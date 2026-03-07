@@ -85,3 +85,6 @@ warn_unused_configs = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "integration: real Bilibili API checks that require local credentials",
+]
