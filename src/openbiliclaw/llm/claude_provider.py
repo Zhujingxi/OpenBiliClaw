@@ -2,17 +2,31 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from typing import TYPE_CHECKING, Any, cast
 
 from anthropic import AsyncAnthropic
 
-from .base import LLMProvider, LLMResponse
+from .base import (
+    LLMProvider,
+    LLMProviderError,
+    LLMRateLimitError,
+    LLMResponse,
+    LLMResponseError,
+    LLMTimeoutError,
+)
+
+if TYPE_CHECKING:
+    from anthropic.types import Message, MessageParam
 
 logger = logging.getLogger(__name__)
 
 
 class ClaudeProvider(LLMProvider):
     """Anthropic Claude provider."""
+    _MAX_RETRIES = 3
+    _BASE_RETRY_DELAY = 0.25
 
     def __init__(self, api_key: str, model: str = "claude-sonnet-4-20250514") -> None:
         self._model = model
@@ -39,18 +53,24 @@ class ClaudeProvider(LLMProvider):
             else:
                 chat_messages.append(msg)
 
-        response = await self._client.messages.create(
-            model=self._model,
-            max_tokens=max_tokens,
-            system=system or "You are a helpful assistant.",
-            messages=chat_messages,  # type: ignore[arg-type]
-            temperature=temperature,
+        response = cast(
+            "Message",
+            await self._request_with_retry(
+                model=self._model,
+                max_tokens=max_tokens,
+                system=system or "You are a helpful assistant.",
+                messages=chat_messages,
+                temperature=temperature,
+            ),
         )
 
         content = ""
         for block in response.content:
             if hasattr(block, "text"):
                 content += block.text
+
+        if not content.strip():
+            raise LLMResponseError("claude returned empty content")
 
         return LLMResponse(
             content=content,
@@ -63,3 +83,45 @@ class ClaudeProvider(LLMProvider):
             },
             raw=response,
         )
+
+    async def _request_with_retry(self, **kwargs: Any) -> Any:
+        """Send a request with bounded retry for transient failures."""
+        last_error: Exception | None = None
+
+        for attempt in range(1, self._MAX_RETRIES + 1):
+            try:
+                return await self._client.messages.create(
+                    model=cast("str", kwargs["model"]),
+                    max_tokens=cast("int", kwargs["max_tokens"]),
+                    system=cast("str", kwargs["system"]),
+                    messages=cast("list[MessageParam]", kwargs["messages"]),
+                    temperature=cast("float", kwargs["temperature"]),
+                )
+            except Exception as exc:
+                mapped = self._map_error(exc)
+                last_error = mapped
+                if not self._is_retryable(mapped) or attempt == self._MAX_RETRIES:
+                    raise mapped from exc
+
+                await asyncio.sleep(self._BASE_RETRY_DELAY * attempt)
+
+        if last_error is None:
+            raise LLMProviderError("claude request failed")
+        raise last_error
+
+    def _map_error(self, exc: Exception) -> LLMProviderError:
+        """Map Anthropic or network errors into shared provider errors."""
+        if isinstance(exc, LLMProviderError):
+            return exc
+        if isinstance(exc, TimeoutError):
+            return LLMTimeoutError("claude request timed out")
+
+        message = str(exc).lower()
+        if "rate limit" in message or "too many requests" in message:
+            return LLMRateLimitError("claude rate limit exceeded")
+
+        return LLMProviderError(f"claude request failed: {exc}")
+
+    def _is_retryable(self, exc: LLMProviderError) -> bool:
+        """Whether a mapped exception should be retried."""
+        return isinstance(exc, (LLMProviderError, LLMRateLimitError, LLMTimeoutError))

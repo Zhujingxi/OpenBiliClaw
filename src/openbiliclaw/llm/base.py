@@ -13,6 +13,21 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+class LLMProviderError(Exception):
+    """Base exception for provider request failures."""
+
+
+class LLMRateLimitError(LLMProviderError):
+    """Raised when a provider rate-limits a request."""
+
+
+class LLMTimeoutError(LLMProviderError):
+    """Raised when a provider request times out."""
+
+
+class LLMResponseError(LLMProviderError):
+    """Raised when a provider returns an invalid or empty response."""
+
 
 @dataclass
 class LLMResponse:
