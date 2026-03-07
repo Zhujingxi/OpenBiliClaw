@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from openbiliclaw.llm.base import LLMProvider
     from openbiliclaw.memory.manager import MemoryManager
 
+from .preference_analyzer import PreferenceAnalyzer
 from .profile import SoulProfile
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ class SoulEngine:
     def __init__(self, llm: LLMProvider, memory: MemoryManager) -> None:
         self._llm = llm
         self._memory = memory
+        self._preference_analyzer = PreferenceAnalyzer(llm)
 
     async def analyze_events(self, events: list[dict[str, Any]]) -> None:
         """Analyze new behavioral events and update all memory layers.
@@ -47,7 +49,14 @@ class SoulEngine:
             events: List of behavioral event dicts from the collector.
         """
         logger.info("Analyzing %d new events...", len(events))
-        # TODO: Process events through the five-layer pipeline
+        preference_layer = self._memory.get_layer("preference")
+        updated_preference = await self._preference_analyzer.analyze_events(
+            events=events,
+            existing_preference=preference_layer.data,
+        )
+        preference_layer.data.clear()
+        preference_layer.data.update(updated_preference)
+        preference_layer.save()
 
     async def build_initial_profile(self, history: list[dict[str, Any]]) -> SoulProfile:
         """Build an initial soul profile from historical data.
