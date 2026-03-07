@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from openbiliclaw.llm.base import LLMProvider
+    from openbiliclaw.llm.service import LLMService
     from openbiliclaw.soul.engine import SoulEngine
 
 logger = logging.getLogger(__name__)
@@ -45,9 +46,15 @@ class SocraticDialogue:
     4. 动态调整 — Refine the soul profile based on dialogue
     """
 
-    def __init__(self, llm: LLMProvider, soul_engine: SoulEngine) -> None:
+    def __init__(
+        self,
+        llm: LLMProvider | None,
+        soul_engine: SoulEngine,
+        llm_service: LLMService | None = None,
+    ) -> None:
         self._llm = llm
         self._soul_engine = soul_engine
+        self._llm_service = llm_service
         self._history: list[DialogueTurn] = []
 
     async def respond(self, user_message: str) -> str:
@@ -66,16 +73,23 @@ class SocraticDialogue:
         Returns:
             Agent's response.
         """
+        from openbiliclaw.llm.service import LLMServiceError
+
         self._history.append(DialogueTurn(role="user", content=user_message))
 
-        # TODO: Build prompt with soul context + dialogue history
-        # TODO: Call LLM to generate Socratic response
-        # TODO: Extract insights from the dialogue
-        # TODO: Update soul profile if significant insights found
+        try:
+            service = self._llm_service or self._build_service()
+            response = await service.complete_socratic_dialogue(
+                user_message=user_message,
+                history=self._history_to_messages(),
+            )
+            reply = response.content
+        except (LLMServiceError, RuntimeError):
+            logger.exception("Failed to generate Socratic dialogue response.")
+            reply = "我刚刚思路断了一下，你可以换个说法再告诉我一次吗？"
 
-        response = "（对话功能开发中）"
-        self._history.append(DialogueTurn(role="agent", content=response))
-        return response
+        self._history.append(DialogueTurn(role="agent", content=reply))
+        return reply
 
     async def extract_insights(self, turns: list[DialogueTurn]) -> list[dict[str, Any]]:
         """Extract insights about the user from dialogue turns.
@@ -98,3 +112,22 @@ class SocraticDialogue:
     def clear_history(self) -> None:
         """Clear the dialogue history."""
         self._history.clear()
+
+    def _history_to_messages(self) -> list[dict[str, str]]:
+        """Convert prior dialogue turns to chat messages for the LLM."""
+        return [
+            {
+                "role": "assistant" if turn.role == "agent" else turn.role,
+                "content": turn.content,
+            }
+            for turn in self._history[:-1]
+        ]
+
+    def _build_service(self) -> LLMService:
+        """Create the shared LLM service when one is not injected."""
+        from openbiliclaw.llm.service import LLMService
+
+        memory = getattr(self._soul_engine, "_memory", None)
+        if self._llm is None or memory is None:
+            raise RuntimeError("Dialogue service is not configured.")
+        return LLMService(registry=self._llm, memory=memory)

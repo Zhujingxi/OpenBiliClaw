@@ -19,6 +19,12 @@ from .registry import (
     build_llm_registry,
     summarize_registry,
 )
+from .service import (
+    LLMProviderExecutionError,
+    LLMResponseContentError,
+    LLMService,
+    LLMServiceError,
+)
 
 __all__ = [
     "ClaudeProvider",
@@ -35,6 +41,10 @@ __all__ = [
     "OpenAIProvider",
     "RegistryBuildError",
     "RegistrySummary",
+    "LLMProviderExecutionError",
+    "LLMService",
+    "LLMServiceError",
+    "LLMResponseContentError",
     "build_llm_registry",
     "summarize_registry",
 ]

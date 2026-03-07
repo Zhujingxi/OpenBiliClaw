@@ -109,6 +109,28 @@ class MemoryManager:
             "preference_summary": self._layers["preference"].data,
         }
 
+    def render_core_memory_prompt(self) -> str:
+        """Render core memory into stable prompt text."""
+        core_memory = self.get_core_memory()
+        soul = core_memory["soul"]
+        preference_summary = core_memory["preference_summary"]
+
+        if not soul and not preference_summary:
+            return "（尚未建立完整画像）"
+
+        sections: list[str] = []
+        if soul:
+            portrait = soul.get("personality_portrait")
+            if portrait:
+                sections.append(f"## 用户画像\n{portrait}")
+            else:
+                sections.append(f"## 用户画像\n{soul}")
+
+        if preference_summary:
+            sections.append(f"## 偏好摘要\n{preference_summary}")
+
+        return "\n\n".join(sections)
+
     # --- Working Memory (session-only) ---
 
     def set_working(self, key: str, value: Any) -> None:
