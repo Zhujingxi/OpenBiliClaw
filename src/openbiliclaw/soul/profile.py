@@ -139,3 +139,211 @@ class SoulProfile:
             parts.append(f"## 近期观察\n{notes}")
 
         return "\n\n".join(parts) if parts else "（尚未建立用户画像）"
+
+    def to_dict(self) -> dict[str, object]:
+        """Serialize the soul profile into JSON-friendly dictionaries."""
+        return {
+            "personality_portrait": self.personality_portrait,
+            "core_traits": self.core_traits,
+            "values": self.values,
+            "life_stage": self.life_stage,
+            "deep_needs": self.deep_needs,
+            "preferences": preference_layer_to_dict(self.preferences),
+            "recent_awareness": [awareness_note_to_dict(note) for note in self.recent_awareness],
+            "active_insights": [insight_hypothesis_to_dict(item) for item in self.active_insights],
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "version": self.version,
+        }
+
+    @classmethod
+    def from_dict(cls, raw_data: dict[str, object]) -> SoulProfile:
+        """Build a SoulProfile from persisted JSON data."""
+        return cls(
+            personality_portrait=str(raw_data.get("personality_portrait", "")),
+            core_traits=_as_str_list(raw_data.get("core_traits")),
+            values=_as_str_list(raw_data.get("values")),
+            life_stage=str(raw_data.get("life_stage", "")),
+            deep_needs=_as_str_list(raw_data.get("deep_needs")),
+            preferences=preference_layer_from_dict(raw_data.get("preferences")),
+            recent_awareness=[
+                awareness_note_from_dict(item)
+                for item in _as_list(raw_data.get("recent_awareness"))
+                if isinstance(item, dict)
+            ],
+            active_insights=[
+                insight_hypothesis_from_dict(item)
+                for item in _as_list(raw_data.get("active_insights"))
+                if isinstance(item, dict)
+            ],
+            created_at=str(raw_data.get("created_at", "")),
+            updated_at=str(raw_data.get("updated_at", "")),
+            version=_as_int(raw_data.get("version", 0)),
+        )
+
+
+def preference_layer_to_dict(layer: PreferenceLayer) -> dict[str, object]:
+    """Serialize a preference layer into JSON-friendly dictionaries."""
+    return {
+        "interests": [interest_tag_to_dict(item) for item in layer.interests],
+        "style": style_preference_to_dict(layer.style),
+        "context": context_mode_to_dict(layer.context),
+        "exploration_openness": layer.exploration_openness,
+        "disliked_topics": layer.disliked_topics,
+        "favorite_up_users": layer.favorite_up_users,
+    }
+
+
+def preference_layer_from_dict(raw_value: object) -> PreferenceLayer:
+    """Build a preference layer from persisted JSON data."""
+    data = raw_value if isinstance(raw_value, dict) else {}
+    return PreferenceLayer(
+        interests=[
+            interest_tag_from_dict(item)
+            for item in _as_list(data.get("interests"))
+            if isinstance(item, dict)
+        ],
+        style=style_preference_from_dict(data.get("style")),
+        context=context_mode_from_dict(data.get("context")),
+        exploration_openness=_as_float(data.get("exploration_openness", 0.5), 0.5),
+        disliked_topics=_as_str_list(data.get("disliked_topics")),
+        favorite_up_users=_as_str_list(data.get("favorite_up_users")),
+    )
+
+
+def interest_tag_to_dict(tag: InterestTag) -> dict[str, object]:
+    """Serialize an interest tag."""
+    return {
+        "name": tag.name,
+        "category": tag.category,
+        "weight": tag.weight,
+        "first_seen": tag.first_seen.isoformat() if tag.first_seen else "",
+        "last_seen": tag.last_seen.isoformat() if tag.last_seen else "",
+        "source": tag.source,
+    }
+
+
+def interest_tag_from_dict(raw_data: dict[str, object]) -> InterestTag:
+    """Build an interest tag from persisted JSON data."""
+    return InterestTag(
+        name=str(raw_data.get("name", "")),
+        category=str(raw_data.get("category", "")),
+        weight=_as_float(raw_data.get("weight", 1.0), 1.0),
+        source=str(raw_data.get("source", "")),
+    )
+
+
+def style_preference_to_dict(style: StylePreference) -> dict[str, object]:
+    return {
+        "preferred_duration": style.preferred_duration,
+        "preferred_pace": style.preferred_pace,
+        "quality_sensitivity": style.quality_sensitivity,
+        "humor_preference": style.humor_preference,
+        "depth_preference": style.depth_preference,
+    }
+
+
+def style_preference_from_dict(raw_value: object) -> StylePreference:
+    data = raw_value if isinstance(raw_value, dict) else {}
+    return StylePreference(
+        preferred_duration=str(data.get("preferred_duration", "")),
+        preferred_pace=str(data.get("preferred_pace", "")),
+        quality_sensitivity=_as_float(data.get("quality_sensitivity", 0.5), 0.5),
+        humor_preference=_as_float(data.get("humor_preference", 0.5), 0.5),
+        depth_preference=_as_float(data.get("depth_preference", 0.5), 0.5),
+    )
+
+
+def context_mode_to_dict(context: ContextMode) -> dict[str, object]:
+    return {
+        "weekday_patterns": context.weekday_patterns,
+        "weekend_patterns": context.weekend_patterns,
+        "time_of_day_patterns": context.time_of_day_patterns,
+        "session_type": context.session_type,
+    }
+
+
+def context_mode_from_dict(raw_value: object) -> ContextMode:
+    data = raw_value if isinstance(raw_value, dict) else {}
+    return ContextMode(
+        weekday_patterns=str(data.get("weekday_patterns", "")),
+        weekend_patterns=str(data.get("weekend_patterns", "")),
+        time_of_day_patterns=str(data.get("time_of_day_patterns", "")),
+        session_type=str(data.get("session_type", "")),
+    )
+
+
+def awareness_note_to_dict(note: AwarenessNote) -> dict[str, object]:
+    return {
+        "date": note.date,
+        "observation": note.observation,
+        "trend": note.trend,
+        "emotion_guess": note.emotion_guess,
+    }
+
+
+def awareness_note_from_dict(raw_data: dict[str, object]) -> AwarenessNote:
+    return AwarenessNote(
+        date=str(raw_data.get("date", "")),
+        observation=str(raw_data.get("observation", "")),
+        trend=str(raw_data.get("trend", "")),
+        emotion_guess=str(raw_data.get("emotion_guess", "")),
+    )
+
+
+def insight_hypothesis_to_dict(item: InsightHypothesis) -> dict[str, object]:
+    return {
+        "hypothesis": item.hypothesis,
+        "evidence": item.evidence,
+        "confidence": item.confidence,
+        "validated": item.validated,
+        "created_at": item.created_at,
+    }
+
+
+def insight_hypothesis_from_dict(raw_data: dict[str, object]) -> InsightHypothesis:
+    return InsightHypothesis(
+        hypothesis=str(raw_data.get("hypothesis", "")),
+        evidence=_as_str_list(raw_data.get("evidence")),
+        confidence=_as_float(raw_data.get("confidence", 0.5), 0.5),
+        validated=bool(raw_data.get("validated", False)),
+        created_at=str(raw_data.get("created_at", "")),
+    )
+
+
+def _as_list(raw_value: object) -> list[object]:
+    return raw_value if isinstance(raw_value, list) else []
+
+
+def _as_str_list(raw_value: object) -> list[str]:
+    if not isinstance(raw_value, list):
+        return []
+    return [str(item) for item in raw_value]
+
+
+def _as_float(raw_value: object, default: float) -> float:
+    if isinstance(raw_value, bool):
+        return float(raw_value)
+    if isinstance(raw_value, (int, float)):
+        return float(raw_value)
+    if isinstance(raw_value, str):
+        try:
+            return float(raw_value)
+        except ValueError:
+            return default
+    return default
+
+
+def _as_int(raw_value: object) -> int:
+    if isinstance(raw_value, bool):
+        return int(raw_value)
+    if isinstance(raw_value, int):
+        return raw_value
+    if isinstance(raw_value, float):
+        return int(raw_value)
+    if isinstance(raw_value, str):
+        try:
+            return int(raw_value)
+        except ValueError:
+            return 0
+    return 0

@@ -13,9 +13,14 @@ if TYPE_CHECKING:
     from openbiliclaw.memory.manager import MemoryManager
 
 from .preference_analyzer import PreferenceAnalyzer
-from .profile import SoulProfile
+from .profile import SoulProfile, preference_layer_from_dict
+from .profile_builder import ProfileBuilder
 
 logger = logging.getLogger(__name__)
+
+
+class SoulProfileNotInitializedError(Exception):
+    """Raised when the soul layer has not been initialized yet."""
 
 
 class SoulEngine:
@@ -37,6 +42,7 @@ class SoulEngine:
         self._llm = llm
         self._memory = memory
         self._preference_analyzer = PreferenceAnalyzer(llm)
+        self._profile_builder = ProfileBuilder(llm)
 
     async def analyze_events(self, events: list[dict[str, Any]]) -> None:
         """Analyze new behavioral events and update all memory layers.
@@ -71,8 +77,17 @@ class SoulEngine:
             Initial SoulProfile.
         """
         logger.info("Building initial soul profile from %d history items...", len(history))
-        # TODO: Use LLM to generate initial multi-layer profile
-        return SoulProfile()
+        preference_layer = self._memory.get_layer("preference").data
+        profile = await self._profile_builder.build(
+            history=history,
+            preference=preference_layer,
+        )
+        profile.preferences = preference_layer_from_dict(preference_layer)
+        soul_layer = self._memory.get_layer("soul")
+        soul_layer.data.clear()
+        soul_layer.data.update(profile.to_dict())
+        soul_layer.save()
+        return profile
 
     async def get_profile(self) -> SoulProfile:
         """Get the current soul profile.
@@ -80,8 +95,10 @@ class SoulEngine:
         Returns:
             Current SoulProfile from the soul memory layer.
         """
-        # TODO: Load from memory manager
-        return SoulProfile()
+        soul_data = self._memory.get_layer("soul").data
+        if not soul_data:
+            raise SoulProfileNotInitializedError("Soul profile has not been initialized yet.")
+        return SoulProfile.from_dict(soul_data)
 
     async def update_from_feedback(self, feedback: dict[str, Any]) -> None:
         """Update soul understanding based on explicit user feedback.
