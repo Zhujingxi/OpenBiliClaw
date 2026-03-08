@@ -85,9 +85,13 @@ openbiliclaw profile
 
 ## 📖 文档
 
+- [文档导航](docs/index.md) — 一站式文档入口
 - [项目规格说明书 (SPEC)](docs/spec.md) — 完整的项目设计与规划
 - [架构设计](docs/architecture.md) — 系统架构详解
 - [记忆系统设计](docs/memory-design.md) — 多层网状记忆架构
+- [变更日志](docs/changelog.md) — 各里程碑交付记录
+- [LLM 模块](docs/modules/llm.md) · [B 站接入](docs/modules/bilibili.md) · [记忆系统](docs/modules/memory.md) · [灵魂引擎](docs/modules/soul.md) — 模块文档
+- [CLI 参考](docs/modules/cli.md) · [配置参考](docs/modules/config.md) — 使用指南
 - [开发指南](docs/contributing.md) — 如何参与贡献
 
 ## 🛠️ 技术栈

@@ -1,0 +1,116 @@
+# B 站接入层
+
+> API 优先的 B 站数据访问层，包含 Cookie 认证、核心 API 封装和 agent-browser 浏览器集成。
+
+## 概述
+
+`bilibili/` 包是系统访问 B 站的唯一出口，分三层：
+
+1. **AuthManager** — Cookie 管理和登录验证
+2. **BilibiliAPIClient** — HTTP API 封装（主访问路径）
+3. **BilibiliBrowser** — agent-browser CLI 封装（API 无法覆盖的操作）
+
+## 已实现功能
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 3.1 Cookie 认证 | ✅ | set / load / validate / clear + CLI auth 命令 |
+| 3.2 核心 API | ✅ | 10+ API 方法 + 限流 + 统一错误处理 |
+| 3.3 agent-browser 集成 | ✅ | navigate / get_page_content + CLI browser 命令 |
+
+## 公开 API
+
+### AuthManager
+
+```python
+from openbiliclaw.bilibili import AuthManager
+
+manager = AuthManager(data_dir=Path("data"))
+manager.set_cookie("SESSDATA=abc; bili_jct=xyz")  # 持久化到 data/bilibili_cookie.json
+manager.load_cookie()                              # 从磁盘恢复
+
+status = await manager.validate_cookie("SESSDATA=abc")
+# AuthStatus(has_cookie=True, authenticated=True, username="alice", user_id=10086)
+
+status = await manager.get_status()  # 加载本地 cookie 并验证
+manager.clear_cookie()               # 删除 cookie 文件
+```
+
+### BilibiliAPIClient
+
+```python
+from openbiliclaw.bilibili import BilibiliAPIClient
+
+client = BilibiliAPIClient(cookie="SESSDATA=abc", min_request_interval=0.2)
+
+# 认证
+nav = await client.get_nav_info()  # NavInfo(is_login=True, uname="alice", mid=10086)
+
+# 观看历史（cursor-based 分页）
+history = await client.get_user_history(max_items=200)
+
+# 搜索
+results = await client.search("纪录片", page=1, order="pubdate")
+
+# 收藏
+folders = await client.get_favorite_folders()  # list[FavoriteFolder]
+all_fav = await client.get_all_favorites(max_folders=10, max_items_per_folder=50)
+
+# 关注
+following = await client.get_following(page=1, page_size=50)  # list[FollowingUser]
+
+# 视频
+video = await client.get_video_info("BV1xx411c7mD")  # VideoInfo
+related = await client.get_related_videos("BV1xx411c7mD")
+
+# 评论
+comments = await client.get_video_comments("BV1xx411c7mD", limit=20)  # list[CommentInfo]
+
+# 排行榜
+ranking = await client.get_ranking(rid=0)
+
+await client.close()
+```
+
+### BilibiliBrowser
+
+```python
+from openbiliclaw.bilibili.browser import BilibiliBrowser
+
+browser = BilibiliBrowser(executable="agent-browser", headed=False)
+print(browser.is_available)  # True / False
+
+result = await browser.navigate("https://www.bilibili.com/video/BV1xx411c7mD")
+content = await browser.get_page_content("https://www.bilibili.com/video/BV1xx411c7mD")
+```
+
+### 数据结构
+
+| 类 | 用途 |
+|----|------|
+| `NavInfo` | 登录用户基本信息（is_login, uname, mid） |
+| `VideoInfo` | 视频详情（标题、UP主、播放/点赞/收藏数等） |
+| `FavoriteFolder` | 收藏夹元数据（media_id, title, media_count） |
+| `FavoriteFolderWithItems` | 收藏夹 + 内容列表 + truncated 标记 |
+| `FollowingUser` | 关注用户（mid, uname, sign） |
+| `CommentInfo` | 评论（mid, uname, message, like_count） |
+| `AuthStatus` | 认证状态（has_cookie, authenticated, username 等） |
+
+## 配置项
+
+```toml
+[bilibili]
+auth_method = "cookie"  # "cookie" | "qrcode" | "none"
+cookie = ""
+
+[bilibili.browser]
+executable = ""    # 留空使用全局安装的 agent-browser
+headed = false     # 调试时设为 true
+```
+
+## 设计决策
+
+1. **API 优先**：所有能通过 API 完成的操作走 API，browser 仅作备选
+2. **统一请求助手 `_get_json()`**：收敛 HTTP 错误映射 + code≠0 检查 + 限流
+3. **轻量限流**：per-client 最小间隔 0.2s，不做全局令牌桶
+4. **Protocol DI**：`AuthManager` 通过 `api_client_factory` 注入 API 客户端，测试友好

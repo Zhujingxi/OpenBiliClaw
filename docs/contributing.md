@@ -60,3 +60,16 @@ test: add soul engine unit tests
 ## Skill 开发
 
 参见 `skills/` 目录下的内置 Skill 示例，了解如何创建自定义 Skill。
+
+## 文档更新清单
+
+完成功能开发后，合入前请检查以下文档是否需要更新：
+
+- [ ] `docs/modules/<模块>.md` — 更新"已实现功能"和"公开 API"
+- [ ] `docs/changelog.md` — 追加变更记录
+- [ ] `docs/modules/cli.md` — 如新增/修改了 CLI 命令
+- [ ] `docs/modules/config.md` — 如新增了配置项
+- [ ] `docs/architecture.md` — 如涉及跨模块交互变化
+- [ ] `docs/index.md` — 如新增模块文档或状态变化
+
+详见 [AGENTS.md](../AGENTS.md) 中的"文档更新要求"段落。
