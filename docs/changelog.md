@@ -6,6 +6,13 @@
 
 ## M8: 插件后端 API（进行中）
 
+### 8.3 Popup — `extension/m83-popup`
+
+- popup 从占位页升级为真实面板：显示后端连接状态和最新推荐列表
+- 新增 popup helper，统一处理推荐字段 fallback、popup 状态判断和 B 站视频 URL 构造
+- 点击推荐卡片或“打开视频”按钮会直接跳转到对应 B 站视频页
+- `喜欢 / 不喜欢` 按钮本轮先保留 UI 占位，后端反馈写回留给后续任务
+
 ### 8.1 行为采集 — `extension/m81-behavior-collection`
 
 - `collector.ts` 从最小 click/search 采集升级为多行为采集：点击、搜索、页面快照、视频 `view/pause/seek`、hover、scroll，以及评论/点赞/投币/收藏意图事件
