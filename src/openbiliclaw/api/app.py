@@ -10,10 +10,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from openbiliclaw.api.models import (
     BehaviorEventBatchIn,
+    ChatIn,
+    ChatResponse,
     EventIngestResponse,
     FeedbackIn,
     FeedbackResponse,
     HealthResponse,
+    ProfileSummaryResponse,
     RecommendationListResponse,
     RecommendationOut,
 )
@@ -24,6 +27,7 @@ def create_app(
     memory_manager: Any | None = None,
     database: Any | None = None,
     soul_engine: Any | None = None,
+    dialogue: Any | None = None,
 ) -> FastAPI:
     """Create the local backend API app."""
     app = FastAPI(title="OpenBiliClaw API")
@@ -37,11 +41,14 @@ def create_app(
     if memory_manager is None or database is None or soul_engine is None:
         from openbiliclaw.config import load_config
         from openbiliclaw.llm import build_llm_registry
+        from openbiliclaw.llm.service import LLMService
         from openbiliclaw.memory.manager import MemoryManager
+        from openbiliclaw.soul.dialogue import SocraticDialogue
         from openbiliclaw.soul.engine import SoulEngine
         from openbiliclaw.storage.database import Database
 
         config = load_config()
+        llm_registry = build_llm_registry(config)
         if memory_manager is None:
             memory_manager = MemoryManager(config.data_path)
             memory_manager.initialize()
@@ -50,13 +57,40 @@ def create_app(
             database.initialize()
         if soul_engine is None:
             soul_engine = SoulEngine(
-                llm=build_llm_registry(config),  # type: ignore[arg-type]
+                llm=llm_registry,  # type: ignore[arg-type]
                 memory=memory_manager,
             )
+        if dialogue is None:
+            dialogue = SocraticDialogue(
+                llm=None,
+                soul_engine=soul_engine,
+                llm_service=LLMService(registry=llm_registry, memory=memory_manager),
+            )
+
+    if dialogue is None:
+        from openbiliclaw.soul.dialogue import SocraticDialogue
+
+        dialogue = SocraticDialogue(llm=None, soul_engine=soul_engine)
 
     @app.get("/api/health", response_model=HealthResponse)
     def health() -> HealthResponse:
         return HealthResponse(status="ok", service="openbiliclaw-api")
+
+    @app.get("/api/profile-summary", response_model=ProfileSummaryResponse)
+    async def profile_summary() -> ProfileSummaryResponse:
+        try:
+            profile = await soul_engine.get_profile()
+        except Exception:
+            return ProfileSummaryResponse(initialized=False)
+
+        top_interests = [item.name for item in profile.preferences.interests[:5] if item.name]
+        return ProfileSummaryResponse(
+            initialized=True,
+            personality_portrait=profile.personality_portrait,
+            core_traits=profile.core_traits[:5],
+            deep_needs=profile.deep_needs[:5],
+            top_interests=top_interests,
+        )
 
     @app.post("/api/events", response_model=EventIngestResponse)
     async def ingest_events(payload: BehaviorEventBatchIn) -> EventIngestResponse:
@@ -93,6 +127,14 @@ def create_app(
                 for row in rows
             ]
         )
+
+    @app.post("/api/chat", response_model=ChatResponse)
+    async def chat(payload: ChatIn) -> ChatResponse:
+        message = payload.message.strip()
+        if not message:
+            raise HTTPException(status_code=422, detail="Chat message is required.")
+        reply = await dialogue.respond(message)
+        return ChatResponse(reply=reply)
 
     @app.post("/api/feedback", response_model=FeedbackResponse)
     async def feedback(payload: FeedbackIn) -> FeedbackResponse:

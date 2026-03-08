@@ -14,7 +14,7 @@
 |------|------|------|
 | 8.1 行为采集 | ✅ | `collector.ts` + `service-worker.ts` 已接通真实事件链 |
 | 8.2 后端 API | ✅ | Python 侧 `/api/events`、`/api/health`、`/api/recommendations` 已可联调 |
-| 8.3 Popup | ✅ | 已显示连接状态、推荐列表，并支持 popup 内直接反馈 |
+| 8.3 Popup | ✅ | 已支持推荐 / 画像 / 聊天三 tab，并在 popup 内直接提交反馈 |
 
 ## 目录结构
 
@@ -74,10 +74,11 @@ popup 当前已具备：
 
 - 后端连接状态检查
 - 从 `/api/recommendations` 拉取推荐列表
-- 展示标题、UP 主、`topic_label`、朋友式推荐文案
-- 点击卡片或“打开视频”按钮后，直接跳转到对应 B 站视频页
-- `喜欢` / `不喜欢` 按钮会调用 `/api/feedback`
-- `写一句` 支持 inline comment 输入并提交 `comment` 反馈
+- 推荐 tab：展示标题、UP 主、`topic_label`、朋友式推荐文案，并通过“打开视频”明确跳转到对应 B 站视频页
+- 修复 popup 卡片误跳转：`喜欢` / `不喜欢` / `写一句` / 输入框 / 发送按钮不再冒泡触发视频打开
+- `喜欢` / `不喜欢` / `写一句` 都会调用 `/api/feedback`
+- 画像 tab：调用 `/api/profile-summary` 展示轻量人格画像、核心特质、深层需求和偏好关键词
+- 聊天 tab：调用 `/api/chat`，在 popup 内和“阿B”进行轻量多轮对话
 
 ### 构建链路
 
@@ -130,9 +131,11 @@ npm run build
 - SQLite `events` 表已能写入 `snapshot` 事件
 - popup 能根据 `/api/health` 与 `/api/recommendations` 切换在线、空状态与推荐列表展示
 - popup 反馈按钮已能经 `/api/feedback` 写回推荐表和事件层
+- popup 现已支持 `推荐 / 我的画像 / 和阿B聊聊` 三个 tab，并已接通画像摘要与聊天接口
 
 ## 当前限制
 
 - 行为按钮识别基于 DOM 文本、类名和 `aria-label`，不是服务端最终结果确认
 - 采集范围优先覆盖首页、搜索页和视频页，未承诺所有 B 站模板完全一致
+- popup chat 会话只保留在当前打开周期内，不做本地持久化
 - popup comment 采用轻量 inline 输入，不支持复杂反馈历史浏览

@@ -11,7 +11,7 @@ class TestBackendAPI:
     def test_health_endpoint_returns_ok(self) -> None:
         from fastapi.testclient import TestClient
 
-        app = create_app()
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
         client = TestClient(app)
 
         response = client.get("/api/health")
@@ -58,7 +58,7 @@ class TestBackendAPI:
     def test_events_endpoint_handles_extension_cors_preflight(self) -> None:
         from fastapi.testclient import TestClient
 
-        app = create_app()
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
         client = TestClient(app)
 
         response = client.options(
@@ -245,3 +245,96 @@ class TestBackendAPI:
 
         assert response.status_code == 200
         assert fake_soul_engine.called is True
+
+    def test_profile_summary_endpoint_returns_initialized_profile(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeProfile:
+            personality_portrait = "这是一个喜欢把问题想透、信息密度偏高的用户。"
+            core_traits = ["理性", "好奇"]
+            deep_needs = ["理解世界", "持续成长"]
+            preferences = type(
+                "Preferences",
+                (),
+                {
+                    "interests": [
+                        type("Interest", (), {"name": "国际新闻"})(),
+                        type("Interest", (), {"name": "深度分析"})(),
+                    ]
+                },
+            )()
+
+        class FakeSoulEngine:
+            async def get_profile(self) -> FakeProfile:
+                return FakeProfile()
+
+        app = create_app(soul_engine=FakeSoulEngine(), memory_manager=object(), database=object())
+        client = TestClient(app)
+
+        response = client.get("/api/profile-summary")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "initialized": True,
+            "personality_portrait": "这是一个喜欢把问题想透、信息密度偏高的用户。",
+            "core_traits": ["理性", "好奇"],
+            "deep_needs": ["理解世界", "持续成长"],
+            "top_interests": ["国际新闻", "深度分析"],
+        }
+
+    def test_profile_summary_endpoint_handles_missing_profile(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeSoulEngine:
+            async def get_profile(self) -> object:
+                raise RuntimeError("not initialized")
+
+        app = create_app(soul_engine=FakeSoulEngine(), memory_manager=object(), database=object())
+        client = TestClient(app)
+
+        response = client.get("/api/profile-summary")
+
+        assert response.status_code == 200
+        assert response.json()["initialized"] is False
+
+    def test_chat_endpoint_returns_dialogue_reply(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeDialogue:
+            async def respond(self, user_message: str) -> str:
+                assert user_message == "我最近总在看国际新闻"
+                return "你更在意的是它背后的逻辑，还是事件本身的冲突感？"
+
+        app = create_app(
+            memory_manager=object(),
+            database=object(),
+            soul_engine=object(),
+            dialogue=FakeDialogue(),
+        )
+        client = TestClient(app)
+
+        response = client.post("/api/chat", json={"message": "我最近总在看国际新闻"})
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "reply": "你更在意的是它背后的逻辑，还是事件本身的冲突感？"
+        }
+
+    def test_chat_endpoint_rejects_empty_message(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeDialogue:
+            async def respond(self, user_message: str) -> str:
+                return user_message
+
+        app = create_app(
+            memory_manager=object(),
+            database=object(),
+            soul_engine=object(),
+            dialogue=FakeDialogue(),
+        )
+        client = TestClient(app)
+
+        response = client.post("/api/chat", json={"message": "   "})
+
+        assert response.status_code == 422

@@ -5,7 +5,9 @@ import {
   buildFeedbackPayload,
   buildVideoUrl,
   getPopupState,
+  getTabButtonState,
   normalizeRecommendation,
+  normalizeProfileSummary,
   validateCommentInput,
 } from "../popup/popup-helpers.js";
 
@@ -98,5 +100,36 @@ test("buildFeedbackPayload trims comment note", () => {
     recommendation_id: 9,
     feedback_type: "comment",
     note: "方向不错，但我想看更深一点。",
+  });
+});
+
+test("normalizeProfileSummary fills stable fallback fields", () => {
+  assert.deepEqual(
+    normalizeProfileSummary({
+      initialized: true,
+      personality_portrait: "  喜欢深度分析  ",
+      core_traits: ["理性", "好奇"],
+      deep_needs: ["理解世界"],
+      top_interests: ["国际新闻", "商业案例"],
+    }),
+    {
+      initialized: true,
+      personality_portrait: "喜欢深度分析",
+      core_traits: ["理性", "好奇"],
+      deep_needs: ["理解世界"],
+      top_interests: ["国际新闻", "商业案例"],
+    },
+  );
+});
+
+test("getTabButtonState highlights current tab", () => {
+  assert.deepEqual(getTabButtonState("recommend", "recommend"), {
+    selected: true,
+    tabIndex: 0,
+  });
+
+  assert.deepEqual(getTabButtonState("profile", "recommend"), {
+    selected: false,
+    tabIndex: -1,
   });
 });

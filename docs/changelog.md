@@ -6,6 +6,13 @@
 
 ## M8: 插件后端 API（进行中）
 
+### Popup 画像 / 聊天页签增强 — `extension/m84-popup-tabs`
+
+- popup 新增 `推荐 / 我的画像 / 和阿B聊聊` 三个 tab，推荐不再是唯一入口
+- 新增 `/api/profile-summary` 和 `/api/chat`，popup 可直接查看轻量画像摘要并发起对话
+- 推荐卡片交互已收口为显式打开视频，不再因为 `喜欢 / 不喜欢 / 写一句` 或输入框点击误跳转
+- popup 内的推荐反馈、画像查看和聊天现在共用同一套本地后端连接状态
+
 ### 9.2 画像更新 — `feedback/m92-profile-refresh`
 
 - 新增 `feedback_state.json`，记录反馈重分析处理游标和最近一次处理时间

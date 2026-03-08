@@ -70,6 +70,41 @@
       color: var(--accent);
     }
 
+    .tab-bar {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    .tab-button {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px 8px;
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text-subtle);
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+    }
+
+    .tab-button.is-active {
+      border-color: rgba(83, 215, 255, 0.36);
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+
+    .view {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding-bottom: 14px;
+    }
+
+    .view[hidden] {
+      display: none;
+    }
+
     .status {
       display: flex;
       align-items: center;
@@ -103,7 +138,6 @@
       display: flex;
       flex-direction: column;
       gap: 12px;
-      padding-bottom: 14px;
     }
 
     .recommendation-card {
@@ -115,16 +149,26 @@
       border-radius: 16px;
       background: var(--panel);
       box-shadow: var(--shadow);
-      cursor: pointer;
       transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
-      outline: none;
     }
 
-    .recommendation-card:hover,
-    .recommendation-card:focus-visible {
+    .recommendation-card:hover {
       transform: translateY(-1px);
       border-color: rgba(83, 215, 255, 0.35);
       background: var(--panel-strong);
+    }
+
+    .recommendation-preview {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      width: 100%;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      text-align: left;
+      color: inherit;
+      cursor: pointer;
     }
 
     .recommendation-title {
@@ -153,6 +197,11 @@
       font-size: 12px;
       line-height: 1.65;
       color: var(--text-subtle);
+    }
+
+    .feedback-status {
+      font-size: 11px;
+      color: var(--accent);
     }
 
     .recommendation-actions {
@@ -208,6 +257,107 @@
       color: var(--text-muted);
     }
 
+    .profile-card,
+    .chat-shell {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .profile-copy {
+      font-size: 12px;
+      line-height: 1.7;
+      color: var(--text-subtle);
+    }
+
+    .profile-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .profile-group h3 {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+
+    .chip-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .chip {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text-subtle);
+      font-size: 11px;
+    }
+
+    .chat-messages {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      max-height: 280px;
+      overflow-y: auto;
+      padding-right: 4px;
+    }
+
+    .chat-message {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .chat-message.user {
+      background: rgba(83, 215, 255, 0.14);
+    }
+
+    .chat-role {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--accent);
+    }
+
+    .chat-content {
+      font-size: 12px;
+      line-height: 1.7;
+      color: var(--text-subtle);
+      white-space: pre-wrap;
+    }
+
+    .chat-form {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .chat-input {
+      width: 100%;
+      min-height: 78px;
+      resize: vertical;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      background: rgba(7, 18, 28, 0.48);
+      color: var(--text-main);
+      font: inherit;
+    }
+
+    .chat-input::placeholder {
+      color: var(--text-muted);
+    }
+
     .empty-state {
       padding: 24px 16px;
       border: 1px dashed rgba(255, 255, 255, 0.14);
@@ -257,12 +407,59 @@
     </div>
 
     <div class="section">
-      <div class="section-title">最新推荐</div>
-      <div id="emptyState" class="empty-state" hidden>
-        <h3 id="emptyTitle">正在获取推荐...</h3>
-        <p id="emptyText">请稍等。</p>
+      <div class="section-title">功能面板</div>
+      <div class="tab-bar" role="tablist" aria-label="Popup views">
+        <button id="tabRecommend" class="tab-button is-active" type="button" role="tab" aria-selected="true" aria-controls="viewRecommend">推荐</button>
+        <button id="tabProfile" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="viewProfile">我的画像</button>
+        <button id="tabChat" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="viewChat">和阿B聊聊</button>
       </div>
-      <div id="recommendationList" class="recommendation-list"></div>
+    </div>
+
+    <div class="section">
+      <div id="viewRecommend" class="view" role="tabpanel" aria-labelledby="tabRecommend">
+        <div id="emptyState" class="empty-state" hidden>
+          <h3 id="emptyTitle">正在获取推荐...</h3>
+          <p id="emptyText">请稍等。</p>
+        </div>
+        <div id="recommendationList" class="recommendation-list"></div>
+      </div>
+
+      <div id="viewProfile" class="view" role="tabpanel" aria-labelledby="tabProfile" hidden>
+        <div id="profileEmpty" class="empty-state" hidden>
+          <h3 id="profileEmptyTitle">画像还没准备好</h3>
+          <p id="profileEmptyText">先运行 openbiliclaw init，再回来看看它怎么理解你。</p>
+        </div>
+        <div id="profileCard" class="profile-card" hidden>
+          <p id="profilePortrait" class="profile-copy"></p>
+          <div class="profile-group">
+            <h3>核心特质</h3>
+            <div id="profileTraits" class="chip-list"></div>
+          </div>
+          <div class="profile-group">
+            <h3>深层需求</h3>
+            <div id="profileNeeds" class="chip-list"></div>
+          </div>
+          <div class="profile-group">
+            <h3>当前偏好</h3>
+            <div id="profileInterests" class="chip-list"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="viewChat" class="view" role="tabpanel" aria-labelledby="tabChat" hidden>
+        <div class="chat-shell">
+          <div id="chatMessages" class="chat-messages">
+            <div class="chat-message">
+              <span class="chat-role">阿B</span>
+              <p class="chat-content">你最近为什么会对这些内容停下来？直接说你现在脑子里最在意的东西就行。</p>
+            </div>
+          </div>
+          <form id="chatForm" class="chat-form">
+            <textarea id="chatInput" class="chat-input" placeholder="比如：我最近总会点开国际新闻和商业分析，想知道自己到底在找什么。"></textarea>
+            <button id="chatSendButton" class="action-button action-primary" type="submit">发送</button>
+          </form>
+        </div>
+      </div>
     </div>
 
     <div class="footer">

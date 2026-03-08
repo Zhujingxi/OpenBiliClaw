@@ -47,6 +47,16 @@ class RecommendationListResponse(BaseModel):
     items: list[RecommendationOut]
 
 
+class ProfileSummaryResponse(BaseModel):
+    """Lightweight soul profile exposed to the popup."""
+
+    initialized: bool
+    personality_portrait: str = ""
+    core_traits: list[str] = Field(default_factory=list)
+    deep_needs: list[str] = Field(default_factory=list)
+    top_interests: list[str] = Field(default_factory=list)
+
+
 class EventIngestResponse(BaseModel):
     """Response after accepting a batch of events."""
 
@@ -67,3 +77,15 @@ class FeedbackResponse(BaseModel):
     ok: bool
     recommendation_id: int
     feedback_type: str
+
+
+class ChatIn(BaseModel):
+    """Popup chat request."""
+
+    message: str
+
+
+class ChatResponse(BaseModel):
+    """Popup chat response."""
+
+    reply: str
