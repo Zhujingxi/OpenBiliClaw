@@ -92,3 +92,47 @@ def build_preference_analysis_prompt(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
+
+
+def build_soul_profile_prompt(
+    *,
+    history_summary: dict[str, object],
+    preference_summary: dict[str, object],
+) -> list[dict[str, str]]:
+    """Build a structured prompt for initial soul-profile generation."""
+    system_prompt = """
+<task>
+你要基于用户历史摘要和偏好摘要，生成一份谨慎、温和、像长期观察后的朋友所写的人格画像。
+</task>
+
+<rules>
+1. 只能根据给定材料推断，不要做医学化、病理化、断言式结论。
+2. 输出必须是严格 JSON，不要附带解释。
+3. 人格描述至少 200 个中文字符。
+4. core_traits 控制在 3 到 5 条，deep_needs 和 values 保持简洁。
+</rules>
+
+<output_schema>
+{
+  "personality_portrait": "至少 200 字的自然语言人格描述",
+  "core_traits": ["理性", "好奇", "谨慎"],
+  "values": ["真实", "成长"],
+  "life_stage": "处于探索与积累阶段",
+  "deep_needs": ["被理解", "持续成长"]
+}
+</output_schema>
+""".strip()
+    user_prompt = "\n\n".join(
+        [
+            "<history_summary>",
+            json.dumps(history_summary, ensure_ascii=False, indent=2),
+            "</history_summary>",
+            "<preference_summary>",
+            json.dumps(preference_summary, ensure_ascii=False, indent=2),
+            "</preference_summary>",
+        ]
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
