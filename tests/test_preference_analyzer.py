@@ -47,11 +47,27 @@ class FakeStructuredService:
         return self.response
 
 
+class FakeErrorStructuredService:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    async def complete_structured_task(
+        self,
+        *,
+        system_instruction: str,
+        user_input: str,
+        history: list[dict[str, str]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ) -> LLMResponse:
+        raise self.error
+
+
 @pytest.mark.asyncio
 async def test_analyze_events_parses_structured_preference_output() -> None:
     from openbiliclaw.soul.preference_analyzer import PreferenceAnalyzer
 
-    registry = FakeRegistry(
+    service = FakeStructuredService(
         LLMResponse(
             content="""
             {
@@ -69,7 +85,7 @@ async def test_analyze_events_parses_structured_preference_output() -> None:
             provider="openai",
         )
     )
-    analyzer = PreferenceAnalyzer(registry)
+    analyzer = PreferenceAnalyzer(service)
 
     preference = await analyzer.analyze_events(
         events=[
@@ -79,8 +95,7 @@ async def test_analyze_events_parses_structured_preference_output() -> None:
         existing_preference={},
     )
 
-    assert registry.json_modes == [True]
-    assert "output_schema" in registry.calls[0][0]["content"]
+    assert "output_schema" in service.calls[0]["system_instruction"]
     assert preference["interests"][0]["name"] == "历史"
     assert preference["interests"][0]["weight"] == 1.0
     assert preference["style"]["preferred_duration"] == "long"
@@ -94,8 +109,9 @@ async def test_invalid_json_response_raises_preference_analysis_error() -> None:
         PreferenceAnalyzer,
     )
 
-    registry = FakeRegistry(LLMResponse(content="not-json", provider="openai"))
-    analyzer = PreferenceAnalyzer(registry)
+    analyzer = PreferenceAnalyzer(
+        FakeStructuredService(LLMResponse(content="not-json", provider="openai"))
+    )
 
     with pytest.raises(PreferenceAnalysisError):
         await analyzer.analyze_events(
@@ -107,7 +123,7 @@ async def test_invalid_json_response_raises_preference_analysis_error() -> None:
 def test_merge_preferences_applies_decay_and_deduplicates_tags() -> None:
     from openbiliclaw.soul.preference_analyzer import PreferenceAnalyzer
 
-    analyzer = PreferenceAnalyzer(FakeRegistry())
+    analyzer = PreferenceAnalyzer(FakeStructuredService())
     merged = analyzer.merge_preferences(
         existing_preference={
             "interests": [
@@ -146,7 +162,7 @@ async def test_provider_error_is_wrapped() -> None:
         PreferenceAnalyzer,
     )
 
-    analyzer = PreferenceAnalyzer(FakeRegistry(error=LLMProviderError("provider down")))
+    analyzer = PreferenceAnalyzer(FakeErrorStructuredService(LLMProviderError("provider down")))
 
     with pytest.raises(PreferenceAnalysisError):
         await analyzer.analyze_events(
@@ -173,3 +189,10 @@ async def test_preference_analyzer_can_use_unified_service() -> None:
 
     assert preference["interests"][0]["name"] == "科技"
     assert service.calls
+
+
+def test_preference_analyzer_requires_core_memory_task_service() -> None:
+    from openbiliclaw.soul.preference_analyzer import PreferenceAnalyzer
+
+    with pytest.raises(TypeError, match="complete_structured_task"):
+        PreferenceAnalyzer(FakeRegistry())

@@ -47,7 +47,7 @@ class FakeStructuredService:
 async def test_awareness_analyzer_builds_notes_from_recent_events() -> None:
     from openbiliclaw.soul.awareness_analyzer import AwarenessAnalyzer
 
-    registry = FakeRegistry(
+    service = FakeStructuredService(
         json.dumps(
             [
                 {
@@ -61,7 +61,7 @@ async def test_awareness_analyzer_builds_notes_from_recent_events() -> None:
         )
     )
 
-    notes = await AwarenessAnalyzer(registry).analyze(
+    notes = await AwarenessAnalyzer(service).analyze(
         events=[{"event_type": "view", "title": "AI 工具实测"}],
         preference={},
         soul_profile={},
@@ -69,7 +69,7 @@ async def test_awareness_analyzer_builds_notes_from_recent_events() -> None:
 
     assert notes[0].observation.startswith("最近连续浏览")
     assert notes[0].trend.startswith("更偏向深度解释")
-    assert registry.calls
+    assert service.calls
 
 
 @pytest.mark.asyncio
@@ -79,7 +79,7 @@ async def test_awareness_analyzer_raises_on_invalid_json() -> None:
         AwarenessGenerationError,
     )
 
-    analyzer = AwarenessAnalyzer(FakeRegistry("not-json"))
+    analyzer = AwarenessAnalyzer(FakeStructuredService("not-json"))
     with pytest.raises(AwarenessGenerationError, match="invalid JSON"):
         await analyzer.analyze(
             events=[{"event_type": "view", "title": "AI 工具实测"}],
@@ -91,7 +91,7 @@ async def test_awareness_analyzer_raises_on_invalid_json() -> None:
 def test_merge_awareness_notes_deduplicates_same_day_observation() -> None:
     from openbiliclaw.soul.awareness_analyzer import AwarenessAnalyzer
 
-    analyzer = AwarenessAnalyzer(FakeRegistry("[]"))
+    analyzer = AwarenessAnalyzer(FakeStructuredService("[]"))
     existing = [
         AwarenessNote(
             date="2026-03-08",
@@ -140,3 +140,10 @@ async def test_awareness_analyzer_can_use_unified_service() -> None:
 
     assert notes[0].observation == "最近更专注。"
     assert service.calls
+
+
+def test_awareness_analyzer_requires_core_memory_task_service() -> None:
+    from openbiliclaw.soul.awareness_analyzer import AwarenessAnalyzer
+
+    with pytest.raises(TypeError, match="complete_structured_task"):
+        AwarenessAnalyzer(FakeRegistry("[]"))

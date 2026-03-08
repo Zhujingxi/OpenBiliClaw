@@ -14,18 +14,7 @@ from openbiliclaw.llm.service import LLMServiceError
 from .profile import AwarenessNote, InsightHypothesis
 
 
-class SupportsComplete(Protocol):
-    async def complete(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        temperature: float = 0.7,
-        max_tokens: int = 4096,
-        json_mode: bool = False,
-    ) -> LLMResponse: ...
-
-
-class SupportsStructuredTask(Protocol):
+class SupportsCoreMemoryTask(Protocol):
     async def complete_structured_task(
         self,
         *,
@@ -45,7 +34,13 @@ class InsightGenerationError(Exception):
 class InsightAnalyzer:
     """Generate and merge structured insight hypotheses."""
 
-    registry: SupportsComplete | SupportsStructuredTask
+    registry: SupportsCoreMemoryTask
+
+    def __post_init__(self) -> None:
+        if not hasattr(self.registry, "complete_structured_task"):
+            raise TypeError(
+                "InsightAnalyzer requires a service with complete_structured_task()."
+            )
 
     async def analyze(
         self,
@@ -60,7 +55,10 @@ class InsightAnalyzer:
             soul_profile=soul_profile,
         )
         try:
-            response = await self._complete(messages)
+            response = await self.registry.complete_structured_task(
+                system_instruction=messages[0]["content"],
+                user_input=messages[1]["content"],
+            )
         except (LLMProviderError, LLMServiceError) as exc:
             raise InsightGenerationError(str(exc)) from exc
         payload = self._parse_response(response.content)
@@ -146,11 +144,3 @@ class InsightAnalyzer:
         else:
             value = 0.5
         return max(0.0, min(1.0, round(value, 4)))
-
-    async def _complete(self, messages: list[dict[str, str]]) -> LLMResponse:
-        if hasattr(self.registry, "complete_structured_task"):
-            return await self.registry.complete_structured_task(
-                system_instruction=messages[0]["content"],
-                user_input=messages[1]["content"],
-            )
-        return await self.registry.complete(messages, json_mode=True)

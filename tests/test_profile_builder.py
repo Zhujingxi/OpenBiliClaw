@@ -52,7 +52,7 @@ class FakeStructuredService:
 async def test_profile_builder_creates_soul_profile_from_json() -> None:
     from openbiliclaw.soul.profile_builder import ProfileBuilder
 
-    registry = FakeRegistry(
+    service = FakeStructuredService(
         json.dumps(
             {
                 "personality_portrait": "这是一个长期保持好奇心、偏好深度内容、做判断较为克制的人。"
@@ -66,7 +66,7 @@ async def test_profile_builder_creates_soul_profile_from_json() -> None:
         )
     )
 
-    profile = await ProfileBuilder(registry).build(
+    profile = await ProfileBuilder(service).build(
         history=[{"title": "AI 视频", "author": "科技UP主"}],
         preference={"interests": [{"name": "科技", "category": "知识"}]},
     )
@@ -76,7 +76,7 @@ async def test_profile_builder_creates_soul_profile_from_json() -> None:
     assert profile.values == ["真实", "成长"]
     assert profile.life_stage == "处于探索与积累阶段"
     assert profile.deep_needs == ["被理解", "持续成长"]
-    assert registry.calls
+    assert service.calls
 
 
 @pytest.mark.asyncio
@@ -84,7 +84,7 @@ async def test_profile_builder_raises_on_invalid_json() -> None:
     from openbiliclaw.soul.profile_builder import ProfileBuilder, SoulProfileBuildError
 
     with pytest.raises(SoulProfileBuildError, match="invalid JSON"):
-        await ProfileBuilder(FakeRegistry("not-json")).build(
+        await ProfileBuilder(FakeStructuredService("not-json")).build(
             history=[{"title": "AI 视频"}],
             preference={},
         )
@@ -95,7 +95,7 @@ async def test_profile_builder_raises_on_empty_response() -> None:
     from openbiliclaw.soul.profile_builder import ProfileBuilder, SoulProfileBuildError
 
     with pytest.raises(SoulProfileBuildError, match="empty soul profile"):
-        await ProfileBuilder(FakeRegistry("")).build(
+        await ProfileBuilder(FakeStructuredService("")).build(
             history=[{"title": "AI 视频"}],
             preference={},
         )
@@ -105,7 +105,7 @@ async def test_profile_builder_raises_on_empty_response() -> None:
 async def test_profile_builder_raises_when_portrait_is_too_short() -> None:
     from openbiliclaw.soul.profile_builder import ProfileBuilder, SoulProfileBuildError
 
-    registry = FakeRegistry(
+    service = FakeStructuredService(
         json.dumps(
             {
                 "personality_portrait": "过短描述",
@@ -119,7 +119,7 @@ async def test_profile_builder_raises_when_portrait_is_too_short() -> None:
     )
 
     with pytest.raises(SoulProfileBuildError, match="at least 200"):
-        await ProfileBuilder(registry).build(
+        await ProfileBuilder(service).build(
             history=[{"title": "AI 视频"}],
             preference={},
         )
@@ -129,7 +129,7 @@ async def test_profile_builder_raises_when_portrait_is_too_short() -> None:
 async def test_profile_builder_allows_missing_preference_data() -> None:
     from openbiliclaw.soul.profile_builder import ProfileBuilder
 
-    registry = FakeRegistry(
+    service = FakeStructuredService(
         json.dumps(
             {
                 "personality_portrait": "喜欢长期积累、偏好深度内容、处理信息比较审慎的人。"
@@ -143,7 +143,7 @@ async def test_profile_builder_allows_missing_preference_data() -> None:
         )
     )
 
-    profile = await ProfileBuilder(registry).build(
+    profile = await ProfileBuilder(service).build(
         history=[{"title": "AI 视频"}],
         preference={},
     )
@@ -173,3 +173,10 @@ async def test_profile_builder_can_use_unified_service() -> None:
 
     assert profile.core_traits == ["理性", "好奇", "谨慎"]
     assert service.calls
+
+
+def test_profile_builder_requires_core_memory_task_service() -> None:
+    from openbiliclaw.soul.profile_builder import ProfileBuilder
+
+    with pytest.raises(TypeError, match="complete_structured_task"):
+        ProfileBuilder(FakeRegistry("{}"))

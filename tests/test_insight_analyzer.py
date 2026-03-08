@@ -47,7 +47,7 @@ class FakeStructuredService:
 async def test_insight_analyzer_builds_hypotheses_from_awareness() -> None:
     from openbiliclaw.soul.insight_analyzer import InsightAnalyzer
 
-    registry = FakeRegistry(
+    service = FakeStructuredService(
         json.dumps(
             [
                 {
@@ -60,7 +60,7 @@ async def test_insight_analyzer_builds_hypotheses_from_awareness() -> None:
         )
     )
 
-    insights = await InsightAnalyzer(registry).analyze(
+    insights = await InsightAnalyzer(service).analyze(
         awareness_notes=[
             AwarenessNote(
                 date="2026-03-08",
@@ -76,14 +76,14 @@ async def test_insight_analyzer_builds_hypotheses_from_awareness() -> None:
     assert insights[0].hypothesis.startswith("用户可能通过深度内容")
     assert insights[0].validated is False
     assert insights[0].confidence == 0.62
-    assert registry.calls
+    assert service.calls
 
 
 @pytest.mark.asyncio
 async def test_insight_analyzer_raises_on_invalid_json() -> None:
     from openbiliclaw.soul.insight_analyzer import InsightAnalyzer, InsightGenerationError
 
-    analyzer = InsightAnalyzer(FakeRegistry("not-json"))
+    analyzer = InsightAnalyzer(FakeStructuredService("not-json"))
     with pytest.raises(InsightGenerationError, match="invalid JSON"):
         await analyzer.analyze(
             awareness_notes=[],
@@ -95,7 +95,7 @@ async def test_insight_analyzer_raises_on_invalid_json() -> None:
 def test_merge_insights_combines_matching_hypotheses() -> None:
     from openbiliclaw.soul.insight_analyzer import InsightAnalyzer
 
-    analyzer = InsightAnalyzer(FakeRegistry("[]"))
+    analyzer = InsightAnalyzer(FakeStructuredService("[]"))
     existing = [
         InsightHypothesis(
             hypothesis="用户可能通过深度内容获得掌控感。",
@@ -148,3 +148,10 @@ async def test_insight_analyzer_can_use_unified_service() -> None:
 
     assert insights[0].hypothesis == "用户可能通过深度内容获得掌控感。"
     assert service.calls
+
+
+def test_insight_analyzer_requires_core_memory_task_service() -> None:
+    from openbiliclaw.soul.insight_analyzer import InsightAnalyzer
+
+    with pytest.raises(TypeError, match="complete_structured_task"):
+        InsightAnalyzer(FakeRegistry("[]"))

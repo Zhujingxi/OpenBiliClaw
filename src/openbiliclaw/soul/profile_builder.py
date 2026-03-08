@@ -13,18 +13,7 @@ from openbiliclaw.llm.service import LLMServiceError
 from .profile import SoulProfile
 
 
-class SupportsComplete(Protocol):
-    async def complete(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        temperature: float = 0.7,
-        max_tokens: int = 4096,
-        json_mode: bool = False,
-    ) -> LLMResponse: ...
-
-
-class SupportsStructuredTask(Protocol):
+class SupportsCoreMemoryTask(Protocol):
     async def complete_structured_task(
         self,
         *,
@@ -44,7 +33,11 @@ class SoulProfileBuildError(Exception):
 class ProfileBuilder:
     """Generate an initial soul profile from history and preference context."""
 
-    registry: SupportsComplete | SupportsStructuredTask
+    registry: SupportsCoreMemoryTask
+
+    def __post_init__(self) -> None:
+        if not hasattr(self.registry, "complete_structured_task"):
+            raise TypeError("ProfileBuilder requires a service with complete_structured_task().")
 
     async def build(
         self,
@@ -57,7 +50,10 @@ class ProfileBuilder:
             preference_summary=preference,
         )
         try:
-            response = await self._complete(messages)
+            response = await self.registry.complete_structured_task(
+                system_instruction=messages[0]["content"],
+                user_input=messages[1]["content"],
+            )
         except (LLMProviderError, LLMServiceError) as exc:
             raise SoulProfileBuildError(str(exc)) from exc
         payload = self._parse_response(response.content)
@@ -122,11 +118,3 @@ class ProfileBuilder:
         if not isinstance(raw_value, list):
             return []
         return [str(item).strip() for item in raw_value if str(item).strip()]
-
-    async def _complete(self, messages: list[dict[str, str]]) -> LLMResponse:
-        if hasattr(self.registry, "complete_structured_task"):
-            return await self.registry.complete_structured_task(
-                system_instruction=messages[0]["content"],
-                user_input=messages[1]["content"],
-            )
-        return await self.registry.complete(messages, json_mode=True)
