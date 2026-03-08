@@ -56,8 +56,11 @@ CREATE TABLE IF NOT EXISTS recommendations (
     confidence  REAL DEFAULT 0.0,
     presented   INTEGER DEFAULT 0,   -- Boolean
     feedback    TEXT,                -- User feedback (like/dislike/comment)
+    feedback_type TEXT,
+    feedback_note TEXT,
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     presented_at TIMESTAMP,
+    feedback_at TIMESTAMP,
     FOREIGN KEY (bvid) REFERENCES content_cache(bvid)
 );
 
@@ -85,6 +88,7 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA_SQL)
+        self._ensure_recommendation_feedback_columns()
 
         # Set schema version
         self._conn.execute(
@@ -329,6 +333,43 @@ class Database:
         )
         self.conn.commit()
 
+    def get_recommendation_by_id(self, recommendation_id: int) -> dict[str, Any] | None:
+        """Return a single recommendation row by primary key."""
+        cursor = self.conn.execute(
+            """
+            SELECT r.*, c.title AS title, c.up_name AS up_name
+            FROM recommendations AS r
+            LEFT JOIN content_cache AS c ON c.bvid = r.bvid
+            WHERE r.id = ?
+            """,
+            (recommendation_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
+    def update_recommendation_feedback(
+        self,
+        recommendation_id: int,
+        *,
+        feedback_type: str,
+        feedback_note: str = "",
+    ) -> None:
+        """Update the current feedback state of a recommendation."""
+        self.conn.execute(
+            """
+            UPDATE recommendations
+            SET feedback = ?,
+                feedback_type = ?,
+                feedback_note = ?,
+                feedback_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (feedback_type, feedback_type, feedback_note, recommendation_id),
+        )
+        self.conn.commit()
+
     def mark_recommendations_presented(self, recommendation_ids: list[int]) -> None:
         """Mark recommendations as presented and set their presented timestamp."""
         if not recommendation_ids:
@@ -350,3 +391,21 @@ class Database:
         if self._conn:
             self._conn.close()
             self._conn = None
+
+    def _ensure_recommendation_feedback_columns(self) -> None:
+        """Backfill recommendation feedback columns for existing databases."""
+        existing_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(recommendations)").fetchall()
+        }
+        required_columns = {
+            "feedback_type": "TEXT",
+            "feedback_note": "TEXT",
+            "feedback_at": "TIMESTAMP",
+        }
+        for column_name, column_type in required_columns.items():
+            if column_name in existing_columns:
+                continue
+            self.conn.execute(
+                f"ALTER TABLE recommendations ADD COLUMN {column_name} {column_type}"
+            )

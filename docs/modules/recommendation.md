@@ -18,7 +18,7 @@
 |------|------|------|
 | 6.1 推荐排序 | ✅ | 从 `content_cache` 选未推荐内容、按分数排序、写入推荐历史 |
 | 6.2 朋友式推荐表达 | ✅ | 用 LLM 生成朋友式推荐理由和个性化 topic，并在 CLI 中真实展示 |
-| 6.3 推荐持久化 | 🔄 | 已有最小推荐历史写入，待补展示状态与反馈 |
+| 6.3 推荐持久化 | ✅ | 推荐记录已补齐展示状态、结构化反馈字段和反馈更新时间 |
 
 ## 公开 API
 
@@ -43,6 +43,7 @@ items = await engine.generate_recommendations(
 - 生成结果后会写入 `recommendations` 表，避免下次重复选中
 - 每条推荐都会调用 `generate_expression()` 生成 `expression` 和 `topic_label`
 - CLI 展示后会把对应推荐记录标记为 `presented = 1`
+- `feedback` 命令会把 `feedback_type` / `feedback_note` / `feedback_at` 写回推荐记录
 
 ### Recommendation
 
@@ -65,6 +66,17 @@ Recommendation(
 - `topic_label`
 - `confidence`
 - `presented`
+- `feedback`
+
+### Recommendation Feedback
+
+当前推荐记录会持久化以下反馈字段：
+
+- `feedback_type`
+- `feedback_note`
+- `feedback_at`
+
+推荐反馈会同时写入事件层，供后续偏好和洞察分析消费。
 
 ## 设计决策
 
@@ -72,3 +84,4 @@ Recommendation(
 2. **推荐历史在选中时写入**：避免相邻批次重复选择同一内容
 3. **表达生成单独落库**：排序和表达拆开，便于失败时降级到 fallback 文案
 4. **`presented` 在 CLI 展示后更新**：区分“系统选中”和“用户已经看见”
+5. **反馈保留当前状态**：v0.1 只保存当前反馈结果，不额外引入 feedback 历史表

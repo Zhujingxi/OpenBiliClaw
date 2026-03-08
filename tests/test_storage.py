@@ -246,3 +246,55 @@ class TestDatabase:
             assert rows[1]["presented_at"] is not None
 
             db.close()
+
+    def test_get_recommendation_by_id_returns_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            db.cache_content(
+                "BV1REC",
+                title="讲透城市与建筑",
+                up_name="城市观察局",
+                source="search",
+            )
+
+            recommendation_id = db.insert_recommendation(
+                "BV1REC",
+                confidence=0.83,
+                presented=0,
+            )
+
+            row = db.get_recommendation_by_id(recommendation_id)
+
+            assert row is not None
+            assert row["id"] == recommendation_id
+            assert row["bvid"] == "BV1REC"
+            assert row["title"] == "讲透城市与建筑"
+
+            db.close()
+
+    def test_update_recommendation_feedback_persists_structured_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            recommendation_id = db.insert_recommendation(
+                "BV1REC",
+                confidence=0.83,
+                presented=0,
+            )
+
+            db.update_recommendation_feedback(
+                recommendation_id,
+                feedback_type="dislike",
+                feedback_note="太浅了",
+            )
+
+            row = db.get_recommendation_by_id(recommendation_id)
+
+            assert row is not None
+            assert row["feedback_type"] == "dislike"
+            assert row["feedback_note"] == "太浅了"
+            assert row["feedback_at"] is not None
+
+            db.close()

@@ -452,3 +452,78 @@ def test_recommend_displays_results_and_marks_them_presented(
     assert "这条会对上你最近那种想把结构想透的劲头。" in result.stdout
     assert "BV1REC" in result.stdout
     assert fake_engine.marked_ids == [7]
+
+
+def test_feedback_command_updates_recommendation_and_records_event(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    class FakeRecommendationEngine:
+        def __init__(self) -> None:
+            self.calls: list[tuple[int, str, str]] = []
+
+        async def record_feedback(
+            self,
+            recommendation_id: int,
+            *,
+            feedback_type: str,
+            note: str = "",
+        ) -> None:
+            self.calls.append((recommendation_id, feedback_type, note))
+
+        def get_recommendation(self, recommendation_id: int) -> dict[str, object] | None:
+            return {"id": recommendation_id, "bvid": "BV1REC", "title": "讲透城市与建筑"}
+
+    class FakeMemoryManager:
+        def __init__(self) -> None:
+            self.events: list[dict[str, object]] = []
+
+        async def propagate_event(self, event: dict[str, object]) -> None:
+            self.events.append(event)
+
+    fake_engine = FakeRecommendationEngine()
+    fake_memory = FakeMemoryManager()
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_recommendation_engine",
+        lambda: fake_engine,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_build_memory_manager",
+        lambda: fake_memory,
+        raising=False,
+    )
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["feedback", "7", "dislike", "--note", "太浅了"])
+
+    assert result.exit_code == 0
+    assert "反馈已记录" in result.stdout
+    assert fake_engine.calls == [(7, "dislike", "太浅了")]
+    assert fake_memory.events[0]["event_type"] == "feedback"
+    assert fake_memory.events[0]["metadata"]["recommendation_id"] == 7
+    assert fake_memory.events[0]["metadata"]["feedback_type"] == "dislike"
+
+
+def test_feedback_command_reports_missing_recommendation(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    class FakeRecommendationEngine:
+        def get_recommendation(self, recommendation_id: int) -> dict[str, object] | None:
+            return None
+
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_recommendation_engine",
+        lambda: FakeRecommendationEngine(),
+        raising=False,
+    )
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["feedback", "7", "like"])
+
+    assert result.exit_code == 1
+    assert "推荐不存在" in result.stdout

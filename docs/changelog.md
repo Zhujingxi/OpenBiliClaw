@@ -90,6 +90,14 @@
 
 ## M6: 推荐引擎（进行中）
 
+### 6.3 推荐持久化 — `recommendation/m63-persistence`
+
+- `recommendations` 表补齐结构化反馈字段：`feedback_type`、`feedback_note`、`feedback_at`
+- 新增 `Database.get_recommendation_by_id()` 和 `update_recommendation_feedback()`，支持推荐反馈读写
+- `RecommendationEngine` 新增 `record_feedback()` / `get_recommendation()` 入口
+- CLI 新增 `feedback <id> <like|dislike> [--note ...]`，成功后会同步写入一条 `feedback` 事件
+- 新增 recommendation/storage/cli 测试，覆盖反馈持久化、事件写入和不存在推荐的错误路径
+
 ### 6.2 朋友式推荐表达 — `recommendation/m62-expression`
 
 - `RecommendationEngine.generate_expression()` 从 stub 升级为结构化 LLM 调用，输出 `expression` 和 `topic_label`

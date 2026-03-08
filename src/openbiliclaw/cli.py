@@ -99,6 +99,17 @@ def _build_recommendation_engine() -> Any:
     return RecommendationEngine(llm=llm_service, database=database)
 
 
+def _build_memory_manager() -> Any:
+    """Build the initialized memory manager for event writes."""
+    from openbiliclaw.config import load_config
+    from openbiliclaw.memory.manager import MemoryManager
+
+    config = load_config()
+    memory = MemoryManager(config.data_path)
+    memory.initialize()
+    return memory
+
+
 @app.callback()
 def main(log_level: str | None = typer.Option(None, "--log-level")) -> None:
     """Global CLI options."""
@@ -207,6 +218,57 @@ def recommend() -> None:
         presented_ids.append(item.recommendation_id)
 
     recommendation_engine.mark_presented(presented_ids)
+
+
+@app.command()
+def feedback(
+    recommendation_id: int,
+    signal: str,
+    note: str = typer.Option("", "--note", help="补充反馈备注"),
+) -> None:
+    """对一条推荐记录提交反馈."""
+    _require_runtime_config()
+    normalized_signal = signal.strip().lower()
+    if normalized_signal not in {"like", "dislike"}:
+        console.print("[bold red]反馈类型无效[/bold red]")
+        console.print("  仅支持: like, dislike")
+        raise typer.Exit(code=1)
+
+    recommendation_engine = _build_recommendation_engine()
+    memory = _build_memory_manager()
+    recommendation = recommendation_engine.get_recommendation(recommendation_id)
+    if recommendation is None:
+        console.print("[bold red]推荐不存在[/bold red]")
+        console.print(f"  recommendation_id={recommendation_id}")
+        raise typer.Exit(code=1)
+
+    asyncio.run(
+        recommendation_engine.record_feedback(
+            recommendation_id,
+            feedback_type=normalized_signal,
+            note=note,
+        )
+    )
+    asyncio.run(
+        memory.propagate_event(
+            {
+                "event_type": "feedback",
+                "title": str(recommendation.get("title", "")),
+                "metadata": {
+                    "recommendation_id": recommendation_id,
+                    "bvid": recommendation.get("bvid", ""),
+                    "feedback_type": normalized_signal,
+                    "feedback_note": note,
+                },
+            }
+        )
+    )
+
+    console.print("[bold green]反馈已记录[/bold green]")
+    console.print(f"  推荐ID: {recommendation_id}")
+    console.print(f"  反馈: {normalized_signal}")
+    if note:
+        console.print(f"  备注: {note}")
 
 
 @app.command()

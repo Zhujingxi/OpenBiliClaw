@@ -170,3 +170,30 @@ async def test_generate_recommendations_populates_expression_and_updates_history
         assert history[0]["expression"] == "这条内容会接住你最近那种想把问题想透的状态。"
         assert history[0]["topic"] == "你最近那种想把问题想透的状态"
         assert history[0]["presented"] == 0
+
+
+@pytest.mark.asyncio
+async def test_record_feedback_updates_recommendation_feedback_fields() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+        recommendation_id = db.insert_recommendation(
+            "BV1REC",
+            confidence=0.83,
+            presented=1,
+        )
+
+        await engine.record_feedback(
+            recommendation_id,
+            feedback_type="like",
+            note="这个讲法很对胃口",
+        )
+
+        row = db.get_recommendation_by_id(recommendation_id)
+
+        assert row is not None
+        assert row["feedback_type"] == "like"
+        assert row["feedback_note"] == "这个讲法很对胃口"
+        assert row["feedback_at"] is not None

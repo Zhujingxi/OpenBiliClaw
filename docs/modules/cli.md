@@ -21,6 +21,7 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `browser content <url>` | 获取页面文本内容 | ✅ |
 | `start` | 启动 Agent | 🔲 stub |
 | `recommend` | 查看推荐 | ✅ |
+| `feedback <id> <like\|dislike>` | 对推荐提交反馈 | ✅ |
 | `profile` | 查看用户画像 | ✅ |
 | `discover` | 手动触发发现 | 🔲 stub |
 | `chat` | 苏格拉底式对话 | 🔲 stub |
@@ -154,3 +155,20 @@ $ openbiliclaw recommend
 ```bash
 openbiliclaw discover
 ```
+
+### `openbiliclaw feedback <id> <like|dislike>`
+
+为一条已展示的推荐记录写入结构化反馈，可附带备注。
+
+```bash
+$ openbiliclaw feedback 7 dislike --note "太浅了"
+反馈已记录
+  推荐ID: 7
+  反馈: dislike
+  备注: 太浅了
+```
+
+这条命令会同时：
+
+- 更新 `recommendations` 表中的 `feedback_type` / `feedback_note` / `feedback_at`
+- 写入一条 `event_type="feedback"` 的事件，供后续记忆系统使用

@@ -212,6 +212,24 @@ class RecommendationEngine:
             return
         self._database.mark_recommendations_presented(ids)
 
+    async def record_feedback(
+        self,
+        recommendation_id: int,
+        *,
+        feedback_type: str,
+        note: str = "",
+    ) -> None:
+        """Persist explicit user feedback for a recommendation."""
+        self._database.update_recommendation_feedback(
+            recommendation_id,
+            feedback_type=feedback_type,
+            feedback_note=note,
+        )
+
+    def get_recommendation(self, recommendation_id: int) -> dict[str, object] | None:
+        """Load a recommendation row for CLI or feedback workflows."""
+        return self._database.get_recommendation_by_id(recommendation_id)
+
     @staticmethod
     def _normalize_discovered(
         discovered: list[DiscoveredContent],
