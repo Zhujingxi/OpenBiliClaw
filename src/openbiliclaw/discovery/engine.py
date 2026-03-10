@@ -50,6 +50,8 @@ class DiscoveredContent:
     relevance_score: float = 0.0  # 0.0 - 1.0 (based on user soul)
     relevance_reason: str = ""  # Why this is relevant to the user
     candidate_tier: str = "primary"  # Primary discovery vs backfill supply
+    discovered_at: str = ""  # Cache timestamp for recency-aware ranking
+    last_scored_at: str = ""  # Last relevance scoring timestamp
 
 
 class DiscoveryStrategy(ABC):
@@ -341,6 +343,8 @@ class ContentDiscoveryEngine:
                     relevance_score=self._clamp_score(row.get("relevance_score", 0.0)),
                     relevance_reason=str(row.get("relevance_reason", "")),
                     candidate_tier="backfill",
+                    discovered_at=str(row.get("discovered_at", "")),
+                    last_scored_at=str(row.get("last_scored_at", "")),
                 )
             )
             if len(candidates) >= limit:

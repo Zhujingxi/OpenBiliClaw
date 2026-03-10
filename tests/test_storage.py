@@ -203,6 +203,54 @@ class TestDatabase:
 
             db.close()
 
+    def test_get_unrecommended_content_orders_by_tier_then_relevance_and_recency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            db.cache_content(
+                "BV1BACK",
+                title="补货高分",
+                up_name="UPA",
+                source="search",
+                view_count=1000,
+                relevance_score=0.95,
+                candidate_tier="backfill",
+            )
+            db.cache_content(
+                "BV1OLD",
+                title="主候选旧",
+                up_name="UPB",
+                source="search",
+                view_count=20,
+                relevance_score=0.82,
+                candidate_tier="primary",
+            )
+            db.cache_content(
+                "BV1NEW",
+                title="主候选新",
+                up_name="UPC",
+                source="search",
+                view_count=10,
+                relevance_score=0.82,
+                candidate_tier="primary",
+            )
+            db.conn.execute(
+                "UPDATE content_cache SET last_scored_at = ? WHERE bvid = ?",
+                ("2026-03-09 08:00:00", "BV1OLD"),
+            )
+            db.conn.execute(
+                "UPDATE content_cache SET last_scored_at = ? WHERE bvid = ?",
+                ("2026-03-10 08:00:00", "BV1NEW"),
+            )
+            db.conn.commit()
+
+            items = db.get_unrecommended_content(limit=10)
+
+            assert [item["bvid"] for item in items] == ["BV1NEW", "BV1OLD", "BV1BACK"]
+
+            db.close()
+
     def test_insert_and_get_recommendations(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(Path(tmpdir) / "test.db")

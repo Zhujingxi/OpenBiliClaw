@@ -116,6 +116,80 @@ async def test_generate_recommendations_reads_from_cache_when_discovered_missing
 
 
 @pytest.mark.asyncio
+async def test_generate_recommendations_prefers_primary_then_relevance_then_recency() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+        discovered = [
+            DiscoveredContent(
+                bvid="BV1BACK",
+                title="补货高分",
+                relevance_score=0.96,
+                candidate_tier="backfill",
+                last_scored_at="2026-03-10T08:00:00",
+            ),
+            DiscoveredContent(
+                bvid="BV1OLD",
+                title="主候选旧",
+                relevance_score=0.87,
+                candidate_tier="primary",
+                last_scored_at="2026-03-09T08:00:00",
+            ),
+            DiscoveredContent(
+                bvid="BV1NEW",
+                title="主候选新",
+                relevance_score=0.87,
+                candidate_tier="primary",
+                last_scored_at="2026-03-10T08:00:00",
+            ),
+        ]
+
+        recommendations = await engine.generate_recommendations(
+            discovered=discovered,
+            profile=_build_profile(),
+            limit=2,
+        )
+
+        assert [item.content.bvid for item in recommendations] == ["BV1NEW", "BV1OLD"]
+
+
+@pytest.mark.asyncio
+async def test_generate_recommendations_reads_cached_relevance_score() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        db.cache_content(
+            "BV1LOW",
+            title="低相关高播放",
+            up_name="UPA",
+            source="search",
+            view_count=1000,
+            relevance_score=0.41,
+            candidate_tier="primary",
+        )
+        db.cache_content(
+            "BV1HIGH",
+            title="高相关低播放",
+            up_name="UPB",
+            source="search",
+            view_count=10,
+            relevance_score=0.93,
+            candidate_tier="primary",
+        )
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+        recommendations = await engine.generate_recommendations(
+            discovered=None,
+            profile=_build_profile(),
+            limit=1,
+        )
+
+        assert [item.content.bvid for item in recommendations] == ["BV1HIGH"]
+
+
+@pytest.mark.asyncio
 async def test_generate_recommendations_does_not_repeat_history() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Database(Path(tmpdir) / "test.db")

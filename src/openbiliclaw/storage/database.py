@@ -287,7 +287,12 @@ class Database:
             """
             SELECT *
             FROM content_cache
-            ORDER BY view_count DESC, discovered_at DESC, bvid ASC
+            ORDER BY
+                CASE candidate_tier WHEN 'primary' THEN 0 ELSE 1 END ASC,
+                relevance_score DESC,
+                last_scored_at DESC,
+                view_count DESC,
+                bvid ASC
             LIMIT ?
             """,
             (limit,),
@@ -305,7 +310,12 @@ class Database:
                 FROM recommendations AS r
                 WHERE r.bvid = c.bvid
             )
-            ORDER BY c.view_count DESC, c.discovered_at DESC, c.bvid ASC
+            ORDER BY
+                CASE c.candidate_tier WHEN 'primary' THEN 0 ELSE 1 END ASC,
+                c.relevance_score DESC,
+                c.last_scored_at DESC,
+                c.view_count DESC,
+                c.bvid ASC
             LIMIT ?
             """,
             (limit,),

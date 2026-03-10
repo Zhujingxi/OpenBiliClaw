@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import TYPE_CHECKING, Protocol
 
 from openbiliclaw.soul.tone import build_tone_profile
@@ -97,10 +98,7 @@ class RecommendationEngine:
             if discovered is not None
             else self._load_unrecommended_content(limit=max(limit * 3, 20))
         )
-        ranked = sorted(
-            candidates,
-            key=lambda item: (-item.relevance_score, -item.view_count, item.bvid),
-        )[:limit]
+        ranked = sorted(candidates, key=self._ranking_key)[:limit]
 
         recommendations = [
             Recommendation(
@@ -247,6 +245,25 @@ class RecommendationEngine:
         return list(discovered)
 
     @staticmethod
+    def _ranking_key(item: DiscoveredContent) -> tuple[int, float, float, int, str]:
+        return (
+            0 if item.candidate_tier == "primary" else 1,
+            -item.relevance_score,
+            -RecommendationEngine._timestamp_score(item.last_scored_at or item.discovered_at),
+            -item.view_count,
+            item.bvid,
+        )
+
+    @staticmethod
+    def _timestamp_score(value: str) -> float:
+        if not value:
+            return 0.0
+        try:
+            return datetime.fromisoformat(value.replace(" ", "T")).timestamp()
+        except ValueError:
+            return 0.0
+
+    @staticmethod
     def _fallback_expression(content: DiscoveredContent) -> str:
         title = content.title or "这条内容"
         return f"我感觉《{title}》会比较对你胃口，它应该能接住你最近那股想继续往深处看的状态。"
@@ -273,6 +290,11 @@ class RecommendationEngine:
                 view_count=int(row.get("view_count", 0) or 0),
                 like_count=int(row.get("like_count", 0) or 0),
                 source_strategy=str(row.get("source", "")),
+                relevance_score=float(row.get("relevance_score", 0.0) or 0.0),
+                relevance_reason=str(row.get("relevance_reason", "")),
+                candidate_tier=str(row.get("candidate_tier", "primary") or "primary"),
+                discovered_at=str(row.get("discovered_at", "")),
+                last_scored_at=str(row.get("last_scored_at", "")),
             )
             for row in rows
         ]
