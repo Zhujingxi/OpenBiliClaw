@@ -33,9 +33,10 @@
     }
 
     body {
-      width: 392px;
-      height: 560px;
-      overflow: hidden;
+      min-width: 100%;
+      min-height: 100vh;
+      overflow-x: hidden;
+      overflow-y: auto;
       font-family: "Avenir Next", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
       color: var(--text-main);
       background:
@@ -57,9 +58,14 @@
       position: relative;
       display: flex;
       flex-direction: column;
-      height: 560px;
+      min-height: 100vh;
       padding: 16px;
       gap: 12px;
+    }
+
+    .side-panel-shell {
+      width: 100%;
+      max-width: none;
     }
 
     .shell::before,
@@ -804,7 +810,7 @@
   </style>
 </head>
 <body>
-  <div class="shell">
+  <div class="shell side-panel-shell">
     <header class="hero">
       <div class="hero-top">
         <div class="brand">

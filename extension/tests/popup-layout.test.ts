@@ -13,3 +13,12 @@ test("popup header keeps compact status inline with brand row", () => {
   assert.match(statusBadgeBlock, /padding:\s*6px\s+10px;/);
   assert.doesNotMatch(popupMarkup, /id="statusText"/);
 });
+
+test("popup page is structured for side panel browsing", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const bodyBlock = popupHtml.match(/body\s*\{[\s\S]*?\}/)?.[0] ?? "";
+
+  assert.match(popupHtml, /class="shell side-panel-shell"/);
+  assert.doesNotMatch(bodyBlock, /width:\s*392px;/);
+  assert.doesNotMatch(bodyBlock, /height:\s*560px;/);
+});
