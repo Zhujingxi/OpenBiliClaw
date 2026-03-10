@@ -11,6 +11,7 @@ import {
   checkBackendStatus,
   fetchProfileSummary,
   fetchRecommendations,
+  refreshRecommendations,
   fetchRuntimeStatus,
   sendChatMessage,
   submitFeedback,
@@ -34,6 +35,8 @@ const elements = {
   emptyTitle: document.getElementById("emptyTitle"),
   emptyText: document.getElementById("emptyText"),
   list: document.getElementById("recommendationList"),
+  refreshRecommendationsButton: document.getElementById("refreshRecommendationsButton"),
+  refreshRecommendationsStatus: document.getElementById("refreshRecommendationsStatus"),
   tabRecommend: document.getElementById("tabRecommend"),
   tabProfile: document.getElementById("tabProfile"),
   tabChat: document.getElementById("tabChat"),
@@ -54,6 +57,17 @@ const elements = {
   chatInput: document.getElementById("chatInput"),
   chatSendButton: document.getElementById("chatSendButton"),
 };
+
+function setRefreshButtonState(loading, message = "") {
+  if (elements.refreshRecommendationsButton instanceof HTMLButtonElement) {
+    elements.refreshRecommendationsButton.disabled = loading;
+    elements.refreshRecommendationsButton.textContent = loading ? "正在补货…" : "立即刷新";
+  }
+  if (elements.refreshRecommendationsStatus instanceof HTMLElement) {
+    elements.refreshRecommendationsStatus.hidden = !message;
+    elements.refreshRecommendationsStatus.textContent = message;
+  }
+}
 
 function setHint(message) {
   if (elements.hintText) {
@@ -434,6 +448,26 @@ async function initializeRecommendations() {
   );
 }
 
+async function handleManualRefresh() {
+  setRefreshButtonState(true, "正在补货…");
+  try {
+    const result = await refreshRecommendations();
+    if (result.reason === "not_initialized") {
+      setHint("先执行 openbiliclaw init，再回来刷新。");
+      return;
+    }
+    state.profileLoaded = false;
+    await initializeRecommendations();
+    setHint(
+      result.refreshed ? "刚给你补了一批新的。" : "先看着这批，暂时还没到要重刷的时候。",
+    );
+  } catch {
+    setHint("这次没刷新成功，稍后再试。");
+  } finally {
+    setRefreshButtonState(false);
+  }
+}
+
 function bindTabs() {
   const bindings = [
     [elements.tabRecommend, "recommend"],
@@ -449,6 +483,15 @@ function bindTabs() {
       setActiveTab(tabName);
     });
   }
+}
+
+function bindRefreshButton() {
+  if (!(elements.refreshRecommendationsButton instanceof HTMLButtonElement)) {
+    return;
+  }
+  elements.refreshRecommendationsButton.addEventListener("click", () => {
+    void handleManualRefresh();
+  });
 }
 
 function bindChat() {
@@ -495,6 +538,7 @@ function bindChat() {
 async function initializePopup() {
   const requestedTab = new URLSearchParams(window.location.search).get("tab");
   bindTabs();
+  bindRefreshButton();
   bindChat();
   setActiveTab(
     requestedTab === "profile" || requestedTab === "chat" || requestedTab === "recommend"

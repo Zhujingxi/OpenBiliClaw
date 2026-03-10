@@ -6,6 +6,12 @@
 
 ## M8: 插件后端 API（进行中）
 
+### Popup 手动刷新推荐 — `extension/m86-manual-refresh`
+
+- popup 推荐 tab 新增“立即刷新”按钮，点击后会调用 `/api/recommendations/refresh` 触发一次完整补货
+- 刷新期间按钮会进入“正在补货…”状态，成功后立即重拉运行状态和推荐列表
+- 刷新失败时保留当前推荐，不清空内容，只给出轻量错误提示
+
 ### Gemini 可选依赖导入修复 — `fix/gemini-optional-import`
 
 - `google-genai` 缺失时，`openbiliclaw.llm` 和 `openbiliclaw.llm.registry` 现在仍可正常导入，不再因为 Gemini 顶层依赖阻塞整个测试收集

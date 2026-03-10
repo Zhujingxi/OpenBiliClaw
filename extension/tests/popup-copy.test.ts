@@ -8,6 +8,8 @@ test("popup copy uses a more native bilibili-style voice in key entry points", (
 
   assert.match(popupHtml, /首页先放一边，这里是你最近更可能点开的。/);
   assert.match(popupHtml, /这几条，你大概会点开/);
+  assert.match(popupHtml, /立即刷新/);
+  assert.match(popupHtml, /正在补货/);
   assert.match(popupHtml, /阿B 最近新记住了什么/);
   assert.match(popupHtml, /最近你到底在看啥/);
   assert.match(popupHtml, /写点你最近爱看的/);

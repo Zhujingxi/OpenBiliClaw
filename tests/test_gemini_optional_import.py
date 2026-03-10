@@ -19,8 +19,12 @@ def test_registry_module_imports_without_google_genai(monkeypatch: pytest.Monkey
 
 
 def test_gemini_provider_raises_helpful_error_without_sdk() -> None:
-    """Using Gemini without google-genai installed should fail clearly."""
+    """Gemini provider should work when installed and fail clearly when absent."""
     module = importlib.import_module("openbiliclaw.llm.gemini_provider")
 
-    with pytest.raises(Exception, match="google-genai"):
-        module.GeminiProvider(api_key="test-key")
+    if module.gemini_sdk_available():
+        provider = module.GeminiProvider(api_key="test-key")
+        assert provider.name == "gemini"
+    else:
+        with pytest.raises(Exception, match="google-genai"):
+            module.GeminiProvider(api_key="test-key")

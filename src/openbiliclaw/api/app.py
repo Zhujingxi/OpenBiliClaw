@@ -28,6 +28,7 @@ from openbiliclaw.api.models import (
     ProfileSummaryResponse,
     RecommendationListResponse,
     RecommendationOut,
+    RecommendationRefreshResponse,
     RuntimeStatusResponse,
 )
 
@@ -226,6 +227,27 @@ def create_app(
                 )
                 for row in rows
             ]
+        )
+
+    @app.post("/api/recommendations/refresh", response_model=RecommendationRefreshResponse)
+    async def refresh_recommendations() -> RecommendationRefreshResponse:
+        refresh_if_needed = getattr(runtime_controller, "refresh_if_needed", None)
+        if not callable(refresh_if_needed):
+            return RecommendationRefreshResponse(
+                ok=True,
+                refreshed=False,
+                strategies=[],
+                reason="runtime_unavailable",
+                recommendation_count=0,
+            )
+
+        result = await refresh_if_needed()
+        return RecommendationRefreshResponse(
+            ok=True,
+            refreshed=bool(result.get("refreshed", False)),
+            strategies=[str(item) for item in result.get("strategies", [])],
+            reason=str(result.get("reason", "")),
+            recommendation_count=int(result.get("recommendation_count", 0)),
         )
 
     @app.get("/api/runtime-status", response_model=RuntimeStatusResponse)

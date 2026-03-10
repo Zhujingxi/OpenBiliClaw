@@ -420,6 +420,21 @@
       color: #bb7a2d;
     }
 
+    .recommendation-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 0 2px;
+    }
+
+    .toolbar-status {
+      font-size: 11px;
+      line-height: 1.5;
+      color: var(--text-secondary);
+      font-weight: 700;
+    }
+
     .recommendation-title {
       font-size: 16px;
       line-height: 1.45;
@@ -823,6 +838,10 @@
           <p class="view-kicker">For You</p>
           <h2>这几条，你大概会点开</h2>
           <p>按你最近在看的、点过的和聊过的，先排了几条。</p>
+        </div>
+        <div class="recommendation-toolbar">
+          <button id="refreshRecommendationsButton" class="action-button action-secondary" type="button">立即刷新</button>
+          <span id="refreshRecommendationsStatus" class="toolbar-status" hidden>正在补货…</span>
         </div>
         <div id="emptyState" class="empty-state" hidden>
           <h3 id="emptyTitle">还没刷出新东西</h3>

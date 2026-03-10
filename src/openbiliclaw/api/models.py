@@ -47,6 +47,16 @@ class RecommendationListResponse(BaseModel):
     items: list[RecommendationOut]
 
 
+class RecommendationRefreshResponse(BaseModel):
+    """Result of one explicit recommendation refresh request."""
+
+    ok: bool
+    refreshed: bool
+    strategies: list[str] = Field(default_factory=list)
+    reason: str = ""
+    recommendation_count: int = 0
+
+
 class RuntimeStatusResponse(BaseModel):
     """Runtime summary for popup and background status checks."""
 

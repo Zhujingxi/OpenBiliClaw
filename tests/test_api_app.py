@@ -137,6 +137,68 @@ class TestBackendAPI:
             "unread_count": 2,
         }
 
+    def test_refresh_recommendations_endpoint_triggers_runtime_refresh(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeRuntimeController:
+            async def refresh_if_needed(self) -> dict[str, object]:
+                return {
+                    "refreshed": True,
+                    "strategies": ["search", "related_chain"],
+                    "reason": "triggered",
+                    "recommendation_count": 8,
+                }
+
+        app = create_app(
+            memory_manager=object(),
+            database=object(),
+            soul_engine=object(),
+            runtime_controller=FakeRuntimeController(),
+        )
+        client = TestClient(app)
+
+        response = client.post("/api/recommendations/refresh")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "ok": True,
+            "refreshed": True,
+            "strategies": ["search", "related_chain"],
+            "reason": "triggered",
+            "recommendation_count": 8,
+        }
+
+    def test_refresh_recommendations_endpoint_reports_uninitialized_runtime(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeRuntimeController:
+            async def refresh_if_needed(self) -> dict[str, object]:
+                return {
+                    "refreshed": False,
+                    "strategies": [],
+                    "reason": "not_initialized",
+                    "recommendation_count": 0,
+                }
+
+        app = create_app(
+            memory_manager=object(),
+            database=object(),
+            soul_engine=object(),
+            runtime_controller=FakeRuntimeController(),
+        )
+        client = TestClient(app)
+
+        response = client.post("/api/recommendations/refresh")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "ok": True,
+            "refreshed": False,
+            "strategies": [],
+            "reason": "not_initialized",
+            "recommendation_count": 0,
+        }
+
     def test_pending_notification_endpoint_returns_single_candidate(self) -> None:
         from fastapi.testclient import TestClient
 

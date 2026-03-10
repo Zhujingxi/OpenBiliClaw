@@ -22,6 +22,10 @@ export async function fetchRecommendations() {
   return Array.isArray(payload.items) ? payload.items : [];
 }
 
+export async function refreshRecommendations() {
+  return requestJson("/recommendations/refresh", { method: "POST" });
+}
+
 export async function fetchRuntimeStatus() {
   return requestJson("/runtime-status", { method: "GET" });
 }

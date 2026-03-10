@@ -5,14 +5,6 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-try:
-    from google import genai  # type: ignore[import-not-found]
-    from google.genai import errors, types  # type: ignore[import-not-found]
-except ModuleNotFoundError:  # pragma: no cover - exercised via integration behavior
-    genai = None
-    errors = None
-    types = None
-
 from .base import (
     LLMProvider,
     LLMProviderError,
@@ -21,6 +13,23 @@ from .base import (
     LLMResponseError,
     LLMTimeoutError,
 )
+
+google_genai: Any
+google_errors: Any
+google_types: Any
+
+try:
+    from google import genai as google_genai
+    from google.genai import errors as google_errors
+    from google.genai import types as google_types
+except ModuleNotFoundError:  # pragma: no cover - exercised via integration behavior
+    google_genai = None
+    google_errors = None
+    google_types = None
+
+genai: Any = google_genai
+errors: Any = google_errors
+types: Any = google_types
 
 
 def gemini_sdk_available() -> bool:
