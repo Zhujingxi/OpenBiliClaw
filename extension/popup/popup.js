@@ -2,6 +2,7 @@ import {
   buildFeedbackPayload,
   buildVideoUrl,
   getConnectionBadgeState,
+  getHintBannerState,
   getPoolStatusSummary,
   getPopupState,
   getTabButtonState,
@@ -32,6 +33,7 @@ const elements = {
   statusBadge: document.getElementById("statusBadge"),
   statusDot: document.getElementById("statusDot"),
   statusLabel: document.getElementById("statusLabel"),
+  footer: document.getElementById("footerHintBar"),
   hintText: document.getElementById("hintText"),
   emptyState: document.getElementById("emptyState"),
   emptyTitle: document.getElementById("emptyTitle"),
@@ -75,9 +77,12 @@ function setRefreshButtonState(loading, message = "") {
   }
 }
 
-function setHint(message) {
-  if (elements.hintText) {
+function setHint(message, tone = "info") {
+  if (elements.hintText instanceof HTMLElement) {
     elements.hintText.textContent = message;
+  }
+  if (elements.footer instanceof HTMLElement) {
+    elements.footer.dataset.tone = getHintBannerState(tone).tone;
   }
 }
 
@@ -235,7 +240,7 @@ function setFeedbackStatus(statusLine, message) {
 
 async function openRecommendation(bvid) {
   if (!bvid) {
-    setHint("这条卡片还没挂上 BV 号，稍后再试。");
+    setHint("这条卡片还没挂上 BV 号，稍后再试。", "error");
     return;
   }
   await chrome.tabs.create({ url: buildVideoUrl(bvid) });
@@ -267,18 +272,18 @@ function createCommentComposer(item, statusLine) {
   const submit = createActionButton("发出去", "action-button action-primary", async () => {
     const validation = validateCommentInput(input.value);
     if (!validation.valid) {
-      setHint(validation.message);
+      setHint(validation.message, "error");
       input.focus();
       return;
     }
     try {
       await submitFeedback(buildFeedbackPayload(item.id, "comment", input.value));
-      setHint("这句记下了。");
+      setHint("这句记下了。", "success");
       setFeedbackStatus(statusLine, "记下了，这句会影响后面的推荐。");
       wrapper.hidden = true;
       input.value = "";
     } catch {
-      setHint("这句没发出去，先看看本地后端是不是开着。");
+      setHint("这句没发出去，先看看本地后端是不是开着。", "error");
     }
   });
 
@@ -367,19 +372,19 @@ function renderRecommendations(items) {
       createActionButton("多来点", "action-button action-secondary", async () => {
         try {
           await submitFeedback(buildFeedbackPayload(item.id, "like"));
-          setHint("记下了，这类可以多来点。");
+          setHint("记下了，这类可以多来点。", "success");
           setFeedbackStatus(feedbackStatus, "记下了，这类内容会多给你一点。");
         } catch {
-          setHint("这条反馈没记上，先看看本地后端是不是开着。");
+          setHint("这条反馈没记上，先看看本地后端是不是开着。", "error");
         }
       }),
       createActionButton("少来点", "action-button action-secondary", async () => {
         try {
           await submitFeedback(buildFeedbackPayload(item.id, "dislike"));
-          setHint("记下了，这路子先少来点。");
+          setHint("记下了，这路子先少来点。", "success");
           setFeedbackStatus(feedbackStatus, "记下了，这个方向先往后放。");
         } catch {
-          setHint("这条反馈没记上，先看看本地后端是不是开着。");
+          setHint("这条反馈没记上，先看看本地后端是不是开着。", "error");
         }
       }),
       createActionButton("说说原因", "action-button action-secondary", () => {
@@ -401,7 +406,7 @@ function renderRecommendationState(stateShape) {
     renderRecommendations(stateShape.items);
     const unreadCount = Number(stateShape.runtime?.unread_count ?? 0);
     if (unreadCount > 0) {
-      setHint(`刚补进 ${unreadCount} 条还没看过的新内容，想看就点，不想看就直说。`);
+      setHint(`刚补进 ${unreadCount} 条还没看过的新内容，想看就点，不想看就直说。`, "success");
     } else {
       setHint("想看就点，不想看就直说。");
     }
@@ -414,13 +419,13 @@ function renderRecommendationState(stateShape) {
 
   if (stateShape.kind === "offline") {
     showRecommendationEmptyState("后端还没开张", stateShape.message);
-    setHint("先在项目根目录把 openbiliclaw start 跑起来。");
+    setHint("先在项目根目录把 openbiliclaw start 跑起来。", "error");
     return;
   }
 
   if (stateShape.kind === "error") {
     showRecommendationEmptyState("推荐暂时没刷出来", stateShape.message);
-    setHint("后端连上了，但推荐接口这会儿没回。");
+    setHint("后端连上了，但推荐接口这会儿没回。", "error");
     return;
   }
 
@@ -505,7 +510,7 @@ async function handleManualRefresh() {
   try {
     const result = await reshuffleRecommendations();
     if (!Array.isArray(result.items)) {
-      setHint("先执行 openbiliclaw init，再回来刷新。");
+      setHint("先执行 openbiliclaw init，再回来刷新。", "error");
       return;
     }
     state.recommendations = result.items;
@@ -518,10 +523,13 @@ async function handleManualRefresh() {
         runtimeStatus: state.runtimeStatus,
       }),
     );
-    setHint(result.items.length > 0 ? "先给你换了一批新的，后台还在继续补货。" : "池子里这会儿还没刷出新的，稍后再试。");
+    setHint(
+      result.items.length > 0 ? "先给你换了一批新的，后台还在继续补货。" : "池子里这会儿还没刷出新的，稍后再试。",
+      result.items.length > 0 ? "success" : "error",
+    );
     void refreshRecommendations().catch(() => undefined);
   } catch {
-    setHint("这次没换出来新的，稍后再试。");
+    setHint("这次没换出来新的，稍后再试。", "error");
   } finally {
     setRefreshButtonState(false);
   }
@@ -566,12 +574,12 @@ function bindChat() {
     event.preventDefault();
     const message = elements.chatInput.value.trim();
     if (!message) {
-      setHint("先说一句你最近老点开什么。");
+      setHint("先说一句你最近老点开什么。", "error");
       elements.chatInput.focus();
       return;
     }
     if (!state.online) {
-      setHint("后端还没连上，现在还发不出去。");
+      setHint("后端还没连上，现在还发不出去。", "error");
       return;
     }
 
@@ -583,10 +591,10 @@ function bindChat() {
     try {
       const payload = await sendChatMessage(message);
       appendChatMessage("助手", payload.reply);
-      setHint("收到，这句记下了。");
+      setHint("收到，这句记下了。", "success");
     } catch {
       appendChatMessage("助手", "刚刚没发出去，换个说法再试试。");
-      setHint("聊天接口这会儿没接上，先看看本地后端是不是开着。");
+      setHint("聊天接口这会儿没接上，先看看本地后端是不是开着。", "error");
     } finally {
       elements.chatSendButton.disabled = false;
       elements.chatSendButton.textContent = "发出去";

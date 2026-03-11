@@ -44,3 +44,19 @@ test("recommendation card layout reserves a media cover slot", () => {
   assert.match(coverBlock, /aspect-ratio:\s*16\s*\/\s*10;/);
   assert.match(coverImageBlock, /object-fit:\s*cover;/);
 });
+
+test("footer hint uses stronger banner-like status styling", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const footerBlock = popupHtml.match(/\.footer\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const footerHintBlock = popupHtml.match(/\.footer-hint\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const footerMarkup = popupHtml.match(/<footer id="footerHintBar"[\s\S]*?<\/footer>/)?.[0] ?? "";
+  const successBlock = popupHtml.match(/\.footer\[data-tone="success"\][\s\S]*?\.footer-hint/s)?.[0] ?? "";
+  const errorBlock = popupHtml.match(/\.footer\[data-tone="error"\][\s\S]*?\.footer-hint/s)?.[0] ?? "";
+
+  assert.match(footerMarkup, /data-tone="info"/);
+  assert.match(footerBlock, /box-shadow:/);
+  assert.match(footerHintBlock, /font-weight:\s*700;/);
+  assert.match(footerHintBlock, /padding-left:\s*22px;/);
+  assert.match(successBlock, /background:/);
+  assert.match(errorBlock, /background:/);
+});

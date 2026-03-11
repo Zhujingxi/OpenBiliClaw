@@ -6,6 +6,11 @@
 
 ## M8: 插件后端 API（进行中）
 
+### Popup 底部提示增强 — `extension/m110-hint-banner`
+
+- popup 底部提示区从淡灰说明文案升级为带状态点的横条提示，成功 / 提示 / 错误三种状态现在更容易区分
+- `喜欢 / 不喜欢 / 写一句 / 换一批 / 聊天发送` 等关键动作都会同步切换提示语气，减少“操作成功了但不明显”的问题
+
 ### 候选池容量与状态展示 — `runtime/m107-pool-status-capacity`
 
 - `scheduler.pool_target_count` 现在可以控制 discovery pool 期望保有的可换候选数量，后台刷新器会持续补货直到池子接近目标

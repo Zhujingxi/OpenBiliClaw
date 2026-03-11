@@ -5,6 +5,7 @@ import {
   buildFeedbackPayload,
   buildVideoUrl,
   getConnectionBadgeState,
+  getHintBannerState,
   getPoolStatusSummary,
   getPopupState,
   getTabButtonState,
@@ -283,5 +284,17 @@ test("getConnectionBadgeState returns compact status copy for popup header", () 
   assert.deepEqual(getConnectionBadgeState(false), {
     tone: "offline",
     label: "未连接",
+  });
+});
+
+test("getHintBannerState normalizes supported tones", () => {
+  assert.deepEqual(getHintBannerState("success"), {
+    tone: "success",
+  });
+  assert.deepEqual(getHintBannerState("error"), {
+    tone: "error",
+  });
+  assert.deepEqual(getHintBannerState("weird"), {
+    tone: "info",
   });
 });

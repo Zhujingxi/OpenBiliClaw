@@ -46,6 +46,14 @@ export function getConnectionBadgeState(online) {
   };
 }
 
+export function getHintBannerState(tone) {
+  const normalized = normalizeText(tone);
+  if (normalized === "success" || normalized === "error") {
+    return { tone: normalized };
+  }
+  return { tone: "info" };
+}
+
 export function normalizeRecommendation(item) {
   const relevanceReason = normalizeText(item?.relevance_reason);
   return {
