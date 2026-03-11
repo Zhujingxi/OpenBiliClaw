@@ -6,6 +6,11 @@
 
 ## M8: 插件后端 API（进行中）
 
+### 聊天即时认知阈值放宽 — `runtime/m114-chat-cognition-threshold`
+
+- popup/CLI 聊天现在对 `interest / value / goal / dislike` 这类单条中高置信信号更敏感，会更早进入「阿B 最近新记住了什么」
+- 偏好重分析和画像重建仍保留原有重复出现/累计阈值，不会因为一句随口聊天就改动长期画像
+
 ### 单条强聊天即时认知更新 — `runtime/m113-immediate-chat-cognition`
 
 - 单条高置信度聊天信号现在也可即时写入轻量 cognition update，供 popup「阿B 最近新记住了什么」优先展示

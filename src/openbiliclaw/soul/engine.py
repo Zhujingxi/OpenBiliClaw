@@ -561,11 +561,9 @@ class SoulEngine:
     ) -> bool:
         kind = str(candidate.get("kind", "")).strip()
         confidence = self._to_float(candidate.get("confidence", 0.0))
-        if kind in {"goal", "dislike"}:
-            return confidence >= 0.9
-        if kind in {"interest", "value"}:
-            return confidence >= 0.92
-        return False
+        if kind in {"goal", "dislike", "interest", "value"}:
+            return confidence >= 0.8
+        return confidence >= 0.9 and kind == "state"
 
     def _build_immediate_dialogue_cognition(
         self,

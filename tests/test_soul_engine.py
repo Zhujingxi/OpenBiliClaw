@@ -495,6 +495,44 @@ async def test_learn_from_dialogue_does_not_duplicate_same_immediate_cognition(
 
 
 @pytest.mark.asyncio
+async def test_learn_from_dialogue_records_immediate_cognition_for_interest_candidate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+
+    async def fake_extract(
+        *,
+        user_message: str,
+        assistant_reply: str,
+        core_memory: dict[str, object],
+    ) -> list[dict[str, object]]:
+        return [
+            {
+                "kind": "interest",
+                "content": "网络流行文化和梗的传播",
+                "confidence": 0.8,
+                "evidence": user_message,
+            }
+        ]
+
+    monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", fake_extract)
+
+    result = await engine.learn_from_dialogue(
+        user_message="最近我还挺想知道 B 站这些梗都是怎么传起来的。",
+        assistant_reply="你像是开始对这些梗背后的传播方式也有兴趣了。",
+        session="popup",
+    )
+
+    assert result["preference_updated"] is False
+    cognition_updates = memory.load_cognition_updates()
+    assert len(cognition_updates) == 1
+    assert cognition_updates[0]["kind"] == "interest_added"
+    assert "网络流行文化和梗的传播" in str(cognition_updates[0]["summary"])
+
+
+@pytest.mark.asyncio
 async def test_learn_from_dialogue_rebuilds_profile_after_candidate_reaches_threshold(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -584,8 +622,9 @@ async def test_learn_from_dialogue_rebuilds_profile_after_candidate_reaches_thre
     assert memory.get_layer("soul").data["core_traits"] == ["理性", "主动"]
     cognition_updates = memory.load_cognition_updates()
     assert cognition_updates
-    assert cognition_updates[0]["kind"] == "interest_added"
-    assert "国际时事" in str(cognition_updates[0]["summary"])
+    kinds = {str(item["kind"]) for item in cognition_updates}
+    assert "interest_added" in kinds
+    assert any("国际时事" in str(item["summary"]) for item in cognition_updates)
 
 
 @pytest.mark.asyncio
