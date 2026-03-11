@@ -281,6 +281,54 @@ async def test_process_feedback_batch_if_needed_skips_below_threshold(tmp_path: 
     }
 
 
+def test_record_immediate_feedback_cognition_adds_comment_update(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+
+    engine.record_immediate_feedback_cognition(
+        feedback_type="comment",
+        title="讲透城市与建筑",
+        note="这个方向对，但希望更深入一点。",
+    )
+
+    updates = memory.load_cognition_updates()
+    assert len(updates) == 1
+    assert updates[0]["kind"] == "profile_shift"
+    assert "这个方向对" in str(updates[0]["summary"])
+
+
+def test_record_immediate_feedback_cognition_adds_dislike_update(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+
+    engine.record_immediate_feedback_cognition(
+        feedback_type="dislike",
+        title="宏大叙事热榜内容",
+        note="太浅了",
+    )
+
+    updates = memory.load_cognition_updates()
+    assert len(updates) == 1
+    assert updates[0]["kind"] == "dislike_added"
+    assert "宏大叙事热榜内容" in str(updates[0]["summary"])
+
+
+def test_record_immediate_feedback_cognition_skips_like(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+
+    engine.record_immediate_feedback_cognition(
+        feedback_type="like",
+        title="讲透城市与建筑",
+        note="这条不错",
+    )
+
+    assert memory.load_cognition_updates() == []
+
+
 @pytest.mark.asyncio
 async def test_process_feedback_batch_updates_preference_after_threshold(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path

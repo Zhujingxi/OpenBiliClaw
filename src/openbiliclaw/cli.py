@@ -493,6 +493,7 @@ def feedback(
     if recommendation is None:
         _print_status_panel("error", "推荐不存在", f"recommendation_id={recommendation_id}")
         raise typer.Exit(code=1)
+    soul_engine = _build_soul_engine()
 
     asyncio.run(
         recommendation_engine.record_feedback(
@@ -515,8 +516,20 @@ def feedback(
             }
         )
     )
+    record_immediate_feedback_cognition = getattr(
+        soul_engine,
+        "record_immediate_feedback_cognition",
+        None,
+    )
+    if callable(record_immediate_feedback_cognition):
+        with suppress(Exception):
+            record_immediate_feedback_cognition(
+                feedback_type=normalized_signal,
+                title=str(recommendation.get("title", "")),
+                note=note.strip(),
+            )
     with suppress(Exception):
-        asyncio.run(_build_soul_engine().process_feedback_batch_if_needed())
+        asyncio.run(soul_engine.process_feedback_batch_if_needed())
 
     _print_status_panel("success", "反馈已记录", f"推荐ID {recommendation_id} 已更新。")
     rows = [

@@ -336,6 +336,62 @@ class SoulEngine:
             "profile_rebuilt": profile_rebuilt,
         }
 
+    def record_immediate_feedback_cognition(
+        self,
+        *,
+        feedback_type: str,
+        title: str,
+        note: str = "",
+    ) -> None:
+        """Record one lightweight cognition update from a single strong feedback.
+
+        This path is intentionally cheap: it only appends a short cognition update
+        for UI visibility and does not trigger preference/profile rebuilds.
+        """
+        normalized_feedback = feedback_type.strip().lower()
+        summary = ""
+        kind = ""
+        if normalized_feedback == "comment" and note.strip():
+            kind = "profile_shift"
+            summary = f"阿B 刚记下了：{note.strip()}"
+        elif normalized_feedback == "dislike":
+            note_text = note.strip()
+            generic_dislike_notes = {"太浅了", "不喜欢", "一般", "太水了", "没意思"}
+            topic = (
+                title.strip()
+                if not note_text or note_text in generic_dislike_notes
+                else note_text
+            )
+            if topic:
+                kind = "dislike_added"
+                summary = f"阿B 记住了：像“{topic}”这种内容你大概率会划走。"
+        else:
+            return
+
+        if not summary:
+            return
+
+        updates = self._memory.load_cognition_updates()
+        if any(
+            str(item.get("summary", "")).strip() == summary
+            for item in updates
+            if isinstance(item, dict)
+        ):
+            return
+        updates.insert(
+            0,
+            {
+                "id": f"cognition-{uuid4()}",
+                "kind": kind,
+                "summary": summary,
+                "confidence": 0.82 if kind == "dislike_added" else 0.84,
+                "created_at": datetime.now().isoformat(),
+                "source": "feedback",
+                "notified": False,
+            },
+        )
+        self._memory.save_cognition_updates(updates)
+
     async def generate_awareness_note(self) -> str:
         """Generate a daily awareness note.
 

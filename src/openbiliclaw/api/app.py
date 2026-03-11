@@ -439,6 +439,18 @@ def create_app(
                 },
             }
         )
+        record_immediate_feedback_cognition = getattr(
+            soul_engine,
+            "record_immediate_feedback_cognition",
+            None,
+        )
+        if callable(record_immediate_feedback_cognition):
+            with suppress(Exception):
+                record_immediate_feedback_cognition(
+                    feedback_type=feedback_type,
+                    title=str(recommendation.get("title", "")),
+                    note=note,
+                )
         with suppress(Exception):
             await soul_engine.process_feedback_batch_if_needed()
         refresh_after_feedback = getattr(runtime_controller, "refresh_after_feedback", None)

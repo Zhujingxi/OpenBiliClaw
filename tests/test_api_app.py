@@ -508,6 +508,16 @@ class TestBackendAPI:
         class FakeSoulEngine:
             def __init__(self) -> None:
                 self.called = False
+                self.immediate_calls: list[tuple[str, str, str]] = []
+
+            def record_immediate_feedback_cognition(
+                self,
+                *,
+                feedback_type: str,
+                title: str,
+                note: str = "",
+            ) -> None:
+                self.immediate_calls.append((feedback_type, title, note))
 
             async def process_feedback_batch_if_needed(self) -> dict[str, object]:
                 self.called = True
@@ -532,6 +542,7 @@ class TestBackendAPI:
 
         assert response.status_code == 200
         assert fake_soul_engine.called is True
+        assert fake_soul_engine.immediate_calls == [("like", "讲透城市与建筑", "")]
 
     def test_profile_summary_endpoint_returns_initialized_profile(self) -> None:
         from fastapi.testclient import TestClient

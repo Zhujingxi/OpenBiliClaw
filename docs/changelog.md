@@ -6,6 +6,11 @@
 
 ## M8: 插件后端 API（进行中）
 
+### 强反馈即时认知更新 — `runtime/m112-immediate-cognition-feedback`
+
+- 单条 `dislike` / `comment` 反馈现在会即时写入轻量 cognition update，供 popup「阿B 最近新记住了什么」立刻展示
+- 偏好重分析和画像重建仍保持现有 `>= 3` 条反馈阈值，不会因为一次反馈就重写整张画像
+
 ### 运行时实时状态流 — `runtime/m111-runtime-stream`
 
 - 新增 `/api/runtime-stream` websocket，popup 打开期间可持续接收后端运行阶段事件
