@@ -3,12 +3,15 @@ import {
   buildVideoUrl,
   getConnectionBadgeState,
   getHintBannerState,
+  getRealtimePoolStatusSummary,
   getPoolStatusSummary,
   getPopupState,
   getTabButtonState,
+  mergeRuntimeStatusEvent,
   normalizeProfileSummary,
   validateCommentInput,
 } from "./popup-helpers.js";
+import { createRuntimeStreamClient } from "./popup-stream.js";
 import {
   checkBackendStatus,
   fetchProfileSummary,
@@ -27,6 +30,7 @@ const state = {
   profile: null,
   profileLoaded: false,
   runtimeStatus: null,
+  runtimeEvent: null,
 };
 
 const elements = {
@@ -154,7 +158,7 @@ function renderPoolStatus(runtimeStatus) {
     return;
   }
 
-  const summary = getPoolStatusSummary(runtimeStatus);
+  const summary = getRealtimePoolStatusSummary(runtimeStatus, state.runtimeEvent);
   if (summary == null) {
     elements.poolStatus.hidden = true;
     return;
@@ -164,6 +168,31 @@ function renderPoolStatus(runtimeStatus) {
   elements.poolAvailable.textContent = summary.available;
   elements.poolReplenished.textContent = summary.replenished;
   elements.poolTopics.textContent = summary.topics;
+}
+
+function getRuntimeEventTone(event) {
+  const type = String(event?.type ?? "");
+  if (type === "refresh.failed") {
+    return "error";
+  }
+  if (type === "refresh.pool_updated" || type === "recommendation.reshuffled") {
+    return "success";
+  }
+  return "info";
+}
+
+function connectRuntimeStream() {
+  const client = createRuntimeStreamClient({
+    onEvent(event) {
+      state.runtimeEvent = event;
+      state.runtimeStatus = mergeRuntimeStatusEvent(state.runtimeStatus, event);
+      renderPoolStatus(state.runtimeStatus);
+      if (typeof event?.message === "string" && event.message.trim()) {
+        setHint(event.message, getRuntimeEventTone(event));
+      }
+    },
+  });
+  client.connect();
 }
 
 function renderChipList(container, items, fallback) {
@@ -614,6 +643,7 @@ async function initializePopup() {
   );
   setHint("先看看本地后端连上没。");
   await initializeRecommendations();
+  connectRuntimeStream();
 }
 
 void initializePopup();

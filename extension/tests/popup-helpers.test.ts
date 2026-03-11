@@ -6,9 +6,11 @@ import {
   buildVideoUrl,
   getConnectionBadgeState,
   getHintBannerState,
+  getRealtimePoolStatusSummary,
   getPoolStatusSummary,
   getPopupState,
   getTabButtonState,
+  mergeRuntimeStatusEvent,
   normalizeRecommendation,
   normalizeProfileSummary,
   normalizeRuntimeStatus,
@@ -184,6 +186,50 @@ test("getPoolStatusSummary builds pool inventory copy", () => {
       available: "当前池子里还有 28 条可换",
       replenished: "刚补进 6 条新的",
       topics: "最近在补：国际时事 / 宏观经济 / 纪录片",
+    },
+  );
+});
+
+test("mergeRuntimeStatusEvent updates pool fields from runtime stream payload", () => {
+  const merged = mergeRuntimeStatusEvent(
+    {
+      initialized: true,
+      pool_available_count: 28,
+      last_replenished_count: 0,
+      recent_pool_topics: [],
+    },
+    {
+      type: "refresh.pool_updated",
+      message: "刚补进 6 条新的",
+      pool_available_count: 34,
+      last_replenished_count: 6,
+      recent_pool_topics: ["国际时事", "宏观经济"],
+    },
+  );
+
+  assert.equal(merged.pool_available_count, 34);
+  assert.equal(merged.last_replenished_count, 6);
+  assert.deepEqual(merged.recent_pool_topics, ["国际时事", "宏观经济"]);
+});
+
+test("getRealtimePoolStatusSummary prefers runtime stream message when available", () => {
+  assert.deepEqual(
+    getRealtimePoolStatusSummary(
+      {
+        initialized: true,
+        pool_available_count: 34,
+        last_replenished_count: 6,
+        recent_pool_topics: ["国际时事", "宏观经济"],
+      },
+      {
+        type: "refresh.strategy",
+        message: "先从你刚刚的口味里搜一轮",
+      },
+    ),
+    {
+      available: "当前池子里还有 34 条可换",
+      replenished: "刚补进 6 条新的",
+      topics: "现在在忙：先从你刚刚的口味里搜一轮",
     },
   );
 });

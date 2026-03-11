@@ -6,7 +6,7 @@ import asyncio
 from contextlib import suppress
 from typing import Any, cast
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from openbiliclaw.api.models import (
@@ -42,6 +42,7 @@ def create_app(
     dialogue: Any | None = None,
     runtime_controller: Any | None = None,
     recommendation_engine: Any | None = None,
+    runtime_event_hub: Any | None = None,
 ) -> FastAPI:
     """Create the local backend API app."""
     app = FastAPI(title="OpenBiliClaw API")
@@ -67,6 +68,7 @@ def create_app(
         from openbiliclaw.llm.service import LLMService
         from openbiliclaw.memory.manager import MemoryManager
         from openbiliclaw.recommendation.engine import RecommendationEngine
+        from openbiliclaw.runtime.events import RuntimeEventHub
         from openbiliclaw.runtime.refresh import ContinuousRefreshController
         from openbiliclaw.soul.dialogue import SocraticDialogue
         from openbiliclaw.soul.engine import SoulEngine
@@ -129,7 +131,10 @@ def create_app(
                 discovery_engine=discovery_engine,
                 recommendation_engine=recommendation_engine,
                 pool_target_count=config.scheduler.pool_target_count,
+                event_hub=runtime_event_hub or RuntimeEventHub(),
             )
+        if runtime_event_hub is None:
+            runtime_event_hub = getattr(runtime_controller, "event_hub", None)
         if dialogue is None:
             dialogue = SocraticDialogue(
                 llm=None,
@@ -142,10 +147,32 @@ def create_app(
         from openbiliclaw.soul.dialogue import SocraticDialogue
 
         dialogue = SocraticDialogue(llm=None, soul_engine=soul_engine, session="popup")
+    if runtime_event_hub is None:
+        from openbiliclaw.runtime.events import RuntimeEventHub
+
+        runtime_event_hub = RuntimeEventHub()
 
     @app.get("/api/health", response_model=HealthResponse)
     def health() -> HealthResponse:
         return HealthResponse(status="ok", service="openbiliclaw-api")
+
+    @app.websocket("/api/runtime-stream")
+    async def runtime_stream(websocket: WebSocket) -> None:
+        await websocket.accept()
+        subscribe = getattr(runtime_event_hub, "subscribe", None)
+        unsubscribe = getattr(runtime_event_hub, "unsubscribe", None)
+        if not callable(subscribe) or not callable(unsubscribe):
+            await websocket.close()
+            return
+        queue = await subscribe()
+        try:
+            while True:
+                event = await queue.get()
+                await websocket.send_json(event)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            await unsubscribe(queue)
 
     @app.on_event("startup")
     async def startup_refresh_loop() -> None:

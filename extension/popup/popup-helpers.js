@@ -114,6 +114,23 @@ export function normalizeRuntimeStatus(status) {
   };
 }
 
+export function mergeRuntimeStatusEvent(status, event) {
+  const runtime = normalizeRuntimeStatus(status);
+  const next = {
+    ...runtime,
+  };
+  if (typeof event?.pool_available_count === "number") {
+    next.pool_available_count = Number(event.pool_available_count);
+  }
+  if (typeof event?.last_replenished_count === "number") {
+    next.last_replenished_count = Number(event.last_replenished_count);
+  }
+  if (Array.isArray(event?.recent_pool_topics)) {
+    next.recent_pool_topics = event.recent_pool_topics.map(normalizeText).filter(Boolean);
+  }
+  return next;
+}
+
 export function getPoolStatusSummary(status) {
   const runtime = normalizeRuntimeStatus(status);
   if (!runtime.initialized) {
@@ -129,6 +146,21 @@ export function getPoolStatusSummary(status) {
       runtime.recent_pool_topics.length > 0
         ? `最近在补：${runtime.recent_pool_topics.join(" / ")}`
         : "最近在补：还在继续摸你的口味",
+  };
+}
+
+export function getRealtimePoolStatusSummary(status, event = null) {
+  const summary = getPoolStatusSummary(status);
+  if (summary == null) {
+    return null;
+  }
+  const message = normalizeText(event?.message);
+  if (!message) {
+    return summary;
+  }
+  return {
+    ...summary,
+    topics: `现在在忙：${message}`,
   };
 }
 

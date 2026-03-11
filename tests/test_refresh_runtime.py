@@ -96,6 +96,14 @@ class _FakeRecommendationEngine:
         return [{"recommendation_id": 1}]
 
 
+class _FakeEventHub:
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+
+    async def publish(self, event: dict[str, object]) -> None:
+        self.events.append(event)
+
+
 async def test_refresh_controller_triggers_event_refresh_when_signal_threshold_reached() -> None:
     now = datetime.now().isoformat()
     controller = ContinuousRefreshController(
@@ -130,6 +138,38 @@ async def test_refresh_controller_triggers_event_refresh_when_signal_threshold_r
 
     assert result["refreshed"] is True
     assert result["strategies"] == ["search", "related_chain"]
+
+
+async def test_refresh_controller_publishes_refresh_lifecycle_events() -> None:
+    event_hub = _FakeEventHub()
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase(
+            [
+                {"id": 1, "event_type": "view"},
+                {"id": 2, "event_type": "search"},
+                {"id": 3, "event_type": "favorite"},
+                {"id": 4, "event_type": "comment"},
+                {"id": 5, "event_type": "feedback"},
+                {"id": 6, "event_type": "view"},
+            ],
+            pool_count=20,
+        ),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        event_hub=event_hub,
+        pool_target_count=30,
+        trending_refresh_hours=999,
+        explore_refresh_hours=999,
+    )
+
+    await controller.refresh_if_needed()
+
+    event_types = [event["type"] for event in event_hub.events]
+    assert "refresh.started" in event_types
+    assert "refresh.strategy" in event_types
+    assert "refresh.pool_updated" in event_types
 
 
 async def test_refresh_controller_skips_when_threshold_not_met() -> None:

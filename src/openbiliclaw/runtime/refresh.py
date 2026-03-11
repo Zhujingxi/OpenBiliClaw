@@ -65,6 +65,7 @@ class ContinuousRefreshController:
     soul_engine: SupportsProfileEngine
     discovery_engine: SupportsDiscoveryEngine
     recommendation_engine: SupportsRecommendationEngine
+    event_hub: Any | None = None
     signal_event_threshold: int = 6
     event_refresh_minutes: int = 0
     trending_refresh_hours: int = 3
@@ -261,10 +262,26 @@ class ContinuousRefreshController:
             self._manual_refresh_state = "failed"
             self._manual_refresh_message = f"这次补货没跑通：{exc}"
             self._manual_refresh_finished_at = self._now().isoformat()
+            await self._publish_event(
+                {
+                    "type": "refresh.failed",
+                    "phase": "failed",
+                    "message": self._manual_refresh_message,
+                    "pool_available_count": self.database.count_pool_candidates(),
+                }
+            )
             return
         self._manual_refresh_state = "success"
         self._manual_refresh_message = "刚给你补了一批新的。"
         self._manual_refresh_finished_at = self._now().isoformat()
+        await self._publish_event(
+            {
+                "type": "refresh.pool_updated",
+                "phase": "done",
+                "message": self._manual_refresh_message,
+                "pool_available_count": self.database.count_pool_candidates(),
+            }
+        )
 
     async def _run_refresh_plan(
         self,
@@ -280,10 +297,29 @@ class ContinuousRefreshController:
         flattened_strategies: list[str] = []
         replenished_topics: list[str] = []
 
+        await self._publish_event(
+            {
+                "type": "refresh.started",
+                "phase": "running",
+                "message": "开始给你补候选了",
+                "pool_available_count": before_pool_count,
+            }
+        )
+
         for strategies in plan:
             current_pool_count = self.database.count_pool_candidates()
             if initial_pool_below_target and current_pool_count >= self.pool_target_count:
                 break
+
+            await self._publish_event(
+                {
+                    "type": "refresh.strategy",
+                    "phase": "running",
+                    "strategy": "+".join(strategies),
+                    "message": self._strategy_message(strategies),
+                    "pool_available_count": current_pool_count,
+                }
+            )
 
             discovered = await self.discovery_engine.discover(
                 profile,
@@ -316,12 +352,36 @@ class ContinuousRefreshController:
         if replenished_topics:
             state["recent_pool_topics"] = self._dedupe_topics(replenished_topics)[:3]
         self.memory_manager.save_discovery_runtime_state(state)
+        await self._publish_event(
+            {
+                "type": "refresh.pool_updated",
+                "phase": "done",
+                "message": f"刚补进 {state['last_replenished_count']} 条新的",
+                "pool_available_count": after_pool_count,
+                "last_replenished_count": state["last_replenished_count"],
+                "recent_pool_topics": self._list_state_value(state, "recent_pool_topics"),
+            }
+        )
         return {
             "refreshed": bool(flattened_strategies),
             "strategies": flattened_strategies,
             "reason": reason,
             "recommendation_count": len(recommendations),
         }
+
+    async def _publish_event(self, event: dict[str, object]) -> None:
+        publish = getattr(self.event_hub, "publish", None)
+        if callable(publish):
+            await publish(event)
+
+    def _strategy_message(self, strategies: list[str]) -> str:
+        if strategies == ["search", "related_chain"]:
+            return "先从你刚刚的口味里搜一轮"
+        if strategies == ["trending"]:
+            return "顺手看看站内热榜里有没有你会吃的"
+        if strategies == ["explore"]:
+            return "再给你探一点你可能会意外喜欢的"
+        return "正在继续给你补候选"
 
     def _is_initialized(self) -> bool:
         try:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from openbiliclaw.api.app import create_app
 
 
@@ -148,6 +150,27 @@ class TestBackendAPI:
             "manual_refresh_state": "idle",
             "manual_refresh_message": "",
         }
+
+    def test_runtime_stream_websocket_receives_published_events(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.runtime.events import RuntimeEventHub
+
+        hub = RuntimeEventHub()
+        app = create_app(
+            memory_manager=object(),
+            database=object(),
+            soul_engine=object(),
+            runtime_event_hub=hub,
+        )
+        client = TestClient(app)
+
+        with client.websocket_connect("/api/runtime-stream") as websocket:
+            asyncio.run(hub.publish({"type": "refresh.started", "message": "开始给你补候选了"}))
+            assert websocket.receive_json() == {
+                "type": "refresh.started",
+                "message": "开始给你补候选了",
+            }
 
     def test_refresh_recommendations_endpoint_triggers_runtime_refresh(self) -> None:
         from fastapi.testclient import TestClient
