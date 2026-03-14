@@ -45,17 +45,25 @@ test("recommendation card layout reserves a media cover slot", () => {
   assert.match(coverImageBlock, /object-fit:\s*cover;/);
 });
 
-test("footer hint uses stronger banner-like status styling", () => {
+test("footer activity card keeps two lines and expandable history area", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const footerBlock = popupHtml.match(/\.footer\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const footerBlocks = [...popupHtml.matchAll(/\.footer\s*\{[\s\S]*?\}/g)].map((match) => match[0]);
+  const footerBlock = footerBlocks.find((block) => /margin-top:\s*auto;/.test(block)) ?? "";
   const footerHintBlock = popupHtml.match(/\.footer-hint\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const footerHeadlineBlock = popupHtml.match(/\.footer-headline\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const footerHistoryBlock = popupHtml.match(/\.footer-history\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const footerMarkup = popupHtml.match(/<footer id="footerHintBar"[\s\S]*?<\/footer>/)?.[0] ?? "";
-  const successBlock = popupHtml.match(/\.footer\[data-tone="success"\][\s\S]*?\.footer-hint/s)?.[0] ?? "";
-  const errorBlock = popupHtml.match(/\.footer\[data-tone="error"\][\s\S]*?\.footer-hint/s)?.[0] ?? "";
+  const successBlock = popupHtml.match(/\.footer\[data-tone="success"\][\s\S]*?\.footer-headline/s)?.[0] ?? "";
+  const errorBlock = popupHtml.match(/\.footer\[data-tone="error"\][\s\S]*?\.footer-headline/s)?.[0] ?? "";
 
   assert.match(footerMarkup, /data-tone="info"/);
-  assert.match(footerBlock, /box-shadow:/);
+  assert.match(footerMarkup, /id="headlineText"/);
+  assert.match(footerMarkup, /id="activityToggleButton"/);
+  assert.match(footerMarkup, /id="activityHistory"/);
+  assert.match(footerBlock, /display:\s*flex;/);
   assert.match(footerHintBlock, /font-weight:\s*700;/);
+  assert.match(footerHeadlineBlock, /font-size:\s*11px;/);
+  assert.match(footerHistoryBlock, /flex-direction:\s*column;/);
   assert.match(footerHintBlock, /padding-left:\s*22px;/);
   assert.match(successBlock, /background:/);
   assert.match(errorBlock, /background:/);

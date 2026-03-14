@@ -182,6 +182,71 @@ class TestBackendAPI:
                 "message": "开始给你补候选了",
             }
 
+    def test_activity_feed_endpoint_returns_live_summary_headline_and_items(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeDatabase:
+            def get_recommendations(self, limit: int = 20) -> list[dict[str, object]]:
+                assert limit in {10, 20}
+                return [
+                    {
+                        "id": 7,
+                        "title": "讲透贸易逆差",
+                        "topic": "你最近还挺想把因果链理顺",
+                        "expression": "这条会对上你最近那股想把事情想透的劲头。",
+                        "created_at": "2026-03-15T10:00:00+08:00",
+                        "feedback_type": "comment",
+                        "feedback_note": "想看更深一点的。",
+                        "feedback_at": "2026-03-15T10:05:00+08:00",
+                    }
+                ]
+
+        class FakeMemoryManager:
+            def load_cognition_updates(self) -> list[dict[str, object]]:
+                return [
+                    {
+                        "id": "cog-1",
+                        "kind": "interest_added",
+                        "summary": "阿B 刚记下了：你最近更吃把因果链讲透的内容。",
+                        "created_at": "2026-03-15T10:10:00+08:00",
+                    }
+                ]
+
+        class FakeRuntimeController:
+            def get_runtime_status(self) -> dict[str, object]:
+                return {
+                    "initialized": True,
+                    "recommendation_count": 5,
+                    "pending_signal_events": 2,
+                    "last_refresh_at": "2026-03-15T10:06:00+08:00",
+                    "last_notification_at": "",
+                    "unread_count": 1,
+                    "pool_available_count": 42,
+                    "pool_target_count": 30,
+                    "last_replenished_count": 6,
+                    "recent_pool_topics": ["国际时事", "宏观经济"],
+                    "manual_refresh_state": "running",
+                    "manual_refresh_message": "正在给你补候选…",
+                }
+
+        app = create_app(
+            memory_manager=FakeMemoryManager(),
+            database=FakeDatabase(),
+            soul_engine=object(),
+            runtime_controller=FakeRuntimeController(),
+        )
+        client = TestClient(app)
+
+        response = client.get("/api/activity-feed")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["live_summary"] == "正在给你补候选…"
+        assert data["headline"] == "阿B 刚记下了：你最近更吃把因果链讲透的内容。"
+        assert data["items"][0]["kind"] == "interest_added"
+        assert any(item["kind"] == "feedback" for item in data["items"])
+        assert any(item["kind"] == "pool_update" for item in data["items"])
+
     def test_refresh_recommendations_endpoint_triggers_runtime_refresh(self) -> None:
         from fastapi.testclient import TestClient
 

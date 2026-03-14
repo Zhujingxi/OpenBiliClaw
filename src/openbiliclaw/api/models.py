@@ -82,6 +82,25 @@ class RuntimeStatusResponse(BaseModel):
     last_account_sync_error: str = ""
 
 
+class ActivityFeedItemOut(BaseModel):
+    """One recent user-visible activity item for the popup."""
+
+    id: str
+    kind: str
+    summary: str
+    detail: str = ""
+    created_at: str = ""
+    tone: str = "info"
+
+
+class ActivityFeedResponse(BaseModel):
+    """Aggregated activity feed for the popup activity card."""
+
+    live_summary: str = ""
+    headline: str = ""
+    items: list[ActivityFeedItemOut] = Field(default_factory=list)
+
+
 class PendingNotificationOut(BaseModel):
     """One notification-worthy recommendation."""
 

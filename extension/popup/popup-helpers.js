@@ -217,6 +217,40 @@ export function getCommentSubmitUiState(state) {
   };
 }
 
+export function normalizeActivityFeed(payload) {
+  const items = Array.isArray(payload?.items)
+    ? payload.items
+        .filter((item) => item && typeof item === "object")
+        .map((item, index) => ({
+          id: normalizeText(item.id) || `activity-${index}`,
+          kind: normalizeText(item.kind) || "activity",
+          summary: normalizeText(item.summary),
+          detail: normalizeText(item.detail),
+          created_at: normalizeText(item.created_at),
+          tone: getHintBannerState(item.tone).tone,
+        }))
+        .filter((item) => item.summary)
+    : [];
+
+  return {
+    live_summary: normalizeText(payload?.live_summary),
+    headline: normalizeText(payload?.headline),
+    items,
+  };
+}
+
+export function getActivityCardState({ feed = null, runtimeEvent = null, expanded = false }) {
+  const normalizedFeed = normalizeActivityFeed(feed);
+  const liveMessage = normalizeText(runtimeEvent?.message) || normalizedFeed.live_summary;
+  const headline = normalizedFeed.headline || "最近还没新动静，先多刷一阵。";
+  return {
+    line1: liveMessage || "阿B 这会儿先替你盯着。",
+    line2: headline,
+    items: normalizedFeed.items,
+    expanded: Boolean(expanded),
+  };
+}
+
 export function getPopupState({ online, items = [], error = null, runtimeStatus = null }) {
   if (!online) {
     return {

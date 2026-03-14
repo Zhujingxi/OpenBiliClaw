@@ -10,6 +10,8 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from openbiliclaw.api.models import (
+    ActivityFeedItemOut,
+    ActivityFeedResponse,
     BehaviorEventBatchIn,
     ChatIn,
     ChatResponse,
@@ -278,6 +280,49 @@ def create_app(
                 )
                 for row in rows
             ]
+        )
+
+    @app.get("/api/activity-feed", response_model=ActivityFeedResponse)
+    async def activity_feed() -> ActivityFeedResponse:
+        from openbiliclaw.runtime.activity_feed import ActivityFeedBuilder
+
+        runtime_status: dict[str, object] = {}
+        get_runtime_status = getattr(runtime_controller, "get_runtime_status", None)
+        if callable(get_runtime_status):
+            runtime_status = dict(get_runtime_status())
+        get_account_sync_status = getattr(account_sync_service, "get_runtime_status", None)
+        if callable(get_account_sync_status):
+            runtime_status.update(get_account_sync_status())
+
+        cognition_updates: list[dict[str, object]] = []
+        load_cognition_updates = getattr(memory_manager, "load_cognition_updates", None)
+        if callable(load_cognition_updates):
+            cognition_updates = [
+                item for item in load_cognition_updates() if isinstance(item, dict)
+            ]
+
+        builder = ActivityFeedBuilder(database=database)
+        payload = builder.build(
+            runtime_status=runtime_status,
+            cognition_updates=cognition_updates,
+        )
+        payload_items = payload.get("items", [])
+        item_dicts = payload_items if isinstance(payload_items, list) else []
+        return ActivityFeedResponse(
+            live_summary=str(payload.get("live_summary", "")),
+            headline=str(payload.get("headline", "")),
+            items=[
+                ActivityFeedItemOut(
+                    id=str(item.get("id", "")),
+                    kind=str(item.get("kind", "")),
+                    summary=str(item.get("summary", "")),
+                    detail=str(item.get("detail", "")),
+                    created_at=str(item.get("created_at", "")),
+                    tone=str(item.get("tone", "info")),
+                )
+                for item in item_dicts
+                if isinstance(item, dict)
+            ],
         )
 
     @app.post("/api/recommendations/reshuffle", response_model=RecommendationReshuffleResponse)

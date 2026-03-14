@@ -1,4 +1,5 @@
 import {
+  getActivityCardState,
   buildFeedbackPayload,
   buildVideoUrl,
   getCommentSubmitUiState,
@@ -9,6 +10,7 @@ import {
   getPopupState,
   getTabButtonState,
   mergeRuntimeStatusEvent,
+  normalizeActivityFeed,
   normalizeProfileSummary,
   validateCommentInput,
   shouldFetchProfileSummary,
@@ -16,6 +18,7 @@ import {
 import { createRuntimeStreamClient } from "./popup-stream.js";
 import {
   checkBackendStatus,
+  fetchActivityFeed,
   fetchProfileSummary,
   fetchRecommendations,
   fetchRuntimeStatus,
@@ -33,6 +36,8 @@ const state = {
   profileLoaded: false,
   runtimeStatus: null,
   runtimeEvent: null,
+  activityFeed: null,
+  activityExpanded: false,
 };
 
 const elements = {
@@ -41,6 +46,9 @@ const elements = {
   statusLabel: document.getElementById("statusLabel"),
   footer: document.getElementById("footerHintBar"),
   hintText: document.getElementById("hintText"),
+  headlineText: document.getElementById("headlineText"),
+  activityToggleButton: document.getElementById("activityToggleButton"),
+  activityHistory: document.getElementById("activityHistory"),
   emptyState: document.getElementById("emptyState"),
   emptyTitle: document.getElementById("emptyTitle"),
   emptyText: document.getElementById("emptyText"),
@@ -84,12 +92,19 @@ function setRefreshButtonState(loading, message = "") {
 }
 
 function setHint(message, tone = "info") {
-  if (elements.hintText instanceof HTMLElement) {
-    elements.hintText.textContent = message;
+  if (state.activityFeed == null) {
+    state.activityFeed = normalizeActivityFeed({
+      live_summary: message,
+      headline: "",
+      items: [],
+    });
+  } else {
+    state.activityFeed.live_summary = message;
   }
   if (elements.footer instanceof HTMLElement) {
     elements.footer.dataset.tone = getHintBannerState(tone).tone;
   }
+  renderActivityCard();
 }
 
 function setStatus(online) {
@@ -189,12 +204,88 @@ function connectRuntimeStream() {
       state.runtimeEvent = event;
       state.runtimeStatus = mergeRuntimeStatusEvent(state.runtimeStatus, event);
       renderPoolStatus(state.runtimeStatus);
-      if (typeof event?.message === "string" && event.message.trim()) {
-        setHint(event.message, getRuntimeEventTone(event));
+      if (elements.footer instanceof HTMLElement) {
+        elements.footer.dataset.tone = getHintBannerState(getRuntimeEventTone(event)).tone;
       }
+      renderActivityCard();
     },
   });
   client.connect();
+}
+
+function renderActivityHistory(items) {
+  if (!(elements.activityHistory instanceof HTMLElement)) {
+    return;
+  }
+  elements.activityHistory.replaceChildren();
+  for (const item of items) {
+    const row = document.createElement("article");
+    row.className = "footer-item";
+
+    const meta = document.createElement("div");
+    meta.className = "footer-item-meta";
+
+    const kind = document.createElement("span");
+    kind.className = "footer-item-kind";
+    kind.textContent = item.kind;
+
+    const time = document.createElement("span");
+    time.textContent = item.created_at || "刚刚";
+
+    meta.append(kind, time);
+
+    const summary = document.createElement("p");
+    summary.className = "footer-item-summary";
+    summary.textContent = item.summary;
+    row.append(meta, summary);
+
+    if (item.detail) {
+      const detail = document.createElement("p");
+      detail.className = "footer-item-detail";
+      detail.textContent = item.detail;
+      row.append(detail);
+    }
+
+    elements.activityHistory.append(row);
+  }
+}
+
+function renderActivityCard() {
+  if (
+    !(elements.hintText instanceof HTMLElement) ||
+    !(elements.headlineText instanceof HTMLElement) ||
+    !(elements.activityToggleButton instanceof HTMLButtonElement) ||
+    !(elements.activityHistory instanceof HTMLElement)
+  ) {
+    return;
+  }
+  const card = getActivityCardState({
+    feed: state.activityFeed,
+    runtimeEvent: state.runtimeEvent,
+    expanded: state.activityExpanded,
+  });
+  elements.hintText.textContent = card.line1;
+  elements.headlineText.textContent = card.line2;
+  elements.activityToggleButton.textContent = card.expanded ? "收起" : "更多";
+  elements.activityToggleButton.setAttribute("aria-expanded", String(card.expanded));
+  elements.activityHistory.hidden = !card.expanded;
+  renderActivityHistory(card.items);
+}
+
+async function loadActivityFeed() {
+  if (!state.online) {
+    return;
+  }
+  try {
+    state.activityFeed = normalizeActivityFeed(await fetchActivityFeed());
+  } catch {
+    state.activityFeed = normalizeActivityFeed({
+      live_summary: "阿B 这会儿先替你盯着。",
+      headline: "最近还没新动静，先多刷一阵。",
+      items: [],
+    });
+  }
+  renderActivityCard();
 }
 
 function renderChipList(container, items, fallback) {
@@ -538,9 +629,11 @@ async function refreshProfileSummaryAfterInteraction() {
     return;
   }
   if (!state.profileLoaded && state.activeTab !== "profile") {
+    await loadActivityFeed();
     return;
   }
   await loadProfileSummary({ force: true });
+  await loadActivityFeed();
 }
 
 async function initializeRecommendations() {
@@ -562,6 +655,7 @@ async function initializeRecommendations() {
 
   state.runtimeStatus = runtimeResult.status === "fulfilled" ? runtimeResult.value : null;
   renderPoolStatus(state.runtimeStatus);
+  await loadActivityFeed();
 
   if (recommendationResult.status === "fulfilled") {
     state.recommendations = recommendationResult.value;
@@ -607,6 +701,7 @@ async function handleManualRefresh() {
       result.items.length > 0 ? "先给你换了一批新的，后台还在继续补货。" : "池子里这会儿还没刷出新的，稍后再试。",
       result.items.length > 0 ? "success" : "error",
     );
+    await loadActivityFeed();
     void refreshRecommendations().catch(() => undefined);
   } catch {
     setHint("这次没换出来新的，稍后再试。", "error");
@@ -638,6 +733,16 @@ function bindRefreshButton() {
   }
   elements.refreshRecommendationsButton.addEventListener("click", () => {
     void handleManualRefresh();
+  });
+}
+
+function bindActivityToggle() {
+  if (!(elements.activityToggleButton instanceof HTMLButtonElement)) {
+    return;
+  }
+  elements.activityToggleButton.addEventListener("click", () => {
+    state.activityExpanded = !state.activityExpanded;
+    renderActivityCard();
   });
 }
 
@@ -687,6 +792,7 @@ async function initializePopup() {
   const requestedTab = new URLSearchParams(window.location.search).get("tab");
   bindTabs();
   bindRefreshButton();
+  bindActivityToggle();
   bindChat();
   setActiveTab(
     requestedTab === "profile" || requestedTab === "chat" || requestedTab === "recommend"

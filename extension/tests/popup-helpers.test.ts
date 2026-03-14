@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  getActivityCardState,
   buildFeedbackPayload,
   buildVideoUrl,
   getCommentSubmitUiState,
@@ -12,6 +13,7 @@ import {
   getPopupState,
   getTabButtonState,
   mergeRuntimeStatusEvent,
+  normalizeActivityFeed,
   normalizeRecommendation,
   normalizeProfileSummary,
   normalizeRuntimeStatus,
@@ -247,6 +249,80 @@ test("getRealtimePoolStatusSummary prefers runtime stream message when available
       available: "当前池子里还有 34 条可换",
       replenished: "刚补进 6 条新的",
       topics: "现在在忙：先从你刚刚的口味里搜一轮",
+    },
+  );
+});
+
+test("normalizeActivityFeed keeps stable summaries and tones", () => {
+  assert.deepEqual(
+    normalizeActivityFeed({
+      live_summary: "正在补候选",
+      headline: "阿B 刚记下了你最近更吃深拆",
+      items: [
+        {
+          id: "cog-1",
+          kind: "cognition",
+          summary: "阿B 刚记下了你最近更吃深拆",
+          detail: "这会继续影响后面的推荐。",
+          created_at: "2026-03-15T12:00:00+08:00",
+          tone: "success",
+        },
+      ],
+    }),
+    {
+      live_summary: "正在补候选",
+      headline: "阿B 刚记下了你最近更吃深拆",
+      items: [
+        {
+          id: "cog-1",
+          kind: "cognition",
+          summary: "阿B 刚记下了你最近更吃深拆",
+          detail: "这会继续影响后面的推荐。",
+          created_at: "2026-03-15T12:00:00+08:00",
+          tone: "success",
+        },
+      ],
+    },
+  );
+});
+
+test("getActivityCardState prefers runtime event for line1 and feed headline for line2", () => {
+  assert.deepEqual(
+    getActivityCardState({
+      feed: {
+        live_summary: "阿B 先替你盯着。",
+        headline: "阿B 刚记下了：你最近更吃因果链。",
+        items: [
+          {
+            id: "cog-1",
+            kind: "cognition",
+            summary: "阿B 刚记下了：你最近更吃因果链。",
+            detail: "",
+            created_at: "2026-03-15T12:00:00+08:00",
+            tone: "success",
+          },
+        ],
+      },
+      runtimeEvent: {
+        type: "refresh.strategy",
+        message: "正在补相关推荐候选",
+      },
+      expanded: true,
+    }),
+    {
+      line1: "正在补相关推荐候选",
+      line2: "阿B 刚记下了：你最近更吃因果链。",
+      items: [
+        {
+          id: "cog-1",
+          kind: "cognition",
+          summary: "阿B 刚记下了：你最近更吃因果链。",
+          detail: "",
+          created_at: "2026-03-15T12:00:00+08:00",
+          tone: "success",
+        },
+      ],
+      expanded: true,
     },
   );
 });

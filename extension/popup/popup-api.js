@@ -34,6 +34,10 @@ export async function fetchRuntimeStatus() {
   return requestJson("/runtime-status", { method: "GET" });
 }
 
+export async function fetchActivityFeed() {
+  return requestJson("/activity-feed", { method: "GET" });
+}
+
 export async function fetchPendingNotification() {
   return requestJson("/notifications/pending", { method: "GET" });
 }
