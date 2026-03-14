@@ -357,10 +357,15 @@ class SoulEngine:
         evidence = ""
         if normalized_feedback == "comment" and note.strip():
             kind = "profile_shift"
-            summary = f"阿B 刚记下了：{note.strip()}"
+            title_text = title.strip()
+            if title_text:
+                summary = f"阿B 刚记下了你对《{title_text}》的评论。"
+                evidence = f"你评论《{title_text}》时说：{note.strip()}"
+            else:
+                summary = f"阿B 刚记下了：{note.strip()}"
+                evidence = note.strip()
             impact = "画像里对这类方向的偏好会更明确，后面会更容易继续往深一点补。"
             reasoning = "这属于单条明确反馈，先记作方向修正，不直接重写整张画像。"
-            evidence = note.strip()
         elif normalized_feedback == "dislike":
             note_text = note.strip()
             generic_dislike_notes = {"太浅了", "不喜欢", "一般", "太水了", "没意思"}

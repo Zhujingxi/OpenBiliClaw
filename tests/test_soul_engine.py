@@ -295,9 +295,10 @@ def test_record_immediate_feedback_cognition_adds_comment_update(tmp_path: Path)
     updates = memory.load_cognition_updates()
     assert len(updates) == 1
     assert updates[0]["kind"] == "profile_shift"
-    assert "这个方向对" in str(updates[0]["summary"])
+    assert "讲透城市与建筑" in str(updates[0]["summary"])
     assert "更明确" in str(updates[0]["impact"])
     assert "单条明确反馈" in str(updates[0]["reasoning"])
+    assert "讲透城市与建筑" in str(updates[0]["evidence"])
     assert "这个方向对，但希望更深入一点。" in str(updates[0]["evidence"])
     assert updates[0]["source"] == "feedback"
 
