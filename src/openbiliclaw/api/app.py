@@ -195,6 +195,14 @@ def create_app(
 
         runtime_event_hub = RuntimeEventHub()
 
+    async def _run_post_feedback_tasks() -> None:
+        with suppress(Exception):
+            await soul_engine.process_feedback_batch_if_needed()
+        refresh_after_feedback = getattr(runtime_controller, "refresh_after_feedback", None)
+        if callable(refresh_after_feedback):
+            with suppress(Exception):
+                await refresh_after_feedback()
+
     @app.get("/api/health", response_model=HealthResponse)
     def health() -> HealthResponse:
         return HealthResponse(status="ok", service="openbiliclaw-api")
@@ -568,12 +576,7 @@ def create_app(
                     title=str(recommendation.get("title", "")),
                     note=note,
                 )
-        with suppress(Exception):
-            await soul_engine.process_feedback_batch_if_needed()
-        refresh_after_feedback = getattr(runtime_controller, "refresh_after_feedback", None)
-        if callable(refresh_after_feedback):
-            with suppress(Exception):
-                await refresh_after_feedback()
+        asyncio.create_task(_run_post_feedback_tasks())
         return FeedbackResponse(
             ok=True,
             recommendation_id=payload.recommendation_id,

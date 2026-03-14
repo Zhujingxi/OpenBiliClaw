@@ -690,6 +690,69 @@ class TestBackendAPI:
         assert fake_soul_engine.called is True
         assert fake_soul_engine.immediate_calls == [("like", "讲透城市与建筑", "")]
 
+    def test_feedback_endpoint_does_not_block_on_post_feedback_refresh(self) -> None:
+        import time
+
+        from fastapi.testclient import TestClient
+
+        class FakeMemoryManager:
+            async def propagate_event(self, event: dict[str, object]) -> None:
+                return None
+
+        class FakeDatabase:
+            def get_recommendation_by_id(self, recommendation_id: int) -> dict[str, object] | None:
+                return {"id": recommendation_id, "bvid": "BV1REC", "title": "讲透城市与建筑"}
+
+            def update_recommendation_feedback(
+                self,
+                recommendation_id: int,
+                *,
+                feedback_type: str,
+                feedback_note: str = "",
+            ) -> None:
+                return None
+
+        class SlowSoulEngine:
+            def record_immediate_feedback_cognition(
+                self,
+                *,
+                feedback_type: str,
+                title: str,
+                note: str = "",
+            ) -> None:
+                return None
+
+            async def process_feedback_batch_if_needed(self) -> dict[str, object]:
+                await asyncio.sleep(0.2)
+                return {"triggered": False}
+
+        class SlowRuntimeController:
+            async def refresh_after_feedback(self) -> dict[str, object]:
+                await asyncio.sleep(0.2)
+                return {"refreshed": False}
+
+        app = create_app(
+            memory_manager=FakeMemoryManager(),
+            database=FakeDatabase(),
+            soul_engine=SlowSoulEngine(),
+            runtime_controller=SlowRuntimeController(),
+        )
+        client = TestClient(app)
+
+        started_at = time.perf_counter()
+        response = client.post(
+            "/api/feedback",
+            json={
+                "recommendation_id": 7,
+                "feedback_type": "like",
+                "note": "",
+            },
+        )
+        elapsed = time.perf_counter() - started_at
+
+        assert response.status_code == 200
+        assert elapsed < 0.15
+
     def test_profile_summary_endpoint_returns_initialized_profile(self) -> None:
         from fastapi.testclient import TestClient
 
