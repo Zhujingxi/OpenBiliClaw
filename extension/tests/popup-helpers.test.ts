@@ -216,6 +216,23 @@ test("getPoolStatusSummary builds pool inventory copy", () => {
   );
 });
 
+test("getPoolStatusSummary shows enough-stock copy when pool is already full", () => {
+  assert.deepEqual(
+    getPoolStatusSummary({
+      initialized: true,
+      pool_available_count: 155,
+      pool_target_count: 150,
+      last_replenished_count: 0,
+      recent_pool_topics: [],
+    }),
+    {
+      available: "当前池子里还有 155 条可换",
+      replenished: "这会儿先不补货，池子里已经够你换了",
+      topics: "最近在补：先把这一池给你慢慢换开",
+    },
+  );
+});
+
 test("mergeRuntimeStatusEvent updates pool fields from runtime stream payload", () => {
   const merged = mergeRuntimeStatusEvent(
     {

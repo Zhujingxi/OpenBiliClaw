@@ -275,16 +275,22 @@ export function getPoolStatusSummary(status) {
   if (!runtime.initialized) {
     return null;
   }
+  const poolIsSufficient =
+    runtime.pool_target_count > 0 && runtime.pool_available_count >= runtime.pool_target_count;
   return {
     available: `当前池子里还有 ${runtime.pool_available_count} 条可换`,
     replenished:
       runtime.last_replenished_count > 0
         ? `刚补进 ${runtime.last_replenished_count} 条新的`
-        : "刚补进 0 条新的",
+        : poolIsSufficient
+          ? "这会儿先不补货，池子里已经够你换了"
+          : "这轮还没补进新的",
     topics:
       runtime.recent_pool_topics.length > 0
         ? `最近在补：${runtime.recent_pool_topics.join(" / ")}`
-        : "最近在补：还在继续摸你的口味",
+        : poolIsSufficient
+          ? "最近在补：先把这一池给你慢慢换开"
+          : "最近在补：还在继续摸你的口味",
   };
 }
 
