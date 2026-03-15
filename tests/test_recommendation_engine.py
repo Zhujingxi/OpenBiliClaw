@@ -572,9 +572,54 @@ async def test_reshuffle_recommendations_limits_single_source_dominance() -> Non
 
         picked_sources = [item.content.source_strategy for item in recommendations]
 
-        assert picked_sources.count("explore") <= 2
-        assert "search" in picked_sources
-        assert "trending" in picked_sources
+    assert picked_sources.count("explore") <= 2
+    assert "search" in picked_sources
+    assert "trending" in picked_sources
+
+
+@pytest.mark.asyncio
+async def test_reshuffle_recommendations_caps_source_and_style_for_larger_batches() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        items = [
+            ("BVEXP1", "探索纪录片 1", "explore", 0.99, "story_doc", "探索:1"),
+            ("BVEXP2", "探索深挖 2", "explore", 0.98, "deep_dive", "探索:2"),
+            ("BVEXP3", "探索轻聊 3", "explore", 0.97, "light_chat", "探索:3"),
+            ("BVEXP4", "探索攻略 4", "explore", 0.96, "practical_guide", "探索:4"),
+            ("BVREL1", "相关推荐机制拆解 1", "related_chain", 0.95, "game_strategy", "相关:1"),
+            ("BVREL2", "相关推荐机制拆解 2", "related_chain", 0.94, "game_strategy", "相关:2"),
+            ("BVREL3", "相关推荐故事向 3", "related_chain", 0.935, "light_chat", "相关:3"),
+            ("BVSEA1", "搜索教程 1", "search", 0.93, "practical_guide", "搜索:1"),
+            ("BVSEA2", "搜索快讯 2", "search", 0.92, "news_brief", "搜索:2"),
+            ("BVTR1", "热榜纪录片 1", "trending", 0.91, "story_doc", "热榜:1"),
+            ("BVTR2", "热榜视觉 2", "trending", 0.9, "visual_showcase", "热榜:2"),
+        ]
+        for bvid, title, source, score, style, topic in items:
+            db.cache_content(
+                bvid,
+                title=title,
+                up_name=f"{source}-频道",
+                source=source,
+                relevance_score=score,
+                relevance_reason=f"{title} 的基础理由。",
+                style_key=style,
+                topic_key=topic,
+            )
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+        recommendations = await engine.reshuffle_recommendations(
+            profile=_build_profile(),
+            limit=10,
+        )
+
+        picked_sources = [item.content.source_strategy for item in recommendations]
+        picked_styles = [item.content.style_key for item in recommendations]
+
+        assert len(recommendations) == 10
+        assert picked_sources.count("explore") <= 3
+        assert picked_sources.count("related_chain") <= 3
+        assert picked_styles.count("game_strategy") <= 3
 
 
 @pytest.mark.asyncio

@@ -11,6 +11,7 @@ import logging
 import re
 import sqlite3
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -389,7 +390,8 @@ class Database:
             (max(limit * 5, 50),),
         )
         rows = [dict(row) for row in cursor.fetchall()]
-        return self._exclude_viewed_rows(rows, self.get_recent_viewed_bvids(), limit=limit)
+        rows = self._exclude_viewed_rows(rows, self.get_recent_viewed_bvids(), limit=len(rows))
+        return self._balance_pool_rows(rows, limit=limit)
 
     def count_pool_candidates(self) -> int:
         """Return how many fresh candidates are immediately available for reshuffle."""
@@ -412,6 +414,38 @@ class Database:
             for row in cursor.fetchall()
             if str(row["bvid"]).strip() and str(row["bvid"]).strip() not in viewed_bvids
         )
+
+    @staticmethod
+    def _balance_pool_rows(rows: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+        if limit <= 0 or len(rows) <= limit:
+            return rows[:limit]
+
+        buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        source_order: list[str] = []
+        for row in rows:
+            source = str(row.get("source", "") or "").strip() or "unknown"
+            if source not in buckets:
+                source_order.append(source)
+            buckets[source].append(row)
+
+        preferred = ["search", "trending", "related_chain", "explore"]
+        ordered_sources = [source for source in preferred if source in buckets]
+        ordered_sources.extend(source for source in source_order if source not in ordered_sources)
+
+        balanced: list[dict[str, Any]] = []
+        while len(balanced) < limit:
+            progressed = False
+            for source in ordered_sources:
+                bucket = buckets[source]
+                if not bucket:
+                    continue
+                balanced.append(bucket.pop(0))
+                progressed = True
+                if len(balanced) >= limit:
+                    break
+            if not progressed:
+                break
+        return balanced[:limit]
 
     def get_recent_viewed_bvids(self, limit: int = 2000) -> set[str]:
         """Return recently viewed BVIDs from view events."""

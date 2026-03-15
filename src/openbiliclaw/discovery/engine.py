@@ -416,10 +416,11 @@ class ContentDiscoveryEngine:
         selected: list[DiscoveredContent] = []
         deferred: list[DiscoveredContent] = []
         seen_topics: set[str] = set()
+        seen_styles: set[str] = set()
         style_counts: dict[str, int] = {}
         source_counts: dict[str, int] = {}
-        per_style_cap = max(1, limit // 3)
-        per_source_cap = max(1, limit // 2)
+        per_style_cap = ContentDiscoveryEngine._style_cap(limit)
+        per_source_cap = ContentDiscoveryEngine._source_cap(limit)
         for item in results:
             topic_key = ContentDiscoveryEngine._topic_bucket(item)
             style_key = ContentDiscoveryEngine._style_bucket(item)
@@ -433,10 +434,14 @@ class ContentDiscoveryEngine:
             if source_key and source_counts.get(source_key, 0) >= per_source_cap:
                 deferred.append(item)
                 continue
+            if style_key and style_key in seen_styles and len(seen_styles) < min(limit, 5):
+                deferred.append(item)
+                continue
             selected.append(item)
             if topic_key:
                 seen_topics.add(topic_key)
             if style_key:
+                seen_styles.add(style_key)
                 style_counts[style_key] = style_counts.get(style_key, 0) + 1
             if source_key:
                 source_counts[source_key] = source_counts.get(source_key, 0) + 1
@@ -446,12 +451,24 @@ class ContentDiscoveryEngine:
         remaining: list[DiscoveredContent] = []
         for item in deferred:
             topic_key = ContentDiscoveryEngine._topic_bucket(item)
+            style_key = ContentDiscoveryEngine._style_bucket(item)
+            source_key = ContentDiscoveryEngine._normalize_topic_token(item.source_strategy)
             if topic_key and topic_key in seen_topics:
+                remaining.append(item)
+                continue
+            if style_key and style_counts.get(style_key, 0) >= per_style_cap:
+                remaining.append(item)
+                continue
+            if source_key and source_counts.get(source_key, 0) >= per_source_cap:
                 remaining.append(item)
                 continue
             selected.append(item)
             if topic_key:
                 seen_topics.add(topic_key)
+            if style_key:
+                style_counts[style_key] = style_counts.get(style_key, 0) + 1
+            if source_key:
+                source_counts[source_key] = source_counts.get(source_key, 0) + 1
             if len(selected) >= limit:
                 break
         if len(selected) < limit:
@@ -479,6 +496,14 @@ class ContentDiscoveryEngine:
     def _normalize_topic_token(value: str) -> str:
         compact = re.sub(r"\s+", "", value.strip().lower())
         return compact[:32]
+
+    @staticmethod
+    def _style_cap(limit: int) -> int:
+        return max(1, min(3, (limit + 1) // 3))
+
+    @staticmethod
+    def _source_cap(limit: int) -> int:
+        return 2 if limit <= 5 else 3
 
     @staticmethod
     def infer_style_key(

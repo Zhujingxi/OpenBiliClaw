@@ -420,6 +420,49 @@ class TestDatabase:
 
             db.close()
 
+    def test_get_pool_candidates_balances_sources_in_candidate_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            for index in range(5):
+                db.cache_content(
+                    f"BVEXP{index}",
+                    title=f"探索候选 {index}",
+                    up_name="探索频道",
+                    source="explore",
+                    relevance_score=0.99 - index * 0.01,
+                )
+            db.cache_content(
+                "BVSEARCH",
+                title="搜索候选",
+                up_name="搜索频道",
+                source="search",
+                relevance_score=0.8,
+            )
+            db.cache_content(
+                "BVTREND",
+                title="热榜候选",
+                up_name="热榜频道",
+                source="trending",
+                relevance_score=0.79,
+            )
+            db.cache_content(
+                "BVREL",
+                title="相关推荐候选",
+                up_name="相关频道",
+                source="related_chain",
+                relevance_score=0.78,
+            )
+
+            items = db.get_pool_candidates(limit=6)
+            sources = [item["source"] for item in items]
+
+            assert sources[:4] == ["search", "trending", "related_chain", "explore"]
+            assert sources.count("explore") == 3
+
+            db.close()
+
     def test_insert_and_get_recommendations(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(Path(tmpdir) / "test.db")

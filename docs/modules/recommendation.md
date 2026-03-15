@@ -28,6 +28,7 @@
 | M117 同批多样性约束 | ✅ | 同一批推荐不再只按分数直取前 N，而会对重复 topic 做限流，让一批里更容易同时出现不同方向 |
 | M118 topic_key 多样性强化 | ✅ | discovery pool 现在会持久化 `topic_key`，推荐层会优先按 `topic_key` 分桶再回填，减少同一 seed chain 或同类 query 连续刷屏 |
 | M119 风格多样性与快速文案增强 | ✅ | `reshuffle` 现在会同时约束 `topic_key + style_key`，并把快速 fallback 文案润色成更自然的老B友短句 |
+| M120 来源上限与硬配比 | ✅ | `reshuffle` 现在会对 `topic_key + style_key + source` 同时加硬上限，小批次优先保留不同来源，10 条一批时单一来源最多 3 条 |
 
 ## 公开 API
 
@@ -71,6 +72,7 @@ items = await engine.reshuffle_recommendations(
 - 优先按 `candidate_tier`、`relevance_score` 和最近评分时间排序
 - 同一批会优先按 `topic_key` 分桶，每个 topic 先出 1 条，再按分数回填
 - 同一批还会对 `style_key` 做软均摊，尽量避免连续塞满“硬核解析 / 游戏攻略 / 新闻快讯”中的某一类
+- 同一批还会对 `source` 做硬上限，避免 `explore` 或 `related_chain` 把 10 条整批刷满；当前 10 条一批时单一来源最多 3 条
 - 如果高分候选前排被同一 `style_key` 占满，回填阶段会放宽风格限流，优先保证整批数量尽量补到请求上限
 - 如果候选缺少 `topic_key`，才退回 `tags` 和标题/来源兜底做软限流
 - 如果候选还没有朋友式 `expression`，会优先使用按 `style_key` 润色过的快速 fallback 文案，而不是直接裸用 `relevance_reason`
@@ -222,3 +224,4 @@ Recommendation(
 12. **多样性要优先吃稳定 topic_key**：只靠 `tags` 不够稳，推荐层现在会优先使用 discovery 入池时生成的 `topic_key` 做分桶，再退回 `tags`
 13. **topic 多样性还不够，要再控风格**：用户体感里的“全是很干很学术”往往不是同一 topic，而是同一种内容风格，所以 `reshuffle` 现在会同时约束 `style_key`
 14. **快速换一批也要有说话味道**：快路径可以不等完整 `expression`，但不能直接退化成生硬说明句；当前 fallback 会按 `style_key` 生成更自然的短文案
+15. **10 条一批必须加来源硬上限**：批量变大后，单靠 topic/style 还不够；现在 `reshuffle` 会同时控制 `source`，避免整批重新被 `explore` 或 `related_chain` 吞掉

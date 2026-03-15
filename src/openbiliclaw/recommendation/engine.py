@@ -359,15 +359,15 @@ class RecommendationEngine:
         if limit <= 1 or len(ranked) <= 1:
             return ranked[:limit]
 
-        per_topic_cap = max(1, limit // 2)
-        per_style_cap = max(1, limit // 2)
+        per_topic_cap = cls._topic_cap(limit)
+        per_style_cap = cls._style_cap(limit)
         selected: list[DiscoveredContent] = []
         deferred: list[DiscoveredContent] = []
         topic_counts: dict[str, int] = {}
         style_counts: dict[str, int] = {}
         source_counts: dict[str, int] = {}
         seen_styles: set[str] = set()
-        per_source_cap = max(1, limit // 2)
+        per_source_cap = cls._source_cap(limit)
 
         for item in ranked:
             tokens = cls._diversity_tokens(item)
@@ -399,13 +399,22 @@ class RecommendationEngine:
         remaining: list[DiscoveredContent] = []
         for item in deferred:
             tokens = cls._diversity_tokens(item)
+            style_token = cls._style_token(item)
             source_token = cls._normalize_topic_token(item.source_strategy)
             if tokens and any(topic_counts.get(token, 0) >= per_topic_cap for token in tokens):
+                remaining.append(item)
+                continue
+            if style_token and style_counts.get(style_token, 0) >= per_style_cap:
+                remaining.append(item)
+                continue
+            if source_token and source_counts.get(source_token, 0) >= per_source_cap:
                 remaining.append(item)
                 continue
             selected.append(item)
             for token in tokens:
                 topic_counts[token] = topic_counts.get(token, 0) + 1
+            if style_token:
+                style_counts[style_token] = style_counts.get(style_token, 0) + 1
             if source_token:
                 source_counts[source_token] = source_counts.get(source_token, 0) + 1
             if len(selected) >= limit:
@@ -451,6 +460,18 @@ class RecommendationEngine:
             return ""
         compact = re.sub(r"\s+", "", text)
         return compact[:24]
+
+    @staticmethod
+    def _topic_cap(limit: int) -> int:
+        return 1 if limit <= 5 else 2
+
+    @staticmethod
+    def _style_cap(limit: int) -> int:
+        return max(1, min(3, (limit + 1) // 3))
+
+    @staticmethod
+    def _source_cap(limit: int) -> int:
+        return 2 if limit <= 5 else 3
 
     def _load_unrecommended_content(self, *, limit: int) -> list[DiscoveredContent]:
         from openbiliclaw.discovery.engine import DiscoveredContent

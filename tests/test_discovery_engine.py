@@ -462,6 +462,123 @@ async def test_discovery_engine_limits_explore_dominance_in_pool() -> None:
     assert "trending" in picked_sources
 
 
+@pytest.mark.asyncio
+async def test_discovery_engine_limits_source_and_style_dominance_for_larger_pool() -> None:
+    class _UnlimitedStrategy(_RecordingStrategy):
+        async def discover(
+            self, profile: SoulProfile, limit: int = 20
+        ) -> list[DiscoveredContent]:
+            self._started.append(self._name)
+            return list(self._result)
+
+    engine = ContentDiscoveryEngine()
+    engine.register_strategy(
+        _UnlimitedStrategy(
+            "mixed",
+            [
+                DiscoveredContent(
+                    bvid="BVEXP1",
+                    title="探索纪录片 1",
+                    relevance_score=0.99,
+                    source_strategy="explore",
+                    topic_key="探索:1",
+                    style_key="story_doc",
+                ),
+                DiscoveredContent(
+                    bvid="BVEXP2",
+                    title="探索深挖 2",
+                    relevance_score=0.98,
+                    source_strategy="explore",
+                    topic_key="探索:2",
+                    style_key="deep_dive",
+                ),
+                DiscoveredContent(
+                    bvid="BVEXP3",
+                    title="探索轻聊 3",
+                    relevance_score=0.97,
+                    source_strategy="explore",
+                    topic_key="探索:3",
+                    style_key="light_chat",
+                ),
+                DiscoveredContent(
+                    bvid="BVEXP4",
+                    title="探索攻略 4",
+                    relevance_score=0.96,
+                    source_strategy="explore",
+                    topic_key="探索:4",
+                    style_key="practical_guide",
+                ),
+                DiscoveredContent(
+                    bvid="BVREL1",
+                    title="相关推荐机制拆解 1",
+                    relevance_score=0.95,
+                    source_strategy="related_chain",
+                    topic_key="相关:1",
+                    style_key="game_strategy",
+                ),
+                DiscoveredContent(
+                    bvid="BVREL2",
+                    title="相关推荐机制拆解 2",
+                    relevance_score=0.94,
+                    source_strategy="related_chain",
+                    topic_key="相关:2",
+                    style_key="game_strategy",
+                ),
+                DiscoveredContent(
+                    bvid="BVREL3",
+                    title="相关推荐故事向 3",
+                    relevance_score=0.935,
+                    source_strategy="related_chain",
+                    topic_key="相关:3",
+                    style_key="light_chat",
+                ),
+                DiscoveredContent(
+                    bvid="BVSEA1",
+                    title="搜索教程 1",
+                    relevance_score=0.93,
+                    source_strategy="search",
+                    topic_key="搜索:1",
+                    style_key="practical_guide",
+                ),
+                DiscoveredContent(
+                    bvid="BVSEA2",
+                    title="搜索快讯 2",
+                    relevance_score=0.92,
+                    source_strategy="search",
+                    topic_key="搜索:2",
+                    style_key="news_brief",
+                ),
+                DiscoveredContent(
+                    bvid="BVTR1",
+                    title="热榜纪录片 1",
+                    relevance_score=0.91,
+                    source_strategy="trending",
+                    topic_key="热榜:1",
+                    style_key="story_doc",
+                ),
+                DiscoveredContent(
+                    bvid="BVTR2",
+                    title="热榜视觉 2",
+                    relevance_score=0.9,
+                    source_strategy="trending",
+                    topic_key="热榜:2",
+                    style_key="visual_showcase",
+                ),
+            ],
+        )
+    )
+
+    results = await engine.discover(_build_profile(), limit=10)
+
+    picked_sources = [item.source_strategy for item in results]
+    picked_styles = [item.style_key for item in results]
+
+    assert picked_sources.count("explore") <= 3
+    assert picked_sources.count("related_chain") <= 3
+    assert len(results) == 10
+    assert picked_styles.count("game_strategy") <= 3
+
+
 def test_infer_style_key_classifies_hard_courses_and_documentaries() -> None:
     assert (
         ContentDiscoveryEngine.infer_style_key(
