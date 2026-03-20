@@ -44,11 +44,23 @@
 - 推荐 tab 头部现已进一步收成紧凑双层结构：标题行 + 状态 chips 行，明显减少首屏占用，让推荐内容更早露出
 - pool summary 文案同步收短成 chip 友好的形式，例如 `还有 151 条可换 / 刚补进 6 条 / 这会儿先不补货`
 
+### popup For You 编辑式重排
+
+- 推荐 tab 的 `For You` 区块进一步改成内容优先的编辑式布局，头部导语、池子摘要和首张内容卡的层级明显分开
+- 推荐卡片改成更清晰的纵向信息节奏：上层是封面和主题标签，中层是标题与推荐理由，下层是 UP 主信息和反馈操作
+- 视觉上收敛了过重的装饰层，首屏更像内容推荐流，而不是状态面板拼装
+
+### popup For You 首卡杂志化
+
+- `For You` 现在会把第一条推荐提升成主视觉封面卡，封面比例、标题字级和信息节奏都明显强于后续卡片
+- 后续推荐继续保留较紧凑的列表卡结构，整个推荐流形成“头部导语 -> 封面主卡 -> 次级列表”的内容层级
+
 ### popup 推荐自动续页
 
 - 新增 `POST /api/recommendations/append`，popup 推荐 tab 滚到底时会继续从 discovery pool 追加下一批 10 条
 - 自动续页会把当前已展示的 `bvid` 传给后端排除，避免追加时和当前列表重复
 - `换一批` 仍保留为整组重开；自动续页只负责在当前列表底部继续往下接内容
+- 修复了续页新卡片封面偶发空白的问题：popup API 现在会统一规范化 `cover_url`，同时封面不再依赖会误伤内部滚动容器的原生 lazy loading
 
 ### SQLite 修复与防损坏加固
 
@@ -68,9 +80,15 @@
 - `openbiliclaw init` 现在支持交互式引导：Docker 用户首次执行时可直接补齐默认 provider、API Key 和 B 站 Cookie，然后继续完成初始化
 - 容器内通过 `docker exec openbiliclaw ...` 执行任意 CLI 命令时，也会重复这层 runtime/bootstrap 逻辑，避免只有主进程有代理、交互命令却直连失败
 - discovery 内部已经改为保守受控并发：Search / Trending / Related / Explore 会共享较小的 B 站请求与 LLM 评分并发上限，减少首轮 init/discover 的明显串行耗时
-- `openbiliclaw init` 的 discover 阶段现在会按 `search + related_chain -> trending -> explore` 分阶段补货，尽量把首轮 fresh 候选池补到至少 `50` 条，降低第一次 `recommend` 直接空池子的概率
+- `openbiliclaw init` 的 discover 阶段现在会按 `search + related_chain -> trending -> explore` 分阶段补货，尽量把首轮 fresh 候选池补到至少 `100` 条，降低第一次 `recommend` 直接空池子的概率
 - `openbiliclaw init` 运行时会同步打印每个补货阶段的当前池子进度和本轮请求上限，首轮等待时不再只有一个静态“发现内容”标题
 - 修复 `DiscoveryConcurrencyController` 在多次 `asyncio.run(...)` 间复用 semaphore 的跨事件循环问题，Docker/CLI 首轮分阶段补货不再在第二阶段报 `Semaphore ... is bound to a different event loop`
+
+### discovery pool 目标扩容
+
+- `scheduler.pool_target_count` 默认值现已从 `150` 提到 `300`，运行时会持续以 300 条 fresh 候选为目标补货
+- `openbiliclaw init` 的首轮补货目标保持保守分层策略，但保底值已从 `50` 提到 `100`
+- 现有护栏保持不变：`pool_target_count` 仍限制在 `1..300`，单轮 refresh discover 回填仍封顶 `60`
 
 ### 同批推荐多样性约束
 
@@ -101,11 +119,6 @@
 - discovery 与 recommendation 的多样性选择现在会优先补齐不同 `source`，再施加 `style` 上限，避免 `trending/search` 还没出场就被重复的 `explore` 候选挤掉
 - `infer_style_key()` 补强了芯片/显微镜/纳米/理论/哲学等硬核解析词，以及“全过程 / 制造过程 / 工艺难度”等纪录片/工业流程词，减少大量硬内容被误判成 `light_chat`
 - 推荐候选与选中摘要日志现在更容易对应“来源是否真的被补齐”，便于继续定位池子上游偏移问题
-
-### generate 路径丰富度修正
-
-- generate_recommendations() 现在会先对缓存候选做来源均衡，再进入多样性选择，避免高分 related_chain 长时间垄断整批结果
-- 多样性回填现在改为分阶段放宽 style / source / topic 约束，只有候选真的不足时才彻底兜底补满
 
 ### 候选池按来源缺口补货
 

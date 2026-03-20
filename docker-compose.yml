@@ -1,0 +1,36 @@
+services:
+  openbiliclaw-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openbiliclaw-backend
+    environment:
+      OPENBILICLAW_PROJECT_ROOT: /app/runtime
+      OPENBILICLAW_CONFIG_TEMPLATE: /app/config.example.toml
+      OPENBILICLAW_PROXY_HOST: ${OPENBILICLAW_PROXY_HOST:-host.docker.internal}
+      OPENBILICLAW_PROXY_PORT: ${OPENBILICLAW_PROXY_PORT:-7897}
+      OPENBILICLAW_PROXY_TIMEOUT: ${OPENBILICLAW_PROXY_TIMEOUT:-1.0}
+    command:
+      - python
+      - -m
+      - openbiliclaw.docker_runtime
+      - openbiliclaw
+      - serve-api
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8420"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8420:8420"
+    volumes:
+      - openbiliclaw_config:/app/runtime
+      - openbiliclaw_data:/app/runtime/data
+      - openbiliclaw_logs:/app/runtime/logs
+    restart: unless-stopped
+
+volumes:
+  openbiliclaw_config:
+  openbiliclaw_data:
+  openbiliclaw_logs:

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 
 import pytest
 
-from openbiliclaw.discovery.engine import DiscoveredContent
+from openbiliclaw.discovery.engine import DiscoveredContent, DiscoveryConcurrencyController
 from openbiliclaw.soul.profile import InterestTag, PreferenceLayer, SoulProfile
 
 
@@ -69,6 +70,29 @@ class FakeBilibiliClient:
         self.calls.append(keyword)
         if keyword in self.failing_queries:
             raise RuntimeError(f"boom: {keyword}")
+        return self.results_by_query.get(keyword, [])
+
+
+@dataclass
+class _SlowSearchClient:
+    results_by_query: dict[str, list[dict[str, object]]]
+    delay: float = 0.02
+    active_calls: int = 0
+    max_active_calls: int = 0
+    calls: list[str] = field(default_factory=list)
+
+    async def search(
+        self,
+        keyword: str,
+        page: int = 1,
+        page_size: int = 20,
+        order: str = "totalrank",
+    ) -> list[dict[str, object]]:
+        self.calls.append(f"{keyword}:{page}")
+        self.active_calls += 1
+        self.max_active_calls = max(self.max_active_calls, self.active_calls)
+        await asyncio.sleep(self.delay)
+        self.active_calls -= 1
         return self.results_by_query.get(keyword, [])
 
 
@@ -181,3 +205,30 @@ async def test_search_strategy_continues_when_single_query_fails() -> None:
 
     assert bilibili_client.calls == ["纪录片", "摄影"]
     assert [item.bvid for item in results] == ["BV1B"]
+
+
+@pytest.mark.asyncio
+async def test_search_strategy_uses_bounded_request_concurrency_and_keeps_limit() -> None:
+    from openbiliclaw.discovery.strategies.strategies import SearchStrategy
+
+    llm_service = FakeLLMService('{"queries": ["纪录片", "摄影", "构图"]}')
+    bilibili_client = _SlowSearchClient(
+        {
+            "纪录片": [{"bvid": "BV1A", "title": "纪录片", "author": "UP1", "mid": 1}],
+            "摄影": [{"bvid": "BV1B", "title": "摄影", "author": "UP2", "mid": 2}],
+            "构图": [{"bvid": "BV1C", "title": "构图", "author": "UP3", "mid": 3}],
+        }
+    )
+    strategy = SearchStrategy(
+        llm_service=llm_service,
+        bilibili_client=bilibili_client,
+        concurrency=DiscoveryConcurrencyController(
+            bilibili_request_concurrency=2,
+            llm_evaluation_concurrency=2,
+        ),
+    )
+
+    results = await strategy.discover(_build_profile(), limit=2)
+
+    assert bilibili_client.max_active_calls == 2
+    assert [item.bvid for item in results] == ["BV1A", "BV1B"]

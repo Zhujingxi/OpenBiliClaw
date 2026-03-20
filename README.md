@@ -195,7 +195,11 @@ docker exec -it openbiliclaw-backend openbiliclaw init
 - 选择默认 LLM provider
 - 输入该 provider 的 API Key
 - 输入 B 站 Cookie
-- 验证通过后继续拉历史、生成画像并执行 discover
+- 验证通过后继续拉历史、生成画像，并按 `search + related_chain -> trending -> explore` 分阶段补首轮 discover 池
+- 首轮网络拉取和 discover 可能持续几分钟，这不是卡死，而是在真实调用 B 站和 LLM
+- 当前首轮 discover 已经做了保守受控并发优化，会并发拉少量 B 站请求并并发打分，但默认上限仍偏保守，优先避免 429
+- 首轮会尽量把 fresh 候选池补到至少 `100` 条，再停下来，降低第一次 `recommend` 直接没内容的概率
+- 运行中会直接打印 `补货阶段 1/3 ... 当前池子 0/100` 这类进度，方便判断还在工作还是已经卡住
 
 这套引导会把运行时状态直接写入 Docker volumes：
 
@@ -267,6 +271,8 @@ docker exec -it openbiliclaw-backend openbiliclaw recommend
 ```
 
 如果你以非交互方式运行 `init`，则仍需要提前准备好 `config.toml` 和 Cookie；非交互终端下不会进入问答引导。
+
+如果你在 Docker 中使用 Clash，一般不需要手动给 `docker exec` 补 `HTTP_PROXY`。现在每次 `openbiliclaw` CLI 启动都会自动探测并按需注入代理。
 
 如果想看日志：
 

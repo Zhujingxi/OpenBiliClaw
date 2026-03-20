@@ -1,3 +1,5 @@
+import { normalizeRecommendation } from "./popup-helpers.js";
+
 const BACKEND_URL = "http://127.0.0.1:8420/api";
 
 async function requestJson(path, options = {}) {
@@ -19,7 +21,7 @@ export async function checkBackendStatus() {
 
 export async function fetchRecommendations() {
   const payload = await requestJson("/recommendations", { method: "GET" });
-  return Array.isArray(payload.items) ? payload.items : [];
+  return Array.isArray(payload.items) ? payload.items.map(normalizeRecommendation) : [];
 }
 
 export async function refreshRecommendations() {
@@ -27,17 +29,25 @@ export async function refreshRecommendations() {
 }
 
 export async function reshuffleRecommendations() {
-  return requestJson("/recommendations/reshuffle", { method: "POST" });
+  const payload = await requestJson("/recommendations/reshuffle", { method: "POST" });
+  return {
+    ...payload,
+    items: Array.isArray(payload.items) ? payload.items.map(normalizeRecommendation) : [],
+  };
 }
 
 export async function appendRecommendations(excludedBvids = []) {
-  return requestJson("/recommendations/append", {
+  const payload = await requestJson("/recommendations/append", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ excluded_bvids: excludedBvids }),
   });
+  return {
+    ...payload,
+    items: Array.isArray(payload.items) ? payload.items.map(normalizeRecommendation) : [],
+  };
 }
 
 export async function fetchRuntimeStatus() {

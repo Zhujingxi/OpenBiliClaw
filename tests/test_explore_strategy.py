@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 
 import pytest
 
+from openbiliclaw.discovery.engine import DiscoveryConcurrencyController
 from openbiliclaw.soul.profile import InterestTag, PreferenceLayer, SoulProfile
 
 
@@ -70,6 +72,36 @@ class FakeBilibiliClient:
         if keyword in self.failing_queries:
             raise RuntimeError(f"boom: {keyword}")
         return self.results_by_query.get(keyword, [])
+
+
+class _SlowScoringLLMService(FakeLLMService):
+    def __init__(self, contents: list[str], delay: float = 0.02) -> None:
+        super().__init__(contents)
+        self.delay = delay
+        self.active_calls = 0
+        self.max_active_calls = 0
+
+    async def complete_structured_task(
+        self,
+        *,
+        system_instruction: str,
+        user_input: str,
+        history: list[dict[str, str]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ) -> object:
+        self.active_calls += 1
+        self.max_active_calls = max(self.max_active_calls, self.active_calls)
+        await asyncio.sleep(self.delay)
+        response = await super().complete_structured_task(
+            system_instruction=system_instruction,
+            user_input=user_input,
+            history=history,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        self.active_calls -= 1
+        return response
 
 
 @pytest.mark.asyncio
@@ -206,3 +238,53 @@ async def test_explore_strategy_tolerates_partial_failures() -> None:
 
     assert bilibili_client.calls == ["声音 文化 纪录片", "城市 建筑 纪录片"]
     assert [item.bvid for item in results] == ["BV1A"]
+
+
+@pytest.mark.asyncio
+async def test_explore_strategy_uses_bounded_evaluation_concurrency() -> None:
+    from openbiliclaw.discovery.strategies.strategies import ExploreStrategy
+
+    llm_service = _SlowScoringLLMService(
+        [
+            """
+            {
+              "domains": [
+                {
+                  "domain": "城市空间与建筑叙事",
+                  "why_it_might_resonate": "你偏好结构化理解。",
+                  "novelty_level": 0.68,
+                  "queries": ["城市 建筑 纪录片", "空间 设计 深度讲解"]
+                }
+              ]
+            }
+            """,
+            '{"score": 0.82, "reason": "A"}',
+            '{"score": 0.81, "reason": "B"}',
+            '{"score": 0.80, "reason": "C"}',
+        ]
+    )
+    bilibili_client = FakeBilibiliClient(
+        {
+            "城市 建筑 纪录片": [
+                {"bvid": "BV1A", "title": "A", "author": "UP1", "mid": 1},
+                {"bvid": "BV1B", "title": "B", "author": "UP2", "mid": 2},
+            ],
+            "空间 设计 深度讲解": [
+                {"bvid": "BV1C", "title": "C", "author": "UP3", "mid": 3}
+            ],
+        }
+    )
+    strategy = ExploreStrategy(
+        llm_service=llm_service,
+        bilibili_client=bilibili_client,
+        concurrency=DiscoveryConcurrencyController(
+            bilibili_request_concurrency=2,
+            llm_evaluation_concurrency=2,
+        ),
+        score_threshold=0.65,
+    )
+
+    results = await strategy.discover(_build_profile(), limit=20)
+
+    assert llm_service.max_active_calls == 2
+    assert [item.bvid for item in results] == ["BV1A", "BV1B", "BV1C"]

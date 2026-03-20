@@ -78,12 +78,12 @@ class TestConfigDefaults:
         assert config.llm.default_provider == "openai"
         assert config.bilibili.auth_method == "cookie"
         assert config.scheduler.enabled is True
-        assert config.scheduler.pool_target_count == 150
+        assert config.scheduler.pool_target_count == 300
 
-    def test_config_defaults_pool_target_count_to_150(self) -> None:
+    def test_config_defaults_pool_target_count_to_300(self) -> None:
         config = Config()
 
-        assert config.scheduler.pool_target_count == 150
+        assert config.scheduler.pool_target_count == 300
 
     def test_build_from_empty_dict(self) -> None:
         config = _build_config({})

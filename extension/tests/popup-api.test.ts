@@ -22,7 +22,7 @@ test("reshuffleRecommendations posts to reshuffle endpoint", async () => {
               bvid: "BV1NEW",
               title: "新的一批",
               up_name: "UPA",
-              cover_url: "https://i0.hdslb.com/bfs/archive/new-cover.jpg",
+              cover_url: "//i0.hdslb.com/bfs/archive/new-cover.jpg",
               expression: "先给你捞一条新的。",
               topic_label: "",
               presented: false,
@@ -61,7 +61,20 @@ test("appendRecommendations posts excluded bvids to append endpoint", async () =
     return {
       ok: true,
       async json() {
-        return { items: [] };
+        return {
+          items: [
+            {
+              id: 21,
+              bvid: "BV1APPEND",
+              title: "追加的一条",
+              up_name: "UPB",
+              cover_url: "http://i0.hdslb.com/bfs/archive/append-cover.jpg",
+              expression: "",
+              topic_label: "",
+              presented: false,
+            },
+          ],
+        };
       },
     };
   };
@@ -73,7 +86,58 @@ test("appendRecommendations posts excluded bvids to append endpoint", async () =
   assert.equal(calls[0].options.method, "POST");
   assert.equal(calls[0].options.headers["Content-Type"], "application/json");
   assert.equal(calls[0].options.body, JSON.stringify({ excluded_bvids: ["BV1A", "BV1B"] }));
-  assert.deepEqual(result, { items: [] });
+  assert.deepEqual(result, {
+    items: [
+      {
+        id: 21,
+        bvid: "BV1APPEND",
+        title: "追加的一条",
+        up_name: "UPB",
+        cover_url: "https://i0.hdslb.com/bfs/archive/append-cover.jpg",
+        expression: "这条已经进了你的推荐区，点开看看。",
+        topic_label: "",
+        presented: false,
+      },
+    ],
+  });
+});
+
+test("fetchRecommendations normalizes cover urls from the recommend endpoint", async () => {
+  globalThis.fetch = async () => ({
+    ok: true,
+    async json() {
+      return {
+        items: [
+          {
+            id: 31,
+            bvid: "BV1FETCH",
+            title: "初始推荐",
+            up_name: "UPC",
+            cover_url: "http://i1.hdslb.com/bfs/archive/fetch-cover.jpg",
+            expression: "",
+            topic_label: "",
+            presented: 0,
+          },
+        ],
+      };
+    },
+  });
+
+  const { fetchRecommendations } = await import("../popup/popup-api.js");
+  const result = await fetchRecommendations();
+
+  assert.deepEqual(result, [
+    {
+      id: 31,
+      bvid: "BV1FETCH",
+      title: "初始推荐",
+      up_name: "UPC",
+      cover_url: "https://i1.hdslb.com/bfs/archive/fetch-cover.jpg",
+      expression: "这条已经进了你的推荐区，点开看看。",
+      topic_label: "",
+      presented: false,
+    },
+  ]);
 });
 
 test("fetchActivityFeed loads popup activity summaries", async () => {

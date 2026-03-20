@@ -6,6 +6,7 @@ Provides the command-line entry point using Typer.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, cast
@@ -27,7 +28,26 @@ app.add_typer(auth_app, name="auth")
 app.add_typer(browser_app, name="browser")
 console = Console()
 _APP_CONTEXT: dict[str, Any] = {}
+
+
+def _bootstrap_container_runtime() -> None:
+    """Bootstrap runtime root and optional proxy env inside Docker-like runtimes."""
+    if not (
+        os.environ.get("OPENBILICLAW_PROJECT_ROOT")
+        or os.environ.get("OPENBILICLAW_CONFIG_TEMPLATE")
+    ):
+        return
+
+    from openbiliclaw.docker_runtime import bootstrap_runtime_environment
+
+    bootstrap_runtime_environment(os.environ)
 _RUNTIME_COMPONENTS: dict[str, Any] = {}
+_INIT_DISCOVERY_PLAN = [
+    ["search", "related_chain"],
+    ["trending"],
+    ["explore"],
+]
+_INIT_POOL_TARGET_COUNT = 100
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -225,7 +245,10 @@ def _build_memory_manager() -> Any:
 
 def _build_discovery_engine() -> Any:
     """Build the discovery engine with currently implemented strategies."""
-    from openbiliclaw.discovery.engine import ContentDiscoveryEngine
+    from openbiliclaw.discovery.engine import (
+        ContentDiscoveryEngine,
+        DiscoveryConcurrencyController,
+    )
     from openbiliclaw.discovery.strategies.strategies import (
         ExploreStrategy,
         RelatedChainStrategy,
@@ -238,12 +261,25 @@ def _build_discovery_engine() -> Any:
     database = _get_runtime_database()
     bilibili_client = _build_bilibili_client()
     llm_service = LLMService(registry=_build_registry(), memory=memory)
+    concurrency = DiscoveryConcurrencyController(
+        bilibili_request_concurrency=2,
+        llm_evaluation_concurrency=2,
+    )
 
-    engine = ContentDiscoveryEngine(llm_service=llm_service, database=database)
-    search_strategy = SearchStrategy(llm_service=llm_service, bilibili_client=bilibili_client)
+    engine = ContentDiscoveryEngine(
+        llm_service=llm_service,
+        database=database,
+        concurrency=concurrency,
+    )
+    search_strategy = SearchStrategy(
+        llm_service=llm_service,
+        bilibili_client=bilibili_client,
+        concurrency=concurrency,
+    )
     trending_strategy = TrendingStrategy(
         bilibili_client=bilibili_client,
         llm_service=llm_service,
+        concurrency=concurrency,
     )
     related_strategy = RelatedChainStrategy(
         bilibili_client=bilibili_client,
@@ -251,10 +287,12 @@ def _build_discovery_engine() -> Any:
         memory_manager=cast("Any", memory),
         search_strategy=search_strategy,
         trending_strategy=trending_strategy,
+        concurrency=concurrency,
     )
     explore_strategy = ExploreStrategy(
         llm_service=llm_service,
         bilibili_client=bilibili_client,
+        concurrency=concurrency,
     )
 
     engine.register_strategy(search_strategy)
@@ -350,6 +388,7 @@ def _history_item_to_event(item: dict[str, Any]) -> dict[str, Any]:
 def main(log_level: str | None = typer.Option(None, "--log-level")) -> None:
     """Global CLI options."""
     _APP_CONTEXT["log_level"] = log_level
+    _bootstrap_container_runtime()
     _initialize_logging(log_level_override=log_level)
 
 
@@ -508,6 +547,44 @@ def _prepare_init_runtime() -> Any:
     return _interactive_auth_setup(auth_manager)
 
 
+def _format_strategy_group(strategies: list[str]) -> str:
+    return " + ".join(strategies)
+
+
+def _run_init_discovery_backfill(profile: Any, *, target_pool_count: int = 100) -> int:
+    """Backfill the initial discovery pool in stages until the target is reached."""
+    database = _get_runtime_database()
+    discovery_engine = _build_discovery_engine()
+    discovered_count = 0
+
+    for index, strategies in enumerate(_INIT_DISCOVERY_PLAN, start=1):
+        current_pool_count = database.count_pool_candidates()
+        if current_pool_count >= target_pool_count:
+            break
+        request_limit = max(30, target_pool_count - current_pool_count)
+        console.print(
+            f"补货阶段 {index}/{len(_INIT_DISCOVERY_PLAN)}: {_format_strategy_group(strategies)}"
+        )
+        console.print(
+            f"当前池子 {current_pool_count}/{target_pool_count}，本轮请求上限 {request_limit}"
+        )
+        discovered = asyncio.run(
+            discovery_engine.discover(
+                profile,
+                strategies=strategies,
+                limit=request_limit,
+            )
+        )
+        discovered_count += len(discovered)
+        console.print(
+            "阶段完成: "
+            f"当前池子 {database.count_pool_candidates()}/{target_pool_count}，"
+            f"本轮发现 {len(discovered)} 条"
+        )
+
+    return discovered_count
+
+
 @app.command()
 def start(
     host: str = typer.Option("127.0.0.1", "--host", help="API 监听地址"),
@@ -557,7 +634,7 @@ def db_repair() -> None:
 
 @app.command()
 def init() -> None:
-    """首次运行：拉取历史、生成画像并自动执行一次内容发现."""
+    """首次运行：拉取历史、生成画像并补足首轮发现池."""
     _prepare_init_runtime()
 
     client = _build_bilibili_client()
@@ -585,9 +662,10 @@ def init() -> None:
     discovered_count = 0
     discovery_error = False
     try:
-        discovery_engine = _build_discovery_engine()
-        discovered = asyncio.run(discovery_engine.discover(profile_data, limit=30))
-        discovered_count = len(discovered)
+        discovered_count = _run_init_discovery_backfill(
+            profile_data,
+            target_pool_count=_INIT_POOL_TARGET_COUNT,
+        )
     except Exception:
         discovery_error = True
         _print_status_panel(

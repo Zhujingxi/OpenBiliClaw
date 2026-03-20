@@ -68,6 +68,35 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
+def test_main_bootstraps_container_runtime_when_project_root_is_configured(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    class FakeAuthManager:
+        async def get_status(self) -> AuthStatus:
+            return AuthStatus(
+                has_cookie=False,
+                authenticated=False,
+                cookie_path=tmp_path / "bilibili_cookie.json",
+                message="未配置 B 站 Cookie。",
+            )
+
+    called: list[bool] = []
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setattr(
+        cli_module,
+        "_bootstrap_container_runtime",
+        lambda: called.append(True),
+        raising=False,
+    )
+    monkeypatch.setattr(cli_module, "_build_auth_manager", lambda: FakeAuthManager(), raising=False)
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["auth", "status"])
+
+    assert result.exit_code == 0
+    assert called == [True]
+
+
 def test_config_show_generates_template_and_prints_guidance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
 ) -> None:
@@ -484,9 +513,16 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
             self.database = database
 
     class FakeDiscoveryEngine:
-        def __init__(self, *, llm_service: object, database: object) -> None:
+        def __init__(
+            self,
+            *,
+            llm_service: object,
+            database: object,
+            concurrency: object | None = None,
+        ) -> None:
             self.llm_service = llm_service
             self.database = database
+            self.concurrency = concurrency
             self.strategies: list[object] = []
 
         def register_strategy(self, strategy: object) -> None:
@@ -1325,7 +1361,7 @@ def test_init_runs_history_preference_profile_and_discovery(
 
     class FakeDiscoveryEngine:
         def __init__(self) -> None:
-            self.calls: list[tuple[SoulProfile, int]] = []
+            self.calls: list[tuple[SoulProfile, list[str] | None, int]] = []
 
         async def discover(
             self,
@@ -1333,7 +1369,7 @@ def test_init_runs_history_preference_profile_and_discovery(
             strategies: list[str] | None = None,
             limit: int = 30,
         ) -> list[DiscoveredContent]:
-            self.calls.append((profile, limit))
+            self.calls.append((profile, strategies, limit))
             return [
                 DiscoveredContent(
                     bvid="BV1DISC",
@@ -1346,6 +1382,11 @@ def test_init_runs_history_preference_profile_and_discovery(
     fake_memory = FakeMemoryManager()
     fake_soul = FakeSoulEngine()
     fake_discovery = FakeDiscoveryEngine()
+    fake_database = type(
+        "FakeDatabase",
+        (),
+        {"count_pool_candidates": lambda self: 0},
+    )()
     monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
     monkeypatch.setattr(cli_module, "_build_auth_manager", lambda: FakeAuthManager(), raising=False)
     monkeypatch.setattr(
@@ -1362,6 +1403,7 @@ def test_init_runs_history_preference_profile_and_discovery(
         lambda: fake_discovery,
         raising=False,
     )
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: fake_database, raising=False)
     monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
 
     result = runner.invoke(app, ["init"])
@@ -1379,6 +1421,221 @@ def test_init_runs_history_preference_profile_and_discovery(
     assert fake_soul.analyzed_events
     assert fake_soul.built_history
     assert fake_discovery.calls
+
+
+def test_init_backfills_pool_in_stages_until_target_is_reached(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    class FakeAuthManager:
+        async def get_status(self) -> AuthStatus:
+            return AuthStatus(
+                has_cookie=True,
+                authenticated=True,
+                cookie_path=tmp_path / "bilibili_cookie.json",
+                username="alice",
+                user_id=10086,
+                message="Cookie 验证成功。",
+            )
+
+    class FakeBilibiliClient:
+        async def get_user_history(self, max_items: int = 100) -> list[dict[str, object]]:
+            return [
+                {
+                    "history": {"bvid": "BV1A", "view_at": 1710000000},
+                    "title": "讲透历史叙事",
+                    "author_name": "历史实验室",
+                }
+            ]
+
+    class FakeMemoryManager:
+        async def propagate_event(self, event: dict[str, object]) -> None:
+            return None
+
+    class FakeSoulEngine:
+        async def analyze_events(self, events: list[dict[str, object]]) -> None:
+            return None
+
+        async def build_initial_profile(self, history: list[dict[str, object]]) -> SoulProfile:
+            return SoulProfile(
+                personality_portrait="稳定用户画像" * 30,
+                core_traits=["理性"],
+                preferences=PreferenceLayer(),
+            )
+
+    class FakeDatabase:
+        def __init__(self) -> None:
+            self.pool_count = 0
+
+        def count_pool_candidates(self) -> int:
+            return self.pool_count
+
+    class FakeDiscoveryEngine:
+        def __init__(self, database: FakeDatabase) -> None:
+            self.database = database
+            self.calls: list[tuple[list[str] | None, int]] = []
+
+        async def discover(
+            self,
+            profile: SoulProfile,
+            strategies: list[str] | None = None,
+            limit: int = 30,
+        ) -> list[DiscoveredContent]:
+            self.calls.append((strategies, limit))
+            if strategies == ["search", "related_chain"]:
+                self.database.pool_count = 20
+            elif strategies == ["trending"]:
+                self.database.pool_count = 100
+            else:
+                raise AssertionError(f"unexpected strategies: {strategies}")
+            return [
+                DiscoveredContent(
+                    bvid=f"BV1-{len(self.calls)}",
+                    title="发现内容",
+                    up_name="发现实验室",
+                    relevance_score=0.8,
+                )
+            ]
+
+    fake_database = FakeDatabase()
+    fake_discovery = FakeDiscoveryEngine(fake_database)
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
+    monkeypatch.setattr(cli_module, "_build_auth_manager", lambda: FakeAuthManager(), raising=False)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_bilibili_client",
+        lambda: FakeBilibiliClient(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_build_memory_manager",
+        lambda: FakeMemoryManager(),
+        raising=False,
+    )
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine(), raising=False)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_discovery_engine",
+        lambda: fake_discovery,
+        raising=False,
+    )
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: fake_database, raising=False)
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0
+    assert fake_discovery.calls == [
+        (["search", "related_chain"], 100),
+        (["trending"], 80),
+    ]
+    assert "补货阶段 1/3" in result.stdout
+    assert "search + related_chain" in result.stdout
+    assert "当前池子 0/100" in result.stdout
+    assert "阶段完成" in result.stdout
+    assert "当前池子 20/100" in result.stdout
+    assert "发现内容数" in result.stdout
+    assert "2" in result.stdout
+
+
+def test_init_stops_backfill_early_when_first_stage_reaches_pool_target(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    class FakeAuthManager:
+        async def get_status(self) -> AuthStatus:
+            return AuthStatus(
+                has_cookie=True,
+                authenticated=True,
+                cookie_path=tmp_path / "bilibili_cookie.json",
+                username="alice",
+                user_id=10086,
+                message="Cookie 验证成功。",
+            )
+
+    class FakeBilibiliClient:
+        async def get_user_history(self, max_items: int = 100) -> list[dict[str, object]]:
+            return [
+                {
+                    "history": {"bvid": "BV1A", "view_at": 1710000000},
+                    "title": "讲透历史叙事",
+                    "author_name": "历史实验室",
+                }
+            ]
+
+    class FakeMemoryManager:
+        async def propagate_event(self, event: dict[str, object]) -> None:
+            return None
+
+    class FakeSoulEngine:
+        async def analyze_events(self, events: list[dict[str, object]]) -> None:
+            return None
+
+        async def build_initial_profile(self, history: list[dict[str, object]]) -> SoulProfile:
+            return SoulProfile(
+                personality_portrait="稳定用户画像" * 30,
+                core_traits=["理性"],
+                preferences=PreferenceLayer(),
+            )
+
+    class FakeDatabase:
+        def __init__(self) -> None:
+            self.pool_count = 45
+
+        def count_pool_candidates(self) -> int:
+            return self.pool_count
+
+    class FakeDiscoveryEngine:
+        def __init__(self, database: FakeDatabase) -> None:
+            self.database = database
+            self.calls: list[tuple[list[str] | None, int]] = []
+
+        async def discover(
+            self,
+            profile: SoulProfile,
+            strategies: list[str] | None = None,
+            limit: int = 30,
+        ) -> list[DiscoveredContent]:
+            self.calls.append((strategies, limit))
+            self.database.pool_count = 100
+            return [
+                DiscoveredContent(
+                    bvid="BV1DONE",
+                    title="发现内容",
+                    up_name="发现实验室",
+                    relevance_score=0.8,
+                )
+            ]
+
+    fake_database = FakeDatabase()
+    fake_discovery = FakeDiscoveryEngine(fake_database)
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
+    monkeypatch.setattr(cli_module, "_build_auth_manager", lambda: FakeAuthManager(), raising=False)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_bilibili_client",
+        lambda: FakeBilibiliClient(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_build_memory_manager",
+        lambda: FakeMemoryManager(),
+        raising=False,
+    )
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine(), raising=False)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_discovery_engine",
+        lambda: fake_discovery,
+        raising=False,
+    )
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: fake_database, raising=False)
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0
+    assert fake_discovery.calls == [(["search", "related_chain"], 55)]
 
 
 def test_init_reports_partial_success_when_discovery_fails(
@@ -1429,6 +1686,11 @@ def test_init_reports_partial_success_when_discovery_fails(
         ) -> list[DiscoveredContent]:
             raise RuntimeError("discovery unavailable")
 
+    fake_database = type(
+        "FakeDatabase",
+        (),
+        {"count_pool_candidates": lambda self: 0},
+    )()
     monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
     monkeypatch.setattr(cli_module, "_build_auth_manager", lambda: FakeAuthManager(), raising=False)
     monkeypatch.setattr(
@@ -1450,6 +1712,7 @@ def test_init_reports_partial_success_when_discovery_fails(
         lambda: FakeDiscoveryEngine(),
         raising=False,
     )
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: fake_database, raising=False)
     monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
 
     result = runner.invoke(app, ["init"])

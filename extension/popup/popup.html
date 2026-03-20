@@ -109,6 +109,7 @@
     .hero,
     .tabs-shell,
     .footer,
+    .recommendation-header-card,
     .recommendation-card,
     .profile-card,
     .empty-state,
@@ -359,13 +360,7 @@
       color: var(--text-secondary);
     }
 
-    .recommendation-list,
-    .chat-shell {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-
+    .recommendation-header-card,
     .recommendation-card,
     .profile-card,
     .empty-state,
@@ -376,8 +371,152 @@
       box-shadow: var(--shadow-lg);
     }
 
-    .recommendation-card {
+    .recommendation-header-card {
+      border-radius: 20px;
       padding: 12px;
+      isolation: isolate;
+    }
+
+    .recommendation-header-card::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      background:
+        radial-gradient(circle at top right, rgba(251, 114, 153, 0.12), transparent 38%),
+        radial-gradient(circle at left bottom, rgba(90, 169, 255, 0.12), transparent 34%);
+      pointer-events: none;
+    }
+
+    .recommendation-header-top {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .recommendation-header-copy {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+
+    .recommendation-header-intro {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+
+    .recommendation-header-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex-wrap: wrap;
+    }
+
+    .recommendation-header-title .view-kicker {
+      margin: 0;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: rgba(251, 114, 153, 0.07);
+      line-height: 1;
+      color: var(--brand-strong);
+      font-size: 10px;
+    }
+
+    .recommendation-header-title h2 {
+      min-width: 0;
+      font-size: 16px;
+      line-height: 1.25;
+      letter-spacing: -0.02em;
+      font-weight: 800;
+    }
+
+    .recommendation-header-top .action-button {
+      flex-shrink: 0;
+      min-height: 34px;
+      padding: 0 11px;
+    }
+
+    .recommendation-summary-row {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 10px;
+    }
+
+    .recommendation-status-row {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-auto-rows: 1fr;
+      gap: 6px;
+    }
+
+    .recommendation-status-chip {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 4px;
+      min-width: 0;
+      min-height: 60px;
+      padding: 8px 9px;
+      border-radius: 16px;
+      border: 1px solid rgba(225, 232, 241, 0.96);
+      box-shadow: none;
+    }
+
+    .recommendation-status-chip[data-tone="neutral"] {
+      background: rgba(255, 255, 255, 0.92);
+    }
+
+    .recommendation-status-chip[data-tone="brand"] {
+      background: rgba(255, 246, 249, 0.92);
+      border-color: rgba(245, 189, 209, 0.46);
+    }
+
+    .recommendation-status-chip[data-tone="info"] {
+      background: rgba(245, 249, 255, 0.94);
+      border-color: rgba(177, 207, 242, 0.58);
+    }
+
+    .recommendation-status-label {
+      font-size: 9px;
+      line-height: 1;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      font-weight: 800;
+    }
+
+    .recommendation-status-value {
+      min-width: 0;
+      font-size: 11px;
+      line-height: 1.4;
+      color: var(--text-main);
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .recommendation-list,
+    .chat-shell {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .recommendation-card {
+      padding: 8px;
       transition:
         border-color 180ms ease,
         box-shadow 180ms ease,
@@ -390,28 +529,46 @@
       transform: translateY(-1px);
     }
 
+    .recommendation-card.is-hero {
+      padding: 12px;
+      border-radius: 24px;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(252, 250, 255, 0.98));
+      box-shadow: 0 24px 48px rgba(41, 53, 82, 0.12);
+    }
+
     .recommendation-preview {
       display: grid;
-      grid-template-columns: 108px minmax(0, 1fr);
+      grid-template-columns: 104px minmax(0, 1fr);
       gap: 12px;
       align-items: stretch;
       width: 100%;
-      border: 0;
-      background: linear-gradient(180deg, rgba(255, 247, 250, 0.98), rgba(247, 251, 255, 0.98));
-      border-radius: 20px;
-      padding: 14px;
+      border: 1px solid rgba(235, 240, 248, 0.98);
+      background: rgba(255, 255, 255, 0.98);
+      border-radius: 18px;
+      padding: 10px;
       text-align: left;
       color: inherit;
+      box-shadow: none;
+    }
+
+    .recommendation-card.is-hero .recommendation-preview {
+      grid-template-columns: 1fr;
+      gap: 14px;
+      border: 0;
+      background: transparent;
+      border-radius: 0;
+      padding: 0;
     }
 
     .recommendation-cover {
       position: relative;
       overflow: hidden;
-      border-radius: 16px;
+      border-radius: 14px;
       border: 1px solid rgba(255, 255, 255, 0.92);
       background:
-        linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(245, 249, 255, 0.92)),
-        linear-gradient(145deg, rgba(251, 114, 153, 0.16), rgba(90, 169, 255, 0.14));
+        linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(246, 249, 255, 0.94)),
+        linear-gradient(145deg, rgba(251, 114, 153, 0.12), rgba(90, 169, 255, 0.1));
       box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
       aspect-ratio: 16 / 10;
       min-height: 0;
@@ -424,6 +581,13 @@
       font-weight: 700;
       text-align: center;
       padding: 10px;
+    }
+
+    .recommendation-card.is-hero .recommendation-cover {
+      aspect-ratio: 16 / 11;
+      border-radius: 18px;
+      border-color: rgba(233, 239, 247, 0.96);
+      box-shadow: 0 12px 28px rgba(40, 52, 79, 0.12);
     }
 
     .recommendation-cover::after {
@@ -451,14 +615,30 @@
       display: flex;
       flex-direction: column;
       gap: 10px;
+      justify-content: space-between;
     }
 
     .recommendation-top {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 8px;
+      gap: 6px;
       flex-wrap: wrap;
+    }
+
+    .recommendation-copy-block {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .recommendation-card.is-hero .recommendation-content {
+      gap: 12px;
+    }
+
+    .recommendation-card.is-hero .recommendation-top {
+      align-items: flex-start;
+      gap: 8px;
     }
 
     .topic-badge,
@@ -466,9 +646,9 @@
       display: inline-flex;
       align-items: center;
       min-height: 26px;
-      padding: 6px 10px;
+      padding: 5px 8px;
       border-radius: 999px;
-      font-size: 11px;
+      font-size: 10px;
       line-height: 1.2;
       font-weight: 700;
     }
@@ -488,41 +668,16 @@
       color: #bb7a2d;
     }
 
-    .recommendation-toolbar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      padding: 0 2px;
-    }
-
-    .toolbar-status {
-      font-size: 11px;
-      line-height: 1.5;
-      color: var(--text-secondary);
-      font-weight: 700;
-    }
-
-    .pool-status {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      margin-top: 12px;
-      padding: 10px 12px;
-      border-radius: 18px;
-      border: 1px solid var(--line);
-      background: rgba(255, 255, 255, 0.78);
-      box-shadow: var(--shadow-sm);
-    }
-
-    .pool-status-line {
-      font-size: 12px;
-      line-height: 1.45;
-      color: var(--text-secondary);
+    .recommendation-card.is-hero .topic-badge,
+    .recommendation-card.is-hero .recommendation-state {
+      min-height: 24px;
+      padding: 4px 8px;
+      font-size: 10px;
+      letter-spacing: 0.03em;
     }
 
     .recommendation-title {
-      font-size: 16px;
+      font-size: 15px;
       line-height: 1.45;
       font-weight: 800;
       color: var(--text-main);
@@ -530,23 +685,65 @@
       overflow-wrap: anywhere;
     }
 
+    .recommendation-card.is-hero .recommendation-title {
+      font-size: 20px;
+      line-height: 1.28;
+      letter-spacing: -0.03em;
+      font-family: "Iowan Old Style", "Palatino Linotype", "Noto Serif SC", serif;
+    }
+
     .recommendation-expression {
-      font-size: 12px;
-      line-height: 1.7;
+      font-size: 11px;
+      line-height: 1.6;
       color: var(--text-secondary);
     }
 
-    .recommendation-meta {
+    .recommendation-card.is-hero .recommendation-expression {
+      font-size: 13px;
+      line-height: 1.65;
+      color: #495a74;
+    }
+
+    .recommendation-meta,
+    .recommendation-meta-line {
       display: flex;
       align-items: center;
       gap: 8px;
       flex-wrap: wrap;
-      font-size: 11px;
-      line-height: 1.4;
+      font-size: 10px;
+      line-height: 1.5;
       color: var(--text-muted);
+      letter-spacing: 0.02em;
+    }
+
+    .recommendation-card.is-hero .recommendation-meta-line {
+      font-size: 11px;
+      color: #7d889d;
+      padding-top: 2px;
+      border-top: 1px solid rgba(231, 237, 246, 0.96);
+    }
+
+    @media (max-width: 360px) {
+      .recommendation-header-top {
+        grid-template-columns: 1fr;
+        align-items: stretch;
+      }
+
+      .recommendation-header-top .action-button {
+        width: 100%;
+      }
+
+      .recommendation-status-chip {
+        min-height: 0;
+      }
+
+      .recommendation-status-row {
+        grid-template-columns: 1fr;
+      }
     }
 
     @media (max-width: 520px) {
+
       .recommendation-preview {
         grid-template-columns: 1fr;
       }
@@ -558,17 +755,28 @@
 
     .recommendation-actions {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
+      justify-content: space-between;
       gap: 8px;
       flex-wrap: wrap;
+      margin-top: 8px;
+    }
+
+    .recommendation-card.is-hero .recommendation-actions {
       margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid rgba(231, 237, 246, 0.96);
+    }
+
+    .recommendation-card.is-hero .recommendation-actions .action-primary {
+      min-width: 96px;
     }
 
     .action-button {
       border: 0;
-      border-radius: 14px;
-      min-height: 38px;
-      padding: 10px 12px;
+      border-radius: 12px;
+      min-height: 36px;
+      padding: 9px 11px;
       font-size: 12px;
       line-height: 1.2;
       transition:
@@ -1260,19 +1468,34 @@
 
     <main class="content">
       <section id="viewRecommend" class="view" role="tabpanel" aria-labelledby="tabRecommend">
-        <div class="view-intro">
-          <p class="view-kicker">For You</p>
-          <h2>这几条，你大概会点开</h2>
-          <p>按你最近在看的、点过的和聊过的，先排了几条。</p>
-        </div>
-        <div class="recommendation-toolbar">
-          <button id="refreshRecommendationsButton" class="action-button action-secondary" type="button">换一批</button>
-          <span id="refreshRecommendationsStatus" class="toolbar-status" hidden>正在给你换一批…</span>
-        </div>
-        <div id="poolStatus" class="pool-status" hidden>
-          <p id="poolAvailable" class="pool-status-line">当前池子里还有 0 条可换</p>
-          <p id="poolReplenished" class="pool-status-line">刚补进 0 条新的</p>
-          <p id="poolTopics" class="pool-status-line">最近在补：还在继续摸你的口味</p>
+        <div class="recommendation-header-card">
+          <div class="recommendation-header-top">
+            <div class="recommendation-header-copy">
+              <div class="recommendation-header-intro">
+                <div class="recommendation-header-title">
+                  <p class="view-kicker">For You</p>
+                  <h2>这几条，你大概会点开</h2>
+                </div>
+              </div>
+            </div>
+            <button id="refreshRecommendationsButton" class="action-button action-secondary" type="button">换一批</button>
+          </div>
+          <div class="recommendation-summary-row">
+            <div id="poolStatus" class="recommendation-status-row" hidden>
+              <div class="recommendation-status-chip" data-tone="neutral">
+                <span class="recommendation-status-label">当前可换</span>
+                <span id="poolAvailable" class="recommendation-status-value">还有 0 条可换</span>
+              </div>
+              <div class="recommendation-status-chip" data-tone="brand">
+                <span class="recommendation-status-label">最近补进</span>
+                <span id="poolReplenished" class="recommendation-status-value">刚补进 0 条</span>
+              </div>
+              <div class="recommendation-status-chip" data-tone="info">
+                <span class="recommendation-status-label">现在在忙</span>
+                <span id="poolTopics" class="recommendation-status-value">还在继续摸你的口味</span>
+              </div>
+            </div>
+          </div>
         </div>
         <div id="emptyState" class="empty-state" hidden>
           <h3 id="emptyTitle">还没刷出新东西</h3>
@@ -1284,8 +1507,8 @@
       <section id="viewProfile" class="view" role="tabpanel" aria-labelledby="tabProfile" hidden>
         <div class="view-intro">
           <p class="view-kicker">Profile</p>
-          <h2>现在的你，大概是这个画风</h2>
-          <p>不只看你点过啥，也看你会在哪儿停下来。</p>
+          <h2>我感觉你大概是这样的</h2>
+          <p>不是光看你点过啥，我主要在看你会为哪种东西停下来。</p>
         </div>
         <div id="profileEmpty" class="empty-state" hidden>
           <h3 id="profileEmptyTitle">画像还没攒起来</h3>
@@ -1297,7 +1520,7 @@
             <p id="profilePortrait" class="profile-copy"></p>
           </div>
           <div class="profile-group">
-            <h3>比较稳定的偏好</h3>
+            <h3>比较稳定的底色</h3>
             <div id="profileTraits" class="chip-list"></div>
           </div>
           <div class="profile-group">

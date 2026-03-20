@@ -71,7 +71,7 @@ enabled = true
 discovery_cron = "0 */4 * * *"  # Every 4 hours
 # Keep at least this many fresh candidates ready in the discovery pool
 # Allowed range: 1..300; each single refresh will backfill at most 60
-pool_target_count = 150
+pool_target_count = 300
 # Low-frequency account sync interval for history / favorites / following
 account_sync_interval_hours = 6
 

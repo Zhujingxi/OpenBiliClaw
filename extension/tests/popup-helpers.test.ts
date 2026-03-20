@@ -9,6 +9,7 @@ import {
   getCommentSubmitUiState,
   getCognitionHistoryUiState,
   getConnectionBadgeState,
+  getDisplayedPoolStatusSummary,
   getHintBannerState,
   getNextExpandedCognitionIndex,
   getRuntimeRefreshSubmissionState,
@@ -209,9 +210,9 @@ test("getPoolStatusSummary builds pool inventory copy", () => {
       recent_pool_topics: ["国际时事", "宏观经济", "纪录片"],
     }),
     {
-      available: "当前池子里还有 28 条可换",
-      replenished: "刚补进 6 条新的",
-      topics: "最近在补：国际时事 / 宏观经济 / 纪录片",
+      available: "还有 28 条可换",
+      replenished: "刚补进 6 条",
+      topics: "国际时事 / 宏观经济 / 纪录片",
     },
   );
 });
@@ -226,9 +227,9 @@ test("getPoolStatusSummary shows enough-stock copy when pool is already full", (
       recent_pool_topics: [],
     }),
     {
-      available: "当前池子里还有 155 条可换",
-      replenished: "这会儿先不补货，池子里已经够你换了",
-      topics: "最近在补：先把这一池给你慢慢换开",
+      available: "还有 155 条可换",
+      replenished: "这会儿先不补货",
+      topics: "先把这一池给你慢慢换开",
     },
   );
 });
@@ -270,9 +271,32 @@ test("getRealtimePoolStatusSummary prefers runtime stream message when available
       },
     ),
     {
-      available: "当前池子里还有 34 条可换",
-      replenished: "刚补进 6 条新的",
-      topics: "现在在忙：先从你刚刚的口味里搜一轮",
+      available: "还有 34 条可换",
+      replenished: "刚补进 6 条",
+      topics: "先从你刚刚的口味里搜一轮",
+    },
+  );
+});
+
+test("getDisplayedPoolStatusSummary prefers active refresh message over cached runtime event", () => {
+  assert.deepEqual(
+    getDisplayedPoolStatusSummary(
+      {
+        initialized: true,
+        pool_available_count: 34,
+        last_replenished_count: 6,
+        recent_pool_topics: ["国际时事", "宏观经济"],
+      },
+      {
+        type: "refresh.strategy",
+        message: "先从你刚刚的口味里搜一轮",
+      },
+      "正在给你换一批…",
+    ),
+    {
+      available: "还有 34 条可换",
+      replenished: "刚补进 6 条",
+      topics: "正在给你换一批…",
     },
   );
 });

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 
 import pytest
 
-from openbiliclaw.discovery.engine import ContentDiscoveryEngine, DiscoveredContent
+from openbiliclaw.discovery.engine import (
+    ContentDiscoveryEngine,
+    DiscoveredContent,
+    DiscoveryConcurrencyController,
+)
 from openbiliclaw.soul.profile import InterestTag, PreferenceLayer, SoulProfile
 
 
@@ -63,6 +68,36 @@ class FakeRankingClient:
         if rid in self.failing_rids:
             raise RuntimeError(f"boom: {rid}")
         return self.results_by_rid.get(rid, [])
+
+
+class _SlowScoringLLMService(FakeLLMService):
+    def __init__(self, contents: list[str], delay: float = 0.02) -> None:
+        super().__init__(contents)
+        self.delay = delay
+        self.active_calls = 0
+        self.max_active_calls = 0
+
+    async def complete_structured_task(
+        self,
+        *,
+        system_instruction: str,
+        user_input: str,
+        history: list[dict[str, str]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ) -> object:
+        self.active_calls += 1
+        self.max_active_calls = max(self.max_active_calls, self.active_calls)
+        await asyncio.sleep(self.delay)
+        response = await super().complete_structured_task(
+            system_instruction=system_instruction,
+            user_input=user_input,
+            history=history,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        self.active_calls -= 1
+        return response
 
 
 @pytest.mark.asyncio
@@ -175,3 +210,40 @@ async def test_evaluate_content_sets_score_and_reason() -> None:
     assert score == 0.76
     assert content.relevance_score == 0.76
     assert "更贴近你的偏好" in content.relevance_reason
+
+
+@pytest.mark.asyncio
+async def test_trending_strategy_uses_bounded_evaluation_concurrency() -> None:
+    from openbiliclaw.discovery.strategies.strategies import TrendingStrategy
+
+    llm_service = _SlowScoringLLMService(
+        [
+            '{"rids": [36]}',
+            '{"score": 0.82, "reason": "A"}',
+            '{"score": 0.81, "reason": "B"}',
+            '{"score": 0.80, "reason": "C"}',
+        ]
+    )
+    bilibili_client = FakeRankingClient(
+        {
+            0: [
+                {"bvid": "BV1A", "title": "A", "author": "UP1", "mid": 1},
+                {"bvid": "BV1B", "title": "B", "author": "UP2", "mid": 2},
+            ],
+            36: [{"bvid": "BV1C", "title": "C", "author": "UP3", "mid": 3}],
+        }
+    )
+    strategy = TrendingStrategy(
+        bilibili_client=bilibili_client,
+        llm_service=llm_service,
+        score_threshold=0.65,
+        concurrency=DiscoveryConcurrencyController(
+            bilibili_request_concurrency=2,
+            llm_evaluation_concurrency=2,
+        ),
+    )
+
+    results = await strategy.discover(_build_profile(), limit=20)
+
+    assert llm_service.max_active_calls == 2
+    assert [item.bvid for item in results] == ["BV1A", "BV1B", "BV1C"]

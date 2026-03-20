@@ -6,11 +6,10 @@ import {
   getCommentSubmitUiState,
   getCognitionHistoryUiState,
   getConnectionBadgeState,
+  getDisplayedPoolStatusSummary,
   getNextExpandedCognitionIndex,
   getHintBannerState,
   getRuntimeRefreshSubmissionState,
-  getRealtimePoolStatusSummary,
-  getPoolStatusSummary,
   getPopupState,
   getSubmissionProgressMessage,
   getTabButtonState,
@@ -56,6 +55,7 @@ const state = {
   activityFeed: null,
   activityExpanded: false,
   activeFeedbackProgress: null,
+  refreshStatusMessage: "",
 };
 
 const elements = {
@@ -73,7 +73,6 @@ const elements = {
   emptyText: document.getElementById("emptyText"),
   list: document.getElementById("recommendationList"),
   refreshRecommendationsButton: document.getElementById("refreshRecommendationsButton"),
-  refreshRecommendationsStatus: document.getElementById("refreshRecommendationsStatus"),
   poolStatus: document.getElementById("poolStatus"),
   poolAvailable: document.getElementById("poolAvailable"),
   poolReplenished: document.getElementById("poolReplenished"),
@@ -107,14 +106,12 @@ const elements = {
 };
 
 function setRefreshButtonState(loading, message = "") {
+  state.refreshStatusMessage = message;
   if (elements.refreshRecommendationsButton instanceof HTMLButtonElement) {
     elements.refreshRecommendationsButton.disabled = loading;
     elements.refreshRecommendationsButton.textContent = loading ? "正在换一批…" : "换一批";
   }
-  if (elements.refreshRecommendationsStatus instanceof HTMLElement) {
-    elements.refreshRecommendationsStatus.hidden = !message;
-    elements.refreshRecommendationsStatus.textContent = message;
-  }
+  renderPoolStatus(state.runtimeStatus);
 }
 
 function setHint(message, tone = "info") {
@@ -201,7 +198,11 @@ function renderPoolStatus(runtimeStatus) {
     return;
   }
 
-  const summary = getRealtimePoolStatusSummary(runtimeStatus, state.runtimeEvent);
+  const summary = getDisplayedPoolStatusSummary(
+    runtimeStatus,
+    state.runtimeEvent,
+    state.refreshStatusMessage,
+  );
   if (summary == null) {
     elements.poolStatus.hidden = true;
     return;
@@ -714,9 +715,12 @@ function renderRecommendations(items, { append = false } = {}) {
     elements.list.replaceChildren();
   }
 
-  for (const item of items) {
+  for (const [index, item] of items.entries()) {
     const card = document.createElement("article");
     card.className = "recommendation-card";
+    if (!append && index === 0) {
+      card.classList.add("is-hero");
+    }
 
     const preview = document.createElement("button");
     preview.className = "recommendation-preview";
@@ -731,7 +735,6 @@ function renderRecommendations(items, { append = false } = {}) {
       const image = document.createElement("img");
       image.src = item.cover_url;
       image.alt = `${item.title} 的封面`;
-      image.loading = "lazy";
       image.referrerPolicy = "no-referrer";
       image.addEventListener("error", () => {
         cover.replaceChildren();
@@ -754,25 +757,30 @@ function renderRecommendations(items, { append = false } = {}) {
     badge.className = "topic-badge";
     badge.textContent = item.topic_label || "这条给你留着";
 
-    const title = document.createElement("h3");
-    title.className = "recommendation-title";
-    title.textContent = item.title;
-
     const stateBadge = document.createElement("span");
     stateBadge.className = `recommendation-state${item.presented ? " is-presented" : ""}`;
     stateBadge.textContent = item.presented ? "你应该刷到过" : "刚给你翻出来";
 
-    const meta = document.createElement("p");
-    meta.className = "recommendation-meta";
-    meta.textContent = `这位 UP：${item.up_name}`;
-
     top.append(badge, stateBadge);
+
+    const copyBlock = document.createElement("div");
+    copyBlock.className = "recommendation-copy-block";
+
+    const title = document.createElement("h3");
+    title.className = "recommendation-title";
+    title.textContent = item.title;
 
     const expression = document.createElement("p");
     expression.className = "recommendation-expression";
     expression.textContent = item.expression;
 
-    content.append(top, title, expression, meta);
+    copyBlock.append(title, expression);
+
+    const metaLine = document.createElement("p");
+    metaLine.className = "recommendation-meta-line";
+    metaLine.textContent = `这位 UP：${item.up_name}`;
+
+    content.append(top, copyBlock, metaLine);
     preview.append(cover, content);
 
     const feedbackStatus = document.createElement("p");

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
 
+from openbiliclaw.discovery.engine import DiscoveryConcurrencyController
 from openbiliclaw.soul.profile import InterestTag, PreferenceLayer, SoulProfile
 
 
@@ -40,6 +42,36 @@ class FakeLLMService:
     ) -> object:
         content = self.contents.pop(0) if self.contents else '{"score": 0.0, "reason": ""}'
         return _FakeResponse(content)
+
+
+class _SlowScoringLLMService(FakeLLMService):
+    def __init__(self, contents: list[str], delay: float = 0.02) -> None:
+        super().__init__(contents)
+        self.delay = delay
+        self.active_calls = 0
+        self.max_active_calls = 0
+
+    async def complete_structured_task(
+        self,
+        *,
+        system_instruction: str,
+        user_input: str,
+        history: list[dict[str, str]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ) -> object:
+        self.active_calls += 1
+        self.max_active_calls = max(self.max_active_calls, self.active_calls)
+        await asyncio.sleep(self.delay)
+        response = await super().complete_structured_task(
+            system_instruction=system_instruction,
+            user_input=user_input,
+            history=history,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        self.active_calls -= 1
+        return response
 
 
 @dataclass
@@ -278,3 +310,40 @@ async def test_related_chain_can_expand_to_second_level() -> None:
 
     assert client.related_calls == ["BV1SEED", "BV1A"]
     assert [item.bvid for item in results] == ["BV1A", "BV1B"]
+
+
+@pytest.mark.asyncio
+async def test_related_chain_uses_bounded_evaluation_concurrency_within_batch() -> None:
+    from openbiliclaw.discovery.strategies.strategies import RelatedChainStrategy
+
+    memory = FakeMemoryManager(events=[_event("BV1SEED")])
+    client = FakeRelatedClient(
+        related_by_bvid={
+            "BV1SEED": [
+                {"bvid": "BV1A", "title": "A", "owner": {"name": "UP1", "mid": 1}},
+                {"bvid": "BV1B", "title": "B", "owner": {"name": "UP2", "mid": 2}},
+                {"bvid": "BV1C", "title": "C", "owner": {"name": "UP3", "mid": 3}},
+            ]
+        }
+    )
+    strategy = RelatedChainStrategy(
+        bilibili_client=client,
+        llm_service=_SlowScoringLLMService(
+            [
+                '{"score": 0.86, "reason": "A"}',
+                '{"score": 0.85, "reason": "B"}',
+                '{"score": 0.84, "reason": "C"}',
+            ]
+        ),
+        memory_manager=memory,
+        concurrency=DiscoveryConcurrencyController(
+            bilibili_request_concurrency=2,
+            llm_evaluation_concurrency=2,
+        ),
+        max_depth=1,
+    )
+
+    results = await strategy.discover(_build_profile(), limit=20)
+
+    assert strategy.llm_service.max_active_calls == 2
+    assert [item.bvid for item in results] == ["BV1A", "BV1B", "BV1C"]

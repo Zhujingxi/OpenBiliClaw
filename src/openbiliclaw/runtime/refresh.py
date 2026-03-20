@@ -82,7 +82,7 @@ class ContinuousRefreshController:
     notification_cooldown_hours: int = 2
     check_interval_seconds: int = 60
     discovery_limit: int = 18
-    pool_target_count: int = 150
+    pool_target_count: int = 300
     _manual_refresh_task: asyncio.Task[None] | None = None
     _manual_refresh_state: str = "idle"
     _manual_refresh_message: str = ""

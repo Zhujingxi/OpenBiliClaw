@@ -12,3 +12,10 @@ test("profile cognition auto-load listens to the shared content scroller", () =>
   assert.match(popupJs, /maybeLoadMoreRecommendations\(\)/);
   assert.doesNotMatch(popupJs, /elements\.viewProfile\.addEventListener\("scroll"/);
 });
+
+test("recommendation covers do not rely on native lazy loading inside the popup scroller", () => {
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  assert.match(popupJs, /const image = document\.createElement\("img"\);/);
+  assert.doesNotMatch(popupJs, /image\.loading = "lazy"/);
+});

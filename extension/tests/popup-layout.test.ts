@@ -14,6 +14,103 @@ test("popup header keeps compact status inline with brand row", () => {
   assert.doesNotMatch(popupMarkup, /id="statusText"/);
 });
 
+test("recommendation header uses a compact top row with status chips", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const headerCardBlock =
+    popupHtml.match(/\.recommendation-header-card\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const topBlock = popupHtml.match(/\.recommendation-header-top\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const introBlock =
+    popupHtml.match(/\.recommendation-header-intro\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const titleBlock =
+    popupHtml.match(/\.recommendation-header-title\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const summaryRowBlock =
+    popupHtml.match(/\.recommendation-summary-row\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const statusRowBlock =
+    popupHtml.match(/\.recommendation-status-row\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const statusChipBlock =
+    popupHtml.match(/\.recommendation-status-chip\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const recommendMarkup =
+    popupHtml.match(/<section id="viewRecommend"[\s\S]*?<div id="emptyState"/)?.[0] ?? "";
+
+  assert.match(headerCardBlock, /border-radius:\s*20px;/);
+  assert.match(headerCardBlock, /padding:\s*12px;/);
+  assert.match(topBlock, /grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;/);
+  assert.match(introBlock, /display:\s*flex;/);
+  assert.match(introBlock, /flex-direction:\s*column;/);
+  assert.match(titleBlock, /align-items:\s*center;/);
+  assert.match(summaryRowBlock, /display:\s*flex;/);
+  assert.match(statusRowBlock, /display:\s*grid;/);
+  assert.match(statusRowBlock, /grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\);/);
+  assert.match(statusChipBlock, /border-radius:\s*16px;/);
+  assert.match(statusChipBlock, /align-items:\s*flex-start;/);
+  assert.match(recommendMarkup, /class="recommendation-header-card"/);
+  assert.match(recommendMarkup, /class="recommendation-header-top"/);
+  assert.match(recommendMarkup, /class="recommendation-header-intro"/);
+  assert.match(recommendMarkup, /class="recommendation-header-title"/);
+  assert.match(recommendMarkup, /class="recommendation-summary-row"/);
+  assert.match(recommendMarkup, /class="recommendation-status-row"/);
+  assert.match(recommendMarkup, /id="poolAvailable"/);
+  assert.match(recommendMarkup, /id="poolReplenished"/);
+  assert.match(recommendMarkup, /id="poolTopics"/);
+  assert.doesNotMatch(recommendMarkup, /class="recommendation-status-grid"/);
+  assert.doesNotMatch(recommendMarkup, /class="recommendation-header-note"/);
+});
+
+test("recommendation header keeps its compact inline layout until very narrow widths", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const narrowHeaderQuery =
+    popupHtml.match(/@media \(max-width: 360px\)\s*\{[\s\S]*?\.recommendation-status-chip[\s\S]*?\}/)?.[0] ?? "";
+  const mediumHeaderQuery =
+    popupHtml.match(/@media \(max-width: 520px\)\s*\{[\s\S]*?\.recommendation-header-top[\s\S]*?\}/)?.[0] ?? "";
+
+  assert.match(narrowHeaderQuery, /\.recommendation-header-top\s*\{/);
+  assert.match(narrowHeaderQuery, /\.recommendation-status-chip\s*\{/);
+  assert.doesNotMatch(mediumHeaderQuery, /\.recommendation-header-top\s*\{/);
+  assert.doesNotMatch(mediumHeaderQuery, /\.recommendation-status-chip\s*\{/);
+});
+
+test("recommendation cards use explicit editorial content sections", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const previewBlock = popupHtml.match(/\.recommendation-preview\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const contentBlock = popupHtml.match(/\.recommendation-content\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const copyBlock = popupHtml.match(/\.recommendation-copy-block\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const metaLineBlock = popupHtml.match(/\.recommendation-meta-line\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const actionsBlock = popupHtml.match(/\.recommendation-actions\s*\{[\s\S]*?\}/)?.[0] ?? "";
+
+  assert.match(previewBlock, /grid-template-columns:\s*104px\s+minmax\(0,\s*1fr\);/);
+  assert.match(contentBlock, /justify-content:\s*space-between;/);
+  assert.match(copyBlock, /display:\s*flex;/);
+  assert.match(copyBlock, /flex-direction:\s*column;/);
+  assert.match(metaLineBlock, /font-size:\s*10px;/);
+  assert.match(actionsBlock, /justify-content:\s*space-between;/);
+  assert.match(popupJs, /copyBlock\.className = "recommendation-copy-block";/);
+  assert.match(popupJs, /metaLine\.className = "recommendation-meta-line";/);
+  assert.match(popupJs, /content\.append\(top, copyBlock, metaLine\);/);
+  assert.doesNotMatch(popupJs, /content\.append\(top,\s*title,\s*expression,\s*meta\);/);
+});
+
+test("first recommendation card is promoted to a magazine-style hero card", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const heroCardBlock =
+    popupHtml.match(/\.recommendation-card\.is-hero\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const heroPreviewBlock =
+    popupHtml.match(/\.recommendation-card\.is-hero\s+\.recommendation-preview\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const heroCoverBlock =
+    popupHtml.match(/\.recommendation-card\.is-hero\s+\.recommendation-cover\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const heroTitleBlock =
+    popupHtml.match(/\.recommendation-card\.is-hero\s+\.recommendation-title\s*\{[\s\S]*?\}/)?.[0] ?? "";
+
+  assert.match(heroCardBlock, /padding:\s*12px;/);
+  assert.match(heroPreviewBlock, /grid-template-columns:\s*1fr;/);
+  assert.match(heroPreviewBlock, /gap:\s*14px;/);
+  assert.match(heroCoverBlock, /aspect-ratio:\s*16\s*\/\s*11;/);
+  assert.match(heroTitleBlock, /font-size:\s*20px;/);
+  assert.match(popupJs, /if \(!append && index === 0\)/);
+  assert.match(popupJs, /card\.classList\.add\("is-hero"\);/);
+});
+
 test("popup page is structured for side panel browsing", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const htmlBlock = popupHtml.match(/html\s*\{[\s\S]*?\}/)?.[0] ?? "";
@@ -40,7 +137,7 @@ test("recommendation card layout reserves a media cover slot", () => {
   const coverBlock = popupHtml.match(/\.recommendation-cover\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const coverImageBlock = popupHtml.match(/\.recommendation-cover img\s*\{[\s\S]*?\}/)?.[0] ?? "";
 
-  assert.match(previewBlock, /grid-template-columns:\s*108px\s+minmax\(0,\s*1fr\);/);
+  assert.match(previewBlock, /grid-template-columns:\s*104px\s+minmax\(0,\s*1fr\);/);
   assert.match(coverBlock, /aspect-ratio:\s*16\s*\/\s*10;/);
   assert.match(coverImageBlock, /object-fit:\s*cover;/);
 });

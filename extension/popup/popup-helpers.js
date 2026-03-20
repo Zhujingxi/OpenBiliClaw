@@ -288,19 +288,19 @@ export function getPoolStatusSummary(status) {
   const poolIsSufficient =
     runtime.pool_target_count > 0 && runtime.pool_available_count >= runtime.pool_target_count;
   return {
-    available: `当前池子里还有 ${runtime.pool_available_count} 条可换`,
+    available: `还有 ${runtime.pool_available_count} 条可换`,
     replenished:
       runtime.last_replenished_count > 0
-        ? `刚补进 ${runtime.last_replenished_count} 条新的`
+        ? `刚补进 ${runtime.last_replenished_count} 条`
         : poolIsSufficient
-          ? "这会儿先不补货，池子里已经够你换了"
-          : "这轮还没补进新的",
+          ? "这会儿先不补货"
+          : "这轮还没补进",
     topics:
       runtime.recent_pool_topics.length > 0
-        ? `最近在补：${runtime.recent_pool_topics.join(" / ")}`
+        ? runtime.recent_pool_topics.join(" / ")
         : poolIsSufficient
-          ? "最近在补：先把这一池给你慢慢换开"
-          : "最近在补：还在继续摸你的口味",
+          ? "先把这一池给你慢慢换开"
+          : "还在继续摸你的口味",
   };
 }
 
@@ -315,7 +315,22 @@ export function getRealtimePoolStatusSummary(status, event = null) {
   }
   return {
     ...summary,
-    topics: `现在在忙：${message}`,
+    topics: message,
+  };
+}
+
+export function getDisplayedPoolStatusSummary(status, event = null, refreshMessage = "") {
+  const summary = getPoolStatusSummary(status);
+  if (summary == null) {
+    return null;
+  }
+  const activeMessage = normalizeText(refreshMessage) || normalizeText(event?.message);
+  if (!activeMessage) {
+    return summary;
+  }
+  return {
+    ...summary,
+    topics: activeMessage,
   };
 }
 

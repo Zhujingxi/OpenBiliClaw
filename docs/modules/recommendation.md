@@ -84,7 +84,7 @@ items = await engine.reshuffle_recommendations(
 - 如果候选缺少 `topic_key`，才退回 `tags` 和标题/来源兜底做软限流
 - 如果候选还没有朋友式 `expression`，会优先使用按 `style_key` 润色过的快速 fallback 文案，而不是直接裸用 `relevance_reason`
 - 命中候选后会立即写入 `recommendations` 表，并把对应池子项标记为 `shown`
-- runtime 会把 discovery pool 持续补到 `pool_target_count` 附近，默认目标现在是 `150`，保证 popup 连续“换一批”时尽量随时有货
+- runtime 会把 discovery pool 持续补到 `pool_target_count` 附近，默认目标现在是 `300`，保证 popup 连续“换一批”和自动续页时尽量随时有货
 
 ### RecommendationEngine.append_recommendations
 
