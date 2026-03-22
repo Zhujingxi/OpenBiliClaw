@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
+import httpx
 import pytest
 
 from openbiliclaw.bilibili.api import (
@@ -32,10 +35,17 @@ class FakeAsyncClient:
 
     def __init__(self, payload: dict[str, object] | list[dict[str, object]]) -> None:
         self.payload = payload
-        self.calls: list[tuple[str, dict[str, object] | None]] = []
+        self.calls: list[
+            tuple[str, dict[str, object] | None, dict[str, str] | None]
+        ] = []
 
-    async def get(self, url: str, params: dict[str, object] | None = None) -> FakeResponse:
-        self.calls.append((url, params))
+    async def get(
+        self,
+        url: str,
+        params: dict[str, object] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> FakeResponse:
+        self.calls.append((url, params, headers))
         payload = self.payload.pop(0) if isinstance(self.payload, list) else self.payload
         return FakeResponse(payload)
 
@@ -48,14 +58,90 @@ class RouteAsyncClient:
 
     def __init__(self, routes: dict[str, list[dict[str, object]]]) -> None:
         self.routes = {key: value.copy() for key, value in routes.items()}
-        self.calls: list[tuple[str, dict[str, object] | None]] = []
+        self.calls: list[
+            tuple[str, dict[str, object] | None, dict[str, str] | None]
+        ] = []
 
-    async def get(self, url: str, params: dict[str, object] | None = None) -> FakeResponse:
-        self.calls.append((url, params))
+    async def get(
+        self,
+        url: str,
+        params: dict[str, object] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> FakeResponse:
+        self.calls.append((url, params, headers))
         for path, payloads in self.routes.items():
             if url.endswith(path):
                 return FakeResponse(payloads.pop(0))
         raise AssertionError(f"Unexpected URL: {url}")
+
+    async def aclose(self) -> None:
+        return None
+
+
+class ErroringAsyncClient:
+    """Fake async client that raises an HTTP status error."""
+
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        self.calls: list[
+            tuple[str, dict[str, object] | None, dict[str, str] | None]
+        ] = []
+
+    async def get(
+        self,
+        url: str,
+        params: dict[str, object] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> FakeResponse:
+        self.calls.append((url, params, headers))
+        request = httpx.Request("GET", url, params=params)
+        response = httpx.Response(self.status_code, request=request)
+        raise httpx.HTTPStatusError(
+            f"Client error '{self.status_code} Precondition Failed'",
+            request=request,
+            response=response,
+        )
+
+    async def aclose(self) -> None:
+        return None
+
+
+class NavThenErrorAsyncClient:
+    """Fake client that serves nav once, then raises on search."""
+
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        self.calls: list[
+            tuple[str, dict[str, object] | None, dict[str, str] | None]
+        ] = []
+
+    async def get(
+        self,
+        url: str,
+        params: dict[str, object] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> FakeResponse:
+        self.calls.append((url, params, headers))
+        if url.endswith("/x/web-interface/nav"):
+            return FakeResponse(
+                {
+                    "code": 0,
+                    "data": {
+                        "wbi_img": {
+                            "img_url": "https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png",
+                            "sub_url": "https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png",
+                        }
+                    },
+                }
+            )
+
+        request = httpx.Request("GET", url, params=params)
+        response = httpx.Response(self.status_code, request=request)
+        raise httpx.HTTPStatusError(
+            f"Client error '{self.status_code} Precondition Failed'",
+            request=request,
+            response=response,
+        )
 
     async def aclose(self) -> None:
         return None
@@ -129,17 +215,77 @@ async def test_get_user_history_uses_cursor_pagination() -> None:
 @pytest.mark.asyncio
 async def test_search_passes_order_parameter() -> None:
     client = BilibiliAPIClient(cookie="SESSDATA=abc")
-    client._client = FakeAsyncClient({"code": 0, "data": {"result": []}})
+    client._client = RouteAsyncClient(
+        {
+            "/x/web-interface/nav": [
+                {
+                    "code": 0,
+                    "data": {
+                        "wbi_img": {
+                            "img_url": "https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png",
+                            "sub_url": "https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png",
+                        }
+                    },
+                }
+            ],
+            "/x/web-interface/wbi/search/type": [{"code": 0, "data": {"result": []}}],
+        }
+    )
 
     await client.search("纪录片", page=2, page_size=10, order="pubdate")
 
-    assert client._client.calls[0][1] == {
-        "keyword": "纪录片",
-        "search_type": "video",
-        "page": 2,
-        "page_size": 10,
-        "order": "pubdate",
+    assert client._client.calls[1][1] is not None
+    assert client._client.calls[1][1]["keyword"] == "纪录片"
+    assert client._client.calls[1][1]["search_type"] == "video"
+    assert client._client.calls[1][1]["page"] == "2"
+    assert client._client.calls[1][1]["page_size"] == "10"
+    assert client._client.calls[1][1]["order"] == "pubdate"
+
+
+@pytest.mark.asyncio
+async def test_search_uses_wbi_signed_endpoint_and_search_page_headers() -> None:
+    client = BilibiliAPIClient(cookie="SESSDATA=abc")
+    client._client = RouteAsyncClient(
+        {
+            "/x/web-interface/nav": [
+                {
+                    "code": -101,
+                    "message": "账号未登录",
+                    "data": {
+                        "wbi_img": {
+                            "img_url": "https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png",
+                            "sub_url": "https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png",
+                        }
+                    },
+                }
+            ],
+            "/x/web-interface/wbi/search/type": [{"code": 0, "data": {"result": []}}],
+        }
+    )
+
+    await client.search("纪录片", page=1, page_size=10, order="totalrank")
+
+    assert client._client.calls[1][0].endswith("/x/web-interface/wbi/search/type")
+    assert client._client.calls[1][1] is not None
+    assert client._client.calls[1][1]["keyword"] == "纪录片"
+    assert client._client.calls[1][1]["search_type"] == "video"
+    assert client._client.calls[1][1]["web_location"] == "1430654"
+    assert "wts" in client._client.calls[1][1]
+    assert "w_rid" in client._client.calls[1][1]
+    assert client._client.calls[1][2] == {
+        "Referer": f"https://search.bilibili.com/all?keyword={quote('纪录片', safe='')}",
+        "Origin": "https://search.bilibili.com",
     }
+
+
+@pytest.mark.asyncio
+async def test_search_returns_empty_on_412() -> None:
+    client = BilibiliAPIClient(cookie="SESSDATA=abc")
+    client._client = NavThenErrorAsyncClient(status_code=412)
+
+    results = await client.search("纪录片", page=1, page_size=10, order="totalrank")
+
+    assert results == []
 
 
 @pytest.mark.asyncio

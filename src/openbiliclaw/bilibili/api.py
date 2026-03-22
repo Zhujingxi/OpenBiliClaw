@@ -7,10 +7,13 @@ and reverse-engineered API for speed and efficiency.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, cast
+from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 
@@ -107,11 +110,79 @@ class BilibiliAPIClient:
     """
 
     _BASE_URL = "https://api.bilibili.com"
+    _SEARCH_WEB_LOCATION = 1430654
+    _WBI_MIXIN_KEY_ENC_TAB = [
+        46,
+        47,
+        18,
+        2,
+        53,
+        8,
+        23,
+        32,
+        15,
+        50,
+        10,
+        31,
+        58,
+        3,
+        45,
+        35,
+        27,
+        43,
+        5,
+        49,
+        33,
+        9,
+        42,
+        19,
+        29,
+        28,
+        14,
+        39,
+        12,
+        38,
+        41,
+        13,
+        37,
+        48,
+        7,
+        16,
+        24,
+        55,
+        40,
+        61,
+        26,
+        17,
+        0,
+        1,
+        60,
+        51,
+        30,
+        4,
+        22,
+        25,
+        54,
+        21,
+        56,
+        59,
+        6,
+        63,
+        57,
+        62,
+        11,
+        36,
+        20,
+        34,
+        44,
+        52,
+    ]
 
     def __init__(self, cookie: str = "", *, min_request_interval: float = 0.2) -> None:
         self._cookie = cookie
         self._min_request_interval = min_request_interval
         self._last_request_at = 0.0
+        self._cached_wbi_keys: tuple[str, str] | None = None
         self._client = httpx.AsyncClient(
             headers={
                 "User-Agent": (
@@ -144,11 +215,16 @@ class BilibiliAPIClient:
         path: str,
         *,
         params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Perform a GET request and return the decoded `data` payload."""
         await self._respect_rate_limit()
         try:
-            resp = await self._client.get(f"{self._BASE_URL}{path}", params=params)
+            resp = await self._client.get(
+                f"{self._BASE_URL}{path}",
+                params=params,
+                headers=headers,
+            )
             resp.raise_for_status()
         except httpx.HTTPError as exc:
             raise BilibiliAPIError(str(exc)) from exc
@@ -159,6 +235,61 @@ class BilibiliAPIClient:
             message = str(payload.get("message", "Bilibili API request failed"))
             raise BilibiliAPIError(message)
         return _json_object(payload.get("data", {}))
+
+    async def _get_wbi_keys(self) -> tuple[str, str]:
+        """Fetch and cache the WBI image/sub keys used for signed search requests."""
+        if self._cached_wbi_keys is not None:
+            return self._cached_wbi_keys
+
+        await self._respect_rate_limit()
+        try:
+            resp = await self._client.get(f"{self._BASE_URL}/x/web-interface/nav")
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise BilibiliAPIError(str(exc)) from exc
+
+        payload = _json_object(resp.json())
+        data = _json_object(payload.get("data", {}))
+        wbi_img = _json_object(data.get("wbi_img", {}))
+        img_key = self._extract_wbi_key_component(str(wbi_img.get("img_url", "")))
+        sub_key = self._extract_wbi_key_component(str(wbi_img.get("sub_url", "")))
+        if not img_key or not sub_key:
+            raise BilibiliAPIError("Missing wbi keys in nav response")
+        self._cached_wbi_keys = (img_key, sub_key)
+        return self._cached_wbi_keys
+
+    @staticmethod
+    def _extract_wbi_key_component(url: str) -> str:
+        """Return the key segment from a WBI image URL."""
+        path = urlparse(url).path
+        filename = path.rsplit("/", 1)[-1]
+        return filename.rsplit(".", 1)[0]
+
+    @classmethod
+    def _build_wbi_mixin_key(cls, img_key: str, sub_key: str) -> str:
+        """Build the mixed key used by Bilibili WBI request signing."""
+        merged = img_key + sub_key
+        return "".join(merged[index] for index in cls._WBI_MIXIN_KEY_ENC_TAB)[:32]
+
+    @classmethod
+    def _sign_wbi_params(
+        cls,
+        params: dict[str, object],
+        *,
+        img_key: str,
+        sub_key: str,
+    ) -> dict[str, str]:
+        """Sign search params using Bilibili's WBI algorithm."""
+        mixin_key = cls._build_wbi_mixin_key(img_key, sub_key)
+        signed_params = {**params, "wts": int(time.time())}
+        ordered_items = sorted(signed_params.items())
+        sanitized = {
+            key: re.sub(r"[!'()*]", "", str(value))
+            for key, value in ordered_items
+        }
+        query = urlencode(sanitized)
+        sanitized["w_rid"] = hashlib.md5((query + mixin_key).encode()).hexdigest()
+        return sanitized
 
     async def get_nav_info(self) -> NavInfo:
         """Get the current login state from Bilibili nav API."""
@@ -223,16 +354,39 @@ class BilibiliAPIClient:
         Returns:
             List of search result dicts.
         """
-        data = await self._get_json(
-            "/x/web-interface/search/type",
-            params={
-                "keyword": keyword,
-                "search_type": "video",
-                "page": page,
-                "page_size": page_size,
-                "order": order,
-            },
-        )
+        try:
+            img_key, sub_key = await self._get_wbi_keys()
+            data = await self._get_json(
+                "/x/web-interface/wbi/search/type",
+                params=self._sign_wbi_params(
+                    {
+                        "keyword": keyword,
+                        "search_type": "video",
+                        "page": page,
+                        "page_size": page_size,
+                        "order": order,
+                        "web_location": self._SEARCH_WEB_LOCATION,
+                    },
+                    img_key=img_key,
+                    sub_key=sub_key,
+                ),
+                headers={
+                    "Referer": (
+                        "https://search.bilibili.com/all"
+                        f"?keyword={quote(keyword, safe='')}"
+                    ),
+                    "Origin": "https://search.bilibili.com",
+                },
+            )
+        except BilibiliAPIError as exc:
+            cause = exc.__cause__
+            if (
+                isinstance(cause, httpx.HTTPStatusError)
+                and cause.response.status_code == 412
+            ):
+                logger.warning("Bilibili search blocked with 412 for query=%r", keyword)
+                return []
+            raise
         return _json_list(data.get("result", []))
 
     async def get_user_history(self, max_items: int = 100) -> list[dict[str, Any]]:
