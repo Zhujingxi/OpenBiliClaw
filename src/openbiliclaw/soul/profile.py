@@ -511,14 +511,13 @@ class OnionProfile:
         """Synthesize a flat PreferenceLayer from onion layers."""
         flat_interests: list[InterestTag] = []
         for dom in self.interest.likes:
-            if dom.specifics:
-                for spec in dom.specifics:
-                    flat_interests.append(
-                        InterestTag(name=spec.name, category=dom.domain, weight=spec.weight)
-                    )
-            else:
+            # Always include the domain itself as a top-level interest
+            flat_interests.append(
+                InterestTag(name=dom.domain, category=dom.domain, weight=dom.weight)
+            )
+            for spec in dom.specifics:
                 flat_interests.append(
-                    InterestTag(name=dom.domain, category=dom.domain, weight=dom.weight)
+                    InterestTag(name=spec.name, category=dom.domain, weight=spec.weight)
                 )
         flat_disliked: list[str] = []
         for dom in self.interest.dislikes:

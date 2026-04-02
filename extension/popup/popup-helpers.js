@@ -120,28 +120,94 @@ export function getNextExpandedCognitionIndex(currentIndex, clickedIndex) {
   return currentIndex === clickedIndex ? null : clickedIndex;
 }
 
+function normalizeStrList(raw) {
+  return Array.isArray(raw) ? raw.map(normalizeText).filter(Boolean) : [];
+}
+
+function normalizeMBTI(raw) {
+  if (!raw || !raw.type) return null;
+  const dims = {};
+  if (raw.dimensions && typeof raw.dimensions === "object") {
+    for (const [k, v] of Object.entries(raw.dimensions)) {
+      dims[k] = { pole: normalizeText(v?.pole), strength: Number(v?.strength ?? 0.5) };
+    }
+  }
+  return { type: normalizeText(raw.type), dimensions: dims, confidence: Number(raw.confidence ?? 0) };
+}
+
+function normalizeInterestDomains(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((d) => d?.domain)
+    .map((d) => ({
+      domain: normalizeText(d.domain),
+      weight: Number(d.weight ?? 0.5),
+      specifics: Array.isArray(d.specifics)
+        ? d.specifics
+            .filter((s) => s?.name)
+            .map((s) => ({ name: normalizeText(s.name), weight: Number(s.weight ?? 0.5) }))
+        : [],
+    }));
+}
+
+function normalizeStyle(raw) {
+  if (!raw) return null;
+  return {
+    preferred_duration: normalizeText(raw.preferred_duration),
+    preferred_pace: normalizeText(raw.preferred_pace),
+    quality_sensitivity: Number(raw.quality_sensitivity ?? 0.5),
+    humor_preference: Number(raw.humor_preference ?? 0.5),
+    depth_preference: Number(raw.depth_preference ?? 0.5),
+  };
+}
+
+function normalizeContext(raw) {
+  if (!raw) return null;
+  return {
+    weekday_patterns: normalizeText(raw.weekday_patterns),
+    weekend_patterns: normalizeText(raw.weekend_patterns),
+    time_of_day_patterns: normalizeText(raw.time_of_day_patterns),
+    session_type: normalizeText(raw.session_type),
+  };
+}
+
 export function normalizeProfileSummary(summary) {
   return {
     initialized: Boolean(summary?.initialized),
     personality_portrait: normalizeText(summary?.personality_portrait) || DEFAULT_PORTRAIT,
-    core_traits: Array.isArray(summary?.core_traits)
-      ? summary.core_traits.map(normalizeText).filter(Boolean)
-      : [],
-    cognitive_style: Array.isArray(summary?.cognitive_style)
-      ? summary.cognitive_style.map(normalizeText).filter(Boolean)
-      : [],
-    motivational_drivers: Array.isArray(summary?.motivational_drivers)
-      ? summary.motivational_drivers.map(normalizeText).filter(Boolean)
-      : [],
+    // Core
+    core_traits: normalizeStrList(summary?.core_traits),
+    deep_needs: normalizeStrList(summary?.deep_needs),
+    mbti: normalizeMBTI(summary?.mbti),
+    // Values
+    values: normalizeStrList(summary?.values),
+    motivational_drivers: normalizeStrList(summary?.motivational_drivers),
+    // Interest
+    likes: normalizeInterestDomains(summary?.likes),
+    dislikes: normalizeInterestDomains(summary?.dislikes),
+    favorite_up_users: normalizeStrList(summary?.favorite_up_users),
+    // Role
+    life_stage: normalizeText(summary?.life_stage),
     current_phase: normalizeText(summary?.current_phase),
-    deep_needs: Array.isArray(summary?.deep_needs)
-      ? summary.deep_needs.map(normalizeText).filter(Boolean)
-      : [],
-    top_interests: Array.isArray(summary?.top_interests)
-      ? summary.top_interests.map(normalizeText).filter(Boolean)
-      : [],
-    disliked_topics: Array.isArray(summary?.disliked_topics)
-      ? summary.disliked_topics.map(normalizeText).filter(Boolean)
+    // Surface
+    cognitive_style: normalizeStrList(summary?.cognitive_style),
+    style: normalizeStyle(summary?.style),
+    context: normalizeContext(summary?.context),
+    exploration_openness: typeof summary?.exploration_openness === "number"
+      ? Math.max(0, Math.min(1, summary.exploration_openness))
+      : 0.5,
+    // Cross-cutting
+    speculative_interests: Array.isArray(summary?.speculative_interests)
+      ? summary.speculative_interests
+          .filter((item) => item?.domain)
+          .map((item) => ({
+            domain: normalizeText(item.domain),
+            reason: normalizeText(item.reason),
+            confidence: Number(item.confidence ?? 0),
+            confirmation_count: Number(item.confirmation_count ?? 0),
+            confirmation_threshold: Number(item.confirmation_threshold ?? 3),
+            status: normalizeText(item.status) || "active",
+          }))
       : [],
     recent_cognition_updates: Array.isArray(summary?.recent_cognition_updates)
       ? summary.recent_cognition_updates

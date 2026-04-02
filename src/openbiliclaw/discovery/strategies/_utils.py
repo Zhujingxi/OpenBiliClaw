@@ -127,11 +127,61 @@ def normalize_match_text(value: str) -> str:
     return re.sub(r"\s+", "", value).strip().lower()
 
 
+def _extract_interest_domains(profile: SoulProfile) -> list[dict[str, object]]:
+    """Extract domain-level (一级) interest hierarchy from profile.
+
+    Returns a list like:
+    [{"domain": "AI/ML", "weight": 0.9, "specifics": ["强化学习", "ppo算法"]}, ...]
+
+    This gives LLM prompts visibility into both broad domains AND
+    specific sub-interests, enabling queries at different granularity.
+    """
+    from openbiliclaw.soul.profile import OnionProfile
+
+    # OnionProfile has the tree structure directly
+    if isinstance(profile, OnionProfile):
+        return [
+            {
+                "domain": dom.domain,
+                "weight": dom.weight,
+                "specifics": [s.name for s in dom.specifics[:5]],
+            }
+            for dom in profile.interest.likes[:8]
+            if dom.domain.strip()
+        ]
+
+    # Flat SoulProfile: reconstruct domains from category grouping
+    domain_map: dict[str, dict[str, object]] = {}
+    for tag in profile.preferences.interests[:15]:
+        key = tag.category or tag.name
+        if key not in domain_map:
+            domain_map[key] = {
+                "domain": key,
+                "weight": tag.weight,
+                "specifics": [],
+            }
+        existing = domain_map[key]
+        if tag.name != key:
+            specs = existing["specifics"]
+            if isinstance(specs, list) and len(specs) < 5:
+                specs.append(tag.name)
+        existing_weight = existing.get("weight", 0)
+        if tag.weight > (float(existing_weight) if isinstance(existing_weight, (int, float)) else 0):
+            existing["weight"] = tag.weight
+    return list(domain_map.values())[:8]
+
+
 def build_profile_summary(profile: SoulProfile) -> dict[str, object]:
-    """Build a compact summary dict from a :class:`SoulProfile`."""
+    """Build a compact summary dict from a :class:`SoulProfile`.
+
+    Includes both domain-level (一级) and specific (二级) interests so that
+    discovery prompts can generate queries at different granularity levels.
+    """
+    interest_domains = _extract_interest_domains(profile)
     summary: dict[str, object] = {
         "personality_portrait": profile.personality_portrait,
         "core_traits": profile.core_traits[:5],
+        "interest_domains": interest_domains,
         "interests": [
             {
                 "name": interest.name,

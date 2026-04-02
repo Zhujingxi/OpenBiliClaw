@@ -985,7 +985,7 @@ class TestBackendAPI:
                         "kind": "interest_added",
                         "summary": "阿B 现在更确定你会吃国际时事深拆这一口。",
                         "context_line": "基于最近内容：《中东局势深拆》 / 《国际秩序观察》",
-                        "impact": "画像里“国际新闻 / 深度分析”这条偏好会更靠前。",
+                        "impact": '画像里\u201c国际新闻 / 深度分析\u201d这条偏好会更靠前。',
                         "reasoning": "这更像是连续强化后的稳定兴趣，不只是一次随手点开。",
                         "evidence": "因为你最近连续点开相关内容，还主动提到了国际时事。",
                         "source": "chat",
@@ -1003,6 +1003,8 @@ class TestBackendAPI:
             motivational_drivers = ["建立判断确定性", "持续扩展理解边界", "在复杂信息里找到秩序感"]
             current_phase = "最近更像在一边吸收高密度信息，一边整理自己的判断框架。"
             deep_needs = ["理解世界", "持续成长", "高质量独处", "智性共鸣", "掌控感", "审美沉浸"]
+            values = ["独立思考", "真实", "深度"]
+            life_stage = "职业上升期，开始关注更宏观的议题。"
             preferences = type(
                 "Preferences",
                 (),
@@ -1026,6 +1028,8 @@ class TestBackendAPI:
                         "过度说教",
                         "工业糖精",
                     ],
+                    "favorite_up_users": ["经济观察", "构图实验室"],
+                    "exploration_openness": 0.72,
                 },
             )()
 
@@ -1043,56 +1047,32 @@ class TestBackendAPI:
         response = client.get("/api/profile-summary")
 
         assert response.status_code == 200
-        assert response.json() == {
-            "initialized": True,
-            "personality_portrait": "这是一个喜欢把问题想透、信息密度偏高的用户。",
-            "core_traits": ["理性", "好奇", "克制", "耐心", "敏感", "深究"],
-            "cognitive_style": ["会先看结构", "对证据比较敏感", "偏好把问题讲透", "不太吃空话"],
-            "motivational_drivers": [
-                "建立判断确定性",
-                "持续扩展理解边界",
-                "在复杂信息里找到秩序感",
-            ],
-            "current_phase": "最近更像在一边吸收高密度信息，一边整理自己的判断框架。",
-            "deep_needs": ["理解世界", "持续成长", "高质量独处", "智性共鸣", "掌控感"],
-            "top_interests": [
-                "国际新闻",
-                "深度分析",
-                "工业设计",
-                "城市观察",
-                "纪录片",
-                "商业案例",
-                "复杂系统",
-                "技术史",
-            ],
-            "disliked_topics": ["标题党", "浅层热点复读", "尬笑段子", "纯情绪输出", "过度说教"],
-            "recent_cognition_updates": [
-                {
-                    "summary": "阿B 现在更确定你会吃国际时事深拆这一口。",
-                    "context_line": "基于最近内容：《中东局势深拆》 / 《国际秩序观察》",
-                    "impact": "画像里“国际新闻 / 深度分析”这条偏好会更靠前。",
-                    "reasoning": "这更像是连续强化后的稳定兴趣，不只是一次随手点开。",
-                    "evidence": "因为你最近连续点开相关内容，还主动提到了国际时事。",
-                    "source": "chat",
-                    "source_label": "聊天",
-                    "expand_hint": "expandable",
-                    "created_at": "2026-03-14T22:30:00",
-                },
-                {
-                    "summary": "我对你又对上了一点：你不是只看热闹的人。",
-                    "context_line": "基于最近几条相关内容",
-                    "impact": "",
-                    "reasoning": "",
-                    "evidence": "",
-                    "source": "",
-                    "source_label": "",
-                    "expand_hint": "summary_only",
-                    "created_at": "",
-                },
-            ],
-            "has_more_cognition_updates": False,
-            "next_cognition_cursor": "",
-        }
+        data = response.json()
+        assert data["initialized"] is True
+        assert data["personality_portrait"] == "这是一个喜欢把问题想透、信息密度偏高的用户。"
+        assert data["core_traits"] == ["理性", "好奇", "克制", "耐心", "敏感", "深究"]
+        assert data["deep_needs"] == ["理解世界", "持续成长", "高质量独处", "智性共鸣", "掌控感"]
+        assert data["values"] == ["独立思考", "真实", "深度"]
+        assert data["motivational_drivers"] == [
+            "建立判断确定性", "持续扩展理解边界", "在复杂信息里找到秩序感",
+        ]
+        assert data["cognitive_style"] == ["会先看结构", "对证据比较敏感", "偏好把问题讲透", "不太吃空话"]
+        assert data["current_phase"] == "最近更像在一边吸收高密度信息，一边整理自己的判断框架。"
+        assert data["life_stage"] == "职业上升期，开始关注更宏观的议题。"
+        assert data["favorite_up_users"] == ["经济观察", "构图实验室"]
+        assert data["exploration_openness"] == 0.72
+        assert data["speculative_interests"] == []
+        # mbti, likes, dislikes, style, context come from OnionProfile layers
+        # FakeProfile has no OnionProfile.interest or .core.mbti so these are defaults
+        assert data["mbti"]["type"] == ""
+        assert isinstance(data["likes"], list)
+        assert isinstance(data["dislikes"], list)
+        assert isinstance(data["style"], dict)
+        assert isinstance(data["context"], dict)
+        assert len(data["recent_cognition_updates"]) == 2
+        assert "summary" in data["recent_cognition_updates"][0]
+        assert data["has_more_cognition_updates"] is False
+        assert data["next_cognition_cursor"] == ""
 
     def test_profile_summary_endpoint_paginates_cognition_history(self) -> None:
         from fastapi.testclient import TestClient

@@ -162,6 +162,7 @@ class TrendingStrategy(DiscoveryStrategy):
             like_count=like_count,
             description=description,
             topic_key=topic_key,
+            topic_group=topic_key,
             style_key=ContentDiscoveryEngine.infer_style_key(
                 title=title,
                 description=description,

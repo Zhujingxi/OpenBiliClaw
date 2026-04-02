@@ -54,14 +54,14 @@
 ### 生命周期
 
 ```
-生成 (Generate) — LLM 根据画像猜测 3-5 个新方向
-    ↓
+生成 (Generate) — LLM 根据画像猜测 3-5 个新方向（每 10min / init / 启动时）
+    ↓  受一级上限(15域)和二级上限(60细项)限制，到达上限则跳过
 活跃 (Active) — 每次事件 ingest 做关键词匹配观测
     ├→ confirmation_count >= threshold → 转正 (Promote)
     │    创建 InterestDomain(source="speculated", weight=0.3)
     │    合并入 OnionProfile.interest.likes
     └→ TTL 到期未确认 → 拒绝 (Reject)
-         加入冷却列表 (cooldown_days=30)
+         加入冷却列表 (cooldown_days=7)
          冷却期间不再猜测该方向
 ```
 
@@ -73,18 +73,40 @@
 
 ### 两个猜测来源
 
-1. **周期性生成**（默认每 2h）：专用 prompt `build_speculation_generation_prompt()` 深度推理
+1. **周期性生成**（默认每 10min）：专用 prompt `build_speculation_generation_prompt()` 深度推理。Init 和进程启动时强制触发一次
 2. **偏好分析附带**：`PreferenceAnalyzer` 每次分析事件时产出 `speculative_interests`，作为种子注入
 
 ### 配置项
 
 | 配置 | 默认值 | 说明 |
 |------|--------|------|
-| `scheduler.speculation_interval_hours` | 2 | 生成间隔 |
+| `scheduler.speculation_interval_minutes` | 10 | 生成间隔（分钟） |
 | `scheduler.speculation_ttl_days` | 3 | 猜测存活期 |
 | `scheduler.speculation_cooldown_days` | 7 | 拒绝后冷却期 |
 | `scheduler.speculation_confirmation_threshold` | 3 | 转正所需确认数 |
 | `scheduler.speculation_max_active` | 5 | 最大活跃猜测数 |
+| `scheduler.speculation_max_primary_interests` | 15 | 一级兴趣上限（确认域数 + 活跃猜测数） |
+| `scheduler.speculation_max_secondary_interests` | 60 | 二级兴趣上限（确认细项数 + 活跃猜测数） |
+
+### 触发时机
+
+| 场景 | 方法 | 说明 |
+|------|------|------|
+| 定时 | `tick()` via Pipeline | 每 10min 检查，受兴趣上限约束 |
+| Init | `force_tick()` via `build_initial_profile()` | 画像初始化后立即生成猜测 |
+| 进程启动 | `force_tick()` via `startup_refresh_loop()` | API 启动时确保有活跃猜测 |
+| 偏好分析 | `ingest_seeds()` via `_update_interest()` | PreferenceAnalyzer 附带的推测兴趣注入 |
+
+`force_tick()` 忽略间隔计时器，但仍尊重一级/二级兴趣上限和 `max_active`。
+
+### 兴趣上限机制
+
+当确认兴趣 + 活跃猜测达到上限时，跳过生成：
+
+| 级别 | 计算方式 | 上限 |
+|------|---------|------|
+| 一级 | `len(profile.interest.likes)` + 活跃猜测数 | 15 |
+| 二级 | `sum(len(d.specifics) for d in likes)` + 活跃猜测数 | 60 |
 
 ### Pipeline 集成
 
@@ -94,14 +116,20 @@
 
 ### Discovery 集成
 
-- `SearchStrategy._profile_summary()` 包含活跃猜测兴趣
-- `ExploreStrategy` 将活跃猜测作为 hint 传入 LLM prompt
+- `SoulEngine.get_profile()` 自动将活跃猜测附加到 `profile._active_speculations`
+- `build_profile_summary()` 读取 `_active_speculations` 并包含在画像摘要中
+- `SearchStrategy` / `ExploreStrategy` / `TrendingStrategy` 均可在 LLM prompt 中看到猜测兴趣
+
+### API 集成
+
+- `GET /api/profile` 返回 `speculative_interests` 字段（`SpeculativeInterestOut` 列表）
+- 从 `speculative_state.json` 直接加载，最多返回 6 条活跃猜测
 
 ### 关键文件
 
-- `src/openbiliclaw/soul/speculator.py` — 核心引擎
+- `src/openbiliclaw/soul/speculator.py` — 核心引擎（生成/观测/转正/过期/force_tick）
 - `src/openbiliclaw/llm/prompts.py` — `build_speculation_generation_prompt()`
-- `tests/test_speculator.py` — 23 个单元测试
+- `tests/test_speculator.py` — 27 个单元测试
 
 ## 画像更新逻辑详解
 

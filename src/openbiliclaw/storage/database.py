@@ -287,6 +287,7 @@ class Database:
                 duration,
                 tags,
                 topic_key,
+                topic_group,
                 style_key,
                 description,
                 cover_url,
@@ -300,7 +301,7 @@ class Database:
                 last_scored_at,
                 source
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
             ON CONFLICT(bvid) DO UPDATE SET
                 title = excluded.title,
                 up_name = excluded.up_name,
@@ -308,6 +309,7 @@ class Database:
                 duration = excluded.duration,
                 tags = excluded.tags,
                 topic_key = excluded.topic_key,
+                topic_group = excluded.topic_group,
                 style_key = excluded.style_key,
                 description = excluded.description,
                 cover_url = excluded.cover_url,
@@ -337,6 +339,7 @@ class Database:
                 kwargs.get("duration", 0),
                 json.dumps(kwargs.get("tags", []), ensure_ascii=False),
                 kwargs.get("topic_key", ""),
+                kwargs.get("topic_group", ""),
                 kwargs.get("style_key", ""),
                 kwargs.get("description", ""),
                 kwargs.get("cover_url", ""),
@@ -981,6 +984,10 @@ class Database:
         if "topic_key" not in existing_columns:
             self.conn.execute(
                 "ALTER TABLE content_cache ADD COLUMN topic_key TEXT DEFAULT ''"
+            )
+        if "topic_group" not in existing_columns:
+            self.conn.execute(
+                "ALTER TABLE content_cache ADD COLUMN topic_group TEXT DEFAULT ''"
             )
         if "style_key" not in existing_columns:
             self.conn.execute(

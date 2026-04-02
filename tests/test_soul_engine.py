@@ -140,7 +140,9 @@ async def test_get_profile_loads_saved_soul_profile(tmp_path: Path) -> None:
     assert profile.core_traits == ["理性", "谨慎", "自驱"]
     assert profile.cognitive_style == ["偏好先看证据再判断"]
     assert profile.current_phase == "最近更像在稳住判断，不急着跟风。"
-    assert profile.preferences.interests[0].name == "科技"
+    interest_names = [i.name for i in profile.preferences.interests]
+    assert "知识" in interest_names  # domain (一级)
+    assert "科技" in interest_names  # specific (二级)
 
 
 @pytest.mark.asyncio

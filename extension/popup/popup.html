@@ -885,6 +885,252 @@
       background: rgba(245, 247, 252, 0.98);
     }
 
+    /* ── Profile layer headers ── */
+    .profile-layer-header {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      margin-top: 20px;
+      margin-bottom: 4px;
+      padding: 6px 0;
+      border-bottom: 1px solid rgba(231, 238, 248, 0.6);
+    }
+
+    /* ── MBTI display ── */
+    .mbti-container {
+      margin-top: 10px;
+    }
+    .mbti-type-label {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--brand-strong);
+      margin-bottom: 8px;
+    }
+    .mbti-dimensions {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .mbti-dim-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+    }
+    .mbti-dim-pole {
+      width: 24px;
+      text-align: center;
+      font-weight: 600;
+      color: var(--brand-strong);
+    }
+    .mbti-dim-bar {
+      flex: 1;
+      height: 6px;
+      border-radius: 3px;
+      background: rgba(231, 238, 248, 0.96);
+      overflow: hidden;
+    }
+    .mbti-dim-bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      background: linear-gradient(90deg, #f7828e, #c7698f);
+      transition: width 0.3s ease;
+    }
+    .mbti-dim-pct {
+      width: 32px;
+      text-align: right;
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+    .mbti-fallback {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    /* ── Interest tree (domain → specifics) ── */
+    .interest-tree {
+      margin-top: 10px;
+    }
+    .interest-domain {
+      margin-bottom: 10px;
+    }
+    .interest-domain-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 4px;
+    }
+    .interest-domain-weight {
+      font-size: 10px;
+      font-weight: 400;
+      color: var(--text-muted);
+    }
+    .interest-specifics {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      padding-left: 14px;
+    }
+    .interest-specific-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-size: 10px;
+      color: var(--text-secondary);
+      background: rgba(244, 247, 255, 0.92);
+      border: 1px solid rgba(230, 236, 245, 0.96);
+    }
+    .interest-tree .is-fallback {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    /* ── Style preference bars ── */
+    .style-bars {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .style-bar-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+    }
+    .style-bar-label {
+      width: 70px;
+      color: var(--text-secondary);
+      text-align: right;
+    }
+    .style-bar-track {
+      flex: 1;
+      height: 6px;
+      border-radius: 3px;
+      background: rgba(231, 238, 248, 0.96);
+      overflow: hidden;
+    }
+    .style-bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      background: linear-gradient(90deg, #397fcb, #5e9fd9);
+      transition: width 0.3s ease;
+    }
+    .style-bar-value {
+      width: 40px;
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+    .style-text-row {
+      display: flex;
+      gap: 8px;
+      font-size: 11px;
+    }
+    .style-text-label {
+      color: var(--text-secondary);
+    }
+    .style-text-value {
+      color: var(--text-primary);
+      font-weight: 500;
+    }
+    .style-bars .is-fallback {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    /* ── Context mode ── */
+    .context-info {
+      margin-top: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .context-row {
+      display: flex;
+      gap: 8px;
+      font-size: 11px;
+    }
+    .context-label {
+      color: var(--text-secondary);
+      min-width: 60px;
+    }
+    .context-value {
+      color: var(--text-primary);
+    }
+    .context-info .is-fallback {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    /* ── Exploration openness bar ── */
+    .exploration-bar-container {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .exploration-bar {
+      flex: 1;
+      height: 8px;
+      border-radius: 4px;
+      background: rgba(231, 238, 248, 0.96);
+      overflow: hidden;
+    }
+    .exploration-bar-fill {
+      height: 100%;
+      border-radius: 4px;
+      background: linear-gradient(90deg, #f7828e, #397fcb);
+      transition: width 0.4s ease;
+    }
+    .exploration-bar-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+
+    /* ── Speculative interests ── */
+    .speculative-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .speculative-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 14px;
+      background: rgba(255, 248, 240, 0.96);
+      border: 1px solid rgba(245, 228, 210, 0.96);
+    }
+    .speculative-item .spec-domain {
+      font-size: 12px;
+      font-weight: 600;
+      color: #c57b2e;
+    }
+    .speculative-item .spec-reason {
+      font-size: 11px;
+      color: var(--text-secondary);
+      flex: 1;
+    }
+    .speculative-item .spec-progress {
+      font-size: 10px;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+    .speculative-list .is-fallback {
+      font-size: 11px;
+      color: var(--text-muted);
+      padding: 6px 0;
+    }
+
     .cognition-list {
       display: flex;
       flex-direction: column;
@@ -1444,37 +1690,93 @@
           <p id="profileEmptyText">先跑一遍 openbiliclaw init，再回来看看。</p>
         </div>
         <div id="profileCard" class="profile-card" hidden>
+          <!-- ── 综合叙事 ── -->
           <div class="profile-summary">
             <h3>这会儿的你</h3>
             <p id="profilePortrait" class="profile-copy"></p>
           </div>
+
+          <!-- ── Core 层 ── -->
+          <div class="profile-layer-header">Core — 比较稳定的底色</div>
           <div class="profile-group">
-            <h3>比较稳定的底色</h3>
+            <h3>核心特质</h3>
             <div id="profileTraits" class="chip-list"></div>
           </div>
           <div class="profile-group">
-            <h3>你怎么处理信息</h3>
-            <div id="profileCognitiveStyle" class="chip-list"></div>
+            <h3>深层需求</h3>
+            <div id="profileNeeds" class="chip-list"></div>
           </div>
           <div class="profile-group">
-            <h3>你在内容里长期在找什么</h3>
+            <h3>MBTI</h3>
+            <div id="profileMBTI" class="mbti-container"></div>
+          </div>
+
+          <!-- ── Values 层 ── -->
+          <div class="profile-layer-header">Values — 你在内容里长期在找什么</div>
+          <div class="profile-group">
+            <h3>价值偏好</h3>
+            <div id="profileValues" class="chip-list"></div>
+          </div>
+          <div class="profile-group">
+            <h3>内在驱动力</h3>
             <div id="profileMotivationalDrivers" class="chip-list"></div>
+          </div>
+
+          <!-- ── Interest 层 ── -->
+          <div class="profile-layer-header">Interest — 你最近在看什么</div>
+          <div class="profile-group">
+            <h3>感兴趣的方向</h3>
+            <div id="profileLikes" class="interest-tree"></div>
+          </div>
+          <div class="profile-group">
+            <h3>明显会避开</h3>
+            <div id="profileDislikes" class="interest-tree"></div>
+          </div>
+          <div class="profile-group">
+            <h3>常看的 UP 主</h3>
+            <div id="profileFavoriteUps" class="chip-list"></div>
+          </div>
+
+          <!-- ── Role 层 ── -->
+          <div class="profile-layer-header">Role — 这阵子的状态</div>
+          <div class="profile-group">
+            <h3>大致处在什么阶段</h3>
+            <p id="profileLifeStage" class="profile-phase-copy"></p>
           </div>
           <div class="profile-group">
             <h3>这阵子更像在经历什么</h3>
             <p id="profileCurrentPhase" class="profile-phase-copy"></p>
           </div>
+
+          <!-- ── Surface 层 ── -->
+          <div class="profile-layer-header">Surface — 你怎么看内容</div>
           <div class="profile-group">
-            <h3>你更在意什么</h3>
-            <div id="profileNeeds" class="chip-list"></div>
+            <h3>认知风格</h3>
+            <div id="profileCognitiveStyle" class="chip-list"></div>
           </div>
           <div class="profile-group">
-            <h3>最近常点开的</h3>
-            <div id="profileInterests" class="chip-list"></div>
+            <h3>内容口味</h3>
+            <div id="profileStyle" class="style-bars"></div>
           </div>
           <div class="profile-group">
-            <h3>最近明显会避开</h3>
-            <div id="profileDislikes" class="chip-list"></div>
+            <h3>使用场景</h3>
+            <div id="profileContext" class="context-info"></div>
+          </div>
+          <div class="profile-group">
+            <h3>探索开放度</h3>
+            <div id="profileExplorationOpenness" class="exploration-bar-container">
+              <div class="exploration-bar">
+                <div class="exploration-bar-fill"></div>
+              </div>
+              <span class="exploration-bar-label"></span>
+            </div>
+          </div>
+
+          <!-- ── Cross-cutting ── -->
+          <div class="profile-layer-header">Speculate — 阿B 在试探的方向</div>
+          <div class="profile-group">
+            <h3>猜测兴趣</h3>
+            <div id="profileSpeculativeInterests" class="speculative-list"></div>
           </div>
           <div class="profile-group">
             <h3>阿B 最近新记住了什么</h3>

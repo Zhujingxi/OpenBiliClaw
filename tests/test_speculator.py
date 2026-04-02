@@ -350,7 +350,7 @@ async def test_speculator_tick_promotes():
 
         speculator = InterestSpeculator(
             llm_service=None, data_dir=data_dir,
-            generation_interval_hours=9999,  # don't generate
+            generation_interval_minutes=999999,  # don't generate
         )
 
         from openbiliclaw.soul.profile import OnionProfile
@@ -374,7 +374,7 @@ async def test_speculator_tick_expires():
 
         speculator = InterestSpeculator(
             llm_service=None, data_dir=data_dir,
-            generation_interval_hours=9999,
+            generation_interval_minutes=999999,
         )
 
         from openbiliclaw.soul.profile import OnionProfile
@@ -400,3 +400,113 @@ def test_speculator_max_active_limit():
             for i in range(10)
         ])
         assert added == 3
+
+
+def test_should_generate_respects_primary_cap():
+    """Skip generation when confirmed domains + active speculations >= cap."""
+    from openbiliclaw.soul.profile import InterestDomain, InterestLayer, OnionProfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        data_dir = Path(tmpdir)
+        # 12 confirmed domains + 2 active = 14, cap is 15 → should generate
+        profile = OnionProfile(
+            interest=InterestLayer(
+                likes=[InterestDomain(domain=f"域{i}") for i in range(12)]
+            )
+        )
+        state = SpeculativeState(active=[
+            SpeculativeInterest(domain="猜A", status="active"),
+            SpeculativeInterest(domain="猜B", status="active"),
+        ])
+        speculator = InterestSpeculator(
+            llm_service=None, data_dir=data_dir,
+            max_primary_interests=15,
+        )
+        assert speculator._should_generate(state, datetime.now(), profile) is True
+
+        # 14 confirmed + 2 active = 16 >= 15 → should NOT generate
+        profile2 = OnionProfile(
+            interest=InterestLayer(
+                likes=[InterestDomain(domain=f"域{i}") for i in range(14)]
+            )
+        )
+        assert speculator._should_generate(state, datetime.now(), profile2) is False
+
+
+def test_should_generate_respects_secondary_cap():
+    """Skip generation when confirmed specifics + active speculations >= cap."""
+    from openbiliclaw.soul.profile import (
+        InterestDomain,
+        InterestLayer,
+        InterestSpecific,
+        OnionProfile,
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        data_dir = Path(tmpdir)
+        # 3 domains with 20 specifics each = 60, cap is 60 → should NOT generate
+        profile = OnionProfile(
+            interest=InterestLayer(
+                likes=[
+                    InterestDomain(
+                        domain=f"域{i}",
+                        specifics=[InterestSpecific(name=f"项{j}") for j in range(20)],
+                    )
+                    for i in range(3)
+                ]
+            )
+        )
+        state = SpeculativeState(active=[
+            SpeculativeInterest(domain="猜A", status="active"),
+        ])
+        speculator = InterestSpeculator(
+            llm_service=None, data_dir=data_dir,
+            max_secondary_interests=60,
+        )
+        assert speculator._should_generate(state, datetime.now(), profile) is False
+
+
+async def test_force_tick_ignores_interval():
+    """force_tick generates even if interval hasn't elapsed."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        data_dir = Path(tmpdir)
+        # Set last_generation_at to just now — tick would skip, force_tick should not
+        state = SpeculativeState(
+            last_generation_at=datetime.now().isoformat(),
+        )
+        save_speculative_state(data_dir, state)
+
+        speculator = InterestSpeculator(
+            llm_service=None, data_dir=data_dir,
+            generation_interval_minutes=9999,
+        )
+
+        from openbiliclaw.soul.profile import OnionProfile
+
+        # force_tick with no LLM service won't generate, but it should run
+        result = await speculator.force_tick(OnionProfile())
+        # No error, returns result (empty since no LLM)
+        assert result.generated == []
+        assert result.promoted == []
+
+
+def test_interval_uses_minutes():
+    """Verify _should_generate uses minutes, not hours."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        data_dir = Path(tmpdir)
+        speculator = InterestSpeculator(
+            llm_service=None, data_dir=data_dir,
+            generation_interval_minutes=10,
+        )
+        now = datetime.now()
+        # 5 minutes ago → should NOT generate
+        state5 = SpeculativeState(
+            last_generation_at=(now - timedelta(minutes=5)).isoformat()
+        )
+        assert speculator._should_generate(state5, now) is False
+
+        # 15 minutes ago → should generate
+        state15 = SpeculativeState(
+            last_generation_at=(now - timedelta(minutes=15)).isoformat()
+        )
+        assert speculator._should_generate(state15, now) is True

@@ -144,6 +144,13 @@ class SoulEngine:
         soul_layer.data.update(profile.to_dict())
         soul_layer.save()
         self._memory.sync_profile_files(profile)
+
+        # Trigger speculator immediately after init to seed speculative interests
+        try:
+            await self._speculator.force_tick(profile)
+        except Exception:
+            logger.debug("Speculator force_tick after init failed", exc_info=True)
+
         return profile
 
     async def get_profile(self) -> OnionProfile:

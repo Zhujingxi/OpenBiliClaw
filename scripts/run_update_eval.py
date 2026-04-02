@@ -203,8 +203,26 @@ async def main() -> None:
 
     print(f"\n{'=' * 60}")
     print(f"完整日志: {rl.run_dir}")
-    print("请评测变化是否合理（✅合理 / ⚠️部分合理 / ❌不合理）")
     print("=" * 60)
+
+    # --- 5. Human feedback → optimization cycle ---
+    from openbiliclaw.eval.human_feedback import (
+        collect_human_feedback,
+        run_optimization_cycle,
+    )
+
+    feedback = collect_human_feedback()
+    if feedback is not None:
+        result = await run_optimization_cycle(
+            feedback,
+            project_root=PROJECT_ROOT,
+            task="incremental_update",
+            run_logger=rl,
+        )
+        if result.get("optimized"):
+            print(f"\n优化完成: {result.get('summary', '')[:80]}")
+        else:
+            print(f"\n未优化: {result.get('reason', '')}")
 
 
 if __name__ == "__main__":

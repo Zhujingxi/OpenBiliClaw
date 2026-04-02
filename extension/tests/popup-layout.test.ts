@@ -162,7 +162,7 @@ test("profile summary includes an explicit dislike chip group", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const markup = popupHtml.match(/<div id="profileCard"[\s\S]*?<\/div>\s*<\/section>/)?.[0] ?? "";
 
-  assert.match(markup, /<h3>最近明显会避开<\/h3>/);
+  assert.match(markup, /<h3>明显会避开<\/h3>/);
   assert.match(markup, /id="profileDislikes"/);
 });
 
@@ -171,15 +171,32 @@ test("profile summary reserves dedicated sections for layered cognition", () => 
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
   const markup = popupHtml.match(/<div id="profileCard"[\s\S]*?<\/div>\s*<\/section>/)?.[0] ?? "";
 
-  assert.match(markup, /<h3>你怎么处理信息<\/h3>/);
-  assert.match(markup, /id="profileCognitiveStyle"/);
-  assert.match(markup, /<h3>你在内容里长期在找什么<\/h3>/);
+  // Core layer
+  assert.match(markup, /id="profileTraits"/);
+  assert.match(markup, /id="profileNeeds"/);
+  assert.match(markup, /id="profileMBTI"/);
+  // Values layer
+  assert.match(markup, /id="profileValues"/);
   assert.match(markup, /id="profileMotivationalDrivers"/);
-  assert.match(markup, /<h3>这阵子更像在经历什么<\/h3>/);
+  // Interest layer
+  assert.match(markup, /id="profileLikes"/);
+  assert.match(markup, /id="profileDislikes"/);
+  assert.match(markup, /id="profileFavoriteUps"/);
+  // Role layer
   assert.match(markup, /id="profileCurrentPhase"/);
+  assert.match(markup, /id="profileLifeStage"/);
+  // Surface layer
+  assert.match(markup, /id="profileCognitiveStyle"/);
+  assert.match(markup, /id="profileStyle"/);
+  assert.match(markup, /id="profileContext"/);
+  assert.match(markup, /id="profileExplorationOpenness"/);
+  // JS references
   assert.match(popupJs, /summary\.cognitive_style/);
   assert.match(popupJs, /summary\.motivational_drivers/);
   assert.match(popupJs, /summary\.current_phase/);
+  assert.match(popupJs, /summary\.mbti/);
+  assert.match(popupJs, /summary\.likes/);
+  assert.match(popupJs, /summary\.style/);
 });
 
 test("profile cognition details stay hidden until a card is expanded", () => {

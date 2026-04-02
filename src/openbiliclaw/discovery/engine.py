@@ -88,6 +88,7 @@ class DiscoveredContent:
     like_count: int = 0
     tags: list[str] = field(default_factory=list)
     topic_key: str = ""
+    topic_group: str = ""  # Coarse semantic category (e.g. "强化学习") for diversity
     style_key: str = ""
     description: str = ""
     source_strategy: str = ""  # Which strategy found this
@@ -156,7 +157,7 @@ class ContentDiscoveryEngine:
         self._concurrency = concurrency
         self._target_primary_count = max(1, target_primary_count)
         self._backfill_target_count = max(self._target_primary_count, backfill_target_count)
-        self._eval_cache: dict[str, tuple[float, str]] = {}
+        self._eval_cache: dict[str, tuple[float, str, str]] = {}
 
     def register_strategy(self, strategy: DiscoveryStrategy) -> None:
         """Register a discovery strategy."""
@@ -241,9 +242,11 @@ class ContentDiscoveryEngine:
         cache_key = f"{content.bvid}:{id(profile)}"
         cached = self._eval_cache.get(cache_key)
         if cached is not None:
-            score, reason = cached
+            score, reason, topic_group = cached
             content.relevance_score = score
             content.relevance_reason = reason
+            if topic_group:
+                content.topic_group = topic_group
             return score
 
         from openbiliclaw.llm.prompts import build_content_evaluation_prompt
@@ -286,13 +289,16 @@ class ContentDiscoveryEngine:
                 return 0.0
             score = self._clamp_score(payload.get("score", 0.0))
             reason = str(payload.get("reason", "")).strip()
+            topic_group = str(payload.get("topic_group", "")).strip()
         except Exception:
             logger.exception("Failed to evaluate discovered content: %s", content.bvid)
             return 0.0
 
         content.relevance_score = score
         content.relevance_reason = reason
-        self._eval_cache[cache_key] = (score, reason)
+        if topic_group:
+            content.topic_group = topic_group
+        self._eval_cache[cache_key] = (score, reason, topic_group)
         return score
 
     @staticmethod
@@ -410,6 +416,7 @@ class ContentDiscoveryEngine:
                     duration=int(row.get("duration", 0) or 0),
                     tags=[],
                     topic_key=str(row.get("topic_key", "")),
+                    topic_group=str(row.get("topic_group", "")),
                     style_key=str(row.get("style_key", "")),
                     description=str(row.get("description", "")),
                     cover_url=str(row.get("cover_url", "")),
@@ -590,6 +597,9 @@ class ContentDiscoveryEngine:
 
     @staticmethod
     def _topic_bucket(item: DiscoveredContent) -> str:
+        """Use topic_group (coarse) for diversity bucketing, fall back to topic_key."""
+        if item.topic_group.strip():
+            return ContentDiscoveryEngine._normalize_topic_token(item.topic_group)
         if item.topic_key.strip():
             return ContentDiscoveryEngine._normalize_topic_token(item.topic_key)
         for tag in item.tags:
@@ -645,6 +655,7 @@ class ContentDiscoveryEngine:
                     duration=item.duration,
                     tags=item.tags,
                     topic_key=item.topic_key,
+                    topic_group=item.topic_group,
                     style_key=item.style_key,
                     description=item.description,
                     cover_url=item.cover_url,

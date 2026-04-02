@@ -90,12 +90,20 @@ const elements = {
   profileCard: document.getElementById("profileCard"),
   profilePortrait: document.getElementById("profilePortrait"),
   profileTraits: document.getElementById("profileTraits"),
-  profileCognitiveStyle: document.getElementById("profileCognitiveStyle"),
-  profileMotivationalDrivers: document.getElementById("profileMotivationalDrivers"),
-  profileCurrentPhase: document.getElementById("profileCurrentPhase"),
   profileNeeds: document.getElementById("profileNeeds"),
-  profileInterests: document.getElementById("profileInterests"),
+  profileMBTI: document.getElementById("profileMBTI"),
+  profileValues: document.getElementById("profileValues"),
+  profileMotivationalDrivers: document.getElementById("profileMotivationalDrivers"),
+  profileLikes: document.getElementById("profileLikes"),
   profileDislikes: document.getElementById("profileDislikes"),
+  profileFavoriteUps: document.getElementById("profileFavoriteUps"),
+  profileLifeStage: document.getElementById("profileLifeStage"),
+  profileCurrentPhase: document.getElementById("profileCurrentPhase"),
+  profileCognitiveStyle: document.getElementById("profileCognitiveStyle"),
+  profileStyle: document.getElementById("profileStyle"),
+  profileContext: document.getElementById("profileContext"),
+  profileExplorationOpenness: document.getElementById("profileExplorationOpenness"),
+  profileSpeculativeInterests: document.getElementById("profileSpeculativeInterests"),
   profileRecentMemory: document.getElementById("profileRecentMemory"),
   profileRecentMemoryStatus: document.getElementById("profileRecentMemoryStatus"),
   profileRecentMemoryMore: document.getElementById("profileRecentMemoryMore"),
@@ -347,6 +355,244 @@ function renderChipList(container, items, fallback) {
   }
 }
 
+function renderExplorationBar(container, openness) {
+  if (!(container instanceof HTMLElement)) {
+    return;
+  }
+  const fill = container.querySelector(".exploration-bar-fill");
+  const label = container.querySelector(".exploration-bar-label");
+  if (fill instanceof HTMLElement) {
+    fill.style.width = `${Math.round(openness * 100)}%`;
+  }
+  if (label instanceof HTMLElement) {
+    const pct = Math.round(openness * 100);
+    const desc =
+      pct >= 80 ? "很愿意看新东西" :
+      pct >= 60 ? "偶尔探索新领域" :
+      pct >= 40 ? "偏好熟悉的内容" :
+      "基本只看自己那几个方向";
+    label.textContent = `${pct}% — ${desc}`;
+  }
+}
+
+function renderSpeculativeInterests(container, items) {
+  if (!(container instanceof HTMLElement)) {
+    return;
+  }
+  container.replaceChildren();
+  if (!items || items.length === 0) {
+    const fallback = document.createElement("p");
+    fallback.className = "is-fallback";
+    fallback.textContent = "暂时没有在试探的方向，过一阵会有的。";
+    container.append(fallback);
+    return;
+  }
+  for (const item of items) {
+    const row = document.createElement("div");
+    row.className = "speculative-item";
+
+    const domain = document.createElement("span");
+    domain.className = "spec-domain";
+    domain.textContent = item.domain;
+    row.append(domain);
+
+    const reason = document.createElement("span");
+    reason.className = "spec-reason";
+    reason.textContent = item.reason;
+    row.append(reason);
+
+    const progress = document.createElement("span");
+    progress.className = "spec-progress";
+    progress.textContent = `${item.confirmation_count}/${item.confirmation_threshold} 次确认`;
+    row.append(progress);
+
+    container.append(row);
+  }
+}
+
+function renderMBTI(container, mbti) {
+  if (!(container instanceof HTMLElement)) {
+    return;
+  }
+  container.replaceChildren();
+  if (!mbti || !mbti.type) {
+    const fb = document.createElement("p");
+    fb.className = "mbti-fallback";
+    fb.textContent = "MBTI 还没推断出来，再多看一阵。";
+    container.append(fb);
+    return;
+  }
+  const typeLabel = document.createElement("div");
+  typeLabel.className = "mbti-type-label";
+  typeLabel.textContent = mbti.type;
+  container.append(typeLabel);
+
+  const dims = document.createElement("div");
+  dims.className = "mbti-dimensions";
+  const dimLabels = { E_I: "E/I", S_N: "S/N", T_F: "T/F", J_P: "J/P" };
+  for (const [key, label] of Object.entries(dimLabels)) {
+    const dim = mbti.dimensions?.[key];
+    if (!dim) continue;
+    const row = document.createElement("div");
+    row.className = "mbti-dim-row";
+    const pole = document.createElement("span");
+    pole.className = "mbti-dim-pole";
+    pole.textContent = dim.pole || label;
+    const bar = document.createElement("div");
+    bar.className = "mbti-dim-bar";
+    const fill = document.createElement("div");
+    fill.className = "mbti-dim-bar-fill";
+    fill.style.width = `${Math.round((dim.strength ?? 0.5) * 100)}%`;
+    bar.append(fill);
+    const pct = document.createElement("span");
+    pct.className = "mbti-dim-pct";
+    pct.textContent = `${Math.round((dim.strength ?? 0.5) * 100)}%`;
+    row.append(pole, bar, pct);
+    dims.append(row);
+  }
+  container.append(dims);
+}
+
+function renderInterestTree(container, domains, fallback) {
+  if (!(container instanceof HTMLElement)) {
+    return;
+  }
+  container.replaceChildren();
+  if (!domains || domains.length === 0) {
+    const fb = document.createElement("p");
+    fb.className = "is-fallback";
+    fb.textContent = fallback;
+    container.append(fb);
+    return;
+  }
+  for (const dom of domains) {
+    const block = document.createElement("div");
+    block.className = "interest-domain";
+    const header = document.createElement("div");
+    header.className = "interest-domain-header";
+    const name = document.createElement("span");
+    name.textContent = dom.domain;
+    header.append(name);
+    if (dom.weight > 0) {
+      const wt = document.createElement("span");
+      wt.className = "interest-domain-weight";
+      wt.textContent = `${Math.round(dom.weight * 100)}%`;
+      header.append(wt);
+    }
+    block.append(header);
+    if (dom.specifics && dom.specifics.length > 0) {
+      const specs = document.createElement("div");
+      specs.className = "interest-specifics";
+      for (const spec of dom.specifics) {
+        const chip = document.createElement("span");
+        chip.className = "interest-specific-chip";
+        chip.textContent = spec.name;
+        specs.append(chip);
+      }
+      block.append(specs);
+    }
+    container.append(block);
+  }
+}
+
+function renderStylePreference(container, style) {
+  if (!(container instanceof HTMLElement)) {
+    return;
+  }
+  container.replaceChildren();
+  if (!style) {
+    const fb = document.createElement("p");
+    fb.className = "is-fallback";
+    fb.textContent = "内容口味还在摸索中。";
+    container.append(fb);
+    return;
+  }
+  const durationLabels = { short: "短视频", medium: "中等", long: "长视频" };
+  const paceLabels = { fast: "快节奏", moderate: "适中", slow: "慢节奏" };
+  const textFields = [
+    ["时长偏好", durationLabels[style.preferred_duration] || style.preferred_duration],
+    ["节奏偏好", paceLabels[style.preferred_pace] || style.preferred_pace],
+  ];
+  for (const [label, value] of textFields) {
+    if (!value) continue;
+    const row = document.createElement("div");
+    row.className = "style-text-row";
+    const lbl = document.createElement("span");
+    lbl.className = "style-text-label";
+    lbl.textContent = label + "：";
+    const val = document.createElement("span");
+    val.className = "style-text-value";
+    val.textContent = value;
+    row.append(lbl, val);
+    container.append(row);
+  }
+  const barFields = [
+    ["深度偏好", style.depth_preference],
+    ["画质敏感度", style.quality_sensitivity],
+    ["幽默偏好", style.humor_preference],
+  ];
+  for (const [label, value] of barFields) {
+    if (typeof value !== "number") continue;
+    const row = document.createElement("div");
+    row.className = "style-bar-row";
+    const lbl = document.createElement("span");
+    lbl.className = "style-bar-label";
+    lbl.textContent = label;
+    const track = document.createElement("div");
+    track.className = "style-bar-track";
+    const fill = document.createElement("div");
+    fill.className = "style-bar-fill";
+    fill.style.width = `${Math.round(value * 100)}%`;
+    track.append(fill);
+    const pct = document.createElement("span");
+    pct.className = "style-bar-value";
+    pct.textContent = `${Math.round(value * 100)}%`;
+    row.append(lbl, track, pct);
+    container.append(row);
+  }
+}
+
+function renderContextMode(container, ctx) {
+  if (!(container instanceof HTMLElement)) {
+    return;
+  }
+  container.replaceChildren();
+  if (!ctx) {
+    const fb = document.createElement("p");
+    fb.className = "is-fallback";
+    fb.textContent = "使用场景还在观察中。";
+    container.append(fb);
+    return;
+  }
+  const fields = [
+    ["工作日", ctx.weekday_patterns],
+    ["周末", ctx.weekend_patterns],
+    ["时段", ctx.time_of_day_patterns],
+    ["模式", ctx.session_type],
+  ];
+  let hasAny = false;
+  for (const [label, value] of fields) {
+    if (!value) continue;
+    hasAny = true;
+    const row = document.createElement("div");
+    row.className = "context-row";
+    const lbl = document.createElement("span");
+    lbl.className = "context-label";
+    lbl.textContent = label + "：";
+    const val = document.createElement("span");
+    val.className = "context-value";
+    val.textContent = value;
+    row.append(lbl, val);
+    container.append(row);
+  }
+  if (!hasAny) {
+    const fb = document.createElement("p");
+    fb.className = "is-fallback";
+    fb.textContent = "使用场景还在观察中。";
+    container.append(fb);
+  }
+}
+
 function renderCognitionCards(container, items, fallback) {
   if (!(container instanceof HTMLElement)) {
     return;
@@ -504,20 +750,31 @@ function renderProfileSummary(summary) {
   elements.profileEmpty.hidden = true;
   elements.profileCard.hidden = false;
   elements.profilePortrait.textContent = summary.personality_portrait;
+  // Core
   renderChipList(elements.profileTraits, summary.core_traits, "这部分还在慢慢补");
-  renderChipList(elements.profileCognitiveStyle, summary.cognitive_style, "这层还在继续归拢");
-  renderChipList(
-    elements.profileMotivationalDrivers,
-    summary.motivational_drivers,
-    "这块还要再多看一点",
-  );
-  if (elements.profileCurrentPhase instanceof HTMLElement) {
-    elements.profileCurrentPhase.textContent =
-      summary.current_phase || "这阵子的变化还在继续看，先不急着下死结论。";
-  }
   renderChipList(elements.profileNeeds, summary.deep_needs, "这块还要再多看一点");
-  renderChipList(elements.profileInterests, summary.top_interests, "再刷一阵，这里会更准");
-  renderChipList(elements.profileDislikes, summary.disliked_topics, "这块还在继续确认，先别急着下死结论");
+  renderMBTI(elements.profileMBTI, summary.mbti);
+  // Values
+  renderChipList(elements.profileValues, summary.values, "价值偏好还在继续归拢");
+  renderChipList(elements.profileMotivationalDrivers, summary.motivational_drivers, "这块还要再多看一点");
+  // Interest
+  renderInterestTree(elements.profileLikes, summary.likes, "再刷一阵，这里会更准");
+  renderInterestTree(elements.profileDislikes, summary.dislikes, "这块还在继续确认，先别急着下死结论");
+  renderChipList(elements.profileFavoriteUps, summary.favorite_up_users, "常看的 UP 主还在统计");
+  // Role
+  if (elements.profileLifeStage instanceof HTMLElement) {
+    elements.profileLifeStage.textContent = summary.life_stage || "这块还在观察，先不急着定论。";
+  }
+  if (elements.profileCurrentPhase instanceof HTMLElement) {
+    elements.profileCurrentPhase.textContent = summary.current_phase || "这阵子的变化还在继续看，先不急着下死结论。";
+  }
+  // Surface
+  renderChipList(elements.profileCognitiveStyle, summary.cognitive_style, "这层还在继续归拢");
+  renderStylePreference(elements.profileStyle, summary.style);
+  renderContextMode(elements.profileContext, summary.context);
+  renderExplorationBar(elements.profileExplorationOpenness, summary.exploration_openness);
+  // Cross-cutting
+  renderSpeculativeInterests(elements.profileSpeculativeInterests, summary.speculative_interests);
   renderCognitionCards(
     elements.profileRecentMemory,
     getProfileCognitionItems(summary),

@@ -70,6 +70,7 @@ def _seed_pool(db: Database, items: list[DiscoveredContent]) -> None:
             duration=item.duration,
             tags=item.tags,
             topic_key=item.topic_key,
+            topic_group=item.topic_group,
             style_key=item.style_key,
             description=item.description,
             cover_url=item.cover_url,
@@ -226,6 +227,7 @@ async def test_generate_recommendations_limits_single_topic_dominance() -> None:
                     title=f"同一 related 主题 {index}",
                     source_strategy="related_chain",
                     topic_key="related:bv1bufdz9eyb",
+                    topic_group="强化学习",
                     style_key="practical_guide",
                     relevance_score=0.95 - index * 0.001,
                 )
@@ -237,6 +239,7 @@ async def test_generate_recommendations_limits_single_topic_dominance() -> None:
                     title=f"另一 related 主题 {index}",
                     source_strategy="related_chain",
                     topic_key="related:bv18xzjbbegz",
+                    topic_group="博弈论",
                     style_key="light_chat",
                     relevance_score=0.94 - index * 0.001,
                 )
@@ -248,6 +251,7 @@ async def test_generate_recommendations_limits_single_topic_dominance() -> None:
                     title=f"热榜内容 {index}",
                     source_strategy="trending",
                     topic_key="trending",
+                    topic_group="时事",
                     style_key="news_brief",
                     relevance_score=0.84 - index * 0.001,
                 )
@@ -259,6 +263,7 @@ async def test_generate_recommendations_limits_single_topic_dominance() -> None:
                     title=f"搜索内容 {index}",
                     source_strategy="search",
                     topic_key="ai",
+                    topic_group="人工智能",
                     style_key="deep_dive",
                     relevance_score=0.83 - index * 0.001,
                 )
@@ -272,9 +277,9 @@ async def test_generate_recommendations_limits_single_topic_dominance() -> None:
             limit=10,
         )
 
-        picked_topic_keys = [item.content.topic_key for item in recommendations]
-
-        assert picked_topic_keys.count("related:bv1bufdz9eyb") <= 3
+        picked_groups = [item.content.topic_group for item in recommendations]
+        # With strict broad_cap, no single topic_group should dominate
+        assert picked_groups.count("强化学习") <= 3
 
 
 @pytest.mark.asyncio

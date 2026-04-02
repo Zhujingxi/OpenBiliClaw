@@ -146,6 +146,7 @@ async def main() -> None:
             p_raw = input("    合理性 (心理桥接是否说得通): ").strip()
             n_raw = input("    新颖性 (不太明显也不太离谱): ").strip()
             s_raw = input("    可操作性 (能在B站找到此类内容): ").strip()
+            r_raw = input("    共鸣度 (你自己会不会想看): ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n  跳过剩余评测")
             break
@@ -154,6 +155,7 @@ async def main() -> None:
             "plausibility": float(p_raw) if p_raw else 0.5,
             "novelty": float(n_raw) if n_raw else 0.5,
             "specificity": float(s_raw) if s_raw else 0.5,
+            "persona_resonance": float(r_raw) if r_raw else 0.5,
         }
 
     display_step.save_text("output.txt", "\n".join(output_lines))

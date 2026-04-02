@@ -88,12 +88,13 @@ class ExploreStrategy(DiscoveryStrategy):
         )
         anchor_list = interest_anchors(profile)
         runner = self.concurrency.run_bilibili if self.concurrency is not None else None
-        request_plan: list[tuple[str, float, bool]] = []
+        request_plan: list[tuple[str, float, bool, str]] = []
         for domain in domains:
             novelty_level = self._clamp_novelty(domain.get("novelty_level", 0.5))
             interest_anchored = bool(domain.get("interest_anchored", False))
+            domain_name = str(domain.get("domain", "")).strip()
             for query in self._clean_queries(domain.get("queries", [])):
-                request_plan.append((query, novelty_level, interest_anchored))
+                request_plan.append((query, novelty_level, interest_anchored, domain_name))
 
         search_outcomes = await _gather_bounded(
             [
@@ -102,14 +103,14 @@ class ExploreStrategy(DiscoveryStrategy):
                     page=1,
                     page_size=10,
                 )
-                for query, _, _ in request_plan
+                for query, _, _, _ in request_plan
             ],
             runner=runner,
         )
 
         candidates: list[tuple[DiscoveredContent, float, bool]] = []
         seen_bvids: set[str] = set()
-        for (query, novelty_level, interest_anchored), outcome in zip(
+        for (query, novelty_level, interest_anchored, domain_label), outcome in zip(
             request_plan, search_outcomes, strict=True
         ):
             if isinstance(outcome, BaseException):
@@ -129,6 +130,8 @@ class ExploreStrategy(DiscoveryStrategy):
                     continue
                 seen_bvids.add(content.bvid)
                 content.source_strategy = self.name
+                if domain_label:
+                    content.topic_group = re.sub(r"\s+", "", domain_label).lower()[:8]
                 candidates.append((content, novelty_level, interest_anchored))
 
         scores = await asyncio.gather(

@@ -273,6 +273,15 @@ def create_app(
             app.state.account_sync_task = None
             return
         app.state.account_sync_task = asyncio.create_task(sync_forever())
+        # Trigger speculator on startup to ensure speculations exist
+        if soul_engine is not None:
+            try:
+                profile = await soul_engine.get_profile()
+                speculator = getattr(soul_engine, "_speculator", None)
+                if speculator is not None:
+                    await speculator.force_tick(profile)
+            except Exception:
+                pass  # Profile not initialized yet — skip silently
 
     @app.on_event("shutdown")
     async def shutdown_refresh_loop() -> None:
@@ -297,12 +306,88 @@ def create_app(
         except Exception:
             return ProfileSummaryResponse(initialized=False)
 
-        top_interests = [item.name for item in profile.preferences.interests[:8] if item.name]
-        disliked_topics = [
+        from openbiliclaw.api.models import (
+            ContextModeOut,
+            InterestDomainOut,
+            InterestSpecificOut,
+            MBTIDimensionOut,
+            MBTIOut,
+            SpeculativeInterestOut,
+            StylePreferenceOut,
+        )
+        from openbiliclaw.soul.speculator import load_speculative_state
+
+        prefs = profile.preferences
+
+        # ── Core layer ──
+        mbti_obj = getattr(getattr(profile, "core", None), "mbti", None)
+        mbti_out = MBTIOut()
+        if mbti_obj is not None and getattr(mbti_obj, "type", ""):
+            mbti_out = MBTIOut(
+                type=str(mbti_obj.type),
+                dimensions={
+                    k: MBTIDimensionOut(pole=str(v.pole), strength=float(v.strength))
+                    for k, v in getattr(mbti_obj, "dimensions", {}).items()
+                },
+                confidence=float(getattr(mbti_obj, "confidence", 0.0)),
+            )
+
+        # ── Interest layer (tree structure) ──
+        interest_layer = getattr(profile, "interest", None)
+
+        def _domain_list(raw_domains: object) -> list[InterestDomainOut]:
+            if not isinstance(raw_domains, list):
+                return []
+            return [
+                InterestDomainOut(
+                    domain=str(getattr(d, "domain", "")),
+                    weight=float(getattr(d, "weight", 0.5)),
+                    specifics=[
+                        InterestSpecificOut(
+                            name=str(getattr(s, "name", "")),
+                            weight=float(getattr(s, "weight", 0.5)),
+                        )
+                        for s in getattr(d, "specifics", [])
+                        if str(getattr(s, "name", "")).strip()
+                    ],
+                )
+                for d in raw_domains
+                if str(getattr(d, "domain", "")).strip()
+            ]
+
+        likes_out = _domain_list(getattr(interest_layer, "likes", []))[:12]
+        dislikes_out = _domain_list(getattr(interest_layer, "dislikes", []))[:8]
+
+        favorite_ups = [
             str(item).strip()
-            for item in getattr(profile.preferences, "disliked_topics", [])[:5]
+            for item in getattr(prefs, "favorite_up_users", [])[:8]
             if str(item).strip()
         ]
+
+        # ── Surface layer ──
+        style_raw = getattr(prefs, "style", None)
+        style_out = StylePreferenceOut()
+        if style_raw is not None:
+            style_out = StylePreferenceOut(
+                preferred_duration=str(getattr(style_raw, "preferred_duration", "")),
+                preferred_pace=str(getattr(style_raw, "preferred_pace", "")),
+                quality_sensitivity=float(getattr(style_raw, "quality_sensitivity", 0.5)),
+                humor_preference=float(getattr(style_raw, "humor_preference", 0.5)),
+                depth_preference=float(getattr(style_raw, "depth_preference", 0.5)),
+            )
+        ctx_raw = getattr(prefs, "context", None)
+        ctx_out = ContextModeOut()
+        if ctx_raw is not None:
+            ctx_out = ContextModeOut(
+                weekday_patterns=str(getattr(ctx_raw, "weekday_patterns", "")),
+                weekend_patterns=str(getattr(ctx_raw, "weekend_patterns", "")),
+                time_of_day_patterns=str(getattr(ctx_raw, "time_of_day_patterns", "")),
+                session_type=str(getattr(ctx_raw, "session_type", "")),
+            )
+
+        exploration_openness = float(getattr(prefs, "exploration_openness", 0.5))
+
+        # ── Cognition updates ──
         cognition_updates = []
         has_more_cognition_updates = False
         next_cognition_cursor = ""
@@ -313,7 +398,6 @@ def create_app(
                 for item in load_cognition_updates()
                 if isinstance(item, dict) and str(item.get("summary", "")).strip()
             ]
-            # Keep unread updates ahead of already-notified ones, newest first within each group.
             raw_updates.sort(key=lambda item: str(item.get("created_at", "")).strip(), reverse=True)
             raw_updates.sort(key=lambda item: bool(item.get("notified", False)))
             try:
@@ -328,16 +412,49 @@ def create_app(
                 _normalize_cognition_update(item)
                 for item in sliced_updates
             ]
+
+        # ── Speculative interests ──
+        spec_items: list[SpeculativeInterestOut] = []
+        try:
+            spec_state = load_speculative_state(config.data_path)
+            spec_items = [
+                SpeculativeInterestOut(
+                    domain=item.domain,
+                    reason=item.reason,
+                    confidence=item.confidence,
+                    confirmation_count=item.confirmation_count,
+                    confirmation_threshold=item.confirmation_threshold,
+                    status=item.status,
+                )
+                for item in spec_state.active[:6]
+            ]
+        except Exception:
+            logger.debug("Failed to load speculative state for profile summary")
+
         return ProfileSummaryResponse(
             initialized=True,
             personality_portrait=profile.personality_portrait,
+            # Core
             core_traits=profile.core_traits[:6],
-            cognitive_style=list(getattr(profile, "cognitive_style", [])[:5]),
-            motivational_drivers=list(getattr(profile, "motivational_drivers", [])[:4]),
-            current_phase=str(getattr(profile, "current_phase", "")),
             deep_needs=profile.deep_needs[:5],
-            top_interests=top_interests,
-            disliked_topics=disliked_topics,
+            mbti=mbti_out,
+            # Values
+            values=list(getattr(profile, "values", [])[:5]),
+            motivational_drivers=list(getattr(profile, "motivational_drivers", [])[:4]),
+            # Interest
+            likes=likes_out,
+            dislikes=dislikes_out,
+            favorite_up_users=favorite_ups,
+            # Role
+            life_stage=str(getattr(profile, "life_stage", "")),
+            current_phase=str(getattr(profile, "current_phase", "")),
+            # Surface
+            cognitive_style=list(getattr(profile, "cognitive_style", [])[:5]),
+            style=style_out,
+            context=ctx_out,
+            exploration_openness=exploration_openness,
+            # Cross-cutting
+            speculative_interests=spec_items,
             recent_cognition_updates=cognition_updates,
             has_more_cognition_updates=has_more_cognition_updates,
             next_cognition_cursor=next_cognition_cursor,

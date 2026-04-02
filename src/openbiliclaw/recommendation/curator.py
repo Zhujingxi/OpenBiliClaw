@@ -154,7 +154,7 @@ class PoolCurator:
                 item.discovered_at or item.last_scored_at, context.now,
             ) * w.freshness
             fatigue = self._topic_fatigue(
-                item.topic_key, context.recent_topic_keys,
+                item.topic_group or item.topic_key, context.recent_topic_keys,
             ) * w.topic_fatigue
             monotony = self._source_monotony(
                 item.source_strategy, context.recent_sources,
@@ -227,7 +227,7 @@ class PoolCurator:
         adj = 0.0
         if item.up_mid and item.up_mid in feedback.disliked_up_mids:
             adj -= _FEEDBACK_DISLIKE_UP_PENALTY
-        topic = item.topic_key.strip()
+        topic = (item.topic_group or item.topic_key).strip()
         if topic and topic in feedback.disliked_topic_keys:
             adj -= _FEEDBACK_DISLIKE_TOPIC_PENALTY
         if topic and topic in feedback.liked_topic_keys:

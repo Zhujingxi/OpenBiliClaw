@@ -284,9 +284,10 @@ class RelatedChainStrategy(DiscoveryStrategy):
             view_count = to_int(stat.get("view", 0))
             like_count = to_int(stat.get("like", 0))
 
+        title_text = clean_text(str(item.get("title", "")))
         return DiscoveredContent(
             bvid=bvid,
-            title=clean_text(str(item.get("title", ""))),
+            title=title_text,
             up_name=up_name,
             up_mid=up_mid,
             cover_url=str(item.get("pic", "")),
@@ -294,11 +295,12 @@ class RelatedChainStrategy(DiscoveryStrategy):
             view_count=view_count,
             like_count=like_count,
             topic_key=seed_topic_key,
+            topic_group=self._topic_group_from_title(title_text),
             description=clean_text(
                 str(item.get("desc", item.get("description", "")))
             ),
             style_key=ContentDiscoveryEngine.infer_style_key(
-                title=clean_text(str(item.get("title", ""))),
+                title=title_text,
                 description=clean_text(
                     str(item.get("desc", item.get("description", "")))
                 ),
@@ -310,6 +312,15 @@ class RelatedChainStrategy(DiscoveryStrategy):
     @staticmethod
     def _topic_key_from_seed_bvid(seed_bvid: str) -> str:
         return f"related:{seed_bvid.strip().lower()}"
+
+    @staticmethod
+    def _topic_group_from_title(title: str) -> str:
+        """Extract a coarse topic group from title for diversity bucketing."""
+        cleaned = re.sub(r"[【】\[\]《》「」\s]+", " ", title).strip()
+        parts = cleaned.split()
+        if parts:
+            return re.sub(r"\s+", "", parts[0]).lower()[:8]
+        return ""
 
     @staticmethod
     def _seed_bonus(seed_index: int) -> float:

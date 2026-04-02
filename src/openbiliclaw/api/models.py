@@ -177,18 +177,92 @@ class CognitionUpdateSummary(BaseModel):
     created_at: str = ""
 
 
+class SpeculativeInterestOut(BaseModel):
+    """A speculated interest direction awaiting confirmation."""
+
+    domain: str = ""
+    reason: str = ""
+    confidence: float = 0.0
+    confirmation_count: int = 0
+    confirmation_threshold: int = 3
+    status: str = "active"
+
+
+class MBTIDimensionOut(BaseModel):
+    """A single MBTI dimension pole with strength."""
+
+    pole: str = ""
+    strength: float = 0.5
+
+
+class MBTIOut(BaseModel):
+    """MBTI personality type with dimensional breakdown."""
+
+    type: str = ""
+    dimensions: dict[str, MBTIDimensionOut] = Field(default_factory=dict)
+    confidence: float = 0.0
+
+
+class InterestSpecificOut(BaseModel):
+    """A narrow interest within a domain."""
+
+    name: str = ""
+    weight: float = 0.5
+
+
+class InterestDomainOut(BaseModel):
+    """A broad interest domain with optional specific sub-interests."""
+
+    domain: str = ""
+    weight: float = 0.5
+    specifics: list[InterestSpecificOut] = Field(default_factory=list)
+
+
+class StylePreferenceOut(BaseModel):
+    """Content style preferences."""
+
+    preferred_duration: str = ""
+    preferred_pace: str = ""
+    quality_sensitivity: float = 0.5
+    humor_preference: float = 0.5
+    depth_preference: float = 0.5
+
+
+class ContextModeOut(BaseModel):
+    """Contextual usage patterns."""
+
+    weekday_patterns: str = ""
+    weekend_patterns: str = ""
+    time_of_day_patterns: str = ""
+    session_type: str = ""
+
+
 class ProfileSummaryResponse(BaseModel):
-    """Lightweight soul profile exposed to the popup."""
+    """Full soul profile exposed to the popup — all five Onion layers."""
 
     initialized: bool
     personality_portrait: str = ""
+    # Core layer
     core_traits: list[str] = Field(default_factory=list)
-    cognitive_style: list[str] = Field(default_factory=list)
-    motivational_drivers: list[str] = Field(default_factory=list)
-    current_phase: str = ""
     deep_needs: list[str] = Field(default_factory=list)
-    top_interests: list[str] = Field(default_factory=list)
-    disliked_topics: list[str] = Field(default_factory=list)
+    mbti: MBTIOut = Field(default_factory=MBTIOut)
+    # Values layer
+    values: list[str] = Field(default_factory=list)
+    motivational_drivers: list[str] = Field(default_factory=list)
+    # Interest layer
+    likes: list[InterestDomainOut] = Field(default_factory=list)
+    dislikes: list[InterestDomainOut] = Field(default_factory=list)
+    favorite_up_users: list[str] = Field(default_factory=list)
+    # Role layer
+    life_stage: str = ""
+    current_phase: str = ""
+    # Surface layer
+    cognitive_style: list[str] = Field(default_factory=list)
+    style: StylePreferenceOut = Field(default_factory=StylePreferenceOut)
+    context: ContextModeOut = Field(default_factory=ContextModeOut)
+    exploration_openness: float = 0.5
+    # Cross-cutting
+    speculative_interests: list[SpeculativeInterestOut] = Field(default_factory=list)
     recent_cognition_updates: list[CognitionUpdateSummary] = Field(default_factory=list)
     has_more_cognition_updates: bool = False
     next_cognition_cursor: str = ""

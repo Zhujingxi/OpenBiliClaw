@@ -338,19 +338,23 @@ class InterestSpeculator:
         *,
         llm_service: Any,
         data_dir: Path | None = None,
-        generation_interval_hours: int = 2,
+        generation_interval_minutes: int = 10,
         default_ttl_days: int = 3,
         cooldown_days: int = 7,
         confirmation_threshold: int = 3,
         max_active: int = 5,
+        max_primary_interests: int = 15,
+        max_secondary_interests: int = 60,
     ) -> None:
         self._llm_service = llm_service
         self._data_dir = data_dir
-        self._generation_interval_hours = generation_interval_hours
+        self._generation_interval_minutes = generation_interval_minutes
         self._default_ttl_days = default_ttl_days
         self._cooldown_days = cooldown_days
         self._confirmation_threshold = confirmation_threshold
         self._max_active = max_active
+        self._max_primary_interests = max_primary_interests
+        self._max_secondary_interests = max_secondary_interests
 
     def _load_state(self) -> SpeculativeState:
         if self._data_dir:
@@ -377,8 +381,8 @@ class InterestSpeculator:
         promoted, state = promote_ready(state)
         result.promoted = promoted
 
-        # 3. Generate new speculations if interval elapsed
-        if self._should_generate(state, now):
+        # 3. Generate new speculations if interval elapsed and caps not reached
+        if self._should_generate(state, now, profile):
             state = await self._generate(profile, state, now)
             result.generated = [s for s in state.active if s.status == "active"]
 
@@ -403,6 +407,39 @@ class InterestSpeculator:
                 [s.domain for s in result.generated],
             )
 
+        return result
+
+    async def force_tick(self, profile: OnionProfile) -> SpeculatorTickResult:
+        """Force a speculator tick ignoring the interval timer.
+
+        Used on init and process startup to ensure speculations exist immediately.
+        Still respects interest tier caps and max_active.
+        """
+        now = datetime.now()
+        state = self._load_state()
+        result = SpeculatorTickResult()
+
+        # Expire and promote as usual
+        rejected, state = expire_stale(state, now, self._cooldown_days)
+        result.rejected = rejected
+        promoted, state = promote_ready(state)
+        result.promoted = promoted
+
+        # Generate regardless of interval (but respect caps)
+        active_count = sum(1 for s in state.active if s.status == "active")
+        can_generate = active_count < self._max_active
+        if can_generate and self._llm_service is not None:
+            # Check tier caps
+            confirmed_domains = len(profile.interest.likes)
+            if confirmed_domains + active_count < self._max_primary_interests:
+                state = await self._generate(profile, state, now)
+                result.generated = [s for s in state.active if s.status == "active"]
+
+        self._save_state(state)
+        logger.info(
+            "Speculator force_tick: generated=%d, promoted=%d, rejected=%d",
+            len(result.generated), len(result.promoted), len(result.rejected),
+        )
         return result
 
     def observe(self, events: list[dict[str, Any]]) -> int:
@@ -469,18 +506,53 @@ class InterestSpeculator:
 
     # -- Internal -------------------------------------------------------------
 
-    def _should_generate(self, state: SpeculativeState, now: datetime) -> bool:
-        """Check if enough time has passed since last generation."""
+    def _should_generate(
+        self,
+        state: SpeculativeState,
+        now: datetime,
+        profile: OnionProfile | None = None,
+    ) -> bool:
+        """Check if generation should run.
+
+        Skips if:
+        - active speculations already at max_active
+        - primary interests (confirmed domains + active speculations) at cap
+        - secondary interests (confirmed specifics + active speculations) at cap
+        - interval not yet elapsed
+        """
         active_count = sum(1 for s in state.active if s.status == "active")
         if active_count >= self._max_active:
             return False
+
+        # Check interest tier caps against profile
+        if profile is not None:
+            confirmed_domains = len(profile.interest.likes)
+            total_primary = confirmed_domains + active_count
+            if total_primary >= self._max_primary_interests:
+                logger.debug(
+                    "Speculation skipped: primary interests at cap (%d/%d)",
+                    total_primary, self._max_primary_interests,
+                )
+                return False
+
+            confirmed_specifics = sum(
+                len(d.specifics) for d in profile.interest.likes
+            )
+            total_secondary = confirmed_specifics + active_count
+            if total_secondary >= self._max_secondary_interests:
+                logger.debug(
+                    "Speculation skipped: secondary interests at cap (%d/%d)",
+                    total_secondary, self._max_secondary_interests,
+                )
+                return False
+
         if not state.last_generation_at:
             return True
         try:
             last = datetime.fromisoformat(state.last_generation_at)
         except (ValueError, TypeError):
             return True
-        return now > last + timedelta(hours=self._generation_interval_hours)
+        return now > last + timedelta(minutes=self._generation_interval_minutes)
 
     async def _generate(
         self,

@@ -264,8 +264,26 @@ async def main() -> None:
     print(f"数据来源: {len(history)} 浏览 + {len(favorites_data)} 收藏 + {len(following_data)} 关注")
     print(f"完整日志: {rl.run_dir}")
     print(f"摘要: {summary_path}")
-    print("请评测后告诉我每层的准确性和需要修正的地方")
     print("=" * 60)
+
+    # --- 5. Human feedback → optimization cycle ---
+    from openbiliclaw.eval.human_feedback import (
+        collect_human_feedback,
+        run_optimization_cycle,
+    )
+
+    feedback = collect_human_feedback()
+    if feedback is not None:
+        result = await run_optimization_cycle(
+            feedback,
+            project_root=PROJECT_ROOT,
+            task="init",
+            run_logger=rl,
+        )
+        if result.get("optimized"):
+            print(f"\n优化完成: {result.get('summary', '')[:80]}")
+        else:
+            print(f"\n未优化: {result.get('reason', '')}")
 
 
 if __name__ == "__main__":

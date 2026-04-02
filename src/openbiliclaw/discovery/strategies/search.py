@@ -271,6 +271,7 @@ class SearchStrategy(DiscoveryStrategy):
             duration=parse_duration(item.get("duration", 0)),
             view_count=to_int(item.get("play", 0)),
             topic_key=self._topic_key_from_query(query),
+            topic_group=self._topic_group_from_query(query),
             description=description,
             style_key=ContentDiscoveryEngine.infer_style_key(
                 title=title,
@@ -309,3 +310,15 @@ class SearchStrategy(DiscoveryStrategy):
     @staticmethod
     def _topic_key_from_query(query: str) -> str:
         return re.sub(r"\s+", "", query).strip().lower()
+
+    @staticmethod
+    def _topic_group_from_query(query: str) -> str:
+        """Extract the core topic word from a search query.
+
+        "强化学习 游戏ai 决策模型" → "强化学习"
+        "纪录片 原理" → "纪录片"
+        """
+        parts = query.strip().split()
+        if parts:
+            return re.sub(r"\s+", "", parts[0]).lower()[:8]
+        return ""

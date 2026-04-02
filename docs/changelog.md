@@ -38,15 +38,18 @@
 ### 猜测兴趣系统 (Speculative Interest Lifecycle)
 
 - **新增 `InterestSpeculator` 引擎** (`soul/speculator.py`)，实现猜测兴趣的完整生命周期：生成 → 观测 → 转正/拒绝 → 冷却
-- **LLM 驱动的兴趣猜测**：定期（默认 24h）基于心理学桥接推理生成 3-5 个新兴趣方向，排除冷却期方向
+- **高频生成**：每 10 分钟检查一次，Init 和进程启动时通过 `force_tick()` 立即触发
+- **兴趣上限保护**：一级兴趣（域数）上限 15、二级兴趣（细项数）上限 60，确认兴趣 + 活跃猜测达到上限时自动跳过生成
+- **LLM 驱动的兴趣猜测**：基于心理学桥接推理生成 3-5 个新兴趣方向，排除冷却期方向
 - **轻量级事件观测**：每次事件 ingest 时通过关键词匹配检查是否与猜测兴趣相关，无需 LLM 调用
 - **自动转正**：猜测兴趣被 3 次以上事件确认后自动提升为正式兴趣（source="speculated", weight=0.3）
-- **拒绝 + 冷却**：TTL（默认 14 天）到期未确认的猜测进入 30 天冷却期，期间不再猜测该方向
+- **拒绝 + 冷却**：TTL（默认 3 天）到期未确认的猜测进入 7 天冷却期，期间不再猜测该方向
 - **双来源种子**：`PreferenceAnalyzer` 每次偏好分析附带产出的 `speculative_interests` 现被保留并注入 speculator 作为种子
 - **Pipeline 集成**：`ingest_batch()` 自动触发观测，`tick()` 自动处理过期/转正/生成
-- **Discovery 集成**：活跃猜测兴趣出现在 `SearchStrategy` 和 `ExploreStrategy` 的画像摘要中
-- **5 项配置项**：`speculation_interval_hours / ttl_days / cooldown_days / confirmation_threshold / max_active`
-- 新增 23 个单元测试覆盖观测匹配、转正、过期冷却、序列化等
+- **Discovery 集成**：`SoulEngine.get_profile()` 附加 `_active_speculations`，`build_profile_summary()` 自动包含猜测兴趣，所有策略 LLM prompt 可见
+- **API 集成**：`GET /api/profile` 返回 `speculative_interests` 字段
+- **7 项配置项**：`speculation_interval_minutes / ttl_days / cooldown_days / confirmation_threshold / max_active / max_primary_interests / max_secondary_interests`
+- 新增 27 个单元测试覆盖观测匹配、转正、过期冷却、兴趣上限、force_tick、间隔单位等
 
 ### SoulProfile 五层洋葱模型重构
 

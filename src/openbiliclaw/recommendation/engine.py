@@ -447,59 +447,95 @@ class RecommendationEngine:
         per_topic_cap = cls._topic_cap(limit)
         soft_topic_cap = cls._soft_topic_cap(limit)
         per_style_cap = cls._style_cap(limit)
+        broad_cap = cls._broad_topic_cap(limit)
         selected: list[DiscoveredContent] = []
         deferred: list[DiscoveredContent] = []
         topic_counts: dict[str, int] = {}
+        broad_topic_counts: dict[str, int] = {}
         style_counts: dict[str, int] = {}
         source_counts: dict[str, int] = {}
         seen_sources: set[str] = set()
         per_source_cap = cls._source_cap(limit)
-        unique_source_target = min(
-            limit,
-            len(
-                {
-                    cls._normalize_topic_token(item.source_strategy)
-                    for item in ranked
-                    if cls._normalize_topic_token(item.source_strategy)
-                }
-            ),
-        )
+        available_sources = {
+            cls._normalize_topic_token(item.source_strategy)
+            for item in ranked
+            if cls._normalize_topic_token(item.source_strategy)
+        }
+        unique_source_target = min(limit, len(available_sources))
+
+        # Source diversity floor: pre-reserve best item per source
+        # so that no source gets completely crowded out
+        reserved = cls._reserve_per_source(ranked, available_sources)
+        reserved_bvids = {item.bvid for item in reserved}
+
+        def _exceeds_broad_cap(item: DiscoveredContent) -> bool:
+            bt = cls._broad_topic_token(item)
+            return bool(bt) and broad_topic_counts.get(bt, 0) >= broad_cap
+
+        def _track_broad(item: DiscoveredContent) -> None:
+            bt = cls._broad_topic_token(item)
+            if bt:
+                broad_topic_counts[bt] = broad_topic_counts.get(bt, 0) + 1
 
         for item in ranked:
             tokens = cls._diversity_tokens(item)
             style_token = cls._style_token(item)
             source_token = cls._normalize_topic_token(item.source_strategy)
+            # Reserved items bypass broad/style/source caps (not topic_cap)
+            # when their source is not yet represented — guarantees source floor
+            needs_source_floor = (
+                item.bvid in reserved_bvids
+                and bool(source_token)
+                and source_token not in seen_sources
+            )
             prioritize_new_source = (
                 bool(source_token)
                 and source_token not in seen_sources
                 and len(seen_sources) < unique_source_target
             )
-            if tokens and any(topic_counts.get(token, 0) >= per_topic_cap for token in tokens):
+            # Topic dedup is always enforced — even reserved items
+            if tokens and any(
+                topic_counts.get(token, 0) >= per_topic_cap for token in tokens
+            ):
+                deferred.append(item)
+                continue
+            if not needs_source_floor and _exceeds_broad_cap(item):
                 deferred.append(item)
                 continue
             if (
-                not prioritize_new_source
+                not needs_source_floor
+                and not prioritize_new_source
                 and style_token
                 and style_counts.get(style_token, 0) >= per_style_cap
             ):
                 deferred.append(item)
                 continue
-            if source_token and source_counts.get(source_token, 0) >= per_source_cap:
+            if (
+                not needs_source_floor
+                and source_token
+                and source_counts.get(source_token, 0) >= per_source_cap
+            ):
                 deferred.append(item)
                 continue
-            if not prioritize_new_source and source_token and source_token in seen_sources:
+            if (
+                not needs_source_floor
+                and not prioritize_new_source
+                and source_token
+                and source_token in seen_sources
+            ):
                 deferred.append(item)
                 continue
             selected.append(item)
             for token in tokens:
                 topic_counts[token] = topic_counts.get(token, 0) + 1
+            _track_broad(item)
             if style_token:
                 style_counts[style_token] = style_counts.get(style_token, 0) + 1
             if source_token:
                 seen_sources.add(source_token)
                 source_counts[source_token] = source_counts.get(source_token, 0) + 1
             if len(selected) >= limit:
-                return selected
+                return cls._interleave_by_topic(selected)
 
         def try_fill(
             pool: list[DiscoveredContent],
@@ -507,6 +543,7 @@ class RecommendationEngine:
             topic_cap: int,
             enforce_style_cap: bool,
             enforce_source_cap: bool,
+            enforce_broad_cap: bool,
         ) -> list[DiscoveredContent]:
             remaining: list[DiscoveredContent] = []
             for item in pool:
@@ -514,6 +551,9 @@ class RecommendationEngine:
                 style_token = cls._style_token(item)
                 source_token = cls._normalize_topic_token(item.source_strategy)
                 if tokens and any(topic_counts.get(token, 0) >= topic_cap for token in tokens):
+                    remaining.append(item)
+                    continue
+                if enforce_broad_cap and _exceeds_broad_cap(item):
                     remaining.append(item)
                     continue
                 if (
@@ -533,6 +573,7 @@ class RecommendationEngine:
                 selected.append(item)
                 for token in tokens:
                     topic_counts[token] = topic_counts.get(token, 0) + 1
+                _track_broad(item)
                 if style_token:
                     style_counts[style_token] = style_counts.get(style_token, 0) + 1
                 if source_token:
@@ -546,6 +587,7 @@ class RecommendationEngine:
             topic_cap=per_topic_cap,
             enforce_style_cap=True,
             enforce_source_cap=True,
+            enforce_broad_cap=True,
         )
         if len(selected) < limit:
             remaining = try_fill(
@@ -553,6 +595,7 @@ class RecommendationEngine:
                 topic_cap=per_topic_cap,
                 enforce_style_cap=False,
                 enforce_source_cap=True,
+                enforce_broad_cap=True,
             )
         if len(selected) < limit:
             remaining = try_fill(
@@ -560,6 +603,7 @@ class RecommendationEngine:
                 topic_cap=per_topic_cap,
                 enforce_style_cap=False,
                 enforce_source_cap=False,
+                enforce_broad_cap=True,
             )
         if len(selected) < limit:
             remaining = try_fill(
@@ -567,16 +611,22 @@ class RecommendationEngine:
                 topic_cap=soft_topic_cap,
                 enforce_style_cap=False,
                 enforce_source_cap=False,
+                enforce_broad_cap=True,  # Never relax broad_cap
             )
         if len(selected) < limit:
             for item in remaining:
                 selected.append(item)
                 if len(selected) >= limit:
                     break
-        return selected[:limit]
+        return cls._interleave_by_topic(selected[:limit])
 
     @staticmethod
     def _diversity_tokens(item: DiscoveredContent) -> set[str]:
+        """Use topic_group (coarse semantic category) for diversity bucketing."""
+        topic_group = RecommendationEngine._normalize_topic_token(item.topic_group)
+        if topic_group:
+            return {topic_group}
+
         topic_key = RecommendationEngine._normalize_topic_token(item.topic_key)
         if topic_key:
             return {topic_key}
@@ -601,6 +651,72 @@ class RecommendationEngine:
     @staticmethod
     def _style_token(item: DiscoveredContent) -> str:
         return RecommendationEngine._normalize_topic_token(item.style_key)
+
+    @staticmethod
+    def _broad_topic_token(item: DiscoveredContent) -> str:
+        """Extract a broad topic category for cross-variant grouping.
+
+        Uses topic_group directly when available (already coarse).
+        Falls back to first 4 chars of topic_key for legacy data.
+        """
+        group = RecommendationEngine._normalize_topic_token(item.topic_group)
+        if group:
+            return group
+        raw = RecommendationEngine._normalize_topic_token(item.topic_key)
+        if not raw:
+            return ""
+        if raw.startswith("related:"):
+            return "related"
+        return raw[:4]
+
+    @staticmethod
+    def _broad_topic_cap(limit: int) -> int:
+        """Maximum items sharing the same broad topic category."""
+        if limit <= 5:
+            return 2
+        if limit <= 10:
+            return 3
+        return 4
+
+    @classmethod
+    def _interleave_by_topic(
+        cls, items: list[DiscoveredContent],
+    ) -> list[DiscoveredContent]:
+        """Reorder items so same-topic content is maximally spread apart.
+
+        Uses round-robin from groups sorted by size (largest first).
+        """
+        if len(items) <= 2:
+            return items
+        groups: dict[str, list[DiscoveredContent]] = {}
+        for item in items:
+            key = cls._broad_topic_token(item) or item.bvid
+            groups.setdefault(key, []).append(item)
+        buckets = sorted(groups.values(), key=len, reverse=True)
+        result: list[DiscoveredContent] = []
+        while buckets:
+            for bucket in buckets:
+                if bucket:
+                    result.append(bucket.pop(0))
+            buckets = [b for b in buckets if b]
+        return result
+
+    @staticmethod
+    def _reserve_per_source(
+        ranked: list[DiscoveredContent],
+        available_sources: set[str],
+    ) -> list[DiscoveredContent]:
+        """Pick the best candidate per source to guarantee source diversity floor."""
+        reserved: list[DiscoveredContent] = []
+        seen_sources: set[str] = set()
+        for item in ranked:
+            source = RecommendationEngine._normalize_topic_token(item.source_strategy)
+            if source and source in available_sources and source not in seen_sources:
+                seen_sources.add(source)
+                reserved.append(item)
+                if len(seen_sources) >= len(available_sources):
+                    break
+        return reserved
 
     @staticmethod
     def _normalize_topic_token(value: str) -> str:
@@ -643,6 +759,7 @@ class RecommendationEngine:
                 like_count=int(row.get("like_count", 0) or 0),
                 tags=self._parse_tags(row.get("tags", "[]")),
                 topic_key=str(row.get("topic_key", "")),
+                topic_group=str(row.get("topic_group", "")),
                 style_key=str(row.get("style_key", "")),
                 source_strategy=str(row.get("source", "")),
                 relevance_score=float(row.get("relevance_score", 0.0) or 0.0),
@@ -673,6 +790,7 @@ class RecommendationEngine:
                 like_count=int(row.get("like_count", 0) or 0),
                 tags=self._parse_tags(row.get("tags", "[]")),
                 topic_key=str(row.get("topic_key", "")),
+                topic_group=str(row.get("topic_group", "")),
                 style_key=str(row.get("style_key", "")),
                 source_strategy=str(row.get("source", "")),
                 relevance_score=float(row.get("relevance_score", 0.0) or 0.0),
