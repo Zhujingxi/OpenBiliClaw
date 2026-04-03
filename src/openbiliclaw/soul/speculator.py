@@ -584,8 +584,8 @@ class InterestSpeculator:
             from openbiliclaw.llm.service import LLMServiceError
 
             response = await self._llm_service.complete_structured_task(
-                messages=messages,
-                task_name="speculation_generation",
+                system_instruction=messages[0]["content"],
+                user_input=messages[1]["content"],
             )
             raw = _parse_speculation_response(response.content)
         except (LLMProviderError, LLMServiceError):

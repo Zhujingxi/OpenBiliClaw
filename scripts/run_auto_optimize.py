@@ -181,6 +181,14 @@ async def main() -> None:
             # 1b. Generate simulated events (with retry)
             logger.info("  → 生成模拟事件...")
             persona_ctx = ground_truth.to_llm_context()
+            # Extract ground truth UP主 for event generation grounding
+            gt_up_users = ground_truth.interest.favorite_up_users or []
+            gt_up_hint = ""
+            if gt_up_users:
+                gt_up_hint = (
+                    f"\n5. **画像中的常看UP主必须出现在事件中**: {', '.join(gt_up_users)}\n"
+                    f"   这些 UP主 的视频至少各出现 2 次（作为 up_name），确保偏好分析能提取到\n"
+                )
             try:
                 events_data = await collect_json(
                     prompt=(
@@ -191,7 +199,8 @@ async def main() -> None:
                         f"1. **每条事件必须有 up_name**（UP主频道名），从画像的兴趣领域推断合理的真实 UP 主名\n"
                         f"2. **至少 5 条负面事件**（skip / dislike），体现用户明确不喜欢的内容方向\n"
                         f"3. skip 事件需包含 completion_rate（0.0-0.3 表示快速跳过）\n"
-                        f"4. 视频标题要真实、具体\n\n"
+                        f"4. 视频标题要真实、具体\n"
+                        f"{gt_up_hint}\n"
                         f"## 输出格式\n"
                         f'```json\n{{"events": [{{"event_type": "view", "title": "...", "up_name": "..."}}, '
                         f'{{"event_type": "skip", "title": "...", "up_name": "...", "completion_rate": 0.1}}]}}\n```\n\n'

@@ -131,7 +131,10 @@ class ExploreStrategy(DiscoveryStrategy):
                 seen_bvids.add(content.bvid)
                 content.source_strategy = self.name
                 if domain_label:
-                    content.topic_group = re.sub(r"\s+", "", domain_label).lower()[:8]
+                    normalized_domain = re.sub(r"\s+", "", domain_label).lower()[:8]
+                    content.topic_group = normalized_domain
+                    # Override topic_key so diversity scoring sees distinct domains
+                    content.topic_key = f"explore:{normalized_domain}"
                 candidates.append((content, novelty_level, interest_anchored))
 
         scores = await asyncio.gather(
@@ -258,7 +261,8 @@ class ExploreStrategy(DiscoveryStrategy):
         if not anchored:
             return domains[: self.max_domains]
 
-        loose_cap = min(1, max(0, self.max_domains - 1))
+        # Allow at least 2 truly novel (loose) domains for better diversity
+        loose_cap = max(2, self.max_domains // 2)
         prioritized = [*anchored, *loose[:loose_cap]]
         return prioritized[: self.max_domains]
 

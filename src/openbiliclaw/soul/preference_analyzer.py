@@ -115,13 +115,12 @@ class PreferenceAnalyzer:
                 ),
             }
 
-        # Use LLM output as authoritative UP user list (LLM already sees
-        # existing_preference and decides which old names to keep).  Fall back
-        # to existing list only when the new batch contains no UP users at all.
+        # Union old and new UP users to accumulate across batches.
+        # Individual batches may only mention a subset; replacing would lose
+        # previously confirmed UP users.
         new_up = self._as_str_list(new_preference.get("favorite_up_users", []))
-        favorite_up_users = sorted(set(new_up)) if new_up else sorted(
-            set(self._as_str_list(existing_preference.get("favorite_up_users", [])))
-        )
+        old_up = self._as_str_list(existing_preference.get("favorite_up_users", []))
+        favorite_up_users = sorted(set(new_up)) if new_up else old_up
         disliked_topics = sorted({
             *self._as_str_list(existing_preference.get("disliked_topics", [])),
             *self._as_str_list(new_preference.get("disliked_topics", [])),

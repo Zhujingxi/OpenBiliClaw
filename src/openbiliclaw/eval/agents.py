@@ -643,10 +643,14 @@ async def run_optimizer_agent(
         "  - prompts.py: 所有 LLM prompt 模板\n"
         "</pipeline_architecture>\n\n"
         "每次最多修改 2 处。修改必须是精确的 diff 级别（old_text → new_text）。\n"
-        "对 pipeline 代码的修改必须保持函数签名不变、不引入新依赖。\n"
-        "最终返回一个 JSON 代码块，格式:\n"
-        '{"changes": [{"file_path": "src/openbiliclaw/...", "old_text": "...", '
-        '"new_text": "...", "reason": "..."}], "summary": "总结"}\n\n'
+        "对 pipeline 代码的修改必须保持函数签名不变、不引入新依赖。\n\n"
+        "⚠️ 关键输出要求：\n"
+        "1. old_text 和 new_text 只包含需要修改的最小片段（3-10 行），不要复制整个函数或整段 schema\n"
+        "2. old_text 必须是文件中能精确匹配到的原文（包括缩进和换行）\n"
+        "3. 你的最后一条消息必须且只能包含一个 ```json 代码块\n\n"
+        "最终返回格式（```json 代码块）:\n"
+        '{"changes": [{"file_path": "src/openbiliclaw/...", "old_text": "最小修改片段", '
+        '"new_text": "替换后的片段", "reason": "修改原因"}], "summary": "一句话总结"}\n\n'
         f"评估报告:\n{report_text}"
     )
 
@@ -660,13 +664,22 @@ async def run_optimizer_agent(
             system_prompt=(
                 "你是画像系统优化专家。你可以修改 prompt 模板和 pipeline Python 代码。\n"
                 "先用 Read 工具阅读相关代码文件理解当前结构和数据流，\n"
-                "然后提出精确的文本修改。最后返回一个 JSON 代码块包含修改方案。\n"
+                "然后提出精确的文本修改。\n\n"
                 "原则：最小化修改，不破坏函数签名和导入，每次只改 1-2 处。\n"
-                "如果偏差根因在 pipeline 代码（如字段未同步、更新逻辑缺失），优先修改代码而非 prompt。"
+                "如果偏差根因在 pipeline 代码（如字段未同步、更新逻辑缺失），优先修改代码而非 prompt。\n\n"
+                "⚠️ 输出格式硬性要求：\n"
+                "- 你的最后一条消息必须是且仅是一个 ```json 代码块\n"
+                "- 不要在 JSON 前后添加任何解释文字\n"
+                "- old_text/new_text 只取最小必要片段（3-10 行），不要复制大段代码\n"
+                "- 如果没有可行修改，返回 {\"changes\": [], \"summary\": \"原因\"}"
             ),
             allowed_tools=["Read", "Grep", "Glob"],
             cwd=str(project_root),
             max_turns=10,
+            output_format={
+                "type": "json_schema",
+                "schema": PARAM_CHANGE_SCHEMA,
+            },
         ),
     )
     elapsed = _time.monotonic() - t0
@@ -680,9 +693,38 @@ async def run_optimizer_agent(
             return _extract_json(text_source)
         except (ValueError, json.JSONDecodeError):
             continue
-    logger.warning("Optimizer agent did not return valid JSON (%.1fs)", elapsed)
-    logger.warning("Last message (500 chars): %s", (last_text or "")[:500])
-    return {"changes": [], "summary": (last_text or all_text or "")[:200]}
+
+    # JSON extraction failed — use a follow-up collect_json call to
+    # format the agent's analysis into the required JSON structure.
+    logger.warning("Optimizer agent did not return valid JSON (%.1fs), reformatting...", elapsed)
+    agent_analysis = (last_text or all_text or "")[:3000]
+    try:
+        return await collect_json(
+            prompt=(
+                "以下是优化专家的分析结果，请提取其中的代码修改方案为 JSON。\n\n"
+                "⚠️ 关键要求：\n"
+                "- old_text 和 new_text 只取最小片段（3-10 行），不要复制整段代码\n"
+                "- 如果分析中没有明确的 old_text → new_text 修改，返回空 changes\n"
+                "- summary 用一句话概括分析结论\n\n"
+                f"分析内容:\n{agent_analysis}\n\n"
+                '返回纯 JSON: {"changes": [...], "summary": "..."}'
+            ),
+            options=ClaudeAgentOptions(
+                system_prompt=(
+                    "你是 JSON 提取工具。从分析文本中提取代码修改方案。\n"
+                    "只返回纯 JSON 对象，不要 code fence，不要解释。\n"
+                    "old_text/new_text 保持简短（最小必要片段）。"
+                ),
+                max_turns=2,
+                output_format="json",
+            ),
+            max_retries=1,
+            label="optimizer_reformat",
+            json_schema=PARAM_CHANGE_SCHEMA,
+        )
+    except Exception:
+        logger.warning("Optimizer reformat also failed")
+        return {"changes": [], "summary": agent_analysis[:200]}
 
 
 # ---------------------------------------------------------------------------
@@ -794,6 +836,10 @@ async def run_discovery_optimizer_agent(
             allowed_tools=["Read", "Grep", "Glob"],
             cwd=str(project_root),
             max_turns=10,
+            output_format={
+                "type": "json_schema",
+                "schema": PARAM_CHANGE_SCHEMA,
+            },
         ),
     )
     elapsed = _time.monotonic() - t0
@@ -808,5 +854,28 @@ async def run_discovery_optimizer_agent(
             return _extract_json(text_source)
         except (ValueError, json.JSONDecodeError):
             continue
-    logger.warning("Discovery optimizer agent did not return valid JSON (%.1fs)", elapsed)
-    return {"changes": [], "summary": (last_text or all_text or "")[:200]}
+
+    logger.warning("Discovery optimizer agent did not return valid JSON (%.1fs), reformatting...", elapsed)
+    agent_analysis = (last_text or all_text or "")[:3000]
+    try:
+        return await collect_json(
+            prompt=(
+                "以下是优化分析的结果，请将其转换为严格的 JSON 格式。\n"
+                "如果分析中提到了具体的代码修改方案（old_text → new_text），提取为 changes。\n"
+                "如果没有提到可执行的修改，返回空 changes 列表。\n\n"
+                f"分析内容:\n{agent_analysis}\n\n"
+                "返回格式:\n"
+                '{"changes": [{"file_path": "...", "old_text": "...", '
+                '"new_text": "...", "reason": "..."}], "summary": "一句话总结"}'
+            ),
+            options=ClaudeAgentOptions(
+                system_prompt="你是 JSON 格式化工具。将输入的分析文本提取为指定的 JSON 结构。只返回纯 JSON。",
+                max_turns=2,
+            ),
+            max_retries=1,
+            label="discovery_optimizer_reformat",
+            json_schema=PARAM_CHANGE_SCHEMA,
+        )
+    except Exception:
+        logger.warning("Discovery optimizer reformat also failed")
+        return {"changes": [], "summary": agent_analysis[:200]}

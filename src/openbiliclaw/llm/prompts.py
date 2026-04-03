@@ -73,6 +73,8 @@ def build_preference_analysis_prompt(
 3. 如果证据不足，返回空数组、默认值或较低权重。
 4. 兴趣标签控制在 5~15 个以内，weight 在 0~1 之间。
 5. 所有文本字段（name、category、context 下的 patterns/session_type、disliked_topics）必须用中文。
+6. favorite_up_users 必须从事件的 up_name 字段原样复制，一个字都不能改。先逐条扫描所有事件收集 up_name 值，再与 existing_preference.favorite_up_users 合并去重。严禁根据话题推测可能的UP主名称。如果本批事件中无 up_name 字段，保留 existing_preference 中的原有列表不变。
+7. cognitive_style 描述用户的信息处理偏好（如思维方式、阅读习惯、理解路径），3~5 条，基于观看行为模式推断，不要照搬兴趣标签。
 </rules>
 
 <output_schema>
@@ -93,6 +95,7 @@ def build_preference_analysis_prompt(
   },
   "exploration_openness": 0.6,
   "disliked_topics": ["低质标题党"],
+  "cognitive_style": ["偏好类比与隐喻式理解而非纯逻辑推演", "直觉优先、自上而下的全局把握"],
   "favorite_up_users": ["某个UP主"]
 }
 </output_schema>
@@ -137,23 +140,62 @@ def build_soul_profile_prompt(
 2. 输出必须是严格 JSON，不要附带解释。
 3. 人格描述至少 200 个中文字符。
 4. core_traits 控制在 3 到 6 条，deep_needs 和 values 保持简洁。
+   deep_needs 必须用具体、可感知的语言描述用户的底层渴望（如"对事物运作原理的深层理解""不受干扰的个人空间与自由"），
+   不要写成抽象心理学术语（"掌控感""自我实现"太笼统），也不要写成认知偏好（"逻辑闭环"属于 cognitive_style）。
+   core_traits 和 values 数量应与证据匹配（如证据支持 4 条 values 就写 4 条，不要人为缩减）。
 5. 先总结这个人怎么处理信息，再总结他在内容里长期在找什么，最后总结他最近更像处于什么阶段。
 6. 不要把兴趣 topic 堆成画像主体；题材、UP 主、作品名最多只举 1 到 2 个例子，
    而且只能当证据，不要当正文主干。
 7. 可以参考非临床的认知风格、内在驱动力、阶段状态来组织描述，但不要写理论术语，
    不要写成心理报告、咨询记录或说明书，要像熟人总结这个人的气质和状态。
+8. mbti 字段必须填写：根据行为数据推断最可能的 MBTI 四字母类型（如 INTJ、ENFP），
+   confidence 取 0.5-0.9，四个维度 EI/SN/TF/JP 都要填。如果证据不足可以降低 confidence，
+   但不要留空。
+9. cognitive_style：如果 preference_summary 中已有 cognitive_style，直接沿用并微调措辞，
+   不要推翻或重新推断。如果没有，再从行为模式推断。
+10. current_phase 和 life_stage 必须基于具体行为证据：引用具体的观看主题、活动模式来描述，
+    不要写"处于探索阶段"之类的空话。参考 history_summary 中的 recent_titles 判断最近的兴趣方向。
+    life_stage 必须尽可能推断具体的人口学特征：从内容偏好推断学历层次（如频繁看考研/学术内容→研究生阶段）、
+    职业阶段（如看面试/职场/转行内容→求职期）、年龄段（如内容成熟度和话题关注点）。
+    用"XX高校研究生在读""工作2-3年的互联网从业者"这样的具体描述，
+    不要用"探索与转型期""存在主义实践"等哲学化表述替代可推断的事实。
+    current_phase 应聚焦用户当前面临的具体张力或抉择（如"AI浪潮下的职业焦虑与创作冲动并存"），
+    而不是抽象的认知状态描述（如"从宏观审美转向消费决策"）。
+11. 警惕内向/分析型偏见：不要默认将用户描绘为"内省、理性、追求掌控感"的人格。
+    如果用户频繁观看搞笑、娱乐、社交互动、派对游戏、生活分享、追番类内容，
+    core_traits 应体现外向、社交驱动、刺激寻求、兴趣易转移等特征；
+    motivational_drivers 应反映分享表达、对抗无聊、群体归属等驱动力；
+    deep_needs 应包含新鲜刺激渴求、被群体接纳等需求。
+    根据实际行为证据判断，而不是套用"深度思考者"模板。
+12. 警惕纯理性偏见：即使用户确实偏好知识类/深度内容，也不要只输出智识维度的特质。
+    观察用户是否表现出以下感性信号：关注人文/情感/艺术/理想主义类内容、
+    对创作者的情感表达有持续互动、追番或追剧中表现出高共情投入、
+    关注社会议题或弱势群体话题、对"完美"或"极致"有反复追求。
+    如果存在这些信号，core_traits 必须包含感性维度（如深度共情、理想主义、
+    完美主义倾向、审美敏感等），不要全部用"好奇""批判""分析"等冷色调词汇覆盖。
+    values 也要相应体现人文关怀、质量信仰等非功利价值观。
 </rules>
 
 <output_schema>
 {
   "personality_portrait": "至少 200 字的自然语言人格描述",
   "core_traits": ["理性", "好奇", "谨慎"],
-  "cognitive_style": ["会先看结构", "对证据比较敏感", "偏好把问题讲透"],
-  "motivational_drivers": ["建立判断确定性", "持续扩展理解边界"],
-  "current_phase": "最近更像在一边吸收高密度信息，一边整理自己的判断框架。",
-  "values": ["真实", "成长"],
+  "cognitive_style": ["具象思维优先", "边做边想的迭代模式", "问题导向型学习"],
+  "motivational_drivers": ["掌握可迁移的实用技能", "持续扩展能力边界"],
+  "current_phase": "最近更像在一边动手实践，一边积累经验和判断力。",
+  "values": ["实用主义", "工匠精神", "个人自由"],
   "life_stage": "处于探索与积累阶段",
-  "deep_needs": ["被理解", "持续成长"]
+  "deep_needs": ["被理解", "持续成长"],
+  "mbti": {
+    "type": "INTP",
+    "confidence": 0.7,
+    "dimensions": {
+      "EI": {"pole": "I", "strength": 0.8},
+      "SN": {"pole": "N", "strength": 0.75},
+      "TF": {"pole": "T", "strength": 0.7},
+      "JP": {"pole": "P", "strength": 0.6}
+    }
+  }
 }
 </output_schema>
 """.strip()
@@ -176,6 +218,154 @@ def build_soul_profile_prompt(
             "</active_insights>",
         ]
     )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def build_role_delta_prompt(
+    *,
+    current_life_stage: str,
+    current_phase: str,
+    evidence: list[str],
+) -> list[dict[str, str]]:
+    """Build a delta prompt for updating the role layer."""
+    system_prompt = """
+<task>
+你要判断用户最近的行为证据是否表明其生活阶段或当前状态发生了变化。
+这是一个保守更新：只有当证据明确表明变化时才修改，否则保持原样。
+</task>
+
+<rules>
+1. 输出必须是严格 JSON。
+2. 如果证据不足以判断变化，返回 changed=false 并保持原值不变。
+3. life_stage 和 current_phase 必须基于具体行为证据描述，不要写抽象空话。
+4. current_phase 应引用具体的活动模式（如"最近密集观看XX类内容"、"开始关注XX领域"）。
+5. 每次最多修改一个字段（life_stage 或 current_phase），优先修改 current_phase。
+</rules>
+
+<output_schema>
+{
+  "changed": true,
+  "life_stage": "当前生活阶段描述",
+  "current_phase": "当前状态描述，引用具体行为证据",
+  "reason": "简要说明为什么需要更新"
+}
+</output_schema>
+""".strip()
+    user_prompt = "\n\n".join([
+        "<current_state>",
+        json.dumps({
+            "life_stage": current_life_stage,
+            "current_phase": current_phase,
+        }, ensure_ascii=False, indent=2),
+        "</current_state>",
+        "<recent_evidence>",
+        json.dumps(evidence[:20], ensure_ascii=False, indent=2),
+        "</recent_evidence>",
+    ])
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def build_values_delta_prompt(
+    *,
+    current_values: list[str],
+    current_drivers: list[str],
+    evidence: list[str],
+) -> list[dict[str, str]]:
+    """Build a delta prompt for updating the values layer."""
+    system_prompt = """
+<task>
+你要判断用户最近的行为证据是否表明其价值观或动机驱动发生了变化。
+这是一个保守更新：每次最多增删 1 条，不要大规模重写。
+</task>
+
+<rules>
+1. 输出必须是严格 JSON。
+2. 如果证据不足，返回 changed=false。
+3. 添加的价值观/驱动力必须有明确的行为证据支撑。
+4. 移除的条目必须说明为什么不再适用。
+5. values 控制在 3-6 条，motivational_drivers 控制在 2-4 条。
+</rules>
+
+<output_schema>
+{
+  "changed": true,
+  "values": ["更新后的价值观列表"],
+  "motivational_drivers": ["更新后的动机驱动列表"],
+  "reason": "简要说明变更理由"
+}
+</output_schema>
+""".strip()
+    user_prompt = "\n\n".join([
+        "<current_state>",
+        json.dumps({
+            "values": current_values,
+            "motivational_drivers": current_drivers,
+        }, ensure_ascii=False, indent=2),
+        "</current_state>",
+        "<recent_evidence>",
+        json.dumps(evidence[:20], ensure_ascii=False, indent=2),
+        "</recent_evidence>",
+    ])
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def build_core_delta_prompt(
+    *,
+    current_traits: list[str],
+    current_needs: list[str],
+    current_mbti: dict[str, object],
+    evidence: list[str],
+) -> list[dict[str, str]]:
+    """Build a delta prompt for updating the core layer."""
+    system_prompt = """
+<task>
+你要判断用户最近的行为证据是否表明其核心人格特质、深层需求或 MBTI 需要微调。
+这是最保守的更新层：核心人格极少变化，只有大量长期一致的证据才应修改。
+</task>
+
+<rules>
+1. 输出必须是严格 JSON。
+2. 如果证据不足（通常如此），返回 changed=false。
+3. core_traits 每次最多增删 1 条，deep_needs 同理。
+4. MBTI 类型几乎不变，只有当大量证据明确矛盾时才调整维度 strength。
+5. 不要因为单次行为就改变核心层，需要看到跨多次的一致性模式。
+6. deep_needs 必须写心理动力层面的需求（如掌控感、身份认同、自主性、归属感），
+   不要写认知偏好（如"逻辑闭环""价值确认"）——认知偏好属于 cognitive_style，不属于 deep_needs。
+7. core_traits 只保留有直接行为证据的特质，不要从已有特质外推衍生维度
+   （如从"务实"衍生出"极致精度追求""结构审美驱动"），也不要遗漏"独立自主"等有证据支撑的特质。
+</rules>
+
+<output_schema>
+{
+  "changed": false,
+  "core_traits": ["保持不变的特质列表"],
+  "deep_needs": ["保持不变的需求列表"],
+  "mbti": {"type": "INTP", "confidence": 0.7, "dimensions": {}},
+  "reason": "说明为什么保持不变/为什么需要微调"
+}
+</output_schema>
+""".strip()
+    user_prompt = "\n\n".join([
+        "<current_state>",
+        json.dumps({
+            "core_traits": current_traits,
+            "deep_needs": current_needs,
+            "mbti": current_mbti,
+        }, ensure_ascii=False, indent=2),
+        "</current_state>",
+        "<recent_evidence>",
+        json.dumps(evidence[:20], ensure_ascii=False, indent=2),
+        "</recent_evidence>",
+    ])
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
@@ -574,14 +764,14 @@ def build_explore_domains_prompt(
    例如“博弈论 / 桌游机制 / 纳什均衡 / 策略模型”这类本质相同的方向不能同时出现。
 5. why_it_might_resonate 必须先说明它对应用户的哪种认知需求、
    信息处理偏好或内在驱动力，再解释这种陌生内容为什么仍然可能打动这个人。
-6. novelty_level 范围必须在 0.4 到 0.8 之间。
-7. 每个 domain 生成 1 到 2 个适合 B 站搜索的 query，不能写抽象句子。
+6. novelty_level 范围必须在 0.55 到 0.95 之间；至少 2 个 domain 的 novelty_level ≥ 0.75。
+7. 每个 domain 生成 2 到 3 个适合 B 站搜索的 query，query 必须具体到可直接搜索的细分话题，禁止只写宽泛大词。
 8. 不同 domain 的 query 之间词汇重叠率要低；每个 query 必须包含一个内容形式词
    （如 纪录片/深度讲解/科普/测评/vlog/解说/手书/混剪），
-   不同 domain 尽量使用不同的形式词，以保证搜索结果在风格维度上有差异。
+   不同 domain 必须使用不同的形式词，以保证搜索结果在风格维度上有差异。
 9. 反信息茧房：不同 domain 的 query 第一个实词（核心主题词）必须两两不同，
-   禁止仅替换修饰词而保留相同核心名词；至少 2 个 domain 必须来自用户
-   已有兴趣领域之外的全新方向。
+   禁止仅替换修饰词而保留相同核心名词；至少 3 个 domain 必须来自用户
+   已有兴趣领域之外的全新方向（即用户画像中未出现的领域）。
 </rules>
 
 <output_schema>
@@ -589,12 +779,15 @@ def build_explore_domains_prompt(
   "domains": [
     {
       "domain": "城市空间与建筑叙事",
+      "category": "审美体验",
       "why_it_might_resonate": "你偏好结构清晰、能从具体对象看见更大系统的内容。",
-      "novelty_level": 0.62,
-      "queries": ["城市 建筑 纪录片", "空间 设计 深度讲解"]
+      "novelty_level": 0.72,
+      "queries": ["上海 里弄 改造 纪录片", "参数化 建筑 深度讲解", "废墟 探险 vlog"]
     }
   ]
 }
+category 必须从以下选项中选取且每个 domain 的 category 必须不同：
+知识解释 / 现实观察 / 审美体验 / 人物叙事 / 技术机制 / 社会文化 / 自然科学 / 生活方式
 </output_schema>
 """.strip()
     user_prompt = "\n\n".join(

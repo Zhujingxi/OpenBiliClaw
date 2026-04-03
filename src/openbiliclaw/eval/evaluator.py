@@ -416,7 +416,7 @@ class ProfileEvaluator:
         ))
 
         # Surface layer
-        surface_fields = self._eval_surface(expected, predicted)
+        surface_fields = await self._eval_surface(expected, predicted)
         layer_scores.append(LayerScore(
             layer="surface",
             score=_mean_score(surface_fields),
@@ -630,12 +630,16 @@ class ProfileEvaluator:
 
         return fields
 
-    def _eval_surface(self, exp: OnionProfile, pred: OnionProfile) -> list[FieldScore]:
+    async def _eval_surface(self, exp: OnionProfile, pred: OnionProfile) -> list[FieldScore]:
         fields: list[FieldScore] = []
 
-        # cognitive_style — use fallback (structural, not deep semantic)
-        s, d = _score_string_list_fallback(
-            exp.surface.cognitive_style, pred.surface.cognitive_style,
+        # cognitive_style — LLM semantic matching
+        s, d = await _llm_semantic_score(
+            "cognitive_style", exp.surface.cognitive_style, pred.surface.cognitive_style,
+            "这是认知风格列表。判断预测的认知风格是否在语义上覆盖了期望的认知风格。"
+            "'具象思维优先'和'偏好直观形象'算高度重叠(0.7-0.9)。"
+            "'发散联想型'和'创意发散'算部分重叠(0.5-0.7)。"
+            "'逻辑严密'和'直觉驱动'才算完全不匹配(0-0.2)。",
         )
         fields.append(FieldScore("surface", "cognitive_style", s,
                                  exp.surface.cognitive_style,

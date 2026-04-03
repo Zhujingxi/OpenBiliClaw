@@ -25,19 +25,26 @@ STYLE_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("visual_showcase", (
         "空镜", "混剪", "素材", "视觉", "厨向mad",
     )),
+    ("tech_analysis", (
+        "大模型", "人工智能", "芯片", "显微镜", "纳米",
+        "编译器", "算法", "架构", "gpu", "cpu", "内核",
+    )),
+    ("philosophy_culture", (
+        "哲学", "控制论", "混沌", "自组织", "世界观", "设定",
+        "悖论", "逻辑谜题", "谜题", "存在主义", "形而上",
+    )),
     ("deep_dive", (
         "讲透", "底层逻辑", "为什么", "如何诞生", "实验经济学",
-        "大模型", "人工智能", "科幻", "芯片", "显微镜", "纳米",
-        "定理", "理论", "原理", "解析", "哲学", "控制论", "混沌",
-        "自组织", "世界观", "设定", "原型", "战力系统",
-        "逻辑谜题", "悖论", "谜题",
+        "科幻", "定理", "理论", "原理", "解析",
+        "原型", "战力系统",
     )),
 ]
 
 # Fallback rules when no token matches — keyed by source_strategy.
+# Note: explore intentionally has no fallback to avoid collapsing all
+# cross-domain results into the same style bucket (hurts diversity).
 SOURCE_FALLBACKS: dict[str, str] = {
     "trending": "news_brief",
-    "explore": "story_doc",
 }
 
 DEFAULT_STYLE: str = "light_chat"

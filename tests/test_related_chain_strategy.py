@@ -151,7 +151,10 @@ async def test_related_chain_uses_event_seeds_first() -> None:
     from openbiliclaw.discovery.strategies.strategies import RelatedChainStrategy
 
     memory = FakeMemoryManager(
-        events=[_event("BV1SEED"), _event("BV1SEED2", event_type="favorite")]
+        events=[
+            _event("BV1SEED", title="科技前沿"),
+            _event("BV1SEED2", event_type="favorite", title="音乐推荐"),
+        ]
     )
     client = FakeRelatedClient(
         related_by_bvid={
@@ -256,7 +259,10 @@ async def test_related_chain_fetches_and_dedupes_related_videos() -> None:
 async def test_related_chain_filters_by_score_and_tolerates_failures() -> None:
     from openbiliclaw.discovery.strategies.strategies import RelatedChainStrategy
 
-    memory = FakeMemoryManager(events=[_event("BV1FAIL"), _event("BV1SEED")])
+    memory = FakeMemoryManager(events=[
+        _event("BV1FAIL", title="失败视频"),
+        _event("BV1SEED", title="正常视频"),
+    ])
     client = FakeRelatedClient(
         related_by_bvid={
             "BV1SEED": [

@@ -135,12 +135,54 @@ class ProfileBuilder:
     @staticmethod
     def _summarize_history(history: list[dict[str, Any]]) -> dict[str, object]:
         titles = [str(item.get("title", "")).strip() for item in history if item.get("title")]
-        authors = [str(item.get("author", "")).strip() for item in history if item.get("author")]
-        return {
+        # Extract authors from multiple possible field names
+        authors: list[str] = []
+        for item in history:
+            author = (
+                item.get("author_name")
+                or item.get("author")
+                or item.get("up_name")
+                or (item.get("metadata") or {}).get("author", "")
+                or (item.get("metadata") or {}).get("up_name", "")
+            )
+            if author and str(author).strip():
+                authors.append(str(author).strip())
+        # Deduplicate while preserving order for frequency ranking
+        from collections import Counter
+        author_counts = Counter(authors)
+        top_authors = [name for name, _ in author_counts.most_common(15)]
+
+        # Time-based grouping: split into recent vs older if timestamps exist
+        recent_titles: list[str] = []
+        older_titles: list[str] = []
+        for item in history:
+            title = str(item.get("title", "")).strip()
+            if not title:
+                continue
+            view_at = item.get("view_at") or item.get("timestamp") or 0
+            # Items in top 30% by position are "recent" (history is usually sorted newest first)
+            # This is a heuristic when timestamps aren't available
+        cutoff = max(1, len(history) * 3 // 10)
+        for i, item in enumerate(history):
+            title = str(item.get("title", "")).strip()
+            if not title:
+                continue
+            if i < cutoff:
+                recent_titles.append(title)
+            else:
+                older_titles.append(title)
+
+        summary: dict[str, object] = {
             "count": len(history),
             "titles": titles[:20],
-            "authors": authors[:10],
+            "authors": top_authors,
         }
+        if recent_titles:
+            summary["recent_titles"] = recent_titles[:10]
+            summary["recent_hint"] = f"最近观看的 {len(recent_titles)} 个视频（前30%）代表当前活跃兴趣"
+        if older_titles:
+            summary["older_titles"] = older_titles[:10]
+        return summary
 
     @staticmethod
     def _as_str_list(raw_value: object) -> list[str]:

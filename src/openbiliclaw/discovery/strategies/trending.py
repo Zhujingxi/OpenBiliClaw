@@ -40,7 +40,9 @@ class TrendingStrategy(DiscoveryStrategy):
     concurrency: DiscoveryConcurrencyController | None = None
     score_threshold: float = 0.65
     max_related_rids: int = 4
-    default_rids: tuple[int, ...] = (36, 188, 181, 119)
+    # Broader default RIDs covering more top-level categories:
+    # 36=科技, 188=资讯, 181=影视, 119=纪录片, 3=音乐, 129=舞蹈, 4=游戏, 160=生活
+    default_rids: tuple[int, ...] = (36, 188, 181, 119, 3, 129, 4, 160)
     last_intermediates: dict[str, object] = field(default_factory=dict)
 
     @property

@@ -204,13 +204,22 @@ class RelatedChainStrategy(DiscoveryStrategy):
     def _event_seed_bvids(self) -> list[str]:
         events = self.memory_manager.query_events(
             event_types=["view", "favorite", "like"],
-            limit=max(self.max_seeds * 3, 12),
+            limit=max(self.max_seeds * 5, 20),
         )
+        # Diversify seeds: pick from different titles/topics to avoid echo chamber
         seed_bvids: list[str] = []
+        seen_title_prefixes: set[str] = set()
         for event in events:
             bvid = self._extract_bvid_from_event(event)
-            if bvid:
-                seed_bvids.append(bvid)
+            if not bvid:
+                continue
+            # Use first 4 chars of title as a rough topic dedup key
+            title = str(event.get("title", "")).strip()[:4]
+            if title and title in seen_title_prefixes:
+                continue
+            if title:
+                seen_title_prefixes.add(title)
+            seed_bvids.append(bvid)
         return seed_bvids
 
     async def _preference_seed_bvids(self, profile: SoulProfile) -> list[str]:

@@ -188,9 +188,15 @@ class FlushResult:
 # ---------------------------------------------------------------------------
 
 _STATIC_LAYER_MAP: dict[SignalType, frozenset[OnionLayer]] = {
-    SignalType.BEHAVIOR_EVENT: frozenset({OnionLayer.SURFACE, OnionLayer.INTEREST}),
-    SignalType.ENGAGEMENT_EVENT: frozenset({OnionLayer.INTEREST, OnionLayer.SURFACE}),
-    SignalType.FEEDBACK: frozenset({OnionLayer.INTEREST, OnionLayer.SURFACE}),
+    SignalType.BEHAVIOR_EVENT: frozenset({
+        OnionLayer.SURFACE, OnionLayer.INTEREST, OnionLayer.ROLE,
+    }),
+    SignalType.ENGAGEMENT_EVENT: frozenset({
+        OnionLayer.INTEREST, OnionLayer.SURFACE, OnionLayer.ROLE,
+    }),
+    SignalType.FEEDBACK: frozenset({
+        OnionLayer.INTEREST, OnionLayer.SURFACE, OnionLayer.VALUES,
+    }),
     SignalType.DIALOGUE_TURN: frozenset({OnionLayer.SURFACE}),
     SignalType.ACCOUNT_SNAPSHOT: frozenset({
         OnionLayer.INTEREST, OnionLayer.SURFACE, OnionLayer.ROLE,

@@ -206,6 +206,7 @@ async def _update_role(
     signals: list[dict[str, object]],
     profile: OnionProfile,
     memory: MemoryManager,
+    profile_builder: ProfileBuilder,
     **_: Any,
 ) -> LayerUpdateResult:
     """Update role layer (life_stage, current_phase) from accumulated signals.
@@ -217,21 +218,60 @@ async def _update_role(
     for sig in signals:
         payload = sig.get("payload", {})
         if isinstance(payload, dict):
+            title = str(payload.get("title", ""))
+            event_type = str(payload.get("event_type", ""))
+            up_name = str(payload.get("up_name", ""))
             content = str(payload.get("content", ""))
-            if content:
+            if title:
+                evidence_parts.append(f"[{event_type}] {title}" + (f" (UP:{up_name})" if up_name else ""))
+            elif content:
                 evidence_parts.append(content)
 
     if not evidence_parts:
         return LayerUpdateResult(layer=OnionLayer.ROLE, changed=False)
 
-    # TODO: Add LLM delta prompt call when prompts_pipeline.py is ready
-    # For now, buffer signals and return unchanged
+    from openbiliclaw.llm.prompts import build_role_delta_prompt
+
+    messages = build_role_delta_prompt(
+        current_life_stage=profile.role.life_stage,
+        current_phase=profile.role.current_phase,
+        evidence=evidence_parts,
+    )
+
+    try:
+        response = await profile_builder.registry.complete_structured_task(
+            system_instruction=messages[0]["content"],
+            user_input=messages[1]["content"],
+        )
+        import json
+        result = json.loads(response.content)
+    except Exception:
+        logger.exception("Role delta LLM call failed")
+        return LayerUpdateResult(layer=OnionLayer.ROLE, changed=False,
+                                 signals_consumed=len(signals),
+                                 timestamp=datetime.now().isoformat())
+
+    changes: list[str] = []
+    if result.get("changed"):
+        new_stage = str(result.get("life_stage", "")).strip()
+        new_phase = str(result.get("current_phase", "")).strip()
+        reason = str(result.get("reason", ""))
+
+        if new_stage and new_stage != profile.role.life_stage:
+            changes.append(f"life_stage: {profile.role.life_stage!r} → {new_stage!r}")
+            profile.role.life_stage = new_stage
+        if new_phase and new_phase != profile.role.current_phase:
+            changes.append(f"current_phase: {profile.role.current_phase!r} → {new_phase!r}")
+            profile.role.current_phase = new_phase
+        if changes:
+            logger.info("Role updated: %s (reason: %s)", "; ".join(changes), reason[:60])
+
     return LayerUpdateResult(
         layer=OnionLayer.ROLE,
-        changed=False,
-        changes=[],
+        changed=bool(changes),
+        changes=changes,
         signals_consumed=len(signals),
-        trigger="角色信号积累",
+        trigger="角色信号分析",
         evidence="; ".join(evidence_parts[:3]),
         timestamp=datetime.now().isoformat(),
     )
@@ -246,6 +286,7 @@ async def _update_values(
     *,
     signals: list[dict[str, object]],
     profile: OnionProfile,
+    profile_builder: ProfileBuilder,
     **_: Any,
 ) -> LayerUpdateResult:
     """Update values layer using LLM delta (add/remove, max 1 per cycle)."""
@@ -253,20 +294,89 @@ async def _update_values(
     for sig in signals:
         payload = sig.get("payload", {})
         if isinstance(payload, dict):
+            title = str(payload.get("title", ""))
+            event_type = str(payload.get("event_type", ""))
             content = str(payload.get("content", ""))
-            if content:
+            if title:
+                evidence_parts.append(f"[{event_type}] {title}")
+            elif content:
                 evidence_parts.append(content)
 
     if not evidence_parts:
         return LayerUpdateResult(layer=OnionLayer.VALUES, changed=False)
 
-    # TODO: Add LLM delta prompt call when prompts_pipeline.py is ready
+    # Inject profile context so LLM can connect evidence to user's life situation
+    ctx_parts: list[str] = []
+    if profile.role.life_stage:
+        ctx_parts.append(f"生活阶段: {profile.role.life_stage}")
+    if profile.role.current_phase:
+        ctx_parts.append(f"当前状态: {profile.role.current_phase}")
+    interest_names = [d.domain for d in profile.interest.likes[:6]] if profile.interest.likes else []
+    if interest_names:
+        ctx_parts.append(f"主要兴趣: {', '.join(interest_names)}")
+    if ctx_parts:
+        evidence_parts.insert(0, "【用户背景】" + "; ".join(ctx_parts))
+
+    from openbiliclaw.llm.prompts import build_values_delta_prompt
+
+    messages = build_values_delta_prompt(
+        current_values=profile.values_layer.values,
+        current_drivers=profile.values_layer.motivational_drivers,
+        evidence=evidence_parts,
+    )
+
+    try:
+        response = await profile_builder.registry.complete_structured_task(
+            system_instruction=messages[0]["content"],
+            user_input=messages[1]["content"],
+        )
+        import json
+        result = json.loads(response.content)
+    except Exception:
+        logger.exception("Values delta LLM call failed")
+        return LayerUpdateResult(layer=OnionLayer.VALUES, changed=False,
+                                 signals_consumed=len(signals),
+                                 timestamp=datetime.now().isoformat())
+
+    changes: list[str] = []
+    if result.get("changed"):
+        new_values = result.get("values")
+        new_drivers = result.get("motivational_drivers")
+        reason = str(result.get("reason", ""))
+
+        if isinstance(new_values, list) and new_values:
+            new_values = [str(v).strip() for v in new_values if str(v).strip()]
+            if set(new_values) != set(profile.values_layer.values):
+                old = profile.values_layer.values
+                profile.values_layer.values = new_values
+                added = set(new_values) - set(old)
+                removed = set(old) - set(new_values)
+                if added:
+                    changes.append(f"新增价值观: {', '.join(added)}")
+                if removed:
+                    changes.append(f"移除价值观: {', '.join(removed)}")
+
+        if isinstance(new_drivers, list) and new_drivers:
+            new_drivers = [str(d).strip() for d in new_drivers if str(d).strip()]
+            if set(new_drivers) != set(profile.values_layer.motivational_drivers):
+                old = profile.values_layer.motivational_drivers
+                profile.values_layer.motivational_drivers = new_drivers
+                added = set(new_drivers) - set(old)
+                removed = set(old) - set(new_drivers)
+                if added:
+                    changes.append(f"新增驱动: {', '.join(added)}")
+                if removed:
+                    changes.append(f"移除驱动: {', '.join(removed)}")
+
+        if changes:
+            logger.info("Values updated: %s (reason: %s)", "; ".join(changes), reason[:60])
+
     return LayerUpdateResult(
         layer=OnionLayer.VALUES,
-        changed=False,
-        changes=[],
+        changed=bool(changes),
+        changes=changes,
         signals_consumed=len(signals),
-        trigger="价值观信号积累",
+        trigger="价值观信号分析",
         evidence="; ".join(evidence_parts[:3]),
         timestamp=datetime.now().isoformat(),
     )
@@ -281,6 +391,7 @@ async def _update_core(
     *,
     signals: list[dict[str, object]],
     profile: OnionProfile,
+    profile_builder: ProfileBuilder,
     **_: Any,
 ) -> LayerUpdateResult:
     """Update core layer (traits, needs, MBTI) with strong diff protection."""
@@ -288,20 +399,107 @@ async def _update_core(
     for sig in signals:
         payload = sig.get("payload", {})
         if isinstance(payload, dict):
+            title = str(payload.get("title", ""))
+            event_type = str(payload.get("event_type", ""))
             content = str(payload.get("content", ""))
-            if content:
+            if title:
+                evidence_parts.append(f"[{event_type}] {title}")
+            elif content:
                 evidence_parts.append(content)
 
     if not evidence_parts:
         return LayerUpdateResult(layer=OnionLayer.CORE, changed=False)
 
-    # TODO: Add LLM delta prompt call when prompts_pipeline.py is ready
+    from openbiliclaw.llm.prompts import build_core_delta_prompt
+
+    mbti_dict: dict[str, object] = {}
+    if profile.core.mbti.type:
+        mbti_dict = {
+            "type": profile.core.mbti.type,
+            "confidence": profile.core.mbti.confidence,
+            "dimensions": {
+                k: {"pole": v.pole, "strength": v.strength}
+                for k, v in profile.core.mbti.dimensions.items()
+            },
+        }
+
+    messages = build_core_delta_prompt(
+        current_traits=profile.core.core_traits,
+        current_needs=profile.core.deep_needs,
+        current_mbti=mbti_dict,
+        evidence=evidence_parts,
+    )
+
+    try:
+        response = await profile_builder.registry.complete_structured_task(
+            system_instruction=messages[0]["content"],
+            user_input=messages[1]["content"],
+        )
+        import json
+        result = json.loads(response.content)
+    except Exception:
+        logger.exception("Core delta LLM call failed")
+        return LayerUpdateResult(layer=OnionLayer.CORE, changed=False,
+                                 signals_consumed=len(signals),
+                                 timestamp=datetime.now().isoformat())
+
+    changes: list[str] = []
+    if result.get("changed"):
+        reason = str(result.get("reason", ""))
+
+        new_traits = result.get("core_traits")
+        if isinstance(new_traits, list) and new_traits:
+            new_traits = [str(t).strip() for t in new_traits if str(t).strip()]
+            if set(new_traits) != set(profile.core.core_traits):
+                added = set(new_traits) - set(profile.core.core_traits)
+                removed = set(profile.core.core_traits) - set(new_traits)
+                profile.core.core_traits = new_traits
+                if added:
+                    changes.append(f"新增特质: {', '.join(added)}")
+                if removed:
+                    changes.append(f"移除特质: {', '.join(removed)}")
+
+        new_needs = result.get("deep_needs")
+        if isinstance(new_needs, list) and new_needs:
+            new_needs = [str(n).strip() for n in new_needs if str(n).strip()]
+            if set(new_needs) != set(profile.core.deep_needs):
+                added = set(new_needs) - set(profile.core.deep_needs)
+                removed = set(profile.core.deep_needs) - set(new_needs)
+                profile.core.deep_needs = new_needs
+                if added:
+                    changes.append(f"新增需求: {', '.join(added)}")
+                if removed:
+                    changes.append(f"移除需求: {', '.join(removed)}")
+
+        # MBTI update (very rare)
+        new_mbti = result.get("mbti")
+        if isinstance(new_mbti, dict) and new_mbti.get("type"):
+            from openbiliclaw.soul.profile import MBTI, MBTIDimension
+            new_type = str(new_mbti["type"]).upper()
+            if new_type != profile.core.mbti.type:
+                changes.append(f"MBTI: {profile.core.mbti.type} → {new_type}")
+                dims = {}
+                for k, v in (new_mbti.get("dimensions") or {}).items():
+                    if isinstance(v, dict):
+                        dims[k] = MBTIDimension(
+                            pole=str(v.get("pole", "")),
+                            strength=float(v.get("strength", 0.5)),
+                        )
+                profile.core.mbti = MBTI(
+                    type=new_type,
+                    confidence=float(new_mbti.get("confidence", 0.6)),
+                    dimensions=dims,
+                )
+
+        if changes:
+            logger.info("Core updated: %s (reason: %s)", "; ".join(changes), reason[:60])
+
     return LayerUpdateResult(
         layer=OnionLayer.CORE,
-        changed=False,
-        changes=[],
+        changed=bool(changes),
+        changes=changes,
         signals_consumed=len(signals),
-        trigger="核心信号积累",
+        trigger="核心信号分析",
         evidence="; ".join(evidence_parts[:3]),
         timestamp=datetime.now().isoformat(),
     )
