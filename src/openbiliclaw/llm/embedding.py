@@ -200,4 +200,4 @@ class EmbeddingService:
 
     def clear_cache(self) -> None:
         """Clear the embedding cache."""
-        self._cache.clear()
+        self._l1_cache.clear()

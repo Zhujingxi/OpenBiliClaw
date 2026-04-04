@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -15,6 +16,8 @@ from .openrouter_provider import OpenRouterProvider
 
 if TYPE_CHECKING:
     from openbiliclaw.config import Config
+
+logger = logging.getLogger(__name__)
 
 
 class RegistryBuildError(LLMProviderError):
