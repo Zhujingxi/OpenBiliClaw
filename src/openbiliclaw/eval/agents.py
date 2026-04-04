@@ -658,30 +658,35 @@ async def run_optimizer_agent(
 
     t0 = _time.monotonic()
     logger.info("[optimizer] Agent start (max_turns=10, scope=%d files)", len(MODIFIABLE_FILES))
-    all_text, last_text = await _collect_text_with_last(
-        prompt=prompt,
-        options=ClaudeAgentOptions(
-            system_prompt=(
-                "你是画像系统优化专家。你可以修改 prompt 模板和 pipeline Python 代码。\n"
-                "先用 Read 工具阅读相关代码文件理解当前结构和数据流，\n"
-                "然后提出精确的文本修改。\n\n"
-                "原则：最小化修改，不破坏函数签名和导入，每次只改 1-2 处。\n"
-                "如果偏差根因在 pipeline 代码（如字段未同步、更新逻辑缺失），优先修改代码而非 prompt。\n\n"
-                "⚠️ 输出格式硬性要求：\n"
-                "- 你的最后一条消息必须是且仅是一个 ```json 代码块\n"
-                "- 不要在 JSON 前后添加任何解释文字\n"
-                "- old_text/new_text 只取最小必要片段（3-10 行），不要复制大段代码\n"
-                "- 如果没有可行修改，返回 {\"changes\": [], \"summary\": \"原因\"}"
+    try:
+        all_text, last_text = await _collect_text_with_last(
+            prompt=prompt,
+            options=ClaudeAgentOptions(
+                system_prompt=(
+                    "你是画像系统优化专家。你可以修改 prompt 模板和 pipeline Python 代码。\n"
+                    "先用 Read 工具阅读相关代码文件理解当前结构和数据流，\n"
+                    "然后提出精确的文本修改。\n\n"
+                    "原则：最小化修改，不破坏函数签名和导入，每次只改 1-2 处。\n"
+                    "如果偏差根因在 pipeline 代码（如字段未同步、更新逻辑缺失），优先修改代码而非 prompt。\n\n"
+                    "⚠️ 输出格式硬性要求：\n"
+                    "- 你的最后一条消息必须是且仅是一个 ```json 代码块\n"
+                    "- 不要在 JSON 前后添加任何解释文字\n"
+                    "- old_text/new_text 只取最小必要片段（3-10 行），不要复制大段代码\n"
+                    "- 如果没有可行修改，返回 {\"changes\": [], \"summary\": \"原因\"}"
+                ),
+                allowed_tools=["Read", "Grep", "Glob"],
+                cwd=str(project_root),
+                max_turns=10,
+                output_format={
+                    "type": "json_schema",
+                    "schema": PARAM_CHANGE_SCHEMA,
+                },
             ),
-            allowed_tools=["Read", "Grep", "Glob"],
-            cwd=str(project_root),
-            max_turns=10,
-            output_format={
-                "type": "json_schema",
-                "schema": PARAM_CHANGE_SCHEMA,
-            },
-        ),
-    )
+        )
+    except Exception as exc:
+        elapsed = _time.monotonic() - t0
+        logger.error("[optimizer] Agent crashed (%.1fs): %s", elapsed, exc)
+        return {"changes": [], "summary": f"optimizer agent crashed: {exc!s:.100}"}
     elapsed = _time.monotonic() - t0
     logger.info("[optimizer] Agent done (%.1fs, response %d chars)", elapsed, len(all_text))
     # Try last message first (most likely to contain the JSON result),
@@ -822,26 +827,31 @@ async def run_discovery_optimizer_agent(
         "[discovery_optimizer] Agent start (max_turns=10, scope=%d files)",
         len(DISCOVERY_MODIFIABLE_FILES),
     )
-    all_text, last_text = await _collect_text_with_last(
-        prompt=prompt,
-        options=ClaudeAgentOptions(
-            system_prompt=(
-                "你是发现系统优化专家。你的目标是提高 B 站内容发现的质量。\n"
-                "你只能修改 src/openbiliclaw/llm/prompts.py 中的 prompt 模板文本。\n"
-                "绝对不要修改策略代码、引擎代码、阈值或权重参数。\n"
-                "先用 Read 工具阅读 prompts.py 中相关函数理解当前 prompt 结构，\n"
-                "然后提出精确的文本修改。最后返回一个 JSON 代码块包含修改方案。\n"
-                "原则：最小化修改，不破坏函数签名和导入，每次只改 1-2 处。"
+    try:
+        all_text, last_text = await _collect_text_with_last(
+            prompt=prompt,
+            options=ClaudeAgentOptions(
+                system_prompt=(
+                    "你是发现系统优化专家。你的目标是提高 B 站内容发现的质量。\n"
+                    "你只能修改 src/openbiliclaw/llm/prompts.py 中的 prompt 模板文本。\n"
+                    "绝对不要修改策略代码、引擎代码、阈值或权重参数。\n"
+                    "先用 Read 工具阅读 prompts.py 中相关函数理解当前 prompt 结构，\n"
+                    "然后提出精确的文本修改。最后返回一个 JSON 代码块包含修改方案。\n"
+                    "原则：最小化修改，不破坏函数签名和导入，每次只改 1-2 处。"
+                ),
+                allowed_tools=["Read", "Grep", "Glob"],
+                cwd=str(project_root),
+                max_turns=10,
+                output_format={
+                    "type": "json_schema",
+                    "schema": PARAM_CHANGE_SCHEMA,
+                },
             ),
-            allowed_tools=["Read", "Grep", "Glob"],
-            cwd=str(project_root),
-            max_turns=10,
-            output_format={
-                "type": "json_schema",
-                "schema": PARAM_CHANGE_SCHEMA,
-            },
-        ),
-    )
+        )
+    except Exception as exc:
+        elapsed = _time.monotonic() - t0
+        logger.error("[discovery_optimizer] Agent crashed (%.1fs): %s", elapsed, exc)
+        return {"changes": [], "summary": f"optimizer agent crashed: {exc!s:.100}"}
     elapsed = _time.monotonic() - t0
     logger.info(
         "[discovery_optimizer] Agent done (%.1fs, response %d chars)",
