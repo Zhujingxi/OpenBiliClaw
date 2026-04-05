@@ -143,7 +143,7 @@ class GeminiProvider(LLMProvider):
             return False
         return isinstance(exc, (LLMProviderError, LLMTimeoutError))
 
-    async def embed(self, text: str, *, model: str = "text-embedding-004") -> list[float]:
+    async def embed(self, text: str, *, model: str = "gemini-embedding-001") -> list[float]:
         """Get text embedding using Gemini's embedding model.
 
         Args:

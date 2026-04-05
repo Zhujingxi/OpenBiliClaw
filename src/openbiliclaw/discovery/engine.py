@@ -685,8 +685,22 @@ class ContentDiscoveryEngine:
             if source:
                 source_counts[source] = source_counts.get(source, 0) + 1
 
-        # Pass 2: fill any remaining slots unconditionally
+        # Pass 2: fill remaining slots with soft source cap (no single source > 40%)
+        max_per_source = max(per_source_cap + 1, limit * 2 // 5)
+        leftover: list[DiscoveredContent] = []
         for item in remaining:
+            if len(selected) >= limit:
+                break
+            source = ContentDiscoveryEngine._normalize_topic_token(item.source_strategy)
+            if source and source_counts.get(source, 0) >= max_per_source:
+                leftover.append(item)
+                continue
+            selected.append(item)
+            if source:
+                source_counts[source] = source_counts.get(source, 0) + 1
+
+        # Pass 3: truly unconditional fill if still short
+        for item in leftover:
             if len(selected) >= limit:
                 break
             selected.append(item)

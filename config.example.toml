@@ -55,7 +55,7 @@ x_title = "OpenBiliClaw"
 # Embedding model for semantic similarity (topic dedup, fatigue, feedback)
 # provider: empty = use default_provider; model: Gemini text-embedding-004 recommended
 provider = ""
-model = "text-embedding-004"
+model = "gemini-embedding-001"
 # Cosine similarity threshold: topics above this are considered "same topic"
 similarity_threshold = 0.82
 

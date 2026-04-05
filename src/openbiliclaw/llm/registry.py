@@ -95,7 +95,7 @@ def build_embedding_service(
             return None
         return EmbeddingService(
             provider,
-            model=emb_cfg.model or "text-embedding-004",
+            model=emb_cfg.model or "gemini-embedding-001",
             similarity_threshold=emb_cfg.similarity_threshold,
         )
     except Exception:

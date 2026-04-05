@@ -49,7 +49,7 @@ class EmbeddingService:
         self,
         provider: SupportsEmbed,
         *,
-        model: str = "text-embedding-004",
+        model: str = "gemini-embedding-001",
         cache_size: int = 500,
         similarity_threshold: float = 0.82,
     ) -> None:

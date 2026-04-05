@@ -66,7 +66,7 @@ class EmbeddingConfig:
     """Embedding model configuration."""
 
     provider: str = ""  # Empty = use LLM default_provider
-    model: str = "text-embedding-004"
+    model: str = "gemini-embedding-001"
     similarity_threshold: float = 0.82
 
 

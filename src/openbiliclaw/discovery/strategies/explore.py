@@ -163,7 +163,7 @@ class ExploreStrategy(DiscoveryStrategy):
             )
             # Lower threshold for explore: cross-domain content is intentionally
             # less "relevant" in the narrow sense, so we accept more of it
-            explore_threshold = self.score_threshold - 0.15 if self.score_threshold > 0.45 else self.score_threshold
+            explore_threshold = self.score_threshold - 0.25 if self.score_threshold > 0.40 else self.score_threshold
             if content.relevance_score < explore_threshold:
                 continue
             results.append(content)
