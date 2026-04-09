@@ -94,6 +94,35 @@ export async function submitFeedback(payload) {
   });
 }
 
+/**
+ * Report a click-through on a recommendation card. Best-effort: errors are
+ * swallowed so UI navigation is never blocked by a slow or offline backend.
+ *
+ * @param {{
+ *   bvid: string,
+ *   title?: string,
+ *   recommendation_id?: number | null,
+ *   topic_label?: string,
+ *   up_name?: string,
+ * }} payload
+ * @returns {Promise<boolean>} true if the click was reported successfully
+ */
+export async function reportRecommendationClick(payload) {
+  try {
+    await requestJson("/recommendation-click", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    return true;
+  } catch (error) {
+    // Best-effort reporting — do not disrupt the user's click.
+    return false;
+  }
+}
+
 export async function sendChatMessage(message) {
   return requestJson("/chat", {
     method: "POST",

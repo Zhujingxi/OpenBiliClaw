@@ -6,6 +6,7 @@ import {
   buildFeedbackPayload,
   buildNextCognitionHistoryState,
   buildVideoUrl,
+  formatRelativeTimestamp,
   getCommentSubmitUiState,
   getCognitionHistoryUiState,
   getConnectionBadgeState,
@@ -656,6 +657,8 @@ test("normalizeProfileSummary fills stable fallback fields", () => {
       ],
       has_more_cognition_updates: true,
       next_cognition_cursor: "3",
+      active_insights: [],
+      recent_awareness: [],
     },
   );
 });
@@ -707,6 +710,49 @@ test("getNextExpandedCognitionIndex toggles the same card and switches across ca
   assert.equal(getNextExpandedCognitionIndex(0, 2), 2);
 });
 
+test("formatRelativeTimestamp returns Chinese relative labels across time buckets", () => {
+  const now = Date.parse("2026-03-15T12:00:00Z");
+
+  // Empty / invalid input
+  assert.equal(formatRelativeTimestamp("", now), "");
+  assert.equal(formatRelativeTimestamp("  ", now), "");
+  assert.equal(formatRelativeTimestamp("not-a-date", now), "");
+
+  // Under 1 minute → "刚刚"
+  assert.equal(
+    formatRelativeTimestamp("2026-03-15T11:59:30Z", now),
+    "刚刚",
+  );
+
+  // Future timestamps also collapse to "刚刚"
+  assert.equal(
+    formatRelativeTimestamp("2026-03-15T12:01:00Z", now),
+    "刚刚",
+  );
+
+  // Under 1 hour → "N 分钟前"
+  assert.equal(
+    formatRelativeTimestamp("2026-03-15T11:48:00Z", now),
+    "12 分钟前",
+  );
+
+  // Under 1 day → "N 小时前"
+  assert.equal(
+    formatRelativeTimestamp("2026-03-15T09:00:00Z", now),
+    "3 小时前",
+  );
+
+  // Under 1 week → "N 天前"
+  assert.equal(
+    formatRelativeTimestamp("2026-03-13T12:00:00Z", now),
+    "2 天前",
+  );
+
+  // Older than a week → "MM-DD HH:mm"
+  const older = formatRelativeTimestamp("2026-03-01T10:30:00Z", now);
+  assert.match(older, /^\d{2}-\d{2} \d{2}:\d{2}$/);
+});
+
 test("normalizeProfileSummary keeps the newer low-roleplay fallback copy", () => {
   assert.deepEqual(
     normalizeProfileSummary({
@@ -736,6 +782,8 @@ test("normalizeProfileSummary keeps the newer low-roleplay fallback copy", () =>
       recent_cognition_updates: [],
       has_more_cognition_updates: false,
       next_cognition_cursor: "",
+      active_insights: [],
+      recent_awareness: [],
     },
   );
 });

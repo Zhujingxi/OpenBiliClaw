@@ -902,11 +902,24 @@
     .mbti-container {
       margin-top: 10px;
     }
+    .mbti-type-row {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
     .mbti-type-label {
       font-size: 18px;
       font-weight: 700;
       color: var(--brand-strong);
-      margin-bottom: 8px;
+    }
+    .mbti-confidence {
+      font-size: 10px;
+      color: var(--text-muted);
+      background: rgba(231, 238, 248, 0.96);
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-weight: 600;
     }
     .mbti-dimensions {
       display: flex;
@@ -1131,6 +1144,44 @@
       color: var(--text-muted);
       white-space: nowrap;
     }
+    .speculative-item .spec-status {
+      font-size: 10px;
+      font-weight: 700;
+      color: #9a6420;
+      background: rgba(255, 228, 196, 0.96);
+      border: 1px solid rgba(235, 190, 140, 0.8);
+      padding: 1px 7px;
+      border-radius: 999px;
+      white-space: nowrap;
+    }
+    .speculative-item.is-status-deprecated,
+    .speculative-item.is-status-rejected {
+      opacity: 0.6;
+    }
+    .speculative-item .spec-confidence-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 2px;
+    }
+    .speculative-item .spec-confidence-bar {
+      flex: 1;
+      height: 4px;
+      border-radius: 4px;
+      background: rgba(245, 228, 210, 0.8);
+      overflow: hidden;
+    }
+    .speculative-item .spec-confidence-fill {
+      height: 100%;
+      border-radius: 4px;
+      background: linear-gradient(90deg, #f5b36b, #c57b2e);
+      transition: width 0.3s ease;
+    }
+    .speculative-item .spec-confidence-label {
+      font-size: 10px;
+      color: #9a6420;
+      white-space: nowrap;
+    }
     .speculative-item .spec-specifics {
       display: flex;
       flex-wrap: wrap;
@@ -1238,6 +1289,14 @@
       font-weight: 700;
     }
 
+    .cognition-timestamp {
+      color: var(--text-muted);
+      font-size: 10px;
+      font-weight: 500;
+      margin-left: auto;
+      margin-right: 8px;
+    }
+
     .cognition-state {
       color: var(--brand-strong);
       font-weight: 800;
@@ -1301,6 +1360,157 @@
 
     .cognition-history-more:disabled {
       opacity: 0.55;
+    }
+
+    /* ── Active insights ── */
+    .insight-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .insight-item {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 12px 14px;
+      border-radius: 16px;
+      background: linear-gradient(180deg, rgba(247, 251, 255, 0.98), rgba(240, 248, 255, 0.96));
+      border: 1px solid rgba(210, 228, 248, 0.9);
+    }
+
+    .insight-item.is-validated {
+      background: linear-gradient(180deg, rgba(244, 255, 250, 0.98), rgba(235, 252, 243, 0.96));
+      border-color: rgba(180, 230, 210, 0.9);
+    }
+
+    .insight-hypothesis {
+      font-size: 12.5px;
+      line-height: 1.65;
+      color: var(--text-main);
+      font-weight: 500;
+    }
+
+    .insight-confidence-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .insight-confidence-bar {
+      flex: 1;
+      height: 4px;
+      border-radius: 4px;
+      background: rgba(210, 228, 248, 0.6);
+      overflow: hidden;
+    }
+
+    .insight-confidence-fill {
+      height: 100%;
+      border-radius: 4px;
+      background: linear-gradient(90deg, var(--sky), #397fcb);
+      transition: width 0.3s ease;
+    }
+
+    .insight-confidence-label {
+      font-size: 10px;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+
+    .insight-validated-badge {
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--success);
+      border: 1px solid rgba(48, 185, 128, 0.3);
+      border-radius: 999px;
+      padding: 1px 7px;
+      align-self: flex-start;
+    }
+
+    .insight-evidence {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      padding-left: 8px;
+      border-left: 2px solid rgba(90, 169, 255, 0.3);
+      margin-top: 2px;
+    }
+
+    .insight-evidence-item {
+      font-size: 11px;
+      line-height: 1.5;
+      color: var(--text-secondary);
+    }
+
+    .insight-timestamp {
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-top: 2px;
+      text-align: right;
+    }
+
+    .insight-list .is-fallback {
+      font-size: 11px;
+      color: var(--text-muted);
+      padding: 6px 0;
+    }
+
+    /* ── Recent awareness ── */
+    .awareness-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .awareness-item {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 10px 13px;
+      border-radius: 14px;
+      background: rgba(255, 252, 247, 0.97);
+      border: 1px solid rgba(240, 230, 215, 0.9);
+    }
+
+    .awareness-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .awareness-date {
+      font-size: 10px;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+
+    .awareness-emotion {
+      font-size: 10px;
+      color: var(--brand);
+      font-weight: 600;
+    }
+
+    .awareness-observation {
+      font-size: 12px;
+      line-height: 1.65;
+      color: var(--text-main);
+    }
+
+    .awareness-trend {
+      font-size: 11px;
+      line-height: 1.5;
+      color: var(--text-secondary);
+      padding-left: 8px;
+      border-left: 2px solid rgba(251, 114, 153, 0.25);
+    }
+
+    .awareness-list .is-fallback {
+      font-size: 11px;
+      color: var(--text-muted);
+      padding: 6px 0;
     }
 
     .empty-state {
@@ -1822,6 +2032,17 @@
                 加载更多
               </button>
             </div>
+          </div>
+
+          <!-- ── Signals ── -->
+          <div class="profile-layer-header">Signals — 正在推断中</div>
+          <div class="profile-group">
+            <h3>当前活跃的洞察</h3>
+            <div id="profileActiveInsights" class="insight-list"></div>
+          </div>
+          <div class="profile-group">
+            <h3>近期观察到的</h3>
+            <div id="profileRecentAwareness" class="awareness-list"></div>
           </div>
         </div>
       </section>

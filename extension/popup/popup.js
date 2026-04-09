@@ -3,6 +3,7 @@ import {
   buildFeedbackPayload,
   buildNextCognitionHistoryState,
   buildVideoUrl,
+  formatRelativeTimestamp,
   getCommentSubmitUiState,
   getCognitionHistoryUiState,
   getConnectionBadgeState,
@@ -29,6 +30,7 @@ import {
   fetchProfileSummary,
   fetchRecommendations,
   fetchRuntimeStatus,
+  reportRecommendationClick,
   reshuffleRecommendations,
   refreshRecommendations,
   sendChatMessage,
@@ -107,6 +109,8 @@ const elements = {
   profileRecentMemory: document.getElementById("profileRecentMemory"),
   profileRecentMemoryStatus: document.getElementById("profileRecentMemoryStatus"),
   profileRecentMemoryMore: document.getElementById("profileRecentMemoryMore"),
+  profileActiveInsights: document.getElementById("profileActiveInsights"),
+  profileRecentAwareness: document.getElementById("profileRecentAwareness"),
   chatMessages: document.getElementById("chatMessages"),
   chatForm: document.getElementById("chatForm"),
   chatInput: document.getElementById("chatInput"),
@@ -387,9 +391,19 @@ function renderSpeculativeInterests(container, items) {
     container.append(fallback);
     return;
   }
+  const statusLabels = {
+    active: "",
+    pending: "待观察",
+    confirmed: "已确认",
+    deprecated: "已弃",
+    rejected: "已排除",
+  };
   for (const item of items) {
     const row = document.createElement("div");
-    row.className = "speculative-item";
+    row.className = `speculative-item is-status-${item.status || "active"}`;
+    if (item.status) {
+      row.dataset.status = item.status;
+    }
 
     const header = document.createElement("div");
     header.className = "spec-header";
@@ -399,12 +413,37 @@ function renderSpeculativeInterests(container, items) {
     domain.textContent = item.domain;
     header.append(domain);
 
+    const statusText = statusLabels[item.status] ?? "";
+    if (statusText) {
+      const status = document.createElement("span");
+      status.className = "spec-status";
+      status.textContent = statusText;
+      header.append(status);
+    }
+
     const progress = document.createElement("span");
     progress.className = "spec-progress";
     progress.textContent = `${item.confirmation_count}/${item.confirmation_threshold} 次确认`;
     header.append(progress);
 
     row.append(header);
+
+    if (typeof item.confidence === "number" && item.confidence > 0) {
+      const confRow = document.createElement("div");
+      confRow.className = "spec-confidence-row";
+      const bar = document.createElement("div");
+      bar.className = "spec-confidence-bar";
+      const fill = document.createElement("div");
+      fill.className = "spec-confidence-fill";
+      fill.style.width = `${Math.round(item.confidence * 100)}%`;
+      bar.append(fill);
+      confRow.append(bar);
+      const label = document.createElement("span");
+      label.className = "spec-confidence-label";
+      label.textContent = `置信度 ${Math.round(item.confidence * 100)}%`;
+      confRow.append(label);
+      row.append(confRow);
+    }
 
     if (item.reason) {
       const reason = document.createElement("p");
@@ -435,6 +474,132 @@ function renderSpeculativeInterests(container, items) {
   }
 }
 
+function renderActiveInsights(container, items) {
+  if (!(container instanceof HTMLElement)) {
+    return;
+  }
+  container.replaceChildren();
+  if (!items || items.length === 0) {
+    const fallback = document.createElement("p");
+    fallback.className = "is-fallback";
+    fallback.textContent = "暂时没有活跃的洞察，多看一阵会慢慢积累的。";
+    container.append(fallback);
+    return;
+  }
+  for (const item of items) {
+    const row = document.createElement("div");
+    row.className = item.validated ? "insight-item is-validated" : "insight-item";
+
+    const hypothesis = document.createElement("p");
+    hypothesis.className = "insight-hypothesis";
+    hypothesis.textContent = item.hypothesis;
+    row.append(hypothesis);
+
+    const confRow = document.createElement("div");
+    confRow.className = "insight-confidence-row";
+
+    const bar = document.createElement("div");
+    bar.className = "insight-confidence-bar";
+    const fill = document.createElement("div");
+    fill.className = "insight-confidence-fill";
+    fill.style.width = `${Math.round(item.confidence * 100)}%`;
+    bar.append(fill);
+    confRow.append(bar);
+
+    const confLabel = document.createElement("span");
+    confLabel.className = "insight-confidence-label";
+    confLabel.textContent = `${Math.round(item.confidence * 100)}%`;
+    confRow.append(confLabel);
+
+    if (item.validated) {
+      const badge = document.createElement("span");
+      badge.className = "insight-validated-badge";
+      badge.textContent = "已确认";
+      confRow.append(badge);
+    }
+
+    row.append(confRow);
+
+    if (item.evidence && item.evidence.length > 0) {
+      const evidenceList = document.createElement("div");
+      evidenceList.className = "insight-evidence";
+      for (const e of item.evidence) {
+        const ev = document.createElement("p");
+        ev.className = "insight-evidence-item";
+        ev.textContent = e;
+        evidenceList.append(ev);
+      }
+      row.append(evidenceList);
+    }
+
+    const createdLabel = formatRelativeTimestamp(item.created_at);
+    if (createdLabel) {
+      const timestampWrapper = document.createElement("p");
+      timestampWrapper.className = "insight-timestamp";
+      timestampWrapper.append("记于 ");
+      const timestamp = document.createElement("time");
+      if (item.created_at) {
+        timestamp.dateTime = item.created_at;
+      }
+      timestamp.textContent = createdLabel;
+      timestampWrapper.append(timestamp);
+      row.append(timestampWrapper);
+    }
+
+    container.append(row);
+  }
+}
+
+function renderRecentAwareness(container, items) {
+  if (!(container instanceof HTMLElement)) {
+    return;
+  }
+  container.replaceChildren();
+  if (!items || items.length === 0) {
+    const fallback = document.createElement("p");
+    fallback.className = "is-fallback";
+    fallback.textContent = "最近还没有特别的观察，先多看一阵。";
+    container.append(fallback);
+    return;
+  }
+  for (const item of items) {
+    const row = document.createElement("div");
+    row.className = "awareness-item";
+
+    if (item.date || item.emotion_guess) {
+      const header = document.createElement("div");
+      header.className = "awareness-header";
+      if (item.date) {
+        const date = document.createElement("span");
+        date.className = "awareness-date";
+        date.textContent = item.date;
+        header.append(date);
+      }
+      if (item.emotion_guess) {
+        const emotion = document.createElement("span");
+        emotion.className = "awareness-emotion";
+        emotion.textContent = item.emotion_guess;
+        header.append(emotion);
+      }
+      row.append(header);
+    }
+
+    const obs = document.createElement("p");
+    obs.className = "awareness-observation";
+    obs.textContent = item.observation;
+    row.append(obs);
+
+    if (item.trend) {
+      const trend = document.createElement("p");
+      trend.className = "awareness-trend";
+      trend.textContent = item.trend;
+      row.append(trend);
+    }
+
+    container.append(row);
+  }
+}
+
 function renderMBTI(container, mbti) {
   if (!(container instanceof HTMLElement)) {
     return;
@@ -447,22 +612,32 @@ function renderMBTI(container, mbti) {
     container.append(fb);
     return;
   }
-  const typeLabel = document.createElement("div");
+  const typeRow = document.createElement("div");
+  typeRow.className = "mbti-type-row";
+  const typeLabel = document.createElement("span");
   typeLabel.className = "mbti-type-label";
   typeLabel.textContent = mbti.type;
-  container.append(typeLabel);
+  typeRow.append(typeLabel);
+  if (typeof mbti.confidence === "number" && mbti.confidence > 0) {
+    const conf = document.createElement("span");
+    conf.className = "mbti-confidence";
+    conf.textContent = `可信度 ${Math.round(mbti.confidence * 100)}%`;
+    typeRow.append(conf);
+  }
+  container.append(typeRow);
 
   const dims = document.createElement("div");
   dims.className = "mbti-dimensions";
-  const dimLabels = { E_I: "E/I", S_N: "S/N", T_F: "T/F", J_P: "J/P" };
-  for (const [key, label] of Object.entries(dimLabels)) {
-    const dim = mbti.dimensions?.[key];
+  // Dimension keys may be stored as "EI"/"SN"/"TF"/"JP" or "E_I"/"S_N"/"T_F"/"J_P"
+  const dimOrder = ["EI", "SN", "TF", "JP"];
+  for (const key of dimOrder) {
+    const dim = mbti.dimensions?.[key] ?? mbti.dimensions?.[`${key[0]}_${key[1]}`];
     if (!dim) continue;
     const row = document.createElement("div");
     row.className = "mbti-dim-row";
     const pole = document.createElement("span");
     pole.className = "mbti-dim-pole";
-    pole.textContent = dim.pole || label;
+    pole.textContent = dim.pole || key;
     const bar = document.createElement("div");
     bar.className = "mbti-dim-bar";
     const fill = document.createElement("div");
@@ -669,9 +844,25 @@ function renderCognitionCards(container, items, fallback) {
 
     const meta = document.createElement("div");
     meta.className = "cognition-meta";
+    if (item.source) {
+      meta.dataset.source = item.source;
+    }
     const source = document.createElement("span");
-    source.className = "cognition-source";
+    source.className = item.source
+      ? `cognition-source is-source-${item.source}`
+      : "cognition-source";
     source.textContent = item.sourceLabel;
+    if (item.source) {
+      source.dataset.source = item.source;
+    }
+
+    const timestampLabel = formatRelativeTimestamp(item.created_at);
+    const timestamp = document.createElement("time");
+    timestamp.className = "cognition-timestamp";
+    timestamp.textContent = timestampLabel;
+    if (item.created_at) {
+      timestamp.dateTime = item.created_at;
+    }
 
     const stateLabel = document.createElement("span");
     stateLabel.className = "cognition-state";
@@ -679,6 +870,9 @@ function renderCognitionCards(container, items, fallback) {
 
     if (item.sourceLabel) {
       meta.append(source);
+    }
+    if (timestampLabel) {
+      meta.append(timestamp);
     }
     meta.append(stateLabel);
 
@@ -806,6 +1000,9 @@ function renderProfileSummary(summary) {
     "阿B 还在继续观察，过一阵这里会更具体。",
   );
   renderCognitionHistoryControls(state.profileCognitionHistory);
+  // Signals
+  renderActiveInsights(elements.profileActiveInsights, summary.active_insights);
+  renderRecentAwareness(elements.profileRecentAwareness, summary.recent_awareness);
 }
 
 function appendChatMessage(role, content) {
@@ -877,11 +1074,33 @@ function attachFeedbackRuntimeProgress(statusLine) {
   state.activeFeedbackProgress = activeFeedbackProgress;
 }
 
-async function openRecommendation(bvid) {
+/**
+ * Open a recommendation's Bilibili page and report the click-through to
+ * the backend as a strong profile signal. The report is best-effort and
+ * fires in parallel with tab creation so the user never waits.
+ *
+ * @param {string} bvid
+ * @param {{
+ *   id?: number,
+ *   title?: string,
+ *   topic_label?: string,
+ *   up_name?: string,
+ * }} [context]
+ */
+async function openRecommendation(bvid, context = {}) {
   if (!bvid) {
     setHint("这条卡片还没挂上 BV 号，稍后再试。", "error");
     return;
   }
+  // Fire-and-forget click report (best effort). Runs in parallel with tab.create.
+  void reportRecommendationClick({
+    bvid,
+    title: context.title || "",
+    recommendation_id:
+      typeof context.id === "number" ? context.id : null,
+    topic_label: context.topic_label || "",
+    up_name: context.up_name || "",
+  });
   await chrome.tabs.create({ url: buildVideoUrl(bvid) });
 }
 
@@ -1021,7 +1240,7 @@ function renderRecommendations(items, { append = false } = {}) {
     preview.className = "recommendation-preview";
     preview.type = "button";
     preview.addEventListener("click", () => {
-      void openRecommendation(item.bvid);
+      void openRecommendation(item.bvid, item);
     });
 
     const cover = document.createElement("div");
@@ -1091,7 +1310,7 @@ function renderRecommendations(items, { append = false } = {}) {
     const composer = createCommentComposer(item, feedbackStatus);
     actions.append(
       createActionButton("去看看", "action-button action-primary", () => {
-        void openRecommendation(item.bvid);
+        void openRecommendation(item.bvid, item);
       }),
       createActionButton("多来点", "action-button action-secondary", async () => {
         try {

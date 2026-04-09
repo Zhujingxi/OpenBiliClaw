@@ -120,6 +120,45 @@ export function getNextExpandedCognitionIndex(currentIndex, clickedIndex) {
   return currentIndex === clickedIndex ? null : clickedIndex;
 }
 
+/**
+ * Format an ISO timestamp into a friendly relative label (Chinese).
+ * @param {string} isoString - The timestamp to format.
+ * @param {number} [now=Date.now()] - Current time, injectable for testing.
+ * @returns {string} Relative label (e.g. "刚刚", "12 分钟前", "03-14 22:30") or "" if invalid.
+ */
+export function formatRelativeTimestamp(isoString, now = Date.now()) {
+  const text = normalizeText(isoString);
+  if (!text) {
+    return "";
+  }
+  const parsed = Date.parse(text);
+  if (Number.isNaN(parsed)) {
+    return "";
+  }
+  const diffMs = now - parsed;
+  if (diffMs < 60_000) {
+    return "刚刚";
+  }
+  const diffMin = Math.floor(diffMs / 60_000);
+  if (diffMin < 60) {
+    return `${diffMin} 分钟前`;
+  }
+  const diffHour = Math.floor(diffMin / 60);
+  if (diffHour < 24) {
+    return `${diffHour} 小时前`;
+  }
+  const diffDay = Math.floor(diffHour / 24);
+  if (diffDay < 7) {
+    return `${diffDay} 天前`;
+  }
+  const date = new Date(parsed);
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  return `${month}-${day} ${hour}:${minute}`;
+}
+
 function normalizeStrList(raw) {
   return Array.isArray(raw) ? raw.map(normalizeText).filter(Boolean) : [];
 }
@@ -224,6 +263,31 @@ export function normalizeProfileSummary(summary) {
       : [],
     has_more_cognition_updates: Boolean(summary?.has_more_cognition_updates),
     next_cognition_cursor: normalizeText(summary?.next_cognition_cursor),
+    active_insights: Array.isArray(summary?.active_insights)
+      ? summary.active_insights
+          .filter((item) => item?.hypothesis)
+          .map((item) => ({
+            hypothesis: normalizeText(item.hypothesis),
+            evidence: Array.isArray(item.evidence)
+              ? item.evidence.map((e) => normalizeText(e)).filter(Boolean)
+              : [],
+            confidence: typeof item.confidence === "number"
+              ? Math.max(0, Math.min(1, item.confidence))
+              : 0.5,
+            validated: Boolean(item.validated),
+            created_at: normalizeText(item.created_at),
+          }))
+      : [],
+    recent_awareness: Array.isArray(summary?.recent_awareness)
+      ? summary.recent_awareness
+          .filter((item) => item?.observation)
+          .map((item) => ({
+            date: normalizeText(item.date),
+            observation: normalizeText(item.observation),
+            trend: normalizeText(item.trend),
+            emotion_guess: normalizeText(item.emotion_guess),
+          }))
+      : [],
   };
 }
 
