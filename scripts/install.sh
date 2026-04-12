@@ -39,7 +39,13 @@ readonly CANDIDATE_SOURCES=(
 REPO_URL="${OPENBILICLAW_REPO_URL:-$DEFAULT_REPO_URL}"
 BRANCH="${OPENBILICLAW_BRANCH:-$DEFAULT_BRANCH}"
 INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
-REUSE_FROM="${REUSE_FROM:-}"
+# Distinguish "user explicitly set REUSE_FROM=" from "not set at all".
+if [ "${REUSE_FROM+set}" = "set" ]; then
+    _REUSE_FROM_EXPLICIT=1
+else
+    _REUSE_FROM_EXPLICIT=0
+    REUSE_FROM=""
+fi
 SKIP_START="${SKIP_START:-}"
 MODE="${MODE:-auto}"
 PORT="${PORT:-8420}"
@@ -111,7 +117,13 @@ check_platform() {
 # Source discovery (auto-reuse existing install)
 
 auto_detect_reuse_source() {
-    if [ -n "$REUSE_FROM" ]; then
+    # If the user explicitly set REUSE_FROM (even to ""), skip auto-detection.
+    if [ "$_REUSE_FROM_EXPLICIT" = "1" ]; then
+        if [ -n "$REUSE_FROM" ]; then
+            log "REUSE_FROM explicitly set to ${C_GREEN}${REUSE_FROM}${C_RESET}"
+        else
+            log "REUSE_FROM explicitly set to empty — skipping auto-detection."
+        fi
         return
     fi
     local cand
@@ -199,8 +211,7 @@ run_bootstrap() {
     fi
 }
 
-# Print a definitive, agent-friendly summary. This is the ONLY block an AI
-# agent needs to read to decide what to do next — no external docs required.
+# Print a human-readable install summary with next-step guidance.
 print_install_summary() {
     local summary
     summary=$(python3 - "$BOOTSTRAP_LOG" "$INSTALL_DIR" "$PORT" "$HOST" "$REUSE_FROM" <<'PY'
@@ -265,32 +276,48 @@ PY
     echo ""
 
     if [ -n "$missing" ]; then
-        echo "Next action (required — credentials are missing):"
+        echo "Next steps (credentials are missing):"
         echo ""
-        echo "  1. Ask the user for the missing values listed above:"
+        echo "  1. Prepare the missing values:"
         case "$missing" in
-            *llm.*api_key*) echo "     - LLM API key for the default provider" ;;
+            *llm.*api_key*)
+                echo "     - LLM API key — get one from your provider:"
+                echo "         OpenAI:     https://platform.openai.com/api-keys"
+                echo "         Gemini:     https://aistudio.google.com/apikey"
+                echo "         DeepSeek:   https://platform.deepseek.com/api_keys"
+                echo "         Claude:     https://console.anthropic.com/settings/keys"
+                echo "         OpenRouter: https://openrouter.ai/keys"
+                ;;
         esac
         case "$missing" in
-            *bilibili.cookie*) echo "     - Bilibili cookie (user should log into https://www.bilibili.com and copy the full cookie string from DevTools)" ;;
+            *bilibili.cookie*)
+                echo "     - Bilibili cookie:"
+                echo "         a. Log in at https://www.bilibili.com"
+                echo "         b. Open DevTools (F12) → Network tab"
+                echo "         c. Refresh the page, click any request"
+                echo "         d. Copy the full 'Cookie' header value"
+                ;;
         esac
         echo ""
-        echo "  2. Run this command with the values the user provided"
-        echo "     (fill the placeholders; omit flags you do not need):"
+        echo "  2. Run with your values filled in:"
         echo ""
+        # Build the command dynamically — only show flags for what's missing.
         echo "     python3 $INSTALL_DIR/scripts/agent_bootstrap.py \\"
         echo "         --project-dir $INSTALL_DIR \\"
-        echo "         --llm-api-key '<VALUE>' \\"
-        echo "         --bilibili-cookie '<VALUE>' \\"
-        echo "         --skip-start \\"
+        case "$missing" in
+            *llm.*api_key*) echo "         --llm-api-key '<YOUR_API_KEY>' \\" ;;
+        esac
+        case "$missing" in
+            *bilibili.cookie*) echo "         --bilibili-cookie '<YOUR_COOKIE>' \\" ;;
+        esac
         echo "         --port $PORT --host $HOST"
         echo ""
-        echo "  3. Curl $health_url again to confirm the backend is still healthy."
-        echo "  4. Report the final state to the user."
+        echo "  3. Verify the backend is healthy:"
+        echo "      curl -sS $health_url"
     else
-        echo "Next action (optional follow-ups):"
+        echo "Next steps (all credentials present):"
         echo ""
-        echo "  - Confirm the backend is healthy:"
+        echo "  - Verify the backend is healthy:"
         echo "      curl -sS $health_url"
         echo "  - Kick off first-time init (fetches Bilibili history, builds soul profile, seeds discovery pool):"
         echo "      cd $INSTALL_DIR && uv run openbiliclaw init"
@@ -298,9 +325,9 @@ PY
         echo "      cd $INSTALL_DIR && uv run openbiliclaw recommend"
     fi
     echo ""
-    echo "Reference docs (for humans, NOT required by the agent):"
-    echo "  - $INSTALL_DIR/docs/agent-install.md     (machine contract)"
-    echo "  - $INSTALL_DIR/docs/agent-deployment.md  (long-form troubleshooting)"
+    echo "Reference docs:"
+    echo "  - $INSTALL_DIR/docs/agent-install.md     (install guide)"
+    echo "  - $INSTALL_DIR/docs/agent-deployment.md  (troubleshooting)"
     echo "================================================================"
 }
 

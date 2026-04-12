@@ -320,11 +320,30 @@ async def main() -> None:
         for f in worst_fields[:3]:
             logger.info("  %s.%s: %.2f — %s", f.layer, f.field, f.score, f.deviation[:50])
 
+        # Epoch 1 is baseline-only: record score without optimizing
+        if epoch == 1:
+            best_score = train_mean
+            epoch_result = {
+                "epoch": epoch,
+                "train_mean": round(train_mean, 4),
+                "action": "BASELINE",
+                "changes_applied": 0,
+                "summary": "Baseline evaluation (no optimization)",
+                "worst": [
+                    {"field": f"{f.layer}.{f.field}", "score": f.score}
+                    for f in worst_fields[:3]
+                ],
+                "accepted": True,
+            }
+            logger.info("📊 BASELINE — score: %.3f (will optimize from epoch 2)", best_score)
+            history_log.append(epoch_result)
+            continue
+
         is_explore = random.random() < args.explore_rate
         action = "EXPLORE" if is_explore else "EXPLOIT"
         logger.info("策略: %s", action)
 
-        # Optimizer — include pipeline-specific context
+        # Optimizer — include pipeline-specific context (epoch >= 2)
         logger.info("→ 运行 Optimizer Agent...")
         combined_report = {
             "task": "incremental_update",
@@ -357,7 +376,7 @@ async def main() -> None:
         logger.info("建议: %s", summary[:80])
         logger.info("修改数: %d", len(raw_changes))
 
-        # 6. Convert raw changes to ParamChange and APPLY
+        # Convert raw changes to ParamChange and APPLY
         param_changes = [
             ParamChange(
                 param_name=str(c.get("file_path", "")),
@@ -396,7 +415,7 @@ async def main() -> None:
                 new_preview = str(pc.new_value)[:50]
                 logger.info("  %s: %s... → %s...", pc.file_path, old_preview, new_preview)
 
-        # 7. Accept/rollback
+        # Accept/rollback
         epoch_result = {
             "epoch": epoch,
             "train_mean": round(train_mean, 4),

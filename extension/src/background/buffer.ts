@@ -18,27 +18,30 @@ export function buildDedupeKey(event: BehaviorEvent): string | null {
   return `${event.type}:${event.url}:${getBucket(event)}`;
 }
 
+/**
+ * Enqueue an event into the buffer, mutating it in place.
+ * Safe because the service worker is single-threaded.
+ */
 export function enqueueBufferedEvent(
   buffer: BehaviorEvent[],
   event: BehaviorEvent,
   maxSize: number,
 ): BehaviorEvent[] {
-  const next = [...buffer];
   const dedupeKey = buildDedupeKey(event);
 
   if (dedupeKey) {
-    const existingIndex = next.findIndex((item) => buildDedupeKey(item) === dedupeKey);
+    const existingIndex = buffer.findIndex((item) => buildDedupeKey(item) === dedupeKey);
     if (existingIndex >= 0) {
-      next[existingIndex] = event;
-      return next;
+      buffer[existingIndex] = event;
+      return buffer;
     }
   }
 
-  next.push(event);
-  if (next.length > maxSize) {
-    next.shift();
+  buffer.push(event);
+  if (buffer.length > maxSize) {
+    buffer.shift();
   }
-  return next;
+  return buffer;
 }
 
 export function shouldFlushImmediately(event: BehaviorEvent): boolean {

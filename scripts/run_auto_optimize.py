@@ -267,12 +267,31 @@ async def main() -> None:
         for f in worst_fields[:3]:
             logger.info("  %s.%s: %.2f — %s", f.layer, f.field, f.score, f.deviation[:50])
 
-        # 4. Decide: exploit or explore
+        # 4. Epoch 1 is baseline-only: record score without optimizing
+        if epoch == 1:
+            best_score = train_mean
+            epoch_result = {
+                "epoch": epoch,
+                "train_mean": round(train_mean, 4),
+                "action": "BASELINE",
+                "changes_applied": 0,
+                "summary": "Baseline evaluation (no optimization)",
+                "worst": [
+                    {"field": f"{f.layer}.{f.field}", "score": f.score}
+                    for f in worst_fields[:3]
+                ],
+                "accepted": True,
+            }
+            logger.info("📊 BASELINE — score: %.3f (will optimize from epoch 2)", best_score)
+            history_log.append(epoch_result)
+            continue
+
+        # 5. Decide: exploit or explore (epoch >= 2)
         is_explore = random.random() < args.explore_rate
         action = "EXPLORE" if is_explore else "EXPLOIT"
         logger.info("策略: %s", action)
 
-        # 5. Run optimizer
+        # 6. Run optimizer
         logger.info("→ 运行 Optimizer Agent...")
         combined_report = {
             "train_mean": train_mean,
@@ -303,7 +322,7 @@ async def main() -> None:
         logger.info("建议: %s", summary[:80])
         logger.info("修改数: %d", len(raw_changes))
 
-        # 6. Convert raw changes to ParamChange and APPLY
+        # 7. Convert raw changes to ParamChange and APPLY
         param_changes = [
             ParamChange(
                 param_name=str(c.get("file_path", "")),
@@ -337,7 +356,7 @@ async def main() -> None:
                 else:
                     logger.info("✅ 测试通过")
 
-        # 7. Accept/rollback logic
+        # 8. Accept/rollback logic
         epoch_result = {
             "epoch": epoch,
             "train_mean": round(train_mean, 4),

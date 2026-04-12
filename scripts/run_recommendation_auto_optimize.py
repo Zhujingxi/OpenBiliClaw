@@ -332,7 +332,19 @@ async def main() -> None:
         worst_fields.sort(key=lambda f: f["score"])
         worst_fields = worst_fields[:5]
 
-        # 7. Run optimizer
+        # 7. Epoch 1 is baseline-only: record score without optimizing
+        if epoch == 1:
+            best_score = train_mean
+            history_log.append({
+                "epoch": epoch,
+                "train_mean": round(train_mean, 4),
+                "action": "BASELINE",
+                "changes_applied": 0,
+            })
+            logger.info("📊 BASELINE — score: %.3f (will optimize from epoch 2)", best_score)
+            continue
+
+        # 8. Run optimizer (epoch >= 2)
         action = "EXPLORE" if random.random() < args.explore_rate else "EXPLOIT"
         logger.info("策略: %s", action)
         logger.info("→ 运行 Optimizer Agent...")
@@ -355,7 +367,7 @@ async def main() -> None:
         logger.info("建议: %s", summary[:80])
         logger.info("修改数: %d", len(raw_changes))
 
-        # 8. Apply
+        # 9. Apply
         from openbiliclaw.eval.optimizer import ParamChange
         param_changes = [
             ParamChange(
@@ -384,7 +396,7 @@ async def main() -> None:
                 else:
                     logger.info("✅ 测试通过")
 
-        # 9. Accept/rollback
+        # 10. Accept/rollback
         if train_mean > best_score:
             best_score = train_mean
             patience = 0

@@ -284,7 +284,22 @@ async def main(args: argparse.Namespace) -> None:
         for d in worst_dims[:3]:
             logger.info("  %s = %.2f", d.dimension, d.score)
 
-        # 6. Exploit or Explore
+        # 6. Epoch 1 is baseline-only: record score without optimizing
+        if epoch == 1:
+            best_score = train_mean
+            best_epoch = epoch
+            epoch_history.append({
+                "epoch": epoch,
+                "train_mean": round(train_mean, 4),
+                "action": "BASELINE",
+                "changes_applied": 0,
+                "accepted": True,
+                "worst_3": [{"dim": d.dimension, "score": d.score} for d in worst_dims[:3]],
+            })
+            logger.info("[Epoch %d] 📊 BASELINE — score: %.4f (will optimize from epoch 2)", epoch, best_score)
+            continue
+
+        # 7. Exploit or Explore (epoch >= 2)
         action = "EXPLORE" if random.random() < args.explore_rate else "EXPLOIT"
         logger.info("[Epoch %d] Action: %s", epoch, action)
 
@@ -299,7 +314,7 @@ async def main(args: argparse.Namespace) -> None:
             logger.exception("[Epoch %d] Optimizer failed", epoch)
             changes = []
 
-        # 7. Apply
+        # 8. Apply
         applied = 0
         if changes:
             applied = optimizer.apply(changes)
@@ -312,7 +327,7 @@ async def main(args: argparse.Namespace) -> None:
                     optimizer.rollback()
                     applied = 0
 
-        # 8. Accept or rollback
+        # 9. Accept or rollback
         accepted = False
         if applied > 0 and train_mean > best_score:
             optimizer.commit()

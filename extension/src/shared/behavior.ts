@@ -32,10 +32,14 @@ export function createDOMSnapshot(doc: Document): string {
   return JSON.stringify(snapshot);
 }
 
-export function createBehaviorContext(win: Window, doc: Document): BehaviorContext {
+export function createBehaviorContext(
+  win: Window,
+  doc: Document,
+  options: { snapshot?: boolean } = {},
+): BehaviorContext {
   return {
     pageType: detectPageType(win.location.href),
-    domSnapshot: createDOMSnapshot(doc),
+    ...(options.snapshot !== false && { domSnapshot: createDOMSnapshot(doc) }),
     viewport: { width: win.innerWidth, height: win.innerHeight },
     scrollPosition: win.scrollY,
   };
@@ -46,13 +50,14 @@ export function createBehaviorEvent(
   win: Window,
   doc: Document,
   metadata: Record<string, unknown> = {},
+  options: { snapshot?: boolean } = {},
 ): BehaviorEvent {
   return {
     type,
     url: win.location.href,
     title: doc.title,
     timestamp: Date.now(),
-    context: createBehaviorContext(win, doc),
+    context: createBehaviorContext(win, doc, options),
     metadata,
   };
 }

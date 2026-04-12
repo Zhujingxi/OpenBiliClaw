@@ -347,7 +347,25 @@ async def main() -> None:
         for d in worst_dims:
             logger.info("  %s: %.2f", d["dimension"], d["score"])
 
-        # 8. Optimize
+        # 8. Epoch 1 is baseline-only: record score without optimizing
+        if epoch == 1:
+            best_score = train_mean
+            epoch_result = {
+                "epoch": epoch,
+                "train_mean": round(train_mean, 4),
+                "conf_rate": round(avg_conf, 4),
+                "diversity": round(avg_div, 4),
+                "persona_resonance": round(avg_res, 4),
+                "action": "BASELINE",
+                "changes_applied": 0,
+                "summary": "Baseline evaluation (no optimization)",
+                "accepted": True,
+            }
+            logger.info("BASELINE — score: %.3f (will optimize from epoch 2)", best_score)
+            history_log.append(epoch_result)
+            continue
+
+        # 9. Optimize (epoch >= 2)
         is_explore = random.random() < args.explore_rate
         action = "EXPLORE" if is_explore else "EXPLOIT"
         logger.info("Strategy: %s", action)
@@ -385,7 +403,7 @@ async def main() -> None:
         logger.info("Suggestion: %s", summary[:80])
         logger.info("Changes: %d", len(raw_changes))
 
-        # 9. Apply changes
+        # 10. Apply changes
         param_changes = [
             ParamChange(
                 param_name=str(c.get("file_path", "")),
@@ -418,7 +436,7 @@ async def main() -> None:
                 else:
                     logger.info("Tests passed")
 
-        # 10. Accept/rollback
+        # 11. Accept/rollback
         epoch_result = {
             "epoch": epoch,
             "train_mean": round(train_mean, 4),

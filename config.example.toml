@@ -107,6 +107,14 @@ discovery_cron = "0 */4 * * *"  # Every 4 hours
 pool_target_count = 300
 # Low-frequency account sync interval for history / favorites / following
 account_sync_interval_hours = 6
+# --- 猜测兴趣（Speculative Interest）调度 ---
+# speculation_interval_minutes = 10   # 猜测推测运行间隔（分钟）
+# speculation_ttl_days = 3            # 猜测兴趣默认存活天数
+# speculation_cooldown_days = 7       # 被否定后的冷却天数
+# speculation_confirmation_threshold = 3  # 确认猜测需要的正向信号数
+# speculation_max_active = 5          # 最多同时活跃的猜测兴趣
+# speculation_max_primary_interests = 15  # 主要兴趣域上限
+# speculation_max_secondary_interests = 60  # 次要兴趣域上限
 
 [storage]
 # SQLite database path

@@ -20,10 +20,15 @@ import type { BehaviorEvent } from "../shared/types.js";
 
 const HOVER_DELAY_MS = 800;
 const SCROLL_DEBOUNCE_MS = 600;
+const HOVER_THROTTLE_MS = 200;
+
+/** Event types that carry a DOM snapshot (navigation + strong signals). */
+const SNAPSHOT_TYPES = new Set(["snapshot", "view", "like", "coin", "favorite", "comment"]);
 
 let currentUrl = window.location.href;
 let scrollTimer: number | null = null;
 let lastScrollEventAt = 0;
+let lastHoverCheckAt = 0;
 const hoverTimers = new WeakMap<Element, number>();
 const trackedVideos = new WeakSet<HTMLVideoElement>();
 
@@ -35,7 +40,7 @@ function createEvent(type: string, metadata: Record<string, unknown> = {}): Beha
   return createBehaviorEvent(type, window, document, {
     bvid: extractBvid(window.location.href),
     ...metadata,
-  });
+  }, { snapshot: SNAPSHOT_TYPES.has(type) });
 }
 
 function sendSnapshot(reason: string): void {
@@ -89,6 +94,10 @@ function observeScroll(): void {
 
 function observeHover(): void {
   document.addEventListener("mouseover", (event) => {
+    const now = Date.now();
+    if (now - lastHoverCheckAt < HOVER_THROTTLE_MS) return;
+    lastHoverCheckAt = now;
+
     const target = event.target as HTMLElement | null;
     const card = target?.closest('a[href*="/video/BV"], .bili-video-card, .video-page-card, .feed-card');
     if (!card || !isTrackableCardElement(card)) return;
