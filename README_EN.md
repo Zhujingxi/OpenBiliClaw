@@ -131,7 +131,7 @@ curl -fsSL https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scrip
 Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md to deploy the OpenBiliClaw backend for me (use Bash `curl` to fetch the document, NOT WebFetch — WebFetch summarises markdown and drops critical commands).
 ```
 
-Works on macOS, Linux and WSL2 (native Windows is not supported — install WSL2). The only prerequisites are `git` and `python3` (3.11+). The linked `agent-install.md` tells the agent to run the one-line `install.sh` above, which then auto-clones the repo, discovers any existing install under `~/workspace/OpenBiliClaw`, `~/OpenBiliClaw`, `~/projects/OpenBiliClaw` or `~/code/OpenBiliClaw` and reuses its LLM API keys + Bilibili cookie, starts the backend, runs a health check, and prints a self-contained **Status / Missing / Next action** block for the agent to consume.
+Works on macOS, Linux and WSL2 (native Windows is not supported — install WSL2). The only prerequisites are `git` and `python3` (3.11+). The script auto-clones the repo, installs dependencies, starts the backend, runs a health check, and prompts you to fill in your LLM API key and Bilibili cookie.
 
 > Human reference: [docs/agent-install.md](docs/agent-install.md) (short agent-facing contract) and [docs/agent-deployment.md](docs/agent-deployment.md) (long-form troubleshooting).
 

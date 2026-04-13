@@ -185,7 +185,7 @@ curl -fsSL https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scrip
 请按照 https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md 的说明帮我部署 OpenBiliClaw 后端(务必用 Bash 的 curl 下载这个文档,不要用 WebFetch — 会丢关键指令)
 ```
 
-支持 macOS / Linux / WSL2(Windows 请先装 WSL2)。依赖只有 `git` 和 `python3`(3.11+)。`agent-install.md` 会让智能体跑上面那条 `install.sh` 一键命令,脚本会自动克隆仓库、在 `~/workspace/OpenBiliClaw` / `~/OpenBiliClaw` / `~/projects/OpenBiliClaw` / `~/code/OpenBiliClaw` 里发现已有安装并复用 LLM API Key 和 B 站 Cookie、起后端、做健康检查,最后打印一个自包含的 Status / Missing / Next action 状态块给智能体消费。
+支持 macOS / Linux / WSL2（Windows 请先装 WSL2）。依赖只有 `git` 和 `python3`（3.11+）。脚本会自动克隆仓库、安装依赖、启动后端、做健康检查，最后提示你填写 LLM API Key 和 B 站 Cookie。
 
 > 人类维护者可以参考 [docs/agent-install.md](docs/agent-install.md)(给智能体看的精简契约)和 [docs/agent-deployment.md](docs/agent-deployment.md)(详细排查说明)。
 
