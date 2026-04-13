@@ -97,7 +97,17 @@
 
 ## 🚀 快速开始
 
-### ⚡ Quick Install
+### 🧩 第一步：安装 Chrome 浏览器插件
+
+插件是你和 OpenBiliClaw 交互的主要界面——在 B 站页面侧边栏展示推荐、采集行为、对话调教。
+
+1. 下载最新的 [`openbiliclaw-extension.zip`](https://github.com/whiteguo233/OpenBiliClaw/releases/latest)
+2. 打开 `chrome://extensions/`，开启右上角「开发者模式」
+3. 将 `.zip` 文件拖入页面安装
+
+> 开发者也可以 `cd extension && npm install && npm run build`，然后「加载已解压的扩展程序」选择 `extension/` 目录。
+
+### ⚡ 第二步：部署后端
 
 **⭐ 复制粘贴给 AI 智能体一键部署（推荐，Claude Code / Codex CLI / Cursor 等都支持）：**
 
@@ -167,26 +177,6 @@ openbiliclaw recommend
 # 查看用户画像
 openbiliclaw profile
 ```
-
-#### 浏览器插件安装
-
-后端运行后，安装 Chrome 插件即可在 B 站页面使用推荐和行为采集：
-
-```bash
-cd extension
-npm install
-npm run package        # 构建 + 打包为 .zip
-```
-
-打包完成后在 `extension/` 目录下生成 `openbiliclaw-extension-v*.zip`。
-
-**加载到 Chrome：**
-
-1. 打开 `chrome://extensions/`，开启右上角「开发者模式」
-2. 方式一：点击「加载已解压的扩展程序」，选择 `extension/` 目录（开发调试用）
-3. 方式二：将生成的 `.zip` 文件拖入扩展页面安装
-
-安装后访问 bilibili.com，插件侧边栏即可展示推荐内容。
 
 #### Docker 部署
 

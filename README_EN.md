@@ -43,7 +43,17 @@ All data lives in a single SQLite file on your disk. LLM calls use your own API 
 
 ## 🚀 Quick Start
 
-### ⚡ Quick Install
+### 🧩 Step 1: Install the Chrome Extension
+
+The extension is your main interface — it shows recommendations in a Bilibili side panel, collects behavior, and lets you chat with the agent.
+
+1. Download the latest [`openbiliclaw-extension.zip`](https://github.com/whiteguo233/OpenBiliClaw/releases/latest)
+2. Open `chrome://extensions/`, enable "Developer mode" in the top right
+3. Drag the `.zip` file into the page to install
+
+> Developers can also `cd extension && npm install && npm run build`, then "Load unpacked" the `extension/` directory.
+
+### ⚡ Step 2: Deploy the Backend
 
 **⭐ Paste to an AI coding agent for one-click deploy (recommended — works with Claude Code / Codex CLI / Cursor etc.):**
 
