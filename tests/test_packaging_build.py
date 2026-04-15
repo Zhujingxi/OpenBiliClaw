@@ -23,6 +23,17 @@ def test_make_archive_name_includes_platform_and_version() -> None:
     assert build_module.make_archive_name("v0.1.1", "macos") == "OpenBiliClaw-macos-v0.1.1.zip"
 
 
+def test_make_archive_name_strips_backend_release_channel_prefix() -> None:
+    assert (
+        build_module.make_archive_name("backend-v0.1.3", "windows")
+        == "OpenBiliClaw-windows-v0.1.3.zip"
+    )
+
+
+def test_make_bundle_version_strips_backend_release_channel_prefix() -> None:
+    assert build_module.make_bundle_version("backend-v0.1.3") == "0.1.3"
+
+
 def test_build_pyinstaller_install_command_falls_back_to_uv_when_pip_missing() -> None:
     assert build_module.build_pyinstaller_install_command(
         pip_available=False,

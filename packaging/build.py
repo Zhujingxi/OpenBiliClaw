@@ -73,9 +73,17 @@ def build_pyinstaller_install_command(
     return [sys.executable, "-m", "ensurepip", "--upgrade"]
 
 
+def normalize_release_version(version: str) -> str:
+    """Normalize release tags like backend-v0.1.3 to a user-facing v0.1.3."""
+    if "-v" in version:
+        _, _, suffix = version.rpartition("-v")
+        return f"v{suffix}"
+    return version if version.startswith("v") else f"v{version}"
+
+
 def make_bundle_version(version: str) -> str:
     """Normalize a tag-style version for bundle metadata."""
-    return version[1:] if version.startswith("v") else version
+    return normalize_release_version(version).removeprefix("v")
 
 
 def detect_target(platform_name: str | None = None) -> str:
@@ -90,7 +98,7 @@ def detect_target(platform_name: str | None = None) -> str:
 
 def make_archive_name(version: str, target: str) -> str:
     """Return the versioned archive filename for a packaged backend."""
-    return f"OpenBiliClaw-{target}-{version}.zip"
+    return f"OpenBiliClaw-{target}-{normalize_release_version(version)}.zip"
 
 
 def find_packaged_root(dist_dir: Path, platform_name: str | None = None) -> Path:

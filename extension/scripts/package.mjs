@@ -1,10 +1,11 @@
 import { execSync } from "node:child_process";
-import { createWriteStream } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
-import { basename, resolve } from "node:path";
-import { pipeline } from "node:stream/promises";
-import { createGzip } from "node:zlib";
-import { Readable } from "node:stream";
+import { resolve } from "node:path";
+
+import {
+  makeExtensionArchiveName,
+  normalizeReleaseVersion,
+} from "./release-utils.mjs";
 
 /**
  * Package the extension into a .zip for Chrome Web Store or sideloading.
@@ -16,6 +17,13 @@ import { Readable } from "node:stream";
 
 const root = resolve(import.meta.dirname, "..");
 const skipBuild = process.argv.includes("--no-build");
+const archiveVersionFlag = process.argv.indexOf("--archive-version");
+const archiveVersionInput =
+  archiveVersionFlag === -1 ? null : process.argv[archiveVersionFlag + 1];
+
+if (archiveVersionFlag !== -1 && !archiveVersionInput) {
+  throw new Error("--archive-version requires a value");
+}
 
 // --- 1. Build ---------------------------------------------------------
 if (!skipBuild) {
@@ -27,8 +35,8 @@ if (!skipBuild) {
 const manifest = JSON.parse(
   await readFile(resolve(root, "manifest.json"), "utf-8"),
 );
-const version = manifest.version;
-const outName = `openbiliclaw-extension-v${version}.zip`;
+const version = normalizeReleaseVersion(archiveVersionInput ?? manifest.version);
+const outName = makeExtensionArchiveName(version);
 const outPath = resolve(root, outName);
 
 // --- 3. Collect files to include --------------------------------------
