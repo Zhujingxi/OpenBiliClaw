@@ -448,3 +448,36 @@ async def test_get_video_comments_returns_top_n_comments() -> None:
     assert comments == [
         CommentInfo(mid=1, uname="alice", message="第一条", like_count=11),
     ]
+
+
+@pytest.mark.asyncio
+async def test_get_ranking_returns_empty_list_when_data_is_null() -> None:
+    """Regression: B站 ``ranking/v2`` may return ``"data": null`` for empty
+    regions or under rate-limiting. The client must degrade to ``[]`` instead
+    of raising ``AttributeError`` on ``None.get(...)``.
+    """
+    client = BilibiliAPIClient(cookie="SESSDATA=abc")
+    client._client = FakeAsyncClient({"code": 0, "data": None})
+
+    items = await client.get_ranking(rid=201)
+
+    assert items == []
+
+
+@pytest.mark.asyncio
+async def test_get_video_info_returns_defaults_when_data_is_null() -> None:
+    """Regression: ``/x/web-interface/view`` may return ``"data": null``
+    (removed/region-locked videos or rate-limiting). The client must
+    degrade to a ``VideoInfo`` with zero/empty defaults instead of raising
+    ``KeyError`` on hard indexing.
+    """
+    client = BilibiliAPIClient(cookie="SESSDATA=abc")
+    client._client = FakeAsyncClient({"code": 0, "data": None})
+
+    info = await client.get_video_info("BV1xx")
+
+    assert info.bvid == "BV1xx"
+    assert info.aid == 0
+    assert info.title == ""
+    assert info.up_name == ""
+    assert info.view_count == 0

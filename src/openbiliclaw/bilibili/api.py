@@ -25,7 +25,14 @@ class BilibiliAPIError(RuntimeError):
 
 
 def _json_object(value: Any) -> dict[str, Any]:
-    """Coerce a JSON value into an object for strict typing."""
+    """Coerce a JSON value into an object for strict typing.
+
+    Returns an empty dict when *value* is ``None`` (common when B站
+    returns ``"data": null`` under rate-limiting or for empty ranking
+    regions), mirroring :func:`_json_list`'s null-handling.
+    """
+    if value is None:
+        return {}
     return cast("dict[str, Any]", value)
 
 
@@ -333,7 +340,7 @@ class BilibiliAPIClient:
         )
         resp.raise_for_status()
         payload = _json_object(resp.json())
-        data = _json_object(payload["data"])
+        data = _json_object(payload.get("data"))
         stat = _json_object(data.get("stat", {}))
         owner = _json_object(data.get("owner", {}))
 

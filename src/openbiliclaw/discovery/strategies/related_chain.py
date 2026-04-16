@@ -121,7 +121,17 @@ class RelatedChainStrategy(DiscoveryStrategy):
                 layer_items, related_outcomes, strict=True,
             ):
                 if isinstance(outcome, BaseException):
-                    logger.exception("Related videos request failed: %s", seed_bvid, exc_info=outcome)
+                    logger.error(
+                        "Related videos request failed: %s",
+                        seed_bvid,
+                        exc_info=outcome,
+                        extra={
+                            "strategy": "related_chain",
+                            "seed_bvid": seed_bvid,
+                            "depth": depth,
+                            "error_type": type(outcome).__name__,
+                        },
+                    )
                     continue
                 if not isinstance(outcome, list):
                     continue

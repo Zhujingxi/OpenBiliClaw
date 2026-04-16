@@ -93,7 +93,12 @@ class TrendingStrategy(DiscoveryStrategy):
 
         for rid, outcome in zip(rids, ranking_outcomes, strict=True):
             if isinstance(outcome, BaseException):
-                logger.exception("Trending ranking request failed: rid=%s", rid, exc_info=outcome)
+                logger.error(
+                    "Trending ranking request failed: rid=%s",
+                    rid,
+                    exc_info=outcome,
+                    extra={"strategy": "trending", "rid": rid, "error_type": type(outcome).__name__},
+                )
                 continue
             if not isinstance(outcome, list):
                 continue

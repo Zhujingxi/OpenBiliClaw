@@ -109,7 +109,17 @@ class SearchStrategy(DiscoveryStrategy):
         api_result_count = 0
         for (query_index, query, page), outcome in zip(request_plan, gathered, strict=True):
             if isinstance(outcome, BaseException):
-                logger.exception("Search query failed: %s", query, exc_info=outcome)
+                logger.error(
+                    "Search query failed: %s",
+                    query,
+                    exc_info=outcome,
+                    extra={
+                        "strategy": "search",
+                        "query": query,
+                        "page": page,
+                        "error_type": type(outcome).__name__,
+                    },
+                )
                 continue
             if not isinstance(outcome, list):
                 logger.warning("Search query '%s' returned non-list: %s", query, type(outcome).__name__)

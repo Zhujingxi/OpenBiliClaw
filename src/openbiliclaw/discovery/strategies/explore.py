@@ -127,7 +127,17 @@ class ExploreStrategy(DiscoveryStrategy):
             request_plan, search_outcomes, strict=True
         ):
             if isinstance(outcome, BaseException):
-                logger.exception("Explore query failed: %s", query, exc_info=outcome)
+                logger.error(
+                    "Explore query failed: %s",
+                    query,
+                    exc_info=outcome,
+                    extra={
+                        "strategy": "explore",
+                        "query": query,
+                        "novelty_level": novelty_level,
+                        "error_type": type(outcome).__name__,
+                    },
+                )
                 continue
             if not isinstance(outcome, list):
                 continue
