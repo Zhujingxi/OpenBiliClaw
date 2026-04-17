@@ -127,7 +127,6 @@ class Database:
         self._ensure_content_cache_pool_copy_columns()
         self._ensure_content_cache_delight_columns()
         self._ensure_content_cache_multisource_columns()
-        self._ensure_source_recipes_table()
 
         # Set schema version
         self._conn.execute(
@@ -1173,121 +1172,6 @@ class Database:
             self.conn.execute(
                 "UPDATE content_cache SET content_id = bvid WHERE content_id = ''"
             )
-
-    def _ensure_source_recipes_table(self) -> None:
-        """Create the source_recipes table if it does not exist."""
-        self.conn.executescript("""
-            CREATE TABLE IF NOT EXISTS source_recipes (
-                id            TEXT PRIMARY KEY,
-                source_type   TEXT NOT NULL,
-                name          TEXT NOT NULL,
-                strategy      TEXT NOT NULL,
-                config        TEXT DEFAULT '{}',
-                target_share  INTEGER DEFAULT 4,
-                enabled       INTEGER DEFAULT 1,
-                created_by    TEXT DEFAULT 'system',
-                created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_fetched_at TIMESTAMP
-            );
-        """)
-
-    # ── Source recipe CRUD ──────────────────────────────────────────
-
-    def save_source_recipe(self, recipe: dict[str, Any]) -> None:
-        """Insert or update a source recipe."""
-        import json as _json
-
-        self._execute_write(
-            """
-            INSERT INTO source_recipes (id, source_type, name, strategy, config,
-                                        target_share, enabled, created_by, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
-            ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                strategy = excluded.strategy,
-                config = excluded.config,
-                target_share = excluded.target_share,
-                enabled = excluded.enabled
-            """,
-            (
-                str(recipe["id"]),
-                str(recipe["source_type"]),
-                str(recipe["name"]),
-                str(recipe["strategy"]),
-                _json.dumps(recipe.get("config", {}), ensure_ascii=False),
-                int(recipe.get("target_share", 4)),
-                int(recipe.get("enabled", True)),
-                str(recipe.get("created_by", "system")),
-                recipe.get("created_at") or None,
-            ),
-        )
-
-    def get_all_recipes(self) -> list[dict[str, Any]]:
-        """Return all source recipes."""
-        self._ensure_fresh_read()
-        rows = self.conn.execute(
-            "SELECT * FROM source_recipes ORDER BY created_at"
-        ).fetchall()
-        return [self._row_to_recipe(row) for row in rows]
-
-    def get_enabled_recipes(self) -> list[dict[str, Any]]:
-        """Return only enabled source recipes."""
-        self._ensure_fresh_read()
-        rows = self.conn.execute(
-            "SELECT * FROM source_recipes WHERE enabled = 1 ORDER BY created_at"
-        ).fetchall()
-        return [self._row_to_recipe(row) for row in rows]
-
-    def update_recipe(self, recipe_id: str, **fields: Any) -> bool:
-        """Update specific fields of a recipe. Returns True if a row was updated."""
-        import json as _json
-
-        allowed = {"name", "strategy", "config", "target_share", "enabled", "last_fetched_at"}
-        updates = {k: v for k, v in fields.items() if k in allowed}
-        if not updates:
-            return False
-        if "config" in updates and not isinstance(updates["config"], str):
-            updates["config"] = _json.dumps(updates["config"], ensure_ascii=False)
-        if "enabled" in updates:
-            updates["enabled"] = int(updates["enabled"])
-
-        set_clause = ", ".join(f"{k} = ?" for k in updates)
-        values = list(updates.values()) + [recipe_id]
-        cursor = self._execute_write(
-            f"UPDATE source_recipes SET {set_clause} WHERE id = ?",
-            tuple(values),
-        )
-        return cursor.rowcount > 0
-
-    def delete_recipe(self, recipe_id: str) -> bool:
-        """Delete a recipe by id. Returns True if a row was deleted."""
-        cursor = self._execute_write(
-            "DELETE FROM source_recipes WHERE id = ?",
-            (recipe_id,),
-        )
-        return cursor.rowcount > 0
-
-    @staticmethod
-    def _row_to_recipe(row: Any) -> dict[str, Any]:
-        import json as _json
-
-        config_raw = row["config"] if row["config"] else "{}"
-        try:
-            config = _json.loads(config_raw)
-        except (ValueError, TypeError):
-            config = {}
-        return {
-            "id": str(row["id"]),
-            "source_type": str(row["source_type"]),
-            "name": str(row["name"]),
-            "strategy": str(row["strategy"]),
-            "config": config,
-            "target_share": int(row["target_share"]),
-            "enabled": bool(row["enabled"]),
-            "created_by": str(row["created_by"]),
-            "created_at": str(row["created_at"] or ""),
-            "last_fetched_at": str(row["last_fetched_at"] or ""),
-        }
 
     def get_delight_candidate(
         self,

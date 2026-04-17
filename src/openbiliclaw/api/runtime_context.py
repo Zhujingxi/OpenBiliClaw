@@ -167,17 +167,6 @@ class RuntimeContext:
         new_discovery_engine.register_strategy(related_strategy)
         new_discovery_engine.register_strategy(explore_strategy)
 
-        # 7b. Register Bilibili source adapter (multi-source Phase 1)
-        from openbiliclaw.sources.bilibili_adapter import BilibiliAdapter
-
-        bilibili_adapter = BilibiliAdapter(
-            search=search_strategy,
-            trending=trending_strategy,
-            related_chain=related_strategy,
-            explore=explore_strategy,
-        )
-        new_discovery_engine.register_adapter(bilibili_adapter)
-
         # 8. Continuous refresh controller
         new_runtime_controller = ContinuousRefreshController(
             memory_manager=self.memory_manager,

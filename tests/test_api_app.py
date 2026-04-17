@@ -121,9 +121,6 @@ class TestBackendAPI:
             def register_strategy(self, strategy: object) -> None:
                 return None
 
-            def register_adapter(self, adapter: object) -> None:
-                return None
-
         class _FakeStrategy:
             def __init__(self, *args, concurrency=None, **kwargs) -> None:
                 captured.setdefault("strategy_concurrency", []).append(concurrency)

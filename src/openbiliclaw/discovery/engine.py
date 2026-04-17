@@ -195,28 +195,6 @@ class ContentDiscoveryEngine:
         self._strategies.append(strategy)
         logger.info("Registered discovery strategy: %s", strategy.name)
 
-    def register_adapter(self, adapter: Any) -> None:
-        """Register a :class:`SourceAdapter` for multi-source discovery.
-
-        The adapter is stored in ``_adapter_registry`` keyed by its
-        ``source_type``.  Phase 2+ will use this during recipe-driven
-        discovery cycles.
-        """
-        if not hasattr(self, "_adapter_registry"):
-            from openbiliclaw.sources.registry import AdapterRegistry
-
-            self._adapter_registry = AdapterRegistry()
-        self._adapter_registry.register(adapter)
-
-    @property
-    def adapter_registry(self) -> Any:
-        """Return the adapter registry, creating it lazily if needed."""
-        if not hasattr(self, "_adapter_registry"):
-            from openbiliclaw.sources.registry import AdapterRegistry
-
-            self._adapter_registry = AdapterRegistry()
-        return self._adapter_registry
-
     async def discover(
         self,
         profile: SoulProfile,
