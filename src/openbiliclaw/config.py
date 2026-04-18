@@ -134,6 +134,27 @@ class SchedulerConfig:
 
 
 @dataclass
+class XiaohongshuSourceConfig:
+    """Xiaohongshu source-specific configuration.
+
+    Detail enrichment is delegated to the GPL-isolated xhs-downloader
+    sidecar container (see ``sidecar/xhs-downloader/``). Discovery
+    (finding note URLs) happens in the user's own browser via the
+    extension — never from the backend directly.
+    """
+
+    # HTTP URL of the xhs-downloader sidecar, e.g. ``http://xhs-sidecar:5556``.
+    # ``None`` means the xhs source is disabled.
+    sidecar_url: str | None = None
+    # Max Soul-driven search tasks the backend may enqueue per day.
+    daily_search_budget: int = 20
+    # Max creator-subscription fetch tasks per day.
+    daily_creator_budget: int = 10
+    # Seconds the extension dispatcher waits between tasks.
+    task_interval_seconds: int = 45
+
+
+@dataclass
 class SourcesConfig:
     """Multi-source content adapters configuration.
 
@@ -150,6 +171,7 @@ class SourcesConfig:
     browser_cdp_url: str = ""
     # Whether to launch a headed agent-browser (fallback path only).
     browser_headed: bool = False
+    xiaohongshu: XiaohongshuSourceConfig = field(default_factory=XiaohongshuSourceConfig)
 
 
 @dataclass
@@ -340,9 +362,23 @@ def _build_config(raw: dict[str, Any]) -> Config:
     )
 
     sources_browser_raw = sources_raw.get("browser", {})
+    xhs_raw = sources_raw.get("xiaohongshu", {})
+    xhs_sidecar_url_raw = xhs_raw.get("sidecar_url")
+    # Docker-compose / container orchestrators set this directly; it overrides TOML
+    # because the naive OPENBILICLAW_SECTION_KEY env pattern can't express nested
+    # keys whose names contain underscores (e.g. ``sidecar_url``).
+    xhs_sidecar_url_env = os.environ.get("OPENBILICLAW_XHS_SIDECAR_URL", "").strip()
+    if xhs_sidecar_url_env:
+        xhs_sidecar_url_raw = xhs_sidecar_url_env
     sources = SourcesConfig(
         browser_cdp_url=sources_browser_raw.get("cdp_url", ""),
         browser_headed=sources_browser_raw.get("headed", False),
+        xiaohongshu=XiaohongshuSourceConfig(
+            sidecar_url=xhs_sidecar_url_raw if xhs_sidecar_url_raw else None,
+            daily_search_budget=int(xhs_raw.get("daily_search_budget", 20)),
+            daily_creator_budget=int(xhs_raw.get("daily_creator_budget", 10)),
+            task_interval_seconds=int(xhs_raw.get("task_interval_seconds", 45)),
+        ),
     )
 
     return Config(
@@ -534,6 +570,12 @@ def _render_config_toml(config: Config) -> str:
             "[sources.browser]",
             f"cdp_url = {_toml_string(config.sources.browser_cdp_url)}",
             f"headed = {_toml_bool(config.sources.browser_headed)}",
+            "",
+            "[sources.xiaohongshu]",
+            f"sidecar_url = {_toml_string(config.sources.xiaohongshu.sidecar_url or '')}",
+            f"daily_search_budget = {config.sources.xiaohongshu.daily_search_budget}",
+            f"daily_creator_budget = {config.sources.xiaohongshu.daily_creator_budget}",
+            f"task_interval_seconds = {config.sources.xiaohongshu.task_interval_seconds}",
             "",
             "[scheduler]",
             f"enabled = {_toml_bool(config.scheduler.enabled)}",

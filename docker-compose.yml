@@ -10,6 +10,7 @@ services:
       OPENBILICLAW_PROXY_HOST: ${OPENBILICLAW_PROXY_HOST:-host.docker.internal}
       OPENBILICLAW_PROXY_PORT: ${OPENBILICLAW_PROXY_PORT:-7897}
       OPENBILICLAW_PROXY_TIMEOUT: ${OPENBILICLAW_PROXY_TIMEOUT:-1.0}
+      OPENBILICLAW_XHS_SIDECAR_URL: http://xhs-sidecar:5556
     command:
       - python
       - -m
@@ -28,7 +29,28 @@ services:
       - openbiliclaw_config:/app/runtime
       - openbiliclaw_data:/app/runtime/data
       - openbiliclaw_logs:/app/runtime/logs
+    depends_on:
+      xhs-sidecar:
+        condition: service_healthy
     restart: unless-stopped
+
+  # GPL-isolated xhs-downloader sidecar. The main backend never imports this
+  # process's code — it only talks to it over HTTP on the compose network.
+  # See sidecar/xhs-downloader/README.md for license rationale.
+  xhs-sidecar:
+    build:
+      context: ./sidecar/xhs-downloader
+      dockerfile: Dockerfile
+    container_name: openbiliclaw-xhs-sidecar
+    expose:
+      - "5556"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5556/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
 
 volumes:
   openbiliclaw_config:

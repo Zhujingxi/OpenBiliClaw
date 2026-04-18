@@ -108,6 +108,21 @@ cdp_url = ""
 # agent-browser 回落路径是否使用 headed 模式
 headed = false
 
+# ── 小红书（xhs）专用配置 ──
+# 详情富化（title / author / tags 等）通过 GPL 隔离的 xhs-downloader sidecar
+# 容器完成，主后端从不直接 import xhs 代码。内容发现（找到要富化的 URL）
+# 由浏览器扩展在真实登录态下完成，不在后端做主动爬取，避免触发风控。
+[sources.xiaohongshu]
+# xhs-downloader sidecar 的 HTTP 地址。留空则禁用小红书源。
+# docker compose 启动时会注入 OPENBILICLAW_XHS_SIDECAR_URL 环境变量覆盖本字段。
+sidecar_url = ""
+# 每天后端允许入队的 Soul 驱动搜索任务数上限
+daily_search_budget = 20
+# 每天每位订阅创作者的抓取任务上限
+daily_creator_budget = 10
+# 扩展分发器两次任务之间的最小间隔（秒），进一步降低风控风险
+task_interval_seconds = 45
+
 [scheduler]
 # Enable scheduled content discovery
 enabled = true

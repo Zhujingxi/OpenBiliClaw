@@ -345,6 +345,61 @@ def test_sources_browser_defaults_are_empty() -> None:
     assert config.sources.browser_headed is False
 
 
+def test_sources_xiaohongshu_defaults() -> None:
+    config = _build_config({})
+
+    assert config.sources.xiaohongshu.sidecar_url is None
+    assert config.sources.xiaohongshu.daily_search_budget == 20
+    assert config.sources.xiaohongshu.daily_creator_budget == 10
+    assert config.sources.xiaohongshu.task_interval_seconds == 45
+
+
+def test_build_config_supports_sources_xiaohongshu(tmp_path: Path) -> None:
+    toml_path = tmp_path / "c.toml"
+    toml_path.write_text(
+        """
+[sources.xiaohongshu]
+sidecar_url = "http://xhs-sidecar:5556"
+daily_search_budget = 30
+daily_creator_budget = 5
+task_interval_seconds = 60
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(toml_path)
+
+    assert config.sources.xiaohongshu.sidecar_url == "http://xhs-sidecar:5556"
+    assert config.sources.xiaohongshu.daily_search_budget == 30
+    assert config.sources.xiaohongshu.daily_creator_budget == 5
+    assert config.sources.xiaohongshu.task_interval_seconds == 60
+
+
+def test_sources_xiaohongshu_sidecar_url_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENBILICLAW_XHS_SIDECAR_URL", "http://xhs-sidecar:5556")
+
+    config = load_config()
+
+    assert config.sources.xiaohongshu.sidecar_url == "http://xhs-sidecar:5556"
+
+
+def test_sources_xiaohongshu_sidecar_url_env_overrides_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    toml_path = tmp_path / "c.toml"
+    toml_path.write_text(
+        '[sources.xiaohongshu]\nsidecar_url = "http://from-toml:5556"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENBILICLAW_XHS_SIDECAR_URL", "http://from-env:5556")
+
+    config = load_config(toml_path)
+
+    assert config.sources.xiaohongshu.sidecar_url == "http://from-env:5556"
+
+
 def test_save_config_round_trips_sources_browser_cdp_url(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config = Config()
