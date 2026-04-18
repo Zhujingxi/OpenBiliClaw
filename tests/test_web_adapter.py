@@ -1,4 +1,11 @@
-"""Tests for WebSourceAdapter / XiaohongshuAdapter with pluggable browser backend."""
+"""Tests for WebSourceAdapter with pluggable browser backend.
+
+The xhs-specific adapter used to live here as a ``XiaohongshuAdapter``
+subclass. It was removed when xhs detail enrichment moved to the sidecar
+HTTP adapter — see ``test_xiaohongshu_adapter.py``. The URL-backfill
+behaviour tested below is still exercised by the generic web adapter
+against a simulated xhs page.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +16,7 @@ import pytest
 from openbiliclaw.sources import web_adapter as web_adapter_module
 from openbiliclaw.sources.browser import PageSnapshot
 from openbiliclaw.sources.protocol import SourceRecipe
-from openbiliclaw.sources.web_adapter import WebSourceAdapter, XiaohongshuAdapter
+from openbiliclaw.sources.web_adapter import WebSourceAdapter
 
 
 class _RecordingBrowser:
@@ -52,17 +59,20 @@ class TestWebSourceAdapterBrowserWiring:
 
         monkeypatch.setattr(web_adapter_module, "extract_content_from_page", fake_extract)
 
-        adapter = XiaohongshuAdapter(
+        adapter = WebSourceAdapter(
             llm_service=None,
             browser_cdp_url="http://127.0.0.1:9222",
         )
 
         recipe = SourceRecipe(
             id="r1",
-            source_type="xiaohongshu",
-            name="小红书",
-            strategy="search",
-            config={"query": "机械键盘"},
+            source_type="web",
+            name="generic-search",
+            strategy="web_extract",
+            config={
+                "url_template": "https://example.com/search?keyword={query}",
+                "query": "机械键盘",
+            },
         )
 
         await adapter.fetch(recipe, profile=None, limit=5)  # type: ignore[arg-type]
@@ -70,7 +80,7 @@ class TestWebSourceAdapterBrowserWiring:
         assert _RecordingBrowser.last_init["cdp_url"] == "http://127.0.0.1:9222"
         assert (
             _RecordingBrowser.last_init["visited_url"]
-            == "https://www.xiaohongshu.com/search_result?keyword=机械键盘"
+            == "https://example.com/search?keyword=机械键盘"
         )
 
     @pytest.mark.asyncio
@@ -136,15 +146,15 @@ class TestWebSourceAdapterURLBackfill:
 
         monkeypatch.setattr(web_adapter_module, "extract_content_from_page", fake_extract)
 
-        adapter = XiaohongshuAdapter(
+        adapter = WebSourceAdapter(
             llm_service=None, browser_cdp_url="http://127.0.0.1:9222"
         )
         recipe = SourceRecipe(
             id="r3",
             source_type="xiaohongshu",
             name="小红书",
-            strategy="search",
-            config={"query": "机械键盘"},
+            strategy="web_extract",
+            config={"url": "https://www.xiaohongshu.com/search_result?keyword=x"},
         )
 
         items = await adapter.fetch(recipe, profile=None, limit=5)  # type: ignore[arg-type]
@@ -180,12 +190,12 @@ class TestWebSourceAdapterURLBackfill:
 
         monkeypatch.setattr(web_adapter_module, "extract_content_from_page", fake_extract)
 
-        adapter = XiaohongshuAdapter(
+        adapter = WebSourceAdapter(
             llm_service=None, browser_cdp_url="http://127.0.0.1:9222"
         )
         recipe = SourceRecipe(
-            id="r4", source_type="xiaohongshu", name="x", strategy="search",
-            config={"query": "x"},
+            id="r4", source_type="xiaohongshu", name="x", strategy="web_extract",
+            config={"url": "https://www.xiaohongshu.com/explore/preset999"},
         )
 
         items = await adapter.fetch(recipe, profile=None, limit=5)  # type: ignore[arg-type]

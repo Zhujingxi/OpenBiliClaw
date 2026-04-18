@@ -174,27 +174,3 @@ def _extract_content_id(url: str) -> str:
     return last
 
 
-class XiaohongshuAdapter(WebSourceAdapter):
-    """Xiaohongshu (小红书) adapter — extends WebSourceAdapter with platform defaults.
-
-    Recipe config keys:
-        query: Search query.
-        url: Direct URL (overrides search).
-    """
-
-    _SEARCH_URL_TEMPLATE = "https://www.xiaohongshu.com/search_result?keyword={query}"
-
-    @property
-    def source_type(self) -> str:
-        return "xiaohongshu"
-
-    @staticmethod
-    def _build_url(recipe: SourceRecipe) -> str:
-        config = recipe.config or {}
-        url = config.get("url", "")
-        if url:
-            return url
-        query = config.get("query", "")
-        if query:
-            return XiaohongshuAdapter._SEARCH_URL_TEMPLATE.replace("{query}", query)
-        return ""

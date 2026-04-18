@@ -178,16 +178,15 @@ class RuntimeContext:
         )
         new_discovery_engine.register_adapter(bilibili_adapter)
 
-        # Register Xiaohongshu (web-scraping) adapter. The CDP URL, when
-        # set in config, points to a pre-launched logged-in Chrome; empty
-        # means the adapter falls back to agent-browser (anonymous).
-        from openbiliclaw.sources.web_adapter import XiaohongshuAdapter
+        # Register Xiaohongshu adapter — HTTP client that talks to the
+        # GPL-isolated xhs-downloader sidecar container. Discovery (finding
+        # note URLs) happens in the user's real browser via the extension;
+        # this adapter only enriches known URLs. If the sidecar URL is not
+        # configured the adapter stays registered but returns empty results.
+        from openbiliclaw.sources.xiaohongshu_adapter import XiaohongshuAdapter
 
         xiaohongshu_adapter = XiaohongshuAdapter(
-            llm_service=new_llm_service,
-            browser_executable=new_config.bilibili.browser_executable,
-            browser_headed=new_config.sources.browser_headed,
-            browser_cdp_url=new_config.sources.browser_cdp_url,
+            sidecar_url=new_config.sources.xiaohongshu.sidecar_url,
         )
         new_discovery_engine.register_adapter(xiaohongshu_adapter)
 

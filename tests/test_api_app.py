@@ -192,7 +192,16 @@ class TestBackendAPI:
         fake_config = SimpleNamespace(
             data_path=Path("/tmp/openbiliclaw-test-data"),
             bilibili=SimpleNamespace(cookie="", browser_executable="", browser_headed=False),
-            sources=SimpleNamespace(browser_cdp_url="", browser_headed=False),
+            sources=SimpleNamespace(
+                browser_cdp_url="",
+                browser_headed=False,
+                xiaohongshu=SimpleNamespace(
+                    sidecar_url=None,
+                    daily_search_budget=20,
+                    daily_creator_budget=10,
+                    task_interval_seconds=45,
+                ),
+            ),
             scheduler=SimpleNamespace(pool_target_count=300, account_sync_interval_hours=24),
         )
 
