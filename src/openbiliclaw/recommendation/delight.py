@@ -16,21 +16,15 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from openbiliclaw.llm.embedding import SupportsEmbeddingService
+
 logger = logging.getLogger(__name__)
-
-
-class SupportsEmbedding(Protocol):
-    """Protocol for embedding service used by the delight scorer."""
-
-    similarity_threshold: float
-
-    async def embed(self, text: str) -> list[float]: ...
 
 
 class SupportsDelightCandidate(Protocol):
     bvid: str
     title: str
-    description: str | None
+    description: str
     view_count: int
     like_count: int
     topic_key: str
@@ -84,7 +78,7 @@ class DelightScorer:
 
     def __init__(
         self,
-        embedding_service: SupportsEmbedding | None,
+        embedding_service: SupportsEmbeddingService | None,
         database: SupportsRecommendationSignalStore,
         *,
         weights: DelightWeights = _DEFAULT_WEIGHTS,

@@ -24,6 +24,14 @@ class SupportsEmbed(Protocol):
     async def embed(self, text: str, *, model: str = ...) -> list[float]: ...
 
 
+class SupportsEmbeddingService(Protocol):
+    """Protocol for semantic embedding helpers used by mainline services."""
+
+    similarity_threshold: float
+
+    async def embed(self, text: str) -> list[float]: ...
+
+
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     """Compute cosine similarity between two vectors (pure Python)."""
     dot = sum(x * y for x, y in zip(a, b, strict=False))

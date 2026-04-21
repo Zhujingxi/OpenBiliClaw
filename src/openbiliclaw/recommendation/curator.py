@@ -9,19 +9,20 @@ Discovery's relevance_score does not capture.
 from __future__ import annotations
 
 import math
-from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from openbiliclaw.discovery.engine import DiscoveredContent
+    from openbiliclaw.llm.embedding import SupportsEmbeddingService
     from openbiliclaw.storage.database import Database
 
 
 # ---------------------------------------------------------------------------
 # Immutable configuration & context
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class ScoringWeights:
@@ -54,7 +55,7 @@ class ScoringContext:
     recent_topic_keys: tuple[str, ...] = ()
     recent_sources: tuple[str, ...] = ()
     feedback: FeedbackSignals = field(default_factory=FeedbackSignals)
-    now: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    now: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 # ---------------------------------------------------------------------------
@@ -66,11 +67,13 @@ _FEEDBACK_DISLIKE_UP_PENALTY: float = 0.20
 _FEEDBACK_DISLIKE_TOPIC_PENALTY: float = 0.10
 _FEEDBACK_LIKE_TOPIC_BONUS: float = 0.05
 _POOL_LOW_THRESHOLD: int = 50
+_DEFAULT_WEIGHTS = ScoringWeights()
 
 
 # ---------------------------------------------------------------------------
 # PoolCurator
 # ---------------------------------------------------------------------------
+
 
 class PoolCurator:
     """Manages recommendation-side scoring and pool health.
@@ -83,7 +86,7 @@ class PoolCurator:
         self,
         database: Database,
         *,
-        weights: ScoringWeights = ScoringWeights(),
+        weights: ScoringWeights = _DEFAULT_WEIGHTS,
         history_window: int = 30,
     ) -> None:
         self._database = database
@@ -154,15 +157,27 @@ class PoolCurator:
         scores: dict[str, float] = {}
         for item in candidates:
             base = item.relevance_score * w.relevance
-            fresh = self._freshness_score(
-                item.discovered_at or item.last_scored_at, context.now,
-            ) * w.freshness
-            fatigue = self._topic_fatigue(
-                item.topic_group or item.topic_key, context.recent_topic_keys,
-            ) * w.topic_fatigue
-            monotony = self._source_monotony(
-                item.source_strategy, context.recent_sources,
-            ) * w.source_monotony
+            fresh = (
+                self._freshness_score(
+                    item.discovered_at or item.last_scored_at,
+                    context.now,
+                )
+                * w.freshness
+            )
+            fatigue = (
+                self._topic_fatigue(
+                    item.topic_group or item.topic_key,
+                    context.recent_topic_keys,
+                )
+                * w.topic_fatigue
+            )
+            monotony = (
+                self._source_monotony(
+                    item.source_strategy,
+                    context.recent_sources,
+                )
+                * w.source_monotony
+            )
             bonus = self._serendipity_bonus(item.source_strategy) * w.serendipity
 
             score = base + fresh - fatigue - monotony + bonus
@@ -195,7 +210,7 @@ class PoolCurator:
                 timestamp_str.replace(" ", "T"),
             )
             if discovered.tzinfo is None:
-                discovered = discovered.replace(tzinfo=timezone.utc)
+                discovered = discovered.replace(tzinfo=UTC)
         except ValueError:
             return 0.5
         age_days = max(0.0, (now - discovered).total_seconds() / 86400.0)
@@ -251,7 +266,7 @@ class PoolCurator:
         candidates: list[DiscoveredContent],
         context: ScoringContext,
         *,
-        embedding_service: object | None = None,
+        embedding_service: SupportsEmbeddingService | None = None,
     ) -> dict[str, float]:
         """Async version of score_candidates with embedding-based fatigue/feedback.
 
@@ -284,12 +299,20 @@ class PoolCurator:
 
         for item in candidates:
             base = item.relevance_score * w.relevance
-            fresh = self._freshness_score(
-                item.discovered_at or item.last_scored_at, context.now,
-            ) * w.freshness
-            monotony = self._source_monotony(
-                item.source_strategy, context.recent_sources,
-            ) * w.source_monotony
+            fresh = (
+                self._freshness_score(
+                    item.discovered_at or item.last_scored_at,
+                    context.now,
+                )
+                * w.freshness
+            )
+            monotony = (
+                self._source_monotony(
+                    item.source_strategy,
+                    context.recent_sources,
+                )
+                * w.source_monotony
+            )
             bonus = self._serendipity_bonus(item.source_strategy) * w.serendipity
 
             # Embedding-based topic fatigue
@@ -298,8 +321,8 @@ class PoolCurator:
                 topic_vec = await embedding_service.embed(topic)
                 if topic_vec and _recent_vecs:
                     sim_count = sum(
-                        1 for rv in _recent_vecs.values()
-                        if cosine_similarity(topic_vec, rv) >= embedding_service.similarity_threshold
+                        cosine_similarity(topic_vec, rv) >= embedding_service.similarity_threshold
+                        for rv in _recent_vecs.values()
                     )
                     fatigue = min(1.0, sim_count / max(1, len(context.recent_topic_keys)) * 3.0)
                 else:
@@ -318,11 +341,17 @@ class PoolCurator:
                     adj -= _FEEDBACK_DISLIKE_UP_PENALTY
                 if topic_vec:
                     for dv in _disliked_vecs.values():
-                        if cosine_similarity(topic_vec, dv) >= embedding_service.similarity_threshold:
+                        if (
+                            cosine_similarity(topic_vec, dv)
+                            >= embedding_service.similarity_threshold
+                        ):
                             adj -= _FEEDBACK_DISLIKE_TOPIC_PENALTY
                             break
                     for lv in _liked_vecs.values():
-                        if cosine_similarity(topic_vec, lv) >= embedding_service.similarity_threshold:
+                        if (
+                            cosine_similarity(topic_vec, lv)
+                            >= embedding_service.similarity_threshold
+                        ):
                             adj += _FEEDBACK_LIKE_TOPIC_BONUS
                             break
                 score += adj

@@ -17,8 +17,9 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 from openbiliclaw.discovery.strategies._utils import build_profile_summary
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
+    from collections.abc import Awaitable, Sequence
 
+    from openbiliclaw.llm.embedding import SupportsEmbeddingService
     from openbiliclaw.soul.profile import SoulProfile
     from openbiliclaw.storage.database import Database
 
@@ -41,9 +42,7 @@ class DiscoveryConcurrencyController:
     """
     _search_strategy_count: int = field(init=False, default=3, repr=False)
     _loop: asyncio.AbstractEventLoop | None = field(init=False, default=None, repr=False)
-    _bilibili_semaphore: asyncio.Semaphore | None = field(
-        init=False, default=None, repr=False
-    )
+    _bilibili_semaphore: asyncio.Semaphore | None = field(init=False, default=None, repr=False)
     _llm_semaphore: asyncio.Semaphore | None = field(init=False, default=None, repr=False)
 
     @property
@@ -57,9 +56,7 @@ class DiscoveryConcurrencyController:
         if self._loop is loop:
             return
         self._loop = loop
-        self._bilibili_semaphore = asyncio.Semaphore(
-            max(1, self.bilibili_request_concurrency)
-        )
+        self._bilibili_semaphore = asyncio.Semaphore(max(1, self.bilibili_request_concurrency))
         self._llm_semaphore = asyncio.Semaphore(max(1, self.llm_evaluation_concurrency))
 
     async def run_bilibili(self, awaitable: Awaitable[_T]) -> _T:
@@ -186,12 +183,21 @@ class DiscoveredContent:
 
 # Canonical set of LLM-returned style_key values accepted by evaluation.
 # Shared across discovery and recommendation — must stay in sync.
-VALID_STYLE_KEYS: frozenset[str] = frozenset({
-    "game_strategy", "news_brief", "practical_guide", "story_doc",
-    "visual_showcase", "tech_analysis",
-    "deep_dive", "fun_variety", "lifestyle", "review_roundup",
-    "light_chat",
-})
+VALID_STYLE_KEYS: frozenset[str] = frozenset(
+    {
+        "game_strategy",
+        "news_brief",
+        "practical_guide",
+        "story_doc",
+        "visual_showcase",
+        "tech_analysis",
+        "deep_dive",
+        "fun_variety",
+        "lifestyle",
+        "review_roundup",
+        "light_chat",
+    }
+)
 
 
 class DiscoveryStrategy(ABC):
@@ -204,9 +210,7 @@ class DiscoveryStrategy(ABC):
         ...
 
     @abstractmethod
-    async def discover(
-        self, profile: SoulProfile, limit: int = 20
-    ) -> list[DiscoveredContent]:
+    async def discover(self, profile: SoulProfile, limit: int = 20) -> list[DiscoveredContent]:
         """Execute the discovery strategy.
 
         Args:
@@ -241,7 +245,7 @@ class ContentDiscoveryEngine:
         database: Database | None = None,
         *,
         concurrency: DiscoveryConcurrencyController | None = None,
-        embedding_service: Any | None = None,
+        embedding_service: SupportsEmbeddingService | None = None,
         target_primary_count: int = 20,
         backfill_target_count: int = 40,
     ) -> None:
@@ -395,7 +399,10 @@ class ContentDiscoveryEngine:
             if best_label is not None and best_sim >= threshold:
                 item.topic_group = best_label
                 logger.debug(
-                    "Topic assigned: %r → %r (sim=%.3f)", topic, best_label, best_sim,
+                    "Topic assigned: %r → %r (sim=%.3f)",
+                    topic,
+                    best_label,
+                    best_sim,
                 )
 
     async def _normalize_topic_keys(
@@ -483,13 +490,15 @@ class ContentDiscoveryEngine:
         # Step 4: Reassign topic_key on items
         for item in results:
             key = (item.topic_key or "").strip().lower()
-            canonical = canonical_map.get(key)
-            if canonical:
+            canonical_key = canonical_map.get(key)
+            if canonical_key:
                 logger.debug(
                     "Topic key normalized: %r → %r (strategy=%s)",
-                    item.topic_key, canonical, item.source_strategy,
+                    item.topic_key,
+                    canonical_key,
+                    item.source_strategy,
                 )
-                item.topic_key = canonical
+                item.topic_key = canonical_key
 
     @staticmethod
     def _label_quality_score(label: str) -> float:
@@ -567,7 +576,10 @@ class ContentDiscoveryEngine:
                     content.relevance_score = round(max_sim * 0.5, 4)
                     content.relevance_reason = "embedding 预过滤: 与所有兴趣相似度极低"
                     self._eval_cache[cache_key] = (
-                        content.relevance_score, content.relevance_reason, "", "",
+                        content.relevance_score,
+                        content.relevance_reason,
+                        "",
+                        "",
                     )
                     return content.relevance_score
 
@@ -660,10 +672,12 @@ class ContentDiscoveryEngine:
 
         # Process uncached items in batches
         for batch_start in range(0, len(uncached_indices), batch_size):
-            batch_indices = uncached_indices[batch_start:batch_start + batch_size]
+            batch_indices = uncached_indices[batch_start : batch_start + batch_size]
             batch_contents = [contents[i] for i in batch_indices]
             batch_scores = await self._evaluate_batch(
-                batch_contents, profile, source_context=source_context,
+                batch_contents,
+                profile,
+                source_context=source_context,
             )
             for idx, batch_score in zip(batch_indices, batch_scores, strict=True):
                 scores[idx] = batch_score
@@ -700,12 +714,20 @@ class ContentDiscoveryEngine:
         )
 
         valid_styles = {
-            "game_strategy", "news_brief", "practical_guide", "story_doc",
-            "visual_showcase", "tech_analysis",
-            "deep_dive", "fun_variety", "lifestyle", "review_roundup",
+            "game_strategy",
+            "news_brief",
+            "practical_guide",
+            "story_doc",
+            "visual_showcase",
+            "tech_analysis",
+            "deep_dive",
+            "fun_variety",
+            "lifestyle",
+            "review_roundup",
             "light_chat",
         }
 
+        assert self._llm_service is not None
         try:
             llm_call = self._llm_service.complete_structured_task(
                 system_instruction=messages[0]["content"],
@@ -825,7 +847,7 @@ class ContentDiscoveryEngine:
     @staticmethod
     def _collect_strategy_results(
         strategies: list[DiscoveryStrategy],
-        gathered: list[object],
+        gathered: Sequence[list[DiscoveredContent] | BaseException],
     ) -> list[DiscoveredContent]:
         results: list[DiscoveredContent] = []
         for strategy, outcome in zip(strategies, gathered, strict=True):
@@ -992,12 +1014,9 @@ class ContentDiscoveryEngine:
         # Pass reserved items' topics/sources so _select_diverse knows what
         # has already been committed.
         remaining_limit = limit - len(reserved)
-        reserved_topics = {
-            ContentDiscoveryEngine._topic_bucket(i) for i in reserved
-        } - {""}
+        reserved_topics = {ContentDiscoveryEngine._topic_bucket(i) for i in reserved} - {""}
         reserved_sources = {
-            ContentDiscoveryEngine._normalize_topic_token(i.source_strategy)
-            for i in reserved
+            ContentDiscoveryEngine._normalize_topic_token(i.source_strategy) for i in reserved
         } - {""}
         selected, overflow = ContentDiscoveryEngine._select_diverse(
             unreserved,
@@ -1020,7 +1039,8 @@ class ContentDiscoveryEngine:
 
         # Step 2: backfill from overflow with relaxed constraints
         combined = ContentDiscoveryEngine._backfill_from_overflow(
-            combined, overflow,
+            combined,
+            overflow,
             limit=limit,
             per_style_cap=per_style_cap,
             per_source_cap=per_source_cap,
@@ -1099,7 +1119,8 @@ class ContentDiscoveryEngine:
             style = ContentDiscoveryEngine._style_bucket(item)
             source = ContentDiscoveryEngine._normalize_topic_token(item.source_strategy)
             is_new_source = (
-                bool(source) and source not in seen_sources
+                bool(source)
+                and source not in seen_sources
                 and len(seen_sources) < unique_source_target
             )
 

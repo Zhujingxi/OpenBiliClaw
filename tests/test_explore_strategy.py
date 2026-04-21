@@ -195,15 +195,9 @@ async def test_explore_strategy_prioritizes_interest_anchored_domains() -> None:
             "纪录片 幕后 工艺": [
                 {"bvid": "BV1A", "title": "纪录片幕后", "author": "UP1", "mid": 1}
             ],
-            "历史 事件 复盘": [
-                {"bvid": "BV1B", "title": "历史复盘", "author": "UP2", "mid": 2}
-            ],
-            "排水 系统 科普": [
-                {"bvid": "BV1C", "title": "排水系统", "author": "UP3", "mid": 3}
-            ],
-            "电影 拟音 幕后": [
-                {"bvid": "BV1D", "title": "电影拟音", "author": "UP4", "mid": 4}
-            ],
+            "历史 事件 复盘": [{"bvid": "BV1B", "title": "历史复盘", "author": "UP2", "mid": 2}],
+            "排水 系统 科普": [{"bvid": "BV1C", "title": "排水系统", "author": "UP3", "mid": 3}],
+            "电影 拟音 幕后": [{"bvid": "BV1D", "title": "电影拟音", "author": "UP4", "mid": 4}],
         }
     )
 
@@ -244,11 +238,7 @@ async def test_explore_strategy_applies_exploration_bonus() -> None:
         ]
     )
     bilibili_client = FakeBilibiliClient(
-        {
-            "城市 建筑 纪录片": [
-                {"bvid": "BV1A", "title": "城市与建筑", "author": "UP1", "mid": 1}
-            ]
-        }
+        {"城市 建筑 纪录片": [{"bvid": "BV1A", "title": "城市与建筑", "author": "UP1", "mid": 1}]}
     )
 
     strategy = ExploreStrategy(
@@ -292,11 +282,7 @@ async def test_explore_strategy_tolerates_partial_failures() -> None:
         ]
     )
     bilibili_client = FakeBilibiliClient(
-        {
-            "城市 建筑 纪录片": [
-                {"bvid": "BV1A", "title": "城市与建筑", "author": "UP1", "mid": 1}
-            ]
-        },
+        {"城市 建筑 纪录片": [{"bvid": "BV1A", "title": "城市与建筑", "author": "UP1", "mid": 1}]},
         failing_queries={"声音 文化 纪录片"},
     )
 
@@ -329,7 +315,10 @@ async def test_explore_strategy_uses_bounded_evaluation_concurrency() -> None:
               ]
             }
             """,
-            '[{"score": 0.82, "reason": "A"}, {"score": 0.81, "reason": "B"}, {"score": 0.80, "reason": "C"}]',
+            (
+                '[{"score": 0.82, "reason": "A"}, {"score": 0.81, "reason": "B"}, '
+                '{"score": 0.80, "reason": "C"}]'
+            ),
         ]
     )
     bilibili_client = FakeBilibiliClient(
@@ -338,9 +327,7 @@ async def test_explore_strategy_uses_bounded_evaluation_concurrency() -> None:
                 {"bvid": "BV1A", "title": "A", "author": "UP1", "mid": 1},
                 {"bvid": "BV1B", "title": "B", "author": "UP2", "mid": 2},
             ],
-            "空间 设计 深度讲解": [
-                {"bvid": "BV1C", "title": "C", "author": "UP3", "mid": 3}
-            ],
+            "空间 设计 深度讲解": [{"bvid": "BV1C", "title": "C", "author": "UP3", "mid": 3}],
         }
     )
     strategy = ExploreStrategy(

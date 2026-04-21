@@ -18,7 +18,6 @@ from openbiliclaw.discovery.engine import (
 )
 from openbiliclaw.discovery.strategies._utils import (
     SupportsSearchClient,
-    _gather_bounded,
     build_profile_summary,
     interest_aliases,
     interest_anchors,
@@ -27,6 +26,7 @@ from openbiliclaw.discovery.strategies.search import SearchStrategy
 from openbiliclaw.llm.prompts import build_explore_domains_prompt
 
 if TYPE_CHECKING:
+    from openbiliclaw.llm.embedding import SupportsEmbeddingService
     from openbiliclaw.soul.profile import SoulProfile
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ class ExploreStrategy(DiscoveryStrategy):
     llm_service: SupportsStructuredTask
     bilibili_client: SupportsSearchClient
     concurrency: DiscoveryConcurrencyController | None = None
-    embedding_service: object | None = None
+    embedding_service: SupportsEmbeddingService | None = None
     score_threshold: float = 0.65
     queries_per_domain: int = 3
     max_domains: int = 5
@@ -88,7 +88,6 @@ class ExploreStrategy(DiscoveryStrategy):
             concurrency=self.concurrency,
         )
         anchor_list = interest_anchors(profile)
-        runner = self.concurrency.run_bilibili if self.concurrency is not None else None
         request_plan: list[tuple[str, float, bool, str]] = []
         for domain in domains:
             novelty_level = self._clamp_novelty(domain.get("novelty_level", 0.5))
@@ -113,7 +112,8 @@ class ExploreStrategy(DiscoveryStrategy):
         search_client = self._create_search_client()
         try:
             search_outcomes = await self._execute_search_sequential(
-                search_client, request_plan,
+                search_client,
+                request_plan,
             )
         finally:
             if search_client is not self.bilibili_client:
@@ -162,13 +162,14 @@ class ExploreStrategy(DiscoveryStrategy):
                 candidates.append((content, novelty_level, interest_anchored))
 
         scores = await evaluator.evaluate_content_batch(
-            [content for content, _, _ in candidates], profile,
+            [content for content, _, _ in candidates],
+            profile,
         )
         results: list[DiscoveredContent] = []
         for (
             content,
             novelty_level,
-            interest_anchored,
+            _interest_anchored,
         ), score in zip(candidates, scores, strict=True):
             bonus = self._exploration_bonus(
                 novelty_level=novelty_level,
@@ -184,7 +185,9 @@ class ExploreStrategy(DiscoveryStrategy):
             )
             # Lower threshold for explore: cross-domain content is intentionally
             # less "relevant" in the narrow sense, so we accept more of it
-            explore_threshold = self.score_threshold - 0.25 if self.score_threshold > 0.40 else self.score_threshold
+            explore_threshold = (
+                self.score_threshold - 0.25 if self.score_threshold > 0.40 else self.score_threshold
+            )
             if content.relevance_score < explore_threshold:
                 continue
             results.append(content)
@@ -301,7 +304,8 @@ class ExploreStrategy(DiscoveryStrategy):
         # (0.75 was too strict — rejected most domains when user has broad interests)
         if self.embedding_service is not None:
             from openbiliclaw.llm.embedding import cosine_similarity
-            _SIMILARITY_REJECT_THRESHOLD = 0.85
+
+            similarity_reject_threshold = 0.85
             try:
                 domain_vec = await self.embedding_service.embed(domain)
                 if domain_vec:
@@ -309,9 +313,15 @@ class ExploreStrategy(DiscoveryStrategy):
                         if not interest_val:
                             continue
                         interest_vec = await self.embedding_service.embed(interest_val)
-                        if interest_vec and cosine_similarity(domain_vec, interest_vec) >= _SIMILARITY_REJECT_THRESHOLD:
+                        if (
+                            interest_vec
+                            and cosine_similarity(domain_vec, interest_vec)
+                            >= similarity_reject_threshold
+                        ):
                             logger.debug(
-                                "Explore domain rejected (semantic): %r ≈ %r", domain, interest_val,
+                                "Explore domain rejected (semantic): %r ≈ %r",
+                                domain,
+                                interest_val,
                             )
                             return True
             except Exception:
