@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
 
 
 class SupportsAccountSyncState(Protocol):
@@ -131,7 +134,10 @@ class AccountSyncService:
     async def run_forever(self) -> None:
         """Run account sync loop until cancelled."""
         while True:
-            await self.sync_if_due()
+            try:
+                await self.sync_if_due()
+            except Exception:
+                logger.exception("Unexpected error in account sync loop")
             await asyncio.sleep(self.check_interval_seconds)
 
     def _filter_new_history(

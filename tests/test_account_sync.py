@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -219,3 +220,33 @@ async def test_account_sync_returns_partial_success_when_one_source_fails() -> N
     assert result["new_event_count"] == 2
     assert "favorites boom" in str(memory.state["last_sync_error"])
     assert {event["event_type"] for event in memory.events} == {"view", "follow"}
+
+
+@pytest.mark.asyncio
+async def test_account_sync_run_forever_recovers_from_iteration_error(caplog) -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    service = AccountSyncService(
+        memory_manager=_FakeMemoryManager(),
+        bilibili_client=_FakeClient(history_items=[], favorites=[], following=[]),
+        soul_engine=_FakeSoulEngine(),
+        check_interval_seconds=1,
+    )
+
+    async def _broken_sync_if_due() -> dict[str, object]:
+        raise RuntimeError("boom")
+
+    async def _cancel_sleep(_: int) -> None:
+        raise asyncio.CancelledError
+
+    service.sync_if_due = _broken_sync_if_due  # type: ignore[method-assign]
+
+    original_sleep = asyncio.sleep
+    try:
+        asyncio.sleep = _cancel_sleep
+        with pytest.raises(asyncio.CancelledError):
+            await service.run_forever()
+    finally:
+        asyncio.sleep = original_sleep
+
+    assert "Unexpected error in account sync loop" in caplog.text
