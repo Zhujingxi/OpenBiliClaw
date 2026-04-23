@@ -149,6 +149,8 @@ class InterestProbeItem:
     reason: str = ""
     confidence: float = 0.0
     weight: float = 0.0
+    experience_mode: str = ""
+    entry_load: str = ""
     specifics: list[str] = field(default_factory=list)
     question: str = ""
 

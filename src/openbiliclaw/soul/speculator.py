@@ -63,6 +63,8 @@ class SpeculativeInterest:
     domain: str = ""
     category: str = ""
     reason: str = ""
+    experience_mode: str = ""
+    entry_load: str = ""
     confidence: float = 0.4
     weight: float = 0.4
     created_at: str = ""
@@ -78,6 +80,8 @@ class SpeculativeInterest:
             "domain": self.domain,
             "category": self.category,
             "reason": self.reason,
+            "experience_mode": self.experience_mode,
+            "entry_load": self.entry_load,
             "confidence": self.confidence,
             "weight": self.weight,
             "created_at": self.created_at,
@@ -95,6 +99,8 @@ class SpeculativeInterest:
             domain=str(data.get("domain", "")),
             category=str(data.get("category", "")),
             reason=str(data.get("reason", "")),
+            experience_mode=str(data.get("experience_mode", "")),
+            entry_load=str(data.get("entry_load", "")),
             confidence=float(data.get("confidence", 0.4)),
             weight=float(data.get("weight", 0.4)),
             created_at=str(data.get("created_at", "")),
@@ -675,7 +681,7 @@ class InterestSpeculator:
             existing_speculations=[s.domain for s in state.active],
             cooldown_domains=cooldown_domains,
             confirmed_domains=confirmed_domains,
-            count=min(slots, 5),
+            count=min(max(slots * 2, 5), 7),
         )
 
         try:
@@ -695,12 +701,11 @@ class InterestSpeculator:
             logger.warning("Speculation generation failed", exc_info=True)
             return state
 
+        candidates: list[SpeculativeInterest] = []
         for item in raw:
             domain = str(item.get("domain", "")).strip()
             if not domain or domain.lower() in existing_domains:
                 continue
-            if len(state.active) >= self._max_active:
-                break
 
             raw_specifics = item.get("specifics") or []
             specifics = [
@@ -708,19 +713,26 @@ class InterestSpeculator:
                 for s in raw_specifics
                 if isinstance(s, str) and str(s).strip()
             ]
-
-            state.active.append(SpeculativeInterest(
+            confidence = float(item.get("confidence", 0.4))
+            candidates.append(SpeculativeInterest(
                 domain=domain,
                 category=str(item.get("category", "")),
                 reason=str(item.get("reason", "")),
-                confidence=float(item.get("confidence", 0.4)),
-                weight=float(item.get("confidence", 0.4)),
+                experience_mode=_normalize_experience_mode(item.get("experience_mode")),
+                entry_load=_normalize_entry_load(item.get("entry_load")),
+                confidence=confidence,
+                weight=confidence,
                 created_at=now.isoformat(),
                 ttl_days=self._default_ttl_days,
                 confirmation_threshold=self._confirmation_threshold,
                 specifics=specifics,
             ))
-            existing_domains.add(domain.lower())
+
+        for candidate in _select_diverse_candidates(candidates, limit=slots):
+            if len(state.active) >= self._max_active:
+                break
+            state.active.append(candidate)
+            existing_domains.add(candidate.domain.lower())
 
         state.last_generation_at = now.isoformat()
         return state
@@ -741,3 +753,151 @@ def _parse_speculation_response(content: str) -> list[dict[str, Any]]:
     if isinstance(data, list):
         return [item for item in data if isinstance(item, dict)]
     return []
+
+
+def _normalize_experience_mode(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    allowed = {
+        "knowledge",
+        "aesthetic",
+        "hands_on",
+        "people_story",
+        "wander_observe",
+    }
+    return text if text in allowed else ""
+
+
+def _normalize_entry_load(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in {"light", "heavy"} else ""
+
+
+def _candidate_priority(
+    candidate: SpeculativeInterest,
+    selected: list[SpeculativeInterest],
+) -> tuple[float, float]:
+    score = float(candidate.confidence)
+    selected_modes = {item.experience_mode for item in selected if item.experience_mode}
+    selected_loads = {item.entry_load for item in selected if item.entry_load}
+    if candidate.experience_mode and candidate.experience_mode not in selected_modes:
+        score += 0.08
+    if candidate.entry_load and candidate.entry_load not in selected_loads:
+        score += 0.05
+    if candidate.entry_load == "light" and "light" not in selected_loads:
+        score += 0.05
+    if candidate.experience_mode and candidate.experience_mode != "knowledge":
+        score += 0.05
+    return (score, float(candidate.weight))
+
+
+def _pick_best_candidate(
+    candidates: list[SpeculativeInterest],
+    selected: list[SpeculativeInterest],
+    predicate: Any,
+) -> SpeculativeInterest | None:
+    matching = [
+        candidate
+        for candidate in candidates
+        if candidate not in selected and predicate(candidate)
+    ]
+    if not matching:
+        return None
+    return max(matching, key=lambda candidate: _candidate_priority(candidate, selected))
+
+
+def _select_diverse_candidates(
+    candidates: list[SpeculativeInterest],
+    *,
+    limit: int,
+) -> list[SpeculativeInterest]:
+    if limit <= 0 or not candidates:
+        return []
+    if len(candidates) <= limit:
+        return list(candidates)
+
+    ordered = sorted(
+        candidates,
+        key=lambda item: (float(item.confidence), float(item.weight)),
+        reverse=True,
+    )
+    selected: list[SpeculativeInterest] = []
+
+    light_pick = _pick_best_candidate(
+        ordered,
+        selected,
+        lambda item: item.entry_load == "light",
+    )
+    if light_pick is not None:
+        selected.append(light_pick)
+
+    if not any(item.experience_mode and item.experience_mode != "knowledge" for item in selected):
+        non_knowledge_pick = _pick_best_candidate(
+            ordered,
+            selected,
+            lambda item: item.experience_mode and item.experience_mode != "knowledge",
+        )
+        if non_knowledge_pick is not None:
+            selected.append(non_knowledge_pick)
+
+    while len(selected) < limit:
+        remaining = [candidate for candidate in ordered if candidate not in selected]
+        if not remaining:
+            break
+        selected.append(
+            max(remaining, key=lambda candidate: _candidate_priority(candidate, selected))
+        )
+    return selected[:limit]
+
+
+def build_probe_axis(*, experience_mode: Any, entry_load: Any) -> str:
+    mode = _normalize_experience_mode(experience_mode)
+    load = _normalize_entry_load(entry_load)
+    if not mode and not load:
+        return ""
+    return f"{mode}|{load}"
+
+
+def choose_next_probe_candidate(
+    specs: list[Any],
+    *,
+    probed_domains: set[str] | None = None,
+    probed_axes: set[str] | None = None,
+) -> Any | None:
+    recent_domains = probed_domains or set()
+    recent_axes = probed_axes or set()
+    candidates = []
+    for candidate in specs:
+        domain = str(getattr(candidate, "domain", "")).strip().lower()
+        if not domain or domain in recent_domains:
+            continue
+        candidates.append(candidate)
+    if not candidates:
+        return None
+
+    min_confirmation = min(
+        int(getattr(candidate, "confirmation_count", 0) or 0)
+        for candidate in candidates
+    )
+    same_pressure = [
+        candidate
+        for candidate in candidates
+        if int(getattr(candidate, "confirmation_count", 0) or 0) == min_confirmation
+    ]
+    fresh_axis = [
+        candidate
+        for candidate in same_pressure
+        if (
+            axis := build_probe_axis(
+                experience_mode=getattr(candidate, "experience_mode", ""),
+                entry_load=getattr(candidate, "entry_load", ""),
+            )
+        ) and axis not in recent_axes
+    ]
+    pool = fresh_axis or same_pressure
+    return max(
+        pool,
+        key=lambda candidate: (
+            float(getattr(candidate, "weight", 0.0) or 0.0),
+            float(getattr(candidate, "confidence", 0.0) or 0.0),
+        ),
+    )

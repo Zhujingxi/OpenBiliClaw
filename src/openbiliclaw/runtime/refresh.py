@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
+from openbiliclaw.soul.speculator import build_probe_axis, choose_next_probe_candidate
+
 _MAX_DISCOVERY_BACKFILL_PER_REFRESH = 60
 _SOURCE_TARGET_SHARES: tuple[tuple[str, int], ...] = (
     ("search", 4),
@@ -623,24 +625,18 @@ class ContinuousRefreshController:
         # Load probe history from runtime state
         state = self.memory_manager.load_discovery_runtime_state()
         probed: dict[str, str] = state.get("probed_domains", {})  # type: ignore[assignment]
+        probed_axes: dict[str, str] = state.get("probed_axes", {})  # type: ignore[assignment]
         # Purge expired entries
         now = self._now()
         cutoff = (now - timedelta(hours=self._PROBE_COOLDOWN_HOURS)).isoformat()
         probed = {d: t for d, t in probed.items() if t > cutoff}
+        probed_axes = {axis: t for axis, t in probed_axes.items() if t > cutoff}
 
-        # Pick the best candidate that hasn't been probed recently
-        specs.sort(
-            key=lambda s: (
-                int(getattr(s, "confirmation_count", 0) or 0),
-                -float(getattr(s, "weight", 0.0) or 0.0),
-            )
+        top = choose_next_probe_candidate(
+            specs,
+            probed_domains=set(probed),
+            probed_axes=set(probed_axes),
         )
-        top = None
-        for candidate in specs:
-            d = str(getattr(candidate, "domain", "")).strip().lower()
-            if d and d not in probed:
-                top = candidate
-                break
         if top is None:
             return  # All active specs were probed recently
 
@@ -651,6 +647,13 @@ class ContinuousRefreshController:
         # Record this probe
         probed[domain.lower()] = now.isoformat()
         state["probed_domains"] = probed
+        axis = build_probe_axis(
+            experience_mode=getattr(top, "experience_mode", ""),
+            entry_load=getattr(top, "entry_load", ""),
+        )
+        if axis:
+            probed_axes[axis] = now.isoformat()
+        state["probed_axes"] = probed_axes
         self.memory_manager.save_discovery_runtime_state(state)
         reason = str(getattr(top, "reason", "")).strip()
         specifics = [
@@ -677,6 +680,8 @@ class ContinuousRefreshController:
                 "reason": reason,
                 "confidence": float(getattr(top, "confidence", 0.0) or 0.0),
                 "weight": float(getattr(top, "weight", 0.0) or 0.0),
+                "experience_mode": str(getattr(top, "experience_mode", "")),
+                "entry_load": str(getattr(top, "entry_load", "")),
                 "specifics": specifics,
                 "question": question,
             }

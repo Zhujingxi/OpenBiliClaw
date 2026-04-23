@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -180,6 +181,8 @@ class _FakeSpeculativeInterest:
         confidence: float = 0.45,
         weight: float = 0.4,
         confirmation_count: int = 0,
+        experience_mode: str = "knowledge",
+        entry_load: str = "heavy",
         specifics: list[object] | None = None,
     ) -> None:
         self.domain = domain
@@ -188,6 +191,8 @@ class _FakeSpeculativeInterest:
         self.confidence = confidence
         self.weight = weight
         self.confirmation_count = confirmation_count
+        self.experience_mode = experience_mode
+        self.entry_load = entry_load
         self.specifics = specifics or []
 
 
@@ -261,9 +266,16 @@ class _FakeSoulEngine:
 class _FakeMemoryManager:
     def __init__(self) -> None:
         self.events: list[dict[str, object]] = []
+        self.runtime_state: dict[str, object] = {}
 
     async def propagate_event(self, event: dict[str, object]) -> None:
         self.events.append(event)
+
+    def load_discovery_runtime_state(self) -> dict[str, object]:
+        return dict(self.runtime_state)
+
+    def save_discovery_runtime_state(self, state: dict[str, object]) -> None:
+        self.runtime_state = dict(state)
 
 
 class _FakeDatabase:
@@ -815,3 +827,34 @@ async def test_get_next_probe_includes_specifics_in_question() -> None:
     assert "参数化设计" in result.probe.question
     assert "混凝土美学" in result.probe.question
     assert result.probe.specifics == ["参数化设计", "混凝土美学"]
+
+
+@pytest.mark.asyncio
+async def test_get_next_probe_prefers_fresher_experience_axis() -> None:
+    adapter, soul_engine, memory_manager, *_ = _build_adapter()
+    memory_manager.runtime_state = {
+        "probed_axes": {
+            "knowledge|heavy": datetime.now().isoformat(),
+        }
+    }
+    soul_engine._speculator = _FakeSpeculator(specs=[
+        _FakeSpeculativeInterest(
+            domain="量子物理",
+            confirmation_count=0,
+            weight=0.9,
+            experience_mode="knowledge",
+            entry_load="heavy",
+        ),
+        _FakeSpeculativeInterest(
+            domain="城市漫游",
+            confirmation_count=0,
+            weight=0.5,
+            experience_mode="wander_observe",
+            entry_load="light",
+        ),
+    ])
+
+    result = await adapter.get_next_probe()
+
+    assert result.probe is not None
+    assert result.probe.domain == "城市漫游"

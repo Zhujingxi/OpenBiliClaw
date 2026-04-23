@@ -45,7 +45,7 @@
 | ToneProfile | ✅ | 从 `OnionProfile`、偏好摘要和近期反馈推断 `density/warmth/playfulness/directness`，统一驱动推荐、画像和聊天语气 |
 | Cognition updates | ✅ | 在反馈刷新和聊天学习后生成 `interest_added / dislike_added / profile_shift` 结构化 cognition card，包含 `summary / context_line / source_label / expand_hint / impact / reasoning / evidence / source / created_at`，供插件提醒与画像页展开展示；即时反馈和聊天会尽量指出具体内容或本轮聊天，聚合判断则保守回退到”基于最近几条相关内容” |
 | Layered profile cognition | ✅ | `OnionProfile` 新增 MBTI / Values / Interest 等分层，画像生成会同时消费 `history + preference + awareness + insights`，避免把兴趣 topic 堆成整段画像 |
-| 猜测兴趣系统 | ✅ | `InterestSpeculator` 定期通过 LLM 生成 3-5 个猜测兴趣方向，通过事件确认后转正为正式兴趣，未确认则拒绝并冷却 |
+| 猜测兴趣系统 | ✅ | `InterestSpeculator` 定期通过 LLM 过采样生成猜测兴趣方向，并在入池前做体验多样性筛选；通过事件确认后转正为正式兴趣，未确认则拒绝并冷却 |
 | ROLE/VALUES/CORE 增量更新器 | ✅ | `_update_role`（`build_role_delta_prompt`，基于信号证据 + LLM diff-protection）、`_update_values`（LLM delta，每周期最多 add/remove 1 条，注入完整画像上下文）、`_update_core`（`build_core_delta_prompt`，更新 traits/needs/MBTI，强 diff-protection）均已完整实现 |
 
 ## 猜测兴趣系统 (Speculative Interest Lifecycle)
@@ -68,14 +68,20 @@
 
 ### 数据结构
 
-- **SpeculativeInterest**: domain, category, reason(心理学桥接), confidence, ttl_days, confirmation_count/threshold, status
+- **SpeculativeInterest**: domain, category, reason(心理学桥接), experience_mode, entry_load, confidence, ttl_days, confirmation_count/threshold, status
 - **CooldownEntry**: 被拒绝的方向 + 冷却到期时间
 - **SpeculativeState**: 活跃猜测 + 冷却列表，存储在 `data/memory/speculative_state.json`
 
 ### 两个猜测来源
 
-1. **周期性生成**（默认每 10min）：专用 prompt `build_speculation_generation_prompt()` 深度推理。Init 和进程启动时强制触发一次
+1. **周期性生成**（默认每 10min）：专用 prompt `build_speculation_generation_prompt()` 深度推理，并额外标注 `experience_mode` / `entry_load`。Init 和进程启动时强制触发一次
 2. **偏好分析附带**：`PreferenceAnalyzer` 每次分析事件时产出 `speculative_interests`，作为种子注入
+
+### Active Pool 多样性
+
+- generation 不再把 LLM 返回的前几条候选直接塞进 active pool，而是先过一层本地 balanced selector
+- selector 优先保证至少一条 `light` 入口、至少一条非 `knowledge` 体验轴，再按 confidence / weight 补齐剩余槽位
+- 当模型没有提供足够丰富的候选时，会自动降级回普通排序，不阻塞 speculative 生成
 
 ### 配置项
 
@@ -125,6 +131,12 @@
 
 - `GET /api/profile` 返回 `speculative_interests` 字段（`SpeculativeInterestOut` 列表）
 - 从 `speculative_state.json` 直接加载，最多返回 6 条活跃猜测
+
+### Probe 选择
+
+- runtime push 和 OpenClaw `get_next_probe()` 共用同一套 probe selection 规则
+- `confirmation_count` 仍然是第一优先级；当验证压力相同，会优先选择最近没推过的 `experience_mode + entry_load` 组合
+- probe 去重状态写入 `discovery_runtime_state["probed_domains"]` 和 `discovery_runtime_state["probed_axes"]`
 
 ### 关键文件
 

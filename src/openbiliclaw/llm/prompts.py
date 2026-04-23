@@ -1174,6 +1174,12 @@ def build_speculation_generation_prompt(
         "     表面看不出明显关联）\n"
         "   - 至少 1 个猜测是纯新奇方向（从用户人格特质出发，\n"
         "     而非从现有兴趣出发推理）\n"
+        "10. 体验分散要求：\n"
+        "   - 不要让所有猜测都落在同一种观看体感上\n"
+        "   - experience_mode 必须从 knowledge / aesthetic / hands_on / people_story / "
+        "wander_observe 中选择\n"
+        "   - entry_load 必须从 light / heavy 中选择\n"
+        "   - 至少 1 个猜测必须是 light，至少 1 个猜测必须不是 knowledge\n"
         "</rules>\n\n"
         "<bridge_examples>\n"
         "近距离桥接：\n"
@@ -1195,6 +1201,8 @@ def build_speculation_generation_prompt(
         '      "category": "所属大类（必须两两不同）",\n'
         '      "reason": "心理学桥接推理：从X兴趣+Y特质->可能喜欢此方向",\n'
         '      "bridge_type": "near|far|novel",\n'
+        '      "experience_mode": "knowledge|aesthetic|hands_on|people_story|wander_observe",\n'
+        '      "entry_load": "light|heavy",\n'
         '      "confidence": 0.45,\n'
         '      "specifics": [\n'
         '        "可搜索的具体话题1",\n'

@@ -7,6 +7,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from openbiliclaw.soul.speculator import choose_next_probe_candidate
+
 from .errors import AdapterOperationError
 from .schemas import (
     ChatRequest,
@@ -310,13 +312,20 @@ class OpenClawAdapter:
             specs = list(get_active())
             if not specs:
                 return InterestProbeResponse(probe=None)
-            specs.sort(
-                key=lambda s: (
-                    int(getattr(s, "confirmation_count", 0) or 0),
-                    -float(getattr(s, "weight", 0.0) or 0.0),
-                )
+            load_runtime_state = getattr(
+                self.services.memory_manager,
+                "load_discovery_runtime_state",
+                None,
             )
-            top = specs[0]
+            runtime_state = load_runtime_state() if callable(load_runtime_state) else {}
+            probed_axes = (
+                set((runtime_state.get("probed_axes") or {}).keys())
+                if isinstance(runtime_state, dict)
+                else set()
+            )
+            top = choose_next_probe_candidate(specs, probed_axes=probed_axes)
+            if top is None:
+                return InterestProbeResponse(probe=None)
             domain = str(getattr(top, "domain", "")).strip()
             if not domain:
                 return InterestProbeResponse(probe=None)
@@ -341,6 +350,8 @@ class OpenClawAdapter:
                     reason=reason,
                     confidence=confidence,
                     weight=weight,
+                    experience_mode=str(getattr(top, "experience_mode", "")),
+                    entry_load=str(getattr(top, "entry_load", "")),
                     specifics=specifics,
                     question=question,
                 )

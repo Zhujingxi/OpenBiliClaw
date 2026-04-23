@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 from openbiliclaw.soul.speculator import (
     CooldownEntry,
@@ -193,6 +195,8 @@ def test_speculative_state_roundtrip():
                 confidence=0.5, weight=0.4,
                 created_at="2026-01-01T00:00:00",
                 confirmation_count=2,
+                experience_mode="knowledge",
+                entry_load="heavy",
             ),
         ],
         cooldown=[
@@ -210,6 +214,8 @@ def test_speculative_state_roundtrip():
     assert len(restored.active) == 1
     assert restored.active[0].domain == "博弈论"
     assert restored.active[0].confirmation_count == 2
+    assert restored.active[0].experience_mode == "knowledge"
+    assert restored.active[0].entry_load == "heavy"
     assert len(restored.cooldown) == 1
     assert restored.total_promoted == 3
     assert restored.total_rejected == 5
@@ -488,6 +494,87 @@ async def test_force_tick_ignores_interval():
         # No error, returns result (empty since no LLM)
         assert result.generated == []
         assert result.promoted == []
+
+
+async def test_speculator_generate_keeps_visible_experience_mix():
+    class _FakeLLMService:
+        async def complete_structured_task(self, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "speculations": [
+                            {
+                                "domain": "博弈论科普",
+                                "category": "知识解释",
+                                "reason": "系统性思维延伸。",
+                                "bridge_type": "near",
+                                "confidence": 0.59,
+                                "experience_mode": "knowledge",
+                                "entry_load": "heavy",
+                                "specifics": ["纳什均衡"],
+                            },
+                            {
+                                "domain": "AI治理",
+                                "category": "社会文化",
+                                "reason": "延续因果链兴趣。",
+                                "bridge_type": "far",
+                                "confidence": 0.57,
+                                "experience_mode": "knowledge",
+                                "entry_load": "heavy",
+                                "specifics": ["监管辩论"],
+                            },
+                            {
+                                "domain": "建筑叙事",
+                                "category": "审美体验",
+                                "reason": "偏好结构和空间逻辑。",
+                                "bridge_type": "novel",
+                                "confidence": 0.55,
+                                "experience_mode": "knowledge",
+                                "entry_load": "heavy",
+                                "specifics": ["城市更新"],
+                            },
+                            {
+                                "domain": "城市漫游",
+                                "category": "现实观察",
+                                "reason": "想从具体空间感受城市。",
+                                "bridge_type": "near",
+                                "confidence": 0.49,
+                                "experience_mode": "wander_observe",
+                                "entry_load": "light",
+                                "specifics": ["街区vlog"],
+                            },
+                            {
+                                "domain": "器物修复",
+                                "category": "实操动手",
+                                "reason": "对结构拆解有兴趣。",
+                                "bridge_type": "near",
+                                "confidence": 0.48,
+                                "experience_mode": "hands_on",
+                                "entry_load": "light",
+                                "specifics": ["旧物翻新"],
+                            },
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        from openbiliclaw.soul.profile import OnionProfile
+
+        data_dir = Path(tmpdir)
+        speculator = InterestSpeculator(
+            llm_service=_FakeLLMService(),
+            data_dir=data_dir,
+            max_active=3,
+        )
+
+        result = await speculator.force_tick(OnionProfile())
+
+        assert len(result.generated) == 3
+        assert any(item.entry_load == "light" for item in result.generated)
+        assert any(item.experience_mode != "knowledge" for item in result.generated)
 
 
 def test_interval_uses_minutes():
