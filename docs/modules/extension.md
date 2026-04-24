@@ -169,6 +169,16 @@ npm run build
 - manifest 图标资源存在性
 - `dist/` 运行时脚本可被 Chrome 直接加载
 
+## Release 分发
+
+插件现在走独立 release 通道：
+
+- 发布 tag：`extension-vX.Y.Z`
+- Release 资产：`openbiliclaw-extension-vX.Y.Z.zip`
+- 下载入口：GitHub Releases 页面中查找最新的 `extension-v*` release
+
+后端桌面包不再和插件共用同一个 release 语义；后端改由 `backend-v*` 通道单独发布。
+
 ## 手动联调
 
 1. 在项目根目录启动后端：

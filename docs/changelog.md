@@ -255,6 +255,14 @@
 - README / 文档导航已同步补充“从 Releases 下载后端”的入口说明
 - 首版桌面后端包暂未签名，文档中已明确 macOS Gatekeeper / Windows SmartScreen 可能出现的安全提示
 
+### 插件 / 后端 Release 通道拆分
+
+- 后端 Release workflow 现在只响应 `backend-v*` tag，并继续自动构建 macOS / Windows 桌面包
+- 新增插件专用 Release workflow，插件现在通过 `extension-v*` tag 单独发布 `openbiliclaw-extension-v*.zip`
+- 后端和插件各自创建自己的 GitHub Release，不再把两类附件混在同一个 release 语义里
+- README、模块文档和文档导航已同步改成“插件看 `extension-v*`、后端看 `backend-v*`”的下载说明
+- 历史 `v0.1.0` / `v0.1.2` 发布记录保持不动，新发布从双通道策略开始执行
+
 ### 推荐引擎解耦重构
 
 - **新增 `serve()` 统一入口** (`recommendation/engine.py`)，所有推荐路径 (generate / reshuffle / append) 合并为一个方法，通过 `expression_mode` 参数区分实时 LLM 和预缓存两种模式

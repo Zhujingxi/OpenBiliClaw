@@ -1,0 +1,109 @@
+name: Release Extension Package
+
+on:
+  push:
+    tags:
+      - "extension-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build extension package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Verify extension version matches release tag
+        shell: node
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          const releaseTag = process.env.RELEASE_TAG;
+          const expectedVersion = releaseTag.replace(/^extension-v/, "");
+          const manifest = JSON.parse(
+            fs.readFileSync(path.join(process.cwd(), "extension", "manifest.json"), "utf8"),
+          );
+          const pkg = JSON.parse(
+            fs.readFileSync(path.join(process.cwd(), "extension", "package.json"), "utf8"),
+          );
+
+          if (manifest.version !== expectedVersion) {
+            throw new Error(
+              `extension release tag ${releaseTag} does not match manifest version ${manifest.version}`,
+            );
+          }
+
+          if (pkg.version !== expectedVersion) {
+            throw new Error(
+              `extension release tag ${releaseTag} does not match package version ${pkg.version}`,
+            );
+          }
+
+      - name: Install extension dependencies
+        run: npm ci
+        working-directory: extension
+
+      - name: Build extension release archive
+        run: npm run package
+        working-directory: extension
+
+      - name: Verify extension release archive
+        shell: bash
+        run: |
+          shopt -s nullglob
+          archives=(extension/openbiliclaw-extension-v*.zip)
+          if [ "${#archives[@]}" -ne 1 ]; then
+            echo "expected exactly one extension archive, got: ${archives[*]}"
+            exit 1
+          fi
+          echo "verified release archive: ${archives[0]}"
+
+      - name: Upload packaged extension artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension-package
+          path: extension/openbiliclaw-extension-v*.zip
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish extension release
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Download packaged extension artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: extension-package
+          path: release-artifacts
+
+      - name: Verify downloaded extension artifact
+        shell: bash
+        run: |
+          shopt -s nullglob
+          archives=(release-artifacts/openbiliclaw-extension-v*.zip)
+          if [ "${#archives[@]}" -ne 1 ]; then
+            echo "expected exactly one extension archive, got: ${archives[*]}"
+            exit 1
+          fi
+          echo "release artifact ready: ${archives[0]}"
+
+      - name: Create GitHub Release and upload extension package
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/openbiliclaw-extension-v*.zip
+          generate_release_notes: true
