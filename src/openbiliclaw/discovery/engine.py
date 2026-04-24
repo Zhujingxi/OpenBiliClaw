@@ -290,6 +290,8 @@ class ContentDiscoveryEngine:
         profile: SoulProfile,
         strategies: list[str] | None = None,
         limit: int = 30,
+        *,
+        fully_parallel: bool = False,
     ) -> list[DiscoveredContent]:
         """Run discovery with selected (or all) strategies.
 
@@ -297,6 +299,13 @@ class ContentDiscoveryEngine:
             profile: User soul profile for relevance evaluation.
             strategies: Optional list of strategy names to run.
                        If None, runs all registered strategies.
+            fully_parallel: When True, skip the default two-phase split
+                (search-first then others) and run every strategy in a
+                single ``asyncio.gather``. Rate limiting still holds —
+                ``bilibili_request_concurrency`` caps simultaneous HTTP
+                requests and ``search_budget_total`` caps total search
+                calls — so this only sacrifices the 2s cool-down between
+                phases. Use for latency-critical flows (init bootstrap).
 
         Returns:
             Combined, deduplicated, and scored list of discovered content.
@@ -313,6 +322,7 @@ class ContentDiscoveryEngine:
             active,
             profile=profile,
             limit=effective_limit,
+            fully_parallel=fully_parallel,
         )
         # Normalize topic_group using embeddings before dedup
         merged_primary = self._merge_and_rank(primary_results)
@@ -808,33 +818,44 @@ class ContentDiscoveryEngine:
         *,
         profile: SoulProfile,
         limit: int,
+        fully_parallel: bool = False,
     ) -> list[DiscoveredContent]:
-        # Split strategies into two phases to avoid B站 IP-level search
-        # rate-limiting.  Search strategy runs first (Phase 1) with a
-        # dedicated cookie-free client so it gets clean quota.  Other
-        # strategies (explore, related_chain) also call the search API,
-        # so each strategy's calls are capped by the per-strategy search
-        # budget in DiscoveryConcurrencyController.
-        search_strategies = [s for s in strategies if s.name == "search"]
-        other_strategies = [s for s in strategies if s.name != "search"]
-
         results: list[DiscoveredContent] = []
 
-        # Phase 1: run search strategy first to get clean IP quota
-        if search_strategies:
-            tasks = [s.discover(profile, limit=limit) for s in search_strategies]
+        if fully_parallel:
+            # One shot: every strategy runs in a single gather. We rely
+            # on ``bilibili_request_concurrency`` + ``search_budget_total``
+            # to bound IP-level pressure; the default phase split is
+            # safer but adds ~search_wall_time before others start.
+            tasks = [s.discover(profile, limit=limit) for s in strategies]
             gathered = await asyncio.gather(*tasks, return_exceptions=True)
-            results.extend(self._collect_strategy_results(search_strategies, gathered))
+            results.extend(self._collect_strategy_results(strategies, gathered))
+        else:
+            # Split strategies into two phases to avoid B站 IP-level
+            # search rate-limiting. Search runs first (Phase 1) with a
+            # dedicated cookie-free client so it gets clean quota.
+            # Other strategies (explore, related_chain) also call the
+            # search API, so each strategy's calls are capped by the
+            # per-strategy search budget in
+            # ``DiscoveryConcurrencyController``.
+            search_strategies = [s for s in strategies if s.name == "search"]
+            other_strategies = [s for s in strategies if s.name != "search"]
 
-        # Brief cooldown between phases to let IP-level rate limit recover
-        if search_strategies and other_strategies:
-            await asyncio.sleep(2.0)
+            # Phase 1: run search strategy first to get clean IP quota
+            if search_strategies:
+                tasks = [s.discover(profile, limit=limit) for s in search_strategies]
+                gathered = await asyncio.gather(*tasks, return_exceptions=True)
+                results.extend(self._collect_strategy_results(search_strategies, gathered))
 
-        # Phase 2: run remaining strategies concurrently
-        if other_strategies:
-            tasks = [s.discover(profile, limit=limit) for s in other_strategies]
-            gathered = await asyncio.gather(*tasks, return_exceptions=True)
-            results.extend(self._collect_strategy_results(other_strategies, gathered))
+            # Brief cooldown between phases to let IP-level rate limit recover
+            if search_strategies and other_strategies:
+                await asyncio.sleep(2.0)
+
+            # Phase 2: run remaining strategies concurrently
+            if other_strategies:
+                tasks = [s.discover(profile, limit=limit) for s in other_strategies]
+                gathered = await asyncio.gather(*tasks, return_exceptions=True)
+                results.extend(self._collect_strategy_results(other_strategies, gathered))
 
         logger.info(
             "Discovery gather returned %d results for %d strategies: %s",

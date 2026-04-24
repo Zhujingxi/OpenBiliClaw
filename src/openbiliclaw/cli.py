@@ -623,6 +623,9 @@ def _run_init_discovery_backfill(profile: Any, *, target_pool_count: int = 100) 
                 profile,
                 strategies=strategies,
                 limit=request_limit,
+                # Init is latency-critical — skip the default search-first
+                # phase split and let every strategy share the gather.
+                fully_parallel=True,
             )
         )
         discovered_count += len(discovered)
