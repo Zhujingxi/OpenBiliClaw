@@ -52,13 +52,20 @@ def _bootstrap_container_runtime() -> None:
     from openbiliclaw.docker_runtime import bootstrap_runtime_environment
 
     bootstrap_runtime_environment(os.environ)
+
+
 _RUNTIME_COMPONENTS: dict[str, Any] = {}
 _INIT_DISCOVERY_PLAN = [
     ["search", "related_chain"],
     ["trending"],
     ["explore"],
 ]
-_INIT_POOL_TARGET_COUNT = 100
+# Initial pool target. Kept deliberately small — just enough for a
+# usable first impression. The background refresh loop tops the pool
+# up to ``scheduler.pool_target_count`` over the following hour, so
+# there is no point making the user wait through tens of LLM
+# evaluations during ``init`` (especially under thinking mode).
+_INIT_POOL_TARGET_COUNT = 40
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -226,6 +233,7 @@ def _build_recommendation_engine() -> Any:
     registry = _build_registry()
     llm_service = LLMService(registry=registry, memory=memory)
     from openbiliclaw.llm.registry import build_embedding_service
+
     _emb = build_embedding_service(cfg, registry)
     embedding_service = cast("SupportsEmbeddingService | None", _emb)
     return RecommendationEngine(
@@ -293,6 +301,7 @@ def _build_discovery_engine() -> Any:
     # Build embedding service from config (optional)
     from openbiliclaw.config import load_config
     from openbiliclaw.llm.registry import build_embedding_service
+
     cfg = load_config()
     embedding_service = build_embedding_service(cfg, _build_registry())
 
@@ -593,7 +602,7 @@ def _run_init_discovery_backfill(profile: Any, *, target_pool_count: int = 100) 
         current_pool_count = database.count_pool_candidates()
         if current_pool_count >= target_pool_count:
             break
-        request_limit = max(30, target_pool_count - current_pool_count)
+        request_limit = max(20, target_pool_count - current_pool_count)
         console.print(
             f"补货阶段 {index}/{len(_INIT_DISCOVERY_PLAN)}: {_format_strategy_group(strategies)}"
         )
@@ -676,24 +685,27 @@ def init() -> None:
     _print_page_title("初始化 OpenBiliClaw", "首次运行引导")
 
     # Fetch all data sources in a single event loop to avoid httpx session closure
-    async def _fetch_all_data() -> (
-        tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]
-    ):
+    async def _fetch_all_data() -> tuple[
+        list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]
+    ]:
         hist = await client.get_user_history(max_items=500)
 
         favs: list[dict[str, Any]] = []
         try:
             fav_folders = await client.get_all_favorites(
-                max_folders=20, max_items_per_folder=200,
+                max_folders=20,
+                max_items_per_folder=200,
             )
             for folder in fav_folders:
                 folder_title = folder.folder.title if hasattr(folder, "folder") else "未知"
                 for item in folder.items if hasattr(folder, "items") else []:
-                    favs.append({
-                        "title": getattr(item, "title", str(item)),
-                        "upper": getattr(item, "upper", ""),
-                        "folder": folder_title,
-                    })
+                    favs.append(
+                        {
+                            "title": getattr(item, "title", str(item)),
+                            "upper": getattr(item, "upper", ""),
+                            "folder": folder_title,
+                        }
+                    )
         except Exception as exc:
             console.print(f"  [yellow]收藏夹拉取失败: {exc}[/yellow]")
 
@@ -704,10 +716,12 @@ def init() -> None:
                 if not page_users:
                     break
                 for user in page_users:
-                    follows.append({
-                        "name": getattr(user, "uname", str(user)),
-                        "sign": getattr(user, "sign", ""),
-                    })
+                    follows.append(
+                        {
+                            "name": getattr(user, "uname", str(user)),
+                            "sign": getattr(user, "sign", ""),
+                        }
+                    )
                 if len(page_users) < 50:
                     break
         except Exception as exc:
@@ -729,23 +743,27 @@ def init() -> None:
     # Build events from all data sources
     events = [_history_item_to_event(item) for item in history]
     for fav in favorites_data:
-        events.append({
-            "event_type": "favorite",
-            "title": str(fav.get("title", "")),
-            "metadata": {
-                "folder": str(fav.get("folder", "")),
-                "upper": str(fav.get("upper", "")),
-            },
-        })
+        events.append(
+            {
+                "event_type": "favorite",
+                "title": str(fav.get("title", "")),
+                "metadata": {
+                    "folder": str(fav.get("folder", "")),
+                    "upper": str(fav.get("upper", "")),
+                },
+            }
+        )
     for user in following_data:
-        events.append({
-            "event_type": "follow",
-            "title": str(user.get("name", "")),
-            "metadata": {
-                "up_name": str(user.get("name", "")),
-                "sign": str(user.get("sign", "")),
-            },
-        })
+        events.append(
+            {
+                "event_type": "follow",
+                "title": str(user.get("name", "")),
+                "metadata": {
+                    "up_name": str(user.get("name", "")),
+                    "sign": str(user.get("sign", "")),
+                },
+            }
+        )
     for event in events:
         asyncio.run(memory.propagate_event(event))
 
@@ -757,21 +775,27 @@ def init() -> None:
     # Merge favorites and following into history for profile builder
     combined_history: list[dict[str, Any]] = list(history)
     if favorites_data:
-        combined_history.append({
-            "title": "[收藏夹汇总]",
-            "_favorites": favorites_data,
-            "_favorites_summary": f"共 {len(favorites_data)} 个收藏，"
-            + "涵盖: " + ", ".join(
-                set(f.get("folder", "") for f in favorites_data[:100] if f.get("folder"))
-            ),
-        })
+        combined_history.append(
+            {
+                "title": "[收藏夹汇总]",
+                "_favorites": favorites_data,
+                "_favorites_summary": f"共 {len(favorites_data)} 个收藏，"
+                + "涵盖: "
+                + ", ".join(
+                    set(f.get("folder", "") for f in favorites_data[:100] if f.get("folder"))
+                ),
+            }
+        )
     if following_data:
-        combined_history.append({
-            "title": "[关注列表汇总]",
-            "_following": following_data,
-            "_following_summary": f"共关注 {len(following_data)} 人，"
-            + "包括: " + ", ".join(f["name"] for f in following_data[:100]),
-        })
+        combined_history.append(
+            {
+                "title": "[关注列表汇总]",
+                "_following": following_data,
+                "_following_summary": f"共关注 {len(following_data)} 人，"
+                + "包括: "
+                + ", ".join(f["name"] for f in following_data[:100]),
+            }
+        )
     profile_data = asyncio.run(soul_engine.build_initial_profile(combined_history))
 
     _print_section_title("4/4 发现内容")
@@ -982,8 +1006,7 @@ def profile() -> None:
     mbti = core.mbti
     if mbti.type:
         dim_parts = [
-            f"{key}={dim.pole}({dim.strength:.2f})"
-            for key, dim in mbti.dimensions.items()
+            f"{key}={dim.pole}({dim.strength:.2f})" for key, dim in mbti.dimensions.items()
         ]
         dims_text = "  ".join(dim_parts) if dim_parts else ""
         console.print(
@@ -1018,9 +1041,7 @@ def profile() -> None:
             spec_names = [s.name for s in dom.specifics[:5]]
             spec_text = "、".join(spec_names)
             suffix = f"  [dim]{spec_text}[/dim]" if spec_text else ""
-            console.print(
-                f"  ▸ [bold]{dom.domain}[/bold] [dim]({dom.weight:.2f})[/dim]{suffix}"
-            )
+            console.print(f"  ▸ [bold]{dom.domain}[/bold] [dim]({dom.weight:.2f})[/dim]{suffix}")
     else:
         console.print("  （暂无兴趣领域）")
     if interest.dislikes:
@@ -1062,9 +1083,7 @@ def _normalize_strategy_names(raw: list[str] | None) -> list[str]:
     unknown = [n for n in names if n not in _BILIBILI_STRATEGY_NAMES]
     if unknown:
         allowed = ", ".join(_BILIBILI_STRATEGY_NAMES)
-        raise typer.BadParameter(
-            f"未知的 Bilibili 策略：{', '.join(unknown)}。可选：{allowed}"
-        )
+        raise typer.BadParameter(f"未知的 Bilibili 策略：{', '.join(unknown)}。可选：{allowed}")
     # Preserve first-seen order, drop duplicates.
     seen: set[str] = set()
     deduped: list[str] = []
@@ -1187,9 +1206,7 @@ def discover(
         return
 
     if source_normalized != "bilibili":
-        raise typer.BadParameter(
-            f"未知的内容源 `{source}`，当前支持：bilibili、xiaohongshu。"
-        )
+        raise typer.BadParameter(f"未知的内容源 `{source}`，当前支持：bilibili、xiaohongshu。")
 
     active_strategies = _normalize_strategy_names(strategies)
 
@@ -1285,7 +1302,8 @@ def delight() -> None:
         profile = asyncio.run(soul_engine.get_profile())
     except SoulProfileNotInitializedError as exc:
         _print_status_panel(
-            "warning", "尚未初始化用户画像",
+            "warning",
+            "尚未初始化用户画像",
             "请先执行 `openbiliclaw init` 拉取历史并生成初始画像。",
         )
         raise typer.Exit(code=1) from exc
@@ -1294,13 +1312,14 @@ def delight() -> None:
     recommendation_engine = _build_recommendation_engine()
 
     # Score un-scored items first
-    asyncio.run(recommendation_engine.precompute_delight_scores(
-        profile=profile, limit=30,
-    ))
-
-    candidate = database.get_delight_candidate(
-        min_delight_score=DEFAULT_DELIGHT_THRESHOLD
+    asyncio.run(
+        recommendation_engine.precompute_delight_scores(
+            profile=profile,
+            limit=30,
+        )
     )
+
+    candidate = database.get_delight_candidate(min_delight_score=DEFAULT_DELIGHT_THRESHOLD)
 
     _print_page_title("惊喜推荐", "从池中寻找你可能意外喜欢的内容")
     if candidate is None:
@@ -1347,7 +1366,8 @@ def probe() -> None:
         asyncio.run(soul_engine.get_profile())
     except SoulProfileNotInitializedError as exc:
         _print_status_panel(
-            "warning", "尚未初始化用户画像",
+            "warning",
+            "尚未初始化用户画像",
             "请先执行 `openbiliclaw init` 拉取历史并生成初始画像。",
         )
         raise typer.Exit(code=1) from exc
