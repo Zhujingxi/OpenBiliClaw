@@ -324,6 +324,14 @@ function connectRuntimeStream() {
         void initializeRecommendations();
         void loadProfileSummary({ force: true });
       }
+      // Profile changed elsewhere (cognition cycle, manual rebuild,
+      // dialogue insight ingestion, …). Force a refetch so the panel
+      // reflects the new portrait/needs/insights without requiring
+      // a chat send or full init.
+      if (event.type === "profile_updated") {
+        state.profileLoaded = false;
+        void loadProfileSummary({ force: true });
+      }
     },
     onConnect() {
       if (!state.online) {

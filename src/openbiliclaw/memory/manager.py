@@ -114,12 +114,46 @@ class MemoryManager:
         self._insight_candidates_path = data_dir / "memory" / "insight_candidates.json"
         self._cognition_updates_path = data_dir / "memory" / "cognition_updates.json"
         self._working_memory: dict[str, Any] = {}  # Session-only
+        # Optional callback that fires after the soul layer is saved or
+        # ``sync_profile_files`` runs. The runtime context wires this to
+        # ``event_hub.publish({"type": "profile_updated"})`` so the
+        # popup picks up profile changes regardless of which code path
+        # ran the update (init, cognition cycle, manual rebuild, …).
+        self._profile_change_callback: Any = None
 
         # Initialize the five layers
         layer_names = ["event", "preference", "awareness", "insight", "soul"]
         for name in layer_names:
             layer_path = data_dir / "memory" / f"{name}.json"
             self._layers[name] = MemoryLayer(name, layer_path)
+
+    def set_profile_change_callback(self, callback: Any) -> None:
+        """Register a callback fired after the soul layer is persisted.
+
+        The callback may be sync or async (a coroutine function); the
+        publisher schedules it via the running loop when present.
+        """
+        self._profile_change_callback = callback
+
+    def _notify_profile_changed(self) -> None:
+        """Best-effort dispatch of the registered profile-change callback."""
+        cb = self._profile_change_callback
+        if cb is None:
+            return
+        import asyncio as _asyncio
+
+        try:
+            result = cb()
+            if _asyncio.iscoroutine(result):
+                # If we're already inside a running loop, schedule it;
+                # otherwise drop silently — the soul write still landed.
+                try:
+                    loop = _asyncio.get_running_loop()
+                except RuntimeError:
+                    return
+                loop.create_task(result)
+        except Exception:
+            logger.debug("profile-change callback raised", exc_info=True)
 
     def initialize(self) -> None:
         """Load all layers from disk."""
@@ -133,6 +167,7 @@ class MemoryManager:
         """Persist all layers to disk."""
         for layer in self._layers.values():
             layer.save()
+        self._notify_profile_changed()
 
     def sync_profile_files(self, profile: object) -> None:
         """Write soul_profile.json + soul_profile.md dual files."""
@@ -144,6 +179,11 @@ class MemoryManager:
         elif isinstance(profile, dict):
             onion = OnionProfile.from_dict(profile)
             sync_profile_files(onion, self._data_dir)
+        # ``sync_profile_files`` is the canonical "profile is now
+        # current on disk" point — every code path that updates the
+        # profile (init, cognition cycle, manual rebuild, dialogue
+        # insight ingestion) ends here. Notify so the popup refetches.
+        self._notify_profile_changed()
 
     def append_changelog(self, entry: str) -> None:
         """Append a changelog entry to soul_changelog.md."""

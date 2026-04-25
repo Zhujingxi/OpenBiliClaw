@@ -335,6 +335,28 @@ def build_runtime_context(
     if event_hub is None:
         event_hub = RuntimeEventHub()
 
+    # Wire the soul-layer change callback so any code path that updates
+    # the profile (init, cognition cycle, dialogue ingestion, manual
+    # rebuild …) automatically broadcasts a ``profile_updated`` event
+    # over the WebSocket. The popup listens and re-fetches without
+    # requiring a manual ``init_completed`` poke.
+    setter = getattr(memory_manager, "set_profile_change_callback", None)
+    if callable(setter):
+
+        async def _on_profile_changed() -> None:
+            publish = getattr(event_hub, "publish", None)
+            if callable(publish):
+                with suppress(Exception):
+                    await publish(
+                        {
+                            "type": "profile_updated",
+                            "phase": "ready",
+                            "message": "画像已更新",
+                        }
+                    )
+
+        setter(_on_profile_changed)
+
     ctx = RuntimeContext(
         database=database,
         memory_manager=memory_manager,
