@@ -645,7 +645,12 @@ def _format_strategy_group(strategies: list[str]) -> str:
     return " + ".join(strategies)
 
 
-def _run_init_discovery_backfill(profile: Any, *, target_pool_count: int = 100) -> int:
+async def _run_init_discovery_backfill_async(
+    profile: Any,
+    *,
+    target_pool_count: int = 100,
+    label_suffix: str = "",
+) -> int:
     """Backfill the initial discovery pool in stages until the target is reached."""
     database = _get_runtime_database()
     discovery_engine = _build_discovery_engine()
@@ -658,23 +663,22 @@ def _run_init_discovery_backfill(profile: Any, *, target_pool_count: int = 100) 
         request_limit = max(20, target_pool_count - current_pool_count)
         console.print(
             f"补货阶段 {index}/{len(_INIT_DISCOVERY_PLAN)}: {_format_strategy_group(strategies)}"
+            f"{label_suffix}"
         )
         console.print(
             f"当前池子 {current_pool_count}/{target_pool_count}，本轮请求上限 {request_limit}"
         )
-        discovered = asyncio.run(
-            _run_with_progress(
-                discovery_engine.discover(
-                    profile,
-                    strategies=strategies,
-                    limit=request_limit,
-                    # Init is latency-critical — skip the default search-first
-                    # phase split and let every strategy share the gather.
-                    fully_parallel=True,
-                ),
-                label=f"发现内容({_format_strategy_group(strategies)} 并发)",
-                eta_seconds=300,
-            )
+        discovered = await _run_with_progress(
+            discovery_engine.discover(
+                profile,
+                strategies=strategies,
+                limit=request_limit,
+                # Init is latency-critical — skip the default search-first
+                # phase split and let every strategy share the gather.
+                fully_parallel=True,
+            ),
+            label=f"发现内容({_format_strategy_group(strategies)} 并发){label_suffix}",
+            eta_seconds=300,
         )
         discovered_count += len(discovered)
         console.print(
@@ -684,6 +688,27 @@ def _run_init_discovery_backfill(profile: Any, *, target_pool_count: int = 100) 
         )
 
     return discovered_count
+
+
+def _build_draft_profile_for_discover(memory: Any) -> Any:
+    """Build a preference-only ``OnionProfile`` so discover can start
+    in parallel with ``build_initial_profile`` (P3).
+
+    The full profile builder runs an LLM synthesis call over history +
+    preference + awareness + insights to produce
+    ``personality_portrait``, ``deep_needs``, ``core_traits`` etc. —
+    fields that *colour* discover's evaluation prompt but aren't
+    load-bearing for relevance scoring (interests + style +
+    favorite_up_users carry the signal). Letting discover use a
+    preference-only draft while the real profile builds in the
+    background overlaps two phases that previously serialised.
+    """
+    from openbiliclaw.soul.profile import OnionProfile
+
+    preference_layer = memory.get_layer("preference").data
+    draft = OnionProfile()
+    draft.populate_from_flat_preference(preference_layer)
+    return draft
 
 
 @app.command()
@@ -853,7 +878,7 @@ def init() -> None:
         )
     )
 
-    _print_section_title("3/4 生成画像")
+    _print_section_title("3/4 生成画像 + 4/4 发现内容(并发)")
     # Merge favorites and following into history for profile builder
     combined_history: list[dict[str, Any]] = list(history)
     if favorites_data:
@@ -878,23 +903,63 @@ def init() -> None:
                 + ", ".join(f["name"] for f in following_data[:100]),
             }
         )
-    profile_data = asyncio.run(
-        _run_with_progress(
-            soul_engine.build_initial_profile(combined_history),
-            label="生成画像(单次 LLM 综合分析)",
-            eta_seconds=70,
-        )
-    )
 
-    _print_section_title("4/4 发现内容")
+    # Parallel: build_initial_profile (P3) and discover (P4) overlap.
+    # Discover starts with a preference-only draft profile so trending /
+    # search / related_chain / explore can begin scoring candidates
+    # while the LLM synthesizes the rich personality_portrait /
+    # deep_needs fields. Once the build completes, the full profile is
+    # already saved to the soul memory layer for downstream callers.
+    draft_profile = _build_draft_profile_for_discover(memory)
+
     discovered_count = 0
     discovery_error = False
-    try:
-        discovered_count = _run_init_discovery_backfill(
-            profile_data,
-            target_pool_count=_INIT_POOL_TARGET_COUNT,
+    profile_data: Any = None
+
+    async def _run_p3_p4_parallel() -> tuple[Any, int, BaseException | None]:
+        profile_task = asyncio.create_task(
+            _run_with_progress(
+                soul_engine.build_initial_profile(combined_history),
+                label="生成画像(单次 LLM 综合分析)",
+                eta_seconds=70,
+            )
         )
-    except Exception:
+        discover_task = asyncio.create_task(
+            _run_init_discovery_backfill_async(
+                draft_profile,
+                target_pool_count=_INIT_POOL_TARGET_COUNT,
+                label_suffix=" — 用 P2 草稿画像并发预热",
+            )
+        )
+        try:
+            built_profile = await profile_task
+        except Exception as exc:
+            # Propagate profile failure but let discover finish so we
+            # at least get some pool content.
+            discover_task.cancel()
+            with suppress(BaseException):
+                await discover_task
+            raise exc
+        try:
+            disc_count = await discover_task
+            disc_err: BaseException | None = None
+        except BaseException as exc:
+            disc_count = 0
+            disc_err = exc
+        return built_profile, disc_count, disc_err
+
+    try:
+        profile_data, discovered_count, discover_exc = asyncio.run(_run_p3_p4_parallel())
+    except Exception as exc:
+        discovery_error = True
+        _print_status_panel(
+            "error",
+            "失败",
+            "画像生成阶段出错。可稍后手动重试 `openbiliclaw init`。",
+        )
+        raise typer.Exit(code=1) from exc
+
+    if discover_exc is not None:
         discovery_error = True
         _print_status_panel(
             "warning",
