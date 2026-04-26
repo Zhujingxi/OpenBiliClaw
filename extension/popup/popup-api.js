@@ -54,8 +54,12 @@ export async function fetchRuntimeStatus() {
   return requestJson("/runtime-status", { method: "GET" });
 }
 
-export async function fetchActivityFeed() {
-  return requestJson("/activity-feed", { method: "GET" });
+export async function fetchActivityFeed({ limit, before } = {}) {
+  const params = new URLSearchParams();
+  if (typeof limit === "number") params.set("limit", String(limit));
+  if (before) params.set("before", before);
+  const qs = params.toString();
+  return requestJson(`/activity-feed${qs ? `?${qs}` : ""}`, { method: "GET" });
 }
 
 export async function fetchPendingNotification() {

@@ -2647,6 +2647,28 @@
       gap: 4px;
     }
 
+    .activity-load-more {
+      align-self: stretch;
+      margin-top: 4px;
+      padding: 8px 12px;
+      border-radius: 12px;
+      border: 1px dashed rgba(165, 180, 210, 0.5);
+      background: rgba(255, 255, 255, 0.6);
+      color: var(--text-secondary);
+      font-size: 12px;
+      cursor: pointer;
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+    .activity-load-more:hover:not(:disabled) {
+      background: rgba(255, 255, 255, 0.95);
+      border-color: rgba(165, 180, 210, 0.85);
+      color: var(--text-main);
+    }
+    .activity-load-more:disabled {
+      cursor: progress;
+      opacity: 0.65;
+    }
+
     .footer-item-meta {
       display: flex;
       align-items: center;

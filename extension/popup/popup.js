@@ -66,6 +66,7 @@ const state = {
   runtimeEvent: null,
   activityFeed: null,
   activityExpanded: false,
+  activityLoadingMore: false,
   // Queue of pending delight recommendations. Banner shows
   // queue[delightCurrentIndex] with ‹/› navigation between siblings.
   // User actions (看看 / 不感兴趣 / × / 聊一聊 完成) remove the
@@ -502,6 +503,24 @@ function renderActivityHistory(items) {
 
     elements.activityHistory.append(row);
   }
+
+  // Load-more affordance — only render when the backend says there
+  // are older items beyond what we already have. Click appends the
+  // next page in place; we re-render on completion so the button
+  // either disappears or stays for further pages.
+  if (state.activityFeed?.has_more && state.activityFeed?.next_cursor) {
+    const loadMore = document.createElement("button");
+    loadMore.type = "button";
+    loadMore.className = "activity-load-more";
+    loadMore.textContent = state.activityLoadingMore
+      ? "加载中…"
+      : "加载更早的动态";
+    loadMore.disabled = Boolean(state.activityLoadingMore);
+    loadMore.addEventListener("click", () => {
+      void loadMoreActivity();
+    });
+    elements.activityHistory.append(loadMore);
+  }
 }
 
 function renderActivityCard() {
@@ -531,7 +550,7 @@ async function loadActivityFeed() {
     return;
   }
   try {
-    state.activityFeed = normalizeActivityFeed(await fetchActivityFeed());
+    state.activityFeed = normalizeActivityFeed(await fetchActivityFeed({ limit: 10 }));
   } catch {
     state.activityFeed = normalizeActivityFeed({
       live_summary: "阿B 这会儿先替你盯着。",
@@ -540,6 +559,41 @@ async function loadActivityFeed() {
     });
   }
   renderActivityCard();
+}
+
+async function loadMoreActivity() {
+  if (
+    !state.online ||
+    !state.activityFeed ||
+    !state.activityFeed.has_more ||
+    !state.activityFeed.next_cursor ||
+    state.activityLoadingMore
+  ) {
+    return;
+  }
+  state.activityLoadingMore = true;
+  renderActivityCard();
+  try {
+    const nextPage = normalizeActivityFeed(
+      await fetchActivityFeed({
+        limit: 10,
+        before: state.activityFeed.next_cursor,
+      }),
+    );
+    // Append items, keep the existing live_summary / headline (they
+    // describe "current" state, not the appended history).
+    state.activityFeed = {
+      ...state.activityFeed,
+      items: [...state.activityFeed.items, ...nextPage.items],
+      has_more: nextPage.has_more,
+      next_cursor: nextPage.next_cursor,
+    };
+  } catch {
+    // Leave existing items in place; user can retry by clicking again.
+  } finally {
+    state.activityLoadingMore = false;
+    renderActivityCard();
+  }
 }
 
 function renderChipList(container, items, fallback) {

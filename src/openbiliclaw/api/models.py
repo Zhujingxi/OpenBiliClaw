@@ -111,6 +111,8 @@ class ActivityFeedResponse(BaseModel):
     live_summary: str = ""
     headline: str = ""
     items: list[ActivityFeedItemOut] = Field(default_factory=list)
+    has_more: bool = False
+    next_cursor: str = ""
 
 
 class PendingNotificationOut(BaseModel):

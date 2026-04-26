@@ -772,6 +772,8 @@ export function normalizeActivityFeed(payload) {
     live_summary: normalizeText(payload?.live_summary),
     headline: normalizeText(payload?.headline),
     items,
+    has_more: Boolean(payload?.has_more),
+    next_cursor: normalizeText(payload?.next_cursor),
   };
 }
 
@@ -784,6 +786,8 @@ export function getActivityCardState({ feed = null, runtimeEvent = null, expande
     line2: headline,
     items: normalizedFeed.items,
     expanded: Boolean(expanded),
+    has_more: Boolean(normalizedFeed.has_more),
+    next_cursor: normalizedFeed.next_cursor || "",
   };
 }
 

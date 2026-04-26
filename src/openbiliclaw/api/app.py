@@ -524,7 +524,10 @@ def create_app(
         )
 
     @app.get("/api/activity-feed", response_model=ActivityFeedResponse)
-    async def activity_feed() -> ActivityFeedResponse:
+    async def activity_feed(
+        limit: int = 10,
+        before: str = "",
+    ) -> ActivityFeedResponse:
         from openbiliclaw.runtime.activity_feed import ActivityFeedBuilder
 
         runtime_status: dict[str, object] = {}
@@ -546,6 +549,8 @@ def create_app(
         payload = builder.build(
             runtime_status=runtime_status,
             cognition_updates=cognition_updates,
+            limit=limit,
+            before=before,
         )
         payload_items = payload.get("items", [])
         item_dicts = payload_items if isinstance(payload_items, list) else []
@@ -564,6 +569,8 @@ def create_app(
                 for item in item_dicts
                 if isinstance(item, dict)
             ],
+            has_more=bool(payload.get("has_more", False)),
+            next_cursor=str(payload.get("next_cursor", "")),
         )
 
     async def _classify_new_pool_items() -> None:

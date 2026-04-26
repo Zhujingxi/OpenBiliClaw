@@ -56,6 +56,8 @@ class ActivityFeedBuilder:
         *,
         runtime_status: dict[str, object],
         cognition_updates: list[dict[str, object]],
+        limit: int = 10,
+        before: str = "",
     ) -> dict[str, object]:
         items: list[dict[str, object]] = []
         items.extend(self._cognition_items(cognition_updates))
@@ -66,14 +68,32 @@ class ActivityFeedBuilder:
             items.append(pool_item)
 
         items.sort(key=lambda item: _parse_timestamp(item.get("created_at", "")), reverse=True)
-        items = items[:10]
+
+        # Cursor pagination by timestamp. ``before`` is an ISO datetime
+        # string emitted as ``next_cursor`` in the prior page; we keep
+        # only items strictly older than it.
+        if before:
+            cutoff = _parse_timestamp(before)
+            items = [
+                it for it in items
+                if _parse_timestamp(it.get("created_at", "")) < cutoff
+            ]
+
+        page_size = max(1, min(50, int(limit)))
+        page = items[:page_size]
+        has_more = len(items) > page_size
+        next_cursor = ""
+        if has_more and page:
+            next_cursor = str(page[-1].get("created_at", ""))
 
         live_summary = self._live_summary(runtime_status)
-        headline = items[0]["summary"] if items else live_summary
+        headline = page[0]["summary"] if page else live_summary
         return {
             "live_summary": live_summary,
             "headline": headline,
-            "items": items,
+            "items": page,
+            "has_more": has_more,
+            "next_cursor": next_cursor,
         }
 
     def _live_summary(self, runtime_status: dict[str, object]) -> str:
