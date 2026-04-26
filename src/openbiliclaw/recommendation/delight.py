@@ -79,21 +79,24 @@ class DelightWeights:
 
 # Delight threshold:
 # After v2 of the scorer (added likes_alignment + dislike_penalty,
-# redistributing weights across more signals), the natural distribution
-# shifted lower — top scores in a typical 600-item pool now land around
-# 0.45-0.50 instead of 0.65-0.70.  Each individual signal still tops
-# at 1.0 in theory, but in practice cosine similarity for real B站
-# titles vs short like/need text rarely exceeds 0.7-0.8, and the
-# weighted sum with 6 components naturally averages lower than the
-# pre-v2 5-component formula.
+# Delight is meant to be exceptional — "this one really resonates"
+# picks pulled out of the regular recommendation pool. Lowering the
+# bar dilutes the signal: at 0.35 most "delights" become just
+# "above-average recommendations", which kills the surprise value
+# the feature is built around.
 #
-# 0.35 is the empirical sweet spot for the v2 scorer:
-# - top 10-20 of pool clear it
-# - the candidates are dominated by likes-anchored content (the fix for
-#   issue 1: delight no longer over-weights analytical resonance)
-# - dislike_penalty pushes false positives below threshold organically
-DEFAULT_DELIGHT_THRESHOLD: float = 0.35
-CONSERVATIVE_DELIGHT_THRESHOLD: float = 0.45
+# Keep the bar at 0.65 even though the v2 scorer (with likes_alignment
+# + dislike_penalty redistributing weights across 6 signals) makes
+# this score harder to reach. Rarity is a feature here, not a bug:
+# - Typical pool of 2000+ scored items yields ~30-50 candidates
+#   above 0.65, which at the 4h push cooldown is enough supply for
+#   ~5-7 days of "really pick of the litter" surfacing
+# - As discovery refreshes the pool, new exceptional matches join
+#   the queue
+# - Below 0.65 content still surfaces via the normal recommendation
+#   feed; users see those without the "delight" framing
+DEFAULT_DELIGHT_THRESHOLD: float = 0.65
+CONSERVATIVE_DELIGHT_THRESHOLD: float = 0.75
 _LOW_EXPLORATION_OPENNESS: float = 0.3
 _DEFAULT_WEIGHTS = DelightWeights()
 
