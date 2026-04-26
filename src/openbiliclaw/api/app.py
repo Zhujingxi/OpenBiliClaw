@@ -737,6 +737,52 @@ def create_app(
         save_cognition_updates(updates)
         return CognitionUpdateSeenResponse(ok=True, id=update_id)
 
+    @app.post("/api/delight/trigger")
+    async def trigger_delight(payload: dict[str, Any] | None = None) -> Any:
+        """Manually push N delight candidates via WebSocket for testing.
+
+        Body: ``{"count": 3}``. Bypasses the 4-hour cooldown gate by
+        clearing ``last_delight_notification_at`` after each push, so
+        consecutive candidates surface immediately. Each pushed bvid is
+        still marked notified, so this consumes real candidates from
+        the pool.
+        """
+        count = 1
+        if isinstance(payload, dict):
+            try:
+                count = max(1, int(payload.get("count", 1)))
+            except (ValueError, TypeError):
+                count = 1
+        controller = ctx.runtime_controller
+        publish = getattr(controller, "_publish_delight_if_available", None)
+        if not callable(publish):
+            raise HTTPException(status_code=503, detail="Delight publisher unavailable")
+        memory_manager = getattr(controller, "memory_manager", None)
+        pushed: list[str] = []
+        for _ in range(count):
+            # Reset cooldown timer so the next call doesn't bail out
+            if memory_manager is not None:
+                state = memory_manager.load_discovery_runtime_state()
+                state.pop("last_delight_notification_at", None)
+                memory_manager.save_discovery_runtime_state(state)
+            # Snapshot candidate so we can record what got pushed
+            get_pending = getattr(controller, "get_pending_delight", None)
+            candidate = get_pending() if callable(get_pending) else None
+            if candidate is None:
+                break
+            await publish()
+            mark_sent = getattr(controller, "mark_delight_sent", None)
+            if callable(mark_sent):
+                mark_sent(str(candidate.get("bvid", "")))
+            pushed.append(str(candidate.get("bvid", "")))
+        # Clear cooldown one last time so manual trigger doesn't leave the
+        # pipeline gated.
+        if memory_manager is not None:
+            state = memory_manager.load_discovery_runtime_state()
+            state.pop("last_delight_notification_at", None)
+            memory_manager.save_discovery_runtime_state(state)
+        return {"ok": True, "pushed_count": len(pushed), "bvids": pushed}
+
     @app.get("/api/delight/pending", response_model=PendingDelightResponse)
     async def pending_delight() -> PendingDelightResponse:
         get_pending_delight = getattr(ctx.runtime_controller, "get_pending_delight", None)
