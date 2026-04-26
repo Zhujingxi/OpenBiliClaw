@@ -381,6 +381,67 @@ class TestDatabase:
             assert all(by_bvid[f"BVLOW{i}"]["pool_status"] == "suppressed" for i in range(3))
             db.close()
 
+    def test_trim_pool_protects_under_quota_source_when_untracked_sources_present(
+        self,
+    ) -> None:
+        """The bug this prevents: untracked sources (e.g. xhs) eat pool slots,
+        pushing total > target. The trim must suppress untracked items before
+        cutting under-quota tracked sources (trending). Without this guard,
+        sum(in_quota) > target leads to score-based cuts that hit trending
+        first because trending scores are systematically lower."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            # search at quota (5/5), trending under quota (2 of 4), xhs (4 untracked).
+            # Total = 11, target = 8, so 3 must go.
+            # Bug-prone behavior: trending scores are 0.5 (low), so naïve
+            # trim would axe both trending items.
+            # Correct behavior: untracked xhs items get cut first.
+            for i in range(5):
+                db.cache_content(
+                    f"BVS{i}",
+                    title=f"S{i}",
+                    up_name="UP",
+                    source="search",
+                    relevance_score=0.95,
+                )
+            for i in range(2):
+                db.cache_content(
+                    f"BVT{i}",
+                    title=f"T{i}",
+                    up_name="UP",
+                    source="trending",
+                    relevance_score=0.50,
+                )
+            for i in range(4):
+                db.cache_content(
+                    f"BVX{i}",
+                    title=f"X{i}",
+                    up_name="UP",
+                    source="xhs-extension-task",
+                    relevance_score=0.70,
+                )
+
+            suppressed = db.trim_pool_to_target_count(
+                target=8,
+                source_share_quotas={"search": 5, "trending": 4},
+            )
+            assert suppressed == 3
+
+            rows = db.get_cached_content(limit=20)
+            by_bvid = {row["bvid"]: row for row in rows}
+            # Trending fully protected (under quota, no items lost)
+            assert all(by_bvid[f"BVT{i}"]["pool_status"] == "fresh" for i in range(2))
+            # Search fully protected (at quota, no over-quota items)
+            assert all(by_bvid[f"BVS{i}"]["pool_status"] == "fresh" for i in range(5))
+            # 3 of the 4 xhs items suppressed (lowest score among negotiable)
+            xhs_fresh = sum(
+                1 for i in range(4) if by_bvid[f"BVX{i}"]["pool_status"] == "fresh"
+            )
+            assert xhs_fresh == 1
+            db.close()
+
     def test_purge_pool_by_disliked_topics_matches_topic_key_exact(self) -> None:
         """An exact topic_key match should flip pool_status to purged_by_dislike."""
         with tempfile.TemporaryDirectory() as tmpdir:

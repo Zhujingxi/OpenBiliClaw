@@ -714,26 +714,43 @@ class Database:
         )
 
         if source_share_quotas:
-            # Walk highest-score-first and split into in-quota vs over-quota.
-            # in_quota items get priority during keep selection so under-target
-            # sources (trending) keep their slots even when over-target sources
-            # (search, related_chain) have higher scores.
-            in_quota: list[dict[str, Any]] = []
-            over_quota: list[dict[str, Any]] = []
+            # Three-tier protection so under-quota sources stay fully intact:
+            #   protected: items from sources whose total ≤ quota, OR top-N
+            #              items from sources whose total > quota (where N=quota)
+            #   negotiable_tracked: bottom (total-quota) items from over-quota
+            #              tracked sources
+            #   negotiable_untracked: items from sources without a declared
+            #              share (e.g. xhs) — eligible to be cut before
+            #              touching protected.
+            # Order for the final keep walk: protected → negotiable_untracked
+            # → negotiable_tracked.  This ensures trending (under quota) stays
+            # 100% protected even when sum of in_quota > target due to
+            # untracked sources eating slots.
+            counts_per_source: dict[str, int] = defaultdict(int)
+            for row in rows:
+                counts_per_source[str(row.get("source", "") or "")] += 1
+
+            protected: list[dict[str, Any]] = []
+            negotiable_tracked: list[dict[str, Any]] = []
+            negotiable_untracked: list[dict[str, Any]] = []
             seen: dict[str, int] = defaultdict(int)
             for row in ranked:
                 src = str(row.get("source", "") or "")
                 quota = source_share_quotas.get(src)
                 if quota is None:
-                    in_quota.append(row)
+                    negotiable_untracked.append(row)
                     continue
-                if seen[src] < quota:
-                    in_quota.append(row)
-                    seen[src] += 1
+                if counts_per_source[src] <= quota:
+                    # entire source under quota — every item protected
+                    protected.append(row)
                 else:
-                    over_quota.append(row)
-            # Build ordering so over-quota lands past `target` first
-            ranked = in_quota + over_quota
+                    # over quota: top `quota` items protected, rest negotiable
+                    if seen[src] < quota:
+                        protected.append(row)
+                        seen[src] += 1
+                    else:
+                        negotiable_tracked.append(row)
+            ranked = protected + negotiable_untracked + negotiable_tracked
 
         overflow_bvids = [str(row.get("bvid", "")).strip() for row in ranked[target:]]
         clean_bvids = [bvid for bvid in overflow_bvids if bvid]
