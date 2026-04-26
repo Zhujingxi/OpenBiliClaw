@@ -344,4 +344,70 @@ async def test_explore_strategy_uses_bounded_evaluation_concurrency() -> None:
 
     # Batch evaluation sends fewer LLM calls than items (1 batch for 3 items)
     assert llm_service.max_active_calls >= 1
+    # Both queries belong to the same domain bucket, so interleave is a no-op
+    # and the natural order (query1 entries, then query2 entry) is preserved.
     assert [item.bvid for item in results] == ["BV1A", "BV1B", "BV1C"]
+
+
+@pytest.mark.asyncio
+async def test_explore_strategy_interleaves_domains_for_eval_fairness() -> None:
+    """Two domains with equal novelty must be round-robin interleaved before
+    the 30-item eval cap. Verifying via post-eval order works only when
+    novelty (and therefore the exploration bonus) matches across domains;
+    otherwise _sort_results re-ranks by score."""
+    from openbiliclaw.discovery.strategies.strategies import ExploreStrategy
+
+    llm_service = FakeLLMService(
+        [
+            """
+            {
+              "domains": [
+                {
+                  "domain": "声音景观",
+                  "why_it_might_resonate": "扩展认知边界。",
+                  "novelty_level": 0.7,
+                  "queries": ["声音 文化"]
+                },
+                {
+                  "domain": "城市建筑",
+                  "why_it_might_resonate": "结构化理解。",
+                  "novelty_level": 0.7,
+                  "queries": ["城市 建筑"]
+                }
+              ]
+            }
+            """,
+            (
+                '[{"score": 0.82, "reason": "a"}, {"score": 0.82, "reason": "b"}, '
+                '{"score": 0.82, "reason": "c"}, {"score": 0.82, "reason": "d"}]'
+            ),
+        ]
+    )
+    bilibili_client = FakeBilibiliClient(
+        {
+            "声音 文化": [
+                {"bvid": "BVS1", "title": "S1", "author": "U", "mid": 1},
+                {"bvid": "BVS2", "title": "S2", "author": "U", "mid": 2},
+            ],
+            "城市 建筑": [
+                {"bvid": "BVC1", "title": "C1", "author": "U", "mid": 3},
+                {"bvid": "BVC2", "title": "C2", "author": "U", "mid": 4},
+            ],
+        }
+    )
+    strategy = ExploreStrategy(
+        llm_service=llm_service,
+        bilibili_client=bilibili_client,
+        score_threshold=0.0,
+    )
+
+    results = await strategy.discover(_build_profile(), limit=20)
+
+    # With equal novelty, all four end up at the same blended score, so the
+    # stable sort in _sort_results preserves the pre-eval interleave order:
+    # depth0 → BVS1, BVC1; depth1 → BVS2, BVC2.
+    bvids = [item.bvid for item in results]
+    assert set(bvids) == {"BVS1", "BVS2", "BVC1", "BVC2"}
+    # The crucial property: at least one C-domain item appears before BVS2,
+    # proving each domain got a turn before the first one finished.
+    assert bvids.index("BVC1") < bvids.index("BVS2")

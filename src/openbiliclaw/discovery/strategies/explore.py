@@ -121,7 +121,11 @@ class ExploreStrategy(DiscoveryStrategy):
                 if callable(close):
                     await close()
 
-        candidates: list[tuple[DiscoveredContent, float, bool]] = []
+        # Bucket candidates by domain_label so the downstream eval hard-cap
+        # (30) doesn't starve later domains: without bucketing, the first
+        # 1-2 domains' query results consume the entire eval window.
+        domain_order: list[str] = []
+        per_domain: dict[str, list[tuple[DiscoveredContent, float, bool]]] = {}
         seen_bvids: set[str] = set()
         for (query, novelty_level, interest_anchored, domain_label), outcome in zip(
             request_plan, search_outcomes, strict=True
@@ -141,6 +145,10 @@ class ExploreStrategy(DiscoveryStrategy):
                 continue
             if not isinstance(outcome, list):
                 continue
+            bucket_key = domain_label or query
+            if bucket_key not in per_domain:
+                per_domain[bucket_key] = []
+                domain_order.append(bucket_key)
             for item_index, item in enumerate(outcome):
                 content = search_strategy._map_search_result(
                     item,
@@ -159,7 +167,17 @@ class ExploreStrategy(DiscoveryStrategy):
                     # Use domain-level granularity for topic_key so content from
                     # the same exploration domain groups together properly
                     content.topic_key = normalized_domain
-                candidates.append((content, novelty_level, interest_anchored))
+                per_domain[bucket_key].append((content, novelty_level, interest_anchored))
+
+        # Round-robin interleave across domains so each domain gets fair
+        # representation in the 30-item eval window.
+        candidates: list[tuple[DiscoveredContent, float, bool]] = []
+        max_depth = max((len(per_domain[k]) for k in domain_order), default=0)
+        for depth in range(max_depth):
+            for key in domain_order:
+                bucket = per_domain[key]
+                if depth < len(bucket):
+                    candidates.append(bucket[depth])
 
         scores = await evaluator.evaluate_content_batch(
             [content for content, _, _ in candidates],
