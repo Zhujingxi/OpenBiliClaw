@@ -272,4 +272,50 @@ async def test_trending_strategy_uses_bounded_evaluation_concurrency() -> None:
     results = await strategy.discover(_build_profile(), limit=20)
 
     assert llm_service.max_active_calls >= 1  # Batch eval sends fewer calls
-    assert [item.bvid for item in results] == ["BV1A", "BV1B", "BV1C"]
+    # Round-robin interleave by rid: depth 0 → rid0[0], rid36[0]; depth 1 → rid0[1].
+    assert [item.bvid for item in results] == ["BV1A", "BV1C", "BV1B"]
+
+
+@pytest.mark.asyncio
+async def test_trending_strategy_interleaves_rids_for_eval_fairness() -> None:
+    """When one rid has many ranking entries and others few, candidates must
+    be round-robin interleaved before eval so the downstream 30-item cap
+    can't starve smaller rids of evaluation slots."""
+    from openbiliclaw.discovery.strategies.strategies import TrendingStrategy
+
+    # Pre-stage 50 score responses so the score path never runs out
+    score_payloads = [f'{{"score": 0.80, "reason": "r{i}"}}' for i in range(50)]
+    llm_service = FakeLLMService(['{"rids": [36, 181, 119]}', *score_payloads])
+
+    bilibili_client = FakeRankingClient(
+        {
+            0: [
+                {"bvid": f"BV0_{i:02d}", "title": f"rid0-{i}", "author": "U", "mid": i}
+                for i in range(8)
+            ],
+            36: [
+                {"bvid": f"BV36_{i:02d}", "title": f"rid36-{i}", "author": "U", "mid": i}
+                for i in range(2)
+            ],
+            181: [
+                {"bvid": "BV181_00", "title": "rid181-0", "author": "U", "mid": 1},
+            ],
+            119: [],
+        }
+    )
+
+    strategy = TrendingStrategy(
+        bilibili_client=bilibili_client,
+        llm_service=llm_service,
+        score_threshold=0.65,
+        max_related_rids=3,
+    )
+
+    results = await strategy.discover(_build_profile(), limit=20)
+
+    # Interleave order: depth 0 → rid0[0], rid36[0], rid181[0], rid119(empty);
+    # depth 1 → rid0[1], rid36[1]; depth 2+ → rid0 only.
+    bvids = [item.bvid for item in results]
+    assert bvids[:4] == ["BV0_00", "BV36_00", "BV181_00", "BV0_01"]
+    # The smaller rids' top items must appear before rid0 exhausts its bucket.
+    assert bvids.index("BV181_00") < bvids.index("BV0_05")

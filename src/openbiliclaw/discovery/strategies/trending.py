@@ -87,7 +87,7 @@ class TrendingStrategy(DiscoveryStrategy):
             [self.bilibili_client.get_ranking(rid) for rid in rids],
             runner=runner,
         )
-        candidates: list[DiscoveredContent] = []
+        per_rid: list[list[DiscoveredContent]] = []
         seen_bvids: set[str] = set()
 
         for rid, outcome in zip(rids, ranking_outcomes, strict=True):
@@ -102,15 +102,30 @@ class TrendingStrategy(DiscoveryStrategy):
                         "error_type": type(outcome).__name__,
                     },
                 )
+                per_rid.append([])
                 continue
             if not isinstance(outcome, list):
+                per_rid.append([])
                 continue
+            bucket: list[DiscoveredContent] = []
             for item in outcome:
                 content = self._map_ranking_item(item, rid=rid)
                 if content is None or content.bvid in seen_bvids:
                     continue
                 seen_bvids.add(content.bvid)
-                candidates.append(content)
+                bucket.append(content)
+            per_rid.append(bucket)
+
+        # Round-robin interleave so the downstream eval hard-cap (30) gives
+        # each rid roughly equal representation. Without this, the rid=0
+        # bucket (always first) consumes the entire eval window when it has
+        # 100+ ranking entries, leaving the other 4 rids unevaluated.
+        candidates: list[DiscoveredContent] = []
+        max_depth = max((len(bucket) for bucket in per_rid), default=0)
+        for depth in range(max_depth):
+            for bucket in per_rid:
+                if depth < len(bucket):
+                    candidates.append(bucket[depth])
 
         scores = await evaluator.evaluate_content_batch(candidates, profile)
         results: list[DiscoveredContent] = []
