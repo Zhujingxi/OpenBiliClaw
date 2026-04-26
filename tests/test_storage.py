@@ -292,6 +292,53 @@ class TestDatabase:
             assert suppressed == 0
             db.close()
 
+    def test_cache_content_refreshes_previously_suppressed_items(self) -> None:
+        """Re-discovering a 'suppressed' item must flip pool_status back to
+        'fresh'. Suppression is an internal diversity decision (trim cuts,
+        topic cap); when the discovery layer re-finds the item it deserves
+        another shot. Without this, slow-churning sources like B站 trending
+        get bottlenecked because hot BVIDs cached as 'suppressed' never
+        recover. 'shown' / 'feedbacked' / 'purged_by_dislike' must NOT
+        re-fresh — those reflect user-facing state."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            # Seed three items, then force them into different terminal states.
+            for status in ("suppressed", "shown", "purged_by_dislike"):
+                bvid = f"BV1{status}"
+                db.cache_content(
+                    bvid,
+                    title=f"item {status}",
+                    up_name="UP",
+                    source="trending",
+                    relevance_score=0.7,
+                )
+                db._execute_write(
+                    "UPDATE content_cache SET pool_status = ? WHERE bvid = ?",
+                    (status, bvid),
+                )
+
+            # Re-discover all three (simulates trending re-fetching same BVIDs)
+            for status in ("suppressed", "shown", "purged_by_dislike"):
+                db.cache_content(
+                    f"BV1{status}",
+                    title=f"item {status}",
+                    up_name="UP",
+                    source="trending",
+                    relevance_score=0.8,
+                )
+
+            rows = db.get_cached_content(limit=10)
+            by_bvid = {row["bvid"]: row for row in rows}
+            # Suppressed re-fresh ✓
+            assert by_bvid["BV1suppressed"]["pool_status"] == "fresh"
+            # Shown stays shown (user already saw)
+            assert by_bvid["BV1shown"]["pool_status"] == "shown"
+            # Disliked stays purged
+            assert by_bvid["BV1purged_by_dislike"]["pool_status"] == "purged_by_dislike"
+            db.close()
+
     def test_trim_pool_share_quotas_protect_under_target_sources(self) -> None:
         """When trim is given source_share_quotas, items from over-quota
         sources get suppressed first — even if they have higher scores

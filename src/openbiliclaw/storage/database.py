@@ -375,6 +375,18 @@ class Database:
                 ),
                 candidate_tier = excluded.candidate_tier,
                 last_scored_at = CURRENT_TIMESTAMP,
+                -- Re-fresh items previously trim-suppressed: 'suppressed' is
+                -- an internal diversity decision (over-quota cuts, topic cap),
+                -- not a user signal. When a discovery strategy re-finds the
+                -- item it deserves another shot. Without this, B站 trending
+                -- (which churns slowly) stays bottlenecked because most hot
+                -- BVIDs are already cached as 'suppressed' from earlier
+                -- trim cycles. User-driven states ('shown', 'feedbacked',
+                -- 'purged_by_dislike') are preserved.
+                pool_status = CASE
+                    WHEN content_cache.pool_status = 'suppressed' THEN 'fresh'
+                    ELSE content_cache.pool_status
+                END,
                 source = excluded.source,
                 content_id = excluded.content_id,
                 content_url = excluded.content_url,
