@@ -243,6 +243,18 @@ class ContinuousRefreshController:
         *after* trimming, signalling the caller to skip discovery. A return of
         ``False`` means there is room to replenish.
         """
+        # Cross-source topic_group quota runs every tick, not just inside
+        # _run_refresh_plan: when pool sits at cap, refresh exits before
+        # discover, so the in-plan trim would never fire and pre-existing
+        # topic concentration would persist indefinitely. This call is a
+        # cheap SQL group-by + UPDATE, safe to run unconditionally.
+        try:
+            self.database.trim_topic_group_overflow(
+                max_per_group=max(3, self.pool_target_count // 10),
+            )
+        except Exception:
+            logger.exception("trim_topic_group_overflow failed")
+
         pool_available = self.database.count_pool_candidates()
         if pool_available > self.pool_target_count:
             trimmed = 0
