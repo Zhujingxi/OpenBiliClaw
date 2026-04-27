@@ -193,6 +193,14 @@ class RecommendationEngine:
         if excluded_bvids:
             candidates = [c for c in candidates if c.bvid not in excluded_bvids]
         candidates = self._exclude_recently_viewed(candidates)
+
+        # Online supergroup merging — collapses semantically-equivalent
+        # topic_groups within this batch (e.g. 动漫/动漫产业/动漫文化) so
+        # the diversifier sees them as a single bucket. Adds 50–200ms of
+        # embedding I/O to the hot path, traded for batch-level richness
+        # that no offline precompute can guarantee at serve time.
+        await self._merge_topic_supergroups(candidates)
+
         label = "realtime" if expression_mode == "realtime" else "pool"
         logger.info(
             "Recommendation candidate summary (serve/%s): %s",
@@ -200,9 +208,6 @@ class RecommendationEngine:
             json.dumps(self._build_debug_summary(candidates), ensure_ascii=False),
         )
 
-        # No embedding API calls on the serve() hot path.
-        # topic_group normalization and semantic scoring happen during
-        # background discovery/precompute. serve() is pure DB + CPU.
         score_override: dict[str, float] | None = None
         if self._curator is not None:
             context = self._curator.build_context()
@@ -258,66 +263,103 @@ class RecommendationEngine:
         self._database.mark_pool_items_shown(shown_bvids)
         return recommendations
 
-    async def _normalize_topic_groups(
+    # Hybrid rule for online supergroup merging:
+    #   - Strict embedding alone: sim >= 0.90 (catches 自走棋↔金铲铲之战
+    #     0.902 across name boundaries).
+    #   - Shared 2-char prefix + loose embedding: sim >= 0.80 (catches
+    #     动漫族 0.80–0.88, 游戏族 0.84–0.87 — locality signal protects
+    #     against transitive bridging that collapses a 40-group batch
+    #     into one bucket).
+    # Probe against live pool: should-merge band 0.80–0.92, should-
+    # separate band caps near 0.82. Embedding alone at 0.83 cascades
+    # via union-find; prefix gates loose-band merges.
+    _SUPERGROUP_STRICT_THRESHOLD = 0.90
+    _SUPERGROUP_LOOSE_THRESHOLD = 0.80
+    _SUPERGROUP_PREFIX_LEN = 2
+
+    async def _merge_topic_supergroups(
         self,
         candidates: list[DiscoveredContent],
     ) -> None:
-        """Use embedding similarity to unify semantically identical topic_keys
-        that lack a topic_group, assigning them to an existing group.
+        """Online union-find merge of equivalent topic_groups within this batch.
 
-        topic_group is already a coarse human-readable category set by Discovery.
-        Re-merging these via embedding produces false positives (e.g. "人工智能"
-        and "国际史实" landing in the same bucket at threshold 0.82) because short
-        Chinese labels are deceptively close in embedding space.
+        For each unique ``topic_group`` in ``candidates``, embed
+        ``"label | sample_titles"`` (titles disambiguate short Chinese labels
+        like "动漫" vs "人工智能"). Pairs above the threshold get merged
+        into a single supergroup; the canonical label is the
+        alphabetically-first member. Mutates each candidate's
+        ``topic_group`` in place to the supergroup label so the downstream
+        diversifier treats the family as one bucket.
 
-        This method therefore only operates on items WITHOUT a topic_group,
-        attempting to assign them to a group from items that already have one.
+        No-op when embedding service is unavailable or fewer than 2 distinct
+        groups are present — preserves correctness in tests / cold start.
         """
-        if self._embedding_service is None or not candidates:
+        if self._embedding_service is None or len(candidates) < 2:
             return
 
         from openbiliclaw.llm.embedding import cosine_similarity
 
-        # Build cluster centroids from items that already have a topic_group
-        clusters: dict[str, list[float]] = {}
+        groups: dict[str, list[DiscoveredContent]] = {}
         for item in candidates:
-            group = (item.topic_group or "").strip().lower()
-            if not group or group in clusters:
-                continue
-            vec = await self._embedding_service.embed(group)
-            if vec:
-                clusters[group] = vec
+            key = (item.topic_group or "").strip().lower()
+            if key:
+                groups.setdefault(key, []).append(item)
 
-        if not clusters:
+        if len(groups) < 2:
             return
 
-        # Only try to assign topic_group to items that don't have one
-        # Use stricter threshold for short Chinese labels (default 0.82 is too low)
-        threshold = min(0.92, self._embedding_service.similarity_threshold + 0.10)
-        for item in candidates:
-            if (item.topic_group or "").strip():
-                continue
-            topic = (item.topic_key or "").strip().lower()
-            if not topic:
-                continue
-            vec = await self._embedding_service.embed(topic)
-            if not vec:
-                continue
-            best_label: str | None = None
-            best_sim = 0.0
-            for label, centroid in clusters.items():
-                sim = cosine_similarity(vec, centroid)
-                if sim > best_sim:
-                    best_sim = sim
-                    best_label = label
-            if best_label is not None and best_sim >= threshold:
-                item.topic_group = best_label
-                logger.debug(
-                    "Rec topic assigned: %r → group %r (sim=%.3f)",
-                    topic,
-                    best_label,
-                    best_sim,
-                )
+        embeddings: dict[str, list[float]] = {}
+        for label, items in groups.items():
+            sample_titles = " | ".join(it.title for it in items[:5] if it.title)
+            text = f"{label} | {sample_titles}" if sample_titles else label
+            vec = await self._embedding_service.embed(text)
+            if vec:
+                embeddings[label] = vec
+
+        if len(embeddings) < 2:
+            return
+
+        labels = list(embeddings.keys())
+        parent: dict[str, str] = {label: label for label in labels}
+
+        def find(x: str) -> str:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: str, b: str) -> None:
+            ra, rb = find(a), find(b)
+            if ra == rb:
+                return
+            # Canonical = alphabetically first (stable across rounds)
+            if rb < ra:
+                ra, rb = rb, ra
+            parent[rb] = ra
+
+        strict = self._SUPERGROUP_STRICT_THRESHOLD
+        loose = self._SUPERGROUP_LOOSE_THRESHOLD
+        prefix_len = self._SUPERGROUP_PREFIX_LEN
+        for i, ga in enumerate(labels):
+            for gb in labels[i + 1 :]:
+                sim = cosine_similarity(embeddings[ga], embeddings[gb])
+                shared_prefix = ga[:prefix_len] == gb[:prefix_len] and len(ga) >= prefix_len
+                if sim >= strict or (shared_prefix and sim >= loose):
+                    union(ga, gb)
+
+        merges: list[tuple[str, str]] = []
+        for label, items in groups.items():
+            canonical = find(label)
+            if canonical != label:
+                merges.append((label, canonical))
+                for item in items:
+                    item.topic_group = canonical
+
+        if merges:
+            logger.info(
+                "Topic supergroup merges (serve): %s",
+                ", ".join(f"{src}→{dst}" for src, dst in merges),
+            )
 
     async def _select_relevant_interests(
         self,
