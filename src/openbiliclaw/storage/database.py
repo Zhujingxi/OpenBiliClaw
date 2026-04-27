@@ -1131,6 +1131,53 @@ class Database:
         )
         return cursor.lastrowid or 0
 
+    def batch_insert_recommendations(
+        self,
+        items: list[dict[str, Any]],
+    ) -> list[int]:
+        """Insert N recommendation rows in one transaction; return row IDs in order.
+
+        Single fsync replaces N (was 200-300ms each under discovery write
+        contention → ~3s for the popup's 10-item batch). Returns
+        ``lastrowid`` per item, computed from the auto-increment delta
+        since this connection's last id.
+        """
+        if not items:
+            return []
+        attempts = _LOCK_RETRY_ATTEMPTS
+        while True:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute("BEGIN IMMEDIATE")
+                try:
+                    ids: list[int] = []
+                    for item in items:
+                        cursor.execute(
+                            """
+                            INSERT INTO recommendations
+                                (bvid, expression, topic, confidence, presented)
+                            VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (
+                                str(item.get("bvid", "")),
+                                str(item.get("expression", "")),
+                                str(item.get("topic", "")),
+                                float(item.get("confidence", 0.0) or 0.0),
+                                int(item.get("presented", 0) or 0),
+                            ),
+                        )
+                        ids.append(cursor.lastrowid or 0)
+                    self.conn.commit()
+                    return ids
+                except Exception:
+                    self.conn.rollback()
+                    raise
+            except sqlite3.OperationalError as exc:
+                if "database is locked" not in str(exc).lower() or attempts <= 1:
+                    raise
+                attempts -= 1
+                time.sleep(_LOCK_RETRY_SLEEP_SECONDS)
+
     def get_recent_recommendation_signals(self, *, limit: int = 30) -> list[dict[str, Any]]:
         """Return recent recommendations with topic/source for scoring context."""
         cursor = self.conn.execute(

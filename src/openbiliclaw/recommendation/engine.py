@@ -225,7 +225,6 @@ class RecommendationEngine:
         )
 
         recommendations: list[Recommendation] = []
-        shown_bvids: list[str] = []
         for item in ranked:
             rec = Recommendation(
                 content=item,
@@ -240,14 +239,29 @@ class RecommendationEngine:
                     rec.expression = self._fallback_expression(item)
                 if not rec.topic_label:
                     rec.topic_label = self._fallback_topic_label(profile)
-            rec.recommendation_id = self._database.insert_recommendation(
-                item.bvid,
-                confidence=rec.confidence,
-                expression=rec.expression,
-                topic=rec.topic_label,
-                presented=0,
-            )
-            if expression_mode == "realtime":
+            recommendations.append(rec)
+
+        # Batch all recommendation inserts into a single transaction.
+        # Per-item insert_recommendation each commit a fsync, which under
+        # the discovery loop's concurrent content_cache writes serialized
+        # to ~200-300ms each — the popup paid 2-3s here on every reshuffle.
+        ids = self._database.batch_insert_recommendations(
+            [
+                {
+                    "bvid": rec.content.bvid,
+                    "expression": rec.expression,
+                    "topic": rec.topic_label,
+                    "confidence": rec.confidence,
+                    "presented": 0,
+                }
+                for rec in recommendations
+            ]
+        )
+        for rec, rec_id in zip(recommendations, ids, strict=True):
+            rec.recommendation_id = rec_id
+
+        if expression_mode == "realtime":
+            for rec, item in zip(recommendations, ranked, strict=True):
                 rec.expression, rec.topic_label = await self.generate_expression(
                     item,
                     profile,
@@ -257,10 +271,8 @@ class RecommendationEngine:
                     expression=rec.expression,
                     topic=rec.topic_label,
                 )
-            recommendations.append(rec)
-            shown_bvids.append(item.bvid)
 
-        self._database.mark_pool_items_shown(shown_bvids)
+        self._database.mark_pool_items_shown([item.bvid for item in ranked])
         return recommendations
 
     # Hybrid rule for online supergroup merging:
@@ -308,13 +320,24 @@ class RecommendationEngine:
         if len(groups) < 2:
             return
 
-        embeddings: dict[str, list[float]] = {}
-        for label, items in groups.items():
-            sample_titles = " | ".join(it.title for it in items[:5] if it.title)
-            text = f"{label} | {sample_titles}" if sample_titles else label
-            vec = await self._embedding_service.embed(text)
-            if vec:
-                embeddings[label] = vec
+        # Embed labels alone (no sample_titles): the cache key now matches
+        # across rounds (titles rotate, labels don't), so the L1/L2 cache
+        # hit rate goes from ~0% to ~100% after the first encounter. The
+        # original "label | titles" form was meant to disambiguate very
+        # short Chinese labels, but coarse topic_group values like 动漫 /
+        # 游戏 / 人工智能 are already separable in embedding space — the
+        # titles bought a marginal disambiguation benefit at the cost of
+        # ~1.5s per reshuffle.
+        import asyncio as _asyncio
+
+        embedding_service = self._embedding_service  # narrow Optional for closure
+
+        async def _embed_label(label: str) -> tuple[str, list[float]]:
+            vec = await embedding_service.embed(label)
+            return label, vec
+
+        results = await _asyncio.gather(*(_embed_label(label) for label in groups))
+        embeddings: dict[str, list[float]] = {label: vec for label, vec in results if vec}
 
         if len(embeddings) < 2:
             return
