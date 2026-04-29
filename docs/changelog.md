@@ -4,6 +4,51 @@
 
 ---
 
+## v0.3.12: 浏览器扩展自动同步 B 站 Cookie 到后端，再也不用 F12（2026-04-30）
+
+之前用户配 B 站 Cookie 必须自己 F12 → Network → 复制 Cookie 头 → 粘到向导里。这个体验对刚接触本项目的人极不友好，而且 Cookie 过期/刷新后还得重做。其实扩展本来就跑在 bilibili.com 上，能直接读用户的 Cookie，把这个流程自动化是天然的。
+
+### Backend：新增 `POST /api/bilibili/cookie`
+
+在 `src/openbiliclaw/api/app.py` 加了一个端点，接收扩展推过来的 Cookie：
+
+1. **校验**：先用 `AuthManager.validate_cookie` 打一次 `api.bilibili.com/x/web-interface/nav`，确认 Cookie 真的处于登录状态——避免无效 Cookie 覆盖一个还在工作的旧 Cookie
+2. **持久化**：写到 `data/bilibili_cookie.json`（运行时真正用的源）+ `config.toml` 的 `[bilibili].cookie`（镜像，给 `config-show` 用）
+3. **热重载**：调 `RuntimeContext.rebuild_from_config` 原子换掉 BilibiliAPIClient，下一次 API 调用就用新 Cookie
+4. **广播**：通过 WebSocket runtime-stream 发 `bilibili_cookie_synced` 事件，扩展 popup 可以停掉「请登录」提示
+
+请求 model 在 `api/models.py` 新增：`BilibiliCookieIn`（`cookie`, `source`, `validate_with_bilibili`）+ `BilibiliCookieResponse`（`ok`, `authenticated`, `username`, `user_id`, `message`）。
+
+### Extension：自动读 + 推
+
+`extension/src/background/cookie-sync.ts` 新文件，service-worker 启动时挂上：
+
+- **触发场景**
+  - `chrome.runtime.onInstalled` / `onStartup` → 启动一次同步
+  - `chrome.cookies.onChanged` 监听器（domain 收尾匹配 `bilibili.com`）→ 用户登录/登出/Cookie 刷新立即同步。debounce 2s 避免一次登录触发 6-10 次 POST
+  - 每小时一次 alarm 兜底（防止 service worker 卸载期间漏掉 onChanged 事件）
+
+- **只推有意义的 Cookie**：`SESSDATA` / `bili_jct` / `DedeUserID` 三件套缺一不发，避免后端做无谓的 nav 校验
+
+- **只在用户登录时推**：未登录直接 `return false`，不打扰后端
+
+`manifest.json` 加 `cookies` 权限 + 版本 0.3.1 → 0.3.2。
+
+### 安全模型
+
+- 后端默认绑 `127.0.0.1`，外网摸不到这个端点
+- Cookie 全程在用户本机：浏览器 → service worker → localhost backend → 本地磁盘
+- CORS 现状是 `*`，对 localhost 后端来说没意义（任何打到 127.0.0.1 的请求本来就来自本机）
+- 用户改成 `--host 0.0.0.0` 应该自己加 auth 层（这是历史 stance，没改）
+
+### 用户感知
+
+- 装好扩展 → 几秒内自动同步 → 后端日志看到 `cookie_synced`，`/api/runtime-status` 返回登录态
+- Cookie 过期了？扩展会在下次 `chrome.cookies.onChanged` 自动推新的，无需手动操作
+- 一句话装机的 wizard 里仍保留 cookie prompt 作为兜底，给不装扩展的用户用
+
+---
+
 ## v0.3.11: Docker 自带 Ollama embedding sidecar + CLI 向导也能自动装 Ollama（2026-04-30）
 
 v0.3.10 把一句话装机（install.sh / install.ps1 → agent_bootstrap.py）的 Ollama 自动安装做齐了，但还有两条路径漏了：

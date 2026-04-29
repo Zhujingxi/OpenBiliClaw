@@ -15,6 +15,8 @@ from openbiliclaw.api.models import (
     ActivityFeedResponse,
     BehaviorEventBatchIn,
     BilibiliConfigOut,
+    BilibiliCookieIn,
+    BilibiliCookieResponse,
     ChatIn,
     CognitionUpdateSeenIn,
     CognitionUpdateSeenResponse,
@@ -191,6 +193,98 @@ def create_app(
     @app.get("/api/health", response_model=HealthResponse)
     def health() -> HealthResponse:
         return HealthResponse(status="ok", service="openbiliclaw-api")
+
+    @app.post("/api/bilibili/cookie", response_model=BilibiliCookieResponse)
+    async def sync_bilibili_cookie(payload: BilibiliCookieIn) -> BilibiliCookieResponse:
+        """Receive a Bilibili cookie from the browser extension and persist
+        it server-side so the backend can call B 站 API as the user.
+
+        Replaces the manual "F12 → Network → copy cookie → paste into
+        wizard" flow. The extension already runs on bilibili.com and has
+        the ``cookies`` Chrome permission, so it's the natural place to
+        get a fresh, valid cookie. We auto-sync on first install and
+        whenever ``chrome.cookies.onChanged`` fires.
+
+        Persistence: writes to ``data/bilibili_cookie.json`` (the runtime
+        cookie source) AND ``config.toml [bilibili].cookie`` (kept in sync
+        as a mirror for ``config-show``). Then rebuilds the runtime
+        BilibiliAPIClient via the same ``rebuild_from_config`` path that
+        the config-update endpoint uses, so any in-flight handlers see
+        the new cookie on their next call.
+
+        Security: the backend is bound to 127.0.0.1 by default, so this
+        endpoint is only reachable from the user's own machine. CORS
+        already accepts ``*`` (set when the app is built); no auth token
+        is needed for an API that lives behind a localhost-only listener.
+        Users who flip ``--host 0.0.0.0`` should put their own auth
+        layer in front of the backend.
+        """
+        from openbiliclaw.bilibili.auth import AuthManager
+        from openbiliclaw.config import (
+            load_config_with_diagnostics,
+            save_config,
+        )
+
+        cookie_value = payload.cookie.strip()
+        if not cookie_value:
+            return BilibiliCookieResponse(
+                ok=False,
+                authenticated=False,
+                message="cookie payload is empty",
+            )
+
+        config, diagnostics = load_config_with_diagnostics()
+        # 1) Validate the cookie if requested. We use the same auth
+        # manager the CLI's interactive wizard uses, for consistency.
+        auth_manager = AuthManager(data_dir=config.data_path)
+        if payload.validate_with_bilibili:
+            status = await auth_manager.validate_cookie(cookie_value)
+            if not status.authenticated:
+                return BilibiliCookieResponse(
+                    ok=False,
+                    authenticated=False,
+                    message=status.message
+                    or "Cookie validation failed; not saved.",
+                )
+            authenticated = True
+            username = status.username or ""
+            user_id = int(status.user_id or 0)
+        else:
+            authenticated = False
+            username = ""
+            user_id = 0
+
+        # 2) Persist to both stores.
+        auth_manager.set_cookie(cookie_value)  # → data/bilibili_cookie.json
+        config.bilibili.cookie = cookie_value
+        save_config(config, diagnostics.config_path)
+
+        # 3) Reload runtime so existing in-flight components pick up
+        # the new client. ``rebuild_from_config`` is atomic — if it
+        # fails partway, the old runtime stays intact.
+        with suppress(Exception):
+            ctx.rebuild_from_config(config)
+
+        # 4) Tell the extension UI the cookie just got refreshed —
+        # this is how the popup knows it can stop nagging the user
+        # to log in.
+        with suppress(Exception):
+            await ctx.event_hub.publish(
+                {
+                    "type": "bilibili_cookie_synced",
+                    "username": username,
+                    "user_id": user_id,
+                    "source": payload.source,
+                }
+            )
+
+        return BilibiliCookieResponse(
+            ok=True,
+            authenticated=authenticated,
+            username=username,
+            user_id=user_id,
+            message="Cookie synced and runtime refreshed.",
+        )
 
     @app.post("/api/init-completed")
     async def init_completed() -> dict[str, object]:

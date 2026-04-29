@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pytest
 
 from openbiliclaw.api.app import create_app
 
@@ -263,6 +267,134 @@ class TestBackendAPI:
 
         assert response.status_code == 200
         assert response.json() == {"status": "ok", "service": "openbiliclaw-api"}
+
+    def test_bilibili_cookie_endpoint_persists_and_validates(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The extension's cookie-sync endpoint must:
+
+        1. Validate the incoming cookie against B 站 nav (not blindly trust).
+        2. Persist to data/bilibili_cookie.json AND config.toml [bilibili].cookie.
+        3. Reject the request when validation fails (don't clobber a working cookie).
+
+        Uses the real AuthManager but stubs the API client factory so
+        we never actually hit api.bilibili.com.
+        """
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.bilibili.auth import AuthManager
+        from openbiliclaw.config import Config, save_config
+
+        # Sandboxed config + data dir; OPENBILICLAW_PROJECT_ROOT redirects
+        # config.toml + data/ to tmp_path so the test can't touch the
+        # developer's real config.
+        monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+        save_config(Config(), tmp_path / "config.toml")
+
+        # Fake B 站 nav: returns a logged-in response so validation passes.
+        class _FakeNav:
+            is_login = True
+            uname = "test_user"
+            mid = 12345
+
+        class _FakeClient:
+            def __init__(self, cookie: str) -> None:
+                self.cookie = cookie
+
+            async def get_nav_info(self) -> _FakeNav:
+                return _FakeNav()
+
+            async def close(self) -> None:
+                pass
+
+        # Patch the auth-manager default client factory globally — the
+        # endpoint constructs its own AuthManager so we can't pass
+        # the factory through; we monkeypatch the staticmethod instead.
+        monkeypatch.setattr(
+            AuthManager,
+            "_default_api_client_factory",
+            staticmethod(lambda cookie: _FakeClient(cookie)),
+        )
+
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+        client = TestClient(app)
+
+        cookie_value = "SESSDATA=abc123; bili_jct=def456; DedeUserID=99999"
+        response = client.post(
+            "/api/bilibili/cookie",
+            json={
+                "cookie": cookie_value,
+                "source": "extension",
+                "validate_with_bilibili": True,
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["ok"] is True
+        assert body["authenticated"] is True
+        assert body["username"] == "test_user"
+        assert body["user_id"] == 12345
+
+        # Side effect 1: data/bilibili_cookie.json got written.
+        cookie_file = tmp_path / "data" / "bilibili_cookie.json"
+        assert cookie_file.exists()
+        import json
+        assert json.loads(cookie_file.read_text())["cookie"] == cookie_value
+
+        # Side effect 2: config.toml [bilibili].cookie mirrors the cookie.
+        config_text = (tmp_path / "config.toml").read_text()
+        assert cookie_value in config_text
+
+    def test_bilibili_cookie_endpoint_rejects_invalid_cookie(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """When B 站 nav says the cookie isn't logged in, do NOT persist."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.bilibili.auth import AuthManager
+        from openbiliclaw.config import Config, save_config
+
+        monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+        save_config(Config(), tmp_path / "config.toml")
+
+        class _FakeNavLoggedOut:
+            is_login = False
+            uname = ""
+            mid = 0
+
+        class _FakeClient:
+            def __init__(self, cookie: str) -> None:
+                pass
+
+            async def get_nav_info(self) -> _FakeNavLoggedOut:
+                return _FakeNavLoggedOut()
+
+            async def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(
+            AuthManager,
+            "_default_api_client_factory",
+            staticmethod(lambda cookie: _FakeClient(cookie)),
+        )
+
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/bilibili/cookie",
+            json={
+                "cookie": "SESSDATA=expired; bili_jct=stale",
+                "validate_with_bilibili": True,
+            },
+        )
+
+        body = response.json()
+        assert body["ok"] is False
+        assert body["authenticated"] is False
+        # No file written (because validation failed before persistence).
+        assert not (tmp_path / "data" / "bilibili_cookie.json").exists()
 
     def test_events_endpoint_persists_batch(self) -> None:
         from fastapi.testclient import TestClient

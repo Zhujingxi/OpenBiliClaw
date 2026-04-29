@@ -411,7 +411,8 @@ OpenBiliClaw/
 
 | 版本 | 日期 | 主要变更 |
 |---|---|---|
-| **[v0.3.11](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.11)** | 2026-04-30 | Docker 模式自带 Ollama embedding sidecar（自动拉 bge-m3 + named volume 持久化）· `docker_runtime.py` 启动时按 env 自动 seed `[llm.embedding] provider=ollama` · CLI 向导（`openbiliclaw init` 直跑）也支持自动装 Ollama |
+| **[v0.3.12](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.12)** | 2026-04-30 | 浏览器扩展自动同步 B 站 Cookie 到后端，再也不用 F12：扩展用 `chrome.cookies` API 读登录态 → 后端 `POST /api/bilibili/cookie` 校验 + 持久化 + 热重载 + WebSocket 广播。装好扩展几秒内自动登录态，Cookie 过期也会自动续 |
+| [v0.3.11](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.11) | 2026-04-30 | Docker 模式自带 Ollama embedding sidecar（自动拉 bge-m3 + named volume 持久化）· `docker_runtime.py` 启动时按 env 自动 seed `[llm.embedding] provider=ollama` · CLI 向导（`openbiliclaw init` 直跑）也支持自动装 Ollama |
 | [v0.3.10](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.10) | 2026-04-30 | 选 Ollama 时一句话装机自己装 Ollama + 拉模型：检测 → brew/winget/install.sh 自动装 → 后台 `ollama serve` → `ollama pull` 拉所需模型，全程 stream 进度。新增 `ollama_ready` 等 JSON 事件 |
 | [v0.3.9](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.9) | 2026-04-30 | 一句话装机适配 PowerShell 5.1（Win10/Win11 默认 PS 版本）：命令前缀加 TLS 1.2 设置 + 修 `??` PS 7-only 语法 + 脚本内自带 TLS 1.2 兜底 |
 | [v0.3.8](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.8) | 2026-04-30 | `openbiliclaw init` 开头打印「预计 2–5 分钟」+ 4 阶段耗时分布，避免用户以为卡住 |

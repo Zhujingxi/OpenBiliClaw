@@ -25,6 +25,7 @@ import {
   parseNotificationBvid,
   parseCognitionUpdateId,
 } from "./notifications.js";
+import { startCookieSync, handleCookieSyncAlarm } from "./cookie-sync.js";
 import type { BehaviorEvent } from "../shared/types.js";
 
 let eventBuffer: BehaviorEvent[] = [];
@@ -253,12 +254,14 @@ chrome.runtime.onInstalled.addListener(() => {
   ensureFlushAlarm();
   connectRuntimeStream();
   startXhsTaskPolling();
+  startCookieSync();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   ensureFlushAlarm();
   connectRuntimeStream();
   startXhsTaskPolling();
+  startCookieSync();
 });
 
 chrome.action.onClicked.addListener((tab) => {
@@ -321,6 +324,9 @@ chrome.runtime.onMessage.addListener((message) => {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   handleXhsTaskAlarm(alarm.name);
+  if (handleCookieSyncAlarm(alarm.name)) {
+    return;
+  }
   if (alarm.name === FLUSH_ALARM_NAME) {
     if (eventBuffer.length > 0) {
       void flushEvents();

@@ -174,6 +174,40 @@ class DelightAckResponse(BaseModel):
     bvid: str
 
 
+class BilibiliCookieIn(BaseModel):
+    """Cookie sync payload from the browser extension.
+
+    Lets the extension push the user's live bilibili.com session cookies
+    to the backend (writes to data/bilibili_cookie.json + config.toml's
+    [bilibili].cookie). Replaces the manual F12 → copy → paste flow.
+    """
+
+    cookie: str = Field(
+        ...,
+        description="Cookie header string ('SESSDATA=...; bili_jct=...; ...').",
+        min_length=1,
+    )
+    source: str = Field(
+        default="extension",
+        description="Where the cookie came from. Used for telemetry only.",
+    )
+    validate_with_bilibili: bool = Field(
+        default=True,
+        description="If true, hit the Bilibili nav endpoint before saving "
+        "to confirm the cookie is actually authenticated.",
+    )
+
+
+class BilibiliCookieResponse(BaseModel):
+    """Result of a cookie-sync attempt."""
+
+    ok: bool
+    authenticated: bool
+    username: str = ""
+    user_id: int = 0
+    message: str = ""
+
+
 class NotificationAckIn(BaseModel):
     """Acknowledge one browser notification delivery."""
 
