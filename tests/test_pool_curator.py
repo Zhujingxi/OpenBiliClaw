@@ -77,6 +77,47 @@ def test_topic_fatigue_empty_inputs() -> None:
     assert PoolCurator._topic_fatigue("ai", ()) == 0.0
 
 
+def test_topic_fatigue_curve_grows_steeply_after_first_repeat() -> None:
+    """Each additional occurrence should add noticeably more fatigue.
+
+    The pre-fix curve (count/len*3) gave count=3/30 only 0.30 fatigue,
+    which after the 0.15 weight only deducted 0.045 from the score —
+    not enough to dethrone a high-relevance candidate. The new curve
+    must escalate sharply after count=2 so a topic that's been served
+    three times in a row gets a near-saturating penalty.
+    """
+    recent = ("ai",) * 3 + ("games",) * 27  # length 30
+    f1 = PoolCurator._topic_fatigue("games", ("games",) + ("other",) * 29)  # 1/30
+    f2 = PoolCurator._topic_fatigue("games", ("games",) * 2 + ("other",) * 28)
+    f3 = PoolCurator._topic_fatigue("games", ("games",) * 3 + ("other",) * 27)
+    f4 = PoolCurator._topic_fatigue("games", ("games",) * 4 + ("other",) * 26)
+    assert 0.0 < f1 < 0.3
+    assert f2 > f1 + 0.1  # second occurrence ≫ first
+    assert f3 > 0.7  # three occurrences are already heavy
+    assert f4 == 1.0  # four+ saturates
+
+
+def test_combined_topic_fatigue_uses_max_of_key_and_group_axes() -> None:
+    """Sibling topic_keys (动漫杂谈/补番/解说) escape per-key fatigue but
+    saturate the topic_group axis (动漫). The combined helper must take
+    the max so the group signal isn't lost."""
+    from openbiliclaw.discovery.engine import DiscoveredContent
+    from openbiliclaw.recommendation.curator import ScoringContext
+
+    item = DiscoveredContent(
+        bvid="BV1A", title="t", topic_key="动漫杂谈", topic_group="动漫"
+    )
+    # No exact key match in history, but topic_group="动漫" appears 3 times
+    context = ScoringContext(
+        recent_topic_keys=("动漫补番", "动漫解说", "动漫资讯", "音乐", "游戏"),
+        recent_topic_groups=("动漫", "动漫", "动漫", "音乐", "游戏"),
+    )
+    fatigue = PoolCurator._combined_topic_fatigue(item, context)
+    # topic_key fatigue would be 0 (no "动漫杂谈" in history); group axis
+    # carries the signal and saturates because 3/5 → high
+    assert fatigue > 0.5
+
+
 # ---------------------------------------------------------------------------
 # Source monotony
 # ---------------------------------------------------------------------------

@@ -572,6 +572,59 @@ class Database:
         )
         return [str(row[0]) for row in cursor.fetchall() if row and row[0]]
 
+    def get_topic_group_samples(
+        self,
+        *,
+        samples_per_group: int = 5,
+        top_n_groups: int = 60,
+    ) -> list[tuple[str, list[str]]]:
+        """For each fresh-pool ``topic_group``, return up to N sample titles.
+
+        Returns the top ``top_n_groups`` groups by member count (tie-break
+        on highest in-group ``relevance_score``). Long-tail micro-topics
+        (1-2 items) almost never show up together in a single 40-candidate
+        recommendation batch, so investing API budget to merge-map them
+        adds latency without affecting visible diversity.
+
+        Used by the recommendation prewarmer to build an accurate
+        supergroup-merge map: short Chinese labels (``赛博朋克``,
+        ``动漫`` …) are catastrophically ambiguous in embedding space
+        when embedded standalone — they need title-context disambiguation.
+        Sample titles are picked top-by-``relevance_score`` within each
+        group, so the input is reasonably stable while the pool is steady.
+        """
+        cursor = self.conn.execute(
+            """
+            SELECT topic_group, title, relevance_score
+            FROM content_cache
+            WHERE COALESCE(pool_status, 'fresh') = 'fresh'
+              AND COALESCE(topic_group, '') != ''
+              AND COALESCE(title, '') != ''
+            ORDER BY topic_group, relevance_score DESC, bvid
+            """
+        )
+        by_group: dict[str, list[str]] = defaultdict(list)
+        group_max_score: dict[str, float] = {}
+        group_count: dict[str, int] = defaultdict(int)
+        for row in cursor.fetchall():
+            group = str(row["topic_group"]).strip()
+            title = str(row["title"]).strip()
+            if not group or not title:
+                continue
+            group_count[group] += 1
+            score = float(row["relevance_score"] or 0.0)
+            if score > group_max_score.get(group, -1.0):
+                group_max_score[group] = score
+            if len(by_group[group]) < samples_per_group:
+                by_group[group].append(title)
+
+        # Rank groups by member count desc, score desc, label asc (stable).
+        ranked = sorted(
+            by_group.keys(),
+            key=lambda g: (-group_count[g], -group_max_score.get(g, 0.0), g),
+        )
+        return [(group, by_group[group]) for group in ranked[:top_n_groups]]
+
     def trim_explore_cluster_overflow(self, *, max_per_cluster: int = 3) -> int:
         """Suppress excess fresh explore items from high-risk topic clusters."""
         cursor = self.conn.execute(
@@ -1196,10 +1249,17 @@ class Database:
                 time.sleep(_LOCK_RETRY_SLEEP_SECONDS)
 
     def get_recent_recommendation_signals(self, *, limit: int = 30) -> list[dict[str, Any]]:
-        """Return recent recommendations with topic/source for scoring context."""
+        """Return recent recommendations with topic/source for scoring context.
+
+        Includes both ``topic_key`` (fine, e.g. ``"洛克王国"``) and
+        ``topic_group`` (coarse, e.g. ``"游戏"``) so the curator can fatigue
+        on both axes. Without ``topic_group``, sibling fine-grained keys
+        like ``动漫杂谈`` / ``动漫补番`` / ``动漫解说`` are independent and
+        per-key fatigue never fires across them.
+        """
         cursor = self.conn.execute(
             """
-            SELECT r.bvid, c.topic_key, c.source, r.created_at
+            SELECT r.bvid, c.topic_key, c.topic_group, c.source, r.created_at
             FROM recommendations AS r
             JOIN content_cache AS c ON c.bvid = r.bvid
             ORDER BY r.created_at DESC, r.id DESC

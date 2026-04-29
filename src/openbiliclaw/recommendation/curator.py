@@ -30,11 +30,19 @@ class ScoringWeights:
 
     Serendipity is weighted higher (0.20) to ensure cross-domain explore
     content surfaces in recommendations, not just high-relevance safe picks.
+
+    ``topic_fatigue`` was raised from 0.15 to 0.25 after observing that
+    high-relevance candidates for "洛克王国"/"动漫"/etc. kept winning the
+    top-K reshuffle batches because the per-key fatigue penalty (~0.045)
+    couldn't overcome the relevance weight advantage (~0.28). Combined
+    with the steeper fatigue curve (now ``count^1.5/len*5``) and the new
+    topic_group axis, the same candidate now takes a 3-4x harder hit
+    when it has appeared ≥2 times in recent history.
     """
 
     relevance: float = 0.30
     freshness: float = 0.20
-    topic_fatigue: float = 0.15
+    topic_fatigue: float = 0.25
     source_monotony: float = 0.15
     serendipity: float = 0.20
 
@@ -53,6 +61,7 @@ class ScoringContext:
     """Immutable snapshot of recent recommendation history."""
 
     recent_topic_keys: tuple[str, ...] = ()
+    recent_topic_groups: tuple[str, ...] = ()
     recent_sources: tuple[str, ...] = ()
     feedback: FeedbackSignals = field(default_factory=FeedbackSignals)
     now: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -107,6 +116,11 @@ class PoolCurator:
             for row in signals
             if str(row.get("topic_key", "")).strip()
         )
+        topic_groups = tuple(
+            str(row.get("topic_group", "")).strip()
+            for row in signals
+            if str(row.get("topic_group", "")).strip()
+        )
         sources = tuple(
             str(row.get("source", "")).strip()
             for row in signals
@@ -135,6 +149,7 @@ class PoolCurator:
 
         return ScoringContext(
             recent_topic_keys=topic_keys,
+            recent_topic_groups=topic_groups,
             recent_sources=sources,
             feedback=FeedbackSignals(
                 disliked_up_mids=frozenset(disliked_ups),
@@ -165,10 +180,7 @@ class PoolCurator:
                 * w.freshness
             )
             fatigue = (
-                self._topic_fatigue(
-                    item.topic_group or item.topic_key,
-                    context.recent_topic_keys,
-                )
+                self._combined_topic_fatigue(item, context)
                 * w.topic_fatigue
             )
             monotony = (
@@ -217,12 +229,51 @@ class PoolCurator:
         return 1.0 / (1.0 + math.exp((age_days - _FRESHNESS_HALF_LIFE_DAYS) / 1.0))
 
     @staticmethod
-    def _topic_fatigue(topic_key: str, recent_topics: tuple[str, ...]) -> float:
-        """Normalised frequency of topic_key in recent recommendations."""
-        if not topic_key or not recent_topics:
+    def _topic_fatigue(topic: str, recent_topics: tuple[str, ...]) -> float:
+        """Saturating fatigue from how often *topic* appeared in recent history.
+
+        Curve (with the canonical ``len(recent)=30``):
+          count=0 → 0.0          count=1 → 0.17
+          count=2 → 0.47         count=3 → 0.87
+          count≥4 → saturates at 1.0
+
+        Derived from ``count^1.5 / len * 5``: linear-style first-occurrence
+        cost, but quadratic-ish growth thereafter so a topic that's been
+        served twice already gets a noticeably bigger penalty than one that
+        was served once. The previous ``count/len*3`` curve only hit 1.0 at
+        count≈10/30, which let high-relevance candidates re-win indefinitely
+        even after appearing 3 times in a row.
+        """
+        if not topic or not recent_topics:
             return 0.0
-        count = sum(1 for t in recent_topics if t == topic_key)
-        return min(1.0, count / max(1, len(recent_topics)) * 3.0)
+        count = sum(1 for t in recent_topics if t == topic)
+        if count == 0:
+            return 0.0
+        return float(min(1.0, (count**1.5) / max(1, len(recent_topics)) * 5.0))
+
+    @classmethod
+    def _combined_topic_fatigue(
+        cls,
+        item: DiscoveredContent,
+        context: ScoringContext,
+    ) -> float:
+        """Fatigue across both topic_key (fine) and topic_group (coarse).
+
+        Either axis flagging the candidate as "we've shown this kind a
+        lot recently" should suffice — so we take the max. This catches
+        the case where ``topic_key`` siblings (动漫杂谈 / 动漫补番 /
+        动漫解说) keep escaping per-key fatigue but together saturate
+        the user's tolerance for one ``topic_group``.
+        """
+        key_fatigue = cls._topic_fatigue(
+            (item.topic_key or "").strip(),
+            context.recent_topic_keys,
+        )
+        group_fatigue = cls._topic_fatigue(
+            (item.topic_group or "").strip(),
+            context.recent_topic_groups,
+        )
+        return max(key_fatigue, group_fatigue)
 
     @staticmethod
     def _source_monotony(source: str, recent_sources: tuple[str, ...]) -> float:
@@ -315,27 +366,34 @@ class PoolCurator:
             )
             bonus = self._serendipity_bonus(item.source_strategy) * w.serendipity
 
-            # Embedding-based topic fatigue
-            topic = (item.topic_group or item.topic_key).strip()
-            if embedding_service is not None and topic:
-                topic_vec = await embedding_service.embed(topic)
+            # Embedding-based topic fatigue (when available) or the
+            # exact-string fallback. Either path takes both axes (topic_key
+            # for fine, topic_group for coarse) and uses the max — so a
+            # candidate trips fatigue if EITHER its specific topic OR its
+            # broader cluster has been served too often recently.
+            topic_label = (item.topic_group or item.topic_key).strip()
+            if embedding_service is not None and topic_label:
+                topic_vec = await embedding_service.embed(topic_label)
                 if topic_vec and _recent_vecs:
                     sim_count = sum(
                         cosine_similarity(topic_vec, rv) >= embedding_service.similarity_threshold
                         for rv in _recent_vecs.values()
                     )
-                    fatigue = min(1.0, sim_count / max(1, len(context.recent_topic_keys)) * 3.0)
+                    fatigue = min(
+                        1.0,
+                        (sim_count**1.5) / max(1, len(context.recent_topic_keys)) * 5.0,
+                    )
                 else:
-                    fatigue = self._topic_fatigue(topic, context.recent_topic_keys)
+                    fatigue = self._combined_topic_fatigue(item, context)
             else:
-                fatigue = self._topic_fatigue(topic, context.recent_topic_keys)
+                fatigue = self._combined_topic_fatigue(item, context)
             fatigue *= w.topic_fatigue
 
             score = base + fresh - fatigue - monotony + bonus
 
             # Embedding-based feedback adjustment
-            if embedding_service is not None and topic:
-                topic_vec = await embedding_service.embed(topic)
+            if embedding_service is not None and topic_label:
+                topic_vec = await embedding_service.embed(topic_label)
                 adj = 0.0
                 if item.up_mid and item.up_mid in context.feedback.disliked_up_mids:
                     adj -= _FEEDBACK_DISLIKE_UP_PENALTY
