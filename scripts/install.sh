@@ -335,7 +335,7 @@ PY
                 ;;
         esac
         echo ""
-        echo "  3. Run with your values filled in:"
+        echo "  3. Run with your values filled in (DO NOT add --skip-init):"
         echo ""
         # Build the command dynamically — only show flags for what's missing.
         echo "     python3 $INSTALL_DIR/scripts/agent_bootstrap.py \\"
@@ -349,7 +349,13 @@ PY
         esac
         echo "         --port $PORT --host $HOST"
         echo ""
-        echo "  3. Verify the backend is healthy:"
+        echo "     This auto-runs 'openbiliclaw init' once credentials check out:"
+        echo "       - pulls your Bilibili history"
+        echo "       - generates the soul profile"
+        echo "       - runs the first content discovery pass"
+        echo "     Takes 2-5 minutes. Without this step the extension shows nothing."
+        echo ""
+        echo "  4. Verify the backend is healthy:"
         echo "      curl -sS $health_url"
     else
         echo "All credentials present — init has been run automatically."

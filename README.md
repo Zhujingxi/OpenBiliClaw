@@ -409,7 +409,8 @@ OpenBiliClaw/
 
 | 版本 | 日期 | 主要变更 |
 |---|---|---|
-| **[v0.3.6](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.6)** | 2026-04-30 | 装机向导从普通用户视角彻底重写：Ollama 排第一作为默认 · OpenAI 官方与协议兼容自建网关拆成两个菜单项 · Embedding 单独提问附带解释 · B 站 Cookie 教用户怎么 F12 拿 |
+| **[v0.3.7](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.7)** | 2026-04-30 | 一句话装机配齐凭据后**自动跑 `openbiliclaw init`**（拉历史 / 生成画像 / 首轮发现），不再让用户多走一步 · agent-install.md Hard Rule 翻转：默认跑 init · agent_bootstrap.py auto-init 修 Windows/Docker 路径 |
+| [v0.3.6](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.6) | 2026-04-30 | 装机向导从普通用户视角彻底重写：Ollama 排第一作为默认 · OpenAI 官方与协议兼容自建网关拆成两个菜单项 · Embedding 单独提问附带解释 · B 站 Cookie 教用户怎么 F12 拿 |
 | [v0.3.5](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.5) | 2026-04-29 | 装机向导改 4 阶段（base_url / 三件套 / embedding 4 选 1 / per-module 覆盖）· 不再因 `openai = 协议家族` 歧义猜错 · `agent_bootstrap.py` 新增 7 个 flag |
 | [v0.3.4](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.4) | 2026-04-29 | 原生 Windows 一句话装机（PowerShell `install.ps1`，无需 Docker/WSL2）· `agent_bootstrap.py` Windows 适配（taskkill / netstat-ano） |
 | **[v0.3.0](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.0)** | 2026-04-28 | 通用多源架构（xhs/web 适配器投产）· 本地 Ollama embedding 兜底 · reshuffle 5x 提速 · 跨源主题配额 |

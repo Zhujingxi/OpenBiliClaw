@@ -308,7 +308,7 @@ print(f"MISSING={','.join(missing)}")
         Write-Host '  1. Choose your LLM provider (default: openai):'
         Write-Host '     Supported: openai | gemini | claude | deepseek | openrouter | ollama'
         Write-Host ''
-        Write-Host '  2. Prepare missing values, then run with values filled in:'
+        Write-Host '  2. Prepare missing values, then run with values filled in (DO NOT add --skip-init):'
         Write-Host ''
         Write-Host "     python $InstallDir\scripts\agent_bootstrap.py ``"
         Write-Host "         --project-dir $InstallDir ``"
@@ -316,6 +316,12 @@ print(f"MISSING={','.join(missing)}")
         if ($missing -match 'api_key')         { Write-Host "         --llm-api-key '<YOUR_API_KEY>' ``" }
         if ($missing -match 'bilibili.cookie') { Write-Host "         --bilibili-cookie '<YOUR_COOKIE>' ``" }
         Write-Host "         --port $Port --host $ApiHost"
+        Write-Host ''
+        Write-Host "     This auto-runs 'openbiliclaw init' once credentials check out:"
+        Write-Host '       - pulls your Bilibili history'
+        Write-Host '       - generates the soul profile'
+        Write-Host '       - runs the first content discovery pass'
+        Write-Host '     Takes 2-5 minutes. Without this step the extension shows nothing.'
         Write-Host ''
         Write-Host '  3. Verify the backend is healthy:'
         Write-Host "      Invoke-RestMethod $healthUrl"

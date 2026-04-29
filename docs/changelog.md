@@ -4,6 +4,41 @@
 
 ---
 
+## v0.3.7: 一句话装机配齐凭据后自动跑 init（2026-04-30）
+
+v0.3.6 的人机界面虽然好了，但有个流程漏洞：用户给完凭据后，AI agent 按文档照做加上了 `--skip-init`，结果装机流程在「config 写好、健康检查通过」就停了。**用户打开扩展看不到任何东西**——画像没生成、历史没拉、首轮内容池是空的，需要再手动跑一遍 `openbiliclaw init`。这彻底违反了「一句话装机」的承诺。
+
+### 修复内容
+
+1. **`docs/agent-install.md` Hard Rule 第 3 条彻底反转**：原来是「Never run `openbiliclaw init` unless the user explicitly asks」，新版是「Run init by default — DO NOT pass `--skip-init`」。给 AI agent 的指令非常明确：凭据齐了就让 init 自动跑
+
+2. **示例命令删除 `--skip-init`**：`docs/agent-install.md` 里两个示例都不再带这个 flag
+
+3. **`agent_bootstrap.py` 的 auto-init 逻辑修了三个 bug**：
+   - 之前 venv python 路径硬编码 `.venv/bin/python`（POSIX），Windows 上找不到——改成按 `os.name == "nt"` 选 `.venv/Scripts/python.exe` 或 `.venv/bin/python`
+   - Docker 模式之前不跑 init——新版用 `docker exec -i openbiliclaw-backend openbiliclaw init` 在容器里跑
+   - 兜底从 `python3` 改成 `sys.executable`，更可靠
+
+4. **`install.sh` / `install.ps1` 状态块加一段说明**：
+   ```
+   This auto-runs 'openbiliclaw init' once credentials check out:
+     - pulls your Bilibili history
+     - generates the soul profile
+     - runs the first content discovery pass
+   Takes 2-5 minutes. Without this step the extension shows nothing.
+   ```
+   还在 follow-up 命令旁边加了「DO NOT add --skip-init」提示，避免 AI agent 按惯性加上这个 flag
+
+5. **agent-install.md 增加「报告最终状态」清单**：AI agent 装完后必须告诉用户：
+   - ✅ 后端已启动
+   - ✅ 配置已写入
+   - ✅ 初始化已完成（拉历史、生成画像、跑发现）
+   - 👉 下一步：装浏览器扩展
+
+   并提示用户 init 首次运行需 2-5 分钟，避免被以为「卡住了」
+
+---
+
 ## v0.3.6: 装机向导从普通用户视角彻底重写（2026-04-30）
 
 v0.3.5 的向导虽然问全了，但顺序、措辞和默认都不够友好。基于线上 AI agent 实际跑出来的提问被反馈「太差」，v0.3.6 整个人机界面重写：

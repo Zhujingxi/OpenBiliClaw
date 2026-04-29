@@ -42,14 +42,18 @@ Missing:     (none)  |  llm.<provider>.api_key, bilibili.cookie, ...
 Next action (required — credentials are missing):
   1. Ask the user for: <exactly the missing items>
   2. Run this command with the values: <exact python3 command>
+     (init will run automatically once credentials are filled in;
+      do NOT add --skip-init)
   3. Curl the Health URL to confirm.
   4. Report the final state.
 
  — or —
 
-Next action (optional follow-ups):
-  - Confirm the backend is healthy: curl -sS <Health URL>
-  - Run `uv run openbiliclaw init` (only if the user explicitly asks)
+Next action (init has been run automatically):
+  - Verify the backend is healthy: curl -sS <Health URL>
+  - See recommendations:    cd <dir> && uv run openbiliclaw recommend
+  - View the soul profile:  cd <dir> && uv run openbiliclaw profile
+  - Re-run init manually if needed: cd <dir> && uv run openbiliclaw init
 ================================================================
 ```
 
@@ -178,8 +182,7 @@ Run with `--bilibili-cookie "<the full cookie string>"`.
 python3 scripts/agent_bootstrap.py \
   --provider ollama \
   --llm-model llama3 \
-  --bilibili-cookie "SESSDATA=...; bili_jct=...; DedeUserID=..." \
-  --skip-init
+  --bilibili-cookie "SESSDATA=...; bili_jct=...; DedeUserID=..."
 ```
 
 **自建网关 + Ollama embedding 兜底**（最常见的进阶路径）：
@@ -192,12 +195,31 @@ python3 scripts/agent_bootstrap.py \
   --llm-model meta-llama/Llama-3.1-70B-Instruct \
   --embedding-provider ollama \
   --embedding-model bge-m3 \
-  --bilibili-cookie "SESSDATA=...; ..." \
-  --skip-init
+  --bilibili-cookie "SESSDATA=...; ..."
 ```
 
-After running, **always** curl the `Health URL` from the status block to
-confirm `200 OK`, then report the final state to the user.
+> ⚠️ **Do NOT pass `--skip-init`** here. The point of running the
+> bootstrap with credentials is to reach a usable state. When all
+> credentials are present and `--skip-init` is absent (the default),
+> `agent_bootstrap.py` will automatically run `openbiliclaw init` after
+> the backend is healthy: it pulls the user's Bilibili history,
+> generates the soul profile, and runs the first content discovery
+> pass. **Without init, the user has nothing to look at — they'd see an
+> empty extension and would have to manually run `openbiliclaw init`
+> themselves**, which defeats the point of one-line install.
+
+After running, **always**:
+
+1. Curl the `Health URL` from the status block to confirm `200 OK`.
+2. Report the final state to the user, including:
+   - "✅ 后端已启动，监听 http://127.0.0.1:8420"
+   - "✅ 配置已写入"
+   - "✅ 初始化已完成 —— 已拉取你的 B 站历史、生成画像、跑了首轮内容发现"
+   - "👉 下一步：装浏览器扩展（链接）来看推荐"
+
+**`init` takes 2-5 minutes on first run** (real LLM calls + real
+Bilibili fetches). Tell the user upfront so they don't think it's
+hung. The bootstrap streams init's stdout so progress is visible.
 
 ### Per-module overrides（高级，默认不要问）
 
@@ -236,7 +258,7 @@ system-level package the user must consent to.
 
 1. **Never edit `config.toml` by hand.** Every credential write goes through `scripts/agent_bootstrap.py`.
 2. **Never hard-code `http://127.0.0.1:8420/api/health`.** Always use the `Health URL` line from the status block — the port may be different if the user already has another instance running.
-3. **Never run `openbiliclaw init` unless the user explicitly asks.** It triggers real LLM calls and real Bilibili history fetches.
+3. **Run init by default — DO NOT pass `--skip-init`.** Once all credentials are present, the user's expectation is "the app is ready to use." That means: history pulled, soul profile generated, first discovery pass done. `agent_bootstrap.py` does this automatically after the backend is healthy. Only pass `--skip-init` when the user explicitly says "don't pull my history yet" or you're doing a credentials-only patch on an already-initialized install.
 4. **Never use WebFetch on this document.** WebFetch summarises markdown and can drop exact flags. Use Bash `curl -o` + Read instead.
 
 ## Deeper reference (for humans, not required)

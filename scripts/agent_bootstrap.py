@@ -1058,24 +1058,49 @@ def run(args: argparse.Namespace) -> int:
             )
         )
 
-        # Auto-run init when all credentials are present and --skip-init is not set
+        # Auto-run init when all credentials are present and --skip-init is
+        # not set. The user finished giving us their credentials — they
+        # expect the system to be in a usable state when we hand control
+        # back. init = pull history + generate soul profile + first
+        # discovery pass. Without it the user opens the extension and
+        # sees nothing.
         if not final_status["missing"] and not args.skip_init:
-            info("All credentials present — running 'openbiliclaw init' to reach usable state...")
+            info(
+                "All credentials present — running 'openbiliclaw init' to reach usable state... "
+                "(this takes 2-5 minutes: real LLM calls + Bilibili history fetches)"
+            )
             try:
                 init_cmd: list[str] = []
-                if detect_uv():
+                if mode == "docker":
+                    # Run init inside the running compose service.
+                    init_cmd = [
+                        "docker",
+                        "exec",
+                        "-i",
+                        "openbiliclaw-backend",
+                        "openbiliclaw",
+                        "init",
+                    ]
+                elif detect_uv():
                     init_cmd = ["uv", "run", "openbiliclaw", "init"]
                 else:
-                    venv_python = project_dir / ".venv" / "bin" / "python"
+                    if os.name == "nt":
+                        venv_python = project_dir / ".venv" / "Scripts" / "python.exe"
+                    else:
+                        venv_python = project_dir / ".venv" / "bin" / "python"
                     if venv_python.exists():
                         init_cmd = [str(venv_python), "-m", "openbiliclaw.cli", "init"]
                     else:
-                        init_cmd = ["python3", "-m", "openbiliclaw.cli", "init"]
+                        init_cmd = [sys.executable, "-m", "openbiliclaw.cli", "init"]
                 run_streaming(init_cmd, cwd=project_dir, check=False)
                 emit(BootstrapResult("ok", "init_complete", {}))
             except Exception as exc:
                 emit(BootstrapResult("warning", "init_failed", {"error": str(exc)}))
-                info(f"Init failed ({exc}), but the backend is running. You can run 'openbiliclaw init' manually later.")
+                info(
+                    f"Init failed ({exc}), but the backend is running. "
+                    "You can run 'openbiliclaw init' manually later "
+                    "(or 'docker exec -it openbiliclaw-backend openbiliclaw init' for Docker)."
+                )
 
         return 0
 
