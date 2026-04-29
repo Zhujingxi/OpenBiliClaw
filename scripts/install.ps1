@@ -129,18 +129,25 @@ function Get-PythonExe {
         if ($cmd) {
             try {
                 if ($candidate -eq 'py') {
-                    $version = & $cmd -3.11 -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>$null
+                    $version = & $cmd -3.11 -c 'import sys; print(sys.version_info[0], sys.version_info[1])' 2>$null
                     if (-not $version) {
-                        $version = & $cmd -3 -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>$null
+                        $version = & $cmd -3 -c 'import sys; print(sys.version_info[0], sys.version_info[1])' 2>$null
                     }
                 } else {
-                    $version = & $cmd -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>$null
+                    $version = & $cmd -c 'import sys; print(sys.version_info[0], sys.version_info[1])' 2>$null
                 }
             } catch {
                 continue
             }
             if (-not $version) { continue }
-            $parts = $version.Trim() -split '\.'
+            # Python prints 'major minor' (whitespace-separated) — using
+            # print(major, minor) instead of an f-string avoids a PS 5.1
+            # quoting bug where inner double-quotes / { } get stripped
+            # before reaching python.exe, which would yield SyntaxError
+            # on the Python side and falsely trigger "Python 3.11+ is
+            # required."
+            $parts = $version.Trim() -split '\s+'
+            if ($parts.Count -lt 2) { continue }
             $major = [int]$parts[0]; $minor = [int]$parts[1]
             if (($major -gt 3) -or ($major -eq 3 -and $minor -ge 11)) {
                 return $cmd.Path

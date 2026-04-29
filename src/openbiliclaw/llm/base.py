@@ -119,18 +119,53 @@ class LLMRegistry:
         self._providers: dict[str, LLMProvider] = {}
         self._default: str = ""
         self._rate_limited_until: dict[str, float] = {}
+        # Names of providers that should NOT appear in the chat-completion
+        # fallback chain — typically an Ollama instance registered solely
+        # for embedding (see register(..., chat_capable=False)).
+        self._chat_disabled: set[str] = set()
 
-    def register(self, provider: LLMProvider, *, default: bool = False) -> None:
+    def register(
+        self,
+        provider: LLMProvider,
+        *,
+        default: bool = False,
+        chat_capable: bool = True,
+    ) -> None:
         """Register a provider.
 
         Args:
             provider: LLM provider instance.
             default: Whether to set as default provider.
+            chat_capable: When False, the provider is registered for
+                non-chat use (typically Ollama for embedding-only) and
+                will NOT appear in the chat-completion fallback chain.
+                Default True for backward compat — every other call site
+                wants chat capability.
+
+                Why this matters: if the user only set
+                ``[llm.embedding] provider = "ollama"`` and never
+                configured ``[llm.ollama] model``, the embedding service
+                still needs Ollama to be in the registry — but the
+                model on disk is ``bge-m3``, which can't serve
+                ``/api/chat`` requests. Without this flag, when the
+                primary cloud provider hits a transient error, the
+                fallback chain happily picks Ollama, gets a 404 from
+                ``/api/chat``, and the user sees
+                ``All providers failed (openai, ollama)``.
         """
         self._providers[provider.name] = provider
+        if not chat_capable:
+            self._chat_disabled.add(provider.name)
+        else:
+            self._chat_disabled.discard(provider.name)
         if default or not self._default:
             self._default = provider.name
-        logger.info("Registered LLM provider: %s%s", provider.name, " (default)" if default else "")
+        logger.info(
+            "Registered LLM provider: %s%s%s",
+            provider.name,
+            " (default)" if default else "",
+            "" if chat_capable else " [embedding-only]",
+        )
 
     def get(self, name: str | None = None) -> LLMProvider:
         """Get a provider by name, or the default.
@@ -228,13 +263,29 @@ class LLMRegistry:
         return results
 
     def _fallback_order(self) -> list[str]:
-        """Return the sequential provider order for fallback."""
-        if not self._default:
-            return self.available_providers
-        return [
-            self._default,
-            *[name for name in self.available_providers if name != self._default],
+        """Return the sequential CHAT-fallback provider order.
+
+        Skips providers registered with ``chat_capable=False`` (the
+        embedding-only Ollama case). The default provider is honored
+        whenever it's chat-capable; if the user picked an embedding-only
+        provider as default we still skip it from the chat chain.
+        """
+        chat_pool = [
+            name for name in self.available_providers
+            if name not in self._chat_disabled
         ]
+        if not chat_pool:
+            # Edge case: every provider is embedding-only. Surface the
+            # problem rather than silently doing nothing — complete()
+            # will raise LLMFallbackError("No provider was available
+            # to process the request.").
+            return []
+        if self._default and self._default in chat_pool:
+            return [
+                self._default,
+                *[name for name in chat_pool if name != self._default],
+            ]
+        return chat_pool
 
     def _provider_on_cooldown(self, provider_name: str) -> bool:
         until = self._rate_limited_until.get(provider_name)

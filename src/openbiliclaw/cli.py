@@ -18,6 +18,40 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+
+def _force_utf8_stdout_on_windows() -> None:
+    """Reconfigure stdout/stderr to UTF-8 on Windows.
+
+    Why: simplified-Chinese Windows defaults the console to GBK (cp936).
+    Any emoji in our CLI output (e.g. ``⏱`` in the init banner, ``🦀``
+    in the typer help text) raises UnicodeEncodeError as soon as the
+    output stream tries to encode it. Users see the program crash with
+    no useful message.
+
+    Fix: force sys.stdout / sys.stderr into UTF-8 mode at import time,
+    with ``errors='replace'`` as a final safety net so a stray
+    untranslatable byte degrades to '?' instead of crashing the run.
+    Idempotent + a no-op on POSIX (``reconfigure`` is a Python 3.7+
+    method on TextIOWrapper that just rewires the codec).
+    """
+    if os.name != "nt":
+        return
+    # PYTHONUTF8=1 is the cleanest fix but only takes effect at process
+    # start, not at module import — set it for any child processes we
+    # spawn (subprocess calls inside the CLI inherit this).
+    os.environ.setdefault("PYTHONUTF8", "1")
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            with suppress(Exception):
+                reconfigure(encoding="utf-8", errors="replace")
+
+
+_force_utf8_stdout_on_windows()
+
+
 app = typer.Typer(
     name="openbiliclaw",
     help="🦀 OpenBiliClaw — 你的 B 站专属 AI 朋友",

@@ -56,7 +56,14 @@ def build_llm_registry(
     for _name, provider in provider_specs:
         if provider is None:
             continue
-        registry.register(provider, default=False)
+        # Ollama gets a special chat-capability check: the registry needs
+        # it for embedding even when the user never configured a chat
+        # model, but in that case it MUST stay out of the chat fallback
+        # chain (see _ollama_is_chat_capable + base.py:_fallback_order).
+        chat_capable = True
+        if _name == "ollama" and not _ollama_is_chat_capable(config):
+            chat_capable = False
+        registry.register(provider, default=False, chat_capable=chat_capable)
 
     for name, provider in overrides.items():
         if name not in registry.available_providers:
@@ -218,6 +225,34 @@ def _maybe_ollama_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         model=model or "llama3",
         base_url=base_url,
     )
+
+
+def _ollama_is_chat_capable(config: Config) -> bool:
+    """Decide whether the registered Ollama instance can serve chat
+    completions, or only embedding requests.
+
+    The user opts in to chat capability by either:
+      * setting ``[llm.ollama] model`` (their explicit chat model), or
+      * picking ``ollama`` as ``[llm].default_provider``, OR using it in
+        any per-module override.
+
+    If none of those are true and we only registered Ollama because the
+    embedding section pointed there, treat it as embedding-only. The
+    fallback chain will skip it for chat completions, avoiding the
+    "All providers failed (..., ollama). Last error: ollama request
+    failed: 404" path when the only model on disk is bge-m3.
+    """
+    if config.llm.ollama.model.strip():
+        return True
+    if config.llm.default_provider.strip().lower() == "ollama":
+        return True
+    for module in ("soul", "discovery", "recommendation", "evaluation"):
+        module_cfg = getattr(config.llm, module, None)
+        if module_cfg is None:
+            continue
+        if str(getattr(module_cfg, "provider", "")).strip().lower() == "ollama":
+            return True
+    return False
 
 
 def _maybe_openrouter_provider(

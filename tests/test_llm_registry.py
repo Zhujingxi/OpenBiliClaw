@@ -337,3 +337,101 @@ async def test_registry_temporarily_cools_down_rate_limited_provider(
     assert second.provider == "claude"
     assert third.provider == "openai"
     assert openai.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_embedding_only_ollama_is_excluded_from_chat_fallback() -> None:
+    """Regression: when [llm.embedding] provider="ollama" but the user
+    never configured a chat model, the registry registers Ollama so the
+    embedding service can reach it — but the chat fallback chain MUST
+    skip it. Otherwise a primary cloud LLM failure cascades to Ollama,
+    which only has bge-m3 on disk, returning 404 from /api/chat and the
+    user sees 'All providers failed (openai, ollama)'.
+    """
+    from openbiliclaw.config import EmbeddingConfig
+
+    cfg = Config(
+        llm=LLMConfig(
+            default_provider="openai",
+            openai=LLMProviderConfig(api_key="openai-key"),
+            # Ollama: NO chat model configured. Empty model + non-default.
+            ollama=LLMProviderConfig(
+                api_key="ollama",
+                model="",  # ← critical: no chat model
+                base_url="http://localhost:11434/v1",
+            ),
+            # Embedding wants Ollama → forces registration even though
+            # the user never set up chat.
+            embedding=EmbeddingConfig(provider="ollama", model="bge-m3"),
+        )
+    )
+
+    openai_fake = FakeProvider(
+        "openai", errors=[LLMProviderError("primary failed")]
+    )
+    ollama_fake = FakeProvider(
+        "ollama",
+        # If the bug is back, the chain will reach this — and we'd want
+        # to assert that it WASN'T called. We don't queue any responses;
+        # if reached it'd raise IndexError.
+    )
+
+    registry = build_llm_registry(
+        cfg,
+        provider_overrides={"openai": openai_fake, "ollama": ollama_fake},
+    )
+
+    # Sanity: both providers ARE registered (embedding service still
+    # needs to find ollama).
+    assert "openai" in registry.available_providers
+    assert "ollama" in registry.available_providers
+
+    # ...but the chat fallback should NOT include ollama.
+    chat_chain = registry._fallback_order()
+    assert "ollama" not in chat_chain, (
+        f"embedding-only ollama leaked into chat fallback: {chat_chain}"
+    )
+
+    # End-to-end: chat call with a failing primary should raise the
+    # primary error (not silently fall through to ollama and 404).
+    with pytest.raises(LLMProviderError):
+        await registry.complete([{"role": "user", "content": "hi"}])
+    # Verify ollama was never called.
+    assert ollama_fake.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_ollama_with_explicit_chat_model_is_chat_capable() -> None:
+    """Counterpart to the embedding-only test: when the user configures
+    [llm.ollama] model = "llama3", Ollama IS chat-capable and SHOULD
+    appear in the chat fallback. (We had to make sure the previous fix
+    didn't accidentally exclude every Ollama from chat.)
+    """
+    cfg = Config(
+        llm=LLMConfig(
+            default_provider="openai",
+            openai=LLMProviderConfig(api_key="openai-key"),
+            ollama=LLMProviderConfig(
+                api_key="ollama",
+                model="llama3",  # ← explicit chat model
+                base_url="http://localhost:11434/v1",
+            ),
+        )
+    )
+
+    registry = build_llm_registry(
+        cfg,
+        provider_overrides={
+            "openai": FakeProvider(
+                "openai", errors=[LLMProviderError("primary failed")]
+            ),
+            "ollama": FakeProvider(
+                "ollama", responses=[LLMResponse(content="ok", provider="ollama")]
+            ),
+        },
+    )
+    chat_chain = registry._fallback_order()
+    assert chat_chain == ["openai", "ollama"]
+
+    response = await registry.complete([{"role": "user", "content": "hi"}])
+    assert response.provider == "ollama"

@@ -4,6 +4,56 @@
 
 ---
 
+## v0.3.15: 一连串 Windows 装机踩坑修复 + Ollama embedding-only 不应做 chat fallback（2026-04-30）
+
+社区反馈了一组 Windows 原生路径的坑，集中修复：
+
+### 1. CLI 在 GBK 控制台打 emoji 直接崩
+
+`openbiliclaw init` 开场打的「⏱」在简体中文 Windows 默认 GBK 控制台触发 `UnicodeEncodeError: 'gbk' codec can't encode character '⏱'`。修复：在 `cli.py` 顶部加 `_force_utf8_stdout_on_windows()`：
+
+- `os.name == "nt"` 时设 `PYTHONUTF8=1` + `PYTHONIOENCODING=utf-8`（这俩对子进程也生效）
+- 用 `sys.stdout.reconfigure(encoding="utf-8", errors="replace")` 把流的 codec 换成 UTF-8 + 替换错误处理
+
+POSIX 上完全是 no-op。`errors="replace"` 是最后一道兜底——即使有少数字符译不动，也只会显示 `?` 而不是崩溃。
+
+### 2. install.ps1 的 `python -c '...f"{...}"...'` 在 PS 5.1 下被剥引号
+
+PowerShell 5.1 把单引号 PS 字符串里的内嵌 `"..."` 传给 native command 时会丢内层引号。结果 `python -c 'print(f"{x}.{y}")'` 实际执行 `python -c print(fx.y)` → SyntaxError → 安装器误报「Python 3.11+ is required」。
+
+修复：去掉 f-string 和内嵌引号，用 `print(sys.version_info[0], sys.version_info[1])`，输出 `3 11` 用空格切分。Python 端不再有 `f"..."`，PS 5.1 引号 bug 触发不到。
+
+### 3. Bash 在 Windows 上误踩 WSL
+
+`docs/agent-install.md` 让 AI agent 在 Windows 跑 `curl ... | bash`，但 Windows 上 `bash` 默认指向 `C:\Windows\System32\bash.exe`（WSL 启动器）。WSL 没装时报 `execvpe(/bin/bash) failed: No such file or directory`。
+
+修复：agent-install.md 加显眼警告，告诉 AI agent 在 Windows 默认走 PowerShell；如必须用 bash，显式调 `& "C:\Program Files\Git\bin\bash.exe" -c "..."`。
+
+### 4. 后端 Ollama embedding-only 注册不应进入 chat fallback chain
+
+最严重的一个：用户日志里出现 `All providers failed (openai, ollama). Last error: ollama request failed: 404 page not found`。根因——`[llm.embedding] provider="ollama"` 触发 `_maybe_ollama_provider` 注册一个仅有 `bge-m3`（embedding 模型）的 Ollama provider。`LLMRegistry.register()` 不区分 chat/embedding 用途，主 provider 失败时 fallback chain 把它当成 chat provider 用，打 `/api/chat?model=llama3` → 404，还把 404 误归因「fallback 也挂了」。
+
+修复：
+
+- `LLMRegistry.register()` 加 `chat_capable: bool = True` 参数 + 内部 `_chat_disabled` 集合
+- `_fallback_order()` 跳过 `_chat_disabled` 里的 provider
+- `build_llm_registry()` 调 `_ollama_is_chat_capable(config)` 判定：用户必须在 `[llm.ollama] model` 显式给了 chat 模型，或把 ollama 设成默认/任一模块的 provider，否则视作 embedding-only，注册时传 `chat_capable=False`
+
+回归测试：
+
+- `tests/test_llm_registry.py::test_embedding_only_ollama_is_excluded_from_chat_fallback` —— 模拟「主 OpenAI 挂了 + Ollama 只配了 embedding」场景，断言 chat 链里**没有** ollama，断言主 provider 的错误如实抛出（不会再被「ollama 也挂了」掩盖）
+- `test_ollama_with_explicit_chat_model_is_chat_capable` —— 反向验证：用户给了 `[llm.ollama] model="llama3"` 时，Ollama 仍然在 fallback 链里，符合预期
+
+### 5. UTF-8 持久化（v0.3.14 已修，这里只是关联引用）
+
+社区报告里同时提到 `MemoryLayer.load/save` 没指定 UTF-8 ——**已经在 v0.3.14 修了**，这里不重复。
+
+### 致谢
+
+非常感谢社区的细致复现 + 系统性总结。一份报告解锁四个独立 bug + 一个架构问题，PR 级质量。
+
+---
+
 ## v0.3.14: 修 Windows GBK 默认编码导致接口 500（2026-04-30）
 
 社区反馈在简体中文 Windows 上后端用默认 GBK locale 启动时，扩展请求 `/api/delight/pending-batch?limit=20`、`/api/activity-feed?limit=10` 等接口都会返回 500，根因是 `MemoryLayer.load()` / `save()` 在 `src/openbiliclaw/memory/manager.py` 用了不带 `encoding=` 的 `open()`：

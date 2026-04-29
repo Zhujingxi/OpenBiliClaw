@@ -15,6 +15,17 @@ Pick the command for the user's shell — **detect the platform from the user's 
 curl -fsSL https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scripts/install.sh | bash
 ```
 
+> ⚠️ **Detect, don't guess.** On a native Windows host (no WSL),
+> `bash` may resolve to `C:\Windows\System32\bash.exe`, which is the
+> Microsoft WSL launcher — not Git Bash. If WSL isn't actually
+> installed, the launcher fails with `execvpe(/bin/bash) failed: No
+> such file or directory`. AI agent: if you see this on Windows, do
+> NOT silently fall back to `bash`. Instead either:
+> - run the **PowerShell** one-liner below (preferred — install.ps1
+>   is the supported native-Windows path), **or**
+> - explicitly invoke Git Bash:
+>   `& "C:\Program Files\Git\bin\bash.exe" -c "curl -fsSL https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scripts/install.sh | bash"`
+
 **Native Windows (PowerShell, no Docker / WSL2 required, since v0.3.4):**
 
 ```powershell
