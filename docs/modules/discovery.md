@@ -456,6 +456,14 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 | M122 来源优先补齐与风格误判修正 | ✅ | 池子压缩时会优先保留不同 `source` 的候选，再限制重复 `style`；同时补强 `style_key` 规则，减少硬内容误判成 `light_chat` |
 | M123 按来源缺口补池子 | ✅ | runtime 在补货时会先统计池子里的 `search / related_chain / trending / explore` 余量，再优先补足缺口最大的来源，不再让 `explore` 长期淹没其它来源 |
 | M126 explore 高风险子簇压缩 | ✅ | refresh 结束后会温和压一轮 `explore` 内部的高风险相邻簇，例如制造 / 工艺 / 材料、博弈 / 桌游 / 机制，避免单簇继续堆满 fresh pool |
+| v0.3.0 trending 按 rid 交错 | ✅ | `TrendingStrategy` 拉 5 个分区排行榜后做 round-robin 交错再送 LLM 评估，避免下游 30 条 hard-cap 把 rid=0/36 的顶部全吃掉 |
+| v0.3.0 explore 按 domain 交错 | ✅ | `ExploreStrategy` 同模式：按 `domain_label` round-robin 后再送评估 |
+| v0.3.0 跨源跨轮 topic_group 配额 | ✅ | `Database.trim_topic_group_overflow(max_per_group)` 每 refresh tick 都跑，把任意 topic_group 在 fresh pool 占比压在 ~10%；不依赖 source，泛化了 explore-only 的 cluster cap |
+| v0.3.0 deficit-source 合并并行 | ✅ | `_build_source_replenishment_plan` 把所有缺货 source 合并到一次 `discover()` 并行 fan-out，单轮多源混排，告别"每轮一种 source"的 60s 串行 |
+| v0.3.0 share-aware trim_pool | ✅ | `trim_pool_to_target_count(source_share_quotas=...)` 用三段桶（protected / negotiable_untracked / negotiable_tracked），保证 under-quota 源不会被 score-only 修剪误伤 |
+| v0.3.0 suppressed 重发现复活 | ✅ | `cache_content` UPSERT 时把 `pool_status='suppressed'` 自动复位为 `'fresh'`；slow-churning 源（trending）从此不再被旧 trim 决定终生淘汰 |
+| v0.3.0 trending share 重定 | ✅ | `_SOURCE_TARGET_SHARES` 把 trending 从 3 调到 1（target ≈ 46，匹配实际稳态 30-45）；不再每分钟无效触发单 source 轮次 |
+| v0.3.1 trim_topic_group 每 tick 触发 | ✅ | 修复"trim 只在 discover 之后跑"的盲点：`_enforce_pool_cap` 路径上每 tick 都调一次，避免 pool 满 cap 时 topic 配额永远不收敛 |
 | SearchStrategy LLM 评估 | ✅ | `SearchStrategy` 现在默认走 `evaluate_content()` LLM 打分（`llm_evaluation=True`），不再只用本地启发式（上限 0.62），可通过 `llm_evaluation=False` 关闭 |
 | 策略中间产物捕获 | ✅ | 4 个策略均支持 `last_intermediates` 属性，运行后可查看生成的搜索词、选择的分区、种子列表、探索域等中间产物 |
 | Discovery 评估框架 | ✅ | `DiscoveryEvaluator` 支持 7 维质量评估（relevance / diversity / specificity / query_quality / explanation_quality / novelty / no_echo_chamber），含自动和人工两种模式 |

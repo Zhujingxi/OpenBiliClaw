@@ -77,6 +77,42 @@ cp config.example.toml config.toml
 
 > `http_referer` 和 `x_title` 都是可选项；留空时不会阻止请求发送。
 
+### `[llm.embedding]`
+
+Embedding 服务用于多个语义任务：discovery 内容兴趣预过滤、recommendation 跨主题去重、PoolCurator 反馈相似度判定、interest probe 主题归类。
+
+| 键 | 类型 | 默认值 | 说明 |
+|----|------|--------|------|
+| `provider` | string | `""` | 留空 = 跟随 `[llm].default_provider`；填 `"ollama"` 启用本地 Ollama 作 embedding 兜底 |
+| `model` | string | `"gemini-embedding-001"` | embedding 模型名；按 provider 自动填合理默认：`gemini → gemini-embedding-001` / `openai → text-embedding-3-small` / `ollama → bge-m3` |
+| `similarity_threshold` | float | `0.82` | 余弦相似度阈值，超过即视为"同主题" |
+
+#### 启用本地 Ollama embedding（v0.3.0+）
+
+不想再多一份 embedding API Key、或要支持离线，可以用 Ollama + bge-m3 跑本地 embedding：
+
+```bash
+# 1. 装 Ollama（一次性）
+# Mac
+brew install ollama && ollama serve &
+# Windows: 从 https://ollama.com/download 下载安装包
+# Linux
+curl -fsSL https://ollama.com/install.sh | sh && ollama serve &
+
+# 2. 跑向导自动拉模型 + 写配置
+openbiliclaw setup-embedding
+```
+
+或手动改 `config.toml`：
+
+```toml
+[llm.embedding]
+provider = "ollama"
+model = "bge-m3"
+```
+
+CPU 即可跑（~100-200ms/次），跨 Mac / Win / Linux 一致。
+
 ### `[bilibili]`
 
 | 键 | 类型 | 默认值 | 说明 |

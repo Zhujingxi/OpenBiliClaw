@@ -4,11 +4,11 @@
 
 OpenBiliClaw 采用分层架构设计，从上到下依次为：
 
-1. **用户交互层** — Chrome 浏览器插件（行为采集 + 推荐展示 + 对话交互）
+1. **用户交互层** — Chrome 浏览器插件（B 站 + 小红书页面行为采集 · 推荐展示 · 对话交互 · xhs 任务调度）
 2. **外部集成层** — OpenClaw adapter / skill wrappers / 本地 API 等对外接入边界
 3. **Agent 核心层** — 自研编排器 + Soul Engine + Discovery Engine + Recommendation Engine + Skill System
-4. **Bilibili 接入层** — API 优先 + agent-browser 浏览器操作
-5. **多层网状记忆存储** — Core / Episodic / Semantic / Working Memory
+4. **多源适配层（v0.3.0+）** — `SourceAdapter` 协议下的 B 站 / 小红书 / 通用 Web 三类源
+5. **多层网状记忆存储** — Core / Episodic / Semantic / Working Memory（SQLite + 向量索引 + JSON）
 
 详见 [项目 Spec](spec.md) 中的架构图。
 
@@ -37,37 +37,44 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 - 自我编辑和遗忘机制
 
 ### Content Discovery (`discovery/`)
-- 多策略内容发现
-- 内容评估（基于用户 Soul）
-- 两阶段候选供给（primary + backfill）
-- 候选分层、去重和缓存写入
+- 多策略内容发现（search · trending · related_chain · explore），按 source 配额并行调度
+- 内容评估（基于用户 Soul，LLM 批量打分）
+- 候选分层、去重和缓存写入；写入时 `pool_status='suppressed'` 的旧候选在重新发现时自动复活成 `'fresh'`
+- v0.3.0+ 多样性栈：trending 按 rid 交错 / explore 按 domain 交错 / `_compress_topic_repeats` 单次压缩 / `trim_topic_group_overflow` 跨源跨轮配额（任意 topic_group ≤ 池子 10%）/ deficit-source 合并 + 并行 fan-out
+
+### Sources (`sources/`) — 多源适配层 (v0.3.0+)
+- `SourceAdapter` Protocol：每个内容源实现统一接口
+- `bilibili_adapter` — B 站 API 直连（WBI 签名、v_voucher 自动恢复）
+- `xiaohongshu_adapter` — 小红书扩展代理（被动收集 + 关键词搜索 + 创作者订阅，零后端爬取）
+- `web_adapter` — 通用 Web（Playwright CDP + LLM 内容抽取）
+- `SourceRecipe` — 源任务持久化与分发
 
 ### Recommendation Engine (`recommendation/`)
-- 推荐排序
-- 朋友式推荐表达生成
-- 缓存候选与实时候选统一排序
+- 推荐排序与朋友式推荐表达生成；统一从候选池读取
+- `PoolCurator` 五维评分（relevance · freshness · topic_fatigue · source_monotony · serendipity）
+- v0.3.1 双轴 fatigue：`recent_topic_keys` (细) + `recent_topic_groups` (粗) 取 max；曲线 `count^1.5/len*5`，count=2 即触发 0.47 强抑制
+- `_merge_topic_supergroups` — serve 时基于 embedding 把 `动漫杂谈/补番/解说` 等近义 topic 合并为同一聚类
+- `prewarm_supergroup_embeddings` — refresh tick 后台预热所有池中 topic_group embedding，让 reshuffle 跑全 cache hit
+- `batch_insert_recommendations` — 单 transaction 批量插入，避免 popup 给 10 条结果时 10 次 fsync
 - 个性化专题生成
-- `PoolCurator` — 推荐侧候选池评分与筛选
 
 ### Runtime (`runtime/`)
 - 系统生命周期管理和服务编排
-- `ContinuousRefreshController` — 后台定时刷新候选池
+- `ContinuousRefreshController` — 后台定时刷新候选池；按 source 配额评估 deficit，多源缺货合并到一次 discover() 并行 fan-out
+- `_enforce_pool_cap` 每 tick 跑 `trim_topic_group_overflow` + 必要时按 share quotas 修剪过额源
 - `AccountSyncService` — 历史记录、收藏夹、关注列表同步
 
-### Bilibili Client (`bilibili/`)
-- B 站 API 封装
-- agent-browser 集成
-- 登录态 / Cookie 管理
-
 ### LLM Providers (`llm/`)
-- 统一的多模型接口
+- 统一的多模型接口（OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter）
 - Provider 注册和切换
-- 成本和性能监控
+- v0.3.0+ embedding 兜底：`OllamaProvider.embed()` 走原生 `/api/embeddings`，配 `bge-m3` 模型可在 Mac/Win/Linux CPU 跑相似度计算，不需额外 API Key
+- `EmbeddingService` L1 内存 + L2 SQLite 双层缓存
 
 ### Storage (`storage/`)
 - SQLite 数据库管理
 - 冷备份、完整性检查与显式修复
 - 候选质量信号持久化与数据迁移
+- v0.3.1 `get_pool_candidates` 用 `ROW_NUMBER() OVER (PARTITION BY topic_group)` 把每个 topic_group 在候选窗口里限到 ≤3 条，保证长尾 group 真正进得到候选窗口
 
 ## 运行时数据库约束
 

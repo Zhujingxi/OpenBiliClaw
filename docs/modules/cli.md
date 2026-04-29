@@ -29,6 +29,7 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `db-repair` | 检查、备份并修复本地 SQLite 数据库 | ✅ |
 | `serve-api` | 启动容器友好的 API 服务 | ✅ |
 | `init` | 首次初始化 | ✅ |
+| `setup-embedding` | 配置本地 Ollama 作为 embedding 兜底服务（可选） | ✅ |
 | `recommend` | 查看推荐 | ✅ |
 | `feedback <id> <like\|dislike\|comment>` | 对推荐提交反馈 | ✅ |
 | `profile` | 查看用户画像 | ✅ |
@@ -293,6 +294,47 @@ $ docker exec -it openbiliclaw-backend openbiliclaw init
 
 ```bash
 openbiliclaw discover
+```
+
+### `openbiliclaw setup-embedding`
+
+配置本地 Ollama 作为 embedding 兜底服务（**可选**）。`init` 阶段会自动询问；只有当时跳过、之后想启用时才需要主动跑这条命令。
+
+```bash
+$ openbiliclaw setup-embedding
+配置本地 embedding · Ollama + bge-m3
+是否启用本地 Ollama 作为 embedding 兜底服务？(可选, 需先安装 Ollama 并启动服务) [y/N]: y
+开始拉取 bge-m3（约 568MB，首次下载需几分钟）…
+  pulling manifest
+  downloading 5e9... 100%
+  verifying sha256 digest
+  writing manifest
+已启用本地 Ollama embedding（bge-m3）
+```
+
+向导会按顺序：
+
+1. 探测 `localhost:11434/api/version`，确认 Ollama 服务在跑
+2. 通过 `/api/tags` 检查 `bge-m3` 是否已 pull
+3. 没拉就流式 `POST /api/pull`，进度直接打到终端
+4. 把 `[llm.embedding] provider="ollama" model="bge-m3"` 写入 `config.toml`
+
+适合：
+
+- embedding API Key 用完了
+- 离线 / 没外网
+- 不想再额外申请一份 embedding 服务密钥
+- 跨平台一致体验（Mac/Win/Linux 同一 HTTP API）
+
+CPU 即可跑，单次 embedding 约 100-200ms，配合后台 prewarmer 实际"换一批" 仍能稳在 600ms。
+
+如果 Ollama 没安装：
+
+```bash
+检测不到 Ollama 服务（localhost:11434）。
+  Mac:     brew install ollama && ollama serve
+  Windows: 从 https://ollama.com/download 下载安装包
+  装好后重新运行本命令即可启用。
 ```
 
 ### `openbiliclaw recommend`
