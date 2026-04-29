@@ -4,6 +4,28 @@
 
 ---
 
+## v0.3.9: 一句话装机适配 PowerShell 5.1（Win10/Win11 默认）（2026-04-30）
+
+之前的 `iwr <url> | iex` 一句话在 Windows 10 / 11 上没装 PowerShell 7 的用户那里直接挂——PS 5.1 默认走 TLS 1.0/1.1，但 GitHub 现在只接受 TLS 1.2+，握手失败报「underlying connection was closed」，新手根本看不懂。
+
+修了 4 件事：
+
+1. **README.md / README_EN.md / docs/agent-install.md 一句话命令前缀加 TLS 1.2 设置**：
+   ```powershell
+   [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; iwr https://...install.ps1 -UseBasicParsing | iex
+   ```
+   PS 7+ 用户可以省掉前缀；PS 5.1 用户必须带
+
+2. **`scripts/install.ps1` 自身启动时也设一次 TLS 1.2**：脚本一旦开始跑，后续的 git clone / pip / uv / Invoke-WebRequest 都覆盖到了
+
+3. **修 `?? '' ` 这个 PS 7-only 语法**：line 281 用的 null 合并操作符 PS 5.1 不支持，改成显式 `if ($null -ne $ReuseFrom) { $ReuseFrom } else { '' }`
+
+4. **`scripts/install.ps1` 的 .EXAMPLE 注释拆成 PS 5.1 / PS 7+ 两个示例**，让用户一眼能看出哪个对应自己
+
+`#requires -Version 5.1` 已经在文件顶部，但 PS 解析器只在脚本开始执行时检查它，对脚本下载阶段（外面那个 iwr）无能为力，所以下载阶段必须靠用户预先设好 TLS。
+
+---
+
 ## v0.3.8: init 启动前明确告诉用户预计用时（2026-04-30）
 
 v0.3.7 把 init 自动跑了起来，但用户看到屏幕静默几十秒就开始怀疑「是不是卡了？」。这次给 `init` 加了一段开场白，跑之前明确告诉用户：

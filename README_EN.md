@@ -104,8 +104,10 @@ curl -fsSL https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scrip
 Native Windows (PowerShell — no Docker, no WSL2 required):
 
 ```powershell
-iwr https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scripts/install.ps1 -UseBasicParsing | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; iwr https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scripts/install.ps1 -UseBasicParsing | iex
 ```
+
+> The leading `[Net.ServicePointManager]...Tls12` lets PowerShell 5.1 (the default on Windows 10/11) successfully negotiate with GitHub. GitHub no longer accepts TLS 1.0/1.1 and PS 5.1 picks those by default. Users on PowerShell 7 can drop the prefix.
 
 The desktop package is the easiest path for macOS / Windows users who want a click-and-go binary. The installer scripts (`install.sh` / `install.ps1`) are for developers and users who want a source-based setup. Prerequisites: `git` and `python3` (3.11+; on Windows the `py` launcher works). The scripts auto-clone the repo, install dependencies, start the backend, run a health check, and prompt you to choose an LLM provider (OpenAI / Gemini / DeepSeek / Claude etc.) and fill in the corresponding API key and Bilibili cookie. Once credentials are set, first-time init runs automatically (fetches history, builds your soul profile, fills the recommendation pool) so you're ready immediately.
 
@@ -345,7 +347,8 @@ OpenBiliClaw/
 
 | Version | Date | Key changes |
 |---|---|---|
-| **[v0.3.8](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.8)** | 2026-04-30 | `openbiliclaw init` now prints an upfront "expected 2–5 min" header + per-stage time estimates so users don't think the silent LLM step is hung |
+| **[v0.3.9](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.9)** | 2026-04-30 | One-liner installer now works on Windows PowerShell 5.1 (the default on Windows 10/11): TLS 1.2 prefix added to the install command, fixed `??` PS 7-only syntax inside install.ps1, in-script TLS 1.2 fallback for git/uv/pip calls |
+| [v0.3.8](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.8) | 2026-04-30 | `openbiliclaw init` now prints an upfront "expected 2–5 min" header + per-stage time estimates so users don't think the silent LLM step is hung |
 | [v0.3.7](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.7) | 2026-04-30 | One-line install **auto-runs `openbiliclaw init`** once credentials are filled in (pulls history / builds soul profile / runs first discovery), so the user doesn't have to do an extra manual step · agent-install.md Hard Rule flipped: run init by default · agent_bootstrap.py auto-init now handles Windows + Docker correctly |
 | [v0.3.6](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.6) | 2026-04-30 | Install wizard rewritten end-to-end for normal users: Ollama is now the default first choice · "OpenAI official" and "OpenAI-compatible self-hosted gateway" are split into separate menu entries · embedding question is its own clearly-explained step · Bilibili cookie prompt now teaches the F12 → Network steps |
 | [v0.3.5](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.5) | 2026-04-29 | 4-phase install wizard (base_url / triplet / embedding 4-way / per-module override) · clears `openai = protocol family` ambiguity · `agent_bootstrap.py` gains 7 new flags |

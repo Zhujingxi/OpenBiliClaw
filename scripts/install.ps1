@@ -37,6 +37,13 @@
     start the backend. Useful for CI pre-bake.
 
 .EXAMPLE
+    # PowerShell 5.1 (Win10/Win11 default) needs the TLS 1.2 prefix —
+    # GitHub no longer accepts TLS 1.0/1.1, which is what PS 5.1 picks.
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    iwr https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scripts/install.ps1 -UseBasicParsing | iex
+
+.EXAMPLE
+    # PowerShell 7+ — TLS 1.2 is already the default, no prefix needed.
     iwr https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scripts/install.ps1 -UseBasicParsing | iex
 
 .EXAMPLE
@@ -56,6 +63,19 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Force TLS 1.2 for any HTTP calls. PowerShell 5.1 (the default on
+# Windows 10/11 without manual upgrade) defaults to TLS 1.0/1.1 + SSL3,
+# but GitHub.com / pypi.org / raw.githubusercontent.com require TLS 1.2+.
+# Without this, Invoke-WebRequest / git-https handshakes fail with
+# misleading messages like "underlying connection was closed".
+try {
+    [Net.ServicePointManager]::SecurityProtocol = `
+        [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch {
+    # Older .NET (pre-4.5) won't have Tls12 — nothing we can do, but most
+    # PS 5.1 installs ship .NET 4.6+ so this almost never triggers.
+}
 
 # -----------------------------------------------------------------------------
 # Defaults
@@ -278,7 +298,10 @@ print(f"STATUS={final.get('status', 'unknown')}")
 print(f"HEALTH_URL={details.get('health_url', '')}")
 print(f"MISSING={','.join(missing)}")
 '@
-    $summary = & $PythonExe -c $parser $script:BootstrapLog $InstallDir "$Port" $ApiHost ($ReuseFrom ?? '')
+    # PS 5.1 (Windows 10/11 default) lacks the ?? null-coalescing operator
+    # — that's a PS 7+ feature. Use a defensive fallback instead.
+    $reuseArg = if ($null -ne $ReuseFrom) { $ReuseFrom } else { '' }
+    $summary = & $PythonExe -c $parser $script:BootstrapLog $InstallDir "$Port" $ApiHost $reuseArg
 
     $status = ''; $healthUrl = ''; $missing = ''
     foreach ($line in $summary -split "`r?`n") {
