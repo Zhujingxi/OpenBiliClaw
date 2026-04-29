@@ -67,10 +67,20 @@ errors, or a no-API-key setup. Steps:
    `curl -fsSL https://ollama.com/install.sh | sh && ollama serve &`.
 2. User runs `cd <INSTALL_DIR> && uv run openbiliclaw setup-embedding`.
 3. The wizard probes `localhost:11434`, pulls `bge-m3` if missing, and
-   writes `[llm.embedding]` to `config.toml`.
+   writes both `[llm.embedding]` and `[llm.ollama] base_url` to
+   `config.toml`. Restart the backend after this.
 
 Do NOT run these steps for the user automatically — Ollama install is a
 system-level package the user must consent to.
+
+> **Backend version note**: in v0.3.0–v0.3.2 the wizard wrote the
+> embedding config but the LLM registry never registered Ollama
+> unless `[llm.ollama]` was also populated, so embedding silently
+> kept hitting the user's primary cloud provider. Fixed in **v0.3.3**:
+> the registry auto-registers Ollama whenever `[llm.embedding]` asks
+> for it. If a user reports "I configured ollama but embedding still
+> hits Gemini/OpenAI", check their backend version and tell them to
+> upgrade to v0.3.3+ and restart.
 
 ## Hard rules
 

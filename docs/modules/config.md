@@ -87,7 +87,10 @@ Embedding 服务用于多个语义任务：discovery 内容兴趣预过滤、rec
 | `model` | string | `"gemini-embedding-001"` | embedding 模型名；按 provider 自动填合理默认：`gemini → gemini-embedding-001` / `openai → text-embedding-3-small` / `ollama → bge-m3` |
 | `similarity_threshold` | float | `0.82` | 余弦相似度阈值，超过即视为"同主题" |
 
-#### 启用本地 Ollama embedding（v0.3.0+）
+#### 启用本地 Ollama embedding（v0.3.0+，**v0.3.3 起真实生效**）
+
+> ⚠️ **如果你装的是 v0.3.0~v0.3.2**：`setup-embedding` 当时虽然写了 `[llm.embedding] provider="ollama"`，但 LLM 注册表静默回退到 default provider，embedding 实际仍走 Gemini。
+> **升级到 v0.3.3+ 重启 backend** 即可生效，不需要改配置；想"零悬念"的话可以再跑一次 `openbiliclaw setup-embedding`，向导会顺手补上 `[llm.ollama] base_url`。
 
 不想再多一份 embedding API Key、或要支持离线，可以用 Ollama + bge-m3 跑本地 embedding：
 
