@@ -298,7 +298,7 @@ async function postXhsTokens(
   }
 }
 
-chrome.runtime.onMessage.addListener((message) => {
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.action === "XHS_URLS_OBSERVED") {
     void postXhsObservedUrls(message.data as Record<string, unknown>);
     return;
@@ -310,8 +310,14 @@ chrome.runtime.onMessage.addListener((message) => {
     return;
   }
   if (message.action === "XHS_TASK_RESULT") {
-    handleTaskResult(message.data as XhsTaskResult);
-    return;
+    void handleTaskResult(message.data as XhsTaskResult)
+      .then(() => {
+        sendResponse({ ok: true });
+      })
+      .catch((error: unknown) => {
+        sendResponse({ ok: false, error: String(error) });
+      });
+    return true;
   }
   if (message.action !== "BEHAVIOR_EVENT") return;
 

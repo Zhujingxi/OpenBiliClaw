@@ -4,6 +4,39 @@
 
 ---
 
+## v0.3.19: 初始化画像混入小红书信号（2026-05-01）
+
+本次把小红书初始化画像导入接到现有事件层：`openbiliclaw init` 会继续拉 B 站历史 / 收藏 / 关注，同时 best-effort 等待浏览器插件执行 `bootstrap_profile` 任务，把小红书收藏、点赞和小红书页面内浏览记录信号混入首轮偏好分析与画像生成。
+
+### 新增
+
+- 后端 `XhsTaskQueue` 支持返回 task id 的入队方法，并新增 `xhs_bootstrap_notes_to_events()`：`saved -> favorite`、`liked -> like`、`xhs_history -> view`，metadata 统一带 `source_platform="xiaohongshu"`、`note_id`、`xsec_token`、`import_source` 和 `signal_strength`
+- `/api/sources/xhs/task-result` 对 `bootstrap_profile` result 会缓存 notes、保留 task result，并把转换后的事件写入 memory event layer
+- 插件新增 `src/content/xhs/bootstrap.ts`，从小红书页面已渲染 state 解析 scoped notes；后台 dispatcher 识别 `bootstrap_profile`，先打开 `/explore` 找当前登录用户的 profile URL，再在同一 tab 跳到个人主页读取 `user.notes` 分组
+- 收藏 / 点赞导入对齐开源实现：profile 页 `user.notes` 的 `[1]` 作为收藏、`[2]` 作为赞过；如果分组尚未加载，插件会点击 profile 页对应 tab 等待页面自己补齐 state
+- profile state 解析补齐小红书 noteCard 字段：`displayTitle`、`user.nickName`、`cover.urlDefault`；受控滚动每轮会合并 state + DOM，再发送新增 partial，减少虚拟列表导致的漏采
+- `bootstrap_profile` 支持显式 `max_scroll_rounds` 的受控滚动；content script 会把首批和滚动新增 notes 以 `status="partial"` 分批回传，background 等后端 `/task-result` 确认后再继续滚动，最后用 `status="ok"` 完成任务
+- 后端任务 payload 可控制滚动节奏：`scroll_wait_ms` 控制每轮滚动后的停留等待，`max_stagnant_scroll_rounds` 控制连续无新增多少轮后停止；插件端会做上下限裁剪，dispatcher 会按更长等待放宽任务 timeout
+- profile 滚动目标从固定 `document/window` 升级为优先探测小红书 feed / waterfall / masonry 容器，并排除零高度 feed wrapper；每轮滚动 debug 会记录 target、scrollTop、scrollHeight、clientHeight、before/after top 和新增数，便于判断是否真正触发瀑布流加载
+- `openbiliclaw init` 会把 XHS bootstrap 事件加入 `SoulEngine.analyze_events()` 的同批输入，并把对应 notes 追加到 `build_initial_profile()` 的 history
+
+### 约束
+
+- 后端仍不直接登录、爬取或调用小红书私有接口；小红书数据只来自用户浏览器里的插件
+- `xhs_history` 指小红书网页自己明确暴露的浏览记录/足迹 state，不是读取 Chrome browser history；普通 `/explore` 推荐流不会再被当成浏览记录导入
+- 收藏、点赞、浏览记录三个 scope 都是 best-effort：插件未连接、未登录或页面不暴露数据时，初始化继续使用 B 站数据完成；滚动也只在任务显式请求时启用
+
+### 测试
+
+- `tests/test_xhs_tasks.py`
+- `tests/test_api_xhs_ingest.py::TestXhsTaskResults::test_xhs_bootstrap_task_result_records_events`
+- `tests/test_api_xhs_ingest.py::TestXhsTaskResults::test_xhs_bootstrap_partial_results_accumulate_until_final`
+- `tests/test_cli.py::test_init_includes_xhs_bootstrap_events`
+- `extension/tests/xhs-task-executor.test.ts`
+- `extension/tests/xhs-task-dispatcher.test.ts`
+
+---
+
 ## v0.3.18: 把 franchise_key 升成一等字段，撤掉 v0.3.17 的标题黑名单（2026-04-30）
 
 v0.3.17 用了**硬编码 IP 别名表 + 标题子串匹配**做 franchise 判定。社区反馈说这种黑白名单做法在长期不可持续——覆盖不全、人工维护成本高、对 LLM 编出新写法（"提瓦特 重制"、"原神 4.5 须弥"）容易漏判或误判。这次撤掉，改成**让 LLM 在内容评估阶段直接打 IP 标签**，作为 `content_cache` 的一等字段持久化。

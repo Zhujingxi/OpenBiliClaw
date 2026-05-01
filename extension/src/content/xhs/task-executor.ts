@@ -1,5 +1,5 @@
 /**
- * xhs no-scroll task executor — content-script side.
+ * xhs task executor — content-script side.
  *
  * When the background dispatcher opens a tab with a search or creator
  * page, this module waits for note cards to render (MutationObserver,
@@ -7,9 +7,8 @@
  * plus immediately adjacent DOM, and emits `XHS_TASK_RESULT` back to
  * the service worker.
  *
- * **Never scrolls** — reading only what the page initially renders is
- * the safest posture against xhs risk control. The user's real browser
- * provides logged-in cookies; we're just a fast reader.
+ * Bootstrap profile imports can optionally scroll when the backend requests
+ * it, but passive search/creator collection still only reads rendered cards.
  */
 
 import {
@@ -19,6 +18,31 @@ import {
   type ViewportRect,
   type XhsNoteMetadata,
 } from "./passive.js";
+import {
+  buildBootstrapDebugPayload,
+  buildBootstrapPartialPayload,
+  bootstrapScrollShouldContinue,
+  bootstrapProfileTabLabels,
+  countBootstrapStateNotesByScope,
+  extractBootstrapNotesFromProfileDocument,
+  extractBootstrapNotesFromState,
+  extractBootstrapStateFromDocument,
+  extractOwnProfileUrlFromDocument,
+  extractOwnProfileUrlFromState,
+  findBootstrapScrollContainer,
+  hasDifferentProfileDocumentNotes,
+  isActiveBootstrapProfileTab,
+  mergeBootstrapNotes,
+  normalizeBootstrapScrollRounds,
+  normalizeBootstrapScrollWaitMs,
+  normalizeBootstrapScopes,
+  normalizeBootstrapStagnantScrollRounds,
+  profileDocumentNoteKeys,
+  readBootstrapScrollMetrics,
+  type BootstrapScrollMetrics,
+  type XhsBootstrapNote,
+  type XhsBootstrapScope,
+} from "./bootstrap.js";
 
 const MAX_URLS = 20;
 const RENDER_WAIT_MS = 5_000;
@@ -27,15 +51,44 @@ const ANCHOR_SELECTOR = 'a[href*="/explore/"], a[href*="/discovery/item/"]';
 
 export interface TaskExecuteMessage {
   task_id: string;
-  type: "search" | "creator";
+  type: "search" | "creator" | "bootstrap_profile";
+  scopes?: XhsBootstrapScope[];
+  max_items_per_scope?: number;
+  max_scroll_rounds?: number;
+  scroll_wait_ms?: number;
+  max_stagnant_scroll_rounds?: number;
 }
 
 export interface TaskResultPayload {
   task_id: string;
   urls: string[];
-  notes: XhsNoteMetadata[];
-  status: "ok" | "empty" | "error";
+  notes: Array<XhsNoteMetadata | XhsBootstrapNote>;
+  scope_counts?: Record<string, number>;
+  status: "ok" | "empty" | "partial" | "error";
   error?: string;
+  next_url?: string;
+  debug?: Record<string, unknown>;
+}
+
+interface ProfileTabLoadResult {
+  notes: XhsBootstrapNote[];
+  changed: boolean;
+  active: boolean;
+  before_count: number;
+  after_count: number;
+  scroll_rounds: number;
+  stagnant_rounds: number;
+  scroll_metrics?: ProfileScrollRoundDebug[];
+}
+
+type ProfileTabDebugResult = Omit<ProfileTabLoadResult, "notes">;
+
+interface ProfileScrollRoundDebug extends BootstrapScrollMetrics {
+  round: number;
+  before_top: number;
+  after_top: number;
+  added_count: number;
+  total_count: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -109,12 +162,371 @@ function waitForCards(doc: Document): Promise<boolean> {
   });
 }
 
+function isProfilePage(url: string): boolean {
+  try {
+    return new URL(url).pathname.startsWith("/user/profile/");
+  } catch {
+    return false;
+  }
+}
+
+function buildScopeCounts(
+  scopes: readonly XhsBootstrapScope[],
+  notes: readonly XhsBootstrapNote[] = [],
+): Record<string, number> {
+  const scope_counts: Record<string, number> = {};
+  for (const scope of scopes) {
+    scope_counts[scope] = notes.filter((note) => note.scope === scope).length;
+  }
+  return scope_counts;
+}
+
+function buildEmptyStateCounts(scopes: readonly XhsBootstrapScope[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const scope of scopes) counts[scope] = 0;
+  return counts;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function sendTaskResult(result: TaskResultPayload): Promise<void> {
+  try {
+    await chrome.runtime.sendMessage({
+      action: "XHS_TASK_RESULT",
+      data: result,
+    });
+  } catch {
+    // If the service worker disappears mid-task, keep the page-side scrape
+    // moving so the final result still has a chance to land.
+  }
+}
+
+function profileTabSelector(): string {
+  return [
+    "[role='tab']",
+    ".tab-item",
+    ".reds-tab-item",
+    "[class*='tab-item']",
+    "[class*='TabItem']",
+    "[class*='tabs'] button",
+    "[class*='tabs'] a",
+    "[class*='Tabs'] button",
+    "[class*='Tabs'] a",
+    "button",
+    "a",
+  ].join(", ");
+}
+
+function normalizedElementText(candidate: HTMLElement): string {
+  return candidate.textContent?.replace(/\s+/g, "").trim() ?? "";
+}
+
+function isProfileTabLikeElement(candidate: HTMLElement): boolean {
+  const className = String(candidate.className ?? "").toLowerCase();
+  if (candidate.getAttribute("role") === "tab") return true;
+  if (className.includes("tab")) return true;
+  return (
+    candidate.closest(
+      "[role='tablist'], .reds-tabs-list, .tabs, [class*='tab-list'], [class*='TabList'], [class*='tabs'], [class*='Tabs']",
+    ) !== null
+  );
+}
+
+function tabTextMatches(text: string, labels: readonly string[]): boolean {
+  if (!text || text.length > 16) return false;
+  return labels.some((label) => text === label || text.startsWith(label));
+}
+
+function activateProfileTab(tab: HTMLElement, win: Window): void {
+  tab.scrollIntoView({ block: "center", inline: "center" });
+  tab.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: win }));
+  tab.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: win }));
+  tab.click();
+}
+
+function extractProfilePageNotes(
+  doc: Document,
+  scope: XhsBootstrapScope,
+  baseUrl: string,
+  maxItemsPerScope: number,
+): XhsBootstrapNote[] {
+  const state = extractBootstrapStateFromDocument(doc);
+  const stateNotes = state
+    ? extractBootstrapNotesFromState(state, [scope], { baseUrl, maxItemsPerScope })
+    : [];
+  const domNotes = extractBootstrapNotesFromProfileDocument(doc, scope, baseUrl, {
+    maxItemsPerScope,
+  });
+  return mergeBootstrapNotes([...stateNotes, ...domNotes], [scope], { maxItemsPerScope });
+}
+
+function documentScrollMetrics(win: Window, doc: Document): BootstrapScrollMetrics {
+  const scrolling = doc.scrollingElement ?? doc.documentElement;
+  return {
+    target: "document",
+    scroll_top: Math.max(0, Math.floor(Math.max(scrolling.scrollTop, win.scrollY || 0))),
+    scroll_height: Math.max(0, Math.floor(scrolling.scrollHeight || 0)),
+    client_height: Math.max(0, Math.floor(scrolling.clientHeight || win.innerHeight || 0)),
+  };
+}
+
+function scrollProfilePage(win: Window, doc: Document): Omit<ProfileScrollRoundDebug, "round" | "added_count" | "total_count"> {
+  const scrollContainer = findBootstrapScrollContainer(doc);
+  const scrolling = scrollContainer ?? (doc.scrollingElement as HTMLElement | null) ?? doc.documentElement;
+  const before = scrollContainer
+    ? readBootstrapScrollMetrics(scrollContainer)
+    : documentScrollMetrics(win, doc);
+  const currentTop = before.scroll_top;
+  const viewportHeight = win.innerHeight || 900;
+  const step = Math.max(Math.floor(viewportHeight * 0.9), 800);
+  const clientHeight = before.client_height || viewportHeight;
+  const nextTop = Math.min(currentTop + step, Math.max(before.scroll_height - clientHeight, 0));
+  scrolling.scrollTop = nextTop;
+  if (!scrollContainer) {
+    win.scrollTo({ top: nextTop, behavior: "auto" });
+  }
+  if (scrollContainer) {
+    scrollContainer.dispatchEvent(new Event("scroll", { bubbles: true }));
+  }
+  win.dispatchEvent(new Event("scroll"));
+  const after = scrollContainer
+    ? readBootstrapScrollMetrics(scrollContainer)
+    : documentScrollMetrics(win, doc);
+  return {
+    target: after.target,
+    scroll_top: after.scroll_top,
+    scroll_height: after.scroll_height,
+    client_height: after.client_height,
+    before_top: before.scroll_top,
+    after_top: after.scroll_top,
+  };
+}
+
+function findProfileTab(doc: Document, labels: readonly string[]): HTMLElement | null {
+  const candidates = Array.from(doc.querySelectorAll<HTMLElement>(profileTabSelector()));
+  for (const candidate of candidates) {
+    const text = normalizedElementText(candidate);
+    if (tabTextMatches(text, labels) && isProfileTabLikeElement(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function collectProfileTabCandidateTexts(doc: Document): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const candidates = Array.from(doc.querySelectorAll<HTMLElement>(profileTabSelector()));
+  for (const candidate of candidates) {
+    if (!isProfileTabLikeElement(candidate)) continue;
+    const text = normalizedElementText(candidate);
+    if (!text || text.length > 16 || seen.has(text)) continue;
+    seen.add(text);
+    out.push(text);
+  }
+  return out.slice(0, 12);
+}
+
+async function waitForScopeContent(
+  doc: Document,
+  scope: XhsBootstrapScope,
+  tab: HTMLElement,
+  baseUrl: string,
+  previousKeys: readonly string[],
+  maxItemsPerScope: number,
+  timeoutMs: number = 5_000,
+): Promise<ProfileTabLoadResult> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const notes = extractProfilePageNotes(doc, scope, baseUrl, maxItemsPerScope);
+    const changed = hasDifferentProfileDocumentNotes(notes, previousKeys);
+    const active = isActiveBootstrapProfileTab(tab);
+    if (changed || (active && notes.length > 0)) {
+      return {
+        notes,
+        changed,
+        active,
+        before_count: previousKeys.length,
+        after_count: notes.length,
+        scroll_rounds: 0,
+        stagnant_rounds: 0,
+      };
+    }
+    await sleep(250);
+  }
+  const notes = extractProfilePageNotes(doc, scope, baseUrl, maxItemsPerScope);
+  return {
+    notes: [],
+    changed: false,
+    active: isActiveBootstrapProfileTab(tab),
+    before_count: previousKeys.length,
+    after_count: notes.length,
+    scroll_rounds: 0,
+    stagnant_rounds: 0,
+  };
+}
+
+async function scrollForMoreProfileNotes(
+  taskId: string,
+  doc: Document,
+  win: Window,
+  scope: XhsBootstrapScope,
+  baseUrl: string,
+  initialNotes: readonly XhsBootstrapNote[],
+  maxItemsPerScope: number,
+  maxScrollRounds: number,
+  scrollWaitMs: number,
+  maxStagnantScrollRounds: number,
+): Promise<{
+  notes: XhsBootstrapNote[];
+  scrollRounds: number;
+  stagnantRounds: number;
+  scrollMetrics: ProfileScrollRoundDebug[];
+}> {
+  let notes = mergeBootstrapNotes(initialNotes, [scope], { maxItemsPerScope });
+  let stagnantRounds = 0;
+  let round = 0;
+  const scrollMetrics: ProfileScrollRoundDebug[] = [];
+
+  while (
+    bootstrapScrollShouldContinue({
+      currentCount: notes.length,
+      maxItemsPerScope,
+      round,
+      maxScrollRounds,
+      stagnantRounds,
+      maxStagnantScrollRounds,
+    })
+  ) {
+    const beforeCount = notes.length;
+    const scrollRound = scrollProfilePage(win, doc);
+    await sleep(scrollWaitMs);
+    const nextNotes = extractProfilePageNotes(doc, scope, baseUrl, maxItemsPerScope);
+    const previousKeys = new Set(notes.map((note) => note.note_id || note.url || note.title));
+    const newlyAdded = nextNotes.filter(
+      (note) => !previousKeys.has(note.note_id || note.url || note.title),
+    );
+    notes = mergeBootstrapNotes([...notes, ...nextNotes], [scope], { maxItemsPerScope });
+    if (newlyAdded.length > 0) {
+      await sendTaskResult(
+        buildBootstrapPartialPayload({
+          taskId,
+          scope,
+          notes: newlyAdded,
+          scopeCounts: { [scope]: notes.length },
+          round: round + 1,
+        }),
+      );
+    }
+    scrollMetrics.push({
+      ...scrollRound,
+      round: round + 1,
+      added_count: newlyAdded.length,
+      total_count: notes.length,
+    });
+    stagnantRounds = notes.length > beforeCount ? 0 : stagnantRounds + 1;
+    round += 1;
+  }
+
+  return { notes, scrollRounds: round, stagnantRounds, scrollMetrics };
+}
+
+async function loadProfileTabsForScopes(
+  taskId: string,
+  scopes: readonly XhsBootstrapScope[],
+  doc: Document,
+  win: Window,
+  baseUrl: string,
+  maxItemsPerScope: number,
+  maxScrollRounds: number,
+  scrollWaitMs: number,
+  maxStagnantScrollRounds: number,
+): Promise<{ notes: XhsBootstrapNote[]; tabResults: Record<string, ProfileTabDebugResult> }> {
+  const domNotes: XhsBootstrapNote[] = [];
+  const tabResults: Record<string, ProfileTabDebugResult> = {};
+
+  for (const scope of scopes) {
+    const labels = bootstrapProfileTabLabels(scope);
+    if (!labels) continue;
+    const state = extractBootstrapStateFromDocument(doc);
+    if (state) {
+      const current = extractBootstrapNotesFromState(state, [scope], { maxItemsPerScope });
+      if (current.length > 0) continue;
+    }
+    const tab = findProfileTab(doc, labels);
+    if (!tab) continue;
+    const previousKeys = profileDocumentNoteKeys(doc, baseUrl);
+    activateProfileTab(tab, win);
+    const result = await waitForScopeContent(
+      doc,
+      scope,
+      tab,
+      baseUrl,
+      previousKeys,
+      maxItemsPerScope,
+    );
+    if (result.notes.length > 0 && maxScrollRounds > 0) {
+      await sendTaskResult(
+        buildBootstrapPartialPayload({
+          taskId,
+          scope,
+          notes: result.notes,
+          scopeCounts: { [scope]: result.notes.length },
+          round: 0,
+        }),
+      );
+    }
+    const scrolled =
+      result.notes.length > 0 && maxScrollRounds > 0
+        ? await scrollForMoreProfileNotes(
+            taskId,
+            doc,
+            win,
+            scope,
+            baseUrl,
+            result.notes,
+            maxItemsPerScope,
+            maxScrollRounds,
+            scrollWaitMs,
+            maxStagnantScrollRounds,
+          )
+        : {
+            notes: result.notes,
+            scrollRounds: 0,
+            stagnantRounds: result.stagnant_rounds,
+            scrollMetrics: [],
+          };
+    result.notes = scrolled.notes;
+    result.after_count = scrolled.notes.length || result.after_count;
+    result.scroll_rounds = scrolled.scrollRounds;
+    result.stagnant_rounds = scrolled.stagnantRounds;
+    result.scroll_metrics = scrolled.scrollMetrics;
+    const { notes, ...debugResult } = result;
+    tabResults[scope] = debugResult;
+    domNotes.push(...result.notes);
+  }
+  return { notes: domNotes, tabResults };
+}
+
+function buildTabCandidateDebug(doc: Document): Partial<Record<XhsBootstrapScope, boolean>> {
+  return {
+    saved: findProfileTab(doc, bootstrapProfileTabLabels("saved")) !== null,
+    liked: findProfileTab(doc, bootstrapProfileTabLabels("liked")) !== null,
+  };
+}
+
 async function executeTaskInPage(
   msg: TaskExecuteMessage,
   win: Window,
   doc: Document,
 ): Promise<TaskResultPayload> {
   try {
+    if (msg.type === "bootstrap_profile") {
+      return executeBootstrapTaskInPage(msg, win, doc);
+    }
+
     const found = await waitForCards(doc);
     if (!found) {
       return { task_id: msg.task_id, urls: [], notes: [], status: "empty" };
@@ -157,6 +569,109 @@ async function executeTaskInPage(
   }
 }
 
+export async function executeBootstrapTaskInPage(
+  msg: TaskExecuteMessage,
+  win: Window,
+  doc: Document,
+): Promise<TaskResultPayload> {
+  const scopes = normalizeBootstrapScopes(msg.scopes);
+  const maxItemsPerScope = Math.max(1, msg.max_items_per_scope ?? 20);
+  const maxScrollRounds = normalizeBootstrapScrollRounds(msg.max_scroll_rounds);
+  const scrollWaitMs = normalizeBootstrapScrollWaitMs(msg.scroll_wait_ms);
+  const maxStagnantScrollRounds = normalizeBootstrapStagnantScrollRounds(
+    msg.max_stagnant_scroll_rounds,
+  );
+  const baseUrl = win.location.href || "https://www.xiaohongshu.com/explore";
+  let state = extractBootstrapStateFromDocument(doc);
+  const is_profile_page = isProfilePage(baseUrl);
+  const requested_scopes = [...scopes];
+  const initialStateCounts = state
+    ? countBootstrapStateNotesByScope(state, scopes, { baseUrl, maxItemsPerScope })
+    : buildEmptyStateCounts(scopes);
+
+  if (!is_profile_page && (scopes.includes("saved") || scopes.includes("liked"))) {
+    const profileUrlFromDocument = extractOwnProfileUrlFromDocument(doc, baseUrl);
+    const profileUrlFromState = state ? extractOwnProfileUrlFromState(state, baseUrl) : "";
+    const profileUrl = profileUrlFromDocument || profileUrlFromState;
+    if (profileUrl) {
+      return {
+        task_id: msg.task_id,
+        urls: [],
+        notes: [],
+        scope_counts: buildScopeCounts(scopes),
+        status: "empty",
+        next_url: profileUrl,
+        debug: buildBootstrapDebugPayload({
+          page_url: baseUrl,
+          is_profile_page,
+          has_initial_state: state !== null,
+          requested_scopes,
+          state_counts: initialStateCounts,
+          profile_url_found: true,
+          profile_url_source: profileUrlFromDocument ? "document" : "state",
+          next_url_requested: true,
+        }) as unknown as Record<string, unknown>,
+      };
+    }
+  }
+
+  let domNotes: XhsBootstrapNote[] = [];
+  let tabResults: Record<string, ProfileTabDebugResult> = {};
+  if (is_profile_page) {
+    const loaded = await loadProfileTabsForScopes(
+      msg.task_id,
+      scopes,
+      doc,
+      win,
+      baseUrl,
+      maxItemsPerScope,
+      maxScrollRounds,
+      scrollWaitMs,
+      maxStagnantScrollRounds,
+    );
+    domNotes = loaded.notes;
+    tabResults = loaded.tabResults;
+    state = extractBootstrapStateFromDocument(doc);
+  }
+
+  const stateNotes = state
+    ? extractBootstrapNotesFromState(state, scopes, { baseUrl, maxItemsPerScope })
+    : [];
+
+  // Do not treat the ordinary explore feed as browsing history. Only explicit
+  // Xiaohongshu history/footprint state paths should become xhs_history.
+  const notes = mergeBootstrapNotes([...stateNotes, ...domNotes], scopes, {
+    maxItemsPerScope,
+  });
+  const urls = [...new Set(notes.map((note) => note.url).filter(Boolean))];
+  const scope_counts = buildScopeCounts(scopes, notes);
+  const finalStateCounts = state
+    ? countBootstrapStateNotesByScope(state, scopes, { baseUrl, maxItemsPerScope })
+    : buildEmptyStateCounts(scopes);
+
+  return {
+    task_id: msg.task_id,
+    urls,
+    notes,
+    scope_counts,
+    status: notes.length > 0 ? "ok" : "empty",
+    debug: buildBootstrapDebugPayload({
+      page_url: baseUrl,
+      is_profile_page,
+      has_initial_state: state !== null,
+      requested_scopes,
+      state_counts: finalStateCounts,
+      dom_counts: is_profile_page ? buildScopeCounts(scopes, domNotes) : undefined,
+      tab_candidate_texts: is_profile_page ? collectProfileTabCandidateTexts(doc) : undefined,
+      tab_load_results: is_profile_page ? tabResults : undefined,
+      profile_url_found: is_profile_page ? undefined : false,
+      profile_url_source: is_profile_page ? undefined : "",
+      next_url_requested: false,
+      tab_candidates: is_profile_page ? buildTabCandidateDebug(doc) : undefined,
+    }) as unknown as Record<string, unknown>,
+  };
+}
+
 /**
  * Register the message listener that the background dispatcher uses to
  * trigger task execution. Call once from the xhs content-script entry.
@@ -169,13 +684,10 @@ export function registerTaskExecutor(): void {
       const data = message.data as TaskExecuteMessage | undefined;
       if (!data?.task_id) return false;
 
-      // Run async, then post result back via runtime message (not sendResponse)
-      // because the dispatcher listens via onMessage, not via callback.
+      // Run async, then post the result through the same acked path as partial
+      // batches so MV3 does not drop the background POST before it settles.
       void executeTaskInPage(data, window, document).then((result) => {
-        chrome.runtime.sendMessage({
-          action: "XHS_TASK_RESULT",
-          data: result,
-        });
+        void sendTaskResult(result);
       });
 
       // Return false — we don't use sendResponse.

@@ -42,6 +42,7 @@
 | DialogueInsightAnalyzer | ✅ | 从聊天轮次提取 `goal/value/interest/dislike/state` 候选信号 |
 | SoulEngine.learn_from_dialogue() | ✅ | 聊天落 `dialogue` 事件、累计 insight candidate；单条 `interest/value/goal/dislike` 聊天信号到中高置信度时会先写入轻量 cognition update，达阈值后再驱动偏好/画像更新 |
 | 账户同步事件分析 | ✅ | 后台低频同步导入的 `view/favorite/follow` 事件会复用 `analyze_events()` 进入偏好与画像链 |
+| 小红书初始化画像信号 | ✅ | `openbiliclaw init` 会把插件解析到的小红书 `saved/liked/xhs_history` 转成 `favorite/like/view` 事件，并与 B 站历史、收藏、关注一起进入 `analyze_events()` 和初始画像 history |
 | ToneProfile | ✅ | 从 `OnionProfile`、偏好摘要和近期反馈推断 `density/warmth/playfulness/directness`，统一驱动推荐、画像和聊天语气 |
 | Cognition updates | ✅ | 在反馈刷新和聊天学习后生成 `interest_added / dislike_added / profile_shift` 结构化 cognition card，包含 `summary / context_line / source_label / expand_hint / impact / reasoning / evidence / source / created_at`，供插件提醒与画像页展开展示；即时反馈和聊天会尽量指出具体内容或本轮聊天，聚合判断则保守回退到”基于最近几条相关内容” |
 | Layered profile cognition | ✅ | `OnionProfile` 新增 MBTI / Values / Interest 等分层，画像生成会同时消费 `history + preference + awareness + insights`，避免把兴趣 topic 堆成整段画像 |
@@ -224,9 +225,10 @@
 首次初始化时，走的是 `SoulEngine.build_initial_profile(history)`：
 
 1. 先读取已有 `preference` 层。
-2. 再加载历史 `awareness_notes` 和 `active_insights`。
-3. `ProfileBuilder.build()` 把 `history_summary + preference_summary + awareness + insights` 一起送给 LLM。
-4. LLM 返回结构化 JSON，必须包含：
+2. `openbiliclaw init` 已经先把 B 站历史 / 收藏 / 关注和小红书 bootstrap signals 汇总成事件批次，调用 `analyze_events()` 更新偏好层。
+3. 再加载历史 `awareness_notes` 和 `active_insights`。
+4. `ProfileBuilder.build()` 把 `history_summary + preference_summary + awareness + insights` 一起送给 LLM。
+5. LLM 返回结构化 JSON，必须包含：
    - `personality_portrait`
    - `core_traits`
    - `cognitive_style`
@@ -235,7 +237,15 @@
    - `values`
    - `life_stage`
    - `deep_needs`
-5. `ProfileBuilder` 校验字段完整性和画像长度，成功后才写入 `soul.json`。
+6. `ProfileBuilder` 校验字段完整性和画像长度，成功后才写入 `soul.json`。
+
+小红书 bootstrap signals 的来源是浏览器插件在小红书页面中解析出的 notes，不是后端爬虫，也不是 Chrome 浏览器历史。scope 映射为：
+
+| 小红书 scope | 事件类型 | 用途 |
+|-------------|----------|------|
+| `saved` | `favorite` | 高强度收藏/想回看信号 |
+| `liked` | `like` | 中高强度偏好信号 |
+| `xhs_history` | `view` | 小红书页面明确暴露时的浏览/足迹 state，强度较弱；普通推荐流不计入 |
 
 这里有两个重要约束：
 

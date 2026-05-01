@@ -17,26 +17,45 @@ const NEXT_TASK_URL = "http://127.0.0.1:8420/api/sources/xhs/next-task";
 const TASK_RESULT_URL = "http://127.0.0.1:8420/api/sources/xhs/task-result";
 const DEFAULT_POLL_INTERVAL_MS = 45_000;
 const TASK_TIMEOUT_MS = 30_000;
+const BOOTSTRAP_SCROLL_TIMEOUT_PER_ROUND_MS = 3_000;
+const BOOTSTRAP_MAX_TASK_TIMEOUT_MS = 180_000;
+const BOOTSTRAP_MAX_EXTENDED_TASK_TIMEOUT_MS = 360_000;
+const MIN_BOOTSTRAP_SCROLL_WAIT_MS = 500;
+const MAX_BOOTSTRAP_SCROLL_WAIT_MS = 5_000;
 const POLL_ALARM_NAME = "openbiliclaw-xhs-task-poll";
+
+export type XhsBootstrapScope = "saved" | "liked" | "xhs_history";
 
 export interface XhsTask {
   id: string;
-  type: "search" | "creator";
+  type: "search" | "creator" | "bootstrap_profile";
   keyword?: string;
   creator_url?: string;
+  scopes?: XhsBootstrapScope[];
+  max_items_per_scope?: number;
+  max_scroll_rounds?: number;
+  scroll_wait_ms?: number;
+  max_stagnant_scroll_rounds?: number;
 }
 
 export interface XhsTaskResult {
   task_id: string;
   urls: string[];
-  status: "ok" | "empty" | "error";
+  notes?: unknown[];
+  scope_counts?: Record<string, number>;
+  status: "ok" | "empty" | "partial" | "error";
   error?: string;
+  next_url?: string;
+  debug?: Record<string, unknown>;
 }
 
 let taskInFlight = false;
 let taskTabId: number | null = null;
 let taskTimeoutId: ReturnType<typeof setTimeout> | null = null;
 let currentTaskId: string | null = null;
+let currentTask: XhsTask | null = null;
+let bootstrapNavigationCount = 0;
+let bootstrapDebugSteps: unknown[] = [];
 let taskUpdateListener: ((tabId: number, changeInfo: { status?: string }) => void) | null = null;
 
 // ---------------------------------------------------------------------------
@@ -50,6 +69,9 @@ export function buildTaskUrl(task: XhsTask): string | null {
   if (task.type === "creator" && task.creator_url) {
     return task.creator_url;
   }
+  if (task.type === "bootstrap_profile") {
+    return "https://www.xiaohongshu.com/explore";
+  }
   return null;
 }
 
@@ -57,8 +79,70 @@ export function isValidTask(task: unknown): task is XhsTask {
   if (typeof task !== "object" || task === null) return false;
   const t = task as Record<string, unknown>;
   if (typeof t.id !== "string" || !t.id) return false;
-  if (t.type !== "search" && t.type !== "creator") return false;
+  if (t.type !== "search" && t.type !== "creator" && t.type !== "bootstrap_profile") {
+    return false;
+  }
   return true;
+}
+
+export function computeTaskTimeoutMs(task: XhsTask): number {
+  if (task.type !== "bootstrap_profile") return TASK_TIMEOUT_MS;
+  const rounds =
+    typeof task.max_scroll_rounds === "number" && Number.isFinite(task.max_scroll_rounds)
+      ? Math.max(0, Math.floor(task.max_scroll_rounds))
+      : 0;
+  if (typeof task.scroll_wait_ms === "number" && Number.isFinite(task.scroll_wait_ms)) {
+    const scrollWaitMs = Math.min(
+      Math.max(Math.floor(task.scroll_wait_ms), MIN_BOOTSTRAP_SCROLL_WAIT_MS),
+      MAX_BOOTSTRAP_SCROLL_WAIT_MS,
+    );
+    return Math.min(
+      Math.max(TASK_TIMEOUT_MS, TASK_TIMEOUT_MS + rounds * (scrollWaitMs + 500) * 2),
+      BOOTSTRAP_MAX_EXTENDED_TASK_TIMEOUT_MS,
+    );
+  }
+  return Math.min(
+    Math.max(TASK_TIMEOUT_MS, TASK_TIMEOUT_MS + rounds * BOOTSTRAP_SCROLL_TIMEOUT_PER_ROUND_MS),
+    BOOTSTRAP_MAX_TASK_TIMEOUT_MS,
+  );
+}
+
+function buildExecuteMessageData(task: XhsTask): Record<string, unknown> {
+  const data: Record<string, unknown> = { task_id: task.id, type: task.type };
+  if (task.scopes !== undefined) data.scopes = task.scopes;
+  if (task.max_items_per_scope !== undefined) {
+    data.max_items_per_scope = task.max_items_per_scope;
+  }
+  if (task.max_scroll_rounds !== undefined) data.max_scroll_rounds = task.max_scroll_rounds;
+  if (task.scroll_wait_ms !== undefined) data.scroll_wait_ms = task.scroll_wait_ms;
+  if (task.max_stagnant_scroll_rounds !== undefined) {
+    data.max_stagnant_scroll_rounds = task.max_stagnant_scroll_rounds;
+  }
+  return data;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function extractBootstrapDebugSteps(debug: unknown): unknown[] {
+  if (!isRecord(debug)) return [];
+  const bootstrap = debug.xhs_bootstrap;
+  if (!isRecord(bootstrap)) return [];
+  const steps = bootstrap.steps;
+  return Array.isArray(steps) ? steps : [];
+}
+
+function mergeBootstrapDebugIntoResult(result: XhsTaskResult): XhsTaskResult {
+  const resultSteps = extractBootstrapDebugSteps(result.debug);
+  const steps = [...bootstrapDebugSteps, ...resultSteps];
+  if (steps.length === 0) return result;
+
+  const debug = isRecord(result.debug) ? { ...result.debug } : {};
+  const bootstrap = isRecord(debug.xhs_bootstrap) ? { ...debug.xhs_bootstrap } : {};
+  bootstrap.steps = steps;
+  debug.xhs_bootstrap = bootstrap;
+  return { ...result, debug };
 }
 
 // ---------------------------------------------------------------------------
@@ -103,13 +187,62 @@ function cleanupTask(): void {
     taskTabId = null;
   }
   currentTaskId = null;
+  currentTask = null;
+  bootstrapNavigationCount = 0;
+  bootstrapDebugSteps = [];
   taskInFlight = false;
+}
+
+function armTaskTimeout(task: XhsTask): void {
+  if (taskTimeoutId !== null) {
+    clearTimeout(taskTimeoutId);
+    taskTimeoutId = null;
+  }
+  taskTimeoutId = setTimeout(() => {
+    if (currentTaskId === task.id) {
+      void reportTaskResult({ task_id: task.id, urls: [], status: "error", error: "timeout" });
+      cleanupTask();
+    }
+  }, computeTaskTimeoutMs(task));
+}
+
+function armTaskLoadListener(task: XhsTask): void {
+  if (taskUpdateListener !== null) {
+    chrome.tabs.onUpdated.removeListener(taskUpdateListener);
+    taskUpdateListener = null;
+  }
+
+  const listener = (updatedTabId: number, changeInfo: { status?: string }): void => {
+    if (updatedTabId !== taskTabId || changeInfo.status !== "complete") return;
+    if (currentTaskId !== task.id) return;
+    // Detach immediately so intra-page navigations don't re-trigger the handshake.
+    chrome.tabs.onUpdated.removeListener(listener);
+    if (taskUpdateListener === listener) taskUpdateListener = null;
+    chrome.tabs
+      .sendMessage(updatedTabId, {
+        action: "XHS_TASK_EXECUTE",
+        data: buildExecuteMessageData(task),
+      })
+      .catch(() => {
+        if (currentTaskId !== task.id) return;
+        void reportTaskResult({
+          task_id: task.id,
+          urls: [],
+          status: "error",
+          error: "sendMessage_failed",
+        });
+        cleanupTask();
+      });
+  };
+  taskUpdateListener = listener;
+  chrome.tabs.onUpdated.addListener(listener);
 }
 
 export async function executeTask(task: XhsTask): Promise<void> {
   if (taskInFlight) return;
   taskInFlight = true;
   currentTaskId = task.id;
+  currentTask = task;
 
   const url = buildTaskUrl(task);
   if (!url) {
@@ -130,43 +263,41 @@ export async function executeTask(task: XhsTask): Promise<void> {
   // Once the tab finishes loading, hand off to the content-script executor.
   // Without this handshake the executor's onMessage listener never fires and
   // every task eventually trips the 30 s hard timeout.
-  const listener = (updatedTabId: number, changeInfo: { status?: string }): void => {
-    if (updatedTabId !== taskTabId || changeInfo.status !== "complete") return;
-    if (currentTaskId !== task.id) return;
-    // Detach immediately so intra-page navigations don't re-trigger the handshake.
-    chrome.tabs.onUpdated.removeListener(listener);
-    if (taskUpdateListener === listener) taskUpdateListener = null;
-    chrome.tabs
-      .sendMessage(updatedTabId, {
-        action: "XHS_TASK_EXECUTE",
-        data: { task_id: task.id, type: task.type },
-      })
-      .catch(() => {
-        if (currentTaskId !== task.id) return;
-        void reportTaskResult({
-          task_id: task.id,
-          urls: [],
-          status: "error",
-          error: "sendMessage_failed",
-        });
-        cleanupTask();
-      });
-  };
-  taskUpdateListener = listener;
-  chrome.tabs.onUpdated.addListener(listener);
-
-  // Hard timeout — forcibly close if content script doesn't respond in time.
-  taskTimeoutId = setTimeout(() => {
-    if (currentTaskId === task.id) {
-      void reportTaskResult({ task_id: task.id, urls: [], status: "error", error: "timeout" });
-      cleanupTask();
-    }
-  }, TASK_TIMEOUT_MS);
+  armTaskLoadListener(task);
+  armTaskTimeout(task);
 }
 
-export function handleTaskResult(result: XhsTaskResult): void {
+export async function handleTaskResult(result: XhsTaskResult): Promise<void> {
   if (!taskInFlight || result.task_id !== currentTaskId) return;
-  void reportTaskResult(result);
+  if (currentTask?.type === "bootstrap_profile" && result.status === "partial") {
+    await reportTaskResult(result);
+    return;
+  }
+  if (
+    currentTask?.type === "bootstrap_profile" &&
+    result.next_url &&
+    taskTabId !== null &&
+    bootstrapNavigationCount < 2
+  ) {
+    const task = currentTask;
+    const tabId = taskTabId;
+    bootstrapDebugSteps.push(...extractBootstrapDebugSteps(result.debug));
+    bootstrapNavigationCount += 1;
+    armTaskLoadListener(task);
+    armTaskTimeout(task);
+    chrome.tabs.update(tabId, { url: result.next_url }).catch(() => {
+      if (currentTaskId !== task.id) return;
+      void reportTaskResult({
+        task_id: task.id,
+        urls: [],
+        status: "error",
+        error: "tab_update_failed",
+      });
+      cleanupTask();
+    });
+    return;
+  }
+  await reportTaskResult(mergeBootstrapDebugIntoResult(result));
   cleanupTask();
 }
 

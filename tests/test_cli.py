@@ -1501,6 +1501,145 @@ def test_init_runs_history_preference_profile_and_discovery(
     assert fake_discovery.calls
 
 
+def test_init_includes_xhs_bootstrap_events(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    class FakeAuthManager:
+        async def get_status(self) -> AuthStatus:
+            return AuthStatus(
+                has_cookie=True,
+                authenticated=True,
+                cookie_path=tmp_path / "bilibili_cookie.json",
+                username="alice",
+                user_id=10086,
+                message="Cookie 验证成功。",
+            )
+
+    class FakeBilibiliClient:
+        async def get_user_history(self, max_items: int = 100) -> list[dict[str, object]]:
+            return [
+                {
+                    "history": {"bvid": "BV1A", "view_at": 1710000000},
+                    "title": "讲透历史叙事",
+                    "author_name": "历史实验室",
+                }
+            ]
+
+        async def get_all_favorites(
+            self,
+            max_folders: int = 20,
+            max_items_per_folder: int = 200,
+        ) -> list[object]:
+            return []
+
+        async def get_following(
+            self,
+            page: int = 1,
+            page_size: int = 50,
+        ) -> list[object]:
+            return []
+
+    class FakeMemoryManager:
+        def __init__(self) -> None:
+            self.events: list[dict[str, object]] = []
+
+        async def propagate_event(self, event: dict[str, object]) -> None:
+            self.events.append(event)
+
+    class FakeSoulEngine:
+        def __init__(self) -> None:
+            self.analyzed_events: list[list[dict[str, object]]] = []
+            self.built_history: list[list[dict[str, object]]] = []
+
+        async def analyze_events(
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+        ) -> None:
+            self.analyzed_events.append(events)
+
+        async def build_initial_profile(self, history: list[dict[str, object]]) -> SoulProfile:
+            self.built_history.append(history)
+            return SoulProfile(
+                personality_portrait="稳定用户画像" * 30,
+                core_traits=["理性"],
+                preferences=PreferenceLayer(),
+            )
+
+    async def passthrough_progress(coro: object, **_: object) -> object:
+        return await coro  # type: ignore[misc]
+
+    async def fake_discovery_backfill(*_: object, **__: object) -> int:
+        return 0
+
+    xhs_event = {
+        "event_type": "favorite",
+        "title": "小红书收藏咖啡",
+        "url": "https://www.xiaohongshu.com/explore/xhs-note-1",
+        "context": "小红书收藏：小红书收藏咖啡 作者：豆子老师",
+        "metadata": {
+            "source_platform": "xiaohongshu",
+            "note_id": "xhs-note-1",
+            "author": "豆子老师",
+            "import_source": "xhs_bootstrap_saved",
+            "signal_strength": 1.0,
+        },
+    }
+    fake_memory = FakeMemoryManager()
+    fake_soul = FakeSoulEngine()
+    fake_database = type(
+        "FakeDatabase",
+        (),
+        {"count_pool_candidates": lambda self: 0},
+    )()
+
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
+    monkeypatch.setattr(cli_module, "_load_runtime_config_error", lambda render=True: None)
+    monkeypatch.setattr(cli_module, "_build_auth_manager", lambda: FakeAuthManager(), raising=False)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_bilibili_client",
+        lambda: FakeBilibiliClient(),
+        raising=False,
+    )
+    monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: fake_memory, raising=False)
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: fake_soul, raising=False)
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: fake_database, raising=False)
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+    monkeypatch.setattr(cli_module, "_run_with_progress", passthrough_progress)
+    monkeypatch.setattr(
+        cli_module,
+        "_run_init_discovery_backfill_async",
+        fake_discovery_backfill,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_build_draft_profile_for_discover",
+        lambda memory: SoulProfile(preferences=PreferenceLayer()),
+    )
+    monkeypatch.setattr(cli_module, "_notify_running_server_init_completed", lambda: None)
+    monkeypatch.setattr(
+        cli_module,
+        "_import_xhs_bootstrap_events",
+        lambda: ([xhs_event], {"saved": 1, "liked": 0, "xhs_history": 0}),
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0
+    assert "小红书" in result.stdout
+    assert fake_soul.analyzed_events
+    analyzed_events = fake_soul.analyzed_events[0]
+    assert any(
+        event.get("metadata", {}).get("source_platform") == "xiaohongshu"
+        for event in analyzed_events
+    )
+    assert fake_soul.built_history
+    built_history = fake_soul.built_history[0]
+    assert any(item.get("title") == "小红书收藏咖啡" for item in built_history)
+
+
 def test_init_backfills_pool_in_stages_until_target_is_reached(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
 ) -> None:

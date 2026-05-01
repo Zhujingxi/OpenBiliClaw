@@ -4,7 +4,7 @@
 
 OpenBiliClaw 采用分层架构设计，从上到下依次为：
 
-1. **用户交互层** — Chrome 浏览器插件（B 站 + 小红书页面行为采集 · 推荐展示 · 对话交互 · xhs 任务调度）
+1. **用户交互层** — Chrome 浏览器插件（B 站 + 小红书页面行为采集 · 推荐展示 · 对话交互 · xhs 任务调度 / 初始化画像导入）
 2. **外部集成层** — OpenClaw adapter / skill wrappers / 本地 API 等对外接入边界
 3. **Agent 核心层** — 自研编排器 + Soul Engine + Discovery Engine + Recommendation Engine + Skill System
 4. **多源适配层（v0.3.0+）** — `SourceAdapter` 协议下的 B 站 / 小红书 / 通用 Web 三类源
@@ -45,7 +45,7 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 ### Sources (`sources/`) — 多源适配层 (v0.3.0+)
 - `SourceAdapter` Protocol：每个内容源实现统一接口
 - `bilibili_adapter` — B 站 API 直连（WBI 签名、v_voucher 自动恢复）
-- `xiaohongshu_adapter` — 小红书扩展代理（被动收集 + 关键词搜索 + 创作者订阅，零后端爬取）
+- `xiaohongshu_adapter` — 小红书扩展代理（被动收集 + 关键词搜索 + 创作者订阅 + `bootstrap_profile` 初始化画像任务，零后端爬取）
 - `web_adapter` — 通用 Web（Playwright CDP + LLM 内容抽取）
 - `SourceRecipe` — 源任务持久化与分发
 
@@ -63,6 +63,15 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 - `ContinuousRefreshController` — 后台定时刷新候选池；按 source 配额评估 deficit，多源缺货合并到一次 discover() 并行 fan-out
 - `_enforce_pool_cap` 每 tick 跑 `trim_topic_group_overflow` + 必要时按 share quotas 修剪过额源
 - `AccountSyncService` — 历史记录、收藏夹、关注列表同步
+
+### Init 多源画像导入
+
+`openbiliclaw init` 的首轮信号现在由两条路径合流：
+
+1. B 站 API 直连拉取观看历史、收藏夹和关注列表。
+2. 后端在 `xhs_tasks` 表入队 `bootstrap_profile`，由浏览器插件在用户已登录的小红书页面中先定位当前用户 profile，再解析 profile state / DOM 中的 `saved / liked` notes 和页面显式暴露的 `xhs_history` notes，回写 `/api/sources/xhs/task-result`。当任务显式传入 `max_scroll_rounds` 时，插件会在 profile tab 内优先探测 feed / waterfall / masonry 滚动容器做有限滚动，并先用 `status="partial"` 分批回传新增 notes，最终再用 `status="ok"` 完成任务；`scroll_wait_ms` 和 `max_stagnant_scroll_rounds` 也由任务 payload 控制，并由插件端裁剪到安全范围。
+
+回写后的 notes 会转成普通事件层 payload：`saved -> favorite`、`liked -> like`、`xhs_history -> view`，并带 `metadata.source_platform="xiaohongshu"`。CLI 只短暂等待该任务结果；插件未连接、未登录或小红书页面不暴露对应数据时，初始化继续使用 B 站数据完成。
 
 ### LLM Providers (`llm/`)
 - 统一的多模型接口（OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter）

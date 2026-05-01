@@ -1416,6 +1416,107 @@ def _build_draft_profile_for_discover(memory: Any) -> Any:
     return draft
 
 
+def _import_xhs_bootstrap_events() -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Best-effort import of extension-collected Xiaohongshu init signals."""
+    import json
+    import time
+
+    from openbiliclaw.sources.xhs_tasks import (
+        XhsTaskQueue,
+        xhs_bootstrap_notes_to_events,
+    )
+
+    try:
+        database = _get_runtime_database()
+    except Exception as exc:
+        console.print(f"  [yellow]小红书初始化信号未导入: 数据库不可用: {exc}[/yellow]")
+        return [], {}
+    if not hasattr(database, "conn"):
+        return [], {}
+
+    try:
+        queue = XhsTaskQueue(database)
+        task_id = queue.enqueue_with_id(
+            "bootstrap_profile",
+            {
+                "scopes": ["saved", "liked", "xhs_history"],
+                "max_items_per_scope": 20,
+                "max_scroll_rounds": 0,
+            },
+            daily_budget=10,
+        )
+    except Exception as exc:
+        console.print(f"  [yellow]小红书初始化信号未导入: {exc}[/yellow]")
+        return [], {}
+    if not task_id:
+        console.print("  [yellow]小红书初始化信号未导入: 今日任务预算已用完。[/yellow]")
+        return [], {}
+
+    wait_seconds = float(os.environ.get("OPENBILICLAW_XHS_BOOTSTRAP_WAIT_SECONDS", "8"))
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    poll_interval = 0.5
+    task: dict[str, Any] | None = None
+    while True:
+        task = queue.get(task_id)
+        status = str((task or {}).get("status", "")).strip()
+        if status in {"completed", "failed"}:
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(poll_interval)
+
+    if not task or task.get("status") != "completed":
+        console.print("  [dim]小红书初始化信号未导入：插件未连接、未登录或页面未返回。[/dim]")
+        return [], {}
+
+    try:
+        result = json.loads(str(task.get("result_json") or "{}"))
+    except json.JSONDecodeError:
+        return [], {}
+    notes = [note for note in result.get("notes", []) if isinstance(note, dict)]
+    events = xhs_bootstrap_notes_to_events(notes)
+    raw_counts = result.get("scope_counts", {})
+    scope_counts = {
+        "saved": 0,
+        "liked": 0,
+        "xhs_history": 0,
+    }
+    if isinstance(raw_counts, dict):
+        for key in scope_counts:
+            with suppress(Exception):
+                scope_counts[key] = int(raw_counts.get(key, 0) or 0)
+    if not any(scope_counts.values()):
+        for event in events:
+            metadata = event.get("metadata", {})
+            if not isinstance(metadata, dict):
+                continue
+            source = str(metadata.get("import_source", ""))
+            for key in scope_counts:
+                if source == f"xhs_bootstrap_{key}":
+                    scope_counts[key] += 1
+    return events, scope_counts
+
+
+def _xhs_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert XHS bootstrap events into profile-builder history rows."""
+    rows: list[dict[str, Any]] = []
+    for event in events:
+        metadata = event.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        rows.append(
+            {
+                "title": str(event.get("title", "")).strip(),
+                "url": str(event.get("url", "")).strip(),
+                "author": str(metadata.get("author", "")).strip(),
+                "event_type": str(event.get("event_type", "")).strip(),
+                "metadata": metadata,
+                "source_platform": "xiaohongshu",
+            }
+        )
+    return [row for row in rows if row.get("title") or row.get("url")]
+
+
 @app.command("setup-embedding")
 def setup_embedding() -> None:
     """配置本地 Ollama 作为 embedding 兜底服务（可选）.
@@ -1565,6 +1666,14 @@ def init() -> None:
         f" / 收藏 [green]{len(favorites_data)}[/green] 个"
         f" / 关注 [green]{len(following_data)}[/green] 人"
     )
+    xhs_events, xhs_scope_counts = _import_xhs_bootstrap_events()
+    if xhs_events:
+        console.print(
+            "  小红书 "
+            f"收藏 [green]{xhs_scope_counts.get('saved', 0)}[/green] 个"
+            f" / 点赞 [green]{xhs_scope_counts.get('liked', 0)}[/green] 个"
+            f" / 浏览记录 [green]{xhs_scope_counts.get('xhs_history', 0)}[/green] 个"
+        )
 
     # Build events from all data sources
     events = [_history_item_to_event(item) for item in history]
@@ -1590,7 +1699,9 @@ def init() -> None:
                 },
             }
         )
-    for event in events:
+    events_to_persist = list(events)
+    events.extend(xhs_events)
+    for event in events_to_persist:
         asyncio.run(memory.propagate_event(event))
 
     _print_section_title("2/4 分析偏好")
@@ -1631,6 +1742,8 @@ def init() -> None:
                 + ", ".join(f["name"] for f in following_data[:100]),
             }
         )
+    if xhs_events:
+        combined_history.extend(_xhs_events_to_history_items(xhs_events))
 
     # Parallel: build_initial_profile (P3) and discover (P4) overlap.
     # Discover starts with a preference-only draft profile so trending /
@@ -1706,6 +1819,7 @@ def init() -> None:
             ("浏览历史", str(len(history))),
             ("收藏", str(len(favorites_data))),
             ("关注", str(len(following_data))),
+            ("小红书事件", str(len(xhs_events))),
             ("总事件数", str(len(events))),
             ("画像状态", "已生成"),
             ("发现内容数", str(discovered_count)),

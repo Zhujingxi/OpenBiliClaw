@@ -22,6 +22,7 @@
 | 画像多层认知展示 | ✅ | 画像 tab 现已把“你怎么处理信息 / 你在内容里长期在找什么 / 这阵子更像在经历什么”单独拆开，不再只显示一段画像 prose 加兴趣 chips |
 | 多源行为采集（MVP） | ✅ | content script 拆成「平台无关 kernel + 平台适配器」，新增小红书适配器。manifest 覆盖 `*.xiaohongshu.com`，事件携带 `source_platform` 字段；MVP 仅采 snapshot / click / scroll / search，like/collect 延后 |
 | xhs token 嗅探（MAIN world） | ✅ | `src/main/xhs-token-sniffer.ts` 以 `world: "MAIN"`、`run_at: "document_start"` 注入 xhs 页面，劫持 `window.fetch` / `XMLHttpRequest` 扫描 xhs 自家 API 响应里的 `(note_id, xsec_token)` 对子，通过 `postMessage` 桥接到 isolated world 再 `/api/sources/xhs/tokens` 回填——解决搜索页永不带 token 导致点击命中 300031 登录墙的问题 |
+| xhs 初始化画像任务 | ✅ | 后端可派发 `bootstrap_profile` 任务；插件后台先打开小红书 tab，在登录态页面定位“我”的个人主页，再从 profile 页 state / DOM 解析收藏、点赞和小红书页面内显式浏览记录信号；显式启用 `max_scroll_rounds` 时会有限滚动，并用 `status="partial"` 分批回传给 `/api/sources/xhs/task-result` |
 
 ## 目录结构
 
@@ -40,7 +41,11 @@ extension/
 │   ├── content/
 │   │   ├── kernel.ts          # 平台无关的 DOM 观察 + 事件派发
 │   │   ├── bilibili.ts        # B 站 entry point，挂载 bilibiliAdapter
-│   │   └── xiaohongshu.ts     # 小红书 entry point，挂载 xiaohongshuAdapter
+│   │   ├── xiaohongshu.ts     # 小红书 entry point，挂载 xiaohongshuAdapter
+│   │   └── xhs/
+│   │       ├── bootstrap.ts   # 初始化画像任务的 state / DOM 解析 helper
+│   │       ├── passive.ts     # 小红书被动 URL / note metadata 采集
+│   │       └── task-executor.ts # 后台任务在页面内的执行入口
 │   ├── main/
 │   │   └── xhs-token-sniffer.ts  # MAIN-world fetch/XHR sniffer，捞 xsec_token
 │   └── shared/
@@ -87,6 +92,39 @@ extension/
 - 通知和认知提醒也会优先把用户带回插件 side panel 上下文
 - 在推荐通知之外，认知变化通知会打开带 `?tab=profile` 的插件页面，直接落到画像视图
 - 惊喜推荐通知现在会打开带 `?tab=recommend&delight=<bvid>` 的插件页面，落到对应的首屏惊喜卡，而不是只把人丢回通用推荐页
+
+### 小红书任务桥
+
+`src/background/xhs-task-dispatcher.ts` 会轮询后端 `/api/sources/xhs/next-task`。当收到 `bootstrap_profile` 时，它会先打开 `https://www.xiaohongshu.com/explore` 的非激活 tab，并向 content script 发送：
+
+```json
+{
+  "task_id": "...",
+  "type": "bootstrap_profile",
+  "scopes": ["saved", "liked", "xhs_history"],
+  "max_items_per_scope": 20,
+  "max_scroll_rounds": 0,
+  "scroll_wait_ms": 1200,
+  "max_stagnant_scroll_rounds": 5
+}
+```
+
+`src/content/xhs/task-executor.ts` 会调用 `bootstrap.ts` 解析小红书页面已经渲染出的 state。若当前页不是个人主页，executor 会只从可信入口找当前登录用户的 profile URL：优先使用小红书导航栏“我”的链接，其次使用 `__INITIAL_STATE__.user.loggedIn=true` 时的 `userInfo.userId`。background 收到这个中间结果后会在同一个 tab 导航到 profile 页并再次执行任务。
+
+到 profile 页后，executor 读取 `__INITIAL_STATE__.user.notes` 分组：`[0]` 为发布，`[1]` 为收藏，`[2]` 为赞过；如果收藏 / 赞过分组尚未加载，会尝试点击对应 profile tab 等待页面自己补齐 state，再退回到已渲染 DOM 卡片解析。state 解析兼容小红书 profile noteCard 结构（`noteCard.displayTitle`、`noteCard.user.nickName`、`noteCard.cover.urlDefault`），滚动后每轮也会把 state 和 DOM 结果合并，避免只看当前可见 DOM 时漏掉已加载但被虚拟列表移出的卡片。默认任务不滚动；如果后端任务显式传入 `max_scroll_rounds > 0`，executor 会优先探测小红书实际 feed / waterfall / masonry 滚动容器，并排除 `clientHeight` 过小的零高度 wrapper，找不到时才回退到 `document.scrollingElement`，直到达到 `max_items_per_scope`、达到滚动轮数上限，或连续五轮没有新增卡片。每个 scope 的首批和后续新增卡片会先以 `status="partial"` 回传，background 等后端确认后再继续，最后用 `status="ok"` 完成任务。
+
+后端可以按任务控制滚动节奏，不需要改插件常量：
+
+| payload 字段 | 默认值 | 插件端裁剪 | 说明 |
+|---|---:|---:|---|
+| `scroll_wait_ms` | `1200` | `500..5000` | 每轮滚动后等待小红书瀑布流加载的时间 |
+| `max_stagnant_scroll_rounds` | `5` | `1..10` | 连续多少轮没有新增卡片后停止 |
+
+dispatcher 会把这两个字段透传给 content script；如果 `scroll_wait_ms` 拉长，background 也会同步放宽任务 timeout，最多 6 分钟。
+
+滚动任务的 `tab_load_results[scope]` 还会带 `scroll_metrics` 数组：每轮记录滚动目标、`scroll_top / scroll_height / client_height`、滚动前后位置、新增卡片数和累计卡片数。真实联调时可用它区分“页面到底了”和“滚错容器了”。
+
+这条链路仍不直接调用小红书 API、不读取 cookie、不接触 Chrome 浏览器历史。这里的 `xhs_history` 指“小红书网页自己明确暴露的浏览记录 / 足迹 state”，不会把普通 `/explore` 推荐流当成浏览记录；如果小红书网页没有暴露稳定入口，就返回 0 条并让初始化继续。
 
 ### `popup/`
 
@@ -213,6 +251,7 @@ npm run build
 - service worker 现在会在高置信推荐出现时触发浏览器通知，并通过后端回写 `notification_sent`
 - service worker 现在也会拉取认知变化通知；如果最近系统对用户形成了新的高置信理解，会发一条更克制的“阿B 又对你多看清了一点”提醒
 - side panel 新版亮色布局已通过本地静态页面快照检查，推荐 / 画像 / 聊天三个视图结构渲染正常
+- 小红书 `bootstrap_profile` 任务已通过单元测试覆盖：dispatcher 识别任务类型并能跟随 profile URL 二次执行，executor 可从 mock `__INITIAL_STATE__` 的 saved / liked / history 分组提取 scoped notes，并能用 `partial` 批次在滚动任务中持续回传新增结果
 
 ## 当前限制
 
@@ -228,3 +267,4 @@ npm run build
 - “换一批”依赖 discovery pool 当前已有候选；如果候选池本身供给不足，仍可能提示“池子里这会儿还没刷出新的”
 - 自动续页同样依赖 discovery pool 当前已有候选；如果池子暂时不够，续页结果可能少于 10 条，甚至直接提示先等后台再补一点新的
 - 池子摘要里的“最近在补”目前基于策略和候选标签做轻量聚合，属于方向提示，不是精确 taxonomy
+- 小红书初始化导入是 best-effort：后端不登录、不爬取小红书，只等待插件在用户已登录浏览器里解析页面；收藏/点赞/浏览记录任一 scope 不暴露时，会跳过该 scope。普通推荐流不会被标成 `xhs_history`；受控滚动只在任务显式设置 `max_scroll_rounds` 时启用

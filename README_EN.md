@@ -268,7 +268,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 - 🧠 **Five-Layer Soul Profile** — Event → Preference → Awareness → Insight → Soul, inferring MBTI, cognitive style, and deep needs — like a psychologist understanding you
 - 🔮 **Speculative Interest System** — Uses psychological bridging logic to guess unexplored domains you might love; promotes correct guesses, retires wrong ones, continuously breaking the filter bubble
 - 🌐 **Cross-Platform Sources** — Started on Bilibili, now extended to Xiaohongshu and generic Web; the architecture is built to keep adding more platforms. Your interests no longer get siloed
-- 🔍 **Multi-Source Discovery Strategies** — Bilibili four strategies (Search · Related Chain · Trending · Cross-domain Explore) + Xiaohongshu three-tier safe discovery (passive collection · keyword search · creator subscription), coordinated cross-platform
+- 🔍 **Multi-Source Discovery Strategies** — Bilibili four strategies (Search · Related Chain · Trending · Cross-domain Explore) + Xiaohongshu safe discovery (passive collection · keyword search · creator subscription · init-profile import), coordinated cross-platform
 - 🎯 **Smart Diversity** — PoolCurator five-dimension scoring + cross-source/round topic quota (any topic ≤10% of pool) + share-aware pool trimming that protects smaller sources; goodbye to "all AI all day"
 - ⚡ **Instant "Reshuffle"** — popup reshuffle ~0.6s (down from 2.6s in v0.3.0); rapid clicks stay snappy
 - 💬 **Warm Recommendations** — Not "because you watched similar videos", but friend-like explanations of why you'd enjoy something
@@ -284,7 +284,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 ```
 ┌─────────────────────────────────────────────────────┐
 │                   Chrome Extension                   │
-│         (Behavior Collection · Recs · Chat)          │
+│ (Behavior Collection · Recs · Chat · XHS Init Import)│
 └────────────────────────┬────────────────────────────┘
                          │ REST API
 ┌────────────────────────▼────────────────────────────┐
@@ -295,13 +295,13 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 │  Engine │ System   │  Engine   │     Engine          │
 │(Profile)│(5-Layer) │(4-Strategy│   (Expression)     │
 ├─────────┴──────────┴───────────┴────────────────────┤
-│        LLM Adapters  ·  Bilibili API  ·  SQLite     │
+│ LLM Adapters · Bilibili API · Extension Proxy · SQLite│
 └─────────────────────────────────────────────────────┘
 ```
 
 ### Content Discovery Engine
 
-Four strategies work in coordination, each with independent API quota:
+Four Bilibili strategies work in coordination, each with independent API quota, and the source layer also accepts Xiaohongshu extension-proxy signals:
 
 | Strategy | Description | Quota |
 |----------|-------------|-------|
@@ -311,6 +311,8 @@ Four strategies work in coordination, each with independent API quota:
 | **Explore** | LLM-driven cross-domain exploration | Fair share |
 
 Results go through multi-dimensional diversity selection: per-source reservation → topic deduplication → style balancing → ceiling caps, ensuring broad coverage in final recommendations.
+
+For first-run profiling, `openbiliclaw init` can also enqueue an XHS `bootstrap_profile` task. The extension opens Xiaohongshu in the user's logged-in browser session, navigates to the current user's profile, parses rendered profile state / DOM for saved / liked notes, and only imports Xiaohongshu-page history when the site exposes an explicit history/footprint state. Explicit scrolling tasks return `partial` batches as new notes appear, then finish with a final result. The backend converts those notes into normal `favorite / like / view` events and still does not crawl or log into Xiaohongshu directly.
 
 ### Soul Engine
 
@@ -331,6 +333,7 @@ OpenBiliClaw/
 │   ├── memory/                # Multi-layer memory system
 │   ├── discovery/             # Discovery engine (4 strategies · quota balancing · diversity)
 │   ├── recommendation/        # Recommendation & expression engine
+│   ├── sources/               # Source adapters and XHS task bridge
 │   ├── bilibili/              # Bilibili API layer (WBI signing · rate control)
 │   ├── llm/                   # Multi-model LLM adapters
 │   └── storage/               # Data storage layer
@@ -348,6 +351,7 @@ OpenBiliClaw/
 | Browser Extension | TypeScript + Chrome Extension (Manifest V3) |
 | LLM | Built-in Gemini / DeepSeek / OpenAI / Claude / OpenRouter / Ollama; any OpenAI-compatible endpoint works via custom base_url |
 | Bilibili API | Custom client (WBI signing · v_voucher auto-recovery · rate control) |
+| Xiaohongshu | Extension DOM/state extraction + background-tab task dispatch + init-profile import with optional bounded scrolling and partial batches; no backend crawling |
 | Storage | SQLite + Embedding vector index |
 | Agent Framework | Lightweight custom framework |
 
@@ -366,6 +370,7 @@ OpenBiliClaw/
 
 | Version | Date | Key changes |
 |---|---|---|
+| **[v0.3.19](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.19)** | 2026-05-01 | `openbiliclaw init` now best-effort mixes Xiaohongshu saved / liked / explicit page-history signals into the first profile. The extension runs `bootstrap_profile` in the user's logged-in Xiaohongshu session, follows the current user's profile, uses `partial` batches for explicit scrolling tasks, and the backend converts notes to normal `favorite / like / view` events without directly crawling Xiaohongshu. |
 | **[v0.3.18](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.18)** | 2026-04-30 | Promotes `franchise_key` to a first-class column on `content_cache`, populated directly by the LLM at evaluation time. Downstream curator dislike propagation and `/api/recommendations` IP dedup now read from the real column instead of the title heuristic that v0.3.17 briefly tried. The hardcoded alias list is gone. |
 | [v0.3.17](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.17) | 2026-04-30 | Fixes a recommendation pipeline IP over-generalisation bug ("5 Genshin clips in one popup"): adds a heuristic franchise extractor; `/api/recommendations` now caps each franchise at 2 per response window; disliking one Genshin video soft-down-weights all same-franchise candidates instead of just blocking that exact bvid |
 | [v0.3.16](https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.16) | 2026-04-30 | README backend-install order reshuffled: one-liner / Docker / direct script come first, the unsigned desktop package is moved into a `<details>` block at the end · adds a "log into every source you want to use" pre-install section explaining why Xiaohongshu specifically requires being logged in in the same browser the extension is installed (CDP mode strongly recommended) |

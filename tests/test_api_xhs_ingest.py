@@ -15,6 +15,16 @@ from fastapi.testclient import TestClient
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from openbiliclaw.storage.database import Database
+
+
+class RecordingMemoryManager:
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+
+    async def propagate_event(self, event: dict[str, object]) -> None:
+        self.events.append(event)
+
 
 @pytest.fixture
 def app_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
@@ -49,6 +59,48 @@ def app_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
     app = create_app(database=db)
     return TestClient(app)
+
+
+@pytest.fixture
+def xhs_task_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[TestClient, Database, RecordingMemoryManager]:
+    """Build an API client with an injectable memory manager for task tests."""
+    from types import SimpleNamespace
+
+    from openbiliclaw.storage.database import Database
+
+    db = Database(tmp_path / "task.db")
+    db.initialize()
+    memory = RecordingMemoryManager()
+
+    fake_config = SimpleNamespace(
+        data_path=tmp_path,
+        bilibili=SimpleNamespace(cookie="", browser_executable="", browser_headed=False),
+        sources=SimpleNamespace(
+            browser_cdp_url="",
+            browser_headed=False,
+            xiaohongshu=SimpleNamespace(
+                daily_search_budget=20,
+                daily_creator_budget=10,
+                task_interval_seconds=45,
+            ),
+        ),
+        scheduler=SimpleNamespace(pool_target_count=300, account_sync_interval_hours=24),
+    )
+
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda: fake_config)
+
+    from openbiliclaw.api.app import create_app
+
+    app = create_app(
+        database=db,
+        memory_manager=memory,
+        soul_engine=SimpleNamespace(),
+        runtime_controller=SimpleNamespace(),
+        recommendation_engine=None,
+    )
+    return TestClient(app), db, memory
 
 
 class TestXhsObservedUrls:
@@ -263,6 +315,233 @@ class TestXhsObservedUrls:
         assert "xsec_token=PRIOR456" in row["content_url"], (
             f"cache overwrote tokenized URL with bare: {row['content_url']!r}"
         )
+
+
+class TestXhsTaskResults:
+    def test_xhs_bootstrap_partial_results_accumulate_until_final(
+        self,
+        xhs_task_client: tuple[TestClient, Database, RecordingMemoryManager],
+    ) -> None:
+        import json
+
+        from openbiliclaw.sources.xhs_tasks import XhsTaskQueue
+
+        app_client, db, memory = xhs_task_client
+        queue = XhsTaskQueue(db)
+        assert queue.enqueue(
+            "bootstrap_profile",
+            {"scopes": ["saved", "liked", "xhs_history"]},
+        )
+        task = queue.next_pending()
+        assert task is not None
+
+        saved_url = "https://www.xiaohongshu.com/explore/saved-partial"
+        liked_url = "https://www.xiaohongshu.com/explore/liked-final"
+
+        partial = app_client.post(
+            "/api/sources/xhs/task-result",
+            json={
+                "task_id": task["id"],
+                "status": "partial",
+                "urls": [saved_url],
+                "notes": [
+                    {
+                        "scope": "saved",
+                        "title": "partial saved",
+                        "url": saved_url,
+                        "note_id": "saved-partial",
+                    }
+                ],
+                "scope_counts": {"saved": 1, "liked": 0, "xhs_history": 0},
+                "debug": {"xhs_bootstrap": {"steps": [{"partial": 1}]}},
+            },
+        )
+        assert partial.status_code == 200
+        assert partial.json() == {"ok": True}
+
+        row = db.conn.execute(
+            "SELECT status, result_json, completed_at FROM xhs_tasks WHERE id=?",
+            (task["id"],),
+        ).fetchone()
+        assert row["status"] == "pending"
+        assert row["completed_at"] is None
+        partial_result = json.loads(row["result_json"])
+        assert partial_result["scope_counts"] == {
+            "saved": 1,
+            "liked": 0,
+            "xhs_history": 0,
+        }
+        assert [note["note_id"] for note in partial_result["notes"]] == ["saved-partial"]
+        assert len(memory.events) == 1
+        assert memory.events[0]["event_type"] == "favorite"
+
+        final = app_client.post(
+            "/api/sources/xhs/task-result",
+            json={
+                "task_id": task["id"],
+                "status": "ok",
+                "urls": [saved_url, liked_url],
+                "notes": [
+                    {
+                        "scope": "saved",
+                        "title": "partial saved",
+                        "url": saved_url,
+                        "note_id": "saved-partial",
+                    },
+                    {
+                        "scope": "liked",
+                        "title": "final liked",
+                        "url": liked_url,
+                        "note_id": "liked-final",
+                    },
+                ],
+                "scope_counts": {"saved": 1, "liked": 1, "xhs_history": 0},
+                "debug": {"xhs_bootstrap": {"steps": [{"final": 1}]}},
+            },
+        )
+
+        assert final.status_code == 200
+        assert len(memory.events) == 2
+        assert memory.events[1]["event_type"] == "like"
+        row = db.conn.execute(
+            "SELECT status, result_json, completed_at FROM xhs_tasks WHERE id=?",
+            (task["id"],),
+        ).fetchone()
+        assert row["status"] == "completed"
+        assert row["completed_at"] is not None
+        result = json.loads(row["result_json"])
+        assert result["urls"] == [saved_url, liked_url]
+        assert [note["note_id"] for note in result["notes"]] == [
+            "saved-partial",
+            "liked-final",
+        ]
+        assert result["scope_counts"] == {"saved": 1, "liked": 1, "xhs_history": 0}
+
+    def test_xhs_bootstrap_empty_result_preserves_scope_counts(
+        self,
+        xhs_task_client: tuple[TestClient, Database, RecordingMemoryManager],
+    ) -> None:
+        import json
+
+        from openbiliclaw.sources.xhs_tasks import XhsTaskQueue
+
+        app_client, db, memory = xhs_task_client
+        queue = XhsTaskQueue(db)
+        assert queue.enqueue(
+            "bootstrap_profile",
+            {"scopes": ["saved", "liked", "xhs_history"]},
+        )
+        task = queue.next_pending()
+        assert task is not None
+
+        response = app_client.post(
+            "/api/sources/xhs/task-result",
+            json={
+                "task_id": task["id"],
+                "status": "empty",
+                "urls": [],
+                "notes": [],
+                "scope_counts": {"saved": 0, "liked": 0, "xhs_history": 0},
+                "debug": {
+                    "xhs_bootstrap": {
+                        "steps": [
+                            {
+                                "page_url": "https://www.xiaohongshu.com/explore",
+                                "has_initial_state": True,
+                                "profile_url_found": False,
+                            }
+                        ]
+                    }
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert memory.events == []
+        row = db.conn.execute(
+            "SELECT status, result_json FROM xhs_tasks WHERE id=?",
+            (task["id"],),
+        ).fetchone()
+        assert row["status"] == "completed"
+        assert json.loads(row["result_json"]) == {
+            "urls": [],
+            "scope_counts": {"saved": 0, "liked": 0, "xhs_history": 0},
+            "debug": {
+                "xhs_bootstrap": {
+                    "steps": [
+                        {
+                            "page_url": "https://www.xiaohongshu.com/explore",
+                            "has_initial_state": True,
+                            "profile_url_found": False,
+                        }
+                    ]
+                }
+            },
+        }
+
+    def test_xhs_bootstrap_task_result_records_events(
+        self,
+        xhs_task_client: tuple[TestClient, Database, RecordingMemoryManager],
+    ) -> None:
+        import json
+
+        from openbiliclaw.sources.xhs_tasks import XhsTaskQueue
+
+        app_client, db, memory = xhs_task_client
+        queue = XhsTaskQueue(db)
+        assert queue.enqueue(
+            "bootstrap_profile",
+            {"scopes": ["saved", "liked", "xhs_history"]},
+        )
+        task = queue.next_pending()
+        assert task is not None
+
+        note_url = "https://www.xiaohongshu.com/explore/note-task-001"
+        response = app_client.post(
+            "/api/sources/xhs/task-result",
+            json={
+                "task_id": task["id"],
+                "status": "ok",
+                "urls": [note_url],
+                "notes": [
+                    {
+                        "scope": "saved",
+                        "title": "手冲咖啡入门",
+                        "url": note_url,
+                        "note_id": "note-task-001",
+                        "xsec_token": "token-task-001",
+                        "author": "豆子老师",
+                        "cover_url": "https://example.com/cover.jpg",
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"ok": True}
+        assert len(memory.events) == 1
+        assert memory.events[0]["event_type"] == "favorite"
+        metadata = memory.events[0]["metadata"]
+        assert isinstance(metadata, dict)
+        assert metadata["source_platform"] == "xiaohongshu"
+        assert metadata["import_source"] == "xhs_bootstrap_saved"
+
+        row = db.conn.execute(
+            "SELECT status, result_json FROM xhs_tasks WHERE id=?",
+            (task["id"],),
+        ).fetchone()
+        assert row["status"] == "completed"
+        result = json.loads(row["result_json"])
+        assert result["notes"][0]["note_id"] == "note-task-001"
+
+        cache_row = db.conn.execute(
+            "SELECT title, source, source_platform FROM content_cache WHERE bvid=?",
+            ("note-task-001",),
+        ).fetchone()
+        assert cache_row is not None
+        assert cache_row["title"] == "手冲咖啡入门"
+        assert cache_row["source"] == "xhs-extension-task"
+        assert cache_row["source_platform"] == "xiaohongshu"
 
 
 class TestXhsTokens:

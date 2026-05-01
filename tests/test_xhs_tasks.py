@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from openbiliclaw.sources.xhs_tasks import (
     XhsCreatorStore,
     XhsTaskQueue,
+    xhs_bootstrap_notes_to_events,
 )
 from openbiliclaw.storage.database import Database
 
@@ -99,6 +100,68 @@ class TestXhsTaskQueue:
 
         # Creator budget should still be available
         assert queue.enqueue("creator", {"creator_url": "https://xhs.com/u/1"}, daily_budget=3)
+
+
+def test_xhs_bootstrap_notes_to_events_maps_scopes() -> None:
+    events = xhs_bootstrap_notes_to_events(
+        [
+            {
+                "scope": "saved",
+                "title": "收藏笔记",
+                "url": "https://www.xiaohongshu.com/explore/a",
+                "note_id": "a",
+            },
+            {
+                "scope": "liked",
+                "title": "点赞笔记",
+                "url": "https://www.xiaohongshu.com/explore/b",
+                "note_id": "b",
+            },
+            {
+                "scope": "xhs_history",
+                "title": "看过笔记",
+                "url": "https://www.xiaohongshu.com/explore/c",
+                "note_id": "c",
+            },
+        ]
+    )
+
+    assert [event["event_type"] for event in events] == ["favorite", "like", "view"]
+    assert all(event["metadata"]["source_platform"] == "xiaohongshu" for event in events)
+
+
+def test_xhs_bootstrap_notes_to_events_preserves_metadata_and_skips_empty() -> None:
+    events = xhs_bootstrap_notes_to_events(
+        [
+            {
+                "scope": "saved",
+                "title": "手冲咖啡入门",
+                "url": "https://www.xiaohongshu.com/explore/note-1",
+                "note_id": "note-1",
+                "xsec_token": "token-1",
+                "author": "豆子老师",
+                "cover_url": "https://example.com/cover.jpg",
+            },
+            {"scope": "liked", "title": "", "url": ""},
+            {"scope": "unknown", "title": "未知", "url": "https://example.com/x"},
+        ]
+    )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event["event_type"] == "favorite"
+    assert event["title"] == "手冲咖啡入门"
+    assert event["url"] == "https://www.xiaohongshu.com/explore/note-1"
+    assert event["context"] == "小红书收藏：手冲咖啡入门 作者：豆子老师"
+    assert event["metadata"] == {
+        "source_platform": "xiaohongshu",
+        "note_id": "note-1",
+        "xsec_token": "token-1",
+        "author": "豆子老师",
+        "cover_url": "https://example.com/cover.jpg",
+        "import_source": "xhs_bootstrap_saved",
+        "signal_strength": 1.0,
+    }
 
 
 class TestXhsCreatorStore:

@@ -1864,7 +1864,11 @@ def create_app(
 
     # ── XHS task queue endpoints (extension dispatcher) ──────────────
 
-    from openbiliclaw.sources.xhs_tasks import XhsCreatorStore, XhsTaskQueue
+    from openbiliclaw.sources.xhs_tasks import (
+        XhsCreatorStore,
+        XhsTaskQueue,
+        xhs_bootstrap_notes_to_events,
+    )
 
     # Guard: only initialise when ctx.database is a real Database (has .conn).
     # Tests that pass database=object() as a stub won't trigger table creation.
@@ -1877,7 +1881,6 @@ def create_app(
     @app.get("/api/sources/xhs/next-task")
     def xhs_next_task(response: Any = None) -> Any:
         """Return the oldest pending xhs task, or 204 if none."""
-        from fastapi.responses import JSONResponse
         from starlette.responses import Response
 
         # 204 No Content responses MUST NOT carry a body (RFC 7230).
@@ -1902,11 +1905,18 @@ def create_app(
         }
 
     @app.post("/api/sources/xhs/task-result")
-    def xhs_task_result(payload: dict[str, Any]) -> dict[str, Any]:
+    async def xhs_task_result(payload: dict[str, Any]) -> dict[str, Any]:
         """Accept a task result from the extension dispatcher."""
         task_id = payload.get("task_id", "")
         status = payload.get("status", "")
         urls = payload.get("urls", [])
+        notes = [note for note in payload.get("notes", []) if isinstance(note, dict)]
+        scope_counts = payload.get("scope_counts")
+        if not isinstance(scope_counts, dict):
+            scope_counts = None
+        debug = payload.get("debug")
+        if not isinstance(debug, dict):
+            debug = None
 
         if not task_id:
             from fastapi import HTTPException
@@ -1916,18 +1926,31 @@ def create_app(
         if _xhs_task_queue is None:
             return {"ok": True}
 
-        if status == "ok":
-            _xhs_task_queue.complete(task_id, urls=urls)
+        task = _xhs_task_queue.get(task_id)
+        task_type = str(task.get("type", "")).strip() if task else ""
+
+        if status in {"partial", "ok"} or (status == "empty" and task_type == "bootstrap_profile"):
+            is_final = status == "ok" or (status == "empty" and task_type == "bootstrap_profile")
+            added_notes = _xhs_task_queue.merge_result(
+                task_id,
+                urls=urls,
+                notes=notes if notes else None,
+                scope_counts=scope_counts,
+                debug=debug,
+                complete=is_final,
+            )
             # Store discovered URLs + metadata
             valid_urls = [u for u in urls if isinstance(u, str) and u.startswith(xhs_url_prefix)]
             if valid_urls:
                 ctx.database.save_xhs_observed_urls(valid_urls, "task")
                 _backfill_xhs_tokens(ctx.database, valid_urls)
-            notes = payload.get("notes", [])
-            if notes:
-                _cache_xhs_notes(ctx.database, notes, "task")
+            if added_notes:
+                _cache_xhs_notes(ctx.database, added_notes, "task")
+            if task_type == "bootstrap_profile" and added_notes:
+                for event in xhs_bootstrap_notes_to_events(added_notes):
+                    await ctx.memory_manager.propagate_event(event)
         else:
-            _xhs_task_queue.fail(task_id, error=payload.get("error", ""))
+            _xhs_task_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
 
         return {"ok": True}
 
