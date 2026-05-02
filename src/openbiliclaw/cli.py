@@ -674,6 +674,15 @@ _PROVIDER_MODEL_HINT: dict[str, str] = {
     "gemini": "可选模型: gemini-2.0-flash-exp (默认) / gemini-2.5-flash / gemini-2.5-pro",
     "claude": "可选模型: claude-sonnet-4-5 (默认) / claude-3-5-sonnet / claude-3-haiku",
     "openrouter": "默认 openai/gpt-4o-mini。OpenRouter 模型名格式: <vendor>/<model>",
+    "ollama": (
+        "常见模型: llama3 (默认 / 通用) / qwen2.5 (中文好) / "
+        "gemma2 (Google 小模型) / mistral (轻量)。模型名要和 Ollama 库里完全一致"
+    ),
+    "openai-compat": (
+        "[bold yellow]模型名必须是你网关上真实部署的那个[/bold yellow],写错会 404。"
+        "常见举例: vLLM/LMStudio → HuggingFace 路径(如 meta-llama/Llama-3.1-70B-Instruct);"
+        "Azure OpenAI → 你的 deployment name;OneAPI/团队 LLM 网关 → 网关里配的别名(如 gpt-4o)"
+    ),
 }
 
 
@@ -1042,10 +1051,13 @@ def _prompt_provider_triplet(menu_choice: str) -> tuple[str, str, str, str]:
             default="",
             show_default=False,
         ).strip()
-        model = typer.prompt(
-            "网关上实际部署的模型名（例 meta-llama/Llama-3.1-70B）",
-            default="gpt-4o-mini",
-        ).strip()
+        compat_hint = _PROVIDER_MODEL_HINT.get("openai-compat")
+        if compat_hint:
+            console.print(f"[dim]  {compat_hint}[/dim]")
+        # No default — user MUST type the model their gateway actually
+        # serves. A leftover "gpt-4o-mini" default would just produce
+        # confusing 404s on a self-hosted vLLM / LMStudio gateway.
+        model = typer.prompt("模型名（必填,见上面的提示）").strip()
         return "openai", base_url, api_key, model
 
     provider = menu_choice
@@ -1069,9 +1081,12 @@ def _prompt_provider_triplet(menu_choice: str) -> tuple[str, str, str, str]:
             return provider, default_base_url, "", default_model
 
         # Phase 3: ask which model and pull if missing.
+        ollama_hint = _PROVIDER_MODEL_HINT.get("ollama")
+        if ollama_hint:
+            console.print(f"[dim]  {ollama_hint}[/dim]")
         model = (
             typer.prompt(
-                "选个 Ollama 模型（默认 llama3，按回车接受）",
+                "选个 Ollama 模型（按回车 = 默认 llama3）",
                 default=default_model,
             ).strip()
             or default_model

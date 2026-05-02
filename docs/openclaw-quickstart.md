@@ -75,8 +75,8 @@ docker exec -it openbiliclaw-backend openbiliclaw init
    - **4) Claude 官方** —— 默认 `claude-sonnet-4-5` / 按 token 付费,质量高
    - **5) OpenRouter 聚合** —— 默认 `openai/gpt-4o-mini` / 一个 Key 跑多家
    - **6) 本地 Ollama（完全离线）** —— 默认 `llama3` / 无 Key / 16GB+ 内存
-   - **7) （高级）OpenAI 协议兼容自建网关** —— Azure / vLLM / LMStudio / OneAPI / 团队 LLM 网关,需自填 Base URL + 模型。**不要和选项 2 (OpenAI 官方) 混淆**
-2. **Phase 2 — 给所选服务填配置**：每个选项只问该选项需要的字段（云厂商问 Key + 模型,Phase 2 默认值就是上面列的模型；Ollama 只问模型名,自动装 + 拉模型；自建网关问 Base URL + Key + 模型）。
+   - **7) （高级）OpenAI 协议兼容自建网关** —— Azure / vLLM / LMStudio / OneAPI / 团队 LLM 网关,需自填 Base URL + 模型。**不要和选项 2 (OpenAI 官方) 混淆**。模型名得是网关上**真实部署的那个**(vLLM/LMStudio = HuggingFace 路径如 `meta-llama/Llama-3.1-70B-Instruct`;Azure = deployment name;OneAPI = 网关里配的别名),写错会 404
+2. **Phase 2 — 给所选服务填配置**：每个选项只问该选项需要的字段。**所有 provider 在 prompt 模型名前都会显示一行"可选/常见模型"提示**(DeepSeek 列 v4-flash / v4-pro,OpenAI 列 gpt-4o-mini / gpt-4o / gpt-4-turbo,Gemini / Claude / Ollama 同样,自建网关明示要按你网关上真实部署的那个填),用户主动确认而不是回车跳过一个不知道是啥的字符串。Ollama 不问 Key(自动装 + 拉模型);自建网关必须自填 Base URL + 模型(default 留空,强制确认)。
 3. **Phase 3 — Embedding（向量化，3 选 1 + 高级）**：默认推荐 **本地 Ollama bge-m3**（免费、离线、效果够用），其次 Gemini（云端、效果最好但要 Key），再次「跟随主 LLM」（仅当主 LLM 提供 embedding 接口时可用，否则自动 fallback 到 Ollama）。高级选项里有"自定义 OpenAI 兼容 endpoint"。
 4. **Phase 4 — Per-module 覆盖**（高级，默认跳过）：可单独给 soul / discovery / recommendation / evaluation 指定不同模型。
 
