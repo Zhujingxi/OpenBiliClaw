@@ -641,13 +641,27 @@ def _save_runtime_provider_config(
 # Default base_url + chat model per provider. The user can always override
 # both in the wizard; these are just the "I picked X, what should the
 # defaults look like?" answers.
+# Last refreshed 2026-05. When a provider rolls a new flagship,
+# update the model field here AND the matching ``_LLM_MENU`` /
+# ``_PROVIDER_MODEL_HINT`` entries.
 _PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
-    "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini"},
-    "claude": {"base_url": "", "model": "claude-sonnet-4-5-20250929"},
-    "gemini": {"base_url": "", "model": "gemini-2.0-flash-exp"},
+    # OpenAI: gpt-4o-mini retired from ChatGPT in Feb 2026; gpt-5-nano
+    # is the cheapest current-gen ($0.05 / $0.40 per 1M).
+    "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-5-nano"},
+    # Claude: Sonnet 4.6 is the current main-line Sonnet (1M context).
+    # Opus 4.7 is top-tier; Haiku 4.5 is the budget option.
+    "claude": {"base_url": "", "model": "claude-sonnet-4-6"},
+    # Gemini: 2.5-flash is the stable budget default (3-flash is preview;
+    # 3.1-pro is reasoning flagship).
+    "gemini": {"base_url": "", "model": "gemini-2.5-flash"},
+    # DeepSeek: V4 family. deepseek-chat / deepseek-reasoner deprecate
+    # 2026-07-24.
     "deepseek": {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash"},
-    "ollama": {"base_url": "http://localhost:11434/v1", "model": "llama3"},
-    "openrouter": {"base_url": "https://openrouter.ai/api/v1", "model": "openai/gpt-4o-mini"},
+    # Ollama: project is Chinese-primary; qwen2.5:7b handles Chinese
+    # noticeably better than llama3 at the same size.
+    "ollama": {"base_url": "http://localhost:11434/v1", "model": "qwen2.5:7b"},
+    # OpenRouter: route to OpenAI's cheapest current-gen by default.
+    "openrouter": {"base_url": "https://openrouter.ai/api/v1", "model": "openai/gpt-5-nano"},
 }
 
 
@@ -670,13 +684,29 @@ _PROVIDER_MODEL_HINT: dict[str, str] = {
         "可选模型: deepseek-v4-flash (默认 / 便宜) / deepseek-v4-pro (更强)。"
         "旧名 deepseek-chat / deepseek-reasoner 将于 2026/07/24 弃用"
     ),
-    "openai": "可选模型: gpt-4o-mini (默认 / 便宜) / gpt-4o / gpt-4-turbo",
-    "gemini": "可选模型: gemini-2.0-flash-exp (默认) / gemini-2.5-flash / gemini-2.5-pro",
-    "claude": "可选模型: claude-sonnet-4-5 (默认) / claude-3-5-sonnet / claude-3-haiku",
-    "openrouter": "默认 openai/gpt-4o-mini。OpenRouter 模型名格式: <vendor>/<model>",
+    "openai": (
+        "可选模型: gpt-5-nano (默认 / 最便宜) / gpt-5.4-nano / "
+        "gpt-5.4-mini / gpt-5.5 (旗舰 4/2026) / gpt-5.5-pro (高精度)。"
+        "gpt-4o / gpt-4o-mini 已从 ChatGPT 退役,API 仍可调"
+    ),
+    "gemini": (
+        "可选模型: gemini-2.5-flash (默认 / 稳定) / "
+        "gemini-3-flash-preview (新一代 / 推理强) / "
+        "gemini-3.1-pro (旗舰 / 4/2026) / gemini-3.1-flash-lite-preview (最便宜)"
+    ),
+    "claude": (
+        "可选模型: claude-sonnet-4-6 (默认 / 1M 上下文) / "
+        "claude-haiku-4-5 (便宜) / claude-opus-4-7 (旗舰 / agentic 最强)。"
+        "claude-sonnet-4-5 仍可调"
+    ),
+    "openrouter": (
+        "默认 openai/gpt-5-nano。OpenRouter 模型名格式: <vendor>/<model>,"
+        "如 anthropic/claude-sonnet-4-6 / google/gemini-2.5-flash"
+    ),
     "ollama": (
-        "常见模型: llama3 (默认 / 通用) / qwen2.5 (中文好) / "
-        "gemma2 (Google 小模型) / mistral (轻量)。模型名要和 Ollama 库里完全一致"
+        "常见模型: qwen2.5:7b (默认 / 中文好) / llama3.2 (Meta 新版) / "
+        "gemma2 (Google) / mistral (轻量) / deepseek-r1 (开源推理)。"
+        "模型名要和 Ollama 库里完全一致 (`ollama list` 看)"
     ),
 }
 
@@ -701,18 +731,33 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
         "kimi",
         {
             "label": "Kimi (Moonshot AI 月之暗面)",
-            "base_url": "https://api.moonshot.cn/v1",
-            "default_model": "moonshot-v1-8k",
-            "hint": "moonshot-v1-8k (默认 / 8K 上下文 / 便宜) / moonshot-v1-32k / moonshot-v1-128k (超长)",
+            # International: api.moonshot.ai/v1 — this is the canonical
+            # one as of 2026-05. .cn still works for China users.
+            "base_url": "https://api.moonshot.ai/v1",
+            # kimi-k2.6 (latest, multimodal, 256K ctx). kimi-latest 已停服
+            # (2026-01-28), 旧 K2-series 2026-05-25 停服, moonshot-v1-*
+            # legacy series 也将停服 — 不要再用。
+            "default_model": "kimi-k2.6",
+            "hint": (
+                "kimi-k2.6 (默认 / 最新 / 256K 上下文 / 多模态) / kimi-k2.5。"
+                "旧 moonshot-v1-* 和 K2-series 即将停服(K2 系列 2026-05-25 停)"
+            ),
         },
     ),
     (
         "minimax",
         {
-            "label": "MiniMax 海螺 AI",
-            "base_url": "https://api.minimaxi.chat/v1",
-            "default_model": "abab6.5s-chat",
-            "hint": "abab6.5s-chat (默认 / 便宜) / abab6.5-chat (更强) / abab7-preview",
+            "label": "MiniMax",
+            # International: api.minimax.io/v1; China: api.minimaxi.com/v1
+            # The old api.minimaxi.chat domain is being phased out.
+            "base_url": "https://api.minimax.io/v1",
+            # MiniMax-M2.7 (released 2026-04-11, $0.30/$1.20 per M, 228K ctx)
+            "default_model": "MiniMax-M2.7",
+            "hint": (
+                "MiniMax-M2.7 (默认 / 最新 / 4-2026 / 228K ctx) / "
+                "MiniMax-M2.5 / MiniMax-M2.1。"
+                "旧 abab 系列 (abab6.5*) 已被 M 系列替代"
+            ),
         },
     ),
     (
@@ -720,8 +765,12 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
         {
             "label": "通义千问 (阿里 DashScope)",
             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            # qwen-plus 是别名,自动跟最新快照 (qwen3.6-plus, 2026-04-02)
             "default_model": "qwen-plus",
-            "hint": "qwen-turbo (便宜) / qwen-plus (默认 / 平衡) / qwen-max (最强但贵)",
+            "hint": (
+                "qwen-flash (最便宜) / qwen-plus (默认 / 平衡) / qwen-max (旗舰)。"
+                "都是别名,自动跟最新快照(当前 → qwen3.6-*, 2026-04 系列)"
+            ),
         },
     ),
     (
@@ -729,8 +778,13 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
         {
             "label": "智谱 ChatGLM",
             "base_url": "https://open.bigmodel.cn/api/paas/v4",
-            "default_model": "glm-4-flash",
-            "hint": "glm-4-flash (默认 / 免费档够用) / glm-4-air / glm-4-plus (旗舰)",
+            # GLM-4.7-Flash (1/2026 发布) 是当前免费旗舰;GLM-5 (2/2026) 是付费
+            # 旗舰 (745B MoE)。glm-4-flash 老了。
+            "default_model": "glm-4.7-flash",
+            "hint": (
+                "glm-4.7-flash (默认 / 免费 / 200K ctx) / glm-5 (付费旗舰 / 4/2026 / 745B MoE) / "
+                "glm-4.6。注意: base_url 是 /api/paas/v4 不是 /v1"
+            ),
         },
     ),
     (
@@ -739,7 +793,10 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
             "label": "零一万物 (Yi)",
             "base_url": "https://api.lingyiwanwu.com/v1",
             "default_model": "yi-medium",
-            "hint": "yi-spark (最便宜) / yi-medium (默认 / 平衡) / yi-large (最强)",
+            "hint": (
+                "yi-spark (最便宜) / yi-medium (默认 / 平衡) / yi-lightning (新 / 快) / "
+                "yi-large (旗舰) / yi-large-turbo (平衡) / yi-medium-200k (长上下文)"
+            ),
         },
     ),
     (
@@ -748,7 +805,11 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
             "label": "自建 vLLM / LMStudio / Ollama 网关",
             "base_url": "http://localhost:8000/v1",
             "default_model": "",  # force user to type their deployed model
-            "hint": "看你网关上部署的是什么。HuggingFace 路径,如 meta-llama/Llama-3.1-70B-Instruct / Qwen/Qwen2.5-72B-Instruct",
+            "hint": (
+                "看你网关上部署的是什么。HuggingFace 路径,如 "
+                "meta-llama/Llama-3.3-70B-Instruct / Qwen/Qwen2.5-72B-Instruct / "
+                "deepseek-ai/DeepSeek-V3"
+            ),
         },
     ),
     (
@@ -756,11 +817,11 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
         {
             "label": "中转站 / OneAPI / 公司团队 LLM 网关",
             "base_url": "",  # user-supplied
-            "default_model": "gpt-4o-mini",
+            "default_model": "gpt-5-nano",
             "hint": (
-                "看你中转站后端代理到哪个真实模型。"
-                "中转站 / OneAPI 通常代理 OpenAI(gpt-4o-mini / gpt-4o / gpt-4-turbo) "
-                "或 Claude(claude-sonnet-4-5),按你充值的那家选"
+                "看你中转站后端代理到哪个真实模型。中转站 / OneAPI 通常代理 "
+                "OpenAI (gpt-5-nano / gpt-5.4-mini / gpt-5.5) 或 "
+                "Claude (claude-sonnet-4-6 / claude-opus-4-7),按你充值的那家选"
             ),
         },
     ),
@@ -771,7 +832,7 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
             "base_url": "https://YOUR-RESOURCE.openai.azure.com/openai/deployments/YOUR-DEPLOYMENT",
             "default_model": "",
             "hint": (
-                "Azure 模型名 = 你创建 deployment 时指定的 deployment name(不是底层 gpt-4o)。"
+                "Azure 模型名 = 你创建 deployment 时指定的 deployment name(不是底层 gpt-5)。"
                 "Base URL 把 YOUR-RESOURCE / YOUR-DEPLOYMENT 替换成你自己的"
             ),
         },
@@ -1058,33 +1119,37 @@ _LLM_MENU: tuple[tuple[str, str, str], ...] = (
     (
         "deepseek",
         "DeepSeek 官方 ★默认推荐",
-        "默认模型 deepseek-v4-flash。¥0.001/千 token 几乎免费，国内可直连",
+        "默认 deepseek-v4-flash (V4)。¥0.001/千 token 几乎免费,国内可直连",
     ),
-    ("openai", "OpenAI 官方", "默认模型 gpt-4o-mini。api.openai.com，需要 sk- 开头的 Key"),
+    (
+        "openai",
+        "OpenAI 官方",
+        "默认 gpt-5-nano (最便宜的 GPT-5)。api.openai.com,需要 sk- 开头的 Key",
+    ),
     (
         "gemini",
         "Gemini 官方",
-        "默认模型 gemini-2.0-flash-exp。Google AI Studio 申请 Key，免费档每天 1500 次够用",
+        "默认 gemini-2.5-flash (稳定 / 便宜)。Google AI Studio 申请 Key,免费档每天 1500 次够用",
     ),
     (
         "claude",
         "Claude 官方",
-        "默认模型 claude-sonnet-4-5。Anthropic console，按 token 付费，质量高",
+        "默认 claude-sonnet-4-6。Anthropic console,按 token 付费,质量高",
     ),
     (
         "openrouter",
         "OpenRouter 聚合",
-        "默认模型 openai/gpt-4o-mini。一个 Key 跑多家模型，按调用计费",
+        "默认 openai/gpt-5-nano。一个 Key 跑多家模型,按调用计费",
     ),
     (
         "ollama",
         "本地 Ollama（完全离线）",
-        "默认模型 llama3。不要 Key / 完全免费，但需 16GB+ 内存，CPU 推理首次响应 10-60s",
+        "默认 qwen2.5:7b (中文好)。不要 Key / 完全免费,但需 16GB+ 内存,CPU 推理首次响应 10-60s",
     ),
     (
         "openai-compat",
-        "（高级）OpenAI 协议兼容自建网关",
-        "Azure / vLLM / LMStudio / OneAPI / 团队 LLM 网关。需自填 Base URL + 模型名",
+        "（高级）OpenAI 协议兼容服务（Kimi / MiniMax / 通义 / 智谱 / Yi / 中转站 / Azure / 自建）",
+        "选完进 9 项子菜单,Base URL 和模型自动填好,只用填 Key",
     ),
 )
 

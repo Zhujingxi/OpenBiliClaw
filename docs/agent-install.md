@@ -94,30 +94,32 @@ Present **three top-level options** (the OpenAI-compatible gateway path
 is folded into "Advanced" further down — do **not** put it in the
 user's main menu unless they explicitly mention having a gateway):
 
+> 模型清单以 **2026-05 当前线上**为准,各家在更新。
+
 | 选项 | 默认模型 | 适合谁 | 是否需要 API Key | 钱 / 速度 |
 |---|---|---|---|---|
-| 1. **DeepSeek**（默认推荐 / 极便宜） | `deepseek-v4-flash`（可选 `deepseek-v4-pro`;旧 `deepseek-chat`/`deepseek-reasoner` 将于 2026/07/24 弃用） | 想几毛钱体验完整功能、不想自建 | ✅ 需要 | ¥0.001 / 千 token，几乎免费 |
-| 2. **OpenAI 官方** | `gpt-4o-mini` | 已有 sk- 开头的 Key | ✅ 需要 | 按 token 计费 |
-| 3. **Gemini** | `gemini-2.0-flash-exp` | Google AI Studio 申请 Key | ✅ 需要 | 免费档每天 1500 次 |
-| 4. **Claude** | `claude-sonnet-4-5` | Anthropic console | ✅ 需要 | 按 token,质量高 |
-| 5. **OpenRouter** | `openai/gpt-4o-mini` | 一个 Key 跑多家 | ✅ 需要 | 按调用计费 |
-| 6. **本地 Ollama**（完全免费 / 离线 / 不要 Key） | `llama3` | 16GB+ 内存，能接受 1–3 分钟首次响应，想完全离线 | ❌ 不需要 | ✅ 免费 / ⚠️ CPU 推理慢 |
-| 7. **(高级) OpenAI 协议兼容服务** | 选 preset 后自动填 / 也支持手填 | Kimi / MiniMax / 通义千问 / 智谱 / Yi / 自建 vLLM-LMStudio / 中转站 / Azure | 看服务 | 看服务 |
+| 1. **DeepSeek**（默认推荐 / 极便宜） | `deepseek-v4-flash`(可选 `deepseek-v4-pro`;旧 `deepseek-chat`/`deepseek-reasoner` **2026/07/24 弃用**) | 想几毛钱体验完整功能 | ✅ 需要 | ¥0.001 / 千 token,几乎免费 |
+| 2. **OpenAI 官方** | `gpt-5-nano`(最便宜的 GPT-5;可选 gpt-5.4-nano / -mini / gpt-5.5 旗舰) | 已有 sk- 开头的 Key | ✅ 需要 | $0.05/M(nano) ~ $30/M(5.5-pro) |
+| 3. **Gemini** | `gemini-2.5-flash`(稳定;可选 gemini-3-flash-preview / gemini-3.1-pro 旗舰) | Google AI Studio 申请 Key | ✅ 需要 | 免费档每天 1500 次 |
+| 4. **Claude** | `claude-sonnet-4-6`(1M ctx;可选 claude-haiku-4-5 便宜 / claude-opus-4-7 旗舰) | Anthropic console | ✅ 需要 | $3-$75/M,按 token,质量高 |
+| 5. **OpenRouter** | `openai/gpt-5-nano`(格式 `<vendor>/<model>`) | 一个 Key 跑多家 | ✅ 需要 | 按调用计费 |
+| 6. **本地 Ollama**（完全免费 / 离线 / 不要 Key） | `qwen2.5:7b`(中文好;可选 llama3.2 / gemma2 / mistral / deepseek-r1) | 16GB+ 内存,能接受 1–3 分钟首次响应 | ❌ 不需要 | ✅ 免费 / ⚠️ CPU 推理慢 |
+| 7. **(高级) OpenAI 协议兼容服务** | 选 preset 后自动填 | Kimi / MiniMax / 通义千问 / 智谱 / Yi / 自建 vLLM-LMStudio / 中转站 / Azure | 看服务 | 看服务 |
 
 > ⚠️ **不要把选项 2 (OpenAI 官方) 和选项 7 (协议兼容) 混淆**:走 OpenAI API 官方端点选 2;走任何"OpenAI 协议兼容"的第三方 / 自建服务选 7。
 
-**选项 7 的子菜单(9 个 preset)** —— 选完后 Base URL + 默认模型自动填好,只用填 API Key:
+**选项 7 的子菜单(9 个 preset,2026-05 当前模型)** —— 选完后 Base URL + 默认模型自动填好,只用填 API Key:
 
 | 子菜单# | 服务 | Base URL | 默认模型 / 备选 |
 |---|---|---|---|
-| 1 | **Kimi (Moonshot AI 月之暗面)** | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` / `-32k` / `-128k` |
-| 2 | **MiniMax 海螺 AI** | `https://api.minimaxi.chat/v1` | `abab6.5s-chat` / `abab6.5-chat` / `abab7-preview` |
-| 3 | **通义千问 (阿里 DashScope)** | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` / `qwen-turbo` / `qwen-max` |
-| 4 | **智谱 ChatGLM** | `https://open.bigmodel.cn/api/paas/v4` | `glm-4-flash` (免费档) / `glm-4-air` / `glm-4-plus` |
-| 5 | **零一万物 (Yi)** | `https://api.lingyiwanwu.com/v1` | `yi-medium` / `yi-spark` / `yi-large` |
-| 6 | **自建 vLLM / LMStudio / Ollama 网关** | `http://localhost:8000/v1` | 用户自填(HuggingFace 路径如 `meta-llama/Llama-3.1-70B-Instruct`) |
-| 7 | **中转站 / OneAPI / 公司团队 LLM 网关** | 用户自填 | `gpt-4o-mini`(看你中转站后端代理 OpenAI / Claude / 哪家) |
-| 8 | **Azure OpenAI** | `https://YOUR-RESOURCE.openai.azure.com/openai/deployments/YOUR-DEPLOYMENT` | 用户自填 deployment name(不是底层 gpt-4o) |
+| 1 | **Kimi (Moonshot AI 月之暗面)** | `https://api.moonshot.ai/v1` | `kimi-k2.6`(最新 / 256K ctx / 多模态)。⚠ 旧 K2-series **2026/05/25 停服**;旧 `moonshot-v1-*` 也将停 |
+| 2 | **MiniMax** | `https://api.minimax.io/v1` | `MiniMax-M2.7`(4/2026 / 228K ctx / $0.30 ~ $1.20 per M);可选 M2.5 / M2.1。**旧 abab 系列已替代** |
+| 3 | **通义千问 (阿里 DashScope)** | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus`(自动跟最新快照,当前 → qwen3.6-plus) / `qwen-flash`(便宜) / `qwen-max`(旗舰) |
+| 4 | **智谱 ChatGLM** | `https://open.bigmodel.cn/api/paas/v4` | `glm-4.7-flash`(1/2026 免费 / 200K ctx) / `glm-5`(2/2026 付费旗舰 / 745B MoE)。注意 base_url 用 `/api/paas/v4` 不是 `/v1` |
+| 5 | **零一万物 (Yi)** | `https://api.lingyiwanwu.com/v1` | `yi-medium` / `yi-spark`(便宜) / `yi-lightning`(快) / `yi-large`(旗舰) / `yi-medium-200k`(长上下文) |
+| 6 | **自建 vLLM / LMStudio / Ollama 网关** | `http://localhost:8000/v1` | 用户自填 HuggingFace 路径(如 `meta-llama/Llama-3.3-70B-Instruct` / `Qwen/Qwen2.5-72B-Instruct` / `deepseek-ai/DeepSeek-V3`) |
+| 7 | **中转站 / OneAPI / 公司团队 LLM 网关** | 用户自填 | 默认 `gpt-5-nano`;按你充值的那家选(OpenAI gpt-5-* / Claude claude-sonnet-4-6 等) |
+| 8 | **Azure OpenAI** | `https://YOUR-RESOURCE.openai.azure.com/openai/deployments/YOUR-DEPLOYMENT` | 用户自填 deployment name(不是底层 gpt-5) |
 | 9 | **其它(完全手填)** | 用户自填 | 用户自填 |
 
 > 💡 **AI agent 注意**: 当用户提到"我有 Kimi / 通义 / 智谱 / Yi / Moonshot / MiniMax / Qwen / GLM / 中转站 / OneAPI / Azure / vLLM / LMStudio"等关键词时,优先引导走选项 7 子菜单的对应 preset。子菜单选完后,bootstrap 会写到 `[llm.openai]` 段(provider 字段都是 `openai`,因为底层走的是 OpenAI Chat Completions 协议)。

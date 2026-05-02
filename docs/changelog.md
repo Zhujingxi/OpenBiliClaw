@@ -11,6 +11,19 @@
 - `docs/openclaw-quickstart.md` —— 把 `init` 4 阶段向导描述同步到 v0.3.27+ 当前形态:Phase 1 LLM(DeepSeek 默认 / Ollama+网关收进高级)、Phase 2 配置、Phase 3 Embedding(Ollama bge-m3 默认)、Phase 4 Per-module 覆盖。新增独立的 🌸 小红书数据可选问题(在 wizard 之后、数据拉取之前),并明确"扩展会在浏览器开前台 tab 抢一次焦点"的真实行为。`init` 阶段列表新增可选小红书拉取步,并提示用 `openbiliclaw cost` 查看花费
 - **DeepSeek 默认模型 `deepseek-chat` → `deepseek-v4-flash`** —— 旧 `deepseek-chat` / `deepseek-reasoner` DeepSeek 官方将于 2026/07/24 弃用。`config.example.toml` 早就指向 v4-flash,但 `cli.py` `_PROVIDER_DEFAULTS` 还在写 `deepseek-chat`,导致 init 向导给出过期的默认值。修复点:`_PROVIDER_DEFAULTS["deepseek"].model`、`_LLM_MENU` hint、Phase 2 配置阶段新增 `_PROVIDER_MODEL_HINT` 表(每个 provider 在 prompt 模型名前显示一行可选清单,DeepSeek 那行明确列 v4-flash / v4-pro 两档 + 旧名弃用日期),让用户明确确认而不是回车跳过一个看不懂的字符串。同步更新 `docs/{openclaw-quickstart,docker-deployment,agent-install,agent-deployment,modules/config,modules/llm}.md`、`scripts/agent_bootstrap.py` 示例、`extension/popup/popup.html` placeholder、`pricing.py` 加 `deepseek-v4-pro` 行
 - **OpenAI 协议兼容: 9-preset 子菜单 (Kimi / MiniMax / 通义 / 智谱 / Yi / 中转站 / 自建 / Azure / 其它)** —— 之前选第 7 项 "OpenAI 协议兼容" 就掉到一个让用户手填 Base URL + 模型名的裸 prompt,普通用户不知道每家的 endpoint 长什么样,中转站 / Azure / vLLM 三种用法的差异也没说清。新增 `_OPENAI_COMPAT_PRESETS` 表 + `_prompt_openai_compat()` helper:选第 7 项后弹出 9 行子菜单,**Base URL + 默认模型按 preset 自动填好**(Kimi `api.moonshot.cn/v1` + `moonshot-v1-8k`;MiniMax `api.minimaxi.chat/v1` + `abab6.5s-chat`;通义 `dashscope.aliyuncs.com/compatible-mode/v1` + `qwen-plus`;智谱 `open.bigmodel.cn/api/paas/v4` + `glm-4-flash`;Yi `api.lingyiwanwu.com/v1` + `yi-medium`;中转站 / Azure / vLLM-LMStudio 也都各自有合理的 prompt 引导)。每个 preset 在 prompt 模型名前显示该家的"可选模型"清单。同步 `docs/{openclaw-quickstart,docker-deployment,agent-install}.md` 全部展开 9 个 preset 的清单,AI agent 注释里加"看到 Kimi / 通义 / 智谱 / Yi / Moonshot / MiniMax / Qwen / GLM / 中转站 / OneAPI / Azure / vLLM / LMStudio 等关键词时,优先引导走第 7 项子菜单"
+- **默认模型全面刷新到 2026-05 当前线上(之前几乎全部过期)** —— 用户实测发现 init 向导推的默认模型几乎都已停服或被替代。Web 搜索确认每家当前线上情况后,逐项更新 `_PROVIDER_DEFAULTS`、`_LLM_MENU` hint、`_PROVIDER_MODEL_HINT`、`_OPENAI_COMPAT_PRESETS`、`config.example.toml`、`pricing.py`:
+  - **OpenAI**: `gpt-4o-mini` → `gpt-5-nano`(GPT-5 nano 是当前最便宜款 $0.05/$0.4 per M;gpt-4o 系列 2026-02 已从 ChatGPT 退役)。完整可选: gpt-5-nano / gpt-5.4-nano / gpt-5.4-mini / gpt-5.5(4/2026 旗舰)/ gpt-5.5-pro
+  - **Claude**: `claude-sonnet-4-5-20250929` → `claude-sonnet-4-6`(Sonnet 4.6 1M ctx)。完整: claude-haiku-4-5(便宜)/ sonnet-4-6(默认)/ opus-4-7(旗舰 / agentic 最强)
+  - **Gemini**: `gemini-2.0-flash-exp` → `gemini-2.5-flash`(2.0-flash-exp 已淘汰)。完整: 2.5-flash(默认)/ 3-flash-preview(新)/ 3.1-pro(旗舰)/ 3.1-flash-lite-preview(最便宜)
+  - **OpenRouter**: `openai/gpt-4o-mini` → `openai/gpt-5-nano`(对齐 OpenAI 默认)
+  - **Ollama**: `llama3` → `qwen2.5:7b`(项目中文优先,qwen2.5 比同尺寸 llama3 中文好得多)
+  - **Kimi**: `moonshot-v1-8k`(2026-05-25 停服)→ `kimi-k2.6`(最新 / 256K ctx / 多模态)。Base URL `api.moonshot.cn/v1` → `api.moonshot.ai/v1`(国际站为主)
+  - **MiniMax**: `abab6.5s-chat`(已被 M 系列替代)→ `MiniMax-M2.7`(4/2026 / 228K ctx / $0.30 ~ $1.20 per M)。Base URL `api.minimaxi.chat/v1` → `api.minimax.io/v1`
+  - **通义**: 仍用 `qwen-plus` 别名(自动跟最新快照,当前 → qwen3.6-plus)。endpoint 不变
+  - **智谱 ChatGLM**: `glm-4-flash` → `glm-4.7-flash`(1/2026 发布的免费旗舰 / 200K ctx);可选 `glm-5`(2/2026 付费旗舰 / 745B MoE)
+  - **Yi**: 仍用 `yi-medium`,在 hint 里加上 `yi-lightning`(新 / 快)
+  - **DeepSeek**: ✅ 之前修对了,仍是 `deepseek-v4-flash`/`deepseek-v4-pro`
+  - **pricing.py**: 加 GPT-5 / Claude 4.6+ / Gemini 3.x / Kimi K2.6 / MiniMax M2.7 / Qwen flash-plus-max / GLM 4.7-flash + 5 / Yi spark-medium-large 的单价行,旧 V3/V4o/Sonnet 4.5 等保留兼容
 
 ---
 

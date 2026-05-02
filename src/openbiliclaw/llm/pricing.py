@@ -36,23 +36,53 @@ PRICING: dict[str, dict[str, tuple[float, float]]] = {
         "default": (0.001, 0.002),
     },
     "openai": {
-        # USD prices × ~7.2 (post-2024 USD/CNY). Leave one decimal of
-        # slack since the rate is a moving target and OpenAI's tier
-        # discounts complicate the picture.
+        # USD × ~7.2 (USD/CNY post-2024). GPT-5 family is current as of
+        # 2026-05. gpt-4o family is retired from ChatGPT but API works.
+        "gpt-5.5": (0.036, 0.216),  # $5/$30 per M
+        "gpt-5.5-pro": (0.216, 1.296),  # $30/$180 per M
+        "gpt-5.4-mini": (0.0054, 0.0324),  # $0.75/$4.5 per M
+        "gpt-5.4-nano": (0.00144, 0.009),  # $0.20/$1.25 per M
+        "gpt-5-nano": (0.00036, 0.00288),  # $0.05/$0.4 per M (cheapest)
         "gpt-4o": (0.018, 0.072),
         "gpt-4o-mini": (0.0011, 0.0043),
         "gpt-4-turbo": (0.072, 0.216),
         "text-embedding-3-small": (0.000144, 0.0),
         "text-embedding-3-large": (0.00094, 0.0),
+        # OpenAI-compatible relay services (Kimi / MiniMax / Qwen / GLM /
+        # Yi) all write provider="openai" in config — list a few common
+        # model names here so the cost report remains useful for them.
+        "kimi-k2.6": (0.001, 0.004),
+        "kimi-k2.5": (0.001, 0.004),
+        "MiniMax-M2.7": (0.00216, 0.00864),  # $0.30/$1.20 per M
+        "MiniMax-M2.5": (0.00216, 0.00864),
+        "qwen-flash": (0.0003, 0.0009),
+        "qwen-plus": (0.0008, 0.002),
+        "qwen-max": (0.0024, 0.0096),
+        "glm-4.7-flash": (0.0, 0.0),  # free tier
+        "glm-5": (0.005, 0.020),
+        "yi-spark": (0.0001, 0.0001),
+        "yi-medium": (0.0025, 0.0025),
+        "yi-large": (0.02, 0.02),
         "default": (0.018, 0.072),
     },
     "claude": {
+        # USD × 7.2; matches platform.claude.com 2026-05 pricing.
+        "claude-opus-4-7": (0.108, 0.540),  # $15/$75 per M (Opus tier)
+        "claude-opus-4-6": (0.036, 0.180),  # $5/$25 per M
+        "claude-sonnet-4-6": (0.0216, 0.108),  # $3/$15 per M
+        "claude-sonnet-4-5": (0.0216, 0.108),
+        "claude-haiku-4-5": (0.0054, 0.027),  # cheap tier
         "claude-sonnet-4-20250514": (0.022, 0.108),
         "claude-3-5-sonnet": (0.022, 0.108),
         "claude-3-haiku": (0.0018, 0.009),
-        "default": (0.022, 0.108),
+        "default": (0.0216, 0.108),
     },
     "gemini": {
+        # 2.5 series stable; 3.x preview-tier still in flux 2026-05.
+        "gemini-3.1-pro": (0.014, 0.056),
+        "gemini-3-flash-preview": (0.0014, 0.0058),
+        "gemini-3-flash": (0.0014, 0.0058),
+        "gemini-3.1-flash-lite-preview": (0.00072, 0.0029),
         "gemini-2.5-flash": (0.0011, 0.0029),
         "gemini-2.5-pro": (0.009, 0.072),
         "gemini-embedding-001": (0.000108, 0.0),

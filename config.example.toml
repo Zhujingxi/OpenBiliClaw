@@ -17,18 +17,25 @@ default_provider = "openai"
 
 [llm.openai]
 # 若 default_provider = "openai"，api_key 必填
+# 当前(2026-05)模型清单: gpt-5-nano (最便宜) / gpt-5.4-nano / gpt-5.4-mini /
+#                      gpt-5.5 (旗舰 4/2026) / gpt-5.5-pro
+# gpt-4o 系列已从 ChatGPT 退役但 API 仍可调
 api_key = ""
-model = "gpt-4o"
+model = "gpt-5-nano"
 base_url = ""  # Leave empty for default, or set for compatible APIs
 
 [llm.claude]
 # 若 default_provider = "claude"，api_key 必填
+# 当前(2026-05)主线: claude-opus-4-7 (旗舰) / claude-sonnet-4-6 (默认 / 1M ctx) /
+#                  claude-haiku-4-5 (便宜)
 api_key = ""
-model = "claude-sonnet-4-20250514"
+model = "claude-sonnet-4-6"
 
 [llm.gemini]
 # 若 default_provider = "gemini"，推荐设置 GEMINI_API_KEY / GOOGLE_API_KEY；
 # 也可直接在这里填写 api_key。
+# 当前(2026-05)清单: gemini-2.5-flash (默认 / 稳定) / gemini-3-flash-preview (新) /
+#                 gemini-3.1-pro (旗舰) / gemini-3.1-flash-lite-preview (最便宜)
 api_key = ""
 model = "gemini-2.5-flash"
 
@@ -55,13 +62,17 @@ reasoning_effort = ""
 # native `/api/embeddings` route is derived by stripping that suffix.
 # A bare "http://localhost:11434" makes the OpenAI SDK call
 # `/chat/completions` which Ollama 404s.
-model = "llama3"
+# 当前 (2026-05) 推荐: qwen2.5:7b (中文好) / llama3.2 (Meta 新版) /
+# gemma2 / mistral / deepseek-r1。``ollama list`` 看本地已拉的模型
+model = "qwen2.5:7b"
 base_url = "http://localhost:11434/v1"
 
 [llm.openrouter]
 # 若 default_provider = "openrouter"，api_key 必填
+# OpenRouter 模型名格式: <vendor>/<model>,如:
+#   openai/gpt-5-nano (默认) / anthropic/claude-sonnet-4-6 / google/gemini-2.5-flash
 api_key = ""
-model = "openai/gpt-4o-mini"
+model = "openai/gpt-5-nano"
 base_url = "https://openrouter.ai/api/v1"
 http_referer = ""
 x_title = "OpenBiliClaw"
