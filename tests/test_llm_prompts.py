@@ -273,11 +273,11 @@ def test_prompt_builder_system_messages_are_call_invariant() -> None:
     stays in system. See ``build_batch_content_evaluation_prompt`` for
     the canonical pattern.
     """
-    from openbiliclaw.llm import prompts as P
+    from openbiliclaw.llm import prompts as prompts_mod
 
     failures: list[str] = []
     for name, args1, args2 in _builder_test_inputs():
-        fn = getattr(P, name, None)
+        fn = getattr(prompts_mod, name, None)
         assert fn is not None, f"missing builder: {name}"
         m1 = fn(**args1)
         m2 = fn(**args2)
