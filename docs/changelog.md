@@ -24,6 +24,13 @@
   - **Yi**: 仍用 `yi-medium`,在 hint 里加上 `yi-lightning`(新 / 快)
   - **DeepSeek**: ✅ 之前修对了,仍是 `deepseek-v4-flash`/`deepseek-v4-pro`
   - **pricing.py**: 加 GPT-5 / Claude 4.6+ / Gemini 3.x / Kimi K2.6 / MiniMax M2.7 / Qwen flash-plus-max / GLM 4.7-flash + 5 / Yi spark-medium-large 的单价行,旧 V3/V4o/Sonnet 4.5 等保留兼容
+- **OpenAI 协议兼容引导深度补强** —— 之前 9-preset 子菜单只解决了 "Base URL + 模型自动填" 一层,用户实际还会卡在"在哪里申请 Key / 这家服务到底是干嘛的 / 选完之后 embedding 怎么办"这三个问题。每个 preset metadata 扩展为 `description` / `signup_url` / `domain_alt` / `supports_embedding` / `embedding_alt`,`_prompt_openai_compat()` 重写为四段式引导:
+  - **选完后展示一段服务介绍**(Kimi → "国产长上下文老牌 256K ctx,长文档理解强";MiniMax → "代码 / agent 场景 SOTA,$0.30/$1.20 per M";智谱 → "GLM-4.7-Flash 完全免费,GLM-5 是 Claude Opus 级")
+  - **直接打印 Key 申请链接**(国内/国际两个地址都列),用户 cmd-click 就能去注册
+  - **国内域名替代提示**(Kimi `api.moonshot.cn/v1`;MiniMax `api.minimaxi.com/v1`)
+  - **预提醒 embedding 怎么办**: Kimi / MiniMax / Yi / 自建 没 embedding endpoint(打印黄色 ⓘ 提醒 Phase 3 自动 fallback Ollama bge-m3,免费 / 离线);Qwen / GLM / Azure / 中转站 有 embedding(打印 💡 提示 Phase 3 高级选项可指向同一 base_url)
+  - **结尾打印将写入的 (base_url, model) 二元组**,catch typo
+- **`scripts/agent_bootstrap.py --llm-preset {kimi,minimax,qwen,zhipu,yi,self-hosted,relay,azure,custom}`** —— AI agent 驱动的非交互式安装路径补一刀。之前 AI agent 用 `--llm-base-url` + `--llm-model` 配 OpenAI 兼容服务时,得自己记住每家的 endpoint(经常写错);现在 `--llm-preset kimi` 一句话搞定,base_url 和默认模型从 `LLM_PRESETS` 表里取(和 cli.py 的 `_OPENAI_COMPAT_PRESETS` 同步)。隐式锁 `--provider=openai`,显式传不同 provider 会冲突报错。`--llm-base-url` / `--llm-model` 可以 per-field 覆盖 preset 默认。`docs/agent-install.md` 加 8 行示例(每家服务一行)
 
 ---
 

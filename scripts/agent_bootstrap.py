@@ -71,6 +71,50 @@ REMOTE_PROVIDERS = ("openai", "claude", "gemini", "deepseek", "openrouter")
 PROVIDERS_WITHOUT_EMBED = ("claude", "deepseek", "openrouter")
 
 
+# Mirror of cli.py's _OPENAI_COMPAT_PRESETS for non-interactive (AI agent
+# driven) installs. Keep the model defaults in sync with cli.py — when
+# updating one, update the other. Each preset implies provider="openai"
+# (the universal Bearer-auth + /v1/chat/completions client).
+LLM_PRESETS: dict[str, dict[str, str]] = {
+    "kimi": {
+        "base_url": "https://api.moonshot.ai/v1",
+        "model": "kimi-k2.6",
+    },
+    "minimax": {
+        "base_url": "https://api.minimax.io/v1",
+        "model": "MiniMax-M2.7",
+    },
+    "qwen": {
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "model": "qwen-plus",
+    },
+    "zhipu": {
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "model": "glm-4.7-flash",
+    },
+    "yi": {
+        "base_url": "https://api.lingyiwanwu.com/v1",
+        "model": "yi-medium",
+    },
+    "self-hosted": {
+        "base_url": "http://localhost:8000/v1",
+        "model": "",  # user must specify
+    },
+    "relay": {
+        "base_url": "",  # user must specify
+        "model": "gpt-5-nano",
+    },
+    "azure": {
+        "base_url": "",  # user must specify (per-deployment URL)
+        "model": "",  # deployment name
+    },
+    "custom": {
+        "base_url": "",
+        "model": "",
+    },
+}
+
+
 # ---------------------------------------------------------------------------
 # Immutable status + exit codes
 
@@ -165,6 +209,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--llm-model",
         default=None,
         help="Override the chosen provider's chat/generation model.",
+    )
+    parser.add_argument(
+        "--llm-preset",
+        choices=(
+            "kimi",
+            "minimax",
+            "qwen",
+            "zhipu",
+            "yi",
+            "self-hosted",
+            "relay",
+            "azure",
+            "custom",
+        ),
+        default=None,
+        help=(
+            "Shortcut for OpenAI-protocol-compatible services. Picks the "
+            "preset's canonical Base URL + default model so AI-agent-driven "
+            "installs don't have to remember each vendor's endpoint. "
+            "Implies --provider=openai. --llm-base-url / --llm-model still "
+            "override the preset on a per-field basis. Presets: "
+            "kimi (Moonshot), minimax (M2.7), qwen (DashScope), zhipu (GLM), "
+            "yi (零一万物), self-hosted (vLLM/LMStudio), relay (中转站/OneAPI), "
+            "azure (Azure OpenAI), custom (no preset)."
+        ),
     )
     parser.add_argument(
         "--embedding-provider",
@@ -1544,6 +1613,32 @@ def run(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = build_arg_parser()
     args = parser.parse_args()
+    # Resolve --llm-preset before run() so the rest of the pipeline
+    # sees concrete provider/base_url/model values. The preset implies
+    # provider=openai but never overrides explicit user-provided
+    # --llm-base-url / --llm-model.
+    if getattr(args, "llm_preset", None):
+        preset = LLM_PRESETS.get(args.llm_preset, {})
+        if not args.provider:
+            args.provider = "openai"
+        elif args.provider != "openai":
+            emit(
+                BootstrapResult(
+                    "error",
+                    "preset_provider_conflict",
+                    {
+                        "reason": (
+                            f"--llm-preset implies provider=openai but you "
+                            f"passed --provider={args.provider}. Drop one of them."
+                        )
+                    },
+                )
+            )
+            return 2
+        if args.llm_base_url is None and preset.get("base_url"):
+            args.llm_base_url = preset["base_url"]
+        if args.llm_model is None and preset.get("model"):
+            args.llm_model = preset["model"]
     try:
         return run(args)
     except KeyboardInterrupt:

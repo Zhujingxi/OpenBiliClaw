@@ -123,6 +123,38 @@ user's main menu unless they explicitly mention having a gateway):
 | 9 | **其它(完全手填)** | 用户自填 | 用户自填 |
 
 > 💡 **AI agent 注意**: 当用户提到"我有 Kimi / 通义 / 智谱 / Yi / Moonshot / MiniMax / Qwen / GLM / 中转站 / OneAPI / Azure / vLLM / LMStudio"等关键词时,优先引导走选项 7 子菜单的对应 preset。子菜单选完后,bootstrap 会写到 `[llm.openai]` 段(provider 字段都是 `openai`,因为底层走的是 OpenAI Chat Completions 协议)。
+>
+> 子菜单还会:**显示该家服务介绍 + Key 申请链接**(国内国际两个域名),并在结尾**预提醒 embedding 怎么办**(Kimi / MiniMax / Yi / 自建 没 embedding endpoint,Phase 3 自动 fallback Ollama bge-m3;Qwen / GLM / Azure / 中转站 有 embedding,Phase 3 高级选项可指向同一 base_url)。
+
+**AI agent 一键非交互式安装(`--llm-preset`)** —— 不走交互菜单,直接传 preset 名给 `agent_bootstrap.py`,Base URL + 默认模型自动从 preset 表里拿。各 preset 对应的最简调用:
+
+```bash
+# Kimi (Moonshot AI)
+python3 scripts/agent_bootstrap.py --llm-preset kimi --llm-api-key sk-xxx --bilibili-cookie "SESSDATA=..."
+
+# MiniMax
+python3 scripts/agent_bootstrap.py --llm-preset minimax --llm-api-key xxx ...
+
+# 通义千问 (DashScope)
+python3 scripts/agent_bootstrap.py --llm-preset qwen --llm-api-key sk-xxx ...
+
+# 智谱 ChatGLM
+python3 scripts/agent_bootstrap.py --llm-preset zhipu --llm-api-key xxx.xxx ...
+
+# 零一万物 Yi
+python3 scripts/agent_bootstrap.py --llm-preset yi --llm-api-key xxx ...
+
+# 中转站 / OneAPI (Base URL + Key 必填,模型走默认 gpt-5-nano)
+python3 scripts/agent_bootstrap.py --llm-preset relay --llm-base-url https://your-relay.com/v1 --llm-api-key sk-xxx ...
+
+# 自建 vLLM / LMStudio (默认 base_url 是 localhost:8000/v1, 模型必填)
+python3 scripts/agent_bootstrap.py --llm-preset self-hosted --llm-model meta-llama/Llama-3.3-70B-Instruct ...
+
+# Azure OpenAI (Base URL 是 deployment 全路径, 模型 = deployment name)
+python3 scripts/agent_bootstrap.py --llm-preset azure --llm-base-url 'https://YOUR.openai.azure.com/openai/deployments/YOUR-DEP' --llm-api-key xxx --llm-model YOUR-DEP ...
+```
+
+`--llm-base-url` / `--llm-model` 单独传时会**覆盖**对应 preset 字段(per-field override),给你 escape hatch 而不强制走 preset 默认。`--llm-preset` 隐式锁 `--provider=openai`,显式传不同 provider 会冲突报错。
 
 **Why DeepSeek default, not Ollama**: previous versions called Ollama
 "推荐新手 / 白嫖" but in practice CPU inference on a 16 GB Mac is slow

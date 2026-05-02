@@ -731,6 +731,12 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
         "kimi",
         {
             "label": "Kimi (Moonshot AI 月之暗面)",
+            "description": (
+                "国产长上下文老牌 (256K ctx),长文档理解 / 网页爬阅 / "
+                "学术阅读这些场景表现好,日常对话也稳"
+            ),
+            "signup_url": "https://platform.moonshot.cn/console/api-keys （国内）/ https://platform.moonshot.ai （国际）",
+            "supports_embedding": "false",
             # International: api.moonshot.ai/v1 — this is the canonical
             # one as of 2026-05. .cn still works for China users.
             "base_url": "https://api.moonshot.ai/v1",
@@ -742,12 +748,21 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
                 "kimi-k2.6 (默认 / 最新 / 256K 上下文 / 多模态) / kimi-k2.5。"
                 "旧 moonshot-v1-* 和 K2-series 即将停服(K2 系列 2026-05-25 停)"
             ),
+            "domain_alt": (
+                "国内用户也可改 base_url 为 https://api.moonshot.cn/v1 (域名不同,Key 通用)"
+            ),
         },
     ),
     (
         "minimax",
         {
             "label": "MiniMax",
+            "description": (
+                "国产代码 / agent 场景的当前 SOTA 之一 (M2.7 在 SWE-Bench 上 80%+),"
+                "便宜 ($0.30 / $1.20 per M),适合做推荐这种结构化输出任务"
+            ),
+            "signup_url": "https://platform.minimaxi.com/user-center/basic-information/interface-key （国内）/ https://platform.minimax.io （国际）",
+            "supports_embedding": "false",
             # International: api.minimax.io/v1; China: api.minimaxi.com/v1
             # The old api.minimaxi.chat domain is being phased out.
             "base_url": "https://api.minimax.io/v1",
@@ -758,12 +773,21 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
                 "MiniMax-M2.5 / MiniMax-M2.1。"
                 "旧 abab 系列 (abab6.5*) 已被 M 系列替代"
             ),
+            "domain_alt": (
+                "国内用户改 base_url 为 https://api.minimaxi.com/v1 (旧 .chat 域名将停)"
+            ),
         },
     ),
     (
         "qwen",
         {
             "label": "通义千问 (阿里 DashScope)",
+            "description": (
+                "阿里出品,中文最强档之一 (qwen3.6 系列),qwen-plus 别名"
+                "自动跟最新快照,无需手动升级。免费档调用次数有限,商用记得充值"
+            ),
+            "signup_url": "https://bailian.console.aliyun.com/?apiKey=1#/api-key",
+            "supports_embedding": "true",
             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
             # qwen-plus 是别名,自动跟最新快照 (qwen3.6-plus, 2026-04-02)
             "default_model": "qwen-plus",
@@ -771,12 +795,19 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
                 "qwen-flash (最便宜) / qwen-plus (默认 / 平衡) / qwen-max (旗舰)。"
                 "都是别名,自动跟最新快照(当前 → qwen3.6-*, 2026-04 系列)"
             ),
+            "embedding_alt": "DashScope 也支持 text-embedding-v3 (Phase 3 高级选项里可选)",
         },
     ),
     (
         "zhipu",
         {
             "label": "智谱 ChatGLM",
+            "description": (
+                "清华 + 智谱出品。GLM-4.7-Flash 完全免费(每天调用次数限制),"
+                "做推荐 / 画像够用;GLM-5 是付费旗舰 (745B MoE,Claude Opus 级)"
+            ),
+            "signup_url": "https://www.bigmodel.cn/usercenter/proj-mgmt/apikeys",
+            "supports_embedding": "true",
             "base_url": "https://open.bigmodel.cn/api/paas/v4",
             # GLM-4.7-Flash (1/2026 发布) 是当前免费旗舰;GLM-5 (2/2026) 是付费
             # 旗舰 (745B MoE)。glm-4-flash 老了。
@@ -785,12 +816,19 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
                 "glm-4.7-flash (默认 / 免费 / 200K ctx) / glm-5 (付费旗舰 / 4/2026 / 745B MoE) / "
                 "glm-4.6。注意: base_url 是 /api/paas/v4 不是 /v1"
             ),
+            "embedding_alt": "智谱也有 embedding-3 (Phase 3 高级选项里可选)",
         },
     ),
     (
         "yi",
         {
             "label": "零一万物 (Yi)",
+            "description": (
+                "李开复创业团队出品,Yi-Large 在 LMSYS 中文榜常年 top 国产之一。"
+                "yi-medium 平衡好用,yi-spark 最便宜适合高频小任务"
+            ),
+            "signup_url": "https://platform.lingyiwanwu.com/apikeys",
+            "supports_embedding": "false",
             "base_url": "https://api.lingyiwanwu.com/v1",
             "default_model": "yi-medium",
             "hint": (
@@ -803,6 +841,12 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
         "self-hosted",
         {
             "label": "自建 vLLM / LMStudio / Ollama 网关",
+            "description": (
+                "你自己跑的 LLM 服务,常见: vLLM (多卡推理) / LMStudio (Mac M-series) / "
+                "Ollama 的 OpenAI 兼容 shim。免费但要自备硬件"
+            ),
+            "signup_url": "无 (本地服务通常不需要 Key,鉴权可留空)",
+            "supports_embedding": "false",  # depends — assume no
             "base_url": "http://localhost:8000/v1",
             "default_model": "",  # force user to type their deployed model
             "hint": (
@@ -810,12 +854,25 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
                 "meta-llama/Llama-3.3-70B-Instruct / Qwen/Qwen2.5-72B-Instruct / "
                 "deepseek-ai/DeepSeek-V3"
             ),
+            "embedding_alt": (
+                "如果你的 vLLM/LMStudio 也部署了 embedding 模型,Phase 3 高级选项里"
+                "可以指向同一个 base_url"
+            ),
         },
     ),
     (
         "relay",
         {
             "label": "中转站 / OneAPI / 公司团队 LLM 网关",
+            "description": (
+                "中转站 = 第三方代理 OpenAI / Claude 的二级商家(国内付人民币用海外模型)。"
+                "OneAPI / 团队 LLM 网关 = 公司自建的多模型聚合 + 计费 + 限流网关"
+            ),
+            "signup_url": (
+                "找你充值的那家中转站官网拿 Key。"
+                "OneAPI 是开源自建项目: https://github.com/songquanpeng/one-api"
+            ),
+            "supports_embedding": "true",  # most relay services proxy embeddings too
             "base_url": "",  # user-supplied
             "default_model": "gpt-5-nano",
             "hint": (
@@ -823,17 +880,34 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
                 "OpenAI (gpt-5-nano / gpt-5.4-mini / gpt-5.5) 或 "
                 "Claude (claude-sonnet-4-6 / claude-opus-4-7),按你充值的那家选"
             ),
+            "embedding_alt": (
+                "中转站通常也代理 OpenAI text-embedding-3-small,"
+                "Phase 3 高级选项里可以指向同一个 base_url"
+            ),
         },
     ),
     (
         "azure",
         {
             "label": "Azure OpenAI",
+            "description": (
+                "微软的 OpenAI 企业版。和 OpenAI 官方模型一致,但鉴权 / 模型名 / "
+                "endpoint 都按 Azure 的 deployment 模式走。多用于企业合规场景"
+            ),
+            "signup_url": (
+                "Azure portal → 创建 OpenAI resource → 创建 deployment → "
+                "Keys & Endpoint 取 KEY 和 ENDPOINT"
+            ),
+            "supports_embedding": "true",
             "base_url": "https://YOUR-RESOURCE.openai.azure.com/openai/deployments/YOUR-DEPLOYMENT",
             "default_model": "",
             "hint": (
                 "Azure 模型名 = 你创建 deployment 时指定的 deployment name(不是底层 gpt-5)。"
                 "Base URL 把 YOUR-RESOURCE / YOUR-DEPLOYMENT 替换成你自己的"
+            ),
+            "embedding_alt": (
+                "Azure 上 embedding 模型也是单独 deployment,Phase 3 时再起一个 deployment "
+                "并填那个的 endpoint"
             ),
         },
     ),
@@ -841,6 +915,12 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
         "custom",
         {
             "label": "其它 (完全手填)",
+            "description": (
+                "上面 8 个都不匹配的兜底选项。任何 OpenAI Chat Completions 协议兼容的服务"
+                "都能填(Bearer auth + /v1/chat/completions 形态)"
+            ),
+            "signup_url": "看你的服务方文档",
+            "supports_embedding": "false",  # unknown
             "base_url": "",
             "default_model": "",
             "hint": (
@@ -1197,19 +1277,31 @@ def _resolve_menu_choice(raw: str) -> str | None:
 
 
 def _prompt_openai_compat() -> tuple[str, str, str, str]:
-    """openai-compat sub-flow — preset menu → base_url → key → model.
+    """openai-compat sub-flow — preset menu → intro → base_url → key → model → embedding hint.
 
     All compat-protocol services write to the ``[llm.openai]`` section
     (the ``openai_provider.OpenAIProvider`` class is the universal
-    Bearer-auth + ``/v1/chat/completions`` client). The point of this
-    sub-menu is to remove the two error-prone fields — Base URL format
-    and model name — by pre-filling them from a vetted preset table,
-    while still giving advanced users a "完全手填" exit.
+    Bearer-auth + ``/v1/chat/completions`` client). The sub-menu's job
+    is to remove the four pain points普通用户 hit when self-configuring:
+
+    1. **Where to register** — every preset surfaces ``signup_url``
+       above the API Key prompt so the user can ``cmd-click`` it.
+    2. **What this thing actually is** — ``description`` runs as a one-
+       paragraph intro after preset selection, framing the strengths /
+       sweet spot of the service so the user knows what they signed up
+       for.
+    3. **Base URL format** — auto-filled from the preset; the user just
+       confirms.
+    4. **No embedding endpoint** — Kimi / MiniMax / Yi / self-hosted
+       don't ship embeddings, so we pre-warn the user that Phase 3
+       will fall back to local Ollama bge-m3. For Qwen / GLM / Azure /
+       relay (who DO have embeddings), we call out the advanced option
+       to point Phase 3 at the same base_url.
     """
     console.print(
         "\n[bold]配置 OpenAI 协议兼容服务[/bold]\n"
-        r"[dim]后端会按 OpenAI 协议(Bearer 鉴权 + /v1/chat/completions)去打你给的 Base URL,"
-        r"配置写到 config.toml 的 \[llm.openai] 段。[/dim]\n"
+        r"[dim]后端按 OpenAI 协议(Bearer 鉴权 + /v1/chat/completions)打你给的 Base URL,"
+        r"配置写入 config.toml 的 \[llm.openai] 段。[/dim]\n"
     )
     table = Table(show_lines=False, show_header=True)
     table.add_column("#", style="cyan", no_wrap=True)
@@ -1222,8 +1314,8 @@ def _prompt_openai_compat() -> tuple[str, str, str, str]:
         table.add_row(str(index), preset["label"], bu, dm)
     console.print(table)
     console.print(
-        "[dim]Tip: 不知道选哪个就看你的 API Key 是哪家发的——"
-        "Kimi/MiniMax/通义/智谱/Yi 是各自国内大模型厂商;"
+        "[dim]Tip: 不知道选哪个就看你的 API Key 是哪家发的—— "
+        "Kimi/MiniMax/通义/智谱/Yi 是国产大模型厂商;"
         "中转站 = 第三方代理 OpenAI/Claude 的二级商家;Azure = 微软的 OpenAI;"
         "其它 / 自建 = 你自己跑的 vLLM/LMStudio。[/dim]\n"
     )
@@ -1233,6 +1325,16 @@ def _prompt_openai_compat() -> tuple[str, str, str, str]:
     except ValueError:
         choice_index = 0
     preset_key, preset = _OPENAI_COMPAT_PRESETS[choice_index]
+
+    # Per-preset intro: what is this service, and where to register.
+    console.print(f"\n[bold]→ 已选: {preset['label']}[/bold]")
+    if preset.get("description"):
+        console.print(f"[dim]  {preset['description']}[/dim]")
+    if preset.get("signup_url"):
+        console.print(f"[dim]  申请 Key: [cyan]{preset['signup_url']}[/cyan][/dim]")
+    if preset.get("domain_alt"):
+        console.print(f"[dim]  💡 {preset['domain_alt']}[/dim]")
+    console.print()
 
     base_url_default = preset["base_url"]
     if base_url_default:
@@ -1250,7 +1352,7 @@ def _prompt_openai_compat() -> tuple[str, str, str, str]:
         ).strip()
 
     api_key = typer.prompt(
-        f"{preset['label']} 的 API Key (网关不鉴权可留空)",
+        f"{preset['label']} 的 API Key (本地 / 不鉴权服务可留空)",
         hide_input=True,
         default="",
         show_default=False,
@@ -1270,6 +1372,26 @@ def _prompt_openai_compat() -> tuple[str, str, str, str]:
         )
     else:
         model = typer.prompt("模型名 (必填,见上面的提示)").strip()
+
+    # Embedding heads-up — most compat-protocol vendors don't ship a
+    # /v1/embeddings endpoint. Pre-warn before the user gets to Phase 3
+    # so they don't think the wizard is broken when it auto-falls back.
+    has_embed = preset.get("supports_embedding", "false") == "true"
+    if not has_embed:
+        console.print(
+            f"\n[yellow]ⓘ {preset['label']} 没有 OpenAI 兼容的 embedding endpoint[/yellow]\n"
+            "[dim]  Phase 3 会自动选「本地 Ollama bge-m3」给推荐管线做向量化"
+            "(免费 / 离线 / 不影响主 LLM)。回车跳过即可。[/dim]"
+        )
+    elif preset.get("embedding_alt"):
+        console.print(f"\n[dim]💡 embedding 提示: {preset['embedding_alt']}[/dim]")
+
+    # Final confirm: show the canonical triplet so the user catches typos.
+    console.print(
+        f"\n[bold green]✓ 即将写入 config.toml:[/bold green]\n"
+        f"  [llm.openai].base_url = [cyan]{base_url}[/cyan]\n"
+        f"  [llm.openai].model    = [cyan]{model}[/cyan]"
+    )
     return "openai", base_url, api_key, model
 
 
