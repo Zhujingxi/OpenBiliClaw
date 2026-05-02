@@ -89,6 +89,42 @@ The Chrome extension (`extension/`) captures user behavior on bilibili.com pages
 - Key sections: `[llm]` (provider + API keys), `[bilibili]` (auth), `[scheduler]` (discovery cron), `[storage]` (db path)
 - Config logic: `src/openbiliclaw/config.py` with Pydantic validation and env var overrides
 
+## LLM Prompt-Cache Convention (v0.3.28+)
+
+OpenBiliClaw runs many LLM calls per discovery cycle. Provider-side
+prompt caching (DeepSeek 90% off / OpenAI 50% / Claude 90% / Gemini 75%
+on cached tokens) only fires when the **system message prefix is
+byte-identical across calls**. So:
+
+**Rule for every prompt builder in `src/openbiliclaw/llm/prompts.py`**:
+
+1. `system_prompt` MUST be 100% static — define it as a module-level
+   constant `_<NAME>_SYSTEM_PROMPT` and return it as-is. **No f-strings,
+   no concatenation with per-call data, no platform/source/profile
+   substitution.**
+2. ALL per-call variables (profile, content, source_platform, tone, …)
+   live in `user_prompt`, ordered from most stable (persona) to most
+   variable (this batch's items).
+3. JSON serialization MUST be deterministic: always pass
+   `ensure_ascii=False, indent=2, sort_keys=True` to `json.dumps`. A
+   dict-key reordering is enough to break the cache prefix.
+4. Reference the system prompt's "see user message for X / Y / Z"
+   contract explicitly so the LLM knows where to find each variable.
+
+**Exception**: `build_socratic_dialogue_prompt` keeps tone / friend
+label / core memory in system. That's intentional for OpenBiliClaw's
+single-user model — per-user state is stable across that user's calls,
+so cache still fires. Multi-user deployments would refactor it.
+
+**Enforcement**: `tests/test_llm_prompts.py::test_prompt_builder_system_messages_are_call_invariant`
+calls every covered builder with two distinct inputs and asserts the
+system message is byte-identical. Add new builders to its
+`_builder_test_inputs()` list.
+
+**Observability**: `openbiliclaw cost --by caller` shows per-caller
+cache hit rate (color-coded — red if <30%, almost certainly a builder
+that broke the convention).
+
 ## Code Conventions
 
 - Python 3.11+, 4-space indent, 100-char line length

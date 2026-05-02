@@ -94,7 +94,17 @@ def build_socratic_dialogue_prompt(
     history: list[dict[str, str]],
     source_platform_mix: dict[str, float] | None = None,
 ) -> list[dict[str, str]]:
-    """Build chat messages for Socratic dialogue generation."""
+    """Build chat messages for Socratic dialogue generation.
+
+    Note (v0.3.28+ cache analysis): unlike content-evaluation builders,
+    this one's system prompt does include per-user state (friend label,
+    tone, core memory). That looks like cache poisoning at first glance,
+    but OpenBiliClaw is single-user — per-user state is stable across
+    calls for the same install, so the cache still fires on repeated
+    dialogue turns. Multi-user deployments would want to refactor this
+    further, but for the current single-user model leaving the system
+    prompt user-specific is the simpler and equally-effective approach.
+    """
     friend_label = _friend_label_from_mix(source_platform_mix)
     system_prompt = "\n\n".join(
         [
@@ -821,6 +831,63 @@ def build_trending_rids_prompt(
     ]
 
 
+# 100% static system prompt for single-item content evaluation.
+# All variables (source_context, source_platform, profile, content)
+# go in user_prompt — see ``build_content_evaluation_prompt``.
+_SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT = (
+    "<task>\n"
+    "你要评估一个候选内容与一个用户画像的匹配度。下面 user 消息会给出 "
+    "<source_context>(发现路径)、<source_platform>(平台)、"
+    "<profile_summary>(画像)、<content_summary>(候选),你按下面规则打分。\n"
+    "</task>\n\n"
+    "<rules>\n"
+    "1. 输出必须是严格 JSON,不要附带解释。\n"
+    "2. score 范围必须在 0 到 1 之间。\n"
+    "3. reason 只写一句中文,解释为什么这个人会喜欢或不喜欢这个内容。\n"
+    '4. 不要只说"因为热门"或"因为看过类似的",要结合用户画像。\n'
+    "5. 根据 <source_context> 调整评判宽容度:search 要求高度匹配;"
+    "trending 来源的内容已经过大众验证,只要不在用户讨厌列表中且内容质量过关,基础分应 ≥ 0.6,若还能和画像产生关联则给更高分;"
+    "related_chain 允许适度偏移;explore 允许主题陌生,但内容仍需具备可看性和吸引力,"
+    "不能仅因为心理需求抽象匹配就给高分,过于学术、艰深、小众的内容应适当降分。\n"
+    "6. topic_group 是该内容所属的粗粒度主题分类,用于推荐去重。"
+    "要求:2-4 个中文词,抽象到能覆盖同类内容,"
+    '例如"强化学习"而非"强化学习ppo算法源码级讲解",'
+    '"城市建筑"而非"上海外滩建筑群纪录片"。'
+    "同一主题的不同切面必须归为同一个 topic_group。"
+    '语义相同的主题必须用同一个词——"AI" "人工智能" "机器学习" 统一写成 "人工智能",'
+    '"RL" "强化学习" 统一写成 "强化学习"。\n'
+    "7. style_key 从以下 11 个选项中选一个,描述该内容的呈现风格:\n"
+    "   game_strategy(游戏攻略/机制解析)/ news_brief(新闻资讯/时事快评)/ "
+    "practical_guide(教程/入门/实操指南)/ story_doc(纪录片/故事/人物传记)/ "
+    "visual_showcase(视觉向/混剪/空镜)/ tech_analysis(技术分析/硬件评测)/ "
+    "deep_dive(原理讲解/学术解析)/ "
+    "fun_variety(搞笑/吐槽/整活/挑战)/ lifestyle(日常/vlog/生活分享)/ "
+    "review_roundup(盘点/测评/推荐/合集)/ "
+    "light_chat(闲聊/杂谈/其他)\n"
+    "8. franchise_key(可空):内容如果明确属于某个具体 IP / 系列 / 作品 / 品牌,"
+    "填它的规范名(中文优先),用于跨 topic_group 的同 IP 去重。例:\n"
+    '   - 「AI 重绘原神地图」「提瓦特摄影」「蒙德角色真实化」 → "原神"\n'
+    '   - 「星穹铁道 1.6 实战」「崩铁 角色养成」 → "崩坏:星穹铁道"\n'
+    '   - 「ChatGPT 工作流」「OpenAI 新模型」 → "ChatGPT"\n'
+    '   - 「黑神话悟空 二周目」 → "黑神话:悟空"\n'
+    '   - 「番茄炒蛋 5 分钟教程」「读书博主 推荐书单」 → ""'
+    "(一般科普 / 美食 / 通用资讯都填空字符串,不要硬凑)\n"
+    "   - 同一 IP 必须用相同写法,不要在「原神」「Genshin」「米哈游 原神」之间切换。\n"
+    "9. 不同 source_platform(bilibili / xiaohongshu / 其他)的内容标签同 schema,"
+    "不要因为来源不同特殊处理评分逻辑。\n"
+    "</rules>\n\n"
+    "<output_schema>\n"
+    "{\n"
+    '  "score": 0.78,\n'
+    '  "reason": "这个视频的选题角度新颖,节奏轻快,契合你对该领域的好奇心。",\n'
+    '  "topic_group": "生活方式",\n'
+    '  "style_key": "light_chat",\n'
+    '  "franchise_key": ""\n'
+    "}\n"
+    "</output_schema>"
+)
+
+
 def build_content_evaluation_prompt(
     *,
     profile_summary: dict[str, object],
@@ -828,83 +895,105 @@ def build_content_evaluation_prompt(
     source_context: str = "",
     source_platform: str = "bilibili",
 ) -> list[dict[str, str]]:
-    """Build a structured prompt for content relevance evaluation.
+    """Build a structured prompt for single-item content relevance evaluation.
 
     Args:
         profile_summary: User profile summary.
         content_summary: Content metadata.
         source_context: Discovery context hint (e.g. search / trending / explore).
         source_platform: Platform identifier for dynamic prompt wording.
-    """
-    source_hint = ""
-    if source_context:
-        source_hint = f"\n<discovery_context>\n{source_context}\n</discovery_context>\n\n"
 
-    system_prompt = (
-        "<task>\n"
-        + source_hint
-        + "你要评估一个 "
-        + _platform_content_label(source_platform)
-        + "与这个用户画像的匹配度。\n"
-        "</task>\n\n"
-        "<rules>\n"
-        "1. 输出必须是严格 JSON，不要附带解释。\n"
-        "2. score 范围必须在 0 到 1 之间。\n"
-        "3. reason 只写一句中文，解释为什么这个人会喜欢或不喜欢这个内容。\n"
-        '4. 不要只说"因为热门"或"因为看过类似的"，要结合用户画像。\n'
-        "5. 根据发现路径调整评判宽容度：search 要求高度匹配；"
-        "trending 来源的内容已经过大众验证，只要不在用户讨厌列表中且内容质量过关，基础分应 ≥ 0.6，若还能和画像产生关联则给更高分；"
-        "related_chain 允许适度偏移；explore 允许主题陌生，但内容仍需具备可看性和吸引力，"
-        "不能仅因为心理需求抽象匹配就给高分，过于学术、艰深、小众的内容应适当降分。\n"
-        "6. topic_group 是该内容所属的粗粒度主题分类，用于推荐去重。"
-        "要求：2-4 个中文词，抽象到能覆盖同类内容，"
-        '例如"强化学习"而非"强化学习ppo算法源码级讲解"，'
-        '"城市建筑"而非"上海外滩建筑群纪录片"。'
-        "同一主题的不同切面必须归为同一个 topic_group。"
-        '语义相同的主题必须用同一个词——"AI" "人工智能" "机器学习" 统一写成 "人工智能"，'
-        '"RL" "强化学习" 统一写成 "强化学习"。\n'
-        "7. style_key 从以下 11 个选项中选一个，描述该内容的呈现风格：\n"
-        "   game_strategy（游戏攻略/机制解析）/ news_brief（新闻资讯/时事快评）/ "
-        "practical_guide（教程/入门/实操指南）/ story_doc（纪录片/故事/人物传记）/ "
-        "visual_showcase（视觉向/混剪/空镜）/ tech_analysis（技术分析/硬件评测）/ "
-        "deep_dive（原理讲解/学术解析）/ "
-        "fun_variety（搞笑/吐槽/整活/挑战）/ lifestyle（日常/vlog/生活分享）/ "
-        "review_roundup（盘点/测评/推荐/合集）/ "
-        "light_chat（闲聊/杂谈/其他）\n"
-        "8. franchise_key（可空）：内容如果明确属于某个具体 IP / 系列 / 作品 / 品牌，"
-        "填它的规范名（中文优先），用于跨 topic_group 的同 IP 去重。例：\n"
-        '   - 「AI 重绘原神地图」「提瓦特摄影」「蒙德角色真实化」 → "原神"\n'
-        '   - 「星穹铁道 1.6 实战」「崩铁 角色养成」 → "崩坏:星穹铁道"\n'
-        '   - 「ChatGPT 工作流」「OpenAI 新模型」 → "ChatGPT"\n'
-        '   - 「黑神话悟空 二周目」 → "黑神话:悟空"\n'
-        '   - 「番茄炒蛋 5 分钟教程」「读书博主 推荐书单」 → ""'
-        "（一般科普 / 美食 / 通用资讯都填空字符串，不要硬凑）\n"
-        "   - 同一 IP 必须用相同写法，不要在「原神」「Genshin」「米哈游 原神」之间切换。\n"
-        "</rules>\n\n"
-        "<output_schema>\n"
-        "{\n"
-        '  "score": 0.78,\n'
-        '  "reason": "这个视频的选题角度新颖，节奏轻快，契合你对该领域的好奇心。",\n'
-        '  "topic_group": "生活方式",\n'
-        '  "style_key": "light_chat",\n'
-        '  "franchise_key": ""\n'
-        "}\n"
-        "</output_schema>"
-    )
+    v0.3.28+ cache-friendly: ``system_prompt`` is the module-level
+    constant ``_SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT`` (100% static).
+    All variables live in ``user_prompt``.
+    """
     user_prompt = "\n\n".join(
         [
+            "<source_context>",
+            source_context or "(unspecified)",
+            "</source_context>",
+            "<source_platform>",
+            source_platform or "bilibili",
+            "</source_platform>",
             "<profile_summary>",
-            json.dumps(profile_summary, ensure_ascii=False, indent=2),
+            json.dumps(
+                profile_summary, ensure_ascii=False, indent=2, sort_keys=True
+            ),
             "</profile_summary>",
             "<content_summary>",
-            json.dumps(content_summary, ensure_ascii=False, indent=2),
+            json.dumps(
+                content_summary, ensure_ascii=False, indent=2, sort_keys=True
+            ),
             "</content_summary>",
         ]
     )
     return [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": _SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
+
+
+# Module-level constant: 100% static system prompt for batch content
+# evaluation. This is what gets cached across all calls, so it MUST NOT
+# include any per-call variables (source platform, discovery context,
+# profile data — all of those go in user_prompt). Provider-side prompt
+# cache (DeepSeek 90% / OpenAI 50% / Claude 90% / Gemini 75% off) only
+# fires when the prefix is byte-identical across calls.
+_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT = (
+    "<task>\n"
+    "你要批量评估多个候选内容与一个用户画像的匹配度。"
+    "下面 user 消息会给出 <source_context>(发现路径)、<source_platform>(平台)、"
+    "<profile_summary>(画像)、<content_batch>(本批候选),你按下面规则打分。\n"
+    "</task>\n\n"
+    "<rules>\n"
+    "1. 输出必须是严格 JSON 数组,不要附带解释。\n"
+    "2. 数组长度必须与输入内容数量一致,顺序一一对应。\n"
+    "3. 每项包含 score(0-1)、reason(一句中文)、topic_group(2-4词粗分类)、"
+    "style_key(11选1)、franchise_key(可空)。\n"
+    "4. 根据 <source_context> 调整评判宽容度:search 要求高度匹配;"
+    "trending 基础分 >= 0.6;related_chain 允许适度偏移;"
+    "explore 允许主题陌生,但内容仍需具备可看性,过于学术艰深的应适当降分。\n"
+    "5. topic_group 规则:2-4 个中文词的粗分类,同主题不同切面统一。"
+    "语义相同必须用同一词(AI/人工智能/机器学习 统一为 人工智能)。\n"
+    "6. style_key 从 11 个选项中选:game_strategy / news_brief / "
+    "practical_guide / story_doc / visual_showcase / tech_analysis / "
+    "deep_dive / fun_variety / lifestyle / review_roundup / light_chat\n"
+    "7. franchise_key 规则:内容如果明确属于某个具体 IP / 系列 / 作品 / 品牌,"
+    "填它的规范名(中文优先),用于跨 topic_group 的同 IP 去重。例:\n"
+    "   - 「AI 重绘原神地图」「提瓦特摄影」「蒙德角色真实化」"
+    '→ franchise_key = "原神"\n'
+    "   - 「星穹铁道 1.6 实战」「崩铁 角色养成」"
+    '→ franchise_key = "崩坏:星穹铁道"\n'
+    '   - 「ChatGPT 工作流」「OpenAI 新模型」 → franchise_key = "ChatGPT"\n'
+    '   - 「黑神话悟空 二周目」 → franchise_key = "黑神话:悟空"\n'
+    '   - 「番茄炒蛋 5 分钟教程」「读书博主 推荐书单」 → franchise_key = ""'
+    "(一般科普 / 美食 / 通用资讯都填空字符串,不要硬凑)\n"
+    "   - 同一 IP 必须用相同写法,不要在「原神」「Genshin」「米哈游 原神」之间切换。\n"
+    "8. 评分要尊重画像里的多样性诉求,双向保护:\n"
+    "   - 如果 depth_preference 不高、preferred_duration 偏短,"
+    "或 humor_preference 偏高,不要把学术艰深、入口很高的内容误判成高匹配;"
+    "讲法轻松但不空的内容同样可以高分。\n"
+    "   - 反过来,如果 depth_preference 偏高、preferred_duration 偏长,"
+    "但 humor_preference >= 0.4、exploration_openness >= 0.6,"
+    '或 cognitive_style 里写明 "兼顾/调节/穿插轻松" 这类双轨倾向,'
+    "说明用户也需要轻内容做心理调节、喘气。这时 fun_variety / light_chat / "
+    "lifestyle / story_doc / visual_showcase 风格的内容只要本身可看(话题清晰、"
+    'UP 主观察角度有意思),不要因为"不够深"就一律压到 0.5 以下,'
+    "应当给到 0.6-0.75,与画像中的娱乐/二次元/生活类兴趣标签保持权重一致。\n"
+    "9. 不同 source_platform(bilibili / xiaohongshu / 其他)的内容标签同 schema,"
+    "不要因为来源不同特殊处理评分逻辑。\n"
+    "</rules>\n\n"
+    "<output_schema>\n"
+    "[\n"
+    '  {"score": 0.78, "reason": "...", "topic_group": "认知科学", '
+    '"style_key": "deep_dive", "franchise_key": ""},\n'
+    '  {"score": 0.72, "reason": "...", "topic_group": "游戏摄影", '
+    '"style_key": "visual_showcase", "franchise_key": "原神"},\n'
+    '  {"score": 0.45, "reason": "...", "topic_group": "美食", '
+    '"style_key": "light_chat", "franchise_key": ""}\n'
+    "]\n"
+    "</output_schema>"
+)
 
 
 def build_batch_content_evaluation_prompt(
@@ -918,79 +1007,89 @@ def build_batch_content_evaluation_prompt(
 
     Same rules as single evaluation, but processes a batch and returns
     a JSON array of results keyed by item index.
-    """
-    source_hint = ""
-    if source_context:
-        source_hint = f"\n<discovery_context>\n{source_context}\n</discovery_context>\n\n"
 
-    system_prompt = (
-        "<task>\n"
-        + source_hint
-        + "你要批量评估多个 "
-        + _platform_content_label(source_platform)
-        + "与这个用户画像的匹配度。\n"
-        "</task>\n\n"
-        "<rules>\n"
-        "1. 输出必须是严格 JSON 数组，不要附带解释。\n"
-        "2. 数组长度必须与输入内容数量一致，顺序一一对应。\n"
-        "3. 每项包含 score(0-1)、reason(一句中文)、topic_group(2-4词粗分类)、"
-        "style_key(11选1)、franchise_key（可空）。\n"
-        "4. 根据发现路径调整评判宽容度：search 要求高度匹配；"
-        "trending 基础分 >= 0.6；related_chain 允许适度偏移；"
-        "explore 允许主题陌生，但内容仍需具备可看性，过于学术艰深的应适当降分。\n"
-        "5. topic_group 规则：2-4 个中文词的粗分类，同主题不同切面统一。"
-        "语义相同必须用同一词（AI/人工智能/机器学习 统一为 人工智能）。\n"
-        "6. style_key 从 11 个选项中选：game_strategy / news_brief / "
-        "practical_guide / story_doc / visual_showcase / tech_analysis / "
-        "deep_dive / fun_variety / lifestyle / review_roundup / light_chat\n"
-        "7. franchise_key 规则：内容如果明确属于某个具体 IP / 系列 / 作品 / 品牌，"
-        "填它的规范名（中文优先），用于跨 topic_group 的同 IP 去重。例：\n"
-        "   - 「AI 重绘原神地图」「提瓦特摄影」「蒙德角色真实化」"
-        '→ franchise_key = "原神"\n'
-        "   - 「星穹铁道 1.6 实战」「崩铁 角色养成」"
-        '→ franchise_key = "崩坏:星穹铁道"\n'
-        '   - 「ChatGPT 工作流」「OpenAI 新模型」 → franchise_key = "ChatGPT"\n'
-        '   - 「黑神话悟空 二周目」 → franchise_key = "黑神话:悟空"\n'
-        '   - 「番茄炒蛋 5 分钟教程」「读书博主 推荐书单」 → franchise_key = ""'
-        "（一般科普 / 美食 / 通用资讯都填空字符串，不要硬凑）\n"
-        "   - 同一 IP 必须用相同写法，不要在「原神」「Genshin」「米哈游 原神」之间切换。\n"
-        "8. 评分要尊重画像里的多样性诉求，双向保护：\n"
-        "   - 如果 depth_preference 不高、preferred_duration 偏短，"
-        "或 humor_preference 偏高，不要把学术艰深、入口很高的内容误判成高匹配；"
-        "讲法轻松但不空的内容同样可以高分。\n"
-        "   - 反过来，如果 depth_preference 偏高、preferred_duration 偏长，"
-        "但 humor_preference >= 0.4、exploration_openness >= 0.6，"
-        '或 cognitive_style 里写明 "兼顾/调节/穿插轻松" 这类双轨倾向，'
-        "说明用户也需要轻内容做心理调节、喘气。这时 fun_variety / light_chat / "
-        "lifestyle / story_doc / visual_showcase 风格的内容只要本身可看（话题清晰、"
-        'UP 主观察角度有意思），不要因为"不够深"就一律压到 0.5 以下，'
-        "应当给到 0.6-0.75，与画像中的娱乐/二次元/生活类兴趣标签保持权重一致。\n"
-        "</rules>\n\n"
-        "<output_schema>\n"
-        "[\n"
-        '  {"score": 0.78, "reason": "...", "topic_group": "认知科学", '
-        '"style_key": "deep_dive", "franchise_key": ""},\n'
-        '  {"score": 0.72, "reason": "...", "topic_group": "游戏摄影", '
-        '"style_key": "visual_showcase", "franchise_key": "原神"},\n'
-        '  {"score": 0.45, "reason": "...", "topic_group": "美食", '
-        '"style_key": "light_chat", "franchise_key": ""}\n'
-        "]\n"
-        "</output_schema>"
-    )
+    v0.3.28+ cache-friendly: ``system_prompt`` is the module-level
+    constant ``_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT`` — 100% static
+    across all calls, so the entire ~3500-token instruction block is
+    cache-eligible. All variables (source_context, source_platform,
+    profile, content_items) live in ``user_prompt``, ordered from most
+    stable (profile, changes once per profile rebuild) to most variable
+    (content_batch, changes every call). DeepSeek's auto-cache hits the
+    system prefix every call after the first; explicit-cache providers
+    can mark the system block with cache_control.
+    """
     user_prompt = "\n\n".join(
         [
+            "<source_context>",
+            source_context or "(unspecified)",
+            "</source_context>",
+            "<source_platform>",
+            source_platform or "bilibili",
+            "</source_platform>",
             "<profile_summary>",
-            json.dumps(profile_summary, ensure_ascii=False, indent=2),
+            json.dumps(
+                profile_summary,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
             "</profile_summary>",
             "<content_batch>",
-            json.dumps(content_items, ensure_ascii=False, indent=2),
+            json.dumps(
+                content_items,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
             "</content_batch>",
         ]
     )
     return [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
+
+
+# 100% static system prompt for single-item recommendation expression.
+# Platform / tone / persona variables live in user_prompt prefix.
+_RECOMMENDATION_EXPRESSION_SYSTEM_PROMPT = """
+<task>
+你要像一个真正懂这个人的朋友一样,给出一段推荐这条候选内容的话。下面 user 消息会给出
+<source_platform>(平台,决定友谊基调)、<tone_profile>(语气参数)、
+<profile_summary>(画像)、<content_summary>(候选)。
+</task>
+
+<rules>
+1. 输出必须是严格 JSON,不要附带解释。
+2. expression 必须是 50 到 150 字的中文口语表达,像朋友私聊,不像算法推荐。
+   如果 source_platform 是 bilibili,可以用"老 B 友"基调和 B 站语境;
+   xiaohongshu 用更生活化的姐妹/朋友语气;其他平台保持中性朋友感。
+3. expression 要解释"为什么这条内容会对上这个人的胃口",必须引用至少一个具体内容细节
+   (如视频/笔记标题中的关键词、作者特点、或内容的独特切入角度),不要说空话。
+4. topic_label 需要是轻度个性化的主题标签,不要只写泛分类词。
+5. 避免机械解释腔、广告腔和"根据你的兴趣""你可能会喜欢"这类算法套话。
+6. 禁止使用以下模板词:信息密度、高质量、深度好文、值得一看、强烈推荐、不容错过。
+   用具体描述代替泛泛评价。
+7. 如果内容来自 explore (跨域发现),expression 要解释这个陌生领域和用户的哪种
+   认知偏好/深层需求产生了关联,让用户觉得"虽然没想过但确实想看"。
+8. 如果 profile_summary.style 里 depth_preference 不高、preferred_duration 偏短,
+   或 humor_preference 偏高,expression 要更轻、更顺口,少用"认知偏好 / 底层结构 /
+   深层需求"这类抽象词,不要把推荐说得比内容本身还硬。
+9. 如果 content_summary.style_key 是 lifestyle / light_chat / fun_variety /
+   review_roundup / story_doc / visual_showcase,优先从人物、场景、信息点或情绪切口来推荐,
+   不要硬写成"系统闭环 / 底层逻辑 / 认知防御"。
+10. 严格遵循 <tone_profile> 里给的密度 / 温度 / 梗感 / 直给度 4 个参数。
+</rules>
+
+<output_schema>
+{
+  "expression": "这个 UP 主拿液压机去压各种日用品,看着无厘头,"
+    "但你仔细看他每次都会慢放形变过程——其实暗合材料力学那套东西,"
+    "你搞机械的应该会觉得有点意思。",
+  "topic_label": "藏在整活视频里的材料力学"
+}
+</output_schema>
+""".strip()
 
 
 def build_recommendation_expression_prompt(
@@ -1000,62 +1099,72 @@ def build_recommendation_expression_prompt(
     tone_profile: ToneProfile | None,
     source_platform: str = "bilibili",
 ) -> list[dict[str, str]]:
-    """Build a structured prompt for friend-style recommendation expression."""
-    _friend = _platform_friend_label(source_platform)
-    _content = _platform_content_label(source_platform)
-    system_prompt = (
-        """
-<task>
-你要像一个真正懂这个人的{friend}一样，给出一段推荐这条 {content}的话。
-</task>""".replace("{friend}", _friend).replace("{content}", _content)
-        + """
+    """Build a structured prompt for friend-style recommendation expression.
 
-<rules>
-1. 输出必须是严格 JSON，不要附带解释。
-2. expression 必须是 50 到 150 字的中文口语表达，像朋友私聊，不像算法推荐。
-3. expression 要解释”为什么这条内容会对上这个人的胃口”，必须引用至少一个具体内容细节
-   （如视频标题中的关键词、UP主特点、或内容的独特切入角度），不要说空话。
-4. topic_label 需要是轻度个性化的主题标签，不要只写泛分类词。
-5. 避免机械解释腔、广告腔和”根据你的兴趣””你可能会喜欢”这类算法套话。
-6. 禁止使用以下模板词：信息密度、高质量、深度好文、值得一看、强烈推荐、不容错过。
-   用具体描述代替泛泛评价。
-7. 如果内容来自 explore（跨域发现），expression 要解释这个陌生领域和用户的哪种
-   认知偏好/深层需求产生了关联，让用户觉得”虽然没想过但确实想看”。
-8. 如果 profile_summary.style 里 depth_preference 不高、preferred_duration 偏短，
-   或 humor_preference 偏高，expression 要更轻、更顺口，少用“认知偏好 / 底层结构 /
-   深层需求”这类抽象词，不要把推荐说得比内容本身还硬。
-9. 如果 content_summary.style_key 是 lifestyle / light_chat / fun_variety /
-   review_roundup / story_doc / visual_showcase，优先从人物、场景、信息点或情绪切口来推荐，
-   不要硬写成“系统闭环 / 底层逻辑 / 认知防御”。
-</rules>
-
-<output_schema>
-{
-  "expression": "这个 UP 主拿液压机去压各种日用品，看着无厘头，"
-    "但你仔细看他每次都会慢放形变过程——其实暗合材料力学那套东西，"
-    "你搞机械的应该会觉得有点意思。",
-  "topic_label": "藏在整活视频里的材料力学"
-}
-</output_schema>
-""".strip()
-    )
-    system_prompt = "\n\n".join(
-        [system_prompt, _render_tone_profile(tone_profile, {source_platform: 1.0})]
-    )
+    v0.3.28+ cache-friendly: ``system_prompt`` is the module-level
+    constant ``_RECOMMENDATION_EXPRESSION_SYSTEM_PROMPT`` (100% static).
+    Platform label / tone profile / profile / content all live in
+    ``user_prompt``, ordered so that platform + tone (semi-stable per
+    user) come before content (changes every call) — extends the
+    prefix-cache match as far as the recommendation cycle reuses the
+    same persona.
+    """
     user_prompt = "\n\n".join(
         [
+            "<source_platform>",
+            source_platform or "bilibili",
+            "</source_platform>",
+            "<tone_profile>",
+            _render_tone_profile(tone_profile, {source_platform: 1.0}),
+            "</tone_profile>",
             "<profile_summary>",
-            json.dumps(profile_summary, ensure_ascii=False, indent=2),
+            json.dumps(
+                profile_summary, ensure_ascii=False, indent=2, sort_keys=True
+            ),
             "</profile_summary>",
             "<content_summary>",
-            json.dumps(content_summary, ensure_ascii=False, indent=2),
+            json.dumps(
+                content_summary, ensure_ascii=False, indent=2, sort_keys=True
+            ),
             "</content_summary>",
         ]
     )
     return [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": _RECOMMENDATION_EXPRESSION_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
+
+
+# 100% static system prompt for batch recommendation expression.
+_BATCH_EXPRESSION_SYSTEM_PROMPT = (
+    "<task>\n"
+    "你要像一个真正懂这个人的朋友一样,为多条候选内容各写一段推荐话。"
+    "下面 user 消息会给出 <source_platform>(平台)、<tone_profile>(语气)、"
+    "<profile_summary>(画像)、<content_batch>(本批候选)。\n"
+    "</task>\n\n"
+    "<rules>\n"
+    "1. 输出必须是严格 JSON 数组,数组长度与输入内容数量一致,顺序一一对应。\n"
+    "2. 每项包含 expression(50-150字中文口语) 和 topic_label(个性化主题标签)。\n"
+    "3. expression 像朋友私聊。bilibili 用'老 B 友'语境,xiaohongshu 用更生活化的姐妹/朋友语气,"
+    "其他平台保持中性朋友感。必须引用至少一个具体内容细节(标题关键词、作者特点、独特切入角度),"
+    "不要说空话。\n"
+    "4. 避免:算法套话、信息密度、高质量、深度好文、值得一看、强烈推荐。\n"
+    "5. explore 来源的内容要解释陌生领域和用户认知偏好的关联。\n"
+    "6. 每条 expression 的开头措辞必须不同,禁止重复同一句式。\n"
+    "7. 如果 profile_summary.style 显示 depth_preference 不高、preferred_duration 偏短,"
+    "或 humor_preference 偏高,整体措辞要更轻、更顺口,不要把轻内容硬写成分析报告。\n"
+    "8. 如果某条 content.style_key 是 lifestyle / light_chat / fun_variety / "
+    "review_roundup / story_doc / visual_showcase,就优先从人物、场景、信息点或情绪切口下笔,"
+    "不要把它写成心理机制拆解。\n"
+    "9. 严格遵循 <tone_profile> 里给的密度 / 温度 / 梗感 / 直给度 4 个参数。\n"
+    "</rules>\n\n"
+    "<output_schema>\n"
+    "[\n"
+    '  {"expression": "这条...", "topic_label": "xxx"},\n'
+    '  {"expression": "这个UP主...", "topic_label": "yyy"}\n'
+    "]\n"
+    "</output_schema>"
+)
 
 
 def build_batch_expression_prompt(
@@ -1065,51 +1174,64 @@ def build_batch_expression_prompt(
     tone_profile: ToneProfile | None,
     source_platform: str = "bilibili",
 ) -> list[dict[str, str]]:
-    """Build a prompt that generates expressions for multiple items in one call."""
-    _friend = _platform_friend_label(source_platform)
-    _content = _platform_content_label(source_platform)
-    system_prompt = (
-        "<task>\n"
-        "你要像一个真正懂这个人的" + _friend + "一样，为多条 " + _content + "各写一段推荐话。\n"
-        "</task>\n\n"
-        "<rules>\n"
-        "1. 输出必须是严格 JSON 数组，数组长度与输入内容数量一致，顺序一一对应。\n"
-        "2. 每项包含 expression(50-150字中文口语) 和 topic_label(个性化主题标签)。\n"
-        "3. expression 像朋友私聊，必须引用至少一个具体内容细节"
-        "（标题关键词、UP主特点、独特切入角度），不要说空话。\n"
-        "4. 避免：算法套话、信息密度、高质量、深度好文、值得一看、强烈推荐。\n"
-        "5. explore 来源的内容要解释陌生领域和用户认知偏好的关联。\n"
-        "6. 每条 expression 的开头措辞必须不同，禁止重复同一句式。\n"
-        "7. 如果 profile_summary.style 显示 depth_preference 不高、preferred_duration 偏短，"
-        "或 humor_preference 偏高，整体措辞要更轻、更顺口，不要把轻内容硬写成分析报告。\n"
-        "8. 如果某条 content.style_key 是 lifestyle / light_chat / fun_variety / "
-        "review_roundup / story_doc / visual_showcase，就优先从人物、场景、信息点或情绪切口下笔，"
-        "不要把它写成心理机制拆解。\n"
-        "</rules>\n\n"
-        "<output_schema>\n"
-        "[\n"
-        '  {"expression": "这条...", "topic_label": "xxx"},\n'
-        '  {"expression": "这个UP主...", "topic_label": "yyy"}\n'
-        "]\n"
-        "</output_schema>"
-    )
-    system_prompt = "\n\n".join(
-        [system_prompt, _render_tone_profile(tone_profile, {source_platform: 1.0})]
-    )
+    """Build a prompt that generates expressions for multiple items in one call.
+
+    v0.3.28+ cache-friendly: ``system_prompt`` is the module-level
+    constant ``_BATCH_EXPRESSION_SYSTEM_PROMPT`` (100% static).
+    """
     user_prompt = "\n\n".join(
         [
+            "<source_platform>",
+            source_platform or "bilibili",
+            "</source_platform>",
+            "<tone_profile>",
+            _render_tone_profile(tone_profile, {source_platform: 1.0}),
+            "</tone_profile>",
             "<profile_summary>",
-            json.dumps(profile_summary, ensure_ascii=False, indent=2),
+            json.dumps(
+                profile_summary, ensure_ascii=False, indent=2, sort_keys=True
+            ),
             "</profile_summary>",
             "<content_batch>",
-            json.dumps(content_items, ensure_ascii=False, indent=2),
+            json.dumps(
+                content_items, ensure_ascii=False, indent=2, sort_keys=True
+            ),
             "</content_batch>",
         ]
     )
     return [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": _BATCH_EXPRESSION_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
+
+
+# 100% static system prompt for delight-reason generation.
+_DELIGHT_REASON_SYSTEM_PROMPT = (
+    "<task>\n"
+    "你要为一条「主动惊喜推荐」写一段解释,说明为什么这条内容可能会让这个人意外地喜欢。\n"
+    "这不是普通推荐——这是你作为一个真正懂他的朋友,主动跑来说「这条你一定要看」。\n"
+    "下面 user 消息会给出 <source_platform>、<tone_profile>、<profile_summary>、"
+    "<content_summary>、<reason_stub>。\n"
+    "</task>\n\n"
+    "<rules>\n"
+    "1. 输出必须是严格 JSON,包含 delight_reason 和 delight_hook。\n"
+    "2. delight_reason(80-200字中文口语)要解释:\n"
+    "   - 这条内容为什么会让这个人产生「意外的共鸣」或「惊喜的发现」\n"
+    "   - 必须引用用户画像中的至少一个深层需求、洞察假说或认知偏好\n"
+    "   - 语气比普通推荐更亲密、更有把握,像「我知道你不常看这类,但这条真的会戳到你」\n"
+    "3. delight_hook(2-4个中文字)是一个短标签,用于UI徽章展示。\n"
+    "   例如:深层共鸣、跨域惊喜、灵感碰撞、意外契合、隐藏需求\n"
+    "4. 不要用:强烈推荐、值得一看、高质量、信息密度等套话。\n"
+    "5. reason_stub 提供了打分信号的线索,用它来组织 delight_reason 的叙事方向。\n"
+    "6. 严格遵循 <tone_profile> 里给的密度 / 温度 / 梗感 / 直给度 4 个参数。\n"
+    "</rules>\n\n"
+    "<output_schema>\n"
+    "{\n"
+    '  "delight_reason": "你之前聊到过想搞明白...",\n'
+    '  "delight_hook": "深层共鸣"\n'
+    "}\n"
+    "</output_schema>"
+)
 
 
 def build_delight_reason_prompt(
@@ -1125,40 +1247,27 @@ def build_delight_reason_prompt(
     The output should feel like a friend saying "I know you don't usually
     watch this kind of thing, but I genuinely think this one would hit
     different for you because..."
+
+    v0.3.28+ cache-friendly: ``system_prompt`` is the module-level
+    constant ``_DELIGHT_REASON_SYSTEM_PROMPT`` (100% static).
     """
-    system_prompt = (
-        "<task>\n"
-        "你要为一条「主动惊喜推荐」写一段解释，说明为什么这条内容可能会让这个人意外地喜欢。\n"
-        "这不是普通推荐——这是你作为一个真正懂他的朋友，主动跑来说「这条你一定要看」。\n"
-        "</task>\n\n"
-        "<rules>\n"
-        "1. 输出必须是严格 JSON，包含 delight_reason 和 delight_hook。\n"
-        "2. delight_reason（80-200字中文口语）要解释：\n"
-        "   - 这条内容为什么会让这个人产生「意外的共鸣」或「惊喜的发现」\n"
-        "   - 必须引用用户画像中的至少一个深层需求、洞察假说或认知偏好\n"
-        "   - 语气比普通推荐更亲密、更有把握，像「我知道你不常看这类，但这条真的会戳到你」\n"
-        "3. delight_hook（2-4个中文字）是一个短标签，用于UI徽章展示。\n"
-        "   例如：深层共鸣、跨域惊喜、灵感碰撞、意外契合、隐藏需求\n"
-        "4. 不要用：强烈推荐、值得一看、高质量、信息密度等套话。\n"
-        "5. reason_stub 提供了打分信号的线索，用它来组织 delight_reason 的叙事方向。\n"
-        "</rules>\n\n"
-        "<output_schema>\n"
-        "{\n"
-        '  "delight_reason": "你之前聊到过想搞明白...",\n'
-        '  "delight_hook": "深层共鸣"\n'
-        "}\n"
-        "</output_schema>"
-    )
-    system_prompt = "\n\n".join(
-        [system_prompt, _render_tone_profile(tone_profile, {source_platform: 1.0})]
-    )
     user_prompt = "\n\n".join(
         [
+            "<source_platform>",
+            source_platform or "bilibili",
+            "</source_platform>",
+            "<tone_profile>",
+            _render_tone_profile(tone_profile, {source_platform: 1.0}),
+            "</tone_profile>",
             "<profile_summary>",
-            json.dumps(profile_summary, ensure_ascii=False, indent=2),
+            json.dumps(
+                profile_summary, ensure_ascii=False, indent=2, sort_keys=True
+            ),
             "</profile_summary>",
             "<content_summary>",
-            json.dumps(content_summary, ensure_ascii=False, indent=2),
+            json.dumps(
+                content_summary, ensure_ascii=False, indent=2, sort_keys=True
+            ),
             "</content_summary>",
             "<reason_stub>",
             reason_stub,
@@ -1166,7 +1275,7 @@ def build_delight_reason_prompt(
         ]
     )
     return [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": _DELIGHT_REASON_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
 

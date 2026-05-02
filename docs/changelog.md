@@ -4,6 +4,57 @@
 
 ---
 
+## v0.3.29: prompt-cache 通用化改造 + 命中率观测 (Layer 1 + Layer 3)（2026-05-02）
+
+为 daemon 长跑成本拉低 50-80% 做架构性铺垫。挖到 v0.3.26 计费台账没有 cache 字段(provider 报但没归一化),v0.3.27 prompt builders 多个把 per-call 变量塞进 system 消息(让 provider-side 自动缓存命中率永远是 0)。两者一起改。
+
+### 新增 (Layer 3 — 跨 provider 的命中率观测基础)
+
+- **每家 LLM provider 提取 cache 字段并 normalize 到 `LLMResponse.usage["cached_input_tokens"]`** —— OpenAI 系 (`prompt_tokens_details.cached_tokens`)、DeepSeek (`prompt_cache_hit_tokens`)、Claude (`cache_read_input_tokens`,另外保留 `cache_creation_input_tokens` 单独记账)、Gemini (`usage_metadata.cached_content_token_count`),OpenRouter / 中转站 / 国产官方因为继承 OpenAIProvider 自动获益
+- **`pricing.CACHE_HIT_DISCOUNT`** 表 + `estimate_cost(..., cached_tokens=N)` 扩展 —— 各家 cache 折扣率列表(DeepSeek 0.10 / OpenAI 0.50 / Claude 0.10 / Gemini 0.25 / Ollama 0 / 未知 0.5),split prompt_tokens 按 cached/non-cached 分别计费
+- **`Database.llm_usage` 加 `cached_input_tokens` 列 + migration `_ensure_llm_usage_cache_columns`** —— 存量 DB 自动 backfill,新调用按 cache 折扣存账。`query_llm_usage_by_caller` / `_total` / `_since_id` 全部返回 cache 字段
+- **`UsageRecorder` 提取 cache 字段并写库** —— INFO 日志多了 `cache_hit=4000/8500 (47%)` 注释,直接 tail daemon 看实时命中率
+- **`openbiliclaw cost --by caller` 加 cache 命中率列** —— 红 (<30%) / 黄 (30-60%) / 绿 (>60%) 三色,红色 caller = prompt 前缀有污染,直接定位到要 audit 的 builder
+- **`init` 收尾的 cost summary 也展示 per-caller cache 命中率** —— 跑完一次 init 直接看命中分布
+
+### 重构 (Layer 1 — 让 system_prompt 100% 静态以激活 provider 缓存)
+
+之前 audit 出 `build_batch_content_evaluation_prompt` / `build_content_evaluation_prompt` / `build_recommendation_expression_prompt` / `build_batch_expression_prompt` / `build_delight_reason_prompt` 这 5 个最热点的 builder 都把 `source_hint` / `_platform_friend_label` / `_platform_content_label` / `_render_tone_profile` 拼接到 system_prompt,**每次切 strategy / platform / 用户 → 整个 ~3500 token 的 system prompt 失配,provider 自动 cache 永远命不上**。改造成"system 100% 静态 + 所有变量挪到 user_prompt 前缀":
+
+- 5 个 builder 全部用 module-level 常量 `_<NAME>_SYSTEM_PROMPT` 表达 system,每个常量都是字符串字面量(不能 f-string,不能拼接,不能 substitute);所有原 system 里的变量(source_context / source_platform / tone_profile / friend_label / content_label)挪到 user_prompt
+- user_prompt 顺序: 平台 / 上下文 / tone (semi-stable per user) → profile (slow-changing) → content_batch (every call)。这样 provider auto-cache 不仅命中 system,顺序合理时还能延伸命中 user 前缀
+- JSON 序列化全部加 `sort_keys=True`,防止 dict 顺序变动让 cache miss
+- system 里加一句 "下面 user 消息会给出 <X>(...)" 让 LLM 明确知道去哪里读变量(prompt engineering 上不损失)
+
+### 例外 (Layer 1 单用户场景下保留 user-specific system)
+
+- **`build_socratic_dialogue_prompt` 保持原样** —— 它的 system 包含 friend_label / tone / core_memory_text。在 OpenBiliClaw 这种**单用户场景**下,per-user 状态在该用户的多次调用里稳定 → cache 仍命中。多用户部署才需要重构,目前不必
+
+### 工程纪律 (Layer 4)
+
+- **`CLAUDE.md` 新增 "LLM Prompt-Cache Convention" 段** —— 给未来贡献者立规则:任何新 prompt builder MUST 满足 system 100% 静态,JSON 序列化必须 deterministic,所有变量入 user_prompt
+- **`test_llm_prompts.py::test_prompt_builder_system_messages_are_call_invariant`** —— 自动化兜底:遍历所有 prompt builder,两组不同 input → assert system msg byte-identical,违反则报错并指明 cache-poisoning builder
+
+### 测试
+
+- 6 个新单测覆盖 cache 折扣计算 / per-caller 持久化 / 跨 provider 命中字段 round-trip
+- audit invariant 测试覆盖 6 个 cache-friendly builder
+- 全套 938 通过 / 16 失败(基线) / 15 跳过 — 0 新回归
+
+### 预期效果
+
+- DeepSeek 默认场景:`discovery.evaluate_batch` 5 次 strategy 评估,从原本 5 次 cold(~17500 input tokens 全收钱)→ 第 1 次 cold + 后 4 次命中 ~3500 token system,**该 caller 总成本立即砍 60-70%**
+- 同效果适用于 `recommendation.evaluate_batch` / `_expression` / `_delight_reason` / `_content_evaluation`
+- OpenAI / Claude / Gemini 用户也能拿到对应的 50% / 90% / 75% cache 折扣,不用改 SDK 调用方式
+- 跑一段时间后 `openbiliclaw cost --by caller --days 7` 应该能看到顶层 caller 的命中率从 0 跳到 60-80%
+
+### 下一步
+
+- Layer 2(显式 cache marker for Claude / Gemini)等观测有数据后再决定 — 如果用 Claude/Gemini 的人多,值得做;如果绝大多数都走 DeepSeek/OpenAI 自动 cache 已经够了
+- 数据驱动的优化:看 `--by caller` 命中率 < 60% 的 caller,逐个 audit 是不是新加的 builder 没遵守 cache 公约
+
+---
+
 ## v0.3.28: LLM 费用观测全链路打通（caller 标签 + 实时日志 + per-init 总结）（2026-05-02）
 
 之前 `UsageRecorder` 的 `caller` 字段虽然在表结构 + recorder API + DB 查询里都已就位,但**整个代码库里没有一个 LLM 调用点真的传 `caller="<module>"`** —— 所有行的 caller 都是空字符串,意味着当年设计的 per-module 费用 attribution 完全失效,`openbiliclaw cost` 能看到 by-day / by-provider/model 但看不出"钱花在哪一层",这是用户最关心的视角。补全:

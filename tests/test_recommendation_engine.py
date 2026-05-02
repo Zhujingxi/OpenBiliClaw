@@ -595,7 +595,10 @@ async def test_generate_expression_uses_old_friend_tone_prompt() -> None:
             _build_profile(),
         )
 
-        assert "老B友" in str(llm.calls[0]["system_instruction"])
+        # v0.3.28+: 老B友 moved from system_instruction to user_input
+        # (tone block) so the system prefix stays cache-stable across
+        # users with different platform mixes.
+        assert "老B友" in str(llm.calls[0]["user_input"])
 
 
 @pytest.mark.asyncio
