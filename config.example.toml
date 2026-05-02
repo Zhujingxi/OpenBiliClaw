@@ -207,7 +207,19 @@ directory = "logs"
 filename = "openbiliclaw.log"
 # Rotate the active log when it exceeds this many MB (0 disables rotation).
 # 启动时如果文件已经超过这个值，会把旧文件重命名为 <filename>.1 后重新开始。
-max_file_size_mb = 1024
+# v0.3.30+ 默认从 1024 (1 GB) 降到 100 MB —— 长跑 daemon 1 GB 太大,占盘。
+max_file_size_mb = 100
 # Number of rotated backups to keep alongside the active file.
 # 设为 1 → 磁盘占用封顶在 `max_file_size_mb * 2` MB。
 backup_count = 1
+# v0.3.30+ logs/ 目录里 *unmanaged* 文件(start 脚本 stdout redirect /
+# 一次性 init 日志 / 旧版本残留)的总磁盘预算 MB。启动时如果整个 logs/
+# 目录(含 unmanaged)超过这个值,从最老的 unmanaged 文件开始删,直到回到
+# 预算内。设 0 关闭。也可以手动跑 `openbiliclaw logs-prune --apply`。
+aggregate_budget_mb = 500
+# 单个 unmanaged 日志文件超过这个 MB 数,启动时直接 truncate 到 0。
+# 抓 backend-restart.log 这类被脚本无限 append 但项目代码控制不到的文件。
+# 设 0 关闭。
+unmanaged_truncate_mb = 200
+# logs/ 目录里超过这个天数的 *unmanaged* 文件,启动时直接删除。设 0 关闭。
+unmanaged_max_age_days = 30

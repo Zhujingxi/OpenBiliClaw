@@ -4,6 +4,40 @@
 
 ---
 
+## v0.3.30: 日志自动清理（按大小 / 按年龄 / 按总预算）（2026-05-02）
+
+用户实测发现 `logs/` 目录下有几个未托管的大文件占盘:`backend-restart.log` 2.2 GB、`openbiliclaw-restart.log` 296 MB,加上原本的 `openbiliclaw.log` 1 GB 主日志,整个目录 5 GB+。原 `RotatingFileHandler` 只管 *本身配置的那个* 文件,其他 stdout-redirect 出来的脚本日志完全没人管。补一套 unmanaged 日志兜底清理。
+
+### 新增
+
+- **启动时自动 sweep `logs/` 目录的 unmanaged 文件**(`logging_setup._sweep_unmanaged_logs`):
+  1. 单文件超过 `unmanaged_truncate_mb` MB → 直接 `truncate` 为 0(留一行 marker)。专治 `backend-restart.log` 这类被脚本无限 append 但项目代码控制不到的文件
+  2. mtime 超过 `unmanaged_max_age_days` 天 → 直接删除
+  3. 整个 logs/ 目录(含 managed)总大小超过 `aggregate_budget_mb` MB → 按 mtime 从最旧的 *unmanaged* 文件开始删,直到回到预算内。**Managed 文件(`<filename>` + `<filename>.N`)永远不被这个 pass 删**(rotation 自己管)
+  
+  每个 truncate / delete 都打 INFO 日志,daemon 启动时 tail 一眼能看到清了什么
+- **`openbiliclaw logs-prune` CLI**(默认 dry-run)—— 手动触发兜底清理,可临时用更激进 / 更保守的阈值。`--apply` 才真改文件。Rich 表格按 traffic-light 色显示 keep / truncate / delete (age) / delete (budget) 四种 plan
+- 4 个新单测覆盖 truncate / age delete / aggregate budget eviction / sweep_unmanaged=False 跳过
+
+### 默认值变化(影响新装)
+
+- **`max_file_size_mb` 1024 → 100**:1 GB 单文件太大,绝大多数 daemon 跑两天就把磁盘吃掉一截。100 MB × 2 backups = 200 MB 上限,够 1-2 周 INFO 级日志
+- **`aggregate_budget_mb = 500`**(新):整个 `logs/` 目录总磁盘预算 500 MB,unmanaged 超出按时间评最早删
+- **`unmanaged_truncate_mb = 200`**(新):单文件超过 200 MB 直接 truncate
+- **`unmanaged_max_age_days = 30`**(新):30 天前的 unmanaged 文件直接删
+
+### 修改
+
+- `LoggingConfig` 加 3 个新字段(`aggregate_budget_mb` / `unmanaged_truncate_mb` / `unmanaged_max_age_days`),旧 config.toml 没有这些字段也兼容(用 dataclass 默认值)
+- `configure_logging` 新增 `sweep_unmanaged: bool = True` kwarg。CLI `_initialize_logging` 检测 `logs-prune` 命令时传 `False`,避免 dry-run 被全局 callback 顺手清掉(否则 dry-run 等于自动 apply)
+- `config.example.toml` 同步更新,加上 4 行注释说明每个阈值的意义
+
+### 测试
+
+- 全套 944 通过 / 16 失败(基线) / 15 跳过 — 0 新回归
+
+---
+
 ## v0.3.29: prompt-cache 通用化改造 + 命中率观测 + Claude 显式 marker（2026-05-02）
 
 为 daemon 长跑成本拉低 50-80% 做架构性铺垫。挖到 v0.3.26 计费台账没有 cache 字段(provider 报但没归一化),v0.3.27 prompt builders 多个把 per-call 变量塞进 system 消息(让 provider-side 自动缓存命中率永远是 0),Claude 这种"显式 marker 才激活" 的 provider 完全没接入。三个层一起改。

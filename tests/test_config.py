@@ -135,8 +135,16 @@ class TestConfigDefaults:
     def test_logging_rotation_defaults(self) -> None:
         config = Config()
 
-        assert config.logging.max_file_size_mb == 1024
+        # v0.3.30+: lowered max_file_size_mb default 1024 → 100. Long-running
+        # daemon previously accumulated 1 GB before rotating, which is too
+        # large per-active-log; 100 MB × 2 backups = 200 MB cap is plenty
+        # for 1-2 weeks of INFO traffic.
+        assert config.logging.max_file_size_mb == 100
         assert config.logging.backup_count == 1
+        # v0.3.30+: aggregate-budget + unmanaged-file cleanup defaults
+        assert config.logging.aggregate_budget_mb == 500
+        assert config.logging.unmanaged_truncate_mb == 200
+        assert config.logging.unmanaged_max_age_days == 30
 
     def test_build_logging_config_parses_rotation_fields(self) -> None:
         raw = {

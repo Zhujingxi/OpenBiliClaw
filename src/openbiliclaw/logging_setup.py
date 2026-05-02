@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import logging
+import time
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rich.logging import RichHandler
 
 if TYPE_CHECKING:
     from openbiliclaw.config import Config
+
+logger = logging.getLogger(__name__)
 
 
 def _coerce_level(level_name: str) -> int:
@@ -100,8 +104,159 @@ def _enforce_size_budget_once(log_file: object, max_file_size_mb: int) -> None:
             return
 
 
-def configure_logging(config: Config, console_level_override: str | None = None) -> None:
-    """Configure root logging for console and file output."""
+def _is_managed_log(path: Path, managed_filename: str) -> bool:
+    """True iff ``path`` is the rotation-managed file or one of its backups.
+
+    Managed = ``<filename>`` exactly OR ``<filename>.N`` where N is digits.
+    Anything else (e.g. ``backend-restart.log``, ``init-run.log``) is
+    unmanaged — created by external scripts or one-off tools, so we treat
+    it under the unmanaged-cleanup policy.
+    """
+    name = path.name
+    if name == managed_filename:
+        return True
+    prefix = managed_filename + "."
+    if name.startswith(prefix):
+        suffix = name[len(prefix):]
+        return suffix.isdigit()
+    return False
+
+
+def _sweep_unmanaged_logs(
+    log_dir: Path,
+    *,
+    managed_filename: str,
+    aggregate_budget_mb: int,
+    unmanaged_truncate_mb: int,
+    unmanaged_max_age_days: int,
+) -> None:
+    """Cleanup ``logs/`` files we don't control via RotatingFileHandler.
+
+    Three policies, applied in order:
+
+    1. **Truncate huge unmanaged files** — if any ``*.log`` file (not the
+       managed one) exceeds ``unmanaged_truncate_mb`` MB, truncate it to
+       0 bytes. Catches things like ``backend-restart.log`` (script
+       stdout redirect), ``openbiliclaw-restart.log``, etc. Truncation
+       (not deletion) so live tail-ers don't lose their fd.
+    2. **Delete stale unmanaged files** — anything older than
+       ``unmanaged_max_age_days`` days gets removed entirely. Old
+       one-shot logs from past install / debug sessions.
+    3. **Cap aggregate dir size** — total bytes in ``logs/`` (managed +
+       unmanaged) summed up. If over ``aggregate_budget_mb`` MB, delete
+       oldest unmanaged files until under budget. Managed files are
+       kept regardless (RotatingFileHandler is in charge of those).
+
+    Each delete / truncate emits an INFO log so users see what got
+    cleaned. All errors are swallowed — startup must not abort because
+    of cleanup hiccups.
+    """
+    if not log_dir.exists() or not log_dir.is_dir():
+        return
+
+    try:
+        entries = [
+            (p, p.stat()) for p in log_dir.iterdir() if p.is_file()
+        ]
+    except OSError:
+        return
+
+    now = time.time()
+    age_cutoff = (
+        now - unmanaged_max_age_days * 86400
+        if unmanaged_max_age_days > 0
+        else 0.0
+    )
+
+    # Pass 1: truncate huge unmanaged files
+    truncate_bytes = unmanaged_truncate_mb * 1024 * 1024
+    for path, st in entries:
+        if _is_managed_log(path, managed_filename):
+            continue
+        if unmanaged_truncate_mb > 0 and st.st_size >= truncate_bytes:
+            try:
+                size_mb = st.st_size / (1024 * 1024)
+                with path.open("w", encoding="utf-8") as f:
+                    f.write(
+                        f"# truncated {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                        f"— was {size_mb:.0f} MB, threshold "
+                        f"{unmanaged_truncate_mb} MB\n"
+                    )
+                logger.info(
+                    "[log-cleanup] truncated %s (was %.0f MB)",
+                    path.name,
+                    size_mb,
+                )
+            except OSError as exc:
+                logger.debug("Failed to truncate %s: %s", path, exc)
+
+    # Pass 2: delete stale unmanaged files (re-stat after truncate)
+    if unmanaged_max_age_days > 0:
+        for path in [p for p, _ in entries]:
+            if _is_managed_log(path, managed_filename):
+                continue
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            if st.st_mtime < age_cutoff:
+                try:
+                    path.unlink()
+                    logger.info(
+                        "[log-cleanup] deleted stale %s (mtime %s)",
+                        path.name,
+                        time.strftime("%Y-%m-%d", time.localtime(st.st_mtime)),
+                    )
+                except OSError as exc:
+                    logger.debug("Failed to unlink %s: %s", path, exc)
+
+    # Pass 3: enforce aggregate budget by removing oldest unmanaged files
+    if aggregate_budget_mb <= 0:
+        return
+    budget_bytes = aggregate_budget_mb * 1024 * 1024
+    try:
+        current_entries = [
+            (p, p.stat()) for p in log_dir.iterdir() if p.is_file()
+        ]
+    except OSError:
+        return
+    total = sum(st.st_size for _, st in current_entries)
+    if total <= budget_bytes:
+        return
+    # Sort unmanaged by mtime ASC (oldest first) and trim until in budget
+    unmanaged = sorted(
+        [(p, st) for p, st in current_entries if not _is_managed_log(p, managed_filename)],
+        key=lambda item: item[1].st_mtime,
+    )
+    for path, st in unmanaged:
+        if total <= budget_bytes:
+            break
+        try:
+            path.unlink()
+            total -= st.st_size
+            logger.info(
+                "[log-cleanup] deleted %s (%.0f MB) to enforce %d MB budget",
+                path.name,
+                st.st_size / (1024 * 1024),
+                aggregate_budget_mb,
+            )
+        except OSError as exc:
+            logger.debug("Failed to unlink %s: %s", path, exc)
+
+
+def configure_logging(
+    config: Config,
+    console_level_override: str | None = None,
+    *,
+    sweep_unmanaged: bool = True,
+) -> None:
+    """Configure root logging for console and file output.
+
+    ``sweep_unmanaged=False`` skips the v0.3.30+ ``logs/`` directory
+    cleanup pass — used by the ``logs-prune`` CLI command which runs
+    its own dry-run-aware cleanup and shouldn't be ambushed by the
+    auto-sweep inside the global Typer callback.
+    """
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
 
@@ -120,6 +275,17 @@ def configure_logging(config: Config, console_level_override: str | None = None)
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
     _enforce_size_budget_once(log_file, config.logging.max_file_size_mb)
+    # v0.3.30+: also sweep unmanaged files in the same logs dir.
+    # Catches stdout-redirect logs from start scripts, stale one-off
+    # bootstrap logs, and the aggregate-size budget.
+    if sweep_unmanaged:
+        _sweep_unmanaged_logs(
+            config.logging.directory_path,
+            managed_filename=config.logging.filename,
+            aggregate_budget_mb=config.logging.aggregate_budget_mb,
+            unmanaged_truncate_mb=config.logging.unmanaged_truncate_mb,
+            unmanaged_max_age_days=config.logging.unmanaged_max_age_days,
+        )
     file_handler = _build_file_handler(
         log_file,
         max_file_size_mb=config.logging.max_file_size_mb,

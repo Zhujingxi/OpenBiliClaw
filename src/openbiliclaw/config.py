@@ -196,12 +196,25 @@ class LoggingConfig:
     file_level: str = "DEBUG"
     directory: str = "logs"
     filename: str = "openbiliclaw.log"
-    # 单个日志文件最大 MB 数；>0 时启用轮转（默认 1024 = 1 GB）。
-    # 设为 0 表示不轮转（仅调试用，线上不建议）。
-    max_file_size_mb: int = 1024
-    # 保留的历史日志份数；至少为 1 才会真正轮转（0 会让 RotatingFileHandler 完全不轮转）。
-    # 默认 1：磁盘占用封顶在 `max_file_size_mb * 2`。
+    # v0.3.30+ 默认 100 MB(从 1024 降下来)。daemon 长跑场景历史 1 GB 太大,
+    # 本机磁盘动辄被占几 GB。100 MB × 2 备份 = 200 MB,足够 1-2 周的 INFO 级日志。
+    # 调试时可调高到 500-1024;>0 时启用轮转,设为 0 表示不轮转(仅调试用)。
+    max_file_size_mb: int = 100
+    # 保留的历史日志份数;至少为 1 才会真正轮转(0 会让 RotatingFileHandler 完全不轮转)。
+    # 默认 1:每个 file_path 磁盘占用封顶在 `max_file_size_mb * 2`。
     backup_count: int = 1
+    # v0.3.30+: ``logs/`` 目录里的 *unmanaged* 文件(start 脚本 stdout
+    # redirect / 一次性 init 日志 / 旧版本残留 等)的总磁盘预算(MB)。启动
+    # 时如果整个 logs/ 目录(含 unmanaged)超过这个值,从最老的 unmanaged
+    # 文件开始删,直到回到预算内。设 0 关闭。默认 500 MB。
+    aggregate_budget_mb: int = 500
+    # 单个 unmanaged 日志文件超过这个 MB 数,启动时直接 truncate 到 0。
+    # 抓 ``backend-restart.log`` 这类被脚本无限 append 但项目代码控制不到的
+    # 文件。设 0 关闭。默认 200 MB。
+    unmanaged_truncate_mb: int = 200
+    # ``logs/`` 目录里超过这个天数的 *unmanaged* 文件,启动时直接删除。
+    # 设 0 关闭。默认 30 天。
+    unmanaged_max_age_days: int = 30
 
     @property
     def directory_path(self) -> Path:

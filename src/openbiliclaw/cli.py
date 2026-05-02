@@ -229,12 +229,24 @@ def _print_discovered_content_preview(item: Any, index: int) -> None:
 
 
 def _initialize_logging(log_level_override: str | None = None) -> None:
-    """Load config and initialize the logging system."""
+    """Load config and initialize the logging system.
+
+    Skips the on-startup unmanaged-logs sweep when invoked via the
+    ``logs-prune`` command — that command's whole purpose is letting
+    the user inspect / control cleanup, so triggering automatic sweep
+    inside the callback would defeat the dry-run contract.
+    """
+    import sys
     from openbiliclaw.config import load_config
     from openbiliclaw.logging_setup import configure_logging
 
     config = load_config()
-    configure_logging(config, console_level_override=log_level_override)
+    skip_sweep = "logs-prune" in sys.argv
+    configure_logging(
+        config,
+        console_level_override=log_level_override,
+        sweep_unmanaged=not skip_sweep,
+    )
 
 
 def _build_registry() -> Any:
@@ -2250,6 +2262,171 @@ def cost(
         "[dim]（费率为公开渠道估算,与 provider 实际账单可能差 ±20%。"
         "tail daemon 日志可以看每次调用的实时 [llm-cost] INFO 行,"
         "cache 命中率 < 30% 的 caller 在 by-caller 表里会标红。）[/dim]",
+    )
+
+
+@app.command("logs-prune")
+def logs_prune(
+    truncate_mb: int = typer.Option(
+        200,
+        "--truncate-mb",
+        min=0,
+        help="单个 unmanaged 日志文件超过此 MB 数则截断为 0 字节(0 = 关闭)",
+    ),
+    max_age_days: int = typer.Option(
+        30,
+        "--max-age-days",
+        min=0,
+        help="超过此天数的 unmanaged 日志文件直接删除(0 = 关闭)",
+    ),
+    aggregate_budget_mb: int = typer.Option(
+        500,
+        "--aggregate-budget-mb",
+        min=0,
+        help="logs/ 目录(含 unmanaged + managed)总磁盘预算 MB,超出时按 mtime 从旧到新删 unmanaged",
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="实际执行删除/截断;默认是 dry-run 模式只列出会改什么",
+    ),
+) -> None:
+    """手动 prune logs/ 目录的日志文件(默认 dry-run)。
+
+    daemon 启动时已经会按 config 自动跑这套清理(v0.3.30+),这个命令是
+    手动触发用的 —— 比如 daemon 没在运行 / 想查看会删什么 / 临时换一组
+    更激进或更保守的阈值。
+    """
+    import time as _time
+    from openbiliclaw.config import load_config
+    from openbiliclaw.logging_setup import _is_managed_log
+
+    config = load_config()
+    log_dir = config.logging.directory_path
+    managed = config.logging.filename
+
+    _print_page_title("LLM 日志清理 (logs prune)", str(log_dir))
+    if not log_dir.exists():
+        _print_status_panel("warning", "日志目录不存在", f"{log_dir} 还没创建。")
+        return
+
+    truncate_bytes = truncate_mb * 1024 * 1024
+    age_cutoff = _time.time() - max_age_days * 86400 if max_age_days > 0 else 0.0
+    budget_bytes = aggregate_budget_mb * 1024 * 1024
+
+    actions: list[tuple[str, str, int]] = []  # (action, path, size)
+    total = 0
+    for path in sorted(log_dir.iterdir()):
+        if not path.is_file():
+            continue
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        total += st.st_size
+        is_managed = _is_managed_log(path, managed)
+        tag = "managed" if is_managed else "unmanaged"
+        if is_managed:
+            actions.append(("keep", f"{path.name}  [{tag}]", st.st_size))
+            continue
+        if truncate_mb > 0 and st.st_size >= truncate_bytes:
+            actions.append((
+                "truncate",
+                f"{path.name}  [{tag}, > {truncate_mb} MB]",
+                st.st_size,
+            ))
+            continue
+        if max_age_days > 0 and st.st_mtime < age_cutoff:
+            age_days = (_time.time() - st.st_mtime) / 86400
+            actions.append((
+                "delete (age)",
+                f"{path.name}  [{tag}, {age_days:.0f} days old]",
+                st.st_size,
+            ))
+            continue
+        actions.append(("keep", f"{path.name}  [{tag}]", st.st_size))
+
+    # Aggregate-budget pass: simulate evicting oldest unmanaged 'keep' rows
+    if aggregate_budget_mb > 0 and total > budget_bytes:
+        # Re-sort the not-yet-doomed unmanaged ones by mtime
+        unmanaged_keep: list[tuple[Path, float, int, int]] = []
+        for i, (action, label, size) in enumerate(actions):
+            if action != "keep" or "[managed]" in label:
+                continue
+            name = label.split("  ")[0]
+            try:
+                st = (log_dir / name).stat()
+            except OSError:
+                continue
+            unmanaged_keep.append((log_dir / name, st.st_mtime, size, i))
+        unmanaged_keep.sort(key=lambda x: x[1])
+        running = total
+        for path, _mt, size, idx in unmanaged_keep:
+            if running <= budget_bytes:
+                break
+            actions[idx] = (
+                "delete (budget)",
+                f"{path.name}  [unmanaged, oldest, evict to fit {aggregate_budget_mb} MB]",
+                size,
+            )
+            running -= size
+
+    table = Table(show_header=True, header_style="bold cyan", title=f"Plan ({'APPLY' if apply else 'DRY-RUN'})")
+    table.add_column("Action", no_wrap=True)
+    table.add_column("File", overflow="fold")
+    table.add_column("Size", justify="right")
+    for action, label, size in actions:
+        size_h = f"{size / (1024 * 1024):.1f} MB"
+        style = (
+            "green" if action == "keep"
+            else "yellow" if action == "truncate"
+            else "red"
+        )
+        table.add_row(f"[{style}]{action}[/{style}]", label, size_h)
+    console.print(table)
+
+    will_change = [a for a in actions if a[0] != "keep"]
+    freed = sum(
+        s for action, _, s in actions if action.startswith("delete")
+    ) + sum(
+        s - 1 for action, _, s in actions if action == "truncate"  # leaves ~1 byte stub
+    )
+    console.print(
+        f"\n会释放约 [bold]{freed / (1024 * 1024):.1f} MB[/bold] 磁盘"
+        f" / 影响 [bold]{len(will_change)}[/bold] 个文件"
+    )
+
+    if not apply:
+        console.print(
+            "\n[yellow]这是 dry-run。加上 --apply 才会真的改文件。[/yellow]"
+        )
+        return
+
+    # Apply
+    import time as _time2
+    actually_freed = 0
+    for action, label, size in actions:
+        name = label.split("  ")[0]
+        path = log_dir / name
+        if action == "truncate":
+            try:
+                with path.open("w", encoding="utf-8") as f:
+                    f.write(
+                        f"# truncated by `openbiliclaw logs-prune` "
+                        f"{_time2.strftime('%Y-%m-%d %H:%M:%S')} — was "
+                        f"{size / (1024 * 1024):.0f} MB\n"
+                    )
+                actually_freed += size
+            except OSError as exc:
+                console.print(f"[red]✗ truncate {path}: {exc}[/red]")
+        elif action.startswith("delete"):
+            try:
+                path.unlink()
+                actually_freed += size
+            except OSError as exc:
+                console.print(f"[red]✗ unlink {path}: {exc}[/red]")
+    console.print(
+        f"\n[bold green]✓ Applied — actually freed {actually_freed / (1024 * 1024):.1f} MB[/bold green]"
     )
 
 
