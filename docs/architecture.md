@@ -4,7 +4,7 @@
 
 OpenBiliClaw 采用分层架构设计，从上到下依次为：
 
-1. **用户交互层** — Chrome 浏览器插件（B 站 + 小红书页面行为采集 · 推荐展示 · 对话交互 · xhs 任务调度 / 初始化画像导入）
+1. **用户交互层** — Chrome 浏览器插件（B 站 + 小红书页面行为采集 · 推荐展示 · 对话交互 · xhs 任务调度 / 初始化画像导入 · B 站 Cookie 自动同步）
 2. **外部集成层** — OpenClaw adapter / skill wrappers / 本地 API 等对外接入边界
 3. **Agent 核心层** — 自研编排器 + Soul Engine + Discovery Engine + Recommendation Engine + Skill System
 4. **多源适配层（v0.3.0+）** — `SourceAdapter` 协议下的 B 站 / 小红书 / 通用 Web 三类源
@@ -63,6 +63,7 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 - `ContinuousRefreshController` — 后台定时刷新候选池；按 source 配额评估 deficit，多源缺货合并到一次 discover() 并行 fan-out
 - `_enforce_pool_cap` 每 tick 跑 `trim_topic_group_overflow` + 必要时按 share quotas 修剪过额源
 - `AccountSyncService` — 历史记录、收藏夹、关注列表同步
+- `runtime-stream` — 浏览器扩展 background 以 `client=background` 连接后，若后端本地没有 B 站 Cookie，会先推送 `bilibili_cookie_sync_requested`，扩展立即通过 `/api/bilibili/cookie` 回传当前浏览器 Cookie；后续推荐、惊喜和画像更新仍复用同一条 WebSocket 事件流
 
 ### Init 多源画像导入
 

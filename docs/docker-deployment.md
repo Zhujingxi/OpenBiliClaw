@@ -73,7 +73,7 @@ docker compose ps
    - 高级：自定义 OpenAI 兼容服务 / 指定其他 provider（默认折叠）
 4. **Phase 4 — Per-module 覆盖（高级，默认跳过）**：可单独给 soul / discovery / recommendation / evaluation 指定不同模型。
 
-> 💡 **v0.3.20+ Embedding 自动 fallback**（无需用户操心）：当主 LLM 是 Claude / DeepSeek / OpenRouter（这三家后端没 embedding 接口），bootstrap 会自动写 `[llm.embedding] provider="ollama" model="bge-m3"` 并预拉模型；运行时 registry 也有 `ollama → gemini → openai` 的 fallback 链兜底，不会再静默返回 None 让推荐管线坏掉。
+> 💡 **Embedding 选择**：交互式 `init` 会单独问；AI agent 一句话安装则必须在调用 `agent_bootstrap.py` 时显式传 `--embedding-provider ... --embedding-model ...`（默认推荐 `ollama` + `bge-m3`）。如果用户选择“跟随主 LLM”，传 `--embedding-provider ""`；主 LLM 是 Claude / DeepSeek / OpenRouter 时 bootstrap 会把它等价落到本地 Ollama bge-m3 并预拉模型。运行时 registry 仍有 `ollama → gemini → openai` 的 fallback 链兜底。
 
 接着 B 站登录态有 **2 种方式**（v0.3.12+）：
 
@@ -86,6 +86,7 @@ docker compose ps
 > - 想加就回 Y(默认),会有准备清单提示你装扩展 + 登录小红书。注意 Docker 模式下扩展是装在你**宿主机**的浏览器里的,后端在容器内通过 8420 端口拉数据
 > - 不想加就回 N,只用 B 站数据建画像
 > - 脚本化场景直接传 flag:`docker exec -it openbiliclaw-backend openbiliclaw init --no-xhs` 跳过 / `--yes-xhs` 强制启用
+> - AI agent 的 `agent_bootstrap.py` auto-init 不会默认启用小红书；必须传 `--yes-xhs` 或 `--no-xhs`。没传会返回 `needs_decisions`，让 agent 先问用户
 > - 想永久跳过:在 docker-compose.yml 里加 `OPENBILICLAW_NO_XHS=1` 环境变量
 
 > 💡 **AI agent 一句话部署**：把下面这句粘到 Claude Code / Codex CLI / Cursor / OpenClaw：

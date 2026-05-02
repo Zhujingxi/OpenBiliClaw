@@ -301,21 +301,29 @@ if final is None:
     sys.exit(0)
 details = final.get("details") or {}
 missing = details.get("missing") or []
+init_decisions = details.get("init_decisions") or {}
+decision_missing = init_decisions.get("missing") or []
+xhs_flag = ((init_decisions.get("xhs") or {}).get("flag") or "")
 print(f"STATUS={final.get('status', 'unknown')}")
 print(f"HEALTH_URL={details.get('health_url', '')}")
 print(f"MISSING={','.join(missing)}")
+print(f"DECISIONS={','.join(decision_missing)}")
+print(f"XHS_FLAG={xhs_flag}")
 '@
     # PS 5.1 (Windows 10/11 default) lacks the ?? null-coalescing operator
     # — that's a PS 7+ feature. Use a defensive fallback instead.
     $reuseArg = if ($null -ne $ReuseFrom) { $ReuseFrom } else { '' }
     $summary = & $PythonExe -c $parser $script:BootstrapLog $InstallDir "$Port" $ApiHost $reuseArg
 
-    $status = ''; $healthUrl = ''; $missing = ''
+    $status = ''; $healthUrl = ''; $missing = ''; $decisions = ''; $xhsFlag = ''
     foreach ($line in $summary -split "`r?`n") {
         if ($line -like 'STATUS=*')     { $status    = $line.Substring(7) }
         elseif ($line -like 'HEALTH_URL=*') { $healthUrl = $line.Substring(11) }
         elseif ($line -like 'MISSING=*')    { $missing   = $line.Substring(8) }
+        elseif ($line -like 'DECISIONS=*')  { $decisions = $line.Substring(10) }
+        elseif ($line -like 'XHS_FLAG=*')   { $xhsFlag   = $line.Substring(9) }
     }
+    if (-not $xhsFlag) { $xhsFlag = '--no-xhs' }
 
     # v0.3.20: distinguish "only B站 cookie missing" (the expected state for
     # users on the recommended browser-extension auto-sync path) from
@@ -329,6 +337,8 @@ print(f"MISSING={','.join(missing)}")
     Write-Host ' OpenBiliClaw ' -NoNewline
     if ($status -eq 'complete') {
         Write-Host 'install complete' -ForegroundColor Green
+    } elseif ($status -eq 'needs_decisions') {
+        Write-Host 'backend ready - waiting for init choices' -ForegroundColor Green
     } elseif ($missingOnlyCookie) {
         Write-Host 'backend ready - waiting for browser extension to sync B站 Cookie' -ForegroundColor Green
     } elseif ($missing) {
@@ -350,18 +360,47 @@ print(f"MISSING={','.join(missing)}")
     Write-Host "Health URL:  $healthUrl"
     if ($missing) { Write-Host "Missing:     $missing" }
     else { Write-Host 'Missing:     (none)' }
+    if ($decisions) { Write-Host "Init choices needed: $decisions" }
     Write-Host ''
 
-    if ($missingOnlyCookie) {
+    if ($status -eq 'needs_decisions') {
+        Write-Host 'Next steps - ask the user before running init:'
+        Write-Host ''
+        Write-Host '  1. Embedding service (default recommendation):'
+        Write-Host '       Local Ollama bge-m3 - free/offline/no extra API key.'
+        Write-Host '       If they choose Gemini/OpenAI/custom instead, replace'
+        Write-Host '       the --embedding-* flags below.'
+        Write-Host ''
+        Write-Host '  2. Xiaohongshu data (privacy choice):'
+        Write-Host '       Ask whether to include Xiaohongshu likes/favorites in'
+        Write-Host '       the initial profile. Default is NO unless they opt in.'
+        Write-Host ''
+        Write-Host '  3. Re-run bootstrap with explicit choices (DO NOT add --skip-init):'
+        Write-Host ''
+        Write-Host "     python $InstallDir\scripts\agent_bootstrap.py ``"
+        Write-Host "         --project-dir $InstallDir ``"
+        if ($decisions -match 'embedding') {
+            Write-Host "         --embedding-provider ollama ``"
+            Write-Host "         --embedding-model bge-m3 ``"
+        }
+        Write-Host "         $xhsFlag ``"
+        Write-Host "         --port $Port --host $ApiHost"
+        Write-Host ''
+        Write-Host '     Use --yes-xhs only after the user says yes; otherwise keep --no-xhs.'
+        Write-Host '     This then runs init: B站 history, soul profile, first discovery.'
+    } elseif ($missingOnlyCookie) {
         Write-Host 'Next step - get your B站 Cookie to the backend (pick ONE):'
         Write-Host ''
         Write-Host '  (A) [recommended, zero config]'
         Write-Host '      Install the browser extension and log in to bilibili.com.'
         Write-Host '      It auto-syncs your cookie to this backend within seconds.'
         Write-Host '        Extension: https://github.com/whiteguo233/OpenBiliClaw/releases'
-        Write-Host "      Once the cookie arrives, the backend automatically runs"
-        Write-Host "      'openbiliclaw init' (pulls history, builds soul profile,"
-        Write-Host '      runs first discovery - 2-5 min).'
+        Write-Host '      Once the cookie arrives, ask the init choices below and'
+        Write-Host "      re-run bootstrap so it can run 'openbiliclaw init'."
+        Write-Host ''
+        Write-Host '      Required before init:'
+        Write-Host '        - Embedding model/service (default: Ollama bge-m3)'
+        Write-Host '        - Xiaohongshu likes/favorites? (default: no; yes only on opt-in)'
         Write-Host ''
         Write-Host '  (B) [manual fallback]'
         Write-Host "      F12 -> Network -> copy the 'Cookie' header from any"
@@ -369,7 +408,13 @@ print(f"MISSING={','.join(missing)}")
         Write-Host "        python $InstallDir\scripts\agent_bootstrap.py ``"
         Write-Host "            --project-dir $InstallDir ``"
         Write-Host "            --bilibili-cookie '<YOUR_COOKIE>' ``"
+        if ($decisions -match 'embedding') {
+            Write-Host "            --embedding-provider ollama ``"
+            Write-Host "            --embedding-model bge-m3 ``"
+        }
+        Write-Host "            $xhsFlag ``"
         Write-Host "            --port $Port --host $ApiHost"
+        Write-Host '      Use --yes-xhs only after the user opts in; otherwise keep --no-xhs.'
         Write-Host ''
         Write-Host '  Verify the backend is healthy any time:'
         Write-Host "      Invoke-RestMethod $healthUrl"
@@ -387,20 +432,35 @@ print(f"MISSING={','.join(missing)}")
             Write-Host '         Download: https://github.com/whiteguo233/OpenBiliClaw/releases'
             Write-Host '         Log in to bilibili.com if you are not already; the extension'
             Write-Host '         pushes the cookie to this backend within seconds. You can then'
-            Write-Host '         SKIP step 2 below for the cookie part - just install the'
-            Write-Host '         extension and run "openbiliclaw init" once it syncs.'
+            Write-Host '         omit --bilibili-cookie below after the extension syncs.'
             Write-Host ''
             Write-Host '     (B) Paste the cookie manually via --bilibili-cookie below.'
             Write-Host ''
         }
-        Write-Host '  2. Prepare missing values, then run with values filled in (DO NOT add --skip-init):'
+        Write-Host '  2. Ask which embedding service to use:'
+        Write-Host '     Default: local Ollama bge-m3 (free/offline/no extra API key).'
+        Write-Host '     Alternatives: Gemini embedding, OpenAI text-embedding-3-small,'
+        Write-Host '     or a custom OpenAI-compatible embedding endpoint.'
+        Write-Host ''
+        Write-Host '  3. Ask whether to include Xiaohongshu likes/favorites:'
+        Write-Host '     Default: no. Use --yes-xhs only after explicit opt-in.'
+        Write-Host ''
+        Write-Host '  4. Prepare missing values, then run with values filled in (DO NOT add --skip-init):'
         Write-Host ''
         Write-Host "     python $InstallDir\scripts\agent_bootstrap.py ``"
         Write-Host "         --project-dir $InstallDir ``"
         Write-Host "         --provider <YOUR_PROVIDER> ``"
         if ($missing -match 'api_key')         { Write-Host "         --llm-api-key '<YOUR_API_KEY>' ``" }
+        if ($decisions -match 'embedding') {
+            Write-Host "         --embedding-provider ollama ``"
+            Write-Host "         --embedding-model bge-m3 ``"
+        }
+        Write-Host "         $xhsFlag ``"
         if ($missing -match 'bilibili.cookie') { Write-Host "         --bilibili-cookie '<YOUR_COOKIE>' ``" }
         Write-Host "         --port $Port --host $ApiHost"
+        Write-Host ''
+        Write-Host '     Replace the embedding flags and --no-xhs according to the'
+        Write-Host '     user answers before running the command.'
         Write-Host ''
         Write-Host "     This auto-runs 'openbiliclaw init' once credentials check out:"
         Write-Host '       - pulls your Bilibili history'

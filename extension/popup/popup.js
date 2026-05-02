@@ -148,6 +148,8 @@ const elements = {
   messagesList: document.getElementById("messagesList"),
 };
 
+let recommendationLoadCheckTimer = null;
+
 function setRefreshButtonState(loading, message = "") {
   state.refreshStatusMessage = message;
   if (elements.refreshRecommendationsButton instanceof HTMLButtonElement) {
@@ -187,6 +189,16 @@ function setStatus(online) {
   elements.statusLabel.textContent = badgeState.label;
 }
 
+function queueRecommendationLoadCheck() {
+  if (recommendationLoadCheckTimer !== null) {
+    return;
+  }
+  recommendationLoadCheckTimer = window.setTimeout(() => {
+    recommendationLoadCheckTimer = null;
+    maybeLoadMoreRecommendations();
+  }, 0);
+}
+
 function setActiveTab(tabName) {
   state.activeTab = tabName;
 
@@ -209,6 +221,9 @@ function setActiveTab(tabName) {
 
   if (tabName === "profile") {
     void loadProfileSummary();
+  }
+  if (tabName === "recommend") {
+    queueRecommendationLoadCheck();
   }
 }
 
@@ -2851,6 +2866,7 @@ async function loadMoreRecommendations() {
     setHint("这次往下续没成功，稍后再试。", "error");
   } finally {
     state.loadingMore = false;
+    queueRecommendationLoadCheck();
   }
 }
 
@@ -2877,6 +2893,7 @@ function renderRecommendationState(stateShape) {
     renderRecommendations(stateShape.items);
     const hint = getReadyRecommendationHint(stateShape.runtime);
     setHint(hint.message, hint.tone);
+    queueRecommendationLoadCheck();
     return;
   }
 

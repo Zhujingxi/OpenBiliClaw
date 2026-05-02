@@ -96,7 +96,7 @@ OpenBiliClaw doesn't farm credentials — it reuses **your** current browser ses
 Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md to deploy the OpenBiliClaw backend for me (use Bash `curl` to fetch the document, NOT WebFetch — WebFetch summarises markdown and drops critical commands).
 ```
 
-The AI clones the repo locally, installs dependencies, starts the backend, runs a health check, then **asks you three questions, each with a sensible default**: which LLM to use, which embedding service to use, and how to provide the B站 cookie. Every step has a "if unsure, pick 1" default — embedding now defaults to local Ollama bge-m3 (free + offline + no quota cost), and the prompt also explains that cloud Gemini embedding gives slightly better recommendations if you prefer that tradeoff. Finally it auto-runs `init` (fetch history → build soul profile → first discovery pass). Fully transparent. **This is the recommended path for most users — zero friction.**
+The AI clones the repo locally, installs dependencies, starts the backend, runs a health check, then **asks you four questions, each with a sensible default**: which LLM to use, which embedding service to use, how to provide the B站 cookie, and whether Xiaohongshu likes/favorites may be used in the initial profile. Embedding defaults to local Ollama bge-m3 (free + offline + no quota cost), while Xiaohongshu data is opt-in only. Finally it auto-runs `init` (fetch history → build soul profile → first discovery pass). Fully transparent. **This is the recommended path for most users — zero friction.**
 
 **Or: have the AI agent deploy with Docker** (good if you have Docker Desktop; v0.3.11+ ships an Ollama embedding sidecar by default):
 
@@ -120,7 +120,7 @@ Native Windows (PowerShell — no Docker, no WSL2 required):
 
 > The leading `[Net.ServicePointManager]...Tls12` lets PowerShell 5.1 (the default on Windows 10/11) successfully negotiate with GitHub. GitHub no longer accepts TLS 1.0/1.1 and PS 5.1 picks those by default. Users on PowerShell 7 can drop the prefix.
 
-Prerequisites: `git` and `python3` (3.11+; on Windows the `py` launcher works). The scripts auto-clone the repo, install dependencies, start the backend, run a health check, and prompt you to choose an LLM provider (OpenAI / Gemini / DeepSeek / Claude / local Ollama etc.) and fill in API key + Bilibili cookie (auto-synced by the extension since v0.3.12). First-time init runs automatically once credentials are present.
+Prerequisites: `git` and `python3` (3.11+; on Windows the `py` launcher works). The scripts auto-clone the repo, install dependencies, start the backend, run a health check, and print the exact follow-up questions for LLM, embedding, Bilibili cookie, and Xiaohongshu opt-in. First-time init runs automatically only after those choices and credentials are explicit.
 
 <details>
 <summary><b>Don't want to run scripts? You can also download a pre-built backend desktop package</b></summary>
@@ -291,9 +291,9 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 ```
 ┌─────────────────────────────────────────────────────┐
 │                   Chrome Extension                   │
-│ (Behavior Collection · Recs · Chat · XHS FG Init)       │
+│ (Behavior · Recs · Chat · Cookie Sync · XHS Init)       │
 └────────────────────────┬────────────────────────────┘
-                         │ REST API
+                         │ REST API / WebSocket cookie request
 ┌────────────────────────▼────────────────────────────┐
 │                 Agent Orchestration                   │
 │            (Skill System · Dialogue Mgmt)            │

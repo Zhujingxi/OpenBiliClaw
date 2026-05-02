@@ -15,6 +15,7 @@
 | 任务 | 状态 | 说明 |
 |------|------|------|
 | 3.1 Cookie 认证 | ✅ | set / load / validate / clear + CLI auth 命令 + 运行时 cookie 回退 |
+| 扩展 Cookie 自动同步 | ✅ | 浏览器扩展可 POST `/api/bilibili/cookie` 持久化 Cookie；后端在 background runtime-stream 连接且缺 Cookie 时会发 `bilibili_cookie_sync_requested` 主动要求扩展回传 |
 | 3.2 核心 API | ✅ | 10+ API 方法 + 限流 + 统一错误处理 |
 | 搜索 WBI 化与 412 软降级 | ✅ | `search()` 现会先从 `nav` 获取 WBI key，走 `/x/web-interface/wbi/search/type`；遇到 `412 Precondition Failed` 时会记录 warning 并返回空结果，避免拖垮整轮 discover |
 | 账户侧同步来源 | ✅ | 已支持 history / favorites / following 三类长期信号，供后台低频同步使用 |
@@ -132,5 +133,6 @@ headed = false     # 调试时设为 true
 3. **轻量限流**：per-client 最小间隔 0.2s，不做全局令牌桶
 4. **Protocol DI**：`AuthManager` 通过 `api_client_factory` 注入 API 客户端，测试友好
 5. **运行时优先级**：命令和本地服务优先使用显式配置的 cookie；若未配置，则自动回退到 `auth login` 已保存的 cookie，避免首次登录后还要重复把 cookie 写进 `config.toml`
-6. **账户侧长期信号分层**：`history / favorites / following` 作为低频同步来源，用来补插件实时事件看不到的长期偏好变化
-7. **搜索 WBI 对齐 + 保守降级**：B 站搜索已切到 WBI 路径；客户端现在会复用 `nav` 的 WBI key 对齐浏览器搜索链路，剩余 `412` 再降级为空结果，避免把单次 search 失败放大成整轮 refresh 错误
+6. **后端可主动请求扩展同步**：`/api/runtime-stream?client=background` 连接建立时，如果 `resolve_runtime_cookie()` 解析不到有效 Cookie，后端会先发 `bilibili_cookie_sync_requested`，扩展收到后立即 POST 当前浏览器 Cookie 到 `/api/bilibili/cookie`
+7. **账户侧长期信号分层**：`history / favorites / following` 作为低频同步来源，用来补插件实时事件看不到的长期偏好变化
+8. **搜索 WBI 对齐 + 保守降级**：B 站搜索已切到 WBI 路径；客户端现在会复用 `nav` 的 WBI key 对齐浏览器搜索链路，剩余 `412` 再降级为空结果，避免把单次 search 失败放大成整轮 refresh 错误

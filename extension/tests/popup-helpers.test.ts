@@ -245,6 +245,43 @@ test("getPopupState distinguishes offline uninitialized refreshing empty and rea
   assert.equal(ready.items[0]?.bvid, "BV1ready");
 });
 
+test("getPopupState does not show init prompt while refresh or pool signals are active", () => {
+  assert.deepEqual(
+    getPopupState({
+      online: true,
+      items: [],
+      runtimeStatus: {
+        initialized: false,
+        manual_refresh_state: "running",
+        manual_refresh_message: "正在初始化后的首轮补货。",
+      },
+    }),
+    {
+      kind: "refreshing",
+      message: "正在初始化后的首轮补货。",
+      items: [],
+    },
+  );
+
+  assert.deepEqual(
+    getPopupState({
+      online: true,
+      items: [],
+      runtimeStatus: {
+        initialized: false,
+        recommendation_count: 0,
+        pool_available_count: 12,
+        last_replenished_count: 12,
+      },
+    }),
+    {
+      kind: "empty",
+      message: "这会儿还没新东西，先运行 init、discover 或 recommend",
+      items: [],
+    },
+  );
+});
+
 test("normalizeRuntimeStatus fills stable fallback fields", () => {
   assert.deepEqual(normalizeRuntimeStatus({ initialized: true, unread_count: "2" }), {
     initialized: true,
@@ -478,6 +515,8 @@ test("normalizeActivityFeed keeps stable summaries and tones", () => {
           tone: "success",
         },
       ],
+      has_more: false,
+      next_cursor: "",
     },
   );
 });
@@ -519,6 +558,8 @@ test("getActivityCardState prefers runtime event for line1 and feed headline for
         },
       ],
       expanded: true,
+      has_more: false,
+      next_cursor: "",
     },
   );
 });

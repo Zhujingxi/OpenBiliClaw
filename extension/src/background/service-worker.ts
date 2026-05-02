@@ -25,7 +25,11 @@ import {
   parseNotificationBvid,
   parseCognitionUpdateId,
 } from "./notifications.js";
-import { startCookieSync, handleCookieSyncAlarm } from "./cookie-sync.js";
+import {
+  startCookieSync,
+  handleCookieSyncAlarm,
+  handleCookieSyncRuntimeEvent,
+} from "./cookie-sync.js";
 import type { BehaviorEvent } from "../shared/types.js";
 
 let eventBuffer: BehaviorEvent[] = [];
@@ -40,7 +44,7 @@ const COGNITION_ACK_URL = "http://127.0.0.1:8420/api/cognition-updates/seen";
 const DELIGHT_ACK_URL = "http://127.0.0.1:8420/api/delight/sent";
 const XHS_OBSERVED_URLS_URL = "http://127.0.0.1:8420/api/sources/xhs/observed-urls";
 const XHS_TOKENS_URL = "http://127.0.0.1:8420/api/sources/xhs/tokens";
-const RUNTIME_STREAM_URL = "ws://127.0.0.1:8420/api/runtime-stream";
+const RUNTIME_STREAM_URL = "ws://127.0.0.1:8420/api/runtime-stream?client=background";
 const WS_RECONNECT_DELAY = 5_000;
 type PendingNotification = import("./notifications.js").PendingNotification;
 type PendingCognitionUpdate = import("./notifications.js").PendingCognitionUpdate;
@@ -135,6 +139,8 @@ let runtimeSocket: WebSocket | null = null;
 let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
 function handleRuntimeEvent(event: Record<string, unknown>): void {
+  if (handleCookieSyncRuntimeEvent(event)) return;
+
   const eventType = String(event.type ?? "");
 
   if (eventType === "interest.probe") {
@@ -370,5 +376,6 @@ chrome.notifications.onClicked.addListener((notificationId) => {
 
 ensureFlushAlarm();
 connectRuntimeStream();
+startCookieSync();
 
 console.log("[OpenBiliClaw] Service worker initialized");

@@ -810,20 +810,27 @@ export function getPopupState({ online, items = [], error = null, runtimeStatus 
 
   const normalizedItems = items.map(normalizeRecommendation);
   const runtime = normalizeRuntimeStatus(runtimeStatus);
+  const refreshInProgress =
+    runtime.manual_refresh_state === "running" || runtime.pending_signal_events > 0;
+  const hasPostInitRuntimeSignals =
+    runtime.recommendation_count > 0 ||
+    runtime.pool_available_count > 0 ||
+    runtime.last_replenished_count > 0 ||
+    runtime.last_discovered_count > 0;
 
   if (normalizedItems.length === 0) {
-    if (!runtime.initialized) {
+    if (refreshInProgress) {
       return {
-        kind: "uninitialized",
-        message: "还没完成初始化，先运行 openbiliclaw init",
+        kind: "refreshing",
+        message: runtime.manual_refresh_message || "正在根据你最近的新行为补货，再刷一会儿就会更新。",
         items: [],
       };
     }
 
-    if (runtime.manual_refresh_state === "running" || runtime.pending_signal_events > 0) {
+    if (!runtime.initialized && !hasPostInitRuntimeSignals) {
       return {
-        kind: "refreshing",
-        message: runtime.manual_refresh_message || "正在根据你最近的新行为补货，再刷一会儿就会更新。",
+        kind: "uninitialized",
+        message: "还没完成初始化，先运行 openbiliclaw init",
         items: [],
       };
     }

@@ -97,6 +97,7 @@ python3 scripts/agent_bootstrap.py \
 | `--embedding-api-key KEY` | （v0.3.5+）自托管 embedding 网关的 API Key。 |
 | `--module-override MODULE=PROVIDER:MODEL` | （v0.3.5+，可重复）per-module LLM 覆盖。MODULE ∈ {soul, discovery, recommendation, evaluation}。例：`--module-override discovery=deepseek:deepseek-v4-flash`。 |
 | `--bilibili-cookie VALUE` | 直接写入 Bilibili Cookie，同时落盘到 `data/bilibili_cookie.json`。 |
+| `--yes-xhs` / `--no-xhs` | （v0.3.30+）auto-init 前的小红书数据决策。`--yes-xhs` 仅在用户明确同意把小红书收藏 / 点赞混进画像时传；其他情况传 `--no-xhs`。不传则 bootstrap 返回 `needs_decisions`，不会跑 init。 |
 | `--skip-start` | 只准备配置和依赖，不启动服务。 |
 | `--skip-init` | （v0.3.7 起默认 **不要加**）凭据齐全 + 后端健康后，bootstrap 会自动跑 `openbiliclaw init`。只有当用户显式说「先别跑 init」或你只是给已经初始化过的实例补凭据时才加这个 flag。 |
 | `--skip-health-check` | 启动服务但不等 `/api/health`。 |
@@ -174,6 +175,25 @@ docker exec -it openbiliclaw-backend openbiliclaw config-show
 **v0.3.7 之前**：`init` 是「部署后可选」步骤，需要你手动触发。
 **v0.3.7+ 改了**：当凭据齐全（`config_summary.missing == []`）+ 后端健康（`backend_healthy`）后，`agent_bootstrap.py` 会自动调用 `openbiliclaw init`，把推荐链路真正接通。
 
+**v0.3.30+ 又加了一道隐私 / 质量决策门槛**：auto-init 只会在
+embedding 选择已显式传入（例如 `--embedding-provider ollama
+--embedding-model bge-m3`，或 `--embedding-provider ""` 表示用户选择跟随主
+LLM）且小红书决策已显式传入（`--yes-xhs` / `--no-xhs`）时执行。如果缺少其中任一项，最后一条事件会是：
+
+```json
+{
+  "status": "needs_decisions",
+  "message": "init_decisions_required",
+  "details": {
+    "missing": [],
+    "init_decisions": {"missing": ["embedding", "xhs"]}
+  }
+}
+```
+
+收到这个状态时不要手动跑 `openbiliclaw init`；先问用户，再用补齐的
+`--embedding-*` 和 `--yes-xhs` / `--no-xhs` 重新跑 bootstrap。
+
 **为什么改成默认跑**：用户期望「一句话装机」之后打开扩展能直接看到推荐。如果 `init` 没跑，画像没生成、历史没拉、内容池是空的，用户等于没装好。
 
 **首次运行 ≈ 2–5 分钟**（拉历史 / LLM 调用 / 多策略发现）。bootstrap 会把 init 的 stdout 流式打到你的终端，进度全程可见。
@@ -201,7 +221,7 @@ docker exec -it openbiliclaw-backend openbiliclaw init
 事件流里会出现 `init_complete` 或 `init_failed`：
 
 ```json
-{"status": "ok", "message": "init_complete", "details": {}}
+{"status": "complete", "message": "init_complete", "details": {"init_command": "uv run openbiliclaw init --no-xhs"}}
 {"status": "warning", "message": "init_failed", "details": {"error": "..."}}
 ```
 

@@ -19,11 +19,38 @@
 const COOKIE_SYNC_URL = "http://127.0.0.1:8420/api/bilibili/cookie";
 const COOKIE_SYNC_ALARM = "openbiliclaw-cookie-sync";
 const COOKIE_SYNC_DEBOUNCE_MS = 2_000;
+const COOKIE_SYNC_REFRESH_MINUTES = 60;
+const COOKIE_SYNC_RETRY_MINUTES = 1;
 
 /** Critical cookie names — without these, the backend can't call B 站 API. */
 const REQUIRED_COOKIE_NAMES = ["SESSDATA", "bili_jct", "DedeUserID"];
 
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+let cookieSyncStarted = false;
+
+function getChromeApi(): typeof chrome | null {
+  if (typeof chrome === "undefined") {
+    return null;
+  }
+  return chrome;
+}
+
+function scheduleCookieSyncAlarm(minutes: number): void {
+  const chromeApi = getChromeApi();
+  if (!chromeApi?.alarms?.create) return;
+  chromeApi.alarms.create(COOKIE_SYNC_ALARM, {
+    delayInMinutes: minutes,
+    periodInMinutes: minutes,
+  });
+}
+
+function scheduleHourlyCookieSync(): void {
+  const chromeApi = getChromeApi();
+  if (!chromeApi?.alarms?.create) return;
+  chromeApi.alarms.create(COOKIE_SYNC_ALARM, {
+    periodInMinutes: COOKIE_SYNC_REFRESH_MINUTES,
+  });
+}
 
 /**
  * Read all bilibili.com cookies and return them as a single Cookie
@@ -35,12 +62,13 @@ let debounceTimer: ReturnType<typeof setTimeout> | null = null;
  * round trip.
  */
 export async function readBilibiliCookieHeader(): Promise<string | null> {
-  if (!chrome?.cookies?.getAll) {
+  const chromeApi = getChromeApi();
+  if (!chromeApi?.cookies?.getAll) {
     return null;
   }
   // domain="bilibili.com" matches both the bare domain and any
   // subdomain (passport.bilibili.com, www.bilibili.com, etc).
-  const cookies = await chrome.cookies.getAll({ domain: "bilibili.com" });
+  const cookies = await chromeApi.cookies.getAll({ domain: "bilibili.com" });
   const have = new Set(cookies.map((c) => c.name));
   for (const required of REQUIRED_COOKIE_NAMES) {
     if (!have.has(required)) {
@@ -82,6 +110,7 @@ export async function syncBilibiliCookieToBackend(
     });
     if (!response.ok) {
       console.warn(`[openbiliclaw] cookie sync HTTP ${response.status}`);
+      scheduleCookieSyncAlarm(COOKIE_SYNC_RETRY_MINUTES);
       return false;
     }
     const result = (await response.json()) as {
@@ -94,13 +123,27 @@ export async function syncBilibiliCookieToBackend(
         `[openbiliclaw] cookie synced via ${source}` +
           (result.username ? ` (logged in as ${result.username})` : ""),
       );
+      scheduleHourlyCookieSync();
     }
     return result.ok;
   } catch (err) {
     // Backend not running, network blocked, etc — silent retry on next tick.
     console.warn("[openbiliclaw] cookie sync failed:", err);
+    scheduleCookieSyncAlarm(COOKIE_SYNC_RETRY_MINUTES);
     return false;
   }
+}
+
+/**
+ * Handle backend runtime-stream events that explicitly ask the extension
+ * to push the current Bilibili cookie now.
+ */
+export function handleCookieSyncRuntimeEvent(event: Record<string, unknown>): boolean {
+  if (String(event.type ?? "") !== "bilibili_cookie_sync_requested") {
+    return false;
+  }
+  void syncBilibiliCookieToBackend("runtime-stream-request");
+  return true;
 }
 
 /**
@@ -123,17 +166,22 @@ function scheduleCookieSync(source: string): void {
  * onInstalled and onStartup.
  */
 export function startCookieSync(): void {
-  if (!chrome?.cookies?.onChanged) {
+  const chromeApi = getChromeApi();
+  if (!chromeApi?.cookies?.onChanged) {
     // Service worker without the cookies permission — silently no-op.
     return;
   }
+  if (cookieSyncStarted) {
+    return;
+  }
+  cookieSyncStarted = true;
 
   // Initial best-effort sync. The user might have been logged in before
   // installing the extension; this catches that case.
   void syncBilibiliCookieToBackend("startup");
 
   // React to login / logout / refresh.
-  chrome.cookies.onChanged.addListener((changeInfo) => {
+  chromeApi.cookies.onChanged.addListener((changeInfo) => {
     const domain = (changeInfo.cookie.domain || "").toLowerCase();
     if (!domain.endsWith("bilibili.com")) {
       return;
@@ -146,9 +194,10 @@ export function startCookieSync(): void {
     scheduleCookieSync(changeInfo.removed ? "logout" : "cookies-onchange");
   });
 
-  // Hourly belt-and-braces refresh in case onChanged drops events
-  // while the service worker is unloaded.
-  chrome.alarms.create(COOKIE_SYNC_ALARM, { periodInMinutes: 60 });
+  // Hourly belt-and-braces refresh in case onChanged drops events while
+  // the service worker is unloaded. Failed POSTs temporarily tighten this
+  // to a 1-minute retry until the backend accepts the cookie.
+  scheduleHourlyCookieSync();
 }
 
 /**

@@ -46,7 +46,7 @@ Either command:
 ================================================================
  OpenBiliClaw install complete / partial (credentials missing)
 ================================================================
-Status:      complete | running_with_missing_secrets | needs_secrets | error
+Status:      complete | running_with_missing_secrets | needs_secrets | needs_decisions | error
 Checkout:    <absolute path to the repo>
 Reused from: <path>                 (only present when reuse happened)
 Health URL:  http://host:port/api/health
@@ -72,14 +72,27 @@ Next action (init has been run automatically):
 
 **Follow that block literally.** That's the entire contract.
 
+If the block says `Status: needs_decisions`, credentials are present
+but init has deliberately not run. Ask the listed init choices, then
+re-run the printed `agent_bootstrap.py` command with explicit
+`--embedding-*` and `--yes-xhs` / `--no-xhs`.
+
 ## Handling missing credentials
 
-When `Missing` is non-empty, you (the AI agent) walk the user through
-**three questions, in order**: pick an LLM, pick an embedding service,
-get a B 站 cookie. Each question must have a clear default — most users
-will accept it. The previous "tell me what an embedding is" framing
-was the failure mode; the new framing is "pick a default I prepared
-for you, or override it if you have an opinion."
+When `Missing` is non-empty, or the final status is
+`needs_decisions`, you (the AI agent) walk the user through **four
+questions, in order**: pick an LLM, pick an embedding service, get a
+B 站 cookie, then ask whether Xiaohongshu likes/favorites may be used.
+Each question must have a clear default — most users will accept it.
+The previous "tell me what an embedding is" framing was the failure
+mode; the new framing is "pick a default I prepared for you, or
+override it if you have an opinion."
+
+`agent_bootstrap.py` is intentionally non-interactive. If credentials
+are already present but you did not pass an explicit embedding choice
+and an explicit `--yes-xhs` / `--no-xhs`, it returns
+`status=needs_decisions` and **does not run init**. Ask the missing
+questions, then re-run bootstrap with those flags.
 
 Don't dump all questions at once — ask one at a time, **explain what
 each thing does in plain language**, and offer the easy path first.
@@ -216,10 +229,10 @@ Once they've picked, only ask the **fields that option actually needs**.
 > 「请给我你的 DeepSeek API Key。从 https://platform.deepseek.com/api_keys
 >   创建一个。月度费用通常在几毛钱以内。」
 
-Run with `--provider deepseek --llm-api-key <KEY>`. The bootstrap will
-automatically wire local Ollama bge-m3 for embedding (DeepSeek has no
-embeddings endpoint) and pull the model in the same run — see
-"Embedding (handled automatically)" below.
+Run with `--provider deepseek --llm-api-key <KEY>` plus the embedding
+flags from Step 3. DeepSeek has no embeddings endpoint; if the user
+chooses "follow primary" (`--embedding-provider ""`), bootstrap will
+wire local Ollama bge-m3 and pull it in the same run.
 
 #### Option 2 (OpenAI 官方 / Gemini / Claude / OpenRouter):
 
@@ -230,10 +243,11 @@ Substitute the right vendor name and Key URL:
 - Claude: https://console.anthropic.com/ → Settings → API Keys
 - OpenRouter: https://openrouter.ai/keys
 
-Run with `--provider <name> --llm-api-key <KEY>`. Don't ask for Base URL.
-For Claude / OpenRouter the bootstrap will auto-wire Ollama bge-m3 for
-embedding (those backends don't expose embeddings); OpenAI and Gemini
-use their own native embedding endpoints.
+Run with `--provider <name> --llm-api-key <KEY>` plus the Step 3
+embedding flags. Don't ask for Base URL. If the user chooses "follow
+primary" for Claude / OpenRouter, bootstrap will wire Ollama bge-m3
+because those backends don't expose embeddings; OpenAI and Gemini use
+their own native embedding endpoints when followed.
 
 #### Option 3 (Ollama, fully offline / no key):
 
@@ -248,8 +262,8 @@ user is:
 >   首次推理会比较慢（CPU 跑模型），不是装坏了。」
 
 Then run with `--provider ollama --llm-model llama3` (or
-`qwen2.5:3b` for a smaller model on weaker hardware). No `--llm-api-key`
-or `--llm-base-url` needed.
+`qwen2.5:3b` for a smaller model on weaker hardware), plus the Step 3
+embedding flags. No `--llm-api-key` or `--llm-base-url` needed.
 
 If the auto-install fails (no `brew` on Mac, no `winget` on Windows,
 no `sudo` on Linux), the bootstrap emits an `ollama_install_failed`
@@ -304,7 +318,7 @@ Tell the user:
 |---|---|---|
 | 1 (本地 Ollama, 默认) | `--embedding-provider ollama --embedding-model bge-m3` | bootstrap 会自动装 Ollama + 拉 bge-m3 |
 | 2 (Gemini) | `--embedding-provider gemini --embedding-model gemini-embedding-001 --embedding-api-key <KEY>` | 用户已有 Gemini Key 就用现有的;没有就引导去 https://aistudio.google.com/apikey 拿 |
-| 3 (跟随主 LLM) | (不传任何 `--embedding-*` flag) | bootstrap 在主 LLM 是 Claude/DeepSeek/OpenRouter 时会自动改写为选项 1 等价配置(发 `embedding_auto_ollama` 事件);其它主 LLM 则用各自的 native endpoint |
+| 3 (跟随主 LLM) | `--embedding-provider ""` | 这是“我问过用户,用户选择跟随”的显式记录。bootstrap 在主 LLM 是 Claude/DeepSeek/OpenRouter 时会自动改写为选项 1 等价配置(发 `embedding_auto_ollama` 事件);其它主 LLM 则用各自的 native endpoint |
 
 **Special case — Gemini Key reuse**: if the user picks option 2 *and*
 already configured Gemini as their primary LLM (i.e. you ran
@@ -371,8 +385,26 @@ uv run openbiliclaw init                                  # local + uv
 ```
 
 **If user picks B**: collect the cookie string, run with
-`--bilibili-cookie "<full cookie string>"` — bootstrap auto-runs init
-once everything's present.
+`--bilibili-cookie "<full cookie string>"` plus the explicit embedding
+and Xiaohongshu flags from the user's answers — bootstrap auto-runs
+init once everything's present.
+
+### Step 5 — Xiaohongshu data opt-in
+
+Before any non-interactive auto-init, ask:
+
+> 「要把你的小红书收藏 / 点赞也混进初始画像吗？这能让跨平台口味更准，
+> 但会让扩展打开小红书页面抓取这些信号。默认不启用；你明确说要用我才开。」
+
+Map the answer to exactly one bootstrap flag:
+
+| 用户回答 | 命令行参数 |
+|---|---|
+| 明确同意 | `--yes-xhs` |
+| 拒绝 / 没有小红书 / 不确定 / 没回答 | `--no-xhs` |
+
+Do not omit the flag. Omitting it means the agent never asked; bootstrap
+will pause with `status=needs_decisions` instead of running init.
 
 ### Putting it all together — example commands
 
@@ -386,7 +418,8 @@ python3 scripts/agent_bootstrap.py \
   --provider deepseek \
   --llm-api-key sk-... \
   --embedding-provider ollama \
-  --embedding-model bge-m3
+  --embedding-model bge-m3 \
+  --no-xhs
 ```
 
 Pass embedding flags explicitly because the user actively picked option 1 —
@@ -402,7 +435,8 @@ python3 scripts/agent_bootstrap.py \
   --provider gemini \
   --llm-api-key AIza... \
   --embedding-provider gemini \
-  --embedding-model gemini-embedding-001
+  --embedding-model gemini-embedding-001 \
+  --no-xhs
 ```
 
 Note: no `--embedding-api-key` because the same Gemini API key the
@@ -416,7 +450,8 @@ python3 scripts/agent_bootstrap.py \
   --provider ollama \
   --llm-model llama3 \
   --embedding-provider ollama \
-  --embedding-model bge-m3
+  --embedding-model bge-m3 \
+  --no-xhs
 ```
 
 **"我不想想这个,跟随主 LLM" 路径** (选项 3 / 用户跳过)：
@@ -424,7 +459,9 @@ python3 scripts/agent_bootstrap.py \
 ```bash
 python3 scripts/agent_bootstrap.py \
   --provider deepseek \
-  --llm-api-key sk-...
+  --llm-api-key sk-... \
+  --embedding-provider "" \
+  --no-xhs
 ```
 
 When no `--embedding-*` flag is passed AND the primary is Claude /
@@ -443,7 +480,8 @@ python3 scripts/agent_bootstrap.py \
   --llm-api-key sk-or-none \
   --llm-model meta-llama/Llama-3.1-70B-Instruct \
   --embedding-provider ollama \
-  --embedding-model bge-m3
+  --embedding-model bge-m3 \
+  --no-xhs
 ```
 
 Embedding explicitly pinned to local Ollama because most self-hosted
@@ -452,13 +490,13 @@ the runtime fallback would still work but adds a startup warning.
 
 > ⚠️ **Do NOT pass `--skip-init`** here. The point of running the
 > bootstrap with credentials is to reach a usable state. When all
-> credentials are present and `--skip-init` is absent (the default),
+> credentials are present, `--skip-init` is absent, and both init
+> decisions are explicit (`--embedding-*` plus `--yes-xhs` / `--no-xhs`),
 > `agent_bootstrap.py` will automatically run `openbiliclaw init` after
 > the backend is healthy: it pulls the user's Bilibili history,
 > generates the soul profile, and runs the first content discovery
-> pass. **Without init, the user has nothing to look at — they'd see an
-> empty extension and would have to manually run `openbiliclaw init`
-> themselves**, which defeats the point of one-line install.
+> pass. Without those explicit decisions, bootstrap returns
+> `status=needs_decisions` and waits for you to ask the user.
 
 After running, **always**:
 
@@ -485,8 +523,12 @@ hung. The bootstrap streams init's stdout so progress is visible.
   B 站数据建画像。给"我有 B 站没小红书"的用户一个干净 opt-out
 - **`openbiliclaw init --yes-xhs`**:跳过提问直接启用,适合脚本化
 - **`OPENBILICLAW_NO_XHS=1` 环境变量**:同 `--no-xhs`,用于永久跳过
-- **非交互式终端(管道 / CI)**:不弹提问,默认启用,bootstrap 任务
-  自带 graceful 降级——扩展没连上时 30s 超时后跳过
+- **直接调用 `openbiliclaw init` 的非交互式终端(管道 / CI)**:
+  CLI 本身不会弹提问,因此脚本必须传 `--yes-xhs` 或 `--no-xhs`
+  才是可审计的行为。
+- **通过 `agent_bootstrap.py` 自动 init**:bootstrap 会强制要求
+  `--yes-xhs` / `--no-xhs` 二选一。没传就返回
+  `status=needs_decisions`,不会运行 init。
 
 **关键:接入会前台抢焦点**。`max_scroll_rounds=3`(v0.3.22+ CLI 默认)
 触发滚动模式,扩展会在用户浏览器里 `chrome.tabs.create({active: true})`
@@ -500,9 +542,9 @@ hung. The bootstrap streams init's stdout so progress is visible.
     `OPENBILICLAW_XHS_BOOTSTRAP_SCROLL_ROUNDS=0` 改用浅层模式
     (只读初始 state,后台 tab,但只能拿 ~10-20 条)
 
-AI agent 视角:**绝大多数情况你不应该手工传任何 flag**。让用户自己
-回答 init 的问题——如果用户说 "我没装扩展也不想用小红书",那时再
-建议他用 `openbiliclaw init --no-xhs` 跳过提问。
+AI agent 视角:**不要省略这个问题**。一句话安装走的是
+`agent_bootstrap.py` 的非交互路径,不会有交互式 prompt 替你兜底。
+用户明确同意才传 `--yes-xhs`;其余情况传 `--no-xhs`。
 
 ### Per-module overrides（高级，默认不要问）
 

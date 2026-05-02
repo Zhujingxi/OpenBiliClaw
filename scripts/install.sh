@@ -269,16 +269,26 @@ if final is None:
 
 details = final.get("details") or {}
 missing = details.get("missing") or []
+init_decisions = details.get("init_decisions") or {}
+decision_missing = init_decisions.get("missing") or []
+xhs_flag = ((init_decisions.get("xhs") or {}).get("flag") or "")
 print(f"STATUS={final.get('status', 'unknown')}")
 print(f"HEALTH_URL={details.get('health_url', '')}")
 print(f"MISSING={','.join(missing)}")
+print(f"DECISIONS={','.join(decision_missing)}")
+print(f"XHS_FLAG={xhs_flag}")
 PY
 )
-    # Parse the three KEY=VALUE lines back into shell variables.
-    local status health_url missing
+    # Parse the KEY=VALUE lines back into shell variables.
+    local status health_url missing decisions xhs_flag
     status=$(echo "$summary" | awk -F= '/^STATUS=/{sub(/^STATUS=/, ""); print; exit}')
     health_url=$(echo "$summary" | awk -F= '/^HEALTH_URL=/{sub(/^HEALTH_URL=/, ""); print; exit}')
     missing=$(echo "$summary" | awk -F= '/^MISSING=/{sub(/^MISSING=/, ""); print; exit}')
+    decisions=$(echo "$summary" | awk -F= '/^DECISIONS=/{sub(/^DECISIONS=/, ""); print; exit}')
+    xhs_flag=$(echo "$summary" | awk -F= '/^XHS_FLAG=/{sub(/^XHS_FLAG=/, ""); print; exit}')
+    if [ -z "$xhs_flag" ]; then
+        xhs_flag="--no-xhs"
+    fi
 
     if [ -z "$health_url" ]; then
         health_url="http://${HOST}:${PORT}/api/health"
@@ -298,6 +308,8 @@ PY
     echo "================================================================"
     if [ "$status" = "complete" ]; then
         printf '%s OpenBiliClaw install complete%s\n' "$C_GREEN" "$C_RESET"
+    elif [ "$status" = "needs_decisions" ]; then
+        printf '%s OpenBiliClaw backend ready — waiting for init choices%s\n' "$C_GREEN" "$C_RESET"
     elif [ "$missing_only_cookie" = "1" ]; then
         # Backend is up and configured; the extension will deliver the
         # cookie when the user installs it. This is the happy path, not
@@ -325,18 +337,51 @@ PY
     else
         echo "Missing:     (none)"
     fi
+    if [ -n "$decisions" ]; then
+        echo "Init choices needed: $decisions"
+    fi
     echo ""
 
-    if [ "$missing_only_cookie" = "1" ]; then
+    if [ "$status" = "needs_decisions" ]; then
+        echo "Next steps — ask the user before running init:"
+        echo ""
+        echo "  1. Embedding service (default recommendation):"
+        echo "       Local Ollama bge-m3 — free/offline/no extra API key."
+        echo "       If they choose Gemini/OpenAI/custom instead, replace the"
+        echo "       --embedding-* flags below with their chosen provider/model."
+        echo ""
+        echo "  2. Xiaohongshu data (privacy choice):"
+        echo "       Ask whether to include Xiaohongshu likes/favorites in the"
+        echo "       initial profile. Default is NO unless they explicitly opt in."
+        echo ""
+        echo "  3. Re-run bootstrap with explicit choices (DO NOT add --skip-init):"
+        echo ""
+        echo "     python3 $INSTALL_DIR/scripts/agent_bootstrap.py \\"
+        echo "         --project-dir $INSTALL_DIR \\"
+        case "$decisions" in
+            *embedding*)
+                echo "         --embedding-provider ollama \\"
+                echo "         --embedding-model bge-m3 \\"
+                ;;
+        esac
+        echo "         $xhs_flag \\"
+        echo "         --port $PORT --host $HOST"
+        echo ""
+        echo "     Use --yes-xhs only after the user says yes; otherwise keep --no-xhs."
+        echo "     This then runs init: B站 history, soul profile, first discovery."
+    elif [ "$missing_only_cookie" = "1" ]; then
         echo "Next step — get your B站 Cookie to the backend (pick ONE):"
         echo ""
         echo "  (A) [recommended, zero config]"
         echo "      Install the browser extension and log in to bilibili.com."
         echo "      It auto-syncs your cookie to this backend within seconds."
         echo "        Extension: https://github.com/whiteguo233/OpenBiliClaw/releases"
-        echo "      Once the cookie arrives, the backend automatically runs"
-        echo "      'openbiliclaw init' (pulls history, builds soul profile,"
-        echo "      runs first discovery — 2-5 min)."
+        echo "      Once the cookie arrives, ask the init choices below and re-run"
+        echo "      bootstrap so it can run 'openbiliclaw init'."
+        echo ""
+        echo "      Required before init:"
+        echo "        - Embedding model/service (default: Ollama bge-m3)"
+        echo "        - Xiaohongshu likes/favorites? (default: no; yes only on opt-in)"
         echo ""
         echo "  (B) [manual fallback]"
         echo "      F12 → Network → copy the 'Cookie' header from any"
@@ -344,7 +389,15 @@ PY
         echo "        python3 $INSTALL_DIR/scripts/agent_bootstrap.py \\"
         echo "            --project-dir $INSTALL_DIR \\"
         echo "            --bilibili-cookie '<YOUR_COOKIE>' \\"
+        case "$decisions" in
+            *embedding*)
+                echo "            --embedding-provider ollama \\"
+                echo "            --embedding-model bge-m3 \\"
+                ;;
+        esac
+        echo "            $xhs_flag \\"
         echo "            --port $PORT --host $HOST"
+        echo "      Use --yes-xhs only after the user opts in; otherwise keep --no-xhs."
         echo ""
         echo "  Verify the backend is healthy any time:"
         echo "      curl -sS $health_url"
@@ -354,7 +407,15 @@ PY
         echo "  1. Choose your LLM provider (default: openai):"
         echo "     Supported: openai | gemini | claude | deepseek | openrouter | ollama"
         echo ""
-        echo "  2. Prepare the missing values:"
+        echo "  2. Ask which embedding service to use:"
+        echo "     Default: local Ollama bge-m3 (free/offline/no extra API key)."
+        echo "     Alternatives: Gemini embedding, OpenAI text-embedding-3-small,"
+        echo "     or a custom OpenAI-compatible embedding endpoint."
+        echo ""
+        echo "  3. Ask whether to include Xiaohongshu likes/favorites:"
+        echo "     Default: no. Use --yes-xhs only after explicit opt-in."
+        echo ""
+        echo "  4. Prepare the missing values:"
         case "$missing" in
             *llm.*api_key*)
                 echo "     - LLM API key — get one from your chosen provider:"
@@ -375,19 +436,19 @@ PY
                 echo "           Extension: https://github.com/whiteguo233/OpenBiliClaw/releases"
                 echo "           After install, log in to bilibili.com if you aren't already;"
                 echo "           the extension pushes the cookie to this backend within seconds."
-                echo "           If you go this route, you can SKIP step 3 below — just install"
-                echo "           the extension, then run 'openbiliclaw init' once cookie syncs."
+                echo "           If you go this route, you can SKIP the --bilibili-cookie flag"
+                echo "           below after the extension syncs."
                 echo ""
                 echo "       (B) Manually paste the cookie:"
                 echo "           a. Log in at https://www.bilibili.com"
                 echo "           b. Open DevTools (F12) → Network tab"
                 echo "           c. Refresh the page, click any request"
                 echo "           d. Copy the full 'Cookie' header value"
-                echo "           Then proceed with step 3 below using --bilibili-cookie."
+                echo "           Then proceed with step 5 below using --bilibili-cookie."
                 ;;
         esac
         echo ""
-        echo "  3. Run with your values filled in (DO NOT add --skip-init):"
+        echo "  5. Run with your values filled in (DO NOT add --skip-init):"
         echo ""
         # Build the command dynamically — only show flags for what's missing.
         echo "     python3 $INSTALL_DIR/scripts/agent_bootstrap.py \\"
@@ -396,10 +457,20 @@ PY
         case "$missing" in
             *llm.*api_key*) echo "         --llm-api-key '<YOUR_API_KEY>' \\" ;;
         esac
+        case "$decisions" in
+            *embedding*)
+                echo "         --embedding-provider ollama \\"
+                echo "         --embedding-model bge-m3 \\"
+                ;;
+        esac
+        echo "         $xhs_flag \\"
         case "$missing" in
             *bilibili.cookie*) echo "         --bilibili-cookie '<YOUR_COOKIE>' \\" ;;
         esac
         echo "         --port $PORT --host $HOST"
+        echo ""
+        echo "     Replace the embedding flags and --no-xhs according to the"
+        echo "     user's answers before running the command."
         echo ""
         echo "     This auto-runs 'openbiliclaw init' once credentials check out:"
         echo "       - pulls your Bilibili history"
@@ -407,7 +478,7 @@ PY
         echo "       - runs the first content discovery pass"
         echo "     Takes 2-5 minutes. Without this step the extension shows nothing."
         echo ""
-        echo "  4. Verify the backend is healthy:"
+        echo "  6. Verify the backend is healthy:"
         echo "      curl -sS $health_url"
     else
         echo "All credentials present — init has been run automatically."

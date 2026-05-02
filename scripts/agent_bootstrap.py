@@ -276,6 +276,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Bilibili cookie string. Stored in config.toml and data/bilibili_cookie.json.",
     )
+    xhs_group = parser.add_mutually_exclusive_group()
+    xhs_group.add_argument(
+        "--yes-xhs",
+        action="store_true",
+        help=(
+            "Explicitly opt in to Xiaohongshu liked/favorite data during auto-init. "
+            "AI agents should only pass this after asking the user."
+        ),
+    )
+    xhs_group.add_argument(
+        "--no-xhs",
+        action="store_true",
+        help=(
+            "Explicitly skip Xiaohongshu liked/favorite data during auto-init. "
+            "Use this when the user says no or has not opted in."
+        ),
+    )
     parser.add_argument(
         "--skip-ollama-setup",
         action="store_true",
@@ -1042,6 +1059,111 @@ def detect_missing_secrets(project_dir: Path) -> dict[str, Any]:
     }
 
 
+def _embedding_choice_from_config(project_dir: Path) -> dict[str, Any]:
+    data = read_simple_toml(project_dir / "config.toml")
+    raw = data.get("llm", {}).get("embedding", {})
+    provider = str(raw.get("provider", "") or "").strip()
+    model = str(raw.get("model", "") or "").strip()
+    if provider or model:
+        return {
+            "source": "config",
+            "provider": provider,
+            "model": model,
+            "explicit": True,
+        }
+    return {
+        "source": "missing",
+        "provider": provider,
+        "model": model,
+        "explicit": False,
+    }
+
+
+def detect_init_decisions(
+    project_dir: Path,
+    args: argparse.Namespace,
+    *,
+    embedding_touched: bool,
+) -> dict[str, Any]:
+    """Return user decisions required before non-interactive auto-init.
+
+    ``agent_bootstrap.py`` never prompts. If the AI agent did not pass an
+    explicit embedding choice or Xiaohongshu opt-in/out, auto-init must pause
+    and surface those decisions instead of silently choosing for the user.
+    """
+
+    missing: list[str] = []
+    if embedding_touched:
+        embedding = {
+            "source": "flags",
+            "provider": (args.embedding_provider or "").strip(),
+            "model": (args.embedding_model or "").strip(),
+            "explicit": True,
+        }
+    else:
+        embedding = _embedding_choice_from_config(project_dir)
+        if not embedding["explicit"]:
+            missing.append("embedding")
+
+    if args.yes_xhs:
+        xhs = {
+            "policy": "enabled",
+            "flag": "--yes-xhs",
+            "explicit": True,
+            "source": "flag",
+        }
+    elif args.no_xhs or os.environ.get("OPENBILICLAW_NO_XHS", "").strip() == "1":
+        xhs = {
+            "policy": "disabled",
+            "flag": "--no-xhs",
+            "explicit": True,
+            "source": "env" if not args.no_xhs else "flag",
+        }
+    else:
+        missing.append("xhs")
+        xhs = {
+            "policy": "pending",
+            "flag": "",
+            "explicit": False,
+            "source": "missing",
+        }
+
+    return {
+        "missing": missing,
+        "embedding": embedding,
+        "xhs": xhs,
+    }
+
+
+def build_init_command(mode: str, project_dir: Path, xhs_flag: str) -> list[str]:
+    """Build the non-interactive init command used after bootstrap health checks."""
+
+    if mode == "docker":
+        init_cmd = [
+            "docker",
+            "exec",
+            "-i",
+            "openbiliclaw-backend",
+            "openbiliclaw",
+            "init",
+        ]
+    elif detect_uv():
+        init_cmd = ["uv", "run", "openbiliclaw", "init"]
+    else:
+        if os.name == "nt":
+            venv_python = project_dir / ".venv" / "Scripts" / "python.exe"
+        else:
+            venv_python = project_dir / ".venv" / "bin" / "python"
+        if venv_python.exists():
+            init_cmd = [str(venv_python), "-m", "openbiliclaw.cli", "init"]
+        else:
+            init_cmd = [sys.executable, "-m", "openbiliclaw.cli", "init"]
+
+    if xhs_flag:
+        init_cmd.append(xhs_flag)
+    return init_cmd
+
+
 # ---------------------------------------------------------------------------
 # Local deployment
 
@@ -1409,14 +1531,19 @@ def run(args: argparse.Namespace) -> int:
         emit(BootstrapResult("ok", "embedding_set", summary))
 
     # When the primary LLM is a provider with no embeddings endpoint
-    # (Claude / DeepSeek / OpenRouter) AND the user didn't configure
-    # embedding explicitly, auto-wire local Ollama bge-m3. This makes
-    # the install actually pull the embedding model in the same run
-    # instead of leaving the user in a "primary works, embedding
-    # silently broken" state.
+    # (Claude / DeepSeek / OpenRouter) AND the user explicitly chose
+    # "follow primary" for embedding, auto-wire local Ollama bge-m3.
+    # If the agent did not ask about embedding at all, leave it pending
+    # for detect_init_decisions() instead of silently choosing.
     auto_embedding_to_ollama = False
     effective_provider = (args.provider or detect_missing_secrets(project_dir)["provider"]) or ""
-    if effective_provider in PROVIDERS_WITHOUT_EMBED and not embedding_touched:
+    embedding_follow_requested = (
+        args.embedding_provider == ""
+        and args.embedding_model is None
+        and args.embedding_base_url is None
+        and args.embedding_api_key is None
+    )
+    if effective_provider in PROVIDERS_WITHOUT_EMBED and embedding_follow_requested:
         # Don't overwrite an existing [llm.embedding] provider that the
         # user (or a prior bootstrap run) set. Only auto-wire when the
         # field is empty.
@@ -1512,7 +1639,18 @@ def run(args: argparse.Namespace) -> int:
     if args.skip_start:
         remaining = detect_missing_secrets(project_dir)
         skipped_label = "complete" if not remaining["missing"] else "needs_secrets"
-        emit(BootstrapResult(skipped_label, "skipped_start", remaining))
+        init_decisions = detect_init_decisions(
+            project_dir,
+            args,
+            embedding_touched=embedding_touched or auto_embedding_to_ollama,
+        )
+        emit(
+            BootstrapResult(
+                skipped_label,
+                "skipped_start",
+                {**remaining, "init_decisions": init_decisions},
+            )
+        )
         return 0
 
     if mode == "docker":
@@ -1533,21 +1671,41 @@ def run(args: argparse.Namespace) -> int:
     if args.skip_health_check:
         final_status = detect_missing_secrets(project_dir)
         final_label = "complete" if not final_status["missing"] else "needs_secrets"
-        emit(BootstrapResult(final_label, "health_check_skipped", final_status))
+        init_decisions = detect_init_decisions(
+            project_dir,
+            args,
+            embedding_touched=embedding_touched or auto_embedding_to_ollama,
+        )
+        emit(
+            BootstrapResult(
+                final_label,
+                "health_check_skipped",
+                {**final_status, "init_decisions": init_decisions},
+            )
+        )
         return 0
 
     healthy = wait_for_health(args.host, args.port)
     final_status = detect_missing_secrets(project_dir)
+    init_decisions = detect_init_decisions(
+        project_dir,
+        args,
+        embedding_touched=embedding_touched or auto_embedding_to_ollama,
+    )
     if healthy:
         label = "complete" if not final_status["missing"] else "running_with_missing_secrets"
+        if not final_status["missing"] and init_decisions["missing"] and not args.skip_init:
+            label = "needs_decisions"
+        health_details = {
+            "health_url": f"http://{args.host}:{args.port}{DEFAULT_HEALTH_PATH}",
+            **final_status,
+            "init_decisions": init_decisions,
+        }
         emit(
             BootstrapResult(
                 label,
                 "backend_healthy",
-                {
-                    "health_url": f"http://{args.host}:{args.port}{DEFAULT_HEALTH_PATH}",
-                    **final_status,
-                },
+                health_details,
             )
         )
 
@@ -1558,35 +1716,36 @@ def run(args: argparse.Namespace) -> int:
         # discovery pass. Without it the user opens the extension and
         # sees nothing.
         if not final_status["missing"] and not args.skip_init:
+            if init_decisions["missing"]:
+                emit(
+                    BootstrapResult(
+                        "needs_decisions",
+                        "init_decisions_required",
+                        health_details,
+                    )
+                )
+                info(
+                    "Credentials are present, but init was not run because "
+                    "the agent has not supplied explicit choices for: "
+                    + ", ".join(init_decisions["missing"])
+                )
+                return 0
+
             info(
                 "All credentials present — running 'openbiliclaw init' to reach usable state... "
                 "(this takes 2-5 minutes: real LLM calls + Bilibili history fetches)"
             )
             try:
-                init_cmd: list[str] = []
-                if mode == "docker":
-                    # Run init inside the running compose service.
-                    init_cmd = [
-                        "docker",
-                        "exec",
-                        "-i",
-                        "openbiliclaw-backend",
-                        "openbiliclaw",
-                        "init",
-                    ]
-                elif detect_uv():
-                    init_cmd = ["uv", "run", "openbiliclaw", "init"]
-                else:
-                    if os.name == "nt":
-                        venv_python = project_dir / ".venv" / "Scripts" / "python.exe"
-                    else:
-                        venv_python = project_dir / ".venv" / "bin" / "python"
-                    if venv_python.exists():
-                        init_cmd = [str(venv_python), "-m", "openbiliclaw.cli", "init"]
-                    else:
-                        init_cmd = [sys.executable, "-m", "openbiliclaw.cli", "init"]
+                xhs_flag = str(init_decisions["xhs"]["flag"])
+                init_cmd = build_init_command(mode, project_dir, xhs_flag)
                 run_streaming(init_cmd, cwd=project_dir, check=False)
-                emit(BootstrapResult("ok", "init_complete", {}))
+                emit(
+                    BootstrapResult(
+                        "complete",
+                        "init_complete",
+                        {**health_details, "init_command": shlex.join(init_cmd)},
+                    )
+                )
             except Exception as exc:
                 emit(BootstrapResult("warning", "init_failed", {"error": str(exc)}))
                 info(
@@ -1604,6 +1763,7 @@ def run(args: argparse.Namespace) -> int:
             {
                 "health_url": f"http://{args.host}:{args.port}{DEFAULT_HEALTH_PATH}",
                 **final_status,
+                "init_decisions": init_decisions,
             },
         )
     )

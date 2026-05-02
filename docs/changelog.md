@@ -32,6 +32,15 @@
 - `configure_logging` 新增 `sweep_unmanaged: bool = True` kwarg。CLI `_initialize_logging` 检测 `logs-prune` 命令时传 `False`,避免 dry-run 被全局 callback 顺手清掉(否则 dry-run 等于自动 apply)
 - `config.example.toml` 同步更新,加上 4 行注释说明每个阈值的意义
 
+### 修复
+
+- **扩展自动同步 B 站 Cookie 的首装竞态**:如果扩展已安装但本地后端还没起来,之前首次 POST 失败后要等 cookie 变化或最长 1 小时 alarm 才会重试,导致 AI agent 一句话安装后看起来"自动获取不到 Cookie"。现在 service worker 冷启动会启动 cookie sync,POST 失败时把 alarm 临时切到 1 分钟重试,成功后恢复 60 分钟刷新;`startCookieSync()` 也改成真正幂等,避免重复注册 `chrome.cookies.onChanged` 监听器。
+- **后端可主动要求扩展回传 Cookie**:`/api/runtime-stream?client=background` 建连时,如果后端解析不到 B 站 Cookie,会先发 `bilibili_cookie_sync_requested`;扩展收到后立即 POST 当前浏览器 Cookie 到 `/api/bilibili/cookie`。这让后端启动后不用等下一轮 alarm,能主动拉起一次 Cookie 同步。
+- **AI agent 一句话安装不再跳过 embedding / 小红书确认**:`agent_bootstrap.py` 新增 `--yes-xhs` / `--no-xhs` 并在 auto-init 前检查两个显式决策:embedding 方案和小红书收藏 / 点赞 opt-in。凭据齐全但没问这两项时,bootstrap 返回 `status=needs_decisions` 而不是直接跑 `openbiliclaw init`;install.sh / install.ps1 的状态块会把默认 `--embedding-provider ollama --embedding-model bge-m3 --no-xhs` 示例命令打印出来,让智能体必须先问用户再继续。
+- **插件推荐列表滚到底续页不再卡住**:side panel 推荐 tab 在首次渲染、切回推荐页和追加完成后都会重新检查一次底部距离,不再只依赖新的 scroll 事件触发 `/api/recommendations/append`。
+- **插件初始化后不再误显示 init 提示**:popup 空推荐状态会优先识别 `manual_refresh_state=running`、pending signal 和候选池补货信号;初始化后首轮补货 / 池子已有内容但 `initialized` 标记短暂滞后时,不再继续显示“还没完成初始化”。
+- **插件发布版本推进到 `extension-v0.3.3`**:本次插件 release 包含 Cookie 自动同步竞态、推荐续页和初始化状态提示修复。
+
 ### 测试
 
 - 全套 944 通过 / 16 失败(基线) / 15 跳过 — 0 新回归

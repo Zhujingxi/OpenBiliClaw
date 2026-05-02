@@ -372,6 +372,24 @@ def create_app(
             await websocket.close()
             return
         queue = await subscribe()
+        client_name = str(websocket.query_params.get("client", "") or "").strip().lower()
+        if client_name in {"background", "extension", "service-worker"}:
+            from openbiliclaw.bilibili.auth import resolve_runtime_cookie
+
+            runtime_config = getattr(ctx, "config", None) or config
+            with suppress(Exception):
+                cookie = resolve_runtime_cookie(
+                    data_dir=runtime_config.data_path,
+                    configured_cookie=runtime_config.bilibili.cookie,
+                )
+                if not str(cookie or "").strip():
+                    await websocket.send_json(
+                        {
+                            "type": "bilibili_cookie_sync_requested",
+                            "reason": "missing_cookie",
+                            "source": "runtime-stream",
+                        }
+                    )
         try:
             while True:
                 event = await queue.get()

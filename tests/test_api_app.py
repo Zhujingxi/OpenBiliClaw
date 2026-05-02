@@ -716,6 +716,33 @@ class TestBackendAPI:
                 "message": "开始给你补候选了",
             }
 
+    def test_runtime_stream_requests_cookie_sync_for_background_client(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config, save_config
+        from openbiliclaw.runtime.events import RuntimeEventHub
+
+        monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+        save_config(Config(), tmp_path / "config.toml")
+
+        hub = RuntimeEventHub()
+        app = create_app(
+            memory_manager=object(),
+            database=object(),
+            soul_engine=object(),
+            runtime_event_hub=hub,
+        )
+        client = TestClient(app)
+
+        with client.websocket_connect("/api/runtime-stream?client=background") as websocket:
+            assert websocket.receive_json() == {
+                "type": "bilibili_cookie_sync_requested",
+                "reason": "missing_cookie",
+                "source": "runtime-stream",
+            }
+
     def test_activity_feed_endpoint_returns_live_summary_headline_and_items(self) -> None:
         from fastapi.testclient import TestClient
 

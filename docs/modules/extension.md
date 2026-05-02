@@ -16,6 +16,7 @@
 | 8.2 后端 API | ✅ | Python 侧 `/api/events`、`/api/health`、`/api/recommendations` 已可联调 |
 | 8.3 Side Panel | ✅ | 已切到 side panel 主入口，继续复用 `popup/` 页面承载推荐 / 画像 / 聊天三 tab |
 | 持续补货与通知 | ✅ | 运行状态已接入 popup，service worker 会拉取高置信通知并回写发送状态 |
+| B 站 Cookie 自动同步 | ✅ | service worker 会读取 `SESSDATA` / `bili_jct` / `DedeUserID` 三件套并推送到本地后端；后端暂未启动时切到 1 分钟重试，成功后恢复 60 分钟兜底刷新；后端 runtime-stream 也可发 `bilibili_cookie_sync_requested` 让扩展立刻回传 |
 | 认知变化提醒 | ✅ | service worker 会提示关键认知变化，画像 tab 会显示“阿B 最近新记住了什么” |
 | 认知变化历史分页 | ✅ | 画像 tab 的认知卡片支持展开详情，并可下拉或点击按钮继续查看更早的变化记录 |
 | 认知卡片上下文澄清 | ✅ | 画像 tab 的认知卡片默认态现在固定展示“结论 + 上下文 + 状态提示”，用户可直接看出这是对哪条内容/哪轮聊天/哪组聚合信号形成的判断，以及这张卡片是否还能展开 |
@@ -37,6 +38,7 @@ extension/
 ├── src/
 │   ├── background/
 │   │   ├── buffer.ts
+│   │   ├── cookie-sync.ts     # B 站 Cookie 自动同步到 localhost 后端
 │   │   └── service-worker.ts
 │   ├── content/
 │   │   ├── kernel.ts          # 平台无关的 DOM 观察 + 事件派发
@@ -88,6 +90,9 @@ extension/
 - 发送失败时把事件回填到缓冲区
 - flush 成功后检查一次待发通知
 - 缓冲为空时也会周期轮询高置信通知
+- 每次 service worker 冷启动都会启动 B 站 Cookie 同步；如果 localhost 后端暂时不可用，会通过 `chrome.alarms` 以 1 分钟间隔重试，成功同步后恢复为 60 分钟刷新
+- 以 `client=background` 连接 `/api/runtime-stream` 后，如果后端发现本地没有 B 站 Cookie，会收到 `bilibili_cookie_sync_requested` 事件并立即执行一次 Cookie POST
+- Cookie 监听器幂等注册，避免 onInstalled / onStartup / 冷启动重复挂载导致同一次 B 站登录触发多次 POST
 - 点击扩展图标时优先打开 side panel
 - 通知和认知提醒也会优先把用户带回插件 side panel 上下文
 - 在推荐通知之外，认知变化通知会打开带 `?tab=profile` 的插件页面，直接落到画像视图
@@ -133,7 +138,7 @@ dispatcher 会把这两个字段透传给 content script；如果 `scroll_wait_m
 - 后端连接状态检查
 - 从 `/api/recommendations` 拉取推荐列表
 - 推荐 tab 现已改成“换一批”，会调用 `/api/recommendations/reshuffle` 直接从 discovery pool 秒级换出一批新推荐
-- 推荐 tab 滚到底时会调用 `/api/recommendations/append` 继续往下续 10 条，不会把当前这一屏直接替换掉
+- 推荐 tab 滚到底时会调用 `/api/recommendations/append` 继续往下续 10 条，不会把当前这一屏直接替换掉；首次渲染、切回推荐 tab 和追加完成后也会再检查一次底部距离，避免停在底部时没有新 scroll 事件导致续页卡住
 - popup API 现在会统一规范化推荐项，追加出来的 `cover_url` 也会被收敛成可直接加载的 `https://` 地址
 - `/api/recommendations/refresh` 仍保留为后台补货入口，用于继续往候选池里持续进货
 - popup 推荐卡片现在不会再把空 `expression / topic_label` 补成固定占位文案；后端预生成没完成时，这两块会直接隐藏
@@ -145,7 +150,7 @@ dispatcher 会把这两个字段透传给 content script；如果 `scroll_wait_m
 - 修复卡片误跳转：`喜欢` / `不喜欢` / `写一句` / 输入框 / 发送按钮不再冒泡触发视频打开
 - `喜欢` / `不喜欢` / `写一句` 都会调用 `/api/feedback`
 - 推荐卡片里的 `写一句 -> 发出去` 现在会在按钮本地显示 `发送中... / 已发出 / 可重试` 三态，卡片底部也会同步写明这句是否真的发出去了
-- 页面会读取 `/api/runtime-status`，区分“未初始化 / 正在补货 / 推荐可用”三种状态
+- 页面会读取 `/api/runtime-status`，区分“未初始化 / 正在补货 / 推荐可用”三种状态；初始化刚完成但 `initialized` 标记尚未同步时，如果已有补货中或候选池信号，不再误提示用户重新执行 init
 - popup 打开期间现在会建立 `/api/runtime-stream` websocket 连接，底部提示条和池子状态会跟着后端事件实时变化
 - popup 底部提示区已升级成可展开动态卡：默认两行显示“现在在忙什么 / 最近一次关键变化”，点 `更多` 可以展开最近历史
 - 新增 `/api/activity-feed` 聚合接口，popup 会把认知更新、反馈记下了、换一批和补货结果收成同一块动态面板
@@ -204,6 +209,7 @@ npm run build
 
 - 页面识别 / BV 提取 / 动作识别
 - 缓冲去重与强信号 flush
+- B 站 Cookie 自动同步的重试闹钟和幂等监听器
 - manifest 图标资源存在性
 - `dist/` 运行时脚本可被 Chrome 直接加载
 
