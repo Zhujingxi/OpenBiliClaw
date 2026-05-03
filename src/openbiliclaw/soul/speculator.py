@@ -448,7 +448,7 @@ class InterestSpeculator:
         max_active: int = 5,
         max_primary_interests: int = 15,
         max_secondary_interests: int = 60,
-        min_confidence: float = 0.48,
+        min_confidence: float = 0.44,
     ) -> None:
         self._llm_service = llm_service
         self._data_dir = data_dir
@@ -460,9 +460,18 @@ class InterestSpeculator:
         self._max_primary_interests = max_primary_interests
         self._max_secondary_interests = max_secondary_interests
         # Quality gate: discard candidates whose self-rated confidence
-        # falls below this threshold.  LLM confidence range is 0.3-0.6
-        # so 0.48 keeps the upper-half of self-rated guesses and drops
-        # the model's own "I'm not sure" hedges.
+        # falls below this threshold. LLM confidence range is 0.3-0.6;
+        # we used to set this at 0.48 hoping to keep only the upper-half
+        # of self-rated guesses, but in practice (2026-05-03 production
+        # logs) LLM consistently scored its own probes at 0.40-0.46 once
+        # the user had 25+ confirmed likes — DeepSeek's calibration gets
+        # conservative when the profile feels "well covered". Result: 6
+        # consecutive 30-min ticks generated 19 candidates, 0 made it
+        # past the gate. Lowered to 0.44 so the LLM's normal-confidence
+        # output (around its median self-score) actually surfaces. The
+        # broader pipeline (specifics≥2 / reason≥20chars / domain not
+        # shadowing existing like) still catches the genuinely lazy
+        # candidates downstream of this number.
         self._min_confidence = min_confidence
 
     def _load_state(self) -> SpeculativeState:
