@@ -448,7 +448,7 @@ class InterestSpeculator:
         max_active: int = 5,
         max_primary_interests: int = 15,
         max_secondary_interests: int = 60,
-        min_confidence: float = 0.44,
+        min_confidence: float = 0.45,
     ) -> None:
         self._llm_service = llm_service
         self._data_dir = data_dir
@@ -467,7 +467,7 @@ class InterestSpeculator:
         # the user had 25+ confirmed likes — DeepSeek's calibration gets
         # conservative when the profile feels "well covered". Result: 6
         # consecutive 30-min ticks generated 19 candidates, 0 made it
-        # past the gate. Lowered to 0.44 so the LLM's normal-confidence
+        # past the gate. Lowered to 0.45 so the LLM's normal-confidence
         # output (around its median self-score) actually surfaces. The
         # broader pipeline (specifics≥2 / reason≥20chars / domain not
         # shadowing existing like) still catches the genuinely lazy
