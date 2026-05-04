@@ -927,6 +927,28 @@ class Database:
             counts[source_family] += 1
         return dict(counts)
 
+    def count_pool_by_franchise(self) -> dict[str, int]:
+        """Return ``{franchise_key_lower: count}`` for fresh pool items.
+
+        Used by discovery's pool-wide franchise quota check (v0.3.50+)
+        so a franchise that already has many items in the pool can't
+        keep accumulating across discovery rounds. Empty franchise_key
+        is excluded — most generic content has no IP signal and the
+        quota is only meaningful for series / IP / UP-driven groups.
+        """
+        cursor = self.conn.execute(
+            """
+            SELECT LOWER(TRIM(franchise_key)) AS fk, COUNT(*) AS n
+            FROM content_cache
+            WHERE COALESCE(pool_status, 'fresh') = 'fresh'
+              AND COALESCE(feedback_type, '') != 'dislike'
+              AND franchise_key IS NOT NULL
+              AND TRIM(franchise_key) != ''
+            GROUP BY LOWER(TRIM(franchise_key))
+            """
+        )
+        return {str(row["fk"]): int(row["n"]) for row in cursor.fetchall() if row["fk"]}
+
     def get_distinct_topic_groups(self) -> list[str]:
         """Return distinct non-empty ``topic_group`` values in the fresh pool.
 

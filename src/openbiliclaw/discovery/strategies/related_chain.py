@@ -124,6 +124,16 @@ class RelatedChainStrategy(DiscoveryStrategy):
 
             # Collect candidates from all results
             batch_candidates: list[tuple[DiscoveredContent, int, int, str]] = []
+            # v0.3.50+: per-UP cap inside one depth round. Without this
+            # cap, related_chain following a "popular UP" seed could
+            # dump 13+ items of the same UP into a single batch (real
+            # case: 张雪机车×13 — observed 2026-05-05). We track count
+            # per up_name across ALL seeds in this round, not per seed,
+            # because the same UP shows up via multiple seeds when the
+            # user genuinely follows them.
+            from openbiliclaw.discovery.engine import _RELATED_CHAIN_PER_UP_CAP
+            up_counts: dict[str, int] = {}
+            up_skipped: dict[str, int] = {}
             for (seed_bvid, depth, seed_index, seed_topic_key), outcome in zip(
                 layer_items,
                 related_outcomes,
@@ -148,8 +158,26 @@ class RelatedChainStrategy(DiscoveryStrategy):
                     content = self._map_related_item(item, seed_topic_key=seed_topic_key)
                     if content is None or content.bvid in seen_bvids:
                         continue
+                    up_name_norm = (content.up_name or "").strip().lower()
+                    if (
+                        _RELATED_CHAIN_PER_UP_CAP > 0
+                        and up_name_norm
+                        and up_counts.get(up_name_norm, 0) >= _RELATED_CHAIN_PER_UP_CAP
+                    ):
+                        up_skipped[up_name_norm] = up_skipped.get(up_name_norm, 0) + 1
+                        continue
                     seen_bvids.add(content.bvid)
+                    if up_name_norm:
+                        up_counts[up_name_norm] = up_counts.get(up_name_norm, 0) + 1
                     batch_candidates.append((content, depth, seed_index, seed_topic_key))
+            if up_skipped:
+                logger.info(
+                    "related_chain per-UP cap: skipped %d item(s) "
+                    "(cap=%d/UP per round; %s)",
+                    sum(up_skipped.values()),
+                    _RELATED_CHAIN_PER_UP_CAP,
+                    ", ".join(f"{k}×{v}" for k, v in up_skipped.items()),
+                )
 
             # Cap per-round candidate count so depth-2 fanout doesn't
             # dump hundreds of items into evaluate_content_batch. We

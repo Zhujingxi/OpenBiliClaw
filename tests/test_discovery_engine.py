@@ -989,3 +989,111 @@ async def test_discovery_engine_limits_llm_evaluation_concurrency() -> None:
     await asyncio.gather(*(engine.evaluate_content(item, _build_profile()) for item in items))
 
     assert llm_service.max_active_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_intra_batch_franchise_cap() -> None:
+    """v0.3.50: same-franchise items beyond the cap get their scores zeroed.
+
+    Reproduces the production trigger: a single eval batch returning 6
+    张雪机车 entries (or 7 风犬少年的天空, etc.) used to all stay
+    kept=30, flooding the pool with one franchise. Cap is 4 — the top
+    4 by score survive, the rest are zeroed (so the caller's
+    ``score > 0`` filter drops them from the kept list).
+    """
+    import json
+
+    class _FrancheseClumpLLMService:
+        async def complete_structured_task(
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            history: list[dict[str, str]] | None = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            caller: str = "",
+        ) -> object:
+            # 6 items, all "张雪机车" franchise, with descending scores.
+            results = [
+                {
+                    "score": 0.95 - i * 0.05,
+                    "reason": "好看",
+                    "topic_group": "机车",
+                    "style_key": "review_roundup",
+                    "franchise_key": "张雪机车",
+                }
+                for i in range(6)
+            ]
+            return _SlowResponse(json.dumps(results, ensure_ascii=False))
+
+    engine = ContentDiscoveryEngine(llm_service=_FrancheseClumpLLMService())
+    batch = [
+        DiscoveredContent(
+            bvid=f"BVZX{i}",
+            title=f"张雪机车第{i}集",
+            up_name="张雪机车",
+            description="d",
+            source_strategy="related_chain",
+        )
+        for i in range(6)
+    ]
+
+    scores = await engine._evaluate_batch(batch, _build_profile())
+
+    # Cap is 4 — top-4 scoring entries kept (>0), the rest zeroed.
+    nonzero = [s for s in scores if s > 0]
+    assert len(nonzero) == 4
+    assert sum(1 for s in scores if s == 0.0) == 2
+    # Zeroed entries must also have their content's relevance_score reset
+    # so downstream code that reads the content directly gets the same answer.
+    zero_indices = [i for i, s in enumerate(scores) if s == 0.0]
+    for idx in zero_indices:
+        assert batch[idx].relevance_score == 0.0
+
+
+def test_count_pool_by_franchise_returns_lowercased_groups(tmp_path: Path) -> None:
+    """v0.3.50: pool-quota query groups + lowercases franchise_key."""
+    from openbiliclaw.storage.database import Database
+
+    db = Database(tmp_path / "fk.db")
+    db.initialize()
+    # Two items sharing a franchise (case-different), one with empty,
+    # one with a different franchise.
+    db.cache_content(
+        bvid="BV1A",
+        title="A",
+        up_name="up",
+        source_platform="bilibili",
+        source="search",
+        franchise_key="张雪机车",
+    )
+    db.cache_content(
+        bvid="BV1B",
+        title="B",
+        up_name="up",
+        source_platform="bilibili",
+        source="search",
+        franchise_key="张雪机车",  # exact match
+    )
+    db.cache_content(
+        bvid="BV1C",
+        title="C",
+        up_name="up",
+        source_platform="bilibili",
+        source="search",
+        franchise_key="风犬少年的天空",
+    )
+    db.cache_content(
+        bvid="BV1D",
+        title="D",
+        up_name="up",
+        source_platform="bilibili",
+        source="search",
+        franchise_key="",
+    )
+
+    counts = db.count_pool_by_franchise()
+    assert counts.get("张雪机车") == 2
+    assert counts.get("风犬少年的天空") == 1
+    assert "" not in counts

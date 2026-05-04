@@ -4,6 +4,57 @@
 
 ---
 
+## v0.3.50: discovery 三层 franchise/UP 配额（2026-05-05）
+
+### 背景
+
+线上日志暴露 B 站候选池被几个 hot franchise 主导：
+
+```
+01:12:46  eval_batch  top_franchise=张雪机车×13 (45%)        ← 30 条里 13 条同 UP
+01:13:27  eval_batch  top_franchise=咲间妮娜×6
+01:14:58  eval_batch  top_franchise=咲间妮娜×6              ← 同 UP 第三波
+01:17:15  eval_batch  top_franchise=风犬少年的天空×7
+```
+
+`咲间妮娜 7+6+6 = 19 条` 横跨三个 batch，全进了池子。LLM **正确填了 franchise_key**（按 prompt 规则 7 的批内一致性约束），但下游 `_evaluate_batch` 收到 30 条里 13 条同 IP 时仍 `kept=30`——franchise 信息有，没人用。
+
+去重只在 serve 时（`_select_diversified_batch.per_franchise_cap`），但 pool 已经被某个 franchise 占了 30+ 条时，serve 端兜底救不了池子的整体倾斜。
+
+### 改动（三层防御）
+
+**A. eval_batch 单批 franchise cap（`discovery/engine.py:_evaluate_batch`）**
+- 新常量 `_BATCH_FRANCHISE_CAP = 4`
+- LLM 评分完成后，按 `franchise_key`（lowercase）分桶，每桶超过 4 条的按 score 排序保留 top 4，其余 `score=0`（被下游 `score > 0` 过滤掉）
+- INFO 日志：`eval_batch franchise cap: dropped N item(s) (cap=4/franchise; offenders=张雪机车×13)`
+
+**B. related_chain 单 round 同 UP cap（`discovery/strategies/related_chain.py`）**
+- 新常量 `_RELATED_CHAIN_PER_UP_CAP = 3`
+- 一个 depth round 内沿所有 seed 收集 `batch_candidates` 时按 `up_name`（lowercase）计数，超过 3 的同 UP 不再加入
+- INFO 日志：`related_chain per-UP cap: skipped N item(s) (cap=3/UP per round; 张雪机车×10)`
+- **治根**：从源头不让 13 条同 UP 一起涌进 batch
+
+**C. 入池 franchise 全局配额（`discovery/engine.py:_cache_results` + `storage/database.py`）**
+- 新常量 `_POOL_FRANCHISE_QUOTA = 10`（约 pool target 600 的 1.5%）
+- 新 `Database.count_pool_by_franchise()` 返回 `{franchise_key_lower: count}`
+- `_cache_results` 入池前查现有 franchise 数量 + 本轮已加数量，超额拒收
+- INFO 日志：`pool franchise quota: skipped N item(s) (cap=10/franchise; 咲间妮娜×7)`
+- **防累积**：即便 A/B 都漏过去，pool 整体也不会被某个 franchise 占据
+
+### 影响
+
+- B 站 batch 内 franchise 集中度从最高 45%（13/30）降到 ≤13%（4/30）
+- related_chain 沿热门 UP 链一次最多吸收 3 条，避免一个 seed 爆雷
+- 单 franchise 在 pool 总量被硬上限到 10 条
+- 日志可见性：所有三层 cap 命中时都有 INFO 日志，可以观察实际剧烈程度
+- 改动不动 LLM prompt builder，不影响 prompt cache 命中率
+
+测试：169/169 通过（含 2 个新回归测试）：
+- `test_evaluate_batch_intra_batch_franchise_cap` — 6 条同 franchise 入 batch，验证 4 留 2 弃
+- `test_count_pool_by_franchise_returns_lowercased_groups` — DB 接口返回 lowercase 分组
+
+---
+
 ## v0.3.49: 惊喜推荐 threshold 跟 LLM rubric 对齐（2026-05-05）
 
 ### 背景

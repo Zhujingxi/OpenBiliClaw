@@ -225,6 +225,28 @@ VALID_STYLE_KEYS: frozenset[str] = frozenset(
     }
 )
 
+# v0.3.50+: per-batch franchise cap for ``_evaluate_batch``. The LLM
+# correctly identifies when a batch has many same-IP items (the prompt
+# mandates batch-wide franchise consistency), but pre-v0.3.50 we kept
+# them all and let serve()'s diversifier sort it out — by which point
+# the pool was already franchise-skewed. Cap=4 lets a series have a
+# small foothold in each refresh round but stops a single ``related_chain``
+# excursion from dumping 13 items of the same UP into one batch.
+_BATCH_FRANCHISE_CAP: int = 4
+
+# v0.3.50+: pool-wide franchise quota for ``_cache_results``. Once a
+# franchise has this many items in the pool, new same-franchise items
+# are skipped before they can compete for serve() slots. Sized at ~1.5%
+# of the default pool target (600), so 9-10 items is enough breathing
+# room for a series the user actively follows but not enough to skew
+# the whole pool's tone.
+_POOL_FRANCHISE_QUOTA: int = 10
+
+# v0.3.50+: per-UP cap inside a single related_chain depth round.
+# Without this, related_chain following a single seed could fan out
+# into 13+ items of the same UP (张雪机车 was the production trigger).
+_RELATED_CHAIN_PER_UP_CAP: int = 3
+
 
 class DiscoveryStrategy(ABC):
     """Base class for content discovery strategies."""
@@ -956,6 +978,47 @@ class ContentDiscoveryEngine:
             )
             results.append(score)
 
+        # v0.3.50+: intra-batch franchise cap. The LLM dutifully fills
+        # franchise_key for IP/series content (per the prompt's batch-
+        # consistency rule), but we used to keep all 30 items even when
+        # ≥10 of them shared a franchise — observed in production:
+        # 张雪机车×13 / 风犬少年的天空×7 / 咲间妮娜×7 in single batches.
+        # Cap at ``_BATCH_FRANCHISE_CAP`` per batch: keep the highest-
+        # scoring N items per franchise, zero the rest. Empty franchise
+        # is exempt (most generic content has no IP signal).
+        cap = _BATCH_FRANCHISE_CAP
+        if cap > 0 and batch:
+            buckets: dict[str, list[int]] = {}
+            for i, content in enumerate(batch):
+                if i >= len(results) or results[i] <= 0:
+                    continue
+                key = (content.franchise_key or "").strip().lower()
+                if not key:
+                    continue
+                buckets.setdefault(key, []).append(i)
+            dropped = 0
+            for key, indices in buckets.items():
+                if len(indices) <= cap:
+                    continue
+                # Keep top ``cap`` by score, drop the rest.
+                indices.sort(key=lambda idx: results[idx], reverse=True)
+                for idx in indices[cap:]:
+                    results[idx] = 0.0
+                    batch[idx].relevance_score = 0.0
+                    dropped += 1
+            if dropped:
+                logger.info(
+                    "eval_batch franchise cap: dropped %d item(s) "
+                    "(cap=%d/franchise; offenders=%s)",
+                    dropped,
+                    cap,
+                    ", ".join(
+                        f"{k}×{len(v)}"
+                        for k, v in buckets.items()
+                        if len(v) > cap
+                    ),
+                )
+
         return results
 
     @staticmethod
@@ -1534,13 +1597,52 @@ class ContentDiscoveryEngine:
     def _cache_results(self, results: list[DiscoveredContent]) -> None:
         if self._database is None or not results:
             return
+
+        # v0.3.50+: pool-wide franchise quota. Without this, multiple
+        # discovery rounds can each pass the per-batch cap (4 张雪机车
+        # in batch 1, 4 in batch 2, ...) and the pool ends up with 30+
+        # items of the same franchise — diversifier at serve time
+        # cannot rescue a pool that's already franchise-skewed.
+        existing_franchise_counts: dict[str, int] = {}
+        if _POOL_FRANCHISE_QUOTA > 0:
+            try:
+                existing_franchise_counts = self._database.count_pool_by_franchise()
+            except Exception:
+                # Old DB or test stub without the helper — skip the
+                # quota check rather than fail caching entirely.
+                logger.debug("count_pool_by_franchise unavailable", exc_info=True)
+                existing_franchise_counts = {}
+
         persisted: list[DiscoveredContent] = []
+        skipped_franchise: dict[str, int] = {}
+        round_franchise_counts: dict[str, int] = {}
         for item in results:
+            franchise_key = (item.franchise_key or "").strip().lower()
+            if franchise_key and _POOL_FRANCHISE_QUOTA > 0:
+                pool_existing = existing_franchise_counts.get(franchise_key, 0)
+                round_existing = round_franchise_counts.get(franchise_key, 0)
+                if pool_existing + round_existing >= _POOL_FRANCHISE_QUOTA:
+                    skipped_franchise[franchise_key] = (
+                        skipped_franchise.get(franchise_key, 0) + 1
+                    )
+                    continue
             try:
                 self._database.cache_content(item.bvid, **item.to_cache_kwargs())
                 persisted.append(item)
+                if franchise_key:
+                    round_franchise_counts[franchise_key] = (
+                        round_franchise_counts.get(franchise_key, 0) + 1
+                    )
             except Exception:
                 logger.exception("Failed to cache discovered content: %s", item.bvid)
+
+        if skipped_franchise:
+            logger.info(
+                "pool franchise quota: skipped %d item(s) (cap=%d/franchise; %s)",
+                sum(skipped_franchise.values()),
+                _POOL_FRANCHISE_QUOTA,
+                ", ".join(f"{k}×{v}" for k, v in skipped_franchise.items()),
+            )
 
         # v0.3.45+: warm the recommendation MMR embedding cache while we
         # still hold these items in memory. Without this hook, the first
