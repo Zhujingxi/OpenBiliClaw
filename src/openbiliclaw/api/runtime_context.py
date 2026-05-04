@@ -328,10 +328,46 @@ class RuntimeContext:
 
     @staticmethod
     async def _safe_prewarm_pool_mmr_embeddings(prewarm_callable: Any) -> None:
-        try:
-            await prewarm_callable()
-        except Exception:
-            logger.exception("Startup prewarm_pool_mmr_embeddings failed")
+        """Run startup MMR prewarm with retry-on-low-coverage.
+
+        v0.3.54+: production logs (2026-05-05) showed
+        ``MMR embedding fetch: coverage=0/40`` for 31 minutes after
+        daemon start — Ollama was 502'ing during the prewarm window
+        and the single-shot startup task gave up. Loop with
+        exponential backoff so a slow Ollama warmup doesn't lock the
+        cache cold for half an hour. Stops after 5 attempts (≈31s)
+        OR when prewarm returns >0 (i.e. some embeddings landed).
+        Failures swallowed silently so pool MMR cache lazy-fills via
+        normal traffic if all 5 attempts truly fail.
+        """
+        delay = 2.0
+        for attempt in range(1, 6):
+            try:
+                warmed = await prewarm_callable()
+                if isinstance(warmed, int) and warmed > 0:
+                    return
+                logger.info(
+                    "Startup prewarm_pool_mmr_embeddings attempt %d "
+                    "warmed=0 — retry in %.1fs",
+                    attempt,
+                    delay,
+                )
+            except Exception:
+                logger.warning(
+                    "Startup prewarm_pool_mmr_embeddings attempt %d failed; "
+                    "retry in %.1fs",
+                    attempt,
+                    delay,
+                    exc_info=True,
+                )
+            if attempt >= 5:
+                break
+            await asyncio.sleep(delay)
+            delay *= 2
+        logger.info(
+            "Startup prewarm_pool_mmr_embeddings gave up after retries — "
+            "cache will lazy-fill from regular serve()/discovery traffic"
+        )
 
 
 def build_runtime_context(

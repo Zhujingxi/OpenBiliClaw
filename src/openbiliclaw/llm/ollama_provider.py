@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import httpx
 
+from .base import LLMProviderError, LLMResponse, LLMTimeoutError
 from .openai_provider import OpenAIProvider
 
 logger = logging.getLogger(__name__)
@@ -21,6 +23,16 @@ class OllamaProvider(OpenAIProvider):
     integration point recommended by the Ollama docs.
     """
 
+    # v0.3.54+: Ollama-specific extended retry. Production logs (2026-05-05)
+    # showed 9× 502 Bad Gateway in the daemon's first 90s while Ollama was
+    # loading bge-m3 from disk. The base OpenAIProvider retry (3 × 0.25s
+    # linear = 1.25s total) was way too short — by the time the model
+    # finished loading, the request had long failed. These constants give
+    # ~30s total wait via exponential backoff, which absorbs cold-load
+    # without delaying the steady-state path (where retries don't fire).
+    _OLLAMA_MAX_RETRIES = 5
+    _OLLAMA_BASE_RETRY_DELAY = 1.0
+
     def __init__(
         self,
         api_key: str = "ollama",
@@ -33,6 +45,55 @@ class OllamaProvider(OpenAIProvider):
             base_url=base_url,
             provider_name="ollama",
         )
+
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        json_mode: bool = False,
+        reasoning_effort: str | None = None,
+    ) -> LLMResponse:
+        """Chat completion with extended retry for Ollama startup hiccups.
+
+        v0.3.54+: when Ollama is still loading models (most often during
+        the daemon's first 60-90 seconds), ``/v1/chat/completions``
+        returns 502 / 503 or times out. The base 3-retry × 0.25s policy
+        burns through retries before the runtime is ready. Override here
+        adds an exponential backoff loop on top: 1s, 2s, 4s, 8s, 16s ≈
+        31s wall time, which covers cold-load without slowing down
+        normal operation (retries don't fire when the model is warm).
+        """
+        last_error: Exception | None = None
+        for attempt in range(1, self._OLLAMA_MAX_RETRIES + 1):
+            try:
+                return await super().complete(
+                    messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    json_mode=json_mode,
+                    reasoning_effort=reasoning_effort,
+                )
+            except (LLMProviderError, LLMTimeoutError, httpx.TransportError) as exc:
+                last_error = exc
+                if attempt >= self._OLLAMA_MAX_RETRIES:
+                    break
+                delay = self._OLLAMA_BASE_RETRY_DELAY * (2 ** (attempt - 1))
+                logger.info(
+                    "Ollama complete attempt %d/%d failed (%s); "
+                    "retrying in %.1fs (likely model still loading)",
+                    attempt,
+                    self._OLLAMA_MAX_RETRIES,
+                    exc,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+        # Exhausted all attempts — re-raise the last error so the
+        # registry's fallback chain can route to the next provider.
+        if last_error is None:  # pragma: no cover — defensive
+            raise LLMProviderError("ollama: complete failed without exception")
+        raise last_error
 
     def _native_root(self) -> str:
         """Strip the OpenAI-compat ``/v1`` suffix to reach Ollama's native API root."""

@@ -4,6 +4,41 @@
 
 ---
 
+## v0.3.54: Ollama 启动期 retry + MMR prewarm 重试（2026-05-05 spec wave 4）
+
+### 背景
+
+`docs/plans/2026-05-05-discovery-runtime-fix-spec.md` U4 + U6。
+
+**U4 — Ollama 启动期 9 次 502 引发连锁失败**：daemon 启动头 90 秒，Ollama 还在加载模型，`localhost:11434/v1/chat/completions` 返 502。基础 OpenAIProvider 重试是 3 × 0.25s 线性 = 1.25s 总时长，远不够 Ollama 30s 模型加载窗口。
+
+**U6 — MMR embedding cache 31 分钟不命中**：startup 的 prewarm 任务在 Ollama 502 期间一次性失败，没重试，导致 cache 空了 31 分钟。
+
+### 改动
+
+**U4 — `OllamaProvider.complete()` 加扩展重试**（`llm/ollama_provider.py`）：
+- 新常量 `_OLLAMA_MAX_RETRIES = 5` + `_OLLAMA_BASE_RETRY_DELAY = 1.0`
+- override 父类 `complete()`，在 502 / 503 / TransportError / TimeoutError 时按 1s, 2s, 4s, 8s, 16s 指数退避（总 ~31s）重试
+- 5 次都失败才向上抛 → registry fallback 链才会切到下一 provider
+- 不影响热路径（已加载好的模型立即返 200，重试不触发）
+
+**U6 — `_safe_prewarm_pool_mmr_embeddings` 改成 5 次重试**（`api/runtime_context.py`）:
+- 之前一次性 try/except 失败就放弃
+- 现在 attempt 1-5，初始 delay 2s 指数翻倍，总 ~62s 窗口
+- 任一次返回 `warmed > 0` 即提前结束（成功 short-circuit）
+- 5 次都失败也是 silent skip — pool MMR cache 还会通过 serve() / discovery 自然填充
+
+### 影响
+
+- 启动期 Ollama 502 触发 OllamaProvider 自带 31s 退避，等模型加载完直接成功
+- speculator / awareness / cognition 不再因为 startup 502 连锁挂掉（v0.3.46 已经把假 ERROR 治了，这次治真正的 502）
+- prewarm 在 ollama 起来之前重试 5 次，cache coverage 5 分钟内回到 ≥80%
+- 不动 prompt builder，cache 命中率不受影响
+
+测试：830/830 通过，无新增（行为是 startup-only 重试，不易写单测）。
+
+---
+
 ## v0.3.53: speculator gate + xhs_producer 节奏（2026-05-05 spec wave 3）
 
 ### 背景
