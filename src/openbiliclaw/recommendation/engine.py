@@ -240,7 +240,8 @@ class RecommendationEngine:
             )
         elif raw_pool_count != loaded_count:
             logger.info(
-                "serve(/%s) pool/load mismatch: count=%d → loaded=%d → after_exclude=%d → after_viewed=%d",
+                "serve(/%s) pool/load mismatch: count=%d → loaded=%d"
+                " → after_exclude=%d → after_viewed=%d",
                 label,
                 raw_pool_count,
                 loaded_count,
@@ -262,10 +263,17 @@ class RecommendationEngine:
             context = self._curator.build_context()
             score_override = self._curator.score_candidates(candidates, context)
 
+        # v0.3.44+: pre-fetch embeddings for MMR-based diversification.
+        # Most are L1 cache hits because _merge_topic_supergroups above
+        # already warmed the EmbeddingService cache. Falls back to
+        # string-cap-only diversification when embeddings are unavailable.
+        embeddings = await self._fetch_candidate_embeddings(candidates)
+
         ranked = self._select_diversified_batch(
             candidates,
             limit=limit,
             score_override=score_override,
+            embeddings=embeddings,
         )
         logger.info(
             "Recommendation picked summary (serve/%s): %s",
@@ -1235,6 +1243,40 @@ class RecommendationEngine:
             return f"你最近那股偏{profile.core_traits[0]}的状态"
         return "想先丢给你的一条"
 
+    async def _fetch_candidate_embeddings(
+        self,
+        candidates: list[DiscoveredContent],
+    ) -> dict[str, list[float]]:
+        """Best-effort pre-fetch of candidate embeddings for MMR diversification.
+
+        Returns ``{bvid: vector}`` only for items whose embedding is available
+        (mostly L1 cache hits because supergroup merging already touched
+        these texts). Items whose embedding fetch fails simply don't appear
+        in the dict — the diversifier falls back to its string-cap-only
+        path for those, which is the legacy behaviour.
+        """
+        if self._embedding_service is None or not candidates:
+            return {}
+        result: dict[str, list[float]] = {}
+        for c in candidates:
+            try:
+                # Same text shape as topic_group_supergroup_merge so we hit
+                # the cached vector instead of computing a fresh one.
+                text = (f"{c.title or ''} {(c.description or '')[:160]}").strip()[:200]
+                if not text:
+                    continue
+                vec = await self._embedding_service.embed(text)
+                if vec:
+                    result[c.bvid] = vec
+            except Exception:
+                logger.debug(
+                    "MMR embedding fetch failed for %s, falling back to "
+                    "string-cap diversification for this item",
+                    c.bvid,
+                    exc_info=True,
+                )
+        return result
+
     @classmethod
     def _select_diversified_batch(
         cls,
@@ -1242,6 +1284,9 @@ class RecommendationEngine:
         *,
         limit: int,
         score_override: dict[str, float] | None = None,
+        embeddings: dict[str, list[float]] | None = None,
+        mmr_alpha: float = 0.5,
+        mmr_beta: float = 0.5,
     ) -> list[DiscoveredContent]:
         if score_override:
             ranked = sorted(
@@ -1252,6 +1297,24 @@ class RecommendationEngine:
             ranked = sorted(candidates, key=cls._ranking_key)
         if limit <= 1 or len(ranked) <= 1:
             return ranked[:limit]
+
+        # MMR path (v0.3.44+): when embeddings are available, replace the
+        # simple relevance-ordered greedy selection with Maximum Marginal
+        # Relevance — each pick balances "high relevance" against "low
+        # similarity to already-picked items" via embedding cosine. This
+        # catches "same topic, different LLM string label" duplication
+        # that the topic_group / style_key string caps miss (e.g. three
+        # rows tagged "人工智能" / "AI 趋势" / "AI 应用" that are
+        # semantically the same content tier).
+        if embeddings:
+            return cls._select_with_mmr(
+                ranked,
+                limit=limit,
+                score_override=score_override,
+                embeddings=embeddings,
+                alpha=mmr_alpha,
+                beta=mmr_beta,
+            )
 
         def _finalize(items: list[DiscoveredContent]) -> list[DiscoveredContent]:
             items = cls._ensure_accessible_entry(
@@ -1363,6 +1426,163 @@ class RecommendationEngine:
                 if len(selected) >= limit:
                     break
         return _finalize(selected)
+
+    @classmethod
+    def _select_with_mmr(
+        cls,
+        ranked: list[DiscoveredContent],
+        *,
+        limit: int,
+        score_override: dict[str, float] | None,
+        embeddings: dict[str, list[float]],
+        alpha: float,
+        beta: float,
+    ) -> list[DiscoveredContent]:
+        """Greedy Maximum Marginal Relevance pick with existing string caps.
+
+        At each step, choose the candidate maximising
+        ``alpha * relevance - beta * max_cosine_to_picked``.
+
+        ``alpha = beta = 0.5`` (default) gives a balanced relevance /
+        diversity trade-off. Bumping ``beta`` up (or ``alpha`` down)
+        produces a more aggressively varied batch at the cost of
+        relevance. The string-based caps (``per_topic_cap`` /
+        ``per_style_cap`` / ``broad_topic_cap``) still gate every
+        pick — items violating them go to ``deferred`` and are only
+        reconsidered if MMR ran out of compliant candidates.
+        """
+        from openbiliclaw.llm.embedding import cosine_similarity
+
+        per_topic_cap = cls._topic_cap(limit)
+        soft_topic_cap = cls._soft_topic_cap(limit)
+        per_style_cap = cls._style_cap(limit)
+        broad_cap = cls._broad_topic_cap(limit)
+        topic_counts: dict[str, int] = {}
+        broad_topic_counts: dict[str, int] = {}
+        style_counts: dict[str, int] = {}
+
+        def _exceeds_broad_cap(item: DiscoveredContent) -> bool:
+            bt = cls._broad_topic_token(item)
+            return bool(bt) and broad_topic_counts.get(bt, 0) >= broad_cap
+
+        def _track(item: DiscoveredContent) -> None:
+            for token in cls._diversity_tokens(item):
+                topic_counts[token] = topic_counts.get(token, 0) + 1
+            bt = cls._broad_topic_token(item)
+            if bt:
+                broad_topic_counts[bt] = broad_topic_counts.get(bt, 0) + 1
+            style_counts[cls._style_token(item)] = style_counts.get(cls._style_token(item), 0) + 1
+
+        def _violates_caps(item: DiscoveredContent, *, topic_cap: int) -> bool:
+            tokens = cls._diversity_tokens(item)
+            if tokens and any(topic_counts.get(t, 0) >= topic_cap for t in tokens):
+                return True
+            if _exceeds_broad_cap(item):
+                return True
+            if style_counts.get(cls._style_token(item), 0) >= per_style_cap:
+                return True
+            return False
+
+        def _relevance(item: DiscoveredContent) -> float:
+            if score_override:
+                return float(score_override.get(item.bvid, 0.0))
+            return float(item.relevance_score or 0.0)
+
+        def _max_cos_to_picked(
+            cand: DiscoveredContent,
+            picked: list[DiscoveredContent],
+        ) -> float:
+            cand_vec = embeddings.get(cand.bvid)
+            if not cand_vec or not picked:
+                return 0.0
+            best = 0.0
+            for p in picked:
+                p_vec = embeddings.get(p.bvid)
+                if not p_vec:
+                    continue
+                sim = cosine_similarity(cand_vec, p_vec)
+                if sim > best:
+                    best = sim
+            return best
+
+        selected: list[DiscoveredContent] = []
+        deferred: list[DiscoveredContent] = []
+        remaining = list(ranked)
+
+        # First pick: highest-relevance compliant item (MMR's "anchor"
+        # — no penalty since picked is empty).
+        # Subsequent picks: argmax(alpha*relevance - beta*max_cos_to_picked).
+        while len(selected) < limit and remaining:
+            best_idx = -1
+            best_score = -1e9
+            for idx, cand in enumerate(remaining):
+                rel = _relevance(cand)
+                penalty = _max_cos_to_picked(cand, selected)
+                mmr = alpha * rel - beta * penalty
+                if mmr > best_score:
+                    best_score = mmr
+                    best_idx = idx
+            if best_idx < 0:
+                break
+            cand = remaining.pop(best_idx)
+            if _violates_caps(cand, topic_cap=per_topic_cap):
+                deferred.append(cand)
+                continue
+            selected.append(cand)
+            _track(cand)
+
+        # Re-fill from deferred if we ran out of compliant items —
+        # progressively relax the topic cap, then drop style cap last,
+        # mirroring the legacy fallback chain. broad_cap stays hard.
+        if len(selected) < limit:
+            still_deferred: list[DiscoveredContent] = []
+            for cand in deferred:
+                if len(selected) >= limit:
+                    still_deferred.append(cand)
+                    continue
+                if _violates_caps(cand, topic_cap=soft_topic_cap):
+                    still_deferred.append(cand)
+                    continue
+                selected.append(cand)
+                _track(cand)
+            deferred = still_deferred
+
+        if len(selected) < limit:
+            for cand in deferred:
+                if len(selected) >= limit:
+                    break
+                # Final relaxation: only broad_cap still binding.
+                if _exceeds_broad_cap(cand):
+                    continue
+                selected.append(cand)
+                _track(cand)
+
+        # Logging — surface MMR effect per call so we can tell if it
+        # actually rotated the topic mix vs the relevance-only path.
+        if selected:
+            picked_topics = Counter(
+                cls._normalize_topic_token(item.topic_group) or "unknown" for item in selected
+            )
+            top_share = picked_topics.most_common(1)[0][1] / len(selected)
+            logger.info(
+                "MMR diversifier: picked %d/%d, alpha=%.2f beta=%.2f, "
+                "unique_topics=%d top_topic_share=%.0f%%",
+                len(selected),
+                limit,
+                alpha,
+                beta,
+                len(picked_topics),
+                top_share * 100,
+            )
+
+        # Reuse legacy finalization (accessible_entry + interleave).
+        finalized = cls._ensure_accessible_entry(
+            ranked=ranked,
+            selected=selected[:limit],
+            limit=limit,
+            score_override=score_override,
+        )
+        return cls._interleave_by_topic(finalized[:limit])
 
     @classmethod
     def _ensure_accessible_entry(
