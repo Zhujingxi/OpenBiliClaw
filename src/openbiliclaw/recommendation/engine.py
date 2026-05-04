@@ -566,6 +566,30 @@ class RecommendationEngine:
                 len(labels),
                 len(new_map),
             )
+            # v0.3.56+: also update existing pool rows to the canonical
+            # form. Without this, ``Recommendation candidate summary``
+            # logs show "动漫" / "动漫杂谈" / "动漫二次元" as 3 separate
+            # topic_groups even after the map says they're synonyms,
+            # because the merge only ran at serve time. Mass-update
+            # makes downstream SQL (`get_topic_group_samples`,
+            # `count_pool_by_franchise`-equivalent group-by analytics,
+            # popup status displays) see the same canonical form
+            # serve-time would.
+            canonicalize = getattr(self._database, "canonicalize_topic_groups", None)
+            if callable(canonicalize):
+                try:
+                    rewritten = canonicalize(new_map)
+                    if rewritten:
+                        logger.info(
+                            "Topic supergroup canonical map applied to pool: "
+                            "%d row(s) rewritten",
+                            rewritten,
+                        )
+                except Exception:
+                    logger.exception(
+                        "canonicalize_topic_groups failed; pool topic_group "
+                        "values will lazy-merge at serve time only"
+                    )
         return len(labels)
 
     async def prewarm_pool_mmr_embeddings(self, *, limit: int = 200) -> int:

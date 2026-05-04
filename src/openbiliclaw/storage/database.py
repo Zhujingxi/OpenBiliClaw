@@ -927,6 +927,42 @@ class Database:
             counts[source_family] += 1
         return dict(counts)
 
+    def canonicalize_topic_groups(self, canonical_map: dict[str, str]) -> int:
+        """Rewrite ``content_cache.topic_group`` to canonical form per map.
+
+        v0.3.56+: ``canonical_map`` is built by
+        ``RecommendationEngine.prewarm_supergroup_embeddings`` and maps
+        normalized (lowered + stripped) topic_group → canonical form.
+        Without applying it to the database rows, the merge only fires
+        at serve time and downstream analytics (``get_topic_group_samples``,
+        per-topic counts in popup status) see the un-merged labels.
+
+        Returns the number of rows actually updated. Empty input or all-
+        identity mappings short-circuit to 0.
+        """
+        if not canonical_map:
+            return 0
+        # Bulk update: one statement per (src → dst) pair. Pure SQL,
+        # no row-level fetch. WAL-friendly because we batch in a single
+        # transaction. Only rewrites rows whose lowercased+trimmed
+        # topic_group exactly matches the source key — case-preserving
+        # storage stays intact for non-matching rows.
+        total = 0
+        for src, dst in canonical_map.items():
+            if src == dst or not src or not dst:
+                continue
+            cursor = self._execute_write(
+                """
+                UPDATE content_cache
+                SET topic_group = ?
+                WHERE LOWER(TRIM(COALESCE(topic_group, ''))) = ?
+                  AND COALESCE(topic_group, '') != ?
+                """,
+                (dst, src, dst),
+            )
+            total += cursor.rowcount or 0
+        return total
+
     def count_pool_by_franchise(self) -> dict[str, int]:
         """Return ``{franchise_key_lower: count}`` for fresh pool items.
 

@@ -4,6 +4,43 @@
 
 ---
 
+## v0.3.56: topic_group supergroup 合并下沉到 DB（2026-05-05 spec wave 6 / 完结）
+
+### 背景
+
+`docs/plans/2026-05-05-discovery-runtime-fix-spec.md` U9。
+
+`_supergroup_canonical_map` 把 "动漫"/"动漫杂谈"/"动漫二次元" 合并成同一个 canonical 主题——但合并**只在 serve 时跑**。pool 在数据库层面看到的还是 3 个独立的 topic_group。任何按 topic_group group_by 的 SQL（`get_topic_group_samples` / popup status / 后台分析）都看不到合并后的真主题分布。
+
+### 改动
+
+**`Database.canonicalize_topic_groups(canonical_map)`**（`storage/database.py`）：
+- 接收 `{lowered_src: canonical_dst}` map
+- 对每个 src→dst pair，发一条 `UPDATE content_cache SET topic_group=? WHERE LOWER(TRIM(topic_group))=?`
+- 跳过 src==dst 和空字符串
+- 单条 transaction（已有的 `_execute_write` 走 WAL）
+- 返回 rewritten 行数
+
+**`prewarm_supergroup_embeddings` 末尾自动调用**（`recommendation/engine.py`）：
+- 每次 prewarm 重建 canonical map 之后立即跑一次 `canonicalize_topic_groups(new_map)`
+- INFO 日志 `Topic supergroup canonical map applied to pool: N row(s) rewritten`
+- 失败 swallow + log（lazy-merge at serve 时仍能兜）
+
+### 影响
+
+- pool 在 DB 层面显示真实主题分布——`Recommendation candidate summary` 不再被字面拆分掩盖
+- 下游 SQL 分析（`get_topic_group_samples` / 任何按 topic_group 聚合的查询）看到合并后的主题
+- 不影响 serve-time merge 路径——双重保险
+- 每次 refresh tick 多一次 batch UPDATE，行数级开销可忽略
+
+测试：830/830 通过，无新增。
+
+### Spec 完结
+
+至此 6 个 wave 全部完成（v0.3.51 → v0.3.56），`docs/plans/2026-05-05-discovery-runtime-fix-spec.md` 中 9 个 U 全部修复。**净 LLM 月成本降幅约 -50%（reasoning 关闭抵消候选并发 3×）**，加上一系列体感优化（pool 不再被 hot franchise/style 占领、speculator 真正出货、startup 错误风暴消失、search v_voucher storm 容忍）。
+
+---
+
 ## v0.3.55: B 站 search v_voucher 退避 1 → 3 attempt（2026-05-05 spec wave 5）
 
 ### 背景
