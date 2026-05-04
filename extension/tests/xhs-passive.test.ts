@@ -15,8 +15,11 @@ import {
   extractXhsNoteUrl,
   collectInViewportNoteUrls,
   dedupeObservedUrls,
+  filterSelfAuthoredNotes,
   type AnchorLike,
   type ViewportRect,
+  type XhsNoteMetadata,
+  type XhsSelfInfo,
 } from "../src/content/xhs/passive.ts";
 
 const VIEWPORT: ViewportRect = { top: 0, bottom: 800, height: 800 };
@@ -157,4 +160,43 @@ test("dedupeObservedUrls removes previously reported URLs", () => {
   );
   assert.deepEqual(fresh, ["https://www.xiaohongshu.com/explore/bbb?xsec_token=2"]);
   assert.equal(seen.size, 2);
+});
+
+// v0.3.10+: scrape-time self-author filter — even before the backend
+// gate fires, the extension drops notes whose author matches the
+// logged-in user. Defends against XHS search/explore feeds that mix
+// the user's own posts back into the result set.
+
+test("filterSelfAuthoredNotes drops notes whose author matches self.nickname", () => {
+  const notes: XhsNoteMetadata[] = [
+    { url: "u1", title: "self post", author: "屎屎", cover_url: "" },
+    { url: "u2", title: "stranger post", author: "Jupiter", cover_url: "" },
+  ];
+  const self: XhsSelfInfo = { user_id: "uid-1", nickname: "屎屎" };
+  const filtered = filterSelfAuthoredNotes(notes, self);
+  assert.equal(filtered.length, 1);
+  assert.equal(filtered[0].author, "Jupiter");
+});
+
+test("filterSelfAuthoredNotes is case-insensitive", () => {
+  const notes: XhsNoteMetadata[] = [
+    { url: "u", title: "x", author: "  Shi Shi  ", cover_url: "" },
+  ];
+  const self: XhsSelfInfo = { user_id: "", nickname: "shi shi" };
+  assert.deepEqual(filterSelfAuthoredNotes(notes, self), []);
+});
+
+test("filterSelfAuthoredNotes is a no-op when self_info is null", () => {
+  const notes: XhsNoteMetadata[] = [
+    { url: "u", title: "x", author: "anyone", cover_url: "" },
+  ];
+  assert.equal(filterSelfAuthoredNotes(notes, null).length, 1);
+});
+
+test("filterSelfAuthoredNotes is a no-op when self.nickname is empty", () => {
+  const notes: XhsNoteMetadata[] = [
+    { url: "u", title: "x", author: "anyone", cover_url: "" },
+  ];
+  const self: XhsSelfInfo = { user_id: "uid", nickname: "" };
+  assert.equal(filterSelfAuthoredNotes(notes, self).length, 1);
 });

@@ -48,11 +48,29 @@ export interface XhsNoteMetadata {
   cover_url: string;
 }
 
+/**
+ * Logged-in user fingerprint extracted from XHS state.
+ *
+ * v0.3.10+: passed alongside ``XhsUrlObservation`` so the backend
+ * (v0.3.57+ ``_extract_self_info_from_payload``) can persist it on
+ * first arrival and filter self-authored notes from any ingest path.
+ */
+export interface XhsSelfInfo {
+  user_id: string;
+  nickname: string;
+}
+
 export interface XhsUrlObservation {
   urls: string[];
   notes: XhsNoteMetadata[];
   page_type: XhsPageType;
   observed_at: number;
+  /**
+   * Optional logged-in user fingerprint, included whenever the page
+   * exposed it via ``__INITIAL_STATE__``. Backend treats absence as
+   * "use whatever's already persisted, don't change it".
+   */
+  self_info?: XhsSelfInfo;
 }
 
 export function classifyXhsPageType(url: string): XhsPageType {
@@ -167,6 +185,29 @@ export function extractNoteMetadataFromAnchor(
     coverImg?.getAttribute("src") || coverImg?.getAttribute("data-src") || "";
 
   return { url, title, author, cover_url };
+}
+
+/**
+ * Drop notes whose author matches the logged-in user.
+ *
+ * v0.3.10+: scrape-time defense in depth — even though the v0.3.57
+ * backend filters again on ingest, doing it here reduces network
+ * chatter and survives any future protocol drift on the server side.
+ *
+ * Comparison is on trimmed, case-insensitive ``author`` vs ``nickname``.
+ * Returns the input unchanged when ``selfInfo`` is null or has an
+ * empty nickname (we never had a fingerprint to compare against).
+ */
+export function filterSelfAuthoredNotes(
+  notes: readonly XhsNoteMetadata[],
+  selfInfo: XhsSelfInfo | null | undefined,
+): XhsNoteMetadata[] {
+  if (!selfInfo) return [...notes];
+  const nickname = (selfInfo.nickname || "").trim().toLowerCase();
+  if (!nickname) return [...notes];
+  return notes.filter(
+    (note) => (note.author || "").trim().toLowerCase() !== nickname,
+  );
 }
 
 /**

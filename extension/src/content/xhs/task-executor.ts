@@ -14,9 +14,11 @@
 import {
   collectInViewportNoteUrls,
   extractNoteMetadataFromAnchor,
+  filterSelfAuthoredNotes,
   type AnchorLike,
   type ViewportRect,
   type XhsNoteMetadata,
+  type XhsSelfInfo,
 } from "./passive.js";
 import {
   buildBootstrapDebugPayload,
@@ -75,6 +77,14 @@ export interface TaskResultPayload {
   error?: string;
   next_url?: string;
   debug?: Record<string, unknown>;
+  /**
+   * v0.3.10+: logged-in user fingerprint, captured from any task type
+   * (search / creator / bootstrap_profile). Backend v0.3.57+ reads it
+   * via ``_extract_self_info_from_payload`` from the top level.
+   * Bootstrap_profile additionally embeds it inside
+   * ``debug.xhs_bootstrap.steps[*].self_info`` for backwards compat.
+   */
+  self_info?: XhsSelfInfo;
 }
 
 interface ProfileTabLoadResult {
@@ -652,7 +662,24 @@ async function executeTaskInPage(
       }
     });
 
-    return { task_id: msg.task_id, urls: urls.slice(0, MAX_URLS), notes, status: "ok" };
+    // v0.3.10+: search / creator pages expose the same logged-in
+    // user fingerprint via __INITIAL_STATE__. Capture + scrape-time
+    // drop self-authored notes — XHS's search feed routinely returns
+    // the user's own posts to the user themselves.
+    const state = extractBootstrapStateFromDocument(doc);
+    const selfInfo = state ? extractSelfInfoFromState(state) : null;
+    const filteredNotes = filterSelfAuthoredNotes(notes, selfInfo);
+
+    const result: TaskResultPayload = {
+      task_id: msg.task_id,
+      urls: urls.slice(0, MAX_URLS),
+      notes: filteredNotes,
+      status: "ok",
+    };
+    if (selfInfo) {
+      result.self_info = selfInfo;
+    }
+    return result;
   } catch (err) {
     return {
       task_id: msg.task_id,

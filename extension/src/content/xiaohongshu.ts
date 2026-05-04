@@ -17,11 +17,17 @@ import {
   collectInViewportNoteUrls,
   dedupeObservedUrls,
   extractNoteMetadataFromAnchor,
+  filterSelfAuthoredNotes,
   type AnchorLike,
   type ViewportRect,
   type XhsNoteMetadata,
+  type XhsSelfInfo,
   type XhsUrlObservation,
 } from "./xhs/passive.js";
+import {
+  extractBootstrapStateFromDocument,
+  extractSelfInfoFromState,
+} from "./xhs/bootstrap.js";
 import { registerTaskExecutor } from "./xhs/task-executor.js";
 
 startCollector(xiaohongshuAdapter);
@@ -137,6 +143,21 @@ function selfNoteAnchor(): AnchorLike | null {
   return { href: window.location.href, rect };
 }
 
+function readPageSelfInfo(): XhsSelfInfo | null {
+  // v0.3.10+: every logged-in XHS page exposes the user fingerprint via
+  // ``__INITIAL_STATE__.user``. Reading it here (not just inside the
+  // bootstrap_profile task) lets backend persist self_info on the very
+  // first passive scrape — closing the race where search-task results
+  // pollute the pool before bootstrap_profile ever runs.
+  try {
+    const state = extractBootstrapStateFromDocument(document);
+    if (!state) return null;
+    return extractSelfInfoFromState(state);
+  } catch {
+    return null;
+  }
+}
+
 function runPassiveCollection(): void {
   const anchors = snapshotAnchors();
   const selfAnchor = selfNoteAnchor();
@@ -164,11 +185,18 @@ function runPassiveCollection(): void {
     }
   });
 
+  // v0.3.10+: scrape-time self-author drop. Backend filters again on
+  // ingest, but doing it here avoids round-tripping notes that XHS's
+  // search/explore feed echoes back to the logged-in author.
+  const selfInfo = readPageSelfInfo();
+  const filteredNotes = filterSelfAuthoredNotes(notes, selfInfo);
+
   const observation: XhsUrlObservation = {
     urls: fresh.slice(0, PASSIVE_MAX_URLS_PER_BATCH),
-    notes,
+    notes: filteredNotes,
     page_type: classifyXhsPageType(baseUrl),
     observed_at: Date.now(),
+    ...(selfInfo ? { self_info: selfInfo } : {}),
   };
   chrome.runtime.sendMessage({ action: "XHS_URLS_OBSERVED", data: observation });
 }
