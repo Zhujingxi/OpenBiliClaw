@@ -325,11 +325,16 @@ PY
     echo "Checkout:    $INSTALL_DIR"
     if [ -n "$REUSE_FROM" ]; then
         echo "Reused from: $REUSE_FROM"
-        echo "             ⓘ Reused API keys are NOT validated. If the backend"
-        echo "               returns 401 / auth errors after start-up, the old"
-        echo "               key is probably expired — re-run with"
+        echo "             ⓘ Reused API keys / B站 cookie are NOT validated."
+        echo "               B站 cookies expire within weeks; if the previous"
+        echo "               install's cookie is stale, init will silently"
+        echo "               return 0 history items and the soul profile will"
+        echo "               be hollow. Agents: surface this reuse to the user"
+        echo "               (HARD RULE 4 in docs/agent-install.md) before"
+        echo "               proceeding — do not skip the cookie question just"
+        echo "               because the file already exists."
+        echo "               To skip auto-reuse and supply fresh credentials:"
         echo "               REUSE_FROM= curl -fsSL ... | bash"
-        echo "               to skip auto-reuse and supply fresh credentials."
     fi
     echo "Health URL:  $health_url"
     if [ -n "$missing" ]; then

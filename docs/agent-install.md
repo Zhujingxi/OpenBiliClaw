@@ -118,6 +118,55 @@ have a default that reads as "ok if you don't care, just pick this
 one"; most users will accept it. The previous "tell me what an
 embedding is" framing was the failure mode.
 
+### Rule 4 — Reused credentials must be confirmed, not silently skipped
+
+When `install.sh` / `install.ps1` reuses a previous install's secrets,
+the status block prints a `Reused from: <path>` line **and**
+`agent_bootstrap.py`'s JSON output lists each reused field under
+`reused`. You can also detect cookie reuse by inspecting whether
+`bilibili.cookie` is in the bootstrap summary's `reused` list, or
+whether `data/bilibili_cookie.json` already exists in the install dir.
+
+**You must surface the reuse to the user, not skip the corresponding
+question silently.** Specifically for `bilibili.cookie`:
+
+- B 站 cookies expire (typically every few weeks; faster if the user
+  signs out / changes IP / triggers risk control).
+- A reused cookie was set during the **previous** install, possibly
+  days or weeks ago. The user has no reason to know whether it's
+  still valid.
+- Init may run to completion against a stale cookie because the
+  history-fetch path swallows the auth failure and just returns 0
+  items — leading to a hollow soul profile and the "为什么我的画像
+  里没东西" support ticket.
+
+**Concrete contract for reused cookies**:
+
+> When you see `bilibili.cookie` in the reused set, render this to
+> the user before continuing to the next question:
+>
+> ```
+> 我注意到安装器从之前的目录复用了一份 B 站 Cookie。
+> 这份 Cookie 可能已经过期(B 站 Cookie 几周内就会失效)。
+>
+> 你想怎么办?
+>   A. 装一下浏览器扩展(推荐): 装好后扩展会立刻把最新 cookie
+>      推到后端,覆盖那条旧的。即使旧 cookie 还有效也是净赚——
+>      过期 / 续签都会自动同步,以后再装就不用管了。
+>      下载: https://github.com/whiteguo233/OpenBiliClaw/releases
+>   B. 先用旧的: 我先继续 init,如果中途看到
+>      "Cannot fetch history without authentication" 或者
+>      画像数据明显偏少,就是 cookie 过期了,到时再装扩展。
+>   C. 现在就手动贴一份新的(F12): 适合你正好在 B 站登录页
+>      手边能直接拿,且不想装扩展的情况。
+> ```
+>
+> Wait for an explicit answer (A/B/C) before continuing. Default is A.
+
+The same rule pattern applies to reused LLM API keys, but those are
+less likely to silently expire — a one-line "我用了 v0.3.x 那次留下
+的 DeepSeek key,有问题告诉我" mention is enough.
+
 ---
 
 ## Handling missing credentials

@@ -351,11 +351,16 @@ print(f"XHS_FLAG={xhs_flag}")
     Write-Host "Checkout:    $InstallDir"
     if ($ReuseFrom) {
         Write-Host "Reused from: $ReuseFrom"
-        Write-Host '             [i] Reused API keys are NOT validated. If the backend'
-        Write-Host '                 returns 401 / auth errors after start-up, the old'
-        Write-Host '                 key is probably expired - re-run install.ps1 with'
-        Write-Host '                 -ReuseFrom "" to skip auto-reuse and supply fresh'
-        Write-Host '                 credentials.'
+        Write-Host '             [i] Reused API keys / B站 cookie are NOT validated.'
+        Write-Host '                 B站 cookies expire within weeks; if the previous'
+        Write-Host '                 install''s cookie is stale, init will silently'
+        Write-Host '                 return 0 history items and the soul profile will'
+        Write-Host '                 be hollow. Agents: surface this reuse to the user'
+        Write-Host '                 (HARD RULE 4 in docs/agent-install.md) before'
+        Write-Host '                 proceeding - do not skip the cookie question just'
+        Write-Host '                 because the file already exists.'
+        Write-Host '                 To skip auto-reuse and supply fresh credentials:'
+        Write-Host '                 install.ps1 -ReuseFrom ""'
     }
     Write-Host "Health URL:  $healthUrl"
     if ($missing) { Write-Host "Missing:     $missing" }
