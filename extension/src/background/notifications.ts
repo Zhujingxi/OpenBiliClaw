@@ -65,14 +65,39 @@ export function parseDelightBvid(notificationId: string): string {
   return notificationId.slice(DELIGHT_NOTIFICATION_PREFIX.length);
 }
 
+/**
+ * v0.3.15+: Resolve the icon URL via ``chrome.runtime.getURL`` instead
+ * of letting Chrome resolve a relative path. MV3 service workers have
+ * no document context, so the implicit base for ``"icons/icon128.png"``
+ * sometimes resolves to ``chrome-extension://invalid/...``, tripping
+ * "Unable to download all specified images" on every
+ * ``chrome.notifications.create`` call. The absolute URL is
+ * deterministic and works under every Chromium variant we've tested.
+ *
+ * Falls back to the relative path if ``chrome.runtime.getURL`` is
+ * unavailable (test environment, hot-reload race) — strictly better
+ * than throwing.
+ */
+function resolveNotificationIconUrl(): string {
+  try {
+    if (typeof chrome !== "undefined" && chrome.runtime?.getURL) {
+      return chrome.runtime.getURL("icons/icon128.png");
+    }
+  } catch {
+    // fall through
+  }
+  return "icons/icon128.png";
+}
+
 export function buildChromeNotificationOptions(
   item: PendingNotification | PendingCognitionUpdate | PendingDelight,
 ): chrome.notifications.NotificationCreateOptions {
+  const iconUrl = resolveNotificationIconUrl();
   if ("delight_reason" in item) {
     const hookBadge = item.delight_hook ? `【${item.delight_hook}】` : "";
     return {
       type: "basic",
-      iconUrl: "icons/icon128.png",
+      iconUrl,
       title: `${hookBadge}阿B 觉得这条你会意外喜欢`,
       message: item.delight_reason || "这条真的可能会戳到你。",
       priority: 2,
@@ -81,7 +106,7 @@ export function buildChromeNotificationOptions(
   if ("summary" in item) {
     return {
       type: "basic",
-      iconUrl: "icons/icon128.png",
+      iconUrl,
       title: "阿B 又对你多看清了一点",
       message: item.summary || "阿B 刚记住了一个新的偏好变化。",
       priority: 2,
@@ -89,7 +114,7 @@ export function buildChromeNotificationOptions(
   }
   return {
     type: "basic",
-    iconUrl: "icons/icon128.png",
+    iconUrl,
     title: item.title || "阿B 给你补到一条新内容",
     message: item.reason || "这条大概率会对你的胃口。",
     priority: 2,

@@ -4,6 +4,45 @@
 
 ---
 
+## extension v0.3.15: 通知 iconUrl 改用 chrome.runtime.getURL 解决根因 (2026-05-05)
+
+### 背景
+
+v0.3.14 已经把"通知失败 → 不 ack → 无限循环"的二次伤害修了,但 console 仍然每隔几分钟出一条:
+```
+[OpenBiliClaw] notifications.create failed (...): Unable to download all specified images. iconUrl: icons/icon128.png
+```
+
+通知失败的**真正根因**这次抓到了:`iconUrl: "icons/icon128.png"` 是相对路径,**MV3 service worker 没有 document 上下文**,Chrome 内部解析相对路径时偶尔会落到 `chrome-extension://invalid/icons/icon128.png` —— 这就是之前 console 里 `chrome-extension://invalid/:1 ERR_FAILED` 的来源。
+
+已知 Chromium issue,推荐做法是 `chrome.runtime.getURL("...")` 拿绝对的 `chrome-extension://<id>/...` URL。
+
+### 修法
+
+`extension/src/background/notifications.ts` 里抽出 `resolveNotificationIconUrl()`:
+```ts
+function resolveNotificationIconUrl(): string {
+  try {
+    if (typeof chrome !== "undefined" && chrome.runtime?.getURL) {
+      return chrome.runtime.getURL("icons/icon128.png");
+    }
+  } catch { /* fall through */ }
+  return "icons/icon128.png";  // 测试环境兜底
+}
+```
+
+`buildChromeNotificationOptions` 三个分支(delight / cognition / recommendation)统一改用 `iconUrl: resolveNotificationIconUrl()`。
+
+### 影响
+
+- 通知 toast **真的能弹出来了**(之前每个 notification 都因图标加载失败被 Chrome 静默吞了)
+- service worker console 不再出 `notifications.create failed` warn
+- 配合 v0.3.14 的 ack-always-run + WS backoff,console 噪音清零
+
+零接口变化。Backend 不需要改。
+
+---
+
 ## extension v0.3.14: 通知失败循环 + WebSocket 重连风暴修复 (2026-05-05)
 
 ### 背景
