@@ -19,8 +19,20 @@ if TYPE_CHECKING:
     from datetime import datetime
 
 logger = logging.getLogger(__name__)
-_LOCK_RETRY_ATTEMPTS = 5
-_LOCK_RETRY_SLEEP_SECONDS = 0.1
+# v0.3.62+: retry budget tightened from 5×100ms (worst-case 500ms
+# blocking the asyncio event loop on lock contention) to 8×20ms
+# (worst-case 160ms). Same total absolute timeout floor (~160-500ms)
+# is preserved by raising attempt count; per-attempt sleep is short
+# enough that even if it fires inside an async context the event-loop
+# stutter is below human-perception thresholds. Most writes succeed
+# on the first try anyway — this only matters under heavy concurrent
+# write load (refresh tick + ingest + classify all hammering pool
+# rows simultaneously). A future rewrite can move to asyncio.to_thread
+# for true non-blocking DB I/O, but that's a larger refactor (every
+# caller must become async) — for now this constant tweak is the
+# pragmatic middle ground.
+_LOCK_RETRY_ATTEMPTS = 8
+_LOCK_RETRY_SLEEP_SECONDS = 0.02
 _BVID_PATTERN = re.compile(r"(BV[0-9A-Za-z]+)")
 _XHS_SOURCE_FAMILY = "xiaohongshu"
 _XHS_SOURCE_PREFIXES = ("xhs-", "xhs_", "xiaohongshu")

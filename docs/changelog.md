@@ -4,6 +4,74 @@
 
 ---
 
+## v0.3.62: 三处架构性 lock 拆分 + DB 写重试收紧 (2026-05-05)
+
+### 背景
+
+用户做了一轮架构 review,识别出 7 个潜在互相拖累点。我们这轮处理 top 3 真问题(并行 agent 实现):
+
+### 修法
+
+#### 🔴 #1 拆 `_precompute_lock` → `_expression_lock` + `_delight_lock`(`recommendation/engine.py`)
+
+```python
+# 之前
+self._precompute_lock = asyncio.Lock()  # expression + delight 都用这一把
+
+# 之后
+self._expression_lock = asyncio.Lock()  # 只 gate 推荐文案
+self._delight_lock = asyncio.Lock()     # 只 gate 惊喜评分
+```
+
+`precompute_pool_copy` 里:
+- expression 生成块包在 `async with self._expression_lock`
+- delight scoring 抽到 `_safe_precompute_delight_scores` helper,**fire-and-forget** 跑(`asyncio.create_task`),用自己的 `_delight_lock` 防同期 double-spend。
+- 早返回 (`if not candidates`) 路径同样走 detached delight,不再阻塞 caller。
+
+效果:推荐文案永远不被 delight 抢锁。delight 慢了,popup 也照样能换内容。
+
+#### 🔴 #2 全局 `_refresh_lock` 防 4 入口叠加(`runtime/refresh.py`)
+
+```python
+_refresh_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+```
+
+`refresh_if_needed` 入口处先检查 `if self._refresh_lock.locked():` → 立即返回 `{"skipped": True, "reason": "another refresh holds lock"}`,**不排队**(避免 manual 等 5 分钟在 periodic 后面)。
+
+`force_refresh`(manual refresh 实际入口)同样加 lock:抽出 `_force_refresh_locked` 内部体,外层 `force_refresh` 做 lock check + acquire。**4 个入口**(`_loop_refresh` / `_complete_manual_refresh` / `refresh_after_event_ingest` / `refresh_after_feedback`)现在都互斥,不再叠 B 站 API 和 SQLite 写。
+
+#### 🟡 #3 `_execute_write` 重试参数收紧(`storage/database.py`)
+
+```python
+# 之前: 5 × 100ms = 最多 500ms 同步阻塞 event loop
+_LOCK_RETRY_ATTEMPTS = 5
+_LOCK_RETRY_SLEEP_SECONDS = 0.1
+
+# 之后: 8 × 20ms = 最多 160ms (更多次重试,每次更短)
+_LOCK_RETRY_ATTEMPTS = 8
+_LOCK_RETRY_SLEEP_SECONDS = 0.02
+```
+
+`time.sleep` 仍是同步的,但每次 20ms 远低于人感知阈值,即使在 asyncio 上下文里短暂卡住也基本不可见。**真异步化**(`asyncio.to_thread` 或 `await asyncio.sleep`)需要级联改 18+ 个 caller,留给 v0.3.63 大重构。
+
+### 不在本次范围
+
+| 用户标记的其他问题 | 排期 |
+|---|---|
+| LLM 没全局优先级队列 | v0.3.63 (架构级,需要设计) |
+| Hot reload detached task 不取消 | v0.3.63 (task registry) |
+| Embedding semaphore=2 | 不动(Ollama 本地推理设计如此) |
+
+### 测试
+
+134 passing(test_recommendation_engine + test_refresh_runtime + test_storage)。1000 passed/29 pre-existing failed,无新增失败。
+
+### 致谢
+
+整套修复完全是用户架构 review 驱动:他用 `git diff` + 代码静读把潜在死锁/抢锁/竞态全部识别出来,然后按优先级排序。Agent #1 (engine.py) 和 Agent #2 (refresh.py) 并行实施互不冲突;我自己改 database.py 走小改动路线避开 await 级联。
+
+---
+
 ## v0.3.61 + extension v0.3.18: v_voucher 风控缓解 + popup 状态解耦 (2026-05-05)
 
 ### 背景

@@ -166,7 +166,19 @@ class RecommendationEngine:
         # per-strategy fire-and-forget tasks (now created from
         # _run_refresh_plan after each strategy completes) don't load
         # the same un-precomputed candidates and double-spend LLM tokens.
-        self._precompute_lock = asyncio.Lock()
+        #
+        # v0.3.62+: split the previous single ``_precompute_lock`` into
+        # two independent locks. The old shared lock serialised
+        # expression generation and delight scoring — when delight
+        # scoring was slow (LLM backoff or a large un-scored backlog),
+        # the next expression batch had to wait behind it even though
+        # nothing about expression touches delight state. Now expression
+        # generation holds ``_expression_lock`` while delight scoring
+        # runs in a detached task guarded by ``_delight_lock``, so the
+        # two flows progress independently and back-to-back precompute
+        # calls still avoid double-spending delight LLM tokens.
+        self._expression_lock = asyncio.Lock()
+        self._delight_lock = asyncio.Lock()
         # Background-computed supergroup canonical map. Populated by
         # prewarm_supergroup_embeddings() during refresh ticks; consumed
         # by serve()'s _merge_topic_supergroups for instant lookup.
@@ -648,10 +660,20 @@ class RecommendationEngine:
         shape needs 2 LLM calls running concurrently — popup copy
         catches up minutes faster.
 
-        The whole call is guarded by ``self._precompute_lock`` so the
-        per-strategy fire-and-forget tasks queued from
-        ``_run_refresh_plan`` don't load the same un-precomputed
-        candidates and double-spend LLM tokens.
+        v0.3.62+: expression generation is guarded by
+        ``self._expression_lock``; delight scoring runs in a detached
+        ``asyncio.create_task`` with its own ``self._delight_lock``. The
+        previous single ``_precompute_lock`` held both flows under one
+        gate, so a slow delight pass would stall the next expression
+        batch even though pool items already needed ``pool_expression``.
+        Splitting the locks lets expression and delight progress
+        independently while the per-flow lock still prevents
+        back-to-back fires from double-spending LLM tokens on the same
+        items.
+
+        The per-strategy fire-and-forget tasks queued from
+        ``_run_refresh_plan`` therefore can't load the same
+        un-precomputed candidates twice for expression generation.
 
         Also runs delight scoring on un-scored candidates and generates
         delight reasons for items above the delight threshold.
@@ -666,33 +688,48 @@ class RecommendationEngine:
                 scoring whenever the copy queue is short.
             batch_size: Batch size for expression generation LLM calls.
         """
-        async with self._precompute_lock:
-            # v0.3.59+: classify_pool_backlog fires as a detached task instead
-            # of awaiting. Previously precompute waited for classify to finish
-            # before reading candidates — under v_voucher rate limit this
-            # serialised the entire pipeline because classify backlog could
-            # take minutes per cycle. Production logs (2026-05-05 21:15-21:36)
-            # showed pool_available stuck at 0 for 16+ min because precompute
-            # was queued behind classify. Now both run on their own cadence;
-            # precompute reads whatever's available right now and the periodic
-            # refresh-loop drain (runtime/refresh.py:_drain_pool_precompute_backlog)
-            # picks up freshly-classified items on the next tick.
+        # v0.3.59+: classify_pool_backlog fires as a detached task instead
+        # of awaiting. Previously precompute waited for classify to finish
+        # before reading candidates — under v_voucher rate limit this
+        # serialised the entire pipeline because classify backlog could
+        # take minutes per cycle. Production logs (2026-05-05 21:15-21:36)
+        # showed pool_available stuck at 0 for 16+ min because precompute
+        # was queued behind classify. Now both run on their own cadence;
+        # precompute reads whatever's available right now and the periodic
+        # refresh-loop drain (runtime/refresh.py:_drain_pool_precompute_backlog)
+        # picks up freshly-classified items on the next tick.
+        try:
+            asyncio.create_task(
+                self._safe_classify_pool_backlog(profile=profile, limit=limit),
+                name="classify_pool_backlog_detached",
+            )
+        except Exception:
+            logger.exception(
+                "classify_pool_backlog detach failed, continuing with precompute"
+            )
+
+        # v0.3.62+: delight scoring runs detached so it doesn't block
+        # expression generation or the caller. Its own _delight_lock
+        # (taken inside _safe_precompute_delight_scores) keeps
+        # back-to-back fires from re-scoring the same items.
+        def _spawn_delight() -> None:
             try:
                 asyncio.create_task(
-                    self._safe_classify_pool_backlog(profile=profile, limit=limit),
-                    name="classify_pool_backlog_detached",
+                    self._safe_precompute_delight_scores(
+                        profile=profile,
+                        limit=delight_limit,
+                    ),
+                    name="precompute_delight_scores_detached",
                 )
             except Exception:
                 logger.exception(
-                    "classify_pool_backlog detach failed, continuing with precompute"
+                    "precompute_delight_scores detach failed"
                 )
 
+        async with self._expression_lock:
             candidates = self._load_pool_candidates_needing_copy(limit=max(0, limit))
             if not candidates:
-                await self.precompute_delight_scores(
-                    profile=profile,
-                    limit=delight_limit,
-                )
+                _spawn_delight()
                 return 0
 
             batches = [
@@ -710,13 +747,9 @@ class RecommendationEngine:
                     continue
                 completed += int(r or 0)
 
-            # Run delight scoring after expression precompute. Inside the
-            # lock so a back-to-back precompute call doesn't try to score
-            # the same items twice.
-            await self.precompute_delight_scores(
-                profile=profile,
-                limit=delight_limit,
-            )
+        # Fire delight scoring outside the expression lock so the next
+        # expression batch can start immediately while delight catches up.
+        _spawn_delight()
         return completed
 
     # ── Source-agnostic content classification ───────────────────────
@@ -753,6 +786,35 @@ class RecommendationEngine:
         except Exception:
             logger.exception("classify_pool_backlog (detached) failed")
             return 0
+
+    async def _safe_precompute_delight_scores(
+        self,
+        *,
+        profile: SoulProfile,
+        limit: int,
+    ) -> int:
+        """Detached-task wrapper for precompute_delight_scores (v0.3.62+).
+
+        ``precompute_pool_copy`` schedules this as ``asyncio.create_task``
+        instead of awaiting it inline. The previous shared
+        ``_precompute_lock`` made delight scoring stall the next
+        expression batch whenever the LLM was slow on delight calls —
+        pool items would sit waiting for ``pool_expression`` even
+        though expression generation itself was idle. Splitting the
+        work into a detached task with its own ``_delight_lock`` keeps
+        delight from blocking expression while still preventing two
+        precompute fires from re-scoring the same items.
+        """
+        if self._delight_lock.locked():
+            return 0
+        async with self._delight_lock:
+            try:
+                return await self.precompute_delight_scores(
+                    profile=profile, limit=limit
+                )
+            except Exception:
+                logger.exception("precompute_delight_scores (detached) failed")
+                return 0
 
     async def classify_pool_backlog(
         self,

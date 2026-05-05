@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
@@ -174,6 +174,16 @@ class ContinuousRefreshController:
     discovery_limit: int = 30
     pool_target_count: int = 600
     _manual_refresh_task: asyncio.Task[None] | None = None
+    # v0.3.62+ global "skip-if-busy" gate. Four entry points
+    # (_loop_refresh, _complete_manual_refresh, refresh_after_event_ingest,
+    # refresh_after_feedback) all funnel through ``refresh_if_needed``.
+    # Without this lock, a slow periodic tick (10+ minutes when WBI
+    # rate-limits) can run concurrently with manual refresh + per-event
+    # opportunistic refresh, amplifying load on Bilibili and causing
+    # SQLite write contention. Acquired with ``async with`` inside
+    # ``refresh_if_needed``; if already held, the new caller exits
+    # immediately with ``{"skipped": True, ...}`` rather than queueing.
+    _refresh_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _manual_refresh_state: str = "idle"
     _manual_refresh_message: str = ""
     _manual_refresh_started_at: str = ""
@@ -251,27 +261,53 @@ class ContinuousRefreshController:
         }
 
     async def refresh_if_needed(self) -> dict[str, object]:
-        """Refresh discovery candidates when thresholds are met."""
-        state = self.memory_manager.load_discovery_runtime_state()
-        if not self._is_initialized():
-            return {"refreshed": False, "strategies": [], "reason": "not_initialized"}
+        """Refresh discovery candidates when thresholds are met.
 
-        pool_at_cap = self._enforce_pool_cap()
-        await self._publish_pool_status_if_changed()
-        if pool_at_cap:
-            return {"refreshed": False, "strategies": [], "reason": "pool_at_cap"}
+        v0.3.62+ semantics — this is the single global gate for all
+        four refresh entry points (``_loop_refresh``,
+        ``_complete_manual_refresh``, ``refresh_after_event_ingest``,
+        ``refresh_after_feedback``). A module-level
+        ``_refresh_lock`` (an ``asyncio.Lock``) is checked at the very
+        top: if another refresh is already in progress, this call
+        returns ``{"skipped": True, "reason": "another refresh holds
+        lock"}`` immediately rather than queueing. The "skip if locked"
+        rather than "wait in queue" pattern is deliberate — manual
+        refresh requests should not stack up behind a slow periodic
+        tick (which can take 10+ minutes when Bilibili WBI rate-limits
+        every request). The remaining body runs inside ``async with
+        self._refresh_lock:``, so the lock is released even on
+        exception paths.
 
-        profile = await self.soul_engine.get_profile()
-        plan = self._build_refresh_plan(state)
-        if not plan:
-            return {"refreshed": False, "strategies": [], "reason": "below_threshold"}
+        Internal helpers (``_run_refresh_plan``, ``force_refresh``)
+        intentionally do NOT acquire this lock — only the public
+        ``refresh_if_needed`` entry does, so callers reaching it from
+        different paths can't double-acquire.
+        """
+        if self._refresh_lock.locked():
+            logger.debug("refresh_if_needed skipped: another refresh in flight")
+            return {"skipped": True, "reason": "another refresh holds lock"}
 
-        return await self._run_refresh_plan(
-            state=state,
-            profile=profile,
-            plan=plan,
-            reason="triggered",
-        )
+        async with self._refresh_lock:
+            state = self.memory_manager.load_discovery_runtime_state()
+            if not self._is_initialized():
+                return {"refreshed": False, "strategies": [], "reason": "not_initialized"}
+
+            pool_at_cap = self._enforce_pool_cap()
+            await self._publish_pool_status_if_changed()
+            if pool_at_cap:
+                return {"refreshed": False, "strategies": [], "reason": "pool_at_cap"}
+
+            profile = await self.soul_engine.get_profile()
+            plan = self._build_refresh_plan(state)
+            if not plan:
+                return {"refreshed": False, "strategies": [], "reason": "below_threshold"}
+
+            return await self._run_refresh_plan(
+                state=state,
+                profile=profile,
+                plan=plan,
+                reason="triggered",
+            )
 
     async def force_refresh(self) -> dict[str, object]:
         """Run a full refresh immediately, bypassing runtime thresholds.
@@ -280,7 +316,27 @@ class ContinuousRefreshController:
         execute concurrently via asyncio.gather, maximizing pool diversity. The pool
         target still applies as a hard cap — if the pool is already full, no
         discovery runs and overflow is trimmed.
+
+        v0.3.62+: also acquires ``_refresh_lock`` so manual refresh
+        (which calls ``force_refresh`` rather than ``refresh_if_needed``)
+        respects the global skip-if-busy gate. Without this, periodic
+        + event-ingest refresh could run concurrently with a manual
+        refresh, amplifying Bilibili API load and SQLite write contention.
+        Skip semantics match ``refresh_if_needed``: return immediately
+        with ``{"refreshed": False, "reason": "another refresh holds lock"}``
+        instead of queueing.
         """
+        if self._refresh_lock.locked():
+            logger.debug("force_refresh skipped: another refresh in flight")
+            return {
+                "refreshed": False,
+                "strategies": [],
+                "reason": "another refresh holds lock",
+            }
+        async with self._refresh_lock:
+            return await self._force_refresh_locked()
+
+    async def _force_refresh_locked(self) -> dict[str, object]:
         state = self.memory_manager.load_discovery_runtime_state()
         if not self._is_initialized():
             return {"refreshed": False, "strategies": [], "reason": "not_initialized"}
