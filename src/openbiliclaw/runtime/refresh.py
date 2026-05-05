@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from openbiliclaw.recommendation.delight import DEFAULT_DELIGHT_THRESHOLD
+from openbiliclaw.runtime.task_registry import BackgroundTaskRegistry
 from openbiliclaw.soul.speculator import build_probe_axis, choose_next_probe_candidate
 
 logger = logging.getLogger(__name__)
@@ -173,6 +174,13 @@ class ContinuousRefreshController:
     # we can tune in tests.
     discovery_limit: int = 30
     pool_target_count: int = 600
+    # v0.3.63+: optional registry so detached tasks (manual-refresh
+    # background work, per-strategy precompute fire-and-forget) can be
+    # cancelled by ``RuntimeContext.rebuild_from_config`` before the
+    # next runtime starts. ``_track_task`` uses bare ``create_task``
+    # when this is ``None`` so existing tests that build the controller
+    # directly without injecting a registry keep working.
+    task_registry: BackgroundTaskRegistry | None = None
     _manual_refresh_task: asyncio.Task[None] | None = None
     # v0.3.62+ global "skip-if-busy" gate. Four entry points
     # (_loop_refresh, _complete_manual_refresh, refresh_after_event_ingest,
@@ -445,8 +453,30 @@ class ContinuousRefreshController:
         self._manual_refresh_message = "正在补货…"
         self._manual_refresh_started_at = self._now().isoformat()
         self._manual_refresh_finished_at = ""
-        self._manual_refresh_task = asyncio.create_task(self._complete_manual_refresh())
+        self._manual_refresh_task = self._track_task(
+            "manual_refresh",
+            self._complete_manual_refresh(),
+        )
         return {"accepted": True, "state": "running", "reason": "started"}
+
+    def _track_task(
+        self,
+        name: str,
+        coro: Any,
+    ) -> asyncio.Task[Any]:
+        """Spawn a detached task, routing through the registry when available.
+
+        v0.3.63+: when ``self.task_registry`` is wired (by
+        ``RuntimeContext`` at startup), the task is registered so that
+        ``rebuild_from_config``'s ``cancel_all`` can cancel it before
+        the new runtime starts. Tests that construct the controller
+        directly (no registry) fall back to bare
+        ``asyncio.create_task`` for backward compat.
+        """
+        registry = self.task_registry
+        if registry is not None:
+            return registry.track(name, coro)
+        return asyncio.create_task(coro, name=name)
 
     def get_pending_notification(self) -> dict[str, object] | None:
         """Return one recommendation candidate for browser notification."""
@@ -959,9 +989,9 @@ class ContinuousRefreshController:
                 # strategy's discovery LLM call). The lock inside the engine
                 # queues this if a previous task is still running.
                 precompute_tasks.append(
-                    asyncio.create_task(
+                    self._track_task(
+                        "precompute_pool_copy",
                         self._safe_precompute_pool_copy(profile=profile),
-                        name="precompute_pool_copy",
                     )
                 )
 

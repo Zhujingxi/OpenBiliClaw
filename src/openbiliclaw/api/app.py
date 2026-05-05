@@ -322,7 +322,7 @@ def create_app(
         # the new client. ``rebuild_from_config`` is atomic — if it
         # fails partway, the old runtime stays intact.
         with suppress(Exception):
-            ctx.rebuild_from_config(config)
+            await ctx.rebuild_from_config(config)
 
         # 4) Tell the extension UI the cookie just got refreshed —
         # this is how the popup knows it can stop nagging the user
@@ -364,11 +364,16 @@ def create_app(
                     "message": "初始化完成，画像与发现池已就绪。",
                 }
             )
-        # Kick refresh controller immediately
+        # Kick refresh controller immediately. v0.3.63+: route through
+        # the registry so a hot-reload mid-init can cancel this task.
         trigger = getattr(ctx.runtime_controller, "trigger_manual_refresh", None)
         if callable(trigger):
             with suppress(Exception):
-                asyncio.create_task(trigger())
+                registry = getattr(ctx, "task_registry", None)
+                if registry is not None:
+                    registry.track("init_completed_trigger", trigger())
+                else:
+                    asyncio.create_task(trigger())
         return {"ok": True}
 
     def _serialize_recommendation_items(items: list[Any]) -> list[RecommendationOut]:
@@ -2588,7 +2593,7 @@ def create_app(
         reloaded = False
         reload_message = f"配置已保存到 {saved_path}。"
         try:
-            ctx.rebuild_from_config(cfg)
+            await ctx.rebuild_from_config(cfg)
             await ctx.restart_background_tasks(app)
             reloaded = True
             reload_message += " 运行时组件已热重载，新配置立即生效。"

@@ -197,9 +197,11 @@ class TestBackendAPI:
                 database: object,
                 curator: object = None,
                 embedding_service: object = None,
+                task_registry: object = None,
             ) -> None:
                 self.llm = llm
                 self.database = database
+                self.task_registry = task_registry
 
         class FakeRuntimeController:
             def __init__(self, **kwargs) -> None:

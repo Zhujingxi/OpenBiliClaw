@@ -24,8 +24,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
+
+from openbiliclaw.runtime.task_registry import BackgroundTaskRegistry
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -43,6 +45,13 @@ class RuntimeContext:
     database: Any = None
     memory_manager: Any = None
     event_hub: Any = None
+    # v0.3.63+: tracks every detached ``asyncio.create_task`` spawned by
+    # the runtime (refresh manual / per-strategy precompute, recommendation
+    # engine classify+delight, prewarm helpers, per-event triggers). On
+    # ``rebuild_from_config`` these are cancelled before new runtime objects
+    # are constructed so old detached work doesn't compete with the freshly
+    # built runtime for SQLite writes / LLM tokens.
+    task_registry: BackgroundTaskRegistry = field(default_factory=BackgroundTaskRegistry)
 
     # ── Swappable (rebuilt on hot-reload) ───────────────────────────
     config: Any = None
@@ -57,16 +66,40 @@ class RuntimeContext:
     account_sync_service: Any = None
     auto_update_service: Any = None
 
-    def rebuild_from_config(self, new_config: Config) -> None:
+    async def rebuild_from_config(self, new_config: Config) -> None:
         """Rebuild all swappable components from *new_config*.
 
-        Construction is performed entirely into local variables first.
-        Only after **every** component succeeds are the attributes
-        assigned — guaranteeing atomic rollback on failure.
+        v0.3.63+: this is now ``async`` so the call can ``await`` the
+        background-task registry's ``cancel_all`` BEFORE constructing
+        new runtime objects. Without that step, detached tasks created
+        by the OLD recommendation engine / refresh controller (per-event
+        triggers, per-strategy precompute, prewarm helpers) keep running
+        after rebuild and compete with the new runtime for SQLite writes
+        and LLM tokens for several seconds.
 
-        This method is synchronous; because the asyncio event loop is
-        single-threaded no endpoint handler can interleave during the
-        attribute-assignment sweep.
+        Construction itself is still synchronous and performed entirely
+        into local variables first — only after **every** component
+        succeeds are the attributes assigned, so atomic rollback on
+        failure is preserved. The asyncio event loop is single-threaded
+        so no endpoint handler can interleave during the attribute-
+        assignment sweep.
+        """
+        cancelled = await self.task_registry.cancel_all()
+        if cancelled:
+            logger.info(
+                "Hot-reload: cancelled %d background task(s) before rebuild",
+                cancelled,
+            )
+        self._rebuild_components(new_config)
+
+    def _rebuild_components(self, new_config: Config) -> None:
+        """Synchronous component construction shared by hot-reload and startup.
+
+        ``rebuild_from_config`` (async) calls this after cancelling
+        in-flight background tasks. ``build_runtime_context`` calls this
+        directly during initial construction — at that point the
+        registry is empty so no cancel step is required, and remaining
+        sync simplifies the FastAPI startup path which is itself sync.
         """
         from openbiliclaw.bilibili.api import BilibiliAPIClient
         from openbiliclaw.bilibili.auth import resolve_runtime_cookie
@@ -138,6 +171,7 @@ class RuntimeContext:
             database=self.database,
             curator=new_curator,
             embedding_service=new_embedding_service,
+            task_registry=self.task_registry,
         )
 
         # 7. Discovery engine + strategies
@@ -226,6 +260,7 @@ class RuntimeContext:
             pool_target_count=new_config.scheduler.pool_target_count,
             event_hub=self.event_hub,
             xhs_producer=new_xhs_producer,
+            task_registry=self.task_registry,
         )
 
         # 9. Account sync
@@ -287,20 +322,28 @@ class RuntimeContext:
                 with suppress(asyncio.CancelledError):
                     await task
 
-        # Start new tasks from the freshly-built components
+        # Start new tasks from the freshly-built components.
+        # v0.3.63+: route through ``self.task_registry.track`` so the
+        # next hot-reload's ``cancel_all`` cleanly stops them too.
         run_forever = getattr(self.runtime_controller, "run_forever", None)
         app.state.refresh_task = (
-            asyncio.create_task(run_forever()) if callable(run_forever) else None
+            self.task_registry.track("refresh_loop", run_forever())
+            if callable(run_forever)
+            else None
         )
 
         sync_forever = getattr(self.account_sync_service, "run_forever", None)
         app.state.account_sync_task = (
-            asyncio.create_task(sync_forever()) if callable(sync_forever) else None
+            self.task_registry.track("account_sync_loop", sync_forever())
+            if callable(sync_forever)
+            else None
         )
 
         update_forever = getattr(self.auto_update_service, "run_forever", None)
         app.state.auto_update_task = (
-            asyncio.create_task(update_forever()) if callable(update_forever) else None
+            self.task_registry.track("auto_update_loop", update_forever())
+            if callable(update_forever)
+            else None
         )
 
         # Kick speculator to seed speculative interests
@@ -322,7 +365,10 @@ class RuntimeContext:
             self.recommendation_engine, "prewarm_pool_mmr_embeddings", None
         )
         if callable(prewarm_pool):
-            asyncio.create_task(self._safe_prewarm_pool_mmr_embeddings(prewarm_pool))
+            self.task_registry.track(
+                "prewarm_pool_mmr_embeddings",
+                self._safe_prewarm_pool_mmr_embeddings(prewarm_pool),
+            )
 
         logger.info("Background tasks restarted after hot-reload")
 
@@ -431,6 +477,9 @@ def build_runtime_context(
         event_hub=event_hub,
     )
 
-    # Build all swappable components via the same path used for hot-reload
-    ctx.rebuild_from_config(config)
+    # Build all swappable components via the same path used for hot-reload.
+    # ``_rebuild_components`` is the sync portion shared with
+    # ``rebuild_from_config``; the async wrapper's ``cancel_all`` is a
+    # no-op here because the registry was just created and is empty.
+    ctx._rebuild_components(config)
     return ctx

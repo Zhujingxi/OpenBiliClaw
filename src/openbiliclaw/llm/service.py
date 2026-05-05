@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+import asyncio
+import heapq
+import itertools
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from openbiliclaw.soul.profile import SoulProfile, preference_layer_from_dict
 from openbiliclaw.soul.tone import ToneProfile, build_tone_profile
@@ -12,6 +16,8 @@ from .base import LLMProviderError
 from .prompts import build_socratic_dialogue_prompt
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from openbiliclaw.memory.manager import MemoryManager
 
     from .base import LLMResponse
@@ -42,9 +48,100 @@ class LLMProviderExecutionError(LLMServiceError):
     """Raised when the underlying provider or registry call fails."""
 
 
+class PrioritySemaphore:
+    """Asyncio semaphore that serves waiters in priority order.
+
+    Lower priority numbers go first (1 = highest). Within the same
+    priority bucket, FIFO is preserved via a monotonically increasing
+    sequence counter. The semaphore takes effect only when there is
+    contention — if the slot is free the caller acquires immediately.
+
+    Concurrency is bounded by ``capacity``: only ``capacity`` callers
+    may hold a slot at once. The default of 1 turns the semaphore into
+    a strict priority queue.
+    """
+
+    def __init__(self, capacity: int = 1) -> None:
+        if capacity < 1:
+            raise ValueError("capacity must be >= 1")
+        self._capacity = capacity
+        self._in_flight = 0
+        # Heap entries: (priority, sequence, future). The sequence
+        # counter breaks ties so the heap stays FIFO within a bucket.
+        self._waiters: list[tuple[int, int, asyncio.Future[None]]] = []
+        self._counter = itertools.count()
+
+    async def acquire(self, priority: int) -> None:
+        if self._in_flight < self._capacity and not self._waiters:
+            self._in_flight += 1
+            return
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future[None] = loop.create_future()
+        heapq.heappush(self._waiters, (priority, next(self._counter), fut))
+        try:
+            await fut
+        except asyncio.CancelledError:
+            # Drop ourselves from the heap if we hadn't been woken yet.
+            self._waiters = [
+                entry for entry in self._waiters if entry[2] is not fut
+            ]
+            heapq.heapify(self._waiters)
+            # If the slot was already handed to us before the cancel
+            # propagated, hand it on to the next waiter so the queue
+            # doesn't deadlock.
+            if fut.done() and not fut.cancelled():
+                self._release_one()
+            raise
+
+    def release(self) -> None:
+        if self._in_flight <= 0:
+            raise RuntimeError("PrioritySemaphore released too many times")
+        self._release_one()
+
+    def _release_one(self) -> None:
+        # Hand the slot to the highest-priority waiter, or just decrement
+        # the in-flight count if no one is waiting.
+        while self._waiters:
+            _, _, fut = heapq.heappop(self._waiters)
+            if not fut.done():
+                fut.set_result(None)
+                return
+        self._in_flight = max(0, self._in_flight - 1)
+
+    @asynccontextmanager
+    async def slot(self, priority: int) -> AsyncIterator[None]:
+        await self.acquire(priority)
+        try:
+            yield
+        finally:
+            self.release()
+
+
+def _build_priority_semaphore() -> PrioritySemaphore:
+    return PrioritySemaphore(capacity=1)
+
+
 @dataclass
 class LLMService:
     """Facade that assembles prompts and delegates calls to the registry."""
+
+    # v0.3.63+: caller-tag → priority map. Lower number wins. Resolved
+    # by longest-prefix match against the ``caller`` tag passed to
+    # ``complete_with_core_memory``. Untagged or unmatched callers fall
+    # through to ``_DEFAULT_PRIORITY``. The intent: when the system is
+    # under load, popup-visible work (write_expression, evaluate_batch
+    # for the active discovery batch) gets the next LLM slot before
+    # background bulk scoring (delight_score) or cold-path soul/xhs
+    # analysis. Without this, a long delight-scoring sweep could starve
+    # the user-visible expression backfill for minutes.
+    _PRIORITY_MAP: ClassVar[dict[str, int]] = {
+        "recommendation.write_expression": 1,
+        "discovery.evaluate_batch": 1,
+        "recommendation.delight_score": 2,
+        "soul": 2,
+        "xhs": 2,
+    }
+    _DEFAULT_PRIORITY: ClassVar[int] = 3
 
     registry: SupportsComplete
     memory: MemoryManager
@@ -54,6 +151,33 @@ class LLMService:
     # preserves prior behaviour for tests / standalone callers that
     # don't care about cost tracking.
     usage_recorder: object | None = None
+    # v0.3.63+: lazy-initialised priority gate. ``init=False`` so existing
+    # callers ``LLMService(registry=..., memory=...)`` continue to work
+    # without passing this in. The semaphore must be constructed inside
+    # the running loop's thread, so we instantiate at field default time
+    # (which is fine — PrioritySemaphore doesn't grab the loop until the
+    # first acquire).
+    _priority_sem: PrioritySemaphore = field(
+        default_factory=_build_priority_semaphore, init=False, repr=False
+    )
+
+    @classmethod
+    def _resolve_priority(cls, caller: str) -> int:
+        """Longest-prefix match of ``caller`` against ``_PRIORITY_MAP``.
+
+        ``"recommendation.write_expression"`` matches exactly, while
+        ``"soul.preference"`` matches the ``"soul"`` prefix. Unknown
+        callers (or empty tag) fall through to ``_DEFAULT_PRIORITY``.
+        """
+        if not caller:
+            return cls._DEFAULT_PRIORITY
+        best: tuple[int, int] | None = None  # (prefix length, priority)
+        for prefix, priority in cls._PRIORITY_MAP.items():
+            if caller == prefix or caller.startswith(prefix + "."):
+                length = len(prefix)
+                if best is None or length > best[0]:
+                    best = (length, priority)
+        return best[1] if best is not None else cls._DEFAULT_PRIORITY
 
     async def complete_with_core_memory(
         self,
@@ -93,14 +217,16 @@ class LLMService:
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": user_input})
+        priority = self._resolve_priority(caller)
         try:
-            response = await self.registry.complete(
-                messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                json_mode=json_mode,
-                reasoning_effort=reasoning_effort,
-            )
+            async with self._priority_sem.slot(priority):
+                response = await self.registry.complete(
+                    messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    json_mode=json_mode,
+                    reasoning_effort=reasoning_effort,
+                )
         except LLMProviderError as exc:
             raise LLMProviderExecutionError(str(exc)) from exc
         if not response.content.strip():

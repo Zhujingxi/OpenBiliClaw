@@ -18,9 +18,12 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 from openbiliclaw.soul.tone import ToneProfile, build_tone_profile
 
 if TYPE_CHECKING:
+    from collections.abc import Coroutine
+
     from openbiliclaw.discovery.engine import DiscoveredContent
     from openbiliclaw.llm.base import LLMResponse
     from openbiliclaw.recommendation.curator import PoolCurator
+    from openbiliclaw.runtime.task_registry import BackgroundTaskRegistry
     from openbiliclaw.soul.profile import SoulProfile
     from openbiliclaw.storage.database import Database
 
@@ -156,11 +159,19 @@ class RecommendationEngine:
         *,
         curator: PoolCurator | None = None,
         embedding_service: SupportsEmbeddingService | None = None,
+        task_registry: BackgroundTaskRegistry | None = None,
     ) -> None:
         self._llm = llm
         self._database = database
         self._curator = curator
         self._embedding_service = embedding_service
+        # v0.3.63+: optional registry for detached fire-and-forget tasks
+        # (classify_pool_backlog_detached, precompute_delight_scores_detached).
+        # When provided, those tasks register here so RuntimeContext's
+        # hot-reload can cancel them before the new runtime starts.
+        # When None, the engine falls back to bare asyncio.create_task —
+        # tests that don't inject a registry continue to work unchanged.
+        self.task_registry: BackgroundTaskRegistry | None = task_registry
         self._classify_lock = asyncio.Lock()
         # v0.3.47+: serialise precompute_pool_copy so multiple
         # per-strategy fire-and-forget tasks (now created from
@@ -699,9 +710,9 @@ class RecommendationEngine:
         # refresh-loop drain (runtime/refresh.py:_drain_pool_precompute_backlog)
         # picks up freshly-classified items on the next tick.
         try:
-            asyncio.create_task(
+            self._spawn_detached_task(
+                "classify_pool_backlog_detached",
                 self._safe_classify_pool_backlog(profile=profile, limit=limit),
-                name="classify_pool_backlog_detached",
             )
         except Exception:
             logger.exception(
@@ -714,12 +725,12 @@ class RecommendationEngine:
         # back-to-back fires from re-scoring the same items.
         def _spawn_delight() -> None:
             try:
-                asyncio.create_task(
+                self._spawn_detached_task(
+                    "precompute_delight_scores_detached",
                     self._safe_precompute_delight_scores(
                         profile=profile,
                         limit=delight_limit,
                     ),
-                    name="precompute_delight_scores_detached",
                 )
             except Exception:
                 logger.exception(
@@ -765,6 +776,25 @@ class RecommendationEngine:
     # bilibili discovery, and writes results back.  After this step content
     # is truly source-agnostic — the recommendation layer only sees content
     # features, never platform labels.
+
+    def _spawn_detached_task(
+        self,
+        name: str,
+        coro: Coroutine[Any, Any, Any],
+    ) -> asyncio.Task[Any]:
+        """Spawn a detached task, routing through the registry when available.
+
+        v0.3.63+: when ``self.task_registry`` is wired (by
+        ``RuntimeContext`` at startup), the task is registered so that
+        ``rebuild_from_config``'s ``cancel_all`` can cancel it before
+        the new runtime starts. Tests that construct
+        ``RecommendationEngine`` directly (no registry) fall back to
+        bare ``asyncio.create_task`` for backward compat.
+        """
+        registry = self.task_registry
+        if registry is not None:
+            return registry.track(name, coro)
+        return asyncio.create_task(coro, name=name)
 
     async def _safe_classify_pool_backlog(
         self,

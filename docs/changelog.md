@@ -4,6 +4,65 @@
 
 ---
 
+## v0.3.63: LLM 全局优先级队列 + detached task registry (2026-05-05)
+
+### 背景
+
+v0.3.62 解决了"互相拖累"的 lock 问题,但留下了用户架构 review 中的两条尾巴:
+
+1. **LLM 资源仍然没有优先级概念。** 当一轮 delight scoring (上百次调用) 在跑时,popup 急需的 `write_expression` (1-2 次调用) 只能在 FIFO 队列后面排队,用户能看见的池子表达式回填可能要等数分钟。
+2. **detached task 在 hot reload 后还在跑。** `RuntimeContext.rebuild_from_config` 只 cancel 顶层 loop task,`asyncio.create_task(...)` 起的 fire-and-forget 协程(per-strategy precompute、prewarm helper、per-event trigger、manual refresh handle)持有旧 runtime 引用继续抢 SQLite 写和 LLM token,可能持续很多秒。
+
+这一版收尾这两条。两件工作仍然是并行 agent 起的(LLM 优先级 / task registry 分别一组),最终在主上下文里收敛、补 4 个集成点 + 8 个测试。
+
+### 一、LLM 全局优先级队列
+
+`src/openbiliclaw/llm/service.py` 加了一个 `PrioritySemaphore` 类,用 heapq + monotonic 计数器实现优先级 + FIFO 平局:capacity=1,完全 free 时无开销直通,有竞争时严格按优先级唤醒 waiter。
+
+`LLMService` 加了:
+
+- `_PRIORITY_MAP` ClassVar:`recommendation.write_expression`/`discovery.evaluate_batch` = **1**(用户可见、堵住就明显);`recommendation.delight_score`/`soul.*`/`xhs.*` = **2**(后台批量打分);其他默认 **3**。
+- `_resolve_priority(caller)`:对 `caller` tag 做 longest-prefix 匹配。`"soul.preference"` 匹配 `"soul"` 前缀拿到 priority=2。
+- `_priority_sem: PrioritySemaphore`(`init=False`,默认 capacity=1):`complete_with_core_memory` 现在把 `await self.registry.complete(...)` 包进 `async with self._priority_sem.slot(priority):`。
+
+唯一改动点是在 `complete_with_core_memory` 里——这是所有 LLM 调用的单一入口(`complete_structured_task` / `complete_with_tools` / `complete_socratic_dialogue` 全部走这条路径),不需要改下游每个 caller。
+
+**预期效果**:在 delight scoring 跑批的时候,popup 触发的 `write_expression` 抢到下一个 LLM slot 而不是排到队尾;后台 priority=3 的临时 caller 也不会插队挤掉 priority=2 的 soul 分析。
+
+### 二、Detached task registry
+
+`src/openbiliclaw/runtime/task_registry.py` 新增 `BackgroundTaskRegistry`:
+
+- `track(name, coro)`:封装 `asyncio.create_task(coro, name=name)`,记录到 `dict[Task, str]`。task 完成时通过 `add_done_callback` 自动 untrack,不会无界增长。
+- `cancel_all(grace_seconds=1.5)`:cancel 所有 tracked task,等 1.5s 优雅退出;超时则 logger.warning 并强制 `_tasks.clear()`,新 runtime 立刻可用。
+- `stats()`:按名字前缀分组的诊断计数(future-proof 给观测面板)。
+
+`RuntimeContext`:
+- 新增 `task_registry: BackgroundTaskRegistry` 字段。
+- `rebuild_from_config` 拆成 async 公开方法(顶部 `await task_registry.cancel_all()` + INFO 日志) + sync `_rebuild_components` 内部。
+- 注入 registry 到 `RecommendationEngine` 和 `ContinuousRefreshController`。
+- 4 个 background task(refresh / account_sync / auto_update / prewarm)统一走 `task_registry.track(...)`。
+
+`RecommendationEngine` / `ContinuousRefreshController` 各新增可选 `task_registry` kwarg + `_spawn_detached_task` / `_track_task` helper。所有 `asyncio.create_task` 调用点(`_safe_classify_pool_backlog`、`_safe_precompute_delight_scores`、`_manual_refresh_task`、per-strategy precompute、per-event trigger)走 helper;helper 在没有 registry 时 fallback 到裸 `create_task`,保证无 registry 的旧测试夹具继续 green。
+
+`api/app.py` 两处 `ctx.rebuild_from_config(...)` 改成 await。
+
+**预期效果**:用户在运行时改了 config 重载之后,旧 detached task 在最多 1.5s 内全部退场,不会和新 runtime 抢同一个 SQLite 写或 LLM token。
+
+### 测试
+
+- 新增 `tests/test_task_registry.py`(5 个测试):track/cancel/stats/超时降级/二次可用性。
+- `tests/test_llm_service.py` +3 个测试:`_resolve_priority` longest-prefix 表、`PrioritySemaphore` 多 waiter 顺序唤醒、`complete_with_core_memory` 通过 priority 门串行化。
+- `tests/test_api_app.py` 的 `FakeRecommendationEngine.__init__` 接受 `task_registry=None` 参数。
+
+### 不影响的
+
+- LLM caller 的 `caller=` tag 习惯没变;现有 caller tag 在 priority map 里命中既有规则,新加 caller 默认 priority=3 不会破坏现有调用。
+- `LLMService(...)` 构造签名向后兼容(`_priority_sem` 是 `init=False`)。
+- 没有 registry 注入时 `RecommendationEngine` / refresh loop 的行为和 v0.3.62 完全一致。
+
+---
+
 ## v0.3.62: 三处架构性 lock 拆分 + DB 写重试收紧 (2026-05-05)
 
 ### 背景
