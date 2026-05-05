@@ -4,6 +4,59 @@
 
 ---
 
+## extension v0.3.14: 通知失败循环 + WebSocket 重连风暴修复 (2026-05-05)
+
+### 背景
+
+用户报告 service worker console 持续刷一堆:
+```
+[OpenBiliClaw] Pending notification check failed
+Uncaught (in promise) Error: Unable to download all specified images.
+WebSocket connection to 'ws://127.0.0.1:8420/...' failed × 70+
+```
+而且 popup "页面好像一直在奇怪的刷新"。
+
+### 根因 1:通知 ack 漏掉,bvid 永远 pending
+
+`service-worker.ts:checkPendingNotification`:
+```ts
+try {
+  const item = await fetchPendingNotification();
+  if (item?.bvid) {
+    await chrome.notifications.create(...);  // ← reject 抛出
+    await acknowledgeNotificationSent(...);  // ← 跑不到
+  }
+} catch { console.warn("...failed"); }      // ← 吞掉真实 error
+```
+
+`chrome.notifications.create` 内部图片下载失败会让 promise reject。catch 吞了,但 `acknowledgeNotificationSent` 也没机会跑。下个轮询周期(每分钟)后端又把同一个 `bvid` 喂回来 → 同样失败 → 同样不 ack → **无限循环**,console 一直被刷。
+
+### 根因 2:WebSocket 重连固定 2s 间隔无退避
+
+`popup-stream.js:scheduleReconnect` 用了固定 `reconnectDelayMs = 2000`。后端短暂死掉时,popup 每 2s 尝试重连,1 分钟内 30 次失败,console 满屏 `ERR_CONNECTION_REFUSED`。
+
+### 修法
+
+**`service-worker.ts`**:
+- 抽出 `safeNotify(id, options)` —— 内部 try/catch 把 `chrome.notifications.create` 的 reject 转成 console.warn(带真实 error message + iconUrl 上下文),不再传染上层
+- `checkPendingNotification` 用 `safeNotify` 替代直接调用 → **`acknowledgeNotificationSent` always run**(用户已经在 popup 里看到推荐了,toast 失败只是少了 OS 弹窗,不能因此让后端永远认为没发过)
+- 顶层 catch 也把 error message 打出来,不再吞
+
+**`popup-stream.js`**:
+- `createRuntimeStreamClient` 加 `maxReconnectDelayMs = 30_000`(默认 30s 上限)
+- 每次失败 `currentReconnectDelay *= 2`,封顶 30s
+- 成功 onopen 时重置回 2s,瞬时网络抖动 fast-recover 不打折
+
+### 影响
+
+- 通知 console 不再被无限循环刷,出 1 次 warn 就停
+- WebSocket 后端死掉时,popup 在第一分钟内尝试 6 次(2s/4s/8s/16s/30s/30s),之后 30s 一次,负载和 console 噪音都可控
+- popup "感觉在乱刷" 主因消除(通知 + WS 两条噪音都掐了)
+
+零接口变化,backend 不用动。
+
+---
+
 ## extension v0.3.13: profile sub-tab 等待重试 — bootstrap_profile 真正能拉到收藏/点赞 (2026-05-05)
 
 ### 背景

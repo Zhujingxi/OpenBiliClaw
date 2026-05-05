@@ -107,27 +107,59 @@ async function acknowledgeDelightSent(bvid: string): Promise<void> {
 // Polling — recommendation & cognition only (delight is WS-pushed)
 // ---------------------------------------------------------------------------
 
+/**
+ * v0.3.14+: chrome.notifications.create() rejects when Chrome can't
+ * download the image (transient CDN errors, sandbox / CORS quirks on
+ * some Chromium variants). The previous flow let the rejection skip
+ * ``acknowledgeNotificationSent``, so the SAME bvid was re-fetched
+ * every minute and looped forever. We now ALWAYS ack — the user
+ * already got the recommendation in the popup; missing the OS-level
+ * toast is a cosmetic failure, not a delivery failure.
+ *
+ * Errors are also surfaced via console.warn with the real message so
+ * debugging "Unable to download all specified images" doesn't require
+ * code-side detective work.
+ */
+async function safeNotify(
+  notificationId: string,
+  options: chrome.notifications.NotificationCreateOptions,
+): Promise<void> {
+  try {
+    await chrome.notifications.create(notificationId, options);
+  } catch (err) {
+    console.warn(
+      "[OpenBiliClaw] notifications.create failed (notification skipped, popup still has it):",
+      err instanceof Error ? err.message : String(err),
+      "iconUrl:",
+      options.iconUrl,
+    );
+  }
+}
+
 async function checkPendingNotification(): Promise<void> {
   try {
     const item = await fetchPendingNotification();
     if (item?.bvid) {
-      await chrome.notifications.create(
-        buildNotificationId(item.bvid),
-        buildChromeNotificationOptions(item),
-      );
+      await safeNotify(buildNotificationId(item.bvid), buildChromeNotificationOptions(item));
+      // Ack regardless of toast success — popup already serves this
+      // recommendation; refusing to ack keeps the same bvid in the
+      // pending queue and triggers the toast every poll tick.
       await acknowledgeNotificationSent(item.bvid);
       return;
     }
     const cognition = await fetchPendingCognitionUpdate();
     if (cognition?.id) {
-      await chrome.notifications.create(
+      await safeNotify(
         buildCognitionNotificationId(cognition.id),
         buildChromeNotificationOptions(cognition),
       );
       await acknowledgeCognitionUpdateSeen(cognition.id);
     }
-  } catch {
-    console.warn("[OpenBiliClaw] Pending notification check failed");
+  } catch (err) {
+    console.warn(
+      "[OpenBiliClaw] Pending notification check failed:",
+      err instanceof Error ? err.message : String(err),
+    );
   }
 }
 
