@@ -41,7 +41,14 @@ const DELIGHT_ACK_URL = "http://127.0.0.1:8420/api/delight/sent";
 const XHS_OBSERVED_URLS_URL = "http://127.0.0.1:8420/api/sources/xhs/observed-urls";
 const XHS_TOKENS_URL = "http://127.0.0.1:8420/api/sources/xhs/tokens";
 const RUNTIME_STREAM_URL = "ws://127.0.0.1:8420/api/runtime-stream?client=background";
-const WS_RECONNECT_DELAY = 5_000;
+// v0.3.17+: exponential backoff capped at 60s. When the daemon is
+// down for minutes, the previous fixed-5s reconnect flooded console
+// with 12 ERR_CONNECTION_REFUSED per minute. Backoff doubles on each
+// failure (5s → 10s → 20s → 40s → 60s capped); resets on successful
+// onopen so transient blips stay fast-recover.
+const WS_RECONNECT_BASE_DELAY = 5_000;
+const WS_RECONNECT_MAX_DELAY = 60_000;
+let wsReconnectDelay = WS_RECONNECT_BASE_DELAY;
 type PendingNotification = import("./notifications.js").PendingNotification;
 type PendingCognitionUpdate = import("./notifications.js").PendingCognitionUpdate;
 
@@ -173,6 +180,12 @@ function connectRuntimeStream(): void {
     return;
   }
 
+  runtimeSocket.onopen = () => {
+    // v0.3.17+: reset backoff on successful connect so a transient
+    // blip after a long outage still recovers immediately.
+    wsReconnectDelay = WS_RECONNECT_BASE_DELAY;
+  };
+
   runtimeSocket.onmessage = (msg) => {
     try {
       const payload = JSON.parse(String(msg.data)) as Record<string, unknown>;
@@ -194,10 +207,13 @@ function connectRuntimeStream(): void {
 
 function scheduleWsReconnect(): void {
   if (wsReconnectTimer !== null) return;
+  const delay = wsReconnectDelay;
   wsReconnectTimer = setTimeout(() => {
     wsReconnectTimer = null;
     connectRuntimeStream();
-  }, WS_RECONNECT_DELAY);
+  }, delay);
+  // Double for next failure, capped. Resets in onopen above.
+  wsReconnectDelay = Math.min(wsReconnectDelay * 2, WS_RECONNECT_MAX_DELAY);
 }
 
 // ---------------------------------------------------------------------------

@@ -40,6 +40,43 @@
 
 ---
 
+## extension v0.3.17: service worker WS 重连指数退避 (2026-05-05)
+
+### 背景
+
+v0.3.14 已经把 popup-stream.js 的 WS 改成指数退避(2s→30s),但**service worker 自己有第二条 WS 连接**(`connectRuntimeStream` 给 background 用的 runtime-stream)依然用固定 5s 间隔重试。后端死掉时:
+
+```
+service-worker.ts:170 WebSocket connection ... failed: ERR_CONNECTION_REFUSED
+service-worker.ts:170 WebSocket connection ... failed: ERR_CONNECTION_REFUSED
+service-worker.ts:170 WebSocket connection ... failed: ERR_CONNECTION_REFUSED
+... 每 5 秒一行,无限刷
+```
+
+### 修法
+
+`service-worker.ts:scheduleWsReconnect` 改用指数退避:5s → 10s → 20s → 40s → 60s 封顶。`onopen` 成功握手时重置回 5s,瞬时网络抖动 fast-recover 不打折。
+
+```ts
+const WS_RECONNECT_BASE_DELAY = 5_000;
+const WS_RECONNECT_MAX_DELAY = 60_000;
+let wsReconnectDelay = WS_RECONNECT_BASE_DELAY;
+
+// scheduleWsReconnect:
+const delay = wsReconnectDelay;
+setTimeout(connectRuntimeStream, delay);
+wsReconnectDelay = Math.min(wsReconnectDelay * 2, WS_RECONNECT_MAX_DELAY);
+
+// onopen:
+wsReconnectDelay = WS_RECONNECT_BASE_DELAY;
+```
+
+### 影响
+
+后端死 1 分钟内 console:之前 ~12 行 → 现在 5 行(5s/10s/20s/40s/60s);1 分钟之后:之前一直 12 次/分钟 → 现在 1 次/60s。配合 v0.3.14 的 popup-stream 退避,扩展两条 WS 连接现在都不再刷屏。
+
+---
+
 ## extension v0.3.16: 关掉所有 OS toast,通知收回 popup 内 (2026-05-05)
 
 ### 背景
