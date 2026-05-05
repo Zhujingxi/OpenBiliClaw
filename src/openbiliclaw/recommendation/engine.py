@@ -667,15 +667,24 @@ class RecommendationEngine:
             batch_size: Batch size for expression generation LLM calls.
         """
         async with self._precompute_lock:
-            # Safety net: classify any leftover un-evaluated items that were
-            # not caught by the ingest-time classification (e.g. race
-            # condition, or the background task was suppressed). No-op when
-            # all pool items already have style_key and topic_group.
+            # v0.3.59+: classify_pool_backlog fires as a detached task instead
+            # of awaiting. Previously precompute waited for classify to finish
+            # before reading candidates — under v_voucher rate limit this
+            # serialised the entire pipeline because classify backlog could
+            # take minutes per cycle. Production logs (2026-05-05 21:15-21:36)
+            # showed pool_available stuck at 0 for 16+ min because precompute
+            # was queued behind classify. Now both run on their own cadence;
+            # precompute reads whatever's available right now and the periodic
+            # refresh-loop drain (runtime/refresh.py:_drain_pool_precompute_backlog)
+            # picks up freshly-classified items on the next tick.
             try:
-                await self.classify_pool_backlog(profile=profile, limit=limit)
+                asyncio.create_task(
+                    self._safe_classify_pool_backlog(profile=profile, limit=limit),
+                    name="classify_pool_backlog_detached",
+                )
             except Exception:
                 logger.exception(
-                    "classify_pool_backlog failed, continuing with precompute"
+                    "classify_pool_backlog detach failed, continuing with precompute"
                 )
 
             candidates = self._load_pool_candidates_needing_copy(limit=max(0, limit))
@@ -723,6 +732,27 @@ class RecommendationEngine:
     # bilibili discovery, and writes results back.  After this step content
     # is truly source-agnostic — the recommendation layer only sees content
     # features, never platform labels.
+
+    async def _safe_classify_pool_backlog(
+        self,
+        *,
+        profile: SoulProfile,
+        limit: int = 30,
+    ) -> int:
+        """Detached-task wrapper for classify_pool_backlog (v0.3.59+).
+
+        ``precompute_pool_copy`` schedules this as ``asyncio.create_task``
+        instead of ``await``-ing classify_pool_backlog directly. The
+        previous serial coupling let a slow classify (under v_voucher
+        backoff or a flood of fresh XHS notes) stall precompute for
+        minutes; now precompute reads whatever's classified-ready right
+        now while classify catches up in parallel.
+        """
+        try:
+            return await self.classify_pool_backlog(profile=profile, limit=limit)
+        except Exception:
+            logger.exception("classify_pool_backlog (detached) failed")
+            return 0
 
     async def classify_pool_backlog(
         self,

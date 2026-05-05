@@ -4,6 +4,63 @@
 
 ---
 
+## v0.3.59: precompute 解耦 classify + 定期主动 drain (2026-05-05)
+
+### 背景
+
+production logs 2026-05-05 21:15-21:36(21 分钟会话):
+
+```
+21:26:42  Soul profile became ready, classify_pool_backlog: 87 items (xiaohongshu)
+21:27:15-21:29:35  recommendation.evaluate_batch × 6 batch (classify done)
+21:28:45 → 21:31:08  pool_available=0 持续
+                     caller=recommendation.expression × **0** ← precompute 一次没跑
+```
+
+popup 截图显示"FOR YOU 1/17"(池子里 17 条)但显示"阿B 正在补货"——这 17 条全卡在 P3 gate 后面,因为没人帮它们生成 `pool_expression`。
+
+### 根因
+
+precompute 只通过两条路径触发:
+1. `_run_refresh_plan` 里 `if discovered: precompute_tasks.append(...)` —— Bilibili search 在 v_voucher 风控下多数策略返回 [],precompute 不 fire
+2. `precompute_pool_copy` 内部先 `await classify_pool_backlog(...)`(同步阻塞)再读 candidates —— classify 自己跑得慢时 precompute 跟着卡
+
+两条路径叠加 = pool_expression 永远填不上 = popup 永远"正在补货"。
+
+### 修法
+
+#### 1. `recommendation/engine.py:precompute_pool_copy` 解耦 classify
+
+`await classify_pool_backlog(...)` → `asyncio.create_task(self._safe_classify_pool_backlog(...))`。让 classify 在后台自己跑,precompute 立刻读"现在已经分类好的" candidates 开始填 expression。
+
+新增 `_safe_classify_pool_backlog` —— detached task wrapper,异常吞掉防止 UnobservedException。
+
+#### 2. `runtime/refresh.py:_loop_refresh` 加定期 drain
+
+每个 60s tick 末尾调用 `_drain_pool_precompute_backlog()`:
+- 检查 profile ready
+- `await engine.precompute_pool_copy(...)` 一次
+
+引擎内部的 `_precompute_lock` 自动 dedup 与 `_run_refresh_plan` 的 per-strategy 触发,不会 double-spend LLM tokens。
+
+### 影响
+
+| 场景 | 之前 | 现在 |
+|---|---|---|
+| Bilibili 风控,所有 strategy 返 0 | precompute 永远不 fire | 60s 一次定期 drain |
+| classify 慢(大 backlog) | precompute 串行等 | precompute 并行读已 classified 的 |
+| pool 空窗时长 | 17 min(实测) | 应降到 ~3-5 min |
+
+### 风险
+
+- precompute 现在按 60s 周期主动 fire,如果 pool 一直空,每分钟都会读一次 `_load_pool_candidates_needing_copy(limit=60)`。SQL 是 indexed,负载可忽略。
+- LLM token 消耗:同样的 candidates,同样的提示词。`_precompute_lock` 防 double-spend。生产环境多花 0 元。
+- 如果 classify 失败导致 pool 中长期有 `style_key=''`/`topic_group=''` 的 row,这些会被 `precompute_pool_copy` 直接读到——精排 LLM 拿到没分类的内容也能生成兜底文案,只是 topic_label 可能不准。Acceptable 边界,不阻塞 popup。
+
+测试:1000/1029 通过(同 29 个 pre-existing failures 不增不减)。
+
+---
+
 ## v0.3.58: init 摘要按平台分类显示信号入库数 (2026-05-05)
 
 ### 背景

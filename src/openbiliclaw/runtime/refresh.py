@@ -551,7 +551,49 @@ class ContinuousRefreshController:
                 await self._on_profile_ready_if_first_time()
             with suppress(Exception):
                 await self.refresh_if_needed()
+            # v0.3.59+: drain the precompute backlog independently of
+            # discovery output. Previously precompute only fired
+            # per-strategy in ``_run_refresh_plan`` via
+            # ``if discovered: precompute_tasks.append(...)``, so when
+            # Bilibili search hit v_voucher rate limit and every strategy
+            # returned [], precompute never ran and pool stayed empty
+            # for 16+ minutes (production logs 2026-05-05 21:15-21:36
+            # showed pool_available=0 throughout despite 87 classified
+            # XHS items waiting for expression generation). Now we tick
+            # this once per refresh-loop iteration regardless of whether
+            # discovery produced anything — items needing copy are
+            # picked up on the next 60s tick.
+            with suppress(Exception):
+                await self._drain_pool_precompute_backlog()
             await asyncio.sleep(self.check_interval_seconds)
+
+    async def _drain_pool_precompute_backlog(self) -> None:
+        """v0.3.59+: independent precompute drain.
+
+        Fires ``precompute_pool_copy`` once per refresh-loop tick (60s)
+        if the soul profile is ready. The engine's ``_precompute_lock``
+        de-dupes against per-strategy fire-and-forget tasks queued by
+        ``_run_refresh_plan`` so back-to-back triggers don't double-spend
+        LLM tokens.
+        """
+        engine = self.recommendation_engine
+        if engine is None:
+            return
+        if not self._is_initialized():
+            return
+        try:
+            profile = await self.soul_engine.get_profile()
+        except Exception:
+            return
+        if profile is None:
+            return
+        try:
+            await engine.precompute_pool_copy(
+                profile=profile,
+                limit=_MAX_DISCOVERY_BACKFILL_PER_REFRESH,
+            )
+        except Exception:
+            logger.exception("Periodic precompute drain failed")
 
     async def _on_profile_ready_if_first_time(self) -> None:
         """One-shot hook fired the tick after soul profile first appears.
