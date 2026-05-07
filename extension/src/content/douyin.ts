@@ -41,6 +41,7 @@ interface ScopeExecuteMessage {
   max_items_per_scope: number;
   max_scroll_rounds: number;
   max_stagnant_scroll_rounds: number;
+  debug_inject_status?: string;
 }
 
 interface ScopeResultPayload {
@@ -61,6 +62,10 @@ interface ScopeResultPayload {
     fetch_tap_install_status: "unknown" | "installed" | "skipped_no_sdk";
     aweme_messages_received: number;
     install_messages_received: number;
+    inject_status?: string;
+    page_url?: string;
+    profile_link_found?: boolean;
+    sub_tab_found?: boolean;
   };
 }
 
@@ -192,22 +197,40 @@ function findScopeSubTab(scope: DouyinScope): HTMLElement | null {
  * we couldn't find any candidate elements — caller can still proceed
  * to scroll loop, just won't have items.
  */
-async function clickToScope(scope: DouyinScope): Promise<boolean> {
+interface ClickToScopeReport {
+  page_url: string;
+  profile_link_found: boolean;
+  sub_tab_found: boolean;
+}
+
+async function clickToScope(scope: DouyinScope): Promise<ClickToScopeReport> {
+  const report: ClickToScopeReport = {
+    page_url: location.href,
+    profile_link_found: false,
+    sub_tab_found: false,
+  };
   const onProfile = location.pathname.startsWith("/user/");
   if (!onProfile) {
     const profileLink = findProfileLink();
-    if (!profileLink) return false;
+    report.profile_link_found = profileLink !== null;
+    if (!profileLink) return report;
     profileLink.click();
     // SPA route is async; let React mount the profile page.
     await sleep(2_000);
+    report.page_url = location.href;
   }
 
-  if (scope === "dy_post") return true; // default tab, no click needed
+  if (scope === "dy_post") {
+    report.sub_tab_found = true; // default tab, no click needed
+    return report;
+  }
   const subTab = findScopeSubTab(scope);
-  if (!subTab) return false;
+  report.sub_tab_found = subTab !== null;
+  if (!subTab) return report;
   subTab.click();
   await sleep(1_500); // allow the new sub-tab to fire its first /aweme/.../<scope>/
-  return true;
+  report.page_url = location.href;
+  return report;
 }
 
 async function runScope(msg: ScopeExecuteMessage): Promise<ScopeResultPayload> {
@@ -234,11 +257,16 @@ async function runScope(msg: ScopeExecuteMessage): Promise<ScopeResultPayload> {
   };
   window.addEventListener("message", onMessage);
 
+  let clickReport: ClickToScopeReport = {
+    page_url: location.href,
+    profile_link_found: false,
+    sub_tab_found: false,
+  };
   try {
     // Navigate via UI clicks (more natural to Douyin risk control
     // than chrome.tabs.update URL jumps). clickToScope handles both
     // the homepage→profile transition and the sub-tab switch.
-    await clickToScope(msg.scope);
+    clickReport = await clickToScope(msg.scope);
 
     // The MAIN-world fetch-tap auto-installs after waitForDouyinSdk
     // resolves. Give it a beat to settle so any pageload-time
@@ -282,6 +310,10 @@ async function runScope(msg: ScopeExecuteMessage): Promise<ScopeResultPayload> {
         fetch_tap_install_status: _lastFetchTapInstallStatus,
         aweme_messages_received: awemeMessagesReceived,
         install_messages_received: _installMessagesReceived,
+        inject_status: msg.debug_inject_status,
+        page_url: clickReport.page_url,
+        profile_link_found: clickReport.profile_link_found,
+        sub_tab_found: clickReport.sub_tab_found,
       },
     };
   } catch (err) {
@@ -296,6 +328,10 @@ async function runScope(msg: ScopeExecuteMessage): Promise<ScopeResultPayload> {
         fetch_tap_install_status: _lastFetchTapInstallStatus,
         aweme_messages_received: awemeMessagesReceived,
         install_messages_received: _installMessagesReceived,
+        inject_status: msg.debug_inject_status,
+        page_url: clickReport.page_url,
+        profile_link_found: clickReport.profile_link_found,
+        sub_tab_found: clickReport.sub_tab_found,
       },
     };
   } finally {

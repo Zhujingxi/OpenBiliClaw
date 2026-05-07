@@ -242,6 +242,13 @@ function onTabReady(tabId: number, callback: () => void): void {
  * an empty DY_SCOPE_RESULT so the state machine still advances and
  * the task eventually finalises rather than hanging until timeout.
  */
+// TEMP DEBUG: track the most recent injectFetchTapInto outcome so
+// it can be passed through DY_SCOPE_EXECUTE → content script →
+// DY_SCOPE_RESULT → backend logs. Lets us diagnose
+// install_messages_received=0 without needing the user's browser
+// console. Will be reverted before release.
+let _lastInjectStatus: string = "not_attempted";
+
 function sendScopeExecuteMessage(): void {
   if (!progress || !taskTabId) return;
   const scope = progress.scopes[progress.current_scope_idx];
@@ -255,6 +262,7 @@ function sendScopeExecuteMessage(): void {
         max_items_per_scope: progress.max_items_per_scope,
         max_scroll_rounds: progress.max_scroll_rounds,
         max_stagnant_scroll_rounds: progress.max_stagnant_scroll_rounds,
+        debug_inject_status: _lastInjectStatus,
       },
     })
     .catch(() => {
@@ -290,17 +298,23 @@ async function injectFetchTapInto(tabId: number): Promise<void> {
   // This bypasses the manifest content_scripts injection logic so
   // SPA-route navs and any other Chrome-version-specific edge cases
   // don't matter — every scope gets a guaranteed fresh hook.
+  if (typeof chrome === "undefined" || !chrome.scripting) {
+    _lastInjectStatus = "scripting_api_missing";
+    return;
+  }
   try {
-    await chrome.scripting.executeScript({
+    const result = await chrome.scripting.executeScript({
       target: { tabId, allFrames: false },
       files: ["dist/main/dy-fetch-tap.js"],
       world: "MAIN",
     });
-  } catch {
-    // Inject failed — could be a chrome:// page, captcha intermediate,
-    // or scripting permission missing. The content script will still
-    // report empty for this scope; user-visible behaviour matches the
-    // existing graceful-degrade path.
+    _lastInjectStatus = `ok_results=${Array.isArray(result) ? result.length : "n/a"}`;
+  } catch (err) {
+    // Inject failed — could be scripting permission missing, file
+    // not in web_accessible_resources, captcha intermediate page,
+    // or chrome:// blocked. Capture the error so the content script
+    // can ship it back through scope debug.
+    _lastInjectStatus = `error: ${String(err).slice(0, 120)}`;
   }
 }
 
