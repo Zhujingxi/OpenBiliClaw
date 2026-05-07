@@ -25,6 +25,10 @@ const entrypoints = [
     entry: resolve(root, "src/main/xhs-state-bridge.ts"),
     outfile: resolve(root, "dist/main/xhs-state-bridge.js"),
   },
+  {
+    entry: resolve(root, "src/main/dy-fetch-tap.ts"),
+    outfile: resolve(root, "dist/main/dy-fetch-tap.js"),
+  },
 ];
 
 for (const target of entrypoints) {
