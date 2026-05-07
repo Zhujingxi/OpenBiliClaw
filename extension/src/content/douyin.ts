@@ -450,6 +450,27 @@ function scrollScopeListToEnd(scope: DouyinScope): boolean {
   return true;
 }
 
+/**
+ * Diagnostic helper — finds the apparent inner scroll container by
+ * walking ancestors of the last visible scope card, looking for a
+ * node where scrollHeight > clientHeight (the canonical "this is the
+ * scroller" signal). Returns its scrollHeight, or 0 when no scroller
+ * was identified. Lets us see in debug logs whether (a) the page has
+ * an inner overflow:auto container at all and (b) whether it's
+ * growing across scroll rounds.
+ */
+function findScopeScrollerHeight(): number {
+  const last = document.querySelector<HTMLElement>(
+    'a[href*="/video/"]:last-of-type, a[href*="/user/MS4w"]:last-of-type',
+  );
+  let cur: HTMLElement | null = last;
+  while (cur && cur !== document.body) {
+    if (cur.scrollHeight > cur.clientHeight + 5) return cur.scrollHeight;
+    cur = cur.parentElement;
+  }
+  return 0;
+}
+
 async function runScope(msg: ScopeExecuteMessage): Promise<ScopeResultPayload> {
   debugLog("runScope:start", {
     scope: msg.scope,
@@ -530,9 +551,14 @@ async function runScope(msg: ScopeExecuteMessage): Promise<ScopeResultPayload> {
     // Douyin's React Router rendered on landing.
     harvestDomSnapshot();
 
+    const anchorSelector =
+      msg.scope === "dy_follow"
+        ? 'a[href*="/user/MS4w"]'
+        : 'a[href*="/video/"]';
     let stagnantRounds = 0;
     for (let round = 0; round < msg.max_scroll_rounds; round += 1) {
       const beforeCount = sink.scopeCounts()[msg.scope];
+      const beforeDomSize = document.querySelectorAll(anchorSelector).length;
 
       // Trigger Douyin's virtual-list pagination. Two strategies in
       // sequence:
@@ -552,6 +578,17 @@ async function runScope(msg: ScopeExecuteMessage): Promise<ScopeResultPayload> {
       harvestDomSnapshot();
 
       const afterCount = sink.scopeCounts()[msg.scope];
+      const afterDomSize = document.querySelectorAll(anchorSelector).length;
+      debugLog("scroll_round", {
+        scope: msg.scope,
+        round,
+        beforeCount,
+        afterCount,
+        beforeDomSize,
+        afterDomSize,
+        scrollY: window.scrollY,
+        innerScrollerHeight: findScopeScrollerHeight(),
+      });
       stagnantRounds = afterCount > beforeCount ? 0 : stagnantRounds + 1;
 
       if (
