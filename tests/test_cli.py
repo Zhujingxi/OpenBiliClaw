@@ -2706,42 +2706,25 @@ def test_dy_events_to_history_items_drops_rows_with_no_title_or_url() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_fetch_douyin_command_runs_full_pipeline_and_propagates(
+def test_fetch_douyin_command_renders_scope_counts_after_extension_done(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``fetch-douyin`` enqueues, collects, propagates events to memory,
-    and prints the scope_counts line. Mirrors the slice of init that
-    handles Douyin without dragging in B站 / 小红书 / soul-engine."""
+    """``fetch-douyin`` is the **pure pull** command — it enqueues a
+    bootstrap_profile task, waits for the extension's POST results
+    (which the daemon-side endpoint already propagates to memory),
+    and prints the scope_counts. CLI itself does NOT propagate events
+    (the daemon's /api/sources/dy/task-result handler does it once,
+    on receive), so we don't need a memory-manager fake here."""
     runner = CliRunner()
 
-    captured_events: list[dict] = []
-
-    class FakeMemoryManager:
-        async def propagate_event(self, event: dict) -> None:
-            captured_events.append(event)
-
-    monkeypatch.setattr(cli_module, "_prepare_init_runtime", lambda: None)
-    monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: FakeMemoryManager())
     monkeypatch.setattr(cli_module, "_enqueue_dy_bootstrap_task", lambda: "task-fake-id")
     monkeypatch.setattr(
         cli_module,
         "_collect_dy_bootstrap_events",
         lambda task_id, *, max_wait_seconds: (
             [
-                {
-                    "event_type": "favorite",
-                    "title": "demo",
-                    "url": "https://www.douyin.com/video/x",
-                    "context": "抖音收藏:demo",
-                    "metadata": {"source_platform": "douyin"},
-                },
-                {
-                    "event_type": "like",
-                    "title": "liked",
-                    "url": "https://www.douyin.com/video/y",
-                    "context": "抖音点赞:liked",
-                    "metadata": {"source_platform": "douyin"},
-                },
+                {"event_type": "favorite", "title": "demo", "metadata": {}},
+                {"event_type": "like", "title": "liked", "metadata": {}},
             ],
             {"dy_post": 0, "dy_collect": 1, "dy_like": 1, "dy_follow": 0},
             "ok",
@@ -2751,23 +2734,57 @@ def test_fetch_douyin_command_runs_full_pipeline_and_propagates(
     result = runner.invoke(app, ["fetch-douyin", "-w", "5"])
     assert result.exit_code == 0, result.output
     assert "抖音" in result.output
-    assert len(captured_events) == 2
+    # The summary should mention the count breakdown line and the
+    # daemon-side propagation hint.
+    assert "收藏" in result.output and "点赞" in result.output
 
 
-def test_fetch_douyin_no_propagate_skips_memory(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``--no-propagate`` runs the wire but does not write events
-    into memory — useful for pure pipeline testing."""
+def test_fetch_douyin_does_not_call_prepare_init_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """fetch-* are pure pull — they must NOT trigger init's runtime
+    prep (which would force B站 cookie / auth checks the user doesn't
+    care about for a single-source pull). The fixture records any
+    inadvertent call so a regression here trips loudly."""
     runner = CliRunner()
+    prepared = {"called": False}
 
+    def _trip() -> None:
+        prepared["called"] = True
+
+    monkeypatch.setattr(cli_module, "_prepare_init_runtime", _trip)
+    monkeypatch.setattr(cli_module, "_enqueue_dy_bootstrap_task", lambda: "task-id")
+    monkeypatch.setattr(
+        cli_module,
+        "_collect_dy_bootstrap_events",
+        lambda task_id, *, max_wait_seconds: (
+            [],
+            {"dy_post": 0, "dy_collect": 0, "dy_like": 0, "dy_follow": 0},
+            "ok",
+        ),
+    )
+
+    result = runner.invoke(app, ["fetch-douyin"])
+    assert result.exit_code == 0, result.output
+    assert prepared["called"] is False
+
+
+def test_fetch_douyin_does_not_propagate_events_cli_side(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The daemon's task-result endpoint propagates events the moment
+    each partial POST lands. CLI MUST NOT propagate again — that would
+    double-write every event. Fail loudly if anyone wires the CLI
+    propagation path back in."""
+    runner = CliRunner()
     propagated: list = []
 
     class FakeMemoryManager:
         async def propagate_event(self, event: dict) -> None:
             propagated.append(event)
 
-    monkeypatch.setattr(cli_module, "_prepare_init_runtime", lambda: None)
     monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: FakeMemoryManager())
-    monkeypatch.setattr(cli_module, "_enqueue_dy_bootstrap_task", lambda: "task-fake-id")
+    monkeypatch.setattr(cli_module, "_enqueue_dy_bootstrap_task", lambda: "task-id")
     monkeypatch.setattr(
         cli_module,
         "_collect_dy_bootstrap_events",
@@ -2778,16 +2795,17 @@ def test_fetch_douyin_no_propagate_skips_memory(monkeypatch: pytest.MonkeyPatch)
         ),
     )
 
-    result = runner.invoke(app, ["fetch-douyin", "--no-propagate"])
+    result = runner.invoke(app, ["fetch-douyin"])
     assert result.exit_code == 0, result.output
-    assert propagated == []
+    assert propagated == [], (
+        "fetch-douyin should not propagate events CLI-side; daemon already does it"
+    )
 
 
 def test_fetch_douyin_exits_with_code_1_when_enqueue_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module, "_prepare_init_runtime", lambda: None)
     monkeypatch.setattr(cli_module, "_enqueue_dy_bootstrap_task", lambda: None)
     result = runner.invoke(app, ["fetch-douyin"])
     assert result.exit_code == 1
@@ -2801,12 +2819,6 @@ def test_fetch_xhs_renders_xhs_specific_summary(
     and summary line format — verify they surface correctly."""
     runner = CliRunner()
 
-    class FakeMemoryManager:
-        async def propagate_event(self, event: dict) -> None:
-            pass
-
-    monkeypatch.setattr(cli_module, "_prepare_init_runtime", lambda: None)
-    monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: FakeMemoryManager())
     monkeypatch.setattr(cli_module, "_enqueue_xhs_bootstrap_task", lambda: "xhs-task")
     monkeypatch.setattr(
         cli_module,
@@ -2818,7 +2830,7 @@ def test_fetch_xhs_renders_xhs_specific_summary(
         ),
     )
 
-    result = runner.invoke(app, ["fetch-xhs", "--no-propagate"])
+    result = runner.invoke(app, ["fetch-xhs"])
     assert result.exit_code == 0, result.output
     assert "小红书" in result.output
     assert "收藏" in result.output and "点赞" in result.output and "浏览记录" in result.output
@@ -2828,13 +2840,12 @@ def test_fetch_xhs_handles_timeout_status(monkeypatch: pytest.MonkeyPatch) -> No
     """When the extension never reports back, the command surfaces a
     'timeout' hint rather than crashing or claiming success."""
     runner = CliRunner()
-    monkeypatch.setattr(cli_module, "_prepare_init_runtime", lambda: None)
     monkeypatch.setattr(cli_module, "_enqueue_xhs_bootstrap_task", lambda: "xhs-task")
     monkeypatch.setattr(
         cli_module,
         "_collect_xhs_bootstrap_events",
         lambda task_id, *, max_wait_seconds: ([], {}, "timeout"),
     )
-    result = runner.invoke(app, ["fetch-xhs", "--no-propagate"])
+    result = runner.invoke(app, ["fetch-xhs"])
     assert result.exit_code == 0  # timeout is not a hard failure
     assert "超时" in result.output

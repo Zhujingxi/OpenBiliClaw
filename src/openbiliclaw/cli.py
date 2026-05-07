@@ -3383,25 +3383,24 @@ def _run_single_source_bootstrap(
     source_label: str,
     enqueue: Callable[[], str | None],
     collect: Callable[[str | None], tuple[list[dict[str, Any]], dict[str, int], str]],
-    propagate: bool,
     wait_seconds: float,
     summary_renderer: Callable[[dict[str, int], str, int], None],
 ) -> None:
     """Shared core for ``fetch-douyin`` / ``fetch-xhs`` standalone commands.
 
-    Standalone test-friendly path that exercises ONLY the per-source
-    bootstrap pipeline — no B站 fetches, no soul-engine, no discovery.
-    Lets a user (or CI) verify the extension+backend+memory wire for
-    one source at a time without paying the full ``init`` cost.
-
-    Flow: enqueue → kick → wait → collect → optionally propagate
-    events to memory → render summary. Mirrors the relevant slice of
-    ``init`` exactly so behaviour parity is preserved.
+    Pure pull pipeline — enqueue → kick → wait for completion →
+    render scope_counts. Does NOT touch B站 auth, does NOT propagate
+    events to memory. The daemon's
+    ``/api/sources/{xhs,dy}/task-result`` handler ALREADY propagates
+    incoming events to memory when it receives partials, so a CLI-side
+    propagate would double-write. Init still runs the soul pipeline
+    (preference / awareness / soul) on top — this command is the
+    isolated 'just verify the extension can pull data' rung beneath
+    that, useful for testing one platform at a time.
     """
-    _prepare_init_runtime()
-    _print_page_title(f"{source_label} 数据拉取", "扩展任务 + 后端入库 单源测试")
+    _print_page_title(f"{source_label} 数据拉取", "扩展任务 → 后端入库")
     console.print(
-        f"[dim]启动 {source_label} bootstrap 任务,等扩展执行(最多 {wait_seconds:.0f}s)...[/dim]"
+        f"[dim]入队 {source_label} bootstrap 任务,等扩展执行(最多 {wait_seconds:.0f}s)...[/dim]"
     )
 
     task_id = enqueue()
@@ -3413,52 +3412,32 @@ def _run_single_source_bootstrap(
         raise typer.Exit(code=1)
 
     events, scope_counts, status_label = collect(task_id)
-
     summary_renderer(scope_counts, status_label, len(events))
-
-    if not propagate:
-        console.print("[dim]--no-propagate:事件不写入 memory(只跑了扩展+后端这条线)。[/dim]")
-        return
-
-    if not events:
-        return
-
-    memory = _build_memory_manager()
-
-    async def _propagate_all() -> None:
-        for event in events:
-            await memory.propagate_event(event)
-
-    asyncio.run(_propagate_all())
-    console.print(
-        f"[green]✓[/green] {len(events)} 条事件已写入 memory(可用 "
-        f"`openbiliclaw profile` 查看影响,完整画像生成请跑 `openbiliclaw init`)。"
-    )
 
 
 @app.command("fetch-douyin")
 def fetch_douyin(
     wait_seconds: float = typer.Option(
-        60.0,
+        120.0,
         "--wait-seconds",
         "-w",
-        help="等扩展回结果的最大秒数(默认 60s,比 init 的 30s 多一倍稳)。",
-    ),
-    no_propagate: bool = typer.Option(
-        False,
-        "--no-propagate",
-        help="只跑扩展 + 后端入库 → 不写 memory。用于纯链路测试。",
+        help="等扩展回结果的最大秒数(默认 120s,4 个 scope 串行 + 滚动 + 兜底)。",
     ),
 ) -> None:
-    """单独测试抖音 bootstrap(独立于 ``init``).
+    """单独触发抖音 bootstrap 拉取(纯执行,不跑 init 的画像 / 发现层).
 
-    用于在不重新跑完整 init 的情况下逐项验证抖音端到端链路:
-    CLI 入队 → /api/sources/dy/kick → 扩展 dispatcher → 4 个 scope 串
-    跑完 → POST 回 /api/sources/dy/task-result → 事件 propagate 到 memory。
+    流程:CLI 入队 → /api/sources/dy/kick(WS push 立即唤醒扩展)→ 扩展 dispatcher
+    跑完 4 个 scope → POST 回 /api/sources/dy/task-result → daemon propagate
+    事件到 memory(daemon 端自己干,CLI 不再 propagate 一次)。
 
-    需要的前提:
-      1. ``openbiliclaw start`` daemon 在跑(否则 kick 没人接,只能等 60s 兜底 alarm)
-      2. 浏览器扩展已装且 service-worker 在线
+    适合什么时候用:
+      - 单独测试抖音的扩展能不能拉数据(不污染 init 的画像 / 发现池逻辑)
+      - 已经 init 过画像后,补一次抖音拉取
+      - 调扩展或诊断风控时反复跑
+
+    前提:
+      1. ``openbiliclaw start`` daemon 在跑(kick 才有人接)
+      2. 浏览器扩展已装、service-worker 在线
       3. 浏览器登录了 https://www.douyin.com
     """
 
@@ -3471,7 +3450,9 @@ def fetch_douyin(
                 f" / 点赞 [green]{scope_counts.get('dy_like', 0)}[/green] 个"
                 f" / 关注 [green]{scope_counts.get('dy_follow', 0)}[/green] 人"
             )
-            console.print(f"  共生成 [green]{event_count}[/green] 条事件。")
+            console.print(
+                f"  共 [green]{event_count}[/green] 条事件已由 daemon 写入 memory。"
+            )
         elif status_label == "empty":
             console.print(
                 "  [yellow]抖音任务跑通但 0 条 videos —— 未登录抖音(常见,"
@@ -3480,7 +3461,7 @@ def fetch_douyin(
         elif status_label == "timeout":
             console.print(
                 "  [dim]抖音任务超时:扩展未连接 / 任务还在跑。"
-                "可加 --wait-seconds 120 重试,或确认 daemon + 扩展都在跑。[/dim]"
+                "可加 --wait-seconds 180 重试,或确认 daemon + 扩展都在跑。[/dim]"
             )
         elif status_label == "failed":
             console.print("  [yellow]抖音任务失败 —— 检查扩展日志。[/yellow]")
@@ -3489,7 +3470,6 @@ def fetch_douyin(
         source_label="抖音",
         enqueue=_enqueue_dy_bootstrap_task,
         collect=lambda tid: _collect_dy_bootstrap_events(tid, max_wait_seconds=wait_seconds),
-        propagate=not no_propagate,
         wait_seconds=wait_seconds,
         summary_renderer=_render,
     )
@@ -3498,15 +3478,10 @@ def fetch_douyin(
 @app.command("fetch-xhs")
 def fetch_xhs(
     wait_seconds: float = typer.Option(
-        60.0,
+        90.0,
         "--wait-seconds",
         "-w",
-        help="等扩展回结果的最大秒数(默认 60s)。",
-    ),
-    no_propagate: bool = typer.Option(
-        False,
-        "--no-propagate",
-        help="只跑扩展 + 后端入库 → 不写 memory。",
+        help="等扩展回结果的最大秒数(默认 90s)。",
     ),
 ) -> None:
     """单独测试小红书 bootstrap(独立于 ``init``).
@@ -3541,7 +3516,6 @@ def fetch_xhs(
         source_label="小红书",
         enqueue=_enqueue_xhs_bootstrap_task,
         collect=lambda tid: _collect_xhs_bootstrap_events(tid, max_wait_seconds=wait_seconds),
-        propagate=not no_propagate,
         wait_seconds=wait_seconds,
         summary_renderer=_render,
     )
