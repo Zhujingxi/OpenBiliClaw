@@ -494,6 +494,31 @@ const END_OF_FEED_PHRASES: readonly string[] = [
   "the end",
 ];
 
+/**
+ * Tight visibility check — Douyin renders the "暂时没有更多了" sentinel
+ * up-front and toggles its visibility, so plain textContent matching
+ * triggers even when the list is far from exhausted. Require all of:
+ *   - offsetParent != null (not display:none under any ancestor)
+ *   - getComputedStyle visibility != hidden, opacity > 0
+ *   - layout box has area
+ *   - rect is at or below the upper half of the viewport (bottom
+ *     sentinels live near the visible list bottom; hidden duplicates
+ *     are usually at top:0 / negative offsets)
+ */
+function isTextNodeRenderedVisible(el: HTMLElement): boolean {
+  if (!el.offsetParent && el !== document.body) return false;
+  if (el.offsetWidth === 0 || el.offsetHeight === 0) return false;
+  const style = window.getComputedStyle(el);
+  if (style.visibility === "hidden" || style.display === "none") return false;
+  if (parseFloat(style.opacity) === 0) return false;
+  const rect = el.getBoundingClientRect();
+  if (rect.width === 0 || rect.height === 0) return false;
+  // Filter out top-of-viewport phantoms — real end-of-feed sentinels
+  // sit at the bottom of the rendered list.
+  if (rect.bottom < window.innerHeight * 0.4) return false;
+  return true;
+}
+
 function detectEndOfFeed(): string {
   const candidates = Array.from(
     document.querySelectorAll<HTMLElement>(
@@ -503,9 +528,16 @@ function detectEndOfFeed(): string {
   for (const el of candidates) {
     const text = (el.textContent ?? "").trim();
     if (!text || text.length > 30) continue;
+    let matched = "";
     for (const phrase of END_OF_FEED_PHRASES) {
-      if (text.includes(phrase)) return text;
+      if (text.includes(phrase)) {
+        matched = phrase;
+        break;
+      }
     }
+    if (!matched) continue;
+    if (!isTextNodeRenderedVisible(el)) continue;
+    return text;
   }
   return "";
 }
