@@ -7,6 +7,7 @@
 ## v0.3.69: 抖音首页推荐流 discovery（2026-05-12）
 
 - 新增 GitHub Pages 项目主页：`docs/index.html` 作为 `/docs` 发布入口，首屏突出纯本地 / 私有 / 开源 / 自进化跨平台内容发现 Agent 定位，并提供一句话安装提示、Chrome 插件下载、GitHub 源码、产品闭环和推荐 / 价值画像 / 认知风格 / 聊天校准截图；原文档导航保留在 `docs/index.md`。
+- GitHub Pages 项目主页新增中英文双语切换：默认跟随浏览器语言，用户手动选择后写入 `localStorage`，安装提示、导航、CTA、截图说明、架构说明和复制按钮状态均同步切换。
 - README / README_EN 顶部新增项目主页入口，直接链接到 `https://whiteguo233.github.io/OpenBiliClaw/`。
 - README / README_EN 快速开始重排：普通用户路径收敛为“安装插件 → 复制一句话给 AI 助手部署后端 → 在同一浏览器登录内容平台”，脚本、Docker、多源登录说明、本地 embedding 和 discovery 调试命令统一移入高级折叠项，减少首次安装时的干扰信息。
 - 修正 CDP 文档定位：小红书和抖音当前稳定链路都走 Chrome 插件任务，不再在 README、Docker 部署文档和配置参考里推荐用户为这两个源额外启动 CDP 调试 Chrome；`[sources.browser].cdp_url` 保留给通用 Web / 自定义网页源。
