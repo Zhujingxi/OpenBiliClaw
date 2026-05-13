@@ -1,0 +1,1218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta
+    name="description"
+    content="OpenBiliClaw 是纯本地、私有、开源的自进化跨平台内容发现 Agent。"
+  />
+  <meta property="og:title" content="OpenBiliClaw" />
+  <meta
+    property="og:description"
+    content="从跨平台使用、项目反馈与对话中持续深化心理画像，主动去 B 站、小红书、抖音等来源寻找你会喜欢的内容。"
+  />
+  <meta property="og:type" content="website" />
+  <meta property="og:image" content="images/screenshot-recommend.png" />
+  <title>OpenBiliClaw - 自进化跨平台内容发现 Agent</title>
+  <link
+    rel="icon"
+    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23fb7299'/%3E%3Ccircle cx='27' cy='35' r='13' fill='white'/%3E%3Ccircle cx='43' cy='22' r='7' fill='%2355c7e8'/%3E%3C/svg%3E"
+  />
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #16181d;
+      --ink-soft: #3f4650;
+      --muted: #69717d;
+      --bg: #fffaf4;
+      --paper: #fffdf9;
+      --band: #f1f8fb;
+      --charcoal: #111418;
+      --charcoal-2: #1a1e24;
+      --line: rgba(22, 24, 29, 0.13);
+      --line-dark: rgba(255, 255, 255, 0.13);
+      --pink: #fb7299;
+      --pink-dark: #d94976;
+      --cyan: #35aede;
+      --green: #4fb66a;
+      --yellow: #e0a92f;
+      --radius: 8px;
+      --max: 1180px;
+      --shadow: 0 18px 50px rgba(24, 31, 42, 0.14);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      letter-spacing: 0;
+    }
+
+    img {
+      display: block;
+      max-width: 100%;
+    }
+
+    a {
+      color: inherit;
+    }
+
+    button {
+      border: 0;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      background: rgba(17, 20, 24, 0.88);
+      color: #fff;
+      backdrop-filter: blur(18px);
+    }
+
+    .topbar-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      width: min(var(--max), calc(100% - 40px));
+      min-height: 68px;
+      margin: 0 auto;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+      text-decoration: none;
+    }
+
+    .mark {
+      position: relative;
+      width: 38px;
+      height: 38px;
+      flex: 0 0 auto;
+      border-radius: 8px;
+      background: linear-gradient(145deg, var(--pink), #ff9fb9);
+      box-shadow: 0 12px 28px rgba(251, 114, 153, 0.28);
+    }
+
+    .mark::before,
+    .mark::after {
+      content: "";
+      position: absolute;
+      border-radius: 999px;
+    }
+
+    .mark::before {
+      width: 16px;
+      height: 16px;
+      left: 9px;
+      top: 13px;
+      background: #fff;
+    }
+
+    .mark::after {
+      width: 8px;
+      height: 8px;
+      right: 8px;
+      top: 8px;
+      background: var(--cyan);
+    }
+
+    .brand strong,
+    .brand span {
+      display: block;
+      white-space: nowrap;
+    }
+
+    .brand strong {
+      font-size: 15px;
+      line-height: 1.2;
+    }
+
+    .brand span {
+      margin-top: 2px;
+      color: rgba(255, 255, 255, 0.68);
+      font-size: 12px;
+    }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+
+    .nav::-webkit-scrollbar {
+      display: none;
+    }
+
+    .nav a {
+      display: inline-flex;
+      align-items: center;
+      min-height: 34px;
+      padding: 0 11px;
+      border-radius: 999px;
+      color: rgba(255, 255, 255, 0.72);
+      font-size: 13px;
+      font-weight: 700;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+
+    .nav a:hover,
+    .nav a:focus-visible {
+      color: #fff;
+      background: rgba(255, 255, 255, 0.08);
+      outline: 0;
+    }
+
+    .section {
+      position: relative;
+      padding: 88px 0;
+      overflow: hidden;
+    }
+
+    .section.dark {
+      background: var(--charcoal);
+      color: #fff;
+    }
+
+    .section.band {
+      background: var(--band);
+    }
+
+    .inner {
+      width: min(var(--max), calc(100% - 40px));
+      margin: 0 auto;
+    }
+
+    .hero {
+      min-height: calc(100vh - 68px);
+      padding: 0;
+      background:
+        linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+        linear-gradient(115deg, rgba(251, 114, 153, 0.18), transparent 38%),
+        var(--charcoal);
+      background-size: 52px 52px, 52px 52px, auto, auto;
+      color: #fff;
+    }
+
+    .hero-inner {
+      position: relative;
+      display: grid;
+      align-items: center;
+      min-height: calc(100vh - 68px);
+      padding: 78px 0 58px;
+    }
+
+    .hero-visual {
+      position: absolute;
+      right: 0;
+      bottom: 0;
+      width: min(540px, 40vw);
+      max-height: calc(100vh - 120px);
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-bottom: 0;
+      border-radius: 28px 28px 0 0;
+      background: #fff;
+      box-shadow: 0 34px 90px rgba(0, 0, 0, 0.38);
+    }
+
+    .hero-visual img {
+      width: 100%;
+      height: auto;
+      min-height: 620px;
+      object-fit: cover;
+      object-position: top center;
+    }
+
+    .hero-copy {
+      position: relative;
+      z-index: 2;
+      width: min(620px, 52%);
+      padding-bottom: 44px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      margin: 0 0 18px;
+      color: var(--cyan);
+      font-size: 13px;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 34px;
+      height: 2px;
+      background: currentColor;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      max-width: 620px;
+      font-size: clamp(42px, 5.1vw, 68px);
+      line-height: 1.02;
+      font-weight: 950;
+    }
+
+    h2 {
+      max-width: 860px;
+      font-size: clamp(34px, 4.2vw, 58px);
+      line-height: 1.06;
+      font-weight: 920;
+    }
+
+    h3 {
+      font-size: 22px;
+      line-height: 1.22;
+      font-weight: 870;
+    }
+
+    .lead {
+      max-width: 760px;
+      margin-top: 22px;
+      color: var(--muted);
+      font-size: clamp(18px, 2vw, 23px);
+      line-height: 1.65;
+    }
+
+    .dark .lead,
+    .hero .lead {
+      color: rgba(255, 255, 255, 0.75);
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 34px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      padding: 0 16px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--paper);
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 850;
+      text-decoration: none;
+      transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+    }
+
+    .btn:hover,
+    .btn:focus-visible {
+      transform: translateY(-1px);
+      box-shadow: 0 12px 26px rgba(24, 31, 42, 0.13);
+      outline: 0;
+    }
+
+    .btn.primary {
+      border-color: var(--pink);
+      background: var(--pink);
+      color: #fff;
+    }
+
+    .btn.dark {
+      border-color: rgba(255, 255, 255, 0.16);
+      background: rgba(255, 255, 255, 0.08);
+      color: #fff;
+    }
+
+    .hero-metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      width: min(620px, 52%);
+      margin-top: 46px;
+    }
+
+    .metric {
+      min-height: 86px;
+      padding: 15px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.07);
+    }
+
+    .metric b,
+    .metric span {
+      display: block;
+    }
+
+    .metric b {
+      font-size: 18px;
+      line-height: 1.15;
+    }
+
+    .metric span {
+      margin-top: 7px;
+      color: rgba(255, 255, 255, 0.68);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .next-hint {
+      position: absolute;
+      left: 0;
+      bottom: 18px;
+      z-index: 3;
+      color: rgba(255, 255, 255, 0.62);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    .install-panel {
+      display: grid;
+      grid-template-columns: minmax(0, 0.9fr) minmax(360px, 1.1fr);
+      gap: 28px;
+      align-items: stretch;
+    }
+
+    .section-head {
+      margin-bottom: 34px;
+    }
+
+    .section-head .lead {
+      max-width: 720px;
+    }
+
+    .code-panel {
+      display: grid;
+      gap: 14px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+      box-shadow: var(--shadow);
+    }
+
+    .code-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--ink-soft);
+      font-size: 13px;
+      font-weight: 850;
+    }
+
+    .copy-btn {
+      min-height: 32px;
+      padding: 0 11px;
+      border-radius: 999px;
+      background: rgba(251, 114, 153, 0.12);
+      color: var(--pink-dark);
+      font-size: 12px;
+      font-weight: 850;
+    }
+
+    pre {
+      margin: 0;
+      overflow-x: auto;
+      border-radius: var(--radius);
+      background: #15181d;
+      color: #f5f7fa;
+      scrollbar-width: thin;
+    }
+
+    code {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    pre code {
+      display: block;
+      min-width: 0;
+      padding: 16px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .install-notes {
+      display: grid;
+      gap: 12px;
+    }
+
+    .note {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.58);
+    }
+
+    .note h3 {
+      font-size: 18px;
+    }
+
+    .note p {
+      margin-top: 9px;
+      color: var(--muted);
+      line-height: 1.65;
+      font-size: 14px;
+    }
+
+    .value-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 36px;
+    }
+
+    .value-card {
+      min-height: 250px;
+      padding: 22px;
+      border: 1px solid var(--line-dark);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.07);
+    }
+
+    .value-card b {
+      display: block;
+      color: var(--cyan);
+      font-size: 13px;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    .value-card h3 {
+      margin-top: 18px;
+      color: #fff;
+    }
+
+    .value-card p {
+      margin-top: 12px;
+      color: rgba(255, 255, 255, 0.72);
+      font-size: 14px;
+      line-height: 1.7;
+    }
+
+    .loop {
+      display: grid;
+      grid-template-columns: minmax(0, 0.8fr) minmax(360px, 1.2fr);
+      gap: 36px;
+      align-items: start;
+    }
+
+    .loop-steps {
+      display: grid;
+      gap: 10px;
+    }
+
+    .loop-step {
+      display: grid;
+      grid-template-columns: 44px 1fr;
+      gap: 14px;
+      align-items: start;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+    }
+
+    .loop-index {
+      display: grid;
+      place-items: center;
+      width: 44px;
+      height: 44px;
+      border-radius: var(--radius);
+      background: var(--charcoal);
+      color: #fff;
+      font-weight: 920;
+    }
+
+    .loop-step p {
+      margin-top: 7px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.65;
+    }
+
+    .sources-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 34px;
+    }
+
+    .source-card {
+      min-height: 178px;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+    }
+
+    .source-card span {
+      display: inline-flex;
+      align-items: center;
+      min-height: 27px;
+      padding: 0 9px;
+      border-radius: 999px;
+      background: rgba(53, 174, 222, 0.11);
+      color: #127ca8;
+      font-size: 12px;
+      font-weight: 850;
+    }
+
+    .source-card h3 {
+      margin-top: 18px;
+    }
+
+    .source-card p {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.65;
+    }
+
+    .screens {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 34px;
+    }
+
+    .screen-shot {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+      box-shadow: var(--shadow);
+    }
+
+    .screen-shot img {
+      width: 100%;
+      height: 420px;
+      object-fit: cover;
+      object-position: top center;
+    }
+
+    .screen-shot div {
+      padding: 18px;
+      border-top: 1px solid var(--line);
+      background: var(--paper);
+    }
+
+    .screen-shot h3 {
+      font-size: 18px;
+    }
+
+    .screen-shot p {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .tech-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 16px;
+      margin-top: 34px;
+    }
+
+    .tech-item {
+      display: grid;
+      grid-template-columns: 52px 1fr;
+      gap: 14px;
+      padding: 18px;
+      border: 1px solid var(--line-dark);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.07);
+    }
+
+    .tech-num {
+      display: grid;
+      place-items: center;
+      width: 52px;
+      height: 52px;
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.1);
+      color: var(--cyan);
+      font-weight: 920;
+    }
+
+    .tech-item p {
+      margin-top: 7px;
+      color: rgba(255, 255, 255, 0.72);
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    .closing {
+      text-align: center;
+    }
+
+    .closing h2,
+    .closing .lead {
+      margin-left: auto;
+      margin-right: auto;
+    }
+
+    .closing-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 12px;
+      margin-top: 30px;
+    }
+
+    .footer {
+      padding: 28px 0;
+      border-top: 1px solid var(--line);
+      background: var(--paper);
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .footer .inner {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      flex-wrap: wrap;
+    }
+
+    .footer a {
+      color: var(--ink);
+      font-weight: 750;
+      text-decoration: none;
+    }
+
+    .reveal {
+      opacity: 0;
+      transform: translateY(18px);
+      transition: opacity 560ms ease, transform 560ms ease;
+    }
+
+    .reveal.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        animation: none !important;
+        scroll-behavior: auto !important;
+        transition: none !important;
+      }
+    }
+
+    @media (max-width: 1040px) {
+      .hero-copy {
+        width: min(760px, 100%);
+      }
+
+      .hero-visual {
+        position: relative;
+        width: min(620px, 100%);
+        max-height: none;
+        margin-top: 28px;
+      }
+
+      .hero-inner {
+        padding-bottom: 0;
+      }
+
+      .hero-metrics {
+        width: 100%;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .install-panel,
+      .loop {
+        grid-template-columns: 1fr;
+      }
+
+      .value-grid,
+      .sources-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .screens {
+        grid-template-columns: 1fr;
+      }
+
+      .screen-shot img {
+        height: 520px;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .topbar-inner {
+        width: calc(100% - 28px);
+        min-height: 82px;
+        align-items: flex-start;
+        flex-direction: column;
+        padding: 14px 0;
+      }
+
+      .nav {
+        width: 100%;
+      }
+
+      .section {
+        padding: 64px 0;
+      }
+
+      .hero-inner {
+        min-height: auto;
+        padding: 34px 0 0;
+      }
+
+      .hero-copy {
+        padding-bottom: 12px;
+        order: 1;
+      }
+
+      .hero-visual {
+        order: 2;
+      }
+
+      .hero-metrics {
+        display: none;
+      }
+
+      h1 {
+        font-size: clamp(38px, 11vw, 50px);
+      }
+
+      h2 {
+        font-size: clamp(32px, 10vw, 44px);
+      }
+
+      .hero-actions,
+      .closing-actions {
+        flex-direction: column;
+      }
+
+      .hero-actions {
+        gap: 10px;
+        margin-top: 24px;
+      }
+
+      .btn {
+        width: 100%;
+      }
+
+      .hero-metrics,
+      .value-grid,
+      .sources-grid,
+      .tech-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .hero-visual {
+        border-radius: 22px 22px 0 0;
+        margin-top: 18px;
+      }
+
+      .hero .lead {
+        margin-top: 18px;
+        font-size: 17px;
+        line-height: 1.55;
+      }
+
+      .screen-shot img {
+        height: 390px;
+      }
+
+      .footer .inner {
+        flex-direction: column;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#top" aria-label="OpenBiliClaw 首页">
+        <span class="mark" aria-hidden="true"></span>
+        <span>
+          <strong>OpenBiliClaw</strong>
+          <span>自进化内容发现 Agent</span>
+        </span>
+      </a>
+      <nav class="nav" aria-label="首页导航">
+        <a href="#install">安装</a>
+        <a href="#why">卖点</a>
+        <a href="#loop">闭环</a>
+        <a href="#sources">来源</a>
+        <a href="#screens">截图</a>
+        <a href="#tech">架构</a>
+        <a href="https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/index.md">文档</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero section dark">
+      <div class="inner hero-inner">
+        <div class="hero-copy reveal">
+          <p class="eyebrow">Fully local · private · open source</p>
+          <h1>自进化的跨平台内容发现 Agent。</h1>
+          <p class="lead">
+            OpenBiliClaw 从跨平台使用、项目内反馈与对话中持续深化心理画像，
+            让 Agent 带着越来越准确的用户理解，主动去 B 站、小红书、抖音等来源寻找你会喜欢的内容。
+          </p>
+          <div class="hero-actions" aria-label="主要操作">
+            <a class="btn primary" href="#install">一句话安装</a>
+            <a class="btn dark" href="https://github.com/whiteguo233/OpenBiliClaw/releases/latest">下载 Chrome 插件</a>
+            <a class="btn dark" href="https://github.com/whiteguo233/OpenBiliClaw">GitHub 源码</a>
+          </div>
+          <div class="hero-metrics" aria-label="项目关键词">
+            <div class="metric">
+              <b>纯本地</b>
+              <span>画像、候选池和推荐历史留在你的机器上</span>
+            </div>
+            <div class="metric">
+              <b>自进化</b>
+              <span>使用、反馈、聊天都会推动理解继续变深</span>
+            </div>
+            <div class="metric">
+              <b>跨平台</b>
+              <span>B 站、小红书、抖音和通用 Web 来源合流</span>
+            </div>
+            <div class="metric">
+              <b>主动发现</b>
+              <span>不是等你刷到，而是带着画像出去找</span>
+            </div>
+          </div>
+        </div>
+        <div class="hero-visual reveal" aria-label="OpenBiliClaw 推荐界面截图">
+          <img src="images/screenshot-recommend.png" alt="OpenBiliClaw 浏览器侧边栏推荐界面" />
+        </div>
+        <div class="next-hint">Install prompt below</div>
+      </div>
+    </section>
+
+    <section class="section band" id="install">
+      <div class="inner install-panel">
+        <div class="section-head reveal">
+          <p class="eyebrow">Start</p>
+          <h2>把这句话交给 AI 编程助手，让它在本机帮你部署。</h2>
+          <p class="lead">
+            推荐先装 Chrome 插件，再让 Claude Code、Codex CLI、Cursor 或 Windsurf 按机器契约完成后端部署、健康检查和首次初始化。
+          </p>
+          <div class="hero-actions">
+            <a class="btn primary" href="https://github.com/whiteguo233/OpenBiliClaw/releases/latest">下载插件</a>
+            <a class="btn" href="https://github.com/whiteguo233/OpenBiliClaw#readme">查看 README</a>
+          </div>
+        </div>
+
+        <div class="install-notes reveal">
+          <div class="code-panel">
+            <div class="code-head">
+              <span>一句话安装提示</span>
+              <button class="copy-btn" data-copy="#agentPrompt">复制</button>
+            </div>
+            <pre><code id="agentPrompt">请按照 https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md 的说明帮我部署 OpenBiliClaw 后端(务必用 Bash 的 curl 下载这个文档,不要用 WebFetch — 会丢关键指令)</code></pre>
+          </div>
+
+          <div class="code-panel">
+            <div class="code-head">
+              <span>不用 AI 助手时的脚本</span>
+              <button class="copy-btn" data-copy="#shellInstall">复制</button>
+            </div>
+            <pre><code id="shellInstall">curl -fsSL https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scripts/install.sh | bash</code></pre>
+          </div>
+
+          <div class="note">
+            <h3>插件是主要入口</h3>
+            <p>
+              插件负责侧边栏推荐、行为采集、反馈、聊天，以及 B 站 / 小红书 / 抖音登录态任务桥。
+              安装后请在同一个浏览器里登录你想接入的内容平台。
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section dark" id="why">
+      <div class="inner">
+        <div class="section-head reveal">
+          <p class="eyebrow">Why it matters</p>
+          <h2>推荐顺序反过来：先理解人，再找内容。</h2>
+          <p class="lead">
+            平台推荐通常先有内容池，再预测你会点什么。OpenBiliClaw 先沉淀对你的理解，再让 Agent 带着这份理解跨平台主动寻找。
+          </p>
+        </div>
+        <div class="value-grid">
+          <article class="value-card reveal">
+            <b>01 Private</b>
+            <h3>纯本地私有</h3>
+            <p>数据落在本机 SQLite 与本地记忆文件里。你使用自己的模型配置和 API Key，不需要把画像交给新的云端服务。</p>
+          </article>
+          <article class="value-card reveal">
+            <b>02 Self-improving</b>
+            <h3>画像会随使用演化</h3>
+            <p>跨平台行为、推荐反馈、聊天表达、兴趣探针确认，都会进入学习闭环，让系统逐步更懂你的真实偏好。</p>
+          </article>
+          <article class="value-card reveal">
+            <b>03 Proactive</b>
+            <h3>主动去找，而不是等你刷</h3>
+            <p>Discovery 会把心理画像翻译成搜索、趋势、关联链、远域探索和多源任务，持续维护候选池。</p>
+          </article>
+          <article class="value-card reveal">
+            <b>04 Explainable</b>
+            <h3>推荐理由能看懂</h3>
+            <p>每条推荐都带朋友式解释。你可以喜欢、不喜欢、补一句原因，反馈会继续影响后续发现和排序。</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="loop">
+      <div class="inner loop">
+        <div class="section-head reveal">
+          <p class="eyebrow">Learning Loop</p>
+          <h2>自进化不是口号，而是一条闭环。</h2>
+          <p class="lead">
+            OpenBiliClaw 不只是抓取历史再生成一次画像。它会在实际使用中持续吸收新的行为、反馈和对话，让理解和推荐一起更新。
+          </p>
+        </div>
+        <div class="loop-steps">
+          <article class="loop-step reveal">
+            <div class="loop-index">01</div>
+            <div>
+              <h3>跨平台使用行为</h3>
+              <p>B 站观看、收藏、关注，小红书收藏和喜欢，抖音发布 / 收藏 / 点赞 / 关注，以及通用 Web 页面信号进入同一事件层。</p>
+            </div>
+          </article>
+          <article class="loop-step reveal">
+            <div class="loop-index">02</div>
+            <div>
+              <h3>项目内反馈与对话</h3>
+              <p>你对推荐卡片的喜欢、不感兴趣、评论，以及侧边栏聊天里的明确偏好，会成为新的长期理解候选。</p>
+            </div>
+          </article>
+          <article class="loop-step reveal">
+            <div class="loop-index">03</div>
+            <div>
+              <h3>心理画像持续深化</h3>
+              <p>Soul Engine 会把事件转成偏好、觉察、洞察和分层画像，不只记录“看了什么”，还判断“为什么会喜欢”。</p>
+            </div>
+          </article>
+          <article class="loop-step reveal">
+            <div class="loop-index">04</div>
+            <div>
+              <h3>Agent 带着理解主动寻找</h3>
+              <p>Discovery Engine 把画像变成可执行的搜索、热点、关联、探索和多源任务，补进候选池并保持来源配比。</p>
+            </div>
+          </article>
+          <article class="loop-step reveal">
+            <div class="loop-index">05</div>
+            <div>
+              <h3>推荐继续反哺理解</h3>
+              <p>Recommendation Engine 选出内容、解释原因、接收反馈；下一轮画像和候选池会因此继续校准。</p>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section band" id="sources">
+      <div class="inner">
+        <div class="section-head reveal">
+          <p class="eyebrow">Sources</p>
+          <h2>你的兴趣不该被单个平台切碎。</h2>
+          <p class="lead">OpenBiliClaw 用统一候选池和来源配比把多个内容来源接进同一套理解、发现和推荐流程。</p>
+        </div>
+        <div class="sources-grid">
+          <article class="source-card reveal">
+            <span>Bilibili</span>
+            <h3>B 站</h3>
+            <p>历史、收藏、关注、搜索、趋势、关联链和跨域探索共同提供候选。</p>
+          </article>
+          <article class="source-card reveal">
+            <span>Xiaohongshu</span>
+            <h3>小红书</h3>
+            <p>通过浏览器插件任务桥读取收藏、喜欢和页面内容，不由后端直接爬取。</p>
+          </article>
+          <article class="source-card reveal">
+            <span>Douyin</span>
+            <h3>抖音</h3>
+            <p>初始化信号、插件签名搜索、hot related 和首页 feed 都走已登录浏览器链路。</p>
+          </article>
+          <article class="source-card reveal">
+            <span>Web</span>
+            <h3>通用 Web</h3>
+            <p>通过浏览器与 LLM 内容抽取接入更多站点，让非平台内容也进入画像。</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="screens">
+      <div class="inner">
+        <div class="section-head reveal">
+          <p class="eyebrow">Product</p>
+          <h2>用户看到的是一个浏览器侧边栏。</h2>
+          <p class="lead">复杂的理解、发现和推荐链路藏在本地后端里；日常使用只需要在插件里看推荐、看画像、聊天和反馈。</p>
+        </div>
+        <div class="screens">
+          <article class="screen-shot reveal">
+            <img src="images/screenshot-recommend-feedback.png" alt="推荐卡片和反馈按钮截图" />
+            <div>
+              <h3>推荐与反馈</h3>
+              <p>换一批、继续看、喜欢、不感兴趣、写一句原因，反馈会回到学习闭环。</p>
+            </div>
+          </article>
+          <article class="screen-shot reveal">
+            <img src="images/screenshot-profile-portrait.png" alt="用户心理画像截图" />
+            <div>
+              <h3>分层心理画像</h3>
+              <p>人格画像、认知风格、价值偏好、兴趣结构和最近新记住的变化都可查看。</p>
+            </div>
+          </article>
+          <article class="screen-shot reveal">
+            <img src="images/screenshot-chat.png" alt="侧边栏聊天截图" />
+            <div>
+              <h3>聊天校准</h3>
+              <p>有些偏好不必靠猜。直接告诉它你想看什么、避开什么、为什么没打中。</p>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section dark" id="tech">
+      <div class="inner">
+        <div class="section-head reveal">
+          <p class="eyebrow">Architecture</p>
+          <h2>技术可以讲成四层：入口、记忆、理解、发现。</h2>
+          <p class="lead">没有云端账号体系，也不是又一个内容平台。它是一套跑在你电脑上的个人推荐系统。</p>
+        </div>
+        <div class="tech-grid">
+          <article class="tech-item reveal">
+            <div class="tech-num">01</div>
+            <div>
+              <h3>Chrome 扩展</h3>
+              <p>侧边栏展示推荐、采集行为、同步登录态、执行小红书和抖音任务。</p>
+            </div>
+          </article>
+          <article class="tech-item reveal">
+            <div class="tech-num">02</div>
+            <div>
+              <h3>本地后端</h3>
+              <p>运行在 127.0.0.1，接收事件、调度 discovery、提供 API 和实时状态。</p>
+            </div>
+          </article>
+          <article class="tech-item reveal">
+            <div class="tech-num">03</div>
+            <div>
+              <h3>Soul / Discovery / Recommendation</h3>
+              <p>Soul 理解人，Discovery 找候选，Recommendation 挑内容并生成解释。</p>
+            </div>
+          </article>
+          <article class="tech-item reveal">
+            <div class="tech-num">04</div>
+            <div>
+              <h3>SQLite 私有记忆</h3>
+              <p>行为、画像、候选池和推荐历史留在本机，可备份、检查、清理和迁移。</p>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section closing">
+      <div class="inner reveal">
+        <p class="eyebrow">Build your own recommender</p>
+        <h2>让推荐系统重新站到用户这一边。</h2>
+        <p class="lead">纯本地、私有、开源、可解释、可反馈、会随你使用持续演化。</p>
+        <div class="closing-actions">
+          <a class="btn primary" href="#install">复制安装提示</a>
+          <a class="btn" href="https://github.com/whiteguo233/OpenBiliClaw/releases/latest">下载 Chrome 插件</a>
+          <a class="btn" href="https://github.com/whiteguo233/OpenBiliClaw">打开 GitHub</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="inner">
+      <span>OpenBiliClaw · Local personalized content discovery agent</span>
+      <span>
+        <a href="https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/index.md">Docs</a>
+        ·
+        <a href="https://github.com/whiteguo233/OpenBiliClaw/releases">Releases</a>
+        ·
+        <a href="https://github.com/whiteguo233/OpenBiliClaw">GitHub</a>
+      </span>
+    </div>
+  </footer>
+
+  <script>
+    const revealObserver = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            entry.target.classList.add("visible");
+            revealObserver.unobserve(entry.target);
+          }
+        });
+      },
+      { threshold: 0.12 }
+    );
+
+    document.querySelectorAll(".reveal").forEach((node) => revealObserver.observe(node));
+
+    document.querySelectorAll("[data-copy]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const target = document.querySelector(button.getAttribute("data-copy"));
+        if (!target) return;
+        const original = button.textContent;
+        try {
+          await navigator.clipboard.writeText(target.textContent.trim());
+          button.textContent = "已复制";
+        } catch {
+          button.textContent = "手动复制";
+        }
+        window.setTimeout(() => {
+          button.textContent = original;
+        }, 1400);
+      });
+    });
+  </script>
+</body>
+</html>

@@ -6,6 +6,7 @@
 
 ## v0.3.69: 抖音首页推荐流 discovery（2026-05-12）
 
+- 新增 GitHub Pages 项目主页：`docs/index.html` 作为 `/docs` 发布入口，首屏突出纯本地 / 私有 / 开源 / 自进化跨平台内容发现 Agent 定位，并提供一句话安装提示、Chrome 插件下载、GitHub 源码和产品闭环说明；原文档导航保留在 `docs/index.md`。
 - 新增抖音首页推荐流 discovery：`discover-douyin --source feed` 会入队 `dy_tasks(type="feed")`，扩展在已登录抖音首页通过 MAIN-world `byted_acrawler.frontierSign()` 签名 `/aweme/v1/web/tab/feed/`，候选以 `dy-plugin-feed` 进入 discovery。
 - 抖音公开 discovery 子来源调整为 `search` / `hot` / `feed`；`creator` 不再作为 CLI 可选渠道，避免把作者主页时间线当作默认内容发现来源。
 - `[sources.douyin]` 新增 `daily_feed_budget`，限制每日 `dy_tasks(type="feed")` 入队次数；`daily_search_budget` / `daily_hot_budget` 继续分别约束 search / hot。
