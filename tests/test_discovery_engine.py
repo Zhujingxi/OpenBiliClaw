@@ -15,6 +15,7 @@ from openbiliclaw.discovery.engine import (
     DiscoveryConcurrencyController,
     llm_eval_candidate_limit,
 )
+from openbiliclaw.discovery.pool_snapshot import PoolDistributionSnapshot
 from openbiliclaw.soul.profile import SoulProfile
 from openbiliclaw.storage.database import Database
 
@@ -470,6 +471,71 @@ async def test_discovery_engine_passes_pool_snapshot_to_backfill_strategy() -> N
 
     assert [item.bvid for item in results] == ["BV1PRIMARY", "BV1SNAP"]
     assert backfill_strategy.pool_snapshots == [pool_snapshot]
+
+
+@pytest.mark.asyncio
+async def test_pool_snapshot_soft_rerank_prefers_undercovered_topics_without_dropping_strong_matches(  # noqa: E501
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sat = DiscoveredContent(
+        bvid="BVsat",
+        title="AI",
+        topic_group="AI 编程",
+        style_key="deep_dive",
+        relevance_score=0.82,
+    )
+    gap = DiscoveredContent(
+        bvid="BVgap",
+        title="纪录",
+        topic_group="人物纪录",
+        style_key="story_doc",
+        relevance_score=0.79,
+    )
+    strong = DiscoveredContent(
+        bvid="BVstrong",
+        title="AI high",
+        topic_group="AI 编程",
+        relevance_score=0.96,
+    )
+    pool_snapshot = PoolDistributionSnapshot(
+        pool_target_count=10,
+        pool_available_count=10,
+        source_targets={},
+        source_counts={},
+        source_deficits={},
+        saturated_topics=("AI 编程",),
+        undercovered_axes=("人物纪录",),
+    )
+
+    class _ThreeCandidateStrategy(_RecordingStrategy):
+        async def discover(
+            self,
+            profile: SoulProfile,
+            limit: int = 20,
+        ) -> list[DiscoveredContent]:
+            self.limits.append(limit)
+            return [sat, gap, strong]
+
+    strategy = _ThreeCandidateStrategy("search", [sat, gap, strong])
+    engine = ContentDiscoveryEngine()
+    engine.register_strategy(strategy)
+    monkeypatch.setattr(
+        ContentDiscoveryEngine,
+        "_compress_topic_repeats",
+        staticmethod(lambda results, *, limit: results[:limit]),
+    )
+    monkeypatch.setattr(engine, "_cache_results", lambda results: None)
+
+    results = await engine.discover(
+        _build_profile(),
+        strategies=["search"],
+        limit=2,
+        pool_snapshot=pool_snapshot,
+    )
+
+    assert [item.bvid for item in results] == ["BVstrong", "BVgap"]
+    assert gap.relevance_score == 0.79
+    assert sat.relevance_score == 0.82
 
 
 def test_llm_eval_candidate_limit_uses_tighter_small_gap_window() -> None:

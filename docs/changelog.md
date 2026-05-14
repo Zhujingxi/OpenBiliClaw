@@ -36,6 +36,7 @@
 - 新增 pool distribution snapshot 基础模型：`PoolDistributionSnapshot` 汇总候选池总量、平台缺口和 topic/style/franchise 饱和方向，并通过 `Database.get_pool_distribution_counts()` 复用 fresh、非 dislike、未推荐且可打开的候选统计口径，为后续 pool-aware discovery prompt / rerank 铺底。
 - runtime refresh 现在会在 discovery 前构建 pool snapshot，并通过 `ContentDiscoveryEngine.discover(..., pool_snapshot=...)` 兼容转发给支持该参数的主策略与 backfill 策略，旧版 strategy 签名保持可用。
 - `SearchStrategy.discover(..., pool_snapshot=...)` 现在会把 `PoolDistributionSnapshot.to_prompt_hints()` 注入搜索 query prompt：对已拥挤 topic/style 做软避让，保留 `source_deficits` 作为独立平台缺口信号；运行时快照暂不把平台名转成内容 `prefer_axes`。
+- discovery engine 会在最终压缩和入池前应用 pool snapshot 软重排：饱和 topic/style/franchise 轻微降权，undercovered axes 轻微加权，强相关候选保留优先级且原始 `relevance_score` 不被改写。
 - 抖音补池预算修正：`dy_tasks` 中因 daemon 重启 / 插件未及时消费而失败的 `stale_pending` discovery 任务不再计入 search / hot / feed 每日预算，避免历史陈旧 pending 吃光当天 search 配额。
 - 抖音 runtime 大缺口补池改为优先 `search` / `hot`，不再把低产出的 `feed` 混进大批量补池；`daily_hot_budget` 在 runtime 中会按本轮抖音缺口动态抬高到最多 60，默认 `5` 仍作为小缺口 / 手动调试的保守基线。
 - 参考开源实现确认首页推荐流端点：F2 暴露 `fetch_post_feed` + `TAB_FEED=/aweme/v1/web/tab/feed/`，Douyin_TikTok_Download_API 也记录了 `TAB_FEED` 和 `PostFeed` 参数模型；本项目不引入第三方依赖，只复用端点和参数形态。

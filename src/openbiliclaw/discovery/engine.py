@@ -546,6 +546,7 @@ class ContentDiscoveryEngine:
         merged_primary = self._merge_and_rank(primary_results)
         await self._normalize_topic_groups(merged_primary)
         await self._normalize_topic_keys(merged_primary)
+        merged_primary = self._apply_pool_snapshot_rerank(merged_primary, pool_snapshot)
         final_results = self._compress_topic_repeats(
             merged_primary,
             limit=effective_limit,
@@ -563,6 +564,7 @@ class ContentDiscoveryEngine:
             all_results = self._merge_and_rank([*final_results, *backfill_results])
             await self._normalize_topic_groups(all_results)
             await self._normalize_topic_keys(all_results)
+            all_results = self._apply_pool_snapshot_rerank(all_results, pool_snapshot)
             final_results = self._compress_topic_repeats(
                 all_results,
                 limit=effective_limit,
@@ -1543,6 +1545,91 @@ class ContentDiscoveryEngine:
             )
         )
         return merged
+
+    @staticmethod
+    def _apply_pool_snapshot_rerank(
+        results: list[DiscoveredContent],
+        pool_snapshot: Any | None,
+    ) -> list[DiscoveredContent]:
+        if pool_snapshot is None or len(results) <= 1:
+            return list(results)
+
+        saturated_topics = ContentDiscoveryEngine._normalized_snapshot_values(
+            pool_snapshot,
+            "saturated_topics",
+        )
+        saturated_styles = ContentDiscoveryEngine._normalized_snapshot_values(
+            pool_snapshot,
+            "saturated_styles",
+        )
+        saturated_franchises = ContentDiscoveryEngine._normalized_snapshot_values(
+            pool_snapshot,
+            "saturated_franchises",
+        )
+        undercovered_axes = ContentDiscoveryEngine._normalized_snapshot_values(
+            pool_snapshot,
+            "undercovered_axes",
+        )
+        if not (saturated_topics or saturated_styles or saturated_franchises or undercovered_axes):
+            return list(results)
+
+        indexed_results = list(enumerate(results))
+        indexed_results.sort(
+            key=lambda indexed: ContentDiscoveryEngine._pool_rerank_key(
+                indexed[1],
+                original_index=indexed[0],
+                saturated_topics=saturated_topics,
+                saturated_styles=saturated_styles,
+                saturated_franchises=saturated_franchises,
+                undercovered_axes=undercovered_axes,
+            )
+        )
+        return [item for _, item in indexed_results]
+
+    @staticmethod
+    def _pool_rerank_key(
+        item: DiscoveredContent,
+        *,
+        original_index: int,
+        saturated_topics: set[str],
+        saturated_styles: set[str],
+        saturated_franchises: set[str],
+        undercovered_axes: set[str],
+    ) -> tuple[bool, bool, float, float, int]:
+        raw_score = item.relevance_score
+        adjusted_score = raw_score
+        topic = ContentDiscoveryEngine._topic_bucket(item)
+        style = ContentDiscoveryEngine._style_bucket(item)
+        franchise = ContentDiscoveryEngine._normalize_topic_token(item.franchise_key)
+
+        if topic in saturated_topics:
+            adjusted_score -= 0.08
+        if style in saturated_styles:
+            adjusted_score -= 0.04
+        if franchise in saturated_franchises:
+            adjusted_score -= 0.10
+        if topic in undercovered_axes:
+            adjusted_score += 0.04
+
+        return (
+            item.candidate_tier != "primary",
+            raw_score < 0.92,
+            -adjusted_score,
+            -raw_score,
+            original_index,
+        )
+
+    @staticmethod
+    def _normalized_snapshot_values(pool_snapshot: Any, attribute: str) -> set[str]:
+        values = getattr(pool_snapshot, attribute, ()) or ()
+        if not isinstance(values, (list, tuple, set, frozenset)):
+            return set()
+        return {
+            token
+            for value in values
+            if isinstance(value, str)
+            if (token := ContentDiscoveryEngine._normalize_topic_token(value))
+        }
 
     @staticmethod
     def _compress_topic_repeats(

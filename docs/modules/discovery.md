@@ -95,6 +95,7 @@
    - 先保 `candidate_tier == "primary"` 的主发现结果
    - 再看 `relevance_score`
    - 同分附近再参考 `view_count`
+   - 如果 runtime 传入 `PoolDistributionSnapshot`，会在压缩前用 pool 饱和方向做一轮软重排：已拥挤的 topic/style/franchise 会轻微降权，手动传入的 undercovered axes 会轻微加权，但不会改写最终落库的 `relevance_score`
    - 若主发现数量不够，再进入 backfill
 
    backfill 的做法也不是简单“补一些随便的内容”，而是分两层：
