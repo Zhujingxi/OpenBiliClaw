@@ -33,7 +33,7 @@ class PoolDistributionSnapshot:
             "avoid_styles": list(self.saturated_styles[:8]),
             "avoid_franchises": list(self.saturated_franchises[:8]),
             "prefer_axes": list(self.undercovered_axes[:8]),
-            "source_deficits": dict(self.source_deficits),
+            "source_deficits": _top_positive_counts(self.source_deficits, limit=8),
         }
 
 
@@ -46,7 +46,7 @@ def build_pool_distribution_snapshot(
     """Build a compact pool coverage summary for later discovery prompts."""
     target_count = max(0, int(pool_target_count))
     clean_source_targets = {
-        str(source): max(0, int(target))
+        str(source).strip(): max(0, int(target))
         for source, target in source_targets.items()
         if str(source).strip()
     }
@@ -99,3 +99,14 @@ def _keys_at_or_above(counts: dict[str, int], threshold: int) -> tuple[str, ...]
         for key, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
         if int(count) >= threshold
     )
+
+
+def _top_positive_counts(counts: dict[str, int], *, limit: int) -> dict[str, int]:
+    if limit <= 0:
+        return {}
+    positive_counts = (
+        (key, count)
+        for key, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+        if count > 0
+    )
+    return dict(list(positive_counts)[:limit])
