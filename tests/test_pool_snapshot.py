@@ -72,6 +72,44 @@ def test_runtime_pool_snapshot_does_not_turn_source_deficits_into_prefer_axes(tm
     assert hints["prefer_axes"] == []
 
 
+def test_pool_snapshot_uses_default_pool_saturation_thresholds(tmp_path):
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    for index in range(78):
+        db.cache_content(
+            f"BVtopic{index}",
+            title=f"AI item {index}",
+            topic_group="AI 编程",
+            style_key="deep_dive",
+            source="search",
+            relevance_score=0.8,
+            pool_expression="x",
+            pool_topic_label="x",
+        )
+    for index in range(10):
+        db.cache_content(
+            f"BVfranchise{index}",
+            title=f"franchise item {index}",
+            topic_group="游戏讨论",
+            style_key="light_chat",
+            franchise_key="原神",
+            source="search",
+            relevance_score=0.75,
+            pool_expression="x",
+            pool_topic_label="x",
+        )
+
+    snapshot = build_pool_distribution_snapshot(
+        db,
+        pool_target_count=600,
+        source_targets={"bilibili": 480, "xiaohongshu": 60, "douyin": 60},
+    )
+
+    assert "AI 编程" in snapshot.saturated_topics
+    assert "deep_dive" in snapshot.saturated_styles
+    assert "原神" in snapshot.saturated_franchises
+
+
 def test_prompt_hints_caps_positive_source_deficits_by_priority():
     snapshot = PoolDistributionSnapshot(
         pool_target_count=100,

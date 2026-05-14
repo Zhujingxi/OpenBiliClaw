@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import ceil
 from typing import Protocol
+
+_FRANCHISE_SATURATION_THRESHOLD = 10
 
 
 class PoolStatsDatabase(Protocol):
@@ -58,9 +59,9 @@ def build_pool_distribution_snapshot(
     }
     distribution_counts = db.get_pool_distribution_counts()
 
-    topic_threshold = max(8, ceil(target_count * 0.20))
-    style_threshold = max(8, ceil(target_count * 0.20))
-    franchise_threshold = max(4, ceil(target_count * 0.10))
+    topic_threshold = max(8, target_count // 20)
+    style_threshold = max(12, target_count // 8)
+    franchise_threshold = _FRANCHISE_SATURATION_THRESHOLD
 
     saturated_topics = _keys_at_or_above(
         distribution_counts.get("topic_group", {}),

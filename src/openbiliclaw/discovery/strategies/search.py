@@ -310,13 +310,42 @@ class SearchStrategy(DiscoveryStrategy):
         *,
         pool_snapshot: object | None = None,
     ) -> list[str]:
+        pool_hints: dict[str, object] | None = None
+        to_prompt_hints = getattr(pool_snapshot, "to_prompt_hints", None)
+        if callable(to_prompt_hints):
+            try:
+                raw_hints = to_prompt_hints()
+            except Exception:
+                logger.warning(
+                    "Search query generation: ignoring invalid pool snapshot hints",
+                    exc_info=True,
+                )
+            else:
+                if isinstance(raw_hints, dict):
+                    pool_hints = raw_hints
+                else:
+                    logger.warning(
+                        "Search query generation: ignoring non-dict pool snapshot hints: %s",
+                        type(raw_hints).__name__,
+                    )
+
         try:
-            to_prompt_hints = getattr(pool_snapshot, "to_prompt_hints", None)
-            pool_hints = to_prompt_hints() if callable(to_prompt_hints) else None
-            prompt_messages = build_search_queries_prompt(
-                profile_summary=self._profile_summary(profile),
-                pool_hints=pool_hints,
-            )
+            try:
+                prompt_messages = build_search_queries_prompt(
+                    profile_summary=self._profile_summary(profile),
+                    pool_hints=pool_hints,
+                )
+            except (TypeError, ValueError) as exc:
+                if pool_hints is None:
+                    raise
+                logger.warning(
+                    "Search query generation: dropping unserializable pool hints: %s",
+                    exc,
+                )
+                prompt_messages = build_search_queries_prompt(
+                    profile_summary=self._profile_summary(profile),
+                    pool_hints=None,
+                )
             response = await self.llm_service.complete_structured_task(
                 system_instruction=prompt_messages[0]["content"],
                 user_input=prompt_messages[1]["content"],

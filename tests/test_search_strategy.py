@@ -205,14 +205,14 @@ async def test_search_strategy_passes_pool_snapshot_to_query_prompt() -> None:
 
 
 @pytest.mark.asyncio
-async def test_search_strategy_falls_back_when_pool_snapshot_hints_fail() -> None:
+async def test_search_strategy_drops_bad_pool_hints_and_uses_llm_queries() -> None:
     from openbiliclaw.discovery.strategies.strategies import SearchStrategy
 
     class BadPoolSnapshot:
         def to_prompt_hints(self) -> dict[str, object]:
             raise RuntimeError("bad hints")
 
-    llm_service = FakeLLMService('{"queries": ["should not be used"]}')
+    llm_service = FakeLLMService('{"queries": ["纪录片 人物故事"]}')
     strategy = SearchStrategy(
         llm_service=llm_service,
         bilibili_client=FakeBilibiliClient({}),
@@ -222,8 +222,9 @@ async def test_search_strategy_falls_back_when_pool_snapshot_hints_fail() -> Non
 
     queries = await strategy._generate_queries(_build_profile(), pool_snapshot=BadPoolSnapshot())
 
-    assert queries == ["纪录片", "摄影"]
-    assert llm_service.calls == []
+    assert queries == ["纪录片 人物故事"]
+    assert len(llm_service.calls) == 1
+    assert "pool_distribution_hints" not in str(llm_service.calls[0]["user_input"])
 
 
 @pytest.mark.asyncio
