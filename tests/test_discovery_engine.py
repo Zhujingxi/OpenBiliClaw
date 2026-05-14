@@ -538,6 +538,68 @@ async def test_pool_snapshot_soft_rerank_prefers_undercovered_topics_without_dro
     assert sat.relevance_score == 0.82
 
 
+@pytest.mark.asyncio
+async def test_pool_snapshot_soft_rerank_runs_before_real_compression() -> None:
+    strong = DiscoveredContent(
+        bvid="BVstrong",
+        title="AI high",
+        topic_group="AI 编程",
+        style_key="tech_analysis",
+        source_strategy="search",
+        relevance_score=0.96,
+    )
+    weak_saturated = DiscoveredContent(
+        bvid="BVsatweak",
+        title="AI tool",
+        topic_group="AI 工具",
+        style_key="deep_dive",
+        source_strategy="explore",
+        relevance_score=0.82,
+    )
+    gap = DiscoveredContent(
+        bvid="BVgap",
+        title="人物纪录",
+        topic_group="人物纪录",
+        style_key="story_doc",
+        source_strategy="related_chain",
+        relevance_score=0.79,
+    )
+    pool_snapshot = PoolDistributionSnapshot(
+        pool_target_count=10,
+        pool_available_count=10,
+        source_targets={},
+        source_counts={},
+        source_deficits={},
+        saturated_topics=("AI 编程", "AI 工具"),
+        undercovered_axes=("人物纪录",),
+    )
+
+    class _ThreeSourceStrategy(_RecordingStrategy):
+        async def discover(
+            self,
+            profile: SoulProfile,
+            limit: int = 20,
+        ) -> list[DiscoveredContent]:
+            self.limits.append(limit)
+            return [strong, weak_saturated, gap]
+
+    strategy = _ThreeSourceStrategy("search", [strong, weak_saturated, gap])
+    engine = ContentDiscoveryEngine()
+    engine.register_strategy(strategy)
+
+    results = await engine.discover(
+        _build_profile(),
+        strategies=["search"],
+        limit=2,
+        pool_snapshot=pool_snapshot,
+    )
+
+    assert [item.bvid for item in results] == ["BVstrong", "BVgap"]
+    assert "BVsatweak" not in {item.bvid for item in results}
+    assert strong.relevance_score == 0.96
+    assert gap.relevance_score == 0.79
+
+
 def test_llm_eval_candidate_limit_uses_tighter_small_gap_window() -> None:
     assert llm_eval_candidate_limit(1) == 6
     assert llm_eval_candidate_limit(3) == 6
