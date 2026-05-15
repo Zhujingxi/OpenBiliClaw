@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -165,6 +166,8 @@ async def _update_interest(
     preference_layer = memory.get_layer("preference")
     existing_preference = dict(preference_layer.data)
 
+    pre_update_profile = deepcopy(profile)
+
     try:
         updated_preference = await preference_analyzer.analyze_events(
             events=events,
@@ -259,7 +262,12 @@ async def _update_interest(
             data_dir = getattr(memory, "_data_dir", None)
             if data_dir:
                 speculator = InterestSpeculator(llm_service=None, data_dir=data_dir)
-                added = speculator.ingest_seeds(speculative_seeds)
+                seed_coverage_profile = deepcopy(pre_update_profile)
+                seed_coverage_profile.interest.likes.extend(profile.interest.likes)
+                added = speculator.ingest_seeds(
+                    speculative_seeds,
+                    profile=seed_coverage_profile,
+                )
                 if added:
                     changes.append(f"注入 {added} 条猜测兴趣种子")
         except Exception:

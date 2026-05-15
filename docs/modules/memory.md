@@ -348,11 +348,18 @@ data/memory/
 |------|------|-----------|
 | `feedback_state.json` | 记录反馈处理到了哪一条，避免重复分析 | SoulEngine |
 | `account_sync_state.json` | 历史/收藏/关注的增量同步游标和签名 | AccountSyncService |
-| `discovery_runtime.json` | 候选池刷新时间、通知游标、最近话题 | RefreshController |
+| `discovery_runtime.json` | 候选池刷新时间、通知游标、最近话题、近期 probe domain / axis 历史 | RefreshController / OpenClaw |
 | `insight_candidates.json` | 聊天中提取的候选洞察，等待置信度达标 | SoulEngine |
 | `cognition_updates.json` | 系统最近形成的关键认知变化 | FastAPI → 浏览器插件通知 |
 
 设计原则：每种状态独立文件，不和画像数据混存。
+
+`discovery_runtime.json` 里与兴趣探针相关的字段：
+
+| 字段 | 结构 | 说明 |
+|------|------|------|
+| `probed_domains` | `{normalized_domain: iso_timestamp}` | 近期已推送 / 已返回的 probe domain，用于短期避免重复问同一方向 |
+| `probed_axes` | `{experience_mode|entry_load: iso_timestamp}` | 近期已推送 / 已返回的体验轴，用于在验证压力相同的候选中优先选择不同体验 |
 
 ## 系统集成
 

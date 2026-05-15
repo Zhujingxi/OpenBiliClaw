@@ -843,7 +843,10 @@ async def test_speculator_generate_keeps_visible_experience_mix():
                             {
                                 "domain": "博弈论科普",
                                 "category": "知识解释",
-                                "reason": "你一直在看结构化推演内容，这个方向能继续提供可验证的思考乐趣。",
+                                "reason": (
+                                    "你一直在看结构化推演内容，"
+                                    "这个方向能继续提供可验证的思考乐趣。"
+                                ),
                                 "bridge_type": "near",
                                 "confidence": 0.59,
                                 "experience_mode": "knowledge",
@@ -853,7 +856,10 @@ async def test_speculator_generate_keeps_visible_experience_mix():
                             {
                                 "domain": "AI治理",
                                 "category": "社会文化",
-                                "reason": "你对技术影响现实社会的链条敏感，这个方向能接住这种关注。",
+                                "reason": (
+                                    "你对技术影响现实社会的链条敏感，"
+                                    "这个方向能接住这种关注。"
+                                ),
                                 "bridge_type": "far",
                                 "confidence": 0.57,
                                 "experience_mode": "knowledge",
@@ -863,7 +869,10 @@ async def test_speculator_generate_keeps_visible_experience_mix():
                             {
                                 "domain": "建筑叙事",
                                 "category": "审美体验",
-                                "reason": "你会被空间里的结构和叙事吸引，这个方向能把抽象秩序落到具体场景。",
+                                "reason": (
+                                    "你会被空间里的结构和叙事吸引，"
+                                    "这个方向能把抽象秩序落到具体场景。"
+                                ),
                                 "bridge_type": "novel",
                                 "confidence": 0.55,
                                 "experience_mode": "knowledge",
@@ -873,7 +882,10 @@ async def test_speculator_generate_keeps_visible_experience_mix():
                             {
                                 "domain": "城市漫游",
                                 "category": "现实观察",
-                                "reason": "你有从具体场景观察系统的习惯，这个方向入口轻但仍有结构感。",
+                                "reason": (
+                                    "你有从具体场景观察系统的习惯，"
+                                    "这个方向入口轻但仍有结构感。"
+                                ),
                                 "bridge_type": "near",
                                 "confidence": 0.49,
                                 "experience_mode": "wander_observe",
@@ -883,7 +895,10 @@ async def test_speculator_generate_keeps_visible_experience_mix():
                             {
                                 "domain": "器物修复",
                                 "category": "实操动手",
-                                "reason": "你喜欢看结构怎么被拆开再复原，这个方向能给到更直接的动手反馈。",
+                                "reason": (
+                                    "你喜欢看结构怎么被拆开再复原，"
+                                    "这个方向能给到更直接的动手反馈。"
+                                ),
                                 "bridge_type": "near",
                                 "confidence": 0.48,
                                 "experience_mode": "hands_on",
@@ -924,7 +939,10 @@ async def test_speculator_generate_prefers_axis_missing_from_active_pool():
                             {
                                 "domain": "城市夜游",
                                 "category": "现实观察",
-                                "reason": "你已经会从街区场景里找结构，这个方向继续沿着同一种轻入口观察走。",
+                                "reason": (
+                                    "你已经会从街区场景里找结构，"
+                                    "这个方向继续沿着同一种轻入口观察走。"
+                                ),
                                 "confidence": 0.59,
                                 "experience_mode": "wander_observe",
                                 "entry_load": "light",
@@ -933,7 +951,10 @@ async def test_speculator_generate_prefers_axis_missing_from_active_pool():
                             {
                                 "domain": "旧物修复",
                                 "category": "实操动手",
-                                "reason": "你喜欢看结构怎么被拆开再复原，这个方向能补上更直接的动手反馈。",
+                                "reason": (
+                                    "你喜欢看结构怎么被拆开再复原，"
+                                    "这个方向能补上更直接的动手反馈。"
+                                ),
                                 "confidence": 0.48,
                                 "experience_mode": "hands_on",
                                 "entry_load": "heavy",
