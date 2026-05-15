@@ -913,6 +913,72 @@ async def test_speculator_generate_keeps_visible_experience_mix():
         assert any(item.experience_mode != "knowledge" for item in result.generated)
 
 
+async def test_speculator_generate_prefers_axis_missing_from_active_pool():
+    class _FakeLLMService:
+        async def complete_structured_task(self, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "speculations": [
+                            {
+                                "domain": "城市夜游",
+                                "category": "现实观察",
+                                "reason": "你已经会从街区场景里找结构，这个方向继续沿着同一种轻入口观察走。",
+                                "confidence": 0.59,
+                                "experience_mode": "wander_observe",
+                                "entry_load": "light",
+                                "specifics": ["夜间街区vlog", "城市灯光观察"],
+                            },
+                            {
+                                "domain": "旧物修复",
+                                "category": "实操动手",
+                                "reason": "你喜欢看结构怎么被拆开再复原，这个方向能补上更直接的动手反馈。",
+                                "confidence": 0.48,
+                                "experience_mode": "hands_on",
+                                "entry_load": "heavy",
+                                "specifics": ["工具修复过程", "旧物翻新记录"],
+                            },
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        from openbiliclaw.soul.profile import OnionProfile
+
+        data_dir = Path(tmpdir)
+        save_speculative_state(
+            data_dir,
+            SpeculativeState(
+                active=[
+                    SpeculativeInterest(
+                        domain="城市漫游",
+                        status="active",
+                        experience_mode="wander_observe",
+                        entry_load="light",
+                    ),
+                    SpeculativeInterest(
+                        domain="街区观察",
+                        status="active",
+                        experience_mode="wander_observe",
+                        entry_load="light",
+                    ),
+                ]
+            ),
+        )
+        speculator = InterestSpeculator(
+            llm_service=_FakeLLMService(),
+            data_dir=data_dir,
+            max_active=3,
+        )
+
+        result = await speculator.force_tick(OnionProfile())
+
+        assert [item.domain for item in result.generated] == ["旧物修复"]
+
+
 def test_interval_uses_minutes():
     """Verify _should_generate uses minutes, not hours."""
     with tempfile.TemporaryDirectory() as tmpdir:

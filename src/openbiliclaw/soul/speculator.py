@@ -1026,7 +1026,12 @@ class InterestSpeculator:
                 "; ".join(rejected_reasons),
             )
 
-        for candidate in _select_diverse_candidates(candidates, limit=slots):
+        existing_active = [s for s in state.active if s.status == "active"]
+        for candidate in _select_diverse_candidates(
+            candidates,
+            limit=slots,
+            existing=existing_active,
+        ):
             if len(state.active) >= self._max_active:
                 break
             state.active.append(candidate)
@@ -1105,6 +1110,7 @@ def _select_diverse_candidates(
     candidates: list[SpeculativeInterest],
     *,
     limit: int,
+    existing: list[SpeculativeInterest] | None = None,
 ) -> list[SpeculativeInterest]:
     if limit <= 0 or not candidates:
         return []
@@ -1116,20 +1122,25 @@ def _select_diverse_candidates(
         key=lambda item: (float(item.confidence), float(item.weight)),
         reverse=True,
     )
+    context = list(existing or [])
     selected: list[SpeculativeInterest] = []
 
-    light_pick = _pick_best_candidate(
-        ordered,
-        selected,
-        lambda item: item.entry_load == "light",
-    )
-    if light_pick is not None:
-        selected.append(light_pick)
+    if not any(item.entry_load == "light" for item in context):
+        light_pick = _pick_best_candidate(
+            ordered,
+            context + selected,
+            lambda item: item.entry_load == "light",
+        )
+        if light_pick is not None:
+            selected.append(light_pick)
 
-    if not any(item.experience_mode and item.experience_mode != "knowledge" for item in selected):
+    if not any(
+        item.experience_mode and item.experience_mode != "knowledge"
+        for item in context + selected
+    ):
         non_knowledge_pick = _pick_best_candidate(
             ordered,
-            selected,
+            context + selected,
             lambda item: item.experience_mode and item.experience_mode != "knowledge",
         )
         if non_knowledge_pick is not None:
@@ -1140,7 +1151,10 @@ def _select_diverse_candidates(
         if not remaining:
             break
         selected.append(
-            max(remaining, key=lambda candidate: _candidate_priority(candidate, selected))
+            max(
+                remaining,
+                key=lambda candidate: _candidate_priority(candidate, context + selected),
+            )
         )
     return selected[:limit]
 
