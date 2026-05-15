@@ -11,6 +11,7 @@
 - 配置默认值文档和示例补齐：`discovery_cron` 统一为 `"0 */8 * * *"`，`auto_update_enabled` 统一为保守默认 `false`，配置参考移除已废弃的 `[sources.xiaohongshu].sidecar_url`，并补上 YouTube / XHS / Douyin init 环境变量说明。
 - YouTube 已接入首次 `init` 的多源画像链路：交互式 `--yes-youtube` / `--no-youtube` 决策、`OPENBILICLAW_NO_YOUTUBE=1` 环境跳过、浏览器扩展 `yt_tasks` 串行拉取观看历史 / 订阅 / 点赞，并把事件送入 `analyze_events()` 与 `build_initial_profile()`。
 - YouTube discovery 真实 smoke 补强并修复集成问题：`yt_search` 现在正确解析真实 `LLMService` 返回的 `LLMResponse.content` 作为搜索关键词，`yt_channel` 可从真实 YouTube follow 事件里的频道 URL 拉取最新视频并在 `scrapetube` 失效时使用 `yt-dlp` fallback，`ContentDiscoveryEngine` 改为按跨源 `source_platform + content_id` 去重 / 缓存，避免多个 YouTube 候选因空 `bvid` 被合并。
+- `yt_trending` 增加真实网络 fallback：当 YouTube 当前 `FEtrending` InnerTube browseId 返回 400 时，改为抓取公开 topic 页（gaming / sports / news / podcasts / live）的 `ytInitialData` 视频并继续进入 LLM 打分，真实 smoke 已从 `fetched=0` 恢复为可产出候选。
 - 新增 YouTube 单源工具：`openbiliclaw fetch-youtube` 用于 smoke 浏览器扩展任务桥，`openbiliclaw import-youtube <path>` 支持 Google Takeout `.zip` 或目录导入观看历史 / 订阅 / 点赞。
 - 新增 GitHub Pages 项目主页：`docs/index.html` 作为 `/docs` 发布入口，首屏突出纯本地 / 私有 / 开源 / 自进化跨平台内容发现 Agent 定位，并提供一句话安装提示、Chrome 插件下载、GitHub 源码、产品闭环和推荐 / 价值画像 / 认知风格 / 聊天校准截图；原文档导航保留在 `docs/index.md`。
 - GitHub Pages 项目主页新增中英文双语切换：默认跟随浏览器语言，用户手动选择后写入 `localStorage`，安装提示、导航、CTA、截图说明、架构说明和复制按钮状态均同步切换。

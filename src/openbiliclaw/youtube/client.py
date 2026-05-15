@@ -25,14 +25,24 @@ import logging
 import re
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib import request as urllib_request
 
 from openbiliclaw.discovery.engine import DiscoveredContent
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_REGION = "US"
+_TRENDING_TOPIC_PATHS: tuple[str, ...] = (
+    "gaming",
+    "sports",
+    "news",
+    "podcasts",
+    "live",
+)
 
 # InnerTube client config for anonymous web requests
 _INNERTUBE_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
@@ -148,9 +158,19 @@ def _channel_uploads_url(channel_ref: str) -> str:
 def _innertube_trending(region_code: str, limit: int) -> list[dict[str, Any]]:
     """Fetch YouTube trending via the InnerTube browse API (no API key needed).
 
-    Uses the FEtrending browseId which maps to the YouTube Trending page.
+    Uses the FEtrending browseId when YouTube still exposes it. If that
+    endpoint is unavailable, falls back to public YouTube topic pages that
+    still ship video renderers in ytInitialData.
     Returns a flat list of video dicts ready for normalize_yt_video().
     """
+    results = _innertube_trending_feed(region_code, limit)
+    if results:
+        return results
+    return _topic_page_trending(region_code, limit)
+
+
+def _innertube_trending_feed(region_code: str, limit: int) -> list[dict[str, Any]]:
+    """Fetch the legacy FEtrending InnerTube browse feed."""
     try:
         config = _fetch_innertube_config(region_code)
         payload = json.dumps(
@@ -192,6 +212,110 @@ def _innertube_trending(region_code: str, limit: int) -> list[dict[str, Any]]:
     except Exception as exc:
         logger.warning("InnerTube trending(%s) failed: %s", region_code, exc)
         return []
+
+
+def _topic_page_trending(
+    region_code: str,
+    limit: int,
+    *,
+    fetch_html: Callable[[str], str] | None = None,
+    topic_paths: tuple[str, ...] = _TRENDING_TOPIC_PATHS,
+) -> list[dict[str, Any]]:
+    """Fallback trending supply from public YouTube topic pages."""
+    fetch = fetch_html or _fetch_youtube_html
+    seen: set[str] = set()
+    results: list[dict[str, Any]] = []
+    for path in topic_paths:
+        if len(results) >= limit:
+            break
+        url = f"https://www.youtube.com/{path}?gl={region_code}&persist_gl=1"
+        try:
+            html = fetch(url)
+        except Exception as exc:
+            logger.warning("YouTube topic page %s failed: %s", path, exc)
+            continue
+        for item in _extract_yt_initial_data_videos(html, limit=limit):
+            video_id = str(item.get("videoId") or item.get("id") or "").strip()
+            if not video_id or video_id in seen:
+                continue
+            seen.add(video_id)
+            results.append(item)
+            if len(results) >= limit:
+                break
+    if results:
+        logger.info("YouTube topic-page trending fallback returned %d videos", len(results))
+    return results
+
+
+def _fetch_youtube_html(url: str) -> str:
+    req = urllib_request.Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cookie": "CONSENT=YES+1",
+        },
+    )
+    with urllib_request.urlopen(req, timeout=20) as resp:
+        html: str = resp.read().decode("utf-8", "ignore")
+        return html
+
+
+def _extract_yt_initial_data_videos(html: str, limit: int) -> list[dict[str, Any]]:
+    data = _extract_yt_initial_data(html)
+    if data is None:
+        return []
+    return _extract_innertube_videos(data, limit=limit)
+
+
+def _extract_yt_initial_data(html: str) -> dict[str, Any] | None:
+    for marker in (
+        "var ytInitialData",
+        "window[\"ytInitialData\"]",
+        "window['ytInitialData']",
+    ):
+        start = html.find(marker)
+        if start < 0:
+            continue
+        parsed = _extract_json_object_after(html, start)
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _extract_json_object_after(text: str, start: int) -> object | None:
+    object_start = text.find("{", start)
+    if object_start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(object_start, len(text)):
+        char = text[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            depth += 1
+            continue
+        if char == "}":
+            depth -= 1
+            if depth == 0:
+                parsed: object = json.loads(text[object_start : index + 1])
+                return parsed
+    return None
 
 
 def _fetch_innertube_config(region_code: str) -> InnerTubeConfig:

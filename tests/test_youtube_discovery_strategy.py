@@ -14,7 +14,12 @@ from openbiliclaw.discovery.strategies.youtube import (
 )
 from openbiliclaw.llm.base import LLMResponse
 from openbiliclaw.soul.profile import InterestTag, PreferenceLayer, SoulProfile
-from openbiliclaw.youtube.client import _channel_uploads_url, _extract_innertube_config
+from openbiliclaw.youtube.client import (
+    _channel_uploads_url,
+    _extract_innertube_config,
+    _extract_yt_initial_data_videos,
+    _topic_page_trending,
+)
 
 
 def _profile() -> SoulProfile:
@@ -156,3 +161,60 @@ def test_channel_uploads_url_accepts_handles_ids_and_urls() -> None:
     )
     assert _channel_uploads_url("@demo") == "https://www.youtube.com/@demo/videos"
     assert _channel_uploads_url("UC123") == "https://www.youtube.com/channel/UC123/videos"
+
+
+def test_extract_yt_initial_data_videos_reads_video_renderers() -> None:
+    html = """
+    <script>
+      var ytInitialData = {
+        "contents": {
+          "twoColumnBrowseResultsRenderer": {
+            "tabs": [
+              {"tabRenderer": {"content": {"richGridRenderer": {"contents": [
+                {"richItemRenderer": {"content": {"videoRenderer": {
+                  "videoId": "abc123",
+                  "title": {"runs": [{"text": "Topic video"}]},
+                  "ownerText": {"runs": [{"text": "Topic channel"}]}
+                }}}},
+                {"richItemRenderer": {"content": {"videoRenderer": {
+                  "videoId": "def456",
+                  "title": {"simpleText": "Second topic video"}
+                }}}}
+              ]}}}}
+            ]
+          }
+        }
+      };
+    </script>
+    """
+
+    videos = _extract_yt_initial_data_videos(html, limit=10)
+
+    assert [item["videoId"] for item in videos] == ["abc123", "def456"]
+
+
+def test_topic_page_trending_dedupes_public_topic_pages() -> None:
+    first_page = """
+    <script>
+      var ytInitialData = {"contents": [
+        {"videoRenderer": {"videoId": "abc123", "title": {"simpleText": "A"}}},
+        {"videoRenderer": {"videoId": "def456", "title": {"simpleText": "B"}}}
+      ]};
+    </script>
+    """
+    second_page = """
+    <script>
+      var ytInitialData = {"contents": [
+        {"videoRenderer": {"videoId": "abc123", "title": {"simpleText": "A duplicate"}}},
+        {"videoRenderer": {"videoId": "ghi789", "title": {"simpleText": "C"}}}
+      ]};
+    </script>
+    """
+    pages = [first_page, second_page]
+
+    def fake_fetch(_url: str) -> str:
+        return pages.pop(0)
+
+    videos = _topic_page_trending("US", 3, fetch_html=fake_fetch, topic_paths=("gaming", "news"))
+
+    assert [item["videoId"] for item in videos] == ["abc123", "def456", "ghi789"]

@@ -19,7 +19,7 @@ YouTube 模块负责把用户在 YouTube 上的长期兴趣信号接入 OpenBili
 | Takeout 导入 | ✅ | `import-youtube` 支持 Google Takeout `.zip` 或目录，JSON / HTML watch history、subscriptions CSV、liked videos CSV |
 | 统一事件转换 | ✅ | `yt_history -> view`、`yt_subscriptions -> follow`、`yt_likes -> like`，全部携带 `metadata.source_platform="youtube"` |
 | `yt_search` discovery | ✅ | LLM 从真实画像生成 YouTube 搜索关键词，`scrapetube` 拉搜索结果，再进入 LLM 相关性打分 |
-| `yt_trending` discovery | ✅ | 通过 YouTube InnerTube browse API 拉 trending feed；YouTube 当前端点返回 400 或网络不可用时返回空结果，不中断整轮 discovery |
+| `yt_trending` discovery | ✅ | 优先通过 YouTube InnerTube browse API 拉 trending feed；当前 `FEtrending` 返回 400 时会降级抓取 YouTube 公开 topic 页（gaming / sports / news / podcasts / live）的 `ytInitialData` 视频，再进入 LLM 过滤 |
 | `yt_channel` discovery | ✅ | 从 DB 读取 `event_type=follow` 且 `metadata.source_platform="youtube"` 的订阅频道，优先 `scrapetube`，频道 handle URL 走 `yt-dlp` fallback 拉最新视频 |
 
 ## 公开 API
