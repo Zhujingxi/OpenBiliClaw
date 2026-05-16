@@ -40,6 +40,15 @@ export function inferBilibiliActionType(hint: ActionHint): string | null {
     .toLowerCase();
 
   if (!text) return null;
+  if (
+    text.includes("不感兴趣") ||
+    text.includes("不喜欢") ||
+    text.includes("减少此类推荐") ||
+    text.includes("减少推荐") ||
+    text.includes("dislike")
+  ) {
+    return "dislike";
+  }
   if (text.includes("点赞") || text.includes("like")) return "like";
   if (text.includes("投币") || text.includes("coin")) return "coin";
   if (text.includes("收藏") || text.includes("collect") || text.includes("favorite")) {

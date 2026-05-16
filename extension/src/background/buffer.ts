@@ -1,7 +1,7 @@
 import type { BehaviorEvent } from "../shared/types.js";
 
 const HIGH_FREQUENCY_TYPES = new Set(["scroll", "hover", "snapshot"]);
-const STRONG_SIGNAL_TYPES = new Set(["comment", "coin", "favorite", "like"]);
+const STRONG_SIGNAL_TYPES = new Set(["comment", "coin", "favorite", "like", "feedback"]);
 
 function getBucket(event: BehaviorEvent): number {
   return Math.floor(event.timestamp / 1000);

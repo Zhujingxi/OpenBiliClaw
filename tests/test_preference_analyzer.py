@@ -342,21 +342,47 @@ async def test_analyze_events_passes_unfiltered_when_satisfaction_flag_off() -> 
 
 
 @pytest.mark.asyncio
-async def test_analyze_events_drops_negative_events_when_satisfaction_flag_on() -> None:
-    """Flag-on path drops negative events but keeps neutral context."""
+async def test_analyze_events_default_drops_quick_exit_but_keeps_explicit_dislike() -> None:
+    """Default path should drop accidental quick exits but retain explicit dislikes.
+
+    Explicit dislike feedback is negative evidence, not positive interest
+    evidence. It must remain available so the LLM can update disliked_topics.
+    """
     from openbiliclaw.soul.preference_analyzer import PreferenceAnalyzer
 
     service = FakeStructuredService(LLMResponse(content="{}", provider="openai"))
-    analyzer = PreferenceAnalyzer(service, satisfaction_filter_enabled=True)
+    analyzer = PreferenceAnalyzer(service)
     events = [
         {"event_type": "click", "title": "好内容", "inferred_satisfaction": "positive"},
         {"event_type": "search", "title": "搜索线索", "inferred_satisfaction": "neutral"},
-        {"event_type": "click", "title": "标题党", "inferred_satisfaction": "negative"},
+        {
+            "event_type": "click",
+            "title": "标题党",
+            "inferred_satisfaction": "negative",
+            "satisfaction_reason": "quick_exit",
+        },
+        {
+            "event_type": "feedback",
+            "title": "低质混剪",
+            "inferred_satisfaction": "negative",
+            "satisfaction_reason": "explicit_negative",
+            "metadata": {"feedback_type": "dislike"},
+        },
+        {
+            "event_type": "feedback",
+            "title": "没写 reason 的点踩",
+            "inferred_satisfaction": "negative",
+            "metadata": {"reaction": "thumbs_down"},
+        },
         {"event_type": "click", "title": "未知", "inferred_satisfaction": None},
     ]
     await analyzer.analyze_events(events=events, existing_preference={})
     user_input = service.calls[0]["user_input"]
+    system_instruction = service.calls[0]["system_instruction"]
     assert "好内容" in user_input
     assert "搜索线索" in user_input, "neutral rows remain useful context"
     assert "未知" in user_input, "unknown / null rows must be kept by the positive+unknown filter"
-    assert "标题党" not in user_input, "negative rows must be filtered out"
+    assert "标题党" not in user_input, "quick-exit rows must be filtered out"
+    assert "低质混剪" in user_input, "explicit dislikes must remain dislike evidence"
+    assert "没写 reason 的点踩" in user_input, "metadata-level explicit dislikes must be kept"
+    assert "不要把负向事件提取为 interests" in str(system_instruction)

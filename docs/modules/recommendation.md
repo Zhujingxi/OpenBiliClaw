@@ -46,6 +46,7 @@
 | v0.3.44 MMR 多样化 | ✅ | `_select_diversified_batch` 引入 Maximum Marginal Relevance：`score = α*relevance - β*max_cos_to_picked`，靠 embedding 余弦把 LLM 误聚到同一 `topic_label` 伞标签下的硬核内容真正打散。每轮 unique_topics=10/10、top_topic_share≤10% |
 | v0.3.45 MMR embedding 提前 warm | ✅ | `warm_mmr_embeddings` 在 discovery 入池 + `classify_pool_backlog` 落库后立即并行 warm L2 SQLite embedding cache（cache key 文本由 `_mmr_embedding_text` 静态方法做 single source of truth），serve() 用 `asyncio.gather` 并行兜底,新增 `MMR embedding fetch: coverage=N/M elapsed=Xms` 埋点。换一批 P50 双峰（0.7s / 6-10s）收敛到稳定 <1s |
 | v0.3.57 pool gate on precomputed copy | ✅ | `get_pool_candidates` / `count_pool_candidates` SQL 加 `AND COALESCE(pool_expression, '') != '' AND COALESCE(pool_topic_label, '') != ''` —— 未 precompute 的 row 对 serve() 不可见,消除"discovery 完成→precompute 完成"60–90s 窗口内 popup 显示占位模板的旧 bug。`engine.py:320` 的 `_fallback_expression` 路径变成 race-window 安全网,触发即 `logger.warning("Pool gate leak: ...")` |
+| v0.3.x 负反馈表达避让 | ✅ | `_recommendation_profile_summary()` 会把 `preferences.disliked_topics` 带入推荐画像摘要；单条和批量推荐表达 prompt 都要求避开这些主题 / 话术模式，候选明显命中时只能保守说明差异化理由，不得热情背书或把避雷项包装成用户偏好 |
 
 ## 公开 API
 
@@ -74,7 +75,7 @@ items = await engine.generate_recommendations(
 - 排序主键先看 `candidate_tier`，再看 `relevance_score`、`last_scored_at/discovered_at`、`view_count`
 - 生成结果后会写入 `recommendations` 表，避免下次重复选中
 - 每条推荐都会调用 `generate_expression()` 生成 `expression` 和 `topic_label`
-- 推荐表达会先从当前画像、偏好摘要和近期反馈推断 `ToneProfile`，再生成更贴近用户口味的“老B友”式文案
+- 推荐表达会先从当前画像、偏好摘要、`disliked_topics` 和近期反馈推断 `ToneProfile`，再生成更贴近用户口味且避开长期雷点的“老B友”式文案
 - CLI 展示后会把对应推荐记录标记为 `presented = 1`
 - `feedback` 命令会把 `feedback_type` / `feedback_note` / `feedback_at` 写回推荐记录
 - 多样性回填会分阶段放宽 `style`、`source`、`topic` 约束，只有候选真的不足时才彻底兜底补满
@@ -235,9 +236,10 @@ from openbiliclaw.recommendation.curator import PoolCurator
 
 #### 关键数据结构
 
-**FeedbackSignals**：追踪用户反馈信号，包含三个字段：
+**FeedbackSignals**：追踪用户反馈信号，包含以下字段：
 - `disliked_up_mids` — 被 dislike 的 UP 主 mid 集合
 - `disliked_topic_keys` — 被 dislike 的话题键集合
+- `disliked_franchises` — 被 dislike 内容所属 franchise / IP 集合，用于同 IP 软降权
 - `liked_topic_keys` — 被 like 的话题键集合
 
 **ScoringContext**：评分时的上下文快照，包含：
@@ -312,6 +314,7 @@ report: PoolHealthReport = curator.check_pool_health()
 
 - `SoulProfile`
 - 偏好摘要
+- `disliked_topics`
 - 语气派生层 `ToneProfile`
 
 来决定怎么说这条推荐。
@@ -323,6 +326,8 @@ report: PoolHealthReport = curator.check_pool_health()
 而不是泛泛地说：
 
 - “这是一条热门国际新闻视频。”
+
+如果候选内容明显命中 `disliked_topics`，prompt 不允许把该避雷项包装成“你一直喜欢这个”。表达层最多保守说明它与已知雷点的差异化理由，避免在已经被用户明确排斥的方向上热情背书。
 
 ### 第四层影响：反馈回流到下一轮推荐
 

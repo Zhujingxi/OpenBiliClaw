@@ -123,24 +123,24 @@ class TestConfigDefaults:
         config = Config(data_dir="/tmp/openbiliclaw_test")
         assert config.data_path == Path("/tmp/openbiliclaw_test")
 
-    def test_soul_preference_satisfaction_filter_defaults_off(self) -> None:
-        """v0.3.x event-satisfaction: flag defaults to False so existing
-        installs keep current behavior until the operator opts in."""
+    def test_soul_preference_satisfaction_filter_defaults_on(self) -> None:
+        """v0.3.x event-satisfaction: default drops quick-exit rows while
+        keeping explicit dislike evidence for disliked_topics."""
         config = Config()
         assert isinstance(config.soul, SoulConfig)
         assert isinstance(config.soul.preference, SoulPreferenceConfig)
-        assert config.soul.preference.satisfaction_filter_enabled is False
+        assert config.soul.preference.satisfaction_filter_enabled is True
 
-    def test_soul_preference_satisfaction_filter_round_trips_true(
+    def test_soul_preference_satisfaction_filter_round_trips_false(
         self, tmp_path: Path
     ) -> None:
-        """save_config → load_config preserves the explicit `true` setting."""
+        """save_config → load_config preserves an explicit opt-out."""
         cfg = Config()
-        cfg.soul.preference.satisfaction_filter_enabled = True
+        cfg.soul.preference.satisfaction_filter_enabled = False
         target = tmp_path / "config.toml"
         save_config(cfg, target)
         loaded = load_config(target)
-        assert loaded.soul.preference.satisfaction_filter_enabled is True
+        assert loaded.soul.preference.satisfaction_filter_enabled is False
 
     def test_soul_preference_satisfaction_filter_built_from_toml(self) -> None:
         raw = {"soul": {"preference": {"satisfaction_filter_enabled": True}}}
@@ -155,7 +155,7 @@ class TestConfigDefaults:
 
         rendered = _render_config_toml(Config())
         assert "[soul.preference]" in rendered
-        assert "satisfaction_filter_enabled = false" in rendered
+        assert "satisfaction_filter_enabled = true" in rendered
 
     def test_load_config_missing_file(self) -> None:
         """Should return defaults when no config file exists."""

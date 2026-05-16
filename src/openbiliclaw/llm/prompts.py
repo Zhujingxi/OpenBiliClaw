@@ -152,6 +152,7 @@ def build_preference_analysis_prompt(
 7. cognitive_style 描述用户的信息处理偏好（如思维方式、阅读习惯、理解路径），3~5 条，基于观看行为模式推断，不要照搬兴趣标签。
 8. 每条事件都自带一个 `context` 字段（v0.3.22+ 起所有源都统一填充），它是该事件的中文自然语言摘要（如"在 B 站收藏了《讲透历史叙事》,作者:历史实验室"或"小红书点赞:手冲咖啡入门 作者:豆子老师"）。**优先把 context 作为人类可读的事件描述**来理解用户行为；同时用 metadata 里的结构化字段（up_name、bvid、folder、source_platform 等）做精确匹配 / 复制。
 9. 用户的兴趣信号可能跨平台（B 站 / 小红书 / 等）；通过 metadata.source_platform 区分来源，但兴趣分析本身要把所有平台的信号一视同仁，不要因为来自小红书就降权。
+10. 如果事件的 inferred_satisfaction 是 negative，或 metadata.feedback_type 是 dislike / metadata.reaction 是 thumbs_down，表示负向证据。不要把负向事件提取为 interests / favorite_up_users；只能用于 disliked_topics、风格避让或降低相关偏好置信度。
 </rules>
 
 <output_schema>
@@ -557,6 +558,7 @@ _AWARENESS_SYSTEM_PROMPT = """
 3. trend 和 emotion_guess 必须使用保守表述。
 4. 如果证据不足，可以返回空数组。
 5. 每条事件自带 `context` 字段（v0.3.22+ 跨源统一），是中文自然语言摘要——优先以 context 来理解事件本身，配合 metadata.source_platform 区分平台。所有平台信号都参与觉察推断,不区别对待。
+6. 如果 recent_events 出现 `feedback_type=dislike`、`reaction=thumbs_down` 或 `inferred_satisfaction=negative`，把它当作用户最近开始避开某类内容的信号；可以生成“最近开始避开 X”这类保守观察，但不要把单次 dislike 上升成人格结论。
 </rules>
 
 <output_schema>
@@ -1015,6 +1017,8 @@ _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "商业意图**层面的比较;若高度相似(同款震惊体、同款保姆级全攻略、同款月入过万"
     "钓贴),`integration_fit` 与 `interest_overlap` 必须显著降低,不要被表面话题词"
     "吸引而错给高分。比较的是**话术模式**,不是关键词重叠。\n"
+    "12. profile_summary.disliked_topics 是长期避雷项;候选命中这些主题或话术模式时,"
+    "score 必须下调,不要把它们当成 interests 的反向补充来加分。\n"
     "</rules>\n\n"
     "<output_schema>\n"
     "[\n"
@@ -1138,6 +1142,8 @@ _RECOMMENDATION_EXPRESSION_SYSTEM_PROMPT = """
    review_roundup / story_doc / visual_showcase,优先从人物、场景、信息点或情绪切口来推荐,
    不要硬写成"系统闭环 / 底层逻辑 / 认知防御"。
 10. 严格遵循 <tone_profile> 里给的密度 / 温度 / 梗感 / 直给度 4 个参数。
+11. 避开 profile_summary.disliked_topics 中的主题或话术模式；如果候选明显命中这些避雷点,
+    不要热情背书,只能保守说明差异化理由,且不得把 disliked topic 包装成用户偏好。
 </rules>
 
 <output_schema>
@@ -1212,6 +1218,8 @@ _BATCH_EXPRESSION_SYSTEM_PROMPT = (
     "review_roundup / story_doc / visual_showcase,就优先从人物、场景、信息点或情绪切口下笔,"
     "不要把它写成心理机制拆解。\n"
     "9. 严格遵循 <tone_profile> 里给的密度 / 温度 / 梗感 / 直给度 4 个参数。\n"
+    "10. 避开 profile_summary.disliked_topics 中的主题或话术模式;如果候选明显命中这些避雷点,"
+    "不要热情背书,只能保守说明差异化理由,且不得把 disliked topic 包装成用户偏好。\n"
     "</rules>\n\n"
     "<output_schema>\n"
     "[\n"

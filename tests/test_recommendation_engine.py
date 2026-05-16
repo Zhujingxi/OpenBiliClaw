@@ -11,7 +11,10 @@ import pytest
 
 from openbiliclaw.discovery.engine import DiscoveredContent
 from openbiliclaw.llm.base import LLMResponse
-from openbiliclaw.recommendation.engine import RecommendationEngine
+from openbiliclaw.recommendation.engine import (
+    RecommendationEngine,
+    _recommendation_profile_summary,
+)
 from openbiliclaw.soul.profile import InterestTag, PreferenceLayer, SoulProfile
 from openbiliclaw.storage.database import Database
 
@@ -60,6 +63,28 @@ def _build_profile() -> SoulProfile:
             interests=[InterestTag(name="纪录片", category="知识", weight=0.9)]
         ),
     )
+
+
+def test_recommendation_profile_summary_includes_disliked_topics() -> None:
+    profile = _build_profile()
+    profile.preferences.disliked_topics = [
+        "标题党",
+        "低质混剪",
+        "营销号",
+        "复读热点",
+        "注水盘点",
+        "过度煽情",
+    ]
+
+    summary = _recommendation_profile_summary(profile)
+
+    assert summary["disliked_topics"] == [
+        "标题党",
+        "低质混剪",
+        "营销号",
+        "复读热点",
+        "注水盘点",
+    ]
 
 
 def _seed_pool(

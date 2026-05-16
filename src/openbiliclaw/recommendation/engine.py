@@ -82,6 +82,7 @@ def _recommendation_profile_summary(
         "style": _profile_style_summary(profile),
         "context": _profile_context_summary(profile),
         "exploration_openness": profile.preferences.exploration_openness,
+        "disliked_topics": profile.preferences.disliked_topics[:5],
     }
     if include_active_insights:
         summary["active_insights"] = [

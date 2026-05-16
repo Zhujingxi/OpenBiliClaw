@@ -6,6 +6,7 @@
 
 ## v0.3.72: 浏览器插件后端端口可配置（2026-05-16）
 
+- 负反馈消费链路收敛：`satisfaction_filter_enabled` 默认开启后只过滤 `quick_exit` 等被动 negative 事件，显式 `dislike` / `thumbs_down` 会保留给 `PreferenceAnalyzer` 作为 `disliked_topics` / 避让证据且禁止提取为正向兴趣；推荐画像摘要现在带 `disliked_topics`，单条 / 批量推荐表达 prompt 不再为命中避雷项的候选热情背书；awareness prompt 可生成“最近开始避开 X”的保守观察；B 站 content script 新增“不感兴趣 / 不喜欢 / 减少此类推荐”识别并规范化为 `feedback_type=dislike` 强信号。
 - 浏览器插件设置页新增「后端端口」字段（默认 `8420`，仅接受 `1-65535` 的完整十进制整数）。Windows 启用 Hyper-V / WSL / Docker 后常见本地端口会被系统组件占用，导致 `openbiliclaw start` 默认 `8420` 启动失败；现在用户可改成 `18080` / `19090` / `13000` 等高位端口，并用 `openbiliclaw start --port <同一端口>` 启动后端即可继续使用插件。端口保存到 `chrome.storage.local`，不写入后端 `config.toml`。
 - 新增 `extension/src/shared/backend-endpoint.ts` + `extension/popup/popup-backend-config.js` 共用 helper。`apiUrl()` / `wsUrl()` / `getBackendBaseUrl()` 在每次调用时解析当前端口，所以保存新端口后无需重载插件即可生效；service worker 通过 `chrome.storage.onChanged` 收到端口变更后会立即关闭旧 `runtime-stream` WebSocket 并按新 origin 重连。
 - 同步收敛了之前散在 ~10 处的硬编码 `127.0.0.1:8420`：service worker、cookie 同步、xhs / dy / yt 任务派发、`_debug/log` 中继、抖音内容脚本现在都走 `apiUrl()` 统一解析。

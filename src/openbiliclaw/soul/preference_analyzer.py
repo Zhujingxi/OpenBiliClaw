@@ -47,13 +47,12 @@ class PreferenceAnalyzer:
     # EMA blend: 0.3 * latest batch + 0.7 * prior mix. Chosen so one-off
     # cross-platform batches don't erase long-running bilibili history.
     source_mix_blend_alpha: float = 0.3
-    # v0.3.x event-satisfaction signal: when True, drop only events the
-    # storage classifier marked as quick-exit / explicit-negative before
-    # building the LLM prompt. Neutral rows still carry useful context
-    # (searches, shallow views, passive browse). Default False so existing
-    # installs keep current behavior until the operator flips the config flag.
-    # See docs/plans/2026-05-16-event-satisfaction-signal.md.
-    satisfaction_filter_enabled: bool = False
+    # v0.3.x event-satisfaction signal: when True, drop passive negative
+    # events such as quick-exit before building the LLM prompt. Explicit
+    # dislike feedback is retained as negative evidence so the analyzer can
+    # update disliked_topics without mistaking that title for a positive
+    # interest.
+    satisfaction_filter_enabled: bool = True
 
     def __post_init__(self) -> None:
         if not hasattr(self.registry, "complete_structured_task"):
@@ -96,18 +95,21 @@ class PreferenceAnalyzer:
         self,
         events: list[dict[str, object]],
     ) -> list[dict[str, object]]:
-        """Drop quick-exit / explicit-negative events when the flag is on.
+        """Drop passive negative events when the flag is on.
 
         The ``"unknown"`` bucket is included so pre-classification legacy
         rows (NULL ``inferred_satisfaction``) still feed the analyzer.
         ``"neutral"`` is included because searches / shallow views are not
         satisfaction evidence, but they are still useful preference context.
+        Explicit dislike feedback is kept so it can feed disliked_topics.
         """
         if not self.satisfaction_filter_enabled:
             return events
-        filtered = filter_events_by_satisfaction(
-            events, modes=frozenset({"positive", "neutral", "unknown"})
-        )
+        filtered = [
+            event
+            for event in events
+            if self._keeps_event_under_satisfaction_filter(event)
+        ]
         if len(filtered) != len(events):
             logger.info(
                 "satisfaction_filter dropped %d/%d events before preference analysis",
@@ -115,6 +117,29 @@ class PreferenceAnalyzer:
                 len(events),
             )
         return filtered
+
+    @staticmethod
+    def _keeps_event_under_satisfaction_filter(event: dict[str, object]) -> bool:
+        if event in filter_events_by_satisfaction(
+            [event], modes=frozenset({"positive", "neutral", "unknown"})
+        ):
+            return True
+        return PreferenceAnalyzer._is_explicit_negative_feedback(event)
+
+    @staticmethod
+    def _is_explicit_negative_feedback(event: dict[str, object]) -> bool:
+        event_type = str(event.get("event_type") or event.get("type") or "").strip().lower()
+        metadata = event.get("metadata")
+        feedback_type = ""
+        reaction = ""
+        if isinstance(metadata, dict):
+            feedback_type = str(metadata.get("feedback_type") or "").strip().lower()
+            reaction = str(metadata.get("reaction") or "").strip().lower()
+        return event_type in {"feedback", "dislike"} and (
+            feedback_type == "dislike"
+            or reaction == "thumbs_down"
+            or event_type == "dislike"
+        )
 
     async def _analyze_events_single(
         self,

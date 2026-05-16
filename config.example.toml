@@ -303,10 +303,8 @@ unmanaged_max_age_days = 30
 
 [soul.preference]
 # v0.3.x event-satisfaction signal.
-# When true, preference analysis ignores events the storage classifier
-# marked as quick_exit (clicked then bounced in <5s) or explicit_negative
-# (thumbs-down feedback). Neutral rows are retained as context. Default
-# false; flip after one release cycle of observing inferred_satisfaction
-# distributions in the `events` table to confirm the classifier is doing
-# the right thing for your usage pattern.
-satisfaction_filter_enabled = false
+# When true, preference analysis ignores passive negative events such as
+# quick_exit (clicked then bounced in <5s). Explicit dislike feedback is
+# retained as disliked_topics evidence instead of being learned as a
+# positive interest.
+satisfaction_filter_enabled = true

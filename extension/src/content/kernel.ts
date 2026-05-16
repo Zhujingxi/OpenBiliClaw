@@ -7,7 +7,11 @@
  * script calls `startCollector(adapter)` from its entry file.
  */
 
-import { createBehaviorEvent, isTrackableCardElement } from "../shared/behavior.js";
+import {
+  createBehaviorEvent,
+  isTrackableCardElement,
+  normalizeActionSignal,
+} from "../shared/behavior.js";
 import type { BehaviorEvent, PlatformAdapter } from "../shared/types.js";
 import { VideoDwellTracker } from "./video-dwell-tracker.js";
 
@@ -186,13 +190,12 @@ export function startCollector(adapter: PlatformAdapter): void {
       });
 
       if (!actionType) return;
-      sendEvent(
-        createEvent(actionType, {
+      const action = normalizeActionSignal(actionType, {
           targetText: target.textContent?.trim().slice(0, 100) ?? null,
           href: link?.href ?? null,
           actionLabel: target.getAttribute("aria-label"),
-        }),
-      );
+      });
+      sendEvent(createEvent(action.type, action.metadata));
     });
   };
 

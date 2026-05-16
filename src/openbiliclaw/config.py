@@ -305,14 +305,12 @@ class SoulPreferenceConfig:
     """Preference-layer toggles.
 
     ``satisfaction_filter_enabled``: v0.3.x event-satisfaction signal —
-    when True, the preference analyzer ignores events the storage
-    classifier marked as quick-exit / explicit-negative, while retaining
-    neutral context. Default False so existing installs keep current
-    behavior until the operator flips the flag after observing
-    inferred_satisfaction distributions for a release cycle.
+    when True, the preference analyzer ignores passive negative events
+    such as quick-exit while retaining explicit dislike feedback as
+    disliked_topics evidence.
     """
 
-    satisfaction_filter_enabled: bool = False
+    satisfaction_filter_enabled: bool = True
 
 
 @dataclass
@@ -517,7 +515,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
     soul = SoulConfig(
         preference=SoulPreferenceConfig(
             satisfaction_filter_enabled=bool(
-                soul_preference_raw.get("satisfaction_filter_enabled", False)
+                soul_preference_raw.get("satisfaction_filter_enabled", True)
             ),
         ),
     )
@@ -818,11 +816,9 @@ def _render_config_toml(config: Config) -> str:
             "",
             "[soul.preference]",
             "# v0.3.x event-satisfaction signal. When true, preference",
-            "# analysis ignores events the storage classifier marked as",
-            "# quick_exit or explicit_negative; neutral rows are retained.",
-            "# Default false; flip after",
-            "# one release cycle of observing inferred_satisfaction",
-            "# distributions in the `events` table.",
+            "# analysis ignores passive negative events such as quick_exit.",
+            "# Explicit dislike feedback is retained as disliked_topics",
+            "# evidence instead of being learned as a positive interest.",
             "satisfaction_filter_enabled = "
             f"{_toml_bool(config.soul.preference.satisfaction_filter_enabled)}",
             "",

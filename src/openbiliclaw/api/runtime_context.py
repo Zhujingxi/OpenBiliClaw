@@ -153,11 +153,13 @@ class RuntimeContext:
         # surfaced as silent "0 new" instead of explicit WARNs.
         # Defensive getattr chain: legacy test fixtures and partial
         # config stubs may not expose the new `soul.preference` block.
-        # Default to False (the rollout posture) when the field is absent.
+        # Default to True when the field is absent: quick-exit rows should
+        # not self-feed into preferences, while explicit dislikes still
+        # remain available as negative evidence.
         soul_cfg = getattr(new_config, "soul", None)
         preference_cfg = getattr(soul_cfg, "preference", None) if soul_cfg else None
         satisfaction_filter_enabled = bool(
-            getattr(preference_cfg, "satisfaction_filter_enabled", False)
+            getattr(preference_cfg, "satisfaction_filter_enabled", True)
         )
         new_soul_engine = SoulEngine(
             llm=new_registry,  # type: ignore[arg-type]

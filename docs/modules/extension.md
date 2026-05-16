@@ -34,6 +34,7 @@
 | 抖音首页推荐流任务 | ✅ | 后端可派发 `feed` 任务；插件用后台 tab 在已登录抖音首页通过 MAIN-world feed bridge 签名 `/aweme/v1/web/tab/feed/`，回传 `dy_feed` 候选供 `dy-plugin-feed` discovery 使用 |
 | YouTube 初始化画像任务 | ✅ | 后端可派发 `bootstrap_profile` 任务；插件依次访问 `/feed/history`、`/feed/channels`、`/playlist?list=LL`，从 DOM 读取观看历史 / 订阅 / 点赞并用 `partial` 分批回传给 `/api/sources/yt/task-result` |
 | 后端端口可配置 | ✅ | 设置页「后端端口」字段仅接受 `1-65535` 的完整十进制整数并保存到 `chrome.storage.local`，popup / service worker / 任务派发 / cookie 同步 / 调试中继全部经 `apiUrl()`/`wsUrl()` 解析当前端口；端口变更后 service worker 通过 `chrome.storage.onChanged` 立即重连 `runtime-stream`，无需重载插件 |
+| B 站负反馈动作采集 | ✅ | B 站 content script 会把“不感兴趣 / 不喜欢 / 减少此类推荐 / dislike”等控件识别为 `dislike` 动作，并经 `normalizeActionSignal()` 规范化为 `feedback` 事件，metadata 带 `feedback_type=dislike` 与 `reaction=thumbs_down`；后台 buffer 把 `feedback` 视为强信号即时 flush |
 
 ## 目录结构
 
@@ -100,7 +101,7 @@ extension/
 - 页面快照 `snapshot`
 - 滚动 `scroll`
 - 卡片停留 `hover`
-- 评论 / 点赞 / 投币 / 收藏意图事件
+- 评论 / 点赞 / 投币 / 收藏 / 不感兴趣意图事件
 
 同时支持 B 站 SPA 导航感知，在 URL 变化时重新发送快照并重绑视频监听。
 
@@ -110,7 +111,7 @@ extension/
 
 - 接收内容脚本事件
 - 高频事件去重
-- 强信号行为优先 flush
+- 强信号行为优先 flush；`feedback` 事件也属于强信号，会尽快上报
 - `chrome.alarms` 周期性批量发送
 - 发送失败时把事件回填到缓冲区
 - flush 成功后检查一次待发通知

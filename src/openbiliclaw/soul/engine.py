@@ -79,7 +79,7 @@ class SoulEngine:
         embedding_service: Any | None = None,
         cognition_cycle_interval_seconds: int | None = None,
         usage_recorder: Any | None = None,
-        satisfaction_filter_enabled: bool = False,
+        satisfaction_filter_enabled: bool = True,
     ) -> None:
         self._llm = llm
         self._memory = memory

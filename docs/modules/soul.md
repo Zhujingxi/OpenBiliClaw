@@ -27,14 +27,14 @@
 | 向后兼容垫片属性 | ✅ | OnionProfile 提供 `core_traits / deep_needs / cognitive_style / motivational_drivers / values` 等垫片属性，兼容旧代码渐进迁移 |
 | 自动格式迁移 | ✅ | `from_legacy()` 支持将 v1 flat SoulProfile 自动迁移到 v2 OnionProfile，SoulEngine 透明处理版本升级 |
 | SoulEngine.analyze_events() | ✅ | 事件 → PreferenceAnalyzer → 偏好层更新 |
-| PreferenceAnalyzer | ✅ | LLM structured extraction + 合并 + 衰减；v0.3.x `satisfaction_filter_enabled=True` 时会在构 prompt 前只丢掉存储层分类为 negative 的事件（quick_exit / explicit_negative），保留 positive + neutral + unknown / NULL，断开点击诱饵自喂回路；默认 `False` 行为不变 |
+| PreferenceAnalyzer | ✅ | LLM structured extraction + 合并 + 衰减；v0.3.x `satisfaction_filter_enabled=True` 默认开启，构 prompt 前会丢掉 `quick_exit` 等被动 negative 事件，保留 positive + neutral + unknown / NULL；显式 `dislike` / `thumbs_down` 负反馈会保留为 disliked_topics / 风格避让证据，但 prompt 明确禁止把它们提取为正向 interests |
 | filter_events_by_satisfaction | ✅ | `soul/event_filters.py` 中的纯函数，按 `inferred_satisfaction` 过滤事件，`"unknown"` 同时匹配缺失 / `None`，使 pre-migration 老行可被显式 opt-in 保留 |
 | recent_negative_exemplars | ✅ | `soul/negative_exemplars.py` 中的纯函数，从事件层拉最近 negative 标题做 recency 加权（半衰期默认 14d）+ 前缀去重 + 80 字截断，最多返回 8 条 `{title, reason, age_days}`。下游消费者是 `discovery/engine.ContentDiscoveryEngine._evaluate_batch`，把列表作为 `negative_examples` 透传给 batch evaluator prompt——这是 [inferred_satisfaction 信号](#) 的第二个消费方（第一个是上面的 `filter_events_by_satisfaction`） |
 | SocraticDialogue.respond() | ✅ | 通过 LLMService 调用 LLM，自动注入画像 |
 | ProfileBuilder | ✅ | 结构化 prompt + JSON 校验 + `OnionProfile` 构建 |
 | SoulEngine.build_initial_profile() | ✅ | 从 history + preference 生成并持久化 `soul.json` |
 | SoulEngine.get_profile() | ✅ | 从 soul 层读取画像，未初始化时抛明确异常 |
-| AwarenessAnalyzer | ✅ | 近期事件 → `AwarenessNote` 列表，支持同日去重；解析 LLM 响应时兼容 `results/items/notes/data/observations/recent_observations/latest/latest_observations` 等 object-wrapped array，也兼容 reasoning 模型常见的 bare singular-note dict（仅需 `observation` 字段）和 wrapper-key 下的单 note dict；prompt 按画像 → 偏好 → 近期事件排序以保留缓存前缀 |
+| AwarenessAnalyzer | ✅ | 近期事件 → `AwarenessNote` 列表，支持同日去重；解析 LLM 响应时兼容 `results/items/notes/data/observations/recent_observations/latest/latest_observations` 等 object-wrapped array，也兼容 reasoning 模型常见的 bare singular-note dict（仅需 `observation` 字段）和 wrapper-key 下的单 note dict；prompt 按画像 → 偏好 → 近期事件排序以保留缓存前缀，并把近期 `dislike` / `thumbs_down` / negative 事件视为“最近开始避开 X”的保守观察信号 |
 | InsightAnalyzer | ✅ | 觉察 + 偏好 + 画像 → `InsightHypothesis` 列表，支持假设合并 |
 | CognitionCycle | ✅ | 半日节流生成 awareness + insight 并同步到 `OnionProfile`；仅在 preference 与 soul 都为空的早期初始化状态跳过，已有任一层时仍会运行，避免已初始化画像因 preference 暂空而长期不产出觉察；awareness 失败时单次重试（间隔 2s），仍失败则记 WARNING 且**不推进** `last_awareness_at`，下一 tick 立即重试而不是空等 12h |
 | SoulEngine.generate_awareness_note() | ✅ | 生成并持久化 `awareness.json` |
@@ -294,6 +294,8 @@
 5. 合并后的偏好写回 `preference.json`。
 
 初始化这类大批量事件会按分片并发分析。若某个分片被 LLM 风控拒绝或返回非 JSON，`PreferenceAnalyzer` 会递归拆小该分片；最终只有仍失败的单条事件会被跳过，其他事件继续参与偏好合并。网络错误、provider 错误仍会让调用失败，避免把服务不可用伪装成成功。
+
+`satisfaction_filter_enabled` 默认开启后，偏好分析会先把 `quick_exit` 等被动 negative 事件从 prompt 中移除，避免误把标题党点击学成兴趣。显式负反馈不走这条丢弃路径：`feedback_type=dislike` 或 `reaction=thumbs_down` 会保留在 prompt 里，但只能贡献 `disliked_topics`、风格避让或置信度下调，不能贡献正向 `interests` / `favorite_up_users`。
 
 这一层真正做的不是“生成画像”，而是把近期行为压缩成结构化偏好状态，例如：
 

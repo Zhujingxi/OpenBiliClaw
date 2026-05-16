@@ -816,11 +816,11 @@ async def test_soul_engine_passes_satisfaction_flag_to_preference_analyzer(
     memory = MemoryManager(tmp_path)
     memory.initialize()
     engine_default = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
-    assert engine_default._preference_analyzer.satisfaction_filter_enabled is False
+    assert engine_default._preference_analyzer.satisfaction_filter_enabled is True
 
-    engine_on = SoulEngine(
+    engine_off = SoulEngine(
         llm=FakeRegistry("{}"),
         memory=memory,
-        satisfaction_filter_enabled=True,
+        satisfaction_filter_enabled=False,
     )
-    assert engine_on._preference_analyzer.satisfaction_filter_enabled is True
+    assert engine_off._preference_analyzer.satisfaction_filter_enabled is False

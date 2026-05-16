@@ -8,8 +8,30 @@
 
 import type { BehaviorContext, BehaviorEvent, PlatformAdapter } from "./types.js";
 
+export interface NormalizedActionSignal {
+  type: string;
+  metadata: Record<string, unknown>;
+}
+
 function normalizeText(value: string | null | undefined): string {
   return (value ?? "").trim();
+}
+
+export function normalizeActionSignal(
+  actionType: string,
+  metadata: Record<string, unknown> = {},
+): NormalizedActionSignal {
+  if (actionType === "dislike") {
+    return {
+      type: "feedback",
+      metadata: {
+        ...metadata,
+        feedback_type: "dislike",
+        reaction: "thumbs_down",
+      },
+    };
+  }
+  return { type: actionType, metadata };
 }
 
 export function createDOMSnapshot(doc: Document): string {

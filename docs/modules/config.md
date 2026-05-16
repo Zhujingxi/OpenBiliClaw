@@ -317,7 +317,7 @@ YouTube discovery 开关。初始化画像由浏览器扩展读取观看历史 /
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `satisfaction_filter_enabled` | bool | `false` | v0.3.x 事件满意度信号：开启后偏好分析会忽略存储层分类为 `quick_exit` / `explicit_negative` 的 negative 事件，保留 neutral 上下文。默认 `false`，观察 `inferred_satisfaction` 分布 1-2 个发布周期后再切到 `true` 关闭点击诱饵自喂回路 |
+| `satisfaction_filter_enabled` | bool | `true` | v0.3.x 事件满意度信号：默认开启。偏好分析会在构 prompt 前忽略 `quick_exit` 等被动 negative 事件，保留 positive / neutral / unknown 上下文；`feedback_type=dislike` 或 `reaction=thumbs_down` 的显式负反馈会继续进入分析器，只能作为 `disliked_topics` / 避让证据，不能提取为正向 `interests` |
 
 ### `[logging]`
 

@@ -15,7 +15,9 @@ import {
 import {
   buildDedupeKey,
   enqueueBufferedEvent,
+  shouldFlushImmediately,
 } from "../src/background/buffer.ts";
+import { normalizeActionSignal } from "../src/shared/behavior.ts";
 import type { BehaviorEvent } from "../src/shared/types.ts";
 
 function makeEvent(
@@ -81,6 +83,37 @@ test("inferBilibiliActionType recognizes common bilibili action buttons", () => 
     inferBilibiliActionType({ text: "分享", ariaLabel: null, className: "" }),
     null,
   );
+});
+
+test("inferBilibiliActionType recognizes negative feedback controls", () => {
+  assert.equal(
+    inferBilibiliActionType({ text: "不感兴趣", ariaLabel: null, className: "" }),
+    "dislike",
+  );
+  assert.equal(
+    inferBilibiliActionType({ text: "", ariaLabel: "减少此类推荐", className: "" }),
+    "dislike",
+  );
+  assert.equal(
+    inferBilibiliActionType({ text: "", ariaLabel: "dislike", className: "" }),
+    "dislike",
+  );
+});
+
+test("collector normalizes dislike actions into feedback events", () => {
+  const action = normalizeActionSignal("dislike", {
+    targetText: "不感兴趣",
+    href: null,
+  });
+
+  assert.equal(action.type, "feedback");
+  assert.deepEqual(action.metadata, {
+    targetText: "不感兴趣",
+    href: null,
+    feedback_type: "dislike",
+    reaction: "thumbs_down",
+  });
+  assert.equal(shouldFlushImmediately(makeEvent(action.type)), true);
 });
 
 test("bilibiliAdapter wires content-id and source platform", () => {

@@ -7,6 +7,7 @@ from openbiliclaw.llm.prompts import (
     _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT,
     build_awareness_prompt,
     build_batch_content_evaluation_prompt,
+    build_batch_expression_prompt,
     build_explore_domains_prompt,
     build_recommendation_expression_prompt,
     build_search_queries_prompt,
@@ -95,6 +96,31 @@ def test_build_recommendation_expression_prompt_mentions_old_friend_tone() -> No
     assert "老B友" in messages[1]["content"]
     # System keeps the algorithm-recommendation taboo
     assert "不像算法推荐" in messages[0]["content"]
+
+
+def test_recommendation_expression_prompts_treat_dislikes_as_avoidance() -> None:
+    profile_summary = {
+        "personality_portrait": "偏好高信息密度内容",
+        "disliked_topics": ["标题党", "低质混剪"],
+    }
+
+    single = build_recommendation_expression_prompt(
+        profile_summary=profile_summary,
+        content_summary={"title": "讲透国际局势", "up_name": "某UP"},
+        tone_profile=None,
+        source_platform="bilibili",
+    )
+    batch = build_batch_expression_prompt(
+        profile_summary=profile_summary,
+        content_items=[{"title": "讲透国际局势", "up_name": "某UP"}],
+        tone_profile=None,
+        source_platform="bilibili",
+    )
+
+    assert "disliked_topics" in single[1]["content"]
+    assert "disliked_topics" in batch[1]["content"]
+    assert "避开 profile_summary.disliked_topics" in single[0]["content"]
+    assert "避开 profile_summary.disliked_topics" in batch[0]["content"]
 
 
 def test_build_soul_profile_prompt_avoids_report_tone() -> None:
@@ -229,6 +255,24 @@ def test_build_awareness_prompt_system_message_equals_constant() -> None:
     )
 
     assert messages[0]["content"] == _AWARENESS_SYSTEM_PROMPT
+
+
+def test_awareness_prompt_mentions_dislike_as_awareness_signal() -> None:
+    messages = build_awareness_prompt(
+        events=[
+            {
+                "event_type": "feedback",
+                "title": "低质混剪",
+                "inferred_satisfaction": "negative",
+                "metadata": {"feedback_type": "dislike"},
+            }
+        ],
+        preference_summary={"disliked_topics": ["低质混剪"]},
+        soul_profile={"core_traits": ["谨慎"]},
+    )
+
+    assert "feedback_type=dislike" in messages[0]["content"]
+    assert "最近开始避开" in messages[0]["content"]
 
 
 def test_build_awareness_prompt_user_block_ends_with_recent_events() -> None:
