@@ -21,10 +21,10 @@
 
 ## 📌 v0.3.72 重要更新（2026-05-16）
 
-- **🔌 浏览器插件后端端口可配置** —— 设置页新增「后端端口」（默认 `8420`，仅接受 `1-65535` 的完整整数），适合 Windows Hyper-V / WSL / Docker 占用默认端口时改用 `18080` / `19090` 等高位端口，并用 `openbiliclaw start --port <同一端口>` 启动后端。
+- **🧭 负反馈学习更准确** —— 默认过滤 `quick_exit` 等被动负向点击，但显式 `dislike` / `thumbs_down` 会进入 `disliked_topics` 和避雷证据；推荐文案不会再把命中避雷项的内容热情包装成“你会喜欢”。
+- **🔌 浏览器插件后端端口可配置** —— 设置页新增「后端端口」（默认 `8420`，仅接受 `1-65535` 的完整整数），适合 Windows Hyper-V / WSL / Docker 占用默认端口时改用 `18080` / `19090` 等高位端口，并用 `openbiliclaw start --port <同一端口>` 启动后端；感谢 [@addtion99](https://github.com/addtion99) 在 [#8](https://github.com/whiteguo233/OpenBiliClaw/pull/8) 提出需求和实现思路。
 - **🧩 插件全链路走统一后端 endpoint** —— popup、service worker、cookie 同步、XHS / Douyin / YouTube 任务派发和调试中继都通过共享 helper 解析当前端口；manifest 本地权限同步放宽到 `127.0.0.1/*` / `localhost/*`。
 - **🦊 Release 同步提供 Firefox 包** —— `extension-v*` release 现在同时上传 Chromium zip 和 `openbiliclaw-extension-v*-firefox.zip`，Firefox 140+ 用户不用再从源码本地打包。
-- **🙏 致谢社区贡献** —— 感谢 [@addtion99](https://github.com/addtion99) 在 [#8](https://github.com/whiteguo233/OpenBiliClaw/pull/8) 提出端口可配置需求并给出 popup 侧实现思路。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 

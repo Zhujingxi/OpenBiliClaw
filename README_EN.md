@@ -19,10 +19,10 @@
 
 ## 📌 v0.3.72 Highlights (2026-05-16)
 
-- **🔌 Configurable extension backend port** — the settings page now has a "backend port" field (default `8420`, complete integers only, `1-65535`) for Windows Hyper-V / WSL / Docker setups where the default local port is already reserved. Pick a high port such as `18080` or `19090`, then start the backend with `openbiliclaw start --port <same port>`.
+- **🧭 More precise negative-feedback learning** — passive quick-exit clicks are filtered by default, while explicit `dislike` / `thumbs_down` feedback still feeds `disliked_topics` and avoidance evidence; recommendation copy will no longer enthusiastically frame avoided topics as things you like.
+- **🔌 Configurable extension backend port** — the settings page now has a "backend port" field (default `8420`, complete integers only, `1-65535`) for Windows Hyper-V / WSL / Docker setups where the default local port is already reserved. Pick a high port such as `18080` or `19090`, then start the backend with `openbiliclaw start --port <same port>`. Thanks to [@addtion99](https://github.com/addtion99) for proposing the need and implementation idea in [#8](https://github.com/whiteguo233/OpenBiliClaw/pull/8).
 - **🧩 One backend endpoint path across the extension** — popup requests, service worker requests, cookie sync, XHS / Douyin / YouTube task dispatchers, and debug relays all resolve the current port through shared helpers; local manifest permissions now cover `127.0.0.1/*` and `localhost/*`.
 - **🦊 Firefox release package included** — `extension-v*` releases now upload both the Chromium zip and `openbiliclaw-extension-v*-firefox.zip`, so Firefox 140+ users no longer need to package from source.
-- **🙏 Community credit** — thanks to [@addtion99](https://github.com/addtion99) for proposing configurable backend ports and the popup-side implementation idea in [#8](https://github.com/whiteguo233/OpenBiliClaw/pull/8).
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
