@@ -77,28 +77,27 @@ function getStorageOnChanged(): ChromeStorageOnChangedLike | null {
   }
 }
 
-export function isValidBackendPort(value: unknown): boolean {
+function parseBackendPort(value: unknown): number | null {
   if (typeof value === "number" && Number.isInteger(value)) {
-    return value >= 1 && value <= 65535;
+    return value >= 1 && value <= 65535 ? value : null;
   }
   if (typeof value === "string" && value.trim() !== "") {
-    const parsed = Number.parseInt(value.trim(), 10);
-    return Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535;
+    const trimmed = value.trim();
+    if (!/^[0-9]+$/.test(trimmed)) {
+      return null;
+    }
+    const parsed = Number(trimmed);
+    return Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535 ? parsed : null;
   }
-  return false;
+  return null;
+}
+
+export function isValidBackendPort(value: unknown): boolean {
+  return parseBackendPort(value) !== null;
 }
 
 function coercePort(value: unknown): number {
-  if (typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 65535) {
-    return value;
-  }
-  if (typeof value === "string" && value.trim() !== "") {
-    const parsed = Number.parseInt(value.trim(), 10);
-    if (Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535) {
-      return parsed;
-    }
-  }
-  return DEFAULT_BACKEND_PORT;
+  return parseBackendPort(value) ?? DEFAULT_BACKEND_PORT;
 }
 
 function sanitizeEndpoint(raw: unknown): BackendEndpoint {

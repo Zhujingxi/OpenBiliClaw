@@ -17,10 +17,11 @@
 
 ---
 
-## 📌 v0.3.71 Highlights (2026-05-16)
+## 📌 v0.3.72 Highlights (2026-05-16)
 
-- **🦊 Firefox 140+ local build support** — `extension-v0.3.23` adds `manifest.firefox.json`, uses Firefox `sidebar_action` for the same popup UI, and `npm run build:firefox` / `npm run package:firefox` produce `dist-firefox/` plus a Firefox-specific zip. The Firefox manifest declares the data-collection categories required by AMO.
-- **📦 Safer extension packaging** — both Chrome and Firefox package scripts remove any existing same-name zip before compressing, so repeated local packaging cannot leave deleted stale files inside release assets.
+- **🔌 Configurable extension backend port** — the settings page now has a "backend port" field (default `8420`, complete integers only, `1-65535`) for Windows Hyper-V / WSL / Docker setups where the default local port is already reserved. Pick a high port such as `18080` or `19090`, then start the backend with `openbiliclaw start --port <same port>`.
+- **🧩 One backend endpoint path across the extension** — popup requests, service worker requests, cookie sync, XHS / Douyin / YouTube task dispatchers, and debug relays all resolve the current port through shared helpers; local manifest permissions now cover `127.0.0.1/*` and `localhost/*`.
+- **🙏 Community credit** — thanks to [@addtion99](https://github.com/addtion99) for proposing configurable backend ports and the popup-side implementation idea in [#8](https://github.com/whiteguo233/OpenBiliClaw/pull/8).
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -427,7 +428,7 @@ OpenBiliClaw/
 
 ## 📜 Release History
 
-Latest: **v0.3.71: Firefox extension build and packaging hardening (2026-05-16)**. The top highlight callout keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md), with packages on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases).
+Latest: **v0.3.72: configurable browser-extension backend port (2026-05-16)**. The top highlight callout keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md), with packages on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases).
 
 ## 🗺️ Roadmap
 
@@ -441,6 +442,10 @@ OpenBiliClaw aims to be your **personalized entry point to the entire web**. Sta
 ## 🤝 Contributing
 
 Contributions welcome! See the [Contributing Guide](docs/contributing.md) to get started.
+
+## 🙏 Acknowledgements
+
+- Thanks to [@addtion99](https://github.com/addtion99) for proposing configurable browser-extension backend ports and sharing the popup-side implementation idea in [#8](https://github.com/whiteguo233/OpenBiliClaw/pull/8).
 
 ## ⭐ Star History
 

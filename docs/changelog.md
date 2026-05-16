@@ -6,7 +6,7 @@
 
 ## v0.3.72: 浏览器插件后端端口可配置（2026-05-16）
 
-- 浏览器插件设置页新增「后端端口」字段（默认 `8420`，范围 `1-65535`）。Windows 启用 Hyper-V / WSL / Docker 后常见本地端口会被系统组件占用，导致 `openbiliclaw start` 默认 `8420` 启动失败；现在用户可改成 `18080` / `19090` / `13000` 等高位端口，并用 `openbiliclaw start --port <同一端口>` 启动后端即可继续使用插件。端口保存到 `chrome.storage.local`，不写入后端 `config.toml`。
+- 浏览器插件设置页新增「后端端口」字段（默认 `8420`，仅接受 `1-65535` 的完整十进制整数）。Windows 启用 Hyper-V / WSL / Docker 后常见本地端口会被系统组件占用，导致 `openbiliclaw start` 默认 `8420` 启动失败；现在用户可改成 `18080` / `19090` / `13000` 等高位端口，并用 `openbiliclaw start --port <同一端口>` 启动后端即可继续使用插件。端口保存到 `chrome.storage.local`，不写入后端 `config.toml`。
 - 新增 `extension/src/shared/backend-endpoint.ts` + `extension/popup/popup-backend-config.js` 共用 helper。`apiUrl()` / `wsUrl()` / `getBackendBaseUrl()` 在每次调用时解析当前端口，所以保存新端口后无需重载插件即可生效；service worker 通过 `chrome.storage.onChanged` 收到端口变更后会立即关闭旧 `runtime-stream` WebSocket 并按新 origin 重连。
 - 同步收敛了之前散在 ~10 处的硬编码 `127.0.0.1:8420`：service worker、cookie 同步、xhs / dy / yt 任务派发、`_debug/log` 中继、抖音内容脚本现在都走 `apiUrl()` 统一解析。
 - `manifest.json` / `manifest.firefox.json` 的 `host_permissions` 从固定 `127.0.0.1:8420/*` 放宽到 `127.0.0.1/*` + `localhost/*`，否则浏览器会在 manifest 层直接 block 非 `8420` 端口的请求；其他平台的 `*.bilibili.com` / `*.xiaohongshu.com` / `*.douyin.com` / `*.youtube.com` 权限完全不变。
