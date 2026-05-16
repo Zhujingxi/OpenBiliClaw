@@ -6,6 +6,7 @@
 
 ## v0.3.71: Firefox 扩展构建与打包补强（2026-05-16）
 
+- 觉察弹性补强：`AwarenessAnalyzer._coerce_note_list` 在前述 `results/items/...` wrapper 基础上再扩展到 `observations / recent_observations / latest / latest_observations`，并兼容 reasoning 模型常见的 bare singular-note dict（仅需 `observation` 字段）与 wrapper-key 下的单 note dict；`CognitionCycle._run_awareness` 失败时单次 2s 间隔重试，仍失败则记 WARNING 且**不推进** `last_awareness_at`，下一 tick 立即重试而非空等 12h；`build_awareness_prompt` 的 system 内容 / user 块顺序 / sort_keys 形态由 `tests/test_llm_prompts.py` 三组 byte-equal 回归测试锁死。修复 MiMo 后端 6 小时连发 569 条 `Awareness analyzer failed during cognition cycle` 的退化路径。
 - LLM prompt-cache 稳定性补强：`AwarenessAnalyzer` 现在接受 `{"results":[...]}` / `{"items":[...]}` 等 object-wrapped array 响应，避免 MiMo 等模型 JSON mode 包裹数组时中断觉察生成；`build_awareness_prompt` 与 `build_batch_content_evaluation_prompt` 的 user prompt 改为稳定画像在前、来源与本批数据在后，并使用确定性 JSON，提升 `soul.awareness` / `discovery.evaluate_batch` 的缓存前缀复用。
 - 安装与诊断补强：`install.sh` / `install.ps1` / `agent_bootstrap.py` 会把 `localhost,127.0.0.1,::1` 写入 `NO_PROXY/no_proxy`，避免 Windows 全局代理劫持本地 health check；OpenAI-compatible provider 会记录 HTTP 400 响应体摘要，便于定位 MiMo 请求 schema 错误；B 站 `/nav` 返回 `-101` 时现在抛出 `BilibiliAuthExpiredError` 并明确提示重新登录或保持扩展在线同步 Cookie。
 - 测试与类型基线恢复：修复 `DelightWeights` 测试遗漏 `likes` 权重、discovery 评估缓存 key 与当前 content identity 不一致、pipeline fake 画像 prompt 识别失效，以及 `CognitionCycle` 只因 preference 空而跳过的过宽 gate；补齐 eval / OpenClaw / source adapter 的 JSON 类型守卫和 optional dependency 动态导入边界，使 `pytest` 全量与 `mypy src/` 重新通过。

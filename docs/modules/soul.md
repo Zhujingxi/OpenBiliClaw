@@ -32,9 +32,9 @@
 | ProfileBuilder | ✅ | 结构化 prompt + JSON 校验 + `OnionProfile` 构建 |
 | SoulEngine.build_initial_profile() | ✅ | 从 history + preference 生成并持久化 `soul.json` |
 | SoulEngine.get_profile() | ✅ | 从 soul 层读取画像，未初始化时抛明确异常 |
-| AwarenessAnalyzer | ✅ | 近期事件 → `AwarenessNote` 列表，支持同日去重；解析 LLM 响应时兼容 `results/items/notes/data` 等 object-wrapped array，prompt 按画像 → 偏好 → 近期事件排序以保留缓存前缀 |
+| AwarenessAnalyzer | ✅ | 近期事件 → `AwarenessNote` 列表，支持同日去重；解析 LLM 响应时兼容 `results/items/notes/data/observations/recent_observations/latest/latest_observations` 等 object-wrapped array，也兼容 reasoning 模型常见的 bare singular-note dict（仅需 `observation` 字段）和 wrapper-key 下的单 note dict；prompt 按画像 → 偏好 → 近期事件排序以保留缓存前缀 |
 | InsightAnalyzer | ✅ | 觉察 + 偏好 + 画像 → `InsightHypothesis` 列表，支持假设合并 |
-| CognitionCycle | ✅ | 半日节流生成 awareness + insight 并同步到 `OnionProfile`；仅在 preference 与 soul 都为空的早期初始化状态跳过，已有任一层时仍会运行，避免已初始化画像因 preference 暂空而长期不产出觉察 |
+| CognitionCycle | ✅ | 半日节流生成 awareness + insight 并同步到 `OnionProfile`；仅在 preference 与 soul 都为空的早期初始化状态跳过，已有任一层时仍会运行，避免已初始化画像因 preference 暂空而长期不产出觉察；awareness 失败时单次重试（间隔 2s），仍失败则记 WARNING 且**不推进** `last_awareness_at`，下一 tick 立即重试而不是空等 12h |
 | SoulEngine.generate_awareness_note() | ✅ | 生成并持久化 `awareness.json` |
 | SoulEngine.generate_insight() | ✅ | 生成并持久化 `insight.json` |
 | SoulEngine.update_from_feedback() | ✅ | feedback 事件落库，并更新匹配洞察状态 |
