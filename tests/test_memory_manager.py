@@ -104,6 +104,54 @@ def test_query_events_and_stats_delegate_to_database(tmp_path: Path) -> None:
     assert stats == {"feedback": 1, "search": 1}
 
 
+@pytest.mark.asyncio
+async def test_propagate_event_persists_classification(tmp_path: Path) -> None:
+    """MemoryManager.propagate_event flows through Database.insert_event,
+    which is the single owner of classify_event_satisfaction. End-to-end
+    we should see the classification land on the row."""
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+
+    await memory.propagate_event(
+        {
+            "event_type": "click",
+            "url": "https://www.bilibili.com/video/BVquick",
+            "title": "标题党 2 秒",
+            "metadata": {"watch_seconds": 2, "video_duration_seconds": 600},
+        }
+    )
+
+    row = memory._database.conn.execute(
+        "SELECT inferred_satisfaction, satisfaction_reason FROM events ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["inferred_satisfaction"] == "negative"
+    assert row["satisfaction_reason"] == "quick_exit"
+
+
+@pytest.mark.asyncio
+async def test_query_events_satisfaction_modes_passthrough(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+
+    await memory.propagate_event(
+        {"event_type": "like", "url": "https://a", "title": "深度教程", "metadata": {}}
+    )
+    await memory.propagate_event(
+        {
+            "event_type": "click",
+            "url": "https://b",
+            "title": "标题党",
+            "metadata": {"watch_seconds": 2, "video_duration_seconds": 600},
+        }
+    )
+
+    positives = memory.query_events(satisfaction_modes=frozenset({"positive"}), limit=10)
+    assert {row["title"] for row in positives} == {"深度教程"}
+
+    negatives = memory.query_events(satisfaction_modes=frozenset({"negative"}), limit=10)
+    assert {row["title"] for row in negatives} == {"标题党"}
+
+
 def test_get_core_memory_returns_trimmed_summary(tmp_path: Path) -> None:
     memory = MemoryManager(tmp_path)
     memory.initialize()

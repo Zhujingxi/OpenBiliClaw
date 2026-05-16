@@ -59,13 +59,18 @@ _SCHEMA_VERSION = 2
 _SCHEMA_SQL = """
 -- Event log (behavioral data from browser extension)
 CREATE TABLE IF NOT EXISTS events (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_type  TEXT NOT NULL,        -- click, search, scroll, comment, etc.
-    url         TEXT,
-    title       TEXT,
-    context     TEXT,                 -- JSON: DOM snapshot reference, viewport, etc.
-    metadata    TEXT,                 -- JSON: additional event-specific data
-    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type            TEXT NOT NULL,        -- click, search, scroll, comment, etc.
+    url                   TEXT,
+    title                 TEXT,
+    context               TEXT,                 -- JSON: DOM snapshot reference, viewport, etc.
+    metadata              TEXT,                 -- JSON: additional event-specific data
+    -- v0.3.x event-satisfaction signal: deterministic classification
+    -- written at insert time by ``classify_event_satisfaction``. NULL on
+    -- pre-migration rows; consumers treat NULL as ``unknown``.
+    inferred_satisfaction TEXT,                 -- "positive" | "neutral" | "negative" | "unknown"
+    satisfaction_reason   TEXT,                 -- short snake_case reason; see event_format.py
+    created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Content cache (discovered/evaluated content)
@@ -212,6 +217,7 @@ class Database:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout = 30000")
         self._conn.executescript(_SCHEMA_SQL)
+        self._ensure_event_satisfaction_columns()
         self._ensure_recommendation_feedback_columns()
         self._ensure_content_cache_runtime_columns()
         self._ensure_content_cache_relevance_columns()
@@ -294,6 +300,8 @@ class Database:
         """
         import json
 
+        from openbiliclaw.sources.event_format import classify_event_satisfaction
+
         raw_context = kwargs.get("context", "")
         if isinstance(raw_context, str):
             context_text = raw_context
@@ -303,14 +311,38 @@ class Database:
             # Legacy dict / list payload — JSON-encode for storage.
             context_text = json.dumps(raw_context, ensure_ascii=False)
 
+        metadata_payload = kwargs.get("metadata", {})
+
+        # Single classification owner. Reconstruct the event dict shape
+        # the classifier expects (event_type + url + title + metadata).
+        # API ingest may set dwell fields at the top level as well; pass
+        # those through so the click rules read either location.
+        classifier_event: dict[str, Any] = {
+            "event_type": event_type,
+            "url": kwargs.get("url", ""),
+            "title": kwargs.get("title", ""),
+            "metadata": metadata_payload if isinstance(metadata_payload, dict) else {},
+        }
+        for top_level_key in ("watch_seconds", "video_duration_seconds"):
+            if top_level_key in kwargs and kwargs[top_level_key] is not None:
+                classifier_event[top_level_key] = kwargs[top_level_key]
+        inferred_satisfaction, satisfaction_reason = classify_event_satisfaction(
+            classifier_event
+        )
+
         cursor = self._execute_write(
-            "INSERT INTO events (event_type, url, title, context, metadata) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO events "
+            "(event_type, url, title, context, metadata, "
+            " inferred_satisfaction, satisfaction_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 event_type,
                 kwargs.get("url", ""),
                 kwargs.get("title", ""),
                 context_text,
-                json.dumps(kwargs.get("metadata", {}), ensure_ascii=False),
+                json.dumps(metadata_payload, ensure_ascii=False),
+                inferred_satisfaction,
+                satisfaction_reason,
             ),
         )
         return cursor.lastrowid or 0
@@ -673,8 +705,14 @@ class Database:
         end_time: datetime | None = None,
         keyword: str = "",
         limit: int = 100,
+        satisfaction_modes: frozenset[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Query events with optional filters."""
+        """Query events with optional filters.
+
+        ``satisfaction_modes`` filters by ``inferred_satisfaction``. When
+        the set includes ``"unknown"``, rows with a NULL classification
+        (pre-migration legacy rows) are also returned.
+        """
         sql = "SELECT * FROM events"
         clauses: list[str] = []
         params: list[Any] = []
@@ -696,6 +734,21 @@ class Database:
             like = f"%{keyword}%"
             clauses.append("(url LIKE ? OR title LIKE ? OR metadata LIKE ?)")
             params.extend([like, like, like])
+
+        if satisfaction_modes is not None:
+            modes = list(satisfaction_modes)
+            mode_clauses: list[str] = []
+            if modes:
+                placeholders = ", ".join("?" for _ in modes)
+                mode_clauses.append(f"inferred_satisfaction IN ({placeholders})")
+                params.extend(modes)
+            if "unknown" in satisfaction_modes:
+                mode_clauses.append("inferred_satisfaction IS NULL")
+            if mode_clauses:
+                clauses.append("(" + " OR ".join(mode_clauses) + ")")
+            else:
+                # Empty modes set explicitly requested → match nothing.
+                clauses.append("1 = 0")
 
         if clauses:
             sql = f"{sql} WHERE {' AND '.join(clauses)}"
@@ -2430,6 +2483,27 @@ class Database:
             if column_name in existing_columns:
                 continue
             self.conn.execute(f"ALTER TABLE llm_usage ADD COLUMN {column_name} {column_type}")
+
+    def _ensure_event_satisfaction_columns(self) -> None:
+        """Backfill v0.3.x event-satisfaction columns for pre-migration DBs.
+
+        Existing rows keep ``NULL`` in both columns; consumers treat NULL
+        as ``unknown`` so the upgrade is non-blocking.
+        """
+        existing_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(events)").fetchall()
+        }
+        required_columns = {
+            "inferred_satisfaction": "TEXT",
+            "satisfaction_reason": "TEXT",
+        }
+        for column_name, column_type in required_columns.items():
+            if column_name in existing_columns:
+                continue
+            self.conn.execute(
+                f"ALTER TABLE events ADD COLUMN {column_name} {column_type}"
+            )
 
     def _ensure_recommendation_feedback_columns(self) -> None:
         """Backfill recommendation feedback columns for existing databases."""

@@ -1869,6 +1869,148 @@ class TestDatabase:
             db.close()
 
 
+class TestEventSatisfactionPersistence:
+    """v0.3.x event-satisfaction signal — schema + migration + filtered query."""
+
+    def test_fresh_database_has_satisfaction_columns(self, tmp_path: Path) -> None:
+        db = Database(tmp_path / "fresh.db")
+        db.initialize()
+        columns = {
+            str(row["name"]) for row in db.conn.execute("PRAGMA table_info(events)").fetchall()
+        }
+        assert "inferred_satisfaction" in columns
+        assert "satisfaction_reason" in columns
+        db.close()
+
+    def test_pre_migration_database_is_additively_upgraded(self, tmp_path: Path) -> None:
+        """A v0.3.71 database (events table without the two new columns)
+        must boot cleanly after the migration; existing rows get NULL."""
+        path = tmp_path / "legacy.db"
+        legacy = sqlite3.connect(str(path))
+        legacy.executescript(
+            """
+            CREATE TABLE events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type  TEXT NOT NULL,
+                url         TEXT,
+                title       TEXT,
+                context     TEXT,
+                metadata    TEXT,
+                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO events (event_type, title) VALUES ('click', 'legacy row');
+            """
+        )
+        legacy.commit()
+        legacy.close()
+
+        db = Database(path)
+        db.initialize()
+        columns = {
+            str(row["name"]) for row in db.conn.execute("PRAGMA table_info(events)").fetchall()
+        }
+        assert "inferred_satisfaction" in columns
+        assert "satisfaction_reason" in columns
+        legacy_row = db.conn.execute(
+            "SELECT inferred_satisfaction, satisfaction_reason FROM events WHERE title = ?",
+            ("legacy row",),
+        ).fetchone()
+        assert legacy_row["inferred_satisfaction"] is None
+        assert legacy_row["satisfaction_reason"] is None
+        db.close()
+
+    def test_insert_event_persists_classification(self, tmp_path: Path) -> None:
+        """insert_event runs classify_event_satisfaction exactly once and
+        stores the result alongside the event fields."""
+        db = Database(tmp_path / "classified.db")
+        db.initialize()
+
+        db.insert_event("like", title="深度教程", url="https://x")
+        db.insert_event(
+            "click",
+            title="标题党",
+            metadata={"watch_seconds": 2, "video_duration_seconds": 600},
+        )
+
+        rows = db.conn.execute(
+            "SELECT event_type, inferred_satisfaction, satisfaction_reason "
+            "FROM events ORDER BY id"
+        ).fetchall()
+        assert rows[0]["event_type"] == "like"
+        assert rows[0]["inferred_satisfaction"] == "positive"
+        assert rows[0]["satisfaction_reason"] == "explicit_engagement"
+        assert rows[1]["event_type"] == "click"
+        assert rows[1]["inferred_satisfaction"] == "negative"
+        assert rows[1]["satisfaction_reason"] == "quick_exit"
+        db.close()
+
+    def test_query_events_filter_by_satisfaction_modes(self, tmp_path: Path) -> None:
+        db = Database(tmp_path / "filtered.db")
+        db.initialize()
+
+        db.insert_event("like", title="好内容")  # → positive
+        db.insert_event(
+            "click",
+            title="标题党",
+            metadata={"watch_seconds": 2, "video_duration_seconds": 600},
+        )  # → negative
+        db.insert_event(
+            "click",
+            title="未知",
+            metadata={"video_duration_seconds": 600},
+        )  # → unknown / missing_dwell
+
+        # No filter → all rows.
+        assert len(db.query_events(limit=10)) == 3
+
+        # Positive only.
+        positives = db.query_events(satisfaction_modes=frozenset({"positive"}), limit=10)
+        assert len(positives) == 1
+        assert positives[0]["title"] == "好内容"
+
+        # Positive + unknown also includes the missing_dwell row.
+        mixed = db.query_events(
+            satisfaction_modes=frozenset({"positive", "unknown"}), limit=10
+        )
+        assert {row["title"] for row in mixed} == {"好内容", "未知"}
+        db.close()
+
+    def test_query_events_unknown_mode_includes_null_rows(self, tmp_path: Path) -> None:
+        """Legacy rows have inferred_satisfaction = NULL. Requesting
+        `unknown` must include them so the consumer can opt in to
+        unclassified history."""
+        path = tmp_path / "legacy-then-modern.db"
+        legacy = sqlite3.connect(str(path))
+        legacy.executescript(
+            """
+            CREATE TABLE events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type  TEXT NOT NULL,
+                url         TEXT,
+                title       TEXT,
+                context     TEXT,
+                metadata    TEXT,
+                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO events (event_type, title) VALUES ('view', 'legacy NULL row');
+            """
+        )
+        legacy.commit()
+        legacy.close()
+
+        db = Database(path)
+        db.initialize()
+        db.insert_event("like", title="新数据")  # post-migration → positive
+
+        unknown_rows = db.query_events(satisfaction_modes=frozenset({"unknown"}), limit=10)
+        titles = {row["title"] for row in unknown_rows}
+        # The legacy NULL row must show up under `unknown`.
+        assert "legacy NULL row" in titles
+        # And the modern positive row must NOT.
+        assert "新数据" not in titles
+        db.close()
+
+
 class TestDatabaseMaintenance:
     def test_check_database_integrity_reports_healthy_database(self, tmp_path: Path) -> None:
         from openbiliclaw.storage.maintenance import check_database_integrity
