@@ -13,7 +13,7 @@
 - 安装与诊断补强：`install.sh` / `install.ps1` / `agent_bootstrap.py` 会把 `localhost,127.0.0.1,::1` 写入 `NO_PROXY/no_proxy`，避免 Windows 全局代理劫持本地 health check；OpenAI-compatible provider 会记录 HTTP 400 响应体摘要，便于定位 MiMo 请求 schema 错误；B 站 `/nav` 返回 `-101` 时现在抛出 `BilibiliAuthExpiredError` 并明确提示重新登录或保持扩展在线同步 Cookie。
 - 测试与类型基线恢复：修复 `DelightWeights` 测试遗漏 `likes` 权重、discovery 评估缓存 key 与当前 content identity 不一致、pipeline fake 画像 prompt 识别失效，以及 `CognitionCycle` 只因 preference 空而跳过的过宽 gate；补齐 eval / OpenClaw / source adapter 的 JSON 类型守卫和 optional dependency 动态导入边界，使 `pytest` 全量与 `mypy src/` 重新通过。
 - 浏览器扩展新增 Firefox 140+ 支持：新增 `manifest.firefox.json` 使用 `sidebar_action` 替代 Chrome 的 `sidePanel`，`npm run build:firefox` / `npm run package:firefox` 产出独立 `dist-firefox/` 和 `openbiliclaw-extension-v*-firefox.zip`；`openExtensionUi()` 增加 Chrome sidePanel -> Firefox sidebarAction -> tab 的三段降级。Firefox manifest 的 version 在构建时从 `manifest.json` 注入，并声明 AMO 所需 `data_collection_permissions`；Chrome / Firefox 打包前都会删除旧 zip，避免本地重复打包残留过期文件。Chrome / Edge / Brave 构建路径完全不变。
-- 浏览器插件版本提升到 v0.3.23，避免复用已发布的 `extension-v0.3.22` tag / release 资产语义。
+- 浏览器插件版本提升到 v0.3.23，承载 Firefox 140+ 支持与上文「视频停留满意度采集」（`video-dwell-tracker.ts`：SPA 路由切换 / `pagehide` 时 flush `click` 事件携带 `watch_seconds` / `video_duration_seconds`），同时避免复用已发布的 `extension-v0.3.22` tag / release 资产语义。Chrome / Edge / Brave 走 `openbiliclaw-extension-v0.3.23.zip`，Firefox 140+ 走 `openbiliclaw-extension-v0.3.23-firefox.zip`。
 - README / README_EN 顶部 highlights callout 收敛为“只保留最新版本、≤4 条、≤1 句、CN/EN 同步”，完整历史继续放在 changelog，避免 README 顶部堆成迷你变更日志。
 - README 增加用户交流群二维码入口，放在贡献入口前，避免打断首次安装路径。
 - README / README_EN 底部“更新日志 / Release History”从长版本表收敛为最新版本入口 + 完整 changelog / Releases 链接，避免 README 主体被历史记录撑长。
