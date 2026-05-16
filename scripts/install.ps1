@@ -77,6 +77,31 @@ try {
     # PS 5.1 installs ship .NET 4.6+ so this almost never triggers.
 }
 
+function Add-LocalNoProxy {
+    $parts = @()
+    foreach ($name in @('NO_PROXY', 'no_proxy')) {
+        $raw = [Environment]::GetEnvironmentVariable($name, 'Process')
+        if ($raw) {
+            foreach ($part in ($raw -split ',')) {
+                $value = $part.Trim()
+                if ($value -and -not $parts.Contains($value)) {
+                    $parts += $value
+                }
+            }
+        }
+    }
+    foreach ($hostName in @('localhost', '127.0.0.1', '::1')) {
+        if (-not $parts.Contains($hostName)) {
+            $parts += $hostName
+        }
+    }
+    $value = ($parts -join ',')
+    $env:NO_PROXY = $value
+    $env:no_proxy = $value
+}
+
+Add-LocalNoProxy
+
 # -----------------------------------------------------------------------------
 # Defaults
 

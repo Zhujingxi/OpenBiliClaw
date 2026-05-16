@@ -12,7 +12,7 @@ import logging
 import math
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
@@ -108,10 +108,32 @@ _DEFAULT_STRATEGY_WEIGHTS: dict[str, float] = {
 
 # Which dimensions apply to which strategies
 _STRATEGY_DIMENSIONS: dict[str, list[str]] = {
-    "search": ["relevance", "diversity", "specificity", "query_quality", "no_echo_chamber", "filter_precision"],
-    "trending": ["relevance", "diversity", "specificity", "explanation_quality", "novelty", "no_echo_chamber"],
+    "search": [
+        "relevance",
+        "diversity",
+        "specificity",
+        "query_quality",
+        "no_echo_chamber",
+        "filter_precision",
+    ],
+    "trending": [
+        "relevance",
+        "diversity",
+        "specificity",
+        "explanation_quality",
+        "novelty",
+        "no_echo_chamber",
+    ],
     "related_chain": ["relevance", "diversity", "explanation_quality", "no_echo_chamber"],
-    "explore": ["relevance", "diversity", "specificity", "query_quality", "explanation_quality", "novelty", "no_echo_chamber"],
+    "explore": [
+        "relevance",
+        "diversity",
+        "specificity",
+        "query_quality",
+        "explanation_quality",
+        "novelty",
+        "no_echo_chamber",
+    ],
 }
 
 
@@ -169,6 +191,7 @@ class SupportsStructuredTask(Protocol):
         history: list[dict[str, str]] | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        caller: str = "",
     ) -> object: ...
 
 
@@ -216,15 +239,17 @@ class DiscoveryEvaluator:
         # Use strategy-specific weight overrides if available
         dim_weights = _STRATEGY_DIM_OVERRIDES.get(strategy_name, self._dim_weights)
         total_weight = sum(
-            dim_weights.get(s.dimension, self._dim_weights.get(s.dimension, 0.0))
-            for s in scores
+            dim_weights.get(s.dimension, self._dim_weights.get(s.dimension, 0.0)) for s in scores
         )
         overall = 0.0
         if total_weight > 0:
-            overall = sum(
-                s.score * dim_weights.get(s.dimension, self._dim_weights.get(s.dimension, 0.0))
-                for s in scores
-            ) / total_weight
+            overall = (
+                sum(
+                    s.score * dim_weights.get(s.dimension, self._dim_weights.get(s.dimension, 0.0))
+                    for s in scores
+                )
+                / total_weight
+            )
 
         worst = sorted(scores, key=lambda s: s.score)[:3]
         attributions = [
@@ -315,7 +340,7 @@ class DiscoveryEvaluator:
             overall_score=round(overall, 4),
             worst_dimensions=worst,
             attributions=attributions,
-            timestamp=datetime.now(tz=timezone.utc).isoformat(),
+            timestamp=datetime.now(tz=UTC).isoformat(),
         )
 
     async def evaluate_with_human(
@@ -337,29 +362,30 @@ class DiscoveryEvaluator:
 
         for strategy_name in strategy_names:
             scores: list[DimensionScore] = []
-            for dim in _STRATEGY_DIMENSIONS.get(strategy_name, []):
-                key = f"{strategy_name}.{dim}"
+            for dimension_name in _STRATEGY_DIMENSIONS.get(strategy_name, []):
+                key = f"{strategy_name}.{dimension_name}"
                 entry = human_feedback.get(key, {})
                 if not isinstance(entry, dict):
                     entry = {}
                 raw_score = entry.get("score", 0.5)
                 score = _clamp(float(raw_score) if isinstance(raw_score, (int, float)) else 0.5)
                 note = str(entry.get("note", ""))
-                scores.append(DimensionScore(
-                    dimension=dim,
-                    score=score,
-                    details=note,
-                    severity=_severity(score),
-                ))
+                scores.append(
+                    DimensionScore(
+                        dimension=dimension_name,
+                        score=score,
+                        details=note,
+                        severity=_severity(score),
+                    )
+                )
 
-            total_weight = sum(
-                self._dim_weights.get(s.dimension, 0.0) for s in scores
-            )
+            total_weight = sum(self._dim_weights.get(s.dimension, 0.0) for s in scores)
             overall = 0.0
             if total_weight > 0:
-                overall = sum(
-                    s.score * self._dim_weights.get(s.dimension, 0.0) for s in scores
-                ) / total_weight
+                overall = (
+                    sum(s.score * self._dim_weights.get(s.dimension, 0.0) for s in scores)
+                    / total_weight
+                )
 
             worst = sorted(scores, key=lambda s: s.score)[:3]
             reports[strategy_name] = StrategyEvalReport(
@@ -371,22 +397,24 @@ class DiscoveryEvaluator:
                 attributions=[
                     f"{strategy_name}.{d.dimension} → "
                     f"{DISCOVERY_FIELD_TO_PARAM.get(f'{strategy_name}.{d.dimension}', 'unknown')}"
-                    for d in worst if d.score < 0.7
+                    for d in worst
+                    if d.score < 0.7
                 ],
             )
 
         # Cross-strategy score from human feedback
         cross_entry = human_feedback.get("cross.diversity", {})
+        cross_raw_score = cross_entry.get("score") if isinstance(cross_entry, dict) else None
         cross_score = _clamp(
-            float(cross_entry.get("score", 0.5))
-            if isinstance(cross_entry, dict) and isinstance(cross_entry.get("score"), (int, float))
-            else 0.5
+            float(cross_raw_score) if isinstance(cross_raw_score, (int, float)) else 0.5
         )
-        cross_scores = [DimensionScore(
-            dimension="cross.diversity",
-            score=cross_score,
-            severity=_severity(cross_score),
-        )]
+        cross_scores = [
+            DimensionScore(
+                dimension="cross.diversity",
+                score=cross_score,
+                severity=_severity(cross_score),
+            )
+        ]
 
         total_weight = 0.0
         weighted_sum = 0.0
@@ -400,13 +428,15 @@ class DiscoveryEvaluator:
 
         all_dims: list[DimensionScore] = []
         for report in reports.values():
-            for dim in report.dimension_scores:
-                all_dims.append(DimensionScore(
-                    dimension=f"{report.strategy_name}.{dim.dimension}",
-                    score=dim.score,
-                    details=dim.details,
-                    severity=dim.severity,
-                ))
+            for dimension_score in report.dimension_scores:
+                all_dims.append(
+                    DimensionScore(
+                        dimension=f"{report.strategy_name}.{dimension_score.dimension}",
+                        score=dimension_score.score,
+                        details=dimension_score.details,
+                        severity=dimension_score.severity,
+                    )
+                )
         all_dims.extend(cross_scores)
         worst = sorted(all_dims, key=lambda d: d.score)[:5]
 
@@ -417,9 +447,10 @@ class DiscoveryEvaluator:
             worst_dimensions=worst,
             attributions=[
                 f"{d.dimension} → {DISCOVERY_FIELD_TO_PARAM.get(d.dimension, 'unknown')}"
-                for d in worst if d.score < 0.7
+                for d in worst
+                if d.score < 0.7
             ],
-            timestamp=datetime.now(tz=timezone.utc).isoformat(),
+            timestamp=datetime.now(tz=UTC).isoformat(),
         )
 
     # ------------------------------------------------------------------
@@ -436,8 +467,9 @@ class DiscoveryEvaluator:
         intermediates: dict[str, object],
     ) -> DimensionScore:
         if not results:
-            return DimensionScore(dimension=dimension, score=0.0, severity="wrong",
-                                  details="No results to evaluate")
+            return DimensionScore(
+                dimension=dimension, score=0.0, severity="wrong", details="No results to evaluate"
+            )
 
         if dimension == "relevance":
             score = await self._score_relevance(results, persona)
@@ -489,7 +521,7 @@ class DiscoveryEvaluator:
             response = await self._llm.complete_structured_task(
                 system_instruction=(
                     "你是内容推荐质量评审员。评估以下内容列表与用户画像的匹配度。\n"
-                    "输出严格 JSON: {\"score\": 0.0-1.0, \"reason\": \"一句话\"}"
+                    '输出严格 JSON: {"score": 0.0-1.0, "reason": "一句话"}'
                 ),
                 user_input=f"用户画像:\n{persona_ctx}\n\n候选内容:\n{items_text}",
                 temperature=0.3,
@@ -520,7 +552,7 @@ class DiscoveryEvaluator:
                 system_instruction=(
                     "评估这些内容是否针对此用户个人定制，而非泛热门内容。\n"
                     "1.0 = 高度个性化，0.0 = 完全是泛热门。\n"
-                    "输出严格 JSON: {\"score\": 0.0-1.0, \"reason\": \"一句话\"}"
+                    '输出严格 JSON: {"score": 0.0-1.0, "reason": "一句话"}'
                 ),
                 user_input=f"用户画像:\n{persona_ctx}\n\n内容列表:\n{items_text}",
                 temperature=0.3,
@@ -556,7 +588,7 @@ class DiscoveryEvaluator:
                 system_instruction=(
                     "评估这些搜索词/探索方向是否有创造性、针对性，能为此用户找到好内容。\n"
                     "1.0 = 创造性强且精准，0.0 = 过于泛泛或与用户无关。\n"
-                    "输出严格 JSON: {\"score\": 0.0-1.0, \"reason\": \"一句话\"}"
+                    '输出严格 JSON: {"score": 0.0-1.0, "reason": "一句话"}'
                 ),
                 user_input=f"用户画像:\n{persona_ctx}\n\n搜索词/方向:\n{items_text}",
                 caller="eval.query_quality",
@@ -591,9 +623,7 @@ def _score_diversity(results: list[Any]) -> float:
     total = len(labels)
     max_entropy = math.log(min(total, len(counts))) if len(counts) > 1 else 1.0
 
-    entropy = -sum(
-        (c / total) * math.log(c / total) for c in counts.values() if c > 0
-    )
+    entropy = -sum((c / total) * math.log(c / total) for c in counts.values() if c > 0)
     return _clamp(entropy / max_entropy if max_entropy > 0 else 0.0)
 
 
@@ -610,7 +640,11 @@ def _score_novelty(results: list[Any], persona: Any) -> float:
         if interest is not None:
             likes = getattr(interest, "likes", [])
             for domain in likes:
-                name = getattr(domain, "name", "") if hasattr(domain, "name") else str(domain.get("name", ""))
+                name = (
+                    getattr(domain, "name", "")
+                    if hasattr(domain, "name")
+                    else str(domain.get("name", ""))
+                )
                 if name:
                     known_topics.add(name.strip().lower())
     else:
@@ -737,7 +771,7 @@ def _persona_context(persona: Any) -> str:
     """Extract a compact text summary from OnionProfile or SoulProfile."""
     if hasattr(persona, "to_llm_context"):
         ctx = persona.to_llm_context()
-        if ctx:
+        if isinstance(ctx, str) and ctx:
             return ctx[:1500]
 
     parts: list[str] = []
@@ -755,9 +789,7 @@ def _persona_context(persona: Any) -> str:
     if prefs:
         interests = getattr(prefs, "interests", [])
         if interests:
-            parts.append("兴趣: " + ", ".join(
-                f"{getattr(i, 'name', '')}" for i in interests[:8]
-            ))
+            parts.append("兴趣: " + ", ".join(f"{getattr(i, 'name', '')}" for i in interests[:8]))
     return "\n".join(parts) or "No profile context available"
 
 

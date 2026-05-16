@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import heapq
 import itertools
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
@@ -33,6 +33,7 @@ class SupportsComplete(Protocol):
         temperature: float = 0.7,
         max_tokens: int = 4096,
         json_mode: bool = False,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse: ...
 
 
@@ -82,9 +83,7 @@ class PrioritySemaphore:
             await fut
         except asyncio.CancelledError:
             # Drop ourselves from the heap if we hadn't been woken yet.
-            self._waiters = [
-                entry for entry in self._waiters if entry[2] is not fut
-            ]
+            self._waiters = [entry for entry in self._waiters if entry[2] is not fut]
             heapq.heapify(self._waiters)
             # If the slot was already handed to us before the cancel
             # propagated, hand it on to the next waiter so the queue
@@ -204,10 +203,8 @@ class LLMService:
         """
         core_memory_block = ""
         if self.memory is not None:
-            try:
+            with suppress(Exception):
                 core_memory_block = self.memory.render_core_memory_prompt()
-            except Exception:
-                pass
         parts = [system_instruction.strip()]
         if core_memory_block:
             parts.append("以下是当前用户的 core memory，请作为理解背景：")
@@ -238,10 +235,8 @@ class LLMService:
         if recorder is not None:
             record_fn = getattr(recorder, "record", None)
             if callable(record_fn):
-                try:
+                with suppress(Exception):
                     record_fn(response, caller=caller)
-                except Exception:
-                    pass
         return response
 
     async def complete_structured_task(

@@ -186,7 +186,8 @@ async def _llm_semantic_score(
 
 
 def _score_string_list_fallback(
-    expected: list[str], predicted: list[str],
+    expected: list[str],
+    predicted: list[str],
 ) -> tuple[float, str]:
     """Fallback: score two string lists using F1 of set overlap."""
     if not expected and not predicted:
@@ -214,7 +215,8 @@ def _score_string_list_fallback(
 
 
 def _score_string_fallback(
-    expected: str, predicted: str,
+    expected: str,
+    predicted: str,
 ) -> tuple[float, str]:
     """Fallback: score two strings without LLM."""
     if not expected and not predicted:
@@ -251,14 +253,13 @@ def _score_mbti_type(expected: str, predicted: str) -> tuple[float, str]:
     score = matches / 4.0
     if matches == 4:
         return 1.0, ""
-    mismatches = [
-        f"{expected[i]}→{predicted[i]}" for i in range(4) if expected[i] != predicted[i]
-    ]
+    mismatches = [f"{expected[i]}→{predicted[i]}" for i in range(4) if expected[i] != predicted[i]]
     return score, f"不匹配: {', '.join(mismatches)}"
 
 
 def _score_mbti_dimensions(
-    expected: dict[str, Any], predicted: dict[str, Any],
+    expected: dict[str, Any],
+    predicted: dict[str, Any],
 ) -> tuple[float, str]:
     """Score MBTI dimensions by per-dimension MAE."""
     if not expected and not predicted:
@@ -288,8 +289,15 @@ def _score_mbti_dimensions(
     return score, "; ".join(deviations)
 
 
+def _interest_tree(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
 def _score_interest_tree(
-    expected: list[dict[str, Any]], predicted: list[dict[str, Any]],
+    expected: list[dict[str, Any]],
+    predicted: list[dict[str, Any]],
 ) -> tuple[float, str]:
     """Score interest tree by domain recall, specifics recall, and weight MAE."""
     if not expected and not predicted:
@@ -324,18 +332,18 @@ def _score_interest_tree(
         weight_diffs.append(abs(exp_w - pred_w))
 
         # Specifics comparison
-        exp_specs = {s.get("name", ""): s for s in (exp_d.get("specifics") or [])
-                     if isinstance(s, dict)}
-        pred_specs = {s.get("name", ""): s for s in (pred_d.get("specifics") or [])
-                      if isinstance(s, dict)}
+        exp_specs = {
+            s.get("name", ""): s for s in (exp_d.get("specifics") or []) if isinstance(s, dict)
+        }
+        pred_specs = {
+            s.get("name", ""): s for s in (pred_d.get("specifics") or []) if isinstance(s, dict)
+        }
         if exp_specs:
             spec_recall = len(set(exp_specs) & set(pred_specs)) / len(exp_specs)
             specifics_scores.append(spec_recall)
             missing_specs = set(exp_specs) - set(pred_specs)
             if missing_specs:
-                missing_parts.append(
-                    f"{domain_name} 缺少: {', '.join(sorted(missing_specs))}"
-                )
+                missing_parts.append(f"{domain_name} 缺少: {', '.join(sorted(missing_specs))}")
 
     weight_score = max(0.0, 1.0 - (sum(weight_diffs) / len(weight_diffs))) if weight_diffs else 1.0
     specifics_score = sum(specifics_scores) / len(specifics_scores) if specifics_scores else 1.0
@@ -385,57 +393,66 @@ class ProfileEvaluator:
 
         # Core layer
         core_fields = await self._eval_core(expected, predicted)
-        layer_scores.append(LayerScore(
-            layer="core",
-            score=_mean_score(core_fields),
-            field_scores=core_fields,
-        ))
+        layer_scores.append(
+            LayerScore(
+                layer="core",
+                score=_mean_score(core_fields),
+                field_scores=core_fields,
+            )
+        )
 
         # Values layer
         values_fields = await self._eval_values(expected, predicted)
-        layer_scores.append(LayerScore(
-            layer="values",
-            score=_mean_score(values_fields),
-            field_scores=values_fields,
-        ))
+        layer_scores.append(
+            LayerScore(
+                layer="values",
+                score=_mean_score(values_fields),
+                field_scores=values_fields,
+            )
+        )
 
         # Interest layer
         interest_fields = self._eval_interest(expected, predicted)
-        layer_scores.append(LayerScore(
-            layer="interest",
-            score=_mean_score(interest_fields),
-            field_scores=interest_fields,
-        ))
+        layer_scores.append(
+            LayerScore(
+                layer="interest",
+                score=_mean_score(interest_fields),
+                field_scores=interest_fields,
+            )
+        )
 
         # Role layer
         role_fields = await self._eval_role(expected, predicted)
-        layer_scores.append(LayerScore(
-            layer="role",
-            score=_mean_score(role_fields),
-            field_scores=role_fields,
-        ))
+        layer_scores.append(
+            LayerScore(
+                layer="role",
+                score=_mean_score(role_fields),
+                field_scores=role_fields,
+            )
+        )
 
         # Surface layer
         surface_fields = await self._eval_surface(expected, predicted)
-        layer_scores.append(LayerScore(
-            layer="surface",
-            score=_mean_score(surface_fields),
-            field_scores=surface_fields,
-        ))
+        layer_scores.append(
+            LayerScore(
+                layer="surface",
+                score=_mean_score(surface_fields),
+                field_scores=surface_fields,
+            )
+        )
 
         # Portrait
         portrait_fields = await self._eval_portrait(expected, predicted)
-        layer_scores.append(LayerScore(
-            layer="portrait",
-            score=_mean_score(portrait_fields),
-            field_scores=portrait_fields,
-        ))
+        layer_scores.append(
+            LayerScore(
+                layer="portrait",
+                score=_mean_score(portrait_fields),
+                field_scores=portrait_fields,
+            )
+        )
 
         # Weighted overall score
-        overall = sum(
-            ls.score * self._layer_weights.get(ls.layer, 0.1)
-            for ls in layer_scores
-        )
+        overall = sum(ls.score * self._layer_weights.get(ls.layer, 0.1) for ls in layer_scores)
 
         # Worst fields (lowest scores)
         all_fields = [f for ls in layer_scores for f in ls.field_scores]
@@ -480,15 +497,17 @@ class ProfileEvaluator:
             layer = parts[0]
             field_name = parts[1] if len(parts) > 1 else layer
             score = float(fb.get("score", 0.5) or 0.5)
-            all_fields.append(FieldScore(
-                layer=layer,
-                field=field_name,
-                score=score,
-                expected=fb.get("actual", ""),
-                predicted=fb.get("predicted", ""),
-                deviation=str(fb.get("note", "")),
-                severity=_severity(score),
-            ))
+            all_fields.append(
+                FieldScore(
+                    layer=layer,
+                    field=field_name,
+                    score=score,
+                    expected=fb.get("actual", ""),
+                    predicted=fb.get("predicted", ""),
+                    deviation=str(fb.get("note", "")),
+                    severity=_severity(score),
+                )
+            )
 
         # Group by layer
         layer_map: dict[str, list[FieldScore]] = {}
@@ -500,10 +519,7 @@ class ProfileEvaluator:
             for layer, fields in layer_map.items()
         ]
 
-        overall = sum(
-            ls.score * self._layer_weights.get(ls.layer, 0.1)
-            for ls in layer_scores
-        )
+        overall = sum(ls.score * self._layer_weights.get(ls.layer, 0.1) for ls in layer_scores)
         worst = sorted(all_fields, key=lambda f: f.score)[:5]
         attributions = [
             f"{f.layer}.{f.field}: {f.deviation}"
@@ -527,35 +543,58 @@ class ProfileEvaluator:
 
         # core_traits — LLM semantic matching
         s, d = await _llm_semantic_score(
-            "core_traits", exp.core.core_traits, pred.core.core_traits,
+            "core_traits",
+            exp.core.core_traits,
+            pred.core.core_traits,
             "这是人格特质列表。判断预测的特质是否在语义上覆盖了期望的特质。"
             "'底层逻辑导向'和'分析型思维'算部分重叠(0.6-0.7)。"
             "'理性'和'感性'才算完全不匹配(0-0.2)。",
         )
-        fields.append(FieldScore("core", "core_traits", s, exp.core.core_traits,
-                                 pred.core.core_traits, d, _severity(s)))
+        fields.append(
+            FieldScore(
+                "core",
+                "core_traits",
+                s,
+                exp.core.core_traits,
+                pred.core.core_traits,
+                d,
+                _severity(s),
+            )
+        )
 
         # deep_needs — LLM semantic matching
         s, d = await _llm_semantic_score(
-            "deep_needs", exp.core.deep_needs, pred.core.deep_needs,
+            "deep_needs",
+            exp.core.deep_needs,
+            pred.core.deep_needs,
             "这是深层心理需求。判断预测的需求是否在本质上与期望需求一致。"
             "'掌控感'和'认知穿透力'有语义关联(0.5-0.7)。",
         )
-        fields.append(FieldScore("core", "deep_needs", s, exp.core.deep_needs,
-                                 pred.core.deep_needs, d, _severity(s)))
+        fields.append(
+            FieldScore(
+                "core", "deep_needs", s, exp.core.deep_needs, pred.core.deep_needs, d, _severity(s)
+            )
+        )
 
         # mbti.type — exact match (no LLM needed)
         s, d = _score_mbti_type(exp.core.mbti.type, pred.core.mbti.type)
-        fields.append(FieldScore("core", "mbti.type", s, exp.core.mbti.type,
-                                 pred.core.mbti.type, d, _severity(s)))
+        fields.append(
+            FieldScore(
+                "core", "mbti.type", s, exp.core.mbti.type, pred.core.mbti.type, d, _severity(s)
+            )
+        )
 
         # mbti.dimensions — numeric (no LLM needed)
         from openbiliclaw.soul.profile import _mbti_to_dict
-        exp_dims = _mbti_to_dict(exp.core.mbti).get("dimensions", {})
-        pred_dims = _mbti_to_dict(pred.core.mbti).get("dimensions", {})
+
+        exp_dims_raw = _mbti_to_dict(exp.core.mbti).get("dimensions", {})
+        pred_dims_raw = _mbti_to_dict(pred.core.mbti).get("dimensions", {})
+        exp_dims = exp_dims_raw if isinstance(exp_dims_raw, dict) else {}
+        pred_dims = pred_dims_raw if isinstance(pred_dims_raw, dict) else {}
         s, d = _score_mbti_dimensions(exp_dims, pred_dims)
-        fields.append(FieldScore("core", "mbti.dimensions", s, exp_dims,
-                                 pred_dims, d, _severity(s)))
+        fields.append(
+            FieldScore("core", "mbti.dimensions", s, exp_dims, pred_dims, d, _severity(s))
+        )
 
         return fields
 
@@ -563,12 +602,23 @@ class ProfileEvaluator:
         fields: list[FieldScore] = []
 
         s, d = await _llm_semantic_score(
-            "values", exp.values_layer.values, pred.values_layer.values,
+            "values",
+            exp.values_layer.values,
+            pred.values_layer.values,
             "这是核心价值观。'真实性'和'追求真相'算高度重叠(0.8+)。"
             "'独立性'和'自主'也算重叠(0.7+)。",
         )
-        fields.append(FieldScore("values", "values", s, exp.values_layer.values,
-                                 pred.values_layer.values, d, _severity(s)))
+        fields.append(
+            FieldScore(
+                "values",
+                "values",
+                s,
+                exp.values_layer.values,
+                pred.values_layer.values,
+                d,
+                _severity(s),
+            )
+        )
 
         s, d = await _llm_semantic_score(
             "motivational_drivers",
@@ -576,9 +626,17 @@ class ProfileEvaluator:
             pred.values_layer.motivational_drivers,
             "这是内在动机驱动力。判断预测的驱动力是否和期望的本质相同。",
         )
-        fields.append(FieldScore("values", "motivational_drivers", s,
-                                 exp.values_layer.motivational_drivers,
-                                 pred.values_layer.motivational_drivers, d, _severity(s)))
+        fields.append(
+            FieldScore(
+                "values",
+                "motivational_drivers",
+                s,
+                exp.values_layer.motivational_drivers,
+                pred.values_layer.motivational_drivers,
+                d,
+                _severity(s),
+            )
+        )
 
         return fields
 
@@ -586,16 +644,21 @@ class ProfileEvaluator:
         fields: list[FieldScore] = []
 
         from openbiliclaw.soul.profile import _interest_layer_to_dict
+
         exp_dict = _interest_layer_to_dict(exp.interest)
         pred_dict = _interest_layer_to_dict(pred.interest)
 
         # likes tree — structural matching (no LLM needed)
-        s, d = _score_interest_tree(exp_dict.get("likes", []), pred_dict.get("likes", []))
+        s, d = _score_interest_tree(
+            _interest_tree(exp_dict.get("likes")),
+            _interest_tree(pred_dict.get("likes")),
+        )
         fields.append(FieldScore("interest", "likes", s, None, None, d, _severity(s)))
 
         # dislikes tree
         s, d = _score_interest_tree(
-            exp_dict.get("dislikes", []), pred_dict.get("dislikes", []),
+            _interest_tree(exp_dict.get("dislikes")),
+            _interest_tree(pred_dict.get("dislikes")),
         )
         fields.append(FieldScore("interest", "dislikes", s, None, None, d, _severity(s)))
 
@@ -604,9 +667,17 @@ class ProfileEvaluator:
             exp.interest.favorite_up_users,
             pred.interest.favorite_up_users,
         )
-        fields.append(FieldScore("interest", "favorite_up_users", s,
-                                 exp.interest.favorite_up_users,
-                                 pred.interest.favorite_up_users, d, _severity(s)))
+        fields.append(
+            FieldScore(
+                "interest",
+                "favorite_up_users",
+                s,
+                exp.interest.favorite_up_users,
+                pred.interest.favorite_up_users,
+                d,
+                _severity(s),
+            )
+        )
 
         return fields
 
@@ -614,19 +685,35 @@ class ProfileEvaluator:
         fields: list[FieldScore] = []
 
         s, d = await _llm_semantic_score(
-            "life_stage", exp.role.life_stage, pred.role.life_stage,
+            "life_stage",
+            exp.role.life_stage,
+            pred.role.life_stage,
             "这是生活阶段描述。'学生阶段'和'大学在读'算高度匹配(0.9)。"
             "'职场初期'和'学生'算部分匹配(0.3-0.5)。",
         )
-        fields.append(FieldScore("role", "life_stage", s, exp.role.life_stage,
-                                 pred.role.life_stage, d, _severity(s)))
+        fields.append(
+            FieldScore(
+                "role", "life_stage", s, exp.role.life_stage, pred.role.life_stage, d, _severity(s)
+            )
+        )
 
         s, d = await _llm_semantic_score(
-            "current_phase", exp.role.current_phase, pred.role.current_phase,
+            "current_phase",
+            exp.role.current_phase,
+            pred.role.current_phase,
             "这是当前状态描述。判断两者描述的是否是同一种生活状态。",
         )
-        fields.append(FieldScore("role", "current_phase", s, exp.role.current_phase,
-                                 pred.role.current_phase, d, _severity(s)))
+        fields.append(
+            FieldScore(
+                "role",
+                "current_phase",
+                s,
+                exp.role.current_phase,
+                pred.role.current_phase,
+                d,
+                _severity(s),
+            )
+        )
 
         return fields
 
@@ -635,28 +722,54 @@ class ProfileEvaluator:
 
         # cognitive_style — LLM semantic matching
         s, d = await _llm_semantic_score(
-            "cognitive_style", exp.surface.cognitive_style, pred.surface.cognitive_style,
+            "cognitive_style",
+            exp.surface.cognitive_style,
+            pred.surface.cognitive_style,
             "这是认知风格列表。判断预测的认知风格是否在语义上覆盖了期望的认知风格。"
             "'具象思维优先'和'偏好直观形象'算高度重叠(0.7-0.9)。"
             "'发散联想型'和'创意发散'算部分重叠(0.5-0.7)。"
             "'逻辑严密'和'直觉驱动'才算完全不匹配(0-0.2)。",
         )
-        fields.append(FieldScore("surface", "cognitive_style", s,
-                                 exp.surface.cognitive_style,
-                                 pred.surface.cognitive_style, d, _severity(s)))
+        fields.append(
+            FieldScore(
+                "surface",
+                "cognitive_style",
+                s,
+                exp.surface.cognitive_style,
+                pred.surface.cognitive_style,
+                d,
+                _severity(s),
+            )
+        )
 
         s, d = _score_float(
             exp.surface.style.depth_preference,
             pred.surface.style.depth_preference,
         )
-        fields.append(FieldScore("surface", "depth_preference", s,
-                                 exp.surface.style.depth_preference,
-                                 pred.surface.style.depth_preference, d, _severity(s)))
+        fields.append(
+            FieldScore(
+                "surface",
+                "depth_preference",
+                s,
+                exp.surface.style.depth_preference,
+                pred.surface.style.depth_preference,
+                d,
+                _severity(s),
+            )
+        )
 
         s, d = _score_float(exp.surface.exploration_openness, pred.surface.exploration_openness)
-        fields.append(FieldScore("surface", "exploration_openness", s,
-                                 exp.surface.exploration_openness,
-                                 pred.surface.exploration_openness, d, _severity(s)))
+        fields.append(
+            FieldScore(
+                "surface",
+                "exploration_openness",
+                s,
+                exp.surface.exploration_openness,
+                pred.surface.exploration_openness,
+                d,
+                _severity(s),
+            )
+        )
 
         return fields
 
@@ -670,10 +783,17 @@ class ProfileEvaluator:
             "不要求措辞相同，但核心人格特征、认知模式和生活状态应该一致。"
             "如果核心结论一致但表达不同，给 0.7-0.9。",
         )
-        return [FieldScore("portrait", "personality_portrait", s,
-                           exp.personality_portrait[:100],
-                           pred.personality_portrait[:100],
-                           d, _severity(s))]
+        return [
+            FieldScore(
+                "portrait",
+                "personality_portrait",
+                s,
+                exp.personality_portrait[:100],
+                pred.personality_portrait[:100],
+                d,
+                _severity(s),
+            )
+        ]
 
 
 def _mean_score(fields: list[FieldScore]) -> float:

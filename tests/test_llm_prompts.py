@@ -3,6 +3,8 @@
 from pathlib import Path
 
 from openbiliclaw.llm.prompts import (
+    build_awareness_prompt,
+    build_batch_content_evaluation_prompt,
     build_explore_domains_prompt,
     build_recommendation_expression_prompt,
     build_search_queries_prompt,
@@ -201,6 +203,34 @@ def test_build_explore_domains_prompt_omits_block_when_no_covered_groups() -> No
         assert "<covered_topic_groups>" not in m[1]["content"]
 
 
+def test_awareness_prompt_orders_stable_context_before_recent_events() -> None:
+    messages = build_awareness_prompt(
+        events=[{"event_type": "view", "title": "本次最新事件"}],
+        preference_summary={"interests": ["长期偏好"]},
+        soul_profile={"core_traits": ["稳定画像"]},
+    )
+
+    user_prompt = messages[1]["content"]
+
+    assert user_prompt.index("<soul_profile>") < user_prompt.index("<preference_summary>")
+    assert user_prompt.index("<preference_summary>") < user_prompt.index("<recent_events>")
+
+
+def test_batch_content_evaluation_prompt_orders_profile_before_source_and_batch() -> None:
+    messages = build_batch_content_evaluation_prompt(
+        profile_summary={"interests": ["长期偏好"]},
+        content_items=[{"title": "本批候选"}],
+        source_context="trending",
+        source_platform="bilibili",
+    )
+
+    user_prompt = messages[1]["content"]
+
+    assert user_prompt.index("<profile_summary>") < user_prompt.index("<source_platform>")
+    assert user_prompt.index("<source_platform>") < user_prompt.index("<source_context>")
+    assert user_prompt.index("<source_context>") < user_prompt.index("<content_batch>")
+
+
 def test_build_explore_domains_prompt_caps_covered_groups_at_12() -> None:
     """Defensive: don't over-constrain the model. Cap at 12 so the most-
     saturated topic_groups make it into the avoidance signal but the
@@ -242,6 +272,19 @@ def _builder_test_inputs() -> list[tuple[str, dict, dict]]:
     will then guard its system-prompt stability automatically.
     """
     return [
+        (
+            "build_awareness_prompt",
+            dict(
+                events=[{"event_type": "view", "title": "A"}],
+                preference_summary={"a": 1},
+                soul_profile={"x": 1},
+            ),
+            dict(
+                events=[{"event_type": "like", "title": "B"}],
+                preference_summary={"a": 2},
+                soul_profile={"x": 2},
+            ),
+        ),
         (
             "build_batch_content_evaluation_prompt",
             dict(

@@ -74,6 +74,42 @@ async def test_awareness_analyzer_builds_notes_from_recent_events() -> None:
 
 
 @pytest.mark.asyncio
+async def test_awareness_analyzer_accepts_object_wrapped_notes() -> None:
+    from openbiliclaw.soul.awareness_analyzer import AwarenessAnalyzer
+
+    service = FakeStructuredService(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "date": "2026-03-08",
+                        "observation": "最近连续浏览高信息密度内容。",
+                        "trend": "更偏向深度解释而非轻量消遣。",
+                        "emotion_guess": "可能处于主动吸收和整理信息的阶段。",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    notes = await AwarenessAnalyzer(service).analyze(
+        events=[{"event_type": "view", "title": "AI 工具实测"}],
+        preference={},
+        soul_profile={},
+    )
+
+    assert notes == [
+        AwarenessNote(
+            date="2026-03-08",
+            observation="最近连续浏览高信息密度内容。",
+            trend="更偏向深度解释而非轻量消遣。",
+            emotion_guess="可能处于主动吸收和整理信息的阶段。",
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_awareness_analyzer_raises_on_invalid_json() -> None:
     from openbiliclaw.soul.awareness_analyzer import (
         AwarenessAnalyzer,

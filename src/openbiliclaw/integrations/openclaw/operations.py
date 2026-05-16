@@ -141,9 +141,7 @@ class OpenClawAdapter:
                 get_recommendations = getattr(self.services.database, "get_recommendations", None)
                 if callable(get_recommendations):
                     rows = [
-                        row
-                        for row in get_recommendations(limit=limit)
-                        if isinstance(row, dict)
+                        row for row in get_recommendations(limit=limit) if isinstance(row, dict)
                     ]
             if rows is not None:
                 return RecommendationResponse(
@@ -280,8 +278,7 @@ class OpenClawAdapter:
             soul_engine = self.services.soul_engine
             llm_service = getattr(self.services, "llm_service", None)
             llm_provider = (
-                getattr(soul_engine, "_llm", None)
-                or getattr(llm_service, "_registry", None)
+                getattr(soul_engine, "_llm", None) or getattr(llm_service, "_registry", None)
                 if llm_service is not None
                 else getattr(soul_engine, "_llm", None)
             )
@@ -379,8 +376,10 @@ class OpenClawAdapter:
         )
         if not callable(save_runtime_state):
             return
-        probed_domains = dict(runtime_state.get("probed_domains") or {})
-        probed_axes = dict(runtime_state.get("probed_axes") or {})
+        raw_domains = runtime_state.get("probed_domains")
+        raw_axes = runtime_state.get("probed_axes")
+        probed_domains = dict(raw_domains) if isinstance(raw_domains, dict) else {}
+        probed_axes = dict(raw_axes) if isinstance(raw_axes, dict) else {}
         now = datetime.now().isoformat()
         probed_domains[domain.lower()] = now
         axis = build_probe_axis(
@@ -409,10 +408,7 @@ class OpenClawAdapter:
                 f"我从你最近的轨迹里嗅到你可能对【{domain}】{specific_hint}感兴趣"
                 f"——{reason} 这个方向你自己认不认？"
             )
-        return (
-            f"我感觉你可能对【{domain}】{specific_hint}有潜在兴趣，"
-            f"这个方向你自己认不认？"
-        )
+        return f"我感觉你可能对【{domain}】{specific_hint}有潜在兴趣，这个方向你自己认不认？"
 
     async def get_runtime_status(self) -> RuntimeStatusResponse:
         """Return the merged runtime and account sync summary."""

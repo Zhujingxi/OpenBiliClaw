@@ -136,7 +136,9 @@ class OptimizationLoop:
 
         logger.info(
             "Starting optimization: %d epochs, batch=%d, explore=%.0f%%",
-            cfg.max_epochs, cfg.batch_size, cfg.exploration_rate * 100,
+            cfg.max_epochs,
+            cfg.batch_size,
+            cfg.exploration_rate * 100,
         )
 
         for epoch in range(cfg.max_epochs):
@@ -148,8 +150,8 @@ class OptimizationLoop:
                 logger.warning("Not enough personas generated, skipping epoch")
                 continue
 
-            train_personas = personas[:-cfg.validation_split]
-            val_personas = personas[-cfg.validation_split:]
+            train_personas = personas[: -cfg.validation_split]
+            val_personas = personas[-cfg.validation_split :]
 
             # 2. Forward pass on training set
             train_reports = await self._evaluate_batch(train_personas)
@@ -182,14 +184,18 @@ class OptimizationLoop:
                 self._optimizer.commit()
                 accepted = True
                 logger.info(
-                    "Epoch %d: ACCEPT — val=%.3f (new best)", epoch + 1, val_mean,
+                    "Epoch %d: ACCEPT — val=%.3f (new best)",
+                    epoch + 1,
+                    val_mean,
                 )
             elif changes:
                 patience_counter += 1
                 self._optimizer.rollback()
                 logger.info(
                     "Epoch %d: ROLLBACK — val=%.3f <= best=%.3f",
-                    epoch + 1, val_mean, best_score,
+                    epoch + 1,
+                    val_mean,
+                    best_score,
                 )
             else:
                 logger.info("Epoch %d: NO CHANGES — val=%.3f", epoch + 1, val_mean)
@@ -232,7 +238,10 @@ class OptimizationLoop:
         if history:
             last_train = history[-1].train_reports
             for r in last_train:
-                for a in (r.get("attributions") or []):
+                attrs = r.get("attributions")
+                if not isinstance(attrs, list):
+                    continue
+                for a in attrs:
                     if isinstance(a, str) and a not in final_attrs:
                         final_attrs.append(a)
 
@@ -246,7 +255,8 @@ class OptimizationLoop:
         )
 
     async def _evaluate_batch(
-        self, personas: list[OnionProfile],
+        self,
+        personas: list[OnionProfile],
     ) -> list[EvalReport]:
         """Evaluate a batch of personas: simulate events → pipeline → score."""
         from openbiliclaw.soul.pipeline import signals_from_events
@@ -283,15 +293,20 @@ class OptimizationLoop:
         report_dir.mkdir(parents=True, exist_ok=True)
         path = report_dir / f"auto_epoch_{result.epoch:03d}.json"
         with open(path, "w", encoding="utf-8") as f:
-            json.dump({
-                "epoch": result.epoch,
-                "train_mean": result.train_mean,
-                "val_mean": result.val_mean,
-                "params_changed": result.params_changed,
-                "exploration": result.exploration,
-                "accepted": result.accepted,
-                "timestamp": datetime.now().isoformat(),
-            }, f, ensure_ascii=False, indent=2)
+            json.dump(
+                {
+                    "epoch": result.epoch,
+                    "train_mean": result.train_mean,
+                    "val_mean": result.val_mean,
+                    "params_changed": result.params_changed,
+                    "exploration": result.exploration,
+                    "accepted": result.accepted,
+                    "timestamp": datetime.now().isoformat(),
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
 
 
 # ---------------------------------------------------------------------------

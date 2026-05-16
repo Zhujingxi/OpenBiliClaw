@@ -17,6 +17,7 @@
 | 3.1 Cookie 认证 | ✅ | set / load / validate / clear + CLI auth 命令 + 运行时 cookie 回退 |
 | 扩展 Cookie 自动同步 | ✅ | 浏览器扩展可 POST `/api/bilibili/cookie` 持久化 Cookie；后端在 background runtime-stream 连接且缺 Cookie 时会发 `bilibili_cookie_sync_requested` 主动要求扩展回传 |
 | 3.2 核心 API | ✅ | 10+ API 方法 + 限流 + 统一错误处理 |
+| `/nav` 登录态诊断 | ✅ | `/x/web-interface/nav` 返回 `-101` 时抛 `BilibiliAuthExpiredError`，日志明确提示 session expired / 重新登录或保持扩展在线同步 Cookie |
 | 搜索 WBI 化与 412 软降级 | ✅ | `search()` 现会先从 `nav` 获取 WBI key，走 `/x/web-interface/wbi/search/type`；遇到 `412 Precondition Failed` 时会记录 warning 并返回空结果，避免拖垮整轮 discover |
 | 账户侧同步来源 | ✅ | 已支持 history / favorites / following 三类长期信号，供后台低频同步使用 |
 | 3.3 agent-browser 集成 | ✅ | navigate / get_page_content + CLI browser 命令 |
@@ -55,12 +56,16 @@ cookie = resolve_runtime_cookie(
 ### BilibiliAPIClient
 
 ```python
-from openbiliclaw.bilibili import BilibiliAPIClient
+from openbiliclaw.bilibili import BilibiliAPIClient, BilibiliAuthExpiredError
 
 client = BilibiliAPIClient(cookie="SESSDATA=abc", min_request_interval=0.2)
 
 # 认证
-nav = await client.get_nav_info()  # NavInfo(is_login=True, uname="alice", mid=10086)
+try:
+    nav = await client.get_nav_info()  # NavInfo(is_login=True, uname="alice", mid=10086)
+except BilibiliAuthExpiredError:
+    # Cookie 已过期或未登录；重新登录 B 站，或保持浏览器扩展在线自动同步新 Cookie
+    raise
 
 # 观看历史（cursor-based 分页）
 history = await client.get_user_history(max_items=200)
@@ -113,6 +118,7 @@ content = await browser.get_page_content("https://www.bilibili.com/video/BV1xx41
 | `FollowingUser` | 关注用户（mid, uname, sign） |
 | `CommentInfo` | 评论（mid, uname, message, like_count） |
 | `AuthStatus` | 认证状态（has_cookie, authenticated, username 等） |
+| `BilibiliAuthExpiredError` | `/nav` 返回 `-101` 时的专项异常，仍继承 `BilibiliAPIError` |
 
 ## 配置项
 
@@ -136,3 +142,4 @@ headed = false     # 调试时设为 true
 6. **后端可主动请求扩展同步**：`/api/runtime-stream?client=background` 连接建立时，如果 `resolve_runtime_cookie()` 解析不到有效 Cookie，后端会先发 `bilibili_cookie_sync_requested`，扩展收到后立即 POST 当前浏览器 Cookie 到 `/api/bilibili/cookie`
 7. **账户侧长期信号分层**：`history / favorites / following` 作为低频同步来源，用来补插件实时事件看不到的长期偏好变化
 8. **搜索 WBI 对齐 + 保守降级**：B 站搜索已切到 WBI 路径；客户端现在会复用 `nav` 的 WBI key 对齐浏览器搜索链路，剩余 `412` 再降级为空结果，避免把单次 search 失败放大成整轮 refresh 错误
+9. **Cookie 过期显式化**：`/nav` 的 `-101` 与普通业务错误分开处理，日志和异常文本都包含 session expired / re-auth 提示；上层仍可按 `BilibiliAPIError` 统一兜底

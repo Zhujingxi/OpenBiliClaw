@@ -90,7 +90,7 @@ def test_delight_signals_defaults_to_zero() -> None:
 
 def test_delight_weights_defaults_sum_to_one() -> None:
     w = DelightWeights()
-    total = w.deep_need + w.insight + w.novelty + w.quality + w.exploration
+    total = w.deep_need + w.insight + w.likes + w.novelty + w.quality + w.exploration
     assert abs(total - 1.0) < 0.01
 
 
@@ -207,7 +207,7 @@ def test_score_065_rejected_at_default_threshold(tmp_path: Path) -> None:
     scorer = DelightScorer(embedding_service=None, database=database)
 
     threshold = scorer.effective_threshold(exploration_openness=0.5)
-    assert 0.65 < threshold, (
+    assert threshold > 0.65, (
         f"effective_threshold={threshold} would admit score=0.65, but the "
         "LLM rubric explicitly tags 0.55-0.70 as '相对常规' (not delight)."
     )
@@ -286,7 +286,10 @@ def test_database_get_delight_candidate_returns_none_below_threshold(
     database = _make_database(tmp_path)
     database.cache_content("BV1LOW", title="普通内容", relevance_score=0.5)
     database.update_delight_score(
-        "BV1LOW", delight_score=0.3, delight_reason="", delight_hook="",
+        "BV1LOW",
+        delight_score=0.3,
+        delight_reason="",
+        delight_hook="",
     )
 
     candidate = database.get_delight_candidate(min_delight_score=0.85)
@@ -298,7 +301,10 @@ def test_database_get_delight_candidate_requires_ready_copy(tmp_path: Path) -> N
     database = _make_database(tmp_path)
     database.cache_content("BV1BLANK", title="只有分数没有文案", relevance_score=0.9)
     database.update_delight_score(
-        "BV1BLANK", delight_score=0.92, delight_reason="", delight_hook="",
+        "BV1BLANK",
+        delight_score=0.92,
+        delight_reason="",
+        delight_hook="",
     )
 
     candidate = database.get_delight_candidate(min_delight_score=0.70)
@@ -349,7 +355,10 @@ def test_database_mark_delight_notified(tmp_path: Path) -> None:
     database = _make_database(tmp_path)
     database.cache_content("BV1DLN", title="已通知", relevance_score=0.9)
     database.update_delight_score(
-        "BV1DLN", delight_score=0.95, delight_reason="reason", delight_hook="hook",
+        "BV1DLN",
+        delight_score=0.95,
+        delight_reason="reason",
+        delight_hook="hook",
     )
     database.mark_delight_notified("BV1DLN")
 
@@ -363,10 +372,16 @@ def test_database_count_delight_candidates(tmp_path: Path) -> None:
     database.cache_content("BV1A", title="A", relevance_score=0.9)
     database.cache_content("BV1B", title="B", relevance_score=0.8)
     database.update_delight_score(
-        "BV1A", delight_score=0.92, delight_reason="r1", delight_hook="h1",
+        "BV1A",
+        delight_score=0.92,
+        delight_reason="r1",
+        delight_hook="h1",
     )
     database.update_delight_score(
-        "BV1B", delight_score=0.88, delight_reason="r2", delight_hook="h2",
+        "BV1B",
+        delight_score=0.88,
+        delight_reason="r2",
+        delight_hook="h2",
     )
 
     count = database.count_delight_candidates(min_delight_score=0.85)
@@ -384,7 +399,10 @@ def test_database_get_pool_candidates_needing_delight_score(tmp_path: Path) -> N
     # Already scored item
     database.cache_content("BV1SCORED", title="Scored", relevance_score=0.7)
     database.update_delight_score(
-        "BV1SCORED", delight_score=0.5, delight_reason="", delight_hook="",
+        "BV1SCORED",
+        delight_score=0.5,
+        delight_reason="",
+        delight_hook="",
     )
 
     candidates = database.get_pool_candidates_needing_delight_score(limit=10)
@@ -434,7 +452,6 @@ def test_database_get_pool_candidates_needing_delight_score_includes_high_score_
     assert "BV1BACKFILL" in bvids
     assert "BV1READY" not in bvids
     assert "BV1LOW" not in bvids
-
 
 
 # ---------------------------------------------------------------------------

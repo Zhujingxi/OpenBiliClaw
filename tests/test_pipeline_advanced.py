@@ -153,12 +153,10 @@ class _RichFakeService:
         max_tokens: int = 4096,
         caller: str = "",
     ) -> LLMResponse:
-        self.calls.append(
-            {"system_instruction": system_instruction, "user_input": user_input}
-        )
+        self.calls.append({"system_instruction": system_instruction, "user_input": user_input})
         # NOTE: portrait prompt also contains "价值观", so the portrait
         # branch must be checked FIRST to avoid getting shadowed.
-        if "人格画像" in system_instruction and "偏好摘要" in system_instruction:
+        if "人格画像" in system_instruction and "<preference_summary>" in user_input:
             return LLMResponse(content=_PORTRAIT_RESP, provider="fake")
         if "生活阶段" in system_instruction:
             return LLMResponse(content=_ROLE_CHANGED_RESP, provider="fake")
@@ -171,8 +169,9 @@ class _RichFakeService:
     @property
     def portrait_calls(self) -> list[dict[str, Any]]:
         return [
-            c for c in self.calls
-            if "人格画像" in c["system_instruction"] and "偏好摘要" in c["system_instruction"]
+            c
+            for c in self.calls
+            if "人格画像" in c["system_instruction"] and "<preference_summary>" in c["user_input"]
         ]
 
 
@@ -223,7 +222,9 @@ def _make_gated_pipeline(
     memory.initialize()
     thresholds = {
         layer: LayerThreshold(
-            min_signals=1, min_interval_seconds=interval_seconds, max_buffer_size=200,
+            min_signals=1,
+            min_interval_seconds=interval_seconds,
+            max_buffer_size=200,
         )
         for layer in _BUFFERED_LAYERS
     }
@@ -247,17 +248,15 @@ async def test_tick_processes_ready_buffer(tmp_path: Path) -> None:
     pipeline, _, _ = _make_low_threshold_pipeline(tmp_path)
 
     # Manually pre-populate the interest buffer (bypass ingest path)
-    raw_signal = _serialize_signal(signals_from_events([
-        {"event_type": "view", "title": "AI教程"}
-    ])[0])
+    raw_signal = _serialize_signal(
+        signals_from_events([{"event_type": "view", "title": "AI教程"}])[0]
+    )
     pipeline._buffers[OnionLayer.INTEREST.value].signals.append(raw_signal)
 
     flush_result = await pipeline.tick()
 
     layers = {r.layer for r in flush_result.layers_updated}
-    assert OnionLayer.INTEREST in layers, (
-        f"tick() should drain and update INTEREST. Got: {layers}"
-    )
+    assert OnionLayer.INTEREST in layers, f"tick() should drain and update INTEREST. Got: {layers}"
     # Buffer must now be empty after drain
     assert pipeline._buffers[OnionLayer.INTEREST.value].signals == []
 
@@ -268,9 +267,7 @@ async def test_flush_force_updates_all_layers(tmp_path: Path) -> None:
     pipeline, _, _ = _make_low_threshold_pipeline(tmp_path)
 
     # Seed two layers with raw signals
-    sig = _serialize_signal(signals_from_events([
-        {"event_type": "view", "title": "测试"}
-    ])[0])
+    sig = _serialize_signal(signals_from_events([{"event_type": "view", "title": "测试"}])[0])
     pipeline._buffers[OnionLayer.INTEREST.value].signals.append(sig)
     pipeline._buffers[OnionLayer.ROLE.value].signals.append(sig)
 
@@ -286,9 +283,7 @@ async def test_flush_with_layer_subset_only_updates_selected(tmp_path: Path) -> 
     """flush(layers={INTEREST}) should ignore buffers in other layers."""
     pipeline, _, _ = _make_low_threshold_pipeline(tmp_path)
 
-    sig = _serialize_signal(signals_from_events([
-        {"event_type": "view", "title": "测试"}
-    ])[0])
+    sig = _serialize_signal(signals_from_events([{"event_type": "view", "title": "测试"}])[0])
     pipeline._buffers[OnionLayer.INTEREST.value].signals.append(sig)
     pipeline._buffers[OnionLayer.ROLE.value].signals.append(sig)
 
@@ -341,9 +336,7 @@ async def test_strong_signal_still_blocked_by_min_interval(tmp_path: Path) -> No
 
     flush_result = await pipeline.tick()
     interest_updated = [r for r in flush_result.layers_updated if r.layer == OnionLayer.INTEREST]
-    assert not interest_updated, (
-        "Even strong signals must respect min_interval_seconds gate"
-    )
+    assert not interest_updated, "Even strong signals must respect min_interval_seconds gate"
 
 
 @pytest.mark.asyncio
@@ -365,15 +358,12 @@ async def test_max_buffer_size_evicts_oldest_signals(tmp_path: Path) -> None:
     )
 
     # Push 5 view events; min_signals=999 prevents any update from firing
-    signals = signals_from_events([
-        {"event_type": "view", "title": f"视频{i}"} for i in range(5)
-    ])
+    signals = signals_from_events([{"event_type": "view", "title": f"视频{i}"} for i in range(5)])
     await pipeline.ingest_batch(signals)
 
     interest_buf = pipeline._buffers[OnionLayer.INTEREST.value]
     assert len(interest_buf.signals) == 3, (
-        f"Buffer should be evicted to max_buffer_size=3. "
-        f"Got len={len(interest_buf.signals)}"
+        f"Buffer should be evicted to max_buffer_size=3. Got len={len(interest_buf.signals)}"
     )
     # Verify oldest were dropped — only 视频2/3/4 should remain
     remaining_titles = [s["payload"]["title"] for s in interest_buf.signals]
@@ -443,10 +433,12 @@ def test_layer_buffer_from_dict_invalid_layer_falls_back_to_surface() -> None:
 
 def test_layer_buffer_from_dict_drops_non_dict_signals() -> None:
     """Garbage entries in signals list must be filtered out."""
-    buf = LayerBuffer.from_dict({
-        "layer": "interest",
-        "signals": [{"id": "valid"}, "not-a-dict", 42, {"id": "also-valid"}],
-    })
+    buf = LayerBuffer.from_dict(
+        {
+            "layer": "interest",
+            "signals": [{"id": "valid"}, "not-a-dict", 42, {"id": "also-valid"}],
+        }
+    )
     assert len(buf.signals) == 2
     assert all(isinstance(s, dict) for s in buf.signals)
 
@@ -488,9 +480,9 @@ async def test_pipeline_buffer_survives_restart(tmp_path: Path) -> None:
         profile_builder=ProfileBuilder(registry=svc),
         thresholds=thresholds,
     )
-    await pipeline1.ingest_batch(signals_from_events([
-        {"event_type": "view", "title": "持久化测试"}
-    ]))
+    await pipeline1.ingest_batch(
+        signals_from_events([{"event_type": "view", "title": "持久化测试"}])
+    )
 
     # Recreate pipeline with same memory dir
     memory2 = MemoryManager(Path(tmp_path))
@@ -552,9 +544,7 @@ async def test_update_layer_exception_restores_signals(tmp_path: Path) -> None:
     assert len(interest_buf.signals) >= 1, (
         "Interest signal should be restored to buffer after exception"
     )
-    assert len(role_buf.signals) >= 1, (
-        "Role signal should be restored to buffer after exception"
-    )
+    assert len(role_buf.signals) >= 1, "Role signal should be restored to buffer after exception"
 
 
 @pytest.mark.asyncio
@@ -617,9 +607,7 @@ async def test_portrait_not_regenerated_for_interest_only_change(
     portrait_calls_before = len(svc.portrait_calls)
 
     # Pure behavior event: routes to surface+interest+role, never to values
-    await pipeline.ingest(
-        signals_from_events([{"event_type": "view", "title": "教程"}])[0]
-    )
+    await pipeline.ingest(signals_from_events([{"event_type": "view", "title": "教程"}])[0])
 
     # Note: ROLE may also change with our mock, but ROLE is NOT a portrait trigger
     portrait_calls_after = len(svc.portrait_calls)
@@ -657,9 +645,9 @@ async def test_core_changed_true_branch_applies_traits_and_mbti(tmp_path: Path) 
     soul_layer.save()
 
     # Trigger Core via DIALOGUE_INSIGHT kind=state
-    insight_signals = signals_from_dialogue([
-        {"kind": "state", "content": "用户正在深度思考人生方向", "confidence": 0.9}
-    ])
+    insight_signals = signals_from_dialogue(
+        [{"kind": "state", "content": "用户正在深度思考人生方向", "confidence": 0.9}]
+    )
     result = await pipeline.ingest(insight_signals[0])
 
     core_results = [r for r in result.layers_updated if r.layer == OnionLayer.CORE]
@@ -681,15 +669,13 @@ async def test_core_change_triggers_portrait_regen(tmp_path: Path) -> None:
     pipeline, svc, _ = _make_low_threshold_pipeline(tmp_path)
 
     portrait_calls_before = len(svc.portrait_calls)
-    insight_signals = signals_from_dialogue([
-        {"kind": "state", "content": "深度思考状态", "confidence": 0.9}
-    ])
+    insight_signals = signals_from_dialogue(
+        [{"kind": "state", "content": "深度思考状态", "confidence": 0.9}]
+    )
     await pipeline.ingest(insight_signals[0])
 
     portrait_calls_after = len(svc.portrait_calls)
-    assert portrait_calls_after > portrait_calls_before, (
-        "Core change must trigger portrait regen"
-    )
+    assert portrait_calls_after > portrait_calls_before, "Core change must trigger portrait regen"
 
 
 # ===========================================================================
@@ -742,14 +728,10 @@ async def test_surface_no_change_when_delta_under_threshold() -> None:
 
     # Pure views, no searches → depth_signal = 0.5
     # new_depth = 0.5*0.7 + 0.5*0.3 = 0.5 → delta=0 → no change
-    signals = [
-        {"payload": {"event_type": "view", "title": f"v{i}"}} for i in range(3)
-    ]
+    signals = [{"payload": {"event_type": "view", "title": f"v{i}"}} for i in range(3)]
     result = await _update_surface(signals=signals, profile=profile)
 
-    assert not result.changed, (
-        f"With 0 delta, surface should NOT change. Got: {result.changes}"
-    )
+    assert not result.changed, f"With 0 delta, surface should NOT change. Got: {result.changes}"
     assert profile.surface.style.depth_preference == 0.5
 
 
@@ -786,9 +768,7 @@ async def test_speculator_observe_called_on_ingest(tmp_path: Path) -> None:
     spy = _SpeculatorSpy()
     pipeline, _, _ = _make_low_threshold_pipeline(tmp_path, speculator=spy)
 
-    await pipeline.ingest(
-        signals_from_events([{"event_type": "view", "title": "AI视频"}])[0]
-    )
+    await pipeline.ingest(signals_from_events([{"event_type": "view", "title": "AI视频"}])[0])
 
     assert len(spy.observe_calls) == 1
     assert spy.observe_calls[0][0]["title"] == "AI视频"
@@ -829,10 +809,7 @@ async def test_speculator_promotion_records_layer_update(tmp_path: Path) -> None
     pipeline, _, memory = _make_low_threshold_pipeline(tmp_path, speculator=spy)
 
     flush_result = await pipeline.tick()
-    promoted_updates = [
-        r for r in flush_result.layers_updated
-        if r.trigger == "猜测兴趣确认"
-    ]
+    promoted_updates = [r for r in flush_result.layers_updated if r.trigger == "猜测兴趣确认"]
     assert promoted_updates, "Promoted speculation must produce a LayerUpdateResult"
     assert promoted_updates[0].layer == OnionLayer.INTEREST
     assert "AI伦理" in promoted_updates[0].changes[0]
@@ -868,9 +845,9 @@ def test_default_thresholds_cover_all_buffered_layers() -> None:
 async def test_dialogue_insight_unknown_kind_routes_to_interest(tmp_path: Path) -> None:
     """End-to-end: an unknown-kind insight should still update INTEREST."""
     pipeline, _, _ = _make_low_threshold_pipeline(tmp_path)
-    sig = signals_from_dialogue([
-        {"kind": "garbage_kind", "content": "用户提到AI技术", "confidence": 0.9}
-    ])[0]
+    sig = signals_from_dialogue(
+        [{"kind": "garbage_kind", "content": "用户提到AI技术", "confidence": 0.9}]
+    )[0]
     result = await pipeline.ingest(sig)
 
     assert "interest" in result.layers_buffered
@@ -1046,7 +1023,11 @@ async def test_update_values_injects_user_context_from_profile(tmp_path: Path) -
 
     class _CaptureService:
         async def complete_structured_task(
-            self, *, system_instruction: str, user_input: str, **_: Any,
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            **_: Any,
         ) -> LLMResponse:
             captured_inputs.append(user_input)
             return LLMResponse(content=_VALUES_CHANGED_RESP, provider="fake")
@@ -1129,7 +1110,11 @@ async def test_update_core_includes_existing_mbti_in_prompt(tmp_path: Path) -> N
 
     class _CaptureService:
         async def complete_structured_task(
-            self, *, system_instruction: str, user_input: str, **_: Any,
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            **_: Any,
         ) -> LLMResponse:
             captured_inputs.append(user_input)
             return LLMResponse(content=_CORE_CHANGED_RESP, provider="fake")
@@ -1348,9 +1333,7 @@ async def test_new_dislike_purges_matching_pool_candidates(tmp_path: Path) -> No
     # Report line must mention the purge
     joined_changes = " ".join(result.changes)
     assert "新增讨厌: 鬼畜" in joined_changes, result.changes
-    assert "从候选池清除" in joined_changes, (
-        f"Expected purge change line. Got: {result.changes}"
-    )
+    assert "从候选池清除" in joined_changes, f"Expected purge change line. Got: {result.changes}"
 
     # Verify DB state
     rows = {row["bvid"]: row for row in db.get_cached_content(limit=10)}
@@ -1368,9 +1351,11 @@ async def test_unchanged_dislikes_do_not_trigger_purge(tmp_path: Path) -> None:
     memory.initialize()
 
     # Pre-seed an existing dislike so the analyzer's response looks unchanged
-    memory.get_layer("preference").data.update({
-        "disliked_topics": ["鬼畜"],
-    })
+    memory.get_layer("preference").data.update(
+        {
+            "disliked_topics": ["鬼畜"],
+        }
+    )
 
     db = memory._database
     db.cache_content(
@@ -1398,12 +1383,8 @@ async def test_unchanged_dislikes_do_not_trigger_purge(tmp_path: Path) -> None:
         profile_builder=ProfileBuilder(registry=svc),
     )
     joined = " ".join(result.changes)
-    assert "新增讨厌" not in joined, (
-        "No new dislikes → no change line expected"
-    )
-    assert "从候选池清除" not in joined, (
-        "No new dislikes → no purge should happen"
-    )
+    assert "新增讨厌" not in joined, "No new dislikes → no change line expected"
+    assert "从候选池清除" not in joined, "No new dislikes → no purge should happen"
 
     # BVghost should still be fresh because purge was not triggered
     rows = db.get_cached_content(limit=10)
@@ -1999,6 +1980,7 @@ def _make_cognition_cycle(tmp_path: Path, *, min_interval_seconds: int = 43200):
     svc = _CognitionFakeService()
     memory = MemoryManager(Path(tmp_path))
     memory.initialize()
+    memory.get_layer("preference").data.update({"interests": []})
     cycle = CognitionCycle(
         memory=memory,
         awareness_analyzer=AwarenessAnalyzer(registry=svc),
@@ -2129,19 +2111,27 @@ async def test_cognition_cycle_awareness_failure_does_not_block_insight(
     memory.get_layer("soul").save()
 
     # Pre-seed awareness notes so insight has something to analyze
-    memory.get_layer("awareness").data.update({
-        "notes": [{
-            "date": "2026-04-08",
-            "observation": "existing",
-            "trend": "",
-            "emotion_guess": "",
-        }],
-    })
+    memory.get_layer("awareness").data.update(
+        {
+            "notes": [
+                {
+                    "date": "2026-04-08",
+                    "observation": "existing",
+                    "trend": "",
+                    "emotion_guess": "",
+                }
+            ],
+        }
+    )
     memory.get_layer("awareness").save()
 
     class _BrokenAwarenessSvc:
         async def complete_structured_task(
-            self, *, system_instruction: str, user_input: str, **_: Any,
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            **_: Any,
         ) -> LLMResponse:
             if "观察" in system_instruction or "awareness" in system_instruction.lower():
                 raise RuntimeError("awareness LLM broken")
@@ -2221,12 +2211,11 @@ async def test_pipeline_tick_invokes_cognition_cycle(tmp_path: Path) -> None:
     assert spy.calls == 1
     # tick() should surface the cognition cycle as a virtual PORTRAIT update
     portrait_updates = [
-        r for r in flush_result.layers_updated
+        r
+        for r in flush_result.layers_updated
         if r.layer == OnionLayer.PORTRAIT and r.trigger == "半日深度反思"
     ]
-    assert portrait_updates, (
-        "Cognition cycle output should appear in tick() result"
-    )
+    assert portrait_updates, "Cognition cycle output should appear in tick() result"
     assert "观察 2" in portrait_updates[0].changes[0]
     assert "洞察 1" in portrait_updates[0].changes[0]
 
@@ -2263,10 +2252,7 @@ async def test_pipeline_tick_cognition_throttled_does_not_produce_update(
     )
 
     flush_result = await pipeline.tick()
-    portrait_updates = [
-        r for r in flush_result.layers_updated
-        if r.layer == OnionLayer.PORTRAIT
-    ]
+    portrait_updates = [r for r in flush_result.layers_updated if r.layer == OnionLayer.PORTRAIT]
     assert not portrait_updates
 
 
@@ -2365,7 +2351,11 @@ async def test_cognition_cycle_insight_failure_is_recorded(
 
     class _BrokenInsightSvc:
         async def complete_structured_task(
-            self, *, system_instruction: str, user_input: str, **_: Any,
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            **_: Any,
         ) -> LLMResponse:
             if "观察" in system_instruction or "awareness" in system_instruction.lower():
                 return LLMResponse(content=_AWARENESS_RESP, provider="fake")
@@ -2441,7 +2431,11 @@ async def test_cognition_cycle_empty_insight_response_returns_zero(
 
     class _EmptyInsightSvc:
         async def complete_structured_task(
-            self, *, system_instruction: str, user_input: str, **_: Any,
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            **_: Any,
         ) -> LLMResponse:
             if "观察" in system_instruction or "awareness" in system_instruction.lower():
                 return LLMResponse(content=_AWARENESS_RESP, provider="fake")
@@ -2469,6 +2463,7 @@ async def test_cognition_cycle_without_data_dir_still_runs(
 
     memory = MemoryManager(Path(tmp_path))
     memory.initialize()
+    memory.get_layer("preference").data.update({"interests": []})
     # Strip the data_dir attribute to trigger the None-path
     delattr(memory, "_data_dir")
 
@@ -2507,10 +2502,15 @@ async def test_cognition_cycle_insight_runs_without_awareness_notes(
     tmp_path: Path,
 ) -> None:
     """Insight pass should short-circuit to 0 when no awareness exists yet."""
+
     # Use a service that returns EMPTY awareness response so no notes get saved
     class _EmptyAwarenessService:
         async def complete_structured_task(
-            self, *, system_instruction: str, user_input: str, **_: Any,
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            **_: Any,
         ) -> LLMResponse:
             # Awareness returns [] → no notes; insight should therefore skip
             return LLMResponse(content="[]", provider="fake")
@@ -2521,6 +2521,7 @@ async def test_cognition_cycle_insight_runs_without_awareness_notes(
 
     memory = MemoryManager(Path(tmp_path))
     memory.initialize()
+    memory.get_layer("preference").data.update({"interests": []})
     memory.get_layer("soul").data.update(OnionProfile().to_dict())
     memory.get_layer("soul").save()
 
@@ -2622,9 +2623,9 @@ async def test_portrait_regen_success_writes_new_portrait(tmp_path: Path) -> Non
     pipeline, svc, memory = _make_low_threshold_pipeline(tmp_path)
 
     # Trigger Core change → Core is in _PORTRAIT_TRIGGER_LAYERS
-    insight_signals = signals_from_dialogue([
-        {"kind": "state", "content": "深度思考状态", "confidence": 0.9}
-    ])
+    insight_signals = signals_from_dialogue(
+        [{"kind": "state", "content": "深度思考状态", "confidence": 0.9}]
+    )
     await pipeline.ingest(insight_signals[0])
 
     # Reload profile from disk and verify the portrait was written
@@ -2643,11 +2644,13 @@ async def test_update_interest_detects_weight_changes(tmp_path: Path) -> None:
     memory = MemoryManager(Path(tmp_path))
     memory.initialize()
     # Pre-seed preference layer with low-weight AI
-    memory.get_layer("preference").data.update({
-        "interests": [
-            {"name": "AI", "category": "知识", "weight": 0.3, "source": "events"},
-        ],
-    })
+    memory.get_layer("preference").data.update(
+        {
+            "interests": [
+                {"name": "AI", "category": "知识", "weight": 0.3, "source": "events"},
+            ],
+        }
+    )
 
     # Mock returns AI at 0.85 → delta of 0.55
     svc = _RichFakeService()
@@ -2675,12 +2678,15 @@ async def test_update_values_records_removed_values_and_drivers(tmp_path: Path) 
     class _ReplacingService:
         async def complete_structured_task(self, **kwargs: Any) -> LLMResponse:
             return LLMResponse(
-                content=json.dumps({
-                    "changed": True,
-                    "values": ["全新价值A", "全新价值B"],
-                    "motivational_drivers": ["全新驱动X"],
-                    "reason": "整体替换",
-                }, ensure_ascii=False),
+                content=json.dumps(
+                    {
+                        "changed": True,
+                        "values": ["全新价值A", "全新价值B"],
+                        "motivational_drivers": ["全新驱动X"],
+                        "reason": "整体替换",
+                    },
+                    ensure_ascii=False,
+                ),
                 provider="fake",
             )
 

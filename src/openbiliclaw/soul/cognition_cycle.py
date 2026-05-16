@@ -108,9 +108,12 @@ class CognitionCycle:
         # memory layers. If neither has been built yet (init's first ~7
         # minutes), the analyzer prompts get near-empty inputs and tend to
         # blow up. Silent skip here avoids the ERROR-level traces every
-        # cognition tick before the profile lands.
-        if not self._memory.get_layer("preference").data:
-            logger.debug("CognitionCycle skipped: preference layer not built yet")
+        # cognition tick before the profile lands, while still allowing a
+        # partially initialized profile to accrue fresh awareness.
+        preference_data = self._memory.get_layer("preference").data
+        soul_data = self._memory.get_layer("soul").data
+        if not preference_data and not soul_data:
+            logger.debug("CognitionCycle skipped: preference and soul layers are empty")
             result.throttled = True
             return result
 
@@ -160,7 +163,9 @@ class CognitionCycle:
     # -- Internal -------------------------------------------------------------
 
     def _is_due(
-        self, last_run_at: datetime | None, now: datetime,
+        self,
+        last_run_at: datetime | None,
+        now: datetime,
     ) -> bool:
         if last_run_at is None:
             return True
@@ -269,35 +274,31 @@ class CognitionCycle:
     def _load_awareness_notes(self) -> list[AwarenessNote]:
         layer_data = self._memory.get_layer("awareness").data
         notes = layer_data.get("notes", [])
-        return [
-            awareness_note_from_dict(item)
-            for item in notes
-            if isinstance(item, dict)
-        ]
+        return [awareness_note_from_dict(item) for item in notes if isinstance(item, dict)]
 
     def _save_awareness_notes(self, notes: list[AwarenessNote]) -> None:
         layer = self._memory.get_layer("awareness")
         layer.data.clear()
-        layer.data.update({
-            "notes": [awareness_note_to_dict(item) for item in notes],
-        })
+        layer.data.update(
+            {
+                "notes": [awareness_note_to_dict(item) for item in notes],
+            }
+        )
         layer.save()
 
     def _load_insights(self) -> list[InsightHypothesis]:
         layer_data = self._memory.get_layer("insight").data
         hypotheses = layer_data.get("hypotheses", [])
-        return [
-            insight_hypothesis_from_dict(item)
-            for item in hypotheses
-            if isinstance(item, dict)
-        ]
+        return [insight_hypothesis_from_dict(item) for item in hypotheses if isinstance(item, dict)]
 
     def _save_insights(self, insights: list[InsightHypothesis]) -> None:
         layer = self._memory.get_layer("insight")
         layer.data.clear()
-        layer.data.update({
-            "hypotheses": [insight_hypothesis_to_dict(item) for item in insights],
-        })
+        layer.data.update(
+            {
+                "hypotheses": [insight_hypothesis_to_dict(item) for item in insights],
+            }
+        )
         layer.save()
 
     # -- State persistence ----------------------------------------------------

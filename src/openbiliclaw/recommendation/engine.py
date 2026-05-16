@@ -105,6 +105,8 @@ class SupportsCoreMemoryTask(Protocol):
         history: list[dict[str, str]] | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        caller: str = "",
+        reasoning_effort: str | None = None,
     ) -> LLMResponse: ...
 
 
@@ -614,8 +616,7 @@ class RecommendationEngine:
                     rewritten = canonicalize(new_map)
                     if rewritten:
                         logger.info(
-                            "Topic supergroup canonical map applied to pool: "
-                            "%d row(s) rewritten",
+                            "Topic supergroup canonical map applied to pool: %d row(s) rewritten",
                             rewritten,
                         )
                 except Exception:
@@ -715,9 +716,7 @@ class RecommendationEngine:
                 self._safe_classify_pool_backlog(profile=profile, limit=limit),
             )
         except Exception:
-            logger.exception(
-                "classify_pool_backlog detach failed, continuing with precompute"
-            )
+            logger.exception("classify_pool_backlog detach failed, continuing with precompute")
 
         # v0.3.62+: delight scoring runs detached so it doesn't block
         # expression generation or the caller. Its own _delight_lock
@@ -733,9 +732,7 @@ class RecommendationEngine:
                     ),
                 )
             except Exception:
-                logger.exception(
-                    "precompute_delight_scores detach failed"
-                )
+                logger.exception("precompute_delight_scores detach failed")
 
         async with self._expression_lock:
             candidates = self._load_pool_candidates_needing_copy(limit=max(0, limit))
@@ -744,8 +741,7 @@ class RecommendationEngine:
                 return 0
 
             batches = [
-                candidates[i : i + batch_size]
-                for i in range(0, len(candidates), batch_size)
+                candidates[i : i + batch_size] for i in range(0, len(candidates), batch_size)
             ]
             results = await asyncio.gather(
                 *(self._precompute_batch(batch, profile) for batch in batches),
@@ -839,9 +835,7 @@ class RecommendationEngine:
             return 0
         async with self._delight_lock:
             try:
-                return await self.precompute_delight_scores(
-                    profile=profile, limit=limit
-                )
+                return await self.precompute_delight_scores(profile=profile, limit=limit)
             except Exception:
                 logger.exception("precompute_delight_scores (detached) failed")
                 return 0
@@ -1562,7 +1556,8 @@ class RecommendationEngine:
         successful API calls). Idempotent — ``EmbeddingService.embed``
         short-circuits on L1/L2 hit.
         """
-        if self._embedding_service is None or not items:
+        embedding_service = self._embedding_service
+        if embedding_service is None or not items:
             return 0
 
         async def _warm(c: DiscoveredContent) -> bool:
@@ -1570,7 +1565,7 @@ class RecommendationEngine:
             if not text:
                 return False
             try:
-                vec = await self._embedding_service.embed(text)
+                vec = await embedding_service.embed(text)
             except Exception:
                 logger.debug(
                     "warm_mmr_embeddings: embed failed for %s",
@@ -1785,9 +1780,7 @@ class RecommendationEngine:
                 return True
             if _exceeds_broad_cap(item):
                 return True
-            if style_counts.get(cls._style_token(item), 0) >= per_style_cap:
-                return True
-            return False
+            return style_counts.get(cls._style_token(item), 0) >= per_style_cap
 
         def _relevance(item: DiscoveredContent) -> float:
             if score_override:
@@ -2231,9 +2224,8 @@ class RecommendationEngine:
         # bucket — but the summary should not lie about what's there.
         topic_counts: Counter[str] = Counter()
         for item in candidates:
-            primary = (
-                cls._normalize_topic_token(item.topic_group)
-                or cls._normalize_topic_token(item.topic_key)
+            primary = cls._normalize_topic_token(item.topic_group) or cls._normalize_topic_token(
+                item.topic_key
             )
             if primary:
                 topic_counts[primary] += 1

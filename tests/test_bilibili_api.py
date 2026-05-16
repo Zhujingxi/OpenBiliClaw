@@ -10,6 +10,7 @@ import pytest
 from openbiliclaw.bilibili.api import (
     BilibiliAPIClient,
     BilibiliAPIError,
+    BilibiliAuthExpiredError,
     CommentInfo,
     FavoriteFolder,
     FavoriteFolderWithItems,
@@ -35,9 +36,7 @@ class FakeAsyncClient:
 
     def __init__(self, payload: dict[str, object] | list[dict[str, object]]) -> None:
         self.payload = payload
-        self.calls: list[
-            tuple[str, dict[str, object] | None, dict[str, str] | None]
-        ] = []
+        self.calls: list[tuple[str, dict[str, object] | None, dict[str, str] | None]] = []
 
     async def get(
         self,
@@ -58,9 +57,7 @@ class RouteAsyncClient:
 
     def __init__(self, routes: dict[str, list[dict[str, object]]]) -> None:
         self.routes = {key: value.copy() for key, value in routes.items()}
-        self.calls: list[
-            tuple[str, dict[str, object] | None, dict[str, str] | None]
-        ] = []
+        self.calls: list[tuple[str, dict[str, object] | None, dict[str, str] | None]] = []
 
     async def get(
         self,
@@ -83,9 +80,7 @@ class ErroringAsyncClient:
 
     def __init__(self, status_code: int) -> None:
         self.status_code = status_code
-        self.calls: list[
-            tuple[str, dict[str, object] | None, dict[str, str] | None]
-        ] = []
+        self.calls: list[tuple[str, dict[str, object] | None, dict[str, str] | None]] = []
 
     async def get(
         self,
@@ -111,9 +106,7 @@ class NavThenErrorAsyncClient:
 
     def __init__(self, status_code: int) -> None:
         self.status_code = status_code
-        self.calls: list[
-            tuple[str, dict[str, object] | None, dict[str, str] | None]
-        ] = []
+        self.calls: list[tuple[str, dict[str, object] | None, dict[str, str] | None]] = []
 
     async def get(
         self,
@@ -177,6 +170,20 @@ async def test_get_nav_info_raises_on_nonzero_code() -> None:
 
     with pytest.raises(BilibiliAPIError, match="账号未登录"):
         await client.get_nav_info()
+
+
+@pytest.mark.asyncio
+async def test_get_nav_info_surfaces_session_expired_for_code_minus_101(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = BilibiliAPIClient(cookie="SESSDATA=expired")
+    client._client = FakeAsyncClient({"code": -101, "message": "账号未登录"})
+    caplog.set_level("WARNING", logger="openbiliclaw.bilibili.api")
+
+    with pytest.raises(BilibiliAuthExpiredError, match="session expired.*-101"):
+        await client.get_nav_info()
+
+    assert "re-authenticate" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -324,7 +331,7 @@ async def test_get_favorite_folders_parses_folder_metadata() -> None:
                         ]
                     },
                 }
-            ]
+            ],
         }
     )
 
@@ -399,7 +406,7 @@ async def test_get_following_parses_users() -> None:
                         ]
                     },
                 }
-            ]
+            ],
         }
     )
 
@@ -416,9 +423,7 @@ async def test_get_video_comments_returns_top_n_comments() -> None:
     client = BilibiliAPIClient(cookie="SESSDATA=abc")
     client._client = RouteAsyncClient(
         {
-            "/x/web-interface/view": [
-                {"code": 0, "data": {"aid": 123, "stat": {}, "owner": {}}}
-            ],
+            "/x/web-interface/view": [{"code": 0, "data": {"aid": 123, "stat": {}, "owner": {}}}],
             "/x/v2/reply/main": [
                 {
                     "code": 0,
@@ -439,7 +444,7 @@ async def test_get_video_comments_returns_top_n_comments() -> None:
                         ]
                     },
                 }
-            ]
+            ],
         }
     )
 

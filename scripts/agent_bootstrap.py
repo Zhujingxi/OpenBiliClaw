@@ -59,6 +59,7 @@ DEFAULT_REPO_URL = "https://github.com/whiteguo233/OpenBiliClaw.git"
 DEFAULT_HEALTH_PATH = "/api/health"
 HEALTH_TIMEOUT_SECONDS = 90
 HEALTH_POLL_INTERVAL = 2.0
+LOCAL_NO_PROXY_HOSTS = ("localhost", "127.0.0.1", "::1")
 
 SUPPORTED_PROVIDERS = ("openai", "claude", "gemini", "deepseek", "ollama", "openrouter")
 REMOTE_PROVIDERS = ("openai", "claude", "gemini", "deepseek", "openrouter")
@@ -70,6 +71,25 @@ REMOTE_PROVIDERS = ("openai", "claude", "gemini", "deepseek", "openrouter")
 # runtime to whatever the registry can find — see registry.py
 # build_embedding_service).
 PROVIDERS_WITHOUT_EMBED = ("claude", "deepseek", "openrouter")
+
+
+def ensure_local_no_proxy() -> str:
+    """Keep localhost backend checks out of user/global HTTP proxies."""
+
+    parts: list[str] = []
+    for key in ("NO_PROXY", "no_proxy"):
+        raw = os.environ.get(key, "")
+        for item in raw.split(","):
+            value = item.strip()
+            if value and value not in parts:
+                parts.append(value)
+    for host in LOCAL_NO_PROXY_HOSTS:
+        if host not in parts:
+            parts.append(host)
+    value = ",".join(parts)
+    os.environ["NO_PROXY"] = value
+    os.environ["no_proxy"] = value
+    return value
 
 
 # Mirror of cli.py's _OPENAI_COMPAT_PRESETS for non-interactive (AI agent
@@ -1561,6 +1581,7 @@ def wait_for_health(host: str, port: int, timeout: float = HEALTH_TIMEOUT_SECOND
 
 
 def run(args: argparse.Namespace) -> int:
+    ensure_local_no_proxy()
     project_dir = Path(args.project_dir)
     try:
         project_dir = ensure_repo_checkout(project_dir, args.repo_url, args.branch)

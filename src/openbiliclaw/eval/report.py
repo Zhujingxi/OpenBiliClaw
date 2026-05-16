@@ -18,13 +18,15 @@ def render_training_summary(result: dict[str, Any]) -> str:
     lines: list[str] = []
     lines.append("═══ 训练报告 ═══")
     lines.append("")
-    lines.append(
-        f"{'Epoch':>5}  {'Train':>6}  {'Val':>6}  {'Changed':<40}  {'Explore?'}"
-    )
+    lines.append(f"{'Epoch':>5}  {'Train':>6}  {'Val':>6}  {'Changed':<40}  {'Explore?'}")
     lines.append("─" * 80)
 
     for h in result.get("history", []):
-        changed = ", ".join(h.get("params_changed", h.get("summary", ["-"])[:1]) if isinstance(h.get("params_changed"), list) else [str(h.get("summary", "-"))[:40]])
+        changed = ", ".join(
+            h.get("params_changed", h.get("summary", ["-"])[:1])
+            if isinstance(h.get("params_changed"), list)
+            else [str(h.get("summary", "-"))[:40]]
+        )
         if len(changed) > 40:
             changed = changed[:37] + "..."
         explore = h.get("action", "Yes" if h.get("exploration") else "No")
@@ -37,8 +39,7 @@ def render_training_summary(result: dict[str, Any]) -> str:
 
     lines.append("")
     lines.append(
-        f"Best val score: {result.get('best_score', 0):.3f}"
-        f" at epoch {result.get('best_epoch', 0)}"
+        f"Best val score: {result.get('best_score', 0):.3f} at epoch {result.get('best_epoch', 0)}"
     )
     lines.append(f"Stop reason: {result.get('stop_reason', 'unknown')}")
     lines.append(f"Epochs run: {result.get('epochs_run', 0)}")
@@ -60,7 +61,7 @@ def save_training_curve(result: dict[str, Any], data_dir: Path) -> Path:
     eval_dir.mkdir(parents=True, exist_ok=True)
     path = eval_dir / "training_curve.json"
 
-    curve = {
+    curve: dict[str, list[object]] = {
         "epochs": [],
         "train_scores": [],
         "val_scores": [],
@@ -124,10 +125,12 @@ def render_speculation_report(report: dict[str, Any]) -> str:
     for ss in report.get("speculation_scores", []):
         icon = "✅" if ss.get("overall", 0) >= 0.7 else "⚠️" if ss.get("overall", 0) >= 0.4 else "❌"
         lines.append(f"\n  {icon} {ss.get('domain', '?')} ({ss.get('overall', 0):.2f})")
-        lines.append(f"    合理={ss.get('plausibility', 0):.2f} "
-                     f"新颖={ss.get('novelty', 0):.2f} "
-                     f"具体={ss.get('specificity', 0):.2f} "
-                     f"非幻觉={ss.get('no_hallucination', 0):.2f}")
+        lines.append(
+            f"    合理={ss.get('plausibility', 0):.2f} "
+            f"新颖={ss.get('novelty', 0):.2f} "
+            f"具体={ss.get('specificity', 0):.2f} "
+            f"非幻觉={ss.get('no_hallucination', 0):.2f}"
+        )
 
     return "\n".join(lines)
 
@@ -150,8 +153,7 @@ def render_speculation_training_summary(result: dict[str, Any]) -> str:
 
     lines.append("")
     lines.append(
-        f"Best score: {result.get('best_score', 0):.3f}"
-        f" at epoch {result.get('best_epoch', 0)}"
+        f"Best score: {result.get('best_score', 0):.3f} at epoch {result.get('best_epoch', 0)}"
     )
     lines.append(f"Stop reason: {result.get('stop_reason', 'unknown')}")
     return "\n".join(lines)

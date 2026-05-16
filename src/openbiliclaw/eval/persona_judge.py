@@ -7,9 +7,9 @@ resonance scores that feed into the SpeculationEvaluator.
 
 from __future__ import annotations
 
-import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from importlib import import_module
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -58,8 +58,7 @@ async def judge_speculations(
         return PersonaJudgment(persona_summary=persona_context[:100])
 
     spec_lines = "\n".join(
-        f"{i}. {s.get('domain', '')} — {s.get('reason', '')}"
-        for i, s in enumerate(speculations, 1)
+        f"{i}. {s.get('domain', '')} — {s.get('reason', '')}" for i, s in enumerate(speculations, 1)
     )
 
     system_prompt = (
@@ -85,11 +84,11 @@ async def judge_speculations(
     try:
         from openbiliclaw.eval.agents import collect_json
 
-        from claude_agent_sdk import ClaudeAgentOptions
+        agent_options = import_module("claude_agent_sdk").ClaudeAgentOptions
 
         result = await collect_json(
             prompt=user_prompt,
-            options=ClaudeAgentOptions(
+            options=agent_options(
                 system_prompt=system_prompt,
                 max_turns=2,
             ),
@@ -102,10 +101,7 @@ async def judge_speculations(
             raw_verdicts = []
 
         verdicts = _parse_verdicts(raw_verdicts, speculations)
-        mean = (
-            sum(v.resonance_score for v in verdicts) / len(verdicts)
-            if verdicts else 0.0
-        )
+        mean = sum(v.resonance_score for v in verdicts) / len(verdicts) if verdicts else 0.0
 
         return PersonaJudgment(
             persona_summary=persona_context[:100],
@@ -168,11 +164,13 @@ def _parse_verdicts(
             if matched is not None:
                 result.append(matched)
             else:
-                result.append(ResonanceVerdict(
-                    domain=domain,
-                    resonance_score=0.5,
-                    reasoning="no verdict returned",
-                ))
+                result.append(
+                    ResonanceVerdict(
+                        domain=domain,
+                        resonance_score=0.5,
+                        reasoning="no verdict returned",
+                    )
+                )
     return result
 
 

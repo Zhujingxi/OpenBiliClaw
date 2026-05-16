@@ -8,6 +8,7 @@ doesn't have a dedicated API adapter.
 from __future__ import annotations
 
 import logging
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 from openbiliclaw.sources.browser import BrowserManager
@@ -78,10 +79,8 @@ class WebSourceAdapter:
             logger.exception("WebSourceAdapter: failed to fetch %s", url)
             return []
         finally:
-            try:
+            with suppress(Exception):
                 await browser.close()
-            except Exception:
-                pass
 
         items = await extract_content_from_page(
             snapshot.text,
@@ -109,9 +108,9 @@ class WebSourceAdapter:
     def _build_url(recipe: SourceRecipe) -> str:
         """Build the target URL from recipe config."""
         config = recipe.config or {}
-        url_template = config.get("url_template", "")
-        query = config.get("query", "")
-        url = config.get("url", "")
+        url_template = str(config.get("url_template", "") or "")
+        query = str(config.get("query", "") or "")
+        url = str(config.get("url", "") or "")
 
         if url_template and query:
             return url_template.replace("{query}", query)
@@ -172,5 +171,3 @@ def _extract_content_id(url: str) -> str:
         return ""
     last = path.rsplit("/", 1)[-1]
     return last
-
-

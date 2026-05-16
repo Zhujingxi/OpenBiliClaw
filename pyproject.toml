@@ -98,6 +98,15 @@ strict = true
 warn_return_any = true
 warn_unused_configs = true
 
+[[tool.mypy.overrides]]
+module = [
+    "aiohttp",
+    "claude_agent_sdk",
+    "claude_agent_sdk.*",
+    "playwright.*",
+]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

@@ -6,6 +6,7 @@ Supports OpenAI API and any compatible APIs (e.g. DeepSeek, local vLLM).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -149,13 +150,53 @@ class OpenAIProvider(LLMProvider):
             return LLMTimeoutError(f"{self._provider_name} request timed out")
 
         status_code = getattr(exc, "status_code", None)
+        body_excerpt = self._provider_error_body_excerpt(exc)
         message = str(exc).lower()
         if status_code == 429 or "rate limit" in message or "too many requests" in message:
             return LLMRateLimitError(f"{self._provider_name} rate limit exceeded")
         if status_code and int(status_code) >= 500:
             return LLMProviderError(f"{self._provider_name} server error: {status_code}")
+        if status_code and body_excerpt:
+            logger.warning(
+                "%s request failed with HTTP %s: %s",
+                self._provider_name,
+                status_code,
+                body_excerpt,
+            )
+            return LLMProviderError(
+                f"{self._provider_name} request failed: HTTP {status_code}: {body_excerpt}"
+            )
 
         return LLMProviderError(f"{self._provider_name} request failed: {exc}")
+
+    @staticmethod
+    def _provider_error_body_excerpt(exc: Exception) -> str:
+        """Extract a compact provider response body from SDK exceptions."""
+
+        candidates: list[object] = []
+        body = getattr(exc, "body", None)
+        if body:
+            candidates.append(body)
+        response = getattr(exc, "response", None)
+        if response is not None:
+            text = getattr(response, "text", None)
+            if text:
+                candidates.append(text)
+            content = getattr(response, "content", None)
+            if content:
+                candidates.append(content)
+
+        for candidate in candidates:
+            if isinstance(candidate, bytes):
+                text = candidate.decode("utf-8", errors="replace")
+            elif isinstance(candidate, (dict, list)):
+                text = json.dumps(candidate, ensure_ascii=False, sort_keys=True)
+            else:
+                text = str(candidate)
+            text = " ".join(text.split())
+            if text:
+                return text[:1000] + ("..." if len(text) > 1000 else "")
+        return ""
 
     def _is_retryable(self, exc: LLMProviderError) -> bool:
         """Whether a mapped exception should be retried."""
@@ -262,9 +303,7 @@ class DeepSeekProvider(OpenAIProvider):
         # 2026-05-05 logs as 8-16 min/batch with reasoning, expected
         # ~30s without).
         previous_effort = self._reasoning_effort
-        applied_effort = (
-            reasoning_effort if reasoning_effort is not None else previous_effort
-        )
+        applied_effort = reasoning_effort if reasoning_effort is not None else previous_effort
         # Temporarily mutate the instance attribute so ``_extra_body``
         # and the empty-content retry path see the per-call value.
         self._reasoning_effort = applied_effort

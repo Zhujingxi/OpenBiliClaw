@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from importlib import import_module
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -66,7 +67,7 @@ def _async_playwright() -> Any:
     without touching the optional playwright dependency.
     """
     try:
-        from playwright.async_api import async_playwright  # type: ignore[import-not-found]
+        async_playwright = import_module("playwright.async_api").async_playwright
     except ImportError as exc:
         raise RuntimeError(
             "Playwright not installed. Install with: "

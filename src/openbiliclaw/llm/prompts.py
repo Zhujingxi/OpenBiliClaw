@@ -546,14 +546,7 @@ def build_core_delta_prompt(
     ]
 
 
-def build_awareness_prompt(
-    *,
-    events: list[dict[str, object]],
-    preference_summary: dict[str, object],
-    soul_profile: dict[str, object],
-) -> list[dict[str, str]]:
-    """Build a structured prompt for recent awareness-note generation."""
-    system_prompt = """
+_AWARENESS_SYSTEM_PROMPT = """
 <task>
 你要基于近期用户行为，生成少量谨慎的近期观察笔记。
 </task>
@@ -577,21 +570,30 @@ def build_awareness_prompt(
 ]
 </output_schema>
 """.strip()
+
+
+def build_awareness_prompt(
+    *,
+    events: list[dict[str, object]],
+    preference_summary: dict[str, object],
+    soul_profile: dict[str, object],
+) -> list[dict[str, str]]:
+    """Build a structured prompt for recent awareness-note generation."""
     user_prompt = "\n\n".join(
         [
-            "<recent_events>",
-            json.dumps(events, ensure_ascii=False, indent=2),
-            "</recent_events>",
-            "<preference_summary>",
-            json.dumps(preference_summary, ensure_ascii=False, indent=2),
-            "</preference_summary>",
             "<soul_profile>",
-            json.dumps(soul_profile, ensure_ascii=False, indent=2),
+            json.dumps(soul_profile, ensure_ascii=False, indent=2, sort_keys=True),
             "</soul_profile>",
+            "<preference_summary>",
+            json.dumps(preference_summary, ensure_ascii=False, indent=2, sort_keys=True),
+            "</preference_summary>",
+            "<recent_events>",
+            json.dumps(events, ensure_ascii=False, indent=2, sort_keys=True),
+            "</recent_events>",
         ]
     )
     return [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": _AWARENESS_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
 
@@ -960,8 +962,8 @@ def build_content_evaluation_prompt(
 _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "<task>\n"
     "你要批量评估多个候选内容与一个用户画像的匹配度。"
-    "下面 user 消息会给出 <source_context>(发现路径)、<source_platform>(平台)、"
-    "<profile_summary>(画像)、<content_batch>(本批候选),你按下面规则打分。\n"
+    "下面 user 消息会给出 <profile_summary>(画像)、<source_platform>(平台)、"
+    "<source_context>(发现路径)、<content_batch>(本批候选),你按下面规则打分。\n"
     "</task>\n\n"
     "<rules>\n"
     "1. 输出必须是严格 JSON 数组,不要附带解释。\n"
@@ -1035,8 +1037,8 @@ def build_batch_content_evaluation_prompt(
     v0.3.28+ cache-friendly: ``system_prompt`` is the module-level
     constant ``_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT`` — 100% static
     across all calls, so the entire ~3500-token instruction block is
-    cache-eligible. All variables (source_context, source_platform,
-    profile, content_items) live in ``user_prompt``, ordered from most
+    cache-eligible. All variables (profile, source_platform,
+    source_context, content_items) live in ``user_prompt``, ordered from most
     stable (profile, changes once per profile rebuild) to most variable
     (content_batch, changes every call). DeepSeek's auto-cache hits the
     system prefix every call after the first; explicit-cache providers
@@ -1044,12 +1046,6 @@ def build_batch_content_evaluation_prompt(
     """
     user_prompt = "\n\n".join(
         [
-            "<source_context>",
-            source_context or "(unspecified)",
-            "</source_context>",
-            "<source_platform>",
-            source_platform or "bilibili",
-            "</source_platform>",
             "<profile_summary>",
             json.dumps(
                 profile_summary,
@@ -1058,6 +1054,12 @@ def build_batch_content_evaluation_prompt(
                 sort_keys=True,
             ),
             "</profile_summary>",
+            "<source_platform>",
+            source_platform or "bilibili",
+            "</source_platform>",
+            "<source_context>",
+            source_context or "(unspecified)",
+            "</source_context>",
             "<content_batch>",
             json.dumps(
                 content_items,

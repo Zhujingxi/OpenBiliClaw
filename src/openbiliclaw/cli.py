@@ -2001,6 +2001,7 @@ def _enqueue_xhs_bootstrap_task(*, force: bool = False) -> str | None:
 
     scroll_rounds = int(os.environ.get("OPENBILICLAW_XHS_BOOTSTRAP_SCROLL_ROUNDS", "15"))
     max_items = int(os.environ.get("OPENBILICLAW_XHS_BOOTSTRAP_MAX_ITEMS", "300"))
+    task_id: str | None = None
 
     try:
         queue = XhsTaskQueue(database)
@@ -3679,8 +3680,7 @@ def init(
         )
     elif yt_status == "empty":
         console.print(
-            "  [yellow]YouTube 任务跑通但 0 条记录 —— "
-            "未登录 YouTube 或页面内容为空。[/yellow]"
+            "  [yellow]YouTube 任务跑通但 0 条记录 —— 未登录 YouTube 或页面内容为空。[/yellow]"
         )
     elif yt_status == "timeout":
         console.print(
@@ -4096,7 +4096,8 @@ def rebuild_profile(
     source = source.strip().lower()
     if source:
         events = [
-            e for e in events
+            e
+            for e in events
             if str((e.get("metadata") or {}).get("source_platform", "")).lower() == source
         ]
 

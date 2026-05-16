@@ -486,6 +486,7 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 | 策略中间产物捕获 | ✅ | 4 个策略均支持 `last_intermediates` 属性，运行后可查看生成的搜索词、选择的分区、种子列表、探索域等中间产物 |
 | Discovery 评估框架 | ✅ | `DiscoveryEvaluator` 支持 7 维质量评估（relevance / diversity / specificity / query_quality / explanation_quality / novelty / no_echo_chamber），含自动和人工两种模式 |
 | Discovery 模拟场景 | ✅ | `ScenarioGenerator` + `MockBilibiliClient` + `MockMemoryManager` 可离线生成模拟 B 站内容宇宙用于评估，无需真实 API |
+| Discovery 评估类型边界 | ✅ | v0.3.71 起 eval scenario / evaluator 对 LLM JSON、缓存 persona、人工反馈和 ranking pool 做显式类型守卫，`mypy strict` 可覆盖评估链路而不依赖真实 Claude / Playwright / aiohttp 安装 |
 | Discovery 自动优化循环 | ✅ | SGD 风格优化循环：生成 persona → 生成 scenario → 运行发现 → 多维评估 → exploit/explore → accept/rollback |
 | Discovery 人工评估脚本 | ✅ | 交互式人工评估 + 可选触发优化 |
 

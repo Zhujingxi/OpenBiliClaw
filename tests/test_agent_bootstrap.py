@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -23,6 +24,16 @@ def _load_bootstrap_module():
 bootstrap = _load_bootstrap_module()
 
 
+def test_bootstrap_extends_no_proxy_for_localhost(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NO_PROXY", "example.com")
+    monkeypatch.delenv("no_proxy", raising=False)
+
+    bootstrap.ensure_local_no_proxy()
+
+    assert os.environ["NO_PROXY"] == "example.com,localhost,127.0.0.1,::1"
+    assert os.environ["no_proxy"] == "example.com,localhost,127.0.0.1,::1"
+
+
 def _write_minimal_config(
     tmp_path: Path,
     *,
@@ -32,19 +43,19 @@ def _write_minimal_config(
     (tmp_path / "config.toml").write_text(
         "\n".join(
             [
-                '[llm]',
+                "[llm]",
                 'default_provider = "openai"',
-                '',
-                '[llm.openai]',
+                "",
+                "[llm.openai]",
                 'api_key = "sk-test"',
-                '',
-                '[llm.embedding]',
+                "",
+                "[llm.embedding]",
                 f'provider = "{embedding_provider}"',
                 f'model = "{embedding_model}"',
-                '',
-                '[bilibili]',
+                "",
+                "[bilibili]",
                 'cookie = "SESSDATA=test; bili_jct=test; DedeUserID=1"',
-                '',
+                "",
             ]
         ),
         encoding="utf-8",

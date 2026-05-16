@@ -3,6 +3,7 @@
 from .api import (
     BilibiliAPIClient,
     BilibiliAPIError,
+    BilibiliAuthExpiredError,
     CommentInfo,
     FavoriteFolder,
     FavoriteFolderWithItems,
@@ -17,6 +18,7 @@ __all__ = [
     "AuthStatus",
     "BilibiliAPIClient",
     "BilibiliAPIError",
+    "BilibiliAuthExpiredError",
     "CommentInfo",
     "FavoriteFolder",
     "FavoriteFolderWithItems",

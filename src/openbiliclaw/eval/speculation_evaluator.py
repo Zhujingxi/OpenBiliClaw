@@ -8,12 +8,12 @@ simulated-event, and human-feedback evaluation modes.
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
+from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -156,11 +156,7 @@ def _score_diversity(speculations: list[SpeculativeInterest]) -> float:
         for cat in categories:
             cat_counts[cat] = cat_counts.get(cat, 0) + 1
         total = len(categories)
-        entropy = -sum(
-            (c / total) * math.log2(c / total)
-            for c in cat_counts.values()
-            if c > 0
-        )
+        entropy = -sum((c / total) * math.log2(c / total) for c in cat_counts.values() if c > 0)
         max_entropy = math.log2(total) if total > 1 else 1.0
         cat_score = entropy / max_entropy if max_entropy > 0 else 0.0
     else:
@@ -207,7 +203,7 @@ async def _llm_eval_speculation(
     try:
         from openbiliclaw.eval.agents import collect_json
 
-        from claude_agent_sdk import ClaudeAgentOptions
+        agent_options = import_module("claude_agent_sdk").ClaudeAgentOptions
 
         result = await collect_json(
             prompt=(
@@ -222,7 +218,7 @@ async def _llm_eval_speculation(
                 f'{{"plausibility": 0.0, "novelty": 0.0, "specificity": 0.0, '
                 f'"reasoning": "简要说明"}}'
             ),
-            options=ClaudeAgentOptions(
+            options=agent_options(
                 system_prompt=(
                     "你是推测兴趣质量评估器。客观评分：完全合理=0.8+，"
                     "部分合理=0.5-0.7，不合理=0-0.4。只返回 JSON。"
@@ -288,7 +284,9 @@ class SpeculationEvaluator:
         for spec in speculations:
             # LLM scoring for plausibility/novelty/specificity
             llm_scores = await _llm_eval_speculation(
-                spec.domain, spec.reason, profile_ctx,
+                spec.domain,
+                spec.reason,
+                profile_ctx,
             )
             # Algorithmic no-hallucination check
             nh = _no_hallucination_score(spec.domain, confirmed_domains)
@@ -302,15 +300,17 @@ class SpeculationEvaluator:
                 + nh * 0.10
                 + resonance * 0.20
             )
-            scores.append(SpeculationScore(
-                domain=spec.domain,
-                plausibility=llm_scores["plausibility"],
-                novelty=llm_scores["novelty"],
-                specificity=llm_scores["specificity"],
-                no_hallucination=nh,
-                persona_resonance=resonance,
-                overall=round(per_spec_overall, 4),
-            ))
+            scores.append(
+                SpeculationScore(
+                    domain=spec.domain,
+                    plausibility=llm_scores["plausibility"],
+                    novelty=llm_scores["novelty"],
+                    specificity=llm_scores["specificity"],
+                    no_hallucination=nh,
+                    persona_resonance=resonance,
+                    overall=round(per_spec_overall, 4),
+                )
+            )
 
         # Confirmation rate
         conf_rate = 0.5  # default if no simulation data
@@ -353,13 +353,13 @@ class SpeculationEvaluator:
         ]
         dim_scores.sort(key=lambda t: t[1])
         worst: list[dict[str, Any]] = [
-            {"dimension": name, "score": score}
-            for name, score in dim_scores[:3]
+            {"dimension": name, "score": score} for name, score in dim_scores[:3]
         ]
 
         attributions = [
             f"{d['dimension']} ({d['score']:.2f}) -> speculation_generation_prompt"
-            for d in worst if d["score"] < 0.7
+            for d in worst
+            if d["score"] < 0.7
         ]
 
         return SpeculationEvalReport(
@@ -400,16 +400,18 @@ class SpeculationEvaluator:
             s = float(fb.get("specificity", 0.5))
             pr = float(fb.get("persona_resonance", 0.5))
             per_overall = p * 0.30 + n * 0.25 + s * 0.15 + pr * 0.30
-            scores.append(SpeculationScore(
-                domain=spec.domain,
-                plausibility=p,
-                novelty=n,
-                specificity=s,
-                no_hallucination=1.0,  # human review assumed no hallucination
-                persona_resonance=pr,
-                overall=round(per_overall, 4),
-                details=str(fb.get("note", "")),
-            ))
+            scores.append(
+                SpeculationScore(
+                    domain=spec.domain,
+                    plausibility=p,
+                    novelty=n,
+                    specificity=s,
+                    no_hallucination=1.0,  # human review assumed no hallucination
+                    persona_resonance=pr,
+                    overall=round(per_overall, 4),
+                    details=str(fb.get("note", "")),
+                )
+            )
 
         if not scores:
             return SpeculationEvalReport(timestamp=datetime.now().isoformat())
@@ -431,8 +433,7 @@ class SpeculationEvaluator:
         ]
         human_dim_scores.sort(key=lambda t: t[1])
         worst_h: list[dict[str, Any]] = [
-            {"dimension": name, "score": score}
-            for name, score in human_dim_scores[:3]
+            {"dimension": name, "score": score} for name, score in human_dim_scores[:3]
         ]
 
         return SpeculationEvalReport(
@@ -447,7 +448,8 @@ class SpeculationEvaluator:
             worst_dimensions=worst_h,
             attributions=[
                 f"{d['dimension']} ({d['score']:.2f}) -> speculation_generation_prompt"
-                for d in worst_h if d["score"] < 0.7
+                for d in worst_h
+                if d["score"] < 0.7
             ],
             timestamp=datetime.now().isoformat(),
         )

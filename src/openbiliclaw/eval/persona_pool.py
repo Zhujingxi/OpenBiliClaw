@@ -93,17 +93,15 @@ class PersonaPool:
             # Fallback: try any persona with same mbti + depth
             mbti = constraints.get("mbti", "")
             depth = constraints.get("depth", "")
-            matches = [
-                p for p in task_dir.glob("*.json")
-                if f"{mbti}_{depth}" in p.stem
-            ]
+            matches = [p for p in task_dir.glob("*.json") if f"{mbti}_{depth}" in p.stem]
         if not matches:
             return None
         path = random.choice(matches)
         with open(path, encoding="utf-8") as f:
             cached = json.load(f)
         logger.info("Persona loaded from pool: %s", path.name)
-        return cached.get("data")
+        data = cached.get("data") if isinstance(cached, dict) else None
+        return data if isinstance(data, dict) else None
 
     def load_any(self, task: str) -> dict[str, Any] | None:
         """Load any random persona from the pool for the given task."""
@@ -115,7 +113,8 @@ class PersonaPool:
         with open(path, encoding="utf-8") as f:
             cached = json.load(f)
         logger.info("Persona loaded (any) from pool: %s", path.name)
-        return cached.get("data")
+        data = cached.get("data") if isinstance(cached, dict) else None
+        return data if isinstance(data, dict) else None
 
     def count(self, task: str) -> int:
         """Return number of cached personas for a task."""

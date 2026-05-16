@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import sys
+from contextlib import suppress
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -188,12 +189,15 @@ _DELIGHT_ACK_URL = "http://127.0.0.1:8420/api/delight/sent"
 async def _acknowledge_delight(bvid: str) -> None:
     """POST acknowledgment so the backend marks the item as notified."""
     try:
-        import aiohttp  # type: ignore[import-untyped]
+        import aiohttp
 
-        async with aiohttp.ClientSession() as session, session.post(
-            _DELIGHT_ACK_URL,
-            json={"bvid": bvid},
-        ) as resp:
+        async with (
+            aiohttp.ClientSession() as session,
+            session.post(
+                _DELIGHT_ACK_URL,
+                json={"bvid": bvid},
+            ) as resp,
+        ):
             resp.raise_for_status()
     except Exception:
         # Fallback to synchronous urllib when aiohttp is unavailable
@@ -221,29 +225,33 @@ async def _listen_ws(ws_url: str, event_types: frozenset[str]) -> None:
     The connection auto-reconnects on failure. Press Ctrl-C to stop.
     """
     try:
-        import websockets  # type: ignore[import-untyped]
+        import websockets
     except ModuleNotFoundError:
-        _print_payload({
-            "ok": False,
-            "error": (
-                "The 'listen' command requires the 'websockets' package. "
-                "Install it with:  pip install websockets"
-            ),
-            "error_type": "dependency_error",
-        })
+        _print_payload(
+            {
+                "ok": False,
+                "error": (
+                    "The 'listen' command requires the 'websockets' package. "
+                    "Install it with:  pip install websockets"
+                ),
+                "error_type": "dependency_error",
+            }
+        )
         return
 
     while True:
         try:
             async with websockets.connect(ws_url) as ws:
-                _print_payload({
-                    "ok": True,
-                    "data": {
-                        "status": "connected",
-                        "ws_url": ws_url,
-                        "event_types": sorted(event_types),
-                    },
-                })
+                _print_payload(
+                    {
+                        "ok": True,
+                        "data": {
+                            "status": "connected",
+                            "ws_url": ws_url,
+                            "event_types": sorted(event_types),
+                        },
+                    }
+                )
                 sys.stdout.flush()
                 async for raw_message in ws:
                     try:
@@ -263,11 +271,13 @@ async def _listen_ws(ws_url: str, event_types: frozenset[str]) -> None:
                         if bvid:
                             await _acknowledge_delight(bvid)
         except (OSError, Exception):
-            _print_payload({
-                "ok": False,
-                "error": "WebSocket disconnected, reconnecting...",
-                "error_type": "connection_error",
-            })
+            _print_payload(
+                {
+                    "ok": False,
+                    "error": "WebSocket disconnected, reconnecting...",
+                    "error_type": "connection_error",
+                }
+            )
             sys.stdout.flush()
             await asyncio.sleep(_WS_RECONNECT_DELAY)
 
@@ -279,13 +289,11 @@ def main(argv: Sequence[str] | None = None, *, adapter: Any | None = None) -> in
 
     # ``listen`` is a long-running stream — handle separately
     if args.command == "listen":
-        event_types = frozenset(
-            t.strip() for t in args.events.split(",") if t.strip()
-        ) or _LISTEN_EVENT_TYPES
-        try:
+        event_types = (
+            frozenset(t.strip() for t in args.events.split(",") if t.strip()) or _LISTEN_EVENT_TYPES
+        )
+        with suppress(KeyboardInterrupt):
             asyncio.run(_listen_ws(args.ws_url, event_types))
-        except KeyboardInterrupt:
-            pass
         return 0
 
     if adapter is not None:

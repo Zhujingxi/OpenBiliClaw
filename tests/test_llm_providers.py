@@ -307,6 +307,25 @@ def test_openai_provider_disables_sdk_retries() -> None:
     assert provider._client.max_retries == 0
 
 
+def test_openai_provider_logs_http_400_response_body(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider = OpenAIProvider(api_key="test-key", provider_name="openai_compatible")
+
+    class BadRequestError(Exception):
+        status_code = 400
+        response = SimpleNamespace(
+            text='{"error":{"message":"MiMo rejected request: invalid response_format"}}'
+        )
+
+    caplog.set_level("WARNING", logger="openbiliclaw.llm.openai_provider")
+
+    mapped = provider._map_error(BadRequestError("Error code: 400"))
+
+    assert "MiMo rejected request" in str(mapped)
+    assert "MiMo rejected request" in caplog.text
+
+
 def test_ollama_provider_defaults() -> None:
     provider = OllamaProvider(model="llama3")
     assert provider.name == "ollama"

@@ -258,7 +258,7 @@ async def test_evaluator_propagates_llm_franchise_key_through_to_db(
     assert contents[2].franchise_key == ""
 
     # Cache tuple is the new 5-tuple shape and carries franchise_key.
-    cache_key = f"BV1:{id(profile)}"
+    cache_key = f"{engine._content_identity(contents[0])}:{id(profile)}"
     cached = engine._eval_cache[cache_key]
     assert len(cached) == 5
     assert cached[4] == "原神"

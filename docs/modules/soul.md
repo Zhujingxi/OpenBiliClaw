@@ -32,8 +32,9 @@
 | ProfileBuilder | ✅ | 结构化 prompt + JSON 校验 + `OnionProfile` 构建 |
 | SoulEngine.build_initial_profile() | ✅ | 从 history + preference 生成并持久化 `soul.json` |
 | SoulEngine.get_profile() | ✅ | 从 soul 层读取画像，未初始化时抛明确异常 |
-| AwarenessAnalyzer | ✅ | 近期事件 → `AwarenessNote` 列表，支持同日去重 |
+| AwarenessAnalyzer | ✅ | 近期事件 → `AwarenessNote` 列表，支持同日去重；解析 LLM 响应时兼容 `results/items/notes/data` 等 object-wrapped array，prompt 按画像 → 偏好 → 近期事件排序以保留缓存前缀 |
 | InsightAnalyzer | ✅ | 觉察 + 偏好 + 画像 → `InsightHypothesis` 列表，支持假设合并 |
+| CognitionCycle | ✅ | 半日节流生成 awareness + insight 并同步到 `OnionProfile`；仅在 preference 与 soul 都为空的早期初始化状态跳过，已有任一层时仍会运行，避免已初始化画像因 preference 暂空而长期不产出觉察 |
 | SoulEngine.generate_awareness_note() | ✅ | 生成并持久化 `awareness.json` |
 | SoulEngine.generate_insight() | ✅ | 生成并持久化 `insight.json` |
 | SoulEngine.update_from_feedback() | ✅ | feedback 事件落库，并更新匹配洞察状态 |
@@ -832,6 +833,7 @@ notes = await awareness.analyze(
     preference=current_pref,
     soul_profile=current_soul,
 )
+# 兼容模型把数组包在 {"results": [...]} / {"items": [...]} 等对象里的 JSON mode 输出
 
 insight = InsightAnalyzer(registry=llm_registry)
 hypotheses = await insight.analyze(

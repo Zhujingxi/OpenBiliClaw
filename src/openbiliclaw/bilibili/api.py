@@ -24,6 +24,10 @@ class BilibiliAPIError(RuntimeError):
     """Raised when a Bilibili API request returns an application error."""
 
 
+class BilibiliAuthExpiredError(BilibiliAPIError):
+    """Raised when Bilibili reports the current Cookie is logged out."""
+
+
 def _json_object(value: Any) -> dict[str, Any]:
     """Coerce a JSON value into an object for strict typing.
 
@@ -249,6 +253,14 @@ class BilibiliAPIClient:
         code = int(payload.get("code", 0))
         if code != 0:
             message = str(payload.get("message", "Bilibili API request failed"))
+            if path == "/x/web-interface/nav" and code == -101:
+                detail = (
+                    f"Bilibili session expired on {path} (-101): {message}. "
+                    "Please re-authenticate in the browser or keep the extension "
+                    "online to sync a fresh Cookie."
+                )
+                logger.warning("%s", detail)
+                raise BilibiliAuthExpiredError(detail)
             raise BilibiliAPIError(message)
         return _json_object(payload.get("data", {}))
 
@@ -308,10 +320,7 @@ class BilibiliAPIClient:
         mixin_key = cls._build_wbi_mixin_key(img_key, sub_key)
         signed_params = {**params, "wts": int(time.time())}
         ordered_items = sorted(signed_params.items())
-        sanitized = {
-            key: re.sub(r"[!'()*]", "", str(value))
-            for key, value in ordered_items
-        }
+        sanitized = {key: re.sub(r"[!'()*]", "", str(value)) for key, value in ordered_items}
         query = urlencode(sanitized)
         sanitized["w_rid"] = hashlib.md5((query + mixin_key).encode()).hexdigest()
         return sanitized
@@ -387,9 +396,9 @@ class BilibiliAPIClient:
         # per keyword) lets the WBI key churn settle without immediately
         # surrendering. Steady-state cost is zero — retries don't fire
         # when keys are healthy.
-        _MAX_ATTEMPTS = 3
-        _BACKOFF_SCHEDULE = (1.5, 5.0, 15.0)
-        for attempt in range(_MAX_ATTEMPTS):
+        max_attempts = 3
+        backoff_schedule = (1.5, 5.0, 15.0)
+        for attempt in range(max_attempts):
             try:
                 img_key, sub_key = await self._get_wbi_keys()
                 data = await self._get_json(
@@ -408,31 +417,27 @@ class BilibiliAPIClient:
                     ),
                     headers={
                         "Referer": (
-                            "https://search.bilibili.com/all"
-                            f"?keyword={quote(keyword, safe='')}"
+                            f"https://search.bilibili.com/all?keyword={quote(keyword, safe='')}"
                         ),
                         "Origin": "https://search.bilibili.com",
                     },
                 )
             except BilibiliAPIError as exc:
                 cause = exc.__cause__
-                if (
-                    isinstance(cause, httpx.HTTPStatusError)
-                    and cause.response.status_code == 412
-                ):
+                if isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code == 412:
                     logger.warning("Bilibili search blocked with 412 for query=%r", keyword)
                     return []
                 raise
 
             # Detect v_voucher-only response (stale WBI keys or rate limit)
             if "v_voucher" in data and data.get("result") is None:
-                if attempt < _MAX_ATTEMPTS - 1:
-                    delay = _BACKOFF_SCHEDULE[attempt]
+                if attempt < max_attempts - 1:
+                    delay = backoff_schedule[attempt]
                     logger.info(
                         "Search v_voucher challenge (attempt %d/%d) for query=%r — "
                         "refreshing WBI keys, retry in %.1fs",
                         attempt + 1,
-                        _MAX_ATTEMPTS,
+                        max_attempts,
                         keyword,
                         delay,
                     )
@@ -443,7 +448,7 @@ class BilibiliAPIClient:
                 logger.warning(
                     "Search exhausted %d v_voucher retries for query=%r — "
                     "giving up (likely WBI storm or IP rate limit)",
-                    _MAX_ATTEMPTS,
+                    max_attempts,
                     keyword,
                 )
                 return []
@@ -541,8 +546,7 @@ class BilibiliAPIClient:
                     folder=folder,
                     items=limited_items,
                     truncated=(
-                        len(items) > len(limited_items)
-                        or folder.media_count > len(limited_items)
+                        len(items) > len(limited_items) or folder.media_count > len(limited_items)
                     ),
                 )
             )

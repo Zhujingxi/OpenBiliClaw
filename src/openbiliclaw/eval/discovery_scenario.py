@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import re
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -59,9 +60,7 @@ class MockBilibiliClient:
     def __init__(self, scenario: DiscoveryScenario) -> None:
         self._scenario = scenario
         self._bvid_to_content: dict[str, dict[str, object]] = {
-            str(item.get("bvid", "")): item
-            for item in scenario.content_pool
-            if item.get("bvid")
+            str(item.get("bvid", "")): item for item in scenario.content_pool if item.get("bvid")
         }
 
     async def search(
@@ -90,12 +89,13 @@ class MockBilibiliClient:
             bvid = str(item.get("bvid", ""))
             title = str(item.get("title", "")).lower()
             desc = str(item.get("description", "")).lower()
-            tag_str = " ".join(str(t) for t in (item.get("tags", []) or [])).lower()
+            tags = _object_list(item.get("tags"))
+            tag_str = " ".join(str(t) for t in tags).lower()
             haystack = f"{title} {desc} {tag_str}"
 
             title_tokens = _tokenize(title)
             tag_tokens: set[str] = set()
-            for tag in item.get("tags", []) or []:
+            for tag in tags:
                 tag_tokens.update(_tokenize(str(tag)))
             desc_tokens = _tokenize(desc)
             all_tokens = title_tokens | tag_tokens | desc_tokens
@@ -156,10 +156,7 @@ class MockMemoryManager:
     ) -> list[dict[str, object]]:
         events = list(self._scenario.mock_event_history)
         if event_types:
-            events = [
-                e for e in events
-                if str(e.get("event_type", "")) in event_types
-            ]
+            events = [e for e in events if str(e.get("event_type", "")) in event_types]
         return events[:limit]
 
 
@@ -177,6 +174,7 @@ class SupportsStructuredTask(Protocol):
         history: list[dict[str, str]] | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        caller: str = "",
     ) -> object: ...
 
 
@@ -268,40 +266,40 @@ class ScenarioGenerator:
         for item in content_pool:
             if not isinstance(item, dict) or not item.get("bvid"):
                 continue
-            normalized_pool.append({
-                "bvid": str(item.get("bvid", "")),
-                "title": str(item.get("title", "")),
-                "description": str(item.get("description", item.get("desc", ""))),
-                "author": str(item.get("up_name", item.get("author", ""))),
-                "up_name": str(item.get("up_name", item.get("author", ""))),
-                "mid": int(item.get("mid", 0) or 0),
-                "tags": list(item.get("tags", []) or []),
-                "duration": int(item.get("duration", 300) or 300),
-                "play": int(item.get("view_count", item.get("play", 1000)) or 1000),
-                "view_count": int(item.get("view_count", item.get("play", 1000)) or 1000),
-                "like": int(item.get("like_count", item.get("like", 100)) or 100),
-                "pic": str(item.get("pic", item.get("cover_url", ""))),
-                "rid": int(item.get("rid", 0) or 0),
-                "owner": {
-                    "name": str(item.get("up_name", item.get("author", ""))),
+            normalized_pool.append(
+                {
+                    "bvid": str(item.get("bvid", "")),
+                    "title": str(item.get("title", "")),
+                    "description": str(item.get("description", item.get("desc", ""))),
+                    "author": str(item.get("up_name", item.get("author", ""))),
+                    "up_name": str(item.get("up_name", item.get("author", ""))),
                     "mid": int(item.get("mid", 0) or 0),
-                },
-                "stat": {
-                    "view": int(item.get("view_count", item.get("play", 1000)) or 1000),
+                    "tags": _object_list(item.get("tags")),
+                    "duration": int(item.get("duration", 300) or 300),
+                    "play": int(item.get("view_count", item.get("play", 1000)) or 1000),
+                    "view_count": int(item.get("view_count", item.get("play", 1000)) or 1000),
                     "like": int(item.get("like_count", item.get("like", 100)) or 100),
-                },
-                "desc": str(item.get("description", item.get("desc", ""))),
-            })
+                    "pic": str(item.get("pic", item.get("cover_url", ""))),
+                    "rid": int(item.get("rid", 0) or 0),
+                    "owner": {
+                        "name": str(item.get("up_name", item.get("author", ""))),
+                        "mid": int(item.get("mid", 0) or 0),
+                    },
+                    "stat": {
+                        "view": int(item.get("view_count", item.get("play", 1000)) or 1000),
+                        "like": int(item.get("like_count", item.get("like", 100)) or 100),
+                    },
+                    "desc": str(item.get("description", item.get("desc", ""))),
+                }
+            )
 
         # Relevance labels
         raw_labels = data.get("relevance_labels", {})
         labels: dict[str, float] = {}
         if isinstance(raw_labels, dict):
             for bvid, score in raw_labels.items():
-                try:
+                with suppress(ValueError, TypeError):
                     labels[str(bvid)] = max(0.0, min(1.0, float(score)))
-                except (ValueError, TypeError):
-                    pass
 
         # Related graph
         raw_graph = data.get("related_graph", {})
@@ -326,7 +324,9 @@ class ScenarioGenerator:
         # Post-process: diversify ranking pools so no single topic dominates
         bvid_to_item = {str(item.get("bvid", "")): item for item in normalized_pool}
         ranking_pools = self._diversify_ranking_pools(
-            ranking_pools, bvid_to_item, normalized_pool,
+            ranking_pools,
+            bvid_to_item,
+            normalized_pool,
         )
 
         # Build search index from titles and tags
@@ -336,7 +336,7 @@ class ScenarioGenerator:
             index_keys: set[str] = set()
             title = str(item.get("title", ""))
             index_keys.add(title)
-            for tag in item.get("tags", []) or []:
+            for tag in _object_list(item.get("tags")):
                 if tag:
                     index_keys.add(str(tag))
             for key in index_keys:
@@ -362,7 +362,6 @@ class ScenarioGenerator:
             mock_event_history=events,
         )
 
-
     @staticmethod
     def _diversify_ranking_pools(
         ranking_pools: dict[int, list[str]],
@@ -375,9 +374,10 @@ class ScenarioGenerator:
         then backfills from the full content pool to reach target size.
         For rid=0 (global), ensures at least 4 distinct topic groups.
         """
+
         def _topic_of(bvid: str) -> str:
             item = bvid_to_item.get(bvid, {})
-            tags = item.get("tags", []) or []
+            tags = _object_list(item.get("tags"))
             if tags:
                 return str(tags[0]).strip().lower()
             title = str(item.get("title", "")).strip().lower()
@@ -402,14 +402,18 @@ class ScenarioGenerator:
 
             # Pass 2: backfill from full pool if under target
             if len(selected) < target_size:
-                used = set(selected) | set(deferred)
+                local_used = set(selected) | set(deferred)
                 # Prefer items matching this rid
-                candidates = [
-                    str(item.get("bvid", ""))
-                    for item in all_items
-                    if str(item.get("bvid", "")) not in used
-                    and (rid == 0 or int(item.get("rid", 0) or 0) == rid)
-                ]
+                candidates: list[str] = []
+                for item in all_items:
+                    bvid = str(item.get("bvid", ""))
+                    if bvid in local_used:
+                        continue
+                    if rid != 0:
+                        item_rid = _int_value(item.get("rid"), 0)
+                        if item_rid != rid:
+                            continue
+                    candidates.append(bvid)
                 for bvid in candidates:
                     topic = _topic_of(bvid)
                     if topic_counts.get(topic, 0) >= max_per_topic:
@@ -429,16 +433,16 @@ class ScenarioGenerator:
             # For rid=0, verify minimum topic diversity
             if rid == 0 and len(set(topic_counts.keys())) < 4:
                 # Force-add items from under-represented topics
-                used = set(selected)
+                selected_bvids = set(selected)
                 for item in all_items:
                     bvid = str(item.get("bvid", ""))
-                    if bvid in used:
+                    if bvid in selected_bvids:
                         continue
                     topic = _topic_of(bvid)
                     if topic not in topic_counts:
                         selected.append(bvid)
                         topic_counts[topic] = 1
-                        used.add(bvid)
+                        selected_bvids.add(bvid)
                     if len(set(topic_counts.keys())) >= 4:
                         break
 
@@ -487,9 +491,7 @@ class ScenarioPool:
             "content_pool": scenario.content_pool,
             "relevance_labels": scenario.relevance_labels,
             "mock_search_index": scenario.mock_search_index,
-            "mock_ranking_pools": {
-                str(k): v for k, v in scenario.mock_ranking_pools.items()
-            },
+            "mock_ranking_pools": {str(k): v for k, v in scenario.mock_ranking_pools.items()},
             "mock_related_graph": scenario.mock_related_graph,
             "mock_event_history": scenario.mock_event_history,
         }
@@ -504,18 +506,16 @@ class ScenarioPool:
             data = json.loads(path.read_text(encoding="utf-8"))
             ranking_pools: dict[int, list[str]] = {}
             for k, v in data.get("mock_ranking_pools", {}).items():
-                try:
+                with suppress(ValueError, TypeError):
                     ranking_pools[int(k)] = v
-                except (ValueError, TypeError):
-                    pass
             return DiscoveryScenario(
-                persona_id=data.get("persona_id", persona_id),
-                content_pool=data.get("content_pool", []),
-                relevance_labels=data.get("relevance_labels", {}),
-                mock_search_index=data.get("mock_search_index", {}),
+                persona_id=str(data.get("persona_id", persona_id)),
+                content_pool=_dict_list(data.get("content_pool")),
+                relevance_labels=_float_dict(data.get("relevance_labels")),
+                mock_search_index=_list_dict(data.get("mock_search_index")),
                 mock_ranking_pools=ranking_pools,
-                mock_related_graph=data.get("mock_related_graph", {}),
-                mock_event_history=data.get("mock_event_history", []),
+                mock_related_graph=_list_dict(data.get("mock_related_graph")),
+                mock_event_history=_dict_list(data.get("mock_event_history")),
             )
         except Exception:
             logger.exception("Failed to load scenario: %s", path)
@@ -532,8 +532,51 @@ class ScenarioPool:
 
 def _tokenize(text: str) -> set[str]:
     """Simple tokenization: split on whitespace and punctuation, lowercase."""
-    cleaned = re.sub(r"[，。！？、：；\u201c\u201d\u2018\u2019（）【】\s]+", " ", text.lower().strip())
+    cleaned = re.sub(
+        r"[，。！？、：；\u201c\u201d\u2018\u2019（）【】\s]+", " ", text.lower().strip()
+    )
     return {t for t in cleaned.split() if len(t) >= 1}
+
+
+def _object_list(value: object) -> list[object]:
+    return list(value) if isinstance(value, list) else []
+
+
+def _dict_list(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _list_dict(value: object) -> dict[str, list[str]]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, list[str]] = {}
+    for key, raw_items in value.items():
+        if isinstance(raw_items, list):
+            result[str(key)] = [str(item) for item in raw_items]
+    return result
+
+
+def _float_dict(value: object) -> dict[str, float]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, float] = {}
+    for key, raw_score in value.items():
+        try:
+            result[str(key)] = float(raw_score)
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _int_value(value: object, default: int = 0) -> int:
+    if isinstance(value, (int, float, str)):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+    return default
 
 
 def _persona_summary(persona: Any) -> str:
@@ -555,10 +598,13 @@ def _persona_summary(persona: Any) -> str:
     if prefs:
         interests = getattr(prefs, "interests", [])
         if interests:
-            parts.append("兴趣: " + ", ".join(
-                f"{getattr(i, 'name', '')}({getattr(i, 'weight', 0):.1f})"
-                for i in interests[:10]
-            ))
+            parts.append(
+                "兴趣: "
+                + ", ".join(
+                    f"{getattr(i, 'name', '')}({getattr(i, 'weight', 0):.1f})"
+                    for i in interests[:10]
+                )
+            )
         ups = getattr(prefs, "favorite_up_users", [])
         if ups:
             parts.append(f"喜欢的UP主: {', '.join(str(u) for u in ups[:5])}")
@@ -570,9 +616,7 @@ def _persona_summary(persona: Any) -> str:
         if interest is not None:
             likes = getattr(interest, "likes", [])
             if likes:
-                parts.append("兴趣: " + ", ".join(
-                    str(getattr(d, "name", "")) for d in likes[:10]
-                ))
+                parts.append("兴趣: " + ", ".join(str(getattr(d, "name", "")) for d in likes[:10]))
 
     return "\n".join(parts) or "No profile available"
 
@@ -597,13 +641,15 @@ def _extract_json(text: str) -> dict[str, Any] | None:
     match = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group(1).strip())
+            parsed = json.loads(match.group(1).strip())
+            return parsed if isinstance(parsed, dict) else None
         except json.JSONDecodeError:
             pass
 
     # Strategy 2: full text
     try:
-        return json.loads(text.strip())
+        parsed = json.loads(text.strip())
+        return parsed if isinstance(parsed, dict) else None
     except json.JSONDecodeError:
         pass
 
@@ -612,7 +658,8 @@ def _extract_json(text: str) -> dict[str, Any] | None:
     last_brace = text.rfind("}")
     if first_brace >= 0 and last_brace > first_brace:
         try:
-            return json.loads(text[first_brace:last_brace + 1])
+            parsed = json.loads(text[first_brace : last_brace + 1])
+            return parsed if isinstance(parsed, dict) else None
         except json.JSONDecodeError:
             pass
 

@@ -51,6 +51,21 @@ MODE="${MODE:-auto}"
 PORT="${PORT:-8420}"
 HOST="${HOST:-127.0.0.1}"
 
+extend_no_proxy_for_localhost() {
+    local current="${NO_PROXY:-${no_proxy:-}}"
+    local host
+    for host in localhost 127.0.0.1 ::1; do
+        case ",$current," in
+            *",$host,"*) ;;
+            *) current="${current:+$current,}$host" ;;
+        esac
+    done
+    export NO_PROXY="$current"
+    export no_proxy="$current"
+}
+
+extend_no_proxy_for_localhost
+
 # ---------------------------------------------------------------------------
 # Logging helpers (ANSI colours only when stdout is a tty)
 

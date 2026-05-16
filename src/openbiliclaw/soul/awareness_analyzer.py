@@ -19,6 +19,18 @@ from .profile import AwarenessNote
 
 logger = logging.getLogger(__name__)
 
+_AWARENESS_WRAPPED_ARRAY_KEYS = (
+    "results",
+    "items",
+    "notes",
+    "awareness_notes",
+    "awareness",
+    "data",
+    "output",
+    "list",
+    "array",
+)
+
 
 class SupportsCoreMemoryTask(Protocol):
     async def complete_structured_task(
@@ -101,9 +113,21 @@ class AwarenessAnalyzer:
                 f"LLM returned invalid JSON for awareness generation "
                 f"(raw_len={len(content.strip())})"
             )
-        if not isinstance(parsed, list):
+        payload = self._coerce_note_list(parsed)
+        if payload is None:
             raise AwarenessGenerationError("LLM awareness response must be a JSON array.")
-        return list(parsed)
+        return payload
+
+    @staticmethod
+    def _coerce_note_list(value: object) -> list[object] | None:
+        if isinstance(value, list):
+            return list(value)
+        if isinstance(value, dict):
+            for key in _AWARENESS_WRAPPED_ARRAY_KEYS:
+                nested = value.get(key)
+                if isinstance(nested, list):
+                    return list(nested)
+        return None
 
     @staticmethod
     def _build_note(raw_item: dict[str, object]) -> AwarenessNote:
