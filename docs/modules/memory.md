@@ -96,7 +96,7 @@
 
 | 任务 | 状态 | 说明 |
 |------|------|------|
-| 4.1 事件层 | ✅ | SQLite 写入 + 按类型/时间/关键词查询 + 统计 |
+| 4.1 事件层 | ✅ | SQLite 写入 + 按类型/时间/关键词查询 + 统计；v0.3.x 每行带 `inferred_satisfaction` + `satisfaction_reason`（写入时由 `classify_event_satisfaction` 决定），`query_events(satisfaction_modes=...)` 支持按 positive/negative/neutral/unknown 过滤，`unknown` 同时匹配 pre-migration 的 NULL 行 |
 | 4.2 偏好层 | ✅ | LLM structured extraction + 合并 + 衰减 |
 | 4.3 灵魂层 | ✅ | 初始画像生成 + `profile` CLI 展示 |
 | 4.4 觉察层 + 洞察层 | ✅ | 觉察笔记、洞察假设、反馈更新 |

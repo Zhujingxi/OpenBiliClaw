@@ -313,6 +313,12 @@ YouTube discovery 开关。初始化画像由浏览器扩展读取观看历史 /
 |----|------|--------|------|
 | `db_path` | string | `"data/openbiliclaw.db"` | SQLite 数据库路径 |
 
+### `[soul.preference]`
+
+| 键 | 类型 | 默认值 | 说明 |
+|----|------|--------|------|
+| `satisfaction_filter_enabled` | bool | `false` | v0.3.x 事件满意度信号：开启后偏好分析会忽略存储层分类为 `quick_exit` / `explicit_negative` 的事件。默认 `false`，观察 `inferred_satisfaction` 分布 1-2 个发布周期后再切到 `true` 关闭点击诱饵自喂回路 |
+
 ### `[logging]`
 
 | 键 | 类型 | 默认值 | 说明 |
