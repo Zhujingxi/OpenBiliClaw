@@ -81,6 +81,15 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
+def _ignore_runtime_config_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        cli_module,
+        "_load_runtime_config_error",
+        lambda *, render=True: None,
+        raising=False,
+    )
+
+
 def test_main_bootstraps_container_runtime_when_project_root_is_configured(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
 ) -> None:
@@ -480,7 +489,7 @@ def test_db_repair_reports_successful_rebuild(
 
     assert result.exit_code == 0
     assert "数据库已恢复并完成切换。" in result.stdout
-    assert "openbiliclaw.repaired.db" in result.stdout
+    assert "openbiliclaw.repaired.db" in result.stdout.replace("\n", "")
 
 
 def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1716,6 +1725,7 @@ def test_init_reports_authentication_failure(
                 message="未配置 B 站 Cookie。",
             )
 
+    _ignore_runtime_config_error(monkeypatch)
     monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
     monkeypatch.setattr(cli_module, "_build_auth_manager", lambda: FakeAuthManager(), raising=False)
     monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
@@ -1810,7 +1820,7 @@ def test_init_guides_missing_runtime_config_interactively(
     #   5. "n" — skip module overrides
     #   6. "n" — skip xhs inclusion
     #   7. "n" — skip douyin inclusion
-    #   8. "n" — skip youtube inclusion
+    #   8+. "n" — skip any remaining optional source prompts
     wizard_input = (
         "\n".join(
             [
@@ -1818,6 +1828,7 @@ def test_init_guides_missing_runtime_config_interactively(
                 "gemini-key",
                 "",
                 "1",
+                "n",
                 "n",
                 "n",
                 "n",
@@ -1936,6 +1947,7 @@ def test_init_reports_when_history_is_empty(
         async def get_user_history(self, max_items: int = 100) -> list[dict[str, object]]:
             return []
 
+    _ignore_runtime_config_error(monkeypatch)
     monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
     monkeypatch.setattr(cli_module, "_build_auth_manager", lambda: FakeAuthManager(), raising=False)
     monkeypatch.setattr(
@@ -2048,6 +2060,7 @@ def test_init_runs_history_preference_profile_and_discovery(
         (),
         {"count_pool_candidates": lambda self: 0},
     )()
+    _ignore_runtime_config_error(monkeypatch)
     monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
     monkeypatch.setattr(cli_module, "_build_auth_manager", lambda: FakeAuthManager(), raising=False)
     monkeypatch.setattr(
@@ -3019,6 +3032,7 @@ def test_init_backfills_pool_in_stages_until_target_is_reached(
 
     fake_database = FakeDatabase()
     fake_discovery = FakeDiscoveryEngine(fake_database)
+    _ignore_runtime_config_error(monkeypatch)
     monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
     monkeypatch.setattr(cli_module, "_build_auth_manager", lambda: FakeAuthManager(), raising=False)
     monkeypatch.setattr(
@@ -3134,6 +3148,7 @@ def test_init_skips_backfill_when_pool_target_is_already_reached(
 
     fake_database = FakeDatabase()
     fake_discovery = FakeDiscoveryEngine(fake_database)
+    _ignore_runtime_config_error(monkeypatch)
     monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
     monkeypatch.setattr(cli_module, "_build_auth_manager", lambda: FakeAuthManager(), raising=False)
     monkeypatch.setattr(
@@ -3224,6 +3239,7 @@ def test_init_reports_partial_success_when_discovery_fails(
         (),
         {"count_pool_candidates": lambda self: 0},
     )()
+    _ignore_runtime_config_error(monkeypatch)
     monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
     monkeypatch.setattr(cli_module, "_build_auth_manager", lambda: FakeAuthManager(), raising=False)
     monkeypatch.setattr(

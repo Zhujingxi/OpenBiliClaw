@@ -19,10 +19,11 @@
 
 ---
 
-## 📌 v0.3.71 重要更新（2026-05-16）
+## 📌 v0.3.72 重要更新（2026-05-16）
 
-- **🦊 Firefox 140+ 本地构建支持** —— `extension-v0.3.23` 新增 `manifest.firefox.json`，用 Firefox `sidebar_action` 承载同一套 popup UI；`npm run build:firefox` / `npm run package:firefox` 可生成 `dist-firefox/` 和 Firefox 专用 zip，manifest 已声明 AMO 所需的数据收集类别。
-- **📦 扩展打包更稳** —— Chrome / Firefox 打包脚本都会先删除同名旧 zip 再压缩，避免重复本地打包时把已经删除的旧文件残留进 release 资产。
+- **🔌 浏览器插件后端端口可配置** —— 设置页新增「后端端口」（默认 `8420`，仅接受 `1-65535` 的完整整数），适合 Windows Hyper-V / WSL / Docker 占用默认端口时改用 `18080` / `19090` 等高位端口，并用 `openbiliclaw start --port <同一端口>` 启动后端。
+- **🧩 插件全链路走统一后端 endpoint** —— popup、service worker、cookie 同步、XHS / Douyin / YouTube 任务派发和调试中继都通过共享 helper 解析当前端口；manifest 本地权限同步放宽到 `127.0.0.1/*` / `localhost/*`。
+- **🙏 致谢社区贡献** —— 感谢 [@addtion99](https://github.com/addtion99) 在 [#8](https://github.com/whiteguo233/OpenBiliClaw/pull/8) 提出端口可配置需求并给出 popup 侧实现思路。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
@@ -490,7 +491,7 @@ OpenBiliClaw/
 
 ## 📜 更新日志
 
-最新版本：**v0.3.71: Firefox 扩展构建与打包补强（2026-05-16）**。README 顶部保留最新重要更新；完整历史见 [docs/changelog.md](docs/changelog.md)，发布包见 [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases)。
+最新版本：**v0.3.72: 浏览器插件后端端口可配置（2026-05-16）**。README 顶部保留最新重要更新；完整历史见 [docs/changelog.md](docs/changelog.md)，发布包见 [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases)。
 
 ## 🗺️ 后续规划
 
@@ -510,6 +511,10 @@ OpenBiliClaw 的目标是做你的**全网个性化内容入口**——从 B 站
 ## 🤝 贡献
 
 欢迎贡献！请查看 [开发指南](docs/contributing.md) 了解如何参与。
+
+## 🙏 致谢
+
+- 感谢 [@addtion99](https://github.com/addtion99) 在 [#8](https://github.com/whiteguo233/OpenBiliClaw/pull/8) 提出浏览器插件后端端口可配置需求，并给出 popup 侧实现思路。
 
 ## ⭐ Star History
 

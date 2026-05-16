@@ -4,12 +4,30 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    import pytest
+import pytest
 
 from openbiliclaw.api.app import create_app
+
+
+@pytest.fixture(autouse=True)
+def _isolate_runtime_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep create_app() route tests independent from the developer machine.
+
+    Several API tests intentionally exercise routes with partial fake runtime
+    components. create_app() still loads runtime config up front, so without
+    this fixture CI sees the repo's empty template while local runs may see a
+    private config.toml with real credentials.
+    """
+
+    from openbiliclaw.config import Config, save_config
+
+    project_root = tmp_path / "runtime"
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(project_root))
+    cfg = Config()
+    cfg.llm.default_provider = "ollama"
+    cfg.llm.ollama.model = "llama3"
+    save_config(cfg, project_root / "config.toml")
 
 
 class TestBackendAPI:
@@ -403,6 +421,7 @@ class TestBackendAPI:
         cookie_file = tmp_path / "data" / "bilibili_cookie.json"
         assert cookie_file.exists()
         import json
+
         assert json.loads(cookie_file.read_text())["cookie"] == cookie_value
 
         # Side effect 2: config.toml [bilibili].cookie mirrors the cookie.
@@ -849,28 +868,32 @@ class TestBackendAPI:
                 # only 2 survive.
                 base: list[dict[str, object]] = []
                 for i in range(5):
-                    base.append({
-                        "id": i,
-                        "bvid": f"BV原神{i}",
-                        "title": f"原神 番外 {i}",
-                        "up_name": "某 UP",
+                    base.append(
+                        {
+                            "id": i,
+                            "bvid": f"BV原神{i}",
+                            "title": f"原神 番外 {i}",
+                            "up_name": "某 UP",
+                            "cover_url": "",
+                            "expression": "",
+                            "topic": "游戏",
+                            "presented": 0,
+                            "franchise_key": "原神",
+                        }
+                    )
+                base.append(
+                    {
+                        "id": 99,
+                        "bvid": "BV番茄",
+                        "title": "番茄炒蛋 5 分钟",
+                        "up_name": "美食 UP",
                         "cover_url": "",
                         "expression": "",
-                        "topic": "游戏",
+                        "topic": "美食",
                         "presented": 0,
-                        "franchise_key": "原神",
-                    })
-                base.append({
-                    "id": 99,
-                    "bvid": "BV番茄",
-                    "title": "番茄炒蛋 5 分钟",
-                    "up_name": "美食 UP",
-                    "cover_url": "",
-                    "expression": "",
-                    "topic": "美食",
-                    "presented": 0,
-                    "franchise_key": "",
-                })
+                        "franchise_key": "",
+                    }
+                )
                 return base
 
         app = create_app(database=FakeDatabase())
@@ -879,9 +902,7 @@ class TestBackendAPI:
         response = client.get("/api/recommendations")
         assert response.status_code == 200
         items = response.json()["items"]
-        franchise_count = sum(
-            1 for it in items if str(it["title"]).startswith("原神")
-        )
+        franchise_count = sum(1 for it in items if str(it["title"]).startswith("原神"))
         # 5 同 IP 行被砍到 2，番茄炒蛋（无 franchise）仍保留
         assert franchise_count == 2
         assert any(it["title"].startswith("番茄炒蛋") for it in items)
@@ -1582,7 +1603,7 @@ class TestBackendAPI:
                         "kind": "interest_added",
                         "summary": "阿B 现在更确定你会吃国际时事深拆这一口。",
                         "context_line": "基于最近内容：《中东局势深拆》 / 《国际秩序观察》",
-                        "impact": '画像里\u201c国际新闻 / 深度分析\u201d这条偏好会更靠前。',
+                        "impact": "画像里\u201c国际新闻 / 深度分析\u201d这条偏好会更靠前。",
                         "reasoning": "这更像是连续强化后的稳定兴趣，不只是一次随手点开。",
                         "evidence": "因为你最近连续点开相关内容，还主动提到了国际时事。",
                         "source": "chat",
@@ -1651,7 +1672,9 @@ class TestBackendAPI:
         assert data["deep_needs"] == ["理解世界", "持续成长", "高质量独处", "智性共鸣", "掌控感"]
         assert data["values"] == ["独立思考", "真实", "深度"]
         assert data["motivational_drivers"] == [
-            "建立判断确定性", "持续扩展理解边界", "在复杂信息里找到秩序感",
+            "建立判断确定性",
+            "持续扩展理解边界",
+            "在复杂信息里找到秩序感",
         ]
         assert data["cognitive_style"] == [
             "会先看结构",
@@ -1926,9 +1949,7 @@ class TestBackendAPI:
         response = client.post("/api/chat", json={"message": "我最近总在看国际新闻"})
 
         assert response.status_code == 200
-        assert response.json() == {
-            "reply": "你更在意的是它背后的逻辑，还是事件本身的冲突感？"
-        }
+        assert response.json() == {"reply": "你更在意的是它背后的逻辑，还是事件本身的冲突感？"}
 
     def test_chat_endpoint_rejects_empty_message(self) -> None:
         from fastapi.testclient import TestClient
@@ -2036,9 +2057,7 @@ class TestBackendAPI:
         ]
         assert soul_engine._speculator.rejected == [("城市漫游路线", 30)]
 
-    def test_chat_turn_endpoint_persists_pending_turn_until_reply(
-        self, tmp_path: Path
-    ) -> None:
+    def test_chat_turn_endpoint_persists_pending_turn_until_reply(self, tmp_path: Path) -> None:
         import asyncio
         import time
 
@@ -2166,9 +2185,7 @@ class TestBackendAPI:
                 "/api/chat/turns",
                 params={"session": "popup", "scope": "delight"},
             ).json()
-            assert [item["turn_id"] for item in delight_history["items"]] == [
-                "turn-delight-1"
-            ]
+            assert [item["turn_id"] for item in delight_history["items"]] == ["turn-delight-1"]
 
     def test_recommendation_click_endpoint_ingests_strong_signal(self) -> None:
         """POST /api/recommendation-click should push a strong signal through the pipeline."""
@@ -2183,7 +2200,8 @@ class TestBackendAPI:
 
         class FakeDatabase:
             def get_recommendation_by_id(
-                self, recommendation_id: int,
+                self,
+                recommendation_id: int,
             ) -> dict[str, object] | None:
                 if recommendation_id != 99:
                     return None
@@ -2282,7 +2300,8 @@ class TestBackendAPI:
 
         class FakeDatabase:
             def get_recommendation_by_id(
-                self, recommendation_id: int,
+                self,
+                recommendation_id: int,
             ) -> dict[str, object] | None:
                 return None
 
@@ -2337,7 +2356,8 @@ class TestBackendAPI:
 
         class FakeDatabase:
             def get_recommendation_by_id(
-                self, recommendation_id: int,
+                self,
+                recommendation_id: int,
             ) -> dict[str, object] | None:
                 return None
 
@@ -2383,7 +2403,8 @@ class TestBackendAPI:
 
         class FakeDatabase:
             def get_recommendation_by_id(
-                self, recommendation_id: int,
+                self,
+                recommendation_id: int,
             ) -> dict[str, object] | None:
                 return None  # should not be called
 
@@ -2431,7 +2452,8 @@ class TestBackendAPI:
 
         class FakeDatabase:
             def get_recommendation_by_id(
-                self, recommendation_id: int,
+                self,
+                recommendation_id: int,
             ) -> dict[str, object] | None:
                 return None  # unknown recommendation
 
@@ -2869,9 +2891,7 @@ class TestEmbeddingAndCompatProviderE2E:
         assert "*" in compat["api_key"]
         assert "gsk-groq-secret-key-1234567890" not in compat["api_key"]
 
-    def test_get_config_exposes_embedding_credentials_masked(
-        self, monkeypatch, tmp_path
-    ) -> None:
+    def test_get_config_exposes_embedding_credentials_masked(self, monkeypatch, tmp_path) -> None:
         """v0.3.32+ embedding owns api_key/base_url. They must surface
         in /api/config (so the popup knows what's configured) with
         api_key masked."""
@@ -2907,9 +2927,7 @@ class TestEmbeddingAndCompatProviderE2E:
         assert "*" in emb["api_key"]
         assert "sk-embed-secret-1234567890" not in emb["api_key"]
 
-    def test_get_config_with_reveal_keys_returns_raw_secrets(
-        self, monkeypatch, tmp_path
-    ) -> None:
+    def test_get_config_with_reveal_keys_returns_raw_secrets(self, monkeypatch, tmp_path) -> None:
         """``GET /api/config?reveal_keys=true`` returns unmasked keys
         for both new fields (openai_compatible.api_key + embedding.api_key).
         Used by the popup when the user clicks "show" to edit."""
@@ -2937,9 +2955,7 @@ class TestEmbeddingAndCompatProviderE2E:
 
     # ── PUT round-trip: openai_compatible ───────────────────────────
 
-    def test_put_openai_compatible_round_trips_through_get(
-        self, monkeypatch, tmp_path
-    ) -> None:
+    def test_put_openai_compatible_round_trips_through_get(self, monkeypatch, tmp_path) -> None:
         """PUT a full [llm.openai_compatible] block, then GET — the
         non-secret fields come back identical, api_key comes back
         masked but the in-memory config object holds the real value."""
@@ -2979,9 +2995,7 @@ class TestEmbeddingAndCompatProviderE2E:
         assert "*" in compat["api_key"]
         assert "gsk-fresh-groq-key-1234567890" not in compat["api_key"]
 
-    def test_put_openai_compatible_does_not_stomp_openai_block(
-        self, monkeypatch, tmp_path
-    ) -> None:
+    def test_put_openai_compatible_does_not_stomp_openai_block(self, monkeypatch, tmp_path) -> None:
         """Partial PUT with only [llm.openai_compatible] must NOT clear
         the existing [llm.openai] block. Both providers can coexist
         (the whole point of the v0.3.32 split)."""
@@ -3053,15 +3067,11 @@ class TestEmbeddingAndCompatProviderE2E:
 
         issues = resp.json()["config"]["issues"]
         fields = [i["field"] for i in issues]
-        assert "llm.openai_compatible.base_url" in fields, (
-            f"expected base_url issue in {fields}"
-        )
+        assert "llm.openai_compatible.base_url" in fields, f"expected base_url issue in {fields}"
 
     # ── Embedding round-trip + masked-echo protection ───────────────
 
-    def test_put_embedding_via_openai_compatible_round_trip(
-        self, monkeypatch, tmp_path
-    ) -> None:
+    def test_put_embedding_via_openai_compatible_round_trip(self, monkeypatch, tmp_path) -> None:
         """Embedding can independently target an openai_compatible
         backend (vLLM / Together / Azure OpenAI), with its own api_key
         and base_url — no need to also fill [llm.openai_compatible]."""
@@ -3182,9 +3192,7 @@ class TestEmbeddingAndCompatProviderE2E:
 
     # ── Coexistence: both providers usable in one config ────────────
 
-    def test_get_after_dual_put_returns_both_provider_blocks(
-        self, monkeypatch, tmp_path
-    ) -> None:
+    def test_get_after_dual_put_returns_both_provider_blocks(self, monkeypatch, tmp_path) -> None:
         """Set both [llm.openai] (real OpenAI for chat) and
         [llm.openai_compatible] (Groq for fast drafting) in one PUT.
         Both blocks must round-trip independently — the v0.3.32 split
@@ -3225,9 +3233,7 @@ class TestEmbeddingAndCompatProviderE2E:
         assert "*" in openai_mask and "*" in compat_mask
         assert openai_mask != compat_mask
 
-    def test_get_config_exposes_sources_and_advanced_settings(
-        self, monkeypatch, tmp_path
-    ) -> None:
+    def test_get_config_exposes_sources_and_advanced_settings(self, monkeypatch, tmp_path) -> None:
         """The config API should expose persisted advanced fields so the
         extension settings page can stay aligned with config.toml."""
         from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
@@ -3319,9 +3325,7 @@ class TestEmbeddingAndCompatProviderE2E:
         assert data["logging"]["unmanaged_truncate_mb"] == 78
         assert data["logging"]["unmanaged_max_age_days"] == 9
 
-    def test_put_config_updates_sources_and_advanced_settings(
-        self, monkeypatch, tmp_path
-    ) -> None:
+    def test_put_config_updates_sources_and_advanced_settings(self, monkeypatch, tmp_path) -> None:
         """PUT /api/config should update the same advanced fields that the
         extension settings page exposes."""
         from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
@@ -3495,9 +3499,7 @@ class TestEmbeddingAndCompatProviderE2E:
             },
         }
 
-    def test_source_share_suggestion_post_uses_form_overrides(
-        self, monkeypatch, tmp_path
-    ) -> None:
+    def test_source_share_suggestion_post_uses_form_overrides(self, monkeypatch, tmp_path) -> None:
         """POST /api/config/source-share-suggestion should support the
         extension settings page's unsaved switch/share state."""
         from fastapi.testclient import TestClient

@@ -51,8 +51,8 @@ function releaseDispatcherMutex(label: string): void {
   }
 }
 
-const NEXT_TASK_URL = "http://127.0.0.1:8420/api/sources/xhs/next-task";
-const TASK_RESULT_URL = "http://127.0.0.1:8420/api/sources/xhs/task-result";
+import { apiUrl } from "../shared/backend-endpoint.ts";
+
 const DEFAULT_POLL_INTERVAL_MS = 45_000;
 const TASK_TIMEOUT_MS = 30_000;
 const BOOTSTRAP_SCROLL_TIMEOUT_PER_ROUND_MS = 3_000;
@@ -217,7 +217,7 @@ function bootstrapClickedNextUrl(result: XhsTaskResult): boolean {
 
 async function fetchNextTask(): Promise<XhsTask | null> {
   try {
-    const response = await fetch(NEXT_TASK_URL, { method: "GET" });
+    const response = await fetch(await apiUrl("/sources/xhs/next-task"), { method: "GET" });
     if (response.status === 204) return null;
     if (!response.ok) return null;
     const payload = await response.json();
@@ -229,7 +229,7 @@ async function fetchNextTask(): Promise<XhsTask | null> {
 
 async function reportTaskResult(result: XhsTaskResult): Promise<void> {
   try {
-    await fetch(TASK_RESULT_URL, {
+    await fetch(await apiUrl("/sources/xhs/task-result"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(result),

@@ -20,6 +20,9 @@ from openbiliclaw.integrations.openclaw.schemas import (
     SyncAccountResponse,
 )
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_SKILL_PACK_PATH = _REPO_ROOT / "skills" / "openbiliclaw-adapter" / "SKILL.md"
+
 
 class _FakeCliAdapter:
     def __init__(self) -> None:
@@ -222,10 +225,7 @@ def test_doctor_cli_reports_skill_pack_and_registered_skill_names(capsys) -> Non
     assert json.loads(captured.out) == {
         "ok": True,
         "data": {
-            "skill_pack_path": (
-                "/Users/white/workspace/OpenBiliClaw/"
-                "skills/openbiliclaw-adapter/SKILL.md"
-            ),
+            "skill_pack_path": str(_SKILL_PACK_PATH),
             "skill_pack_exists": True,
             "skill_count": 8,
             "skill_names": [
@@ -293,11 +293,15 @@ def test_listen_parser_accepts_custom_flags() -> None:
     from openbiliclaw.integrations.openclaw.cli import _build_parser
 
     parser = _build_parser()
-    args = parser.parse_args([
-        "listen",
-        "--ws-url", "ws://custom:9999/api/runtime-stream",
-        "--events", "delight.candidate,refresh.pool_updated",
-    ])
+    args = parser.parse_args(
+        [
+            "listen",
+            "--ws-url",
+            "ws://custom:9999/api/runtime-stream",
+            "--events",
+            "delight.candidate,refresh.pool_updated",
+        ]
+    )
 
     assert args.ws_url == "ws://custom:9999/api/runtime-stream"
     assert "delight.candidate" in args.events
@@ -305,9 +309,7 @@ def test_listen_parser_accepts_custom_flags() -> None:
 
 
 def test_workspace_skill_pack_exists_and_mentions_cli_bridge() -> None:
-    skill_path = Path("/Users/white/workspace/OpenBiliClaw/skills/openbiliclaw-adapter/SKILL.md")
-
-    content = skill_path.read_text(encoding="utf-8")
+    content = _SKILL_PACK_PATH.read_text(encoding="utf-8")
 
     assert "name: openbiliclaw_adapter" in content
     assert "uv run python -m openbiliclaw.integrations.openclaw.cli" in content

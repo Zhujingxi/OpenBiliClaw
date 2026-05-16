@@ -16,8 +16,9 @@
  * Douyin cookie for direct discovery smoke / recall.
  */
 
-const COOKIE_SYNC_URL = "http://127.0.0.1:8420/api/bilibili/cookie";
-const DOUYIN_COOKIE_SYNC_URL = "http://127.0.0.1:8420/api/sources/dy/cookie";
+// .ts extension: see service-worker.ts for the node:test resolver rationale.
+import { apiUrl } from "../shared/backend-endpoint.ts";
+
 const COOKIE_SYNC_ALARM = "openbiliclaw-cookie-sync";
 const COOKIE_SYNC_DEBOUNCE_MS = 2_000;
 const COOKIE_SYNC_REFRESH_MINUTES = 60;
@@ -160,7 +161,7 @@ export async function syncBilibiliCookieToBackend(
     return false;
   }
   try {
-    const response = await fetch(COOKIE_SYNC_URL, {
+    const response = await fetch(await apiUrl("/bilibili/cookie"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -230,7 +231,7 @@ export async function syncDouyinCookieToBackend(
     return false;
   }
   try {
-    const response = await fetch(DOUYIN_COOKIE_SYNC_URL, {
+    const response = await fetch(await apiUrl("/sources/dy/cookie"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

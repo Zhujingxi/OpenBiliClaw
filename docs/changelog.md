@@ -4,6 +4,17 @@
 
 ---
 
+## v0.3.72: 浏览器插件后端端口可配置（2026-05-16）
+
+- 浏览器插件设置页新增「后端端口」字段（默认 `8420`，仅接受 `1-65535` 的完整十进制整数）。Windows 启用 Hyper-V / WSL / Docker 后常见本地端口会被系统组件占用，导致 `openbiliclaw start` 默认 `8420` 启动失败；现在用户可改成 `18080` / `19090` / `13000` 等高位端口，并用 `openbiliclaw start --port <同一端口>` 启动后端即可继续使用插件。端口保存到 `chrome.storage.local`，不写入后端 `config.toml`。
+- 新增 `extension/src/shared/backend-endpoint.ts` + `extension/popup/popup-backend-config.js` 共用 helper。`apiUrl()` / `wsUrl()` / `getBackendBaseUrl()` 在每次调用时解析当前端口，所以保存新端口后无需重载插件即可生效；service worker 通过 `chrome.storage.onChanged` 收到端口变更后会立即关闭旧 `runtime-stream` WebSocket 并按新 origin 重连。
+- 同步收敛了之前散在 ~10 处的硬编码 `127.0.0.1:8420`：service worker、cookie 同步、xhs / dy / yt 任务派发、`_debug/log` 中继、抖音内容脚本现在都走 `apiUrl()` 统一解析。
+- `manifest.json` / `manifest.firefox.json` 的 `host_permissions` 从固定 `127.0.0.1:8420/*` 放宽到 `127.0.0.1/*` + `localhost/*`，否则浏览器会在 manifest 层直接 block 非 `8420` 端口的请求；其他平台的 `*.bilibili.com` / `*.xiaohongshu.com` / `*.douyin.com` / `*.youtube.com` 权限完全不变。
+- 浏览器插件版本提升到 v0.3.24，Chrome / Edge / Brave 走 `openbiliclaw-extension-v0.3.24.zip`，Firefox 140+ 走 `openbiliclaw-extension-v0.3.24-firefox.zip`。
+- 致谢 [@addtion99 #8](https://github.com/whiteguo233/OpenBiliClaw/pull/8) 提出端口可配置的需求并给出 popup 侧实现思路；本次以最小回归方式重做，扩展到 service-worker / dispatcher 全链路并补齐 manifest 权限。
+
+---
+
 ## v0.3.71: Firefox 扩展构建与打包补强（2026-05-16）
 
 - Eval-batch 负样本锚定：`discovery/engine.ContentDiscoveryEngine._evaluate_batch` 现在每批前通过新 `_get_negative_exemplars()` 从事件层拉最近 8 条 negative 标题（来自 `soul/negative_exemplars.py` 的 recency-weighted 去重列表，半衰期 14d，标题超过 80 字会带 `…` 截断），引擎内部有 5 分钟 / `latest_event_id` 双失效 TTL 缓存避免 back-to-back batch 重复查 SQLite；batch 评分缓存 key 也带最新 event id，确保新 quick-exit / explicit-negative 出现后不会继续复用旧分数。`build_batch_content_evaluation_prompt` 新增可选 `negative_examples` kwarg，在 `<source_context>` 与 `<content_batch>` 之间插入块，并在 `_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT` 永久加入两条规则（10 / 11）让 LLM 按话术 / 商业意图 / 标题结构层面 pattern-match 候选与示例，而不是关键词重叠。配合上文事件满意度信号，分类先跑、负样本池自动建立，evaluator 不需要等到 `satisfaction_filter_enabled` 打开就能开始压制"同款保姆级全攻略 / 同款月入过万钓贴"类候选。Cold-start 用户（没有 negative 分类事件）保持 user prompt 字节形态不变，cache prefix 不被打断。

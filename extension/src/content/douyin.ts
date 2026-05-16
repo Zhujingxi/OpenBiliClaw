@@ -24,14 +24,21 @@ import type {
   DouyinScope,
   DouyinSearchItem,
 } from "../main/dy-fetch-tap.js";
+import { apiUrl } from "../shared/backend-endpoint.ts";
 
 // TEMP DEBUG: relay content-script events to daemon (see debug-log.ts).
 function debugLog(event: string, data?: unknown): void {
-  void fetch("http://127.0.0.1:8420/api/sources/_debug/log", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ source: "dy-cs", event, data: data ?? null }),
-  }).catch(() => {});
+  void (async () => {
+    try {
+      await fetch(await apiUrl("/sources/_debug/log"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ source: "dy-cs", event, data: data ?? null }),
+      });
+    } catch {
+      // ignore — debug relay must not break the content script
+    }
+  })();
 }
 
 /**

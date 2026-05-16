@@ -49,22 +49,17 @@ import {
   handleCookieSyncAlarm,
   handleCookieSyncRuntimeEvent,
 } from "./cookie-sync.js";
+// Use .ts extension so node:test's --experimental-strip-types resolver
+// (which doesn't rewrite .js → .ts for source-only modules) can follow
+// the import when test files load these dispatchers directly. esbuild
+// bundles either extension, so production builds are unaffected.
+import { apiUrl, onBackendEndpointChange, wsUrl } from "../shared/backend-endpoint.ts";
 import type { BehaviorEvent } from "../shared/types.js";
 
 let eventBuffer: BehaviorEvent[] = [];
 const BUFFER_FLUSH_INTERVAL = 30_000;
 const BUFFER_MAX_SIZE = 50;
 const FLUSH_ALARM_NAME = "openbiliclaw-flush-events";
-const BACKEND_URL = "http://localhost:8420/api/events";
-const NOTIFICATION_POLL_URL = "http://127.0.0.1:8420/api/notifications/pending";
-const NOTIFICATION_ACK_URL = "http://127.0.0.1:8420/api/notifications/sent";
-const COGNITION_POLL_URL = "http://127.0.0.1:8420/api/cognition-updates/pending";
-const COGNITION_ACK_URL = "http://127.0.0.1:8420/api/cognition-updates/seen";
-const DELIGHT_ACK_URL = "http://127.0.0.1:8420/api/delight/sent";
-const XHS_OBSERVED_URLS_URL = "http://127.0.0.1:8420/api/sources/xhs/observed-urls";
-const XHS_TOKENS_URL = "http://127.0.0.1:8420/api/sources/xhs/tokens";
-const RUNTIME_STREAM_URL = "ws://127.0.0.1:8420/api/runtime-stream?client=background";
-const HEALTH_URL = "http://127.0.0.1:8420/api/health";
 // v0.3.22+: health probe before WS prevents extension-only installs
 // from flooding chrome://extensions "Errors" with browser-level
 // WebSocket connection failures. A failed fetch caught here is just a
@@ -88,7 +83,7 @@ type PendingCognitionUpdate = import("./notifications.js").PendingCognitionUpdat
 
 async function acknowledgeNotificationSent(bvid: string): Promise<void> {
   if (!bvid) return;
-  await fetch(NOTIFICATION_ACK_URL, {
+  await fetch(await apiUrl("/notifications/sent"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ bvid }),
@@ -96,7 +91,7 @@ async function acknowledgeNotificationSent(bvid: string): Promise<void> {
 }
 
 async function fetchPendingNotification(): Promise<PendingNotification | null> {
-  const response = await fetch(NOTIFICATION_POLL_URL, { method: "GET" });
+  const response = await fetch(await apiUrl("/notifications/pending"), { method: "GET" });
   if (!response.ok) {
     throw new Error(`pending notifications failed: ${response.status}`);
   }
@@ -105,7 +100,7 @@ async function fetchPendingNotification(): Promise<PendingNotification | null> {
 }
 
 async function fetchPendingCognitionUpdate(): Promise<PendingCognitionUpdate | null> {
-  const response = await fetch(COGNITION_POLL_URL, { method: "GET" });
+  const response = await fetch(await apiUrl("/cognition-updates/pending"), { method: "GET" });
   if (!response.ok) {
     throw new Error(`pending cognition updates failed: ${response.status}`);
   }
@@ -115,7 +110,7 @@ async function fetchPendingCognitionUpdate(): Promise<PendingCognitionUpdate | n
 
 async function acknowledgeCognitionUpdateSeen(id: string): Promise<void> {
   if (!id) return;
-  await fetch(COGNITION_ACK_URL, {
+  await fetch(await apiUrl("/cognition-updates/seen"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id }),
@@ -128,7 +123,7 @@ async function acknowledgeCognitionUpdateSeen(id: string): Promise<void> {
 
 async function acknowledgeDelightSent(bvid: string): Promise<void> {
   if (!bvid) return;
-  await fetch(DELIGHT_ACK_URL, {
+  await fetch(await apiUrl("/delight/sent"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ bvid }),
@@ -245,7 +240,10 @@ async function isBackendAlive(): Promise<boolean> {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), HEALTH_PROBE_TIMEOUT_MS);
     try {
-      const resp = await fetch(HEALTH_URL, { method: "GET", signal: ctrl.signal });
+      const resp = await fetch(await apiUrl("/health"), {
+        method: "GET",
+        signal: ctrl.signal,
+      });
       return resp.ok;
     } finally {
       clearTimeout(timer);
@@ -283,7 +281,8 @@ async function connectRuntimeStream(): Promise<void> {
     }
 
     try {
-      runtimeSocket = new WebSocket(RUNTIME_STREAM_URL);
+      const url = await wsUrl("/runtime-stream?client=background");
+      runtimeSocket = new WebSocket(url);
     } catch {
       setBackendBadge(false);
       scheduleWsReconnect();
@@ -341,7 +340,7 @@ async function flushEvents(): Promise<void> {
   eventBuffer = [];
 
   try {
-    const response = await fetch(BACKEND_URL, {
+    const response = await fetch(await apiUrl("/events"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ events }),
@@ -396,7 +395,7 @@ chrome.action.onClicked.addListener((tab) => {
 
 async function postXhsObservedUrls(payload: Record<string, unknown>): Promise<void> {
   try {
-    await fetch(XHS_OBSERVED_URLS_URL, {
+    await fetch(await apiUrl("/sources/xhs/observed-urls"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -411,7 +410,7 @@ async function postXhsTokens(
 ): Promise<void> {
   if (!payload?.pairs || payload.pairs.length === 0) return;
   try {
-    await fetch(XHS_TOKENS_URL, {
+    await fetch(await apiUrl("/sources/xhs/tokens"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -556,5 +555,27 @@ chrome.notifications.onClicked.addListener((notificationId) => {
 ensureFlushAlarm();
 void connectRuntimeStream();
 startCookieSync();
+
+// Popup writes a new backend port → chrome.storage.onChanged fires here.
+// Close the existing runtime-stream WS so the next connect attempt opens
+// against the new origin. All HTTP callers resolve apiUrl() at call time,
+// so no further bookkeeping is needed for polled requests.
+onBackendEndpointChange(() => {
+  try {
+    runtimeSocket?.close();
+  } catch {
+    // close() shouldn't throw, but we don't want a stray reset to crash
+    // the service worker.
+  }
+  runtimeSocket = null;
+  // Reset backoff so the new origin gets an immediate first attempt
+  // instead of inheriting the failed-against-old-port delay.
+  wsReconnectDelay = WS_RECONNECT_BASE_DELAY;
+  if (wsReconnectTimer !== null) {
+    clearTimeout(wsReconnectTimer);
+    wsReconnectTimer = null;
+  }
+  void connectRuntimeStream();
+});
 
 console.log("[OpenBiliClaw] Service worker initialized");

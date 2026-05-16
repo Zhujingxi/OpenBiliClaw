@@ -28,6 +28,7 @@ import type {
   DouyinScope,
   DouyinSearchItem,
 } from "../main/dy-fetch-tap.js";
+import { apiUrl } from "../shared/backend-endpoint.ts";
 // Cross-source mutex via globalThis. Mirror of the helper inlined
 // in xhs-task-dispatcher; both dispatchers coordinate by writing to
 // the same field on globalThis. See dispatcher-mutex.ts for the
@@ -62,11 +63,17 @@ function releaseDispatcherMutex(label: string): void {
 
 // TEMP DEBUG: extension-side log relay → daemon (see debug-log.ts).
 function debugLog(event: string, data?: unknown): void {
-  void fetch("http://127.0.0.1:8420/api/sources/_debug/log", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ source: "dy", event, data: data ?? null }),
-  }).catch(() => {});
+  void (async () => {
+    try {
+      await fetch(await apiUrl("/sources/_debug/log"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ source: "dy", event, data: data ?? null }),
+      });
+    } catch {
+      // ignore
+    }
+  })();
 }
 
 // buildScopeUrl is loaded lazily via dynamic import inside the
@@ -85,8 +92,6 @@ async function loadBuildScopeUrl(): Promise<
   return mod.buildScopeUrl;
 }
 
-const NEXT_TASK_URL = "http://127.0.0.1:8420/api/sources/dy/next-task";
-const TASK_RESULT_URL = "http://127.0.0.1:8420/api/sources/dy/task-result";
 const DEFAULT_POLL_INTERVAL_MS = 60_000;
 const TASK_TIMEOUT_MS = 30_000;
 const SEARCH_TASK_TIMEOUT_MS = 180_000;
@@ -317,7 +322,7 @@ export function shouldOpenDyTaskActive(task: DyTask): boolean {
 
 async function fetchNextTask(): Promise<DyTask | null> {
   try {
-    const resp = await fetch(NEXT_TASK_URL);
+    const resp = await fetch(await apiUrl("/sources/dy/next-task"));
     if (resp.status === 204) return null; // no pending task
     if (!resp.ok) return null;
     const payload: unknown = await resp.json();
@@ -329,7 +334,7 @@ async function fetchNextTask(): Promise<DyTask | null> {
 
 async function postTaskResult(result: DyTaskResult): Promise<void> {
   try {
-    await fetch(TASK_RESULT_URL, {
+    await fetch(await apiUrl("/sources/dy/task-result"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(result),
