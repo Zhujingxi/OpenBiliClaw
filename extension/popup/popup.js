@@ -45,6 +45,7 @@ import {
   fetchRuntimeStatus,
   fetchSourceShareSuggestion,
   markDelightSent,
+  readCachedConfigSnapshot,
   reportRecommendationClick,
   reshuffleRecommendations,
   refreshRecommendations,
@@ -3883,6 +3884,9 @@ function bindSettings() {
   const issuesContainer = document.getElementById("settingsIssues");
   const providerSelect = document.getElementById("cfgLlmProvider");
   const backendPortInput = document.getElementById("cfgBackendPort");
+  const bannerOffline = document.getElementById("cfgBannerOffline");
+  const bannerDegraded = document.getElementById("cfgBannerDegraded");
+  const bannerNoCache = document.getElementById("cfgBannerNoCache");
 
   if (!gearBtn || !overlay || !backBtn || !saveBtn) return;
 
@@ -3964,6 +3968,53 @@ function bindSettings() {
     setTimeout(() => { toast.hidden = true; }, 4000);
   }
 
+  function setSaveButtonMode(mode = "") {
+    saveBtn.dataset.tone = mode === "warning" ? "warning" : "";
+    saveBtn.textContent = mode === "degraded" ? "保存并提示重启" : "保存配置";
+  }
+
+  function hideConfigBanners() {
+    for (const banner of [bannerOffline, bannerDegraded, bannerNoCache]) {
+      if (banner instanceof HTMLElement) {
+        banner.hidden = true;
+        banner.textContent = "";
+      }
+    }
+  }
+
+  function showConfigBanner(banner, message, tone = "warning") {
+    if (!(banner instanceof HTMLElement)) return;
+    banner.textContent = message;
+    banner.dataset.tone = tone;
+    banner.hidden = false;
+  }
+
+  function formatCachedAt(cachedAt) {
+    if (!cachedAt) return "未知时间";
+    const parsed = new Date(cachedAt);
+    if (Number.isNaN(parsed.getTime())) return String(cachedAt);
+    return parsed.toLocaleString("zh-CN", { hour12: false });
+  }
+
+  function renderDegradedBanner(cfg) {
+    if (!cfg?.degraded) {
+      if (bannerDegraded instanceof HTMLElement) bannerDegraded.hidden = true;
+      return;
+    }
+    const issues = Array.isArray(cfg.issues) ? cfg.issues : [];
+    const issueText = issues
+      .map((issue) => `${issue.field || "config"}: ${issue.message || ""}`.trim())
+      .filter(Boolean)
+      .slice(0, 3)
+      .join("；");
+    showConfigBanner(
+      bannerDegraded,
+      `后端处于降级模式，保存修复后需要 restart daemon。${issueText}`,
+      "warning",
+    );
+    setSaveButtonMode("degraded");
+  }
+
   function renderIssues(issues) {
     issuesContainer.innerHTML = "";
     if (!Array.isArray(issues) || issues.length === 0) return;
@@ -3979,6 +4030,7 @@ function bindSettings() {
     if (!Array.isArray(err.details?.config?.issues)) return false;
     applyRuntimeConfig(err.details.config);
     renderIssues(err.details.config.issues);
+    renderDegradedBanner(err.details.config);
     showToast(err.details.message || "配置未保存，请先修正高亮问题。", "error");
     return true;
   }
@@ -4133,6 +4185,7 @@ function bindSettings() {
     setVal("cfgLogUnmanagedMaxAge", cfg.logging?.unmanaged_max_age_days);
 
     renderIssues(cfg.issues);
+    renderDegradedBanner(cfg);
   }
 
   function collectForm() {
@@ -4273,6 +4326,8 @@ function bindSettings() {
     overlay.hidden = false;
     toast.hidden = true;
     issuesContainer.innerHTML = "";
+    hideConfigBanners();
+    setSaveButtonMode("");
     // Backend port is stored in chrome.storage, not on the backend, so it
     // populates even when the backend is unreachable — which is the whole
     // point of changing it.
@@ -4281,6 +4336,23 @@ function bindSettings() {
       const cfg = await fetchConfig();
       populateForm(cfg);
     } catch {
+      const cached = await readCachedConfigSnapshot();
+      if (cached?.config) {
+        populateForm(cached.config);
+        showConfigBanner(
+          bannerOffline,
+          `后端不可达，已使用 ${formatCachedAt(cached.cached_at)} 的缓存配置。`,
+          "warning",
+        );
+        setSaveButtonMode("warning");
+        showToast("后端不可达，当前显示缓存配置。", "error");
+        return;
+      }
+      showConfigBanner(
+        bannerNoCache,
+        "后端不可达且没有缓存配置。请先启动 daemon 后再打开设置。",
+        "error",
+      );
       showToast("无法加载配置，请确认后端已启动。", "error");
     }
   });
@@ -4352,8 +4424,9 @@ function bindSettings() {
         if (result.config) {
           applyRuntimeConfig(result.config);
           renderIssues(result.config.issues);
+          renderDegradedBanner(result.config);
         }
-        const tone = result.reloaded ? "success" : "warning";
+        const tone = result.restart_required ? "warning" : result.reloaded ? "success" : "warning";
         showToast(result.message || "配置已保存。", tone);
       } catch (err) {
         if (renderStructuredConfigError(err)) {
@@ -4385,7 +4458,7 @@ function bindSettings() {
       }
     } finally {
       saveBtn.disabled = false;
-      saveBtn.textContent = "保存配置";
+      setSaveButtonMode(state.runtimeConfig?.degraded ? "degraded" : "");
     }
   });
 }

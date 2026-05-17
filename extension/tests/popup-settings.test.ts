@@ -122,3 +122,20 @@ test("settings save renders structured config validation errors inline", () => {
   assert.match(structuredErrorBlock, /showToast\([^)]*,\s*"error"\)/);
   assert.match(saveBlock, /renderStructuredConfigError\(err\)/);
 });
+
+test("settings page wires offline cache and degraded-mode banners", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  for (const id of ["cfgBannerOffline", "cfgBannerDegraded", "cfgBannerNoCache"]) {
+    assert.match(popupHtml, new RegExp(`id="${id}"`), `${id} should exist`);
+    assert.match(popupJs, new RegExp(`"${id}"`), `${id} should be wired in popup.js`);
+  }
+
+  assert.match(popupJs, /readCachedConfigSnapshot/);
+  assert.match(popupJs, /cached_at/);
+  assert.match(popupJs, /后端不可达且没有缓存配置/);
+  assert.match(popupJs, /renderDegradedBanner\(cfg\)/);
+  assert.match(popupJs, /restart_required/);
+  assert.match(popupJs, /保存并提示重启/);
+});

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   appendRecommendations,
+  cacheConfigSnapshot,
   fetchPendingDelight,
   fetchActivityFeed,
   fetchChatTurn,
@@ -10,6 +11,7 @@ import {
   fetchConfig,
   fetchProfileSummary,
   fetchSourceShareSuggestion,
+  readCachedConfigSnapshot,
   reshuffleRecommendations,
   startChatTurn,
   updateConfig,
@@ -278,6 +280,63 @@ test("fetchConfig sends GET to /config with reveal_keys", async () => {
   assert.equal(result.llm.embedding.provider, "gemini");
   assert.equal(result.llm.embedding.model, "gemini-embedding-001");
   assert.equal(result.llm.embedding.similarity_threshold, 0.85);
+});
+
+test("fetchConfig caches successful config snapshots in chrome storage", async () => {
+  const originalChrome = (globalThis as { chrome?: unknown }).chrome;
+  const writes: Array<Record<string, unknown>> = [];
+  const storage: Record<string, unknown> = {};
+  (globalThis as { chrome?: unknown }).chrome = {
+    storage: {
+      local: {
+        get(key: string, callback: (items: Record<string, unknown>) => void) {
+          callback({ [key]: storage[key] });
+        },
+        set(items: Record<string, unknown>, callback: () => void) {
+          writes.push(items);
+          Object.assign(storage, items);
+          callback();
+        },
+      },
+    },
+  };
+  globalThis.fetch = async () => ({
+    ok: true,
+    async json() {
+      return {
+        language: "zh",
+        llm: {
+          default_provider: "openai",
+          openai: { api_key: "sk-test" },
+        },
+      };
+    },
+  }) as Response;
+
+  try {
+    const result = await fetchConfig();
+    const cached = await readCachedConfigSnapshot();
+
+    assert.equal(result.llm.default_provider, "openai");
+    assert.equal(writes.length, 1);
+    assert.ok(writes[0]["openbiliclaw.config_cache"]);
+    assert.equal(cached?.config.llm.openai.api_key, "sk-test");
+    assert.match(cached?.cached_at ?? "", /^\d{4}-\d{2}-\d{2}T/);
+  } finally {
+    (globalThis as { chrome?: unknown }).chrome = originalChrome;
+  }
+});
+
+test("cacheConfigSnapshot no-ops when chrome storage is unavailable", async () => {
+  const originalChrome = (globalThis as { chrome?: unknown }).chrome;
+  delete (globalThis as { chrome?: unknown }).chrome;
+
+  try {
+    const snapshot = await cacheConfigSnapshot({ language: "zh" });
+    assert.equal(snapshot, null);
+  } finally {
+    (globalThis as { chrome?: unknown }).chrome = originalChrome;
+  }
 });
 
 test("fetchSourceShareSuggestion loads source-share recommendation", async () => {

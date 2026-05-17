@@ -1,6 +1,8 @@
 import { normalizeRecommendation } from "./popup-helpers.js";
 import { getBackendBaseUrl } from "./popup-backend-config.js";
 
+export const CONFIG_CACHE_KEY = "openbiliclaw.config_cache";
+
 async function requestJson(path, options = {}) {
   const backendUrl = await getBackendBaseUrl();
   const response = await fetch(`${backendUrl}${path}`, options);
@@ -17,6 +19,59 @@ async function requestJson(path, options = {}) {
     throw error;
   }
   return response.json();
+}
+
+function getChromeStorageLocal() {
+  return globalThis.chrome?.storage?.local || null;
+}
+
+function storageGet(key) {
+  const local = getChromeStorageLocal();
+  if (!local?.get) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    try {
+      const maybePromise = local.get(key, (items) => resolve(items || {}));
+      if (maybePromise?.then) {
+        maybePromise.then((items) => resolve(items || {})).catch(() => resolve(null));
+      }
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+function storageSet(items) {
+  const local = getChromeStorageLocal();
+  if (!local?.set) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    try {
+      const maybePromise = local.set(items, () => resolve(true));
+      if (maybePromise?.then) {
+        maybePromise.then(() => resolve(true)).catch(() => resolve(false));
+      }
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+export async function cacheConfigSnapshot(config) {
+  if (!config || !getChromeStorageLocal()) return null;
+  const snapshot = {
+    config,
+    cached_at: new Date().toISOString(),
+  };
+  const ok = await storageSet({ [CONFIG_CACHE_KEY]: snapshot });
+  return ok ? snapshot : null;
+}
+
+export async function readCachedConfigSnapshot() {
+  const items = await storageGet(CONFIG_CACHE_KEY);
+  const snapshot = items?.[CONFIG_CACHE_KEY];
+  if (!snapshot || typeof snapshot !== "object" || !snapshot.config) {
+    return null;
+  }
+  return snapshot;
 }
 
 export async function checkBackendStatus() {
@@ -243,7 +298,9 @@ export async function respondToDelight(bvid, responseType, title = "", message =
 }
 
 export async function fetchConfig() {
-  return requestJson("/config?reveal_keys=true", { method: "GET" });
+  const config = await requestJson("/config?reveal_keys=true", { method: "GET" });
+  await cacheConfigSnapshot(config);
+  return config;
 }
 
 export async function fetchSourceShareSuggestion(overrides = null) {
