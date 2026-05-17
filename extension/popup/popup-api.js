@@ -5,7 +5,16 @@ async function requestJson(path, options = {}) {
   const backendUrl = await getBackendBaseUrl();
   const response = await fetch(`${backendUrl}${path}`, options);
   if (!response.ok) {
-    throw new Error(`${path} request failed: ${response.status}`);
+    let details = null;
+    try {
+      details = await response.json();
+    } catch {
+      details = null;
+    }
+    const error = new Error(`${path} request failed: ${response.status}`);
+    error.status = response.status;
+    error.details = details;
+    throw error;
   }
   return response.json();
 }

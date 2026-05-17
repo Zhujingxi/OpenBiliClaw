@@ -105,3 +105,20 @@ test("source-share suggestion button uses settings-scope helpers and form switch
   assert.match(suggestionBlock, /youtube:\s*checked\("cfgYoutubeEnabled"\)/);
   assert.match(suggestionBlock, /configured_shares:\s*\{/);
 });
+
+test("settings save renders structured config validation errors inline", () => {
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const bindSettingsBlock =
+    popupJs.match(/function bindSettings\(\) \{[\s\S]*?\nasync function initializePopup/)?.[0] ?? "";
+  const saveBlock =
+    popupJs.match(/saveBtn\.addEventListener\("click"[\s\S]*?\n  \}\);/)?.[0] ?? "";
+  const structuredErrorBlock =
+    bindSettingsBlock.match(/function renderStructuredConfigError[\s\S]*?\n  \}/)?.[0] ?? "";
+
+  assert.match(structuredErrorBlock, /err\.details\?\.config\?\.issues/);
+  assert.match(structuredErrorBlock, /applyRuntimeConfig\(err\.details\.config\)/);
+  assert.match(structuredErrorBlock, /renderIssues\(err\.details\.config\.issues\)/);
+  assert.match(structuredErrorBlock, /配置未保存，请先修正高亮问题。/);
+  assert.match(structuredErrorBlock, /showToast\([^)]*,\s*"error"\)/);
+  assert.match(saveBlock, /renderStructuredConfigError\(err\)/);
+});

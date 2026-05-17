@@ -408,6 +408,41 @@ test("updateConfig sends PUT with embedding config", async () => {
   assert.equal(result.reloaded, true);
 });
 
+test("updateConfig preserves structured details from validation errors", async () => {
+  const details = {
+    ok: false,
+    reloaded: false,
+    rollback_applied: false,
+    config: {
+      issues: [
+        {
+          field: "llm",
+          message: "LLM registry would fail to build",
+          severity: "blocking",
+        },
+      ],
+    },
+    message: "配置校验失败，未写入 config.toml。",
+  };
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 400,
+    async json() {
+      return details;
+    },
+  });
+
+  await assert.rejects(
+    () => updateConfig({ reset_fields: ["llm.openai.api_key"] }),
+    (error: any) => {
+      assert.equal(error.message, "/config request failed: 400");
+      assert.equal(error.status, 400);
+      assert.deepEqual(error.details, details);
+      return true;
+    },
+  );
+});
+
 test("startChatTurn posts durable chat turn metadata", async () => {
   const calls: Array<{ url: string; options: any }> = [];
   globalThis.fetch = async (url: any, options: any) => {

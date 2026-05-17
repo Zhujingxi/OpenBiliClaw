@@ -3975,6 +3975,14 @@ function bindSettings() {
     }
   }
 
+  function renderStructuredConfigError(err) {
+    if (!Array.isArray(err.details?.config?.issues)) return false;
+    applyRuntimeConfig(err.details.config);
+    renderIssues(err.details.config.issues);
+    showToast(err.details.message || "配置未保存，请先修正高亮问题。", "error");
+    return true;
+  }
+
   const setVal = (id, val) => {
     const el = document.getElementById(id);
     if (el) el.value = val ?? "";
@@ -4348,6 +4356,9 @@ function bindSettings() {
         const tone = result.reloaded ? "success" : "warning";
         showToast(result.message || "配置已保存。", tone);
       } catch (err) {
+        if (renderStructuredConfigError(err)) {
+          return;
+        }
         if (portChanged) {
           showToast(
             `端口已切换为 ${newPort}，但保存其余配置失败。请用 openbiliclaw start --port ${newPort} 启动后端后重试。`,
@@ -4369,7 +4380,9 @@ function bindSettings() {
         setStatus(state.online);
       }
     } catch (err) {
-      showToast(`保存失败: ${err.message}`, "error");
+      if (!renderStructuredConfigError(err)) {
+        showToast(`保存失败: ${err.message}`, "error");
+      }
     } finally {
       saveBtn.disabled = false;
       saveBtn.textContent = "保存配置";
