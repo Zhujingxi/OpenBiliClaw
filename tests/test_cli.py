@@ -166,6 +166,36 @@ def test_config_show_displays_registered_providers(
     assert "claude" in result.stdout
 
 
+def test_config_show_displays_runtime_pause_fields(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    cfg = config_module.Config()
+    cfg.scheduler.enabled = False
+    cfg.scheduler.pause_on_extension_disconnect = True
+    cfg.scheduler.extension_disconnect_grace_seconds = 45
+
+    class FakeRegistry:
+        default_provider = "openai"
+        available_providers = ["openai"]
+
+    monkeypatch.setattr(
+        config_module,
+        "load_config_with_diagnostics",
+        lambda: (cfg, config_module.ConfigDiagnostics()),
+        raising=False,
+    )
+    monkeypatch.setattr(cli_module, "_build_registry", lambda: FakeRegistry())
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["config-show"])
+
+    assert result.exit_code == 0
+    assert "后台 LLM 工作" in result.stdout
+    assert "暂停（省钱模式）" in result.stdout
+    assert "浏览器断开后暂停" in result.stdout
+    assert "开启（宽限 45s）" in result.stdout
+
+
 def test_health_check_reports_provider_statuses(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner
 ) -> None:
@@ -400,6 +430,31 @@ def test_start_uses_local_api_defaults(monkeypatch: pytest.MonkeyPatch, runner: 
     assert called == {"host": "127.0.0.1", "port": 8420}
 
 
+def test_start_warns_when_pause_on_disconnect_requires_extension_presence(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    called: dict[str, object] = {}
+    cfg = config_module.Config()
+    cfg.scheduler.pause_on_extension_disconnect = True
+
+    def fake_run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
+        called["host"] = host
+        called["port"] = port
+
+    monkeypatch.setattr(config_module, "load_config", lambda: cfg, raising=False)
+    monkeypatch.setattr(cli_module, "_ensure_runtime_database_healthy", lambda: None)
+    monkeypatch.setattr(cli_module, "_maybe_create_runtime_database_backup", lambda: None)
+    monkeypatch.setattr(cli_module, "_run_api_server", fake_run_api_server, raising=False)
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["start"])
+
+    assert result.exit_code == 0
+    assert "WARN extension presence required" in result.stdout
+    assert "background LLM work after grace period" in result.stdout
+    assert called == {"host": "127.0.0.1", "port": 8420}
+
+
 def test_start_refuses_unhealthy_database(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner
 ) -> None:
@@ -630,6 +685,29 @@ def test_serve_api_uses_container_defaults(
     assert result.exit_code == 0
     assert "容器 API 服务" in result.stdout
     assert "0.0.0.0:8420" in result.stdout
+    assert called == {"host": "0.0.0.0", "port": 8420}
+
+
+def test_serve_api_warns_when_pause_on_disconnect_requires_extension_presence(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    called: dict[str, object] = {}
+    cfg = config_module.Config()
+    cfg.scheduler.pause_on_extension_disconnect = True
+
+    def fake_run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
+        called["host"] = host
+        called["port"] = port
+
+    monkeypatch.setattr(config_module, "load_config", lambda: cfg, raising=False)
+    monkeypatch.setattr(cli_module, "_run_api_server", fake_run_api_server, raising=False)
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["serve-api"])
+
+    assert result.exit_code == 0
+    assert "WARN extension presence required" in result.stdout
+    assert "background LLM work after grace period" in result.stdout
     assert called == {"host": "0.0.0.0", "port": 8420}
 
 

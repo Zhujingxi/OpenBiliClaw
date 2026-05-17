@@ -4,6 +4,15 @@
 
 ---
 
+## v0.3.73: Popup 运行时省钱开关（2026-05-17）
+
+- Popup 顶部新增两个运行时开关：`暂停后台 LLM` 直接写入 `scheduler.enabled=false`，`关浏览器后暂停后台` 写入 `scheduler.pause_on_extension_disconnect=true`；设置页同步暴露后者。后端 `/api/config`、`config-show`、`start` / `serve-api` WARN 和 `config.example.toml` 都同步展示新字段。
+- 后端新增 `PresenceTracker` 与共享 `background_llm_work_allowed()` gate：`scheduler.enabled` 是后台 LLM / embedding 总开关，`pause_on_extension_disconnect` 开启后还要求浏览器插件 `runtime-stream` 在线或处于断开宽限窗口。gate 覆盖 refresh、pool precompute、soul pipeline、xhs/dy producer、proactive push、AccountSyncService、startup one-shot 和 OpenClaw direct bootstrap；手动 CLI / API 操作不被隐式拦截。
+- `/api/runtime-stream` 增加 reader / receive-side disconnect detector，浏览器 idle disconnect 后会正确触发 presence decrement，避免后端误以为插件一直在线；最后一个连接断开后按 `extension_disconnect_grace_seconds` 进入宽限。
+- 文档同步更新 `docs/modules/config.md`、`docs/modules/cli.md`、`docs/modules/extension.md`、`docs/modules/integrations.md`、`docs/architecture.md`、`docs/spec.md`、README / README_EN 和配置样例，明确 pause gate 的范围是 daemon-owned background LLM / embedding work。
+
+---
+
 ## v0.3.72: 浏览器插件后端端口可配置（2026-05-16）
 
 - 负反馈消费链路收敛：`satisfaction_filter_enabled` 默认开启后只过滤 `quick_exit` 等被动 negative 事件，显式 `dislike` / `thumbs_down` 会保留给 `PreferenceAnalyzer` 作为 `disliked_topics` / 避让证据且禁止提取为正向兴趣；discovery 共享 `profile_summary`、推荐画像摘要和单条 / 批量推荐表达 prompt 现在都会带 `disliked_topics`，让 search / explore / trending query 生成、batch 内容评估和推荐文案都能避开长期雷点；awareness prompt 可生成“最近开始避开 X”的保守观察；B 站 content script 新增“不感兴趣 / 不喜欢 / 减少此类推荐”识别并规范化为 `feedback_type=dislike` 强信号。

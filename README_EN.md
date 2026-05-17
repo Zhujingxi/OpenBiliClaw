@@ -17,12 +17,12 @@
 
 ---
 
-## 📌 v0.3.72 Highlights (2026-05-16)
+## 📌 v0.3.73 Highlights (2026-05-17)
 
-- **🧭 Fuller negative-feedback and profile context** — passive quick-exit clicks are filtered by default, while explicit `dislike` / `thumbs_down` feedback still feeds `disliked_topics` and avoidance evidence; discovery and candidate evaluation now also see cognitive style, values, current phase, MBTI, recent awareness, source mix, and long-term avoidances.
-- **🔌 Configurable extension backend port** — the settings page now has a "backend port" field (default `8420`, complete integers only, `1-65535`) for Windows Hyper-V / WSL / Docker setups where the default local port is already reserved. Pick a high port such as `18080` or `19090`, then start the backend with `openbiliclaw start --port <same port>`. Thanks to [@addtion99](https://github.com/addtion99) for proposing the need and implementation idea in [#8](https://github.com/whiteguo233/OpenBiliClaw/pull/8).
-- **🧩 One backend endpoint path across the extension** — popup requests, service worker requests, cookie sync, XHS / Douyin / YouTube task dispatchers, and debug relays all resolve the current port through shared helpers; local manifest permissions now cover `127.0.0.1/*` and `localhost/*`.
-- **🦊 Firefox release package included** — `extension-v*` releases now upload both the Chromium zip and `openbiliclaw-extension-v*-firefox.zip`, so Firefox 140+ users no longer need to package from source.
+- **💸 Popup runtime cost switches** — pause daemon-owned background LLM work from the top of the popup, or pause it automatically after the browser closes; automatic refresh, precompute, account sync, speculation, and proactive push are gated, while explicit CLI / API actions still run.
+- **🧷 Runtime-stream presence no longer gets stuck** — `/api/runtime-stream` now has a receive-side disconnect detector, so browser idle disconnects enter the grace window instead of leaving extension presence permanently online.
+- **⚙️ Config / API / CLI visibility** — `config.toml`, `/api/config`, the popup settings page, `config-show`, and `start` / `serve-api` WARN output all expose `pause_on_extension_disconnect` and the grace seconds.
+- **🔌 Configurable backend port stays supported** — popup requests, service worker requests, cookie sync, XHS / Douyin / YouTube task dispatchers, and debug relays still resolve the current port through shared helpers.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -341,19 +341,19 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 ```
 ┌─────────────────────────────────────────────────────┐
 │                   Chrome Extension                   │
-│      (Behavior · Dwell Satisfaction · Recs · Chat · Cookies)│
-│      (XHS/DY/YT tasks · init-profile bridge)          │
+│      (Behavior · Recs · Chat · Runtime Toggles)       │
+│      (Cookies · XHS/DY/YT tasks · init bridge)        │
 └────────────────────────┬────────────────────────────┘
-                         │ REST API / WebSocket cookie request
+                         │ REST API / WebSocket (presence + cookies)
 ┌────────────────────────▼────────────────────────────┐
 │                 Agent Orchestration                   │
-│            (Skill System · Dialogue Mgmt)            │
+│            (Skills · Dialogue · Runtime Gate)       │
 ├─────────┬──────────┬───────────┬────────────────────┤
 │  Soul   │ Memory   │ Discovery │  Recommendation    │
 │  Engine │ System   │  Engine   │     Engine          │
 │(Sat.filter)│(5-Layer)│(Neg.anchor)│  (Expression)   │
 ├─────────┴──────────┴───────────┴────────────────────┤
-│ LLM Adapters · Bilibili API · Extension Proxy · SQLite│
+│  LLM · Bilibili API · Extension Proxy · Runtime Gate  │
 │ SQLite: events(inferred_satisfaction) · content_cache   │
 │         recommendations · chat_turns                    │
 └─────────────────────────────────────────────────────┘
@@ -432,7 +432,7 @@ OpenBiliClaw/
 
 ## 📜 Release History
 
-Latest: **v0.3.72: configurable browser-extension backend port (2026-05-16)**. The top highlight callout keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md), with packages on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases).
+Latest: **v0.3.73: popup runtime cost switches (2026-05-17)**. The top highlight callout keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md), with packages on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases).
 
 ## 🗺️ Roadmap
 

@@ -137,6 +137,10 @@ _DEFAULT_XHS_BOOTSTRAP_WAIT_SECONDS = 180.0
 _DEFAULT_DY_BOOTSTRAP_WAIT_SECONDS = 180.0
 _DEFAULT_YT_BOOTSTRAP_WAIT_SECONDS = 240.0
 _DEFAULT_XHS_BOOTSTRAP_DEDUPE_HOURS = 6.0
+_EXTENSION_PRESENCE_REQUIRED_WARNING = (
+    "WARN extension presence required; backend will pause background LLM work "
+    "after grace period if no extension client connects"
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -168,6 +172,28 @@ def _print_key_value_table(title: str, rows: list[tuple[str, str]]) -> None:
     for key, value in rows:
         table.add_row(key, value)
     console.print(table)
+
+
+def _format_pause_on_disconnect_status(*, enabled: bool, grace_seconds: int) -> str:
+    if not enabled:
+        return "关闭"
+    return f"开启（宽限 {grace_seconds}s）"
+
+
+def _warn_if_pause_on_disconnect_requires_presence() -> None:
+    """Print a startup warning when background work depends on extension presence."""
+    try:
+        from openbiliclaw.config import load_config
+
+        cfg = load_config()
+    except Exception:
+        return
+
+    if cfg.scheduler.pause_on_extension_disconnect:
+        console.print(
+            f"[yellow]{_EXTENSION_PRESENCE_REQUIRED_WARNING}[/yellow]",
+            soft_wrap=True,
+        )
 
 
 def _print_section_title(title: str) -> None:
@@ -2976,6 +3002,7 @@ def start(
         "API 服务",
         f"正在启动本地后端，当前监听 {host}:{port}。",
     )
+    _warn_if_pause_on_disconnect_requires_presence()
     _maybe_create_runtime_database_backup()
     _run_api_server(host=host, port=port)
 
@@ -2992,6 +3019,7 @@ def serve_api(
         "API 服务",
         f"正在启动容器友好的后端入口，当前监听 {host}:{port}。",
     )
+    _warn_if_pause_on_disconnect_requires_presence()
     _run_api_server(host=host, port=port)
 
 
@@ -5331,6 +5359,14 @@ def config_show() -> None:
         ("LLM", cfg.llm.default_provider),
         ("B站认证", cfg.bilibili.auth_method),
         ("定时任务", "开启" if cfg.scheduler.enabled else "关闭"),
+        ("后台 LLM 工作", "开启" if cfg.scheduler.enabled else "暂停（省钱模式）"),
+        (
+            "浏览器断开后暂停",
+            _format_pause_on_disconnect_status(
+                enabled=cfg.scheduler.pause_on_extension_disconnect,
+                grace_seconds=cfg.scheduler.extension_disconnect_grace_seconds,
+            ),
+        ),
         ("数据目录", str(cfg.data_path)),
     ]
     if diagnostics.config_path:

@@ -569,10 +569,16 @@ def _normalize_pool_source_shares(value: object) -> dict[str, int]:
 
 def _normalize_extension_disconnect_grace(value: object) -> int:
     """Normalize extension disconnect grace seconds into a positive int."""
-    try:
+    if isinstance(value, int | float):
         grace = int(value)
-    except (TypeError, ValueError):
+    elif isinstance(value, str):
+        try:
+            grace = int(value.strip())
+        except ValueError:
+            return _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS
+    else:
         return _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS
+
     if grace <= 0:
         return _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS
     return grace

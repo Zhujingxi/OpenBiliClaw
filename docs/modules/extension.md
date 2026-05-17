@@ -34,6 +34,7 @@
 | 抖音首页推荐流任务 | ✅ | 后端可派发 `feed` 任务；插件用后台 tab 在已登录抖音首页通过 MAIN-world feed bridge 签名 `/aweme/v1/web/tab/feed/`，回传 `dy_feed` 候选供 `dy-plugin-feed` discovery 使用 |
 | YouTube 初始化画像任务 | ✅ | 后端可派发 `bootstrap_profile` 任务；插件依次访问 `/feed/history`、`/feed/channels`、`/playlist?list=LL`，从 DOM 读取观看历史 / 订阅 / 点赞并用 `partial` 分批回传给 `/api/sources/yt/task-result` |
 | 后端端口可配置 | ✅ | 设置页「后端端口」字段仅接受 `1-65535` 的完整十进制整数并保存到 `chrome.storage.local`，popup / service worker / 任务派发 / cookie 同步 / 调试中继全部经 `apiUrl()`/`wsUrl()` 解析当前端口；端口变更后 service worker 通过 `chrome.storage.onChanged` 立即重连 `runtime-stream`，无需重载插件 |
+| 后台 LLM 暂停开关 | ✅ | popup 顶部提供「暂停后台 LLM」和「关浏览器后暂停后台」两个运行时开关；设置页同步暴露 `pause_on_extension_disconnect`。后端通过 `/api/runtime-stream` presence 判断插件是否在线，浏览器 idle disconnect 会被 receive-side detector 及时清掉 |
 | B 站负反馈动作采集 | ✅ | B 站 content script 会把“不感兴趣 / 不喜欢 / 减少此类推荐 / dislike”等控件识别为 `dislike` 动作，并经 `normalizeActionSignal()` 规范化为 `feedback` 事件，metadata 带 `feedback_type=dislike` 与 `reaction=thumbs_down`；后台 buffer 把 `feedback` 视为强信号即时 flush |
 
 ## 目录结构
@@ -117,7 +118,7 @@ extension/
 - flush 成功后检查一次待发通知
 - 缓冲为空时也会周期轮询高置信通知
 - 每次 service worker 冷启动都会启动 B 站和抖音 Cookie 同步；如果 localhost 后端暂时不可用，会通过 `chrome.alarms` 以 1 分钟间隔重试，成功同步后恢复为 60 分钟刷新
-- 以 `client=background` 连接 `/api/runtime-stream` 后，如果后端发现本地缺少 B 站 Cookie，会收到 `bilibili_cookie_sync_requested`；如果 `[sources.douyin].enabled=true` 且缺少抖音 Cookie，会收到 `douyin_cookie_sync_requested`。扩展收到后会立即执行对应 Cookie POST
+- 以 `client=background` 连接 `/api/runtime-stream` 后，如果后端发现本地缺少 B 站 Cookie，会收到 `bilibili_cookie_sync_requested`；如果 `[sources.douyin].enabled=true` 且缺少抖音 Cookie，会收到 `douyin_cookie_sync_requested`。扩展收到后会立即执行对应 Cookie POST。后端也把这条 WebSocket 作为 extension presence 信号：连接建立时允许后台 LLM 工作，最后一个连接断开后进入 `extension_disconnect_grace_seconds` 宽限；服务端 reader 会主动 `receive()` 检测 idle disconnect，避免浏览器断开后 presence 卡住
 - 连接 `/api/runtime-stream` 之前会先 HTTP `GET /api/health`（2 秒超时）做一次健康探针，仅在后端可达时再 `new WebSocket(...)`。这样 fresh-install 用户先装扩展、后启动后端时，`chrome://extensions` 不会被浏览器层 WebSocket 失败计入「错误」徽标；健康探针失败仍走原有的 5s → 60s 指数退避兜底重连
 - 后端不可达时会在扩展工具栏图标上打一个浅灰 `!` badge 作为可视提示，WebSocket 首次连上后自动清除；popup 内仍会显示「后端还没开张，先运行 `openbiliclaw start`」
 - Cookie 监听器幂等注册，避免 onInstalled / onStartup / 冷启动重复挂载导致同一次登录触发多次 POST
@@ -241,6 +242,7 @@ CLI 入口：
 
 - 后端连接状态检查
 - 设置页「后端端口」（默认 `8420`，仅接受 `1-65535` 的完整十进制整数）由 `popup-backend-config.js` 写入 `chrome.storage.local`；popup 自身的 `/api/...` HTTP 请求与 `runtime-stream` WebSocket，以及 service worker / cookie 同步 / 各源任务派发都通过 `apiUrl()` / `wsUrl()` 在调用时解析当前端口，service worker 通过 `chrome.storage.onChanged` 同步收到变更并立即重连。端口不会写入后端 `config.toml`，需要用户自行 `openbiliclaw start --port <同一端口>` 启动后端
+- popup 顶部的运行时开关会立即调用 `/api/config`：`暂停后台 LLM` 写入 `scheduler.enabled=false`（省钱模式），`关浏览器后暂停后台` 写入 `scheduler.pause_on_extension_disconnect=true`；设置页的同名复选框与顶部开关共用后端返回的配置状态
 - 从 `/api/recommendations` 拉取推荐列表
 - 设置页会通过 `/api/config` 读取并保存后端配置，保存后请求后端热重载；当前覆盖 LLM provider/key/model、DeepSeek reasoning、OpenRouter headers、per-module LLM override、B 站浏览器、通用 source 浏览器、小红书 / 抖音 / YouTube source 开关、小红书 / 抖音 source 预算、数据目录、SQLite 路径、调度、自动更新、候选池平台配比、猜测兴趣参数和日志清理参数
 - 设置页的“按已有信号建议比例”会把当前页面上尚未保存的平台开关和比例一并 POST 到 `/api/config/source-share-suggestion`，按本地事件库的平台分布填入 B 站 / 小红书 / 抖音 / YouTube 占比，用户仍需点击保存才写入 `config.toml`

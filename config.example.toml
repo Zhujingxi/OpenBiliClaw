@@ -234,6 +234,13 @@ enabled = false
 [scheduler]
 # Enable scheduled content discovery
 enabled = true
+# Optional cost-saving guard for daemon-owned background LLM / embedding work.
+# When true, refresh / pool precompute / account sync / speculation / proactive
+# push only run while the browser extension has an active runtime-stream
+# connection, plus the grace window below after the last disconnect.
+# Manual CLI/API requests remain explicit and are not blocked by this switch.
+pause_on_extension_disconnect = false
+extension_disconnect_grace_seconds = 90
 # Cron expression for discovery task. v0.3.26+ default is every 8h
 # (was 4h pre-v0.3.26). 4h triggers ~6 refresh ticks per day; combined
 # with the v0.3.24+ pool-aware sizing each tick costs ~¥0.06-0.10 in

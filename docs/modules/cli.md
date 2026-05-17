@@ -49,6 +49,7 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 ### `openbiliclaw config-show`
 
 显示当前加载的配置、已注册的 LLM Provider 和最终生效的默认 Provider。
+配置概览会直接显示后台 LLM 总开关，以及「浏览器断开后暂停」是否启用和当前宽限秒数，方便确认 popup 里的省钱开关是否已经写入后端配置。
 
 ```bash
 $ openbiliclaw config-show
@@ -151,6 +152,14 @@ $ openbiliclaw start --host 0.0.0.0 --port 9000
 1. 检查 `data/openbiliclaw.db` 是否完整；如果检测到损坏，会拒绝启动并提示先执行 `openbiliclaw db-repair`
 2. 在数据库健康且距离上次冷备超过 24 小时时，自动生成一份冷备到 `data/backups/`
 
+如果 `scheduler.pause_on_extension_disconnect=true`，`start` 会在 uvicorn 启动前打印一行 WARN：
+
+```text
+WARN extension presence required; backend will pause background LLM work after grace period if no extension client connects
+```
+
+这表示 daemon-owned 后台 LLM / embedding 工作需要浏览器插件保持 `runtime-stream` 在线，或仍处于断开后的宽限窗口内；手动 CLI/API 操作不受这个 WARN 影响。
+
 如果数据库已损坏：
 
 ```bash
@@ -190,6 +199,7 @@ $ openbiliclaw serve-api --host 0.0.0.0 --port 8420
 ```
 
 推荐容器内使用该命令作为启动入口。
+当 `scheduler.pause_on_extension_disconnect=true` 时，`serve-api` 与 `start` 一样会在 uvicorn 启动前打印 extension presence WARN，提醒容器后端若没有插件客户端连接，后台 LLM 工作会在宽限期后暂停。
 
 ### `openbiliclaw delight`
 
