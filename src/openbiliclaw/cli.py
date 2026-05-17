@@ -412,7 +412,23 @@ def _run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
 
     from openbiliclaw.api.app import create_app
 
-    uvicorn.run(create_app(), host=host, port=port, log_level="info")
+    api_app = create_app()
+    state = getattr(api_app, "state", None)
+    if bool(getattr(state, "degraded", False)):
+        issues = []
+        for issue in list(getattr(state, "degraded_issues", [])):
+            field = str(getattr(issue, "field", ""))
+            message = str(getattr(issue, "message", issue))
+            issues.append(f"- {field}: {message}" if field else f"- {message}")
+        reason = str(getattr(state, "degraded_reason", ""))
+        body = (
+            f"reason: {reason or 'unknown'}\n"
+            + "\n".join(issues)
+            + "\n\nOpen the extension popup settings to fix the LLM credentials, "
+            "then restart the daemon."
+        )
+        _print_status_panel("warning", "降级模式 / Degraded mode", body)
+    uvicorn.run(api_app, host=host, port=port, log_level="info")
 
 
 def _build_memory_manager() -> Any:

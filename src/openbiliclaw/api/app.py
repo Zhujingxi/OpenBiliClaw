@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import uuid
 from contextlib import suppress
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from openbiliclaw.api.models import (
     ActivityFeedItemOut,
@@ -70,7 +72,11 @@ from openbiliclaw.api.models import (
     YoutubeSourceConfigOut,
 )
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 logger = logging.getLogger(__name__)
+_CONFIG_SAVE_LOCK = asyncio.Lock()
 
 SOURCE_LABELS = {
     "feedback": "推荐反馈",
@@ -79,6 +85,51 @@ SOURCE_LABELS = {
 }
 
 _SOURCE_SHARE_ORDER = ("bilibili", "xiaohongshu", "douyin", "youtube")
+
+_RESETTABLE_CONFIG_FIELDS = {
+    "llm.openai.api_key": ("llm", "openai", "api_key"),
+    "llm.claude.api_key": ("llm", "claude", "api_key"),
+    "llm.gemini.api_key": ("llm", "gemini", "api_key"),
+    "llm.deepseek.api_key": ("llm", "deepseek", "api_key"),
+    "llm.openrouter.api_key": ("llm", "openrouter", "api_key"),
+    "llm.openai_compatible.api_key": ("llm", "openai_compatible", "api_key"),
+    "llm.embedding.api_key": ("llm", "embedding", "api_key"),
+}
+
+
+def _config_backup_path(config_path: Path) -> Path:
+    return config_path.with_name(f"{config_path.name}.bak")
+
+
+def _snapshot_config_file(config_path: Path) -> Path | None:
+    if not config_path.exists():
+        return None
+    backup_path = _config_backup_path(config_path)
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(config_path, backup_path)
+    return backup_path
+
+
+def _restore_config_snapshot(backup_path: Path, config_path: Path) -> None:
+    shutil.copy2(backup_path, config_path)
+
+
+def _validate_llm_buildable(cfg: Any, base_issues: list[Any]) -> list[Any]:
+    from openbiliclaw.config import ConfigIssue
+    from openbiliclaw.llm.registry import RegistryBuildError, build_llm_registry
+
+    issues = list(base_issues)
+    try:
+        build_llm_registry(cfg)
+    except RegistryBuildError as exc:
+        issues.append(
+            ConfigIssue(
+                field="llm",
+                message=f"LLM registry would fail to build: {exc}",
+                severity="blocking",
+            )
+        )
+    return issues
 
 
 def _count_events_by_source_platform(database: Any) -> dict[str, int]:
@@ -205,10 +256,13 @@ def create_app(
     auto_update_service: Any | None = None,
 ) -> FastAPI:
     """Create the local backend API app."""
-    from fastapi.responses import JSONResponse
-
-    from openbiliclaw.api.runtime_context import RuntimeContext, build_runtime_context
+    from openbiliclaw.api.runtime_context import (
+        RuntimeContext,
+        build_degraded_runtime_context,
+        build_runtime_context,
+    )
     from openbiliclaw.config import load_config
+    from openbiliclaw.llm.registry import RegistryBuildError
 
     app = FastAPI(title="OpenBiliClaw API", default_response_class=JSONResponse)
 
@@ -279,13 +333,63 @@ def create_app(
             ctx.auto_update_service = AutoUpdateService(enabled=True)
     else:
         # Production path: build everything from config.
-        ctx = build_runtime_context(
-            config,
-            memory_manager=memory_manager,
-            database=database,
-            event_hub=runtime_event_hub,
-        )
+        try:
+            ctx = build_runtime_context(
+                config,
+                memory_manager=memory_manager,
+                database=database,
+                event_hub=runtime_event_hub,
+            )
+        except RegistryBuildError as exc:
+            ctx = build_degraded_runtime_context(
+                config,
+                memory_manager=memory_manager,
+                database=database,
+                event_hub=runtime_event_hub,
+                exc=exc,
+            )
+            logger.warning(
+                "FastAPI started in degraded mode (%s): %s",
+                ctx.degraded_reason,
+                "; ".join(str(getattr(issue, "message", issue)) for issue in ctx.degraded_issues),
+            )
     app.state.runtime_context = ctx
+    app.state.degraded = bool(getattr(ctx, "degraded", False))
+    app.state.degraded_reason = str(getattr(ctx, "degraded_reason", ""))
+    app.state.degraded_issues = list(getattr(ctx, "degraded_issues", []))
+
+    def _degraded_issues_payload() -> list[dict[str, str]]:
+        return [
+            {
+                "field": str(getattr(issue, "field", "")),
+                "message": str(getattr(issue, "message", issue)),
+                "severity": str(getattr(issue, "severity", "warning")),
+            }
+            for issue in getattr(ctx, "degraded_issues", [])
+        ]
+
+    def _degraded_body() -> dict[str, object]:
+        return {
+            "status": "degraded",
+            "reason": str(getattr(ctx, "degraded_reason", "")),
+            "issues": _degraded_issues_payload(),
+        }
+
+    @app.middleware("http")
+    async def _degraded_mode_guard(request: Request, call_next: Any) -> Any:
+        if not bool(getattr(ctx, "degraded", False)):
+            return await call_next(request)
+        path = request.url.path
+        method = request.method.upper()
+        allowed = (
+            method == "OPTIONS"
+            or path == "/api/health"
+            or path == "/api/runtime-status"
+            or (path == "/api/config" and method in {"GET", "PUT"})
+        )
+        if allowed:
+            return await call_next(request)
+        return JSONResponse(status_code=503, content=_degraded_body())
 
     async def _run_post_feedback_tasks() -> None:
         with suppress(Exception):
@@ -459,7 +563,17 @@ def create_app(
             )
 
     @app.get("/api/health", response_model=HealthResponse)
-    def health() -> HealthResponse:
+    def health() -> HealthResponse | JSONResponse:
+        if bool(getattr(ctx, "degraded", False)):
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "degraded",
+                    "service": "openbiliclaw-api",
+                    "reason": str(getattr(ctx, "degraded_reason", "")),
+                    "issues": _degraded_issues_payload(),
+                },
+            )
         return HealthResponse(status="ok", service="openbiliclaw-api")
 
     @app.post("/api/bilibili/cookie", response_model=BilibiliCookieResponse)
@@ -696,6 +810,29 @@ def create_app(
     @app.websocket("/api/runtime-stream")
     async def runtime_stream(websocket: WebSocket) -> None:
         await websocket.accept()
+        if bool(getattr(ctx, "degraded", False)):
+            connected = False
+            try:
+                ctx.presence.on_connect()
+                connected = True
+                await websocket.send_json(
+                    {
+                        "type": "degraded",
+                        "reason": str(getattr(ctx, "degraded_reason", "")),
+                        "issues": _degraded_issues_payload(),
+                    }
+                )
+                while True:
+                    message = await websocket.receive()
+                    if message.get("type") == "websocket.disconnect":
+                        raise WebSocketDisconnect
+            except WebSocketDisconnect:
+                pass
+            finally:
+                if connected:
+                    ctx.presence.on_disconnect()
+            return
+
         subscribe = getattr(ctx.event_hub, "subscribe", None)
         unsubscribe = getattr(ctx.event_hub, "unsubscribe", None)
         if not callable(subscribe) or not callable(unsubscribe):
@@ -780,6 +917,8 @@ def create_app(
 
     @app.on_event("startup")
     async def startup_refresh_loop() -> None:
+        if bool(getattr(ctx, "degraded", False)):
+            return
         await ctx.restart_background_tasks(app)
 
     @app.on_event("shutdown")
@@ -3234,6 +3373,8 @@ def create_app(
         issues: list[Any] | None = None,
         *,
         mask_keys: bool = True,
+        degraded: bool = False,
+        degraded_reason: str = "",
     ) -> ConfigResponse:
         """Convert a Config dataclass to a ConfigResponse, optionally masking API keys."""
 
@@ -3254,11 +3395,20 @@ def create_app(
                 reasoning_effort=getattr(p, "reasoning_effort", ""),
             )
 
-        issue_list = [ConfigIssueOut(field=i.field, message=i.message) for i in (issues or [])]
+        issue_list = [
+            ConfigIssueOut(
+                field=i.field,
+                message=i.message,
+                severity=getattr(i, "severity", "warning"),
+            )
+            for i in (issues or [])
+        ]
 
         return ConfigResponse(
             language=cfg.language,
             data_dir=cfg.data_dir,
+            degraded=degraded,
+            degraded_reason=degraded_reason,
             llm=LLMConfigOut(
                 default_provider=cfg.llm.default_provider,
                 openai=_provider_out(cfg.llm.openai),
@@ -3370,11 +3520,19 @@ def create_app(
         )
 
         cfg = load_config()
-        issues = _collect_config_issues(cfg)
-        return _config_to_response(cfg, issues, mask_keys=not reveal_keys)
+        issues = list(_collect_config_issues(cfg))
+        if bool(getattr(ctx, "degraded", False)):
+            issues.extend(getattr(ctx, "degraded_issues", []))
+        return _config_to_response(
+            cfg,
+            issues,
+            mask_keys=not reveal_keys,
+            degraded=bool(getattr(ctx, "degraded", False)),
+            degraded_reason=str(getattr(ctx, "degraded_reason", "")),
+        )
 
     @app.put("/api/config", response_model=ConfigUpdateResponse)
-    async def update_config(payload: ConfigUpdateIn) -> ConfigUpdateResponse:
+    async def update_config(payload: ConfigUpdateIn) -> ConfigUpdateResponse | JSONResponse:
         """Update configuration, persist to config.toml, and hot-reload runtime.
 
         Only the fields included in the request body are modified.
@@ -3383,6 +3541,7 @@ def create_app(
         """
         from openbiliclaw.config import (
             _collect_config_issues,
+            _default_config_path,
             _normalize_extension_disconnect_grace,
             _normalize_pool_source_shares,
             load_config,
@@ -3391,6 +3550,18 @@ def create_app(
 
         cfg = load_config()
         update = payload.model_dump(exclude_none=True)
+        reset_fields = [str(field) for field in update.pop("reset_fields", [])]
+        unknown_reset_fields = [
+            field for field in reset_fields if field not in _RESETTABLE_CONFIG_FIELDS
+        ]
+        if unknown_reset_fields:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "unknown_reset_fields",
+                    "fields": unknown_reset_fields,
+                },
+            )
 
         def _as_bool(value: object) -> bool:
             if isinstance(value, bool):
@@ -3422,6 +3593,7 @@ def create_app(
                 if provider_name in llm_data and isinstance(llm_data[provider_name], dict):
                     provider_cfg = getattr(cfg.llm, provider_name)
                     pdata = llm_data[provider_name]
+                    skipped_fields: list[str] = []
                     for field_name in (
                         "api_key",
                         "model",
@@ -3431,13 +3603,33 @@ def create_app(
                         "reasoning_effort",
                     ):
                         if field_name in pdata:
-                            setattr(provider_cfg, field_name, str(pdata[field_name]))
+                            new_value = str(pdata[field_name])
+                            if field_name == "api_key" and "*" in new_value:
+                                skipped_fields.append(f"{field_name}=masked")
+                                continue
+                            existing = getattr(provider_cfg, field_name, "")
+                            if (
+                                not new_value.strip()
+                                and isinstance(existing, str)
+                                and existing.strip()
+                            ):
+                                skipped_fields.append(f"{field_name}=empty_skip")
+                                continue
+                            setattr(provider_cfg, field_name, new_value)
+                    if skipped_fields:
+                        logger.debug(
+                            "PUT /api/config: provider %s skipped fields: %s",
+                            provider_name,
+                            ", ".join(skipped_fields),
+                        )
             if "embedding" in llm_data and isinstance(llm_data["embedding"], dict):
                 emb = llm_data["embedding"]
                 if "provider" in emb:
                     cfg.llm.embedding.provider = str(emb["provider"])
                 if "model" in emb:
-                    cfg.llm.embedding.model = str(emb["model"])
+                    new_model = str(emb["model"])
+                    if new_model.strip() or not cfg.llm.embedding.model.strip():
+                        cfg.llm.embedding.model = new_model
                 # v0.3.32+ — embedding owns api_key/base_url. Skip the
                 # api_key write when the payload echoes back the masked
                 # value (e.g. ``sk-d****a826``) so we don't overwrite the
@@ -3445,10 +3637,15 @@ def create_app(
                 # contains ``*``.
                 if "api_key" in emb:
                     new_key = str(emb["api_key"])
-                    if "*" not in new_key:
+                    if (
+                        "*" not in new_key
+                        and (new_key.strip() or not cfg.llm.embedding.api_key.strip())
+                    ):
                         cfg.llm.embedding.api_key = new_key
                 if "base_url" in emb:
-                    cfg.llm.embedding.base_url = str(emb["base_url"])
+                    new_base_url = str(emb["base_url"])
+                    if new_base_url.strip() or not cfg.llm.embedding.base_url.strip():
+                        cfg.llm.embedding.base_url = new_base_url
                 if "similarity_threshold" in emb:
                     cfg.llm.embedding.similarity_threshold = float(emb["similarity_threshold"])
             for module_name in ("soul", "discovery", "recommendation", "evaluation"):
@@ -3577,38 +3774,136 @@ def create_app(
                 if key in ldata:
                     setattr(cfg.logging, key, int(ldata[key]))
 
-        # Save to disk
-        saved_path = save_config(cfg)
-        issues = _collect_config_issues(cfg)
-        logger.info("Configuration saved to %s", saved_path)
+        for field in reset_fields:
+            target = _RESETTABLE_CONFIG_FIELDS[field]
+            section = getattr(cfg, target[0])
+            subsection = getattr(section, target[1])
+            setattr(subsection, target[2], "")
 
-        # ── Hot-reload: rebuild runtime components ──────────────────
-        reloaded = False
-        reload_message = f"配置已保存到 {saved_path}。"
-        try:
-            await ctx.rebuild_from_config(cfg)
-            await ctx.restart_background_tasks(app)
-            reloaded = True
-            reload_message += " 运行时组件已热重载，新配置立即生效。"
-            logger.info("Config hot-reload succeeded")
-            # Notify WebSocket subscribers so the extension re-fetches data
-            with suppress(Exception):
-                await ctx.event_hub.publish(
-                    {
-                        "type": "config_reloaded",
-                        "message": "配置已热重载，运行时组件已重建。",
-                    }
+        issues = _validate_llm_buildable(cfg, _collect_config_issues(cfg))
+        if any(getattr(issue, "severity", "warning") == "blocking" for issue in issues):
+            response = ConfigUpdateResponse(
+                ok=False,
+                config=_config_to_response(
+                    cfg,
+                    issues,
+                    mask_keys=True,
+                    degraded=bool(getattr(ctx, "degraded", False)),
+                    degraded_reason=str(getattr(ctx, "degraded_reason", "")),
+                ),
+                message="配置校验失败，未写入 config.toml。",
+                reloaded=False,
+                rollback_applied=False,
+                restart_required=False,
+            )
+            return JSONResponse(
+                status_code=400,
+                content=response.model_dump(mode="json"),
+            )
+
+        async with _CONFIG_SAVE_LOCK:
+            config_path = _default_config_path()
+            try:
+                backup_path = _snapshot_config_file(config_path)
+            except Exception as exc:
+                logger.exception("Config snapshot failed — refusing to overwrite config.toml")
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "error": "config_snapshot_failed",
+                        "message": f"couldn't snapshot config, refusing to risk overwrite: {exc}",
+                    },
                 )
-        except Exception as exc:
-            logger.exception("Config hot-reload failed — old components remain active")
-            reload_message += f" 热重载失败（{exc}），旧组件仍在运行，重启后端可完全生效。"
 
-        return ConfigUpdateResponse(
-            ok=True,
-            config=_config_to_response(cfg, issues, mask_keys=True),
-            message=reload_message,
-            reloaded=reloaded,
-        )
+            saved_path = save_config(cfg)
+            logger.info("Configuration saved to %s", saved_path)
+
+            if bool(getattr(ctx, "degraded", False)):
+                return ConfigUpdateResponse(
+                    ok=True,
+                    config=_config_to_response(
+                        cfg,
+                        issues,
+                        mask_keys=True,
+                        degraded=True,
+                        degraded_reason=str(getattr(ctx, "degraded_reason", "")),
+                    ),
+                    message=(
+                        f"配置已保存到 {saved_path}。当前后端处于降级模式，"
+                        "请 restart daemon 后让新配置生效。"
+                    ),
+                    reloaded=False,
+                    rollback_applied=False,
+                    restart_required=True,
+                )
+
+            # ── Hot-reload: rebuild runtime components ──────────────
+            reload_message = f"配置已保存到 {saved_path}。"
+            try:
+                await ctx.rebuild_from_config(cfg)
+                await ctx.restart_background_tasks(app)
+                reload_message += " 运行时组件已热重载，新配置立即生效。"
+                logger.info("Config hot-reload succeeded")
+                # Notify WebSocket subscribers so the extension re-fetches data
+                with suppress(Exception):
+                    await ctx.event_hub.publish(
+                        {
+                            "type": "config_reloaded",
+                            "message": "配置已热重载，运行时组件已重建。",
+                        }
+                    )
+                return ConfigUpdateResponse(
+                    ok=True,
+                    config=_config_to_response(cfg, issues, mask_keys=True),
+                    message=reload_message,
+                    reloaded=True,
+                    rollback_applied=False,
+                    restart_required=False,
+                )
+            except Exception as exc:
+                logger.exception("Config hot-reload failed — attempting config rollback")
+                if backup_path is None:
+                    rollback_message = (
+                        f" 热重载失败（{str(exc)[:200]}），未找到可回滚的 config.toml.bak。"
+                    )
+                    rollback_cfg = cfg
+                    rollback_applied = False
+                else:
+                    try:
+                        _restore_config_snapshot(backup_path, saved_path)
+                    except Exception as restore_exc:
+                        logger.critical(
+                            "Config rollback failed after hot-reload exception",
+                            exc_info=True,
+                        )
+                        return JSONResponse(
+                            status_code=500,
+                            content={
+                                "error": "config_persistence_corrupted",
+                                "message": (
+                                    "config.toml may be in inconsistent state after hot-reload "
+                                    f"failure and rollback failure: {restore_exc}"
+                                ),
+                                "manual_recovery": (
+                                    "config.toml may be in inconsistent state; if "
+                                    "config.toml.bak exists, manually copy it back."
+                                ),
+                            },
+                        )
+                    rollback_cfg = load_config(saved_path)
+                    rollback_message = (
+                        f" 热重载失败（{str(exc)[:200]}），已从 config.toml.bak 回滚。"
+                    )
+                    rollback_applied = True
+
+                return ConfigUpdateResponse(
+                    ok=True,
+                    config=_config_to_response(rollback_cfg, _collect_config_issues(rollback_cfg)),
+                    message=reload_message + rollback_message,
+                    reloaded=False,
+                    rollback_applied=rollback_applied,
+                    restart_required=False,
+                )
 
     def _normalize_enabled_sources_override(
         raw_enabled: dict[str, bool] | None,

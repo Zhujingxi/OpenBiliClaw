@@ -31,6 +31,8 @@
 | v0.3.69 Gemini reasoning-first 模型适配 | ✅ | `GeminiProvider._is_reasoning_first_model` 用 prefix 识别 `gemini-3.x` / `gemini-2.5-pro*`，json_mode 下不再附加 `thinking_budget=0`（这些模型会以 `400 INVALID_ARGUMENT` 拒绝）；`gemini-2.5-flash` 等非 reasoning-first 模型继续走省钱通路。pricing 补全 `gemini-3.1-pro-preview` / `gemini-3-pro-preview` 别名，配套 CLI / config / 文档统一改用真实模型 ID |
 | v0.3.71 Prompt-cache 与 400 诊断 | ✅ | `build_awareness_prompt` / `build_batch_content_evaluation_prompt` 的 user prompt 按稳定画像在前、本次批次在后排序，并使用 `sort_keys=True` 的确定性 JSON；`OpenAIProvider._map_error()` 会把 OpenAI-compatible HTTP 400 响应体摘要写入 WARNING 和错误文本，便于定位 MiMo 等兼容服务的请求 schema 问题 |
 | v0.3.71 Awareness 缓存形态回归锁 | ✅ | `build_awareness_prompt` 的 system 内容固定为模块级常量 `_AWARENESS_SYSTEM_PROMPT`，user 块顺序锁定为 `<soul_profile>` → `<preference_summary>` → `<recent_events>`，并通过 `tests/test_llm_prompts.py` 的 byte-equal / 末尾块 / 不同字典 key 序仍产相同字节三组回归测试保证未来改动不会再把变量数据放进 system、不把 recent_events 之后塞入稳定块、或丢掉 `sort_keys=True` |
+| v0.3.74 结构化输出共享解析 | ✅ | 新增 `llm/json_utils.py`，统一提供 `extract_llm_json_list()` / `extract_llm_json_object()` / `parse_llm_json_tolerant()`。调用方可传 item/object predicate 和 wrapper aliases，兼容 root array/object、`results/items/data/output/scores/evaluations` 等 wrapper、singleton dict、Markdown fenced JSON、JSONL、多 root echo 后最终结果，以及 MiMo 形态的 malformed `{ [ ... ] }` 数组包裹 |
+| v0.3.74 Ollama embedding 空凭据静默本地默认 | ✅ | `embedding.provider="ollama"` 且 embedding `api_key/base_url` 为空时直接构造本地 Ollama provider，默认 `http://localhost:11434/v1`；如果 chat-side `[llm.ollama].base_url` 非空，会复用并规范化到 `/v1`，不再触发 `_emit_embedding_compat_warning()`。远端 embedding provider 留空凭据时仍保留一次性向后兼容 WARNING |
 | v0.3.x Eval-batch 负样本锚定 | ✅ | `build_batch_content_evaluation_prompt` 新增可选 `negative_examples` kwarg；非空时在 user prompt `<source_context>` 与 `<content_batch>` 之间插入 `<negative_examples>` 块（`sort_keys=True` 决定性 JSON）。`None` / `[]` 退回原 user 字节形态以保留 cold-start 缓存前缀。`_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT` 加入两条永久规则 (10 / 11)：按话术 / 商业意图 / 标题结构层面 pattern-match 候选与示例，不要看关键词重叠；规则改动一次后系统消息保持 call-invariant |
 | v0.3.x dislike-aware prompts | ✅ | `build_preference_analysis_prompt` 明确把 negative / dislike / thumbs_down 事件限制为 `disliked_topics` 与风格避让证据，禁止提取为正向兴趣；`build_awareness_prompt` 可从近期 dislike 生成“最近开始避开 X”的保守观察；单条 / 批量推荐表达 prompt 会消费 `profile_summary.disliked_topics`，命中避雷项时不得热情背书 |
 
@@ -108,6 +110,26 @@ response = await service.complete_structured_task(
 # 自动注入 core memory，并以 json_mode 调用 provider
 ```
 
+### 结构化 JSON 解析 helper
+
+```python
+from openbiliclaw.llm.json_utils import extract_llm_json_list, extract_llm_json_object
+
+scores = extract_llm_json_list(
+    response.content,
+    wrapper_aliases=("scores", "evaluations"),
+    item_predicate=lambda item: isinstance(item, dict) and "score" in item,
+)
+
+profile_delta = extract_llm_json_object(
+    response.content,
+    wrapper_aliases=("result", "data"),
+    object_predicate=lambda obj: isinstance(obj, dict) and "summary" in obj,
+)
+```
+
+这些 helper 是 MiMo / OpenAI-compatible / reasoning 模型结构化输出的统一容错边界。调用方仍应用 predicate 限定自己真正接受的 shape，避免 schema echo 或 prompt 示例被误当作结果。
+
 #### 全局优先级队列(v0.3.63+)
 
 `LLMService` 内部用 `PrioritySemaphore`(capacity=1, heapq + monotonic
@@ -169,7 +191,7 @@ base_url = "https://api.deepseek.com"
 
 [llm.ollama]
 model = "llama3"
-base_url = "http://localhost:11434"
+base_url = "http://localhost:11434/v1"
 
 [llm.openrouter]
 api_key = ""
@@ -191,3 +213,4 @@ x_title = "OpenBiliClaw"
 8. **Gemini 可选依赖降级**：环境里缺少 `google-genai` 时，`llm` 包和 registry 仍可正常导入；只有真正实例化 Gemini provider 时才会给出明确缺依赖错误
 9. **Prompt 风格集中收口**：推荐、画像和聊天的“老B友”语气由共享 `ToneProfile` 驱动，不允许各模块各自发散成不同人格
 10. **Prompt-cache 约定**：高频结构化 builder 的 system prompt 必须保持静态；user prompt 按“画像 / 长期偏好 / 来源上下文 / 本批内容”从稳定到易变排序，并使用确定性 JSON，便于 DeepSeek / Claude / OpenAI / Gemini 的 provider-side prompt cache 复用前缀
+11. **结构化输出只在 helper 处放宽**：业务模块不再各自手写 JSON 截取逻辑；容错集中在 `json_utils.py`，模块侧用 predicate 收紧语义，避免一个 provider 的异常 shape 修复污染其他任务。

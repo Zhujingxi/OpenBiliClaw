@@ -631,6 +631,7 @@ class LoggingConfigOut(BaseModel):
 class ConfigIssueOut(BaseModel):
     field: str
     message: str
+    severity: str = "warning"
 
 
 class ConfigResponse(BaseModel):
@@ -638,6 +639,8 @@ class ConfigResponse(BaseModel):
 
     language: str = "zh"
     data_dir: str = "data"
+    degraded: bool = False
+    degraded_reason: str = ""
     llm: LLMConfigOut = Field(default_factory=LLMConfigOut)
     bilibili: BilibiliConfigOut = Field(default_factory=BilibiliConfigOut)
     sources: SourcesConfigOut = Field(default_factory=SourcesConfigOut)
@@ -652,6 +655,7 @@ class ConfigUpdateIn(BaseModel):
 
     language: str | None = None
     data_dir: str | None = None
+    reset_fields: list[str] | None = None
     llm: dict[str, object] | None = None
     bilibili: dict[str, object] | None = None
     sources: dict[str, object] | None = None
@@ -674,6 +678,8 @@ class ConfigUpdateResponse(BaseModel):
     config: ConfigResponse
     message: str = ""
     reloaded: bool = False
+    rollback_applied: bool = False
+    restart_required: bool = False
 
 
 class SourceShareSuggestionResponse(BaseModel):

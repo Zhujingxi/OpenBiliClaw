@@ -62,6 +62,9 @@ class RuntimeContext:
 
     # ── Swappable (rebuilt on hot-reload) ───────────────────────────
     config: Any = None
+    degraded: bool = False
+    degraded_reason: str = ""
+    degraded_issues: list[Any] = field(default_factory=list)
     llm_registry: Any = None
     llm_service: Any = None
     bilibili_client: Any = None
@@ -579,3 +582,69 @@ def build_runtime_context(
     # no-op here because the registry was just created and is empty.
     ctx._rebuild_components(config)
     return ctx
+
+
+def build_degraded_runtime_context(
+    config: Config,
+    *,
+    memory_manager: Any | None = None,
+    database: Any | None = None,
+    event_hub: Any | None = None,
+    exc: Exception | None = None,
+) -> RuntimeContext:
+    """Construct a minimal context that can serve config recovery endpoints.
+
+    ``build_runtime_context`` intentionally stays strict. This degraded
+    constructor is used only by FastAPI startup after registry construction
+    fails, so the popup can still read and repair config.toml.
+    """
+    from openbiliclaw.config import ConfigIssue
+    from openbiliclaw.memory.manager import MemoryManager
+    from openbiliclaw.runtime.events import RuntimeEventHub
+    from openbiliclaw.storage.database import Database
+
+    created_runtime_database = False
+    if database is None:
+        database = Database(config.data_path / "openbiliclaw.db")
+        database.initialize()
+        created_runtime_database = True
+    if memory_manager is None:
+        shared_database = database if created_runtime_database else None
+        memory_manager = MemoryManager(config.data_path, database=shared_database)
+        memory_manager.initialize()
+    if event_hub is None:
+        event_hub = RuntimeEventHub()
+
+    setter = getattr(memory_manager, "set_profile_change_callback", None)
+    if callable(setter):
+
+        async def _on_profile_changed() -> None:
+            publish = getattr(event_hub, "publish", None)
+            if callable(publish):
+                with suppress(Exception):
+                    await publish(
+                        {
+                            "type": "profile_updated",
+                            "phase": "ready",
+                            "message": "画像已更新",
+                        }
+                    )
+
+        setter(_on_profile_changed)
+
+    message = str(exc) if exc is not None else "LLM registry unavailable"
+    return RuntimeContext(
+        database=database,
+        memory_manager=memory_manager,
+        event_hub=event_hub,
+        config=config,
+        degraded=True,
+        degraded_reason="llm_registry_unavailable",
+        degraded_issues=[
+            ConfigIssue(
+                field="llm",
+                message=f"LLM registry unavailable: {message}",
+                severity="blocking",
+            )
+        ],
+    )

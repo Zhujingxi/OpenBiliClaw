@@ -34,8 +34,8 @@
 | ProfileBuilder | ✅ | 结构化 prompt + JSON 校验 + `OnionProfile` 构建 |
 | SoulEngine.build_initial_profile() | ✅ | 从 history + preference 生成并持久化 `soul.json` |
 | SoulEngine.get_profile() | ✅ | 从 soul 层读取画像，未初始化时抛明确异常 |
-| AwarenessAnalyzer | ✅ | 近期事件 → `AwarenessNote` 列表，支持同日去重；解析 LLM 响应时兼容 `results/items/notes/data/observations/recent_observations/latest/latest_observations` 等 object-wrapped array，也兼容 reasoning 模型常见的 bare singular-note dict（仅需 `observation` 字段）和 wrapper-key 下的单 note dict；prompt 按画像 → 偏好 → 近期事件排序以保留缓存前缀，并把近期 `dislike` / `thumbs_down` / negative 事件视为“最近开始避开 X”的保守观察信号 |
-| InsightAnalyzer | ✅ | 觉察 + 偏好 + 画像 → `InsightHypothesis` 列表，支持假设合并 |
+| AwarenessAnalyzer | ✅ | 近期事件 → `AwarenessNote` 列表，支持同日去重；解析 LLM 响应时复用 `llm.json_utils.extract_llm_json_list()`，兼容 `results/items/notes/data/observations/recent_observations/latest/latest_observations` 等 object-wrapped array、reasoning 模型 bare singular-note dict、wrapper-key 下单 note、fenced JSON、JSONL 和 MiMo malformed `{ [ ... ] }`；prompt 按画像 → 偏好 → 近期事件排序以保留缓存前缀，并把近期 `dislike` / `thumbs_down` / negative 事件视为“最近开始避开 X”的保守观察信号 |
+| InsightAnalyzer | ✅ | 觉察 + 偏好 + 画像 → `InsightHypothesis` 列表，支持假设合并；解析 LLM 响应时复用共享 JSON helper，能兼容 object wrapper、schema echo 后最终结果和 MiMo malformed array root |
 | CognitionCycle | ✅ | 半日节流生成 awareness + insight 并同步到 `OnionProfile`；仅在 preference 与 soul 都为空的早期初始化状态跳过，已有任一层时仍会运行，避免已初始化画像因 preference 暂空而长期不产出觉察；awareness 失败时单次重试（间隔 2s），仍失败则记 WARNING 且**不推进** `last_awareness_at`，下一 tick 立即重试而不是空等 12h |
 | SoulEngine.generate_awareness_note() | ✅ | 生成并持久化 `awareness.json` |
 | SoulEngine.generate_insight() | ✅ | 生成并持久化 `insight.json` |
@@ -53,6 +53,7 @@
 | Layered profile cognition | ✅ | `OnionProfile` 新增 MBTI / Values / Interest 等分层，画像生成会同时消费 `history + preference + awareness + insights`，避免把兴趣 topic 堆成整段画像 |
 | 猜测兴趣系统 | ✅ | `InterestSpeculator` 定期通过 LLM 过采样生成猜测兴趣方向，并在入池前做画像/历史去重和体验多样性筛选；通过事件确认后转正为正式兴趣，未确认则拒绝并冷却 |
 | ROLE/VALUES/CORE 增量更新器 | ✅ | `_update_role`（`build_role_delta_prompt`，基于信号证据 + LLM diff-protection）、`_update_values`（LLM delta，每周期最多 add/remove 1 条，注入完整画像上下文）、`_update_core`（`build_core_delta_prompt`，更新 traits/needs/MBTI，强 diff-protection）均已完整实现 |
+| v0.3.74 Soul 结构化 JSON 容错统一 | ✅ | ProfileBuilder、PreferenceAnalyzer、DialogueInsightAnalyzer、AwarenessAnalyzer、InsightAnalyzer、LayerUpdaters 和 InterestSpeculator 都收敛到 `llm.json_utils`，每个任务用 predicate 约束自己需要的 schema；MiMo / 非 OpenAI wrapper 不再只修 awareness 一处 |
 
 ## 猜测兴趣系统 (Speculative Interest Lifecycle)
 

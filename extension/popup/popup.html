@@ -3295,6 +3295,10 @@
       cursor: not-allowed;
     }
 
+    .settings-save[data-tone="warning"] {
+      background: linear-gradient(135deg, #f3a83b, #e1862a);
+    }
+
     .settings-toast {
       padding: 8px 12px;
       border-radius: 10px;
@@ -3313,7 +3317,34 @@
       color: #c0404e;
     }
 
+    .settings-toast[data-tone="warning"] {
+      background: var(--warning-soft);
+      color: #8a6520;
+    }
+
     .settings-toast[hidden] {
+      display: none;
+    }
+
+    .settings-banner {
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.45;
+    }
+
+    .settings-banner[data-tone="warning"] {
+      background: var(--warning-soft);
+      color: #8a6520;
+    }
+
+    .settings-banner[data-tone="error"] {
+      background: rgba(239, 122, 134, 0.15);
+      color: #c0404e;
+    }
+
+    .settings-banner[hidden] {
       display: none;
     }
 
@@ -3595,6 +3626,10 @@
       </div>
 
       <div id="settingsToast" class="settings-toast" hidden></div>
+
+      <div id="cfgBannerOffline" class="settings-banner" data-tone="warning" hidden></div>
+      <div id="cfgBannerDegraded" class="settings-banner" data-tone="warning" hidden></div>
+      <div id="cfgBannerNoCache" class="settings-banner" data-tone="error" hidden></div>
 
       <div id="settingsIssues" class="settings-issues"></div>
 

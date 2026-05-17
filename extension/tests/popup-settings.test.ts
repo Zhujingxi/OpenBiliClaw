@@ -105,3 +105,37 @@ test("source-share suggestion button uses settings-scope helpers and form switch
   assert.match(suggestionBlock, /youtube:\s*checked\("cfgYoutubeEnabled"\)/);
   assert.match(suggestionBlock, /configured_shares:\s*\{/);
 });
+
+test("settings save renders structured config validation errors inline", () => {
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const bindSettingsBlock =
+    popupJs.match(/function bindSettings\(\) \{[\s\S]*?\nasync function initializePopup/)?.[0] ?? "";
+  const saveBlock =
+    popupJs.match(/saveBtn\.addEventListener\("click"[\s\S]*?\n  \}\);/)?.[0] ?? "";
+  const structuredErrorBlock =
+    bindSettingsBlock.match(/function renderStructuredConfigError[\s\S]*?\n  \}/)?.[0] ?? "";
+
+  assert.match(structuredErrorBlock, /err\.details\?\.config\?\.issues/);
+  assert.match(structuredErrorBlock, /applyRuntimeConfig\(err\.details\.config\)/);
+  assert.match(structuredErrorBlock, /renderIssues\(err\.details\.config\.issues\)/);
+  assert.match(structuredErrorBlock, /配置未保存，请先修正高亮问题。/);
+  assert.match(structuredErrorBlock, /showToast\([^)]*,\s*"error"\)/);
+  assert.match(saveBlock, /renderStructuredConfigError\(err\)/);
+});
+
+test("settings page wires offline cache and degraded-mode banners", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  for (const id of ["cfgBannerOffline", "cfgBannerDegraded", "cfgBannerNoCache"]) {
+    assert.match(popupHtml, new RegExp(`id="${id}"`), `${id} should exist`);
+    assert.match(popupJs, new RegExp(`"${id}"`), `${id} should be wired in popup.js`);
+  }
+
+  assert.match(popupJs, /readCachedConfigSnapshot/);
+  assert.match(popupJs, /cached_at/);
+  assert.match(popupJs, /后端不可达且没有缓存配置/);
+  assert.match(popupJs, /renderDegradedBanner\(cfg\)/);
+  assert.match(popupJs, /restart_required/);
+  assert.match(popupJs, /保存并提示重启/);
+});

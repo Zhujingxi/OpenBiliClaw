@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
 from openbiliclaw.discovery.strategies._utils import build_profile_summary
-from openbiliclaw.llm.json_utils import parse_llm_json_tolerant
+from openbiliclaw.llm.json_utils import extract_llm_json_list, parse_llm_json_tolerant
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Sequence
@@ -173,90 +173,15 @@ def trim_candidates_for_llm(
 
 def _parse_batch_evaluation_payload(raw: str) -> list[dict[str, Any]] | None:
     """Extract the scored result array from a provider response."""
-    parsed = parse_llm_json_tolerant(raw)
-    direct_list = _coerce_scored_result_list(parsed)
-    if direct_list is not None:
-        return direct_list
-    if isinstance(parsed, dict):
-        for key in ("results", "items", "evaluations", "scores", "data"):
-            nested = _coerce_scored_result_list(parsed.get(key))
-            if nested is not None:
-                return nested
-        if "score" in parsed:
-            return [parsed]
-
-    # Some JSON-mode gateways echo the input JSON before the real output
-    # array. Pick the last array-shaped JSON snippet that actually contains
-    # score objects, not profile/interests/content_batch arrays from the echo.
-    for snippet in reversed(_extract_json_array_snippets(raw)):
-        candidate = _coerce_scored_result_list(parse_llm_json_tolerant(snippet))
-        if candidate is not None:
-            return candidate
-    object_results: list[dict[str, Any]] = []
-    for snippet in _extract_json_object_snippets(raw):
-        parsed_object = parse_llm_json_tolerant(snippet)
-        if isinstance(parsed_object, dict) and "score" in parsed_object:
-            object_results.append(parsed_object)
-    if object_results:
-        return object_results
-    return None
-
-
-def _coerce_scored_result_list(value: object) -> list[dict[str, Any]] | None:
-    if not isinstance(value, list) or not value:
+    payload = extract_llm_json_list(
+        raw,
+        wrapper_keys=("results", "items", "evaluations", "scores", "data"),
+        allow_singleton=True,
+        item_predicate=lambda item: "score" in item,
+    )
+    if payload is None:
         return None
-    results: list[dict[str, Any]] = []
-    for item in value:
-        if not isinstance(item, dict):
-            return None
-        results.append(item)
-    if not any("score" in item for item in results):
-        return None
-    return results
-
-
-def _extract_json_array_snippets(text: str) -> list[str]:
-    return _extract_balanced_json_snippets(text, open_char="[", close_char="]")
-
-
-def _extract_json_object_snippets(text: str) -> list[str]:
-    return _extract_balanced_json_snippets(text, open_char="{", close_char="}")
-
-
-def _extract_balanced_json_snippets(
-    text: str,
-    *,
-    open_char: str,
-    close_char: str,
-) -> list[str]:
-    snippets: list[str] = []
-    start: int | None = None
-    depth = 0
-    in_string = False
-    escape = False
-    for index, char in enumerate(text):
-        if in_string:
-            if escape:
-                escape = False
-            elif char == "\\":
-                escape = True
-            elif char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-            continue
-        if char == open_char:
-            if depth == 0:
-                start = index
-            depth += 1
-            continue
-        if char == close_char and depth > 0:
-            depth -= 1
-            if depth == 0 and start is not None:
-                snippets.append(text[start : index + 1])
-                start = None
-    return snippets
+    return [dict(item) for item in payload]
 
 
 @dataclass

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -1573,6 +1574,317 @@ async def test_classify_pool_backlog_skips_already_classified() -> None:
         assert classified == 0
         # LLM should NOT have been called for classification
         assert len(llm.calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_classify_pool_backlog_accepts_jsonl_output(caplog: pytest.LogCaptureFixture) -> None:
+    class _JsonlClassifyLLM:
+        async def complete_structured_task(
+            self,
+            *,
+            system_instruction: str = "",
+            user_input: str = "",
+            history: list[dict[str, str]] | None = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            caller: str = "",
+            reasoning_effort: str | None = None,
+        ) -> LLMResponse:
+            return LLMResponse(
+                content="\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "score": 0.84,
+                                "reason": "慢速观察类生活内容",
+                                "topic_group": "生活观察",
+                                "style_key": "lifestyle",
+                            },
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            {
+                                "score": 0.76,
+                                "reason": "偏系统分析的深度内容",
+                                "topic_group": "系统分析",
+                                "style_key": "deep_dive",
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ]
+                ),
+                provider="test",
+                model="dummy",
+                usage={},
+            )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(
+            db,
+            "xhs_jsonl_001",
+            title="城市通勤里的小变化",
+            up_name="街角观察",
+            source="xhs-extension-task",
+            source_platform="xiaohongshu",
+            style_key="",
+            topic_group="",
+            topic_key="",
+            relevance_score=0.0,
+        )
+        _seed_visible(
+            db,
+            "xhs_jsonl_002",
+            title="怎样拆一个复杂系统",
+            up_name="系统笔记",
+            source="xhs-extension-task",
+            source_platform="xiaohongshu",
+            style_key="",
+            topic_group="",
+            topic_key="",
+            relevance_score=0.0,
+        )
+        engine = RecommendationEngine(llm=_JsonlClassifyLLM(), database=db)
+
+        caplog.set_level(logging.WARNING)
+        classified = await engine.classify_pool_backlog(profile=_build_profile(), limit=10)
+
+        assert classified == 2
+        rows = {row["bvid"]: row for row in db.get_cached_content(limit=10)}
+        assert rows["xhs_jsonl_001"]["style_key"] == "lifestyle"
+        assert rows["xhs_jsonl_002"]["style_key"] == "deep_dive"
+        assert "classify_pool_backlog: batch failed" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapper_key", ["results", "items"])
+async def test_classify_pool_backlog_accepts_wrapped_output(
+    wrapper_key: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class _WrappedClassifyLLM:
+        async def complete_structured_task(
+            self,
+            *,
+            system_instruction: str = "",
+            user_input: str = "",
+            history: list[dict[str, str]] | None = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            caller: str = "",
+            reasoning_effort: str | None = None,
+        ) -> LLMResponse:
+            return LLMResponse(
+                content=json.dumps(
+                    {
+                        wrapper_key: [
+                            {
+                                "score": 0.81,
+                                "reason": "结构化评测",
+                                "topic_group": "工具效率",
+                                "style_key": "tech_analysis",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                provider="test",
+                model="dummy",
+                usage={},
+            )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(
+            db,
+            f"xhs_wrapped_{wrapper_key}",
+            title="剪辑工具的自动化流程",
+            up_name="效率实验室",
+            source="xhs-extension-task",
+            source_platform="xiaohongshu",
+            style_key="",
+            topic_group="",
+            topic_key="",
+            relevance_score=0.0,
+        )
+        engine = RecommendationEngine(llm=_WrappedClassifyLLM(), database=db)
+
+        caplog.set_level(logging.WARNING)
+        classified = await engine.classify_pool_backlog(profile=_build_profile(), limit=10)
+
+        assert classified == 1
+        row = next(
+            r
+            for r in db.get_cached_content(limit=10)
+            if r["bvid"] == f"xhs_wrapped_{wrapper_key}"
+        )
+        assert row["style_key"] == "tech_analysis"
+        assert row["topic_group"] == "工具效率"
+        assert "classify_pool_backlog: batch failed" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_precompute_batch_accepts_items_wrapper_without_single_fallback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class _WrappedExpressionLLM:
+        def __init__(self) -> None:
+            self.callers: list[str] = []
+
+        async def complete_structured_task(
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            history: list[dict[str, str]] | None = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            caller: str = "",
+            reasoning_effort: str | None = None,
+        ) -> LLMResponse:
+            self.callers.append(caller)
+            return LLMResponse(
+                content=json.dumps(
+                    {
+                        "items": [
+                            {
+                                "expression": "这条能把你最近想拆流程的劲头接住。",
+                                "topic_label": "流程拆解",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                provider="test",
+                model="dummy",
+                usage={},
+            )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        item = DiscoveredContent(
+            bvid="BV_EXPR_WRAP",
+            title="自动化流程怎么拆",
+            up_name="效率实验室",
+            description="把一个复杂流程拆成可执行的小步骤。",
+            relevance_score=0.88,
+        )
+        _seed_pool(db, [item], precomputed=False)
+        llm = _WrappedExpressionLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+
+        caplog.set_level(logging.WARNING)
+        completed = await engine._precompute_batch([item], _build_profile())
+
+        assert completed == 1
+        row = next(r for r in db.get_cached_content(limit=10) if r["bvid"] == "BV_EXPR_WRAP")
+        assert row["pool_expression"] == "这条能把你最近想拆流程的劲头接住。"
+        assert row["pool_topic_label"] == "流程拆解"
+        assert llm.callers == ["recommendation.write_expression"]
+        assert "Batch expression generation failed" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_generate_expression_accepts_echoed_schema_before_final_fenced_object(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class _EchoedSchemaExpressionLLM:
+        async def complete_structured_task(
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            history: list[dict[str, str]] | None = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            caller: str = "",
+            reasoning_effort: str | None = None,
+        ) -> LLMResponse:
+            return LLMResponse(
+                content=(
+                    'Schema: {"type":"object","properties":{"expression":{"type":"string"}}}\n'
+                    "```json\n"
+                    '{"expression":"这条会接上你最近的系统感。","topic_label":"系统感"}\n'
+                    "```"
+                ),
+                provider="test",
+                model="dummy",
+                usage={},
+            )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        engine = RecommendationEngine(llm=_EchoedSchemaExpressionLLM(), database=db)
+
+        caplog.set_level(logging.ERROR)
+        expression, topic_label = await engine.generate_expression(
+            DiscoveredContent(
+                bvid="BV_EXPR_ECHO",
+                title="系统观察的方法",
+                up_name="系统笔记",
+                description="用结构化方式理解变化。",
+                relevance_score=0.9,
+            ),
+            _build_profile(),
+        )
+
+        assert expression == "这条会接上你最近的系统感。"
+        assert topic_label == "系统感"
+        assert "Failed to generate recommendation expression" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_generate_delight_reason_accepts_result_wrapper() -> None:
+    class _WrappedDelightReasonLLM:
+        async def complete_structured_task(
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            history: list[dict[str, str]] | None = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            caller: str = "",
+            reasoning_effort: str | None = None,
+        ) -> LLMResponse:
+            return LLMResponse(
+                content=json.dumps(
+                    {
+                        "result": {
+                            "delight_reason": "这条会把你对系统结构的好奇心接住。",
+                            "delight_hook": "结构上头",
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                provider="test",
+                model="dummy",
+                usage={},
+            )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        engine = RecommendationEngine(llm=_WrappedDelightReasonLLM(), database=db)
+
+        reason, hook = await engine._generate_delight_reason(
+            DiscoveredContent(
+                bvid="BV_DELIGHT_WRAP",
+                title="复杂系统入门",
+                up_name="系统观察者",
+                description="从连接关系理解复杂系统。",
+                relevance_score=0.93,
+            ),
+            _build_profile(),
+            "系统结构",
+        )
+
+        assert reason == "这条会把你对系统结构的好奇心接住。"
+        assert hook == "结构上头"
 
 
 def test_re_ingest_does_not_overwrite_classified_fields() -> None:

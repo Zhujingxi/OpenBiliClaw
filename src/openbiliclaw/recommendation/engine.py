@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
+from openbiliclaw.llm.json_utils import extract_llm_json_list, extract_llm_json_object
 from openbiliclaw.soul.tone import ToneProfile, build_tone_profile
 
 if TYPE_CHECKING:
@@ -984,11 +985,14 @@ class RecommendationEngine:
             caller="recommendation.evaluate_batch",
         )
         raw = str(getattr(response, "content", "")).strip()
-        payload = json.loads(raw)
-        if isinstance(payload, dict):
-            payload = [payload]
-        if not isinstance(payload, list):
-            raise ValueError(f"Expected JSON array, got {type(payload).__name__}")
+        payload = extract_llm_json_list(
+            raw,
+            wrapper_keys=("results", "items", "evaluations", "scores", "data"),
+            allow_singleton=True,
+            item_predicate=lambda item: "score" in item,
+        )
+        if payload is None:
+            raise ValueError("Expected classification JSON array or compatible wrapper.")
 
         if len(payload) != len(batch):
             logger.warning(
@@ -1006,7 +1010,10 @@ class RecommendationEngine:
                 content.relevance_reason = "classification_failed"
                 continue
             result = payload[i]
-            score = max(0.0, min(1.0, float(result.get("score", 0.0))))
+            score_value = result.get("score", 0.0)
+            if not isinstance(score_value, (int, float, str)):
+                score_value = 0.0
+            score = max(0.0, min(1.0, float(score_value)))
             reason = str(result.get("reason", "")).strip()
             topic_group = str(result.get("topic_group", "")).strip()
             style_key = str(result.get("style_key", "")).strip().lower()
@@ -1150,8 +1157,12 @@ class RecommendationEngine:
                 user_input=messages[1]["content"],
                 caller="recommendation.delight_reason",
             )
-            payload = json.loads(response.content.strip())
-            if not isinstance(payload, dict):
+            payload = extract_llm_json_object(
+                str(response.content),
+                wrapper_keys=("result", "item", "data", "output"),
+                item_predicate=lambda item: "delight_reason" in item or "delight_hook" in item,
+            )
+            if payload is None:
                 raise ValueError("Delight reason response must be a JSON object.")
             reason = str(payload.get("delight_reason", "")).strip()
             hook = str(payload.get("delight_hook", "")).strip()
@@ -1211,11 +1222,14 @@ class RecommendationEngine:
                 reasoning_effort="",
                 caller="recommendation.write_expression",
             )
-            payload = json.loads(response.content.strip())
-            if isinstance(payload, dict):
-                payload = [payload]
-            if not isinstance(payload, list):
-                raise ValueError(f"Expected JSON array, got {type(payload).__name__}")
+            payload = extract_llm_json_list(
+                str(response.content),
+                wrapper_keys=("results", "items", "expressions", "data"),
+                allow_singleton=True,
+                item_predicate=lambda item: "expression" in item or "topic_label" in item,
+            )
+            if payload is None:
+                raise ValueError("Expected expression JSON array or compatible wrapper.")
         except Exception:
             logger.warning(
                 "Batch expression generation failed for %d items, falling back to single",
@@ -1386,8 +1400,12 @@ class RecommendationEngine:
                 user_input=messages[1]["content"],
                 caller="recommendation.expression",
             )
-            payload = json.loads(response.content.strip())
-            if not isinstance(payload, dict):
+            payload = extract_llm_json_object(
+                str(response.content),
+                wrapper_keys=("result", "item", "expression", "data", "output"),
+                item_predicate=lambda item: "expression" in item or "topic_label" in item,
+            )
+            if payload is None:
                 raise ValueError("Expression response must be a JSON object.")
             expression = str(payload.get("expression", "")).strip()
             topic_label = str(payload.get("topic_label", "")).strip()
