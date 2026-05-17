@@ -1,10 +1,13 @@
 """CLI tests for configuration guidance behavior."""
 
+import io
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 import typer
+from rich.console import Console
 from typer.testing import CliRunner
 
 from openbiliclaw import cli as cli_module
@@ -453,6 +456,49 @@ def test_start_warns_when_pause_on_disconnect_requires_extension_presence(
     assert "WARN extension presence required" in result.stdout
     assert "background LLM work after grace period" in result.stdout
     assert called == {"host": "127.0.0.1", "port": 8420}
+
+
+def test_run_api_server_prints_degraded_mode_panel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.api import app as api_app
+
+    output = io.StringIO()
+    fake_app = SimpleNamespace(
+        state=SimpleNamespace(
+            degraded=True,
+            degraded_reason="llm_registry_unavailable",
+            degraded_issues=[
+                SimpleNamespace(
+                    field="llm",
+                    message="LLM registry unavailable: missing api key",
+                    severity="blocking",
+                )
+            ],
+        )
+    )
+    run_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=output, force_terminal=False, width=120),
+        raising=False,
+    )
+    monkeypatch.setattr(api_app, "create_app", lambda: fake_app)
+    monkeypatch.setattr(
+        "uvicorn.run",
+        lambda app, **kwargs: run_calls.append({"app": app, **kwargs}),
+    )
+
+    cli_module._run_api_server(host="127.0.0.1", port=8420)
+
+    rendered = output.getvalue()
+    assert "降级模式" in rendered or "Degraded mode" in rendered
+    assert "llm_registry_unavailable" in rendered
+    assert "missing api key" in rendered
+    assert "extension popup settings" in rendered
+    assert run_calls and run_calls[0]["app"] is fake_app
 
 
 def test_start_refuses_unhealthy_database(
