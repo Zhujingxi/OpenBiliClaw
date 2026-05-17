@@ -88,6 +88,64 @@ def test_configure_logging_disables_rotation_when_size_is_zero(tmp_path: Path) -
     assert not isinstance(handler, RotatingFileHandler)
 
 
+def test_rotating_file_handler_preserves_exception_traceback(tmp_path: Path) -> None:
+    log_dir = tmp_path / "logs"
+    config = Config(
+        logging=LoggingConfig(
+            level="INFO",
+            file_level="DEBUG",
+            directory=str(log_dir),
+            filename="app.log",
+            max_file_size_mb=5,
+            backup_count=1,
+        )
+    )
+
+    configure_logging(config)
+    try:
+        raise ValueError("sentinel")
+    except ValueError:
+        logging.getLogger("openbiliclaw.test").exception("sentinel exception")
+
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, logging.FileHandler):
+            handler.flush()
+
+    text = (log_dir / "app.log").read_text(encoding="utf-8")
+    assert "sentinel exception" in text
+    assert "Traceback (most recent call last)" in text
+    assert "ValueError: sentinel" in text
+
+
+def test_plain_file_handler_preserves_exception_traceback(tmp_path: Path) -> None:
+    log_dir = tmp_path / "logs"
+    config = Config(
+        logging=LoggingConfig(
+            level="INFO",
+            file_level="DEBUG",
+            directory=str(log_dir),
+            filename="app.log",
+            max_file_size_mb=0,
+            backup_count=1,
+        )
+    )
+
+    configure_logging(config)
+    try:
+        raise ValueError("sentinel")
+    except ValueError:
+        logging.getLogger("openbiliclaw.test").exception("sentinel exception")
+
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, logging.FileHandler):
+            handler.flush()
+
+    text = (log_dir / "app.log").read_text(encoding="utf-8")
+    assert "sentinel exception" in text
+    assert "Traceback (most recent call last)" in text
+    assert "ValueError: sentinel" in text
+
+
 def test_configure_logging_rotates_oversized_existing_file(tmp_path: Path) -> None:
     log_dir = tmp_path / "logs"
     log_dir.mkdir()

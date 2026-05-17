@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING
 
 import httpx
@@ -9,7 +10,15 @@ from fastapi.testclient import TestClient
 
 from openbiliclaw.api.app import create_app
 from openbiliclaw.api.runtime_context import RuntimeContext
-from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig, load_config, save_config
+from openbiliclaw.config import (
+    Config,
+    LLMConfig,
+    LLMProviderConfig,
+    LoggingConfig,
+    load_config,
+    save_config,
+)
+from openbiliclaw.logging_setup import configure_logging
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -97,6 +106,42 @@ def test_put_config_rolls_back_when_hot_reload_fails(
     assert "simulated" in body["message"]
     assert config_path.read_bytes() == before
     assert (tmp_path / "config.toml.bak").read_bytes() == before
+
+
+def test_put_config_hot_reload_failure_file_log_keeps_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    log_dir = tmp_path / "logs"
+    configure_logging(
+        Config(
+            logging=LoggingConfig(
+                level="INFO",
+                file_level="DEBUG",
+                directory=str(log_dir),
+                filename="app.log",
+                max_file_size_mb=0,
+                backup_count=1,
+            )
+        )
+    )
+    client = _make_client(monkeypatch, tmp_path, _valid_config())
+
+    async def fail_rebuild(self: RuntimeContext, new_config: Config) -> None:  # noqa: ARG001
+        raise RuntimeError("simulated hot reload crash")
+
+    monkeypatch.setattr(RuntimeContext, "rebuild_from_config", fail_rebuild)
+
+    response = client.put("/api/config", json={"llm": {"openai": {"model": "gpt-4.1-mini"}}})
+
+    assert response.status_code == 200
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, logging.FileHandler):
+            handler.flush()
+    text = (log_dir / "app.log").read_text(encoding="utf-8")
+    assert "Config hot-reload failed" in text
+    assert "Traceback (most recent call last)" in text
+    assert "RuntimeError: simulated hot reload crash" in text
 
 
 def test_put_config_returns_500_when_rollback_restore_fails(
