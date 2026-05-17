@@ -80,6 +80,16 @@ SOURCE_LABELS = {
 
 _SOURCE_SHARE_ORDER = ("bilibili", "xiaohongshu", "douyin", "youtube")
 
+_RESETTABLE_CONFIG_FIELDS = {
+    "llm.openai.api_key": ("llm", "openai", "api_key"),
+    "llm.claude.api_key": ("llm", "claude", "api_key"),
+    "llm.gemini.api_key": ("llm", "gemini", "api_key"),
+    "llm.deepseek.api_key": ("llm", "deepseek", "api_key"),
+    "llm.openrouter.api_key": ("llm", "openrouter", "api_key"),
+    "llm.openai_compatible.api_key": ("llm", "openai_compatible", "api_key"),
+    "llm.embedding.api_key": ("llm", "embedding", "api_key"),
+}
+
 
 def _count_events_by_source_platform(database: Any) -> dict[str, int]:
     """Count stored behavior events by normalized source platform."""
@@ -3391,6 +3401,18 @@ def create_app(
 
         cfg = load_config()
         update = payload.model_dump(exclude_none=True)
+        reset_fields = [str(field) for field in update.pop("reset_fields", [])]
+        unknown_reset_fields = [
+            field for field in reset_fields if field not in _RESETTABLE_CONFIG_FIELDS
+        ]
+        if unknown_reset_fields:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "unknown_reset_fields",
+                    "fields": unknown_reset_fields,
+                },
+            )
 
         def _as_bool(value: object) -> bool:
             if isinstance(value, bool):
@@ -3422,6 +3444,7 @@ def create_app(
                 if provider_name in llm_data and isinstance(llm_data[provider_name], dict):
                     provider_cfg = getattr(cfg.llm, provider_name)
                     pdata = llm_data[provider_name]
+                    skipped_fields: list[str] = []
                     for field_name in (
                         "api_key",
                         "model",
@@ -3431,13 +3454,33 @@ def create_app(
                         "reasoning_effort",
                     ):
                         if field_name in pdata:
-                            setattr(provider_cfg, field_name, str(pdata[field_name]))
+                            new_value = str(pdata[field_name])
+                            if field_name == "api_key" and "*" in new_value:
+                                skipped_fields.append(f"{field_name}=masked")
+                                continue
+                            existing = getattr(provider_cfg, field_name, "")
+                            if (
+                                not new_value.strip()
+                                and isinstance(existing, str)
+                                and existing.strip()
+                            ):
+                                skipped_fields.append(f"{field_name}=empty_skip")
+                                continue
+                            setattr(provider_cfg, field_name, new_value)
+                    if skipped_fields:
+                        logger.debug(
+                            "PUT /api/config: provider %s skipped fields: %s",
+                            provider_name,
+                            ", ".join(skipped_fields),
+                        )
             if "embedding" in llm_data and isinstance(llm_data["embedding"], dict):
                 emb = llm_data["embedding"]
                 if "provider" in emb:
                     cfg.llm.embedding.provider = str(emb["provider"])
                 if "model" in emb:
-                    cfg.llm.embedding.model = str(emb["model"])
+                    new_model = str(emb["model"])
+                    if new_model.strip() or not cfg.llm.embedding.model.strip():
+                        cfg.llm.embedding.model = new_model
                 # v0.3.32+ — embedding owns api_key/base_url. Skip the
                 # api_key write when the payload echoes back the masked
                 # value (e.g. ``sk-d****a826``) so we don't overwrite the
@@ -3445,10 +3488,15 @@ def create_app(
                 # contains ``*``.
                 if "api_key" in emb:
                     new_key = str(emb["api_key"])
-                    if "*" not in new_key:
+                    if (
+                        "*" not in new_key
+                        and (new_key.strip() or not cfg.llm.embedding.api_key.strip())
+                    ):
                         cfg.llm.embedding.api_key = new_key
                 if "base_url" in emb:
-                    cfg.llm.embedding.base_url = str(emb["base_url"])
+                    new_base_url = str(emb["base_url"])
+                    if new_base_url.strip() or not cfg.llm.embedding.base_url.strip():
+                        cfg.llm.embedding.base_url = new_base_url
                 if "similarity_threshold" in emb:
                     cfg.llm.embedding.similarity_threshold = float(emb["similarity_threshold"])
             for module_name in ("soul", "discovery", "recommendation", "evaluation"):
@@ -3576,6 +3624,12 @@ def create_app(
             ):
                 if key in ldata:
                     setattr(cfg.logging, key, int(ldata[key]))
+
+        for field in reset_fields:
+            target = _RESETTABLE_CONFIG_FIELDS[field]
+            section = getattr(cfg, target[0])
+            subsection = getattr(section, target[1])
+            setattr(subsection, target[2], "")
 
         # Save to disk
         saved_path = save_config(cfg)

@@ -652,6 +652,7 @@ class ConfigUpdateIn(BaseModel):
 
     language: str | None = None
     data_dir: str | None = None
+    reset_fields: list[str] | None = None
     llm: dict[str, object] | None = None
     bilibili: dict[str, object] | None = None
     sources: dict[str, object] | None = None
