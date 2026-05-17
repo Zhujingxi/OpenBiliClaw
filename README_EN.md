@@ -17,12 +17,12 @@
 
 ---
 
-## 📌 v0.3.73 Highlights (2026-05-17)
+## 📌 v0.3.74 Highlights (2026-05-17)
 
-- **💸 Popup runtime cost switches** — pause daemon-owned background LLM work from the top of the popup, or pause it automatically after the browser closes; automatic refresh, precompute, account sync, speculation, and proactive push are gated, while explicit CLI / API actions still run.
-- **🧷 Runtime-stream presence no longer gets stuck** — `/api/runtime-stream` now has a receive-side disconnect detector, so browser idle disconnects enter the grace window instead of leaving extension presence permanently online.
-- **⚙️ Config / API / CLI visibility** — `config.toml`, `/api/config`, the popup settings page, `config-show`, and `start` / `serve-api` WARN output all expose `pause_on_extension_disconnect` and the grace seconds.
-- **🔌 Configurable backend port stays supported** — popup requests, service worker requests, cookie sync, XHS / Douyin / YouTube task dispatchers, and debug relays still resolve the current port through shared helpers.
+- **🧯 Config deadlock recovery** — `/api/config` now validates before writing, rolls back failed hot reloads, and degraded boot still lets the popup settings page save recovery config.
+- **🧷 Settings no longer erase config** — masked keys and non-empty model/base URL/header/reasoning fields are preserved; only explicit reset can clear allowlisted API keys.
+- **🧩 Unified MiMo / non-OpenAI JSON tolerance** — recommendation, discovery, delight, awareness, and insight share structured-output parsing for wrappers, fenced JSON, JSONL, and schema echo.
+- **🔇 Ollama embedding and log diagnostics** — local Ollama embedding with empty credentials no longer emits fallback warnings; file traceback preservation is locked by tests.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -397,10 +397,12 @@ OpenBiliClaw/
 │   ├── recommendation/        # Recommendation & expression engine
 │   ├── sources/               # Source adapters and XHS/Douyin/YouTube task bridges
 │   ├── youtube/               # Google Takeout import parser
+│   ├── api/                   # Local FastAPI (config rollback / degraded mode / popup API)
+│   ├── runtime/               # Refresh, presence gate, auto-update, degraded RuntimeContext
 │   ├── bilibili/              # Bilibili API layer (WBI signing · rate control)
-│   ├── llm/                   # Multi-model LLM adapters
+│   ├── llm/                   # Multi-model LLM adapters + structured JSON tolerance
 │   └── storage/               # Data storage layer
-├── extension/                 # Chrome browser extension (Bilibili + XHS + Douyin + YouTube)
+├── extension/                 # Chrome browser extension (Bilibili + XHS + Douyin + YouTube + degraded config recovery)
 ├── skills/                    # Built-in Skill definitions
 ├── docs/                      # Documentation
 └── tests/                     # Tests (650+)
@@ -432,7 +434,7 @@ OpenBiliClaw/
 
 ## 📜 Release History
 
-Latest: **v0.3.73: popup runtime cost switches (2026-05-17)**. The top highlight callout keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md), with packages on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases).
+Latest: **v0.3.74: Config deadlock recovery (2026-05-17)**. The top highlight callout keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md), with packages on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases).
 
 ## 🗺️ Roadmap
 

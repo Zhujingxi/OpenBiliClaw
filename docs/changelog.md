@@ -6,7 +6,15 @@
 
 ## v0.3.74: Config deadlock recovery（2026-05-17）
 
+- `/api/config` 保存改为先校验再写盘，写入前生成 `config.toml.bak`，热重载失败时自动回滚；响应新增 `rollback_applied` / `restart_required`，避免错误配置把 daemon 卡进无法从 popup 修复的死锁。
+- 配置保存会保留后端返回的 masked key、非空 `model/base_url/http_referer/x_title/reasoning_effort` 与 embedding 凭据；只有显式 `reset_fields` 才会清空允许列表里的 API Key，避免 settings UI 把真实 key 或模型名写成空值。
+- FastAPI 生产启动遇到 `RegistryBuildError` 时进入降级模式：`/api/health`、`/api/config`、`/api/runtime-status` 和 `/api/runtime-stream` 仍可用，非配置接口返回 503；popup 可在离线缓存或降级配置页中保存修复配置，降级保存会提示重启。
+- Popup 设置页缓存最近一次成功的配置快照；后端离线时可用缓存填表，后端降级时展示具体配置问题并把保存按钮切到“保存并提示重启”。
 - 后端自动更新改为直接查询 GitHub `/tags` 并只接受 `backend-v*`（兼容 legacy `v*` / 裸 semver）作为后端版本来源，明确忽略 `extension-v*`；当 tag 列表里暂时没有 backend tag 时返回 `no_backend_tag_yet`，不再把扩展 release 误判成 "Already up-to-date"。
+- LLM 结构化输出解析收敛到共享 helper，recommendation、delight、discovery eval-batch、awareness、insight、dialogue insight、profile builder 和 speculator 都能兼容 MiMo / 非 OpenAI provider 常见的 object wrapper、fenced JSON、JSONL、schema echo 与 malformed `{ [ ... ] }` 数组包裹。
+- `embedding.provider="ollama"` 且 embedding `api_key/base_url` 为空时直接使用本地 Ollama 默认地址，不再发出向后兼容 credential fallback WARNING；远端 provider 仍保留一次性 warning。
+- 文件日志 traceback 保留加回归测试锁定：rotating file handler、plain file handler 和配置热重载异常都会把 stack trace 写进文件日志。
+- 后端包版本提升到 v0.3.74；浏览器插件版本提升到 v0.3.26，准备发布 `extension-v0.3.26`；Chrome / Edge / Brave 走 `openbiliclaw-extension-v0.3.26.zip`，Firefox 140+ 走 `openbiliclaw-extension-v0.3.26-firefox.zip`。
 
 ---
 

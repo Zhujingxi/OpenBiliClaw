@@ -19,12 +19,12 @@
 
 ---
 
-## 📌 v0.3.73 重要更新（2026-05-17）
+## 📌 v0.3.74 重要更新（2026-05-17）
 
-- **💸 Popup 运行时省钱开关** —— 顶部可一键暂停 daemon-owned 后台 LLM，或开启「关浏览器后暂停后台」；自动刷新、补池预计算、账户同步、猜测兴趣和主动推送会被 gate，手动 CLI / API 操作不受影响。
-- **🧷 runtime-stream presence 不再卡住** —— 后端 `/api/runtime-stream` 增加 receive-side disconnect detector，浏览器 idle disconnect 后会进入宽限窗口，而不是让 extension presence 永远保持在线。
-- **⚙️ 配置 / API / CLI 全链路可见** —— `config.toml`、`/api/config`、popup 设置页、`config-show` 以及 `start` / `serve-api` WARN 都同步暴露 `pause_on_extension_disconnect` 和宽限秒数。
-- **🔌 后端端口可配置继续保留** —— popup、service worker、cookie 同步、XHS / Douyin / YouTube 任务派发和调试中继仍通过共享 helper 解析当前端口。
+- **🧯 配置死锁恢复** —— `/api/config` 先校验再写盘，热重载失败自动回滚；启动遇到 LLM registry 配置错误时进入降级模式，popup 仍能打开设置页保存修复配置。
+- **🧷 设置页不再擦配置** —— masked key、非空 model/base_url/header/reasoning 字段会被保留，只有显式 reset 才会清空允许列表里的 API Key。
+- **🧩 MiMo / 非 OpenAI JSON 容错统一** —— recommendation、discovery、delight、awareness 和 insight 共用结构化输出解析，兼容 object wrapper、fenced JSON、JSONL 和 schema echo。
+- **🔇 Ollama embedding 与日志诊断** —— 本地 Ollama embedding 空凭据不再刷 fallback warning；文件日志 traceback 保留由回归测试锁定。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
@@ -458,10 +458,12 @@ OpenBiliClaw/
 │   │   ├── yt_tasks           # YouTube 插件任务队列 / bootstrap_profile
 │   │   └── web_adapter        # 通用 Web (Playwright + LLM)
 │   ├── youtube/               # YouTube Takeout 离线导入解析
+│   ├── api/                   # 本地 FastAPI (配置回滚 / 降级模式 / popup API)
+│   ├── runtime/               # 后台刷新、presence gate、自动更新、降级 RuntimeContext
 │   ├── bilibili/              # B 站接入层 (WBI 签名 · 速率控制)
-│   ├── llm/                   # 多模型 LLM 适配
+│   ├── llm/                   # 多模型 LLM 适配 + 结构化 JSON 容错
 │   └── storage/               # 数据存储层
-├── extension/                 # Chrome 浏览器插件 (B 站 + 小红书 + 抖音 + YouTube)
+├── extension/                 # Chrome 浏览器插件 (B 站 + 小红书 + 抖音 + YouTube + 降级配置修复)
 ├── skills/                    # 内置 Skill 定义
 ├── docs/                      # 项目文档
 └── tests/                     # 测试 (800+)
@@ -495,7 +497,7 @@ OpenBiliClaw/
 
 ## 📜 更新日志
 
-最新版本：**v0.3.73: Popup 运行时省钱开关（2026-05-17）**。README 顶部保留最新重要更新；完整历史见 [docs/changelog.md](docs/changelog.md)，发布包见 [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases)。
+最新版本：**v0.3.74: Config deadlock recovery（2026-05-17）**。README 顶部保留最新重要更新；完整历史见 [docs/changelog.md](docs/changelog.md)，发布包见 [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases)。
 
 ## 🗺️ 后续规划
 

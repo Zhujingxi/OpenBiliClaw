@@ -338,6 +338,8 @@ YouTube discovery 开关。初始化画像由浏览器扩展读取观看历史 /
 
 启动时如果现有日志文件已经超过 `max_file_size_mb`，会被重命名为 `<filename>.1`（覆盖旧的 `.1`）并重新开始写入——这样意外堆积的大日志不会在下次启动时继续增长。运行时到达上限则由 `RotatingFileHandler` 正常轮转：`app.log` → `app.log.1` → `app.log.2` → …，超出 `backup_count` 的旧份自动丢弃。
 
+文件日志使用标准 formatter 写入异常 traceback；`RotatingFileHandler`、plain `FileHandler` 和 `/api/config` 热重载异常路径都有回归测试覆盖，避免 Windows / 非轮转配置下只留下错误摘要而丢失 stack trace。
+
 ## 插件设置页覆盖范围
 
 浏览器插件的设置页通过后端 `/api/config` 读取和保存配置。当前 UI 已覆盖常用和高风险易漏项：
@@ -349,6 +351,29 @@ YouTube discovery 开关。初始化画像由浏览器扩展读取观看历史 /
 - 日志：控制台 / 文件级别、日志目录和文件名、轮转与非托管日志清理参数
 
 保留但不单独暴露的字段主要是目前只有一个有效值的内部兼容项，例如 `[sources.douyin].mode = "direct"`；保存时插件会继续按当前支持值写回，不会删除其他高级字段。
+
+## `/api/config` 保存与恢复语义
+
+设置页和外部调用方都走同一条配置 API。`GET /api/config` 默认会 mask API Key；`PUT /api/config` 只更新请求体里出现的字段，并遵循以下安全规则：
+
+- masked key（例如 `sk-****abcd`）不会写回 `config.toml`，避免把真实密钥覆盖成星号。
+- 已有非空的 `model`、`base_url`、OpenRouter headers、DeepSeek `reasoning_effort` 和 embedding `model/base_url/api_key` 不会被空字符串覆盖；空值只在旧值本来为空时写入。
+- 需要真正清空 API Key 时，调用方必须传 `reset_fields`。当前允许值为 `llm.openai.api_key`、`llm.claude.api_key`、`llm.gemini.api_key`、`llm.deepseek.api_key`、`llm.openrouter.api_key`、`llm.openai_compatible.api_key`、`llm.embedding.api_key`；未知字段返回 400。
+- 写盘前会先用新配置构建 LLM registry；blocking issue 会返回 400 且不写入 `config.toml`。
+- 写盘前会生成 `config.toml.bak`。正常模式下热重载失败会尝试恢复备份，并在响应里设置 `rollback_applied=true`；如果备份恢复也失败，接口返回 500 和人工恢复提示。
+
+`PUT /api/config` 返回 `ConfigUpdateResponse`：
+
+| 字段 | 说明 |
+|------|------|
+| `ok` | 请求是否完成。校验失败时为 `false`。 |
+| `reloaded` | 是否已热重载运行时组件。 |
+| `rollback_applied` | 热重载失败后是否已从 `config.toml.bak` 回滚。 |
+| `restart_required` | 新配置是否已写入但需要重启 daemon 才能生效。降级模式保存会返回 `true`。 |
+| `config` | 保存后或回滚后的配置快照，API Key 仍默认 masked。 |
+| `message` | 给 UI 展示的人类可读状态。 |
+
+当 daemon 因 LLM registry 配置错误进入降级模式时，`GET /api/config` 会返回 `degraded=true`、`degraded_reason="llm_registry_unavailable"` 和 blocking issues；`PUT /api/config` 会保存修复配置但不尝试热重载，返回 `restart_required=true`，要求用户重启 daemon。
 
 ## 环境变量
 

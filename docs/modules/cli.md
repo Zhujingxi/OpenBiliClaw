@@ -160,6 +160,8 @@ WARN extension presence required; backend will pause background LLM work after g
 
 这表示 daemon-owned 后台 LLM / embedding 工作需要浏览器插件保持 `runtime-stream` 在线，或仍处于断开后的宽限窗口内；手动 CLI/API 操作不受这个 WARN 影响。
 
+如果配置导致 LLM registry 无法构建，`start` 不会直接让 popup 完全失联，而是以降级模式启动本地 API，并在 uvicorn 启动前打印 `降级模式 / Degraded mode` 面板。面板会列出 `llm_registry_unavailable` 和 blocking issue，并提示打开扩展设置页保存修复配置后重启 daemon。
+
 如果数据库已损坏：
 
 ```bash
@@ -200,6 +202,7 @@ $ openbiliclaw serve-api --host 0.0.0.0 --port 8420
 
 推荐容器内使用该命令作为启动入口。
 当 `scheduler.pause_on_extension_disconnect=true` 时，`serve-api` 与 `start` 一样会在 uvicorn 启动前打印 extension presence WARN，提醒容器后端若没有插件客户端连接，后台 LLM 工作会在宽限期后暂停。
+当配置进入降级模式时，`serve-api` 也会打印同一张 `降级模式 / Degraded mode` 面板；容器或脚本可继续通过 `/api/config` 写入修复配置，再重启服务让新 registry 生效。
 
 ### `openbiliclaw delight`
 
