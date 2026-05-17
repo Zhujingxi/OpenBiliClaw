@@ -3,9 +3,24 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from datetime import datetime
+from types import SimpleNamespace
+
+import pytest
 
 from openbiliclaw.recommendation.delight import DEFAULT_DELIGHT_THRESHOLD
+from openbiliclaw.runtime.presence import PresenceTracker
 from openbiliclaw.runtime.refresh import ContinuousRefreshController
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
 
 
 class _FakeMemoryManager:
@@ -250,6 +265,185 @@ class _FakeEventHub:
 
     async def publish(self, event: dict[str, object]) -> None:
         self.events.append(event)
+
+
+_LOOP_BODY_ATTRS = [
+    ("_loop_refresh", ("_on_profile_ready_if_first_time", "refresh_if_needed")),
+    ("_loop_pool_precompute", ("_drain_pool_precompute_backlog",)),
+    ("_loop_soul_pipeline", ("_tick_soul_pipeline",)),
+    ("_loop_xhs_producer", ("_tick_xhs_producer",)),
+    ("_loop_douyin_producer", ("_tick_douyin_producer",)),
+    (
+        "_loop_proactive_push",
+        (
+            "prepare_delight_candidates",
+            "_publish_delight_if_available",
+            "_publish_interest_probe_if_available",
+        ),
+    ),
+]
+
+
+def _controller_with_gate(
+    *,
+    scheduler_config: object,
+    presence: PresenceTracker | None = None,
+) -> ContinuousRefreshController:
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase(events=[]),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        scheduler_config=scheduler_config,
+        presence=presence or PresenceTracker(now=_FakeClock()),
+        check_interval_seconds=3600,
+        proactive_push_interval_seconds=3600,
+    )
+    controller._init_grace_consumed = True
+    return controller
+
+
+async def _run_one_loop_with_cancelled_sleep(
+    monkeypatch: pytest.MonkeyPatch,
+    controller: ContinuousRefreshController,
+    loop_name: str,
+    body_attrs: tuple[str, ...],
+) -> int:
+    calls = 0
+
+    async def _body(*_args: object, **_kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        return None
+
+    async def _cancel_sleep(_seconds: float) -> None:
+        raise asyncio.CancelledError
+
+    for body_attr in body_attrs:
+        monkeypatch.setattr(controller, body_attr, _body)
+    monkeypatch.setattr(asyncio, "sleep", _cancel_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await getattr(controller, loop_name)()
+    return calls
+
+
+@pytest.mark.parametrize(("loop_name", "body_attrs"), _LOOP_BODY_ATTRS)
+async def test_refresh_loops_skip_body_when_scheduler_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    loop_name: str,
+    body_attrs: tuple[str, ...],
+) -> None:
+    controller = _controller_with_gate(
+        scheduler_config=SimpleNamespace(enabled=False, pause_on_extension_disconnect=False),
+    )
+
+    calls = await _run_one_loop_with_cancelled_sleep(
+        monkeypatch,
+        controller,
+        loop_name,
+        body_attrs,
+    )
+
+    assert calls == 0
+
+
+@pytest.mark.parametrize(("loop_name", "body_attrs"), _LOOP_BODY_ATTRS)
+async def test_refresh_loops_skip_body_when_extension_presence_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+    loop_name: str,
+    body_attrs: tuple[str, ...],
+) -> None:
+    clock = _FakeClock()
+    presence = PresenceTracker(now=clock)
+    clock.advance(11)
+    controller = _controller_with_gate(
+        scheduler_config=SimpleNamespace(
+            enabled=True,
+            pause_on_extension_disconnect=True,
+            extension_disconnect_grace_seconds=10,
+        ),
+        presence=presence,
+    )
+
+    calls = await _run_one_loop_with_cancelled_sleep(
+        monkeypatch,
+        controller,
+        loop_name,
+        body_attrs,
+    )
+
+    assert calls == 0
+
+
+@pytest.mark.parametrize(("loop_name", "body_attrs"), _LOOP_BODY_ATTRS)
+async def test_refresh_loops_run_body_when_extension_presence_is_fresh(
+    monkeypatch: pytest.MonkeyPatch,
+    loop_name: str,
+    body_attrs: tuple[str, ...],
+) -> None:
+    controller = _controller_with_gate(
+        scheduler_config=SimpleNamespace(
+            enabled=True,
+            pause_on_extension_disconnect=True,
+            extension_disconnect_grace_seconds=10,
+        ),
+    )
+
+    calls = await _run_one_loop_with_cancelled_sleep(
+        monkeypatch,
+        controller,
+        loop_name,
+        body_attrs,
+    )
+
+    assert calls >= 1
+
+
+async def test_profile_ready_classify_is_skipped_while_llm_work_blocked() -> None:
+    class _ClassifyingRecommendationEngine(_FakeRecommendationEngine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.classify_calls = 0
+
+        async def classify_pool_backlog(self, *, profile: object, limit: int) -> int:
+            self.classify_calls += 1
+            return limit
+
+    rec_engine = _ClassifyingRecommendationEngine()
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase(events=[]),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=rec_engine,
+        scheduler_config=SimpleNamespace(enabled=False, pause_on_extension_disconnect=False),
+    )
+
+    await controller._on_profile_ready_if_first_time()
+
+    assert rec_engine.classify_calls == 0
+    assert controller._profile_ready_observed is False
+
+
+def test_refresh_controller_llm_work_allowed_delegates_to_shared_gate() -> None:
+    clock = _FakeClock()
+    presence = PresenceTracker(now=clock)
+    controller = _controller_with_gate(
+        scheduler_config=SimpleNamespace(
+            enabled=True,
+            pause_on_extension_disconnect=True,
+            extension_disconnect_grace_seconds=5,
+        ),
+        presence=presence,
+    )
+
+    assert controller._llm_work_allowed() is True
+
+    clock.advance(6)
+
+    assert controller._llm_work_allowed() is False
 
 
 class _FakeSpeculation:

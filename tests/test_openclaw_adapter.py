@@ -686,6 +686,8 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
             youtube=SimpleNamespace(enabled=False),
         ),
         scheduler=SimpleNamespace(
+            enabled=True,
+            pause_on_extension_disconnect=False,
             pool_target_count=30,
             pool_source_shares={
                 "bilibili": 8,
@@ -733,6 +735,8 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     assert services.runtime_controller.kwargs["pool_source_shares"] == {
         "bilibili": 8,
     }
+    assert services.runtime_controller.kwargs["scheduler_config"] is fake_config.scheduler
+    assert "presence" in services.runtime_controller.kwargs
 
 
 def test_build_openclaw_adapter_returns_ready_adapter(monkeypatch) -> None:

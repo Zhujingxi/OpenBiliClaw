@@ -10,8 +10,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
+from openbiliclaw.config import SchedulerConfig
 from openbiliclaw.discovery.pool_snapshot import build_pool_distribution_snapshot
 from openbiliclaw.recommendation.delight import DEFAULT_DELIGHT_THRESHOLD
+from openbiliclaw.runtime.presence import PresenceTracker, background_llm_work_allowed
 from openbiliclaw.soul.speculator import build_probe_axis, choose_next_probe_candidate
 
 if TYPE_CHECKING:
@@ -177,6 +179,8 @@ class ContinuousRefreshController:
     event_hub: Any | None = None
     xhs_producer: Any | None = None
     douyin_producer: Any | None = None
+    scheduler_config: Any = field(default_factory=SchedulerConfig)
+    presence: PresenceTracker = field(default_factory=PresenceTracker)
     signal_event_threshold: int = 6
     event_refresh_minutes: int = 0
     trending_refresh_hours: int = 3
@@ -254,6 +258,7 @@ class ContinuousRefreshController:
     # v_voucher storm. One refresh tick of grace = much fewer
     # exhausted retries on the first half-hour.
     _init_grace_consumed: bool = False
+    _last_llm_gate_allowed: bool = field(default=True, init=False)
 
     _signal_event_types = [
         "view",
@@ -264,6 +269,17 @@ class ContinuousRefreshController:
         "comment",
         "feedback",
     ]
+
+    def _llm_work_allowed(self) -> bool:
+        """Return whether daemon-owned background LLM / embedding work can run."""
+        allowed = background_llm_work_allowed(self.scheduler_config, self.presence)
+        if allowed != self._last_llm_gate_allowed:
+            logger.info(
+                "Background LLM work gate %s",
+                "allowed" if allowed else "blocked",
+            )
+            self._last_llm_gate_allowed = allowed
+        return allowed
 
     def get_runtime_status(self) -> dict[str, object]:
         """Build a lightweight runtime summary for popup or diagnostics."""
@@ -675,8 +691,9 @@ class ContinuousRefreshController:
             ├─ _loop_douyin_producer()   60s   Douyin discovery when under quota
             └─ _loop_proactive_push()    60s   delight + interest probe
         """
-        with suppress(Exception):
-            await self.prepare_delight_candidates()
+        if self._llm_work_allowed():
+            with suppress(Exception):
+                await self.prepare_delight_candidates()
         self._warn_on_stranded_source_shares()
         tasks = [
             asyncio.create_task(self._loop_refresh()),
@@ -696,8 +713,6 @@ class ContinuousRefreshController:
     async def _loop_refresh(self) -> None:
         """Discovery refresh — fills the candidate pool."""
         while True:
-            with suppress(Exception):
-                await self._on_profile_ready_if_first_time()
             # v0.3.61+: 30s init grace period. The very first refresh
             # tick after daemon start lands while Bilibili's WBI
             # rate-limit bucket is still saturated from init's history
@@ -711,7 +726,12 @@ class ContinuousRefreshController:
                     "Init grace period — skipping first refresh tick to let "
                     "Bilibili WBI bucket cool down (next tick will run normally)"
                 )
+            elif not self._llm_work_allowed():
+                await asyncio.sleep(self.check_interval_seconds)
+                continue
             else:
+                with suppress(Exception):
+                    await self._on_profile_ready_if_first_time()
                 with suppress(Exception):
                     await self.refresh_if_needed()
             await asyncio.sleep(self.check_interval_seconds)
@@ -734,6 +754,9 @@ class ContinuousRefreshController:
         by ``_run_refresh_plan`` so no LLM token double-spend.
         """
         while True:
+            if not self._llm_work_allowed():
+                await asyncio.sleep(self.check_interval_seconds)
+                continue
             with suppress(Exception):
                 await self._drain_pool_precompute_backlog()
             await asyncio.sleep(self.check_interval_seconds)
@@ -777,6 +800,8 @@ class ContinuousRefreshController:
         fallback ``topic_group=title[:N]`` (the ugly "屎屎/165/三花"
         debug we saw on 2026-05-05).
         """
+        if not self._llm_work_allowed():
+            return
         if self._profile_ready_observed:
             return
         if not self._is_initialized():
@@ -804,6 +829,9 @@ class ContinuousRefreshController:
     async def _loop_soul_pipeline(self) -> None:
         """Soul profile pipeline — buffer flushes, speculator, cognition."""
         while True:
+            if not self._llm_work_allowed():
+                await asyncio.sleep(self.check_interval_seconds)
+                continue
             with suppress(Exception):
                 await self._tick_soul_pipeline()
             await asyncio.sleep(self.check_interval_seconds)
@@ -811,6 +839,9 @@ class ContinuousRefreshController:
     async def _loop_xhs_producer(self) -> None:
         """XHS keyword production — Soul-driven search task generation."""
         while True:
+            if not self._llm_work_allowed():
+                await asyncio.sleep(self.check_interval_seconds)
+                continue
             with suppress(Exception):
                 await self._tick_xhs_producer()
             await asyncio.sleep(self.check_interval_seconds)
@@ -818,6 +849,9 @@ class ContinuousRefreshController:
     async def _loop_douyin_producer(self) -> None:
         """Douyin production — plugin/direct discovery when Douyin is below quota."""
         while True:
+            if not self._llm_work_allowed():
+                await asyncio.sleep(self.check_interval_seconds)
+                continue
             with suppress(Exception):
                 await self._tick_douyin_producer()
             await asyncio.sleep(self.check_interval_seconds)
@@ -831,6 +865,9 @@ class ContinuousRefreshController:
         contribute notification fatigue.
         """
         while True:
+            if not self._llm_work_allowed():
+                await asyncio.sleep(self.proactive_push_interval_seconds)
+                continue
             # Score un-scored pool items even when the discovery refresh
             # tick early-exits (pool_at_cap or below_threshold). Without
             # this, a steady-state pool that sits at cap silently starves

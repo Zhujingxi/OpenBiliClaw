@@ -20,6 +20,7 @@ from openbiliclaw.llm.service import LLMService
 from openbiliclaw.memory.manager import MemoryManager
 from openbiliclaw.recommendation.engine import RecommendationEngine
 from openbiliclaw.runtime.account_sync import AccountSyncService
+from openbiliclaw.runtime.presence import PresenceTracker
 from openbiliclaw.runtime.refresh import ContinuousRefreshController
 from openbiliclaw.runtime.source_policy import effective_pool_source_shares
 from openbiliclaw.soul.engine import SoulEngine
@@ -124,6 +125,7 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
 
     from openbiliclaw.runtime.douyin_producer import build_douyin_discovery_producer
 
+    presence = PresenceTracker()
     douyin_producer = build_douyin_discovery_producer(
         config=config,
         database=database,
@@ -139,6 +141,8 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         pool_target_count=config.scheduler.pool_target_count,
         pool_source_shares=effective_pool_source_shares(config),
         douyin_producer=douyin_producer,
+        scheduler_config=config.scheduler,
+        presence=presence,
     )
     account_sync_service = AccountSyncService(
         memory_manager=memory_manager,

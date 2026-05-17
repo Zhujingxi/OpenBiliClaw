@@ -307,6 +307,36 @@ async def test_account_sync_skips_when_unauthenticated_without_burning_throttle(
 
 
 @pytest.mark.asyncio
+async def test_account_sync_if_due_skips_without_fetching_when_llm_work_paused() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    client = _CookieAwareClient(
+        history_items=[_history_item("BVPAUSED", 200, "paused")],
+        is_authenticated=True,
+    )
+    soul = _FakeSoulEngine()
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=client,
+        soul_engine=soul,
+        llm_work_allowed=lambda: False,
+    )
+
+    result = await service.sync_if_due()
+
+    assert result == {
+        "synced": False,
+        "new_event_count": 0,
+        "reason": "llm_paused",
+    }
+    assert client.history_calls == 0
+    assert soul.calls == []
+    assert memory.events == []
+    assert not memory.state.get("last_account_sync_at")
+
+
+@pytest.mark.asyncio
 async def test_account_sync_uses_short_retry_interval_until_first_fetch_succeeds() -> None:
     """v0.3.57+: until the first authenticated history fetch lands,
     the per-tick due-check should not be gated by the 6-hour interval.

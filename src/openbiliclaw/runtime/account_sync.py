@@ -6,7 +6,10 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, ClassVar, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +66,7 @@ class AccountSyncService:
     max_items_per_folder: int = 50
     following_page_size: int = 100
     check_interval_seconds: int = 300
+    llm_work_allowed: Callable[[], bool] | None = None
     # v0.3.57+: tracks the cookie-not-ready → ready transition so
     # ``sync_if_due`` only emits the "auth ready" INFO log once per
     # session. Reset path is via fresh AccountSyncService instance,
@@ -88,6 +92,12 @@ class AccountSyncService:
                 "account_sync: bilibili cookie now ready — first history "
                 "fetch will run on this tick"
             )
+        if self.llm_work_allowed is not None and not self.llm_work_allowed():
+            return {
+                "synced": False,
+                "new_event_count": 0,
+                "reason": "llm_paused",
+            }
         state = self.memory_manager.load_account_sync_state()
         if not self._is_due(str(state.get("last_account_sync_at", ""))):
             return {

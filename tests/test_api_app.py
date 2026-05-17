@@ -64,6 +64,57 @@ class TestBackendAPI:
 
         assert ctx.presence is original_presence
 
+    @pytest.mark.asyncio
+    async def test_runtime_context_skips_startup_one_shots_when_llm_work_blocked(self) -> None:
+        from types import SimpleNamespace
+
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config
+
+        class FakeSpeculator:
+            def __init__(self) -> None:
+                self.force_tick_calls = 0
+
+            async def force_tick(self, *_args: object, **_kwargs: object) -> None:
+                self.force_tick_calls += 1
+
+        class FakeSoulEngine:
+            def __init__(self) -> None:
+                self._speculator = FakeSpeculator()
+                self.profile_calls = 0
+
+            async def get_profile(self) -> dict[str, object]:
+                self.profile_calls += 1
+                return {"profile": "ok"}
+
+        class FakeRecommendationEngine:
+            def __init__(self) -> None:
+                self.prewarm_calls = 0
+
+            async def prewarm_pool_mmr_embeddings(self) -> int:
+                self.prewarm_calls += 1
+                return 1
+
+        cfg = Config()
+        cfg.scheduler.enabled = False
+        soul = FakeSoulEngine()
+        rec = FakeRecommendationEngine()
+        ctx = RuntimeContext(
+            config=cfg,
+            memory_manager=SimpleNamespace(load_discovery_runtime_state=lambda: {}),
+            runtime_controller=object(),
+            account_sync_service=object(),
+            auto_update_service=object(),
+            soul_engine=soul,
+            recommendation_engine=rec,
+        )
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        await ctx.restart_background_tasks(app)
+
+        assert soul._speculator.force_tick_calls == 0
+        assert rec.prewarm_calls == 0
+
     def test_create_app_bootstrap_shares_database_with_memory_manager(
         self,
         monkeypatch,
@@ -260,6 +311,7 @@ class TestBackendAPI:
         class FakeAccountSyncService:
             def __init__(self, **kwargs) -> None:
                 self.kwargs = kwargs
+                captured["account_sync_kwargs"] = kwargs
 
         class FakeRuntimeEventHub:
             pass
@@ -292,7 +344,12 @@ class TestBackendAPI:
                     task_interval_seconds=45,
                 ),
             ),
-            scheduler=SimpleNamespace(pool_target_count=300, account_sync_interval_hours=24),
+            scheduler=SimpleNamespace(
+                enabled=True,
+                pause_on_extension_disconnect=False,
+                pool_target_count=300,
+                account_sync_interval_hours=24,
+            ),
         )
 
         monkeypatch.setattr("openbiliclaw.config.load_config", lambda: fake_config)
@@ -323,12 +380,18 @@ class TestBackendAPI:
         monkeypatch.setattr(runtime_events_module, "RuntimeEventHub", FakeRuntimeEventHub)
         monkeypatch.setattr(dialogue_module, "SocraticDialogue", FakeDialogue)
 
-        app_module.create_app()
+        app = app_module.create_app()
 
         assert captured["bilibili_request_concurrency"] == 2
         assert captured["llm_evaluation_concurrency"] == 2
         assert captured["engine_concurrency"] is captured["controller"]
         assert all(item is captured["controller"] for item in captured["strategy_concurrency"])
+        assert captured["runtime_controller_kwargs"]["scheduler_config"] is fake_config.scheduler
+        assert (
+            captured["runtime_controller_kwargs"]["presence"]
+            is app.state.runtime_context.presence
+        )
+        assert callable(captured["account_sync_kwargs"]["llm_work_allowed"])
 
     def test_cap_by_franchise_keeps_at_most_n_per_franchise(self) -> None:
         """Regression for the 'one popup full of 原神' bug. The API
