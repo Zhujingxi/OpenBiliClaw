@@ -6,21 +6,25 @@ import test from "node:test";
 import { updateRuntimeToggle } from "../popup/popup-api.js";
 import { __resetBackendEndpointForTests } from "../popup/popup-backend-config.js";
 
-test("popup exposes runtime pause toggles in top card and settings drawer", () => {
+test("scheduler toggles exist only in settings drawer, not in recommendation card", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
 
+  // Runtime toggles removed from recommendation card
   for (const id of ["cfgRuntimePauseLlm", "cfgRuntimePauseOnDisconnect"]) {
-    assert.match(popupHtml, new RegExp(`id="${id}"`), `${id} should exist in top card`);
-    assert.match(popupJs, new RegExp(`"${id}"`), `${id} should be wired in popup.js`);
+    assert.doesNotMatch(popupHtml, new RegExp(`id="${id}"`), `${id} should not exist in HTML`);
+    assert.doesNotMatch(popupJs, new RegExp(`"${id}"`), `${id} should not be wired in popup.js`);
   }
 
+  // Settings drawer retains the toggles
+  assert.match(popupHtml, /id="cfgSchedulerEnabled"/);
   assert.match(popupHtml, /id="cfgPauseOnDisconnect"/);
-  assert.match(popupHtml, /后台 LLM 总开关（关闭=省钱模式）/);
+  assert.match(popupHtml, /停止后台 LLM 请求/);
+  assert.match(popupHtml, /候选池为空时可能暂时没有推荐/);
+  assert.match(popupHtml, /离线期间不会自动补新内容/);
   assert.match(popupJs, /pause_on_extension_disconnect:\s*checked\("cfgPauseOnDisconnect"\)/);
   assert.match(popupJs, /cfg\.scheduler\?\.pause_on_extension_disconnect/);
   assert.match(popupJs, /function renderRuntimeToggles/);
-  assert.match(popupJs, /function bindRuntimeToggles/);
 });
 
 test("updateRuntimeToggle sends the matching scheduler patch", async () => {

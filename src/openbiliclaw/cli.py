@@ -5399,7 +5399,7 @@ def config_show() -> None:
         ("LLM", cfg.llm.default_provider),
         ("B站认证", cfg.bilibili.auth_method),
         ("定时任务", "开启" if cfg.scheduler.enabled else "关闭"),
-        ("后台 LLM 工作", "开启" if cfg.scheduler.enabled else "暂停（省钱模式）"),
+        ("停止后台 LLM 请求", "否" if cfg.scheduler.enabled else "是"),
         (
             "浏览器断开后暂停",
             _format_pause_on_disconnect_status(

@@ -49,7 +49,7 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 ### `openbiliclaw config-show`
 
 显示当前加载的配置、已注册的 LLM Provider 和最终生效的默认 Provider。
-配置概览会直接显示后台 LLM 总开关，以及「浏览器断开后暂停」是否启用和当前宽限秒数，方便确认 popup 里的省钱开关是否已经写入后端配置。
+配置概览会直接显示「停止后台 LLM 请求」是否启用，以及「浏览器断开后暂停」是否启用和当前宽限秒数，方便确认插件设置页里的调度配置是否已经写入后端配置。
 
 ```bash
 $ openbiliclaw config-show

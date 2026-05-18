@@ -193,8 +193,8 @@ def test_config_show_displays_runtime_pause_fields(
     result = runner.invoke(app, ["config-show"])
 
     assert result.exit_code == 0
-    assert "后台 LLM 工作" in result.stdout
-    assert "暂停（省钱模式）" in result.stdout
+    assert "停止后台 LLM 请求" in result.stdout
+    assert "是" in result.stdout
     assert "浏览器断开后暂停" in result.stdout
     assert "开启（宽限 45s）" in result.stdout
 

@@ -282,8 +282,8 @@ YouTube discovery 开关。初始化画像由浏览器扩展读取观看历史 /
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `enabled` | bool | `true` | 后台 LLM / embedding 工作总开关。关闭后 runtime 的刷新、补池预计算、账户同步、猜测兴趣和主动推送等 daemon-owned 后台任务都会跳过；手动 CLI / API 请求仍按显式操作执行 |
-| `pause_on_extension_disconnect` | bool | `false` | 省钱模式：开启后，daemon-owned 后台 LLM / embedding 工作只在浏览器插件有 `/api/runtime-stream` 连接、或刚断开仍处于宽限窗口内时运行 |
+| `enabled` | bool | `true` | 后台 LLM / embedding 工作总开关；插件设置页显示为「停止后台 LLM 请求」。关闭后 runtime 的刷新、补池预计算、账户同步、猜测兴趣和主动推送等 daemon-owned 后台任务都会跳过；手动 CLI / API 请求仍按显式操作执行。若候选池为空，推荐页可能暂时没有内容 |
+| `pause_on_extension_disconnect` | bool | `false` | 开启后，daemon-owned 后台 LLM / embedding 工作只在浏览器插件有 `/api/runtime-stream` 连接、或刚断开仍处于宽限窗口内时运行；离线期间不会自动补新内容 |
 | `extension_disconnect_grace_seconds` | int | `90` | 插件最后一个 `runtime-stream` 连接断开后的宽限秒数；小于等于 0 或无法解析时回退到 `90` |
 | `discovery_cron` | string | `"0 */8 * * *"` | 发现任务 cron 表达式；想更频繁刷新可改回 `"0 */4 * * *"` |
 | `pool_target_count` | int | `600` | discovery pool 的硬上限，同时作为期望保有的可换候选数量；允许范围 `1..600`。pool < 目标时会持续补货；pool ≥ 目标时任何 refresh（含 `force_refresh`）都直接返回 `pool_at_cap` 不再 discover；pool > 目标时会先按 `relevance_score` / 时间 / `explore` 优先顺序把溢出部分降为 `suppressed` |

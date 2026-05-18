@@ -20,6 +20,7 @@
 ## 📌 v0.3.77 Highlights (2026-05-18)
 
 - **🌐 Extension can connect to a LAN backend** — the settings page now has a backend host field, so the daemon can run on another machine in your LAN; Chrome and Firefox manifests both allow remote HTTP backend origins.
+- **⚙️ Background LLM controls moved back to settings** — the recommendation tab no longer shows the quick toggles; the settings page now explains that enabling them stops automatic replenishment, so an empty candidate pool may temporarily show no recommendations.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
