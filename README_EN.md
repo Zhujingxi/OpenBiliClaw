@@ -17,9 +17,9 @@
 
 ---
 
-## 📌 v0.3.76 Highlights (2026-05-18)
+## 📌 v0.3.77 Highlights (2026-05-18)
 
-- **🩹 Recommendation card hover no longer jitters** — removed `translateY` shift from the large card element, eliminating the visual jump and double-bounce on action buttons.
+- **🌐 Extension can connect to a LAN backend** — the settings page now has a backend host field, so the daemon can run on another machine in your LAN; Chrome and Firefox manifests both allow remote HTTP backend origins.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -104,6 +104,8 @@ Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/do
 ```
 
 The agent will clone the repo, install dependencies, start the backend, run a health check, and ask a few questions with defaults. If unsure, pick the default. Xiaohongshu, Douyin, and YouTube signals are used in the initial profile only when you explicitly opt in.
+
+If the backend runs on another machine in your LAN, start it with `openbiliclaw start --host 0.0.0.0 --port 8420`, then set the extension's "Backend host" field to that machine's LAN IP, for example `192.168.1.100`.
 
 ### 3. Log in to content platforms in the same browser
 
@@ -431,7 +433,7 @@ OpenBiliClaw/
 
 ## 📜 Release History
 
-Latest: **v0.3.75: Config save effectiveness and LLM routing fixes (2026-05-18)**. The top highlight callout keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md), with packages on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases).
+Latest: **v0.3.77: Browser extension LAN backend host configuration (2026-05-18)**. The top highlight callout keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md), with packages on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases).
 
 ## 🗺️ Roadmap
 
@@ -448,7 +450,7 @@ Contributions welcome! See the [Contributing Guide](docs/contributing.md) to get
 
 ## 🙏 Acknowledgements
 
-- Thanks to [@addtion99](https://github.com/addtion99) for proposing configurable browser-extension backend ports and sharing the popup-side implementation idea in [#8](https://github.com/whiteguo233/OpenBiliClaw/pull/8).
+- Thanks to [@addtion99](https://github.com/addtion99) for proposing configurable browser-extension backend host / port settings and sharing the popup-side implementation idea in [#8](https://github.com/whiteguo233/OpenBiliClaw/pull/8).
 
 ## ⭐ Star History
 

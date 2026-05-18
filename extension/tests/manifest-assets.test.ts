@@ -99,3 +99,18 @@ test("Firefox manifest declares required data collection categories", () => {
     ],
   );
 });
+
+test("Chrome and Firefox manifests allow remote HTTP backend hosts", () => {
+  const root = process.cwd();
+  const chromeManifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8")) as {
+    host_permissions?: string[];
+  };
+  const firefoxManifest = JSON.parse(
+    readFileSync(join(root, "manifest.firefox.json"), "utf8"),
+  ) as {
+    host_permissions?: string[];
+  };
+
+  assert.equal(chromeManifest.host_permissions?.includes("http://*/*"), true);
+  assert.equal(firefoxManifest.host_permissions?.includes("http://*/*"), true);
+});

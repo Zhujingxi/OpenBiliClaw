@@ -19,9 +19,9 @@
 
 ---
 
-## 📌 v0.3.76 重要更新（2026-05-18）
+## 📌 v0.3.77 重要更新（2026-05-18）
 
-- **🩹 推荐卡片 hover 不再抖动** —— 移除大面积卡片的 `translateY` 位移，消除 hover 时整体跳动和按钮二次弹跳。
+- **🌐 插件可连接局域网后端** —— 设置页新增「后端地址」，可把后端跑在局域网另一台机器上，并在 Chrome / Firefox 两套 manifest 中同步放开远程 HTTP 后端权限。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
@@ -160,6 +160,8 @@ npm run build:firefox          # 产出 dist-firefox/
 ```
 
 AI 助手会克隆仓库、安装依赖、启动后端、做健康检查，并问几个有默认值的问题。看不懂就选默认；小红书、抖音和 YouTube 数据只有你明确同意才会进入初始画像。
+
+如果后端跑在局域网另一台机器上，用 `openbiliclaw start --host 0.0.0.0 --port 8420` 启动后端，并在插件设置页把「后端地址」改成那台机器的局域网 IP（例如 `192.168.1.100`）。
 
 ### 3. 在同一个浏览器登录内容平台
 
@@ -494,7 +496,7 @@ OpenBiliClaw/
 
 ## 📜 更新日志
 
-最新版本：**v0.3.75: 配置保存生效与 LLM 路由修复（2026-05-18）**。README 顶部保留最新重要更新；完整历史见 [docs/changelog.md](docs/changelog.md)，发布包见 [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases)。
+最新版本：**v0.3.77: 浏览器插件局域网后端地址配置（2026-05-18）**。README 顶部保留最新重要更新；完整历史见 [docs/changelog.md](docs/changelog.md)，发布包见 [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases)。
 
 ## 🗺️ 后续规划
 
@@ -517,7 +519,7 @@ OpenBiliClaw 的目标是做你的**全网个性化内容入口**——从 B 站
 
 ## 🙏 致谢
 
-- 感谢 [@addtion99](https://github.com/addtion99) 在 [#8](https://github.com/whiteguo233/OpenBiliClaw/pull/8) 提出浏览器插件后端端口可配置需求，并给出 popup 侧实现思路。
+- 感谢 [@addtion99](https://github.com/addtion99) 在 [#8](https://github.com/whiteguo233/OpenBiliClaw/pull/8) 提出浏览器插件后端地址 / 端口可配置需求，并给出 popup 侧实现思路。
 
 ## ⭐ Star History
 

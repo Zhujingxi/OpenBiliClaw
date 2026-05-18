@@ -4,6 +4,13 @@
 
 ---
 
+## v0.3.77: 浏览器插件局域网后端地址配置（2026-05-18）
+
+- 浏览器插件设置页的后端 endpoint 从“仅端口可改”扩展为“后端地址 + 端口”一起配置：Chrome / Firefox manifest 都加入 `http://*/*` 权限，用户可把后端运行在局域网另一台机器上（`openbiliclaw start --host 0.0.0.0 --port 8420`），再在插件设置页填写该机器的局域网 IP；新增 host 校验、endpoint 持久化和 manifest 权限回归测试。
+- 浏览器插件版本提升到 v0.3.29，准备发布 `extension-v0.3.29`；Chrome / Edge / Brave 走 `openbiliclaw-extension-v0.3.29.zip`，Firefox 140+ 走 `openbiliclaw-extension-v0.3.29-firefox.zip`。
+
+---
+
 ## v0.3.76: 推荐卡片 hover 抖动修复（2026-05-18）
 
 - 移除推荐卡片（`.recommendation-card`）hover 时的 `transform: translateY(-1px)`，消除大面积元素整体位移 + 内部按钮二次位移导致的视觉抖动；保留 `border-color` 与 `box-shadow` 过渡作为 hover 反馈。

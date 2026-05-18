@@ -598,7 +598,7 @@ test("fetchChatTurn and fetchChatTurns read durable chat state", async () => {
   assert.equal(history.items[0].turn_id, "turn-abc");
 });
 
-test("popup-api requests honor configured backend port from chrome.storage.local", async () => {
+test("popup-api requests honor configured backend host and port from chrome.storage.local", async () => {
   // Reset module cache so the previous tests' default-port resolution
   // doesn't shadow the stubbed chrome.storage value.
   __resetBackendEndpointForTests();
@@ -609,7 +609,7 @@ test("popup-api requests honor configured backend port from chrome.storage.local
         get(_key: string, callback: (items: Record<string, unknown>) => void) {
           callback({
             popup_backend_endpoint: {
-              host: "127.0.0.1",
+              host: "192.168.1.100",
               port: 19090,
               basePath: "/api",
             },
@@ -633,7 +633,7 @@ test("popup-api requests honor configured backend port from chrome.storage.local
   try {
     await fetchConfig();
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].url, "http://127.0.0.1:19090/api/config?reveal_keys=true");
+    assert.equal(calls[0].url, "http://192.168.1.100:19090/api/config?reveal_keys=true");
   } finally {
     (globalThis as { chrome?: unknown }).chrome = originalChrome;
     __resetBackendEndpointForTests();

@@ -28,8 +28,9 @@ import {
 import { createRuntimeStreamClient } from "./popup-stream.js";
 import {
   getBackendEndpointConfig,
+  isValidBackendHost,
   isValidBackendPort,
-  updateBackendPort,
+  updateBackendEndpoint,
 } from "./popup-backend-config.js";
 import {
   appendRecommendations,
@@ -3883,6 +3884,7 @@ function bindSettings() {
   const toast = document.getElementById("settingsToast");
   const issuesContainer = document.getElementById("settingsIssues");
   const providerSelect = document.getElementById("cfgLlmProvider");
+  const backendHostInput = document.getElementById("cfgBackendHost");
   const backendPortInput = document.getElementById("cfgBackendPort");
   const bannerOffline = document.getElementById("cfgBannerOffline");
   const bannerDegraded = document.getElementById("cfgBannerDegraded");
@@ -3891,10 +3893,14 @@ function bindSettings() {
   if (!gearBtn || !overlay || !backBtn || !saveBtn) return;
 
   async function populateBackendEndpoint() {
-    if (!(backendPortInput instanceof HTMLInputElement)) return;
     try {
       const endpoint = await getBackendEndpointConfig();
-      backendPortInput.value = String(endpoint.port);
+      if (backendHostInput instanceof HTMLInputElement) {
+        backendHostInput.value = endpoint.host || "";
+      }
+      if (backendPortInput instanceof HTMLInputElement) {
+        backendPortInput.value = String(endpoint.port);
+      }
     } catch {
       // Fall back to the placeholder default if storage is unavailable.
     }
@@ -4400,22 +4406,28 @@ function bindSettings() {
     saveBtn.textContent = "保存中...";
     toast.hidden = true;
     try {
-      // Backend port lives in chrome.storage, not the backend's
+      // Backend endpoint lives in chrome.storage, not the backend's
       // config.toml — persist it locally first so the subsequent
-      // updateConfig() PUT targets the new origin (if the user
-      // restarted the daemon with --port <newPort>).
-      let portChanged = false;
-      let newPort = null;
-      if (backendPortInput instanceof HTMLInputElement) {
-        const portRaw = backendPortInput.value.trim();
-        if (!isValidBackendPort(portRaw)) {
-          showToast("后端端口必须是 1-65535 的整数。", "error");
-          return;
-        }
+      // updateConfig() PUT targets the new origin.
+      let endpointChanged = false;
+      let newEndpointLabel = null;
+      const hostRaw = backendHostInput instanceof HTMLInputElement
+        ? backendHostInput.value.trim() : "";
+      const portRaw = backendPortInput instanceof HTMLInputElement
+        ? backendPortInput.value.trim() : "";
+      if (hostRaw !== "" && !isValidBackendHost(hostRaw)) {
+        showToast("后端地址必须是有效的 IP 地址或主机名。", "error");
+        return;
+      }
+      if (portRaw !== "" && !isValidBackendPort(portRaw)) {
+        showToast("后端端口必须是 1-65535 的整数。", "error");
+        return;
+      }
+      {
         const previous = await getBackendEndpointConfig();
-        const next = await updateBackendPort(portRaw);
-        newPort = next.port;
-        portChanged = next.port !== previous.port;
+        const next = await updateBackendEndpoint(hostRaw, portRaw || "8420");
+        newEndpointLabel = `${next.host}:${next.port}`;
+        endpointChanged = next.host !== previous.host || next.port !== previous.port;
       }
 
       const data = collectForm();
@@ -4439,9 +4451,9 @@ function bindSettings() {
         if (renderStructuredConfigError(err)) {
           return;
         }
-        if (portChanged) {
+        if (endpointChanged) {
           showToast(
-            `端口已切换为 ${newPort}，但保存其余配置失败。请用 openbiliclaw start --port ${newPort} 启动后端后重试。`,
+            `后端已切换为 ${newEndpointLabel}，但保存其余配置失败。请确认后端已在该地址运行后重试。`,
             "warning",
           );
         } else {
@@ -4449,7 +4461,7 @@ function bindSettings() {
         }
       }
 
-      if (portChanged) {
+      if (endpointChanged) {
         // Rebind the runtime stream against the new origin and refresh
         // the online indicator. If the backend isn't yet running on the
         // new port these will retry per the WS backoff and the popup
