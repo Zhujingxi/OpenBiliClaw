@@ -124,7 +124,26 @@ class OpenAIProvider(LLMProvider):
         choice = response.choices[0]
         content = choice.message.content or ""
         if not content.strip():
-            raise LLMResponseError(f"{self._provider_name} returned empty content")
+            # Some local backends (notably LM Studio) return HTTP 200 and
+            # report completion_tokens > 0, yet ``message.content`` is
+            # empty when ``response_format`` is set to ``json_schema``.
+            # The model *did* generate output (visible in the backend UI)
+            # but the OpenAI-compat layer loses it.  Retry once with
+            # ``response_format`` removed — the prompt itself already asks
+            # for JSON, so the model will still produce valid output.
+            if json_mode and "response_format" in kwargs:
+                logger.warning(
+                    "%s returned empty content with response_format=%s; "
+                    "retrying without response_format constraint",
+                    self._provider_name,
+                    kwargs["response_format"].get("type", "?"),
+                )
+                kwargs.pop("response_format")
+                response = await self._request_with_retry(**kwargs)
+                choice = response.choices[0]
+                content = choice.message.content or ""
+            if not content.strip():
+                raise LLMResponseError(f"{self._provider_name} returned empty content")
 
         usage = None
         if response.usage:

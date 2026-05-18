@@ -102,6 +102,37 @@ async def test_openai_provider_uses_json_schema_for_lm_studio_json_mode(
 
 
 @pytest.mark.asyncio
+async def test_openai_provider_retries_without_response_format_when_lm_studio_returns_empty_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider(
+        api_key="lm-studio",
+        model="qwen3.5-9b",
+        base_url="http://127.0.0.1:1234/v1",
+        provider_name="openai_compatible",
+    )
+    seen_response_formats: list[object] = []
+
+    async def fake_request(**kwargs: object) -> SimpleNamespace:
+        seen_response_formats.append(kwargs.get("response_format"))
+        if len(seen_response_formats) == 1:
+            response_format = kwargs.get("response_format")
+            assert isinstance(response_format, dict)
+            assert response_format["type"] == "json_schema"
+            return _openai_response("")
+        assert "response_format" not in kwargs
+        return _openai_response('{"ok": true}')
+
+    monkeypatch.setattr(provider, "_request_with_retry", fake_request)
+
+    response = await provider.complete([{"role": "user", "content": "hi"}], json_mode=True)
+
+    assert response.content == '{"ok": true}'
+    assert len(seen_response_formats) == 2
+    assert seen_response_formats[1] is None
+
+
+@pytest.mark.asyncio
 async def test_openai_provider_retries_json_mode_with_schema_when_json_object_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -7,6 +7,7 @@
 ## v0.3.77: 浏览器插件局域网后端地址配置（2026-05-18）
 
 - 浏览器插件设置页的后端 endpoint 从“仅端口可改”扩展为“后端地址 + 端口”一起配置：Chrome / Firefox manifest 都加入 `http://*/*` 权限，用户可把后端运行在局域网另一台机器上（`openbiliclaw start --host 0.0.0.0 --port 8420`），再在插件设置页填写该机器的局域网 IP；新增 host 校验、endpoint 持久化和 manifest 权限回归测试。
+- 修复 [#27](https://github.com/whiteguo233/OpenBiliClaw/issues/27)：LM Studio 在 `json_schema` response format 下可能返回 HTTP 200 且后台 UI 可见模型输出，但 OpenAI-compatible API 的 `message.content` 为空；`OpenAIProvider` 现在会在结构化请求遇到这种空内容时移除 `response_format` 自动重试一次，避免偏好分析阶段直接报 `openai returned empty content`。
 - 浏览器插件版本提升到 v0.3.29，准备发布 `extension-v0.3.29`；Chrome / Edge / Brave 走 `openbiliclaw-extension-v0.3.29.zip`，Firefox 140+ 走 `openbiliclaw-extension-v0.3.29-firefox.zip`。
 
 ---
