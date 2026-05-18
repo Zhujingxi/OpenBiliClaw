@@ -17,12 +17,9 @@
 
 ---
 
-## 📌 v0.3.75 Highlights (2026-05-18)
+## 📌 v0.3.76 Highlights (2026-05-18)
 
-- **🧯 Config saves no longer wait on slow work** — post-reload speculator ticks now run in the background, and extension saves have a 60s timeout fallback.
-- **🎛️ Per-module LLM overrides now take effect** — `[llm.soul]` / `[llm.discovery]` / `[llm.recommendation]` / `[llm.evaluation]` route by caller bucket and can set provider/model per call.
-- **🧭 Override routing is explicit** — override provider errors and rate limits surface directly instead of silently spilling back to the default provider; mistyped providers log once then fall back.
-- **🧷 Model overrides do not mutate defaults** — per-call `model=` stays scoped to that request, so one soul / discovery call cannot change later default routing.
+- **🩹 Recommendation card hover no longer jitters** — removed `translateY` shift from the large card element, eliminating the visual jump and double-bounce on action buttons.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 

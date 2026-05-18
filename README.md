@@ -19,12 +19,9 @@
 
 ---
 
-## 📌 v0.3.75 重要更新（2026-05-18）
+## 📌 v0.3.76 重要更新（2026-05-18）
 
-- **🧯 配置保存不再卡慢** —— `/api/config` 热重载后的 speculator tick 已后台化，插件保存设置也有 60s 超时兜底。
-- **🎛️ 分模块 LLM 覆盖真正生效** —— `[llm.soul]` / `[llm.discovery]` / `[llm.recommendation]` / `[llm.evaluation]` 现在按 caller bucket 路由，并支持每次调用单独指定 provider/model。
-- **🧭 路由覆盖更可预期** —— override provider 报错或限流时直接暴露错误，不会偷偷 spill 回默认 provider；拼错 provider 只 INFO 一次后降级。
-- **🧷 模型覆盖不污染默认值** —— 单次 `model=` 覆盖不会写回 provider 实例，避免一次 soul / discovery 调用影响后续默认链。
+- **🩹 推荐卡片 hover 不再抖动** —— 移除大面积卡片的 `translateY` 位移，消除 hover 时整体跳动和按钮二次弹跳。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 

@@ -4,6 +4,13 @@
 
 ---
 
+## v0.3.76: 推荐卡片 hover 抖动修复（2026-05-18）
+
+- 移除推荐卡片（`.recommendation-card`）hover 时的 `transform: translateY(-1px)`，消除大面积元素整体位移 + 内部按钮二次位移导致的视觉抖动；保留 `border-color` 与 `box-shadow` 过渡作为 hover 反馈。
+- 浏览器插件版本提升到 v0.3.28，准备发布 `extension-v0.3.28`。
+
+---
+
 ## v0.3.75: 配置保存生效与 LLM 路由修复（2026-05-18）
 
 - `/api/config` 热重载后的 speculator tick 改为受 `BackgroundTaskRegistry` 管理的 detached task，保存配置不再等待一次可能很慢的 `force_tick()`；异常由 helper 记录并吞掉，避免后台补货失败反向影响配置保存响应。
