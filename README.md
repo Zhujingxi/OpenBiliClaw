@@ -19,11 +19,11 @@
 
 ---
 
-## 📌 v0.3.83 重要更新（2026-05-19）
+## 📌 v0.3.84 重要更新（2026-05-20）
 
-- **🧩 插件设置页分组** —— 后端设置按「模型 / 平台源 / 调度 / 通用 / 日志」分 tab，平台源和候选池占比放到一起，不再挤在一个长列表里。
-- **▶️ YouTube 配置补齐** —— `[sources.youtube]` 现在可配置 search / trending / channel 三条 discovery 策略预算，并可从插件设置页保存。
-- **🚀 双通道发布** —— 后端版本提升到 `backend-v0.3.83`，浏览器插件版本提升到 `extension-v0.3.34`。
+- **🚀 安装自动 init 收敛** —— Bash / PowerShell / Docker / AI agent 安装渠道都会在确认 embedding、B 站 Cookie 来源和小红书 / 抖音 / YouTube opt-in 后自动运行 init。
+- **🐳 Docker runtime 配置同步** —— `agent_bootstrap.py --mode docker` 会把确认后的配置同步进容器 `/app/runtime`，再触发容器内 init；手动 `docker exec ... init` 只保留为 fallback。
+- **📦 后端发布** —— 后端版本提升到 `backend-v0.3.84`；浏览器插件版本保持 `extension-v0.3.34`。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 

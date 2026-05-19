@@ -17,11 +17,11 @@
 
 ---
 
-## 📌 v0.3.83 Highlights (2026-05-19)
+## 📌 v0.3.84 Highlights (2026-05-20)
 
-- **🧩 Tabbed extension settings** — backend settings are split into Models / Sources / Scheduler / General / Logs, with source toggles and pool shares grouped together.
-- **▶️ YouTube config parity** — `[sources.youtube]` can now tune search / trending / channel discovery budgets, and those fields are editable from the extension settings page.
-- **🚀 Split-channel release** — backend bumps to `backend-v0.3.83`, and the browser extension bumps to `extension-v0.3.34`.
+- **🚀 Auto-init across install channels** — Bash, PowerShell, Docker, and AI-agent install paths confirm embedding, Bilibili cookie source, and Xiaohongshu / Douyin / YouTube opt-ins before automatically running init.
+- **🐳 Docker runtime config sync** — `agent_bootstrap.py --mode docker` copies confirmed config into the container's `/app/runtime` before triggering init; manual `docker exec ... init` remains a fallback.
+- **📦 Backend release** — backend bumps to `backend-v0.3.84`; the browser extension remains at `extension-v0.3.34`.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
