@@ -73,6 +73,7 @@ from openbiliclaw.api.models import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -562,19 +563,38 @@ def create_app(
                 }
             )
 
-    @app.get("/api/health", response_model=HealthResponse)
+    def _health_profile_ready() -> bool | None:
+        soul_engine = getattr(ctx, "soul_engine", None)
+        if soul_engine is None:
+            return None
+        is_ready_candidate = getattr(soul_engine, "is_profile_ready", None)
+        if not callable(is_ready_candidate):
+            return None
+        is_ready_fn = cast("Callable[[], bool]", is_ready_candidate)
+        try:
+            return bool(is_ready_fn())
+        except Exception:
+            logger.debug("Health profile readiness check failed", exc_info=True)
+            return None
+
+    @app.get("/api/health", response_model=HealthResponse, response_model_exclude_none=True)
     def health() -> HealthResponse | JSONResponse:
+        profile_ready = _health_profile_ready()
         if bool(getattr(ctx, "degraded", False)):
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "status": "degraded",
-                    "service": "openbiliclaw-api",
-                    "reason": str(getattr(ctx, "degraded_reason", "")),
-                    "issues": _degraded_issues_payload(),
-                },
-            )
-        return HealthResponse(status="ok", service="openbiliclaw-api")
+            body: dict[str, object] = {
+                "status": "degraded",
+                "service": "openbiliclaw-api",
+                "reason": str(getattr(ctx, "degraded_reason", "")),
+                "issues": _degraded_issues_payload(),
+            }
+            if profile_ready is not None:
+                body["profile_ready"] = profile_ready
+            return JSONResponse(status_code=200, content=body)
+        return HealthResponse(
+            status="ok",
+            service="openbiliclaw-api",
+            profile_ready=profile_ready,
+        )
 
     @app.post("/api/bilibili/cookie", response_model=BilibiliCookieResponse)
     async def sync_bilibili_cookie(payload: BilibiliCookieIn) -> BilibiliCookieResponse:

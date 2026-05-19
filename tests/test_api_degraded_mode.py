@@ -152,7 +152,7 @@ def test_degraded_runtime_stream_sends_degraded_event_and_stays_open(
         assert event["issues"]
 
 
-def test_normal_boot_health_payload_is_unchanged(
+def test_normal_boot_health_payload_reports_profile_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
@@ -163,7 +163,11 @@ def test_normal_boot_health_payload_is_unchanged(
     response = client.get("/api/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "service": "openbiliclaw-api"}
+    assert response.json() == {
+        "status": "ok",
+        "service": "openbiliclaw-api",
+        "profile_ready": False,
+    }
 
 
 def test_restart_after_degraded_recovery_config_boots_normal(
@@ -184,4 +188,5 @@ def test_restart_after_degraded_recovery_config_boots_normal(
     assert normal_client.get("/api/health").json() == {
         "status": "ok",
         "service": "openbiliclaw-api",
+        "profile_ready": False,
     }

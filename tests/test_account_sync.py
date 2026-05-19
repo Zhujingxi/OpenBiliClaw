@@ -41,6 +41,26 @@ class _FakeSoulEngine:
         self.calls.append(events)
 
 
+class _BootstrapSoulEngine(_FakeSoulEngine):
+    def __init__(self, *, ready: bool = False, fail_bootstrap: bool = False) -> None:
+        super().__init__()
+        self.ready = ready
+        self.fail_bootstrap = fail_bootstrap
+        self.ready_checks = 0
+        self.bootstrap_calls: list[list[dict[str, Any]]] = []
+
+    def is_profile_ready(self) -> bool:
+        self.ready_checks += 1
+        return self.ready
+
+    async def build_initial_profile(self, history: list[dict[str, Any]]) -> object:
+        self.bootstrap_calls.append(history)
+        if self.fail_bootstrap:
+            raise RuntimeError("bootstrap boom")
+        self.ready = True
+        return object()
+
+
 @dataclass
 class _FakeClient:
     history_items: list[dict[str, Any]]
@@ -197,6 +217,51 @@ async def test_account_sync_imports_new_favorites_and_following() -> None:
     assert {event["event_type"] for event in memory.events} == {"favorite", "follow"}
     assert memory.state["favorite_signature"] == "7:BVFRESH"
     assert memory.state["following_signature"] == "99"
+
+
+@pytest.mark.asyncio
+async def test_account_sync_auto_bootstraps_empty_soul_profile_after_events() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    soul = _BootstrapSoulEngine(ready=False)
+    client = _FakeClient(
+        history_items=[_history_item("BVPROFILE", 101, "profile seed")],
+        favorites=[],
+        following=[],
+    )
+    service = AccountSyncService(memory_manager=memory, bilibili_client=client, soul_engine=soul)
+
+    result = await service.sync_now()
+
+    assert result["synced"] is True
+    assert soul.calls and len(soul.calls[0]) == 1
+    assert soul.bootstrap_calls == [[]]
+    assert soul.ready_checks == 1
+
+
+@pytest.mark.asyncio
+async def test_account_sync_auto_bootstrap_attempts_only_once_after_failure() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    soul = _BootstrapSoulEngine(ready=False, fail_bootstrap=True)
+    client = _FakeClient(
+        history_items=[_history_item("BVFIRST", 101, "first")],
+        favorites=[],
+        following=[],
+    )
+    service = AccountSyncService(memory_manager=memory, bilibili_client=client, soul_engine=soul)
+
+    first_result = await service.sync_now()
+    client.history_items = [_history_item("BVSECOND", 102, "second")]
+    second_result = await service.sync_now()
+
+    assert first_result["synced"] is True
+    assert second_result["synced"] is True
+    assert len(soul.calls) == 2
+    assert soul.bootstrap_calls == [[]]
+    assert soul.ready_checks == 1
 
 
 @pytest.mark.asyncio

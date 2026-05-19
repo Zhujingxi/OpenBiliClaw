@@ -6,10 +6,10 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,7 @@ class AccountSyncService:
     following_page_size: int = 100
     check_interval_seconds: int = 300
     llm_work_allowed: Callable[[], bool] | None = None
+    _auto_bootstrap_attempted: bool = False
     # v0.3.57+: tracks the cookie-not-ready → ready transition so
     # ``sync_if_due`` only emits the "auth ready" INFO log once per
     # session. Reset path is via fresh AccountSyncService instance,
@@ -171,6 +172,7 @@ class AccountSyncService:
             for event in events:
                 await self.memory_manager.propagate_event(event)
             await self.soul_engine.analyze_events(events)
+            await self._auto_bootstrap_soul_profile(len(events))
 
         state["last_account_sync_at"] = self._now().isoformat()
         state["last_sync_error"] = " | ".join(errors)
@@ -188,6 +190,43 @@ class AccountSyncService:
             "last_account_sync_at": str(state.get("last_account_sync_at", "")),
             "last_account_sync_error": str(state.get("last_sync_error", "")),
         }
+
+    async def _auto_bootstrap_soul_profile(self, event_count: int) -> None:
+        """Build the first soul profile after account sync learns preferences."""
+        if self._auto_bootstrap_attempted:
+            return
+
+        is_ready_candidate = getattr(self.soul_engine, "is_profile_ready", None)
+        if not callable(is_ready_candidate):
+            return
+        is_ready_fn = cast("Callable[[], bool]", is_ready_candidate)
+
+        try:
+            if is_ready_fn():
+                return
+        except Exception:
+            logger.debug("Auto-bootstrap soul profile readiness check failed", exc_info=True)
+            return
+
+        build_candidate = getattr(self.soul_engine, "build_initial_profile", None)
+        if not callable(build_candidate):
+            self._auto_bootstrap_attempted = True
+            return
+        build_fn = cast("Callable[[list[dict[str, Any]]], Awaitable[Any]]", build_candidate)
+
+        self._auto_bootstrap_attempted = True
+        try:
+            logger.info(
+                "Auto-bootstrapping soul profile after account sync (%d new events)",
+                event_count,
+            )
+            await build_fn([])
+        except Exception:
+            logger.warning(
+                "Auto-bootstrap of soul profile failed; run 'openbiliclaw init' "
+                "manually for a richer profile",
+                exc_info=True,
+            )
 
     # v0.3.57+: tighter retry while cookie hasn't arrived. The default
     # ``check_interval_seconds`` of 300 is right for steady-state polling

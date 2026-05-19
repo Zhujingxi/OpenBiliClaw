@@ -237,6 +237,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │     PoolCurator + 双轴 fatigue + per-group 候选窗口     │   │
 │  │     ContinuousRefreshController + B/XHS/DY/YT=8/1/1/1 │   │
 │  │     LLM gate: scheduler + extension presence          │   │
+│  │     AccountSync: B 站账号信号 -> Memory/Soul bootstrap    │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │              Skill System (可扩展技能)                 │   │

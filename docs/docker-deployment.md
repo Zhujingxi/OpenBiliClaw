@@ -55,6 +55,11 @@ cd OpenBiliClaw
 # 2. 启动容器（首次会构建镜像，后续仅增量）
 docker compose up -d --build
 
+# ⚠️ 重要：第 3 步（init）是必须的！
+#    不跑 init，后端只是一个空壳——不会生成用户画像，也不会有任何推荐。
+#    容器启动后能通过健康检查（/api/health 返回 200），
+#    但这只代表 API 服务在运行，并不代表系统已就绪。
+
 # 3. 一键初始化：交互式向导 + B 站认证 + 画像生成 + 首轮发现
 #    首次运行预计 2–5 分钟（拉历史 / LLM 调用 / 多策略发现）
 docker exec -it openbiliclaw-backend openbiliclaw init
@@ -312,3 +317,20 @@ ports:
 **Q: 数据库出现问题怎么修复？**
 
 如果数据库出现问题，可以在容器内运行 `docker exec openbiliclaw-backend openbiliclaw db-repair` 进行检查和修复。
+
+**Q: 后端启动了、健康检查也通过了，但插件里没有推荐？**
+
+最常见原因是没有执行过 `init`。容器启动只运行 API 服务器，用户画像需要通过 init 命令生成：
+
+```bash
+docker exec -it openbiliclaw-backend openbiliclaw init
+```
+
+也可以检查 health endpoint 确认画像状态：
+
+```bash
+curl -s http://127.0.0.1:8420/api/health | python -m json.tool
+# 看 "profile_ready" 字段：false 或缺失都表示还需要跑 init
+```
+
+v0.3.80+ 后端会在首次同步到行为数据后自动尝试生成画像，但手动 init 能获得更完整的初始画像（包含历史标题、作者等上下文信息）。

@@ -143,6 +143,8 @@ Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/do
 
 See the [Docker Deployment Guide](docs/docker-deployment.md).
 
+> 💡 **Docker users**: after the container starts, also run `docker exec -it openbiliclaw-backend openbiliclaw init` to generate your profile. Without init, the backend can start normally but will not produce recommendations.
+
 </details>
 
 <details>
@@ -348,13 +350,14 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
                          │ REST API / WebSocket (presence + cookies)
 ┌────────────────────────▼────────────────────────────┐
 │                 Agent Orchestration                   │
-│            (Skills · Dialogue · Runtime Gate)       │
+│       (Skills · Dialogue · Runtime Gate · Account Sync) │
 ├─────────┬──────────┬───────────┬────────────────────┤
 │  Soul   │ Memory   │ Discovery │  Recommendation    │
 │  Engine │ System   │  Engine   │     Engine          │
 │(Sat.filter)│(5-Layer)│(Neg.anchor)│  (Expression)   │
 ├─────────┴──────────┴───────────┴────────────────────┤
 │ LLM (API Key/Codex OAuth) · Bilibili API · Extension Proxy │
+│ Runtime: Account sync -> Memory/Soul auto-bootstrap        │
 │ SQLite: events(inferred_satisfaction) · content_cache   │
 │         recommendations · chat_turns                    │
 └─────────────────────────────────────────────────────┘

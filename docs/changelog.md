@@ -4,6 +4,15 @@
 
 ---
 
+## v0.3.80: Docker 部署体验补强（2026-05-19）
+
+- 后台 `AccountSyncService` 首次同步账号行为并完成 preference 分析后，如果 soul 画像层为空（典型场景：Docker 部署未跑 init），会自动触发 `build_initial_profile([])` 生成初始画像；每进程生命周期最多尝试一次，失败不影响后续同步。
+- `/api/health` 新增可选 `profile_ready` 字段，返回 soul 画像是否已生成；字段缺失时保持旧响应兼容，不影响 HTTP 状态码和 Docker healthcheck 判定。
+- Docker 部署文档和 README 补充 init 步骤提示，并新增「后端启动但无推荐」排查说明。
+- 后端包版本提升到 v0.3.80，准备发布 `backend-v0.3.80`。
+
+---
+
 ## v0.3.79: Popup 聊天输入体验补强（2026-05-19）
 
 - 浏览器插件聊天 tab 新增多场景 placeholder 轮播，覆盖纪录片、测评、健身、怀旧动画、注意力、自我描述和近期状态等入口；输入框 focus 时暂停轮播，blur 且内容为空时恢复，避免用户正在输入时被提示语打断。
