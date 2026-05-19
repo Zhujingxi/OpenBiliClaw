@@ -160,6 +160,37 @@ def test_collect_interactive_confirmations_requires_input_func() -> None:
         bootstrap.collect_interactive_confirmations(input_func=None)
 
 
+def test_wait_for_cookie_sync_returns_when_cookie_appears(tmp_path: Path) -> None:
+    calls = {"count": 0}
+
+    def detector(_project_dir: Path) -> dict[str, object]:
+        calls["count"] += 1
+        missing = ["bilibili.cookie"] if calls["count"] == 1 else []
+        return {"missing": missing}
+
+    assert (
+        bootstrap.wait_for_cookie_sync(
+            tmp_path,
+            timeout_seconds=1,
+            interval_seconds=0,
+            detector=detector,
+        )
+        is True
+    )
+
+
+def test_wait_for_cookie_sync_times_out(tmp_path: Path) -> None:
+    assert (
+        bootstrap.wait_for_cookie_sync(
+            tmp_path,
+            timeout_seconds=0.01,
+            interval_seconds=0,
+            detector=lambda _project_dir: {"missing": ["bilibili.cookie"]},
+        )
+        is False
+    )
+
+
 def test_build_init_command_appends_explicit_source_flags_for_docker(tmp_path: Path) -> None:
     command = bootstrap.build_init_command(
         "docker", tmp_path, "--yes-xhs", "--yes-douyin", "--no-youtube"

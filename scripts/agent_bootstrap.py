@@ -48,7 +48,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -1757,6 +1757,24 @@ def wait_for_health(host: str, port: int, timeout: float = HEALTH_TIMEOUT_SECOND
     return False
 
 
+def wait_for_cookie_sync(
+    project_dir: Path,
+    *,
+    timeout_seconds: float = 300.0,
+    interval_seconds: float = 2.0,
+    detector: Callable[[Path], dict[str, Any]] = detect_missing_secrets,
+) -> bool:
+    """Wait until Bilibili cookie arrives via extension sync."""
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() <= deadline:
+        missing = detector(project_dir).get("missing", [])
+        if "bilibili.cookie" not in missing:
+            return True
+        time.sleep(interval_seconds)
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 
@@ -2033,12 +2051,35 @@ def run(args: argparse.Namespace) -> int:
 
     healthy = wait_for_health(args.host, args.port)
     final_status = detect_missing_secrets(project_dir)
-    init_decisions = detect_init_decisions(
-        project_dir,
-        args,
-        embedding_touched=embedding_touched or auto_embedding_to_ollama,
-    )
     if healthy:
+        if args.wait_for_extension_cookie and final_status["missing"] == ["bilibili.cookie"]:
+            emit(
+                BootstrapResult(
+                    "progress",
+                    "waiting_for_extension_cookie",
+                    {
+                        "timeout_seconds": 300,
+                        "hint": "Install the browser extension and log in to bilibili.com.",
+                    },
+                )
+            )
+            if wait_for_cookie_sync(project_dir):
+                final_status = detect_missing_secrets(project_dir)
+                emit(BootstrapResult("ok", "extension_cookie_synced", final_status))
+            else:
+                emit(
+                    BootstrapResult(
+                        "needs_secrets",
+                        "extension_cookie_wait_timeout",
+                        final_status,
+                    )
+                )
+
+        init_decisions = detect_init_decisions(
+            project_dir,
+            args,
+            embedding_touched=embedding_touched or auto_embedding_to_ollama,
+        )
         label = "complete" if not final_status["missing"] else "running_with_missing_secrets"
         if not final_status["missing"] and init_decisions["missing"] and not args.skip_init:
             label = "needs_decisions"
@@ -2123,6 +2164,11 @@ def run(args: argparse.Namespace) -> int:
 
         return 0
 
+    init_decisions = detect_init_decisions(
+        project_dir,
+        args,
+        embedding_touched=embedding_touched or auto_embedding_to_ollama,
+    )
     emit(
         BootstrapResult(
             "error",
