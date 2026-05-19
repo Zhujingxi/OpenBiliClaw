@@ -129,6 +129,37 @@ def test_build_init_command_appends_all_source_flags_for_local(tmp_path: Path) -
     assert command[-4:] == ["init", "--no-xhs", "--no-douyin", "--yes-youtube"]
 
 
+def test_interactive_answers_apply_source_flags() -> None:
+    answers = bootstrap.InitConfirmationAnswers(
+        embedding_provider="ollama",
+        embedding_model="bge-m3",
+        xhs=False,
+        douyin=True,
+        youtube=False,
+        cookie_mode="manual",
+        bilibili_cookie="SESSDATA=test; bili_jct=test; DedeUserID=1",
+    )
+
+    argv = bootstrap.confirmation_answers_to_bootstrap_args(answers)
+
+    assert argv == [
+        "--embedding-provider",
+        "ollama",
+        "--embedding-model",
+        "bge-m3",
+        "--no-xhs",
+        "--yes-douyin",
+        "--no-youtube",
+        "--bilibili-cookie",
+        "SESSDATA=test; bili_jct=test; DedeUserID=1",
+    ]
+
+
+def test_collect_interactive_confirmations_requires_input_func() -> None:
+    with pytest.raises(RuntimeError, match="interactive confirmation requires a terminal"):
+        bootstrap.collect_interactive_confirmations(input_func=None)
+
+
 def test_build_init_command_appends_explicit_source_flags_for_docker(tmp_path: Path) -> None:
     command = bootstrap.build_init_command(
         "docker", tmp_path, "--yes-xhs", "--yes-douyin", "--no-youtube"

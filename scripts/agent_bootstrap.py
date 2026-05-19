@@ -149,6 +149,19 @@ class BootstrapResult:
     details: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class InitConfirmationAnswers:
+    """Explicit user decisions required before auto-init may run."""
+
+    embedding_provider: str
+    embedding_model: str
+    xhs: bool
+    douyin: bool
+    youtube: bool
+    cookie_mode: str
+    bilibili_cookie: str = ""
+
+
 def emit(result: BootstrapResult) -> None:
     """Emit a machine-parseable status line for the caller agent."""
 
@@ -166,6 +179,120 @@ def info(message: str) -> None:
 
     print(f"[bootstrap] {message}")
     sys.stdout.flush()
+
+
+def confirmation_answers_to_bootstrap_args(answers: InitConfirmationAnswers) -> list[str]:
+    """Convert interactive answers to the same explicit flags agents pass."""
+
+    args = [
+        "--embedding-provider",
+        answers.embedding_provider,
+        "--embedding-model",
+        answers.embedding_model,
+        "--yes-xhs" if answers.xhs else "--no-xhs",
+        "--yes-douyin" if answers.douyin else "--no-douyin",
+        "--yes-youtube" if answers.youtube else "--no-youtube",
+    ]
+    if answers.cookie_mode == "manual" and answers.bilibili_cookie:
+        args.extend(["--bilibili-cookie", answers.bilibili_cookie])
+    return args
+
+
+def _ask_yes_no(
+    input_func: Any,
+    prompt: str,
+    *,
+    default: bool = False,
+) -> bool:
+    suffix = "Y/n" if default else "y/N"
+    raw = str(input_func(f"{prompt} [{suffix}]: ")).strip().lower()
+    if not raw:
+        return default
+    return raw in {"y", "yes", "1", "true", "是", "好", "同意"}
+
+
+def collect_interactive_confirmations(input_func: Any | None = input) -> InitConfirmationAnswers:
+    """Ask the user for init decisions in human-run installer flows."""
+
+    if input_func is None or (input_func is input and not sys.stdin.isatty()):
+        raise RuntimeError("interactive confirmation requires a terminal")
+
+    print("")
+    print("OpenBiliClaw init choices")
+    print("Embedding default: local Ollama bge-m3 (free/offline/no extra API key).")
+    embedding_choice = str(
+        input_func("Embedding provider [ollama] (enter to accept default): ")
+    ).strip()
+    embedding_provider = embedding_choice or "ollama"
+    model_default = "bge-m3" if embedding_provider == "ollama" else ""
+    embedding_model = str(
+        input_func(f"Embedding model [{model_default}] (enter to accept default): ")
+    ).strip() or model_default
+
+    print("")
+    print("Optional source data is disabled by default unless you explicitly opt in.")
+    xhs = _ask_yes_no(
+        input_func,
+        "Include Xiaohongshu likes/favorites in the initial profile?",
+        default=False,
+    )
+    douyin = _ask_yes_no(
+        input_func,
+        "Include Douyin post/favorite/like/follow data in the initial profile?",
+        default=False,
+    )
+    youtube = _ask_yes_no(
+        input_func,
+        "Include YouTube history/subscriptions/likes in the initial profile?",
+        default=False,
+    )
+
+    print("")
+    print("Bilibili auth default: browser extension sync.")
+    cookie_mode_raw = str(
+        input_func("Bilibili cookie source: extension/manual/existing [extension]: ")
+    ).strip().lower()
+    cookie_mode = cookie_mode_raw or "extension"
+    bilibili_cookie = ""
+    if cookie_mode == "manual":
+        bilibili_cookie = str(input_func("Paste Bilibili Cookie header: ")).strip()
+    elif cookie_mode not in {"extension", "existing"}:
+        cookie_mode = "extension"
+
+    return InitConfirmationAnswers(
+        embedding_provider=embedding_provider,
+        embedding_model=embedding_model,
+        xhs=xhs,
+        douyin=douyin,
+        youtube=youtube,
+        cookie_mode=cookie_mode,
+        bilibili_cookie=bilibili_cookie,
+    )
+
+
+def apply_confirmation_answers_to_args(
+    args: argparse.Namespace,
+    answers: InitConfirmationAnswers,
+) -> None:
+    """Mutate parsed args with interactive choices where flags were omitted."""
+
+    if args.embedding_provider is None:
+        args.embedding_provider = answers.embedding_provider
+    if args.embedding_model is None:
+        args.embedding_model = answers.embedding_model
+    if not args.yes_xhs and not args.no_xhs:
+        args.yes_xhs = answers.xhs
+        args.no_xhs = not answers.xhs
+    if not args.yes_douyin and not args.no_douyin:
+        args.yes_douyin = answers.douyin
+        args.no_douyin = not answers.douyin
+    if not args.yes_youtube and not args.no_youtube:
+        args.yes_youtube = answers.youtube
+        args.no_youtube = not answers.youtube
+    if answers.cookie_mode == "manual" and answers.bilibili_cookie and not args.bilibili_cookie:
+        args.bilibili_cookie = answers.bilibili_cookie
+    if answers.cookie_mode == "extension":
+        args.wait_for_extension_cookie = True
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +495,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--skip-init",
         action="store_true",
         help="Do not run 'openbiliclaw init' after the backend is healthy.",
+    )
+    parser.add_argument(
+        "--interactive-confirm",
+        action="store_true",
+        help="Ask required init confirmations from the terminal before auto-init.",
+    )
+    parser.add_argument(
+        "--wait-for-extension-cookie",
+        action="store_true",
+        help="After backend health, wait for the browser extension to sync Bilibili cookie.",
     )
     parser.add_argument(
         "--skip-install",
@@ -1648,6 +1785,28 @@ def run(args: argparse.Namespace) -> int:
             emit(BootstrapResult("error", str(exc), {"step": "reuse"}))
             return 2
         emit(BootstrapResult("ok", "secrets_reused", reuse_summary))
+
+    if args.interactive_confirm:
+        try:
+            answers = collect_interactive_confirmations()
+        except RuntimeError as exc:
+            emit(BootstrapResult("error", str(exc), {"step": "interactive_confirm"}))
+            return 2
+        apply_confirmation_answers_to_args(args, answers)
+        emit(
+            BootstrapResult(
+                "ok",
+                "init_confirmations_set",
+                {
+                    "embedding_provider": args.embedding_provider,
+                    "embedding_model": args.embedding_model,
+                    "xhs": "yes" if args.yes_xhs else "no",
+                    "douyin": "yes" if args.yes_douyin else "no",
+                    "youtube": "yes" if args.yes_youtube else "no",
+                    "cookie_mode": answers.cookie_mode,
+                },
+            )
+        )
 
     if args.provider:
         apply_provider_override(project_dir, args.provider)
