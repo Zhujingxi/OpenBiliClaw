@@ -22,6 +22,14 @@ def test_shell_installers_recommend_same_default_llm_provider() -> None:
     assert "DeepSeek:   https://platform.deepseek.com/api_keys" in install_ps1
 
 
+def test_install_sh_uses_interactive_auto_init_contract() -> None:
+    install_sh = _read("scripts/install.sh")
+
+    assert "--interactive-confirm" in install_sh
+    assert "--wait-for-extension-cookie" in install_sh
+    assert "docker exec -it openbiliclaw-backend openbiliclaw init" not in install_sh
+
+
 def test_agent_install_llm_menu_numbering_matches_current_options() -> None:
     doc = _read("docs/agent-install.md")
 

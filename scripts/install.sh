@@ -239,6 +239,13 @@ run_bootstrap() {
     if [ -n "$SKIP_START" ]; then
         args+=(--skip-start)
     fi
+    local interactive_bootstrap=0
+    if [ -z "${OPENBILICLAW_NONINTERACTIVE:-}" ] && [ -z "${CI:-}" ]; then
+        if [ -t 0 ] || [ -r /dev/tty ]; then
+            args+=(--interactive-confirm --wait-for-extension-cookie)
+            interactive_bootstrap=1
+        fi
+    fi
 
     BOOTSTRAP_LOG=$(mktemp -t openbiliclaw-bootstrap.XXXXXX)
     log "Running bootstrap: python3 $bootstrap ${args[*]}"
@@ -246,7 +253,11 @@ run_bootstrap() {
     # Stream stdout to the terminal AND capture it for post-run parsing.
     # Use PIPESTATUS so `set -e` still sees the real bootstrap exit code.
     set +e
-    python3 "$bootstrap" "${args[@]}" 2>&1 | tee "$BOOTSTRAP_LOG"
+    if [ "$interactive_bootstrap" = "1" ] && [ -r /dev/tty ]; then
+        python3 "$bootstrap" "${args[@]}" </dev/tty 2>&1 | tee "$BOOTSTRAP_LOG"
+    else
+        python3 "$bootstrap" "${args[@]}" 2>&1 | tee "$BOOTSTRAP_LOG"
+    fi
     local rc=${PIPESTATUS[0]}
     set -e
 
