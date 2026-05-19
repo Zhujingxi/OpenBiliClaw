@@ -53,20 +53,19 @@ OpenBiliClaw 不爬登录态——它复用**你**当前浏览器的登录会话
 git clone https://github.com/whiteguo233/OpenBiliClaw.git
 cd OpenBiliClaw
 
-# 2. 启动容器（首次会构建镜像，后续仅增量）
-docker compose up -d --build
+# 2. Docker 主路径：启动 compose、确认配置、等待 Cookie、自动运行 init
+python3 scripts/agent_bootstrap.py --mode docker --interactive-confirm --wait-for-extension-cookie
 
-# ⚠️ 重要：第 3 步（init）是必须的！
-#    不跑 init，后端只是一个空壳——不会生成用户画像，也不会有任何推荐。
-#    容器启动后能通过健康检查（/api/health 返回 200），
-#    但这只代表 API 服务在运行，并不代表系统已就绪。
-
-# 3. 一键初始化：交互式向导 + B 站认证 + 画像生成 + 首轮发现
-#    首次运行预计 2–5 分钟（拉历史 / LLM 调用 / 多策略发现）
-docker exec -it openbiliclaw-backend openbiliclaw init
-
-# 4. 健康状态：HEALTHCHECK 会让 docker compose ps 在容器真正可服务后才显示 healthy
+# 3. 健康状态：HEALTHCHECK 会让 docker compose ps 在容器真正可服务后才显示 healthy
 docker compose ps
+```
+
+`agent_bootstrap.py --mode docker` 是 Docker 部署的主入口：它会启动 compose，把宿主机确认后的 `config.toml` 同步到容器 `/app/runtime`，在 B 站 Cookie 通过扩展同步后继续自动运行 init。缺 LLM Key、缺 Cookie 或缺来源确认时，bootstrap 会停在明确的 `needs_secrets` / `needs_decisions` 状态并打印继续命令；这不是最终成功状态。
+
+**手动 fallback**：高级排查或重复初始化时，仍可直接运行：
+
+```bash
+docker exec -it openbiliclaw-backend openbiliclaw init
 ```
 
 `init` 是 v0.3.20+ 的交互式向导，自动检测 `config.toml` 缺哪些配置并按需引导。每一步都有"不确定就回 1"的默认推荐：
@@ -84,7 +83,7 @@ docker compose ps
 
 接着 B 站登录态有 **2 种方式**（v0.3.12+）：
 
-- **A.** 装浏览器扩展（推荐，零配置）—— [下载](https://github.com/whiteguo233/OpenBiliClaw/releases) 装好登录 B 站后，扩展会几秒内把 Cookie 自动推到 `http://127.0.0.1:8420/api/bilibili/cookie`。这条路向导会先退出，等同步好再 `docker exec -it openbiliclaw-backend openbiliclaw init` 完成 init
+- **A.** 装浏览器扩展（推荐，零配置）—— [下载](https://github.com/whiteguo233/OpenBiliClaw/releases) 装好登录 B 站后，扩展会几秒内把 Cookie 自动推到 `http://127.0.0.1:8420/api/bilibili/cookie`。bootstrap 会等待 Cookie 到达并继续自动运行 init
 - **B.** 手动贴 Cookie —— 向导内附 F12 → Network 取 cookie 的 5 步教程
 
 最后才进入真正的 init 阶段：拉历史、生成画像、跑首轮发现。整个流程会打印进度，不要以为卡住了——LLM 单次响应可能就要 10–30s。

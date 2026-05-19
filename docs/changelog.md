@@ -4,6 +4,14 @@
 
 ---
 
+## v0.3.84: 安装渠道自动 init 收敛（2026-05-20）
+
+- `agent_bootstrap.py` 新增交互确认模式和扩展 Cookie 等待流程：Bash / PowerShell / Docker / AI agent 安装渠道会在确认 embedding、B 站 Cookie 来源和小红书 / 抖音 / YouTube opt-in 后自动运行 init，不再把手动 `openbiliclaw init` 作为主路径。
+- Docker bootstrap 会把宿主机确认后的 `config.toml` 与 Cookie 文件同步到容器 `/app/runtime`，并用容器 runtime config 判断是否具备 init 条件；`docker exec ... openbiliclaw init` 保留为高级手动 fallback。
+- 后端包版本提升到 v0.3.84，准备发布 `backend-v0.3.84`。
+
+---
+
 ## v0.3.83: 插件设置页分组与 YouTube 配置补齐（2026-05-19）
 
 - 浏览器插件设置页按「模型 / 平台源 / 调度 / 通用 / 日志」分 tab，候选池来源占比移入平台源区，避免所有配置挤在同一个长列表里。

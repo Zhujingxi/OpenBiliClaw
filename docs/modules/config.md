@@ -455,8 +455,9 @@ cookie = ""
 
 建议：
 
-- Docker 模式下的首选入口是 `docker exec -it openbiliclaw-backend openbiliclaw init`
-- 如果缺少 provider API Key 或 B 站 Cookie，`init` 会直接在终端里引导并写回 Docker volume
+- Docker 模式下的首选入口是 `python3 scripts/agent_bootstrap.py --mode docker --interactive-confirm --wait-for-extension-cookie`；它会确认配置、同步到容器 `/app/runtime`，并自动运行 init
+- `docker exec -it openbiliclaw-backend openbiliclaw init` 是高级手动 fallback，用于重复初始化或排查
+- 如果缺少 provider API Key 或 B 站 Cookie，bootstrap / init 会直接在终端里引导并写回 Docker volume
 - provider 和 API Key 会写入 `/app/runtime/config.toml`
 - B 站 cookie 会写入 `/app/runtime/data/bilibili_cookie.json`
 - 首轮 `init` 和后续 `discover` 可能持续几分钟，因为它们会真实访问 B 站和当前 LLM provider

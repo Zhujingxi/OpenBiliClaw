@@ -38,6 +38,17 @@ def test_install_ps1_uses_interactive_auto_init_contract() -> None:
     assert "docker exec -it openbiliclaw-backend openbiliclaw init" not in install_ps1
 
 
+def test_docs_make_auto_init_primary_for_all_install_channels() -> None:
+    readme = _read("README.md")
+    docker_doc = _read("docs/docker-deployment.md")
+    agent_doc = _read("docs/agent-install.md")
+
+    assert "自动运行 init" in readme
+    assert "agent_bootstrap.py --mode docker" in docker_doc
+    assert "init_complete" in agent_doc
+    assert "手动 fallback" in docker_doc
+
+
 def test_agent_install_llm_menu_numbering_matches_current_options() -> None:
     doc = _read("docs/agent-install.md")
 

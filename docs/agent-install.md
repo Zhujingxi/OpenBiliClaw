@@ -41,7 +41,8 @@ Either command:
 2. Auto-detects any existing OpenBiliClaw install under the standard candidate paths (`~/workspace/OpenBiliClaw`, `~/OpenBiliClaw`, `~/projects/OpenBiliClaw`, `~/code/OpenBiliClaw` — same set on both platforms, rooted at `$HOME` / `%USERPROFILE%`) and **reuses** its LLM API keys and Bilibili cookie so the user never has to retype them
 3. Installs Python dependencies (`uv sync` preferred, `pip install -e .` fallback)
 4. Starts the backend and runs a health check against `/api/health`
-5. Prints a self-contained **status block** at the very end of stdout:
+5. Confirms embedding, Bilibili cookie source, and XHS / Douyin / YouTube opt-in choices with the user when the installer is running interactively
+6. Automatically runs init after credentials and confirmations are complete, then prints a self-contained **status block** at the very end of stdout:
 
 ```
 ================================================================
@@ -72,6 +73,12 @@ Next action (init has been run automatically):
 ```
 
 **Follow that block literally.** That's the entire contract.
+
+`init_complete` is the normal success target. `needs_secrets`,
+`running_with_missing_secrets`, and `needs_decisions` are intermediate
+states: continue the printed bootstrap command after asking the user,
+or wait for the browser extension to sync the Bilibili cookie, until
+bootstrap emits `init_complete` or a concrete blocker.
 
 If the block says `Status: needs_decisions`, credentials are present
 but init has deliberately not run. Ask the listed init choices, then

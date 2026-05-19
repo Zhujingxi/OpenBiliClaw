@@ -59,11 +59,13 @@ docker compose up -d --build
 
 ### 2. 完成首次初始化
 
-容器启动后，必须先做一次初始化：
+推荐用 bootstrap 继续走自动 init 流程，而不是让用户手动记一条 `docker exec` 命令：
 
 ```bash
-docker exec -it openbiliclaw-backend openbiliclaw init
+python3 scripts/agent_bootstrap.py --mode docker --interactive-confirm --wait-for-extension-cookie
 ```
+
+它会启动 / 复用 Docker Compose、向用户确认 LLM / embedding / B 站 Cookie / 小红书 / 抖音 / YouTube 选择，并在确认齐全后自动运行 init。`docker exec -it openbiliclaw-backend openbiliclaw init` 只作为高级手动 fallback。
 
 > ⏱  **首次运行预计 2–5 分钟**。LLM 单次响应可能就要 10–30s，全程会打印进度，不要以为卡住了。
 

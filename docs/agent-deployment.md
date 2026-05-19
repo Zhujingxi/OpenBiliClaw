@@ -69,7 +69,7 @@ find ~ -maxdepth 4 -type f -name "config.toml" -path "*OpenBiliClaw*" 2>/dev/nul
 
 ### 4. 跑部署脚本
 
-用户的仓库里有 `scripts/agent_bootstrap.py`。这是你唯一需要直接调用的自动化入口。
+用户的仓库里有 `scripts/agent_bootstrap.py`。这是你唯一需要直接调用的自动化入口；目标是推进到 `init_complete`，不是停在“后端已启动”。
 
 ```bash
 python3 scripts/agent_bootstrap.py \
@@ -97,6 +97,8 @@ python3 scripts/agent_bootstrap.py \
 | `--embedding-api-key KEY` | （v0.3.5+）自托管 embedding 网关的 API Key。 |
 | `--module-override MODULE=PROVIDER:MODEL` | （v0.3.5+，可重复）per-module LLM 覆盖。MODULE ∈ {soul, discovery, recommendation, evaluation}。例：`--module-override discovery=deepseek:deepseek-v4-flash`。 |
 | `--bilibili-cookie VALUE` | 直接写入 Bilibili Cookie，同时落盘到 `data/bilibili_cookie.json`。 |
+| `--interactive-confirm` | 人类直接运行 installer 时使用：bootstrap 会在终端里确认 embedding、B 站 Cookie 来源和 XHS / Douyin / YouTube opt-in。AI agent 通常自己问完用户后传显式参数。 |
+| `--wait-for-extension-cookie` | 缺 B 站 Cookie 且用户选择浏览器扩展同步时，后端健康后等待扩展把 Cookie 推到 `/api/bilibili/cookie`，同步后继续自动 init。 |
 | `--yes-xhs` / `--no-xhs` | （v0.3.30+）auto-init 前的小红书数据决策。`--yes-xhs` 仅在用户明确同意把小红书收藏 / 点赞混进画像时传；其他情况传 `--no-xhs`。不传则 bootstrap 返回 `needs_decisions`，不会跑 init。 |
 | `--yes-douyin` / `--no-douyin` | （v0.3.67+）auto-init 前的抖音数据决策。`--yes-douyin` 仅在用户明确同意把抖音发布 / 收藏 / 点赞 / 关注混进画像时传；其他情况传 `--no-douyin`。不传则 bootstrap 返回 `needs_decisions`，不会跑 init。 |
 | `--yes-youtube` / `--no-youtube` | auto-init 前的 YouTube 数据决策。`--yes-youtube` 仅在用户明确同意把 YouTube 观看历史 / 订阅 / 点赞混进画像时传；其他情况传 `--no-youtube`。不传则 bootstrap 返回 `needs_decisions`，不会跑 init。 |
@@ -105,7 +107,7 @@ python3 scripts/agent_bootstrap.py \
 | `--skip-health-check` | 启动服务但不等 `/api/health`。 |
 | `--host`, `--port` | local 模式下 API 监听地址，默认 `127.0.0.1:8420`。 |
 
-脚本不会交互地向 stdin 要凭据——所有补齐都通过命令行参数传入。脚本向 stdout 输出两类行：
+AI agent 路径不要依赖 stdin 交互：你应该先问用户，再把补齐后的参数传入。人类直接运行 `install.sh` / `install.ps1` 时，脚本会加 `--interactive-confirm --wait-for-extension-cookie`，由 bootstrap 在过程中确认并自动 init。脚本向 stdout 输出两类行：
 
 1. 以 `[bootstrap]` 开头的人类可读日志。
 2. 以 `BOOTSTRAP_STATUS:` 开头的机器 JSON 行，你**必须**解析这些行来判断状态。

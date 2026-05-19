@@ -304,6 +304,8 @@ $ openbiliclaw profile
 8. 生成初始画像
 9. 按阶段自动补首轮内容池
 
+安装渠道里的首选路径是 `scripts/agent_bootstrap.py` 自动运行 init：Bash / PowerShell / Docker / AI agent 安装会先确认 LLM、embedding、B 站 Cookie 和各来源 opt-in，再触发本命令。直接执行 `openbiliclaw init` 仍保留为高级手动 fallback 和重复初始化入口。
+
 ```bash
 $ openbiliclaw init
 初始化 OpenBiliClaw
