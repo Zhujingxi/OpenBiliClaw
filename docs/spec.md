@@ -291,7 +291,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 | 浏览器插件 | **Chrome Extension** (Manifest V3) | 行为采集 + 交互 UI + LUI |
 | Agent 框架 | **自研轻量框架**，按需扩展 | 灵活可控，支持 Skill 系统 |
 | 记忆存储 | **SQLite** + **向量索引** + **JSON** | 分层存储，匹配不同记忆类型需求 |
-| 任务调度 | **APScheduler** 或系统 crontab | 定时执行内容发现 |
+| 任务调度 | **asyncio runtime loops** + `[scheduler]` 配置 | 按候选池缺口、行为阈值和策略间隔执行内容发现；不依赖 cron |
 | 运行模式 | **本地运行** | 用户自己的电脑上执行 |
 
 ---
