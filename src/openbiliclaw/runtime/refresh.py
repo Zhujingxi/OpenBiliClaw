@@ -1274,8 +1274,8 @@ class ContinuousRefreshController:
         suppressed items or trimming overflow — a path that doesn't go
         through the end-of-refresh ``refresh.pool_updated`` event. Without
         this hook, the popup's pool-count UI only refreshes when a full
-        refresh tick completes (every 8h cron); now it stays in sync
-        within seconds of any pool-state change.
+        refresh wave completes; now it stays in sync within seconds of any
+        pool-state change.
 
         Only emits when the count is different from the last emit, so
         steady-state ticks don't spam the WebSocket stream.
