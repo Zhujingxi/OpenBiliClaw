@@ -2836,26 +2836,41 @@ def test_enqueue_xhs_bootstrap_task_force_bypasses_recent_task(
     assert captured["task_type"] == "bootstrap_profile"
 
 
-def test_ask_xhs_inclusion_non_interactive_terminal_defaults_yes(
+def test_ask_xhs_inclusion_non_interactive_terminal_defaults_no(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """v0.3.27+: in non-interactive terminals (CI / piped stdin) the
-    decision returns True silently. Auto-on is the safest default —
-    the bootstrap task itself degrades gracefully if the extension
-    isn't actually connected."""
+    """Non-interactive init should not enable XHS unless a flag opts in."""
     from openbiliclaw.cli import _ask_xhs_inclusion
 
     monkeypatch.delenv("OPENBILICLAW_NO_XHS", raising=False)
     monkeypatch.setattr(cli_module, "_is_interactive_terminal", lambda: False)
-    assert _ask_xhs_inclusion() is True
+    assert _ask_xhs_inclusion() is False
+
+
+def test_ask_xhs_inclusion_prompt_defaults_no(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.cli import _ask_xhs_inclusion
+
+    defaults: list[bool | None] = []
+
+    def fake_confirm(prompt: str, *args: object, **kwargs: object) -> bool:
+        assert prompt == "加入小红书数据?"
+        defaults.append(cast("bool | None", kwargs.get("default")))
+        return False
+
+    monkeypatch.delenv("OPENBILICLAW_NO_XHS", raising=False)
+    monkeypatch.setattr(cli_module, "_is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(cli_module.typer, "confirm", fake_confirm)
+
+    assert _ask_xhs_inclusion() is False
+    assert defaults == [False]
 
 
 def test_ask_xhs_inclusion_env_var_returns_false(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``OPENBILICLAW_NO_XHS=1`` skips even non-interactive auto-on
-    so a script can permanently opt out without piping ``n`` into
-    stdin."""
+    """``OPENBILICLAW_NO_XHS=1`` keeps the explicit env opt-out behavior."""
     from openbiliclaw.cli import _ask_xhs_inclusion
 
     monkeypatch.setenv("OPENBILICLAW_NO_XHS", "1")

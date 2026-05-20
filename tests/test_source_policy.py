@@ -24,6 +24,18 @@ def test_source_enabled_map_reads_bilibili_switch() -> None:
     }
 
 
+def test_default_enabled_sources_make_xiaohongshu_opt_in() -> None:
+    config = Config()
+
+    assert source_enabled_map(config) == {
+        "bilibili": True,
+        "xiaohongshu": False,
+        "douyin": False,
+        "youtube": False,
+    }
+    assert effective_pool_source_shares(config) == {"bilibili": 8}
+
+
 def test_effective_pool_source_shares_drop_disabled_bilibili() -> None:
     config = Config()
     config.sources.bilibili.enabled = False

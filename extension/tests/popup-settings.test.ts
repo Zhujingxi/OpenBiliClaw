@@ -89,7 +89,9 @@ test("settings source tab separates every platform into its own block", () => {
   assert.match(sourcesPanel, />启用 Bilibili discovery</);
   assert.match(sourcesPanel, />调试：B 站登录时显示浏览器窗口</);
   assert.match(popupJs, /bilibiliEnabled\.checked = cfg\.sources\?\.bilibili\?\.enabled !== false/);
+  assert.match(popupJs, /xhsEnabled\.checked = cfg\.sources\?\.xiaohongshu\?\.enabled === true/);
   assert.match(popupJs, /bilibili:\s*\{\s*enabled: checked\("cfgBilibiliEnabled", true\)/);
+  assert.match(popupJs, /xiaohongshu:\s*\{\s*enabled: checked\("cfgXhsEnabled"\)/);
 });
 
 test("settings logging tab edits a single full log path", () => {
@@ -220,7 +222,7 @@ test("source-share suggestion button uses settings-scope helpers and form switch
   assert.match(suggestionBlock, /fetchSourceShareSuggestion\(\{/);
   assert.match(suggestionBlock, /enabled_sources:\s*\{/);
   assert.match(suggestionBlock, /bilibili:\s*checked\("cfgBilibiliEnabled", true\)/);
-  assert.match(suggestionBlock, /xiaohongshu:\s*checked\("cfgXhsEnabled", true\)/);
+  assert.match(suggestionBlock, /xiaohongshu:\s*checked\("cfgXhsEnabled"\)/);
   assert.match(suggestionBlock, /youtube:\s*checked\("cfgYoutubeEnabled"\)/);
   assert.match(suggestionBlock, /configured_shares:\s*\{/);
 });

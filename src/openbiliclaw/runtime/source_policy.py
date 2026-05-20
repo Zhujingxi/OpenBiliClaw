@@ -9,7 +9,7 @@ from typing import Any
 SOURCE_ORDER = ("bilibili", "xiaohongshu", "douyin", "youtube")
 DEFAULT_SOURCE_ENABLED = {
     "bilibili": True,
-    "xiaohongshu": True,
+    "xiaohongshu": False,
     "douyin": False,
     "youtube": False,
 }

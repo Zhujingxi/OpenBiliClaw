@@ -4,6 +4,16 @@
 
 ---
 
+## v0.3.86 / extension v0.3.37: 小红书默认改为显式开启（2026-05-20）
+
+- `[sources.xiaohongshu].enabled` 默认改为 `false`；小红书 discovery / init bootstrap 现在必须由用户在初始化时选择 Yes、传 `--yes-xhs`，或在插件设置页打开后才会启用。
+- `openbiliclaw init` 的小红书交互提示默认从 Yes 改为 No；非交互环境也不再静默启用小红书 bootstrap，避免未安装扩展或未登录时自动排队任务。
+- runtime 候选池默认有效配比改为只包含 Bilibili；`[scheduler.pool_source_shares]` 仍保存 Bilibili / 小红书 / 抖音 / YouTube = `8 / 1 / 1 / 1`，显式启用可选平台后才参与 quota。
+- 插件设置页读取缺省配置时不再默认勾选「启用小红书 discovery」，保存和配比建议都以用户当前开关为准。
+- 后端包版本提升到 v0.3.86，准备发布 `backend-v0.3.86`；浏览器插件版本提升到 v0.3.37，准备发布 `extension-v0.3.37`。
+
+---
+
 ## v0.3.85 / extension v0.3.36: 插件配置页来源与日志整理（2026-05-20）
 
 - `[sources.bilibili].enabled` 新增 Bilibili discovery 开关；关闭后 B 站 search / related_chain / trending / explore 不再参与后台补池，`pool_source_shares.bilibili` 会保留但从运行时有效配比中剔除。

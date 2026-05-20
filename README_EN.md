@@ -17,12 +17,12 @@
 
 ---
 
-## 📌 v0.3.85 / extension-v0.3.36 Highlights (2026-05-20)
+## 📌 v0.3.86 / extension-v0.3.37 Highlights (2026-05-20)
 
-- **🎛️ Source settings are split into cards** — the extension settings Source tab now separates Bilibili, Xiaohongshu, Douyin, YouTube, generic Web, and pool-share controls.
-- **📺 Bilibili discovery switch** — `[sources.bilibili].enabled` is now configurable and defaults to on; disabling it removes Bilibili discovery from background pool replenishment.
-- **🪵 Full log path editing** — the extension Logging tab edits one full backend log path while still saving compatible `logging.directory` / `logging.filename` values.
-- **📦 Split-channel release** — backend ships as `backend-v0.3.85`, and the browser extension ships as `extension-v0.3.36`.
+- **🌸 Xiaohongshu is now explicit opt-in** — `[sources.xiaohongshu].enabled` now defaults to `false`; it only joins discovery after init Yes, `--yes-xhs`, or the extension settings toggle.
+- **🧭 More conservative init default** — `openbiliclaw init` defaults the XHS question to No, and non-interactive runs no longer enable XHS bootstrap silently.
+- **🎛️ Default pool quota is Bilibili-only** — `pool_source_shares` still stores 8/1/1/1, but XHS / Douyin / YouTube are off by default and do not consume runtime quota.
+- **📦 Split-channel release** — backend ships as `backend-v0.3.86`, and the browser extension ships as `extension-v0.3.37`.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -373,7 +373,7 @@ Four Bilibili strategies work in coordination, each with independent API quota, 
 | **Related Chain** | Expands from seed videos along recommendation chains | Fair share |
 | **Explore** | LLM-driven cross-domain exploration | Fair share |
 
-Results go through multi-dimensional diversity selection: platform-family reservation (default Bilibili / Xiaohongshu / Douyin / YouTube = 8 / 1 / 1 / 1, configurable via `[scheduler.pool_source_shares]`) → topic deduplication → style balancing → ceiling caps, ensuring broad coverage in final recommendations. The four Bilibili strategies count as `bilibili`; XHS extension sources count as `xiaohongshu`; Douyin search / hot / feed count as `douyin`; YouTube `yt_search` / `yt_trending` / `yt_channel` count as `youtube`. Disabled platforms are removed from the effective runtime mix.
+Results go through multi-dimensional diversity selection: platform-family reservation (saved default Bilibili / Xiaohongshu / Douyin / YouTube = 8 / 1 / 1 / 1, configurable via `[scheduler.pool_source_shares]`; the effective default only includes Bilibili until XHS / Douyin / YouTube are explicitly enabled) → topic deduplication → style balancing → ceiling caps, ensuring broad coverage in final recommendations. The four Bilibili strategies count as `bilibili`; XHS extension sources count as `xiaohongshu`; Douyin search / hot / feed count as `douyin`; YouTube `yt_search` / `yt_trending` / `yt_channel` count as `youtube`. Disabled platforms are removed from the effective runtime mix.
 
 For first-run profiling, `openbiliclaw init` can enqueue XHS, Douyin, and YouTube `bootstrap_profile` tasks. XHS opens Xiaohongshu in the user's logged-in browser session, navigates to the profile, parses saved / liked / explicit history state, and returns `partial` batches; the backend reuses recent XHS bootstrap tasks by default and marks a task `in_progress` before returning it to the extension so the same foreground favorites / likes pull is not opened repeatedly. Douyin visits post / favorite / like / follow scopes in the logged-in Douyin session and combines DOM extraction with a MAIN-world API harvester. YouTube visits watch history / subscriptions / liked videos pages and reads rendered DOM items. The backend converts all three sources into normal `view / favorite / like / follow` events and still does not crawl or log in to those sites directly.
 
@@ -437,7 +437,7 @@ OpenBiliClaw/
 
 ## 📜 Release History
 
-Latest: **v0.3.85 / extension v0.3.36: settings source cards and Bilibili discovery switch (2026-05-20)**. The top highlight callout keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md), with packages on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases).
+Latest: **v0.3.86 / extension v0.3.37: Xiaohongshu is now explicit opt-in by default (2026-05-20)**. The top highlight callout keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md), with packages on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases).
 
 ## 🗺️ Roadmap
 

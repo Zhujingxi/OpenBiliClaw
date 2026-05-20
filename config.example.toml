@@ -213,8 +213,8 @@ enabled = true
 [sources.xiaohongshu]
 # 设为 false 后：跳过 init 的 XHS bootstrap，后端不再生成 XHS 搜索任务，
 # pool_source_shares 中的 xiaohongshu 配额会被丢弃（不会让池子卡在低于目标）。
-# init 交互式提示选 No、--no-xhs 或 OPENBILICLAW_NO_XHS=1 都会写回 false。
-enabled = true
+# 默认 false；init 交互式提示选 Yes、--yes-xhs 或插件设置页打开后才会写回 true。
+enabled = false
 # 每天后端允许入队的 Soul 驱动搜索任务数上限
 daily_search_budget = 30
 # 每天每位订阅创作者的抓取任务上限
@@ -281,8 +281,8 @@ auto_update_enabled = false        # 是否自动检查并应用新版本（git 
 auto_update_check_interval_hours = 6  # 检查间隔（小时）
 
 [scheduler.pool_source_shares]
-# Candidate-pool source mix by platform family. Default 8:1:1:1 keeps B 站
-# as the main source while reserving pool capacity for 小红书、抖音、YouTube.
+# Candidate-pool source mix by platform family. The saved default 8:1:1:1
+# keeps B 站 as the main source when optional platforms are enabled.
 # 关掉的源（[sources.<name>].enabled = false）的配额会被自动剔除，剩余
 # 源按比例重新归一化吃满 pool_target_count——所以这里写多少不重要，重要的
 # 是源本身的 enabled 开关。

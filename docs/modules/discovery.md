@@ -530,7 +530,7 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 | M119 style_key 风格标注 | ✅ | discovery 入池时会按标题/描述轻规则补 `style_key`，为推荐层的风格多样性约束提供稳定信号 |
 | M120 候选池来源交错取样 | ✅ | `get_pool_candidates()` 现在会按 `search / trending / related_chain / explore` 交错取样，避免候选窗口被单一来源刷满 |
 | M122 来源优先补齐与风格误判修正 | ✅ | 池子压缩时会优先保留不同 `source` 的候选，再限制重复 `style`；同时补强 `style_key` 规则，减少硬内容误判成 `light_chat` |
-| M123 按平台缺口补池子 | ✅ | runtime 在补货时会先按 `[scheduler.pool_source_shares]` 统计平台族余量；默认 B 站 / 小红书 / 抖音 / YouTube = 8 / 1 / 1 / 1，但 disabled 平台会从有效配比中剔除。B 站缺口会合并四个策略到一次 discover()，再用 `strategy_limits` 把同一个平台缺口分摊给各策略；小红书 / 抖音缺口分别交给对应 producer；YouTube 缺口走 `yt_search` / `yt_trending` / `yt_channel`；超配额平台族会被压回目标内 |
+| M123 按平台缺口补池子 | ✅ | runtime 在补货时会先按 `[scheduler.pool_source_shares]` 统计平台族余量；默认保存的 B 站 / 小红书 / 抖音 / YouTube share = 8 / 1 / 1 / 1，但默认只有 B 站启用，disabled 平台会从有效配比中剔除。B 站缺口会合并四个策略到一次 discover()，再用 `strategy_limits` 把同一个平台缺口分摊给各策略；小红书 / 抖音缺口分别交给对应 producer；YouTube 缺口走 `yt_search` / `yt_trending` / `yt_channel`；超配额平台族会被压回目标内 |
 | M124 LLM 评估窗口控费 | ✅ | runtime 按平台自身缺口传递补货 limit；各策略在 LLM 评估前把候选窗口收缩到 `max(6, limit*2)`、上限 90，少量补货时不再把几十条候选送去评分后立刻 suppressed；batch parser 兼容 fenced JSON、回显输入后追加结果、NDJSON object 序列，避免退回 N 次单条评估 |
 | v0.3.74 eval-batch JSON 容错统一 | ✅ | `_evaluate_batch` 改用 `llm.json_utils.extract_llm_json_list()`，在原 fenced / echo / JSONL 基础上统一兼容 `results/items/data/output/scores/evaluations` wrapper、MiMo malformed `{ [ ... ] }` 数组包裹和 schema echo 后最终结果；解析失败仍按原有降级路径处理，不把示例 JSON 当作真实评分 |
 | v0.3.81 eval-batch 按内容 ID 绑定 | ✅ | batch 内容评估 prompt 会携带 `bvid/content_id`，解析时优先按返回 ID 写回 `score/reason/topic/style/franchise`。provider 乱序或漏项时，不再把后一条候选的 `relevance_reason` 写到前一条；无 ID 且数量不完整时降级逐条评估 |
@@ -700,14 +700,12 @@ hints = snapshot.to_prompt_hints()
 
 ```python
 source_targets = controller._source_target_counts()
-# 默认有效 [scheduler.pool_source_shares] = 8:1:1 且 pool_target=600 时：
+# 默认有效 [scheduler.pool_source_shares] = 8 且 pool_target=600 时：
 # {
-#     "bilibili": 480,
-#     "xiaohongshu": 60,
-#     "douyin": 60,
+#     "bilibili": 600,
 # }
-# 如果 YouTube enabled=true 且有效配比为 8:1:1:1，则 YouTube 也会获得
-# 独立 target，并由 yt_search / yt_trending / yt_channel 补池。
+# 如果显式启用 XHS / Douyin / YouTube，对应平台会按保存的 share 获得
+# 独立 target，并由各自 producer 或 strategy 补池。
 
 database.reactivate_under_quota_pool_sources(
     target=600,

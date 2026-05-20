@@ -94,8 +94,8 @@ AI agent 一句话部署时，`agent_bootstrap.py` 会在 auto-init 期间额外
 最终 `init_complete` 后才汇报。
 
 > 🌸 **小红书数据是否加入(v0.3.27+)**:init 在 Docker 里跑时也会弹一个交互式问题——把小红书的收藏 / 点赞混进画像吗?
-> - 想加就回 Y(默认),会有准备清单提示你装扩展 + 登录小红书。注意 Docker 模式下扩展是装在你**宿主机**的浏览器里的,后端在容器内通过 8420 端口拉数据
-> - 不想加就回 N,只用 B 站数据建画像
+> - 想加就回 Y,会有准备清单提示你装扩展 + 登录小红书。注意 Docker 模式下扩展是装在你**宿主机**的浏览器里的,后端在容器内通过 8420 端口拉数据
+> - 直接回车或回 N 会跳过,只用 B 站数据建画像
 > - 脚本化场景直接传 flag:`docker exec -it openbiliclaw-backend openbiliclaw init --no-xhs` 跳过 / `--yes-xhs` 强制启用
 > - AI agent 的 `agent_bootstrap.py` auto-init 不会默认启用小红书；必须传 `--yes-xhs` 或 `--no-xhs`。没传会返回 `needs_decisions`，让 agent 先问用户
 > - 想永久跳过:在 docker-compose.yml 里加 `OPENBILICLAW_NO_XHS=1` 环境变量

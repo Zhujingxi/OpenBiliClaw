@@ -3101,10 +3101,8 @@ def _ask_xhs_inclusion() -> bool:
 
     Resolution order (first match wins):
       1. ``OPENBILICLAW_NO_XHS=1`` env var → False, silent
-      2. Non-interactive terminal (CI / piped stdin) → True, silent.
-         Auto-on is the safest default — graceful timeout + skip if
-         the extension isn't actually connected.
-      3. Interactive terminal → ask the user with default Y, then
+      2. Non-interactive terminal (CI / piped stdin) → False, silent.
+      3. Interactive terminal → ask the user with default N, then
          (if Y) walk them through a prep checklist.
 
     Returns True iff the caller should proceed with xhs bootstrap.
@@ -3113,7 +3111,7 @@ def _ask_xhs_inclusion() -> bool:
         console.print("[dim]  跳过小红书数据接入(OPENBILICLAW_NO_XHS=1)。[/dim]")
         return False
     if not _is_interactive_terminal():
-        return True
+        return False
 
     console.print()
     console.print("[bold]🌸 小红书数据接入(可选)[/bold]")
@@ -3139,7 +3137,7 @@ def _ask_xhs_inclusion() -> bool:
     )
     console.print()
 
-    if not typer.confirm("加入小红书数据?", default=True):
+    if not typer.confirm("加入小红书数据?", default=False):
         console.print("[dim]  已选择跳过,本次 init 不会请求扩展。[/dim]")
         return False
 
@@ -3188,9 +3186,8 @@ def _ask_dy_inclusion() -> bool:
     Resolution order (first match wins):
       1. ``OPENBILICLAW_NO_DOUYIN=1`` env var → False, silent
       2. Non-interactive terminal (CI / piped stdin) → **False**, silent.
-         Conservative default for Douyin (different from XHS auto-on)
-         because Douyin hits more-aggressive risk-control if the user
-         isn't actually logged in, and the soft anti-bot returns
+         Conservative default because Douyin hits more-aggressive risk-control
+         if the user isn't actually logged in, and the soft anti-bot returns
          HTTP 200 + empty body (design-doc Risk #7) which we can only
          detect after the bootstrap runs. Better to require explicit
          opt-in for Douyin than auto-fire it on every CI run.
@@ -3352,7 +3349,7 @@ def _persist_init_source_enabled_flags(
 
         cfg = load_config()
         changed = False
-        if bool(getattr(cfg.sources.xiaohongshu, "enabled", True)) != include_xhs:
+        if bool(getattr(cfg.sources.xiaohongshu, "enabled", False)) != include_xhs:
             cfg.sources.xiaohongshu.enabled = include_xhs
             changed = True
         if bool(getattr(cfg.sources.douyin, "enabled", False)) != include_dy:
@@ -3622,12 +3619,12 @@ def init(
         return hist, favs, follows
 
     # v0.3.27+: ask the user whether to include xhs data, with a prep
-    # checklist when they opt in. Three escape hatches preserve the
-    # auto-on default for non-interactive callers:
+    # checklist when they opt in. Defaults stay off unless the user
+    # explicitly enables XHS:
     #   --no-xhs          forces skip
     #   --yes-xhs         skips the y/n + checklist (scripted opt-in)
     #   OPENBILICLAW_NO_XHS=1   env var skip
-    # Default (interactive, no flags): prompt with default Y.
+    # Default (interactive, no flags): prompt with default N.
     if no_xhs:
         include_xhs = False
         console.print("[dim]  跳过小红书数据接入(命令行 --no-xhs)。[/dim]")
@@ -3637,10 +3634,7 @@ def init(
         include_xhs = _ask_xhs_inclusion()
 
     # Same resolution order for the Douyin opt-in. Default is
-    # off-in-non-interactive (see _ask_dy_inclusion docstring) which
-    # diverges from the XHS auto-on default — Douyin's risk control
-    # is more aggressive and the empty-200 anti-bot makes blind
-    # opt-in less safe.
+    # off-in-non-interactive (see _ask_dy_inclusion docstring).
     if no_douyin:
         include_dy = False
         console.print("[dim]  跳过抖音数据接入(命令行 --no-douyin)。[/dim]")

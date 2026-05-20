@@ -258,7 +258,7 @@ Bilibili discovery 的平台级开关。B 站账号登录 / Cookie 获取仍由 
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `enabled` | bool | `true` | 是否启用小红书 discovery 和 init bootstrap；`init` 选 No、`--no-xhs` 或 `OPENBILICLAW_NO_XHS=1` 会写回 `false` |
+| `enabled` | bool | `false` | 是否启用小红书 discovery 和 init bootstrap；默认关闭，`init` 选 Yes、`--yes-xhs` 或插件设置页打开后才会写回 `true` |
 | `daily_search_budget` | int | `30` | 每天后端允许入队的 Soul 驱动搜索任务数上限。由 `XhsTaskProducer`（`runtime/xhs_producer.py`）在持续刷新循环里使用，搭配内部 4h 最小间隔避免反复抢配额 |
 | `daily_creator_budget` | int | `10` | 每天每位订阅创作者的抓取任务上限 |
 | `task_interval_seconds` | int | `45` | 扩展分发器两次任务之间的最小间隔（秒） |
@@ -319,7 +319,7 @@ YouTube discovery 配置。初始化画像由浏览器扩展读取观看历史 /
 
 ### `[scheduler.pool_source_shares]`
 
-候选池按平台族做保底配比，默认 `bilibili:xiaohongshu:douyin:youtube = 8:1:1:1`。关闭的平台会保留配置值但在运行时从有效配比中剔除，剩余平台重新归一化吃满 `pool_target_count`；默认安装里 YouTube / Douyin 关闭，所以不会因为默认 share 留空池子。
+候选池按平台族做保底配比，默认保存的 share 仍是 `bilibili:xiaohongshu:douyin:youtube = 8:1:1:1`。关闭的平台会保留配置值但在运行时从有效配比中剔除，剩余平台重新归一化吃满 `pool_target_count`；默认安装里小红书 / 抖音 / YouTube 都关闭，所以默认有效配比只有 Bilibili。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|

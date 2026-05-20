@@ -11,6 +11,8 @@ from openbiliclaw.recommendation.delight import DEFAULT_DELIGHT_THRESHOLD
 from openbiliclaw.runtime.presence import PresenceTracker
 from openbiliclaw.runtime.refresh import ContinuousRefreshController
 
+_MULTI_SOURCE_SHARES = {"bilibili": 8, "xiaohongshu": 1, "douyin": 1}
+
 
 class _FakeClock:
     def __init__(self) -> None:
@@ -781,6 +783,7 @@ async def test_force_refresh_skips_bilibili_when_platform_quota_full() -> None:
         discovery_engine=discovery,
         recommendation_engine=_FakeRecommendationEngine(),
         pool_target_count=600,
+        pool_source_shares=_MULTI_SOURCE_SHARES,
         discovery_limit=30,
     )
 
@@ -817,6 +820,7 @@ async def test_manual_refresh_skip_does_not_reuse_stale_replenishment_message() 
         recommendation_engine=_FakeRecommendationEngine(),
         event_hub=event_hub,
         pool_target_count=600,
+        pool_source_shares=_MULTI_SOURCE_SHARES,
         discovery_limit=30,
     )
 
@@ -1082,6 +1086,7 @@ async def test_refresh_controller_prioritizes_underfilled_sources() -> None:
         discovery_engine=discovery,
         recommendation_engine=_FakeRecommendationEngine(),
         pool_target_count=30,
+        pool_source_shares=_MULTI_SOURCE_SHARES,
         discovery_limit=4,
         trending_refresh_hours=999,
         explore_refresh_hours=999,
@@ -1123,6 +1128,7 @@ async def test_refresh_controller_skips_bilibili_when_only_small_sources_underfi
         discovery_engine=discovery,
         recommendation_engine=_FakeRecommendationEngine(),
         pool_target_count=30,
+        pool_source_shares=_MULTI_SOURCE_SHARES,
         discovery_limit=4,
         trending_refresh_hours=999,
         explore_refresh_hours=999,
@@ -1288,11 +1294,7 @@ def test_source_target_counts_use_platform_default_shares() -> None:
         pool_target_count=600,
     )
 
-    assert controller._source_target_counts() == {
-        "bilibili": 480,
-        "xiaohongshu": 60,
-        "douyin": 60,
-    }
+    assert controller._source_target_counts() == {"bilibili": 600}
 
 
 def test_source_target_counts_use_configured_platform_shares() -> None:
@@ -1332,7 +1334,7 @@ def test_source_replenishment_plan_maps_bilibili_deficit_to_bilibili_strategies(
     )
 
     assert controller._build_source_replenishment_plan() == [
-        (["search", "related_chain", "trending", "explore"], 180)
+        (["search", "related_chain", "trending", "explore"], 300)
     ]
 
 
@@ -1372,6 +1374,7 @@ async def test_refresh_controller_uses_bilibili_deficit_for_discovery_limit() ->
         discovery_engine=discovery,
         recommendation_engine=_FakeRecommendationEngine(),
         pool_target_count=600,
+        pool_source_shares=_MULTI_SOURCE_SHARES,
         discovery_limit=30,
     )
 
@@ -1403,6 +1406,7 @@ def test_source_replenishment_plan_leaves_xhs_deficit_to_xhs_producer() -> None:
         discovery_engine=_FakeDiscoveryEngine(),
         recommendation_engine=_FakeRecommendationEngine(),
         pool_target_count=600,
+        pool_source_shares=_MULTI_SOURCE_SHARES,
     )
 
     assert controller._build_source_replenishment_plan() == []
@@ -1444,6 +1448,7 @@ async def test_xhs_producer_receives_source_deficit_limit() -> None:
         discovery_engine=_FakeDiscoveryEngine(),
         recommendation_engine=_FakeRecommendationEngine(),
         pool_target_count=600,
+        pool_source_shares=_MULTI_SOURCE_SHARES,
         discovery_limit=30,
         xhs_producer=producer,
     )
@@ -1466,6 +1471,7 @@ async def test_douyin_producer_runs_when_douyin_under_quota() -> None:
         discovery_engine=_FakeDiscoveryEngine(),
         recommendation_engine=_FakeRecommendationEngine(),
         pool_target_count=600,
+        pool_source_shares=_MULTI_SOURCE_SHARES,
         discovery_limit=30,
         douyin_producer=producer,
     )
@@ -1505,6 +1511,7 @@ def test_pool_cap_trim_receives_xhs_family_quota() -> None:
         discovery_engine=_FakeDiscoveryEngine(),
         recommendation_engine=_FakeRecommendationEngine(),
         pool_target_count=600,
+        pool_source_shares=_MULTI_SOURCE_SHARES,
     )
 
     assert controller._enforce_pool_cap() is True
@@ -1523,6 +1530,7 @@ def test_pool_cap_enforces_platform_caps_even_when_ready_pool_below_target() -> 
         discovery_engine=_FakeDiscoveryEngine(),
         recommendation_engine=_FakeRecommendationEngine(),
         pool_target_count=600,
+        pool_source_shares=_MULTI_SOURCE_SHARES,
     )
 
     assert controller._enforce_pool_cap() is False
@@ -1542,6 +1550,7 @@ def test_pool_cap_reactivates_under_quota_sources_before_trim() -> None:
         discovery_engine=_FakeDiscoveryEngine(),
         recommendation_engine=_FakeRecommendationEngine(),
         pool_target_count=600,
+        pool_source_shares=_MULTI_SOURCE_SHARES,
     )
 
     assert controller._enforce_pool_cap() is True

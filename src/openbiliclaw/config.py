@@ -191,12 +191,9 @@ class XiaohongshuSourceConfig:
     background-tab tasks). No sidecar or backend crawling needed.
     """
 
-    # Set to False to skip XHS init bootstrap, suppress backend XHS task
-    # generation and drop xiaohongshu from pool_source_shares.  Init's
-    # interactive prompt and ``OPENBILICLAW_NO_XHS=1`` env var write this
-    # back so the runtime stops burning daily_search_budget on an
-    # un-installed / un-logged-in xhs extension.
-    enabled: bool = True
+    # XHS is opt-in because it requires the browser extension and a logged-in
+    # browser session. Init --yes-xhs or the settings page can enable it later.
+    enabled: bool = False
     # Max Soul-driven search tasks the backend may enqueue per day.
     daily_search_budget: int = 30
     # Max creator-subscription fetch tasks per day.
@@ -512,7 +509,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
             enabled=bool(bilibili_source_raw.get("enabled", True)),
         ),
         xiaohongshu=XiaohongshuSourceConfig(
-            enabled=bool(xhs_raw.get("enabled", True)),
+            enabled=bool(xhs_raw.get("enabled", False)),
             daily_search_budget=int(xhs_raw.get("daily_search_budget", 30)),
             daily_creator_budget=int(xhs_raw.get("daily_creator_budget", 10)),
             task_interval_seconds=int(xhs_raw.get("task_interval_seconds", 45)),

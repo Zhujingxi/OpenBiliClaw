@@ -4205,7 +4205,7 @@ function bindSettings() {
       sourcesBrowserHeaded.checked = cfg.sources?.browser?.headed === true;
     }
     const xhsEnabled = document.getElementById("cfgXhsEnabled");
-    if (xhsEnabled) xhsEnabled.checked = cfg.sources?.xiaohongshu?.enabled !== false;
+    if (xhsEnabled) xhsEnabled.checked = cfg.sources?.xiaohongshu?.enabled === true;
     setVal("cfgXhsDailySearchBudget", cfg.sources?.xiaohongshu?.daily_search_budget);
     setVal("cfgXhsDailyCreatorBudget", cfg.sources?.xiaohongshu?.daily_creator_budget);
     setVal("cfgXhsTaskInterval", cfg.sources?.xiaohongshu?.task_interval_seconds);
@@ -4352,7 +4352,7 @@ function bindSettings() {
           enabled: checked("cfgBilibiliEnabled", true),
         },
         xiaohongshu: {
-          enabled: checked("cfgXhsEnabled", true),
+          enabled: checked("cfgXhsEnabled"),
           daily_search_budget: getInt("cfgXhsDailySearchBudget", 30),
           daily_creator_budget: getInt("cfgXhsDailyCreatorBudget", 10),
           task_interval_seconds: getInt("cfgXhsTaskInterval", 45),
@@ -4462,7 +4462,7 @@ function bindSettings() {
         const suggestion = await fetchSourceShareSuggestion({
           enabled_sources: {
             bilibili: checked("cfgBilibiliEnabled", true),
-            xiaohongshu: checked("cfgXhsEnabled", true),
+            xiaohongshu: checked("cfgXhsEnabled"),
             douyin: checked("cfgDouyinEnabled"),
             youtube: checked("cfgYoutubeEnabled"),
           },

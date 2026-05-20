@@ -668,7 +668,7 @@ def test_sources_browser_defaults_are_empty() -> None:
 def test_sources_xiaohongshu_defaults() -> None:
     config = _build_config({})
 
-    assert config.sources.xiaohongshu.enabled is True
+    assert config.sources.xiaohongshu.enabled is False
     assert config.sources.xiaohongshu.daily_search_budget == 30
     assert config.sources.xiaohongshu.daily_creator_budget == 10
     assert config.sources.xiaohongshu.task_interval_seconds == 45

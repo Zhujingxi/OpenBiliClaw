@@ -339,7 +339,7 @@ class RuntimeContext:
 
             xhs_cfg = getattr(new_config.sources, "xiaohongshu", None)
             sched_cfg = getattr(new_config, "scheduler", None)
-            xhs_enabled = bool(getattr(xhs_cfg, "enabled", True)) and bool(
+            xhs_enabled = bool(getattr(xhs_cfg, "enabled", False)) and bool(
                 getattr(sched_cfg, "enabled", True)
             )
             new_xhs_producer = XhsTaskProducer(

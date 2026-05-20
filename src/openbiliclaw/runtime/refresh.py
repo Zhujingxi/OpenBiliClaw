@@ -24,8 +24,6 @@ logger = logging.getLogger(__name__)
 _MAX_DISCOVERY_BACKFILL_PER_REFRESH = 60
 _DEFAULT_PLATFORM_SOURCE_SHARES: dict[str, int] = {
     "bilibili": 8,
-    "xiaohongshu": 1,
-    "douyin": 1,
 }
 _PLATFORM_SOURCE_ORDER = ("bilibili", "xiaohongshu", "douyin", "youtube")
 _BILIBILI_DISCOVERY_SOURCES = ("search", "related_chain", "trending", "explore")

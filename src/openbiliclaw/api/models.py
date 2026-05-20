@@ -570,7 +570,7 @@ class BilibiliSourceConfigOut(BaseModel):
 
 
 class XiaohongshuSourceConfigOut(BaseModel):
-    enabled: bool = True
+    enabled: bool = False
     daily_search_budget: int = 30
     daily_creator_budget: int = 10
     task_interval_seconds: int = 45
