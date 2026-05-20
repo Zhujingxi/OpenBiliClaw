@@ -237,7 +237,8 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │     PoolCurator + 双轴 fatigue + per-group 候选窗口     │   │
 │  │     ContinuousRefreshController + B/XHS/DY/YT=8/1/1/1 │   │
 │  │     LLM gate: scheduler + extension presence          │   │
-│  │     AccountSync: B 站账号信号 -> Memory/Soul bootstrap    │   │
+│  │     AccountSync: B 站账号增量 -> Memory/Soul bootstrap     │   │
+│  │     Source bootstrap seen-key guard -> Memory/Profile      │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │              Skill System (可扩展技能)                 │   │
@@ -254,7 +255,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │ DouyinDiscoveryService: 后台插件搜索 / 热点 related / 首页 feed │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ Cookie/登录态、runtime-stream presence、任务持久化/claim、平台配额 │ │
+│  │ Cookie/登录态、runtime-stream presence、任务持久化/claim、seen-key 去重 │ │
 │  └──────────────────────────────────────────────────────┘   │
 ├──────────────────────────────────────────────────────────────┤
 │         LLM 适配层 + Embedding 服务（双层缓存）                 │

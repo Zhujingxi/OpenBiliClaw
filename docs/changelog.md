@@ -6,6 +6,8 @@
 
 ## v0.3.87 / extension v0.3.38: runtime 配置真实生效（2026-05-20）
 
+- `AccountSyncService` 现在会持久化同秒历史 bvid 集合、收藏 bvid 集合和关注 mid 集合；B 站账号同步只把新增历史 / 收藏 / 关注送进画像分析，避免消息推荐期间重复重放旧账号信号并浪费 LLM tokens。
+- XHS / 抖音 / YouTube bootstrap task-result 新增跨任务 seen-key 过滤：任务表仍保留完整 partial / final 原始结果，但进入 memory / 增量画像前会跳过 `source_bootstrap_state.json` 里已见的 note / video / item key；抖音和 YouTube 队列也补齐 `in_progress` claim 与 6 小时近期任务复用，避免反复打开前台 tab 全量扫描。
 - `[scheduler]` 新增真实 runtime 调度参数：refresh 轮询、行为触发阈值、trending / explore 间隔、单轮 discovery 上限、主动推送间隔和 speculator idle tick；这些字段已接入 `/api/config`、daemon runtime、OpenClaw direct bootstrap 和插件设置页。
 - `scheduler.speculation_*` 现在会传入 `SoulEngine` / `InterestSpeculator`，配置页里的猜测兴趣间隔、TTL、冷却、确认阈值和上限不再只是保存到 TOML。
 - 插件设置页调度区移除无效的 `discovery_cron` 输入，补上 `extension_disconnect_grace_seconds` 和实际生效的 runtime 频率控件；`discovery_cron` 仍作为 legacy 字段保留在配置/API 中但 runtime 不消费。

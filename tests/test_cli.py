@@ -3841,6 +3841,32 @@ def test_enqueue_dy_bootstrap_task_uses_env_overrides(
     ]
 
 
+def test_enqueue_dy_bootstrap_task_reuses_recent_task_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.cli import _enqueue_dy_bootstrap_task
+
+    class FakeQueue:
+        def __init__(self, _db: object) -> None:
+            pass
+
+        def find_recent_task(self, task_type: str, *, recent_hours: float, statuses=None):
+            assert task_type == "bootstrap_profile"
+            assert recent_hours > 0
+            return {"id": "recent-dy-task-id", "status": "completed"}
+
+        def enqueue_with_id(self, task_type: str, payload: dict, *, daily_budget: int) -> str:
+            raise AssertionError("recent dy bootstrap task should be reused")
+
+    class FakeDatabase:
+        conn = object()
+
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: FakeDatabase())
+    monkeypatch.setattr("openbiliclaw.sources.dy_tasks.DyTaskQueue", FakeQueue)
+
+    assert _enqueue_dy_bootstrap_task() == "recent-dy-task-id"
+
+
 def test_enqueue_dy_bootstrap_task_returns_none_when_db_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3851,6 +3877,32 @@ def test_enqueue_dy_bootstrap_task_returns_none_when_db_unavailable(
 
     monkeypatch.setattr(cli_module, "_get_runtime_database", _raises)
     assert _enqueue_dy_bootstrap_task() is None
+
+
+def test_enqueue_yt_bootstrap_task_reuses_recent_task_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.cli import _enqueue_yt_bootstrap_task
+
+    class FakeQueue:
+        def __init__(self, _db: object) -> None:
+            pass
+
+        def find_recent_task(self, task_type: str, *, recent_hours: float, statuses=None):
+            assert task_type == "bootstrap_profile"
+            assert recent_hours > 0
+            return {"id": "recent-yt-task-id", "status": "completed"}
+
+        def enqueue_with_id(self, task_type: str, payload: dict, *, daily_budget: int) -> str:
+            raise AssertionError("recent yt bootstrap task should be reused")
+
+    class FakeDatabase:
+        conn = object()
+
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: FakeDatabase())
+    monkeypatch.setattr("openbiliclaw.sources.yt_tasks.YtTaskQueue", FakeQueue)
+
+    assert _enqueue_yt_bootstrap_task() == "recent-yt-task-id"
 
 
 def test_collect_dy_bootstrap_events_returns_skipped_for_no_task_id() -> None:

@@ -52,6 +52,11 @@ def _note_key(note: dict[str, Any]) -> str:
     return f"{scope}:{key}" if key else ""
 
 
+def xhs_bootstrap_note_key(note: dict[str, Any]) -> str:
+    """Return the stable cross-task identity key for one bootstrap note."""
+    return _note_key(note)
+
+
 def _merge_result_payload(
     current: dict[str, Any],
     *,
@@ -272,9 +277,7 @@ class XhsTaskQueue:
         eligible again after 15 minutes so a crashed extension does not
         permanently wedge the queue.
         """
-        stale_before = (datetime.now(UTC) - timedelta(minutes=15)).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
+        stale_before = (datetime.now(UTC) - timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
         conn = self._db.conn
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -319,9 +322,7 @@ class XhsTaskQueue:
         if not selected_statuses:
             return None
         placeholders = ",".join("?" for _ in selected_statuses)
-        cutoff = (datetime.now(UTC) - timedelta(hours=recent_hours)).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
+        cutoff = (datetime.now(UTC) - timedelta(hours=recent_hours)).strftime("%Y-%m-%d %H:%M:%S")
         row = self._db.conn.execute(
             f"""
             SELECT *

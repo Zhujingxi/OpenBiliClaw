@@ -159,6 +159,8 @@ _DEFAULT_XHS_BOOTSTRAP_WAIT_SECONDS = 180.0
 _DEFAULT_DY_BOOTSTRAP_WAIT_SECONDS = 180.0
 _DEFAULT_YT_BOOTSTRAP_WAIT_SECONDS = 240.0
 _DEFAULT_XHS_BOOTSTRAP_DEDUPE_HOURS = 6.0
+_DEFAULT_DY_BOOTSTRAP_DEDUPE_HOURS = 6.0
+_DEFAULT_YT_BOOTSTRAP_DEDUPE_HOURS = 6.0
 _EXTENSION_PRESENCE_REQUIRED_WARNING = (
     "WARN extension presence required; backend will pause background LLM work "
     "after grace period if no extension client connects"
@@ -2067,6 +2069,28 @@ def _xhs_bootstrap_dedupe_hours() -> float:
         return _DEFAULT_XHS_BOOTSTRAP_DEDUPE_HOURS
 
 
+def _dy_bootstrap_dedupe_hours() -> float:
+    raw = os.environ.get(
+        "OPENBILICLAW_DY_BOOTSTRAP_DEDUPE_HOURS",
+        str(_DEFAULT_DY_BOOTSTRAP_DEDUPE_HOURS),
+    )
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return _DEFAULT_DY_BOOTSTRAP_DEDUPE_HOURS
+
+
+def _yt_bootstrap_dedupe_hours() -> float:
+    raw = os.environ.get(
+        "OPENBILICLAW_YT_BOOTSTRAP_DEDUPE_HOURS",
+        str(_DEFAULT_YT_BOOTSTRAP_DEDUPE_HOURS),
+    )
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return _DEFAULT_YT_BOOTSTRAP_DEDUPE_HOURS
+
+
 def _enqueue_xhs_bootstrap_task(*, force: bool = False) -> str | None:
     """Fire-and-forget enqueue of the bootstrap_profile task.
 
@@ -2295,9 +2319,28 @@ def _enqueue_dy_bootstrap_task() -> str | None:
 
     scroll_rounds = int(os.environ.get("OPENBILICLAW_DY_BOOTSTRAP_SCROLL_ROUNDS", "15"))
     max_items = int(os.environ.get("OPENBILICLAW_DY_BOOTSTRAP_MAX_ITEMS", "300"))
+    task_id: str | None = None
 
     try:
         queue = DyTaskQueue(database)
+        dedupe_hours = _dy_bootstrap_dedupe_hours()
+        find_recent = getattr(queue, "find_recent_task", None)
+        if dedupe_hours > 0 and callable(find_recent):
+            recent = find_recent(
+                "bootstrap_profile",
+                recent_hours=dedupe_hours,
+                statuses=("pending", "in_progress", "completed", "failed"),
+            )
+            if recent is not None:
+                task_id = str(recent.get("id", "")).strip()
+                if task_id:
+                    status = str(recent.get("status", "unknown"))
+                    console.print(
+                        "  [dim]复用最近的抖音 bootstrap 任务"
+                        f"({status})；需要重新拉取可设 "
+                        "OPENBILICLAW_DY_BOOTSTRAP_DEDUPE_HOURS=0。[/dim]"
+                    )
+                    return task_id
         task_id = queue.enqueue_with_id(
             "bootstrap_profile",
             {
@@ -2430,9 +2473,28 @@ def _enqueue_yt_bootstrap_task() -> str | None:
 
     scroll_rounds = int(os.environ.get("OPENBILICLAW_YT_BOOTSTRAP_SCROLL_ROUNDS", "10"))
     max_items = int(os.environ.get("OPENBILICLAW_YT_BOOTSTRAP_MAX_ITEMS", "300"))
+    task_id: str | None = None
 
     try:
         queue = YtTaskQueue(database)
+        dedupe_hours = _yt_bootstrap_dedupe_hours()
+        find_recent = getattr(queue, "find_recent_task", None)
+        if dedupe_hours > 0 and callable(find_recent):
+            recent = find_recent(
+                "bootstrap_profile",
+                recent_hours=dedupe_hours,
+                statuses=("pending", "in_progress", "completed", "failed"),
+            )
+            if recent is not None:
+                task_id = str(recent.get("id", "")).strip()
+                if task_id:
+                    status = str(recent.get("status", "unknown"))
+                    console.print(
+                        "  [dim]复用最近的 YouTube bootstrap 任务"
+                        f"({status})；需要重新拉取可设 "
+                        "OPENBILICLAW_YT_BOOTSTRAP_DEDUPE_HOURS=0。[/dim]"
+                    )
+                    return task_id
         task_id = queue.enqueue_with_id(
             "bootstrap_profile",
             {

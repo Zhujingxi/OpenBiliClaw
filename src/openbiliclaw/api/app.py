@@ -6,6 +6,7 @@ import asyncio
 import logging
 import shutil
 import uuid
+from collections.abc import Callable
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, cast
 
@@ -437,6 +438,79 @@ def create_app(
                     await ingest(signal)
         except Exception:
             logger.exception("Failed to ingest source task events into profile pipeline")
+
+    def _load_source_bootstrap_state() -> dict[str, object]:
+        from openbiliclaw.sources.bootstrap_state import (
+            default_source_bootstrap_state,
+            normalize_source_bootstrap_state,
+        )
+
+        load_state = getattr(ctx.memory_manager, "load_source_bootstrap_state", None)
+        if not callable(load_state):
+            return default_source_bootstrap_state()
+        with suppress(Exception):
+            return normalize_source_bootstrap_state(load_state())
+        return default_source_bootstrap_state()
+
+    def _save_source_bootstrap_state(state: dict[str, object]) -> None:
+        from openbiliclaw.sources.bootstrap_state import normalize_source_bootstrap_state
+
+        save_state = getattr(ctx.memory_manager, "save_source_bootstrap_state", None)
+        if not callable(save_state):
+            return
+        with suppress(Exception):
+            save_state(normalize_source_bootstrap_state(state))
+
+    def _filter_new_source_bootstrap_items(
+        source: str,
+        items: list[dict[str, Any]],
+        key_func: Callable[[dict[str, Any]], str],
+    ) -> tuple[list[dict[str, Any]], dict[int, str]]:
+        """Filter bootstrap items that already propagated from an older task."""
+        from openbiliclaw.sources.bootstrap_state import (
+            as_string_list,
+            source_bootstrap_state_key,
+        )
+
+        state = _load_source_bootstrap_state()
+        state_key = source_bootstrap_state_key(source)
+        seen = set(as_string_list(state.get(state_key, [])))
+        batch_seen: set[str] = set()
+        fresh: list[dict[str, Any]] = []
+        fresh_keys_by_index: dict[int, str] = {}
+        for item in items:
+            key = key_func(item)
+            if not key or key in seen or key in batch_seen:
+                continue
+            batch_seen.add(key)
+            fresh_keys_by_index[len(fresh)] = key
+            fresh.append(item)
+        return fresh, fresh_keys_by_index
+
+    def _mark_source_bootstrap_keys(source: str, keys: list[str]) -> None:
+        """Persist bootstrap keys that already entered the source event path."""
+        if not keys:
+            return
+        from datetime import UTC, datetime
+
+        from openbiliclaw.sources.bootstrap_state import (
+            as_string_list,
+            source_bootstrap_state_key,
+        )
+
+        state = _load_source_bootstrap_state()
+        state_key = source_bootstrap_state_key(source)
+        merged = as_string_list(state.get(state_key, []))
+        seen = set(merged)
+        for key in keys:
+            normalized = str(key).strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            merged.append(normalized)
+        state[state_key] = merged
+        state["last_source_bootstrap_sync_at"] = datetime.now(UTC).isoformat()
+        _save_source_bootstrap_state(state)
 
     chat_turn_lock = asyncio.Lock()
     fallback_chat_turns: dict[str, dict[str, Any]] = {}
@@ -2993,6 +3067,7 @@ def create_app(
     from openbiliclaw.sources.xhs_tasks import (
         XhsCreatorStore,
         XhsTaskQueue,
+        xhs_bootstrap_note_key,
         xhs_bootstrap_notes_to_events,
     )
 
@@ -3084,21 +3159,31 @@ def create_app(
             if added_notes:
                 _cache_xhs_notes(ctx.database, added_notes, "task", self_info_now)
             if task_type == "bootstrap_profile" and added_notes:
+                fresh_notes, note_keys_by_index = _filter_new_source_bootstrap_items(
+                    "xhs",
+                    added_notes,
+                    xhs_bootstrap_note_key,
+                )
                 # Filter self-authored notes from event propagation —
                 # otherwise the user's own posts get treated as their
                 # own "favorite/like" signals and warp the soul profile.
                 propagated = 0
                 skipped_self = 0
                 profile_events: list[dict[str, Any]] = []
-                for note in added_notes:
+                propagated_keys: list[str] = []
+                for index, note in enumerate(fresh_notes):
                     if _is_self_authored_note(note, self_info_now):
                         skipped_self += 1
                         continue
                     for event in xhs_bootstrap_notes_to_events([note]):
                         await ctx.memory_manager.propagate_event(event)
                         profile_events.append(event)
+                        key = note_keys_by_index.get(index, "")
+                        if key:
+                            propagated_keys.append(key)
                         propagated += 1
                 await _ingest_profile_update_events(profile_events)
+                _mark_source_bootstrap_keys("xhs", propagated_keys)
                 if skipped_self > 0:
                     logger.info(
                         "xhs bootstrap propagate: dropped %d self-authored note(s) (%d propagated)",
@@ -3157,6 +3242,7 @@ def create_app(
 
     from openbiliclaw.sources.dy_tasks import (
         DyTaskQueue,
+        dy_bootstrap_video_key,
         dy_bootstrap_videos_to_events,
     )
 
@@ -3234,12 +3320,22 @@ def create_app(
                 complete=is_final,
             )
             if task_type == "bootstrap_profile" and added_videos:
+                fresh_videos, video_keys_by_index = _filter_new_source_bootstrap_items(
+                    "dy",
+                    added_videos,
+                    dy_bootstrap_video_key,
+                )
                 profile_events: list[dict[str, Any]] = []
-                for video in added_videos:
+                propagated_keys: list[str] = []
+                for index, video in enumerate(fresh_videos):
                     for event in dy_bootstrap_videos_to_events([video]):
                         await ctx.memory_manager.propagate_event(event)
                         profile_events.append(event)
+                        key = video_keys_by_index.get(index, "")
+                        if key:
+                            propagated_keys.append(key)
                 await _ingest_profile_update_events(profile_events)
+                _mark_source_bootstrap_keys("dy", propagated_keys)
         else:
             _dy_task_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
 
@@ -3293,6 +3389,7 @@ def create_app(
     # ── YouTube bootstrap endpoints ────────────────────────────────
     from openbiliclaw.sources.yt_tasks import (
         YtTaskQueue,
+        yt_bootstrap_item_key,
         yt_bootstrap_items_to_events,
     )
 
@@ -3354,11 +3451,22 @@ def create_app(
                 complete=is_final,
             )
             if task_type == "bootstrap_profile" and added_items:
+                fresh_items, item_keys_by_index = _filter_new_source_bootstrap_items(
+                    "yt",
+                    added_items,
+                    yt_bootstrap_item_key,
+                )
                 profile_events: list[dict[str, Any]] = []
-                for event in yt_bootstrap_items_to_events(added_items):
-                    await ctx.memory_manager.propagate_event(event)
-                    profile_events.append(event)
+                propagated_keys: list[str] = []
+                for index, item in enumerate(fresh_items):
+                    for event in yt_bootstrap_items_to_events([item]):
+                        await ctx.memory_manager.propagate_event(event)
+                        profile_events.append(event)
+                        key = item_keys_by_index.get(index, "")
+                        if key:
+                            propagated_keys.append(key)
                 await _ingest_profile_update_events(profile_events)
+                _mark_source_bootstrap_keys("yt", propagated_keys)
         else:
             _yt_task_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
 

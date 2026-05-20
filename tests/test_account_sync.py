@@ -167,6 +167,46 @@ async def test_account_sync_imports_incremental_history_only() -> None:
 
 
 @pytest.mark.asyncio
+async def test_account_sync_does_not_reimport_same_timestamp_history() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager(
+        {
+            "last_history_view_at": 100,
+            "last_history_bvid": "BVOLD2",
+            "history_bvids_at_last_view_at": ["BVOLD1", "BVOLD2"],
+            "last_favorites_sync_at": "",
+            "favorite_signature": "",
+            "last_following_sync_at": "",
+            "following_signature": "",
+            "last_account_sync_at": "",
+            "last_sync_error": "",
+        }
+    )
+    soul = _FakeSoulEngine()
+    client = _FakeClient(
+        history_items=[
+            _history_item("BVOLD1", 100, "同秒旧视频 1"),
+            _history_item("BVOLD2", 100, "同秒旧视频 2"),
+            _history_item("BVOLDER", 99, "更早旧视频"),
+        ],
+        favorites=[],
+        following=[],
+    )
+
+    service = AccountSyncService(memory_manager=memory, bilibili_client=client, soul_engine=soul)
+
+    result = await service.sync_now()
+
+    assert result["synced"] is False
+    assert result["new_event_count"] == 0
+    assert memory.events == []
+    assert soul.calls == []
+    assert memory.state["last_history_view_at"] == 100
+    assert memory.state["history_bvids_at_last_view_at"] == ["BVOLD1", "BVOLD2"]
+
+
+@pytest.mark.asyncio
 async def test_account_sync_skips_favorites_and_following_when_signature_unchanged() -> None:
     from openbiliclaw.runtime.account_sync import AccountSyncService
 
@@ -195,6 +235,42 @@ async def test_account_sync_skips_favorites_and_following_when_signature_unchang
     assert result["new_event_count"] == 0
     assert service.memory_manager.events == []
     assert service.soul_engine.calls == []
+
+
+@pytest.mark.asyncio
+async def test_account_sync_imports_only_new_favorites_when_signature_changes() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager(
+        {
+            "last_history_view_at": 0,
+            "last_history_bvid": "",
+            "last_favorites_sync_at": "2026-03-14T12:00:00",
+            "favorite_signature": "7:BVOLD",
+            "favorite_bvids": ["BVOLD"],
+            "last_following_sync_at": "",
+            "following_signature": "",
+            "last_account_sync_at": "",
+            "last_sync_error": "",
+        }
+    )
+    soul = _FakeSoulEngine()
+    client = _FakeClient(
+        history_items=[],
+        favorites=[_favorite_folder_with_items(7, "BVNEW", "BVOLD")],
+        following=[],
+    )
+
+    service = AccountSyncService(memory_manager=memory, bilibili_client=client, soul_engine=soul)
+
+    result = await service.sync_now()
+
+    assert result["synced"] is True
+    assert result["new_event_count"] == 1
+    assert [event["metadata"]["bvid"] for event in memory.events] == ["BVNEW"]
+    assert soul.calls and len(soul.calls[0]) == 1
+    assert memory.state["favorite_bvids"] == ["BVNEW", "BVOLD"]
+    assert memory.state["favorite_signature"] == "7:BVNEW,BVOLD"
 
 
 @pytest.mark.asyncio
