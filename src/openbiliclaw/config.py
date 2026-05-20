@@ -23,6 +23,13 @@ _SUPPORTED_OPENAI_AUTH_MODES = {"", "api_key", "codex_oauth"}
 _MIN_POOL_TARGET_COUNT = 1
 _MAX_POOL_TARGET_COUNT = 600
 _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS = 90
+_DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS = 60
+_DEFAULT_SIGNAL_EVENT_THRESHOLD = 6
+_DEFAULT_TRENDING_REFRESH_HOURS = 3
+_DEFAULT_EXPLORE_REFRESH_HOURS = 12
+_DEFAULT_DISCOVERY_LIMIT = 30
+_DEFAULT_PROACTIVE_PUSH_INTERVAL_SECONDS = 120
+_DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES = 30
 _DEFAULT_POOL_SOURCE_SHARES = {
     "bilibili": 8,
     "xiaohongshu": 1,
@@ -165,6 +172,13 @@ class SchedulerConfig:
         default_factory=lambda: dict(_DEFAULT_POOL_SOURCE_SHARES)
     )
     account_sync_interval_hours: int = 6
+    refresh_check_interval_seconds: int = _DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS
+    signal_event_threshold: int = _DEFAULT_SIGNAL_EVENT_THRESHOLD
+    trending_refresh_hours: int = _DEFAULT_TRENDING_REFRESH_HOURS
+    explore_refresh_hours: int = _DEFAULT_EXPLORE_REFRESH_HOURS
+    discovery_limit: int = _DEFAULT_DISCOVERY_LIMIT
+    proactive_push_interval_seconds: int = _DEFAULT_PROACTIVE_PUSH_INTERVAL_SECONDS
+    speculator_idle_interval_minutes: int = _DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES
     speculation_interval_minutes: int = 10
     speculation_ttl_days: int = 3
     speculation_cooldown_days: int = 7
@@ -559,6 +573,42 @@ def _build_config(raw: dict[str, Any]) -> Config:
                 "pool_source_shares": _normalize_pool_source_shares(
                     sched_raw.get("pool_source_shares")
                 ),
+                "refresh_check_interval_seconds": _normalize_scheduler_int(
+                    sched_raw.get("refresh_check_interval_seconds"),
+                    default=_DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS,
+                    min_value=15,
+                ),
+                "signal_event_threshold": _normalize_scheduler_int(
+                    sched_raw.get("signal_event_threshold"),
+                    default=_DEFAULT_SIGNAL_EVENT_THRESHOLD,
+                    min_value=1,
+                ),
+                "trending_refresh_hours": _normalize_scheduler_int(
+                    sched_raw.get("trending_refresh_hours"),
+                    default=_DEFAULT_TRENDING_REFRESH_HOURS,
+                    min_value=1,
+                ),
+                "explore_refresh_hours": _normalize_scheduler_int(
+                    sched_raw.get("explore_refresh_hours"),
+                    default=_DEFAULT_EXPLORE_REFRESH_HOURS,
+                    min_value=1,
+                ),
+                "discovery_limit": _normalize_scheduler_int(
+                    sched_raw.get("discovery_limit"),
+                    default=_DEFAULT_DISCOVERY_LIMIT,
+                    min_value=1,
+                    max_value=60,
+                ),
+                "proactive_push_interval_seconds": _normalize_scheduler_int(
+                    sched_raw.get("proactive_push_interval_seconds"),
+                    default=_DEFAULT_PROACTIVE_PUSH_INTERVAL_SECONDS,
+                    min_value=30,
+                ),
+                "speculator_idle_interval_minutes": _normalize_scheduler_int(
+                    sched_raw.get("speculator_idle_interval_minutes"),
+                    default=_DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES,
+                    min_value=5,
+                ),
             }
         ),
         storage=StorageConfig(**store_raw),
@@ -602,6 +652,31 @@ def _normalize_extension_disconnect_grace(value: object) -> int:
     if grace <= 0:
         return _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS
     return grace
+
+
+def _normalize_scheduler_int(
+    value: object,
+    *,
+    default: int,
+    min_value: int,
+    max_value: int | None = None,
+) -> int:
+    """Normalize scheduler tuning values into bounded positive ints."""
+    if isinstance(value, int | float):
+        normalized = int(value)
+    elif isinstance(value, str):
+        try:
+            normalized = int(value.strip())
+        except ValueError:
+            return default
+    else:
+        return default
+
+    if normalized < min_value:
+        return default
+    if max_value is not None and normalized > max_value:
+        return default
+    return normalized
 
 
 def _collect_config_issues(config: Config) -> list[ConfigIssue]:
@@ -892,6 +967,16 @@ def _render_config_toml(config: Config) -> str:
             f"discovery_cron = {_toml_string(config.scheduler.discovery_cron)}",
             f"pool_target_count = {config.scheduler.pool_target_count}",
             f"account_sync_interval_hours = {config.scheduler.account_sync_interval_hours}",
+            "refresh_check_interval_seconds = "
+            f"{config.scheduler.refresh_check_interval_seconds}",
+            f"signal_event_threshold = {config.scheduler.signal_event_threshold}",
+            f"trending_refresh_hours = {config.scheduler.trending_refresh_hours}",
+            f"explore_refresh_hours = {config.scheduler.explore_refresh_hours}",
+            f"discovery_limit = {config.scheduler.discovery_limit}",
+            "proactive_push_interval_seconds = "
+            f"{config.scheduler.proactive_push_interval_seconds}",
+            "speculator_idle_interval_minutes = "
+            f"{config.scheduler.speculator_idle_interval_minutes}",
             f"speculation_interval_minutes = {config.scheduler.speculation_interval_minutes}",
             f"speculation_ttl_days = {config.scheduler.speculation_ttl_days}",
             f"speculation_cooldown_days = {config.scheduler.speculation_cooldown_days}",

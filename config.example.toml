@@ -256,18 +256,23 @@ enabled = true
 # Manual CLI/API requests remain explicit and are not blocked by this switch.
 pause_on_extension_disconnect = false
 extension_disconnect_grace_seconds = 90
-# Cron expression for discovery task. v0.3.26+ default is every 8h
-# (was 4h pre-v0.3.26). 4h triggers ~6 refresh ticks per day; combined
-# with the v0.3.24+ pool-aware sizing each tick costs ~¥0.06-0.10 in
-# LLM evaluations. 8h cuts that in half. Set to "0 */4 * * *" if you
-# want fresher recommendations and don't mind ~2x cost. Run
-# ``openbiliclaw cost`` to see your actual spend.
+# Legacy compatibility field. The current runtime does not consume this cron;
+# discovery is driven by the refresh loop, pool deficits, event thresholds, and
+# per-strategy refresh intervals below.
 discovery_cron = "0 */8 * * *"
 # Keep at least this many fresh candidates ready in the discovery pool
 # Allowed range: 1..600; each single refresh will backfill at most 60
 pool_target_count = 600
 # Low-frequency account sync interval for history / favorites / following
 account_sync_interval_hours = 6
+# --- Runtime refresh tuning ---
+refresh_check_interval_seconds = 60      # Main loop poll interval; values <15 fallback
+signal_event_threshold = 6               # New behavior events before search+related refresh
+trending_refresh_hours = 3               # Minimum interval for trending strategy
+explore_refresh_hours = 12               # Minimum interval for explore strategy
+discovery_limit = 30                     # Per discovery wave limit; allowed range 1..60
+proactive_push_interval_seconds = 120    # Delight/probe push loop interval; values <30 fallback
+speculator_idle_interval_minutes = 30    # Idle interval before checking speculation lifecycle
 # --- 猜测兴趣（Speculative Interest）调度 ---
 # speculation_interval_minutes = 10   # 猜测推测运行间隔（分钟）
 # speculation_ttl_days = 3            # 猜测兴趣默认存活天数

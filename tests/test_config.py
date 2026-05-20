@@ -109,6 +109,17 @@ class TestConfigDefaults:
         assert config.scheduler.pause_on_extension_disconnect is False
         assert config.scheduler.extension_disconnect_grace_seconds == 90
 
+    def test_scheduler_runtime_field_defaults(self) -> None:
+        config = Config()
+
+        assert config.scheduler.refresh_check_interval_seconds == 60
+        assert config.scheduler.signal_event_threshold == 6
+        assert config.scheduler.trending_refresh_hours == 3
+        assert config.scheduler.explore_refresh_hours == 12
+        assert config.scheduler.discovery_limit == 30
+        assert config.scheduler.proactive_push_interval_seconds == 120
+        assert config.scheduler.speculator_idle_interval_minutes == 30
+
     def test_build_from_empty_dict(self) -> None:
         config = _build_config({})
         assert config.language == "zh"
@@ -617,6 +628,90 @@ def test_save_config_round_trips_scheduler_pause_on_extension_disconnect(
 
     assert loaded.scheduler.pause_on_extension_disconnect is True
     assert loaded.scheduler.extension_disconnect_grace_seconds == 45
+
+
+def test_load_config_reads_scheduler_runtime_fields(tmp_path: Path) -> None:
+    toml_path = tmp_path / "c.toml"
+    toml_path.write_text(
+        """
+[scheduler]
+refresh_check_interval_seconds = 75
+signal_event_threshold = 9
+trending_refresh_hours = 5
+explore_refresh_hours = 18
+discovery_limit = 17
+proactive_push_interval_seconds = 155
+speculator_idle_interval_minutes = 11
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(toml_path)
+
+    assert config.scheduler.refresh_check_interval_seconds == 75
+    assert config.scheduler.signal_event_threshold == 9
+    assert config.scheduler.trending_refresh_hours == 5
+    assert config.scheduler.explore_refresh_hours == 18
+    assert config.scheduler.discovery_limit == 17
+    assert config.scheduler.proactive_push_interval_seconds == 155
+    assert config.scheduler.speculator_idle_interval_minutes == 11
+
+
+@pytest.mark.parametrize(
+    ("field", "literal", "expected"),
+    [
+        ("refresh_check_interval_seconds", "0", 60),
+        ("refresh_check_interval_seconds", '"abc"', 60),
+        ("signal_event_threshold", "-1", 6),
+        ("trending_refresh_hours", "0", 3),
+        ("explore_refresh_hours", "0", 12),
+        ("discovery_limit", "0", 30),
+        ("discovery_limit", "61", 30),
+        ("proactive_push_interval_seconds", "29", 120),
+        ("speculator_idle_interval_minutes", "4", 30),
+    ],
+)
+def test_load_config_defaults_invalid_scheduler_runtime_fields(
+    tmp_path: Path,
+    field: str,
+    literal: str,
+    expected: int,
+) -> None:
+    toml_path = tmp_path / "c.toml"
+    toml_path.write_text(
+        f"""
+[scheduler]
+{field} = {literal}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(toml_path)
+
+    assert getattr(config.scheduler, field) == expected
+
+
+def test_save_config_round_trips_scheduler_runtime_fields(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.scheduler.refresh_check_interval_seconds = 75
+    config.scheduler.signal_event_threshold = 9
+    config.scheduler.trending_refresh_hours = 5
+    config.scheduler.explore_refresh_hours = 18
+    config.scheduler.discovery_limit = 17
+    config.scheduler.proactive_push_interval_seconds = 155
+    config.scheduler.speculator_idle_interval_minutes = 11
+
+    save_config(config, config_path)
+    loaded = load_config(config_path)
+
+    assert loaded.scheduler.refresh_check_interval_seconds == 75
+    assert loaded.scheduler.signal_event_threshold == 9
+    assert loaded.scheduler.trending_refresh_hours == 5
+    assert loaded.scheduler.explore_refresh_hours == 18
+    assert loaded.scheduler.discovery_limit == 17
+    assert loaded.scheduler.proactive_push_interval_seconds == 155
+    assert loaded.scheduler.speculator_idle_interval_minutes == 11
 
 
 def test_scheduler_pool_source_shares_override(tmp_path: Path) -> None:
