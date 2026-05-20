@@ -4,11 +4,17 @@
 
 ---
 
-## v0.3.86 / extension v0.3.37: 小红书默认改为显式开启（2026-05-20）
+## v0.3.87 / extension v0.3.38: runtime 配置真实生效（2026-05-20）
 
 - `[scheduler]` 新增真实 runtime 调度参数：refresh 轮询、行为触发阈值、trending / explore 间隔、单轮 discovery 上限、主动推送间隔和 speculator idle tick；这些字段已接入 `/api/config`、daemon runtime、OpenClaw direct bootstrap 和插件设置页。
 - `scheduler.speculation_*` 现在会传入 `SoulEngine` / `InterestSpeculator`，配置页里的猜测兴趣间隔、TTL、冷却、确认阈值和上限不再只是保存到 TOML。
 - 插件设置页调度区移除无效的 `discovery_cron` 输入，补上 `extension_disconnect_grace_seconds` 和实际生效的 runtime 频率控件；`discovery_cron` 仍作为 legacy 字段保留在配置/API 中但 runtime 不消费。
+- 后端源码版本记录为 v0.3.87，但不发布 backend GitHub Release；浏览器插件版本提升到 v0.3.38，准备发布 `extension-v0.3.38`。
+
+---
+
+## v0.3.86 / extension v0.3.37: 小红书默认改为显式开启（2026-05-20）
+
 - `[sources.xiaohongshu].enabled` 默认改为 `false`；小红书 discovery / init bootstrap 现在必须由用户在初始化时选择 Yes、传 `--yes-xhs`，或在插件设置页打开后才会启用。
 - `openbiliclaw init` 的小红书交互提示默认从 Yes 改为 No；非交互环境也不再静默启用小红书 bootstrap，避免未安装扩展或未登录时自动排队任务。
 - runtime 候选池默认有效配比改为只包含 Bilibili；`[scheduler.pool_source_shares]` 仍保存 Bilibili / 小红书 / 抖音 / YouTube = `8 / 1 / 1 / 1`，显式启用可选平台后才参与 quota。

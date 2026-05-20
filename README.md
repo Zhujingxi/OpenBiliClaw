@@ -19,12 +19,12 @@
 
 ---
 
-## 📌 v0.3.86 / extension-v0.3.37 重要更新（2026-05-20）
+## 📌 v0.3.87 / extension-v0.3.38 重要更新（2026-05-20）
 
-- **🌸 小红书默认显式开启** —— `[sources.xiaohongshu].enabled` 默认改为 `false`；只有初始化选 Yes、传 `--yes-xhs`，或在插件设置页打开后才参与 discovery。
-- **🧭 初始化默认更保守** —— `openbiliclaw init` 的小红书问题默认 No，非交互环境也不会静默启用小红书 bootstrap。
-- **🎛️ 默认候选池只含 B 站** —— `pool_source_shares` 仍保存 8/1/1/1，但小红书 / 抖音 / YouTube 默认关闭，不占 runtime quota。
-- **📦 插件发布** —— 后端不发布 GitHub Release；浏览器插件发布 `extension-v0.3.37`。
+- **🎛️ 调度配置真实生效** —— 设置页里的 refresh 轮询、行为触发阈值、trending / explore 间隔、单轮 discovery 上限和主动推送间隔都会传到 runtime。
+- **🔮 猜测兴趣配置接入运行时** —— `scheduler.speculation_*` 会传给 `SoulEngine` / `InterestSpeculator`，TTL、冷却、确认阈值和上限不再只是保存到 TOML。
+- **🧩 插件设置页去掉无效 Cron** —— 移除 `discovery_cron` 输入，补上断开宽限秒数和真实 runtime 频率控件。
+- **📦 插件发布** —— 后端不发布 GitHub Release；浏览器插件发布 `extension-v0.3.38`。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
@@ -500,7 +500,7 @@ OpenBiliClaw/
 
 ## 📜 更新日志
 
-最新版本：**v0.3.86 / extension v0.3.37: 小红书默认改为显式开启（2026-05-20）**。README 顶部保留最新重要更新；完整历史见 [docs/changelog.md](docs/changelog.md)，发布包见 [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases)。
+最新版本：**v0.3.87 / extension v0.3.38: runtime 配置真实生效（2026-05-20）**。README 顶部保留最新重要更新；完整历史见 [docs/changelog.md](docs/changelog.md)，发布包见 [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases)。
 
 ## 🗺️ 后续规划
 

@@ -17,12 +17,12 @@
 
 ---
 
-## 📌 v0.3.86 / extension-v0.3.37 Highlights (2026-05-20)
+## 📌 v0.3.87 / extension-v0.3.38 Highlights (2026-05-20)
 
-- **🌸 Xiaohongshu is now explicit opt-in** — `[sources.xiaohongshu].enabled` now defaults to `false`; it only joins discovery after init Yes, `--yes-xhs`, or the extension settings toggle.
-- **🧭 More conservative init default** — `openbiliclaw init` defaults the XHS question to No, and non-interactive runs no longer enable XHS bootstrap silently.
-- **🎛️ Default pool quota is Bilibili-only** — `pool_source_shares` still stores 8/1/1/1, but XHS / Douyin / YouTube are off by default and do not consume runtime quota.
-- **📦 Extension release** — the backend does not publish GitHub Releases; the browser extension ships as `extension-v0.3.37`.
+- **🎛️ Scheduler settings now affect runtime** — refresh polling, signal thresholds, trending / explore cadence, discovery wave limits, and proactive push intervals are wired into the daemon.
+- **🔮 Speculation settings are live** — `scheduler.speculation_*` now reaches `SoulEngine` / `InterestSpeculator`, so TTL, cooldown, confirmation thresholds, and caps are no longer TOML-only.
+- **🧩 Dead Cron control removed** — the extension settings page drops `discovery_cron` and exposes disconnect grace plus the runtime frequency controls that actually run.
+- **📦 Extension release** — the backend does not publish GitHub Releases; the browser extension ships as `extension-v0.3.38`.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -437,7 +437,7 @@ OpenBiliClaw/
 
 ## 📜 Release History
 
-Latest: **v0.3.86 / extension v0.3.37: Xiaohongshu is now explicit opt-in by default (2026-05-20)**. The top highlight callout keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md), with packages on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases).
+Latest: **v0.3.87 / extension v0.3.38: runtime config now takes effect (2026-05-20)**. The top highlight callout keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md), with packages on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases).
 
 ## 🗺️ Roadmap
 
