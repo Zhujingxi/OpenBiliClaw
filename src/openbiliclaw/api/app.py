@@ -2393,7 +2393,7 @@ def create_app(
     async def feedback(payload: FeedbackIn) -> FeedbackResponse:
         feedback_type = payload.feedback_type.strip().lower()
         note = payload.note.strip()
-        if feedback_type not in {"like", "dislike", "comment"}:
+        if feedback_type not in {"like", "dislike", "comment", "dismiss"}:
             raise HTTPException(status_code=422, detail="Unsupported feedback type.")
         if feedback_type == "comment" and not note:
             raise HTTPException(status_code=422, detail="Comment feedback requires note.")
@@ -2407,50 +2407,51 @@ def create_app(
             feedback_type=feedback_type,
             feedback_note=note,
         )
-        from openbiliclaw.sources.event_format import (
-            SOURCE_BILIBILI,
-            build_event,
-        )
-
         rec_title = str(recommendation.get("title", ""))
-        # Tailor a natural-language context per feedback type — the
-        # "feedback" verb in the generic table doesn't capture the
-        # like/dislike/comment distinction the LLM cares about.
-        feedback_label = {
-            "like": "点赞了",
-            "dislike": "踩了",
-            "comment": "评论了",
-        }.get(feedback_type, "反馈了")
-        feedback_context = f"在 B 站{feedback_label}《{rec_title}》"
-        if note:
-            feedback_context = f"{feedback_context},备注:{note}"
-        await ctx.memory_manager.propagate_event(
-            build_event(
-                event_type="feedback",
-                source_platform=SOURCE_BILIBILI,
-                title=rec_title,
-                context=feedback_context,
-                metadata={
-                    "recommendation_id": payload.recommendation_id,
-                    "bvid": recommendation.get("bvid", ""),
-                    "feedback_type": feedback_type,
-                    "feedback_note": note,
-                },
+        if feedback_type != "dismiss":
+            from openbiliclaw.sources.event_format import (
+                SOURCE_BILIBILI,
+                build_event,
             )
-        )
-        record_immediate_feedback_cognition = getattr(
-            ctx.soul_engine,
-            "record_immediate_feedback_cognition",
-            None,
-        )
-        if callable(record_immediate_feedback_cognition):
-            with suppress(Exception):
-                record_immediate_feedback_cognition(
-                    feedback_type=feedback_type,
-                    title=str(recommendation.get("title", "")),
-                    note=note,
+
+            # Tailor a natural-language context per feedback type — the
+            # "feedback" verb in the generic table doesn't capture the
+            # like/dislike/comment distinction the LLM cares about.
+            feedback_label = {
+                "like": "点赞了",
+                "dislike": "踩了",
+                "comment": "评论了",
+            }.get(feedback_type, "反馈了")
+            feedback_context = f"在 B 站{feedback_label}《{rec_title}》"
+            if note:
+                feedback_context = f"{feedback_context},备注:{note}"
+            await ctx.memory_manager.propagate_event(
+                build_event(
+                    event_type="feedback",
+                    source_platform=SOURCE_BILIBILI,
+                    title=rec_title,
+                    context=feedback_context,
+                    metadata={
+                        "recommendation_id": payload.recommendation_id,
+                        "bvid": recommendation.get("bvid", ""),
+                        "feedback_type": feedback_type,
+                        "feedback_note": note,
+                    },
                 )
-        asyncio.create_task(_run_post_feedback_tasks())
+            )
+            record_immediate_feedback_cognition = getattr(
+                ctx.soul_engine,
+                "record_immediate_feedback_cognition",
+                None,
+            )
+            if callable(record_immediate_feedback_cognition):
+                with suppress(Exception):
+                    record_immediate_feedback_cognition(
+                        feedback_type=feedback_type,
+                        title=str(recommendation.get("title", "")),
+                        note=note,
+                    )
+            asyncio.create_task(_run_post_feedback_tasks())
         return FeedbackResponse(
             ok=True,
             recommendation_id=payload.recommendation_id,
