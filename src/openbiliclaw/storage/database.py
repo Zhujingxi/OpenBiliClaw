@@ -2288,7 +2288,12 @@ class Database:
         )
         return [dict(row) for row in cursor.fetchall()]
 
-    def get_recommendations(self, limit: int = 100) -> list[dict[str, Any]]:
+    def get_recommendations(
+        self,
+        limit: int = 100,
+        *,
+        include_feedbacked: bool = True,
+    ) -> list[dict[str, Any]]:
         """Get recommendation history ordered by newest first.
 
         xhs rows whose cached ``content_url`` is missing ``xsec_token``
@@ -2299,8 +2304,12 @@ class Database:
         otherwise five 原神 / 提瓦特 items can land in one popup view.
         """
         self._ensure_fresh_read()
+        feedback_clause = "" if include_feedbacked else """
+              AND COALESCE(r.feedback_type, r.feedback, '') = ''
+              AND COALESCE(c.pool_status, '') != 'feedbacked'
+        """
         cursor = self.conn.execute(
-            """
+            f"""
             SELECT
                 r.*,
                 c.title AS title,
@@ -2309,13 +2318,16 @@ class Database:
                 c.content_id AS content_id,
                 c.content_url AS content_url,
                 c.source_platform AS source_platform,
-                c.franchise_key AS franchise_key
+                c.franchise_key AS franchise_key,
+                c.pool_status AS pool_status,
+                c.feedback_type AS cache_feedback_type
             FROM recommendations AS r
             LEFT JOIN content_cache AS c ON c.bvid = r.bvid
             WHERE (
                 COALESCE(c.source_platform, '') != 'xiaohongshu'
                 OR COALESCE(c.content_url, '') LIKE '%xsec_token=%'
             )
+            {feedback_clause}
             ORDER BY created_at DESC, id DESC
             LIMIT ?
             """,

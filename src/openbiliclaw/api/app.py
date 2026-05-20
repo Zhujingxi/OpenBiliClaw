@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import shutil
 import uuid
@@ -824,9 +825,29 @@ def create_app(
                 content_id=str(getattr(item.content, "content_id", "") or item.content.bvid),
                 content_url=str(getattr(item.content, "content_url", "") or ""),
                 source_platform=str(getattr(item.content, "source_platform", "") or "bilibili"),
+                feedback_type=str(getattr(item, "feedback_type", "") or "") or None,
+                pool_status=str(getattr(item.content, "pool_status", "") or "") or None,
             )
             for item in items
         ]
+
+    def _is_feedbacked_recommendation_row(row: dict[str, Any]) -> bool:
+        return bool(
+            str(row.get("feedback_type") or row.get("feedback") or "").strip()
+            or str(row.get("cache_feedback_type") or "").strip()
+            or str(row.get("pool_status") or "").strip() == "feedbacked"
+        )
+
+    def _get_recommendation_rows(*, limit: int, include_feedbacked: bool) -> list[dict[str, Any]]:
+        get_recommendations = ctx.database.get_recommendations
+        signature = inspect.signature(get_recommendations)
+        if "include_feedbacked" in signature.parameters:
+            rows = get_recommendations(limit=limit, include_feedbacked=include_feedbacked)
+        else:
+            rows = get_recommendations(limit=limit)
+        if include_feedbacked:
+            return rows
+        return [row for row in rows if not _is_feedbacked_recommendation_row(row)]
 
     @app.websocket("/api/runtime-stream")
     async def runtime_stream(websocket: WebSocket) -> None:
@@ -1235,14 +1256,18 @@ def create_app(
                     )
         return EventIngestResponse(accepted=accepted)
 
-    @app.get("/api/recommendations", response_model=RecommendationListResponse)
+    @app.get(
+        "/api/recommendations",
+        response_model=RecommendationListResponse,
+        response_model_exclude_none=True,
+    )
     async def recommendations() -> RecommendationListResponse:
         # Pull a 2x window so the per-franchise cap below still has 20
         # survivors to return after dropping over-represented IPs.
         # Without the wider pool, capping 原神 at 2 in a 20-row request
         # would leave gaps that other items further back in time would
         # have filled.
-        rows = ctx.database.get_recommendations(limit=40)
+        rows = _get_recommendation_rows(limit=40, include_feedbacked=False)
 
         # Fresh-install bootstrap: ``recommendations`` table is the
         # write-only history of items we've ever served. On first popup
@@ -1262,7 +1287,7 @@ def create_app(
                 if pool_count > 0:
                     profile = await ctx.soul_engine.get_profile()
                     await ctx.recommendation_engine.serve(profile, limit=10)
-                    rows = ctx.database.get_recommendations(limit=40)
+                    rows = _get_recommendation_rows(limit=40, include_feedbacked=False)
                     logger.info(
                         "GET /api/recommendations bootstrap: served from "
                         "empty history (pool_count=%d → wrote %d to history)",
@@ -1285,6 +1310,8 @@ def create_app(
                     content_id=str(row.get("content_id", "") or row.get("bvid", "")),
                     content_url=str(row.get("content_url", "") or ""),
                     source_platform=str(row.get("source_platform", "") or "bilibili"),
+                    feedback_type=str(row.get("feedback_type") or row.get("feedback") or "") or None,
+                    pool_status=str(row.get("pool_status") or "") or None,
                 )
                 for row in rows
             ]
@@ -1379,7 +1406,11 @@ def create_app(
             logger.info("Pool low — triggering automatic replenishment")
             asyncio.create_task(trigger())
 
-    @app.post("/api/recommendations/reshuffle", response_model=RecommendationReshuffleResponse)
+    @app.post(
+        "/api/recommendations/reshuffle",
+        response_model=RecommendationReshuffleResponse,
+        response_model_exclude_none=True,
+    )
     async def reshuffle_recommendations() -> RecommendationReshuffleResponse:
         if ctx.recommendation_engine is None or ctx.soul_engine is None:
             return RecommendationReshuffleResponse(items=[])
@@ -1391,7 +1422,11 @@ def create_app(
         await _trigger_replenishment_if_needed()
         return RecommendationReshuffleResponse(items=_serialize_recommendation_items(items))
 
-    @app.post("/api/recommendations/append", response_model=RecommendationReshuffleResponse)
+    @app.post(
+        "/api/recommendations/append",
+        response_model=RecommendationReshuffleResponse,
+        response_model_exclude_none=True,
+    )
     async def append_recommendations(
         payload: RecommendationAppendIn,
     ) -> RecommendationReshuffleResponse:
