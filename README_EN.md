@@ -22,7 +22,7 @@
 - **🌸 Xiaohongshu is now explicit opt-in** — `[sources.xiaohongshu].enabled` now defaults to `false`; it only joins discovery after init Yes, `--yes-xhs`, or the extension settings toggle.
 - **🧭 More conservative init default** — `openbiliclaw init` defaults the XHS question to No, and non-interactive runs no longer enable XHS bootstrap silently.
 - **🎛️ Default pool quota is Bilibili-only** — `pool_source_shares` still stores 8/1/1/1, but XHS / Douyin / YouTube are off by default and do not consume runtime quota.
-- **📦 Split-channel release** — backend ships as `backend-v0.3.86`, and the browser extension ships as `extension-v0.3.37`.
+- **📦 Extension release** — the backend does not publish GitHub Releases; the browser extension ships as `extension-v0.3.37`.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 

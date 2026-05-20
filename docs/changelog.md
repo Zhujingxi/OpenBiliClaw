@@ -10,7 +10,7 @@
 - `openbiliclaw init` 的小红书交互提示默认从 Yes 改为 No；非交互环境也不再静默启用小红书 bootstrap，避免未安装扩展或未登录时自动排队任务。
 - runtime 候选池默认有效配比改为只包含 Bilibili；`[scheduler.pool_source_shares]` 仍保存 Bilibili / 小红书 / 抖音 / YouTube = `8 / 1 / 1 / 1`，显式启用可选平台后才参与 quota。
 - 插件设置页读取缺省配置时不再默认勾选「启用小红书 discovery」，保存和配比建议都以用户当前开关为准。
-- 后端包版本提升到 v0.3.86，准备发布 `backend-v0.3.86`；浏览器插件版本提升到 v0.3.37，准备发布 `extension-v0.3.37`。
+- 后端源码版本记录为 v0.3.86，但不发布 backend GitHub Release；浏览器插件版本提升到 v0.3.37，准备发布 `extension-v0.3.37`。
 
 ---
 

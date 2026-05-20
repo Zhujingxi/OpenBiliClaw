@@ -24,7 +24,7 @@
 - **🌸 小红书默认显式开启** —— `[sources.xiaohongshu].enabled` 默认改为 `false`；只有初始化选 Yes、传 `--yes-xhs`，或在插件设置页打开后才参与 discovery。
 - **🧭 初始化默认更保守** —— `openbiliclaw init` 的小红书问题默认 No，非交互环境也不会静默启用小红书 bootstrap。
 - **🎛️ 默认候选池只含 B 站** —— `pool_source_shares` 仍保存 8/1/1/1，但小红书 / 抖音 / YouTube 默认关闭，不占 runtime quota。
-- **📦 双通道发布** —— 后端发布 `backend-v0.3.86`，浏览器插件发布 `extension-v0.3.37`。
+- **📦 插件发布** —— 后端不发布 GitHub Release；浏览器插件发布 `extension-v0.3.37`。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
