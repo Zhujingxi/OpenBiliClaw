@@ -420,6 +420,8 @@ def _iter_spooled_file(file_obj: BinaryIO) -> Iterator[bytes]:
 
 
 def _image_cache_dir() -> Path:
+    from pathlib import Path
+
     d = Path("data/image-cache")
     d.mkdir(parents=True, exist_ok=True)
     return d
