@@ -49,6 +49,7 @@ class RecommendationOut(BaseModel):
     expression: str = ""
     topic_label: str = ""
     presented: bool = False
+    feedback_type: str = ""
     # Multi-source fields (additive, backward-compatible)
     content_id: str = ""
     content_url: str = ""

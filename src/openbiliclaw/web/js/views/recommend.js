@@ -589,8 +589,15 @@ async function loadData() {
       fetchDelightBatch().catch(() => []),
       fetchActivityFeed({ limit: 5 }).catch(() => null),
     ]);
+    const normalizedRecs = recs.map(normalizeRecommendation);
+    // Restore feedback state from backend so it survives page refresh.
+    for (const rec of normalizedRecs) {
+      if (rec.feedback_type && !feedbackDone.has(rec.id)) {
+        feedbackDone.set(rec.id, rec.feedback_type);
+      }
+    }
     patchState({
-      recommendations: recs.map(normalizeRecommendation),
+      recommendations: normalizedRecs,
       runtimeStatus: status ? normalizeRuntimeStatus(status) : state.runtimeStatus,
       activeDelights: delights.map(normalizeDelightCandidate),
       delightCurrentIndex: 0,

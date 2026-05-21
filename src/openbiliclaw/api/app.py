@@ -1693,6 +1693,7 @@ def create_app(
                     expression=str(row.get("expression", "")),
                     topic_label=str(row.get("topic", "")),
                     presented=bool(row.get("presented", 0)),
+                    feedback_type=str(row.get("feedback_type", "") or ""),
                     content_id=str(row.get("content_id", "") or row.get("bvid", "")),
                     content_url=str(row.get("content_url", "") or ""),
                     source_platform=str(row.get("source_platform", "") or "bilibili"),
