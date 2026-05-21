@@ -582,14 +582,33 @@ async function handleReshuffle() {
 async function handleAppend() {
   if (loading) return;
   loading = true;
-  render();
+
+  // Disable the button inline instead of full re-render.
+  const loadMoreRow = $root.querySelector(".load-more-row");
+  const appendBtnEl = loadMoreRow?.querySelector("button");
+  if (appendBtnEl) { appendBtnEl.disabled = true; appendBtnEl.textContent = "\u52A0\u8F7D\u4E2D\u2026"; }
+
   try {
     const existing = state.recommendations.map((i) => i.bvid).filter(Boolean);
     const result = await appendRecommendations(existing);
-    patchState({ recommendations: [...state.recommendations, ...(result.items || []).map(normalizeRecommendation)] });
+    const newItems = (result.items || []).map(normalizeRecommendation);
+    patchState({ recommendations: [...state.recommendations, ...newItems] });
+
+    // Append new cards before the load-more row without rebuilding existing ones.
+    if (loadMoreRow) {
+      for (const item of newItems) {
+        $root.insertBefore(renderCard(item), loadMoreRow);
+      }
+    }
   } catch { /* ignore */ }
+
   loading = false;
-  render();
+  // Restore button state.
+  if (appendBtnEl) {
+    appendBtnEl.disabled = false;
+    const headerState = getMobileRecommendationHeaderState();
+    appendBtnEl.textContent = headerState.secondaryActionLabel;
+  }
 }
 
 // ── Pull-to-Refresh ──────────────────────────────────────────
