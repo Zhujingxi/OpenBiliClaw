@@ -479,6 +479,11 @@
       .delight-main-actions { order: 1; flex: 0 0 auto; grid-template-columns: 1fr; }
       .delight-feedback-actions.card-feedback-icons { order: 2; flex: 0 0 auto; width: 128px; max-width: 128px; min-height: 34px; margin-left: 0; align-self: flex-start; justify-content: center; padding: 3px 6px; }
       .delight-main-actions .small-btn { width: 100%; }
+      .delight-main-actions.is-composing { flex: 0 0 auto; grid-template-columns: minmax(0, 1fr) 38px; align-items: center; min-height: 38px; }
+      .delight-main-actions.is-composing .comment-field { grid-column: 1; grid-row: 1; align-self: center; }
+      .delight-main-actions.is-composing .comment-field input { height: 38px; }
+      .delight-main-actions.is-composing .chat-action { grid-column: 2; grid-row: 1; width: 38px; min-width: 38px; align-self: center; }
+      .delight-main-actions.is-composing .small-btn { width: auto; min-height: 38px; }
       .metric-row { grid-template-columns: 1fr; }
       .card-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .small-btn { width: 100%; }
