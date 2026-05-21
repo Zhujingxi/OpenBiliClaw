@@ -218,17 +218,15 @@ function renderDelightTray() {
     ` : ""}
     <div class="delight-compact">
       ${coverHtml}
-      <div class="delight-copy">
-        <div class="delight-kicker-line">
-          <span class="delight-tag">\u2728 \u60CA\u559C\u63A8\u8350</span>
-          ${d.delight_hook ? `<span class="delight-hook-badge">${esc(d.delight_hook)}</span>` : ""}
-        </div>
-        <div class="delight-title">${esc(d.title)}</div>
-        ${reasonText ? `<div class="delight-reason">${esc(reasonText)}</div>` : ""}
-        <div class="delight-meta">
-          <span class="card-source" data-source="${d.source_platform}">${esc(getSourceLabel(d.source_platform))}</span>
-          ${uiState.score_label ? `<span>${esc(uiState.score_label)}</span>` : ""}
-        </div>
+      <div class="delight-kicker-line">
+        <span class="delight-tag">\u2728 \u60CA\u559C\u63A8\u8350</span>
+        ${d.delight_hook ? `<span class="delight-hook-badge">${esc(d.delight_hook)}</span>` : ""}
+      </div>
+      <div class="delight-title">${esc(d.title)}</div>
+      ${reasonText ? `<div class="delight-reason">${esc(reasonText)}</div>` : ""}
+      <div class="delight-meta">
+        <span class="card-source" data-source="${d.source_platform}">${esc(getSourceLabel(d.source_platform))}</span>
+        ${uiState.score_label ? `<span>${esc(uiState.score_label)}</span>` : ""}
       </div>
     </div>`;
 
