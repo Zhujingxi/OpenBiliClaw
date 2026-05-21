@@ -652,6 +652,7 @@ class TestBackendAPI:
 
         assert client.get("/", follow_redirects=False).status_code == 404
         assert client.get("/web").status_code == 404
+        assert client.get("/web/assets/css/app.css").status_code == 404
         assert client.get("/m/").status_code == 404
         assert client.get("/favicon.ico").status_code == 404
 
@@ -676,6 +677,15 @@ class TestBackendAPI:
             assert response.headers["content-type"].startswith("text/html")
             assert "OpenBiliClaw" in response.text
             assert "为你推荐的内容" in response.text
+
+        css_response = client.get("/web/assets/css/app.css")
+        assert css_response.status_code == 200
+        assert css_response.headers["content-type"].startswith("text/css")
+        assert ".video-card" in css_response.text
+
+        js_response = client.get("/web/assets/js/app.js")
+        assert js_response.status_code == 200
+        assert "DEFAULT_API_BASE" in js_response.text
 
         mobile_response = client.get("/m/")
         assert mobile_response.status_code == 200

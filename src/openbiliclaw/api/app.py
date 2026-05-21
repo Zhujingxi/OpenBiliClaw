@@ -561,13 +561,23 @@ def create_app(
     )
 
     if serve_webui:
+        from fastapi.staticfiles import StaticFiles as _StaticFiles
+
         web_dir = Path(__file__).resolve().parent.parent / "web"
         web_index_path = web_dir / "index.html"
+        web_assets_dir = web_dir / "assets"
 
         def _webui_html() -> FileResponse:
             if not web_index_path.is_file():
                 raise HTTPException(status_code=404, detail="web UI not found")
             return FileResponse(web_index_path, media_type="text/html")
+
+        if web_assets_dir.is_dir():
+            app.mount(
+                "/web/assets",
+                _StaticFiles(directory=web_assets_dir),
+                name="desktop-web-assets",
+            )
 
         @app.get("/", include_in_schema=False)
         async def webui_root() -> RedirectResponse:
@@ -4596,8 +4606,6 @@ def create_app(
 
     # ── Mobile Web UI ───────────────────────────────────────────
     if serve_webui:
-        from fastapi.staticfiles import StaticFiles as _StaticFiles
-
         _mobile_web_dir = Path(__file__).resolve().parent.parent / "web" / "m"
         if _mobile_web_dir.is_dir():
             _favicon_path = _mobile_web_dir / "icon-192.png"
