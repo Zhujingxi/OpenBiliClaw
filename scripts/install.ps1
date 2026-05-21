@@ -26,7 +26,7 @@
     Backend API port. Default: 8420
 
 .PARAMETER ApiHost
-    Backend bind address. Default: 127.0.0.1
+    Backend bind address. Default: 0.0.0.0
 
 .PARAMETER Mode
     Bootstrap mode. Default: "local" (no Docker on Windows by design;
@@ -118,7 +118,7 @@ $CandidateSources  = @(
 if (-not $InstallDir) { $InstallDir = $DefaultInstallDir }
 if (-not $Branch)     { $Branch     = if ($env:OPENBILICLAW_BRANCH) { $env:OPENBILICLAW_BRANCH } else { $DefaultBranch } }
 if ($Port -le 0)      { $Port       = if ($env:PORT) { [int]$env:PORT } else { 8420 } }
-if (-not $ApiHost)    { $ApiHost    = '127.0.0.1' }
+if (-not $ApiHost)    { $ApiHost    = '0.0.0.0' }
 if (-not $Mode)       { $Mode       = 'local' }   # native Windows defaults to local, not docker
 $RepoUrl = if ($env:OPENBILICLAW_REPO_URL) { $env:OPENBILICLAW_REPO_URL } else { $DefaultRepoUrl }
 
@@ -361,6 +361,13 @@ print(f"YOUTUBE_FLAG={youtube_flag}")
     if (-not $xhsFlag) { $xhsFlag = '--no-xhs' }
     if (-not $douyinFlag) { $douyinFlag = '--no-douyin' }
     if (-not $youtubeFlag) { $youtubeFlag = '--no-youtube' }
+    if (-not $healthUrl) {
+        if ($ApiHost -in @('0.0.0.0', '::', '[::]')) {
+            $healthUrl = "http://127.0.0.1:$Port/api/health"
+        } else {
+            $healthUrl = "http://${ApiHost}:$Port/api/health"
+        }
+    }
 
     # v0.3.20: distinguish "only B站 cookie missing" (the expected state for
     # users on the recommended browser-extension auto-sync path) from

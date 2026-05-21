@@ -3110,7 +3110,9 @@ def logs_prune(
 @app.command()
 def start(
     host: str = typer.Option("", "--host", help="API 监听地址（默认读 config.toml [api].host）"),
-    port: int = typer.Option(0, "--port", min=0, max=65535, help="API 监听端口（默认读 config.toml [api].port）"),
+    port: int = typer.Option(
+        0, "--port", min=0, max=65535, help="API 监听端口（默认读 config.toml [api].port）"
+    ),
 ) -> None:
     """启动 OpenBiliClaw Agent."""
     from openbiliclaw.config import load_config
@@ -3414,8 +3416,7 @@ def _ask_network_binding() -> bool:
     console.print()
     console.print("[bold]📱 移动端访问[/bold]")
     console.print(
-        "OpenBiliClaw 自带移动端 Web（[bold cyan]/m/[/bold cyan]），"
-        "同一局域网的手机扫码即可打开。"
+        "OpenBiliClaw 自带移动端 Web（[bold cyan]/m/[/bold cyan]），同一局域网的手机扫码即可打开。"
     )
     console.print()
     console.print(
@@ -3424,9 +3425,7 @@ def _ask_network_binding() -> bool:
         "如果你只在本机使用、不需要手机端，选 N 会改为仅监听 127.0.0.1。"
     )
     console.print()
-    console.print(
-        "[dim]后续可在 config.toml 的 [api].host 随时切换。[/dim]"
-    )
+    console.print("[dim]后续可在 config.toml 的 [api].host 随时切换。[/dim]")
     console.print()
     return typer.confirm("允许局域网设备访问（推荐）?", default=True)
 

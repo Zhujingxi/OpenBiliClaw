@@ -27,8 +27,7 @@ Typical agent workflow:
     4. If the final status says ``missing_llm_key`` or ``missing_cookie``,
        ask the user for the value and re-run with ``--llm-api-key`` or
        ``--bilibili-cookie``.
-    5. Poll ``http://127.0.0.1:8420/api/health`` to confirm the service is
-       ready.
+    5. Poll the emitted ``Health URL`` to confirm the service is ready.
 
 All secrets accepted via flags are written directly to ``config.toml`` and
 ``data/bilibili_cookie.json``. Nothing is uploaded off the machine.
@@ -56,7 +55,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Constants
 
-DEFAULT_HOST = "127.0.0.1"
+DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8420
 DEFAULT_REPO_URL = "https://github.com/whiteguo233/OpenBiliClaw.git"
 DEFAULT_HEALTH_PATH = "/api/health"
@@ -524,7 +523,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--host",
         default=DEFAULT_HOST,
-        help="API host to bind on local mode (default: 127.0.0.1).",
+        help="API host to bind on local mode (default: 0.0.0.0).",
     )
     parser.add_argument(
         "--port",
@@ -1532,6 +1531,18 @@ def local_serve_command(project_dir: Path, host: str, port: int) -> list[str]:
     return [str(python), "-m", "openbiliclaw.cli", "serve-api", "--host", host, "--port", str(port)]
 
 
+def _connect_host_for_bind_host(host: str) -> str:
+    """Return a concrete local address for checks against a bind address."""
+    value = str(host or "").strip().lower()
+    if value in {"", "0.0.0.0", "::", "[::]"}:
+        return "127.0.0.1"
+    return str(host).strip()
+
+
+def _health_url(host: str, port: int) -> str:
+    return f"http://{_connect_host_for_bind_host(host)}:{port}{DEFAULT_HEALTH_PATH}"
+
+
 def _probe_port_open(host: str, port: int, timeout: float = 0.5) -> bool:
     """Return True if a TCP listener answers on host:port."""
     import socket
@@ -1546,7 +1557,7 @@ def _probe_port_open(host: str, port: int, timeout: float = 0.5) -> bool:
 
 def _probe_is_openbiliclaw(host: str, port: int) -> bool:
     """Confirm the listener on host:port responds to /api/health as OpenBiliClaw."""
-    url = f"http://{host}:{port}{DEFAULT_HEALTH_PATH}"
+    url = _health_url(host, port)
     try:
         with urllib.request.urlopen(url, timeout=2.0) as response:  # noqa: S310
             if not (200 <= response.status < 300):
@@ -1694,11 +1705,12 @@ def start_local_backend(project_dir: Path, host: str, port: int) -> subprocess.P
         process), stop it and replace
       - if it's something else, raise so the caller surfaces a clear error
     """
-    if _probe_port_open(host, port):
-        freed = _stop_existing_obc_backend(host, port)
+    connect_host = _connect_host_for_bind_host(host)
+    if _probe_port_open(connect_host, port):
+        freed = _stop_existing_obc_backend(connect_host, port)
         if not freed:
             raise RuntimeError(
-                f"port {port} on {host} is in use by a non-OpenBiliClaw service. "
+                f"port {port} on {connect_host} is in use by a non-OpenBiliClaw service. "
                 f"Stop that service or set PORT=<free port> and retry."
             )
 
@@ -1838,7 +1850,7 @@ def detect_docker_missing_secrets(_project_dir: Path) -> dict[str, Any]:
 def wait_for_health(host: str, port: int, timeout: float = HEALTH_TIMEOUT_SECONDS) -> bool:
     """Poll /api/health until it returns 200 or timeout expires."""
 
-    url = f"http://{host}:{port}{DEFAULT_HEALTH_PATH}"
+    url = _health_url(host, port)
     deadline = time.monotonic() + timeout
     last_error: str | None = None
     while time.monotonic() < deadline:
@@ -2148,7 +2160,7 @@ def run(args: argparse.Namespace) -> int:
         if not final_status["missing"] and init_decisions["missing"] and not args.skip_init:
             label = "needs_decisions"
         health_details = {
-            "health_url": f"http://{args.host}:{args.port}{DEFAULT_HEALTH_PATH}",
+            "health_url": _health_url(args.host, args.port),
             **final_status,
             "init_decisions": init_decisions,
         }
@@ -2239,7 +2251,7 @@ def run(args: argparse.Namespace) -> int:
             "error",
             "health_check_failed",
             {
-                "health_url": f"http://{args.host}:{args.port}{DEFAULT_HEALTH_PATH}",
+                "health_url": _health_url(args.host, args.port),
                 **final_status,
                 "init_decisions": init_decisions,
             },

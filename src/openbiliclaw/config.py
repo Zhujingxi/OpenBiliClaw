@@ -477,6 +477,7 @@ def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
 def _build_config(raw: dict[str, Any]) -> Config:
     """Build a Config dataclass from raw dict."""
     general = raw.get("general", {})
+    api_raw = raw.get("api", {}) if isinstance(raw.get("api"), dict) else {}
     llm_raw = raw.get("llm", {})
     bili_raw = raw.get("bilibili", {})
     sources_raw = raw.get("sources", {})
@@ -587,6 +588,10 @@ def _build_config(raw: dict[str, Any]) -> Config:
     return Config(
         language=general.get("language", "zh"),
         data_dir=general.get("data_dir", "data"),
+        api=ApiConfig(
+            host=str(api_raw.get("host", "0.0.0.0") or "0.0.0.0").strip() or "0.0.0.0",
+            port=_normalize_api_port(api_raw.get("port", 8420)),
+        ),
         llm=llm,
         bilibili=bilibili,
         sources=sources,
@@ -641,6 +646,22 @@ def _build_config(raw: dict[str, Any]) -> Config:
         logging=LoggingConfig(**logging_raw),
         soul=soul,
     )
+
+
+def _normalize_api_port(value: object) -> int:
+    """Normalize API port values into the valid TCP port range."""
+    if isinstance(value, bool):
+        return 8420
+    if isinstance(value, int | float):
+        port = int(value)
+    elif isinstance(value, str):
+        try:
+            port = int(value.strip())
+        except ValueError:
+            return 8420
+    else:
+        return 8420
+    return port if 1 <= port <= 65535 else 8420
 
 
 def _normalize_pool_source_shares(value: object) -> dict[str, int]:
@@ -905,6 +926,10 @@ def _render_config_toml(config: Config) -> str:
         "[general]",
         f"language = {_toml_string(config.language)}",
         f"data_dir = {_toml_string(config.data_dir)}",
+        "",
+        "[api]",
+        f"host = {_toml_string(config.api.host)}",
+        f"port = {config.api.port}",
         "",
         "[llm]",
         f"default_provider = {_toml_string(config.llm.default_provider)}",

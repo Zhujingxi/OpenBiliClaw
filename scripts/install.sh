@@ -14,7 +14,7 @@
 #     SKIP_START       Set to any non-empty value to skip starting the backend
 #     MODE             auto | docker | local (default: auto)
 #     PORT             API port (default: 8420)
-#     HOST             API host  (default: 127.0.0.1)
+#     HOST             API host  (default: 0.0.0.0)
 #
 # Examples:
 #     INSTALL_DIR=$HOME/obc curl -fsSL .../install.sh | bash
@@ -49,7 +49,7 @@ fi
 SKIP_START="${SKIP_START:-}"
 MODE="${MODE:-auto}"
 PORT="${PORT:-8420}"
-HOST="${HOST:-127.0.0.1}"
+HOST="${HOST:-0.0.0.0}"
 
 extend_no_proxy_for_localhost() {
     local current="${NO_PROXY:-${no_proxy:-}}"
@@ -329,7 +329,11 @@ PY
     fi
 
     if [ -z "$health_url" ]; then
-        health_url="http://${HOST}:${PORT}/api/health"
+        if [ "$HOST" = "0.0.0.0" ] || [ "$HOST" = "::" ] || [ "$HOST" = "[::]" ]; then
+            health_url="http://127.0.0.1:${PORT}/api/health"
+        else
+            health_url="http://${HOST}:${PORT}/api/health"
+        fi
     fi
 
     # Distinguish "only Bilibili cookie missing" (the expected state for

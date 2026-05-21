@@ -12,6 +12,8 @@
 - `openbiliclaw init` 新增网络绑定确认：交互式引导中会询问用户是否允许局域网设备访问（默认 Y），选择结果持久化到 `config.toml [api].host`。
 - 健康检查端点 `/api/health` 新增 `lan_ip` 字段：通过 UDP connect trick 检测本机局域网 IP 并返回。
 - 浏览器插件移动端二维码自动检测局域网 IP：当插件配置的后端地址是 127.0.0.1 时，自动从 `/api/health` 获取 `lan_ip` 并用局域网 IP 生成二维码，手机扫码直接可用。
+- 修复 `[api]` 配置 round-trip：`load_config()` 现在会读取 `[api].host` / `[api].port`，`save_config()` 会写回 `[api]`；一句话安装脚本和 `agent_bootstrap.py` 默认绑定 `0.0.0.0`，健康检查仍使用 `127.0.0.1` URL，避免把 `0.0.0.0` 当作浏览器访问地址。
+- 修复局域网 IP 检测优先级：`/api/health.lan_ip` 现在优先选择网卡上的 RFC1918 地址（如 `192.168.x.x`），并排除 VPN / TUN 常见的 `198.18.0.0/15` benchmark 地址，避免二维码显示手机不可达的虚拟网卡 IP。
 
 ---
 

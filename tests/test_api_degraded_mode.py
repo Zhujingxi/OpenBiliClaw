@@ -163,11 +163,10 @@ def test_normal_boot_health_payload_reports_profile_state(
     response = client.get("/api/health")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "status": "ok",
-        "service": "openbiliclaw-api",
-        "profile_ready": False,
-    }
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["service"] == "openbiliclaw-api"
+    assert body["profile_ready"] is False
 
 
 def test_restart_after_degraded_recovery_config_boots_normal(
@@ -185,8 +184,7 @@ def test_restart_after_degraded_recovery_config_boots_normal(
 
     assert response.status_code == 200
     normal_client = TestClient(create_app())
-    assert normal_client.get("/api/health").json() == {
-        "status": "ok",
-        "service": "openbiliclaw-api",
-        "profile_ready": False,
-    }
+    health = normal_client.get("/api/health").json()
+    assert health["status"] == "ok"
+    assert health["service"] == "openbiliclaw-api"
+    assert health["profile_ready"] is False

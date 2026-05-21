@@ -6,6 +6,7 @@ import pytest
 
 from openbiliclaw import config as config_module
 from openbiliclaw.config import (
+    ApiConfig,
     BilibiliConfig,
     Config,
     ConfigError,
@@ -77,6 +78,9 @@ class TestConfigDefaults:
     def test_default_config(self) -> None:
         config = Config()
         assert config.language == "zh"
+        assert isinstance(config.api, ApiConfig)
+        assert config.api.host == "0.0.0.0"
+        assert config.api.port == 8420
         assert config.llm.default_provider == "openai"
         assert config.bilibili.auth_method == "cookie"
         assert config.scheduler.enabled is True
@@ -128,13 +132,32 @@ class TestConfigDefaults:
     def test_build_from_partial_dict(self) -> None:
         raw = {
             "general": {"language": "en"},
+            "api": {"host": "127.0.0.1", "port": 19090},
             "llm": {"default_provider": "claude"},
         }
         config = _build_config(raw)
         assert config.language == "en"
+        assert config.api.host == "127.0.0.1"
+        assert config.api.port == 19090
         assert config.llm.default_provider == "claude"
         # Other defaults should remain
         assert config.bilibili.auth_method == "cookie"
+
+    def test_api_config_round_trips_through_toml(self, tmp_path: Path) -> None:
+        config = Config()
+        config.api.host = "127.0.0.1"
+        config.api.port = 19090
+
+        target = tmp_path / "config.toml"
+        save_config(config, target)
+        rendered = target.read_text(encoding="utf-8")
+        loaded = load_config(target)
+
+        assert "[api]" in rendered
+        assert 'host = "127.0.0.1"' in rendered
+        assert "port = 19090" in rendered
+        assert loaded.api.host == "127.0.0.1"
+        assert loaded.api.port == 19090
 
     def test_data_path_relative(self) -> None:
         config = Config(data_dir="data")

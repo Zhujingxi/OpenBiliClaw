@@ -18,6 +18,15 @@ cp config.example.toml config.toml
 | `language` | string | `"zh"` | Agent 输出语言（`zh` / `en`） |
 | `data_dir` | string | `"data"` | 数据目录（记忆、Cookie、数据库） |
 
+### `[api]`
+
+| 键 | 类型 | 默认值 | 说明 |
+|----|------|--------|------|
+| `host` | string | `"0.0.0.0"` | 后端 API 监听地址。默认绑定所有网卡，方便同局域网手机访问 `/m/`；如只允许本机访问可改为 `"127.0.0.1"` |
+| `port` | int | `8420` | 后端 API 监听端口 |
+
+`openbiliclaw start` 默认读取这里的 host / port。浏览器插件的手机二维码入口会在后端地址仍是 loopback 时读取 `/api/health.lan_ip`，用局域网 IP 生成 `/m/` 二维码；但后端仍需要绑定 `0.0.0.0`，手机才能连上。
+
 ### `[llm]`
 
 | 键 | 类型 | 默认值 | 说明 |

@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
+import os
+import re
 import shutil
+import socket
+import subprocess
 import uuid
 from collections.abc import Callable
 from contextlib import suppress
@@ -88,6 +93,103 @@ SOURCE_LABELS = {
 }
 
 _SOURCE_SHARE_ORDER = ("bilibili", "xiaohongshu", "douyin", "youtube")
+
+_RFC1918_NETWORKS = tuple(
+    ipaddress.ip_network(net) for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
+_BENCHMARK_NETWORK = ipaddress.ip_network("198.18.0.0/15")
+
+
+def _default_route_ip() -> str | None:
+    """Return the IPv4 address selected for outbound traffic, if usable."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(0.1)
+            sock.connect(("8.8.8.8", 80))
+            ip = sock.getsockname()[0]
+            return str(ip) if ip else None
+    except Exception:
+        return None
+
+
+def _interface_ipv4_candidates() -> list[str]:
+    """Best-effort local IPv4 enumeration without extra dependencies."""
+    commands: list[list[str]]
+    if os.name == "nt":
+        commands = [["ipconfig"]]
+    else:
+        commands = [["ifconfig"], ["ip", "-4", "addr", "show", "scope", "global"]]
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for command in commands:
+        try:
+            proc = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if proc.returncode != 0:
+            continue
+        for ip in re.findall(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])", proc.stdout):
+            if ip not in seen:
+                candidates.append(ip)
+                seen.add(ip)
+        if candidates:
+            break
+    return candidates
+
+
+def _is_rfc1918_ipv4(addr: ipaddress.IPv4Address) -> bool:
+    return any(addr in network for network in _RFC1918_NETWORKS)
+
+
+def _usable_lan_candidate(ip: str) -> tuple[bool, bool]:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return (False, False)
+    if not isinstance(addr, ipaddress.IPv4Address):
+        return (False, False)
+    if (
+        addr.is_loopback
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_unspecified
+        or addr in _BENCHMARK_NETWORK
+    ):
+        return (False, False)
+    return (True, _is_rfc1918_ipv4(addr))
+
+
+def _detect_lan_ip() -> str | None:
+    """Return a likely phone-reachable LAN IPv4 address.
+
+    UDP default-route detection can return VPN/TUN addresses such as
+    198.18.0.1 on macOS. Prefer RFC1918 interface addresses and only use
+    the default-route result when it is not a benchmark / loopback address.
+    """
+    candidates = _interface_ipv4_candidates()
+    route_ip = _default_route_ip()
+    if route_ip:
+        candidates.append(route_ip)
+
+    fallback: str | None = None
+    for candidate in candidates:
+        usable, rfc1918 = _usable_lan_candidate(candidate)
+        if not usable:
+            continue
+        if rfc1918:
+            return candidate
+        if fallback is None:
+            fallback = candidate
+    return fallback
+
 
 _RESETTABLE_CONFIG_FIELDS = {
     "llm.openai.api_key": ("llm", "openai", "api_key"),
@@ -651,20 +753,6 @@ def create_app(
             return bool(is_ready_fn())
         except Exception:
             logger.debug("Health profile readiness check failed", exc_info=True)
-            return None
-
-    def _detect_lan_ip() -> str | None:
-        """Best-effort LAN IP detection via UDP connect trick."""
-        import socket
-
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.settimeout(0.1)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip if ip and not ip.startswith("127.") else None
-        except Exception:
             return None
 
     @app.get("/api/health", response_model=HealthResponse, response_model_exclude_none=True)

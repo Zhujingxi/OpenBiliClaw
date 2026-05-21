@@ -511,7 +511,9 @@ def test_browser_content_reports_command_failure(
     assert "snapshot failed" in result.stdout
 
 
-def test_start_uses_local_api_defaults(monkeypatch: pytest.MonkeyPatch, runner: CliRunner) -> None:
+def test_start_uses_lan_accessible_api_defaults(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
     called: dict[str, object] = {}
     backup_calls: list[str] = []
 
@@ -535,7 +537,32 @@ def test_start_uses_local_api_defaults(monkeypatch: pytest.MonkeyPatch, runner: 
     assert "启动 OpenBiliClaw" in result.stdout
     assert "API 服务" in result.stdout
     assert backup_calls == ["called"]
-    assert called == {"host": "127.0.0.1", "port": 8420}
+    assert called == {"host": "0.0.0.0", "port": 8420}
+
+
+def test_start_uses_configured_api_host_and_port(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    called: dict[str, object] = {}
+    cfg = config_module.Config()
+    cfg.api.host = "127.0.0.1"
+    cfg.api.port = 19090
+
+    def fake_run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
+        called["host"] = host
+        called["port"] = port
+
+    monkeypatch.setattr(config_module, "load_config", lambda: cfg, raising=False)
+    monkeypatch.setattr(cli_module, "_ensure_runtime_database_healthy", lambda: None)
+    monkeypatch.setattr(cli_module, "_maybe_create_runtime_database_backup", lambda: None)
+    monkeypatch.setattr(cli_module, "_run_api_server", fake_run_api_server, raising=False)
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["start"])
+
+    assert result.exit_code == 0
+    assert called == {"host": "127.0.0.1", "port": 19090}
+    assert "127.0.0.1:19090" in result.stdout
 
 
 def test_start_warns_when_pause_on_disconnect_requires_extension_presence(
@@ -560,7 +587,7 @@ def test_start_warns_when_pause_on_disconnect_requires_extension_presence(
     assert result.exit_code == 0
     assert "WARN extension presence required" in result.stdout
     assert "background LLM work after grace period" in result.stdout
-    assert called == {"host": "127.0.0.1", "port": 8420}
+    assert called == {"host": "0.0.0.0", "port": 8420}
 
 
 def test_run_api_server_prints_degraded_mode_panel(
@@ -2135,10 +2162,10 @@ def test_init_guides_missing_auth_interactively(
     # v0.3.13: auth wizard now opens with a 2-choice prompt
     # (1=install extension and skip / 2=paste cookie now). To keep this
     # test exercising the manual-paste path, send "2" first.
-    # v0.3.27+: a y/n xhs prompt fires before data fetch; v0.3.64+
-    # then asks for douyin; v0.3.69+ adds youtube. Send "n" to all so this test stays
-    # focused on the cookie-prompt path.
-    result = runner.invoke(app, ["init"], input="2\nSESSDATA=valid\nn\nn\nn\n")
+    # v0.3.89+: init asks whether to allow LAN access before the source
+    # prompts. Answer yes, then send "n" to XHS / Douyin / YouTube so this
+    # test stays focused on the cookie-prompt path.
+    result = runner.invoke(app, ["init"], input="2\nSESSDATA=valid\ny\nn\nn\nn\n")
 
     assert result.exit_code == 1
     assert fake_auth.saved_cookie == "SESSDATA=valid"

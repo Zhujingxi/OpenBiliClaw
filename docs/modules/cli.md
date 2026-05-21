@@ -170,7 +170,7 @@ $ openbiliclaw browser content https://example.com
 
 ### `openbiliclaw start`
 
-启动本地 API 服务。默认监听 `127.0.0.1:8420`，也支持显式传入 host/port。
+启动本地 API 服务。默认读取 `config.toml [api]`，新安装默认监听 `0.0.0.0:8420`，方便同局域网手机访问 `/m/`；也支持显式传入 host/port 覆盖配置。
 
 ```bash
 $ openbiliclaw start
@@ -178,7 +178,7 @@ $ openbiliclaw start
 $ openbiliclaw start --host 0.0.0.0 --port 9000
 ```
 
-适合本地直接运行或调试场景。
+适合本地直接运行或调试场景。若只希望本机访问，把 `[api].host` 改为 `127.0.0.1`，或启动时传 `--host 127.0.0.1`。
 
 启动前会先做两件事：
 

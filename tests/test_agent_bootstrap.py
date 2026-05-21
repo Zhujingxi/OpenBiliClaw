@@ -34,6 +34,19 @@ def test_bootstrap_extends_no_proxy_for_localhost(monkeypatch: pytest.MonkeyPatc
     assert os.environ["no_proxy"] == "example.com,localhost,127.0.0.1,::1"
 
 
+def test_bootstrap_defaults_to_lan_accessible_bind_host(tmp_path: Path) -> None:
+    args = bootstrap.build_arg_parser().parse_args(["--project-dir", str(tmp_path)])
+
+    assert args.host == "0.0.0.0"
+
+
+def test_bootstrap_connects_to_loopback_when_binding_all_interfaces() -> None:
+    assert bootstrap._connect_host_for_bind_host("0.0.0.0") == "127.0.0.1"
+    assert bootstrap._connect_host_for_bind_host("::") == "127.0.0.1"
+    assert bootstrap._connect_host_for_bind_host("127.0.0.1") == "127.0.0.1"
+    assert bootstrap._connect_host_for_bind_host("192.168.1.100") == "192.168.1.100"
+
+
 def _write_minimal_config(
     tmp_path: Path,
     *,
@@ -135,7 +148,7 @@ def test_apply_embedding_config_writes_embedding_owned_credentials(tmp_path: Pat
     text = (tmp_path / "config.toml").read_text(encoding="utf-8")
     assert "llm.embedding.base_url" in result["written"]
     assert "llm.embedding.api_key" in result["written"]
-    assert '[llm.embedding]' in text
+    assert "[llm.embedding]" in text
     assert 'provider = "openai"' in text
     assert 'model = "text-embedding-3-small"' in text
     assert 'base_url = "https://embed.example.com/v1"' in text

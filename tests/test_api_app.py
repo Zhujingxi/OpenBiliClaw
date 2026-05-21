@@ -657,6 +657,20 @@ class TestBackendAPI:
         assert body["service"] == "openbiliclaw-api"
         assert body["profile_ready"] is True
 
+    def test_detect_lan_ip_prefers_rfc1918_interface_over_benchmark_tun(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from openbiliclaw.api import app as app_module
+
+        monkeypatch.setattr(app_module, "_default_route_ip", lambda: "198.18.0.1")
+        monkeypatch.setattr(
+            app_module,
+            "_interface_ipv4_candidates",
+            lambda: ["198.18.0.1", "192.168.31.98"],
+        )
+
+        assert app_module._detect_lan_ip() == "192.168.31.98"
+
     def test_bilibili_cookie_endpoint_persists_and_validates(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

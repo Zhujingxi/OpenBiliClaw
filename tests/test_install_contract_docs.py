@@ -38,6 +38,19 @@ def test_install_ps1_uses_interactive_auto_init_contract() -> None:
     assert "docker exec -it openbiliclaw-backend openbiliclaw init" not in install_ps1
 
 
+def test_one_line_installers_default_to_lan_accessible_backend() -> None:
+    install_sh = _read("scripts/install.sh")
+    install_ps1 = _read("scripts/install.ps1")
+    bootstrap = _read("scripts/agent_bootstrap.py")
+
+    assert 'HOST="${HOST:-0.0.0.0}"' in install_sh
+    assert "HOST             API host  (default: 0.0.0.0)" in install_sh
+    assert "Backend bind address. Default: 0.0.0.0" in install_ps1
+    assert "if (-not $ApiHost)    { $ApiHost    = '0.0.0.0' }" in install_ps1
+    assert 'DEFAULT_HOST = "0.0.0.0"' in bootstrap
+    assert "default: 0.0.0.0" in bootstrap
+
+
 def test_docs_make_auto_init_primary_for_all_install_channels() -> None:
     readme = _read("README.md")
     docker_doc = _read("docs/docker-deployment.md")

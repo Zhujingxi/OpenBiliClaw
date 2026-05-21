@@ -40,7 +40,7 @@ Either command:
 1. Clones the OpenBiliClaw repo (default `~/OpenBiliClaw` on Unix, `%USERPROFILE%\OpenBiliClaw` on Windows; override with the `INSTALL_DIR` env var)
 2. Auto-detects any existing OpenBiliClaw install under the standard candidate paths (`~/workspace/OpenBiliClaw`, `~/OpenBiliClaw`, `~/projects/OpenBiliClaw`, `~/code/OpenBiliClaw` — same set on both platforms, rooted at `$HOME` / `%USERPROFILE%`) and **reuses** its LLM API keys and Bilibili cookie so the user never has to retype them
 3. Installs Python dependencies (`uv sync` preferred, `pip install -e .` fallback)
-4. Starts the backend and runs a health check against `/api/health`
+4. Starts the backend and runs a health check against `/api/health`. Local one-line installs default to `--host 0.0.0.0 --port 8420` so the Mobile Web `/m/` is reachable from phones on the same LAN; the status block's `Health URL` still uses a concrete local URL such as `http://127.0.0.1:8420/api/health` for curl verification
 5. Confirms embedding, Bilibili cookie source, and XHS / Douyin / YouTube opt-in choices with the user when the installer is running interactively
 6. Automatically runs init after credentials and confirmations are complete, then prints a self-contained **status block** at the very end of stdout:
 
@@ -51,7 +51,7 @@ Either command:
 Status:      complete | running_with_missing_secrets | needs_secrets | needs_decisions | error
 Checkout:    <absolute path to the repo>
 Reused from: <path>                 (only present when reuse happened)
-Health URL:  http://host:port/api/health
+Health URL:  http://127.0.0.1:8420/api/health
 Missing:     (none)  |  llm.<provider>.api_key, bilibili.cookie, ...
 
 Next action (required — credentials are missing):
@@ -66,6 +66,7 @@ Next action (required — credentials are missing):
 
 Next action (init has been run automatically):
   - Verify the backend is healthy: curl -sS <Health URL>
+  - Open Mobile Web: click the phone icon in the extension header and scan the QR code; if the backend address is loopback, the extension reads `/api/health.lan_ip` and shows the LAN URL automatically
   - See recommendations:    cd <dir> && uv run openbiliclaw recommend
   - View the soul profile:  cd <dir> && uv run openbiliclaw profile
   - Re-run init manually if needed: cd <dir> && uv run openbiliclaw init
