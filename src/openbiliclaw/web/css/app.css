@@ -1072,7 +1072,10 @@ body {
   display: flex;
   gap: 8px;
   padding: 8px 4px 10px;
+  padding-bottom: max(10px, var(--safe-bottom));
   align-items: flex-end;
+  max-width: 100%;
+  box-sizing: border-box;
   background:
     linear-gradient(180deg, rgba(242, 248, 255, 0), var(--bg-sky) 18px),
     var(--bg-sky);
@@ -1080,6 +1083,7 @@ body {
 
 .chat-input {
   flex: 1;
+  min-width: 0;
   padding: 10px 14px;
   border-radius: 20px;
   background: var(--surface);
@@ -1090,6 +1094,7 @@ body {
   height: 60px;
   max-height: 112px;
   line-height: 1.4;
+  box-sizing: border-box;
 }
 
 .chat-input:focus { outline: none; box-shadow: var(--focus-ring); }
