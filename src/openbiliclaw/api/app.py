@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import logging
 import os
@@ -112,6 +113,7 @@ _IMAGE_PROXY_MAX_BYTES = 10 * 1024 * 1024
 _IMAGE_PROXY_SPOOL_MEMORY_BYTES = 1024 * 1024
 _IMAGE_PROXY_TIMEOUT_SECONDS = 10.0
 _IMAGE_PROXY_MAX_REDIRECTS = 3
+_IMAGE_CACHE_MAX_AGE_DAYS = 30
 _IMAGE_PROXY_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _IMAGE_PROXY_UPSTREAM_HEADERS = {
     "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
@@ -415,6 +417,58 @@ def _iter_spooled_file(file_obj: BinaryIO) -> Iterator[bytes]:
             yield chunk
     finally:
         file_obj.close()
+
+
+def _image_cache_dir() -> Path:
+    d = Path("data/image-cache")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _image_cache_key(url: str) -> str:
+    return hashlib.sha256(url.encode()).hexdigest()
+
+
+def _image_cache_lookup(url: str) -> tuple[Path, str] | None:
+    """Return (path, content_type) if a cached copy exists."""
+    key = _image_cache_key(url)
+    cache_dir = _image_cache_dir()
+    for candidate in cache_dir.glob(f"{key}.*"):
+        ext = candidate.suffix.lstrip(".")
+        content_type = f"image/{ext}" if ext else "image/jpeg"
+        if candidate.stat().st_size > 0:
+            return candidate, content_type
+    return None
+
+
+def _image_cache_save(url: str, data: bytes, content_type: str) -> None:
+    """Persist image bytes to disk cache."""
+    key = _image_cache_key(url)
+    ext = content_type.split("/")[-1].split(";")[0].strip()
+    if ext not in {"jpeg", "jpg", "png", "webp", "avif", "gif"}:
+        ext = "jpg"
+    path = _image_cache_dir() / f"{key}.{ext}"
+    try:
+        path.write_bytes(data)
+    except Exception:
+        pass
+
+
+def _image_cache_cleanup() -> int:
+    """Remove cached images older than _IMAGE_CACHE_MAX_AGE_DAYS. Returns count removed."""
+    import time
+
+    cache_dir = _image_cache_dir()
+    cutoff = time.time() - _IMAGE_CACHE_MAX_AGE_DAYS * 86400
+    removed = 0
+    try:
+        for f in cache_dir.iterdir():
+            if f.is_file() and f.stat().st_mtime < cutoff:
+                f.unlink(missing_ok=True)
+                removed += 1
+    except Exception:
+        pass
+    return removed
 
 
 async def _send_image_proxy_request(client: httpx.AsyncClient, url: httpx.URL) -> httpx.Response:
@@ -888,11 +942,16 @@ def create_app(
             lan_ip=lan_ip,
         )
 
-    @app.get("/api/image-proxy")
+    @app.get("/api/image-proxy", response_model=None)
     async def image_proxy(
         url: str = Query(..., description="URL-encoded image URL to proxy"),
-    ) -> StreamingResponse:
-        """Proxy whitelisted remote cover images through the local backend."""
+    ) -> StreamingResponse | FileResponse:
+        """Proxy whitelisted remote cover images through the local backend.
+
+        Successfully fetched images are cached to ``data/image-cache/``.
+        When the upstream fails (e.g. expired XHS CDN tokens), the cached
+        copy is served instead.
+        """
 
         parsed = _parse_image_proxy_url(url)
         try:
@@ -908,10 +967,27 @@ def create_app(
                     spool = await _read_image_proxy_body(response)
                 finally:
                     await response.aclose()
-        except httpx.TimeoutException as exc:
-            raise HTTPException(status_code=504, detail="Upstream timeout") from exc
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail="Upstream request failed") from exc
+        except (httpx.TimeoutException, httpx.HTTPError, HTTPException):
+            # Upstream failed — try serving from cache.
+            cached = _image_cache_lookup(url)
+            if cached:
+                cache_path, cache_ct = cached
+                return FileResponse(
+                    cache_path,
+                    media_type=cache_ct,
+                    headers={
+                        "Cache-Control": "public, max-age=86400",
+                        "X-Content-Type-Options": "nosniff",
+                        "X-Image-Cache": "hit",
+                    },
+                )
+            raise HTTPException(status_code=502, detail="Upstream request failed")
+
+        # Cache the successfully fetched image.
+        spool.seek(0)
+        image_bytes = spool.read()
+        spool.seek(0)
+        _image_cache_save(url, image_bytes, content_type)
 
         return StreamingResponse(
             _iter_spooled_file(spool),
@@ -1263,6 +1339,14 @@ def create_app(
 
     @app.on_event("startup")
     async def startup_refresh_loop() -> None:
+        # Clean up expired image cache on startup.
+        try:
+            removed = _image_cache_cleanup()
+            if removed:
+                logger.info("Image cache cleanup: removed %d expired files", removed)
+        except Exception:
+            logger.debug("Image cache cleanup failed", exc_info=True)
+
         if bool(getattr(ctx, "degraded", False)):
             return
         await ctx.restart_background_tasks(app)
