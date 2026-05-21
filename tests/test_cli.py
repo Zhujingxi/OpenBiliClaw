@@ -2438,6 +2438,7 @@ def test_init_caps_bilibili_favorites_and_following_at_300(
         return 0
 
     _ignore_runtime_config_error(monkeypatch)
+    monkeypatch.setattr(cli_module, "_is_interactive_terminal", lambda: False, raising=False)
     monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
     monkeypatch.setattr(cli_module, "_build_bilibili_client", lambda: FakeBilibiliClient())
     monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: fake_memory)
@@ -2530,6 +2531,7 @@ def test_init_accepts_custom_bilibili_favorites_and_following_limits(
         return 0
 
     _ignore_runtime_config_error(monkeypatch)
+    monkeypatch.setattr(cli_module, "_is_interactive_terminal", lambda: False, raising=False)
     monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
     monkeypatch.setattr(cli_module, "_build_bilibili_client", lambda: FakeBilibiliClient())
     monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: fake_memory)
