@@ -1253,7 +1253,7 @@ def create_app(
                 content_id=str(getattr(item.content, "content_id", "") or item.content.bvid),
                 content_url=str(getattr(item.content, "content_url", "") or ""),
                 source_platform=str(getattr(item.content, "source_platform", "") or "bilibili"),
-                feedback_type=str(getattr(item, "feedback_type", "") or "") or None,
+                feedback_type=str(getattr(item, "feedback_type", "") or ""),
                 pool_status=str(getattr(item.content, "pool_status", "") or "") or None,
             )
             for item in items
@@ -1749,9 +1749,7 @@ def create_app(
                     content_id=str(row.get("content_id", "") or row.get("bvid", "")),
                     content_url=str(row.get("content_url", "") or ""),
                     source_platform=str(row.get("source_platform", "") or "bilibili"),
-                    feedback_type=(
-                        str(row.get("feedback_type") or row.get("feedback") or "") or None
-                    ),
+                    feedback_type=str(row.get("feedback_type") or row.get("feedback") or ""),
                     pool_status=str(row.get("pool_status") or "") or None,
                 )
                 for row in rows

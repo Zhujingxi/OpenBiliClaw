@@ -54,7 +54,6 @@ class RecommendationOut(BaseModel):
     content_id: str = ""
     content_url: str = ""
     source_platform: str = ""
-    feedback_type: str | None = None
     pool_status: str | None = None
 
 
