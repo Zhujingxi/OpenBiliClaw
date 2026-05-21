@@ -51,14 +51,21 @@ function esc(s) {
 // ── Render ────────────────────────────────────────────────────
 function render() {
   if (!$root) return;
-  $root.innerHTML = "";
+
+  // Build the entire view into a fragment first, then swap in one
+  // operation so the user never sees an empty frame (white flash).
+  const frag = document.createDocumentFragment();
 
   // Pull indicator
   const pull = document.createElement("div");
   pull.className = "pull-indicator";
   pull.id = "pull-indicator";
   pull.textContent = "\u2193 \u4E0B\u62C9\u5237\u65B0";
-  $root.appendChild(pull);
+  frag.appendChild(pull);
+
+  // Temporarily point $root at the fragment so sub-renderers append there.
+  const realRoot = $root;
+  $root = frag;
 
   renderRecommendationHeader();
 
@@ -72,11 +79,11 @@ function render() {
     const empty = document.createElement("div");
     empty.className = "empty-state";
     empty.innerHTML = `<div class="empty-state-icon">\u{1F30A}</div><div class="empty-state-text">${esc(hint.message)}</div>`;
-    $root.appendChild(empty);
+    frag.appendChild(empty);
   }
 
   for (const item of recs) {
-    $root.appendChild(renderCard(item));
+    frag.appendChild(renderCard(item));
   }
 
   renderLoadMoreRow();
@@ -85,8 +92,12 @@ function render() {
     const sp = document.createElement("div");
     sp.style.padding = "20px";
     sp.innerHTML = `<div class="spinner"></div>`;
-    $root.appendChild(sp);
+    frag.appendChild(sp);
   }
+
+  // Restore real root and swap the DOM in one shot — no white flash.
+  $root = realRoot;
+  $root.replaceChildren(frag);
 
   // Feedback bottom sheet
   renderFeedbackSheet();
