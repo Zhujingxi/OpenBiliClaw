@@ -226,7 +226,7 @@ Mobile Web should keep a dedicated state object, but the state shape should mirr
 - `chatTurns`
 - `pendingChatPolls`
 
-Shared normalization belongs in `src/openbiliclaw/web/js/view-models.js`. Functions should be ported from `extension/popup/popup-helpers.js` where semantics matter:
+Shared normalization belongs in `src/openbiliclaw/web/m/js/view-models.js`. Functions should be ported from `extension/popup/popup-helpers.js` where semantics matter:
 
 - pool status summary
 - ready recommendation hint

@@ -40,7 +40,7 @@ class TestMobileWebViewModels:
             import {
               getCoverImageAttrs, normalizeChatTurn, normalizeCoverUrl,
               normalizeMbtiDimensions, normalizePoolStatus,
-            } from "./src/openbiliclaw/web/js/view-models.js";
+            } from "./src/openbiliclaw/web/m/js/view-models.js";
 
             assert.deepEqual(
               normalizePoolStatus({
@@ -94,7 +94,7 @@ class TestMobileWebViewModels:
         _assert_js(
             dedent("""
             import assert from "node:assert/strict";
-            import * as vm from "./src/openbiliclaw/web/js/view-models.js";
+            import * as vm from "./src/openbiliclaw/web/m/js/view-models.js";
 
             const required = [
               "buildVideoUrl", "buildContentUrl",
@@ -121,11 +121,11 @@ class TestMobileWebViewModels:
         )
 
     def test_mobile_cover_templates_use_wrapper_fallbacks(self) -> None:
-        recommend_js = Path("src/openbiliclaw/web/js/views/recommend.js").read_text(
+        recommend_js = Path("src/openbiliclaw/web/m/js/views/recommend.js").read_text(
             encoding="utf-8"
         )
-        chat_js = Path("src/openbiliclaw/web/js/views/chat.js").read_text(encoding="utf-8")
-        app_css = Path("src/openbiliclaw/web/css/app.css").read_text(encoding="utf-8")
+        chat_js = Path("src/openbiliclaw/web/m/js/views/chat.js").read_text(encoding="utf-8")
+        app_css = Path("src/openbiliclaw/web/m/css/app.css").read_text(encoding="utf-8")
 
         assert 'referrerpolicy="${cover.referrerPolicy}"' not in recommend_js
         assert 'referrerpolicy="${cover.referrerPolicy}"' not in chat_js
@@ -142,7 +142,7 @@ class TestMobileWebViewModels:
         _assert_js(
             dedent("""
             import assert from "node:assert/strict";
-            import { normalizeRecommendation } from "./src/openbiliclaw/web/js/view-models.js";
+            import { normalizeRecommendation } from "./src/openbiliclaw/web/m/js/view-models.js";
 
             const rec = normalizeRecommendation({ id: 42, bvid: "BV1xx" });
             assert.equal(rec.id, 42);
@@ -159,7 +159,7 @@ class TestMobileWebViewModels:
         _assert_js(
             dedent("""
             import assert from "node:assert/strict";
-            import { isFeedbackedRecommendation } from "./src/openbiliclaw/web/js/view-models.js";
+            import { isFeedbackedRecommendation } from "./src/openbiliclaw/web/m/js/view-models.js";
 
             assert.equal(isFeedbackedRecommendation({ feedback_type: "like" }), true);
             assert.equal(isFeedbackedRecommendation({ feedback: "dismiss" }), true);
@@ -172,7 +172,7 @@ class TestMobileWebViewModels:
         _assert_js(
             dedent("""
             import assert from "node:assert/strict";
-            import { buildFeedbackPayload } from "./src/openbiliclaw/web/js/view-models.js";
+            import { buildFeedbackPayload } from "./src/openbiliclaw/web/m/js/view-models.js";
 
             const p = buildFeedbackPayload(42, "like", "  nice  ");
             assert.equal(p.recommendation_id, 42);
@@ -190,7 +190,7 @@ class TestMobileWebViewModels:
         _assert_js(
             dedent("""
             import assert from "node:assert/strict";
-            import { getDelightActionState } from "./src/openbiliclaw/web/js/view-models.js";
+            import { getDelightActionState } from "./src/openbiliclaw/web/m/js/view-models.js";
 
             const view = getDelightActionState("view");
             assert.equal(view.apiResponse, "view");
@@ -223,7 +223,7 @@ class TestMobileWebViewModels:
         _assert_js(
             dedent("""
             import assert from "node:assert/strict";
-            import { getDelightUiState } from "./src/openbiliclaw/web/js/view-models.js";
+            import { getDelightUiState } from "./src/openbiliclaw/web/m/js/view-models.js";
 
             const pending = getDelightUiState({ bvid: "BV1", title: "t", delight_score: 0.9 });
             assert.equal(pending.visible, true);
@@ -251,7 +251,7 @@ class TestMobileWebViewModels:
               getDelightMessageActions,
               getMobileChatSession,
               getProbeMessageActions,
-            } from "./src/openbiliclaw/web/js/view-models.js";
+            } from "./src/openbiliclaw/web/m/js/view-models.js";
 
             assert.deepEqual(getMobileChatSession(), { session: "popup", scope: "chat" });
             assert.deepEqual(
@@ -283,7 +283,7 @@ class TestMobileWebViewModels:
         _assert_js(
             dedent("""
             import assert from "node:assert/strict";
-            import { getPoolStatusSummary } from "./src/openbiliclaw/web/js/view-models.js";
+            import { getPoolStatusSummary } from "./src/openbiliclaw/web/m/js/view-models.js";
 
             // Uninit returns null
             assert.equal(getPoolStatusSummary({}), null);
@@ -329,7 +329,7 @@ class TestMobileWebViewModels:
             import assert from "node:assert/strict";
             import {
               getMobileRecommendationHeaderState,
-            } from "./src/openbiliclaw/web/js/view-models.js";
+            } from "./src/openbiliclaw/web/m/js/view-models.js";
 
             const header = getMobileRecommendationHeaderState({
               runtimeStatus: {
@@ -392,7 +392,7 @@ class TestMobileWebViewModels:
             import {
               getActivityCardState,
               normalizeActivityFeed,
-            } from "./src/openbiliclaw/web/js/view-models.js";
+            } from "./src/openbiliclaw/web/m/js/view-models.js";
 
             const empty = normalizeActivityFeed({});
             assert.equal(empty.items.length, 0);
@@ -418,7 +418,7 @@ class TestMobileWebViewModels:
         _assert_js(
             dedent("""
             import assert from "node:assert/strict";
-            import { normalizeProfileSummary } from "./src/openbiliclaw/web/js/view-models.js";
+            import { normalizeProfileSummary } from "./src/openbiliclaw/web/m/js/view-models.js";
 
             // Empty input gives defaults
             const empty = normalizeProfileSummary({});
@@ -458,7 +458,7 @@ class TestMobileWebViewModels:
               getContextPatternRows,
               getMbtiDisplayState,
               getProfileStyleDisplay,
-            } from "./src/openbiliclaw/web/js/view-models.js";
+            } from "./src/openbiliclaw/web/m/js/view-models.js";
 
             const mbti = getMbtiDisplayState({
               type: "INTJ",
@@ -496,7 +496,9 @@ class TestMobileWebViewModels:
         _assert_js(
             dedent("""
             import assert from "node:assert/strict";
-            import { normalizeCognitionUpdateCard } from "./src/openbiliclaw/web/js/view-models.js";
+            import {
+              normalizeCognitionUpdateCard,
+            } from "./src/openbiliclaw/web/m/js/view-models.js";
 
             const first = normalizeCognitionUpdateCard({
               summary: "更明确偏好因果链",
@@ -524,7 +526,7 @@ class TestMobileWebViewModels:
         _assert_js(
             dedent("""
             import assert from "node:assert/strict";
-            import { formatRelativeTimestamp } from "./src/openbiliclaw/web/js/view-models.js";
+            import { formatRelativeTimestamp } from "./src/openbiliclaw/web/m/js/view-models.js";
 
             const now = Date.parse("2025-06-01T12:00:00Z");
             assert.equal(formatRelativeTimestamp("2025-06-01T11:59:30Z", now), "刚刚");
@@ -543,7 +545,7 @@ class TestMobileWebViewModels:
             import {
               getSourceLabel,
               normalizeSourcePlatform,
-            } from "./src/openbiliclaw/web/js/view-models.js";
+            } from "./src/openbiliclaw/web/m/js/view-models.js";
 
             assert.equal(normalizeSourcePlatform({ bvid: "BV1xx" }), "bilibili");
             assert.equal(

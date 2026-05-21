@@ -11,7 +11,7 @@
 | 技术栈 | Vanilla JS + ES Modules，模块化组件，无构建步骤 |
 | 样式 | 复用插件 CSS 设计令牌（CSS Variables），针对移动端重写布局 |
 | 路由 | SPA hash routing（`#/recommend`、`#/profile`、`#/chat`） |
-| 文件位置 | `src/openbiliclaw/web/` — 随 pip install 分发 |
+| 文件位置 | `src/openbiliclaw/web/m/` — 随 pip install 分发；`src/openbiliclaw/web/` 保留给桌面 Web UI |
 | 静态服务 | FastAPI `StaticFiles` mount at `/m/` |
 | 入口 URL | `http://<局域网IP>:8420/m/` |
 | 鉴权 | 不做鉴权；默认本机访问，手机访问需用户显式 `start --host 0.0.0.0` |
@@ -78,30 +78,32 @@
 
 ```
 src/openbiliclaw/web/
-├── index.html          # SPA 入口
-├── manifest.json       # PWA manifest
-├── icon-192.png        # PWA 图标
-├── icon-512.png
-├── css/
-│   └── app.css         # 全量样式（复用插件设计令牌）
-├── js/
-│   ├── app.js          # 入口：路由、Tab 切换、WebSocket
-│   ├── api.js          # 后端 API 封装（同插件 popup-api.js）
-│   ├── stream.js       # WebSocket 客户端（同插件 popup-stream.js）
-│   ├── view-models.js  # 后端响应 → 移动端渲染字段适配
-│   ├── views/
-│   │   ├── recommend.js  # 推荐页渲染 & 交互
-│   │   ├── profile.js    # 画像页渲染 & 交互
-│   │   └── chat.js       # 对话页渲染 & 交互
-│   └── components/
-│       ├── tab-bar.js       # 底部导航
-│       ├── status-bar.js    # 顶部状态栏
-│       ├── card.js          # 推荐卡片
-│       ├── delight.js       # 惊喜推荐 banner
-│       ├── interest-tree.js # 兴趣树组件
-│       ├── mbti.js          # MBTI 展示
-│       ├── messages.js      # 消息收件箱 overlay
-│       └── pull-refresh.js  # 下拉刷新
+├── index.html          # 桌面 Web UI 入口
+└── m/
+    ├── index.html      # 移动端 SPA 入口
+    ├── manifest.json   # PWA manifest
+    ├── icon-192.png    # PWA 图标
+    ├── icon-512.png
+    ├── css/
+    │   └── app.css     # 全量样式（复用插件设计令牌）
+    └── js/
+        ├── app.js          # 入口：路由、Tab 切换、WebSocket
+        ├── api.js          # 后端 API 封装（同插件 popup-api.js）
+        ├── stream.js       # WebSocket 客户端（同插件 popup-stream.js）
+        ├── view-models.js  # 后端响应 → 移动端渲染字段适配
+        ├── views/
+        │   ├── recommend.js  # 推荐页渲染 & 交互
+        │   ├── profile.js    # 画像页渲染 & 交互
+        │   └── chat.js       # 对话页渲染 & 交互
+        └── components/
+            ├── tab-bar.js       # 底部导航
+            ├── status-bar.js    # 顶部状态栏
+            ├── card.js          # 推荐卡片
+            ├── delight.js       # 惊喜推荐 banner
+            ├── interest-tree.js # 兴趣树组件
+            ├── mbti.js          # MBTI 展示
+            ├── messages.js      # 消息收件箱 overlay
+            └── pull-refresh.js  # 下拉刷新
 ```
 
 ### 后端改动
@@ -196,7 +198,7 @@ if web_dir.is_dir():
 ## 实施计划
 
 ### Phase 1: 后端 + 骨架（~1h）
-1. `src/openbiliclaw/web/` 目录 + index.html 骨架
+1. `src/openbiliclaw/web/m/` 目录 + index.html 骨架
 2. FastAPI StaticFiles mount
 3. SPA hash router + Tab 切换
 4. CSS 设计令牌 + 移动端基础布局

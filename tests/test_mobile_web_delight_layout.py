@@ -6,8 +6,8 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-RECOMMEND_JS = ROOT / "src/openbiliclaw/web/js/views/recommend.js"
-APP_CSS = ROOT / "src/openbiliclaw/web/css/app.css"
+RECOMMEND_JS = ROOT / "src/openbiliclaw/web/m/js/views/recommend.js"
+APP_CSS = ROOT / "src/openbiliclaw/web/m/css/app.css"
 
 
 def _css_block(css: str, selector: str) -> str:

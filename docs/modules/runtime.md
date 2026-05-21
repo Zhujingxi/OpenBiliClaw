@@ -13,7 +13,7 @@
 | 运行时频率配置 | ✅ | `refresh_check_interval_seconds`、行为触发阈值、trending / explore 间隔、单轮发现上限、主动推送间隔和 speculator idle tick 都从 `[scheduler]` 读取，配置热重载后重建 runtime 生效。 |
 | 浏览器 presence gate | ✅ | `background_llm_work_allowed()` 结合 `scheduler.enabled` 与 `pause_on_extension_disconnect` 控制 daemon-owned 后台 LLM / embedding 工作。 |
 | Runtime event stream | ✅ | `/api/runtime-stream` 向扩展推送状态、Cookie sync 请求、配置重载和 presence 事件。 |
-| Bundled Web UI | ✅ | `start` 默认让 FastAPI 同端口托管包内 `webui/index.html`；`serve-api` 默认 API-only，显式 `--with-web` 才挂载 `/web`。 |
+| Bundled Web UI | ✅ | `start` 默认让 FastAPI 同端口托管包内桌面 Web `web/index.html` 和手机 Web `web/m/`；`serve-api` 默认 API-only，显式 `--with-web` 才挂载。 |
 | 图片代理 API | ✅ | `/api/image-proxy` 为移动 Web 和浏览器插件代理白名单 CDN 封面图，逐跳校验 redirect，并在返回前完成类型和 10MB 大小校验。 |
 | 自动更新 | ✅ | `AutoUpdateService` 周期性检查 backend git tag，发现新 backend 版本后执行 `git pull --ff-only` 与依赖同步。 |
 | 账号同步 | ✅ | `AccountSyncService` 同步 B 站账号历史、收藏和关注等信号；历史按 `view_at + 同秒 bvid 集合` 增量导入，收藏 / 关注只把新增 ID 转成画像事件，避免重放旧信号。 |
@@ -30,7 +30,8 @@
 FastAPI app 支持按需挂载包内 Web UI。`openbiliclaw start` 默认启用；`openbiliclaw serve-api` 默认不启用，只有传 `--with-web` 时才挂载：
 
 - `GET /`：返回 `302`，跳转到 `/web`。
-- `GET /web` / `GET /web/`：返回 `src/openbiliclaw/webui/index.html`。
+- `GET /web` / `GET /web/`：返回桌面 Web UI `src/openbiliclaw/web/index.html`。
+- `GET /m/`：返回手机端 Web UI `src/openbiliclaw/web/m/index.html` 及其静态资源。
 
 这组入口和 `/api/*` 共用同一个后端进程与端口。Web UI 只负责浏览器内的推荐首页体验；Cookie 同步、XHS / 抖音 / YouTube 任务领取和后台 presence 仍由浏览器插件承担。
 

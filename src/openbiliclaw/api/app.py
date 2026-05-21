@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 import uuid
 from contextlib import suppress
-from importlib import resources
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
 import httpx
@@ -23,7 +23,6 @@ from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     FileResponse,
-    HTMLResponse,
     JSONResponse,
     RedirectResponse,
     StreamingResponse,
@@ -91,7 +90,6 @@ from openbiliclaw.api.models import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 _CONFIG_SAVE_LOCK = asyncio.Lock()
@@ -563,25 +561,24 @@ def create_app(
     )
 
     if serve_webui:
+        web_dir = Path(__file__).resolve().parent.parent / "web"
+        web_index_path = web_dir / "index.html"
 
-        def _webui_html() -> HTMLResponse:
-            html = (
-                resources.files("openbiliclaw.webui")
-                .joinpath("index.html")
-                .read_text(encoding="utf-8")
-            )
-            return HTMLResponse(html)
+        def _webui_html() -> FileResponse:
+            if not web_index_path.is_file():
+                raise HTTPException(status_code=404, detail="web UI not found")
+            return FileResponse(web_index_path, media_type="text/html")
 
         @app.get("/", include_in_schema=False)
         async def webui_root() -> RedirectResponse:
             return RedirectResponse(url="/web", status_code=302)
 
-        @app.get("/web", response_class=HTMLResponse, include_in_schema=False)
-        async def webui() -> HTMLResponse:
+        @app.get("/web", include_in_schema=False)
+        async def webui() -> FileResponse:
             return _webui_html()
 
-        @app.get("/web/", response_class=HTMLResponse, include_in_schema=False)
-        async def webui_slash() -> HTMLResponse:
+        @app.get("/web/", include_in_schema=False)
+        async def webui_slash() -> FileResponse:
             return _webui_html()
 
     # ── Build RuntimeContext ────────────────────────────────────────
@@ -4601,13 +4598,11 @@ def create_app(
 
     # ── Mobile Web UI ───────────────────────────────────────────
     if serve_webui:
-        from pathlib import Path as _Path
-
         from fastapi.staticfiles import StaticFiles as _StaticFiles
 
-        _web_dir = _Path(__file__).resolve().parent.parent / "web"
-        if _web_dir.is_dir():
-            _favicon_path = _web_dir / "icon-192.png"
+        _mobile_web_dir = Path(__file__).resolve().parent.parent / "web" / "m"
+        if _mobile_web_dir.is_dir():
+            _favicon_path = _mobile_web_dir / "icon-192.png"
 
             @app.get("/favicon.ico", include_in_schema=False)
             def _favicon() -> FileResponse:
@@ -4615,6 +4610,6 @@ def create_app(
                     raise HTTPException(status_code=404, detail="favicon not found")
                 return FileResponse(_favicon_path, media_type="image/png")
 
-            app.mount("/m", _StaticFiles(directory=_web_dir, html=True), name="mobile-web")
+            app.mount("/m", _StaticFiles(directory=_mobile_web_dir, html=True), name="mobile-web")
 
     return app

@@ -67,7 +67,7 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 
 ### Runtime (`runtime/`)
 - 系统生命周期管理和服务编排
-- FastAPI 可同端口托管 `webui/index.html`：`openbiliclaw start` 默认启用 `GET /` 302 到 `/web`，`GET /web` / `/web/` 返回独立推荐首页；`serve-api` 默认保持 API-only，需要 `--with-web` 才挂载 Web UI。Web UI 复用本地 API 和 runtime stream，但 Cookie / 平台任务结果仍由浏览器插件同步。
+- FastAPI 可同端口托管包内 Web：`src/openbiliclaw/web/index.html` 是桌面推荐首页，`src/openbiliclaw/web/m/` 是手机端 Web；`openbiliclaw start` 默认启用 `GET /` 302 到 `/web`，`GET /web` / `/web/` 返回桌面首页，`GET /m/` 返回手机端。`serve-api` 默认保持 API-only，需要 `--with-web` 才挂载 Web UI。Web UI 复用本地 API 和 runtime stream，但 Cookie / 平台任务结果仍由浏览器插件同步。
 - 降级模式启动：生产 `create_app()` 遇到 LLM registry 配置错误时保留 `/api/health`、`/api/config`、`/api/runtime-status` 和 `/api/runtime-stream`，让 popup 设置页仍能保存修复配置；其他 API 返回 503，避免半初始化 runtime 继续跑推荐/发现链路
 - 配置热重载：`RuntimeContext` 重建 registry / service / engine 时会从 `[llm.soul]` / `[llm.discovery]` / `[llm.recommendation]` / `[llm.evaluation]` 注入同一份 module override；热重载后的 speculator tick 作为 detached task 注册到 `BackgroundTaskRegistry`，不阻塞 `/api/config` 响应
 - `AutoUpdateService` — 后端自动更新只查询 GitHub `/tags` 并过滤 `backend-v*`（兼容 legacy `v*` / 裸 semver），明确忽略 `extension-v*`；当前 GitHub Releases 由扩展 artifact 占用，不能用 `/releases/latest` 判断后端源码是否最新
