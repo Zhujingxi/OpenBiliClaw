@@ -1842,6 +1842,100 @@ class TestBackendAPI:
         assert response.json() == {"ok": True, "bvid": "BV1ACK"}
         assert runtime.marked == ["BV1ACK"]
 
+    def test_delight_like_marks_candidate_consumed(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeDatabase:
+            def __init__(self) -> None:
+                self.writes: list[tuple[str, tuple[object, ...]]] = []
+
+            def _execute_write(self, sql: str, params: tuple[object, ...]) -> None:
+                self.writes.append((sql, params))
+
+        class FakeMemoryManager:
+            def __init__(self) -> None:
+                self.updates: list[dict[str, object]] = []
+
+            def load_cognition_updates(self) -> list[dict[str, object]]:
+                return list(self.updates)
+
+            def save_cognition_updates(self, updates: list[dict[str, object]]) -> None:
+                self.updates = updates
+
+        class FakeRuntimeController:
+            def __init__(self) -> None:
+                self.marked: list[str] = []
+
+            def mark_delight_sent(self, bvid: str) -> None:
+                self.marked.append(bvid)
+
+        database = FakeDatabase()
+        runtime = FakeRuntimeController()
+        app = create_app(
+            memory_manager=FakeMemoryManager(),
+            database=database,
+            soul_engine=object(),
+            runtime_controller=runtime,
+        )
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/delight/respond",
+            json={"bvid": "BV1DL", "title": "惊喜内容", "response": "like"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["action"] == "liked"
+        assert runtime.marked == ["BV1DL"]
+        assert any("feedback_type='like'" in sql for sql, _params in database.writes)
+
+    def test_delight_dislike_marks_candidate_consumed_and_feedbacked(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeDatabase:
+            def __init__(self) -> None:
+                self.writes: list[tuple[str, tuple[object, ...]]] = []
+
+            def _execute_write(self, sql: str, params: tuple[object, ...]) -> None:
+                self.writes.append((sql, params))
+
+        class FakeMemoryManager:
+            def load_cognition_updates(self) -> list[dict[str, object]]:
+                return []
+
+            def save_cognition_updates(self, updates: list[dict[str, object]]) -> None:
+                self.updates = updates
+
+        class FakeRuntimeController:
+            def __init__(self) -> None:
+                self.marked: list[str] = []
+
+            def mark_delight_sent(self, bvid: str) -> None:
+                self.marked.append(bvid)
+
+        database = FakeDatabase()
+        runtime = FakeRuntimeController()
+        app = create_app(
+            memory_manager=FakeMemoryManager(),
+            database=database,
+            soul_engine=object(),
+            runtime_controller=runtime,
+        )
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/delight/respond",
+            json={"bvid": "BV1DL", "title": "惊喜内容", "response": "dislike"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["action"] == "disliked"
+        assert runtime.marked == ["BV1DL"]
+        assert any(
+            "pool_status = 'purged_by_dislike'" in sql and "feedback_type = 'dislike'" in sql
+            for sql, _params in database.writes
+        )
+
     def test_feedback_endpoint_updates_recommendation_and_records_event(self) -> None:
         from fastapi.testclient import TestClient
 

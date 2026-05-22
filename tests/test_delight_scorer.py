@@ -312,6 +312,26 @@ def test_database_get_delight_candidate_requires_ready_copy(tmp_path: Path) -> N
     assert candidate is None
 
 
+def test_database_get_delight_candidate_excludes_feedbacked_items(tmp_path: Path) -> None:
+    database = _make_database(tmp_path)
+    database.cache_content("BV1DONE", title="已反馈惊喜", relevance_score=0.9)
+    database.update_delight_score(
+        "BV1DONE",
+        delight_score=0.92,
+        delight_reason="已经处理过，不应再次出现。",
+        delight_hook="已反馈",
+    )
+    database.conn.execute(
+        "UPDATE content_cache SET feedback_type = 'like' WHERE bvid = ?",
+        ("BV1DONE",),
+    )
+    database.conn.commit()
+
+    candidate = database.get_delight_candidate(min_delight_score=0.70)
+
+    assert candidate is None
+
+
 def test_database_get_delight_candidate_excludes_suppressed_pool_items(
     tmp_path: Path,
 ) -> None:

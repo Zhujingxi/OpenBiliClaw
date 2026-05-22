@@ -2142,6 +2142,13 @@ def create_app(
                 detail="response must be view, like, dislike, or chat",
             )
 
+        def mark_current_delight_consumed() -> None:
+            mark_sent = getattr(ctx.runtime_controller, "mark_delight_sent", None)
+            if callable(mark_sent):
+                mark_sent(bvid)
+                return
+            ctx.database.mark_delight_notified(bvid)
+
         if response_type == "view":
             return JSONResponse(content={"ok": True, "action": "viewed", "bvid": bvid})
 
@@ -2171,13 +2178,15 @@ def create_app(
                 f"好，「{label}」这类多来点。",
                 bvid,
             )
+            mark_current_delight_consumed()
             return JSONResponse(content={"ok": True, "action": "liked", "bvid": bvid})
 
         if response_type == "dislike":
             try:
                 ctx.database._execute_write(
-                    "UPDATE content_cache SET pool_status = 'purged_by_dislike' "
-                    "WHERE bvid = ? AND COALESCE(pool_status, 'fresh') = 'fresh'",
+                    "UPDATE content_cache SET pool_status = 'purged_by_dislike', "
+                    "feedback_type = 'dislike', feedback_at = CURRENT_TIMESTAMP "
+                    "WHERE bvid = ?",
                     (bvid,),
                 )
             except Exception:
@@ -2193,6 +2202,7 @@ def create_app(
                 f"好，「{label}」这类先不推了。",
                 bvid,
             )
+            mark_current_delight_consumed()
             return JSONResponse(content={"ok": True, "action": "disliked", "bvid": bvid})
 
         # Chat
@@ -2240,6 +2250,7 @@ def create_app(
             detail=f"你的反馈：{raw_message}\n阿b的回复：{reply}",
         )
         await _publish_probe_event("delight.chat", f"关于「{label}」你说：{raw_message}", bvid)
+        mark_current_delight_consumed()
         return JSONResponse(content={"ok": True, "action": "chat", "bvid": bvid, "reply": reply})
 
     @app.post("/api/notifications/sent", response_model=NotificationAckResponse)
