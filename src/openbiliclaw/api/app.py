@@ -427,8 +427,22 @@ def _image_cache_dir() -> Path:
     return d
 
 
+def _normalize_cache_url(url: str) -> str:
+    """Normalize URLs with expiring tokens so the same image always maps to the same cache key.
+
+    XHS CDN URLs: ``https://sns-webpic-qc.xhscdn.com/{timestamp}/{token}/{path}``
+    — the ``{timestamp}/{token}`` changes on every regeneration but ``{path}`` is stable.
+    """
+    import re
+
+    m = re.match(r"(https?://[^/]*xhscdn\.com)/\d{12}/[0-9a-f]+/(.*)", url)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+    return url
+
+
 def _image_cache_key(url: str) -> str:
-    return hashlib.sha256(url.encode()).hexdigest()
+    return hashlib.sha256(_normalize_cache_url(url).encode()).hexdigest()
 
 
 def _image_cache_lookup(url: str) -> tuple[Path, str] | None:
