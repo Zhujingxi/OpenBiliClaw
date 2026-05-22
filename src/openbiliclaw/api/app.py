@@ -4565,4 +4565,15 @@ def create_app(
 
         app.mount("/m", _StaticFiles(directory=_web_dir, html=True), name="mobile-web")
 
+    # ── Desktop Web UI ───────────────────────────────────────────
+    _desktop_dir = _Path(__file__).resolve().parent.parent / "web" / "desktop"
+    if _desktop_dir.is_dir():
+        app.mount("/web", _StaticFiles(directory=_desktop_dir, html=True), name="desktop-web")
+
+        @app.get("/", include_in_schema=False)
+        def _root_redirect():
+            from fastapi.responses import RedirectResponse as _Redirect
+
+            return _Redirect(url="/web", status_code=302)
+
     return app
