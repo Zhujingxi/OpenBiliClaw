@@ -1600,7 +1600,7 @@
       setInput("logUnmanagedTruncate", config.logging?.unmanaged_truncate_mb);
       setInput("logUnmanagedMaxAge", config.logging?.unmanaged_max_age_days);
 
-      if ($("#configStatus")) $("#configStatus").value = "配置已从后端加载。候选池来源字段已按原 sidebar 的 pool_source_shares 显示为占比/权重。";
+      if ($("#configStatus")) $("#configStatus").value = "配置已从后端加载。";
       if (state.runtimeStatus) applyRuntimeStatus(state.runtimeStatus);
     }
 
