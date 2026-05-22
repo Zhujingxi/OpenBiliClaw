@@ -321,30 +321,8 @@ function renderOverlay() {
     panel.appendChild(card);
   }
 
-  // Delight notifications
-  for (const d of delightMsgs) {
-    const nd = normalizeDelightCandidate(d);
-    const cover = getCoverImageAttrs(nd.cover_url);
-    const card = document.createElement("div");
-    card.className = "message-card";
-    card.innerHTML = `
-      <div class="message-card-type"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>惊喜推荐</div>
-      ${cover ? `<div class="message-cover-frame"><img src="${esc(cover.src)}" alt="" loading="lazy" onerror="this.parentElement.classList.add('is-error');this.remove()"></div>` : `<div class="message-cover-frame is-error"></div>`}
-      <div class="message-card-title">${esc(nd.title)}</div>
-      <div class="message-card-body">${esc(nd.delight_hook || nd.delight_reason)}</div>
-      <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
-        <span class="card-source" data-source="${nd.source_platform}">${esc(getSourceLabel(nd.source_platform))}</span>
-      </div>
-      <div class="message-card-actions">
-        ${getDelightMessageActions().map((item) => `
-          <button class="message-action-btn ${item.primary ? "primary" : "secondary"}" data-delight="${esc(item.action)}" data-bvid="${esc(nd.bvid)}" data-title="${esc(nd.title)}">${esc(item.label)}</button>
-        `).join("")}
-      </div>`;
-    panel.appendChild(card);
-  }
-
-  if (notifications.length === 0 && delightMsgs.length === 0) {
-    panel.innerHTML += `<div style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:48px 24px;color:var(--text-muted)"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.4"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg><span style="font-size:14px">暂时没有新消息</span><span style="font-size:12px;opacity:0.7">兴趣探测和惊喜推荐会在这里出现</span></div>`;
+  if (notifications.length === 0) {
+    panel.innerHTML += `<div style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:48px 24px;color:var(--text-muted)"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.4"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg><span style="font-size:14px">暂时没有新消息</span><span style="font-size:12px;opacity:0.7">兴趣探测会在这里出现</span></div>`;
   }
 
   overlay.innerHTML = "";
@@ -409,9 +387,9 @@ function renderOverlay() {
 }
 
 function updateBadgeCount() {
-  const msgs = { notifications: [...notifications], delights: [...delightMsgs] };
+  const msgs = { notifications: [...notifications], delights: [] };
   patchState({ messages: msgs });
-  setUnreadCount(notifications.length + delightMsgs.length);
+  setUnreadCount(notifications.length);
 }
 
 // ── Load ─────────────────────────────────────────────────────
@@ -496,20 +474,13 @@ export function onStreamEvent(payload) {
       notifications.push(item);
       updateBadgeCount();
     }
-  } else if (type === "delight.candidate") {
-    const item = payload.data || payload;
-    if (item.title && item.bvid) {
-      delightMsgs.push(item);
-      updateBadgeCount();
-    }
   } else if (type === "delight.liked" || type === "delight.disliked") {
-    // Another client dismissed this delight — remove from messages overlay
+    // Delight dismissed by another client — no longer shown in messages
     const bvid = (payload.data || payload)?.bvid;
     if (bvid) {
       const before = delightMsgs.length;
       delightMsgs = delightMsgs.filter((d) => d.bvid !== bvid);
       if (delightMsgs.length !== before) {
-        updateBadgeCount();
         if (overlayOpen) renderOverlay();
       }
     }

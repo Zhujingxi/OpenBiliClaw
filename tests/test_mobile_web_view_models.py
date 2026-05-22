@@ -131,12 +131,9 @@ class TestMobileWebViewModels:
         assert '? `<img class="card-cover"' not in recommend_js
         assert 'onerror="this.remove()"' not in recommend_js
         assert "card-cover-frame" in recommend_js
-        assert "message-cover-frame" in chat_js
         assert "card-cover-frame" in app_css
         assert ".card-cover-frame.is-error" in app_css
-        assert ".message-cover-frame.is-error" in app_css
         assert ".card-cover::after" not in app_css
-        assert ".message-cover-frame img" in app_css
 
     def test_recommendation_cover_preload_helpers(self) -> None:
         _assert_js(

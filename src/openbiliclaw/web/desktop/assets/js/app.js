@@ -1035,19 +1035,19 @@
       if (state.messageListSnapshot && isMessagesDrawerOpen()) state.messageListSnapshot = messages;
       else state.messages = messages;
       syncMessageCount();
-      if (!messages.length) {
-        list.innerHTML = `<div class="empty-state">暂无待处理消息。兴趣确认、惊喜推荐和通知都会出现在这里。</div>`;
+      const filtered = messages.filter((m) => messageType(m) !== "delight");
+      if (!filtered.length) {
+        list.innerHTML = `<div class="empty-state">暂无待处理消息。兴趣确认和通知会出现在这里。</div>`;
         return;
       }
-      list.replaceChildren(...messages.map((msg) => {
+      list.replaceChildren(...filtered.map((msg) => {
         const el = document.createElement("article");
         const key = messageKey(msg);
         const resolvedResult = state.resolvedMessageResults.get(key);
         el.className = "message-item";
         el.dataset.messageKey = key;
         if (messageType(msg) === "delight") {
-          el.innerHTML = `<p class="eyebrow">惊喜推荐</p><h3>${escapeHtml(msg.title)}</h3><p class="video-meta">${escapeHtml(msg.reason || msg.delight_reason || "")}</p>${msg.chat_reply ? `<div class="message-note">${escapeHtml(msg.chat_reply)}</div>` : ""}<div class="message-card-actions"><div class="card-feedback-icons" aria-label="反馈这条惊喜推荐"><button class="feedback-icon-btn" data-delight-msg="like" type="button" aria-label="喜欢" title="喜欢"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg></button><span class="feedback-separator" aria-hidden="true">/</span><button class="feedback-icon-btn" data-delight-msg="dislike" type="button" aria-label="不感兴趣" title="不感兴趣"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg></button><span class="feedback-separator" aria-hidden="true">/</span><button class="feedback-icon-btn" data-delight-msg="dismiss" type="button" aria-label="忽略" title="忽略"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3l18 18M9.84 9.91A3 3 0 0 0 12 15c.82 0 1.57-.33 2.11-.87M6.5 6.65A10.45 10.45 0 0 0 2.46 12C3.73 16.06 7.52 19 12 19c1.99 0 3.84-.58 5.4-1.58M11 5.05c.33-.03.66-.05 1-.05 4.48 0 8.27 2.94 9.54 7a10.5 10.5 0 0 1-1.19 2.5"/></svg></button></div><div class="message-primary-actions"><button class="small-btn secondary" data-delight-msg="chat">聊一聊</button><button class="small-btn" data-delight-msg="view">看看</button></div></div>`;
-          el.querySelectorAll("[data-delight-msg]").forEach((btn) => btn.addEventListener("click", () => respondDelight(msg, btn.dataset.delightMsg, el)));
+          return null; // delights shown in delight tray, not messages
         } else if (messageType(msg) === "notification") {
           el.innerHTML = `<p class="eyebrow">待通知候选</p><h3>${escapeHtml(msg.title)}</h3><p class="video-meta">${escapeHtml(msg.reason)}</p><div class="message-note">这类消息来自后端挑出的高置信推荐，用于插件通知；标记已通知后不会反复出现。</div><div class="message-card-actions"><div class="card-feedback-icons" aria-label="通知候选状态"><button class="feedback-icon-btn" data-notification-msg="dismiss" type="button" aria-label="标记已通知" title="标记已通知"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></button></div><div class="message-primary-actions"><button class="small-btn" data-notification-msg="view">去看看</button></div></div>`;
           el.querySelectorAll("[data-notification-msg]").forEach((btn) => btn.addEventListener("click", () => respondNotification(msg, btn.dataset.notificationMsg, el)));
@@ -1542,6 +1542,7 @@
       const llm = config.llm || {};
       const provider = llm.default_provider || llm.provider;
       setSelect("llmProvider", provider);
+      setInput("llmConcurrency", llm.concurrency ?? 3);
       setSelect("llmAuthMode", llm.openai?.auth_mode || "api_key");
       if (provider) {
         setInput("llmModel", llm[provider]?.model);
@@ -1798,6 +1799,7 @@
       const llm = {
         ...(state.config?.llm || {}),
         default_provider: provider,
+        concurrency: getIntInput("llmConcurrency", 3),
         [provider]: { ...(state.config?.llm?.[provider] || {}), ...llmProviderConfig },
         embedding: { ...(state.config?.llm?.embedding || {}), ...embedding },
         soul: { ...(state.config?.llm?.soul || {}), provider: getInput("moduleSoulProvider"), model: getInput("moduleSoulModel") },

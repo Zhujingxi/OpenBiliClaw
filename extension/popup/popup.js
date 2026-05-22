@@ -556,13 +556,7 @@ function connectRuntimeStream() {
         }
         renderProbeCard();
       }
-      // Delight candidate: add to messages inbox
-      if (event.type === "delight.candidate" && event.bvid) {
-        if (!state.messages.some((m) => m.type === "delight" && m.bvid === event.bvid)) {
-          state.messages.push({ ...event, type: "delight" });
-          updateMessageBadge();
-        }
-      }
+      // Delight candidates are shown in the delight tray, not in messages.
       // Delight refreshed: backend computed N new above-threshold delights
       // — re-fetch the full queue (no per-item chrome notification, no
       // banner pop). Just keeps popup in sync with backend without forcing
@@ -1229,11 +1223,8 @@ function renderMessagesList() {
 
   for (const msg of state.messages) {
     const type = msg.type || "interest.probe";
-    if (type === "delight") {
-      container.append(buildDelightCard(msg));
-    } else {
-      container.append(buildMessageCard(msg));
-    }
+    if (type === "delight") continue; // delights shown in delight tray, not messages
+    container.append(buildMessageCard(msg));
   }
 }
 
@@ -3805,9 +3796,7 @@ async function initializeRecommendations() {
     clearDelightQueue();
     for (const item of delightResult.value) {
       pushDelightCandidate(item);
-      if (!state.messages.some((m) => m.type === "delight" && m.bvid === item.bvid)) {
-        state.messages.push({ ...item, type: "delight" });
-      }
+      // Delights no longer added to messages — shown in delight tray only.
     }
     // Restore local-only delight state (chat_reply, draft, composer, etc.)
     // that survives a Chrome side-panel reload.
@@ -4337,6 +4326,7 @@ function bindSettings() {
     // LLM
     providerSelect.value = cfg.llm?.default_provider || "openai";
     showProviderFields(providerSelect.value);
+    setVal("cfgLlmConcurrency", cfg.llm?.concurrency ?? 3);
     setVal("cfgLlmFallbackProvider", cfg.llm?.fallback_provider);
 
     setVal("cfgOpenaiAuthMode", cfg.llm?.openai?.auth_mode || "api_key");
@@ -4481,6 +4471,7 @@ function bindSettings() {
       data_dir: getVal("cfgDataDir"),
       llm: {
         default_provider: providerSelect.value,
+        concurrency: getInt("cfgLlmConcurrency", 3),
         fallback_enabled: Boolean(llmFallbackProvider),
         fallback_provider: llmFallbackProvider,
         openai: {
