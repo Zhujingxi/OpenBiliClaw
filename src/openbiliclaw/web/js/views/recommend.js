@@ -47,7 +47,8 @@ let loaded = false;
 let loading = false;
 let feedbackSheet = null; // { itemId, note, submitState }
 const feedbackDone = new Map(); // recId -> "like" | "dislike" | "comment"
-const COVER_PRELOAD_BATCH_SIZE = 8;
+const COVER_PRELOAD_BATCH_SIZE = 12;
+const COVER_PRELOAD_WAIT_TIMEOUT_MS = 1200;
 const AUTO_APPEND_ROOT_MARGIN = "700px 0px 900px 0px";
 const warmedCoverUrls = new Set();
 const warmingImages = new Map();
@@ -120,7 +121,7 @@ function render() {
 
   // Feedback bottom sheet
   renderFeedbackSheet();
-  warmRecommendationCovers(recs);
+  void warmRecommendationCovers(recs);
   observeAutoAppendSentinel();
 }
 
@@ -585,25 +586,43 @@ function renderLoadMoreRow() {
   $root.appendChild(actions);
 }
 
-function warmRecommendationCovers(items, { start = 0, limit = COVER_PRELOAD_BATCH_SIZE } = {}) {
-  if (typeof Image === "undefined") return;
+function waitForCoverPreload(promises, timeoutMs) {
+  if (promises.length === 0) return Promise.resolve();
+  return Promise.race([
+    Promise.all(promises),
+    new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
+}
+
+function warmRecommendationCovers(
+  items,
+  { start = 0, limit = COVER_PRELOAD_BATCH_SIZE, waitForDecode = false } = {},
+) {
+  if (typeof Image === "undefined") return Promise.resolve();
   const urls = getRecommendationCoverPreloadUrls(items, { start, limit });
+  const pending = [];
   for (const src of urls) {
     if (warmedCoverUrls.has(src)) continue;
     warmedCoverUrls.add(src);
 
     const img = new Image();
     const cleanup = () => warmingImages.delete(src);
+    const loaded = new Promise((resolve) => {
+      img.onload = () => { cleanup(); resolve(); };
+      img.onerror = () => { cleanup(); resolve(); };
+    });
     img.decoding = "async";
     img.loading = "eager";
-    img.onload = cleanup;
-    img.onerror = cleanup;
     warmingImages.set(src, img);
     img.src = src;
+    let ready = loaded;
     if (typeof img.decode === "function") {
-      img.decode().then(cleanup).catch(cleanup);
+      ready = img.decode().then(cleanup).catch(cleanup);
     }
+    if (waitForDecode) pending.push(ready);
   }
+  if (!waitForDecode) return Promise.resolve();
+  return waitForCoverPreload(pending, COVER_PRELOAD_WAIT_TIMEOUT_MS);
 }
 
 function disconnectAutoAppendObserver() {
@@ -640,7 +659,7 @@ function renderCard(rawItem, index = 0) {
   const imageAttrs = getRecommendationImageLoadingAttrs(index);
 
   const coverHtml = cover
-    ? `<div class="card-cover-frame"><img class="card-cover" src="${esc(cover.src)}" alt="" loading="${esc(imageAttrs.loading)}" fetchpriority="${esc(imageAttrs.fetchPriority)}" decoding="async" onerror="this.parentElement.classList.add('is-error');this.remove()"></div>`
+    ? `<div class="card-cover-frame"><img class="card-cover" onload="(this.decode ? this.decode() : Promise.resolve()).then(() => this.classList.add('is-loaded')).catch(() => this.classList.add('is-loaded'))" src="${esc(cover.src)}" alt="" loading="${esc(imageAttrs.loading)}" fetchpriority="${esc(imageAttrs.fetchPriority)}" decoding="async" onerror="this.parentElement.classList.add('is-error');this.remove()"></div>`
     : `<div class="card-cover-frame is-error"></div>`;
 
   card.innerHTML = `
@@ -830,6 +849,7 @@ async function handleAppend() {
     const result = await appendRecommendations(existing);
     const newItems = (result.items || []).map(normalizeRecommendation);
     autoAppendExhausted = newItems.length === 0;
+    await warmRecommendationCovers(newItems, { waitForDecode: true });
     patchState({ recommendations: [...state.recommendations, ...newItems] });
 
     // Append new cards before the load-more row without rebuilding existing ones.
@@ -838,7 +858,6 @@ async function handleAppend() {
         $root.insertBefore(renderCard(item, startIndex + offset), loadMoreRow);
       }
     }
-    warmRecommendationCovers(newItems);
   } catch {
     autoAppendExhausted = true;
   }

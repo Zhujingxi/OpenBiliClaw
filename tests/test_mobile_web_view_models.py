@@ -132,6 +132,11 @@ class TestMobileWebViewModels:
         assert 'onerror="this.remove()"' not in recommend_js
         assert "card-cover-frame" in recommend_js
         assert "message-cover-frame" in chat_js
+        assert "linear-gradient(135deg, rgba(251, 114, 153, 0.14)" in app_css
+        assert "this.decode" in recommend_js
+        assert "this.classList.add('is-loaded')" in recommend_js
+        assert ".card-cover.is-loaded" in app_css
+        assert "opacity: 0" in app_css
         assert ".card-cover-frame.is-error" in app_css
         assert ".message-cover-frame.is-error" in app_css
         assert ".card-cover::after" not in app_css
@@ -145,6 +150,11 @@ class TestMobileWebViewModels:
               getRecommendationCoverPreloadUrls,
               getRecommendationImageLoadingAttrs,
             } from "./src/openbiliclaw/web/js/view-models.js";
+
+            const tenItems = Array.from({ length: 10 }, (_, index) => ({
+              cover_url: `https://i${index}.hdslb.com/bfs/archive/${index}.jpg`,
+            }));
+            assert.equal(getRecommendationCoverPreloadUrls(tenItems).length, 10);
 
             const urls = getRecommendationCoverPreloadUrls([
               { cover_url: "http://i0.hdslb.com/bfs/archive/a.jpg" },
@@ -171,6 +181,14 @@ class TestMobileWebViewModels:
             );
             assert.deepEqual(
               getRecommendationImageLoadingAttrs(2),
+              { loading: "eager", fetchPriority: "auto" },
+            );
+            assert.deepEqual(
+              getRecommendationImageLoadingAttrs(11),
+              { loading: "eager", fetchPriority: "auto" },
+            );
+            assert.deepEqual(
+              getRecommendationImageLoadingAttrs(12),
               { loading: "lazy", fetchPriority: "auto" },
             );
         """)
@@ -184,6 +202,8 @@ class TestMobileWebViewModels:
         assert "function warmRecommendationCovers" in recommend_js
         assert "new Image()" in recommend_js
         assert ".decode()" in recommend_js
+        assert "waitForDecode" in recommend_js
+        assert "await warmRecommendationCovers(newItems, { waitForDecode: true })" in recommend_js
         assert 'loading="${esc(imageAttrs.loading)}"' in recommend_js
         assert 'fetchpriority="${esc(imageAttrs.fetchPriority)}"' in recommend_js
         assert "AUTO_APPEND_ROOT_MARGIN" in recommend_js

@@ -186,7 +186,9 @@ body {
 .card-cover-frame {
   width: 100%;
   aspect-ratio: 16 / 9;
-  background: var(--surface-soft);
+  background:
+    linear-gradient(135deg, rgba(251, 114, 153, 0.14), rgba(90, 169, 255, 0.16)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(242, 248, 255, 0.88));
   overflow: hidden;
   display: block;
 }
@@ -196,9 +198,13 @@ body {
   height: 100%;
   object-fit: cover;
   display: block;
-  background:
-    linear-gradient(135deg, rgba(251, 114, 153, 0.08), rgba(90, 169, 255, 0.08)),
-    var(--surface-soft);
+  background: transparent;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+
+.card-cover.is-loaded {
+  opacity: 1;
 }
 
 .card-cover-frame.is-error,
