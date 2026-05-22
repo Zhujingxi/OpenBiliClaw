@@ -517,15 +517,9 @@ def test_start_uses_lan_accessible_api_defaults(
     called: dict[str, object] = {}
     backup_calls: list[str] = []
 
-    def fake_run_api_server(
-        *,
-        host: str = "127.0.0.1",
-        port: int = 8420,
-        serve_webui: bool = False,
-    ) -> None:
+    def fake_run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
         called["host"] = host
         called["port"] = port
-        called["serve_webui"] = serve_webui
 
     monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
     monkeypatch.setattr(
@@ -543,7 +537,7 @@ def test_start_uses_lan_accessible_api_defaults(
     assert "启动 OpenBiliClaw" in result.stdout
     assert "API 服务" in result.stdout
     assert backup_calls == ["called"]
-    assert called == {"host": "0.0.0.0", "port": 8420, "serve_webui": True}
+    assert called == {"host": "0.0.0.0", "port": 8420}
 
 
 def test_start_uses_configured_api_host_and_port(
@@ -554,15 +548,9 @@ def test_start_uses_configured_api_host_and_port(
     cfg.api.host = "127.0.0.1"
     cfg.api.port = 19090
 
-    def fake_run_api_server(
-        *,
-        host: str = "127.0.0.1",
-        port: int = 8420,
-        serve_webui: bool = False,
-    ) -> None:
+    def fake_run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
         called["host"] = host
         called["port"] = port
-        called["serve_webui"] = serve_webui
 
     monkeypatch.setattr(config_module, "load_config", lambda: cfg, raising=False)
     monkeypatch.setattr(cli_module, "_ensure_runtime_database_healthy", lambda: None)
@@ -573,7 +561,7 @@ def test_start_uses_configured_api_host_and_port(
     result = runner.invoke(app, ["start"])
 
     assert result.exit_code == 0
-    assert called == {"host": "127.0.0.1", "port": 19090, "serve_webui": True}
+    assert called == {"host": "127.0.0.1", "port": 19090}
     assert "127.0.0.1:19090" in result.stdout
 
 
@@ -584,15 +572,9 @@ def test_start_warns_when_pause_on_disconnect_requires_extension_presence(
     cfg = config_module.Config()
     cfg.scheduler.pause_on_extension_disconnect = True
 
-    def fake_run_api_server(
-        *,
-        host: str = "127.0.0.1",
-        port: int = 8420,
-        serve_webui: bool = False,
-    ) -> None:
+    def fake_run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
         called["host"] = host
         called["port"] = port
-        called["serve_webui"] = serve_webui
 
     monkeypatch.setattr(config_module, "load_config", lambda: cfg, raising=False)
     monkeypatch.setattr(cli_module, "_ensure_runtime_database_healthy", lambda: None)
@@ -605,7 +587,7 @@ def test_start_warns_when_pause_on_disconnect_requires_extension_presence(
     assert result.exit_code == 0
     assert "WARN extension presence required" in result.stdout
     assert "background LLM work after grace period" in result.stdout
-    assert called == {"host": "0.0.0.0", "port": 8420, "serve_webui": True}
+    assert called == {"host": "0.0.0.0", "port": 8420}
 
 
 def test_run_api_server_prints_degraded_mode_panel(
@@ -635,7 +617,7 @@ def test_run_api_server_prints_degraded_mode_panel(
         Console(file=output, force_terminal=False, width=120),
         raising=False,
     )
-    monkeypatch.setattr(api_app, "create_app", lambda **_: fake_app)
+    monkeypatch.setattr(api_app, "create_app", lambda: fake_app)
     monkeypatch.setattr(
         "uvicorn.run",
         lambda app, **kwargs: run_calls.append({"app": app, **kwargs}),
@@ -657,12 +639,7 @@ def test_start_refuses_unhealthy_database(
     server_calls: list[str] = []
     backup_calls: list[str] = []
 
-    def fake_run_api_server(
-        *,
-        host: str = "127.0.0.1",
-        port: int = 8420,
-        serve_webui: bool = False,
-    ) -> None:
+    def fake_run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
         server_calls.append(f"{host}:{port}")
 
     def fake_ensure_runtime_database_healthy() -> None:
@@ -787,10 +764,12 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
             registry: object,
             memory: object,
             module_overrides: object | None = None,
+            concurrency: int = 1,
         ) -> None:
             self.registry = registry
             self.memory = memory
             self.module_overrides = module_overrides
+            self.concurrency = concurrency
 
     class FakeRecommendationEngine:
         def __init__(
@@ -827,6 +806,7 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
     fake_config = SimpleNamespace(
         data_path=Path("/tmp/openbiliclaw-test-data"),
         bilibili=SimpleNamespace(cookie=""),
+        llm=SimpleNamespace(concurrency=3),
     )
 
     monkeypatch.setattr(cli_module, "_RUNTIME_COMPONENTS", {}, raising=False)
@@ -860,15 +840,9 @@ def test_start_accepts_explicit_host_and_port(
 ) -> None:
     called: dict[str, object] = {}
 
-    def fake_run_api_server(
-        *,
-        host: str = "127.0.0.1",
-        port: int = 8420,
-        serve_webui: bool = False,
-    ) -> None:
+    def fake_run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
         called["host"] = host
         called["port"] = port
-        called["serve_webui"] = serve_webui
 
     monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
     monkeypatch.setattr(cli_module, "_run_api_server", fake_run_api_server, raising=False)
@@ -877,7 +851,7 @@ def test_start_accepts_explicit_host_and_port(
     result = runner.invoke(app, ["start", "--host", "0.0.0.0", "--port", "9000"])
 
     assert result.exit_code == 0
-    assert called == {"host": "0.0.0.0", "port": 9000, "serve_webui": True}
+    assert called == {"host": "0.0.0.0", "port": 9000}
     assert "0.0.0.0:9000" in result.stdout
 
 
@@ -886,15 +860,9 @@ def test_serve_api_uses_container_defaults(
 ) -> None:
     called: dict[str, object] = {}
 
-    def fake_run_api_server(
-        *,
-        host: str = "127.0.0.1",
-        port: int = 8420,
-        serve_webui: bool = False,
-    ) -> None:
+    def fake_run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
         called["host"] = host
         called["port"] = port
-        called["serve_webui"] = serve_webui
 
     monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
     monkeypatch.setattr(cli_module, "_run_api_server", fake_run_api_server, raising=False)
@@ -905,33 +873,7 @@ def test_serve_api_uses_container_defaults(
     assert result.exit_code == 0
     assert "容器 API 服务" in result.stdout
     assert "0.0.0.0:8420" in result.stdout
-    assert called == {"host": "0.0.0.0", "port": 8420, "serve_webui": False}
-
-
-def test_serve_api_with_web_enables_webui(
-    monkeypatch: pytest.MonkeyPatch, runner: CliRunner
-) -> None:
-    called: dict[str, object] = {}
-
-    def fake_run_api_server(
-        *,
-        host: str = "127.0.0.1",
-        port: int = 8420,
-        serve_webui: bool = False,
-    ) -> None:
-        called["host"] = host
-        called["port"] = port
-        called["serve_webui"] = serve_webui
-
-    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
-    monkeypatch.setattr(cli_module, "_run_api_server", fake_run_api_server, raising=False)
-    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
-
-    result = runner.invoke(app, ["serve-api", "--with-web"])
-
-    assert result.exit_code == 0
-    assert "Web UI 同端口可用" in result.stdout
-    assert called == {"host": "0.0.0.0", "port": 8420, "serve_webui": True}
+    assert called == {"host": "0.0.0.0", "port": 8420}
 
 
 def test_serve_api_warns_when_pause_on_disconnect_requires_extension_presence(
@@ -941,15 +883,9 @@ def test_serve_api_warns_when_pause_on_disconnect_requires_extension_presence(
     cfg = config_module.Config()
     cfg.scheduler.pause_on_extension_disconnect = True
 
-    def fake_run_api_server(
-        *,
-        host: str = "127.0.0.1",
-        port: int = 8420,
-        serve_webui: bool = False,
-    ) -> None:
+    def fake_run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
         called["host"] = host
         called["port"] = port
-        called["serve_webui"] = serve_webui
 
     monkeypatch.setattr(config_module, "load_config", lambda: cfg, raising=False)
     monkeypatch.setattr(cli_module, "_run_api_server", fake_run_api_server, raising=False)
@@ -960,7 +896,7 @@ def test_serve_api_warns_when_pause_on_disconnect_requires_extension_presence(
     assert result.exit_code == 0
     assert "WARN extension presence required" in result.stdout
     assert "background LLM work after grace period" in result.stdout
-    assert called == {"host": "0.0.0.0", "port": 8420, "serve_webui": False}
+    assert called == {"host": "0.0.0.0", "port": 8420}
 
 
 def test_discover_prints_init_guidance_when_profile_missing(
@@ -2432,7 +2368,7 @@ def test_init_runs_history_preference_profile_and_discovery(
     assert fake_discovery.calls
 
 
-def test_init_caps_bilibili_favorites_and_following_at_300(
+def test_init_caps_bilibili_favorites_at_300_and_following_at_100(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
 ) -> None:
     class FakeBilibiliClient:
@@ -2532,12 +2468,12 @@ def test_init_caps_bilibili_favorites_and_following_at_300(
     assert fake_soul.analyzed_events
     analyzed = fake_soul.analyzed_events[0]
     assert len([event for event in analyzed if event["event_type"] == "favorite"]) == 300
-    assert len([event for event in analyzed if event["event_type"] == "follow"]) == 300
-    assert len(fake_memory.events) == 601
+    assert len([event for event in analyzed if event["event_type"] == "follow"]) == 100
+    assert len(fake_memory.events) == 401
     built_history = fake_soul.built_history[0]
     assert len(built_history) == 3
     assert str(built_history[1]["_favorites_summary"]).startswith("共 300 个收藏")
-    assert str(built_history[2]["_following_summary"]).startswith("共关注 300 人")
+    assert str(built_history[2]["_following_summary"]).startswith("共关注 100 人")
 
 
 def test_init_accepts_custom_bilibili_favorites_and_following_limits(
@@ -3135,6 +3071,34 @@ def test_enqueue_xhs_bootstrap_task_uses_env_overrides(
     assert captured["payload"]["max_scroll_rounds"] == 5
     assert captured["payload"]["max_items_per_scope"] == 100
     assert captured["payload"]["scopes"] == ["saved", "liked", "xhs_history"]
+
+
+def test_enqueue_xhs_bootstrap_task_defaults_to_300_items_per_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.cli import _enqueue_xhs_bootstrap_task
+
+    captured: dict = {}
+
+    class FakeQueue:
+        def __init__(self, _db):
+            pass
+
+        def enqueue_with_id(self, task_type, payload, *, daily_budget):
+            captured["task_type"] = task_type
+            captured["payload"] = payload
+            captured["daily_budget"] = daily_budget
+            return "task-default"
+
+    class FakeDatabase:
+        conn = object()
+
+    monkeypatch.delenv("OPENBILICLAW_XHS_BOOTSTRAP_MAX_ITEMS", raising=False)
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: FakeDatabase())
+    monkeypatch.setattr("openbiliclaw.sources.xhs_tasks.XhsTaskQueue", FakeQueue)
+
+    assert _enqueue_xhs_bootstrap_task(force=True) == "task-default"
+    assert captured["payload"]["max_items_per_scope"] == 300
 
 
 def test_enqueue_xhs_bootstrap_task_reuses_recent_task_by_default(
@@ -4158,6 +4122,34 @@ def test_enqueue_dy_bootstrap_task_uses_env_overrides(
     ]
 
 
+def test_enqueue_dy_bootstrap_task_defaults_to_300_items_per_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.cli import _enqueue_dy_bootstrap_task
+
+    captured: dict = {}
+
+    class FakeQueue:
+        def __init__(self, _db: object) -> None:
+            pass
+
+        def enqueue_with_id(self, task_type: str, payload: dict, *, daily_budget: int) -> str:
+            captured["task_type"] = task_type
+            captured["payload"] = payload
+            captured["daily_budget"] = daily_budget
+            return "dy-task-default"
+
+    class FakeDatabase:
+        conn = object()
+
+    monkeypatch.delenv("OPENBILICLAW_DY_BOOTSTRAP_MAX_ITEMS", raising=False)
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: FakeDatabase())
+    monkeypatch.setattr("openbiliclaw.sources.dy_tasks.DyTaskQueue", FakeQueue)
+
+    assert _enqueue_dy_bootstrap_task() == "dy-task-default"
+    assert captured["payload"]["max_items_per_scope"] == 300
+
+
 def test_enqueue_dy_bootstrap_task_reuses_recent_task_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4220,6 +4212,34 @@ def test_enqueue_yt_bootstrap_task_reuses_recent_task_by_default(
     monkeypatch.setattr("openbiliclaw.sources.yt_tasks.YtTaskQueue", FakeQueue)
 
     assert _enqueue_yt_bootstrap_task() == "recent-yt-task-id"
+
+
+def test_enqueue_yt_bootstrap_task_defaults_to_300_items_per_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.cli import _enqueue_yt_bootstrap_task
+
+    captured: dict = {}
+
+    class FakeQueue:
+        def __init__(self, _db: object) -> None:
+            pass
+
+        def enqueue_with_id(self, task_type: str, payload: dict, *, daily_budget: int) -> str:
+            captured["task_type"] = task_type
+            captured["payload"] = payload
+            captured["daily_budget"] = daily_budget
+            return "yt-task-default"
+
+    class FakeDatabase:
+        conn = object()
+
+    monkeypatch.delenv("OPENBILICLAW_YT_BOOTSTRAP_MAX_ITEMS", raising=False)
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: FakeDatabase())
+    monkeypatch.setattr("openbiliclaw.sources.yt_tasks.YtTaskQueue", FakeQueue)
+
+    assert _enqueue_yt_bootstrap_task() == "yt-task-default"
+    assert captured["payload"]["max_items_per_scope"] == 300
 
 
 def test_collect_dy_bootstrap_events_returns_skipped_for_no_task_id() -> None:

@@ -32,23 +32,23 @@ These API facts are fixed inputs for implementation:
 ## Files Touched
 
 ### New
-- `src/openbiliclaw/web/m/js/state.js` — shared mobile UI state, `patchState()`, subscriptions, and cross-view context fields
+- `src/openbiliclaw/web/js/state.js` — shared mobile UI state, `patchState()`, subscriptions, and cross-view context fields
 
 ### Modified
-- `src/openbiliclaw/web/m/js/view-models.js` — grow from the current small helper set into the full mobile normalization layer
+- `src/openbiliclaw/web/js/view-models.js` — grow from the current small helper set into the full mobile normalization layer
 - `tests/test_mobile_web_view_models.py` — extend the existing pytest Node wrapper with direct mobile helper coverage
-- `src/openbiliclaw/web/m/css/app.css` — significant additions (activity strip, feedback sheet, delight tray, placeholder carousel, bottom sheet, degraded banner, `prefers-reduced-motion`)
-- `src/openbiliclaw/web/m/js/app.js` — shell render, status text next to dot, degraded detection, stream event routing, `navigateToTab()`
-- `src/openbiliclaw/web/m/js/api.js` — add `fetchHealth()`, `submitFeedback()`, `markDelightSent()`, `refreshRecommendations()`; keep existing `fetchActivityFeed()`
-- `src/openbiliclaw/web/m/js/views/recommend.js` — major rewrite (activity strip, pool semantic summary, delight tray with actions, card feedback, feedback bottom sheet)
-- `src/openbiliclaw/web/m/js/views/profile.js` — moderate rewrite (full normalizeProfileSummary, empty/uninit state, favorite UP, style/context sections, cognition card expand)
-- `src/openbiliclaw/web/m/js/views/chat.js` — moderate rewrite; Phase 1 adds the contextual-chat entry contract, Phase 3/5 polish messages/chat UI
-- `src/openbiliclaw/web/m/index.html` — no changes expected (shell is correct)
-- `src/openbiliclaw/web/m/manifest.json` — no changes expected
+- `src/openbiliclaw/web/css/app.css` — significant additions (activity strip, feedback sheet, delight tray, placeholder carousel, bottom sheet, degraded banner, `prefers-reduced-motion`)
+- `src/openbiliclaw/web/js/app.js` — shell render, status text next to dot, degraded detection, stream event routing, `navigateToTab()`
+- `src/openbiliclaw/web/js/api.js` — add `fetchHealth()`, `submitFeedback()`, `markDelightSent()`, `refreshRecommendations()`; keep existing `fetchActivityFeed()`
+- `src/openbiliclaw/web/js/views/recommend.js` — major rewrite (activity strip, pool semantic summary, delight tray with actions, card feedback, feedback bottom sheet)
+- `src/openbiliclaw/web/js/views/profile.js` — moderate rewrite (full normalizeProfileSummary, empty/uninit state, favorite UP, style/context sections, cognition card expand)
+- `src/openbiliclaw/web/js/views/chat.js` — moderate rewrite; Phase 1 adds the contextual-chat entry contract, Phase 3/5 polish messages/chat UI
+- `src/openbiliclaw/web/index.html` — no changes expected (shell is correct)
+- `src/openbiliclaw/web/manifest.json` — no changes expected
 
 ### Not Modified
 - `src/openbiliclaw/api/app.py` — already has StaticFiles mount + degraded guard passthrough; all needed API endpoints exist
-- `src/openbiliclaw/web/m/js/stream.js` — no changes expected
+- `src/openbiliclaw/web/js/stream.js` — no changes expected
 - `extension/` — no changes; mobile ports logic into its own `view-models.js`
 
 ---
@@ -113,7 +113,7 @@ getDelightActionState("later")
 
 ### 1.2 Centralized State in `state.js`
 
-Create `src/openbiliclaw/web/m/js/state.js` with the spec's state model:
+Create `src/openbiliclaw/web/js/state.js` with the spec's state model:
 
 ```js
 export const state = {

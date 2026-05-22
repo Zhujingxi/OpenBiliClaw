@@ -74,7 +74,10 @@ class ActivityFeedBuilder:
         # only items strictly older than it.
         if before:
             cutoff = _parse_timestamp(before)
-            items = [it for it in items if _parse_timestamp(it.get("created_at", "")) < cutoff]
+            items = [
+                it for it in items
+                if _parse_timestamp(it.get("created_at", "")) < cutoff
+            ]
 
         page_size = max(1, min(50, int(limit)))
         page = items[:page_size]
@@ -128,23 +131,21 @@ class ActivityFeedBuilder:
     def _feedback_items(self) -> list[dict[str, object]]:
         items: list[dict[str, object]] = []
         for row in self.database.get_recommendations(limit=20):
-            feedback_type = _normalize_text(row.get("feedback_type")).lower()
-            if feedback_type not in {"like", "dislike", "comment"}:
+            feedback_type = _normalize_text(row.get("feedback_type"))
+            if not feedback_type:
                 continue
             title = _normalize_text(row.get("title")) or "这条推荐"
             note = _normalize_text(row.get("feedback_note"))
             if feedback_type == "like":
                 summary = f"这条你点了多来点：{title}"
-                detail = note
                 tone = "success"
             elif feedback_type == "dislike":
                 summary = f"这条你点了少来点：{title}"
-                detail = note
                 tone = "error"
             else:
-                summary = f"你刚给 {title} 写了一句反馈"
-                detail = note or "这句会继续影响后面的推荐。"
+                summary = note or f"你刚给 {title} 写了一句反馈"
                 tone = "info"
+            detail = note if feedback_type != "comment" else "这句会继续影响后面的推荐。"
             items.append(
                 {
                     "id": f"feedback-{row.get('id', len(items))}",
@@ -169,7 +170,8 @@ class ActivityFeedBuilder:
                     "kind": "recommendation",
                     "summary": f"这批先给你翻出来了：{title}",
                     "detail": (
-                        _normalize_text(row.get("topic")) or _normalize_text(row.get("expression"))
+                        _normalize_text(row.get("topic"))
+                        or _normalize_text(row.get("expression"))
                     ),
                     "created_at": _normalize_text(row.get("created_at")),
                     "tone": "info",

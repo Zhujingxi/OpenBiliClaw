@@ -103,6 +103,14 @@ const state = {
   messages: [],
 };
 
+const RUNTIME_REFRESH_DEBOUNCE_MS = 1000;
+let recommendationsRefreshTimer = null;
+let recommendationsRefreshInFlight = false;
+let recommendationsRefreshPending = false;
+let activityFeedRefreshTimer = null;
+let activityFeedRefreshInFlight = false;
+let activityFeedRefreshPending = false;
+
 const elements = {
   content: document.querySelector(".content"),
   statusBadge: document.getElementById("statusBadge"),
@@ -506,6 +514,60 @@ function getRuntimeEventTone(event) {
   return "info";
 }
 
+function scheduleRecommendationsRefresh({ delayMs = RUNTIME_REFRESH_DEBOUNCE_MS } = {}) {
+  if (recommendationsRefreshTimer !== null) {
+    window.clearTimeout(recommendationsRefreshTimer);
+  }
+  recommendationsRefreshTimer = window.setTimeout(() => {
+    recommendationsRefreshTimer = null;
+    void runScheduledRecommendationsRefresh();
+  }, Math.max(0, delayMs));
+}
+
+async function runScheduledRecommendationsRefresh() {
+  if (recommendationsRefreshInFlight) {
+    recommendationsRefreshPending = true;
+    return;
+  }
+  recommendationsRefreshInFlight = true;
+  try {
+    await initializeRecommendations();
+  } finally {
+    recommendationsRefreshInFlight = false;
+    if (recommendationsRefreshPending) {
+      recommendationsRefreshPending = false;
+      scheduleRecommendationsRefresh();
+    }
+  }
+}
+
+function scheduleActivityFeedRefresh({ delayMs = RUNTIME_REFRESH_DEBOUNCE_MS } = {}) {
+  if (activityFeedRefreshTimer !== null) {
+    window.clearTimeout(activityFeedRefreshTimer);
+  }
+  activityFeedRefreshTimer = window.setTimeout(() => {
+    activityFeedRefreshTimer = null;
+    void runScheduledActivityFeedRefresh();
+  }, Math.max(0, delayMs));
+}
+
+async function runScheduledActivityFeedRefresh() {
+  if (activityFeedRefreshInFlight) {
+    activityFeedRefreshPending = true;
+    return;
+  }
+  activityFeedRefreshInFlight = true;
+  try {
+    await loadActivityFeed();
+  } finally {
+    activityFeedRefreshInFlight = false;
+    if (activityFeedRefreshPending) {
+      activityFeedRefreshPending = false;
+      scheduleActivityFeedRefresh();
+    }
+  }
+}
+
 function connectRuntimeStream() {
   // Disconnect any previous client first so a settings-page port change
   // doesn't leave a zombie WebSocket against the old origin.
@@ -526,7 +588,7 @@ function connectRuntimeStream() {
       // Hot-reload: re-fetch all data when backend config is reloaded
       if (event.type === "config_reloaded") {
         setHint("后端配置已热重载，正在刷新数据…", "success");
-        void initializeRecommendations();
+        scheduleRecommendationsRefresh();
       }
       // Discovery refresh tick produced new pool items — silently refetch
       // the recommendation list so the popup doesn't show stale content
@@ -535,12 +597,12 @@ function connectRuntimeStream() {
       // so a banner would be intrusive). No DOM jump because top-N items
       // mostly persist across pool replenishments.
       if (event.type === "refresh.pool_updated") {
-        void initializeRecommendations();
+        scheduleRecommendationsRefresh();
       }
       // Activity log got a new behavior event — refresh the activity feed
       // so the popup's "刚刚看了..." panel stays current without polling.
       if (event.type === "activity.added") {
-        void loadActivityFeed();
+        scheduleActivityFeedRefresh();
       }
       // Interest confirmed/rejected: refresh profile and show hint
       if (event.type === "interest.confirmed" || event.type === "interest.rejected" || event.type === "interest.chat") {
@@ -556,13 +618,7 @@ function connectRuntimeStream() {
         }
         renderProbeCard();
       }
-      // Delight candidate: add to messages inbox
-      if (event.type === "delight.candidate" && event.bvid) {
-        if (!state.messages.some((m) => m.type === "delight" && m.bvid === event.bvid)) {
-          state.messages.push({ ...event, type: "delight" });
-          updateMessageBadge();
-        }
-      }
+      // Delight candidates are shown in the delight tray, not in messages.
       // Delight refreshed: backend computed N new above-threshold delights
       // — re-fetch the full queue (no per-item chrome notification, no
       // banner pop). Just keeps popup in sync with backend without forcing
@@ -594,7 +650,7 @@ function connectRuntimeStream() {
       if (event.type === "init_completed") {
         state.profileLoaded = false;
         setHint("初始化完成！正在加载画像和推荐…", "success");
-        void initializeRecommendations();
+        scheduleRecommendationsRefresh();
         void loadProfileSummary({ force: true });
       }
       // Profile changed elsewhere (cognition cycle, manual rebuild,
@@ -611,7 +667,7 @@ function connectRuntimeStream() {
         state.online = true;
         setStatus(true);
         setHint("后端重新连上了，正在刷新。", "success");
-        void initializeRecommendations();
+        scheduleRecommendationsRefresh({ delayMs: 0 });
       }
     },
     onDisconnect() {
@@ -1229,11 +1285,8 @@ function renderMessagesList() {
 
   for (const msg of state.messages) {
     const type = msg.type || "interest.probe";
-    if (type === "delight") {
-      container.append(buildDelightCard(msg));
-    } else {
-      container.append(buildMessageCard(msg));
-    }
+    if (type === "delight") continue; // delights shown in delight tray, not messages
+    container.append(buildMessageCard(msg));
   }
 }
 
@@ -3805,9 +3858,7 @@ async function initializeRecommendations() {
     clearDelightQueue();
     for (const item of delightResult.value) {
       pushDelightCandidate(item);
-      if (!state.messages.some((m) => m.type === "delight" && m.bvid === item.bvid)) {
-        state.messages.push({ ...item, type: "delight" });
-      }
+      // Delights no longer added to messages — shown in delight tray only.
     }
     // Restore local-only delight state (chat_reply, draft, composer, etc.)
     // that survives a Chrome side-panel reload.
@@ -4337,6 +4388,7 @@ function bindSettings() {
     // LLM
     providerSelect.value = cfg.llm?.default_provider || "openai";
     showProviderFields(providerSelect.value);
+    setVal("cfgLlmConcurrency", cfg.llm?.concurrency ?? 3);
     setVal("cfgLlmFallbackProvider", cfg.llm?.fallback_provider);
 
     setVal("cfgOpenaiAuthMode", cfg.llm?.openai?.auth_mode || "api_key");
@@ -4481,6 +4533,7 @@ function bindSettings() {
       data_dir: getVal("cfgDataDir"),
       llm: {
         default_provider: providerSelect.value,
+        concurrency: getInt("cfgLlmConcurrency", 3),
         fallback_enabled: Boolean(llmFallbackProvider),
         fallback_provider: llmFallbackProvider,
         openai: {
@@ -4587,7 +4640,7 @@ function bindSettings() {
         enabled: !checked("cfgSchedulerEnabled"),
         pause_on_extension_disconnect: checked("cfgPauseOnDisconnect"),
         extension_disconnect_grace_seconds: getInt("cfgExtensionDisconnectGrace", 90),
-        pool_target_count: getInt("cfgPoolTarget", 600),
+        pool_target_count: getInt("cfgPoolTarget", 300),
         account_sync_interval_hours: getInt("cfgAccountSyncInterval", 6),
         refresh_check_interval_seconds: getInt("cfgRefreshCheckInterval", 60),
         signal_event_threshold: getInt("cfgSignalEventThreshold", 6),

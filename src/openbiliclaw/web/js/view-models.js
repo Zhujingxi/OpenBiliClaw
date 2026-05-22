@@ -64,6 +64,39 @@ export function getCoverImageAttrs(value) {
   return { src: `/api/image-proxy?url=${encodeURIComponent(src)}` };
 }
 
+export function getRecommendationCoverPreloadUrls(items, { start = 0, limit = 12 } = {}) {
+  const safeStart = Math.max(0, Math.trunc(coerceNumber(start) ?? 0));
+  const safeLimit = Math.max(0, Math.trunc(coerceNumber(limit) ?? 0));
+  if (!Array.isArray(items) || safeLimit <= 0) return [];
+
+  const seen = new Set();
+  const urls = [];
+  for (const item of items.slice(safeStart)) {
+    const attrs = getCoverImageAttrs(item?.cover_url ?? item);
+    if (!attrs || seen.has(attrs.src)) continue;
+    seen.add(attrs.src);
+    urls.push(attrs.src);
+    if (urls.length >= safeLimit) break;
+  }
+  return urls;
+}
+
+export function getRecommendationImageLoadingAttrs(
+  index,
+  { eagerCount = 12, highPriorityCount = 2 } = {},
+) {
+  const safeIndex = Math.max(0, Math.trunc(coerceNumber(index) ?? 0));
+  const safeEagerCount = Math.max(0, Math.trunc(coerceNumber(eagerCount) ?? 0));
+  const safeHighPriorityCount = Math.max(0, Math.trunc(coerceNumber(highPriorityCount) ?? 0));
+  if (safeIndex < safeEagerCount) {
+    return {
+      loading: "eager",
+      fetchPriority: safeIndex < safeHighPriorityCount ? "high" : "auto",
+    };
+  }
+  return { loading: "lazy", fetchPriority: "auto" };
+}
+
 // ── Source Platform ──────────────────────────────────────────
 
 const SOURCE_LABEL_MAP = {
@@ -175,15 +208,7 @@ export function normalizeRecommendation(item) {
     content_id: normalizeText(item?.content_id) || normalizeText(item?.bvid),
     content_url: normalizeText(item?.content_url) || "",
     source_platform: normalizeSourcePlatform(item),
-    feedback_type: normalizeText(item?.feedback_type ?? item?.feedback),
-    pool_status: normalizeText(item?.pool_status ?? item?.status),
   };
-}
-
-export function isFeedbackedRecommendation(item) {
-  const feedbackType = normalizeText(item?.feedback_type ?? item?.feedback);
-  const poolStatus = normalizeText(item?.pool_status ?? item?.status).toLowerCase();
-  return Boolean(feedbackType || poolStatus === "feedbacked");
 }
 
 // ── Feedback ─────────────────────────────────────────────────

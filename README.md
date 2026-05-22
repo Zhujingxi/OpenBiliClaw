@@ -63,7 +63,7 @@
 
 ## 📸 功能预览
 
-核心入口现在有两个：浏览器插件负责平台内交互和登录会话，移动端 Web 负责在手机上查看推荐、画像和对话，不包含 Cookie 同步或内容爬取能力。
+核心入口现在有三个：浏览器插件负责平台内交互和登录会话，桌面端 Web（`/web`）提供大屏推荐首页，移动端 Web（`/m`）适合手机使用。桌面端和移动端都只调用本地 API，Cookie 同步和平台任务仍由插件承担。
 
 <table>
   <tr>
@@ -86,6 +86,32 @@
       <img src="docs/images/screenshot-chat.png" width="200" /><br/>
       <b>对话调教</b><br/>
       <sub>聊天告诉它你想看什么</sub>
+    </td>
+  </tr>
+</table>
+
+### 🖥️ 桌面端 Web 预览
+
+启动后端后访问 `http://127.0.0.1:8420/web`（或直接 `http://127.0.0.1:8420/`，会自动跳转），即可在浏览器大屏上使用推荐首页。
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/images/desktop-home.png" width="480" /><br/>
+      <b>桌面推荐首页</b><br/>
+      <sub>Runtime 看板 · 惊喜推荐轮播 · 画像侧栏</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/images/desktop-cards.png" width="480" /><br/>
+      <b>横向双卡片推荐流</b><br/>
+      <sub>封面左 + 推荐理由右 · 喜欢 / 不感兴趣 / 聊一聊</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2">
+      <img src="docs/images/desktop-profile.png" width="480" /><br/>
+      <b>画像详情面板</b><br/>
+      <sub>核心特质 · MBTI 推断 · 兴趣树 · 猜测兴趣 · 认知风格</sub>
     </td>
   </tr>
 </table>
@@ -189,25 +215,22 @@ npm run build:firefox          # 产出 dist-firefox/
 
 AI 助手会克隆仓库、安装依赖、用局域网可访问的默认绑定启动后端（`0.0.0.0:8420`）、做健康检查，并问几个有默认值的问题。看不懂就选默认；小红书、抖音和 YouTube 数据只有你明确同意才会进入初始画像。
 
-通过 `openbiliclaw start` 启动本地后端后，除了插件 side panel，你也可以在同端访问独立 Web UI：打开 `http://127.0.0.1:8420/web` 可用更大的浏览器页面查看推荐首页、画像、消息和设置；根路径 `/` 也会自动跳转到 `/web`。需要注意的是：**Web UI只是另一个更好的前端，后端仍依赖插件进行同步 Cookie等工作**。容器/API-only 入口 `openbiliclaw serve-api` 默认不托管 Web UI，如需同端口页面请显式加 `--with-web`。
-
 如果后端跑在局域网另一台机器上，用 `openbiliclaw start --host 0.0.0.0 --port 8420` 启动后端，并在插件设置页把「后端地址」改成那台机器的局域网 IP（例如 `192.168.1.100`）。
 
 ### 3. 在同一个浏览器登录内容平台
 
 至少登录 [B 站](https://www.bilibili.com)，OpenBiliClaw 会用它生成第一版画像和推荐。想接入小红书、抖音或 YouTube 时，再在装了插件的同一个浏览器里登录 [小红书](https://www.xiaohongshu.com) / [抖音](https://www.douyin.com) / [YouTube](https://www.youtube.com)。
 
-### 4. 在手机上打开移动端 Web
+### 4. 打开桌面端或移动端 Web
 
-移动端 Web 是主要使用入口之一，适合在手机上刷推荐、看画像、和阿B聊天，以及处理消息里的兴趣探测和惊喜推荐。它只调用本地后端 API，不做 Cookie 同步、内容爬取或平台登录。
-
-后端默认监听 `0.0.0.0`（所有网卡），同局域网的手机可以直接访问。只需正常启动：
+后端启动后会同时托管桌面端和移动端 Web，都只调用本地 API，不做 Cookie 同步或平台登录。
 
 ```bash
 openbiliclaw start
 ```
 
-然后点击插件顶部的手机图标，扫二维码即可打开——插件会自动检测你电脑的局域网 IP，二维码直接可用。也可以手动在手机浏览器输入 `http://<电脑局域网 IP>:8420/m/`。
+- **桌面端**：浏览器直接访问 `http://127.0.0.1:8420/web`（或 `http://127.0.0.1:8420/`，自动跳转）。大屏两栏布局，推荐流、画像、聊天、消息和设置全在一页。
+- **移动端**：点击插件顶部的手机图标扫二维码，或手动输入 `http://<电脑局域网 IP>:8420/m/`。适合手机上刷推荐、看画像、和阿B聊天。
 
 > 首次运行 `openbiliclaw init` 时会询问是否允许局域网访问（默认 Y）。如果选了 N 或想改回来，编辑 `config.toml` 的 `[api].host`（`0.0.0.0` = 局域网可达，`127.0.0.1` = 仅本机）。
 

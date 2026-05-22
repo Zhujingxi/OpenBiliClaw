@@ -57,6 +57,32 @@ All data lives in a single SQLite file on your disk. LLM calls use your own API 
 > | Explains why | "Guess you'll like" | None | Friend-like explanations |
 > | Customizable | No | Low | Swap LLMs / edit profile / write Skills |
 
+## 🖥️ Desktop Web Preview
+
+After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://127.0.0.1:8420/`, which redirects automatically) for a full-screen recommendation dashboard.
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/images/desktop-home.png" width="480" /><br/>
+      <b>Desktop Home</b><br/>
+      <sub>Runtime dashboard · delight carousel · profile sidebar</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/images/desktop-cards.png" width="480" /><br/>
+      <b>Horizontal Dual-Card Feed</b><br/>
+      <sub>Cover left + reason right · like / skip / chat</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2">
+      <img src="docs/images/desktop-profile.png" width="480" /><br/>
+      <b>Profile Detail Panel</b><br/>
+      <sub>Core traits · MBTI · interest tree · speculative interests · cognitive style</sub>
+    </td>
+  </tr>
+</table>
+
 ## 📱 Mobile Web Preview
 
 <table>
@@ -131,25 +157,22 @@ Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/do
 
 The agent will clone the repo, install dependencies, start the backend with the LAN-accessible default bind (`0.0.0.0:8420`), run a health check, and ask a few questions with defaults. If unsure, pick the default. Xiaohongshu, Douyin, and YouTube signals are used in the initial profile only when you explicitly opt in.
 
-Once the local backend is started with `openbiliclaw start`, it also serves a standalone Web UI on the same port: open `http://127.0.0.1:8420/web` for a larger browser view of recommendations, profile, messages, chat, and settings. The root path `/` also redirects to `/web`. Note that: **The Web UI is just another better frontend, the backend still relies on the browser extension to sync cookies and so on.** The container/API-only `openbiliclaw serve-api` entrypoint does not serve the Web UI by default; pass `--with-web` when you explicitly want the page on that server.
-
 If the backend runs on another machine in your LAN, set the extension's "Backend host" field to that machine's LAN IP, for example `192.168.1.100`.
 
 ### 3. Log in to content platforms in the same browser
 
 At minimum, log in to [Bilibili](https://www.bilibili.com). OpenBiliClaw uses it to build the first profile and recommendations. If you want Xiaohongshu, Douyin, or YouTube, also log in to [Xiaohongshu](https://www.xiaohongshu.com) / [Douyin](https://www.douyin.com) / [YouTube](https://www.youtube.com) in the same browser where the extension is installed.
 
-### 4. Open Mobile Web on your phone
+### 4. Open Desktop or Mobile Web
 
-Mobile Web is now one of the primary ways to use OpenBiliClaw. It is for checking recommendations, reading your profile, chatting with the agent, and handling interest probes or delight candidates from a phone. It only calls your local backend API; it does not sync cookies, crawl pages, or log in to platforms.
-
-The backend listens on `0.0.0.0` (all interfaces) by default, so phones on the same LAN can reach it immediately. Just start normally:
+The backend serves both a desktop and a mobile Web UI. Neither syncs cookies or crawls pages — they only call your local API.
 
 ```bash
 openbiliclaw start
 ```
 
-Then click the phone icon in the extension header and scan the QR code — the extension auto-detects your computer's LAN IP, so the QR code just works. You can also type `http://<your-LAN-IP>:8420/m/` in your phone's browser manually.
+- **Desktop**: open `http://127.0.0.1:8420/web` (or `http://127.0.0.1:8420/`, auto-redirects). Two-column editorial layout with recommendations, profile, chat, messages, and settings all on one page.
+- **Mobile**: click the phone icon in the extension header to scan the QR code, or type `http://<your-LAN-IP>:8420/m/` manually. Best for browsing recommendations, profile, and chat on your phone.
 
 > During `openbiliclaw init`, you'll be asked whether to allow LAN access (default Y). If you chose N or want to change it later, edit `[api].host` in `config.toml` (`0.0.0.0` = LAN-reachable, `127.0.0.1` = local only).
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import inspect
 import ipaddress
 import logging
 import os
@@ -15,18 +14,12 @@ import subprocess
 import tempfile
 import uuid
 from contextlib import suppress
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import (
-    FileResponse,
-    JSONResponse,
-    RedirectResponse,
-    StreamingResponse,
-)
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 
 from openbiliclaw.api.models import (
     ActivityFeedItemOut,
@@ -90,6 +83,7 @@ from openbiliclaw.api.models import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 _CONFIG_SAVE_LOCK = asyncio.Lock()
@@ -433,8 +427,22 @@ def _image_cache_dir() -> Path:
     return d
 
 
+def _normalize_cache_url(url: str) -> str:
+    """Normalize URLs with expiring tokens so the same image always maps to the same cache key.
+
+    XHS CDN URLs: ``https://sns-webpic-qc.xhscdn.com/{timestamp}/{token}/{path}``
+    — the ``{timestamp}/{token}`` changes on every regeneration but ``{path}`` is stable.
+    """
+    import re
+
+    m = re.match(r"(https?://[^/]*xhscdn\.com)/\d{12}/[0-9a-f]+/(.*)", url)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+    return url
+
+
 def _image_cache_key(url: str) -> str:
-    return hashlib.sha256(url.encode()).hexdigest()
+    return hashlib.sha256(_normalize_cache_url(url).encode()).hexdigest()
 
 
 def _image_cache_lookup(url: str) -> tuple[Path, str] | None:
@@ -543,7 +551,6 @@ def create_app(
     runtime_event_hub: Any | None = None,
     account_sync_service: Any | None = None,
     auto_update_service: Any | None = None,
-    serve_webui: bool = False,
 ) -> FastAPI:
     """Create the local backend API app."""
     from openbiliclaw.api.runtime_context import (
@@ -573,37 +580,6 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-    if serve_webui:
-        from fastapi.staticfiles import StaticFiles as _StaticFiles
-
-        web_dir = Path(__file__).resolve().parent.parent / "web"
-        web_index_path = web_dir / "index.html"
-        web_assets_dir = web_dir / "assets"
-
-        def _webui_html() -> FileResponse:
-            if not web_index_path.is_file():
-                raise HTTPException(status_code=404, detail="web UI not found")
-            return FileResponse(web_index_path, media_type="text/html")
-
-        if web_assets_dir.is_dir():
-            app.mount(
-                "/web/assets",
-                _StaticFiles(directory=web_assets_dir),
-                name="desktop-web-assets",
-            )
-
-        @app.get("/", include_in_schema=False)
-        async def webui_root() -> RedirectResponse:
-            return RedirectResponse(url="/web", status_code=302)
-
-        @app.get("/web", include_in_schema=False)
-        async def webui() -> FileResponse:
-            return _webui_html()
-
-        @app.get("/web/", include_in_schema=False)
-        async def webui_slash() -> FileResponse:
-            return _webui_html()
 
     # ── Build RuntimeContext ────────────────────────────────────────
     config = load_config()
@@ -1276,31 +1252,9 @@ def create_app(
                 content_id=str(getattr(item.content, "content_id", "") or item.content.bvid),
                 content_url=str(getattr(item.content, "content_url", "") or ""),
                 source_platform=str(getattr(item.content, "source_platform", "") or "bilibili"),
-                pool_status=str(getattr(item.content, "pool_status", "") or "") or None,
             )
             for item in items
         ]
-
-    def _is_feedbacked_recommendation_row(row: dict[str, Any]) -> bool:
-        return bool(
-            str(row.get("feedback_type") or row.get("feedback") or "").strip()
-            or str(row.get("cache_feedback_type") or "").strip()
-            or str(row.get("pool_status") or "").strip() == "feedbacked"
-        )
-
-    def _get_recommendation_rows(*, limit: int, include_feedbacked: bool) -> list[dict[str, Any]]:
-        get_recommendations = ctx.database.get_recommendations
-        signature = inspect.signature(get_recommendations)
-        if "include_feedbacked" in signature.parameters:
-            rows = cast(
-                "list[dict[str, Any]]",
-                get_recommendations(limit=limit, include_feedbacked=include_feedbacked),
-            )
-        else:
-            rows = cast("list[dict[str, Any]]", get_recommendations(limit=limit))
-        if include_feedbacked:
-            return rows
-        return [row for row in rows if not _is_feedbacked_recommendation_row(row)]
 
     @app.websocket("/api/runtime-stream")
     async def runtime_stream(websocket: WebSocket) -> None:
@@ -1717,18 +1671,14 @@ def create_app(
                     )
         return EventIngestResponse(accepted=accepted)
 
-    @app.get(
-        "/api/recommendations",
-        response_model=RecommendationListResponse,
-        response_model_exclude_none=True,
-    )
+    @app.get("/api/recommendations", response_model=RecommendationListResponse)
     async def recommendations() -> RecommendationListResponse:
         # Pull a 2x window so the per-franchise cap below still has 20
         # survivors to return after dropping over-represented IPs.
         # Without the wider pool, capping 原神 at 2 in a 20-row request
         # would leave gaps that other items further back in time would
         # have filled.
-        rows = _get_recommendation_rows(limit=40, include_feedbacked=False)
+        rows = ctx.database.get_recommendations(limit=40)
 
         # Fresh-install bootstrap: ``recommendations`` table is the
         # write-only history of items we've ever served. On first popup
@@ -1748,7 +1698,7 @@ def create_app(
                 if pool_count > 0:
                     profile = await ctx.soul_engine.get_profile()
                     await ctx.recommendation_engine.serve(profile, limit=10)
-                    rows = _get_recommendation_rows(limit=40, include_feedbacked=False)
+                    rows = ctx.database.get_recommendations(limit=40)
                     logger.info(
                         "GET /api/recommendations bootstrap: served from "
                         "empty history (pool_count=%d → wrote %d to history)",
@@ -1768,11 +1718,10 @@ def create_app(
                     expression=str(row.get("expression", "")),
                     topic_label=str(row.get("topic", "")),
                     presented=bool(row.get("presented", 0)),
+                    feedback_type=str(row.get("feedback_type", "") or ""),
                     content_id=str(row.get("content_id", "") or row.get("bvid", "")),
                     content_url=str(row.get("content_url", "") or ""),
                     source_platform=str(row.get("source_platform", "") or "bilibili"),
-                    feedback_type=str(row.get("feedback_type") or row.get("feedback") or ""),
-                    pool_status=str(row.get("pool_status") or "") or None,
                 )
                 for row in rows
             ]
@@ -1867,11 +1816,7 @@ def create_app(
             logger.info("Pool low — triggering automatic replenishment")
             asyncio.create_task(trigger())
 
-    @app.post(
-        "/api/recommendations/reshuffle",
-        response_model=RecommendationReshuffleResponse,
-        response_model_exclude_none=True,
-    )
+    @app.post("/api/recommendations/reshuffle", response_model=RecommendationReshuffleResponse)
     async def reshuffle_recommendations() -> RecommendationReshuffleResponse:
         if ctx.recommendation_engine is None or ctx.soul_engine is None:
             return RecommendationReshuffleResponse(items=[])
@@ -1883,11 +1828,7 @@ def create_app(
         await _trigger_replenishment_if_needed()
         return RecommendationReshuffleResponse(items=_serialize_recommendation_items(items))
 
-    @app.post(
-        "/api/recommendations/append",
-        response_model=RecommendationReshuffleResponse,
-        response_model_exclude_none=True,
-    )
+    @app.post("/api/recommendations/append", response_model=RecommendationReshuffleResponse)
     async def append_recommendations(
         payload: RecommendationAppendIn,
     ) -> RecommendationReshuffleResponse:
@@ -2154,13 +2095,6 @@ def create_app(
                 detail="response must be view, like, dislike, or chat",
             )
 
-        def mark_current_delight_consumed() -> None:
-            mark_sent = getattr(ctx.runtime_controller, "mark_delight_sent", None)
-            if callable(mark_sent):
-                mark_sent(bvid)
-                return
-            ctx.database.mark_delight_notified(bvid)
-
         if response_type == "view":
             return JSONResponse(content={"ok": True, "action": "viewed", "bvid": bvid})
 
@@ -2190,15 +2124,13 @@ def create_app(
                 f"好，「{label}」这类多来点。",
                 bvid,
             )
-            mark_current_delight_consumed()
             return JSONResponse(content={"ok": True, "action": "liked", "bvid": bvid})
 
         if response_type == "dislike":
             try:
                 ctx.database._execute_write(
-                    "UPDATE content_cache SET pool_status = 'purged_by_dislike', "
-                    "feedback_type = 'dislike', feedback_at = CURRENT_TIMESTAMP "
-                    "WHERE bvid = ?",
+                    "UPDATE content_cache SET pool_status = 'purged_by_dislike' "
+                    "WHERE bvid = ? AND COALESCE(pool_status, 'fresh') = 'fresh'",
                     (bvid,),
                 )
             except Exception:
@@ -2214,7 +2146,6 @@ def create_app(
                 f"好，「{label}」这类先不推了。",
                 bvid,
             )
-            mark_current_delight_consumed()
             return JSONResponse(content={"ok": True, "action": "disliked", "bvid": bvid})
 
         # Chat
@@ -2262,7 +2193,6 @@ def create_app(
             detail=f"你的反馈：{raw_message}\n阿b的回复：{reply}",
         )
         await _publish_probe_event("delight.chat", f"关于「{label}」你说：{raw_message}", bvid)
-        mark_current_delight_consumed()
         return JSONResponse(content={"ok": True, "action": "chat", "bvid": bvid, "reply": reply})
 
     @app.post("/api/notifications/sent", response_model=NotificationAckResponse)
@@ -2482,7 +2412,7 @@ def create_app(
             return "neutral"
         try:
             response = await asyncio.wait_for(
-                llm.complete_structured_task(
+                llm.complete_with_core_memory(
                     system_instruction=(
                         "任务：判断用户对一个兴趣方向的态度。\n\n"
                         "规则：\n"
@@ -2496,6 +2426,7 @@ def create_app(
                     user_input=f"方向：{domain}\n用户：{user_message}",
                     max_tokens=8,
                     temperature=0.0,
+                    json_mode=False,
                     caller="api.sentiment",
                 ),
                 timeout=15,
@@ -2865,7 +2796,7 @@ def create_app(
     async def feedback(payload: FeedbackIn) -> FeedbackResponse:
         feedback_type = payload.feedback_type.strip().lower()
         note = payload.note.strip()
-        if feedback_type not in {"like", "dislike", "comment", "dismiss"}:
+        if feedback_type not in {"like", "dislike", "comment"}:
             raise HTTPException(status_code=422, detail="Unsupported feedback type.")
         if feedback_type == "comment" and not note:
             raise HTTPException(status_code=422, detail="Comment feedback requires note.")
@@ -2879,51 +2810,50 @@ def create_app(
             feedback_type=feedback_type,
             feedback_note=note,
         )
-        rec_title = str(recommendation.get("title", ""))
-        if feedback_type != "dismiss":
-            from openbiliclaw.sources.event_format import (
-                SOURCE_BILIBILI,
-                build_event,
-            )
+        from openbiliclaw.sources.event_format import (
+            SOURCE_BILIBILI,
+            build_event,
+        )
 
-            # Tailor a natural-language context per feedback type — the
-            # "feedback" verb in the generic table doesn't capture the
-            # like/dislike/comment distinction the LLM cares about.
-            feedback_label = {
-                "like": "点赞了",
-                "dislike": "踩了",
-                "comment": "评论了",
-            }.get(feedback_type, "反馈了")
-            feedback_context = f"在 B 站{feedback_label}《{rec_title}》"
-            if note:
-                feedback_context = f"{feedback_context},备注:{note}"
-            await ctx.memory_manager.propagate_event(
-                build_event(
-                    event_type="feedback",
-                    source_platform=SOURCE_BILIBILI,
-                    title=rec_title,
-                    context=feedback_context,
-                    metadata={
-                        "recommendation_id": payload.recommendation_id,
-                        "bvid": recommendation.get("bvid", ""),
-                        "feedback_type": feedback_type,
-                        "feedback_note": note,
-                    },
+        rec_title = str(recommendation.get("title", ""))
+        # Tailor a natural-language context per feedback type — the
+        # "feedback" verb in the generic table doesn't capture the
+        # like/dislike/comment distinction the LLM cares about.
+        feedback_label = {
+            "like": "点赞了",
+            "dislike": "踩了",
+            "comment": "评论了",
+        }.get(feedback_type, "反馈了")
+        feedback_context = f"在 B 站{feedback_label}《{rec_title}》"
+        if note:
+            feedback_context = f"{feedback_context},备注:{note}"
+        await ctx.memory_manager.propagate_event(
+            build_event(
+                event_type="feedback",
+                source_platform=SOURCE_BILIBILI,
+                title=rec_title,
+                context=feedback_context,
+                metadata={
+                    "recommendation_id": payload.recommendation_id,
+                    "bvid": recommendation.get("bvid", ""),
+                    "feedback_type": feedback_type,
+                    "feedback_note": note,
+                },
+            )
+        )
+        record_immediate_feedback_cognition = getattr(
+            ctx.soul_engine,
+            "record_immediate_feedback_cognition",
+            None,
+        )
+        if callable(record_immediate_feedback_cognition):
+            with suppress(Exception):
+                record_immediate_feedback_cognition(
+                    feedback_type=feedback_type,
+                    title=str(recommendation.get("title", "")),
+                    note=note,
                 )
-            )
-            record_immediate_feedback_cognition = getattr(
-                ctx.soul_engine,
-                "record_immediate_feedback_cognition",
-                None,
-            )
-            if callable(record_immediate_feedback_cognition):
-                with suppress(Exception):
-                    record_immediate_feedback_cognition(
-                        feedback_type=feedback_type,
-                        title=str(recommendation.get("title", "")),
-                        note=note,
-                    )
-            asyncio.create_task(_run_post_feedback_tasks())
+        asyncio.create_task(_run_post_feedback_tasks())
         return FeedbackResponse(
             ok=True,
             recommendation_id=payload.recommendation_id,
@@ -3975,6 +3905,7 @@ def create_app(
             degraded_reason=degraded_reason,
             llm=LLMConfigOut(
                 default_provider=cfg.llm.default_provider,
+                concurrency=int(getattr(cfg.llm, "concurrency", 3)),
                 fallback_enabled=cfg.llm.fallback_enabled,
                 fallback_provider=cfg.llm.fallback_provider,
                 openai=_provider_out(cfg.llm.openai),
@@ -4132,6 +4063,7 @@ def create_app(
             _collect_config_issues,
             _default_config_path,
             _normalize_extension_disconnect_grace,
+            _normalize_llm_concurrency,
             _normalize_pool_source_shares,
             _normalize_scheduler_int,
             load_config,
@@ -4171,6 +4103,8 @@ def create_app(
             llm_data = update["llm"]
             if "default_provider" in llm_data:
                 cfg.llm.default_provider = str(llm_data["default_provider"])
+            if "concurrency" in llm_data:
+                cfg.llm.concurrency = _normalize_llm_concurrency(llm_data["concurrency"])
             if "fallback_enabled" in llm_data:
                 cfg.llm.fallback_enabled = _as_bool(llm_data["fallback_enabled"])
             if "fallback_provider" in llm_data:
@@ -4634,17 +4568,29 @@ def create_app(
             )
 
     # ── Mobile Web UI ───────────────────────────────────────────
-    if serve_webui:
-        _mobile_web_dir = Path(__file__).resolve().parent.parent / "web" / "m"
-        if _mobile_web_dir.is_dir():
-            _favicon_path = _mobile_web_dir / "icon-192.png"
+    from pathlib import Path as _Path
 
-            @app.get("/favicon.ico", include_in_schema=False)
-            def _favicon() -> FileResponse:
-                if not _favicon_path.is_file():
-                    raise HTTPException(status_code=404, detail="favicon not found")
-                return FileResponse(_favicon_path, media_type="image/png")
+    from fastapi.staticfiles import StaticFiles as _StaticFiles
 
-            app.mount("/m", _StaticFiles(directory=_mobile_web_dir, html=True), name="mobile-web")
+    _web_dir = _Path(__file__).resolve().parent.parent / "web"
+    if _web_dir.is_dir():
+        _favicon_path = _web_dir / "icon-192.png"
+
+        @app.get("/favicon.ico", include_in_schema=False)
+        def _favicon() -> FileResponse:
+            if not _favicon_path.is_file():
+                raise HTTPException(status_code=404, detail="favicon not found")
+            return FileResponse(_favicon_path, media_type="image/png")
+
+        app.mount("/m", _StaticFiles(directory=_web_dir, html=True), name="mobile-web")
+
+    # ── Desktop Web UI ───────────────────────────────────────────
+    _desktop_dir = _Path(__file__).resolve().parent.parent / "web" / "desktop"
+    if _desktop_dir.is_dir():
+        app.mount("/web", _StaticFiles(directory=_desktop_dir, html=True), name="desktop-web")
+
+        @app.get("/", include_in_schema=False)
+        def _root_redirect() -> RedirectResponse:
+            return RedirectResponse(url="/web", status_code=302)
 
     return app

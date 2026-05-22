@@ -87,7 +87,6 @@ def test_cli_module_docs_show_current_init_llm_menu() -> None:
     assert "不会跟随主 LLM" in doc
     assert "| 1 | 本地 Ollama，自动探测 + 拉取 `bge-m3` |" in doc
     assert "Ollama 排第一" not in doc
-    assert "3   跟随你刚才选的 LLM" not in doc
     assert "1) 跟随你刚才选的 LLM" not in doc
     assert "跟随主 provider（默认）" not in doc
     assert "User picked OpenAI 官方 (option 2 in agent-install.md)" not in bootstrap

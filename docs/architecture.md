@@ -4,8 +4,8 @@
 
 OpenBiliClaw 采用分层架构设计，从上到下依次为：
 
-1. **用户交互层** — Chrome 浏览器插件（B 站 + 小红书 + 抖音 + YouTube 页面行为采集 · 视频停留满意度信号 · side panel 推荐展示 · durable 对话交互 · 后台 LLM 暂停开关 · 配置离线缓存 / 降级修复 UI · xhs/dy/yt 任务调度 / 初始化画像导入 · B 站 / 抖音 Cookie 自动同步）与本地后端可选同端口托管的独立 Web UI（`/web` 大屏推荐首页 · 画像 · 消息 · 设置）。
-2. **外部集成层** — OpenClaw adapter / skill wrappers / 本地 API / bundled Web UI / Codex CLI 凭据导入等对外接入边界
+1. **用户交互层** — Chrome 浏览器插件（B 站 + 小红书 + 抖音 + YouTube 页面行为采集 · 视频停留满意度信号 · 推荐展示 · durable 对话交互 · 后台 LLM 暂停开关 · 配置离线缓存 / 降级修复 UI · xhs/dy/yt 任务调度 / 初始化画像导入 · B 站 / 抖音 Cookie 自动同步）
+2. **外部集成层** — OpenClaw adapter / skill wrappers / 本地 API / Codex CLI 凭据导入等对外接入边界
 3. **Agent 核心层** — 自研编排器 + Soul Engine + Discovery Engine + Recommendation Engine + Skill System
 4. **多源适配层（v0.3.0+）** — `SourceAdapter` 协议下的 B 站 / 小红书 / 抖音 / YouTube / 通用 Web 源
 5. **多层网状记忆存储** — Core / Episodic / Semantic / Working Memory（SQLite + 向量索引 + JSON）
@@ -57,7 +57,6 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 
 ### Recommendation Engine (`recommendation/`)
 - 推荐排序与朋友式推荐表达生成；统一从候选池读取
-- 活跃推荐 API 默认过滤已反馈 / 已忽略内容；`dismiss` 只消费推荐、不写记忆事件、不参与即时画像学习。
 - `PoolCurator` 五维评分（relevance · freshness · topic_fatigue · source_monotony · serendipity）
 - v0.3.1 双轴 fatigue：`recent_topic_keys` (细) + `recent_topic_groups` (粗) 取 max；曲线 `count^1.5/len*5`，count=2 即触发 0.47 强抑制
 - `_merge_topic_supergroups` — serve 时基于 embedding 把 `动漫杂谈/补番/解说` 等近义 topic 合并为同一聚类
@@ -67,7 +66,6 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 
 ### Runtime (`runtime/`)
 - 系统生命周期管理和服务编排
-- FastAPI 可同端口托管包内 Web：`src/openbiliclaw/web/index.html` 是桌面推荐首页，`src/openbiliclaw/web/m/` 是手机端 Web；`openbiliclaw start` 默认启用 `GET /` 302 到 `/web`，`GET /web` / `/web/` 返回桌面首页，`GET /m/` 返回手机端。`serve-api` 默认保持 API-only，需要 `--with-web` 才挂载 Web UI。Web UI 复用本地 API 和 runtime stream，但 Cookie / 平台任务结果仍由浏览器插件同步。
 - 降级模式启动：生产 `create_app()` 遇到 LLM registry 配置错误时保留 `/api/health`、`/api/config`、`/api/runtime-status` 和 `/api/runtime-stream`，让 popup 设置页仍能保存修复配置；其他 API 返回 503，避免半初始化 runtime 继续跑推荐/发现链路
 - 配置热重载：`RuntimeContext` 重建 registry / service / engine 时会从 `[llm.soul]` / `[llm.discovery]` / `[llm.recommendation]` / `[llm.evaluation]` 注入同一份 module override；热重载后的 speculator tick 作为 detached task 注册到 `BackgroundTaskRegistry`，不阻塞 `/api/config` 响应
 - `AutoUpdateService` — 后端自动更新只查询 GitHub `/tags` 并过滤 `backend-v*`（兼容 legacy `v*` / 裸 semver），明确忽略 `extension-v*`；当前 GitHub Releases 由扩展 artifact 占用，不能用 `/releases/latest` 判断后端源码是否最新

@@ -6,8 +6,8 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-RECOMMEND_JS = ROOT / "src/openbiliclaw/web/m/js/views/recommend.js"
-APP_CSS = ROOT / "src/openbiliclaw/web/m/css/app.css"
+RECOMMEND_JS = ROOT / "src/openbiliclaw/web/js/views/recommend.js"
+APP_CSS = ROOT / "src/openbiliclaw/web/css/app.css"
 
 
 def _css_block(css: str, selector: str) -> str:
@@ -18,8 +18,8 @@ def _css_block(css: str, selector: str) -> str:
 def test_mobile_delight_tray_uses_featured_reason_wrap() -> None:
     """The surprise recommendation tray should look distinct from normal cards."""
 
-    js = RECOMMEND_JS.read_text(encoding="utf-8")
-    css = APP_CSS.read_text(encoding="utf-8")
+    js = RECOMMEND_JS.read_text()
+    css = APP_CSS.read_text()
 
     assert 'class="delight-feature-copy"' in js
     assert 'class="delight-reason-label"' in js
@@ -46,7 +46,7 @@ def test_mobile_delight_tray_uses_featured_reason_wrap() -> None:
 def test_mobile_delight_inline_chat_uses_shared_session_helper() -> None:
     """Inline delight chat must use the same mobile chat session contract as chat.js."""
 
-    js = RECOMMEND_JS.read_text(encoding="utf-8")
+    js = RECOMMEND_JS.read_text()
 
     assert "getMobileChatSession" in js
     assert 'session: "mobile"' not in js
@@ -56,7 +56,7 @@ def test_mobile_delight_inline_chat_uses_shared_session_helper() -> None:
 def test_mobile_delight_actions_stay_hidden_for_permanent_handled_states() -> None:
     """Viewed/liked/rejected delights should not keep generic action buttons visible."""
 
-    js = RECOMMEND_JS.read_text(encoding="utf-8")
+    js = RECOMMEND_JS.read_text()
 
     assert 'class="delight-result-state"' in js
     assert "always rendered" not in js

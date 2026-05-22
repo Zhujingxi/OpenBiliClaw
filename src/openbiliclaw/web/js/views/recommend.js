@@ -21,8 +21,9 @@ import {
 import { state, patchState } from "../state.js";
 import {
   getCoverImageAttrs,
+  getRecommendationCoverPreloadUrls,
+  getRecommendationImageLoadingAttrs,
   normalizeRecommendation,
-  isFeedbackedRecommendation,
   normalizeRuntimeStatus,
   mergeRuntimeStatusEvent,
   getReadyRecommendationHint,
@@ -46,6 +47,21 @@ let loaded = false;
 let loading = false;
 let feedbackSheet = null; // { itemId, note, submitState }
 const feedbackDone = new Map(); // recId -> "like" | "dislike" | "comment"
+const COVER_PRELOAD_BATCH_SIZE = 12;
+const COVER_PRELOAD_WAIT_TIMEOUT_MS = 3000;
+const AUTO_APPEND_ROOT_MARGIN = "700px 0px 1400px 0px";
+const SCROLL_PREHEAT_LOOKAHEAD = 8;
+const SCROLL_PREHEAT_ROOT_MARGIN = "0px 0px 1200px 0px";
+const warmedCoverUrls = new Set();
+const decodedCoverUrls = new Set();
+const warmingImages = new Map();
+let autoAppendObserver = null;
+let scrollPreheatObserver = null;
+let autoAppendExhausted = false;
+const RECOMMENDATION_ITEMS_REFRESH_DEBOUNCE_MS = 1000;
+let recommendationItemsRefreshTimer = null;
+let recommendationItemsRefreshInFlight = false;
+let recommendationItemsRefreshPending = false;
 
 // ── Escape helper ────────────────────────────────────────────
 function esc(s) {
@@ -93,8 +109,8 @@ function render() {
     frag.appendChild(empty);
   }
 
-  for (const item of recs) {
-    frag.appendChild(renderCard(item));
+  for (const [index, item] of recs.entries()) {
+    frag.appendChild(renderCard(item, index));
   }
 
   renderInto(frag, renderLoadMoreRow);
@@ -113,6 +129,9 @@ function render() {
 
   // Feedback bottom sheet
   renderFeedbackSheet();
+  void warmRecommendationCovers(recs);
+  observeScrollPreheat();
+  observeAutoAppendSentinel();
 }
 
 /** Run a sub-renderer with $root temporarily pointed at the given container. */
@@ -576,16 +595,119 @@ function renderLoadMoreRow() {
   $root.appendChild(actions);
 }
 
+function waitForCoverPreload(promises, timeoutMs) {
+  if (promises.length === 0) return Promise.resolve();
+  return Promise.race([
+    Promise.all(promises),
+    new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
+}
+
+function warmRecommendationCovers(
+  items,
+  { start = 0, limit = COVER_PRELOAD_BATCH_SIZE, waitForDecode = false } = {},
+) {
+  if (typeof Image === "undefined") return Promise.resolve();
+  const urls = getRecommendationCoverPreloadUrls(items, { start, limit });
+  const pending = [];
+  for (const src of urls) {
+    if (warmedCoverUrls.has(src)) continue;
+    warmedCoverUrls.add(src);
+
+    const img = new Image();
+    const cleanup = () => warmingImages.delete(src);
+    const markDecoded = () => { cleanup(); decodedCoverUrls.add(src); };
+    const loaded = new Promise((resolve) => {
+      img.onload = () => { markDecoded(); resolve(); };
+      img.onerror = () => { cleanup(); resolve(); };
+    });
+    img.decoding = "async";
+    img.loading = "eager";
+    warmingImages.set(src, img);
+    img.src = src;
+    let ready = loaded;
+    if (typeof img.decode === "function") {
+      ready = img.decode().then(markDecoded).catch(cleanup);
+    }
+    if (waitForDecode) pending.push(ready);
+  }
+  if (!waitForDecode) return Promise.resolve();
+  return waitForCoverPreload(pending, COVER_PRELOAD_WAIT_TIMEOUT_MS);
+}
+
+function disconnectScrollPreheatObserver() {
+  if (!scrollPreheatObserver) return;
+  scrollPreheatObserver.disconnect();
+  scrollPreheatObserver = null;
+}
+
+function observeScrollPreheat() {
+  disconnectScrollPreheatObserver();
+  if (!$root || typeof IntersectionObserver === "undefined") return;
+
+  const cards = $root.querySelectorAll(".card");
+  if (!cards.length) return;
+
+  scrollPreheatObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      scrollPreheatObserver.unobserve(entry.target);
+
+      // Find this card's index and preheat the next batch ahead
+      const allCards = Array.from($root.querySelectorAll(".card"));
+      const idx = allCards.indexOf(entry.target);
+      if (idx < 0) continue;
+
+      const recs = state.recommendations || [];
+      const start = Math.min(idx + 1, recs.length);
+      if (start < recs.length) {
+        warmRecommendationCovers(recs, { start, limit: SCROLL_PREHEAT_LOOKAHEAD });
+      }
+    }
+  }, {
+    root: null,
+    rootMargin: SCROLL_PREHEAT_ROOT_MARGIN,
+    threshold: 0,
+  });
+
+  cards.forEach((card) => scrollPreheatObserver.observe(card));
+}
+
+function disconnectAutoAppendObserver() {
+  if (!autoAppendObserver) return;
+  autoAppendObserver.disconnect();
+  autoAppendObserver = null;
+}
+
+function observeAutoAppendSentinel() {
+  disconnectAutoAppendObserver();
+  if (!$root || typeof IntersectionObserver === "undefined") return;
+  const loadMoreRow = $root.querySelector(".load-more-row");
+  if (!loadMoreRow) return;
+
+  autoAppendObserver = new IntersectionObserver((entries) => {
+    if (!entries.some((entry) => entry.isIntersecting)) return;
+    if (loading || autoAppendExhausted || state.activeTab !== "recommend") return;
+    handleAppend();
+  }, {
+    root: document.getElementById("app"),
+    rootMargin: AUTO_APPEND_ROOT_MARGIN,
+    threshold: 0,
+  });
+  autoAppendObserver.observe(loadMoreRow);
+}
+
 // ── Recommendation Card ──────────────────────────────────────
-function renderCard(rawItem) {
+function renderCard(rawItem, index = 0) {
   const item = normalizeRecommendation(rawItem);
   const card = document.createElement("div");
   card.className = "card";
   const url = buildContentUrl(item);
   const cover = getCoverImageAttrs(item.cover_url);
+  const imageAttrs = getRecommendationImageLoadingAttrs(index);
 
   const coverHtml = cover
-    ? `<div class="card-cover-frame"><img class="card-cover" src="${esc(cover.src)}" alt="" loading="lazy" onerror="this.parentElement.classList.add('is-error');this.remove()"></div>`
+    ? `<div class="card-cover-frame"><img class="card-cover" src="${esc(cover.src)}" alt="" loading="${esc(imageAttrs.loading)}" fetchpriority="${esc(imageAttrs.fetchPriority)}" decoding="async" onerror="this.parentElement.classList.add('is-error');this.remove()"></div>`
     : `<div class="card-cover-frame is-error"></div>`;
 
   card.innerHTML = `
@@ -600,28 +722,69 @@ function renderCard(rawItem) {
       ${item.expression ? `<div class="card-expression">${esc(item.expression)}</div>` : ""}
     </div>`;
 
-  // Card actions — open only records clicks; feedback consumes the card.
+  // Card actions — icon style with feedback state persistence
   const actionsRow = document.createElement("div");
   actionsRow.className = "card-actions";
   actionsRow.addEventListener("click", (e) => e.stopPropagation());
 
-  const openBtn = createCardAction("\u{1F517} 打开", () => {
+  const alreadyFeedback = feedbackDone.get(item.id);
+
+  const openBtn = createCardAction("\u{1F517} \u6253\u5F00", () => {
     reportClick({ bvid: item.bvid, title: item.title, recommendation_id: item.id, topic_label: item.topic_label, up_name: item.up_name });
     if (url) window.open(url, "_blank");
   });
 
-  const likeBtn = createCardAction("\u{1F44D}", () => submitCardFeedback(item, "like", "已记下", card, likeBtn));
-  const dislikeBtn = createCardAction("\u{1F44E}", () => submitCardFeedback(item, "dislike", "已减少", card, dislikeBtn));
-  const dismissBtn = createCardAction("\u{1F648}", () => submitCardFeedback(item, "dismiss", "已忽略", card, dismissBtn));
+  const likeBtn = createCardAction(alreadyFeedback === "like" ? "\u2705" : "\u{1F44D}", async () => {
+    likeBtn.disabled = true;
+    likeBtn.textContent = "\u2026";
+    try {
+      await submitFeedback(buildFeedbackPayload(item.id, "like"));
+      feedbackDone.set(item.id, "like");
+      likeBtn.textContent = "\u2705";
+    } catch {
+      likeBtn.disabled = false;
+      likeBtn.textContent = "\u{1F44D}";
+    }
+  });
+  if (alreadyFeedback === "like") likeBtn.disabled = true;
+
+  const dislikeBtn = createCardAction(alreadyFeedback === "dislike" ? "\u274C" : "\u{1F44E}", async () => {
+    dislikeBtn.disabled = true;
+    dislikeBtn.textContent = "\u2026";
+    try {
+      await submitFeedback(buildFeedbackPayload(item.id, "dislike"));
+      feedbackDone.set(item.id, "dislike");
+      // Remove the card from the list with a brief fade-out.
+      card.style.transition = "opacity 0.3s ease, max-height 0.3s ease";
+      card.style.opacity = "0";
+      card.style.maxHeight = card.offsetHeight + "px";
+      card.style.overflow = "hidden";
+      setTimeout(() => {
+        card.style.maxHeight = "0";
+        card.style.marginBottom = "0";
+        card.style.padding = "0";
+      }, 150);
+      setTimeout(() => {
+        card.remove();
+        patchState({
+          recommendations: state.recommendations.filter((r) => r.id !== item.id),
+        });
+      }, 450);
+    } catch {
+      dislikeBtn.disabled = false;
+      dislikeBtn.textContent = "\u{1F44E}";
+    }
+  });
+  if (alreadyFeedback === "dislike") dislikeBtn.disabled = true;
+
   const commentBtn = createCardAction("\u{1F4AC}", () => {
-    feedbackSheet = { item, card, note: "", submitState: "idle" };
+    feedbackSheet = { itemId: item.id, note: "", submitState: "idle" };
     renderFeedbackSheet();
   });
 
   actionsRow.appendChild(openBtn);
   actionsRow.appendChild(likeBtn);
   actionsRow.appendChild(dislikeBtn);
-  actionsRow.appendChild(dismissBtn);
   actionsRow.appendChild(commentBtn);
   card.appendChild(actionsRow);
 
@@ -643,40 +806,6 @@ function createCardAction(label, handler) {
   btn.textContent = label;
   btn.addEventListener("click", handler);
   return btn;
-}
-
-function removeRecommendation(item, card, delayMs = 1600) {
-  setTimeout(() => {
-    card.style.transition = "opacity 0.3s ease, max-height 0.3s ease, margin 0.3s ease, padding 0.3s ease";
-    card.style.maxHeight = `${card.offsetHeight}px`;
-    card.style.overflow = "hidden";
-    requestAnimationFrame(() => {
-      card.style.opacity = "0";
-      card.style.maxHeight = "0";
-      card.style.marginBottom = "0";
-      card.style.paddingTop = "0";
-      card.style.paddingBottom = "0";
-    });
-  }, delayMs);
-  setTimeout(() => {
-    card.remove();
-    patchState({ recommendations: state.recommendations.filter((r) => normalizeRecommendation(r).id !== item.id) });
-  }, delayMs + 360);
-}
-
-async function submitCardFeedback(item, feedbackType, successLabel, card, button, note = "") {
-  button.disabled = true;
-  const original = button.textContent;
-  button.textContent = "…";
-  try {
-    await submitFeedback(buildFeedbackPayload(item.id, feedbackType, note));
-    feedbackDone.set(item.id, feedbackType);
-    button.textContent = successLabel;
-    removeRecommendation(item, card);
-  } catch {
-    button.disabled = false;
-    button.textContent = original;
-  }
 }
 
 // ── Feedback Bottom Sheet ────────────────────────────────────
@@ -728,12 +857,9 @@ function renderFeedbackSheet() {
     feedbackSheet.submitState = "submitting";
     renderFeedbackSheet();
     try {
-      const item = normalizeRecommendation(feedbackSheet.item);
-      await submitFeedback(buildFeedbackPayload(item.id, "comment", feedbackSheet.note));
-      feedbackDone.set(item.id, "comment");
+      await submitFeedback(buildFeedbackPayload(feedbackSheet.itemId, "comment", feedbackSheet.note));
       feedbackSheet.submitState = "success";
       renderFeedbackSheet();
-      if (feedbackSheet.card) removeRecommendation(item, feedbackSheet.card);
       setTimeout(() => { feedbackSheet = null; renderFeedbackSheet(); }, 1200);
     } catch {
       feedbackSheet.submitState = "error";
@@ -749,7 +875,8 @@ async function handleReshuffle() {
   render();
   try {
     const result = await reshuffleRecommendations();
-    patchState({ recommendations: (result.items || []).map(normalizeRecommendation).filter((item) => !isFeedbackedRecommendation(item)) });
+    autoAppendExhausted = false;
+    patchState({ recommendations: (result.items || []).map(normalizeRecommendation) });
   } catch { /* ignore */ }
   loading = false;
   render();
@@ -765,18 +892,25 @@ async function handleAppend() {
   if (appendBtnEl) { appendBtnEl.disabled = true; appendBtnEl.textContent = "\u52A0\u8F7D\u4E2D\u2026"; }
 
   try {
+    const startIndex = state.recommendations.length;
     const existing = state.recommendations.map((i) => i.bvid).filter(Boolean);
     const result = await appendRecommendations(existing);
-    const newItems = (result.items || []).map(normalizeRecommendation).filter((item) => !isFeedbackedRecommendation(item));
+    const newItems = (result.items || []).map(normalizeRecommendation);
+    autoAppendExhausted = newItems.length === 0;
+    await warmRecommendationCovers(newItems, { limit: newItems.length, waitForDecode: true });
     patchState({ recommendations: [...state.recommendations, ...newItems] });
 
     // Append new cards before the load-more row without rebuilding existing ones.
     if (loadMoreRow) {
-      for (const item of newItems) {
-        $root.insertBefore(renderCard(item), loadMoreRow);
+      for (const [offset, item] of newItems.entries()) {
+        const card = renderCard(item, startIndex + offset);
+        $root.insertBefore(card, loadMoreRow);
+        if (scrollPreheatObserver) scrollPreheatObserver.observe(card);
       }
     }
-  } catch { /* ignore */ }
+  } catch {
+    autoAppendExhausted = true;
+  }
 
   loading = false;
   // Restore button state.
@@ -785,6 +919,7 @@ async function handleAppend() {
     const headerState = getMobileRecommendationHeaderState();
     appendBtnEl.textContent = headerState.secondaryActionLabel;
   }
+  observeAutoAppendSentinel();
 }
 
 // ── Pull-to-Refresh ──────────────────────────────────────────
@@ -878,23 +1013,28 @@ async function hydrateDelightTurns() {
 }
 
 // ── Load ─────────────────────────────────────────────────────
+function rememberRecommendationFeedback(normalizedRecs) {
+  for (const rec of normalizedRecs) {
+    if (rec.feedback_type && !feedbackDone.has(rec.id)) {
+      feedbackDone.set(rec.id, rec.feedback_type);
+    }
+  }
+}
+
 async function loadData() {
   loading = true;
   render();
   try {
     const [recs, status, delights, activity] = await Promise.all([
-      reshuffleRecommendations().then((r) => r.items || []).catch(() => fetchRecommendations()),
+      fetchRecommendations(),
       fetchRuntimeStatus().catch(() => null),
       fetchDelightBatch().catch(() => []),
       fetchActivityFeed({ limit: 5 }).catch(() => null),
     ]);
-    const normalizedRecs = recs.map(normalizeRecommendation).filter((item) => !isFeedbackedRecommendation(item));
+    const normalizedRecs = recs.map(normalizeRecommendation);
+    autoAppendExhausted = false;
     // Restore feedback state from backend so it survives page refresh.
-    for (const rec of normalizedRecs) {
-      if (rec.feedback_type && !feedbackDone.has(rec.id)) {
-        feedbackDone.set(rec.id, rec.feedback_type);
-      }
-    }
+    rememberRecommendationFeedback(normalizedRecs);
     patchState({
       recommendations: normalizedRecs,
       runtimeStatus: status ? normalizeRuntimeStatus(status) : state.runtimeStatus,
@@ -907,6 +1047,40 @@ async function loadData() {
   render();
   // Hydrate durable delight chat turns after initial render
   hydrateDelightTurns();
+}
+
+function scheduleRecommendationItemsRefresh() {
+  if (recommendationItemsRefreshTimer !== null) {
+    clearTimeout(recommendationItemsRefreshTimer);
+  }
+  recommendationItemsRefreshTimer = setTimeout(
+    runScheduledRecommendationItemsRefresh,
+    RECOMMENDATION_ITEMS_REFRESH_DEBOUNCE_MS,
+  );
+}
+
+async function runScheduledRecommendationItemsRefresh() {
+  recommendationItemsRefreshTimer = null;
+  if (recommendationItemsRefreshInFlight) {
+    recommendationItemsRefreshPending = true;
+    return;
+  }
+  recommendationItemsRefreshInFlight = true;
+  try {
+    const recs = await fetchRecommendations();
+    const normalizedRecs = recs.map(normalizeRecommendation);
+    rememberRecommendationFeedback(normalizedRecs);
+    autoAppendExhausted = false;
+    patchState({ recommendations: normalizedRecs });
+    render();
+  } catch { /* best-effort live refresh */ }
+  finally {
+    recommendationItemsRefreshInFlight = false;
+    if (recommendationItemsRefreshPending) {
+      recommendationItemsRefreshPending = false;
+      scheduleRecommendationItemsRefresh();
+    }
+  }
 }
 
 // ── Public API ───────────────────────────────────────────────
@@ -924,11 +1098,12 @@ export function initRecommendView(root) {
 export function onStreamEvent(payload) {
   const type = payload?.type || payload?.event;
   if (type === "refresh.pool_updated") {
-    // Merge runtime status from event
+    // Merge runtime status and coalesce the recommendation list fetch.
     patchState({
       runtimeStatus: mergeRuntimeStatusEvent(state.runtimeStatus, payload.data || payload),
     });
-    loadData();
+    rerenderHeaderOnly();
+    scheduleRecommendationItemsRefresh();
   } else if (type === "refresh.started" || type === "refresh.strategy") {
     patchState({ runtimeEvent: payload.data || payload });
     rerenderHeaderOnly();

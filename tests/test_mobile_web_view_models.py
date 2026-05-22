@@ -40,7 +40,7 @@ class TestMobileWebViewModels:
             import {
               getCoverImageAttrs, normalizeChatTurn, normalizeCoverUrl,
               normalizeMbtiDimensions, normalizePoolStatus,
-            } from "./src/openbiliclaw/web/m/js/view-models.js";
+            } from "./src/openbiliclaw/web/js/view-models.js";
 
             assert.deepEqual(
               normalizePoolStatus({
@@ -94,7 +94,7 @@ class TestMobileWebViewModels:
         _assert_js(
             dedent("""
             import assert from "node:assert/strict";
-            import * as vm from "./src/openbiliclaw/web/m/js/view-models.js";
+            import * as vm from "./src/openbiliclaw/web/js/view-models.js";
 
             const required = [
               "buildVideoUrl", "buildContentUrl",
@@ -109,8 +109,9 @@ class TestMobileWebViewModels:
               "normalizeActivityFeed", "getActivityCardState",
               "getPoolStatusSummary", "normalizeRuntimeStatus", "mergeRuntimeStatusEvent",
               "getReadyRecommendationHint",
+              "getRecommendationCoverPreloadUrls", "getRecommendationImageLoadingAttrs",
               "formatRelativeTimestamp",
-              "normalizeSourcePlatform", "getSourceLabel", "isFeedbackedRecommendation",
+              "normalizeSourcePlatform", "getSourceLabel",
               "normalizeCoverUrl", "getCoverImageAttrs",
               "normalizePoolStatus", "normalizeMbtiDimensions", "normalizeChatTurn",
             ];
@@ -121,28 +122,95 @@ class TestMobileWebViewModels:
         )
 
     def test_mobile_cover_templates_use_wrapper_fallbacks(self) -> None:
-        recommend_js = Path("src/openbiliclaw/web/m/js/views/recommend.js").read_text(
-            encoding="utf-8"
-        )
-        chat_js = Path("src/openbiliclaw/web/m/js/views/chat.js").read_text(encoding="utf-8")
-        app_css = Path("src/openbiliclaw/web/m/css/app.css").read_text(encoding="utf-8")
+        recommend_js = Path("src/openbiliclaw/web/js/views/recommend.js").read_text()
+        chat_js = Path("src/openbiliclaw/web/js/views/chat.js").read_text()
+        app_css = Path("src/openbiliclaw/web/css/app.css").read_text()
 
         assert 'referrerpolicy="${cover.referrerPolicy}"' not in recommend_js
         assert 'referrerpolicy="${cover.referrerPolicy}"' not in chat_js
         assert '? `<img class="card-cover"' not in recommend_js
         assert 'onerror="this.remove()"' not in recommend_js
         assert "card-cover-frame" in recommend_js
-        assert "message-cover-frame" in chat_js
+        assert "card-cover-frame" in app_css
         assert ".card-cover-frame.is-error" in app_css
-        assert ".message-cover-frame.is-error" in app_css
         assert ".card-cover::after" not in app_css
-        assert ".message-cover-frame img" in app_css
+
+    def test_recommendation_cover_preload_helpers(self) -> None:
+        _assert_js(
+            dedent("""
+            import assert from "node:assert/strict";
+            import {
+              getRecommendationCoverPreloadUrls,
+              getRecommendationImageLoadingAttrs,
+            } from "./src/openbiliclaw/web/js/view-models.js";
+
+            const tenItems = Array.from({ length: 10 }, (_, index) => ({
+              cover_url: `https://i${index}.hdslb.com/bfs/archive/${index}.jpg`,
+            }));
+            assert.equal(getRecommendationCoverPreloadUrls(tenItems).length, 10);
+
+            const urls = getRecommendationCoverPreloadUrls([
+              { cover_url: "http://i0.hdslb.com/bfs/archive/a.jpg" },
+              { cover_url: "//i0.hdslb.com/bfs/archive/a.jpg" },
+              { cover_url: "https://i1.hdslb.com/bfs/archive/b.jpg" },
+              { cover_url: "not-a-url" },
+              { cover_url: "" },
+              { cover_url: "https://sns-webpic-qc.xhscdn.com/c.jpg" },
+            ], { limit: 3 });
+
+            assert.deepEqual(urls, [
+              "/api/image-proxy?url=https%3A%2F%2Fi0.hdslb.com%2Fbfs%2Farchive%2Fa.jpg",
+              "/api/image-proxy?url=https%3A%2F%2Fi1.hdslb.com%2Fbfs%2Farchive%2Fb.jpg",
+              "/api/image-proxy?url=https%3A%2F%2Fsns-webpic-qc.xhscdn.com%2Fc.jpg",
+            ]);
+
+            assert.deepEqual(
+              getRecommendationImageLoadingAttrs(0),
+              { loading: "eager", fetchPriority: "high" },
+            );
+            assert.deepEqual(
+              getRecommendationImageLoadingAttrs(1),
+              { loading: "eager", fetchPriority: "high" },
+            );
+            assert.deepEqual(
+              getRecommendationImageLoadingAttrs(2),
+              { loading: "eager", fetchPriority: "auto" },
+            );
+            assert.deepEqual(
+              getRecommendationImageLoadingAttrs(11),
+              { loading: "eager", fetchPriority: "auto" },
+            );
+            assert.deepEqual(
+              getRecommendationImageLoadingAttrs(12),
+              { loading: "lazy", fetchPriority: "auto" },
+            );
+        """)
+        )
+
+    def test_mobile_recommendation_view_preloads_and_auto_appends(self) -> None:
+        recommend_js = Path("src/openbiliclaw/web/js/views/recommend.js").read_text()
+
+        assert "getRecommendationCoverPreloadUrls" in recommend_js
+        assert "getRecommendationImageLoadingAttrs" in recommend_js
+        assert "function warmRecommendationCovers" in recommend_js
+        assert "new Image()" in recommend_js
+        assert ".decode()" in recommend_js
+        assert "waitForDecode" in recommend_js
+        assert "await warmRecommendationCovers(newItems," in recommend_js
+        assert "waitForDecode: true" in recommend_js
+        assert 'loading="${esc(imageAttrs.loading)}"' in recommend_js
+        assert 'fetchpriority="${esc(imageAttrs.fetchPriority)}"' in recommend_js
+        assert "AUTO_APPEND_ROOT_MARGIN" in recommend_js
+        assert "IntersectionObserver" in recommend_js
+        assert "observeAutoAppendSentinel" in recommend_js
+        assert ".load-more-row" in recommend_js
+        assert "handleAppend();" in recommend_js
 
     def test_normalize_recommendation_defaults(self) -> None:
         _assert_js(
             dedent("""
             import assert from "node:assert/strict";
-            import { normalizeRecommendation } from "./src/openbiliclaw/web/m/js/view-models.js";
+            import { normalizeRecommendation } from "./src/openbiliclaw/web/js/view-models.js";
 
             const rec = normalizeRecommendation({ id: 42, bvid: "BV1xx" });
             assert.equal(rec.id, 42);
@@ -150,21 +218,6 @@ class TestMobileWebViewModels:
             assert.equal(rec.title, "这条标题还没对上号");
             assert.equal(rec.up_name, "这位 UP 还没认出来");
             assert.equal(rec.source_platform, "bilibili");
-            assert.equal(rec.feedback_type, "");
-            assert.equal(rec.pool_status, "");
-        """)
-        )
-
-    def test_feedbacked_recommendation_detection(self) -> None:
-        _assert_js(
-            dedent("""
-            import assert from "node:assert/strict";
-            import { isFeedbackedRecommendation } from "./src/openbiliclaw/web/m/js/view-models.js";
-
-            assert.equal(isFeedbackedRecommendation({ feedback_type: "like" }), true);
-            assert.equal(isFeedbackedRecommendation({ feedback: "dismiss" }), true);
-            assert.equal(isFeedbackedRecommendation({ pool_status: "feedbacked" }), true);
-            assert.equal(isFeedbackedRecommendation({ status: "active" }), false);
         """)
         )
 
@@ -172,7 +225,7 @@ class TestMobileWebViewModels:
         _assert_js(
             dedent("""
             import assert from "node:assert/strict";
-            import { buildFeedbackPayload } from "./src/openbiliclaw/web/m/js/view-models.js";
+            import { buildFeedbackPayload } from "./src/openbiliclaw/web/js/view-models.js";
 
             const p = buildFeedbackPayload(42, "like", "  nice  ");
             assert.equal(p.recommendation_id, 42);
@@ -190,7 +243,7 @@ class TestMobileWebViewModels:
         _assert_js(
             dedent("""
             import assert from "node:assert/strict";
-            import { getDelightActionState } from "./src/openbiliclaw/web/m/js/view-models.js";
+            import { getDelightActionState } from "./src/openbiliclaw/web/js/view-models.js";
 
             const view = getDelightActionState("view");
             assert.equal(view.apiResponse, "view");
@@ -223,7 +276,7 @@ class TestMobileWebViewModels:
         _assert_js(
             dedent("""
             import assert from "node:assert/strict";
-            import { getDelightUiState } from "./src/openbiliclaw/web/m/js/view-models.js";
+            import { getDelightUiState } from "./src/openbiliclaw/web/js/view-models.js";
 
             const pending = getDelightUiState({ bvid: "BV1", title: "t", delight_score: 0.9 });
             assert.equal(pending.visible, true);
@@ -259,7 +312,7 @@ class TestMobileWebViewModels:
               getDelightMessageActions,
               getMobileChatSession,
               getProbeMessageActions,
-            } from "./src/openbiliclaw/web/m/js/view-models.js";
+            } from "./src/openbiliclaw/web/js/view-models.js";
 
             assert.deepEqual(getMobileChatSession(), { session: "popup", scope: "chat" });
             assert.deepEqual(
@@ -291,7 +344,7 @@ class TestMobileWebViewModels:
         _assert_js(
             dedent("""
             import assert from "node:assert/strict";
-            import { getPoolStatusSummary } from "./src/openbiliclaw/web/m/js/view-models.js";
+            import { getPoolStatusSummary } from "./src/openbiliclaw/web/js/view-models.js";
 
             // Uninit returns null
             assert.equal(getPoolStatusSummary({}), null);
@@ -337,7 +390,7 @@ class TestMobileWebViewModels:
             import assert from "node:assert/strict";
             import {
               getMobileRecommendationHeaderState,
-            } from "./src/openbiliclaw/web/m/js/view-models.js";
+            } from "./src/openbiliclaw/web/js/view-models.js";
 
             const header = getMobileRecommendationHeaderState({
               runtimeStatus: {
@@ -400,7 +453,7 @@ class TestMobileWebViewModels:
             import {
               getActivityCardState,
               normalizeActivityFeed,
-            } from "./src/openbiliclaw/web/m/js/view-models.js";
+            } from "./src/openbiliclaw/web/js/view-models.js";
 
             const empty = normalizeActivityFeed({});
             assert.equal(empty.items.length, 0);
@@ -426,7 +479,7 @@ class TestMobileWebViewModels:
         _assert_js(
             dedent("""
             import assert from "node:assert/strict";
-            import { normalizeProfileSummary } from "./src/openbiliclaw/web/m/js/view-models.js";
+            import { normalizeProfileSummary } from "./src/openbiliclaw/web/js/view-models.js";
 
             // Empty input gives defaults
             const empty = normalizeProfileSummary({});
@@ -466,7 +519,7 @@ class TestMobileWebViewModels:
               getContextPatternRows,
               getMbtiDisplayState,
               getProfileStyleDisplay,
-            } from "./src/openbiliclaw/web/m/js/view-models.js";
+            } from "./src/openbiliclaw/web/js/view-models.js";
 
             const mbti = getMbtiDisplayState({
               type: "INTJ",
@@ -504,9 +557,7 @@ class TestMobileWebViewModels:
         _assert_js(
             dedent("""
             import assert from "node:assert/strict";
-            import {
-              normalizeCognitionUpdateCard,
-            } from "./src/openbiliclaw/web/m/js/view-models.js";
+            import { normalizeCognitionUpdateCard } from "./src/openbiliclaw/web/js/view-models.js";
 
             const first = normalizeCognitionUpdateCard({
               summary: "更明确偏好因果链",
@@ -534,7 +585,7 @@ class TestMobileWebViewModels:
         _assert_js(
             dedent("""
             import assert from "node:assert/strict";
-            import { formatRelativeTimestamp } from "./src/openbiliclaw/web/m/js/view-models.js";
+            import { formatRelativeTimestamp } from "./src/openbiliclaw/web/js/view-models.js";
 
             const now = Date.parse("2025-06-01T12:00:00Z");
             assert.equal(formatRelativeTimestamp("2025-06-01T11:59:30Z", now), "刚刚");
@@ -553,7 +604,7 @@ class TestMobileWebViewModels:
             import {
               getSourceLabel,
               normalizeSourcePlatform,
-            } from "./src/openbiliclaw/web/m/js/view-models.js";
+            } from "./src/openbiliclaw/web/js/view-models.js";
 
             assert.equal(normalizeSourcePlatform({ bvid: "BV1xx" }), "bilibili");
             assert.equal(

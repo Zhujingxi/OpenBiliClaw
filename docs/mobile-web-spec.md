@@ -11,7 +11,7 @@
 | 技术栈 | Vanilla JS + ES Modules，模块化组件，无构建步骤 |
 | 样式 | 复用插件 CSS 设计令牌（CSS Variables），针对移动端重写布局 |
 | 路由 | SPA hash routing（`#/recommend`、`#/profile`、`#/chat`） |
-| 文件位置 | `src/openbiliclaw/web/m/` — 随 pip install 分发；`src/openbiliclaw/web/` 保留给桌面 Web UI |
+| 文件位置 | `src/openbiliclaw/web/` — 随 pip install 分发 |
 | 静态服务 | FastAPI `StaticFiles` mount at `/m/` |
 | 入口 URL | `http://<局域网IP>:8420/m/` |
 | 鉴权 | 不做鉴权；默认本机访问，手机访问需用户显式 `start --host 0.0.0.0` |
@@ -32,7 +32,7 @@
    - 点击跳转原始内容链接（`content_url` 优先，B 站 `bvid` fallback）
    - 点击直达上报（best-effort，不追踪观看时长）
    - "换一批" 按钮（reshuffle）
-   - 列表底部 "加载更多"（append）
+   - 接近列表底部自动 append 下一批，底部 "加载更多" 保留为手动兜底
    - 推荐池状态显示（当前可换、最近补进、现在在忙）
    - Delight 惊喜推荐 banner（队列浏览 ‹/›），动作与插件对齐为「看看 / 喜欢 / 不感兴趣 / 聊一聊」
 
@@ -78,32 +78,30 @@
 
 ```
 src/openbiliclaw/web/
-├── index.html          # 桌面 Web UI 入口
-└── m/
-    ├── index.html      # 移动端 SPA 入口
-    ├── manifest.json   # PWA manifest
-    ├── icon-192.png    # PWA 图标
-    ├── icon-512.png
-    ├── css/
-    │   └── app.css     # 全量样式（复用插件设计令牌）
-    └── js/
-        ├── app.js          # 入口：路由、Tab 切换、WebSocket
-        ├── api.js          # 后端 API 封装（同插件 popup-api.js）
-        ├── stream.js       # WebSocket 客户端（同插件 popup-stream.js）
-        ├── view-models.js  # 后端响应 → 移动端渲染字段适配
-        ├── views/
-        │   ├── recommend.js  # 推荐页渲染 & 交互
-        │   ├── profile.js    # 画像页渲染 & 交互
-        │   └── chat.js       # 对话页渲染 & 交互
-        └── components/
-            ├── tab-bar.js       # 底部导航
-            ├── status-bar.js    # 顶部状态栏
-            ├── card.js          # 推荐卡片
-            ├── delight.js       # 惊喜推荐 banner
-            ├── interest-tree.js # 兴趣树组件
-            ├── mbti.js          # MBTI 展示
-            ├── messages.js      # 消息收件箱 overlay
-            └── pull-refresh.js  # 下拉刷新
+├── index.html          # SPA 入口
+├── manifest.json       # PWA manifest
+├── icon-192.png        # PWA 图标
+├── icon-512.png
+├── css/
+│   └── app.css         # 全量样式（复用插件设计令牌）
+├── js/
+│   ├── app.js          # 入口：路由、Tab 切换、WebSocket
+│   ├── api.js          # 后端 API 封装（同插件 popup-api.js）
+│   ├── stream.js       # WebSocket 客户端（同插件 popup-stream.js）
+│   ├── view-models.js  # 后端响应 → 移动端渲染字段适配
+│   ├── views/
+│   │   ├── recommend.js  # 推荐页渲染 & 交互
+│   │   ├── profile.js    # 画像页渲染 & 交互
+│   │   └── chat.js       # 对话页渲染 & 交互
+│   └── components/
+│       ├── tab-bar.js       # 底部导航
+│       ├── status-bar.js    # 顶部状态栏
+│       ├── card.js          # 推荐卡片
+│       ├── delight.js       # 惊喜推荐 banner
+│       ├── interest-tree.js # 兴趣树组件
+│       ├── mbti.js          # MBTI 展示
+│       ├── messages.js      # 消息收件箱 overlay
+│       └── pull-refresh.js  # 下拉刷新
 ```
 
 ### 后端改动
@@ -172,14 +170,14 @@ if web_dir.is_dir():
 
 移动端会在 `view-models.js` 中做最小字段适配：
 - 推荐池状态读取 `/api/runtime-status` 的 `pool_available_count`、`last_replenished_count`、`recent_pool_topics`，再映射成推荐页三枚 chip 使用的 `pool_size`、`recent_replenish`、`current_topic`。
-- 推荐页头部用 `getMobileRecommendationHeaderState()` 生成插件语义一致的标题、首屏「换一批」、三枚池状态 chip 和活动辅助行；移动端把池状态压成横向轻量 pill，并把 `xhs-extension-*` / `dy-plugin-*` / `yt-*` 等内部来源名显示为用户可读短标签；「加载更多」保留为列表底部显式续页入口。
+- 推荐页头部用 `getMobileRecommendationHeaderState()` 生成插件语义一致的标题、首屏「换一批」、三枚池状态 chip 和活动辅助行；移动端把池状态压成横向轻量 pill，并把 `xhs-extension-*` / `dy-plugin-*` / `yt-*` 等内部来源名显示为用户可读短标签；列表接近底部时用 `IntersectionObserver` 自动调用 `append`，同时保留底部「加载更多」作为手动兜底。
 - 惊喜推荐沿用插件 compact banner 思路：左侧小缩略图、标签 / 标题 / 理由 / 来源围绕头图形成 featured card，推荐原因带轻量标记，翻页控件与「稍后看」关闭入口放在右上角，动作区仍保持「看看 / 喜欢 / 不感兴趣 / 聊一聊」；「聊一聊」会在当前卡片内展开 composer 和多轮气泡，不切换到对话 tab。
 - MBTI 维度兼容后端对象形态（如 `EI: { pole: "I", strength: 0.8 }`）和旧数组形态，统一映射为 `{ left, right, score }` 后再渲染。
 - MBTI 会保留后端 `confidence` 显示为“可信度”；内容口味将 `long/slow` 等 raw 枚举映射为“长视频 / 慢节奏”等中文标签；使用场景会显示 `session_type` 为“模式”。
 - 认知更新卡片会保留后端 `context_line` 与 `source_label`，即使前端已做过一次 normalize 后再次渲染，也不回退成泛化上下文。
 - 对话 turn 兼容 `response` 和后端当前返回的 `reply` 字段，统一映射成聊天气泡使用的 `response`。
 - 移动端主聊天与插件读取同一 `session=popup&scope=chat`；contextual delight/probe 聊天通过 `scope=delight/probe` 标识主题上下文。惊喜推荐内联聊天也复用 `session=popup&scope=delight`，按 `subject_id=bvid` hydrate 每条候选自己的 `turns` 历史，pending turn 通过 `/api/chat/turns/{turn_id}` 轮询恢复。
-- 封面图会在渲染前归一化：B 站 `http` / protocol-relative 地址升级为 HTTPS，小红书 `*.xhscdn.com` 这类直接 403 的热链地址不渲染，外链图片统一使用 `referrerpolicy="no-referrer"`，避免 localhost 页面触发热链拦截。
+- 封面图会在渲染前归一化：B 站 `http` / protocol-relative 地址升级为 HTTPS，推荐、惊喜推荐和消息封面统一走本地 `/api/image-proxy`，加载失败时保留固定比例 fallback。推荐列表当前批次默认预热 12 张封面，前 12 张使用 eager 加载，追加批次会先等待封面预热/解码或短超时再插入卡片；封面 frame 使用粉蓝渐变骨架占位，真实图片 decode 完成后淡入，减少高速滑动过程中的白屏。
 
 ### 静态资源
 
@@ -198,7 +196,7 @@ if web_dir.is_dir():
 ## 实施计划
 
 ### Phase 1: 后端 + 骨架（~1h）
-1. `src/openbiliclaw/web/m/` 目录 + index.html 骨架
+1. `src/openbiliclaw/web/` 目录 + index.html 骨架
 2. FastAPI StaticFiles mount
 3. SPA hash router + Tab 切换
 4. CSS 设计令牌 + 移动端基础布局
@@ -209,7 +207,7 @@ if web_dir.is_dir():
 1. 推荐卡片组件
 2. 推荐列表渲染 + 空状态
 3. 池状态显示
-4. 换一批 / 加载更多
+4. 换一批 / 自动续页 / 加载更多兜底
 5. Delight banner + 队列导航
 6. 下拉刷新
 7. 实时更新（WebSocket）

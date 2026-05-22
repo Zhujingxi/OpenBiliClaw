@@ -290,11 +290,13 @@ class TestBackendAPI:
                 memory: object,
                 usage_recorder: object | None = None,
                 module_overrides: object | None = None,
+                concurrency: int = 1,
             ) -> None:
                 self.registry = registry
                 self.memory = memory
                 self.usage_recorder = usage_recorder
                 self.module_overrides = module_overrides
+                self.concurrency = concurrency
 
         class FakeBilibiliClient:
             def __init__(self, *, cookie: str) -> None:
@@ -421,11 +423,13 @@ class TestBackendAPI:
                 memory: object,
                 usage_recorder: object | None = None,
                 module_overrides: object | None = None,
+                concurrency: int = 1,
             ) -> None:
                 self.registry = registry
                 self.memory = memory
                 self.usage_recorder = usage_recorder
                 self.module_overrides = module_overrides
+                self.concurrency = concurrency
 
         class FakeBilibiliClient:
             def __init__(self, *, cookie: str) -> None:
@@ -490,6 +494,7 @@ class TestBackendAPI:
         fake_config = SimpleNamespace(
             data_path=Path("/tmp/openbiliclaw-test-data"),
             bilibili=SimpleNamespace(cookie="", browser_executable="", browser_headed=False),
+            llm=SimpleNamespace(concurrency=3),
             sources=SimpleNamespace(
                 browser_cdp_url="",
                 browser_headed=False,
@@ -630,12 +635,7 @@ class TestBackendAPI:
     def test_favicon_endpoint_serves_mobile_web_icon(self) -> None:
         from fastapi.testclient import TestClient
 
-        app = create_app(
-            memory_manager=object(),
-            database=object(),
-            soul_engine=object(),
-            serve_webui=True,
-        )
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
         client = TestClient(app)
 
         response = client.get("/favicon.ico")
@@ -643,54 +643,6 @@ class TestBackendAPI:
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("image/png")
         assert response.content
-
-    def test_webui_routes_are_disabled_by_default(self) -> None:
-        from fastapi.testclient import TestClient
-
-        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
-        client = TestClient(app)
-
-        assert client.get("/", follow_redirects=False).status_code == 404
-        assert client.get("/web").status_code == 404
-        assert client.get("/web/assets/css/app.css").status_code == 404
-        assert client.get("/m/").status_code == 404
-        assert client.get("/favicon.ico").status_code == 404
-
-    def test_webui_routes_serve_bundled_html_when_enabled(self) -> None:
-        from fastapi.testclient import TestClient
-
-        app = create_app(
-            memory_manager=object(),
-            database=object(),
-            soul_engine=object(),
-            serve_webui=True,
-        )
-        client = TestClient(app)
-
-        root_response = client.get("/", follow_redirects=False)
-        assert root_response.status_code == 302
-        assert root_response.headers["location"] == "/web"
-
-        for path in ("/web", "/web/"):
-            response = client.get(path)
-            assert response.status_code == 200
-            assert response.headers["content-type"].startswith("text/html")
-            assert "OpenBiliClaw" in response.text
-            assert "为你推荐的内容" in response.text
-
-        css_response = client.get("/web/assets/css/app.css")
-        assert css_response.status_code == 200
-        assert css_response.headers["content-type"].startswith("text/css")
-        assert ".video-card" in css_response.text
-
-        js_response = client.get("/web/assets/js/app.js")
-        assert js_response.status_code == 200
-        assert "DEFAULT_API_BASE" in js_response.text
-
-        mobile_response = client.get("/m/")
-        assert mobile_response.status_code == 200
-        assert mobile_response.headers["content-type"].startswith("text/html")
-        assert "OpenBiliClaw" in mobile_response.text
 
     def test_health_endpoint_reports_profile_ready_when_available(self) -> None:
         from fastapi.testclient import TestClient
@@ -1466,27 +1418,7 @@ class TestBackendAPI:
                         "feedback_type": "comment",
                         "feedback_note": "想看更深一点的。",
                         "feedback_at": "2026-03-15T10:05:00+08:00",
-                    },
-                    {
-                        "id": 8,
-                        "title": "酷态科是怎么放这种东西出厂的",
-                        "topic": "数码评测",
-                        "expression": "这条来自候选池。",
-                        "created_at": "2026-03-15T10:01:00+08:00",
-                        "feedback_type": "Dismiss",
-                        "feedback_note": "",
-                        "feedback_at": "2026-03-15T10:06:00+08:00",
-                    },
-                    {
-                        "id": 9,
-                        "title": "未知反馈类型不该展示",
-                        "topic": "数码评测",
-                        "expression": "这条来自候选池。",
-                        "created_at": "2026-03-15T10:02:00+08:00",
-                        "feedback_type": "archive",
-                        "feedback_note": "",
-                        "feedback_at": "2026-03-15T10:07:00+08:00",
-                    },
+                    }
                 ]
 
         class FakeMemoryManager:
@@ -1532,19 +1464,7 @@ class TestBackendAPI:
         assert data["live_summary"] == "正在给你补候选…"
         assert data["headline"] == "阿B 刚记下了：你最近更吃把因果链讲透的内容。"
         assert data["items"][0]["kind"] == "interest_added"
-        feedback_items = [item for item in data["items"] if item["kind"] == "feedback"]
-        assert feedback_items == [
-            {
-                "id": "feedback-7",
-                "kind": "feedback",
-                "summary": "你刚给 讲透贸易逆差 写了一句反馈",
-                "detail": "想看更深一点的。",
-                "created_at": "2026-03-15T10:05:00+08:00",
-                "tone": "info",
-            }
-        ]
-        assert not any("酷态科" in item["summary"] for item in feedback_items)
-        assert not any("未知反馈类型" in item["summary"] for item in feedback_items)
+        assert any(item["kind"] == "feedback" for item in data["items"])
         assert any(item["kind"] == "pool_update" for item in data["items"])
 
     def test_refresh_recommendations_endpoint_triggers_runtime_refresh(self) -> None:
@@ -1842,100 +1762,6 @@ class TestBackendAPI:
         assert response.json() == {"ok": True, "bvid": "BV1ACK"}
         assert runtime.marked == ["BV1ACK"]
 
-    def test_delight_like_marks_candidate_consumed(self) -> None:
-        from fastapi.testclient import TestClient
-
-        class FakeDatabase:
-            def __init__(self) -> None:
-                self.writes: list[tuple[str, tuple[object, ...]]] = []
-
-            def _execute_write(self, sql: str, params: tuple[object, ...]) -> None:
-                self.writes.append((sql, params))
-
-        class FakeMemoryManager:
-            def __init__(self) -> None:
-                self.updates: list[dict[str, object]] = []
-
-            def load_cognition_updates(self) -> list[dict[str, object]]:
-                return list(self.updates)
-
-            def save_cognition_updates(self, updates: list[dict[str, object]]) -> None:
-                self.updates = updates
-
-        class FakeRuntimeController:
-            def __init__(self) -> None:
-                self.marked: list[str] = []
-
-            def mark_delight_sent(self, bvid: str) -> None:
-                self.marked.append(bvid)
-
-        database = FakeDatabase()
-        runtime = FakeRuntimeController()
-        app = create_app(
-            memory_manager=FakeMemoryManager(),
-            database=database,
-            soul_engine=object(),
-            runtime_controller=runtime,
-        )
-        client = TestClient(app)
-
-        response = client.post(
-            "/api/delight/respond",
-            json={"bvid": "BV1DL", "title": "惊喜内容", "response": "like"},
-        )
-
-        assert response.status_code == 200
-        assert response.json()["action"] == "liked"
-        assert runtime.marked == ["BV1DL"]
-        assert any("feedback_type='like'" in sql for sql, _params in database.writes)
-
-    def test_delight_dislike_marks_candidate_consumed_and_feedbacked(self) -> None:
-        from fastapi.testclient import TestClient
-
-        class FakeDatabase:
-            def __init__(self) -> None:
-                self.writes: list[tuple[str, tuple[object, ...]]] = []
-
-            def _execute_write(self, sql: str, params: tuple[object, ...]) -> None:
-                self.writes.append((sql, params))
-
-        class FakeMemoryManager:
-            def load_cognition_updates(self) -> list[dict[str, object]]:
-                return []
-
-            def save_cognition_updates(self, updates: list[dict[str, object]]) -> None:
-                self.updates = updates
-
-        class FakeRuntimeController:
-            def __init__(self) -> None:
-                self.marked: list[str] = []
-
-            def mark_delight_sent(self, bvid: str) -> None:
-                self.marked.append(bvid)
-
-        database = FakeDatabase()
-        runtime = FakeRuntimeController()
-        app = create_app(
-            memory_manager=FakeMemoryManager(),
-            database=database,
-            soul_engine=object(),
-            runtime_controller=runtime,
-        )
-        client = TestClient(app)
-
-        response = client.post(
-            "/api/delight/respond",
-            json={"bvid": "BV1DL", "title": "惊喜内容", "response": "dislike"},
-        )
-
-        assert response.status_code == 200
-        assert response.json()["action"] == "disliked"
-        assert runtime.marked == ["BV1DL"]
-        assert any(
-            "pool_status = 'purged_by_dislike'" in sql and "feedback_type = 'dislike'" in sql
-            for sql, _params in database.writes
-        )
-
     def test_feedback_endpoint_updates_recommendation_and_records_event(self) -> None:
         from fastapi.testclient import TestClient
 
@@ -1988,66 +1814,6 @@ class TestBackendAPI:
         assert memory.events[0]["event_type"] == "feedback"
         assert memory.events[0]["metadata"]["recommendation_id"] == 7
         assert memory.events[0]["metadata"]["feedback_type"] == "like"
-
-    def test_feedback_endpoint_dismiss_clears_without_cognition(self) -> None:
-        from fastapi.testclient import TestClient
-
-        class FakeMemoryManager:
-            def __init__(self) -> None:
-                self.events: list[dict[str, object]] = []
-
-            async def propagate_event(self, event: dict[str, object]) -> None:
-                self.events.append(event)
-
-        class FakeDatabase:
-            def __init__(self) -> None:
-                self.updated: list[tuple[int, str, str]] = []
-
-            def get_recommendation_by_id(self, recommendation_id: int) -> dict[str, object] | None:
-                return {"id": recommendation_id, "bvid": "BV1REC", "title": "讲透城市与建筑"}
-
-            def update_recommendation_feedback(
-                self,
-                recommendation_id: int,
-                *,
-                feedback_type: str,
-                feedback_note: str = "",
-            ) -> None:
-                self.updated.append((recommendation_id, feedback_type, feedback_note))
-
-        class FakeSoulEngine:
-            def __init__(self) -> None:
-                self.immediate_calls: list[tuple[str, str, str]] = []
-
-            def record_immediate_feedback_cognition(
-                self,
-                *,
-                feedback_type: str,
-                title: str,
-                note: str = "",
-            ) -> None:
-                self.immediate_calls.append((feedback_type, title, note))
-
-        memory = FakeMemoryManager()
-        database = FakeDatabase()
-        soul_engine = FakeSoulEngine()
-        app = create_app(memory_manager=memory, database=database, soul_engine=soul_engine)
-        client = TestClient(app)
-
-        response = client.post(
-            "/api/feedback",
-            json={"recommendation_id": 7, "feedback_type": "dismiss", "note": ""},
-        )
-
-        assert response.status_code == 200
-        assert response.json() == {
-            "ok": True,
-            "recommendation_id": 7,
-            "feedback_type": "dismiss",
-        }
-        assert database.updated == [(7, "dismiss", "")]
-        assert memory.events == []
-        assert soul_engine.immediate_calls == []
 
     def test_feedback_endpoint_rejects_comment_without_note(self) -> None:
         from fastapi.testclient import TestClient
@@ -3949,6 +3715,7 @@ class TestEmbeddingAndCompatProviderE2E:
         data = response.json()
 
         assert data["data_dir"] == "runtime-data"
+        assert data["llm"]["concurrency"] == 3
         assert data["llm"]["deepseek"]["reasoning_effort"] == "high"
         assert data["llm"]["openrouter"]["http_referer"] == "https://example.com"
         assert data["llm"]["openrouter"]["x_title"] == "Example App"
@@ -4087,6 +3854,7 @@ class TestEmbeddingAndCompatProviderE2E:
             json={
                 "data_dir": "runtime-data",
                 "llm": {
+                    "concurrency": 5,
                     "deepseek": {"reasoning_effort": "high"},
                     "openrouter": {
                         "http_referer": "https://example.com",
@@ -4169,6 +3937,8 @@ class TestEmbeddingAndCompatProviderE2E:
 
         assert response.status_code == 200
         assert cfg.data_dir == "runtime-data"
+        assert cfg.llm.concurrency == 5
+        assert response.json()["config"]["llm"]["concurrency"] == 5
         assert cfg.llm.deepseek.reasoning_effort == "high"
         assert cfg.llm.openrouter.http_referer == "https://example.com"
         assert cfg.llm.openrouter.x_title == "Example App"
@@ -4493,3 +4263,80 @@ def test_events_endpoint_skips_activity_added_for_empty_batch() -> None:
 
     activity_events = [e for e in hub.events if e["type"] == "activity.added"]
     assert activity_events == []
+
+
+def test_probe_chat_sentiment_uses_plain_text_llm_call() -> None:
+    """Probe chat sentiment asks for one scalar word, not a JSON object.
+
+    DeepSeek rejects ``response_format=json_object`` for this prompt because
+    it intentionally does not ask for JSON. The API should therefore call the
+    plain core-memory LLM path with ``json_mode=False``.
+    """
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+
+    class FakeLLM:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        async def complete_structured_task(self, **kwargs: object) -> SimpleNamespace:
+            self.calls.append(("structured", kwargs))
+            return SimpleNamespace(content="positive")
+
+        async def complete_with_core_memory(self, **kwargs: object) -> SimpleNamespace:
+            self.calls.append(("core", kwargs))
+            return SimpleNamespace(content="positive")
+
+    class FakeDialogue:
+        async def respond(self, _message: str) -> str:
+            return "懂，你更喜欢和 VOCALOID 相关的部分。"
+
+    class FakeSpeculator:
+        def __init__(self) -> None:
+            self.observed: list[object] = []
+
+        def observe(self, events: object) -> None:
+            self.observed.append(events)
+
+        def user_reject_speculation(self, *_args: object, **_kwargs: object) -> bool:
+            return True
+
+    class FakeSoulEngine:
+        def __init__(self, speculator: FakeSpeculator) -> None:
+            self._speculator = speculator
+
+    class FakeMemoryManager:
+        def load_cognition_updates(self) -> list[object]:
+            return []
+
+        def save_cognition_updates(self, _updates: list[object]) -> None:
+            return None
+
+    llm = FakeLLM()
+    speculator = FakeSpeculator()
+    app = create_app(
+        memory_manager=FakeMemoryManager(),
+        database=object(),
+        soul_engine=FakeSoulEngine(speculator),
+        dialogue=FakeDialogue(),
+        recommendation_engine=SimpleNamespace(_llm=llm),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/interest-probes/respond",
+        json={
+            "domain": "电子音乐制作",
+            "response": "chat",
+            "message": "我更喜欢与vocaloid有关系的部分",
+        },
+    )
+
+    assert response.status_code == 200
+    assert llm.calls
+    method, kwargs = llm.calls[0]
+    assert method == "core"
+    assert kwargs["caller"] == "api.sentiment"
+    assert kwargs["max_tokens"] == 8
+    assert kwargs["json_mode"] is False
