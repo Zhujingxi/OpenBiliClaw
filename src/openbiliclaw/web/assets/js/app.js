@@ -422,12 +422,20 @@
       }));
     }
 
-    async function openRecommendation(item, card) {
-      await requestJson(ENDPOINTS.click, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bvid: item.bvid, title: item.title, recommendation_id: item.id, topic_label: item.topic, up_name: item.up }) });
+    function trackRecommendationClick(item) {
+      void requestJson(ENDPOINTS.click, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bvid: item.bvid, title: item.title, recommendation_id: item.id, topic_label: item.topic, up_name: item.up })
+      }).catch(() => {});
+    }
+
+    function openRecommendation(item, card) {
       const url = contentUrl(item);
-      card.querySelector(".status-line").textContent = url ? "已记录点击信号，并打开真实内容链接。" : "已记录点击信号；后端没有返回可打开链接。";
       if (url) window.open(url, "_blank", "noopener,noreferrer");
-      showToast(`打开：${item.title}`);
+      trackRecommendationClick(item);
+      card.querySelector(".status-line").textContent = url ? "已打开真实内容链接，点击信号会在后台记录。" : "后端没有返回可打开链接；点击信号会在后台记录。";
+      showToast(url ? `打开：${item.title}` : "后端没有返回可打开链接");
     }
 
     async function submitFeedback(item, feedback_type, note = "") {
@@ -1185,9 +1193,7 @@
       if (response === "view") {
         const url = delight.content_url || (delight.bvid ? `https://www.bilibili.com/video/${encodeURIComponent(delight.bvid)}` : "");
         if (url) window.open(url, "_blank", "noopener,noreferrer");
-        try {
-          await requestJson(ENDPOINTS.click, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bvid: delight.bvid, title: delight.title, recommendation_id: delight.id, topic_label: delight.topic, up_name: delight.up }) });
-        } catch (_) {}
+        trackRecommendationClick(delight);
         showToast(url ? "已打开惊喜推荐" : "后端没有返回可打开链接");
         return;
       }
