@@ -10,6 +10,7 @@
 - 移动 Web 惊喜推荐的「聊一聊」不再切到对话 tab，而是在当前惊喜卡片内展开 16px textarea composer，提交后就地显示用户气泡、AI thinking、完成回复或失败提示。
 - 移动 Web 和插件的惊喜推荐内聊统一走 durable `/api/chat/turns`，按 `scope=delight` + `subject_id` 归并历史；pending turn 会轮询恢复，reload 后可重新 hydrate。
 - 移动 Web 推荐列表新增封面预热和接近底部自动续页：首屏推荐封面用 eager/high priority 加载，后续封面通过 `/api/image-proxy` URL best-effort 预热；滚到列表底部附近会自动调用 `append` 续下一批，底部「加载更多」按钮保留为兜底。
+- 移动 Web 推荐列表的高速滑动封面体验继续收敛：当前批次默认预热 12 张封面，前 12 张用 eager 加载，追加批次会先等待封面预热/解码或短超时再插入卡片；封面图加载和 decode 完成前保持透明，让粉蓝渐变骨架先显示，decode 完成后淡入，减少快速下滑时的白屏闪烁。
 - 插件惊喜推荐卡片从单个 `chat_reply` 升级为 per-delight `turns` 多轮气泡，`chat_reply` 仅保留为兼容 last reply；切换候选和 side panel reload 不再覆盖旧回合。
 - Discovery / recommendation 的批量内容评估统一透传近期 negative exemplars：B 站、抖音、YouTube 策略和 OpenClaw bootstrap 都会把共享 database 传给内部 evaluator；推荐层的未分类池子补评估也会带上 `negative_examples`，让短期话术避让与长期 `disliked_topics` 一起生效。
 - 补充移动端回归测试，锁定 delight inline chat 复用 `session=popup` 契约、`chatted` 状态继续保留「聊一聊」入口，同时 viewed/liked/rejected 等永久处理态不泄漏通用动作按钮。
