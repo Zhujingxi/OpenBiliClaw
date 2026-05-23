@@ -647,6 +647,11 @@ class SchedulerConfigOut(BaseModel):
     speculation_max_active: int = 5
     speculation_max_primary_interests: int = 15
     speculation_max_secondary_interests: int = 60
+    avoidance_speculation_interval_minutes: int = 10
+    avoidance_speculation_ttl_days: int = 3
+    avoidance_speculation_cooldown_days: int = 7
+    avoidance_speculation_confirmation_threshold: int = 3
+    avoidance_speculation_max_active: int = 5
     auto_update_enabled: bool = False
     auto_update_check_interval_hours: int = 6
 

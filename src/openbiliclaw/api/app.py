@@ -1410,9 +1410,12 @@ def create_app(
             InterestSpecificOut,
             MBTIDimensionOut,
             MBTIOut,
+            SpeculativeAvoidanceOut,
             SpeculativeInterestOut,
+            SpeculativeSpecificOut,
             StylePreferenceOut,
         )
+        from openbiliclaw.soul.avoidance_speculator import load_avoidance_state
         from openbiliclaw.soul.speculator import load_speculative_state
 
         prefs = profile.preferences
@@ -1511,9 +1514,10 @@ def create_app(
 
         # ── Speculative interests ──
         spec_items: list[SpeculativeInterestOut] = []
+        avoidance_items: list[SpeculativeAvoidanceOut] = []
+        runtime_config = getattr(ctx, "config", None) or config
         try:
-            spec_state = load_speculative_state(ctx.config.data_path)
-            from openbiliclaw.api.models import SpeculativeSpecificOut
+            spec_state = load_speculative_state(runtime_config.data_path)
 
             # Filter status="active" only — confirmed/rejected items are
             # technically still in spec_state.active until force_tick rotates
@@ -1542,6 +1546,36 @@ def create_app(
             ]
         except Exception:
             logger.debug("Failed to load speculative state for profile summary")
+
+        # ── Speculative avoidances ──
+        try:
+            avoidance_state = load_avoidance_state(runtime_config.data_path)
+            active_avoidances = [
+                item for item in avoidance_state.active if item.status == "active"
+            ]
+            avoidance_items = [
+                SpeculativeAvoidanceOut(
+                    domain=item.domain,
+                    reason=item.reason,
+                    confidence=item.confidence,
+                    source_mode=item.source_mode,
+                    source_signal=item.source_signal,
+                    confirmation_count=item.confirmation_count,
+                    confirmation_threshold=item.confirmation_threshold,
+                    status=item.status,
+                    specifics=[
+                        SpeculativeSpecificOut(
+                            name=s.name,
+                            confirmation_count=s.confirmation_count,
+                        )
+                        for s in item.specifics
+                        if s.name.strip()
+                    ],
+                )
+                for item in active_avoidances[:6]
+            ]
+        except Exception:
+            logger.debug("Failed to load avoidance state for profile summary")
 
         active_insights_out = [
             InsightHypothesisOut(
@@ -1590,7 +1624,7 @@ def create_app(
             exploration_openness=exploration_openness,
             # Cross-cutting
             speculative_interests=spec_items,
-            speculative_avoidances=[],
+            speculative_avoidances=avoidance_items,
             recent_cognition_updates=cognition_updates,
             has_more_cognition_updates=has_more_cognition_updates,
             next_cognition_cursor=next_cognition_cursor,
@@ -4025,6 +4059,17 @@ def create_app(
                 speculation_max_secondary_interests=(
                     cfg.scheduler.speculation_max_secondary_interests
                 ),
+                avoidance_speculation_interval_minutes=(
+                    cfg.scheduler.avoidance_speculation_interval_minutes
+                ),
+                avoidance_speculation_ttl_days=cfg.scheduler.avoidance_speculation_ttl_days,
+                avoidance_speculation_cooldown_days=(
+                    cfg.scheduler.avoidance_speculation_cooldown_days
+                ),
+                avoidance_speculation_confirmation_threshold=(
+                    cfg.scheduler.avoidance_speculation_confirmation_threshold
+                ),
+                avoidance_speculation_max_active=cfg.scheduler.avoidance_speculation_max_active,
                 auto_update_enabled=cfg.scheduler.auto_update_enabled,
                 auto_update_check_interval_hours=cfg.scheduler.auto_update_check_interval_hours,
             ),
@@ -4309,6 +4354,11 @@ def create_app(
                     1,
                     None,
                 ),
+                "avoidance_speculation_interval_minutes": (10, 1, None),
+                "avoidance_speculation_ttl_days": (3, 1, None),
+                "avoidance_speculation_cooldown_days": (7, 1, None),
+                "avoidance_speculation_confirmation_threshold": (3, 1, None),
+                "avoidance_speculation_max_active": (5, 1, None),
             }
             for key in (
                 "enabled",
@@ -4331,6 +4381,11 @@ def create_app(
                 "speculation_max_active",
                 "speculation_max_primary_interests",
                 "speculation_max_secondary_interests",
+                "avoidance_speculation_interval_minutes",
+                "avoidance_speculation_ttl_days",
+                "avoidance_speculation_cooldown_days",
+                "avoidance_speculation_confirmation_threshold",
+                "avoidance_speculation_max_active",
                 "auto_update_enabled",
                 "auto_update_check_interval_hours",
                 "feedback_batch_threshold",

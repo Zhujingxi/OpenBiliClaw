@@ -491,7 +491,7 @@ class AvoidanceSpeculator:
         self,
         *,
         llm_service: object | None,
-        data_dir: Path,
+        data_dir: Path | None,
         generation_interval_minutes: int = 10,
         default_ttl_days: int = 3,
         cooldown_days: int = 7,
@@ -507,9 +507,13 @@ class AvoidanceSpeculator:
         self._max_active = max_active
 
     def _load_state(self) -> AvoidanceState:
+        if self._data_dir is None:
+            return AvoidanceState()
         return load_avoidance_state(self._data_dir)
 
     def _save_state(self, state: AvoidanceState) -> None:
+        if self._data_dir is None:
+            return
         save_avoidance_state(self._data_dir, state)
 
     def get_active_avoidances(self) -> list[SpeculativeAvoidance]:

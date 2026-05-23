@@ -2167,6 +2167,64 @@ class TestBackendAPI:
         assert data["has_more_cognition_updates"] is False
         assert data["next_cognition_cursor"] == ""
 
+    def test_profile_summary_endpoint_includes_speculative_avoidances(self, tmp_path: Path) -> None:
+        from types import SimpleNamespace
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.soul.avoidance_speculator import (
+            AvoidanceState,
+            SpeculativeAvoidance,
+            SpeculativeAvoidanceSpecific,
+            save_avoidance_state,
+        )
+        from openbiliclaw.soul.profile import OnionProfile
+
+        save_avoidance_state(
+            tmp_path,
+            AvoidanceState(
+                active=[
+                    SpeculativeAvoidance(
+                        domain="浅层热点复读",
+                        reason="用户可能想避开无信息增量的热点复读内容。",
+                        source_mode="negative_signal",
+                        source_signal="thumbs_down",
+                        experience_mode="knowledge",
+                        entry_load="light",
+                        confidence=0.66,
+                        specifics=[
+                            SpeculativeAvoidanceSpecific(name="标题党热点解读"),
+                            SpeculativeAvoidanceSpecific(name="无信息增量复读"),
+                        ],
+                    ),
+                    SpeculativeAvoidance(domain="已确认", status="confirmed"),
+                ]
+            ),
+        )
+
+        class FakeSoulEngine:
+            async def get_profile(self) -> OnionProfile:
+                return OnionProfile()
+
+        app = create_app(
+            soul_engine=FakeSoulEngine(),
+            memory_manager=SimpleNamespace(load_cognition_updates=lambda: []),
+            database=object(),
+        )
+        app.state.runtime_context.config = SimpleNamespace(data_path=tmp_path)
+        client = TestClient(app)
+
+        response = client.get("/api/profile-summary")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["speculative_avoidances"][0]["domain"] == "浅层热点复读"
+        assert data["speculative_avoidances"][0]["source_mode"] == "negative_signal"
+        assert [item["name"] for item in data["speculative_avoidances"][0]["specifics"]] == [
+            "标题党热点解读",
+            "无信息增量复读",
+        ]
+
     def test_profile_summary_endpoint_paginates_cognition_history(self) -> None:
         from fastapi.testclient import TestClient
 

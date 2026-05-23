@@ -192,6 +192,7 @@ def _make_low_threshold_pipeline(
     *,
     service: Any = None,
     speculator: Any = None,
+    avoidance_speculator: Any = None,
     speculator_idle_interval_minutes: int = 30,
 ) -> tuple[ProfileUpdatePipeline, _RichFakeService, MemoryManager]:
     """Pipeline with min_signals=1 thresholds — every signal triggers update."""
@@ -208,6 +209,7 @@ def _make_low_threshold_pipeline(
         profile_builder=ProfileBuilder(registry=svc),
         thresholds=thresholds,
         speculator=speculator,
+        avoidance_speculator=avoidance_speculator,
         speculator_idle_interval_minutes=speculator_idle_interval_minutes,
     )
     return pipeline, svc, memory
@@ -826,6 +828,72 @@ async def test_speculator_promotion_records_layer_update(tmp_path: Path) -> None
     assert promoted_updates, "Promoted speculation must produce a LayerUpdateResult"
     assert promoted_updates[0].layer == OnionLayer.INTEREST
     assert "AI伦理" in promoted_updates[0].changes[0]
+
+
+@pytest.mark.asyncio
+async def test_avoidance_speculator_observe_called_on_ingest(tmp_path: Path) -> None:
+    """ingest_batch should pass payloads to the avoidance speculator too."""
+    spy = _SpeculatorSpy()
+    pipeline, _, _ = _make_low_threshold_pipeline(tmp_path, avoidance_speculator=spy)
+
+    await pipeline.ingest(signals_from_events([{"event_type": "dislike", "title": "标题党"}])[0])
+
+    assert len(spy.observe_calls) == 1
+    assert spy.observe_calls[0][0]["title"] == "标题党"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_auto_promoted_avoidance_uses_apply_new_dislikes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Observe-driven avoidance promotion must use the shared dislike writeback."""
+    from openbiliclaw.soul import pipeline as pipeline_mod
+    from openbiliclaw.soul.avoidance_speculator import (
+        SpeculativeAvoidance,
+        SpeculativeAvoidanceSpecific,
+    )
+
+    class _PromotingAvoidanceSpeculator(_SpeculatorSpy):
+        async def tick(self, profile: Any, *, feedback_history: object | None = None) -> Any:
+            self.tick_called = True
+
+            class _R:
+                promoted = [
+                    SpeculativeAvoidance(
+                        domain="浅层热点复读",
+                        confirmation_count=3,
+                        confirmation_threshold=3,
+                        specifics=[
+                            SpeculativeAvoidanceSpecific(name="标题党热点解读"),
+                            SpeculativeAvoidanceSpecific(name="无信息增量复读"),
+                        ],
+                    )
+                ]
+                rejected: list[Any] = []
+                generated: list[Any] = []
+
+            return _R()
+
+    calls: list[dict[str, Any]] = []
+
+    async def fake_apply_new_dislikes(**kwargs: Any) -> list[str]:
+        calls.append(kwargs)
+        return [f"新增不喜欢方向: {topic}" for topic in kwargs["topics"]]
+
+    monkeypatch.setattr(pipeline_mod, "apply_new_dislikes", fake_apply_new_dislikes, raising=False)
+
+    spy = _PromotingAvoidanceSpeculator()
+    pipeline, _, _ = _make_low_threshold_pipeline(tmp_path, avoidance_speculator=spy)
+
+    flush_result = await pipeline.tick()
+
+    assert spy.tick_called
+    assert [call["topics"] for call in calls] == [["标题党热点解读", "无信息增量复读"]]
+    promoted_updates = [r for r in flush_result.layers_updated if r.trigger == "避雷方向确认"]
+    assert promoted_updates, "Promoted avoidance must produce a LayerUpdateResult"
+    assert promoted_updates[0].layer == OnionLayer.INTEREST
+    assert "标题党热点解读" in promoted_updates[0].changes[0]
 
 
 # ===========================================================================
