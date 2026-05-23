@@ -813,7 +813,7 @@ def create_app(
 
     def _normalize_chat_scope(scope: str) -> str:
         normalized = scope.strip().lower()
-        if normalized in {"chat", "delight", "probe"}:
+        if normalized in {"chat", "delight", "probe", "avoidance_probe"}:
             return normalized
         return "chat"
 
@@ -2525,6 +2525,9 @@ def create_app(
         if turn.scope == "probe":
             label = turn.subject_title or turn.subject_id or "这个方向"
             return f"[关于猜测兴趣「{label}」的反馈] {turn.message}"
+        if turn.scope == "avoidance_probe":
+            label = turn.subject_title or turn.subject_id or "这个避雷方向"
+            return f"[关于避雷方向「{label}」的反馈] {turn.message}"
         return turn.message
 
     async def _generate_durable_chat_reply(turn: ChatTurnOut) -> str:
@@ -2597,6 +2600,59 @@ def create_app(
                 detail=f"你的反馈：{turn.message}\n阿b的回复：{reply}",
             )
             await _publish_probe_event("interest.chat", summary, domain)
+        elif turn.scope == "avoidance_probe":
+            domain = turn.subject_id or turn.subject_title
+            sentiment = await _judge_probe_sentiment(turn.message, reply, domain)
+            speculator = getattr(ctx.soul_engine, "_avoidance_speculator", None)
+            if sentiment == "negative":
+                chat_response = "chat_positive"
+                if speculator is not None:
+                    with suppress(Exception):
+                        speculator.observe(
+                            [
+                                {
+                                    "event_type": "dislike",
+                                    "title": domain,
+                                    "metadata": {
+                                        "feedback_type": "dislike",
+                                        "user_message": turn.message,
+                                        "source": "avoidance_probe_chat",
+                                    },
+                                }
+                            ]
+                        )
+                summary = f"你确认「{domain}」偏向不喜欢，确认度 +1。"
+            elif sentiment == "positive":
+                chat_response = "chat_negative"
+                if speculator is not None:
+                    reject_fn = getattr(speculator, "user_reject_avoidance", None)
+                    if callable(reject_fn):
+                        with suppress(Exception):
+                            reject_fn(domain, cooldown_days=14)
+                summary = f"你表示其实不排斥「{domain}」，已暂时搁置 14 天。"
+            else:
+                chat_response = "chat_neutral"
+                summary = f"关于避雷方向「{domain}」你说：{turn.message}"
+            if speculator is not None:
+                _record_probe_feedback_history(
+                    domain,
+                    chat_response,
+                    speculator=speculator,
+                    message=turn.message,
+                    state_key="avoidance_probe_feedback_history",
+                    metadata_fn=lambda item_domain: _probe_metadata_from_active_avoidance(
+                        speculator,
+                        item_domain,
+                    ),
+                )
+            _record_probe_cognition(
+                summary,
+                domain,
+                "chat",
+                source="avoidance_probe",
+                detail=f"你的反馈：{turn.message}\n阿b的回复：{reply}",
+            )
+            await _publish_probe_event("avoidance.chat", summary, domain)
 
         return reply
 

@@ -2953,6 +2953,114 @@ class TestBackendAPI:
             ).json()
             assert [item["turn_id"] for item in delight_history["items"]] == ["turn-delight-1"]
 
+    def test_chat_turn_endpoint_records_avoidance_probe_scope_context(
+        self, tmp_path: Path
+    ) -> None:
+        import asyncio
+        import time
+        from types import SimpleNamespace
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        class FakeDialogue:
+            def __init__(self) -> None:
+                self.messages: list[str] = []
+
+            async def respond(self, user_message: str) -> str:
+                self.messages.append(user_message)
+                await asyncio.sleep(0.01)
+                return "懂，这类你更像是在避开低信息密度。"
+
+        class FakeAvoidanceSpeculator:
+            def __init__(self) -> None:
+                self.observed: list[object] = []
+
+            def get_active_avoidances(self) -> list[object]:
+                return [
+                    SimpleNamespace(
+                        domain="浅层热点复读",
+                        reason="信息密度低",
+                        source_mode="negative_signal",
+                        source_signal="dislike",
+                        specifics=[SimpleNamespace(name="标题党热点解读")],
+                        experience_mode="knowledge",
+                        entry_load="light",
+                    )
+                ]
+
+            def observe(self, events: object) -> None:
+                self.observed.append(events)
+
+            def user_reject_avoidance(self, *_args: object, **_kwargs: object) -> bool:
+                return True
+
+        class FakeMemoryManager:
+            def __init__(self) -> None:
+                self.cognition_updates: list[object] = []
+                self.runtime_state: dict[str, object] = {
+                    "avoidance_probe_feedback_history": []
+                }
+
+            def load_cognition_updates(self) -> list[object]:
+                return list(self.cognition_updates)
+
+            def save_cognition_updates(self, updates: list[object]) -> None:
+                self.cognition_updates = list(updates)
+
+            def load_discovery_runtime_state(self) -> dict[str, object]:
+                return dict(self.runtime_state)
+
+            def save_discovery_runtime_state(self, state: dict[str, object]) -> None:
+                self.runtime_state = dict(state)
+
+        db = Database(tmp_path / "openbiliclaw.db")
+        db.initialize()
+        dialogue = FakeDialogue()
+        speculator = FakeAvoidanceSpeculator()
+        memory = FakeMemoryManager()
+        app = create_app(
+            memory_manager=memory,
+            database=db,
+            soul_engine=SimpleNamespace(_avoidance_speculator=speculator),
+            dialogue=dialogue,
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/chat/turns",
+                json={
+                    "turn_id": "turn-avoidance-1",
+                    "session": "popup",
+                    "scope": "avoidance_probe",
+                    "subject_id": "浅层热点复读",
+                    "subject_title": "浅层热点复读",
+                    "message": "对，这类我不喜欢",
+                },
+            )
+            assert response.status_code == 200
+
+            turn = response.json()
+            for _ in range(20):
+                time.sleep(0.02)
+                turn = client.get("/api/chat/turns/turn-avoidance-1").json()
+                if turn["status"] == "completed":
+                    break
+
+            assert turn["status"] == "completed"
+            assert turn["scope"] == "avoidance_probe"
+            assert "关于避雷方向「浅层热点复读」的反馈" in dialogue.messages[0]
+            assert speculator.observed
+
+            history = client.get(
+                "/api/chat/turns",
+                params={"session": "popup", "scope": "avoidance_probe"},
+            ).json()
+            assert [item["turn_id"] for item in history["items"]] == ["turn-avoidance-1"]
+            feedback_history = memory.runtime_state["avoidance_probe_feedback_history"]
+            assert feedback_history[0]["response"] == "chat_positive"
+
     def test_recommendation_click_endpoint_ingests_strong_signal(self) -> None:
         """POST /api/recommendation-click should push a strong signal through the pipeline."""
         from fastapi.testclient import TestClient
