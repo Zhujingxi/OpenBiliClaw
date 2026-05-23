@@ -63,6 +63,7 @@ runtime state 新增字段：
 - `probed_avoidance_domains`: `{normalized_domain: iso_timestamp}`
 - `probed_avoidance_axes`: `{experience_mode|entry_load: iso_timestamp}`
 - `avoidance_probe_feedback_history`: 最近 100 条显式负向探针反馈
+- `last_probe_kind`: `"interest" | "avoidance" | ""`，用于主动推送循环在正向/负向探针都可用时轮流投递，避免同一轮同时打扰用户
 
 默认配置：
 
@@ -95,8 +96,8 @@ runtime state 新增字段：
 负向探针沿用 `confirm / reject / chat`，但含义是负向语义：
 
 - `confirm`: 用户确认“确实不喜欢 / 需要避开这个方向”
-  - 写入 `disliked_topics`
-  - 同步到 `OnionProfile.interest.dislikes`
+  - 以 `preference_layer.data["disliked_topics"]` 作为持久化源头写入 domain 和有效 specifics
+  - 通过 `OnionProfile.populate_from_flat_preference(preference_layer.data)` 同步并保存 `soul` layer，让 `OnionProfile.interest.dislikes` 与 flat preference 保持一致
   - 触发 cognition update
   - 触发现有 dislike pool purge 和后续推荐避让
   - 从 active 移除并后台补位
@@ -168,18 +169,27 @@ runtime 事件：
 4. 生成前做本地 quality gate 和 novelty guard。
 5. active 数量达到 5 时停止生成。
 
+Prompt builder 必须遵守项目的 prompt-cache 约定：system prompt 使用模块级静态常量，所有 profile / 状态 / count 等变量进入 user message，并加入现有 prompt invariant 测试。
+
+观察 / 自动确认流程：
+
+1. `AvoidanceSpeculator.observe()` 只消费显式负向证据：`feedback_type=dislike`、`reaction=thumbs_down`、`event_type=dislike` 或明确的负向 probe chat。`quick_exit` 等被动 negative 不计入，避免把误点/快速退出当成避雷确认。
+2. 当显式负向事件文本匹配 active avoidance 的 domain 或 specifics 时，`confirmation_count += 1`。
+3. 达到 `confirmation_threshold` 后进入 promote，写入 `disliked_topics` 的同一持久化路径。
+4. 用户点击 `confirm` 是强确认，会直接把该 avoidance 标记为 `confirmed` 并进入 promote/writeback；因此 threshold 对自动确认有意义，对显式确认只是状态机兼容字段。
+
 投递流程：
 
 1. `ContinuousRefreshController._loop_proactive_push()` 继续作为主动推送入口。
-2. 在正向 `interest.probe` 推送旁边新增 `_publish_avoidance_probe_if_available()`。
+2. 主动推送循环每轮最多投递一个 probe。正向 `interest.probe` 与负向 `avoidance.probe` 都有候选时，依据 `last_probe_kind` 轮流选择，避免新增负向探针后把用户每轮收到的 probe 数量翻倍。
 3. 选择候选时避开近期 `probed_avoidance_domains` 和 `probed_avoidance_axes`。
 4. 只有 runtime stream 实际投递成功后，才写入 `probed_avoidance_domains` / `probed_avoidance_axes`。
 
 确认流程：
 
 1. API 先记录 `avoidance_probe_feedback_history`。
-2. `confirm` 将 probe 转为 confirmed，并写入 `disliked_topics`。
-3. 调用现有画像更新或轻量写入路径，让 `ProfileSummaryResponse.dislikes` 可见。
+2. `confirm` 将 probe 转为 confirmed，并写入 flat preference 的 `disliked_topics`。这是避雷画像的持久化源头；不要只 mutate `await soul_engine.get_profile()` 返回的快照。
+3. 基于更新后的 flat preference 调用 `OnionProfile.populate_from_flat_preference()` 并保存 `soul` layer，让 `ProfileSummaryResponse.dislikes` 可见且不会在下次 profile rebuild 时丢失。
 4. 触发 pool purge，清除已缓存的相关候选。
 5. 发布 `avoidance.confirmed`，前端刷新画像和 cognition updates。
 6. 后台 tick 补位，不阻塞响应。
@@ -195,7 +205,7 @@ runtime 事件：
 - cooldown avoidance probes
 - 近期 `probed_avoidance_domains`
 - `avoidance_probe_feedback_history` 中用户已否认的方向
-- 正向 likes 的高权重 domain，避免直接问“你是不是讨厌你喜欢的东西”
+- 正向 likes 的高权重 domain 与 specifics，避免直接问“你是不是讨厌你喜欢的东西”；这条必须在 `AvoidanceNoveltyGuard.from_profile_and_state()` 中硬过滤，不能只依赖 prompt
 
 质量门：
 

@@ -48,6 +48,7 @@ def test_discovery_runtime_state_round_trips_avoidance_probe_history(tmp_path: P
                     "created_at": "2026-05-24T10:01:00",
                 }
             ],
+            "last_probe_kind": "avoidance",
         }
     )
 
@@ -56,6 +57,7 @@ def test_discovery_runtime_state_round_trips_avoidance_probe_history(tmp_path: P
     assert state["probed_avoidance_domains"] == {"浅层热点复读": "2026-05-24T10:00:00"}
     assert state["probed_avoidance_axes"] == {"knowledge|light": "2026-05-24T10:00:00"}
     assert state["avoidance_probe_feedback_history"][0]["domain"] == "浅层热点复读"
+    assert state["last_probe_kind"] == "avoidance"
 ```
 
 **Step 2: Run test to verify it fails**
@@ -76,6 +78,7 @@ In `MemoryManager.load_discovery_runtime_state()`, add defaults:
 "probed_avoidance_domains": {},
 "probed_avoidance_axes": {},
 "avoidance_probe_feedback_history": [],
+"last_probe_kind": "",
 ```
 
 In returned payload, preserve those fields and cap history to 100 dict records using `_as_dict_list()`.
@@ -175,6 +178,12 @@ def test_avoidance_novelty_guard_blocks_existing_dislikes() -> None:
     # profile.interest.dislikes and preferences.disliked_topics are duplicate coverage
 ```
 
+```python
+def test_avoidance_observe_counts_only_explicit_negative_events(tmp_path: Path) -> None:
+    # feedback_type=dislike matching the avoidance increments confirmation_count
+    # quick_exit / passive inferred_satisfaction=negative does not increment
+```
+
 **Step 2: Run tests to verify they fail**
 
 Run:
@@ -218,6 +227,13 @@ POSITIVE_AVOIDANCE_RESPONSES = {"confirm", "chat_positive"}
 ```
 
 For avoidance probes, “negative response” means user denies the avoidance hypothesis. Use it to avoid asking the denied direction again.
+
+Add `AvoidanceSpeculator.observe(events)` with explicit-negative-only semantics:
+
+- Count only events with `metadata.feedback_type == "dislike"`, `metadata.reaction == "thumbs_down"`, `event_type == "dislike"`, or probe chat records explicitly marked negative toward the content.
+- Do not count passive `quick_exit` or generic `inferred_satisfaction=negative`; those are too noisy for an avoidance confirmation.
+- When an explicit negative event text matches an active avoidance `domain` or `specifics`, increment `confirmation_count` and store a short event title.
+- User `confirm` still force-sets the threshold and marks `status="confirmed"`; threshold is for repeated explicit negative evidence and state-machine compatibility, not required after a direct confirmation click.
 
 **Step 4: Run tests to verify pass**
 
@@ -268,6 +284,10 @@ def test_avoidance_generation_prompt_requires_source_modes() -> None:
     assert "不能直接把正向兴趣本身当成讨厌对象" in text
 ```
 
+Also update `tests/test_llm_prompts.py::_builder_test_inputs()` so
+`test_prompt_builder_system_messages_are_call_invariant` covers
+`build_avoidance_generation_prompt()`.
+
 **Step 2: Write failing selector tests**
 
 In `tests/test_avoidance_speculator.py`:
@@ -285,6 +305,19 @@ def test_choose_next_avoidance_probe_skips_denied_feedback_domain() -> None:
     assert chosen.domain == "营销号带货"
 ```
 
+```python
+def test_avoidance_novelty_guard_blocks_positive_like_domain() -> None:
+    profile = OnionProfile(
+        interest=InterestLayer(
+            likes=[InterestDomain(domain="AI", weight=0.9)]
+        )
+    )
+    guard = AvoidanceNoveltyGuard.from_profile_and_state(profile, AvoidanceState())
+
+    assert guard.is_duplicate_domain("AI") is True
+    assert guard.is_duplicate_domain("AI大模型") is True
+```
+
 **Step 3: Run tests to verify failure**
 
 Run:
@@ -298,6 +331,14 @@ Expected: FAIL because prompt and selector are missing.
 **Step 4: Implement prompt and selector**
 
 Add `build_avoidance_generation_prompt()` to `prompts.py`.
+
+Prompt-cache requirements:
+
+- Define `_AVOIDANCE_GENERATION_SYSTEM_PROMPT` as a module-level constant.
+- Return that constant as the system message without f-strings or per-call concatenation.
+- Put all variables (`profile_summary`, `existing_avoidances`, `cooldown_domains`, `confirmed_dislikes`, `confirmed_likes`, `count`) in the user message.
+- Use `json.dumps(..., ensure_ascii=False, indent=2, sort_keys=True)` for structured user payloads.
+- Add the builder to `_builder_test_inputs()` so the cache-invariant test protects it.
 
 Schema:
 
@@ -324,6 +365,14 @@ In `avoidance_speculator.py`, implement:
 - `AvoidanceNoveltyGuard`
 - `_select_diverse_avoidances()`
 - `choose_next_avoidance_candidate()`
+
+`AvoidanceNoveltyGuard.from_profile_and_state()` must include:
+
+- Existing `disliked_topics` and `interest.dislikes` as duplicate coverage.
+- Active/cooldown avoidances.
+- Recently probed avoidance domains.
+- Denied avoidance feedback (`reject` / `chat_negative`).
+- High-weight positive `interest.likes` domains and specifics as blocked terms. A candidate cannot directly target something the user already likes; only lower-quality boundary forms should pass.
 
 Selection rules:
 
@@ -389,6 +438,8 @@ Expected: FAIL because fields do not exist or are not serialized.
 
 Add fields to `SchedulerConfig` and config serialization.
 
+Keep the avoidance fields as an explicit scheduler block adjacent to the existing `speculation_*` fields; do not hide them inside unrelated refresh tuning fields.
+
 Add sample config comments:
 
 ```toml
@@ -431,7 +482,9 @@ self._avoidance_speculator = AvoidanceSpeculator(
 
 Pass to `ProfileUpdatePipeline`.
 
-In `SoulEngine.get_profile()`, optionally attach `_active_avoidances` for discovery context only if later needed. Do not let active avoidances affect recommendation filtering.
+In `SoulEngine.get_profile()`, do not attach active avoidances to the profile object. Unconfirmed avoidance probes must not reach discovery, curator, delight, or recommendation contexts.
+
+In `ProfileUpdatePipeline`, call `avoidance_speculator.observe(raw_events)` with the explicit-negative-only behavior from Task 2, then tick it on the same idle/layer-update cadence as the positive speculator.
 
 In `/api/profile-summary`, load `avoidance_state.json` and return `speculative_avoidances`.
 
@@ -480,6 +533,12 @@ def test_avoidance_probe_confirm_adds_disliked_topic(...) -> None:
     assert response.status_code == 200
     assert response.json()["action"] == "confirmed"
     assert "浅层热点复读" in memory.get_layer("preference").data["disliked_topics"]
+
+    profile_response = client.get("/api/profile-summary")
+    assert any(
+        item["domain"] == "浅层热点复读"
+        for item in profile_response.json()["dislikes"]
+    )
 ```
 
 ```python
@@ -509,13 +568,16 @@ Expected: FAIL because endpoints do not exist.
 
 **Step 3: Implement endpoints**
 
-Add helpers beside current interest probe helpers:
+Generalize the existing probe helpers instead of copying a full parallel set.
+Keep small avoidance wrappers only where the data source differs.
 
-- `_avoidance_metadata_from_active_speculation()`
-- `_record_avoidance_feedback_history()`
-- `_record_avoidance_cognition()`
-- `_publish_avoidance_event()`
-- `_apply_confirmed_avoidance_to_profile()`
+Suggested helper shape:
+
+- `_probe_metadata_from_active_item(get_active, domain, *, include_source_mode=False)`
+- `_record_probe_feedback_history(state_key, append_fn, domain, response, *, get_active, message="")`
+- `_record_probe_cognition(summary, domain, action, *, source="interest_probe", detail="")`
+- `_publish_probe_event(event_type, message, domain)`
+- `_apply_confirmed_avoidance_to_preference(domain, specifics)`
 
 Add endpoints:
 
@@ -523,7 +585,7 @@ Add endpoints:
 - `GET /api/avoidance-probes/pending`
 - `POST /api/avoidance-probes/respond`
 
-For confirmed avoidance write:
+For confirmed avoidance, write to flat preference as the durable source of truth:
 
 ```python
 preference_layer = ctx.memory_manager.get_layer("preference")
@@ -537,14 +599,27 @@ preference_layer.data["disliked_topics"] = topics
 preference_layer.save()
 ```
 
-Then update soul profile dislikes if initialized:
+Then sync the persisted soul layer from that preference. Do not only mutate the
+object returned by `await ctx.soul_engine.get_profile()`; that object is a
+snapshot and direct append can be lost on the next rebuild.
 
 ```python
-profile = await ctx.soul_engine.get_profile()
-profile.interest.dislikes.append(InterestDomain(domain=domain, weight=0.7, source="avoidance_probe"))
+from openbiliclaw.soul.profile import OnionProfile
+
+soul_layer = ctx.memory_manager.get_layer("soul")
+if soul_layer.data:
+    profile = OnionProfile.from_dict(soul_layer.data)
+    profile.populate_from_flat_preference(preference_layer.data)
+    soul_layer.data.clear()
+    soul_layer.data.update(profile.to_dict())
+    soul_layer.save()
+    ctx.memory_manager.sync_profile_files(profile)
 ```
 
-Deduplicate before append. Reuse existing pool purge hooks from `layer_updaters` where possible; if no direct hook is available, call database purge helpers in the same style as dislike handling.
+After the preference write, call the same pool-purge path used for newly added
+`disliked_topics` in `soul/layer_updaters.py`. If extracting that code is
+needed, create a small shared helper rather than duplicating the purge logic in
+`api/app.py`.
 
 **Step 4: Run tests**
 
@@ -589,6 +664,13 @@ async def test_publish_avoidance_probe_does_not_record_without_stream_subscriber
     # expect probed_avoidance_domains and axes unchanged
 ```
 
+```python
+async def test_proactive_probe_push_publishes_only_one_probe_per_tick() -> None:
+    # both interest and avoidance candidates are available
+    # one call to the proactive probe arbiter should publish exactly one probe event
+    # last_probe_kind should update so the next call prefers the other kind
+```
+
 **Step 2: Run tests to verify failure**
 
 Run:
@@ -611,12 +693,35 @@ Add `_publish_avoidance_probe_if_available()`:
 - Publish `avoidance.probe`.
 - Only record history after `_publish_event()` returns truthy.
 
-Call it inside `_loop_proactive_push()` after interest probe push:
+Do not call both positive and negative publishers unconditionally in one loop.
+Instead add an arbiter, for example `_publish_probe_if_available()`, that:
+
+First adjust the existing positive publisher to return `bool` (`True` when it
+actually delivered an `interest.probe`, `False` otherwise). Keep existing
+callers compatible by ignoring the return value where they do not need it.
 
 ```python
-with suppress(Exception):
-    await self._publish_avoidance_probe_if_available()
+async def _publish_probe_if_available(self) -> None:
+    state = self.memory_manager.load_discovery_runtime_state()
+    last_kind = str(state.get("last_probe_kind", ""))
+    order = ("avoidance", "interest") if last_kind == "interest" else ("interest", "avoidance")
+    for kind in order:
+        if kind == "interest":
+            delivered = await self._publish_interest_probe_if_available(record_kind=False)
+        else:
+            delivered = await self._publish_avoidance_probe_if_available(record_kind=False)
+        if delivered:
+            state = self.memory_manager.load_discovery_runtime_state()
+            state["last_probe_kind"] = kind
+            self.memory_manager.save_discovery_runtime_state(state)
+            return
 ```
+
+The exact implementation can avoid the `record_kind` parameter by extracting a
+shared candidate/publish helper. The behavioral requirement is one probe event
+per proactive tick, alternating polarity when both pools have candidates.
+
+Call only the arbiter from `_loop_proactive_push()`.
 
 **Step 4: Run tests**
 
@@ -754,6 +859,14 @@ git commit -m "feat: expose avoidance probes to OpenClaw"
 - Test: `tests/test_mobile_web_view_models.py`
 
 **Step 1: Write failing view-model tests**
+
+Before editing, inspect the existing mobile web test conventions:
+
+```bash
+rg -n "mobile web|view-models|profile" tests/test_mobile_web_view_models.py tests/test_mobile_web_delight_layout.py
+```
+
+Use the existing helper style rather than creating a disconnected test harness.
 
 Add:
 
@@ -1147,7 +1260,10 @@ git commit -m "feat: support avoidance probe chat scope"
 - Modify: `docs/modules/cli.md`
 - Modify: `docs/modules/config.md`
 - Modify: `docs/changelog.md`
-- Modify if architecture/data flow changed visibly: `docs/architecture.md`, `docs/spec.md`, `README.md`, `README_EN.md`
+- Modify: `docs/architecture.md`
+- Modify: `docs/spec.md`
+- Modify: `README.md`
+- Modify: `README_EN.md`
 
 **Step 1: Update module docs**
 
@@ -1162,6 +1278,10 @@ Document:
 - config fields
 - confirmation semantics
 - “unconfirmed avoidance probes do not filter recommendations”
+
+Also update the cross-module architecture diagrams and top-level README diagrams.
+This feature adds new API endpoints, runtime events, persistent state, and four
+client surfaces, so architecture docs are mandatory rather than conditional.
 
 **Step 2: Update changelog**
 
@@ -1240,4 +1360,4 @@ If docs were committed with the implementation tasks, skip this final docs commi
 - Avoidance `confirm` means “confirmed dislike,” not “confirmed interest.”
 - Avoidance `reject` means “I do not dislike this,” and should be used as future duplicate-suppression evidence.
 - Preserve existing `interest.probe` behavior and tests. Any shared helper changes must run interest-probe tests as regression coverage.
-- Keep `scope="probe"` for current positive probes; use `scope="avoidance_probe"` for negative probes unless a caller cannot support new scope, in which case include `polarity="negative"` in payload and route server-side.
+- Keep `scope="probe"` for current positive probes and use only `scope="avoidance_probe"` for negative probes. Do not add a parallel `polarity="negative"` fallback route.
