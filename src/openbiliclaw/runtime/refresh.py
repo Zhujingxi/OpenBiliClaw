@@ -339,6 +339,9 @@ class ContinuousRefreshController:
         ``refresh_if_needed`` entry does, so callers reaching it from
         different paths can't double-acquire.
         """
+        if not self._llm_work_allowed():
+            return {"refreshed": False, "strategies": [], "reason": "llm_paused"}
+
         if self._refresh_lock.locked():
             logger.debug("refresh_if_needed skipped: another refresh in flight")
             return {"skipped": True, "reason": "another refresh holds lock"}

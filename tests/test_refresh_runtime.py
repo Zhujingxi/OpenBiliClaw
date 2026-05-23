@@ -2221,3 +2221,38 @@ async def test_refresh_pool_status_re_emits_when_count_rotates() -> None:
     pool_events = [e for e in event_hub.events if e["type"] == "pool_status"]
     counts = [e["pool_available_count"] for e in pool_events]
     assert counts == [42, 20, 42]
+
+
+async def test_refresh_if_needed_skips_when_scheduler_disabled() -> None:
+    """refresh_if_needed must respect the LLM gate so event-ingest and
+    feedback paths don't fire discovery when 停止后台 LLM 请求 is on."""
+    controller = _controller_with_gate(
+        scheduler_config=SimpleNamespace(enabled=False, pause_on_extension_disconnect=False),
+    )
+
+    result = await controller.refresh_if_needed()
+
+    assert result["refreshed"] is False
+    assert result["reason"] == "llm_paused"
+
+
+async def test_refresh_after_event_ingest_skips_when_scheduler_disabled() -> None:
+    controller = _controller_with_gate(
+        scheduler_config=SimpleNamespace(enabled=False, pause_on_extension_disconnect=False),
+    )
+
+    result = await controller.refresh_after_event_ingest()
+
+    assert result["refreshed"] is False
+    assert result["reason"] == "llm_paused"
+
+
+async def test_refresh_after_feedback_skips_when_scheduler_disabled() -> None:
+    controller = _controller_with_gate(
+        scheduler_config=SimpleNamespace(enabled=False, pause_on_extension_disconnect=False),
+    )
+
+    result = await controller.refresh_after_feedback()
+
+    assert result["refreshed"] is False
+    assert result["reason"] == "llm_paused"
