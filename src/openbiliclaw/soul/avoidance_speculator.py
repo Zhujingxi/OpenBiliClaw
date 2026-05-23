@@ -520,6 +520,51 @@ class AvoidanceSpeculator:
         state = self._load_state()
         return [item for item in state.active if item.status == "active"]
 
+    def user_confirm_avoidance(self, domain: str) -> SpeculativeAvoidance | None:
+        """User explicitly confirmed an avoidance; remove it from active state."""
+        state = self._load_state()
+        remaining: list[SpeculativeAvoidance] = []
+        confirmed: SpeculativeAvoidance | None = None
+        for item in state.active:
+            if item.domain.lower() == domain.lower() and item.status == "active":
+                item.status = "promoted"
+                item.confirmation_count = item.confirmation_threshold
+                item.confirming_events.append("user_confirmed")
+                confirmed = item
+                state.total_promoted += 1
+            else:
+                remaining.append(item)
+        if confirmed is not None:
+            state.active = remaining
+            self._save_state(state)
+        return confirmed
+
+    def user_reject_avoidance(self, domain: str, cooldown_days: int = 30) -> bool:
+        """User rejected an avoidance hypothesis; move it to cooldown."""
+        state = self._load_state()
+        remaining: list[SpeculativeAvoidance] = []
+        found = False
+        now = datetime.now()
+        for item in state.active:
+            if item.domain.lower() == domain.lower() and item.status == "active":
+                item.status = "rejected"
+                state.total_rejected += 1
+                state.cooldown.append(
+                    AvoidanceCooldownEntry(
+                        domain=item.domain,
+                        source_mode=item.source_mode,
+                        rejected_at=now.isoformat(),
+                        cooldown_until=(now + timedelta(days=cooldown_days)).isoformat(),
+                    )
+                )
+                found = True
+            else:
+                remaining.append(item)
+        state.active = remaining
+        if found:
+            self._save_state(state)
+        return found
+
     def observe(self, events: list[dict[str, Any]]) -> int:
         if not events:
             return 0

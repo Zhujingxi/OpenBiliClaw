@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -2582,6 +2583,245 @@ class TestBackendAPI:
             }
         ]
         assert soul_engine._speculator.rejected == [("城市漫游路线", 30)]
+
+    def test_avoidance_probe_pending_returns_active_items(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.soul.avoidance_speculator import (
+            AvoidanceState,
+            SpeculativeAvoidance,
+            SpeculativeAvoidanceSpecific,
+            save_avoidance_state,
+        )
+
+        save_avoidance_state(
+            tmp_path,
+            AvoidanceState(
+                active=[
+                    SpeculativeAvoidance(
+                        domain="浅层热点复读",
+                        reason="用户可能想避开无信息增量的热点复读内容。",
+                        source_mode="negative_signal",
+                        source_signal="thumbs_down",
+                        confidence=0.66,
+                        specifics=[SpeculativeAvoidanceSpecific(name="标题党热点解读")],
+                    ),
+                    SpeculativeAvoidance(domain="已确认避雷", status="confirmed"),
+                ]
+            ),
+        )
+
+        class FakeSoulEngine:
+            pass
+
+        app = create_app(soul_engine=FakeSoulEngine(), memory_manager=object(), database=object())
+        app.state.runtime_context.config = SimpleNamespace(data_path=tmp_path)
+        client = TestClient(app)
+
+        response = client.get("/api/avoidance-probes/pending")
+
+        assert response.status_code == 200
+        assert response.json()["items"][0]["domain"] == "浅层热点复读"
+        assert len(response.json()["items"]) == 1
+
+    def test_avoidance_probe_confirm_adds_disliked_specific_topics(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.memory.manager import MemoryManager
+        from openbiliclaw.soul.avoidance_speculator import (
+            AvoidanceSpeculator,
+            AvoidanceState,
+            SpeculativeAvoidance,
+            SpeculativeAvoidanceSpecific,
+            save_avoidance_state,
+        )
+        from openbiliclaw.soul.profile import OnionProfile
+
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        save_avoidance_state(
+            tmp_path,
+            AvoidanceState(
+                active=[
+                    SpeculativeAvoidance(
+                        domain="浅层热点复读",
+                        reason="用户可能想避开无信息增量的热点复读内容。",
+                        source_mode="negative_signal",
+                        source_signal="thumbs_down",
+                        specifics=[
+                            SpeculativeAvoidanceSpecific(name="标题党热点解读"),
+                            SpeculativeAvoidanceSpecific(name="无信息增量复读"),
+                        ],
+                    )
+                ]
+            ),
+        )
+
+        class FakeSoulEngine:
+            def __init__(self) -> None:
+                self._avoidance_speculator = AvoidanceSpeculator(
+                    llm_service=None,
+                    data_dir=tmp_path,
+                )
+                self._embedding_service = None
+
+            async def get_profile(self) -> OnionProfile:
+                soul_data = memory.get_layer("soul").data
+                return OnionProfile.from_dict(soul_data) if soul_data else OnionProfile()
+
+        app = create_app(
+            memory_manager=memory,
+            database=memory._database,
+            soul_engine=FakeSoulEngine(),
+        )
+        app.state.runtime_context.config = SimpleNamespace(data_path=tmp_path)
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/avoidance-probes/respond",
+            json={"domain": "浅层热点复读", "response": "confirm"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["action"] == "confirmed"
+        disliked_topics = memory.get_layer("preference").data["disliked_topics"]
+        assert "标题党热点解读" in disliked_topics
+        assert "无信息增量复读" in disliked_topics
+        assert "浅层热点复读" not in disliked_topics
+
+        profile_response = client.get("/api/profile-summary")
+        assert {
+            item["domain"] for item in profile_response.json()["dislikes"]
+        } >= {"标题党热点解读", "无信息增量复读"}
+
+    def test_avoidance_probe_reject_does_not_add_disliked_topic(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.memory.manager import MemoryManager
+        from openbiliclaw.soul.avoidance_speculator import (
+            AvoidanceSpeculator,
+            AvoidanceState,
+            SpeculativeAvoidance,
+            save_avoidance_state,
+        )
+
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        save_avoidance_state(
+            tmp_path,
+            AvoidanceState(active=[SpeculativeAvoidance(domain="浅层热点复读")]),
+        )
+
+        class FakeSoulEngine:
+            def __init__(self) -> None:
+                self._avoidance_speculator = AvoidanceSpeculator(
+                    llm_service=None,
+                    data_dir=tmp_path,
+                )
+                self._embedding_service = None
+
+        app = create_app(
+            memory_manager=memory,
+            database=memory._database,
+            soul_engine=FakeSoulEngine(),
+        )
+        app.state.runtime_context.config = SimpleNamespace(data_path=tmp_path)
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/avoidance-probes/respond",
+            json={"domain": "浅层热点复读", "response": "reject"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["action"] == "rejected"
+        assert "浅层热点复读" not in memory.get_layer("preference").data.get(
+            "disliked_topics",
+            [],
+        )
+        history = memory.load_discovery_runtime_state()["avoidance_probe_feedback_history"]
+        assert history[0]["response"] == "reject"
+
+    def test_avoidance_probe_confirm_uses_apply_new_dislikes(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.api import app as app_module
+        from openbiliclaw.memory.manager import MemoryManager
+        from openbiliclaw.soul.avoidance_speculator import (
+            AvoidanceSpeculator,
+            AvoidanceState,
+            SpeculativeAvoidance,
+            SpeculativeAvoidanceSpecific,
+            save_avoidance_state,
+        )
+
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        save_avoidance_state(
+            tmp_path,
+            AvoidanceState(
+                active=[
+                    SpeculativeAvoidance(
+                        domain="浅层热点复读",
+                        source_mode="negative_signal",
+                        source_signal="thumbs_down",
+                        specifics=[SpeculativeAvoidanceSpecific(name="标题党热点解读")],
+                    )
+                ]
+            ),
+        )
+        embedding_service = object()
+        calls: list[dict[str, object]] = []
+
+        async def fake_apply_new_dislikes(**kwargs: object) -> list[str]:
+            calls.append(dict(kwargs))
+            return ["新增不喜欢方向: 标题党热点解读"]
+
+        monkeypatch.setattr(
+            app_module,
+            "apply_new_dislikes",
+            fake_apply_new_dislikes,
+            raising=False,
+        )
+
+        class FakeSoulEngine:
+            def __init__(self) -> None:
+                self._avoidance_speculator = AvoidanceSpeculator(
+                    llm_service=None,
+                    data_dir=tmp_path,
+                )
+                self._embedding_service = embedding_service
+
+        app = create_app(
+            memory_manager=memory,
+            database=memory._database,
+            soul_engine=FakeSoulEngine(),
+        )
+        app.state.runtime_context.config = SimpleNamespace(data_path=tmp_path)
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/avoidance-probes/respond",
+            json={"domain": "浅层热点复读", "response": "confirm"},
+        )
+
+        assert response.status_code == 200
+        assert calls
+        assert calls[0]["topics"] == ["标题党热点解读"]
+        assert calls[0]["embedding_service"] is embedding_service
+        history = memory.load_discovery_runtime_state()["avoidance_probe_feedback_history"]
+        assert history[0]["response"] == "confirm"
+        assert history[0]["source_mode"] == "negative_signal"
 
     def test_chat_turn_endpoint_persists_pending_turn_until_reply(self, tmp_path: Path) -> None:
         import asyncio
