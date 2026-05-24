@@ -2271,7 +2271,6 @@
     }
 
     safeBind("#sideDrawerBtn", "click", toggleSideDrawer);
-    safeBind("#sideDrawerClose", "click", closeSideDrawer);
     safeBind("#sideDrawerScrim", "click", closeSideDrawer);
     safeBind("#mobileMenuBtn", "click", openMobileMenu);
     safeBind("#mobileMenuClose", "click", closeMobileMenu);
