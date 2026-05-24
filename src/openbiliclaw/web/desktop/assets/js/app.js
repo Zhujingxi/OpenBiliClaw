@@ -76,6 +76,26 @@
     ];
     let chatPlaceholderIndex = 0;
     let chatPlaceholderTimer = null;
+    let activityRailHeightFrame = 0;
+
+    function syncActivityRailHeight() {
+      const rail = document.querySelector('[data-od-id="activity-rail"]');
+      const delight = document.getElementById("delightBanner");
+      if (!rail || !delight || !window.matchMedia("(min-width: 1181px)").matches) {
+        rail?.style.removeProperty("--activity-rail-max-height");
+        return;
+      }
+      const height = Math.ceil(delight.getBoundingClientRect().height);
+      if (height > 0) rail.style.setProperty("--activity-rail-max-height", `${height}px`);
+    }
+
+    function scheduleActivityRailHeightSync() {
+      if (activityRailHeightFrame) cancelAnimationFrame(activityRailHeightFrame);
+      activityRailHeightFrame = requestAnimationFrame(() => {
+        activityRailHeightFrame = 0;
+        syncActivityRailHeight();
+      });
+    }
 
     function showFatal(error, context = "页面启动") {
       const message = error?.message || String(error || "未知错误");
@@ -513,6 +533,7 @@
       button.innerHTML = sendIcon;
       button.setAttribute("aria-label", "发送");
       button.setAttribute("title", "发送");
+      scheduleActivityRailHeightSync();
       requestAnimationFrame(() => $("#delightCommentInput")?.focus());
     }
 
@@ -528,6 +549,7 @@
       button.textContent = "聊一聊";
       button.removeAttribute("aria-label");
       button.removeAttribute("title");
+      scheduleActivityRailHeightSync();
     }
 
     async function handleCardAction(action, item, card) {
@@ -1255,6 +1277,7 @@
       const turns = delightTurnList(delight?.turns);
       if (!turns.length && !delight?.chat_reply) {
         area.hidden = true;
+        scheduleActivityRailHeightSync();
         return;
       }
       area.hidden = false;
@@ -1263,6 +1286,7 @@
         bubble.className = "delight-turn-bubble is-assistant";
         bubble.textContent = delight.chat_reply;
         area.append(bubble);
+        scheduleActivityRailHeightSync();
         return;
       }
       for (const turn of turns) {
@@ -1282,6 +1306,7 @@
             : turn.reply || "后端已完成这轮聊天。";
         area.append(assistantBubble);
       }
+      scheduleActivityRailHeightSync();
     }
 
     function updateDelightState(bvid, updates) {
@@ -1868,6 +1893,7 @@
         if ($("#delightStatus")) $("#delightStatus").textContent = "";
         if ($("#delightCount")) $("#delightCount").textContent = "0/0";
         controls.forEach((btn) => { btn.disabled = true; });
+        scheduleActivityRailHeightSync();
         return;
       }
       state.delightIndex = Math.max(0, Math.min(index, state.delights.length - 1));
@@ -1883,6 +1909,7 @@
         const action = btn.dataset.delight;
         btn.disabled = (action === "prev" && state.delightIndex === 0) || (action === "next" && state.delightIndex === state.delights.length - 1);
       });
+      scheduleActivityRailHeightSync();
     }
 
     function applyDelights(payload) {
@@ -2028,6 +2055,7 @@
       for (const step of steps) {
         try { step(); } catch (error) { showFatal(error, step.name || "渲染"); }
       }
+      scheduleActivityRailHeightSync();
     }
 
     function buildConfigUpdate() {
@@ -2259,6 +2287,7 @@
     safeBind("#resetFiltersBtn", "click", () => { state.query = ""; state.filter = "全部"; const input = $("#searchInput"); if (input) input.value = ""; renderAll(); });
     safeBind("#searchInput", "input", (event) => { state.query = event.target.value || ""; renderAll(); });
     safeBind("#searchForm", "submit", (event) => { event.preventDefault(); state.query = $("#searchInput")?.value || ""; renderAll(); });
+    window.addEventListener("resize", scheduleActivityRailHeightSync);
     safeBind("#chatForm", "submit", (event) => { event.preventDefault(); const input = $("#chatInput"); const text = input?.value?.trim() || ""; if (!text) return; input.value = ""; sendChat(text); });
     safeBind("#messageChatBackBtn", "click", returnToMessages);
     safeBind("#messageChatForm", "submit", (event) => { event.preventDefault(); const input = $("#messageChatInput"); const text = input?.value?.trim() || ""; if (!text) return; input.value = ""; sendChat(text, { contextPrefix: state.messageChatPrompt }); });

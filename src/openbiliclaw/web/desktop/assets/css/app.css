@@ -157,6 +157,9 @@
       .layout { display: block; }
       .layout::after { content: ""; display: block; clear: both; }
       .rail { float: right; width: 360px; margin-left: var(--space-6); margin-bottom: var(--space-6); }
+      [data-od-id="activity-rail"] { max-height: var(--activity-rail-max-height, none); display: flex; flex-direction: column; }
+      [data-od-id="activity-rail"] .activity-list { min-height: 0; overflow: auto; padding-right: 2px; }
+      [data-od-id="activity-rail"] .drawer-actions { flex: 0 0 auto; }
       .main-col { display: block; min-width: 0; }
       .hero, .delight { width: calc(100% - 360px - var(--space-6)); }
       [data-od-id="recommendations"] { width: 100%; min-width: 0; margin-top: var(--space-6); }
