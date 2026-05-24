@@ -1,12 +1,12 @@
 <!doctype html>
- <html lang="zh-CN">
- <head>
+<html lang="zh-CN">
+<head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>OpenBiliClaw 推荐首页</title>
-  <link rel="stylesheet" href="assets/css/app.css">
- </head>
- <body>
+  <link rel="stylesheet" href="/web/assets/css/app.css">
+</head>
+<body>
   <div class="app-shell">
     <header class="topbar">
       <a class="brand" href="#home" aria-label="OpenBiliClaw 首页">
@@ -44,6 +44,26 @@
     <div class="fatal-banner" id="fatalBanner" role="alert"></div>
 
     <main class="layout" id="home">
+      <aside class="rail" aria-label="侧栏摘要">
+        <section class="panel" data-od-id="profile-rail">
+          <p class="eyebrow">Profile</p>
+          <h3>阿B 眼里的你</h3>
+          <div class="profile-chip-row" id="profileChips" style="font-size: 16px;"></div>
+          <p class="video-meta" id="profilePortrait">偏好结构化解释、长视频和跨学科桥接，对“为什么”比“是什么”更敏感。</p>
+          <div class="kv">
+            <div class="kv-row"><span>MBTI 推断</span><strong id="railMbti">INTJ</strong></div>
+            <div class="kv-row"><span>探索开放度</span><strong id="railOpenness">78%</strong></div>
+            <div class="kv-row"><span>深度偏好</span><strong id="railDepth">92%</strong></div>
+          </div>
+        </section>
+        <section class="panel" data-od-id="activity-rail">
+          <p class="eyebrow">Activity</p>
+          <h3>后台刚记住的事</h3>
+          <div class="activity-list" id="activityList"></div>
+          <div class="drawer-actions"><button class="small-btn" id="activityBtn" type="button">查看全部动态</button></div>
+        </section>
+      </aside>
+
       <section class="main-col" aria-label="推荐首页" data-od-id="recommendation-home">
         <section class="hero" data-od-id="hero">
           <div class="hero-copy">
@@ -96,6 +116,7 @@
               <div class="delight-main-actions" aria-label="打开或讨论这条推荐">
                 <button class="small-btn" data-delight="view" type="button">去看看</button>
                 <div class="comment-field"><input id="delightCommentInput" placeholder="想围绕这条聊什么？" aria-label="想围绕这条聊什么？"></div>
+                <button class="small-btn composer-cancel" data-delight="cancel-comment" type="button" aria-label="返回" title="返回">‹</button>
                 <button class="small-btn chat-action" data-delight="chat" type="button">聊一聊</button>
               </div>
               <div class="delight-feedback-actions card-feedback-icons" aria-label="反馈这条推荐">
@@ -138,30 +159,6 @@
           <div class="load-row"><button class="pill-btn dark" id="loadMoreBtn" type="button">加载更多推荐</button></div>
         </section>
       </section>
-
-      <aside class="rail" aria-label="侧栏摘要">
-        <button class="rail-toggle" id="railToggle" type="button" aria-label="收起侧栏">
-          <span class="rail-toggle-label">收起侧栏</span>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M9 18l6-6-6-6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
-        <section class="panel" data-od-id="profile-rail">
-          <p class="eyebrow">Profile</p>
-          <h3>阿B 眼里的你</h3>
-          <div class="profile-chip-row" id="profileChips" style="font-size: 16px;"></div>
-          <p class="video-meta" id="profilePortrait">偏好结构化解释、长视频和跨学科桥接，对“为什么”比“是什么”更敏感。</p>
-          <div class="kv">
-            <div class="kv-row"><span>MBTI 推断</span><strong id="railMbti">INTJ</strong></div>
-            <div class="kv-row"><span>探索开放度</span><strong id="railOpenness">78%</strong></div>
-            <div class="kv-row"><span>深度偏好</span><strong id="railDepth">92%</strong></div>
-          </div>
-        </section>
-        <section class="panel" data-od-id="activity-rail">
-          <p class="eyebrow">Activity</p>
-          <h3>后台刚记住的事</h3>
-          <div class="activity-list" id="activityList"></div>
-          <div class="drawer-actions"><button class="small-btn" id="activityBtn" type="button">查看全部动态</button></div>
-        </section>
-      </aside>
     </main>
   </div>
 
@@ -268,7 +265,6 @@
 
           <div class="settings-subpanel is-active" data-model-settings-group="llm" data-model-settings-panel="default">
             <label class="settings-field"><span>默认 LLM Provider</span><select id="llmProvider"><option value="openai">openai</option><option value="claude">claude</option><option value="gemini">gemini</option><option value="deepseek">deepseek</option><option value="openrouter">openrouter</option><option value="ollama">ollama</option><option value="openai_compatible">openai_compatible</option></select></label>
-            <label class="settings-field"><span>LLM 并发数</span><input id="llmConcurrency" type="number" min="1" max="16" step="1" value="3"></label>
             <label class="settings-field"><span>OpenAI 认证方式</span><select id="llmAuthMode"><option value="api_key">API Key</option><option value="codex_oauth">Codex OAuth</option></select></label>
             <label class="settings-field"><span>默认模型</span><input id="llmModel" value="gpt-5-nano"></label>
             <label class="settings-field"><span>当前 Provider API Key</span><input id="llmApiKey" autocomplete="off" placeholder="只保存当前选中的 Provider"></label>
@@ -278,10 +274,10 @@
           </div>
 
           <div class="settings-subpanel" data-model-settings-group="llm" data-model-settings-panel="fallback" hidden>
-            <p class="settings-note-inline">默认 LLM Provider 不可用时才会使用备选 Provider；这里编辑的是所选 Provider 的现有配置。</p>
+            <p class="settings-note-inline">默认 LLM Provider 不可用时才会使用备选 Provider；留空表示不启用 LLM fallback。</p>
             <label class="settings-field"><span>备选 LLM Provider</span><select id="llmFallbackProvider"><option value="">不启用 fallback</option><option value="openai">openai</option><option value="claude">claude</option><option value="gemini">gemini</option><option value="deepseek">deepseek</option><option value="openrouter">openrouter</option><option value="ollama">ollama</option><option value="openai_compatible">openai_compatible</option></select></label>
             <label class="settings-field"><span>备选 OpenAI 认证方式</span><select id="llmFallbackAuthMode"><option value="api_key">API Key</option><option value="codex_oauth">Codex OAuth</option></select></label>
-            <label class="settings-field"><span>备选 Provider 模型</span><input id="llmFallbackModel" placeholder="写入所选 Provider 的 model"></label>
+            <label class="settings-field"><span>备选模型</span><input id="llmFallbackModel" placeholder="留空使用该 Provider 现有模型"></label>
             <label class="settings-field"><span>备选 Provider API Key</span><input id="llmFallbackApiKey" autocomplete="off" placeholder="只保存备选 Provider"></label>
             <label class="settings-field"><span>备选 Provider Base URL</span><input id="llmFallbackBaseUrl" placeholder="OpenAI-compatible / DeepSeek / Ollama 等"></label>
           </div>
@@ -368,7 +364,7 @@
           <label class="settings-field"><span>后台 LLM 请求</span><select id="schedulerEnabled"><option value="on">开启</option><option value="off">暂停</option></select></label>
           <label class="settings-field"><span>浏览器关闭后</span><select id="pauseDisconnect"><option value="pause">暂停后台</option><option value="keep">继续运行</option></select></label>
           <label class="settings-field"><span>Discovery Cron</span><input id="discoveryCron" placeholder="0 */8 * * *"></label>
-          <label class="settings-field"><span>候选池目标数</span><input id="poolTarget" value="300" inputmode="numeric"></label>
+          <label class="settings-field"><span>候选池目标数</span><input id="poolTarget" value="600" inputmode="numeric"></label>
           <label class="settings-field"><span>账户同步间隔小时</span><input id="accountSyncInterval" inputmode="numeric" placeholder="6"></label>
           <label class="settings-field"><span>自动更新</span><select id="autoUpdate"><option value="off">关闭</option><option value="on">开启</option></select></label>
           <label class="settings-field"><span>自动更新检查小时</span><input id="autoUpdateInterval" inputmode="numeric" placeholder="6"></label>
@@ -416,5 +412,5 @@
   </section>
 
   <div class="toast" id="toast" role="status"></div>
-  <script src="assets/js/app.js" defer></script>
+  <script src="/web/assets/js/app.js" defer></script>
 </body></html>
