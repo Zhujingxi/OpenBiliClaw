@@ -2470,6 +2470,31 @@ class Database:
         )
         return [dict(row) for row in cursor.fetchall()]
 
+    def get_recent_recommendation_signals_since(
+        self,
+        *,
+        since: datetime,
+    ) -> list[dict[str, Any]]:
+        """Return recommendation topic/source rows shown since a timestamp."""
+        self._ensure_fresh_read()
+        since_text = since.isoformat(sep=" ")
+        cursor = self.conn.execute(
+            """
+            SELECT r.bvid,
+                   c.topic_key,
+                   c.topic_group,
+                   c.source,
+                   r.created_at,
+                   r.presented_at
+            FROM recommendations AS r
+            JOIN content_cache AS c ON c.bvid = r.bvid
+            WHERE COALESCE(r.presented_at, r.created_at) >= ?
+            ORDER BY COALESCE(r.presented_at, r.created_at) DESC, r.id DESC
+            """,
+            (since_text,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
     def get_feedback_signals(self, *, limit: int = 50) -> list[dict[str, Any]]:
         """Return recent feedback with UP/topic/franchise info for score
         adjustment.

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -71,6 +71,8 @@ class ScoringContext:
     recent_topic_groups: tuple[str, ...] = ()
     recent_sources: tuple[str, ...] = ()
     feedback: FeedbackSignals = field(default_factory=FeedbackSignals)
+    newly_confirmed_amplification_keys: frozenset[str] = field(default_factory=frozenset)
+    over_budget_amplification_keys: frozenset[str] = field(default_factory=frozenset)
     now: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -90,6 +92,20 @@ _FEEDBACK_DISLIKE_FRANCHISE_PENALTY: float = 0.07
 _FEEDBACK_LIKE_TOPIC_BONUS: float = 0.05
 _POOL_LOW_THRESHOLD: int = 50
 _DEFAULT_WEIGHTS = ScoringWeights()
+
+
+def normalize_amplification_key(value: str) -> str:
+    """Normalize a topic/domain label used by amplification guards."""
+    return " ".join(value.strip().lower().split())
+
+
+def candidate_amplification_keys(item: DiscoveredContent) -> set[str]:
+    """Return v1 amplification keys for a recommendation candidate."""
+    keys = {
+        normalize_amplification_key(str(getattr(item, "topic_group", "") or "")),
+        normalize_amplification_key(str(getattr(item, "topic_key", "") or "")),
+    }
+    return {key for key in keys if key}
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +135,12 @@ class PoolCurator:
     # Public API
     # ------------------------------------------------------------------
 
-    def build_context(self) -> ScoringContext:
+    def build_context(
+        self,
+        *,
+        newly_confirmed_amplification_keys: set[str] | frozenset[str] | None = None,
+        rolling_window_hours: int = 24,
+    ) -> ScoringContext:
         """Build a scoring context from recent recommendation history."""
         signals = self._database.get_recent_recommendation_signals(
             limit=self._history_window,
@@ -169,6 +190,33 @@ class PoolCurator:
                 if topic:
                     liked_topics.add(topic)
 
+        normalized_amplification_keys = frozenset(
+            key
+            for key in (
+                normalize_amplification_key(value)
+                for value in (newly_confirmed_amplification_keys or set())
+            )
+            if key
+        )
+        over_budget_keys: set[str] = set()
+        if normalized_amplification_keys:
+            since = datetime.now(UTC) - timedelta(hours=rolling_window_hours)
+            recent_rows = self._database.get_recent_recommendation_signals_since(
+                since=since,
+            )
+            total_recent = max(1, len(recent_rows))
+            for key in normalized_amplification_keys:
+                matching = 0
+                for row in recent_rows:
+                    row_keys = {
+                        normalize_amplification_key(str(row.get("topic_key", "") or "")),
+                        normalize_amplification_key(str(row.get("topic_group", "") or "")),
+                    }
+                    if key in row_keys:
+                        matching += 1
+                if matching / total_recent >= 0.25:
+                    over_budget_keys.add(key)
+
         return ScoringContext(
             recent_topic_keys=topic_keys,
             recent_topic_groups=topic_groups,
@@ -179,6 +227,8 @@ class PoolCurator:
                 liked_topic_keys=frozenset(liked_topics),
                 disliked_franchises=frozenset(disliked_franchises),
             ),
+            newly_confirmed_amplification_keys=normalized_amplification_keys,
+            over_budget_amplification_keys=frozenset(over_budget_keys),
         )
 
     def score_candidates(
@@ -219,6 +269,8 @@ class PoolCurator:
 
             # Feedback adjustments (additive, outside weight system)
             score += self._feedback_adjustment(item, context.feedback)
+            if candidate_amplification_keys(item) & context.over_budget_amplification_keys:
+                score -= 0.35
 
             scores[item.bvid] = max(0.0, score)
         return scores

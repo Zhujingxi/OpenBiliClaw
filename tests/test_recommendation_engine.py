@@ -243,6 +243,33 @@ def test_select_diversified_batch_keeps_one_accessible_entry_when_available() ->
     )
 
 
+def test_select_diversified_batch_caps_newly_confirmed_amplification_direction() -> None:
+    def item(bvid: str, *, topic_group: str) -> DiscoveredContent:
+        return DiscoveredContent(
+            bvid=bvid,
+            title=bvid,
+            topic_group=topic_group,
+            style_key="tutorial",
+            relevance_score=0.9,
+        )
+
+    items = [
+        item("A1", topic_group="城市基础设施观察"),
+        item("A2", topic_group="城市基础设施观察"),
+        item("A3", topic_group="城市基础设施观察"),
+        item("B1", topic_group="游戏推荐"),
+        item("C1", topic_group="手工木工"),
+    ]
+
+    selected = RecommendationEngine._select_diversified_batch(
+        items,
+        limit=4,
+        amplification_guard={"城市基础设施观察"},
+    )
+
+    assert sum(i.topic_group == "城市基础设施观察" for i in selected) <= 1
+
+
 def test_expression_tone_profile_softens_dense_profile_for_lifestyle_content() -> None:
     profile = _build_profile()
     profile.preferences.style.depth_preference = 0.95
