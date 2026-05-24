@@ -864,6 +864,15 @@ export function getContextPatternRows(context) {
   ].filter((row) => row.value);
 }
 
+function normalizeProbeMode(value) {
+  const mode = normalizeText(value);
+  return ["near", "lateral", "bridge", "wildcard"].includes(mode) ? mode : "near";
+}
+
+function isChallengeProbe(mode, explicit) {
+  return Boolean(explicit) || ["lateral", "bridge", "wildcard"].includes(mode);
+}
+
 export function normalizeProfileSummary(summary) {
   return {
     initialized: Boolean(summary?.initialized),
@@ -887,19 +896,24 @@ export function normalizeProfileSummary(summary) {
     speculative_interests: Array.isArray(summary?.speculative_interests)
       ? summary.speculative_interests
           .filter((item) => item?.domain)
-          .map((item) => ({
-            domain: normalizeText(item.domain),
-            reason: normalizeText(item.reason),
-            confidence: Number(item.confidence ?? 0),
-            confirmation_count: Number(item.confirmation_count ?? 0),
-            confirmation_threshold: Number(item.confirmation_threshold ?? 3),
-            status: normalizeText(item.status) || "active",
-            specifics: Array.isArray(item.specifics)
-              ? item.specifics
-                  .filter((s) => s?.name)
-                  .map((s) => ({ name: normalizeText(s.name), confirmation_count: Number(s.confirmation_count ?? 0) }))
-              : [],
-          }))
+          .map((item) => {
+            const probeMode = normalizeProbeMode(item.probe_mode);
+            return {
+              domain: normalizeText(item.domain),
+              reason: normalizeText(item.reason),
+              confidence: Number(item.confidence ?? 0),
+              probe_mode: probeMode,
+              challenge: isChallengeProbe(probeMode, item.challenge),
+              confirmation_count: Number(item.confirmation_count ?? 0),
+              confirmation_threshold: Number(item.confirmation_threshold ?? 3),
+              status: normalizeText(item.status) || "active",
+              specifics: Array.isArray(item.specifics)
+                ? item.specifics
+                    .filter((s) => s?.name)
+                    .map((s) => ({ name: normalizeText(s.name), confirmation_count: Number(s.confirmation_count ?? 0) }))
+                : [],
+            };
+          })
       : [],
     speculative_avoidances: Array.isArray(summary?.speculative_avoidances)
       ? summary.speculative_avoidances

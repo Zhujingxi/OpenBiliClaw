@@ -197,9 +197,17 @@ export async function fetchPendingProbes() {
   return Array.isArray(data?.items) ? data.items : [];
 }
 
-export async function respondToProbe(domain, responseType, message = "") {
+export async function respondToProbe(domain, responseType, options = {}) {
+  const payload = { domain, response: responseType, message: "" };
+  if (typeof options === "string") {
+    payload.message = options;
+  } else if (options && typeof options === "object") {
+    payload.message = options.message || "";
+    if (options.surface) payload.surface = options.surface;
+    if (options.confirmation_source) payload.confirmation_source = options.confirmation_source;
+  }
   return requestJson("/interest-probes/respond", {
-    ...json({ domain, response: responseType, message }),
+    ...json(payload),
     timeoutMs: 35_000,
   });
 }

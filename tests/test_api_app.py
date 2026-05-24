@@ -2228,6 +2228,183 @@ class TestBackendAPI:
             "无信息增量复读",
         ]
 
+    def test_profile_summary_endpoint_includes_probe_mode_challenge_metadata(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from types import SimpleNamespace
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.soul.profile import OnionProfile
+        from openbiliclaw.soul.speculator import (
+            SpeculativeInterest,
+            SpeculativeSpecific,
+            SpeculativeState,
+            save_speculative_state,
+        )
+
+        save_speculative_state(
+            tmp_path,
+            SpeculativeState(
+                active=[
+                    SpeculativeInterest(
+                        domain="城市基础设施观察",
+                        reason="从城市漫游兴趣桥接到更结构化的空间理解。",
+                        confidence=0.67,
+                        probe_mode="bridge",
+                        specifics=[SpeculativeSpecific(name="地铁换乘设计")],
+                    )
+                ]
+            ),
+        )
+
+        class FakeSoulEngine:
+            async def get_profile(self) -> OnionProfile:
+                return OnionProfile()
+
+        app = create_app(
+            soul_engine=FakeSoulEngine(),
+            memory_manager=SimpleNamespace(load_cognition_updates=lambda: []),
+            database=object(),
+        )
+        app.state.runtime_context.config = SimpleNamespace(data_path=tmp_path)
+        client = TestClient(app)
+
+        response = client.get("/api/profile-summary")
+
+        assert response.status_code == 200
+        item = response.json()["speculative_interests"][0]
+        assert item["domain"] == "城市基础设施观察"
+        assert item["probe_mode"] == "bridge"
+        assert item["challenge"] is True
+        assert item["specifics"][0]["name"] == "地铁换乘设计"
+
+    def test_pending_interest_probes_include_probe_mode_challenge_metadata(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from types import SimpleNamespace
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.soul.speculator import (
+            SpeculativeInterest,
+            SpeculativeState,
+            save_speculative_state,
+        )
+
+        save_speculative_state(
+            tmp_path,
+            SpeculativeState(
+                active=[
+                    SpeculativeInterest(
+                        domain="公共空间设计",
+                        reason="这是从建筑美学延伸出去的横向试探。",
+                        confidence=0.61,
+                        probe_mode="lateral",
+                    )
+                ]
+            ),
+        )
+
+        class FakeSoulEngine:
+            _speculator = object()
+
+        app = create_app(
+            soul_engine=FakeSoulEngine(),
+            memory_manager=SimpleNamespace(load_cognition_updates=lambda: []),
+            database=object(),
+        )
+        app.state.runtime_context.config = SimpleNamespace(data_path=tmp_path)
+        client = TestClient(app)
+
+        response = client.get("/api/interest-probes/pending")
+
+        assert response.status_code == 200
+        assert response.json()["items"] == [
+            {
+                "domain": "公共空间设计",
+                "reason": "这是从建筑美学延伸出去的横向试探。",
+                "confidence": 0.61,
+                "status": "active",
+                "probe_mode": "lateral",
+                "challenge": True,
+            }
+        ]
+
+    def test_interest_probe_trigger_runtime_event_includes_probe_mode_challenge_metadata(
+        self,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.runtime.events import RuntimeEventHub
+        from openbiliclaw.runtime.refresh import ContinuousRefreshController
+
+        class FakeMemoryManager:
+            def __init__(self) -> None:
+                self.runtime_state: dict[str, object] = {
+                    "probed_domains": {},
+                    "probed_axes": {},
+                    "probed_distance_bands": {},
+                }
+
+            def load_discovery_runtime_state(self) -> dict[str, object]:
+                return dict(self.runtime_state)
+
+            def save_discovery_runtime_state(self, state: dict[str, object]) -> None:
+                self.runtime_state = dict(state)
+
+        class FakeSpeculator:
+            def get_active_speculations(self) -> list[object]:
+                return [
+                    SimpleNamespace(
+                        domain="城市基础设施观察",
+                        category="城市",
+                        reason="从城市漫游兴趣桥接到空间系统理解。",
+                        confidence=0.67,
+                        weight=0.5,
+                        experience_mode="wander_observe",
+                        entry_load="light",
+                        probe_mode="bridge",
+                        specifics=[SimpleNamespace(name="地铁换乘设计")],
+                    )
+                ]
+
+        class FakeSoulEngine:
+            def __init__(self) -> None:
+                self._speculator = FakeSpeculator()
+
+        memory = FakeMemoryManager()
+        hub = RuntimeEventHub()
+        runtime = ContinuousRefreshController(
+            memory_manager=memory,
+            database=object(),
+            soul_engine=FakeSoulEngine(),
+            discovery_engine=object(),
+            recommendation_engine=object(),
+            event_hub=hub,
+        )
+        app = create_app(
+            memory_manager=memory,
+            database=object(),
+            soul_engine=runtime.soul_engine,
+            runtime_controller=runtime,
+            runtime_event_hub=hub,
+        )
+        client = TestClient(app)
+
+        with client.websocket_connect("/api/runtime-stream") as websocket:
+            response = client.post("/api/interest-probes/trigger")
+
+            assert response.status_code == 200
+            event = websocket.receive_json()
+
+        assert event["type"] == "interest.probe"
+        assert event["domain"] == "城市基础设施观察"
+        assert event["probe_mode"] == "bridge"
+        assert event["challenge"] is True
+
     def test_profile_summary_endpoint_paginates_cognition_history(self) -> None:
         from fastapi.testclient import TestClient
 

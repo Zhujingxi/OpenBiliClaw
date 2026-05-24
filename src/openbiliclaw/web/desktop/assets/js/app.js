@@ -994,6 +994,8 @@
         domain: String(domain),
         reason: item.reason || item.message || item.description || (isAvoidanceProbe ? "后端希望确认这个避雷方向。" : "后端希望确认这个兴趣方向。"),
         specifics: asArray(item.specifics || item.examples || item.children).map((s) => s?.name || s?.label || valueList(s)).filter(Boolean),
+        probe_mode: item.probe_mode || "",
+        challenge: Boolean(item.challenge),
         chat_status: item.chat_status || item.status_text || "",
         chat_reply: item.chat_reply || item.reply || ""
       };
@@ -1220,7 +1222,9 @@
       row.querySelectorAll("[data-spec-response]").forEach((btn) => { btn.disabled = true; });
       try {
         const endpoint = isAvoidanceProbe ? ENDPOINTS.avoidanceProbeRespond : ENDPOINTS.interestProbeRespond;
-        await requestJson(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain, response, message: "" }) });
+        const payload = { domain, response, message: "" };
+        if (!isAvoidanceProbe) payload.surface = "profile";
+        await requestJson(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
         const result = isAvoidanceProbe
           ? (response === "confirm" ? `好，「${escapeHtml(domain)}」会作为避雷方向处理。` : `好，「${escapeHtml(domain)}」不记成避雷。`)
           : (response === "confirm" ? `好，「${escapeHtml(domain)}」记住了。` : `好，「${escapeHtml(domain)}」先不看了。`);
@@ -1874,7 +1878,7 @@
       }
       if (event.type === "delight.refreshed") scheduleDelightQueueRefresh();
       if (event.type === "notification.pending" && event.bvid) mergeMessages([{ ...event, type: "notification" }]);
-      if (event.type === "interest.probe" && event.domain) mergeMessages([{ type: "interest.probe", domain: event.domain, reason: event.reason || event.message || "后端希望确认这个兴趣方向。", specifics: event.specifics || event.examples || [] }]);
+      if (event.type === "interest.probe" && event.domain) mergeMessages([{ type: "interest.probe", domain: event.domain, reason: event.reason || event.message || "后端希望确认这个兴趣方向。", specifics: event.specifics || event.examples || [], probe_mode: event.probe_mode || "", challenge: Boolean(event.challenge) }]);
       if (event.type === "avoidance.probe" && event.domain) mergeMessages([{ type: "avoidance.probe", domain: event.domain, reason: event.reason || event.message || "后端希望确认这个避雷方向。", specifics: event.specifics || event.examples || [] }]);
     }
 

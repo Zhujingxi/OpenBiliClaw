@@ -630,7 +630,13 @@ class TestMobileWebViewModels:
               likes: [{ domain: "tech", weight: 0.8, specifics: [{ name: "AI" }] }],
               exploration_openness: 0.7,
               favorite_up_users: ["UP1"],
-              speculative_interests: [{ domain: "cooking", confidence: 0.6, status: "active" }],
+              speculative_interests: [{
+                domain: "cooking",
+                confidence: 0.6,
+                status: "active",
+                probe_mode: "bridge",
+                challenge: true,
+              }],
               speculative_avoidances: [{
                 domain: "浅层热点复读",
                 reason: "信息密度低",
@@ -648,9 +654,37 @@ class TestMobileWebViewModels:
             assert.equal(full.exploration_openness, 0.7);
             assert.deepEqual(full.favorite_up_users, ["UP1"]);
             assert.equal(full.speculative_interests[0].domain, "cooking");
+            assert.equal(full.speculative_interests[0].probe_mode, "bridge");
+            assert.equal(full.speculative_interests[0].challenge, true);
             assert.equal(full.speculative_avoidances[0].domain, "浅层热点复读");
             assert.equal(full.speculative_avoidances[0].source_mode, "negative_signal");
             assert.equal(full.speculative_avoidances[0].specifics[0].name, "标题党热点解读");
+        """)
+        )
+
+    def test_profile_confirm_probe_actions_mark_profile_surface(self) -> None:
+        api_js = Path("src/openbiliclaw/web/js/api.js").read_text()
+        profile_js = Path("src/openbiliclaw/web/js/views/profile.js").read_text()
+        desktop_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text()
+
+        assert "export async function respondToProbe(domain, responseType, options = {})" in api_js
+        assert 'surface: "profile"' in profile_js
+        assert 'payload.surface = "profile"' in desktop_js
+        assert "respondToProbe(domain, action, { surface: \"profile\" })" in profile_js
+
+    def test_normalize_profile_summary_preserves_probe_mode_metadata(self) -> None:
+        _assert_js(
+            dedent("""
+            import assert from "node:assert/strict";
+            import { normalizeProfileSummary } from "./src/openbiliclaw/web/js/view-models.js";
+
+            const profile = normalizeProfileSummary({
+              initialized: true,
+              speculative_interests: [{ domain: "city", probe_mode: "bridge" }],
+            });
+
+            assert.equal(profile.speculative_interests[0].probe_mode, "bridge");
+            assert.equal(profile.speculative_interests[0].challenge, true);
         """)
         )
 

@@ -99,6 +99,8 @@ SOURCE_LABELS = {
 }
 
 _SOURCE_SHARE_ORDER = ("bilibili", "xiaohongshu", "douyin", "youtube")
+_PROBE_MODES = {"near", "lateral", "bridge", "wildcard"}
+_PROBE_CHALLENGE_MODES = {"lateral", "bridge", "wildcard"}
 
 _RFC1918_NETWORKS = tuple(
     ipaddress.ip_network(net) for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
@@ -318,6 +320,19 @@ def _normalize_source_platform(source: object) -> str:
     if source_key in {"bilibili", "bili", ""}:
         return "bilibili"
     return source_key
+
+
+def _normalize_probe_mode_for_payload(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in _PROBE_MODES else "near"
+
+
+def _probe_metadata_for_payload(item: object) -> tuple[str, bool]:
+    probe_mode = _normalize_probe_mode_for_payload(getattr(item, "probe_mode", ""))
+    challenge = probe_mode in _PROBE_CHALLENGE_MODES
+    with suppress(Exception):
+        challenge = challenge or bool(getattr(item, "challenge", False))
+    return probe_mode, challenge
 
 
 def _cap_by_franchise(
@@ -1529,25 +1544,28 @@ def create_app(
             # clicked 喜欢 has already given their answer and expects the
             # row to disappear, not to re-render with a "已确认" tag.
             active_specs = [item for item in spec_state.active if item.status == "active"]
-            spec_items = [
-                SpeculativeInterestOut(
-                    domain=item.domain,
-                    reason=item.reason,
-                    confidence=item.confidence,
-                    confirmation_count=item.confirmation_count,
-                    confirmation_threshold=item.confirmation_threshold,
-                    status=item.status,
-                    specifics=[
-                        SpeculativeSpecificOut(
-                            name=s.name,
-                            confirmation_count=s.confirmation_count,
-                        )
-                        for s in item.specifics
-                        if s.name.strip()
-                    ],
+            for item in active_specs[:6]:
+                probe_mode, challenge = _probe_metadata_for_payload(item)
+                spec_items.append(
+                    SpeculativeInterestOut(
+                        domain=item.domain,
+                        reason=item.reason,
+                        confidence=item.confidence,
+                        probe_mode=probe_mode,
+                        challenge=challenge,
+                        confirmation_count=item.confirmation_count,
+                        confirmation_threshold=item.confirmation_threshold,
+                        status=item.status,
+                        specifics=[
+                            SpeculativeSpecificOut(
+                                name=s.name,
+                                confirmation_count=s.confirmation_count,
+                            )
+                            for s in item.specifics
+                            if s.name.strip()
+                        ],
+                    )
                 )
-                for item in active_specs[:6]
-            ]
         except Exception:
             logger.debug("Failed to load speculative state for profile summary")
 
@@ -2921,15 +2939,19 @@ def create_app(
 
             spec_state = load_speculative_state(ctx.config.data_path)
             active = [item for item in spec_state.active if item.status == "active"]
-            items = [
-                {
-                    "domain": item.domain,
-                    "reason": item.reason,
-                    "confidence": item.confidence,
-                    "status": item.status,
-                }
-                for item in active[:6]
-            ]
+            items = []
+            for item in active[:6]:
+                probe_mode, challenge = _probe_metadata_for_payload(item)
+                items.append(
+                    {
+                        "domain": item.domain,
+                        "reason": item.reason,
+                        "confidence": item.confidence,
+                        "status": item.status,
+                        "probe_mode": probe_mode,
+                        "challenge": challenge,
+                    }
+                )
             return {"items": items}
         except Exception:
             return {"items": []}

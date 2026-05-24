@@ -32,6 +32,7 @@ _DEFAULT_PLATFORM_SOURCE_SHARES: dict[str, int] = {
 }
 _PLATFORM_SOURCE_ORDER = ("bilibili", "xiaohongshu", "douyin", "youtube")
 _BILIBILI_DISCOVERY_SOURCES = ("search", "related_chain", "trending", "explore")
+_PROBE_CHALLENGE_MODES = {"lateral", "bridge", "wildcard"}
 
 
 def _call_accepts_limit(fn: Any) -> bool:
@@ -1515,6 +1516,10 @@ class ContinuousRefreshController:
         if not domain:
             return False
 
+        probe_mode = _normalize_probe_mode(getattr(top, "probe_mode", ""))
+        challenge = probe_mode in _PROBE_CHALLENGE_MODES
+        with suppress(Exception):
+            challenge = challenge or bool(getattr(top, "challenge", False))
         axis = build_probe_axis(
             experience_mode=getattr(top, "experience_mode", ""),
             entry_load=getattr(top, "entry_load", ""),
@@ -1546,6 +1551,8 @@ class ContinuousRefreshController:
                 "weight": float(getattr(top, "weight", 0.0) or 0.0),
                 "experience_mode": str(getattr(top, "experience_mode", "")),
                 "entry_load": str(getattr(top, "entry_load", "")),
+                "probe_mode": probe_mode,
+                "challenge": challenge,
                 "specifics": specifics,
                 "question": question,
             }
@@ -1560,7 +1567,6 @@ class ContinuousRefreshController:
         if axis:
             probed_axes[axis] = now.isoformat()
         state["probed_axes"] = probed_axes
-        probe_mode = _normalize_probe_mode(getattr(top, "probe_mode", ""))
         probed_distance_bands[probe_mode] = now.isoformat()
         state["probed_distance_bands"] = probed_distance_bands
         self.memory_manager.save_discovery_runtime_state(state)

@@ -308,6 +308,8 @@ class SpeculativeInterestOut(BaseModel):
     domain: str = ""
     reason: str = ""
     confidence: float = 0.0
+    probe_mode: str = "near"
+    challenge: bool = False
     confirmation_count: int = 0
     confirmation_threshold: int = 3
     status: str = "active"

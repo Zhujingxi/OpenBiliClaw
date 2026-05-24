@@ -283,7 +283,7 @@ function bindSpecInterestActions() {
       if (!domain || !action) return;
       btn.disabled = true;
       try {
-        await respondToProbe(domain, action);
+        await respondToProbe(domain, action, { surface: "profile" });
         const p = state.profile;
         if (p?.speculative_interests) {
           patchState({
