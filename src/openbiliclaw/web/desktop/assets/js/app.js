@@ -2150,7 +2150,7 @@
         requestJson(ENDPOINTS.runtimeStatus),
         requestJson(`${ENDPOINTS.activityFeed}?limit=5`),
         requestJson(ENDPOINTS.profile),
-        requestJson(`${ENDPOINTS.delightBatch}?limit=5`),
+        requestJson(`${ENDPOINTS.delightBatch}?limit=20`),
         requestJson(ENDPOINTS.notificationPending),
         requestJson(`${ENDPOINTS.chatTurns}?session=webui&scope=chat&limit=20`),
         requestJson(`${ENDPOINTS.chatTurns}?session=webui&scope=delight&limit=80`),
