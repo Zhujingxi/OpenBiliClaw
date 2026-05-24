@@ -331,6 +331,7 @@ class MemoryManager:
             "probed_axes": {},
             "probed_distance_bands": {},
             "probe_feedback_history": [],
+            "short_term_exploration_buffer": {"entries": []},
             "probed_avoidance_domains": {},
             "probed_avoidance_axes": {},
             "avoidance_probe_feedback_history": [],
@@ -357,6 +358,10 @@ class MemoryManager:
             "probe_feedback_history": self._as_dict_list(loaded.get("probe_feedback_history", []))[
                 -100:
             ],
+            "short_term_exploration_buffer": loaded.get(
+                "short_term_exploration_buffer",
+                {"entries": []},
+            ),
             "probed_avoidance_domains": loaded.get("probed_avoidance_domains", {}),
             "probed_avoidance_axes": loaded.get("probed_avoidance_axes", {}),
             "avoidance_probe_feedback_history": self._as_dict_list(
@@ -384,6 +389,10 @@ class MemoryManager:
             "probe_feedback_history": self._as_dict_list(state.get("probe_feedback_history", []))[
                 -100:
             ],
+            "short_term_exploration_buffer": state.get(
+                "short_term_exploration_buffer",
+                {"entries": []},
+            ),
             "probed_avoidance_domains": state.get("probed_avoidance_domains", {}),
             "probed_avoidance_axes": state.get("probed_avoidance_axes", {}),
             "avoidance_probe_feedback_history": self._as_dict_list(

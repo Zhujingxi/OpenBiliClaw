@@ -268,6 +268,7 @@ def test_discovery_runtime_state_defaults_when_missing(tmp_path: Path) -> None:
         "probed_axes": {},
         "probed_distance_bands": {},
         "probe_feedback_history": [],
+        "short_term_exploration_buffer": {"entries": []},
         "probed_avoidance_domains": {},
         "probed_avoidance_axes": {},
         "avoidance_probe_feedback_history": [],
@@ -292,6 +293,14 @@ def test_discovery_runtime_state_round_trips_to_json(tmp_path: Path) -> None:
             "probed_domains": {"建筑美学": "2026-03-10T10:30:00"},
             "probed_axes": {"aesthetic|light": "2026-03-10T10:30:00"},
             "probed_distance_bands": {"bridge": "2026-05-24T12:00:00"},
+            "short_term_exploration_buffer": {
+                "entries": [
+                    {
+                        "domain": "城市基础设施观察",
+                        "score": 1.5,
+                    }
+                ]
+            },
             "probed_avoidance_domains": {"浅层热点复读": "2026-05-24T10:00:00"},
             "probed_avoidance_axes": {"knowledge|light": "2026-05-24T10:00:00"},
             "last_probe_kind": "avoidance",
@@ -327,6 +336,14 @@ def test_discovery_runtime_state_round_trips_to_json(tmp_path: Path) -> None:
     assert state["probed_domains"] == {"建筑美学": "2026-03-10T10:30:00"}
     assert state["probed_axes"] == {"aesthetic|light": "2026-03-10T10:30:00"}
     assert state["probed_distance_bands"] == {"bridge": "2026-05-24T12:00:00"}
+    assert state["short_term_exploration_buffer"] == {
+        "entries": [
+            {
+                "domain": "城市基础设施观察",
+                "score": 1.5,
+            }
+        ]
+    }
     assert state["probed_avoidance_domains"] == {"浅层热点复读": "2026-05-24T10:00:00"}
     assert state["probed_avoidance_axes"] == {"knowledge|light": "2026-05-24T10:00:00"}
     assert state["last_probe_kind"] == "avoidance"
@@ -359,6 +376,25 @@ def test_discovery_runtime_state_round_trips_probed_distance_bands(tmp_path: Pat
     state = memory.load_discovery_runtime_state()
 
     assert state["probed_distance_bands"] == {"bridge": "2026-05-24T12:00:00"}
+
+
+def test_discovery_runtime_state_round_trips_short_term_exploration_buffer(
+    tmp_path: Path,
+) -> None:
+    memory = MemoryManager(data_dir=tmp_path)
+    memory.save_discovery_runtime_state(
+        {
+            "short_term_exploration_buffer": {
+                "entries": [{"domain": "城市基础设施观察", "score": 1.5}]
+            },
+        }
+    )
+
+    state = memory.load_discovery_runtime_state()
+
+    assert state["short_term_exploration_buffer"] == {
+        "entries": [{"domain": "城市基础设施观察", "score": 1.5}]
+    }
 
 
 def test_discovery_runtime_state_round_trips_probe_feedback_history(

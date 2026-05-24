@@ -2159,6 +2159,11 @@ def create_app(
                 f"好，「{label}」这类多来点。",
                 bvid,
             )
+            _record_exploration_buffer_event(
+                domain=label,
+                source_event="card_more_like",
+                evidence_id=bvid,
+            )
             return JSONResponse(content={"ok": True, "action": "liked", "bvid": bvid})
 
         if response_type == "dislike":
@@ -2180,6 +2185,11 @@ def create_app(
                 "delight.disliked",
                 f"好，「{label}」这类先不推了。",
                 bvid,
+            )
+            _record_exploration_buffer_event(
+                domain=label,
+                source_event="negative",
+                evidence_id=bvid,
             )
             return JSONResponse(content={"ok": True, "action": "disliked", "bvid": bvid})
 
@@ -2555,6 +2565,113 @@ def create_app(
         except TypeError:
             return bool(confirm(domain))
 
+    def _promote_exploration_buffer_entries(
+        promoted: list[dict[str, object]],
+    ) -> None:
+        if not promoted:
+            return
+        from openbiliclaw.soul.interest_writeback import merge_confirmed_interest
+        from openbiliclaw.soul.profile import OnionProfile
+
+        memory_manager = getattr(ctx, "memory_manager", None)
+        get_layer = getattr(memory_manager, "get_layer", None)
+        if not callable(get_layer):
+            return
+        try:
+            soul_layer = get_layer("soul")
+            raw_profile = getattr(soul_layer, "data", {})
+            profile = (
+                OnionProfile.from_dict(raw_profile)
+                if isinstance(raw_profile, dict) and raw_profile
+                else OnionProfile()
+            )
+            changed = False
+            for entry in promoted:
+                raw_specifics = entry.get("specifics", [])
+                specifics = (
+                    [str(item) for item in raw_specifics if str(item).strip()]
+                    if isinstance(raw_specifics, list)
+                    else []
+                )
+                changed = (
+                    merge_confirmed_interest(
+                        profile,
+                        domain=str(entry.get("domain", "")),
+                        specifics=specifics,
+                        source=str(entry.get("confirmation_source", "buffer_promoted")),
+                        first_seen=str(entry.get("first_seen", "")),
+                        last_seen=str(entry.get("last_seen", "")),
+                    )
+                    or changed
+                )
+            if not changed:
+                return
+            if isinstance(raw_profile, dict):
+                raw_profile.clear()
+                raw_profile.update(profile.to_dict())
+            save = getattr(soul_layer, "save", None)
+            if callable(save):
+                save()
+            sync_profile_files = getattr(memory_manager, "sync_profile_files", None)
+            if callable(sync_profile_files):
+                sync_profile_files(profile)
+        except Exception:
+            logger.exception("Failed to promote exploration buffer entries")
+
+    def _record_exploration_buffer_event(
+        *,
+        domain: str,
+        source_event: str,
+        specifics: list[str] | None = None,
+        evidence_id: str = "",
+    ) -> None:
+        from datetime import UTC, datetime
+
+        from openbiliclaw.soul.exploration_buffer import (
+            pop_promotable_buffer_entries,
+            record_buffer_event,
+        )
+
+        clean_domain = domain.strip()
+        if not clean_domain:
+            return
+        memory_manager = getattr(ctx, "memory_manager", None)
+        load_state = getattr(memory_manager, "load_discovery_runtime_state", None)
+        save_state = getattr(memory_manager, "save_discovery_runtime_state", None)
+        if not callable(load_state) or not callable(save_state):
+            return
+        try:
+            state = load_state()
+            if not isinstance(state, dict):
+                state = {}
+            now = datetime.now(UTC)
+            buffer_state = record_buffer_event(
+                state.get("short_term_exploration_buffer", {}),
+                domain=clean_domain,
+                source_event=source_event,
+                specifics=specifics or [],
+                evidence_id=evidence_id,
+                now=now,
+            )
+            promoted, buffer_state = pop_promotable_buffer_entries(buffer_state, now=now)
+            state["short_term_exploration_buffer"] = buffer_state
+            save_state(state)
+            _promote_exploration_buffer_entries(promoted)
+        except Exception:
+            logger.exception("Failed to record exploration buffer event")
+
+    def _recommendation_buffer_domain(row: dict[str, object]) -> tuple[str, list[str]]:
+        title = str(row.get("title", "")).strip()
+        domain = (
+            str(row.get("topic_group", "")).strip()
+            or str(row.get("topic_label", "")).strip()
+            or str(row.get("topic", "")).strip()
+            or str(row.get("topic_key", "")).strip()
+            or title
+        )
+        specifics = [title] if title and title != domain else []
+        return domain, specifics
+
     def _contextual_chat_message(turn: ChatTurnOut) -> str:
         if turn.scope == "delight":
             label = turn.subject_title or turn.subject_id or "这条惊喜推荐"
@@ -2630,6 +2747,10 @@ def create_app(
             elif sentiment == "weak_positive":
                 chat_response = "weak_positive"
                 resulting_action = "weak_positive_deferred"
+                _record_exploration_buffer_event(
+                    domain=domain,
+                    source_event="weak_positive_chat",
+                )
                 summary = f"你对「{domain}」有轻微信号，先作为短期探索方向观察。"
             else:
                 summary = f"关于「{domain}」你说：{turn.message}"
@@ -2989,6 +3110,10 @@ def create_app(
         elif sentiment == "weak_positive":
             chat_response = "weak_positive"
             resulting_action = "weak_positive_deferred"
+            _record_exploration_buffer_event(
+                domain=domain,
+                source_event="weak_positive_chat",
+            )
             summary = f"你对「{domain}」有轻微信号，先作为短期探索方向观察。"
         else:
             summary = f"关于「{domain}」你说：{raw_message}"
@@ -3280,6 +3405,21 @@ def create_app(
                 },
             )
         )
+        buffer_domain, buffer_specifics = _recommendation_buffer_domain(recommendation)
+        if feedback_type == "like":
+            _record_exploration_buffer_event(
+                domain=buffer_domain,
+                specifics=buffer_specifics,
+                source_event="card_like",
+                evidence_id=str(recommendation.get("bvid", "")),
+            )
+        elif feedback_type == "dislike":
+            _record_exploration_buffer_event(
+                domain=buffer_domain,
+                specifics=buffer_specifics,
+                source_event="negative",
+                evidence_id=str(recommendation.get("bvid", "")),
+            )
         record_immediate_feedback_cognition = getattr(
             ctx.soul_engine,
             "record_immediate_feedback_cognition",
@@ -3380,6 +3520,19 @@ def create_app(
                     metadata=click_metadata,
                 )
             )
+        buffer_domain, buffer_specifics = _recommendation_buffer_domain(
+            {
+                "title": title,
+                "topic_label": topic_label,
+                "bvid": bvid,
+            }
+        )
+        _record_exploration_buffer_event(
+            domain=buffer_domain,
+            specifics=buffer_specifics,
+            source_event="plain_click",
+            evidence_id=bvid,
+        )
 
         # Push a strong signal into the profile update pipeline.
         layers_updated: list[str] = []

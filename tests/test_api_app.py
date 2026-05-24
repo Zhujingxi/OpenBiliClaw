@@ -2802,6 +2802,67 @@ class TestBackendAPI:
         assert history[0]["classification"] == "weak_positive"
         assert history[0]["resulting_action"] == "weak_positive_deferred"
 
+    def test_interest_probe_chat_weak_positive_records_buffer_event(self) -> None:
+        from types import SimpleNamespace
+
+        from fastapi.testclient import TestClient
+
+        class FakeDialogue:
+            async def respond(self, _message: str) -> str:
+                return "可以，先轻量试试。"
+
+        class FakeMemoryManager:
+            def __init__(self) -> None:
+                self.runtime_state: dict[str, object] = {"probe_feedback_history": []}
+                self.cognition_updates: list[dict[str, object]] = []
+
+            def load_discovery_runtime_state(self) -> dict[str, object]:
+                return dict(self.runtime_state)
+
+            def save_discovery_runtime_state(self, state: dict[str, object]) -> None:
+                self.runtime_state = dict(state)
+
+            def load_cognition_updates(self) -> list[dict[str, object]]:
+                return list(self.cognition_updates)
+
+            def save_cognition_updates(self, updates: list[dict[str, object]]) -> None:
+                self.cognition_updates = list(updates)
+
+        class FakeSpeculator:
+            def get_active_speculations(self) -> list[object]:
+                return [SimpleNamespace(domain="城市基础设施观察")]
+
+            def user_confirm_speculation(self, *_args: object, **_kwargs: object) -> bool:
+                return True
+
+            def user_reject_speculation(self, *_args: object, **_kwargs: object) -> bool:
+                return True
+
+        memory = FakeMemoryManager()
+        app = create_app(
+            memory_manager=memory,
+            database=object(),
+            soul_engine=SimpleNamespace(_speculator=FakeSpeculator()),
+            dialogue=FakeDialogue(),
+        )
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/interest-probes/respond",
+            json={
+                "domain": "城市基础设施观察",
+                "response": "chat",
+                "message": "有点意思，可以看看",
+            },
+        )
+
+        assert response.status_code == 200
+        buffer_state = memory.runtime_state["short_term_exploration_buffer"]
+        assert buffer_state["entries"][0]["domain"] == "城市基础设施观察"
+        assert buffer_state["entries"][0]["recent_evidence"][0]["source_event"] == (
+            "weak_positive_chat"
+        )
+
     def test_interest_probe_chat_classifier_failure_defaults_to_neutral(self) -> None:
         from types import SimpleNamespace
 
