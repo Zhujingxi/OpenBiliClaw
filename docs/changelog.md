@@ -4,6 +4,14 @@
 
 ---
 
+## v0.3.91 / extension v0.3.48: 挑战式兴趣探针发布（2026-05-25）
+
+- 后端源码版本仍为 v0.3.91；浏览器插件版本提升到 extension v0.3.48，准备发布 `extension-v0.3.48`。
+- 兴趣探针新增 near / lateral / bridge / wildcard 四档挑战距离，system prompt 保留距离定义，运行时按近期历史和画像状态控制探索远近。
+- 探针反馈改成 4-way 语义：`positive`、`weak_positive`、`negative`、`neutral`；聊天、卡片、OpenClaw adapter 和 avoidance probe 的反向语义都走同一套写回分支。
+- 弱正向兴趣探针先进入短期 exploration buffer，只有积累到足够显式信号后才晋升为正式兴趣，避免单次“有点意思”造成推荐短期刷屏。
+- 推荐侧对新确认方向增加放大保护和 per-refresh 上限，新兴趣可以参与探索，但不会立刻挤占整批推荐。
+
 ## v0.3.91 / extension v0.3.47: 真实可换库存口径修正 + 不喜欢领域探针（2026-05-24）
 
 - 后端源码版本提升到 v0.3.91，准备发布 `backend-v0.3.91`；浏览器插件版本提升到 extension v0.3.47，准备发布 `extension-v0.3.47`。
@@ -15,7 +23,6 @@
 - 新增不喜欢领域探针设计与实现：系统会主动确认可能的避雷方向，移动 Web / 桌面 Web / 浏览器插件 / OpenClaw 都可查看和操作。
 - 确认后通过 `apply_new_dislikes()` 写入 `disliked_topics` 并触发候选池清理；未确认避雷方向不参与 discovery / recommendation 过滤。
 - 避雷探针聊天使用 durable `scope=avoidance_probe`，用户在多聊中确认或否认会走同一条反馈、写回与冷却路径。
-- Interest probes now use challenge distance bands, direct confirmation sources, weak-signal buffering, and guarded recommendation amplification to reduce short-term overfitting.
 
 ## v0.3.89 / extension v0.3.44: 惊喜推荐内联多轮聊天（2026-05-22）
 

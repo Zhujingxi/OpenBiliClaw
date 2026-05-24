@@ -27,12 +27,12 @@
 
 ---
 
-## 📌 v0.3.91 / extension v0.3.47 重要更新（2026-05-24）
+## 📌 v0.3.91 / extension v0.3.48 重要更新（2026-05-25）
 
-- **🔢 真实可换库存** —— 插件、移动端 Web 和桌面 Web 的“可换”数字现在只统计后端当前能立即 `serve()` 的候选。
-- **🧰 素材整理态分离** —— 已发现但还缺文案、分类或可跳转链接的内容会显示为“正在整理”，不再误写成“还有 N 条可换”。
-- **🔁 换一批状态同步** —— 手动“换一批”遇到空结果时会重新同步 runtime status，并避免重复点击造成状态闪烁。
-- **🧭 避雷探针上线** —— 系统会主动确认你可能想避开的内容形态；确认后写入 `disliked_topics` 并清理候选池，未确认前不参与过滤。
+- **🔮 挑战式兴趣探针** —— 兴趣探针按 near / lateral / bridge / wildcard 四档控制探索距离，既能试探相近兴趣，也能发起更大胆的心理桥接。
+- **🧪 弱正向 buffer** —— “有点意思”这类弱正向反馈先进入短期 buffer，积累足够显式信号后才晋升为正式兴趣。
+- **🛡️ 推荐放大保护** —— 新确认方向参与探索时带 per-refresh 上限，避免一次确认后短期刷屏。
+- **🧭 避雷探针语义统一** —— 不喜欢领域探针继续写入 `disliked_topics`，聊天确认 / 否认和兴趣探针共享 4-way 反馈分支。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
@@ -579,7 +579,7 @@ OpenBiliClaw/
 
 ## 📜 更新日志
 
-最新版本：**v0.3.91 / extension v0.3.47: 真实可换库存口径修正 + 不喜欢领域探针（2026-05-24）**。README 顶部保留最新重要更新；完整历史见 [docs/changelog.md](docs/changelog.md)。插件包见 [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases)，后端源码更新看 `backend-v*` tag，不发布后端桌面包。
+最新版本：**v0.3.91 / extension v0.3.48: 挑战式兴趣探针发布（2026-05-25）**。README 顶部保留最新重要更新；完整历史见 [docs/changelog.md](docs/changelog.md)。插件包见 [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases)，后端源码更新看 `backend-v*` tag，不发布后端桌面包。
 
 ## 🗺️ 后续规划
 

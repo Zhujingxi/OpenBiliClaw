@@ -17,12 +17,12 @@
 
 ---
 
-## 📌 v0.3.91 / extension v0.3.47 Highlights (2026-05-24)
+## 📌 v0.3.91 / extension v0.3.48 Highlights (2026-05-25)
 
-- **🔢 True reshuffle inventory** — the extension, Mobile Web, and Desktop Web now show "available" only for candidates the backend can immediately `serve()`.
-- **🧰 Pending material is separate** — discovered items that still need copy, classification, or a linkable URL are shown as "being prepared" instead of "N available".
-- **🔁 Reshuffle status resync** — an empty manual reshuffle after advertised inventory refreshes runtime status and avoids repeated-click races.
-- **🧭 Avoidance probes** — the system asks about content forms you may want to avoid; confirmed answers write `disliked_topics`, while unconfirmed probes do not filter recommendations.
+- **🔮 Challenge probes** — interest probes now use near / lateral / bridge / wildcard distance bands, so exploration can range from adjacent interests to bolder psychological bridges.
+- **🧪 Weak-positive buffer** — tentative "maybe interesting" feedback enters a short-term buffer before becoming a formal interest.
+- **🛡️ Amplification guardrails** — newly confirmed directions can influence exploration without taking over an entire refresh.
+- **🧭 Unified avoidance semantics** — avoidance probes still write `disliked_topics`, while chat confirm / reject paths share the same 4-way feedback flow as interest probes.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -508,7 +508,7 @@ OpenBiliClaw/
 
 ## 📜 Release History
 
-Latest: **v0.3.91 / extension v0.3.47: true reshuffle inventory counts + avoidance probes (2026-05-24)**. The top highlight callout keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Extension packages live on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases); backend source updates use `backend-v*` tags and do not publish backend desktop packages.
+Latest: **v0.3.91 / extension v0.3.48: challenge interest probes (2026-05-25)**. The top highlight callout keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Extension packages live on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases); backend source updates use `backend-v*` tags and do not publish backend desktop packages.
 
 ## 🗺️ Roadmap
 
