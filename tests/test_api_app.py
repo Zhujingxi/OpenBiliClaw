@@ -2750,11 +2750,13 @@ class TestBackendAPI:
         history = memory.load_discovery_runtime_state()["avoidance_probe_feedback_history"]
         assert history[0]["response"] == "reject"
 
-    def test_avoidance_probe_confirm_uses_apply_new_dislikes(
+    def test_avoidance_probe_confirm_schedules_dislike_writeback(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        import time
+
         from fastapi.testclient import TestClient
 
         from openbiliclaw.api import app as app_module
@@ -2786,6 +2788,7 @@ class TestBackendAPI:
         calls: list[dict[str, object]] = []
 
         async def fake_apply_new_dislikes(**kwargs: object) -> list[str]:
+            await asyncio.sleep(0.02)
             calls.append(dict(kwargs))
             return ["新增不喜欢方向: 标题党热点解读"]
 
@@ -2810,14 +2813,19 @@ class TestBackendAPI:
             soul_engine=FakeSoulEngine(),
         )
         app.state.runtime_context.config = SimpleNamespace(data_path=tmp_path)
-        client = TestClient(app)
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/avoidance-probes/respond",
+                json={"domain": "浅层热点复读", "response": "confirm"},
+            )
 
-        response = client.post(
-            "/api/avoidance-probes/respond",
-            json={"domain": "浅层热点复读", "response": "confirm"},
-        )
+            assert response.status_code == 200
+            assert calls == []
+            for _ in range(20):
+                time.sleep(0.02)
+                if calls:
+                    break
 
-        assert response.status_code == 200
         assert calls
         assert calls[0]["topics"] == ["标题党热点解读"]
         assert calls[0]["embedding_service"] is embedding_service

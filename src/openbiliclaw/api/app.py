@@ -3019,26 +3019,42 @@ def create_app(
             ok = active_avoidance is not None
             if ok:
                 topics = topics_for_confirmed_avoidance(active_avoidance)
-                changes = await apply_new_dislikes(
-                    memory=ctx.memory_manager,
-                    database=getattr(ctx, "database", None)
-                    or getattr(ctx.memory_manager, "_database", None),
-                    embedding_service=getattr(ctx.soul_engine, "_embedding_service", None),
-                    llm_service=getattr(ctx, "llm_service", None),
-                    topics=topics,
-                )
+                summary = f"你确认了避开「{domain}」，已开始更新不喜欢方向。"
                 _record_probe_cognition(
-                    f"你确认了避开「{domain}」，已更新不喜欢方向。",
+                    summary,
                     domain,
                     "confirmed",
                     source="avoidance_probe",
-                    detail="\n".join(changes) if changes else "",
                 )
-                await _publish_probe_event(
-                    "avoidance.confirmed",
-                    f"你确认了避开「{domain}」，已更新不喜欢方向。",
-                    domain,
-                )
+                await _publish_probe_event("avoidance.confirmed", summary, domain)
+
+                async def _apply_confirmed_avoidance() -> None:
+                    try:
+                        changes = await apply_new_dislikes(
+                            memory=ctx.memory_manager,
+                            database=getattr(ctx, "database", None)
+                            or getattr(ctx.memory_manager, "_database", None),
+                            embedding_service=getattr(
+                                ctx.soul_engine, "_embedding_service", None
+                            ),
+                            llm_service=getattr(ctx, "llm_service", None),
+                            topics=topics,
+                        )
+                        if changes:
+                            _record_probe_cognition(
+                                f"避雷方向「{domain}」的不喜欢画像已更新。",
+                                domain,
+                                "confirmed",
+                                source="avoidance_probe",
+                                detail="\n".join(changes),
+                            )
+                    except Exception:
+                        logger.exception(
+                            "Background avoidance dislike writeback failed: %s",
+                            domain,
+                        )
+
+                asyncio.create_task(_apply_confirmed_avoidance())
             return {"ok": ok, "action": "confirmed", "domain": domain}
 
         if response_type == "reject":
