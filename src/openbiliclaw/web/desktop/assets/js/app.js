@@ -1296,7 +1296,10 @@
       target.getBoundingClientRect();
       target.classList.add("is-dismissing");
       target.style.height = "0px";
-      window.setTimeout(finish, 260);
+      window.setTimeout(() => {
+        target.remove();
+        finish();
+      }, 260);
     }
 
     async function respondProbe(msg, response, el) {
