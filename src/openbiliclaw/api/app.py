@@ -1763,7 +1763,7 @@ def create_app(
         # Without the wider pool, capping 原神 at 2 in a 20-row request
         # would leave gaps that other items further back in time would
         # have filled.
-        rows = ctx.database.get_recommendations(limit=40)
+        rows = ctx.database.get_recommendations(limit=40, exclude_processed=True)
 
         # Fresh-install bootstrap: ``recommendations`` table is the
         # write-only history of items we've ever served. On first popup
@@ -1783,7 +1783,7 @@ def create_app(
                 if pool_count > 0:
                     profile = await ctx.soul_engine.get_profile()
                     await ctx.recommendation_engine.serve(profile, limit=10)
-                    rows = ctx.database.get_recommendations(limit=40)
+                    rows = ctx.database.get_recommendations(limit=40, exclude_processed=True)
                     logger.info(
                         "GET /api/recommendations bootstrap: served from "
                         "empty history (pool_count=%d → wrote %d to history)",

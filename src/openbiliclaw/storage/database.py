@@ -2518,7 +2518,10 @@ class Database:
             """
             SELECT r.bvid, c.topic_key, c.topic_group, c.source, r.created_at
             FROM recommendations AS r
-            JOIN content_cache AS c ON c.bvid = r.bvid OR c.content_id = r.bvid
+            JOIN content_cache AS c ON c.bvid = COALESCE(
+                (SELECT bvid FROM content_cache WHERE bvid = r.bvid),
+                (SELECT bvid FROM content_cache WHERE content_id = r.bvid LIMIT 1)
+            )
             ORDER BY r.created_at DESC, r.id DESC
             LIMIT ?
             """,
@@ -2543,7 +2546,10 @@ class Database:
                    r.created_at,
                    r.presented_at
             FROM recommendations AS r
-            JOIN content_cache AS c ON c.bvid = r.bvid OR c.content_id = r.bvid
+            JOIN content_cache AS c ON c.bvid = COALESCE(
+                (SELECT bvid FROM content_cache WHERE bvid = r.bvid),
+                (SELECT bvid FROM content_cache WHERE content_id = r.bvid LIMIT 1)
+            )
             WHERE COALESCE(r.presented_at, r.created_at) >= ?
             ORDER BY COALESCE(r.presented_at, r.created_at) DESC, r.id DESC
             """,
@@ -2566,7 +2572,10 @@ class Database:
             SELECT r.feedback_type, c.up_mid, c.up_name, c.topic_key,
                    c.source, c.title, c.franchise_key
             FROM recommendations AS r
-            JOIN content_cache AS c ON c.bvid = r.bvid OR c.content_id = r.bvid
+            JOIN content_cache AS c ON c.bvid = COALESCE(
+                (SELECT bvid FROM content_cache WHERE bvid = r.bvid),
+                (SELECT bvid FROM content_cache WHERE content_id = r.bvid LIMIT 1)
+            )
             WHERE r.feedback_type IS NOT NULL
             ORDER BY r.feedback_at DESC
             LIMIT ?
@@ -2575,19 +2584,33 @@ class Database:
         )
         return [dict(row) for row in cursor.fetchall()]
 
-    def get_recommendations(self, limit: int = 100) -> list[dict[str, Any]]:
+    def get_recommendations(
+        self,
+        limit: int = 100,
+        *,
+        exclude_processed: bool = False,
+    ) -> list[dict[str, Any]]:
         """Get recommendation history ordered by newest first.
 
         xhs rows whose cached ``content_url`` is missing ``xsec_token``
         are filtered out — clicking them hits xhs's 300031 login wall.
+
+        When *exclude_processed* is True, rows that have already been
+        acted upon (liked / disliked / dismissed / commented) are
+        omitted so the API only returns actionable items.
 
         ``franchise_key`` (v0.3.18) is exposed so /api/recommendations
         can apply a final per-IP cap before returning to the client —
         otherwise five 原神 / 提瓦特 items can land in one popup view.
         """
         self._ensure_fresh_read()
+        processed_clause = (
+            "AND (r.feedback_type IS NULL OR r.feedback_type = '')"
+            if exclude_processed
+            else ""
+        )
         cursor = self.conn.execute(
-            """
+            f"""
             SELECT
                 r.*,
                 COALESCE(c.title, '') AS title,
@@ -2598,11 +2621,15 @@ class Database:
                 COALESCE(c.source_platform, '') AS source_platform,
                 COALESCE(c.franchise_key, '') AS franchise_key
             FROM recommendations AS r
-            LEFT JOIN content_cache AS c ON c.bvid = r.bvid OR c.content_id = r.bvid
+            LEFT JOIN content_cache AS c ON c.bvid = COALESCE(
+                (SELECT bvid FROM content_cache WHERE bvid = r.bvid),
+                (SELECT bvid FROM content_cache WHERE content_id = r.bvid LIMIT 1)
+            )
             WHERE (
                 COALESCE(c.source_platform, '') != 'xiaohongshu'
                 OR COALESCE(c.content_url, '') LIKE '%xsec_token=%'
             )
+            {processed_clause}
             ORDER BY created_at DESC, id DESC
             LIMIT ?
             """,
@@ -2643,7 +2670,10 @@ class Database:
                 c.notification_sent,
                 c.notified_at
             FROM recommendations AS r
-            JOIN content_cache AS c ON c.bvid = r.bvid OR c.content_id = r.bvid
+            JOIN content_cache AS c ON c.bvid = COALESCE(
+                (SELECT bvid FROM content_cache WHERE bvid = r.bvid),
+                (SELECT bvid FROM content_cache WHERE content_id = r.bvid LIMIT 1)
+            )
             WHERE r.presented = 0
               AND c.notification_sent = 0
               AND r.confidence >= ?
@@ -2700,7 +2730,10 @@ class Database:
                 COALESCE(c.content_url, '') AS content_url,
                 COALESCE(c.source_platform, '') AS source_platform
             FROM recommendations AS r
-            LEFT JOIN content_cache AS c ON c.bvid = r.bvid OR c.content_id = r.bvid
+            LEFT JOIN content_cache AS c ON c.bvid = COALESCE(
+                (SELECT bvid FROM content_cache WHERE bvid = r.bvid),
+                (SELECT bvid FROM content_cache WHERE content_id = r.bvid LIMIT 1)
+            )
             WHERE r.id = ?
             """,
             (recommendation_id,),
