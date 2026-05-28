@@ -17,8 +17,9 @@
 
 ---
 
-## 📌 v0.3.93 / extension v0.3.52 Highlights (2026-05-29)
+## 📌 v0.3.94 / extension v0.3.53 Highlights (2026-05-29)
 
+- **🖼️ No more cover flash** — recommendation covers appear instantly when revealed on scroll or load-more across all three surfaces, no more white-flash-then-image.
 - **♥ Standalone Favorites** — a new "Favorites" collection, fully independent from "Watch Later": tap ♡ on any recommendation or delight card to keep content permanently.
 - **📚 Saved/Watch-later browsing pages on all surfaces** — mobile, extension, and desktop now have dedicated entries to browse what you've favorited and saved — finally one place to see your collected content.
 - **🗂️ Count badges & per-item removal** — desktop sidebar Favorites/Watch-later entries show count badges; list items open or remove individually.
