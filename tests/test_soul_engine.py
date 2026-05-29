@@ -10,6 +10,13 @@ from openbiliclaw.llm.base import LLMResponse
 from openbiliclaw.llm.service import ModuleOverride
 from openbiliclaw.memory.manager import MemoryManager
 from openbiliclaw.soul.engine import SoulEngine
+from openbiliclaw.soul.overrides import ProfileOverrides, apply_edit
+from openbiliclaw.soul.profile import (
+    CoreLayer,
+    InterestDomain,
+    InterestLayer,
+    OnionProfile,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -879,3 +886,95 @@ async def test_soul_engine_passes_satisfaction_flag_to_preference_analyzer(
         satisfaction_filter_enabled=False,
     )
     assert engine_off._preference_analyzer.satisfaction_filter_enabled is False
+
+
+# --- profile overrides overlay (Task 4) -----------------------------------
+
+
+def _overlay_profile(
+    *, core_traits: tuple[str, ...] = (), dislikes: tuple[str, ...] = ()
+) -> OnionProfile:
+    return OnionProfile(
+        core=CoreLayer(core_traits=list(core_traits)),
+        interest=InterestLayer(dislikes=[InterestDomain(domain=d, weight=0.9) for d in dislikes]),
+    )
+
+
+def _seed_soul(memory: MemoryManager, profile: OnionProfile) -> None:
+    layer = memory.get_layer("soul")
+    layer.data.clear()
+    layer.data.update(profile.to_dict())
+    layer.save()
+
+
+@pytest.mark.asyncio
+async def test_get_profile_applies_overrides_get_raw_does_not(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    _seed_soul(memory, _overlay_profile(core_traits=("完美主义",)))
+
+    new_ov, _ = apply_edit(
+        memory.load_profile_overrides(), target="core.core_traits", op="add", value="务实"
+    )
+    memory.save_profile_overrides(new_ov)
+
+    effective = await engine.get_profile()
+    raw = await engine.get_raw_profile()
+    assert "务实" in effective.core.core_traits
+    assert "务实" not in raw.core.core_traits
+
+
+@pytest.mark.asyncio
+async def test_get_profile_overrides_survive_rebuild(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    _seed_soul(memory, _overlay_profile(core_traits=("完美主义", "好奇")))
+
+    new_ov, _ = apply_edit(
+        memory.load_profile_overrides(), target="core.core_traits", op="remove", value="完美主义"
+    )
+    memory.save_profile_overrides(new_ov)
+
+    # Simulate a full profile rebuild that re-derives the removed trait.
+    _seed_soul(memory, _overlay_profile(core_traits=("完美主义", "好奇", "新特质")))
+
+    effective = await engine.get_profile()
+    assert "完美主义" not in effective.core.core_traits
+    assert "新特质" in effective.core.core_traits
+
+
+def test_get_overrides_returns_stored(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    new_ov, _ = apply_edit(ProfileOverrides(), target="core.core_traits", op="add", value="务实")
+    memory.save_profile_overrides(new_ov)
+    assert engine.get_overrides().list_edits["core.core_traits"].add == ["务实"]
+
+
+def test_effective_disliked_topics_base_then_overlay(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    _seed_soul(memory, _overlay_profile(dislikes=("营销号",)))
+    preference = memory.get_layer("preference")
+    preference.data["disliked_topics"] = ["标题党"]
+    preference.save()
+
+    # Remove the raw-preference dislike via overlay; must not be re-added by raw.
+    new_ov, _ = apply_edit(
+        memory.load_profile_overrides(), target="dislikes", op="remove", value="标题党"
+    )
+    memory.save_profile_overrides(new_ov)
+
+    effective = engine.get_effective_disliked_topics()
+    assert "标题党" not in effective
+    assert "营销号" in effective
+
+    new_ov, _ = apply_edit(
+        memory.load_profile_overrides(), target="dislikes", op="add", value="钓鱼贴"
+    )
+    memory.save_profile_overrides(new_ov)
+    assert "钓鱼贴" in engine.get_effective_disliked_topics()

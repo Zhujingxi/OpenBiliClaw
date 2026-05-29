@@ -32,6 +32,7 @@ from .dialogue_insight_analyzer import (
     DialogueInsightAnalyzer,
 )
 from .insight_analyzer import InsightAnalyzer
+from .overrides import ProfileOverrides, apply_overrides, effective_dislike_terms
 from .pipeline import ProfileUpdatePipeline
 from .preference_analyzer import PreferenceAnalyzer
 from .profile import (
@@ -314,21 +315,60 @@ class SoulEngine:
             return False
 
     async def get_profile(self) -> OnionProfile:
-        """Get the current soul profile.
+        """Get the current *effective* soul profile (AI profile ⊕ user overrides).
 
         Returns:
-            Current OnionProfile from the soul memory layer.
-            Active speculative interests are attached as _active_speculations.
+            The OnionProfile from the soul memory layer with user overrides
+            merged on top. Active speculative interests are attached as
+            ``_active_speculations``.
         """
         soul_data = self._memory.get_layer("soul").data
         if not soul_data:
             raise SoulProfileNotInitializedError("Soul profile has not been initialized yet.")
         profile = OnionProfile.from_dict(soul_data)
+        profile = apply_overrides(profile, self._memory.load_profile_overrides())
         # Attach active speculations so downstream consumers (Discovery) can use them
         active_specs = self._speculator.get_active_speculations()
         if active_specs:
             profile._active_speculations = active_specs  # type: ignore[attr-defined]
         return profile
+
+    async def get_raw_profile(self) -> OnionProfile:
+        """Get the AI-generated profile WITHOUT user overrides.
+
+        Used by the edit-state endpoint and drift detection so the UI can show
+        the AI's current suggestion alongside the user's pinned value.
+        """
+        soul_data = self._memory.get_layer("soul").data
+        if not soul_data:
+            raise SoulProfileNotInitializedError("Soul profile has not been initialized yet.")
+        return OnionProfile.from_dict(soul_data)
+
+    def get_overrides(self) -> ProfileOverrides:
+        """Return the current user-authored profile overrides."""
+        return self._memory.load_profile_overrides()
+
+    def get_effective_disliked_topics(self) -> list[str]:
+        """Effective dislike terms for hard filters (base-then-overlay).
+
+        ``base`` = raw ``soul.interest.dislikes`` (domains + specifics) ∪ raw
+        flat ``preference.disliked_topics``; the dislikes overlay's remove/add
+        is then applied — remove last, so a user-removed term is NOT re-added
+        by a raw source (the reason this is not a plain union, evals F6).
+        """
+        base: list[str] = []
+        soul_data = self._memory.get_layer("soul").data
+        if soul_data:
+            raw_profile = OnionProfile.from_dict(soul_data)
+            for domain in raw_profile.interest.dislikes:
+                base.append(domain.domain)
+                base.extend(spec.name for spec in domain.specifics)
+        preference_data = self._memory.get_layer("preference").data
+        if isinstance(preference_data, dict):
+            raw_topics = preference_data.get("disliked_topics")
+            if isinstance(raw_topics, list):
+                base.extend(str(topic) for topic in raw_topics)
+        return effective_dislike_terms(base, self._memory.load_profile_overrides())
 
     async def update_from_feedback(self, feedback: dict[str, Any]) -> None:
         """Update soul understanding based on explicit user feedback.

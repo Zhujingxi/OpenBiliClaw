@@ -478,6 +478,25 @@ def apply_overrides(profile: OnionProfile, overrides: ProfileOverrides) -> Onion
     return result
 
 
+def effective_dislike_terms(base_terms: list[str], overrides: ProfileOverrides) -> list[str]:
+    """Flat effective dislike terms for hard filters.
+
+    ``base_terms`` should already combine every raw source (soul
+    ``interest.dislikes`` domains+specifics *and* flat
+    ``preference.disliked_topics``). The dislikes-polarity overlay is then
+    applied via ``_merge_list`` — remove suppresses ``base`` (applied last),
+    add appended — so a user-removed term is NOT re-added by a raw source.
+    """
+    edit = overrides.interest_edits.get("dislikes")
+    if edit is None:
+        return _merge_list(base_terms, ListEdit())
+    add: list[str] = []
+    for dom in edit.add_domains:
+        add.append(dom.domain)
+        add.extend(dom.specifics)
+    return _merge_list(base_terms, ListEdit(add=add, remove=list(edit.remove_domains)))
+
+
 # ---------------------------------------------------------------------------
 # Edit reducer: validate one user edit and fold it into the overrides.
 # ---------------------------------------------------------------------------
