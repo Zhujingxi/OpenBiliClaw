@@ -17,12 +17,12 @@
 
 ---
 
-## 📌 v0.3.94 / extension v0.3.53 Highlights (2026-05-29)
+## 📌 Editable Profile · Edit Mode Across All 3 Surfaces (2026-05-29)
 
-- **🖼️ No more cover flash** — recommendation covers appear instantly when revealed on scroll or load-more across all three surfaces, no more white-flash-then-image.
-- **♥ Standalone Favorites** — a new "Favorites" collection, fully independent from "Watch Later": tap ♡ on any recommendation or delight card to keep content permanently.
-- **📚 Saved/Watch-later browsing pages on all surfaces** — mobile, extension, and desktop now have dedicated entries to browse what you've favorited and saved — finally one place to see your collected content.
-- **🗂️ Count badges & per-item removal** — desktop sidebar Favorites/Watch-later entries show count badges; list items open or remove individually.
+- **✏️ Edit your own profile** — extension / mobile / desktop profile pages get an "Edit profile" mode: add/remove core traits, values, interest domains, favorite UPs, and rewrite prose like your persona sketch.
+- **🛡️ Edits survive rebuilds** — changes live in a separate overrides layer the AI's re-derivation can't wipe; hit "Restore AI suggestion" to revert any field.
+- **🎯 Delete/block hits recs instantly** — "disliked" domains enter the hard filter and purge already-pooled matches, no waiting for the next learning cycle.
+- **🤝 Collaborate with the AI** — pin a text field and, if the AI has a newer take, it surfaces "AI wants to update this" for you to accept or ignore.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
