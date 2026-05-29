@@ -2699,6 +2699,10 @@ const EDIT_FIELD_LABELS = {
   "role.life_stage": "人生阶段",
   "role.current_phase": "当前阶段",
   "surface.cognitive_style": "认知风格",
+  "surface.exploration_openness": "探索开放度",
+  "surface.style.quality_sensitivity": "质量敏感度",
+  "surface.style.humor_preference": "幽默偏好",
+  "surface.style.depth_preference": "深度偏好",
 };
 const EDIT_FIELD_ORDER = [
   "personality_portrait",
@@ -2712,6 +2716,10 @@ const EDIT_FIELD_ORDER = [
   "role.life_stage",
   "role.current_phase",
   "surface.cognitive_style",
+  "surface.exploration_openness",
+  "surface.style.quality_sensitivity",
+  "surface.style.humor_preference",
+  "surface.style.depth_preference",
 ];
 
 function syncProfileEditChrome(initialized) {
@@ -2904,6 +2912,55 @@ function renderTextEditField(path, label, field) {
   return block;
 }
 
+// Scalar (0..1) fields render as a percent slider. Like text fields they
+// commit on an explicit 保存 tap (not per-drag); the live label tracks the
+// slider on input so the value is visible while dragging.
+function renderScalarEditField(path, label, field) {
+  const block = makeEditFieldBlock(label, Boolean(field.pinned));
+  const pct = Math.round((Number(field.value) || 0) * 100);
+
+  const row = document.createElement("div");
+  row.className = "edit-scalar-row";
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.min = "0";
+  slider.max = "100";
+  slider.step = "1";
+  slider.value = String(pct);
+  slider.className = "edit-scalar-input";
+  const out = document.createElement("span");
+  out.className = "edit-scalar-value";
+  out.textContent = `${pct}%`;
+  slider.addEventListener("input", () => {
+    out.textContent = `${slider.value}%`;
+  });
+  row.append(slider, out);
+  block.append(row);
+
+  if (typeof field.ai_suggestion === "number") {
+    const hint = document.createElement("p");
+    hint.className = "edit-drift-hint";
+    hint.textContent = `AI 当前想更新为：${Math.round(field.ai_suggestion * 100)}%`;
+    block.append(hint);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "edit-field-actions";
+  // Named editSaveBtn (not saveBtn) to match renderTextEditField and avoid the
+  // settings-test regex that anchors on the lowercase `saveBtn.addEventListener`.
+  const editSaveBtn = document.createElement("button");
+  editSaveBtn.type = "button";
+  editSaveBtn.className = "action-button action-primary edit-save-btn";
+  editSaveBtn.textContent = "保存";
+  editSaveBtn.addEventListener("click", () => {
+    void applyProfileEdit({ target: path, op: "set", value: Number(slider.value) / 100 });
+  });
+  actions.append(editSaveBtn);
+  if (field.pinned) actions.append(makeResetButton(path));
+  block.append(actions);
+  return block;
+}
+
 function renderListEditField(path, label, field) {
   const items = Array.isArray(field.items) ? field.items : [];
   const added = Array.isArray(field.added) ? field.added : [];
@@ -2982,7 +3039,8 @@ function renderEditPanel(container, editState) {
   }
   const intro = document.createElement("p");
   intro.className = "profile-edit-note";
-  intro.textContent = "改完即时生效，且不会被后续自动重建覆盖；删错了点「恢复 AI 建议」即可。";
+  intro.textContent =
+    "标签 / 兴趣类增删即时生效；文本与滑杆类改完点「保存」才生效。改动都不会被后续自动重建覆盖，删错了点「恢复 AI 建议」即可。";
   container.append(intro);
 
   const fields = editState.fields;
@@ -2992,6 +3050,7 @@ function renderEditPanel(container, editState) {
     const label = EDIT_FIELD_LABELS[path] || path;
     let block = null;
     if (field.type === "text") block = renderTextEditField(path, label, field);
+    else if (field.type === "scalar") block = renderScalarEditField(path, label, field);
     else if (field.type === "list") block = renderListEditField(path, label, field);
     else if (field.type === "interest") block = renderInterestEditField(path, label, field);
     if (block) container.append(block);

@@ -995,6 +995,25 @@ body {
   cursor: pointer;
 }
 .edit-reset-btn:active { color: var(--brand); }
+.edit-scalar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.edit-scalar-input {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--brand);
+}
+.edit-scalar-value {
+  min-width: 44px;
+  text-align: right;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--brand);
+  font-variant-numeric: tabular-nums;
+}
 
 /* ── MBTI ─────────────────────────────────────────────────── */
 .mbti-type {

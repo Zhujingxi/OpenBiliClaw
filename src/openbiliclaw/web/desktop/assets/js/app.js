@@ -1462,7 +1462,11 @@
       "interest.favorite_up_users": "常看的 UP 主",
       "role.life_stage": "大致处在什么阶段",
       "role.current_phase": "这阵子更像在经历什么",
-      "surface.cognitive_style": "认知风格"
+      "surface.cognitive_style": "认知风格",
+      "surface.exploration_openness": "探索开放度",
+      "surface.style.quality_sensitivity": "质量敏感度",
+      "surface.style.humor_preference": "幽默偏好",
+      "surface.style.depth_preference": "深度偏好"
     };
     const PROFILE_EDIT_ORDER = [
       "personality_portrait",
@@ -1475,7 +1479,11 @@
       "interest.favorite_up_users",
       "role.life_stage",
       "role.current_phase",
-      "surface.cognitive_style"
+      "surface.cognitive_style",
+      "surface.exploration_openness",
+      "surface.style.quality_sensitivity",
+      "surface.style.humor_preference",
+      "surface.style.depth_preference"
     ];
 
     function bindProfileEditToggle() {
@@ -1530,6 +1538,25 @@
         </div>`;
     }
 
+    function profileEditScalarField(path, label, field) {
+      const pinned = Boolean(field.pinned);
+      const pct = Math.round((Number(field.value) || 0) * 100);
+      const aiPct = typeof field.ai_suggestion === "number" ? Math.round(field.ai_suggestion * 100) : null;
+      return `
+        <div class="edit-field">
+          <div class="edit-field-head"><span class="edit-field-label">${escapeHtml(label)}</span>${pinned ? `<span class="edit-badge">已编辑</span>` : ""}</div>
+          <div class="edit-scalar-row">
+            <input class="edit-scalar-input" type="range" min="0" max="100" step="1" value="${pct}" data-edit-scalar="${escapeHtml(path)}" />
+            <span class="edit-scalar-value" data-edit-scalar-value="${escapeHtml(path)}">${pct}%</span>
+          </div>
+          ${aiPct !== null ? `<p class="edit-drift-hint">AI 当前想更新为：${aiPct}%</p>` : ""}
+          <div class="edit-field-actions">
+            <button class="pill-btn primary" type="button" data-edit-save-scalar="${escapeHtml(path)}">保存</button>
+            ${pinned ? `<button class="edit-reset-btn" type="button" data-edit-reset="${escapeHtml(path)}">恢复 AI 建议</button>` : ""}
+          </div>
+        </div>`;
+    }
+
     function profileEditListField(path, label, field) {
       const items = Array.isArray(field.items) ? field.items : [];
       const edited = (field.added?.length || 0) > 0 || (field.removed?.length || 0) > 0;
@@ -1578,12 +1605,13 @@
         html += `<p class="video-meta">画像还没攒起来，先跑一遍 openbiliclaw init 再回来编辑。</p>`;
         return html;
       }
-      html += `<p class="video-meta profile-edit-note">改完即时生效，且不会被后续自动重建覆盖；删错了点「恢复 AI 建议」即可。</p>`;
+      html += `<p class="video-meta profile-edit-note">标签 / 兴趣类增删即时生效；文本与滑杆类改完点「保存」才生效。改动都不会被后续自动重建覆盖，删错了点「恢复 AI 建议」即可。</p>`;
       for (const path of PROFILE_EDIT_ORDER) {
         const field = editState.fields[path];
         if (!field || typeof field !== "object") continue;
         const label = PROFILE_EDIT_LABELS[path] || path;
         if (field.type === "text") html += profileEditTextField(path, label, field);
+        else if (field.type === "scalar") html += profileEditScalarField(path, label, field);
         else if (field.type === "list") html += profileEditListField(path, label, field);
         else if (field.type === "interest") html += profileEditInterestField(path, label, field);
       }
@@ -1625,6 +1653,20 @@
           const value = textarea?.value.trim();
           if (!value) return;
           void applyProfileEdit({ target: path, op: "set", value });
+        });
+      });
+      root.querySelectorAll("[data-edit-scalar]").forEach((input) => {
+        input.addEventListener("input", () => {
+          const out = root.querySelector(`[data-edit-scalar-value="${input.dataset.editScalar}"]`);
+          if (out) out.textContent = `${input.value}%`;
+        });
+      });
+      root.querySelectorAll("[data-edit-save-scalar]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const path = btn.dataset.editSaveScalar;
+          const input = root.querySelector(`[data-edit-scalar="${path}"]`);
+          if (!input) return;
+          void applyProfileEdit({ target: path, op: "set", value: Number(input.value) / 100 });
         });
       });
     }

@@ -57,6 +57,10 @@ const EDIT_FIELD_LABELS = {
   "role.life_stage": "人生阶段",
   "role.current_phase": "当前阶段",
   "surface.cognitive_style": "认知风格",
+  "surface.exploration_openness": "探索开放度",
+  "surface.style.quality_sensitivity": "质量敏感度",
+  "surface.style.humor_preference": "幽默偏好",
+  "surface.style.depth_preference": "深度偏好",
 };
 const EDIT_FIELD_ORDER = [
   "personality_portrait",
@@ -70,6 +74,10 @@ const EDIT_FIELD_ORDER = [
   "role.life_stage",
   "role.current_phase",
   "surface.cognitive_style",
+  "surface.exploration_openness",
+  "surface.style.quality_sensitivity",
+  "surface.style.humor_preference",
+  "surface.style.depth_preference",
 ];
 
 function chipList(items, cls = "") {
@@ -443,7 +451,12 @@ async function enterEdit() {
   try {
     editState = await fetchEditState();
   } catch {
-    editState = { initialized: false };
+    // Distinguish a failed request (404/500/network) from a genuinely
+    // uninitialized profile — the latter is what the server reports as
+    // {initialized:false}. Conflating them showed "先跑一遍 init" even
+    // when the profile exists (view mode renders it fine) and only the
+    // edit-state request failed.
+    editState = { loadError: true };
   }
   render();
 }
@@ -478,6 +491,28 @@ function renderTextEditField(path, label, field) {
       ${field.ai_suggestion ? `<p class="edit-drift-hint">AI 当前想更新为：${esc(field.ai_suggestion)}</p>` : ""}
       <div class="edit-field-actions">
         <button class="edit-save-btn" data-edit-save="${escAttr(path)}">保存</button>
+        ${pinned ? `<button class="edit-reset-btn" data-edit-reset="${escAttr(path)}">恢复 AI 建议</button>` : ""}
+      </div>
+    </div>`;
+}
+
+// Scalar (0..1) fields render as a percent slider. Like text fields they
+// commit on an explicit 保存 tap (not per-drag) to avoid a POST per pixel;
+// the live label updates on input so the value is visible while dragging.
+function renderScalarEditField(path, label, field) {
+  const pinned = Boolean(field.pinned);
+  const pct = Math.round((Number(field.value) || 0) * 100);
+  const aiPct = typeof field.ai_suggestion === "number" ? Math.round(field.ai_suggestion * 100) : null;
+  return `
+    <div class="edit-field">
+      <div class="edit-field-head"><span class="edit-field-label">${esc(label)}</span>${pinned ? `<span class="edit-badge">已编辑</span>` : ""}</div>
+      <div class="edit-scalar-row">
+        <input class="edit-scalar-input" type="range" min="0" max="100" step="1" value="${pct}" data-edit-scalar="${escAttr(path)}" />
+        <span class="edit-scalar-value" data-edit-scalar-value="${escAttr(path)}">${pct}%</span>
+      </div>
+      ${aiPct !== null ? `<p class="edit-drift-hint">AI 当前想更新为：${aiPct}%</p>` : ""}
+      <div class="edit-field-actions">
+        <button class="edit-save-btn" data-edit-save-scalar="${escAttr(path)}">保存</button>
         ${pinned ? `<button class="edit-reset-btn" data-edit-reset="${escAttr(path)}">恢复 AI 建议</button>` : ""}
       </div>
     </div>`;
@@ -536,16 +571,21 @@ function renderEditPanelHtml() {
     html += `<div style="padding:24px"><div class="spinner"></div></div>`;
     return html;
   }
+  if (editState.loadError) {
+    html += `<div class="profile-edit-note">编辑数据加载失败，请检查后端连接后重试。</div><button class="load-more-btn" data-edit-retry="1">重试</button>`;
+    return html;
+  }
   if (!editState.initialized || !editState.fields) {
     html += `<div class="profile-edit-note">画像还没攒起来，先跑一遍 <code>openbiliclaw init</code> 再回来编辑。</div>`;
     return html;
   }
-  html += `<div class="profile-edit-note">改完即时生效，且不会被后续自动重建覆盖；删错了点「恢复 AI 建议」即可。</div>`;
+  html += `<div class="profile-edit-note">标签 / 兴趣类增删即时生效；文本与滑杆类改完点「保存」才生效。改动都不会被后续自动重建覆盖，删错了点「恢复 AI 建议」即可。</div>`;
   for (const path of EDIT_FIELD_ORDER) {
     const field = editState.fields[path];
     if (!field || typeof field !== "object") continue;
     const label = EDIT_FIELD_LABELS[path] || path;
     if (field.type === "text") html += renderTextEditField(path, label, field);
+    else if (field.type === "scalar") html += renderScalarEditField(path, label, field);
     else if (field.type === "list") html += renderListEditField(path, label, field);
     else if (field.type === "interest") html += renderInterestEditField(path, label, field);
   }
@@ -554,6 +594,7 @@ function renderEditPanelHtml() {
 
 function bindEditActions() {
   $root.querySelector('[data-edit-toggle="exit"]')?.addEventListener("click", exitEdit);
+  $root.querySelector("[data-edit-retry]")?.addEventListener("click", () => void enterEdit());
 
   for (const btn of $root.querySelectorAll("[data-edit-remove]")) {
     btn.addEventListener("click", () =>
@@ -588,6 +629,20 @@ function bindEditActions() {
       const value = ta?.value.trim();
       if (!value) return;
       void applyEdit({ target: path, op: "set", value });
+    });
+  }
+  for (const input of $root.querySelectorAll("[data-edit-scalar]")) {
+    input.addEventListener("input", () => {
+      const out = $root.querySelector(`[data-edit-scalar-value="${input.dataset.editScalar}"]`);
+      if (out) out.textContent = `${input.value}%`;
+    });
+  }
+  for (const btn of $root.querySelectorAll("[data-edit-save-scalar]")) {
+    btn.addEventListener("click", () => {
+      const path = btn.dataset.editSaveScalar;
+      const input = $root.querySelector(`[data-edit-scalar="${path}"]`);
+      if (!input) return;
+      void applyEdit({ target: path, op: "set", value: Number(input.value) / 100 });
     });
   }
 }

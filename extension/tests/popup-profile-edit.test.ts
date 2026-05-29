@@ -42,3 +42,19 @@ test("edit panel covers the un-truncated editable fields", () => {
     assert.ok(js.includes(`"${path}"`), `EDIT_FIELD_ORDER should include ${path}`);
   }
 });
+
+test("edit panel renders scalar (slider) fields committing a 0..1 float", () => {
+  const js = readFileSync(resolve("popup", "popup.js"), "utf8");
+  for (const path of [
+    "surface.exploration_openness",
+    "surface.style.quality_sensitivity",
+    "surface.style.humor_preference",
+    "surface.style.depth_preference",
+  ]) {
+    assert.ok(js.includes(`"${path}"`), `EDIT_FIELD_ORDER should include ${path}`);
+  }
+  assert.match(js, /function renderScalarEditField\(/);
+  assert.match(js, /field\.type === "scalar"/);
+  // slider commits as a 0..1 float on explicit save (not per-drag)
+  assert.match(js, /op: "set", value: Number\(slider\.value\) \/ 100/);
+});
