@@ -5,6 +5,7 @@ Transforms raw behavioral data into deep, layered understanding of a person.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -192,6 +193,10 @@ class SoulEngine:
             cognition_cycle=self._cognition_cycle,
             speculator_idle_interval_minutes=speculator_idle_interval_minutes,
         )
+        # Detached post-edit work (the dislike pool purge runs an LLM+embedding
+        # recall that must not block the edit response). Tracked so it isn't
+        # garbage-collected mid-flight and can be awaited in tests / shutdown.
+        self._background_edit_tasks: set[asyncio.Task[Any]] = set()
 
     def set_embedding_service(self, embedding_service: Any) -> None:
         """Attach or update the embedding service after construction.
@@ -441,14 +446,6 @@ class SoulEngine:
 
         after = set(self.get_effective_disliked_topics())
         newly_added = sorted(after - before)
-        if newly_added:
-            await self._purge_for_new_dislikes(
-                newly_added=newly_added,
-                all_dislikes=sorted(after),
-                database=database,
-                embedding_service=embedding_service,
-                llm_service=llm_service,
-            )
 
         self._sync_speculators_for_edit(target=target, op=op, value=value)
         self._record_manual_cognition(target=target, op=op, value=value)
@@ -456,7 +453,43 @@ class SoulEngine:
         if self._memory.get_layer("soul").data:
             self._memory.sync_profile_files(await self.get_raw_profile())
 
+        # The dislike pool purge does an embedding recall + LLM classification
+        # that can take tens of seconds. It is a best-effort cleanup of
+        # already-pooled content and MUST NOT block the edit response — doing so
+        # makes the UI hang for the whole call and the new dislike appears "not
+        # saved". Run it detached; the override itself is already persisted.
+        if newly_added:
+            self._schedule_dislike_purge(
+                newly_added=newly_added,
+                all_dislikes=sorted(after),
+                database=database,
+                embedding_service=embedding_service,
+                llm_service=llm_service,
+            )
+
         return {"ok": True, "target": target, "op": op}
+
+    def _schedule_dislike_purge(self, **kwargs: Any) -> None:
+        """Run the dislike pool purge detached from the edit request.
+
+        ``apply_user_edit`` is always invoked inside a running event loop, so a
+        task is scheduled there. Failures are swallowed inside
+        ``_purge_for_new_dislikes``; the done-callback only drops the tracking
+        reference.
+        """
+        task = asyncio.ensure_future(self._purge_for_new_dislikes(**kwargs))
+        self._background_edit_tasks.add(task)
+        task.add_done_callback(self._background_edit_tasks.discard)
+
+    async def wait_for_pending_edits(self) -> None:
+        """Await any detached post-edit work (the dislike pool purge).
+
+        Used by tests and graceful shutdown so the background purge can finish
+        deterministically. No-op when nothing is pending.
+        """
+        tasks = list(self._background_edit_tasks)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _purge_for_new_dislikes(
         self,

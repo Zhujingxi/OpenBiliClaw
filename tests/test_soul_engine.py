@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -1021,9 +1022,9 @@ async def test_apply_user_edit_dislike_add_triggers_purge_with_diff(
         return []
 
     monkeypatch.setattr(dislike_writeback, "purge_pool_for_new_dislikes", fake_purge)
-    await engine.apply_user_edit(
-        target="dislikes", op="add", value="营销号", database=object()
-    )
+    await engine.apply_user_edit(target="dislikes", op="add", value="营销号", database=object())
+    # Purge runs detached so it never blocks the edit response — drain it.
+    await engine.wait_for_pending_edits()
     assert len(calls) == 1
     assert "营销号" in calls[0]
 
@@ -1047,10 +1048,47 @@ async def test_apply_user_edit_duplicate_dislike_does_not_purge(
         return []
 
     monkeypatch.setattr(dislike_writeback, "purge_pool_for_new_dislikes", fake_purge)
-    await engine.apply_user_edit(
-        target="dislikes", op="add", value="营销号", database=object()
-    )
+    await engine.apply_user_edit(target="dislikes", op="add", value="营销号", database=object())
+    await engine.wait_for_pending_edits()
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_apply_user_edit_dislike_add_does_not_block_on_purge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new dislike must return immediately; the LLM+embedding pool purge runs
+    detached. Regression: the purge used to be awaited inline, blocking the edit
+    response for tens of seconds so the UI looked like the add never saved.
+    """
+    import openbiliclaw.soul.dislike_writeback as dislike_writeback
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    _seed_soul(memory, _overlay_profile())
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = False
+
+    async def slow_purge(**kwargs: object) -> list[str]:
+        nonlocal finished
+        started.set()
+        await release.wait()
+        finished = True
+        return []
+
+    monkeypatch.setattr(dislike_writeback, "purge_pool_for_new_dislikes", slow_purge)
+    await engine.apply_user_edit(target="dislikes", op="add", value="营销号", database=object())
+    # apply_user_edit returned without awaiting the purge: it has started (the
+    # task got scheduled) but is parked on `release`, not finished.
+    await started.wait()
+    assert finished is False
+    # Letting it complete still runs the purge to the end.
+    release.set()
+    await engine.wait_for_pending_edits()
+    assert finished is True
 
 
 @pytest.mark.asyncio
