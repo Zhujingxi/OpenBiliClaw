@@ -187,15 +187,26 @@ class MemoryManager:
         self._notify_profile_changed()
 
     def sync_profile_files(self, profile: object) -> None:
-        """Write soul_profile.json + soul_profile.md dual files."""
+        """Write soul_profile.json + soul_profile.md, rendering the EFFECTIVE
+        profile (AI profile ⊕ user overrides).
+
+        Callers pass the raw AI profile (rebuild, init, dialogue ingestion).
+        We apply the user overrides here so the human-readable mirror reflects
+        manual edits even right after a regeneration — without this, the
+        mirror would show the raw AI profile and silently drop user edits.
+        """
+        from openbiliclaw.soul.overrides import apply_overrides
         from openbiliclaw.soul.profile import OnionProfile
         from openbiliclaw.soul.profile_renderer import sync_profile_files
 
+        onion: OnionProfile | None = None
         if isinstance(profile, OnionProfile):
-            sync_profile_files(profile, self._data_dir)
+            onion = profile
         elif isinstance(profile, dict):
             onion = OnionProfile.from_dict(profile)
-            sync_profile_files(onion, self._data_dir)
+        if onion is not None:
+            effective = apply_overrides(onion, self.load_profile_overrides())
+            sync_profile_files(effective, self._data_dir)
         # ``sync_profile_files`` is the canonical "profile is now
         # current on disk" point — every code path that updates the
         # profile (init, cognition cycle, manual rebuild, dialogue

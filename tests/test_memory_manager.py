@@ -40,6 +40,44 @@ def test_load_profile_overrides_missing_returns_empty(tmp_path: Path) -> None:
     assert memory.load_profile_overrides().is_empty()
 
 
+def test_sync_profile_files_renders_effective_profile(tmp_path: Path) -> None:
+    from openbiliclaw.soul.overrides import ProfileOverrides, apply_edit
+    from openbiliclaw.soul.profile import OnionProfile
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+
+    ov, _ = apply_edit(
+        ProfileOverrides(), target="personality_portrait", op="set", value="我自己写的画像"
+    )
+    memory.save_profile_overrides(ov)
+
+    # Sync the raw AI profile (as a rebuild would) — different portrait text.
+    memory.sync_profile_files(OnionProfile(personality_portrait="AI 生成的画像"))
+
+    md = (tmp_path / "memory" / "soul_profile.md").read_text(encoding="utf-8")
+    assert "我自己写的画像" in md
+    assert "AI 生成的画像" not in md
+
+
+def test_sync_profile_files_applies_overlay_on_dict_input(tmp_path: Path) -> None:
+    from openbiliclaw.soul.overrides import ProfileOverrides, apply_edit
+    from openbiliclaw.soul.profile import OnionProfile
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+
+    ov, _ = apply_edit(
+        ProfileOverrides(), target="personality_portrait", op="set", value="覆盖文案"
+    )
+    memory.save_profile_overrides(ov)
+
+    memory.sync_profile_files(OnionProfile(personality_portrait="原始").to_dict())
+
+    md = (tmp_path / "memory" / "soul_profile.md").read_text(encoding="utf-8")
+    assert "覆盖文案" in md
+
+
 @pytest.mark.asyncio
 async def test_propagate_event_persists_to_sqlite(tmp_path: Path) -> None:
     memory = MemoryManager(tmp_path)
