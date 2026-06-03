@@ -110,6 +110,13 @@ class RuntimeStatusResponse(BaseModel):
     manual_refresh_message: str = ""
     last_account_sync_at: str = ""
     last_account_sync_error: str = ""
+    auto_update_enabled: bool = False
+    current_version: str = ""
+    latest_remote_version: str = ""
+    last_update_check_at: str = ""
+    last_update_error: str = ""
+    backend_update_state: str = "unknown"
+    backend_update_reason: str = "none"
 
 
 class ActivityFeedItemOut(BaseModel):

@@ -6,6 +6,7 @@
 
 ## v0.3.100: 外站补池预算与 B 站统一（2026-06-03）
 
+- 修复自动更新版本状态在 runtime 链路中被丢弃的问题：`/api/runtime-status` 的响应模型现在保留 `AutoUpdateService.get_runtime_status()` 合入的 `current_version`、`latest_remote_version`、`last_update_check_at`、`last_update_error`、`backend_update_state` 和 `backend_update_reason`；插件 `normalizeRuntimeStatus()` 同步保留这些字段，避免前端状态归一化浪费后端版本数据。设置页仍使用后端专用 `/api/update-status` 做“版本与更新”展示和手动检查 / 应用。
 - 小红书 / 抖音 / YouTube 的 `daily_*_budget` 默认改为 `0`，语义统一为“不设每日上限”；持续补池改为像 B 站一样主要受平台缺口、单轮 `scheduler.discovery_limit` 和 producer 节流控制，避免外站内容被刷完后因当天预算耗尽而长期不补。
 - 队列层统一支持 `daily_budget <= 0` 跳过每日上限：`XhsTaskQueue`、`DyTaskQueue` 和 YouTube bootstrap `YtTaskQueue` 都保留正数预算限流能力，但默认不再按天卡死。抖音 hot runtime 预算在配置为 `0` 时不再被缺口动态放大成正数。
 - YouTube steady-state producer 在 `daily_*_budget = 0` 时以本轮 `limit` 作为策略执行预算；显式正数仍按 SQLite ledger 做每日剩余额度，便于需要严格限流的用户手动恢复上限。插件设置页、API 配置模型、CLI fallback、`config.example.toml` 和配置参考同步更新。

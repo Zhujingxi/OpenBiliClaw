@@ -440,7 +440,54 @@ test("normalizeRuntimeStatus fills stable fallback fields", () => {
     recent_pool_topics: [],
     manual_refresh_state: "idle",
     manual_refresh_message: "",
+    auto_update_enabled: false,
+    current_version: "",
+    latest_remote_version: "",
+    last_update_check_at: "",
+    last_update_error: "",
+    backend_update_state: "unknown",
+    backend_update_reason: "none",
   });
+});
+
+test("normalizeRuntimeStatus preserves backend update summary fields", () => {
+  assert.deepEqual(
+    normalizeRuntimeStatus({
+      initialized: true,
+      recommendation_count: 5,
+      auto_update_enabled: true,
+      current_version: "0.3.91",
+      latest_remote_version: "0.3.92",
+      last_update_check_at: "2026-05-31T12:00:00+00:00",
+      last_update_error: "",
+      backend_update_state: "update_available",
+      backend_update_reason: "none",
+    }),
+    {
+      initialized: true,
+      recommendation_count: 5,
+      pending_signal_events: 0,
+      last_refresh_at: "",
+      last_notification_at: "",
+      unread_count: 0,
+      pool_available_count: 0,
+      pool_raw_count: 0,
+      pool_pending_count: 0,
+      pool_target_count: 0,
+      last_discovered_count: 0,
+      last_replenished_count: 0,
+      recent_pool_topics: [],
+      manual_refresh_state: "idle",
+      manual_refresh_message: "",
+      auto_update_enabled: true,
+      current_version: "0.3.91",
+      latest_remote_version: "0.3.92",
+      last_update_check_at: "2026-05-31T12:00:00+00:00",
+      last_update_error: "",
+      backend_update_state: "update_available",
+      backend_update_reason: "none",
+    },
+  );
 });
 
 test("shouldFetchProfileSummary allows force refresh after profile is cached", () => {

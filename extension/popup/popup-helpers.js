@@ -597,6 +597,13 @@ export function normalizeRuntimeStatus(status) {
       : [],
     manual_refresh_state: normalizeText(status?.manual_refresh_state) || "idle",
     manual_refresh_message: normalizeText(status?.manual_refresh_message),
+    auto_update_enabled: Boolean(status?.auto_update_enabled),
+    current_version: normalizeText(status?.current_version),
+    latest_remote_version: normalizeText(status?.latest_remote_version),
+    last_update_check_at: normalizeText(status?.last_update_check_at),
+    last_update_error: normalizeText(status?.last_update_error),
+    backend_update_state: normalizeText(status?.backend_update_state) || "unknown",
+    backend_update_reason: normalizeText(status?.backend_update_reason) || "none",
   };
 }
 

@@ -1492,7 +1492,59 @@ class TestBackendAPI:
             "manual_refresh_message": "",
             "last_account_sync_at": "2026-03-14T18:00:00+00:00",
             "last_account_sync_error": "",
+            "auto_update_enabled": False,
+            "current_version": "0.3.91",
+            "latest_remote_version": "",
+            "last_update_check_at": "",
+            "last_update_error": "",
+            "backend_update_state": "disabled",
+            "backend_update_reason": "none",
         }
+
+    def test_runtime_status_endpoint_includes_backend_update_summary(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeRuntimeController:
+            def get_runtime_status(self) -> dict[str, object]:
+                return {
+                    "initialized": True,
+                    "recommendation_count": 5,
+                    "pending_signal_events": 3,
+                    "unread_count": 2,
+                }
+
+        class FakeAutoUpdateService:
+            def get_runtime_status(self) -> dict[str, object]:
+                return {
+                    "auto_update_enabled": False,
+                    "current_version": "0.3.91",
+                    "latest_remote_version": "0.3.92",
+                    "last_update_check_at": "2026-05-31T12:00:00+00:00",
+                    "last_update_error": "",
+                    "backend_update_state": "update_available",
+                    "backend_update_reason": "none",
+                }
+
+        app = create_app(
+            memory_manager=object(),
+            database=object(),
+            soul_engine=object(),
+            runtime_controller=FakeRuntimeController(),
+            auto_update_service=FakeAutoUpdateService(),
+        )
+        client = TestClient(app)
+
+        response = client.get("/api/runtime-status")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["auto_update_enabled"] is False
+        assert body["current_version"] == "0.3.91"
+        assert body["latest_remote_version"] == "0.3.92"
+        assert body["last_update_check_at"] == "2026-05-31T12:00:00+00:00"
+        assert body["last_update_error"] == ""
+        assert body["backend_update_state"] == "update_available"
+        assert body["backend_update_reason"] == "none"
 
     def test_update_status_returns_backend_only_and_ignores_extension_metadata(self) -> None:
         from fastapi.testclient import TestClient
