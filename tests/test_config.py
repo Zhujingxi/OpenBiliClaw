@@ -808,8 +808,8 @@ def test_sources_xiaohongshu_defaults() -> None:
     config = _build_config({})
 
     assert config.sources.xiaohongshu.enabled is False
-    assert config.sources.xiaohongshu.daily_search_budget == 30
-    assert config.sources.xiaohongshu.daily_creator_budget == 10
+    assert config.sources.xiaohongshu.daily_search_budget == 0
+    assert config.sources.xiaohongshu.daily_creator_budget == 0
     assert config.sources.xiaohongshu.task_interval_seconds == 45
 
 
@@ -819,9 +819,9 @@ def test_sources_douyin_defaults() -> None:
     assert config.sources.douyin.enabled is False
     assert config.sources.douyin.mode == "direct"
     assert config.sources.douyin.cookie_env == "OPENBILICLAW_DOUYIN_COOKIE"
-    assert config.sources.douyin.daily_search_budget == 30
-    assert config.sources.douyin.daily_hot_budget == 5
-    assert config.sources.douyin.daily_feed_budget == 30
+    assert config.sources.douyin.daily_search_budget == 0
+    assert config.sources.douyin.daily_hot_budget == 0
+    assert config.sources.douyin.daily_feed_budget == 0
     assert config.sources.douyin.request_interval_seconds == 2
 
 
@@ -829,9 +829,9 @@ def test_sources_youtube_defaults() -> None:
     config = _build_config({})
 
     assert config.sources.youtube.enabled is False
-    assert config.sources.youtube.daily_search_budget == 6
-    assert config.sources.youtube.daily_trending_budget == 50
-    assert config.sources.youtube.daily_channel_budget == 10
+    assert config.sources.youtube.daily_search_budget == 0
+    assert config.sources.youtube.daily_trending_budget == 0
+    assert config.sources.youtube.daily_channel_budget == 0
     assert config.sources.youtube.request_interval_seconds == 2
     assert config.sources.youtube.min_interval_minutes == 60
 

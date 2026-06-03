@@ -416,12 +416,18 @@ async def test_youtube_producer_factory_filters_youtube_results_and_records_unit
     result = await producer.produce_if_due(limit=10)
 
     assert result == {
-        "discovered": 2,
-        "source_counts": {"yt_search": 2},
+        "discovered": 6,
+        "source_counts": {"yt_search": 2, "yt_trending": 2, "yt_channel": 2},
         "reason": "ok",
     }
-    assert discovery_engine.discover_calls == [(["yt_search"], 10)]
+    assert discovery_engine.discover_calls == [
+        (["yt_search"], 10),
+        (["yt_trending"], 10),
+        (["yt_channel"], 10),
+    ]
     assert producer.consumed_today("yt_search") == 2
+    assert producer.consumed_today("yt_trending") == 10
+    assert producer.consumed_today("yt_channel") == 10
 
 
 def test_extract_innertube_config_reads_current_youtube_constants() -> None:

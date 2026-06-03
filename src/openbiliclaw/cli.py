@@ -5340,7 +5340,7 @@ def _run_xhs_discovery(*, force: bool) -> None:
         soul_engine=soul_engine,
         llm_service=llm_service,
         enabled=True,
-        daily_budget=int(getattr(xhs_cfg, "daily_search_budget", 30)),
+        daily_budget=int(getattr(xhs_cfg, "daily_search_budget", 0)),
         min_interval_hours=0 if force else 4,
     )
     result = asyncio.run(producer.produce_if_due())
@@ -5356,7 +5356,7 @@ def _run_xhs_discovery(*, force: bool) -> None:
             [
                 ("入队关键词数", str(enqueued)),
                 ("尝试关键词数", str(attempted)),
-                ("今日预算", str(int(getattr(xhs_cfg, "daily_search_budget", 30)))),
+                ("今日预算", str(int(getattr(xhs_cfg, "daily_search_budget", 0)))),
                 ("节流开关", "已跳过（--force）" if force else "4 小时节流"),
             ],
         )
@@ -5520,9 +5520,9 @@ def _run_douyin_discovery(
                         database=database,
                         direct_client=direct_client,
                         wait_seconds=search_wait_seconds,
-                        daily_search_budget=int(getattr(dy_cfg, "daily_search_budget", 30)),
-                        daily_hot_budget=int(getattr(dy_cfg, "daily_hot_budget", 5)),
-                        daily_feed_budget=int(getattr(dy_cfg, "daily_feed_budget", 30)),
+                        daily_search_budget=int(getattr(dy_cfg, "daily_search_budget", 0)),
+                        daily_hot_budget=int(getattr(dy_cfg, "daily_hot_budget", 0)),
+                        daily_feed_budget=int(getattr(dy_cfg, "daily_feed_budget", 0)),
                     )
             discovery_engine = _build_discovery_engine() if cache else None
             service = DouyinDiscoveryService(

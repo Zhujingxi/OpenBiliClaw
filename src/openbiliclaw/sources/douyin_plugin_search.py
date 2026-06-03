@@ -24,6 +24,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _normalize_daily_budget(value: int) -> int:
+    """Normalize daily task budget; 0 disables the per-day cap."""
+
+    return max(0, int(value))
+
+
 class SupportsDouyinSearchFallback(Protocol):
     """Subset of the direct client used as fallback/delegate."""
 
@@ -89,17 +95,14 @@ class DouyinPluginSearchClient:
         self._direct_client = direct_client
         self._wait_seconds = max(0.0, float(wait_seconds))
         self._poll_interval_seconds = max(0.01, float(poll_interval_seconds))
-        self._daily_search_budget = max(
-            1,
-            int(daily_search_budget if daily_search_budget is not None else daily_budget),
+        self._daily_search_budget = _normalize_daily_budget(
+            daily_search_budget if daily_search_budget is not None else daily_budget
         )
-        self._daily_hot_budget = max(
-            1,
-            int(daily_hot_budget if daily_hot_budget is not None else daily_budget),
+        self._daily_hot_budget = _normalize_daily_budget(
+            daily_hot_budget if daily_hot_budget is not None else daily_budget
         )
-        self._daily_feed_budget = max(
-            1,
-            int(daily_feed_budget if daily_feed_budget is not None else daily_budget),
+        self._daily_feed_budget = _normalize_daily_budget(
+            daily_feed_budget if daily_feed_budget is not None else daily_budget
         )
         self._kick = kick or kick_douyin_task_dispatcher
 

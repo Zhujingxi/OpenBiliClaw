@@ -40,9 +40,9 @@ class YoutubeDiscoveryProducer:
     discover: YoutubeDiscoverCallable
     enabled: bool = True
     min_interval_minutes: int = 60
-    daily_search_budget: int = 6
-    daily_trending_budget: int = 50
-    daily_channel_budget: int = 10
+    daily_search_budget: int = 0
+    daily_trending_budget: int = 0
+    daily_channel_budget: int = 0
     strategies: tuple[str, ...] = YOUTUBE_DISCOVERY_STRATEGIES
     _last_run_at: datetime | None = field(default=None, init=False)
     _last_skip_reason: str = field(default="", init=False)
@@ -62,12 +62,12 @@ class YoutubeDiscoveryProducer:
         if profile is None:
             return self._skip("no_profile")
 
-        remaining = self.remaining_budgets()
+        requested_limit = max(1, int(limit or 10))
+        remaining = self.remaining_budgets(per_run_budget=requested_limit)
         runnable = [strategy for strategy in self.strategies if int(remaining.get(strategy, 0)) > 0]
         if not runnable:
             return self._skip("budget_exhausted")
 
-        requested_limit = max(1, int(limit or 10))
         discovered_total = 0
         source_counts: Counter[str] = Counter()
         error_count = 0
@@ -118,17 +118,28 @@ class YoutubeDiscoveryProducer:
             "reason": "ok",
         }
 
-    def remaining_budgets(self) -> dict[str, int]:
-        """Return remaining execution units by YouTube strategy for today."""
+    def remaining_budgets(self, *, per_run_budget: int | None = None) -> dict[str, int]:
+        """Return runnable execution units by YouTube strategy.
+
+        ``daily_*_budget == 0`` means no per-day cap, matching the Bilibili
+        producer style: every due run is bounded by the runtime deficit /
+        ``discovery_limit`` passed in as ``per_run_budget``.
+        """
+        run_budget = max(1, int(per_run_budget or 10))
         configured = {
-            "yt_search": max(0, int(self.daily_search_budget)),
-            "yt_trending": max(0, int(self.daily_trending_budget)),
-            "yt_channel": max(0, int(self.daily_channel_budget)),
+            "yt_search": int(self.daily_search_budget),
+            "yt_trending": int(self.daily_trending_budget),
+            "yt_channel": int(self.daily_channel_budget),
         }
-        return {
-            strategy: max(0, budget - self.consumed_today(strategy))
-            for strategy, budget in configured.items()
-        }
+        remaining: dict[str, int] = {}
+        for strategy, budget in configured.items():
+            if budget == 0:
+                remaining[strategy] = run_budget
+            elif budget < 0:
+                remaining[strategy] = 0
+            else:
+                remaining[strategy] = max(0, budget - self.consumed_today(strategy))
+        return remaining
 
     def consumed_today(self, strategy: str) -> int:
         """Return today's successful execution units for one strategy."""

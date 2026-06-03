@@ -218,8 +218,8 @@ class YtTaskQueue:
         *,
         daily_budget: int = 100,
     ) -> str | None:
-        count_today = self._budgeted_count_today(task_type)
-        if count_today >= daily_budget:
+        count_today = self._budgeted_count_today(task_type) if daily_budget > 0 else 0
+        if daily_budget > 0 and count_today >= daily_budget:
             logger.info(
                 "yt task budget exhausted: type=%s, count=%d, budget=%d",
                 task_type,

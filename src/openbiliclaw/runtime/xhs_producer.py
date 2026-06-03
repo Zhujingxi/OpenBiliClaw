@@ -32,7 +32,8 @@ class XhsTaskProducer:
     """Enqueues xhs search tasks from the SoulProfile on a throttle.
 
     The producer respects two limits:
-    - ``daily_budget`` — enforced by ``XhsTaskQueue.enqueue`` per type
+    - ``daily_budget`` — enforced by ``XhsTaskQueue.enqueue`` per type;
+      ``0`` disables the daily cap
     - ``min_interval_hours`` — enforced here by inspecting the newest
       task's ``created_at`` before running
     """
@@ -41,7 +42,7 @@ class XhsTaskProducer:
     soul_engine: Any
     llm_service: LLMService
     enabled: bool = True
-    daily_budget: int = 30
+    daily_budget: int = 0
     # v0.3.53+: lowered 4 → 1. Production logs (2026-05-05) showed
     # the producer firing only once per 43-minute session because the
     # 4-hour throttle is way too long for pool freshness — XHS pool

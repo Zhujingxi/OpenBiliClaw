@@ -294,8 +294,8 @@ Bilibili discovery 的平台级开关。B 站账号登录 / Cookie 获取仍由 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `enabled` | bool | `false` | 是否启用小红书 discovery 和 init bootstrap；默认关闭，`init` 选 Yes、`--yes-xhs` 或插件设置页打开后才会写回 `true` |
-| `daily_search_budget` | int | `30` | 每天后端允许入队的 Soul 驱动搜索任务数上限。由 `XhsTaskProducer`（`runtime/xhs_producer.py`）在持续刷新循环里使用，搭配内部 4h 最小间隔避免反复抢配额 |
-| `daily_creator_budget` | int | `10` | 每天每位订阅创作者的抓取任务上限 |
+| `daily_search_budget` | int | `0` | 每天后端允许入队的 Soul 驱动搜索任务数上限；`0` 表示不设每日上限，持续补池只受平台缺口、单轮 `discovery_limit` 和 producer 节流控制 |
+| `daily_creator_budget` | int | `0` | 每天订阅创作者抓取任务上限；`0` 表示不设每日上限 |
 | `task_interval_seconds` | int | `45` | 扩展分发器两次任务之间的最小间隔（秒） |
 
 > **安全设计要点：** 后端从不直接调用小红书搜索 / Feed API。所有"主动发现"（关键词搜索、创作者主页浏览）都在用户自己的浏览器中以后台标签页形式执行，由扩展代理完成。被动发现则利用用户正常浏览时已经加载的卡片 URL，零额外请求。
@@ -309,23 +309,23 @@ Bilibili discovery 的平台级开关。B 站账号登录 / Cookie 获取仍由 
 | `enabled` | bool | `false` | 是否启用抖音 discovery。默认关闭，必须显式 opt-in |
 | `mode` | string | `"direct"` | 当前仅支持 `direct`，保留字段用于后续 extension/direct 切换 |
 | `cookie_env` | string | `"OPENBILICLAW_DOUYIN_COOKIE"` | douyin.com Cookie header 的环境变量覆盖名；为空时使用扩展同步文件 |
-| `daily_search_budget` | int | `30` | 每日搜索插件任务预算，限制 `dy_tasks(type="search")` 入队次数 |
-| `daily_hot_budget` | int | `5` | 每日热点插件任务预算，限制 `dy_tasks(type="hot")` 入队次数；runtime 抖音缺口较大时会把有效预算临时抬高到 `max(配置值, min(缺口, 60))`，手动 CLI 仍使用配置值 |
-| `daily_feed_budget` | int | `30` | 每日首页推荐流插件任务预算，限制 `dy_tasks(type="feed")` 入队次数 |
+| `daily_search_budget` | int | `0` | 每日搜索插件任务预算，限制 `dy_tasks(type="search")` 入队次数；`0` 表示不设每日上限 |
+| `daily_hot_budget` | int | `0` | 每日热点插件任务预算，限制 `dy_tasks(type="hot")` 入队次数；`0` 表示不设每日上限，正数时 runtime 抖音缺口较大时会把有效预算临时抬高到 `max(配置值, min(缺口, 60))` |
+| `daily_feed_budget` | int | `0` | 每日首页推荐流插件任务预算，限制 `dy_tasks(type="feed")` 入队次数；`0` 表示不设每日上限 |
 | `request_interval_seconds` | int | `2` | direct 请求的建议最小间隔；当前插件签名链路主要由任务预算和 runtime producer 节流保护 |
 
-当前 `search` 子来源优先使用浏览器插件的 logged-in page + acrawler 签名桥，并以 `dy-plugin-search` 进入 discovery；`hot` 子来源优先使用插件 hot-related 链路，并以 `dy-plugin-hot-related` 进入 discovery；`feed` 子来源使用同一插件签名桥请求 `/aweme/v1/web/tab/feed/`，并以 `dy-plugin-feed` 进入 discovery。插件任务空 / 失败时 search / hot 会分别回退 direct-cookie search / hot，feed 也保留 direct-cookie 诊断 fallback；因 daemon 重启或插件未及时消费而被清理的 `failed/stale_pending` 任务不消耗每日预算。runtime 大缺口补池会优先 search / hot，feed 只用于小缺口补零散名额。`msToken` 如果存在会随 Cookie 一起使用，但扩展同步不再硬依赖它。若 Cookie 过期、签名被拒绝或插件未在线，命令可能返回 0 条并提示检查登录态。
+当前 `search` 子来源优先使用浏览器插件的 logged-in page + acrawler 签名桥，并以 `dy-plugin-search` 进入 discovery；`hot` 子来源优先使用插件 hot-related 链路，并以 `dy-plugin-hot-related` 进入 discovery；`feed` 子来源使用同一插件签名桥请求 `/aweme/v1/web/tab/feed/`，并以 `dy-plugin-feed` 进入 discovery。插件任务空 / 失败时 search / hot 会分别回退 direct-cookie search / hot，feed 也保留 direct-cookie 诊断 fallback；因 daemon 重启或插件未及时消费而被清理的 `failed/stale_pending` 任务不消耗正数每日预算。runtime 大缺口补池会优先 search / hot，feed 只用于小缺口补零散名额。`msToken` 如果存在会随 Cookie 一起使用，但扩展同步不再硬依赖它。若 Cookie 过期、签名被拒绝或插件未在线，命令可能返回 0 条并提示检查登录态。
 
 ### `[sources.youtube]`
 
-YouTube discovery 配置。初始化画像由浏览器扩展读取观看历史 / 订阅 / 点赞，也可通过 `import-youtube` 导入 Google Takeout；steady-state discovery 由后端 `YoutubeDiscoveryProducer` 独立调度 `yt_search` / `yt_trending` / `yt_channel` 三个策略。这里的预算是每日执行预算，按实际 strategy work 写入 SQLite ledger；不依赖 `content_cache` 统计，也不是扩展任务队列的每日入队数。
+YouTube discovery 配置。初始化画像由浏览器扩展读取观看历史 / 订阅 / 点赞，也可通过 `import-youtube` 导入 Google Takeout；steady-state discovery 由后端 `YoutubeDiscoveryProducer` 独立调度 `yt_search` / `yt_trending` / `yt_channel` 三个策略。这里的预算是可选每日执行上限；默认 `0` 表示不设每日上限，每轮执行规模由平台缺口和 `scheduler.discovery_limit` 决定，行为与 B 站补池保持一致。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `enabled` | bool | `false` | 是否让 YouTube 参与候选池配比和后台 discovery；`init --yes-youtube` 会写回 `true`，`--no-youtube` 或 `OPENBILICLAW_NO_YOUTUBE=1` 会写回 `false` |
-| `daily_search_budget` | int | `6` | `yt_search` 每天最多生成 / 执行的 YouTube 搜索 query 数，对应 `YoutubeSearchStrategy.queries_per_run` 的日预算上限 |
-| `daily_trending_budget` | int | `50` | `yt_trending` 每天最多拉取的热门候选数，对应 `YoutubeTrendingStrategy.fetch_limit` 的日预算上限 |
-| `daily_channel_budget` | int | `10` | `yt_channel` 每天最多选择的订阅频道数，对应 `YoutubeChannelStrategy.max_channels` 的日预算上限 |
+| `daily_search_budget` | int | `0` | `yt_search` 每天最多生成 / 执行的 YouTube 搜索 query 数；`0` 表示不设每日上限，本轮 query 数由平台缺口 / `discovery_limit` 决定 |
+| `daily_trending_budget` | int | `0` | `yt_trending` 每天最多拉取的热门候选数；`0` 表示不设每日上限，本轮拉取规模由平台缺口 / `discovery_limit` 决定 |
+| `daily_channel_budget` | int | `0` | `yt_channel` 每天最多选择的订阅频道数；`0` 表示不设每日上限，本轮频道数由平台缺口 / `discovery_limit` 决定 |
 | `request_interval_seconds` | int | `2` | 预留的 YouTube 请求间隔配置；当前策略主要由单轮预算和 runtime 补池节奏控制 |
 | `min_interval_minutes` | int | `60` | `YoutubeDiscoveryProducer` 两次执行之间的最小间隔；`0` 表示每个 refresh tick 都允许检查执行 |
 

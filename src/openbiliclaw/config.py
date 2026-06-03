@@ -244,9 +244,9 @@ class XiaohongshuSourceConfig:
     # browser session. Init --yes-xhs or the settings page can enable it later.
     enabled: bool = False
     # Max Soul-driven search tasks the backend may enqueue per day.
-    daily_search_budget: int = 30
+    daily_search_budget: int = 0
     # Max creator-subscription fetch tasks per day.
-    daily_creator_budget: int = 10
+    daily_creator_budget: int = 0
     # Seconds the extension dispatcher waits between tasks.
     task_interval_seconds: int = 45
 
@@ -263,9 +263,9 @@ class DouyinSourceConfig:
     enabled: bool = False
     mode: str = "direct"
     cookie_env: str = "OPENBILICLAW_DOUYIN_COOKIE"
-    daily_search_budget: int = 30
-    daily_hot_budget: int = 5
-    daily_feed_budget: int = 30
+    daily_search_budget: int = 0
+    daily_hot_budget: int = 0
+    daily_feed_budget: int = 0
     request_interval_seconds: int = 2
 
 
@@ -279,9 +279,9 @@ class YoutubeSourceConfig:
     """
 
     enabled: bool = False
-    daily_search_budget: int = 6
-    daily_trending_budget: int = 50
-    daily_channel_budget: int = 10
+    daily_search_budget: int = 0
+    daily_trending_budget: int = 0
+    daily_channel_budget: int = 0
     request_interval_seconds: int = 2
     min_interval_minutes: int = 60
 
@@ -617,24 +617,24 @@ def _build_config(raw: dict[str, Any]) -> Config:
         ),
         xiaohongshu=XiaohongshuSourceConfig(
             enabled=bool(xhs_raw.get("enabled", False)),
-            daily_search_budget=int(xhs_raw.get("daily_search_budget", 30)),
-            daily_creator_budget=int(xhs_raw.get("daily_creator_budget", 10)),
+            daily_search_budget=int(xhs_raw.get("daily_search_budget", 0)),
+            daily_creator_budget=int(xhs_raw.get("daily_creator_budget", 0)),
             task_interval_seconds=int(xhs_raw.get("task_interval_seconds", 45)),
         ),
         douyin=DouyinSourceConfig(
             enabled=bool(douyin_raw.get("enabled", False)),
             mode=str(douyin_raw.get("mode", "direct")),
             cookie_env=str(douyin_raw.get("cookie_env", "OPENBILICLAW_DOUYIN_COOKIE")),
-            daily_search_budget=int(douyin_raw.get("daily_search_budget", 30)),
-            daily_hot_budget=int(douyin_raw.get("daily_hot_budget", 5)),
-            daily_feed_budget=int(douyin_raw.get("daily_feed_budget", 30)),
+            daily_search_budget=int(douyin_raw.get("daily_search_budget", 0)),
+            daily_hot_budget=int(douyin_raw.get("daily_hot_budget", 0)),
+            daily_feed_budget=int(douyin_raw.get("daily_feed_budget", 0)),
             request_interval_seconds=int(douyin_raw.get("request_interval_seconds", 2)),
         ),
         youtube=YoutubeSourceConfig(
             enabled=bool(youtube_raw.get("enabled", False)),
-            daily_search_budget=int(youtube_raw.get("daily_search_budget", 6)),
-            daily_trending_budget=int(youtube_raw.get("daily_trending_budget", 50)),
-            daily_channel_budget=int(youtube_raw.get("daily_channel_budget", 10)),
+            daily_search_budget=int(youtube_raw.get("daily_search_budget", 0)),
+            daily_trending_budget=int(youtube_raw.get("daily_trending_budget", 0)),
+            daily_channel_budget=int(youtube_raw.get("daily_channel_budget", 0)),
             request_interval_seconds=int(youtube_raw.get("request_interval_seconds", 2)),
             min_interval_minutes=max(0, int(youtube_raw.get("min_interval_minutes", 60))),
         ),

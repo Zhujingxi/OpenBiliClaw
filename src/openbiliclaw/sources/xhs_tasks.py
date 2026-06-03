@@ -242,14 +242,21 @@ class XhsTaskQueue:
         *,
         daily_budget: int = 100,
     ) -> str | None:
-        """Enqueue a task and return its id, or None when budget is exhausted."""
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
-        count_today = self._db.conn.execute(
-            "SELECT COUNT(*) FROM xhs_tasks WHERE type = ? AND created_at >= ?",
-            (task_type, today),
-        ).fetchone()[0]
+        """Enqueue a task and return its id, or None when budget is exhausted.
 
-        if count_today >= daily_budget:
+        ``daily_budget <= 0`` disables the per-day cap; runtime producers are
+        then controlled by source deficits and their per-run throttles.
+        """
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        if daily_budget > 0:
+            count_today = self._db.conn.execute(
+                "SELECT COUNT(*) FROM xhs_tasks WHERE type = ? AND created_at >= ?",
+                (task_type, today),
+            ).fetchone()[0]
+        else:
+            count_today = 0
+
+        if daily_budget > 0 and count_today >= daily_budget:
             logger.info(
                 "xhs task budget exhausted: type=%s, count=%d, budget=%d",
                 task_type,

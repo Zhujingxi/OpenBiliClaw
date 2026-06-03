@@ -120,6 +120,10 @@ def test_douyin_runtime_hot_budget_scales_with_runtime_deficit() -> None:
     assert douyin_runtime_hot_budget(base_budget=5, requested_limit=3) == 5
 
 
+def test_douyin_runtime_hot_budget_preserves_zero_as_no_daily_cap() -> None:
+    assert douyin_runtime_hot_budget(base_budget=0, requested_limit=30) == 0
+
+
 async def test_douyin_producer_throttles_recent_runs() -> None:
     calls = 0
 

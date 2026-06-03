@@ -695,8 +695,8 @@ class BilibiliSourceConfigOut(BaseModel):
 
 class XiaohongshuSourceConfigOut(BaseModel):
     enabled: bool = False
-    daily_search_budget: int = 30
-    daily_creator_budget: int = 10
+    daily_search_budget: int = 0
+    daily_creator_budget: int = 0
     task_interval_seconds: int = 45
 
 
@@ -704,17 +704,17 @@ class DouyinSourceConfigOut(BaseModel):
     enabled: bool = False
     mode: str = "direct"
     cookie_env: str = "OPENBILICLAW_DOUYIN_COOKIE"
-    daily_search_budget: int = 30
-    daily_hot_budget: int = 5
-    daily_feed_budget: int = 30
+    daily_search_budget: int = 0
+    daily_hot_budget: int = 0
+    daily_feed_budget: int = 0
     request_interval_seconds: int = 2
 
 
 class YoutubeSourceConfigOut(BaseModel):
     enabled: bool = False
-    daily_search_budget: int = 6
-    daily_trending_budget: int = 50
-    daily_channel_budget: int = 10
+    daily_search_budget: int = 0
+    daily_trending_budget: int = 0
+    daily_channel_budget: int = 0
     request_interval_seconds: int = 2
     min_interval_minutes: int = 60
 

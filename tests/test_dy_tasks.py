@@ -194,6 +194,15 @@ def test_dy_task_queue_counts_non_stale_failures_for_daily_budget(
     assert queue.enqueue_with_id("search", {"keywords": ["第三个任务"]}, daily_budget=2) is None
 
 
+def test_dy_task_queue_zero_daily_budget_disables_daily_cap(
+    database: Database,
+) -> None:
+    queue = DyTaskQueue(database)
+
+    for i in range(5):
+        assert queue.enqueue_with_id("search", {"keywords": [f"任务 {i}"]}, daily_budget=0)
+
+
 def test_dy_task_queue_claims_pending_task_until_terminal_status(
     database: Database,
 ) -> None:

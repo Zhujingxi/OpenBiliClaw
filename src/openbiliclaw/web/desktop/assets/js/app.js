@@ -3203,24 +3203,24 @@
           },
           xiaohongshu: {
             enabled: $("#xhsEnabled").value === "on",
-            daily_search_budget: getIntInput("xhsDailySearchBudget", 30),
-            daily_creator_budget: getIntInput("xhsDailyCreatorBudget", 10),
+            daily_search_budget: getIntInput("xhsDailySearchBudget", 0),
+            daily_creator_budget: getIntInput("xhsDailyCreatorBudget", 0),
             task_interval_seconds: getIntInput("xhsTaskInterval", 45)
           },
           douyin: {
             enabled: $("#douyinEnabled").value === "on",
             mode: "direct",
             cookie_env: getInput("douyinCookieEnv"),
-            daily_search_budget: getIntInput("douyinDailySearchBudget", 30),
-            daily_hot_budget: getIntInput("douyinDailyHotBudget", 5),
-            daily_feed_budget: getIntInput("douyinDailyFeedBudget", 30),
+            daily_search_budget: getIntInput("douyinDailySearchBudget", 0),
+            daily_hot_budget: getIntInput("douyinDailyHotBudget", 0),
+            daily_feed_budget: getIntInput("douyinDailyFeedBudget", 0),
             request_interval_seconds: getIntInput("douyinRequestInterval", 2)
           },
           youtube: {
             enabled: $("#youtubeEnabled").value === "on",
-            daily_search_budget: getIntInput("youtubeDailySearchBudget", 6),
-            daily_trending_budget: getIntInput("youtubeDailyTrendingBudget", 50),
-            daily_channel_budget: getIntInput("youtubeDailyChannelBudget", 10),
+            daily_search_budget: getIntInput("youtubeDailySearchBudget", 0),
+            daily_trending_budget: getIntInput("youtubeDailyTrendingBudget", 0),
+            daily_channel_budget: getIntInput("youtubeDailyChannelBudget", 0),
             request_interval_seconds: getIntInput("youtubeRequestInterval", 2)
           }
         },

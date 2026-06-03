@@ -105,6 +105,10 @@ class TestXhsTaskQueue:
         # Next enqueue should be rejected
         assert not queue.enqueue("search", {"keyword": "over"}, daily_budget=budget)
 
+    def test_zero_daily_budget_disables_daily_cap(self, queue: XhsTaskQueue) -> None:
+        for i in range(5):
+            assert queue.enqueue("search", {"keyword": f"k{i}"}, daily_budget=0)
+
     def test_creator_tasks_have_separate_budget(self, queue: XhsTaskQueue) -> None:
         # Fill search budget
         for i in range(3):
@@ -204,9 +208,7 @@ class TestXhsCreatorStore:
         assert deleted is True
         assert len(creator_store.list_all()) == 0
 
-    def test_delete_nonexistent_returns_false(
-        self, creator_store: XhsCreatorStore
-    ) -> None:
+    def test_delete_nonexistent_returns_false(self, creator_store: XhsCreatorStore) -> None:
         assert creator_store.delete(9999) is False
 
     def test_due_for_fetch(self, creator_store: XhsCreatorStore, db: Database) -> None:

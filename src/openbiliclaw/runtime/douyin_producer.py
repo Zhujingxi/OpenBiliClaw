@@ -24,7 +24,9 @@ DouyinDiscoverCallable = Callable[[Any, DouyinDiscoveryOptions], Awaitable[Douyi
 
 def douyin_runtime_hot_budget(*, base_budget: int, requested_limit: int) -> int:
     """Return the effective hot-task budget for one runtime replenishment run."""
-    configured = max(1, int(base_budget))
+    configured = int(base_budget)
+    if configured <= 0:
+        return 0
     requested = max(1, int(requested_limit))
     if requested < 10:
         return configured
@@ -167,12 +169,12 @@ def build_douyin_discovery_producer(
                     database=database,
                     direct_client=direct_client,
                     wait_seconds=wait_seconds,
-                    daily_search_budget=int(getattr(dy_cfg, "daily_search_budget", 30)),
+                    daily_search_budget=int(getattr(dy_cfg, "daily_search_budget", 0)),
                     daily_hot_budget=douyin_runtime_hot_budget(
-                        base_budget=int(getattr(dy_cfg, "daily_hot_budget", 5)),
+                        base_budget=int(getattr(dy_cfg, "daily_hot_budget", 0)),
                         requested_limit=options.limit,
                     ),
-                    daily_feed_budget=int(getattr(dy_cfg, "daily_feed_budget", 30)),
+                    daily_feed_budget=int(getattr(dy_cfg, "daily_feed_budget", 0)),
                 )
             service = DouyinDiscoveryService(
                 client=client,

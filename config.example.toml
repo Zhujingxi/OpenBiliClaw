@@ -266,10 +266,11 @@ enabled = true
 # pool_source_shares 中的 xiaohongshu 配额会被丢弃（不会让池子卡在低于目标）。
 # 默认 false；init 交互式提示选 Yes、--yes-xhs 或插件设置页打开后才会写回 true。
 enabled = false
-# 每天后端允许入队的 Soul 驱动搜索任务数上限
-daily_search_budget = 30
-# 每天每位订阅创作者的抓取任务上限
-daily_creator_budget = 10
+# 每天后端允许入队的 Soul 驱动搜索任务数上限；0 表示不设每日上限，
+# 仅受平台缺口、每轮 discovery_limit 与任务节流控制。
+daily_search_budget = 0
+# 每天订阅创作者抓取任务上限；0 表示不设每日上限。
+daily_creator_budget = 0
 # 扩展分发器两次任务之间的最小间隔（秒），进一步降低风控风险
 task_interval_seconds = 45
 
@@ -277,24 +278,28 @@ task_interval_seconds = 45
 # 初始化画像仍走浏览器扩展；这里仅控制可选的后台内容发现。
 # Cookie 优先读下方环境变量；未设置时会使用浏览器扩展同步到 data/douyin_cookie.json 的值。
 # 不要把真实 Cookie 写进 config.toml。
+# daily_*_budget 为每日任务上限；0 表示不设每日上限，仅受平台缺口、
+# 每轮 discovery_limit、producer 节流与 request_interval_seconds 控制。
 [sources.douyin]
 enabled = false
 mode = "direct"
 cookie_env = "OPENBILICLAW_DOUYIN_COOKIE"
-daily_search_budget = 30
-daily_hot_budget = 5
-daily_feed_budget = 30
+daily_search_budget = 0
+daily_hot_budget = 0
+daily_feed_budget = 0
 request_interval_seconds = 2
 
 # ── YouTube 专用配置 ──
 # enabled=false 时 pool_source_shares 中的 youtube 配额会被丢弃（避免池子卡在低于目标）。
 # YouTube steady-state discovery 由后端 producer 独立调度 yt_search / yt_trending / yt_channel。
-# 下面的 daily_*_budget 按天限制各策略执行规模；bootstrap 画像导入仍走浏览器扩展 yt_tasks。
+# 下面的 daily_*_budget 按天限制各策略执行规模；0 表示不设每日上限，
+# 每轮执行规模由平台缺口和 scheduler.discovery_limit 决定。
+# bootstrap 画像导入仍走浏览器扩展 yt_tasks。
 [sources.youtube]
 enabled = false
-daily_search_budget = 6
-daily_trending_budget = 50
-daily_channel_budget = 10
+daily_search_budget = 0
+daily_trending_budget = 0
+daily_channel_budget = 0
 request_interval_seconds = 2
 # YouTube producer 两次执行之间的最小间隔；0 表示每个 refresh tick 都允许检查执行。
 min_interval_minutes = 60

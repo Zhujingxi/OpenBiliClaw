@@ -149,6 +149,33 @@ async def test_youtube_producer_skips_when_daily_budget_exhausted(db: Database) 
     assert discover.calls == []
 
 
+async def test_youtube_producer_zero_daily_budget_uses_per_run_limit(
+    db: Database,
+) -> None:
+    discover = _Discover([])
+    producer = YoutubeDiscoveryProducer(
+        database=db,
+        soul_engine=_Soul(),
+        discover=discover,
+        min_interval_minutes=0,
+        daily_search_budget=0,
+        daily_trending_budget=0,
+        daily_channel_budget=0,
+    )
+    producer.record_strategy_run("yt_search", units_used=999, discovered=0, reason="ok")
+    producer.record_strategy_run("yt_trending", units_used=999, discovered=0, reason="ok")
+    producer.record_strategy_run("yt_channel", units_used=999, discovered=0, reason="ok")
+
+    result = await producer.produce_if_due(limit=5)
+
+    assert result["reason"] == "ok"
+    assert discover.calls == [
+        ("yt_search", 5, 5),
+        ("yt_trending", 5, 5),
+        ("yt_channel", 5, 5),
+    ]
+
+
 async def test_youtube_producer_skips_when_disabled(db: Database) -> None:
     discover = _Discover([])
     producer = YoutubeDiscoveryProducer(
@@ -202,8 +229,7 @@ async def test_youtube_producer_min_interval_zero_is_always_due(db: Database) ->
         discover=discover,
         min_interval_minutes=0,
         daily_search_budget=1,
-        daily_trending_budget=0,
-        daily_channel_budget=0,
+        strategies=("yt_search",),
     )
     producer._last_run_at = datetime.now(UTC)
 
@@ -246,7 +272,7 @@ async def test_youtube_producer_returns_ok_when_one_strategy_fails(
         min_interval_minutes=0,
         daily_search_budget=1,
         daily_trending_budget=1,
-        daily_channel_budget=0,
+        strategies=("yt_search", "yt_trending"),
     )
 
     result = await producer.produce_if_due(limit=3)
@@ -272,7 +298,7 @@ async def test_youtube_producer_returns_error_when_all_strategies_fail(
         min_interval_minutes=0,
         daily_search_budget=1,
         daily_trending_budget=1,
-        daily_channel_budget=0,
+        strategies=("yt_search", "yt_trending"),
     )
 
     result = await producer.produce_if_due(limit=3)

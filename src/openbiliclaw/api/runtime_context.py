@@ -67,9 +67,18 @@ def build_youtube_discovery_strategies(
 
     yt_cfg = getattr(getattr(config, "sources", None), "youtube", None)
     budgets = strategy_unit_budget or {}
-    search_budget = int(budgets.get("yt_search", getattr(yt_cfg, "daily_search_budget", 6)))
-    trending_budget = int(budgets.get("yt_trending", getattr(yt_cfg, "daily_trending_budget", 50)))
-    channel_budget = int(budgets.get("yt_channel", getattr(yt_cfg, "daily_channel_budget", 10)))
+    scheduler = getattr(config, "scheduler", None)
+    default_run_budget = max(1, int(getattr(scheduler, "discovery_limit", 30)))
+
+    def _strategy_budget(strategy: str, attr: str) -> int:
+        if strategy in budgets:
+            return int(budgets[strategy])
+        configured = int(getattr(yt_cfg, attr, 0))
+        return default_run_budget if configured <= 0 else configured
+
+    search_budget = _strategy_budget("yt_search", "daily_search_budget")
+    trending_budget = _strategy_budget("yt_trending", "daily_trending_budget")
+    channel_budget = _strategy_budget("yt_channel", "daily_channel_budget")
     return [
         YoutubeSearchStrategy(
             client=client,
@@ -202,9 +211,9 @@ def build_youtube_discovery_producer(
         discover=_discover,
         enabled=True,
         min_interval_minutes=int(getattr(yt_cfg, "min_interval_minutes", 60)),
-        daily_search_budget=int(getattr(yt_cfg, "daily_search_budget", 6)),
-        daily_trending_budget=int(getattr(yt_cfg, "daily_trending_budget", 50)),
-        daily_channel_budget=int(getattr(yt_cfg, "daily_channel_budget", 10)),
+        daily_search_budget=int(getattr(yt_cfg, "daily_search_budget", 0)),
+        daily_trending_budget=int(getattr(yt_cfg, "daily_trending_budget", 0)),
+        daily_channel_budget=int(getattr(yt_cfg, "daily_channel_budget", 0)),
     )
 
 
@@ -498,7 +507,7 @@ class RuntimeContext:
                 soul_engine=new_soul_engine,
                 llm_service=new_llm_service,
                 enabled=xhs_enabled,
-                daily_budget=int(getattr(xhs_cfg, "daily_search_budget", 30)),
+                daily_budget=int(getattr(xhs_cfg, "daily_search_budget", 0)),
             )
             from openbiliclaw.runtime.douyin_producer import build_douyin_discovery_producer
 

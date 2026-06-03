@@ -349,10 +349,14 @@ class DyTaskQueue:
         *,
         daily_budget: int = 100,
     ) -> str | None:
-        """Enqueue a task and return its id, or None when budget exhausted."""
-        count_today = self._budgeted_count_today(task_type)
+        """Enqueue a task and return its id, or None when budget exhausted.
 
-        if count_today >= daily_budget:
+        ``daily_budget <= 0`` disables the per-day cap; runtime producers are
+        then controlled by source deficits and their per-run throttles.
+        """
+        count_today = self._budgeted_count_today(task_type) if daily_budget > 0 else 0
+
+        if daily_budget > 0 and count_today >= daily_budget:
             logger.info(
                 "dy task budget exhausted: type=%s, count=%d, budget=%d",
                 task_type,
