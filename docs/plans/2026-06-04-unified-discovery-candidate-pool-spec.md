@@ -314,7 +314,132 @@ Batch size 30:
 The exact split should be driven by source deficits and pending availability,
 not a hard per-source ratio.
 
-## 7. Acceptance Policy
+## 7. Capacity Contract
+
+The pending pool must not weaken `pool_target_count`.
+
+`pool_target_count` continues to mean:
+
+```text
+target number of frontend-available recommendation candidates
+```
+
+A candidate is frontend-available only after it has been evaluated, accepted,
+written to `content_cache`, classified with non-empty `style_key` /
+`topic_group`, has `pool_expression` / `pool_topic_label`, is linkable, is not
+recently viewed, and is inside the same serve-window diversity gates used by
+`get_pool_candidates()`.
+
+### 7.1 Discovery Stop Rule
+
+When:
+
+```text
+pool_available_count >= pool_target_count
+```
+
+the runtime must not start new source discovery:
+
+- Do not call Bilibili / Xiaohongshu / Douyin / YouTube producers.
+- Do not enqueue new pending candidates from scheduled refresh.
+- Do not run normal LLM evaluation for pending candidates.
+
+Non-discovery maintenance may still run:
+
+- expire stale pending candidates;
+- enforce raw/pending ceilings;
+- prefetch covers;
+- repair legacy rows when explicitly requested.
+
+This preserves the user's expectation: once the recommendation pool is full,
+background discovery stops spending source/API/LLM budget.
+
+### 7.2 Pending Raw Material Ceiling
+
+Adding a pending pool creates a second inventory surface. The raw material
+ceiling must count both:
+
+```text
+fresh/evaluated material in content_cache
++ pending/evaluating/evaluated-but-not-cached rows in discovery_candidates
+```
+
+Otherwise, the system could stop at the formal recommendation-pool cap while
+quietly accumulating thousands of unevaluated source candidates.
+
+Default raw ceiling should mirror the existing pool slack contract:
+
+```text
+raw_material_ceiling = max(pool_target_count * 2, pool_target_count + 120)
+```
+
+Source-specific raw headroom should also include pending candidates for that
+source family. Example:
+
+```text
+source_raw_count("xiaohongshu")
+  = content_cache raw xhs rows
+  + discovery_candidates pending/evaluating/evaluated xhs rows
+```
+
+### 7.3 Replenishment Request Formula
+
+For each source family, requested discovery count should be bounded by all three
+limits:
+
+```text
+requested_count = min(
+  available_deficit_by_source,
+  raw_headroom_by_source,
+  global_available_deficit
+)
+```
+
+Where:
+
+```text
+global_available_deficit = max(0, pool_target_count - pool_available_count)
+```
+
+If `global_available_deficit == 0`, `requested_count` is zero for every source.
+
+### 7.4 Evaluation Drain Rule
+
+The mixed evaluator should also be capacity-aware.
+
+It may drain pending candidates only when:
+
+```text
+pool_available_count < pool_target_count
+```
+
+and it should stop admitting evaluated candidates once the current deficit is
+filled. The admission writer should re-read current availability before writing
+each batch because another refresh task may have filled the pool concurrently.
+
+If the pool becomes full while a batch is already being evaluated:
+
+- complete the in-flight LLM call;
+- persist evaluation results in `discovery_candidates`;
+- admit only up to the remaining capacity;
+- leave the rest as `evaluated` for a later deficit, or mark stale if they age
+  out before use.
+
+### 7.5 Runtime Status
+
+Runtime status should distinguish:
+
+| Metric | Meaning |
+|--------|---------|
+| `pool_available_count` | Candidates the frontend can immediately serve |
+| `pool_raw_count` | Total raw material across `content_cache` and pending candidates |
+| `pool_pending_eval_count` | Pending candidates waiting for LLM evaluation |
+| `pool_evaluated_pending_count` | Evaluated candidates not yet admitted |
+
+The UI should keep using `pool_available_count` for "可换" count. Pending
+candidates are diagnostic/background inventory, not user-visible capacity.
+
+## 8. Acceptance Policy
 
 Evaluation produces neutral scores. Admission to `content_cache` applies a
 separate policy:
@@ -344,7 +469,7 @@ may carry seed/depth context. That intent should be represented as structured
 candidate metadata and consumed by the shared acceptance policy, not hidden
 inside a source strategy.
 
-## 8. Content Cache Admission
+## 9. Content Cache Admission
 
 Accepted candidates are converted to `DiscoveredContent.to_cache_kwargs()` and
 written through the same cache writer.
@@ -363,9 +488,9 @@ Target shared post-evaluation steps:
 This makes Xiaohongshu follow the same post-evaluation path as Bilibili instead
 of relying on recommendation backlog classification.
 
-## 9. Source-Specific Notes
+## 10. Source-Specific Notes
 
-### 9.1 Bilibili
+### 10.1 Bilibili
 
 Current Bilibili strategies already do useful candidate ordering and context
 construction. Keep that logic, but split it before the final LLM evaluation.
@@ -379,7 +504,7 @@ BilibiliStrategy.fetch_candidates()
   -> shared cache admission
 ```
 
-### 9.2 Xiaohongshu
+### 10.2 Xiaohongshu
 
 Current `_cache_xhs_notes()` should no longer write normal rich notes directly
 to `content_cache` in the primary flow.
@@ -404,7 +529,7 @@ on currently unservable rows.
 Bootstrap profile task results may still propagate behavioral events for the
 soul/profile pipeline. That is separate from discovery candidate admission.
 
-### 9.3 Douyin
+### 10.3 Douyin
 
 The plugin/direct bridge can stay source-specific. The change is that
 `DouyinDirectStrategy` should stop running its own evaluation and should enqueue
@@ -414,18 +539,18 @@ Diagnostic CLI flags such as `--no-cache` or `--no-evaluate` may continue to
 exist, but they should be clearly marked as preview/smoke paths outside the
 production recommendation pipeline.
 
-### 9.4 YouTube
+### 10.4 YouTube
 
 YouTube search/trending/channel strategies should keep scraper and budget logic
 but stop evaluating inside each strategy. The runtime ledger remains a fetch
 budget, not an evaluation/admission budget.
 
-### 9.5 Generic Web
+### 10.5 Generic Web
 
 The web adapter already extracts `DiscoveredContent`. Once steady-state source
 recipes are scheduled, extracted web items should enter the same pending pool.
 
-## 10. Relationship To Recommendation Backlog Classification
+## 11. Relationship To Recommendation Backlog Classification
 
 `RecommendationEngine.classify_pool_backlog()` should remain as a compatibility
 and repair path for:
@@ -437,7 +562,7 @@ and repair path for:
 
 It should not be the normal path for Xiaohongshu or any new source.
 
-## 11. Error Handling
+## 12. Error Handling
 
 - Candidate enqueue failures should not block source fetch loops; log and
   continue.
@@ -450,8 +575,11 @@ It should not be the normal path for Xiaohongshu or any new source.
   fallback may group by source platform to preserve progress.
 - Candidates older than a configured TTL should become `stale` unless refreshed
   by a source producer.
+- If the recommendation pool is already full, pending candidates should not be
+  evaluated merely to drain the queue. They should wait for available deficit or
+  expire by TTL.
 
-## 12. Migration Plan
+## 13. Migration Plan
 
 1. Add pending candidate table and storage helpers.
 2. Add mixed-source evaluator prompt support while keeping old evaluator API.
@@ -460,13 +588,15 @@ It should not be the normal path for Xiaohongshu or any new source.
 4. Split Bilibili strategy fetch from LLM evaluation, preserving old behavior
    behind a compatibility wrapper during transition.
 5. Split Douyin and YouTube strategy fetch from LLM evaluation.
-6. Add shared admission writer from evaluated candidates to `content_cache`.
-7. Keep `classify_pool_backlog()` running for legacy rows until the backlog is
+6. Add capacity-aware replenishment and evaluation drain gates that count both
+   `content_cache` and pending candidates as raw material.
+7. Add shared admission writer from evaluated candidates to `content_cache`.
+8. Keep `classify_pool_backlog()` running for legacy rows until the backlog is
    drained reliably.
-8. Remove or de-emphasize per-source evaluation paths once tests cover the
+9. Remove or de-emphasize per-source evaluation paths once tests cover the
    unified evaluator.
 
-## 13. Testing
+## 14. Testing
 
 Required tests:
 
@@ -485,8 +615,13 @@ Required tests:
 - Legacy `classify_pool_backlog()` still classifies old unevaluated cache rows.
 - End-to-end: a batch containing Bilibili, XHS, Douyin, and YouTube candidates
   produces evaluated rows and writes only accepted candidates to `content_cache`.
+- When `pool_available_count >= pool_target_count`, runtime does not call source
+  producers and the evaluator does not drain pending candidates.
+- Raw material counts include both `content_cache` rows and pending candidates.
+- Admission writer stops after filling the current available deficit, even if a
+  mixed evaluation batch returned more accepted items.
 
-## 14. Acceptance Criteria
+## 15. Acceptance Criteria
 
 The implementation is complete when:
 
@@ -501,8 +636,10 @@ The implementation is complete when:
    produced the content.
 6. Existing source quotas and runtime status continue to report available and
    pending counts correctly.
+7. Source discovery and normal LLM evaluation stop when the frontend-available
+   pool has reached `pool_target_count`.
 
-## 15. Non-Goals
+## 16. Non-Goals
 
 - Do not make platform-specific content shapes identical. A video, note, and
   article may have different metadata; they only share the evaluation schema.
