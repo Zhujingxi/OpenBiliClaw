@@ -8,9 +8,10 @@
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
-| 后台刷新控制 | ✅ | `ContinuousRefreshController` 按 scheduler 配置补充候选池，并通过 source policy 计算各平台有效配比。 |
+| 后台刷新控制 | ✅ | `ContinuousRefreshController` 按 scheduler 配置补充候选池，并通过 source policy 计算各平台有效配比；注入 `DiscoveryCandidatePipeline` 后，B 站主补货先生产 raw candidates，再进入统一待评估池。 |
+| 统一候选待评估池调度 | ✅ | B 站、XHS、抖音、YouTube discovery raw candidates 先写入 `discovery_candidates`，runtime 调 `drain_discovery_candidates_once()` 混源 batch 评估并 admission 到 `content_cache`；`DiscoveryCandidatePipeline` 自带共享 drain lock，producer 直接触发也不会并发 admission；正式可换池达到 `pool_target_count` 时不会继续 discovery / drain。 |
 | 候选池文案预计算状态同步 | ✅ | 独立 `_loop_pool_precompute()` 将 fresh 候选补齐 `pool_expression` / `pool_topic_label` 后，会同步更新 `last_replenished_count` 并推送 `refresh.pool_updated`；前端消费该事件时只刷新池子状态，不全量替换推荐列表，避免覆盖已 append 的历史内容。 |
-| 候选池真实可换计数 | ✅ | `pool_available_count` 现在只表示后端当前可立即 `serve()` 的候选，并按默认每 `topic_group` 最多 3 条的候选窗口计数；runtime status / runtime stream 另带 `pool_raw_count` 和 `pool_pending_count` 区分素材库存与待整理内容。 |
+| 候选池真实可换计数 | ✅ | `pool_available_count` 现在只表示后端当前可立即 `serve()` 的候选，并按默认每 `topic_group` 最多 3 条的候选窗口计数；runtime status / runtime stream 另带 `pool_raw_count`、`pool_pending_count`、`pool_pending_eval_count`、`pool_evaluated_pending_count` 区分素材库存、待评估和已评估待入池内容。 |
 | embedding 后台预热 | ✅ | refresh 完成前只保证候选入池与文案可用；`prewarm_supergroup_embeddings()` / `prewarm_pool_mmr_embeddings()` 作为后台 task 运行，慢本地 embedding 后端不会占住 refresh lock 或让界面长时间停在“正在补货”。 |
 | YouTube 后台 discovery producer | ✅ | `YoutubeDiscoveryProducer` 独立运行 `yt_search` / `yt_trending` / `yt_channel`，只在 YouTube 平台族低于 quota 时由 `_loop_youtube_producer()` tick，按每日 ledger 和 `min_interval_minutes` 控制执行。 |
 | 运行时频率配置 | ✅ | `refresh_check_interval_seconds`、行为触发阈值、trending / explore 间隔、单轮发现上限、主动推送间隔和 speculator idle tick 都从 `[scheduler]` 读取，配置热重载后重建 runtime 生效。 |
@@ -46,6 +47,18 @@ status_code, apply_payload = await service.request_apply(tag="backend-v0.3.92")
 - `get_update_status()`：返回 `/api/update-status` 使用的 backend 状态对象。
 - `get_runtime_status()`：返回 `/api/runtime-status` 合并用的自动更新摘要，包含当前版本、最新远端版本、上次检查、错误和状态原因。
 
+### ContinuousRefreshController
+
+```python
+result = await controller.drain_discovery_candidates_once(batch_size=30)
+```
+
+核心调用：
+
+- `refresh_if_needed()` / `force_refresh()`：按 pool available 缺口、source share 和 raw-material headroom 构建补货计划；如果正式可换池已经达到 `pool_target_count`，返回 `pool_at_cap` 并跳过 discovery。
+- `drain_discovery_candidates_once(batch_size=...)`：由 XHS task-result / 被动采集等外部来源入队后触发，也可由 refresh plan 内部调用；它会先检查 `count_pool_candidates() >= pool_target_count`，池满时直接返回 `{"evaluated": 0, "cached": 0, "rejected": 0}`。profile 未就绪或已有 drain 在跑时同样 no-op，底层 `DiscoveryCandidatePipeline.drain_pending()` 也有同一共享锁，避免 refresh / XHS / Douyin / YouTube 多入口并发 admission。
+- `_pool_count_payload()`：统一生成 runtime status / runtime stream 的池子字段，包含 pending eval 与 evaluated pending 拆分。
+
 ### Degraded RuntimeContext
 
 `build_runtime_context()` 仍然保持严格：LLM registry 无法构建时直接抛出 `RegistryBuildError`，方便测试和 CLI 调用方快速失败。FastAPI 生产入口 `create_app()` 会单独捕获这个错误并调用 `build_degraded_runtime_context()`。
@@ -64,10 +77,14 @@ status_code, apply_payload = await service.request_apply(tag="backend-v0.3.92")
 `GET /api/runtime-status` 和 runtime stream 中的池子字段语义如下：
 
 - `pool_available_count`：真实可换数量，只统计 fresh、未 dislike、未进入推荐历史、未近期看过、已有 `pool_expression` / `pool_topic_label`、已有 `style_key` / `topic_group` 且来源可打开的候选，并按默认每 `topic_group` 最多 3 条的候选窗口计数。
-- `pool_raw_count`：fresh、未 dislike、未进入推荐历史的素材库存，用于诊断池子里是否还有原料。
-- `pool_pending_count`：未近期看过、但仍缺文案 / 分类 / 可打开链接等 readiness 条件的素材数；不会用 `raw - available` 近似，避免把 recently viewed 内容误算为待整理。
+- `pool_raw_count`：fresh、未 dislike、未进入推荐历史的 `content_cache` 素材库存 + `discovery_candidates` 中尚未缓存的 raw candidates，用于诊断池子里是否还有原料。
+- `pool_pending_count`：未近期看过、但仍缺文案 / 分类 / 可打开链接等 readiness 条件的 `content_cache` 素材数，加上待评估 / 已评估待入池候选；不会用 `raw - available` 近似，避免把 recently viewed 内容误算为待整理。
+- `pool_pending_eval_count`：`discovery_candidates.status IN ('pending_eval', 'evaluating')` 的数量，表示已经找到但还没完成统一 LLM 评估的内容。
+- `pool_evaluated_pending_count`：`discovery_candidates.status='evaluated'` 的数量，表示已经完成评估但尚未 admission 到 `content_cache` 的内容。
+- `last_discovered_count`：最近一轮 refresh 新入队的 raw candidates 数；已评估待入池候选的 retry / admission 不会冒充“新发现”。
+- `recent_pool_topics`：最近一轮实际 admission 到推荐池的内容主题；retry-only admission 可以更新该字段，但不会增加 `last_discovered_count`。
 
-前端凡是显示“可换”都必须只读取 `pool_available_count`。`pool_pending_count` 只能用于“正在整理成可换内容”等辅助文案。
+前端凡是显示“可换”都必须只读取 `pool_available_count`。`pool_pending_count` / `pool_pending_eval_count` / `pool_evaluated_pending_count` 只能用于“正在整理成可换内容”等辅助文案和诊断。
 
 ### Runtime Status Update Fields
 
@@ -145,9 +162,9 @@ from openbiliclaw.runtime.youtube_producer import YoutubeDiscoveryProducer
 result = await producer.produce_if_due(limit=20)
 ```
 
-`produce_if_due()` 返回 `{"discovered": int, "reason": str, ...}`。常见 `reason`：
+`produce_if_due()` 返回 `{"discovered": int, "reason": str, ...}`。注入 `DiscoveryCandidatePipeline` 时，`discovered` 表示本轮已入待评估池或已被 drain 处理的候选量；未注入时沿用直接 `ContentDiscoveryEngine.discover()` 缓存路径。常见 `reason`：
 
-- `ok`：至少完成了一轮可运行策略；结果已通过 `ContentDiscoveryEngine.discover()` 进入统一评估 / 缓存路径。
+- `ok`：至少完成了一轮可运行策略；结果已通过候选 pipeline 或直接 discovery 路径进入统一评估 / 缓存链路。
 - `throttled`：距离上次执行未达到 `min_interval_minutes`。
 - `budget_exhausted`：当天 `yt_search` / `yt_trending` / `yt_channel` 的执行 ledger 已耗尽。
 - `disabled` / `no_profile` / `error`：分别表示配置关闭、画像不可用或所有策略失败。
@@ -212,4 +229,4 @@ XHS / 抖音 / YouTube 的插件任务桥保留两层去重：
 
 刷新调度不使用 `scheduler.discovery_cron`。该字段仅保留为旧配置兼容；实际触发由 `refresh_check_interval_seconds` 轮询、候选池缺口、`signal_event_threshold`、`trending_refresh_hours`、`explore_refresh_hours` 和 `discovery_limit` 共同决定。
 
-`ContinuousRefreshController.run_forever()` 当前并行启动 refresh、pool precompute、soul pipeline、XHS producer、Douyin producer、YouTube producer 和 proactive push 七条 loop。共享的 `background_llm_work_allowed()` gate 覆盖所有 daemon-owned LLM / embedding 工作；YouTube 与 XHS / Douyin 一样会在 gate 关闭时跳过 tick。不同点是 YouTube 不通过扩展任务队列做 steady-state discovery，而是在后端直接调用 YouTube strategies；`yt_tasks` 只保留给 bootstrap profile 导入。
+`ContinuousRefreshController.run_forever()` 当前并行启动 refresh、pool precompute、soul pipeline、XHS producer、Douyin producer、YouTube producer 和 proactive push 七条 loop。共享的 `background_llm_work_allowed()` gate 覆盖所有 daemon-owned LLM / embedding 工作；YouTube 与 XHS / Douyin 一样会在 gate 关闭时跳过 tick。不同点是 YouTube 不通过扩展任务队列做 steady-state discovery，而是在后端直接调用 YouTube strategies；`yt_tasks` 只保留给 bootstrap profile 导入。三类外站 producer 和 B 站主 refresh 都会优先把 raw candidates 交给同一个 `DiscoveryCandidatePipeline`，后续混源 batch 评估和入池逻辑一致，并由 pipeline drain lock 串行化。

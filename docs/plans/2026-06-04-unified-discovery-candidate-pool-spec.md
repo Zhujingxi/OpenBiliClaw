@@ -158,11 +158,12 @@ Status values:
 pending_eval
 evaluating
 evaluated
-accepted
 cached
 rejected_low_score
 rejected_duplicate
+rejected_cache_admission
 rejected_recently_viewed
+rejected_franchise_quota
 failed_eval
 stale
 ```
@@ -566,7 +567,10 @@ It should not be the normal path for Xiaohongshu or any new source.
 
 - Candidate enqueue failures should not block source fetch loops; log and
   continue.
-- LLM evaluation failure should mark candidates `failed_eval` with retry count.
+- Batch-level LLM/provider evaluation failure, malformed batch length, or parser
+  failure should release claimed rows back to `pending_eval` without consuming
+  per-row retry budget; only item-attributable failures may use retry count and
+  eventually mark `failed_eval`.
 - Rate-limit failures should leave candidates `pending_eval` or move them to a
   cooldown state, not reject them as low score.
 - If the LLM omits a candidate id, mark only that candidate failed; do not

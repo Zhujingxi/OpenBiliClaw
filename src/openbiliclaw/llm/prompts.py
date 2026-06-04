@@ -1011,14 +1011,18 @@ _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "应当给到 0.6-0.75,与画像中的娱乐/二次元/生活类兴趣标签保持权重一致。\n"
     "9. 不同 source_platform(bilibili / xiaohongshu / 其他)的内容标签同 schema,"
     "不要因为来源不同特殊处理评分逻辑。\n"
-    "10. 当 user 消息携带 `<negative_examples>` 时,把这些标题视为用户最近"
+    "10. When content_batch items include source_platform/source_strategy/content_type, "
+    "use those per-item fields as the authoritative platform context. "
+    "Do not lower or raise preference score merely because content comes from a "
+    "different platform; score every item against the same Soul-profile rubric.\n"
+    "11. 当 user 消息携带 `<negative_examples>` 时,把这些标题视为用户最近"
     "**明确不喜欢**的样本——理由可能是快速划走 (`quick_exit`) 或显式负反馈"
     " (`explicit_negative`)。\n"
-    "11. 对每个候选项,先与 `<negative_examples>` 中的标题做**结构 / 话术 / "
+    "12. 对每个候选项,先与 `<negative_examples>` 中的标题做**结构 / 话术 / "
     "商业意图**层面的比较;若高度相似(同款震惊体、同款保姆级全攻略、同款月入过万"
     "钓贴),`integration_fit` 与 `interest_overlap` 必须显著降低,不要被表面话题词"
     "吸引而错给高分。比较的是**话术模式**,不是关键词重叠。\n"
-    "12. profile_summary.disliked_topics 是长期避雷项;候选命中这些主题或话术模式时,"
+    "13. profile_summary.disliked_topics 是长期避雷项;候选命中这些主题或话术模式时,"
     "score 必须下调,不要把它们当成 interests 的反向补充来加分。\n"
     "</rules>\n\n"
     "<output_schema>\n"
@@ -1787,9 +1791,7 @@ def build_avoidance_generation_prompt(
         "</avoidance_generation_context>",
     ]
     if source_mode_quota:
-        quota_lines = [
-            f"  - {mode}: {n} 条" for mode, n in source_mode_quota.items() if n > 0
-        ]
+        quota_lines = [f"  - {mode}: {n} 条" for mode, n in source_mode_quota.items() if n > 0]
         user_prompt_parts.extend(
             [
                 "",

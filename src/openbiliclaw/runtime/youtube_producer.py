@@ -17,6 +17,11 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 YOUTUBE_DISCOVERY_STRATEGIES = ("yt_search", "yt_trending", "yt_channel")
+_YOUTUBE_SCORE_THRESHOLDS = {
+    "yt_search": 0.65,
+    "yt_trending": 0.60,
+    "yt_channel": 0.65,
+}
 
 
 @dataclass(frozen=True)
@@ -44,6 +49,7 @@ class YoutubeDiscoveryProducer:
     daily_trending_budget: int = 0
     daily_channel_budget: int = 0
     strategies: tuple[str, ...] = YOUTUBE_DISCOVERY_STRATEGIES
+    candidate_pipeline: Any | None = None
     _last_run_at: datetime | None = field(default=None, init=False)
     _last_skip_reason: str = field(default="", init=False)
 
@@ -53,6 +59,8 @@ class YoutubeDiscoveryProducer:
             return self._skip("disabled")
         if not self._is_due():
             return self._skip("throttled")
+        if self._candidate_pool_full():
+            return self._skip("pool_full")
 
         try:
             profile = await self.soul_engine.get_profile()
@@ -69,6 +77,7 @@ class YoutubeDiscoveryProducer:
             return self._skip("budget_exhausted")
 
         discovered_total = 0
+        enqueued_total = 0
         source_counts: Counter[str] = Counter()
         error_count = 0
 
@@ -108,15 +117,32 @@ class YoutubeDiscoveryProducer:
             )
             discovered_total += discovered
             source_counts.update(result.source_counts)
+            if self.candidate_pipeline is not None and result.items:
+                self._stamp_candidate_score_thresholds(result.items, strategy=strategy)
+                enqueued_total += int(
+                    self.candidate_pipeline.enqueue_candidates(
+                        list(result.items),
+                        source_context=strategy,
+                    )
+                )
 
         self._last_run_at = datetime.now(UTC)
         if discovered_total <= 0 and error_count >= len(runnable):
             return {"discovered": 0, "reason": "error"}
-        return {
+        payload: dict[str, object] = {
             "discovered": discovered_total,
             "source_counts": dict(source_counts),
             "reason": "ok",
         }
+        if self.candidate_pipeline is not None:
+            payload["enqueued"] = enqueued_total
+            if enqueued_total > 0:
+                drain_result = await self.candidate_pipeline.drain_pending(
+                    profile=profile,
+                    batch_size=requested_limit,
+                )
+                payload.update(drain_result)
+        return payload
 
     def remaining_budgets(self, *, per_run_budget: int | None = None) -> dict[str, int]:
         """Return runnable execution units by YouTube strategy.
@@ -202,6 +228,28 @@ class YoutubeDiscoveryProducer:
         if self._last_run_at is None:
             return True
         return datetime.now(UTC) - self._last_run_at >= timedelta(minutes=self.min_interval_minutes)
+
+    def _candidate_pool_full(self) -> bool:
+        if self.candidate_pipeline is None:
+            return False
+        pool_full = getattr(self.candidate_pipeline, "pool_full", None)
+        if not callable(pool_full):
+            return False
+        try:
+            return bool(pool_full())
+        except Exception:
+            logger.debug("youtube producer: candidate pool fullness unavailable", exc_info=True)
+            return False
+
+    def _stamp_candidate_score_thresholds(self, items: list[Any], *, strategy: str) -> None:
+        threshold = _YOUTUBE_SCORE_THRESHOLDS.get(strategy, 0.60)
+        for item in items:
+            try:
+                if float(getattr(item, "score_threshold", 0.0) or 0.0) > 0:
+                    continue
+                item.score_threshold = threshold
+            except Exception:
+                logger.debug("youtube producer: failed to stamp score threshold", exc_info=True)
 
     def _skip(self, reason: str) -> dict[str, object]:
         if reason != self._last_skip_reason:

@@ -4,11 +4,11 @@ All content discovery and metadata extraction happens in the user's
 browser via the Chrome extension (passive URL collection, background-tab
 search tasks, creator subscription fetches). The extension sends note
 metadata (title, author, cover, URL) directly to the backend API, which
-stores it in ``content_cache``.
+stores it in the shared ``discovery_candidates`` pending-evaluation pool.
 
 This adapter exists so the ``AdapterRegistry`` has a ``"xiaohongshu"``
 entry. Its ``fetch()`` is a no-op: the real data path is
-``POST /api/sources/xhs/observed-urls`` → ``content_cache``.
+``POST /api/sources/xhs/observed-urls`` → ``discovery_candidates``.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ class XiaohongshuAdapter:
         profile: SoulProfile,
         limit: int = 20,
     ) -> list[DiscoveredContent]:
-        """No-op — xhs content is ingested via POST /api/sources/xhs/observed-urls."""
+        """No-op — xhs content is ingested via observed-urls into the candidate pool."""
         logger.debug(
             "XiaohongshuAdapter.fetch() called but xhs content enters "
             "via extension API, not adapter.fetch(). Returning empty.",

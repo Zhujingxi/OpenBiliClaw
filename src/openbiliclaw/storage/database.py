@@ -12,6 +12,7 @@ import re
 import sqlite3
 import time
 from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
@@ -112,6 +113,57 @@ CREATE TABLE IF NOT EXISTS content_cache (
     feedback_at TIMESTAMP,
     source      TEXT                 -- Which discovery strategy found it
 );
+
+-- Unified raw discovery candidate queue.
+-- Producers enqueue platform-specific raw content here; evaluators claim
+-- mixed-source batches and only accepted items advance into content_cache.
+CREATE TABLE IF NOT EXISTS discovery_candidates (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_key         TEXT NOT NULL UNIQUE,
+    status                TEXT NOT NULL DEFAULT 'pending_eval',
+    source_platform       TEXT NOT NULL DEFAULT '',
+    source_strategy       TEXT NOT NULL DEFAULT '',
+    source_context        TEXT NOT NULL DEFAULT '',
+    content_type          TEXT NOT NULL DEFAULT 'video',
+    bvid                  TEXT NOT NULL DEFAULT '',
+    content_id            TEXT NOT NULL DEFAULT '',
+    content_url           TEXT NOT NULL DEFAULT '',
+    title                 TEXT NOT NULL DEFAULT '',
+    author_name           TEXT NOT NULL DEFAULT '',
+    up_name               TEXT NOT NULL DEFAULT '',
+    up_mid                INTEGER NOT NULL DEFAULT 0,
+    description           TEXT NOT NULL DEFAULT '',
+    cover_url             TEXT NOT NULL DEFAULT '',
+    duration              INTEGER NOT NULL DEFAULT 0,
+    view_count            INTEGER NOT NULL DEFAULT 0,
+    like_count            INTEGER NOT NULL DEFAULT 0,
+    tags                  TEXT NOT NULL DEFAULT '[]',
+    candidate_tier        TEXT NOT NULL DEFAULT 'primary',
+    score_threshold       REAL NOT NULL DEFAULT 0.0,
+    raw_payload           TEXT NOT NULL DEFAULT '{}',
+    topic_key             TEXT NOT NULL DEFAULT '',
+    topic_group           TEXT NOT NULL DEFAULT '',
+    style_key             TEXT NOT NULL DEFAULT '',
+    franchise_key         TEXT NOT NULL DEFAULT '',
+    relevance_score       REAL NOT NULL DEFAULT 0.0,
+    relevance_reason      TEXT NOT NULL DEFAULT '',
+    pool_expression       TEXT NOT NULL DEFAULT '',
+    pool_topic_label      TEXT NOT NULL DEFAULT '',
+    eval_error            TEXT NOT NULL DEFAULT '',
+    eval_attempts         INTEGER NOT NULL DEFAULT 0,
+    batch_eval_attempts   INTEGER NOT NULL DEFAULT 0,
+    created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    claimed_at            TIMESTAMP,
+    evaluated_at          TIMESTAMP,
+    cached_at             TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_discovery_candidates_status_seen
+    ON discovery_candidates(status, last_seen_at, id);
+CREATE INDEX IF NOT EXISTS idx_discovery_candidates_source_status
+    ON discovery_candidates(source_platform, status);
+CREATE INDEX IF NOT EXISTS idx_discovery_candidates_content_id
+    ON discovery_candidates(source_platform, content_id);
 
 -- Recommendation history
 CREATE TABLE IF NOT EXISTS recommendations (
@@ -276,11 +328,13 @@ class Database:
         self._ensure_recommendation_read_indexes()
         self._ensure_source_recipes_table()
         self._ensure_xhs_observed_urls_table()
+        self._ensure_discovery_candidate_columns()
         self._ensure_llm_usage_cache_columns()
         self._ensure_chat_turns_table()
         self._ensure_watch_later_table()
         self._ensure_favorites_table()
         self._ensure_auth_state_table()
+        self.reset_stale_discovery_candidate_evaluations()
 
         # Set schema version
         self._conn.execute(
@@ -997,6 +1051,530 @@ class Database:
             ),
         )
 
+    @staticmethod
+    def _candidate_value(candidate: object, key: str, default: Any = "") -> Any:
+        if isinstance(candidate, Mapping):
+            return candidate.get(key, default)
+        return getattr(candidate, key, default)
+
+    @staticmethod
+    def _candidate_json_payload(value: object, *, default: object) -> str:
+        if isinstance(value, str):
+            try:
+                json.loads(value)
+            except json.JSONDecodeError:
+                return json.dumps(default, ensure_ascii=False)
+            return value
+        try:
+            return json.dumps(default if value is None else value, ensure_ascii=False)
+        except TypeError:
+            return json.dumps(default, ensure_ascii=False)
+
+    def enqueue_discovery_candidates(
+        self,
+        candidates: Sequence[Any],
+        *,
+        max_pending_per_source: int | None = None,
+    ) -> int:
+        """Insert raw discovery candidates into the pending evaluation queue.
+
+        Existing ``candidate_key`` rows are treated as rediscovery signals: the
+        row is not duplicated, but ``last_seen_at`` is refreshed so active
+        sources do not look stale.
+        """
+
+        inserted = 0
+        touched_sources: set[str] = set()
+        for candidate in candidates:
+            candidate_key = str(self._candidate_value(candidate, "candidate_key", "") or "").strip()
+            if not candidate_key:
+                continue
+            source_platform = str(self._candidate_value(candidate, "source_platform", "") or "")
+            tags = self._candidate_json_payload(
+                self._candidate_value(candidate, "tags", []),
+                default=[],
+            )
+            raw_payload = self._candidate_json_payload(
+                self._candidate_value(candidate, "raw_payload", {}),
+                default={},
+            )
+            score_threshold = float(self._candidate_value(candidate, "score_threshold", 0.0) or 0.0)
+            cursor = self._execute_write(
+                """
+                INSERT OR IGNORE INTO discovery_candidates (
+                    candidate_key,
+                    status,
+                    source_platform,
+                    source_strategy,
+                    source_context,
+                    content_type,
+                    bvid,
+                    content_id,
+                    content_url,
+                    title,
+                    author_name,
+                    up_name,
+                    up_mid,
+                    description,
+                    cover_url,
+                    duration,
+                    view_count,
+                    like_count,
+                    tags,
+                    candidate_tier,
+                    score_threshold,
+                    raw_payload
+                )
+                VALUES (
+                    ?, 'pending_eval', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                (
+                    candidate_key,
+                    source_platform,
+                    str(self._candidate_value(candidate, "source_strategy", "") or ""),
+                    str(self._candidate_value(candidate, "source_context", "") or ""),
+                    str(self._candidate_value(candidate, "content_type", "video") or "video"),
+                    str(self._candidate_value(candidate, "bvid", "") or ""),
+                    str(self._candidate_value(candidate, "content_id", "") or ""),
+                    str(self._candidate_value(candidate, "content_url", "") or ""),
+                    str(self._candidate_value(candidate, "title", "") or ""),
+                    str(self._candidate_value(candidate, "author_name", "") or ""),
+                    str(self._candidate_value(candidate, "up_name", "") or ""),
+                    int(self._candidate_value(candidate, "up_mid", 0) or 0),
+                    str(self._candidate_value(candidate, "description", "") or ""),
+                    str(self._candidate_value(candidate, "cover_url", "") or ""),
+                    int(self._candidate_value(candidate, "duration", 0) or 0),
+                    int(self._candidate_value(candidate, "view_count", 0) or 0),
+                    int(self._candidate_value(candidate, "like_count", 0) or 0),
+                    tags,
+                    str(self._candidate_value(candidate, "candidate_tier", "primary") or "primary"),
+                    score_threshold,
+                    raw_payload,
+                ),
+            )
+            if source_platform:
+                touched_sources.add(source_platform)
+            if cursor.rowcount > 0:
+                inserted += 1
+                continue
+            self._execute_write(
+                """
+                UPDATE discovery_candidates
+                SET last_seen_at = CURRENT_TIMESTAMP
+                WHERE candidate_key = ?
+                """,
+                (candidate_key,),
+            )
+        if max_pending_per_source is not None:
+            max_pending = max(0, int(max_pending_per_source))
+            if max_pending > 0:
+                for source in touched_sources:
+                    self.trim_discovery_candidates_for_source(
+                        source_platform=source,
+                        max_pending=max_pending,
+                    )
+        return inserted
+
+    def trim_discovery_candidates_for_source(
+        self,
+        *,
+        source_platform: str,
+        max_pending: int,
+    ) -> int:
+        """Drop oldest candidate rows for one source over a queue cap.
+
+        In-flight ``evaluating`` rows are never deleted. Terminal rows are
+        trimmed before pending/evaluated rows so active raw material is kept
+        whenever possible.
+        """
+
+        source = str(source_platform or "").strip()
+        cap = max(0, int(max_pending))
+        if not source or cap <= 0:
+            return 0
+        self._ensure_fresh_read()
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM discovery_candidates
+            WHERE source_platform = ?
+            """,
+            (source,),
+        ).fetchone()
+        current = int(row["count"] if row else 0)
+        excess = current - cap
+        if excess <= 0:
+            return 0
+        cursor = self._execute_write(
+            """
+            DELETE FROM discovery_candidates
+            WHERE id IN (
+                SELECT id
+                FROM discovery_candidates
+                WHERE source_platform = ?
+                  AND status != 'evaluating'
+                ORDER BY
+                    CASE
+                        WHEN status IN (
+                            'cached',
+                            'rejected_low_score',
+                            'rejected_duplicate',
+                            'rejected_cache_admission',
+                            'rejected_recently_viewed',
+                            'rejected_franchise_quota',
+                            'failed_eval'
+                        ) THEN 0
+                        ELSE 1
+                    END ASC,
+                    last_seen_at ASC,
+                    id ASC
+                LIMIT ?
+            )
+            """,
+            (source, excess),
+        )
+        return int(cursor.rowcount)
+
+    def reset_stale_discovery_candidate_evaluations(
+        self,
+        *,
+        max_age_minutes: int = 30,
+    ) -> int:
+        """Release evaluator claims left behind by a crashed process."""
+
+        minutes = max(1, int(max_age_minutes))
+        cursor = self._execute_write(
+            """
+            UPDATE discovery_candidates
+            SET status = 'pending_eval',
+                claimed_at = NULL,
+                eval_error = 'stale evaluating claim reset'
+            WHERE status = 'evaluating'
+              AND claimed_at IS NOT NULL
+              AND claimed_at < datetime('now', ?)
+            """,
+            (f"-{minutes} minutes",),
+        )
+        return int(cursor.rowcount)
+
+    def claim_discovery_candidates_for_eval(self, *, limit: int) -> list[dict[str, Any]]:
+        """Claim a mixed-source batch of pending candidates for evaluation."""
+
+        claim_limit = max(0, int(limit))
+        if claim_limit <= 0:
+            return []
+        self._ensure_fresh_read()
+        # Peek a bounded window and round-robin in Python so one noisy source
+        # cannot monopolize a mixed evaluator batch.
+        cursor = self.conn.execute(
+            """
+            SELECT *
+            FROM discovery_candidates
+            WHERE status = 'pending_eval'
+            ORDER BY last_seen_at ASC, id ASC
+            LIMIT ?
+            """,
+            (max(claim_limit * 4, claim_limit),),
+        )
+        pending = [dict(row) for row in cursor.fetchall()]
+        if not pending:
+            return []
+
+        source_order: list[str] = []
+        by_source: dict[str, list[dict[str, Any]]] = {}
+        for row in pending:
+            source = str(row.get("source_platform") or "unknown")
+            if source not in by_source:
+                source_order.append(source)
+                by_source[source] = []
+            by_source[source].append(row)
+
+        selected: list[dict[str, Any]] = []
+        while len(selected) < claim_limit:
+            added = False
+            for source in source_order:
+                rows = by_source[source]
+                if not rows:
+                    continue
+                selected.append(rows.pop(0))
+                added = True
+                if len(selected) >= claim_limit:
+                    break
+            if not added:
+                break
+
+        ids = [int(row["id"]) for row in selected]
+        placeholders = ", ".join("?" for _ in ids)
+        self._execute_write(
+            f"""
+            UPDATE discovery_candidates
+            SET status = 'evaluating',
+                claimed_at = CURRENT_TIMESTAMP,
+                eval_error = ''
+            WHERE id IN ({placeholders})
+              AND status = 'pending_eval'
+            """,
+            ids,
+        )
+        claimed_rows = self.conn.execute(
+            f"""
+            SELECT id
+            FROM discovery_candidates
+            WHERE id IN ({placeholders})
+              AND status = 'evaluating'
+            """,
+            ids,
+        ).fetchall()
+        claimed_ids = {int(row["id"]) for row in claimed_rows}
+        claimed = [row for row in selected if int(row["id"]) in claimed_ids]
+        for row in claimed:
+            row["status"] = "evaluating"
+        return claimed
+
+    def get_evaluated_discovery_candidates_for_admission(
+        self,
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Return evaluated candidates still waiting for content-cache admission."""
+
+        admission_limit = max(0, int(limit))
+        if admission_limit <= 0:
+            return []
+        self._ensure_fresh_read()
+        cursor = self.conn.execute(
+            """
+            SELECT *
+            FROM discovery_candidates
+            WHERE status = 'evaluated'
+            ORDER BY evaluated_at ASC, last_seen_at ASC, id ASC
+            LIMIT ?
+            """,
+            (admission_limit,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def update_discovery_candidate_evaluations(
+        self,
+        evaluations: Sequence[Mapping[str, Any]],
+    ) -> int:
+        """Persist evaluator output back onto claimed candidate rows."""
+
+        updated = 0
+        for evaluation in evaluations:
+            candidate_id = int(evaluation.get("candidate_id") or evaluation.get("id") or 0)
+            if candidate_id <= 0:
+                continue
+            cursor = self._execute_write(
+                """
+                UPDATE discovery_candidates
+                SET status = ?,
+                    topic_key = ?,
+                    topic_group = ?,
+                    style_key = ?,
+                    franchise_key = ?,
+                    relevance_score = ?,
+                    relevance_reason = ?,
+                    pool_expression = ?,
+                    pool_topic_label = ?,
+                    eval_error = ?,
+                    eval_attempts = 0,
+                    batch_eval_attempts = 0,
+                    evaluated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND status = 'evaluating'
+                """,
+                (
+                    str(evaluation.get("status") or "evaluated"),
+                    str(evaluation.get("topic_key") or ""),
+                    str(evaluation.get("topic_group") or ""),
+                    str(evaluation.get("style_key") or ""),
+                    str(evaluation.get("franchise_key") or ""),
+                    float(evaluation.get("relevance_score") or evaluation.get("score") or 0.0),
+                    str(evaluation.get("relevance_reason") or evaluation.get("reason") or ""),
+                    str(evaluation.get("pool_expression") or ""),
+                    str(evaluation.get("pool_topic_label") or ""),
+                    str(evaluation.get("eval_error") or ""),
+                    candidate_id,
+                ),
+            )
+            if cursor.rowcount > 0:
+                updated += 1
+        return updated
+
+    def reset_discovery_candidates_to_pending(
+        self,
+        candidate_ids: Sequence[int],
+        *,
+        reason: str = "",
+        max_attempts: int = 5,
+        max_batch_attempts: int = 50,
+        increment_attempts: bool = True,
+    ) -> int:
+        """Release claimed candidates after a transient evaluator failure."""
+
+        ids = [int(candidate_id) for candidate_id in candidate_ids if int(candidate_id) > 0]
+        if not ids:
+            return 0
+        placeholders = ", ".join("?" for _ in ids)
+        if not increment_attempts:
+            batch_attempts_limit = max(1, int(max_batch_attempts))
+            cursor = self._execute_write(
+                f"""
+                UPDATE discovery_candidates
+                SET batch_eval_attempts = batch_eval_attempts + 1,
+                    status = CASE
+                        WHEN batch_eval_attempts + 1 >= ? THEN 'failed_eval'
+                        ELSE 'pending_eval'
+                    END,
+                    claimed_at = NULL,
+                    eval_error = ?,
+                    evaluated_at = CASE
+                        WHEN batch_eval_attempts + 1 >= ? THEN CURRENT_TIMESTAMP
+                        ELSE evaluated_at
+                    END,
+                    last_seen_at = CASE
+                        WHEN batch_eval_attempts + 1 >= ? THEN last_seen_at
+                        ELSE CURRENT_TIMESTAMP
+                    END
+                WHERE id IN ({placeholders})
+                  AND status = 'evaluating'
+                """,
+                (
+                    batch_attempts_limit,
+                    str(reason),
+                    batch_attempts_limit,
+                    batch_attempts_limit,
+                    *ids,
+                ),
+            )
+            return int(cursor.rowcount)
+
+        attempts_limit = max(1, int(max_attempts))
+        cursor = self._execute_write(
+            f"""
+            UPDATE discovery_candidates
+            SET eval_attempts = eval_attempts + 1,
+                status = CASE
+                    WHEN eval_attempts + 1 >= ? THEN 'failed_eval'
+                    ELSE 'pending_eval'
+                END,
+                claimed_at = NULL,
+                eval_error = ?,
+                evaluated_at = CASE
+                    WHEN eval_attempts + 1 >= ? THEN CURRENT_TIMESTAMP
+                    ELSE evaluated_at
+                END,
+                last_seen_at = CASE
+                    WHEN eval_attempts + 1 >= ? THEN last_seen_at
+                    ELSE CURRENT_TIMESTAMP
+                END
+            WHERE id IN ({placeholders})
+              AND status = 'evaluating'
+            """,
+            (attempts_limit, str(reason), attempts_limit, attempts_limit, *ids),
+        )
+        return int(cursor.rowcount)
+
+    def mark_discovery_candidate_cached(self, candidate_id: int) -> None:
+        """Mark an evaluated candidate as successfully inserted into content_cache."""
+
+        self._execute_write(
+            """
+            UPDATE discovery_candidates
+            SET status = 'cached',
+                cached_at = CURRENT_TIMESTAMP,
+                eval_error = '',
+                eval_attempts = 0,
+                batch_eval_attempts = 0
+            WHERE id = ?
+              AND status IN ('evaluating', 'evaluated')
+            """,
+            (int(candidate_id),),
+        )
+
+    def reject_discovery_candidate(
+        self,
+        candidate_id: int,
+        *,
+        status: str,
+        reason: str = "",
+    ) -> None:
+        """Mark a candidate as rejected before it enters content_cache."""
+
+        self._execute_write(
+            """
+            UPDATE discovery_candidates
+            SET status = ?,
+                eval_error = ?,
+                evaluated_at = COALESCE(evaluated_at, CURRENT_TIMESTAMP)
+            WHERE id = ?
+              AND status IN ('evaluating', 'evaluated')
+            """,
+            (status, reason, int(candidate_id)),
+        )
+
+    def count_discovery_candidates_by_status(self) -> dict[str, int]:
+        """Return candidate queue counts grouped by lifecycle status."""
+
+        self._ensure_fresh_read()
+        cursor = self.conn.execute(
+            """
+            SELECT status, COUNT(*) AS count
+            FROM discovery_candidates
+            GROUP BY status
+            ORDER BY status ASC
+            """
+        )
+        return {str(row["status"]): int(row["count"]) for row in cursor.fetchall()}
+
+    def count_discovery_candidates_by_source_status(self) -> dict[str, dict[str, int]]:
+        """Return candidate queue counts grouped by source and lifecycle status."""
+
+        self._ensure_fresh_read()
+        cursor = self.conn.execute(
+            """
+            SELECT source_platform, status, COUNT(*) AS count
+            FROM discovery_candidates
+            GROUP BY source_platform, status
+            ORDER BY source_platform ASC, status ASC
+            """
+        )
+        counts: dict[str, dict[str, int]] = {}
+        for row in cursor.fetchall():
+            source = str(row["source_platform"] or "unknown")
+            status = str(row["status"])
+            counts.setdefault(source, {})[status] = int(row["count"])
+        return counts
+
+    def count_discovery_pending_raw_material_by_source(self) -> dict[str, int]:
+        """Return not-yet-cached raw candidate counts grouped by source."""
+
+        self._ensure_fresh_read()
+        cursor = self.conn.execute(
+            """
+            SELECT source_platform, COUNT(*) AS count
+            FROM discovery_candidates
+            WHERE status IN ('pending_eval', 'evaluating', 'evaluated')
+            GROUP BY source_platform
+            ORDER BY source_platform ASC
+            """
+        )
+        return {str(row["source_platform"] or "unknown"): int(row["count"]) for row in cursor}
+
+    def _count_pending_discovery_raw_material(self) -> int:
+        self._ensure_fresh_read()
+        cursor = self.conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM discovery_candidates
+            WHERE status IN ('pending_eval', 'evaluating', 'evaluated')
+            """
+        )
+        row = cursor.fetchone()
+        return int(row["count"] if row else 0)
+
     def get_cached_content(self, limit: int = 100) -> list[dict[str, Any]]:
         """Get cached discovered content ordered by basic quality signals."""
         cursor = self.conn.execute(
@@ -1321,7 +1899,9 @@ class Database:
 
     def count_pool_raw_material_candidates(self) -> int:
         """Return raw fresh material count used for raw-ceiling headroom."""
-        return len(self._load_pool_raw_material_rows())
+        return (
+            len(self._load_pool_raw_material_rows()) + self._count_pending_discovery_raw_material()
+        )
 
     def count_pool_raw_material_by_source(self) -> dict[str, int]:
         """Return raw fresh material grouped by source family.
@@ -1333,6 +1913,17 @@ class Database:
         for row in self._load_pool_raw_material_rows():
             source_family = _pool_source_family(row["source"], row["source_platform"])
             counts[source_family] += 1
+        cursor = self.conn.execute(
+            """
+            SELECT source_platform, source_strategy, COUNT(*) AS count
+            FROM discovery_candidates
+            WHERE status IN ('pending_eval', 'evaluating', 'evaluated')
+            GROUP BY source_platform, source_strategy
+            """
+        )
+        for row in cursor.fetchall():
+            source_family = _pool_source_family(row["source_strategy"], row["source_platform"])
+            counts[source_family] += int(row["count"])
         return dict(counts)
 
     def count_pool_readiness(self, *, xhs_self_nickname: str = "") -> dict[str, int]:
@@ -1404,10 +1995,19 @@ class Database:
             ):
                 pending_count += 1
 
+        status_counts = self.count_discovery_candidates_by_status()
+        pending_eval_count = int(status_counts.get("pending_eval", 0)) + int(
+            status_counts.get("evaluating", 0)
+        )
+        evaluated_pending_count = int(status_counts.get("evaluated", 0))
+        discovery_pending_count = pending_eval_count + evaluated_pending_count
+
         return {
             "available": self.count_pool_candidates(xhs_self_nickname=xhs_self_nickname),
-            "raw": raw_count,
-            "pending": pending_count,
+            "raw": raw_count + discovery_pending_count,
+            "pending": pending_count + discovery_pending_count,
+            "pending_eval": pending_eval_count,
+            "evaluated_pending": evaluated_pending_count,
         }
 
     def count_pool_candidates_by_source(self) -> dict[str, int]:
@@ -3016,6 +3616,25 @@ class Database:
             added = True
         if added:
             self.conn.execute("UPDATE content_cache SET content_id = bvid WHERE content_id = ''")
+
+    def _ensure_discovery_candidate_columns(self) -> None:
+        """Backfill discovery-candidate lifecycle columns for existing databases."""
+
+        existing_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(discovery_candidates)").fetchall()
+        }
+        required_columns = {
+            "score_threshold": "REAL NOT NULL DEFAULT 0.0",
+            "eval_attempts": "INTEGER NOT NULL DEFAULT 0",
+            "batch_eval_attempts": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for column_name, column_type in required_columns.items():
+            if column_name in existing_columns:
+                continue
+            self.conn.execute(
+                f"ALTER TABLE discovery_candidates ADD COLUMN {column_name} {column_type}"
+            )
 
     def _ensure_recommendation_read_indexes(self) -> None:
         """Create indexes used by recommendation and activity-feed reads."""

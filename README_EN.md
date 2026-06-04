@@ -25,11 +25,11 @@
 
 ---
 
-## 📌 Delight Positive Feedback Stays Visible Across Clients (2026-06-01)
+## 📌 Cross-Platform Candidates Share One Evaluation Pool (2026-06-04)
 
-- **Positive delight feedback no longer removes the card** — Like, Favorite, Watch Later, Chat, and Open keep the current card visible across all three clients.
-- **Negative feedback still removes immediately** — Not Interested, Dismiss, and explicit close actions remove the current delight from the queue.
-- **Browser E2E covers the behavior** — desktop web, mobile web, and the extension popup were all checked for positive retention and negative removal.
+- **Bilibili / Xiaohongshu / Douyin / YouTube now align after discovery** — each source only fetches raw candidates first, then writes them into `discovery_candidates`.
+- **One mixed-source evaluator decides fit** — the backend claims mixed batches, scores them against the Soul profile, source context, and recent negative examples, then admits accepted items into the recommendation pool.
+- **The recommendation pool cap still gates discovery** — when `pool_available_count >= pool_target_count`, discovery and candidate draining stop instead of overfilling the staging pool.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -483,12 +483,12 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 ├─────────┬──────────┬───────────┬────────────────────┤
 │  Soul   │ Memory   │ Discovery │  Recommendation    │
 │  Engine │ System   │  Engine   │     Engine          │
-│(Profile+Probe)│(5-Layer+Buffer)│(Neg.anchor)│(Guarded Mix)│
+│(Profile+Probe)│(5-Layer+Buffer)│(Eval Pool+Neg.)│(Guarded Mix)│
 ├─────────┴──────────┴───────────┴────────────────────┤
 │ LLM (API Key/Codex OAuth) · Bilibili API · Extension Proxy │
 │ Runtime: Account sync + producers + probe arbiter(distance/quota)│
-│ Runtime status: pool_available/raw/pending_count           │
-│ SQLite: events(inferred_satisfaction) · content_cache   │
+│ Runtime status: pool_available/raw/pending/eval_count      │
+│ SQLite: events · discovery_candidates · content_cache   │
 │         recommendations · chat_turns · avoidance_state  │
 │ Profile overrides: edits -> profile_overrides.json overlay │
 │         (merged at read · rebuild-proof · 3 frontends)   │
@@ -508,9 +508,11 @@ Four Bilibili strategies work in coordination, each with independent API quota, 
 
 **Safe data fetching** — Bilibili and generic Web fetch backend-direct (Bilibili via WBI-signed APIs); Xiaohongshu / Douyin / YouTube are read by the browser extension inside your *already-logged-in* pages: init profiling doesn't deep-scroll by default and returns in batches, and the backend never crawls or logs in to those sites itself (YouTube can also import old history via Google Takeout). For steady-state refill, Douyin signs requests from a background tab in your logged-in browser without stealing focus, and YouTube is refilled backend-side by platform deficit.
 
-**Diversity selection** — discovered results pass through platform-quota reservation → topic dedup → style balancing → **cross-platform interleaving** → count caps, so recommendations never become "all AI all day". Saved platform shares default to Bilibili / Xiaohongshu / Douyin / YouTube = 8 / 1 / 1 / 1, configurable via `[scheduler.pool_source_shares]`; out of the box only Bilibili is enabled and the others must be turned on explicitly.
+**Unified evaluation** — every source first writes raw candidates to `discovery_candidates`. The backend then claims mixed-source batches and scores them with the Soul profile plus recent negative examples. The "will this user like it?" judgment lives in this shared evaluator, not inside each platform producer.
 
-**Pool counts** — the "swappable" number in the UI only counts `pool_available_count`: candidates with ready copy, a category and an openable link, and no recent-view conflict. Material still being prepared counts as `pool_pending_count`, and the extension / Mobile Web / Desktop Web never present it as swappable.
+**Diversity selection** — accepted results then pass through platform-quota reservation → topic dedup → style balancing → **cross-platform interleaving** → count caps, so recommendations never become "all AI all day". Saved platform shares default to Bilibili / Xiaohongshu / Douyin / YouTube = 8 / 1 / 1 / 1, configurable via `[scheduler.pool_source_shares]`; out of the box only Bilibili is enabled and the others must be turned on explicitly.
+
+**Pool counts** — the "swappable" number in the UI only counts `pool_available_count`: candidates with ready copy, a category and an openable link, and no recent-view conflict. Material still being prepared counts as `pool_pending_count`; `pool_pending_eval_count` / `pool_evaluated_pending_count` split out the not-yet-scored and scored-but-not-admitted stages. The extension / Mobile Web / Desktop Web never present pending material as swappable.
 
 ### Soul Engine
 
@@ -529,7 +531,7 @@ OpenBiliClaw/
 │   ├── agent/                 # Agent orchestration & Skill system
 │   ├── soul/                  # Soul Engine (profiling · MBTI · interest/avoidance probes)
 │   ├── memory/                # Multi-layer memory system
-│   ├── discovery/             # Discovery engine (4 strategies · quota balancing · diversity)
+│   ├── discovery/             # Discovery engine (strategies · candidate pool · quota balancing · diversity)
 │   ├── recommendation/        # Recommendation & expression engine
 │   ├── sources/               # Source adapters and XHS/Douyin/YouTube task bridges
 │   ├── youtube/               # Google Takeout import parser

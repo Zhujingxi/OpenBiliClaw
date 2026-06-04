@@ -20,6 +20,12 @@ from openbiliclaw.discovery.douyin import DouyinDiscoveryOptions, DouyinDiscover
 logger = logging.getLogger(__name__)
 
 DouyinDiscoverCallable = Callable[[Any, DouyinDiscoveryOptions], Awaitable[DouyinDiscoveryResult]]
+_DOUYIN_SCORE_THRESHOLDS = {
+    "search": 0.65,
+    "hot": 0.60,
+    "feed": 0.60,
+}
+_DOUYIN_DEFAULT_SCORE_THRESHOLD = _DOUYIN_SCORE_THRESHOLDS["search"]
 
 
 def douyin_runtime_hot_budget(*, base_budget: int, requested_limit: int) -> int:
@@ -43,6 +49,7 @@ class DouyinDiscoveryProducer:
     min_interval_minutes: int = 30
     sources: tuple[str, ...] = ("search", "hot", "feed")
     evaluate: bool = True
+    candidate_pipeline: Any | None = None
     per_source_limit: int = 20
     _last_run_at: datetime | None = field(default=None, init=False)
     _last_skip_reason: str = field(default="", init=False)
@@ -53,6 +60,8 @@ class DouyinDiscoveryProducer:
             return self._skip("disabled")
         if not self._is_due():
             return self._skip("throttled")
+        if self._candidate_pool_full():
+            return self._skip("pool_full")
 
         try:
             profile = await self.soul_engine.get_profile()
@@ -71,11 +80,12 @@ class DouyinDiscoveryProducer:
                 math.ceil(requested_limit / max(1, len(selected_sources))),
             ),
         )
+        use_candidate_pipeline = self.candidate_pipeline is not None
         options = DouyinDiscoveryOptions(
             limit=requested_limit,
             sources=selected_sources,
-            cache=True,
-            evaluate=self.evaluate,
+            cache=not use_candidate_pipeline,
+            evaluate=False if use_candidate_pipeline else self.evaluate,
             per_source_limit=per_source_limit,
             keywords_per_run=1,
         )
@@ -86,12 +96,30 @@ class DouyinDiscoveryProducer:
             return self._skip("error")
 
         self._last_run_at = datetime.now(UTC)
-        return {
+        payload: dict[str, object] = {
             "discovered": len(result.items),
-            "cached": result.cached,
             "source_counts": dict(result.source_counts),
             "reason": "ok",
         }
+        if self.candidate_pipeline is None:
+            payload["cached"] = result.cached
+            return payload
+
+        self._stamp_candidate_score_thresholds(result.items)
+        enqueued = int(
+            self.candidate_pipeline.enqueue_candidates(
+                list(result.items),
+                source_context="douyin",
+            )
+        )
+        payload["enqueued"] = enqueued
+        if enqueued > 0:
+            drain_result = await self.candidate_pipeline.drain_pending(
+                profile=profile,
+                batch_size=requested_limit,
+            )
+            payload.update(drain_result)
+        return payload
 
     def _is_due(self) -> bool:
         if self.min_interval_minutes <= 0:
@@ -118,6 +146,35 @@ class DouyinDiscoveryProducer:
             return non_search[:1]
         return configured[:1] or ("search",)
 
+    def _candidate_pool_full(self) -> bool:
+        if self.candidate_pipeline is None:
+            return False
+        pool_full = getattr(self.candidate_pipeline, "pool_full", None)
+        if not callable(pool_full):
+            return False
+        try:
+            return bool(pool_full())
+        except Exception:
+            logger.debug("douyin producer: candidate pool fullness unavailable", exc_info=True)
+            return False
+
+    def _stamp_candidate_score_thresholds(self, items: list[Any]) -> None:
+        for item in items:
+            try:
+                if float(getattr(item, "score_threshold", 0.0) or 0.0) > 0:
+                    continue
+                item.score_threshold = self._score_threshold_for_item(item)
+            except Exception:
+                logger.debug("douyin producer: failed to stamp score threshold", exc_info=True)
+
+    @staticmethod
+    def _score_threshold_for_item(item: Any) -> float:
+        strategy = str(getattr(item, "source_strategy", "") or "").strip().lower()
+        for key, threshold in _DOUYIN_SCORE_THRESHOLDS.items():
+            if key in strategy:
+                return threshold
+        return _DOUYIN_DEFAULT_SCORE_THRESHOLD
+
     def _skip(self, reason: str) -> dict[str, object]:
         if reason != self._last_skip_reason:
             logger.info("douyin producer skip: reason=%s", reason)
@@ -131,6 +188,7 @@ def build_douyin_discovery_producer(
     database: Any,
     soul_engine: Any,
     discovery_engine: Any,
+    candidate_pipeline: Any | None = None,
 ) -> DouyinDiscoveryProducer | None:
     """Build the runtime Douyin producer if Douyin discovery is enabled."""
     dy_cfg = getattr(getattr(config, "sources", None), "douyin", None)
@@ -189,5 +247,6 @@ def build_douyin_discovery_producer(
         enabled=bool(getattr(scheduler, "enabled", True)),
         min_interval_minutes=30,
         sources=("search", "hot", "feed"),
+        candidate_pipeline=candidate_pipeline,
         per_source_limit=20,
     )

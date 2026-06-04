@@ -8,7 +8,7 @@ import logging
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from openbiliclaw.config import SchedulerConfig
 from openbiliclaw.discovery.pool_snapshot import build_pool_distribution_snapshot
@@ -211,6 +211,7 @@ class ContinuousRefreshController:
     discovery_engine: SupportsDiscoveryEngine
     recommendation_engine: SupportsRecommendationEngine
     event_hub: Any | None = None
+    discovery_candidate_pipeline: Any | None = None
     xhs_producer: Any | None = None
     douyin_producer: Any | None = None
     youtube_producer: Any | None = None
@@ -255,6 +256,11 @@ class ContinuousRefreshController:
     # directly without injecting a registry keep working.
     task_registry: BackgroundTaskRegistry | None = None
     _manual_refresh_task: asyncio.Task[None] | None = None
+    _discovery_drain_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock,
+        init=False,
+        repr=False,
+    )
     # v0.3.62+ global "skip-if-busy" gate. Four entry points
     # (_loop_refresh, _complete_manual_refresh, refresh_after_event_ingest,
     # refresh_after_feedback) all funnel through ``refresh_if_needed``.
@@ -338,10 +344,18 @@ class ContinuousRefreshController:
                 "available": max(0, available),
                 "raw": max(0, int(readiness.get("raw", available))),
                 "pending": max(0, int(readiness.get("pending", 0))),
+                "pending_eval": max(0, int(readiness.get("pending_eval", 0))),
+                "evaluated_pending": max(0, int(readiness.get("evaluated_pending", 0))),
             }
         except Exception:
             available = int(self.database.count_pool_candidates(xhs_self_nickname=nickname))
-            return {"available": max(0, available), "raw": max(0, available), "pending": 0}
+            return {
+                "available": max(0, available),
+                "raw": max(0, available),
+                "pending": 0,
+                "pending_eval": 0,
+                "evaluated_pending": 0,
+            }
 
     @staticmethod
     def _pool_count_payload(counts: dict[str, int]) -> dict[str, int]:
@@ -349,6 +363,8 @@ class ContinuousRefreshController:
             "pool_available_count": int(counts.get("available", 0)),
             "pool_raw_count": int(counts.get("raw", counts.get("available", 0))),
             "pool_pending_count": int(counts.get("pending", 0)),
+            "pool_pending_eval_count": int(counts.get("pending_eval", 0)),
+            "pool_evaluated_pending_count": int(counts.get("evaluated_pending", 0)),
         }
 
     def get_runtime_status(self) -> dict[str, object]:
@@ -1272,6 +1288,41 @@ class ContinuousRefreshController:
         """Allow callers to trigger a refresh immediately after initialization."""
         return await self.refresh_if_needed()
 
+    async def drain_discovery_candidates_once(
+        self,
+        *,
+        batch_size: int | None = None,
+    ) -> dict[str, int]:
+        """Drain one pending discovery-candidate batch through the shared evaluator."""
+
+        pipeline = self.discovery_candidate_pipeline
+        if pipeline is None:
+            return {"evaluated": 0, "cached": 0, "rejected": 0}
+        if self._discovery_drain_lock.locked():
+            return {"evaluated": 0, "cached": 0, "rejected": 0}
+        async with self._discovery_drain_lock:
+            try:
+                pool_available = self.database.count_pool_candidates(
+                    xhs_self_nickname=self._xhs_self_nickname()
+                )
+            except TypeError:
+                pool_available = self.database.count_pool_candidates()
+            if int(pool_available) >= self.pool_target_count:
+                return {"evaluated": 0, "cached": 0, "rejected": 0}
+            try:
+                profile = await self.soul_engine.get_profile()
+            except Exception as exc:
+                logger.info("discovery candidate drain skipped: soul profile unavailable: %s", exc)
+                return {"evaluated": 0, "cached": 0, "rejected": 0}
+            if profile is None:
+                logger.info("discovery candidate drain skipped: soul profile unavailable")
+                return {"evaluated": 0, "cached": 0, "rejected": 0}
+            result = await pipeline.drain_pending(
+                profile=profile,
+                batch_size=batch_size or self.discovery_limit,
+            )
+            return cast("dict[str, int]", result)
+
     async def _complete_manual_refresh(self) -> None:
         try:
             refresh_result = await self.force_refresh()
@@ -1327,6 +1378,7 @@ class ContinuousRefreshController:
         before_pool_count = before_pool_counts["available"]
         initial_pool_below_target = before_pool_count < self.pool_target_count
         all_discovered: list[Any] = []
+        pipeline_discovered_count = 0
         flattened_strategies: list[str] = []
         replenished_topics: list[str] = []
         # v0.3.47+: per-strategy expression precompute tasks. Each strategy's
@@ -1385,21 +1437,47 @@ class ContinuousRefreshController:
             except Exception:
                 logger.exception("Failed to build pool distribution snapshot")
                 pool_snapshot = None
-            discover_fn = self.discovery_engine.discover
-            discover_kwargs: dict[str, Any] = {
-                "strategies": strategies,
-                "limit": effective_limit,
-            }
-            if strategy_limits and _call_accepts_strategy_limits(discover_fn):
-                discover_kwargs["strategy_limits"] = strategy_limits
-            if _call_accepts_pool_snapshot(discover_fn):
-                discover_kwargs["pool_snapshot"] = pool_snapshot
-            discovered = await discover_fn(profile, **discover_kwargs)
+            pipeline = self.discovery_candidate_pipeline
+            discovered: list[Any] = []
+            topic_items: list[Any] = []
+            discovered_count = 0
+            admitted_count = 0
+            if pipeline is not None:
+                produced_count = await pipeline.produce_and_enqueue(
+                    profile=profile,
+                    strategies=strategies,
+                    limit=effective_limit,
+                    strategy_limits=strategy_limits,
+                    pool_snapshot=pool_snapshot,
+                )
+                drain_result = await pipeline.drain_pending(
+                    profile=profile,
+                    batch_size=effective_limit,
+                )
+                discovered_count = int(produced_count or 0)
+                admitted_count = int(drain_result.get("cached", 0) or 0)
+                if admitted_count > 0:
+                    topic_items = list(getattr(pipeline, "last_admitted_items", []) or [])
+                pipeline_discovered_count += discovered_count
+            else:
+                discover_fn = self.discovery_engine.discover
+                discover_kwargs: dict[str, Any] = {
+                    "strategies": strategies,
+                    "limit": effective_limit,
+                }
+                if strategy_limits and _call_accepts_strategy_limits(discover_fn):
+                    discover_kwargs["strategy_limits"] = strategy_limits
+                if _call_accepts_pool_snapshot(discover_fn):
+                    discover_kwargs["pool_snapshot"] = pool_snapshot
+                discovered = await discover_fn(profile, **discover_kwargs)
+                topic_items = discovered
+                discovered_count = len(discovered)
+                admitted_count = discovered_count
             all_discovered.extend(discovered)
             flattened_strategies.extend(strategies)
 
-            if discovered:
-                replenished_topics.extend(self._extract_topics(discovered))
+            if admitted_count > 0:
+                replenished_topics.extend(self._extract_topics(topic_items))
                 # Fire expression precompute now (in parallel with the next
                 # strategy's discovery LLM call). The lock inside the engine
                 # queues this if a previous task is still running.
@@ -1500,7 +1578,7 @@ class ContinuousRefreshController:
             state["last_explore_refresh_at"] = now
         after_pool_counts = self._pool_readiness_counts()
         after_pool_count = after_pool_counts["available"]
-        state["last_discovered_count"] = len(all_discovered)
+        state["last_discovered_count"] = len(all_discovered) + pipeline_discovered_count
         state["last_replenished_count"] = max(0, after_pool_count - before_pool_count)
         if replenished_topics:
             state["recent_pool_topics"] = self._dedupe_topics(replenished_topics)[:3]
@@ -1885,10 +1963,17 @@ class ContinuousRefreshController:
         available_target = int(target_counts.get(source_family, 0))
         current_available = self._platform_source_count(source_available_counts, source_family)
         available_deficit = max(0, available_target - current_available)
+        try:
+            current_global_available = self.database.count_pool_candidates(
+                xhs_self_nickname=self._xhs_self_nickname()
+            )
+        except TypeError:
+            current_global_available = self.database.count_pool_candidates()
+        global_available_deficit = max(0, self.pool_target_count - int(current_global_available))
         raw_target = int(raw_target_counts.get(source_family, 0))
         current_raw = self._platform_source_count(source_raw_counts, source_family)
         raw_headroom = max(0, raw_target - current_raw)
-        return max(0, min(available_deficit, raw_headroom))
+        return max(0, min(available_deficit, raw_headroom, global_available_deficit))
 
     def _count_pool_available_candidates_by_source(self) -> dict[str, int]:
         count_fn = getattr(self.database, "count_pool_available_candidates_by_source", None)

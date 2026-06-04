@@ -7,6 +7,9 @@ XiaohongshuAdapter.
 
 from __future__ import annotations
 
+import asyncio
+import json
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -62,6 +65,56 @@ class RecordingSoulEngine:
 
     def is_profile_ready(self) -> bool:
         return True
+
+
+class _Response:
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+
+class _XhsScoringLLM:
+    def __init__(
+        self,
+        *,
+        content_id: str = "xhs-e2e-note",
+        score: float = 0.88,
+    ) -> None:
+        self.content_id = content_id
+        self.score = score
+        self.calls: list[dict[str, object]] = []
+
+    async def complete_structured_task(
+        self,
+        *,
+        system_instruction: str,
+        user_input: str,
+        history: list[dict[str, str]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        caller: str = "",
+        reasoning_effort: str | None = None,
+    ) -> object:
+        self.calls.append(
+            {
+                "system_instruction": system_instruction,
+                "user_input": user_input,
+                "caller": caller,
+            }
+        )
+        return _Response(
+            json.dumps(
+                [
+                    {
+                        "content_id": self.content_id,
+                        "score": self.score,
+                        "reason": "fit" if self.score >= 0.60 else "new direction",
+                        "topic_group": "生活方式",
+                        "style_key": "story_doc",
+                    }
+                ],
+                ensure_ascii=False,
+            )
+        )
 
 
 @pytest.fixture
@@ -160,6 +213,7 @@ class TestXhsObservedUrls:
         body = response.json()
         assert body["ok"] is True
         assert body["accepted"] == 2
+        assert body["enqueued"] == 0
 
     def test_rejects_empty_url_list(self, app_client: TestClient) -> None:
         response = app_client.post(
@@ -191,6 +245,7 @@ class TestXhsObservedUrls:
         assert response.status_code == 200
         body = response.json()
         assert body["accepted"] == 1  # only the valid xhs URL
+        assert body["enqueued"] == 0
 
     def test_stores_observations_in_db(self, app_client: TestClient, tmp_path: Path) -> None:
         from openbiliclaw.storage.database import Database
@@ -211,10 +266,10 @@ class TestXhsObservedUrls:
         assert rows[0]["url"] == "https://www.xiaohongshu.com/explore/abc123"
         assert rows[0]["page_type"] == "search"
 
-    def test_notes_cache_populates_source_and_platform(
+    def test_notes_enqueue_populates_source_and_platform(
         self, app_client: TestClient, tmp_path: Path
     ) -> None:
-        """Regression: xhs note caches must tag `source` (strategy label)
+        """Regression: xhs note candidates must tag strategy label
         AND `source_platform='xiaohongshu'`.
 
         An earlier bug passed the wrong kwarg (`source_strategy=` instead of
@@ -244,25 +299,255 @@ class TestXhsObservedUrls:
             },
         )
         assert response.status_code == 200
+        body = response.json()
+        assert body["accepted"] == 1
+        assert body["enqueued"] == 1
 
         row = db.conn.execute(
-            "SELECT source, source_platform, content_id, content_url, title, up_name "
-            "FROM content_cache WHERE bvid=?",
+            "SELECT source_strategy, source_platform, content_id, content_url, title, up_name "
+            "FROM discovery_candidates WHERE content_id=?",
             ("note-xyz-001",),
         ).fetchone()
-        assert row is not None, "xhs note was not cached"
-        assert row["source"] == "xhs-extension-search"
+        assert row is not None, "xhs note was not enqueued"
+        assert row["source_strategy"] == "xhs-extension-search"
         assert row["source_platform"] == "xiaohongshu"
-        assert row["content_id"] == "note-xyz-001"
-        assert row["content_url"].endswith("/note-xyz-001")
-        assert row["title"] == "手冲咖啡入门"
-        assert row["up_name"] == "豆子老师"
 
-    def test_tokenized_url_upgrades_existing_bare_cache_row(
+    def test_notes_ingest_drains_through_pipeline_into_content_cache(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from openbiliclaw.api.app import create_app
+        from openbiliclaw.discovery.candidate_pipeline import DiscoveryCandidatePipeline
+        from openbiliclaw.discovery.engine import ContentDiscoveryEngine
+        from openbiliclaw.storage.database import Database
+
+        from .test_search_strategy import _build_profile
+
+        db = Database(tmp_path / "xhs-e2e.db")
+        db.initialize()
+        memory = RecordingMemoryManager()
+        llm = _XhsScoringLLM()
+        discovery_engine = ContentDiscoveryEngine(llm_service=llm, database=db)
+        pipeline = DiscoveryCandidatePipeline(
+            database=db,
+            discovery_engine=discovery_engine,
+            pool_target_count=30,
+        )
+
+        class RuntimeController:
+            memory_manager = memory
+
+            async def drain_discovery_candidates_once(
+                self,
+                *,
+                batch_size: int | None = None,
+            ) -> dict[str, int]:
+                return await pipeline.drain_pending(
+                    profile=_build_profile(),
+                    batch_size=batch_size or 30,
+                )
+
+        app = create_app(
+            database=db,
+            memory_manager=memory,
+            soul_engine=RecordingSoulEngine(memory),
+            runtime_controller=RuntimeController(),
+            recommendation_engine=None,
+        )
+        scheduled: list[object] = []
+
+        def _capture_task(coro: object) -> object:
+            scheduled.append(coro)
+            return SimpleNamespace()
+
+        monkeypatch.setattr("asyncio.create_task", _capture_task)
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/sources/xhs/observed-urls",
+            json={
+                "urls": [],
+                "notes": [
+                    {
+                        "url": "https://www.xiaohongshu.com/explore/xhs-e2e-note?xsec_token=tok",
+                        "title": "小红书 E2E Note",
+                        "author": "Creator",
+                        "cover_url": "https://example.test/cover.jpg",
+                    }
+                ],
+                "page_type": "search",
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["accepted"] == 0
+        assert body["enqueued"] == 1
+        assert scheduled
+        for coro in scheduled:
+            asyncio.run(coro)
+
+        row = db.conn.execute(
+            "SELECT * FROM content_cache WHERE content_id = ?",
+            ("xhs-e2e-note",),
+        ).fetchone()
+        assert row is not None
+        assert row["source_platform"] == "xiaohongshu"
+        assert row["source"] == "xhs-extension-search"
+        assert row["topic_group"] == "生活方式"
+        assert row["style_key"] == "story_doc"
+        assert row["relevance_score"] == 0.88
+        user_input = str(llm.calls[0]["user_input"])
+        assert '"source_platform": "xiaohongshu"' in user_input
+        assert '"content_type": "note"' in user_input
+
+    def test_observed_note_low_relevance_score_still_reaches_content_cache(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from openbiliclaw.api.app import create_app
+        from openbiliclaw.discovery.candidate_pipeline import DiscoveryCandidatePipeline
+        from openbiliclaw.discovery.engine import ContentDiscoveryEngine
+        from openbiliclaw.storage.database import Database
+
+        from .test_search_strategy import _build_profile
+
+        db = Database(tmp_path / "xhs-low-score.db")
+        db.initialize()
+        memory = RecordingMemoryManager()
+        llm = _XhsScoringLLM(content_id="xhs-low-score-note", score=0.30)
+        discovery_engine = ContentDiscoveryEngine(llm_service=llm, database=db)
+        pipeline = DiscoveryCandidatePipeline(
+            database=db,
+            discovery_engine=discovery_engine,
+            pool_target_count=30,
+        )
+
+        class RuntimeController:
+            memory_manager = memory
+
+            async def drain_discovery_candidates_once(
+                self,
+                *,
+                batch_size: int | None = None,
+            ) -> dict[str, int]:
+                return await pipeline.drain_pending(
+                    profile=_build_profile(),
+                    batch_size=batch_size or 30,
+                )
+
+        app = create_app(
+            database=db,
+            memory_manager=memory,
+            soul_engine=RecordingSoulEngine(memory),
+            runtime_controller=RuntimeController(),
+            recommendation_engine=None,
+        )
+        scheduled: list[object] = []
+
+        def _capture_task(coro: object) -> object:
+            scheduled.append(coro)
+            return SimpleNamespace()
+
+        monkeypatch.setattr("asyncio.create_task", _capture_task)
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/sources/xhs/observed-urls",
+            json={
+                "urls": [],
+                "notes": [
+                    {
+                        "url": (
+                            "https://www.xiaohongshu.com/explore/xhs-low-score-note?xsec_token=tok"
+                        ),
+                        "title": "小红书低分新方向",
+                        "author": "Creator",
+                        "cover_url": "https://example.test/cover.jpg",
+                    }
+                ],
+                "page_type": "search",
+            },
+        )
+
+        assert response.status_code == 200
+        assert scheduled
+        for coro in scheduled:
+            asyncio.run(coro)
+
+        row = db.conn.execute(
+            "SELECT * FROM content_cache WHERE content_id = ?",
+            ("xhs-low-score-note",),
+        ).fetchone()
+        assert row is not None
+        assert row["source_platform"] == "xiaohongshu"
+        assert row["relevance_score"] == 0.30
+        assert db.count_discovery_candidates_by_status()["cached"] == 1
+
+    def test_notes_enqueue_does_not_spawn_legacy_classification(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from types import SimpleNamespace
+
+        from openbiliclaw.api.app import create_app
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "legacy-classify.db")
+        db.initialize()
+        memory = RecordingMemoryManager()
+        created_task_names: list[str] = []
+
+        def _record_task(coro: object) -> object:
+            name = getattr(getattr(coro, "cr_code", None), "co_name", "")
+            created_task_names.append(str(name))
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+            return SimpleNamespace(done=lambda: True)
+
+        class _LegacyClassifier:
+            async def classify_pool_backlog(self, **kwargs: object) -> int:
+                raise AssertionError("legacy classify must not run for normal XHS ingest")
+
+        monkeypatch.setattr("asyncio.create_task", _record_task)
+        app = create_app(
+            database=db,
+            memory_manager=memory,
+            soul_engine=RecordingSoulEngine(memory),
+            runtime_controller=SimpleNamespace(memory_manager=memory),
+            recommendation_engine=_LegacyClassifier(),
+        )
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/sources/xhs/observed-urls",
+            json={
+                "urls": ["https://www.xiaohongshu.com/explore/no-classify-001"],
+                "notes": [
+                    {
+                        "url": "https://www.xiaohongshu.com/explore/no-classify-001",
+                        "title": "普通笔记",
+                        "author": "作者",
+                        "cover_url": "",
+                    }
+                ],
+                "page_type": "search",
+            },
+        )
+
+        assert response.status_code == 200
+        assert "_classify_new_pool_items" not in created_task_names
+        assert "_drain_discovery_candidates_once" in created_task_names
+
+    def test_tokenized_url_upgrades_existing_bare_candidate_row(
         self, app_client: TestClient, tmp_path: Path
     ) -> None:
         """Regression: when the extension reports a note URL *with*
-        ``xsec_token`` after the same note was already cached from a
+        ``xsec_token`` after the same note was already enqueued from a
         search page *without* the token, the cache row must be upgraded.
 
         Without this backfill, users click recommendation cards and get
@@ -290,9 +575,9 @@ class TestXhsObservedUrls:
         assert resp1.status_code == 200
 
         row = db.conn.execute(
-            "SELECT content_url FROM content_cache WHERE bvid=?", (note_id,)
+            "SELECT content_url FROM discovery_candidates WHERE content_id=?", (note_id,)
         ).fetchone()
-        assert row["content_url"] == bare_url  # bare URL cached
+        assert row["content_url"] == bare_url  # bare URL enqueued
 
         # Second pass: explore feed observes the same note WITH a token.
         # No new `notes` payload — just the bare URL list carrying the token.
@@ -303,7 +588,7 @@ class TestXhsObservedUrls:
         assert resp2.status_code == 200
 
         row = db.conn.execute(
-            "SELECT content_url FROM content_cache WHERE bvid=?", (note_id,)
+            "SELECT content_url FROM discovery_candidates WHERE content_id=?", (note_id,)
         ).fetchone()
         assert "xsec_token=ABCXYZ123" in row["content_url"], (
             f"token backfill failed: still cached as {row['content_url']!r}"
@@ -345,7 +630,7 @@ class TestXhsObservedUrls:
         assert resp.status_code == 200
 
         row = db.conn.execute(
-            "SELECT content_url FROM content_cache WHERE bvid=?", (note_id,)
+            "SELECT content_url FROM discovery_candidates WHERE content_id=?", (note_id,)
         ).fetchone()
         assert "xsec_token=PRIOR456" in row["content_url"], (
             f"cache overwrote tokenized URL with bare: {row['content_url']!r}"
@@ -358,7 +643,7 @@ class TestXhsObservedUrls:
         """v0.3.57+: passive XHS pages send self_info at the payload top level
         (extension v0.3.10's xiaohongshu.ts:runPassiveCollection); backend
         must read it and drop notes authored by the logged-in user before
-        they enter content_cache.
+        they enter discovery_candidates.
 
         Reproduces the leak where the user's own posts ("自家宝安领航城...
         165㎡大五房出售") landed in the XHS recommendation pool because the
@@ -392,9 +677,9 @@ class TestXhsObservedUrls:
         assert response.status_code == 200
 
         bvids = {
-            row["bvid"]
+            row["content_id"]
             for row in db.conn.execute(
-                "SELECT bvid FROM content_cache WHERE source_platform='xiaohongshu'"
+                "SELECT content_id FROM discovery_candidates WHERE source_platform='xiaohongshu'"
             ).fetchall()
         }
         assert "passive-other-001" in bvids
@@ -444,9 +729,9 @@ class TestXhsObservedUrls:
         )
 
         bvids = {
-            row["bvid"]
+            row["content_id"]
             for row in db.conn.execute(
-                "SELECT bvid FROM content_cache WHERE source_platform='xiaohongshu'"
+                "SELECT content_id FROM discovery_candidates WHERE source_platform='xiaohongshu'"
             ).fetchall()
         }
         assert "n0" in bvids
@@ -570,9 +855,9 @@ class TestXhsObservedUrls:
         )
         assert response.status_code == 200
         bvids = {
-            row["bvid"]
+            row["content_id"]
             for row in db.conn.execute(
-                "SELECT bvid FROM content_cache WHERE source_platform='xiaohongshu'"
+                "SELECT content_id FROM discovery_candidates WHERE source_platform='xiaohongshu'"
             ).fetchall()
         }
         assert "search-other-001" in bvids
@@ -871,14 +1156,15 @@ class TestXhsTaskResults:
         result = json.loads(row["result_json"])
         assert result["notes"][0]["note_id"] == "note-task-001"
 
-        cache_row = db.conn.execute(
-            "SELECT title, source, source_platform FROM content_cache WHERE bvid=?",
+        candidate_row = db.conn.execute(
+            "SELECT title, source_strategy, source_platform FROM discovery_candidates "
+            "WHERE content_id=?",
             ("note-task-001",),
         ).fetchone()
-        assert cache_row is not None
-        assert cache_row["title"] == "手冲咖啡入门"
-        assert cache_row["source"] == "xhs-extension-task"
-        assert cache_row["source_platform"] == "xiaohongshu"
+        assert candidate_row is not None
+        assert candidate_row["title"] == "手冲咖啡入门"
+        assert candidate_row["source_strategy"] == "xhs-extension-task"
+        assert candidate_row["source_platform"] == "xiaohongshu"
 
     def test_xhs_bootstrap_skips_notes_already_seen_in_previous_task(
         self,
@@ -943,7 +1229,7 @@ class TestXhsTaskResults:
         assert task is not None
 
         # 1st request — bootstrap brings self_info AND a self-authored note.
-        # The self-authored one should be dropped from cache + event flow.
+        # The self-authored one should be dropped from candidate queue + event flow.
         own_url = "https://www.xiaohongshu.com/explore/own-note-001"
         other_url = "https://www.xiaohongshu.com/explore/other-note-001"
         response = app_client.post(
@@ -989,14 +1275,14 @@ class TestXhsTaskResults:
         assert len(memory.events) == 1
         assert memory.events[0]["title"] == "手冲咖啡入门"
 
-        # Self-authored note dropped from content_cache too.
+        # Self-authored note dropped from discovery_candidates too.
         own_row = db.conn.execute(
-            "SELECT bvid FROM content_cache WHERE bvid=?",
+            "SELECT content_id FROM discovery_candidates WHERE content_id=?",
             ("own-note-001",),
         ).fetchone()
         assert own_row is None
         other_row = db.conn.execute(
-            "SELECT bvid FROM content_cache WHERE bvid=?",
+            "SELECT content_id FROM discovery_candidates WHERE content_id=?",
             ("other-note-001",),
         ).fetchone()
         assert other_row is not None
@@ -1011,7 +1297,7 @@ class TestXhsTokens:
     sharing.
     """
 
-    def test_backfills_token_onto_existing_bare_cache(
+    def test_backfills_token_onto_existing_bare_candidate(
         self, app_client: TestClient, tmp_path: Path
     ) -> None:
         from openbiliclaw.storage.database import Database
@@ -1022,7 +1308,7 @@ class TestXhsTokens:
         note_id = "note-sniffer-001"
         bare_url = f"https://www.xiaohongshu.com/explore/{note_id}"
 
-        # Seed a bare-URL cache row as the search-page path would.
+        # Seed a bare-URL candidate row as the search-page path would.
         app_client.post(
             "/api/sources/xhs/observed-urls",
             json={
@@ -1041,7 +1327,7 @@ class TestXhsTokens:
         assert resp.json()["upgraded"] >= 1
 
         row = db.conn.execute(
-            "SELECT content_url FROM content_cache WHERE bvid=?", (note_id,)
+            "SELECT content_url FROM discovery_candidates WHERE content_id=?", (note_id,)
         ).fetchone()
         assert "xsec_token=SNIFFED_TOKEN_42" in row["content_url"], (
             f"token backfill failed: {row['content_url']!r}"

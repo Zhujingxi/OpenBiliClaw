@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from openbiliclaw.discovery.candidate_pool import DiscoveryCandidateWrite
 from openbiliclaw.storage.database import Database
 
 
@@ -1759,6 +1760,41 @@ class TestDatabase:
                 "available": 1,
                 "raw": 3,
                 "pending": 1,
+                "pending_eval": 0,
+                "evaluated_pending": 0,
+            }
+
+            db.close()
+
+    def test_count_pool_readiness_includes_pending_discovery_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            _seed_visible(db, "BV-ready", source="search")
+            db.enqueue_discovery_candidates(
+                [
+                    DiscoveryCandidateWrite(
+                        candidate_key="youtube:yt-pending",
+                        source_platform="youtube",
+                        source_strategy="yt_search",
+                        content_id="yt-pending",
+                        content_url="https://www.youtube.com/watch?v=yt-pending",
+                        title="Pending",
+                    )
+                ]
+            )
+
+            readiness = db.count_pool_readiness()
+
+            assert readiness["available"] == 1
+            assert readiness["raw"] == 2
+            assert readiness["pending"] == 1
+            assert readiness["pending_eval"] == 1
+            assert readiness["evaluated_pending"] == 0
+            assert db.count_pool_raw_material_candidates() == 2
+            assert db.count_pool_raw_material_by_source() == {
+                "bilibili": 1,
+                "youtube": 1,
             }
 
             db.close()

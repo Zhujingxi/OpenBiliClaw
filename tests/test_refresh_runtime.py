@@ -83,6 +83,7 @@ class _FakeDatabase:
         source_raw_counts: dict[str, int] | None = None,
         pool_raw_count: int | None = None,
         pool_pending_count: int = 0,
+        discovery_status_counts: dict[str, int] | None = None,
         reactivate_pool_count: int = 0,
         delight_candidate: dict[str, object] | None = None,
         delight_count: int = 0,
@@ -91,6 +92,7 @@ class _FakeDatabase:
         self.pool_count = pool_count
         self.pool_raw_count = pool_raw_count
         self.pool_pending_count = pool_pending_count
+        self.discovery_status_counts = dict(discovery_status_counts or {})
         self.source_counts = source_counts or {}
         self.source_available_counts = (
             dict(source_available_counts)
@@ -147,10 +149,15 @@ class _FakeDatabase:
         return self.pool_count
 
     def count_pool_readiness(self, *, xhs_self_nickname: str = "") -> dict[str, int]:
+        pending_eval = int(self.discovery_status_counts.get("pending_eval", 0))
+        pending_eval += int(self.discovery_status_counts.get("evaluating", 0))
+        evaluated_pending = int(self.discovery_status_counts.get("evaluated", 0))
         return {
             "available": self.pool_count,
             "raw": self.pool_count if self.pool_raw_count is None else self.pool_raw_count,
             "pending": self.pool_pending_count,
+            "pending_eval": pending_eval,
+            "evaluated_pending": evaluated_pending,
         }
 
     def count_pool_candidates_by_source(self) -> dict[str, int]:
@@ -263,6 +270,31 @@ class _FakeSoulEngine:
         return list(self._disliked)
 
 
+class _NoProfileSoulEngine:
+    async def get_profile(self) -> None:
+        return None
+
+    def get_effective_disliked_topics(self) -> list[str]:
+        return []
+
+
+class _RaisingNoProfileSoulEngine:
+    async def get_profile(self) -> None:
+        raise RuntimeError("profile not initialized")
+
+    def get_effective_disliked_topics(self) -> list[str]:
+        return []
+
+
+class _DrainSpyCandidatePipeline:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def drain_pending(self, *, profile: object, batch_size: int = 30) -> dict[str, int]:
+        self.calls += 1
+        raise AssertionError("drain_pending should not run without a profile")
+
+
 class _FakeDiscoveryEngine:
     def __init__(self) -> None:
         self.calls: list[tuple[dict[str, object], list[str] | None, int]] = []
@@ -282,6 +314,44 @@ class _FakeDiscoveryEngine:
         self.strategy_limit_calls.append(dict(strategy_limits) if strategy_limits else None)
         self.pool_snapshot_calls.append(pool_snapshot)
         return [{"bvid": "BV1X", "relevance_score": 0.9, "view_count": 100}]
+
+
+class _FakeCandidatePipeline:
+    def __init__(self) -> None:
+        self.enqueued: list[tuple[list[str], int]] = []
+        self.strategy_limit_calls: list[dict[str, int] | None] = []
+        self.pool_snapshot_calls: list[object | None] = []
+        self.drains: list[int] = []
+        self.last_admitted_items: list[object] = []
+
+    async def produce_and_enqueue(
+        self,
+        *,
+        profile: object,
+        strategies: list[str],
+        limit: int,
+        strategy_limits: dict[str, int] | None = None,
+        pool_snapshot: object | None = None,
+    ) -> int:
+        self.enqueued.append((list(strategies), limit))
+        self.strategy_limit_calls.append(dict(strategy_limits) if strategy_limits else None)
+        self.pool_snapshot_calls.append(pool_snapshot)
+        return limit
+
+    async def drain_pending(
+        self,
+        *,
+        profile: object,
+        batch_size: int = 30,
+    ) -> dict[str, int]:
+        self.drains.append(batch_size)
+        self.last_admitted_items = [
+            SimpleNamespace(
+                tags=["pipeline-topic"],
+                source_strategy="search",
+            )
+        ]
+        return {"evaluated": batch_size, "cached": 3, "rejected": 0}
 
 
 class _FakeXhsProducer:
@@ -796,7 +866,13 @@ def test_get_pending_delight_skips_effective_disliked_candidate() -> None:
 def test_runtime_status_reports_pool_readiness_counts() -> None:
     controller = ContinuousRefreshController(
         memory_manager=_FakeMemoryManager(),
-        database=_FakeDatabase([], pool_count=0, pool_raw_count=142, pool_pending_count=142),
+        database=_FakeDatabase(
+            [],
+            pool_count=0,
+            pool_raw_count=142,
+            pool_pending_count=142,
+            discovery_status_counts={"pending_eval": 4, "evaluated": 2},
+        ),
         soul_engine=_FakeSoulEngine(),
         discovery_engine=_FakeDiscoveryEngine(),
         recommendation_engine=_FakeRecommendationEngine(),
@@ -807,6 +883,8 @@ def test_runtime_status_reports_pool_readiness_counts() -> None:
     assert status["pool_available_count"] == 0
     assert status["pool_raw_count"] == 142
     assert status["pool_pending_count"] == 142
+    assert status["pool_pending_eval_count"] == 4
+    assert status["pool_evaluated_pending_count"] == 2
 
 
 async def test_refresh_controller_prepares_delight_candidates_without_refresh() -> None:
@@ -859,6 +937,8 @@ async def test_periodic_pool_precompute_reports_newly_available_inventory() -> N
             "pool_available_count": 16,
             "pool_raw_count": 16,
             "pool_pending_count": 0,
+            "pool_pending_eval_count": 0,
+            "pool_evaluated_pending_count": 0,
             "last_discovered_count": 21,
             "last_replenished_count": 16,
             "recent_pool_topics": [],
@@ -1114,6 +1194,116 @@ async def test_refresh_controller_requests_discovery_with_backfill_limit() -> No
     # ~80% of LLM evaluation cost to land on candidates that were
     # immediately suppressed by trim_pool_to_target_count.
     assert discovery.calls[0][2] == 7
+
+
+async def test_refresh_plan_uses_candidate_pipeline_when_available() -> None:
+    pipeline = _FakeCandidatePipeline()
+    discovery = _FakeDiscoveryEngine()
+    memory = _FakeMemoryManager()
+    controller = ContinuousRefreshController(
+        memory_manager=memory,
+        database=_FakeDatabase([{"id": 1, "event_type": "view"}], pool_count=0),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=discovery,
+        recommendation_engine=_FakeRecommendationEngine(),
+        discovery_candidate_pipeline=pipeline,
+        pool_target_count=30,
+    )
+
+    result = await controller.force_refresh()
+
+    assert result["refreshed"] is True
+    assert pipeline.enqueued
+    assert pipeline.drains
+    assert discovery.calls == []
+    assert memory.state["last_discovered_count"] == pipeline.enqueued[0][1]
+    assert memory.state["recent_pool_topics"][:1] == ["pipeline-topic"]
+
+
+async def test_refresh_pipeline_does_not_use_stale_topics_when_drain_skips() -> None:
+    class SkipDrainPipeline:
+        def __init__(self) -> None:
+            self.last_admitted_items = [
+                SimpleNamespace(tags=["stale-topic"], source_strategy="search")
+            ]
+
+        async def produce_and_enqueue(self, **kwargs: object) -> int:
+            return 4
+
+        async def drain_pending(self, **kwargs: object) -> dict[str, int]:
+            return {"evaluated": 0, "cached": 0, "rejected": 0}
+
+    memory = _FakeMemoryManager({"recent_pool_topics": []})
+    controller = ContinuousRefreshController(
+        memory_manager=memory,
+        database=_FakeDatabase([{"id": 1, "event_type": "view"}], pool_count=0),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        discovery_candidate_pipeline=SkipDrainPipeline(),
+        pool_target_count=30,
+    )
+
+    await controller.force_refresh()
+
+    assert memory.state["last_discovered_count"] == 4
+    assert memory.state["recent_pool_topics"] == []
+
+
+async def test_refresh_pipeline_counts_only_newly_enqueued_candidates_as_discovered() -> None:
+    class RetryDrainPipeline:
+        last_admitted_items: list[object] = []
+
+        async def produce_and_enqueue(self, **kwargs: object) -> int:
+            return 0
+
+        async def drain_pending(self, **kwargs: object) -> dict[str, int]:
+            return {"evaluated": 5, "cached": 0, "rejected": 0}
+
+    memory = _FakeMemoryManager()
+    controller = ContinuousRefreshController(
+        memory_manager=memory,
+        database=_FakeDatabase([{"id": 1, "event_type": "view"}], pool_count=0),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        discovery_candidate_pipeline=RetryDrainPipeline(),
+        pool_target_count=30,
+    )
+
+    await controller.force_refresh()
+
+    assert memory.state["last_discovered_count"] == 0
+
+
+async def test_refresh_pipeline_updates_topics_for_retry_only_admissions() -> None:
+    class RetryAdmissionPipeline:
+        def __init__(self) -> None:
+            self.last_admitted_items = [
+                SimpleNamespace(tags=["retry-topic"], source_strategy="search")
+            ]
+
+        async def produce_and_enqueue(self, **kwargs: object) -> int:
+            return 0
+
+        async def drain_pending(self, **kwargs: object) -> dict[str, int]:
+            return {"evaluated": 2, "cached": 2, "rejected": 0}
+
+    memory = _FakeMemoryManager({"recent_pool_topics": ["旧主题"]})
+    controller = ContinuousRefreshController(
+        memory_manager=memory,
+        database=_FakeDatabase([{"id": 1, "event_type": "view"}], pool_count=0),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        discovery_candidate_pipeline=RetryAdmissionPipeline(),
+        pool_target_count=30,
+    )
+
+    await controller.force_refresh()
+
+    assert memory.state["last_discovered_count"] == 0
+    assert memory.state["recent_pool_topics"][:1] == ["retry-topic"]
 
 
 async def test_run_refresh_plan_passes_pool_snapshot() -> None:
@@ -1786,6 +1976,42 @@ async def test_force_refresh_skips_when_pool_at_cap() -> None:
     assert discovery.calls == []
 
 
+async def test_drain_discovery_candidates_skips_when_profile_unavailable() -> None:
+    pipeline = _DrainSpyCandidatePipeline()
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase([], pool_count=0),
+        soul_engine=_NoProfileSoulEngine(),  # type: ignore[arg-type]
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        discovery_candidate_pipeline=pipeline,
+        pool_target_count=30,
+    )
+
+    result = await controller.drain_discovery_candidates_once(batch_size=30)
+
+    assert result == {"evaluated": 0, "cached": 0, "rejected": 0}
+    assert pipeline.calls == 0
+
+
+async def test_drain_discovery_candidates_skips_when_profile_lookup_raises() -> None:
+    pipeline = _DrainSpyCandidatePipeline()
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase([], pool_count=0),
+        soul_engine=_RaisingNoProfileSoulEngine(),  # type: ignore[arg-type]
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        discovery_candidate_pipeline=pipeline,
+        pool_target_count=30,
+    )
+
+    result = await controller.drain_discovery_candidates_once(batch_size=30)
+
+    assert result == {"evaluated": 0, "cached": 0, "rejected": 0}
+    assert pipeline.calls == 0
+
+
 async def test_refresh_skips_discovery_when_available_pool_is_at_target_floor() -> None:
     database = _FakeDatabase([], pool_count=50)
     controller = ContinuousRefreshController(
@@ -1835,6 +2061,94 @@ def test_source_target_counts_use_configured_platform_shares() -> None:
     }
 
 
+def test_source_requested_count_is_bounded_by_global_available_deficit() -> None:
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase(
+            [],
+            pool_count=98,
+            source_available_counts={"bilibili": 10},
+            source_raw_counts={"bilibili": 10},
+        ),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        pool_target_count=100,
+        pool_source_shares={"bilibili": 1},
+    )
+
+    assert controller._source_requested_count("bilibili") == 2
+
+
+async def test_non_bili_producer_not_called_when_global_pool_is_full() -> None:
+    xhs = _FakeXhsProducer()
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase(
+            [],
+            pool_count=100,
+            source_available_counts={"xiaohongshu": 0},
+            source_raw_counts={"xiaohongshu": 0},
+        ),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        xhs_producer=xhs,
+        pool_target_count=100,
+        pool_source_shares={"bilibili": 8, "xiaohongshu": 1},
+    )
+
+    await controller._tick_xhs_producer()
+
+    assert xhs.calls == []
+
+
+async def test_douyin_producer_not_called_when_global_pool_is_full() -> None:
+    douyin = _FakeDouyinProducer()
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase(
+            [],
+            pool_count=100,
+            source_available_counts={"douyin": 0},
+            source_raw_counts={"douyin": 0},
+        ),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        douyin_producer=douyin,
+        pool_target_count=100,
+        pool_source_shares={"bilibili": 8, "douyin": 1},
+    )
+
+    await controller._tick_douyin_producer()
+
+    assert douyin.calls == []
+
+
+async def test_youtube_producer_not_called_when_global_pool_is_full() -> None:
+    youtube = _FakeYoutubeProducer()
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase(
+            [],
+            pool_count=100,
+            source_available_counts={"youtube": 0},
+            source_raw_counts={"youtube": 0},
+        ),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        youtube_producer=youtube,
+        pool_target_count=100,
+        pool_source_shares={"bilibili": 8, "youtube": 1},
+    )
+
+    await controller._tick_youtube_producer()
+
+    assert youtube.calls == []
+
+
 def test_source_replenishment_plan_maps_bilibili_deficit_to_bilibili_strategies() -> None:
     controller = ContinuousRefreshController(
         memory_manager=_FakeMemoryManager(),
@@ -1854,7 +2168,7 @@ def test_source_replenishment_plan_maps_bilibili_deficit_to_bilibili_strategies(
     )
 
     assert controller._build_source_replenishment_plan() == [
-        (["search", "related_chain", "trending", "explore"], 300)
+        (["search", "related_chain", "trending", "explore"], 180)
     ]
 
 
@@ -2672,7 +2986,13 @@ async def test_refresh_publishes_pool_status_when_count_changes() -> None:
 
 async def test_refresh_pool_status_includes_readiness_counts() -> None:
     event_hub = _FakeEventHub()
-    database = _FakeDatabase([], pool_count=0, pool_raw_count=142, pool_pending_count=142)
+    database = _FakeDatabase(
+        [],
+        pool_count=0,
+        pool_raw_count=142,
+        pool_pending_count=142,
+        discovery_status_counts={"pending_eval": 1, "evaluating": 1, "evaluated": 3},
+    )
 
     controller = ContinuousRefreshController(
         memory_manager=_FakeMemoryManager(),
@@ -2693,6 +3013,8 @@ async def test_refresh_pool_status_includes_readiness_counts() -> None:
             "pool_available_count": 0,
             "pool_raw_count": 142,
             "pool_pending_count": 142,
+            "pool_pending_eval_count": 2,
+            "pool_evaluated_pending_count": 3,
             "pool_target_count": 30,
         }
     ]

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from openbiliclaw.discovery.engine import DiscoveredContent
 from openbiliclaw.runtime.youtube_producer import (
     YoutubeDiscoveryProducer,
     YoutubeStrategyRunResult,
@@ -82,6 +83,24 @@ class _SometimesFailingDiscover:
         )
 
 
+class _FakeCandidatePipeline:
+    def __init__(self, *, pool_full: bool = False) -> None:
+        self._pool_full = pool_full
+        self.enqueued: list[tuple[list[object], str]] = []
+        self.drains: list[int] = []
+
+    def pool_full(self) -> bool:
+        return self._pool_full
+
+    def enqueue_candidates(self, items: list[object], *, source_context: str = "") -> int:
+        self.enqueued.append((list(items), source_context))
+        return len(items)
+
+    async def drain_pending(self, *, profile: object, batch_size: int = 30) -> dict[str, int]:
+        self.drains.append(batch_size)
+        return {"evaluated": batch_size, "cached": 2, "rejected": 0}
+
+
 async def test_youtube_producer_produces_when_due(db: Database) -> None:
     discover = _Discover([])
     producer = YoutubeDiscoveryProducer(
@@ -110,6 +129,101 @@ async def test_youtube_producer_produces_when_due(db: Database) -> None:
     assert producer.consumed_today("yt_search") == 3
     assert producer.consumed_today("yt_trending") == 5
     assert producer.consumed_today("yt_channel") == 2
+
+
+async def test_youtube_producer_enqueues_raw_candidates_when_pipeline_is_available(
+    db: Database,
+) -> None:
+    discover = _Discover([])
+    pipeline = _FakeCandidatePipeline()
+    producer = YoutubeDiscoveryProducer(
+        database=db,
+        soul_engine=_Soul(),
+        discover=discover,
+        enabled=True,
+        min_interval_minutes=0,
+        daily_search_budget=2,
+        strategies=("yt_search",),
+        candidate_pipeline=pipeline,
+    )
+
+    result = await producer.produce_if_due(limit=4)
+
+    assert discover.calls == [("yt_search", 2, 4)]
+    assert len(pipeline.enqueued) == 1
+    assert pipeline.enqueued[0][1] == "yt_search"
+    assert len(pipeline.enqueued[0][0]) == 2
+    assert pipeline.drains == [4]
+    assert result["discovered"] == 2
+    assert result["enqueued"] == 2
+    assert result["cached"] == 2
+
+
+async def test_youtube_producer_stamps_strategy_score_threshold_before_enqueue(
+    db: Database,
+) -> None:
+    pipeline = _FakeCandidatePipeline()
+
+    async def discover(
+        profile: Any,
+        *,
+        strategy: str,
+        unit_budget: int,
+        result_limit: int,
+    ) -> YoutubeStrategyRunResult:
+        return YoutubeStrategyRunResult(
+            items=[
+                DiscoveredContent(
+                    content_id="yt-channel-1",
+                    title="Channel",
+                    source_platform="youtube",
+                    source_strategy=strategy,
+                )
+            ],
+            units_used=unit_budget,
+            source_counts={strategy: 1},
+        )
+
+    producer = YoutubeDiscoveryProducer(
+        database=db,
+        soul_engine=_Soul(),
+        discover=discover,
+        enabled=True,
+        min_interval_minutes=0,
+        daily_channel_budget=1,
+        strategies=("yt_channel",),
+        candidate_pipeline=pipeline,
+    )
+
+    await producer.produce_if_due(limit=4)
+
+    assert pipeline.enqueued
+    assert pipeline.enqueued[0][0][0].score_threshold == 0.65
+
+
+async def test_youtube_producer_skips_discovery_when_pipeline_pool_is_full(
+    db: Database,
+) -> None:
+    discover = _Discover([])
+    pipeline = _FakeCandidatePipeline(pool_full=True)
+    producer = YoutubeDiscoveryProducer(
+        database=db,
+        soul_engine=_Soul(),
+        discover=discover,
+        enabled=True,
+        min_interval_minutes=0,
+        daily_search_budget=3,
+        daily_trending_budget=5,
+        daily_channel_budget=2,
+        candidate_pipeline=pipeline,
+    )
+
+    result = await producer.produce_if_due(limit=4)
+
+    assert result["reason"] == "pool_full"
+    assert discover.calls == []
+    assert pipeline.enqueued == []
+    assert pipeline.drains == []
 
 
 async def test_youtube_producer_throttles_recent_run(db: Database) -> None:

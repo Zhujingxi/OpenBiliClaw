@@ -33,13 +33,13 @@
 | 画像可编辑（编辑模式） | ✅ | 画像页新增「编辑画像」开关：进入后由未截断的 `GET /api/profile/edit-state` 驱动，可增删核心特质 / 深层需求 / 价值观 / 内在驱动 / 认知风格 / 常看 UP 等 chip、增删喜欢 / 不喜欢领域、改写人格素描 / 人生阶段 / 当前阶段等长文、拖动滑杆调探索开放度 / 质量敏感度 / 幽默偏好 / 深度偏好等标量；文本与标量固定项显示「AI 想更新此项」漂移建议，每个改过的字段可「恢复 AI 建议」。每个控件 POST 一次 `/api/profile/edit`（确定性、抗画像重建；chip 增删即时生效，长文与滑杆点「保存」生效）。插件 side panel 进入编辑时会切到 `is-profile-editing` 页面态，强制只读画像卡片退出布局、编辑面板占据原位置；移动 Web（`/m`）与桌面 Web（`/web`）同样是替换式编辑态，三端行为一致 |
 | 多源行为采集（MVP） | ✅ | content script 拆成「平台无关 kernel + 平台适配器」，新增小红书适配器。manifest 覆盖 `*.xiaohongshu.com`，事件携带 `source_platform` 字段；MVP 仅采 snapshot / click / scroll / search，like/collect 延后 |
 | 视频页停留时长采集 | ✅ | v0.3.x event-satisfaction：`src/content/video-dwell-tracker.ts` 用纯依赖注入的方式追踪 video page session，kernel 在 `pushState` / `replaceState` / `popstate` / `pagehide` 触发时 flush 一个 click 事件，metadata 携带 `watch_seconds` / `video_duration_seconds` / `dwell_source="video_page_exit"`，供后端 `classify_event_satisfaction` 区分 meaningful_dwell vs quick_exit。service worker 透传 metadata，不会丢字段 |
-| xhs token 嗅探（MAIN world） | ✅ | `src/main/xhs-token-sniffer.ts` 以 `world: "MAIN"`、`run_at: "document_start"` 注入 xhs 页面，劫持 `window.fetch` / `XMLHttpRequest` 扫描 xhs 自家 API 响应里的 `(note_id, xsec_token)` 对子，通过 `postMessage` 桥接到 isolated world 再 `/api/sources/xhs/tokens` 回填——解决搜索页永不带 token 导致点击命中 300031 登录墙的问题 |
+| xhs token 嗅探（MAIN world） | ✅ | `src/main/xhs-token-sniffer.ts` 以 `world: "MAIN"`、`run_at: "document_start"` 注入 xhs 页面，劫持 `window.fetch` / `XMLHttpRequest` 扫描 xhs 自家 API 响应里的 `(note_id, xsec_token)` 对子，通过 `postMessage` 桥接到 isolated world 再 `/api/sources/xhs/tokens` 回填到 `content_cache` 与 `discovery_candidates`——解决搜索页永不带 token 导致点击命中 300031 登录墙的问题 |
 | xhs 初始化画像任务 | ✅ | 后端可派发 `bootstrap_profile` 任务；`/api/sources/xhs/next-task` 会先把任务原子标记为 `in_progress` 再返回给扩展，避免多个浏览器实例重复领取同一个前台拉取任务；插件先打开小红书 `/explore`，滚动任务会以前台 tab 点击页面“我”入口进入 profile，再从 profile 页 state / DOM 解析收藏、点赞和小红书页面内显式浏览记录信号；显式启用 `max_scroll_rounds` 时会有限滚动，并用 `status="partial"` 分批回传给 `/api/sources/xhs/task-result` |
 | 抖音初始化画像任务 | ✅ | 后端可派发 `bootstrap_profile` 任务；插件依次访问抖音发布 / 收藏 / 喜欢 / 关注 scope，content script 结合 DOM、MAIN-world fetch tap 与 API harvester 采集条目，并用 `partial` 分批回传给 `/api/sources/dy/task-result` |
 | 扩展任务并发领取保护 | ✅ | XHS / 抖音 / YouTube 的 `/next-task` claim 使用短生命周期 SQLite 连接执行 `BEGIN IMMEDIATE`，避免多个 FastAPI threadpool 请求共享同一 connection 时出现嵌套事务错误 |
-| 抖音搜索任务 | ✅ | 后端可派发 `search` 任务；插件用后台 tab 在已登录抖音会话中执行关键词搜索，MAIN-world search bridge 调用页面 `byted_acrawler.frontierSign()` 签名搜索 API，回传 `dy_search` 候选供 CLI smoke 和正式 `dy-plugin-search` discovery 使用；单关键词任务 timeout 为 180 秒 |
-| 抖音热点任务 | ✅ | 后端可派发 `hot` 任务；插件用后台 tab 打开 `/hot/{sentence_id}`，从跳转后的 `/video/{aweme_id}` 取 seed aweme，并通过 MAIN-world related bridge 签名 `/aweme/v1/web/aweme/related/`，回传 `dy_hot` 候选供 `dy-plugin-hot-related` discovery 使用 |
-| 抖音首页推荐流任务 | ✅ | 后端可派发 `feed` 任务；插件用后台 tab 在已登录抖音首页通过 MAIN-world feed bridge 签名 `/aweme/v1/web/tab/feed/`，回传 `dy_feed` 候选供 `dy-plugin-feed` discovery 使用 |
+| 抖音搜索任务 | ✅ | 后端可派发 `search` 任务；插件用后台 tab 在已登录抖音会话中执行关键词搜索，MAIN-world search bridge 调用页面 `byted_acrawler.frontierSign()` 签名搜索 API，回传 `dy_search` 候选供 CLI smoke 和正式 `dy-plugin-search` discovery 使用；runtime 会把候选写入统一待评估池；单关键词任务 timeout 为 180 秒 |
+| 抖音热点任务 | ✅ | 后端可派发 `hot` 任务；插件用后台 tab 打开 `/hot/{sentence_id}`，从跳转后的 `/video/{aweme_id}` 取 seed aweme，并通过 MAIN-world related bridge 签名 `/aweme/v1/web/aweme/related/`，回传 `dy_hot` 候选供 `dy-plugin-hot-related` discovery 使用；runtime 会把候选写入统一待评估池 |
+| 抖音首页推荐流任务 | ✅ | 后端可派发 `feed` 任务；插件用后台 tab 在已登录抖音首页通过 MAIN-world feed bridge 签名 `/aweme/v1/web/tab/feed/`，回传 `dy_feed` 候选供 `dy-plugin-feed` discovery 使用；runtime 会把候选写入统一待评估池 |
 | YouTube 初始化画像任务 | ✅ | 后端可派发 `bootstrap_profile` 任务；插件依次访问 `/feed/history`、`/feed/channels`、`/playlist?list=LL`，从 DOM 读取观看历史 / 订阅 / 点赞并用 `partial` 分批回传给 `/api/sources/yt/task-result` |
 | 后端地址与端口可配置 | ✅ | 设置页「后端地址」接受裸 IPv4 / 主机名，「后端端口」仅接受 `1-65535` 的完整十进制整数；二者一起保存到 `chrome.storage.local`，popup / service worker / 任务派发 / cookie 同步 / 调试中继全部经 `apiUrl()`/`wsUrl()` 解析当前 origin；endpoint 变更后 service worker 通过 `chrome.storage.onChanged` 立即重连 `runtime-stream`，无需重载插件；Chrome Web Store / AMO 发布包默认只声明 `127.0.0.1` / `localhost` 后端 host 权限，局域网 / 远程后端需要带对应 host 权限的开发者构建或后续可选授权 |
 | 后台 LLM 暂停配置 | ✅ | 设置页调度区提供「停止后台 LLM 请求」「关闭浏览器后停止后台」和断开宽限秒数，推荐页不再放运行时开关；后端通过 `/api/runtime-stream` presence 判断插件是否在线，浏览器 idle disconnect 会被 receive-side detector 及时清掉 |
@@ -178,6 +178,10 @@ dispatcher 会把这两个字段透传给 content script；如果 `scroll_wait_m
 
 这条链路仍不直接调用小红书 API、不读取 cookie、不接触 Chrome 浏览器历史。这里的 `xhs_history` 指“小红书网页自己明确暴露的浏览记录 / 足迹 state”，不会把普通 `/explore` 推荐流当成浏览记录；如果小红书网页没有暴露稳定入口，就返回 0 条并让初始化继续。
 
+小红书 discovery notes 不再由 API 直接写入 `content_cache`。被动 URL / note metadata、search / creator 任务结果和 bootstrap 中可作为内容候选的 notes 会先写入后端 `discovery_candidates` 待评估池；后端随后调用共享 discovery evaluator 混合评估各平台候选，达标后才 admission 到推荐池。这样 XHS 与 B 站、抖音、YouTube 的“用户会不会喜欢”判断处于同一环节。
+
+`/api/sources/xhs/observed-urls` 的返回里，`accepted` 只表示本次接收的有效小红书 URL 数，`enqueued` 表示随请求携带的 note metadata 中有多少条进入 `discovery_candidates`。入池后的喜好评估和 admission 是异步完成的，插件端不应把 `accepted` 理解成“已经可推荐”。
+
 #### v0.3.10 self_info 全路径捕获
 
 **任意** XHS 页面只要登录,`window.__INITIAL_STATE__.user.userInfo` 就带 self user_id + nickname。v0.3.10 起把抽取从只在 bootstrap_profile 任务里发生,扩到三条入池路径全覆盖:
@@ -243,7 +247,7 @@ CLI 侧分两层使用这条链路：
 }
 ```
 
-dispatcher 等待首页、搜索页和热点页 ready 时会同时处理两种情况：正常的 `chrome.tabs.onUpdated(status="complete")`，以及抖音 SPA 已经跳到目标页但没有再发完整 `complete` 事件的 fallback timer，避免任务卡住直到 `task_timeout`。search 任务按关键词数计算超时窗口，单关键词至少 180 秒，覆盖首页打开、搜索页跳转、MAIN-world acrawler 签名 API 和 DOM 兜底解析的真实耗时；后端 `DouyinPluginSearchClient` 默认也等 180 秒，避免插件刚开始执行 search bridge 就被后端清成 stale。`src/content/douyin.ts` 会尝试触发页面搜索 UI、监听页面自身搜索响应，并通过 `src/main/dy-fetch-tap.ts` 的 MAIN-world search API bridge 兜底拉取 `/aweme/v1/web/general/search/single/`。这个 bridge 会补齐浏览器参数，并调用页面 `byted_acrawler.frontierSign()` 生成 `X-Bogus` 后用 `credentials: "include"` 请求，避免简化直连接口命中 `antispam_check / hit_shark` 软空。热点任务复用同一 MAIN-world 签名能力：后台打开 `/hot/{sentence_id}` 后，content script 从当前 `/video/{aweme_id}` 解析 seed aweme，再请求 `/aweme/v1/web/aweme/related/` 拉相关视频；dispatcher 会按任务总目标数累计，达到目标后不再继续打开后续 hot seed。feed 任务同样复用 MAIN-world 签名能力，在后台首页请求 `/aweme/v1/web/tab/feed/` 拉推荐流。搜索结果以 `scope="dy_search"`、热点结果以 `scope="dy_hot"`、首页推荐结果以 `scope="dy_feed"` 回写到 `dy_tasks.result_json`，不会转成初始化画像事件；`DouyinPluginSearchClient` 会把这些候选映射成 aweme-like JSON，分别以 `dy-plugin-search` / `dy-plugin-hot-related` / `dy-plugin-feed` 进入 discovery。
+dispatcher 等待首页、搜索页和热点页 ready 时会同时处理两种情况：正常的 `chrome.tabs.onUpdated(status="complete")`，以及抖音 SPA 已经跳到目标页但没有再发完整 `complete` 事件的 fallback timer，避免任务卡住直到 `task_timeout`。search 任务按关键词数计算超时窗口，单关键词至少 180 秒，覆盖首页打开、搜索页跳转、MAIN-world acrawler 签名 API 和 DOM 兜底解析的真实耗时；后端 `DouyinPluginSearchClient` 默认也等 180 秒，避免插件刚开始执行 search bridge 就被后端清成 stale。`src/content/douyin.ts` 会尝试触发页面搜索 UI、监听页面自身搜索响应，并通过 `src/main/dy-fetch-tap.ts` 的 MAIN-world search API bridge 兜底拉取 `/aweme/v1/web/general/search/single/`。这个 bridge 会补齐浏览器参数，并调用页面 `byted_acrawler.frontierSign()` 生成 `X-Bogus` 后用 `credentials: "include"` 请求，避免简化直连接口命中 `antispam_check / hit_shark` 软空。热点任务复用同一 MAIN-world 签名能力：后台打开 `/hot/{sentence_id}` 后，content script 从当前 `/video/{aweme_id}` 解析 seed aweme，再请求 `/aweme/v1/web/aweme/related/` 拉相关视频；dispatcher 会按任务总目标数累计，达到目标后不再继续打开后续 hot seed。feed 任务同样复用 MAIN-world 签名能力，在后台首页请求 `/aweme/v1/web/tab/feed/` 拉推荐流。搜索结果以 `scope="dy_search"`、热点结果以 `scope="dy_hot"`、首页推荐结果以 `scope="dy_feed"` 回写到 `dy_tasks.result_json`，不会转成初始化画像事件；`DouyinPluginSearchClient` 会把这些候选映射成 aweme-like JSON，分别以 `dy-plugin-search` / `dy-plugin-hot-related` / `dy-plugin-feed` 进入 `discovery_candidates` 待评估池，再由后端共享 evaluator 判定是否进入推荐池。
 
 CLI 入口：
 
@@ -293,7 +297,7 @@ CLI 入口：
 - 如果某条候选的预生成文案还没补好，卡片会先只展示标题、封面和 UP 信息，不会再显示统一占位话题或默认推荐理由
 - 后台补货继续异步进行，不会阻塞 popup 立刻换片
 - pool 状态摘要现在会区分“正在补货”“这轮找到了内容但可换库存没变”“刚补进 N 条”，不再把 refresh 进行中和上一轮净新增为 0 混成同一句
-- 插件 side panel、移动 Web 和桌面 Web 统一把 `pool_available_count` 当作真实可换数量；当 `pool_available_count=0` 但 `pool_pending_count>0` 时显示“找到 N 条素材，正在整理成可换内容”，不会把待分类 / 待文案 / 不可打开的素材数写成“可换”。
+- 插件 side panel、移动 Web 和桌面 Web 统一把 `pool_available_count` 当作真实可换数量；当 `pool_available_count=0` 但 `pool_pending_count>0` 时显示“找到 N 条素材，正在整理成可换内容”，不会把待评估 / 待分类 / 待文案 / 不可打开的素材数写成“可换”。`pool_pending_eval_count` 和 `pool_evaluated_pending_count` 只作为诊断与整理状态使用。
 - 推荐 tab 头部现已进一步压缩成双层内容型入口：第一层只保留 `For You`、标题和 `换一批`，第二层把池子状态收成三枚紧凑 chips，让第一张推荐卡更早进入首屏
 - 推荐 tab 现在还会在头部下方展示独立的“惊喜推荐”首屏卡位：popup 启动时会主动读取 `/api/delight/pending`，runtime stream 收到新的 `delight.candidate` 也会立刻刷新这张卡
 - 推荐 tab 会展示候选池摘要：

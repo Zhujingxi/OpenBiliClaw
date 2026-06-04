@@ -15,6 +15,7 @@ from openbiliclaw.discovery.engine import (
     DiscoveryConcurrencyController,
     DiscoveryStrategy,
     SupportsStructuredTask,
+    discovery_raw_candidate_mode_enabled,
     trim_candidates_for_llm,
 )
 from openbiliclaw.discovery.strategies._utils import (
@@ -86,8 +87,7 @@ class SearchStrategy(DiscoveryStrategy):
                 "cooldown_remaining_seconds": int(cooldown_remaining),
             }
             logger.info(
-                "Search: Bilibili search cooldown active (%.0fs left); "
-                "skipping query generation",
+                "Search: Bilibili search cooldown active (%.0fs left); skipping query generation",
                 cooldown_remaining,
             )
             return []
@@ -177,7 +177,7 @@ class SearchStrategy(DiscoveryStrategy):
             len(candidates),
         )
 
-        if not self.llm_evaluation:
+        if not self.llm_evaluation or discovery_raw_candidate_mode_enabled():
             return candidates[:limit]
 
         evaluator = ContentDiscoveryEngine(

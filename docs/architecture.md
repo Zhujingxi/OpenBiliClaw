@@ -47,8 +47,8 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 
 ### Content Discovery (`discovery/`)
 - 多策略内容发现（B 站 search · trending · related_chain · explore + 小红书 `xiaohongshu` + 抖音 `douyin` + YouTube `yt_search` / `yt_trending` / `yt_channel`），按 `runtime.source_policy` 生成的平台有效配比补池；默认保存的 share 为 B 站 / 小红书 / 抖音 / YouTube = 8 / 1 / 1 / 1，但默认只启用 B 站，关闭的平台不会占候选池 quota。B 站仍在主 refresh 计划内并行 fan-out；XHS / 抖音 / YouTube 低于可换 quota 时分别交给独立 producer；补货请求还会受 raw-material ceiling headroom 约束，避免不可服务库存已满时继续消耗 LLM / discovery。
-- 内容评估（基于用户 Soul，LLM 批量打分）；eval-batch 会读取近期 negative exemplars，按话术 / 商业意图 / 标题结构压低相似候选，评分缓存随最新事件 id 版本化
-- 候选分层、去重和缓存写入；写入时 `pool_status='suppressed'` 的旧候选在重新发现时自动复活成 `'fresh'`
+- 统一待评估池：各来源 raw candidates 先持久化到 `discovery_candidates(status='pending_eval')`；`DiscoveryCandidatePipeline` 按来源混合 claim batch，再调用 `ContentDiscoveryEngine.evaluate_content_batch()` 结合 Soul 画像、来源上下文和近期 negative exemplars 做统一 LLM 打分。
+- 候选分层、去重和缓存写入：达标候选通过 `cache_evaluated_results()` admission 到正式推荐池 `content_cache`；写入时 `pool_status='suppressed'` 的旧候选在重新发现时自动复活成 `'fresh'`。`content_cache` 是 recommendation serve 的唯一正式池，`discovery_candidates` 是 discovery 阶段的待评估 / 已评估队列。
 - v0.3.0+ 多样性栈：trending 按 rid 交错 / explore 按 domain 交错 / `_compress_topic_repeats` 单次压缩 / `trim_topic_group_overflow` 跨源跨轮配额（任意 topic_group ≤ 池子 10%）/ deficit-source 合并 + 并行 fan-out
 
 ### Sources (`sources/`) — 多源适配层 (v0.3.0+)
@@ -78,8 +78,8 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 - 降级模式启动：生产 `create_app()` 遇到 LLM registry 配置错误时保留 `/api/health`、`/api/config`、`/api/runtime-status` 和 `/api/runtime-stream`，让 popup 设置页仍能保存修复配置；其他 API 返回 503，避免半初始化 runtime 继续跑推荐/发现链路
 - 配置热重载：`RuntimeContext` 重建 registry / service / engine 时会从 `[llm.soul]` / `[llm.discovery]` / `[llm.recommendation]` / `[llm.evaluation]` 注入同一份 module override；热重载后的正向兴趣和避雷 speculator tick 都作为 detached task 注册到 `BackgroundTaskRegistry`，分别读取 `probe_feedback_history` / `avoidance_probe_feedback_history`，不阻塞 `/api/config` 响应
 - `AutoUpdateService` — 后端自动更新只查询 GitHub `/tags` 并过滤 `backend-v*`（兼容 legacy `v*` / 裸 semver），明确忽略 `extension-v*`；当前 GitHub Releases 由扩展 artifact 占用，不能用 `/releases/latest` 判断后端源码是否最新
-- `ContinuousRefreshController` — 后台定时刷新候选池；按平台族的前端可换配额评估 deficit，B 站缺货合并到一次 discover() 并行 fan-out，小红书缺口交给 xhs producer / 扩展任务链；抖音缺口交给 runtime `DouyinDiscoveryProducer`，通过 `DouyinDiscoveryService(cache=True)` 复用 search / hot / feed 后台插件签名链路补池；YouTube 缺口交给 `YoutubeDiscoveryProducer` 后端直连补池，主 refresh replenishment plan 不再 inline 调度 `yt_*`。cap enforcement 使用独立 raw-material ceiling（默认 `max(target*2, target+120)`）修剪 raw 库存，而不是把 raw 行数压成前端可换目标。
-- `/api/runtime-status` / `runtime-stream` — 对插件、移动 Web 和桌面 Web 发布同一套候选池库存口径：`pool_available_count` 只表示当前可立即被 `serve()` 消费的内容，`pool_raw_count` 表示基础 fresh 素材，`pool_pending_count` 表示已有素材但仍缺文案、分类、可跳转链接或仍在近期已看窗口内。前端只把 available 显示为“可换”，pending 显示为“正在整理”；后台补池的 source deficit 也使用 available-by-source，而 raw trim / headroom 使用 all-raw-material by-source。
+- `ContinuousRefreshController` — 后台定时刷新候选池；按平台族的前端可换配额评估 deficit，B 站缺货合并到一次 raw candidate production 并行 fan-out，小红书缺口交给 xhs producer / 扩展任务链；抖音缺口交给 runtime `DouyinDiscoveryProducer`，通过 `DouyinDiscoveryService(cache=False, evaluate=False)` 复用 search / hot / feed 后台插件签名链路补 raw candidates；YouTube 缺口交给 `YoutubeDiscoveryProducer` 后端直连补 raw candidates，主 refresh replenishment plan 不再 inline 调度 `yt_*`。cap enforcement 使用独立 raw-material ceiling（默认 `max(target*2, target+120)`）修剪 raw 库存，而不是把 raw 行数压成前端可换目标。
+- `/api/runtime-status` / `runtime-stream` — 对插件、移动 Web 和桌面 Web 发布同一套候选池库存口径：`pool_available_count` 只表示当前可立即被 `serve()` 消费的内容，`pool_raw_count` 表示基础 fresh 素材加待评估 raw candidates，`pool_pending_count` 表示已有素材但仍缺评估、文案、分类、可跳转链接或仍在近期已看窗口内。`pool_pending_eval_count` / `pool_evaluated_pending_count` 分别拆出待 LLM 评估和已评估待 admission 的数量。前端只把 available 显示为“可换”，pending 显示为“正在整理”；后台补池的 source deficit 也使用 available-by-source，而 raw trim / headroom 使用 all-raw-material by-source。
 - `_publish_probe_if_available` — proactive push 循环中的探针仲裁器；从正向兴趣和避雷探针池中每轮最多选一条，正向探针事件携带 `probe_mode/challenge`，普通 `near` 和挑战探针使用独立 active 额度，只有推送到订阅者后才记录 domain / axis / distance history
 - `background_llm_work_allowed()` — 共享 gate predicate；`scheduler.enabled=false` 会暂停 daemon-owned 后台 LLM / embedding 工作，`scheduler.pause_on_extension_disconnect=true` 时还要求浏览器插件 presence 在线或仍处于断开宽限窗口。该 gate 覆盖 refresh、pool precompute、soul pipeline、xhs/dy/youtube producer、proactive push、低频 account sync、startup one-shot 和 OpenClaw direct bootstrap
 - `_enforce_pool_cap` 每 tick 跑 `trim_topic_group_overflow` + under-quota suppressed 候选复活 + 必要时按 share quotas 修剪过额源
@@ -117,9 +117,9 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 
 ### Douyin Direct Discovery
 
-抖音 steady-state 内容发现走 opt-in 路径：`OPENBILICLAW_DOUYIN_COOKIE` 可显式覆盖，默认则复用浏览器扩展同步到 `data/douyin_cookie.json` 的 douyin.com Cookie。后端 `DouyinDirectClient` 仍保留 direct-cookie 诊断能力；公开 discovery 子来源收敛为 `search` / `hot` / `feed`，并优先走 `DouyinPluginSearchClient` 入队 `dy_tasks(type="search"|"hot"|"feed")`。search 让扩展在登录浏览器的后台 tab 中打开搜索页，并在 MAIN world 调用页面 `byted_acrawler.frontierSign()` 签名搜索 API；hot 先取 hot board 的 `sentence_id`，扩展后台打开 `/hot/{sentence_id}`，从跳转后的 `/video/{aweme_id}` 解析 seed，再签名 `/aweme/v1/web/aweme/related/` 拉相关视频；feed 在后台首页签名 `/aweme/v1/web/tab/feed/` 拉首页推荐流。`DouyinDiscoveryService` 是这条链路的复用边界：默认把 `DouyinDirectStrategy` 注册到现有 `ContentDiscoveryEngine`，让候选继续走统一评估、去重、缓存和推荐；调试时也可以由 `openbiliclaw discover-douyin --no-cache --no-evaluate` 直接跑 strategy 预览召回。这样初始化强账号信号与后台补池请求分离，且 search / hot / feed 都能复用真实登录浏览器但不会抢用户焦点。
+抖音 steady-state 内容发现走 opt-in 路径：`OPENBILICLAW_DOUYIN_COOKIE` 可显式覆盖，默认则复用浏览器扩展同步到 `data/douyin_cookie.json` 的 douyin.com Cookie。后端 `DouyinDirectClient` 仍保留 direct-cookie 诊断能力；公开 discovery 子来源收敛为 `search` / `hot` / `feed`，并优先走 `DouyinPluginSearchClient` 入队 `dy_tasks(type="search"|"hot"|"feed")`。search 让扩展在登录浏览器的后台 tab 中打开搜索页，并在 MAIN world 调用页面 `byted_acrawler.frontierSign()` 签名搜索 API；hot 先取 hot board 的 `sentence_id`，扩展后台打开 `/hot/{sentence_id}`，从跳转后的 `/video/{aweme_id}` 解析 seed，再签名 `/aweme/v1/web/aweme/related/` 拉相关视频；feed 在后台首页签名 `/aweme/v1/web/tab/feed/` 拉首页推荐流。`DouyinDiscoveryService` 是这条链路的复用边界：runtime 正常路径拉 raw candidates 后写入 `discovery_candidates`，再由共享 evaluator 入正式推荐池；调试时也可以由 `openbiliclaw discover-douyin --no-cache --no-evaluate` 直接跑 strategy 预览召回。这样初始化强账号信号与后台补池请求分离，且 search / hot / feed 都能复用真实登录浏览器但不会抢用户焦点。
 
-`openbiliclaw search-douyin` 保留为同一后台插件签名搜索链路的独立 smoke：结果只保存在任务结果里用于诊断，不进入 `content_cache`，也不参与画像重建；正式 `discover-douyin --source search` / `discover --source douyin` 会把这些候选映射为 aweme-like JSON，以 `dy-plugin-search` 进入 discovery pool。`discover-douyin --source hot` / `--source feed` 复用同一后台任务桥但没有单独 smoke 命令，候选分别以 `dy-plugin-hot-related` / `dy-plugin-feed` 进入 discovery pool。
+`openbiliclaw search-douyin` 保留为同一后台插件签名搜索链路的独立 smoke：结果只保存在任务结果里用于诊断，不进入 `content_cache`，也不参与画像重建；正式 runtime discovery 会把这些候选映射为 aweme-like JSON，以 `dy-plugin-search` / `dy-plugin-hot-related` / `dy-plugin-feed` 进入 `discovery_candidates` 待评估池。`discover-douyin --source hot` / `--source feed` 复用同一后台任务桥但没有单独 smoke 命令。
 
 ### LLM Providers (`llm/`)
 - 统一的多模型接口（OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter）
@@ -135,7 +135,8 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 - 冷备份、完整性检查与显式修复
 - 候选质量信号持久化与数据迁移；`events` 行写入 `inferred_satisfaction` / `satisfaction_reason`，支持 `query_events(satisfaction_modes=...)`
 - v0.3.1 `get_pool_candidates` 用 `ROW_NUMBER() OVER (PARTITION BY topic_group)` 把每个 topic_group 在候选窗口里限到 ≤3 条，保证长尾 group 真正进得到候选窗口
-- `count_pool_available_candidates_by_source()` 与 `count_pool_candidates()` 保持前端可见口径一致；`count_pool_raw_material_by_source()` 统计 fresh / 非 dislike / 未推荐 / 未看过的 raw material（含 XHS pending），供 runtime raw ceiling headroom 和 trim 使用。
+- `discovery_candidates` 持久化所有来源 raw candidates 的 lifecycle：`pending_eval`、`evaluating`、`evaluated`、`cached`、`rejected_low_score`、`rejected_duplicate`、`rejected_cache_admission`、`rejected_recently_viewed`、`rejected_franchise_quota`、`failed_eval`。
+- `count_pool_available_candidates_by_source()` 与 `count_pool_candidates()` 保持前端可见口径一致；`count_pool_raw_material_by_source()` 统计 fresh / 非 dislike / 未推荐 / 未看过的 `content_cache` raw material，并合并 `discovery_candidates` 中待评估 / 已评估未缓存的 raw material，供 runtime raw ceiling headroom 和 trim 使用。
 - `chat_turns` 持久化 side panel durable chat turn，字段包含 `turn_id/session/scope/subject/message/status/reply/error/created_at/updated_at`；`scope` 支持 `chat`、`delight`、`probe` 和 `avoidance_probe`
 - `auth_state(key, value)` 单行表持久化局域网密码门禁的撤销纪元 `auth_epoch` 与稳定密码指纹 `password_fingerprint`（非会话表，仅全局计数 + 指纹）；跨进程事务原子自增，验签实时读
 

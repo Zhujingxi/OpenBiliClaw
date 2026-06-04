@@ -4,8 +4,15 @@
 
 ---
 
-## v0.3.100: 外站补池预算与 B 站统一（2026-06-03）
+## v0.3.100: 统一 discovery 待评估池与外站补池预算（2026-06-04）
 
+- 新增 `discovery_candidates` 持久化待评估池和 `DiscoveryCandidatePipeline`：B 站、小红书、抖音、YouTube raw candidates 先统一进入 `pending_eval`，再由共享 evaluator 混源 batch 评估并 admission 到 `content_cache`。来源差异只保留为取数方式、配额和 prompt 上下文，不再各走一套喜好判断流程。
+- B 站主 refresh 改用 `ContentDiscoveryEngine.produce_candidates()` 拉 raw candidates；抖音 / YouTube producer 注入 candidate pipeline 后改为 enqueue + drain；小红书被动 notes 和 task-result notes 不再直接写 `content_cache`，而是先进入 `discovery_candidates`，token 回填同时覆盖待评估表和正式池。
+- runtime status 新增 `pool_pending_eval_count` 与 `pool_evaluated_pending_count`，`pool_raw_count` / `pool_pending_count` 合并统计待评估 raw candidates；`last_discovered_count` 在 pipeline 路径只统计本轮新入队 raw candidates，已评估候选 retry/admission 不再冒充“新发现”。`pool_available_count >= pool_target_count` 时 `ContinuousRefreshController` 不再 discovery / drain，推荐池上限仍以真实可换数生效。
+- `DiscoveryCandidatePipeline` 在 admission 前会优先重试 `evaluated` 待入池候选；若池子在 admission 中途达到上限，剩余高分候选保留为 `evaluated`，下一轮先入池。LLM / provider batch transient、空 / 短 / 长 scores 都会把整批释放回 `pending_eval`，不消耗单条候选 `eval_attempts`；同时递增高阈值 `batch_eval_attempts`，避免永久坏 provider 无限 churn。
+- 修复 unified evaluator 验收中发现的边界风险：小红书 observed notes 仍走 mixed evaluator 补主题 / 风格，但 admission 阈值为 0，低分新兴趣不会被丢弃；B 站 / YouTube / 抖音 raw candidates 持久化来源策略 `score_threshold`，抖音 hot/feed 对齐 0.60、search 保持 0.65；pipeline admission 前复用 topic_group / topic_key embedding normalization；成功入池 item 回传给 runtime 更新 `recent_pool_topics`，drain short-circuit 时不会复用旧 topics；`evaluating` crash 遗留行会在启动时过期回收，terminal candidate rows 有 status guard；pipeline 自带共享 drain lock，避免 refresh / XHS / Douyin / YouTube 多入口并发 admission 越过推荐池上限；pipeline 会 clamp evaluator hard-cap，避免超大 batch 尾部未评估候选被 0 分拒绝；franchise quota admission drop 记录为 `rejected_franchise_quota`，非特定 cache admission skip 记录为 `rejected_cache_admission`，不再误报 duplicate；XHS observed enqueue / producer enqueue 使用同一来源 cap helper，按来源 cap 计数包含 `evaluating` 但删除时保护 in-flight 行，并保留 600 条兜底上限。
+- `/api/sources/xhs/observed-urls` 响应新增 `enqueued` 字段；`accepted` 只表示本次接收的有效 URL 数，不再把异步待评估内容暗示成已经进入推荐池。
+- discovery batch prompt 补充跨平台公平规则，要求模型不得仅因平台来源不同而抬高或压低偏好分；每条候选 payload 带 `source_platform`、`source_strategy`、`source_context`、`content_url`、`author_name`，方便统一 evaluator 在混源 batch 中做可解释评分。
 - 后端源码版本提升到 `v0.3.100`，准备发布 `backend-v0.3.100`；浏览器插件版本沿用 `extension-v0.3.66`。
 - 修复自动更新版本状态在 runtime 链路中被丢弃的问题：`/api/runtime-status` 的响应模型现在保留 `AutoUpdateService.get_runtime_status()` 合入的 `current_version`、`latest_remote_version`、`last_update_check_at`、`last_update_error`、`backend_update_state` 和 `backend_update_reason`；插件 `normalizeRuntimeStatus()` 同步保留这些字段，避免前端状态归一化浪费后端版本数据。设置页仍使用后端专用 `/api/update-status` 做“版本与更新”展示和手动检查 / 应用。
 - 小红书 / 抖音 / YouTube 的 `daily_*_budget` 默认改为 `0`，语义统一为“不设每日上限”；持续补池改为像 B 站一样主要受平台缺口、单轮 `scheduler.discovery_limit` 和 producer 节流控制，避免外站内容被刷完后因当天预算耗尽而长期不补。

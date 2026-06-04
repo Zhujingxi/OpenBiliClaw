@@ -2266,12 +2266,13 @@ def create_app(
         )
 
     async def _classify_new_pool_items() -> None:
-        """Run LLM classification on pool items that lack content features.
+        """Legacy recovery for content_cache rows that lack content features.
 
-        Called after XHS (or any non-bilibili) content is ingested.  This
-        ensures every item gets ``style_key``, ``topic_group``, and
-        ``relevance_score`` before it can be recommended — same treatment
-        bilibili content receives during discovery.
+        Normal source ingest writes ``discovery_candidates`` and lets the
+        shared discovery-candidate pipeline evaluate/admit content before it
+        reaches ``content_cache``.  This helper remains for old databases or
+        explicit repair paths where rows are already cached but still missing
+        ``style_key``, ``topic_group``, and ``relevance_score``.
 
         Silent skip when soul profile hasn't been built yet (init's first
         ~7 minutes). Otherwise events ingested before profile-ready would
@@ -2291,6 +2292,17 @@ def create_app(
             )
         except Exception:
             logger.exception("Background pool classification failed")
+
+    async def _drain_discovery_candidates_once() -> None:
+        """Best-effort drain for newly enqueued source candidates."""
+
+        drain = getattr(ctx.runtime_controller, "drain_discovery_candidates_once", None)
+        if not callable(drain):
+            return
+        try:
+            await drain(batch_size=30)
+        except Exception:
+            logger.exception("Background discovery candidate drain failed")
 
     async def _trigger_replenishment_if_needed() -> None:
         """Fire a background Discovery refresh when the pool runs low."""
@@ -4213,6 +4225,13 @@ def create_app(
     xhs_max_urls_per_batch = 50
     xhs_url_prefix = "https://www.xiaohongshu.com/"
 
+    def _discovery_candidate_pending_cap() -> int:
+        from openbiliclaw.discovery.candidate_pool import discovery_candidate_pending_cap
+
+        scheduler = getattr(config, "scheduler", None)
+        target = int(getattr(scheduler, "pool_target_count", 300) or 300)
+        return discovery_candidate_pending_cap(target)
+
     def _pick_best_xhs_url(database: Any, note_id: str, incoming: str) -> str:
         """Return the most share-worthy URL for a xhs note.
 
@@ -4252,6 +4271,18 @@ def create_app(
                 return str(row["content_url"])
         except Exception:
             pass
+        try:
+            row = database.conn.execute(
+                "SELECT content_url FROM discovery_candidates "
+                "WHERE source_platform='xiaohongshu' AND content_id=? "
+                "  AND content_url LIKE '%xsec_token=%' "
+                "ORDER BY last_seen_at DESC LIMIT 1",
+                (note_id,),
+            ).fetchone()
+            if row and row["content_url"]:
+                return str(row["content_url"])
+        except Exception:
+            pass
         return incoming
 
     def _backfill_xhs_tokens(database: Any, urls: list[str]) -> int:
@@ -4280,6 +4311,17 @@ def create_app(
                 cursor = database.conn.execute(
                     "UPDATE content_cache SET content_url=? "
                     "WHERE bvid=? AND source_platform='xiaohongshu' "
+                    "AND (content_url = '' OR content_url NOT LIKE '%xsec_token=%')",
+                    (url, note_id),
+                )
+                updated += cursor.rowcount or 0
+            except Exception:
+                pass
+            try:
+                cursor = database.conn.execute(
+                    "UPDATE discovery_candidates "
+                    "SET content_url=?, last_seen_at=CURRENT_TIMESTAMP "
+                    "WHERE source_platform='xiaohongshu' AND content_id=? "
                     "AND (content_url = '' OR content_url NOT LIKE '%xsec_token=%')",
                     (url, note_id),
                 )
@@ -4459,7 +4501,7 @@ def create_app(
         page_type: str,
         self_info: dict[str, str] | None = None,
     ) -> int:
-        """Store xhs note metadata from the extension directly into content_cache.
+        """Enqueue xhs note metadata from the extension into discovery_candidates.
 
         ``self_info`` (v0.3.48+) lets the caller pass the just-extracted
         login fingerprint from the same request — avoids a round-trip
@@ -4469,9 +4511,15 @@ def create_app(
         """
         from urllib.parse import urlparse
 
+        from openbiliclaw.discovery.candidate_pool import discovered_content_to_candidate_write
+        from openbiliclaw.discovery.engine import DiscoveredContent
+
+        enqueue = getattr(database, "enqueue_discovery_candidates", None)
+        if not callable(enqueue):
+            return 0
         if self_info is None:
             self_info = _load_xhs_self_info()
-        cached = 0
+        writes = []
         skipped_self = 0
         for note in notes:
             if _is_self_authored_note(note, self_info):
@@ -4496,29 +4544,48 @@ def create_app(
             cover_url = str(note.get("cover_url", "") or "").strip()
             best_url = _pick_best_xhs_url(database, note_id, url)
 
-            # Cache as DiscoveredContent with multi-source fields.
-            # NOTE: `cache_content` reads the `source` kwarg (not `source_strategy`)
-            # for the content_cache.source column — passing the wrong key silently
-            # dropped the label and was the cause of empty-source xhs rows.
-            database.cache_content(
+            item = DiscoveredContent(
                 bvid=note_id,
                 title=title,
                 up_name=author,
                 cover_url=cover_url,
-                source=f"xhs-extension-{page_type}",
+                description=str(
+                    note.get("description") or note.get("desc") or note.get("text") or ""
+                ),
+                source_strategy=f"xhs-extension-{page_type}",
                 content_id=note_id,
                 content_url=best_url,
                 source_platform="xiaohongshu",
                 author_name=author,
             )
-            cached += 1
+            writes.append(
+                discovered_content_to_candidate_write(
+                    item,
+                    source_context=page_type,
+                    raw_payload={
+                        "note_id": note_id,
+                        "url": best_url,
+                        "page_type": page_type,
+                        "title": title,
+                        "author": author,
+                        "cover_url": cover_url,
+                        "admission_policy": "observed",
+                        "score_threshold": 0.0,
+                    },
+                )
+            )
         if skipped_self > 0:
             logger.info(
                 "xhs ingest filter: dropped %d self-authored note(s) (%s)",
                 skipped_self,
                 page_type,
             )
-        return cached
+        if not writes:
+            return 0
+        try:
+            return int(enqueue(writes, max_pending_per_source=_discovery_candidate_pending_cap()))
+        except TypeError:
+            return int(enqueue(writes))
 
     @app.post("/api/sources/xhs/observed-urls")
     async def ingest_xhs_observed_urls(payload: dict[str, Any]) -> dict[str, Any]:
@@ -4526,11 +4593,10 @@ def create_app(
 
         Body: ``{ "urls": [...], "notes": [{url, title, author, cover_url}], "page_type": "..." }``
 
-        When ``notes`` is present, metadata is stored directly into content_cache
-        as DiscoveredContent — no sidecar enrichment needed.  A background LLM
-        classification task is spawned so the content receives the same
-        ``style_key`` / ``topic_group`` / ``relevance_score`` that bilibili
-        content gets during discovery.
+        When ``notes`` is present, metadata is normalized into
+        ``discovery_candidates``.  The shared discovery-candidate drain then
+        evaluates and admits accepted notes through the same path as other
+        platforms.
         """
         from fastapi import HTTPException
 
@@ -4567,24 +4633,23 @@ def create_app(
             ctx.database.save_xhs_observed_urls(valid_urls, page_type)
             _backfill_xhs_tokens(ctx.database, valid_urls)
 
-        # Store rich notes directly into content_cache
-        cached = 0
+        # Store rich notes into the shared pending evaluation pool.
+        enqueued = 0
         if notes_raw:
-            cached = _cache_xhs_notes(
+            enqueued = _cache_xhs_notes(
                 ctx.database,
                 notes_raw,
                 page_type,
                 self_info=self_info_for_filter or None,
             )
-            # Trigger background LLM classification so XHS content gets the
-            # same style_key / topic_group / relevance_score that bilibili
-            # content receives during discovery.  Without this the
-            # recommendation diversity mechanism collapses (all XHS items
-            # share "unknown" style and a single fallback topic token).
-            if cached and ctx.recommendation_engine is not None:
-                asyncio.create_task(_classify_new_pool_items())
+            if enqueued:
+                asyncio.create_task(_drain_discovery_candidates_once())
 
-        return {"ok": True, "accepted": max(len(valid_urls), cached)}
+        return {
+            "ok": True,
+            "accepted": len(valid_urls),
+            "enqueued": enqueued,
+        }
 
     @app.post("/api/sources/xhs/tokens")
     def ingest_xhs_tokens(payload: dict[str, Any]) -> dict[str, Any]:
@@ -4711,7 +4776,9 @@ def create_app(
                 ctx.database.save_xhs_observed_urls(valid_urls, "task")
                 _backfill_xhs_tokens(ctx.database, valid_urls)
             if added_notes:
-                _cache_xhs_notes(ctx.database, added_notes, "task", self_info_now)
+                enqueued = _cache_xhs_notes(ctx.database, added_notes, "task", self_info_now)
+                if enqueued:
+                    asyncio.create_task(_drain_discovery_candidates_once())
             if task_type == "bootstrap_profile" and added_notes:
                 fresh_notes, note_keys_by_index = _filter_new_source_bootstrap_items(
                     "xhs",

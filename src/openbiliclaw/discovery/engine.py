@@ -7,6 +7,7 @@ that matches the user's soul profile.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import inspect
 import logging
 import re
@@ -32,6 +33,16 @@ _T = TypeVar("_T")
 _EVALUATE_BATCH_HARD_CAP_DEFAULT: int = 90
 _LLM_EVAL_OVERSAMPLE_FACTOR: int = 2
 _LLM_EVAL_MIN_WINDOW: int = 6
+_RAW_CANDIDATE_MODE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "openbiliclaw_discovery_raw_candidate_mode",
+    default=False,
+)
+
+
+def discovery_raw_candidate_mode_enabled() -> bool:
+    """Return whether the current coroutine should fetch without LLM evaluation."""
+
+    return bool(_RAW_CANDIDATE_MODE.get())
 
 
 @dataclass
@@ -262,6 +273,7 @@ class DiscoveredContent:
     content_url: str = ""  # Direct clickable URL
     source_platform: str = ""  # "bilibili" | "xiaohongshu" | "web" | ...
     author_name: str = ""  # Universal author name; equals up_name for Bilibili
+    score_threshold: float = 0.0  # Strategy-specific admission floor for raw candidates
 
     def __post_init__(self) -> None:
         if not self.content_id and self.bvid:
@@ -552,6 +564,61 @@ class ContentDiscoveryEngine:
 
         self._cache_results(final_results)
         return final_results
+
+    async def produce_candidates(
+        self,
+        profile: SoulProfile,
+        strategies: list[str] | None = None,
+        limit: int = 30,
+        *,
+        fully_parallel: bool = False,
+        strategy_limits: dict[str, int] | None = None,
+        pool_snapshot: Any | None = None,
+    ) -> list[DiscoveredContent]:
+        """Fetch raw candidates without LLM evaluation or content_cache writes."""
+
+        active = self._strategies
+        if strategies:
+            active = [s for s in self._strategies if s.name in strategies]
+        if not active:
+            return []
+
+        effective_limit = max(1, min(limit, self._backfill_target_count))
+        token = _RAW_CANDIDATE_MODE.set(True)
+        try:
+            raw_results = await self._run_strategies(
+                active,
+                profile=profile,
+                limit=effective_limit,
+                fully_parallel=fully_parallel,
+                strategy_limits=strategy_limits,
+                pool_snapshot=pool_snapshot,
+            )
+        finally:
+            _RAW_CANDIDATE_MODE.reset(token)
+
+        self._stamp_raw_candidate_thresholds(raw_results, active)
+        return self._merge_duplicates(raw_results)[:effective_limit]
+
+    @staticmethod
+    def _stamp_raw_candidate_thresholds(
+        results: list[DiscoveredContent],
+        strategies: list[DiscoveryStrategy],
+    ) -> None:
+        thresholds: dict[str, float] = {}
+        for strategy in strategies:
+            threshold = float(getattr(strategy, "score_threshold", 0.0) or 0.0)
+            if threshold > 0:
+                thresholds[str(strategy.name).strip().lower()] = threshold
+        if not thresholds:
+            return
+        for item in results:
+            if float(item.score_threshold or 0.0) > 0:
+                continue
+            strategy_key = str(item.source_strategy or "").strip().lower()
+            item_threshold = thresholds.get(strategy_key)
+            if item_threshold is not None:
+                item.score_threshold = item_threshold
 
     async def _normalize_topic_groups(
         self,
@@ -927,8 +994,7 @@ class ContentDiscoveryEngine:
             skipped_viewed = len(contents) - len(eval_pairs)
             if skipped_viewed > 0:
                 logger.info(
-                    "eval_batch skipped %d recently viewed candidate(s) before LLM "
-                    "(source=%s)",
+                    "eval_batch skipped %d recently viewed candidate(s) before LLM (source=%s)",
                     skipped_viewed,
                     source_context or "mixed",
                 )
@@ -1184,19 +1250,44 @@ class ContentDiscoveryEngine:
         from openbiliclaw.llm.prompts import build_batch_content_evaluation_prompt
 
         profile_data = build_profile_summary(profile)
-        content_items = [
-            {
-                "bvid": c.bvid,
-                "content_id": c.content_id or c.bvid,
-                "title": c.title,
-                "up_name": c.up_name,
-                "description": (c.description or "")[:200],
-                "duration": c.duration,
-                "view_count": c.view_count,
-                "source_strategy": c.source_strategy,
-            }
-            for c in batch
-        ]
+        content_items: list[dict[str, object]] = []
+        for c in batch:
+            platform = (c.source_platform or ("bilibili" if c.bvid else "")).strip().lower()
+            if platform == "xhs":
+                platform = "xiaohongshu"
+            elif platform == "dy":
+                platform = "douyin"
+            elif platform == "yt":
+                platform = "youtube"
+            elif platform == "bili":
+                platform = "bilibili"
+            if not platform:
+                platform = "bilibili"
+            content_items.append(
+                {
+                    "bvid": c.bvid,
+                    "content_id": c.content_id or c.bvid,
+                    "content_url": c.content_url,
+                    "source_platform": platform,
+                    "source_strategy": c.source_strategy,
+                    "source_context": source_context or c.source_strategy,
+                    "content_type": "note" if platform == "xiaohongshu" else "video",
+                    "title": c.title,
+                    "up_name": c.up_name,
+                    "author_name": c.author_name or c.up_name,
+                    "description": (c.description or "")[:200],
+                    "duration": c.duration,
+                    "view_count": c.view_count,
+                }
+            )
+        source_platforms = {
+            str(item.get("source_platform") or "").strip()
+            for item in content_items
+            if str(item.get("source_platform") or "").strip()
+        }
+        batch_source_platform = (
+            "mixed" if len(source_platforms) > 1 else next(iter(source_platforms), "bilibili")
+        )
         negative_examples = self._get_negative_exemplars()
         # Treat empty list as "no examples" so the user-message stays
         # byte-identical to the no-examples shape on cold-start users.
@@ -1206,7 +1297,7 @@ class ContentDiscoveryEngine:
             profile_summary=profile_data,
             content_items=content_items,
             source_context=source_context or (batch[0].source_strategy if batch else ""),
-            source_platform=(batch[0].source_platform or "bilibili") if batch else "bilibili",
+            source_platform=batch_source_platform,
             negative_examples=negative_examples,
         )
 
@@ -2129,6 +2220,67 @@ class ContentDiscoveryEngine:
             source_strategy=source_strategy,
         )
 
+    def _cached_result_count(self, results: list[DiscoveredContent]) -> int:
+        database = getattr(self, "_database", None)
+        if database is None or not results:
+            return 0
+        keys = [item.bvid or item.content_id for item in results if item.bvid or item.content_id]
+        if not keys:
+            return 0
+        try:
+            conn = database.conn
+            placeholders = ", ".join("?" for _ in keys)
+            cursor = conn.execute(
+                f"SELECT COUNT(*) AS count FROM content_cache WHERE bvid IN ({placeholders})",
+                keys,
+            )
+            row = cursor.fetchone()
+        except Exception:
+            logger.debug("cache_evaluated_results: cached-row count unavailable", exc_info=True)
+            return 0
+        if row is None:
+            return 0
+        return int(row["count"] if isinstance(row, dict) else row[0])
+
+    def cache_evaluated_results(self, results: list[DiscoveredContent]) -> int:
+        """Persist evaluated discovery results and return newly cached row count."""
+
+        if self._database is None or not results:
+            return 0
+        before = self._cached_result_count(results)
+        self._cache_results(results)
+        after = self._cached_result_count(results)
+        return max(0, after - before)
+
+    async def normalize_evaluated_results(self, results: list[DiscoveredContent]) -> None:
+        """Apply discovery topic normalization before evaluated candidates are cached."""
+
+        await self._normalize_topic_groups(results)
+        await self._normalize_topic_keys(results)
+
+    def cache_admission_block_reason(self, item: DiscoveredContent) -> str:
+        """Return why an evaluated item should not be written to ``content_cache``."""
+
+        if self._database is None:
+            return ""
+        viewed_content_keys = self._recent_viewed_content_keys()
+        if viewed_content_keys and not self._candidate_view_keys(item).isdisjoint(
+            viewed_content_keys
+        ):
+            return "recently_viewed"
+
+        franchise_key = (item.franchise_key or "").strip().lower()
+        if not franchise_key or _POOL_FRANCHISE_QUOTA <= 0:
+            return ""
+        try:
+            existing_franchise_counts = self._database.count_pool_by_franchise()
+        except Exception:
+            logger.debug("count_pool_by_franchise unavailable", exc_info=True)
+            return ""
+        if int(existing_franchise_counts.get(franchise_key, 0)) >= _POOL_FRANCHISE_QUOTA:
+            return "franchise_quota"
+        return ""
+
     def _cache_results(self, results: list[DiscoveredContent]) -> None:
         if self._database is None or not results:
             return
@@ -2154,9 +2306,8 @@ class ContentDiscoveryEngine:
         round_franchise_counts: dict[str, int] = {}
         viewed_content_keys = self._recent_viewed_content_keys()
         for item in results:
-            if (
+            if viewed_content_keys and not self._candidate_view_keys(item).isdisjoint(
                 viewed_content_keys
-                and not self._candidate_view_keys(item).isdisjoint(viewed_content_keys)
             ):
                 skipped_viewed += 1
                 continue

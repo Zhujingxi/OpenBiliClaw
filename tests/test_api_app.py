@@ -1484,6 +1484,8 @@ class TestBackendAPI:
             "pool_available_count": 28,
             "pool_raw_count": 0,
             "pool_pending_count": 0,
+            "pool_pending_eval_count": 0,
+            "pool_evaluated_pending_count": 0,
             "pool_target_count": 30,
             "last_discovered_count": 14,
             "last_replenished_count": 6,

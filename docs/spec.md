@@ -147,6 +147,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 
 - **核心评估**：这个内容是否匹配这个用户的深层兴趣和当前状态？
 - **可选辅助指标**：播放量/点赞/弹幕质量等——由用户画像决定是否参考（有些用户在意质量指标，有些人不在意）
+- **统一待评估池**：不同来源先产出 raw candidates 并进入 `discovery_candidates`，再由统一 evaluator 混合 batch 评估；来源只影响取数方式、配额和 prompt 上下文，不单独决定一套喜好判断流程。
 
 ---
 
@@ -251,11 +252,12 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  ┌──────────────┐ ┌──────────────┐ ┌────────────────┐      │
 │  │ User Soul    │ │ Content      │ │ Recommendation │      │
 │  │ Engine       │ │ Discovery    │ │ Engine         │      │
-│  │ (画像+探针)   │ │ (发现+负样本) │ │ (排序+表达)     │      │
+│  │ (画像+探针)   │ │ (发现+待评估池)│ │ (排序+表达)     │      │
 │  └──────────────┘ └──────────────┘ └────────────────┘      │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │     PoolCurator + 双轴 fatigue + per-group 窗口 + 新兴趣放大保护 │ │
 │  │     ContinuousRefreshController + B/XHS/DY/YT=8/1/1/1 │   │
+│  │     DiscoveryCandidatePipeline: raw candidates -> mixed batch eval -> pool │ │
 │  │     LLM gate: scheduler + extension presence          │   │
 │  │     XHS/Douyin/YouTube producers: 按平台缺口独立补池       │   │
 │  │     Hot reload one-shots: interest/avoidance force_tick │   │
@@ -305,8 +307,8 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │ (JSON)     │ │ (SQLite +   │ │ (知识图谱/  │ │ (内存)  │  │
 │  │ Soul+偏好   │ │  向量索引)   │ │  JSON)     │ │         │  │
 │  └───────────┘ └─────────────┘ └────────────┘ └─────────┘  │
-│  SQLite: events(inferred_satisfaction) / content_cache           │
-│          recommendations / chat_turns / avoidance_state           │
+│  SQLite: events(inferred_satisfaction) / discovery_candidates     │
+│          content_cache / recommendations / chat_turns / avoidance_state │
 └──────────────────────────────────────────────────────────────┘
 ```
 

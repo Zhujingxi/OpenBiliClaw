@@ -15,6 +15,7 @@ from openbiliclaw.discovery.engine import (
     DiscoveryConcurrencyController,
     DiscoveryStrategy,
     SupportsStructuredTask,
+    discovery_raw_candidate_mode_enabled,
     trim_candidates_for_llm,
 )
 from openbiliclaw.discovery.strategies._utils import (
@@ -73,6 +74,7 @@ class ExploreStrategy(DiscoveryStrategy):
     # ``score_threshold`` already used by other strategies still keep
     # the pool's overall quality high.
     score_threshold: float = 0.65
+    llm_evaluation: bool = True
     queries_per_domain: int = 3
     max_domains: int = 5
     last_intermediates: dict[str, object] = field(default_factory=dict)
@@ -113,8 +115,7 @@ class ExploreStrategy(DiscoveryStrategy):
                 "cooldown_remaining_seconds": int(cooldown_remaining),
             }
             logger.info(
-                "Explore: Bilibili search cooldown active (%.0fs left); "
-                "skipping domain generation",
+                "Explore: Bilibili search cooldown active (%.0fs left); skipping domain generation",
                 cooldown_remaining,
             )
             return []
@@ -230,6 +231,8 @@ class ExploreStrategy(DiscoveryStrategy):
             limit=limit,
             source_context=self.name,
         )
+        if not self.llm_evaluation or discovery_raw_candidate_mode_enabled():
+            return [content for content, _, _ in candidates[:limit]]
 
         scores = await evaluator.evaluate_content_batch(
             [content for content, _, _ in candidates],

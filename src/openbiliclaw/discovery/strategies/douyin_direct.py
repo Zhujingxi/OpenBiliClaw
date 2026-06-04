@@ -12,6 +12,7 @@ from openbiliclaw.discovery.engine import (
     DiscoveryConcurrencyController,
     DiscoveryStrategy,
     SupportsStructuredTask,
+    discovery_raw_candidate_mode_enabled,
     trim_candidates_for_llm,
 )
 from openbiliclaw.sources.douyin_direct import normalize_aweme_item
@@ -107,7 +108,11 @@ class DouyinDirectStrategy(DiscoveryStrategy):
         if not candidates:
             return []
 
-        if not self.llm_evaluation or self.llm_service is None:
+        if (
+            not self.llm_evaluation
+            or discovery_raw_candidate_mode_enabled()
+            or self.llm_service is None
+        ):
             return candidates[:limit]
 
         evaluator = ContentDiscoveryEngine(

@@ -848,11 +848,12 @@ class RecommendationEngine:
     # Items that lack these features would collapse _select_diversified_batch
     # — all sharing "unknown" style and a single fallback topic token.
     #
-    # classify_pool_backlog() is the single gate: it picks up un-classified
-    # items in the pool, runs them through the same LLM evaluation used for
-    # bilibili discovery, and writes results back.  After this step content
-    # is truly source-agnostic — the recommendation layer only sees content
-    # features, never platform labels.
+    # classify_pool_backlog() is now a legacy/recovery gate: it picks up
+    # old rows that are already in content_cache without content features
+    # (for example, rows inserted before the discovery_candidates staging
+    # table existed), runs them through the same LLM evaluation used for
+    # discovery, and writes results back.  Normal source ingest should enter
+    # discovery_candidates first and be evaluated before content_cache.
 
     def _spawn_detached_task(
         self,
@@ -928,18 +929,13 @@ class RecommendationEngine:
         limit: int = 30,
         batch_size: int = 10,
     ) -> int:
-        """Classify pool items that lack content features (style / topic / score).
+        """Legacy/recovery path for cached rows lacking style / topic / score.
 
-        Content enters the pool from many sources.  Bilibili content is
-        classified during discovery, but other sources (xiaohongshu, web, …)
-        may bypass that pipeline and arrive with empty ``style_key``,
-        ``topic_group``, and ``relevance_score``.
-
-        This method is the recommendation module's guarantee of
-        source-agnostic treatment: every item that reaches the ranking
-        pipeline has proper content features, regardless of where it came
-        from.  It reuses the same LLM evaluation prompt that discovery uses,
-        so the feature space is identical across all sources.
+        Normal source ingest now writes ``discovery_candidates`` and uses the
+        shared discovery-candidate pipeline before rows enter ``content_cache``.
+        This method remains as a safety net for legacy databases and recovery
+        jobs where rows are already cached but still missing ``style_key``,
+        ``topic_group``, or ``relevance_score``.
 
         Returns:
             Number of items classified.
@@ -1972,9 +1968,7 @@ class RecommendationEngine:
 
         return frozenset(
             key
-            for key in (
-                normalize_amplification_key(value) for value in amplification_guard
-            )
+            for key in (normalize_amplification_key(value) for value in amplification_guard)
             if key
         )
 

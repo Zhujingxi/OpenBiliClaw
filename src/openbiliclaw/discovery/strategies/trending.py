@@ -14,6 +14,7 @@ from openbiliclaw.discovery.engine import (
     DiscoveryConcurrencyController,
     DiscoveryStrategy,
     SupportsStructuredTask,
+    discovery_raw_candidate_mode_enabled,
     trim_candidates_for_llm,
 )
 from openbiliclaw.discovery.strategies._utils import (
@@ -41,6 +42,7 @@ class TrendingStrategy(DiscoveryStrategy):
     concurrency: DiscoveryConcurrencyController | None = None
     database: Database | None = None
     score_threshold: float = 0.70
+    llm_evaluation: bool = True
     max_related_rids: int = 4
     # Broader default RIDs covering more top-level categories:
     # 36=科技, 188=资讯, 181=影视, 119=纪录片, 3=音乐, 129=舞蹈, 4=游戏, 160=生活
@@ -154,6 +156,8 @@ class TrendingStrategy(DiscoveryStrategy):
             limit=limit,
             source_context=self.name,
         )
+        if not self.llm_evaluation or discovery_raw_candidate_mode_enabled():
+            return candidates[:limit]
 
         scores = await evaluator.evaluate_content_batch(candidates, profile)
         results: list[DiscoveredContent] = []

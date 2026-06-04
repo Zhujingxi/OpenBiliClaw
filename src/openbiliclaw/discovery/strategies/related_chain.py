@@ -14,6 +14,7 @@ from openbiliclaw.discovery.engine import (
     DiscoveryConcurrencyController,
     DiscoveryStrategy,
     SupportsStructuredTask,
+    discovery_raw_candidate_mode_enabled,
     llm_eval_candidate_limit,
 )
 from openbiliclaw.discovery.strategies._utils import (
@@ -46,6 +47,7 @@ class RelatedChainStrategy(DiscoveryStrategy):
     concurrency: DiscoveryConcurrencyController | None = None
     database: Database | None = None
     score_threshold: float = 0.70
+    llm_evaluation: bool = True
     max_seeds: int = 5
     related_per_seed: int = 8
     max_depth: int = 2
@@ -221,6 +223,16 @@ class RelatedChainStrategy(DiscoveryStrategy):
 
             # Evaluate all candidates in batched LLM calls
             contents = [c for c, _, _, _ in batch_candidates]
+            if not self.llm_evaluation or discovery_raw_candidate_mode_enabled():
+                results.extend(contents)
+                if len(results) >= limit:
+                    break
+                current_layer = [
+                    (content.bvid, depth + 1, seed_index, seed_topic_key)
+                    for content, depth, seed_index, seed_topic_key in batch_candidates
+                    if depth < self.max_depth
+                ]
+                continue
             scores = await evaluator.evaluate_content_batch(contents, profile)
 
             next_layer: list[tuple[str, int, int, str]] = []

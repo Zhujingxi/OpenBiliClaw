@@ -14,6 +14,7 @@ from openbiliclaw.discovery.engine import (
     ContentDiscoveryEngine,
     DiscoveredContent,
     DiscoveryConcurrencyController,
+    discovery_raw_candidate_mode_enabled,
     llm_eval_candidate_limit,
 )
 from openbiliclaw.discovery.pool_snapshot import PoolDistributionSnapshot
@@ -107,6 +108,58 @@ class _RecordingCacheDatabase(_RecentViewedDatabase):
 
     def cache_content(self, bvid: str, **kwargs: object) -> None:
         self.cached_bvids.append(bvid)
+
+
+class _RawModeAwareStrategy:
+    name = "raw_mode"
+
+    def __init__(self) -> None:
+        self.llm_evaluation = True
+        self.raw_call_entered = asyncio.Event()
+        self.release_raw_call = asyncio.Event()
+        self.calls: list[tuple[bool, bool]] = []
+
+    async def discover(
+        self,
+        profile: SoulProfile,
+        limit: int = 20,
+        *,
+        pool_snapshot: object | None = None,
+    ) -> list[DiscoveredContent]:
+        raw_mode = discovery_raw_candidate_mode_enabled()
+        self.calls.append((raw_mode, self.llm_evaluation))
+        if raw_mode:
+            self.raw_call_entered.set()
+            await self.release_raw_call.wait()
+        return [
+            DiscoveredContent(
+                bvid="BVRAW",
+                title="raw mode candidate",
+                source_strategy=self.name,
+                relevance_score=0.9,
+            )
+        ][:limit]
+
+    def create_backfill_strategy(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_produce_candidates_raw_mode_does_not_mutate_concurrent_discover() -> None:
+    strategy = _RawModeAwareStrategy()
+    engine = ContentDiscoveryEngine()
+    engine.register_strategy(strategy)  # type: ignore[arg-type]
+    profile = _build_profile()
+
+    produce_task = asyncio.create_task(engine.produce_candidates(profile, limit=1))
+    await strategy.raw_call_entered.wait()
+    await engine.discover(profile, limit=1)
+    strategy.release_raw_call.set()
+    await produce_task
+
+    assert (True, True) in strategy.calls
+    assert (False, True) in strategy.calls
+    assert strategy.llm_evaluation is True
 
 
 async def _contend_llm_semaphore(
@@ -571,6 +624,47 @@ class _PoolSnapshotBackfillStrategy(_RecordingStrategy):
 
     def create_backfill_strategy(self) -> _PoolSnapshotStrategy:
         return self._backfill_strategy
+
+
+@pytest.mark.asyncio
+async def test_produce_candidates_does_not_evaluate_or_cache() -> None:
+    strategy = _RecordingStrategy(
+        "search",
+        [DiscoveredContent(bvid="BV1", title="Raw", source_strategy="search")],
+    )
+    strategy.llm_evaluation = True  # type: ignore[attr-defined]
+    db = _RecordingCacheDatabase(set())
+    llm = _SlowLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm, database=db)
+    engine.register_strategy(strategy)
+
+    items = await engine.produce_candidates(_build_profile(), strategies=["search"], limit=10)
+
+    assert [item.bvid for item in items] == ["BV1"]
+    assert db.cached_bvids == []
+    assert llm.max_active_calls == 0
+    assert strategy.llm_evaluation is True  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_produce_candidates_stamps_strategy_score_threshold() -> None:
+    strategy = _RecordingStrategy(
+        "related_chain",
+        [DiscoveredContent(bvid="BVTHRESH", title="Raw", source_strategy="related_chain")],
+    )
+    strategy.score_threshold = 0.70  # type: ignore[attr-defined]
+    engine = ContentDiscoveryEngine(
+        llm_service=_SlowLLMService(), database=_RecordingCacheDatabase(set())
+    )
+    engine.register_strategy(strategy)
+
+    items = await engine.produce_candidates(
+        _build_profile(),
+        strategies=["related_chain"],
+        limit=10,
+    )
+
+    assert items[0].score_threshold == 0.70
 
 
 @pytest.mark.asyncio
@@ -1940,6 +2034,58 @@ class _RecordingBatchLLMService:
     ) -> object:
         self.user_inputs.append(user_input)
         return _SlowResponse(self.response)
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_sends_per_item_platform_metadata() -> None:
+    llm = _RecordingBatchLLMService(
+        response=json.dumps(
+            [
+                {
+                    "content_id": "BV1",
+                    "score": 0.8,
+                    "reason": "ok",
+                    "topic_group": "tech",
+                    "style_key": "deep_dive",
+                },
+                {
+                    "content_id": "xhs1",
+                    "score": 0.7,
+                    "reason": "ok",
+                    "topic_group": "life",
+                    "style_key": "lifestyle",
+                },
+            ]
+        )
+    )
+    engine = ContentDiscoveryEngine(llm_service=llm)
+
+    await engine._evaluate_batch(
+        [
+            DiscoveredContent(
+                bvid="BV1",
+                title="Bili",
+                source_platform="bilibili",
+                source_strategy="search",
+            ),
+            DiscoveredContent(
+                content_id="xhs1",
+                title="XHS",
+                source_platform="xiaohongshu",
+                source_strategy="xhs-extension-search",
+                content_url="https://www.xiaohongshu.com/explore/xhs1",
+            ),
+        ],
+        _build_profile(),
+        source_context="mixed",
+    )
+
+    user = llm.user_inputs[-1]
+    assert '"source_platform": "bilibili"' in user
+    assert '"source_platform": "xiaohongshu"' in user
+    assert '"source_strategy": "xhs-extension-search"' in user
+    assert '"content_type": "note"' in user
+    assert "<source_platform>\n\nmixed\n\n</source_platform>" in user
 
 
 @pytest.mark.asyncio

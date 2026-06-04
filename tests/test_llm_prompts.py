@@ -396,6 +396,38 @@ def test_batch_content_evaluation_prompt_orders_profile_before_source_and_batch(
     assert user_prompt.index("<source_context>") < user_prompt.index("<content_batch>")
 
 
+def test_batch_content_evaluation_prompt_allows_per_item_platforms() -> None:
+    messages = build_batch_content_evaluation_prompt(
+        profile_summary={"interests": ["systems"]},
+        source_platform="mixed",
+        source_context="mixed",
+        content_items=[
+            {
+                "content_id": "BV1",
+                "source_platform": "bilibili",
+                "source_strategy": "search",
+                "content_type": "video",
+                "title": "Bili item",
+            },
+            {
+                "content_id": "xhs1",
+                "source_platform": "xiaohongshu",
+                "source_strategy": "xhs-extension-search",
+                "content_type": "note",
+                "title": "XHS item",
+            },
+        ],
+    )
+
+    system = messages[0]["content"]
+    user = messages[1]["content"]
+
+    assert "<source_platform>\n\nmixed\n\n</source_platform>" in user
+    assert '"source_platform": "bilibili"' in user
+    assert '"source_platform": "xiaohongshu"' in user
+    assert "Do not lower or raise preference score merely because" in system
+
+
 def test_build_explore_domains_prompt_caps_covered_groups_at_12() -> None:
     """Defensive: don't over-constrain the model. Cap at 12 so the most-
     saturated topic_groups make it into the avoidance signal but the

@@ -102,6 +102,8 @@ class RuntimeStatusResponse(BaseModel):
     pool_available_count: int = 0
     pool_raw_count: int = 0
     pool_pending_count: int = 0
+    pool_pending_eval_count: int = 0
+    pool_evaluated_pending_count: int = 0
     pool_target_count: int = 0
     last_discovered_count: int = 0
     last_replenished_count: int = 0

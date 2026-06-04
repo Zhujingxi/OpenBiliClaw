@@ -29,6 +29,7 @@ from openbiliclaw.discovery.engine import (
     DiscoveryConcurrencyController,
     DiscoveryStrategy,
     SupportsStructuredTask,
+    discovery_raw_candidate_mode_enabled,
     trim_candidates_for_llm,
 )
 from openbiliclaw.discovery.strategies._utils import build_profile_summary
@@ -116,7 +117,7 @@ class YoutubeSearchStrategy(DiscoveryStrategy):
         if not candidates:
             return []
 
-        if not self.llm_evaluation:
+        if not self.llm_evaluation or discovery_raw_candidate_mode_enabled():
             return candidates[:limit]
 
         return await self._evaluate(candidates, profile, limit)
@@ -210,7 +211,7 @@ class YoutubeTrendingStrategy(DiscoveryStrategy):
         if not candidates:
             return []
 
-        if not self.llm_evaluation:
+        if not self.llm_evaluation or discovery_raw_candidate_mode_enabled():
             return candidates[:limit]
 
         evaluator = ContentDiscoveryEngine(
@@ -300,7 +301,7 @@ class YoutubeChannelStrategy(DiscoveryStrategy):
         if not candidates:
             return []
 
-        if not self.llm_evaluation:
+        if not self.llm_evaluation or discovery_raw_candidate_mode_enabled():
             return candidates[:limit]
 
         evaluator = ContentDiscoveryEngine(

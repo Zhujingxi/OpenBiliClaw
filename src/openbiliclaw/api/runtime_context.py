@@ -139,6 +139,7 @@ def build_youtube_discovery_producer(
     llm_service: Any,
     memory: Any,
     concurrency: Any,
+    candidate_pipeline: Any | None = None,
 ) -> Any | None:
     """Build the runtime YouTube producer if YouTube discovery is enabled."""
     yt_cfg = getattr(getattr(config, "sources", None), "youtube", None)
@@ -184,11 +185,19 @@ def build_youtube_discovery_producer(
 
         selected_strategy = selected[0]
         discovery_engine.register_strategy(selected_strategy)
-        raw_items = await discovery_engine.discover(
-            profile,
-            strategies=[strategy],
-            limit=max(1, int(result_limit)),
-        )
+        produce_fn = getattr(discovery_engine, "produce_candidates", None)
+        if callable(produce_fn):
+            raw_items = await produce_fn(
+                profile,
+                strategies=[strategy],
+                limit=max(1, int(result_limit)),
+            )
+        else:
+            raw_items = await discovery_engine.discover(
+                profile,
+                strategies=[strategy],
+                limit=max(1, int(result_limit)),
+            )
         items = [
             item
             for item in raw_items
@@ -214,6 +223,7 @@ def build_youtube_discovery_producer(
         daily_search_budget=int(getattr(yt_cfg, "daily_search_budget", 0)),
         daily_trending_budget=int(getattr(yt_cfg, "daily_trending_budget", 0)),
         daily_channel_budget=int(getattr(yt_cfg, "daily_channel_budget", 0)),
+        candidate_pipeline=candidate_pipeline,
     )
 
 
@@ -490,6 +500,16 @@ class RuntimeContext:
         new_discovery_engine.register_adapter(xiaohongshu_adapter)
 
         # 8. Continuous refresh controller
+        from openbiliclaw.discovery.candidate_pipeline import DiscoveryCandidatePipeline
+
+        new_candidate_pipeline = DiscoveryCandidatePipeline(
+            database=self.database,
+            discovery_engine=new_discovery_engine,
+            pool_target_count=new_config.scheduler.pool_target_count,
+            xhs_self_nickname_provider=lambda: str(
+                (_xhs_self_info_provider() or {}).get("nickname", "") or ""
+            ).strip(),
+        )
         new_xhs_producer: Any = None
         new_douyin_producer: Any = None
         new_youtube_producer: Any = None
@@ -516,12 +536,14 @@ class RuntimeContext:
                 database=self.database,
                 soul_engine=new_soul_engine,
                 discovery_engine=new_discovery_engine,
+                candidate_pipeline=new_candidate_pipeline,
             )
             new_youtube_producer = build_youtube_discovery_producer(
                 config=new_config,
                 database=self.database,
                 soul_engine=new_soul_engine,
                 discovery_engine=new_discovery_engine,
+                candidate_pipeline=new_candidate_pipeline,
                 llm_service=new_llm_service,
                 memory=cast("Any", self.memory_manager),
                 concurrency=concurrency,
@@ -533,6 +555,7 @@ class RuntimeContext:
             soul_engine=new_soul_engine,
             discovery_engine=new_discovery_engine,
             recommendation_engine=new_recommendation_engine,
+            discovery_candidate_pipeline=new_candidate_pipeline,
             pool_target_count=new_config.scheduler.pool_target_count,
             pool_source_shares=_pool_source_shares_from_config(new_config),
             signal_event_threshold=int(getattr(new_config.scheduler, "signal_event_threshold", 6)),
