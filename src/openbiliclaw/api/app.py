@@ -5148,24 +5148,24 @@ def create_app(
         reason = "none"
         if not state.supported:
             reason = state.reason
+        elif not trusted_local:
+            reason = "local_only"
         elif managed_env:
             reason = "env_managed"
         elif shadowed:
             reason = "shadowed"
-        elif not trusted_local:
-            reason = "local_only"
         if reason_override is not None:
             reason = reason_override
 
         detail = ""
         if not state.supported:
             detail = "当前运行环境不支持注册开机自启动。"
+        elif not trusted_local:
+            detail = "仅本机可信请求可以修改开机自启动。"
         elif managed_env:
             detail = "检测到环境变量配置，自启动登录会话可能缺失：" + ", ".join(managed_env)
         elif shadowed:
             detail = "config.local.toml 覆盖了 [autostart].enabled，config.toml 修改不会生效。"
-        elif not trusted_local:
-            detail = "仅本机可信请求可以修改开机自启动。"
         elif cfg.autostart.enabled and not state.registered:
             detail = "开机自启动配置已开启，但系统自启动项缺失。"
         elif cfg.autostart.enabled:

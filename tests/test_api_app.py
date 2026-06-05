@@ -2550,6 +2550,43 @@ class TestBackendAPI:
         assert response.status_code == 200
         assert response.json()["can_manage"] is False
 
+    def test_autostart_status_remote_hides_env_managed_keys(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.runtime import autostart
+        from openbiliclaw.runtime.autostart import guards
+        from openbiliclaw.runtime.autostart.base import AutostartStatus
+
+        monkeypatch.setattr(
+            autostart,
+            "status",
+            lambda: AutostartStatus(True, False, "darwin", "launchd"),
+        )
+        monkeypatch.setattr(
+            guards,
+            "active_env_managed_inputs",
+            lambda loaded_cfg: ["GOOGLE_API_KEY", "OPENBILICLAW_LLM_OPENAI_API_KEY"],
+        )
+        monkeypatch.setattr(guards, "autostart_shadowed", lambda intended: False)
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor.ollama_required",
+            lambda loaded_cfg: False,
+        )
+        app = create_app()
+        app.state.auth_gate.is_trusted_local = lambda request: False
+        client = TestClient(app)
+
+        response = client.get("/api/autostart-status", headers={"sec-fetch-site": "cross-site"})
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["can_manage"] is False
+        assert body["reason"] == "local_only"
+        assert "GOOGLE_API_KEY" not in body["detail"]
+        assert "OPENBILICLAW_LLM_OPENAI_API_KEY" not in body["detail"]
+
     def test_config_response_includes_autostart(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from fastapi.testclient import TestClient
 
