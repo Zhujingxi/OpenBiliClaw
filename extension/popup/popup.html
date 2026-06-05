@@ -4784,6 +4784,15 @@
           <button id="cfgAuthSave" type="button" class="settings-inline-btn" hidden>保存密码设置</button>
           <p class="settings-hint" id="cfgAuthHint">读取鉴权状态中…</p>
         </div>
+        <div class="settings-field" id="autostartControlField">
+          <label>开机自启动</label>
+          <div class="settings-field-row">
+            <input id="cfgAutostartEnabled" type="checkbox">
+            <span>登录系统时自动拉起 OpenBiliClaw 后端</span>
+          </div>
+          <p class="settings-hint" id="cfgAutostartHint">读取开机自启动状态中…</p>
+          <p class="settings-note">只影响下次登录拉起后端，不启停当前进程；本机 Ollama 配置可能随启动预检一起拉起。若依赖 shell 环境变量，建议先写入 config.toml。</p>
+        </div>
         <div class="settings-field">
           <label for="cfgLanguage">语言</label>
           <select id="cfgLanguage">

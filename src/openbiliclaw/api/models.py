@@ -818,6 +818,28 @@ class LoggingConfigOut(BaseModel):
     unmanaged_max_age_days: int = 30
 
 
+class AutostartConfigOut(BaseModel):
+    enabled: bool = False
+    manage_ollama: bool = True
+
+
+class AutostartStatusOut(BaseModel):
+    supported: bool
+    enabled: bool
+    registered: bool
+    can_manage: bool
+    platform: str
+    mechanism: str
+    manage_ollama: bool
+    ollama_required: bool
+    reason: str = "none"
+    detail: str = ""
+
+
+class AutostartApplyIn(BaseModel):
+    enabled: bool
+
+
 class ConfigIssueOut(BaseModel):
     field: str
     message: str
@@ -835,6 +857,7 @@ class ConfigResponse(BaseModel):
     bilibili: BilibiliConfigOut = Field(default_factory=BilibiliConfigOut)
     sources: SourcesConfigOut = Field(default_factory=SourcesConfigOut)
     scheduler: SchedulerConfigOut = Field(default_factory=SchedulerConfigOut)
+    autostart: AutostartConfigOut = Field(default_factory=AutostartConfigOut)
     storage: StorageConfigOut = Field(default_factory=StorageConfigOut)
     logging: LoggingConfigOut = Field(default_factory=LoggingConfigOut)
     issues: list[ConfigIssueOut] = Field(default_factory=list)

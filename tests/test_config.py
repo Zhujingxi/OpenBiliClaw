@@ -7,6 +7,7 @@ import pytest
 from openbiliclaw import config as config_module
 from openbiliclaw.config import (
     ApiConfig,
+    AutostartConfig,
     BilibiliConfig,
     Config,
     ConfigError,
@@ -87,6 +88,9 @@ class TestConfigDefaults:
         assert config.scheduler.enabled is True
         assert config.scheduler.discovery_cron == "0 */8 * * *"
         assert config.scheduler.pool_target_count == 300
+        assert isinstance(config.autostart, AutostartConfig)
+        assert config.autostart.enabled is False
+        assert config.autostart.manage_ollama is True
 
     def test_config_defaults_pool_target_count_to_300(self) -> None:
         config = Config()
@@ -129,6 +133,27 @@ class TestConfigDefaults:
         config = _build_config({})
         assert config.language == "zh"
         assert config.llm.default_provider == "openai"
+        assert config.autostart.enabled is False
+        assert config.autostart.manage_ollama is True
+
+    def test_load_config_coerces_autostart_env_bool_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            """
+[autostart]
+enabled = true
+manage_ollama = true
+""".strip(),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("OPENBILICLAW_AUTOSTART_ENABLED", "false")
+
+        config = load_config(config_path)
+
+        assert config.autostart.enabled is False
+        assert config.autostart.manage_ollama is True
 
     def test_build_from_partial_dict(self) -> None:
         raw = {
@@ -200,6 +225,70 @@ class TestConfigDefaults:
         rendered = _render_config_toml(Config())
         assert "[soul.preference]" in rendered
         assert "satisfaction_filter_enabled = true" in rendered
+
+    def test_autostart_section_appears_in_rendered_toml(self) -> None:
+        from openbiliclaw.config import _render_config_toml
+
+        rendered = _render_config_toml(Config())
+
+        assert "[autostart]" in rendered
+        assert "manage_ollama = true" in rendered
+
+    def test_save_config_round_trips_authoritative_autostart(self, tmp_path: Path) -> None:
+        cfg = Config()
+        cfg.autostart.enabled = True
+        cfg.autostart.manage_ollama = False
+        target = tmp_path / "config.toml"
+
+        save_config(cfg, target, autostart_authoritative=True)
+        loaded = load_config(target)
+
+        assert loaded.autostart.enabled is True
+        assert loaded.autostart.manage_ollama is False
+
+    def test_save_config_preserves_on_disk_autostart_enabled_by_default(
+        self, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "config.toml"
+        target.write_text(
+            """
+[autostart]
+enabled = true
+manage_ollama = false
+""".strip(),
+            encoding="utf-8",
+        )
+        stale_cfg = Config()
+        stale_cfg.autostart.enabled = False
+        stale_cfg.autostart.manage_ollama = True
+
+        save_config(stale_cfg, target)
+        loaded = load_config(target)
+
+        assert loaded.autostart.enabled is True
+        assert loaded.autostart.manage_ollama is True
+
+    def test_save_config_authoritative_autostart_enabled_overrides_disk(
+        self, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "config.toml"
+        target.write_text(
+            """
+[autostart]
+enabled = false
+manage_ollama = false
+""".strip(),
+            encoding="utf-8",
+        )
+        cfg = Config()
+        cfg.autostart.enabled = True
+        cfg.autostart.manage_ollama = True
+
+        save_config(cfg, target, autostart_authoritative=True)
+        loaded = load_config(target)
+
+        assert loaded.autostart.enabled is True
+        assert loaded.autostart.manage_ollama is True
 
     def test_load_config_missing_file(self) -> None:
         """Should return defaults when no config file exists."""

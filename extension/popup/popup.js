@@ -40,6 +40,7 @@ import {
   updateBackendEndpoint,
 } from "./popup-backend-config.js";
 import { initAuthControl } from "./popup-auth-control.js";
+import { initAutostartControl } from "./popup-autostart-control.js";
 import {
   createQrSvgMarkup,
   getMobileQrViewState,
@@ -5130,6 +5131,14 @@ function bindSettings() {
     { getBaseUrl: getBackendBaseUrl },
   );
 
+  const autostartControl = initAutostartControl(
+    {
+      checkbox: document.getElementById("cfgAutostartEnabled"),
+      hint: document.getElementById("cfgAutostartHint"),
+    },
+    { getBaseUrl: getBackendBaseUrl },
+  );
+
   const settingsTabs = [
     ["models", document.getElementById("settingsTabModels")],
     ["sources", document.getElementById("settingsTabSources")],
@@ -5776,6 +5785,7 @@ function bindSettings() {
     await populateBackendEndpoint();
     void loadBackendUpdateStatus();
     void authControl.reload();
+    void autostartControl.reload();
     try {
       const cfg = await fetchConfig();
       populateForm(cfg);

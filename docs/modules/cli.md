@@ -28,6 +28,9 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `browser content <url>` | 获取页面文本内容 | ✅ |
 | `start` | 启动本地 API 服务 | ✅ |
 | `set-password` | 设置 / 修改局域网访问密码（`--disable` 关闭门禁 / `--logout-all` / `--rotate-secret`） | ✅ |
+| `autostart status` | 查看开机自启动配置、系统注册和平台支持状态 | ✅ |
+| `autostart enable` | 注册当前用户登录自启动并写入 `[autostart].enabled=true` | ✅ |
+| `autostart disable` | 移除当前用户登录自启动并写入 `[autostart].enabled=false` | ✅ |
 | `db-repair` | 检查、备份并修复本地 SQLite 数据库 | ✅ |
 | `serve-api` | 启动容器友好的 API 服务 | ✅ |
 | `init` | 首次初始化 | ✅ |
@@ -53,7 +56,7 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 ### `openbiliclaw config-show`
 
 显示当前加载的配置、已注册的 LLM Provider 和最终生效的默认 Provider。
-配置概览会直接显示「停止后台 LLM 请求」是否启用，以及「浏览器断开后暂停」是否启用和当前宽限秒数，方便确认插件设置页里的调度配置是否已经写入后端配置。
+配置概览会直接显示「停止后台 LLM 请求」是否启用、「浏览器断开后暂停」是否启用和当前宽限秒数，以及「开机自启动」配置 / 系统注册状态，方便确认插件设置页里的调度与自启动配置是否已经写入后端配置。
 
 ```bash
 $ openbiliclaw config-show
@@ -188,6 +191,12 @@ $ openbiliclaw start --host 0.0.0.0 --port 9000
 1. 检查 `data/openbiliclaw.db` 是否完整；如果检测到损坏，会拒绝启动并提示先执行 `openbiliclaw db-repair`
 2. 在数据库健康且距离上次冷备超过 24 小时时，自动生成一份冷备到 `data/backups/`
 
+数据库健康后、API server 启动前，`start` 还会执行自启动相关的轻量 reconcile：
+
+- 如果当前 LLM / embedding 配置需要本机 Ollama、`[autostart].manage_ollama=true` 且 endpoint 是默认 `localhost:11434`，会探测 `/api/version`；未运行时尝试后台执行 `ollama serve`。远端或自定义 loopback 端口只探测，不强行拉起。
+- 如果 `[autostart].enabled=true` 但系统登录项缺失，会在没有环境变量管理风险时重新注册当前用户登录项；发现 `OPENBILICLAW_*` / provider API key 等环境变量覆盖时只告警并跳过，避免注册一个下次登录拿不到配置的启动项。
+- 如果 `[autostart].enabled=false` 但系统登录项仍残留，会尝试移除该当前用户登录项，让手动编辑配置后的下一次启动也能回到关闭状态。
+
 如果 `scheduler.pause_on_extension_disconnect=true`，`start` 会在 uvicorn 启动前打印一行 WARN：
 
 ```text
@@ -269,6 +278,25 @@ $ openbiliclaw set-password --rotate-secret
 - `--rotate-secret`：轮换 `session_secret` 并撤销所有登录态；新密钥需重启后端进程才完全生效。
 
 > 改密码（无论走本命令、`init`、直接改 TOML、env、还是 `PUT /api/config`）都会在下次启动 / 重载时按密码指纹变化自动撤销旧登录态。永不过期（`session_ttl_hours=0`，「记住登录」）的会话不会因重启被误撤销。
+
+### `openbiliclaw autostart`
+
+管理当前用户作用域的登录自启动（macOS LaunchAgent / Windows HKCU Run / Linux XDG autostart）。该命令不写系统级服务，不需要 root / 管理员权限；Docker / 容器和未知平台会拒绝注册。
+
+```bash
+# 查看配置意图、系统注册状态和平台机制
+$ openbiliclaw autostart status
+
+# 开启：先权威写 [autostart].enabled=true，再注册 OS 登录项
+$ openbiliclaw autostart enable
+
+# 关闭：先移除 OS 登录项，再权威写 [autostart].enabled=false
+$ openbiliclaw autostart disable
+```
+
+`enable` 会拒绝当前进程依赖环境变量管理的配置（例如 `OPENBILICLAW_*`、`GOOGLE_API_KEY` / `GEMINI_API_KEY`、抖音 Cookie env），因为桌面登录会话可能拿不到这些 shell 变量。请先把必要配置写入 `config.toml`。
+
+CLI 与 API 使用同一套方向化事务规则：开启时写配置成功且未被 `config.local.toml` 覆盖后才注册 OS；关闭时先注销 OS，再写配置。任一步失败都会尽量把配置和 OS 注册恢复到操作前状态。
 
 ### `openbiliclaw delight`
 

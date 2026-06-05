@@ -278,6 +278,10 @@ def _is_public(request: Request) -> bool:
         return True
     if path in ("/api/auth/status", "/api/auth/login"):
         return True
+    if path == "/api/autostart-status":
+        return True
+    if path == "/api/autostart/apply":
+        return True
     # gate management bypasses the middleware so its handler can enforce
     # trusted-local itself and return a specific 403 local_only for every
     # non-local caller (remote OR cross-origin loopback), instead of a generic

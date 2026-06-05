@@ -23,6 +23,9 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from openbiliclaw.api.models import (
     ActivityFeedItemOut,
     ActivityFeedResponse,
+    AutostartApplyIn,
+    AutostartConfigOut,
+    AutostartStatusOut,
     BackendUpdateStatusOut,
     BehaviorEventBatchIn,
     BilibiliConfigOut,
@@ -838,6 +841,8 @@ def create_app(
             method == "OPTIONS"
             or path == "/api/health"
             or path == "/api/runtime-status"
+            or path == "/api/autostart-status"
+            or path == "/api/autostart/apply"
             or (path == "/api/config" and method in {"GET", "PUT"})
             or path.startswith("/api/auth")
             or path.startswith("/m")
@@ -5116,6 +5121,233 @@ def create_app(
                 await publish({"type": "extension_reload", "source": "dev"})
         return {"ok": True}
 
+    def _autostart_status_out(
+        request: Request,
+        cfg: Any,
+        *,
+        reason_override: str | None = None,
+        detail_override: str | None = None,
+    ) -> AutostartStatusOut:
+        from openbiliclaw.runtime import autostart
+        from openbiliclaw.runtime.autostart.guards import (
+            active_env_managed_inputs,
+            autostart_shadowed,
+        )
+        from openbiliclaw.runtime.ollama_supervisor import (
+            effective_ollama_endpoint,
+            is_loopback,
+            ollama_required,
+        )
+
+        state = autostart.status()
+        managed_env = active_env_managed_inputs(cfg)
+        shadowed = autostart_shadowed(cfg.autostart.enabled)
+        trusted_local = _get_auth_gate().is_trusted_local(request)
+        requires_ollama = ollama_required(cfg)
+
+        reason = "none"
+        if not state.supported:
+            reason = state.reason
+        elif not trusted_local:
+            reason = "local_only"
+        elif managed_env:
+            reason = "env_managed"
+        elif shadowed:
+            reason = "shadowed"
+        if reason_override is not None:
+            reason = reason_override
+
+        detail = ""
+        if not state.supported:
+            detail = "当前运行环境不支持注册开机自启动。"
+        elif not trusted_local:
+            detail = "仅本机可信请求可以修改开机自启动。"
+        elif managed_env:
+            detail = "检测到环境变量配置，自启动登录会话可能缺失：" + ", ".join(managed_env)
+        elif shadowed:
+            detail = "config.local.toml 覆盖了 [autostart].enabled，config.toml 修改不会生效。"
+        elif cfg.autostart.enabled and not state.registered:
+            detail = "开机自启动配置已开启，但系统自启动项缺失。"
+        elif cfg.autostart.enabled:
+            detail = "开机自启动已开启。"
+        else:
+            detail = "尚未开启开机自启动。"
+        if detail_override is not None:
+            detail = detail_override
+
+        if requires_ollama:
+            endpoint = effective_ollama_endpoint(cfg)
+            if not is_loopback(endpoint):
+                detail = (detail + " " if detail else "") + "Ollama 端点是远端地址，需自行管理。"
+
+        return AutostartStatusOut(
+            supported=state.supported,
+            enabled=cfg.autostart.enabled,
+            registered=state.registered,
+            can_manage=trusted_local and state.supported and not managed_env and not shadowed,
+            platform=state.platform,
+            mechanism=state.mechanism,
+            manage_ollama=cfg.autostart.manage_ollama,
+            ollama_required=requires_ollama,
+            reason=reason,
+            detail=detail,
+        )
+
+    @app.get("/api/autostart-status", response_model=AutostartStatusOut)
+    def autostart_status(request: Request) -> AutostartStatusOut:
+        from openbiliclaw.config import load_config
+
+        cfg = load_config()
+        return _autostart_status_out(request, cfg)
+
+    @app.post("/api/autostart/apply", response_model=AutostartStatusOut)
+    async def autostart_apply(
+        payload: AutostartApplyIn, request: Request
+    ) -> AutostartStatusOut | JSONResponse:
+        from openbiliclaw.config import _default_config_path as _cfg_path
+        from openbiliclaw.config import load_config as _load
+        from openbiliclaw.config import save_config as _save
+        from openbiliclaw.runtime import autostart
+        from openbiliclaw.runtime.autostart.guards import active_env_managed_inputs
+
+        cfg = _load()
+        if not _get_auth_gate().is_trusted_local(request):
+            body = _autostart_status_out(
+                request,
+                cfg,
+                reason_override="local_only",
+                detail_override="仅本机可信请求可以修改开机自启动。",
+            )
+            return JSONResponse(status_code=403, content=body.model_dump(mode="json"))
+
+        current = autostart.status()
+        if not current.supported:
+            body = _autostart_status_out(
+                request,
+                cfg,
+                reason_override=current.reason,
+                detail_override="当前运行环境不支持注册开机自启动。",
+            )
+            return JSONResponse(status_code=409, content=body.model_dump(mode="json"))
+
+        managed = active_env_managed_inputs(cfg)
+        if payload.enabled and managed:
+            body = _autostart_status_out(
+                request,
+                cfg,
+                reason_override="env_managed",
+                detail_override="检测到环境变量配置，自启动登录会话可能缺失：" + ", ".join(managed),
+            )
+            return JSONResponse(status_code=409, content=body.model_dump(mode="json"))
+
+        async with _CONFIG_SAVE_LOCK:
+            config_path = _cfg_path()
+            config_existed = config_path.exists()
+            backup_path = _snapshot_config_file(config_path)
+
+            def _rollback_cfg() -> None:
+                if backup_path is not None:
+                    with suppress(Exception):
+                        _restore_config_snapshot(backup_path, config_path)
+                elif not config_existed:
+                    with suppress(Exception):
+                        config_path.unlink(missing_ok=True)
+
+            cfg = _load()
+            was_registered = autostart.status().registered
+
+            if payload.enabled:
+                cfg.autostart.enabled = True
+                try:
+                    _save(cfg, autostart_authoritative=True)
+                except Exception:
+                    _rollback_cfg()
+                    logger.warning("autostart: enable save_config failed", exc_info=True)
+                    body = _autostart_status_out(
+                        request,
+                        _load(),
+                        reason_override="unavailable",
+                        detail_override="保存配置失败，开机自启动未修改。",
+                    )
+                    return JSONResponse(status_code=503, content=body.model_dump(mode="json"))
+
+                effective = _load()
+                if effective.autostart.enabled is not True:
+                    _rollback_cfg()
+                    body = _autostart_status_out(
+                        request,
+                        _load(),
+                        reason_override="shadowed",
+                        detail_override=(
+                            "config.local.toml 覆盖了 [autostart].enabled，"
+                            "config.toml 修改不会生效。"
+                        ),
+                    )
+                    return JSONResponse(status_code=409, content=body.model_dump(mode="json"))
+
+                try:
+                    autostart.register(effective)
+                except Exception:
+                    _rollback_cfg()
+                    logger.warning("autostart: OS registration failed", exc_info=True)
+                    body = _autostart_status_out(
+                        request,
+                        _load(),
+                        reason_override="registration_failed",
+                        detail_override="系统自启动项注册失败，配置已回滚。",
+                    )
+                    return JSONResponse(status_code=409, content=body.model_dump(mode="json"))
+                return _autostart_status_out(request, _load())
+
+            try:
+                autostart.unregister()
+            except Exception:
+                logger.warning("autostart: OS unregister failed", exc_info=True)
+                body = _autostart_status_out(
+                    request,
+                    cfg,
+                    reason_override="unregister_failed",
+                    detail_override="系统自启动项移除失败，配置未修改。",
+                )
+                return JSONResponse(status_code=409, content=body.model_dump(mode="json"))
+
+            cfg.autostart.enabled = False
+            try:
+                _save(cfg, autostart_authoritative=True)
+            except Exception:
+                if was_registered:
+                    with suppress(Exception):
+                        cfg.autostart.enabled = True
+                        autostart.register(cfg)
+                _rollback_cfg()
+                logger.warning("autostart: disable save_config failed", exc_info=True)
+                body = _autostart_status_out(
+                    request,
+                    _load(),
+                    reason_override="unavailable",
+                    detail_override="保存配置失败，系统自启动项已尝试恢复。",
+                )
+                return JSONResponse(status_code=503, content=body.model_dump(mode="json"))
+
+            effective = _load()
+            if effective.autostart.enabled is not False:
+                if was_registered:
+                    with suppress(Exception):
+                        cfg.autostart.enabled = True
+                        autostart.register(cfg)
+                _rollback_cfg()
+                body = _autostart_status_out(
+                    request,
+                    _load(),
+                    reason_override="shadowed",
+                    detail_override=(
+                        "config.local.toml 覆盖了 [autostart].enabled，config.toml 修改不会生效。"
+                    ),
+                )
+                return JSONResponse(status_code=409, content=body.model_dump(mode="json"))
+
+            return _autostart_status_out(request, _load())
+
     # ── Configuration management endpoints ──────────────────────────
 
     def _config_to_response(
@@ -5278,6 +5510,10 @@ def create_app(
                 auto_update_check_interval_hours=cfg.scheduler.auto_update_check_interval_hours,
                 auto_update_allow_prerelease=cfg.scheduler.auto_update_allow_prerelease,
                 auto_update_allowed_remotes=list(cfg.scheduler.auto_update_allowed_remotes),
+            ),
+            autostart=AutostartConfigOut(
+                enabled=cfg.autostart.enabled,
+                manage_ollama=cfg.autostart.manage_ollama,
             ),
             storage=StorageConfigOut(db_path=cfg.storage.db_path),
             logging=LoggingConfigOut(

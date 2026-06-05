@@ -232,6 +232,14 @@ class SchedulerConfig:
 
 
 @dataclass
+class AutostartConfig:
+    """Boot autostart configuration."""
+
+    enabled: bool = False
+    manage_ollama: bool = True
+
+
+@dataclass
 class XiaohongshuSourceConfig:
     """Xiaohongshu source-specific configuration.
 
@@ -431,6 +439,7 @@ class Config:
     bilibili: BilibiliConfig = field(default_factory=BilibiliConfig)
     sources: SourcesConfig = field(default_factory=SourcesConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+    autostart: AutostartConfig = field(default_factory=AutostartConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     # Top-level `[soul]` is distinct from `[llm.soul]` (per-module
@@ -545,6 +554,9 @@ def _build_config(raw: dict[str, Any]) -> Config:
     bili_raw = raw.get("bilibili", {})
     sources_raw = raw.get("sources", {})
     sched_raw = dict(raw.get("scheduler", {}))
+    autostart_raw = raw.get("autostart", {})
+    if not isinstance(autostart_raw, dict):
+        autostart_raw = {}
     store_raw = raw.get("storage", {})
     logging_raw = raw.get("logging", {})
 
@@ -739,6 +751,10 @@ def _build_config(raw: dict[str, Any]) -> Config:
                     sched_raw.get("auto_update_allowed_remotes")
                 ),
             }
+        ),
+        autostart=AutostartConfig(
+            enabled=_coerce_bool(autostart_raw.get("enabled"), default=False),
+            manage_ollama=_coerce_bool(autostart_raw.get("manage_ollama"), default=True),
         ),
         storage=StorageConfig(**store_raw),
         logging=LoggingConfig(**logging_raw),
@@ -1353,6 +1369,17 @@ def _read_on_disk_auth(path: Path) -> dict[str, Any]:
     return auth if isinstance(auth, dict) else {}
 
 
+def _read_on_disk_autostart(path: Path) -> dict[str, Any]:
+    """Return the raw ``[autostart]`` table currently persisted at ``path`` ({} if none)."""
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    autostart = data.get("autostart")
+    return autostart if isinstance(autostart, dict) else {}
+
+
 def _api_auth_lines(
     config: Config, on_disk_auth: dict[str, Any] | None, *, consult_local: bool
 ) -> list[str]:
@@ -1452,7 +1479,36 @@ def _api_auth_lines(
     return lines
 
 
-def save_config(config: Config, config_path: str | Path | None = None) -> Path:
+def _autostart_lines(
+    config: Config,
+    on_disk_autostart: dict[str, Any] | None,
+    *,
+    autostart_authoritative: bool,
+) -> list[str]:
+    """Render ``[autostart]`` without clobbering the OS-registration intent.
+
+    Ordinary whole-file writes can hold a stale ``Config`` snapshot, so they preserve
+    the on-disk ``enabled`` value. Apply/CLI writers pass ``autostart_authoritative``
+    and become the only code paths allowed to change it. ``manage_ollama`` has no OS
+    side effect and is always rendered from memory.
+    """
+    lines = ["[autostart]"]
+    if autostart_authoritative:
+        lines.append(f"enabled = {_toml_bool(config.autostart.enabled)}")
+    else:
+        disk = on_disk_autostart or {}
+        if "enabled" in disk:
+            lines.append(f"enabled = {_toml_bool(_coerce_bool(disk['enabled'], default=False))}")
+    lines.append(f"manage_ollama = {_toml_bool(config.autostart.manage_ollama)}")
+    return lines
+
+
+def save_config(
+    config: Config,
+    config_path: str | Path | None = None,
+    *,
+    autostart_authoritative: bool = False,
+) -> Path:
     """Persist a Config dataclass to TOML."""
     path = Path(config_path) if config_path is not None else _default_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1462,12 +1518,19 @@ def save_config(config: Config, config_path: str | Path | None = None) -> Path:
     # env-managed) so a normal settings/cookie write can't drop a plaintext
     # password and flip the reconcile fingerprint basis.
     on_disk_auth = _read_on_disk_auth(path) if path.exists() else None
+    on_disk_autostart = _read_on_disk_autostart(path) if path.exists() else None
     # config.local.toml is merged ONLY when load_config runs with no explicit path
     # (production / default path). For a save to any other explicit file it was
     # never merged, so its overrides must not gate this render (review r11).
     consult_local = config_path is None or path.resolve() == _default_config_path().resolve()
     path.write_text(
-        _render_config_toml(config, on_disk_auth=on_disk_auth, consult_local=consult_local),
+        _render_config_toml(
+            config,
+            on_disk_auth=on_disk_auth,
+            on_disk_autostart=on_disk_autostart,
+            autostart_authoritative=autostart_authoritative,
+            consult_local=consult_local,
+        ),
         encoding="utf-8",
     )
     return path
@@ -1477,6 +1540,8 @@ def _render_config_toml(
     config: Config,
     *,
     on_disk_auth: dict[str, Any] | None = None,
+    on_disk_autostart: dict[str, Any] | None = None,
+    autostart_authoritative: bool = False,
     consult_local: bool = False,
 ) -> str:
     """Render a Config dataclass into TOML."""
@@ -1625,6 +1690,12 @@ def _render_config_toml(
             f"xiaohongshu = {int(config.scheduler.pool_source_shares.get('xiaohongshu', 1))}",
             f"douyin = {int(config.scheduler.pool_source_shares.get('douyin', 1))}",
             f"youtube = {int(config.scheduler.pool_source_shares.get('youtube', 1))}",
+            "",
+            *_autostart_lines(
+                config,
+                on_disk_autostart,
+                autostart_authoritative=autostart_authoritative,
+            ),
             "",
             "[storage]",
             f"db_path = {_toml_string(config.storage.db_path)}",

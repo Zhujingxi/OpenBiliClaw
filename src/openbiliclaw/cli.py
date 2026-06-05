@@ -19,6 +19,14 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from openbiliclaw.runtime.ollama_supervisor import (
+    _ollama_is_running,
+    _ollama_start_serve_background,
+    effective_ollama_endpoint,
+    is_loopback,
+    ollama_required,
+)
+
 
 def _force_utf8_stdout_on_windows() -> None:
     """Reconfigure stdout/stderr to UTF-8 on Windows.
@@ -61,9 +69,11 @@ app = typer.Typer(
 auth_app = typer.Typer(help="B 站认证命令")
 login_app = typer.Typer(help="账号登录命令")
 browser_app = typer.Typer(help="agent-browser 浏览器命令")
+autostart_app = typer.Typer(help="开机自启动命令")
 app.add_typer(auth_app, name="auth")
 app.add_typer(login_app, name="login")
 app.add_typer(browser_app, name="browser")
+app.add_typer(autostart_app, name="autostart")
 console = Console()
 _APP_CONTEXT: dict[str, Any] = {}
 _DISCOVER_STRATEGIES_OPTION = typer.Option(
@@ -222,6 +232,68 @@ def _warn_if_pause_on_disconnect_requires_presence() -> None:
             f"[yellow]{_EXTENSION_PRESENCE_REQUIRED_WARNING}[/yellow]",
             soft_wrap=True,
         )
+
+
+def _is_default_ollama_endpoint(endpoint: str) -> bool:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(endpoint)
+    host = (parsed.hostname or "").strip().lower()
+    return host in {"localhost", "127.0.0.1", "::1"} and parsed.port == 11434
+
+
+def _preflight_loopback_ollama(cfg: Any) -> None:
+    if not ollama_required(cfg) or not cfg.autostart.manage_ollama:
+        return
+    endpoint = effective_ollama_endpoint(cfg)
+    if not is_loopback(endpoint):
+        return
+    if _ollama_is_running(host=endpoint):
+        return
+    if not _is_default_ollama_endpoint(endpoint):
+        console.print(
+            f"[yellow]本机 Ollama 端点 {endpoint} 未响应；自定义端口不会自动执行 "
+            "`ollama serve`，请自行管理该服务。[/yellow]"
+        )
+        return
+    if not _ollama_start_serve_background():
+        console.print(
+            "[yellow]Ollama preflight 未能拉起本机服务；后端继续启动，"
+            "后续 LLM/embedding 请求可能降级或失败。[/yellow]"
+        )
+
+
+def _self_heal_autostart_registration(cfg: Any) -> None:
+    from openbiliclaw.runtime import autostart
+
+    state = autostart.status()
+    if not state.supported:
+        return
+
+    if not cfg.autostart.enabled:
+        if state.registered:
+            try:
+                autostart.unregister()
+            except Exception as exc:
+                console.print(f"[yellow]开机自启动残留项移除失败：{exc}[/yellow]")
+        return
+
+    if state.registered:
+        return
+
+    from openbiliclaw.runtime.autostart.guards import active_env_managed_inputs
+
+    managed = active_env_managed_inputs(cfg)
+    if managed:
+        console.print(
+            "[yellow]已开启开机自启动，但检测到环境变量配置，跳过自动补注册："
+            f"{', '.join(managed)}。请先写入 config.toml。[/yellow]"
+        )
+        return
+    try:
+        autostart.register(cfg)
+    except Exception as exc:
+        console.print(f"[yellow]开机自启动补注册失败：{exc}[/yellow]")
 
 
 def _print_section_title(title: str) -> None:
@@ -1105,22 +1177,6 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
 )
 
 
-def _ollama_is_running(host: str = "http://localhost:11434") -> bool:
-    """Probe Ollama's HTTP API; return True only on a healthy 200 response."""
-    import httpx
-
-    try:
-        # trust_env=False — same rationale as OllamaProvider.embed: a
-        # localhost Ollama probe must not be hijacked by the user's
-        # HTTP_PROXY env (e.g. 127.0.0.1:7897 VPN client), or the CLI
-        # falsely concludes "Ollama isn't running" while it's healthy.
-        with httpx.Client(timeout=2.0, trust_env=False) as client:
-            response = client.get(f"{host}/api/version")
-            return response.status_code == 200
-    except Exception:
-        return False
-
-
 def _ollama_has_model(model: str, host: str = "http://localhost:11434") -> bool:
     """Return True if Ollama already has the named model pulled."""
     import httpx
@@ -1245,54 +1301,6 @@ def _ollama_install_if_missing() -> bool:
     console.print(
         "[red]安装似乎没成功。请从 https://ollama.com/download 手动装一下，再重新跑本命令。[/red]"
     )
-    return False
-
-
-def _ollama_start_serve_background() -> bool:
-    """Start `ollama serve` in the background, wait up to 15s for it
-    to start responding to /api/version. Returns whether the daemon is
-    healthy at exit.
-    """
-    import shutil
-    import subprocess
-
-    if _ollama_is_running():
-        return True
-
-    ollama = shutil.which("ollama")
-    if ollama is None:
-        return False
-
-    try:
-        if os.name == "nt":
-            creationflags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(
-                subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
-            )
-            subprocess.Popen(
-                [ollama, "serve"],
-                creationflags=creationflags,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-            )
-        else:
-            subprocess.Popen(
-                [ollama, "serve"],
-                start_new_session=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-            )
-    except Exception as exc:
-        console.print(f"[red]启动 ollama serve 失败: {exc}[/red]")
-        return False
-
-    import time
-
-    for _ in range(30):
-        if _ollama_is_running():
-            return True
-        time.sleep(0.5)
     return False
 
 
@@ -3193,6 +3201,8 @@ def start(
                 "否则远程请求可能被误判为本机而绕过密码。",
             )
     _maybe_create_runtime_database_backup()
+    _preflight_loopback_ollama(cfg)
+    _self_heal_autostart_registration(cfg)
     _run_api_server(host=effective_host, port=effective_port)
 
 
@@ -3243,6 +3253,192 @@ def _rebase_auth_fingerprint(cfg: Any) -> None:
     finally:
         with suppress(Exception):
             db.close()
+
+
+def _autostart_reason_message(reason: str) -> str:
+    if reason == "unsupported_docker_runtime":
+        return "当前在 Docker / 容器环境中，不支持注册桌面登录自启动。"
+    if reason == "unsupported_platform":
+        return "当前平台暂不支持开机自启动。"
+    if reason == "env_managed":
+        return "检测到环境变量配置，登录会话可能拿不到这些值；请先写入 config.toml。"
+    if reason == "shadowed":
+        return "config.local.toml 正在覆盖 [autostart].enabled，config.toml 修改不会生效。"
+    if reason == "registration_failed":
+        return "系统自启动注册失败，config 已回滚。"
+    if reason == "unregister_failed":
+        return "系统自启动注销失败，config 未修改。"
+    return "无法完成开机自启动操作。"
+
+
+def _autostart_status_rows(cfg: Any) -> list[tuple[str, str]]:
+    from openbiliclaw.runtime import autostart
+
+    state = autostart.status()
+    enabled = bool(getattr(getattr(cfg, "autostart", None), "enabled", False))
+    manage_ollama = bool(getattr(getattr(cfg, "autostart", None), "manage_ollama", True))
+    return [
+        ("配置", "开启" if enabled else "关闭"),
+        ("系统注册", "已注册" if state.registered else "未注册"),
+        ("支持状态", "支持" if state.supported else "不支持"),
+        ("平台", state.platform),
+        ("机制", state.mechanism),
+        ("原因", state.reason),
+        ("Ollama 预检", "开启" if manage_ollama else "关闭"),
+    ]
+
+
+def _print_autostart_status(cfg: Any) -> None:
+    _print_page_title("开机自启动", "登录系统时自动拉起 OpenBiliClaw 后端")
+    _print_key_value_table("自启动状态", _autostart_status_rows(cfg))
+
+
+def _format_autostart_config_status(cfg: Any) -> str:
+    from openbiliclaw.runtime import autostart
+
+    try:
+        state = autostart.status()
+    except Exception:
+        return "开启" if bool(getattr(cfg.autostart, "enabled", False)) else "关闭"
+    enabled = "开启" if bool(getattr(cfg.autostart, "enabled", False)) else "关闭"
+    registered = "已注册" if state.registered else "未注册"
+    return f"{enabled}（{registered}，{state.mechanism}）"
+
+
+def _autostart_manager_or_exit() -> Any:
+    from openbiliclaw.runtime import autostart
+
+    manager = autostart.get_manager()
+    if manager is not None:
+        return manager
+    reason = autostart.status().reason
+    _print_status_panel("error", "当前环境不支持开机自启动", _autostart_reason_message(reason))
+    raise typer.Exit(code=1)
+
+
+def _save_autostart_authoritative(cfg: Any) -> None:
+    from openbiliclaw.config import save_config
+
+    save_config(cfg, autostart_authoritative=True)
+
+
+def _restore_autostart_enabled(cfg: Any, enabled: bool) -> None:
+    cfg.autostart.enabled = enabled
+    with suppress(Exception):
+        _save_autostart_authoritative(cfg)
+
+
+def _register_autostart_best_effort(manager: Any, cfg: Any, should_register: bool) -> None:
+    if should_register:
+        with suppress(Exception):
+            manager.register(cfg)
+
+
+@autostart_app.command("status")
+def autostart_status() -> None:
+    """显示开机自启动状态。"""
+    from openbiliclaw.config import load_config
+
+    _print_autostart_status(load_config())
+
+
+@autostart_app.command("enable")
+def autostart_enable() -> None:
+    """开启登录系统后自动拉起后端。"""
+    from openbiliclaw.config import load_config
+    from openbiliclaw.runtime.autostart.guards import (
+        active_env_managed_inputs,
+        autostart_shadowed,
+    )
+
+    cfg = load_config()
+    manager = _autostart_manager_or_exit()
+    managed = active_env_managed_inputs(cfg)
+    if managed:
+        _print_status_panel(
+            "error",
+            "检测到环境变量配置，无法开启自启动",
+            f"{_autostart_reason_message('env_managed')}\n命中：{', '.join(managed)}",
+        )
+        raise typer.Exit(code=1)
+
+    previous_enabled = bool(cfg.autostart.enabled)
+    cfg.autostart.enabled = True
+    try:
+        _save_autostart_authoritative(cfg)
+    except Exception as exc:
+        cfg.autostart.enabled = previous_enabled
+        _print_status_panel("error", "配置保存失败", str(exc))
+        raise typer.Exit(code=1) from exc
+
+    if autostart_shadowed(True):
+        _restore_autostart_enabled(cfg, previous_enabled)
+        _print_status_panel("error", "配置被覆盖", _autostart_reason_message("shadowed"))
+        raise typer.Exit(code=1)
+
+    try:
+        manager.register(cfg)
+    except Exception as exc:
+        _restore_autostart_enabled(cfg, previous_enabled)
+        _print_status_panel(
+            "error",
+            "自启动注册失败",
+            f"{_autostart_reason_message('registration_failed')}\n{exc}",
+        )
+        raise typer.Exit(code=1) from exc
+
+    _print_status_panel(
+        "success",
+        "已开启开机自启动",
+        "下次登录系统时会拉起 OpenBiliClaw 后端；当前进程不会被启停。",
+    )
+    _print_autostart_status(cfg)
+
+
+@autostart_app.command("disable")
+def autostart_disable() -> None:
+    """关闭登录系统后自动拉起后端。"""
+    from openbiliclaw.config import load_config
+    from openbiliclaw.runtime.autostart.guards import autostart_shadowed
+
+    cfg = load_config()
+    manager = _autostart_manager_or_exit()
+    previous_enabled = bool(cfg.autostart.enabled)
+    was_registered = bool(manager.is_registered())
+
+    try:
+        manager.unregister()
+    except Exception as exc:
+        _print_status_panel(
+            "error",
+            "自启动注销失败",
+            f"{_autostart_reason_message('unregister_failed')}\n{exc}",
+        )
+        raise typer.Exit(code=1) from exc
+
+    cfg.autostart.enabled = False
+    try:
+        _save_autostart_authoritative(cfg)
+    except Exception as exc:
+        cfg.autostart.enabled = previous_enabled
+        _register_autostart_best_effort(manager, cfg, was_registered)
+        _restore_autostart_enabled(cfg, previous_enabled)
+        _print_status_panel("error", "配置保存失败", str(exc))
+        raise typer.Exit(code=1) from exc
+
+    if autostart_shadowed(False):
+        cfg.autostart.enabled = previous_enabled
+        _register_autostart_best_effort(manager, cfg, was_registered)
+        _restore_autostart_enabled(cfg, previous_enabled)
+        _print_status_panel("error", "配置被覆盖", _autostart_reason_message("shadowed"))
+        raise typer.Exit(code=1)
+
+    _print_status_panel(
+        "success",
+        "已关闭开机自启动",
+        "系统登录项已移除；当前后端进程不会被停止。",
+    )
+    _print_autostart_status(cfg)
 
 
 @app.command("set-password")
@@ -5909,6 +6105,7 @@ def config_show() -> None:
                 grace_seconds=cfg.scheduler.extension_disconnect_grace_seconds,
             ),
         ),
+        ("开机自启动", _format_autostart_config_status(cfg)),
         ("数据目录", str(cfg.data_path)),
     ]
     if diagnostics.config_path:

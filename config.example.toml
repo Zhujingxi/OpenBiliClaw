@@ -365,6 +365,14 @@ xiaohongshu = 1
 douyin = 1
 youtube = 1
 
+[autostart]
+# 登录系统后是否自动拉起 OpenBiliClaw 后端。默认关闭；请通过设置页或
+# `openbiliclaw autostart enable` 开启，以便同步注册/反注册 OS 自启动项。
+enabled = false
+# 当 LLM / embedding 使用本机 Ollama 时，后端启动时顺带确保 `ollama serve`
+# 已运行。仅管理本机 localhost:11434，远端 Ollama 不会被拉起。
+manage_ollama = true
+
 [storage]
 # SQLite database path
 db_path = "data/openbiliclaw.db"
