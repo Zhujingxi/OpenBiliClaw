@@ -2,8 +2,8 @@
 
 **Created:** 2026-06-05
 **Spec:** [`docs/specs/autostart.md`](../specs/autostart.md)（CONVERGED，5 轮对抗 review）
-**Status:** 待执行（对抗 review loop 进行中）
-**Reviews:** 轮 1（coverage + buildability + Codex，~26 findings：2 atomic-commit 雷 + 2 真 bug + 半数 status producer 缺失）+ 轮 2（fix-verify + fresh-eyes：ollama `/v1` 探测 bug + E2b save-throws 回滚 + 数 minor）全部 incorporated
+**Status:** 待执行 — **CONVERGED**（4 轮对抗；独立 fresh-eyes 冷读判 **EXECUTE**，0 blocker / 0 major）
+**Reviews:** 轮 1（coverage + buildability + Codex，~26 findings：2 atomic-commit 雷 + 2 真 bug + 半数 status producer 缺失）+ 轮 2（fix-verify + fresh-eyes：ollama `/v1` 探测 bug + E2b save-throws 回滚 + 数 minor）+ 轮 3（自审：D1↔E1 `ollama_unavailable` detail 矛盾、F1 dep 漏 E2 拆分等 consistency nit）+ 轮 4（独立 fresh-eyes 终审：四个前轮修复全部验证在位且对得上真实代码，仅 3 条 cosmetic 备注，判 **EXECUTE**）全部 incorporated
 **Scope:** 后端 Python + 浏览器插件；纯新增，不改现有行为（除 `start` 新增 preflight/self-heal、`save_config` 新增 keyword 参数，默认值保持旧行为）
 
 > 把 spec 的 9 个 Requirement 拆成 **依赖有序、每个 = 一个原子 commit** 的任务。最高风险是 config provenance / anti-clobber（spec 里错过两次），故排在最前且测试最重。每个任务自带测试落进专属文件，最后一个任务补齐验收矩阵并跑 gate 命令。
@@ -124,7 +124,7 @@ H. 测试矩阵补齐 (Req 9) 贯穿；I. 文档同步收尾 (CLAUDE.md 强制)
 - **目标**：Req 4 wiring + M1。
 - **文件**：`src/openbiliclaw/cli.py`（`start` 命令 `:3160-3196`，**在 `_maybe_create_runtime_database_backup()` + `_ensure_runtime_database_healthy()` 之后、`_run_api_server` 之前**插入——DB 健康失败时不应跑 preflight/register）
 - **步骤**：
-  1. **preflight**：`ep = effective_ollama_endpoint(cfg)`；`if ollama_required(cfg) and cfg.autostart.manage_ollama and is_loopback(ep)`：`_ollama_is_running(host=ep)`，未运行 **且 `ep` 是默认 `localhost:11434`** 才 `_ollama_start_serve_background()`（`ollama serve` 只绑默认端口；自定义 loopback 端口只探测不拉起，原因写进 `detail`/`ollama_unavailable`）。失败仅告警，不阻断。
+  1. **preflight**：`ep = effective_ollama_endpoint(cfg)`；`if ollama_required(cfg) and cfg.autostart.manage_ollama and is_loopback(ep)`：`_ollama_is_running(host=ep)`，未运行 **且 `ep` 是默认 `localhost:11434`** 才 `_ollama_start_serve_background()`（`ollama serve` 只绑默认端口；自定义 loopback 端口只探测不拉起）。失败仅告警 + 记 `ollama_unavailable` 到**运行日志**（不进 status detail，见 E1），不阻断。
   2. **self-heal**：`if cfg.autostart.enabled and not autostart.status().registered`：先 `active_env_managed_inputs(cfg)` 非空则跳过 + warn；否则 `autostart.register(cfg)`，失败仅 warn。（Windows `.pyw` 缺失也算未注册。）
 - **测试**（`tests/test_autostart.py`，mock supervisor + manager）：远端 / 自定义 loopback 端口不 `serve`；`manage_ollama=false` 跳过；**DB 健康失败时不触发 preflight/register**；self-heal 在 env-managed 时跳过补注册；`enabled=true ∧ 未注册` 时补注册。
 - **依赖**：A1、B1、B2、C。
@@ -163,7 +163,7 @@ H. 测试矩阵补齐 (Req 9) 贯穿；I. 文档同步收尾 (CLAUDE.md 强制)
 - **步骤**：`async with _CONFIG_SAVE_LOCK`（`app.py:117`）→ 快照 → `cfg=_load()` 锁内重读（照 `auth_admin` `app.py:698-758`）。**每个 `save_config` 都包 try/except**（照 `auth_admin` `_save` + `_rollback_cfg` `:744-749`）：
   - **enable**：set `enabled=true` → `save_config(cfg, autostart_authoritative=True)`（**throw → 恢复快照 + `503 unavailable`**）→ reload effective（shadow → 恢复快照 + `409 shadowed`）→ `manager.register()`（失败 → 恢复快照=`enabled=false` + `409 registration_failed`）。
   - **disable**：**先 `manager.unregister()`**（失败 → config 不动 + `409 unregister_failed`）→ set `enabled=false` + `save_config(..., autostart_authoritative=True)`（**throw → 重新 `register()` + 恢复快照 + `503 unavailable`**，否则 OS 没了但 config 还 enabled）→ reload（被 local 钉 `true` → **重新 `register()` + 恢复快照** + `409 shadowed`）。
-  - **方向化避免崩溃残留**：若 enable 先 register 后写 config，或 disable 先写 config 后 unregister，中途崩溃会留「OS 注册着但 config 说关 / 反之」，而 self-heal 只修 `enabled=true ∧ 未注册`、修不了反向。故 enable 写后注册、disable 注销后写；任一步失败都把 **OS 与 config 一并回滚到操作前**。
+  - **方向化避免崩溃残留**：若 enable 先 register 后写 config，或 disable 先写 config 后 unregister，中途崩溃会留「OS 注册着但 config 说关 / 反之」，而 self-heal 只修 `enabled=true ∧ 未注册`、修不了反向。故 enable 写后注册、disable 注销后写；任一步失败都把 **OS 与 config 一并回滚到操作前**（快照恢复 best-effort，同 `auth_admin` `_rollback_cfg`——双重失败=磁盘级灾难，与 PUT/auth 现状同等可接受）。
   - 成功返回最新 status。
 - **测试**（`tests/test_api_app.py`）：enable→`enabled/registered=true`；disable→OS 移除 + `enabled=false`；`config.local` 钉→`409 shadowed`（且 config 回滚、OS 复位）；register 失败→config 回滚 `false` + `409 registration_failed`；unregister 失败→`409 unregister_failed`、config 不动；**disable 时 unregister 成功但 save 抛错 → 重新 register + config 回滚 + `503`**；并发 `PUT /api/config` 不回退 apply 值（provenance）。
 - **依赖**：E2a、A2。
@@ -173,10 +173,10 @@ H. 测试矩阵补齐 (Req 9) 贯穿；I. 文档同步收尾 (CLAUDE.md 强制)
 
 #### F1. 「开机自启动」开关
 - **目标**：Req 7。
-- **文件**：`extension/popup/popup.html`、`popup.js`、`popup-api.js`（仿 `popup-auth-control.js` Pattern B）
+- **文件**：`extension/popup/popup.html`、`popup.js`、`popup-api.js`；建议平行新建 `popup-autostart-control.js`（仿 `popup-auth-control.js` 的 Pattern B，DOM-agnostic 可单测），`popup.js` wire 进来
 - **步骤**：设置页加开关（缺省关）；打开读 `GET /api/autostart-status`；切换调 `POST /api/autostart/apply` 即时生效 + 行内 hint；`can_manage=false` 禁用并按 `reason` 出文案（远程/env_managed/shadowed/unsupported）。**必出的后果文案**（spec Settings UX）：仅影响下次登录拉起后端 / 不启停当前进程 / ollama 用户会顺带拉起本机 Ollama；外加残留风险提示（纯 shell env 配置自启动时可能缺失，建议落 config.toml）。`manage_ollama` v1 仅 config 文件可改（UI 不设入口，如展示标只读）。
 - **测试**（`extension` `npm run test` + `npm run typecheck`）：渲染/禁用态逻辑（如有可测函数）；手测切换。
-- **依赖**：E1、E2。
+- **依赖**：E1、E2a、E2b。
 - **commit**：`feat(extension): add boot-autostart toggle in settings`
 
 ### Phase G — CLI 子命令
@@ -186,7 +186,7 @@ H. 测试矩阵补齐 (Req 9) 贯穿；I. 文档同步收尾 (CLAUDE.md 强制)
 - **文件**：`src/openbiliclaw/cli.py`
 - **步骤**：新增 Typer 子命令组；复用 manager + `active_env_managed_inputs` + `autostart_shadowed` + **同 E2b 的 enable/disable OS 方向化排序**；**自带守卫**，照 `set-password`（`cli.py:3291-3318` 自查 env/shadow），不蹭 `_CONFIG_SAVE_LOCK`（进程内 `asyncio.Lock`，跨进程拿不到），`save_config(cfg, autostart_authoritative=True)`；`config-show` 增自启动状态行。`manage_ollama` 不提供 CLI setter（v1 config 文件改）。不支持平台 `enable` 非零退出。
 - **测试**（`tests/test_cli.py`）：enable→status 报已注册；disable→未注册；env-managed/shadow 时拒绝；不支持平台非零退出。
-- **依赖**：A、B2、C。
+- **依赖**：A、B1、B2、C。
 - **commit**：`feat(cli): autostart enable/disable/status subcommands`
 
 ### Phase H — 测试矩阵补齐
