@@ -253,3 +253,41 @@ def test_windows_run_unregister_cleans_registry_and_pyw(
     assert "OpenBiliClaw" not in fake_winreg.values
     assert not (tmp_path / "data" / "autostart" / "openbiliclaw-autostart.pyw").exists()
     assert manager.is_registered() is False
+
+
+def test_linux_xdg_register_writes_desktop_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbiliclaw.runtime.autostart.linux import LinuxXdgAutostartManager
+
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    manager = LinuxXdgAutostartManager(home=tmp_path / "home")
+
+    manager.register(Config())
+
+    desktop_path = tmp_path / "home" / ".config" / "autostart" / "openbiliclaw.desktop"
+    content = desktop_path.read_text(encoding="utf-8")
+    assert manager.mechanism == "xdg_autostart"
+    assert manager.is_registered() is True
+    assert "Type=Application" in content
+    assert "Name=OpenBiliClaw" in content
+    assert f"OPENBILICLAW_PROJECT_ROOT={tmp_path}" in content
+    assert f"{sys.executable} -m openbiliclaw.cli start" in content
+    assert "X-GNOME-Autostart-enabled=true" in content
+    assert "Hidden=false" in content
+
+
+def test_linux_xdg_unregister_is_idempotent(tmp_path: Path) -> None:
+    from openbiliclaw.runtime.autostart.linux import LinuxXdgAutostartManager
+
+    manager = LinuxXdgAutostartManager(home=tmp_path)
+
+    manager.unregister()
+    assert manager.is_registered() is False
+
+    manager.register(Config())
+    assert manager.is_registered() is True
+    manager.unregister()
+    manager.unregister()
+
+    assert manager.is_registered() is False
