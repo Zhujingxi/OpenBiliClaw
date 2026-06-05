@@ -5341,8 +5341,7 @@ def create_app(
                     _load(),
                     reason_override="shadowed",
                     detail_override=(
-                        "config.local.toml 覆盖了 [autostart].enabled，"
-                        "config.toml 修改不会生效。"
+                        "config.local.toml 覆盖了 [autostart].enabled，config.toml 修改不会生效。"
                     ),
                 )
                 return JSONResponse(status_code=409, content=body.model_dump(mode="json"))

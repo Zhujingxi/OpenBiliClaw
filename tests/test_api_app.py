@@ -2567,9 +2567,7 @@ class TestBackendAPI:
         assert response.status_code == 200
         assert response.json()["autostart"] == {"enabled": True, "manage_ollama": False}
 
-    def test_autostart_apply_rejects_remote(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_autostart_apply_rejects_remote(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from fastapi.testclient import TestClient
 
         from openbiliclaw.runtime import autostart
