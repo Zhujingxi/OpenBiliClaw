@@ -169,3 +169,87 @@ def test_macos_launch_agent_unregister_is_idempotent(tmp_path: Path) -> None:
     manager.unregister()
 
     assert manager.is_registered() is False
+
+
+class _FakeWinregKey:
+    def __enter__(self) -> "_FakeWinregKey":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+
+class _FakeWinreg:
+    HKEY_CURRENT_USER = object()
+    KEY_SET_VALUE = 1
+    KEY_READ = 2
+    REG_SZ = 1
+
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+
+    def CreateKey(self, root: object, path: str) -> _FakeWinregKey:  # noqa: N802
+        return _FakeWinregKey()
+
+    def OpenKey(self, root: object, path: str, reserved: int, access: int) -> _FakeWinregKey:  # noqa: N802
+        return _FakeWinregKey()
+
+    def SetValueEx(  # noqa: N802
+        self, key: _FakeWinregKey, name: str, reserved: int, reg_type: int, value: str
+    ) -> None:
+        self.values[name] = value
+
+    def QueryValueEx(self, key: _FakeWinregKey, name: str) -> tuple[str, int]:  # noqa: N802
+        if name not in self.values:
+            raise FileNotFoundError(name)
+        return self.values[name], self.REG_SZ
+
+    def DeleteValue(self, key: _FakeWinregKey, name: str) -> None:  # noqa: N802
+        if name not in self.values:
+            raise FileNotFoundError(name)
+        del self.values[name]
+
+
+def test_windows_run_register_writes_registry_and_pyw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbiliclaw.runtime.autostart.windows import WindowsRunManager
+
+    fake_winreg = _FakeWinreg()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    cfg = Config()
+    cfg.data_dir = str(tmp_path / "data")
+    manager = WindowsRunManager(winreg_module=fake_winreg)
+
+    manager.register(cfg)
+
+    script = tmp_path / "data" / "autostart" / "openbiliclaw-autostart.pyw"
+    assert manager.mechanism == "windows_run"
+    assert script.exists()
+    assert "OPENBILICLAW_PROJECT_ROOT" in script.read_text(encoding="utf-8")
+    assert "OpenBiliClaw" in fake_winreg.values
+    assert str(script) in fake_winreg.values["OpenBiliClaw"]
+    assert manager.is_registered() is True
+
+    script.unlink()
+    assert manager.is_registered() is False
+
+
+def test_windows_run_unregister_cleans_registry_and_pyw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbiliclaw.runtime.autostart.windows import WindowsRunManager
+
+    fake_winreg = _FakeWinreg()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    cfg = Config()
+    cfg.data_dir = str(tmp_path / "data")
+    manager = WindowsRunManager(winreg_module=fake_winreg)
+
+    manager.register(cfg)
+    manager.unregister()
+    manager.unregister()
+
+    assert "OpenBiliClaw" not in fake_winreg.values
+    assert not (tmp_path / "data" / "autostart" / "openbiliclaw-autostart.pyw").exists()
+    assert manager.is_registered() is False
