@@ -518,7 +518,7 @@ print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
         Write-Host 'Next steps (credentials are missing):'
         Write-Host ''
         Write-Host '  1. Choose your LLM provider (default: deepseek):'
-        Write-Host '     Supported: deepseek | openai | gemini | claude | openrouter | ollama'
+        Write-Host '     Supported: deepseek | openai | gemini | claude | openrouter | ollama | openai_compatible'
         Write-Host ''
         if ($missing -match 'api_key') {
             Write-Host '     LLM API key - get one from your chosen provider:'

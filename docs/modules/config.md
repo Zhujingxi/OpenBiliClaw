@@ -62,7 +62,7 @@ cp config.example.toml config.toml
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `default_provider` | string | `"openai"` | 默认 Provider：`openai` / `claude` / `gemini` / `deepseek` / `ollama` / `openrouter` / `openai_compatible` |
+| `default_provider` | string | `"deepseek"` | 默认 Provider：`deepseek` / `openai` / `claude` / `gemini` / `ollama` / `openrouter` / `openai_compatible` |
 | `concurrency` | int | `3` | 全局 LLM 请求并发上限。所有 `LLMService` 调用共享这个优先级队列；可在插件设置页「模型」tab 调整，合法范围为 `1..16` |
 | `fallback_enabled` | bool | `false` | 旧兼容开关；当前实际 fallback 只在 `fallback_provider` 非空时发生 |
 | `fallback_provider` | string | `""` | 第二个备选 Provider。留空 = 不 fallback；非空时只按 `default_provider → fallback_provider` 尝试，不再自动遍历其它 provider |
@@ -523,11 +523,11 @@ language = "zh"
 data_dir = "data"
 
 [llm]
-default_provider = "openai"
+default_provider = "deepseek"
 
-[llm.openai]
+[llm.deepseek]
 api_key = "sk-..."
-model = "gpt-5-nano"
+model = "deepseek-v4-flash"
 
 [bilibili]
 auth_method = "cookie"

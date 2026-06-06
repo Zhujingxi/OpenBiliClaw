@@ -62,7 +62,7 @@ python3 scripts/agent_bootstrap.py --mode docker --interactive-confirm --wait-fo
 docker compose ps
 ```
 
-`agent_bootstrap.py --mode docker` 是 Docker 部署的主入口：它会启动 compose，把宿主机确认后的 `config.toml` 同步到容器 `/app/runtime`，在 B 站 Cookie 通过扩展同步后继续自动运行 init。缺 LLM Key、缺 Cookie 或缺来源确认时，bootstrap 会停在明确的 `needs_secrets` / `needs_decisions` 状态并打印继续命令；这不是最终成功状态。凭据和选择齐全后，bootstrap 会先在容器运行时里真实验证 LLM provider 和 embedding 服务；如果返回 `service_check_failed`，说明 init 尚未运行，先修 API key / base_url / model / Ollama 后再重跑同一条 bootstrap 命令。
+`agent_bootstrap.py --mode docker` 是 Docker 部署的主入口：人类终端传 `--interactive-confirm` 时会先在 Python bootstrap 里收集完整安装选择（LLM provider → embedding → B 站 Cookie → 来源 opt-in），再启动 compose；AI agent / CI 等非交互路径仍通过显式 flags 和 `BOOTSTRAP_STATUS` 推进，不会提示输入。bootstrap 会把宿主机确认后的 `config.toml` 同步到容器 `/app/runtime`，在 B 站 Cookie 通过扩展同步后继续自动运行 init。缺 LLM Key、缺 Cookie 或缺来源确认时，bootstrap 会停在明确的 `needs_secrets` / `needs_decisions` 状态并打印继续命令；这不是最终成功状态。凭据和选择齐全后，bootstrap 会先在容器运行时里真实验证 LLM provider 和 embedding 服务；如果返回 `service_check_failed`，说明 init 尚未运行，先修 API key / base_url / model / Ollama 后再重跑同一条 bootstrap 命令。
 
 **手动 fallback**：高级排查或重复初始化时，仍可直接运行：
 

@@ -39,9 +39,9 @@ trusted_proxies = []
 allowed_bearer_origins = []
 
 [llm]
-# Default LLM provider: "openai" | "claude" | "gemini" | "deepseek" | "ollama" | "openrouter" | "openai_compatible"
+# Default LLM provider: "deepseek" | "openai" | "claude" | "gemini" | "ollama" | "openrouter" | "openai_compatible"
 # 这里选择的 provider 决定了运行时会检查哪一组敏感字段。
-default_provider = "openai"
+default_provider = "deepseek"
 # Shared max concurrency for LLM requests. Higher values replenish faster but
 # may hit provider/local-proxy rate limits sooner.
 concurrency = 3

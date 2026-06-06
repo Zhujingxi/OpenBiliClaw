@@ -10,9 +10,13 @@ def _read(path: str) -> str:
 def test_shell_installers_recommend_same_default_llm_provider() -> None:
     install_sh = _read("scripts/install.sh")
     install_ps1 = _read("scripts/install.ps1")
+    config_example = _read("config.example.toml")
 
     expected_default = "Choose your LLM provider (default: deepseek):"
-    expected_supported = "Supported: deepseek | openai | gemini | claude | openrouter | ollama"
+    expected_supported = (
+        "Supported: deepseek | openai | gemini | claude | openrouter | ollama | "
+        "openai_compatible"
+    )
 
     assert expected_default in install_sh
     assert expected_default in install_ps1
@@ -20,6 +24,13 @@ def test_shell_installers_recommend_same_default_llm_provider() -> None:
     assert expected_supported in install_ps1
     assert "DeepSeek:   https://platform.deepseek.com/api_keys" in install_sh
     assert "DeepSeek:   https://platform.deepseek.com/api_keys" in install_ps1
+    config_lines = {
+        line.strip()
+        for line in config_example.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert 'default_provider = "deepseek"' in config_lines
+    assert 'default_provider = "openai"' not in config_lines
 
 
 def test_install_sh_uses_interactive_auto_init_contract() -> None:
@@ -77,6 +88,20 @@ def test_install_contract_blocks_init_when_ai_service_checks_fail() -> None:
     assert "default LLM provider or embedding service failed" in agent_doc
     assert "service_check_failed" in docker_doc
     assert "service_check_failed" in cli_doc
+
+
+def test_human_installers_run_full_terminal_wizard_before_init() -> None:
+    install_sh = _read("scripts/install.sh")
+    install_ps1 = _read("scripts/install.ps1")
+    bootstrap = _read("scripts/agent_bootstrap.py")
+    agent_doc = _read("docs/agent-install.md")
+
+    assert "--interactive-confirm" in install_sh
+    assert "--interactive-confirm" in install_ps1
+    assert "human_install_choices_set" in bootstrap
+    assert "human one-line installer asks LLM provider first" in agent_doc
+    assert "openai_compatible" in bootstrap
+    assert "GetPassWarning" in bootstrap
 
 
 def test_agent_install_llm_menu_numbering_matches_current_options() -> None:

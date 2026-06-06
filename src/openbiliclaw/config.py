@@ -145,7 +145,7 @@ class ModuleLLMConfig:
 class LLMConfig:
     """LLM configuration with global defaults and per-module overrides."""
 
-    default_provider: str = "openai"
+    default_provider: str = "deepseek"
     concurrency: int = DEFAULT_LLM_CONCURRENCY
     timeout: int = _DEFAULT_LLM_TIMEOUT
     fallback_enabled: bool = False
@@ -562,7 +562,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
 
     embedding_raw = llm_raw.get("embedding", {})
     llm = LLMConfig(
-        default_provider=llm_raw.get("default_provider", "openai"),
+        default_provider=llm_raw.get("default_provider", "deepseek"),
         concurrency=_normalize_llm_concurrency(llm_raw.get("concurrency")),
         timeout=_normalize_llm_timeout(llm_raw.get("timeout")),
         fallback_enabled=bool(llm_raw.get("fallback_enabled", False)),

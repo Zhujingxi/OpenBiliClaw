@@ -12,6 +12,9 @@
 - 新增 API：`GET /api/autostart-status` 远程可读、降级模式可读，返回固定无敏字段；`POST /api/autostart/apply` 仅 trusted-local 可写，带 env / `config.local.toml` shadow / unsupported guard，开启时先写 config 后注册 OS，关闭时先注销 OS 后写 config，失败尽量回滚到操作前状态。
 - 新增 CLI：`openbiliclaw autostart status|enable|disable`，并在 `config-show` 中展示开机自启动配置 / 系统注册状态。CLI 与 API 使用同一套 env-managed、shadow 和方向化事务规则。
 - 插件 `extension v0.3.67` 设置页通用 tab 新增「开机自启动」开关：打开时读状态，切换时即时调用 apply；不可管理时按 `env_managed` / `shadowed` / `unsupported_*` reason 禁用并展示行内提示。提示明确该开关只影响下次登录拉起后端，不启停当前进程；本机 Ollama 可能随启动预检一起拉起。
+- 修复一句话安装默认 LLM 分叉：`config.example.toml`、运行时默认值和 bootstrap 缺省检查统一改为 DeepSeek，避免新装先提示缺 `llm.openai.api_key`、随后又引导用户选择 DeepSeek；自动写入 Ollama embedding 后，bootstrap 状态现在从 config 回读 `ollama/bge-m3`，不再输出空 provider。
+- 修复一句话安装复用旧配置时的 OpenAI-compatible 路径：`agent_bootstrap.py` 现在把 `openai_compatible` 作为受支持远程 provider，缺失检查会报告 `llm.openai_compatible.api_key/base_url`，复用旧安装会同步远程 provider 的非空 `api_key/model/base_url`，避免只复用 `default_provider=openai_compatible` 后服务检查失败。
+- 人类直接运行 Bash / PowerShell 一行安装脚本时，`agent_bootstrap.py --interactive-confirm` 现在会先收集完整安装向导选项（LLM provider / API Key / base_url / model → embedding → B 站 Cookie → 小红书 / 抖音 / YouTube opt-in）再安装依赖、启动后端和运行 init；选「中转站 / OpenAI 协议兼容服务」会写入 `[llm.openai_compatible]`，AI-agent 非交互 `--llm-preset` 兼容路径保持不变。
 - 后端源码版本提升到 `v0.3.101`，准备发布 `backend-v0.3.101`；浏览器插件版本提升到 `extension-v0.3.67`。
 
 ## v0.3.100: 统一 discovery 待评估池与外站补池预算（2026-06-04）

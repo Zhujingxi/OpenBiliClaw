@@ -264,7 +264,7 @@ Native Windows (PowerShell, no Docker or WSL2 required):
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; iwr https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scripts/install.ps1 -UseBasicParsing | iex
 ```
 
-The script needs `git` and Python 3.11+. It clones the repo, installs dependencies, starts the backend, runs a health check, then asks for LLM, embedding, Bilibili cookie, Xiaohongshu opt-in, Douyin opt-in, and YouTube opt-in choices. Once the confirmations are complete, it first checks that the LLM provider and embedding service can really respond, then automatically runs init to build the first profile and discovery pool. If unsure, press Enter or choose the default.
+The script needs `git` and Python 3.11+. It clones the repo, then asks for LLM provider, embedding, Bilibili cookie, Xiaohongshu opt-in, Douyin opt-in, and YouTube opt-in choices in the terminal wizard before installing dependencies or starting the backend. Once the confirmations are complete, it starts the backend, runs the health check, verifies that the LLM provider and embedding service can really respond, then automatically runs init to build the first profile and discovery pool. If unsure, press Enter or choose the default.
 
 </details>
 

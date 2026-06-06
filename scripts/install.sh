@@ -501,7 +501,7 @@ PY
         echo "Next steps (credentials are missing):"
         echo ""
         echo "  1. Choose your LLM provider (default: deepseek):"
-        echo "     Supported: deepseek | openai | gemini | claude | openrouter | ollama"
+        echo "     Supported: deepseek | openai | gemini | claude | openrouter | ollama | openai_compatible"
         echo ""
         echo "  2. Ask which embedding service to use:"
         echo "     Default: local Ollama bge-m3 (free/offline/no extra API key)."

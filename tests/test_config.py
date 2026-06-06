@@ -82,7 +82,7 @@ class TestConfigDefaults:
         assert isinstance(config.api, ApiConfig)
         assert config.api.host == "0.0.0.0"
         assert config.api.port == 8420
-        assert config.llm.default_provider == "openai"
+        assert config.llm.default_provider == "deepseek"
         assert config.llm.concurrency == 3
         assert config.bilibili.auth_method == "cookie"
         assert config.scheduler.enabled is True
@@ -132,7 +132,7 @@ class TestConfigDefaults:
     def test_build_from_empty_dict(self) -> None:
         config = _build_config({})
         assert config.language == "zh"
-        assert config.llm.default_provider == "openai"
+        assert config.llm.default_provider == "deepseek"
         assert config.autostart.enabled is False
         assert config.autostart.manage_ollama is True
 

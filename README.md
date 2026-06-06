@@ -268,7 +268,7 @@ Windows 原生（PowerShell，不需要 Docker / WSL2）：
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; iwr https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scripts/install.ps1 -UseBasicParsing | iex
 ```
 
-脚本依赖 `git` 和 Python 3.11+。它会自动克隆仓库、安装依赖、启动后端、健康检查，再提示你补充 LLM、embedding、B 站 Cookie、小红书 opt-in、抖音 opt-in、YouTube opt-in 等决策；确认齐全后会先验证 LLM provider 和 embedding 服务都能真实响应，再自动运行 init，完成画像生成和首轮发现。不确定的选项直接回车或选默认。
+脚本依赖 `git` 和 Python 3.11+。它会自动克隆仓库，然后先在终端向导里收集 LLM provider、embedding、B 站 Cookie、小红书 opt-in、抖音 opt-in、YouTube opt-in 等决策，再安装依赖、启动后端和健康检查；确认齐全后会先验证 LLM provider 和 embedding 服务都能真实响应，再自动运行 init，完成画像生成和首轮发现。不确定的选项直接回车或选默认。
 
 </details>
 

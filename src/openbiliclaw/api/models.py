@@ -666,7 +666,7 @@ class ModuleLLMConfigOut(BaseModel):
 
 
 class LLMConfigOut(BaseModel):
-    default_provider: str = "openai"
+    default_provider: str = "deepseek"
     concurrency: int = 3
     timeout: int = 300
     fallback_enabled: bool = False

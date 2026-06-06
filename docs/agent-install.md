@@ -39,10 +39,10 @@ Either command:
 
 1. Clones the OpenBiliClaw repo (default `~/OpenBiliClaw` on Unix, `%USERPROFILE%\OpenBiliClaw` on Windows; override with the `INSTALL_DIR` env var)
 2. Auto-detects any existing OpenBiliClaw install under the standard candidate paths (`~/workspace/OpenBiliClaw`, `~/OpenBiliClaw`, `~/projects/OpenBiliClaw`, `~/code/OpenBiliClaw` — same set on both platforms, rooted at `$HOME` / `%USERPROFILE%`) and **reuses** its LLM API keys and Bilibili cookie so the user never has to retype them
-3. Installs Python dependencies (`uv sync` preferred, `pip install -e .` fallback)
-4. Starts the backend and runs a health check against `/api/health`. Local one-line installs default to `--host 0.0.0.0 --port 8420` so the Mobile Web `/m/` is reachable from phones on the same LAN; the status block's `Health URL` still uses a concrete local URL such as `http://127.0.0.1:8420/api/health` for curl verification
+3. In a human terminal, opens the full installer wizard **before dependency install or backend start**: human one-line installer asks LLM provider first, then provider credentials/model, embedding, Bilibili init limits, XHS / Douyin / YouTube opt-ins, and Bilibili cookie source
+4. Installs Python dependencies (`uv sync` preferred, `pip install -e .` fallback)
+5. Starts the backend and runs a health check against `/api/health`. Local one-line installs default to `--host 0.0.0.0 --port 8420` so the Mobile Web `/m/` is reachable from phones on the same LAN; the status block's `Health URL` still uses a concrete local URL such as `http://127.0.0.1:8420/api/health` for curl verification
    - **Optional LAN password gate**: exposing `0.0.0.0` makes the UI reachable by any device on the network. To require a login for LAN/remote devices (the local machine and the browser extension stay password-free), run `openbiliclaw set-password` (or answer "yes" to the init prompt), or set `OPENBILICLAW_API_AUTH_ENABLED=true` + `OPENBILICLAW_API_AUTH_PASSWORD=…` for unattended/Docker installs. See [`docs/modules/api-auth.md`](modules/api-auth.md). Behind a same-host reverse proxy, also set `[api.auth].trusted_proxies` or have the proxy enforce auth.
-5. Confirms embedding, Bilibili cookie source, and XHS / Douyin / YouTube opt-in choices with the user when the installer is running interactively
 6. Verifies the configured LLM provider and embedding service with real lightweight calls before init; if either fails, it blocks init with `status=service_check_failed`
 7. Automatically runs init after credentials, confirmations, and AI service checks are complete, then prints a self-contained **status block** at the very end of stdout:
 
@@ -293,7 +293,7 @@ user chooses an OpenAI-compatible gateway / preset path.
 > - 用户说"Azure OpenAI / 公司 Azure 部署" → 子菜单 #7 (azure)
 > - 用户说"自己跑的 vLLM / LMStudio / Ollama OpenAI 兼容 shim" → 子菜单 #8 (self-hosted)
 >
-> 子菜单选完后,bootstrap 会写到 `[llm.openai]` 段(provider 字段都是 `openai`,底层走的是 OpenAI Chat Completions 协议)。子菜单还会**显示服务介绍 + Key 申请链接**,并**预提醒 embedding 怎么办**(Kimi / MiniMax / Yi / 自建 没 embedding endpoint → Phase 3 自动 fallback Ollama bge-m3;Qwen / GLM / Azure / 中转站 有 embedding → Phase 3 高级选项可指向同一 base_url)。
+> 子菜单选完后,**human one-line installer 会写到 `[llm.openai_compatible]`**（provider=`openai_compatible`,base_url 必填,和 OpenAI 官方配置解耦）。AI-agent 非交互 `--llm-preset` 兼容路径本阶段仍写 `[llm.openai]` 段(provider 字段是 `openai`,底层走 OpenAI Chat Completions 协议),避免破坏既有 agent prompt。子菜单还会**显示服务介绍 + Key 申请链接**,并**预提醒 embedding 怎么办**(Kimi / MiniMax / Yi / 自建 没 embedding endpoint → Phase 3 自动 fallback Ollama bge-m3;Qwen / GLM / Azure / 中转站 有 embedding → Phase 3 高级选项可指向同一 base_url)。
 
 **AI agent 一键非交互式安装(`--llm-preset`)** —— 不走交互菜单,直接传 preset 名给 `agent_bootstrap.py`,Base URL + 默认模型自动从 preset 表里拿。**最常见的中转站场景排第一**:
 
