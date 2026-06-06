@@ -869,12 +869,24 @@ def create_app(
         except Exception:
             return False
 
-    # Writers that mutate the soul profile or trigger a runtime rebuild — these
-    # must not run concurrently with guided init (gui-init D1). EXCLUDED on
-    # purpose: /api/bilibili/cookie (handled in-handler as a no-op so the
-    # extension's auto-sync doesn't error), and /api/sources/*/task-result
-    # (init's own bootstrap collectors need those to land — those handlers skip
-    # their live profile/pool writes during init instead, see D1).
+    def _init_owns_task(task_id: str) -> bool:
+        """Whether ``task_id`` is a bootstrap task enqueued by the active init
+        run (so its task-result is init's own data, not a stale/steady-state
+        completion). Defensive — never raises."""
+        coord = getattr(ctx, "init_coordinator", None)
+        if coord is None or not task_id:
+            return False
+        try:
+            return bool(coord.is_owned_bootstrap_task(str(task_id)))
+        except Exception:
+            return False
+
+    # Writers that mutate the soul profile / discovery pool or trigger a runtime
+    # rebuild — these must not run concurrently with guided init (gui-init D1).
+    # EXCLUDED on purpose: /api/bilibili/cookie (in-handler no-op so the
+    # extension auto-sync doesn't error) and /api/sources/*/task-result (init's
+    # own bootstrap collectors need those to land — those handlers instead skip
+    # pool writes during init and only propagate init-OWNED results, see D1).
     _init_gated_write_paths = frozenset(
         {
             "/api/events",
@@ -888,6 +900,9 @@ def create_app(
             "/api/avoidance-probes/trigger",
             "/api/avoidance-probes/respond",
             "/api/delight/respond",
+            "/api/chat",
+            "/api/chat/turns",
+            "/api/init-completed",
             "/api/sources",
         }
     )
@@ -5076,14 +5091,17 @@ def create_app(
             if self_info_from_request:
                 _persist_xhs_self_info(self_info_from_request)
             self_info_now = self_info_from_request or _load_xhs_self_info()
-            # gui-init D1: while a guided init is active, the result is still
-            # persisted above (merge_result) so init's own bootstrap collector
-            # can read it — but skip every live pool / candidate / profile write
-            # so a stale or init-owned task-result can't mutate state mid-run.
-            # Stage 4 / post-init flow owns those. Computed BEFORE the URL/token
-            # backfill because _backfill_xhs_tokens writes content_cache +
-            # discovery_candidates.
+            # gui-init D1: the result is always persisted above (merge_result)
+            # so init's own collector can read it. During an active init:
+            #  - skip ALL live discovery-pool writes (stage 4 owns the pool);
+            #  - skip profile propagation for tasks NOT owned by this run (stale
+            #    / steady-state completions), but DO propagate init-OWNED
+            #    bootstrap results through the normal deduped path so the source
+            #    signals land in memory exactly once (handles force re-init).
+            # Computed BEFORE the URL/token backfill (_backfill_xhs_tokens writes
+            # content_cache + discovery_candidates).
             _init_busy = _init_active_now()
+            _skip_profile = _init_busy and not _init_owns_task(task_id)
             # Store discovered URLs + metadata
             valid_urls = [u for u in urls if isinstance(u, str) and u.startswith(xhs_url_prefix)]
             if valid_urls and not _init_busy:
@@ -5093,7 +5111,7 @@ def create_app(
                 enqueued = _cache_xhs_notes(ctx.database, added_notes, "task", self_info_now)
                 if enqueued:
                     asyncio.create_task(_drain_discovery_candidates_once())
-            if task_type == "bootstrap_profile" and added_notes and not _init_busy:
+            if task_type == "bootstrap_profile" and added_notes and not _skip_profile:
                 fresh_notes, note_keys_by_index = _filter_new_source_bootstrap_items(
                     "xhs",
                     added_notes,
@@ -5254,9 +5272,11 @@ def create_app(
                 debug=debug,
                 complete=is_final,
             )
-            # gui-init D1: persist the result (above) for init's own collector,
-            # but skip live profile propagation while a guided init is active.
-            if task_type == "bootstrap_profile" and added_videos and not _init_active_now():
+            # gui-init D1: persist the result (above) for init's own collector;
+            # during init skip profile propagation for non-owned results, but
+            # propagate init-OWNED bootstrap results through the deduped path.
+            _skip_profile = _init_active_now() and not _init_owns_task(task_id)
+            if task_type == "bootstrap_profile" and added_videos and not _skip_profile:
                 fresh_videos, video_keys_by_index = _filter_new_source_bootstrap_items(
                     "dy",
                     added_videos,
@@ -5387,9 +5407,11 @@ def create_app(
                 debug=debug,
                 complete=is_final,
             )
-            # gui-init D1: persist the result (above) for init's own collector,
-            # but skip live profile propagation while a guided init is active.
-            if task_type == "bootstrap_profile" and added_items and not _init_active_now():
+            # gui-init D1: persist the result (above) for init's own collector;
+            # during init skip profile propagation for non-owned results, but
+            # propagate init-OWNED bootstrap results through the deduped path.
+            _skip_profile = _init_active_now() and not _init_owns_task(task_id)
+            if task_type == "bootstrap_profile" and added_items and not _skip_profile:
                 fresh_items, item_keys_by_index = _filter_new_source_bootstrap_items(
                     "yt",
                     added_items,

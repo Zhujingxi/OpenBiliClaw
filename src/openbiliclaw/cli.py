@@ -4456,20 +4456,17 @@ async def run_guided_init(
             )
         )
     bilibili_event_count = len(events)
+    # Persist only B站 events to memory here. Cross-platform (xhs/dy/yt) events
+    # are propagated by the task-result handler — which, during init, only
+    # propagates init-OWNED results and reuses its bootstrap-key dedupe (so a
+    # force re-init within the task-reuse window doesn't double-insert). They
+    # still feed *this* run's analyze/profile via the collected ``events`` list
+    # below; memory persistence is owned by the handler on both CLI and API
+    # paths (gui-init review §5e).
     events_to_persist = list(events)
     events.extend(xhs_events)
     events.extend(dy_events)
     events.extend(yt_events)
-    # On the API path the task-result handlers skip live propagate_event while
-    # init is active (gui-init D1), so the shared pipeline must persist the
-    # collected cross-platform events into memory itself — otherwise GUI init
-    # would analyze them but never store them as event memory. The CLI path
-    # leaves source-event persistence to the running server's task-result
-    # handler (coordinator is None there), so it must NOT double-propagate.
-    if coordinator is not None:
-        events_to_persist.extend(xhs_events)
-        events_to_persist.extend(dy_events)
-        events_to_persist.extend(yt_events)
     # Source-share tuning does an unlocked load_config/save_config. That's
     # fine for the CLI (single-process, no live runtime), but on the API path
     # it would mutate config.toml outside _CONFIG_SAVE_LOCK / rebuild_from_config

@@ -6830,6 +6830,27 @@ class TestGuidedInitEndpoints:
         assert resp.status_code == 409
         assert resp.json()["error"] == "init_running"
 
+    def test_soul_and_pool_writers_gated_during_init(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        # Chat (dialogue learning), probe responses, and init-completed all
+        # mutate soul/pool state and must be blocked while a run is active.
+        gated_paths = [
+            "/api/chat",
+            "/api/chat/turns",
+            "/api/delight/respond",
+            "/api/interest-probes/respond",
+            "/api/avoidance-probes/respond",
+            "/api/init-completed",
+        ]
+        app, _ = self._make_app(tmp_path)
+        with TestClient(app) as client:
+            app.state.runtime_context.init_coordinator.try_start("active")
+            for path in gated_paths:
+                resp = client.post(path, json={})
+                assert resp.status_code == 409, f"{path} not gated ({resp.status_code})"
+                assert resp.json().get("error") == "init_running", path
+
     def test_cookie_same_value_is_noop_during_init(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient
 
