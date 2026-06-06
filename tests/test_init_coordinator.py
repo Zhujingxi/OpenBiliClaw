@@ -143,3 +143,56 @@ def test_get_status_idle_when_empty(tmp_path: Path) -> None:
     assert status["running"] is False
     assert status["status"] == "idle"
     assert status["current_stage"] == 0
+
+
+# ── A3: RuntimeContext wiring ──────────────────────────────────────────────
+
+
+def test_runtime_context_exposes_lazy_init_coordinator(tmp_path: Path) -> None:
+    from openbiliclaw.api.runtime_context import RuntimeContext
+
+    db = Database(tmp_path / "ctx.db")
+    db.initialize()
+    ctx = RuntimeContext(database=db)
+    c1 = ctx.init_coordinator
+    assert isinstance(c1, InitCoordinator)
+    assert ctx.init_coordinator is c1  # memoized singleton
+    # Reads ctx.database lazily, so it actually drives the wired DB.
+    assert c1.try_start("r1") is True
+    assert db.get_latest_init_run()["run_id"] == "r1"
+
+
+def test_coordinator_reads_ctx_components_lazily_not_cached(tmp_path: Path) -> None:
+    from openbiliclaw.api.runtime_context import RuntimeContext
+
+    db1 = Database(tmp_path / "a.db")
+    db1.initialize()
+    ctx = RuntimeContext(database=db1)
+    coord = ctx.init_coordinator
+    # Swap a component on the ctx (mirrors hot-reload swapping runtime_controller):
+    # the same coordinator must use the new instance, not one cached at build.
+    db2 = Database(tmp_path / "b.db")
+    db2.initialize()
+    ctx.database = db2
+    coord.try_start("r2")
+    assert db2.get_latest_init_run()["run_id"] == "r2"
+    assert db1.get_latest_init_run() is None
+
+
+def test_startup_reconciles_stale_init_run(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from openbiliclaw.api.app import create_app
+
+    db = Database(tmp_path / "startup.db")
+    db.initialize()
+    db.try_reserve_init_starting("stale")
+    db.update_init_run("stale", status="running")
+
+    app = create_app(memory_manager=object(), database=db, soul_engine=object())
+    with TestClient(app):  # entering triggers the startup event
+        pass
+
+    run = db.get_latest_init_run()
+    assert run["status"] == "failed"
+    assert run["error_reason"] == "interrupted"

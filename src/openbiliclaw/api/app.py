@@ -1632,6 +1632,16 @@ def create_app(
         except Exception:
             logger.debug("Image cache cleanup failed", exc_info=True)
 
+        # Guided-init crash recovery: fail any run left starting/running by a
+        # prior crash so /api/init-status never reports a stuck running=true.
+        # Must run even in degraded mode (before the early return below).
+        try:
+            reconciled = ctx.init_coordinator.reconcile_on_boot()
+            if reconciled:
+                logger.info("Reconciled %d stale guided-init run(s) on boot", reconciled)
+        except Exception:
+            logger.debug("Guided-init boot reconciliation failed", exc_info=True)
+
         if bool(getattr(ctx, "degraded", False)):
             return
         await ctx.restart_background_tasks(app)

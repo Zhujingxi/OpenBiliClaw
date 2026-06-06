@@ -243,6 +243,11 @@ class RuntimeContext:
     # are constructed so old detached work doesn't compete with the freshly
     # built runtime for SQLite writes / LLM tokens.
     task_registry: BackgroundTaskRegistry = field(default_factory=BackgroundTaskRegistry)
+    # Lazily-built guided-init coordinator (gui-init spec §5). Not a constructor
+    # arg; created on first access bound to THIS ctx so it always reads the
+    # current database / runtime_controller even after a hot-reload swaps them
+    # (review R2 A-1). All three construct paths inherit it via the property.
+    _init_coordinator: Any = field(default=None, init=False, repr=False, compare=False)
 
     # ── Swappable (rebuilt on hot-reload) ───────────────────────────
     config: Any = None
@@ -259,6 +264,15 @@ class RuntimeContext:
     runtime_controller: Any = None
     account_sync_service: Any = None
     auto_update_service: Any = None
+
+    @property
+    def init_coordinator(self) -> Any:
+        """Guided-init coordinator bound to this ctx (lazy singleton, spec §5)."""
+        if self._init_coordinator is None:
+            from openbiliclaw.runtime.init_coordinator import InitCoordinator
+
+            self._init_coordinator = InitCoordinator(self)
+        return self._init_coordinator
 
     def background_llm_work_allowed(self) -> bool:
         """Return whether daemon-owned background LLM / embedding work may run."""
