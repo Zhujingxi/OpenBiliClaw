@@ -6670,3 +6670,131 @@ def test_cap_keeping_user_added_keeps_manual_entries_past_limit() -> None:
     out = _cap_keeping_user_added(doms, ["mine"], 8, key=lambda d: d.domain)
     assert any(d.domain == "mine" for d in out)
     assert len(out) == 9  # 8 head + 1 user-added
+
+
+class _FakeInitPrereqs:
+    """Controllable stand-in for InitPrereqs (E2 endpoint tests)."""
+
+    def __init__(self, *, bili: str = "ok", chat: bool = True, platforms=None) -> None:
+        self._bili = bili
+        self._chat = chat
+        self._platforms = list(platforms or [])
+
+    async def bilibili_check(self) -> str:
+        return self._bili
+
+    async def chat_ready(self) -> bool:
+        return self._chat
+
+    def enabled_platforms(self) -> list[str]:
+        return list(self._platforms)
+
+
+class TestGuidedInitEndpoints:
+    """E2: POST /api/init + POST /api/init/cancel (local-only, gui-init §2/§5b)."""
+
+    def _make_app(self, tmp_path, *, profile_ready=False, prereqs=None):
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "e2.db")
+        db.initialize()
+        soul = SimpleNamespace(is_profile_ready=lambda: profile_ready)
+        app = create_app(memory_manager=object(), database=db, soul_engine=soul)
+        app.state.auth_gate.is_trusted_local = lambda request: True
+        if prereqs is not None:
+            app.state.runtime_context._init_prereqs = prereqs
+        return app, db
+
+    def test_init_rejects_non_local(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        app, _ = self._make_app(tmp_path)
+        app.state.auth_gate.is_trusted_local = lambda request: False
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={})
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "local_only"
+
+    def test_init_rejects_docker_runtime(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        monkeypatch.setattr(
+            "openbiliclaw.docker_runtime.is_running_in_container", lambda *a, **k: True
+        )
+        app, db = self._make_app(tmp_path)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={})
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "unsupported_runtime"
+        # Rejected before reserving — no run row created at all.
+        assert db.get_latest_init_run() is None
+
+    def test_init_rejects_already_initialized_without_force(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        app, db = self._make_app(tmp_path, profile_ready=True)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={})
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "already_initialized"
+        assert db.get_latest_init_run() is None
+
+    def test_init_already_running_returns_409(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        app, _ = self._make_app(tmp_path)
+        with TestClient(app) as client:
+            # Seed AFTER startup reconcile (which would otherwise fail a stale
+            # "starting" row) so the run is genuinely active at POST time.
+            app.state.runtime_context.init_coordinator.try_start("existing")
+            resp = client.post("/api/init", json={})
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "already_running"
+
+    def test_init_missing_bilibili_resets_to_idle(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="failed", chat=True)
+        app, db = self._make_app(tmp_path, prereqs=prereqs)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={})
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "bilibili_not_logged_in"
+        # Critical: the reserved run was rolled back, never left "starting".
+        run = db.get_latest_init_run()
+        assert run["status"] == "idle"
+        assert run["error_reason"] == "bilibili_not_logged_in"
+        assert app.state.runtime_context.init_coordinator.init_active() is False
+
+    def test_init_missing_llm_resets_to_idle(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=False)
+        app, db = self._make_app(tmp_path, prereqs=prereqs)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={})
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "llm_not_ready"
+        assert db.get_latest_init_run()["status"] == "idle"
+        assert app.state.runtime_context.init_coordinator.init_active() is False
+
+    def test_cancel_without_active_run_returns_409(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        app, _ = self._make_app(tmp_path)
+        with TestClient(app) as client:
+            resp = client.post("/api/init/cancel", json={})
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "not_running"
+
+    def test_cancel_rejects_non_local(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        app, _ = self._make_app(tmp_path)
+        app.state.auth_gate.is_trusted_local = lambda request: False
+        with TestClient(app) as client:
+            resp = client.post("/api/init/cancel", json={})
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "local_only"

@@ -1260,6 +1260,152 @@ def create_app(
             detail=detail,
         )
 
+    def _init_runtime_supported() -> tuple[bool, str]:
+        """Cheap guard: GUI init needs a writable host runtime (gui-init §5b,
+        review R2 A-7). Docker uses the headless auto-init path instead."""
+        from openbiliclaw.docker_runtime import is_running_in_container
+
+        if is_running_in_container():
+            return False, "Docker 运行时不支持图形化初始化"
+        cfg = ctx.config
+        if cfg is not None:
+            try:
+                if not os.access(str(cfg.data_path), os.W_OK):
+                    return False, "数据目录不可写"
+            except Exception:
+                pass
+        return True, ""
+
+    async def _run_guided_init_wrapper(run_id: str) -> None:
+        """Sole status/event writer for an API-launched guided init (gui-init
+        §5f). Drives the shared ``run_guided_init`` through the coordinator and
+        persists the terminal state here — completed / failed / cancelled —
+        never via a side path. Imported lazily to avoid an import cycle with
+        the CLI module that owns the shared pipeline.
+        """
+        from openbiliclaw.cli import (
+            _INIT_BILIBILI_FAVORITE_LIMIT,
+            _INIT_BILIBILI_FOLLOW_LIMIT,
+            _INIT_POOL_TARGET_COUNT,
+            GuidedInitError,
+            run_guided_init,
+        )
+
+        coord = ctx.init_coordinator
+
+        async def _api_discover_backfill(
+            profile: Any, *, target_pool_count: int, label_suffix: str = ""
+        ) -> int:
+            # API path backfills through the live controller so it holds the
+            # refresh lock (B1); ``label_suffix`` is CLI-only console flavour.
+            return int(
+                await ctx.runtime_controller.run_init_backfill(
+                    profile, target_pool_count, fully_parallel=True
+                )
+            )
+
+        try:
+            await coord.mark_running(run_id)
+            enabled = set(ctx.init_prereqs.enabled_platforms())
+            result = await run_guided_init(
+                client=ctx.bilibili_client,
+                memory=ctx.memory_manager,
+                soul_engine=ctx.soul_engine,
+                favorite_limit=_INIT_BILIBILI_FAVORITE_LIMIT,
+                follow_limit=_INIT_BILIBILI_FOLLOW_LIMIT,
+                include_xhs="xiaohongshu" in enabled,
+                include_dy="douyin" in enabled,
+                include_yt="youtube" in enabled,
+                target_pool_count=_INIT_POOL_TARGET_COUNT,
+                discover_backfill=_api_discover_backfill,
+                coordinator=coord,
+                run_id=run_id,
+            )
+            await coord.complete(run_id, partial_success=result.discovery_error)
+        except asyncio.CancelledError:
+            # Cancel was requested via /api/init/cancel — shield the terminal
+            # write so the cancelled status still lands before we propagate.
+            with suppress(Exception):
+                await asyncio.shield(coord.cancel(run_id))
+            raise
+        except GuidedInitError as exc:
+            logger.warning("guided init %s failed: %s", run_id, exc.reason)
+            with suppress(Exception):
+                await coord.fail(run_id, exc.reason)
+        except Exception:
+            logger.exception("guided init %s crashed", run_id)
+            with suppress(Exception):
+                await coord.fail(run_id, "internal_error")
+
+    @app.post("/api/init")
+    async def start_guided_init(request: Request) -> JSONResponse:
+        """Launch guided init in the background (local-only; gui-init §2/§5b).
+
+        Cheap rejections run BEFORE reserving the run so a rejected request
+        never leaves a stuck ``starting`` row (review R2 A-2). The single-flight
+        guard is the DB reservation inside ``try_start``.
+        """
+        if not _get_auth_gate().is_trusted_local(request):
+            return JSONResponse({"error": "local_only"}, status_code=403)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        force = bool(body.get("force", False)) if isinstance(body, dict) else False
+
+        coord = ctx.init_coordinator
+
+        supported, detail = _init_runtime_supported()
+        if not supported:
+            return JSONResponse(
+                {"error": "unsupported_runtime", "detail": detail}, status_code=409
+            )
+        if not force and _health_profile_ready() is True:
+            return JSONResponse(
+                {"error": "already_initialized", "detail": "已初始化；重建请传 force"},
+                status_code=409,
+            )
+
+        run_id = uuid.uuid4().hex
+        if not coord.try_start(run_id):
+            return JSONResponse({"error": "already_running"}, status_code=409)
+
+        # Critical-section revalidation: prereqs may have lapsed between the
+        # status poll and now. On a miss, roll the reservation back to idle so
+        # no stuck row remains (review R2 A-2).
+        bili = await ctx.init_prereqs.bilibili_check()
+        if bili != "ok":
+            coord.reset_to_idle(run_id, reason="bilibili_not_logged_in")
+            return JSONResponse({"error": "bilibili_not_logged_in"}, status_code=409)
+        chat = await ctx.init_prereqs.chat_ready()
+        if not chat:
+            coord.reset_to_idle(run_id, reason="llm_not_ready")
+            return JSONResponse({"error": "llm_not_ready"}, status_code=409)
+
+        registry = getattr(ctx, "task_registry", None)
+        if registry is not None:
+            task = registry.track("guided_init", _run_guided_init_wrapper(run_id))
+        else:
+            task = asyncio.create_task(_run_guided_init_wrapper(run_id))
+        coord.attach_task(run_id, task)
+        return JSONResponse({"run_id": run_id, **coord.get_status()}, status_code=202)
+
+    @app.post("/api/init/cancel")
+    async def cancel_guided_init(request: Request) -> JSONResponse:
+        """Cooperatively cancel the in-flight guided init (local-only)."""
+        if not _get_auth_gate().is_trusted_local(request):
+            return JSONResponse({"error": "local_only"}, status_code=403)
+        coord = ctx.init_coordinator
+        run = ctx.database.get_latest_init_run() if ctx.database is not None else None
+        if run is None or not coord.init_active():
+            return JSONResponse({"error": "not_running"}, status_code=409)
+        cancelled = await coord.cancel_current_run(run["run_id"])
+        if not cancelled:
+            return JSONResponse({"error": "not_running"}, status_code=409)
+        return JSONResponse(
+            {"cancelling": True, "run_id": run["run_id"]}, status_code=202
+        )
+
     @app.get("/api/image-proxy", response_model=None)
     async def image_proxy(
         url: str = Query(..., description="URL-encoded image URL to proxy"),
