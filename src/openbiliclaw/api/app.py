@@ -5164,7 +5164,14 @@ def create_app(
                         if key:
                             propagated_keys.append(key)
                         propagated += 1
-                await _ingest_profile_update_events(profile_events)
+                # During init, skip the incremental profile-update pipeline even
+                # for owned results — run_guided_init's explicit analyze/build
+                # owns the profile this run, and a force re-init has an existing
+                # profile that _ingest would otherwise mutate concurrently
+                # (gui-init review). Memory propagation above still records the
+                # signals; the pipeline resumes for steady-state after init.
+                if not _init_busy:
+                    await _ingest_profile_update_events(profile_events)
                 _mark_source_bootstrap_keys("xhs", propagated_keys)
                 if skipped_self > 0:
                     logger.info(
@@ -5304,7 +5311,8 @@ def create_app(
             # gui-init D1: persist the result (above) for init's own collector;
             # during init skip profile propagation for non-owned results, but
             # propagate init-OWNED bootstrap results through the deduped path.
-            _skip_profile = _init_active_now() and not _init_owns_task(task_id)
+            _init_busy = _init_active_now()
+            _skip_profile = _init_busy and not _init_owns_task(task_id)
             if task_type == "bootstrap_profile" and added_videos and not _skip_profile:
                 fresh_videos, video_keys_by_index = _filter_new_source_bootstrap_items(
                     "dy",
@@ -5320,7 +5328,9 @@ def create_app(
                         key = video_keys_by_index.get(index, "")
                         if key:
                             propagated_keys.append(key)
-                await _ingest_profile_update_events(profile_events)
+                # Skip the incremental pipeline during init (see xhs handler).
+                if not _init_busy:
+                    await _ingest_profile_update_events(profile_events)
                 _mark_source_bootstrap_keys("dy", propagated_keys)
         else:
             _dy_task_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
@@ -5439,7 +5449,8 @@ def create_app(
             # gui-init D1: persist the result (above) for init's own collector;
             # during init skip profile propagation for non-owned results, but
             # propagate init-OWNED bootstrap results through the deduped path.
-            _skip_profile = _init_active_now() and not _init_owns_task(task_id)
+            _init_busy = _init_active_now()
+            _skip_profile = _init_busy and not _init_owns_task(task_id)
             if task_type == "bootstrap_profile" and added_items and not _skip_profile:
                 fresh_items, item_keys_by_index = _filter_new_source_bootstrap_items(
                     "yt",
@@ -5455,7 +5466,9 @@ def create_app(
                         key = item_keys_by_index.get(index, "")
                         if key:
                             propagated_keys.append(key)
-                await _ingest_profile_update_events(profile_events)
+                # Skip the incremental pipeline during init (see xhs handler).
+                if not _init_busy:
+                    await _ingest_profile_update_events(profile_events)
                 _mark_source_bootstrap_keys("yt", propagated_keys)
         else:
             _yt_task_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
