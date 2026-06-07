@@ -132,25 +132,30 @@ def _resolve_runtime_paths() -> tuple[Path, Path]:
     ``project_root`` is where ``config.toml`` / ``data/`` / ``logs/`` live.
     ``bundled_resources`` is the read-only directory holding the default
     ``config.example.toml`` (and bundled ``ollama``) shipped with the package.
+
+    An explicit ``OPENBILICLAW_PROJECT_ROOT`` env var overrides ``project_root``
+    (portable installs, multiple profiles, isolated tests); bundled resources are
+    still resolved from the executable. ``main`` re-exports the resolved root, so
+    a pre-set value flows through to the backend unchanged.
     """
+    override = os.environ.get("OPENBILICLAW_PROJECT_ROOT", "").strip()
+
     if not getattr(sys, "frozen", False):
         # Development fallback
         repo_root = Path(__file__).resolve().parent.parent
-        return repo_root, repo_root
+        return (Path(override) if override else repo_root), repo_root
 
     exe_dir = Path(sys.executable).resolve().parent
     if _is_macos_app_bundle(exe_dir):
-        project_root = _user_data_root()
         bundled_resources = exe_dir.parent / "Resources"
-        return project_root, bundled_resources
+        return (Path(override) if override else _user_data_root()), bundled_resources
 
     # onedir layout (Windows): the install dir is overwritten on upgrade and may
     # be removed on uninstall, so user data lives in a per-user root instead of
     # next to the executable. The install dir still provides the bundled template
     # config + ollama as read-only resources.
-    project_root = _user_data_root()
     bundled_resources = exe_dir
-    return project_root, bundled_resources
+    return (Path(override) if override else _user_data_root()), bundled_resources
 
 
 def _seed_default_config(project_root: Path, bundled_resources: Path) -> bool:
@@ -372,18 +377,24 @@ def _open_in_default_app(path: Path) -> None:
 
 
 def _view_runtime_logs(log_path: Path) -> None:
-    """Show the running log. On Windows, open a live-tailing console window
-    (closest to the original console the user had); elsewhere open the file."""
-    if os.name == "nt":
-        try:
+    """Show the running log in a live-tailing console/terminal (parity across
+    Windows + macOS); fall back to opening the log file in the default app."""
+    try:
+        if os.name == "nt":
             ps_cmd = f"Get-Content -LiteralPath '{log_path}' -Wait -Tail 200"
             subprocess.Popen(  # noqa: S603
                 ["powershell", "-NoExit", "-NoProfile", "-Command", ps_cmd],
                 creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
             )
             return
-        except Exception as exc:  # noqa: BLE001 — fall back to opening the file
-            print(f"[OpenBiliClaw] 打开实时日志失败: {exc}")
+        if sys.platform == "darwin":
+            # Open Terminal live-tailing the log (the macOS analogue of the
+            # Windows console). Path is double-quoted to survive spaces.
+            script = f'tell application "Terminal" to do script "tail -n 200 -f \\"{log_path}\\""'
+            subprocess.Popen(["osascript", "-e", script])  # noqa: S603,S607
+            return
+    except Exception as exc:  # noqa: BLE001 — fall back to opening the file
+        print(f"[OpenBiliClaw] 打开实时日志失败: {exc}")
     _open_in_default_app(log_path)
 
 
@@ -402,13 +413,15 @@ def _tray_icon_image() -> Any:
 
 
 def _should_use_tray() -> bool:
-    """Tray mode = frozen Windows build with pystray + Pillow importable.
+    """Tray mode = a frozen Windows or macOS build with pystray + Pillow.
 
-    Gated to Windows: the macOS tray backend needs heavyweight pyobjc deps and
-    the ``.app`` already runs without a console, so it keeps the simple
-    foreground server.
+    Windows → system tray (bottom-right); macOS → menu-bar status item. Both run
+    uvicorn in the background and the tray in the foreground. Other platforms
+    (and dev runs) keep the simple foreground server.
     """
-    if not getattr(sys, "frozen", False) or os.name != "nt":
+    if not getattr(sys, "frozen", False):
+        return False
+    if os.name != "nt" and sys.platform != "darwin":
         return False
     try:
         import PIL  # noqa: F401
@@ -534,10 +547,11 @@ def main() -> None:
     server = uvicorn.Server(config)
 
     if _should_use_tray():
-        # Windowed Windows build: uvicorn runs in the background and a system-tray
-        # icon owns the foreground. No console window appears; closing nothing
-        # stops it — only the tray menu's "退出" quits the backend.
-        print("[OpenBiliClaw] 已最小化到系统托盘（右下角）；右键托盘图标可查看日志或退出。")
+        # Windowed build: uvicorn runs in the background and a tray icon owns the
+        # foreground (Windows system tray / macOS menu bar). No console window
+        # appears; closing nothing stops it — only the tray menu's "退出" quits.
+        where = "系统托盘（右下角）" if os.name == "nt" else "菜单栏（右上角）"
+        print(f"[OpenBiliClaw] 已最小化到{where}；右键托盘图标可查看日志或退出。")
         _run_server_in_tray(server, host, port, project_root)
     else:
         # Dev / non-Windows / tray unavailable: run in the foreground (console).

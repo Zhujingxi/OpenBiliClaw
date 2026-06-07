@@ -86,7 +86,8 @@ def test_user_data_root_delegates_to_pure_resolver() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_resolve_runtime_paths_dev_fallback_uses_repo_root() -> None:
+def test_resolve_runtime_paths_dev_fallback_uses_repo_root(monkeypatch) -> None:
+    monkeypatch.delenv("OPENBILICLAW_PROJECT_ROOT", raising=False)
     project_root, bundled = entry._resolve_runtime_paths()
 
     repo_root = Path(entry.__file__).resolve().parent.parent
@@ -100,6 +101,7 @@ def test_resolve_runtime_paths_onedir_splits_data_from_install_dir(
     # Simulate a frozen onedir launch. We can't force os.name="nt" on POSIX CI
     # (breaks pathlib), so assert the *split* property — data root is separate
     # from the install dir — using whatever _user_data_root() the host returns.
+    monkeypatch.delenv("OPENBILICLAW_PROJECT_ROOT", raising=False)
     install_dir = tmp_path / "Programs" / "OpenBiliClaw"
     install_dir.mkdir(parents=True)
     monkeypatch.setattr(entry.sys, "frozen", True, raising=False)
@@ -111,6 +113,17 @@ def test_resolve_runtime_paths_onedir_splits_data_from_install_dir(
     assert bundled == install_dir
     assert project_root == entry._user_data_root()
     assert project_root != bundled
+
+
+def test_resolve_runtime_paths_honors_project_root_override(monkeypatch, tmp_path: Path) -> None:
+    # An explicit OPENBILICLAW_PROJECT_ROOT relocates user data (portable installs
+    # / isolated tests) while bundled resources still resolve from the package.
+    override = tmp_path / "custom-data-root"
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(override))
+
+    project_root, _bundled = entry._resolve_runtime_paths()
+
+    assert project_root == override
 
 
 # --------------------------------------------------------------------------- #
@@ -259,11 +272,12 @@ def test_should_use_tray_false_when_not_frozen() -> None:
     assert entry._should_use_tray() is False
 
 
-def test_should_use_tray_false_on_non_windows(monkeypatch) -> None:
-    # Frozen but not Windows → no tray (macOS .app already runs without a console;
-    # its tray backend would need pyobjc). Short-circuits before importing pystray.
+def test_should_use_tray_false_on_unsupported_platform(monkeypatch) -> None:
+    # Frozen but neither Windows nor macOS (e.g. Linux) → no tray, regardless of
+    # whether pystray is importable. Short-circuits before the import check.
     monkeypatch.setattr(entry.sys, "frozen", True, raising=False)
     monkeypatch.setattr(entry.os, "name", "posix")
+    monkeypatch.setattr(entry.sys, "platform", "linux")
 
     assert entry._should_use_tray() is False
 

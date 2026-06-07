@@ -17,14 +17,26 @@ block_cipher = None
 project_root = Path(SPECPATH).parent
 bundle_version = os.environ.get("OPENBILICLAW_BUNDLE_VERSION", "0.2.0")
 
-# System-tray desktop mode (packaging/entry.py) is Windows-only: it needs
-# pystray + Pillow bundled. On macOS/Linux the tray is never used (the .app runs
-# without a console already) and pystray's macOS backend drags in pyobjc — so
-# exclude it there to keep the build clean.
+# System-tray desktop mode (packaging/entry.py): the app runs as a tray icon
+# (Windows system tray / macOS menu bar) with no console window. Bundle pystray
+# + Pillow on both; the macOS backend additionally needs pyobjc (Foundation /
+# AppKit). Linux isn't a build target, so exclude pystray there.
 _tray_hiddenimports = []
 _tray_excludes = []
 if platform.system() == "Windows":
     _tray_hiddenimports = ["pystray", "pystray._win32", "PIL", "PIL.Image", "PIL.ImageDraw"]
+elif platform.system() == "Darwin":
+    _tray_hiddenimports = [
+        "pystray",
+        "pystray._darwin",
+        "PIL",
+        "PIL.Image",
+        "PIL.ImageDraw",
+        "Foundation",
+        "AppKit",
+        "objc",
+        "CoreFoundation",
+    ]
 else:
     _tray_excludes = ["pystray"]
 
@@ -178,5 +190,8 @@ if platform.system() == "Darwin":
             "CFBundleShortVersionString": bundle_version,
             "LSMinimumSystemVersion": "10.15",
             "NSHighResolutionCapable": True,
+            # Menu-bar agent: run as a status-bar item with no Dock icon,
+            # matching the Windows system-tray behaviour (packaging/entry.py).
+            "LSUIElement": True,
         },
     )

@@ -30,7 +30,9 @@ jobs:
       - name: Install project + PyInstaller
         run: |
           python -m pip install --upgrade pip
-          pip install -e . pyinstaller
+          # [packaging] pulls pyinstaller + pystray + Pillow + (on macOS) pyobjc
+          # for the menu-bar tray desktop mode.
+          pip install -e ".[packaging]"
 
       - name: Install Ollama (bundled into the app for local bge-m3 embedding)
         run: brew install ollama
@@ -67,9 +69,8 @@ jobs:
       - name: Install project + PyInstaller
         run: |
           python -m pip install --upgrade pip
-          # pystray + pillow power the Windows system-tray desktop mode
-          # (packaging/entry.py); PyInstaller must see them to bundle them.
-          pip install -e . pyinstaller pystray pillow
+          # [packaging] pulls pyinstaller + pystray + Pillow (tray desktop mode).
+          pip install -e ".[packaging]"
 
       - name: Resolve version
         id: ver

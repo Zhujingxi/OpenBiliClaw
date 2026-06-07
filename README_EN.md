@@ -18,10 +18,6 @@
 
 A local-first AI discovery agent that learns your taste across Bilibili, Xiaohongshu, Douyin, YouTube and the open web — without handing your profile to another platform.
 
-<p align="center">
-  <img src="docs/images/hero-demo.gif" width="820" alt="OpenBiliClaw local-first cross-platform AI discovery agent demo: platform signals, local backend, taste profile, reasoned cards, and feedback loop" />
-</p>
-
 | Cross-platform | Local-first | Trainable |
 |---|---|---|
 | Bilibili / Xiaohongshu / Douyin / YouTube / Web | Data stays in your local SQLite by default | Likes, dislikes, and chat feedback shape future recommendations |
@@ -39,6 +35,10 @@ A local-first AI discovery agent that learns your taste across Bilibili, Xiaohon
 ### Privacy at a glance
 
 Default data flow: browser extension → your configured local OpenBiliClaw backend → SQLite on your machine. The extension does not send data to servers operated by OpenBiliClaw developers. If you configure a cloud LLM or embedding provider, the relevant content is sent to that provider according to your configuration. See the [Privacy Policy](docs/privacy.md).
+
+<p align="center">
+  <img src="docs/images/hero-demo.gif" width="820" alt="OpenBiliClaw local-first cross-platform AI discovery agent demo: platform signals, local backend, taste profile, reasoned cards, and feedback loop" />
+</p>
 
 ## Quick Start
 

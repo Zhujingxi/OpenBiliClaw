@@ -20,10 +20,6 @@
 
 一个只为你一个人工作的本地 AI 推荐 Agent：把 B 站、小红书、抖音、YouTube 等平台的兴趣信号连起来，主动帮你找更有惊喜的内容。
 
-<p align="center">
-  <img src="docs/images/hero-demo.gif" width="820" alt="OpenBiliClaw 跨平台本地推荐 Agent 演示：信号进入本地后端、生成画像、解释推荐理由、根据反馈继续学习" />
-</p>
-
 | 跨平台 | 本地优先 | 可调教 |
 |---|---|---|
 | B 站 / 小红书 / 抖音 / YouTube / Web | 数据默认留在本机 SQLite | 喜欢、不感兴趣、聊天反馈都会改变后续推荐 |
@@ -41,6 +37,10 @@
 ### 隐私速览
 
 默认数据流向：浏览器插件 → 你配置的本地 OpenBiliClaw 后端 → 本机 SQLite。插件不会把数据发送到 OpenBiliClaw 开发者运营的服务器。若你配置云端 LLM / embedding，相关内容会按你的配置发送给对应服务商。详见 [隐私政策](docs/privacy.md)。
+
+<p align="center">
+  <img src="docs/images/hero-demo.gif" width="820" alt="OpenBiliClaw 跨平台本地推荐 Agent 演示：信号进入本地后端、生成画像、解释推荐理由、根据反馈继续学习" />
+</p>
 
 ## 快速开始
 
