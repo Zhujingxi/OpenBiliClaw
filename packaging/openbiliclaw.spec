@@ -148,10 +148,39 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# Boot splash (Windows only): the windowed tray app shows nothing for several
+# seconds while Python starts, Ollama preflights and the backend assembles, so
+# the first click looks dead. PyInstaller paints this PNG at the OS level the
+# instant the exe starts (before Python loads); entry.py closes it once the tray
+# icon appears. Splash is unsupported on macOS — the .app launch + a "starting"
+# notification (entry.py:_notify_starting) cover that path instead. Degrades to
+# no-splash (never breaks the build) if PIL / the Splash target is unavailable.
+splash = None
+if platform.system() == "Windows":
+    try:
+        import sys as _sys
+
+        _sys.path.insert(0, str(project_root / "packaging"))
+        from make_splash import make_splash
+
+        _splash_png = make_splash(project_root / "build" / "splash.png")
+        splash = Splash(
+            str(_splash_png),
+            binaries=a.binaries,
+            datas=a.datas,
+            always_on_top=True,
+        )
+    except Exception as exc:  # noqa: BLE001 — splash is a nicety, not a build dep
+        print(f"[spec] boot splash disabled: {exc}")
+        splash = None
+
+_exe_targets = [pyz, a.scripts]
+if splash is not None:
+    _exe_targets.append(splash)
+_exe_targets.append([])
+
 exe = EXE(
-    pyz,
-    a.scripts,
-    [],
+    *_exe_targets,
     exclude_binaries=True,
     name="OpenBiliClaw",
     debug=False,
@@ -162,14 +191,16 @@ exe = EXE(
     # (packaging/entry.py); logs go to logs/desktop.log and are viewable from the
     # tray menu. macOS already runs windowed via the .app bundle below.
     console=False,
-    icon=None,     # TODO: add icon -- packaging/icon.ico (Windows) / packaging/icon.icns (macOS)
+    icon=None,  # TODO: add icon -- packaging/icon.ico (Windows) / packaging/icon.icns (macOS)
 )
 
+_coll_targets = [exe]
+if splash is not None:
+    _coll_targets.append(splash.binaries)  # bundled tcl/tk for the splash
+_coll_targets += [a.binaries, a.zipfiles, a.datas]
+
 coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
+    *_coll_targets,
     strip=False,
     upx=True,
     upx_exclude=[],

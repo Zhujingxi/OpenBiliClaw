@@ -289,6 +289,44 @@ def test_redirect_output_to_logfile_noop_when_not_frozen(tmp_path: Path) -> None
     assert not (tmp_path / "logs" / "desktop.log").exists()
 
 
+def test_close_splash_noop_without_pyi_splash() -> None:
+    # Dev / non-splash builds have no ``pyi_splash`` module — closing the splash
+    # must be a silent no-op, never raise.
+    entry._close_splash()  # must not raise
+
+
+def test_notify_starting_noop_when_not_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Not frozen (tests) → no OS notification subprocess is spawned regardless of
+    # platform, so the test suite never pops a real notification.
+    calls: list[object] = []
+    monkeypatch.setattr(entry.subprocess, "Popen", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(entry.sys, "frozen", False, raising=False)
+    entry._notify_starting()
+    assert calls == []
+
+
+def test_notify_starting_noop_on_non_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Even frozen, only macOS uses the notification path (Windows has the splash).
+    calls: list[object] = []
+    monkeypatch.setattr(entry.subprocess, "Popen", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(entry.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(entry.sys, "platform", "win32")
+    entry._notify_starting()
+    assert calls == []
+
+
+def test_notify_starting_fires_on_frozen_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(entry.subprocess, "Popen", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(entry.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(entry.sys, "platform", "darwin")
+    entry._notify_starting()
+    assert len(calls) == 1
+    argv = calls[0][0]
+    assert argv[0] == "osascript"
+    assert any("OpenBiliClaw" in str(part) for part in argv)
+
+
 def test_redirect_output_writes_utf8_bom_on_fresh_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

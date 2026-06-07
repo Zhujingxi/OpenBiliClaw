@@ -371,6 +371,41 @@ def _redirect_output_to_logfile(project_root: Path) -> Path | None:
     return log_path
 
 
+def _close_splash() -> None:
+    """Close the PyInstaller boot splash, if this build has one.
+
+    ``pyi_splash`` only exists inside a frozen build that bundled a Splash
+    target (Windows). Everywhere else (dev, macOS) the import fails and this is a
+    no-op. Best-effort: a failure here must never block startup.
+    """
+    try:
+        import pyi_splash  # type: ignore[import-not-found]  # only in splash builds
+    except Exception:  # noqa: BLE001 — absent on dev / macOS / non-splash builds
+        return
+    with suppress(Exception):
+        pyi_splash.close()
+
+
+def _notify_starting() -> None:
+    """Show a one-shot 'starting' OS notification (macOS only, frozen only).
+
+    Windows gets the PyInstaller boot splash; macOS can't (PyInstaller splash is
+    unsupported there), so a menu-bar agent — which shows no Dock bounce — uses a
+    notification instead so the launch isn't silent. Best-effort and fire-and-
+    forget; never blocks or raises.
+    """
+    if not getattr(sys, "frozen", False) or sys.platform != "darwin":
+        return
+    with suppress(Exception):
+        subprocess.Popen(  # noqa: S603
+            [
+                "osascript",  # noqa: S607
+                "-e",
+                'display notification "正在启动,请稍候…" with title "OpenBiliClaw"',
+            ]
+        )
+
+
 def _open_in_default_app(path: Path) -> None:
     """Open a file / folder with the OS default handler (best-effort)."""
     try:
@@ -526,6 +561,9 @@ def _run_server_in_tray(server: Any, host: str, port: int, project_root: Path) -
         pystray.MenuItem("退出 OpenBiliClaw", _quit),
     )
     icon = pystray.Icon("OpenBiliClaw", _tray_icon_image(), "OpenBiliClaw", menu)
+    # Backend is assembled and the tray icon is about to appear → drop the boot
+    # splash now, handing visual feedback over to the tray with no perceptible gap.
+    _close_splash()
     try:
         icon.run()  # blocks on the main thread until _quit calls icon.stop()
     finally:
@@ -549,6 +587,10 @@ def main() -> None:
     with suppress(OSError):
         (project_root / "logs").mkdir(parents=True, exist_ok=True)
     _redirect_output_to_logfile(project_root)
+    # Tell the user the launch registered. Windows shows the PyInstaller boot
+    # splash (closed once the tray appears); macOS — where a menu-bar agent gives
+    # no Dock bounce — gets a one-shot notification here instead.
+    _notify_starting()
     # Windows onedir upgrades: relocate any user data older builds left in the
     # install dir into the per-user root, BEFORE we create fresh data/ + logs/
     # (a whole-dir move must not land inside a freshly-made empty dir).
@@ -594,6 +636,7 @@ def main() -> None:
     # when a real serve-api already owns the port.
     if os.environ.get("OPENBILICLAW_SELFTEST"):
         create_app()
+        _close_splash()
         print("[OpenBiliClaw] selftest OK — 依赖与后端装配正常")
         return
 
@@ -607,6 +650,7 @@ def main() -> None:
         status, lock_handle = _try_single_instance_lock(project_root)
         if status == "busy":
             existing_host = "127.0.0.1" if host == "0.0.0.0" else host  # noqa: S104
+            _close_splash()
             print("[OpenBiliClaw] 已有实例在运行;打开 Web 界面,本次不启动新后端。")
             with suppress(Exception):
                 webbrowser.open(f"http://{existing_host}:{port}/web/")
@@ -649,6 +693,7 @@ def main() -> None:
         _run_server_in_tray(server, host, port, project_root)
     else:
         # Dev / non-Windows / tray unavailable: run in the foreground (console).
+        _close_splash()
         server.run()
 
 
@@ -656,7 +701,9 @@ if __name__ == "__main__":
     try:
         main()
     except Exception:
-        # Windowed builds have no console — persist the crash so it isn't silent.
+        # Startup failed — drop the splash so it doesn't hang on screen forever,
+        # then persist the crash (windowed builds have no console to print to).
+        _close_splash()
         with suppress(Exception):
             import traceback
 
