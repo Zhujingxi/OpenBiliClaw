@@ -223,6 +223,101 @@
       max-width: 300px;
     }
 
+    /* GitHub Star CTA — a prominent but dismissible nudge under the hero. */
+    .star-cta {
+      display: flex;
+      align-items: stretch;
+      gap: 6px;
+      padding: 2px;
+      border-radius: 16px;
+      background: linear-gradient(135deg, rgba(255, 214, 102, 0.22), rgba(251, 114, 153, 0.16));
+      border: 1px solid rgba(255, 197, 66, 0.45);
+    }
+
+    .star-cta[hidden] {
+      display: none;
+    }
+
+    .star-cta-main {
+      flex: 1 1 auto;
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 12px;
+      border: 0;
+      background: transparent;
+      border-radius: 14px;
+      cursor: pointer;
+      text-align: left;
+      transition: background 0.15s;
+    }
+
+    .star-cta-main:hover {
+      background: rgba(255, 255, 255, 0.4);
+    }
+
+    .star-cta-star {
+      flex-shrink: 0;
+      font-size: 20px;
+      line-height: 1;
+      color: #f7b500;
+      text-shadow: 0 1px 2px rgba(247, 181, 0, 0.35);
+    }
+
+    .star-cta-copy {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .star-cta-title {
+      font-size: 12.5px;
+      font-weight: 800;
+      color: var(--text-primary);
+      line-height: 1.3;
+    }
+
+    .star-cta-sub {
+      font-size: 11px;
+      line-height: 1.45;
+      color: var(--text-secondary);
+    }
+
+    .star-cta-go {
+      flex-shrink: 0;
+      align-self: center;
+      font-size: 11px;
+      font-weight: 800;
+      color: var(--brand-strong);
+      white-space: nowrap;
+    }
+
+    .star-cta-dismiss {
+      flex-shrink: 0;
+      width: 24px;
+      border: 0;
+      background: transparent;
+      color: var(--text-secondary);
+      font-size: 18px;
+      line-height: 1;
+      cursor: pointer;
+      border-radius: 10px;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .star-cta-dismiss:hover {
+      background: rgba(255, 255, 255, 0.5);
+      color: var(--text-primary);
+    }
+
+    @media (max-width: 460px) {
+      .star-cta-go {
+        display: none;
+      }
+    }
+
     .status-badge {
       display: flex;
       align-items: center;
@@ -1441,35 +1536,49 @@
     }
 
     @media (max-width: 460px) {
+      /* Keep the header on ONE row even when narrow: the brand (logo + title +
+         status badge) shrinks on the left while the action buttons stay on the
+         right, vertically centered. The decorative eyebrow is hidden to
+         declutter, and the status badge wraps just under the title only when
+         space is genuinely tight — so the buttons never break onto an awkward
+         right-floating second row (the old `grid-template-columns: 1fr` stack). */
       .hero-top {
-        grid-template-columns: 1fr;
-        align-items: stretch;
+        align-items: center;
         gap: 10px;
       }
 
       .brand {
-        align-items: flex-start;
-        width: 100%;
+        gap: 10px;
       }
 
       .brand-copy {
-        flex: 1;
+        flex: 1 1 auto;
         min-width: 0;
+      }
+
+      .eyebrow {
+        display: none;
       }
 
       .brand-title-row {
         flex-wrap: wrap;
-        gap: 6px;
+        gap: 2px 8px;
       }
 
       .status-badge {
-        justify-self: start;
         padding: 5px 8px;
       }
 
       .hero-actions {
-        width: 100%;
-        justify-content: flex-end;
+        gap: 5px;
+      }
+
+      .mobile-button,
+      .messages-button,
+      .webui-button,
+      .settings-gear {
+        width: 30px;
+        height: 30px;
       }
     }
 
@@ -4208,6 +4317,18 @@
       </div>
       <p class="hero-copy">首页先放一边，这里是你最近更可能点开的。</p>
     </header>
+
+    <div id="starCta" class="star-cta" hidden>
+      <button id="starCtaMain" class="star-cta-main" type="button">
+        <span class="star-cta-star" aria-hidden="true">★</span>
+        <span class="star-cta-copy">
+          <span class="star-cta-title">喜欢就给个 GitHub Star ⭐</span>
+          <span class="star-cta-sub">开源项目靠 Star 长大，一颗星就是对持续更新最大的支持</span>
+        </span>
+        <span class="star-cta-go">去点 Star →</span>
+      </button>
+      <button id="starCtaDismiss" class="star-cta-dismiss" type="button" title="不再显示" aria-label="不再显示">×</button>
+    </div>
 
     <div class="tabs-shell">
       <div class="tab-bar" role="tablist" aria-label="Popup views">

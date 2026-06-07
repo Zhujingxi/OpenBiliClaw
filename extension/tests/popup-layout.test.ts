@@ -31,18 +31,41 @@ test("popup header exposes a local mobile web QR entry", () => {
   assert.doesNotMatch(popupHtml, /api\.qrserver|chart\.googleapis/);
 });
 
-test("popup header moves utility icons below the brand on narrow side-panel widths", () => {
+test("popup header stays a single row with inline icons at narrow side-panel widths", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  // The header's narrow-width rules live in the @media(max-width:460px) block
+  // that opens with a comment (a separate 460px block hides the star CTA's
+  // call-to-action label). Anchor on `{` + comment to grab only this one.
   const narrowHeaderQuery =
-    popupHtml.match(/@media \(max-width: 460px\)\s*\{[\s\S]*?\.hero-actions[\s\S]*?\}/)?.[0] ?? "";
+    popupHtml.match(/@media \(max-width: 460px\) \{\s*\/\*[\s\S]*?\n {4}\}/)?.[0] ?? "";
 
   assert.match(narrowHeaderQuery, /\.hero-top\s*\{/);
-  assert.match(narrowHeaderQuery, /grid-template-columns:\s*1fr;/);
-  assert.match(narrowHeaderQuery, /\.hero-actions\s*\{/);
-  assert.match(narrowHeaderQuery, /width:\s*100%;/);
-  assert.match(narrowHeaderQuery, /justify-content:\s*flex-end;/);
+  // It must NOT collapse into a single stacked column — that old layout floated
+  // the action buttons onto an awkward, empty-gap second row.
+  assert.doesNotMatch(narrowHeaderQuery, /grid-template-columns:\s*1fr;/);
+  // Declutter: the decorative eyebrow is hidden so brand + icons fit one row.
+  assert.match(narrowHeaderQuery, /\.eyebrow\s*\{\s*display:\s*none;/);
+  // The status badge wraps just under the title only when space is tight.
   assert.match(narrowHeaderQuery, /\.brand-title-row\s*\{/);
   assert.match(narrowHeaderQuery, /flex-wrap:\s*wrap;/);
+  // Compact (30px) action buttons keep the icons inline on the right.
+  assert.match(narrowHeaderQuery, /width:\s*30px;/);
+});
+
+test("popup surfaces a dismissible GitHub Star call-to-action", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const ctaMarkup = popupHtml.match(/<div id="starCta"[\s\S]*?<\/div>\s*<div class="tabs-shell">/)?.[0] ?? "";
+
+  // A prominent, dismissible Star nudge sits between the hero and the tabs.
+  assert.match(ctaMarkup, /id="starCta"/);
+  assert.match(ctaMarkup, /id="starCtaMain"/);
+  assert.match(ctaMarkup, /id="starCtaDismiss"/);
+  assert.match(ctaMarkup, /GitHub Star/);
+  // It opens the repo and remembers a dismissal so it doesn't nag.
+  assert.match(popupJs, /STAR_CTA_URL\s*=\s*"https:\/\/github\.com\/whiteguo233\/OpenBiliClaw"/);
+  assert.match(popupJs, /localStorage\.setItem\(STAR_CTA_DISMISS_KEY/);
+  assert.match(popupJs, /bindStarCta\(\);/);
 });
 
 test("recommendation header uses a compact top row with status chips", () => {

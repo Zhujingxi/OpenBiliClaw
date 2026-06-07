@@ -233,6 +233,9 @@ const elements = {
   chatSendButton: document.getElementById("chatSendButton"),
   chatStatus: document.getElementById("chatStatus"),
   openWebButton: document.getElementById("openWebButton"),
+  starCta: document.getElementById("starCta"),
+  starCtaMain: document.getElementById("starCtaMain"),
+  starCtaDismiss: document.getElementById("starCtaDismiss"),
   mobileQrButton: document.getElementById("mobileQrButton"),
   mobileQrOverlay: document.getElementById("mobileQrOverlay"),
   mobileQrBack: document.getElementById("mobileQrBack"),
@@ -1892,6 +1895,40 @@ function openMobileWebUrl(url) {
     // Fall back to window.open below.
   }
   window.open(url, "_blank", "noopener");
+}
+
+const STAR_CTA_URL = "https://github.com/whiteguo233/OpenBiliClaw";
+const STAR_CTA_DISMISS_KEY = "obc:starCtaDismissed";
+
+// Wire the dismissible "give us a GitHub Star" nudge under the hero: open the
+// repo on click, and remember a dismissal in localStorage so it stays gone.
+function bindStarCta() {
+  const { starCta, starCtaMain, starCtaDismiss } = elements;
+  if (!(starCta instanceof HTMLElement)) {
+    return;
+  }
+  let dismissed = false;
+  try {
+    dismissed = localStorage.getItem(STAR_CTA_DISMISS_KEY) === "1";
+  } catch {
+    dismissed = false; // storage blocked → just show it
+  }
+  starCta.hidden = dismissed;
+  if (starCtaMain instanceof HTMLElement) {
+    starCtaMain.addEventListener("click", () => {
+      openMobileWebUrl(STAR_CTA_URL);
+    });
+  }
+  if (starCtaDismiss instanceof HTMLElement) {
+    starCtaDismiss.addEventListener("click", () => {
+      try {
+        localStorage.setItem(STAR_CTA_DISMISS_KEY, "1");
+      } catch {
+        // best-effort; if storage is unavailable the nudge just returns next open
+      }
+      starCta.hidden = true;
+    });
+  }
 }
 
 async function renderMobileQrPanel() {
@@ -6335,6 +6372,7 @@ async function initializePopup() {
   bindOpenWeb();
   bindMobileQr();
   bindSettings();
+  bindStarCta();
 
   bindMessages();
   setActiveTab(
