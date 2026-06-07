@@ -289,5 +289,46 @@ def test_redirect_output_to_logfile_noop_when_not_frozen(tmp_path: Path) -> None
     assert not (tmp_path / "logs" / "desktop.log").exists()
 
 
+# --------------------------------------------------------------------------- #
+# Single-instance lock (one running instance per data dir)
+# --------------------------------------------------------------------------- #
+
+
+def test_single_instance_lock_blocks_second_acquire(tmp_path: Path) -> None:
+    # First launch wins the lock; a second launch on the same data dir is "busy"
+    # (the OS treats the two open handles as independent even in one process), and
+    # the slot frees once the first handle closes (== the owning process exits).
+    status1, handle1 = entry._try_single_instance_lock(tmp_path)
+    assert status1 == "acquired"
+    assert handle1 is not None
+
+    status2, handle2 = entry._try_single_instance_lock(tmp_path)
+    assert status2 == "busy"
+    assert handle2 is None
+
+    handle1.close()  # owning instance exits → lock released
+
+    status3, handle3 = entry._try_single_instance_lock(tmp_path)
+    assert status3 == "acquired"
+    handle3.close()
+
+
+def test_single_instance_lock_separate_dirs_both_acquire(tmp_path: Path) -> None:
+    # Different data dirs (portable installs / OPENBILICLAW_PROJECT_ROOT) may run
+    # side by side — the lock is per data dir.
+    root_a = tmp_path / "a"
+    root_a.mkdir()
+    root_b = tmp_path / "b"
+    root_b.mkdir()
+
+    status_a, handle_a = entry._try_single_instance_lock(root_a)
+    status_b, handle_b = entry._try_single_instance_lock(root_b)
+
+    assert status_a == "acquired"
+    assert status_b == "acquired"
+    handle_a.close()
+    handle_b.close()
+
+
 if __name__ == "__main__":  # pragma: no cover - convenience
     raise SystemExit(pytest.main([__file__, "-q"]))

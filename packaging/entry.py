@@ -398,6 +398,43 @@ def _view_runtime_logs(log_path: Path) -> None:
     _open_in_default_app(log_path)
 
 
+def _try_single_instance_lock(project_root: Path) -> tuple[str, Any]:
+    """Attempt the per-data-dir single-instance lock.
+
+    Returns ``(status, handle)``:
+
+    * ``("acquired", handle)`` — we own it; the caller MUST keep ``handle`` open
+      for the process lifetime. The OS releases the lock automatically when the
+      process exits (even on a crash), so there are no stale locks.
+    * ``("busy", None)`` — another instance already holds it (e.g. the user
+      double-clicked the icon); this launch should not start a second backend.
+    * ``("error", None)`` — couldn't use a lock file at all; the caller should
+      fail open (start anyway) rather than block on a lock-file problem.
+
+    The lock lives in ``project_root``, so separate data dirs (portable installs)
+    can run side by side; the same install double-launched is what gets blocked.
+    """
+    lock_path = project_root / "openbiliclaw.lock"
+    try:
+        handle = open(lock_path, "a+")  # noqa: SIM115 — held for the process lifetime
+    except OSError:
+        return "error", None
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return "busy", None
+    return "acquired", handle
+
+
 def _tray_icon_image() -> Any:
     """Build a small in-memory tray icon (no bundled asset needed)."""
     from PIL import Image, ImageDraw
@@ -518,6 +555,22 @@ def main() -> None:
         create_app()
         print("[OpenBiliClaw] selftest OK — 依赖与后端装配正常")
         return
+
+    # Single-instance guard (packaged app only): a second launch — e.g. the user
+    # double-clicking the icon — must not spin up a second backend + tray. Hold
+    # the lock for the whole run (``lock_handle`` stays referenced until main()
+    # returns); the OS frees it on exit. A busy lock means another instance owns
+    # the port already, so just surface its Web UI and quit this launch.
+    lock_handle = None
+    if getattr(sys, "frozen", False):
+        status, lock_handle = _try_single_instance_lock(project_root)
+        if status == "busy":
+            existing_host = "127.0.0.1" if host == "0.0.0.0" else host  # noqa: S104
+            print("[OpenBiliClaw] 已有实例在运行;打开 Web 界面,本次不启动新后端。")
+            with suppress(Exception):
+                webbrowser.open(f"http://{existing_host}:{port}/web/")
+            return
+    _ = lock_handle  # keep a reference so the lock is held for the process lifetime
 
     # Packaged entry bypasses ``openbiliclaw start``, so run the same loopback
     # Ollama preflight here to bring up the (bundled) daemon when needed.
