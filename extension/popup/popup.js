@@ -36,8 +36,6 @@ import {
   describeInitReason,
   describeInitStartError,
   initProgressView,
-  initStartButtonState,
-  isInitTerminal,
 } from "./popup-init-control.js";
 import {
   getBackendBaseUrl,
@@ -172,7 +170,6 @@ const elements = {
   initProgressBar: document.getElementById("initProgressBar"),
   initProgressLabel: document.getElementById("initProgressLabel"),
   initStartBtn: document.getElementById("initStartBtn"),
-  initRecheckBtn: document.getElementById("initRecheckBtn"),
   initStartReason: document.getElementById("initStartReason"),
   list: document.getElementById("recommendationList"),
   refreshRecommendationsButton: document.getElementById("refreshRecommendationsButton"),
@@ -708,7 +705,7 @@ function showRecommendationEmptyState(title, message) {
   elements.emptyTitle.textContent = title;
   elements.emptyText.textContent = message;
   // The guided-init panel is only for the uninitialized state; the
-  // uninitialized branch re-shows it via refreshInitPanel().
+  // uninitialized branch re-shows it via renderInitPanelIdle().
   if (elements.initPanel instanceof HTMLElement) {
     elements.initPanel.hidden = true;
   }
@@ -734,39 +731,89 @@ function clearInitPolling() {
   }
 }
 
-function renderInitPanel(status) {
+function _setInitStartButton(label, enabled) {
+  if (!(elements.initStartBtn instanceof HTMLButtonElement)) {
+    return;
+  }
+  elements.initStartBtn.textContent = label;
+  elements.initStartBtn.disabled = !enabled;
+  if (!elements.initStartBtn.dataset.bound) {
+    elements.initStartBtn.dataset.bound = "1";
+    elements.initStartBtn.addEventListener("click", () => {
+      void handleStartInitClick();
+    });
+  }
+}
+
+function _setInitReason(text) {
+  if (elements.initStartReason instanceof HTMLElement) {
+    elements.initStartReason.textContent = text || "";
+    elements.initStartReason.hidden = !text;
+  }
+}
+
+function _renderInitChecklist(status) {
+  // Show the prereq checklist (red ✗ / green ✓ / soft •) — only surfaced AFTER a
+  // click whose check failed, so the user sees exactly what to fix.
+  if (!(elements.initChecklist instanceof HTMLElement)) {
+    return;
+  }
+  elements.initChecklist.replaceChildren();
+  for (const row of buildInitChecklist(status)) {
+    const li = document.createElement("li");
+    li.className = `${row.ok ? "init-ok" : "init-missing"} ${row.hard ? "init-hard" : "init-soft"}`;
+    const head = document.createElement("div");
+    head.className = "init-row";
+    const mark = document.createElement("span");
+    mark.className = "init-mark";
+    mark.textContent = row.ok ? "✓" : row.hard ? "✗" : "•";
+    const label = document.createElement("span");
+    label.textContent = row.label;
+    head.append(mark, label);
+    li.append(head);
+    if (!row.ok && row.hint) {
+      const hint = document.createElement("p");
+      hint.className = "init-hint";
+      hint.textContent = row.hint;
+      li.append(hint);
+    }
+    elements.initChecklist.append(li);
+  }
+}
+
+// Idle entry: just the actionable button + a one-line note. Conditions are
+// checked ON CLICK (no slow upfront probe / blank panel); failures are surfaced
+// only after a click that doesn't pass.
+function renderInitPanelIdle() {
   if (!(elements.initPanel instanceof HTMLElement)) {
     return;
   }
   elements.initPanel.hidden = false;
-
   if (elements.initChecklist instanceof HTMLElement) {
     elements.initChecklist.replaceChildren();
-    for (const row of buildInitChecklist(status)) {
-      const li = document.createElement("li");
-      li.className = `${row.ok ? "init-ok" : "init-missing"} ${row.hard ? "init-hard" : "init-soft"}`;
-      const head = document.createElement("div");
-      head.className = "init-row";
-      const mark = document.createElement("span");
-      mark.className = "init-mark";
-      mark.textContent = row.ok ? "✓" : row.hard ? "✗" : "•";
-      const label = document.createElement("span");
-      label.textContent = row.label;
-      head.append(mark, label);
-      li.append(head);
-      if (!row.ok && row.hint) {
-        const hint = document.createElement("p");
-        hint.className = "init-hint";
-        hint.textContent = row.hint;
-        li.append(hint);
-      }
-      elements.initChecklist.append(li);
-    }
+    const li = document.createElement("li");
+    li.className = "init-hint-row";
+    li.textContent = "点「开始初始化」会先检查 B 站登录 / AI 服务 / 向量模型，全部通过才开始。";
+    elements.initChecklist.append(li);
   }
+  if (elements.initProgress instanceof HTMLElement) {
+    elements.initProgress.hidden = true;
+  }
+  _setInitStartButton("开始初始化", true);
+  _setInitReason("");
+}
 
+function renderInitProgress(status) {
+  if (!(elements.initPanel instanceof HTMLElement)) {
+    return;
+  }
+  elements.initPanel.hidden = false;
+  if (elements.initChecklist instanceof HTMLElement) {
+    elements.initChecklist.replaceChildren();
+  }
   const progress = initProgressView(status);
   if (elements.initProgress instanceof HTMLElement) {
-    elements.initProgress.hidden = !(progress.active || progress.pct >= 100 || progress.failed);
+    elements.initProgress.hidden = false;
     if (elements.initProgressBar instanceof HTMLElement) {
       elements.initProgressBar.style.width = `${progress.pct}%`;
     }
@@ -775,147 +822,111 @@ function renderInitPanel(status) {
         ? `初始化未完成：${describeInitReason(status && status.reason) || progress.failedReason || "请稍后重试"}`
         : progress.active
           ? `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`
-          : progress.pct >= 100
-            ? "初始化完成！"
-            : "";
+          : "初始化完成！";
     }
   }
-
-  const btnState = initStartButtonState(status);
-  if (elements.initStartBtn instanceof HTMLButtonElement) {
-    elements.initStartBtn.textContent = btnState.label;
-    elements.initStartBtn.disabled = !btnState.enabled;
-    if (!elements.initStartBtn.dataset.bound) {
-      elements.initStartBtn.dataset.bound = "1";
-      elements.initStartBtn.addEventListener("click", () => {
-        void handleStartInitClick();
-      });
-    }
-  }
-  // Re-check is available whenever a check isn't in flight — but while a run is
-  // actually in progress there's nothing to re-check, so keep it disabled then.
-  setInitRecheckBusy(Boolean(status && status.running));
-  if (elements.initStartReason instanceof HTMLElement) {
-    elements.initStartReason.textContent = btnState.reason;
-    elements.initStartReason.hidden = !btnState.reason;
+  if (progress.active) {
+    _setInitStartButton("初始化进行中…", false);
+    _setInitReason("");
+  } else if (progress.failed) {
+    _setInitStartButton("重试初始化", true);
+    _setInitReason("");
+  } else {
+    _setInitStartButton("已初始化", false);
+    _setInitReason("");
   }
 }
 
-// Bind the "重新检查" button once: it re-runs the prereq check on demand so the
-// user can confirm readiness right after configuring the LLM / logging in,
-// instead of waiting for the cache TTL or the 3s poll.
-function bindInitRecheckOnce() {
-  const btn = elements.initRecheckBtn;
-  if (btn instanceof HTMLButtonElement && !btn.dataset.bound) {
-    btn.dataset.bound = "1";
-    btn.addEventListener("click", () => {
-      void refreshInitPanel();
-    });
-  }
-}
-
-function setInitRecheckBusy(busy) {
-  bindInitRecheckOnce();
-  if (elements.initRecheckBtn instanceof HTMLButtonElement) {
-    elements.initRecheckBtn.disabled = busy;
-    elements.initRecheckBtn.textContent = busy ? "检查中…" : "↻ 重新检查";
-  }
-}
-
-function renderInitPanelChecking() {
-  // Loading state: the prereq probes are real (now strict) requests — B站
-  // cookie + chat LLM + embedding — so /api/init-status can take a dozen
-  // seconds on a cold backend. Show "检查中" immediately instead of a blank
-  // panel so the user knows it's working (not stuck).
-  if (!(elements.initPanel instanceof HTMLElement)) {
-    return;
-  }
-  elements.initPanel.hidden = false;
-  if (elements.initChecklist instanceof HTMLElement) {
-    elements.initChecklist.replaceChildren();
-    const li = document.createElement("li");
-    li.className = "init-checking";
-    li.textContent = "正在检查前置条件（B 站 / AI 服务 / 向量模型，实时请求测试，可能要十几秒）…";
-    elements.initChecklist.append(li);
-  }
-  if (elements.initProgress instanceof HTMLElement) {
-    elements.initProgress.hidden = true;
-  }
-  if (elements.initStartBtn instanceof HTMLButtonElement) {
-    elements.initStartBtn.textContent = "检查中…";
-    elements.initStartBtn.disabled = true;
-  }
-  setInitRecheckBusy(true);
-  if (elements.initStartReason instanceof HTMLElement) {
-    elements.initStartReason.hidden = true;
-  }
-}
-
-function renderInitPanelCheckFailed() {
-  if (!(elements.initChecklist instanceof HTMLElement)) {
-    return;
-  }
-  elements.initChecklist.replaceChildren();
-  const li = document.createElement("li");
-  li.className = "init-checking";
-  li.textContent = "前置检查没拉到（后端可能在忙或重启中），稍后自动重试，或点「重新检查」。";
-  elements.initChecklist.append(li);
-  if (elements.initStartBtn instanceof HTMLButtonElement) {
-    elements.initStartBtn.textContent = "检查中…";
-    elements.initStartBtn.disabled = true;
-  }
-  // Re-enable manual re-check so the user isn't stuck waiting for the auto-retry.
-  setInitRecheckBusy(false);
-}
-
-async function refreshInitPanel() {
-  renderInitPanelChecking();
+// Poll init-status while a run is in progress; on terminal, reload (success) or
+// leave the failure reason on screen with the button re-enabled for a retry.
+async function pollInitProgress() {
   let status = null;
   try {
     status = await fetchInitStatus();
   } catch {
-    renderInitPanelCheckFailed();
     clearInitPolling();
     initPollTimer = setTimeout(() => {
-      void refreshInitPanel();
-    }, 4000);
-    return null;
+      void pollInitProgress();
+    }, 3000);
+    return;
   }
-  renderInitPanel(status);
+  renderInitProgress(status);
   if (status.running) {
     clearInitPolling();
     initPollTimer = setTimeout(() => {
-      void refreshInitPanel();
+      void pollInitProgress();
     }, 3000);
-  } else {
-    clearInitPolling();
-    if (isInitTerminal(status) && status.initialized) {
-      // Init finished → recommendations + profile are ready; reload them.
-      state.profileLoaded = false;
-      setHint("初始化完成！正在加载画像和推荐…", "success");
-      scheduleRecommendationsRefresh();
-      void loadProfileSummary({ force: true });
-    }
-  }
-  return status;
-}
-
-async function handleStartInitClick() {
-  if (!(elements.initStartBtn instanceof HTMLButtonElement)) {
     return;
   }
-  elements.initStartBtn.disabled = true;
+  clearInitPolling();
+  if (status.initialized) {
+    state.profileLoaded = false;
+    setHint("初始化完成！正在加载画像和推荐…", "success");
+    scheduleRecommendationsRefresh();
+    void loadProfileSummary({ force: true });
+  }
+}
+
+function _startInitProgressPoll() {
+  clearInitPolling();
+  initPollTimer = setTimeout(() => {
+    void pollInitProgress();
+  }, 1200);
+}
+
+// THE click handler: run the condition checks on demand. If anything fails,
+// surface the checklist + reason and do NOT initialize; only start init when
+// every condition passes (gui-init: user-requested click-driven gating).
+async function handleStartInitClick() {
+  _setInitStartButton("检查中…", false);
+  _setInitReason("");
+  if (elements.initChecklist instanceof HTMLElement) {
+    elements.initChecklist.replaceChildren();
+    const li = document.createElement("li");
+    li.className = "init-checking";
+    li.textContent = "正在检查 B 站登录 / AI 服务 / 向量模型（实时请求测试，可能要十几秒）…";
+    elements.initChecklist.append(li);
+  }
+
+  let status = null;
+  try {
+    status = await fetchInitStatus();
+  } catch {
+    renderInitPanelIdle();
+    _setInitReason("前置检查没拉到（后端可能在忙），稍后再点「开始初始化」。");
+    return;
+  }
+
+  // Already running (double-click / a run started elsewhere) → show progress.
+  if (status.running) {
+    renderInitProgress(status);
+    _startInitProgressPoll();
+    return;
+  }
+
+  // Conditions not met → show exactly what failed; do NOT initialize.
+  if (!status.can_start) {
+    _renderInitChecklist(status);
+    _setInitStartButton("开始初始化", true);
+    _setInitReason(
+      describeInitReason(status.reason) || "以下条件未满足，无法开始初始化，补齐后再点一次。",
+    );
+    return;
+  }
+
+  // All conditions pass → start. The backend re-validates in its critical
+  // section, so a race can still 409 — surface that and let the user retry.
   try {
     await startInit({ force: false });
-    setHint("初始化已开始，正在拉取数据…", "info");
   } catch (error) {
-    const message = describeInitStartError(error);
-    if (elements.initStartReason instanceof HTMLElement) {
-      elements.initStartReason.textContent = message;
-      elements.initStartReason.hidden = false;
-    }
+    _renderInitChecklist(status);
+    _setInitStartButton("开始初始化", true);
+    _setInitReason(describeInitStartError(error));
+    return;
   }
-  void refreshInitPanel();
+  setHint("初始化已开始，正在拉取数据…", "info");
+  renderInitProgress({ running: true, current_stage: 1, total_stages: 4, stages: [] });
+  _startInitProgressPoll();
 }
 
 function renderPoolStatus(runtimeStatus) {
@@ -1255,10 +1266,10 @@ function connectRuntimeStream() {
       ) {
         setHint(String(event.message || ""), "success");
       }
-      // Live guided-init progress (gui-init F1): refresh the recommend-tab
-      // init panel so the checklist/progress bar tracks the run.
+      // Live guided-init progress (gui-init F1): drive the recommend-tab
+      // progress bar from the run's stage events.
       if (event.type === "init_progress" || event.type === "init_failed") {
-        void refreshInitPanel();
+        void pollInitProgress();
       }
       // Init completed: re-fetch everything including profile
       if (event.type === "init_completed") {
@@ -4820,10 +4831,10 @@ function renderRecommendationState(stateShape) {
   if (stateShape.kind === "uninitialized") {
     showRecommendationEmptyState(
       "还没完成初始化",
-      "按下面的清单准备好，再点「开始初始化」，就能在这里一步步建好画像和首轮内容池。",
+      "点「开始初始化」，会先检查前置条件，通过后就在这里一步步建好画像和首轮内容池。",
     );
     setHint("先完成初始化，把画像和候选池攒起来。");
-    void refreshInitPanel();
+    renderInitPanelIdle();
     return;
   }
 
