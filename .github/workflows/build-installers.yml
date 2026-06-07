@@ -97,12 +97,20 @@ jobs:
       - name: Stage bundled Ollama (CPU runner only — bge-m3 embedding is CPU)
         shell: pwsh
         run: |
-          $ver = "0.18.2"
+          # Recent ollama: older 0.18.2 popped a visible console window for the
+          # model "runner" subprocess on Windows (the flashing users saw); newer
+          # releases spawn it hidden. Keep this current.
+          $ver = "0.30.6"
           Invoke-WebRequest "https://github.com/ollama/ollama/releases/download/v$ver/ollama-windows-amd64.zip" -OutFile ollama.zip
           Expand-Archive ollama.zip -DestinationPath ollama_win -Force
-          Copy-Item ollama_win\ollama.exe dist\OpenBiliClaw\ollama.exe -Force
-          if (Test-Path ollama_win\lib) {
-            Copy-Item ollama_win\lib dist\OpenBiliClaw\lib -Recurse -Force
+          # Locate ollama.exe (root of the zip historically; search as a safety
+          # net in case the layout changes), then its sibling lib/ runners.
+          $exe = Get-ChildItem ollama_win -Recurse -Filter ollama.exe | Select-Object -First 1
+          if (-not $exe) { throw "ollama.exe not found in ollama-windows-amd64.zip" }
+          Copy-Item $exe.FullName dist\OpenBiliClaw\ollama.exe -Force
+          $lib = Join-Path $exe.Directory.FullName "lib"
+          if (Test-Path $lib) {
+            Copy-Item $lib dist\OpenBiliClaw\lib -Recurse -Force
             # Drop large GPU runners; keep the installer lean (embedding runs on CPU).
             Get-ChildItem dist\OpenBiliClaw\lib\ollama -Directory -ErrorAction SilentlyContinue |
               Where-Object { $_.Name -match 'cuda|rocm' } |
