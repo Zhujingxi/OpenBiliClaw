@@ -4,7 +4,7 @@
 
 ---
 
-## v0.3.102 / extension v0.3.68: 图形化引导初始化（GUI guided init）（2026-06-07）
+## v0.3.102 / extension v0.3.69: 图形化引导初始化（GUI guided init）（2026-06-07）
 
 - 抽出共享异步初始化流水线 `cli.run_guided_init`：`openbiliclaw init` 的四阶段（拉取 + 入库 / 分析偏好 / 生成画像 ‖ 发现补池）原先内联在 CLI 命令里、被四处独立 `asyncio.run` 包着，无法被后端复用。现在合并为一个协程，CLI 用单次 `asyncio.run(run_guided_init(...))` 驱动、后端在服务事件循环里直接 `await`，互不嵌套 loop。bootstrap 采集器仍是同步实现但改走 `asyncio.to_thread`，不冻结 API loop；唯一与路径相关的发现补池步骤以 `discover_backfill` 注入（CLI 传一次性引擎、后端传持锁的 `controller.run_init_backfill`）。CLI 行为 / 输出 / 退出码零回归。
 - 新增 `InitCoordinator`（`runtime/init_coordinator.py`）+ `init_runs` 持久化状态机（`storage/database.py`）：单飞启动用 `BEGIN IMMEDIATE` CAS 预定（TOCTOU 收口在 DB），单写者串行化状态写入 + 进度事件（`_write_lock` 保证并行 stage 3/4 的 `sequence` 不丢更新），协作式取消，启动 reconcile 把崩溃残留的 `starting/running` 行判失败，避免 `/api/init-status` 永远报 running。
