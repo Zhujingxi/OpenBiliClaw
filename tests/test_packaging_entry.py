@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -295,6 +296,58 @@ def test_close_splash_noop_without_pyi_splash() -> None:
     entry._close_splash()  # must not raise
 
 
+def test_main_uses_configured_api_host_when_env_host_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_root = tmp_path / "userdata"
+    project_root.mkdir()
+    (project_root / "config.toml").write_text(
+        '[api]\nhost = "0.0.0.0"\nport = 19090\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(project_root))
+    monkeypatch.delenv("OPENBILICLAW_HOST", raising=False)
+    monkeypatch.delenv("OPENBILICLAW_PORT", raising=False)
+    monkeypatch.delenv("OPENBILICLAW_SELFTEST", raising=False)
+    monkeypatch.setattr(entry.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(entry, "_redirect_output_to_logfile", lambda _root: None)
+    monkeypatch.setattr(entry, "_notify_starting", lambda: None)
+    monkeypatch.setattr(entry, "_migrate_legacy_install_dir_data", lambda *_args: None)
+    monkeypatch.setattr(entry, "_inject_bundled_ollama_on_path", lambda _resources: False)
+    monkeypatch.setattr(entry, "_packaged_ollama_preflight", lambda: None)
+    monkeypatch.setattr(entry, "_ensure_embedding_model_async", lambda: None)
+    monkeypatch.setattr(entry, "_close_splash", lambda: None)
+    monkeypatch.setattr(entry, "_should_use_tray", lambda: False)
+    monkeypatch.setattr(entry.webbrowser, "open", lambda _url: True)
+
+    import uvicorn
+
+    import openbiliclaw.api.app as api_app
+
+    monkeypatch.setattr(api_app, "create_app", lambda: SimpleNamespace())
+    seen: dict[str, object] = {}
+
+    class _Config:
+        def __init__(self, app: object, *, host: str, port: int, log_level: str) -> None:
+            seen.update({"app": app, "host": host, "port": port, "log_level": log_level})
+
+    class _Server:
+        def __init__(self, config: object) -> None:
+            seen["server_config"] = config
+
+        def run(self) -> None:
+            seen["ran"] = True
+
+    monkeypatch.setattr(uvicorn, "Config", _Config)
+    monkeypatch.setattr(uvicorn, "Server", _Server)
+
+    entry.main()
+
+    assert seen["host"] == "0.0.0.0"
+    assert seen["port"] == 19090
+    assert seen["ran"] is True
+
+
 def test_notify_starting_noop_when_not_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
     # Not frozen (tests) → no OS notification subprocess is spawned regardless of
     # platform, so the test suite never pops a real notification.
@@ -413,6 +466,7 @@ def test_single_instance_lock_separate_dirs_both_acquire(tmp_path: Path) -> None
 # silently did nothing. The fix opens a .command as a document (no permission)
 # and checks the return code so it can fall back to the default app.
 # --------------------------------------------------------------------------- #
+
 
 def test_view_runtime_logs_windows_opens_log_without_console(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

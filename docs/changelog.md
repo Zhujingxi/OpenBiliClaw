@@ -22,6 +22,7 @@
 - README 用户交流群区块新增微信用户群二维码入口，并保留原 QQ 群二维码，方便用户按常用平台加入社区。
 - PC Web 顶部新增 GitHub Star 强引导：复用插件的 GitHub-Buttons 风格，显示“好用求 Star”入口并缓存实时 star 数，点击跳转项目仓库。
 - 新增 Chrome Web Store 商店页文案源 `docs/chrome-webstore-listing.md`：补齐项目主页、GitHub 项目页、Releases / AI 部署说明、插件安装使用步骤、后端依赖、本地优先隐私说明和提交前检查清单；`docs/index.md` 与插件模块文档同步挂入口，避免商店公开页只剩短概述、缺少安装和使用引导。
+- 修复桌面安装包入口忽略 `config.toml [api].host` / `[api].port` 的问题：打包版现在与 `openbiliclaw start` 一样默认按配置监听（默认 `0.0.0.0:8420`，手机 `/m/` 可达），仍保留 `OPENBILICLAW_HOST` / `OPENBILICLAW_PORT` 作为显式环境变量覆盖。
 - 抽出共享异步初始化流水线 `cli.run_guided_init`：`openbiliclaw init` 的四阶段（拉取 + 入库 / 分析偏好 / 生成画像 ‖ 发现补池）原先内联在 CLI 命令里、被四处独立 `asyncio.run` 包着，无法被后端复用。现在合并为一个协程，CLI 用单次 `asyncio.run(run_guided_init(...))` 驱动、后端在服务事件循环里直接 `await`，互不嵌套 loop。bootstrap 采集器仍是同步实现但改走 `asyncio.to_thread`，不冻结 API loop；唯一与路径相关的发现补池步骤以 `discover_backfill` 注入（CLI 传一次性引擎、后端传持锁的 `controller.run_init_backfill`）。CLI 行为 / 输出 / 退出码零回归。
 - 新增 `InitCoordinator`（`runtime/init_coordinator.py`）+ `init_runs` 持久化状态机（`storage/database.py`）：单飞启动用 `BEGIN IMMEDIATE` CAS 预定（TOCTOU 收口在 DB），单写者串行化状态写入 + 进度事件（`_write_lock` 保证并行 stage 3/4 的 `sequence` 不丢更新），协作式取消，启动 reconcile 把崩溃残留的 `starting/running` 行判失败，避免 `/api/init-status` 永远报 running。
 - 新增 `GET /api/init-status`：权威进度 + 前置清单（B站登录 / LLM / embedding / 已启用平台 + `is_profile_ready`），远程可读、降级可读、远程 `can_manage=false`；前置探测 `InitPrereqs`（`runtime/init_prereqs.py`）TTL 缓存 + 单飞，避免轮询打爆 chat provider / `validate_cookie`。LLM / embedding 改为严格真实探测：各发一次最小真实请求，超时 / 失败一律判未就绪（不再乐观放行 —— 让“状态检查通过”真正代表服务可用），成功 / 失败分别用长 / 短 TTL 缓存（修好后能快速复检），probe 全程经 `asyncio.gather` 并发以压低首检延迟。
