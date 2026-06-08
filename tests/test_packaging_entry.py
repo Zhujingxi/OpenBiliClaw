@@ -414,6 +414,24 @@ def test_single_instance_lock_separate_dirs_both_acquire(tmp_path: Path) -> None
 # and checks the return code so it can fall back to the default app.
 # --------------------------------------------------------------------------- #
 
+def test_view_runtime_logs_windows_opens_log_without_console(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(entry.os, "name", "nt")
+    monkeypatch.setattr(entry.sys, "platform", "win32")
+    spawned: list[object] = []
+    opened: list[Path] = []
+    monkeypatch.setattr(entry.subprocess, "Popen", lambda *a, **k: spawned.append((a, k)))
+    monkeypatch.setattr(entry, "_open_in_default_app", lambda p: opened.append(p))
+    log = tmp_path / "logs" / "desktop.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("hi", encoding="utf-8")
+
+    entry._view_runtime_logs(log)
+
+    assert spawned == []
+    assert opened == [log]
+
 
 def test_view_runtime_logs_macos_opens_terminal_with_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

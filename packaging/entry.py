@@ -424,11 +424,7 @@ def _view_runtime_logs(log_path: Path) -> None:
     Windows + macOS); fall back to opening the log file in the default app."""
     try:
         if os.name == "nt":
-            ps_cmd = f"Get-Content -LiteralPath '{log_path}' -Wait -Tail 200"
-            subprocess.Popen(  # noqa: S603
-                ["powershell", "-NoExit", "-NoProfile", "-Command", ps_cmd],
-                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
-            )
+            _open_in_default_app(log_path)
             return
         if sys.platform == "darwin":
             # Live-tail in Terminal by opening a tiny .command as a *document*
