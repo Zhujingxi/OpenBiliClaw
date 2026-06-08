@@ -1,9 +1,12 @@
 name: Build Desktop Installers
 
 # Manual-only. Produces downloadable Actions ARTIFACTS (macOS .dmg / Windows
-# .exe installer) — it does NOT create a GitHub Release and is NOT triggered by
-# any tag push. Backend release policy stays "source-only"; this is just an
-# on-demand convenience build for people who want a packaged installer.
+# .exe installer). This workflow itself does NOT create a GitHub Release and is
+# NOT triggered by any tag push (read-only token below). The backend SOURCE stays
+# "source-only" (backend-v* tags are git markers, no Release). The desktop
+# installer binaries, however, are published as EXPERIMENTAL pre-releases on the
+# Releases page (currently hand-cut with `gh release create … --prerelease` from
+# these artifacts) so README Quick Start can link a durable, no-login download.
 on:
   workflow_dispatch:
     inputs:

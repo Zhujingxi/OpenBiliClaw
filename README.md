@@ -43,7 +43,9 @@
 普通用户先走这四步；Firefox、Docker 和手动部署等备用路径保留在后面的 [安装与部署详情](#安装与部署详情)。
 
 1. **安装浏览器插件**：从 [Chrome 应用商店安装 OpenBiliClaw](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg)。
-2. **让 AI 助手部署后端**：把下面整句粘给 Claude Code、Codex CLI、Cursor、Windsurf 或其他 AI 编程助手。
+2. **部署后端（两种方式，按需选一，都推荐）**：
+   - 🖥️ **下载桌面安装包（最省事）**：到 [Releases](https://github.com/whiteguo233/OpenBiliClaw/releases) 下载 macOS `.dmg` / Windows `.exe`，装好双击即用 —— 自带本地 embedding、常驻菜单栏/托盘。当前为**未签名的实验性预发布**，首次打开需绕过系统拦截，详见 [安装与部署详情](#安装与部署详情)。
+   - 🤖 **让 AI 助手部署（想改源码 / 深度定制选它）**：把下面整句粘给 Claude Code、Codex CLI、Cursor、Windsurf 或其他 AI 编程助手。
 
 ```text
 请按照 https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md 的说明帮我部署 OpenBiliClaw 后端(务必用 Bash 的 curl 下载这个文档,不要用 WebFetch — 会丢关键指令)
@@ -251,7 +253,26 @@ npm run build:firefox          # 产出 dist-firefox/
 
 </details>
 
-### 2. AI 一句话部署后端
+### 2. 部署后端（二选一）
+
+普通用户直接用**桌面安装包**最省事；想改源码、换 LLM、深度定制就用 **AI 一句话部署**。
+
+#### 方式 A：下载桌面安装包（实验性，最省事）
+
+到 [Releases](https://github.com/whiteguo233/OpenBiliClaw/releases) 下载对应系统的安装包：
+
+- **macOS**：`.dmg`（区分 Apple 芯片 `arm64` / Intel `x64`），打开后把 OpenBiliClaw 拖进「应用程序」。
+- **Windows**：`.exe` 安装程序，双击安装。
+
+安装包自带本地 Ollama + `bge-m3` embedding，开箱即用；启动后常驻 **macOS 菜单栏 / Windows 系统托盘**，右键可「打开 Web 界面 / 查看运行日志 / 退出」。数据存在 `~/Library/Application Support/OpenBiliClaw`（mac）/ `%LOCALAPPDATA%\OpenBiliClaw`（Windows），升级或卸载不会动它。
+
+> ⚠️ **首次打开要绕过系统拦截（应用尚未签名 / 公证）**：
+> - **macOS**：右键图标 →「打开」→ 在弹窗里再点「打开」；或到「系统设置 → 隐私与安全性」点「仍要打开」。
+> - **Windows**：SmartScreen 弹窗点「更多信息 → 仍要运行」。
+>
+> 这是**实验性预发布**：未签名、随后端版本滚动更新，适合只想最快试用、不碰命令行的人。要二次开发 / 改源码请用下面的方式 B。
+
+#### 方式 B：AI 一句话部署（可定制 / 可改源码）
 
 把下面整句粘给 Claude Code、Codex CLI、Cursor、Windsurf 或其他 AI 编程助手即可。括号里的限制是给 AI 助手看的，你不用理解。
 

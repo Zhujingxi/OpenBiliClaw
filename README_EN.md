@@ -41,7 +41,9 @@ A local-first AI discovery agent that learns your taste across Bilibili, Xiaohon
 Most users only need these four steps. Firefox, Docker, and manual setup paths are preserved later in [Setup Details](#setup-details).
 
 1. **Install the extension** from the [Chrome Web Store](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg).
-2. **Ask an AI coding agent to deploy the backend** by pasting this prompt into Claude Code, Codex CLI, Cursor, Windsurf, or another coding agent.
+2. **Deploy the backend (two ways — pick one, both recommended)**:
+   - 🖥️ **Download the desktop installer (easiest)**: grab the macOS `.dmg` / Windows `.exe` from [Releases](https://github.com/whiteguo233/OpenBiliClaw/releases), install, and launch — it bundles local embedding and lives in the menu bar / system tray. It's an **unsigned experimental pre-release**, so the first launch needs a system-prompt bypass; see [Setup Details](#setup-details).
+   - 🤖 **Let an AI coding agent deploy it (pick this to customize / edit the source)**: paste this prompt into Claude Code, Codex CLI, Cursor, Windsurf, or another coding agent.
 
 ```text
 Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md to deploy the OpenBiliClaw backend for me (use Bash `curl` to fetch the document, NOT WebFetch — WebFetch summarises markdown and drops critical commands).
@@ -247,7 +249,26 @@ Caveat: temporary add-ons disappear on Firefox restart; signed AMO distribution 
 
 </details>
 
-### 2. Ask an AI coding agent to deploy the backend
+### 2. Deploy the backend (two options)
+
+Most users: the **desktop installer** is the least effort. Want to edit the source, swap LLMs, or customize deeply? Use the **AI one-line deploy**.
+
+#### Option A: Download the desktop installer (experimental, easiest)
+
+Grab the installer for your OS from [Releases](https://github.com/whiteguo233/OpenBiliClaw/releases):
+
+- **macOS**: `.dmg` (separate Apple-silicon `arm64` / Intel `x64` builds) — drag OpenBiliClaw into Applications.
+- **Windows**: `.exe` installer — double-click to install.
+
+It bundles local Ollama + `bge-m3` embedding (works out of the box) and lives in the **macOS menu bar / Windows system tray**; right-click for "Open Web UI / View runtime logs / Quit". Data is stored in `~/Library/Application Support/OpenBiliClaw` (mac) / `%LOCALAPPDATA%\OpenBiliClaw` (Windows) and survives upgrades and uninstalls.
+
+> ⚠️ **First launch needs a system-prompt bypass (the app isn't signed / notarized yet)**:
+> - **macOS**: right-click the icon → "Open" → click "Open" again in the dialog; or allow it under "System Settings → Privacy & Security".
+> - **Windows**: on the SmartScreen prompt, click "More info → Run anyway".
+>
+> This is an **experimental pre-release**: unsigned, rolling with the backend version, best for trying it fast without the command line. To hack on the source, use Option B.
+
+#### Option B: AI one-line deploy (customizable / editable source)
 
 Paste this whole prompt into Claude Code, Codex CLI, Cursor, Windsurf, or another AI coding agent. The parenthetical note is for the agent; you do not need to understand it.
 
