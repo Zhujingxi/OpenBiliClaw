@@ -381,6 +381,15 @@ class _FakeYoutubeProducer:
         return {"discovered": 3, "reason": "ok"}
 
 
+class _FakeXProducer:
+    def __init__(self) -> None:
+        self.calls: list[int | None] = []
+
+    async def produce_if_due(self, *, limit: int | None = None) -> dict[str, object]:
+        self.calls.append(limit)
+        return {"enqueued": 3, "discovered": 3, "reason": "ok"}
+
+
 class _FakeRecommendationEngine:
     def __init__(self) -> None:
         self.calls: list[tuple[list[dict[str, object]], dict[str, object], int]] = []
@@ -426,6 +435,7 @@ _LOOP_BODY_ATTRS = [
     ("_loop_xhs_producer", ("_tick_xhs_producer",)),
     ("_loop_douyin_producer", ("_tick_douyin_producer",)),
     ("_loop_youtube_producer", ("_tick_youtube_producer",)),
+    ("_loop_x_producer", ("_tick_x_producer",)),
     (
         "_loop_proactive_push",
         (
@@ -2519,6 +2529,67 @@ async def test_youtube_producer_skips_when_youtube_at_quota() -> None:
     await controller._tick_youtube_producer()
 
     assert producer.calls == []
+
+
+async def test_x_producer_runs_when_twitter_under_quota() -> None:
+    producer = _FakeXProducer()
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase(
+            [],
+            pool_count=540,
+            source_counts={"bilibili": 480, "twitter": 0},
+        ),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        pool_target_count=600,
+        pool_source_shares={"bilibili": 8, "twitter": 2},
+        discovery_limit=30,
+        x_producer=producer,
+    )
+
+    await controller._tick_x_producer()
+
+    assert producer.calls == [30]
+
+
+async def test_x_producer_skips_when_twitter_at_quota() -> None:
+    producer = _FakeXProducer()
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase(
+            [],
+            pool_count=600,
+            source_counts={"bilibili": 480, "twitter": 120},
+        ),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        pool_target_count=600,
+        pool_source_shares={"bilibili": 8, "twitter": 2},
+        x_producer=producer,
+    )
+
+    await controller._tick_x_producer()
+
+    assert producer.calls == []
+
+
+async def test_x_producer_skips_when_not_configured() -> None:
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase([], pool_count=540, source_counts={"bilibili": 480, "twitter": 0}),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        pool_target_count=600,
+        pool_source_shares={"bilibili": 8, "twitter": 2},
+        x_producer=None,
+    )
+
+    # No producer wired → tick is a safe no-op (does not raise).
+    await controller._tick_x_producer()
 
 
 def test_pool_cap_total_trim_receives_raw_ceiling_source_quotas() -> None:

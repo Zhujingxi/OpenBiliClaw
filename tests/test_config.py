@@ -105,6 +105,7 @@ class TestConfigDefaults:
             "xiaohongshu": 1,
             "douyin": 1,
             "youtube": 1,
+            "twitter": 1,
         }
 
     def test_bilibili_source_enabled_defaults_true(self) -> None:
@@ -1049,6 +1050,7 @@ def test_save_config_round_trips_pool_source_shares(tmp_path: Path) -> None:
         "xiaohongshu": 2,
         "douyin": 2,
         "youtube": 1,
+        "twitter": 3,
     }
 
     save_config(config, config_path)
@@ -1059,6 +1061,7 @@ def test_save_config_round_trips_pool_source_shares(tmp_path: Path) -> None:
         "xiaohongshu": 2,
         "douyin": 2,
         "youtube": 1,
+        "twitter": 3,
     }
 
 
@@ -1627,3 +1630,120 @@ def test_save_config_explicit_path_ignores_project_root_config_local(
     # the project-root config.local must not have shadowed the explicit write
     assert "trust_loopback = false" in explicit.read_text(encoding="utf-8")
     assert load_config(explicit).api.auth.trust_loopback is False
+
+
+def test_twitter_source_defaults() -> None:
+    config = Config()
+
+    assert config.sources.twitter.enabled is False
+    assert config.sources.twitter.mode == "cookie"
+    assert config.sources.twitter.cookie_env == "OPENBILICLAW_X_COOKIE"
+    assert config.sources.twitter.daily_search_budget == 0
+    assert config.sources.twitter.daily_feed_budget == 0
+    assert config.sources.twitter.daily_creator_budget == 0
+    assert config.sources.twitter.request_interval_seconds == 3
+    assert config.sources.twitter.min_interval_minutes == 60
+
+
+def test_twitter_source_parsed_from_toml(tmp_path: Path) -> None:
+    toml_path = tmp_path / "c.toml"
+    toml_path.write_text(
+        """
+[sources.twitter]
+enabled = true
+mode = "cookie"
+cookie_env = "MY_X_COOKIE"
+daily_search_budget = 12
+daily_feed_budget = 4
+daily_creator_budget = 6
+request_interval_seconds = 5
+min_interval_minutes = 90
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(toml_path)
+
+    assert config.sources.twitter.enabled is True
+    assert config.sources.twitter.cookie_env == "MY_X_COOKIE"
+    assert config.sources.twitter.daily_search_budget == 12
+    assert config.sources.twitter.daily_feed_budget == 4
+    assert config.sources.twitter.daily_creator_budget == 6
+    assert config.sources.twitter.request_interval_seconds == 5
+    assert config.sources.twitter.min_interval_minutes == 90
+
+
+def test_twitter_source_round_trips_through_save_load(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.sources.twitter.enabled = True
+    config.sources.twitter.cookie_env = "ROUND_TRIP_X_COOKIE"
+    config.sources.twitter.daily_search_budget = 7
+    config.sources.twitter.daily_feed_budget = 2
+    config.sources.twitter.daily_creator_budget = 3
+    config.sources.twitter.request_interval_seconds = 4
+    config.sources.twitter.min_interval_minutes = 45
+
+    save_config(config, config_path)
+    rendered = config_path.read_text(encoding="utf-8")
+    assert "[sources.twitter]" in rendered
+    assert "daily_feed_budget = 2" in rendered
+
+    loaded = load_config(config_path)
+    assert loaded.sources.twitter.enabled is True
+    assert loaded.sources.twitter.cookie_env == "ROUND_TRIP_X_COOKIE"
+    assert loaded.sources.twitter.daily_search_budget == 7
+    assert loaded.sources.twitter.daily_feed_budget == 2
+    assert loaded.sources.twitter.daily_creator_budget == 3
+    assert loaded.sources.twitter.request_interval_seconds == 4
+    assert loaded.sources.twitter.min_interval_minutes == 45
+
+
+def test_pool_source_shares_twitter_round_trips(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.scheduler.pool_source_shares = {
+        "bilibili": 6,
+        "xiaohongshu": 2,
+        "douyin": 1,
+        "youtube": 1,
+        "twitter": 2,
+    }
+
+    save_config(config, config_path)
+    rendered = config_path.read_text(encoding="utf-8")
+    assert "twitter = 2" in rendered
+
+    loaded = load_config(config_path)
+    assert loaded.scheduler.pool_source_shares["twitter"] == 2
+
+
+def test_twitter_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    toml_path = tmp_path / "c.toml"
+    toml_path.write_text(
+        """
+[sources.twitter]
+enabled = false
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENBILICLAW_SOURCES_TWITTER_ENABLED", "true")
+
+    config = load_config(toml_path)
+
+    assert config.sources.twitter.enabled is True
+
+
+def test_disabling_twitter_drops_its_pool_quota() -> None:
+    from openbiliclaw.runtime.source_policy import effective_pool_source_shares
+
+    config = Config()
+    config.sources.twitter.enabled = True
+    config.scheduler.pool_source_shares = {
+        "bilibili": 8,
+        "twitter": 3,
+    }
+    assert effective_pool_source_shares(config).get("twitter") == 3
+
+    config.sources.twitter.enabled = False
+    assert "twitter" not in effective_pool_source_shares(config)

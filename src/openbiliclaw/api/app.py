@@ -98,6 +98,7 @@ from openbiliclaw.api.models import (
     XCookieIn,
     XCookieResponse,
     XiaohongshuSourceConfigOut,
+    XStatusResponse,
     YoutubeSourceConfigOut,
 )
 from openbiliclaw.runtime.image_cache import (
@@ -5487,6 +5488,27 @@ def create_app(
         if not deleted:
             raise HTTPException(status_code=404, detail="Subscription not found")
         return {"ok": True}
+
+    # ── X (Twitter) source health (spec §7) ────────────────────────
+    # Surfaces the persisted health state machine so the settings UI can
+    # show login / rate-limit / block status (rendered in Task 12).
+
+    @app.get("/api/sources/x/status", response_model=XStatusResponse)
+    def x_source_status() -> XStatusResponse:
+        """Return the current X source health (ok / cookie / rate-limit / block)."""
+        if not hasattr(ctx.database, "conn"):
+            return XStatusResponse()
+        from openbiliclaw.storage.x_health import XSourceHealthStore
+
+        health = XSourceHealthStore(ctx.database).get()
+        return XStatusResponse(
+            state=str(health.get("state", "ok")),
+            consecutive_failures=int(health.get("consecutive_failures", 0)),
+            feed_paused=bool(health.get("feed_paused", False)),
+            cooldown_until=str(health.get("cooldown_until", "")),
+            detail=str(health.get("detail", "")),
+            updated_at=str(health.get("updated_at", "")),
+        )
 
     # ── Douyin task queue endpoints (extension dispatcher) ──────────
     # Independent from the XHS block above by design — see

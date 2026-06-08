@@ -44,6 +44,7 @@ _DEFAULT_POOL_SOURCE_SHARES = {
     "xiaohongshu": 1,
     "douyin": 1,
     "youtube": 1,
+    "twitter": 1,
 }
 _DEFAULT_AUTO_UPDATE_ALLOWED_REMOTES = [
     "https://github.com/whiteguo233/OpenBiliClaw.git",
@@ -298,15 +299,22 @@ class YoutubeSourceConfig:
 class TwitterSourceConfig:
     """X (Twitter) direct-cookie discovery configuration.
 
-    Minimal v1: just the enable switch and the cookie env var so the runtime
-    can gate adapter registration on ``[sources.twitter].enabled``. Steady-
-    state discovery is server-side cookie replay (search / For-You / creator),
-    mirroring the Douyin-direct path. Budgets / scheduling / source-share
-    knobs are added by the X producer task; keep this minimal until then.
+    Steady-state discovery is server-side cookie replay (search / For-You /
+    creator), mirroring the Douyin-direct path. The X producer reads the
+    budget / interval knobs below to throttle the three strategies and to
+    keep the high-visibility For-You feed to a low daily cadence. ``0`` daily
+    budgets mean "no per-day cap" (each due run is bounded by the runtime
+    deficit), matching the Douyin / YouTube producer convention.
     """
 
     enabled: bool = False
+    mode: str = "cookie"
     cookie_env: str = "OPENBILICLAW_X_COOKIE"
+    daily_search_budget: int = 0
+    daily_feed_budget: int = 0
+    daily_creator_budget: int = 0
+    request_interval_seconds: int = 3
+    min_interval_minutes: int = 60
 
 
 @dataclass
@@ -669,7 +677,13 @@ def _build_config(raw: dict[str, Any]) -> Config:
         ),
         twitter=TwitterSourceConfig(
             enabled=bool(twitter_raw.get("enabled", False)),
+            mode=str(twitter_raw.get("mode", "cookie")),
             cookie_env=str(twitter_raw.get("cookie_env", "OPENBILICLAW_X_COOKIE")),
+            daily_search_budget=int(twitter_raw.get("daily_search_budget", 0)),
+            daily_feed_budget=int(twitter_raw.get("daily_feed_budget", 0)),
+            daily_creator_budget=int(twitter_raw.get("daily_creator_budget", 0)),
+            request_interval_seconds=int(twitter_raw.get("request_interval_seconds", 3)),
+            min_interval_minutes=max(0, int(twitter_raw.get("min_interval_minutes", 60))),
         ),
     )
 
@@ -1664,7 +1678,13 @@ def _render_config_toml(
             "",
             "[sources.twitter]",
             f"enabled = {_toml_bool(config.sources.twitter.enabled)}",
+            f"mode = {_toml_string(config.sources.twitter.mode)}",
             f"cookie_env = {_toml_string(config.sources.twitter.cookie_env)}",
+            f"daily_search_budget = {config.sources.twitter.daily_search_budget}",
+            f"daily_feed_budget = {config.sources.twitter.daily_feed_budget}",
+            f"daily_creator_budget = {config.sources.twitter.daily_creator_budget}",
+            f"request_interval_seconds = {config.sources.twitter.request_interval_seconds}",
+            f"min_interval_minutes = {config.sources.twitter.min_interval_minutes}",
             "",
             "[scheduler]",
             f"enabled = {_toml_bool(config.scheduler.enabled)}",
@@ -1715,6 +1735,7 @@ def _render_config_toml(
             f"xiaohongshu = {int(config.scheduler.pool_source_shares.get('xiaohongshu', 1))}",
             f"douyin = {int(config.scheduler.pool_source_shares.get('douyin', 1))}",
             f"youtube = {int(config.scheduler.pool_source_shares.get('youtube', 1))}",
+            f"twitter = {int(config.scheduler.pool_source_shares.get('twitter', 1))}",
             "",
             *_autostart_lines(
                 config,

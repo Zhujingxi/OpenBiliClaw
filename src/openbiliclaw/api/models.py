@@ -338,6 +338,22 @@ class XCookieResponse(BaseModel):
     error_code: str = ""
 
 
+class XStatusResponse(BaseModel):
+    """Current X (Twitter) source health (spec §7).
+
+    ``state`` is one of ``ok`` / ``missing_cookie`` / ``expired_cookie`` /
+    ``rate_limited`` / ``blocked``. ``feed_paused`` is true when repeated
+    For-You failures have auto-paused the high-visibility home-timeline fetch.
+    """
+
+    state: str = "ok"
+    consecutive_failures: int = 0
+    feed_paused: bool = False
+    cooldown_until: str = ""
+    detail: str = ""
+    updated_at: str = ""
+
+
 class NotificationAckIn(BaseModel):
     """Acknowledge one browser notification delivery."""
 

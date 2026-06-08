@@ -21,6 +21,7 @@ def test_source_enabled_map_reads_bilibili_switch() -> None:
         "xiaohongshu": False,
         "douyin": False,
         "youtube": False,
+        "twitter": False,
     }
 
 
@@ -32,6 +33,7 @@ def test_default_enabled_sources_make_xiaohongshu_opt_in() -> None:
         "xiaohongshu": False,
         "douyin": False,
         "youtube": False,
+        "twitter": False,
     }
     assert effective_pool_source_shares(config) == {"bilibili": 8}
 

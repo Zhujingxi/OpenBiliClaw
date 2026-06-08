@@ -6295,6 +6295,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "xiaohongshu": True,
                 "douyin": True,
                 "youtube": True,
+                "twitter": False,
             },
             "suggested_shares": {
                 "bilibili": 8,

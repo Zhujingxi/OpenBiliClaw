@@ -304,6 +304,22 @@ request_interval_seconds = 2
 # YouTube producer 两次执行之间的最小间隔；0 表示每个 refresh tick 都允许检查执行。
 min_interval_minutes = 60
 
+# ── X (Twitter) 专用配置 ──
+# 设为 false 后：后端不再生成 X 搜索/推荐流/账号订阅任务，
+# pool_source_shares 中的 twitter 配额会被丢弃（避免池子卡在低于目标）。
+# 默认 false，由 init 交互 / --yes-x / 插件设置页打开后才写回 true。
+# 发现走服务端 cookie 重放（对标 douyin direct），cookie 经浏览器扩展自动同步
+# 落盘 data/x_cookie.json，可被 OPENBILICLAW_X_COOKIE env 覆盖。
+[sources.twitter]
+enabled = false
+mode = "cookie"                         # 服务端 cookie 重放
+cookie_env = "OPENBILICLAW_X_COOKIE"    # 优先级高于 data/x_cookie.json
+daily_search_budget = 0                 # 0 = 不设每日上限
+daily_feed_budget = 0                   # 推荐流(For You)每日拉取上限（高曝光，建议压低）
+daily_creator_budget = 0                # 账号订阅每日抓取上限
+request_interval_seconds = 3            # 两次请求最小间隔（抗检测）
+min_interval_minutes = 60               # producer 两次执行最小间隔
+
 [scheduler]
 # Enable scheduled content discovery
 enabled = true
@@ -364,6 +380,7 @@ bilibili = 8
 xiaohongshu = 1
 douyin = 1
 youtube = 1
+twitter = 1
 
 [autostart]
 # 登录系统后是否自动拉起 OpenBiliClaw 后端。默认关闭；请通过设置页或

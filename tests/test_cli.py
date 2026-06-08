@@ -3724,6 +3724,9 @@ def test_select_init_source_shares_accepts_suggested_ratios(
         "xiaohongshu": 3,
         "douyin": 1,
         "youtube": 5,
+        # twitter carries its default share (1) even when not in the import's
+        # enabled_sources; effective_pool_source_shares drops it while disabled.
+        "twitter": 1,
     }
 
 
@@ -3761,6 +3764,8 @@ def test_select_init_source_shares_accepts_manual_ratios(
         "xiaohongshu": 2,
         "douyin": 1,
         "youtube": 3,
+        # twitter carries its default share (1); dropped later while disabled.
+        "twitter": 1,
     }
 
 

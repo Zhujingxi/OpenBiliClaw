@@ -47,7 +47,7 @@ _COVER_PREFETCH_MAX_FETCH = 40
 _DEFAULT_PLATFORM_SOURCE_SHARES: dict[str, int] = {
     "bilibili": 8,
 }
-_PLATFORM_SOURCE_ORDER = ("bilibili", "xiaohongshu", "douyin", "youtube")
+_PLATFORM_SOURCE_ORDER = ("bilibili", "xiaohongshu", "douyin", "youtube", "twitter")
 _BILIBILI_DISCOVERY_SOURCES = ("search", "related_chain", "trending", "explore")
 _PROBE_CHALLENGE_MODES = {"lateral", "bridge", "wildcard"}
 
@@ -225,6 +225,7 @@ class ContinuousRefreshController:
     xhs_producer: Any | None = None
     douyin_producer: Any | None = None
     youtube_producer: Any | None = None
+    x_producer: Any | None = None
     scheduler_config: Any = field(default_factory=SchedulerConfig)
     presence: PresenceTracker = field(default_factory=PresenceTracker)
     # gui-init D1: optional init-aware gate. When it returns True (a guided init
@@ -871,6 +872,7 @@ class ContinuousRefreshController:
             ├─ _loop_xhs_producer()      60s   xhs keyword generation
             ├─ _loop_douyin_producer()   60s   Douyin discovery when under quota
             ├─ _loop_youtube_producer()  60s   YouTube discovery when under quota
+            ├─ _loop_x_producer()        60s   X (Twitter) discovery when under quota
             ├─ _loop_proactive_push()    60s   delight + interest probe
             ├─ _loop_image_cache_cleanup() 6h  prune consumed+unsaved covers
             └─ _loop_cover_prefetch()    60s   cache fresh-token covers (XHS)
@@ -886,6 +888,7 @@ class ContinuousRefreshController:
             asyncio.create_task(self._loop_xhs_producer()),
             asyncio.create_task(self._loop_douyin_producer()),
             asyncio.create_task(self._loop_youtube_producer()),
+            asyncio.create_task(self._loop_x_producer()),
             asyncio.create_task(self._loop_proactive_push()),
             asyncio.create_task(self._loop_image_cache_cleanup()),
             asyncio.create_task(self._loop_cover_prefetch()),
@@ -1103,6 +1106,16 @@ class ContinuousRefreshController:
                 await self._tick_youtube_producer()
             await asyncio.sleep(self.check_interval_seconds)
 
+    async def _loop_x_producer(self) -> None:
+        """X (Twitter) production — server-side cookie-replay discovery when under quota."""
+        while True:
+            if not self._llm_work_allowed():
+                await asyncio.sleep(self.check_interval_seconds)
+                continue
+            with suppress(Exception):
+                await self._tick_x_producer()
+            await asyncio.sleep(self.check_interval_seconds)
+
     async def _loop_proactive_push(self) -> None:
         """Delight + interest probe push — lightweight, never blocks.
 
@@ -1261,6 +1274,25 @@ class ContinuousRefreshController:
         if not self._is_initialized():
             return
         deficit = self._source_deficit("youtube")
+        if deficit <= 0:
+            return
+        produce_fn = getattr(producer, "produce_if_due", None)
+        if not callable(produce_fn):
+            return
+        limit = max(1, min(deficit, self.discovery_limit))
+        if _call_accepts_limit(produce_fn):
+            await produce_fn(limit=limit)
+        else:
+            await produce_fn()
+
+    async def _tick_x_producer(self) -> None:
+        """Invoke the X (Twitter) discovery producer if X is under quota."""
+        producer = self.x_producer
+        if producer is None:
+            return
+        if not self._is_initialized():
+            return
+        deficit = self._source_deficit("twitter")
         if deficit <= 0:
             return
         produce_fn = getattr(producer, "produce_if_due", None)
@@ -2091,7 +2123,9 @@ class ContinuousRefreshController:
                 stranded.append("douyin")
             elif source == "youtube" and self.youtube_producer is None:
                 stranded.append("youtube")
-            elif source not in {"bilibili", "xiaohongshu", "douyin", "youtube"}:
+            elif source == "twitter" and self.x_producer is None:
+                stranded.append("twitter")
+            elif source not in {"bilibili", "xiaohongshu", "douyin", "youtube", "twitter"}:
                 # Unknown source family with an explicit share.
                 stranded.append(source)
         if stranded:

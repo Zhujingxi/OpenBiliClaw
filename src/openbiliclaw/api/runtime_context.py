@@ -582,6 +582,7 @@ class RuntimeContext:
         new_xhs_producer: Any = None
         new_douyin_producer: Any = None
         new_youtube_producer: Any = None
+        new_x_producer: Any = None
         if hasattr(self.database, "conn"):
             from openbiliclaw.runtime.xhs_producer import XhsTaskProducer
             from openbiliclaw.sources.xhs_tasks import XhsTaskQueue
@@ -617,6 +618,17 @@ class RuntimeContext:
                 memory=cast("Any", self.memory_manager),
                 concurrency=concurrency,
             )
+            # X (Twitter) producer — fetch-only; enqueues into discovery_candidates
+            # and never evaluates / writes content_cache (unified-pool spec). Gated
+            # on [sources.twitter].enabled; the disabled path imports no twitter_cli.
+            from openbiliclaw.runtime.x_producer import build_x_discovery_producer
+
+            new_x_producer = build_x_discovery_producer(
+                config=new_config,
+                database=self.database,
+                soul_engine=new_soul_engine,
+                llm_service=new_llm_service,
+            )
 
         new_runtime_controller = ContinuousRefreshController(
             memory_manager=self.memory_manager,
@@ -641,6 +653,7 @@ class RuntimeContext:
             xhs_producer=new_xhs_producer,
             douyin_producer=new_douyin_producer,
             youtube_producer=new_youtube_producer,
+            x_producer=new_x_producer,
             scheduler_config=new_config.scheduler,
             presence=self.presence,
             # gui-init D1: pause the controller's background loops while a guided
