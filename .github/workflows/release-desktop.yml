@@ -1,40 +1,30 @@
-name: Build Desktop Installers
+name: Release Desktop Installers
 
-# Manual-only. Produces downloadable Actions ARTIFACTS (macOS arm64 + Intel .dmg
-# / Windows .exe). This workflow itself does NOT create a GitHub Release and is
-# NOT triggered by any tag push (read-only token below). The backend SOURCE stays
-# "source-only" (backend-v* tags are git markers, no Release).
+# Tag-triggered auto-publish. Push a `desktop-v*` tag (e.g. `desktop-v0.3.102`)
+# and this builds the macOS (.dmg) + Windows (.exe) installers and publishes them
+# to a GitHub *pre-release* (the app is unsigned / pre-alpha). This is the
+# auto-publish counterpart to build-installers.yml (manual, artifacts-only).
 #
-# For an actual published Release, push a `desktop-v*` tag → release-desktop.yml
-# auto-builds (arm64 + Windows) and publishes an experimental pre-release. This
-# manual workflow stays for ad-hoc builds — notably the Intel x64 .dmg, which
-# release-desktop.yml skips because the macos-13 runner queues too long to gate a
-# release on. Build it here on demand and attach it to the release if needed.
+# Scope note: the backend SOURCE stays source-only (`backend-v*` tags are git
+# markers, no Release) — only the desktop installer BINARIES ship here.
+#
+# Arch note: only macOS arm64 + Windows x64 are auto-built. The macos-13 (Intel
+# x64) runner is scarce and routinely queues for a very long time; gating every
+# release on it would stall the whole publish. Build the Intel .dmg on demand via
+# the manual build-installers.yml and attach it to the release if needed.
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Version label for artifact filenames (e.g. v0.3.101). Defaults to pyproject version."
-        required: false
-        default: ""
+  push:
+    tags:
+      - "desktop-v*"
 
-# Read-only token: this workflow structurally cannot publish a Release.
+# Needs write access to publish the Release (build-installers.yml stays read-only).
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   macos:
-    name: macOS installer (.dmg, ${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Native per-arch builds: each bundles its own ollama + wheels. A
-          # universal2 build isn't viable because the bundled ollama binary
-          # (and some wheels) ship per-architecture only.
-          - { runner: macos-14, arch: arm64 } # Apple Silicon
-          - { runner: macos-13, arch: x64 } # Intel
+    name: macOS installer (.dmg, arm64)
+    runs-on: macos-14 # Apple Silicon
     steps:
       - uses: actions/checkout@v6
 
@@ -45,8 +35,7 @@ jobs:
       - name: Install project + PyInstaller
         run: |
           python -m pip install --upgrade pip
-          # [packaging] pulls pyinstaller + pystray + Pillow + (on macOS) pyobjc
-          # for the menu-bar tray desktop mode.
+          # [packaging] pulls pyinstaller + pystray + Pillow + pyobjc (menu-bar tray).
           pip install -e ".[packaging]"
 
       - name: Install Ollama (bundled into the app for local bge-m3 embedding)
@@ -55,20 +44,16 @@ jobs:
       - name: Resolve version
         id: ver
         run: |
-          if [ -n "${{ inputs.version }}" ]; then v="${{ inputs.version }}"; else
-            v="v$(python -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
-          fi
-          # Stamp the commit SHA so every build is uniquely identifiable — the
-          # installed app / .dmg name shows exactly which code it contains.
-          v="${v}.${GITHUB_SHA:0:7}"
+          # desktop-v0.3.102 -> v0.3.102 (a tagged release IS the version; no SHA stamp).
+          v="${GITHUB_REF_NAME#desktop-}"
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
       - name: Build .app + .dmg (auto-bundles ollama)
-        run: python packaging/build.py --clean --archive-version "${{ steps.ver.outputs.version }}-${{ matrix.arch }}"
+        run: python packaging/build.py --clean --archive-version "${{ steps.ver.outputs.version }}-arm64"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: openbiliclaw-macos-installer-${{ matrix.arch }}
+          name: openbiliclaw-macos-installer-arm64
           path: |
             dist/release/*.dmg
             dist/release/*.zip
@@ -94,12 +79,7 @@ jobs:
         id: ver
         shell: bash
         run: |
-          if [ -n "${{ inputs.version }}" ]; then v="${{ inputs.version }}"; else
-            v="v$(python -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
-          fi
-          # Stamp the commit SHA so the installed app's version (Programs &
-          # Features) shows exactly which code it contains — no more guessing.
-          v="${v}.${GITHUB_SHA:0:7}"
+          v="${GITHUB_REF_NAME#desktop-}"
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "bare=${v#v}" >> "$GITHUB_OUTPUT"
 
@@ -109,10 +89,6 @@ jobs:
       - name: Stage bundled Ollama (CPU runner only — bge-m3 embedding is CPU)
         shell: pwsh
         run: |
-          # Keep ollama current (0.18.2 was ancient). NOTE: even 0.30.6 still
-          # spawns its model runner (llama-server.exe) with its own console on
-          # Windows — the next step flips those exes to the GUI subsystem so no
-          # console window is ever allocated.
           $ver = "0.30.6"
           Invoke-WebRequest "https://github.com/ollama/ollama/releases/download/v$ver/ollama-windows-amd64.zip" -OutFile ollama.zip
           Expand-Archive ollama.zip -DestinationPath ollama_win -Force
@@ -133,10 +109,8 @@ jobs:
       - name: Make bundled ollama windowless (PE subsystem console -> GUI)
         shell: pwsh
         run: |
-          # ollama spawns llama-server.exe with its own console (visible window /
-          # conhost flashing). A GUI-subsystem exe never allocates a console, so
-          # flip ollama.exe + every bundled runner exe to GUI. Doesn't affect the
-          # stdout/stderr pipes ollama reads or the runner's HTTP port.
+          # A GUI-subsystem exe never allocates a console, so flip ollama.exe +
+          # every bundled runner exe to GUI to stop the console/conhost flashing.
           $exes = @("dist\OpenBiliClaw\ollama.exe")
           $exes += (Get-ChildItem dist\OpenBiliClaw\lib -Recurse -Filter *.exe -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
           python packaging\patch_pe_subsystem.py @exes
@@ -154,3 +128,39 @@ jobs:
           name: openbiliclaw-windows-installer
           path: dist/release/*.exe
           if-no-files-found: error
+
+  publish:
+    name: Publish desktop pre-release
+    runs-on: ubuntu-latest
+    needs: [macos, windows]
+    # always() so a single failed build leg still ships the other installer
+    # rather than blocking the whole release.
+    if: ${{ always() }}
+    steps:
+      - name: Download built installers
+        uses: actions/download-artifact@v8
+        with:
+          path: release-artifacts
+          pattern: openbiliclaw-*
+          merge-multiple: true
+
+      - name: List downloaded installers
+        run: ls -lhR release-artifacts || true
+
+      - name: Publish GitHub pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+          body: |
+            **实验性桌面安装包**（未签名 / 未公证，仅供尝鲜）。后端源码仍为 source-only；此处只发桌面应用二进制。
+
+            ### 首次打开要绕过系统拦截
+            - **macOS**：右键图标 →「打开」→ 在弹窗里再点「打开」；或「系统设置 → 隐私与安全性」点「仍要打开」。
+            - **Windows**：SmartScreen 弹窗点「更多信息 → 仍要运行」。
+
+            自带本地 Ollama + `bge-m3` embedding，开箱即用，常驻 macOS 菜单栏 / Windows 系统托盘。数据在 `~/Library/Application Support/OpenBiliClaw`（mac）/ `%LOCALAPPDATA%\OpenBiliClaw`（Windows），升级 / 卸载不动它。Intel mac（x64）.dmg 未自动构建，需要时用手动的 build-installers.yml 产出后补挂。
+          files: |
+            release-artifacts/*.dmg
+            release-artifacts/*.exe
