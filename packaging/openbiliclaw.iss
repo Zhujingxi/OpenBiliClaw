@@ -15,6 +15,10 @@
   #define MyAppVersion "0.0.0-dev"
 #endif
 
+#ifndef MyAppVersionInfoVersion
+  #define MyAppVersionInfoVersion MyAppVersion
+#endif
+
 #define MyAppName "OpenBiliClaw"
 #define MyAppPublisher "OpenBiliClaw Contributors"
 #define MyAppURL "https://github.com/whiteguo233/OpenBiliClaw"
@@ -25,6 +29,12 @@
 AppId={{B4F3D2A1-7C6E-4A8B-9D1F-0E2A6C5B3D14}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
+VersionInfoVersion={#MyAppVersionInfoVersion}
+VersionInfoProductVersion={#MyAppVersion}
+VersionInfoProductTextVersion={#MyAppVersion}
+VersionInfoCompany={#MyAppPublisher}
+VersionInfoDescription={#MyAppName} Setup
+VersionInfoProductName={#MyAppName}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}

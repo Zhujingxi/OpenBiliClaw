@@ -82,9 +82,11 @@ jobs:
           v="${GITHUB_REF_NAME#desktop-}"
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "bare=${v#v}" >> "$GITHUB_OUTPUT"
+          numeric="$(python -c 'import re,sys; m=re.match(r"v?(\d+)\.(\d+)\.(\d+)", sys.argv[1]); print(f"{m.group(1)}.{m.group(2)}.{m.group(3)}.0" if m else "0.0.0.0")' "$v")"
+          echo "version_info=$numeric" >> "$GITHUB_OUTPUT"
 
       - name: PyInstaller onedir build (ollama staged separately below)
-        run: python packaging/build.py --clean --no-bundle-ollama
+        run: python packaging/build.py --clean --no-bundle-ollama --archive-version "${{ steps.ver.outputs.version }}"
 
       - name: Stage bundled Ollama (CPU runner only — bge-m3 embedding is CPU)
         shell: pwsh
@@ -121,7 +123,7 @@ jobs:
       - name: Compile installer
         shell: pwsh
         run: |
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ steps.ver.outputs.bare }} packaging\openbiliclaw.iss
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ steps.ver.outputs.bare }} /DMyAppVersionInfoVersion=${{ steps.ver.outputs.version_info }} packaging\openbiliclaw.iss
 
       - uses: actions/upload-artifact@v7
         with:

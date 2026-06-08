@@ -34,6 +34,46 @@ def test_make_bundle_version_strips_backend_release_channel_prefix() -> None:
     assert build_module.make_bundle_version("backend-v0.1.3") == "0.1.3"
 
 
+def test_windows_file_version_tuple_uses_numeric_prefix() -> None:
+    assert build_module.make_windows_file_version_tuple("0.3.103") == (0, 3, 103, 0)
+    assert build_module.make_windows_file_version_tuple("v0.3.103.deadbee") == (0, 3, 103, 0)
+    assert build_module.make_windows_file_version_tuple("0.3.103-rc1") == (0, 3, 103, 0)
+
+
+def test_write_windows_version_file_includes_file_and_product_versions(tmp_path: Path) -> None:
+    version_file = build_module.write_windows_version_file(
+        tmp_path / "version_info.txt",
+        version="0.3.103.deadbee",
+    )
+
+    text = version_file.read_text(encoding="utf-8")
+
+    assert "filevers=(0, 3, 103, 0)" in text
+    assert "prodvers=(0, 3, 103, 0)" in text
+    assert "StringStruct('FileVersion', '0.3.103.deadbee')" in text
+    assert "StringStruct('ProductVersion', '0.3.103.deadbee')" in text
+    assert "StringStruct('OriginalFilename', 'OpenBiliClaw.exe')" in text
+
+
+def test_inno_installer_sets_numeric_file_version_resource() -> None:
+    script = (Path(__file__).resolve().parent.parent / "packaging" / "openbiliclaw.iss").read_text(
+        encoding="utf-8"
+    )
+
+    assert "#define MyAppVersionInfoVersion" in script
+    assert "VersionInfoVersion={#MyAppVersionInfoVersion}" in script
+    assert "VersionInfoProductVersion={#MyAppVersion}" in script
+
+
+def test_pyinstaller_spec_uses_windows_version_file_env() -> None:
+    spec = (
+        Path(__file__).resolve().parent.parent / "packaging" / "openbiliclaw.spec"
+    ).read_text(encoding="utf-8")
+
+    assert 'OPENBILICLAW_WINDOWS_VERSION_FILE' in spec
+    assert "version=version_file" in spec
+
+
 def test_build_pyinstaller_install_command_falls_back_to_uv_when_pip_missing() -> None:
     assert build_module.build_pyinstaller_install_command(
         pip_available=False,

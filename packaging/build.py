@@ -12,6 +12,7 @@ import argparse
 import importlib.util
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -82,6 +83,68 @@ def normalize_release_version(version: str) -> str:
 def make_bundle_version(version: str) -> str:
     """Normalize a tag-style version for bundle metadata."""
     return normalize_release_version(version).removeprefix("v")
+
+
+def make_windows_file_version_tuple(version: str) -> tuple[int, int, int, int]:
+    """Return a numeric Windows PE file version tuple from a display version.
+
+    Windows VERSIONINFO requires integer fields. Release labels may contain a
+    channel prefix, architecture suffix, prerelease marker, or commit stamp, so
+    use the leading semantic version and zero-fill the fourth component.
+    """
+    normalized = make_bundle_version(version)
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?", normalized)
+    if match is None:
+        raise ValueError(f"cannot derive Windows file version from {version!r}")
+    parts = [int(part) if part is not None else 0 for part in match.groups()]
+    return (parts[0], parts[1], parts[2], parts[3])
+
+
+def _version_string_literal(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def write_windows_version_file(path: Path, *, version: str) -> Path:
+    """Write a PyInstaller VERSIONINFO resource file for OpenBiliClaw.exe."""
+    file_version = make_windows_file_version_tuple(version)
+    file_version_text = ", ".join(str(part) for part in file_version)
+    display_version = _version_string_literal(version)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"""# UTF-8
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=({file_version_text}),
+    prodvers=({file_version_text}),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0),
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        '040904B0',
+        [
+          StringStruct('CompanyName', 'OpenBiliClaw Contributors'),
+          StringStruct('FileDescription', 'OpenBiliClaw'),
+          StringStruct('FileVersion', '{display_version}'),
+          StringStruct('InternalName', 'OpenBiliClaw'),
+          StringStruct('OriginalFilename', 'OpenBiliClaw.exe'),
+          StringStruct('ProductName', 'OpenBiliClaw'),
+          StringStruct('ProductVersion', '{display_version}'),
+        ],
+      ),
+    ]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])]),
+  ],
+)
+""",
+        encoding="utf-8",
+    )
+    return path
 
 
 def detect_target(platform_name: str | None = None) -> str:
@@ -327,6 +390,12 @@ def build(
     print(f"[build] Running: {' '.join(cmd)}")
     env = os.environ.copy()
     env["OPENBILICLAW_BUNDLE_VERSION"] = bundle_version
+    if platform.system() == "Windows":
+        version_file = write_windows_version_file(
+            PROJECT_ROOT / "build" / "openbiliclaw_version_info.txt",
+            version=bundle_version,
+        )
+        env["OPENBILICLAW_WINDOWS_VERSION_FILE"] = str(version_file)
     subprocess.check_call(cmd, cwd=str(PROJECT_ROOT), env=env)
 
     if platform.system() == "Darwin":

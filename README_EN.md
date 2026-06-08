@@ -188,10 +188,10 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-Latest: **v0.3.103 / extension v0.3.69: desktop installer runtime UX fixes (2026-06-09)**. Full history lives in [docs/changelog.md](docs/changelog.md).
+Latest: **v0.3.104 / extension v0.3.69: Windows installer version metadata fix (2026-06-09)**. Full history lives in [docs/changelog.md](docs/changelog.md).
 
+- **Correct Windows version display** — both the installer and `OpenBiliClaw.exe` now carry FileVersion / ProductVersion metadata, so Explorer, Task Manager, and uninstall entries line up.
 - **Smoother desktop recommendation feed** — empty / low inventory returns immediately and triggers debounced replenishment in the background, so scrolling no longer waits on the refill path or swaps the whole list unexpectedly.
-- **Faster cover rendering** — appended recommendation cards render before cover prewarm, and the first-view delight cover uses eager/high-priority loading.
 - **Installer web UI cache-busting** — `/web` injects versioned CSS / JS URLs and returns `no-store`, so upgrades open the newly packaged frontend code.
 
 ## Community
@@ -643,7 +643,7 @@ OpenBiliClaw/
 
 ## 📜 Release History
 
-Latest: **v0.3.103 / extension v0.3.69: desktop installer runtime UX fixes (2026-06-09)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Extension packages and desktop installers live on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases); backend source updates use `backend-v*` tags.
+Latest: **v0.3.104 / extension v0.3.69: Windows installer version metadata fix (2026-06-09)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Extension packages and desktop installers live on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases); backend source updates use `backend-v*` tags.
 
 ## 🗺️ Roadmap
 

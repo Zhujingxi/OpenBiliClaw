@@ -16,6 +16,11 @@ from pathlib import Path
 block_cipher = None
 project_root = Path(SPECPATH).parent
 bundle_version = os.environ.get("OPENBILICLAW_BUNDLE_VERSION", "0.2.0")
+version_file = (
+    os.environ.get("OPENBILICLAW_WINDOWS_VERSION_FILE")
+    if platform.system() == "Windows"
+    else None
+)
 
 # System-tray desktop mode (packaging/entry.py): the app runs as a tray icon
 # (Windows system tray / macOS menu bar) with no console window. Bundle pystray
@@ -192,6 +197,7 @@ exe = EXE(
     # tray menu. macOS already runs windowed via the .app bundle below.
     console=False,
     icon=None,  # TODO: add icon -- packaging/icon.ico (Windows) / packaging/icon.icns (macOS)
+    version=version_file,
 )
 
 _coll_targets = [exe]

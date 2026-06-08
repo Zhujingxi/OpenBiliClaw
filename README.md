@@ -192,10 +192,10 @@
 
 ## 最近更新
 
-最新版本：**v0.3.103 / extension v0.3.69: 桌面安装包运行体验修复（2026-06-09）**。完整历史见 [docs/changelog.md](docs/changelog.md)。
+最新版本：**v0.3.104 / extension v0.3.69: Windows 安装包版本元数据修复（2026-06-09）**。完整历史见 [docs/changelog.md](docs/changelog.md)。
 
+- **Windows 版本显示正确** —— 安装器和 `OpenBiliClaw.exe` 都写入 FileVersion / ProductVersion，资源管理器、任务管理器和卸载列表能对上版本。
 - **桌面推荐流更稳** —— 空池 / 低库存时立即返回并后台防抖补货，不再因为补货链路卡住滚动或突然整批换内容。
-- **图片加载更快** —— 追加推荐卡片先渲染再异步预热封面，首屏 delight 封面使用 eager/high priority 加载。
 - **安装包前端不吃旧缓存** —— `/web` 自动给 CSS / JS 注入版本指纹并返回 `no-store`，升级后能确认打开的是新代码。
 
 ## 用户交流群
@@ -654,7 +654,7 @@ OpenBiliClaw/
 
 ## 📜 更新日志
 
-最新版本：**v0.3.103 / extension v0.3.69: 桌面安装包运行体验修复（2026-06-09）**。最近更新见上方摘要；完整历史见 [docs/changelog.md](docs/changelog.md)。插件包和桌面安装包见 [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases)，后端源码更新看 `backend-v*` tag。
+最新版本：**v0.3.104 / extension v0.3.69: Windows 安装包版本元数据修复（2026-06-09）**。最近更新见上方摘要；完整历史见 [docs/changelog.md](docs/changelog.md)。插件包和桌面安装包见 [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases)，后端源码更新看 `backend-v*` tag。
 
 ## 🗺️ 后续规划
 

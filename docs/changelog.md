@@ -4,6 +4,12 @@
 
 ---
 
+## v0.3.104 / extension v0.3.69: Windows 安装包版本元数据修复（2026-06-09）
+
+- 修复 Windows 安装包 / 主程序版本属性不完整：`OpenBiliClaw.exe` 现在由 PyInstaller 写入 `FileVersion` / `ProductVersion` / `OriginalFilename` 等 VERSIONINFO 资源，Windows 资源管理器、任务管理器和诊断脚本都能看到正确版本。
+- 修复 Inno Setup 安装器自身 `FileVersion` 为空的问题：CI 会传入纯数字四段 `VersionInfoVersion`，同时保留展示用 `ProductVersion` / `DisplayVersion`，带 commit stamp 的手动 artifact 也不会写坏 PE 数值版本。
+- `release-desktop.yml` 与手动 `build-installers.yml` 均同步传递版本元数据，避免自动发布包和手动构建包版本显示不一致。
+
 ## v0.3.103 / extension v0.3.69: 桌面安装包运行体验修复（2026-06-09）
 
 - 修复 Windows 桌面安装包推荐流在低库存 / 空库存时的卡顿与“突然整批换内容”：`/api/recommendations/reshuffle` 与 `/append` 在可用池为 0 时立即返回空列表，并通过后台任务 + 30 秒防抖触发补货，不再让用户滚动交互等待补货链路。
