@@ -189,18 +189,25 @@ def _interface_ipv4_candidates() -> list[str]:
     seen: set[str] = set()
     for command in commands:
         try:
-            run_kwargs: dict[str, object] = {}
             if os.name == "nt":
-                run_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            proc = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                errors="replace",
-                timeout=2,
-                check=False,
-                **run_kwargs,
-            )
+                proc = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    errors="replace",
+                    timeout=2,
+                    check=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            else:
+                proc = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    errors="replace",
+                    timeout=2,
+                    check=False,
+                )
         except (OSError, subprocess.TimeoutExpired):
             continue
         if proc.returncode != 0:
