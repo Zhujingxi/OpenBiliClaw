@@ -188,7 +188,7 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-Latest: **v0.3.108 / extension v0.3.71: X (Twitter) content source (2026-06-09)**. Full changelog: [docs/changelog.md](docs/changelog.md).
+Latest: **v0.3.109 / extension v0.3.72: settings-page parity & unified source status (2026-06-09)**. Full changelog: [docs/changelog.md](docs/changelog.md).
 
 - **New X (Twitter) source** — the sixth source; server-side cookie-replay discovery (search / For-You / followed authors), with the x.com cookie auto-synced once you log in.
 - **X history backfill** — `openbiliclaw init` reads your own X likes / bookmarks into the profile, same as Bilibili favorites.
@@ -646,7 +646,7 @@ OpenBiliClaw/
 
 ## 📜 Release History
 
-Latest: **v0.3.108 / extension v0.3.71: X (Twitter) content source (2026-06-09)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Extension packages and desktop installers live on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases); backend source updates use `backend-v*` tags.
+Latest: **v0.3.109 / extension v0.3.72: settings-page parity & unified source status (2026-06-09)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Extension packages and desktop installers live on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases); backend source updates use `backend-v*` tags.
 
 ## 🗺️ Roadmap
 

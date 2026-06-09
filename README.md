@@ -192,7 +192,7 @@
 
 ## 最近更新
 
-最新版本：**v0.3.108 / extension v0.3.71: X（Twitter）内容源接入（2026-06-09）**。完整变更详见 [docs/changelog.md](docs/changelog.md)。
+最新版本：**v0.3.109 / extension v0.3.72: 配置页对齐与统一来源接入状态（2026-06-09）**。完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
 - **新增 X（Twitter）内容源** —— 第六个来源，服务端 cookie 重放做发现（搜索 / For-You / 关注作者），登录 x.com 即自动同步 cookie。
 - **X 历史偏好回填** —— `openbiliclaw init` 会读取你自己的 X 点赞 / 收藏喂画像，和 B 站收藏一个待遇。
@@ -658,7 +658,7 @@ OpenBiliClaw/
 
 ## 📜 更新日志
 
-最新版本：**v0.3.108 / extension v0.3.71: X（Twitter）内容源接入（2026-06-09）**。最近更新见上方摘要；完整历史见 [docs/changelog.md](docs/changelog.md)。插件包和桌面安装包见 [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases)，后端源码更新看 `backend-v*` tag。
+最新版本：**v0.3.109 / extension v0.3.72: 配置页对齐与统一来源接入状态（2026-06-09）**。最近更新见上方摘要；完整历史见 [docs/changelog.md](docs/changelog.md)。插件包和桌面安装包见 [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases)，后端源码更新看 `backend-v*` tag。
 
 ## 🗺️ 后续规划
 
