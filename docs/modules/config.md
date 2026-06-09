@@ -316,7 +316,7 @@ Bilibili discovery 的平台级开关。B 站账号登录 / Cookie 获取仍由 
 
 ### `[sources.douyin]`
 
-抖音专用 discovery 配置。初始化画像仍由浏览器扩展执行；本段控制 `openbiliclaw discover --source douyin` / `discover-douyin` 的内容发现。Cookie 不写进 `config.toml`：`cookie_env` 指向的环境变量优先；未设置时，后端读取浏览器扩展通过 `/api/sources/dy/cookie` 同步到 `data/douyin_cookie.json` 的值。
+抖音专用 discovery 配置。初始化画像仍由浏览器扩展执行；本段控制 `openbiliclaw discover --source douyin` / `discover-douyin` 的内容发现。Cookie 不写进 `config.toml`：`cookie_env` 指向的环境变量优先；未设置时，后端读取浏览器扩展通过 `/api/sources/dy/cookie` 同步到 `data/douyin_cookie.json` 的值。设置页（插件 / 桌面 Web）的抖音卡片可查看并手动粘贴当前 Cookie：`GET /api/config` 的 `sources.douyin.cookie`（API-only 字段，非 `config.toml` 键）返回解析后的凭据（默认脱敏，`reveal_keys=true` 明文），`PUT /api/config` 把非空新值路由到 `data/douyin_cookie.json`。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
@@ -345,7 +345,7 @@ YouTube discovery 配置。初始化画像由浏览器扩展读取观看历史 /
 
 ### `[sources.twitter]`
 
-X (Twitter) discovery 配置。X 是第六个内容源，发现走**服务端 cookie 重放**（对标 `[sources.douyin]` 的 direct 模式），由后端 `XDiscoveryProducer` 调度 `search`（画像驱动关键词）/ `feed`（推荐流 For-You）/ `creator`（账号订阅）三个策略，把推文灌入统一候选池。行为采集（用户在 x.com 上自己的点赞 / 收藏 / 回复）走浏览器扩展 MAIN-world tap，与本段无关。Cookie 不写进 `config.toml`：`cookie_env` 指向的环境变量优先；未设置时，后端读取浏览器扩展通过 `/api/sources/x/cookie` 同步到 `data/x_cookie.json` 的 `auth_token` + `ct0`。X 客户端 `XClient`（封装 `twitter-cli`，属可选 extra `openbiliclaw[x]`）只在 `enabled=true` 且真正 fetch 时 lazy import，`enabled=false` 路径绝不 import，未装该 extra 的用户不受影响。
+X (Twitter) discovery 配置。X 是第六个内容源，发现走**服务端 cookie 重放**（对标 `[sources.douyin]` 的 direct 模式），由后端 `XDiscoveryProducer` 调度 `search`（画像驱动关键词）/ `feed`（推荐流 For-You）/ `creator`（账号订阅）三个策略，把推文灌入统一候选池。行为采集（用户在 x.com 上自己的点赞 / 收藏 / 回复）走浏览器扩展 MAIN-world tap，与本段无关。Cookie 不写进 `config.toml`：`cookie_env` 指向的环境变量优先；未设置时，后端读取浏览器扩展通过 `/api/sources/x/cookie` 同步到 `data/x_cookie.json` 的 `auth_token` + `ct0`。设置页（插件 / 桌面 Web）的 X 卡片可查看并手动粘贴当前 Cookie：`GET /api/config` 的 `sources.twitter.cookie`（API-only 字段，非 `config.toml` 键）返回解析后的凭据（默认脱敏，`reveal_keys=true` 明文），`PUT /api/config` 把非空新值路由到 `data/x_cookie.json`，含 `auth_token` + `ct0` 的有效粘贴会同时解除 re-login 健康封锁。X 客户端 `XClient`（封装 `twitter-cli`，属可选 extra `openbiliclaw[x]`）只在 `enabled=true` 且真正 fetch 时 lazy import，`enabled=false` 路径绝不 import，未装该 extra 的用户不受影响。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|

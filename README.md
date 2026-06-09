@@ -192,12 +192,12 @@
 
 ## 最近更新
 
-最新版本：**v0.3.110 / extension v0.3.72: macOS 安装包签名封印修复（2026-06-09）**。完整变更详见 [docs/changelog.md](docs/changelog.md)。
+最新版本：**v0.3.114 / extension v0.3.74: 来源 Cookie 配置对齐（2026-06-10）**。完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
-- **新增 X（Twitter）内容源** —— 第六个来源，服务端 cookie 重放做发现（搜索 / For-You / 关注作者），登录 x.com 即自动同步 cookie。
-- **X 历史偏好回填** —— `openbiliclaw init` 会读取你自己的 X 点赞 / 收藏喂画像，和 B 站收藏一个待遇。
-- **设置页接上 X** —— 平台启用开关 + 候选池 X 占比可在插件设置页直接配置并持久化。
-- **新增 `fetch-x` 命令** —— 不重跑 init 即可单独拉取 X 点赞 / 收藏做测试。
+- **抖音 / X Cookie 可见可改** —— 设置页（插件 + 桌面 Web）的抖音 / X 卡片对齐 B 站形态，直接查看当前明文 Cookie，也能手动粘贴覆盖。
+- **来源状态不再误报** —— X 没有凭据时不再显示「cookie 有效」；B 站二维码登录后状态行不再误报「未配置」。
+- **保存设置不丢 Cookie** —— 空字段 / 脱敏回显不再覆盖已同步的 Cookie，误清空输入框点保存也安全。
+- **Cookie 同步重试按平台独立** —— B 站 / 抖音 / X 各自重试，一个平台成功不再打断另一平台的快速重试。
 
 ## 用户交流群
 
@@ -665,7 +665,7 @@ OpenBiliClaw/
 
 ## 📜 更新日志
 
-最新版本：**v0.3.110 / extension v0.3.72: macOS 安装包签名封印修复（2026-06-09）**。最近更新见上方摘要；完整历史见 [docs/changelog.md](docs/changelog.md)。插件包和桌面安装包见 [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases)，后端源码更新看 `backend-v*` tag。
+最新版本：**v0.3.114 / extension v0.3.74: 来源 Cookie 配置对齐（2026-06-10）**。最近更新见上方摘要；完整历史见 [docs/changelog.md](docs/changelog.md)。插件包和桌面安装包见 [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases)，后端源码更新看 `backend-v*` tag。
 
 ## 🗺️ 后续规划
 

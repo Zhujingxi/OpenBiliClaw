@@ -546,13 +546,13 @@ class RuntimeContext:
         # optional ``openbiliclaw[x]`` extra is absent) never touch them.
         twitter_cfg = getattr(getattr(new_config, "sources", None), "twitter", None)
         if twitter_cfg is not None and bool(getattr(twitter_cfg, "enabled", False)):
-            from openbiliclaw.api.app import resolve_x_cookie
             from openbiliclaw.discovery.strategies.x import (
                 XCreatorStrategy,
                 XForYouStrategy,
                 XSearchStrategy,
             )
             from openbiliclaw.sources.twitter_adapter import XAdapter
+            from openbiliclaw.sources.x_auth import resolve_x_cookie
             from openbiliclaw.sources.x_client import XClient
 
             x_cookie = resolve_x_cookie(

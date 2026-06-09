@@ -25,10 +25,12 @@
 | 持续补货与通知 | ✅ | 运行状态已接入 popup，service worker 会拉取高置信通知并回写发送状态 |
 | 设置页源策略控制 | ✅ | side panel 设置页已按「模型 / 平台源 / 调度 / 通用 / 日志」分 tab；模型 tab 可设置 LLM / embedding 的显式备选 Provider，留空即不 fallback，并明确 embedding 不再跟随默认 LLM；平台源 tab 按 Bilibili / 小红书 / 抖音 / YouTube / 通用网页 / 候选池配比独立分块，可开关四个平台 discovery，编辑各源预算和候选池占比，并按已有事件向后端请求推荐比例；调度 tab 暴露后台暂停、断开宽限、真实 refresh / probe 频率和猜测兴趣参数；日志 tab 用单个「完整日志路径」编辑后端日志文件位置 |
 | 桌面 Web 设置页对齐插件 | ✅ | 桌面 Web（`/web`）设置页 `src/openbiliclaw/web/desktop/` 的可配置面与插件 side panel 拉齐：模型 tab 补 `llm.concurrency`、DeepSeek `reasoning_effort`；平台源 tab 补完整 X(Twitter) 源块（`enabled` / `cookie_env` / 三项预算 / `request_interval` / `min_interval`）+ `GET /api/sources/x/status` 源健康提示、YouTube `min_interval_minutes`、候选池 X 占比；调度 tab 补 9 个真实 runtime 参数（`extension_disconnect_grace_seconds` / `refresh_check_interval_seconds` / `signal_event_threshold` / `feedback_batch_threshold` / `trending_refresh_hours` / `explore_refresh_hours` / `discovery_limit` / `proactive_push_interval_seconds` / `speculator_idle_interval_minutes`）；通用 tab 补局域网访问密码（`/auth/status` + `/auth/admin`，同源 loopback 视为可信本机）与开机自启（`/autostart-status` + `/autostart/apply`）。桌面 Web 同时移除了运行时不消费的 `discovery_cron` 旧字段，与插件一致 |
-| 统一来源接入状态 | ✅ | 新后端端点 `GET /api/sources/status`（`SourcesStatusResponse`）用纯本地信号给每个来源一致的登录 / cookie 状态：B站 看 cookie 是否含 `SESSDATA`/`bili_jct`/`DedeUserID`、抖音 看 `resolve_douyin_cookie()`、小红书 看带 `xsec_token` 的缓存条数、X 复用 `XSourceHealthStore`、YouTube 标 `no_auth`，全程不发对外平台请求。插件 side panel 五张来源卡片（`data-source-status`）与桌面 Web 平台源 tab 顶部「来源接入状态」彩点列表都读同一端点，`renderSourcesStatus()` 渲染统一彩点 + 文案。诚实标注：仅 X 为实时校验的 `ok`，其余为本地 `ready`（就绪）/ `missing`（未配置） |
+| 统一来源接入状态 | ✅ | 新后端端点 `GET /api/sources/status`（`SourcesStatusResponse`）用纯本地信号给每个来源一致的登录 / cookie 状态：B站 看 cookie 是否含 `SESSDATA`/`bili_jct`/`DedeUserID`（`config.toml` 镜像为空时回落读 `data/bilibili_cookie.json`，覆盖 CLI 二维码登录只写文件的场景）、抖音 看 `resolve_douyin_cookie()`、小红书 看带 `xsec_token` 的缓存条数、X 复用 `XSourceHealthStore`（健康态为 `ok` 时再用 `resolve_x_cookie()` 校验凭据存在，缺失降级为 `missing_cookie`，避免健康表默认行误报「cookie 有效」）、YouTube 标 `no_auth`，全程不发对外平台请求。插件 side panel 五张来源卡片（`data-source-status`）与桌面 Web 平台源 tab 顶部「来源接入状态」彩点列表都读同一端点，`renderSourcesStatus()` 渲染统一彩点 + 文案。诚实标注：仅 X 为实时校验的 `ok`，其余为本地 `ready`（就绪）/ `missing`（未配置） |
+| 来源 Cookie 明文配置对齐 | ✅ | 插件 side panel 与桌面 Web 的抖音 / X 来源卡片对齐 B 站卡片形态：新增明文 Cookie 文本框（`GET /api/config` 的 `sources.douyin.cookie` / `sources.twitter.cookie`，默认脱敏、`reveal_keys=true` 明文），可手动粘贴覆盖；`PUT /api/config` 把非空值路由到 `data/douyin_cookie.json` / `data/x_cookie.json`（secrets 不进 `config.toml`），X 粘贴含 `auth_token`+`ct0` 的有效 Cookie 同时解除 re-login 封锁。空字段与脱敏回显（连续 `****`）不覆盖现有 Cookie（`bilibili.cookie` 同样补上该防护）；小红书（token 嗅探）/ YouTube（无需登录）维持差异化说明 |
 | 开机自启动设置 | ✅ | 通用 tab 新增「开机自启动」开关：打开设置时读 `GET /api/autostart-status`，切换时调用 `POST /api/autostart/apply` 即时生效；`can_manage=false` 时按 `env_managed` / `shadowed` / `unsupported_*` 等 reason 禁用并展示行内提示。提示明确该开关只影响下次系统登录拉起后端，不启停当前进程；本机 Ollama 可能随 `start` 预检一起拉起。 |
 | B 站 Cookie 自动同步 | ✅ | service worker 会读取 `SESSDATA` / `bili_jct` / `DedeUserID` 三件套并推送到本地后端；后端暂未启动时切到 1 分钟重试，成功后恢复 60 分钟兜底刷新；后端 runtime-stream 也可发 `bilibili_cookie_sync_requested` 让扩展立刻回传 |
 | 抖音 Cookie 自动同步 | ✅ | service worker 会读取 douyin.com Cookie header 并推送到 `/api/sources/dy/cookie`；后端保存到 `data/douyin_cookie.json`，供 `discover --source douyin` / `discover-douyin` 在无环境变量覆盖时使用；冷启动、runtime-stream 请求和 alarm 兜底都会触发同步 |
+| Cookie 同步重试按平台隔离 | ✅ | B站 / 抖音 / X 的 cookie 同步重试 alarm 拆分为 `openbiliclaw-cookie-sync-bili` / `-dy` / `-x` 三个独立 alarm：一个平台同步成功不再把另一平台刚排的 1/5 分钟快速重试重置回 60 分钟兜底；`cookies.onChanged` 的 debounce 也按平台独立，登录某平台只触发该平台的同步。旧共享 alarm 名（`openbiliclaw-cookie-sync`，chrome alarm 跨扩展升级持久化）兼容触发一轮全量同步后由下次 worker 启动清除 |
 | 认知变化提醒 | ✅ | service worker 会提示关键认知变化，画像 tab 会显示“阿B 最近新记住了什么” |
 | 认知变化历史分页 | ✅ | 画像 tab 的认知卡片支持展开详情；「阿B 最近新记住了什么」默认只展示最近 3 条，需点击「加载更多」按钮分页查看更早的变化记录（不再随页面滚动自动续页，避免该区块无限变长） |
 | 认知卡片上下文澄清 | ✅ | 画像 tab 的认知卡片默认态现在固定展示“结论 + 上下文 + 状态提示”，用户可直接看出这是对哪条内容/哪轮聊天/哪组聚合信号形成的判断，以及这张卡片是否还能展开 |
@@ -77,7 +79,7 @@ extension/
 ├── src/
 │   ├── background/
 │   │   ├── buffer.ts
-│   │   ├── cookie-sync.ts     # B 站 / 抖音 Cookie 自动同步到已配置后端
+│   │   ├── cookie-sync.ts     # B 站 / 抖音 / X Cookie 自动同步到已配置后端（重试 alarm 按平台隔离）
 │   │   └── service-worker.ts
 │   ├── content/
 │   │   ├── kernel.ts          # 平台无关的 DOM 观察 + 事件派发

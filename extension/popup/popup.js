@@ -6036,6 +6036,7 @@ function bindSettings() {
     setVal("cfgXhsTaskInterval", cfg.sources?.xiaohongshu?.task_interval_seconds);
     const douyinEnabled = document.getElementById("cfgDouyinEnabled");
     if (douyinEnabled) douyinEnabled.checked = cfg.sources?.douyin?.enabled === true;
+    setVal("cfgDouyinCookie", cfg.sources?.douyin?.cookie);
     setVal("cfgDouyinCookieEnv", cfg.sources?.douyin?.cookie_env);
     setVal("cfgDouyinDailySearchBudget", cfg.sources?.douyin?.daily_search_budget);
     setVal("cfgDouyinDailyHotBudget", cfg.sources?.douyin?.daily_hot_budget);
@@ -6050,6 +6051,7 @@ function bindSettings() {
     setVal("cfgYoutubeMinInterval", cfg.sources?.youtube?.min_interval_minutes);
     const twitterEnabled = document.getElementById("cfgTwitterEnabled");
     if (twitterEnabled) twitterEnabled.checked = cfg.sources?.twitter?.enabled === true;
+    setVal("cfgTwitterCookie", cfg.sources?.twitter?.cookie);
     setVal("cfgTwitterCookieEnv", cfg.sources?.twitter?.cookie_env);
     setVal("cfgTwitterDailySearchBudget", cfg.sources?.twitter?.daily_search_budget);
     setVal("cfgTwitterDailyFeedBudget", cfg.sources?.twitter?.daily_feed_budget);
@@ -6191,7 +6193,10 @@ function bindSettings() {
       },
       bilibili: {
         auth_method: getVal("cfgBiliAuth"),
-        cookie: getVal("cfgBiliCookie"),
+        // An empty textarea must not wipe the synced cookie on save — omit
+        // the field so the backend keeps the current value (the web desktop
+        // settings page applies the same guard).
+        ...(getVal("cfgBiliCookie") ? { cookie: getVal("cfgBiliCookie") } : {}),
         browser_executable: getVal("cfgBiliBrowserExecutable"),
         browser_headed: checked("cfgBiliBrowserHeaded"),
       },
@@ -6203,32 +6208,37 @@ function bindSettings() {
         bilibili: {
           enabled: checked("cfgBilibiliEnabled", true),
         },
+        // Empty-field fallbacks mirror the backend dataclass defaults
+        // (budgets: 0 = uncapped) so the popup and the web settings page
+        // write identical values for an untouched form.
         xiaohongshu: {
           enabled: checked("cfgXhsEnabled"),
-          daily_search_budget: getInt("cfgXhsDailySearchBudget", 30),
-          daily_creator_budget: getInt("cfgXhsDailyCreatorBudget", 10),
+          daily_search_budget: getInt("cfgXhsDailySearchBudget", 0),
+          daily_creator_budget: getInt("cfgXhsDailyCreatorBudget", 0),
           task_interval_seconds: getInt("cfgXhsTaskInterval", 45),
         },
         douyin: {
           enabled: checked("cfgDouyinEnabled"),
           mode: "direct",
+          ...(getVal("cfgDouyinCookie") ? { cookie: getVal("cfgDouyinCookie") } : {}),
           cookie_env: getVal("cfgDouyinCookieEnv"),
-          daily_search_budget: getInt("cfgDouyinDailySearchBudget", 30),
-          daily_hot_budget: getInt("cfgDouyinDailyHotBudget", 5),
-          daily_feed_budget: getInt("cfgDouyinDailyFeedBudget", 30),
+          daily_search_budget: getInt("cfgDouyinDailySearchBudget", 0),
+          daily_hot_budget: getInt("cfgDouyinDailyHotBudget", 0),
+          daily_feed_budget: getInt("cfgDouyinDailyFeedBudget", 0),
           request_interval_seconds: getInt("cfgDouyinRequestInterval", 2),
         },
         youtube: {
           enabled: checked("cfgYoutubeEnabled"),
-          daily_search_budget: getInt("cfgYoutubeDailySearchBudget", 6),
-          daily_trending_budget: getInt("cfgYoutubeDailyTrendingBudget", 50),
-          daily_channel_budget: getInt("cfgYoutubeDailyChannelBudget", 10),
+          daily_search_budget: getInt("cfgYoutubeDailySearchBudget", 0),
+          daily_trending_budget: getInt("cfgYoutubeDailyTrendingBudget", 0),
+          daily_channel_budget: getInt("cfgYoutubeDailyChannelBudget", 0),
           request_interval_seconds: getInt("cfgYoutubeRequestInterval", 2),
           min_interval_minutes: getInt("cfgYoutubeMinInterval", 60),
         },
         twitter: {
           enabled: checked("cfgTwitterEnabled"),
           mode: "cookie",
+          ...(getVal("cfgTwitterCookie") ? { cookie: getVal("cfgTwitterCookie") } : {}),
           cookie_env: getVal("cfgTwitterCookieEnv"),
           daily_search_budget: getInt("cfgTwitterDailySearchBudget", 0),
           daily_feed_budget: getInt("cfgTwitterDailyFeedBudget", 0),

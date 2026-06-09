@@ -310,13 +310,13 @@ def build_x_discovery_producer(
         return None
 
     # Lazy imports — only reached on the enabled path.
-    from openbiliclaw.api.app import resolve_x_cookie
     from openbiliclaw.discovery.strategies.x import (
         XCreatorStrategy,
         XForYouStrategy,
         XSearchStrategy,
     )
     from openbiliclaw.sources.twitter_adapter import XAdapter
+    from openbiliclaw.sources.x_auth import resolve_x_cookie
     from openbiliclaw.sources.x_client import XClient
     from openbiliclaw.sources.x_tasks import XCreatorStore
     from openbiliclaw.storage.x_health import XSourceHealthStore

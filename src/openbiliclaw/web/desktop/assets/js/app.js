@@ -3489,11 +3489,12 @@
       setSelect("bilibiliEnabled", config.sources?.bilibili?.enabled === false ? "off" : "on");
       setInput("sourcesBrowserCdp", config.sources?.browser?.cdp_url);
       setSelect("sourcesBrowserHeaded", config.sources?.browser?.headed === true ? "on" : "off");
-      setSelect("xhsEnabled", config.sources?.xiaohongshu?.enabled === false ? "off" : "on");
+      setSelect("xhsEnabled", config.sources?.xiaohongshu?.enabled === true ? "on" : "off");
       setInput("xhsDailySearchBudget", config.sources?.xiaohongshu?.daily_search_budget);
       setInput("xhsDailyCreatorBudget", config.sources?.xiaohongshu?.daily_creator_budget);
       setInput("xhsTaskInterval", config.sources?.xiaohongshu?.task_interval_seconds);
       setSelect("douyinEnabled", config.sources?.douyin?.enabled === true ? "on" : "off");
+      setInput("douyinCookie", config.sources?.douyin?.cookie);
       setInput("douyinCookieEnv", config.sources?.douyin?.cookie_env);
       setInput("douyinDailySearchBudget", config.sources?.douyin?.daily_search_budget);
       setInput("douyinDailyHotBudget", config.sources?.douyin?.daily_hot_budget);
@@ -3506,6 +3507,7 @@
       setInput("youtubeRequestInterval", config.sources?.youtube?.request_interval_seconds);
       setInput("youtubeMinInterval", config.sources?.youtube?.min_interval_minutes);
       setSelect("twitterEnabled", config.sources?.twitter?.enabled === true ? "on" : "off");
+      setInput("twitterCookie", config.sources?.twitter?.cookie);
       setInput("twitterCookieEnv", config.sources?.twitter?.cookie_env);
       setInput("twitterDailySearchBudget", config.sources?.twitter?.daily_search_budget);
       setInput("twitterDailyFeedBudget", config.sources?.twitter?.daily_feed_budget);
@@ -3809,6 +3811,8 @@
       if (getInput("embeddingApiKey")) embedding.api_key = getInput("embeddingApiKey");
       if (getInput("embeddingBaseUrl")) embedding.base_url = getInput("embeddingBaseUrl");
       const cookie = getInput("biliCookie");
+      const douyinCookie = getInput("douyinCookie");
+      const twitterCookie = getInput("twitterCookie");
       const llm = {
         ...(state.config?.llm || {}),
         default_provider: provider,
@@ -3876,6 +3880,7 @@
           douyin: {
             enabled: $("#douyinEnabled").value === "on",
             mode: "direct",
+            ...(douyinCookie ? { cookie: douyinCookie } : {}),
             cookie_env: getInput("douyinCookieEnv"),
             daily_search_budget: getIntInput("douyinDailySearchBudget", 0),
             daily_hot_budget: getIntInput("douyinDailyHotBudget", 0),
@@ -3893,6 +3898,7 @@
           twitter: {
             enabled: $("#twitterEnabled").value === "on",
             mode: "cookie",
+            ...(twitterCookie ? { cookie: twitterCookie } : {}),
             cookie_env: getInput("twitterCookieEnv"),
             daily_search_budget: getIntInput("twitterDailySearchBudget", 0),
             daily_feed_budget: getIntInput("twitterDailyFeedBudget", 0),
@@ -3905,7 +3911,7 @@
           enabled: $("#schedulerEnabled").value === "on",
           pause_on_extension_disconnect: $("#pauseDisconnect").value === "pause",
           extension_disconnect_grace_seconds: getIntInput("extensionDisconnectGrace", 90),
-          pool_target_count: getIntInput("poolTarget", 600),
+          pool_target_count: getIntInput("poolTarget", 300),
           account_sync_interval_hours: getIntInput("accountSyncInterval", 6),
           refresh_check_interval_seconds: getIntInput("refreshCheckInterval", 60),
           signal_event_threshold: getIntInput("signalEventThreshold", 6),

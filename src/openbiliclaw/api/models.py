@@ -841,6 +841,10 @@ class XiaohongshuSourceConfigOut(BaseModel):
 class DouyinSourceConfigOut(BaseModel):
     enabled: bool = False
     mode: str = "direct"
+    # Resolved Cookie header (env override, else data/douyin_cookie.json).
+    # Read-only mirror for the settings pages — masked unless reveal_keys.
+    # PUT routes a non-empty value to DouyinCookieManager, never config.toml.
+    cookie: str = ""
     cookie_env: str = "OPENBILICLAW_DOUYIN_COOKIE"
     daily_search_budget: int = 0
     daily_hot_budget: int = 0
@@ -860,6 +864,10 @@ class YoutubeSourceConfigOut(BaseModel):
 class TwitterSourceConfigOut(BaseModel):
     enabled: bool = False
     mode: str = "cookie"
+    # Resolved Cookie header (env override, else data/x_cookie.json).
+    # Read-only mirror for the settings pages — masked unless reveal_keys.
+    # PUT routes a non-empty value to XCookieManager, never config.toml.
+    cookie: str = ""
     cookie_env: str = "OPENBILICLAW_X_COOKIE"
     daily_search_budget: int = 0
     daily_feed_budget: int = 0
@@ -1017,6 +1025,25 @@ class ConfigUpdateIn(BaseModel):
     scheduler: dict[str, object] | None = None
     storage: dict[str, object] | None = None
     logging: dict[str, object] | None = None
+
+
+class ConfigServiceProbeIn(BaseModel):
+    """No-write request to probe the submitted LLM or embedding config."""
+
+    kind: Literal["llm", "embedding"]
+    config: dict[str, object] = Field(default_factory=dict)
+
+
+class ConfigServiceProbeResponse(BaseModel):
+    """Result of a user-triggered provider connectivity probe."""
+
+    ok: bool
+    kind: Literal["llm", "embedding"]
+    provider: str = ""
+    model: str = ""
+    message: str = ""
+    error: str = ""
+    latency_ms: int = 0
 
 
 class SourceShareSuggestionIn(BaseModel):

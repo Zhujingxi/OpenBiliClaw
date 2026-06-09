@@ -4,6 +4,17 @@
 
 ---
 
+## v0.3.114 / extension v0.3.74: 来源 Cookie 配置对齐（2026-06-10）
+
+插件 side panel 与桌面 Web 配置页的五大来源卡片对齐到 B 站卡片的形态：抖音 / X 也能直接查看并手动粘贴明文 Cookie，状态彩点不再误报，保存配置不会意外清掉已同步的 Cookie。
+
+- 抖音 / X 来源卡片新增明文 Cookie 文本框（插件 + 桌面 Web 同步）：`GET /api/config` 的 `sources.douyin.cookie` / `sources.twitter.cookie` 返回 `resolve_douyin_cookie()` / `resolve_x_cookie()` 解析后的当前凭据（默认脱敏，`reveal_keys=true` 明文）；`PUT /api/config` 把非空值路由到 `data/douyin_cookie.json` / `data/x_cookie.json`（与扩展自动同步同一存储，secrets 不进 `config.toml`），X 粘贴含 `auth_token`+`ct0` 的有效 Cookie 时同时解除 `missing_cookie`/`expired_cookie`/`blocked` 的 re-login 封锁。小红书（token 嗅探）与 YouTube（无需登录）维持差异化说明。
+- 修复 `/api/sources/status` 两处误报：X 的健康表默认行是 `ok`，此前从未跑过 X discovery 时即使没有任何 cookie 也显示「正常，cookie 有效」，现在 `ok` 态会再用 `resolve_x_cookie()` 校验凭据存在，缺失即报 `missing_cookie`；B 站状态此前只看 `config.toml` 镜像，现在回落读 `data/bilibili_cookie.json`（CLI 二维码登录只写文件的场景不再误报「未配置」）。
+- `PUT /api/config` 给 `bilibili.cookie` 补上与 `api_key` 同级的防护：脱敏回显（连续 `****`）与空值不再覆盖现有 Cookie；`cookie_env` 空值保留现名。插件 popup 保存时空 Cookie 字段直接省略（对齐桌面 Web 已有行为）。
+- 插件 cookie 自动同步的重试 alarm 按平台拆分（`-bili` / `-dy` / `-x`）：一个平台同步成功不再把另一平台刚排的快速重试重置回 60 分钟，登录某平台也只触发该平台的同步；旧共享 alarm 名兼容一轮后清除。
+- 配置页 parity 杂项：插件 popup 空字段回退值与后端默认对齐（各源预算 0 = 不限，YouTube 6/50/10、抖音 30/5/30、小红书 30/10 的旧回退移除），预算输入框 placeholder 统一标注「0 = 不限」；桌面 Web `xhsEnabled` 缺省渲染与候选池 `pool_target_count` 回退值（600→300）对齐后端默认。
+- 代码组织：`XCookieManager` / `resolve_x_cookie` 迁至 `sources/x_auth.py`（对标 `sources/douyin_auth.py`），`api.app` 保留 re-export 兼容旧导入。
+
 ## v0.3.113: Embedding 维度独立配置（2026-06-10）
 
 Embedding 与 chat LLM 的配置边界进一步收紧：embedding 默认目标维度统一为 1024，并显式暴露到配置 API 与桌面 Web 设置页。

@@ -312,32 +312,34 @@
           <label class="settings-field"><span>通用网页 CDP URL</span><input id="sourcesBrowserCdp" placeholder="http://localhost:9222"></label>
           <label class="settings-field"><span>回退浏览器窗口</span><select id="sourcesBrowserHeaded"><option value="off">隐藏</option><option value="on">显示</option></select></label>
           <div class="inline-row">
-            <label class="settings-field"><span>小红书每日搜索</span><input id="xhsDailySearchBudget" inputmode="numeric" placeholder="30"></label>
-            <label class="settings-field"><span>小红书每日创作者</span><input id="xhsDailyCreatorBudget" inputmode="numeric" placeholder="10"></label>
+            <label class="settings-field"><span>小红书每日搜索</span><input id="xhsDailySearchBudget" inputmode="numeric" placeholder="0 = 不限"></label>
+            <label class="settings-field"><span>小红书每日创作者</span><input id="xhsDailyCreatorBudget" inputmode="numeric" placeholder="0 = 不限"></label>
             <label class="settings-field"><span>小红书间隔秒数</span><input id="xhsTaskInterval" inputmode="numeric" placeholder="45"></label>
             <label class="settings-field"><span>抖音 Cookie 环境变量</span><input id="douyinCookieEnv" placeholder="OPENBILICLAW_DOUYIN_COOKIE"></label>
           </div>
+          <label class="settings-field full"><span>抖音 Cookie</span><textarea id="douyinCookie" rows="2" placeholder="保留空值表示不覆盖现有 cookie（登录抖音后插件会自动同步）"></textarea></label>
           <div class="inline-row">
-            <label class="settings-field"><span>抖音每日搜索</span><input id="douyinDailySearchBudget" inputmode="numeric" placeholder="30"></label>
-            <label class="settings-field"><span>抖音每日热点</span><input id="douyinDailyHotBudget" inputmode="numeric" placeholder="5"></label>
-            <label class="settings-field"><span>抖音每日推荐流</span><input id="douyinDailyFeedBudget" inputmode="numeric" placeholder="30"></label>
+            <label class="settings-field"><span>抖音每日搜索</span><input id="douyinDailySearchBudget" inputmode="numeric" placeholder="0 = 不限"></label>
+            <label class="settings-field"><span>抖音每日热点</span><input id="douyinDailyHotBudget" inputmode="numeric" placeholder="0 = 不限"></label>
+            <label class="settings-field"><span>抖音每日推荐流</span><input id="douyinDailyFeedBudget" inputmode="numeric" placeholder="0 = 不限"></label>
             <label class="settings-field"><span>抖音请求间隔秒数</span><input id="douyinRequestInterval" inputmode="numeric" placeholder="2"></label>
           </div>
           <div class="inline-row">
-            <label class="settings-field"><span>YouTube 搜索预算</span><input id="youtubeDailySearchBudget" inputmode="numeric" placeholder="6"></label>
-            <label class="settings-field"><span>YouTube 热门预算</span><input id="youtubeDailyTrendingBudget" inputmode="numeric" placeholder="50"></label>
-            <label class="settings-field"><span>YouTube 频道预算</span><input id="youtubeDailyChannelBudget" inputmode="numeric" placeholder="10"></label>
+            <label class="settings-field"><span>YouTube 搜索预算</span><input id="youtubeDailySearchBudget" inputmode="numeric" placeholder="0 = 不限"></label>
+            <label class="settings-field"><span>YouTube 热门预算</span><input id="youtubeDailyTrendingBudget" inputmode="numeric" placeholder="0 = 不限"></label>
+            <label class="settings-field"><span>YouTube 频道预算</span><input id="youtubeDailyChannelBudget" inputmode="numeric" placeholder="0 = 不限"></label>
             <label class="settings-field"><span>YouTube 请求间隔秒数</span><input id="youtubeRequestInterval" inputmode="numeric" placeholder="2"></label>
           </div>
           <label class="settings-field"><span>YouTube 最小调度间隔分钟</span><input id="youtubeMinInterval" inputmode="numeric" placeholder="60"></label>
           <p class="settings-note-inline">YouTube 预算限制 yt_search / yt_trending / yt_channel 三个 discovery 策略的单轮规模。</p>
           <p class="settings-section-title">X (Twitter)</p>
-          <p class="settings-note-inline">在浏览器登录 x.com 后，插件会自动同步 cookie；Web 端无法嗅探 cookie，只读其登录状态（见上方「来源接入状态」）。</p>
+          <p class="settings-note-inline">在浏览器登录 x.com 后，插件会自动同步 cookie；也可在下方手动粘贴（需含 auth_token 和 ct0）。</p>
+          <label class="settings-field full"><span>X Cookie</span><textarea id="twitterCookie" rows="2" placeholder="保留空值表示不覆盖现有 cookie（登录 x.com 后插件会自动同步）"></textarea></label>
           <label class="settings-field"><span>X Cookie 环境变量</span><input id="twitterCookieEnv" placeholder="OPENBILICLAW_X_COOKIE"></label>
           <div class="inline-row">
-            <label class="settings-field"><span>X 每日搜索</span><input id="twitterDailySearchBudget" inputmode="numeric" placeholder="0"></label>
-            <label class="settings-field"><span>X 每日 For-You</span><input id="twitterDailyFeedBudget" inputmode="numeric" placeholder="0"></label>
-            <label class="settings-field"><span>X 每日订阅作者</span><input id="twitterDailyCreatorBudget" inputmode="numeric" placeholder="0"></label>
+            <label class="settings-field"><span>X 每日搜索</span><input id="twitterDailySearchBudget" inputmode="numeric" placeholder="0 = 不限"></label>
+            <label class="settings-field"><span>X 每日 For-You</span><input id="twitterDailyFeedBudget" inputmode="numeric" placeholder="0 = 不限"></label>
+            <label class="settings-field"><span>X 每日订阅作者</span><input id="twitterDailyCreatorBudget" inputmode="numeric" placeholder="0 = 不限"></label>
             <label class="settings-field"><span>X 请求间隔秒数</span><input id="twitterRequestInterval" inputmode="numeric" placeholder="3"></label>
           </div>
           <label class="settings-field"><span>X 最小调度间隔分钟</span><input id="twitterMinInterval" inputmode="numeric" placeholder="60"></label>

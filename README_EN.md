@@ -188,12 +188,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-Latest: **v0.3.110 / extension v0.3.72: macOS installer ad-hoc signature repair (2026-06-09)**. Full changelog: [docs/changelog.md](docs/changelog.md).
+Latest: **v0.3.114 / extension v0.3.74: source cookie config parity (2026-06-10)**. Full changelog: [docs/changelog.md](docs/changelog.md).
 
-- **New X (Twitter) source** — the sixth source; server-side cookie-replay discovery (search / For-You / followed authors), with the x.com cookie auto-synced once you log in.
-- **X history backfill** — `openbiliclaw init` reads your own X likes / bookmarks into the profile, same as Bilibili favorites.
-- **X wired into settings** — the platform enable toggle and the candidate-pool X share are configurable and persisted from the extension settings page.
-- **New `fetch-x` command** — pull X likes / bookmarks on demand for testing without re-running init.
+- **Douyin / X cookies visible & editable** — the Douyin / X source cards (extension + desktop web settings) now match the Bilibili card: view the current plaintext cookie or paste one manually.
+- **No more false source status** — X no longer reports "cookie valid" without a credential; Bilibili no longer shows "not configured" after a CLI QR login.
+- **Saving settings can't wipe cookies** — empty fields and masked echoes no longer overwrite synced cookies, so an accidentally cleared textbox is safe to save.
+- **Per-platform cookie sync retries** — Bilibili / Douyin / X retry independently; one platform's success no longer cancels another's pending quick retry.
 
 ## Community
 
@@ -653,7 +653,7 @@ OpenBiliClaw/
 
 ## 📜 Release History
 
-Latest: **v0.3.110 / extension v0.3.72: macOS installer ad-hoc signature repair (2026-06-09)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Extension packages and desktop installers live on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases); backend source updates use `backend-v*` tags.
+Latest: **v0.3.114 / extension v0.3.74: source cookie config parity (2026-06-10)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Extension packages and desktop installers live on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases); backend source updates use `backend-v*` tags.
 
 ## 🗺️ Roadmap
 

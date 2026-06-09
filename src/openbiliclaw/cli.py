@@ -4382,7 +4382,7 @@ async def _fetch_x_init_data(
     x_cfg = getattr(getattr(cfg, "sources", None), "twitter", None)
     cookie_env = str(getattr(x_cfg, "cookie_env", "OPENBILICLAW_X_COOKIE"))
 
-    from openbiliclaw.api.app import resolve_x_cookie
+    from openbiliclaw.sources.x_auth import resolve_x_cookie
 
     cookie = resolve_x_cookie(data_dir=cfg.data_path, cookie_env=cookie_env)
     if not cookie:

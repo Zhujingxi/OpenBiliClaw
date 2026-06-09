@@ -197,3 +197,62 @@ class TestXCookieReader:
 
         monkeypatch.delenv("TEST_X_COOKIE", raising=False)
         assert resolve_x_cookie(data_dir=tmp_path, cookie_env="TEST_X_COOKIE") == ""
+
+
+class TestSourcesStatusCookieGating:
+    """The unified status chip must not report a logged-in source without a
+    credential actually present (the x_source_health row defaults to ``ok``
+    before any fetch has run)."""
+
+    def _client(self, monkeypatch, tmp_path: Path):
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.api.app import create_app
+        from openbiliclaw.config import Config, save_config
+        from openbiliclaw.storage.database import Database
+
+        monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.delenv("OPENBILICLAW_X_COOKIE", raising=False)
+        monkeypatch.delenv("OPENBILICLAW_DOUYIN_COOKIE", raising=False)
+        save_config(Config(), tmp_path / "config.toml")
+
+        db = Database(tmp_path / "x.db")
+        db.initialize()
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        return TestClient(app)
+
+    def test_x_reports_missing_cookie_when_health_ok_but_no_cookie(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        client = self._client(monkeypatch, tmp_path)
+
+        body = client.get("/api/sources/status").json()
+
+        assert body["twitter"]["state"] == "missing_cookie"
+        assert body["twitter"]["logged_in"] is False
+
+    def test_x_reports_ok_when_health_ok_and_cookie_present(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        from openbiliclaw.sources.x_auth import XCookieManager
+
+        XCookieManager(tmp_path / "data").set_cookie("auth_token=at; ct0=ct", source="test")
+        client = self._client(monkeypatch, tmp_path)
+
+        body = client.get("/api/sources/status").json()
+
+        assert body["twitter"]["state"] == "ok"
+        assert body["twitter"]["logged_in"] is True
+
+    def test_bilibili_status_falls_back_to_cookie_file(self, monkeypatch, tmp_path: Path) -> None:
+        """CLI QR login writes only data/bilibili_cookie.json; the status
+        chip must count that as ready even with config.toml cookie empty."""
+        from openbiliclaw.bilibili.auth import AuthManager
+
+        AuthManager(data_dir=tmp_path / "data").set_cookie("SESSDATA=s; bili_jct=j; DedeUserID=1")
+        client = self._client(monkeypatch, tmp_path)
+
+        body = client.get("/api/sources/status").json()
+
+        assert body["bilibili"]["state"] == "ready"
+        assert body["bilibili"]["logged_in"] is True

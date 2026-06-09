@@ -41,6 +41,8 @@ from openbiliclaw.api.models import (
     CognitionUpdateSummary,
     ConfigIssueOut,
     ConfigResponse,
+    ConfigServiceProbeIn,
+    ConfigServiceProbeResponse,
     ConfigUpdateIn,
     ConfigUpdateResponse,
     DelightAckIn,
@@ -150,65 +152,15 @@ _EMBEDDING_PROBE_TIMEOUT_SECONDS = 15.0
 _LAN_IP_TTL_SECONDS = 30.0
 _AUTO_REPLENISH_DEBOUNCE_SECONDS = 30.0
 
-# X (Twitter) server-side cookie replay needs BOTH of these cookies; the
-# browser may send a far larger jar, but ``has_cookie`` only goes true when
-# both are present (twitter-cli 401s otherwise).
-_X_REQUIRED_COOKIE_NAMES = ("auth_token", "ct0")
-_X_COOKIE_FILENAME = "x_cookie.json"
-
-
-class XCookieManager:
-    """Store the user's X (Twitter) Cookie header outside config.toml.
-
-    Mirrors ``openbiliclaw.sources.douyin_auth.DouyinCookieManager``: the
-    browser extension keeps ``data/x_cookie.json`` fresh; secrets never land
-    in config.toml.
-    """
-
-    def __init__(self, data_dir: Path) -> None:
-        self._data_dir = data_dir
-        self._cookie_path = data_dir / _X_COOKIE_FILENAME
-
-    @property
-    def cookie_path(self) -> Path:
-        return self._cookie_path
-
-    def set_cookie(self, cookie: str, *, source: str = "unknown") -> None:
-        import json
-
-        normalized = cookie.strip()
-        self._data_dir.mkdir(parents=True, exist_ok=True)
-        with open(self._cookie_path, "w", encoding="utf-8") as f:
-            json.dump(
-                {"cookie": normalized, "source": source.strip() or "unknown"},
-                f,
-                ensure_ascii=False,
-            )
-
-    def load_cookie(self) -> str:
-        import json
-
-        if not self._cookie_path.exists():
-            return ""
-        with open(self._cookie_path, encoding="utf-8") as f:
-            payload = json.load(f)
-        if not isinstance(payload, dict):
-            return ""
-        return str(payload.get("cookie", "") or "").strip()
-
-
-def resolve_x_cookie(*, data_dir: Path, cookie_env: str = "OPENBILICLAW_X_COOKIE") -> str:
-    """Resolve the X (Twitter) Cookie header for server-side discovery.
-
-    The environment variable is the explicit override for debugging, while the
-    browser extension keeps ``data/x_cookie.json`` fresh for normal use. Env
-    always wins over the persisted file (mirrors ``resolve_douyin_cookie``).
-    """
-    env_cookie = os.environ.get(cookie_env, "").strip()
-    if env_cookie:
-        return env_cookie
-    return XCookieManager(data_dir).load_cookie()
-
+# Canonical home is openbiliclaw.sources.x_auth (mirrors douyin_auth);
+# re-exported here because callers historically imported from api.app.
+from openbiliclaw.sources.x_auth import (  # noqa: E402
+    X_REQUIRED_COOKIE_NAMES as _X_REQUIRED_COOKIE_NAMES,
+)
+from openbiliclaw.sources.x_auth import (  # noqa: E402, F401
+    XCookieManager,
+    resolve_x_cookie,
+)
 
 SOURCE_LABELS = {
     "feedback": "推荐反馈",
@@ -5643,7 +5595,15 @@ def create_app(
         srcs = cfg.sources
 
         # ── Bilibili: cookie present with the core login fields ──
+        # config.toml is the mirror, data/bilibili_cookie.json is the runtime
+        # store (CLI QR login writes only the file) — check both, like the
+        # douyin/x branches resolve env + file.
         bili_cookie = str(getattr(cfg.bilibili, "cookie", "") or "")
+        if not bili_cookie.strip():
+            with suppress(Exception):
+                from openbiliclaw.bilibili.auth import AuthManager
+
+                bili_cookie = AuthManager(data_dir=cfg.data_path).load_cookie()
         bili_enabled = bool(getattr(srcs.bilibili, "enabled", True))
         has_fields = sum(
             1 for f in ("SESSDATA", "bili_jct", "DedeUserID") if f"{f}=" in bili_cookie
@@ -5743,6 +5703,18 @@ def create_app(
             h = XSourceHealthStore(ctx.database).get()
             tw_state = str(h.get("state", "ok"))
             tw_feed_paused = bool(h.get("feed_paused", False))
+        # The health row defaults to ``ok`` before any fetch has run, so an
+        # ``ok`` without an actual cookie would falsely report a logged-in
+        # source — gate it on the resolved credential, like the douyin branch.
+        if tw_state == "ok":
+            tw_cookie = ""
+            with suppress(Exception):
+                tw_cookie = resolve_x_cookie(
+                    data_dir=cfg.data_path,
+                    cookie_env=getattr(srcs.twitter, "cookie_env", "OPENBILICLAW_X_COOKIE"),
+                )
+            if not tw_cookie.strip():
+                tw_state = "missing_cookie"
         tw_detail = _x_state_detail.get(tw_state, f"X 来源状态：{tw_state}。")
         if tw_feed_paused:
             tw_detail += " For-You 因连续失败已自动暂停。"
@@ -6283,6 +6255,24 @@ def create_app(
                 return "*" * len(key)
             return key[:4] + "*" * (len(key) - 8) + key[-4:]
 
+        # Douyin / X store their cookie in data/*.json (env override wins),
+        # not in config.toml — resolve here so the settings pages can show
+        # the live credential exactly like the Bilibili card does.
+        from openbiliclaw.sources.douyin_auth import resolve_douyin_cookie
+
+        dy_cookie = ""
+        with suppress(Exception):
+            dy_cookie = resolve_douyin_cookie(
+                data_dir=cfg.data_path,
+                cookie_env=cfg.sources.douyin.cookie_env,
+            )
+        tw_cookie = ""
+        with suppress(Exception):
+            tw_cookie = resolve_x_cookie(
+                data_dir=cfg.data_path,
+                cookie_env=cfg.sources.twitter.cookie_env,
+            )
+
         def _provider_out(p: Any) -> LLMProviderConfigOut:
             return LLMProviderConfigOut(
                 api_key=_mask(p.api_key),
@@ -6371,6 +6361,7 @@ def create_app(
                 douyin=DouyinSourceConfigOut(
                     enabled=cfg.sources.douyin.enabled,
                     mode=cfg.sources.douyin.mode,
+                    cookie=_mask(dy_cookie),
                     cookie_env=cfg.sources.douyin.cookie_env,
                     daily_search_budget=cfg.sources.douyin.daily_search_budget,
                     daily_hot_budget=cfg.sources.douyin.daily_hot_budget,
@@ -6388,6 +6379,7 @@ def create_app(
                 twitter=TwitterSourceConfigOut(
                     enabled=cfg.sources.twitter.enabled,
                     mode=cfg.sources.twitter.mode,
+                    cookie=_mask(tw_cookie),
                     cookie_env=cfg.sources.twitter.cookie_env,
                     daily_search_budget=cfg.sources.twitter.daily_search_budget,
                     daily_feed_budget=cfg.sources.twitter.daily_feed_budget,
@@ -6478,6 +6470,238 @@ def create_app(
             degraded=bool(getattr(ctx, "degraded", False)),
             degraded_reason=str(getattr(ctx, "degraded_reason", "")),
         )
+
+    def _as_bool(value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+        return bool(value)
+
+    def _string_list(value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    def _apply_llm_update(cfg: Any, llm_data: object) -> None:
+        """Apply the LLM subset of a config update to an in-memory config."""
+        if not isinstance(llm_data, dict):
+            return
+        from openbiliclaw.config import _normalize_llm_concurrency, _normalize_llm_timeout
+
+        if "default_provider" in llm_data:
+            cfg.llm.default_provider = str(llm_data["default_provider"])
+        if "concurrency" in llm_data:
+            cfg.llm.concurrency = _normalize_llm_concurrency(llm_data["concurrency"])
+        if "timeout" in llm_data:
+            cfg.llm.timeout = _normalize_llm_timeout(llm_data["timeout"])
+        if "fallback_enabled" in llm_data:
+            cfg.llm.fallback_enabled = _as_bool(llm_data["fallback_enabled"])
+        if "fallback_provider" in llm_data:
+            cfg.llm.fallback_provider = str(llm_data["fallback_provider"]).strip()
+        for provider_name in (
+            "openai",
+            "claude",
+            "gemini",
+            "deepseek",
+            "ollama",
+            "openrouter",
+            "openai_compatible",
+        ):
+            if provider_name in llm_data and isinstance(llm_data[provider_name], dict):
+                provider_cfg = getattr(cfg.llm, provider_name)
+                pdata = llm_data[provider_name]
+                skipped_fields: list[str] = []
+                for field_name in (
+                    "api_key",
+                    "model",
+                    "base_url",
+                    "auth_mode",
+                    "http_referer",
+                    "x_title",
+                    "reasoning_effort",
+                ):
+                    if field_name in pdata:
+                        new_value = str(pdata[field_name])
+                        if field_name == "api_key" and "*" in new_value:
+                            skipped_fields.append(f"{field_name}=masked")
+                            continue
+                        existing = getattr(provider_cfg, field_name, "")
+                        if (
+                            field_name != "auth_mode"
+                            and not new_value.strip()
+                            and isinstance(existing, str)
+                            and existing.strip()
+                        ):
+                            skipped_fields.append(f"{field_name}=empty_skip")
+                            continue
+                        setattr(provider_cfg, field_name, new_value)
+                if skipped_fields:
+                    logger.debug(
+                        "Config LLM update: provider %s skipped fields: %s",
+                        provider_name,
+                        ", ".join(skipped_fields),
+                    )
+        if "embedding" in llm_data and isinstance(llm_data["embedding"], dict):
+            emb = llm_data["embedding"]
+            if "provider" in emb:
+                cfg.llm.embedding.provider = str(emb["provider"])
+            if "model" in emb:
+                new_model = str(emb["model"])
+                if new_model.strip() or not cfg.llm.embedding.model.strip():
+                    cfg.llm.embedding.model = new_model
+            if "api_key" in emb:
+                new_key = str(emb["api_key"])
+                if "*" not in new_key and (new_key.strip() or not cfg.llm.embedding.api_key.strip()):
+                    cfg.llm.embedding.api_key = new_key
+            if "base_url" in emb:
+                new_base_url = str(emb["base_url"])
+                if new_base_url.strip() or not cfg.llm.embedding.base_url.strip():
+                    cfg.llm.embedding.base_url = new_base_url
+            if "output_dimensionality" in emb:
+                try:
+                    cfg.llm.embedding.output_dimensionality = max(
+                        0,
+                        int(emb["output_dimensionality"] or 0),
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="llm.embedding.output_dimensionality must be an integer",
+                    ) from exc
+            if "similarity_threshold" in emb:
+                cfg.llm.embedding.similarity_threshold = float(emb["similarity_threshold"])
+            if "fallback_enabled" in emb:
+                cfg.llm.embedding.fallback_enabled = _as_bool(emb["fallback_enabled"])
+            if "fallback_provider" in emb:
+                cfg.llm.embedding.fallback_provider = str(emb["fallback_provider"]).strip()
+        for module_name in ("soul", "discovery", "recommendation", "evaluation"):
+            if module_name in llm_data and isinstance(llm_data[module_name], dict):
+                mod_cfg = getattr(cfg.llm, module_name)
+                mdata = llm_data[module_name]
+                if "provider" in mdata:
+                    mod_cfg.provider = str(mdata["provider"])
+                if "model" in mdata:
+                    mod_cfg.model = str(mdata["model"])
+
+    async def _probe_llm_config(cfg: Any) -> ConfigServiceProbeResponse:
+        from openbiliclaw.llm.registry import build_llm_registry
+
+        started = time.perf_counter()
+        provider = str(getattr(cfg.llm, "default_provider", "") or "").strip().lower()
+        model = ""
+        try:
+            registry = build_llm_registry(cfg)
+            provider = provider or str(getattr(registry, "default_provider", "") or "")
+            provider_cfg = getattr(cfg.llm, provider, None)
+            model = str(getattr(provider_cfg, "model", "") or "").strip()
+            if not registry.is_chat_capable(provider):
+                return ConfigServiceProbeResponse(
+                    ok=False,
+                    kind="llm",
+                    provider=provider,
+                    model=model,
+                    error=f"LLM provider {provider!r} is not registered or not chat-capable.",
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                )
+            timeout_s = min(max(float(getattr(cfg.llm, "timeout", 300) or 300), 10.0), 30.0)
+            response = await asyncio.wait_for(
+                registry.complete_provider(
+                    provider,
+                    [
+                        {"role": "system", "content": "Reply with only OK."},
+                        {"role": "user", "content": "OpenBiliClaw connectivity probe."},
+                    ],
+                    temperature=0,
+                    max_tokens=8,
+                    reasoning_effort="",
+                    model=model or None,
+                ),
+                timeout=timeout_s,
+            )
+            ok = bool(str(getattr(response, "content", "") or "").strip())
+            response_model = str(getattr(response, "model", "") or model)
+            return ConfigServiceProbeResponse(
+                ok=ok,
+                kind="llm",
+                provider=provider,
+                model=response_model,
+                message="LLM provider is available." if ok else "",
+                error="" if ok else "LLM provider returned an empty response.",
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+        except Exception as exc:
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind="llm",
+                provider=provider,
+                model=model,
+                error=str(exc),
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+
+    async def _probe_embedding_config(cfg: Any) -> ConfigServiceProbeResponse:
+        from openbiliclaw.llm.base import LLMRegistry
+        from openbiliclaw.llm.registry import build_embedding_service
+
+        started = time.perf_counter()
+        emb_cfg = getattr(getattr(cfg, "llm", None), "embedding", None)
+        provider = str(getattr(emb_cfg, "provider", "") or "").strip().lower()
+        model = str(getattr(emb_cfg, "model", "") or "").strip()
+        if not provider:
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind="embedding",
+                provider="",
+                model=model,
+                error="Embedding provider is not configured.",
+            )
+        try:
+            service = build_embedding_service(cfg, LLMRegistry())
+            if service is None:
+                return ConfigServiceProbeResponse(
+                    ok=False,
+                    kind="embedding",
+                    provider=provider,
+                    model=model,
+                    error="Embedding service could not be built from the submitted config.",
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                )
+            ok = bool(await asyncio.wait_for(service.probe(), timeout=15.0))
+            return ConfigServiceProbeResponse(
+                ok=ok,
+                kind="embedding",
+                provider=provider,
+                model=model,
+                message="Embedding provider is available." if ok else "",
+                error="" if ok else "Embedding provider returned no vector.",
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+        except Exception as exc:
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind="embedding",
+                provider=provider,
+                model=model,
+                error=str(exc),
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+
+    @app.post("/api/config/probe-service", response_model=ConfigServiceProbeResponse)
+    async def probe_config_service(payload: ConfigServiceProbeIn) -> ConfigServiceProbeResponse:
+        """Probe submitted LLM / embedding settings without saving config.toml."""
+        from copy import deepcopy
+
+        from openbiliclaw.config import load_config
+
+        cfg = deepcopy(load_config())
+        update = payload.config if isinstance(payload.config, dict) else {}
+        llm_data = update.get("llm")
+        if isinstance(llm_data, dict):
+            _apply_llm_update(cfg, llm_data)
+        if payload.kind == "llm":
+            return await _probe_llm_config(cfg)
+        return await _probe_embedding_config(cfg)
 
     @app.put("/api/config", response_model=ConfigUpdateResponse)
     async def update_config(payload: ConfigUpdateIn) -> ConfigUpdateResponse | JSONResponse:
@@ -6646,13 +6870,27 @@ def create_app(
                     if "model" in mdata:
                         mod_cfg.model = str(mdata["model"])
 
+        # A masked GET echo looks like ``SESS****abcd`` — a long asterisk run
+        # never appears in a genuine Cookie header, so use it (not a single
+        # ``*``, which cookie values may legally contain) to detect echoes.
+        def _is_masked_echo(value: str) -> bool:
+            return "****" in value
+
         # Apply bilibili updates
         if "bilibili" in update:
             bdata = update["bilibili"]
             if "auth_method" in bdata:
                 cfg.bilibili.auth_method = str(bdata["auth_method"])
             if "cookie" in bdata:
-                cfg.bilibili.cookie = str(bdata["cookie"])
+                # Mirror the api_key guards: never persist a masked echo, and
+                # an empty field never wipes an existing cookie (the browser
+                # extension's auto-sync owns refresh; a blank textarea on save
+                # must not log the backend out).
+                new_cookie = str(bdata["cookie"])
+                if not _is_masked_echo(new_cookie) and (
+                    new_cookie.strip() or not cfg.bilibili.cookie.strip()
+                ):
+                    cfg.bilibili.cookie = new_cookie
             if "browser_executable" in bdata:
                 cfg.bilibili.browser_executable = str(bdata["browser_executable"])
             if "browser_headed" in bdata:
@@ -6692,7 +6930,34 @@ def create_app(
                     if "mode" in dy_data:
                         cfg.sources.douyin.mode = str(dy_data["mode"])
                     if "cookie_env" in dy_data:
-                        cfg.sources.douyin.cookie_env = str(dy_data["cookie_env"])
+                        # The env var name has a sensible default; an emptied
+                        # field keeps the current name rather than wiping it.
+                        new_env = str(dy_data["cookie_env"]).strip()
+                        if new_env:
+                            cfg.sources.douyin.cookie_env = new_env
+                    if "cookie" in dy_data:
+                        # Manual paste from the settings pages. Routed to
+                        # data/douyin_cookie.json (same store the extension
+                        # auto-sync writes) — secrets never land in config.toml.
+                        from openbiliclaw.sources.douyin_auth import (
+                            DouyinCookieManager,
+                            resolve_douyin_cookie,
+                        )
+
+                        new_cookie = str(dy_data["cookie"]).strip()
+                        if new_cookie and not _is_masked_echo(new_cookie):
+                            current = ""
+                            with suppress(Exception):
+                                current = resolve_douyin_cookie(
+                                    data_dir=cfg.data_path,
+                                    cookie_env=cfg.sources.douyin.cookie_env,
+                                )
+                            # Unchanged form echo → no write (env override
+                            # must not be copied into the file needlessly).
+                            if new_cookie != current:
+                                DouyinCookieManager(cfg.data_path).set_cookie(
+                                    new_cookie, source="config-update"
+                                )
                     for key in (
                         "daily_search_budget",
                         "daily_hot_budget",
@@ -6723,7 +6988,42 @@ def create_app(
                     if "mode" in tw_data:
                         cfg.sources.twitter.mode = str(tw_data["mode"])
                     if "cookie_env" in tw_data:
-                        cfg.sources.twitter.cookie_env = str(tw_data["cookie_env"])
+                        new_env = str(tw_data["cookie_env"]).strip()
+                        if new_env:
+                            cfg.sources.twitter.cookie_env = new_env
+                    if "cookie" in tw_data:
+                        # Manual paste — routed to data/x_cookie.json like the
+                        # extension auto-sync; never lands in config.toml.
+                        new_cookie = str(tw_data["cookie"]).strip()
+                        if new_cookie and not _is_masked_echo(new_cookie):
+                            current = ""
+                            with suppress(Exception):
+                                current = resolve_x_cookie(
+                                    data_dir=cfg.data_path,
+                                    cookie_env=cfg.sources.twitter.cookie_env,
+                                )
+                            if new_cookie != current:
+                                XCookieManager(cfg.data_path).set_cookie(
+                                    new_cookie, source="config-update"
+                                )
+                                # A pasted valid cookie is a re-login signal,
+                                # same as the extension sync endpoint: lift any
+                                # missing/expired/blocked health block so
+                                # discovery retries instead of staying parked.
+                                from openbiliclaw.sources.douyin_direct import (
+                                    parse_cookie_header,
+                                )
+
+                                pairs = parse_cookie_header(new_cookie)
+                                if all(
+                                    name in pairs for name in _X_REQUIRED_COOKIE_NAMES
+                                ) and hasattr(ctx.database, "conn"):
+                                    with suppress(Exception):
+                                        from openbiliclaw.storage.x_health import (
+                                            XSourceHealthStore,
+                                        )
+
+                                        XSourceHealthStore(ctx.database).clear_relogin_block()
                     for key in (
                         "daily_search_budget",
                         "daily_feed_budget",

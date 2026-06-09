@@ -5451,7 +5451,7 @@ async def test_fetch_x_init_data_skips_without_cookie(monkeypatch, tmp_path) -> 
         data_path=tmp_path,
     )
     monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
-    monkeypatch.setattr("openbiliclaw.api.app.resolve_x_cookie", lambda **kwargs: "")
+    monkeypatch.setattr("openbiliclaw.sources.x_auth.resolve_x_cookie", lambda **kwargs: "")
     likes, bookmarks = await cli_module._fetch_x_init_data(likes_limit=10, bookmarks_limit=10)
     assert likes == []
     assert bookmarks == []
@@ -5475,7 +5475,7 @@ async def test_fetch_x_init_data_fetches_likes_and_bookmarks(monkeypatch, tmp_pa
 
     monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
     monkeypatch.setattr(
-        "openbiliclaw.api.app.resolve_x_cookie", lambda **kwargs: "auth_token=a; ct0=b"
+        "openbiliclaw.sources.x_auth.resolve_x_cookie", lambda **kwargs: "auth_token=a; ct0=b"
     )
     monkeypatch.setattr("openbiliclaw.sources.x_client.XClient", _FakeXClient)
 

@@ -64,7 +64,7 @@ test("startCookieSync retries quickly when the backend is not ready", async () =
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.deepEqual(alarms.at(-1), {
-    name: "openbiliclaw-cookie-sync",
+    name: "openbiliclaw-cookie-sync-bili",
     info: { delayInMinutes: 1, periodInMinutes: 1 },
   });
 });
@@ -169,7 +169,9 @@ test("cookie sync runtime event posts the current douyin cookie immediately", as
   });
 });
 
-test("cookie sync alarm refreshes bilibili and douyin cookies", async () => {
+test("legacy shared cookie sync alarm refreshes bilibili and douyin cookies", async () => {
+  // Pre-split alarms persist across extension updates — the legacy name
+  // must still trigger a full round instead of being silently dropped.
   const { handleCookieSyncAlarm } = await importCookieSync();
   installChromeMock([
     { name: "SESSDATA", value: "sess", domain: ".bilibili.com" },
@@ -271,7 +273,7 @@ test("cookie sync runtime event posts the current x cookie immediately", async (
   });
 });
 
-test("cookie sync alarm refreshes bilibili, douyin AND x cookies together", async () => {
+test("legacy shared cookie sync alarm refreshes bilibili, douyin AND x cookies together", async () => {
   const { handleCookieSyncAlarm } = await importCookieSync();
   installChromeMock([
     { name: "SESSDATA", value: "sess", domain: ".bilibili.com" },
@@ -311,6 +313,47 @@ test("cookie sync alarm refreshes bilibili, douyin AND x cookies together", asyn
     cookie: "auth_token=x-at; ct0=x-csrf",
     source: "hourly-alarm",
   });
+});
+
+test("per-platform alarm only syncs its own platform", async () => {
+  const { handleCookieSyncAlarm } = await importCookieSync();
+  installChromeMock([
+    { name: "SESSDATA", value: "sess", domain: ".bilibili.com" },
+    { name: "bili_jct", value: "csrf", domain: ".bilibili.com" },
+    { name: "DedeUserID", value: "42", domain: ".bilibili.com" },
+    { name: "sessionid", value: "dy-sess", domain: ".douyin.com" },
+    { name: "auth_token", value: "x-at", domain: ".x.com" },
+    { name: "ct0", value: "x-csrf", domain: ".x.com" },
+  ]);
+  const calls: string[] = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    return new Response(JSON.stringify({ ok: true, authenticated: true, has_cookie: true }), {
+      status: 200,
+    });
+  };
+
+  const handled = handleCookieSyncAlarm("openbiliclaw-cookie-sync-dy");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(handled, true);
+  assert.deepEqual(calls, ["http://127.0.0.1:8420/api/sources/dy/cookie"]);
+});
+
+test("a douyin sync failure does not reschedule the bilibili alarm", async () => {
+  const { handleCookieSyncAlarm } = await importCookieSync();
+  const { alarms } = installChromeMock([
+    { name: "sessionid", value: "dy-sess", domain: ".douyin.com" },
+  ]);
+  globalThis.fetch = async () => {
+    throw new Error("backend down");
+  };
+
+  handleCookieSyncAlarm("openbiliclaw-cookie-sync-dy");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(alarms.map((alarm) => alarm.name), ["openbiliclaw-cookie-sync-dy"]);
+  assert.deepEqual(alarms.at(-1)?.info, { delayInMinutes: 1, periodInMinutes: 1 });
 });
 
 test("startCookieSync triggers an x cookie sync at startup", async () => {
