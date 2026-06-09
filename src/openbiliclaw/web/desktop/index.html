@@ -243,6 +243,10 @@
             <label class="settings-field"><span>DeepSeek Reasoning Effort</span><select id="deepseekReasoning"><option value="">默认</option><option value="high">high</option><option value="max">max</option></select></label>
             <label class="settings-field"><span>OpenRouter Referer</span><input id="openrouterReferer" placeholder="https://example.com"></label>
             <label class="settings-field"><span>OpenRouter X-Title</span><input id="openrouterTitle" placeholder="OpenBiliClaw"></label>
+            <div class="settings-probe-row">
+              <button class="pill-btn" id="probeLlm" type="button">测试 LLM</button>
+              <span class="settings-probe-status" id="probeLlmStatus" aria-live="polite"></span>
+            </div>
           </div>
 
           <div class="settings-subpanel" data-model-settings-group="llm" data-model-settings-panel="fallback" hidden>
@@ -267,6 +271,10 @@
             <label class="settings-field"><span>Embedding Base URL</span><input id="embeddingBaseUrl"></label>
             <label class="settings-field"><span>Embedding 维度</span><input id="embeddingOutputDimensionality" type="number" min="0" step="1" inputmode="numeric" placeholder="1024"></label>
             <label class="settings-field"><span>相似度阈值</span><input id="embeddingSimilarity" inputmode="decimal" placeholder="0.82"></label>
+            <div class="settings-probe-row">
+              <button class="pill-btn" id="probeEmbedding" type="button">测试 Embedding</button>
+              <span class="settings-probe-status" id="probeEmbeddingStatus" aria-live="polite"></span>
+            </div>
           </div>
 
           <div class="settings-subpanel" data-model-settings-group="embedding" data-model-settings-panel="fallback" hidden>

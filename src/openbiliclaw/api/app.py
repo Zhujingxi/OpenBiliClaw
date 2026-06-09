@@ -6731,7 +6731,6 @@ def create_app(
             _collect_config_issues,
             _default_config_path,
             _normalize_extension_disconnect_grace,
-            _normalize_llm_concurrency,
             _normalize_pool_source_shares,
             _normalize_scheduler_int,
             load_config,
@@ -6753,18 +6752,6 @@ def create_app(
                 },
             )
 
-        def _as_bool(value: object) -> bool:
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, str):
-                return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-            return bool(value)
-
-        def _string_list(value: object) -> list[str]:
-            if not isinstance(value, list):
-                return []
-            return [str(item).strip() for item in value if str(item).strip()]
-
         # Apply top-level scalars
         if "language" in update:
             cfg.language = str(update["language"])
@@ -6773,110 +6760,7 @@ def create_app(
 
         # Apply LLM updates
         if "llm" in update:
-            llm_data = update["llm"]
-            if "default_provider" in llm_data:
-                cfg.llm.default_provider = str(llm_data["default_provider"])
-            if "concurrency" in llm_data:
-                cfg.llm.concurrency = _normalize_llm_concurrency(llm_data["concurrency"])
-            if "timeout" in llm_data:
-                from openbiliclaw.config import _normalize_llm_timeout
-
-                cfg.llm.timeout = _normalize_llm_timeout(llm_data["timeout"])
-            if "fallback_enabled" in llm_data:
-                cfg.llm.fallback_enabled = _as_bool(llm_data["fallback_enabled"])
-            if "fallback_provider" in llm_data:
-                cfg.llm.fallback_provider = str(llm_data["fallback_provider"]).strip()
-            for provider_name in (
-                "openai",
-                "claude",
-                "gemini",
-                "deepseek",
-                "ollama",
-                "openrouter",
-                "openai_compatible",
-            ):
-                if provider_name in llm_data and isinstance(llm_data[provider_name], dict):
-                    provider_cfg = getattr(cfg.llm, provider_name)
-                    pdata = llm_data[provider_name]
-                    skipped_fields: list[str] = []
-                    for field_name in (
-                        "api_key",
-                        "model",
-                        "base_url",
-                        "auth_mode",
-                        "http_referer",
-                        "x_title",
-                        "reasoning_effort",
-                    ):
-                        if field_name in pdata:
-                            new_value = str(pdata[field_name])
-                            if field_name == "api_key" and "*" in new_value:
-                                skipped_fields.append(f"{field_name}=masked")
-                                continue
-                            existing = getattr(provider_cfg, field_name, "")
-                            if (
-                                field_name != "auth_mode"
-                                and not new_value.strip()
-                                and isinstance(existing, str)
-                                and existing.strip()
-                            ):
-                                skipped_fields.append(f"{field_name}=empty_skip")
-                                continue
-                            setattr(provider_cfg, field_name, new_value)
-                    if skipped_fields:
-                        logger.debug(
-                            "PUT /api/config: provider %s skipped fields: %s",
-                            provider_name,
-                            ", ".join(skipped_fields),
-                        )
-            if "embedding" in llm_data and isinstance(llm_data["embedding"], dict):
-                emb = llm_data["embedding"]
-                if "provider" in emb:
-                    cfg.llm.embedding.provider = str(emb["provider"])
-                if "model" in emb:
-                    new_model = str(emb["model"])
-                    if new_model.strip() or not cfg.llm.embedding.model.strip():
-                        cfg.llm.embedding.model = new_model
-                # v0.3.32+ — embedding owns api_key/base_url. Skip the
-                # api_key write when the payload echoes back the masked
-                # value (e.g. ``sk-d****a826``) so we don't overwrite the
-                # real key with asterisks. A genuine API key never
-                # contains ``*``.
-                if "api_key" in emb:
-                    new_key = str(emb["api_key"])
-                    if "*" not in new_key and (
-                        new_key.strip() or not cfg.llm.embedding.api_key.strip()
-                    ):
-                        cfg.llm.embedding.api_key = new_key
-                if "base_url" in emb:
-                    new_base_url = str(emb["base_url"])
-                    if new_base_url.strip() or not cfg.llm.embedding.base_url.strip():
-                        cfg.llm.embedding.base_url = new_base_url
-                if "output_dimensionality" in emb:
-                    try:
-                        cfg.llm.embedding.output_dimensionality = max(
-                            0,
-                            int(emb["output_dimensionality"] or 0),
-                        )
-                    except (TypeError, ValueError) as exc:
-                        raise HTTPException(
-                            status_code=400,
-                            detail="llm.embedding.output_dimensionality must be an integer",
-                        ) from exc
-                if "similarity_threshold" in emb:
-                    cfg.llm.embedding.similarity_threshold = float(emb["similarity_threshold"])
-                if "fallback_enabled" in emb:
-                    cfg.llm.embedding.fallback_enabled = _as_bool(emb["fallback_enabled"])
-                if "fallback_provider" in emb:
-                    cfg.llm.embedding.fallback_provider = str(emb["fallback_provider"]).strip()
-            for module_name in ("soul", "discovery", "recommendation", "evaluation"):
-                if module_name in llm_data and isinstance(llm_data[module_name], dict):
-                    mod_cfg = getattr(cfg.llm, module_name)
-                    mdata = llm_data[module_name]
-                    if "provider" in mdata:
-                        mod_cfg.provider = str(mdata["provider"])
-                    if "model" in mdata:
-                        mod_cfg.model = str(mdata["model"])
+            _apply_llm_update(cfg, update["llm"])
 
         # A masked GET echo looks like ``SESS****abcd`` — a long asterisk run
         # never appears in a genuine Cookie header, so use it (not a single

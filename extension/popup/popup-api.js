@@ -511,6 +511,17 @@ export async function fetchSourceShareSuggestion(overrides = null) {
   return requestJson("/config/source-share-suggestion", { method: "GET" });
 }
 
+export async function probeConfigService(kind, config) {
+  return requestJson("/config/probe-service", {
+    method: "POST",
+    timeoutMs: 35_000,
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ kind, config }),
+  });
+}
+
 export async function updateConfig(data) {
   return requestJson("/config", {
     method: "PUT",

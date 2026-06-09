@@ -171,6 +171,52 @@ Embedding 服务用于多个语义任务：discovery 内容兴趣预过滤、rec
 | `fallback_enabled` | bool | `false` | 旧兼容开关；插件设置页选择 `fallback_provider` 时会同步写成 `true`，用于允许借用对应 chat provider 凭据 |
 | `fallback_provider` | string | `""` | 第二个 embedding 备选 Provider。留空 = 不 fallback；可填 `openai` / `gemini` / `ollama` / `openai_compatible`，不会再自动走 `ollama → gemini → openai` 链 |
 
+#### 配置页服务探测 API（v0.3.114+）
+
+插件 side panel 设置页和桌面 Web `/web` 设置页都可在「模型」tab 直接测试当前表单草稿里的 LLM / embedding 是否连通。该探测走一个**无写入**接口，不会保存 `config.toml`，也不会触发运行时热重载。
+
+```http
+POST /api/config/probe-service
+Content-Type: application/json
+
+{
+  "kind": "llm",
+  "config": {
+    "llm": {
+      "default_provider": "openai_compatible",
+      "openai_compatible": {
+        "api_key": "sk-...",
+        "model": "llama-3.1-70b-versatile",
+        "base_url": "https://api.groq.com/openai/v1"
+      }
+    }
+  }
+}
+```
+
+`kind` 可为 `"llm"` 或 `"embedding"`。后端会先读取当前 `load_config()`，再把请求里的 `config.llm` 按 `PUT /api/config` 的同一套规则合并到内存副本上，然后：
+
+| kind | 行为 | 成功条件 |
+|------|------|----------|
+| `llm` | 构建临时 `LLMRegistry`，对当前 `default_provider` 发送一条最小 chat completion 请求 | provider 已注册、chat-capable，并返回非异常响应 |
+| `embedding` | 构建临时 `EmbeddingService`，调用 `EmbeddingService.probe()` 绕过缓存真实取一次向量 | provider 已配置，并返回非空向量 |
+
+响应统一为：
+
+```json
+{
+  "ok": true,
+  "kind": "llm",
+  "provider": "openai_compatible",
+  "model": "llama-3.1-70b-versatile",
+  "message": "LLM provider responded.",
+  "error": "",
+  "latency_ms": 428
+}
+```
+
+探测失败也会返回 `200` + `ok=false`，让前端以行内状态显示错误原因；只有请求体 schema 错误等 API 层问题才按常规 4xx 处理。
+
 #### 启用本地 Ollama embedding（v0.3.0+，**v0.3.3 起真实生效**）
 
 > ⚠️ **如果你装的是 v0.3.0~v0.3.2**：`setup-embedding` 当时虽然写了 `[llm.embedding] provider="ollama"`，但 LLM 注册表静默回退到 default provider，embedding 实际仍走 Gemini。

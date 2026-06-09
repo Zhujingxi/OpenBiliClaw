@@ -87,6 +87,7 @@ import {
   fetchSourceShareSuggestion,
   fetchSourcesStatus,
   markDelightSent,
+  probeConfigService,
   startInit,
   readCachedConfigSnapshot,
   reportRecommendationClick,
@@ -6293,6 +6294,75 @@ function bindSettings() {
         unmanaged_max_age_days: getInt("cfgLogUnmanagedMaxAge", 30),
       },
     };
+  }
+
+  function renderProbeResult(statusEl, result) {
+    if (!statusEl) return;
+    const ok = Boolean(result?.ok);
+    const provider = result?.provider ? ` ${result.provider}` : "";
+    const model = result?.model ? ` / ${result.model}` : "";
+    const latency = Number.isFinite(Number(result?.latency_ms)) && Number(result.latency_ms) > 0
+      ? ` (${Math.round(Number(result.latency_ms))}ms)`
+      : "";
+    const detail = result?.message || result?.error || (ok ? "服务可用" : "服务不可用");
+    statusEl.dataset.tone = ok ? "success" : "error";
+    statusEl.textContent = `${ok ? "可用" : "不可用"}${provider}${model}${latency}: ${detail}`;
+  }
+
+  function renderProbePending(statusEl, label) {
+    if (!statusEl) return;
+    statusEl.dataset.tone = "pending";
+    statusEl.textContent = `${label} 探测中...`;
+  }
+
+  async function runLlmConfigProbe(button, statusEl) {
+    if (!button) return;
+    button.disabled = true;
+    renderProbePending(statusEl, "LLM");
+    try {
+      const result = await probeConfigService("llm", collectForm());
+      renderProbeResult(statusEl, result);
+    } catch (err) {
+      renderProbeResult(statusEl, {
+        ok: false,
+        error: err?.message || "LLM 探测失败",
+      });
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function runEmbeddingConfigProbe(button, statusEl) {
+    if (!button) return;
+    button.disabled = true;
+    renderProbePending(statusEl, "Embedding");
+    try {
+      const result = await probeConfigService("embedding", collectForm());
+      renderProbeResult(statusEl, result);
+    } catch (err) {
+      renderProbeResult(statusEl, {
+        ok: false,
+        error: err?.message || "Embedding 探测失败",
+      });
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  const probeLlmBtn = document.getElementById("cfgProbeLlm");
+  const probeLlmStatus = document.getElementById("cfgProbeLlmStatus");
+  if (probeLlmBtn instanceof HTMLButtonElement) {
+    probeLlmBtn.addEventListener("click", () => {
+      void runLlmConfigProbe(probeLlmBtn, probeLlmStatus);
+    });
+  }
+
+  const probeEmbeddingBtn = document.getElementById("cfgProbeEmbedding");
+  const probeEmbeddingStatus = document.getElementById("cfgProbeEmbeddingStatus");
+  if (probeEmbeddingBtn instanceof HTMLButtonElement) {
+    probeEmbeddingBtn.addEventListener("click", () => {
+      void runEmbeddingConfigProbe(probeEmbeddingBtn, probeEmbeddingStatus);
+    });
   }
 
   const backendCheckBtn = document.getElementById("backendUpdateCheck");

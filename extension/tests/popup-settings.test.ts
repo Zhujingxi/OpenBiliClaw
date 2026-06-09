@@ -293,6 +293,19 @@ test("settings page round-trips explicit LLM and embedding fallback providers", 
   );
 });
 
+test("settings page exposes and wires LLM and embedding probe buttons", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  assert.match(popupHtml, /id="cfgProbeLlm"/);
+  assert.match(popupHtml, /id="cfgProbeEmbedding"/);
+  assert.match(popupHtml, /id="cfgProbeLlmStatus"/);
+  assert.match(popupHtml, /id="cfgProbeEmbeddingStatus"/);
+  assert.match(popupJs, /probeConfigService\("llm", collectForm\(\)\)/);
+  assert.match(popupJs, /probeConfigService\("embedding", collectForm\(\)\)/);
+  assert.match(popupJs, /function renderProbeResult/);
+});
+
 test("settings page placeholders match config example defaults", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const expectedDefaults = [

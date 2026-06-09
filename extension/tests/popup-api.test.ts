@@ -17,6 +17,7 @@ import {
   fetchSourceShareSuggestion,
   fetchUpdateStatus,
   fetchWatchLater,
+  probeConfigService,
   readCachedConfigSnapshot,
   requestJson,
   reshuffleRecommendations,
@@ -655,6 +656,41 @@ test("fetchSourceShareSuggestion posts current settings overrides when provided"
     },
   });
   assert.equal(result.suggested_shares.youtube, 4);
+});
+
+test("probeConfigService posts no-write config probe payload", async () => {
+  const calls: Array<{ url: string; options: any }> = [];
+  globalThis.fetch = async (url: any, options: any) => {
+    calls.push({ url, options });
+    return {
+      ok: true,
+      async json() {
+        return {
+          ok: true,
+          kind: "llm",
+          provider: "openai",
+          message: "LLM provider is available.",
+        };
+      },
+    };
+  };
+
+  const result = await probeConfigService("llm", {
+    llm: { default_provider: "openai", openai: { api_key: "sk-test" } },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "http://127.0.0.1:8420/api/config/probe-service");
+  assert.equal(calls[0].options.method, "POST");
+  assert.equal(calls[0].options.headers["Content-Type"], "application/json");
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    kind: "llm",
+    config: {
+      llm: { default_provider: "openai", openai: { api_key: "sk-test" } },
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.provider, "openai");
 });
 
 test("updateConfig sends PUT with embedding config", async () => {

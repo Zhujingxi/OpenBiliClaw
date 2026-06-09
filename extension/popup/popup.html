@@ -4065,6 +4065,32 @@
 
     .settings-secondary-btn:hover { border-color: var(--sky); }
 
+    .settings-probe-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin: 0 0 2px;
+    }
+
+    .settings-probe-status {
+      min-width: 0;
+      flex: 1 1 180px;
+      color: var(--text-secondary);
+      font-size: 11.5px;
+      font-weight: 700;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
+    .settings-probe-status[data-tone="success"] {
+      color: #1a7a4a;
+    }
+
+    .settings-probe-status[data-tone="error"] {
+      color: #c0404e;
+    }
+
     .settings-link {
       color: var(--brand-strong);
       font-weight: 700;
@@ -4677,6 +4703,10 @@
           </select>
         </div>
         <p class="settings-hint">默认空；只有显式选择备选 Provider 时才会 fallback，不再自动尝试其它 Provider。</p>
+        <div class="settings-probe-row">
+          <button id="cfgProbeLlm" class="settings-secondary-btn" type="button">测试 LLM</button>
+          <span id="cfgProbeLlmStatus" class="settings-probe-status" aria-live="polite"></span>
+        </div>
         <!-- OpenAI -->
         <div class="settings-provider-fields" data-provider="openai">
           <div class="settings-field">
@@ -4825,6 +4855,10 @@
           </select>
         </div>
         <p class="settings-hint">默认空；只有显式选择备选 Provider 时才会 fallback，并借用对应 chat provider 凭据。</p>
+        <div class="settings-probe-row">
+          <button id="cfgProbeEmbedding" class="settings-secondary-btn" type="button">测试 Embedding</button>
+          <span id="cfgProbeEmbeddingStatus" class="settings-probe-status" aria-live="polite"></span>
+        </div>
         <div class="settings-field" data-embedding-field="api_key">
           <label for="cfgEmbeddingApiKey">Embedding API Key</label>
           <input id="cfgEmbeddingApiKey" type="password" autocomplete="off" placeholder="sk-...">

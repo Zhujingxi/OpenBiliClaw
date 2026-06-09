@@ -21,6 +21,7 @@
       interestProbeRespond: "/interest-probes/respond",
       avoidanceProbeRespond: "/avoidance-probes/respond",
       sourceShareSuggestion: "/config/source-share-suggestion",
+      configProbe: "/config/probe-service",
       config: "/config?reveal_keys=true",
       watchLater: "/watch-later",
       favorites: "/favorites",
@@ -3954,6 +3955,76 @@
       };
     }
 
+    function formatProbeResult(result) {
+      const ok = Boolean(result?.ok);
+      const provider = result?.provider ? ` ${result.provider}` : "";
+      const model = result?.model ? ` / ${result.model}` : "";
+      const latency = Number.isFinite(Number(result?.latency_ms)) && Number(result.latency_ms) > 0
+        ? ` (${Math.round(Number(result.latency_ms))}ms)`
+        : "";
+      const detail = result?.message || result?.error || (ok ? "服务可用" : "服务不可用");
+      return `${ok ? "可用" : "不可用"}${provider}${model}${latency}: ${detail}`;
+    }
+
+    async function probeConfigService(kind, config) {
+      return await requestJsonStrict(ENDPOINTS.configProbe, {
+        method: "POST",
+        timeoutMs: 35000,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind, config })
+      });
+    }
+
+    function renderProbeResult(statusEl, result) {
+      if (!statusEl) return;
+      statusEl.dataset.tone = result?.ok ? "success" : "error";
+      statusEl.textContent = formatProbeResult(result);
+      const configStatus = $("#configStatus");
+      if (configStatus) configStatus.value = formatProbeResult(result);
+    }
+
+    function renderProbePending(statusEl, label) {
+      if (!statusEl) return;
+      statusEl.dataset.tone = "pending";
+      statusEl.textContent = `${label} 探测中…`;
+    }
+
+    async function runLlmConfigProbe() {
+      const button = $("#probeLlm");
+      const statusEl = $("#probeLlmStatus");
+      if (button) button.disabled = true;
+      renderProbePending(statusEl, "LLM");
+      try {
+        const result = await probeConfigService("llm", buildConfigUpdate());
+        renderProbeResult(statusEl, result);
+      } catch (error) {
+        renderProbeResult(statusEl, {
+          ok: false,
+          error: configErrorMessage(error?.details) || error?.message || "LLM 探测失败"
+        });
+      } finally {
+        if (button) button.disabled = false;
+      }
+    }
+
+    async function runEmbeddingConfigProbe() {
+      const button = $("#probeEmbedding");
+      const statusEl = $("#probeEmbeddingStatus");
+      if (button) button.disabled = true;
+      renderProbePending(statusEl, "Embedding");
+      try {
+        const result = await probeConfigService("embedding", buildConfigUpdate());
+        renderProbeResult(statusEl, result);
+      } catch (error) {
+        renderProbeResult(statusEl, {
+          ok: false,
+          error: configErrorMessage(error?.details) || error?.message || "Embedding 探测失败"
+        });
+      } finally {
+        if (button) button.disabled = false;
+      }
+    }
+
     document.addEventListener("click", (event) => {
       const closeId = event.target?.dataset?.close;
       if (closeId) closePanel(closeId);
@@ -4087,6 +4158,8 @@
     safeBind("#llmProvider", "change", () => applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), default_provider: $("#llmProvider")?.value || "" } }));
     safeBind("#llmFallbackProvider", "change", () => applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), fallback_provider: $("#llmFallbackProvider")?.value || "" } }));
     safeBind("#embeddingFallbackProvider", "change", () => applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), embedding: { ...(state.config?.llm?.embedding || {}), fallback_provider: $("#embeddingFallbackProvider")?.value || "" } } }));
+    safeBind("#probeLlm", "click", () => { void runLlmConfigProbe(); });
+    safeBind("#probeEmbedding", "click", () => { void runEmbeddingConfigProbe(); });
     lanAuthControl = initLanAuthControl();
     bootAutostartControl = initBootAutostartControl();
     safeBind("#suggestSharesBtn", "click", async () => {
