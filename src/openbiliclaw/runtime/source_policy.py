@@ -15,7 +15,7 @@ DEFAULT_SOURCE_ENABLED = {
     "twitter": False,
 }
 DEFAULT_POOL_SOURCE_SHARES = {
-    "bilibili": 8,
+    "bilibili": 5,
     "xiaohongshu": 1,
     "douyin": 1,
     "youtube": 1,

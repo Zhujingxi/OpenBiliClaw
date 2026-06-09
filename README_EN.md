@@ -581,7 +581,7 @@ Four Bilibili strategies work in coordination, each with independent API quota, 
 
 **Unified evaluation** — every source first writes raw candidates to `discovery_candidates`. The backend then claims mixed-source batches and scores them with the Soul profile plus recent negative examples. The "will this user like it?" judgment lives in this shared evaluator, not inside each platform producer.
 
-**Diversity selection** — accepted results then pass through platform-quota reservation → topic dedup → style balancing → **cross-platform interleaving** → count caps, so recommendations never become "all AI all day". Saved platform shares default to Bilibili / Xiaohongshu / Douyin / YouTube / X = 8 / 1 / 1 / 1 / 1, configurable via `[scheduler.pool_source_shares]`; out of the box only Bilibili is enabled and the others must be turned on explicitly.
+**Diversity selection** — accepted results then pass through platform-quota reservation → topic dedup → style balancing → **cross-platform interleaving** → count caps, so recommendations never become "all AI all day". Saved platform shares default to Bilibili / Xiaohongshu / Douyin / YouTube / X = 5 / 1 / 1 / 1 / 1, configurable via `[scheduler.pool_source_shares]`; out of the box only Bilibili is enabled and the others must be turned on explicitly.
 
 **Pool counts** — the "swappable" number in the UI only counts `pool_available_count`: candidates with ready copy, a category and an openable link, and no recent-view conflict. Material still being prepared counts as `pool_pending_count`; `pool_pending_eval_count` / `pool_evaluated_pending_count` split out the not-yet-scored and scored-but-not-admitted stages. The extension / Mobile Web / Desktop Web never present pending material as swappable.
 

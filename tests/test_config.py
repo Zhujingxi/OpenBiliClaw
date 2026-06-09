@@ -101,7 +101,7 @@ class TestConfigDefaults:
         config = Config()
 
         assert config.scheduler.pool_source_shares == {
-            "bilibili": 8,
+            "bilibili": 5,
             "xiaohongshu": 1,
             "douyin": 1,
             "youtube": 1,

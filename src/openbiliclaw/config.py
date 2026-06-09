@@ -40,7 +40,7 @@ _MAX_LLM_CONCURRENCY = 16
 _DEFAULT_LLM_TIMEOUT = 300
 _MIN_LLM_TIMEOUT = 10
 _DEFAULT_POOL_SOURCE_SHARES = {
-    "bilibili": 8,
+    "bilibili": 5,
     "xiaohongshu": 1,
     "douyin": 1,
     "youtube": 1,

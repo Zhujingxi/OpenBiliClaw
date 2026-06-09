@@ -45,7 +45,7 @@ _COVER_PREFETCH_RECENT_HOURS = 12
 _COVER_PREFETCH_SCAN = 300
 _COVER_PREFETCH_MAX_FETCH = 40
 _DEFAULT_PLATFORM_SOURCE_SHARES: dict[str, int] = {
-    "bilibili": 8,
+    "bilibili": 5,
 }
 _PLATFORM_SOURCE_ORDER = ("bilibili", "xiaohongshu", "douyin", "youtube", "twitter")
 _BILIBILI_DISCOVERY_SOURCES = ("search", "related_chain", "trending", "explore")
