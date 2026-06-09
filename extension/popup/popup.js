@@ -156,6 +156,7 @@ let manualRefreshInFlight = false;
 let activityFeedRefreshTimer = null;
 let activityFeedRefreshInFlight = false;
 let activityFeedRefreshPending = false;
+let hasRuntimeStreamConnected = false;
 
 const elements = {
   content: document.querySelector(".content"),
@@ -1370,9 +1371,12 @@ function connectRuntimeStream() {
       if (!state.online) {
         state.online = true;
         setStatus(true);
-        setHint("后端重新连上了，正在刷新。", "success");
-        scheduleRecommendationsRefresh({ delayMs: 0 });
+        if (hasRuntimeStreamConnected) {
+          setHint("后端重新连上了，正在刷新。", "success");
+          scheduleRecommendationsRefresh({ delayMs: 0 });
+        }
       }
+      hasRuntimeStreamConnected = true;
     },
     onDisconnect() {
       if (state.online) {

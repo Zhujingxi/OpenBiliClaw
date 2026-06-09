@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from openbiliclaw import __version__
 from openbiliclaw.api.app import create_app
 
 
@@ -44,6 +45,19 @@ def _isolate_runtime_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
 
 class TestBackendAPI:
     """Route-level tests for the plugin backend API."""
+
+    def test_desktop_web_index_cache_busts_static_assets(self) -> None:
+        from fastapi.testclient import TestClient
+
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+        client = TestClient(app)
+
+        response = client.get("/web")
+
+        assert response.status_code == 200
+        assert response.headers.get("cache-control") == "no-store"
+        assert 'href="/web/assets/css/app.css?v=' in response.text
+        assert 'src="/web/assets/js/app.js?v=' in response.text
 
     @pytest.mark.asyncio
     async def test_runtime_context_presence_survives_rebuild(
@@ -875,6 +889,53 @@ class TestBackendAPI:
 
         assert app_module._detect_lan_ip() == "192.168.31.98"
 
+    def test_windows_interface_ipv4_probe_hides_ipconfig_console(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        from openbiliclaw.api import app as app_module
+
+        calls: list[dict[str, object]] = []
+
+        def _fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append({"command": command, **kwargs})
+            return SimpleNamespace(
+                returncode=0,
+                stdout="IPv4 Address . . . . . . . . . . : 192.168.1.7",
+            )
+
+        monkeypatch.setattr(app_module.os, "name", "nt")
+        monkeypatch.setattr(app_module.subprocess, "run", _fake_run)
+        monkeypatch.setattr(app_module.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+
+        assert app_module._interface_ipv4_candidates() == ["192.168.1.7"]
+
+        assert calls
+        assert calls[0]["command"] == ["ipconfig"]
+        assert calls[0]["creationflags"] == subprocess.CREATE_NO_WINDOW
+
+    def test_health_endpoint_caches_lan_ip_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.api import app as app_module
+
+        calls = 0
+
+        def _fake_detect_lan_ip() -> str:
+            nonlocal calls
+            calls += 1
+            return "192.168.1.7"
+
+        monkeypatch.setattr(app_module, "_detect_lan_ip", _fake_detect_lan_ip)
+
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+        client = TestClient(app)
+
+        assert client.get("/api/health").json()["lan_ip"] == "192.168.1.7"
+        assert client.get("/api/health").json()["lan_ip"] == "192.168.1.7"
+        assert calls == 1
+
     def test_bilibili_cookie_endpoint_persists_and_validates(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -1496,7 +1557,7 @@ class TestBackendAPI:
             "last_account_sync_at": "2026-03-14T18:00:00+00:00",
             "last_account_sync_error": "",
             "auto_update_enabled": False,
-            "current_version": "0.3.103",
+            "current_version": __version__,
             "latest_remote_version": "",
             "last_update_check_at": "",
             "last_update_error": "",

@@ -5,12 +5,14 @@ import {
   appendRecommendations,
   cacheConfigSnapshot,
   applyBackendUpdate,
+  checkBackendStatus,
   checkBackendUpdate,
   fetchPendingDelight,
   fetchActivityFeed,
   fetchChatTurn,
   fetchChatTurns,
   fetchConfig,
+  fetchHealth,
   fetchProfileSummary,
   fetchSourceShareSuggestion,
   fetchUpdateStatus,
@@ -21,8 +23,58 @@ import {
   respondToAvoidanceProbe,
   startChatTurn,
   updateConfig,
+  __resetPopupHealthCacheForTests,
 } from "../popup/popup-api.js";
 import { __resetBackendEndpointForTests } from "../popup/popup-backend-config.js";
+
+test("health helpers coalesce concurrent popup probes", async () => {
+  __resetPopupHealthCacheForTests();
+  const calls: Array<{ url: string; options: RequestInit }> = [];
+  globalThis.fetch = (async (url: string, options: RequestInit = {}) => {
+    calls.push({ url, options });
+    return {
+      ok: true,
+      async json() {
+        return { status: "ok", service: "openbiliclaw-api", embedding_ready: true };
+      },
+    };
+  }) as unknown as typeof fetch;
+
+  const [health, online, healthAgain] = await Promise.all([
+    fetchHealth(),
+    checkBackendStatus(),
+    fetchHealth(),
+  ]);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "http://127.0.0.1:8420/api/health");
+  assert.deepEqual(health, { status: "ok", service: "openbiliclaw-api", embedding_ready: true });
+  assert.equal(online, true);
+  assert.deepEqual(healthAgain, health);
+});
+
+test("health helpers reuse a fresh popup health result", async () => {
+  __resetPopupHealthCacheForTests();
+  const calls: Array<{ url: string; options: RequestInit }> = [];
+  globalThis.fetch = (async (url: string, options: RequestInit = {}) => {
+    calls.push({ url, options });
+    return {
+      ok: true,
+      async json() {
+        return { status: "ok", service: "openbiliclaw-api", embedding_ready: false };
+      },
+    };
+  }) as unknown as typeof fetch;
+
+  const health = await fetchHealth();
+  const online = await checkBackendStatus();
+  const secondHealth = await fetchHealth();
+
+  assert.equal(calls.length, 1);
+  assert.equal(health?.embedding_ready, false);
+  assert.equal(online, true);
+  assert.deepEqual(secondHealth, health);
+});
 
 test("reshuffleRecommendations posts to reshuffle endpoint", async () => {
   const calls = [];

@@ -476,11 +476,7 @@ def _view_runtime_logs(log_path: Path) -> None:
     Windows + macOS); fall back to opening the log file in the default app."""
     try:
         if os.name == "nt":
-            ps_cmd = f"Get-Content -LiteralPath '{log_path}' -Wait -Tail 200"
-            subprocess.Popen(  # noqa: S603
-                ["powershell", "-NoExit", "-NoProfile", "-Command", ps_cmd],
-                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
-            )
+            _open_in_default_app(log_path)
             return
         if sys.platform == "darwin":
             # Live-tail in Terminal by opening a tiny .command as a *document*
@@ -691,14 +687,23 @@ def main() -> None:
     # only record is raw stdout in desktop.log, which is harder to triage and can
     # mojibake. Best-effort: the stdout→desktop.log redirect remains the fallback.
     # sweep_unmanaged=False so it won't truncate the live desktop.log mid-run.
+    runtime_config = None
     with suppress(Exception):
         from openbiliclaw.config import load_config
         from openbiliclaw.logging_setup import configure_logging
 
-        configure_logging(load_config(), sweep_unmanaged=False)
+        runtime_config = load_config()
+        configure_logging(runtime_config, sweep_unmanaged=False)
 
-    host = os.environ.get("OPENBILICLAW_HOST", "127.0.0.1")
-    port = int(os.environ.get("OPENBILICLAW_PORT", "8420"))
+    default_host = "127.0.0.1"
+    default_port = 8420
+    if runtime_config is not None:
+        default_host = str(
+            getattr(runtime_config.api, "host", default_host) or default_host
+        ).strip()
+        default_port = int(getattr(runtime_config.api, "port", default_port) or default_port)
+    host = os.environ.get("OPENBILICLAW_HOST", "").strip() or default_host
+    port = int(os.environ.get("OPENBILICLAW_PORT", "").strip() or str(default_port))
 
     from openbiliclaw.api.app import create_app
 
@@ -753,10 +758,12 @@ def main() -> None:
     import uvicorn
 
     app = create_app()
-    config = uvicorn.Config(app, host=host, port=port, log_level="info")
+    use_tray = _should_use_tray()
+    config_kwargs = {"access_log": False} if use_tray else {}
+    config = uvicorn.Config(app, host=host, port=port, log_level="info", **config_kwargs)
     server = uvicorn.Server(config)
 
-    if _should_use_tray():
+    if use_tray:
         # Windowed build: uvicorn runs in the background and a tray icon owns the
         # foreground (Windows system tray / macOS menu bar). No console window
         # appears; closing nothing stops it — only the tray menu's "退出" quits.

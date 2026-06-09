@@ -3,6 +3,14 @@ import { getBackendBaseUrl } from "./popup-backend-config.js";
 
 export const CONFIG_CACHE_KEY = "openbiliclaw.config_cache";
 export const CONFIG_PUT_TIMEOUT_MS = 60_000;
+const HEALTH_SUCCESS_CACHE_TTL_MS = 3_000;
+const HEALTH_FAILURE_CACHE_TTL_MS = 1_000;
+
+let healthCacheBaseUrl = "";
+let healthCacheCheckedAt = 0;
+let healthCacheHasValue = false;
+let healthCachePayload = null;
+let healthProbeInFlight = null;
 
 function abortError(message = "Request aborted") {
   if (typeof DOMException === "function") {
@@ -129,27 +137,59 @@ export async function readCachedConfigSnapshot() {
 }
 
 export async function checkBackendStatus() {
-  try {
-    const backendUrl = await getBackendBaseUrl();
-    const response = await fetch(`${backendUrl}/health`, { method: "GET" });
-    return response.ok;
-  } catch {
-    return false;
-  }
+  return (await fetchHealth()) !== null;
 }
 
 // Full /health payload (status, profile_ready, embedding_ready, ...).
 // Returns null when the backend is unreachable so callers can no-op
 // instead of throwing on startup.
 export async function fetchHealth() {
-  try {
-    const backendUrl = await getBackendBaseUrl();
-    const response = await fetch(`${backendUrl}/health`, { method: "GET" });
-    if (!response.ok) return null;
-    return await response.json();
-  } catch {
-    return null;
+  const backendUrl = await getBackendBaseUrl();
+  const now = Date.now();
+  const cacheTtlMs =
+    healthCachePayload === null ? HEALTH_FAILURE_CACHE_TTL_MS : HEALTH_SUCCESS_CACHE_TTL_MS;
+  if (
+    healthCacheHasValue &&
+    healthCacheBaseUrl === backendUrl &&
+    now - healthCacheCheckedAt < cacheTtlMs
+  ) {
+    return healthCachePayload;
   }
+  if (healthProbeInFlight && healthProbeInFlight.baseUrl === backendUrl) {
+    return healthProbeInFlight.promise;
+  }
+
+  const promise = (async () => {
+    try {
+      const response = await fetch(`${backendUrl}/health`, { method: "GET" });
+      if (!response.ok) return null;
+      return await response.json();
+    } catch {
+      return null;
+    }
+  })()
+    .then((payload) => {
+      healthCacheBaseUrl = backendUrl;
+      healthCacheCheckedAt = Date.now();
+      healthCacheHasValue = true;
+      healthCachePayload = payload;
+      return payload;
+    })
+    .finally(() => {
+      if (healthProbeInFlight?.promise === promise) {
+        healthProbeInFlight = null;
+      }
+    });
+  healthProbeInFlight = { baseUrl: backendUrl, promise };
+  return promise;
+}
+
+export function __resetPopupHealthCacheForTests() {
+  healthCacheBaseUrl = "";
+  healthCacheCheckedAt = 0;
+  healthCacheHasValue = false;
+  healthCachePayload = null;
+  healthProbeInFlight = null;
 }
 
 export async function fetchRecommendations() {

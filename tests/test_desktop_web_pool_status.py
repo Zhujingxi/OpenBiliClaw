@@ -64,3 +64,37 @@ def test_desktop_web_shows_github_star_cta() -> None:
     assert "https://api.github.com/repos/${STAR_REPO_SLUG}" in app_js
     assert "openbiliclaw.webui.starCount" in app_js
     assert "bindStarButton();" in app_js
+
+
+def test_desktop_delight_cover_loads_with_first_view_priority() -> None:
+    """The first-view delight image should not wait for native lazy loading."""
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    match = re.search(
+        r"function renderDelightCover\(delight\) \{(?P<body>.*?)\n    \}",
+        app_js,
+        flags=re.S,
+    )
+    assert match is not None, "renderDelightCover not found"
+    body = match.group("body")
+    assert 'image.loading = "eager";' in body
+    assert 'image.fetchPriority = "high";' in body
+    assert 'image.decoding = "async";' in body
+
+
+def test_desktop_append_more_renders_before_cover_decode() -> None:
+    """Appending recommendations must not block on cover decode/network misses."""
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    match = re.search(
+        r"async function appendMore\(\) \{(?P<body>.*?)\n    \}",
+        app_js,
+        flags=re.S,
+    )
+    assert match is not None, "appendMore not found"
+    body = match.group("body")
+    render_index = body.index("state.videos = state.videos.concat(freshItems);")
+    warm_index = body.index("warmCoverImages(freshItems")
+    assert render_index < warm_index
+    assert "await warmCoverImages(freshItems" not in body
+    assert "void warmCoverImages(freshItems" in body

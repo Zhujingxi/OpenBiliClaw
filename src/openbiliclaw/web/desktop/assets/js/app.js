@@ -2650,11 +2650,11 @@
       const payload = await requestJson(ENDPOINTS.append, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ excluded_bvids: state.videos.map((v) => v.bvid) }) });
       if (payload?.items?.length) {
         const freshItems = normalizeRecommendationList(payload.items);
-        // Preload + decode the new covers before re-rendering so they appear
-        // without the placeholder flash.
-        await warmCoverImages(freshItems, { waitForDecode: true });
         state.videos = state.videos.concat(freshItems);
         renderAll();
+        // Keep decoding off the interaction path: slow first-miss covers should
+        // not delay the new recommendation cards from appearing.
+        void warmCoverImages(freshItems, { waitForDecode: true }).catch(() => {});
         showToast(freshItems.length ? "已加载更多推荐" : "后端返回的内容都已反馈过");
       } else {
         showToast("加载更多失败：后端没有返回新候选");
@@ -2965,10 +2965,12 @@
       if (!url) return;
       const image = document.createElement("img");
       if (isCrossOriginBase()) image.crossOrigin = "anonymous";
-      image.src = url;
       image.alt = "";
-      image.loading = "lazy";
+      image.loading = "eager";
+      image.fetchPriority = "high";
+      image.decoding = "async";
       image.referrerPolicy = "no-referrer";
+      image.src = url;
       image.addEventListener("error", () => {
         image.remove();
         thumb.classList.remove("has-image");

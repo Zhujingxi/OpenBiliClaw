@@ -363,17 +363,58 @@ async def test_serve_zero_candidates_warning_includes_readiness_counts(
         )
         engine = RecommendationEngine(llm=_DummyLLM(), database=db)
 
-        caplog.set_level(logging.WARNING)
-        result = await engine.serve(
-            _build_profile(),
-            limit=1,
-            excluded_bvids=frozenset({"BV1READY"}),
+        try:
+            caplog.set_level(logging.WARNING)
+            result = await engine.serve(
+                _build_profile(),
+                limit=1,
+                excluded_bvids=frozenset({"BV1READY"}),
+            )
+
+            assert result == []
+            assert "raw=1" in caplog.text
+            assert "servable=1" in caplog.text
+            assert "pending=0" in caplog.text
+        finally:
+            db.close()
+
+
+@pytest.mark.asyncio
+async def test_serve_empty_after_exclusions_skips_curator_context() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(
+            db,
+            "BV1READY",
+            title="宸茬粡鍦ㄦ睜瀛愰噷",
+            source="search",
+            relevance_score=0.9,
         )
 
+        class ExplodingCurator:
+            def build_context(self) -> object:
+                raise AssertionError("empty candidate batch should return before curator")
+
+            def score_candidates(self, candidates: object, context: object) -> dict[str, float]:
+                raise AssertionError("empty candidate batch should return before scoring")
+
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            curator=ExplodingCurator(),  # type: ignore[arg-type]
+        )
+
+        try:
+            result = await engine.serve(
+                _build_profile(),
+                limit=1,
+                excluded_bvids=frozenset({"BV1READY"}),
+            )
+        finally:
+            db.close()
+
         assert result == []
-        assert "raw=1" in caplog.text
-        assert "servable=1" in caplog.text
-        assert "pending=0" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -924,6 +965,7 @@ async def test_reshuffle_recommendations_uses_pool_reason_without_waiting_expres
         history = db.get_recommendations(limit=10)
         assert history[0]["expression"] == "这条会接住你最近想把地缘链路顺清楚的状态。"
         assert history[0]["topic"] == "你最近那股想把地缘链路顺清楚的状态"
+        db.close()
 
 
 @pytest.mark.asyncio
@@ -975,6 +1017,7 @@ async def test_append_recommendations_skips_excluded_bvids() -> None:
         history = db.get_recommendations(limit=10)
         assert history[0]["expression"] == "第三条已经提前备好了推荐理由。"
         assert history[0]["topic"] == "第三条提前备好的话题"
+        db.close()
 
 
 @pytest.mark.asyncio

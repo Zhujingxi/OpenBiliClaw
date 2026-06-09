@@ -4,7 +4,7 @@
 
 ---
 
-## v0.3.103 / extension v0.3.70: X（Twitter）内容源接入（2026-06-09）
+## v0.3.108 / extension v0.3.71: X（Twitter）内容源接入（2026-06-09）
 
 第六个内容源 X（Twitter）：服务端 cookie 重放发现 + 浏览器扩展互动捕获 + `init` 历史偏好回填，源健康 / 配置 / 设置页全链路与既有源对齐。
 
@@ -16,12 +16,26 @@
 - 修复设置页 X 开关：`PUT /api/config` 之前静默丢弃 `sources.twitter`、`GET /api/config` 也不返回它 → 设置页开关存不下、刷新即丢；现补齐 `TwitterSourceConfigOut` + `update_config` 的 twitter 分支，X 启用开关与候选池 X 占比端到端持久化。
 - 配置：`config.toml` 的 `[sources.twitter]`（enabled / mode / cookie_env / 预算 / 间隔）与 `[scheduler.pool_source_shares].twitter` 全链路读写；`init` 平台清单纳入 twitter。
 
+## v0.3.104 / extension v0.3.69: Windows 安装包版本元数据修复（2026-06-09）
+
+- 修复 Windows 安装包 / 主程序版本属性不完整：`OpenBiliClaw.exe` 现在由 PyInstaller 写入 `FileVersion` / `ProductVersion` / `OriginalFilename` 等 VERSIONINFO 资源，Windows 资源管理器、任务管理器和诊断脚本都能看到正确版本。
+- 修复 Inno Setup 安装器自身 `FileVersion` 为空的问题：CI 会传入纯数字四段 `VersionInfoVersion`，同时保留展示用 `ProductVersion` / `DisplayVersion`，带 commit stamp 的手动 artifact 也不会写坏 PE 数值版本。
+- `release-desktop.yml` 与手动 `build-installers.yml` 均同步传递版本元数据，避免自动发布包和手动构建包版本显示不一致。
+
+## v0.3.103 / extension v0.3.69: 桌面安装包运行体验修复（2026-06-09）
+
+- 修复 Windows 桌面安装包推荐流在低库存 / 空库存时的卡顿与“突然整批换内容”：`/api/recommendations/reshuffle` 与 `/append` 在可用池为 0 时立即返回空列表，并通过后台任务 + 30 秒防抖触发补货，不再让用户滚动交互等待补货链路。
+- 修复桌面 Web 图片加载慢：追加推荐卡片先渲染，再异步预热封面；首屏 delight 封面改为 eager/high priority/async decode，避免原生 lazy loading 拖慢第一屏观感。
+- 修复安装包升级后仍像“没更新”的静态资源缓存问题：`/web` 与 `/web/` 动态注入 CSS/JS `?v=` 指纹，并返回 `Cache-Control: no-store`，确保新安装包打开的是新前端代码。
+- 补充回归测试覆盖空池补货、推荐引擎空候选短路、桌面 Web 图片加载优先级与静态资源 cache-bust；桌面安装包由 `desktop-v0.3.103` tag 触发自动发布。
+
 ## v0.3.102 / extension v0.3.69: 图形化引导初始化（GUI guided init）（2026-06-07）
 
 - 统一桌面安装包与 AI / 脚本安装的用户数据目录：打包版默认改用 `~/OpenBiliClaw` / `%USERPROFILE%\OpenBiliClaw`，与一键安装共用 `config.toml`、`data/`、`logs/`；旧安装包写在 `~/Library/Application Support/OpenBiliClaw` / `%LOCALAPPDATA%\OpenBiliClaw` 的数据会在首启时非覆盖拷贝到统一目录。若用户先运行安装包、后运行一键脚本，脚本现在能在已有用户数据目录里补齐源码 checkout，不再因目录非空失败。
 - README 用户交流群区块新增微信用户群二维码入口，并保留原 QQ 群二维码，方便用户按常用平台加入社区。
 - PC Web 顶部新增 GitHub Star 强引导：复用插件的 GitHub-Buttons 风格，显示“好用求 Star”入口并缓存实时 star 数，点击跳转项目仓库。
 - 新增 Chrome Web Store 商店页文案源 `docs/chrome-webstore-listing.md`：补齐项目主页、GitHub 项目页、Releases / AI 部署说明、插件安装使用步骤、后端依赖、本地优先隐私说明和提交前检查清单；`docs/index.md` 与插件模块文档同步挂入口，避免商店公开页只剩短概述、缺少安装和使用引导。
+- 修复桌面安装包入口忽略 `config.toml [api].host` / `[api].port` 的问题：打包版现在与 `openbiliclaw start` 一样默认按配置监听（默认 `0.0.0.0:8420`，手机 `/m/` 可达），仍保留 `OPENBILICLAW_HOST` / `OPENBILICLAW_PORT` 作为显式环境变量覆盖。
 - 抽出共享异步初始化流水线 `cli.run_guided_init`：`openbiliclaw init` 的四阶段（拉取 + 入库 / 分析偏好 / 生成画像 ‖ 发现补池）原先内联在 CLI 命令里、被四处独立 `asyncio.run` 包着，无法被后端复用。现在合并为一个协程，CLI 用单次 `asyncio.run(run_guided_init(...))` 驱动、后端在服务事件循环里直接 `await`，互不嵌套 loop。bootstrap 采集器仍是同步实现但改走 `asyncio.to_thread`，不冻结 API loop；唯一与路径相关的发现补池步骤以 `discover_backfill` 注入（CLI 传一次性引擎、后端传持锁的 `controller.run_init_backfill`）。CLI 行为 / 输出 / 退出码零回归。
 - 新增 `InitCoordinator`（`runtime/init_coordinator.py`）+ `init_runs` 持久化状态机（`storage/database.py`）：单飞启动用 `BEGIN IMMEDIATE` CAS 预定（TOCTOU 收口在 DB），单写者串行化状态写入 + 进度事件（`_write_lock` 保证并行 stage 3/4 的 `sequence` 不丢更新），协作式取消，启动 reconcile 把崩溃残留的 `starting/running` 行判失败，避免 `/api/init-status` 永远报 running。
 - 新增 `GET /api/init-status`：权威进度 + 前置清单（B站登录 / LLM / embedding / 已启用平台 + `is_profile_ready`），远程可读、降级可读、远程 `can_manage=false`；前置探测 `InitPrereqs`（`runtime/init_prereqs.py`）TTL 缓存 + 单飞，避免轮询打爆 chat provider / `validate_cookie`。LLM / embedding 改为严格真实探测：各发一次最小真实请求，超时 / 失败一律判未就绪（不再乐观放行 —— 让“状态检查通过”真正代表服务可用），成功 / 失败分别用长 / 短 TTL 缓存（修好后能快速复检），probe 全程经 `asyncio.gather` 并发以压低首检延迟。

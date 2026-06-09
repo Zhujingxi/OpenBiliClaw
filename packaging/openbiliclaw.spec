@@ -18,6 +18,11 @@ from PyInstaller.utils.hooks import collect_all
 block_cipher = None
 project_root = Path(SPECPATH).parent
 bundle_version = os.environ.get("OPENBILICLAW_BUNDLE_VERSION", "0.2.0")
+version_file = (
+    os.environ.get("OPENBILICLAW_WINDOWS_VERSION_FILE")
+    if platform.system() == "Windows"
+    else None
+)
 
 # --- Optional X (Twitter) discovery extra (openbiliclaw[x]) ---
 # packaging/build.py installs the `x` extra and sets OPENBILICLAW_BUNDLE_X=1 when
@@ -224,6 +229,7 @@ exe = EXE(
     # tray menu. macOS already runs windowed via the .app bundle below.
     console=False,
     icon=None,  # TODO: add icon -- packaging/icon.ico (Windows) / packaging/icon.icns (macOS)
+    version=version_file,
 )
 
 _coll_targets = [exe]
