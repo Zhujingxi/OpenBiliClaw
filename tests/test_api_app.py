@@ -705,6 +705,28 @@ class TestBackendAPI:
         assert body["status"] == "ok"
         assert body["service"] == "openbiliclaw-api"
 
+    def test_sources_status_returns_every_source(self) -> None:
+        """Unified /api/sources/status reports a status item per source."""
+        from fastapi.testclient import TestClient
+
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+        client = TestClient(app)
+
+        response = client.get("/api/sources/status")
+
+        assert response.status_code == 200
+        body = response.json()
+        # One status item per source, each with the unified shape.
+        for key in ("bilibili", "xiaohongshu", "douyin", "youtube", "twitter"):
+            assert key in body, f"{key} missing from sources status"
+            item = body[key]
+            assert set(item) >= {"enabled", "state", "detail", "logged_in"}
+            assert isinstance(item["enabled"], bool)
+            assert isinstance(item["state"], str) and item["state"]
+        # YouTube needs no login -> always no_auth.
+        assert body["youtube"]["state"] == "no_auth"
+        assert body["youtube"]["logged_in"] is True
+
     def test_favicon_endpoint_serves_mobile_web_icon(self) -> None:
         from fastapi.testclient import TestClient
 

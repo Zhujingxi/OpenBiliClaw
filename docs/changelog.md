@@ -15,6 +15,8 @@
 - 修复 X 源健康恢复死锁：`missing_cookie` / `expired_cookie` / `blocked` 这类 re-login 状态原本无法自动恢复（`is_ready()` 会永久 park 住 producer），现 `/api/sources/x/cookie` 收到有效 cookie 即调 `XSourceHealthStore.clear_relogin_block()` 解封——cookie 过期重登后发现能自动续上。
 - 修复设置页 X 开关：`PUT /api/config` 之前静默丢弃 `sources.twitter`、`GET /api/config` 也不返回它 → 设置页开关存不下、刷新即丢；现补齐 `TwitterSourceConfigOut` + `update_config` 的 twitter 分支，X 启用开关与候选池 X 占比端到端持久化。
 - 配置：`config.toml` 的 `[sources.twitter]`（enabled / mode / cookie_env / 预算 / 间隔）与 `[scheduler.pool_source_shares].twitter` 全链路读写；`init` 平台清单纳入 twitter。
+- 桌面 Web 设置页与插件设置页对齐：补齐此前只在插件暴露的配置项——模型 tab 的 `llm.concurrency` 与 DeepSeek `reasoning_effort`；平台源 tab 的完整 X(Twitter) 源块 + `GET /api/sources/x/status` 源健康提示、YouTube `min_interval_minutes`、候选池 X 占比；调度 tab 的 9 个真实 runtime 参数（断开宽限 / 刷新轮询 / 行为触发阈值 / 反馈积累阈值 / 热门 + 探索刷新小时 / 单轮发现上限 / 主动推送轮询 / 猜测器空闲检查）；通用 tab 的局域网访问密码与开机自启（复用 `/auth/admin`、`/autostart/apply`，桌面 Web 同源 loopback 视为可信本机）。同时移除桌面 Web 仍残留、runtime 已不消费的 `discovery_cron` 旧字段，与插件保持一致（后端 `[scheduler].discovery_cron` 兼容字段保留）。
+- 新增统一来源接入状态：新后端端点 `GET /api/sources/status` 用纯本地信号（B站 cookie 登录字段、抖音 cookie 文件/环境变量、带 `xsec_token` 的小红书缓存条数、X 实时健康存储）给每个来源给出一致的登录 / cookie 状态，不发任何对外平台请求。桌面 Web 设置页平台源 tab 顶部新增「来源接入状态」彩点列表，插件设置页每张来源卡片也加上同款状态行——五个来源（B站 / 小红书 / 抖音 / YouTube / X）现在都像原来只有 X 那样直观展示登录态。诚实标注：只有 X 是实时校验的「正常」，其余按本地 cookie/令牌是否就绪显示「就绪 / 未配置」，YouTube 标「公开源 · 无需登录」。
 
 ## v0.3.104 / extension v0.3.69: Windows 安装包版本元数据修复（2026-06-09）
 

@@ -88,6 +88,8 @@ from openbiliclaw.api.models import (
     SourcesConfigOut,
     SourceShareSuggestionIn,
     SourceShareSuggestionResponse,
+    SourcesStatusResponse,
+    SourceStatusItem,
     StorageConfigOut,
     TwitterSourceConfigOut,
     UpdateApplyIn,
@@ -5558,6 +5560,152 @@ def create_app(
             updated_at=str(health.get("updated_at", "")),
         )
 
+    # Human-readable detail for each X (twitter) health state, reused by the
+    # unified /api/sources/status chip below.
+    _x_state_detail = {
+        "ok": "X 来源正常，cookie 有效。",
+        "missing_cookie": "未检测到登录 —— 在浏览器登录 x.com，插件会自动同步 cookie。",
+        "expired_cookie": "cookie 已过期 —— 请重新登录 x.com。",
+        "rate_limited": "被限流，正在退避冷却中，稍后会自动重试。",
+        "blocked": "请求被拒绝 (403) —— 账号可能受限或需要重新验证。",
+    }
+
+    @app.get("/api/sources/status", response_model=SourcesStatusResponse)
+    def sources_status() -> SourcesStatusResponse:
+        """Unified per-source login / cookie readiness for the settings pages.
+
+        Local-only: each source's state is derived from config cookie fields,
+        the Douyin cookie file/env, the count of token-bearing 小红书 cache
+        rows, and the X health store — no outbound platform requests. See
+        :class:`SourcesStatusResponse`. ``ready`` means a credential is present
+        and structurally valid (not live-validated); only X reports a真正
+        live-validated ``ok``.
+        """
+        from openbiliclaw.config import load_config
+
+        cfg = load_config()
+        srcs = cfg.sources
+
+        # ── Bilibili: cookie present with the core login fields ──
+        bili_cookie = str(getattr(cfg.bilibili, "cookie", "") or "")
+        bili_enabled = bool(getattr(srcs.bilibili, "enabled", True))
+        has_fields = sum(
+            1 for f in ("SESSDATA", "bili_jct", "DedeUserID") if f"{f}=" in bili_cookie
+        )
+        if getattr(cfg.bilibili, "auth_method", "cookie") == "none":
+            bilibili = SourceStatusItem(
+                enabled=bili_enabled,
+                state="no_auth",
+                detail="未启用 B 站登录（auth_method=none）。",
+                logged_in=True,
+            )
+        elif has_fields >= 3:
+            bilibili = SourceStatusItem(
+                enabled=bili_enabled,
+                state="ready",
+                detail="Cookie 就绪（含 SESSDATA / bili_jct / DedeUserID）。",
+                logged_in=True,
+            )
+        elif bili_cookie.strip():
+            bilibili = SourceStatusItem(
+                enabled=bili_enabled,
+                state="ready",
+                detail="Cookie 已配置，但缺少部分登录字段，可能未完整登录。",
+                logged_in=True,
+            )
+        else:
+            bilibili = SourceStatusItem(
+                enabled=bili_enabled,
+                state="missing",
+                detail="未配置 Cookie —— 在浏览器登录 bilibili.com，插件会自动同步。",
+            )
+
+        # ── 小红书: token-bearing cache rows = extension is syncing tokens ──
+        xhs_enabled = bool(getattr(srcs.xiaohongshu, "enabled", False))
+        xhs_tokens = 0
+        if hasattr(ctx.database, "conn"):
+            try:
+                row = ctx.database.conn.execute(
+                    "SELECT COUNT(*) FROM content_cache "
+                    "WHERE source_platform = 'xiaohongshu' "
+                    "AND content_url LIKE '%xsec_token=%'"
+                ).fetchone()
+                xhs_tokens = int(row[0]) if row else 0
+            except Exception:  # pragma: no cover - defensive
+                xhs_tokens = 0
+        if xhs_tokens > 0:
+            xiaohongshu = SourceStatusItem(
+                enabled=xhs_enabled,
+                state="ready",
+                detail=f"访问令牌已同步（{xhs_tokens} 条带 xsec_token 的缓存内容）。",
+                logged_in=True,
+            )
+        else:
+            xiaohongshu = SourceStatusItem(
+                enabled=xhs_enabled,
+                state="missing",
+                detail="未检测到访问令牌 —— 在浏览器登录小红书后插件会自动同步。",
+            )
+
+        # ── 抖音: cookie resolvable from env / data/douyin_cookie.json ──
+        dy_enabled = bool(getattr(srcs.douyin, "enabled", False))
+        dy_cookie = ""
+        try:
+            from openbiliclaw.sources.douyin_auth import resolve_douyin_cookie
+
+            dy_cookie = resolve_douyin_cookie(
+                data_dir=cfg.data_path,
+                cookie_env=getattr(srcs.douyin, "cookie_env", "OPENBILICLAW_DOUYIN_COOKIE"),
+            )
+        except Exception:  # pragma: no cover - defensive
+            dy_cookie = ""
+        if dy_cookie.strip():
+            douyin = SourceStatusItem(
+                enabled=dy_enabled, state="ready", detail="Cookie 就绪。", logged_in=True
+            )
+        else:
+            douyin = SourceStatusItem(
+                enabled=dy_enabled,
+                state="missing",
+                detail="未配置 Cookie —— 设置环境变量，或登录抖音后由插件同步。",
+            )
+
+        # ── YouTube: public, no login required ──
+        youtube = SourceStatusItem(
+            enabled=bool(getattr(srcs.youtube, "enabled", False)),
+            state="no_auth",
+            detail="公开源 · 无需登录。",
+            logged_in=True,
+        )
+
+        # ── X (Twitter): reuse the live health store ──
+        tw_enabled = bool(getattr(srcs.twitter, "enabled", False))
+        tw_state, tw_feed_paused = "missing_cookie", False
+        if hasattr(ctx.database, "conn"):
+            from openbiliclaw.storage.x_health import XSourceHealthStore
+
+            h = XSourceHealthStore(ctx.database).get()
+            tw_state = str(h.get("state", "ok"))
+            tw_feed_paused = bool(h.get("feed_paused", False))
+        tw_detail = _x_state_detail.get(tw_state, f"X 来源状态：{tw_state}。")
+        if tw_feed_paused:
+            tw_detail += " For-You 因连续失败已自动暂停。"
+        twitter = SourceStatusItem(
+            enabled=tw_enabled,
+            state=tw_state,
+            detail=tw_detail,
+            logged_in=tw_state == "ok",
+            feed_paused=tw_feed_paused,
+        )
+
+        return SourcesStatusResponse(
+            bilibili=bilibili,
+            xiaohongshu=xiaohongshu,
+            douyin=douyin,
+            youtube=youtube,
+            twitter=twitter,
+        )
+
     # ── Douyin task queue endpoints (extension dispatcher) ──────────
     # Independent from the XHS block above by design — see
     # docs/plans/2026-05-06-douyin-bootstrap-import-design.md
@@ -6201,6 +6349,7 @@ def create_app(
                 account_sync_interval_hours=cfg.scheduler.account_sync_interval_hours,
                 refresh_check_interval_seconds=cfg.scheduler.refresh_check_interval_seconds,
                 signal_event_threshold=cfg.scheduler.signal_event_threshold,
+                feedback_batch_threshold=cfg.scheduler.feedback_batch_threshold,
                 trending_refresh_hours=cfg.scheduler.trending_refresh_hours,
                 explore_refresh_hours=cfg.scheduler.explore_refresh_hours,
                 discovery_limit=cfg.scheduler.discovery_limit,

@@ -359,6 +359,48 @@ class XStatusResponse(BaseModel):
     updated_at: str = ""
 
 
+class SourceStatusItem(BaseModel):
+    """Unified per-source login / cookie readiness (settings pages).
+
+    ``state`` is a coarse, source-agnostic status so every platform can render
+    the same chip:
+
+    - ``ok``         — credential present AND live-validated (X only, from the
+      health store).
+    - ``ready``      — credential present and structurally valid, but not
+      live-validated (B站 cookie with login fields, 抖音 cookie present, 小红书
+      access tokens synced).
+    - ``missing``    — source enabled but no usable credential.
+    - ``expired`` / ``rate_limited`` / ``blocked`` — X live-health states.
+    - ``no_auth``    — source needs no login (YouTube, public).
+
+    ``logged_in`` is a convenience flag (``state in {ok, ready, no_auth}``) so
+    the UI can pick a dot colour without re-deriving the rule.
+    """
+
+    enabled: bool = False
+    state: str = "missing"
+    detail: str = ""
+    logged_in: bool = False
+    feed_paused: bool = False
+
+
+class SourcesStatusResponse(BaseModel):
+    """Login / cookie readiness for every content source, keyed by platform.
+
+    Backs the unified status chip shown on both the desktop-Web and the
+    extension settings pages. Derived entirely from local signals (config
+    cookie fields, the X health store, the Douyin cookie file/env, and the
+    count of token-bearing 小红书 cache rows) — no outbound platform calls.
+    """
+
+    bilibili: SourceStatusItem = Field(default_factory=SourceStatusItem)
+    xiaohongshu: SourceStatusItem = Field(default_factory=SourceStatusItem)
+    douyin: SourceStatusItem = Field(default_factory=SourceStatusItem)
+    youtube: SourceStatusItem = Field(default_factory=SourceStatusItem)
+    twitter: SourceStatusItem = Field(default_factory=SourceStatusItem)
+
+
 class NotificationAckIn(BaseModel):
     """Acknowledge one browser notification delivery."""
 
@@ -844,6 +886,7 @@ class SchedulerConfigOut(BaseModel):
     account_sync_interval_hours: int = 6
     refresh_check_interval_seconds: int = 60
     signal_event_threshold: int = 6
+    feedback_batch_threshold: int = 3
     trending_refresh_hours: int = 3
     explore_refresh_hours: int = 12
     discovery_limit: int = 30

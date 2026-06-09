@@ -51,7 +51,7 @@ cp config.example.toml config.toml
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `enabled` | bool | `false` | 是否期望系统登录后自动拉起 `openbiliclaw start`。可通过插件设置页或 `openbiliclaw autostart enable/disable` 修改 |
+| `enabled` | bool | `false` | 是否期望系统登录后自动拉起 `openbiliclaw start`。可通过插件 / 桌面 Web 设置页或 `openbiliclaw autostart enable/disable` 修改 |
 | `manage_ollama` | bool | `true` | `start` 时如果检测到当前配置需要本机 Ollama，且 endpoint 是默认 `localhost:11434`，会在 Ollama 未运行时尝试后台拉起 `ollama serve`。自定义端口或远端 endpoint 只探测不拉起 |
 
 `save_config()` 默认会保留磁盘上已有的 `[autostart].enabled`，避免普通配置保存用陈旧快照覆盖用户刚从 API / CLI 改过的自启动开关。只有 `/api/autostart/apply` 和 `openbiliclaw autostart enable/disable` 会以 `autostart_authoritative=true` 权威写入该字段。
@@ -63,7 +63,7 @@ cp config.example.toml config.toml
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `default_provider` | string | `"deepseek"` | 默认 Provider：`deepseek` / `openai` / `claude` / `gemini` / `ollama` / `openrouter` / `openai_compatible` |
-| `concurrency` | int | `3` | 全局 LLM 请求并发上限。所有 `LLMService` 调用共享这个优先级队列；可在插件设置页「模型」tab 调整，合法范围为 `1..16` |
+| `concurrency` | int | `3` | 全局 LLM 请求并发上限。所有 `LLMService` 调用共享这个优先级队列；可在插件 / 桌面 Web 设置页「模型」tab 调整，合法范围为 `1..16` |
 | `fallback_enabled` | bool | `false` | 旧兼容开关；当前实际 fallback 只在 `fallback_provider` 非空时发生 |
 | `fallback_provider` | string | `""` | 第二个备选 Provider。留空 = 不 fallback；非空时只按 `default_provider → fallback_provider` 尝试，不再自动遍历其它 provider |
 
@@ -357,7 +357,7 @@ X (Twitter) discovery 配置。X 是第六个内容源，发现走**服务端 co
 | `request_interval_seconds` | int | `3` | 两次 X 请求之间的最小间隔（抗检测）；TLS 指纹由 `twitter-cli`（`curl_cffi`）负责 |
 | `min_interval_minutes` | int | `60` | `XDiscoveryProducer` 两次执行之间的最小间隔；`0` 表示每个 refresh tick 都允许检查执行 |
 
-X 源健康状态（`ok` / `missing_cookie` / `expired_cookie` / `rate_limited` / `blocked`）由 `storage/x_health.py` 持久化，按 401 / 403 / 429 分别退避，连续 For-You 失败会自动暂停 For-You 拉取，状态经 `GET /api/sources/x/status` 暴露到插件设置页。账号订阅用 `x_creator_subscriptions` 表持久化，经 `GET/POST/DELETE /api/sources/x/creators` 管理。
+X 源健康状态（`ok` / `missing_cookie` / `expired_cookie` / `rate_limited` / `blocked`）由 `storage/x_health.py` 持久化，按 401 / 403 / 429 分别退避，连续 For-You 失败会自动暂停 For-You 拉取，状态经 `GET /api/sources/x/status` 暴露到插件 / 桌面 Web 设置页。账号订阅用 `x_creator_subscriptions` 表持久化，经 `GET/POST/DELETE /api/sources/x/creators` 管理。
 
 ### `[scheduler]`
 
@@ -366,7 +366,7 @@ X 源健康状态（`ok` / `missing_cookie` / `expired_cookie` / `rate_limited` 
 | `enabled` | bool | `true` | 后台 LLM / embedding 工作总开关；插件设置页显示为「停止后台 LLM 请求」。关闭后 runtime 的刷新、补池预计算、账户同步、猜测兴趣和主动推送等 daemon-owned 后台任务都会跳过；手动 CLI / API 请求仍按显式操作执行。若候选池为空，推荐页可能暂时没有内容 |
 | `pause_on_extension_disconnect` | bool | `false` | 开启后，daemon-owned 后台 LLM / embedding 工作只在浏览器插件有 `/api/runtime-stream` 连接、或刚断开仍处于宽限窗口内时运行；离线期间不会自动补新内容 |
 | `extension_disconnect_grace_seconds` | int | `90` | 插件最后一个 `runtime-stream` 连接断开后的宽限秒数；小于等于 0 或无法解析时回退到 `90` |
-| `discovery_cron` | string | `"0 */8 * * *"` | 兼容旧配置的保留字段；当前 runtime 不消费这个 cron，发现补池由轮询、候选池缺口、行为阈值和下方策略间隔驱动 |
+| `discovery_cron` | string | `"0 */8 * * *"` | 兼容旧配置的保留字段；当前 runtime 不消费这个 cron，发现补池由轮询、候选池缺口、行为阈值和下方策略间隔驱动。插件与桌面 Web 设置页均不再暴露该字段，只能通过手改 `config.toml` 保留 |
 | `pool_target_count` | int | `300` | 前端真实可换候选目标；允许范围 `1..600`。`count_pool_candidates()`（含预生成 / 分类 / 可打开 / 最近看过过滤 / topic window）低于目标时会持续补货；达到目标时 refresh（含 `force_refresh`）返回 `pool_at_cap` 不再 discover。raw 素材库存由独立 raw ceiling `max(pool_target_count * 2, pool_target_count + 120)` 控制，不再被压成与可换目标相同 |
 | `account_sync_interval_hours` | int | `6` | 账户侧长期信号同步间隔；运行时会低频拉取 history / favorites / following |
 | `refresh_check_interval_seconds` | int | `60` | `ContinuousRefreshController` 主循环轮询间隔；小于 `15` 或无法解析时回退默认值 |

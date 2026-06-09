@@ -692,6 +692,9 @@
       setActiveSettingsPanel(panel || "models");
       showMainPage("settingsPage");
       window.scrollTo({ top: 0, behavior: "smooth" });
+      void renderSourcesStatus();
+      void lanAuthControl?.reload();
+      void bootAutostartControl?.reload();
     }
 
     // ── Saved pages: 稍后再看 (watch-later) & 收藏 (favorites) ──────
@@ -2824,21 +2827,191 @@
       if (el && value !== undefined && value !== null) el.value = String(value);
     }
 
+    // Unified per-source login / cookie status (GET /api/sources/status),
+    // rendered as a uniform colored-dot list in the 平台源 settings tab.
+    const SOURCE_STATUS_DOT = {
+      ok: "#2ecc71", ready: "#2ecc71", no_auth: "#9aa0a6",
+      missing: "#e0a800", missing_cookie: "#e0a800", rate_limited: "#e0a800",
+      expired_cookie: "#e74c3c", blocked: "#e74c3c"
+    };
+    const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter"];
+
+    async function renderSourcesStatus() {
+      const list = $("#sourceStatusList");
+      if (!list) return;
+      let data = null;
+      try { data = await requestJson("/sources/status"); } catch { data = null; }
+      SOURCE_STATUS_KEYS.forEach((key) => {
+        const row = list.querySelector(`[data-source-status="${key}"]`);
+        if (!row) return;
+        const dot = row.querySelector(".src-dot");
+        const detail = row.querySelector(".src-detail");
+        const item = data?.[key];
+        if (!item) {
+          if (detail) detail.textContent = "状态暂不可用（后端未连接）。";
+          if (dot) dot.style.color = "#9aa0a6";
+          row.style.opacity = "1";
+          return;
+        }
+        if (detail) detail.textContent = (item.enabled ? "" : "（未启用）") + (item.detail || "");
+        if (dot) dot.style.color = SOURCE_STATUS_DOT[item.state] || "#9aa0a6";
+        row.style.opacity = item.enabled ? "1" : "0.6";
+      });
+    }
+
+    // LAN password-gate control. The web UI is served from 127.0.0.1, so it is a
+    // trusted-local client (same-origin loopback) and may manage /api/auth/admin,
+    // exactly like the extension's popup-auth-control.
+    let lanAuthControl = null;
+    let bootAutostartControl = null;
+
+    function initLanAuthControl() {
+      const checkbox = $("#authEnabled");
+      const password = $("#authPassword");
+      const passwordField = $("#authPasswordField");
+      const saveRow = $("#authSaveRow");
+      const saveBtn = $("#authSave");
+      const hint = $("#authHint");
+      if (!checkbox) return { reload: async () => {} };
+      let current = null;
+      const setHint = (msg) => { if (hint) hint.textContent = msg; };
+      function syncEditing() {
+        const can = Boolean(current && current.can_manage);
+        const enabling = checkbox.checked;
+        if (passwordField) passwordField.hidden = !(can && enabling);
+        if (saveRow) saveRow.hidden = !(can && enabling);
+      }
+      function applyServerState() {
+        const can = Boolean(current && current.can_manage);
+        checkbox.checked = Boolean(current && current.enabled);
+        checkbox.disabled = !can;
+        syncEditing();
+        if (!current) setHint("无法读取后端鉴权状态。");
+        else if (!can) setHint(current.env_managed ? "由环境变量管理，请改环境变量并重启后端。" : "仅本机 / 浏览器插件可修改此设置。");
+        else if (current.enabled) setHint("已开启：局域网 / 远程设备访问需要登录密码（本机与插件免登录）。");
+        else setHint("已关闭：局域网访问无需密码。");
+      }
+      async function load() {
+        current = await requestJson("/auth/status");
+        applyServerState();
+        return current;
+      }
+      async function apply(enabled) {
+        const pwd = password ? String(password.value || "") : "";
+        if (enabled && !pwd.trim()) { setHint("请输入要设置的访问密码。"); if (password?.focus) password.focus(); return; }
+        setHint("保存中…");
+        try {
+          const payload = enabled ? { enabled: true, password: pwd } : { enabled: false };
+          const result = await requestJsonStrict("/auth/admin", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+          if (result && result.ok === false) { setHint("保存失败，请重试。"); await load(); return; }
+          if (password) password.value = "";
+          await load();
+        } catch (err) {
+          const status = err?.status;
+          if (status === 403) setHint("仅本机 / 插件可修改此设置。");
+          else if (status === 409) setHint("由环境变量管理，无法在此修改。");
+          else if (status === 400) setHint("开启密码门禁需要先设置密码。");
+          else setHint("无法连接后端或保存失败，请重试。");
+          await load();
+        }
+      }
+      checkbox.addEventListener("change", () => {
+        if (!checkbox.checked) void apply(false);
+        else { syncEditing(); if (password?.focus) password.focus(); }
+      });
+      saveBtn?.addEventListener("click", () => void apply(true));
+      void load();
+      return { reload: load };
+    }
+
+    // Boot autostart control — mirrors the extension's popup-autostart-control.
+    function initBootAutostartControl() {
+      const checkbox = $("#autostartEnabled");
+      const hint = $("#autostartHint");
+      if (!checkbox) return { reload: async () => {} };
+      let current = null;
+      let busy = false;
+      const setHint = (msg) => { if (hint) hint.textContent = msg; };
+      function disabledHint(status) {
+        const reason = status?.reason || "";
+        if (reason === "env_managed") return "检测到环境变量配置，登录会话可能拿不到这些值；请先写入 config.toml。";
+        if (reason === "shadowed") return "config.local.toml 正在覆盖开关，无法在此修改。";
+        if (reason === "unsupported_docker_runtime") return "当前在 Docker / 容器环境中，不能注册桌面登录自启动。";
+        if (reason === "unsupported_platform") return "当前平台暂不支持开机自启动。";
+        if (reason === "local_only") return "仅本机 / 浏览器插件可修改此设置。";
+        return "当前环境不能在这里修改开机自启动。";
+      }
+      function enabledHint(status) {
+        const ollama = status?.manage_ollama ? "；本机 Ollama 配置会在需要时顺带拉起" : "";
+        if (status?.registered === false) return `配置已开启，但系统注册缺失；下次后端启动会尝试修复${ollama}。`;
+        return `已开启：下次登录系统会拉起后端，不启停当前进程${ollama}。`;
+      }
+      function activeHint(status) {
+        if (!status) return "无法读取开机自启动状态。";
+        if (!status.can_manage) return disabledHint(status);
+        if (status.enabled) return enabledHint(status);
+        return "已关闭：不会注册登录自启动；当前后端进程不受影响。";
+      }
+      function applyServerState() {
+        const can = Boolean(current && current.can_manage);
+        checkbox.checked = Boolean(current && current.enabled);
+        checkbox.disabled = busy || !can;
+        setHint(activeHint(current));
+      }
+      async function load() {
+        current = await requestJson("/autostart-status");
+        applyServerState();
+        return current;
+      }
+      async function apply(enabled) {
+        busy = true;
+        checkbox.disabled = true;
+        setHint(enabled ? "正在开启开机自启动…" : "正在关闭开机自启动…");
+        try {
+          const result = await requestJsonStrict("/autostart/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: Boolean(enabled) }) });
+          current = result || current;
+          busy = false;
+          applyServerState();
+          await load();
+        } catch (err) {
+          busy = false;
+          const status = err?.status;
+          current = err?.details || current;
+          if (status === 403) setHint("仅本机 / 浏览器插件可修改此设置。");
+          else if (status === 409) setHint(disabledHint(current));
+          else setHint("无法连接后端或保存失败，请重试。");
+          await load();
+        }
+      }
+      checkbox.addEventListener("change", () => void apply(Boolean(checkbox.checked)));
+      void load();
+      return { reload: load };
+    }
+
     function applyConfig(config) {
       if (!config || typeof config !== "object") return;
       state.config = config;
       const scheduler = config.scheduler || {};
       setSelect("schedulerEnabled", scheduler.enabled === false ? "off" : "on");
       setSelect("pauseDisconnect", scheduler.pause_on_extension_disconnect === false ? "keep" : "pause");
-      setInput("discoveryCron", scheduler.discovery_cron);
+      setInput("extensionDisconnectGrace", scheduler.extension_disconnect_grace_seconds);
       setInput("poolTarget", scheduler.pool_target_count);
       setInput("accountSyncInterval", scheduler.account_sync_interval_hours);
+      setInput("refreshCheckInterval", scheduler.refresh_check_interval_seconds);
+      setInput("signalEventThreshold", scheduler.signal_event_threshold);
+      setInput("feedbackBatchThreshold", scheduler.feedback_batch_threshold);
+      setInput("trendingRefreshHours", scheduler.trending_refresh_hours);
+      setInput("exploreRefreshHours", scheduler.explore_refresh_hours);
+      setInput("discoveryLimit", scheduler.discovery_limit);
+      setInput("proactivePushInterval", scheduler.proactive_push_interval_seconds);
+      setInput("speculatorIdleInterval", scheduler.speculator_idle_interval_minutes);
       setSelect("autoUpdate", scheduler.auto_update_enabled === true ? "on" : "off");
       setInput("autoUpdateInterval", scheduler.auto_update_check_interval_hours);
       setInput("shareBilibili", scheduler.pool_source_shares?.bilibili);
       setInput("shareXhs", scheduler.pool_source_shares?.xiaohongshu);
       setInput("shareDouyin", scheduler.pool_source_shares?.douyin);
       setInput("shareYoutube", scheduler.pool_source_shares?.youtube);
+      setInput("shareTwitter", scheduler.pool_source_shares?.twitter);
       setInput("speculationInterval", scheduler.speculation_interval_minutes);
       setInput("speculationTtl", scheduler.speculation_ttl_days);
       setInput("speculationCooldown", scheduler.speculation_cooldown_days);
@@ -2856,6 +3029,7 @@
       setSelect("llmProvider", provider);
       const fallbackProvider = llm.fallback_provider || "";
       setSelect("llmFallbackProvider", fallbackProvider);
+      setInput("llmConcurrency", llm.concurrency ?? 3);
       setInput("llmTimeout", llm.timeout);
       setSelect("llmAuthMode", llm.openai?.auth_mode || "api_key");
       if (provider) {
@@ -2876,6 +3050,7 @@
       }
       setInput("openrouterReferer", llm.openrouter?.http_referer);
       setInput("openrouterTitle", llm.openrouter?.x_title);
+      setSelect("deepseekReasoning", llm.deepseek?.reasoning_effort || "");
       setSelect("embeddingProvider", llm.embedding?.provider || "");
       const embeddingFallbackProvider = llm.embedding?.fallback_provider || "";
       setSelect("embeddingFallbackProvider", embeddingFallbackProvider);
@@ -2923,6 +3098,15 @@
       setInput("youtubeDailyTrendingBudget", config.sources?.youtube?.daily_trending_budget);
       setInput("youtubeDailyChannelBudget", config.sources?.youtube?.daily_channel_budget);
       setInput("youtubeRequestInterval", config.sources?.youtube?.request_interval_seconds);
+      setInput("youtubeMinInterval", config.sources?.youtube?.min_interval_minutes);
+      setSelect("twitterEnabled", config.sources?.twitter?.enabled === true ? "on" : "off");
+      setInput("twitterCookieEnv", config.sources?.twitter?.cookie_env);
+      setInput("twitterDailySearchBudget", config.sources?.twitter?.daily_search_budget);
+      setInput("twitterDailyFeedBudget", config.sources?.twitter?.daily_feed_budget);
+      setInput("twitterDailyCreatorBudget", config.sources?.twitter?.daily_creator_budget);
+      setInput("twitterRequestInterval", config.sources?.twitter?.request_interval_seconds);
+      setInput("twitterMinInterval", config.sources?.twitter?.min_interval_minutes);
+      void renderSourcesStatus();
 
       setSelect("logLevel", config.logging?.level || "INFO");
       setSelect("logFileLevel", config.logging?.file_level || "DEBUG");
@@ -3220,6 +3404,7 @@
         default_provider: provider,
         fallback_enabled: Boolean(fallbackProvider),
         fallback_provider: fallbackProvider,
+        concurrency: getIntInput("llmConcurrency", 3),
         timeout: getIntInput("llmTimeout", 60),
         [provider]: { ...(state.config?.llm?.[provider] || {}), ...llmProviderConfig },
         embedding: { ...(state.config?.llm?.embedding || {}), ...embedding },
@@ -3245,6 +3430,13 @@
           ...(llm.openrouter || {}),
           http_referer: getInput("openrouterReferer"),
           x_title: getInput("openrouterTitle")
+        };
+      }
+      const deepseekReasoning = getInput("deepseekReasoning");
+      if (deepseekReasoning || provider === "deepseek" || fallbackProvider === "deepseek") {
+        llm.deepseek = {
+          ...(llm.deepseek || state.config?.llm?.deepseek || {}),
+          reasoning_effort: deepseekReasoning
         };
       }
       return {
@@ -3285,20 +3477,40 @@
             daily_search_budget: getIntInput("youtubeDailySearchBudget", 0),
             daily_trending_budget: getIntInput("youtubeDailyTrendingBudget", 0),
             daily_channel_budget: getIntInput("youtubeDailyChannelBudget", 0),
-            request_interval_seconds: getIntInput("youtubeRequestInterval", 2)
+            request_interval_seconds: getIntInput("youtubeRequestInterval", 2),
+            min_interval_minutes: getIntInput("youtubeMinInterval", 60)
+          },
+          twitter: {
+            enabled: $("#twitterEnabled").value === "on",
+            mode: "cookie",
+            cookie_env: getInput("twitterCookieEnv"),
+            daily_search_budget: getIntInput("twitterDailySearchBudget", 0),
+            daily_feed_budget: getIntInput("twitterDailyFeedBudget", 0),
+            daily_creator_budget: getIntInput("twitterDailyCreatorBudget", 0),
+            request_interval_seconds: getIntInput("twitterRequestInterval", 3),
+            min_interval_minutes: getIntInput("twitterMinInterval", 60)
           }
         },
         scheduler: {
           enabled: $("#schedulerEnabled").value === "on",
           pause_on_extension_disconnect: $("#pauseDisconnect").value === "pause",
-          discovery_cron: getInput("discoveryCron"),
+          extension_disconnect_grace_seconds: getIntInput("extensionDisconnectGrace", 90),
           pool_target_count: getIntInput("poolTarget", 600),
           account_sync_interval_hours: getIntInput("accountSyncInterval", 6),
+          refresh_check_interval_seconds: getIntInput("refreshCheckInterval", 60),
+          signal_event_threshold: getIntInput("signalEventThreshold", 6),
+          feedback_batch_threshold: getIntInput("feedbackBatchThreshold", 3),
+          trending_refresh_hours: getIntInput("trendingRefreshHours", 3),
+          explore_refresh_hours: getIntInput("exploreRefreshHours", 12),
+          discovery_limit: getIntInput("discoveryLimit", 30),
+          proactive_push_interval_seconds: getIntInput("proactivePushInterval", 120),
+          speculator_idle_interval_minutes: getIntInput("speculatorIdleInterval", 30),
           pool_source_shares: {
             bilibili: getIntInput("shareBilibili", 8),
             xiaohongshu: getIntInput("shareXhs", 1),
             douyin: getIntInput("shareDouyin", 1),
-            youtube: getIntInput("shareYoutube", 1)
+            youtube: getIntInput("shareYoutube", 1),
+            twitter: getIntInput("shareTwitter", 1)
           },
           speculation_interval_minutes: getIntInput("speculationInterval", 10),
           speculation_ttl_days: getIntInput("speculationTtl", 3),
@@ -3455,14 +3667,17 @@
     safeBind("#llmProvider", "change", () => applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), default_provider: $("#llmProvider")?.value || "" } }));
     safeBind("#llmFallbackProvider", "change", () => applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), fallback_provider: $("#llmFallbackProvider")?.value || "" } }));
     safeBind("#embeddingFallbackProvider", "change", () => applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), embedding: { ...(state.config?.llm?.embedding || {}), fallback_provider: $("#embeddingFallbackProvider")?.value || "" } } }));
+    lanAuthControl = initLanAuthControl();
+    bootAutostartControl = initBootAutostartControl();
     safeBind("#suggestSharesBtn", "click", async () => {
-      const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
+      const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on", twitter: $("#twitterEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
       const shares = result?.pool_source_shares || result?.shares || result?.suggested_shares;
       if (shares) {
         setInput("shareBilibili", shares.bilibili);
         setInput("shareXhs", shares.xiaohongshu);
         setInput("shareDouyin", shares.douyin);
         setInput("shareYoutube", shares.youtube);
+        if (shares.twitter !== undefined) setInput("shareTwitter", shares.twitter);
         showToast("已应用来源占比建议");
       } else {
         showToast("没有拿到占比建议");

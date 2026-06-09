@@ -235,6 +235,10 @@ export async function fetchXSourceStatus() {
   return requestJson("/sources/x/status", { method: "GET" });
 }
 
+export async function fetchSourcesStatus() {
+  return requestJson("/sources/status", { method: "GET" });
+}
+
 export async function startInit({ force = false, sources } = {}) {
   const payload = { force };
   // Only attach an explicit per-run platform selection when given; omitting it

@@ -4928,6 +4928,7 @@
           <input id="cfgBilibiliEnabled" type="checkbox">
           <label for="cfgBilibiliEnabled">启用 Bilibili discovery</label>
         </div>
+        <p class="settings-hint source-status-row" id="cfgBilibiliStatus" data-source-status="bilibili"><span class="src-dot">●</span> <span class="src-detail">登录状态加载中…</span></p>
         <div class="settings-field">
           <label for="cfgBiliAuth">认证方式</label>
           <select id="cfgBiliAuth">
@@ -4956,6 +4957,7 @@
           <input id="cfgXhsEnabled" type="checkbox">
           <label for="cfgXhsEnabled">启用小红书 discovery</label>
         </div>
+        <p class="settings-hint source-status-row" id="cfgXhsStatus" data-source-status="xiaohongshu"><span class="src-dot">●</span> <span class="src-detail">登录状态加载中…</span></p>
         <div class="settings-field">
           <label for="cfgXhsDailySearchBudget">小红书每日搜索任务</label>
           <input id="cfgXhsDailySearchBudget" type="number" min="0" step="1" placeholder="30">
@@ -4976,6 +4978,7 @@
           <input id="cfgDouyinEnabled" type="checkbox">
           <label for="cfgDouyinEnabled">启用抖音 discovery</label>
         </div>
+        <p class="settings-hint source-status-row" id="cfgDouyinStatus" data-source-status="douyin"><span class="src-dot">●</span> <span class="src-detail">登录状态加载中…</span></p>
         <div class="settings-field">
           <label for="cfgDouyinCookieEnv">抖音 Cookie 环境变量</label>
           <input id="cfgDouyinCookieEnv" type="text" placeholder="OPENBILICLAW_DOUYIN_COOKIE">
@@ -5004,6 +5007,7 @@
           <input id="cfgYoutubeEnabled" type="checkbox">
           <label for="cfgYoutubeEnabled">启用 YouTube discovery</label>
         </div>
+        <p class="settings-hint source-status-row" id="cfgYoutubeStatus" data-source-status="youtube"><span class="src-dot">●</span> <span class="src-detail">登录状态加载中…</span></p>
         <div class="settings-field">
           <label for="cfgYoutubeDailySearchBudget">YouTube 搜索 query 预算</label>
           <input id="cfgYoutubeDailySearchBudget" type="number" min="0" step="1" placeholder="6">
@@ -5033,7 +5037,7 @@
           <input id="cfgTwitterEnabled" type="checkbox">
           <label for="cfgTwitterEnabled">启用 X discovery</label>
         </div>
-        <p class="settings-hint" id="cfgTwitterStatus" data-source-status="twitter">X 来源状态加载中…</p>
+        <p class="settings-hint source-status-row" id="cfgTwitterStatus" data-source-status="twitter"><span class="src-dot">●</span> <span class="src-detail">X 来源状态加载中…</span></p>
         <div class="settings-field">
           <label for="cfgTwitterCookieEnv">X Cookie 环境变量</label>
           <input id="cfgTwitterCookieEnv" type="text" placeholder="OPENBILICLAW_X_COOKIE">

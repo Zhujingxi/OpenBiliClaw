@@ -80,7 +80,7 @@ import {
   fetchRecommendations,
   fetchRuntimeStatus,
   fetchSourceShareSuggestion,
-  fetchXSourceStatus,
+  fetchSourcesStatus,
   markDelightSent,
   startInit,
   readCachedConfigSnapshot,
@@ -5857,34 +5857,44 @@ function bindSettings() {
     return el ? el.checked : fallback;
   };
 
-  // Human label for an X (twitter) source-health state from
-  // GET /api/sources/x/status (mirrors how other sources surface login/status).
-  const X_SOURCE_STATE_TEXT = {
-    ok: "X 来源正常,cookie 有效。",
-    missing_cookie: "X 未检测到登录 —— 在浏览器登录 x.com,扩展会自动同步 cookie。",
-    expired_cookie: "X cookie 已过期 —— 请重新登录 x.com。",
-    rate_limited: "X 被限流,正在退避冷却中,稍后会自动重试。",
-    blocked: "X 请求被拒绝 (403) —— 账号可能受限或需要重新验证。",
+  // Unified per-source login / cookie status from GET /api/sources/status,
+  // rendered as a uniform colored-dot line inside every source card. Only X is
+  // live-validated (state ok); the rest report local cookie/token readiness.
+  const SOURCE_STATUS_DOT = {
+    ok: "#2ecc71",
+    ready: "#2ecc71",
+    no_auth: "#9aa0a6",
+    missing: "#e0a800",
+    missing_cookie: "#e0a800",
+    rate_limited: "#e0a800",
+    expired_cookie: "#e74c3c",
+    blocked: "#e74c3c",
   };
+  const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter"];
 
-  function describeXSourceState(state) {
-    return X_SOURCE_STATE_TEXT[state] || `X 来源状态:${state || "未知"}。`;
-  }
-
-  // Fetch + render the X source health onto the X settings card. Best-effort:
-  // when the backend is unreachable, leave a neutral hint instead of throwing.
-  async function renderTwitterSourceStatus() {
-    const el = document.getElementById("cfgTwitterStatus");
-    if (!el) return;
+  // Best-effort: when the backend is unreachable, leave a neutral hint.
+  async function renderSourcesStatus() {
+    let data = null;
     try {
-      const status = await fetchXSourceStatus();
-      let text = describeXSourceState(status?.state);
-      if (status?.feed_paused) {
-        text += " For-You 因连续失败已自动暂停。";
-      }
-      el.textContent = text;
+      data = await fetchSourcesStatus();
     } catch {
-      el.textContent = "X 来源状态暂不可用(后端未连接)。";
+      data = null;
+    }
+    for (const key of SOURCE_STATUS_KEYS) {
+      const row = document.querySelector(`[data-source-status="${key}"]`);
+      if (!row) continue;
+      const dot = row.querySelector(".src-dot");
+      const detail = row.querySelector(".src-detail");
+      const item = data && data[key];
+      if (!item) {
+        if (detail) detail.textContent = "状态暂不可用(后端未连接)。";
+        if (dot) dot.style.color = "#9aa0a6";
+        row.style.opacity = "1";
+        continue;
+      }
+      if (detail) detail.textContent = (item.enabled ? "" : "(未启用) ") + (item.detail || "");
+      if (dot) dot.style.color = SOURCE_STATUS_DOT[item.state] || "#9aa0a6";
+      row.style.opacity = item.enabled ? "1" : "0.6";
     }
   }
 
@@ -5983,7 +5993,7 @@ function bindSettings() {
     setVal("cfgTwitterDailyCreatorBudget", cfg.sources?.twitter?.daily_creator_budget);
     setVal("cfgTwitterRequestInterval", cfg.sources?.twitter?.request_interval_seconds);
     setVal("cfgTwitterMinInterval", cfg.sources?.twitter?.min_interval_minutes);
-    void renderTwitterSourceStatus();
+    void renderSourcesStatus();
 
     // General
     const lang = document.getElementById("cfgLanguage");
