@@ -3240,6 +3240,7 @@
     const SOURCE_STATUS_DOT = {
       ok: "#2ecc71", ready: "#2ecc71", no_auth: "#9aa0a6",
       missing: "#e0a800", missing_cookie: "#e0a800", rate_limited: "#e0a800",
+      partial: "#e0a800", stale: "#e0a800",
       expired_cookie: "#e74c3c", blocked: "#e74c3c"
     };
     const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter"];
@@ -3266,6 +3267,16 @@
         row.style.opacity = item.enabled ? "1" : "0.6";
       });
     }
+
+    // Login happens outside this page (user signs into a platform in another
+    // tab), so a one-shot render on settings open goes stale — re-poll while
+    // the status list is actually visible.
+    setInterval(() => {
+      if (document.hidden) return;
+      const list = $("#sourceStatusList");
+      if (!list || list.offsetParent === null) return;
+      void renderSourcesStatus();
+    }, 30000);
 
     // LAN password-gate control. The web UI is served from 127.0.0.1, so it is a
     // trusted-local client (same-origin loopback) and may manage /api/auth/admin,

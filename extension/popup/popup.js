@@ -5931,6 +5931,8 @@ function bindSettings() {
     missing: "#e0a800",
     missing_cookie: "#e0a800",
     rate_limited: "#e0a800",
+    partial: "#e0a800",
+    stale: "#e0a800",
     expired_cookie: "#e74c3c",
     blocked: "#e74c3c",
   };
@@ -5961,6 +5963,16 @@ function bindSettings() {
       row.style.opacity = item.enabled ? "1" : "0.6";
     }
   }
+
+  // The side panel stays open while the user signs into platforms in other
+  // tabs, so a one-shot render goes stale — re-poll while a status row is
+  // actually visible.
+  setInterval(() => {
+    if (document.hidden) return;
+    const row = document.querySelector("[data-source-status]");
+    if (!row || row.offsetParent === null) return;
+    void renderSourcesStatus();
+  }, 30000);
 
   function populateForm(cfg) {
     applyRuntimeConfig(cfg);

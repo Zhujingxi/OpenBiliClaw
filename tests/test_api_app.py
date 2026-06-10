@@ -727,6 +727,102 @@ class TestBackendAPI:
         assert body["youtube"]["state"] == "no_auth"
         assert body["youtube"]["logged_in"] is True
 
+    def test_sources_status_xhs_old_tokens_report_stale_not_ready(self, tmp_path: Path) -> None:
+        """小红书 token rows outside the freshness window degrade to ``stale``.
+
+        A bare COUNT(*) used to keep the status green forever once a single
+        token row ever existed, even weeks after the extension stopped syncing
+        and the tokens died (xhs 300031).
+        """
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        db.conn.execute(
+            "INSERT INTO content_cache (bvid, source_platform, content_url, discovered_at) "
+            "VALUES ('xhsold', 'xiaohongshu', "
+            "'https://www.xiaohongshu.com/explore/xhsold?xsec_token=dead', "
+            "datetime('now', '-3 days'))"
+        )
+        db.conn.commit()
+
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/sources/status").json()["xiaohongshu"]
+        assert item["state"] == "stale"
+        assert item["logged_in"] is False
+
+        # A freshly discovered token row flips the status back to ready.
+        db.conn.execute(
+            "INSERT INTO content_cache (bvid, source_platform, content_url) "
+            "VALUES ('xhsnew', 'xiaohongshu', "
+            "'https://www.xiaohongshu.com/explore/xhsnew?xsec_token=live')"
+        )
+        db.conn.commit()
+
+        item = client.get("/api/sources/status").json()["xiaohongshu"]
+        assert item["state"] == "ready"
+        assert item["logged_in"] is True
+
+    def test_sources_status_xhs_token_backfill_counts_as_fresh(self, tmp_path: Path) -> None:
+        """Token backfill only touches discovery_candidates.last_seen_at.
+
+        ``_backfill_xhs_tokens`` upgrades a candidate's content_url in place
+        without rewriting content_cache.discovered_at, so a recently
+        backfilled candidate must keep the status ``ready`` even when every
+        cache row is old.
+        """
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        db.conn.execute(
+            "INSERT INTO content_cache (bvid, source_platform, content_url, discovered_at) "
+            "VALUES ('xhsold', 'xiaohongshu', "
+            "'https://www.xiaohongshu.com/explore/xhsold?xsec_token=dead', "
+            "datetime('now', '-3 days'))"
+        )
+        db.conn.execute(
+            "INSERT INTO discovery_candidates (candidate_key, source_platform, content_url) "
+            "VALUES ('xhs:backfilled', 'xiaohongshu', "
+            "'https://www.xiaohongshu.com/explore/backfilled?xsec_token=live')"
+        )
+        db.conn.commit()
+
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/sources/status").json()["xiaohongshu"]
+        assert item["state"] == "ready"
+
+    def test_sources_status_bilibili_incomplete_cookie_reports_partial(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A cookie missing core login fields renders yellow, not green."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config, save_config
+
+        project_root = tmp_path / "partial-cookie"
+        monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(project_root))
+        cfg = Config()
+        cfg.bilibili.cookie = "SESSDATA=abc"
+        save_config(cfg, project_root / "config.toml")
+
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/sources/status").json()["bilibili"]
+        assert item["state"] == "partial"
+        assert item["logged_in"] is False
+
     def test_favicon_endpoint_serves_mobile_web_icon(self) -> None:
         from fastapi.testclient import TestClient
 
@@ -7302,9 +7398,7 @@ class TestGuidedInitEndpoints:
         assert resp.status_code == 403
         assert resp.json()["error"] == "local_only"
 
-    def test_legacy_init_completed_does_not_mark_guided_init_done(
-        self, tmp_path: Path
-    ) -> None:
+    def test_legacy_init_completed_does_not_mark_guided_init_done(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient
 
         app, _ = self._make_app(tmp_path)
@@ -7316,9 +7410,7 @@ class TestGuidedInitEndpoints:
         assert before["initialized"] is False
         assert after["initialized"] is False
 
-    def test_runtime_stream_emits_real_init_coordinator_events(
-        self, tmp_path: Path
-    ) -> None:
+    def test_runtime_stream_emits_real_init_coordinator_events(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient
 
         app, _ = self._make_app(tmp_path)

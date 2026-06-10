@@ -5569,6 +5569,12 @@ def create_app(
             updated_at=str(health.get("updated_at", "")),
         )
 
+    # Window for treating synced 小红书 access tokens as fresh. xsec_tokens
+    # die well within a day, so /api/sources/status only reports "ready" when
+    # token activity happened inside this window — older-only rows degrade to
+    # the yellow "stale" state instead of staying green forever.
+    _xhs_token_fresh_hours = 24
+
     # Human-readable detail for each X (twitter) health state, reused by the
     # unified /api/sources/status chip below.
     _x_state_detail = {
@@ -5626,9 +5632,8 @@ def create_app(
         elif bili_cookie.strip():
             bilibili = SourceStatusItem(
                 enabled=bili_enabled,
-                state="ready",
+                state="partial",
                 detail="Cookie 已配置，但缺少部分登录字段，可能未完整登录。",
-                logged_in=True,
             )
         else:
             bilibili = SourceStatusItem(
@@ -5638,24 +5643,62 @@ def create_app(
             )
 
         # ── 小红书: token-bearing cache rows = extension is syncing tokens ──
+        # A bare COUNT(*) is sticky: one token row from weeks ago keeps the
+        # status green forever after the extension stops syncing, while the
+        # stored tokens are long dead (xhs 300031 access-denied). Gate "ready"
+        # on recent activity instead — a token-bearing cache row discovered,
+        # or a candidate token-backfilled (``_backfill_xhs_tokens`` refreshes
+        # ``last_seen_at`` without touching ``discovered_at``), inside the
+        # freshness window. Old-only rows degrade to ``stale``.
         xhs_enabled = bool(getattr(srcs.xiaohongshu, "enabled", False))
         xhs_tokens = 0
+        xhs_fresh = 0
         if hasattr(ctx.database, "conn"):
+            window = f"-{_xhs_token_fresh_hours} hours"
             try:
                 row = ctx.database.conn.execute(
-                    "SELECT COUNT(*) FROM content_cache "
+                    "SELECT COUNT(*), "
+                    "COALESCE(SUM(discovered_at >= datetime('now', ?)), 0) "
+                    "FROM content_cache "
                     "WHERE source_platform = 'xiaohongshu' "
-                    "AND content_url LIKE '%xsec_token=%'"
+                    "AND content_url LIKE '%xsec_token=%'",
+                    (window,),
                 ).fetchone()
                 xhs_tokens = int(row[0]) if row else 0
+                xhs_fresh = int(row[1]) if row else 0
             except Exception:  # pragma: no cover - defensive
                 xhs_tokens = 0
-        if xhs_tokens > 0:
+                xhs_fresh = 0
+            if xhs_tokens and not xhs_fresh:
+                try:
+                    row = ctx.database.conn.execute(
+                        "SELECT COUNT(*) FROM discovery_candidates "
+                        "WHERE source_platform = 'xiaohongshu' "
+                        "AND content_url LIKE '%xsec_token=%' "
+                        "AND last_seen_at >= datetime('now', ?)",
+                        (window,),
+                    ).fetchone()
+                    xhs_fresh = int(row[0]) if row else 0
+                except Exception:  # pragma: no cover - defensive
+                    xhs_fresh = 0
+        if xhs_fresh > 0:
             xiaohongshu = SourceStatusItem(
                 enabled=xhs_enabled,
                 state="ready",
-                detail=f"访问令牌已同步（{xhs_tokens} 条带 xsec_token 的缓存内容）。",
+                detail=(
+                    f"访问令牌已同步（最近 {_xhs_token_fresh_hours} 小时内 {xhs_fresh} 条，"
+                    f"共 {xhs_tokens} 条带 xsec_token 的缓存内容）。"
+                ),
                 logged_in=True,
+            )
+        elif xhs_tokens > 0:
+            xiaohongshu = SourceStatusItem(
+                enabled=xhs_enabled,
+                state="stale",
+                detail=(
+                    f"令牌可能已失效 —— 超过 {_xhs_token_fresh_hours} 小时未同步新令牌"
+                    f"（存量 {xhs_tokens} 条）。在浏览器逛逛小红书即可自动刷新。"
+                ),
             )
         else:
             xiaohongshu = SourceStatusItem(
