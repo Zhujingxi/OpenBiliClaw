@@ -13,6 +13,7 @@
 - 桌面安装包与插件包 release workflow 的发布步骤改用 GitHub CLI 创建 / 上传 Release 资产，绕过 `softprops/action-gh-release@v2` 在当前 runner 上创建 release 时返回 401 的问题。
 - Release 资产上传改为显式 `--repo`、同时暴露 `GH_TOKEN` / `GITHUB_TOKEN`，并逐个文件重试上传，避免多资产上传时单个 zip / 安装包因 `uploads.github.com` 401 中断整次发布。
 - 重新打 tag 后若 GitHub 把既有 Release 置回 draft，发布步骤会显式执行 `gh release edit --draft=false`；桌面安装包继续保持 prerelease 标记。
+- 桌面安装包 release 创建也加入重试与二次确认，避免长时间打包后在最后的 `gh release create` 受临时 401 影响而丢失已产出的安装器 artifact。
 - 后端包版本提升到 `v0.3.117`，浏览器插件版本提升到 `0.3.76`，准备发布 `backend-v0.3.117`、`desktop-v0.3.117` 与 `extension-v0.3.76`。
 
 ## v0.3.116 / extension v0.3.75: 惊喜推荐生命周期闭环（2026-06-10）
