@@ -139,6 +139,11 @@ jobs:
     # rather than blocking the whole release.
     if: ${{ always() }}
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
       - name: Download built installers
         uses: actions/download-artifact@v8
         with:
