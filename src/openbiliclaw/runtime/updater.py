@@ -75,6 +75,23 @@ def _project_root() -> Path:
     return Path.cwd()
 
 
+def detect_install_mode() -> str:
+    """Best-effort install-mode detection for update-status surfaces.
+
+    - ``frozen``: PyInstaller desktop bundle. There is no git checkout to
+      fast-forward, so backend self-update is structurally unsupported —
+      users update by installing a newer desktop package.
+    - ``git``: the project root is a git checkout (one-line installer,
+      agent install, or dev checkout) — the auto-update flow can apply.
+    - ``unsupported``: anything else (e.g. a bare pip install).
+    """
+    if getattr(sys, "frozen", False):
+        return "frozen"
+    if (_project_root() / ".git").exists():
+        return "git"
+    return "unsupported"
+
+
 def _parse_version(v: str) -> tuple[int, ...]:
     """Parse a version string like 'v0.2.1' or '0.2.1' into a comparable tuple."""
     v = v.strip().lstrip("vV")
@@ -343,6 +360,7 @@ class AutoUpdateService:
         return {
             "state": state,
             "auto_update_enabled": self.enabled,
+            "install_mode": detect_install_mode(),
             "current_version": openbiliclaw.__version__,
             "latest_version": self._latest_remote_version,
             "latest_tag": self._latest_tag,
@@ -355,6 +373,7 @@ class AutoUpdateService:
         """Expose update status for the runtime-status API."""
         return {
             "auto_update_enabled": self.enabled,
+            "install_mode": detect_install_mode(),
             "current_version": openbiliclaw.__version__,
             "latest_remote_version": self._latest_remote_version,
             "last_update_check_at": (

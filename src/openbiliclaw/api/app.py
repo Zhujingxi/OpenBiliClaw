@@ -2967,6 +2967,7 @@ def create_app(
             return BackendUpdateStatusOut(
                 state=str(runtime_status.get("backend_update_state", "unknown")),
                 auto_update_enabled=bool(runtime_status.get("auto_update_enabled", False)),
+                install_mode=str(runtime_status.get("install_mode", "")),
                 current_version=str(runtime_status.get("current_version", "")),
                 latest_version=str(runtime_status.get("latest_remote_version", "")),
                 latest_tag=str(runtime_status.get("latest_remote_version", "")),

@@ -241,6 +241,35 @@ async def test_manual_check_reports_prerelease_ignored_when_only_newer_rc_exists
     assert backend["latest_tag"] == ""
 
 
+def test_detect_install_mode_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    assert updater.detect_install_mode() == "frozen"
+
+
+def test_detect_install_mode_git_and_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    assert updater.detect_install_mode() == "unsupported"
+    (tmp_path / ".git").mkdir()
+    assert updater.detect_install_mode() == "git"
+
+
+def test_update_status_payloads_include_install_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService(enabled=False)
+
+    assert service.get_update_status()["install_mode"] == "git"
+    assert service.get_runtime_status()["install_mode"] == "git"
+
+
 @pytest.mark.parametrize(
     ("porcelain", "expected"),
     [

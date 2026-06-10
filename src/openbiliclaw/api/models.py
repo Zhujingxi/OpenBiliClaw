@@ -155,6 +155,7 @@ class RuntimeStatusResponse(BaseModel):
     last_account_sync_at: str = ""
     last_account_sync_error: str = ""
     auto_update_enabled: bool = False
+    install_mode: str = ""
     current_version: str = ""
     latest_remote_version: str = ""
     last_update_check_at: str = ""
@@ -922,6 +923,7 @@ class SchedulerConfigOut(BaseModel):
 class BackendUpdateStatusOut(BaseModel):
     state: str = "unknown"
     auto_update_enabled: bool = False
+    install_mode: str = ""
     current_version: str = ""
     latest_version: str = ""
     latest_tag: str = ""

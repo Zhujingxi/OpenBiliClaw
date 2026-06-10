@@ -1669,6 +1669,7 @@ class TestBackendAPI:
             "backend": {
                 "state": "update_available",
                 "auto_update_enabled": False,
+                "install_mode": "",
                 "current_version": "0.3.91",
                 "latest_version": "0.3.92",
                 "latest_tag": "backend-v0.3.92",
