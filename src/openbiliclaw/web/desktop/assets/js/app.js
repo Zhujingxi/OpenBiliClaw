@@ -2858,6 +2858,13 @@
         const url = delight.content_url || (delight.bvid ? `https://www.bilibili.com/video/${encodeURIComponent(delight.bvid)}` : "");
         if (url) window.open(url, "_blank", "noopener,noreferrer");
         trackRecommendationClick(delight);
+        // 浏览过即已读：上报 view 让后端标记 delight_notified，下次重灌不再出现。
+        // fire-and-forget，不阻塞打开内容；当场卡片仍保留。
+        requestJson(ENDPOINTS.delightRespond, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ bvid: delight.bvid, response: "view", title: delight.title || "", message: "" })
+        }).catch(() => {});
         showToast(url ? "已打开惊喜推荐" : "后端没有返回可打开链接");
         return;
       }
@@ -3546,6 +3553,10 @@
 
     function normalizeDelight(item) {
       if (!item) return null;
+      // 后端 pending-batch 对喜欢过的候选下发 state="liked"，重灌后恢复
+      // 「已喜欢」文案，让用户看出这条已经表过态。
+      const serverState = String(item.state ?? "");
+      const fallbackMessage = serverState === "liked" ? "好，这类多来点。" : "";
       return {
         type: "delight",
         bvid: String(item.bvid ?? item.content_id ?? ""),
@@ -3557,7 +3568,8 @@
         chat_turn_id: String(item.chat_turn_id ?? ""),
         chat_reply: String(item.chat_reply ?? item.reply ?? ""),
         chat_draft: String(item.chat_draft ?? ""),
-        response_message: String(item.response_message ?? ""),
+        state: serverState,
+        response_message: String(item.response_message ?? "") || fallbackMessage,
         turns: delightTurnList(item.turns)
       };
     }

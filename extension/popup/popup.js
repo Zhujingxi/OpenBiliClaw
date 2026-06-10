@@ -4359,6 +4359,9 @@ function renderDelightSlot() {
       "action-button action-primary delight-banner-action",
       async () => {
         await openRecommendation(delight.bvid, delight);
+        // 浏览过即已读：上报 view 让后端标记 delight_notified，
+        // 下次重灌不再出现。当场卡片保留 viewed 状态。
+        respondToDelight(delight.bvid, "view", delight.title).catch(() => {});
         updateDelightHead({
           state: "viewed",
           response_message: "已打开，阿B 会把这次点击当成强信号。",
