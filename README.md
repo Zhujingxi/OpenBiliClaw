@@ -192,11 +192,12 @@
 
 ## 最近更新
 
-最新版本：**v0.3.120: 桌面安装包更新提醒（2026-06-11）**。完整变更详见 [docs/changelog.md](docs/changelog.md)。
+最新版本：**v0.3.120 / extension v0.3.78: 桌面安装包更新提醒（2026-06-11）**。完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
 - **桌面安装包会自动提醒升级了** —— 后台定期检查 `desktop-v*` 新安装包，发现后设置页提示并附直达下载链接 + toast 提醒，无需自己盯 Releases。
 - **设置页新增「立即检查 / 立即应用」** —— 自动更新状态可手动触发，更新进度随后端事件实时刷新。
 - **自动更新更安全** —— 冻结安装包永不自行改写共用目录里的 git 检出；LLM 配置出错降级时仍可检查并拉取修复版本。
+- **惊喜推荐加载数量三端统一** —— 新配置 `delight_queue_limit` 在桌面 Web 保存后，插件和移动 Web 同步生效。
 
 ## 用户交流群
 
@@ -664,7 +665,7 @@ OpenBiliClaw/
 
 ## 📜 更新日志
 
-最新版本：**v0.3.120: 桌面安装包更新提醒（2026-06-11）**。最近更新见上方摘要；完整历史见 [docs/changelog.md](docs/changelog.md)。插件包和桌面安装包见 [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases)，后端源码更新看 `backend-v*` tag。
+最新版本：**v0.3.120 / extension v0.3.78: 桌面安装包更新提醒（2026-06-11）**。最近更新见上方摘要；完整历史见 [docs/changelog.md](docs/changelog.md)。插件包和桌面安装包见 [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases)，后端源码更新看 `backend-v*` tag。
 
 ## 🗺️ 后续规划
 

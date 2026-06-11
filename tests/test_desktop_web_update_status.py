@@ -62,3 +62,11 @@ def test_desktop_web_settings_guides_frozen_installs_to_download_new_installer()
     assert "releases/tag/" in js
     # The toast reminder distinguishes installer releases from source releases.
     assert 'startsWith("desktop-v")' in js
+
+
+def test_desktop_web_settings_persists_delight_queue_limit_to_backend_config() -> None:
+    """The shared delight queue size must be saved through /api/config."""
+    js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    assert "delight_queue_limit: getDelightQueueLimit()" in js
+    assert "config.scheduler?.delight_queue_limit" in js
