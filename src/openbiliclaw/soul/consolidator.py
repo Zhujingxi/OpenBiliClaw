@@ -174,6 +174,10 @@ class ProfileConsolidator:
 
     # -- Public API -----------------------------------------------------------
 
+    def set_embedding_service(self, embedding_service: SupportsEmbed | None) -> None:
+        """Attach or replace the embedding service after construction."""
+        self._embedding_service = embedding_service
+
     async def run_if_due(self, *, now: datetime | None = None) -> ConsolidationReport:
         """Run a consolidation pass if the throttle interval elapsed.
 

@@ -474,3 +474,108 @@ async def test_apply_rebuilds_onion_tree(tmp_path: Path) -> None:
     specific_names = [spec.name for dom in rebuilt.interest.likes for spec in dom.specifics]
     assert "智能体开发与实现" not in specific_names
     assert memory.synced_profiles  # sync_profile_files invoked
+
+
+async def test_pipeline_tick_runs_consolidator_and_records_cognition(tmp_path: Path) -> None:
+    from openbiliclaw.soul.consolidator import ConsolidationReport
+    from openbiliclaw.soul.pipeline import ProfileUpdatePipeline
+
+    class _StubConsolidator:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run_if_due(self, **_: Any) -> ConsolidationReport:
+            self.calls += 1
+            report = ConsolidationReport(ran=True, run_id="t1")
+            report.merges = [
+                {"scope": "likes", "members": ["A", "B"], "canonical": "A"},
+                {"scope": "dislikes", "members": ["X", "Y"], "canonical": "X"},
+            ]
+            return report
+
+    class _CogMemory(_FakeMemory):
+        def __init__(self) -> None:
+            super().__init__({"interests": [], "disliked_topics": []})
+            self.cognition_updates: list[dict[str, Any]] = []
+
+        def load_cognition_updates(self) -> list[dict[str, Any]]:
+            return self.cognition_updates
+
+        def save_cognition_updates(self, updates: list[dict[str, Any]]) -> None:
+            self.cognition_updates = updates
+
+    memory = _CogMemory()
+    consolidator = _StubConsolidator()
+    pipeline = ProfileUpdatePipeline(
+        memory=memory,  # type: ignore[arg-type]
+        preference_analyzer=SimpleNamespace(),  # type: ignore[arg-type]
+        profile_builder=SimpleNamespace(),  # type: ignore[arg-type]
+        profile_consolidator=consolidator,
+    )
+
+    result = await pipeline.tick()
+
+    assert consolidator.calls == 1
+    assert memory.cognition_updates
+    card = memory.cognition_updates[0]
+    assert card["kind"] == "profile_consolidation"
+    assert "兴趣合并 1 组" in card["summary"]
+    assert "避雷合并 1 组" in card["summary"]
+    assert any("画像整理" in (u.changes[0] if u.changes else "") for u in result.layers_updated)
+
+
+async def test_pipeline_tick_quiet_when_consolidator_throttled(tmp_path: Path) -> None:
+    from openbiliclaw.soul.consolidator import ConsolidationReport
+    from openbiliclaw.soul.pipeline import ProfileUpdatePipeline
+
+    class _ThrottledConsolidator:
+        async def run_if_due(self, **_: Any) -> ConsolidationReport:
+            return ConsolidationReport(throttled=True)
+
+    class _CogMemory(_FakeMemory):
+        def __init__(self) -> None:
+            super().__init__({"interests": [], "disliked_topics": []})
+            self.cognition_updates: list[dict[str, Any]] = []
+
+        def load_cognition_updates(self) -> list[dict[str, Any]]:
+            return self.cognition_updates
+
+        def save_cognition_updates(self, updates: list[dict[str, Any]]) -> None:
+            self.cognition_updates = updates
+
+    memory = _CogMemory()
+    pipeline = ProfileUpdatePipeline(
+        memory=memory,  # type: ignore[arg-type]
+        preference_analyzer=SimpleNamespace(),  # type: ignore[arg-type]
+        profile_builder=SimpleNamespace(),  # type: ignore[arg-type]
+        profile_consolidator=_ThrottledConsolidator(),
+    )
+
+    result = await pipeline.tick()
+
+    assert memory.cognition_updates == []
+    assert result.layers_updated == []
+
+
+def test_scheduler_config_consolidation_fields(tmp_path: Path) -> None:
+    from openbiliclaw.config import load_config
+
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(
+        """
+[llm]
+default_provider = "ollama"
+
+[scheduler]
+profile_consolidation_enabled = false
+profile_consolidation_interval_hours = 6
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(cfg_path)
+    assert cfg.scheduler.profile_consolidation_enabled is False
+    assert cfg.scheduler.profile_consolidation_interval_hours == 6
+
+    defaults = load_config(tmp_path / "missing.toml")
+    assert defaults.scheduler.profile_consolidation_enabled is True
+    assert defaults.scheduler.profile_consolidation_interval_hours == 12

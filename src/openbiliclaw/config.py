@@ -208,6 +208,11 @@ class SchedulerConfig:
     delight_queue_limit: int = _DEFAULT_DELIGHT_QUEUE_LIMIT
     proactive_push_interval_seconds: int = _DEFAULT_PROACTIVE_PUSH_INTERVAL_SECONDS
     speculator_idle_interval_minutes: int = _DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES
+    # LLM-judged like/dislike topic consolidation (soul/consolidator.py).
+    # Runs from the pipeline tick at most once per interval; dirty-check
+    # and no-merge pair memory make steady-state runs nearly free.
+    profile_consolidation_enabled: bool = True
+    profile_consolidation_interval_hours: int = 12
     speculation_interval_minutes: int = 10
     speculation_ttl_days: int = 3
     speculation_cooldown_days: int = 7
@@ -766,6 +771,11 @@ def _build_config(raw: dict[str, Any]) -> Config:
                     sched_raw.get("speculator_idle_interval_minutes"),
                     default=_DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES,
                     min_value=5,
+                ),
+                "profile_consolidation_interval_hours": _normalize_scheduler_int(
+                    sched_raw.get("profile_consolidation_interval_hours"),
+                    default=12,
+                    min_value=1,
                 ),
                 "avoidance_speculation_interval_minutes": _normalize_scheduler_int(
                     sched_raw.get("avoidance_speculation_interval_minutes"),

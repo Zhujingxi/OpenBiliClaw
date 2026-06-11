@@ -443,6 +443,12 @@ class RuntimeContext:
             speculator_idle_interval_minutes=int(
                 getattr(new_config.scheduler, "speculator_idle_interval_minutes", 30)
             ),
+            profile_consolidation_enabled=bool(
+                getattr(new_config.scheduler, "profile_consolidation_enabled", True)
+            ),
+            profile_consolidation_interval_hours=int(
+                getattr(new_config.scheduler, "profile_consolidation_interval_hours", 12)
+            ),
             feedback_batch_threshold=int(
                 getattr(new_config.scheduler, "feedback_batch_threshold", 3)
             ),

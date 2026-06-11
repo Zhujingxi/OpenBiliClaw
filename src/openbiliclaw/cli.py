@@ -504,6 +504,10 @@ def _build_soul_engine() -> Any:
         ),
         avoidance_speculation_max_active=cfg.scheduler.avoidance_speculation_max_active,
         speculator_idle_interval_minutes=cfg.scheduler.speculator_idle_interval_minutes,
+        profile_consolidation_enabled=cfg.scheduler.profile_consolidation_enabled,
+        profile_consolidation_interval_hours=(
+            cfg.scheduler.profile_consolidation_interval_hours
+        ),
     )
 
 

@@ -91,6 +91,10 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
             getattr(config.scheduler, "avoidance_speculation_max_active", 5)
         ),
         speculator_idle_interval_minutes=config.scheduler.speculator_idle_interval_minutes,
+        profile_consolidation_enabled=config.scheduler.profile_consolidation_enabled,
+        profile_consolidation_interval_hours=(
+            config.scheduler.profile_consolidation_interval_hours
+        ),
     )
     llm_service = LLMService(
         registry=llm_registry,
