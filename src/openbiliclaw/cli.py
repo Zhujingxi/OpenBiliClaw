@@ -5458,6 +5458,84 @@ def _run_single_source_bootstrap(
     summary_renderer(scope_counts, status_label, len(events))
 
 
+@app.command("profile-consolidate")
+def profile_consolidate(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="真正写入合并结果。默认 dry-run：只打印建议，不改任何数据。",
+    ),
+) -> None:
+    """用 LLM 整理合并画像里重复的喜欢 / 讨厌主题。
+
+    兴趣标签和避雷主题会不断积累措辞变体（「智能体开发」vs
+    「智能体开发与实现」），把进入 prompt 的 top-64 名额挤占掉。
+    本命令按「规则合并 → embedding 聚类 → LLM 裁决 → 校验执行」
+    的流水线做同义合并，卡 64 边界整理（likes 只看权重 top-128）。
+
+    \b
+      - 默认 dry-run，先看建议再决定
+      - --apply 写入,自动备份到 data/memory/consolidation_runs/
+      - 审计记录追加到 data/memory/soul_changelog.md
+    """
+    import asyncio as _asyncio
+
+    from openbiliclaw.config import load_config
+    from openbiliclaw.llm.registry import build_embedding_service
+    from openbiliclaw.llm.service import LLMService, module_overrides_from_config
+    from openbiliclaw.soul.consolidator import ProfileConsolidator
+
+    _print_page_title("画像整理", "profile-consolidate")
+
+    cfg = load_config()
+    memory = _build_memory_manager()
+    registry = _build_registry()
+    llm_service = LLMService(
+        registry=registry,
+        memory=memory,
+        module_overrides=module_overrides_from_config(cfg),
+        concurrency=cfg.llm.concurrency,
+    )
+    embedding_service = None
+    try:
+        embedding_service = build_embedding_service(cfg, registry)
+    except Exception:
+        console.print("[dim]  embedding 服务不可用，退回子串聚类。[/dim]")
+
+    consolidator = ProfileConsolidator(
+        memory=memory,
+        llm_service=llm_service,
+        embedding_service=embedding_service,
+    )
+
+    mode_label = "[bold]apply[/bold]" if apply else "dry-run（加 --apply 才会写入）"
+    console.print(f"  模式: {mode_label}")
+    report = _asyncio.run(consolidator.run(dry_run=not apply))
+
+    if report.errors:
+        for err in report.errors:
+            console.print(f"[yellow]  ⚠ {err}[/yellow]")
+    console.print(f"  嫌疑簇送审: {report.clusters_sent} 个")
+    for rule_merge in report.rule_merges:
+        console.print(f"  [cyan][规则][/cyan] {rule_merge}")
+    for merge in report.merges:
+        members = " / ".join(str(m) for m in merge.get("members", []))
+        scope = "兴趣" if merge.get("scope") == "likes" else "避雷"
+        console.print(
+            f"  [green][{scope}][/green] {members} → [bold]{merge.get('canonical')}[/bold]"
+        )
+    for rejected in report.rejected_clusters:
+        console.print(f"  [dim][放弃簇] {rejected}[/dim]")
+    console.print(
+        f"\n  兴趣: {report.likes_before} → {report.likes_after}"
+        f"    避雷: {report.dislikes_before} → {report.dislikes_after}"
+    )
+    if not apply and (report.merges or report.rule_merges):
+        console.print("\n  [dim]满意的话用 --apply 真正写入。[/dim]")
+    if apply and (report.merges or report.rule_merges):
+        console.print(f"\n  [dim]已备份，run_id={report.run_id}[/dim]")
+
+
 @app.command("fetch-douyin")
 def fetch_douyin(
     wait_seconds: float = typer.Option(

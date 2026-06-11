@@ -1808,3 +1808,75 @@ def build_avoidance_generation_prompt(
         {"role": "system", "content": _AVOIDANCE_GENERATION_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
+
+
+_PROFILE_CONSOLIDATION_SYSTEM_PROMPT = (
+    "<task>\n"
+    "你是用户画像的整理器。输入是若干「嫌疑重复」的主题簇（cluster），\n"
+    "分为 likes（兴趣主题）和 dislikes（避雷主题）两组。\n"
+    "你要对每个簇内的主题做出裁决：哪些是同一概念的措辞变体（应合并），\n"
+    "哪些是真正不同的概念（应保留）。\n"
+    "</task>\n"
+    "\n"
+    "<rules>\n"
+    "1. 只能输出操作（op），不能输出整理后的列表。每个操作是 merge 或 keep。\n"
+    "2. merge 的 members 必须从该簇的 members 中【逐字原样复制】，一个字都不能改。\n"
+    "3. 每个簇内的每个主题，必须被 merge 或 keep 恰好覆盖一次，不能遗漏、不能重复。\n"
+    "4. merge 至少 2 个 members。canonical 是合并后的规范名：优先从 members 里选\n"
+    "   最准确的一个；只有当所有 members 都不够准确时才起新名，新名必须与\n"
+    "   members 同等具体，不得更宽泛。\n"
+    "5. 「合并」只适用于同一概念的措辞变体（如「智能体开发」vs「智能体开发与实现」）。\n"
+    "   子集/包含关系不是同义（如「篮球」vs「NBA」、「游戏」vs「手机游戏」），必须分别 keep。\n"
+    "6. dislikes 组的标准更严：只合并语义几乎相同的真同义项；【严禁向上泛化】——\n"
+    "   canonical 绝不能比 members 更宽泛（如把「一个案例反复切悬念拖时长」归并成\n"
+    "   「低质内容」是严重错误，会误伤大量正常内容）。拿不准时一律 keep。\n"
+    "7. likes 组可以稍宽松，但同样不允许把具体兴趣合并成大类。\n"
+    "8. 输出严格 JSON，不要附带解释文本。\n"
+    "9. 各变量见 user 消息：likes_clusters / dislikes_clusters（各簇带 cluster_id、\n"
+    "   members 及其权重元数据）。\n"
+    "</rules>\n"
+    "\n"
+    "<output_schema>\n"
+    "{\n"
+    '  "likes": [\n'
+    '    {"cluster_id": "L1", "op": "merge", "members": ["智能体开发", "智能体开发与实现"],\n'
+    '     "canonical": "智能体开发", "reason": "同一概念的措辞变体"},\n'
+    '    {"cluster_id": "L2", "op": "keep", "name": "篮球", "reason": "NBA 是其子集而非同义"},\n'
+    '    {"cluster_id": "L2", "op": "merge", "members": ["NBA篮球", "NBA球星动态"], "canonical": "NBA"}\n'
+    "  ],\n"
+    '  "dislikes": [\n'
+    '    {"cluster_id": "D1", "op": "merge", "members": ["偶像团体练习室内容", "偶像练习室物料"],\n'
+    '     "canonical": "偶像练习室物料"}\n'
+    "  ]\n"
+    "}\n"
+    "</output_schema>"
+)
+
+
+def build_profile_consolidation_prompt(
+    *,
+    likes_clusters: list[dict[str, object]],
+    dislikes_clusters: list[dict[str, object]],
+) -> list[dict[str, str]]:
+    """Build the prompt for LLM-judged consolidation of like/dislike topics.
+
+    Each cluster dict carries ``cluster_id`` and ``members`` (list of dicts
+    with name + weight metadata for likes, plain strings for dislikes).
+    System prompt is fully static (cache-friendly per CLAUDE.md convention);
+    all per-call data lives in the user message with deterministic
+    serialization.
+    """
+    user_prompt = "\n\n".join(
+        [
+            "<likes_clusters>",
+            json.dumps(likes_clusters, ensure_ascii=False, indent=2, sort_keys=True),
+            "</likes_clusters>",
+            "<dislikes_clusters>",
+            json.dumps(dislikes_clusters, ensure_ascii=False, indent=2, sort_keys=True),
+            "</dislikes_clusters>",
+        ]
+    )
+    return [
+        {"role": "system", "content": _PROFILE_CONSOLIDATION_SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
