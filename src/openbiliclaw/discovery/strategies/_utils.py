@@ -410,7 +410,11 @@ def build_profile_summary(profile: SoulProfile) -> dict[str, object]:
         "life_stage": profile.life_stage,
         "interest_domains": interest_domains,
         "interests": _extract_interest_tags(profile),
-        "favorite_up_users": profile.preferences.favorite_up_users[:5],
+        # favorite_up_users is intentionally excluded from the LLM-facing
+        # profile output: "常看某创作者" ≠ "对该创作者内容类型感兴趣", and it
+        # only invited the model to back-derive interests from creator names.
+        # The user's UP list still lives in /api/profile-summary (their own
+        # view) and seeds related_chain directly — just not here.
         "disliked_topics": profile.preferences.disliked_topics[:_DISLIKED_TOPICS_CAP],
         "deep_needs": profile.deep_needs[:5],
         "style": {

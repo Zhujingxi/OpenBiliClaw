@@ -575,9 +575,14 @@ class RecommendationEngine:
 
         Falls back to top-K by weight when embedding service is unavailable.
         """
+        # Candidate pool aligned with the profile summary's interest cap
+        # (30): a niche interest ranked #16-30 by weight should still be
+        # selectable when it's the best semantic match for this content.
+        # top_k (5) still bounds how many actually reach the prompt, so the
+        # wider pool improves coverage without growing prompt size.
         all_interests = [
             {"name": item.name, "category": item.category, "weight": item.weight}
-            for item in _interests_by_weight(profile)[:15]
+            for item in _interests_by_weight(profile)[:30]
         ]
         if not all_interests:
             return []
@@ -1052,7 +1057,7 @@ class RecommendationEngine:
                 "content_id": c.content_id or c.bvid,
                 "title": c.title,
                 "up_name": c.up_name or c.author_name,
-                "description": (c.description or "")[:200],
+                "description": (c.description or "")[:400],
                 "duration": c.duration,
                 "view_count": c.view_count,
                 "source_strategy": c.source_strategy,
@@ -1272,7 +1277,7 @@ class RecommendationEngine:
             content_summary={
                 "title": content.title,
                 "up_name": content.up_name,
-                "description": (content.description or "")[:300],
+                "description": (content.description or "")[:400],
                 "source_strategy": content.source_strategy,
                 "style_key": content.style_key,
                 "topic_group": content.topic_group,
@@ -1330,7 +1335,7 @@ class RecommendationEngine:
                 "content_id": item.content_id or item.bvid,
                 "title": item.title,
                 "up_name": item.up_name,
-                "description": (item.description or "")[:200],
+                "description": (item.description or "")[:400],
                 "source_strategy": item.source_strategy,
                 "style_key": item.style_key,
                 "topic_group": item.topic_group,

@@ -146,7 +146,7 @@ def build_preference_analysis_prompt(
 1. 只能根据提供的事件推断，不要猜测没有证据的结论。
 2. 输出必须是严格 JSON，不要附带解释。
 3. 如果证据不足，返回空数组、默认值或较低权重。
-4. 兴趣标签控制在 5~15 个以内，weight 在 0~1 之间。
+4. 兴趣标签控制在 5~25 个以内，weight 在 0~1 之间。证据充分时可多提，证据不足时宁可少提、给低权重，不要为了凑数编造标签。
 5. 所有文本字段（name、category、context 下的 patterns/session_type、disliked_topics）必须用中文。
 6. favorite_up_users 必须从事件的 up_name 字段原样复制，一个字都不能改。先逐条扫描所有事件收集 up_name 值，再与 existing_preference.favorite_up_users 合并去重。严禁根据话题推测可能的UP主名称。如果本批事件中无 up_name 字段，保留 existing_preference 中的原有列表不变。
 7. cognitive_style 描述用户的信息处理偏好（如思维方式、阅读习惯、理解路径），3~5 条，基于观看行为模式推断，不要照搬兴趣标签。
@@ -694,11 +694,6 @@ def build_search_queries_prompt(
    avoid_topics / avoid_styles / avoid_franchises 是软避让信号；prefer_axes 是优先补货方向。
    source_deficits 是平台/来源缺口信号，不是内容轴；不要把平台名当成 query 主题。
    不要为了避让而生成与用户画像无关的 query。
-10. favorite_up_users 是用户常看的 B 站 UP 主名单，仅供背景参考。
-    严禁从创作者名字推断其内容类型或专长领域，进而生成该类型的 query。
-    "关注/常看某创作者" ≠ "对该创作者的内容类型感兴趣"。
-    用户的内容兴趣已完整体现在 interest_domains / interests / speculative_interests 中，
-    不要从 favorite_up_users 另行推导兴趣方向。
 </rules>
 
 <output_schema>

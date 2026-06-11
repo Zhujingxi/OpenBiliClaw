@@ -13,6 +13,12 @@
 - **设置页冻结态提醒 UI**：新增 `describeFrozenUpdateStatus` 分支文案（「发现新版安装包 vX.Y.Z…请下载新版安装包完成升级」/「当前安装包已是最新」等），`update_available` 时显示「前往下载新安装包」按钮直达对应 `desktop-v*` Release 页；「立即检查」在冻结态可用，「立即应用」保持隐藏；`backend_update_available` 事件到达时按 tag 前缀区分文案弹 toast 提醒（安装包 → 引导下载，源码 → 普通提示）。开关与间隔输入在冻结态仍禁用（它们只管自动应用）。
 - **惊喜推荐加载数量三端统一生效**：新增 `[scheduler].delight_queue_limit`（默认 `20`，范围 `1..100`），`/api/delight/pending-batch` 在未显式传 `limit` 时读取该配置。桌面 Web 设置页保存该字段，插件 side panel 和移动 Web 默认不再写死 `20`，因此同一配置会随下一次队列拉取在三端同步生效。
 - **discovery / 评估画像输入上限放宽**：画像摘要扁平兴趣 tag 上限 10 → 30，兴趣域 / 兴趣 tag 一律按 weight 降序排序后再截断（域 tag 优先填充，画像越丰富的用户不再被列表顺序随机砍掉强兴趣）；`disliked_topics` 上限 discovery 侧 8 → 16、推荐侧 5 → 16；负例锚定 `negative_exemplars.MAX_LIMIT` 8 → 16；batch 评估 payload 的 `description` 截断 200 → 400 字符；`_select_relevant_interests()` embedding 候选池改为按 weight 排序取前 15。
+- **画像输出去掉 UP 主维度 + 偏好合并 bug 修复 + 避雷项近因排序**（接上一条的后续）：
+  - `build_profile_summary()` 不再输出 `favorite_up_users`，`build_search_queries_prompt` 同步删掉配套规则——避免模型从「常看某 UP」反推内容兴趣。用户的 UP 主清单仍在 `/api/profile-summary` 用户视图可见可编辑，并继续给 `RelatedChainStrategy` 当种子，只是不进 LLM 画像输出。
+  - 修复 `merge_preferences` 的 `favorite_up_users` 合并 bug：此前「本批一旦提到任意创作者就用本批列表整体替换历史」会丢掉之前确认过的 UP 主，改为旧 ∪ 新真正累积（与注释里声明的语义一致，`RelatedChainStrategy` 种子因此不再被偶发批次冲掉）。
+  - `disliked_topics` 合并从字典序集合并集改为**近因有序并集 + 上限 40**：本轮避雷项排在前，下游 `[:16]` 截断保留最新 / 最相关的雷点而非字典序靠前的那批；长期不再出现的雷点滑出尾部衰减。
+  - `build_preference_analysis_prompt` 每轮兴趣 tag 上限 5~15 → 5~25（证据充分可多提，不足时仍少提低权重，不凑数），让冷启动 / 富历史用户首轮就能填满放宽后的 30 槽画像输出。
+  - 推荐重评估 / 批量文案 / delight 评分 / delight 理由四处候选 `description` 截断统一对齐 400 字符（原 200 / 300 / 280），与 discovery 评估一致；MMR 去重 embedding 文本保持不变（缓存 key）。
 
 ## v0.3.119: 自动更新冻结包守卫与状态体验（2026-06-11）
 

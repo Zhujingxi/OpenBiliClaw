@@ -427,7 +427,8 @@ active 池会做两层多样性保护：词面 / specifics 的 novelty guard 阻
   - `first_seen` 保留最早值
   - `last_seen` 更新到现在
   - `weight` 取旧值和新值的较大者
-- `favorite_up_users` 和 `disliked_topics` 走集合并集，不会丢历史值
+- `favorite_up_users` 走旧 ∪ 新集合并集累积，不会丢历史值（修正了此前「本批一旦提到任意创作者就整体替换历史列表」的 bug）
+- `disliked_topics` 走**近因有序并集**：本轮避雷项排在前，与历史去重后再截到 `_DISLIKED_TOPICS_STORE_CAP`（40）。每轮被重新标记的雷点会冒到前面，长期不再出现的雷点滑出尾部衰减掉。下游 `[:16]` 截断因此保留最新 / 最相关的避雷项，而非旧实现里按字典序排在前的那批
 - `style/context` 先继承默认值，再叠加旧状态，再叠加新状态
 
 这意味着行为事件对画像的第一影响，通常不是直接改 `personality_portrait`，而是先慢慢把偏好层往一个更稳定的方向推。
