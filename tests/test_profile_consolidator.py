@@ -168,6 +168,7 @@ async def test_llm_merge_applies_weight_and_timestamps(tmp_path: Path) -> None:
     runs = list((tmp_path / "consolidation_runs").glob("*.json"))
     assert len(runs) == 1
     record = json.loads(runs[0].read_text(encoding="utf-8"))
+    assert record["kind"] == "consolidation"
     assert record["rename_map"] == {"智能体开发与实现": "智能体开发"}
     assert len(record["before"]["interests"]) == 3
     # Audit entry appended

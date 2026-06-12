@@ -102,6 +102,26 @@ class SupportsEmbed(Protocol):
     async def embed(self, text: str) -> list[float]: ...
 
 
+def rebuild_profile_tree(memory: MemoryManager, preference_data: dict[str, object]) -> None:
+    """Rebuild the Onion interest tree from a flat preference payload."""
+    from openbiliclaw.soul.profile import OnionProfile
+
+    soul_layer = memory.get_layer("soul")
+    if not soul_layer.data:
+        return
+    try:
+        profile = OnionProfile.from_dict(dict(soul_layer.data))
+        profile.populate_from_flat_preference(preference_data)
+        soul_layer.data.clear()
+        soul_layer.data.update(profile.to_dict())
+        soul_layer.save()
+        sync = getattr(memory, "sync_profile_files", None)
+        if callable(sync):
+            sync(profile)
+    except Exception:
+        logger.exception("Failed to rebuild profile tree after consolidation")
+
+
 @dataclass
 class ConsolidationReport:
     """Outcome of one consolidation pass."""
@@ -594,22 +614,7 @@ class ProfileConsolidator:
 
     def _rebuild_profile_tree(self, preference_data: dict[str, object]) -> None:
         """Rebuild the Onion interest tree from the consolidated flat preference."""
-        from openbiliclaw.soul.profile import OnionProfile
-
-        soul_layer = self._memory.get_layer("soul")
-        if not soul_layer.data:
-            return
-        try:
-            profile = OnionProfile.from_dict(dict(soul_layer.data))
-            profile.populate_from_flat_preference(preference_data)
-            soul_layer.data.clear()
-            soul_layer.data.update(profile.to_dict())
-            soul_layer.save()
-            sync = getattr(self._memory, "sync_profile_files", None)
-            if callable(sync):
-                sync(profile)
-        except Exception:
-            logger.exception("Failed to rebuild profile tree after consolidation")
+        rebuild_profile_tree(self._memory, preference_data)
 
     # -- Overrides passthrough + revert ------------------------------------------------
 
@@ -760,6 +765,7 @@ class ProfileConsolidator:
             runs_dir.mkdir(parents=True, exist_ok=True)
             record = {
                 "run_id": report.run_id,
+                "kind": "consolidation",
                 "before": before_snapshot,
                 "rule_merges": report.rule_merges,
                 "merges": report.merges,
