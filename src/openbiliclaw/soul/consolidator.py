@@ -9,8 +9,9 @@ concept, crowding genuinely distinct interests out of the boundary.
 
 The consolidator runs a staged, mostly-free pipeline:
 
-1. **Rule layer** — identical names with different categories merge in
-   code (no LLM).
+1. **Rule layer** — identical names within the same category merge in
+   code (no LLM); identical names across categories are forced to LLM
+   judgement as homonym-safety clusters.
 2. **Clustering** — embedding cosine similarity (or substring fallback)
    groups suspect duplicates. Only multi-member clusters proceed.
 3. **No-merge memory** — pairs an earlier run already judged "distinct"
@@ -147,6 +148,17 @@ class _Cluster:
     cluster_id: str
     scope: str  # "likes" | "dislikes"
     members: list[str]
+    member_categories: list[str] | None = None
+
+    @property
+    def member_keys(self) -> list[str]:
+        """No-merge pair keys. Homonym clusters qualify duplicate names by category."""
+        if self.member_categories is None:
+            return list(self.members)
+        return [
+            f"{name}::{category}"
+            for name, category in zip(self.members, self.member_categories, strict=True)
+        ]
 
 
 def _pair_key(a: str, b: str) -> str:
@@ -250,8 +262,8 @@ class ProfileConsolidator:
             "disliked_topics": list(dislikes_raw),
         }
 
-        # ── Stage 0: rule layer — same name, different category ────────────
-        interests, rule_merges = self._rule_merge_exact_names(interests_raw)
+        # ── Stage 0: rule layer — same name + same category ───────────────
+        interests, rule_merges, homonym_groups = self._rule_merge_exact_names(interests_raw)
         report.rule_merges = rule_merges
 
         # ── Boundary slice ─────────────────────────────────────────────────
@@ -261,11 +273,20 @@ class ProfileConsolidator:
         # ── Stage 1: clustering ────────────────────────────────────────────
         state = self._load_state()
         no_merge: set[str] = set(str(p) for p in state.get("no_merge_pairs", []))
+        forced_clusters = [
+            _Cluster(
+                cluster_id=f"H{idx + 1}",
+                scope="likes",
+                members=[str(item.get("name", "")) for item in group],
+                member_categories=[str(item.get("category", "")) for item in group],
+            )
+            for idx, group in enumerate(homonym_groups)
+        ]
         like_clusters = await self._cluster(like_slice_names, scope="likes")
         dislike_clusters = await self._cluster(dislikes_raw, scope="dislikes")
         clusters = [
             cluster
-            for cluster in (*like_clusters, *dislike_clusters)
+            for cluster in (*forced_clusters, *like_clusters, *dislike_clusters)
             if self._has_unjudged_pair(cluster, no_merge)
         ]
         report.clusters_sent = len(clusters)
@@ -335,6 +356,13 @@ class ProfileConsolidator:
         # Record judged-distinct pairs so future runs skip them, and
         # advance run bookkeeping even on no-op runs.
         for cluster in judged_clusters:
+            if cluster.member_categories is not None:
+                if not any(op.get("cluster_id") == cluster.cluster_id for op in valid_ops):
+                    keys = cluster.member_keys
+                    for i, a in enumerate(keys):
+                        for b in keys[i + 1 :]:
+                            no_merge.add(_pair_key(a, b))
+                continue
             survivors = self._cluster_survivors(cluster, valid_ops)
             for i, a in enumerate(survivors):
                 for b in survivors[i + 1 :]:
@@ -351,16 +379,17 @@ class ProfileConsolidator:
 
     def _rule_merge_exact_names(
         self, interests: list[dict[str, Any]]
-    ) -> tuple[list[dict[str, Any]], list[str]]:
-        """Merge entries whose normalized names are identical (category differs)."""
-        by_name: dict[str, dict[str, Any]] = {}
-        order: list[str] = []
+    ) -> tuple[list[dict[str, Any]], list[str], list[list[dict[str, Any]]]]:
+        """Merge same normalized name within the same category only."""
+        by_key: dict[tuple[str, str], dict[str, Any]] = {}
+        order: list[tuple[str, str]] = []
         merges: list[str] = []
         for item in interests:
-            key = _normalize_name(str(item["name"]))
-            existing = by_name.get(key)
+            category = str(item.get("category", "")).strip()
+            key = (_normalize_name(str(item["name"])), category)
+            existing = by_key.get(key)
             if existing is None:
-                by_name[key] = item
+                by_key[key] = item
                 order.append(key)
                 continue
             winner, loser = (
@@ -374,12 +403,15 @@ class ProfileConsolidator:
             )
             merged["first_seen"] = _earliest(winner.get("first_seen"), loser.get("first_seen"))
             merged["last_seen"] = _latest(winner.get("last_seen"), loser.get("last_seen"))
-            by_name[key] = merged
-            merges.append(
-                f"同名合并: {winner.get('name')} "
-                f"({winner.get('category')} ∪ {loser.get('category')})"
-            )
-        return [by_name[key] for key in order], merges
+            by_key[key] = merged
+            merges.append(f"同名同类合并: {winner.get('name')} ({category})")
+
+        result = [by_key[key] for key in order]
+        homonym_by_name: dict[str, list[dict[str, Any]]] = {}
+        for item in result:
+            homonym_by_name.setdefault(_normalize_name(str(item.get("name", ""))), []).append(item)
+        homonym_groups = [group for group in homonym_by_name.values() if len(group) >= 2]
+        return result, merges, homonym_groups
 
     # -- Stage 1: clustering ------------------------------------------------------
 
@@ -440,9 +472,9 @@ class ProfileConsolidator:
 
     @staticmethod
     def _has_unjudged_pair(cluster: _Cluster, no_merge: set[str]) -> bool:
-        members = cluster.members
-        for i, a in enumerate(members):
-            for b in members[i + 1 :]:
+        keys = cluster.member_keys
+        for i, a in enumerate(keys):
+            for b in keys[i + 1 :]:
                 if _pair_key(a, b) not in no_merge:
                     return True
         return False

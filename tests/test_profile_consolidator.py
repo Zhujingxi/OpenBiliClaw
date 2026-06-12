@@ -89,7 +89,7 @@ def _interest(name: str, weight: float, category: str = "科技", **extra: Any) 
     }
 
 
-async def test_rule_layer_merges_same_name_across_categories(tmp_path: Path) -> None:
+async def test_same_name_cross_category_no_longer_rule_merged(tmp_path: Path) -> None:
     memory = _FakeMemory(
         {
             "interests": [
@@ -106,14 +106,129 @@ async def test_rule_layer_merges_same_name_across_categories(tmp_path: Path) -> 
     report = await consolidator.run(dry_run=False)
 
     interests = memory.get_layer("preference").data["interests"]
-    names = [item["name"] for item in interests]
-    assert names == ["人工智能", "篮球"]
-    ai = interests[0]
-    assert ai["weight"] == 0.98
-    assert ai["category"] == "技术"  # higher-weight entry wins the metadata
-    assert ai["first_seen"] == "2026-01-01T00:00:00"  # earliest survives
+    names_cats = {(item["name"], item["category"]) for item in interests}
+    assert names_cats == {("人工智能", "技术"), ("人工智能", "科技"), ("篮球", "体育")}
+    assert report.rule_merges == []
+    assert report.clusters_sent == 1
+    assert any("llm" in err for err in report.errors)
+    assert memory.get_layer("preference").save_count == 0
+
+
+async def test_same_name_same_category_merged_at_stage_zero(tmp_path: Path) -> None:
+    memory = _FakeMemory(
+        {
+            "interests": [
+                _interest("猫咪", 0.8, "萌宠", first_seen="2026-02-01T00:00:00"),
+                _interest("猫咪", 0.6, "萌宠", first_seen="2026-01-01T00:00:00"),
+            ],
+            "disliked_topics": [],
+        },
+        data_dir=tmp_path,
+    )
+    consolidator = ProfileConsolidator(memory=memory, llm_service=None, data_dir=tmp_path)
+
+    report = await consolidator.run(dry_run=False)
+
+    interests = memory.get_layer("preference").data["interests"]
+    assert len(interests) == 1
+    assert interests[0]["name"] == "猫咪"
+    assert interests[0]["category"] == "萌宠"
+    assert interests[0]["weight"] == 0.8
+    assert interests[0]["first_seen"] == "2026-01-01T00:00:00"
     assert len(report.rule_merges) == 1
     assert memory.get_layer("preference").save_count == 1
+
+
+async def test_homonym_not_rule_merged_and_forced_into_cluster(tmp_path: Path) -> None:
+    memory = _FakeMemory(
+        {
+            "interests": [
+                _interest("苹果", 0.9, "科技"),
+                _interest("苹果", 0.5, "美食"),
+            ],
+            "disliked_topics": [],
+        },
+        data_dir=tmp_path,
+    )
+    consolidator = ProfileConsolidator(memory=memory, llm_service=None, data_dir=tmp_path)
+
+    report = await consolidator.run(dry_run=False)
+
+    stored_interests = memory.get_layer("preference").data["interests"]
+    names_cats = {
+        (item["name"], item["category"])
+        for item in stored_interests
+    }
+    assert names_cats == {("苹果", "科技"), ("苹果", "美食")}
+    assert report.rule_merges == []
+    assert report.clusters_sent == 1
+    assert any("llm" in err for err in report.errors)
+
+
+async def test_homonym_keep_both_pins_no_merge_with_qualified_keys(tmp_path: Path) -> None:
+    memory = _FakeMemory(
+        {
+            "interests": [
+                _interest("苹果", 0.9, "科技"),
+                _interest("苹果", 0.5, "美食"),
+            ],
+            "disliked_topics": [],
+        },
+        data_dir=tmp_path,
+    )
+    llm = _StubLLM(
+        {
+            "likes": [
+                {"cluster_id": "H1", "op": "keep", "name": "苹果"},
+                {"cluster_id": "H1", "op": "keep", "name": "苹果"},
+            ],
+            "dislikes": [],
+        }
+    )
+    consolidator = ProfileConsolidator(memory=memory, llm_service=llm, data_dir=tmp_path)
+
+    first = await consolidator.run(dry_run=False)
+    second = await consolidator.run(dry_run=False)
+
+    assert first.clusters_sent == 1
+    assert second.clusters_sent == 0
+    assert llm.calls == 1
+
+
+async def test_homonym_merge_collapses_both_entries(tmp_path: Path) -> None:
+    memory = _FakeMemory(
+        {
+            "interests": [
+                _interest("苹果", 0.9, "科技"),
+                _interest("苹果", 0.5, "美食"),
+            ],
+            "disliked_topics": [],
+        },
+        data_dir=tmp_path,
+    )
+    llm = _StubLLM(
+        {
+            "likes": [
+                {
+                    "cluster_id": "H1",
+                    "op": "merge",
+                    "members": ["苹果", "苹果"],
+                    "canonical": "苹果",
+                }
+            ],
+            "dislikes": [],
+        }
+    )
+    consolidator = ProfileConsolidator(memory=memory, llm_service=llm, data_dir=tmp_path)
+
+    report = await consolidator.run(dry_run=False)
+
+    interests = memory.get_layer("preference").data["interests"]
+    assert len(interests) == 1
+    assert interests[0]["name"] == "苹果"
+    assert interests[0]["category"] == "科技"
+    assert interests[0]["weight"] == 0.9
+    assert report.merges and report.merges[0]["members"] == ["苹果", "苹果"]
 
 
 async def test_llm_merge_applies_weight_and_timestamps(tmp_path: Path) -> None:
