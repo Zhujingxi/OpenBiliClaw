@@ -290,6 +290,77 @@ async def test_llm_merge_applies_weight_and_timestamps(tmp_path: Path) -> None:
     assert "画像整理" in (tmp_path / "soul_changelog.md").read_text(encoding="utf-8")
 
 
+async def test_likes_judge_payload_carries_category(tmp_path: Path) -> None:
+    memory = _FakeMemory(
+        {
+            "interests": [
+                _interest("智能体开发", 0.97, "科技"),
+                _interest("智能体开发与实现", 0.88, "科技"),
+            ],
+            "disliked_topics": [],
+        },
+        data_dir=tmp_path,
+    )
+    llm = _StubLLM(
+        {
+            "likes": [
+                {
+                    "cluster_id": "L1",
+                    "op": "merge",
+                    "members": ["智能体开发", "智能体开发与实现"],
+                    "canonical": "智能体开发",
+                }
+            ],
+            "dislikes": [],
+        }
+    )
+    consolidator = ProfileConsolidator(
+        memory=memory,
+        llm_service=llm,
+        embedding_service=_StubEmbedding([["智能体开发", "智能体开发与实现"]]),
+        data_dir=tmp_path,
+    )
+
+    await consolidator.run(dry_run=False)
+
+    assert '"category": "科技"' in llm.last_user_input
+
+
+async def test_forced_homonym_payload_distinguishes_by_category(tmp_path: Path) -> None:
+    memory = _FakeMemory(
+        {
+            "interests": [
+                _interest("苹果", 0.9, "科技"),
+                _interest("苹果", 0.5, "美食"),
+            ],
+            "disliked_topics": [],
+        },
+        data_dir=tmp_path,
+    )
+    llm = _StubLLM(
+        {
+            "likes": [
+                {"cluster_id": "H1", "op": "keep", "name": "苹果"},
+                {"cluster_id": "H1", "op": "keep", "name": "苹果"},
+            ],
+            "dislikes": [],
+        }
+    )
+    consolidator = ProfileConsolidator(memory=memory, llm_service=llm, data_dir=tmp_path)
+
+    await consolidator.run(dry_run=False)
+
+    assert '"category": "科技"' in llm.last_user_input
+    assert '"category": "美食"' in llm.last_user_input
+
+
+def test_consolidation_system_prompt_has_homonym_keep_rule() -> None:
+    from openbiliclaw.llm.prompts import _PROFILE_CONSOLIDATION_SYSTEM_PROMPT
+
+    assert "同名异义" in _PROFILE_CONSOLIDATION_SYSTEM_PROMPT
+    assert "category" in _PROFILE_CONSOLIDATION_SYSTEM_PROMPT
+
+
 async def test_dislike_merge_keeps_frontmost_position(tmp_path: Path) -> None:
     memory = _FakeMemory(
         {

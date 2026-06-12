@@ -490,12 +490,30 @@ class ProfileConsolidator:
             for item in preference_layer.data.get("interests", [])
             if isinstance(item, dict)
         }
+        category_by_name: dict[str, str] = {}
+        best_weight_by_name: dict[str, float] = {}
+        for item in preference_layer.data.get("interests", []):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", ""))
+            weight = _coerce_float(item.get("weight"))
+            if name not in best_weight_by_name or weight > best_weight_by_name[name]:
+                best_weight_by_name[name] = weight
+                category_by_name[name] = str(item.get("category", ""))
         likes_payload: list[dict[str, object]] = [
             {
                 "cluster_id": c.cluster_id,
                 "members": [
-                    {"name": name, "weight": round(weight_by_name.get(name, 0.0), 3)}
-                    for name in c.members
+                    {
+                        "name": name,
+                        "weight": round(weight_by_name.get(name, 0.0), 3),
+                        "category": (
+                            c.member_categories[idx]
+                            if c.member_categories is not None
+                            else category_by_name.get(name, "")
+                        ),
+                    }
+                    for idx, name in enumerate(c.members)
                 ],
             }
             for c in clusters
