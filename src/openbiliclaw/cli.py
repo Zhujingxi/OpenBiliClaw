@@ -5589,7 +5589,9 @@ def profile_consolidate(
                 f"run_id={migration_report.run_id}（--revert {migration_report.run_id} 可回滚）"
                 "[/dim]"
             )
-        degraded = migration_report.errors == ["llm: service unavailable"]
+        degraded = (
+            len(migration_report.errors) == 1 and migration_report.errors[0].startswith("llm:")
+        )
         if migration_report.errors and not migration_report.mapping and not degraded:
             raise typer.Exit(code=1)
         return

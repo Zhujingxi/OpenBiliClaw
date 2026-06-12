@@ -53,6 +53,11 @@ class _StubLLM:
         return SimpleNamespace(content=json.dumps(self.payload, ensure_ascii=False))
 
 
+class _FailingLLM:
+    async def complete_structured_task(self, **_: Any) -> Any:
+        raise RuntimeError("llm down")
+
+
 def _interest(name: str, category: str, weight: float = 0.8) -> dict[str, Any]:
     return {
         "name": name,
@@ -181,6 +186,21 @@ async def test_llm_unavailable_degrades_to_preview(tmp_path: Path) -> None:
     assert report.histogram == {"泛娱乐": 2, "宠物": 1, "科技": 1}
     assert report.errors == ["llm: service unavailable"]
     assert memory.get_layer("preference").save_count == 0
+
+
+async def test_llm_call_failure_degrades_to_preview(tmp_path: Path) -> None:
+    from openbiliclaw.soul.category_migration import CategoryMigrator
+
+    memory = _memory(tmp_path)
+
+    migrator = CategoryMigrator(memory=memory, llm_service=_FailingLLM(), data_dir=tmp_path)
+    report = await migrator.run(dry_run=False)
+
+    assert report.histogram == {"泛娱乐": 2, "宠物": 1, "科技": 1}
+    assert report.mapping == {}
+    assert report.errors == ["llm: llm down"]
+    assert memory.get_layer("preference").save_count == 0
+    assert not (tmp_path / "consolidation_runs").exists()
 
 
 async def test_empty_category_assigned_fallback(tmp_path: Path) -> None:

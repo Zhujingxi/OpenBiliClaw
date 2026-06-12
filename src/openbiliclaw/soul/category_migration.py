@@ -73,7 +73,12 @@ class CategoryMigrator:
             report.errors.append("llm: service unavailable")
             return report
 
-        mapping = await self._load_mapping_from_llm(nonempty_categories, histogram)
+        try:
+            mapping = await self._load_mapping_from_llm(nonempty_categories, histogram)
+        except Exception as exc:
+            logger.warning("category migration LLM call failed: %s", exc)
+            report.errors.append(f"llm: {exc}")
+            return report
         for category in nonempty_categories:
             if category in CATEGORY_VOCAB:
                 mapping[category] = category
