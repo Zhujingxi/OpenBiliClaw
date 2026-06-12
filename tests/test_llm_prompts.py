@@ -665,9 +665,7 @@ def test_category_mapping_prompt_user_message_carries_vocab_and_histogram() -> N
     from openbiliclaw.llm.prompts import build_category_mapping_prompt
     from openbiliclaw.soul.taxonomy import CATEGORY_VOCAB
 
-    messages = build_category_mapping_prompt(
-        categories=[{"category": "泛娱乐", "tag_count": 12}]
-    )
+    messages = build_category_mapping_prompt(categories=[{"category": "泛娱乐", "tag_count": 12}])
     system = messages[0]["content"]
     user = messages[1]["content"]
 

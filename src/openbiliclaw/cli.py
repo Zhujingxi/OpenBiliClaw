@@ -505,9 +505,7 @@ def _build_soul_engine() -> Any:
         avoidance_speculation_max_active=cfg.scheduler.avoidance_speculation_max_active,
         speculator_idle_interval_minutes=cfg.scheduler.speculator_idle_interval_minutes,
         profile_consolidation_enabled=cfg.scheduler.profile_consolidation_enabled,
-        profile_consolidation_interval_hours=(
-            cfg.scheduler.profile_consolidation_interval_hours
-        ),
+        profile_consolidation_interval_hours=(cfg.scheduler.profile_consolidation_interval_hours),
     )
 
 
@@ -5579,15 +5577,9 @@ def profile_consolidate(
             migration_report.mapping.items(),
             key=lambda item: -migration_report.histogram.get(item[0], 0),
         ):
-            console.print(
-                f"  {old}({migration_report.histogram.get(old, 0)}) → [bold]{new}[/bold]"
-            )
+            console.print(f"  {old}({migration_report.histogram.get(old, 0)}) → [bold]{new}[/bold]")
         if migration_report.mapping:
-            suffix = (
-                "  [yellow]⚠ 超过 10%[/yellow]"
-                if migration_report.other_ratio > 0.10
-                else ""
-            )
+            suffix = "  [yellow]⚠ 超过 10%[/yellow]" if migration_report.other_ratio > 0.10 else ""
             console.print(f"\n  「其他」占比: {migration_report.other_ratio:.1%}{suffix}")
         if not apply and migration_report.mapping:
             console.print("\n  [dim]满意的话用 --apply 真正写入。[/dim]")

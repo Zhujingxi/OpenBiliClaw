@@ -100,9 +100,9 @@ async def test_validation_gap_aborts_with_zero_writes(tmp_path: Path) -> None:
 
     memory = _memory(tmp_path)
     missing = _StubLLM({"mapping": {"泛娱乐": "娱乐", "科技": "科技"}})
-    report = await CategoryMigrator(
-        memory=memory, llm_service=missing, data_dir=tmp_path
-    ).run(dry_run=False)
+    report = await CategoryMigrator(memory=memory, llm_service=missing, data_dir=tmp_path).run(
+        dry_run=False
+    )
 
     assert report.errors
     assert report.mapping == {}
@@ -110,9 +110,9 @@ async def test_validation_gap_aborts_with_zero_writes(tmp_path: Path) -> None:
     assert not (tmp_path / "consolidation_runs").exists()
 
     bad_target = _StubLLM({"mapping": {"泛娱乐": "娱乐", "宠物": "数码", "科技": "科技"}})
-    report = await CategoryMigrator(
-        memory=memory, llm_service=bad_target, data_dir=tmp_path
-    ).run(dry_run=False)
+    report = await CategoryMigrator(memory=memory, llm_service=bad_target, data_dir=tmp_path).run(
+        dry_run=False
+    )
 
     assert report.errors
     assert report.mapping == {}

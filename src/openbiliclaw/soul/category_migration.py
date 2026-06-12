@@ -53,9 +53,7 @@ class CategoryMigrator:
         resolved_dir = data_dir or getattr(memory, "_data_dir", None)
         self._data_dir = Path(resolved_dir) if resolved_dir else None
 
-    async def run(
-        self, *, dry_run: bool, now: datetime | None = None
-    ) -> CategoryMigrationReport:
+    async def run(self, *, dry_run: bool, now: datetime | None = None) -> CategoryMigrationReport:
         """Run a dry-run preview or apply the validated category mapping."""
         current = now or datetime.now()
         report = CategoryMigrationReport(
@@ -212,9 +210,7 @@ def _interests_from_layer(preference_data: dict[str, object]) -> list[dict[str, 
     if not isinstance(raw, list):
         return []
     return [
-        dict(item)
-        for item in raw
-        if isinstance(item, dict) and str(item.get("name", "")).strip()
+        dict(item) for item in raw if isinstance(item, dict) and str(item.get("name", "")).strip()
     ]
 
 
@@ -238,9 +234,7 @@ def _validate_mapping(mapping: dict[str, str], expected_categories: list[str]) -
         errors.append(f"mapping missing categories: {missing}")
     if extra:
         errors.append(f"mapping has unknown categories: {extra}")
-    invalid_targets = {
-        old: new for old, new in mapping.items() if new not in CATEGORY_VOCAB
-    }
+    invalid_targets = {old: new for old, new in mapping.items() if new not in CATEGORY_VOCAB}
     if invalid_targets:
         errors.append(f"mapping targets outside vocab: {invalid_targets}")
     return errors

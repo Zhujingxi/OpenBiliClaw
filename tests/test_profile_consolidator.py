@@ -209,10 +209,7 @@ async def test_homonym_not_rule_merged_and_forced_into_cluster(tmp_path: Path) -
     report = await consolidator.run(dry_run=False)
 
     stored_interests = memory.get_layer("preference").data["interests"]
-    names_cats = {
-        (item["name"], item["category"])
-        for item in stored_interests
-    }
+    names_cats = {(item["name"], item["category"]) for item in stored_interests}
     assert names_cats == {("苹果", "科技"), ("苹果", "美食")}
     assert report.rule_merges == []
     assert report.clusters_sent == 1
@@ -416,10 +413,7 @@ def test_consolidation_system_prompt_has_homonym_keep_rule() -> None:
 
 
 async def test_full_boundary_surfaces_clusters_beyond_top128(tmp_path: Path) -> None:
-    interests = [
-        _interest(f"普通兴趣{i}", 1.0 - i * 0.001)
-        for i in range(150)
-    ]
+    interests = [_interest(f"普通兴趣{i}", 1.0 - i * 0.001) for i in range(150)]
     interests[140]["name"] = "长尾同义A"
     interests[141]["name"] = "长尾同义B"
     memory = _FakeMemory({"interests": interests, "disliked_topics": []}, data_dir=tmp_path)

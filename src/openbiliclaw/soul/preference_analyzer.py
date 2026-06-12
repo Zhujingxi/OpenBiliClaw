@@ -675,9 +675,7 @@ class PreferenceAnalyzer:
         ]
         return normalized
 
-    async def _normalize_and_resolve(
-        self, raw_preference: dict[str, object]
-    ) -> dict[str, object]:
+    async def _normalize_and_resolve(self, raw_preference: dict[str, object]) -> dict[str, object]:
         normalized = self._normalize_preference(raw_preference)
         for key in ("interests", "speculative_interests"):
             items = normalized.get(key, [])
