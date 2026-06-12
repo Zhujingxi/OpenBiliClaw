@@ -5589,9 +5589,9 @@ def profile_consolidate(
                 f"run_id={migration_report.run_id}（--revert {migration_report.run_id} 可回滚）"
                 "[/dim]"
             )
-        degraded = (
-            len(migration_report.errors) == 1 and migration_report.errors[0].startswith("llm:")
-        )
+        # 只有「LLM 服务不可用」是降级只读预览（打印 histogram 即成功，code=0）；
+        # LLM 调用异常 / 映射校验失败必须非零退出，脚本化调用才能区分失败与预览。
+        degraded = migration_report.errors == ["llm: service unavailable"]
         if migration_report.errors and not migration_report.mapping and not degraded:
             raise typer.Exit(code=1)
         return
