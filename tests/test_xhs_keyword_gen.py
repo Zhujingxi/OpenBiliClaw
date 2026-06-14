@@ -55,3 +55,58 @@ async def test_xhs_keyword_prompt_uses_unified_profile_summary() -> None:
     assert "interest_domains" in user_input
     assert "标题党" in user_input
     assert "name | category | weight" not in user_input
+
+
+@dataclass
+class _RaisingLLM:
+    calls: list[dict[str, object]] = field(default_factory=list)
+
+    async def complete_structured_task(
+        self,
+        *,
+        system_instruction: str,
+        user_input: str,
+        history: list[dict[str, str]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        caller: str = "",
+        reasoning_effort: str | None = None,
+    ) -> object:
+        self.calls.append({"caller": caller})
+        raise RuntimeError("llm down")
+
+
+def _two_interest_profile() -> SoulProfile:
+    return SoulProfile(
+        preferences=PreferenceLayer(
+            interests=[
+                InterestTag(name="露营", category="生活", weight=0.9),
+                InterestTag(name="和田玉", category="文玩", weight=0.7),
+            ]
+        )
+    )
+
+
+async def test_xhs_falls_back_to_interest_names_on_llm_failure() -> None:
+    # LLM unavailable/fails → deterministic interest names (weight desc), not [].
+    keywords = await generate_xhs_keywords(_RaisingLLM(), _two_interest_profile(), count=5)  # type: ignore[arg-type]
+    assert keywords == ["露营", "和田玉"]
+
+
+async def test_xhs_falls_back_on_non_json() -> None:
+    llm = _RecordingLLM("not json at all")
+    keywords = await generate_xhs_keywords(llm, _two_interest_profile(), count=5)  # type: ignore[arg-type]
+    assert keywords == ["露营", "和田玉"]
+
+
+async def test_xhs_falls_back_on_empty_keywords() -> None:
+    llm = _RecordingLLM('{"keywords": []}')
+    keywords = await generate_xhs_keywords(llm, _two_interest_profile(), count=5)  # type: ignore[arg-type]
+    assert keywords == ["露营", "和田玉"]
+
+
+async def test_xhs_empty_when_no_interests() -> None:
+    profile = SoulProfile(preferences=PreferenceLayer(interests=[]))
+    llm = _RecordingLLM('{"keywords": ["x"]}')
+    keywords = await generate_xhs_keywords(llm, profile, count=5)  # type: ignore[arg-type]
+    assert keywords == []

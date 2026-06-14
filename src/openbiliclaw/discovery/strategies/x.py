@@ -182,11 +182,17 @@ class XSearchStrategy:
         return results
 
     async def _generate_keywords(self, profile: SoulProfile) -> list[str]:
-        if self.llm_service is None:
-            return []
         if not profile.preferences.interests:
             return []
+        keywords = await self._llm_keywords(profile)
+        # Deterministic fallback when LLM is unavailable / fails / returns
+        # nothing — so the unified planner (and the legacy path) never loses X
+        # to a transient failure (mirrors B站/YouTube/抖音).
+        return keywords or _x_interest_fallback(profile, self.keywords_per_run)
 
+    async def _llm_keywords(self, profile: SoulProfile) -> list[str]:
+        if self.llm_service is None:
+            return []
         try:
             response = await self.llm_service.complete_structured_task(
                 system_instruction=_KEYWORDS_SYSTEM_PROMPT,
@@ -195,7 +201,7 @@ class XSearchStrategy:
                 max_tokens=512,
                 caller="discovery.x.keyword_gen",
             )
-        except Exception as exc:  # noqa: BLE001 - degrade to "nothing this cycle"
+        except Exception as exc:  # noqa: BLE001 - degrade to fallback
             logger.warning("x keyword LLM call failed: %s", exc)
             return []
 
@@ -216,6 +222,24 @@ def _build_keyword_user_prompt(profile: SoulProfile, count: int) -> str:
         + "请基于上面画像里的兴趣（interests / interest_domains），结合 disliked_topics 避雷，"
         + f"输出 {count} 个适合 X 搜索的关键词。"
     )
+
+
+def _x_interest_fallback(profile: SoulProfile, count: int) -> list[str]:
+    """Deterministic interest-name keywords (mirrors B站/YouTube/抖音 fallback)."""
+    ranked = sorted(
+        profile.preferences.interests, key=lambda tag: float(tag.weight or 0.0), reverse=True
+    )
+    seen: set[str] = set()
+    out: list[str] = []
+    for tag in ranked:
+        name = str(tag.name).strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+        if len(out) >= count:
+            break
+    return out
 
 
 # ── XForYouStrategy ──────────────────────────────────────────────────

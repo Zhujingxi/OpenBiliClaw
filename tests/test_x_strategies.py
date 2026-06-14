@@ -150,6 +150,34 @@ async def test_search_strategy_drops_tombstones() -> None:
     assert len(items) == 1  # the empty-id tombstone normalized to None and was dropped
 
 
+@pytest.mark.asyncio
+async def test_search_strategy_falls_back_to_interest_names_without_llm() -> None:
+    # P1.3: no LLM → deterministic interest-name keywords (not empty), so the
+    # unified planner / legacy path never loses X to a missing LLM.
+    client = _FakeXClient(search_result=[_tweet("1790000000000000020")])
+    strategy = XSearchStrategy(client=client, llm_service=None)
+
+    items = await strategy.discover(_profile(), limit=5)
+
+    assert client.calls[0][1][0] == "rust async"  # the profile's interest name
+    assert items
+
+
+@pytest.mark.asyncio
+async def test_search_strategy_falls_back_on_llm_failure() -> None:
+    class _BoomLLM(_FakeLLMService):
+        async def complete_structured_task(self, **kwargs: object) -> object:
+            raise RuntimeError("llm down")
+
+    client = _FakeXClient(search_result=[_tweet("1790000000000000021")])
+    strategy = XSearchStrategy(client=client, llm_service=_BoomLLM(payload=""))
+
+    items = await strategy.discover(_profile(), limit=5)
+
+    assert client.calls[0][1][0] == "rust async"
+    assert items
+
+
 # ── XForYouStrategy ──────────────────────────────────────────────────
 
 

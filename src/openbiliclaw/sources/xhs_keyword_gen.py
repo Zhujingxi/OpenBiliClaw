@@ -61,13 +61,23 @@ async def generate_xhs_keywords(
 ) -> list[str]:
     """Generate up to ``count`` xhs-style search keywords from *profile*.
 
-    Returns an empty list when the profile has no usable interests or the
-    LLM call fails — the caller should treat empty as "nothing to enqueue
-    this cycle" and try again next interval.
+    Falls back to the profile's interest names (deterministic) when the LLM is
+    unavailable / fails / returns nothing usable, so the unified keyword planner
+    (and the legacy path) never loses xhs to a transient LLM failure. Returns an
+    empty list only when the profile has no usable interests.
     """
     if not profile.preferences.interests:
         return []
+    keywords = await _llm_xhs_keywords(llm_service, profile, count)
+    return keywords or _interest_name_fallback(profile, count)
 
+
+async def _llm_xhs_keywords(
+    llm_service: LLMService,
+    profile: SoulProfile | OnionProfile,
+    count: int,
+) -> list[str]:
+    """The LLM attempt; returns ``[]`` on any failure so the caller can fall back."""
     try:
         response = await llm_service.complete_structured_task(
             system_instruction=_SYSTEM_PROMPT,
@@ -88,10 +98,8 @@ async def generate_xhs_keywords(
         except (json.JSONDecodeError, TypeError):
             logger.warning("xhs keyword LLM returned non-JSON: %r", content[:200])
             return []
-
     if not isinstance(payload, dict):
         return []
-
     raw_keywords = payload.get("keywords", [])
     if not isinstance(raw_keywords, list):
         return []
@@ -107,3 +115,21 @@ async def generate_xhs_keywords(
         if len(keywords) >= count:
             break
     return keywords
+
+
+def _interest_name_fallback(profile: SoulProfile | OnionProfile, count: int) -> list[str]:
+    """Deterministic interest-name keywords (mirrors B站/YouTube/抖音 fallback)."""
+    ranked = sorted(
+        profile.preferences.interests, key=lambda tag: float(tag.weight or 0.0), reverse=True
+    )
+    seen: set[str] = set()
+    out: list[str] = []
+    for tag in ranked:
+        name = str(tag.name).strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+        if len(out) >= count:
+            break
+    return out
