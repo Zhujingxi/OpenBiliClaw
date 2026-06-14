@@ -467,11 +467,11 @@ X 源健康状态（`ok` / `missing_cookie` / `expired_cookie` / `rate_limited` 
 
 **统一关键词规划器 / Discover 背压**（`DiscoveryConfig`，P1）。把"每平台各自定时调 LLM 生成搜索词"换成**缺口拉动的双缓冲背压模型**：一个关键词存储（cache + 历史 + 产出）夹在「生成」与「抓取」之间，生成只在缓存见底且池子有真实缺口时触发（一次合并 LLM 调用覆盖所有缺货平台，带历史去重 + 池子分布避让）。本段**与 `[llm.discovery]` 是两个独立的表**——后者是 discovery 模块的 per-module LLM provider 覆盖，本段是规划器 / 背压调参。完整设计见 [`docs/plans/2026-06-14-discover-backpressure-refactor-design.md`](../plans/2026-06-14-discover-backpressure-refactor-design.md) §6 参数表。
 
-> ⚠️ `unified_keyword_planner_enabled` 默认 `false`：当前仍走旧的逐平台搜索词生成路径，本段其余字段只有 flag 打开后才生效，旧路径保留可随时回退。
+> ✅ `unified_keyword_planner_enabled` **v0.3.124 起默认 `true`**：搜索词走统一规划器 + 关键词存储，本段其余字段随之生效。设为 `false` 可逐字回退到旧的逐平台搜索词生成路径（旧路径保留、回退无副作用）。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `unified_keyword_planner_enabled` | bool | `false` | 统一关键词规划器总开关。`false` = 旧逐平台搜索词生成；`true` = 走 planner + 关键词存储。其余字段仅在 `true` 时生效 |
+| `unified_keyword_planner_enabled` | bool | `true` | 统一关键词规划器总开关（v0.3.124 起默认 `true`）。`true` = 走 planner + 关键词存储；`false` = 回退旧逐平台搜索词生成。其余字段仅在 `true` 时生效 |
 | `kw_cache_high` | int | `30` | 每平台关键词缓存高水位；生成补到这个数。小于 `1` 或无法解析时回退默认值 |
 | `kw_cache_low` | int | `10` | 每平台关键词缓存低水位；`pending < low` 且有真实缺口时触发生成。小于 `1` 时回退默认值 |
 | `gen_batch` | int | `30` | 单平台单次合并 LLM 调用生成的关键词数。小于 `1` 时回退默认值 |

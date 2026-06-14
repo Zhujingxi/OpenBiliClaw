@@ -39,7 +39,7 @@ _DEFAULT_FEEDBACK_BATCH_THRESHOLD = 3
 # All defaults are the owner-approved starting baseline; see
 # docs/plans/2026-06-14-discover-backpressure-refactor-design.md §6 and
 # docs/plans/2026-06-14-discover-backpressure-P1-plan.md §P1.0.
-_DEFAULT_UNIFIED_KEYWORD_PLANNER_ENABLED = False
+_DEFAULT_UNIFIED_KEYWORD_PLANNER_ENABLED = True
 _DEFAULT_KW_CACHE_HIGH = 30
 _DEFAULT_KW_CACHE_LOW = 10
 _DEFAULT_GEN_BATCH = 30
@@ -260,15 +260,17 @@ class DiscoveryConfig:
 
     Governs the double-buffered keyword store + merged keyword planner that
     replaces the per-platform search keyword generators. All knobs are gated
-    behind ``unified_keyword_planner_enabled`` (default off — the legacy
-    per-platform LLM generation path stays the fallback until cutover). See
+    behind ``unified_keyword_planner_enabled`` (default ON as of v0.3.124; set
+    it ``false`` to fall back, byte-for-byte, to the legacy per-platform LLM
+    generation path). See
     ``docs/plans/2026-06-14-discover-backpressure-refactor-design.md`` §6 for
     the parameter table these defaults come from. ``fetch_floor`` is NOT a
     field here — the planner reuses each platform's existing ``min_interval``.
     """
 
-    # Master feature flag. False keeps the legacy per-platform search keyword
-    # generators; the planner / store path is dormant until this flips on.
+    # Master feature flag. True (default, v0.3.124+) runs the merged planner /
+    # keyword store; False falls back to the legacy per-platform search keyword
+    # generators (the path stays dormant and the fallback is byte-identical).
     unified_keyword_planner_enabled: bool = _DEFAULT_UNIFIED_KEYWORD_PLANNER_ENABLED
     # Per-platform keyword cache high/low watermarks. Generation fires when
     # pending < low and a real deficit exists; it refills up to high.

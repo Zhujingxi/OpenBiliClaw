@@ -188,12 +188,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-Latest: **v0.3.123: unified profile prompt input across all sources (personality portrait dropped from prompts) (2026-06-14)**. Full changelog: [docs/changelog.md](docs/changelog.md).
+Latest: **v0.3.124: unified keyword planner on by default (2026-06-15)**. Full changelog: [docs/changelog.md](docs/changelog.md).
 
+- **Unified keyword backpressure now on by default** — the five platforms' search-keyword generation collapses into one merged, deficit-pulled call with per-platform adaptive avoid / water-level / supply; set `false` to fall back, byte-for-byte, to the legacy path.
 - **One profile input across every platform** — discovery / recommendation / speculator prompts all collapse onto a single structured profile, with missing fields filled and caps unified at 30.
 - **Personality portrait no longer enters prompts** — that prose summary is dropped from every LLM input (still shown on the profile page), so queries and copy stop getting skewed by its metaphors.
 - **Five-platform keyword generation aligned + Douyin gains LLM gen** — X / Xiaohongshu / Douyin / YouTube / Bilibili keyword generation all eat the same full profile.
-- **New unified keyword-backpressure subsystem (off by default, opt-in)** — the five platforms' search-keyword generation can collapse into one merged, deficit-pulled call with per-platform adaptive avoid / water-level / supply.
 
 ## Community
 
@@ -653,7 +653,7 @@ OpenBiliClaw/
 
 ## 📜 Release History
 
-Latest: **v0.3.123: unified profile prompt input across all sources (personality portrait dropped from prompts) (2026-06-14)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Extension packages and desktop installers live on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases); backend source updates use `backend-v*` tags.
+Latest: **v0.3.124: unified keyword planner on by default (2026-06-15)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Extension packages and desktop installers live on [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases); backend source updates use `backend-v*` tags.
 
 ## 🗺️ Roadmap
 

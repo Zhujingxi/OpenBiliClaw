@@ -1765,7 +1765,7 @@ class TestDiscoveryConfig:
         config = Config()
 
         assert isinstance(config.discovery, DiscoveryConfig)
-        assert config.discovery.unified_keyword_planner_enabled is False
+        assert config.discovery.unified_keyword_planner_enabled is True
         assert config.discovery.kw_cache_high == 30
         assert config.discovery.kw_cache_low == 10
         assert config.discovery.gen_batch == 30
@@ -1779,7 +1779,7 @@ class TestDiscoveryConfig:
     def test_discovery_defaults_from_empty_dict(self) -> None:
         config = _build_config({})
 
-        assert config.discovery.unified_keyword_planner_enabled is False
+        assert config.discovery.unified_keyword_planner_enabled is True
         assert config.discovery.kw_cache_high == 30
         assert config.discovery.plan_ttl_hours == 12
 
@@ -1961,6 +1961,6 @@ plan_ttl_hours = 6
         rendered = _render_config_toml(Config())
 
         assert "[discovery]" in rendered
-        assert "unified_keyword_planner_enabled = false" in rendered
+        assert "unified_keyword_planner_enabled = true" in rendered
         assert "kw_cache_high = 30" in rendered
         assert "plan_ttl_hours = 12" in rendered

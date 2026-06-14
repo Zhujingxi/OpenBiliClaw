@@ -192,12 +192,12 @@
 
 ## 最近更新
 
-最新版本：**v0.3.123: 统一各来源 profile prompt 输入（移除人格素描总结）（2026-06-14）**。完整变更详见 [docs/changelog.md](docs/changelog.md)。
+最新版本：**v0.3.124: 统一关键词规划器默认开启（2026-06-15）**。完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
+- **统一关键词背压默认开启** —— 五平台搜索词从各自调 LLM 收敛为一次合并生成，按缺口拉动、逐平台自适应避让 / 水位 / 供给；设 `false` 可逐字回退旧路径。
 - **画像输入全平台统一** —— 发现 / 推荐 / 探测各处的画像输入收敛成同一份结构化画像，字段补齐、上限统一抬到 30。
 - **人格素描不再进 prompt** —— 那段总结性叙事不再喂任何 LLM 输入（仍在画像页正常展示），搜索词与文案不再被比喻带偏。
 - **五平台搜索词生成对齐 + 抖音补 LLM 生成** —— X / 小红书 / 抖音 / YouTube / B站 关键词生成全部吃同一份完整画像。
-- **新增统一关键词背压子系统（默认关、可 opt-in）** —— 五平台搜索词可收敛成一次合并生成，按缺口拉动、逐平台自适应避让 / 水位 / 供给。
 
 ## 用户交流群
 
@@ -665,7 +665,7 @@ OpenBiliClaw/
 
 ## 📜 更新日志
 
-最新版本：**v0.3.123: 统一各来源 profile prompt 输入（移除人格素描总结）（2026-06-14）**。最近更新见上方摘要；完整历史见 [docs/changelog.md](docs/changelog.md)。插件包和桌面安装包见 [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases)，后端源码更新看 `backend-v*` tag。
+最新版本：**v0.3.124: 统一关键词规划器默认开启（2026-06-15）**。最近更新见上方摘要；完整历史见 [docs/changelog.md](docs/changelog.md)。插件包和桌面安装包见 [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases)，后端源码更新看 `backend-v*` tag。
 
 ## 🗺️ 后续规划
 
