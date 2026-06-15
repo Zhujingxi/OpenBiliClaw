@@ -879,6 +879,23 @@ class RuntimeContext:
                         ),
                     )
                     logger.debug("post-reload avoidance speculator scheduled as background task")
+
+                # v0.3.124+ (lever 2a): the cancel_all in rebuild_from_config
+                # also killed any in-flight classify_pool_backlog /
+                # precompute_pool_copy / delight scoring. Without a re-kick a
+                # user saving config mid-cold-start strands pool-fill until
+                # the next 60s refresh tick — or indefinitely if they keep
+                # saving. Re-kick the classify→copy→delight drain on the
+                # freshly-built engine so pool-fill resumes immediately.
+                # precompute_pool_copy spawns classify + delight detached
+                # internally, so one call restarts the whole trio.
+                precompute = getattr(self.recommendation_engine, "precompute_pool_copy", None)
+                if callable(precompute):
+                    self.task_registry.track(
+                        "post_reload_precompute_pool_copy",
+                        self._safe_post_reload_precompute(precompute, profile),
+                    )
+                    logger.debug("post-reload classify/copy drain scheduled as background task")
             except Exception:
                 pass  # Profile not initialized yet — skip silently
 
@@ -932,6 +949,23 @@ class RuntimeContext:
                     await speculator.force_tick(profile)
         except Exception:
             pass
+
+    @staticmethod
+    async def _safe_post_reload_precompute(precompute_callable: Any, profile: Any) -> None:
+        """Re-kick the classify→copy→delight drain after a hot-reload.
+
+        ``rebuild_from_config``'s ``cancel_all`` stops any in-flight
+        classify_pool_backlog / precompute_pool_copy / delight scoring (they
+        hold references to the now-swapped-out engine). One
+        ``precompute_pool_copy`` call restarts the whole trio on the fresh
+        engine — its own ``_expression_lock`` keeps it from racing the
+        refresh loop's periodic drain, which remains the backstop. Failures
+        are logged, not fatal to the config PUT.
+        """
+        try:
+            await precompute_callable(profile=profile)
+        except Exception:
+            logger.exception("post-reload precompute_pool_copy failed")
 
     @staticmethod
     async def _safe_prewarm_pool_mmr_embeddings(prewarm_callable: Any) -> None:

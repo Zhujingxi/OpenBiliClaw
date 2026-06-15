@@ -791,3 +791,217 @@ async def test_search_strategy_without_injection_still_generates() -> None:
 
     assert bilibili_client.calls == ["纪录片 原理"]
     assert len(llm_service.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: graded search cooldown through the *real* BilibiliAPIClient.
+#
+# These drive SearchStrategy / ExploreStrategy against a real BilibiliAPIClient
+# (so the real cooldown logic + the strategy's own storm-abort both run),
+# faking only the HTTP boundary. They prove the v0.3.124 fix: a single
+# v_voucher-challenged keyword no longer aborts the whole search round + the
+# explore strategy that shares the process-wide cooldown, while a sustained
+# storm still backs off.
+# ---------------------------------------------------------------------------
+
+_E2E_NAV_PAYLOAD = {
+    "code": 0,
+    "data": {
+        "wbi_img": {
+            "img_url": "https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png",
+            "sub_url": "https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png",
+        }
+    },
+}
+
+
+class _HttpResp:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, object]:
+        return self._payload
+
+
+class _ScriptedSearchHTTP:
+    """Fake httpx client: /nav always OK; search/type pops a scripted queue."""
+
+    def __init__(self, search_payloads: list[dict[str, object]]) -> None:
+        self._search = list(search_payloads)
+        self.search_calls = 0
+
+    async def get(
+        self,
+        url: str,
+        params: dict[str, object] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> _HttpResp:
+        if url.endswith("/x/web-interface/nav"):
+            return _HttpResp(_E2E_NAV_PAYLOAD)
+        if url.endswith("/x/web-interface/wbi/search/type"):
+            self.search_calls += 1
+            if not self._search:
+                raise AssertionError("search/type called more times than scripted")
+            return _HttpResp(self._search.pop(0))
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _voucher_payload() -> dict[str, object]:
+    return {"code": 0, "data": {"v_voucher": "challenge", "result": None}}
+
+
+def _results_payload(*bvids: str) -> dict[str, object]:
+    return {
+        "code": 0,
+        "data": {
+            "result": [
+                {
+                    "bvid": bvid,
+                    "title": f"标题 {bvid}",
+                    "author": f"UP {bvid}",
+                    "mid": 1000 + index,
+                    "description": "纪录片相关内容",
+                    "pic": "https://example.com/cover.jpg",
+                    "play": 12345,
+                    "duration": "10:00",
+                }
+                for index, bvid in enumerate(bvids)
+            ]
+        },
+    }
+
+
+def _real_search_client(search_payloads: list[dict[str, object]]) -> object:
+    from openbiliclaw.bilibili.api import BilibiliAPIClient
+
+    client = BilibiliAPIClient(cookie="SESSDATA=e2e")
+    client._client = _ScriptedSearchHTTP(search_payloads)  # type: ignore[assignment]
+    return client
+
+
+class _RaisingLLM:
+    """Fails loudly if any LLM call slips through (proves a gate short-circuited)."""
+
+    async def complete_structured_task(self, **_kwargs: object) -> object:
+        raise AssertionError("LLM must not be called on this path")
+
+
+@pytest.fixture(autouse=True)
+def _reset_search_cooldown_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openbiliclaw.bilibili.api import BilibiliAPIClient
+
+    monkeypatch.setattr(BilibiliAPIClient, "_search_cooldown_until", 0.0)
+    monkeypatch.setattr(BilibiliAPIClient, "_search_cooldown_level", 0)
+    monkeypatch.setattr(BilibiliAPIClient, "_search_voucher_block_streak", 0)
+
+
+@pytest.mark.asyncio
+async def test_e2e_single_v_voucher_keyword_does_not_abort_search_round(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One challenged keyword is dropped; the rest of the round still searches."""
+    from openbiliclaw.bilibili.api import BilibiliAPIClient
+    from openbiliclaw.discovery.strategies.strategies import SearchStrategy
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    # q1 storms (3 attempts → 3 vouchers), q2 then q3 succeed. q2 runs with
+    # streak>0 so it fast-fails to a single probe — which here returns results.
+    client = _real_search_client(
+        [
+            _voucher_payload(),
+            _voucher_payload(),
+            _voucher_payload(),
+            _results_payload("BV2"),
+            _results_payload("BV3"),
+        ]
+    )
+    monkeypatch.setattr(SearchStrategy, "_create_search_client", lambda self: client)
+
+    strategy = SearchStrategy(
+        llm_service=_RaisingLLM(),  # never called: queries injected + eval off
+        bilibili_client=client,
+        llm_evaluation=False,
+    )
+
+    results = await strategy.discover(_build_profile(), limit=20, queries=["q1", "q2", "q3"])
+
+    # The round was NOT aborted by q1's storm: q2 + q3 results came through.
+    assert {item.bvid for item in results} == {"BV2", "BV3"}
+    # A lone v_voucher keyword must not trip the shared process-wide cooldown.
+    assert BilibiliAPIClient.search_cooldown_remaining() == 0.0
+    assert client._client.search_calls == 5  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_e2e_v_voucher_storm_trips_cooldown_and_aborts_round(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Consecutive challenged keywords past the threshold still back off."""
+    from openbiliclaw.bilibili.api import BilibiliAPIClient
+    from openbiliclaw.discovery.strategies.strategies import SearchStrategy
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    # q1 (3 vouchers) → streak 1; q2 (1 probe) → streak 2; q3 (1 probe) →
+    # streak 3 == threshold → cooldown trips. q4 must never hit the network.
+    client = _real_search_client(
+        [
+            _voucher_payload(),
+            _voucher_payload(),
+            _voucher_payload(),
+            _voucher_payload(),
+            _voucher_payload(),
+        ]
+    )
+    monkeypatch.setattr(SearchStrategy, "_create_search_client", lambda self: client)
+
+    strategy = SearchStrategy(
+        llm_service=_RaisingLLM(),
+        bilibili_client=client,
+        llm_evaluation=False,
+    )
+
+    results = await strategy.discover(_build_profile(), limit=20, queries=["q1", "q2", "q3", "q4"])
+
+    assert results == []
+    assert BilibiliAPIClient.search_cooldown_remaining() > 0  # storm backed off
+    # q4 skipped — never searched once the cooldown tripped.
+    assert client._client.search_calls == 5  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_e2e_explore_skips_while_search_cooldown_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explore shares the same process-wide cooldown and skips when it's hot."""
+    import time
+
+    from openbiliclaw.bilibili.api import BilibiliAPIClient
+    from openbiliclaw.discovery.strategies.strategies import ExploreStrategy
+
+    # Trip the shared cooldown directly (as a real storm would have).
+    monkeypatch.setattr(BilibiliAPIClient, "_search_cooldown_until", time.monotonic() + 120.0)
+    client = _real_search_client([])
+
+    strategy = ExploreStrategy(
+        llm_service=_RaisingLLM(),  # must NOT be reached: gate returns first
+        bilibili_client=client,
+    )
+
+    results = await strategy.discover(_build_profile(), limit=20)
+
+    assert results == []
+    assert strategy.last_intermediates.get("skipped") == "search_cooldown"

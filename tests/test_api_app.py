@@ -267,6 +267,166 @@ class TestBackendAPI:
         assert captured_tasks[0].exception() is None
 
     @pytest.mark.asyncio
+    async def test_restart_tasks_rekicks_pool_precompute_drain(self) -> None:
+        """Lever 2a: hot-reload re-kicks the classify→copy→delight drain.
+
+        ``rebuild_from_config``'s ``cancel_all`` kills any in-flight pool
+        precompute; ``restart_background_tasks`` must re-kick it on the
+        freshly-built engine so a user saving config mid-cold-start doesn't
+        strand pool-fill until the next refresh tick.
+        """
+        from types import SimpleNamespace
+
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config
+
+        class FakeRecommendationEngine:
+            def __init__(self) -> None:
+                self.calls: list[object] = []
+                self.started = asyncio.Event()
+
+            async def precompute_pool_copy(self, *, profile: object) -> int:
+                self.calls.append(profile)
+                self.started.set()
+                return 0
+
+        class FakeSoulEngine:
+            async def get_profile(self) -> dict[str, object]:
+                return {"profile": "ok"}
+
+        engine = FakeRecommendationEngine()
+        cfg = Config()
+        ctx = RuntimeContext(
+            config=cfg,
+            memory_manager=SimpleNamespace(load_discovery_runtime_state=lambda: {}),
+            runtime_controller=object(),
+            account_sync_service=object(),
+            auto_update_service=object(),
+            soul_engine=FakeSoulEngine(),
+            recommendation_engine=engine,
+        )
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        try:
+            await asyncio.wait_for(ctx.restart_background_tasks(app), timeout=0.5)
+            assert ctx.task_registry.stats().get("post_reload_precompute_pool_copy") == 1
+            await asyncio.wait_for(engine.started.wait(), timeout=0.5)
+            assert engine.calls == [{"profile": "ok"}]
+        finally:
+            await ctx.task_registry.cancel_all()
+
+    @pytest.mark.asyncio
+    async def test_e2e_hot_reload_resumes_real_pool_fill(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """E2E (lever 2a): a config reload makes the *real* engine fill copy for
+        a pending pool candidate against a *real* DB — pool-fill actually
+        resumes (the seeded row becomes serveable), not just 'a task was
+        scheduled'. Only the LLM (copy text) is faked.
+        """
+        import json
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config
+        from openbiliclaw.llm.base import LLMResponse
+        from openbiliclaw.recommendation.engine import RecommendationEngine
+        from openbiliclaw.soul.profile import PreferenceLayer, SoulProfile
+        from openbiliclaw.storage.database import Database
+
+        async def no_sleep(_delay: float) -> None:
+            return None
+
+        monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+        class _CopyLLM:
+            def __init__(self) -> None:
+                self.callers: list[str] = []
+
+            async def complete_structured_task(
+                self, *, caller: str = "", **_kw: object
+            ) -> LLMResponse:
+                self.callers.append(caller)
+                content = json.dumps(
+                    [
+                        {
+                            "bvid": "BVe2e",
+                            "expression": "这条接住你最近的状态。",
+                            "topic_label": "你最近在意的方向",
+                        }
+                    ],
+                    ensure_ascii=False,
+                )
+                return LLMResponse(content=content, provider="test", model="dummy", usage={})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "e2e.db")
+            db.initialize()
+            # Classified but un-copied → "needs copy", not yet serveable.
+            db.cache_content(
+                "BVe2e",
+                title="测试视频",
+                up_name="UP",
+                source="search",
+                style_key="tutorial",
+                topic_group="测试分组",
+                topic_key="测试分组",
+                relevance_score=0.9,
+                pool_expression="",
+                pool_topic_label="",
+            )
+            assert db.count_pool_candidates() == 0  # gated: copy missing
+
+            profile = SoulProfile(
+                personality_portrait="p",
+                core_traits=["好奇"],
+                preferences=PreferenceLayer(),
+            )
+            llm = _CopyLLM()
+            engine = RecommendationEngine(llm=llm, database=db)
+
+            class FakeSoulEngine:
+                async def get_profile(self) -> object:
+                    return profile
+
+            ctx = RuntimeContext(
+                config=Config(),
+                memory_manager=SimpleNamespace(load_discovery_runtime_state=lambda: {}),
+                runtime_controller=object(),
+                account_sync_service=object(),
+                auto_update_service=object(),
+                soul_engine=FakeSoulEngine(),
+                recommendation_engine=engine,
+            )
+            engine.task_registry = ctx.task_registry  # mirror production wiring
+
+            # Capture the post-reload precompute task so we can await it.
+            captured: dict[str, asyncio.Task[object]] = {}
+            original_track = ctx.task_registry.track
+
+            def _track(name: str, coro: object) -> object:
+                task = original_track(name, coro)
+                captured[name] = task
+                return task
+
+            ctx.task_registry.track = _track  # type: ignore[method-assign]
+
+            app = SimpleNamespace(state=SimpleNamespace())
+            try:
+                await asyncio.wait_for(ctx.restart_background_tasks(app), timeout=2.0)
+                assert "post_reload_precompute_pool_copy" in captured
+                await asyncio.wait_for(captured["post_reload_precompute_pool_copy"], timeout=2.0)
+
+                # The reload drove the REAL engine to write copy for the pending
+                # candidate against the REAL DB — it is now serveable.
+                assert "recommendation.write_expression" in llm.callers
+                assert db.count_pool_candidates() == 1
+            finally:
+                await ctx.task_registry.cancel_all()
+
+    @pytest.mark.asyncio
     async def test_put_config_does_not_block_on_speculator(
         self,
         monkeypatch: pytest.MonkeyPatch,
