@@ -246,7 +246,7 @@ B 站扩展搜索 producer 是 API 搜索的兜底，不是常驻主发现路径
 - B 站平台族低于 source share quota，且 `DiscoveryCandidatePipeline.pool_full()` 为 false。
 - `bili_tasks` 中近期没有 pending / in-progress / completed search 任务，避免同一冷却窗口反复打开搜索页。
 
-统一关键词 planner 开启时，producer 会通过 `KeywordFetchCoordinator` claim B 站关键词并把 `source_keyword_id` 写进任务 payload；扩展结果回传后，`/api/sources/bili/task-result` 会把视频转换成 `source_platform="bilibili"`、`source_strategy="bili-extension-search"` 的 raw candidates，并触发一次候选 drain。terminal `ok` 会把关键词标记 used，失败或空结果标记 failed。
+统一关键词 planner 开启时，producer 会通过 `KeywordFetchCoordinator` claim B 站关键词并把 `source_keyword_id` 写进任务 payload；扩展收到 `bili_task_available` 后打开真实 B 站搜索页并抓渲染后的 DOM 卡片，`/api/sources/bili/task-result` 再把视频转换成 `source_platform="bilibili"`、`source_strategy="bili-extension-search"` 的 raw candidates，并触发一次候选 drain。terminal `ok` 会把关键词标记 used，失败或空结果标记 failed。
 
 ### Source Bootstrap Task Results
 
