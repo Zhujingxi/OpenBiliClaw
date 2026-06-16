@@ -47,11 +47,13 @@ extension_tag="$(latest_release_with_prefix "extension-v")"
 desktop_tag="$(latest_release_with_prefix "desktop-v")"
 
 extension_line="Not published yet."
-extension_assets_line="No extension release asset is available yet."
+chrome_extension_asset_line="No Chrome-compatible extension release asset is available yet."
+firefox_extension_asset_line="No Firefox extension release asset is available yet."
 if [ -n "$extension_tag" ]; then
   extension_version="${extension_tag#extension-v}"
   extension_line="[${extension_tag}](https://github.com/${repo}/releases/tag/${extension_tag})"
-  extension_assets_line="\`openbiliclaw-extension-v${extension_version}.zip\` and \`openbiliclaw-extension-v${extension_version}-firefox.zip\`"
+  chrome_extension_asset_line="\`openbiliclaw-extension-v${extension_version}.zip\`"
+  firefox_extension_asset_line="\`openbiliclaw-extension-v${extension_version}-firefox.zip\`"
 fi
 
 desktop_line="Not published yet."
@@ -167,8 +169,8 @@ This is the user-facing aggregate release. It keeps the current backend source t
 
 ## Downloads
 
-- Chrome / Edge / Brave extension: use ${extension_assets_line}
-- Firefox 140+ extension: use the \`-firefox.zip\` package
+- Chrome / Edge / Brave extension: use ${chrome_extension_asset_line}
+- Firefox 140+ extension: use ${firefox_extension_asset_line}
 - macOS / Windows desktop app: use the attached \`.dmg\` / \`.exe\` installer when present
 
 Attached package assets:
