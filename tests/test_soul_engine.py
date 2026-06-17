@@ -478,6 +478,62 @@ async def test_process_feedback_batch_updates_preference_after_threshold(
 
 
 @pytest.mark.asyncio
+async def test_process_feedback_batch_new_dislikes_trigger_pool_purge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import openbiliclaw.soul.dislike_writeback as dislike_writeback
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    for index in range(3):
+        await memory.propagate_event(
+            {
+                "event_type": "feedback",
+                "title": f"反馈 {index}",
+                "metadata": {"feedback_type": "dislike", "bvid": f"BV{index}"},
+            }
+        )
+
+    async def fake_analyze_events(
+        *,
+        events: list[dict[str, object]],
+        existing_preference: dict[str, object],
+        event_chunk_size: int = 0,
+    ) -> dict[str, object]:
+        return {
+            "interests": [],
+            "style": {},
+            "context": {},
+            "exploration_openness": 0.4,
+            "disliked_topics": ["标题党"],
+            "favorite_up_users": [],
+        }
+
+    calls: list[dict[str, object]] = []
+
+    async def fake_purge_pool_for_new_dislikes(**kwargs: object) -> list[str]:
+        calls.append(dict(kwargs))
+        return []
+
+    monkeypatch.setattr(engine._preference_analyzer, "analyze_events", fake_analyze_events)
+    monkeypatch.setattr(
+        dislike_writeback,
+        "purge_pool_for_new_dislikes",
+        fake_purge_pool_for_new_dislikes,
+    )
+
+    result = await engine.process_feedback_batch_if_needed()
+    await engine.wait_for_pending_edits()
+
+    assert result["triggered"] is True
+    assert len(calls) == 1
+    assert calls[0]["newly_added"] == ["标题党"]
+    assert calls[0]["all_dislikes"] == ["标题党"]
+    assert calls[0]["database"] is memory._database
+
+
+@pytest.mark.asyncio
 async def test_learn_from_dialogue_persists_event_and_candidate_below_threshold(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

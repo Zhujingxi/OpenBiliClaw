@@ -19,6 +19,7 @@
 - **Soul HTML 架构图补齐后台触发器**：`docs/diagrams/soul-architecture.html` 与 `docs/diagrams/soul-update-flow.html` 补充账户同步、runtime soul pipeline tick、speculator / cognition / consolidation 定时节流、探针响应、手动覆盖层和 `discovery_cron` 非消费边界。
 - **新增跨平台行为事件技术债记录**：`docs/technical-debt.md` 新增 TD-003，记录当前只有 B 站具备账号侧行为拉取入口，外站 bootstrap / discovery / 插件实时事件尚未统一形成 Soul 维护闭环。
 - **补齐 Soul 内部技术债清单**：`docs/technical-debt.md` 新增 TD-004 至 TD-008，记录 ProfileUpdatePipeline 未成为真实单入口、B 站 account sync 已有画像后只更新 preference、聊天学习后台任务未接入 registry、聊天 insight 候选合并依赖精确字符串，以及旧 awareness / insight 公开入口仍保留固定窗口语义。
+- **推荐 dislike 批处理补齐候选池清理**：`process_feedback_batch_if_needed()` 现在会 diff 本批新增的 `disliked_topics`，并复用 `purge_pool_for_new_dislikes()` 以后台任务清理 fresh 候选池；普通推荐卡片多次 `dislike` 学到长期避雷项后，不再只更新画像而漏清已有同类候选。
 - **热重载补货重启测试稳定性**：`BackgroundTaskRegistry.stats()` 只统计尚未完成的任务，CI 测试改为捕获 `track()` 调度的 task 并等待其完成，不再依赖任务是否仍处于 live 状态。
 
 ## extension v0.3.80: 对话历史自动滚到底部（2026-06-16）

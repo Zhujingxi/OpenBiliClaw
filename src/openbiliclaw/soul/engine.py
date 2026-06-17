@@ -873,6 +873,17 @@ class SoulEngine:
             existing_preference=existing_preference,
             event_chunk_size=200,
         )
+        old_disliked = {
+            str(item).strip()
+            for item in self._as_str_list(existing_preference.get("disliked_topics", []))
+            if str(item).strip()
+        }
+        new_disliked = {
+            str(item).strip()
+            for item in self._as_str_list(updated_preference.get("disliked_topics", []))
+            if str(item).strip()
+        }
+        newly_added_dislikes = sorted(new_disliked - old_disliked)
         preference_layer.data.clear()
         preference_layer.data.update(updated_preference)
         preference_layer.save()
@@ -900,6 +911,15 @@ class SoulEngine:
                 profile_rebuilt = True
             except Exception:
                 logger.exception("Failed to rebuild soul profile after feedback refresh.")
+
+        if newly_added_dislikes:
+            self._schedule_dislike_purge(
+                newly_added=newly_added_dislikes,
+                all_dislikes=sorted(new_disliked),
+                database=getattr(self._memory, "_database", None),
+                embedding_service=self._embedding_service,
+                llm_service=self._llm_service,
+            )
 
         self._record_cognition_updates(
             existing_preference=existing_preference,
