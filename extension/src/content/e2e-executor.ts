@@ -103,6 +103,7 @@ const ACTIVE_STATE_LABELS: Partial<Record<E2EAction, readonly RegExp[]>> = {
     /已赞/,
     /已点赞/,
     /取消赞/,
+    /取消点赞/,
   ],
   favorite: [
     /\bunfavorite\b/i,

@@ -125,6 +125,11 @@ function fakeEnv(elements: FakeElement[] = []) {
   };
 }
 
+function envWithButtonLabel(label: string): ReturnType<typeof fakeEnv> & { button: FakeElement } {
+  const button = new FakeElement(label, { tag: "button", "aria-label": label });
+  return { ...fakeEnv([button]), button };
+}
+
 test.before(() => {
   const globals = globalThis as { getComputedStyle?: (element: FakeElement) => ReturnType<FakeElement["getComputedStyle"]> };
   globals.getComputedStyle = (element) => element.getComputedStyle();
@@ -226,6 +231,19 @@ test("state action skips active chinese labels", async () => {
     detail: "target_not_found",
   });
   assert.equal(following.clicked, false);
+});
+
+test("like action skips cancel-like chinese labels", async () => {
+  const env = envWithButtonLabel("取消点赞");
+
+  const result = await executeAction("douyin", "like", true, env);
+
+  assert.deepEqual(result, {
+    action: "like",
+    status: "failed",
+    detail: "target_not_found",
+  });
+  assert.equal(env.button.clicked, false);
 });
 
 test("state action can click an inactive target after skipping active targets", async () => {
