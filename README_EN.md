@@ -190,12 +190,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-Latest: **v0.3.125: profile category taxonomy + Bilibili extension-search fallback (2026-06-16)**. Full changelog: [docs/changelog.md](docs/changelog.md).
+Latest: **v0.3.131 / extension v0.3.85: multi-source metrics and cover-image evaluation (2026-06-20)**. Full changelog: [docs/changelog.md](docs/changelog.md).
 
-- **Fixed profile category taxonomy** — first-level interest categories now resolve into `CATEGORY_VOCAB`; existing free-form categories can be migrated with `profile-consolidate --migrate-categories` dry-run / apply / revert.
-- **Homonym-safe profile cleanup** — consolidation tracks `(name, category)` so entries such as "Apple (technology)" and "apple (food)" are not merged by surface name alone; default cleanup covers likes top-512 and `--full` can scan the whole tag store.
-- **Bilibili extension-search fallback** — when backend Bilibili search is cooling down, the extension can open a real logged-in search page in the background and return rendered DOM results as raw candidates.
-- **More reliable refill pipeline** — hot reload re-kicks classify → copy → delight drains, copy generation runs right after classification, and embedding prewarm logs distinguish empty pools from real backend failures.
+- **Multi-source engagement metrics in evaluation** — Bilibili / Xiaohongshu / Douyin / YouTube / X candidates can carry views, likes, saves, comments, shares, and related counters into the discovery evaluator.
+- **Optional multimodal cover-image evaluation** — enabled batches compress candidate covers into image inputs, with sources such as Xiaohongshu preferring the local image cache.
+- **PC Web and extension settings stay aligned** — both the desktop Web UI and extension side panel can toggle multimodal evaluation and tune batch size, cover dimensions, JPEG quality, and timeout.
+- **Real extension path verified** — real-browser checks covered the Web settings page, extension settings page, and live discover / E2E capture flows.
 
 ## Community
 
@@ -656,7 +656,7 @@ OpenBiliClaw/
 
 ## 📜 Release History
 
-Latest: **v0.3.129 / extension v0.3.84: unified cross-platform behavior capture (2026-06-19)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Most users should use the `openbiliclaw-v*` aggregate [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) for extension packages and desktop installers; backend source auto-update still follows `backend-v*` tags.
+Latest: **v0.3.131 / extension v0.3.85: multi-source metrics and cover-image evaluation (2026-06-20)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Most users should use the `openbiliclaw-v*` aggregate [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) for extension packages and desktop installers; backend source auto-update still follows `backend-v*` tags.
 
 ## 🗺️ Roadmap
 

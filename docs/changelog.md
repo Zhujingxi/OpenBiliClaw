@@ -4,7 +4,9 @@
 
 ---
 
-## Unreleased: 多源评估指标与封面图评估（2026-06-20）
+## v0.3.131 / extension v0.3.85: 多源评估指标与封面图评估（2026-06-20）
+
+后端源码走 `backend-v0.3.131`，浏览器插件走 `extension-v0.3.85`。桌面安装包未改动；如冻结包用户需要同步本次 Web / 后端修复，可后续单独打 `desktop-v0.3.131`。
 
 - **各来源候选补齐互动指标**：`DiscoveredContent`、`discovery_candidates`、`content_cache` 与来源归一化链路新增观看、点赞、收藏、评论、分享、弹幕、转推、书签等字段；B 站 / 小红书 / 抖音 / YouTube / X 能取到的指标会随候选进入统一 evaluator。batch prompt 同时带 `tags/body_text`，并明确互动指标只作辅助，不能用热度覆盖内容与画像的真实匹配。
 - **可选多模态 discovery evaluator**：新增 `[discovery].multimodal_evaluation_enabled` 及 batch/图片压缩参数；设置页可开关。开启且当前 evaluation 路由支持图像输入时，候选封面优先从 `data/image-cache/` 读取，未命中才经白名单抓取、缩放和 JPEG 压缩后作为 image input 进入同一 batch evaluator；小红书已缓存头图不再依赖评估时原 CDN token 仍有效。模型不支持或图片准备失败时自动退回纯文本 + 指标评估。

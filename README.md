@@ -194,12 +194,12 @@
 
 ## 最近更新
 
-最新版本：**v0.3.125: 画像分类词表 + B 站扩展搜索兜底（2026-06-16）**。完整变更详见 [docs/changelog.md](docs/changelog.md)。
+最新版本：**v0.3.131 / extension v0.3.85: 多源评估指标与封面图评估（2026-06-20）**。完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
-- **画像分类固定词表** —— 一级兴趣分类收敛到 `CATEGORY_VOCAB`，存量自由分类可用 `profile-consolidate --migrate-categories` dry-run / apply / revert 迁移。
-- **同名异义整理防误合并** —— 画像整理按 `(name, category)` 识别“苹果(科技)”和“苹果(美食)”这类同名异义，默认整理 likes top-512，`--full` 可全量清理。
-- **B 站扩展搜索兜底** —— 服务端 B 站 search 被风控冷却时，扩展可用真实登录浏览器后台搜索页抓渲染结果补 raw candidates。
-- **补货链路更稳** —— 热重载后自动恢复 classify→文案→delight drain，classify 完成即排文案，embedding 预热日志能区分空池和真故障。
+- **多源互动指标进入评估器** —— B 站 / 小红书 / 抖音 / YouTube / X 候选能带观看、点赞、收藏、评论、分享等指标进入 discovery evaluator。
+- **可选封面图多模态评估** —— 开启后会压缩候选头图并随 batch 输入评估器，小红书等来源优先复用本地图片缓存。
+- **PC Web 与插件配置同步** —— 桌面 Web 和插件 side panel 都能开关多模态评估并调整 batch、封面尺寸、JPEG 质量和超时。
+- **真实插件链路验证** —— 已用真实浏览器验证 Web 配置页、插件配置页和真实 discover / E2E 捕捉链路。
 
 ## 用户交流群
 
@@ -668,7 +668,7 @@ OpenBiliClaw/
 
 ## 📜 更新日志
 
-最新版本：**v0.3.129 / extension v0.3.84: 跨平台行为捕捉统一（2026-06-19）**。最近更新见上方摘要；完整历史见 [docs/changelog.md](docs/changelog.md)。普通用户从 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 的 `openbiliclaw-v*` 聚合页同时下载插件包和桌面安装包；后端源码自动更新仍看 `backend-v*` tag。
+最新版本：**v0.3.131 / extension v0.3.85: 多源评估指标与封面图评估（2026-06-20）**。最近更新见上方摘要；完整历史见 [docs/changelog.md](docs/changelog.md)。普通用户从 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 的 `openbiliclaw-v*` 聚合页同时下载插件包和桌面安装包；后端源码自动更新仍看 `backend-v*` tag。
 
 ## 🗺️ 后续规划
 
