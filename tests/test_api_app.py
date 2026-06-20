@@ -7566,6 +7566,31 @@ class TestEmbeddingAndCompatProviderE2E:
         assert cfg.logging.unmanaged_truncate_mb == 78
         assert cfg.logging.unmanaged_max_age_days == 9
 
+    def test_put_config_clears_deepseek_reasoning_effort(self, monkeypatch, tmp_path) -> None:
+        """The settings UIs send an empty string when users disable DeepSeek thinking."""
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+
+        cfg = Config(
+            llm=LLMConfig(
+                default_provider="deepseek",
+                deepseek=LLMProviderConfig(
+                    api_key="sk-deepseek",
+                    model="deepseek-v4-flash",
+                    reasoning_effort="max",
+                ),
+            ),
+        )
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.put(
+            "/api/config",
+            json={"llm": {"deepseek": {"reasoning_effort": ""}}},
+        )
+
+        assert response.status_code == 200
+        assert cfg.llm.deepseek.reasoning_effort == ""
+        assert response.json()["config"]["llm"]["deepseek"]["reasoning_effort"] == ""
+
     def test_put_config_normalizes_invalid_scheduler_runtime_fields(
         self,
         monkeypatch,

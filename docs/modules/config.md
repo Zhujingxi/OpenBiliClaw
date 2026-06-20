@@ -107,7 +107,7 @@ cp config.example.toml config.toml
 | `api_key` | string | `""` | DeepSeek API Key |
 | `model` | string | `"deepseek-v4-flash"` | 模型名称（可选 `deepseek-v4-pro`；旧 `deepseek-chat` / `deepseek-reasoner` 将于 2026/07/24 弃用） |
 | `base_url` | string | `"https://api.deepseek.com"` | API 地址 |
-| `reasoning_effort` | string | `"max"` | DeepSeek v4 thinking 模式：`""` 关闭，`"high"` / `"max"` 开启 |
+| `reasoning_effort` | string | `"max"` | DeepSeek v4 thinking 模式：`""` 关闭，`"high"` / `"max"` 开启。插件 / PC Web 设置页选择空值会显式写入 `reasoning_effort = ""`，不会回落到默认 `"max"` |
 
 ### `[llm.ollama]`
 
@@ -537,7 +537,8 @@ X 源健康状态（`ok` / `missing_cookie` / `expired_cookie` / `rate_limited` 
 设置页和外部调用方都走同一条配置 API。`GET /api/config` 默认会 mask API Key；`PUT /api/config` 只更新请求体里出现的字段，并遵循以下安全规则：
 
 - masked key（例如 `sk-****abcd`）不会写回 `config.toml`，避免把真实密钥覆盖成星号。
-- 已有非空的 `model`、`base_url`、OpenRouter headers、DeepSeek `reasoning_effort` 和 embedding `model/base_url/api_key` 不会被空字符串覆盖；空值只在旧值本来为空时写入。
+- 已有非空的 `model`、`base_url`、OpenRouter headers 和 embedding `model/base_url/api_key` 不会被空字符串覆盖；空值只在旧值本来为空时写入。
+- DeepSeek `reasoning_effort` 是例外：空字符串是有效配置值，表示关闭 thinking，会被 `/api/config` 保存并热重载。
 - 需要真正清空 API Key 时，调用方必须传 `reset_fields`。当前允许值为 `llm.openai.api_key`、`llm.claude.api_key`、`llm.gemini.api_key`、`llm.deepseek.api_key`、`llm.openrouter.api_key`、`llm.openai_compatible.api_key`、`llm.embedding.api_key`；未知字段返回 400。
 - 写盘前会先用新配置构建 LLM registry；blocking issue 会返回 400 且不写入 `config.toml`。
 - 写盘前会生成 `config.toml.bak`。正常模式下热重载失败会尝试恢复备份，并在响应里设置 `rollback_applied=true`；如果备份恢复也失败，接口返回 500 和人工恢复提示。

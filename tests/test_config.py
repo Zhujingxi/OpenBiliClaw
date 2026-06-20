@@ -1143,6 +1143,19 @@ def test_save_config_round_trips_runtime_changes(tmp_path: Path) -> None:
     assert loaded.llm.embedding.fallback_provider == "ollama"
 
 
+def test_save_config_round_trips_empty_deepseek_reasoning_effort(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.llm.deepseek.reasoning_effort = ""
+
+    save_config(config, config_path)
+    rendered = config_path.read_text(encoding="utf-8")
+    loaded = load_config(config_path)
+
+    assert 'reasoning_effort = ""' in rendered
+    assert loaded.llm.deepseek.reasoning_effort == ""
+
+
 def test_llm_and_embedding_fallback_defaults_are_disabled() -> None:
     config = Config()
 

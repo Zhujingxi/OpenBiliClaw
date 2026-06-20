@@ -4,6 +4,12 @@
 
 ---
 
+## v0.3.130: DeepSeek reasoning_effort 配置保存修复（2026-06-20）
+
+后端源码改动，浏览器插件与桌面安装包未改动。
+
+- **插件 / PC Web 设置页关闭 DeepSeek thinking 立即生效**：`PUT /api/config` 现在允许 `llm.deepseek.reasoning_effort=""` 覆盖已有 `"max"` / `"high"`，并且 `save_config()` 会显式写出 `reasoning_effort = ""`，避免重启后因缺省值回落到 `"max"`。新增 API 与配置 round-trip 回归测试覆盖该路径。
+
 ## v0.3.129 / extension v0.3.84: 跨平台行为捕捉统一（2026-06-19）
 
 后端源码走 `backend-v0.3.129`，浏览器插件走 `extension-v0.3.84`。桌面安装包未改动；如冻结包用户需要同步本次捕捉链路修复，可后续单独打 `desktop-v0.3.129`。

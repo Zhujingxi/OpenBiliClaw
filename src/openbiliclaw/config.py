@@ -1937,7 +1937,7 @@ def _render_provider_section(name: str, provider: LLMProviderConfig) -> list[str
         lines.append(f"base_url = {_toml_string(provider.base_url)}")
     if name == "openai":
         lines.append(f"auth_mode = {_toml_string(provider.auth_mode)}")
-    if name == "deepseek" and provider.reasoning_effort:
+    if name == "deepseek":
         lines.append(f"reasoning_effort = {_toml_string(provider.reasoning_effort)}")
     if name == "openrouter":
         lines.append(f"http_referer = {_toml_string(provider.http_referer)}")
