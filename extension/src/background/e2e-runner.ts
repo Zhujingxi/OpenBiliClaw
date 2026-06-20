@@ -18,7 +18,12 @@ interface E2EContentExecuteResponse {
 
 let activeRunId: string | null = null;
 
-export async function handleE2ERuntimeEvent(event: unknown): Promise<boolean> {
+type E2ECaptureFlushHook = () => Promise<void> | void;
+
+export async function handleE2ERuntimeEvent(
+  event: unknown,
+  flushCapturedEvents?: E2ECaptureFlushHook,
+): Promise<boolean> {
   if (!isExtensionE2ERuntimeEvent(event)) {
     return false;
   }
@@ -34,12 +39,25 @@ export async function handleE2ERuntimeEvent(event: unknown): Promise<boolean> {
     for (const platform of event.platforms) {
       platformResults.push(await executePlatformE2ERun(event, platform));
     }
+    await runFlushHook(flushCapturedEvents);
     await safePostE2EResult(event, platformResults);
   } finally {
     activeRunId = null;
   }
 
   return true;
+}
+
+async function runFlushHook(flushCapturedEvents: E2ECaptureFlushHook | undefined): Promise<void> {
+  if (!flushCapturedEvents) return;
+  try {
+    await flushCapturedEvents();
+  } catch (error) {
+    console.warn(
+      "[OpenBiliClaw] Extension E2E capture flush failed:",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
 }
 
 function buildConcurrentFailureResults(
@@ -104,7 +122,7 @@ async function openOrReusePlatformTab(platform: E2EPlatform): Promise<chrome.tab
   if (existing?.id !== undefined) {
     const updated = await chrome.tabs.update(existing.id, {
       active: true,
-      url: existing.url ?? targetUrl,
+      url: targetUrl,
     });
     if (!updated) {
       throw new Error(`Missing updated tab for ${platform}`);

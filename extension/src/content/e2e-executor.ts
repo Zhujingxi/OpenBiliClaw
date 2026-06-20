@@ -23,6 +23,10 @@ interface ClickableElement {
   matches?: (selector: string) => boolean;
   parentElement?: ClickableElement | null;
   scrollIntoView?: (options?: ScrollIntoViewOptions) => void;
+  scrollBy?: (options: ScrollToOptions) => void;
+  scrollTop?: number;
+  scrollHeight?: number;
+  clientHeight?: number;
   disabled?: boolean;
 }
 
@@ -33,6 +37,7 @@ interface QueryDocument {
 interface ScrollWindow {
   innerHeight: number;
   scrollBy: (options: ScrollToOptions) => void;
+  dispatchEvent?: (event: Event) => boolean;
 }
 
 export interface E2EExecutorEnv {
@@ -43,12 +48,15 @@ export interface E2EExecutorEnv {
 
 interface PlatformRecipe {
   clickSelectors: readonly string[];
+  actionSelectors?: Partial<Record<E2EAction, readonly string[]>>;
   textActions: Partial<Record<E2EAction, readonly RegExp[]>>;
 }
 
 const SNAPSHOT_WAIT_MS = 150;
 const SCROLL_WAIT_MS = 300;
-const CLICK_WAIT_MS = 200;
+const CLICK_WAIT_MS = 800;
+const TARGET_WAIT_MS = 8_000;
+const TARGET_RETRY_MS = 500;
 const TEXT_TARGET_SELECTOR = 'button, [role="button"], a, div, span';
 const BUTTON_CONTROL_SELECTOR = 'button, [role="button"]';
 
@@ -75,7 +83,14 @@ const RECIPES: Record<E2EPlatform, PlatformRecipe> = {
     },
   },
   xiaohongshu: {
-    clickSelectors: [".note-item", 'a[href*="/explore/"]', 'a[href*="/discovery/item/"]'],
+    clickSelectors: ['a[href*="/explore/"]', 'a[href*="/discovery/item/"]', ".note-item"],
+    actionSelectors: {
+      share: [
+        '[aria-label*="分享"]',
+        '[title*="分享"]',
+        '[class*="share" i]',
+      ],
+    },
     textActions: {
       share: [/share/i, /分享/],
       like: [/like/i, /赞/],
@@ -84,7 +99,13 @@ const RECIPES: Record<E2EPlatform, PlatformRecipe> = {
     },
   },
   twitter: {
-    clickSelectors: ['article[data-testid="tweet"]', '[data-testid="tweet"]', 'article a[href*="/status/"]'],
+    clickSelectors: ['article a[href*="/status/"]', 'article[data-testid="tweet"]', '[data-testid="tweet"]'],
+    actionSelectors: {
+      share: [
+        '[data-testid="share"]',
+        '[aria-label*="Share" i]',
+      ],
+    },
     textActions: {
       share: [/share/i],
       repost: [/repost/i, /retweet/i],
@@ -254,6 +275,20 @@ function queryClickTarget(
   return null;
 }
 
+function queryActionSelectorTarget(
+  documentLike: QueryDocument,
+  selectors: readonly string[] | undefined,
+  viewportHeight: number,
+): ClickableElement | null {
+  if (!selectors || selectors.length === 0) return null;
+  for (const selector of selectors) {
+    const elements = Array.from(documentLike.querySelectorAll(selector));
+    const target = elements.find((element) => isVisible(element, viewportHeight));
+    if (target) return target;
+  }
+  return null;
+}
+
 function elementLabel(element: ClickableElement): string {
   return [
     element.getAttribute?.("aria-label"),
@@ -283,19 +318,117 @@ function findTextTarget(
   }) ?? null;
 }
 
-function clickElement(element: ClickableElement): void {
-  element.scrollIntoView?.({ block: "center", inline: "center", behavior: "smooth" });
-  if (typeof element.click === "function") {
-    element.click();
-    return;
-  }
-  element.dispatchEvent?.(
-    new MouseEvent("click", {
+function dispatchSyntheticClick(element: ClickableElement): void {
+  const event = typeof MouseEvent === "undefined"
+    ? new Event("click", { bubbles: true, cancelable: true })
+    : new MouseEvent("click", {
       bubbles: true,
       cancelable: true,
       view: window,
-    }),
+    });
+  element.dispatchEvent?.(event);
+}
+
+function clickElement(element: ClickableElement, forceSyntheticEvent = false): void {
+  element.scrollIntoView?.({ block: "center", inline: "center", behavior: "smooth" });
+  if (typeof element.click === "function") {
+    element.click();
+    if (forceSyntheticEvent) {
+      dispatchSyntheticClick(element);
+    }
+    return;
+  }
+  dispatchSyntheticClick(element);
+}
+
+function queryScrollableTarget(
+  documentLike: QueryDocument,
+  viewportHeight: number,
+): ClickableElement | null {
+  const elements = Array.from(documentLike.querySelectorAll("*"));
+  let best: { element: ClickableElement; score: number } | null = null;
+
+  for (const element of elements) {
+    if (!isVisible(element, viewportHeight)) continue;
+    const scrollHeight = element.scrollHeight ?? 0;
+    const clientHeight = element.clientHeight ?? 0;
+    if (clientHeight < 120 || scrollHeight <= clientHeight + 120) continue;
+
+    const rect = element.getBoundingClientRect?.();
+    const visibleHeight = rect
+      ? Math.min(rect.bottom, viewportHeight) - Math.max(rect.top, 0)
+      : 0;
+    const score = Math.max(0, visibleHeight) + Math.min(scrollHeight - clientHeight, viewportHeight);
+    if (!best || score > best.score) {
+      best = { element, score };
+    }
+  }
+
+  return best?.element ?? null;
+}
+
+function dispatchScrollEvent(target: { dispatchEvent?: (event: Event) => boolean }): void {
+  if (typeof Event === "undefined") return;
+  target.dispatchEvent?.(new Event("scroll", { bubbles: false, cancelable: false }));
+}
+
+function performScroll(runtime: Required<E2EExecutorEnv>): void {
+  const amount = Math.max(300, runtime.window.innerHeight * 0.75);
+  const target = queryScrollableTarget(runtime.document, runtime.window.innerHeight || 800);
+
+  if (target) {
+    const before = target.scrollTop ?? 0;
+    if (typeof target.scrollBy === "function") {
+      target.scrollBy({ top: amount, behavior: "smooth" });
+    } else {
+      target.scrollTop = before + amount;
+    }
+    dispatchScrollEvent(target);
+    return;
+  }
+
+  runtime.window.scrollBy({
+    top: amount,
+    behavior: "smooth",
+  });
+  dispatchScrollEvent(runtime.window);
+}
+
+function findActionTarget(
+  runtime: Required<E2EExecutorEnv>,
+  recipe: PlatformRecipe,
+  action: E2EAction,
+): ClickableElement | null {
+  if (action === "click") {
+    return queryClickTarget(runtime.document, recipe.clickSelectors, runtime.window.innerHeight);
+  }
+
+  return queryActionSelectorTarget(
+    runtime.document,
+    recipe.actionSelectors?.[action],
+    runtime.window.innerHeight,
+  ) ?? findTextTarget(
+    runtime.document,
+    recipe.textActions[action] ?? [],
+    action,
+    runtime.window.innerHeight,
   );
+}
+
+async function waitForActionTarget(
+  runtime: Required<E2EExecutorEnv>,
+  recipe: PlatformRecipe,
+  action: E2EAction,
+): Promise<ClickableElement | null> {
+  let waitedMs = 0;
+  do {
+    const target = findActionTarget(runtime, recipe, action);
+    if (target) return target;
+    await runtime.sleep(TARGET_RETRY_MS);
+    waitedMs += TARGET_RETRY_MS;
+  } while (waitedMs < TARGET_WAIT_MS);
+
+  return null;
 }
 
 function failedResult(action: E2EAction, detail: string, error?: string): E2EActionExecutionResult {
@@ -335,10 +468,7 @@ export async function executeAction(
     }
 
     if (action === "scroll") {
-      runtime.window.scrollBy({
-        top: Math.max(300, runtime.window.innerHeight * 0.75),
-        behavior: "smooth",
-      });
+      performScroll(runtime);
       await runtime.sleep(SCROLL_WAIT_MS);
       return { action, status: "ok", detail: "scrolled" };
     }
@@ -352,20 +482,13 @@ export async function executeAction(
     }
 
     const recipe = RECIPES[platform];
-    const target = action === "click"
-      ? queryClickTarget(runtime.document, recipe.clickSelectors, runtime.window.innerHeight)
-      : findTextTarget(
-        runtime.document,
-        recipe.textActions[action] ?? [],
-        action,
-        runtime.window.innerHeight,
-      );
+    const target = await waitForActionTarget(runtime, recipe, action);
 
     if (!target) {
       return failedResult(action, "target_not_found");
     }
 
-    clickElement(target);
+    clickElement(target, action === "share");
     await runtime.sleep(CLICK_WAIT_MS);
     return { action, status: "ok", detail: "clicked" };
   } catch (error) {

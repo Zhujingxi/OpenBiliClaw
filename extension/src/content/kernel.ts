@@ -108,34 +108,59 @@ export function startCollector(adapter: PlatformAdapter): void {
   };
 
   const observeScroll = (): void => {
+    const buildScrollMetadata = (target: EventTarget | null): Record<string, unknown> => {
+      if (
+        target instanceof HTMLElement &&
+        target !== document.body &&
+        target !== document.documentElement &&
+        target.scrollHeight > target.clientHeight
+      ) {
+        const maxElementScroll = Math.max(target.scrollHeight - target.clientHeight, 1);
+        return {
+          scrollRatio: Number((target.scrollTop / maxElementScroll).toFixed(4)),
+          scrollY: window.scrollY,
+          elementScrollTop: target.scrollTop,
+          elementScrollHeight: target.scrollHeight,
+          elementClientHeight: target.clientHeight,
+          scrollTarget: target.tagName.toLowerCase(),
+        };
+      }
+
+      const docHeight = Math.max(
+        document.body.scrollHeight,
+        document.documentElement.scrollHeight,
+        1,
+      );
+      const viewportHeight = window.innerHeight || 1;
+      const maxScroll = Math.max(docHeight - viewportHeight, 1);
+      return {
+        scrollRatio: Number((window.scrollY / maxScroll).toFixed(4)),
+        scrollY: window.scrollY,
+      };
+    };
+
+    const handleScroll = (target: EventTarget | null): void => {
+      if (scrollTimer !== null) {
+        window.clearTimeout(scrollTimer);
+      }
+      scrollTimer = window.setTimeout(() => {
+        const now = Date.now();
+        if (now - lastScrollEventAt < SCROLL_DEBOUNCE_MS) return;
+        lastScrollEventAt = now;
+
+        sendEvent(createEvent("scroll", buildScrollMetadata(target)));
+      }, SCROLL_DEBOUNCE_MS);
+    };
+
     window.addEventListener(
       "scroll",
-      () => {
-        if (scrollTimer !== null) {
-          window.clearTimeout(scrollTimer);
-        }
-        scrollTimer = window.setTimeout(() => {
-          const now = Date.now();
-          if (now - lastScrollEventAt < SCROLL_DEBOUNCE_MS) return;
-          lastScrollEventAt = now;
-
-          const docHeight = Math.max(
-            document.body.scrollHeight,
-            document.documentElement.scrollHeight,
-            1,
-          );
-          const viewportHeight = window.innerHeight || 1;
-          const maxScroll = Math.max(docHeight - viewportHeight, 1);
-          sendEvent(
-            createEvent("scroll", {
-              scrollRatio: Number((window.scrollY / maxScroll).toFixed(4)),
-              scrollY: window.scrollY,
-            }),
-          );
-        }, SCROLL_DEBOUNCE_MS);
-      },
+      () => handleScroll(window),
       { passive: true },
     );
+    document.addEventListener("scroll", (event) => handleScroll(event.target), {
+      passive: true,
+      capture: true,
+    });
   };
 
   const observeHover = (): void => {
@@ -202,7 +227,7 @@ export function startCollector(adapter: PlatformAdapter): void {
         actionLabel: actionHint.ariaLabel,
       });
       sendEvent(createEvent(action.type, action.metadata));
-    });
+    }, { capture: true });
   };
 
   const attachVideoListeners = (): void => {

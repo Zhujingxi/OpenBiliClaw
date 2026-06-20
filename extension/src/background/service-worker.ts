@@ -68,6 +68,7 @@ let eventBuffer: BehaviorEvent[] = [];
 const BUFFER_FLUSH_INTERVAL = 30_000;
 const BUFFER_MAX_SIZE = 50;
 const FLUSH_ALARM_NAME = "openbiliclaw-flush-events";
+const E2E_CAPTURE_SETTLE_MS = 1_000;
 // v0.3.22+: health probe before WS prevents extension-only installs
 // from flooding chrome://extensions "Errors" with browser-level
 // WebSocket connection failures. A failed fetch caught here is just a
@@ -190,7 +191,7 @@ async function handleRuntimeEvent(event: Record<string, unknown>): Promise<void>
   if (handleCookieSyncRuntimeEvent(event)) return;
 
   try {
-    if (await handleE2ERuntimeEvent(event)) return;
+    if (await handleE2ERuntimeEvent(event, flushCapturedEventsForE2E)) return;
   } catch (err) {
     console.warn(
       "[OpenBiliClaw] Extension E2E runtime event failed:",
@@ -255,6 +256,11 @@ async function handleRuntimeEvent(event: Record<string, unknown>): Promise<void>
 
   // Still ack the backend so the same bvid isn't re-pushed forever.
   void acknowledgeDelightSent(bvid);
+}
+
+async function flushCapturedEventsForE2E(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, E2E_CAPTURE_SETTLE_MS));
+  await flushEvents();
 }
 
 async function isBackendAlive(): Promise<boolean> {

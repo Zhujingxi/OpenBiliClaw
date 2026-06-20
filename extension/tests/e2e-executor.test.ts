@@ -19,6 +19,10 @@ interface RectLike {
 class FakeElement {
   public clicked = false;
   public scrolled = false;
+  public scrollTop = 0;
+  public scrollHeight = 0;
+  public clientHeight = 0;
+  public readonly dispatchedEvents: string[] = [];
   public readonly textContent: string;
   private readonly attrs: Record<string, string>;
   private readonly rect: RectLike;
@@ -80,6 +84,15 @@ class FakeElement {
     this.clicked = true;
   }
 
+  scrollBy(options: { top?: number }): void {
+    this.scrollTop += options.top ?? 0;
+  }
+
+  dispatchEvent(event: Event): boolean {
+    this.dispatchedEvents.push(event.type);
+    return true;
+  }
+
   matches(selector: string): boolean {
     return selector
       .split(",")
@@ -108,10 +121,13 @@ class FakeElement {
 
 function fakeEnv(elements: FakeElement[] = []) {
   const scrollCalls: unknown[] = [];
+  const windowEvents: string[] = [];
   return {
     scrollCalls,
+    windowEvents,
     document: {
       querySelectorAll(selector: string): FakeElement[] {
+        if (selector === "*") return elements;
         return elements.filter((element) => element.matches(selector));
       },
     },
@@ -119,6 +135,10 @@ function fakeEnv(elements: FakeElement[] = []) {
       innerHeight: 800,
       scrollBy(options: unknown): void {
         scrollCalls.push(options);
+      },
+      dispatchEvent(event: Event): boolean {
+        windowEvents.push(event.type);
+        return true;
       },
     },
     sleep: async () => {},
@@ -140,6 +160,19 @@ test("twitter share clicks a visible matching target", async () => {
   const env = fakeEnv([share]);
 
   const result = await executeAction("twitter", "share", false, env);
+
+  assert.deepEqual(result, { action: "share", status: "ok", detail: "clicked" });
+  assert.equal(share.scrolled, true);
+  assert.equal(share.clicked, true);
+});
+
+test("xiaohongshu share can click an icon-only class selector", async () => {
+  const share = new FakeElement("", { tag: "div" }, undefined, {
+    selectors: ['[class*="share" i]'],
+  });
+  const env = fakeEnv([share]);
+
+  const result = await executeAction("xiaohongshu", "share", false, env);
 
   assert.deepEqual(result, { action: "share", status: "ok", detail: "clicked" });
   assert.equal(share.scrolled, true);
@@ -321,6 +354,32 @@ test("scroll calls window.scrollBy with a smooth viewport-sized step", async () 
 
   assert.deepEqual(result, { action: "scroll", status: "ok", detail: "scrolled" });
   assert.deepEqual(env.scrollCalls, [{ top: 600, behavior: "smooth" }]);
+  assert.deepEqual(env.windowEvents, ["scroll"]);
+});
+
+test("scroll prefers a visible internal scroll container", async () => {
+  const scroller = new FakeElement(
+    "",
+    { tag: "div" },
+    {
+      width: 400,
+      height: 500,
+      top: 0,
+      left: 0,
+      bottom: 500,
+      right: 400,
+    },
+  );
+  scroller.scrollHeight = 1800;
+  scroller.clientHeight = 500;
+  const env = fakeEnv([scroller]);
+
+  const result = await executeAction("douyin", "scroll", false, env);
+
+  assert.deepEqual(result, { action: "scroll", status: "ok", detail: "scrolled" });
+  assert.deepEqual(env.scrollCalls, []);
+  assert.equal(scroller.scrollTop, 600);
+  assert.deepEqual(scroller.dispatchedEvents, ["scroll"]);
 });
 
 test("registerE2EExecutor registers an async chrome message listener", async () => {

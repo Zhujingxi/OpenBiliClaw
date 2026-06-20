@@ -62,7 +62,50 @@ test("e2e background runner opens a platform tab, dispatches content execution, 
   }
 });
 
-test("e2e background runner reuses an existing platform tab by host", async () => {
+test("e2e background runner flushes captured events before posting backend result", async () => {
+  const state = installChromeMock();
+  const order: string[] = [];
+  state.sendMessageImpl = async () => ({
+    status: "ok",
+    actions: [{ action: "scroll", status: "ok", detail: "scrolled" }],
+  });
+  state.fetchImpl = async (input, init) => {
+    order.push("post-result");
+    state.fetchCalls.push({
+      url: String(input),
+      method: init?.method,
+      body: init?.body ? JSON.parse(String(init.body)) : undefined,
+    });
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  };
+
+  try {
+    await handleE2ERuntimeEvent(
+      {
+        type: "extension_e2e_run",
+        run_id: "e2e-flush",
+        token: "secret",
+        platforms: ["douyin"],
+        actions: { douyin: ["scroll"] },
+        allow_state_changing: false,
+        timeout_seconds: 5,
+      },
+      async () => {
+        order.push("flush");
+        assert.equal(state.fetchCalls.length, 0);
+      },
+    );
+
+    assert.deepEqual(order, ["flush", "post-result"]);
+    assert.equal(state.fetchCalls.length, 1);
+    const body = state.fetchCalls[0].body as { run_id?: string };
+    assert.equal(body.run_id, "e2e-flush");
+  } finally {
+    state.restore();
+  }
+});
+
+test("e2e background runner reuses an existing platform tab and resets it to the platform entry", async () => {
   const state = installChromeMock();
   state.queryResult = [{ id: 7, status: "complete", url: "https://www.douyin.com/user/self" }];
   state.tabById.set(7, { id: 7, status: "complete", url: "https://www.douyin.com/user/self" });
@@ -80,7 +123,7 @@ test("e2e background runner reuses an existing platform tab by host", async () =
 
     assert.deepEqual(state.createdTabs, []);
     assert.deepEqual(state.updatedTabs, [
-      { tabId: 7, active: true, url: "https://www.douyin.com/user/self" },
+      { tabId: 7, active: true, url: "https://www.douyin.com/" },
     ]);
     assert.equal(state.sentMessages[0].tabId, 7);
   } finally {

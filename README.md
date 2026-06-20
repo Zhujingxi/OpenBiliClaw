@@ -24,7 +24,7 @@
 |---|---|---|
 | B 站 / 小红书 / 抖音 / YouTube / X / Web | 数据默认留在本机 SQLite | 喜欢、不感兴趣、聊天反馈都会改变后续推荐 |
 
-开发版还提供本机扩展 E2E 自检：后端可驱动已安装插件打开抖音 / 小红书 / X 真实页面，执行白名单 DOM 操作并校验事件是否自然进入本地 `/api/events`。
+开发版还提供本机扩展 E2E 自检：后端可驱动已安装插件打开或复用抖音 / 小红书 / X 真实页面，先归位到平台入口，再执行白名单 DOM 操作并校验事件是否自然进入本地 `/api/events`。
 
 <p align="center">
   <a href="https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg"><b>安装浏览器插件</b></a>
