@@ -22,6 +22,8 @@ A local-first AI discovery agent that learns your taste across Bilibili, Xiaohon
 |---|---|---|
 | Bilibili / Xiaohongshu / Douyin / YouTube / X / Web | Data stays in your local SQLite by default | Likes, dislikes, and chat feedback shape future recommendations |
 
+Dev builds also include a local extension-driven E2E check: the backend can ask the installed extension to open real Douyin / Xiaohongshu / X pages, perform whitelisted DOM actions, and verify that events naturally reach the local `/api/events` pipeline.
+
 <p align="center">
   <a href="https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg"><b>Install the browser extension</b></a>
   ·

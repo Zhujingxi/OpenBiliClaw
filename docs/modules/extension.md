@@ -59,6 +59,7 @@
 | 版本与更新面板 | ✅ | 设置页调度 tab 的“版本与更新”读取 `/api/update-status` 展示后端当前 / 最新版本、状态、上次检查和错误；`popup-helpers.normalizeRuntimeStatus()` 同时保留 `/api/runtime-status` 中的 `current_version`、`latest_remote_version`、`backend_update_state` 等自动更新摘要字段，避免 runtime 状态归一化时丢失后端版本信息。 |
 | 语义去重未启用提示 | ✅ | v0.3.54+ 推荐页启动时读 `/api/health.embedding_ready`，为 `false` 时在推荐列表上方显示可关闭横幅（`maybeShowEmbeddingBanner`）；「一键启用本地 Ollama」按钮 PUT `/api/config` 写入 `embedding.provider=ollama, model=bge-m3` 热加载，再复检 health，仅当 `embedding_ready` 翻 `true` 才收起横幅，否则提示去跑 `ollama serve` / `ollama pull bge-m3`。本会话内关闭后不再打扰（`sessionStorage`）。v0.3.97+ 横幅决策抽到 `popup-embedding-banner.js`（`shouldShowEmbeddingBanner`），并在面板重新可见 / 获焦时复检（`installEmbeddingBannerAutoRefresh`）——配合后端实时探活，embedding 修好后无需重开面板横幅即自动消失（此前 `maybeShowEmbeddingBanner` 仅面板打开时跑一次，常驻 side panel 会长期残留旧横幅）。v0.3.97+ 同时修复横幅**根本无法隐藏**的 CSS bug：`.embedding-banner { display: flex }` 盖过 UA `[hidden] { display: none }`（同优先级，author > UA），`banner.hidden = true` 形同虚设、横幅无视 `embedding_ready` 常驻——新增 `.embedding-banner[hidden] { display: none }` 守卫修复 |
 | 跨平台行为动作采集 | ✅ | B 站、小红书、抖音、YouTube 和 X 均通过 `PlatformAdapter` 识别统一动作：`like/favorite/comment/share/follow` 等按平台能力映射；`dislike` 永远经 `normalizeActionSignal()` 规范为 `feedback` 事件，metadata 带 `feedback_type=dislike` 与 `reaction=thumbs_down`。真实 DOM 点击会从内部 `span/svg` 向上归因到最近的按钮 / 链接 / 带 `aria-label` 的动作元素，避免真实站点嵌套按钮漏识别分享、关注等强信号。后台 buffer 把 `feedback/follow/share/view` 和带 dwell metadata 的 `click` 视为即时 flush 信号，高频 `scroll/hover/snapshot` 仍缓冲去重 |
+| 扩展捕捉 E2E 自检 | ✅ | 本机后端可通过 `/api/extension/e2e/run` 向已安装插件投递 `extension_e2e_run`，插件打开 / 复用抖音、小红书、X 标签页并执行白名单 DOM 操作，再由后端按运行窗口校验真实 `/api/events` 入库结果。content executor 不直接发送 `BEHAVIOR_EVENT`，确保测到的是真实捕捉链路；会改变状态的动作需要显式 `allow_state_changing=true` |
 | 对话历史自动定位 | ✅ | `popup/popup.js` 的 `scrollChatMessagesToBottom()` 统一处理聊天历史滚动：历史 hydrate、追加用户/助手消息、thinking 占位替换，以及从其他 tab 切回「对话」时都会把 `.chat-messages` 滚到最新 turn；切 tab 场景额外用下一帧滚动覆盖 hidden 容器恢复布局后的高度变化 |
 
 ## 目录结构
@@ -83,9 +84,11 @@ extension/
 │   ├── background/
 │   │   ├── buffer.ts
 │   │   ├── cookie-sync.ts     # B 站 / 抖音 / X Cookie 自动同步到已配置后端（重试 alarm 按平台隔离）
+│   │   ├── e2e-runner.ts      # 后端驱动的真实标签页 E2E 捕捉自检 runner
 │   │   ├── bili-task-dispatcher.ts # B 站搜索兜底任务轮询 / 后台 tab / 结果回传
 │   │   └── service-worker.ts
 │   ├── content/
+│   │   ├── e2e-executor.ts    # 只执行白名单 DOM 操作，不直接伪造行为事件
 │   │   ├── kernel.ts          # 平台无关的 DOM 观察 + 事件派发
 │   │   ├── bilibili.ts        # B 站 entry point，挂载 bilibiliAdapter
 │   │   ├── bili/
@@ -109,6 +112,7 @@ extension/
 │   └── shared/
 │       ├── backend-endpoint.ts # 共用后端 origin / apiUrl() / wsUrl() + chrome.storage 持久化 endpoint
 │       ├── behavior.ts        # createBehaviorEvent / DOM snapshot kernel
+│       ├── e2e.ts             # E2E request / result / action 类型与超时常量
 │       ├── types.ts           # BehaviorEvent + PlatformAdapter 接口
 │       └── platforms/
 │           ├── bilibili.ts    # bvid 提取、卡片选择器、动作关键字
@@ -153,6 +157,7 @@ extension/
 - 缓冲为空时也会周期轮询高置信通知
 - 每次 service worker 冷启动都会启动 B 站和抖音 Cookie 同步；如果已配置后端暂时不可用，会通过 `chrome.alarms` 以 1 分钟间隔重试，成功同步后恢复为 60 分钟刷新
 - 以 `client=background` 连接 `/api/runtime-stream` 后，如果后端发现本地缺少 B 站 Cookie，会收到 `bilibili_cookie_sync_requested`；如果 `[sources.douyin].enabled=true` 且缺少抖音 Cookie，会收到 `douyin_cookie_sync_requested`。扩展收到后会立即执行对应 Cookie POST。后端也把这条 WebSocket 作为 extension presence 信号：连接建立时允许后台 LLM 工作，最后一个连接断开后进入 `extension_disconnect_grace_seconds` 宽限；服务端 reader 会主动 `receive()` 检测 idle disconnect，避免浏览器断开后 presence 卡住
+- 收到 `extension_e2e_run` 后会调用 `background/e2e-runner.ts`：按目标平台打开或复用标签页，等待页面 ready，再向 content script 发送 `OBC_E2E_EXECUTE`；runner 会把执行结果 POST 到 `/api/extension/e2e/result`，sendMessage / tab load / 整体运行都有独立超时，避免单个平台页面卡住整个后端请求
 - 连接 `/api/runtime-stream` 之前会先 HTTP `GET /api/ping`（2 秒超时）做一次活性探针，仅在后端可达时再 `new WebSocket(...)`。这样 fresh-install 用户先装扩展、后启动后端时，`chrome://extensions` 不会被浏览器层 WebSocket 失败计入「错误」徽标；探针失败仍走原有的 5s → 60s 指数退避兜底重连。探活不再打 `/api/health`：health 会同步等一次 embedding 实探（冷缓存可达数秒），2 秒预算下会把健康但冷启动的后端误判为掉线；`/api/ping` 返回 404（旧后端）时回退 `/api/health`（12 秒预算）
 - 后端不可达时会在扩展工具栏图标上打一个浅灰 `!` badge 作为可视提示，WebSocket 首次连上后自动清除；popup 内仍会显示「后端还没开张，先运行 `openbiliclaw start`」
 - Cookie 监听器幂等注册，避免 onInstalled / onStartup / 冷启动重复挂载导致同一次登录触发多次 POST
@@ -161,6 +166,39 @@ extension/
 - 在推荐通知之外，认知变化通知会打开带 `?tab=profile` 的插件页面，直接落到画像视图
 - 惊喜推荐通知现在会打开带 `?tab=recommend&delight=<bvid>` 的插件页面，落到对应的首屏惊喜卡，而不是只把人丢回通用推荐页
 - `interest.probe` 和 `avoidance.probe` 都留在 side panel inbox 内处理，不走系统级 OS toast，避免探针在浏览器外打扰用户
+
+### 扩展捕捉 E2E 自检
+
+这条链路用于验证“捕捉层是否真的正常”，不是给后端灌假事件：
+
+```text
+POST /api/extension/e2e/run
+  -> runtime-stream: extension_e2e_run
+  -> service worker e2e-runner
+  -> content script OBC_E2E_EXECUTE
+  -> 真实 DOM click / scroll / snapshot
+  -> content/kernel.ts + PlatformAdapter 自然捕捉
+  -> service worker buffer
+  -> POST /api/events
+  -> POST /api/extension/e2e/result
+  -> 后端按 run window 匹配 events 表
+```
+
+请求示例：
+
+```json
+{
+  "platform": "douyin",
+  "action": "share",
+  "url": "https://www.douyin.com/",
+  "timeout_ms": 45000,
+  "allow_state_changing": false
+}
+```
+
+默认只允许不改变账号状态或副作用极低的动作：`snapshot`、`scroll`、普通 `click` 和安全分享入口点击。`like`、`favorite`、`follow`、`comment`、X 的 `repost` 等会改变平台状态的动作，必须显式传 `allow_state_changing=true`。为了避免误测，`share` 只匹配安全分享入口的 click / share 捕捉结果，不会把 X 的转推 / repost mutation 算作普通分享成功。
+
+content executor 的 selector 策略按平台收敛在 `src/content/e2e-executor.ts`：优先找当前页面可见的 action button / role button / aria-label，并排除“取消点赞”“已收藏”“Following”等反向或已激活状态。执行器只返回“是否点到了 DOM”，最终成功标准仍以后端是否在 `/api/events` 中看到对应平台、动作和时间窗口内的真实事件为准。
 
 ### B 站搜索兜底任务桥
 
