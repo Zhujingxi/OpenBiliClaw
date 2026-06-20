@@ -4044,12 +4044,10 @@
         };
       }
       const deepseekReasoning = getInput("deepseekReasoning");
-      if (deepseekReasoning || provider === "deepseek" || fallbackProvider === "deepseek") {
-        llm.deepseek = {
-          ...(llm.deepseek || state.config?.llm?.deepseek || {}),
-          reasoning_effort: deepseekReasoning
-        };
-      }
+      llm.deepseek = {
+        ...(llm.deepseek || state.config?.llm?.deepseek || {}),
+        reasoning_effort: deepseekReasoning
+      };
       return {
         language: getInput("language") || "zh",
         data_dir: getInput("dataDir"),

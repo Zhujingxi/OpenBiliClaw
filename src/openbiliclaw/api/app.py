@@ -6960,7 +6960,7 @@ def create_app(
                             continue
                         existing = getattr(provider_cfg, field_name, "")
                         if (
-                            field_name != "auth_mode"
+                            field_name not in {"auth_mode", "reasoning_effort"}
                             and not new_value.strip()
                             and isinstance(existing, str)
                             and existing.strip()

@@ -4,6 +4,12 @@
 
 ---
 
+## v0.3.130: DeepSeek reasoning_effort 配置保存修复（2026-06-20）
+
+后端源码改动，浏览器插件与桌面安装包未改动。
+
+- **插件 / PC Web 设置页关闭 DeepSeek thinking 立即生效**：`PUT /api/config` 现在允许 `llm.deepseek.reasoning_effort=""` 覆盖已有 `"max"` / `"high"`，并且 `save_config()` 会显式写出 `reasoning_effort = ""`，避免重启后因缺省值回落到 `"max"`。新增 API 与配置 round-trip 回归测试覆盖该路径。
+
 ## Unreleased: 多源评估指标与封面图评估（2026-06-20）
 
 - **各来源候选补齐互动指标**：`DiscoveredContent`、`discovery_candidates`、`content_cache` 与来源归一化链路新增观看、点赞、收藏、评论、分享、弹幕、转推、书签等字段；B 站 / 小红书 / 抖音 / YouTube / X 能取到的指标会随候选进入统一 evaluator。batch prompt 同时带 `tags/body_text`，并明确互动指标只作辅助，不能用热度覆盖内容与画像的真实匹配。
