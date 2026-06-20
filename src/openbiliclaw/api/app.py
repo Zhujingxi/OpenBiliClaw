@@ -1218,6 +1218,7 @@ def create_app(
             or path == "/api/ping"
             or path == "/api/health"
             or path == "/api/runtime-status"
+            or path == "/favicon.ico"
             or path == "/api/autostart-status"
             or path == "/api/autostart/apply"
             or path in ("/api/init-status", "/api/init", "/api/init/cancel")

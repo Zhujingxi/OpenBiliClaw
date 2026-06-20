@@ -70,6 +70,7 @@ class TestBackendAPI:
         assert response.status_code == 200
         assert response.headers.get("content-type", "").startswith("text/html")
         assert '<link rel="manifest" href="manifest.json">' in response.text
+        assert '<meta name="mobile-web-app-capable" content="yes">' in response.text
         assert '<meta name="apple-mobile-web-app-capable" content="yes">' in response.text
         assert '<meta name="apple-mobile-web-app-title" content="BiliClaw">' in response.text
         assert '<link rel="apple-touch-icon" sizes="180x180" href="icon-192.png">' in response.text
