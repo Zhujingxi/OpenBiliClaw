@@ -10,6 +10,7 @@
 
 - **图形化初始化来源勾选即生效**：`/setup/`、桌面 Web 和插件推荐 tab 不再把“小红书 / 抖音 / YouTube / X 已勾选但未在设置开启”当作启动前错误；显式 `sources` 现在是本轮 guided init 的 opt-in，并 best-effort 写回 `sources.<platform>.enabled=true`。前置清单同步显示“本次初始化来源”，避免首启默认勾选后仍报未开启。
 - **`/setup/` 保存模型配置不再提前启动画像 / 探针**：安装包首启向导第一页把“模型名”移出高级折叠并自动填入推荐默认模型；点击“保存并继续”只保存 LLM/provider/model 并热重载组件，同时用 `suppress_background_llm_work=true` 暂停 post-reload speculator、画像/探针和补池后台工作。只有第二页选择来源并点击“开始初始化”后才真正进入四阶段 guided init，初始化终态后再恢复后台循环。
+- **B 站搜索插件兜底不再只等全局冷却**：单个 `v_voucher` 关键词耗尽仍不会触发 API 全局 cooldown、也不会让 explore 一起停摆，但会打开短期 DOM fallback 信号；扩展在线且 B 站池子低于配额时，runtime producer 可以立即入队浏览器真实搜索页任务补货。
 - **推荐表达语气固定跟随用户画像**：推荐文案不再因为内容 `style_key` 是日常、轻聊或审美浏览就把语气自动调轻；`style_key` 只影响推荐理由切入角度。缺省推荐 tone 调整为 `balanced / warm / low / direct`，避免冷启动时过冷或过油。
 
 ## v0.3.131 / extension v0.3.85: 多源评估指标与封面图评估（2026-06-20）

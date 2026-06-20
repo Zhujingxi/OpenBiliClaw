@@ -40,11 +40,15 @@ class _Presence:
 
 
 class _BiliClient:
-    def __init__(self, cooldown: float = 120.0) -> None:
+    def __init__(self, cooldown: float = 120.0, dom_fallback: float = 0.0) -> None:
         self.cooldown = cooldown
+        self.dom_fallback = dom_fallback
 
     def search_cooldown_remaining(self) -> float:
         return self.cooldown
+
+    def search_dom_fallback_remaining(self) -> float:
+        return self.dom_fallback
 
 
 _DEFAULT_PROFILE = object()
@@ -123,6 +127,35 @@ async def test_bilibili_producer_skips_without_search_cooldown(queue: BiliTaskQu
 
     assert result["reason"] == "search_not_cooling"
     assert queue.next_pending() is None
+
+
+@pytest.mark.asyncio
+async def test_bilibili_producer_enqueues_when_dom_fallback_requested(
+    db: Database,
+    queue: BiliTaskQueue,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_keywords(_llm: Any, _profile: Any, *, count: int) -> list[str]:
+        return [f"kw-{i}" for i in range(count)]
+
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.bilibili_producer.generate_bili_search_keywords",
+        fake_keywords,
+    )
+    producer = BilibiliExtensionSearchProducer(
+        task_queue=queue,
+        soul_engine=_Soul(),
+        llm_service=_LLM(),
+        bilibili_client=_BiliClient(cooldown=0, dom_fallback=90),
+        presence=_Presence(),
+        keywords_per_cycle=3,
+        min_interval_minutes=0,
+    )
+
+    result = await producer.produce_if_due(limit=2)
+
+    assert result == {"enqueued": 2, "attempted": 2, "reason": "ok"}
+    assert {payload["query"] for payload in _task_payloads(db)} == {"kw-0", "kw-1"}
 
 
 @pytest.mark.asyncio

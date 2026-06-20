@@ -53,7 +53,7 @@ async def generate_bili_search_keywords(
 
 @dataclass
 class BilibiliExtensionSearchProducer:
-    """Enqueue Bilibili search tasks for the extension during API cooldown."""
+    """Enqueue Bilibili search tasks when API search is degraded."""
 
     task_queue: BiliTaskQueue
     soul_engine: Any
@@ -77,11 +77,11 @@ class BilibiliExtensionSearchProducer:
         limit: int | None = None,
         keywords: list[str] | None = None,
     ) -> dict[str, object]:
-        """Run one fallback cycle if Bilibili API search is cooling down."""
+        """Run one fallback cycle if Bilibili API search needs DOM help."""
 
         if not self.enabled:
             return self._skip("disabled")
-        if search_cooldown_remaining(self.bilibili_client) <= 0:
+        if not self._api_search_fallback_needed():
             return self._skip("search_not_cooling")
         if not self._extension_present():
             return self._skip("extension_absent")
@@ -211,6 +211,18 @@ class BilibiliExtensionSearchProducer:
             return bool(is_present(max(1, int(self.presence_grace_seconds))))
         except Exception:
             logger.debug("bili extension producer: presence unavailable", exc_info=True)
+            return False
+
+    def _api_search_fallback_needed(self) -> bool:
+        if search_cooldown_remaining(self.bilibili_client) > 0:
+            return True
+        remaining = getattr(self.bilibili_client, "search_dom_fallback_remaining", None)
+        if not callable(remaining):
+            return False
+        try:
+            return float(remaining()) > 0
+        except Exception:
+            logger.debug("bili extension producer: DOM fallback state unavailable", exc_info=True)
             return False
 
     def _candidate_pool_full(self) -> bool:

@@ -135,6 +135,7 @@ class BilibiliAPIClient:
     _SEARCH_COOLDOWN_BASE_SECONDS: ClassVar[float] = 180.0
     _SEARCH_COOLDOWN_412_SECONDS: ClassVar[float] = 600.0
     _SEARCH_COOLDOWN_MAX_SECONDS: ClassVar[float] = 1800.0
+    _SEARCH_DOM_FALLBACK_SECONDS: ClassVar[float] = 180.0
     # A single challenged keyword (transient churn) must NOT zero out the
     # whole search round + the explore strategy that shares this cooldown.
     # Only trip the process-wide cooldown after this many *consecutive*
@@ -143,6 +144,7 @@ class BilibiliAPIClient:
     _search_cooldown_until: ClassVar[float] = 0.0
     _search_cooldown_level: ClassVar[int] = 0
     _search_voucher_block_streak: ClassVar[int] = 0
+    _search_dom_fallback_until: ClassVar[float] = 0.0
     _WBI_MIXIN_KEY_ENC_TAB = [
         46,
         47,
@@ -251,6 +253,26 @@ class BilibiliAPIClient:
         return max(0.0, cls._search_cooldown_until - time.monotonic())
 
     @classmethod
+    def search_dom_fallback_remaining(cls) -> float:
+        """Seconds remaining while rendered-page search fallback is preferred."""
+        return max(0.0, cls._search_dom_fallback_until - time.monotonic())
+
+    @classmethod
+    def _activate_search_dom_fallback(cls, *, seconds: float | None = None) -> float:
+        """Ask the extension-search producer to try DOM search soon.
+
+        This signal is intentionally weaker than the global cooldown: API
+        search may keep probing, but the browser extension can backfill via a
+        rendered search page while the API path looks degraded.
+        """
+        duration = cls._SEARCH_DOM_FALLBACK_SECONDS if seconds is None else seconds
+        cls._search_dom_fallback_until = max(
+            cls._search_dom_fallback_until,
+            time.monotonic() + duration,
+        )
+        return duration
+
+    @classmethod
     def _activate_search_cooldown(cls, *, base_seconds: float | None = None) -> float:
         """Back off all search clients after repeated v_voucher/412 blocks.
 
@@ -268,6 +290,7 @@ class BilibiliAPIClient:
             cls._search_cooldown_until,
             time.monotonic() + duration,
         )
+        cls._activate_search_dom_fallback(seconds=duration)
         return duration
 
     @classmethod
@@ -515,6 +538,7 @@ class BilibiliAPIClient:
                         duration,
                     )
                     return []
+                self._activate_search_dom_fallback()
                 raise
 
             # Detect v_voucher-only response (stale WBI keys or rate limit)
@@ -536,6 +560,7 @@ class BilibiliAPIClient:
                 # trip the shared cooldown once consecutive keyword failures
                 # cross the threshold — a lone challenged keyword just gets
                 # dropped so the rest of the round (and explore) stays live.
+                self._activate_search_dom_fallback()
                 duration = self._record_voucher_block()
                 if duration > 0:
                     logger.warning(

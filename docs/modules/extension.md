@@ -31,7 +31,7 @@
 | 来源 Cookie 明文配置对齐 | ✅ | 插件 side panel 与桌面 Web 的抖音 / X 来源卡片对齐 B 站卡片形态：新增明文 Cookie 文本框（`GET /api/config` 的 `sources.douyin.cookie` / `sources.twitter.cookie`，默认脱敏、`reveal_keys=true` 明文），可手动粘贴覆盖；`PUT /api/config` 把非空值路由到 `data/douyin_cookie.json` / `data/x_cookie.json`（secrets 不进 `config.toml`），X 粘贴含 `auth_token`+`ct0` 的有效 Cookie 同时解除 re-login 封锁。空字段与脱敏回显（连续 `****`）不覆盖现有 Cookie（`bilibili.cookie` 同样补上该防护）；小红书（token 嗅探）/ YouTube（无需登录）维持差异化说明 |
 | 开机自启动设置 | ✅ | 通用 tab 新增「开机自启动」开关：打开设置时读 `GET /api/autostart-status`，切换时调用 `POST /api/autostart/apply` 即时生效；`can_manage=false` 时按 `env_managed` / `shadowed` / `unsupported_*` 等 reason 禁用并展示行内提示。提示明确该开关只影响下次系统登录拉起后端，不启停当前进程；本机 Ollama 可能随 `start` 预检一起拉起。 |
 | B 站 Cookie 自动同步 | ✅ | service worker 会读取 `SESSDATA` / `bili_jct` / `DedeUserID` 三件套并推送到本地后端；后端暂未启动时切到 1 分钟重试，成功后恢复 60 分钟兜底刷新；后端 runtime-stream 也可发 `bilibili_cookie_sync_requested` 让扩展立刻回传 |
-| B 站扩展搜索兜底任务 | ✅ | service worker 轮询 `/api/sources/bili/next-task` 并响应 `bili_task_available` 即时 kick；后台 tab 打开 `search.bilibili.com/all?keyword=...`，B 站 content script 抓渲染后的搜索结果卡片，回传 `BILI_TASK_RESULT` 到 `/api/sources/bili/task-result`。该链路只在后端 API search 冷却且扩展在线时由 producer 入队，不取代 API 主路径 |
+| B 站扩展搜索兜底任务 | ✅ | service worker 轮询 `/api/sources/bili/next-task` 并响应 `bili_task_available` 即时 kick；后台 tab 打开 `search.bilibili.com/all?keyword=...`，B 站 content script 抓渲染后的搜索结果卡片，回传 `BILI_TASK_RESULT` 到 `/api/sources/bili/task-result`。该链路在后端 API search 冷却或短期 DOM fallback 降级信号存在且扩展在线时由 producer 入队，不取代 API 主路径 |
 | 抖音 Cookie 自动同步 | ✅ | service worker 会读取 douyin.com Cookie header 并推送到 `/api/sources/dy/cookie`；后端保存到 `data/douyin_cookie.json`，供 `discover --source douyin` / `discover-douyin` 在无环境变量覆盖时使用；冷启动、runtime-stream 请求和 alarm 兜底都会触发同步 |
 | Cookie 同步重试按平台隔离 | ✅ | B站 / 抖音 / X 的 cookie 同步重试 alarm 拆分为 `openbiliclaw-cookie-sync-bili` / `-dy` / `-x` 三个独立 alarm：一个平台同步成功不再把另一平台刚排的 1/5 分钟快速重试重置回 60 分钟兜底；`cookies.onChanged` 的 debounce 也按平台独立，登录某平台只触发该平台的同步。旧共享 alarm 名（`openbiliclaw-cookie-sync`，chrome alarm 跨扩展升级持久化）兼容触发一轮全量同步后由下次 worker 启动清除 |
 | 认知变化提醒 | ✅ | service worker 会提示关键认知变化，画像 tab 会显示“阿B 最近新记住了什么” |
@@ -207,7 +207,7 @@ content executor 的 selector 策略按平台收敛在 `src/content/e2e-executor
 
 ### B 站搜索兜底任务桥
 
-`src/background/bili-task-dispatcher.ts` 会轮询后端 `/api/sources/bili/next-task`。这条链路不是 B 站 discovery 的常驻主路径：后端 `BilibiliExtensionSearchProducer` 只有在 API search 已进入冷却、扩展 presence 在线、候选池低于配额且近期没有同类任务时才会入队。service worker 同时监听 runtime stream 的 `bili_task_available`，收到后立即 `pollBiliTaskNow()`，alarm 轮询作为兜底。
+`src/background/bili-task-dispatcher.ts` 会轮询后端 `/api/sources/bili/next-task`。这条链路不是 B 站 discovery 的常驻主路径：后端 `BilibiliExtensionSearchProducer` 只有在 API search 已进入冷却或 `search_dom_fallback_remaining()>0`、扩展 presence 在线、候选池低于配额且近期没有同类任务时才会入队。service worker 同时监听 runtime stream 的 `bili_task_available`，收到后立即 `pollBiliTaskNow()`，alarm 轮询作为兜底。
 
 扩展领取到 search task 后，会打开后台 tab：
 

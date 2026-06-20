@@ -24,6 +24,7 @@ def _reset_bilibili_search_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(BilibiliAPIClient, "_search_cooldown_until", 0.0)
     monkeypatch.setattr(BilibiliAPIClient, "_search_cooldown_level", 0)
     monkeypatch.setattr(BilibiliAPIClient, "_search_voucher_block_streak", 0)
+    monkeypatch.setattr(BilibiliAPIClient, "_search_dom_fallback_until", 0.0)
 
 
 class FakeResponse:
@@ -346,6 +347,7 @@ async def test_single_v_voucher_keyword_does_not_trip_cooldown(
     # One exhaustion: streak ticks up but NO cooldown yet.
     assert BilibiliAPIClient.search_cooldown_remaining() == 0.0
     assert BilibiliAPIClient._search_voucher_block_streak == 1
+    assert BilibiliAPIClient.search_dom_fallback_remaining() > 0
 
     # The next keyword still reaches the network (not short-circuited),
     # and a success resets the streak.

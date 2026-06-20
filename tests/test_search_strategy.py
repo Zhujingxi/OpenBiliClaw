@@ -934,6 +934,7 @@ def _reset_search_cooldown_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(BilibiliAPIClient, "_search_cooldown_until", 0.0)
     monkeypatch.setattr(BilibiliAPIClient, "_search_cooldown_level", 0)
     monkeypatch.setattr(BilibiliAPIClient, "_search_voucher_block_streak", 0)
+    monkeypatch.setattr(BilibiliAPIClient, "_search_dom_fallback_until", 0.0)
 
 
 @pytest.mark.asyncio
