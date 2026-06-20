@@ -214,7 +214,7 @@ _E2E_ACTION_EVENT_TYPES: dict[ExtensionE2EAction, frozenset[str]] = {
     "snapshot": frozenset({"snapshot"}),
     "scroll": frozenset({"scroll"}),
     "click": frozenset({"click"}),
-    "share": frozenset({"share", "click"}),
+    "share": frozenset({"click"}),
     "like": frozenset({"like", "favorite"}),
     "favorite": frozenset({"favorite", "bookmark"}),
     "follow": frozenset({"follow"}),

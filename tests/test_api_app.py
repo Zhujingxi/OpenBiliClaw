@@ -2079,6 +2079,49 @@ class TestBackendAPI:
         )
         assert used_event_ids == set()
 
+    def test_match_e2e_event_separates_safe_share_from_repost(self) -> None:
+        from openbiliclaw.api.app import _match_e2e_event
+
+        events = [
+            {
+                "id": 1,
+                "event_type": "share",
+                "url": "https://x.com/example/status/1",
+                "title": "X repost mutation",
+                "metadata": {"source_platform": "twitter"},
+            },
+            {
+                "id": 2,
+                "event_type": "click",
+                "url": "https://x.com/example/status/2",
+                "title": "X share control click",
+                "metadata": {"source_platform": "twitter"},
+            },
+        ]
+
+        assert _match_e2e_event(
+            events,
+            platform="twitter",
+            action="share",
+            used_event_ids=set(),
+        ) == {
+            "event_id": 2,
+            "event_type": "click",
+            "url": "https://x.com/example/status/2",
+            "title": "X share control click",
+        }
+        assert _match_e2e_event(
+            events,
+            platform="twitter",
+            action="repost",
+            used_event_ids=set(),
+        ) == {
+            "event_id": 1,
+            "event_type": "share",
+            "url": "https://x.com/example/status/1",
+            "title": "X repost mutation",
+        }
+
     def test_extension_e2e_run_publishes_runtime_event_and_returns_timeout_report(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
