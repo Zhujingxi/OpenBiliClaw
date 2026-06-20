@@ -226,7 +226,13 @@ async def test_complete_multimodal_structured_task_sends_text_and_images() -> No
     assert isinstance(user_message["content"], list)
     parts = user_message["content"]
     assert parts[0] == {"type": "text", "text": "请评估候选。"}
-    assert parts[1] == {"type": "text", "text": "Cover image for content_id=yt-demo."}
+    assert parts[1] == {
+        "type": "text",
+        "text": (
+            "Cover image cover:yt-demo maps to the content_batch item whose "
+            "cover_image_ref is cover:yt-demo."
+        ),
+    }
     assert parts[2] == {
         "type": "image_url",
         "image_url": {"url": "data:image/jpeg;base64,/9j/4AAQSkZJRg=="},

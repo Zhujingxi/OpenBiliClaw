@@ -458,6 +458,37 @@ def test_batch_content_evaluation_prompt_explains_engagement_metrics() -> None:
     assert "Do not lower or raise preference score merely because" in system
 
 
+def test_batch_content_evaluation_prompt_explains_cover_image_refs() -> None:
+    messages = build_batch_content_evaluation_prompt(
+        profile_summary={"interests": ["visual analysis"]},
+        source_platform="mixed",
+        source_context="mixed",
+        content_items=[
+            {
+                "content_id": "yt-demo",
+                "source_platform": "youtube",
+                "title": "Visual item",
+                "cover_image_ref": "cover:yt-demo",
+            },
+            {
+                "content_id": "x-text",
+                "source_platform": "twitter",
+                "content_type": "tweet",
+                "title": "Text-only item",
+            },
+        ],
+    )
+
+    system = messages[0]["content"]
+    user = messages[1]["content"]
+
+    assert "cover_image_ref" in system
+    assert "cover:<content_id>" in system
+    assert "没有 cover_image_ref" in system
+    assert "只按文本字段判断" in system
+    assert '"cover_image_ref": "cover:yt-demo"' in user
+
+
 def test_build_explore_domains_prompt_caps_covered_groups_at_12() -> None:
     """Defensive: don't over-constrain the model. Cap at 12 so the most-
     saturated topic_groups make it into the avoidance signal but the

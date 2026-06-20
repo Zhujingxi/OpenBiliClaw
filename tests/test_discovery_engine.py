@@ -6,6 +6,7 @@ import asyncio
 import json
 import tempfile
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -581,6 +582,153 @@ async def test_multimodal_evaluation_sends_prepared_cover_images(monkeypatch) ->
         ]
     ]
     assert '"cover_image_ref": "cover:cover-0"' in llm_service.user_inputs[0]
+
+
+async def test_multimodal_evaluation_e2e_binds_cached_cover_to_content_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from PIL import Image
+
+    from openbiliclaw.llm.base import LLMResponse
+    from openbiliclaw.llm.service import LLMService
+    from openbiliclaw.runtime import image_cache
+
+    cover_url = "https://i.ytimg.com/vi/openbiliclaw-e2e/hqdefault.jpg"
+    image_content_id = "yt-e2e"
+    text_content_id = "x-text"
+
+    monkeypatch.setattr(image_cache, "_CACHE_DIR", tmp_path)
+    image = Image.new("RGB", (640, 360), (18, 104, 166))
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG", quality=92)
+    image_cache.save_image_bytes(cover_url, buffer.getvalue(), "image/jpeg")
+
+    class _VisionProvider:
+        _model = "gpt-4o-mini"
+
+    class _CapturingRegistry:
+        default_provider = "openai"
+
+        def __init__(self) -> None:
+            self.calls: list[list[dict[str, object]]] = []
+            self.json_modes: list[bool] = []
+
+        def get(self, _provider_key: str) -> object:
+            return _VisionProvider()
+
+        async def complete(
+            self,
+            messages: list[dict[str, object]],
+            *,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            json_mode: bool = False,
+            reasoning_effort: str | None = None,
+        ) -> LLMResponse:
+            self.calls.append(messages)
+            self.json_modes.append(json_mode)
+            return LLMResponse(
+                content=json.dumps(
+                    [
+                        {
+                            "content_id": image_content_id,
+                            "score": 0.81,
+                            "reason": "封面和标题都指向视觉向内容，和画像匹配。",
+                            "topic_group": "视觉分析",
+                            "style_key": "visual_showcase",
+                            "franchise_key": "",
+                        },
+                        {
+                            "content_id": text_content_id,
+                            "score": 0.42,
+                            "reason": "纯文本候选只有正文线索，匹配度一般。",
+                            "topic_group": "社交动态",
+                            "style_key": "light_chat",
+                            "franchise_key": "",
+                        },
+                    ],
+                    ensure_ascii=False,
+                ),
+                provider="capturing",
+            )
+
+    registry = _CapturingRegistry()
+    engine = ContentDiscoveryEngine(
+        llm_service=LLMService(registry=registry, memory=None),  # type: ignore[arg-type]
+        multimodal_evaluation_enabled=True,
+        multimodal_batch_size=4,
+        multimodal_image_max_px=384,
+        multimodal_image_quality=72,
+        multimodal_image_timeout_seconds=6,
+    )
+
+    scores = await engine._evaluate_batch(
+        [
+            DiscoveredContent(
+                content_id=image_content_id,
+                source_platform="youtube",
+                source_strategy="yt_search",
+                content_type="video",
+                title="A visual analysis demo",
+                description="A demo item with a real cached cover image.",
+                cover_url=cover_url,
+                view_count=1234,
+                like_count=56,
+                tags=["visual", "demo"],
+            ),
+            DiscoveredContent(
+                content_id=text_content_id,
+                source_platform="twitter",
+                source_strategy="x-search",
+                content_type="tweet",
+                title="A text-only tweet",
+                body_text="This candidate intentionally has no cover image.",
+                like_count=7,
+            ),
+        ],
+        SoulProfile(
+            core_traits=["偏好视觉细节和结构化分析"],
+            cognitive_style=["喜欢把图像线索和文字线索一起判断"],
+            deep_needs=["快速判断内容是否值得点开"],
+        ),
+        source_context="e2e",
+    )
+
+    assert scores == [0.81, 0.42]
+    assert registry.json_modes == [True]
+    assert any(path.stem == image_cache.image_cache_key(cover_url) for path in tmp_path.glob("*.*"))
+
+    messages = registry.calls[0]
+    assert len(messages) == 2
+    system_prompt = str(messages[0]["content"])
+    assert "cover_image_ref" in system_prompt
+    assert "没有 cover_image_ref" in system_prompt
+
+    user_parts = messages[1]["content"]
+    assert isinstance(user_parts, list)
+    assert [part.get("type") for part in user_parts if isinstance(part, dict)] == [
+        "text",
+        "text",
+        "image_url",
+    ]
+    user_text = str(user_parts[0]["text"])
+    content_batch = json.loads(
+        user_text.split("<content_batch>", 1)[1].split("</content_batch>", 1)[0].strip()
+    )
+    expected_ref = f"cover:{image_content_id}"
+    assert content_batch[0]["cover_image_ref"] == expected_ref
+    assert "cover_image_ref" not in content_batch[1]
+
+    assert user_parts[1] == {
+        "type": "text",
+        "text": (
+            f"Cover image {expected_ref} maps to the content_batch item whose "
+            f"cover_image_ref is {expected_ref}."
+        ),
+    }
+    assert user_parts[2]["type"] == "image_url"
+    assert user_parts[2]["image_url"]["url"].startswith("data:image/jpeg;base64,")
 
 
 def test_cache_results_skips_recently_viewed_items() -> None:

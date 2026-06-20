@@ -520,7 +520,16 @@ class LLMService:
             data_url = str(image.get("data_url") or "").strip()
             if not content_id or not data_url:
                 continue
-            user_parts.append({"type": "text", "text": f"Cover image for content_id={content_id}."})
+            cover_ref = f"cover:{content_id}"
+            user_parts.append(
+                {
+                    "type": "text",
+                    "text": (
+                        f"Cover image {cover_ref} maps to the content_batch item whose "
+                        f"cover_image_ref is {cover_ref}."
+                    ),
+                }
+            )
             user_parts.append({"type": "image_url", "image_url": {"url": data_url}})
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_content}]
