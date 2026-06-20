@@ -22,6 +22,8 @@ A local-first AI discovery agent that learns your taste across Bilibili, Xiaohon
 |---|---|---|
 | Bilibili / Xiaohongshu / Douyin / YouTube / X / Web | Data stays in your local SQLite by default | Likes, dislikes, and chat feedback shape future recommendations |
 
+Dev builds also include a local extension-driven E2E check: the backend can ask the installed extension to open or reuse real Douyin / Xiaohongshu / X pages, reset them to stable platform entry URLs, perform whitelisted DOM actions, and verify that events naturally reach the local `/api/events` pipeline.
+
 <p align="center">
   <a href="https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg"><b>Install the browser extension</b></a>
   ·
@@ -550,7 +552,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 ```
 ┌─────────────────────────────────────────────────────┐
 │                   Chrome Extension                   │
-│      (Behavior · Recs · Source-Aware Clicks · Chat · Probes) │
+│      (Unified Behavior · Recs · Source-Aware Clicks · Chat · Probes) │
 │      (Cookies · Bili/XHS/DY/YT tasks · optional init bridge · autostart setting) │
 └────────────────────────┬────────────────────────────┘
                          │ REST API / WebSocket (presence + cookies + pool counts + source-aware clicks + probes)
@@ -654,7 +656,7 @@ OpenBiliClaw/
 
 ## 📜 Release History
 
-Latest: **v0.3.128 / extension v0.3.83: Douyin DOM-first discovery (2026-06-18)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Most users should use the `openbiliclaw-v*` aggregate [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) for extension packages and desktop installers; backend source auto-update still follows `backend-v*` tags.
+Latest: **v0.3.129 / extension v0.3.84: unified cross-platform behavior capture (2026-06-19)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Most users should use the `openbiliclaw-v*` aggregate [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) for extension packages and desktop installers; backend source auto-update still follows `backend-v*` tags.
 
 ## 🗺️ Roadmap
 

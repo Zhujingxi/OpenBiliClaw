@@ -8,12 +8,14 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import socket
 import subprocess
 import time
 import uuid
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote, urlparse
 
@@ -54,6 +56,17 @@ from openbiliclaw.api.models import (
     DouyinSourceConfigOut,
     EmbeddingConfigOut,
     EventIngestResponse,
+    EventRejectedOut,
+    ExtensionE2EAction,
+    ExtensionE2EActionReportOut,
+    ExtensionE2EActionStatus,
+    ExtensionE2EEventMatchOut,
+    ExtensionE2EPlatform,
+    ExtensionE2EPlatformReportOut,
+    ExtensionE2EResultIn,
+    ExtensionE2ERunIn,
+    ExtensionE2ERunOut,
+    ExtensionE2ERunStatus,
     FavoriteAddIn,
     FavoriteItem,
     FavoriteListResponse,
@@ -188,6 +201,39 @@ _BENCHMARK_NETWORK = ipaddress.ip_network("198.18.0.0/15")
 # (shared by the proxy route and the prefetch sweep). Only the disk-cache age cap
 # is referenced directly from here, by the startup cleanup call.
 _IMAGE_CACHE_MAX_AGE_DAYS = 30
+
+_E2E_STATE_CHANGING_ACTIONS = frozenset(
+    {"like", "favorite", "follow", "repost", "bookmark"}
+)
+_E2E_DEFAULT_SAFE_ACTIONS: tuple[ExtensionE2EAction, ...] = (
+    "snapshot",
+    "scroll",
+    "click",
+    "share",
+)
+_E2E_ACTION_EVENT_TYPES: dict[ExtensionE2EAction, frozenset[str]] = {
+    "snapshot": frozenset({"snapshot"}),
+    "scroll": frozenset({"scroll"}),
+    "click": frozenset({"click"}),
+    "share": frozenset({"click"}),
+    "like": frozenset({"like", "favorite"}),
+    "favorite": frozenset({"favorite", "bookmark"}),
+    "follow": frozenset({"follow"}),
+    "repost": frozenset({"share", "repost"}),
+    "bookmark": frozenset({"bookmark", "favorite"}),
+}
+
+
+@dataclass
+class _ExtensionE2ERunState:
+    run_id: str
+    token: str
+    started_at: float
+    after_event_id: int
+    expected_actions: dict[ExtensionE2EPlatform, list[ExtensionE2EAction]]
+    event: asyncio.Event
+    extension_result: ExtensionE2EResultIn | None = None
+    error: str = ""
 
 
 def _default_route_ip() -> str | None:
@@ -425,6 +471,263 @@ def _infer_source_platform_from_url(url: object) -> str:
     if "bilibili.com" in text or "b23.tv" in text:
         return "bilibili"
     return ""
+
+
+def _extension_e2e_actions_for_request(
+    payload: ExtensionE2ERunIn,
+) -> dict[ExtensionE2EPlatform, list[ExtensionE2EAction]]:
+    actions_by_platform: dict[ExtensionE2EPlatform, list[ExtensionE2EAction]] = {}
+    seen_platforms: set[ExtensionE2EPlatform] = set()
+    for platform in payload.platforms:
+        if platform in seen_platforms:
+            continue
+        seen_platforms.add(platform)
+        requested_actions = (
+            payload.actions[platform]
+            if platform in payload.actions
+            else list(_E2E_DEFAULT_SAFE_ACTIONS)
+        )
+        deduped: list[ExtensionE2EAction] = []
+        seen_actions: set[ExtensionE2EAction] = set()
+        for action in requested_actions:
+            if action in seen_actions:
+                continue
+            seen_actions.add(action)
+            deduped.append(action)
+        actions_by_platform[platform] = deduped
+    return actions_by_platform
+
+
+def _event_row_id(row: dict[str, Any]) -> int | None:
+    try:
+        event_id = int(row.get("id", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    return event_id if event_id > 0 else None
+
+
+def _event_row_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    metadata = row.get("metadata", {})
+    if isinstance(metadata, str):
+        try:
+            parsed = json.loads(metadata) if metadata else {}
+        except Exception:
+            parsed = {}
+        metadata = parsed
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _coerce_e2e_event_rows(rows: object, *, after_event_id: int = 0) -> list[dict[str, Any]]:
+    if not isinstance(rows, list | tuple):
+        return []
+    coerced: list[dict[str, Any]] = []
+    for row in rows:
+        if isinstance(row, dict):
+            item = dict(row)
+        else:
+            try:
+                item = dict(row)
+            except Exception:
+                continue
+        event_id = _event_row_id(item)
+        if event_id is not None and event_id <= after_event_id:
+            continue
+        coerced.append(item)
+    return sorted(coerced, key=lambda item: _event_row_id(item) or 0)
+
+
+def _latest_e2e_event_id(ctx: Any) -> int:
+    database = getattr(ctx, "database", None)
+    conn = getattr(database, "conn", None)
+    if conn is not None:
+        try:
+            row = conn.execute("SELECT COALESCE(MAX(id), 0) AS max_id FROM events").fetchone()
+            if row is not None:
+                try:
+                    return int(row["max_id"])
+                except Exception:
+                    return int(row[0])
+        except Exception:
+            pass
+
+    memory_manager = getattr(ctx, "memory_manager", None)
+    query_events = getattr(memory_manager, "query_events", None)
+    if callable(query_events):
+        try:
+            rows = _coerce_e2e_event_rows(query_events(limit=1))
+        except Exception:
+            rows = []
+        if rows:
+            return _event_row_id(rows[-1]) or 0
+    return 0
+
+
+def _query_e2e_events(ctx: Any, *, after_event_id: int, limit: int = 1000) -> list[dict[str, Any]]:
+    memory_manager = getattr(ctx, "memory_manager", None)
+    query_events = getattr(memory_manager, "query_events", None)
+    if callable(query_events):
+        try:
+            return _coerce_e2e_event_rows(
+                query_events(after_event_id=after_event_id, limit=limit),
+                after_event_id=after_event_id,
+            )
+        except TypeError:
+            try:
+                return _coerce_e2e_event_rows(
+                    query_events(limit=limit),
+                    after_event_id=after_event_id,
+                )
+            except Exception:
+                return []
+        except Exception:
+            return []
+
+    database = getattr(ctx, "database", None)
+    query_events = getattr(database, "query_events", None)
+    if callable(query_events):
+        try:
+            return _coerce_e2e_event_rows(
+                query_events(after_event_id=after_event_id, limit=limit),
+                after_event_id=after_event_id,
+            )
+        except Exception:
+            return []
+    return []
+
+
+def _match_e2e_event(
+    events: list[dict[str, Any]],
+    *,
+    platform: ExtensionE2EPlatform,
+    action: ExtensionE2EAction,
+    used_event_ids: set[int],
+) -> dict[str, object] | None:
+    accepted_event_types = _E2E_ACTION_EVENT_TYPES.get(action, frozenset())
+    if not accepted_event_types:
+        return None
+
+    for row in sorted(events, key=lambda item: _event_row_id(item) or 0):
+        event_id = _event_row_id(row)
+        if event_id is None or event_id in used_event_ids:
+            continue
+        event_type = str(row.get("event_type") or row.get("type") or "").strip()
+        if event_type not in accepted_event_types:
+            continue
+        metadata = _event_row_metadata(row)
+        source_platform = _normalize_source_platform(
+            metadata.get("source_platform")
+            or row.get("source_platform")
+            or _infer_source_platform_from_url(row.get("url", ""))
+        )
+        if source_platform != platform:
+            continue
+        used_event_ids.add(event_id)
+        return {
+            "event_id": event_id,
+            "event_type": event_type,
+            "url": str(row.get("url", "") or ""),
+            "title": str(row.get("title", "") or ""),
+        }
+    return None
+
+
+def _build_extension_e2e_report(
+    state: _ExtensionE2ERunState,
+    events: list[dict[str, Any]],
+    *,
+    timed_out: bool,
+    timeout_seconds: int,
+) -> ExtensionE2ERunOut:
+    result = state.extension_result
+    action_results: dict[
+        tuple[ExtensionE2EPlatform, ExtensionE2EAction], tuple[ExtensionE2EActionStatus, str]
+    ] = {}
+    platform_details: dict[ExtensionE2EPlatform, str] = {}
+    if result is not None:
+        for platform_result in result.platforms:
+            platform_details[platform_result.platform] = platform_result.detail
+            for action_result in platform_result.actions:
+                action_results[(platform_result.platform, action_result.action)] = (
+                    action_result.status,
+                    action_result.detail,
+                )
+
+    used_event_ids: set[int] = set()
+    reports: list[ExtensionE2EPlatformReportOut] = []
+    total_actions = 0
+    complete_actions = 0
+    partial_actions = 0
+    default_status: ExtensionE2EActionStatus = "skipped" if timed_out else "failed"
+    default_detail = "extension result timed out" if timed_out else "extension result missing"
+
+    for platform, actions in state.expected_actions.items():
+        action_reports: list[ExtensionE2EActionReportOut] = []
+        for action in actions:
+            total_actions += 1
+            action_status, detail = action_results.get(
+                (platform, action),
+                (default_status, default_detail),
+            )
+            match = _match_e2e_event(
+                events,
+                platform=platform,
+                action=action,
+                used_event_ids=used_event_ids,
+            )
+            backend_event = (
+                ExtensionE2EEventMatchOut(
+                    event_id=cast("int", match["event_id"]),
+                    event_type=str(match["event_type"]),
+                    url=str(match["url"]),
+                    title=str(match["title"]),
+                )
+                if match is not None
+                else None
+            )
+            extension_executed = action_status == "ok"
+            backend_matched = backend_event is not None
+            if extension_executed and backend_matched:
+                complete_actions += 1
+            elif extension_executed or backend_matched:
+                partial_actions += 1
+            action_reports.append(
+                ExtensionE2EActionReportOut(
+                    action=action,
+                    extension_status=action_status,
+                    extension_executed=extension_executed,
+                    extension_detail=detail,
+                    backend_event_matched=backend_matched,
+                    backend_event=backend_event,
+                )
+            )
+        reports.append(
+            ExtensionE2EPlatformReportOut(
+                platform=platform,
+                actions=action_reports,
+                detail=platform_details.get(platform, ""),
+            )
+        )
+
+    error = state.error or (result.error if result is not None else "")
+    if timed_out:
+        run_status: ExtensionE2ERunStatus = "timeout"
+        error = error or "extension e2e result timed out"
+    elif error and complete_actions == 0 and partial_actions == 0:
+        run_status = "failed"
+    elif total_actions == complete_actions:
+        run_status = "ok"
+    elif complete_actions > 0 or partial_actions > 0:
+        run_status = "partial"
+    else:
+        run_status = "failed"
+
+    return ExtensionE2ERunOut(
+        run_id=state.run_id,
+        status=run_status,
+        platforms=reports,
+        error=error,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def _fallback_recommendation_click_url(
@@ -724,6 +1027,7 @@ def create_app(
 
     # ── Password gate (LAN/remote auth) ─────────────────────────────
     app.state.auth_gate = AuthGate(_auth_cfg, getattr(ctx, "database", None))
+    app.state.extension_e2e_runs = {}
 
     def _get_auth_gate() -> AuthGate:
         return cast("AuthGate", app.state.auth_gate)
@@ -2561,8 +2865,11 @@ def create_app(
         from openbiliclaw.sources.event_format import build_event
 
         accepted = 0
-        for item in payload.events:
+        rejected: list[EventRejectedOut] = []
+        for index, item in enumerate(payload.events):
             source_platform = (item.source_platform or "bilibili").strip() or "bilibili"
+            raw_event_type = str(item.type or "").strip()
+            event_type = "feedback" if raw_event_type == "dislike" else raw_event_type
             # Coerce context to a string for downstream LLM consumers.
             # Pre-v0.3.22 this passed item.context through verbatim — when
             # the extension sent a dict (e.g. structured click context),
@@ -2583,6 +2890,9 @@ def create_app(
                 **item.metadata,
                 "timestamp": item.timestamp,
             }
+            if raw_event_type == "dislike":
+                metadata.setdefault("feedback_type", "dislike")
+                metadata.setdefault("reaction", "thumbs_down")
             if not isinstance(raw_context, str) and raw_context:
                 metadata.setdefault("raw_context", raw_context)
             # v0.3.x event-satisfaction: fold top-level dwell into
@@ -2594,7 +2904,7 @@ def create_app(
             if item.video_duration_seconds is not None:
                 metadata.setdefault("video_duration_seconds", item.video_duration_seconds)
             event = build_event(
-                event_type=item.type,
+                event_type=event_type,
                 source_platform=source_platform,
                 title=item.title or "",
                 url=item.url or "",
@@ -2602,7 +2912,17 @@ def create_app(
                 context=context_str,
                 metadata=metadata,
             )
-            await ctx.memory_manager.propagate_event(event)
+            try:
+                await ctx.memory_manager.propagate_event(event)
+            except ValueError as exc:
+                rejected.append(
+                    EventRejectedOut(
+                        index=index,
+                        type=raw_event_type,
+                        reason=str(exc),
+                    )
+                )
+                continue
             accepted += 1
         refresh_after_event_ingest = getattr(
             ctx.runtime_controller, "refresh_after_event_ingest", None
@@ -2624,7 +2944,7 @@ def create_app(
                             "count": accepted,
                         }
                     )
-        return EventIngestResponse(accepted=accepted)
+        return EventIngestResponse(accepted=accepted, rejected=rejected)
 
     @app.get("/api/recommendations", response_model=RecommendationListResponse)
     async def recommendations() -> RecommendationListResponse:
@@ -6406,6 +6726,111 @@ def create_app(
             with suppress(Exception):
                 await publish({"type": "yt_task_available", "source": "task_kick"})
         return {"ok": True}
+
+    @app.post("/api/extension/e2e/run", response_model=ExtensionE2ERunOut)
+    async def extension_e2e_run(
+        request: Request,
+        payload: ExtensionE2ERunIn,
+    ) -> ExtensionE2ERunOut:
+        """Local-only control plane for extension E2E simulation runs."""
+        if not _get_auth_gate().is_trusted_local(request):
+            raise HTTPException(status_code=403, detail="local_only")
+
+        registry = cast("dict[str, _ExtensionE2ERunState]", app.state.extension_e2e_runs)
+        if registry:
+            raise HTTPException(status_code=409, detail="e2e_run_in_progress")
+
+        expected_actions = _extension_e2e_actions_for_request(payload)
+        if not payload.allow_state_changing:
+            blocked_actions = sorted(
+                {
+                    action
+                    for actions in expected_actions.values()
+                    for action in actions
+                    if action in _E2E_STATE_CHANGING_ACTIONS
+                }
+            )
+            if blocked_actions:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "allow_state_changing must be true for actions: "
+                        + ", ".join(blocked_actions)
+                    ),
+                )
+
+        run_id = f"e2e-{uuid.uuid4().hex}"
+        token = secrets.token_urlsafe(32)
+        after_event_id = _latest_e2e_event_id(ctx)
+        state = _ExtensionE2ERunState(
+            run_id=run_id,
+            token=token,
+            started_at=time.time(),
+            after_event_id=after_event_id,
+            expected_actions=expected_actions,
+            event=asyncio.Event(),
+        )
+        registry[run_id] = state
+        timed_out = False
+
+        try:
+            publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
+            if not callable(publish):
+                state.error = "extension_runtime_unavailable"
+            else:
+                delivered = await publish(
+                    {
+                        "type": "extension_e2e_run",
+                        "source": "api",
+                        "run_id": run_id,
+                        "token": token,
+                        "platforms": list(expected_actions.keys()),
+                        "actions": {
+                            platform: list(actions)
+                            for platform, actions in expected_actions.items()
+                        },
+                        "allow_state_changing": payload.allow_state_changing,
+                        "timeout_seconds": payload.timeout_seconds,
+                    }
+                )
+                if delivered is False:
+                    state.error = "extension_runtime_unavailable"
+
+            if not state.error:
+                try:
+                    await asyncio.wait_for(state.event.wait(), timeout=payload.timeout_seconds)
+                except TimeoutError:
+                    timed_out = True
+
+            events = _query_e2e_events(ctx, after_event_id=after_event_id)
+            return _build_extension_e2e_report(
+                state,
+                events,
+                timed_out=timed_out,
+                timeout_seconds=payload.timeout_seconds,
+            )
+        finally:
+            registry.pop(run_id, None)
+
+    @app.post("/api/extension/e2e/result")
+    async def extension_e2e_result(
+        request: Request,
+        payload: ExtensionE2EResultIn,
+    ) -> dict[str, object]:
+        """Accept a signed callback from the extension E2E runner."""
+        if not _get_auth_gate().is_trusted_local(request):
+            raise HTTPException(status_code=403, detail="local_only")
+
+        registry = cast("dict[str, _ExtensionE2ERunState]", app.state.extension_e2e_runs)
+        state = registry.get(payload.run_id)
+        if state is None:
+            raise HTTPException(status_code=404, detail="unknown run_id")
+        if not secrets.compare_digest(state.token, payload.token):
+            raise HTTPException(status_code=403, detail="bad token")
+
+        state.extension_result = payload
+        state.event.set()
+        return {"ok": True, "run_id": payload.run_id}
 
     @app.post("/api/extension/reload")
     async def extension_reload() -> dict[str, Any]:

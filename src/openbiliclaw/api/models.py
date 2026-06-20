@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
@@ -586,10 +586,117 @@ class ProfileSummaryResponse(BaseModel):
     overrides: dict[str, object] = Field(default_factory=dict)
 
 
+class EventRejectedOut(BaseModel):
+    """One event skipped during batch ingest."""
+
+    index: int
+    type: str
+    reason: str
+
+
 class EventIngestResponse(BaseModel):
     """Response after accepting a batch of events."""
 
     accepted: int
+    rejected: list[EventRejectedOut] = Field(default_factory=list)
+
+
+ExtensionE2EPlatform = Literal["douyin", "xiaohongshu", "twitter"]
+ExtensionE2EAction = Literal[
+    "snapshot",
+    "scroll",
+    "click",
+    "like",
+    "favorite",
+    "share",
+    "follow",
+    "repost",
+    "bookmark",
+]
+ExtensionE2EActionList = Annotated[list[ExtensionE2EAction], Field(min_length=1)]
+ExtensionE2EActionStatus = Literal["ok", "skipped", "failed"]
+ExtensionE2ERunStatus = Literal["ok", "partial", "failed", "timeout"]
+
+
+def _default_extension_e2e_platforms() -> list[ExtensionE2EPlatform]:
+    return ["douyin", "xiaohongshu", "twitter"]
+
+
+class ExtensionE2ERunIn(BaseModel):
+    """Request to run a local browser-extension E2E simulation."""
+
+    platforms: list[ExtensionE2EPlatform] = Field(
+        default_factory=_default_extension_e2e_platforms,
+        min_length=1,
+    )
+    actions: dict[ExtensionE2EPlatform, ExtensionE2EActionList] = Field(
+        default_factory=dict
+    )
+    allow_state_changing: bool = False
+    timeout_seconds: int = Field(default=45, ge=5, le=180)
+
+
+class ExtensionE2EActionResultIn(BaseModel):
+    """One action result reported by the extension E2E runner."""
+
+    action: ExtensionE2EAction
+    status: ExtensionE2EActionStatus
+    detail: str = ""
+
+
+class ExtensionE2EPlatformResultIn(BaseModel):
+    """Per-platform action results reported by the extension."""
+
+    platform: ExtensionE2EPlatform
+    actions: list[ExtensionE2EActionResultIn] = Field(default_factory=list)
+    detail: str = ""
+
+
+class ExtensionE2EResultIn(BaseModel):
+    """Signed extension callback payload for a local E2E run."""
+
+    run_id: str
+    token: str
+    platforms: list[ExtensionE2EPlatformResultIn] = Field(default_factory=list)
+    error: str = ""
+
+
+class ExtensionE2EEventMatchOut(BaseModel):
+    """Natural backend event matched to a requested extension action."""
+
+    event_id: int
+    event_type: str
+    url: str = ""
+    title: str = ""
+
+
+class ExtensionE2EActionReportOut(BaseModel):
+    """Final report for one requested action."""
+
+    action: ExtensionE2EAction
+    extension_status: ExtensionE2EActionStatus = "skipped"
+    extension_executed: bool = False
+    extension_detail: str = ""
+    backend_event_matched: bool = False
+    backend_event: ExtensionE2EEventMatchOut | None = None
+
+
+class ExtensionE2EPlatformReportOut(BaseModel):
+    """Final report for one requested platform."""
+
+    platform: ExtensionE2EPlatform
+    actions: list[ExtensionE2EActionReportOut] = Field(default_factory=list)
+    detail: str = ""
+
+
+class ExtensionE2ERunOut(BaseModel):
+    """Final local E2E run report."""
+
+    run_id: str
+    status: ExtensionE2ERunStatus
+    platforms: list[ExtensionE2EPlatformReportOut] = Field(default_factory=list)
+    error: str = ""
+    timeout_seconds: int
 
 
 class FeedbackIn(BaseModel):

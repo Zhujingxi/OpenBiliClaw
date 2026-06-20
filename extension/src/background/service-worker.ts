@@ -56,6 +56,7 @@ import {
   handleCookieSyncAlarm,
   handleCookieSyncRuntimeEvent,
 } from "./cookie-sync.js";
+import { handleE2ERuntimeEvent } from "./e2e-runner.ts";
 // Use .ts extension so node:test's --experimental-strip-types resolver
 // (which doesn't rewrite .js → .ts for source-only modules) can follow
 // the import when test files load these dispatchers directly. esbuild
@@ -67,6 +68,7 @@ let eventBuffer: BehaviorEvent[] = [];
 const BUFFER_FLUSH_INTERVAL = 30_000;
 const BUFFER_MAX_SIZE = 50;
 const FLUSH_ALARM_NAME = "openbiliclaw-flush-events";
+const E2E_CAPTURE_SETTLE_MS = 1_000;
 // v0.3.22+: health probe before WS prevents extension-only installs
 // from flooding chrome://extensions "Errors" with browser-level
 // WebSocket connection failures. A failed fetch caught here is just a
@@ -185,8 +187,18 @@ let runtimeSocket: WebSocket | null = null;
 let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let runtimeConnectInFlight = false;
 
-function handleRuntimeEvent(event: Record<string, unknown>): void {
+async function handleRuntimeEvent(event: Record<string, unknown>): Promise<void> {
   if (handleCookieSyncRuntimeEvent(event)) return;
+
+  try {
+    if (await handleE2ERuntimeEvent(event, flushCapturedEventsForE2E)) return;
+  } catch (err) {
+    console.warn(
+      "[OpenBiliClaw] Extension E2E runtime event failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+    return;
+  }
 
   const eventType = String(event.type ?? "");
 
@@ -244,6 +256,11 @@ function handleRuntimeEvent(event: Record<string, unknown>): void {
 
   // Still ack the backend so the same bvid isn't re-pushed forever.
   void acknowledgeDelightSent(bvid);
+}
+
+async function flushCapturedEventsForE2E(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, E2E_CAPTURE_SETTLE_MS));
+  await flushEvents();
 }
 
 async function isBackendAlive(): Promise<boolean> {
@@ -334,7 +351,12 @@ async function connectRuntimeStream(): Promise<void> {
     runtimeSocket.onmessage = (msg) => {
       try {
         const payload = JSON.parse(String(msg.data)) as Record<string, unknown>;
-        handleRuntimeEvent(payload);
+        void handleRuntimeEvent(payload).catch((err) => {
+          console.warn(
+            "[OpenBiliClaw] Runtime stream event failed:",
+            err instanceof Error ? err.message : String(err),
+          );
+        });
       } catch {
         // Ignore malformed payloads.
       }

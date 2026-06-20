@@ -4,18 +4,29 @@
 
 ---
 
-## v0.3.130: DeepSeek reasoning_effort 配置保存修复（2026-06-20）
-
-后端源码改动，浏览器插件与桌面安装包未改动。
-
-- **插件 / PC Web 设置页关闭 DeepSeek thinking 立即生效**：`PUT /api/config` 现在允许 `llm.deepseek.reasoning_effort=""` 覆盖已有 `"max"` / `"high"`，并且 `save_config()` 会显式写出 `reasoning_effort = ""`，避免重启后因缺省值回落到 `"max"`。新增 API 与配置 round-trip 回归测试覆盖该路径。
-
 ## Unreleased: 多源评估指标与封面图评估（2026-06-20）
 
 - **各来源候选补齐互动指标**：`DiscoveredContent`、`discovery_candidates`、`content_cache` 与来源归一化链路新增观看、点赞、收藏、评论、分享、弹幕、转推、书签等字段；B 站 / 小红书 / 抖音 / YouTube / X 能取到的指标会随候选进入统一 evaluator。batch prompt 同时带 `tags/body_text`，并明确互动指标只作辅助，不能用热度覆盖内容与画像的真实匹配。
 - **可选多模态 discovery evaluator**：新增 `[discovery].multimodal_evaluation_enabled` 及 batch/图片压缩参数；设置页可开关。开启且当前 evaluation 路由支持图像输入时，候选封面优先从 `data/image-cache/` 读取，未命中才经白名单抓取、缩放和 JPEG 压缩后作为 image input 进入同一 batch evaluator；小红书已缓存头图不再依赖评估时原 CDN token 仍有效。模型不支持或图片准备失败时自动退回纯文本 + 指标评估。
 - **浏览器扩展 DOM 采集补齐指标**：小红书被动卡片和抖音 DOM / passive fetch 路径会解析可见的浏览、点赞、收藏、评论、分享数字并回传后端，补齐插件来源候选的评估上下文。
 - **插件设置补齐封面图评估开关**：浏览器插件 side panel 的调度 tab 现在也能开关 `[discovery].multimodal_evaluation_enabled`，并编辑图文 batch、封面最大边、JPEG 质量和图片准备超时；保存时保留既有 discovery 配置，避免插件与桌面 Web 设置面脱节。
+
+## v0.3.130: DeepSeek reasoning_effort 配置保存修复（2026-06-20）
+
+后端源码改动，浏览器插件与桌面安装包未改动。
+
+- **插件 / PC Web 设置页关闭 DeepSeek thinking 立即生效**：`PUT /api/config` 现在允许 `llm.deepseek.reasoning_effort=""` 覆盖已有 `"max"` / `"high"`，并且 `save_config()` 会显式写出 `reasoning_effort = ""`，避免重启后因缺省值回落到 `"max"`。新增 API 与配置 round-trip 回归测试覆盖该路径。
+
+## v0.3.129 / extension v0.3.84: 跨平台行为捕捉统一（2026-06-19）
+
+后端源码走 `backend-v0.3.129`，浏览器插件走 `extension-v0.3.84`。桌面安装包未改动；如冻结包用户需要同步本次捕捉链路修复，可后续单独打 `desktop-v0.3.129`。
+
+- **事件入口批处理不再被单条坏事件打崩**：`POST /api/events` 继续返回 `accepted`，并新增 `rejected` 明细；raw `dislike` 会统一规范为 `feedback` + `feedback_type=dislike`，未知事件只拒绝该条，不再让整批 500 后被插件重试造成重复写入。
+- **浏览器插件跨平台行为采集补齐统一 adapter**：B 站、小红书、抖音、YouTube 和 X 都走同一 `PlatformAdapter` / generic collector 事件形态；抖音和 YouTube 除原有 bootstrap / task executor 外，也开始上报普通页面行为事件。
+- **统一动作语义和 flush 策略**：B 站补 `follow/share`，小红书补 `share`，抖音 / YouTube 覆盖 `like/favorite/comment/share/follow/dislike`；所有平台 `dislike` 只发送 `feedback`。`follow/share/view` 和带视频停留 metadata 的 `click` 现在会即时 flush，高频 `scroll/hover/snapshot` 仍缓冲去重。
+- **真实站点嵌套按钮命中修复**：generic collector 的 click action 识别不再只看原始 `event.target`，会从内部 `span/svg` 向上解析动作元素，并优先选择最近的 `button/[role=button]`，再回退到 `a/[aria-label]/[title]`，避免 X 这类“整张推文卡片也是链接”的 DOM 把 Share 误判成 Reply；X 的 DOM fallback 同时补齐 `aria-label="Share"` 到 `share` 事件的映射。真实 B 站、YouTube、X 视频 / 推文页点击分享按钮已验证会同时写入普通 `click` 和强信号动作事件。
+- **新增本机扩展驱动 E2E 捕捉自检**：后端新增 local-only `POST /api/extension/e2e/run` 与 `POST /api/extension/e2e/result`，通过 `/api/runtime-stream` 投递 `extension_e2e_run` 给已安装插件；service worker 打开或复用抖音 / 小红书 / X 标签页，content executor 只执行白名单 DOM 操作（snapshot / scroll / click / share 等），不直接伪造 `BEHAVIOR_EVENT`。后端按运行窗口校验真实 `/api/events` 入库结果；会改变平台状态的 like / favorite / follow / comment / repost 需显式 `allow_state_changing=true`，普通 share 不再被 X 转推 mutation 误匹配。
+- **真实三平台捕捉 E2E 续修并通过**：content collector 的 click 监听切到 capture 阶段，避免 X / React 控件在冒泡阶段 `stopPropagation` 后漏掉 Share；scroll 同时覆盖页面和内部滚动容器，解决抖音 / 小红书 feed 容器滚动不进事件的问题。E2E runner 复用同域 tab 时会先归位到平台稳定入口，避免小红书 404 / 风控页或 X 图片预览页污染测试；执行结束后先等待并 flush buffer，再回传 result。真实已登录 Chrome 插件环境下，抖音 / 小红书 / X 的 `snapshot/scroll/click/share` 共 12 个动作全部 extension 执行成功且后端 `/api/events` 匹配成功。
 
 ## v0.3.128 / extension v0.3.83: 抖音 DOM-first discovery（2026-06-18）
 

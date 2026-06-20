@@ -20,6 +20,7 @@
 | 运行时频率配置 | ✅ | `refresh_check_interval_seconds`、行为触发阈值、trending / explore 间隔、单轮发现上限、惊喜队列加载数量、主动推送间隔和 speculator idle tick 都从 `[scheduler]` 读取，配置热重载后重建 runtime 生效。 |
 | 浏览器 presence gate | ✅ | `background_llm_work_allowed()` 结合 `scheduler.enabled` 与 `pause_on_extension_disconnect` 控制 daemon-owned 后台 LLM / embedding 工作。 |
 | Runtime event stream | ✅ | `/api/runtime-stream` 向扩展推送状态、Cookie sync 请求、配置重载和 presence 事件；`RuntimeEventHub.publish()` 会返回是否至少有一个订阅者接收，供一次性事件判断是否真正投递。 |
+| 扩展捕捉 E2E 控制事件 | ✅ | local-only `/api/extension/e2e/run` 会通过 runtime stream 投递 `extension_e2e_run`，要求已安装扩展在真实平台页执行白名单 DOM 操作；`/api/extension/e2e/result` 回收插件执行结果，后端再按运行窗口匹配 `/api/events` 中自然捕捉到的事件。 |
 | 兴趣探针投递保护 | ✅ | `interest.probe` 只有成功投递到 runtime stream 后才写入 `probed_domains` / `probed_axes` / `probed_distance_bands` 冷却状态；事件 payload 会带 `probe_mode` 与 `challenge`，前端离线时不会消耗 active probe。普通 `near` 探针与挑战探针使用独立 active 额度，运行时选择时仍统一仲裁。 |
 | 避雷探针投递与仲裁 | ✅ | `avoidance.probe` 与 `interest.probe` 共用 proactive push 循环；每轮最多投递一个 probe，并用 `last_probe_kind` 在正向/负向都有候选时轮流选择，避免探针频率翻倍。 |
 | 图片代理 API | ✅ | `/api/image-proxy` 为移动 Web 和浏览器插件代理白名单 CDN 封面图，逐跳校验 redirect，并在返回前完成类型和 10MB 大小校验；成功封面写入 `data/image-cache/`（小红书 token 归一化），并按「已消费且未保存」定期清理、保护无法重抓的封面；多模态 discovery 评估也复用同一缓存，命中时不再重新请求 CDN。 |
@@ -129,6 +130,24 @@ result = await controller.drain_discovery_candidates_once(batch_size=30)
 - `interest.probe` 正向探针还会记录 `probed_distance_bands`，并在下一次选择时优先尝试没在冷却窗口内问过的 `near/lateral/bridge/wildcard` 档位。
 - `interest.probe` runtime event 暴露 `probe_mode` 和 `challenge`，移动 Web、桌面 Web、插件 inbox 与 OpenClaw 都可以把挑战探针和普通确认区分开；`near` 普通池最多 5 条，`lateral/bridge/wildcard` 挑战池另有 3 条 active 额度。
 - `avoidance.probe` 选取会避开近期 `probed_avoidance_domains` / `probed_avoidance_axes`，并读取 `avoidance_probe_feedback_history` 中用户否认过的方向。
+
+### Extension E2E API
+
+`POST /api/extension/e2e/run` 是本机 trusted-local 调试端点，用来验证已安装扩展的真实捕捉链路。它不会直接写事件，也不会让后端伪造采集结果；后端只发布一次 `extension_e2e_run` runtime event，并等待扩展回传执行结果。
+
+典型响应字段：
+
+- `run_id`：本轮运行 ID，贯穿 runtime event、插件 result 和后端匹配。
+- `token`：一次性结果回传 token，仅用于 `/api/extension/e2e/result` 鉴权。
+- `observed`：后端在运行窗口内从 `events` 表匹配到的真实捕捉事件。
+- `matched`：`observed` 是否满足本轮平台 / 动作要求。
+
+约束：
+
+- 端点只允许可信本机调用；局域网或远程请求会被拒绝。
+- 同一后端进程一次只允许一个 E2E run，避免多个真实浏览器标签页互相污染匹配窗口。
+- 如果 `RuntimeEventHub.publish()` 返回 `False`，端点会快速失败为 `extension_runtime_unavailable`，不空等超时。
+- 默认禁止会改变平台状态的动作；调用方必须显式设置 `allow_state_changing=true` 才能执行 `like/favorite/follow/comment/repost` 这类操作。
 
 ### Image Proxy API
 
