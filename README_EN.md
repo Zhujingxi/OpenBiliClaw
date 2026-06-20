@@ -52,7 +52,7 @@ Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/do
 ```
 
 3. **Log in to content platforms in the same browser**. Bilibili is selected by default for init, but you can deselect it and use enabled [Xiaohongshu](https://www.xiaohongshu.com) / [Douyin](https://www.douyin.com) / [YouTube](https://www.youtube.com) / [X](https://x.com) sources instead; init needs at least one logged-in source that can return signals.
-4. **Open the desktop or mobile Web UI**. Use `http://127.0.0.1:8420/web` on the same machine, or scan the extension QR code for `http://<your-LAN-IP>:8420/m/` on your phone.
+4. **Open the desktop or mobile Web UI**. Use `http://127.0.0.1:8420/web` on the same machine, or scan the extension QR code for `http://<your-LAN-IP>:8420/m/` on your phone, then save it to your home screen for app-like access.
 
 ## Why OpenBiliClaw?
 
@@ -316,6 +316,8 @@ openbiliclaw start
 - **Mobile**: click the phone icon in the extension header to scan the QR code, or type `http://<your-LAN-IP>:8420/m/` manually. Best for browsing recommendations, profile, and chat on your phone.
 
 > During `openbiliclaw init`, you'll be asked whether to allow LAN access (default Y). If you chose N or want to change it later, edit `[api].host` in `config.toml` (`0.0.0.0` = LAN-reachable, `127.0.0.1` = local only).
+
+After opening `/m/`, save it as a home-screen shortcut: on iPhone / iPad, use Safari's Share menu and choose "Add to Home Screen"; on Android Chrome / Chromium browsers, use the menu item "Install app" or "Add to Home screen". LAN HTTP may only create a shortcut in some Android browsers; full PWA install prompts are more reliable behind HTTPS in a trusted local setup.
 
 The app has five bottom tabs: Recommendations, Watch Later, Favorites, Profile, and Chat. Recommendations support reshuffle, load more, like, not interested, watch later, favorite, comments, and contextual chat. Watch Later and Favorites manage your saved lists. Profile shows the personality sketch, core traits, interests, and cognition updates. Chat shares the main chat history with the extension.
 

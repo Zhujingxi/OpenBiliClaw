@@ -1301,6 +1301,13 @@
               安装后请在同一个浏览器里登录你想接入的内容平台。插件最新版建议从 GitHub Latest Release 的 openbiliclaw-v* 聚合页下载手动安装（Firefox 用 -firefox.zip）；Chrome 应用商店一键装会自动更新，但受审核排期影响，版本可能滞后几天到一两周。
             </p>
           </div>
+
+          <div class="note">
+            <h3 data-i18n="mobileInstallNoteTitle">手机桌面快捷入口</h3>
+            <p data-i18n="mobileInstallNoteText">
+              后端允许局域网访问后，点击插件顶部手机图标扫码打开 /m/。iPhone / iPad 用 Safari「分享 → 添加到主屏幕」；Android Chrome / Chromium 浏览器用菜单里的「安装应用」或「添加到主屏幕」。局域网 HTTP 在部分 Android 浏览器上可能只生成快捷方式；HTTPS 反代下完整 PWA 安装提示更稳定。
+            </p>
+          </div>
         </div>
       </div>
     </section>
@@ -1598,6 +1605,8 @@
         desktopNoteText: "macOS .dmg / Windows .exe，从同一个 openbiliclaw-v* 聚合 Latest Release 下载；自带本地 Ollama embedding，常驻菜单栏 / 系统托盘。当前为未签名的实验性预发布，首次打开需绕过系统拦截（mac 拖入应用程序后右键打开，若提示已损坏按 README 命令处理；Windows「更多信息 → 仍要运行」）。想改源码或深度定制，用上面的 AI 一句话部署。",
         pluginNoteTitle: "插件是主要入口",
         pluginNoteText: "插件负责侧边栏推荐、行为采集、反馈、聊天，以及 B 站 / 小红书 / 抖音登录态任务桥。安装后请在同一个浏览器里登录你想接入的内容平台。插件最新版建议从 GitHub Latest Release 的 openbiliclaw-v* 聚合页下载手动安装（Firefox 用 -firefox.zip）；Chrome 应用商店一键装会自动更新，但受审核排期影响，版本可能滞后几天到一两周。",
+        mobileInstallNoteTitle: "手机桌面快捷入口",
+        mobileInstallNoteText: "后端允许局域网访问后，点击插件顶部手机图标扫码打开 /m/。iPhone / iPad 用 Safari「分享 → 添加到主屏幕」；Android Chrome / Chromium 浏览器用菜单里的「安装应用」或「添加到主屏幕」。局域网 HTTP 在部分 Android 浏览器上可能只生成快捷方式；HTTPS 反代下完整 PWA 安装提示更稳定。",
         whyEyebrow: "Why it matters",
         whyTitle: "推荐顺序反过来：先理解人，再找内容。",
         whyLead: "平台推荐通常先有内容池，再预测你会点什么。OpenBiliClaw 先沉淀对你的理解，再让 Agent 带着这份理解跨平台主动寻找。",
@@ -1735,6 +1744,8 @@
         desktopNoteText: "macOS .dmg / Windows .exe — download them from the same openbiliclaw-v* aggregate Latest Release. The app bundles local Ollama embedding and lives in the menu bar / system tray. It's an unsigned experimental pre-release, so the first launch needs a system-prompt bypass (macOS: drag to Applications, then right-click → Open; if it says damaged, use the README command; Windows: 'More info → Run anyway'). To edit the source or customize deeply, use the AI one-line deploy above.",
         pluginNoteTitle: "The extension is the main entry point",
         pluginNoteText: "The extension powers sidebar recommendations, behavior capture, feedback, chat, and the logged-in task bridge for Bilibili, Xiaohongshu, and Douyin. After installing it, log in to the content platforms you want to use in the same browser. For the newest build, download it from the openbiliclaw-v* aggregate GitHub Latest Release and load it manually (Firefox: use the -firefox.zip); the Chrome Web Store one-click install auto-updates but its version can lag by days to a couple of weeks due to review scheduling.",
+        mobileInstallNoteTitle: "Phone home-screen shortcut",
+        mobileInstallNoteText: "After enabling LAN access for the backend, click the phone icon in the extension header and scan the QR code for /m/. On iPhone / iPad, open Safari's Share menu and choose Add to Home Screen; on Android Chrome / Chromium browsers, use Install app or Add to Home screen. LAN HTTP may only create a shortcut in some Android browsers; full PWA install prompts are more reliable behind an HTTPS reverse proxy.",
         whyEyebrow: "Why it matters",
         whyTitle: "Flip the order: understand the person first, then find content.",
         whyLead: "Platform recommenders usually start with a content pool and predict what you will click. OpenBiliClaw first builds an understanding of you, then lets an Agent search across platforms with that understanding.",
