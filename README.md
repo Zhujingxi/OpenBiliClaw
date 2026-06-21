@@ -194,11 +194,11 @@
 
 ## 最近更新
 
-最新版本：**v0.3.134 / extension v0.3.88: 初始化前事件入口收口（2026-06-21）**。完整变更详见 [docs/changelog.md](docs/changelog.md)。
+最新版本：**v0.3.135 / extension v0.3.89: 抖音 search discovery 真实召回修复（2026-06-21）**。完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
-- **初始化前普通事件不入库** —— soul 画像明确未初始化时，`/api/events` 返回 `not_initialized`，不写 memory、不增加待处理信号。
-- **首屏文案不再误报 219 个信号** —— `/api/activity-feed` 在未初始化且无推荐池产物时优先显示“开始初始化”，不会把后台待处理计数当作已启动提示。
-- **首轮信号只归 guided init 拉取** —— 用户选完来源并点击“开始初始化”后，初始化任务自己的来源结果仍按 init-owned 逻辑放行。
+- **抖音搜索真实召回恢复** —— search 仍从首页搜索框输入并点击按钮提交，同时用 `search_navigation_ok` 校验进入真实结果页。
+- **搜索空结果自动走页面 API bridge** —— 当页面自身 fetch tap / DOM 都没有候选时，插件会用已登录页面的 MAIN-world search API bridge 兜底。
+- **抖音三渠道真实 E2E 通过** —— `discover-douyin --source search|hot|feed` 均已在当前环境返回 3 条候选。
 
 ## 用户交流群
 
@@ -673,7 +673,7 @@ OpenBiliClaw/
 
 ## 📜 更新日志
 
-最新版本：**v0.3.134 / extension v0.3.88: 初始化前事件入口收口（2026-06-21）**。最近更新见上方摘要；完整历史见 [docs/changelog.md](docs/changelog.md)。普通用户从 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 的 `openbiliclaw-v*` 聚合页下载插件包和可用桌面安装包；自动化频道 release 仍分别保留 `backend-v*`、`extension-v*`、`desktop-v*`。
+最新版本：**v0.3.135 / extension v0.3.89: 抖音 search discovery 真实召回修复（2026-06-21）**。最近更新见上方摘要；完整历史见 [docs/changelog.md](docs/changelog.md)。普通用户从 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 的 `openbiliclaw-v*` 聚合页下载插件包和可用桌面安装包；自动化频道 release 仍分别保留 `backend-v*`、`extension-v*`、`desktop-v*`。
 
 ## 🗺️ 后续规划
 
