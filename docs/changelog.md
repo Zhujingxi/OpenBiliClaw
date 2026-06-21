@@ -6,7 +6,7 @@
 
 ## v0.3.133 / extension v0.3.87: 推荐池 admission 统一收口（2026-06-21）
 
-后端源码走 `backend-v0.3.133`，浏览器插件走 `extension-v0.3.87`。桌面安装包未改动；如冻结包用户需要同步本次 Web / 后端修复，可后续单独打 `desktop-v0.3.133`。
+后端源码走 `backend-v0.3.133`，浏览器插件走 `extension-v0.3.87`，桌面安装包走 `desktop-v0.3.133`。
 
 - **推荐池 admission 取消 observed 特权**：新增 `[discovery].admission_min_score=0.60` 作为普通统一入池最低分；B 站扩展搜索、小红书 observed 和其它插件 / 来源候选都必须先过 evaluator 分数门，普通策略 / producer 默认阈值也统一为 0.60。探索类策略可使用略低阈值鼓励新方向，但不再有平台 / observed 特权；数据库读取、suppressed 复活、delight 候选和 `/api/recommendations` 历史输出同步加低分过滤，并在初始化时压制旧低分 `content_cache` / `recommendations` 脏数据。
 - **PC setup / Web 初始化完成态等首批内容池**：安装包 `/setup/` 和桌面 Web `/web` 不再只凭 `init-status.initialized=true` 就进入完成态；收到 `init_completed` 后会继续读取 `/api/runtime-status`，只有 `pool_available_count>0` 或已有推荐数时才算首轮初始化完成。画像已生成但首批内容还没入池时，PC 侧会停在“整理首轮内容池”进度态，和浏览器插件“有内容可刷后再进入推荐体验”的语义对齐。
