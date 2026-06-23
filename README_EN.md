@@ -190,11 +190,11 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-Latest: **v0.3.135 / extension v0.3.89 / desktop v0.3.135: Douyin search discovery recovery (2026-06-21)**. Full changelog: [docs/changelog.md](docs/changelog.md).
+Latest: **v0.3.136 / extension v0.3.90 / desktop v0.3.136: independent raw-candidate eval drain (2026-06-23)**. Full changelog: [docs/changelog.md](docs/changelog.md).
 
-- **Douyin search discovery is back** — search still starts from the homepage search box, clicks the submit button, and verifies the real results route with `search_navigation_ok`.
-- **Search now falls back through the page API bridge** — when passive fetch tap and DOM parsing produce no candidates, the extension uses the logged-in MAIN-world search API bridge.
-- **Douyin E2E passed across all three channels** — `discover-douyin --source search|hot|feed` each returned 3 candidates in the current real environment.
+- **Pending raw candidates now evaluate independently** — the runtime drains `discovery_candidates(pending_eval)` on every refresh tick, even when refresh planning does not create new tasks.
+- **Admitted candidates immediately enter the swappable pool** — successful admission now triggers `precompute_pool_copy()`, carrying raw candidates through `content_cache` into usable pool inventory.
+- **Bilibili search tasks are more resilient** — the extension retries `BILI_TASK_EXECUTE` briefly to absorb real-browser timing where page completion beats content-script listener registration.
 
 ## Community
 
@@ -661,7 +661,7 @@ OpenBiliClaw/
 
 ## 📜 Release History
 
-Latest: **v0.3.135 / extension v0.3.89 / desktop v0.3.135: Douyin search discovery recovery (2026-06-21)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Most users should use the `openbiliclaw-v*` aggregate [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) for extension packages and available desktop installers; automation-channel releases remain available as `backend-v*`, `extension-v*`, and `desktop-v*`.
+Latest: **v0.3.136 / extension v0.3.90 / desktop v0.3.136: independent raw-candidate eval drain (2026-06-23)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Most users should use the `openbiliclaw-v*` aggregate [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) for extension packages and available desktop installers; automation-channel releases remain available as `backend-v*`, `extension-v*`, and `desktop-v*`.
 
 ## 🗺️ Roadmap
 

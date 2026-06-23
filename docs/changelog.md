@@ -4,9 +4,9 @@
 
 ---
 
-## v0.3.136: 候选 raw 评估独立 drain（2026-06-23）
+## v0.3.136 / extension v0.3.90 / desktop v0.3.136: 候选 raw 评估独立 drain（2026-06-23）
 
-后端源码改动，浏览器插件与桌面安装包未改动。
+后端源码走 `backend-v0.3.136`，浏览器插件走 `extension-v0.3.90`，桌面安装包走 `desktop-v0.3.136`。
 
 - **pending raw 不再依赖 refresh plan 才能评估**：`ContinuousRefreshController.run_forever()` 新增 `_loop_candidate_eval()`，每个 refresh tick 独立 drain `discovery_candidates(pending_eval)`，并在 admission 后触发 `precompute_pool_copy()` 让候选进入真实可换池。refresh plan 发现新 raw 后仍会即时 eval，但 refresh path 和 periodic path 现在共用 `_discovery_drain_lock`，锁被占用时跳过本轮而不排队，避免两个入口并发评估同一批 raw。新增真实 SQLite + `DiscoveryCandidatePipeline` 端到端测试覆盖“pending raw -> eval -> content_cache -> pool copy -> 可换池”的完整链路。
 - **B 站扩展搜索兜底吸收 content script 注入抖动**：真实浏览器 E2E 暴露出搜索页 `complete` 早于 content script listener 注册时会偶发 `sendMessage_failed`；`bili-task-dispatcher` 现在对 `BILI_TASK_EXECUTE` 做 8 秒短重试，避免把可恢复时序误判为任务失败。
