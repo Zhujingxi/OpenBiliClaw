@@ -4,6 +4,8 @@ import importlib.util
 import zipfile
 from pathlib import Path
 
+import pytest
+
 
 def _load_build_module():
     project_root = Path(__file__).resolve().parent.parent
@@ -154,8 +156,12 @@ def test_bundle_ollama_binary_copies_into_onedir_with_sibling_lib(tmp_path: Path
 
 
 def test_bundle_ollama_binary_targets_app_resources_on_macos(tmp_path: Path) -> None:
-    src = tmp_path / "ollama"
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    src = src_dir / "ollama"
     src.write_text("bin\n", encoding="utf-8")
+    sidecar = src_dir / "llama-server"
+    sidecar.write_text("runner\n", encoding="utf-8")
     dist = tmp_path / "dist"
     (dist / "OpenBiliClaw").mkdir(parents=True)
     (dist / "OpenBiliClaw.app" / "Contents" / "Resources").mkdir(parents=True)
@@ -164,6 +170,22 @@ def test_bundle_ollama_binary_targets_app_resources_on_macos(tmp_path: Path) -> 
 
     assert (dist / "OpenBiliClaw" / "ollama") in written
     assert (dist / "OpenBiliClaw.app" / "Contents" / "Resources" / "ollama") in written
+    assert (dist / "OpenBiliClaw" / "llama-server") in written
+    assert (
+        dist / "OpenBiliClaw.app" / "Contents" / "Resources" / "llama-server"
+    ) in written
+    assert (dist / "OpenBiliClaw" / "llama-server").exists()
+    assert (dist / "OpenBiliClaw.app" / "Contents" / "Resources" / "llama-server").exists()
+
+
+def test_bundle_ollama_binary_rejects_incomplete_macos_runtime(tmp_path: Path) -> None:
+    src = tmp_path / "ollama"
+    src.write_text("bin\n", encoding="utf-8")
+    dist = tmp_path / "dist"
+    (dist / "OpenBiliClaw.app" / "Contents" / "Resources").mkdir(parents=True)
+
+    with pytest.raises(RuntimeError, match="llama-server"):
+        build_module.bundle_ollama_binary(dist, src, platform_name="Darwin")
 
 
 def test_repair_macos_ad_hoc_signature_signs_then_verifies(tmp_path: Path, monkeypatch) -> None:
@@ -204,3 +226,25 @@ def test_macos_build_repairs_signature_after_bundle_mutations_before_archives() 
     assert sign_index > build_block.index("bundle_ollama_binary(")
     assert sign_index < build_block.index("create_archive(")
     assert sign_index < build_block.index("make_macos_dmg(")
+
+
+def test_desktop_release_workflow_uses_official_macos_ollama_bundle() -> None:
+    workflow = (
+        Path(__file__).resolve().parent.parent / ".github" / "workflows" / "release-desktop.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "Ollama-darwin.zip" in workflow
+    assert "OPENBILICLAW_OLLAMA_BIN" in workflow
+    assert "Contents/Resources/llama-server" in workflow
+    assert "brew install ollama" not in workflow
+
+
+def test_manual_installer_workflow_uses_official_macos_ollama_bundle() -> None:
+    workflow = (
+        Path(__file__).resolve().parent.parent / ".github" / "workflows" / "build-installers.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "Ollama-darwin.zip" in workflow
+    assert "OPENBILICLAW_OLLAMA_BIN" in workflow
+    assert "Contents/Resources/llama-server" in workflow
+    assert "brew install ollama" not in workflow

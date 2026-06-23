@@ -61,6 +61,7 @@ class InitPrerequisitesOut(BaseModel):
     bilibili_check: str = "checking"  # ok | failed | checking
     llm_ready: bool = False
     embedding_ready: bool = False
+    embedding_required: bool = False
     enabled_platforms: list[str] = Field(default_factory=list)
 
 

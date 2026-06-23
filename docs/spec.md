@@ -271,14 +271,14 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │     DiscoveryCandidatePipeline: raw candidates -> periodic/refresh eval -> pool │ │
 │  │     LLM gate: scheduler + extension presence          │   │
 │  │     Soul taxonomy: CATEGORY_VOCAB + category migration + homonym-aware consolidation │ │
-│  │     Autostart: user login item + Ollama preflight/self-heal │ │
+│  │     Autostart: user login item + Ollama preflight/self-heal + Ollama.app runtime 校验 │ │
 │  │     Bili DOM fallback + XHS/Douyin/YouTube/X producers: 按平台缺口独立补池 │ │
 │  │     Hot reload one-shots: interest/avoidance force_tick │   │
 │  │     Probe arbiter: interest / avoidance 每轮最多推送一条   │   │
 │  │     Interest probes: near 5 + challenge 3 独立 active 额度 │   │
 │  │     Probe memory: domain / axis / distance + exploration buffer │ │
 │  │     AccountSync: B 站账号增量 -> Memory/Soul bootstrap     │   │
-│  │     Guided init: selected sources -> run_guided_init + InitCoordinator + /api/init* + init 期写者门控 │ │
+│  │     Guided init: selected sources + LLM/embedding live probe -> run_guided_init + InitCoordinator │ │
 │  │     Pool readiness: servable/raw/pending 统一库存口径       │   │
 │  │     Source bootstrap seen-key guard -> Memory/Profile      │   │
 │  │     Profile overrides overlay: 用户编辑 -> profile_overrides.json │ │
@@ -316,6 +316,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │ DeepSeek / Ollama /      │  │ L1 内存 + L2 SQLite    │   │
 │  │ OpenRouter + Codex OAuth │  │ Ollama bge-m3 兜底可选  │   │
 │  └──────────────────────────┘  └────────────────────────┘   │
+│  Desktop bundle: official Ollama.app runtime (ollama + llama-server sidecar) │
 │  LLMService caller bucket → per-module provider/model override │
 │  discovery evaluator: text + metrics + optional compressed cover image input │
 │  OpenAI auth_mode: api_key / experimental Codex CLI OAuth      │

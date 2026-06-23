@@ -102,6 +102,7 @@
       already_running: "初始化正在进行中。",
       bilibili_not_logged_in: "还没检测到 B 站登录。",
       llm_not_ready: "AI 服务还没配好或当前不可用。",
+      embedding_not_ready: "向量模型还没就绪，请等待 bge-m3 下载完成或修复 Ollama 后重试。",
       already_initialized: "已经初始化过了；如需重建，请到设置页。",
       local_only: "只能在本机发起初始化。",
       no_sources_selected: "至少勾选一个数据来源。",
@@ -729,6 +730,7 @@
       const selectedSources = Array.isArray(selected) ? selected : null;
       // B 站登录只在勾选了 B 站时才是硬前置。
       const biliSelected = selectedSources ? selectedSources.includes("bilibili") : true;
+      const embeddingRequired = Boolean(prereq.embedding_required);
       return [
         {
           key: "bilibili",
@@ -746,10 +748,12 @@
         },
         {
           key: "embedding",
-          label: "向量模型可用（推荐，非必须）",
+          label: embeddingRequired ? "向量模型可用" : "向量模型可用（推荐，非必须）",
           ok: Boolean(prereq.embedding_ready),
-          hard: false,
-          hint: "本地 Ollama + bge-m3 没就绪也能初始化，但语义检索会弱一些。"
+          hard: embeddingRequired,
+          hint: embeddingRequired
+            ? "本地 Ollama + bge-m3 需要完成一次真实向量请求；模型仍在下载或服务异常时请稍后重试。"
+            : "未配置 embedding 时可以先初始化；推荐去重和语义检索会弱一些。"
         },
         {
           key: "platforms",

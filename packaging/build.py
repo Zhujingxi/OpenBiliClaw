@@ -379,7 +379,7 @@ def bundle_ollama_binary(
     ollama_bin: Path,
     platform_name: str | None = None,
 ) -> list[Path]:
-    """Copy the ollama executable into the packaged outputs.
+    """Copy the Ollama runtime into the packaged outputs.
 
     Ships a self-contained local-embedding runtime so the app does not depend on
     a user-installed ollama (the fragile brew/winget step). Placed where
@@ -401,12 +401,34 @@ def bundle_ollama_binary(
     # Windows ollama is not a single self-contained binary like macOS — it ships
     # ``ollama.exe`` plus a sibling ``lib/`` of inference runners. Carry that dir
     # along (CPU runner is enough for bge-m3 embedding) so the bundled exe works.
+    #
+    # macOS 0.30.x is no longer reliably single-binary either: Homebrew's formula
+    # can expose an ``ollama`` executable that starts /api/version but fails every
+    # GGUF embedding with "llama-server binary not found". The official .app ships
+    # ``llama-server`` beside ``Contents/Resources/ollama``; require and bundle it
+    # so the release never contains a half-working daemon.
+    sidecar_files: list[Path] = []
+    if resolved == "Darwin":
+        llama_server = ollama_bin.parent / "llama-server"
+        if not llama_server.is_file():
+            raise RuntimeError(
+                "macOS Ollama runtime is incomplete: missing llama-server beside "
+                f"{ollama_bin}. Use the official Ollama.app Resources/ollama, not "
+                "a Homebrew-only ollama binary."
+            )
+        sidecar_files.append(llama_server)
+
     sibling_lib = ollama_bin.parent / "lib"
     written: list[Path] = []
     for dest in targets:
         shutil.copyfile(ollama_bin, dest)
         os.chmod(dest, 0o755)
         written.append(dest)
+        for sidecar in sidecar_files:
+            sidecar_dest = dest.parent / sidecar.name
+            shutil.copyfile(sidecar, sidecar_dest)
+            os.chmod(sidecar_dest, 0o755)
+            written.append(sidecar_dest)
         if sibling_lib.is_dir():
             dest_lib = dest.parent / "lib"
             if not dest_lib.exists():

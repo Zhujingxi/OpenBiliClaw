@@ -190,11 +190,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-Latest: **v0.3.136 / extension v0.3.90 / desktop v0.3.136: independent raw-candidate eval drain (2026-06-23)**. Full changelog: [docs/changelog.md](docs/changelog.md).
+Latest: **v0.3.137 / extension v0.3.90 / desktop v0.3.137: macOS installer Ollama runtime fix (2026-06-23)**. Full changelog: [docs/changelog.md](docs/changelog.md).
 
-- **Pending raw candidates now evaluate independently** — the runtime drains `discovery_candidates(pending_eval)` on every refresh tick, even when refresh planning does not create new tasks.
-- **Admitted candidates immediately enter the swappable pool** — successful admission now triggers `precompute_pool_copy()`, carrying raw candidates through `content_cache` into usable pool inventory.
-- **Bilibili search tasks are more resilient** — the extension retries `BILI_TASK_EXECUTE` briefly to absorb real-browser timing where page completion beats content-script listener registration.
+- **macOS local embedding is fixed** — the installer now bundles the official `Ollama.app` runtime's `ollama + llama-server`, avoiding `/api/embeddings` failures with `llama-server binary not found`.
+- **Guided init now verifies embedding with a real probe** — when local `ollama` embedding is configured by the installer, profile initialization waits for one successful `bge-m3` embedding request instead of silently degrading while the model is still downloading or Ollama is broken.
+- **Release builds now fail fast on incomplete Ollama runtimes** — the macOS desktop build checks the `llama-server` sidecar before producing a package, and the manual installer workflow uses the same official runtime.
+- **Extension version unchanged** — browser packages remain on `extension v0.3.90`; this release refreshes backend source and desktop installers only.
 
 ## Community
 
@@ -380,13 +381,14 @@ If you do not want a separate embedding API key, or remote embedding quota is an
 
 ```bash
 # macOS
-brew install ollama && ollama serve &
+# Install and launch the official Ollama.app; it creates the ollama CLI link.
+open https://ollama.com/download/mac
 
 # Linux
 curl -fsSL https://ollama.com/install.sh | sh && ollama serve &
 ```
 
-Windows users can install it from [ollama.com/download](https://ollama.com/download). Then run:
+macOS / Windows users can install the official app from [ollama.com/download](https://ollama.com/download). Start Ollama, then run:
 
 ```bash
 uv run openbiliclaw setup-embedding
@@ -661,7 +663,7 @@ OpenBiliClaw/
 
 ## 📜 Release History
 
-Latest: **v0.3.136 / extension v0.3.90 / desktop v0.3.136: independent raw-candidate eval drain (2026-06-23)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Most users should use the `openbiliclaw-v*` aggregate [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) for extension packages and available desktop installers; automation-channel releases remain available as `backend-v*`, `extension-v*`, and `desktop-v*`.
+Latest: **v0.3.137 / extension v0.3.90 / desktop v0.3.137: macOS installer Ollama runtime fix (2026-06-23)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Most users should use the `openbiliclaw-v*` aggregate [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) for extension packages and available desktop installers; automation-channel releases remain available as `backend-v*`, `extension-v*`, and `desktop-v*`.
 
 ## 🗺️ Roadmap
 

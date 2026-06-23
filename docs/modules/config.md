@@ -227,7 +227,8 @@ Content-Type: application/json
 ```bash
 # 1. 装 Ollama（一次性）
 # Mac
-brew install ollama && ollama serve &
+# 安装并启动官方 Ollama.app（会创建 ollama 命令行入口）
+open https://ollama.com/download/mac
 # Windows: 从 https://ollama.com/download 下载安装包
 # Linux
 curl -fsSL https://ollama.com/install.sh | sh && ollama serve &

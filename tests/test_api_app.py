@@ -8553,7 +8553,14 @@ def test_select_init_platforms_empty_selection_yields_empty() -> None:
 class TestGuidedInitEndpoints:
     """E2: POST /api/init + POST /api/init/cancel (local-only, gui-init §2/§5b)."""
 
-    def _make_app(self, tmp_path, *, profile_ready=False, prereqs=None):
+    def _make_app(
+        self,
+        tmp_path,
+        *,
+        profile_ready=False,
+        prereqs=None,
+        embedding_provider: str | None = None,
+    ):
         from openbiliclaw.storage.database import Database
 
         db = Database(tmp_path / "e2.db")
@@ -8561,6 +8568,14 @@ class TestGuidedInitEndpoints:
         soul = SimpleNamespace(is_profile_ready=lambda: profile_ready)
         app = create_app(memory_manager=object(), database=db, soul_engine=soul)
         app.state.auth_gate.is_trusted_local = lambda request: True
+        if embedding_provider is not None:
+            from openbiliclaw.config import Config
+
+            app.state.runtime_context.config = Config()
+            data_dir = tmp_path / "data"
+            data_dir.mkdir()
+            app.state.runtime_context.config.data_dir = str(data_dir)
+            app.state.runtime_context.config.llm.embedding.provider = embedding_provider
         if prereqs is not None:
             app.state.runtime_context._init_prereqs = prereqs
         return app, db
@@ -8580,9 +8595,7 @@ class TestGuidedInitEndpoints:
     ) -> None:
         from fastapi.testclient import TestClient
 
-        monkeypatch.setattr(
-            "openbiliclaw.docker_runtime.is_running_in_container", lambda *a, **k: True
-        )
+        monkeypatch.setenv("OPENBILICLAW_IN_CONTAINER", "1")
         app, db = self._make_app(tmp_path)
         with TestClient(app) as client:
             resp = client.post("/api/init", json={})
@@ -8638,6 +8651,34 @@ class TestGuidedInitEndpoints:
         assert resp.status_code == 409
         assert resp.json()["error"] == "llm_not_ready"
         assert db.get_latest_init_run()["status"] == "idle"
+        assert app.state.runtime_context.init_coordinator.init_active() is False
+
+    def test_init_missing_configured_embedding_resets_to_idle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        real_exists = Path.exists
+
+        def _exists_without_container_markers(path: Path) -> bool:
+            if str(path) in {"/.dockerenv", "/run/.containerenv"}:
+                return False
+            return real_exists(path)
+
+        monkeypatch.delenv("OPENBILICLAW_IN_CONTAINER", raising=False)
+        monkeypatch.setattr(Path, "exists", _exists_without_container_markers)
+        from openbiliclaw.docker_runtime import is_running_in_container
+
+        assert is_running_in_container() is False
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["xiaohongshu"])
+        app, db = self._make_app(tmp_path, prereqs=prereqs, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={"sources": ["xiaohongshu"]})
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "embedding_not_ready"
+        latest = db.get_latest_init_run()
+        assert latest["status"] == "idle"
+        assert latest["error_reason"] == "embedding_not_ready"
         assert app.state.runtime_context.init_coordinator.init_active() is False
 
     def test_init_skips_bilibili_login_check_when_deselected(
@@ -9005,6 +9046,34 @@ class TestGuidedInitEndpoints:
         body = resp.json()
         assert body["can_start"] is False
         assert body["reason"] == "llm_not_ready"
+
+    def test_init_status_configured_embedding_hard_gates_can_start(
+        self, tmp_path: Path
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["xiaohongshu"])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.get("/api/init-status")
+        body = resp.json()
+        assert body["can_start"] is False
+        assert body["reason"] == "embedding_not_ready"
+        assert body["prerequisites"]["embedding_ready"] is False
+        assert body["prerequisites"]["embedding_required"] is True
+
+    def test_init_status_disabled_embedding_does_not_gate_can_start(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["xiaohongshu"])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs, embedding_provider="")
+        with TestClient(app) as client:
+            resp = client.get("/api/init-status")
+        body = resp.json()
+        assert body["can_start"] is True
+        assert body["reason"] == "none"
+        assert body["prerequisites"]["embedding_ready"] is False
+        assert body["prerequisites"]["embedding_required"] is False
 
     def test_task_result_not_gated_during_init(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient

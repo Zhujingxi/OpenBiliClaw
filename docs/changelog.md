@@ -4,6 +4,14 @@
 
 ---
 
+## v0.3.137 / extension v0.3.90 / desktop v0.3.137: macOS 安装包 Ollama runtime 修复（2026-06-23）
+
+后端源码走 `backend-v0.3.137`，浏览器插件沿用 `extension-v0.3.90`，桌面安装包走 `desktop-v0.3.137`。
+
+- **macOS 安装包不再打进 Homebrew 半残 Ollama**：macOS `release-desktop.yml` 改为下载官方 `Ollama.app` runtime，并把 `Contents/Resources/ollama` 指给打包脚本；构建时会显式校验 `Contents/Resources/llama-server` 存在。`packaging/build.py` 现在在 Darwin bundle 中强制携带 `ollama + llama-server`，若只发现 Homebrew 风格的单独 `ollama` 主程序则直接失败，避免再次发布“`/api/version` 正常但 `/api/embeddings` 500: llama-server binary not found”的安装包。
+- **初始化前真实确认 embedding 可用**：`/api/init-status` 新增 `prerequisites.embedding_required`；当 `[llm.embedding].provider` 已配置（安装包默认 `ollama`）时，`can_start` 和 `POST /api/init` 都必须等 `EmbeddingService.probe()` 完成真实向量请求才放行，失败时返回 `embedding_not_ready` 并回滚 init 预约。用户显式留空 provider 时仍允许降级初始化。桌面 `/setup` 和 `/web` 清单按该字段把向量模型显示为硬前置或可选项。
+- **打包回归测试补齐**：`tests/test_packaging_build.py` 新增 macOS Ollama sidecar 拷贝 / 缺失拒绝 / release + 手动 installer workflow 官方 runtime 来源断言，守住后续桌面包 embedding 开箱即用承诺；`tests/test_api_app.py` 覆盖配置了 embedding 时 init 前硬拦、未配置时不拦。
+
 ## v0.3.136 / extension v0.3.90 / desktop v0.3.136: 候选 raw 评估独立 drain（2026-06-23）
 
 后端源码走 `backend-v0.3.136`，浏览器插件走 `extension-v0.3.90`，桌面安装包走 `desktop-v0.3.136`。

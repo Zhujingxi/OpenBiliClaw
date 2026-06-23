@@ -834,8 +834,8 @@ This is a **post-install opt-in**, not part of the install contract. Mention
 it to the user only if they ask about offline operation, embedding-quota
 errors, or a no-API-key setup. Steps:
 
-1. User installs Ollama: Mac `brew install ollama && ollama serve &`,
-   Windows from `https://ollama.com/download`, Linux
+1. User installs the official Ollama app: macOS / Windows from
+   `https://ollama.com/download` (start the app so `localhost:11434` is live), Linux
    `curl -fsSL https://ollama.com/install.sh | sh && ollama serve &`.
 2. User runs `cd <INSTALL_DIR> && uv run openbiliclaw setup-embedding`.
 3. The wizard probes `localhost:11434`, pulls `bge-m3` if missing, and

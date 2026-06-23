@@ -1677,6 +1677,13 @@ def create_app(
             _embedding_ready_checked_at = time.monotonic()
             return ready
 
+    def _embedding_required_for_init() -> bool:
+        """Whether guided init must wait for a configured embedding provider."""
+        cfg = getattr(ctx, "config", None)
+        emb = getattr(getattr(cfg, "llm", None), "embedding", None)
+        provider = str(getattr(emb, "provider", "") or "").strip()
+        return bool(provider)
+
     @app.get("/api/ping")
     async def ping() -> JSONResponse:
         """Pure liveness probe: no DB, no provider round-trips.
@@ -1746,7 +1753,8 @@ def create_app(
         # which only POST /api/init sees. ``bilibili_logged_in`` stays in the
         # prerequisites payload so clients gate the start button themselves
         # when B站 is among the checked sources; POST revalidates regardless.
-        hard_ok = chat
+        embedding_required = _embedding_required_for_init()
+        hard_ok = chat and (embedding or not embedding_required)
         # Mirror POST /api/init's guards: an already-initialized profile blocks
         # a (non-force) start, so can_start must reflect that too — otherwise E1
         # and E2 disagree and a client could offer "start" that E2 rejects.
@@ -1760,6 +1768,8 @@ def create_app(
             reason, detail = "already_initialized", "已经初始化过了；如需重建请用 force"
         elif not chat:
             reason, detail = "llm_not_ready", "AI 服务还没配好或当前不可用"
+        elif embedding_required and not embedding:
+            reason, detail = "embedding_not_ready", "向量模型还没就绪"
         elif bili != "ok":
             # Informational (does not flip can_start): blocks only if the
             # client keeps bilibili selected, which the UI enforces.
@@ -1789,6 +1799,7 @@ def create_app(
                 bilibili_check=bili,
                 llm_ready=chat,
                 embedding_ready=embedding,
+                embedding_required=embedding_required,
                 enabled_platforms=platforms,
             ),
             reason=reason,
@@ -2001,6 +2012,9 @@ def create_app(
         if not chat:
             coord.reset_to_idle(run_id, reason="llm_not_ready")
             return JSONResponse({"error": "llm_not_ready"}, status_code=409)
+        if _embedding_required_for_init() and not await _health_embedding_ready():
+            coord.reset_to_idle(run_id, reason="embedding_not_ready")
+            return JSONResponse({"error": "embedding_not_ready"}, status_code=409)
 
         registry = getattr(ctx, "task_registry", None)
         if registry is not None:
