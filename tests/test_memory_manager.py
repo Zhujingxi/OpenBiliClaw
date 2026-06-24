@@ -641,6 +641,7 @@ def test_source_bootstrap_state_defaults_when_missing(tmp_path: Path) -> None:
         "xhs_seen_note_keys": [],
         "dy_seen_video_keys": [],
         "yt_seen_item_keys": [],
+        "zhihu_seen_item_keys": [],
         "last_source_bootstrap_sync_at": "",
     }
 
@@ -654,6 +655,7 @@ def test_source_bootstrap_state_round_trips_to_json(tmp_path: Path) -> None:
             "xhs_seen_note_keys": ["saved:xhs-1"],
             "dy_seen_video_keys": ["dy_collect:dy-1"],
             "yt_seen_item_keys": ["yt_history:yt-1"],
+            "zhihu_seen_item_keys": ["zhihu_favorite:zh-1"],
             "last_source_bootstrap_sync_at": "2026-05-20T12:00:00",
         }
     )
@@ -663,6 +665,7 @@ def test_source_bootstrap_state_round_trips_to_json(tmp_path: Path) -> None:
     assert state["xhs_seen_note_keys"] == ["saved:xhs-1"]
     assert state["dy_seen_video_keys"] == ["dy_collect:dy-1"]
     assert state["yt_seen_item_keys"] == ["yt_history:yt-1"]
+    assert state["zhihu_seen_item_keys"] == ["zhihu_favorite:zh-1"]
     assert state["last_source_bootstrap_sync_at"] == "2026-05-20T12:00:00"
 
 

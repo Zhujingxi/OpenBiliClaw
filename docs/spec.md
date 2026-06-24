@@ -34,7 +34,7 @@ OpenBiliClaw 是一个**通用开源的 Bilibili 个性化内容推荐 AI Agent*
 #### 2.1.1 行为数据采集
 
 **浏览器插件（核心采集入口）**：
-- 通过统一 `PlatformAdapter` 捕捉 B 站 / 小红书 / 抖音 / YouTube / X 的交互行为：点击、滚动、停留、评论、点赞、收藏、分享、关注、搜索，以及 B 站特有投币；click 在 capture 阶段记录，scroll 同时覆盖页面和内部 feed / modal 滚动容器
+- 通过统一 `PlatformAdapter` 捕捉 B 站 / 小红书 / 抖音 / YouTube / X / 知乎的交互行为：点击、滚动、停留、评论、点赞、收藏、分享、关注、搜索，以及 B 站特有投币；click 在 capture 阶段记录，scroll 同时覆盖页面和内部 feed / modal 滚动容器
 - 记录行为发生时的**完整上下文**：对应的 DOM 页面快照、当前浏览路径、时间戳、平台内容 ID
 - 捕捉用户的**微行为**：鼠标悬停、视频进度条跳转、视频暂停 / 继续、页面导航等
 - 记录用户的**主动反馈**：`dislike` 类动作统一规范成 `feedback` 事件，避免各平台负反馈语义分叉
@@ -210,11 +210,11 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  ┌──────────────┐  ┌──────────────┐  ┌─────────────────┐    │
 │  │ 统一行为采集   │  │ 推荐展示 UI   │  │ 对话/反馈/探针   │    │
 │  │ Adapter: B/x │  │ (LUI 界面)   │  │ (durable turn) │    │
-│  │ +yt+x(推文)  │  │ +真实可换数   │  │                │    │
+│  │ +yt+x+zhihu  │  │ +真实可换数   │  │                │    │
 │  │ +停留满意度   │  │ +文字卡渲染   │  │                │    │
 │  └──────────────┘  └──────────────┘  └─────────────────┘    │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ bili/xhs/dy/yt 任务调度 + 源开关/比例配置（后台 tab / 初始化导入 / 配比建议）│ │
+│  │ bili/xhs/dy/yt/zhihu 任务调度 + 源开关/比例配置（后台 tab / 初始化导入 / 配比建议）│ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ B 站 / 抖音 / X Cookie 同步（runtime-stream 请求 + 扩展回传）│   │
@@ -267,12 +267,12 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  └──────────────┘ └──────────────┘ └────────────────┘      │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │     PoolCurator + 双轴 fatigue + per-group 窗口 + 新兴趣放大保护 │ │
-│  │     ContinuousRefreshController + B/XHS/DY/YT/X=8/1/1/1/1 │ │
+│  │     ContinuousRefreshController + B/XHS/DY/YT/X/Zhihu=5/1/1/1/1/1 │ │
 │  │     DiscoveryCandidatePipeline: raw candidates -> periodic/refresh eval -> pool │ │
 │  │     LLM gate: scheduler + extension presence          │   │
 │  │     Soul taxonomy: CATEGORY_VOCAB + category migration + homonym-aware consolidation │ │
 │  │     Autostart: user login item + Ollama preflight/self-heal + Ollama.app runtime 校验 │ │
-│  │     Bili DOM fallback + XHS/Douyin/YouTube/X producers: 按平台缺口独立补池 │ │
+│  │     Bili DOM fallback + XHS/Douyin/YouTube/X/Zhihu producers: 按平台缺口独立补池 │ │
 │  │     Hot reload one-shots: interest/avoidance force_tick │   │
 │  │     Probe arbiter: interest / avoidance 每轮最多推送一条   │   │
 │  │     Interest probes: near 5 + challenge 3 独立 active 额度 │   │
@@ -291,9 +291,9 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 ├──────────────────────────────────────────────────────────────┤
 │           多源适配层 (SourceAdapter Protocol, v0.3.0+)         │
 │  ┌──────────────┐  ┌──────────────────┐  ┌─────────────┐    │
-│  │ B 站 Adapter  │  │ Bili/小红书/抖音/YouTube任务桥│ │ Web Adapter │  │
+│  │ B 站 Adapter  │  │ Bili/小红书/抖音/YouTube/知乎任务桥│ │ Web Adapter │  │
 │  │ (WBI API+DOM兜底)│ │ (扩展代理 + DOM-first)│  │ (Playwright │    │
-│  │              │  │ + profile/search/feed/yt)│ │ + LLM 抽取)│    │
+│  │              │  │ + profile/search/feed/yt/zhihu)│ │ + LLM 抽取)│    │
 │  └──────────────┘  └──────────────────┘  └─────────────┘    │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ DouyinDiscoveryService: 首页 DOM 触发 search / 热点 seed-related / feed │ │
@@ -305,6 +305,10 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │ XAdapter + XDiscoveryProducer: 服务端 cookie 重放(twitter-cli) │ │
 │  │   search / feed(For-You) / creator(账号订阅) + 源健康状态机   │   │
 │  │   行为采集: 扩展 MAIN-world GraphQL tap + generic collector   │   │
+│  └──────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │ ZhihuDiscoveryProducer: 插件登录态 search/hot/feed/creator/related -> pending eval │ │
+│  │   fetch-zhihu 只做 smoke；guided init 勾选知乎才进首版画像       │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ Cookie/登录态、runtime-stream presence、任务持久化/claim、seen-key 去重 │ │

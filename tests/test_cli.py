@@ -1,6 +1,7 @@
 """CLI tests for configuration guidance behavior."""
 
 import io
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -2489,7 +2490,7 @@ def test_init_guides_missing_runtime_config_interactively(
     #   5. "n" — skip module overrides
     #   6. "y" — allow LAN access
     #   7-8. "" — accept Bili favorite/follow init limits
-    #   9+. "n" — skip optional source prompts (xhs / douyin / youtube / X)
+    #   9+. "n" — skip optional source prompts (xhs / douyin / youtube / X / zhihu)
     wizard_input = (
         "\n".join(
             [
@@ -2501,6 +2502,7 @@ def test_init_guides_missing_runtime_config_interactively(
                 "y",
                 "",
                 "",
+                "n",
                 "n",
                 "n",
                 "n",
@@ -2576,9 +2578,9 @@ def test_init_guides_missing_auth_interactively(
     # test exercising the manual-paste path, send "2" first.
     # v0.3.89+: init asks whether to allow LAN access before the source
     # prompts. Answer yes, accept Bili signal-limit defaults, then send "n"
-    # to XHS / Douyin / YouTube / X so this test stays focused on the
+    # to XHS / Douyin / YouTube / X / Zhihu so this test stays focused on the
     # cookie-prompt path.
-    result = runner.invoke(app, ["init"], input="2\nSESSDATA=valid\ny\n\n\nn\nn\nn\nn\n")
+    result = runner.invoke(app, ["init"], input="2\nSESSDATA=valid\ny\n\n\nn\nn\nn\nn\nn\n")
 
     assert result.exit_code == 1
     assert fake_auth.saved_cookie == "SESSDATA=valid"
@@ -3702,11 +3704,17 @@ def test_persist_init_source_enabled_flags_updates_optional_sources(
     monkeypatch.setattr("openbiliclaw.config.load_config", lambda: config)
     monkeypatch.setattr("openbiliclaw.config.save_config", lambda cfg: saved.append(cfg))
 
-    _persist_init_source_enabled_flags(include_xhs=False, include_dy=True, include_yt=True)
+    _persist_init_source_enabled_flags(
+        include_xhs=False,
+        include_dy=True,
+        include_yt=True,
+        include_zhihu=True,
+    )
 
     assert config.sources.xiaohongshu.enabled is False
     assert config.sources.douyin.enabled is True
     assert config.sources.youtube.enabled is True
+    assert config.sources.zhihu.enabled is True
     assert saved == [config]
 
 
@@ -3742,6 +3750,7 @@ def test_select_init_source_shares_accepts_suggested_ratios(
         # twitter carries its default share (1) even when not in the import's
         # enabled_sources; effective_pool_source_shares drops it while disabled.
         "twitter": 1,
+        "zhihu": 1,
     }
 
 
@@ -3779,8 +3788,10 @@ def test_select_init_source_shares_accepts_manual_ratios(
         "xiaohongshu": 2,
         "douyin": 1,
         "youtube": 3,
-        # twitter carries its default share (1); dropped later while disabled.
+        # Optional disabled sources carry their default share (1); dropped
+        # later while disabled.
         "twitter": 1,
+        "zhihu": 1,
     }
 
 
@@ -5063,6 +5074,346 @@ def test_fetch_douyin_does_not_propagate_events_cli_side(
     )
 
 
+def test_fetch_zhihu_command_renders_event_counts_without_init(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    prepared = {"called": False}
+    propagated: list[dict[str, object]] = []
+
+    def _trip() -> None:
+        prepared["called"] = True
+
+    class FakeMemoryManager:
+        async def propagate_event(self, event: dict[str, object]) -> None:
+            propagated.append(event)
+
+    monkeypatch.setattr(cli_module, "_prepare_init_runtime", _trip)
+    monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: FakeMemoryManager())
+    monkeypatch.setattr(cli_module, "_enqueue_zhihu_bootstrap_task", lambda **_: "zhihu-task")
+    monkeypatch.setattr(
+        cli_module,
+        "_collect_zhihu_bootstrap_events",
+        lambda task_id, *, max_wait_seconds: (
+            [
+                {"event_type": "view", "title": "浏览", "metadata": {}},
+                {"event_type": "favorite", "title": "收藏", "metadata": {}},
+                {"event_type": "like", "title": "点赞", "metadata": {}},
+            ],
+            {
+                "zhihu_read_history": 1,
+                "zhihu_collection": 1,
+                "zhihu_activity_like": 1,
+                "zhihu_activity_favorite": 0,
+            },
+            "ok",
+        ),
+    )
+
+    result = runner.invoke(app, ["fetch-zhihu", "--profile-slug", "demo", "-w", "5"])
+
+    assert result.exit_code == 0, result.output
+    assert prepared["called"] is False
+    assert propagated == []
+    assert "知乎" in result.output
+    assert "浏览" in result.output
+    assert "收藏" in result.output
+    assert "点赞" in result.output
+
+
+def test_fetch_zhihu_write_memory_propagates_collected_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    propagated: list[dict[str, object]] = []
+
+    class FakeMemoryManager:
+        async def propagate_event(self, event: dict[str, object]) -> None:
+            propagated.append(event)
+
+    monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: FakeMemoryManager())
+    monkeypatch.setattr(cli_module, "_enqueue_zhihu_bootstrap_task", lambda **_: "zhihu-task")
+    monkeypatch.setattr(
+        cli_module,
+        "_collect_zhihu_bootstrap_events",
+        lambda task_id, *, max_wait_seconds: (
+            [
+                {
+                    "event_type": "view",
+                    "title": "浏览",
+                    "url": "https://www.zhihu.com/question/1",
+                    "metadata": {"source_platform": "zhihu", "content_id": "1"},
+                },
+                {
+                    "event_type": "favorite",
+                    "title": "收藏",
+                    "url": "https://www.zhihu.com/question/2",
+                    "metadata": {"source_platform": "zhihu", "content_id": "2"},
+                },
+            ],
+            {
+                "zhihu_read_history": 1,
+                "zhihu_collection": 1,
+                "zhihu_activity_like": 0,
+                "zhihu_activity_favorite": 0,
+            },
+            "ok",
+        ),
+    )
+
+    result = runner.invoke(app, ["fetch-zhihu", "--write-memory", "-w", "5"])
+
+    assert result.exit_code == 0, result.output
+    assert [event["title"] for event in propagated] == ["浏览", "收藏"]
+    assert "已写入 memory" in result.output
+
+
+def test_enqueue_zhihu_bootstrap_requests_activity_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from openbiliclaw.sources.zhihu_tasks import ZhihuTaskQueue
+    from openbiliclaw.storage.database import Database
+
+    database = Database(tmp_path / "test.db")
+    database.initialize()
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: database)
+    monkeypatch.setattr(cli_module, "_kick_task_dispatcher", lambda source: None)
+
+    task_id = cli_module._enqueue_zhihu_bootstrap_task()
+
+    assert task_id is not None
+    task = ZhihuTaskQueue(database).get(task_id)
+    assert task is not None
+    payload = json.loads(str(task["payload_json"]))
+    assert payload["profile_slug"] == ""
+    assert payload["scopes"] == [
+        "zhihu_read_history",
+        "zhihu_collection",
+        "zhihu_activity",
+    ]
+
+
+def test_collect_zhihu_bootstrap_events_surfaces_login_required(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from openbiliclaw.sources.zhihu_tasks import ZhihuTaskQueue
+    from openbiliclaw.storage.database import Database
+
+    database = Database(tmp_path / "test.db")
+    database.initialize()
+    queue = ZhihuTaskQueue(database)
+    task_id = queue.enqueue_with_id("bootstrap_events", {"scopes": ["zhihu_read_history"]})
+    assert task_id is not None
+    assert queue.next_pending() is not None
+    queue.fail(
+        task_id,
+        error="zhihu_login_required",
+        debug={
+            "login_required": True,
+            "current_url": "https://www.zhihu.com/signin?next=%2F",
+            "http_status": 400,
+        },
+    )
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: database)
+
+    events, counts, status = cli_module._collect_zhihu_bootstrap_events(task_id, max_wait_seconds=0)
+
+    assert events == []
+    assert counts["zhihu_read_history"] == 0
+    assert status == "login_required"
+
+
+def test_collect_zhihu_bootstrap_events_marks_in_progress_timeout_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from openbiliclaw.sources.zhihu_tasks import ZhihuTaskQueue
+    from openbiliclaw.storage.database import Database
+
+    database = Database(tmp_path / "test.db")
+    database.initialize()
+    queue = ZhihuTaskQueue(database)
+    task_id = queue.enqueue_with_id("bootstrap_events", {"scopes": ["zhihu_read_history"]})
+    assert task_id is not None
+    assert queue.next_pending() is not None
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: database)
+
+    events, _counts, status = cli_module._collect_zhihu_bootstrap_events(
+        task_id, max_wait_seconds=0
+    )
+
+    task = queue.get(task_id)
+    assert events == []
+    assert status == "timeout"
+    assert task is not None
+    assert task["status"] == "failed"
+    assert "extension_result_timeout" in str(task["result_json"])
+
+
+def test_fetch_zhihu_command_explains_login_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(cli_module, "_enqueue_zhihu_bootstrap_task", lambda **_: "zhihu-task")
+    monkeypatch.setattr(
+        cli_module,
+        "_collect_zhihu_bootstrap_events",
+        lambda task_id, *, max_wait_seconds: (
+            [],
+            {
+                "zhihu_read_history": 0,
+                "zhihu_collection": 0,
+                "zhihu_activity_like": 0,
+                "zhihu_activity_favorite": 0,
+            },
+            "login_required",
+        ),
+    )
+
+    result = runner.invoke(app, ["fetch-zhihu", "--force", "-w", "5"])
+
+    assert result.exit_code == 0, result.output
+    assert "先在当前浏览器登录知乎" in result.output
+
+
+def test_discover_zhihu_command_enqueues_search_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    runner = CliRunner()
+    calls: dict[str, object] = {}
+
+    def enqueue(keywords: tuple[str, ...], *, max_items_per_keyword: int) -> str:
+        calls["keywords"] = keywords
+        calls["max_items_per_keyword"] = max_items_per_keyword
+        return "zhihu-search-task"
+
+    monkeypatch.setattr(cli_module, "_enqueue_zhihu_search_task", enqueue)
+    monkeypatch.setattr(
+        cli_module,
+        "_collect_zhihu_search_results",
+        lambda task_id, *, max_wait_seconds: (
+            [
+                {
+                    "scope": "zhihu_search",
+                    "title": "知乎回答",
+                    "url": "https://www.zhihu.com/question/1/answer/2",
+                    "content_type": "answer",
+                    "content_id": "2",
+                }
+            ],
+            {"zhihu_search": 1},
+            "ok",
+        ),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_enqueue_zhihu_discovery_candidates",
+        lambda items: (
+            1,
+            [
+                SimpleNamespace(
+                    title="知乎回答",
+                    up_name="作者",
+                    source_strategy="zhihu-search",
+                    relevance_score=0.0,
+                )
+            ],
+        ),
+    )
+
+    result = runner.invoke(app, ["discover-zhihu", "AI 工程化", "--limit", "7", "-w", "5"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == {
+        "keywords": ("AI 工程化",),
+        "max_items_per_keyword": 7,
+    }
+    assert "知乎内容发现" in result.output
+    assert "入池候选" in result.output
+
+
+def test_discover_zhihu_hot_command_enqueues_hot_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    runner = CliRunner()
+    calls: dict[str, object] = {}
+
+    def enqueue(task_type: str, payload: dict[str, object], *, daily_budget_key: str) -> str:
+        calls["task_type"] = task_type
+        calls["payload"] = payload
+        calls["daily_budget_key"] = daily_budget_key
+        return "zhihu-hot-task"
+
+    monkeypatch.setattr(cli_module, "_enqueue_zhihu_discovery_task", enqueue)
+    monkeypatch.setattr(
+        cli_module,
+        "_collect_zhihu_discovery_results",
+        lambda task_id, *, max_wait_seconds: (
+            [
+                {
+                    "scope": "zhihu_hot",
+                    "title": "热榜问题",
+                    "url": "https://www.zhihu.com/question/1",
+                    "content_type": "question",
+                    "content_id": "1",
+                    "source_strategy": "zhihu-hot",
+                }
+            ],
+            {"zhihu_hot": 1},
+            "ok",
+        ),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_enqueue_zhihu_discovery_candidates",
+        lambda items: (
+            1,
+            [
+                SimpleNamespace(
+                    title="热榜问题",
+                    up_name="",
+                    source_strategy="zhihu-hot",
+                    relevance_score=0.0,
+                )
+            ],
+        ),
+    )
+
+    result = runner.invoke(app, ["discover-zhihu-hot", "--limit", "7", "-w", "5"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == {
+        "task_type": "hot",
+        "payload": {"max_items": 7},
+        "daily_budget_key": "daily_hot_budget",
+    }
+    assert "zhihu-hot" in result.output
+
+
+def test_discover_source_zhihu_runs_formal_producer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    calls: dict[str, object] = {}
+
+    def run_zhihu_discovery(*, limit: int) -> None:
+        calls["limit"] = limit
+
+    monkeypatch.setattr(cli_module, "_run_zhihu_discovery", run_zhihu_discovery)
+
+    result = runner.invoke(app, ["discover", "--source", "zhihu", "--limit", "11"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == {"limit": 11}
+    assert "discover-zhihu" not in result.output
+
+
 def test_fetch_douyin_does_not_rebuild_profile_cli_side(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5617,6 +5968,36 @@ def _guided_init_pipeline_doubles(monkeypatch) -> dict[str, Any]:
     monkeypatch.setattr(
         cli_module, "_collect_yt_bootstrap_events", lambda task_id, **kwargs: ([], {}, "skipped")
     )
+    monkeypatch.setattr(
+        cli_module, "_enqueue_zhihu_bootstrap_task", lambda **kwargs: "zhihu-task-1"
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_collect_zhihu_bootstrap_events",
+        lambda task_id, **kwargs: (
+            (
+                list(state.get("zhihu_events", [])),
+                {
+                    "zhihu_read_history": 1,
+                    "zhihu_collection": 0,
+                    "zhihu_activity_like": 0,
+                    "zhihu_activity_favorite": 0,
+                },
+                "ok",
+            )
+            if task_id
+            else (
+                [],
+                {
+                    "zhihu_read_history": 0,
+                    "zhihu_collection": 0,
+                    "zhihu_activity_like": 0,
+                    "zhihu_activity_favorite": 0,
+                },
+                "skipped",
+            )
+        ),
+    )
     monkeypatch.setattr(cli_module, "_maybe_update_init_source_shares", lambda counts: None)
     monkeypatch.setattr(cli_module, "_build_draft_profile_for_discover", lambda memory: object())
 
@@ -5686,6 +6067,53 @@ def test_run_guided_init_without_bilibili_builds_profile_from_xhs(monkeypatch) -
     assert state["propagated"] == []
 
 
+def test_run_guided_init_without_bilibili_builds_profile_from_zhihu(monkeypatch) -> None:
+    """Zhihu bootstrap signals should participate in first-profile init just
+    like the other plugin-backed sources."""
+    import asyncio
+
+    state = _guided_init_pipeline_doubles(monkeypatch)
+    state["zhihu_events"] = [
+        {
+            "event_type": "favorite",
+            "title": "LLM Agent 工程经验",
+            "url": "https://www.zhihu.com/question/1/answer/2",
+            "context": "知乎收藏夹：LLM Agent 工程经验 作者：知乎作者",
+            "metadata": {
+                "source_platform": "zhihu",
+                "author": "知乎作者",
+                "import_source": "zhihu_bootstrap_collection",
+            },
+        }
+    ]
+
+    result = asyncio.run(
+        cli_module.run_guided_init(
+            client=None,
+            memory=state["memory"],
+            soul_engine=state["soul"],
+            favorite_limit=0,
+            follow_limit=0,
+            include_bili=False,
+            include_xhs=False,
+            include_dy=False,
+            include_yt=False,
+            include_zhihu=True,
+            target_pool_count=10,
+            discover_backfill=state["backfill"],
+        )
+    )
+
+    assert result.history == []
+    assert result.bilibili_event_count == 0
+    assert result.zhihu_status == "ok"
+    assert result.zhihu_scope_counts["zhihu_read_history"] == 1
+    assert state["analyzed"] == state["zhihu_events"]
+    assert state["profile_history"]
+    assert state["profile_history"][0]["source_platform"] == "zhihu"
+    assert state["propagated"] == state["zhihu_events"]
+
+
 def test_run_guided_init_all_sources_empty_raises_empty_signals(monkeypatch) -> None:
     import asyncio
 
@@ -5703,6 +6131,7 @@ def test_run_guided_init_all_sources_empty_raises_empty_signals(monkeypatch) -> 
                 include_xhs=False,
                 include_dy=False,
                 include_yt=False,
+                include_zhihu=False,
                 target_pool_count=10,
                 discover_backfill=state["backfill"],
             )

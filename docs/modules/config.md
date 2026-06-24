@@ -407,6 +407,22 @@ X (Twitter) discovery 配置。X 是第六个内容源，发现走**服务端 co
 
 X 源健康状态（`ok` / `missing_cookie` / `expired_cookie` / `rate_limited` / `blocked`）由 `storage/x_health.py` 持久化，按 401 / 403 / 429 分别退避，连续 For-You 失败会自动暂停 For-You 拉取，状态经 `GET /api/sources/x/status` 暴露到插件 / 桌面 Web 设置页。账号订阅用 `x_creator_subscriptions` 表持久化，经 `GET/POST/DELETE /api/sources/x/creators` 管理。
 
+### `[sources.zhihu]`
+
+知乎 discovery 配置。知乎是浏览器插件登录态源：后端入队 `zhihu_tasks`，插件在已登录 `zhihu.com` 标签页中执行 `search` / `hot` / `feed` / `creator` / `related` 任务并把 `zhihu_*` 候选回写，后端再转换为 `source_platform="zhihu"` 的 `DiscoveredContent` 写入统一待评估候选池。`fetch-zhihu` 的事件 smoke 也复用同一张 `zhihu_tasks` 表，但任务类型是 `bootstrap_events`，命令本身只打印计数、不写 memory；guided init 里选择知乎时会显式收集同一类 `bootstrap_events` 结果，把浏览 / 收藏 / 点赞 / 动态收藏转换为首轮画像信号，并写回 `enabled=true`。
+
+| 键 | 类型 | 默认值 | 说明 |
+|----|------|--------|------|
+| `enabled` | bool | `false` | 是否让知乎参与候选池配比和后台 discovery。默认关闭，必须显式 opt-in；关闭后 `ZhihuDiscoveryProducer` 不入队任务，`pool_source_shares.zhihu` 配额从有效配比中剔除 |
+| `source_modes` | list[str] | `["search", "hot", "feed", "creator", "related"]` | 后台和 `openbiliclaw discover --source zhihu` 允许调度的知乎 discovery 分支。插件 side panel 与桌面 Web 配置页都提供五个显式勾选项。`search` 使用统一关键词 planner；`hot` 拉热榜；`feed` 拉首页推荐；`creator` 优先用最近任务结果里的作者主页作种子，没有历史种子时使用本轮 search / hot / feed 返回的作者页；`related` 优先用最近知乎候选 URL，没有历史种子时使用本轮已返回内容 URL 作相关扩展种子 |
+| `daily_search_budget` | int | `0` | 知乎搜索 discovery 每日任务预算；`0` 表示不设每日上限，本轮关键词数由统一关键词 planner / fallback 画像兴趣和平台缺口决定 |
+| `daily_hot_budget` | int | `0` | 知乎热榜 discovery 每日任务预算；`0` 表示不设每日上限 |
+| `daily_feed_budget` | int | `0` | 知乎首页推荐 discovery 每日任务预算；`0` 表示不设每日上限 |
+| `daily_creator_budget` | int | `0` | 知乎作者 discovery 每日任务预算；`0` 表示不设每日上限 |
+| `daily_related_budget` | int | `0` | 知乎相关扩展 discovery 每日任务预算；`0` 表示不设每日上限 |
+| `request_interval_seconds` | int | `3` | 后端等待任务时的轮询间隔 / 插件搜索节奏提示；真实平台请求仍发生在用户已登录浏览器内 |
+| `min_interval_minutes` | int | `60` | `ZhihuDiscoveryProducer` 两次执行之间的最小间隔；`0` 表示每个 refresh tick 都允许检查执行 |
+
 ### `[scheduler]`
 
 | 键 | 类型 | 默认值 | 说明 |
@@ -450,19 +466,20 @@ X 源健康状态（`ok` / `missing_cookie` / `expired_cookie` / `rate_limited` 
 
 ### `[scheduler.pool_source_shares]`
 
-候选池按平台族做保底配比，默认保存的 share 仍是 `bilibili:xiaohongshu:douyin:youtube:twitter = 8:1:1:1:1`。关闭的平台会保留配置值但在运行时从有效配比中剔除，剩余平台重新归一化吃满 `pool_target_count`；默认安装里小红书 / 抖音 / YouTube / X 都关闭，所以默认有效配比只有 Bilibili。
+候选池按平台族做保底配比，默认保存的 share 是 `bilibili:xiaohongshu:douyin:youtube:twitter:zhihu = 5:1:1:1:1:1`。旧配置文件若已有本段但缺少后续新增的平台 key，加载时会自动补齐默认 share（例如 `zhihu = 1`）。关闭的平台会保留配置值但在运行时从有效配比中剔除，剩余平台重新归一化吃满 `pool_target_count`；默认安装里小红书 / 抖音 / YouTube / X / 知乎都关闭，所以默认有效配比只有 Bilibili。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `bilibili` | int | `8` | B 站平台族占比；`search` / `related_chain` / `trending` / `explore` 四个策略统一计入该族 |
+| `bilibili` | int | `5` | B 站平台族占比；`search` / `related_chain` / `trending` / `explore` 四个策略统一计入该族 |
 | `xiaohongshu` | int | `1` | 小红书平台族占比；`xhs-extension-*` 原始来源统一计入该族 |
 | `douyin` | int | `1` | 抖音平台族占比；`dy-plugin-search` / `dy-plugin-hot-related` / `dy-plugin-feed` 等统一计入该族 |
 | `youtube` | int | `1` | YouTube 平台族占比；`yt_search` / `yt_trending` / `yt_channel` 统一计入该族 |
 | `twitter` | int | `1` | X (Twitter) 平台族占比；`search` / `feed`（For-You）/ `creator`（账号订阅）三个策略统一计入该族 |
+| `zhihu` | int | `1` | 知乎平台族占比；插件 `zhihu-search` / `zhihu-hot` / `zhihu-feed` / `zhihu-creator` / `zhihu-related` 候选统一计入该族 |
 
-运行时会拆分两套 quota：前端可换来源目标用于补货和 `reactivate_under_quota_pool_sources()` 的缺口判断；raw ceiling 来源目标用于 `trim_pool_source_overflow()` / `trim_pool_to_target_count()` 的硬成本边界。小平台低于可换目标时，会优先保护 / 复活它们的候选，但不会超过 raw headroom；任一平台族 raw material 高于 raw ceiling 配额时，才会先压回配额内。B 站低于可换目标且 `[sources.bilibili].enabled=true` 时，仍由四个 B 站 discovery 策略并行补货；抖音低于目标且 `[sources.douyin].enabled=true` 时，后台 `DouyinDiscoveryProducer` 会通过 `DouyinDiscoveryService(cache=True)` 触发 search / hot / feed 补池；YouTube 低于目标且 `[sources.youtube].enabled=true` 时，后台 `YoutubeDiscoveryProducer` 会在独立 loop 中触发 `yt_search` / `yt_trending` / `yt_channel`，主 refresh replenishment plan 不再 inline 调度 YouTube；X 低于目标且 `[sources.twitter].enabled=true` 时，后台 `XDiscoveryProducer` 会在独立 loop 中按预算和源健康触发 `search` / `feed` / `creator` 三个策略补池。
+运行时会拆分两套 quota：前端可换来源目标用于补货和 `reactivate_under_quota_pool_sources()` 的缺口判断；raw ceiling 来源目标用于 `trim_pool_source_overflow()` / `trim_pool_to_target_count()` 的硬成本边界。小平台低于可换目标时，会优先保护 / 复活它们的候选，但不会超过 raw headroom；任一平台族 raw material 高于 raw ceiling 配额时，才会先压回配额内。B 站低于可换目标且 `[sources.bilibili].enabled=true` 时，仍由四个 B 站 discovery 策略并行补货；抖音低于目标且 `[sources.douyin].enabled=true` 时，后台 `DouyinDiscoveryProducer` 会通过 `DouyinDiscoveryService(cache=True)` 触发 search / hot / feed 补池；YouTube 低于目标且 `[sources.youtube].enabled=true` 时，后台 `YoutubeDiscoveryProducer` 会在独立 loop 中触发 `yt_search` / `yt_trending` / `yt_channel`，主 refresh replenishment plan 不再 inline 调度 YouTube；X 低于目标且 `[sources.twitter].enabled=true` 时，后台 `XDiscoveryProducer` 会在独立 loop 中按预算和源健康触发 `search` / `feed` / `creator` 三个策略补池；知乎低于目标且 `[sources.zhihu].enabled=true` 时，后台 `ZhihuDiscoveryProducer` 会通过浏览器插件按 `source_modes` 触发 search / hot / feed / creator / related 补池。
 
-`openbiliclaw init` 会根据用户是否接入小红书 / 抖音 / YouTube / X 写回对应 `enabled`；Bilibili 默认启用，也可在插件设置页或 `config.toml` 里手动关闭。交互式初始化在采集完各平台事件后，会按事件量给出一组推荐比例，用户可确认使用或手动输入。插件设置页也可开关五个平台、编辑五个平台占比，并通过 `/api/config/source-share-suggestion` 按已有事件重新生成建议值；GET 使用已保存配置，POST 可接收设置页当前尚未保存的 `enabled_sources` / `configured_shares`。
+`openbiliclaw init` 会根据用户是否接入小红书 / 抖音 / YouTube / X / 知乎写回对应 `enabled`。其中知乎在 `fetch-zhihu` 命令下仍只是事件爬取 smoke；在 guided init 勾选知乎或传 `--yes-zhihu` 时，`bootstrap_events` 会作为首版画像信号参与 `analyze_events()` / `build_initial_profile()`。Bilibili 默认启用，也可在插件设置页或 `config.toml` 里手动关闭。交互式初始化在采集完各平台事件后，会按事件量给出一组推荐比例，用户可确认使用或手动输入。插件设置页也可开关六个平台、编辑六个平台占比，并通过 `/api/config/source-share-suggestion` 按已有事件重新生成建议值；GET 使用已保存配置，POST 可接收设置页当前尚未保存的 `enabled_sources` / `configured_shares`。
 
 ### `[discovery]`
 
@@ -536,7 +553,7 @@ X 源健康状态（`ok` / `missing_cookie` / `expired_cookie` / `rate_limited` 
 - 基础：`language`、`data_dir`、`storage.db_path`
 - LLM：默认 provider、全局并发数、显式备选 provider、各 provider 的 key/model/base_url、DeepSeek `reasoning_effort`、OpenRouter headers、四个 per-module override
 - B 站与多源：`bilibili.browser.*`、`sources.bilibili.enabled`、`sources.browser.*`、`sources.xiaohongshu.*`、`sources.douyin.*`、`sources.youtube.*`、`sources.twitter.*`
-- 调度：`scheduler.enabled`、`pause_on_extension_disconnect`、`extension_disconnect_grace_seconds`、`pool_target_count`、`account_sync_interval_hours`、refresh / signal / trending / explore / discovery limit / proactive push / speculator idle 等 runtime 频率参数、五个平台 `pool_source_shares`、猜测兴趣参数、不喜欢领域探针参数、自动更新参数；设置页可调用 `/api/config/source-share-suggestion` 按已有事件和当前表单开关填入建议比例
+- 调度：`scheduler.enabled`、`pause_on_extension_disconnect`、`extension_disconnect_grace_seconds`、`pool_target_count`、`account_sync_interval_hours`、refresh / signal / trending / explore / discovery limit / proactive push / speculator idle 等 runtime 频率参数、六个平台 `pool_source_shares`、猜测兴趣参数、不喜欢领域探针参数、自动更新参数；设置页可调用 `/api/config/source-share-suggestion` 按已有事件和当前表单开关填入建议比例
 - 日志：控制台 / 文件级别、完整日志路径（保存时拆回 `directory` / `filename`）、轮转与非托管日志清理参数
 
 保留但不单独暴露的字段主要是目前只有一个有效值的内部兼容项，例如 `[sources.douyin].mode = "direct"`；保存时插件会继续按当前支持值写回，不会删除其他高级字段。

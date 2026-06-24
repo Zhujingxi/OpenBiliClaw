@@ -80,12 +80,13 @@
       { key: "xiaohongshu", label: "小红书" },
       { key: "douyin", label: "抖音" },
       { key: "youtube", label: "YouTube" },
-      { key: "twitter", label: "X (Twitter)" }
+      { key: "twitter", label: "X (Twitter)" },
+      { key: "zhihu", label: "知乎" }
     ];
     const sourceFilterOrder = sourceFilterDefinitions.map((source) => source.label);
-    const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", twitter: "X (Twitter)", x: "X (Twitter)" };
-    const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter" };
-    const textCardContentTypes = new Set(["tweet", "thread"]);
+    const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", twitter: "X (Twitter)", x: "X (Twitter)", zhihu: "知乎" };
+    const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter", zh: "zhihu", zhihu: "zhihu" };
+    const textCardContentTypes = new Set(["tweet", "thread", "answer", "article", "question"]);
     // v0.3.118+: bilibili is selectable like every other source — default
     // checked (recommended) but no longer forced. At least one source must
     // stay checked to start.
@@ -94,7 +95,8 @@
       { key: "xiaohongshu", label: "小红书" },
       { key: "douyin", label: "抖音" },
       { key: "youtube", label: "YouTube" },
-      { key: "twitter", label: "X" }
+      { key: "twitter", label: "X" },
+      { key: "zhihu", label: "知乎" }
     ];
     const INIT_SOURCE_LOGIN_HINT = "勾选要纳入初始化的平台（至少一个）。使用某个平台前，请先在当前浏览器登录该平台账号；勾选会同时开启该来源。";
     const INIT_REASON_TEXT = {
@@ -605,6 +607,7 @@
         if (url.includes("douyin.com")) return "douyin";
         if (url.includes("youtube.com") || url.includes("youtu.be")) return "youtube";
         if (urlHostMatches(url, ["x.com", "twitter.com"])) return "twitter";
+        if (urlHostMatches(url, ["zhihu.com", "zhuanlan.zhihu.com"])) return "zhihu";
         return "web";
       }
       if (String(item?.bvid ?? "").trim()) return "bilibili";
@@ -3395,6 +3398,34 @@
       return Number.isFinite(value) ? value : fallback;
     }
 
+    const ZHIHU_SOURCE_MODE_FIELDS = [
+      ["search", "zhihuModeSearch"],
+      ["hot", "zhihuModeHot"],
+      ["feed", "zhihuModeFeed"],
+      ["creator", "zhihuModeCreator"],
+      ["related", "zhihuModeRelated"],
+    ];
+
+    function setZhihuSourceModes(rawModes) {
+      const fallbackModes = ZHIHU_SOURCE_MODE_FIELDS.map(([mode]) => mode);
+      const selected = new Set(
+        (Array.isArray(rawModes) && rawModes.length > 0 ? rawModes : fallbackModes)
+          .map((mode) => String(mode).trim())
+          .filter(Boolean),
+      );
+      for (const [mode, id] of ZHIHU_SOURCE_MODE_FIELDS) {
+        const el = document.getElementById(id);
+        if (el) el.checked = selected.has(mode);
+      }
+    }
+
+    function collectZhihuSourceModes() {
+      const selected = ZHIHU_SOURCE_MODE_FIELDS
+        .filter(([, id]) => document.getElementById(id)?.checked === true)
+        .map(([mode]) => mode);
+      return selected.length > 0 ? selected : ["search"];
+    }
+
     function joinPath(directory, filename) {
       const dir = String(directory || "").trim();
       const name = String(filename || "").trim();
@@ -3434,7 +3465,7 @@
       partial: "#e0a800", stale: "#e0a800",
       expired_cookie: "#e74c3c", blocked: "#e74c3c"
     };
-    const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter"];
+    const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu"];
 
     async function renderSourcesStatus() {
       const list = $("#sourceStatusList");
@@ -3622,6 +3653,7 @@
       setInput("shareDouyin", scheduler.pool_source_shares?.douyin);
       setInput("shareYoutube", scheduler.pool_source_shares?.youtube);
       setInput("shareTwitter", scheduler.pool_source_shares?.twitter);
+      setInput("shareZhihu", scheduler.pool_source_shares?.zhihu);
       setInput("speculationInterval", scheduler.speculation_interval_minutes);
       setInput("speculationTtl", scheduler.speculation_ttl_days);
       setInput("speculationCooldown", scheduler.speculation_cooldown_days);
@@ -3730,6 +3762,15 @@
       setInput("twitterDailyCreatorBudget", config.sources?.twitter?.daily_creator_budget);
       setInput("twitterRequestInterval", config.sources?.twitter?.request_interval_seconds);
       setInput("twitterMinInterval", config.sources?.twitter?.min_interval_minutes);
+      setSelect("zhihuEnabled", config.sources?.zhihu?.enabled === true ? "on" : "off");
+      setZhihuSourceModes(config.sources?.zhihu?.source_modes);
+      setInput("zhihuDailySearchBudget", config.sources?.zhihu?.daily_search_budget);
+      setInput("zhihuDailyHotBudget", config.sources?.zhihu?.daily_hot_budget);
+      setInput("zhihuDailyFeedBudget", config.sources?.zhihu?.daily_feed_budget);
+      setInput("zhihuDailyCreatorBudget", config.sources?.zhihu?.daily_creator_budget);
+      setInput("zhihuDailyRelatedBudget", config.sources?.zhihu?.daily_related_budget);
+      setInput("zhihuRequestInterval", config.sources?.zhihu?.request_interval_seconds);
+      setInput("zhihuMinInterval", config.sources?.zhihu?.min_interval_minutes);
       void renderSourcesStatus();
 
       setSelect("logLevel", config.logging?.level || "INFO");
@@ -4142,6 +4183,17 @@
             daily_creator_budget: getIntInput("twitterDailyCreatorBudget", 0),
             request_interval_seconds: getIntInput("twitterRequestInterval", 3),
             min_interval_minutes: getIntInput("twitterMinInterval", 60)
+          },
+          zhihu: {
+            enabled: $("#zhihuEnabled").value === "on",
+            source_modes: collectZhihuSourceModes(),
+            daily_search_budget: getIntInput("zhihuDailySearchBudget", 0),
+            daily_hot_budget: getIntInput("zhihuDailyHotBudget", 0),
+            daily_feed_budget: getIntInput("zhihuDailyFeedBudget", 0),
+            daily_creator_budget: getIntInput("zhihuDailyCreatorBudget", 0),
+            daily_related_budget: getIntInput("zhihuDailyRelatedBudget", 0),
+            request_interval_seconds: getIntInput("zhihuRequestInterval", 3),
+            min_interval_minutes: getIntInput("zhihuMinInterval", 60)
           }
         },
         scheduler: {
@@ -4160,11 +4212,12 @@
           proactive_push_interval_seconds: getIntInput("proactivePushInterval", 120),
           speculator_idle_interval_minutes: getIntInput("speculatorIdleInterval", 30),
           pool_source_shares: {
-            bilibili: getIntInput("shareBilibili", 8),
+            bilibili: getIntInput("shareBilibili", 5),
             xiaohongshu: getIntInput("shareXhs", 1),
             douyin: getIntInput("shareDouyin", 1),
             youtube: getIntInput("shareYoutube", 1),
-            twitter: getIntInput("shareTwitter", 1)
+            twitter: getIntInput("shareTwitter", 1),
+            zhihu: getIntInput("shareZhihu", 1)
           },
           speculation_interval_minutes: getIntInput("speculationInterval", 10),
           speculation_ttl_days: getIntInput("speculationTtl", 3),
@@ -4615,7 +4668,7 @@
     lanAuthControl = initLanAuthControl();
     bootAutostartControl = initBootAutostartControl();
     safeBind("#suggestSharesBtn", "click", async () => {
-      const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on", twitter: $("#twitterEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
+      const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on", twitter: $("#twitterEnabled").value === "on", zhihu: $("#zhihuEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
       const shares = result?.pool_source_shares || result?.shares || result?.suggested_shares;
       if (shares) {
         setInput("shareBilibili", shares.bilibili);
@@ -4623,6 +4676,7 @@
         setInput("shareDouyin", shares.douyin);
         setInput("shareYoutube", shares.youtube);
         if (shares.twitter !== undefined) setInput("shareTwitter", shares.twitter);
+        if (shares.zhihu !== undefined) setInput("shareZhihu", shares.zhihu);
         showToast("已应用来源占比建议");
       } else {
         showToast("没有拿到占比建议");

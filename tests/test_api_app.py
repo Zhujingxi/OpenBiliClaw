@@ -1146,7 +1146,7 @@ class TestBackendAPI:
         assert response.status_code == 200
         body = response.json()
         # One status item per source, each with the unified shape.
-        for key in ("bilibili", "xiaohongshu", "douyin", "youtube", "twitter"):
+        for key in ("bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu"):
             assert key in body, f"{key} missing from sources status"
             item = body[key]
             assert set(item) >= {"enabled", "state", "detail", "logged_in"}
@@ -1155,6 +1155,7 @@ class TestBackendAPI:
         # YouTube needs no login -> always no_auth.
         assert body["youtube"]["state"] == "no_auth"
         assert body["youtube"]["logged_in"] is True
+        assert body["zhihu"]["state"] in {"unverified", "ready", "missing"}
 
     def test_sources_status_xhs_old_tokens_report_stale_not_ready(self, tmp_path: Path) -> None:
         """小红书 token rows outside the freshness window degrade to ``stale``.
@@ -1228,6 +1229,83 @@ class TestBackendAPI:
 
         item = client.get("/api/sources/status").json()["xiaohongshu"]
         assert item["state"] == "ready"
+
+    def test_sources_status_zhihu_login_required_reports_missing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.sources.zhihu_tasks import ZhihuTaskQueue
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config()
+        cfg.sources.zhihu.enabled = True
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        queue = ZhihuTaskQueue(db)
+        task_id = queue.enqueue_with_id("bootstrap_events", {"scopes": ["zhihu_read_history"]})
+        assert task_id is not None
+        queue.fail(
+            task_id,
+            error="zhihu_login_required",
+            debug={"current_url": "https://www.zhihu.com/signin"},
+        )
+
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/sources/status").json()["zhihu"]
+        assert item["enabled"] is True
+        assert item["state"] == "missing"
+        assert item["logged_in"] is False
+        assert "登录知乎" in item["detail"]
+
+    def test_sources_status_zhihu_recent_completed_reports_ready(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.sources.zhihu_tasks import ZhihuTaskQueue
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config()
+        cfg.sources.zhihu.enabled = True
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        queue = ZhihuTaskQueue(db)
+        task_id = queue.enqueue_with_id("bootstrap_events", {"scopes": ["zhihu_read_history"]})
+        assert task_id is not None
+        queue.merge_result(
+            task_id,
+            items=[
+                {
+                    "scope": "zhihu_read_history",
+                    "title": "知乎阅读",
+                    "url": "https://www.zhihu.com/question/1/answer/2",
+                }
+            ],
+            scope_counts={"zhihu_read_history": 1},
+            complete=True,
+        )
+
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/sources/status").json()["zhihu"]
+        assert item["enabled"] is True
+        assert item["state"] == "ready"
+        assert item["logged_in"] is True
+        assert "最近任务完成" in item["detail"]
 
     def test_sources_status_bilibili_incomplete_cookie_reports_partial(
         self,
@@ -7898,6 +7976,8 @@ class TestEmbeddingAndCompatProviderE2E:
             "xiaohongshu": 2,
             "douyin": 2,
             "youtube": 1,
+            "twitter": 1,
+            "zhihu": 1,
         }
         assert cfg.scheduler.refresh_check_interval_seconds == 75
         assert cfg.scheduler.signal_event_threshold == 9
@@ -8031,6 +8111,8 @@ class TestEmbeddingAndCompatProviderE2E:
                 "xiaohongshu": 100,
                 "douyin": 9,
                 "youtube": 400,
+                "twitter": 0,
+                "zhihu": 0,
             },
             "enabled_sources": {
                 "bilibili": True,
@@ -8038,6 +8120,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "douyin": True,
                 "youtube": True,
                 "twitter": False,
+                "zhihu": False,
             },
             "suggested_shares": {
                 "bilibili": 8,
@@ -8109,12 +8192,16 @@ class TestEmbeddingAndCompatProviderE2E:
                 "xiaohongshu": 100,
                 "douyin": 9,
                 "youtube": 400,
+                "twitter": 0,
+                "zhihu": 0,
             },
             "enabled_sources": {
                 "bilibili": True,
                 "xiaohongshu": False,
                 "douyin": False,
                 "youtube": True,
+                "twitter": False,
+                "zhihu": False,
             },
             "suggested_shares": {
                 "bilibili": 6,
@@ -8743,11 +8830,13 @@ class TestGuidedInitEndpoints:
 
         captured = self._capture_run_guided_init(monkeypatch)
         prereqs = _FakeInitPrereqs(
-            bili="ok", chat=True, platforms=["bilibili", "xiaohongshu", "douyin", "youtube"]
+            bili="ok",
+            chat=True,
+            platforms=["bilibili", "xiaohongshu", "douyin", "youtube", "zhihu"],
         )
         app, _ = self._make_app(tmp_path, prereqs=prereqs)
         with TestClient(app) as client:
-            resp = client.post("/api/init", json={"sources": ["bilibili", "xiaohongshu"]})
+            resp = client.post("/api/init", json={"sources": ["bilibili", "xiaohongshu", "zhihu"]})
             assert resp.status_code == 202
             self._drive_until(client, captured)
         # Only the selected sources are included, even though all 4 are
@@ -8756,6 +8845,7 @@ class TestGuidedInitEndpoints:
         assert captured["include_xhs"] is True
         assert captured["include_dy"] is False
         assert captured["include_yt"] is False
+        assert captured["include_zhihu"] is True
 
     def test_init_without_sources_uses_all_enabled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -8764,7 +8854,7 @@ class TestGuidedInitEndpoints:
 
         captured = self._capture_run_guided_init(monkeypatch)
         prereqs = _FakeInitPrereqs(
-            bili="ok", chat=True, platforms=["bilibili", "xiaohongshu", "douyin"]
+            bili="ok", chat=True, platforms=["bilibili", "xiaohongshu", "douyin", "zhihu"]
         )
         app, _ = self._make_app(tmp_path, prereqs=prereqs)
         with TestClient(app) as client:
@@ -8776,6 +8866,7 @@ class TestGuidedInitEndpoints:
         assert captured["include_xhs"] is True
         assert captured["include_dy"] is True
         assert captured["include_yt"] is False  # youtube not enabled in config
+        assert captured["include_zhihu"] is True
 
     def test_init_keeps_selected_source_not_enabled_in_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -9047,9 +9138,7 @@ class TestGuidedInitEndpoints:
         assert body["can_start"] is False
         assert body["reason"] == "llm_not_ready"
 
-    def test_init_status_configured_embedding_hard_gates_can_start(
-        self, tmp_path: Path
-    ) -> None:
+    def test_init_status_configured_embedding_hard_gates_can_start(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient
 
         prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["xiaohongshu"])

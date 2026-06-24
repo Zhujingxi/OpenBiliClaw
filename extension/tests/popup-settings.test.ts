@@ -231,6 +231,25 @@ test("settings page round-trips YouTube source budgets", () => {
   }
 });
 
+test("settings page round-trips Zhihu discovery source modes", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  for (const id of [
+    "cfgZhihuModeSearch",
+    "cfgZhihuModeHot",
+    "cfgZhihuModeFeed",
+    "cfgZhihuModeCreator",
+    "cfgZhihuModeRelated",
+  ]) {
+    assert.match(popupHtml, new RegExp(`id="${id}"`), `${id} should exist`);
+    assert.match(popupJs, new RegExp(`"${id}"`), `${id} should be wired in popup.js`);
+  }
+
+  assert.match(popupJs, /setZhihuSourceModes\(cfg\.sources\?\.zhihu\?\.source_modes\)/);
+  assert.match(popupJs, /source_modes: collectZhihuSourceModes\(\)/);
+});
+
 test("settings page round-trips multimodal discovery evaluation controls", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");

@@ -29,7 +29,7 @@
 | 自动格式迁移 | ✅ | `from_legacy()` 支持将 v1 flat SoulProfile 自动迁移到 v2 OnionProfile，SoulEngine 透明处理版本升级 |
 | SoulEngine.analyze_events() | ✅ | 事件 → PreferenceAnalyzer → 偏好层更新 |
 | SoulEngine module overrides | ✅ | 构造时可接收 `module_overrides` 并注入内部 `LLMService`，确保 preference / awareness / insight / profile_builder / speculator / dialogue_insight 都遵循 `[llm.soul]` 路由 |
-| PreferenceAnalyzer | ✅ | LLM structured extraction + 合并 + 衰减；偏好分析 system prompt 注入 `CATEGORY_VOCAB`（静态常量、缓存安全），代码侧在 `(name, category)` 合并键生成前执行 `resolve_category()`：词表外 → embedding 最近邻（≥0.55）→「其他」，任何路径都不会把词表外一级分类写入 preference 层；v0.3.x `satisfaction_filter_enabled=True` 默认开启，构 prompt 前会丢掉 `quick_exit` 等被动 negative 事件，保留 positive + neutral + unknown / NULL；显式 `dislike` / `thumbs_down` 负反馈会保留为 disliked_topics / 风格避让证据；偏好分析调用前有 prompt 预算保护，超长 chunk 会递归二分，单条超长事件会 compact，`n_keep >= n_ctx` / `context length` 等上下文错误会用更小 chunk 重试 |
+| PreferenceAnalyzer | ✅ | LLM structured extraction + 合并 + 衰减；偏好分析 system prompt 注入 `CATEGORY_VOCAB`（静态常量、缓存安全），代码侧在 `(name, category)` 合并键生成前执行 `resolve_category()`：词表外 → embedding 最近邻（≥0.55）→「其他」，任何路径都不会把词表外一级分类写入 preference 层；v0.3.x `satisfaction_filter_enabled=True` 默认开启，构 prompt 前会丢掉 `quick_exit` 等被动 negative 事件，保留 positive + neutral + unknown / NULL；显式 `dislike` / `thumbs_down` 负反馈会保留为 disliked_topics / 风格避让证据；偏好分析调用前有 prompt 预算保护，超长 chunk 会递归二分，单条超长事件会 compact，`n_keep >= n_ctx` / `context length` 等上下文错误会用更小 chunk 重试；chunked 分析遇到 LLM 拒答 / 非 JSON 时会对单条事件追加 title / URL / source-only 安全压缩重试，避免长网页 context 触发安全拒答后直接丢失该条画像信号 |
 | filter_events_by_satisfaction | ✅ | `soul/event_filters.py` 中的纯函数，按 `inferred_satisfaction` 过滤事件，`"unknown"` 同时匹配缺失 / `None`，使 pre-migration 老行可被显式 opt-in 保留 |
 | recent_negative_exemplars | ✅ | `soul/negative_exemplars.py` 中的纯函数，从事件层拉最近 negative 标题做 recency 加权（半衰期默认 14d）+ 前缀去重 + 80 字截断，最多返回 16 条 `{title, reason, age_days}`。下游消费者是 `discovery/engine.ContentDiscoveryEngine._evaluate_batch` 和 `recommendation/engine.RecommendationEngine._classify_batch`，二者都会把列表作为 `negative_examples` 透传给 batch evaluator prompt——这是 [inferred_satisfaction 信号](#) 的第二个消费方（第一个是上面的 `filter_events_by_satisfaction`） |
 | SocraticDialogue.respond() | ✅ | 通过 LLMService 调用 LLM，自动注入画像 |
@@ -57,7 +57,7 @@
 | 账户同步事件分析 | ✅ | 后台低频同步导入的 `view/favorite/follow` 事件会复用 `analyze_events()` 进入偏好与画像链 |
 | 小红书初始化画像信号 | ✅ | `openbiliclaw init` 会把插件解析到的小红书 `saved/liked/xhs_history` 转成 `favorite/like/view` 事件，并与 B 站历史、收藏、关注一起进入 `analyze_events()` 和初始画像 history |
 | 抖音初始化画像信号 | ✅ | `openbiliclaw init --yes-douyin` 会把插件解析到的抖音 `dy_post/dy_collect/dy_like/dy_follow` 转成 `view/favorite/like/follow` 事件，并进入偏好分析和初始画像 history |
-| 小红书 / 抖音增量画像事件 | ✅ | profile 已存在时，`/api/sources/xhs/task-result` 和 `/api/sources/dy/task-result` 的 bootstrap 新增事件会在落 memory 后进入 `ProfileUpdatePipeline`，参与后续分层画像更新 |
+| 小红书 / 抖音 / YouTube / 知乎增量画像事件 | ✅ | profile 已存在时，带画像更新语义的 bootstrap task-result 新增事件会在落 memory 后进入 `ProfileUpdatePipeline`，参与后续分层画像更新；知乎任务需在 payload 中显式设置 `profile_update=true`，普通 `fetch-zhihu` smoke 不触发 |
 | ToneProfile | ✅ | 从 `OnionProfile`、偏好摘要和近期反馈推断 `density/warmth/playfulness/directness`，统一驱动推荐、画像和聊天语气 |
 | Cognition updates | ✅ | 在反馈刷新和聊天学习后生成 `interest_added / dislike_added / profile_shift` 结构化 cognition card，包含 `summary / context_line / source_label / expand_hint / impact / reasoning / evidence / source / created_at`，供插件提醒与画像页展开展示；即时反馈和聊天会尽量指出具体内容或本轮聊天，聚合判断则保守回退到”基于最近几条相关内容” |
 | Layered profile cognition | ✅ | `OnionProfile` 新增 MBTI / Values / Interest 等分层，画像生成会同时消费 `history + preference + awareness + insights`，避免把兴趣 topic 堆成整段画像 |
@@ -436,7 +436,7 @@ active 池会做两层多样性保护：词面 / specifics 的 novelty guard 阻
 
 这意味着行为事件对画像的第一影响，通常不是直接改 `personality_portrait`，而是先慢慢把偏好层往一个更稳定的方向推。
 
-小红书 / 抖音插件任务还有一条增量路径：当 `soul_engine.is_profile_ready()` 已经为真时，bootstrap task-result 新增的事件会先写入 memory，再通过 `signals_from_events()` 转成 `ProfileSignal` 进入 `ProfileUpdatePipeline.ingest_batch()`。首次 init 期间不会走这条增量更新，避免同一批初始化事件同时被 `analyze_events()` 和 pipeline 重复学习。
+小红书 / 抖音 / YouTube / 知乎插件任务还有一条增量路径：当 `soul_engine.is_profile_ready()` 已经为真时，bootstrap task-result 新增的事件会先写入 memory，再通过 `signals_from_events()` 转成 `ProfileSignal` 进入 `ProfileUpdatePipeline.ingest_batch()`。首次 init 期间不会走这条增量更新，避免同一批初始化事件同时被 `analyze_events()` 和 pipeline 重复学习。知乎为了保留 `fetch-zhihu` 的 smoke 语义，只有任务 payload 显式带 `profile_update=true` 时才走这条 API 自动传播路径；CLI 手动回填使用 `fetch-zhihu --write-memory` / `--rebuild-profile`。
 
 ### 3. 推荐反馈路径：分成“即时记住”和“批量学习”两档
 
