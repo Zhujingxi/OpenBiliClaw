@@ -302,6 +302,20 @@ class PreferenceAnalyzer:
                 compact["metadata"] = compact_metadata
         return compact
 
+    def _safe_compact_event_for_invalid_json_retry(
+        self,
+        event: dict[str, object],
+    ) -> dict[str, object]:
+        """Build a lower-risk prompt event for retrying model refusals.
+
+        Long natural-language page context can trigger provider safety refusals
+        even though preference extraction is benign. A title/URL/source retry
+        keeps useful preference signal while removing the likely offending body.
+        """
+        compact = self._compact_event_for_prompt(event)
+        compact.pop("context", None)
+        return compact
+
     @staticmethod
     def _truncate_for_prompt(value: object, max_chars: int) -> str:
         if max_chars <= 0:
@@ -354,8 +368,40 @@ class PreferenceAnalyzer:
                 )
             except (LLMProviderError, LLMServiceError) as exc:
                 raise PreferenceAnalysisError(str(exc)) from exc
-            raw = self._parse_response(response.content)
+            raw = self._parse_response(response.content, log_error=False)
             return raw, await self._normalize_and_resolve(raw)
+
+        async def _retry_single_event_without_context(
+            event: dict[str, object],
+        ) -> tuple[dict[str, object], dict[str, object]] | None:
+            safe_event = self._safe_compact_event_for_invalid_json_retry(event)
+            if not safe_event:
+                return None
+            safe_messages = build_preference_analysis_prompt(
+                events=[safe_event],
+                existing_preference={},
+            )
+            if not self._prompt_fits_budget(safe_messages):
+                logger.warning(
+                    "preference event skipped because safe compact prompt still exceeds "
+                    "budget: title=%r prompt_chars=%d budget=%d",
+                    str(event.get("title", "")),
+                    self._prompt_char_count(safe_messages),
+                    self.max_prompt_chars,
+                )
+                return None
+            try:
+                return await _run_chunk_once([safe_event])
+            except PreferenceAnalysisError as retry_exc:
+                if retry_exc.__cause__ is not None and not self._is_context_overflow_error(
+                    retry_exc
+                ):
+                    raise
+                logger.warning(
+                    "preference chunk skipped after safe compact retry failed: title=%r",
+                    str(event.get("title", "")),
+                )
+                return None
 
         async def _split_or_compact_chunk(
             chunk: list[dict[str, object]],
@@ -406,9 +452,14 @@ class PreferenceAnalyzer:
                     raise
                 # Invalid JSON / model refusal is often content-local: split
                 # the batch to isolate the offending event, then skip only
-                # that final single event if it still refuses.
+                # that final single event if a title/source-only retry still
+                # refuses.
                 if len(chunk) <= 1:
                     event = chunk[0] if chunk else {}
+                    if isinstance(event, dict):
+                        retry_outcome = await _retry_single_event_without_context(event)
+                        if retry_outcome is not None:
+                            return [retry_outcome]
                     logger.warning(
                         "preference chunk skipped after invalid LLM response: title=%r",
                         str(event.get("title", "")) if isinstance(event, dict) else "",
@@ -662,14 +713,15 @@ class PreferenceAnalyzer:
             decayed.append(item)
         return decayed
 
-    def _parse_response(self, content: str) -> dict[str, object]:
+    def _parse_response(self, content: str, *, log_error: bool = True) -> dict[str, object]:
         parsed = parse_llm_json_tolerant(content)
         if parsed is None:
             exc = ValueError("unrecoverable JSON")
-            logger.error(
-                "%s",
-                format_parse_failure(content, exc, label="preference analysis"),
-            )
+            if log_error:
+                logger.error(
+                    "%s",
+                    format_parse_failure(content, exc, label="preference analysis"),
+                )
             raise PreferenceAnalysisError(
                 f"LLM returned invalid JSON for preference analysis "
                 f"(raw_len={len(content.strip())})"

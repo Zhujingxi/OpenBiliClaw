@@ -5,7 +5,10 @@
 
 import { startCollector } from "./kernel.js";
 import { installZhihuMessageListener } from "./zhihu/task-executor.js";
+import { isZhihuTaskTabLocation } from "./zhihu/task-mode.js";
 import { zhihuAdapter } from "../shared/platforms/zhihu.js";
 
-startCollector(zhihuAdapter);
+if (!isZhihuTaskTabLocation()) {
+  startCollector(zhihuAdapter);
+}
 installZhihuMessageListener();

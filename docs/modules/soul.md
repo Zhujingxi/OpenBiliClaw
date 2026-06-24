@@ -29,7 +29,7 @@
 | 自动格式迁移 | ✅ | `from_legacy()` 支持将 v1 flat SoulProfile 自动迁移到 v2 OnionProfile，SoulEngine 透明处理版本升级 |
 | SoulEngine.analyze_events() | ✅ | 事件 → PreferenceAnalyzer → 偏好层更新 |
 | SoulEngine module overrides | ✅ | 构造时可接收 `module_overrides` 并注入内部 `LLMService`，确保 preference / awareness / insight / profile_builder / speculator / dialogue_insight 都遵循 `[llm.soul]` 路由 |
-| PreferenceAnalyzer | ✅ | LLM structured extraction + 合并 + 衰减；偏好分析 system prompt 注入 `CATEGORY_VOCAB`（静态常量、缓存安全），代码侧在 `(name, category)` 合并键生成前执行 `resolve_category()`：词表外 → embedding 最近邻（≥0.55）→「其他」，任何路径都不会把词表外一级分类写入 preference 层；v0.3.x `satisfaction_filter_enabled=True` 默认开启，构 prompt 前会丢掉 `quick_exit` 等被动 negative 事件，保留 positive + neutral + unknown / NULL；显式 `dislike` / `thumbs_down` 负反馈会保留为 disliked_topics / 风格避让证据；`metadata.signal_strength` 作为跨平台证据强度进入 prompt 和 compact prompt，但只辅助判断，不直接等同最终 `interest.weight`；偏好分析调用前有 prompt 预算保护，超长 chunk 会递归二分，单条超长事件会 compact，`n_keep >= n_ctx` / `context length` 等上下文错误会用更小 chunk 重试 |
+| PreferenceAnalyzer | ✅ | LLM structured extraction + 合并 + 衰减；偏好分析 system prompt 注入 `CATEGORY_VOCAB`（静态常量、缓存安全），代码侧在 `(name, category)` 合并键生成前执行 `resolve_category()`：词表外 → embedding 最近邻（≥0.55）→「其他」，任何路径都不会把词表外一级分类写入 preference 层；v0.3.x `satisfaction_filter_enabled=True` 默认开启，构 prompt 前会丢掉 `quick_exit` 等被动 negative 事件，保留 positive + neutral + unknown / NULL；显式 `dislike` / `thumbs_down` 负反馈会保留为 disliked_topics / 风格避让证据；偏好分析调用前有 prompt 预算保护，超长 chunk 会递归二分，单条超长事件会 compact，`n_keep >= n_ctx` / `context length` 等上下文错误会用更小 chunk 重试；chunked 分析遇到 LLM 拒答 / 非 JSON 时会对单条事件追加 title / URL / source-only 安全压缩重试，避免长网页 context 触发安全拒答后直接丢失该条画像信号 |
 | filter_events_by_satisfaction | ✅ | `soul/event_filters.py` 中的纯函数，按 `inferred_satisfaction` 过滤事件，`"unknown"` 同时匹配缺失 / `None`，使 pre-migration 老行可被显式 opt-in 保留 |
 | recent_negative_exemplars | ✅ | `soul/negative_exemplars.py` 中的纯函数，从事件层拉最近 negative 标题做 recency 加权（半衰期默认 14d）+ 前缀去重 + 80 字截断，最多返回 16 条 `{title, reason, age_days}`。下游消费者是 `discovery/engine.ContentDiscoveryEngine._evaluate_batch` 和 `recommendation/engine.RecommendationEngine._classify_batch`，二者都会把列表作为 `negative_examples` 透传给 batch evaluator prompt——这是 [inferred_satisfaction 信号](#) 的第二个消费方（第一个是上面的 `filter_events_by_satisfaction`） |
 | SocraticDialogue.respond() | ✅ | 通过 LLMService 调用 LLM，自动注入画像 |
@@ -49,7 +49,7 @@
 | SoulEngine.generate_awareness_note() | ✅ | 生成并持久化 `awareness.json` |
 | SoulEngine.generate_insight() | ✅ | 生成并持久化 `insight.json` |
 | SoulEngine.update_from_feedback() | ✅ | feedback 事件落库，并校准匹配的洞察假设——确认→`validated=True`+置信度抬到 ≥0.75；推翻→`validated=False`+压到 ≤0.35（软作废：不删除、靠 delight 置信度加权降权）。**已接线**到 `POST /api/insights/feedback`（插件 + web/桌面三端洞察卡片「准/不准」按钮驱动），返回 `{matched, validated, confidence}`；此前实现但无生产调用方。命中后经 `_sync_insight_to_soul_snapshot` **同步把校准写回 soul 层 `active_insights` 快照**（`get_profile` / profile-summary / delight 读的是该快照，不是 insight 层），否则校准要等下一次 12h 认知 sync 才对 UI / 推荐生效 |
-| SoulEngine.process_feedback_batch_if_needed() | ✅ | 达到反馈阈值后重分析偏好，并在变化明显时重建画像；若本批新增 `disliked_topics`，会按新旧差集调度 `purge_pool_for_new_dislikes` 后台清理 fresh 候选池，保持普通推荐卡片 `dislike` 学到长期避雷项后的清池行为与手动编辑 / 避雷探针一致 |
+| SoulEngine.process_feedback_batch_if_needed() | ✅ | 达到反馈阈值后重分析偏好，并在变化明显时重建画像；批处理入口带 single-flight 锁，已有任务在跑时直接返回 `feedback_batch_in_progress`，避免多个 `/api/feedback` 后台任务用同一旧游标重复分析未处理反馈；传给 LLM 前会瘦身 feedback 事件，只保留标题、上下文和偏好相关 metadata；若本批新增 `disliked_topics`，会按新旧差集调度 `purge_pool_for_new_dislikes` 后台清理 fresh 候选池，保持普通推荐卡片 `dislike` 学到长期避雷项后的清池行为与手动编辑 / 避雷探针一致 |
 | SoulEngine.record_immediate_feedback_cognition() | ✅ | 单条 `dislike/comment` 可即时写入结构化 cognition card，供插件画像页展示；评论类更新会带上对应内容标题，并以中性直接反馈记录，不预设正负向 |
 | DialogueInsightAnalyzer | ✅ | 从聊天轮次提取 `goal/value/interest/dislike/state` 候选信号 |
 | SoulEngine.learn_from_dialogue() | ✅ | 聊天落 `dialogue` 事件、累计 insight candidate；单条 `interest/value/goal/dislike` 聊天信号到中高置信度时会先写入轻量 cognition update，高置信度或重复出现达阈值后再驱动偏好/画像更新 |
@@ -57,7 +57,7 @@
 | 账户同步事件分析 | ✅ | 后台低频同步导入的 `view/favorite/follow` 事件会复用 `analyze_events()` 进入偏好与画像链 |
 | 小红书初始化画像信号 | ✅ | `openbiliclaw init` 会把插件解析到的小红书 `saved/liked/xhs_history` 转成 `favorite/like/view` 事件，并与 B 站历史、收藏、关注一起进入 `analyze_events()` 和初始画像 history |
 | 抖音初始化画像信号 | ✅ | `openbiliclaw init --yes-douyin` 会把插件解析到的抖音 `dy_post/dy_collect/dy_like/dy_follow` 转成 `view/favorite/like/follow` 事件，并进入偏好分析和初始画像 history |
-| 小红书 / 抖音增量画像事件 | ✅ | profile 已存在时，`/api/sources/xhs/task-result` 和 `/api/sources/dy/task-result` 的 bootstrap 新增事件会在落 memory 后进入 `ProfileUpdatePipeline`，参与后续分层画像更新 |
+| 小红书 / 抖音 / YouTube / 知乎增量画像事件 | ✅ | profile 已存在时，带画像更新语义的 bootstrap task-result 新增事件会在落 memory 后进入 `ProfileUpdatePipeline`，参与后续分层画像更新；知乎任务需在 payload 中显式设置 `profile_update=true`，普通 `fetch-zhihu` smoke 不触发 |
 | ToneProfile | ✅ | 从 `OnionProfile`、偏好摘要和近期反馈推断 `density/warmth/playfulness/directness`，统一驱动推荐、画像和聊天语气 |
 | Cognition updates | ✅ | 在反馈刷新和聊天学习后生成 `interest_added / dislike_added / profile_shift` 结构化 cognition card，包含 `summary / context_line / source_label / expand_hint / impact / reasoning / evidence / source / created_at`，供插件提醒与画像页展开展示；即时反馈和聊天会尽量指出具体内容或本轮聊天，聚合判断则保守回退到”基于最近几条相关内容” |
 | Layered profile cognition | ✅ | `OnionProfile` 新增 MBTI / Values / Interest 等分层，画像生成会同时消费 `history + preference + awareness + insights`，避免把兴趣 topic 堆成整段画像 |
@@ -436,7 +436,7 @@ active 池会做两层多样性保护：词面 / specifics 的 novelty guard 阻
 
 这意味着行为事件对画像的第一影响，通常不是直接改 `personality_portrait`，而是先慢慢把偏好层往一个更稳定的方向推。
 
-小红书 / 抖音插件任务还有一条增量路径：当 `soul_engine.is_profile_ready()` 已经为真时，bootstrap task-result 新增的事件会先写入 memory，再通过 `signals_from_events()` 转成 `ProfileSignal` 进入 `ProfileUpdatePipeline.ingest_batch()`。首次 init 期间不会走这条增量更新，避免同一批初始化事件同时被 `analyze_events()` 和 pipeline 重复学习。
+小红书 / 抖音 / YouTube / 知乎插件任务还有一条增量路径：当 `soul_engine.is_profile_ready()` 已经为真时，bootstrap task-result 新增的事件会先写入 memory，再通过 `signals_from_events()` 转成 `ProfileSignal` 进入 `ProfileUpdatePipeline.ingest_batch()`。首次 init 期间不会走这条增量更新，避免同一批初始化事件同时被 `analyze_events()` 和 pipeline 重复学习。知乎为了保留 `fetch-zhihu` 的 smoke 语义，只有任务 payload 显式带 `profile_update=true` 时才走这条 API 自动传播路径；CLI 手动回填使用 `fetch-zhihu --write-memory` / `--rebuild-profile`。
 
 ### 3. 推荐反馈路径：分成“即时记住”和“批量学习”两档
 
@@ -476,15 +476,19 @@ active 池会做两层多样性保护：词面 / specifics 的 novelty guard 阻
 
 真正会动到偏好层和画像的是 `process_feedback_batch_if_needed()`：
 
-1. 读取 `feedback_state.json` 中的 `last_processed_feedback_event_id`
-2. 从事件层找出这个游标之后的新 `feedback` 事件
-3. 如果新增反馈少于 `3` 条，直接返回，不做重分析
-4. 达到阈值后，调用 `PreferenceAnalyzer.analyze_events()` 用这批反馈重跑偏好提取
-5. 偏好写回 `preference.json`
-6. 再比较“这次偏好变化是否足够明显”
-7. 如果明显，才调用 `ProfileBuilder.build()` 重建画像并写回 `soul.json`
-8. 同时生成聚合层的 cognition updates
-9. 最后更新 `feedback_state.json` 的游标和处理时间
+生产 API 入口不会每条反馈都立即新起画像重分析任务；`/api/feedback` 会先交给 runtime 的 `FeedbackBatchScheduler` 做短窗口 debounce / coalesce，再进入这里的批量学习。
+
+1. 如果已有反馈批处理在跑，立即返回 `skipped=true, reason="feedback_batch_in_progress"`
+2. 读取 `feedback_state.json` 中的 `last_processed_feedback_event_id`
+3. 从事件层按 `id ASC` 找出这个游标之后的全部新 `feedback` 事件；不再用 newest-first `limit=500` 截断，避免大积压时跳过较早但未处理的 feedback
+4. 如果新增反馈少于 `3` 条，直接返回，不做重分析
+5. 达到阈值后，先把反馈事件瘦身为偏好分析需要的字段：`id/event_type/url/title/context/inferred_satisfaction/satisfaction_reason/created_at`，以及 `recommendation_id/bvid/content_id/source_platform/feedback_type/feedback_note/reaction/topic_label/signal_strength` 等白名单 metadata；插件原始字段如 `targetText`、`raw_context`、`href` 不进入 LLM prompt
+6. 调用 `PreferenceAnalyzer.analyze_events()` 用这批瘦身后的反馈重跑偏好提取
+7. 偏好写回 `preference.json`
+8. 再比较“这次偏好变化是否足够明显”
+9. 如果明显，才调用 `ProfileBuilder.build()` 重建画像并写回 `soul.json`
+10. 同时生成聚合层的 cognition updates
+11. 最后更新 `feedback_state.json` 的游标和处理时间
 
 #### 什么叫“变化明显”
 

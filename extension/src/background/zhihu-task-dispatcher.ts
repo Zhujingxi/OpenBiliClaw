@@ -2,7 +2,8 @@
  * Zhihu task dispatcher — background polling for fetch-only bootstrap_events.
  */
 
-import type { ZhihuScope, ZhihuTaskResult } from "../content/zhihu/task-executor.js";
+import type { ZhihuScope, ZhihuTaskResult, ZhihuTaskType } from "../content/zhihu/task-executor.ts";
+import { ZHIHU_TASK_TAB_URL } from "../content/zhihu/task-mode.ts";
 import { apiUrl } from "../shared/backend-endpoint.ts";
 
 const _MUTEX_STALE_MS = 6 * 60 * 1000;
@@ -45,18 +46,26 @@ const MAX_TIMEOUT_MS = 300_000;
 
 export interface ZhihuTask {
   id: string;
-  type: "bootstrap_events";
+  type: ZhihuTaskType;
   scopes?: ZhihuScope[];
   profile_slug?: string;
   max_items_per_scope?: number;
   max_collections?: number;
+  keywords?: string[];
+  max_items_per_keyword?: number;
+  source_keyword_ids?: Record<string, number>;
+  max_items?: number;
+  creator_urls?: string[];
+  max_items_per_creator?: number;
+  related_urls?: string[];
+  max_items_per_seed?: number;
 }
 
 export function isValidZhihuTask(task: unknown): task is ZhihuTask {
   if (typeof task !== "object" || task === null) return false;
   const t = task as Record<string, unknown>;
   if (typeof t.id !== "string" || !t.id) return false;
-  if (t.type !== "bootstrap_events") return false;
+  if (!["bootstrap_events", "search", "hot", "feed", "creator", "related"].includes(String(t.type))) return false;
   if (t.scopes !== undefined) {
     if (!Array.isArray(t.scopes)) return false;
     for (const scope of t.scopes) {
@@ -65,12 +74,28 @@ export function isValidZhihuTask(task: unknown): task is ZhihuTask {
       }
     }
   }
+  if (t.type === "search") {
+    if (!Array.isArray(t.keywords) || t.keywords.length === 0) return false;
+  }
+  if ((t.type === "hot" || t.type === "feed") && t.max_items !== undefined) {
+    if (!Number.isFinite(Number(t.max_items)) || Number(t.max_items) < 1) return false;
+  }
+  if (t.type === "creator") {
+    if (!Array.isArray(t.creator_urls) || t.creator_urls.length === 0) return false;
+  }
+  if (t.type === "related") {
+    if (!Array.isArray(t.related_urls) || t.related_urls.length === 0) return false;
+  }
   return true;
 }
 
 export function computeZhihuTaskTimeoutMs(task: ZhihuTask): number {
-  const scopeCount =
+  let scopeCount =
     Array.isArray(task.scopes) && task.scopes.length > 0 ? task.scopes.length : DEFAULT_SCOPES.length;
+  if (task.type === "search") scopeCount = Math.max(1, task.keywords?.length ?? 1);
+  if (task.type === "hot" || task.type === "feed") scopeCount = 1;
+  if (task.type === "creator") scopeCount = Math.max(1, task.creator_urls?.length ?? 1);
+  if (task.type === "related") scopeCount = Math.max(1, task.related_urls?.length ?? 1);
   return Math.min(Math.max(BASE_TIMEOUT_MS, BASE_TIMEOUT_MS + scopeCount * PER_SCOPE_MS), MAX_TIMEOUT_MS);
 }
 
@@ -162,10 +187,19 @@ function sendExecuteMessage(): void {
       action: "ZHIHU_BOOTSTRAP_EXECUTE",
       data: {
         task_id: currentTask.id,
+        type: currentTask.type,
         scopes: currentTask.scopes,
         profile_slug: currentTask.profile_slug,
         max_items_per_scope: currentTask.max_items_per_scope,
         max_collections: currentTask.max_collections,
+        keywords: currentTask.keywords,
+        max_items_per_keyword: currentTask.max_items_per_keyword,
+        source_keyword_ids: currentTask.source_keyword_ids,
+        max_items: currentTask.max_items,
+        creator_urls: currentTask.creator_urls,
+        max_items_per_creator: currentTask.max_items_per_creator,
+        related_urls: currentTask.related_urls,
+        max_items_per_seed: currentTask.max_items_per_seed,
       },
     })
     .catch(() => {
@@ -189,7 +223,7 @@ export async function executeTask(task: ZhihuTask): Promise<void> {
 
   let tab: chrome.tabs.Tab;
   try {
-    tab = await chrome.tabs.create({ url: "https://www.zhihu.com/", active: true });
+    tab = await chrome.tabs.create({ url: ZHIHU_TASK_TAB_URL, active: true });
   } catch {
     await postTaskResult({
       task_id: task.id,

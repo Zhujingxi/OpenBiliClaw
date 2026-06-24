@@ -122,7 +122,9 @@ from openbiliclaw.api.models import (
     XiaohongshuSourceConfigOut,
     XStatusResponse,
     YoutubeSourceConfigOut,
+    ZhihuSourceConfigOut,
 )
+from openbiliclaw.runtime.feedback_scheduler import FeedbackBatchScheduler
 from openbiliclaw.runtime.image_cache import (
     CoverFetchError,
     cleanup_image_cache,
@@ -172,6 +174,7 @@ _EMBEDDING_FAIL_TTL_SECONDS = 8.0
 _EMBEDDING_PROBE_TIMEOUT_SECONDS = 15.0
 _LAN_IP_TTL_SECONDS = 30.0
 _AUTO_REPLENISH_DEBOUNCE_SECONDS = 30.0
+_FEEDBACK_BATCH_DEBOUNCE_SECONDS = 5.0
 
 # Canonical home is openbiliclaw.sources.x_auth (mirrors douyin_auth);
 # re-exported here because callers historically imported from api.app.
@@ -189,8 +192,8 @@ SOURCE_LABELS = {
     "profile_refresh": "聚合观察",
 }
 
-_SOURCE_SHARE_ORDER = ("bilibili", "xiaohongshu", "douyin", "youtube")
-_INIT_SOURCE_ORDER = ("bilibili", "xiaohongshu", "douyin", "youtube", "twitter")
+_SOURCE_SHARE_ORDER = ("bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu")
+_INIT_SOURCE_ORDER = ("bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu")
 _PROBE_MODES = {"near", "lateral", "bridge", "wildcard"}
 _PROBE_CHALLENGE_MODES = {"lateral", "bridge", "wildcard"}
 
@@ -466,6 +469,8 @@ def _normalize_source_platform(source: object) -> str:
         return "youtube"
     if source_key in {"douyin", "tiktok"}:
         return "douyin"
+    if source_key in {"zhihu", "知乎"}:
+        return "zhihu"
     if source_key in {"bilibili", "bili", ""}:
         return "bilibili"
     return source_key
@@ -482,6 +487,8 @@ def _infer_source_platform_from_url(url: object) -> str:
         return "xiaohongshu"
     if "douyin.com" in text:
         return "douyin"
+    if "zhihu.com" in text:
+        return "zhihu"
     if "bilibili.com" in text or "b23.tv" in text:
         return "bilibili"
     return ""
@@ -1038,6 +1045,11 @@ def create_app(
     app.state.degraded = bool(getattr(ctx, "degraded", False))
     app.state.degraded_reason = str(getattr(ctx, "degraded_reason", ""))
     app.state.degraded_issues = list(getattr(ctx, "degraded_issues", []))
+    feedback_batch_scheduler = FeedbackBatchScheduler(
+        getattr(ctx, "soul_engine", None),
+        debounce_seconds=_FEEDBACK_BATCH_DEBOUNCE_SECONDS,
+    )
+    app.state.feedback_batch_scheduler = feedback_batch_scheduler
 
     # ── Password gate (LAN/remote auth) ─────────────────────────────
     app.state.auth_gate = AuthGate(_auth_cfg, getattr(ctx, "database", None))
@@ -1344,9 +1356,9 @@ def create_app(
     # downstream handling. CORS stays inner; 401/403 echo a permissive header.
     app.middleware("http")(make_auth_middleware(_get_auth_gate))
 
-    async def _run_post_feedback_tasks() -> None:
+    def _schedule_post_feedback_tasks() -> None:
         with suppress(Exception):
-            await ctx.soul_engine.process_feedback_batch_if_needed()
+            feedback_batch_scheduler.schedule()
 
     async def _ingest_profile_update_events(events: list[dict[str, Any]]) -> None:
         """Feed source task events into the profile-update pipeline when ready.
@@ -1923,6 +1935,7 @@ def create_app(
                 include_dy="douyin" in effective,
                 include_yt="youtube" in effective,
                 include_x="twitter" in effective,
+                include_zhihu="zhihu" in effective,
                 target_pool_count=_INIT_POOL_TARGET_COUNT,
                 discover_backfill=_api_discover_backfill,
                 coordinator=coord,
@@ -2588,6 +2601,10 @@ def create_app(
 
     @app.on_event("shutdown")
     async def shutdown_refresh_loop() -> None:
+        feedback_scheduler = getattr(app.state, "feedback_batch_scheduler", None)
+        if feedback_scheduler is not None:
+            with suppress(Exception):
+                await feedback_scheduler.close()
         refresh_task = getattr(app.state, "refresh_task", None)
         if refresh_task is not None:
             refresh_task.cancel()
@@ -5165,7 +5182,7 @@ def create_app(
                     title=str(recommendation.get("title", "")),
                     note=note,
                 )
-        asyncio.create_task(_run_post_feedback_tasks())
+        _schedule_post_feedback_tasks()
         return FeedbackResponse(
             ok=True,
             recommendation_id=payload.recommendation_id,
@@ -6586,12 +6603,83 @@ def create_app(
             feed_paused=tw_feed_paused,
         )
 
+        zh_cfg = getattr(srcs, "zhihu", None)
+        zh_enabled = bool(getattr(zh_cfg, "enabled", False))
+        zhihu = SourceStatusItem(
+            enabled=zh_enabled,
+            state="unverified",
+            detail=(
+                "浏览器插件登录态源 · 尚未看到知乎任务结果，"
+                "保存后可运行 init 或 discover 验证登录态。"
+            ),
+            logged_in=False,
+        )
+        if hasattr(ctx.database, "conn"):
+            try:
+                row = ctx.database.conn.execute(
+                    """
+                    SELECT type, status, result_json, created_at, completed_at
+                    FROM zhihu_tasks
+                    WHERE status IN ('pending', 'in_progress', 'completed', 'failed')
+                    ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+            except Exception:
+                row = None
+            if row is not None:
+                task_type = str(row["type"] if hasattr(row, "keys") else row[0])
+                status = str(row["status"] if hasattr(row, "keys") else row[1])
+                result_json = row["result_json"] if hasattr(row, "keys") else row[2]
+                payload: dict[str, Any] = {}
+                with suppress(Exception):
+                    parsed = json.loads(str(result_json or "{}"))
+                    if isinstance(parsed, dict):
+                        payload = parsed
+                items = payload.get("items")
+                item_count = len(items) if isinstance(items, list) else 0
+                error_code = str(payload.get("error", "") or "").strip()
+                debug = payload.get("debug")
+                login_required = error_code == "zhihu_login_required" or (
+                    isinstance(debug, dict) and bool(debug.get("login_required"))
+                )
+                if status == "completed":
+                    zhihu = SourceStatusItem(
+                        enabled=zh_enabled,
+                        state="ready",
+                        detail=f"最近任务完成（{task_type}，{item_count} 条）。",
+                        logged_in=True,
+                    )
+                elif login_required:
+                    zhihu = SourceStatusItem(
+                        enabled=zh_enabled,
+                        state="missing",
+                        detail="最近知乎任务提示需要登录知乎。请在当前浏览器登录知乎后重试。",
+                        logged_in=False,
+                    )
+                elif status == "failed":
+                    suffix = f"：{error_code}" if error_code else ""
+                    zhihu = SourceStatusItem(
+                        enabled=zh_enabled,
+                        state="partial",
+                        detail=f"最近知乎任务失败{suffix}。可在浏览器登录态正常后重试。",
+                        logged_in=False,
+                    )
+                elif status in {"pending", "in_progress"}:
+                    zhihu = SourceStatusItem(
+                        enabled=zh_enabled,
+                        state="unverified",
+                        detail=f"知乎任务正在等待插件执行（{task_type} / {status}）。",
+                        logged_in=False,
+                    )
+
         return SourcesStatusResponse(
             bilibili=bilibili,
             xiaohongshu=xiaohongshu,
             douyin=douyin,
             youtube=youtube,
             twitter=twitter,
+            zhihu=zhihu,
         )
 
     # ── Douyin task queue endpoints (extension dispatcher) ──────────
@@ -6759,10 +6847,15 @@ def create_app(
         yt_bootstrap_item_key,
         yt_bootstrap_items_to_events,
     )
-    from openbiliclaw.sources.zhihu_tasks import ZhihuTaskQueue
+    from openbiliclaw.sources.zhihu_tasks import (
+        ZhihuTaskQueue,
+        zhihu_bootstrap_item_key,
+        zhihu_bootstrap_items_to_events,
+    )
 
     _zhihu_task_queue: ZhihuTaskQueue | None = None
-    if hasattr(ctx.database, "conn"):
+    db_conn = getattr(ctx.database, "conn", None)
+    if hasattr(db_conn, "executescript"):
         _zhihu_task_queue = ZhihuTaskQueue(ctx.database)
 
     @app.get("/api/sources/zhihu/next-task")
@@ -6772,7 +6865,7 @@ def create_app(
 
         if _zhihu_task_queue is None:
             return Response(status_code=204)
-        task = _zhihu_task_queue.next_pending()
+        task = _zhihu_task_queue.next_pending(only_ids=_init_owned_ids_filter())
         if task is None:
             return Response(status_code=204)
 
@@ -6789,8 +6882,10 @@ def create_app(
     async def zhihu_task_result(payload: dict[str, Any]) -> dict[str, Any]:
         """Accept a Zhihu task result from the extension dispatcher.
 
-        This endpoint intentionally does not propagate events into memory/profile:
-        ``fetch-zhihu`` is a source-crawl smoke path, not an init/profile path.
+        Plain ``fetch-zhihu`` smoke tasks only record the task payload. Tasks
+        explicitly marked ``profile_update`` also propagate bootstrap events to
+        memory and, once a profile exists, into the incremental profile-update
+        pipeline.
         """
         task_id = str(payload.get("task_id", "") or "").strip()
         status = str(payload.get("status", "") or "").strip()
@@ -6810,14 +6905,50 @@ def create_app(
         if _zhihu_task_queue is None:
             return {"ok": True}
 
+        task = _zhihu_task_queue.get(task_id)
+        task_type = str(task.get("type", "")).strip() if task else ""
+        task_payload: dict[str, Any] = {}
+        if task and task.get("payload_json"):
+            with suppress(Exception):
+                parsed_payload = json.loads(str(task.get("payload_json") or "{}"))
+                if isinstance(parsed_payload, dict):
+                    task_payload = parsed_payload
+        profile_update = bool(task_payload.get("profile_update"))
+
         if status in {"partial", "ok"} or status == "empty":
-            _zhihu_task_queue.merge_result(
+            is_final = status in {"ok", "empty"}
+            added_items = _zhihu_task_queue.merge_result(
                 task_id,
                 items=items if items else None,
                 scope_counts=scope_counts,
                 debug=debug,
-                complete=status in {"ok", "empty"},
+                complete=is_final,
             )
+            _init_busy = _init_active_now()
+            _skip_profile = _init_busy and not _init_owns_task(task_id)
+            if (
+                task_type == "bootstrap_events"
+                and profile_update
+                and added_items
+                and not _skip_profile
+            ):
+                fresh_items, item_keys_by_index = _filter_new_source_bootstrap_items(
+                    "zhihu",
+                    added_items,
+                    zhihu_bootstrap_item_key,
+                )
+                profile_events: list[dict[str, Any]] = []
+                propagated_keys: list[str] = []
+                for index, item in enumerate(fresh_items):
+                    for event in zhihu_bootstrap_items_to_events([item]):
+                        await ctx.memory_manager.propagate_event(event)
+                        profile_events.append(event)
+                        key = item_keys_by_index.get(index, "")
+                        if key:
+                            propagated_keys.append(key)
+                if not _init_busy:
+                    await _ingest_profile_update_events(profile_events)
+                _mark_source_bootstrap_keys("zhihu", propagated_keys)
         else:
             _zhihu_task_queue.fail(task_id, error=str(payload.get("error", "") or ""), debug=debug)
 
@@ -7424,6 +7555,17 @@ def create_app(
                     request_interval_seconds=cfg.sources.twitter.request_interval_seconds,
                     min_interval_minutes=cfg.sources.twitter.min_interval_minutes,
                 ),
+                zhihu=ZhihuSourceConfigOut(
+                    enabled=cfg.sources.zhihu.enabled,
+                    source_modes=list(cfg.sources.zhihu.source_modes),
+                    daily_search_budget=cfg.sources.zhihu.daily_search_budget,
+                    daily_hot_budget=cfg.sources.zhihu.daily_hot_budget,
+                    daily_feed_budget=cfg.sources.zhihu.daily_feed_budget,
+                    daily_creator_budget=cfg.sources.zhihu.daily_creator_budget,
+                    daily_related_budget=cfg.sources.zhihu.daily_related_budget,
+                    request_interval_seconds=cfg.sources.zhihu.request_interval_seconds,
+                    min_interval_minutes=cfg.sources.zhihu.min_interval_minutes,
+                ),
             ),
             scheduler=SchedulerConfigOut(
                 enabled=cfg.scheduler.enabled,
@@ -7990,6 +8132,37 @@ def create_app(
                     ):
                         if key in tw_data:
                             setattr(cfg.sources.twitter, key, int(tw_data[key]))
+
+                zh_data = sources_data.get("zhihu")
+                if isinstance(zh_data, dict):
+                    if "enabled" in zh_data:
+                        cfg.sources.zhihu.enabled = _as_bool(zh_data["enabled"])
+                    if "source_modes" in zh_data:
+                        raw_modes = zh_data["source_modes"]
+                        if isinstance(raw_modes, str):
+                            modes = [part.strip() for part in raw_modes.split(",")]
+                        elif isinstance(raw_modes, list):
+                            modes = [str(part).strip() for part in raw_modes]
+                        else:
+                            modes = []
+                        selected = [
+                            mode
+                            for mode in modes
+                            if mode in {"search", "hot", "feed", "creator", "related"}
+                        ]
+                        if selected:
+                            cfg.sources.zhihu.source_modes = tuple(dict.fromkeys(selected))
+                    for key in (
+                        "daily_search_budget",
+                        "daily_hot_budget",
+                        "daily_feed_budget",
+                        "daily_creator_budget",
+                        "daily_related_budget",
+                        "request_interval_seconds",
+                        "min_interval_minutes",
+                    ):
+                        if key in zh_data:
+                            setattr(cfg.sources.zhihu, key, int(zh_data[key]))
 
         # Apply scheduler updates
         if "scheduler" in update:

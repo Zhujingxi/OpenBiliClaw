@@ -4867,7 +4867,7 @@ function renderRecommendations(items, { append = false } = {}) {
     }
     const platformKey = (item.source_platform || "bilibili").toLowerCase();
     const platformLabel =
-      { bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube", twitter: "X" }[
+      { bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube", twitter: "X", zhihu: "知乎" }[
         platformKey
       ] || item.source_platform;
     const sourceCorner = document.createElement("span");
@@ -6026,6 +6026,34 @@ function bindSettings() {
     return el ? el.checked : fallback;
   };
 
+  const ZHIHU_SOURCE_MODE_FIELDS = [
+    ["search", "cfgZhihuModeSearch"],
+    ["hot", "cfgZhihuModeHot"],
+    ["feed", "cfgZhihuModeFeed"],
+    ["creator", "cfgZhihuModeCreator"],
+    ["related", "cfgZhihuModeRelated"],
+  ];
+
+  function setZhihuSourceModes(rawModes) {
+    const fallbackModes = ZHIHU_SOURCE_MODE_FIELDS.map(([mode]) => mode);
+    const selected = new Set(
+      (Array.isArray(rawModes) && rawModes.length > 0 ? rawModes : fallbackModes)
+        .map((mode) => String(mode).trim())
+        .filter(Boolean),
+    );
+    for (const [mode, id] of ZHIHU_SOURCE_MODE_FIELDS) {
+      const el = document.getElementById(id);
+      if (el) el.checked = selected.has(mode);
+    }
+  }
+
+  function collectZhihuSourceModes() {
+    const selected = ZHIHU_SOURCE_MODE_FIELDS
+      .filter(([, id]) => checked(id))
+      .map(([mode]) => mode);
+    return selected.length > 0 ? selected : ["search"];
+  }
+
   // Unified per-source login / cookie status from GET /api/sources/status,
   // rendered as a uniform colored-dot line inside every source card. Only X is
   // live-validated (state ok); the rest report local cookie/token readiness.
@@ -6041,7 +6069,7 @@ function bindSettings() {
     expired_cookie: "#e74c3c",
     blocked: "#e74c3c",
   };
-  const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter"];
+  const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu"];
 
   // Best-effort: when the backend is unreachable, leave a neutral hint.
   async function renderSourcesStatus() {
@@ -6176,6 +6204,16 @@ function bindSettings() {
     setVal("cfgTwitterDailyCreatorBudget", cfg.sources?.twitter?.daily_creator_budget);
     setVal("cfgTwitterRequestInterval", cfg.sources?.twitter?.request_interval_seconds);
     setVal("cfgTwitterMinInterval", cfg.sources?.twitter?.min_interval_minutes);
+    const zhihuEnabled = document.getElementById("cfgZhihuEnabled");
+    if (zhihuEnabled) zhihuEnabled.checked = cfg.sources?.zhihu?.enabled === true;
+    setZhihuSourceModes(cfg.sources?.zhihu?.source_modes);
+    setVal("cfgZhihuDailySearchBudget", cfg.sources?.zhihu?.daily_search_budget);
+    setVal("cfgZhihuDailyHotBudget", cfg.sources?.zhihu?.daily_hot_budget);
+    setVal("cfgZhihuDailyFeedBudget", cfg.sources?.zhihu?.daily_feed_budget);
+    setVal("cfgZhihuDailyCreatorBudget", cfg.sources?.zhihu?.daily_creator_budget);
+    setVal("cfgZhihuDailyRelatedBudget", cfg.sources?.zhihu?.daily_related_budget);
+    setVal("cfgZhihuRequestInterval", cfg.sources?.zhihu?.request_interval_seconds);
+    setVal("cfgZhihuMinInterval", cfg.sources?.zhihu?.min_interval_minutes);
     void renderSourcesStatus();
 
     // General
@@ -6218,6 +6256,7 @@ function bindSettings() {
     setVal("cfgPoolShareDouyin", cfg.scheduler?.pool_source_shares?.douyin);
     setVal("cfgPoolShareYoutube", cfg.scheduler?.pool_source_shares?.youtube);
     setVal("cfgPoolShareTwitter", cfg.scheduler?.pool_source_shares?.twitter);
+    setVal("cfgPoolShareZhihu", cfg.scheduler?.pool_source_shares?.zhihu);
     setVal("cfgSpeculationInterval", cfg.scheduler?.speculation_interval_minutes);
     setVal("cfgSpeculationTtl", cfg.scheduler?.speculation_ttl_days);
     setVal("cfgSpeculationCooldown", cfg.scheduler?.speculation_cooldown_days);
@@ -6372,6 +6411,17 @@ function bindSettings() {
           request_interval_seconds: getInt("cfgTwitterRequestInterval", 3),
           min_interval_minutes: getInt("cfgTwitterMinInterval", 60),
         },
+        zhihu: {
+          enabled: checked("cfgZhihuEnabled"),
+          source_modes: collectZhihuSourceModes(),
+          daily_search_budget: getInt("cfgZhihuDailySearchBudget", 0),
+          daily_hot_budget: getInt("cfgZhihuDailyHotBudget", 0),
+          daily_feed_budget: getInt("cfgZhihuDailyFeedBudget", 0),
+          daily_creator_budget: getInt("cfgZhihuDailyCreatorBudget", 0),
+          daily_related_budget: getInt("cfgZhihuDailyRelatedBudget", 0),
+          request_interval_seconds: getInt("cfgZhihuRequestInterval", 3),
+          min_interval_minutes: getInt("cfgZhihuMinInterval", 60),
+        },
       },
       discovery: {
         ...(state.runtimeConfig?.discovery || {}),
@@ -6396,11 +6446,12 @@ function bindSettings() {
         proactive_push_interval_seconds: getInt("cfgProactivePushInterval", 120),
         speculator_idle_interval_minutes: getInt("cfgSpeculatorIdleInterval", 30),
         pool_source_shares: {
-          bilibili: getInt("cfgPoolShareBilibili", 8),
+          bilibili: getInt("cfgPoolShareBilibili", 5),
           xiaohongshu: getInt("cfgPoolShareXhs", 1),
           douyin: getInt("cfgPoolShareDouyin", 1),
           youtube: getInt("cfgPoolShareYoutube", 1),
           twitter: getInt("cfgPoolShareTwitter", 1),
+          zhihu: getInt("cfgPoolShareZhihu", 1),
         },
         speculation_interval_minutes: getInt("cfgSpeculationInterval", 10),
         speculation_ttl_days: getInt("cfgSpeculationTtl", 3),
@@ -6586,13 +6637,15 @@ function bindSettings() {
             douyin: checked("cfgDouyinEnabled"),
             youtube: checked("cfgYoutubeEnabled"),
             twitter: checked("cfgTwitterEnabled"),
+            zhihu: checked("cfgZhihuEnabled"),
           },
           configured_shares: {
-            bilibili: getInt("cfgPoolShareBilibili", 8),
+            bilibili: getInt("cfgPoolShareBilibili", 5),
             xiaohongshu: getInt("cfgPoolShareXhs", 1),
             douyin: getInt("cfgPoolShareDouyin", 1),
             youtube: getInt("cfgPoolShareYoutube", 1),
             twitter: getInt("cfgPoolShareTwitter", 1),
+            zhihu: getInt("cfgPoolShareZhihu", 1),
           },
         });
         const shares = suggestion?.suggested_shares || {};
@@ -6601,6 +6654,7 @@ function bindSettings() {
         if (shares.douyin !== undefined) setVal("cfgPoolShareDouyin", shares.douyin);
         if (shares.youtube !== undefined) setVal("cfgPoolShareYoutube", shares.youtube);
         if (shares.twitter !== undefined) setVal("cfgPoolShareTwitter", shares.twitter);
+        if (shares.zhihu !== undefined) setVal("cfgPoolShareZhihu", shares.zhihu);
         showToast("已按已有信号填入建议比例，保存后生效。", "success");
       } catch (err) {
         showToast(`生成建议失败: ${err.message}`, "error");

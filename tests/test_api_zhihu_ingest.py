@@ -137,3 +137,49 @@ def test_zhihu_next_task_and_result_record_without_profile_propagation(
     assert task["status"] == "completed"
     assert memory.events == []
     assert soul.pipeline.signals == []
+
+
+def test_zhihu_bootstrap_result_with_profile_update_propagates_to_memory_and_pipeline(
+    zhihu_task_client: tuple[TestClient, Database, RecordingMemoryManager, RecordingSoulEngine],
+) -> None:
+    from openbiliclaw.sources.zhihu_tasks import ZhihuTaskQueue
+
+    client, db, memory, soul = zhihu_task_client
+    queue = ZhihuTaskQueue(db)
+    task_id = queue.enqueue_with_id(
+        "bootstrap_events",
+        {
+            "scopes": ["zhihu_read_history"],
+            "max_items_per_scope": 20,
+            "profile_update": True,
+        },
+        daily_budget=10,
+    )
+    assert task_id is not None
+
+    result_response = client.post(
+        "/api/sources/zhihu/task-result",
+        json={
+            "task_id": task_id,
+            "status": "ok",
+            "items": [
+                {
+                    "scope": "zhihu_read_history",
+                    "title": "最近浏览回答",
+                    "url": "https://www.zhihu.com/question/1/answer/2",
+                    "content_type": "answer",
+                    "content_id": "2",
+                    "summary": "真实回答摘要",
+                }
+            ],
+            "scope_counts": {"zhihu_read_history": 1},
+        },
+    )
+
+    assert result_response.status_code == 200
+    assert len(memory.events) == 1
+    event = memory.events[0]
+    assert event["event_type"] == "view"
+    assert event["title"] == "最近浏览回答"
+    assert event["metadata"]["source_platform"] == "zhihu"  # type: ignore[index]
+    assert soul.pipeline.signals

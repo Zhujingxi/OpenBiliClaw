@@ -478,6 +478,163 @@ async def test_process_feedback_batch_updates_preference_after_threshold(
 
 
 @pytest.mark.asyncio
+async def test_process_feedback_batch_single_flights_concurrent_calls(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    for index in range(3):
+        await memory.propagate_event(
+            {
+                "event_type": "feedback",
+                "title": f"反馈 {index}",
+                "metadata": {"feedback_type": "dislike", "bvid": f"BV{index}"},
+            }
+        )
+
+    calls = 0
+
+    async def fake_analyze_events(
+        *,
+        events: list[dict[str, object]],
+        existing_preference: dict[str, object],
+        event_chunk_size: int = 0,
+    ) -> dict[str, object]:
+        nonlocal calls
+        del events, existing_preference, event_chunk_size
+        calls += 1
+        await asyncio.sleep(0.02)
+        return {
+            "interests": [
+                {"name": "纪录片", "category": "知识", "weight": 0.9, "source": "feedback"}
+            ],
+            "style": {},
+            "context": {},
+            "exploration_openness": 0.4,
+            "disliked_topics": ["标题党"],
+            "favorite_up_users": [],
+        }
+
+    monkeypatch.setattr(engine._preference_analyzer, "analyze_events", fake_analyze_events)
+
+    results = await asyncio.gather(*(engine.process_feedback_batch_if_needed() for _ in range(5)))
+
+    assert calls == 1
+    assert sum(1 for item in results if item["triggered"] is True) == 1
+    assert sum(1 for item in results if item.get("skipped") is True) == 4
+
+
+@pytest.mark.asyncio
+async def test_process_feedback_batch_compacts_noisy_metadata_before_llm(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    for index in range(3):
+        await memory.propagate_event(
+            {
+                "event_type": "feedback",
+                "title": f"反馈 {index}",
+                "url": f"https://www.bilibili.com/video/BV{index}",
+                "context": f"在 B 站踩了《反馈 {index}》",
+                "metadata": {
+                    "feedback_type": "dislike",
+                    "reaction": "thumbs_down",
+                    "bvid": f"BV{index}",
+                    "source_platform": "bilibili",
+                    "feedback_note": "太浅了",
+                    "targetText": "x" * 5000,
+                    "raw_context": {"viewport": {"width": 1920, "height": 1080}},
+                    "href": "https://example.invalid/noisy",
+                    "actionLabel": "不感兴趣",
+                },
+            }
+        )
+
+    captured_events: list[dict[str, object]] = []
+
+    async def fake_analyze_events(
+        *,
+        events: list[dict[str, object]],
+        existing_preference: dict[str, object],
+        event_chunk_size: int = 0,
+    ) -> dict[str, object]:
+        del existing_preference, event_chunk_size
+        captured_events.extend(events)
+        return {
+            "interests": [],
+            "style": {},
+            "context": {},
+            "exploration_openness": 0.4,
+            "disliked_topics": ["太浅了"],
+            "favorite_up_users": [],
+        }
+
+    monkeypatch.setattr(engine._preference_analyzer, "analyze_events", fake_analyze_events)
+
+    await engine.process_feedback_batch_if_needed()
+
+    assert captured_events
+    metadata = captured_events[0]["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["feedback_type"] == "dislike"
+    assert metadata["reaction"] == "thumbs_down"
+    assert metadata["bvid"] == "BV0"
+    assert metadata["source_platform"] == "bilibili"
+    assert metadata["feedback_note"] == "太浅了"
+    assert "targetText" not in metadata
+    assert "raw_context" not in metadata
+    assert "href" not in metadata
+    assert "actionLabel" not in metadata
+
+
+@pytest.mark.asyncio
+async def test_process_feedback_batch_reads_all_incremental_feedback_events(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    for index in range(503):
+        await memory.propagate_event(
+            {
+                "event_type": "feedback",
+                "title": f"反馈 {index}",
+                "metadata": {"feedback_type": "like", "bvid": f"BV{index:04d}"},
+            }
+        )
+
+    captured_ids: list[int] = []
+
+    async def fake_analyze_events(
+        *,
+        events: list[dict[str, object]],
+        existing_preference: dict[str, object],
+        event_chunk_size: int = 0,
+    ) -> dict[str, object]:
+        del existing_preference, event_chunk_size
+        captured_ids.extend(int(event["id"]) for event in events)
+        return {
+            "interests": [],
+            "style": {},
+            "context": {},
+            "exploration_openness": 0.4,
+            "disliked_topics": [],
+            "favorite_up_users": [],
+        }
+
+    monkeypatch.setattr(engine._preference_analyzer, "analyze_events", fake_analyze_events)
+
+    await engine.process_feedback_batch_if_needed()
+
+    assert len(captured_ids) == 503
+    assert captured_ids == list(range(1, 504))
+    assert memory.load_feedback_state()["last_processed_feedback_event_id"] == 503
+
+
+@pytest.mark.asyncio
 async def test_feedback_signal_strength_reaches_profile_update_prompt_and_profile_rebuild(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

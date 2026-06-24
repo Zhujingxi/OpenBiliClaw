@@ -2,7 +2,7 @@
 
 ## 概述
 
-`src/openbiliclaw/runtime/` 负责后端 daemon 的长期运行能力：后台刷新、账号同步、运行时事件流、浏览器插件 presence gate、自动更新和任务生命周期管理。FastAPI 启动后会通过 `RuntimeContext` 持有这些 runtime 服务，配置热重载时重建可替换组件。
+`src/openbiliclaw/runtime/` 负责后端 daemon 的长期运行能力：后台刷新、账号同步、反馈批学习调度、运行时事件流、浏览器插件 presence gate、自动更新和任务生命周期管理。FastAPI 启动后会通过 `RuntimeContext` 持有这些 runtime 服务，配置热重载时重建可替换组件。
 
 ## 已实现功能
 
@@ -18,6 +18,7 @@
 | X 后台 discovery producer | ✅ | `XDiscoveryProducer.produce_if_due()` 在 X 平台族低于 quota 且源健康就绪时，由独立 loop tick 触发 `search` / `feed`（For-You）/ `creator`（账号订阅）三个策略；按 `daily_*_budget` / `min_interval_minutes` / `request_interval_seconds` 节流，For-You 压到很低的每日频次并在连续失败后自动暂停。只 enqueue raw candidates 进 `discovery_candidates`，不写 `content_cache`、不调评估器。`enabled=false` 时是 no-op，不 import `twitter_cli`。 |
 | X 源健康状态机 | ✅ | `storage/x_health.py` 的 `XSourceHealthStore` 持久化 `ok` / `missing_cookie` / `expired_cookie`(401) / `blocked`(403) / `rate_limited`(429) 五态；按 code 分别退避，429 带 `cooldown_until` 自愈，401/403/missing 须等用户重新登录 x.com 才恢复；连续 For-You 失败触发 `feed_allowed()=false` 自动暂停。状态经 `GET /api/sources/x/status` 暴露到插件设置页。 |
 | 运行时频率配置 | ✅ | `refresh_check_interval_seconds`、行为触发阈值、trending / explore 间隔、单轮发现上限、惊喜队列加载数量、主动推送间隔和 speculator idle tick 都从 `[scheduler]` 读取，配置热重载后重建 runtime 生效。 |
+| 推荐反馈批学习调度 | ✅ | `FeedbackBatchScheduler` 挂在 FastAPI `app.state`，`/api/feedback` 每次只标记 dirty 并触发 5 秒 debounce；burst 内多条推荐反馈 coalesce 成一次 `SoulEngine.process_feedback_batch_if_needed()`，处理期间又有新反馈时会在本轮结束后再补跑一轮，避免每条反馈都启动画像重分析。 |
 | 浏览器 presence gate | ✅ | `background_llm_work_allowed()` 结合 `scheduler.enabled` 与 `pause_on_extension_disconnect` 控制 daemon-owned 后台 LLM / embedding 工作。 |
 | Runtime event stream | ✅ | `/api/runtime-stream` 向扩展推送状态、Cookie sync 请求、配置重载和 presence 事件；`RuntimeEventHub.publish()` 会返回是否至少有一个订阅者接收，供一次性事件判断是否真正投递。 |
 | Activity feed 状态摘要 | ✅ | `/api/activity-feed` 聚合认知更新、反馈、推荐池补货和 live summary；未初始化且还没有推荐 / 可换池 / 补货产物时，普通 `/api/events` 不会新写入 pending signals，旧的 `pending_signal_events` 也不会抢占初始化提示，避免首启 setup 保存配置后被“已记下 N 个信号”误导。 |
@@ -69,6 +70,27 @@ result = await controller.drain_discovery_candidates_once(batch_size=30)
 - `drain_discovery_candidates_once(batch_size=..., reason="manual")`：由 XHS task-result / 被动采集等外部来源入队后触发；refresh path 和 `_loop_candidate_eval()` 走同一套 controller drain helper。它会先检查 `count_pool_candidates() >= pool_target_count`，池满时直接返回 `{"evaluated": 0, "cached": 0, "rejected": 0}`。profile 未就绪或已有 drain 在跑时同样 no-op，底层 `DiscoveryCandidatePipeline.drain_pending()` 也有同一共享锁，避免 refresh / XHS / Douyin / YouTube / periodic loop 多入口并发 admission。周期 loop 的 drain 如果缓存了新候选，会立即补调 `precompute_pool_copy()` 并发布补货后的池子状态。
 - `run_init_backfill(profile, target_pool_count, *, fully_parallel=True)`：图形化引导初始化（gui-init）stage 4 的发现补池。持 `_refresh_lock` 与连续 refresh 串行，绝不与之争 `content_cache`；`async with` 在 `CancelledError` 时释放锁。不查 `_llm_work_allowed()`，因此 init 期间后台门控暂停不会自锁 init 自己的补池。
 - `_pool_count_payload()`：统一生成 runtime status / runtime stream 的池子字段，包含 pending eval 与 evaluated pending 拆分。
+
+### FeedbackBatchScheduler
+
+```python
+from openbiliclaw.runtime.feedback_scheduler import FeedbackBatchScheduler
+
+scheduler = FeedbackBatchScheduler(soul_engine, debounce_seconds=5.0)
+scheduler.schedule()
+```
+
+核心调用：
+
+- `schedule()`：标记当前有新反馈待处理；若没有活跃任务，创建一个后台任务，先等待 debounce 窗口，再调用 `SoulEngine.process_feedback_batch_if_needed()`。
+- `drain()`：测试辅助，等待当前调度任务结束。
+- `close()`：关闭 API 时取消还没跑完的调度任务。
+
+调度语义：
+
+- 多个 `/api/feedback` 请求在 debounce 窗口内只会合并成一次批处理。
+- 批处理执行中再次收到反馈，会把 dirty 标志重新置位；当前处理结束后再等待一个 debounce 窗口并补跑一次。
+- 该调度器只解决 API 层的 burst coalesce；Soul 层仍有 `process_feedback_batch_if_needed()` single-flight，防止其它入口绕过 API 时并发重放同一游标。
 
 ### InitCoordinator + InitPrereqs（引导初始化）
 

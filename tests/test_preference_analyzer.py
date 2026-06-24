@@ -239,6 +239,31 @@ class RejectingChunkStructuredService:
         )
 
 
+class RejectingContextStructuredService:
+    """Reject long/context-heavy prompts, accept title-only safe prompts."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def complete_structured_task(
+        self,
+        *,
+        system_instruction: str,
+        user_input: str,
+        history: list[dict[str, str]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        caller: str = "",
+    ) -> LLMResponse:
+        self.calls.append(user_input)
+        if "FORBIDDEN_CONTEXT" in user_input:
+            return LLMResponse(content="你好，我无法给到相关内容。", provider="deepseek")
+        return LLMResponse(
+            content='{"interests": [{"name": "AI Agent", "category": "科技", "weight": 0.9}]}',
+            provider="deepseek",
+        )
+
+
 @pytest.mark.asyncio
 async def test_analyze_events_parses_structured_preference_output() -> None:
     from openbiliclaw.soul.preference_analyzer import PreferenceAnalyzer
@@ -919,6 +944,38 @@ async def test_service_context_overflow_splits_chunk_and_retries() -> None:
 
     assert preference["interests"][0]["name"] == "科技"
     assert len(service.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_invalid_json_single_event_retries_with_safe_compact_prompt() -> None:
+    from openbiliclaw.soul.preference_analyzer import PreferenceAnalyzer
+
+    service = RejectingContextStructuredService()
+    analyzer = PreferenceAnalyzer(service, max_prompt_chars=0)
+
+    preference = await analyzer.analyze_events(
+        events=[
+            {
+                "event_type": "view",
+                "title": "如何评价新的 AI Agent 编程框架？",
+                "context": "FORBIDDEN_CONTEXT " * 50,
+                "metadata": {
+                    "source_platform": "zhihu",
+                    "content_id": "answer-1",
+                    "author": "知乎作者",
+                },
+            }
+        ],
+        existing_preference={},
+        event_chunk_size=1,
+    )
+
+    assert preference["interests"][0]["name"] == "AI Agent"
+    assert len(service.calls) == 2
+    assert "FORBIDDEN_CONTEXT" in service.calls[0]
+    assert "如何评价新的 AI Agent 编程框架？" in service.calls[1]
+    assert "zhihu" in service.calls[1]
+    assert "FORBIDDEN_CONTEXT" not in service.calls[1]
 
 
 @pytest.mark.asyncio

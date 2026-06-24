@@ -880,6 +880,18 @@ class MemoryManager:
             after_event_id=after_event_id,
         )
 
+    def query_events_since(
+        self,
+        *,
+        after_event_id: int,
+        event_types: list[str],
+    ) -> list[dict[str, Any]]:
+        """Query events newer than a cursor in ascending id order."""
+        return self._database.query_events_since(
+            after_event_id=after_event_id,
+            event_types=event_types,
+        )
+
     def get_event_stats(
         self,
         *,

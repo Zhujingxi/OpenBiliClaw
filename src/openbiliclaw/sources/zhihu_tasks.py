@@ -41,6 +41,15 @@ ZHIHU_BOOTSTRAP_SIGNAL_STRENGTH: dict[str, float] = {
     "zhihu_bootstrap_collection": 0.9,
 }
 
+ZHIHU_DISCOVERY_SCORE_THRESHOLD = 0.60
+ZHIHU_DISCOVERY_SCOPE_STRATEGIES = {
+    "zhihu_search": "zhihu-search",
+    "zhihu_hot": "zhihu-hot",
+    "zhihu_feed": "zhihu-feed",
+    "zhihu_creator": "zhihu-creator",
+    "zhihu_related": "zhihu-related",
+}
+
 
 def _activity_event_type(action: str) -> str | None:
     normalized = action.strip()
@@ -145,6 +154,148 @@ def _item_key(item: dict[str, Any]) -> str:
 def zhihu_bootstrap_item_key(item: dict[str, Any]) -> str:
     """Return the stable cross-task identity key for one Zhihu bootstrap item."""
     return _item_key(item)
+
+
+def zhihu_discovery_items_to_contents(
+    items: list[dict[str, Any]],
+    *,
+    source_keyword_ids: dict[str, int] | None = None,
+) -> list[Any]:
+    """Convert extension-collected Zhihu discovery rows into discovered content.
+
+    The browser extension returns a lightweight, API-shape-independent row. This
+    function is the backend boundary that turns those rows into
+    :class:`DiscoveredContent` for the shared candidate pool. Bootstrap scopes
+    are intentionally ignored here; they only become user behavior events.
+    """
+    from openbiliclaw.discovery.engine import DiscoveredContent
+
+    keyword_ids = source_keyword_ids or {}
+    contents: list[DiscoveredContent] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        scope = str(item.get("scope", "")).strip()
+        default_strategy = ZHIHU_DISCOVERY_SCOPE_STRATEGIES.get(scope)
+        if default_strategy is None:
+            continue
+        content_type = str(item.get("content_type", "")).strip() or "answer"
+        raw_content_id = str(item.get("content_id", "")).strip()
+        url = str(item.get("url", "")).strip()
+        title = str(item.get("title", "")).strip()
+        if not raw_content_id and not url:
+            continue
+        if not title and not url:
+            continue
+
+        content_id = f"{content_type}:{raw_content_id}" if raw_content_id else ""
+        key = content_id or url
+        if key in seen:
+            continue
+        seen.add(key)
+
+        summary = str(item.get("summary", "")).strip()
+        keyword = str(item.get("search_keyword", "")).strip()
+        source_keyword_id = _optional_int(item.get("source_keyword_id"))
+        if scope == "zhihu_search" and source_keyword_id is None and keyword:
+            source_keyword_id = keyword_ids.get(keyword)
+
+        contents.append(
+            DiscoveredContent(
+                bvid=content_id or url,
+                title=title or url,
+                up_name=str(item.get("author", "")).strip(),
+                author_name=str(item.get("author", "")).strip(),
+                description=summary,
+                body_text=summary,
+                content_id=content_id or url,
+                content_url=url,
+                content_type=content_type,
+                source_platform="zhihu",
+                source_strategy=str(item.get("source_strategy", "")).strip() or default_strategy,
+                like_count=_safe_int(item.get("voteup")),
+                favorite_count=_safe_int(item.get("favorite_count")),
+                comment_count=_safe_int(item.get("comment_count")),
+                score_threshold=ZHIHU_DISCOVERY_SCORE_THRESHOLD,
+                source_keyword_id=source_keyword_id,
+            )
+        )
+    return contents
+
+
+def _safe_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(float(str(value or 0).replace(",", ""))))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def recent_zhihu_creator_urls(db: Database, *, limit: int = 10) -> list[str]:
+    """Return recent Zhihu author URLs from completed task results."""
+    return _recent_zhihu_item_values(db, key="author_url", limit=limit)
+
+
+def recent_zhihu_related_urls(db: Database, *, limit: int = 10) -> list[str]:
+    """Return recent Zhihu content URLs suitable for related expansion."""
+    return _recent_zhihu_item_values(db, key="url", limit=limit)
+
+
+def _recent_zhihu_item_values(db: Database, *, key: str, limit: int) -> list[str]:
+    try:
+        rows = db.conn.execute(
+            """
+            SELECT result_json
+            FROM zhihu_tasks
+            WHERE status = 'completed' AND result_json IS NOT NULL
+            ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC
+            LIMIT 50
+            """
+        ).fetchall()
+    except Exception:
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+    max_items = max(1, int(limit))
+    for row in rows:
+        try:
+            payload = json.loads(
+                str(row["result_json"] if isinstance(row, dict) else row[0] or "{}")
+            )
+        except (json.JSONDecodeError, TypeError, KeyError, IndexError):
+            continue
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            value = str(item.get(key, "") or "").strip()
+            if not value or value in seen:
+                continue
+            if (
+                key == "url"
+                and "zhihu.com/question/" not in value
+                and "zhuanlan.zhihu.com/p/" not in value
+            ):
+                continue
+            seen.add(value)
+            out.append(value)
+            if len(out) >= max_items:
+                return out
+    return out
 
 
 def _merge_zhihu_result_payload(

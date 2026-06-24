@@ -78,6 +78,26 @@ _MANUAL_EDIT_LABELS = {
     "surface.style.depth_preference": "深度偏好",
 }
 
+_FEEDBACK_ANALYSIS_METADATA_KEYS = frozenset(
+    {
+        "recommendation_id",
+        "bvid",
+        "aid",
+        "content_id",
+        "content_url",
+        "source_platform",
+        "feedback_type",
+        "feedback_note",
+        "reaction",
+        "up_name",
+        "author",
+        "topic_label",
+        "watch_seconds",
+        "video_duration_seconds",
+        "signal_strength",
+    }
+)
+
 
 class SoulProfileNotInitializedError(Exception):
     """Raised when the soul layer has not been initialized yet."""
@@ -133,6 +153,7 @@ class SoulEngine:
         self._memory = memory
         self._satisfaction_filter_enabled = satisfaction_filter_enabled
         self._feedback_batch_threshold = max(1, feedback_batch_threshold)
+        self._feedback_batch_lock = asyncio.Lock()
         self._module_overrides = dict(module_overrides or {})
         self._llm_concurrency = llm_concurrency
         # Pass usage_recorder through so internal LLM calls
@@ -854,14 +875,29 @@ class SoulEngine:
 
     async def process_feedback_batch_if_needed(self) -> dict[str, object]:
         """Reanalyze preference/profile after enough new feedback has accumulated."""
+        if self._feedback_batch_lock.locked():
+            return {
+                "triggered": False,
+                "feedback_count": 0,
+                "preference_updated": False,
+                "profile_rebuilt": False,
+                "skipped": True,
+                "reason": "feedback_batch_in_progress",
+            }
+        async with self._feedback_batch_lock:
+            return await self._process_feedback_batch_if_needed_locked()
+
+    async def _process_feedback_batch_if_needed_locked(self) -> dict[str, object]:
+        """Feedback batch implementation guarded by ``_feedback_batch_lock``."""
         state = self._memory.load_feedback_state()
         last_processed_id = self._to_int(state.get("last_processed_feedback_event_id", 0))
         feedback_events = [
             self._deserialize_event(event)
-            for event in self._memory.query_events(event_types=["feedback"], limit=500)
-            if int(event.get("id", 0) or 0) > last_processed_id
+            for event in self._memory.query_events_since(
+                after_event_id=last_processed_id,
+                event_types=["feedback"],
+            )
         ]
-        feedback_events.sort(key=lambda item: int(item.get("id", 0) or 0))
         feedback_count = len(feedback_events)
         if feedback_count < self._feedback_batch_threshold:
             return {
@@ -875,7 +911,7 @@ class SoulEngine:
         existing_preference = dict(preference_layer.data)
         existing_profile = dict(self._memory.get_layer("soul").data)
         updated_preference = await self._preference_analyzer.analyze_events(
-            events=feedback_events,
+            events=[self._compact_feedback_event_for_analysis(event) for event in feedback_events],
             existing_preference=existing_preference,
             event_chunk_size=200,
         )
@@ -947,6 +983,37 @@ class SoulEngine:
             "preference_updated": True,
             "profile_rebuilt": profile_rebuilt,
         }
+
+    def _compact_feedback_event_for_analysis(
+        self,
+        event: dict[str, object],
+    ) -> dict[str, object]:
+        """Keep only preference-relevant feedback fields before LLM analysis."""
+        compact: dict[str, object] = {}
+        for key in (
+            "id",
+            "event_type",
+            "url",
+            "title",
+            "context",
+            "inferred_satisfaction",
+            "satisfaction_reason",
+            "created_at",
+        ):
+            value = event.get(key)
+            if value not in (None, ""):
+                compact[key] = value
+
+        metadata = event.get("metadata")
+        if isinstance(metadata, dict):
+            compact_metadata = {
+                key: value
+                for key, value in metadata.items()
+                if key in _FEEDBACK_ANALYSIS_METADATA_KEYS and value not in (None, "")
+            }
+            if compact_metadata:
+                compact["metadata"] = compact_metadata
+        return compact
 
     def record_immediate_feedback_cognition(
         self,
