@@ -56,6 +56,22 @@
 3. **在同一个浏览器登录内容平台**：默认会用 [B 站](https://www.bilibili.com) 做初始化来源，也可以取消 B 站、改勾 [小红书](https://www.xiaohongshu.com) / [抖音](https://www.douyin.com) / [YouTube](https://www.youtube.com) / [X](https://x.com) / [知乎](https://www.zhihu.com)；初始化至少需要一个已登录且能取到信号的来源，勾选会同时开启该来源。
 4. **打开桌面端或移动端 Web**：后端启动后访问 `http://127.0.0.1:8420/web`；手机可扫插件二维码打开 `http://<电脑局域网 IP>:8420/m/`，再从手机浏览器保存到主屏幕，像桌面 App 一样快速进入。
 
+## 用户交流群
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/images/user-community-qrcode.png" width="200" alt="QQ 用户交流群二维码" /><br/>
+      <b>QQ 用户群</b>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/images/wechat-user-community-qrcode.jpg" width="200" alt="微信用户群二维码" /><br/>
+      <b>微信用户群</b><br/>
+      <sub>二维码 7 天内有效，失效后会更新</sub>
+    </td>
+  </tr>
+</table>
+
 ## 为什么需要 OpenBiliClaw？
 
 > 名字起源于 B 站（`Bili` = Bilibili，`Claw` = 爪子），项目最早只支持 B 站。从 v0.3.0 起已扩展为通用跨平台 Agent —— 已落地 B 站 / 小红书 / 抖音 / YouTube / X / 知乎初始化信号、抖音 search / hot / feed、X 服务端内容发现、知乎插件 search / hot / feed / creator / related discovery 和通用 Web 多类源，持续接入更多内容平台。
@@ -201,22 +217,6 @@
 - **低可用池不再被 source overflow 压掉** —— 可换池低于 target 时跳过 source overflow trim，只让 raw ceiling 总量 trim 收敛素材。
 - **空 plan 诊断补齐** —— refresh plan 为空时会记录 pool/raw/pending、source available/raw/target 和 requested_by_source。
 - **发现多样性补强** —— API runtime 对主 discovery 生产 raw candidates 做 4 倍 oversample，降低重复候选导致 pending 队列只有 1-3 条的概率。
-
-## 用户交流群
-
-<table>
-  <tr>
-    <td align="center" width="50%">
-      <img src="docs/images/user-community-qrcode.png" width="200" alt="QQ 用户交流群二维码" /><br/>
-      <b>QQ 用户群</b>
-    </td>
-    <td align="center" width="50%">
-      <img src="docs/images/wechat-user-community-qrcode.jpg" width="200" alt="微信用户群二维码" /><br/>
-      <b>微信用户群</b><br/>
-      <sub>二维码 7 天内有效，失效后会更新</sub>
-    </td>
-  </tr>
-</table>
 
 ## 安装与部署详情
 
