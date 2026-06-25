@@ -79,7 +79,7 @@ All data lives in a single SQLite file on your disk. LLM calls use your own API 
 > | | Bilibili Official | Keyword Filter Plugins | OpenBiliClaw |
 > |---|---|---|---|
 > | Recommendation logic | Collaborative filtering | Tag matching | Psychological profiling + 5-layer memory |
-> | Content sources | Single platform | Single platform | Cross-platform: Bilibili · Xiaohongshu · Douyin · YouTube · X · more |
+> | Content sources | Single platform | Single platform | Cross-platform: Bilibili · Xiaohongshu · Douyin · YouTube · X · Zhihu · more |
 > | Filter bubble | Gets narrower | Doesn't address it | Speculative interests actively break it |
 > | Data ownership | Platform-owned | Usually cloud | 100% local |
 > | Explains why | "Guess you'll like" | None | Friend-like explanations |
@@ -190,15 +190,13 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-Latest: **v0.3.141 / extension v0.3.93 / desktop v0.3.140: recommendation pool refill deadlock fix (2026-06-25)**. Full changelog: [docs/changelog.md](docs/changelog.md).
+Latest: **v0.3.142 / extension v0.3.94 / desktop v0.3.142: background Zhihu discovery and release package sync (2026-06-25)**. Full changelog: [docs/changelog.md](docs/changelog.md).
 
-- **Fixes a refill deadlock** — when available inventory is below target but raw material has reached the ceiling, runtime no longer turns the source deficit into zero; search/producers keep refilling the servable pool.
-- **Publishes an extension maintenance package** — `extension-v0.3.93` is for GitHub Release and Chrome Web Store distribution; extension behavior remains aligned with v0.3.92.
+- **Zhihu discovery no longer steals focus** — init / event smoke tasks still use a foreground tab, while search / hot / feed / creator / related discovery now use a background task tab.
 - **Zhihu is now a full source path** — the extension can read Zhihu history, collections, and activity likes/favorites from your already logged-in browser session; `init --yes-zhihu` can feed first-run profiling, while `fetch-zhihu --write-memory` / `--rebuild-profile` support real backfill and profile rebuilds.
-- **Five Zhihu discovery branches** — search / hot / feed / creator / related all use extension tasks, and `discover --source zhihu` is wired into the formal producer and unified candidate pipeline.
-- **Settings and cards are aligned** — the extension, desktop web UI, and mobile web UI can configure Zhihu, render Zhihu recommendation cards, and make the `zhihu` source share participate in runtime scheduling.
-- **Real E2E verified** — logged-in extension bootstrap, profile rebuild, and all five Zhihu discovery branches have been exercised; plain smoke tasks still do not pollute memory or profiling.
-- **Keeps v0.3.139 stability fixes** — this release includes GitHub API rate-limit fallback for update checks, cross-platform signal strength, and coalesced recommendation-feedback learning.
+- **Source positioning is synced** — README, package metadata, GitHub About, architecture docs, and discovery docs all describe Zhihu as a production cross-platform source.
+- **Extension and installer packages are published together** — `extension-v0.3.94` and `desktop-v0.3.142` are prepared for the aggregate GitHub Release page.
+- **Real E2E verified** — a logged-in extension completed `discover-zhihu-hot --limit 3` and wrote real candidates; plain smoke tasks still do not pollute memory or profiling.
 
 ## Community
 
@@ -564,7 +562,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 ┌─────────────────────────────────────────────────────┐
 │                   Chrome Extension                   │
 │      (Unified behavior -> /api/events -> profile pipeline · Recs · Chat · Probes) │
-│      (Cookies · Bili/XHS/DY/YT tasks · optional init bridge · autostart setting) │
+│      (Cookies · Bili/XHS/DY/YT/Zhihu tasks · optional init bridge · autostart) │
 └────────────────────────┬────────────────────────────┘
                          │ REST API / WebSocket (presence + cookies + pool counts + source-aware clicks + probes)
                          │ + Mobile/Desktop Web (/m · /web) · optional [api.auth] password gate (local free / LAN needs password)
@@ -599,7 +597,7 @@ Four Bilibili strategies work in coordination, each with independent API quota; 
 | **Related Chain** | Expands from seed videos along recommendation chains | Fair share |
 | **Explore** | LLM-driven cross-domain exploration | Fair share |
 
-**Safe data fetching** — Bilibili and generic Web fetch backend-direct (Bilibili via WBI-signed APIs); if Bilibili search degrades or is blocked and cooling down, the backend task bridge can enqueue a search task, then the extension opens the real logged-in search page in a background tab and returns visible rendered DOM results as fallback candidates. Xiaohongshu / Douyin / YouTube / Zhihu are read by the browser extension inside your *already-logged-in* pages: init profiling doesn't deep-scroll by default and returns in batches, and the backend never crawls or logs in to those sites itself (YouTube can also import old history via Google Takeout). `fetch-zhihu` remains an event-smoke command and does not feed profiling; guided init only feeds Zhihu `bootstrap_events` into the first profile when Zhihu is selected, and steady-state discovery uses extension-backed search / hot / feed / creator / related tasks. X is fetched backend-side via read-only server-side cookie replay using the x.com cookie the extension synced (`auth_token` + `ct0`); the extension only syncs the cookie and captures your own engagement. Ordinary browser behavior events enter the continuous-learning path only after the profile is initialized: accepted events are written to memory, ingested into the `ProfileUpdatePipeline` interest / surface / role buffers, then queue a replenishment request via `request_replenishment(reason="event_ingest")`. Runtime `pending_signal_events` is only the search / related_chain discovery watermark, not a profile backlog. First-run profile signals are fetched only after you click "Start initialization" and only from the selected sources. For steady-state refill, Douyin search / hot / feed background tabs first open the Douyin home page and perform real DOM interactions to trigger search, hot, or feed loading; search/feed passively collect page responses and rendered DOM, while hot can use a hot-board seed through the logged-in page's related API bridge when the page path returns no candidates. YouTube is refilled backend-side by platform deficit; Zhihu is refilled via extension multi-source discovery tasks.
+**Safe data fetching** — Bilibili and generic Web fetch backend-direct (Bilibili via WBI-signed APIs); if Bilibili search degrades or is blocked and cooling down, the backend task bridge can enqueue a search task, then the extension opens the real logged-in search page in a background tab and returns visible rendered DOM results as fallback candidates. Xiaohongshu / Douyin / YouTube / Zhihu are read by the browser extension inside your *already-logged-in* pages: init profiling doesn't deep-scroll by default and returns in batches, and the backend never crawls or logs in to those sites itself (YouTube can also import old history via Google Takeout). `fetch-zhihu` remains an event-smoke command and does not feed profiling; guided init only feeds Zhihu `bootstrap_events` into the first profile when Zhihu is selected, and steady-state discovery uses extension-backed search / hot / feed / creator / related tasks. X is fetched backend-side via read-only server-side cookie replay using the x.com cookie the extension synced (`auth_token` + `ct0`); the extension only syncs the cookie and captures your own engagement. Ordinary browser behavior events enter the continuous-learning path only after the profile is initialized: accepted events are written to memory, ingested into the `ProfileUpdatePipeline` interest / surface / role buffers, then queue a replenishment request via `request_replenishment(reason="event_ingest")`. Runtime `pending_signal_events` is only the search / related_chain discovery watermark, not a profile backlog. First-run profile signals are fetched only after you click "Start initialization" and only from the selected sources. For steady-state refill, Douyin search / hot / feed background tabs first open the Douyin home page and perform real DOM interactions to trigger search, hot, or feed loading; search/feed passively collect page responses and rendered DOM, while hot can use a hot-board seed through the logged-in page's related API bridge when the page path returns no candidates. YouTube is refilled backend-side by platform deficit; Zhihu discovery runs extension search / hot / feed / creator / related tasks in a background task tab, while `bootstrap_events` init / event smoke remains foreground.
 
 **Unified evaluation** — every source first writes raw candidates to `discovery_candidates`. The backend then claims mixed-source batches and scores them with the Soul profile, text / tags, engagement metrics, and recent negative examples. A refresh that discovers new raw candidates drains immediately, and an independent candidate eval loop also drains existing pending raw periodically, so evaluation no longer depends on a non-empty replenish plan. When optional cover-image evaluation is enabled and the evaluation model supports image input, covers are read from the runtime image cache first, fetched through the whitelist boundary only on cache miss, compressed, and sent to the same shared evaluator; the "will this user like it?" judgment does not live inside each platform producer.
 
@@ -669,7 +667,7 @@ OpenBiliClaw/
 
 ## 📜 Release History
 
-Latest: **v0.3.141 / extension v0.3.93 / desktop v0.3.140: recommendation pool refill deadlock fix (2026-06-25)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Most users should use the `openbiliclaw-v*` aggregate [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) for extension packages and available desktop installers; automation-channel releases remain available as `backend-v*`, `extension-v*`, and `desktop-v*`.
+Latest: **v0.3.142 / extension v0.3.94 / desktop v0.3.142: background Zhihu discovery and release package sync (2026-06-25)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Most users should use the `openbiliclaw-v*` aggregate [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) for extension packages and available desktop installers; automation-channel releases remain available as `backend-v*`, `extension-v*`, and `desktop-v*`.
 
 ## 🗺️ Roadmap
 

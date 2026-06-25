@@ -4,15 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "openbiliclaw"
-version = "0.3.141"
-description = "Your AI friend on Bilibili — understands who you are and finds content you'll love."
+version = "0.3.142"
+description = "Your local-first, cross-platform AI discovery friend for Bilibili, Zhihu, and more."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 authors = [
     { name = "OpenBiliClaw Contributors" },
 ]
-keywords = ["bilibili", "ai", "agent", "recommendation", "llm"]
+keywords = ["bilibili", "zhihu", "ai", "agent", "recommendation", "content-discovery", "cross-platform", "llm"]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: End Users/Desktop",

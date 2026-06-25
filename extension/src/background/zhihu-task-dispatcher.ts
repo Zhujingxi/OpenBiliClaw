@@ -99,6 +99,10 @@ export function computeZhihuTaskTimeoutMs(task: ZhihuTask): number {
   return Math.min(Math.max(BASE_TIMEOUT_MS, BASE_TIMEOUT_MS + scopeCount * PER_SCOPE_MS), MAX_TIMEOUT_MS);
 }
 
+export function shouldOpenZhihuTaskActive(task: ZhihuTask): boolean {
+  return task.type === "bootstrap_events";
+}
+
 let taskInFlight = false;
 let taskTabId: number | null = null;
 let taskTimeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -223,7 +227,7 @@ export async function executeTask(task: ZhihuTask): Promise<void> {
 
   let tab: chrome.tabs.Tab;
   try {
-    tab = await chrome.tabs.create({ url: ZHIHU_TASK_TAB_URL, active: true });
+    tab = await chrome.tabs.create({ url: ZHIHU_TASK_TAB_URL, active: shouldOpenZhihuTaskActive(task) });
   } catch {
     await postTaskResult({
       task_id: task.id,

@@ -4,12 +4,23 @@
 
 ---
 
+## v0.3.142 / extension v0.3.94 / desktop v0.3.142: 知乎后台 discovery 与发布包同步（2026-06-25）
+
+后端源码走 `backend-v0.3.142`，浏览器插件走 `extension-v0.3.94`，桌面安装包走 `desktop-v0.3.142`。
+
+- **知乎 discovery 不再抢前台**：浏览器插件只在 `bootstrap_events` 初始化 / 事件 smoke 时打开前台知乎 tab，便于用户确认浏览 / 收藏 / 点赞收藏信息收集；search / hot / feed / creator / related discovery 改用后台任务 tab，后台补池不会打断当前浏览焦点。
+- **同步知乎来源对外定位**：GitHub About、包描述、README 中英文架构摘录、`docs/spec.md` 与 discovery 模块文档统一把知乎列为已落地跨平台来源，避免仍被描述成 B 站单源工具。
+- **发布插件与桌面安装包**：插件版本提升到 `extension-v0.3.94`，后端 / 桌面安装包版本提升到 `desktop-v0.3.142`，用于 GitHub Release 聚合页分发。
+- **真实环境验证**：本地真实 API + 已连接浏览器插件完成 `discover-zhihu-hot --limit 3` E2E，扩展任务完成并写入 3 条 `zhihu-hot` 候选；后台 tab 分支配套单测覆盖 `bootstrap_events` 前台、discovery 后台。
+
 ## v0.3.141 / extension v0.3.93 / desktop v0.3.140: 推荐池补货死锁修复（2026-06-25）
 
 后端源码走 `backend-v0.3.141`，浏览器插件走 `extension-v0.3.93`，桌面安装包暂沿用 `desktop-v0.3.140`。
 
 - **修复 raw ceiling 误停补货**：当 `pool_available_count` 低于 `pool_target_count`、但 raw material 已达到 ceiling 时，`ContinuousRefreshController` 不再把 source deficit 算成 0；Search / producer 会继续补足可用池，raw ceiling 仍由 `_enforce_pool_cap()` 和 post-refresh trim 负责收敛，避免 pending keywords 长期不被消费、日志只剩 `enforce_pool_cap` / `candidate eval drain no_pending`。
 - **同步发布插件维护包**：浏览器插件版本提升到 `extension-v0.3.93`，用于 GitHub Release 和 Chrome Web Store 包同步分发；插件功能代码与 `v0.3.92` 保持一致。
+- **同步知乎来源对外定位文档**：GitHub About、包描述、README 中英文架构摘录、`docs/spec.md` 和 discovery 模块文档统一把知乎列为已落地跨平台来源，避免仍被描述成 B 站单源工具。
+- **知乎 discovery 改为后台任务 tab**：插件仍用前台 tab 执行 `bootstrap_events` 初始化 / 事件 smoke，便于用户感知浏览 / 收藏 / 点赞收藏信息收集；search / hot / feed / creator / related discovery 则改为后台 tab，避免后台补池打断用户当前浏览焦点。
 
 ## v0.3.140 / extension v0.3.92 / desktop v0.3.140: 知乎多源接入与插件发现（2026-06-24）
 
