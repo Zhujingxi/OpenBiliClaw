@@ -3800,11 +3800,36 @@ class TestBackendAPI:
     def test_reshuffle_recommendations_endpoint_returns_immediate_items(self) -> None:
         from fastapi.testclient import TestClient
 
+        class FakeEventHub:
+            def __init__(self) -> None:
+                self.events: list[dict[str, object]] = []
+
+            async def publish(self, event: dict[str, object]) -> bool:
+                self.events.append(event)
+                return True
+
+        class FakeRuntimeController:
+            def __init__(self, hub: FakeEventHub) -> None:
+                self.event_hub = hub
+                self.pool_available_count = 3
+
+            def get_runtime_status(self) -> dict[str, object]:
+                return {
+                    "initialized": True,
+                    "pool_available_count": self.pool_available_count,
+                    "pool_pending_count": 5,
+                    "last_replenished_count": 0,
+                    "last_discovered_count": 0,
+                }
+
         class FakeSoulEngine:
             async def get_profile(self) -> dict[str, object]:
                 return {"profile": "ok"}
 
         class FakeRecommendationEngine:
+            def __init__(self, runtime: FakeRuntimeController) -> None:
+                self.runtime = runtime
+
             async def reshuffle_recommendations(
                 self,
                 *,
@@ -3813,6 +3838,7 @@ class TestBackendAPI:
             ) -> list[object]:
                 assert profile == {"profile": "ok"}
                 assert limit == 10
+                self.runtime.pool_available_count = 0
                 from openbiliclaw.discovery.engine import DiscoveredContent
                 from openbiliclaw.recommendation.engine import Recommendation
 
@@ -3832,11 +3858,14 @@ class TestBackendAPI:
                     )
                 ]
 
+        hub = FakeEventHub()
+        runtime = FakeRuntimeController(hub)
         app = create_app(
             memory_manager=object(),
             database=object(),
             soul_engine=FakeSoulEngine(),
-            recommendation_engine=FakeRecommendationEngine(),
+            recommendation_engine=FakeRecommendationEngine(runtime),
+            runtime_controller=runtime,
         )
         client = TestClient(app)
 
@@ -3863,16 +3892,43 @@ class TestBackendAPI:
                 }
             ]
         }
+        assert hub.events[-1]["type"] == "refresh.pool_updated"
+        assert hub.events[-1]["message"] == "推荐池已同步"
+        assert hub.events[-1]["pool_available_count"] == 0
+        assert hub.events[-1]["pool_pending_count"] == 5
 
     def test_append_recommendations_endpoint_excludes_existing_bvids(self) -> None:
         from fastapi.testclient import TestClient
+
+        class FakeEventHub:
+            def __init__(self) -> None:
+                self.events: list[dict[str, object]] = []
+
+            async def publish(self, event: dict[str, object]) -> bool:
+                self.events.append(event)
+                return True
+
+        class FakeRuntimeController:
+            def __init__(self, hub: FakeEventHub) -> None:
+                self.event_hub = hub
+                self.pool_available_count = 4
+
+            def get_runtime_status(self) -> dict[str, object]:
+                return {
+                    "initialized": True,
+                    "pool_available_count": self.pool_available_count,
+                    "pool_pending_count": 2,
+                    "last_replenished_count": 0,
+                    "last_discovered_count": 0,
+                }
 
         class FakeSoulEngine:
             async def get_profile(self) -> dict[str, object]:
                 return {"profile": "ok"}
 
         class FakeRecommendationEngine:
-            def __init__(self) -> None:
+            def __init__(self, runtime: FakeRuntimeController) -> None:
+                self.runtime = runtime
                 self.calls: list[tuple[object, list[str], int]] = []
 
             async def append_recommendations(
@@ -3883,6 +3939,7 @@ class TestBackendAPI:
                 limit: int = 10,
             ) -> list[object]:
                 self.calls.append((profile, excluded_bvids, limit))
+                self.runtime.pool_available_count = 1
                 from openbiliclaw.discovery.engine import DiscoveredContent
                 from openbiliclaw.recommendation.engine import Recommendation
 
@@ -3902,12 +3959,15 @@ class TestBackendAPI:
                     )
                 ]
 
-        recommendation_engine = FakeRecommendationEngine()
+        hub = FakeEventHub()
+        runtime = FakeRuntimeController(hub)
+        recommendation_engine = FakeRecommendationEngine(runtime)
         app = create_app(
             memory_manager=object(),
             database=object(),
             soul_engine=FakeSoulEngine(),
             recommendation_engine=recommendation_engine,
+            runtime_controller=runtime,
         )
         client = TestClient(app)
 
@@ -3938,6 +3998,10 @@ class TestBackendAPI:
                 }
             ]
         }
+        assert hub.events[-1]["type"] == "refresh.pool_updated"
+        assert hub.events[-1]["message"] == "推荐池已同步"
+        assert hub.events[-1]["pool_available_count"] == 1
+        assert hub.events[-1]["pool_pending_count"] == 2
 
     def test_empty_pool_append_and_reshuffle_skip_recommendation_path_and_debounce_refresh(
         self, monkeypatch: pytest.MonkeyPatch

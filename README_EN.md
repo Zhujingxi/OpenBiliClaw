@@ -603,7 +603,7 @@ Four Bilibili strategies work in coordination, each with independent API quota; 
 
 **Diversity selection** — accepted results then pass through platform-quota reservation → topic dedup → style balancing → **cross-platform interleaving** → count caps, so recommendations never become "all AI all day". Saved platform shares default to Bilibili / Xiaohongshu / Douyin / YouTube / X / Zhihu = 5 / 1 / 1 / 1 / 1 / 1, configurable via `[scheduler.pool_source_shares]`; out of the box only Bilibili is enabled and the others must be turned on explicitly.
 
-**Pool counts** — the "swappable" number in the UI only counts `pool_available_count`: candidates with ready copy, a category and an openable link, and no recent-view conflict. Material still being prepared counts as `pool_pending_count`; `pool_pending_eval_count` / `pool_evaluated_pending_count` split out the not-yet-scored and scored-but-not-admitted stages. The extension / Mobile Web / Desktop Web never present pending material as swappable.
+**Pool counts** — the "swappable" number in the UI only counts `pool_available_count`: candidates with ready copy, a category and an openable link, and no recent-view conflict. Material still being prepared counts as `pool_pending_count`; `pool_pending_eval_count` / `pool_evaluated_pending_count` split out the not-yet-scored and scored-but-not-admitted stages. The extension / Mobile Web / Desktop Web never present pending material as swappable. After recommendation bootstrap, reshuffle, or append consumes the pool, the backend immediately broadcasts a fresh runtime-stream pool snapshot so every open surface sees the decremented inventory.
 
 ### Soul Engine
 

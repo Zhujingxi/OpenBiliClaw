@@ -17,6 +17,7 @@
 - **知乎事件回填补齐 memory / 画像路径**：`fetch-zhihu` 新增 `--write-memory` 和 `--rebuild-profile`。默认仍只做真实插件 smoke；`--write-memory` 会把本次抓到的知乎浏览 / 收藏 / 点赞事件去重后写入 memory，`--rebuild-profile` 隐含写入并触发真实 LLM 画像重建。`/api/sources/zhihu/task-result` 对 payload 显式带 `profile_update=true` 的 `bootstrap_events` 任务会像其它平台一样把新增事件传播到 memory，并在 profile 已存在时进入 `ProfileUpdatePipeline`；普通 smoke 任务保持不污染画像。
 - **知乎来源比例升级兼容**：旧 `config.toml` 若已有 `[scheduler.pool_source_shares]` 但缺少 `zhihu`，配置加载和运行时 source policy 会自动补默认 `zhihu=1`；配置页保存 `pool_source_shares.zhihu` 后，启用知乎时会进入有效平台配比，关闭知乎时仍保留配置值但不占 runtime quota。
 - **画像偏好分析补齐网页长文本拒答兜底**：真实知乎画像重建时发现 DeepSeek 偶发把含长回答摘要的 preference chunk 拒答成非 JSON。`PreferenceAnalyzer` 的 chunked 路径现在先把可恢复的非 JSON 当作重试信号而不是直接 ERROR；单条事件仍失败时会去掉长 `context`，保留 title / URL / source metadata 做一次安全压缩重试，避免整条知乎浏览 / 收藏 / 点赞信号被丢弃。新增回归测试覆盖“原始 context 被拒答、压缩后成功提取兴趣”的场景。
+- **推荐池消费后库存状态实时收敛**：`GET /api/recommendations` 首次从候选池补历史、`/api/recommendations/reshuffle` 和 `/api/recommendations/append` 消费可换内容后，会立即重新读取 runtime 池子口径并广播 `refresh.pool_updated`，避免其它已打开客户端继续显示旧的“可换”数量。插件 side panel 和移动 Web 收到该事件时同步刷新底部可换提示 / 空态文案但不重拉推荐列表；桌面 Web 首屏在推荐 bootstrap 后会再读一次 `/api/runtime-status`，并把左侧标签改为“当前可换库存 / 上次成功补货”，减少“当前库存”和“上一轮补货结果”混读。
 
 ## v0.3.139 / extension v0.3.91 / desktop v0.3.139: 更新检查限流兜底与知乎 smoke（2026-06-24）
 

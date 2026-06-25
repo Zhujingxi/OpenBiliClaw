@@ -1062,6 +1062,29 @@ function renderPoolStatus(runtimeStatus) {
   elements.poolTopics.textContent = summary.topics;
 }
 
+function runtimeEventCarriesPoolCounts(event) {
+  return (
+    event?.type === "refresh.pool_updated" ||
+    typeof event?.pool_available_count === "number" ||
+    typeof event?.pool_pending_count === "number" ||
+    typeof event?.pool_raw_count === "number"
+  );
+}
+
+function renderReadyRecommendationHint() {
+  if (
+    state.activeTab !== "recommend" ||
+    !(elements.viewRecommend instanceof HTMLElement) ||
+    elements.viewRecommend.hidden ||
+    !Array.isArray(state.recommendations) ||
+    state.recommendations.length === 0
+  ) {
+    return;
+  }
+  const hint = getReadyRecommendationHint(state.runtimeStatus);
+  setHint(hint.message, hint.tone);
+}
+
 function rememberDismissedDelight(bvid) {
   if (!bvid) {
     return;
@@ -1317,6 +1340,9 @@ function connectRuntimeStream() {
       state.runtimeEvent = event;
       state.runtimeStatus = mergeRuntimeStatusEvent(state.runtimeStatus, event);
       renderPoolStatus(state.runtimeStatus);
+      if (runtimeEventCarriesPoolCounts(event)) {
+        renderReadyRecommendationHint();
+      }
       if (event.type === "delight.candidate" && event.bvid) {
         mergeIncomingDelight(event);
       }
@@ -5417,6 +5443,8 @@ async function initializeRecommendations() {
     state.recommendations = recommendationResult.value;
     state.loadingMore = false;
     state.hasMoreRecommendations = state.recommendations.length >= 10;
+    state.runtimeStatus = await fetchRuntimeStatus().catch(() => state.runtimeStatus);
+    renderPoolStatus(state.runtimeStatus);
     renderRecommendationState(
       getPopupState({
         online,

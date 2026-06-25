@@ -3253,6 +3253,7 @@ def create_app(
                     rows = _filter_low_confidence(
                         ctx.database.get_recommendations(limit=40, exclude_processed=True)
                     )
+                    await _publish_pool_status_snapshot()
                     logger.info(
                         "GET /api/recommendations bootstrap: served from "
                         "empty history (pool_count=%d → wrote %d to history)",
@@ -3490,6 +3491,84 @@ def create_app(
                 return max(0, int(count_pool()))
         return None
 
+    def _runtime_pool_status_payload() -> dict[str, object]:
+        """Return frontend runtime fields needed to resync pool status."""
+        status: dict[str, object] = {}
+        get_runtime_status = getattr(ctx.runtime_controller, "get_runtime_status", None)
+        if callable(get_runtime_status):
+            with suppress(Exception):
+                runtime_status = get_runtime_status()
+                if isinstance(runtime_status, dict):
+                    status.update(runtime_status)
+
+        if "pool_available_count" not in status:
+            readiness = getattr(ctx.database, "count_pool_readiness", None)
+            if callable(readiness):
+                with suppress(Exception):
+                    counts = readiness()
+                    if isinstance(counts, dict):
+                        status.update(
+                            {
+                                "pool_available_count": counts.get("available", 0),
+                                "pool_raw_count": counts.get("raw", counts.get("available", 0)),
+                                "pool_pending_count": counts.get("pending", 0),
+                                "pool_pending_eval_count": counts.get("pending_eval", 0),
+                                "pool_evaluated_pending_count": counts.get(
+                                    "evaluated_pending", 0
+                                ),
+                            }
+                        )
+            else:
+                count_pool = getattr(ctx.database, "count_pool_candidates", None)
+                if callable(count_pool):
+                    with suppress(Exception):
+                        status["pool_available_count"] = int(count_pool())
+
+        int_fields = (
+            "pool_available_count",
+            "pool_raw_count",
+            "pool_pending_count",
+            "pool_pending_eval_count",
+            "pool_evaluated_pending_count",
+            "pool_target_count",
+            "last_replenished_count",
+            "last_discovered_count",
+        )
+        payload: dict[str, object] = {}
+        for field in int_fields:
+            if field not in status:
+                continue
+            raw_value = status.get(field)
+            if raw_value is None:
+                raw_value = 0
+            with suppress(TypeError, ValueError):
+                payload[field] = max(0, int(cast("Any", raw_value)))
+        recent_pool_topics = status.get("recent_pool_topics")
+        if isinstance(recent_pool_topics, list):
+            payload["recent_pool_topics"] = [
+                str(item) for item in recent_pool_topics if str(item).strip()
+            ]
+        return payload
+
+    async def _publish_pool_status_snapshot(message: str = "推荐池已同步") -> None:
+        """Broadcast pool counts after recommendation endpoints consume inventory."""
+        event_hub = getattr(ctx, "event_hub", None) or getattr(
+            ctx.runtime_controller, "event_hub", None
+        )
+        publish = getattr(event_hub, "publish", None)
+        if not callable(publish):
+            return
+        event = {
+            "type": "refresh.pool_updated",
+            "phase": "done",
+            "message": message,
+            **_runtime_pool_status_payload(),
+        }
+        with suppress(Exception):
+            result = publish(event)
+            if asyncio.iscoroutine(result):
+                await result
+
     async def _run_auto_replenishment(trigger: Callable[[], Any]) -> None:
         try:
             await trigger()
@@ -3573,6 +3652,7 @@ def create_app(
         except Exception:
             return RecommendationReshuffleResponse(items=[])
         items = await ctx.recommendation_engine.reshuffle_recommendations(profile=profile, limit=10)
+        await _publish_pool_status_snapshot()
         await _trigger_replenishment_if_needed()
         return RecommendationReshuffleResponse(items=_serialize_recommendation_items(items))
 
@@ -3594,6 +3674,7 @@ def create_app(
             excluded_bvids=payload.excluded_bvids,
             limit=10,
         )
+        await _publish_pool_status_snapshot()
         await _trigger_replenishment_if_needed()
         return RecommendationReshuffleResponse(items=_serialize_recommendation_items(items))
 

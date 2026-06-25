@@ -12,7 +12,7 @@
 | 后台刷新控制 | ✅ | `ContinuousRefreshController` 按 scheduler 配置补充候选池，并通过 source policy 计算各平台有效配比；注入 `DiscoveryCandidatePipeline` 后，B 站主补货先生产 raw candidates，再进入统一待评估池。 |
 | 统一候选待评估池调度 | ✅ | B 站、XHS、抖音、YouTube、X discovery raw candidates 先写入 `discovery_candidates`；runtime 既会在 refresh plan 发现新 raw 后即时调用共享 drain，也会由独立 `_loop_candidate_eval()` 周期性 drain 已有 pending raw 并在 admission 后触发 `precompute_pool_copy()`。controller 层 `_discovery_drain_lock` 与 `DiscoveryCandidatePipeline` 内部 lock 串行化所有入口，producer / refresh / periodic loop 不会并发 admission；正式可换池达到 `pool_target_count` 时不会继续 discovery / drain。 |
 | B 站扩展搜索兜底 producer | ✅ | `BilibiliExtensionSearchProducer` 在 B 站平台族低于 quota、`BilibiliAPIClient.search_cooldown_remaining()>0`、扩展 presence 在线且候选池未满时入队 `bili_tasks(type="search")`；扩展回传后仍进入 `DiscoveryCandidatePipeline` 统一评估。 |
-| 候选池文案预计算状态同步 | ✅ | 独立 `_loop_pool_precompute()` 将 fresh 候选补齐 `pool_expression` / `pool_topic_label` 后，会同步更新 `last_replenished_count` 并推送 `refresh.pool_updated`；前端消费该事件时只刷新池子状态，不全量替换推荐列表，避免覆盖已 append 的历史内容。 |
+| 候选池文案预计算状态同步 | ✅ | 独立 `_loop_pool_precompute()` 将 fresh 候选补齐 `pool_expression` / `pool_topic_label` 后，会同步更新 `last_replenished_count` 并推送 `refresh.pool_updated`；`GET /api/recommendations` bootstrap、`reshuffle` 和 `append` 消费可换池后也会发布同一池子快照。前端消费该事件时只刷新池子状态和相关提示，不全量替换推荐列表，避免覆盖已 append 的历史内容。 |
 | 候选池真实可换计数 | ✅ | `pool_available_count` 现在只表示后端当前可立即 `serve()` 的候选，并按默认每 `topic_group` 最多 3 条的候选窗口计数；runtime status / runtime stream 另带 `pool_raw_count`、`pool_pending_count`、`pool_pending_eval_count`、`pool_evaluated_pending_count` 区分素材库存、待评估和已评估待入池内容。 |
 | embedding 后台预热 | ✅ | refresh 完成前只保证候选入池与文案可用；`prewarm_supergroup_embeddings()` / `prewarm_pool_mmr_embeddings()` 作为后台 task 运行，慢本地 embedding 后端不会占住 refresh lock 或让界面长时间停在“正在补货”。v0.3.124+（lever 4）：`prewarm_pool_mmr_embeddings()` 返回值区分良性冷启动与真故障——`-1`（无 embedding service / 空池，没东西可暖）让启动重试包装器 `_safe_prewarm_pool_mmr_embeddings` 平静跳过(不再每次装机刷 5 行 `warmed=0 — retry`)，`0`（有候选但全嵌入失败＝后端不可达）才重试到底并在放弃时打 WARNING 点名 embedding 后端不可达、MMR 降级。 |
 | YouTube 后台 discovery producer | ✅ | `YoutubeDiscoveryProducer` 独立运行 `yt_search` / `yt_trending` / `yt_channel`，只在 YouTube 平台族低于 quota 时由 `_loop_youtube_producer()` tick，按每日 ledger 和 `min_interval_minutes` 控制执行。 |
@@ -21,7 +21,7 @@
 | 运行时频率配置 | ✅ | `refresh_check_interval_seconds`、行为触发阈值、trending / explore 间隔、单轮发现上限、惊喜队列加载数量、主动推送间隔和 speculator idle tick 都从 `[scheduler]` 读取，配置热重载后重建 runtime 生效。 |
 | 推荐反馈批学习调度 | ✅ | `FeedbackBatchScheduler` 挂在 FastAPI `app.state`，`/api/feedback` 每次只标记 dirty 并触发 5 秒 debounce；burst 内多条推荐反馈 coalesce 成一次 `SoulEngine.process_feedback_batch_if_needed()`，处理期间又有新反馈时会在本轮结束后再补跑一轮，避免每条反馈都启动画像重分析。 |
 | 浏览器 presence gate | ✅ | `background_llm_work_allowed()` 结合 `scheduler.enabled` 与 `pause_on_extension_disconnect` 控制 daemon-owned 后台 LLM / embedding 工作。 |
-| Runtime event stream | ✅ | `/api/runtime-stream` 向扩展推送状态、Cookie sync 请求、配置重载和 presence 事件；`RuntimeEventHub.publish()` 会返回是否至少有一个订阅者接收，供一次性事件判断是否真正投递。 |
+| Runtime event stream | ✅ | `/api/runtime-stream` 向扩展推送状态、Cookie sync 请求、配置重载、候选池快照和 presence 事件；`RuntimeEventHub.publish()` 会返回是否至少有一个订阅者接收，供一次性事件判断是否真正投递。 |
 | Activity feed 状态摘要 | ✅ | `/api/activity-feed` 聚合认知更新、反馈、推荐池补货和 live summary；未初始化且还没有推荐 / 可换池 / 补货产物时，普通 `/api/events` 不会新写入 pending signals，旧的 `pending_signal_events` 也不会抢占初始化提示。初始化后 pending 文案统一为“已记下 N 个新动作，下一轮补货会拿来参考”，表示 discovery refresh 水位，不表示画像待处理队列。 |
 | 扩展捕捉 E2E 控制事件 | ✅ | local-only `/api/extension/e2e/run` 会通过 runtime stream 投递 `extension_e2e_run`，要求已安装扩展在真实平台页执行白名单 DOM 操作；`/api/extension/e2e/result` 回收插件执行结果，后端再按运行窗口匹配 `/api/events` 中自然捕捉到的事件。 |
 | 兴趣探针投递保护 | ✅ | `interest.probe` 只有成功投递到 runtime stream 后才写入 `probed_domains` / `probed_axes` / `probed_distance_bands` 冷却状态；事件 payload 会带 `probe_mode` 与 `challenge`，前端离线时不会消耗 active probe。普通 `near` 探针与挑战探针使用独立 active 额度，运行时选择时仍统一仲裁。 |
@@ -125,6 +125,8 @@ scheduler.schedule()
 - `recent_pool_topics`：最近一轮实际 admission 到推荐池的内容主题；retry-only admission 可以更新该字段，但不会增加 `last_discovered_count`。
 
 前端凡是显示“可换”都必须只读取 `pool_available_count`。`pool_pending_count` / `pool_pending_eval_count` / `pool_evaluated_pending_count` 只能用于“正在整理成可换内容”等辅助文案和诊断。
+
+`refresh.pool_updated` 不只来自后台补货和文案预计算。`GET /api/recommendations` 在无历史推荐时会从池子 bootstrap，一旦这一步或 `reshuffle` / `append` 把 fresh 候选标记为 shown，API 会立刻重新读取同一组 runtime pool 字段并向 `/api/runtime-stream` 发布快照。已打开的插件、移动 Web 和桌面 Web 应用该快照刷新库存数字、底部可换提示和空态文案，但不得因此重拉 `/api/recommendations` 替换当前列表。
 
 ### Activity Feed
 

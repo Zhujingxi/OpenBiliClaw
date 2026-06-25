@@ -4047,7 +4047,8 @@
           { role: "agent", text: turn.reply || turn.assistant_message || turn.status || "等待后端回复中。" }
         ]).filter((item) => item.text);
       }
-      applyRuntimeStatus(runtime?.status || runtime);
+      const effectiveRuntime = await requestJson(ENDPOINTS.runtimeStatus).catch(() => runtime?.status || runtime);
+      applyRuntimeStatus(effectiveRuntime?.status || effectiveRuntime);
       applyDelights(delights);
       const delightChatItems = Array.isArray(delightChatTurns) ? delightChatTurns : asArray(delightChatTurns?.items);
       for (const turn of delightChatItems.filter(Boolean)) applyTurnToDelight({ ...turn, scope: turn.scope || "delight" });
