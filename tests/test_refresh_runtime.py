@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from contextlib import suppress
 from datetime import datetime
 from types import SimpleNamespace
@@ -2660,6 +2661,45 @@ def test_disabled_bilibili_share_skips_bilibili_refresh_strategies() -> None:
     assert controller._build_refresh_plan(_FakeMemoryManager().load_discovery_runtime_state()) == []
 
 
+def test_refresh_plan_logs_diagnostics_when_pool_below_target_but_no_plan(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase(
+            [],
+            pool_count=33,
+            source_available_counts={"youtube": 33},
+            source_raw_counts={"youtube": 600},
+            pool_raw_count=600,
+            pool_pending_count=9,
+            discovery_status_counts={"pending_eval": 4, "evaluated": 2},
+        ),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        pool_target_count=300,
+        pool_source_shares={"youtube": 1},
+    )
+    caplog.set_level(logging.INFO, logger="openbiliclaw.runtime.refresh")
+
+    plan = controller._build_refresh_plan(_FakeMemoryManager().load_discovery_runtime_state())
+
+    assert plan == []
+    assert "refresh plan empty" in caplog.text
+    for key in (
+        "pool_available",
+        "raw",
+        "pending",
+        "source_available",
+        "source_raw",
+        "source_targets",
+        "raw_targets",
+        "requested_by_source",
+    ):
+        assert key in caplog.text
+
+
 async def test_refresh_controller_uses_bilibili_deficit_for_discovery_limit() -> None:
     discovery = _FakeDiscoveryEngine()
     controller = ContinuousRefreshController(
@@ -3002,7 +3042,7 @@ def test_pool_cap_total_trim_receives_raw_ceiling_source_quotas() -> None:
     assert database.pool_raw_count == 1200
 
 
-def test_pool_cap_enforces_platform_caps_even_when_ready_pool_below_target() -> None:
+def test_pool_cap_skips_platform_overflow_when_ready_pool_below_target() -> None:
     database = _FakeDatabase([], pool_count=580)
     controller = ContinuousRefreshController(
         memory_manager=_FakeMemoryManager(),
@@ -3015,11 +3055,7 @@ def test_pool_cap_enforces_platform_caps_even_when_ready_pool_below_target() -> 
     )
 
     assert controller._enforce_pool_cap() is False
-    assert database.trim_overflow_source_share_quotas == {
-        "bilibili": 960,
-        "xiaohongshu": 120,
-        "douyin": 120,
-    }
+    assert database.trim_overflow_source_share_quotas is None
 
 
 def test_pool_cap_reactivates_under_quota_sources_before_trim() -> None:

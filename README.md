@@ -194,13 +194,13 @@
 
 ## 最近更新
 
-最新版本：**v0.3.142 / extension v0.3.94 / desktop v0.3.142: 知乎后台 discovery 与发布包同步（2026-06-25）**。完整变更详见 [docs/changelog.md](docs/changelog.md)。
+最新版本：**v0.3.143 / extension v0.3.94 / desktop v0.3.143: 候选评估蓄水与补池诊断（2026-06-25）**。完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
-- **知乎 discovery 不再抢前台** —— 初始化 / 事件 smoke 仍用前台 tab，search / hot / feed / creator / related discovery 改用后台任务 tab。
-- **知乎进入完整来源链路** —— 插件可用已登录知乎页面拉取浏览、收藏、动态点赞 / 收藏；`init --yes-zhihu` 可纳入首轮画像，`fetch-zhihu --write-memory` / `--rebuild-profile` 支持真实回填和画像重建。
-- **知乎来源定位同步** —— README、包描述、GitHub About、架构和 discovery 文档统一把知乎列为已落地跨平台来源。
-- **插件与安装包同步发布** —— `extension-v0.3.94` 和 `desktop-v0.3.142` 用于 GitHub Release 聚合页分发。
-- **真实 E2E 验证** —— 已用登录态插件验证 `discover-zhihu-hot --limit 3` 真实入池；普通 smoke 任务仍不污染 memory / 画像。
+- **候选评估先蓄 batch** —— daemon runtime 中 `pending_eval` 少于 8 条会先等待，最多等 120 秒再跑，避免 1-3 条候选也消耗一整份画像 prompt。
+- **评估 prompt 更瘦** —— discovery batch evaluator 只带高权重兴趣、最新 awareness / insight 和完整避雷项，减少固定画像 token。
+- **低可用池不再被 source overflow 压掉** —— 可换池低于 target 时跳过 source overflow trim，只让 raw ceiling 总量 trim 收敛素材。
+- **空 plan 诊断补齐** —— refresh plan 为空时会记录 pool/raw/pending、source available/raw/target 和 requested_by_source。
+- **发现多样性补强** —— API runtime 对主 discovery 生产 raw candidates 做 4 倍 oversample，降低重复候选导致 pending 队列只有 1-3 条的概率。
 
 ## 用户交流群
 
@@ -681,7 +681,7 @@ OpenBiliClaw/
 
 ## 📜 更新日志
 
-最新版本：**v0.3.142 / extension v0.3.94 / desktop v0.3.142: 知乎后台 discovery 与发布包同步（2026-06-25）**。最近更新见上方摘要；完整历史见 [docs/changelog.md](docs/changelog.md)。普通用户从 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 的 `openbiliclaw-v*` 聚合页下载插件包和可用桌面安装包；自动化频道 release 仍分别保留 `backend-v*`、`extension-v*`、`desktop-v*`。
+最新版本：**v0.3.143 / extension v0.3.94 / desktop v0.3.143: 候选评估蓄水与补池诊断（2026-06-25）**。最近更新见上方摘要；完整历史见 [docs/changelog.md](docs/changelog.md)。普通用户从 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 的 `openbiliclaw-v*` 聚合页下载插件包和可用桌面安装包；自动化频道 release 仍分别保留 `backend-v*`、`extension-v*`、`desktop-v*`。
 
 ## 🗺️ 后续规划
 

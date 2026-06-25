@@ -718,8 +718,12 @@ class ContinuousRefreshController:
             except Exception:
                 logger.exception("reactivate_under_quota_pool_sources failed")
 
+        pool_available = self.database.count_pool_candidates(
+            xhs_self_nickname=self._xhs_self_nickname()
+        )
+
         trim_source_overflow_fn = getattr(self.database, "trim_pool_source_overflow", None)
-        if callable(trim_source_overflow_fn):
+        if callable(trim_source_overflow_fn) and pool_available >= self.pool_target_count:
             try:
                 source_overflow_suppressed = trim_source_overflow_fn(
                     source_share_quotas=raw_source_targets,
@@ -734,10 +738,13 @@ class ContinuousRefreshController:
                     )
             except Exception:
                 logger.exception("trim_pool_source_overflow failed")
-
-        pool_available = self.database.count_pool_candidates(
-            xhs_self_nickname=self._xhs_self_nickname()
-        )
+        elif callable(trim_source_overflow_fn):
+            logger.debug(
+                "enforce_pool_cap: skipped source overflow trim below target "
+                "pool_available=%s target=%s",
+                pool_available,
+                self.pool_target_count,
+            )
         raw_ceiling = self._raw_material_ceiling()
         trimmed = 0
         try:
@@ -1627,6 +1634,7 @@ class ContinuousRefreshController:
             # capacity belongs to enabled non-Bilibili platform producers.
             # Running the Bilibili fallback here would immediately violate
             # the configured pool-source ratio.
+            self._log_empty_refresh_plan_diagnostics(pool_available=pool_available)
             return []
 
         if "bilibili" not in self._normalized_pool_source_shares():
@@ -1646,6 +1654,63 @@ class ContinuousRefreshController:
         ):
             plan.append((["explore"], self.discovery_limit))
         return plan
+
+    def _log_empty_refresh_plan_diagnostics(self, *, pool_available: int) -> None:
+        try:
+            readiness = self._pool_readiness_counts()
+        except Exception:
+            logger.debug("refresh plan empty readiness diagnostics failed", exc_info=True)
+            readiness = {}
+        try:
+            source_available = self._count_pool_available_candidates_by_source()
+        except Exception:
+            logger.debug("refresh plan empty source available diagnostics failed", exc_info=True)
+            source_available = {}
+        try:
+            source_raw = self._count_pool_raw_material_by_source()
+        except Exception:
+            logger.debug("refresh plan empty source raw diagnostics failed", exc_info=True)
+            source_raw = {}
+        source_targets = self._source_target_counts()
+        raw_targets = self._raw_source_target_counts()
+        requested_by_source: dict[str, int] = {}
+        sources = sorted(
+            set(source_targets)
+            | set(raw_targets)
+            | set(source_available)
+            | set(source_raw)
+            | set(_PLATFORM_SOURCE_ORDER)
+        )
+        for source in sources:
+            try:
+                requested_by_source[source] = self._source_requested_count(
+                    source,
+                    source_available_counts=source_available,
+                    source_raw_counts=source_raw,
+                    target_counts=source_targets,
+                    raw_target_counts=raw_targets,
+                )
+            except Exception:
+                logger.debug(
+                    "refresh plan empty requested_by_source diagnostics failed for %s",
+                    source,
+                    exc_info=True,
+                )
+                requested_by_source[source] = -1
+
+        logger.info(
+            "refresh plan empty: pool_available=%s raw=%s pending=%s "
+            "source_available=%s source_raw=%s source_targets=%s raw_targets=%s "
+            "requested_by_source=%s",
+            pool_available,
+            readiness.get("raw", "?"),
+            readiness.get("pending", "?"),
+            source_available,
+            source_raw,
+            source_targets,
+            raw_targets,
+            requested_by_source,
+        )
 
     async def refresh_after_event_ingest(self) -> dict[str, object]:
         """Compatibility shim: event ingest marks demand, scheduler refreshes later."""
@@ -1729,6 +1794,7 @@ class ContinuousRefreshController:
             cached = int(drain_result.get("cached", 0) or 0)
             rejected = int(drain_result.get("rejected", 0) or 0)
             failed = int(drain_result.get("failed", 0) or 0)
+            waiting = int(drain_result.get("waiting", 0) or 0)
         if cached > 0 and precompute:
             await self._safe_precompute_pool_copy(profile=profile)
             await self._publish_precompute_replenishment_if_needed(
@@ -1742,6 +1808,12 @@ class ContinuousRefreshController:
                 cached,
                 rejected,
                 failed,
+            )
+        elif waiting:
+            logger.info(
+                "candidate eval drain skipped: reason=batch_waiting pending=%s caller=%s",
+                waiting,
+                reason,
             )
         else:
             logger.debug("candidate eval drain skipped: reason=no_pending caller=%s", reason)

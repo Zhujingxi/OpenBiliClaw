@@ -620,7 +620,7 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 | 5.4 跨领域探索策略 | ✅ | 远域探索领域生成 + query 搜索 + exploration bonus + prompt 级外推多样性约束 |
 | 5.5 内容评估 | ✅ | `evaluate_content()` 已被四类发现策略复用（含 SearchStrategy） |
 | 5.6 发现引擎编排 | ✅ | 并发执行策略 + 高分去重 + 直接 discover 缓存收口；runtime 正常路径通过待评估池 admission 到 SQLite 推荐池 |
-| 统一待评估候选池 | ✅ | B 站、XHS、抖音、YouTube、X、知乎的原始候选先写入 `discovery_candidates(pending_eval)`，`DiscoveryCandidatePipeline` 再混源 claim、batch 评估、按阈值入 `content_cache`；runtime refresh path 和独立 candidate eval loop 共用同一 drain helper |
+| 统一待评估候选池 | ✅ | B 站、XHS、抖音、YouTube、X、知乎的原始候选先写入 `discovery_candidates(pending_eval)`，`DiscoveryCandidatePipeline` 再混源 claim、batch 评估、按阈值入 `content_cache`；API runtime 会先蓄到 8 条或等待 120 秒再跑 batch evaluator，refresh path 和独立 candidate eval loop 共用同一 drain helper |
 | M120 多事件循环并发控制修复 | ✅ | `DiscoveryConcurrencyController` 现在会按当前 event loop 重新绑定 semaphore，CLI `init` 的分阶段补货不会再在第二轮触发跨 loop `RuntimeError` |
 | 候选供给升级 | ✅ | 主发现不足时触发 backfill，并把相关性 / 候选层级写入缓存 |
 | M118 topic_key 与池子层压缩 | ✅ | Search / Related 现在会给候选带稳定 `topic_key`，发现引擎会先压缩同 topic 重复项，再写入 discovery pool |
@@ -632,7 +632,7 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 | M124 LLM 评估窗口控费 | ✅ | runtime 按平台自身缺口传递补货 limit；各策略在 LLM 评估前把候选窗口收缩到 `max(6, limit*2)`、上限 90，少量补货时不再把几十条候选送去评分后立刻 suppressed；batch evaluator 优先要求 `{"results":[...]}` 以贴合 `json_object` provider，parser 兼容 fenced JSON、回显输入后追加结果、NDJSON object 序列和按内容 ID 映射的 object，避免退回 N 次单条评估 |
 | v0.3.74 eval-batch JSON 容错统一 | ✅ | `_evaluate_batch` 改用 `llm.json_utils.extract_llm_json_list()`，在原 fenced / echo / JSONL 基础上统一兼容 `results/items/data/output/scores/evaluations` wrapper、MiMo malformed `{ [ ... ] }` 数组包裹和 schema echo 后最终结果；解析失败仍按原有降级路径处理，不把示例 JSON 当作真实评分 |
 | v0.3.81 eval-batch 按内容 ID 绑定 | ✅ | batch 内容评估 prompt 会携带 `bvid/content_id`，解析时优先按返回 ID 写回 `score/reason/topic/style/franchise`。provider 乱序或漏项时，不再把后一条候选的 `relevance_reason` 写到前一条；无 ID 且数量不完整时降级逐条评估 |
-| eval-batch 互动指标与封面图输入 | ✅ | `DiscoveredContent` / `discovery_candidates` / `content_cache` 透传观看、点赞、收藏、评论、分享、弹幕、转推、书签等指标；batch prompt 会带 `tags/body_text` 和互动指标。`[discovery].multimodal_evaluation_enabled=true` 且 evaluation 模型支持图像时，封面图经运行时图片缓存命中或白名单抓取后压缩为 image input 一并评估，并用 `cover_image_ref="cover:<content_id>"` 和图片前置文字锚点稳定绑定候选，自动使用更小 batch |
+| eval-batch 互动指标与封面图输入 | ✅ | `DiscoveredContent` / `discovery_candidates` / `content_cache` 透传观看、点赞、收藏、评论、分享、弹幕、转推、书签等指标；batch prompt 会带 `tags/body_text` 和互动指标，但画像摘要会先压缩到高权重兴趣、最新 awareness / insight 与完整避雷项。`[discovery].multimodal_evaluation_enabled=true` 且 evaluation 模型支持图像时，封面图经运行时图片缓存命中或白名单抓取后压缩为 image input 一并评估，并用 `cover_image_ref="cover:<content_id>"` 和图片前置文字锚点稳定绑定候选，自动使用更小 batch |
 | v0.3.x eval-batch 限流保护 | ✅ | batch LLM 调用若失败原因为 provider rate limit / cooldown / quota，不再降级到逐条 `evaluate_content()`；本批候选返回 0 分并等待下一轮补货重试，避免一次 Gemini 429 放大成整批 traceback |
 | B 站 search 风控冷却 | ✅ | `BilibiliAPIClient.search()` 连续 `v_voucher` 重试耗尽或 412 后会设置共享 cooldown；Search / Explore / RelatedChain 的搜索路径在冷却期直接跳过，不再继续生成 query/domain 或逐 query 撞风控 |
 | M126 explore 高风险子簇压缩 | ✅ | refresh 结束后会温和压一轮 `explore` 内部的高风险相邻簇，例如制造 / 工艺 / 材料、博弈 / 桌游 / 机制，避免单簇继续堆满 fresh pool |
@@ -758,6 +758,7 @@ drained = await pipeline.drain_pending(profile=profile, batch_size=30)
 - `produce_and_enqueue()` 负责 B 站主 refresh 路径：用 `ContentDiscoveryEngine.produce_candidates()` 拉 raw candidates，再入待评估池。
 - `drain_pending()` 是统一 evaluator：从 `pending_eval` mixed-source batch claim，调用 `evaluate_content_batch()`，完成 topic normalization 后将低分、重复、cache admission fallback、franchise quota 和已缓存候选写回不同 lifecycle status；batch 级 transient 只释放 claim 回 `pending_eval` 并递增高阈值 `batch_eval_attempts`。
 - `drain_pending()` 会读取 evaluator 的 `_EVALUATE_BATCH_HARD_CAP` 并 clamp claim size，避免配置把 batch_size 调到 evaluator hard-cap 之上时，尾部候选被当作 0 分低相关永久拒绝。
+- API runtime 构造 pipeline 时会启用 `min_eval_batch_size=8`、`max_eval_wait_seconds=120` 和 `candidate_fetch_oversample=4`：少于 8 条 `pending_eval` 先等待，超时才跑小 batch；主 B 站 refresh 会多抓 raw candidates 后再靠 `candidate_key` 去重入队，降低重复 discovery 让 evaluator 只拿到 1-3 条的概率。CLI 手动路径保留默认立即执行语义。
 - `drain_pending()` 自带共享 async lock；`ContinuousRefreshController.drain_discovery_candidates_once()` 与周期 `_loop_candidate_eval()` 也会在 controller 层串行化外部触发。所有入口都会先检查 `count_pool_candidates() >= pool_target_count`；正式可换推荐池满时不再评估 / 入池。周期 loop 在 admission 后会触发 `precompute_pool_copy()`，把刚入 `content_cache` 但缺文案的候选整理成可换库存。
 - 普通入池兜底阈值是 `[discovery].admission_min_score=0.60`；候选行可携带更严格的 strategy 阈值，explore 默认 `0.58`（backfill 最低 `0.55`）作为探索鼓励，普通 backfill 最低不低于 `0.60`。来源 / 平台标签不参与降阈值。
 
@@ -884,7 +885,7 @@ distribution_counts = database.get_pool_distribution_counts()
 - 配额单位是“平台族”，不是 raw `content_cache.source`。B 站的 `search` / `related_chain` / `trending` / `explore` 统一计入 `bilibili`；小红书的 `xhs-extension-*` 统一计入 `xiaohongshu`；抖音的 `dy-plugin-*` / `douyin*` 统一计入 `douyin`；知乎的 `zhihu-search` / `zhihu-hot` / `zhihu-feed` / `zhihu-creator` / `zhihu-related` 统一计入 `zhihu`。
 - B 站缺口仍由 `ContentDiscoveryEngine.discover()` 的四个策略补齐；小红书缺口由 `XhsTaskProducer` / 浏览器插件任务链补齐；抖音缺口由 runtime `DouyinDiscoveryProducer` 调用 `DouyinDiscoveryService(cache=True)`，小缺口用 feed / hot 快速补零散名额，大缺口优先 search / hot 插件 DOM-first 链路补池；知乎缺口由 runtime `ZhihuDiscoveryProducer` 按 `source_modes` 入队插件 search / hot / feed / creator / related 任务补齐。
 - 如果池子可换数未满但可选平台低于可换配额，`reactivate_under_quota_pool_sources()` 会优先从 `pool_status='suppressed'` 且可打开的高分小平台候选中复活一批，但会同时检查 raw ceiling headroom，避免待评估 / 未整理 raw material 已经占满对应 raw 配额时继续复活。
-- `trim_pool_source_overflow()` 和 `trim_pool_to_target_count()` 使用 raw ceiling 配额，而不是前端可换目标；trim 会先丢 non-linkable、再丢 non-ready，最后才按 relevance / recency 排序，避免为了保留高分 pending 行而删掉可打开候选。
+- `trim_pool_source_overflow()` 和 `trim_pool_to_target_count()` 使用 raw ceiling 配额，而不是前端可换目标；当 `pool_available < pool_target_count` 时，runtime 会跳过 source overflow trim，避免低可用池继续 suppress 当前可换候选；总 raw ceiling 仍由 `trim_pool_to_target_count()` 执行，trim 会先丢 non-linkable、再丢 non-ready，最后才按 relevance / recency 排序，避免为了保留高分 pending 行而删掉可打开候选。
 - B 站补货缺口使用 `count_pool_available_candidates_by_source()`，它与 `count_pool_candidates()` 同口径应用预生成 / 分类 / linkability / 最近看过过滤和全局 topic window；raw headroom 使用 `count_pool_raw_material_by_source()`，包含 `content_cache` 未整理素材和 `discovery_candidates` 待评估 / 已评估未入池素材，但同样排除最近看过和已推荐内容。raw headroom 只限制正常请求规模，不再在可用池低于目标时把补货缺口硬压成 0；raw ceiling 的最终约束由每 tick / post-refresh trim 执行。
 - B 站补货 limit 使用 `bilibili` 平台自身缺口，而不是“总池子缺口”；例如总池子缺 57 条但 B 站只缺 5 条时，本轮 B 站 discovery 总目标只请求 5 条，并分摊为 `search=2, related_chain=1, trending=1, explore=1`，避免四个策略各自按 5 条去过采样和 LLM 评估。
 - 如果 B 站 search 已进入 `v_voucher` / `412` cooldown，本轮 Search / Explore / RelatedChain 内部的搜索分支会直接跳过；Trending 和 RelatedChain 的相关推荐 API 仍可继续提供候选，不会因为 search 风控把整轮 B 站 discovery 卡死。

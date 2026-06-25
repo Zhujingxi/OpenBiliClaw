@@ -190,13 +190,13 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-Latest: **v0.3.142 / extension v0.3.94 / desktop v0.3.142: background Zhihu discovery and release package sync (2026-06-25)**. Full changelog: [docs/changelog.md](docs/changelog.md).
+Latest: **v0.3.143 / extension v0.3.94 / desktop v0.3.143: candidate eval batching and pool diagnostics (2026-06-25)**. Full changelog: [docs/changelog.md](docs/changelog.md).
 
-- **Zhihu discovery no longer steals focus** — init / event smoke tasks still use a foreground tab, while search / hot / feed / creator / related discovery now use a background task tab.
-- **Zhihu is now a full source path** — the extension can read Zhihu history, collections, and activity likes/favorites from your already logged-in browser session; `init --yes-zhihu` can feed first-run profiling, while `fetch-zhihu --write-memory` / `--rebuild-profile` support real backfill and profile rebuilds.
-- **Source positioning is synced** — README, package metadata, GitHub About, architecture docs, and discovery docs all describe Zhihu as a production cross-platform source.
-- **Extension and installer packages are published together** — `extension-v0.3.94` and `desktop-v0.3.142` are prepared for the aggregate GitHub Release page.
-- **Real E2E verified** — a logged-in extension completed `discover-zhihu-hot --limit 3` and wrote real candidates; plain smoke tasks still do not pollute memory or profiling.
+- **Candidate eval batches now accumulate** — daemon runtime waits for at least 8 `pending_eval` rows, or up to 120 seconds, before spending a full profile prompt.
+- **Eval prompts are slimmer** — discovery batch evaluation keeps top interests, newest awareness / insights, and full avoid topics while trimming long profile windows.
+- **Low available pools keep source material** — source-overflow trim is skipped while the ready pool is below target; raw ceiling trim still bounds total material.
+- **Empty refresh plans are diagnosable** — logs now include pool/raw/pending counts, source available/raw/targets, and `requested_by_source`.
+- **Discovery fetch diversity improves** — API runtime oversamples main raw discovery by 4x to reduce duplicate starvation and tiny eval batches.
 
 ## Community
 
@@ -667,7 +667,7 @@ OpenBiliClaw/
 
 ## 📜 Release History
 
-Latest: **v0.3.142 / extension v0.3.94 / desktop v0.3.142: background Zhihu discovery and release package sync (2026-06-25)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Most users should use the `openbiliclaw-v*` aggregate [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) for extension packages and available desktop installers; automation-channel releases remain available as `backend-v*`, `extension-v*`, and `desktop-v*`.
+Latest: **v0.3.143 / extension v0.3.94 / desktop v0.3.143: candidate eval batching and pool diagnostics (2026-06-25)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Most users should use the `openbiliclaw-v*` aggregate [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) for extension packages and available desktop installers; automation-channel releases remain available as `backend-v*`, `extension-v*`, and `desktop-v*`.
 
 ## 🗺️ Roadmap
 

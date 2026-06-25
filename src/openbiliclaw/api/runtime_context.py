@@ -623,6 +623,9 @@ class RuntimeContext:
             discovery_engine=new_discovery_engine,
             pool_target_count=new_config.scheduler.pool_target_count,
             admission_min_score=admission_min_score,
+            min_eval_batch_size=8,
+            max_eval_wait_seconds=120,
+            candidate_fetch_oversample=4,
             xhs_self_nickname_provider=lambda: str(
                 (_xhs_self_info_provider() or {}).get("nickname", "") or ""
             ).strip(),

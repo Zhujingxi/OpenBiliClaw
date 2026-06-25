@@ -4,6 +4,16 @@
 
 ---
 
+## v0.3.143 / extension v0.3.94 / desktop v0.3.143: 候选评估蓄水与补池诊断（2026-06-25）
+
+后端源码走 `backend-v0.3.143`，浏览器插件沿用 `extension-v0.3.94`，桌面安装包走 `desktop-v0.3.143`。
+
+- **候选评估先蓄 batch**：API daemon runtime 的 `DiscoveryCandidatePipeline` 现在少于 8 条 `pending_eval` 不会立即跑 LLM，最多等待 120 秒后才放行小批次，避免 1-3 条候选也消耗一整份 20k+ token 画像 prompt。周期 drain 日志会把等待状态标成 `reason=batch_waiting`。
+- **评估 prompt 输入瘦身**：`ContentDiscoveryEngine.evaluate_content_batch()` 在构建 batch prompt 前会压缩画像摘要，只保留高权重兴趣 / 领域、最新 awareness / insight 和完整 `disliked_topics`，减少 evaluator 的固定输入 token，同时保留关键避雷和近期语境。
+- **低可用池不再被 source overflow 压掉**：`_enforce_pool_cap()` 在 `pool_available < pool_target_count` 时跳过 `trim_pool_source_overflow()`，避免 raw/source 配额把当前可用候选继续 suppress；总 raw ceiling 仍由 `trim_pool_to_target_count()` 收敛。
+- **空补货计划可诊断**：`_build_refresh_plan()` 在池子低于 target 但 plan 为空时会输出 `pool_available/raw/pending/source_available/source_raw/source_targets/raw_targets/requested_by_source`，方便直接定位是来源配额、raw headroom、非 B 站 producer 还是其它 gating 导致不补。
+- **减少重复 discovery 导致的小批 eval**：API runtime 的主 discovery raw 生产改为 4 倍 oversample，并同步放大 strategy limits；重复候选仍由 `candidate_key` 去重，但新候选更容易把 `pending_eval` 攒到有效 batch。
+
 ## v0.3.142 / extension v0.3.94 / desktop v0.3.142: 知乎后台 discovery 与发布包同步（2026-06-25）
 
 后端源码走 `backend-v0.3.142`，浏览器插件走 `extension-v0.3.94`，桌面安装包走 `desktop-v0.3.142`。
