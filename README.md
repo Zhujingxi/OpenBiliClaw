@@ -194,8 +194,10 @@
 
 ## 最近更新
 
-最新版本：**v0.3.140 / extension v0.3.92 / desktop v0.3.140: 知乎多源接入与插件发现（2026-06-24）**。完整变更详见 [docs/changelog.md](docs/changelog.md)。
+最新版本：**v0.3.141 / extension v0.3.93 / desktop v0.3.140: 推荐池补货死锁修复（2026-06-25）**。完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
+- **修复补货死锁** —— 当可换库存低于目标、但 raw material 已达到 ceiling 时，后台补货不再把 source deficit 算成 0，Search / producer 会继续补足可用池。
+- **插件维护包同步发布** —— `extension-v0.3.93` 用于 GitHub Release 和 Chrome 应用商店提交，功能代码沿用 v0.3.92。
 - **知乎进入完整来源链路** —— 插件可用已登录知乎页面拉取浏览、收藏、动态点赞 / 收藏；`init --yes-zhihu` 可纳入首轮画像，`fetch-zhihu --write-memory` / `--rebuild-profile` 支持真实回填和画像重建。
 - **知乎 discovery 五路补齐** —— search / hot / feed / creator / related 都走浏览器插件任务，`discover --source zhihu` 接入正式 producer 与统一候选评估池。
 - **配置页与推荐卡对齐** —— 插件、桌面 Web、移动 Web 都能配置知乎来源、展示知乎推荐卡，并让候选池来源比例中的 `zhihu` 真正参与调度。
@@ -681,7 +683,7 @@ OpenBiliClaw/
 
 ## 📜 更新日志
 
-最新版本：**v0.3.140 / extension v0.3.92 / desktop v0.3.140: 知乎多源接入与插件发现（2026-06-24）**。最近更新见上方摘要；完整历史见 [docs/changelog.md](docs/changelog.md)。普通用户从 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 的 `openbiliclaw-v*` 聚合页下载插件包和可用桌面安装包；自动化频道 release 仍分别保留 `backend-v*`、`extension-v*`、`desktop-v*`。
+最新版本：**v0.3.141 / extension v0.3.93 / desktop v0.3.140: 推荐池补货死锁修复（2026-06-25）**。最近更新见上方摘要；完整历史见 [docs/changelog.md](docs/changelog.md)。普通用户从 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 的 `openbiliclaw-v*` 聚合页下载插件包和可用桌面安装包；自动化频道 release 仍分别保留 `backend-v*`、`extension-v*`、`desktop-v*`。
 
 ## 🗺️ 后续规划
 

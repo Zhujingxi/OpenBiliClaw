@@ -4,6 +4,13 @@
 
 ---
 
+## v0.3.141 / extension v0.3.93 / desktop v0.3.140: 推荐池补货死锁修复（2026-06-25）
+
+后端源码走 `backend-v0.3.141`，浏览器插件走 `extension-v0.3.93`，桌面安装包暂沿用 `desktop-v0.3.140`。
+
+- **修复 raw ceiling 误停补货**：当 `pool_available_count` 低于 `pool_target_count`、但 raw material 已达到 ceiling 时，`ContinuousRefreshController` 不再把 source deficit 算成 0；Search / producer 会继续补足可用池，raw ceiling 仍由 `_enforce_pool_cap()` 和 post-refresh trim 负责收敛，避免 pending keywords 长期不被消费、日志只剩 `enforce_pool_cap` / `candidate eval drain no_pending`。
+- **同步发布插件维护包**：浏览器插件版本提升到 `extension-v0.3.93`，用于 GitHub Release 和 Chrome Web Store 包同步分发；插件功能代码与 `v0.3.92` 保持一致。
+
 ## v0.3.140 / extension v0.3.92 / desktop v0.3.140: 知乎多源接入与插件发现（2026-06-24）
 
 后端源码走 `backend-v0.3.140`，浏览器插件走 `extension-v0.3.92`，桌面安装包走 `desktop-v0.3.140`。
@@ -18,7 +25,6 @@
 - **知乎来源比例升级兼容**：旧 `config.toml` 若已有 `[scheduler.pool_source_shares]` 但缺少 `zhihu`，配置加载和运行时 source policy 会自动补默认 `zhihu=1`；配置页保存 `pool_source_shares.zhihu` 后，启用知乎时会进入有效平台配比，关闭知乎时仍保留配置值但不占 runtime quota。
 - **画像偏好分析补齐网页长文本拒答兜底**：真实知乎画像重建时发现 DeepSeek 偶发把含长回答摘要的 preference chunk 拒答成非 JSON。`PreferenceAnalyzer` 的 chunked 路径现在先把可恢复的非 JSON 当作重试信号而不是直接 ERROR；单条事件仍失败时会去掉长 `context`，保留 title / URL / source metadata 做一次安全压缩重试，避免整条知乎浏览 / 收藏 / 点赞信号被丢弃。新增回归测试覆盖“原始 context 被拒答、压缩后成功提取兴趣”的场景。
 - **推荐池消费后库存状态实时收敛**：`GET /api/recommendations` 首次从候选池补历史、`/api/recommendations/reshuffle` 和 `/api/recommendations/append` 消费可换内容后，会立即重新读取 runtime 池子口径并广播 `refresh.pool_updated`，避免其它已打开客户端继续显示旧的“可换”数量。插件 side panel 和移动 Web 收到该事件时同步刷新底部可换提示 / 空态文案但不重拉推荐列表；桌面 Web 首屏在推荐 bootstrap 后会再读一次 `/api/runtime-status`，并把左侧标签改为“当前可换库存 / 上次成功补货”，减少“当前库存”和“上一轮补货结果”混读。
-- **修复 raw ceiling 误停补货**：当 `pool_available_count` 低于 `pool_target_count`、但 raw material 已达到 ceiling 时，`ContinuousRefreshController` 不再把 source deficit 算成 0；Search / producer 会继续补足可用池，raw ceiling 仍由 `_enforce_pool_cap()` 和 post-refresh trim 负责收敛，避免 pending keywords 长期不被消费、日志只剩 `enforce_pool_cap` / `candidate eval drain no_pending`。
 
 ## v0.3.139 / extension v0.3.91 / desktop v0.3.139: 更新检查限流兜底与知乎 smoke（2026-06-24）
 

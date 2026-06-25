@@ -190,8 +190,10 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-Latest: **v0.3.140 / extension v0.3.92 / desktop v0.3.140: Zhihu multi-source integration and extension discovery (2026-06-24)**. Full changelog: [docs/changelog.md](docs/changelog.md).
+Latest: **v0.3.141 / extension v0.3.93 / desktop v0.3.140: recommendation pool refill deadlock fix (2026-06-25)**. Full changelog: [docs/changelog.md](docs/changelog.md).
 
+- **Fixes a refill deadlock** — when available inventory is below target but raw material has reached the ceiling, runtime no longer turns the source deficit into zero; search/producers keep refilling the servable pool.
+- **Publishes an extension maintenance package** — `extension-v0.3.93` is for GitHub Release and Chrome Web Store distribution; extension behavior remains aligned with v0.3.92.
 - **Zhihu is now a full source path** — the extension can read Zhihu history, collections, and activity likes/favorites from your already logged-in browser session; `init --yes-zhihu` can feed first-run profiling, while `fetch-zhihu --write-memory` / `--rebuild-profile` support real backfill and profile rebuilds.
 - **Five Zhihu discovery branches** — search / hot / feed / creator / related all use extension tasks, and `discover --source zhihu` is wired into the formal producer and unified candidate pipeline.
 - **Settings and cards are aligned** — the extension, desktop web UI, and mobile web UI can configure Zhihu, render Zhihu recommendation cards, and make the `zhihu` source share participate in runtime scheduling.
@@ -667,7 +669,7 @@ OpenBiliClaw/
 
 ## 📜 Release History
 
-Latest: **v0.3.140 / extension v0.3.92 / desktop v0.3.140: Zhihu multi-source integration and extension discovery (2026-06-24)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Most users should use the `openbiliclaw-v*` aggregate [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) for extension packages and available desktop installers; automation-channel releases remain available as `backend-v*`, `extension-v*`, and `desktop-v*`.
+Latest: **v0.3.141 / extension v0.3.93 / desktop v0.3.140: recommendation pool refill deadlock fix (2026-06-25)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Most users should use the `openbiliclaw-v*` aggregate [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) for extension packages and available desktop installers; automation-channel releases remain available as `backend-v*`, `extension-v*`, and `desktop-v*`.
 
 ## 🗺️ Roadmap
 
