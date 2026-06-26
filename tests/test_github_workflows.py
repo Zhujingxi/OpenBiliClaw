@@ -14,3 +14,4 @@ def test_web_guided_init_e2e_sanitizes_apt_sources_before_playwright_install() -
     assert cleanup_step < install_step
     assert "microsoft" in e2e_job
     assert "azure-cli" in e2e_job
+    assert "| xargs -r sudo rm -f || true" in e2e_job
