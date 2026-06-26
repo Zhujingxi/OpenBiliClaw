@@ -2166,7 +2166,7 @@ async def test_evaluate_batch_accepts_fenced_json_without_single_eval_fallback()
 
 
 @pytest.mark.asyncio
-async def test_evaluate_batch_skips_single_fallback_during_provider_cooldown() -> None:
+async def test_evaluate_batch_propagates_provider_cooldown_without_single_fallback() -> None:
     class _CooldownLLMService:
         def __init__(self) -> None:
             self.calls = 0
@@ -2195,9 +2195,9 @@ async def test_evaluate_batch_skips_single_fallback_during_provider_cooldown() -
         DiscoveredContent(bvid="BV_COOL_B", title="B", source_strategy="trending"),
     ]
 
-    scores = await engine._evaluate_batch(batch, _build_profile())
+    with pytest.raises(LLMProviderExecutionError):
+        await engine._evaluate_batch(batch, _build_profile())
 
-    assert scores == [0.0, 0.0]
     assert llm_service.calls == 1
 
 

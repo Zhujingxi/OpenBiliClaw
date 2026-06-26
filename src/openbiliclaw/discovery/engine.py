@@ -1759,12 +1759,12 @@ class ContentDiscoveryEngine:
         except Exception as exc:
             if is_llm_rate_limit_error(exc):
                 logger.warning(
-                    "Batch evaluation skipped single-item fallback for %d items because "
-                    "the LLM provider is rate-limited or cooling down: %s",
+                    "Batch evaluation is rate-limited for %d items; "
+                    "propagating transient failure so callers can retry later: %s",
                     len(batch),
                     exc,
                 )
-                return [0.0 for _ in batch]
+                raise
             logger.warning(
                 "Batch evaluation failed for %d items (%s: %s), falling back to single eval",
                 len(batch),

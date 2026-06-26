@@ -13,6 +13,7 @@ import pytest
 from openbiliclaw.discovery.candidate_pipeline import DiscoveryCandidatePipeline
 from openbiliclaw.discovery.candidate_pool import DiscoveryCandidateWrite
 from openbiliclaw.discovery.engine import ContentDiscoveryEngine
+from openbiliclaw.llm.base import LLMRateLimitError
 from openbiliclaw.recommendation.delight import DEFAULT_DELIGHT_THRESHOLD
 from openbiliclaw.runtime.events import RuntimeEventHub
 from openbiliclaw.runtime.presence import PresenceTracker
@@ -1482,6 +1483,115 @@ async def test_candidate_eval_drain_with_real_database_makes_raw_candidate_avail
     assert database.count_discovery_candidates_by_status()["cached"] == 1
     assert database.count_pool_candidates() == 1
     assert [call[1] for call in recommendations.pool_copy_calls] == [60]
+
+
+async def test_candidate_eval_rate_limit_releases_claims_for_recovery_with_real_database(
+    tmp_path: Path,
+) -> None:
+    class RateLimitThenScoringLLM:
+        def __init__(self, payload: list[dict[str, object]]) -> None:
+            self.payload = payload
+            self.calls = 0
+
+        async def complete_structured_task(
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            history: list[dict[str, str]] | None = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            caller: str = "",
+            reasoning_effort: str | None = None,
+        ) -> object:
+            self.calls += 1
+            if self.calls == 1:
+                raise LLMRateLimitError("provider 429 rate limit")
+            return _StructuredResponse(json.dumps(self.payload, ensure_ascii=False))
+
+    database = Database(tmp_path / "candidate-eval-rate-limit-e2e.db")
+    database.initialize()
+    payload: list[dict[str, object]] = []
+    writes: list[DiscoveryCandidateWrite] = []
+    style_keys = [
+        "deep_focus",
+        "quick_scan",
+        "hands_on",
+        "decision_support",
+        "story_immersion",
+        "opinion_sparring",
+        "social_chat",
+        "daily_wander",
+        "mood_release",
+        "aesthetic_browse",
+        "ambient_companion",
+        "live_pulse",
+        "curiosity_spark",
+    ]
+    for index in range(32):
+        content_id = f"BVratelimit{index:02d}"
+        writes.append(
+            DiscoveryCandidateWrite(
+                candidate_key=f"bilibili:{content_id}",
+                source_platform="bilibili",
+                source_strategy="search",
+                content_id=content_id,
+                content_url=f"https://www.bilibili.com/video/{content_id}",
+                title=f"限流恢复候选 {index}",
+            )
+        )
+        payload.append(
+            {
+                "content_id": content_id,
+                "score": 0.91,
+                "reason": "fit after recovery",
+                "topic_group": "tech",
+                "style_key": style_keys[index % len(style_keys)],
+            }
+        )
+    database.enqueue_discovery_candidates(writes)
+    llm = RateLimitThenScoringLLM(payload)
+    discovery_engine = ContentDiscoveryEngine(llm_service=llm, database=database)
+    pipeline = DiscoveryCandidatePipeline(
+        database=database,
+        discovery_engine=discovery_engine,
+        pool_target_count=64,
+    )
+    recommendations = _RealDatabasePrecomputeEngine(database)
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        soul_engine=_ProfileSoulEngine(),
+        discovery_engine=discovery_engine,
+        recommendation_engine=recommendations,
+        discovery_candidate_pipeline=pipeline,
+        pool_target_count=64,
+        pool_source_shares={"bilibili": 1},
+    )
+
+    first = await controller._drain_discovery_candidates_and_precompute(
+        reason="periodic",
+        batch_size=32,
+    )
+
+    first_counts = database.count_discovery_candidates_by_status()
+    assert first == {"evaluated": 0, "cached": 0, "rejected": 0, "failed": 32}
+    assert first_counts["pending_eval"] == 32
+    assert first_counts.get("evaluating", 0) == 0
+    assert first_counts.get("rejected_low_score", 0) == 0
+
+    second = await controller._drain_discovery_candidates_and_precompute(
+        reason="periodic",
+        batch_size=32,
+    )
+
+    assert second == {"evaluated": 32, "cached": 32, "rejected": 0}
+    assert llm.calls == 2
+    final_counts = database.count_discovery_candidates_by_status()
+    assert final_counts["cached"] == 32
+    assert final_counts.get("evaluating", 0) == 0
+    cached_rows = database.conn.execute("SELECT COUNT(*) FROM content_cache").fetchone()[0]
+    assert cached_rows == 32
 
 
 async def test_refresh_pipeline_does_not_use_stale_topics_when_drain_skips() -> None:
