@@ -1324,6 +1324,49 @@ class TestBackendAPI:
         assert body["youtube"]["logged_in"] is True
         assert body["zhihu"]["state"] in {"unverified", "ready", "missing"}
 
+    def test_sources_credentials_returns_current_local_credentials(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config, save_config
+        from openbiliclaw.sources.douyin_auth import DouyinCookieManager
+        from openbiliclaw.sources.x_auth import XCookieManager
+        from openbiliclaw.storage.database import Database
+
+        project_root = tmp_path / "credentials-root"
+        monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(project_root))
+        cfg = Config()
+        cfg.bilibili.cookie = "SESSDATA=bili; bili_jct=jct; DedeUserID=1;"
+        save_config(cfg, project_root / "config.toml")
+        DouyinCookieManager(cfg.data_path).set_cookie("msToken=dy; ttwid=tw;", source="test")
+        XCookieManager(cfg.data_path).set_cookie("auth_token=x; ct0=csrf;", source="test")
+        db = Database(tmp_path / "credentials.db")
+        db.initialize()
+        db.conn.execute(
+            "INSERT INTO content_cache (bvid, source_platform, content_url) "
+            "VALUES ('xhs1', 'xiaohongshu', "
+            "'https://www.xiaohongshu.com/explore/xhs1?xsec_token=xhs-token')"
+        )
+        db.conn.commit()
+
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        body = client.get("/api/sources/credentials?reveal_keys=true").json()
+
+        assert body["bilibili"]["value"] == "SESSDATA=bili; bili_jct=jct; DedeUserID=1;"
+        assert body["douyin"]["value"] == "msToken=dy; ttwid=tw;"
+        assert body["twitter"]["value"] == "auth_token=x; ct0=csrf;"
+        assert body["xiaohongshu"]["label"] == "xsec_token"
+        assert body["xiaohongshu"]["value"] == "xhs-token"
+        assert body["youtube"]["available"] is False
+        assert body["zhihu"]["available"] is False
+
+        masked = client.get("/api/sources/credentials").json()
+        assert masked["bilibili"]["value"] != body["bilibili"]["value"]
+        assert "*" in masked["bilibili"]["value"]
+
     def test_sources_status_xhs_old_tokens_report_stale_not_ready(self, tmp_path: Path) -> None:
         """小红书 token rows outside the freshness window degrade to ``stale``.
 

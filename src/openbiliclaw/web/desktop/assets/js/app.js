@@ -22,6 +22,7 @@
       avoidanceProbeRespond: "/avoidance-probes/respond",
       insightFeedback: "/insights/feedback",
       sourceShareSuggestion: "/config/source-share-suggestion",
+      sourceCredentials: "/sources/credentials?reveal_keys=true",
       configProbe: "/config/probe-service",
       updateStatus: "/update-status",
       updateCheck: "/update/check",
@@ -54,6 +55,8 @@
       delightIndex: 0,
       delight: null,
       config: null,
+      sourceStatus: null,
+      sourceCredentials: null,
       runtimeStatus: null,
       runtimeSocket: null,
       videos: [],
@@ -1147,6 +1150,7 @@
       showMainPage("settingsPage");
       window.scrollTo({ top: 0, behavior: "smooth" });
       void renderSourcesStatus();
+      void renderSourceCredentials();
       void lanAuthControl?.reload();
       void bootAutostartControl?.reload();
       void refreshUpdateStatus();
@@ -3384,6 +3388,16 @@
       if (el && value !== undefined && value !== null) el.value = String(value);
     }
 
+    function setCookieOverrideInput(id, currentCookie, platformLabel) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.value = "";
+      const hasCookie = Boolean(String(currentCookie || "").trim());
+      el.placeholder = hasCookie
+        ? `已保存${platformLabel} Cookie；留空保存不会覆盖，需要更换时粘贴新的 Cookie`
+        : `未保存${platformLabel} Cookie；需要手动覆盖时粘贴 Cookie`;
+    }
+
     function getInput(id) {
       return document.getElementById(id)?.value?.trim() || "";
     }
@@ -3458,36 +3472,121 @@
     }
 
     // Unified per-source login / cookie status (GET /api/sources/status),
-    // rendered as a uniform colored-dot list in the 平台源 settings tab.
-    const SOURCE_STATUS_DOT = {
-      ok: "#2ecc71", ready: "#2ecc71", no_auth: "#9aa0a6",
-      missing: "#e0a800", missing_cookie: "#e0a800", rate_limited: "#e0a800",
-      partial: "#e0a800", stale: "#e0a800",
-      expired_cookie: "#e74c3c", blocked: "#e74c3c"
-    };
+    // rendered with separate scheduling and credential/plugin states.
     const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu"];
+    const CURRENT_CREDENTIAL_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu"];
+    const SOURCE_ENABLE_SELECT_IDS = {
+      bilibili: "bilibiliEnabled",
+      xiaohongshu: "xhsEnabled",
+      douyin: "douyinEnabled",
+      youtube: "youtubeEnabled",
+      twitter: "twitterEnabled",
+      zhihu: "zhihuEnabled"
+    };
+    const SOURCE_ACCESS_STATE = {
+      ok: { tone: "ready", label: "接入可用" },
+      ready: { tone: "ready", label: "接入可用" },
+      no_auth: { tone: "public", label: "无需登录" },
+      unverified: { tone: "pending", label: "状态待验证" },
+      missing: { tone: "warning", label: "需要登录" },
+      missing_cookie: { tone: "warning", label: "缺少 Cookie" },
+      rate_limited: { tone: "warning", label: "频率受限" },
+      partial: { tone: "warning", label: "部分可用" },
+      stale: { tone: "warning", label: "需要刷新" },
+      expired_cookie: { tone: "danger", label: "Cookie 失效" },
+      blocked: { tone: "danger", label: "接入受阻" }
+    };
 
-    async function renderSourcesStatus() {
+    function setSourceBadge(badge, text, tone) {
+      if (!badge) return;
+      badge.textContent = text;
+      badge.dataset.tone = tone;
+    }
+
+    function getPendingSourceEnabled(key, item) {
+      const select = document.getElementById(SOURCE_ENABLE_SELECT_IDS[key]);
+      const currentEnabled = select ? select.value === "on" : Boolean(item?.enabled);
+      const savedEnabled = typeof item?.enabled === "boolean" ? item.enabled : currentEnabled;
+      return {
+        currentEnabled,
+        savedEnabled,
+        pending: currentEnabled !== savedEnabled
+      };
+    }
+
+    function renderSourcesStatusRows(data) {
       const list = $("#sourceStatusList");
       if (!list) return;
-      let data = null;
-      try { data = await requestJson("/sources/status"); } catch { data = null; }
       SOURCE_STATUS_KEYS.forEach((key) => {
         const row = list.querySelector(`[data-source-status="${key}"]`);
         if (!row) return;
-        const dot = row.querySelector(".src-dot");
+        const sourceBadge = row.querySelector(".source-source-badge");
+        const accessBadge = row.querySelector(".source-access-badge");
         const detail = row.querySelector(".src-detail");
         const item = data?.[key];
         if (!item) {
-          if (detail) detail.textContent = "状态暂不可用（后端未连接）。";
-          if (dot) dot.style.color = "#9aa0a6";
-          row.style.opacity = "1";
+          setSourceBadge(sourceBadge, "来源：状态未知", "muted");
+          setSourceBadge(accessBadge, "接入：后端未连接", "muted");
+          if (detail) detail.textContent = "暂时无法读取来源接入状态，请确认后端服务可用。";
+          row.classList.remove("source-row-unsaved");
+          row.dataset.sourceEnabled = "unknown";
+          row.dataset.accessTone = "muted";
           return;
         }
-        if (detail) detail.textContent = (item.enabled ? "" : "（未启用）") + (item.detail || "");
-        if (dot) dot.style.color = SOURCE_STATUS_DOT[item.state] || "#9aa0a6";
-        row.style.opacity = item.enabled ? "1" : "0.6";
+        const enableState = getPendingSourceEnabled(key, item);
+        const accessState = SOURCE_ACCESS_STATE[item.state] || { tone: "muted", label: "状态未知" };
+        const sourceLabel = enableState.pending
+          ? `来源：${enableState.currentEnabled ? "将启用" : "将停用"}，保存后生效`
+          : `来源：${enableState.savedEnabled ? "启用" : "停用"}`;
+        setSourceBadge(sourceBadge, sourceLabel, enableState.pending ? "pending" : enableState.savedEnabled ? "enabled" : "disabled");
+        setSourceBadge(accessBadge, `接入：${accessState.label}`, accessState.tone);
+        const detailPrefix = enableState.pending ? "开关已改动，保存配置后才会进入/退出调度。 " : "";
+        if (detail) detail.textContent = detailPrefix + (item.detail || "暂无更多状态细节。");
+        row.classList.toggle("source-row-unsaved", enableState.pending);
+        row.dataset.sourceEnabled = enableState.currentEnabled ? "true" : "false";
+        row.dataset.accessTone = accessState.tone;
       });
+    }
+
+    async function renderSourcesStatus() {
+      let data = null;
+      try { data = await requestJson("/sources/status"); } catch { data = null; }
+      state.sourceStatus = data;
+      renderSourcesStatusRows(data);
+    }
+
+    function renderSourceCredentialRows(data) {
+      const list = $("#sourceCredentialList");
+      if (!list) return;
+      CURRENT_CREDENTIAL_KEYS.forEach((key) => {
+        const row = list.querySelector(`[data-source-credential="${key}"]`);
+        if (!row) return;
+        const summary = row.querySelector(".source-credential-summary");
+        const value = row.querySelector(".source-credential-value");
+        const item = data?.[key];
+        if (!item) {
+          row.dataset.available = "false";
+          if (summary) summary.textContent = "状态暂不可用";
+          if (value) value.value = "暂时无法读取当前 Cookie / 登录凭据。";
+          return;
+        }
+        row.dataset.available = item.available ? "true" : "false";
+        if (summary) {
+          summary.textContent = item.available
+            ? `${item.label || "Cookie"} 已保存，展开查看`
+            : item.detail || "当前没有可展示 Cookie";
+        }
+        if (value) {
+          value.value = item.value || item.detail || "当前没有可展示 Cookie / 登录凭据。";
+        }
+      });
+    }
+
+    async function renderSourceCredentials() {
+      let data = null;
+      try { data = await requestJson(ENDPOINTS.sourceCredentials); } catch { data = null; }
+      state.sourceCredentials = data;
+      renderSourceCredentialRows(data);
     }
 
     // Login happens outside this page (user signs into a platform in another
@@ -3731,7 +3830,7 @@
       setInput("moduleEvaluationModel", llm.evaluation?.model);
 
       setSelect("biliAuth", config.bilibili?.auth_method || "cookie");
-      setInput("biliCookie", config.bilibili?.cookie);
+      setCookieOverrideInput("biliCookie", config.bilibili?.cookie, " B 站");
       setInput("biliBrowserExecutable", config.bilibili?.browser_executable);
       setSelect("biliBrowserHeaded", config.bilibili?.browser_headed === true ? "on" : "off");
       setSelect("bilibiliEnabled", config.sources?.bilibili?.enabled === false ? "off" : "on");
@@ -3742,7 +3841,7 @@
       setInput("xhsDailyCreatorBudget", config.sources?.xiaohongshu?.daily_creator_budget);
       setInput("xhsTaskInterval", config.sources?.xiaohongshu?.task_interval_seconds);
       setSelect("douyinEnabled", config.sources?.douyin?.enabled === true ? "on" : "off");
-      setInput("douyinCookie", config.sources?.douyin?.cookie);
+      setCookieOverrideInput("douyinCookie", config.sources?.douyin?.cookie, "抖音");
       setInput("douyinCookieEnv", config.sources?.douyin?.cookie_env);
       setInput("douyinDailySearchBudget", config.sources?.douyin?.daily_search_budget);
       setInput("douyinDailyHotBudget", config.sources?.douyin?.daily_hot_budget);
@@ -3755,7 +3854,7 @@
       setInput("youtubeRequestInterval", config.sources?.youtube?.request_interval_seconds);
       setInput("youtubeMinInterval", config.sources?.youtube?.min_interval_minutes);
       setSelect("twitterEnabled", config.sources?.twitter?.enabled === true ? "on" : "off");
-      setInput("twitterCookie", config.sources?.twitter?.cookie);
+      setCookieOverrideInput("twitterCookie", config.sources?.twitter?.cookie, " X");
       setInput("twitterCookieEnv", config.sources?.twitter?.cookie_env);
       setInput("twitterDailySearchBudget", config.sources?.twitter?.daily_search_budget);
       setInput("twitterDailyFeedBudget", config.sources?.twitter?.daily_feed_budget);
@@ -3772,6 +3871,7 @@
       setInput("zhihuRequestInterval", config.sources?.zhihu?.request_interval_seconds);
       setInput("zhihuMinInterval", config.sources?.zhihu?.min_interval_minutes);
       void renderSourcesStatus();
+      void renderSourceCredentials();
 
       setSelect("logLevel", config.logging?.level || "INFO");
       setSelect("logFileLevel", config.logging?.file_level || "DEBUG");
@@ -4669,6 +4769,9 @@
     safeBind("#probeEmbedding", "click", () => { void runEmbeddingConfigProbe(); });
     lanAuthControl = initLanAuthControl();
     bootAutostartControl = initBootAutostartControl();
+    Object.values(SOURCE_ENABLE_SELECT_IDS).forEach((id) => {
+      safeBind(`#${id}`, "change", () => renderSourcesStatusRows(state.sourceStatus));
+    });
     safeBind("#suggestSharesBtn", "click", async () => {
       const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on", twitter: $("#twitterEnabled").value === "on", zhihu: $("#zhihuEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
       const shares = result?.pool_source_shares || result?.shares || result?.suggested_shares;

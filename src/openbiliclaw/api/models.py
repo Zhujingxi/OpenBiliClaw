@@ -410,6 +410,26 @@ class SourcesStatusResponse(BaseModel):
     zhihu: SourceStatusItem = Field(default_factory=SourceStatusItem)
 
 
+class SourceCredentialItem(BaseModel):
+    """Current local credential snapshot for a source settings page."""
+
+    label: str = "Cookie"
+    value: str = ""
+    available: bool = False
+    detail: str = ""
+
+
+class SourcesCredentialsResponse(BaseModel):
+    """Current local Cookie / token values for source settings pages."""
+
+    bilibili: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
+    xiaohongshu: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
+    douyin: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
+    youtube: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
+    twitter: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
+    zhihu: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
+
+
 class NotificationAckIn(BaseModel):
     """Acknowledge one browser notification delivery."""
 

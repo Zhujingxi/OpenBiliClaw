@@ -536,6 +536,30 @@
     .settings-switch-copy { color: var(--muted); font-size: var(--text-sm); line-height: 1.45; }
     .settings-toggle-inline { grid-column: 2; grid-row: 1 / span 2; align-self: center; margin: 0; box-shadow: none; }
     .settings-note-inline { grid-column: 1 / -1; margin: -6px 0 0; color: var(--muted); font-size: var(--text-sm); line-height: 1.45; }
+    .source-status-list { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
+    .source-status-row { min-width: 0; display: grid; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: color-mix(in oklab, var(--surface), var(--bg) 35%); transition: border-color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard); }
+    .source-status-row[data-source-enabled="false"] { background: color-mix(in oklab, var(--surface), var(--bg) 55%); }
+    .source-status-row[data-access-tone="warning"] { border-color: color-mix(in oklab, var(--warn), var(--border-soft) 64%); }
+    .source-status-row[data-access-tone="danger"] { border-color: color-mix(in oklab, var(--danger), var(--border-soft) 58%); }
+    .source-status-row[data-access-tone="pending"], .source-row-unsaved { border-color: color-mix(in oklab, #3898ec, var(--border-soft) 54%); background: color-mix(in oklab, var(--surface), #3898ec 6%); }
+    .source-status-head { min-width: 0; display: grid; grid-template-columns: minmax(96px, 1fr) auto; align-items: start; gap: var(--space-2); }
+    .source-status-head strong { min-width: 0; color: var(--fg); font-weight: 750; line-height: 1.25; overflow-wrap: anywhere; }
+    .source-status-badges { min-width: 0; display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+    .source-source-badge, .source-access-badge { max-width: 100%; display: inline-flex; align-items: center; min-height: 24px; padding: 2px 8px; border: 1px solid var(--border-soft); border-radius: var(--radius-pill); background: var(--surface); color: var(--fg-2); font-size: 12px; font-weight: 650; line-height: 1.35; overflow-wrap: anywhere; }
+    .source-source-badge[data-tone="enabled"], .source-access-badge[data-tone="ready"] { border-color: color-mix(in oklab, var(--success), var(--border-soft) 55%); background: color-mix(in oklab, var(--surface), var(--success) 10%); color: color-mix(in oklab, var(--success), var(--fg) 34%); }
+    .source-source-badge[data-tone="disabled"], .source-access-badge[data-tone="public"], .source-source-badge[data-tone="muted"], .source-access-badge[data-tone="muted"] { background: color-mix(in oklab, var(--surface), var(--bg) 52%); color: var(--muted); }
+    .source-source-badge[data-tone="pending"], .source-access-badge[data-tone="pending"] { border-color: color-mix(in oklab, #3898ec, var(--border-soft) 45%); background: color-mix(in oklab, var(--surface), #3898ec 10%); color: #246aa6; }
+    .source-access-badge[data-tone="warning"] { border-color: color-mix(in oklab, var(--warn), var(--border-soft) 48%); background: color-mix(in oklab, var(--surface), var(--warn) 16%); color: color-mix(in oklab, #8a5a00, var(--fg) 18%); }
+    .source-access-badge[data-tone="danger"] { border-color: color-mix(in oklab, var(--danger), var(--border-soft) 48%); background: color-mix(in oklab, var(--surface), var(--danger) 10%); color: var(--danger); }
+    .source-status-row .src-detail { margin: 0; color: var(--muted); font-size: var(--text-sm); line-height: 1.45; overflow-wrap: anywhere; }
+    .source-credential-list { grid-column: 1 / -1; display: grid; gap: var(--space-2); }
+    .source-credential-row { min-width: 0; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: color-mix(in oklab, var(--surface), var(--bg) 42%); overflow: hidden; }
+    .source-credential-row summary { cursor: pointer; display: grid; grid-template-columns: minmax(96px, 1fr) auto; align-items: center; gap: var(--space-2); min-width: 0; padding: 10px var(--space-3); color: var(--fg); }
+    .source-credential-row summary::-webkit-details-marker { color: var(--meta); }
+    .source-credential-row summary strong { min-width: 0; overflow-wrap: anywhere; }
+    .source-credential-summary { min-width: 0; color: var(--muted); font-size: 12px; line-height: 1.35; text-align: right; overflow-wrap: anywhere; }
+    .source-credential-row[data-available="true"] .source-credential-summary { color: color-mix(in oklab, var(--success), var(--fg) 36%); }
+    .source-credential-value { width: calc(100% - 24px); min-height: 92px; margin: 0 var(--space-3) var(--space-3); font-family: var(--font-mono); font-size: 12px; line-height: 1.45; resize: vertical; white-space: pre; }
     .toast { position: fixed; left: 50%; bottom: var(--space-6); translate: -50% 0; z-index: 90; display: none; max-width: min(560px, calc(100% - 32px)); padding: var(--space-3) var(--space-5); border-radius: var(--radius-pill); background: var(--fg); color: var(--surface); box-shadow: var(--elev-raised); }
     .toast.is-open { display: block; }
     .fatal-banner { display: none; margin: var(--space-4) clamp(var(--space-4), 3vw, var(--space-8)) 0; padding: var(--space-3) var(--space-4); border: 1px solid color-mix(in oklab, var(--danger), var(--border-soft) 55%); border-radius: var(--radius-md); background: color-mix(in oklab, var(--danger), var(--surface) 92%); color: var(--fg); }
@@ -596,6 +620,11 @@
       .delight-main-actions { flex-basis: 212px; grid-template-columns: 116px 88px; }
       .delight-feedback-actions { width: 128px; }
       .settings-grid, .settings-panel, .settings-subpanel, .inline-row { grid-template-columns: 1fr; }
+      .source-status-list { grid-template-columns: 1fr; }
+      .source-status-head { grid-template-columns: 1fr; }
+      .source-status-badges { justify-content: flex-start; }
+      .source-credential-row summary { grid-template-columns: 1fr; align-items: start; }
+      .source-credential-summary { text-align: left; }
       .card-grid { grid-template-columns: 1fr; }
       .section-head { align-items: stretch; flex-direction: column; margin-top: 0; }
       .recommendation-actions { justify-content: space-between; }

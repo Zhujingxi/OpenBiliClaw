@@ -102,8 +102,10 @@ from openbiliclaw.api.models import (
     RecommendationReshuffleResponse,
     RuntimeStatusResponse,
     SchedulerConfigOut,
+    SourceCredentialItem,
     SourcesBrowserConfigOut,
     SourcesConfigOut,
+    SourcesCredentialsResponse,
     SourceShareSuggestionIn,
     SourceShareSuggestionResponse,
     SourcesStatusResponse,
@@ -3513,9 +3515,7 @@ def create_app(
                                 "pool_raw_count": counts.get("raw", counts.get("available", 0)),
                                 "pool_pending_count": counts.get("pending", 0),
                                 "pool_pending_eval_count": counts.get("pending_eval", 0),
-                                "pool_evaluated_pending_count": counts.get(
-                                    "evaluated_pending", 0
-                                ),
+                                "pool_evaluated_pending_count": counts.get("evaluated_pending", 0),
                             }
                         )
             else:
@@ -6919,6 +6919,101 @@ def create_app(
             youtube=youtube,
             twitter=twitter,
             zhihu=zhihu,
+        )
+
+    def _mask_source_credential(value: str, *, reveal: bool) -> str:
+        if reveal or not value:
+            return value
+        if len(value) <= 8:
+            return "*" * len(value)
+        return f"{value[:4]}{'*' * max(4, len(value) - 8)}{value[-4:]}"
+
+    def _xhs_token_from_url(url: str) -> str:
+        match = re.search(r"(?:[?&])xsec_token=([^&#]+)", str(url or ""))
+        return match.group(1) if match else ""
+
+    def _latest_xhs_token() -> str:
+        if not hasattr(ctx.database, "conn"):
+            return ""
+        queries = (
+            """
+            SELECT content_url
+            FROM discovery_candidates
+            WHERE source_platform = 'xiaohongshu'
+              AND content_url LIKE '%xsec_token=%'
+            ORDER BY last_seen_at DESC, id DESC
+            LIMIT 1
+            """,
+            """
+            SELECT content_url
+            FROM content_cache
+            WHERE source_platform = 'xiaohongshu'
+              AND content_url LIKE '%xsec_token=%'
+            ORDER BY discovered_at DESC, bvid DESC
+            LIMIT 1
+            """,
+        )
+        for sql in queries:
+            with suppress(Exception):
+                row = ctx.database.conn.execute(sql).fetchone()
+                if row:
+                    url = row["content_url"] if hasattr(row, "keys") else row[0]
+                    token = _xhs_token_from_url(str(url))
+                    if token:
+                        return token
+        return ""
+
+    @app.get("/api/sources/credentials", response_model=SourcesCredentialsResponse)
+    def sources_credentials(reveal_keys: bool = False) -> SourcesCredentialsResponse:
+        """Return current local Cookie / token snapshots for source settings pages."""
+        from openbiliclaw.bilibili.auth import resolve_runtime_cookie
+        from openbiliclaw.config import load_config
+        from openbiliclaw.sources.douyin_auth import resolve_douyin_cookie
+
+        cfg = load_config()
+        srcs = cfg.sources
+
+        bili_cookie = resolve_runtime_cookie(
+            data_dir=cfg.data_path,
+            configured_cookie=str(getattr(cfg.bilibili, "cookie", "") or ""),
+        )
+        dy_cookie = resolve_douyin_cookie(
+            data_dir=cfg.data_path,
+            cookie_env=getattr(srcs.douyin, "cookie_env", "OPENBILICLAW_DOUYIN_COOKIE"),
+        )
+        tw_cookie = resolve_x_cookie(
+            data_dir=cfg.data_path,
+            cookie_env=getattr(srcs.twitter, "cookie_env", "OPENBILICLAW_X_COOKIE"),
+        )
+        xhs_token = _latest_xhs_token()
+
+        def item(label: str, value: str, detail: str) -> SourceCredentialItem:
+            return SourceCredentialItem(
+                label=label,
+                value=_mask_source_credential(value, reveal=reveal_keys),
+                available=bool(value.strip()),
+                detail=detail,
+            )
+
+        return SourcesCredentialsResponse(
+            bilibili=item("Cookie", bili_cookie, "B 站当前 resolved Cookie。"),
+            xiaohongshu=item(
+                "xsec_token",
+                xhs_token,
+                "小红书不保存整站 Cookie；这里展示最近同步内容 URL 中的 xsec_token。",
+            ),
+            douyin=item("Cookie", dy_cookie, "抖音当前 resolved Cookie。"),
+            youtube=SourceCredentialItem(
+                label="Cookie",
+                available=False,
+                detail="YouTube 当前按公开源接入，后端不保存 Cookie。",
+            ),
+            twitter=item("Cookie", tw_cookie, "X 当前 resolved Cookie。"),
+            zhihu=SourceCredentialItem(
+                label="Cookie",
+                available=False,
+                detail="知乎登录态保存在浏览器站点 / 插件上下文中，后端不保存可展示 Cookie。",
+            ),
         )
 
     # ── Douyin task queue endpoints (extension dispatcher) ──────────

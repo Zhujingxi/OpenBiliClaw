@@ -9,6 +9,7 @@
 后端源码走 `backend-v0.3.146`，浏览器插件走 `extension-v0.3.97`，桌面安装包走 `desktop-v0.3.146`。
 
 - **知乎长 ID 链接不再被 JS 舍入**：插件知乎 task executor 对站内 API 响应做 lossless JSON 解析，把超过 `Number.MAX_SAFE_INTEGER` 的裸整数先转成字符串；归一化时也会优先从 URL 字符串解析 question / answer / article ID，修复 19 位 question id 被舍入成错误知乎链接的问题。真实后端 + 已连接浏览器插件 E2E 覆盖 `discover-zhihu-hot` 和指定 `2053435015258804659` 的 `discover-zhihu-related`，确认入库 URL 不再出现舍入后的 `2053435015258804700`。
+- **PC Web 平台源状态与 Cookie 展示优化**：设置页“平台源”现在把“来源开关是否进入调度”和“Cookie / 令牌 / 插件任务是否可用”拆成两个 badge；知乎 `pending/unverified` 显示为“状态待验证”，修改来源开关但未保存时会标注“保存后生效”。新增 `/api/sources/credentials`，PC Web 会把 B 站 / 抖音 / X 当前 Cookie 和小红书最近 `xsec_token` 放在默认折叠的只读面板里；下方 Cookie 输入框仅用于覆盖，留空保存不会覆盖，只有主动粘贴新 Cookie 时才提交。
 
 ## v0.3.145 / extension v0.3.96 / desktop v0.3.145.1: Eval 缓存与推荐理由并发优化（2026-06-26）
 
