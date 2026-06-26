@@ -326,6 +326,7 @@
     .feedback-icon-btn { width: 32px; height: 32px; min-height: 32px; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: var(--radius-pill); background: transparent; color: var(--muted); }
     .feedback-icon-btn svg { width: 16px; height: 16px; stroke-width: 2; }
     .feedback-icon-btn:hover { background: var(--surface); color: var(--fg); }
+    .feedback-icon-btn[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
     .feedback-separator { color: var(--meta); font-size: 13px; line-height: 1; transform: translateY(-1px); }
     .small-btn { display: inline-flex; align-items: center; justify-content: center; min-height: 34px; border: 1px solid var(--border-soft); background: var(--surface); color: var(--fg-2); border-radius: var(--radius-pill); padding: 7px var(--space-3); font-size: var(--text-sm); white-space: nowrap; }
     .video-card .small-btn { width: auto; min-height: 38px; padding: 0 var(--space-4); border: 1px solid var(--accent); background: var(--accent); color: var(--accent-on); font-size: 13px; font-weight: 650; transition: width var(--motion-base) var(--ease-standard), min-width var(--motion-base) var(--ease-standard), padding var(--motion-base) var(--ease-standard), background var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard); }
@@ -383,6 +384,24 @@
     .message-primary-actions .small-btn:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--accent-on); }
     .message-primary-actions .small-btn.secondary { border-color: var(--border-soft); background: var(--surface); color: var(--fg-2); }
     .message-primary-actions .small-btn.secondary:hover { background: var(--surface-warm); border-color: var(--border-soft); color: var(--fg); }
+    .message-item .inline-chat-area { display: grid; gap: 10px; margin-top: 2px; }
+    .message-item .inline-chat-turns { display: grid; gap: 8px; }
+    .message-item .inline-chat-compose { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: end; }
+    .message-item .inline-chat-input { width: 100%; min-width: 0; min-height: 42px; max-height: 120px; resize: vertical; border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--bg); color: var(--fg); padding: 10px 12px; font: inherit; line-height: 1.45; }
+    .message-item .inline-chat-input:focus-visible { outline: none; border-color: color-mix(in oklab, var(--accent), var(--border-soft) 42%); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent), transparent 38%); }
+    .message-item .inline-chat-send,
+    .message-item .inline-chat-cancel { min-height: 42px; border-radius: var(--radius-pill); padding: 0 14px; font-size: 13px; font-weight: 700; white-space: nowrap; }
+    .message-item .inline-chat-send { border: 1px solid var(--accent); background: var(--accent); color: var(--accent-on); }
+    .message-item .inline-chat-cancel { border: 1px solid var(--border-soft); background: var(--surface); color: var(--fg-2); }
+    .message-item .inline-chat-send:disabled,
+    .message-item .inline-chat-cancel:disabled,
+    .message-item .inline-chat-input:disabled { opacity: 0.62; cursor: default; }
+    .message-item .inline-chat-bubble { width: fit-content; max-width: 92%; padding: 9px 12px; border-radius: var(--radius-md); border: 1px solid var(--border-soft); background: var(--bg); color: var(--fg-2); font-size: var(--text-sm); line-height: 1.45; }
+    .message-item .inline-chat-bubble.user { justify-self: end; background: var(--surface-warm); color: var(--fg); }
+    .message-item .inline-chat-bubble.thinking { color: var(--muted); animation: pulse 1.5s ease-in-out infinite; }
+    .message-item .inline-chat-reply { justify-self: start; background: var(--surface); color: var(--fg); }
+    .message-item .inline-chat-bubble.error { border-color: color-mix(in oklab, var(--danger), var(--border-soft) 55%); background: color-mix(in oklab, var(--danger), var(--surface) 90%); color: var(--danger); }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
     .message-chat-view { display: grid; grid-template-rows: auto auto auto auto minmax(160px, 1fr) auto; gap: var(--space-3); min-height: calc(100vh - 48px); }
     .message-chat-view[hidden] { display: none; }
     .message-chat-head { align-items: center; margin-bottom: 0; }

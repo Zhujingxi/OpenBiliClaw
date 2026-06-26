@@ -643,10 +643,15 @@
       return String(item?.bvid || item?.content_id || item?.id || "");
     }
 
+    function shouldRemoveRecommendationAfterFeedback(feedbackType) {
+      const normalized = String(feedbackType || "").trim().toLowerCase();
+      return normalized === "dislike" || normalized === "dismiss";
+    }
+
     function isFeedbackedRecommendation(item) {
-      const feedback = String(item?.feedback_type || item?.feedback || "").trim();
+      const feedback = String(item?.feedback_type || item?.feedback || "").trim().toLowerCase();
       const poolStatus = String(item?.pool_status || item?.status || "").trim().toLowerCase();
-      return Boolean(feedback) || poolStatus === "feedbacked";
+      return shouldRemoveRecommendationAfterFeedback(feedback) || (poolStatus === "feedbacked" && !feedback);
     }
 
     function normalizeRecommendationList(items) {
@@ -1693,6 +1698,19 @@
       }, card ? delayMs : 0);
     }
 
+    function finishRecommendationFeedback(card, feedbackType = "") {
+      if (!card) return;
+      delete card.dataset.feedbackPending;
+      card.querySelectorAll(".card-actions button, .card-actions input").forEach((control) => { control.disabled = false; });
+      const normalized = String(feedbackType || "").trim().toLowerCase();
+      if (normalized !== "like") return;
+      const button = card.querySelector('[data-action="like"]');
+      if (!button) return;
+      button.setAttribute("aria-pressed", "true");
+      button.classList.add("is-active");
+      button.disabled = true;
+    }
+
     const sendIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M4 12 20 4l-5 16-3.2-6.8L4 12Z"/><path d="m11.8 13.2 3.7-3.7"/></svg>';
 
     function openCardComposer(card) {
@@ -1830,19 +1848,27 @@
           await submitFeedback(item, "comment", note);
           if (input) input.value = "";
           closeCardComposer(card);
-          status.textContent = "已提交聊天线索，几秒后从当前列表移除。";
-          removeRecommendationCard(item, card, "已提交聊天线索");
+          item.feedback_type = "comment";
+          status.textContent = "已提交聊天线索，推荐会继续保留在当前列表。";
+          finishRecommendationFeedback(card, "comment");
+          showToast("已提交聊天线索");
           return;
         }
         const feedbackType = action === "like" ? "like" : action === "dismiss" ? "dismiss" : "dislike";
         await submitFeedback(item, feedbackType);
         const feedbackCopy = {
-          like: ["已记录喜欢，几秒后从当前列表移除。", "已记录喜欢"],
+          like: ["已记录喜欢，推荐会继续保留在当前列表。", "已记录喜欢"],
           dislike: ["已记录不感兴趣，几秒后从当前列表移除。", "已记录不感兴趣"],
           dismiss: ["已忽略这条推荐，几秒后从当前列表移除。", "已忽略推荐"]
         }[feedbackType];
         status.textContent = feedbackCopy[0];
-        removeRecommendationCard(item, card, feedbackCopy[1]);
+        if (shouldRemoveRecommendationAfterFeedback(feedbackType)) {
+          removeRecommendationCard(item, card, feedbackCopy[1]);
+          return;
+        }
+        item.feedback_type = feedbackType;
+        finishRecommendationFeedback(card, feedbackType);
+        showToast(feedbackCopy[1]);
       } catch (error) {
         delete card.dataset.feedbackPending;
         card.querySelectorAll(".card-actions button, .card-actions input").forEach((control) => { control.disabled = false; });
@@ -2710,12 +2736,124 @@
       }, 260);
     }
 
+    function appendInlineChatBubble(container, role, text) {
+      if (!container) return null;
+      const bubble = document.createElement("div");
+      bubble.className = `inline-chat-bubble ${role}${role === "reply" ? " inline-chat-reply" : ""}`;
+      bubble.textContent = text;
+      container.appendChild(bubble);
+      return bubble;
+    }
+
+    function messageProbeChatPrompt(msg, isAvoidance) {
+      return msg.domain
+        ? `我想多聊聊「${msg.domain}」这个${isAvoidance ? "避雷" : "兴趣"}方向。`
+        : `我想多聊聊这个${isAvoidance ? "避雷" : "兴趣"}方向。`;
+    }
+
+    async function pollInlineMessageChatTurn(turnId, chatArea, thinking, startedAt = Date.now()) {
+      const showReply = (text, tone = "reply") => {
+        thinking?.remove();
+        appendInlineChatBubble(chatArea.querySelector(".inline-chat-turns"), tone, text);
+        chatArea.querySelectorAll(".inline-chat-input, .inline-chat-send, .inline-chat-cancel").forEach((control) => { control.disabled = false; });
+        chatArea.querySelector(".inline-chat-input")?.focus();
+      };
+      try {
+        const latest = await requestJson(`${ENDPOINTS.chatTurns}/${encodeURIComponent(turnId)}`);
+        if (latest?.status === "completed" || latest?.reply) {
+          showReply(latest.reply || "后端已完成这轮聊天。");
+          return;
+        }
+        if (latest?.status === "failed" || Date.now() - startedAt > 180000) {
+          showReply(latest?.error || "聊天处理超时，稍后可以在历史里继续查看。", "error");
+          return;
+        }
+      } catch {
+        // Keep polling below; transient disconnects should not collapse the inline composer.
+      }
+      window.setTimeout(() => pollInlineMessageChatTurn(turnId, chatArea, thinking, startedAt), 1200);
+    }
+
+    function openInlineMessageProbeChat(msg, el) {
+      if (!el) return;
+      const existing = el.querySelector(".inline-chat-area");
+      if (existing) {
+        existing.querySelector(".inline-chat-input")?.focus();
+        return;
+      }
+      const probeType = messageType(msg);
+      const isAvoidance = probeType === "avoidance.probe";
+      const domain = String(msg.domain || "");
+      const prompt = messageProbeChatPrompt(msg, isAvoidance);
+      const actions = el.querySelector(".message-card-actions");
+      if (actions) actions.hidden = true;
+      const chatArea = document.createElement("div");
+      chatArea.className = "inline-chat-area";
+      chatArea.innerHTML = `
+        <div class="inline-chat-turns" aria-live="polite"></div>
+        <div class="inline-chat-compose">
+          <textarea class="inline-chat-input" rows="2" placeholder="${escapeHtml(isAvoidance ? `聊聊你为什么想避开「${domain || "这个方向"}」…` : `聊聊你对「${domain || "这个方向"}」的想法…`)}"></textarea>
+          <button class="inline-chat-send" type="button">发送</button>
+          <button class="inline-chat-cancel" type="button">返回</button>
+        </div>`;
+      actions?.insertAdjacentElement("afterend", chatArea);
+      const input = chatArea.querySelector(".inline-chat-input");
+      const sendBtn = chatArea.querySelector(".inline-chat-send");
+      const cancelBtn = chatArea.querySelector(".inline-chat-cancel");
+      const closeComposer = () => {
+        chatArea.remove();
+        if (actions) actions.hidden = false;
+      };
+      const submit = async () => {
+        const message = input?.value?.trim() || "";
+        if (!message) {
+          input?.focus();
+          return;
+        }
+        chatArea.querySelectorAll(".inline-chat-input, .inline-chat-send, .inline-chat-cancel").forEach((control) => { control.disabled = true; });
+        appendInlineChatBubble(chatArea.querySelector(".inline-chat-turns"), "user", message);
+        const thinking = appendInlineChatBubble(chatArea.querySelector(".inline-chat-turns"), "thinking", "阿B 正在结合这条探针思考…");
+        const turnId = createClientTurnId(isAvoidance ? "avoidance-probe" : "probe");
+        try {
+          const turn = await requestJsonStrict(ENDPOINTS.chatTurns, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              turn_id: turnId,
+              session: "webui",
+              scope: isAvoidance ? "avoidance_probe" : "probe",
+              subject_id: domain,
+              subject_title: domain || (isAvoidance ? "这个避雷方向" : "这个兴趣方向"),
+              message: `${prompt}\n\n${message}`
+            })
+          });
+          if (input) input.value = "";
+          void pollInlineMessageChatTurn(turn?.turn_id || turnId, chatArea, thinking);
+        } catch (error) {
+          thinking?.remove();
+          appendInlineChatBubble(chatArea.querySelector(".inline-chat-turns"), "error", error?.message || "后台正忙，等一下再聊。");
+          chatArea.querySelectorAll(".inline-chat-input, .inline-chat-send, .inline-chat-cancel").forEach((control) => { control.disabled = false; });
+          input?.focus();
+        }
+      };
+      sendBtn?.addEventListener("click", () => void submit());
+      cancelBtn?.addEventListener("click", closeComposer);
+      input?.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+          event.preventDefault();
+          void submit();
+        }
+        if (event.key === "Escape") closeComposer();
+      });
+      window.setTimeout(() => input?.focus(), 40);
+    }
+
     async function respondProbe(msg, response, el) {
       if (!el) return;
       const actions = el.querySelector(".message-card-actions");
       if (response === "chat") {
-        openMessageChat(msg);
-        showToast("已在消息里打开聊天上下文");
+        openInlineMessageProbeChat(msg, el);
+        showToast("已在这条消息里打开聊天输入");
         return;
       }
       const key = messageKey(msg);
