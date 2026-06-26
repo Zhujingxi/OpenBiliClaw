@@ -249,6 +249,49 @@ if [ "${#assets[@]}" -eq 0 ]; then
   exit 0
 fi
 
+is_aggregate_package_asset() {
+  local asset_name="$1"
+
+  case "$asset_name" in
+    openbiliclaw-extension-v*.zip | OpenBiliClaw-macos-v*.dmg | OpenBiliClaw-windows-*-Setup.exe)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+prune_existing_package_assets() {
+  local asset_name
+
+  while IFS= read -r asset_name; do
+    if [ -z "$asset_name" ]; then
+      continue
+    fi
+    if ! is_aggregate_package_asset "$asset_name"; then
+      continue
+    fi
+
+    for attempt in 1 2 3; do
+      if gh release delete-asset "$aggregate_tag" "$asset_name" --repo "$repo" --yes >/dev/null; then
+        break
+      fi
+      if [ "$attempt" -eq 3 ]; then
+        exit 1
+      fi
+      sleep "$((attempt * 5))"
+    done
+  done < <(
+    gh release view "$aggregate_tag" \
+      --repo "$repo" \
+      --json assets \
+      --jq '.assets[].name'
+  )
+}
+
+prune_existing_package_assets
+
 for asset in "${assets[@]}"; do
   for attempt in 1 2 3; do
     if gh release upload "$aggregate_tag" "$asset" --repo "$repo" --clobber; then

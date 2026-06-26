@@ -26,6 +26,16 @@ def test_aggregate_release_helper_updates_latest_release() -> None:
     assert "--clobber" in script
 
 
+def test_aggregate_release_helper_prunes_stale_package_assets() -> None:
+    script = read_text(".github/scripts/sync-aggregate-release.sh")
+
+    assert "prune_existing_package_assets" in script
+    assert "gh release delete-asset" in script
+    assert "openbiliclaw-extension-v*.zip" in script
+    assert "OpenBiliClaw-macos-v*.dmg" in script
+    assert "OpenBiliClaw-windows-*-Setup.exe" in script
+
+
 def test_release_channels_sync_assets_to_aggregate_release() -> None:
     extension = read_text(".github/workflows/release-extension.yml")
     desktop = read_text(".github/workflows/release-desktop.yml")
