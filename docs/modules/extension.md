@@ -23,7 +23,7 @@
 | 知乎候选链接保真 | ✅ | 知乎任务 executor 对站内 API 响应做 lossless JSON 解析，把超过 JS 安全整数范围的裸整数 token 先转成字符串；归一化 discovery / 收藏 / 动态条目时也会优先从 URL 字符串解析 question / answer / article ID，再退回 JSON 字段，避免 19 位 question id 被 `Number` 舍入后拼出不可打开链接。 |
 | 收藏夹 / 稍后再看 | ✅ | 推荐卡和 delight banner 都提供「时钟=稍后再看」「星星=收藏」两个互相独立的 SVG toggle（乐观 UI、失败回退、懒加载状态）；popup tab bar 已对齐移动 Web / 桌面 Web，提供独立「稍后」页（`viewWatchLater/watchLaterList`，`loadWatchLater` 拉 `/api/watch-later`）和「收藏」页（`viewFavorites/favoritesList`，`loadFavorites` 拉 `/api/favorites`），列表项展示 16:9 头图缩略图并支持打开 / 单条移除；列表页移除走共享的乐观绑定 `bindSavedCardRemove`——点击即从列表消失，DELETE（10s 超时）失败时卡片原位恢复、按钮变「重试」并打 console.error，不再等响应返回才动 DOM（旧实现静默吞错，DELETE 被同源慢请求排队时表现为「点了没反应」）；封面 URL 会和推荐卡一样归一化后走 `/api/image-proxy`。插件 popup 侧保存状态统一由 `popup-saved-sync.js` 管理：同一 bvid 的推荐卡、惊喜横幅按钮、保存列表移除会同步更新，且用户刚点击后的状态不会被旧的懒加载查询覆盖。详见 [收藏夹 spec](../specs/favorites.md) 与 [稍后再看 spec](../specs/watch-later.md)。 |
 | 惊喜推荐正向保留 | ✅ | 插件 side panel、桌面 Web 和移动 Web 对惊喜推荐采用同一反馈语义：`喜欢 / 收藏 / 稍后再看 / 聊一聊` 保留候选在队列中；`去看看` 当场保留卡片但会上报 `view` 标记已读（三端统一，下次队列重灌不再出现）；`不感兴趣 / 忽略 / 关闭` 才立即移出当前队列。已喜欢的候选重灌后以 `state="liked"` 恢复展示。三端默认加载数量统一读取 `[scheduler].delight_queue_limit`，桌面 Web 设置页保存后插件和移动端随下一次队列拉取同步生效。 |
-| Firefox 140+ 支持 | ✅ | `manifest.firefox.json` 使用 `sidebar_action` 承载同一套 popup UI，`openExtensionUi()` 按 Chrome sidePanel -> Firefox sidebarAction -> tab 降级；Firefox manifest 在构建时注入主 manifest version，并声明 AMO 所需 `data_collection_permissions` |
+| Firefox 140+ 支持 | ✅ | `manifest.firefox.json` 使用 `sidebar_action` 承载同一套 popup UI，`openExtensionUi()` 按 Chrome sidePanel -> Firefox sidebarAction -> tab 降级；Firefox manifest 在构建时注入主 manifest version，并声明 AMO 所需 `data_collection_permissions`。发布链路会把 `dist-firefox/` 先打成未签名 `openbiliclaw-extension-v*-firefox.zip`（开发 / 临时加载 / AMO 输入），再通过 `web-ext sign --channel=unlisted` 生成可直接安装的 `openbiliclaw-extension-v*-firefox.xpi` |
 | 持续补货与通知 | ✅ | 运行状态已接入 popup，service worker 会拉取高置信通知并回写发送状态 |
 | 设置页源策略控制 | ✅ | side panel 设置页已按「模型 / 平台源 / 调度 / 通用 / 日志」分 tab；模型 tab 可设置 LLM / embedding 的显式备选 Provider，留空即不 fallback，并明确 embedding 不再跟随默认 LLM；LLM 与 embedding 默认配置旁提供「测试」按钮，按当前表单草稿调用 `/api/config/probe-service` 做无写入连通性探测并行内展示结果；平台源 tab 按 Bilibili / 小红书 / 抖音 / YouTube / 通用网页 / 候选池配比独立分块，可开关四个平台 discovery，编辑各源预算和候选池占比，并按已有事件向后端请求推荐比例；调度 tab 暴露后台暂停、断开宽限、真实 refresh / probe 频率和猜测兴趣参数；日志 tab 用单个「完整日志路径」编辑后端日志文件位置 |
 | 封面图评估设置 | ✅ | side panel 调度 tab 补齐 `[discovery]` 多模态评估控制：可开关封面图评估，并编辑图文 batch、封面最大边、JPEG 质量和图片准备超时；保存 payload 会保留已有 discovery 字段后覆盖 `multimodal_*` 参数，与桌面 Web 设置页保持同一配置面。 |
@@ -78,6 +78,7 @@ extension/
 │   ├── build.mjs
 │   ├── package.mjs
 │   ├── package-firefox.mjs
+│   ├── sign-firefox.mjs
 │   └── chrome-webstore-upload.mjs
 ├── popup/
 │   ├── popup.html
@@ -455,7 +456,7 @@ npm run build
 - B 站搜索兜底 opt-in 浏览器 E2E harness（默认 skip，`BILI_EXTENSION_E2E=1` 才启动真实 Chromium）
 - B 站 / 抖音 Cookie 自动同步的重试闹钟和幂等监听器
 - manifest 图标资源存在性
-- Firefox manifest 的 version 注入、`sidebar_action` 降级路径、AMO 数据收集类别声明和 Firefox zip 打包清理
+- Firefox manifest 的 version 注入、`sidebar_action` 降级路径、AMO 数据收集类别声明、Firefox zip 打包清理和 AMO unlisted XPI 签名
 - popup 设置页字段与 `/api/config` schema 的基础对齐
 - popup API durable chat turn：`startChatTurn()`、`fetchChatTurn()`、`fetchChatTurns()` 会分别调用 `/api/chat/turns`、`/api/chat/turns/{turn_id}` 和列表接口
 - popup 聊天布局：历史 hydrate 与切回聊天 tab 都会触发滚到底部，避免 hidden view 恢复后停在旧消息
@@ -470,13 +471,14 @@ npm run build
 - 发布 tag：`extension-vX.Y.Z`
 - Release 资产：
   - Chrome / Edge / Brave / 其他 Chromium 浏览器：`openbiliclaw-extension-vX.Y.Z.zip`
-  - Firefox 140+：`openbiliclaw-extension-vX.Y.Z-firefox.zip`
+  - Firefox 140+ 正式安装：`openbiliclaw-extension-vX.Y.Z-firefox.xpi`
+  - Firefox 140+ 临时调试 / AMO 输入：`openbiliclaw-extension-vX.Y.Z-firefox.zip`
 - 用户下载入口：`openbiliclaw-v*` 聚合 Latest Release；维护者需要核对构建日志时再看对应 `extension-v*` release
 - Chrome / Edge / Brave 打包脚本会先删除同名旧 zip，再重新压缩 `manifest.json`、`dist/`、`icons/`、`popup/`，避免重复打包带入残留文件
-- `extension-v*` GitHub Actions release workflow 会同时运行 Chrome / Firefox 两条打包脚本并上传两个 zip；发布尾部调用 `.github/scripts/sync-aggregate-release.sh`，把插件 zip 同步到当前 `openbiliclaw-v*` 聚合 Latest Release，并把该聚合页重新标记为 GitHub Latest。Firefox 140+ 也可本地构建 / 临时加载：`npm run build:firefox` 生成 `dist-firefox/`，`npm run package:firefox` 生成 `openbiliclaw-extension-vX.Y.Z-firefox.zip`；Firefox 打包脚本同样会先删除同名旧 zip
+- `extension-v*` GitHub Actions release workflow 会同时运行 Chrome / Firefox 两条打包脚本，并默认用 `AMO_JWT_ISSUER` / `AMO_JWT_SECRET` 执行 `npm run sign:firefox:only` 生成 signed XPI；发布尾部调用 `.github/scripts/sync-aggregate-release.sh`，把插件 zip / xpi 同步到当前 `openbiliclaw-v*` 聚合 Latest Release，并把该聚合页重新标记为 GitHub Latest。Firefox 140+ 也可本地构建 / 临时加载：`npm run build:firefox` 生成 `dist-firefox/`，`npm run package:firefox` 生成未签名 `openbiliclaw-extension-vX.Y.Z-firefox.zip`；配置 AMO 凭据后，`npm run sign:firefox:only` 会把当前 `dist-firefox/` 提交 AMO unlisted 签名并输出可直接安装的 `openbiliclaw-extension-vX.Y.Z-firefox.xpi`
 - v0.3.62 起，Chrome / Firefox 发布包移除 `http://*/*` 宽泛主机权限，只保留四个受支持内容平台和 `127.0.0.1` / `localhost` 本机后端权限，避免 Chrome Web Store 把插件标为“所有网站权限”。
 - v0.3.64 起，Chrome / Firefox 发布包不再声明 `tabs` permission；后台任务仍可使用 `chrome.tabs.create/update/remove/onUpdated/sendMessage` 打开、导航和清理受支持平台任务页，发布包仅保留实际需要的最小 permission 集合。
-- 插件更新不走后端自动更新 API：商店安装版本由 Chrome / Edge / Firefox 原生更新，GitHub zip / sideload 用户按 release 页面下载新版并重新加载。
+- 插件更新不走后端自动更新 API：商店安装版本由 Chrome / Edge / Firefox 原生更新；GitHub Release 下载的 Chrome zip / Firefox signed XPI、开发者模式加载和临时加载用户按 release 页面下载新版并重新加载。
 
 Chrome Web Store 上传自动化走官方 API v2，不使用第三方上传 action：
 
