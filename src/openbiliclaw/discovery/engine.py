@@ -8,9 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import hashlib
 import inspect
-import json
 import logging
 import re
 import time
@@ -23,7 +21,13 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 from openbiliclaw.discovery.strategies._utils import build_profile_summary
 from openbiliclaw.discovery.style_keys import VALID_STYLE_KEYS, normalize_style_key
 from openbiliclaw.llm.json_utils import extract_llm_json_list, parse_llm_json_tolerant
+from openbiliclaw.llm.prompt_cache import (
+    PromptLayerRenderCache,
+    profile_prompt_layers,
+    stable_json_digest,
+)
 from openbiliclaw.llm.service import is_llm_rate_limit_error
+from openbiliclaw.llm.task_options import without_core_memory_kwargs
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Sequence
@@ -52,35 +56,6 @@ _EVAL_PROFILE_EVIDENCE_CAP = 8
 _EVAL_PROFILE_SPECULATION_CAP = 12
 _EVAL_BATCH_CACHE_VERSION = "batch-content-eval-v1"
 _NEGATIVE_EXAMPLES_UNSET = object()
-
-
-def _stable_json_digest(value: object) -> str:
-    """Return a deterministic short digest for prompt-visible eval inputs."""
-
-    try:
-        text = json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        )
-    except TypeError:
-        text = str(value)
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
-
-
-def _call_accepts_keyword(fn: Any, name: str) -> bool:
-    """Return whether a callable accepts a keyword argument."""
-
-    try:
-        signature = inspect.signature(fn)
-    except (TypeError, ValueError):
-        return False
-    for param in signature.parameters.values():
-        if param.kind is inspect.Parameter.VAR_KEYWORD:
-            return True
-    return name in signature.parameters
 
 
 def discovery_raw_candidate_mode_enabled() -> bool:
@@ -123,6 +98,13 @@ def compact_evaluation_profile_summary(profile_summary: dict[str, object]) -> di
         _EVAL_PROFILE_SPECULATION_CAP,
     )
     return compacted
+
+
+def evaluation_profile_prompt_layers(
+    profile_summary: dict[str, object],
+) -> list[tuple[str, dict[str, object]]]:
+    """Split eval profile prompt input from most stable to most volatile."""
+    return profile_prompt_layers(profile_summary)
 
 
 def _cap_profile_sequence(value: object, cap: int, *, newest: bool = False) -> object:
@@ -716,6 +698,7 @@ class ContentDiscoveryEngine:
         self._multimodal_vision_supported_override = multimodal_vision_supported
         self.multimodal_unavailable_reason = ""
         self._eval_cache: dict[str, tuple[float, str, str, str, str]] = {}
+        self._evaluation_profile_prompt_cache = PromptLayerRenderCache()
         # v0.3.x negative-anchors cache: (timestamp, latest_event_id,
         # exemplars). Refreshes when either the latest event id changes
         # (new negative classified) or 5 minutes have elapsed.
@@ -1218,10 +1201,12 @@ class ContentDiscoveryEngine:
             source_platform=content.source_platform or "bilibili",
         )
         try:
-            llm_call = self._llm_service.complete_structured_task(
+            complete_structured = self._llm_service.complete_structured_task
+            llm_call = complete_structured(
                 system_instruction=messages[0]["content"],
                 user_input=messages[1]["content"],
                 caller="discovery.evaluate_single",
+                **without_core_memory_kwargs(complete_structured),
             )
             if self._concurrency is not None:
                 response = await self._concurrency.run_llm(llm_call)
@@ -1596,15 +1581,29 @@ class ContentDiscoveryEngine:
     def _evaluation_profile_digest(self, profile: SoulProfile) -> str:
         """Digest the full structured profile shape visible to batch evaluation."""
 
-        return _stable_json_digest(self._evaluation_profile_summary(profile))
+        return stable_json_digest(self._evaluation_profile_summary(profile))
 
     @staticmethod
     def _evaluation_profile_summary(profile: SoulProfile) -> dict[str, object]:
         return build_profile_summary(profile)
 
+    def _evaluation_profile_prompt_cache_obj(self) -> PromptLayerRenderCache:
+        """Return eval profile prompt cache, creating it for lightweight tests."""
+
+        cache = getattr(self, "_evaluation_profile_prompt_cache", None)
+        if not isinstance(cache, PromptLayerRenderCache):
+            cache = PromptLayerRenderCache()
+            self._evaluation_profile_prompt_cache = cache
+        return cache
+
+    def evaluation_profile_prompt_cache_stats(self) -> dict[str, dict[str, Any]]:
+        """Return eval profile prompt-layer cache stats."""
+
+        return self._evaluation_profile_prompt_cache_obj().stats()
+
     @staticmethod
     def _negative_examples_digest(examples: list[dict[str, object]] | None) -> str:
-        return _stable_json_digest(examples or [])
+        return stable_json_digest(examples or [])
 
     def _batch_eval_cache_key(
         self,
@@ -1703,8 +1702,12 @@ class ContentDiscoveryEngine:
         negative_examples_for_prompt = cast("list[dict[str, object]] | None", negative_examples)
         profile_digest = self._evaluation_profile_digest(profile)
         negative_digest = self._negative_examples_digest(negative_examples_for_prompt)
+        profile_blocks = self._evaluation_profile_prompt_cache_obj().render_json_layers(
+            evaluation_profile_prompt_layers(profile_data)
+        )
         messages = build_batch_content_evaluation_prompt(
             profile_summary=profile_data,
+            profile_blocks=profile_blocks,
             content_items=content_items,
             source_context=source_context or (batch[0].source_strategy if batch else ""),
             source_platform=batch_source_platform,
@@ -1727,8 +1730,7 @@ class ContentDiscoveryEngine:
                     "reasoning_effort": "",
                     "caller": "discovery.evaluate_batch",
                 }
-                if _call_accepts_keyword(multimodal_call, "inject_core_memory"):
-                    kwargs["inject_core_memory"] = False
+                kwargs.update(without_core_memory_kwargs(multimodal_call))
                 llm_call = multimodal_call(**kwargs)
             else:
                 kwargs = {
@@ -1745,8 +1747,7 @@ class ContentDiscoveryEngine:
                     "caller": "discovery.evaluate_batch",
                 }
                 complete_structured = self._llm_service.complete_structured_task
-                if _call_accepts_keyword(complete_structured, "inject_core_memory"):
-                    kwargs["inject_core_memory"] = False
+                kwargs.update(without_core_memory_kwargs(complete_structured))
                 llm_call = complete_structured(**kwargs)
             if self._concurrency is not None:
                 response = await self._concurrency.run_llm(llm_call)

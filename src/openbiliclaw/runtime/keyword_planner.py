@@ -51,10 +51,12 @@ from openbiliclaw.discovery.pool_snapshot import (
     build_cold_start_pool_snapshot,
     build_pool_distribution_snapshot,
 )
+from openbiliclaw.llm.prompt_cache import PromptLayerRenderCache, profile_prompt_layers
 from openbiliclaw.llm.prompts import (
     build_merged_keywords_prompt,
     parse_merged_keywords_with_presence,
 )
+from openbiliclaw.llm.task_options import without_core_memory_kwargs
 
 if TYPE_CHECKING:
     from openbiliclaw.config import Config, DiscoveryConfig
@@ -178,6 +180,7 @@ class KeywordPlanner:
         # ``{platform: {"generated": n, "yield": y}}`` snapshot emitted by a
         # generation pass. Empty until the first pass that generates anything.
         self.last_cycle_ledger: dict[str, dict[str, int]] = {}
+        self._profile_prompt_cache = PromptLayerRenderCache()
 
     # ── wiring ──────────────────────────────────────────────────────────
 
@@ -403,16 +406,22 @@ class KeywordPlanner:
             )
             try:
                 profile_summary = build_profile_summary(profile)
+                profile_blocks = self._profile_prompt_cache.render_json_layers(
+                    profile_prompt_layers(profile_summary)
+                )
                 messages = build_merged_keywords_prompt(
                     profile_summary=profile_summary,
+                    profile_blocks=profile_blocks,
                     platform_blocks=blocks,
                 )
-                response = await self._llm.complete_structured_task(
+                complete_structured = self._llm.complete_structured_task
+                response = await complete_structured(
                     system_instruction=messages[0]["content"],
                     user_input=messages[1]["content"],
                     caller="discovery.keyword_planner",
                     reasoning_effort="",
                     max_tokens=merged_max_tokens,
+                    **without_core_memory_kwargs(complete_structured),
                 )
                 content = str(getattr(response, "content", "") or "")
                 generated, present = parse_merged_keywords_with_presence(

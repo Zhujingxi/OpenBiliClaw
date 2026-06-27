@@ -111,7 +111,7 @@
 
    evaluator 的候选输入不再只依赖标题：各来源会尽量映射 `view_count`、`like_count`、`favorite_count` / `collect_count`、`comment_count` / `reply_count`、`share_count`、`danmaku_count`、`retweet_count`、`bookmark_count`、`tags`、`body_text` 等字段。prompt 明确把互动指标当辅助信号，不能用高热度替代内容与画像的真实匹配，也不能因为低热度惩罚小众但高度匹配的内容。
 
-   `evaluate_content_batch()` 的进程内评分缓存按“候选身份 + full eval profile digest + negative_examples digest + evaluator cache version”命中，不再使用 Python `id(profile)` 或全局最新事件水位作为 key。这样同一画像内容在 profile 对象重建后仍能复用精确评分；普通非负向事件推进 event id 时不会冲掉缓存，但近期负样本内容发生变化仍会强制重新评估。批量 eval 调用 `LLMService` 时还会在服务支持的情况下关闭额外 core memory 注入，因为 batch prompt 已经携带完整结构化画像；这能稳定 provider-side prompt-cache 前缀，同时不减少 evaluator 可见的画像信号。
+   `evaluate_content_batch()` 的进程内评分缓存按“候选身份 + full eval profile digest + negative_examples digest + evaluator cache version”命中，不再使用 Python `id(profile)` 或全局最新事件水位作为 key。这样同一画像内容在 profile 对象重建后仍能复用精确评分；普通非负向事件推进 event id 时不会冲掉缓存，但近期负样本内容发生变化仍会强制重新评估。LLM prompt 侧，batch evaluator 会把完整结构化画像拆成 `<profile_core>` / `<profile_life_context>` / `<profile_interests>` / `<profile_style_context>` / `<profile_recent_context>` 五层，并用 `PromptLayerRenderCache` 按层 digest 复用渲染后的 JSON block；近期觉察变化只会更新后置 recent 层，画像核心和兴趣层保持 byte-stable 前缀。批量 eval、单条 fallback eval 和搜索 / 排行 / 跨域 / 多平台关键词生成调用 `LLMService` 时，会在服务支持的情况下关闭额外 core memory 注入，因为这些 prompt 已经携带完整结构化画像；这能稳定 provider-side prompt-cache 前缀，同时不减少 evaluator 或 query generator 可见的画像信号。
 
    batch evaluator 的 LLM 输出优先使用顶层 JSON object：`{"results": [...]}`，以匹配 OpenAI-compatible provider 的 `json_object` 约束；解析器仍兼容旧的根数组、fenced JSON、JSONL，以及 provider 偶发返回的 `{"content_id": {"score": ...}}` 映射对象。解析失败或结果数量无法可靠对齐时，直接 discovery 兼容路径会降级为逐条 `evaluate_content()`，runtime 待评估池路径则按 batch 级 transient 失败释放回队列等待后续重试。
 
@@ -589,7 +589,7 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 **生成（planner loop）**：`runtime/keyword_planner.py::KeywordPlanner` 作为独立后台对象（在 `api/runtime_context.py` 构造、持 `llm_service`+db+config，由 refresh controller 的 `run_forever` 拉起），每 `planner_poll_seconds` 轮一次：
 
 1. 算 `due` = 缓存 `pending` 低于 `kw_cache_low` **且** 真实缺口 > 0（复用 controller 的补池口径，含 raw headroom + 在途）；B 站额外催化（池低于目标 / ≥ `signal_event_threshold` 信号）也进 due。
-2. due 非空 → 现读最新画像 → 取**短事务单飞锁并在调用 LLM 前释放** → `build_merged_keywords_prompt`（一次合并调用、画像只发一份、按平台分块、静态 system 命中 prompt-cache）→ 解析 `{platform: [...]}` → 按当前 `profile_kw_digest` 写 `pending` 补到 `kw_cache_high`。
+2. due 非空 → 现读最新画像 → 取**短事务单飞锁并在调用 LLM 前释放** → `build_merged_keywords_prompt`（一次合并调用、画像只发一份、按平台分块、静态 system 命中 prompt-cache，并关闭额外 core memory 注入）→ 解析 `{platform: [...]}` → 按当前 `profile_kw_digest` 写 `pending` 补到 `kw_cache_high`。
 3. LLM 失败 / 缺某平台块 → 该平台回退确定性权重排序兴趣名；仍无新词（稀疏画像）→ 回收该平台最旧 `used` 词。
 
 **缺口驱动抓取 + 三种执行形态**（`runtime/keyword_fetch.py::KeywordFetchCoordinator`，每个 search 抓取点显式 flag 分支，flag-off 行为逐字不变）：距上次 ≥ 各平台自身 `min_interval`、缺口 > 0、且 store 有可领词 → 原子 `claim` `fetch_batch` 个 → 经 P1.5 注入口（`queries` / `keyword_ids`）喂进搜索：
@@ -633,6 +633,7 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 | runtime 调度参数配置 | ✅ | 后台 discovery 不使用 `discovery_cron`；`ContinuousRefreshController` 从 `[scheduler]` 读取 `refresh_check_interval_seconds`、`signal_event_threshold`、`trending_refresh_hours`、`explore_refresh_hours`、`discovery_limit` 和 `proactive_push_interval_seconds`，配置热重载后重建 controller 生效 |
 | M124 LLM 评估窗口控费 | ✅ | runtime 按平台自身缺口传递补货 limit；各策略在 LLM 评估前把候选窗口收缩到 `max(6, limit*2)`、上限 90，少量补货时不再把几十条候选送去评分后立刻 suppressed；batch evaluator 优先要求 `{"results":[...]}` 以贴合 `json_object` provider，parser 兼容 fenced JSON、回显输入后追加结果、NDJSON object 序列和按内容 ID 映射的 object，避免退回 N 次单条评估 |
 | v0.3.74 eval-batch JSON 容错统一 | ✅ | `_evaluate_batch` 改用 `llm.json_utils.extract_llm_json_list()`，在原 fenced / echo / JSONL 基础上统一兼容 `results/items/data/output/scores/evaluations` wrapper、MiMo malformed `{ [ ... ] }` 数组包裹和 schema echo 后最终结果；解析失败仍按原有降级路径处理，不把示例 JSON 当作真实评分 |
+| v0.3.147 eval 画像分层 prompt cache | ✅ | `_evaluate_batch` 构造 prompt 时通过共享 `profile_prompt_layers()` 把 `build_profile_summary()` 输出按稳定性拆为 core / life_context / interests / style_context / recent_context 五层；`ContentDiscoveryEngine` 实例内的 `PromptLayerRenderCache` 按层 digest 复用渲染文本，画像某一层变动时只替换该层，帮助 provider prompt-cache 命中更长稳定前缀 |
 | v0.3.81 eval-batch 按内容 ID 绑定 | ✅ | batch 内容评估 prompt 会携带 `bvid/content_id`，解析时优先按返回 ID 写回 `score/reason/topic/style/franchise`。provider 乱序或漏项时，不再把后一条候选的 `relevance_reason` 写到前一条；无 ID 且数量不完整时降级逐条评估 |
 | eval-batch 互动指标与封面图输入 | ✅ | `DiscoveredContent` / `discovery_candidates` / `content_cache` 透传观看、点赞、收藏、评论、分享、弹幕、转推、书签等指标；batch prompt 会带 `tags/body_text` 和互动指标，但画像摘要会先压缩到高权重兴趣、最新 awareness / insight 与完整避雷项。`[discovery].multimodal_evaluation_enabled=true` 且 evaluation 模型支持图像时，封面图经运行时图片缓存命中或白名单抓取后压缩为 image input 一并评估，并用 `cover_image_ref="cover:<content_id>"` 和图片前置文字锚点稳定绑定候选，自动使用更小 batch |
 | v0.3.x eval-batch 限流保护 | ✅ | batch LLM 调用若失败原因为 provider rate limit / cooldown / quota，不再降级到逐条 `evaluate_content()`，也不把候选当 0 分拒绝；runtime 待评估池会把本批 claim 释放回 `pending_eval`，待 provider 恢复后继续评估，避免一次 Gemini 429 放大成逐条请求或误淘汰整批候选 |
@@ -1256,7 +1257,7 @@ for each epoch:
 ## 设计决策
 
 1. **策略显式注入依赖**：`SearchStrategy` 不自己构建 LLM 或 API client，便于测试和后续编排
-2. **query 生成走结构化任务**：统一通过 `LLMService` 注入 core memory，避免各策略手拼画像上下文
+2. **query 生成走结构化任务**：各策略统一把 `build_profile_summary()` 的结构化画像放进 user prompt，并在 `LLMService` 支持时关闭额外 core memory 注入；这样 query / rid / explore domain 生成能看到同一份画像，同时 system prompt 保持静态、provider prompt-cache 前缀稳定
 3. **坏 JSON 有本地 fallback**：保证搜索策略在 LLM 不稳定时仍可运行
 4. **排行榜分区先做轻量选择**：固定 `rid=0`，其余分区由 LLM 结构化选择并保留默认 fallback
 5. **相关推荐链优先复用真实行为**：种子优先来自近期事件，其次才是偏好补种子和策略兜底

@@ -33,7 +33,7 @@
 | filter_events_by_satisfaction | ✅ | `soul/event_filters.py` 中的纯函数，按 `inferred_satisfaction` 过滤事件，`"unknown"` 同时匹配缺失 / `None`，使 pre-migration 老行可被显式 opt-in 保留 |
 | recent_negative_exemplars | ✅ | `soul/negative_exemplars.py` 中的纯函数，从事件层拉最近 negative 标题做 recency 加权（半衰期默认 14d）+ 前缀去重 + 80 字截断，最多返回 16 条 `{title, reason, age_days}`。下游消费者是 `discovery/engine.ContentDiscoveryEngine._evaluate_batch` 和 `recommendation/engine.RecommendationEngine._classify_batch`，二者都会把列表作为 `negative_examples` 透传给 batch evaluator prompt——这是 [inferred_satisfaction 信号](#) 的第二个消费方（第一个是上面的 `filter_events_by_satisfaction`） |
 | SocraticDialogue.respond() | ✅ | 通过 LLMService 调用 LLM，自动注入画像 |
-| ProfileBuilder | ✅ | 结构化 prompt + JSON 校验 + `OnionProfile` 构建 |
+| ProfileBuilder | ✅ | 结构化 prompt + JSON 校验 + `OnionProfile` 构建；`build_soul_profile_prompt()` 的 system prompt 保持静态，user prompt 按 `<tone_profile>` → `<preference_summary>` → `<recent_awareness>` → `<active_insights>` → `<history_summary>` 排列并使用确定性 JSON，让超大的历史摘要位于 provider cache 前缀末端 |
 | SoulEngine.build_initial_profile() | ✅ | 从 history + preference 生成并持久化 `soul.json` |
 | SoulEngine.get_profile() | ✅ | 从 soul 层读取画像并叠加用户覆盖层返回**有效画像**，未初始化时抛明确异常 |
 | SoulEngine.get_raw_profile() / get_overrides() | ✅ | 返回不叠加覆盖的纯 AI 画像 / 当前 `ProfileOverrides`，供编辑态与 AI 漂移比对 |
@@ -68,6 +68,7 @@
 | 不喜欢领域探针系统 | ✅ | `AvoidanceSpeculator` 与正向兴趣探针并行运行，最多 5 条 active 避雷假设；只在用户确认或显式负向证据达到阈值后写入 `disliked_topics`，未确认前不参与 discovery / recommendation 过滤；生成前会读取最新 `avoidance_probe_feedback_history`，确认/否认/探针聊天处理过的方向不再作为 active 避雷探针重复出现 |
 | ROLE/VALUES/CORE 增量更新器 | ✅ | `_update_role`（`build_role_delta_prompt`，基于信号证据 + LLM diff-protection）、`_update_values`（LLM delta，每周期最多 add/remove 1 条，注入完整画像上下文）、`_update_core`（`build_core_delta_prompt`，更新 traits/needs/MBTI，强 diff-protection）均已完整实现 |
 | v0.3.74 Soul 结构化 JSON 容错统一 | ✅ | ProfileBuilder、PreferenceAnalyzer、DialogueInsightAnalyzer、AwarenessAnalyzer、InsightAnalyzer、LayerUpdaters 和 InterestSpeculator 都收敛到 `llm.json_utils`，每个任务用 predicate 约束自己需要的 schema；MiMo / 非 OpenAI wrapper 不再只修 awareness 一处 |
+| v0.3.147 画像上下文缓存前缀保护 | ✅ | PreferenceAnalyzer、ProfileBuilder、AwarenessAnalyzer、InsightAnalyzer、InterestSpeculator 和 AvoidanceSpeculator 的结构化 prompt 已经把 history / preference / soul_profile / profile_summary 放在 user message；调用 `LLMService` 时在支持路径上关闭额外 core memory 注入，避免把同一份动态画像再次拼进 system prompt |
 
 ## 猜测兴趣系统 (Speculative Interest Lifecycle)
 
@@ -406,7 +407,7 @@ active 池会做两层多样性保护：词面 / specifics 的 novelty guard 阻
 4. 返回结果会进入 `merge_preferences()`，与旧偏好合并。
 5. 合并后的偏好写回 `preference.json`。
 
-初始化这类大批量事件会按分片并发分析，但初始 chunk 调度会按最多 16 个一批推进；一批处理完再处理下一批，避免拉全量历史时一次性创建所有 prompt 任务和等待队列。真实 provider 并发仍由 `LLMService` 控制，不通过这里调高。偏好分析还会在每次 LLM 调用前检查 prompt 体积：`event_chunk_size` 只是第一层按条数粗分片；如果某个 chunk 的 `system_instruction + user_input` 超过本地保守预算，`PreferenceAnalyzer` 会继续递归二分该 chunk。若单条事件本身过长，会只保留 `event_type / title / context / inferred_satisfaction / satisfaction_reason` 和 `metadata.source_platform / up_name / bvid / feedback_type` 等偏好提取关键字段，截断长文本并丢弃 `raw_context`、字幕、评论、原始 payload 等大字段。compact 后仍超预算的单条事件会被跳过并记录 warning，其他事件继续参与合并。
+初始化这类大批量事件会按分片并发分析，但初始 chunk 调度会按最多 16 个一批推进；一批处理完再处理下一批，避免拉全量历史时一次性创建所有 prompt 任务和等待队列。真实 provider 并发仍由 `LLMService` 控制，不通过这里调高。偏好分析的事件批次和 existing preference 已经完整放在 user prompt 中，因此单批 / 分片 LLM 调用会在 `LLMService` 支持时传 `inject_core_memory=False`，避免把动态 core memory 再拼进 system prompt、打穿 provider prompt-cache 前缀。偏好分析还会在每次 LLM 调用前检查 prompt 体积：`event_chunk_size` 只是第一层按条数粗分片；如果某个 chunk 的 `system_instruction + user_input` 超过本地保守预算，`PreferenceAnalyzer` 会继续递归二分该 chunk。若单条事件本身过长，会只保留 `event_type / title / context / inferred_satisfaction / satisfaction_reason` 和 `metadata.source_platform / up_name / bvid / feedback_type` 等偏好提取关键字段，截断长文本并丢弃 `raw_context`、字幕、评论、原始 payload 等大字段。compact 后仍超预算的单条事件会被跳过并记录 warning，其他事件继续参与合并。
 
 若某个分片被 LLM 风控拒绝或返回非 JSON，`PreferenceAnalyzer` 仍会递归拆小该分片；最终只有仍失败的单条事件会被跳过。若 provider 返回明确的 context-window 错误（例如 `n_keep >= n_ctx`、`context length`、`prompt is too long`），偏好分析会按同一套拆分 / compact 逻辑重试；认证、网络、限流、模型不存在等非上下文错误仍会让调用失败，避免把服务不可用伪装成成功。
 
@@ -811,6 +812,8 @@ updated_pref = await analyzer.analyze_events(
 )
 # 初始化路径每批最多推进 200 * 16 = 3200 条事件的粗分片；
 # 单个 chunk 超过 max_prompt_chars 时仍会继续按 prompt 预算拆小。
+# 偏好提取的 user prompt 已含事件批次和 existing_preference；
+# 使用 LLMService 时会关闭额外 core memory 注入，保护 provider prompt-cache 前缀。
 assert DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE * MAX_CONCURRENT_PREFERENCE_CHUNKS == 3200
 # 返回:
 # {

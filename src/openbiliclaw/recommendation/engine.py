@@ -7,7 +7,6 @@ to the user in a warm, friend-like manner with deep personal insights.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import logging
 import re
@@ -18,7 +17,9 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from openbiliclaw.discovery.style_keys import VALID_STYLE_KEYS, normalize_style_key
 from openbiliclaw.llm.json_utils import extract_llm_json_list, extract_llm_json_object
+from openbiliclaw.llm.prompt_cache import PromptLayerRenderCache, profile_prompt_layers
 from openbiliclaw.llm.service import is_llm_rate_limit_error
+from openbiliclaw.llm.task_options import without_core_memory_kwargs
 from openbiliclaw.soul.tone import ToneProfile, build_tone_profile
 
 if TYPE_CHECKING:
@@ -108,19 +109,6 @@ def _batch_results_by_content_key(
     return matched if saw_identifier else None
 
 
-def _call_accepts_keyword(fn: Any, name: str) -> bool:
-    """Return whether a callable accepts a keyword argument."""
-
-    try:
-        signature = inspect.signature(fn)
-    except (TypeError, ValueError):
-        return False
-    for param in signature.parameters.values():
-        if param.kind is inspect.Parameter.VAR_KEYWORD:
-            return True
-    return name in signature.parameters
-
-
 class SupportsCoreMemoryTask(Protocol):
     """Protocol for a core-memory-aware structured LLM task executor."""
 
@@ -207,6 +195,9 @@ class RecommendationEngine:
         # tests that don't inject a registry continue to work unchanged.
         self.task_registry: BackgroundTaskRegistry | None = task_registry
         self._classify_lock = asyncio.Lock()
+        self._profile_prompt_caches: defaultdict[str, PromptLayerRenderCache] = defaultdict(
+            PromptLayerRenderCache
+        )
         # v0.3.47+: serialise precompute_pool_copy so multiple
         # per-strategy fire-and-forget tasks (now created from
         # _run_refresh_plan after each strategy completes) don't load
@@ -234,6 +225,18 @@ class RecommendationEngine:
         # the new batch were also in the previous batch). High
         # carryover signals stale-pool / fatigue-bypass.
         self._last_served_bvids: frozenset[str] = frozenset()
+
+    def _profile_blocks(
+        self,
+        profile_summary: dict[str, object],
+        *,
+        cache_key: str,
+    ) -> list[str]:
+        """Render cached profile prompt layers for one recommendation task."""
+
+        return self._profile_prompt_caches[cache_key].render_json_layers(
+            profile_prompt_layers(profile_summary)
+        )
 
     def _xhs_self_nickname(self) -> str:
         """Return the persisted XHS self nickname for pool guards."""
@@ -1143,13 +1146,15 @@ class RecommendationEngine:
         platform = (batch[0].source_platform or "bilibili") if batch else "bilibili"
         messages = build_batch_content_evaluation_prompt(
             profile_summary=profile_data,
+            profile_blocks=self._profile_blocks(profile_data, cache_key="evaluate_batch"),
             content_items=content_items,
             source_context=batch[0].source_strategy if batch else "",
             source_platform=platform,
             negative_examples=negative_examples,
         )
 
-        response = await self._llm.complete_structured_task(
+        complete_structured = self._llm.complete_structured_task
+        response = await complete_structured(
             system_instruction=messages[0]["content"],
             user_input=messages[1]["content"],
             max_tokens=8192,
@@ -1157,6 +1162,7 @@ class RecommendationEngine:
             # categorical fields, doesn't benefit from reasoning chain.
             reasoning_effort="",
             caller="recommendation.evaluate_batch",
+            **without_core_memory_kwargs(complete_structured),
         )
         raw = str(getattr(response, "content", "")).strip()
         payload = extract_llm_json_list(
@@ -1329,8 +1335,10 @@ class RecommendationEngine:
         from openbiliclaw.llm.prompts import build_delight_reason_prompt
 
         tone_profile = self._expression_tone_profile(profile, content)
+        profile_summary = _recommendation_profile_summary(profile)
         messages = build_delight_reason_prompt(
-            profile_summary=_recommendation_profile_summary(profile),
+            profile_summary=profile_summary,
+            profile_blocks=self._profile_blocks(profile_summary, cache_key="delight_reason"),
             content_summary={
                 "title": content.title,
                 "up_name": content.up_name,
@@ -1348,14 +1356,11 @@ class RecommendationEngine:
         )
         try:
             complete_structured = self._llm.complete_structured_task
-            kwargs: dict[str, Any] = {}
-            if _call_accepts_keyword(complete_structured, "inject_core_memory"):
-                kwargs["inject_core_memory"] = False
             response = await complete_structured(
                 system_instruction=messages[0]["content"],
                 user_input=messages[1]["content"],
                 caller="recommendation.delight_reason",
-                **kwargs,
+                **without_core_memory_kwargs(complete_structured),
             )
             payload = extract_llm_json_object(
                 str(response.content),
@@ -1409,8 +1414,10 @@ class RecommendationEngine:
             }
             for item in batch
         ]
+        profile_summary = _recommendation_profile_summary(profile)
         messages = build_batch_expression_prompt(
-            profile_summary=_recommendation_profile_summary(profile),
+            profile_summary=profile_summary,
+            profile_blocks=self._profile_blocks(profile_summary, cache_key="batch_expression"),
             content_items=content_items,
             tone_profile=tone_profile,
             source_platform=batch[0].source_platform if batch else "bilibili",
@@ -1418,9 +1425,6 @@ class RecommendationEngine:
 
         try:
             complete_structured = self._llm.complete_structured_task
-            kwargs: dict[str, Any] = {}
-            if _call_accepts_keyword(complete_structured, "inject_core_memory"):
-                kwargs["inject_core_memory"] = False
             response = await complete_structured(
                 system_instruction=messages[0]["content"],
                 user_input=messages[1]["content"],
@@ -1431,7 +1435,7 @@ class RecommendationEngine:
                 # vs without, no quality difference).
                 reasoning_effort="",
                 caller="recommendation.write_expression",
-                **kwargs,
+                **without_core_memory_kwargs(complete_structured),
             )
             payload = extract_llm_json_list(
                 str(response.content),
@@ -1706,11 +1710,13 @@ class RecommendationEngine:
         # Select most relevant interests for this content via embedding similarity
         interests_for_prompt = await self._select_relevant_interests(content, profile)
 
+        profile_summary = _recommendation_profile_summary(
+            profile,
+            interests=interests_for_prompt,
+        )
         messages = build_recommendation_expression_prompt(
-            profile_summary=_recommendation_profile_summary(
-                profile,
-                interests=interests_for_prompt,
-            ),
+            profile_summary=profile_summary,
+            profile_blocks=self._profile_blocks(profile_summary, cache_key="expression"),
             content_summary={
                 "title": content.title,
                 "up_name": content.up_name,
@@ -1727,14 +1733,11 @@ class RecommendationEngine:
         )
         try:
             complete_structured = self._llm.complete_structured_task
-            kwargs: dict[str, Any] = {}
-            if _call_accepts_keyword(complete_structured, "inject_core_memory"):
-                kwargs["inject_core_memory"] = False
             response = await complete_structured(
                 system_instruction=messages[0]["content"],
                 user_input=messages[1]["content"],
                 caller="recommendation.expression",
-                **kwargs,
+                **without_core_memory_kwargs(complete_structured),
             )
             payload = extract_llm_json_object(
                 str(response.content),

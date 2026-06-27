@@ -57,6 +57,34 @@ class FakeStructuredService:
         return self.response
 
 
+class CacheFlagStructuredService:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def complete_structured_task(
+        self,
+        *,
+        system_instruction: str,
+        user_input: str,
+        history: list[dict[str, str]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        caller: str = "",
+        inject_core_memory: bool = True,
+    ) -> LLMResponse:
+        self.calls.append(
+            {
+                "system_instruction": system_instruction,
+                "user_input": user_input,
+                "inject_core_memory": inject_core_memory,
+            }
+        )
+        return LLMResponse(
+            content='{"interests": [{"name": "科技", "category": "知识", "weight": 0.7}]}',
+            provider="openai",
+        )
+
+
 class BudgetCapturingStructuredService:
     def __init__(self, max_prompt_chars: int) -> None:
         self.max_prompt_chars = max_prompt_chars
@@ -123,6 +151,24 @@ def test_preference_chunk_defaults_bound_initial_batch_events() -> None:
     assert DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE == 200
     assert MAX_CONCURRENT_PREFERENCE_CHUNKS == 16
     assert DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE * MAX_CONCURRENT_PREFERENCE_CHUNKS == 3200
+
+
+@pytest.mark.asyncio
+async def test_chunked_preference_analysis_disables_core_memory_injection() -> None:
+    service = CacheFlagStructuredService()
+    analyzer = PreferenceAnalyzer(service)
+
+    await analyzer.analyze_events(
+        events=[
+            {"event_type": "view", "title": "AI 进展", "metadata": {"up_name": "甲"}},
+            {"event_type": "like", "title": "工程实践", "metadata": {"up_name": "乙"}},
+        ],
+        existing_preference={"interests": [{"name": "旧兴趣", "category": "知识"}]},
+        event_chunk_size=1,
+    )
+
+    assert len(service.calls) == 2
+    assert [call["inject_core_memory"] for call in service.calls] == [False, False]
 
 
 def test_preference_prompt_explains_cross_platform_signal_strength() -> None:

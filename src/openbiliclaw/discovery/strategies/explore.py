@@ -27,6 +27,7 @@ from openbiliclaw.discovery.strategies._utils import (
 )
 from openbiliclaw.discovery.strategies.search import SearchStrategy
 from openbiliclaw.llm.prompts import build_explore_domains_prompt
+from openbiliclaw.llm.task_options import without_core_memory_kwargs
 
 if TYPE_CHECKING:
     from openbiliclaw.llm.embedding import SupportsEmbeddingService
@@ -337,7 +338,8 @@ class ExploreStrategy(DiscoveryStrategy):
             covered_topic_groups=covered_topic_groups,
         )
         try:
-            response = await self.llm_service.complete_structured_task(
+            complete_structured = self.llm_service.complete_structured_task
+            response = await complete_structured(
                 system_instruction=messages[0]["content"],
                 user_input=messages[1]["content"],
                 # v0.3.31+: bumped 4096 → 8192. With covered_topic_groups
@@ -349,6 +351,7 @@ class ExploreStrategy(DiscoveryStrategy):
                 # return 0 items. 8K leaves comfortable headroom.
                 max_tokens=8192,
                 caller="discovery.explore.queries",
+                **without_core_memory_kwargs(complete_structured),
             )
             parsed = json.loads(str(getattr(response, "content", "")).strip())
         except Exception:

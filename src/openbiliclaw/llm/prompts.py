@@ -33,6 +33,21 @@ def _platform_display_name(source_platform: str) -> str:
     return _PLATFORM_DISPLAY_NAMES.get(source_platform, "内容")
 
 
+def _profile_prompt_blocks(
+    profile_summary: dict[str, object],
+    profile_blocks: list[str] | None = None,
+) -> list[str]:
+    """Return profile prompt blocks, preferring caller-rendered layers."""
+
+    if profile_blocks:
+        return list(profile_blocks)
+    return [
+        "<profile_summary>",
+        json.dumps(profile_summary, ensure_ascii=False, indent=2, sort_keys=True),
+        "</profile_summary>",
+    ]
+
+
 def _friend_label_from_mix(source_platform_mix: dict[str, float] | None) -> str:
     """Pick a friend label that fits the user's observed source mix.
 
@@ -58,9 +73,7 @@ def _tone_context_line(source_platform_mix: dict[str, float] | None) -> str:
         return f"请保持“{friend}”基调：懂 {display} 语境，像熟人聊天，不像客服。"
     top = [
         platform
-        for platform, _ in sorted(source_platform_mix.items(), key=lambda kv: kv[1], reverse=True)[
-            :3
-        ]
+        for platform, _ in sorted(source_platform_mix.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
     ]
     display_list = " / ".join(_platform_display_name(p) for p in top)
     return (
@@ -263,7 +276,7 @@ def build_soul_profile_prompt(
     tone_profile: ToneProfile | None,
     source_platform_mix: dict[str, float] | None = None,
 ) -> list[dict[str, str]]:
-    """Build a structured prompt for initial soul-profile generation."""
+    """Build a cache-friendly prompt for initial soul-profile generation."""
     system_prompt = """
 <task>
 你要生成一份人格画像。你是用户的老朋友,正坐在 ta 对面,直接跟 ta 说"你是这样一个人"。
@@ -409,25 +422,25 @@ def build_soul_profile_prompt(
 }
 </output_schema>
 """.strip()
-    system_prompt = "\n\n".join(
-        [system_prompt, _render_tone_profile(tone_profile, source_platform_mix)]
-    )
     normalized_awareness = recent_awareness or []
     normalized_insights = active_insights or []
     user_prompt = "\n\n".join(
         [
-            "<history_summary>",
-            json.dumps(history_summary, ensure_ascii=False, indent=2),
-            "</history_summary>",
+            "<tone_profile>",
+            _render_tone_profile(tone_profile, source_platform_mix),
+            "</tone_profile>",
             "<preference_summary>",
-            json.dumps(preference_summary, ensure_ascii=False, indent=2),
+            json.dumps(preference_summary, ensure_ascii=False, indent=2, sort_keys=True),
             "</preference_summary>",
             "<recent_awareness>",
-            json.dumps(normalized_awareness, ensure_ascii=False, indent=2),
+            json.dumps(normalized_awareness, ensure_ascii=False, indent=2, sort_keys=True),
             "</recent_awareness>",
             "<active_insights>",
-            json.dumps(normalized_insights, ensure_ascii=False, indent=2),
+            json.dumps(normalized_insights, ensure_ascii=False, indent=2, sort_keys=True),
             "</active_insights>",
+            "<history_summary>",
+            json.dumps(history_summary, ensure_ascii=False, indent=2, sort_keys=True),
+            "</history_summary>",
         ]
     )
     return [
@@ -1035,7 +1048,9 @@ def build_content_evaluation_prompt(
 _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "<task>\n"
     "你要批量评估多个候选内容与一个用户画像的匹配度。"
-    "下面 user 消息会给出 <profile_summary>(画像)、<source_platform>(平台)、"
+    "下面 user 消息会按稳定性顺序给出画像层(<profile_core>、<profile_life_context>、"
+    "<profile_interests>、<profile_style_context>、<profile_recent_context>)、"
+    "<source_platform>(平台)、"
     "<source_context>(发现路径)、<content_batch>(本批候选),你按下面规则打分。\n"
     "</task>\n\n"
     "<rules>\n"
@@ -1106,7 +1121,7 @@ _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "商业意图**层面的比较;若高度相似(同款震惊体、同款保姆级全攻略、同款月入过万"
     "钓贴),`integration_fit` 与 `interest_overlap` 必须显著降低,不要被表面话题词"
     "吸引而错给高分。比较的是**话术模式**,不是关键词重叠。\n"
-    "13. profile_summary.disliked_topics 是长期避雷项;候选命中这些主题或话术模式时,"
+    "13. profile_interests.disliked_topics 是长期避雷项;候选命中这些主题或话术模式时,"
     "score 必须下调,不要把它们当成 interests 的反向补充来加分。\n"
     "</rules>\n\n"
     "<output_schema>\n"
@@ -1127,6 +1142,7 @@ _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT = (
 def build_batch_content_evaluation_prompt(
     *,
     profile_summary: dict[str, object],
+    profile_blocks: list[str] | None = None,
     content_items: list[dict[str, object]],
     source_context: str = "",
     source_platform: str = "bilibili",
@@ -1139,13 +1155,12 @@ def build_batch_content_evaluation_prompt(
 
     v0.3.28+ cache-friendly: ``system_prompt`` is the module-level
     constant ``_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT`` — 100% static
-    across all calls, so the entire ~3500-token instruction block is
-    cache-eligible. All variables (profile, source_platform,
-    source_context, content_items) live in ``user_prompt``, ordered from most
-    stable (profile, changes once per profile rebuild) to most variable
-    (content_batch, changes every call). DeepSeek's auto-cache hits the
-    system prefix every call after the first; explicit-cache providers
-    can mark the system block with cache_control.
+    across all calls, so the entire instruction block is cache-eligible.
+    v0.3.x+ eval callers may pass pre-rendered ``profile_blocks`` ordered
+    from stable core profile to volatile recent context; unchanged layers are
+    reused by the caller's render cache and keep the provider-visible prefix
+    byte-stable. The fallback path still serializes ``profile_summary`` as one
+    block for older call sites.
 
     v0.3.x: optional ``negative_examples`` block sits between
     ``<source_context>`` and ``<content_batch>``, carrying recent
@@ -1156,22 +1171,30 @@ def build_batch_content_evaluation_prompt(
     permanent rules about how to consume the block (rules 10 + 11) and
     stays call-invariant after that one-time template change.
     """
-    user_blocks: list[str] = [
-        "<profile_summary>",
-        json.dumps(
-            profile_summary,
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        ),
-        "</profile_summary>",
-        "<source_platform>",
-        source_platform or "bilibili",
-        "</source_platform>",
-        "<source_context>",
-        source_context or "(unspecified)",
-        "</source_context>",
-    ]
+    user_blocks: list[str] = (
+        list(profile_blocks)
+        if profile_blocks
+        else [
+            "<profile_summary>",
+            json.dumps(
+                profile_summary,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            "</profile_summary>",
+        ]
+    )
+    user_blocks.extend(
+        [
+            "<source_platform>",
+            source_platform or "bilibili",
+            "</source_platform>",
+            "<source_context>",
+            source_context or "(unspecified)",
+            "</source_context>",
+        ]
+    )
     if negative_examples:
         user_blocks.extend(
             [
@@ -1254,6 +1277,7 @@ _RECOMMENDATION_EXPRESSION_SYSTEM_PROMPT = """
 def build_recommendation_expression_prompt(
     *,
     profile_summary: dict[str, object],
+    profile_blocks: list[str] | None = None,
     content_summary: dict[str, object],
     tone_profile: ToneProfile | None,
     source_platform: str = "bilibili",
@@ -1263,32 +1287,28 @@ def build_recommendation_expression_prompt(
     v0.3.28+ cache-friendly: ``system_prompt`` is the module-level
     constant ``_RECOMMENDATION_EXPRESSION_SYSTEM_PROMPT`` (100% static).
     Platform label / tone profile / profile / content all live in
-    ``user_prompt``, ordered so that platform + tone (semi-stable per
-    user) come before content (changes every call) — extends the
-    prefix-cache match as far as the recommendation cycle reuses the
-    same persona.
+    ``user_prompt``. Callers may pass pre-rendered layered profile blocks,
+    which are placed before platform / tone / content so the provider cache
+    can reuse the stable profile prefix across platform and copy changes.
     """
-    user_prompt = "\n\n".join(
-        [
-            "<source_platform>",
-            source_platform or "bilibili",
-            "</source_platform>",
-            "<tone_profile>",
-            _render_tone_profile(tone_profile, {source_platform: 1.0}),
-            "</tone_profile>",
-            "<profile_summary>",
-            json.dumps(profile_summary, ensure_ascii=False, indent=2, sort_keys=True),
-            "</profile_summary>",
-            "<content_summary>",
-            json.dumps(
-                _normalize_content_style_fields(content_summary),
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            ),
-            "</content_summary>",
-        ]
-    )
+    user_blocks = [
+        *_profile_prompt_blocks(profile_summary, profile_blocks),
+        "<source_platform>",
+        source_platform or "bilibili",
+        "</source_platform>",
+        "<tone_profile>",
+        _render_tone_profile(tone_profile, {source_platform: 1.0}),
+        "</tone_profile>",
+        "<content_summary>",
+        json.dumps(
+            _normalize_content_style_fields(content_summary),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ),
+        "</content_summary>",
+    ]
+    user_prompt = "\n\n".join(user_blocks)
     return [
         {"role": "system", "content": _RECOMMENDATION_EXPRESSION_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
@@ -1334,6 +1354,7 @@ _BATCH_EXPRESSION_SYSTEM_PROMPT = (
 def build_batch_expression_prompt(
     *,
     profile_summary: dict[str, object],
+    profile_blocks: list[str] | None = None,
     content_items: list[dict[str, object]],
     tone_profile: ToneProfile | None,
     source_platform: str = "bilibili",
@@ -1343,27 +1364,24 @@ def build_batch_expression_prompt(
     v0.3.28+ cache-friendly: ``system_prompt`` is the module-level
     constant ``_BATCH_EXPRESSION_SYSTEM_PROMPT`` (100% static).
     """
-    user_prompt = "\n\n".join(
-        [
-            "<source_platform>",
-            source_platform or "bilibili",
-            "</source_platform>",
-            "<tone_profile>",
-            _render_tone_profile(tone_profile, {source_platform: 1.0}),
-            "</tone_profile>",
-            "<profile_summary>",
-            json.dumps(profile_summary, ensure_ascii=False, indent=2, sort_keys=True),
-            "</profile_summary>",
-            "<content_batch>",
-            json.dumps(
-                [_normalize_content_style_fields(item) for item in content_items],
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            ),
-            "</content_batch>",
-        ]
-    )
+    user_blocks = [
+        *_profile_prompt_blocks(profile_summary, profile_blocks),
+        "<source_platform>",
+        source_platform or "bilibili",
+        "</source_platform>",
+        "<tone_profile>",
+        _render_tone_profile(tone_profile, {source_platform: 1.0}),
+        "</tone_profile>",
+        "<content_batch>",
+        json.dumps(
+            [_normalize_content_style_fields(item) for item in content_items],
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ),
+        "</content_batch>",
+    ]
+    user_prompt = "\n\n".join(user_blocks)
     return [
         {"role": "system", "content": _BATCH_EXPRESSION_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
@@ -1444,6 +1462,7 @@ _DELIGHT_BATCH_SCORE_SYSTEM_PROMPT = (
 def build_delight_score_batch_prompt(
     *,
     profile_summary: dict[str, object],
+    profile_blocks: list[str] | None = None,
     content_batch: list[dict[str, object]],
 ) -> list[dict[str, str]]:
     """Build a prompt for batch-scoring delight candidates via LLM.
@@ -1458,21 +1477,18 @@ def build_delight_score_batch_prompt(
     the candidate batch, both serialized with sort_keys for deterministic
     cache prefixes.
     """
-    user_prompt = "\n\n".join(
-        [
-            "<profile_summary>",
-            json.dumps(profile_summary, ensure_ascii=False, indent=2, sort_keys=True),
-            "</profile_summary>",
-            "<content_batch>",
-            json.dumps(
-                [_normalize_content_style_fields(item) for item in content_batch],
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            ),
-            "</content_batch>",
-        ]
-    )
+    user_blocks = [
+        *_profile_prompt_blocks(profile_summary, profile_blocks),
+        "<content_batch>",
+        json.dumps(
+            [_normalize_content_style_fields(item) for item in content_batch],
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ),
+        "</content_batch>",
+    ]
+    user_prompt = "\n\n".join(user_blocks)
     return [
         {"role": "system", "content": _DELIGHT_BATCH_SCORE_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
@@ -1482,6 +1498,7 @@ def build_delight_score_batch_prompt(
 def build_delight_reason_prompt(
     *,
     profile_summary: dict[str, object],
+    profile_blocks: list[str] | None = None,
     content_summary: dict[str, object],
     reason_stub: str,
     tone_profile: ToneProfile | None,
@@ -1496,30 +1513,27 @@ def build_delight_reason_prompt(
     v0.3.28+ cache-friendly: ``system_prompt`` is the module-level
     constant ``_DELIGHT_REASON_SYSTEM_PROMPT`` (100% static).
     """
-    user_prompt = "\n\n".join(
-        [
-            "<source_platform>",
-            source_platform or "bilibili",
-            "</source_platform>",
-            "<tone_profile>",
-            _render_tone_profile(tone_profile, {source_platform: 1.0}),
-            "</tone_profile>",
-            "<profile_summary>",
-            json.dumps(profile_summary, ensure_ascii=False, indent=2, sort_keys=True),
-            "</profile_summary>",
-            "<content_summary>",
-            json.dumps(
-                _normalize_content_style_fields(content_summary),
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            ),
-            "</content_summary>",
-            "<reason_stub>",
-            reason_stub,
-            "</reason_stub>",
-        ]
-    )
+    user_blocks = [
+        *_profile_prompt_blocks(profile_summary, profile_blocks),
+        "<source_platform>",
+        source_platform or "bilibili",
+        "</source_platform>",
+        "<tone_profile>",
+        _render_tone_profile(tone_profile, {source_platform: 1.0}),
+        "</tone_profile>",
+        "<content_summary>",
+        json.dumps(
+            _normalize_content_style_fields(content_summary),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ),
+        "</content_summary>",
+        "<reason_stub>",
+        reason_stub,
+        "</reason_stub>",
+    ]
+    user_prompt = "\n\n".join(user_blocks)
     return [
         {"role": "system", "content": _DELIGHT_REASON_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
@@ -2148,6 +2162,7 @@ def build_category_mapping_prompt(
 def build_merged_keywords_prompt(
     *,
     profile_summary: dict[str, object],
+    profile_blocks: list[str] | None = None,
     platform_blocks: list[dict[str, object]],
 ) -> list[dict[str, str]]:
     """Build the merged, multi-platform search-keyword generation prompt.
@@ -2173,21 +2188,18 @@ def build_merged_keywords_prompt(
     due platforms), each serialized with ``ensure_ascii=False, indent=2,
     sort_keys=True``.
     """
-    user_prompt = "\n\n".join(
-        [
-            "<profile_summary>",
-            json.dumps(profile_summary, ensure_ascii=False, indent=2, sort_keys=True),
-            "</profile_summary>",
-            "<platforms>",
-            json.dumps(
-                _normalize_platform_blocks(platform_blocks),
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            ),
-            "</platforms>",
-        ]
-    )
+    user_blocks = [
+        *_profile_prompt_blocks(profile_summary, profile_blocks),
+        "<platforms>",
+        json.dumps(
+            _normalize_platform_blocks(platform_blocks),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ),
+        "</platforms>",
+    ]
+    user_prompt = "\n\n".join(user_blocks)
     return [
         {"role": "system", "content": _MERGED_KEYWORDS_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},

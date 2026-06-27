@@ -29,6 +29,7 @@ from openbiliclaw.discovery.strategies._utils import (
     to_int,
 )
 from openbiliclaw.llm.prompts import build_search_queries_prompt
+from openbiliclaw.llm.task_options import without_core_memory_kwargs
 
 if TYPE_CHECKING:
     from openbiliclaw.soul.profile import SoulProfile
@@ -407,10 +408,12 @@ class SearchStrategy(DiscoveryStrategy):
                     profile_summary=self._profile_summary(profile),
                     pool_hints=None,
                 )
-            response = await self.llm_service.complete_structured_task(
+            complete_structured = self.llm_service.complete_structured_task
+            response = await complete_structured(
                 system_instruction=prompt_messages[0]["content"],
                 user_input=prompt_messages[1]["content"],
                 caller="discovery.search.queries",
+                **without_core_memory_kwargs(complete_structured),
             )
             queries = self._parse_queries(str(getattr(response, "content", "")))
             if queries:

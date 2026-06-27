@@ -21,7 +21,7 @@ from openbiliclaw.discovery.engine import (
 )
 from openbiliclaw.discovery.pool_snapshot import PoolDistributionSnapshot
 from openbiliclaw.llm.service import LLMProviderExecutionError
-from openbiliclaw.soul.profile import InterestTag, SoulProfile
+from openbiliclaw.soul.profile import AwarenessNote, InterestTag, SoulProfile
 from openbiliclaw.storage.database import Database
 
 from .test_explore_strategy import (
@@ -2676,8 +2676,15 @@ async def test_evaluate_batch_requests_no_core_memory_injection_when_supported()
     assert llm.call_kwargs == [{"inject_core_memory": False}]
 
 
+def _json_prompt_block(user_input: str, tag: str) -> dict[str, object]:
+    block = user_input.split(f"<{tag}>", 1)[1].split(f"</{tag}>", 1)[0]
+    parsed = json.loads(block.strip())
+    assert isinstance(parsed, dict)
+    return parsed
+
+
 @pytest.mark.asyncio
-async def test_evaluate_batch_uses_full_profile_summary() -> None:
+async def test_evaluate_batch_uses_layered_profile_prompt_with_full_interests() -> None:
     llm = _RecordingBatchLLMService()
     engine = ContentDiscoveryEngine(llm_service=llm)
     profile = _build_profile()
@@ -2692,14 +2699,63 @@ async def test_evaluate_batch_uses_full_profile_summary() -> None:
     )
 
     user_input = llm.user_inputs[0]
-    profile_json = user_input.split("<profile_summary>", 1)[1].split(
-        "</profile_summary>",
-        1,
-    )[0]
-    profile_summary = json.loads(profile_json.strip())
+    assert "<profile_summary>" not in user_input
+    assert user_input.index("<profile_core>") < user_input.index("<profile_life_context>")
+    assert user_input.index("<profile_life_context>") < user_input.index("<profile_interests>")
+    assert user_input.index("<profile_interests>") < user_input.index("<profile_style_context>")
+    assert user_input.index("<profile_style_context>") < user_input.index(
+        "<profile_recent_context>"
+    )
+    assert user_input.index("<profile_recent_context>") < user_input.index("<content_batch>")
 
-    assert len(profile_summary["interests"]) == 80
-    assert profile_summary["interests"][-1]["name"] == "兴趣79"
+    profile_interests = _json_prompt_block(user_input, "profile_interests")
+    interests = profile_interests["interests"]
+    assert isinstance(interests, list)
+    assert len(interests) == 80
+    assert interests[-1]["name"] == "兴趣79"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_only_updates_changed_profile_layers() -> None:
+    llm = _RecordingBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm)
+    profile = _build_profile()
+
+    await engine._evaluate_batch(
+        [DiscoveredContent(bvid="BVx", title="候选", up_name="u", source_strategy="search")],
+        profile,
+    )
+    profile.recent_awareness.append(
+        AwarenessNote(
+            date="2026-06-27",
+            observation="最近只改变近期觉察",
+            trend="短期上下文变化",
+            emotion_guess="专注",
+        )
+    )
+    await engine._evaluate_batch(
+        [DiscoveredContent(bvid="BVy", title="候选2", up_name="u", source_strategy="search")],
+        profile,
+    )
+
+    first_input, second_input = llm.user_inputs
+    for stable_tag in (
+        "profile_core",
+        "profile_life_context",
+        "profile_interests",
+        "profile_style_context",
+    ):
+        assert _json_prompt_block(first_input, stable_tag) == _json_prompt_block(
+            second_input,
+            stable_tag,
+        )
+    assert _json_prompt_block(first_input, "profile_recent_context") != _json_prompt_block(
+        second_input,
+        "profile_recent_context",
+    )
+
+    assert engine.evaluation_profile_prompt_cache_stats()["profile_core"]["hits"] == 1
+    assert engine.evaluation_profile_prompt_cache_stats()["profile_recent_context"]["misses"] == 2
 
 
 @pytest.mark.asyncio

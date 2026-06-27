@@ -224,6 +224,20 @@ async def test_cold_start_multiple_platforms_one_merged_call(db: Database) -> No
     assert _pending(db, _TWITTER, digest) == []
 
 
+async def test_keyword_planner_uses_layered_profile_prefix(db: Database) -> None:
+    profile = _profile(("露营", 0.9), ("和田玉", 0.7))
+    llm = _FakeLLM(payload={_BILI: ["露营 装备 盘点"]})
+    deficit = _FakeDeficitSource(deficits={_BILI: 40})
+    planner = _make_planner(db, llm=llm, profile=profile, deficit=deficit)
+
+    await planner.run_once()
+
+    user = llm.calls[0]["user"]
+    assert "<profile_summary>" not in user
+    assert user.index("<profile_core>") < user.index("<profile_interests>")
+    assert user.index("<profile_interests>") < user.index("<platforms>")
+
+
 async def test_cold_start_merged_prompt_carries_diversity_hints(db: Database) -> None:
     profile = _profile(("人工智能", 0.96), ("篮球战术", 0.72), ("电影拉片", 0.68))
     llm = _FakeLLM(

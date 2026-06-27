@@ -27,6 +27,17 @@ from openbiliclaw.llm.prompts import (
 )
 from openbiliclaw.memory.manager import MemoryManager
 
+_PROFILE_BLOCKS = [
+    '<profile_core>\n\n{"core_traits":["stable"]}\n\n</profile_core>',
+    '<profile_interests>\n\n{"interests":[{"name":"AI"}]}\n\n</profile_interests>',
+]
+
+
+def _assert_layered_profile_prefix(user_prompt: str, later_tag: str) -> None:
+    assert "<profile_summary>" not in user_prompt
+    assert user_prompt.index("<profile_core>") < user_prompt.index("<profile_interests>")
+    assert user_prompt.index("<profile_interests>") < user_prompt.index(later_tag)
+
 
 def test_render_core_memory_prompt_includes_soul_and_preferences(tmp_path: Path) -> None:
     memory = MemoryManager(tmp_path)
@@ -123,6 +134,63 @@ def test_recommendation_expression_prompt_defaults_to_warm_direct_tone() -> None
     assert "- 情绪温度: warm" in user_prompt
     assert "- 梗感强度: low" in user_prompt
     assert "- 直给程度: direct" in user_prompt
+
+
+def test_recommendation_expression_prompt_accepts_profile_blocks_first() -> None:
+    messages = build_recommendation_expression_prompt(
+        profile_summary={"core_traits": ["fallback"]},
+        profile_blocks=_PROFILE_BLOCKS,
+        content_summary={"title": "候选"},
+        tone_profile=None,
+        source_platform="bilibili",
+    )
+
+    user_prompt = messages[1]["content"]
+    _assert_layered_profile_prefix(user_prompt, "<source_platform>")
+    assert user_prompt.index("<source_platform>") < user_prompt.index("<content_summary>")
+
+
+def test_batch_expression_prompt_accepts_profile_blocks_first() -> None:
+    messages = build_batch_expression_prompt(
+        profile_summary={"core_traits": ["fallback"]},
+        profile_blocks=_PROFILE_BLOCKS,
+        content_items=[{"bvid": "BV1", "title": "候选"}],
+        tone_profile=None,
+        source_platform="bilibili",
+    )
+
+    user_prompt = messages[1]["content"]
+    _assert_layered_profile_prefix(user_prompt, "<source_platform>")
+    assert user_prompt.index("<source_platform>") < user_prompt.index("<content_batch>")
+
+
+def test_delight_prompts_accept_profile_blocks_first() -> None:
+    score_messages = build_delight_score_batch_prompt(
+        profile_summary={"core_traits": ["fallback"]},
+        profile_blocks=_PROFILE_BLOCKS,
+        content_batch=[{"bvid": "BV1", "title": "候选"}],
+    )
+    reason_messages = build_delight_reason_prompt(
+        profile_summary={"core_traits": ["fallback"]},
+        profile_blocks=_PROFILE_BLOCKS,
+        content_summary={"title": "候选"},
+        reason_stub="因为它有跨域惊喜",
+        tone_profile=None,
+        source_platform="bilibili",
+    )
+
+    _assert_layered_profile_prefix(score_messages[1]["content"], "<content_batch>")
+    _assert_layered_profile_prefix(reason_messages[1]["content"], "<source_platform>")
+
+
+def test_merged_keywords_prompt_accepts_profile_blocks_first() -> None:
+    messages = build_merged_keywords_prompt(
+        profile_summary={"core_traits": ["fallback"]},
+        profile_blocks=_PROFILE_BLOCKS,
+        platform_blocks=[{"platform": "bilibili", "need": 3}],
+    )
+
+    _assert_layered_profile_prefix(messages[1]["content"], "<platforms>")
 
 
 def test_recommendation_expression_prompts_treat_dislikes_as_avoidance() -> None:
@@ -740,6 +808,30 @@ def _builder_test_inputs() -> list[tuple[str, dict, dict]]:
             dict(events=[{"event_type": "like", "title": "B"}], existing_preference={"a": 2}),
         ),
         (
+            "build_soul_profile_prompt",
+            dict(
+                history_summary={"recent_topics": ["A"]},
+                preference_summary={"interests": ["A"]},
+                recent_awareness=[],
+                active_insights=[],
+                tone_profile=None,
+                source_platform_mix={"bilibili": 1.0},
+            ),
+            dict(
+                history_summary={"recent_topics": ["B"]},
+                preference_summary={"interests": ["B"]},
+                recent_awareness=[{"note": "B"}],
+                active_insights=[{"hypothesis": "B"}],
+                tone_profile={
+                    "density": "dense",
+                    "warmth": "warm",
+                    "playfulness": "medium",
+                    "directness": "balanced",
+                },
+                source_platform_mix={"xiaohongshu": 1.0},
+            ),
+        ),
+        (
             "build_category_mapping_prompt",
             dict(categories=[{"category": "泛娱乐", "tag_count": 12}]),
             dict(
@@ -824,6 +916,58 @@ def test_prompt_builder_system_messages_are_call_invariant() -> None:
         "input — extends provider cache miss across all calls): "
         f"{failures}. Refactor to put per-call variables in user_prompt."
     )
+
+
+def test_soul_profile_prompt_orders_stable_context_before_history() -> None:
+    """The profile-build call has a huge history block; keep it last.
+
+    Provider prompt caches only match a continuous prefix. Tone/source mix and
+    preference summary are more stable than raw history, awareness, and insight
+    evidence, so they must appear before the changing history payload.
+    """
+    messages = build_soul_profile_prompt(
+        history_summary={"recent_topics": ["国际新闻"]},
+        preference_summary={"interests": ["国际关系"]},
+        recent_awareness=[{"note": "最近更偏深度内容"}],
+        active_insights=[{"hypothesis": "通过深度内容获得掌控感"}],
+        tone_profile={
+            "density": "dense",
+            "warmth": "warm",
+            "playfulness": "medium",
+            "directness": "balanced",
+        },
+        source_platform_mix={"bilibili": 0.5, "xiaohongshu": 0.5},
+    )
+    user_prompt = messages[1]["content"]
+
+    tone_idx = user_prompt.index("<tone_profile>")
+    preference_idx = user_prompt.index("<preference_summary>")
+    awareness_idx = user_prompt.index("<recent_awareness>")
+    insights_idx = user_prompt.index("<active_insights>")
+    history_idx = user_prompt.index("<history_summary>")
+
+    assert tone_idx < preference_idx < awareness_idx < insights_idx < history_idx
+
+
+def test_soul_profile_prompt_serialization_is_deterministic() -> None:
+    messages_a = build_soul_profile_prompt(
+        history_summary={"b": 2, "a": 1},
+        preference_summary={"style": {"depth_preference": 0.8}, "interests": ["AI"]},
+        recent_awareness=[{"z": 2, "a": 1}],
+        active_insights=[{"hypothesis": "H", "confidence": 0.6}],
+        tone_profile=None,
+        source_platform_mix={"xiaohongshu": 0.5, "bilibili": 0.5},
+    )
+    messages_b = build_soul_profile_prompt(
+        history_summary={"a": 1, "b": 2},
+        preference_summary={"interests": ["AI"], "style": {"depth_preference": 0.8}},
+        recent_awareness=[{"a": 1, "z": 2}],
+        active_insights=[{"confidence": 0.6, "hypothesis": "H"}],
+        tone_profile=None,
+        source_platform_mix={"bilibili": 0.5, "xiaohongshu": 0.5},
+    )
+
+    assert messages_a[1]["content"] == messages_b[1]["content"]
 
 
 def test_profile_consolidation_prompt_requires_representative_item_names() -> None:

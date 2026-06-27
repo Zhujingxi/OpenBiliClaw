@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from openbiliclaw.llm.base import LLMProviderError, LLMResponse
 from openbiliclaw.llm.json_utils import (
@@ -15,6 +15,7 @@ from openbiliclaw.llm.json_utils import (
 )
 from openbiliclaw.llm.prompts import build_preference_analysis_prompt
 from openbiliclaw.llm.service import LLMServiceError
+from openbiliclaw.llm.task_options import without_core_memory_kwargs
 from openbiliclaw.soul.event_filters import filter_events_by_satisfaction
 from openbiliclaw.soul.taxonomy import SupportsEmbed, resolve_category
 
@@ -64,6 +65,7 @@ class SupportsCoreMemoryTask(Protocol):
         temperature: float = 0.7,
         max_tokens: int = 4096,
         caller: str = "",
+        inject_core_memory: bool = True,
     ) -> LLMResponse: ...
 
 
@@ -206,7 +208,7 @@ class PreferenceAnalyzer:
             existing_preference=existing_preference,
         )
         try:
-            response = await self.registry.complete_structured_task(
+            response = await self._complete_cacheable_preference_task(
                 system_instruction=messages[0]["content"],
                 user_input=messages[1]["content"],
                 max_tokens=DEFAULT_STRUCTURED_MAX_TOKENS,
@@ -231,6 +233,25 @@ class PreferenceAnalyzer:
             if isinstance(existing_cs, list):
                 merged["cognitive_style"] = existing_cs
         return merged
+
+    async def _complete_cacheable_preference_task(
+        self,
+        *,
+        system_instruction: str,
+        user_input: str,
+        max_tokens: int,
+        caller: str,
+    ) -> LLMResponse:
+        """Run preference extraction without dynamic core-memory system suffixes."""
+        kwargs: dict[str, Any] = {
+            "system_instruction": system_instruction,
+            "user_input": user_input,
+            "max_tokens": max_tokens,
+            "caller": caller,
+        }
+        complete = cast("Any", self.registry.complete_structured_task)
+        kwargs.update(without_core_memory_kwargs(complete))
+        return cast("LLMResponse", await complete(**kwargs))
 
     def _prompt_char_count(self, messages: list[dict[str, str]]) -> int:
         return sum(len(message.get("content", "")) for message in messages)
@@ -363,7 +384,7 @@ class PreferenceAnalyzer:
                 existing_preference={},
             )
             try:
-                response = await self.registry.complete_structured_task(
+                response = await self._complete_cacheable_preference_task(
                     system_instruction=messages[0]["content"],
                     user_input=messages[1]["content"],
                     max_tokens=DEFAULT_STRUCTURED_MAX_TOKENS,

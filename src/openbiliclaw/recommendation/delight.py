@@ -17,7 +17,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 from openbiliclaw.llm.json_utils import extract_llm_json_list
+from openbiliclaw.llm.prompt_cache import PromptLayerRenderCache, profile_prompt_layers
 from openbiliclaw.llm.prompts import build_delight_score_batch_prompt
+from openbiliclaw.llm.task_options import without_core_memory_kwargs
 
 if TYPE_CHECKING:
     from openbiliclaw.llm.embedding import SupportsEmbeddingService
@@ -144,6 +146,7 @@ class _SupportsStructuredLLM(Protocol):
         user_input: str,
         max_tokens: int = ...,
         caller: str = ...,
+        inject_core_memory: bool = ...,
     ) -> Any: ...
 
 
@@ -183,6 +186,7 @@ class LLMDelightScorer:
         self._llm_service = llm_service
         self._threshold = threshold
         self._batch_size = max(1, batch_size)
+        self._profile_prompt_cache = PromptLayerRenderCache()
 
     @property
     def threshold(self) -> float:
@@ -212,6 +216,9 @@ class LLMDelightScorer:
 
         results: dict[str, DelightLLMResult] = {}
         profile_summary = _build_delight_profile_summary(profile)
+        profile_blocks = self._profile_prompt_cache.render_json_layers(
+            profile_prompt_layers(profile_summary)
+        )
 
         for batch_start in range(0, len(candidates), self._batch_size):
             batch = candidates[batch_start : batch_start + self._batch_size]
@@ -228,14 +235,17 @@ class LLMDelightScorer:
             ]
             messages = build_delight_score_batch_prompt(
                 profile_summary=profile_summary,
+                profile_blocks=profile_blocks,
                 content_batch=content_batch,
             )
             try:
-                response = await self._llm_service.complete_structured_task(
+                complete_structured = self._llm_service.complete_structured_task
+                response = await complete_structured(
                     system_instruction=messages[0]["content"],
                     user_input=messages[1]["content"],
                     max_tokens=2048,
                     caller="recommendation.delight_score",
+                    **without_core_memory_kwargs(complete_structured),
                 )
             except Exception:
                 logger.warning(

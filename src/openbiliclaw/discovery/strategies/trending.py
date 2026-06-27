@@ -25,6 +25,7 @@ from openbiliclaw.discovery.strategies._utils import (
     parse_duration,
     to_int,
 )
+from openbiliclaw.llm.task_options import without_core_memory_kwargs
 
 if TYPE_CHECKING:
     from openbiliclaw.soul.profile import SoulProfile
@@ -175,10 +176,12 @@ class TrendingStrategy(DiscoveryStrategy):
 
         messages = build_trending_rids_prompt(profile_summary=build_profile_summary(profile))
         try:
-            response = await self.llm_service.complete_structured_task(
+            complete_structured = self.llm_service.complete_structured_task
+            response = await complete_structured(
                 system_instruction=messages[0]["content"],
                 user_input=messages[1]["content"],
                 caller="discovery.trending.rids",
+                **without_core_memory_kwargs(complete_structured),
             )
             parsed = json.loads(str(getattr(response, "content", "")).strip())
             if isinstance(parsed, dict) and isinstance(parsed.get("rids"), list):

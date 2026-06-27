@@ -16,6 +16,9 @@
 - **聚合 Release 自动清理旧包资产**：`openbiliclaw-v*` 聚合页同步新插件 / 桌面安装包前会先删除旧版本 `.zip` / `.dmg` / `.exe` 包类资产，避免同一个最新 release 同时展示上一版下载包。
 - **CI Web E2E 避开 runner 失效 apt 源**：`Web guided-init E2E` 在安装 Playwright Chromium 依赖前会清理 GitHub runner 上可能返回 403 的 Microsoft / azure-cli apt 源，避免 `python -m playwright install --with-deps chromium` 在 apt update 阶段被外部源拖失败。
 - **候选评估限流不再误拒绝整批候选**：真实 SQLite + runtime drain E2E 复现 LLM 429 后，发现 batch evaluator 曾把 provider rate limit 转成全 0 分，导致 `discovery_candidates` 直接进入 `rejected_low_score`。现在 rate-limit / cooldown 会作为 transient failure 向上传递，`DiscoveryCandidatePipeline` 释放 claim 回 `pending_eval`，模型恢复后继续评估原候选。
+- **画像上下文 LLM 调用缓存前缀稳定**：`PreferenceAnalyzer` 的单批 / 分片结构化 LLM 调用现在会在 `LLMService` 支持时关闭额外 core memory 注入；事件批次和 existing preference 仍在 user prompt 中完整传递，但 system prompt 不再拼入动态画像片段，提升 `soul.preference.chunk` 这类初始化高频调用的 provider prompt-cache 命中率。同一策略也扩展到 discovery 单条 fallback、推荐池分类、delight 批量评分、跨平台关键词生成、awareness / insight / speculation / profile build 等已自带 `profile_summary` / `soul_profile` / `preference_summary` 的结构化调用，并用共享 helper 兼容不支持 `inject_core_memory` 的测试 stub 或旧服务对象。
+- **初始画像生成 prompt 稳定块前置**：`build_soul_profile_prompt()` 的 system prompt 改为完全静态，动态 `tone_profile` / 来源基调移动到 user prompt 首部；user prompt 顺序调整为 `<tone_profile>` → `<preference_summary>` → `<recent_awareness>` → `<active_insights>` → `<history_summary>`，并对 JSON 输入使用 `sort_keys=True`，避免巨大的历史摘要打断 provider prompt-cache 前缀。
+- **画像按层缓存输入扩展到推荐与关键词链路**：共享 `profile_prompt_layers()` 会把 `profile_summary` 拆成 `<profile_core>` / `<profile_life_context>` / `<profile_interests>` / `<profile_style_context>` / `<profile_recent_context>` 五层并按稳定性排序。`discovery.evaluate_batch`、推荐池分类、批量 / 单条推荐文案、delight 批量评分 / 备用理由、统一关键词 planner 都通过 `PromptLayerRenderCache` 按层 digest 复用渲染后的 prompt block：画像核心没变时保持 provider 可见前缀 byte-stable，近期觉察或洞察变化时只更新后置 recent 层，不牺牲各环节可见的完整画像。
 
 ## v0.3.146 / extension v0.3.97 / desktop v0.3.146: 知乎长 ID 链接保真（2026-06-26）
 

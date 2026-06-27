@@ -911,6 +911,51 @@ async def test_generate_expression_requests_no_core_memory_injection_when_suppor
 
 
 @pytest.mark.asyncio
+async def test_generate_expression_uses_layered_profile_prefix() -> None:
+    class _LayerRecordingLLM:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def complete_structured_task(self, **kwargs: object) -> LLMResponse:
+            self.calls.append(dict(kwargs))
+            return LLMResponse(
+                content=json.dumps(
+                    {
+                        "expression": "这条能接住你喜欢拆复杂系统的劲头。",
+                        "topic_label": "系统拆解",
+                    },
+                    ensure_ascii=False,
+                ),
+                provider="test",
+                model="dummy",
+                usage={},
+            )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        llm = _LayerRecordingLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+
+        await engine.generate_expression(
+            DiscoveredContent(
+                bvid="BV_EXPR_LAYERED",
+                title="系统拆解方法",
+                up_name="系统笔记",
+                description="把复杂问题拆成可执行结构。",
+                relevance_score=0.9,
+            ),
+            _build_profile(),
+        )
+
+    user_input = str(llm.calls[0]["user_input"])
+    assert "<profile_summary>" not in user_input
+    assert user_input.index("<profile_core>") < user_input.index("<profile_interests>")
+    assert user_input.index("<profile_interests>") < user_input.index("<source_platform>")
+    assert user_input.index("<source_platform>") < user_input.index("<content_summary>")
+
+
+@pytest.mark.asyncio
 async def test_select_diversified_batch_tolerates_text_items_without_cover() -> None:
     """Task 11: ranking / diversity / MMR must not assume a cover_url or a
     non-zero duration. Text-first X items (empty cover, duration 0) must
