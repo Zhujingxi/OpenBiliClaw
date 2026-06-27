@@ -42,7 +42,7 @@ Dev builds also include a local extension-driven E2E check: the backend can ask 
 
 Most users only need these four steps. Firefox, Docker, and manual setup paths are preserved later in [Setup Details](#setup-details).
 
-1. **Install the extension** — recommended: open the latest aggregate `openbiliclaw-v*` page on [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest), download `openbiliclaw-extension-v*.zip`, and load it (always newest; Firefox uses `openbiliclaw-extension-v*-firefox.zip`); or one-click from the [Chrome Web Store](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg) (auto-updates, but the listed version can lag behind Releases due to review delays).
+1. **Install the extension** — recommended: open the latest aggregate `openbiliclaw-v*` page on [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) and download the manual package (Chrome / Edge / Brave use `openbiliclaw-extension-v*.zip`; Firefox uses the signed `openbiliclaw-extension-v*-firefox.xpi`); or one-click from the [Chrome Web Store](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg) (auto-updates, but the listed version can lag behind Releases due to review delays).
 2. **Deploy the backend (two ways — pick one, both recommended)**:
    - 🖥️ **Download the desktop installer (easiest)**: the same [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) aggregate page keeps the current backend source, extension packages, and available desktop installers together; if the desktop package has a package-only hotfix or temporarily differs from the backend source, `Current Channels` names the matching `desktop-v*`. Grab the macOS `.dmg` / Windows `.exe`, install, and launch — it bundles local embedding and lives in the menu bar / system tray. It's an **unsigned experimental pre-release**, and the macOS DMG includes first-launch instructions; see [Setup Details](#setup-details).
    - 🤖 **Let an AI coding agent deploy it (pick this to customize / edit the source)**: paste this prompt into Claude Code, Codex CLI, Cursor, Windsurf, or another coding agent.
@@ -226,20 +226,25 @@ Built on Manifest V3, the extension works in any Chrome-compatible browser — *
 **Recommended · download the latest build from the Latest Release aggregate page** (gets the newest features and fixes — the Chrome Web Store listing usually lags by a few days to a couple of weeks due to review scheduling):
 
 1. Open [OpenBiliClaw Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest), the newest user-facing aggregate `openbiliclaw-v*` release
-2. Chrome / Edge / Brave users download `openbiliclaw-extension-v*.zip`; Firefox users download `openbiliclaw-extension-v*-firefox.zip`
+2. Chrome / Edge / Brave users download `openbiliclaw-extension-v*.zip`; Firefox users download the signed `openbiliclaw-extension-v*-firefox.xpi`
 3. Open the extensions page (Chrome: `chrome://extensions/` · Edge: `edge://extensions/` · Brave: `brave://extensions/`), enable "Developer mode" in the top right
-4. Drag the downloaded `.zip` file into the page to install
+4. Chrome / Edge / Brave users drag the downloaded `.zip` file into the page to install; Firefox users open the downloaded `.xpi` and confirm installation
 
 **Convenient · one-click from the Chrome Web Store** (the browser keeps it auto-updated — best if you don't want to update manually; downside: the version can lag behind Releases):
 
 > 👉 **[Install OpenBiliClaw on the Chrome Web Store](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg)** — click "Add to Chrome".
 
-Extension updates depend on the install channel: Chrome Web Store / Edge Add-ons / AMO builds are updated by the browser; GitHub zip, developer-mode, and Firefox temporary installs must download the new zip and reload it manually. The backend "auto update" switch only updates the local backend source checkout, not the browser extension.
+Extension updates depend on the install channel: Chrome Web Store / Edge Add-ons (and a future listed AMO build) are updated by the browser; GitHub Release Chrome zips / Firefox signed XPIs, developer-mode loads, and Firefox temporary installs must download the new package and reload it manually. The backend "auto update" switch only updates the local backend source checkout, not the browser extension.
 
 <details>
-<summary>Firefox users: download the Firefox package and sideload (Firefox 140+)</summary>
+<summary>Firefox users: regular install and temporary debugging (Firefox 140+)</summary>
 
-Firefox uses `sidebar_action` instead of Chrome's `sidePanel`, so releases ship a separate `openbiliclaw-extension-v*-firefox.zip`. Download and unzip it, then load it temporarily via `about:debugging`; you can also build the same Firefox package from source:
+Firefox uses `sidebar_action` instead of Chrome's `sidePanel`, so releases ship separate Firefox artifacts:
+
+- `openbiliclaw-extension-v*-firefox.xpi`: signed through Mozilla AMO unlisted signing, installable directly in regular Firefox Release / Beta.
+- `openbiliclaw-extension-v*-firefox.zip`: unsigned development package for `about:debugging` temporary loading or AMO signing input. Installing this zip directly in regular Firefox reports that the add-on could not be verified.
+
+For temporary debugging or source builds:
 
 ```bash
 unzip openbiliclaw-extension-v*-firefox.zip -d openbiliclaw-firefox
@@ -249,7 +254,9 @@ git clone https://github.com/whiteguo233/OpenBiliClaw.git
 cd OpenBiliClaw/extension
 npm install
 npm run build:firefox          # writes dist-firefox/
-# or: npm run package:firefox   # also produces openbiliclaw-extension-v*-firefox.zip
+npm run package:firefox        # also produces unsigned openbiliclaw-extension-v*-firefox.zip
+# With AMO credentials configured, sign it into the installable XPI:
+# AMO_JWT_ISSUER=... AMO_JWT_SECRET=... npm run sign:firefox:only
 ```
 
 Then:
@@ -258,7 +265,7 @@ Then:
 2. Click "Load Temporary Add-on…"
 3. Pick `manifest.json` from the unzipped directory, or `extension/dist-firefox/manifest.json` after a source build
 
-Caveat: temporary add-ons disappear on Firefox restart; signed AMO distribution is still on the roadmap.
+Caveat: temporary add-ons disappear on Firefox restart; regular users should use the signed `.xpi`.
 
 </details>
 
@@ -271,7 +278,7 @@ Most users: the **desktop installer** is the least effort. Want to edit the sour
 Grab the installer for your OS from the `openbiliclaw-v*` aggregate [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest). The aggregate page shows:
 
 - Current backend source tag: `backend-v*`
-- Current extension release: `extension-v*`, with `openbiliclaw-extension-v*.zip` / `openbiliclaw-extension-v*-firefox.zip`
+- Current extension release: `extension-v*`, with `openbiliclaw-extension-v*.zip` / `openbiliclaw-extension-v*-firefox.xpi` (regular Firefox install) / `openbiliclaw-extension-v*-firefox.zip` (Firefox temporary debugging)
 - Current desktop installer release: `desktop-v*`, with available `.dmg` / `.exe` assets; the desktop package can have package-only hotfixes or temporarily differ from the backend source version, so trust the page's `Current Channels`
 
 - **macOS**: download `OpenBiliClaw-macos-v*-arm64.dmg` (Apple silicon is published automatically; Intel `x64` is attached separately when available), open `首次打开说明 First Launch.html` in the DMG, then drag OpenBiliClaw into Applications.

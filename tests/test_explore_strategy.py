@@ -46,11 +46,16 @@ class FakeLLMService:
         max_tokens: int = 4096,
         caller: str = "",
         reasoning_effort: str | None = None,
+        inject_core_memory: bool = True,
     ) -> object:
         self.calls.append(
             {
                 "system_instruction": system_instruction,
                 "user_input": user_input,
+                "max_tokens": max_tokens,
+                "caller": caller,
+                "reasoning_effort": reasoning_effort,
+                "inject_core_memory": inject_core_memory,
             }
         )
         content = self.contents.pop(0) if self.contents else '{"score": 0.0, "reason": ""}'
@@ -93,6 +98,7 @@ class _SlowScoringLLMService(FakeLLMService):
         max_tokens: int = 4096,
         caller: str = "",
         reasoning_effort: str | None = None,
+        inject_core_memory: bool = True,
     ) -> object:
         self.active_calls += 1
         self.max_active_calls = max(self.max_active_calls, self.active_calls)
@@ -103,6 +109,9 @@ class _SlowScoringLLMService(FakeLLMService):
             history=history,
             temperature=temperature,
             max_tokens=max_tokens,
+            caller=caller,
+            reasoning_effort=reasoning_effort,
+            inject_core_memory=inject_core_memory,
         )
         self.active_calls -= 1
         return response
@@ -154,6 +163,77 @@ async def test_explore_strategy_generates_and_filters_domains() -> None:
 
     assert bilibili_client.calls == ["城市 建筑 纪录片", "空间 设计 深度讲解"]
     assert [item.bvid for item in results] == ["BV1A", "BV1B"]
+
+
+@pytest.mark.asyncio
+async def test_explore_strategy_uses_short_domain_json_budget() -> None:
+    from openbiliclaw.discovery.strategies.strategies import ExploreStrategy
+
+    llm_service = FakeLLMService(
+        [
+            """
+            {
+              "domains": [
+                {
+                  "domain": "城市空间与建筑叙事",
+                  "novelty_level": 0.72,
+                  "queries": ["城市 建筑 纪录片", "废墟 探险 vlog"]
+                }
+              ]
+            }
+            """
+        ]
+    )
+    strategy = ExploreStrategy(
+        llm_service=llm_service,
+        bilibili_client=FakeBilibiliClient({}),
+        llm_evaluation=False,
+    )
+
+    domains = await strategy._generate_domains(_build_profile())
+
+    assert len(domains) == 1
+    assert domains[0]["domain"] == "城市空间与建筑叙事"
+    assert domains[0]["why_it_might_resonate"] == ""
+    assert domains[0]["novelty_level"] == 0.72
+    assert domains[0]["queries"] == ["城市 建筑 纪录片", "废墟 探险 vlog"]
+    assert llm_service.calls[0]["caller"] == "discovery.explore.queries"
+    assert int(llm_service.calls[0]["max_tokens"]) <= 2048
+    assert llm_service.calls[0]["reasoning_effort"] == ""
+    assert llm_service.calls[0]["inject_core_memory"] is False
+    assert "why_it_might_resonate" not in str(llm_service.calls[0]["system_instruction"])
+
+
+@pytest.mark.asyncio
+async def test_explore_strategy_reuses_domains_when_profile_and_pool_unchanged() -> None:
+    from openbiliclaw.discovery.strategies.strategies import ExploreStrategy
+
+    llm_service = FakeLLMService(
+        [
+            """
+            {
+              "domains": [
+                {
+                  "domain": "城市空间与建筑叙事",
+                  "novelty_level": 0.72,
+                  "queries": ["城市 建筑 纪录片"]
+                }
+              ]
+            }
+            """
+        ]
+    )
+    strategy = ExploreStrategy(
+        llm_service=llm_service,
+        bilibili_client=FakeBilibiliClient({}),
+        llm_evaluation=False,
+    )
+
+    first = await strategy._generate_domains(_build_profile())
+    second = await strategy._generate_domains(_build_profile())
+
+    assert first == second
+    assert len(llm_service.calls) == 1
 
 
 @pytest.mark.asyncio

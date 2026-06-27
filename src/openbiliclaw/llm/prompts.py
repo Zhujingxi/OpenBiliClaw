@@ -1573,8 +1573,8 @@ def build_explore_domains_prompt(
    不要都落在同一个抽象轴上。
 5. 同一母题的换皮变体最多只能保留 1 个，
    例如”博弈论 / 桌游机制 / 纳什均衡 / 策略模型”这类本质相同的方向不能同时出现。
-6. why_it_might_resonate 必须先说明它对应用户的哪种认知需求、
-   信息处理偏好或内在驱动力，再解释这种陌生内容为什么仍然可能打动这个人。
+6. 输出保持短 JSON：每个 domain 只包含 domain、novelty_level、queries 三个字段，
+   不要输出解释、分类、原因或其它长文本字段。
 7. novelty_level 范围必须在 0.65 到 0.95 之间；至少 3 个 domain 的 novelty_level ≥ 0.75。
 8. 每个 domain 生成 2 到 3 个适合 B 站搜索的 query，query 必须具体到可直接搜索的细分话题，禁止只写宽泛大词。
 9. 不同 domain 的 query 之间词汇重叠率要低；每个 query 必须包含一个内容形式词
@@ -1588,7 +1588,7 @@ def build_explore_domains_prompt(
    不同 domain 之间不得共享同一个上位概念（如"城市空间"与"城市规划"共享"城市"）。
 11. 心理诉求轴多样性（核心规则，违反即视为失败）：
    每个 domain 必须对应**不同**的心理诉求轴，每个轴最多只能出现一次。
-   定义清单（每个 domain 在 why_it_might_resonate 里**显式写出对应哪个轴**）：
+   定义清单：
      - 拆解·系统·结构  ：精密机械、数学、算法、博弈、底层原理、工艺拆解
      - 感官·沉浸·审美    ：视觉/听觉/材质/光影/空间体验、ASMR、风景、艺术
      - 情绪·叙事·人物    ：纪录片人物、剧情、日常 vlog、生活故事、情感讨论
@@ -1615,15 +1615,11 @@ def build_explore_domains_prompt(
   "domains": [
     {
       "domain": "城市空间与建筑叙事",
-      "category": "审美体验",
-      "why_it_might_resonate": "你偏好结构清晰、能从具体对象看见更大系统的内容。",
       "novelty_level": 0.72,
       "queries": ["上海 里弄 改造 纪录片", "创意 建筑 盘点", "废墟 探险 vlog"]
     }
   ]
 }
-category 必须从以下选项中选取且每个 domain 的 category 必须不同：
-知识解释 / 现实观察 / 审美体验 / 人物叙事 / 技术机制 / 社会文化 / 自然科学 / 生活方式
 </output_schema>
 """.strip()
     user_prompt_parts = [

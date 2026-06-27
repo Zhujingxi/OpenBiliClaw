@@ -231,6 +231,39 @@ async def test_openai_provider_does_not_retry_rate_limit(
 
 
 @pytest.mark.asyncio
+async def test_openai_provider_treats_insufficient_balance_as_provider_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = DeepSeekProvider(api_key="test-key")
+    calls = {"count": 0}
+
+    class PaymentRequiredError(Exception):
+        status_code = 402
+        body = {
+            "error": {
+                "message": "Insufficient Balance",
+                "type": "unknown_error",
+                "code": "invalid_request_error",
+            }
+        }
+
+    async def fake_sleep(_: float) -> None:
+        pytest.fail("billing/quota failures should not burn provider retries")
+
+    async def fake_create(**_: object) -> SimpleNamespace:
+        calls["count"] += 1
+        raise PaymentRequiredError("Error code: 402 - Insufficient Balance")
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", fake_create)
+    monkeypatch.setattr("openbiliclaw.llm.openai_provider.asyncio.sleep", fake_sleep)
+
+    with pytest.raises(LLMRateLimitError):
+        await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert calls["count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_openai_provider_rejects_empty_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

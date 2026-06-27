@@ -108,6 +108,9 @@ def test_is_llm_rate_limit_error_detects_wrapped_provider_backoff() -> None:
     assert is_llm_rate_limit_error(
         LLMProviderExecutionError("Provider gemini is cooling down after 429")
     )
+    assert is_llm_rate_limit_error(
+        LLMProviderExecutionError("Provider deepseek failed: HTTP 402: Insufficient Balance")
+    )
     assert not is_llm_rate_limit_error(ValueError("Expected scored JSON array"))
 
 

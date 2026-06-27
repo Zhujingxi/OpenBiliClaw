@@ -533,12 +533,14 @@ class RuntimeContext:
             bilibili_client=new_bilibili_client,
             concurrency=concurrency,
             database=self.database,
+            embedding_service=new_embedding_service,
         )
         trending_strategy = TrendingStrategy(
             bilibili_client=new_bilibili_client,
             llm_service=new_llm_service,
             concurrency=concurrency,
             database=self.database,
+            embedding_service=new_embedding_service,
         )
         related_strategy = RelatedChainStrategy(
             bilibili_client=new_bilibili_client,
@@ -766,6 +768,7 @@ class RuntimeContext:
             soul_engine=new_soul_engine,
             pool_target_count=new_config.scheduler.pool_target_count,
             signal_event_threshold=int(getattr(new_config.scheduler, "signal_event_threshold", 6)),
+            embedding_service=new_embedding_service,
         )
 
         new_runtime_controller = ContinuousRefreshController(

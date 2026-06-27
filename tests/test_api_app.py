@@ -2628,6 +2628,130 @@ class TestBackendAPI:
         assert "discovery 已推进但画像未补" in soul_engine.pipeline.titles
         assert memory.runtime_state["last_profile_pipeline_event_id"] == 11
 
+    @pytest.mark.asyncio
+    async def test_events_endpoint_serializes_concurrent_profile_backfill_claims(self) -> None:
+        import httpx
+
+        started_backfill = asyncio.Event()
+        second_event_propagated = asyncio.Event()
+        release_backfill = asyncio.Event()
+        queried_after: list[int] = []
+        batches: list[list[object]] = []
+
+        class FakeMemoryManager:
+            def __init__(self) -> None:
+                self.runtime_state: dict[str, object] = {
+                    "last_processed_event_id": 10,
+                    "last_profile_pipeline_event_id": 10,
+                }
+
+            def load_discovery_runtime_state(self) -> dict[str, object]:
+                return dict(self.runtime_state)
+
+            def update_discovery_runtime_state(self, mutator: object) -> dict[str, object]:
+                result = mutator(self.runtime_state)  # type: ignore[operator]
+                if isinstance(result, dict):
+                    self.runtime_state = result
+                return dict(self.runtime_state)
+
+            async def propagate_event(self, event: dict[str, object]) -> None:
+                if event.get("title") == "当前点击 2":
+                    second_event_propagated.set()
+
+        class FakeDatabase:
+            def get_latest_event_id(self) -> int:
+                return 11
+
+            def query_events_since(
+                self,
+                *,
+                after_event_id: int,
+                event_types: list[str],
+            ) -> list[dict[str, object]]:
+                del event_types
+                queried_after.append(after_event_id)
+                return [
+                    {
+                        "id": 11,
+                        "event_type": "favorite",
+                        "title": "旧 pending 收藏",
+                    }
+                ]
+
+        class SpyPipeline:
+            async def ingest_batch(self, signals: list[object]) -> object:
+                titles = [signal.payload["title"] for signal in signals]
+                batches.append(titles)
+                if titles == ["旧 pending 收藏"]:
+                    started_backfill.set()
+                    await release_backfill.wait()
+                return object()
+
+        class FakeSoulEngine:
+            def __init__(self) -> None:
+                self.pipeline = SpyPipeline()
+
+            def is_profile_ready(self) -> bool:
+                return True
+
+        class FakeRuntimeController:
+            async def refresh_after_event_ingest(self) -> dict[str, object]:
+                return {"refreshed": False}
+
+        app = create_app(
+            memory_manager=FakeMemoryManager(),
+            database=FakeDatabase(),
+            soul_engine=FakeSoulEngine(),
+            runtime_controller=FakeRuntimeController(),
+        )
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            first = asyncio.create_task(
+                client.post(
+                    "/api/events",
+                    json={
+                        "events": [
+                            {
+                                "type": "click",
+                                "url": "https://www.bilibili.com/video/BV1NOW",
+                                "title": "当前点击 1",
+                                "timestamp": 1710000000000,
+                            }
+                        ]
+                    },
+                )
+            )
+            await started_backfill.wait()
+
+            second = asyncio.create_task(
+                client.post(
+                    "/api/events",
+                    json={
+                        "events": [
+                            {
+                                "type": "click",
+                                "url": "https://www.bilibili.com/video/BV2NOW",
+                                "title": "当前点击 2",
+                                "timestamp": 1710000000001,
+                            }
+                        ]
+                    },
+                )
+            )
+            await second_event_propagated.wait()
+            await asyncio.sleep(0.05)
+            release_backfill.set()
+            responses = await asyncio.gather(first, second)
+
+        assert [response.status_code for response in responses] == [200, 200]
+        assert queried_after == [10]
+        assert batches.count(["旧 pending 收藏"]) == 1
+        assert ["当前点击 1"] in batches
+        assert ["当前点击 2"] in batches
+
     def test_extension_e2e_rejects_state_changing_action_without_opt_in(self) -> None:
         from fastapi.testclient import TestClient
 

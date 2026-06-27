@@ -39,6 +39,9 @@ logger = logging.getLogger(__name__)
 
 _MAX_DISCOVERY_BACKFILL_PER_REFRESH = 60
 _DEFAULT_CANDIDATE_EVAL_BATCH_SIZE = 45
+_DISCOVERY_REPLENISH_LOW_WATERMARK_RATIO = 0.90
+_BILIBILI_EXPENSIVE_DISCOVERY_GAP_RATIO = 0.20
+_BILIBILI_EXPENSIVE_DISCOVERY_MIN_GAP = 20
 # How often the cover-image disk cache is pruned of consumed + unsaved covers.
 # The bulk one-shot prune runs at API startup; this is the steady-state sweep.
 _IMAGE_CACHE_CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60
@@ -1627,6 +1630,8 @@ class ContinuousRefreshController:
         pool_below_target = pool_available < self.pool_target_count
 
         if pool_below_target:
+            if not self._pool_below_replenishment_watermark(pool_available):
+                return []
             source_plan = self._build_source_replenishment_plan()
             if source_plan:
                 return source_plan
@@ -1654,6 +1659,11 @@ class ContinuousRefreshController:
         ):
             plan.append((["explore"], self.discovery_limit))
         return plan
+
+    def _pool_below_replenishment_watermark(self, pool_available: int) -> bool:
+        target = max(1, int(self.pool_target_count))
+        low_watermark = int(target * _DISCOVERY_REPLENISH_LOW_WATERMARK_RATIO)
+        return int(pool_available) < low_watermark
 
     def _log_empty_refresh_plan_diagnostics(self, *, pool_available: int) -> None:
         try:
@@ -2821,7 +2831,20 @@ class ContinuousRefreshController:
             max(1, int(effective_limit)),
             total_gap,
         )
+        if set(strategies) == set(_BILIBILI_DISCOVERY_SOURCES) and (
+            self._should_defer_expensive_bilibili_strategies(total_gap)
+        ):
+            cheap = ["search", "related_chain"]
+            cheap_limits = self._split_budget_across_strategies(cheap, shared_budget)
+            return {strategy: cheap_limits.get(strategy, 0) for strategy in strategies}
         return self._split_budget_across_strategies(strategies, shared_budget)
+
+    def _should_defer_expensive_bilibili_strategies(self, total_gap: int) -> bool:
+        threshold = max(
+            _BILIBILI_EXPENSIVE_DISCOVERY_MIN_GAP,
+            int(self.pool_target_count * _BILIBILI_EXPENSIVE_DISCOVERY_GAP_RATIO),
+        )
+        return int(total_gap) < threshold
 
     @staticmethod
     def _split_budget_across_strategies(

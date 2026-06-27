@@ -1062,6 +1062,7 @@ def create_app(
         debounce_seconds=_FEEDBACK_BATCH_DEBOUNCE_SECONDS,
     )
     app.state.feedback_batch_scheduler = feedback_batch_scheduler
+    profile_pipeline_backfill_lock = asyncio.Lock()
 
     # ── Password gate (LAN/remote auth) ─────────────────────────────
     app.state.auth_gate = AuthGate(_auth_cfg, getattr(ctx, "database", None))
@@ -1478,6 +1479,19 @@ def create_app(
         """
         if max_event_id <= 0:
             return 0
+        if profile_pipeline_backfill_lock.locked():
+            logger.debug("profile pipeline backfill already in progress; skipping duplicate claim")
+            return 0
+        async with profile_pipeline_backfill_lock:
+            return await _backfill_pending_discovery_events_to_profile_pipeline_locked(
+                max_event_id=max_event_id
+            )
+
+    async def _backfill_pending_discovery_events_to_profile_pipeline_locked(
+        *,
+        max_event_id: int,
+    ) -> int:
+        """Feed discovery-pending profile events while holding the backfill claim lock."""
         load_state = getattr(ctx.memory_manager, "load_discovery_runtime_state", None)
         update_state = getattr(ctx.memory_manager, "update_discovery_runtime_state", None)
         if not callable(load_state) or not callable(update_state):

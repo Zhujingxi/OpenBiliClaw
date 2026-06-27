@@ -48,11 +48,15 @@ class FakeLLMService:
         max_tokens: int = 4096,
         caller: str = "",
         reasoning_effort: str | None = None,
+        inject_core_memory: bool = True,
     ) -> object:
         self.calls.append(
             {
                 "system_instruction": system_instruction,
                 "user_input": user_input,
+                "caller": caller,
+                "reasoning_effort": reasoning_effort,
+                "inject_core_memory": inject_core_memory,
             }
         )
         if "content_batch" in user_input:
@@ -149,6 +153,7 @@ class _SlowScoringLLMService(FakeLLMService):
         max_tokens: int = 4096,
         caller: str = "",
         reasoning_effort: str | None = None,
+        inject_core_memory: bool = True,
     ) -> object:
         self.active_calls += 1
         self.max_active_calls = max(self.max_active_calls, self.active_calls)
@@ -159,6 +164,9 @@ class _SlowScoringLLMService(FakeLLMService):
             history=history,
             temperature=temperature,
             max_tokens=max_tokens,
+            caller=caller,
+            reasoning_effort=reasoning_effort,
+            inject_core_memory=inject_core_memory,
         )
         self.active_calls -= 1
         return response
@@ -194,6 +202,49 @@ async def test_trending_strategy_fetches_global_and_related_rankings() -> None:
     assert bilibili_client.calls == [0, 36, 181]
     assert [item.bvid for item in results] == ["BV1A", "BV1B"]
     assert all(item.source_strategy == "trending" for item in results)
+
+
+@pytest.mark.asyncio
+async def test_trending_strategy_reuses_rids_for_same_profile_day() -> None:
+    from openbiliclaw.discovery.strategies.strategies import TrendingStrategy
+
+    llm_service = FakeLLMService(['{"rids": [36]}'])
+    bilibili_client = FakeRankingClient(
+        {
+            0: [{"bvid": "BV1A", "title": "全站榜内容", "author": "UP1", "mid": 1}],
+            36: [{"bvid": "BV1B", "title": "知识区内容", "author": "UP2", "mid": 2}],
+        }
+    )
+    strategy = TrendingStrategy(
+        bilibili_client=bilibili_client,
+        llm_service=llm_service,
+        llm_evaluation=False,
+    )
+
+    await strategy.discover(_build_profile(), limit=20)
+    await strategy.discover(_build_profile(), limit=20)
+
+    assert len(llm_service.calls) == 1
+    assert bilibili_client.calls == [0, 36, 0, 36]
+
+
+@pytest.mark.asyncio
+async def test_trending_rid_selection_uses_low_cost_structured_call() -> None:
+    from openbiliclaw.discovery.strategies.strategies import TrendingStrategy
+
+    llm_service = FakeLLMService(['{"rids": [36]}'])
+    strategy = TrendingStrategy(
+        bilibili_client=FakeRankingClient({}),
+        llm_service=llm_service,
+        llm_evaluation=False,
+    )
+
+    rids = await strategy._select_rids(_build_profile())
+
+    assert rids == [0, 36]
+    assert llm_service.calls[0]["caller"] == "discovery.trending.rids"
+    assert llm_service.calls[0]["reasoning_effort"] == ""
+    assert llm_service.calls[0]["inject_core_memory"] is False
 
 
 @pytest.mark.asyncio

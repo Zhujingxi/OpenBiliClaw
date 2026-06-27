@@ -44,7 +44,7 @@
 
 普通用户先走这四步；Firefox、Docker 和手动部署等备用路径保留在后面的 [安装与部署详情](#安装与部署详情)。
 
-1. **安装浏览器插件**：推荐从 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 的 `openbiliclaw-v*` 聚合页下载 `openbiliclaw-extension-v*.zip` 手动安装（版本最新；Firefox 用 `openbiliclaw-extension-v*-firefox.zip`）；也可从 [Chrome 应用商店](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg)一键安装（自动更新，但受审核排期影响，版本可能滞后于 Releases）。
+1. **安装浏览器插件**：推荐从 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 的 `openbiliclaw-v*` 聚合页下载手动安装（Chrome / Edge / Brave 用 `openbiliclaw-extension-v*.zip`，Firefox 用已签名的 `openbiliclaw-extension-v*-firefox.xpi`）；也可从 [Chrome 应用商店](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg)一键安装（自动更新，但受审核排期影响，版本可能滞后于 Releases）。
 2. **部署后端（两种方式，按需选一，都推荐）**：
    - 🖥️ **下载桌面安装包（最省事）**：同一个 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 聚合页会把当前后端源码、插件包和可用桌面安装包放在一起；桌面包可能单独热修或暂时不同步，页面里的 `Current Channels` 会标出对应 `desktop-v*`。下载 macOS `.dmg` / Windows `.exe` 后双击即用，自带本地 embedding、常驻菜单栏/托盘。当前为**未签名的实验性预发布**，macOS DMG 内会显示首次打开说明，详见 [安装与部署详情](#安装与部署详情)。
    - 🤖 **让 AI 助手部署（想改源码 / 深度定制选它）**：把下面整句粘给 Claude Code、Codex CLI、Cursor、Windsurf 或其他 AI 编程助手。
@@ -230,20 +230,25 @@
 **推荐方式 · 从 Latest Release 聚合页下载最新版手动安装**（拿到最新功能与修复 —— Chrome 应用商店受审核排期影响，版本通常会滞后几天到一两周）：
 
 1. 打开 [OpenBiliClaw Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest)，也就是最新 `openbiliclaw-v*` 用户下载聚合页
-2. Chrome / Edge / Brave 下载 `openbiliclaw-extension-v*.zip`；Firefox 下载 `openbiliclaw-extension-v*-firefox.zip`
+2. Chrome / Edge / Brave 下载 `openbiliclaw-extension-v*.zip`；Firefox 下载已签名的 `openbiliclaw-extension-v*-firefox.xpi`
 3. 打开扩展管理页面（Chrome：`chrome://extensions/` · Edge：`edge://extensions/` · Brave：`brave://extensions/`），开启右上角「开发者模式」
-4. 将下载的 `.zip` 文件拖入页面安装
+4. Chrome / Edge / Brave 将下载的 `.zip` 文件拖入页面安装；Firefox 直接打开下载的 `.xpi` 并确认安装
 
 **省事方式 · Chrome 应用商店一键安装**（安装后由浏览器自动更新，适合不想手动升级的人；缺点是版本可能滞后于 Releases）：
 
 > 👉 **[在 Chrome 应用商店安装 OpenBiliClaw](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg)** —— 打开后点「添加至 Chrome」即可。
 
-插件更新取决于安装渠道：Chrome Web Store / Edge Add-ons / AMO 安装的版本由浏览器自动更新；从 GitHub Release 下载 zip、开发者模式加载或 Firefox 临时加载的用户，需要下载新版 zip 并按同样方式重新加载。后端设置里的“自动更新”开关只更新本地后端源码，不会更新浏览器插件。
+插件更新取决于安装渠道：Chrome Web Store / Edge Add-ons（以及未来 AMO 上架版）由浏览器自动更新；从 GitHub Release 下载的 Chrome zip / Firefox signed XPI、开发者模式加载或 Firefox 临时加载的用户，需要下载新版安装包并按同样方式重新加载。后端设置里的“自动更新”开关只更新本地后端源码，不会更新浏览器插件。
 
 <details>
-<summary>Firefox 用户：下载 Firefox 包临时加载（Firefox 140+）</summary>
+<summary>Firefox 用户：正式安装与临时调试（Firefox 140+）</summary>
 
-Firefox 用 `sidebar_action` 而不是 Chrome 的 `sidePanel`，所以 release 会提供独立的 `openbiliclaw-extension-v*-firefox.zip`。下载后先解压，再通过 `about:debugging` 临时加载；也可以从源码本地构建同一个 Firefox 包：
+Firefox 用 `sidebar_action` 而不是 Chrome 的 `sidePanel`，所以 release 会提供独立产物：
+
+- `openbiliclaw-extension-v*-firefox.xpi`：Mozilla AMO unlisted 签名后的正式安装包，普通 Firefox Release / Beta 可以直接安装。
+- `openbiliclaw-extension-v*-firefox.zip`：未签名开发包，只用于 `about:debugging` 临时加载或 AMO 签名输入。普通 Firefox 直接安装它会提示“未通过验证 / could not be verified”。
+
+临时调试或源码构建时使用：
 
 ```bash
 unzip openbiliclaw-extension-v*-firefox.zip -d openbiliclaw-firefox
@@ -253,7 +258,9 @@ git clone https://github.com/whiteguo233/OpenBiliClaw.git
 cd OpenBiliClaw/extension
 npm install
 npm run build:firefox          # 产出 dist-firefox/
-# 或: npm run package:firefox   # 额外打成 openbiliclaw-extension-v*-firefox.zip
+npm run package:firefox        # 额外打成未签名 openbiliclaw-extension-v*-firefox.zip
+# AMO 凭据配置后可签名成正式安装包：
+# AMO_JWT_ISSUER=... AMO_JWT_SECRET=... npm run sign:firefox:only
 ```
 
 加载方式：
@@ -262,7 +269,7 @@ npm run build:firefox          # 产出 dist-firefox/
 2. 点「Load Temporary Add-on…」
 3. 选解压目录里的 `manifest.json`（或源码构建后的 `extension/dist-firefox/manifest.json`）
 
-注意：Firefox 临时加载在浏览器重启后会失效；正式签名 / AMO 上架仍在规划中。
+注意：Firefox 临时加载在浏览器重启后会失效；普通用户应优先使用已签名的 `.xpi`。
 
 </details>
 
@@ -275,7 +282,7 @@ npm run build:firefox          # 产出 dist-firefox/
 到 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 的 `openbiliclaw-v*` 聚合发布页下载对应系统的安装包。这个聚合页会同步展示：
 
 - 当前后端源码 tag：`backend-v*`
-- 当前插件 release：`extension-v*`，并附 `openbiliclaw-extension-v*.zip` / `openbiliclaw-extension-v*-firefox.zip`
+- 当前插件 release：`extension-v*`，并附 `openbiliclaw-extension-v*.zip` / `openbiliclaw-extension-v*-firefox.xpi`（Firefox 正式安装）/ `openbiliclaw-extension-v*-firefox.zip`（Firefox 临时调试）
 - 当前桌面安装包 release：`desktop-v*`，并附可用的 `.dmg` / `.exe`；桌面包可能单独热修或临时不同步，以页面 `Current Channels` 为准
 
 - **macOS**：下载 `OpenBiliClaw-macos-v*-arm64.dmg`（Apple 芯片常规自动发布；Intel `x64` 包如有会另行附加），打开后先看 DMG 里的 `首次打开说明 First Launch.html`，再把 OpenBiliClaw 拖进「应用程序」。

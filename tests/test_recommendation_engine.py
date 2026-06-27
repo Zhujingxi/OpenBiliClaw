@@ -417,6 +417,46 @@ async def test_serve_empty_after_exclusions_skips_curator_context() -> None:
 
 
 @pytest.mark.asyncio
+async def test_serve_filters_profile_disliked_topics_before_pool_purge_finishes() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        try:
+            _seed_visible(
+                db,
+                "BV1CASE",
+                title="刑事案件纪实：真实大案复盘",
+                up_name="案件频道",
+                source="search",
+                relevance_score=0.99,
+                topic_key="刑事案件",
+                topic_group="法律案件",
+                pool_topic_label="刑事案件",
+            )
+            _seed_visible(
+                db,
+                "BV1DOC",
+                title="博物馆纪录片：一件瓷器的百年旅程",
+                up_name="纪录片频道",
+                source="search",
+                relevance_score=0.72,
+                topic_key="人文纪录片",
+                topic_group="纪录片",
+                pool_topic_label="人文纪录片",
+            )
+            profile = _build_profile()
+            profile.preferences.disliked_topics = ["刑事案件", "法律案件"]
+            engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+            recommendations = await engine.serve(profile, limit=1)
+            await asyncio.sleep(0)
+        finally:
+            db.close()
+
+        assert [item.content.bvid for item in recommendations] == ["BV1DOC"]
+
+
+@pytest.mark.asyncio
 async def test_generate_recommendations_prefers_primary_then_relevance_then_recency() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Database(Path(tmpdir) / "test.db")

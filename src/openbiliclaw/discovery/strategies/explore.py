@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -18,9 +20,11 @@ from openbiliclaw.discovery.engine import (
     discovery_raw_candidate_mode_enabled,
     trim_candidates_for_llm,
 )
+from openbiliclaw.discovery.keyword_digest import profile_kw_digest
 from openbiliclaw.discovery.strategies._utils import (
     SupportsSearchClient,
-    build_profile_summary,
+    build_query_generation_profile_summary,
+    cached_embedding_lookup,
     interest_aliases,
     interest_anchors,
     search_cooldown_remaining,
@@ -71,6 +75,12 @@ class ExploreStrategy(DiscoveryStrategy):
     queries_per_domain: int = 3
     max_domains: int = 5
     last_intermediates: dict[str, object] = field(default_factory=dict)
+    domain_cache_ttl_seconds: float = 6 * 60 * 60
+    _domain_cache: dict[str, tuple[float, list[dict[str, object]]]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
 
     @property
     def name(self) -> str:
@@ -332,8 +342,16 @@ class ExploreStrategy(DiscoveryStrategy):
                 ", ".join(covered_topic_groups[:5]),
             )
 
+        cache_key = self._domain_cache_key(profile, covered_topic_groups)
+        cached = self._cached_domains(cache_key)
+        if cached is not None:
+            return cached
+
         messages = build_explore_domains_prompt(
-            profile_summary=build_profile_summary(profile)
+            profile_summary=build_query_generation_profile_summary(
+                profile,
+                embedding_lookup=cached_embedding_lookup(self.embedding_service),
+            )
             | {"exploration_openness": profile.preferences.exploration_openness},
             covered_topic_groups=covered_topic_groups,
         )
@@ -342,15 +360,9 @@ class ExploreStrategy(DiscoveryStrategy):
             response = await complete_structured(
                 system_instruction=messages[0]["content"],
                 user_input=messages[1]["content"],
-                # v0.3.31+: bumped 4096 → 8192. With covered_topic_groups
-                # added to user msg + 5 domains × 3 queries +
-                # why_it_might_resonate text per domain, the JSON output
-                # was hitting the 4K cap mid-string (truncation observed
-                # at line 20 col 32 / char 736 in production logs),
-                # which made json.loads error out and the whole strategy
-                # return 0 items. 8K leaves comfortable headroom.
-                max_tokens=8192,
+                max_tokens=2048,
                 caller="discovery.explore.queries",
+                reasoning_effort="",
                 **without_core_memory_kwargs(complete_structured),
             )
             parsed = json.loads(str(getattr(response, "content", "")).strip())
@@ -390,7 +402,42 @@ class ExploreStrategy(DiscoveryStrategy):
             if len(domains) >= self.max_domains:
                 break
         prioritized = self._prioritize_domains(domains, anchor_set)
-        return [domain for domain in prioritized if domain["queries"]]
+        result = [domain for domain in prioritized if domain["queries"]]
+        self._store_domains(cache_key, result)
+        return result
+
+    def _domain_cache_key(
+        self,
+        profile: SoulProfile,
+        covered_topic_groups: list[str] | None,
+    ) -> str:
+        payload = {
+            "profile": profile_kw_digest(profile),
+            "covered_topic_groups": [str(item) for item in (covered_topic_groups or [])],
+            "max_domains": int(self.max_domains),
+            "queries_per_domain": int(self.queries_per_domain),
+        }
+        blob = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+    def _cached_domains(self, cache_key: str) -> list[dict[str, object]] | None:
+        cached = self._domain_cache.get(cache_key)
+        if cached is None:
+            return None
+        expires_at, domains = cached
+        if time.monotonic() >= expires_at:
+            self._domain_cache.pop(cache_key, None)
+            return None
+        return [dict(domain) for domain in domains]
+
+    def _store_domains(self, cache_key: str, domains: list[dict[str, object]]) -> None:
+        ttl = max(0.0, float(self.domain_cache_ttl_seconds))
+        if ttl <= 0:
+            return
+        self._domain_cache[cache_key] = (
+            time.monotonic() + ttl,
+            [dict(domain) for domain in domains],
+        )
 
     async def _looks_too_similar_async(self, domain: str, current_interests: set[str]) -> bool:
         """Check if domain is too similar to existing interests.

@@ -58,8 +58,17 @@ class _FakeLLM:
         max_tokens: int = 4096,
         caller: str = "",
         reasoning_effort: str | None = None,
+        inject_core_memory: bool = True,
     ) -> Any:
-        self.calls.append({"system": system_instruction, "user": user_input, "caller": caller})
+        self.calls.append(
+            {
+                "system": system_instruction,
+                "user": user_input,
+                "caller": caller,
+                "reasoning_effort": reasoning_effort,
+                "inject_core_memory": inject_core_memory,
+            }
+        )
         if self.entered is not None:
             self.entered.set()
         if self.gate is not None:
@@ -210,6 +219,8 @@ async def test_cold_start_multiple_platforms_one_merged_call(db: Database) -> No
     # Exactly one merged call, tagged with the planner caller.
     assert len(llm.calls) == 1
     assert llm.calls[0]["caller"] == "discovery.keyword_planner"
+    assert llm.calls[0]["reasoning_effort"] == ""
+    assert llm.calls[0]["inject_core_memory"] is False
     # The user prompt mentions all three due platforms but NOT the zero-deficit ones.
     user = llm.calls[0]["user"]
     assert _BILI in user and _XHS in user and _DOUYIN in user
@@ -277,6 +288,27 @@ async def test_full_pool_no_deficit_zero_llm_calls(db: Database) -> None:
     assert ledger == {}
     for platform in (_BILI, _XHS, _DOUYIN, _YOUTUBE, _TWITTER):
         assert _pending(db, platform, digest) == []
+
+
+async def test_planner_reuses_generation_when_profile_and_pool_snapshot_match(
+    db: Database,
+) -> None:
+    profile = _profile(("露营", 0.9), ("和田玉", 0.7))
+    digest = profile_kw_digest(profile)
+    llm = _FakeLLM(payload={_BILI: ["露营 装备 盘点", "和田玉 鉴别 入门"]})
+    deficit = _FakeDeficitSource(deficits={_BILI: 20})
+    planner = _make_planner(db, llm=llm, profile=profile, deficit=deficit)
+
+    first = await planner.run_once()
+    claimed = db.claim_keywords(_BILI, 10)
+    for row in claimed:
+        db.mark_keyword_failed(int(row["id"]))
+    second = await planner.run_once()
+
+    assert first == {_BILI: 2}
+    assert second == {_BILI: 2}
+    assert len(llm.calls) == 1
+    assert _pending(db, _BILI, digest) == ["露营 装备 盘点", "和田玉 鉴别 入门"]
 
 
 async def test_digest_change_expires_old_and_regenerates(db: Database) -> None:
@@ -945,7 +977,9 @@ class _CaptureLLM:
         max_tokens: int = 4096,
         caller: str = "",
         reasoning_effort: str | None = None,
+        inject_core_memory: bool = True,
     ) -> Any:
+        del inject_core_memory
         self.calls.append({"user": user_input, "caller": caller})
         self.max_tokens_seen.append(max_tokens)
         from openbiliclaw.llm.base import LLMResponse

@@ -23,6 +23,17 @@ from .base import (
 )
 
 logger = logging.getLogger(__name__)
+_BILLING_BACKOFF_STATUS_CODES = {402}
+_BILLING_BACKOFF_MARKERS = (
+    "insufficient balance",
+    "payment required",
+    "quota exceeded",
+    "billing",
+    "out of credit",
+    "credit exhausted",
+    "余额不足",
+    "账户余额",
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -243,11 +254,20 @@ class OpenAIProvider(LLMProvider):
             return LLMTimeoutError(f"{self._provider_name} request timed out")
 
         status_code = getattr(exc, "status_code", None)
+        status_code_int = self._status_code_int(status_code)
         body_excerpt = self._provider_error_body_excerpt(exc)
-        message = str(exc).lower()
-        if status_code == 429 or "rate limit" in message or "too many requests" in message:
+        message = f"{exc} {body_excerpt}".lower()
+        if status_code_int == 429 or "rate limit" in message or "too many requests" in message:
             return LLMRateLimitError(f"{self._provider_name} rate limit exceeded")
-        if status_code and int(status_code) >= 500:
+        if status_code_int in _BILLING_BACKOFF_STATUS_CODES or any(
+            marker in message for marker in _BILLING_BACKOFF_MARKERS
+        ):
+            detail = body_excerpt or str(exc)
+            return LLMRateLimitError(
+                f"{self._provider_name} provider backoff: HTTP {status_code_int or status_code}: "
+                f"{detail}"
+            )
+        if status_code_int and status_code_int >= 500:
             return LLMProviderError(f"{self._provider_name} server error: {status_code}")
         if status_code and body_excerpt:
             logger.warning(
@@ -261,6 +281,17 @@ class OpenAIProvider(LLMProvider):
             )
 
         return LLMProviderError(f"{self._provider_name} request failed: {exc}")
+
+    @staticmethod
+    def _status_code_int(status_code: object) -> int | None:
+        if isinstance(status_code, int):
+            return status_code
+        if isinstance(status_code, str):
+            try:
+                return int(status_code.strip())
+            except ValueError:
+                return None
+        return None
 
     @staticmethod
     def _provider_error_body_excerpt(exc: Exception) -> str:

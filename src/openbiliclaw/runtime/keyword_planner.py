@@ -40,9 +40,11 @@ through the DB-level planner lock, whose write transaction is released
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import socket
+import time
 import uuid
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -50,6 +52,10 @@ from openbiliclaw.discovery.keyword_digest import profile_kw_digest
 from openbiliclaw.discovery.pool_snapshot import (
     build_cold_start_pool_snapshot,
     build_pool_distribution_snapshot,
+)
+from openbiliclaw.discovery.strategies._utils import (
+    build_query_generation_profile_summary,
+    cached_embedding_lookup,
 )
 from openbiliclaw.llm.prompt_cache import PromptLayerRenderCache, profile_prompt_layers
 from openbiliclaw.llm.prompts import (
@@ -159,11 +165,13 @@ class KeywordPlanner:
         pool_target_count: int | None = None,
         signal_event_threshold: int = 6,
         owner: str | None = None,
+        embedding_service: Any | None = None,
     ) -> None:
         self._llm = llm_service
         self._db = database
         self._config = config
         self._soul_engine = soul_engine
+        self._embedding_service = embedding_service
         self._deficit_source: KeywordDeficitSource | None = None
         self._pool_target_count = pool_target_count
         self._signal_event_threshold = signal_event_threshold
@@ -181,6 +189,10 @@ class KeywordPlanner:
         # generation pass. Empty until the first pass that generates anything.
         self.last_cycle_ledger: dict[str, dict[str, int]] = {}
         self._profile_prompt_cache = PromptLayerRenderCache()
+        self._generation_cache: dict[
+            str,
+            tuple[float, dict[str, list[str]], set[str]],
+        ] = {}
 
     # ── wiring ──────────────────────────────────────────────────────────
 
@@ -349,8 +361,6 @@ class KeywordPlanner:
         profile: SoulProfile,
         digest: str,
     ) -> dict[str, int]:
-        from openbiliclaw.discovery.strategies._utils import build_profile_summary
-
         hints_by_platform = self._avoid_hints(profile)
         supply_by_platform = self._supply_hints(hints_by_platform)
         blocks: list[dict[str, object]] = []
@@ -396,48 +406,57 @@ class KeywordPlanner:
         call_failed = False
         if blocks:
             target_platforms = [str(block["platform"]) for block in blocks]
-            # Budget the merged call's max_tokens from the actual ask (sum of the
-            # gen_batch-capped needs) so the trailing platforms in the JSON are
-            # never truncated onto the interest-name fallback. Scales with
-            # platform count and gen_batch; floored at the prior 4096 default.
-            merged_max_tokens = max(
-                _MERGED_MIN_MAX_TOKENS,
-                total_ask * _MERGED_TOKENS_PER_KEYWORD + _MERGED_JSON_OVERHEAD_TOKENS,
-            )
-            try:
-                profile_summary = build_profile_summary(profile)
-                profile_blocks = self._profile_prompt_cache.render_json_layers(
-                    profile_prompt_layers(profile_summary)
+            cache_key = self._generation_cache_key(digest, blocks)
+            cached = self._cached_generation(cache_key)
+            if cached is not None:
+                generated, present = cached
+            else:
+                # Budget the merged call's max_tokens from the actual ask (sum of the
+                # gen_batch-capped needs) so the trailing platforms in the JSON are
+                # never truncated onto the interest-name fallback. Scales with
+                # platform count and gen_batch; floored at the prior 4096 default.
+                merged_max_tokens = max(
+                    _MERGED_MIN_MAX_TOKENS,
+                    total_ask * _MERGED_TOKENS_PER_KEYWORD + _MERGED_JSON_OVERHEAD_TOKENS,
                 )
-                messages = build_merged_keywords_prompt(
-                    profile_summary=profile_summary,
-                    profile_blocks=profile_blocks,
-                    platform_blocks=blocks,
-                )
-                complete_structured = self._llm.complete_structured_task
-                response = await complete_structured(
-                    system_instruction=messages[0]["content"],
-                    user_input=messages[1]["content"],
-                    caller="discovery.keyword_planner",
-                    reasoning_effort="",
-                    max_tokens=merged_max_tokens,
-                    **without_core_memory_kwargs(complete_structured),
-                )
-                content = str(getattr(response, "content", "") or "")
-                generated, present = parse_merged_keywords_with_presence(
-                    content,
-                    target_platforms,
-                    per_platform_cap=gen_batch,
-                )
-            except Exception:
-                logger.exception(
-                    "keyword planner merged generation failed; "
-                    "falling back to interest names for %s",
-                    target_platforms,
-                )
-                generated = {}
-                present = set()
-                call_failed = True
+                try:
+                    profile_summary = build_query_generation_profile_summary(
+                        profile,
+                        embedding_lookup=cached_embedding_lookup(self._embedding_service),
+                    )
+                    profile_blocks = self._profile_prompt_cache.render_json_layers(
+                        profile_prompt_layers(profile_summary)
+                    )
+                    messages = build_merged_keywords_prompt(
+                        profile_summary=profile_summary,
+                        profile_blocks=profile_blocks,
+                        platform_blocks=blocks,
+                    )
+                    complete_structured = self._llm.complete_structured_task
+                    response = await complete_structured(
+                        system_instruction=messages[0]["content"],
+                        user_input=messages[1]["content"],
+                        caller="discovery.keyword_planner",
+                        reasoning_effort="",
+                        max_tokens=merged_max_tokens,
+                        **without_core_memory_kwargs(complete_structured),
+                    )
+                    content = str(getattr(response, "content", "") or "")
+                    generated, present = parse_merged_keywords_with_presence(
+                        content,
+                        target_platforms,
+                        per_platform_cap=gen_batch,
+                    )
+                    self._store_generation(cache_key, generated, present)
+                except Exception:
+                    logger.exception(
+                        "keyword planner merged generation failed; "
+                        "falling back to interest names for %s",
+                        target_platforms,
+                    )
+                    generated = {}
+                    present = set()
+                    call_failed = True
 
         low = int(self._discovery.kw_cache_low)
         ledger: dict[str, int] = {}
@@ -485,6 +504,61 @@ class KeywordPlanner:
 
         self._emit_cycle_ledger(ledger, digest)
         return ledger
+
+    def _generation_cache_key(self, digest: str, blocks: list[dict[str, object]]) -> str:
+        cache_blocks: list[dict[str, object]] = []
+        for block in blocks:
+            cache_blocks.append(
+                {
+                    "platform": str(block.get("platform", "")),
+                    "need": int(cast("Any", block.get("need", 0)) or 0),
+                    "avoid_topics": _as_str_list(block.get("avoid_topics")),
+                    "avoid_styles": _as_str_list(block.get("avoid_styles")),
+                    "avoid_franchises": _as_str_list(block.get("avoid_franchises")),
+                    "prefer_axes": _as_str_list(block.get("prefer_axes")),
+                    "cold_start": bool(block.get("cold_start")),
+                    "supply_hint": _as_str_list(block.get("supply_hint")),
+                }
+            )
+        blob = json.dumps(
+            {
+                "digest": digest,
+                "gen_batch": int(self._discovery.gen_batch),
+                "blocks": cache_blocks,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return blob
+
+    def _generation_cache_ttl_seconds(self) -> float:
+        return max(1.0, float(self._discovery.plan_ttl_hours) * 60.0 * 60.0)
+
+    def _cached_generation(
+        self,
+        cache_key: str,
+    ) -> tuple[dict[str, list[str]], set[str]] | None:
+        cached = self._generation_cache.get(cache_key)
+        if cached is None:
+            return None
+        expires_at, generated, present = cached
+        if time.monotonic() >= expires_at:
+            self._generation_cache.pop(cache_key, None)
+            return None
+        return ({platform: list(words) for platform, words in generated.items()}, set(present))
+
+    def _store_generation(
+        self,
+        cache_key: str,
+        generated: dict[str, list[str]],
+        present: set[str],
+    ) -> None:
+        self._generation_cache[cache_key] = (
+            time.monotonic() + self._generation_cache_ttl_seconds(),
+            {platform: list(words) for platform, words in generated.items()},
+            set(present),
+        )
 
     # ── per-cycle observability ledger (P1.9) ───────────────────────────
 

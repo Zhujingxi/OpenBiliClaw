@@ -314,13 +314,21 @@ class RecommendationEngine:
         if excluded_bvids:
             candidates = [c for c in candidates if c.bvid not in excluded_bvids]
         after_exclude_count = len(candidates)
+        candidates = self._exclude_disliked_topic_candidates(candidates, profile)
+        after_disliked_count = len(candidates)
+        if after_disliked_count < after_exclude_count:
+            logger.info(
+                "serve(/%s) filtered %d candidate(s) by profile disliked_topics",
+                label,
+                after_exclude_count - after_disliked_count,
+            )
         candidates = self._exclude_recently_viewed(candidates)
         after_viewed_count = len(candidates)
         if after_viewed_count == 0:
             logger.warning(
                 "serve(/%s) loaded 0 usable candidates from servable=%d "
                 "(raw=%d pending=%d) after filters: loaded=%d "
-                "after_exclude=%d after_viewed=%d. Skipping curator, "
+                "after_exclude=%d after_disliked=%d after_viewed=%d. Skipping curator, "
                 "MMR embeddings, and recommendation writes.",
                 label,
                 servable_pool_count,
@@ -328,6 +336,7 @@ class RecommendationEngine:
                 pending_pool_count,
                 loaded_count,
                 after_exclude_count,
+                after_disliked_count,
                 after_viewed_count,
             )
             self._last_served_bvids = frozenset()
@@ -347,11 +356,13 @@ class RecommendationEngine:
         if servable_pool_count != loaded_count:
             logger.info(
                 "serve(/%s) pool/load mismatch: count=%d → loaded=%d"
-                " → after_exclude=%d → after_viewed=%d (raw=%d pending=%d)",
+                " → after_exclude=%d → after_disliked=%d → after_viewed=%d "
+                "(raw=%d pending=%d)",
                 label,
                 servable_pool_count,
                 loaded_count,
                 after_exclude_count,
+                after_disliked_count,
                 after_viewed_count,
                 raw_pool_count,
                 pending_pool_count,
@@ -2585,6 +2596,63 @@ class RecommendationEngine:
         if not viewed_bvids:
             return candidates
         return [item for item in candidates if item.bvid not in viewed_bvids]
+
+    @classmethod
+    def _exclude_disliked_topic_candidates(
+        cls,
+        candidates: list[DiscoveredContent],
+        profile: SoulProfile,
+    ) -> list[DiscoveredContent]:
+        terms = cls._normalized_disliked_topics(profile)
+        if not terms:
+            return candidates
+        return [item for item in candidates if not cls._matches_disliked_topic(item, terms)]
+
+    @classmethod
+    def _normalized_disliked_topics(cls, profile: SoulProfile) -> list[str]:
+        raw_topics = getattr(getattr(profile, "preferences", None), "disliked_topics", []) or []
+        result: list[str] = []
+        seen: set[str] = set()
+        for topic in raw_topics:
+            term = cls._normalize_dislike_match_text(topic)
+            if len(term) < 2 or term in seen:
+                continue
+            seen.add(term)
+            result.append(term)
+        return result
+
+    @classmethod
+    def _matches_disliked_topic(
+        cls,
+        item: DiscoveredContent,
+        disliked_terms: list[str],
+    ) -> bool:
+        exact_fields = [
+            cls._normalize_dislike_match_text(item.topic_key),
+            cls._normalize_dislike_match_text(item.topic_group),
+            cls._normalize_dislike_match_text(item.pool_topic_label),
+        ]
+        search_fields = [
+            cls._normalize_dislike_match_text(item.title),
+            cls._normalize_dislike_match_text(item.pool_topic_label),
+            cls._normalize_dislike_match_text(item.description),
+            cls._normalize_dislike_match_text(item.up_name),
+            cls._normalize_dislike_match_text((item.body_text or "")[:800]),
+            *[cls._normalize_dislike_match_text(tag) for tag in item.tags],
+        ]
+        for term in disliked_terms:
+            if term in exact_fields:
+                return True
+            if any(term in field for field in search_fields if field):
+                return True
+        return False
+
+    @staticmethod
+    def _normalize_dislike_match_text(value: object) -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        return re.sub(r"\s+", "", text)
 
     @staticmethod
     def _parse_tags(value: object) -> list[str]:

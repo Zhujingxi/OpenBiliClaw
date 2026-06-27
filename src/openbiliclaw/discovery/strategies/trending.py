@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field, replace
+from datetime import date
 from typing import TYPE_CHECKING
 
 from openbiliclaw.discovery.engine import (
@@ -17,10 +19,12 @@ from openbiliclaw.discovery.engine import (
     discovery_raw_candidate_mode_enabled,
     trim_candidates_for_llm,
 )
+from openbiliclaw.discovery.keyword_digest import profile_kw_digest
 from openbiliclaw.discovery.strategies._utils import (
     SupportsRankingClient,
     _gather_bounded,
-    build_profile_summary,
+    build_query_generation_profile_summary,
+    cached_embedding_lookup,
     clean_text,
     parse_duration,
     to_int,
@@ -28,6 +32,7 @@ from openbiliclaw.discovery.strategies._utils import (
 from openbiliclaw.llm.task_options import without_core_memory_kwargs
 
 if TYPE_CHECKING:
+    from openbiliclaw.llm.embedding import SupportsEmbeddingService
     from openbiliclaw.soul.profile import SoulProfile
     from openbiliclaw.storage.database import Database
 
@@ -42,12 +47,19 @@ class TrendingStrategy(DiscoveryStrategy):
     llm_service: SupportsStructuredTask
     concurrency: DiscoveryConcurrencyController | None = None
     database: Database | None = None
+    embedding_service: SupportsEmbeddingService | None = None
     score_threshold: float = 0.60
     llm_evaluation: bool = True
     max_related_rids: int = 4
     # Broader default RIDs covering more top-level categories:
     # 36=科技, 188=资讯, 181=影视, 119=纪录片, 3=音乐, 129=舞蹈, 4=游戏, 160=生活
     default_rids: tuple[int, ...] = (36, 188, 181, 119, 3, 129, 4, 160)
+    rid_cache_ttl_seconds: float = 6 * 60 * 60
+    _rid_cache: dict[str, tuple[float, list[int]]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
     # Mapping from Bilibili ranking rid to semantic topic category
     RID_TO_TOPIC: dict[int, str] = field(
         default_factory=lambda: {
@@ -174,23 +186,53 @@ class TrendingStrategy(DiscoveryStrategy):
     async def _select_rids(self, profile: SoulProfile) -> list[int]:
         from openbiliclaw.llm.prompts import build_trending_rids_prompt
 
-        messages = build_trending_rids_prompt(profile_summary=build_profile_summary(profile))
+        cache_key = f"{profile_kw_digest(profile)}:{date.today().isoformat()}"
+        cached = self._cached_rids(cache_key)
+        if cached is not None:
+            return cached
+
+        messages = build_trending_rids_prompt(
+            profile_summary=build_query_generation_profile_summary(
+                profile,
+                embedding_lookup=cached_embedding_lookup(self.embedding_service),
+            )
+        )
         try:
             complete_structured = self.llm_service.complete_structured_task
             response = await complete_structured(
                 system_instruction=messages[0]["content"],
                 user_input=messages[1]["content"],
+                max_tokens=512,
                 caller="discovery.trending.rids",
+                reasoning_effort="",
                 **without_core_memory_kwargs(complete_structured),
             )
             parsed = json.loads(str(getattr(response, "content", "")).strip())
             if isinstance(parsed, dict) and isinstance(parsed.get("rids"), list):
                 selected = [to_int(item) for item in parsed["rids"] if to_int(item) > 0]
                 selected = self._dedupe_ints(selected)[: self.max_related_rids]
-                return [0, *selected]
+                rids = [0, *selected]
+                self._store_rids(cache_key, rids)
+                return rids
         except Exception:
             logger.exception("Trending rid selection failed; using defaults.")
         return [0, *list(self.default_rids[: self.max_related_rids])]
+
+    def _cached_rids(self, cache_key: str) -> list[int] | None:
+        cached = self._rid_cache.get(cache_key)
+        if cached is None:
+            return None
+        expires_at, rids = cached
+        if time.monotonic() >= expires_at:
+            self._rid_cache.pop(cache_key, None)
+            return None
+        return list(rids)
+
+    def _store_rids(self, cache_key: str, rids: list[int]) -> None:
+        ttl = max(0.0, float(self.rid_cache_ttl_seconds))
+        if ttl <= 0:
+            return
+        self._rid_cache[cache_key] = (time.monotonic() + ttl, list(rids))
 
     def _map_ranking_item(
         self,

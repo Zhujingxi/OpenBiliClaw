@@ -73,10 +73,18 @@ class LLMProviderExecutionError(LLMServiceError):
 _RATE_LIMIT_ERROR_MARKERS = (
     "rate limit",
     "429",
+    "402",
     "cooling down",
     "too many requests",
     "resource exhausted",
     "quota exceeded",
+    "payment required",
+    "insufficient balance",
+    "billing",
+    "out of credit",
+    "credit exhausted",
+    "余额不足",
+    "账户余额",
 )
 
 

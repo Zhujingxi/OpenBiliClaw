@@ -1833,7 +1833,7 @@ async def test_refresh_controller_pool_aware_limit_scales_with_gap() -> None:
     scoring).
 
     Verifies the gap → per-strategy mapping for three regimes:
-    1. Tiny gap (5): floor at 5 (don't starve strategies entirely)
+    1. Tiny gap (5): stay above replenish low-watermark and skip discovery
     2. Mid gap (40): per_strategy = 30 (gap*3//4=30, no excess)
     3. Huge gap (1000): cap at discovery_limit=30 (avoid wave)
     """
@@ -1870,10 +1870,11 @@ async def test_refresh_controller_pool_aware_limit_scales_with_gap() -> None:
             explore_refresh_hours=999,
         )
 
-    # Tiny gap: 95/100, gap=5 → max(5, 5*3//4=3) = 5 (floor protects)
+    # Tiny gap: 95/100, gap=5 → above low-watermark; don't spend discovery LLM.
     discovery.calls.clear()
-    await make_controller(pool_count=95, pool_target=100).refresh_if_needed()
-    assert discovery.calls[0][2] == 5
+    result = await make_controller(pool_count=95, pool_target=100).refresh_if_needed()
+    assert result["reason"] == "below_threshold"
+    assert discovery.calls == []
 
     # Mid gap: 60/100, gap=40 → max(5, 40*3//4=30) = 30 (full discovery_limit)
     discovery.calls.clear()
@@ -1886,6 +1887,30 @@ async def test_refresh_controller_pool_aware_limit_scales_with_gap() -> None:
     discovery.calls.clear()
     await make_controller(pool_count=0, pool_target=1000).refresh_if_needed()
     assert discovery.calls[0][2] == 30
+
+
+async def test_refresh_controller_small_gap_skips_expensive_bilibili_generators() -> None:
+    discovery = _FakeDiscoveryEngine()
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase([], pool_count=85),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=discovery,
+        recommendation_engine=_FakeRecommendationEngine(),
+        pool_target_count=100,
+        discovery_limit=30,
+    )
+
+    await controller.refresh_if_needed()
+
+    assert discovery.calls[0][1] == ["search", "related_chain", "trending", "explore"]
+    assert discovery.calls[0][2] == 11
+    assert discovery.strategy_limit_calls[0] == {
+        "search": 6,
+        "related_chain": 5,
+        "trending": 0,
+        "explore": 0,
+    }
 
 
 async def test_refresh_controller_replenishes_until_pool_reaches_target() -> None:
@@ -2915,7 +2940,7 @@ async def test_refresh_controller_uses_bilibili_deficit_for_discovery_limit() ->
         memory_manager=_FakeMemoryManager(),
         database=_FakeDatabase(
             [],
-            pool_count=543,
+            pool_count=530,
             source_counts={
                 "bilibili": 475,
                 "xiaohongshu": 60,
@@ -2935,10 +2960,10 @@ async def test_refresh_controller_uses_bilibili_deficit_for_discovery_limit() ->
     assert discovery.calls[0][1] == ["search", "related_chain", "trending", "explore"]
     assert discovery.calls[0][2] == 5
     assert discovery.strategy_limit_calls[0] == {
-        "search": 2,
-        "related_chain": 1,
-        "trending": 1,
-        "explore": 1,
+        "search": 3,
+        "related_chain": 2,
+        "trending": 0,
+        "explore": 0,
     }
 
 

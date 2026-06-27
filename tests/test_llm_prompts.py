@@ -339,7 +339,7 @@ def test_build_explore_domains_prompt_requires_directional_diversity() -> None:
 
     assert "至少覆盖 3 类不同内容方向" in system_prompt
     assert "同一母题的换皮变体最多只能保留 1 个" in system_prompt
-    assert "先说明它对应用户的哪种认知需求" in system_prompt
+    assert "只包含 domain、novelty_level、queries 三个字段" in system_prompt
 
 
 def test_build_explore_domains_prompt_requires_core_interest_anchors() -> None:
@@ -355,7 +355,8 @@ def test_build_explore_domains_prompt_requires_core_interest_anchors() -> None:
 
     assert "domain" in system_prompt
     assert "novelty_level" in system_prompt
-    assert "why_it_might_resonate" in system_prompt
+    assert "queries" in system_prompt
+    assert "长文本字段" in system_prompt
 
 
 def test_build_explore_domains_prompt_passes_covered_groups_into_user_msg() -> None:

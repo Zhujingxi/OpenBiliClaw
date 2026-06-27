@@ -57,12 +57,14 @@ desktop_tag="$(latest_release_with_prefix "desktop-v")"
 
 extension_line="Not published yet."
 chrome_extension_asset_line="No Chrome-compatible extension release asset is available yet."
-firefox_extension_asset_line="No Firefox extension release asset is available yet."
+firefox_signed_asset_line="No signed Firefox extension XPI is available yet."
+firefox_dev_asset_line="No Firefox temporary-loading zip is available yet."
 if [ -n "$extension_tag" ]; then
   extension_version="${extension_tag#extension-v}"
   extension_line="[${extension_tag}](https://github.com/${repo}/releases/tag/${extension_tag})"
   chrome_extension_asset_line="\`openbiliclaw-extension-v${extension_version}.zip\`"
-  firefox_extension_asset_line="\`openbiliclaw-extension-v${extension_version}-firefox.zip\`"
+  firefox_signed_asset_line="\`openbiliclaw-extension-v${extension_version}-firefox.xpi\`"
+  firefox_dev_asset_line="\`openbiliclaw-extension-v${extension_version}-firefox.zip\`"
 fi
 
 desktop_line="Not published yet."
@@ -155,7 +157,7 @@ download_release_assets() {
   done < <(find "$target_dir" -maxdepth 1 -type f -print0)
 }
 
-download_release_assets "$extension_tag" "openbiliclaw-extension-v*.zip"
+download_release_assets "$extension_tag" "openbiliclaw-extension-v*.zip" "openbiliclaw-extension-v*.xpi"
 download_release_assets "$desktop_tag" "*.dmg" "*.exe"
 
 asset_list="No package assets were attached by this run."
@@ -179,7 +181,8 @@ This is the user-facing aggregate release. It keeps the current backend source t
 ## Downloads
 
 - Chrome / Edge / Brave extension: use ${chrome_extension_asset_line}
-- Firefox 140+ extension: use ${firefox_extension_asset_line}
+- Firefox 140+ extension: use ${firefox_signed_asset_line}
+- Firefox temporary debugging package: use ${firefox_dev_asset_line} via \`about:debugging\`
 - macOS / Windows desktop app: use the attached \`.dmg\` / \`.exe\` installer when present
 
 Attached package assets:
@@ -253,7 +256,7 @@ is_aggregate_package_asset() {
   local asset_name="$1"
 
   case "$asset_name" in
-    openbiliclaw-extension-v*.zip | OpenBiliClaw-macos-v*.dmg | OpenBiliClaw-windows-*-Setup.exe)
+    openbiliclaw-extension-v*.zip | openbiliclaw-extension-v*.xpi | OpenBiliClaw-macos-v*.dmg | OpenBiliClaw-windows-*-Setup.exe)
       return 0
       ;;
     *)
