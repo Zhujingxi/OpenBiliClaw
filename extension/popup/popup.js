@@ -3574,9 +3574,10 @@ function makeResetButton(path) {
   return btn;
 }
 
-function makeRemovableChip(label, onRemove) {
+function makeRemovableChip(label, onRemove, chipClass = "") {
   const chip = document.createElement("span");
   chip.className = "edit-chip";
+  if (chipClass) chip.classList.add(chipClass);
   const text = document.createElement("span");
   text.textContent = label;
   chip.append(text);
@@ -3744,30 +3745,84 @@ function renderListEditField(path, label, field) {
   return block;
 }
 
+function editSpecificName(item) {
+  if (typeof item === "string") return item;
+  if (item && typeof item === "object") return item.name || item.label || "";
+  return "";
+}
+
+function hasInterestSpecificEdits(field) {
+  const edits = field && typeof field === "object" ? field.specific_edits : null;
+  if (!edits || typeof edits !== "object") return false;
+  return Object.values(edits).some((edit) => {
+    if (!edit || typeof edit !== "object") return false;
+    return (edit.add?.length || 0) > 0 || (edit.remove?.length || 0) > 0;
+  });
+}
+
 function renderInterestEditField(path, label, field) {
   const domains = Array.isArray(field.domains) ? field.domains : [];
   const removed = Array.isArray(field.removed_domains) ? field.removed_domains : [];
-  const edited = removed.length > 0 || domains.some((d) => d && d.user_added);
+  const edited =
+    removed.length > 0 ||
+    domains.some((d) => d && d.user_added) ||
+    hasInterestSpecificEdits(field);
   const block = makeEditFieldBlock(label, edited);
 
-  const chips = document.createElement("div");
-  chips.className = "edit-chip-list";
+  const tree = document.createElement("div");
+  tree.className = "edit-interest-tree";
   for (const dom of domains) {
     if (!dom || !dom.domain) continue;
     const name = dom.user_added ? `${dom.domain} ＋` : dom.domain;
-    chips.append(
-      makeRemovableChip(name, () =>
-        applyProfileEdit({ target: path, op: "remove", value: dom.domain }),
+    const domain = document.createElement("div");
+    domain.className = "edit-interest-domain";
+    const head = document.createElement("div");
+    head.className = "edit-interest-domain-head";
+    head.append(
+      makeRemovableChip(
+        name,
+        () => applyProfileEdit({ target: path, op: "remove", value: dom.domain }),
+        "edit-domain-chip",
       ),
     );
+    domain.append(head);
+
+    const specificList = document.createElement("div");
+    specificList.className = "edit-specific-list";
+    const specifics = Array.isArray(dom.specifics)
+      ? dom.specifics.map(editSpecificName).filter(Boolean)
+      : [];
+    for (const specific of specifics) {
+      specificList.append(
+        makeRemovableChip(
+          specific,
+          () => applyProfileEdit({ target: path, op: "remove", value: specific, parent: dom.domain }),
+          "edit-specific-chip",
+        ),
+      );
+    }
+    if (specifics.length === 0) {
+      const emptySpecific = document.createElement("p");
+      emptySpecific.className = "edit-empty edit-specific-empty";
+      emptySpecific.textContent = "还没有二级兴趣";
+      specificList.append(emptySpecific);
+    }
+    domain.append(specificList);
+
+    const specificAddRow = makeAddRow("添加二级兴趣", (value) =>
+      applyProfileEdit({ target: path, op: "add", value, parent: dom.domain }),
+    );
+    specificAddRow.classList.add("edit-specific-add-row");
+    domain.append(specificAddRow);
+    tree.append(domain);
   }
   if (domains.length === 0) {
     const empty = document.createElement("p");
     empty.className = "edit-empty";
     empty.textContent = "还没有，添加一个吧";
-    chips.append(empty);
+    tree.append(empty);
   }
-  block.append(chips);
+  block.append(tree);
   const placeholder = path === "dislikes" ? "添加要避开的领域" : "添加感兴趣的领域";
   block.append(makeAddRow(placeholder, (value) => applyProfileEdit({ target: path, op: "add", value })));
   if (edited) {

@@ -20,6 +20,8 @@
 - **插件连接空态实时同步**：side panel 首次打开时如果 `/api/ping` 瞬时失败但 `/api/runtime-stream` 随后连上，现在会立刻把推荐页从“后端还没开张”离线空态切回在线刷新流程，不再只更新顶部“已连接”徽标。
 - **插件 Release 缺 AMO 密钥不再阻断**：`release-extension.yml` 现在会先探测 Firefox AMO 签名凭证；只有 `FIREFOX_SIGNING_ENABLED=true` 且 `AMO_JWT_ISSUER` / `AMO_JWT_SECRET` 同时存在时才要求 signed XPI，否则仍发布 Chrome / Edge zip 与 Firefox 临时加载 zip，避免未配置 Firefox 签名密钥时阻断插件包发版。
 - **画像增量回填增加并发 claim 保护**：`/api/events` 的 `last_profile_pipeline_event_id` backfill 现在有进程内 single-flight 保护；当前一批旧 pending 行正在喂给 `ProfileUpdatePipeline` 时，并发事件请求会跳过重复 backfill，只处理自身 accepted 事件，避免同一批 200 条画像信号被重复送进 `soul.preference.chunk`。
+- **画像编辑支持二级兴趣**：`GET /api/profile/edit-state` 现在会返回兴趣树的 `specific_edits` 痕迹；插件 side panel、移动 Web 和桌面 Web 的画像编辑面板会按 `domain -> specifics` 渲染，新增 / 删除二级兴趣时向 `/api/profile/edit` 带 `parent`，不再只能编辑一级兴趣域；新增后立即删除的二级兴趣会归约为空覆盖，不再留下错误的已编辑状态。
+- **画像编辑态层级样式优化**：桌面 Web 的兴趣编辑树增加一级 domain 分组左侧层级线与二级 specifics 缩进分隔；插件 side panel 使用同一层级语义但收紧间距、字号和添加按钮 reset，避免二级兴趣编辑态挤成一片或露出浏览器默认按钮样式。
 - **初始化 chunk 顺带生成临时觉察 / 洞察上下文**：`soul.preference.chunk` 的结构化输出现在可包含 `awareness_candidates` / `insight_candidates`；后端会去重合并后只作为本次 `soul.profile_build` 的 prompt 上下文，不写入长期 `awareness.json` / `insight.json`，让初始人格画像在首次生成时就能利用每个 chunk 提炼出的观察和假设。
 
 ## v0.3.147 / extension v0.3.98 / desktop v0.3.147: PC Web 正向反馈与探针原地聊天（2026-06-26）
