@@ -15,7 +15,7 @@
 | 8.1 行为采集 | ✅ | `content/kernel.ts` + `shared/platforms/*` + `service-worker.ts` 已接通统一事件链；B 站 / 小红书 / 抖音 / YouTube / X / 知乎都通过 `PlatformAdapter` 产出同一 `BehaviorEvent` 形态，平台差异只保留在 selector、内容 ID 和 action 识别中；click 监听在 capture 阶段执行，scroll 同时覆盖页面和内部滚动容器 |
 | 8.2 后端 API | ✅ | Python 侧 `/api/events`、`/api/health`、`/api/recommendations` 已可联调；`/api/events` 在 soul 画像明确未初始化时只返回 `not_initialized` 拒收结果，不写 memory，首轮画像信号由 guided init 的来源任务拉取 |
 | 8.3 Side Panel | ✅ | 已切到 side panel 主入口，继续复用 `popup/` 页面承载推荐 / 稍后 / 收藏 / 画像 / 对话五个 tab；顶部功能区提供移动端二维码入口，按当前插件后端地址生成 `/m/` 扫码链接；460px 以下窄宽度会把 Web、二维码、消息、设置按钮换到品牌区下一行靠右排列，避免和标题 / 状态徽标重叠；如果当前后端地址仍是 `127.0.0.1` / `localhost`，会先读 `/api/health.lan_ip` 并用局域网 IP 生成二维码，提示为 info 状态；后端会优先返回 `192.168.x.x` / `10.x.x.x` / `172.16-31.x.x` 这类真实局域网地址，排除 `198.18.x.x` 等 VPN/TUN 地址；移动 Web 推荐页首屏先渲染 `/api/recommendations`，再异步补 runtime status / activity / delight，慢请求不会让页面无限停在 loading；聊天改走后端 durable turn，Chrome 丢弃或切 tab 后可恢复；惊喜推荐、兴趣猜测和避雷探针的内联聊天也会按 `scope=delight/probe/avoidance_probe` 恢复 pending/completed/failed turn；聊天 tab 激活时隐藏底部活动栏，聊天记录区独立滚动并占满上方空间，输入框固定在底部且会轮播想法、口味、自我描述、近期状态等多场景提示语 |
-| Runtime stream 合并刷新 | ✅ | 插件 side panel、桌面 Web 和移动 Web 对 `activity.added` / `profile_updated` 等运行时事件做 debounce 与 single-flight；`refresh.pool_updated` 只合并池子状态并刷新 header / pool chips / 底部可换提示 / 空态文案，不再重拉推荐列表，避免覆盖用户已经 append 出来的历史卡片。插件 side panel 从离线转在线时（包括首次 `/api/ping` 瞬时失败但 `/api/runtime-stream` 随后连上的竞态）会立即调度推荐刷新，避免顶部显示“已连接”而推荐页仍停在“后端还没开张”的旧空态。 |
+| Runtime stream 合并刷新 | ✅ | 插件 side panel、桌面 Web 和移动 Web 对 `activity.added` / `profile_updated` 等运行时事件做 debounce 与 single-flight；`refresh.pool_updated` 只合并池子状态并刷新 header / pool chips / 底部可换提示 / 空态文案，不再重拉推荐列表，避免覆盖用户已经 append 出来的历史卡片。插件 side panel 从离线转在线时（包括首次 `/api/ping` 瞬时失败但 `/api/runtime-stream` 随后连上的竞态）会立即调度推荐刷新；popup 离线期间会每 1 秒轻量重探测 `/api/ping`，runtime-stream 自身也固定每 1 秒重连，成功后停止轮询并切回在线刷新流程，避免后端已启动但插件仍停在“后端还没开张”的旧空态。 |
 | 兴趣挑战探针 UI | ✅ | `interest.probe` 和 `speculative_interests` 会保留后端的 `probe_mode` / `challenge` metadata；profile 页确认会向 `/api/interest-probes/respond` 传 `surface="profile"`，写回为 `profile_confirmed`，而 inbox / runtime probe 卡片确认保持默认 `probe_confirmed`。插件 side panel、移动 Web 和桌面 Web 会把普通 `near` 兴趣探针与 `lateral/bridge/wildcard` 挑战探针拆成不同样式和提示：普通兴趣强调继续探索，挑战探针提示“把口味往侧边推一点”，区别于避雷探针。用户对同一 domain 做确认、拒绝或探针内聊后，三端会用 handled probe key 立即从 inbox、画像页和 runtime hydration 里隐藏该探针，避免后端旧快照/缓存再次把它展示出来。 |
 | 避雷探针 UI | ✅ | popup inbox 支持 `avoidance.probe`，按钮文案为「确实不喜欢 / 不是 / 多聊聊」；画像页显示 `speculative_avoidances` 的待确认避雷方向，确认后通过 `/api/avoidance-probes/respond` 写回后端。插件 side panel、移动 Web 和桌面 Web 会用避雷专属样式和“少看这类 / 猜错点不是”提示，区别于正向兴趣试探。移动 Web 在任一探针按钮点击后会锁住同一卡片其它动作，避免一次 active 探针被连续提交 confirm + reject；三端也会在本地记录 handled 避雷 key，使已处理 domain 不再从 profile summary、pending probes 或 runtime stream 重复水合；消息收件箱空态不会重建 header，X 关闭入口保持可用。 |
 | 封面图代理加载 | ✅ | side panel 的推荐卡片、惊喜推荐和消息封面会用当前配置的后端 origin 拼接 `/api/image-proxy?url=...`，不再直连平台 CDN，也不再设置 `referrerPolicy`。 |
@@ -84,6 +84,7 @@ extension/
 │   ├── popup.html
 │   ├── popup.js
 │   ├── popup-autostart-control.js
+│   ├── popup-connection-poller.js # popup 离线期间轻量 /api/ping 重探测
 │   ├── popup-saved-sync.js
 │   └── popup-helpers.js    # popup 纯函数：runtime 状态归一化、探针 key / stale 过滤等
 ├── src/
@@ -171,7 +172,7 @@ extension/
 - 会启动知乎任务轮询；收到 runtime stream 的 `zhihu_task_available` 后立即打开带 `openbiliclaw_zhihu_task` 标记的知乎任务 tab。`bootstrap_events` 初始化 / 事件 smoke 使用前台 tab，会把浏览记录、收藏夹和个人动态条目回传到 `/api/sources/zhihu/task-result`；只有后端任务 payload 显式带 `profile_update=true` 时，新增条目才会由 API 自动写入 memory 并进入增量画像 pipeline。`search` / `hot` / `feed` / `creator` / `related` discovery 使用后台 tab，并把知乎候选分别回传为 `zhihu_search` / `zhihu_hot` / `zhihu_feed` / `zhihu_creator` / `zhihu_related`。任务 tab 不启动普通 `startCollector`，因此 CLI smoke、guided init 和 discovery 任务不会额外写入 `/api/events`
 - 以 `client=background` 连接 `/api/runtime-stream` 后，如果后端发现本地缺少 B 站 Cookie，会收到 `bilibili_cookie_sync_requested`；如果 `[sources.douyin].enabled=true` 且缺少抖音 Cookie，会收到 `douyin_cookie_sync_requested`。扩展收到后会立即执行对应 Cookie POST。后端也把这条 WebSocket 作为 extension presence 信号：连接建立时允许后台 LLM 工作，最后一个连接断开后进入 `extension_disconnect_grace_seconds` 宽限；服务端 reader 会主动 `receive()` 检测 idle disconnect，避免浏览器断开后 presence 卡住
 - 收到 `extension_e2e_run` 后会调用 `background/e2e-runner.ts`：按目标平台打开或复用标签页，复用时也会导航到平台稳定入口，等待页面 ready，再向 content script 发送 `OBC_E2E_EXECUTE`；runner 会先等待捕捉 buffer settle 并 flush，再把执行结果 POST 到 `/api/extension/e2e/result`，sendMessage / tab load / 整体运行都有独立超时，避免单个平台页面卡住整个后端请求
-- 连接 `/api/runtime-stream` 之前会先 HTTP `GET /api/ping`（2 秒超时）做一次活性探针，仅在后端可达时再 `new WebSocket(...)`。这样 fresh-install 用户先装扩展、后启动后端时，`chrome://extensions` 不会被浏览器层 WebSocket 失败计入「错误」徽标；探针失败仍走原有的 5s → 60s 指数退避兜底重连。探活不再打 `/api/health`：health 会同步等一次 embedding 实探（冷缓存可达数秒），2 秒预算下会把健康但冷启动的后端误判为掉线；`/api/ping` 返回 404（旧后端）时回退 `/api/health`（12 秒预算）
+- 连接 `/api/runtime-stream` 之前会先 HTTP `GET /api/ping`（2 秒超时）做一次活性探针，仅在后端可达时再 `new WebSocket(...)`。这样 fresh-install 用户先装扩展、后启动后端时，`chrome://extensions` 不会被浏览器层 WebSocket 失败计入「错误」徽标；探针失败后按固定 1 秒间隔继续重试，直到后端可达。探活不再打 `/api/health`：health 会同步等一次 embedding 实探（冷缓存可达数秒），2 秒预算下会把健康但冷启动的后端误判为掉线；`/api/ping` 返回 404（旧后端）时回退 `/api/health`（12 秒预算）
 - 后端不可达时会在扩展工具栏图标上打一个浅灰 `!` badge 作为可视提示，WebSocket 首次连上后自动清除；popup 内仍会显示「后端还没开张，先运行 `openbiliclaw start`」
 - Cookie 监听器幂等注册，避免 onInstalled / onStartup / 冷启动重复挂载导致同一次登录触发多次 POST
 - 点击扩展图标时优先打开 Chrome side panel；Firefox 构建会改用 `sidebar_action` 打开同一套 `popup/popup.html`
@@ -357,7 +358,7 @@ CLI 入口：
 
 `popup/` 目录当前承载 side panel 页面，已具备：
 
-- 后端连接状态检查
+- 后端连接状态检查：首屏用 `/api/ping` 做轻量活性判断，`runtime-stream` 连接 / 断开负责实时翻转在线状态；当首屏或地址切换后处于离线状态时，`popup-connection-poller.js` 会每 1 秒重探测 `/api/ping`，runtime-stream 也以固定 1 秒间隔重连，一旦后端恢复就停止轮询、更新徽标并调度推荐刷新
 - 设置页「后端地址」（默认 `127.0.0.1`，接受裸 IPv4 / 主机名）和「后端端口」（默认 `8420`，仅接受 `1-65535` 的完整十进制整数）由 `popup-backend-config.js` 一起写入 `chrome.storage.local`；popup 自身的 `/api/...` HTTP 请求与 `runtime-stream` WebSocket，以及 service worker / cookie 同步 / 各源任务派发都通过 `apiUrl()` / `wsUrl()` 在调用时解析当前 origin，service worker 通过 `chrome.storage.onChanged` 同步收到变更并立即重连。endpoint 不会写入后端 `config.toml`；本机改端口时用 `openbiliclaw start --port <同一端口>`。Chrome Web Store / AMO 发布包为缩短审核和降低权限提示，默认只声明 `127.0.0.1` / `localhost` 后端 host 权限；连接局域网其他机器或远程域名需要带对应 host 权限的开发者构建，或后续补充 `optional_host_permissions` 的用户授权流程
 - 顶部手机图标会打开移动端二维码面板，二维码完全在 popup 本地生成，指向当前插件后端地址的 `/m/`；打开后的 `/m/` 页面已带 PWA manifest 与 iOS Web Clip 元数据，可从手机浏览器保存到主屏幕；当前不提供离线缓存，仍需手机能访问运行中的本地后端。如果当前 host 仍是 `127.0.0.1` / `localhost`，面板会提示手机通常无法访问，需要先把插件后端地址改成电脑局域网 IP；在 460px 以下侧边栏宽度，顶部 Web / 二维码 / 消息 / 设置按钮会换到品牌区下一行靠右排列，避免和标题 / 状态徽标重叠
 - 设置页调度区的「停止后台 LLM 请求」写入 `scheduler.enabled=false`；开启后会暂停 daemon-owned 定时发现、候选池预计算和画像更新里的 LLM / embedding 调用，推荐列表不会自动补充新内容，候选池为空时可能暂时没有推荐。「关闭浏览器后停止后台」写入 `scheduler.pause_on_extension_disconnect=true`，断开宽限秒数写入 `scheduler.extension_disconnect_grace_seconds`；所有扩展窗口断开并超过宽限期后，后台 LLM / embedding 工作暂停，重新打开浏览器后恢复。手动刷新和显式 CLI / API 操作仍按用户动作执行
@@ -459,6 +460,7 @@ npm run build
 - Firefox manifest 的 version 注入、`sidebar_action` 降级路径、AMO 数据收集类别声明、Firefox zip 打包清理和 AMO unlisted XPI 签名
 - popup 设置页字段与 `/api/config` schema 的基础对齐
 - popup API durable chat turn：`startChatTurn()`、`fetchChatTurn()`、`fetchChatTurns()` 会分别调用 `/api/chat/turns`、`/api/chat/turns/{turn_id}` 和列表接口
+- popup 离线连接恢复：`popup-connection-poller.js` 覆盖 `/api/ping` 失败后持续重探测、恢复后停止轮询并触发在线回调
 - popup 聊天布局：历史 hydrate 与切回聊天 tab 都会触发滚到底部，避免 hidden view 恢复后停在旧消息
 - `dist/` 运行时脚本可被 Chrome 直接加载
 
@@ -516,7 +518,7 @@ npm run build
 - `service worker` 能启动并批量上报
 - `/api/events` 能接收插件预检请求与事件批次
 - SQLite `events` 表已能写入 `snapshot` 事件
-- popup 能根据 `/api/ping`（连接徽章活性，404 回退 `/api/health`）、`/api/health`（embedding / profile 就绪）与 `/api/recommendations` 切换在线、空状态与推荐列表展示
+- popup 能根据 `/api/ping`（连接徽章活性，404 回退 `/api/health`）、`/api/health`（embedding / profile 就绪）与 `/api/recommendations` 切换在线、空状态与推荐列表展示；如果打开时后端尚未就绪，side panel 会离线短轮询 `/api/ping`，后端启动后自动恢复在线状态并刷新推荐
 - side panel 页面反馈按钮已能经 `/api/feedback` 写回推荐表和事件层
 - side panel 现已支持 `推荐 / 稍后 / 收藏 / 画像 / 对话` 五个 tab，其中稍后再看和收藏列表与 PC Web、移动 Web 的保存语义一致
 - side panel 聊天信号已进入后端学习链，但仍采用受控积累，不会因为单轮聊天立即重写画像

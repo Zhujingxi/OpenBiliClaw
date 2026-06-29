@@ -17,7 +17,7 @@
 - **推荐出口增加 dislike 硬过滤兜底**：`RecommendationEngine.serve()` 从 discovery pool 读出候选后，会按当前 `profile.preferences.disliked_topics` 再过滤一次；主题字段精确命中，或标题 / 标签 / 简介 / 作者 / 短正文包含避雷 term 的候选不会进入排序，覆盖异步清池尚未完成或清池失败的窗口。
 - **统一关键词 planner 切断 B 站旧搜索词 LLM 兜底**：`[discovery].unified_keyword_planner_enabled=true` 时，B 站主 refresh 若暂时 claim 不到 `discovery_keywords` 里的 pending 词，会只移除本轮 `search` 子策略并保留 `related_chain/trending/explore`，不再把 `queries=None` 传给 `SearchStrategy` 触发 `discovery.search.queries`，避免 planner 与旧搜索词生成同时烧 token。
 - **插件与桌面安装包同步发布**：浏览器插件版本提升到 `extension-v0.3.99`，用于 GitHub Release 与 Chrome Web Store 同步分发；桌面安装包提升到 `desktop-v0.3.148`，让冻结包用户直接获得本轮 LLM 费用控制、dislike 兜底和关键词 planner 修复。
-- **插件连接空态实时同步**：side panel 首次打开时如果 `/api/ping` 瞬时失败但 `/api/runtime-stream` 随后连上，现在会立刻把推荐页从“后端还没开张”离线空态切回在线刷新流程，不再只更新顶部“已连接”徽标。
+- **插件连接空态实时同步**：side panel 首次打开时如果 `/api/ping` 瞬时失败但 `/api/runtime-stream` 随后连上，现在会立刻把推荐页从“后端还没开张”离线空态切回在线刷新流程，不再只更新顶部“已连接”徽标；popup 离线期间会每 1 秒轻量重探测 `/api/ping`，runtime-stream 自身也改为固定 1 秒重连，后端启动后自动更新徽标并刷新推荐。
 - **插件 Release 缺 AMO 密钥不再阻断**：`release-extension.yml` 现在会先探测 Firefox AMO 签名凭证；只有 `FIREFOX_SIGNING_ENABLED=true` 且 `AMO_JWT_ISSUER` / `AMO_JWT_SECRET` 同时存在时才要求 signed XPI，否则仍发布 Chrome / Edge zip 与 Firefox 临时加载 zip，避免未配置 Firefox 签名密钥时阻断插件包发版。
 - **画像增量回填增加并发 claim 保护**：`/api/events` 的 `last_profile_pipeline_event_id` backfill 现在有进程内 single-flight 保护；当前一批旧 pending 行正在喂给 `ProfileUpdatePipeline` 时，并发事件请求会跳过重复 backfill，只处理自身 accepted 事件，避免同一批 200 条画像信号被重复送进 `soul.preference.chunk`。
 - **画像编辑支持二级兴趣**：`GET /api/profile/edit-state` 现在会返回兴趣树的 `specific_edits` 痕迹；插件 side panel、移动 Web 和桌面 Web 的画像编辑面板会按 `domain -> specifics` 渲染，新增 / 删除二级兴趣时向 `/api/profile/edit` 带 `parent`，不再只能编辑一级兴趣域；新增后立即删除的二级兴趣会归约为空覆盖，不再留下错误的已编辑状态。

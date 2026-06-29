@@ -37,6 +37,7 @@ import {
   validateCommentInput,
 } from "./popup-helpers.js";
 import { createRuntimeStreamClient } from "./popup-stream.js";
+import { createOfflineBackendPoller } from "./popup-connection-poller.js";
 import {
   buildInitChecklist,
   describeInitReason,
@@ -297,6 +298,19 @@ let recommendationAutoLoadUserArmed = false;
 let recommendationAutoLoadTouchY = null;
 let recommendationAutoLoadIntentInitialized = false;
 let runtimeStreamClient = null;
+const offlineBackendPoller = createOfflineBackendPoller({
+  isOnline: () => state.online,
+  checkBackendStatus,
+  onOnline: async () => {
+    if (!state.online) {
+      state.online = true;
+      setStatus(true);
+      setHint("后端连上了，正在刷新。", "success");
+    }
+    scheduleRecommendationsRefresh({ delayMs: 0 });
+    void maybeShowEmbeddingBanner();
+  },
+});
 const CHAT_SESSION = "popup";
 const CHAT_POLL_INTERVAL_MS = 1200;
 const CHAT_POLL_DEADLINE_MS = 180_000;
@@ -1452,6 +1466,7 @@ function connectRuntimeStream() {
     },
     onConnect() {
       const wasOnline = state.online;
+      offlineBackendPoller.stop();
       if (!wasOnline) {
         state.online = true;
         setStatus(true);
@@ -1465,6 +1480,7 @@ function connectRuntimeStream() {
         setStatus(false);
         setHint("后端连接断了，等重连上会自动恢复。", "error");
       }
+      offlineBackendPoller.start();
     },
   });
   client.connect();
@@ -5431,6 +5447,7 @@ async function initializeRecommendations() {
   setStatus(online);
 
   if (!online) {
+    offlineBackendPoller.start();
     state.runtimeStatus = null;
     state.runtimeConfig = null;
     state.recommendations = [];
@@ -5443,6 +5460,7 @@ async function initializeRecommendations() {
     renderProfileSummary(normalizeProfileSummary({ initialized: false }));
     return;
   }
+  offlineBackendPoller.stop();
 
   const [runtimeResult, recommendationResult, delightResult, configResult] =
     await Promise.allSettled([
@@ -6807,12 +6825,17 @@ function bindSettings() {
       if (endpointChanged) {
         // Rebind the runtime stream against the new origin and refresh
         // the online indicator. If the backend isn't yet running on the
-        // new port these will retry per the WS backoff and the popup
+        // new port these will retry on the fixed liveness cadence and the popup
         // status will flip to offline — exactly the signal the user
         // needs to remember to start the daemon with --port.
         connectRuntimeStream();
         state.online = await checkBackendStatus();
         setStatus(state.online);
+        if (state.online) {
+          offlineBackendPoller.stop();
+        } else {
+          offlineBackendPoller.start();
+        }
       }
     } catch (err) {
       if (!renderStructuredConfigError(err)) {
