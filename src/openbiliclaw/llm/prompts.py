@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from openbiliclaw.discovery.style_keys import STYLE_KEY_PROMPT_TEXT, normalize_style_key
 from openbiliclaw.llm.json_utils import parse_llm_json_tolerant
@@ -139,6 +139,39 @@ def _normalize_platform_blocks(platform_blocks: list[dict[str, object]]) -> list
             )
         normalized_blocks.append(normalized)
     return normalized_blocks
+
+
+def _normalize_explore_domains_block(block: dict[str, object]) -> dict[str, object]:
+    normalized = dict(block)
+    try:
+        need_domains = int(cast("Any", normalized.get("need_domains", 5)) or 5)
+    except (TypeError, ValueError):
+        need_domains = 5
+    try:
+        queries_per_domain = int(cast("Any", normalized.get("queries_per_domain", 3)) or 3)
+    except (TypeError, ValueError):
+        queries_per_domain = 3
+    normalized["need_domains"] = max(1, need_domains)
+    normalized["queries_per_domain"] = max(
+        1,
+        min(3, queries_per_domain),
+    )
+    covered = normalized.get("covered_topic_groups", [])
+    if not isinstance(covered, (list, tuple)):
+        covered = []
+    seen: set[str] = set()
+    unique_covered: list[str] = []
+    for item in covered:
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        unique_covered.append(text)
+        if len(unique_covered) >= 12:
+            break
+    normalized["covered_topic_groups"] = unique_covered
+    normalized["intent"] = "exploratory_bilibili_queries"
+    return normalized
 
 
 def build_socratic_dialogue_prompt(
@@ -2038,6 +2071,10 @@ _MERGED_KEYWORDS_SYSTEM_PROMPT = (
     "prefer_axes(冷启动或手动传入的优先补广度方向)、cold_start(是否空池冷启动)、"
     "supply_hint(数据观察:该平台近来实际产出较多、用户没有反感的方向,是下面 "
     "<supply_advantage> 静态表的数据化补充,可能为空)。\n"
+    "如果 user 消息额外包含 <explore_domains>,说明 B 站 explore refresh plan 已到期"
+    "或即将到期,且 B 站仍有补货空间。此时除了常规平台关键词,还要额外输出"
+    "可选 key `explore_domains`:它不是常规兴趣命中,而是专门给 B 站搜索缓存池的"
+    "探索性查询方向,用于跳出信息茧房和测试新的心理诉求轴。\n"
     "</task>\n\n"
     "<supply_advantage>\n"
     "每个平台结构性擅长的内容方向不同(下面是平台的固有供给优势,与具体用户无关)。"
@@ -2056,7 +2093,9 @@ _MERGED_KEYWORDS_SYSTEM_PROMPT = (
     "1. 输出必须是严格 JSON 对象,不要附带解释。\n"
     "2. JSON 的 key 必须是 <platforms> 里出现的 platform 标识符"
     "(bilibili / xiaohongshu / douyin / youtube / twitter),每个 key 的值是一个"
-    "字符串数组。**只输出本轮 <platforms> 里给到的平台**,不要凭空加平台。\n"
+    "字符串数组。**只输出本轮 <platforms> 里给到的平台**,不要凭空加平台。"
+    "唯一例外:只有 user 消息含 <explore_domains> 时,才可以额外输出"
+    "`explore_domains` 数组。\n"
     "3. 每个平台生成恰好该平台 need 个搜索关键词;凑不满时宁缺毋滥,数组可短于 need,"
     "但不要为了凑数编造与画像无关的词。\n"
     "4. 每个关键词都要是适合在该平台搜索框直接输入的短词 / 短组合,不要写成长句。\n"
@@ -2075,6 +2114,12 @@ _MERGED_KEYWORDS_SYSTEM_PROMPT = (
     "avoid_topics 整组最多 2 个可以直接使用;至少一半关键词应覆盖 prefer_axes、"
     "较低权重兴趣、一级兴趣域的其它切面或适合该平台的跨域映射。仍要保留少量"
     "高权重兴趣入口,不要完全避开用户最喜欢的方向。\n"
+    "11. explore_domains 规则:只有收到 <explore_domains> 才生成。每个 domain 必须"
+    "明显带探索性:优先选择用户画像之外、但可能被其 deep_needs / interest_domains "
+    "间接吸引的跨域方向;不要把已有高权重兴趣换皮成探索。每个 domain 输出 domain、"
+    "novelty_level、queries;queries 是适合 B 站直接搜索的具体短词,每条都要含内容形式词"
+    "(纪录片 / 盘点 / vlog / 科普 / 测评 / 解说 / 体验等),并尽量避开"
+    "covered_topic_groups。探索 query 宁可少而新,不要补成常规关键词。\n"
     "</rules>\n\n"
     "<output_schema>\n"
     "{\n"
@@ -2082,7 +2127,11 @@ _MERGED_KEYWORDS_SYSTEM_PROMPT = (
     '  "xiaohongshu": ["手冲咖啡 入门 教程", "通勤 穿搭 真实体验"],\n'
     '  "douyin": ["AI 绘画 整活", "城市 夜骑 热门"],\n'
     '  "youtube": ["machine learning explained", "城市规划 纪录片"],\n'
-    '  "twitter": ["rust async runtime", "llm agents discussion"]\n'
+    '  "twitter": ["rust async runtime", "llm agents discussion"],\n'
+    '  "explore_domains": [\n'
+    '    {"domain": "城市声音采样", "novelty_level": 0.84, '
+    '"queries": ["城市 声音 采样 纪录片", "街头 声音 设计 vlog"]}\n'
+    "  ]\n"
     "}\n"
     "</output_schema>"
 )
@@ -2139,6 +2188,7 @@ def build_merged_keywords_prompt(
     profile_summary: dict[str, object],
     profile_blocks: list[str] | None = None,
     platform_blocks: list[dict[str, object]],
+    explore_domains_block: dict[str, object] | None = None,
 ) -> list[dict[str, str]]:
     """Build the merged, multi-platform search-keyword generation prompt.
 
@@ -2156,6 +2206,10 @@ def build_merged_keywords_prompt(
             appear in the prompt (and may appear in the output). The ``avoid_*``
             and ``prefer_axes`` fields come from
             ``PoolDistributionSnapshot.to_prompt_hints()``.
+        explore_domains_block: Optional Bilibili explore-refresh request. When
+            present, the model may append an ``explore_domains`` array whose
+            queries are written into the Bilibili query cache as exploratory
+            searches.
 
     Cache-friendly per CLAUDE.md: ``system_prompt`` is the module-level constant
     ``_MERGED_KEYWORDS_SYSTEM_PROMPT`` (100% static). All per-call data lives in
@@ -2174,6 +2228,19 @@ def build_merged_keywords_prompt(
         ),
         "</platforms>",
     ]
+    if explore_domains_block is not None:
+        user_blocks.extend(
+            [
+                "<explore_domains>",
+                json.dumps(
+                    _normalize_explore_domains_block(explore_domains_block),
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ),
+                "</explore_domains>",
+            ]
+        )
     user_prompt = "\n\n".join(user_blocks)
     return [
         {"role": "system", "content": _MERGED_KEYWORDS_SYSTEM_PROMPT},
@@ -2265,3 +2332,82 @@ def parse_merged_keywords_with_presence(
                 break
         result[platform] = keywords
     return result, present
+
+
+def parse_merged_keywords_with_presence_and_explore_domains(
+    content: str,
+    platforms: list[str],
+    *,
+    per_platform_cap: int,
+    max_explore_domains: int = 5,
+    queries_per_domain: int = 3,
+) -> tuple[dict[str, list[str]], set[str], list[dict[str, object]]]:
+    """Parse platform keywords plus optional ``explore_domains``.
+
+    This keeps the legacy platform-keyword parser contract intact while giving
+    the unified planner a way to consume the optional exploratory Bilibili query
+    block requested by ``build_merged_keywords_prompt(..., explore_domains_block=...)``.
+    """
+    keywords, present = parse_merged_keywords_with_presence(
+        content,
+        platforms,
+        per_platform_cap=per_platform_cap,
+    )
+    payload = parse_llm_json_tolerant(content)
+    if not isinstance(payload, dict):
+        return keywords, present, []
+    raw_domains = payload.get("explore_domains")
+    if not isinstance(raw_domains, list):
+        return keywords, present, []
+
+    domains: list[dict[str, object]] = []
+    seen_domains: set[str] = set()
+    max_domains = max(0, int(max_explore_domains))
+    query_cap = max(1, int(queries_per_domain))
+    for raw_item in raw_domains:
+        if not isinstance(raw_item, dict):
+            continue
+        domain = str(raw_item.get("domain", "")).strip()
+        normalized_domain = "".join(domain.split()).lower()
+        if not domain or normalized_domain in seen_domains:
+            continue
+        queries = _clean_explore_domain_queries(raw_item.get("queries"), query_cap)
+        if not queries:
+            continue
+        seen_domains.add(normalized_domain)
+        domains.append(
+            {
+                "domain": domain,
+                "novelty_level": _clamp_explore_novelty(raw_item.get("novelty_level")),
+                "queries": queries,
+            }
+        )
+        if len(domains) >= max_domains:
+            break
+    return keywords, present, domains
+
+
+def _clean_explore_domain_queries(value: object, cap: int) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    seen: set[str] = set()
+    queries: list[str] = []
+    for item in value:
+        if not isinstance(item, (str, int, float)):
+            continue
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        queries.append(text)
+        if len(queries) >= cap:
+            break
+    return queries
+
+
+def _clamp_explore_novelty(value: object) -> float:
+    try:
+        novelty = float(cast("Any", value))
+    except (TypeError, ValueError):
+        novelty = 0.65
+    return max(0.65, min(0.95, novelty))

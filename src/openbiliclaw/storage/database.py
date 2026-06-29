@@ -44,6 +44,14 @@ _VIEW_CONTENT_ID_METADATA_KEYS = (
     "video_id",
     "yt_video_id",
 )
+_KEYWORD_KIND_REGULAR = "regular"
+_KEYWORD_KIND_EXPLORE = "explore"
+_KEYWORD_KINDS = {_KEYWORD_KIND_REGULAR, _KEYWORD_KIND_EXPLORE}
+
+
+def _normalize_keyword_kind(value: object) -> str:
+    kind = str(value or "").strip().lower()
+    return kind if kind in _KEYWORD_KINDS else _KEYWORD_KIND_REGULAR
 
 
 def _unique_clean_strings(values: Sequence[object]) -> list[str]:
@@ -4276,6 +4284,7 @@ class Database:
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
                 platform          TEXT NOT NULL,
                 keyword           TEXT NOT NULL,
+                keyword_kind      TEXT NOT NULL DEFAULT 'regular',
                 profile_kw_digest TEXT NOT NULL DEFAULT '',
                 status            TEXT NOT NULL DEFAULT 'pending',
                 created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -4285,15 +4294,25 @@ class Database:
                 attempts          INTEGER NOT NULL DEFAULT 0,
                 yield_count       INTEGER NOT NULL DEFAULT 0
             );
+        """)
+        columns = self.conn.execute("PRAGMA table_info(discovery_keywords)").fetchall()
+        column_names = {str(row[1]) for row in columns}
+        if "keyword_kind" not in column_names:
+            self.conn.execute(
+                "ALTER TABLE discovery_keywords "
+                "ADD COLUMN keyword_kind TEXT NOT NULL DEFAULT 'regular'"
+            )
+        self.conn.executescript("""
             -- Partial uniqueness: only the in-flight triplet is unique, so
             -- used/expired history never blocks re-generating the same word.
+            DROP INDEX IF EXISTS uq_discovery_keywords_inflight;
             CREATE UNIQUE INDEX IF NOT EXISTS uq_discovery_keywords_inflight
-                ON discovery_keywords (platform, keyword, profile_kw_digest)
+                ON discovery_keywords (platform, keyword, profile_kw_digest, keyword_kind)
                 WHERE status IN ('pending', 'claimed', 'executing');
             CREATE INDEX IF NOT EXISTS idx_discovery_keywords_status_digest
-                ON discovery_keywords (platform, status, profile_kw_digest);
+                ON discovery_keywords (platform, keyword_kind, status, profile_kw_digest);
             CREATE INDEX IF NOT EXISTS idx_discovery_keywords_status_used
-                ON discovery_keywords (platform, status, used_at);
+                ON discovery_keywords (platform, keyword_kind, status, used_at);
 
             CREATE TABLE IF NOT EXISTS discovery_planner_lock (
                 lock_name    TEXT PRIMARY KEY,
@@ -4332,12 +4351,15 @@ class Database:
         platform: str,
         keywords: Sequence[str],
         profile_kw_digest: str,
+        *,
+        keyword_kind: str = "regular",
     ) -> int:
         """Batch-insert ``pending`` keywords, ignoring in-flight duplicates.
 
         The partial unique index ``uq_discovery_keywords_inflight`` means a
         word already ``pending`` / ``claimed`` / ``executing`` for the same
-        ``(platform, profile_kw_digest)`` is silently skipped (``OR IGNORE``);
+        ``(platform, profile_kw_digest, keyword_kind)`` is silently skipped
+        (``OR IGNORE``);
         a word that is only present as ``used`` / ``expired`` history does
         **not** conflict, so the same word can be regenerated. Blank /
         duplicate words within ``keywords`` are de-duplicated up front.
@@ -4346,41 +4368,58 @@ class Database:
         """
         platform_key = platform.strip()
         digest = profile_kw_digest.strip()
+        kind = _normalize_keyword_kind(keyword_kind)
         seen: set[str] = set()
-        rows: list[tuple[str, str, str]] = []
+        rows: list[tuple[str, str, str, str]] = []
         for raw in keywords:
             word = str(raw).strip()
             if not word or word in seen:
                 continue
             seen.add(word)
-            rows.append((platform_key, word, digest))
+            rows.append((platform_key, word, kind, digest))
         if not rows:
             return 0
         before = self.conn.total_changes
         self._execute_many_write(
             """
             INSERT OR IGNORE INTO discovery_keywords
-                (platform, keyword, profile_kw_digest, status)
-            VALUES (?, ?, ?, 'pending')
+                (platform, keyword, keyword_kind, profile_kw_digest, status)
+            VALUES (?, ?, ?, ?, 'pending')
             """,
             rows,
         )
         return self.conn.total_changes - before
 
-    def count_pending_keywords(self, platform: str, profile_kw_digest: str) -> int:
+    def count_pending_keywords(
+        self,
+        platform: str,
+        profile_kw_digest: str,
+        *,
+        keyword_kind: str = "regular",
+    ) -> int:
         """Return how many ``pending`` keywords exist for this digest."""
+        kind = _normalize_keyword_kind(keyword_kind)
         self._ensure_fresh_read()
         row = self.conn.execute(
             """
             SELECT COUNT(*) AS n
             FROM discovery_keywords
-            WHERE platform = ? AND status = 'pending' AND profile_kw_digest = ?
+            WHERE platform = ?
+              AND keyword_kind = ?
+              AND status = 'pending'
+              AND profile_kw_digest = ?
             """,
-            (platform.strip(), profile_kw_digest.strip()),
+            (platform.strip(), kind, profile_kw_digest.strip()),
         ).fetchone()
         return int(row["n"]) if row is not None else 0
 
-    def claim_keywords(self, platform: str, n: int) -> list[dict[str, Any]]:
+    def claim_keywords(
+        self,
+        platform: str,
+        n: int,
+        *,
+        keyword_kind: str = "regular",
+    ) -> list[dict[str, Any]]:
         """Atomically claim up to ``n`` ``pending`` keywords for a platform.
 
         Uses a short-lived connection + ``BEGIN IMMEDIATE`` so two concurrent
@@ -4393,6 +4432,7 @@ class Database:
         claim_n = max(0, int(n))
         if claim_n <= 0:
             return []
+        kind = _normalize_keyword_kind(keyword_kind)
         self._ensure_fresh_read()
         conn = self.open_connection()
         try:
@@ -4401,11 +4441,13 @@ class Database:
                 """
                 SELECT id
                 FROM discovery_keywords
-                WHERE platform = ? AND status = 'pending'
+                WHERE platform = ?
+                  AND keyword_kind = ?
+                  AND status = 'pending'
                 ORDER BY created_at ASC, id ASC
                 LIMIT ?
                 """,
-                (platform.strip(), claim_n),
+                (platform.strip(), kind, claim_n),
             ).fetchall()
             if not pending:
                 conn.commit()
@@ -4537,19 +4579,24 @@ class Database:
         platform: str,
         window_size: int,
         window_hours: float,
+        *,
+        keyword_kind: str = "regular",
     ) -> list[str]:
         """Return recent in-flight + used keywords for dedup, newest first.
 
         Includes ``claimed`` / ``executing`` (in-flight, so the planner does
         not regenerate a word a fetch is about to consume) and ``used``
         (recently searched) within the rolling window. Capped at
-        ``window_size`` and bounded to the last ``window_hours``.
+        ``window_size`` and bounded to the last ``window_hours``. History is
+        scoped by keyword pool so regular search and planner-backed explore do
+        not suppress or recycle each other's queries.
         """
         from datetime import UTC, datetime, timedelta
 
         cap = max(0, int(window_size))
         if cap <= 0:
             return []
+        kind = _normalize_keyword_kind(keyword_kind)
         self._ensure_fresh_read()
         cutoff = (datetime.now(UTC) - timedelta(hours=max(0.0, window_hours))).strftime(
             "%Y-%m-%d %H:%M:%S"
@@ -4559,12 +4606,13 @@ class Database:
             SELECT keyword
             FROM discovery_keywords
             WHERE platform = ?
+              AND keyword_kind = ?
               AND status IN ('claimed', 'executing', 'used')
               AND COALESCE(used_at, executing_at, claimed_at, created_at) >= ?
             ORDER BY COALESCE(used_at, executing_at, claimed_at, created_at) DESC, id DESC
             LIMIT ?
             """,
-            (platform.strip(), cutoff, cap),
+            (platform.strip(), kind, cutoff, cap),
         ).fetchall()
         return [str(row["keyword"]) for row in rows]
 
@@ -4573,6 +4621,8 @@ class Database:
         platform: str,
         n: int,
         profile_kw_digest: str,
+        *,
+        keyword_kind: str = "regular",
     ) -> int:
         """Recycle the oldest ``used`` keywords back to ``pending``.
 
@@ -4588,6 +4638,7 @@ class Database:
         if recycle_n <= 0:
             return 0
         digest = profile_kw_digest.strip()
+        kind = _normalize_keyword_kind(keyword_kind)
         self._ensure_fresh_read()
         conn = self.open_connection()
         try:
@@ -4596,10 +4647,12 @@ class Database:
                 """
                 SELECT id, keyword
                 FROM discovery_keywords
-                WHERE platform = ? AND status = 'used'
+                WHERE platform = ?
+                  AND keyword_kind = ?
+                  AND status = 'used'
                 ORDER BY used_at ASC, id ASC
                 """,
-                (platform.strip(),),
+                (platform.strip(), kind),
             ).fetchall()
             recycled = 0
             for row in candidates:
@@ -4612,10 +4665,11 @@ class Database:
                     WHERE platform = ?
                       AND keyword = ?
                       AND profile_kw_digest = ?
+                      AND keyword_kind = ?
                       AND status IN ('pending', 'claimed', 'executing')
                     LIMIT 1
                     """,
-                    (platform.strip(), str(row["keyword"]), digest),
+                    (platform.strip(), str(row["keyword"]), digest, kind),
                 ).fetchone()
                 if clash is not None:
                     continue

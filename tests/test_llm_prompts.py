@@ -24,6 +24,7 @@ from openbiliclaw.llm.prompts import (
     build_speculation_generation_prompt,
     parse_merged_keywords,
     parse_merged_keywords_with_presence,
+    parse_merged_keywords_with_presence_and_explore_domains,
 )
 from openbiliclaw.memory.manager import MemoryManager
 
@@ -1351,6 +1352,25 @@ def test_merged_keywords_prompt_user_message_carries_profile_once_and_due_platfo
     assert "原神" in user
 
 
+def test_merged_keywords_prompt_can_request_explore_domains() -> None:
+    messages = build_merged_keywords_prompt(
+        profile_summary={"interests": [{"name": "AI", "weight": 0.9}]},
+        platform_blocks=_merged_platform_blocks(),
+        explore_domains_block={
+            "need_domains": 5,
+            "queries_per_domain": 3,
+            "covered_topic_groups": ["AI 编程", "认知科学"],
+        },
+    )
+    user = messages[1]["content"]
+
+    assert "<explore_domains>" in user
+    assert '"covered_topic_groups"' in user
+    assert "AI 编程" in user
+    assert "探索" in messages[0]["content"]
+    assert "explore_domains" in messages[0]["content"]
+
+
 def test_merged_keywords_prompt_serialization_is_deterministic() -> None:
     """Differently-ordered dict keys with identical semantics must yield a
     byte-identical user message (sort_keys=True discipline)."""
@@ -1546,6 +1566,48 @@ def test_parse_merged_keywords_with_presence_marks_explicit_empty_as_present() -
     # bilibili (had words) and xiaohongshu (explicit []) are present; douyin
     # (absent from the JSON object) is NOT.
     assert present == {"bilibili", "xiaohongshu"}
+
+
+def test_parse_merged_keywords_with_presence_and_explore_domains() -> None:
+    content = """
+    {
+      "bilibili": ["历史 盘点"],
+      "explore_domains": [
+        {
+          "domain": "城市声音采样",
+          "novelty_level": 0.83,
+          "queries": ["城市 声音 采样 纪录片", "街头 声音 设计 vlog"]
+        },
+        {
+          "domain": "AI",
+          "novelty_level": "not-a-number",
+          "queries": ["", "  ", "工业 影像 解说", "工业 影像 解说"]
+        }
+      ]
+    }
+    """
+    keywords, present, explore_domains = parse_merged_keywords_with_presence_and_explore_domains(
+        content,
+        ["bilibili", "xiaohongshu"],
+        per_platform_cap=10,
+        max_explore_domains=5,
+        queries_per_domain=3,
+    )
+
+    assert keywords["bilibili"] == ["历史 盘点"]
+    assert present == {"bilibili"}
+    assert explore_domains == [
+        {
+            "domain": "城市声音采样",
+            "novelty_level": 0.83,
+            "queries": ["城市 声音 采样 纪录片", "街头 声音 设计 vlog"],
+        },
+        {
+            "domain": "AI",
+            "novelty_level": 0.65,
+            "queries": ["工业 影像 解说"],
+        },
+    ]
 
 
 def test_parse_merged_keywords_with_presence_non_list_is_not_present() -> None:
