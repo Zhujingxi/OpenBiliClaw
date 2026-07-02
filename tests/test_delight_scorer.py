@@ -613,8 +613,112 @@ def test_database_get_pool_candidates_needing_delight_score_includes_high_score_
 
     bvids = [c["bvid"] for c in candidates]
     assert "BV1BACKFILL" in bvids
-    assert "BV1READY" not in bvids
-    assert "BV1LOW" not in bvids
+    assert "BV1READY" in bvids
+    assert "BV1LOW" in bvids
+
+
+def test_database_get_pool_candidates_needing_delight_score_includes_stale_score_backfill(
+    tmp_path: Path,
+) -> None:
+    database = _make_database(tmp_path)
+    database.cache_content("BV1STALE", title="Stale", relevance_score=0.92)
+    database.update_delight_score(
+        "BV1STALE",
+        delight_score=0.72,
+        delight_reason="旧阈值留下的理由",
+        delight_hook="旧钩子",
+    )
+
+    candidates = database.get_pool_candidates_needing_delight_score(
+        limit=10,
+        min_delight_score_for_reason=0.91,
+    )
+
+    assert "BV1STALE" in [c["bvid"] for c in candidates]
+
+
+def test_database_get_pool_candidates_needing_delight_score_prioritizes_current_relevance(
+    tmp_path: Path,
+) -> None:
+    database = _make_database(tmp_path)
+    database.cache_content("BV1LOWOLD", title="Old high score", relevance_score=0.60)
+    database.update_delight_score(
+        "BV1LOWOLD",
+        delight_score=0.99,
+        delight_reason="旧高分",
+        delight_hook="旧",
+    )
+    database.cache_content("BV1HIGHNEW", title="Current high score", relevance_score=0.92)
+    database.update_delight_score(
+        "BV1HIGHNEW",
+        delight_score=0.72,
+        delight_reason="旧低分",
+        delight_hook="旧",
+    )
+
+    candidates = database.get_pool_candidates_needing_delight_score(
+        limit=1,
+        min_delight_score_for_reason=0.91,
+    )
+
+    assert [c["bvid"] for c in candidates] == ["BV1HIGHNEW"]
+
+
+def test_database_get_pool_candidates_needing_delight_score_includes_shown_stale_rows(
+    tmp_path: Path,
+) -> None:
+    database = _make_database(tmp_path)
+    database.cache_content("BV1SHOWN", title="Shown stale", relevance_score=0.92)
+    database.update_delight_score(
+        "BV1SHOWN",
+        delight_score=0.72,
+        delight_reason="旧低分",
+        delight_hook="旧",
+    )
+    database.conn.execute(
+        "UPDATE content_cache SET pool_status = 'shown' WHERE bvid = ?",
+        ("BV1SHOWN",),
+    )
+    database.conn.commit()
+
+    candidates = database.get_pool_candidates_needing_delight_score(
+        limit=10,
+        min_delight_score_for_reason=0.91,
+    )
+
+    assert "BV1SHOWN" in [c["bvid"] for c in candidates]
+
+
+def test_database_get_pool_candidates_needing_delight_score_includes_shown_history_rows(
+    tmp_path: Path,
+) -> None:
+    database = _make_database(tmp_path)
+    database.cache_content("BV1HISTORY", title="Shown history stale", relevance_score=0.92)
+    database.update_delight_score(
+        "BV1HISTORY",
+        delight_score=0.72,
+        delight_reason="旧低分",
+        delight_hook="旧",
+    )
+    database.conn.execute(
+        "UPDATE content_cache SET pool_status = 'shown' WHERE bvid = ?",
+        ("BV1HISTORY",),
+    )
+    database.insert_recommendation(
+        "BV1HISTORY",
+        confidence=0.92,
+        expression="普通推荐历史",
+        topic="普通推荐",
+        presented=1,
+    )
+    database.conn.commit()
+
+    candidates = database.get_pool_candidates_needing_delight_score(
+        limit=10,
+        min_delight_score_for_reason=0.91,
+    )
+
+    assert "BV1HISTORY" in [c["bvid"] for c in candidates]
 
 
 # ---------------------------------------------------------------------------

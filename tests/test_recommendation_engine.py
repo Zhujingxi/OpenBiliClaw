@@ -3251,3 +3251,55 @@ async def test_precompute_delight_scores_uses_dynamic_pool_top_boundary() -> Non
         assert float(row["delight_score"]) == pytest.approx(0.72)
         assert row["delight_reason"] == ""
         assert row["delight_hook"] == ""
+
+
+@pytest.mark.asyncio
+async def test_precompute_delight_scores_resyncs_legacy_stale_delight_score() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        for index in range(40):
+            _seed_visible(
+                db,
+                f"BV1DYN{index:02d}",
+                title=f"动态样本 {index}",
+                relevance_score=0.50 + (index * 0.01),
+                relevance_reason="pool sample",
+                topic_group="动态样本",
+                pool_topic_label="动态样本",
+            )
+        _seed_visible(
+            db,
+            "BV1STALE",
+            title="旧分数但新相关度很高",
+            relevance_score=0.92,
+            relevance_reason="Evo 已判断它进入当前 Top 5%",
+            topic_group="旧分数迁移",
+            pool_topic_label="旧分数迁移",
+            pool_expression="这条应该按新的 Evo relevance 重新成为惊喜候选。",
+        )
+        db.update_delight_score(
+            "BV1STALE",
+            delight_score=0.72,
+            delight_reason="旧阈值留下的理由",
+            delight_hook="旧钩子",
+        )
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+        scored = await engine.precompute_delight_scores(
+            profile=_build_profile(),
+            limit=50,
+        )
+
+        assert scored > 0
+        row = db.conn.execute(
+            """
+            SELECT delight_score, delight_reason, delight_hook
+            FROM content_cache
+            WHERE bvid = 'BV1STALE'
+            """
+        ).fetchone()
+        assert row is not None
+        assert float(row["delight_score"]) == pytest.approx(0.92)
+        assert row["delight_reason"] == "这条应该按新的 Evo relevance 重新成为惊喜候选。"
+        assert row["delight_hook"] == "旧分数迁移"

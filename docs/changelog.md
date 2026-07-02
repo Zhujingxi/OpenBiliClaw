@@ -11,7 +11,7 @@
 - **LLM 探测诊断补强**：配置页和 CLI 探测延续 `v0.3.150` 的 reasoning-only 诊断语义，并补充更清晰的 probe 失败信息，方便用户区分模型仅返回思考内容、最终内容为空和真实服务不可用。
 - **发布渠道版本号对齐**：浏览器插件、后端源码和桌面安装包统一提升到 `0.3.151`，GitHub Release 聚合页、插件包和桌面安装包使用同一版本号，减少用户在手动插件包、Chrome Web Store 与桌面安装包之间比对版本的成本。
 - **插件更新失败原因可见**：side panel 设置页点击“立即应用”后，如果后端自动更新被 `dirty_worktree`、`untrusted_remote`、`branch_not_fast_forwardable` 等安全守卫拒绝，插件会展示本地化原因并刷新状态卡，不再只提示“后端更新未能开始”。
-- **惊喜推荐改为池内 Top 5% 动态阈值**：`precompute_delight_scores()`、runtime 主动推送、pending-batch、CLI 和普通推荐池的 delight 占位排除都改用动态门槛。默认底线仍是 `0.70`，低探索开放度用户底线仍是 `0.80`；正式候选池样本不少于 20 条时，会取 `max(profile floor, 当前池内 Top 5% 分数边界)`，避免普通高分内容被过早包装成“惊喜推荐”。
+- **惊喜推荐改为池内 Top 5% 动态阈值**：`precompute_delight_scores()`、runtime 主动推送、pending-batch、CLI 和普通推荐池的 delight 占位排除都改用动态门槛。默认底线仍是 `0.70`，低探索开放度用户底线仍是 `0.80`；正式候选池样本不少于 20 条时，会取 `max(profile floor, 当前池内 Top 5% 分数边界)`，避免普通高分内容被过早包装成“惊喜推荐”。生产库副本验证还暴露了旧版 `delight_score` 标尺残留，因此 backfill 现在会重新领取并同步 `delight_score != relevance_score` 的历史行，包括 `shown` 且已有普通推荐历史的行。
 - **发布流程文档同步**：收紧平台来源发布 checklist，并刷新 README / 文档索引中的当前版本标识，确保本轮插件包、后端源码 tag 和桌面安装包 tag 对外一致。
 
 ## v0.3.150 / extension v0.3.101 / desktop v0.3.150: Reddit rdt-cli 默认后端与发布包同步（2026-06-30）

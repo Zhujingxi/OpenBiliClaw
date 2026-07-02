@@ -79,7 +79,9 @@ def _chunks(values: Sequence[str], size: int) -> list[list[str]]:
 _DELIGHT_CLAIM_MIN_SCORE = 0.70
 _DELIGHT_DYNAMIC_TOP_FRACTION = 0.05
 _DELIGHT_DYNAMIC_MIN_SAMPLE_SIZE = 20
+_DELIGHT_SCORE_SYNC_EPSILON = 0.000001
 _DEFAULT_ADMISSION_MIN_SCORE = 0.60
+
 
 # Rows claimed by the surprise (delight) channel: already delivered as a
 # delight, or currently delight-eligible (the pending-queue predicate). The
@@ -96,6 +98,7 @@ def _delight_claim_guard_sql() -> str:
                     )
                   )
 """
+
 
 _LEGACY_STYLE_KEY_MAP: dict[str, str] = {
     "deep_dive": "deep_focus",
@@ -5779,31 +5782,33 @@ class Database:
                 f"""
                 SELECT *
                 FROM content_cache
-                WHERE COALESCE(pool_status, 'fresh') IN ('fresh', 'suppressed')
+                WHERE COALESCE(pool_status, 'fresh') IN ('fresh', 'shown', 'suppressed')
                   AND COALESCE(feedback_type, '') != 'dislike'
                   AND COALESCE(delight_score, 0.0) = 0.0
                   AND COALESCE(relevance_score, 0.0) >= ?
                   {guard_sql}
-                  AND NOT EXISTS (
-                    SELECT 1
-                    FROM recommendations AS r
-                    WHERE r.bvid = content_cache.bvid
-                  )
                 ORDER BY relevance_score DESC, discovered_at DESC
                 LIMIT ?
                 """,
-                (effective_min_relevance_score, *guard_params, limit),
+                (
+                    effective_min_relevance_score,
+                    *guard_params,
+                    limit,
+                ),
             )
         else:
             cursor = self.conn.execute(
                 f"""
                 SELECT *
                 FROM content_cache
-                WHERE COALESCE(pool_status, 'fresh') IN ('fresh', 'suppressed')
+                WHERE COALESCE(pool_status, 'fresh') IN ('fresh', 'shown', 'suppressed')
                   AND COALESCE(feedback_type, '') != 'dislike'
                   AND COALESCE(relevance_score, 0.0) >= ?
                   AND (
                     COALESCE(delight_score, 0.0) = 0.0
+                    OR ABS(
+                      COALESCE(delight_score, 0.0) - COALESCE(relevance_score, 0.0)
+                    ) > ?
                     OR (
                       COALESCE(delight_score, 0.0) >= ?
                       AND (
@@ -5813,20 +5818,15 @@ class Database:
                     )
                   )
                   {guard_sql}
-                  AND NOT EXISTS (
-                    SELECT 1
-                    FROM recommendations AS r
-                    WHERE r.bvid = content_cache.bvid
-                  )
                 ORDER BY
-                    CASE WHEN COALESCE(delight_score, 0.0) > 0.0 THEN 0 ELSE 1 END ASC,
-                    delight_score DESC,
                     relevance_score DESC,
+                    delight_score DESC,
                     discovered_at DESC
                 LIMIT ?
                 """,
                 (
                     effective_min_relevance_score,
+                    _DELIGHT_SCORE_SYNC_EPSILON,
                     min_delight_score_for_reason,
                     *guard_params,
                     limit,

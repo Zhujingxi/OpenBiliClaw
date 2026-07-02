@@ -204,7 +204,8 @@ count = await engine.precompute_delight_scores(
 行为说明：
 
 - 对 fresh / suppressed 池子里还没打分的候选补 `delight_score`
-- 直接复用 Evo 写入的 `relevance_score` 作为 `delight_score`；低于当前 delight 阈值的候选只写分数、不写 `reason/hook`，避免下轮重复处理
+- 直接复用 Evo 写入的 `relevance_score` 作为 `delight_score`；历史行如果保留了旧版 `delight_score` 标尺，会被重新纳入 backfill 并同步到当前 `relevance_score`
+- 低于当前 delight 阈值的候选只写分数、不写 `reason/hook`，避免下轮重复处理
 - 高于阈值的候选优先用 `pool_expression` 作为卡片展示的 `delight_reason`，没有预生成推荐文案时才 fallback 到 `relevance_reason` / topic 兜底；`delight_hook` 优先用 `pool_topic_label`、`topic_group`、`topic_key` 或 `style_key` 生成
 - 对已经高分但缺 `delight_reason / delight_hook` 的 backlog 候选按同一 Evo 映射补齐文案，而不是永远卡在“只有分数没有解释”
 - 候选出池阈值与运行时 `pending delight` 查询共用同一套口径：先取 profile 默认底线（默认 `0.70`，探索开放度较低时 `0.80`），正式候选池可用分数样本不少于 20 条时再用 `max(profile floor, pool Top 5% boundary)` 抬高门槛；样本不足或初始化阶段回退 profile 默认底线
