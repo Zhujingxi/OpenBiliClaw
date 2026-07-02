@@ -9285,7 +9285,7 @@ def chat() -> None:
 @app.command()
 def delight() -> None:
     """手动触发一次惊喜推荐检查."""
-    from openbiliclaw.recommendation.delight import DEFAULT_DELIGHT_THRESHOLD
+    from openbiliclaw.recommendation.delight import effective_delight_threshold
     from openbiliclaw.soul.engine import SoulProfileNotInitializedError
 
     _require_runtime_config()
@@ -9311,7 +9311,16 @@ def delight() -> None:
         )
     )
 
-    candidate = database.get_delight_candidate(min_delight_score=DEFAULT_DELIGHT_THRESHOLD)
+    prefs = getattr(profile, "preferences", None)
+    exploration_openness = float(getattr(prefs, "exploration_openness", 0.5))
+    default_threshold = effective_delight_threshold(exploration_openness)
+    dynamic_threshold = getattr(database, "dynamic_delight_threshold", None)
+    threshold = (
+        float(dynamic_threshold(default_threshold=default_threshold))
+        if callable(dynamic_threshold)
+        else default_threshold
+    )
+    candidate = database.get_delight_candidate(min_delight_score=threshold)
 
     _print_page_title("惊喜推荐", "从池中寻找你可能意外喜欢的内容")
     if candidate is None:

@@ -396,13 +396,12 @@ def test_database_delight_candidates_skip_feedbacked_items(tmp_path: Path) -> No
     assert database.count_delight_candidates(min_delight_score=0.85) == 1
 
 
-def test_delight_claim_threshold_in_sync() -> None:
-    """storage mirrors DEFAULT_DELIGHT_THRESHOLD without importing recommendation.
+def test_delight_claim_threshold_floor_in_sync() -> None:
+    """storage mirrors DEFAULT_DELIGHT_THRESHOLD as the dynamic floor.
 
-    The regular feed's delight-claim guard (storage layer) must use the
-    same threshold as the surprise queue, or content could fall in the
-    gap (excluded from the feed yet never surfaced as a surprise) or
-    duplicate across both surfaces.
+    Storage stays leaf-only and receives profile-aware threshold floors
+    from callers where available, so this constant only locks the
+    default fallback floor.
     """
     from openbiliclaw.recommendation.delight import DEFAULT_DELIGHT_THRESHOLD
     from openbiliclaw.storage.database import _DELIGHT_CLAIM_MIN_SCORE
@@ -481,6 +480,79 @@ def test_database_count_delight_candidates(tmp_path: Path) -> None:
     database.mark_delight_notified("BV1A")
     count = database.count_delight_candidates(min_delight_score=0.85)
     assert count == 1
+
+
+def test_database_dynamic_delight_threshold_uses_top_five_percent_boundary(
+    tmp_path: Path,
+) -> None:
+    database = _make_database(tmp_path)
+    for index in range(40):
+        score = 0.50 + (index * 0.01)
+        database.cache_content(f"BV1DYN{index:02d}", title="dynamic", relevance_score=score)
+
+    threshold = database.dynamic_delight_threshold(default_threshold=0.70)
+
+    assert threshold == pytest.approx(0.88)
+
+
+def test_database_dynamic_delight_threshold_falls_back_when_pool_is_small(
+    tmp_path: Path,
+) -> None:
+    database = _make_database(tmp_path)
+    for index in range(19):
+        database.cache_content(f"BV1SMALL{index:02d}", title="small", relevance_score=0.95)
+
+    assert database.dynamic_delight_threshold(default_threshold=0.70) == pytest.approx(0.70)
+
+
+def test_database_dynamic_delight_threshold_never_drops_below_default(tmp_path: Path) -> None:
+    database = _make_database(tmp_path)
+    for index in range(40):
+        database.cache_content(f"BV1LOW{index:02d}", title="low", relevance_score=0.40)
+
+    assert database.dynamic_delight_threshold(default_threshold=0.70) == pytest.approx(0.70)
+
+
+def test_pool_candidates_use_dynamic_delight_claim_threshold(tmp_path: Path) -> None:
+    database = _make_database(tmp_path)
+    for index in range(40):
+        score = 0.50 + (index * 0.01)
+        bvid = f"BV1BASE{index:02d}"
+        database.cache_content(bvid, title=bvid, relevance_score=score)
+        database.conn.execute(
+            """
+            UPDATE content_cache
+            SET pool_expression = 'copy',
+                pool_topic_label = 'topic',
+                style_key = 'deep_focus',
+                topic_group = 'base'
+            WHERE bvid = ?
+            """,
+            (bvid,),
+        )
+
+    database.cache_content("BV1MID", title="mid delight", relevance_score=0.72)
+    database.conn.execute(
+        """
+        UPDATE content_cache
+        SET pool_expression = 'copy',
+            pool_topic_label = 'topic',
+            style_key = 'deep_focus',
+            topic_group = 'mid'
+        WHERE bvid = 'BV1MID'
+        """
+    )
+    database.update_delight_score(
+        "BV1MID",
+        delight_score=0.72,
+        delight_reason="ready",
+        delight_hook="hook",
+    )
+    database.conn.commit()
+
+    rows = database.get_pool_candidates(limit=50, max_per_topic_group=0)
+
+    assert "BV1MID" in [row["bvid"] for row in rows]
 
 
 def test_database_get_pool_candidates_needing_delight_score(tmp_path: Path) -> None:

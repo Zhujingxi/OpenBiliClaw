@@ -1254,7 +1254,13 @@ class RecommendationEngine:
 
         prefs = getattr(profile, "preferences", None)
         exploration_openness = float(getattr(prefs, "exploration_openness", 0.5))
-        effective_threshold = effective_delight_threshold(exploration_openness)
+        default_threshold = effective_delight_threshold(exploration_openness)
+        dynamic_threshold = getattr(self._database, "dynamic_delight_threshold", None)
+        effective_threshold = (
+            float(dynamic_threshold(default_threshold=default_threshold))
+            if callable(dynamic_threshold)
+            else default_threshold
+        )
         rows = self._database.get_pool_candidates_needing_delight_score(
             limit=limit,
             min_delight_score_for_reason=effective_threshold,

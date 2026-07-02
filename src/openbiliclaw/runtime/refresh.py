@@ -15,7 +15,10 @@ from openbiliclaw.discovery.pool_snapshot import (
     build_cold_start_pool_snapshot,
     build_pool_distribution_snapshot,
 )
-from openbiliclaw.recommendation.delight import DEFAULT_DELIGHT_THRESHOLD
+from openbiliclaw.recommendation.delight import (
+    DEFAULT_DELIGHT_THRESHOLD,
+    effective_delight_threshold,
+)
 from openbiliclaw.runtime.image_cache import (
     cleanup_image_cache,
     prefetch_cover,
@@ -469,6 +472,23 @@ class ContinuousRefreshController:
             "pool_evaluated_pending_count": int(counts.get("evaluated_pending", 0)),
         }
 
+    def _profile_delight_default_threshold(self) -> float:
+        exploration_openness = 0.5
+        with suppress(Exception):
+            preference_layer = self.memory_manager.get_layer("preference")
+            preference_data = getattr(preference_layer, "data", {})
+            if isinstance(preference_data, dict):
+                exploration_openness = float(preference_data.get("exploration_openness", 0.5))
+        return effective_delight_threshold(exploration_openness)
+
+    def _dynamic_delight_threshold(self) -> float:
+        default_threshold = self._profile_delight_default_threshold()
+        threshold_fn = getattr(self.database, "dynamic_delight_threshold", None)
+        if callable(threshold_fn):
+            with suppress(Exception):
+                return float(threshold_fn(default_threshold=default_threshold))
+        return default_threshold
+
     def get_runtime_status(self) -> dict[str, object]:
         """Build a lightweight runtime summary for popup or diagnostics."""
         state = self.memory_manager.load_discovery_runtime_state()
@@ -486,7 +506,7 @@ class ContinuousRefreshController:
         pending_delight_count = 0
         with suppress(Exception):
             pending_delight_count = self.database.count_delight_candidates(
-                min_delight_score=DEFAULT_DELIGHT_THRESHOLD,
+                min_delight_score=self._dynamic_delight_threshold(),
             )
         pool_counts = self._pool_readiness_counts()
         return {
@@ -885,7 +905,7 @@ class ContinuousRefreshController:
         # are typically only a handful of high-score candidates and a
         # very short disliked list, so the overhead is negligible.
         candidates = self.database.get_delight_candidates(
-            min_delight_score=DEFAULT_DELIGHT_THRESHOLD,
+            min_delight_score=self._dynamic_delight_threshold(),
             limit=20,
         )
         if not candidates:
@@ -2292,11 +2312,11 @@ class ContinuousRefreshController:
         """Best-effort count of pending delight candidates (returns 0 on any
         error so the caller can do delta-based comparison without crashing
         the refresh tick)."""
-        from openbiliclaw.recommendation.delight import DEFAULT_DELIGHT_THRESHOLD
-
         try:
             return int(
-                self.database.count_delight_candidates(min_delight_score=DEFAULT_DELIGHT_THRESHOLD)
+                self.database.count_delight_candidates(
+                    min_delight_score=self._dynamic_delight_threshold()
+                )
             )
         except Exception:
             return 0

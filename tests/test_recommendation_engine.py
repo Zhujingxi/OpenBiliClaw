@@ -3205,3 +3205,49 @@ async def test_precompute_delight_scores_reuses_evo_result_without_llm_call() ->
         assert candidate["delight_score"] == pytest.approx(0.91)
         assert candidate["delight_reason"] == "这条会把你最近想拆清楚系统结构的劲头接住。"
         assert candidate["delight_hook"] == "系统结构"
+
+
+@pytest.mark.asyncio
+async def test_precompute_delight_scores_uses_dynamic_pool_top_boundary() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        for index in range(40):
+            _seed_visible(
+                db,
+                f"BV1DYN{index:02d}",
+                title=f"动态样本 {index}",
+                relevance_score=0.50 + (index * 0.01),
+                relevance_reason="pool sample",
+                topic_group="动态样本",
+                pool_topic_label="动态样本",
+            )
+        _seed_visible(
+            db,
+            "BV1MID",
+            title="不够惊喜的中等匹配",
+            relevance_score=0.72,
+            relevance_reason="按旧阈值会通过",
+            topic_group="中等匹配",
+            pool_topic_label="中等匹配",
+            pool_expression="这条按旧阈值会被写成惊喜文案。",
+        )
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+        scored = await engine.precompute_delight_scores(
+            profile=_build_profile(),
+            limit=50,
+        )
+
+        assert scored > 0
+        row = db.conn.execute(
+            """
+            SELECT delight_score, delight_reason, delight_hook
+            FROM content_cache
+            WHERE bvid = 'BV1MID'
+            """
+        ).fetchone()
+        assert row is not None
+        assert float(row["delight_score"]) == pytest.approx(0.72)
+        assert row["delight_reason"] == ""
+        assert row["delight_hook"] == ""

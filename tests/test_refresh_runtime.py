@@ -119,6 +119,7 @@ class _FakeDatabase:
         self.delight_count = delight_count
         self.count_delight_thresholds: list[float] = []
         self.get_delight_thresholds: list[float] = []
+        self.dynamic_default_thresholds: list[float] = []
         self.trim_target: int | None = None
         self.trim_source_share_quotas: dict[str, int] | None = None
         self.trim_overflow_source_share_quotas: dict[str, int] | None = None
@@ -247,6 +248,10 @@ class _FakeDatabase:
     ) -> dict[str, object] | None:
         self.get_delight_thresholds.append(min_delight_score)
         return self.delight_candidate
+
+    def dynamic_delight_threshold(self, *, default_threshold: float) -> float:
+        self.dynamic_default_thresholds.append(default_threshold)
+        return 0.88
 
     def get_delight_candidates(
         self,
@@ -917,8 +922,12 @@ async def test_refresh_controller_uses_shared_delight_threshold_for_runtime_quer
 
     assert status["pending_delight_count"] == 2
     assert pending is not None
-    assert database.count_delight_thresholds == [DEFAULT_DELIGHT_THRESHOLD]
-    assert database.get_delight_thresholds == [DEFAULT_DELIGHT_THRESHOLD]
+    assert database.dynamic_default_thresholds == [
+        DEFAULT_DELIGHT_THRESHOLD,
+        DEFAULT_DELIGHT_THRESHOLD,
+    ]
+    assert database.count_delight_thresholds == [0.88]
+    assert database.get_delight_thresholds == [0.88]
 
 
 def test_load_disliked_topic_phrases_reads_effective_dislikes() -> None:

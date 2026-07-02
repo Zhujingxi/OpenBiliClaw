@@ -3974,8 +3974,14 @@ def create_app(
 
         from openbiliclaw.recommendation.delight import DEFAULT_DELIGHT_THRESHOLD
 
+        threshold = DEFAULT_DELIGHT_THRESHOLD
+        dynamic_threshold = getattr(ctx.runtime_controller, "_dynamic_delight_threshold", None)
+        if callable(dynamic_threshold):
+            with suppress(Exception):
+                threshold = float(dynamic_threshold())
+
         candidates = ctx.database.get_delight_candidates(
-            min_delight_score=DEFAULT_DELIGHT_THRESHOLD,
+            min_delight_score=threshold,
             limit=count,
         )
         pushed: list[str] = []
@@ -4044,8 +4050,13 @@ def create_app(
             20,
         )
         requested_limit = configured_limit if limit is None else limit
+        threshold = DEFAULT_DELIGHT_THRESHOLD
+        dynamic_threshold = getattr(ctx.runtime_controller, "_dynamic_delight_threshold", None)
+        if callable(dynamic_threshold):
+            with suppress(Exception):
+                threshold = float(dynamic_threshold())
         rows = ctx.database.get_delight_candidates(
-            min_delight_score=DEFAULT_DELIGHT_THRESHOLD,
+            min_delight_score=threshold,
             limit=max(1, min(100, int(requested_limit))),
             include_liked=True,
         )

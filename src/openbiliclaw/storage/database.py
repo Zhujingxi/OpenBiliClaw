@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import sqlite3
 import time
@@ -74,19 +75,22 @@ def _chunks(values: Sequence[str], size: int) -> list[list[str]]:
 
 # Mirrors recommendation.delight.DEFAULT_DELIGHT_THRESHOLD. Storage stays a
 # leaf module (no openbiliclaw imports), so the value is duplicated here and
-# pinned by tests/test_delight_scorer.py::test_delight_claim_threshold_in_sync.
+# pinned by tests/test_delight_scorer.py::test_delight_claim_threshold_floor_in_sync.
 _DELIGHT_CLAIM_MIN_SCORE = 0.70
+_DELIGHT_DYNAMIC_TOP_FRACTION = 0.05
+_DELIGHT_DYNAMIC_MIN_SAMPLE_SIZE = 20
 _DEFAULT_ADMISSION_MIN_SCORE = 0.60
 
 # Rows claimed by the surprise (delight) channel: already delivered as a
 # delight, or currently delight-eligible (the pending-queue predicate). The
 # regular feed's servable gate excludes them so the same content never shows
 # up in both the recommendation list and the surprise tray.
-_DELIGHT_CLAIM_GUARD_SQL = f"""
+def _delight_claim_guard_sql() -> str:
+    return """
                   AND NOT (
                     COALESCE(delight_notified, 0) = 1
                     OR (
-                      COALESCE(delight_score, 0.0) >= {_DELIGHT_CLAIM_MIN_SCORE}
+                      COALESCE(delight_score, 0.0) >= ?
                       AND COALESCE(delight_reason, '') != ''
                       AND COALESCE(delight_hook, '') != ''
                     )
@@ -2004,8 +2008,8 @@ class Database:
         ``max_per_topic_group=0`` to restore the legacy unrestricted
         ordering for callers that need it (e.g. health checks).
 
-        Rows claimed by the surprise (delight) channel are excluded via
-        ``_DELIGHT_CLAIM_GUARD_SQL`` — a delight that was delivered or is
+        Rows claimed by the surprise (delight) channel are excluded via the
+        delight claim guard — a delight that was delivered or is
         currently queue-eligible must never be duplicated by the regular
         feed. ``count_pool_candidates`` applies the same guard so the
         "还有 N 条" display stays in sync with what serve() can load.
@@ -2025,7 +2029,10 @@ class Database:
         min_score = self._pool_admission_min_score()
         guard_sql = _xhs_self_author_guard_sql()
         guard_params = _xhs_self_author_guard_params(xhs_self_nickname)
-        delight_guard_sql = _DELIGHT_CLAIM_GUARD_SQL
+        delight_threshold = self.dynamic_delight_threshold(
+            default_threshold=_DELIGHT_CLAIM_MIN_SCORE
+        )
+        delight_guard_sql = _delight_claim_guard_sql()
         if max_per_topic_group <= 0:
             sql = f"""
                 SELECT *
@@ -2056,7 +2063,12 @@ class Database:
                     bvid ASC
                 LIMIT ?
             """
-            params: tuple[Any, ...] = (min_score, *guard_params, fetch_limit)
+            params: tuple[Any, ...] = (
+                min_score,
+                *guard_params,
+                delight_threshold,
+                fetch_limit,
+            )
         else:
             # Per-group rank via window function: keep the top-N classified
             # items of each topic_group, then order the remainder by relevance.
@@ -2101,7 +2113,13 @@ class Database:
                     bvid ASC
                 LIMIT ?
             """
-            params = (min_score, *guard_params, max_per_topic_group, fetch_limit)
+            params = (
+                min_score,
+                *guard_params,
+                delight_threshold,
+                max_per_topic_group,
+                fetch_limit,
+            )
         cursor = self.conn.execute(sql, params)
         rows = [dict(row) for row in cursor.fetchall()]
         rows = self._exclude_viewed_rows(
@@ -2141,7 +2159,7 @@ class Database:
     ) -> list[dict[str, Any]]:
         """Load rows counted by the frontend-visible pool availability gate.
 
-        Applies ``_DELIGHT_CLAIM_GUARD_SQL`` like ``get_pool_candidates`` so
+        Applies the delight claim guard like ``get_pool_candidates`` so
         the availability count never includes surprise-channel rows serve()
         would refuse to load.
         """
@@ -2149,7 +2167,10 @@ class Database:
         min_score = self._pool_admission_min_score()
         guard_sql = _xhs_self_author_guard_sql()
         guard_params = _xhs_self_author_guard_params(xhs_self_nickname)
-        delight_guard_sql = _DELIGHT_CLAIM_GUARD_SQL
+        delight_threshold = self.dynamic_delight_threshold(
+            default_threshold=_DELIGHT_CLAIM_MIN_SCORE
+        )
+        delight_guard_sql = _delight_claim_guard_sql()
         if max_per_topic_group > 0:
             cursor = self.conn.execute(
                 f"""
@@ -2187,7 +2208,7 @@ class Database:
                 FROM ranked
                 WHERE group_rank <= ?
                 """,
-                (min_score, *guard_params, max_per_topic_group),
+                (min_score, *guard_params, delight_threshold, max_per_topic_group),
             )
         else:
             cursor = self.conn.execute(
@@ -2213,7 +2234,7 @@ class Database:
                     WHERE r.bvid = content_cache.bvid
                   )
                 """,
-                (min_score, *guard_params),
+                (min_score, *guard_params, delight_threshold),
             )
         viewed_content_keys = self.get_recent_viewed_content_keys()
         rows: list[dict[str, Any]] = []
@@ -5567,6 +5588,42 @@ class Database:
             "created_at": str(row["created_at"] or ""),
             "last_fetched_at": str(row["last_fetched_at"] or ""),
         }
+
+    def dynamic_delight_threshold(
+        self,
+        *,
+        default_threshold: float = _DELIGHT_CLAIM_MIN_SCORE,
+    ) -> float:
+        """Return the profile floor raised to the pool Top 5% boundary.
+
+        The dynamic component uses the current formal candidate pool, not raw
+        ``discovery_candidates``. When the pool is too small for a meaningful
+        percentile, the caller-provided default is returned unchanged.
+        """
+        try:
+            floor = float(default_threshold)
+        except (TypeError, ValueError):
+            floor = _DELIGHT_CLAIM_MIN_SCORE
+        floor = min(1.0, max(0.0, floor))
+
+        self._ensure_fresh_read()
+        cursor = self.conn.execute(
+            """
+            SELECT COALESCE(relevance_score, 0.0) AS score
+            FROM content_cache
+            WHERE COALESCE(pool_status, 'fresh') IN ('fresh', 'shown')
+              AND COALESCE(feedback_type, '') != 'dislike'
+              AND COALESCE(relevance_score, 0.0) > 0.0
+            ORDER BY score DESC
+            """
+        )
+        scores = [float(row["score"]) for row in cursor.fetchall()]
+        if len(scores) < _DELIGHT_DYNAMIC_MIN_SAMPLE_SIZE:
+            return floor
+
+        top_count = max(1, math.ceil(len(scores) * _DELIGHT_DYNAMIC_TOP_FRACTION))
+        boundary = min(1.0, max(0.0, scores[top_count - 1]))
+        return max(floor, boundary)
 
     def get_delight_candidate(
         self,
