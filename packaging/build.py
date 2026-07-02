@@ -372,16 +372,17 @@ def write_macos_first_launch_guide(stage_dir: Path) -> Path:
   </style>
 </head>
 <body>
-  <h1>首次打开 OpenBiliClaw</h1>
+  <h1>OpenBiliClaw macOS 首次打开</h1>
   <p class="note">
-    当前 macOS 包是未签名 / 未公证的实验包。
+    当前 Release 是 ad-hoc signed、未 notarized 的实验包。
     请只在确认来源是 OpenBiliClaw GitHub Releases 后继续。
   </p>
+  <h2>安装</h2>
   <ol>
     <li>把 <strong>OpenBiliClaw</strong> 拖到 <strong>Applications</strong>。</li>
     <li>
-      第一次启动时，不要直接双击。请右键 / Control-click 应用图标，
-      选择 <strong>Open</strong>，再在弹窗中点 <strong>Open</strong>。
+      首次打开如果提示“无法验证开发者”或“未经安全验证”，请右键 / Control-click 应用图标，
+      选择 <strong>Open / 打开</strong>，再在弹窗中点 <strong>Open / 打开</strong>。
     </li>
     <li>
       如果仍被拦截，打开 <strong>System Settings -> Privacy & Security</strong>，
@@ -389,18 +390,22 @@ def write_macos_first_launch_guide(stage_dir: Path) -> Path:
     </li>
   </ol>
 
-  <h2>Advanced fallback</h2>
-  <p>如果 macOS 仍提示应用已损坏，并且你确认安装包来自本项目 Releases，可以在 Terminal 执行：</p>
+  <h2>macOS 安全阻挡</h2>
+  <p>
+    如果提示“OpenBiliClaw.app 已损坏，无法打开。您应该将它移到废纸篓”，
+    通常是下载隔离属性导致。把 app 放入 Applications 后，在 Terminal 执行：
+  </p>
   <pre><code>APP="/Applications/OpenBiliClaw.app"
-xattr -dr com.apple.quarantine "$APP"
-codesign --force --deep --sign - "$APP"
-open "$APP"</code></pre>
+xattr -dr com.apple.quarantine "$APP"</code></pre>
+  <p>然后再次打开应用。</p>
 
   <h2>English</h2>
+  <p>The current Release is ad-hoc signed, but not notarized.</p>
   <ol>
     <li>Drag <strong>OpenBiliClaw</strong> into <strong>Applications</strong>.</li>
     <li>
-      For the first launch, use <strong>right-click / Control-click -> Open</strong>,
+      If macOS says it cannot verify the developer, use
+      <strong>right-click / Control-click -> Open</strong>,
       then click <strong>Open</strong> in the dialog.
     </li>
     <li>
@@ -409,6 +414,10 @@ open "$APP"</code></pre>
       and choose <strong>Open Anyway</strong>.
     </li>
   </ol>
+  <p>
+    If macOS says the app is damaged, confirm the package came from this project's Releases,
+    run the <code>xattr</code> command above, then open the app again.
+  </p>
 </body>
 </html>
 """,
@@ -475,11 +484,11 @@ def write_macos_dmg_background(stage_dir: Path) -> Path:
 
     steps = [
         ("1", "拖到 Applications", "Drag OpenBiliClaw into Applications."),
-        ("2", "第一次请右键 / Control-click -> Open", "Do not double-click for the first launch."),
+        ("2", "安全阻挡: 右键 / Control-click -> 打开", "Use Open from the context menu first."),
         (
             "3",
-            "仍被拦截: Privacy & Security -> Open Anyway",
-            "macOS keeps you in control of this approval.",
+            "已损坏: 先看 First Launch.html 里的 xattr 命令",
+            "If macOS says damaged, remove quarantine after verifying source.",
         ),
     ]
     y = 218
@@ -492,7 +501,7 @@ def write_macos_dmg_background(stage_dir: Path) -> Path:
 
     draw.text(
         (80, 522),
-        "未签名实验包: 请只在确认来源是 OpenBiliClaw GitHub Releases 后继续。",
+        "ad-hoc signed / 未公证: 请只在确认来源是 OpenBiliClaw GitHub Releases 后继续。",
         fill="#7c2d12",
         font=small_font,
     )

@@ -46,7 +46,7 @@
 
 1. **安装浏览器插件**：推荐从 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 的 `openbiliclaw-v*` 聚合页下载手动安装（Chrome / Edge / Brave 用 `openbiliclaw-extension-v*.zip`，Firefox 用已签名的 `openbiliclaw-extension-v*-firefox.xpi`）；也可从 [Chrome 应用商店](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg)一键安装（自动更新，但受审核排期影响，版本可能滞后于 Releases）。
 2. **部署后端（两种方式，按需选一，都推荐）**：
-   - 🖥️ **下载桌面安装包（最省事）**：同一个 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 聚合页会把当前后端源码、插件包和可用桌面安装包放在一起；桌面包可能单独热修或暂时不同步，页面里的 `Current Channels` 会标出对应 `desktop-v*`。下载 macOS `.dmg` / Windows `.exe` 后双击即用，自带本地 embedding、常驻菜单栏/托盘。当前为**未签名的实验性预发布**，macOS DMG 内会显示首次打开说明，详见 [安装与部署详情](#安装与部署详情)。
+   - 🖥️ **下载桌面安装包（最省事）**：同一个 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 聚合页会把当前后端源码、插件包和可用桌面安装包放在一起；桌面包可能单独热修或暂时不同步，页面里的 `Current Channels` 会标出对应 `desktop-v*`。下载 macOS `.dmg` / Windows `.exe` 后按平台提示安装启动，自带本地 embedding、常驻菜单栏/托盘。当前为**未签名的实验性预发布**，macOS DMG 内会显示首次打开说明，详见 [安装与部署详情](#安装与部署详情)。
    - 🤖 **让 AI 助手部署（想改源码 / 深度定制选它）**：把下面整句粘给 Claude Code、Codex CLI、Cursor、Windsurf 或其他 AI 编程助手。
 
 ```text
@@ -285,20 +285,21 @@ npm run package:firefox        # 额外打成未签名 openbiliclaw-extension-v*
 - 当前插件 release：`extension-v*`，并附 `openbiliclaw-extension-v*.zip` / `openbiliclaw-extension-v*-firefox.xpi`（Firefox 正式安装）/ `openbiliclaw-extension-v*-firefox.zip`（Firefox 临时调试）
 - 当前桌面安装包 release：`desktop-v*`，并附可用的 `.dmg` / `.exe`；桌面包可能单独热修或临时不同步，以页面 `Current Channels` 为准
 
-- **macOS**：下载 `OpenBiliClaw-macos-v*-arm64.dmg`（Apple 芯片常规自动发布；Intel `x64` 包如有会另行附加），打开后先看 DMG 里的 `首次打开说明 First Launch.html`，再把 OpenBiliClaw 拖进「应用程序」。
+- **macOS**：从发布页下载与你的 Mac 匹配的 DMG：Apple 芯片用 `OpenBiliClaw-macos-v*-arm64.dmg`；Intel 用 `OpenBiliClaw-macos-v*-x64.dmg`（如发布页提供）。打开后先看 DMG 里的 `首次打开说明 First Launch.html`，再把 OpenBiliClaw 拖进「应用程序」。
 - **Windows**：下载 `OpenBiliClaw-windows-*-Setup.exe`，双击安装。
 
 安装包自带本地 Ollama + `bge-m3` embedding，开箱即用；也内置默认内容源依赖，包括 X 的 `twitter-cli` 和 Reddit 的 `rdt-cli`（Reddit rdt 命令后端会优先使用已连接插件同步的 `reddit_session`，插件不可用时可手动运行 `rdt login`，未登录会 fallback 插件）。启动后常驻 **macOS 菜单栏 / Windows 系统托盘**，右键可「打开 Web 界面 / 查看运行日志 / 退出」。数据与 AI / 脚本安装复用同一个目录：`~/OpenBiliClaw`（macOS / Linux）/ `%USERPROFILE%\OpenBiliClaw`（Windows），升级或卸载不会动它；旧安装包曾写入的 `~/Library/Application Support/OpenBiliClaw` / `%LOCALAPPDATA%\OpenBiliClaw` 会在新版本首次启动时非覆盖拷贝回来。
 
-> ⚠️ **首次打开要绕过系统拦截（应用尚未签名 / 公证）**：
-> - **macOS**：DMG 内已放入首次打开说明。先拖进「应用程序」，再右键 / Control-click 图标 →「打开」→ 在弹窗里再点「打开」；或到「系统设置 → 隐私与安全性」点「仍要打开」。若仍提示“已损坏”，确认包来自本项目 Releases 后执行：
+> ⚠️ **macOS 安全阻挡（应用尚未签名 / 公证）**：
+> - 当前 Release 是 ad-hoc signed、未 notarized。首次打开如果提示“无法验证开发者”或“未经安全验证”，先把应用拖进「应用程序」，再右键 / Control-click `OpenBiliClaw.app` →「打开」→ 在弹窗里再点「打开」；也可以到「系统设置 → 隐私与安全性」点击「仍要打开」。
+> - 如果提示“`OpenBiliClaw.app` 已损坏，无法打开。您应该将它移到废纸篓”，通常是下载隔离属性导致。确认包来自本项目 Releases 后运行：
 >
 >   ```bash
 >   APP="/Applications/OpenBiliClaw.app"
 >   xattr -dr com.apple.quarantine "$APP"
->   codesign --force --deep --sign - "$APP"
->   open "$APP"
 >   ```
+>
+>   然后再次打开应用。
 > - **Windows**：SmartScreen 弹窗点「更多信息 → 仍要运行」。
 >
 > 这是**实验性预发布**：未签名、随后端版本滚动更新，适合只想最快试用、不碰命令行的人。要二次开发 / 改源码请用下面的方式 B。

@@ -44,7 +44,7 @@ Most users only need these four steps. Firefox, Docker, and manual setup paths a
 
 1. **Install the extension** — recommended: open the latest aggregate `openbiliclaw-v*` page on [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) and download the manual package (Chrome / Edge / Brave use `openbiliclaw-extension-v*.zip`; Firefox uses the signed `openbiliclaw-extension-v*-firefox.xpi`); or one-click from the [Chrome Web Store](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg) (auto-updates, but the listed version can lag behind Releases due to review delays).
 2. **Deploy the backend (two ways — pick one, both recommended)**:
-   - 🖥️ **Download the desktop installer (easiest)**: the same [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) aggregate page keeps the current backend source, extension packages, and available desktop installers together; if the desktop package has a package-only hotfix or temporarily differs from the backend source, `Current Channels` names the matching `desktop-v*`. Grab the macOS `.dmg` / Windows `.exe`, install, and launch — it bundles local embedding and lives in the menu bar / system tray. It's an **unsigned experimental pre-release**, and the macOS DMG includes first-launch instructions; see [Setup Details](#setup-details).
+   - 🖥️ **Download the desktop installer (easiest)**: the same [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) aggregate page keeps the current backend source, extension packages, and available desktop installers together; if the desktop package has a package-only hotfix or temporarily differs from the backend source, `Current Channels` names the matching `desktop-v*`. Grab the macOS `.dmg` / Windows `.exe`, install using the platform-specific prompt, and launch — it bundles local embedding and lives in the menu bar / system tray. It's an **unsigned experimental pre-release**, and the macOS DMG includes first-launch instructions; see [Setup Details](#setup-details).
    - 🤖 **Let an AI coding agent deploy it (pick this to customize / edit the source)**: paste this prompt into Claude Code, Codex CLI, Cursor, Windsurf, or another coding agent.
 
 ```text
@@ -281,20 +281,21 @@ Grab the installer for your OS from the `openbiliclaw-v*` aggregate [Latest Rele
 - Current extension release: `extension-v*`, with `openbiliclaw-extension-v*.zip` / `openbiliclaw-extension-v*-firefox.xpi` (regular Firefox install) / `openbiliclaw-extension-v*-firefox.zip` (Firefox temporary debugging)
 - Current desktop installer release: `desktop-v*`, with available `.dmg` / `.exe` assets; the desktop package can have package-only hotfixes or temporarily differ from the backend source version, so trust the page's `Current Channels`
 
-- **macOS**: download `OpenBiliClaw-macos-v*-arm64.dmg` (Apple silicon is published automatically; Intel `x64` is attached separately when available), open `首次打开说明 First Launch.html` in the DMG, then drag OpenBiliClaw into Applications.
+- **macOS**: download the DMG that matches your Mac: `OpenBiliClaw-macos-v*-arm64.dmg` for Apple silicon, or `OpenBiliClaw-macos-v*-x64.dmg` for Intel when the release provides it. Open `首次打开说明 First Launch.html` in the DMG, then drag OpenBiliClaw into Applications.
 - **Windows**: download `OpenBiliClaw-windows-*-Setup.exe` — double-click to install.
 
 It bundles local Ollama + `bge-m3` embedding (works out of the box) plus the default source dependencies, including X's `twitter-cli` and Reddit's `rdt-cli` (Reddit's rdt command backend prefers the connected extension's synced `reddit_session`; `rdt login` remains a manual fallback, and unauthenticated runs fall back to extension tasks). It lives in the **macOS menu bar / Windows system tray**; right-click for "Open Web UI / View runtime logs / Quit". Data uses the same directory as the AI / script installers: `~/OpenBiliClaw` (macOS / Linux) / `%USERPROFILE%\OpenBiliClaw` (Windows), and survives upgrades and uninstalls. Data from older packaged builds under `~/Library/Application Support/OpenBiliClaw` / `%LOCALAPPDATA%\OpenBiliClaw` is copied back on first launch without overwriting existing files.
 
-> ⚠️ **First launch needs a system-prompt bypass (the app isn't signed / notarized yet)**:
-> - **macOS**: the DMG includes a first-launch guide. Drag it into Applications first, then right-click / Control-click the icon → "Open" → click "Open" again in the dialog; or allow it under "System Settings → Privacy & Security". If macOS still says the app is damaged, confirm the package came from this project's Releases and run:
+> ⚠️ **macOS security blocking (the app isn't signed / notarized yet)**:
+> - The current Release is ad-hoc signed but not notarized. On first launch, if macOS says it cannot verify the developer or the app was not checked for safety, drag it into Applications first, then right-click / Control-click `OpenBiliClaw.app` → "Open" → click "Open" again in the dialog; or allow it under "System Settings → Privacy & Security" with "Open Anyway".
+> - If macOS says "`OpenBiliClaw.app` is damaged and can't be opened", it is usually the download quarantine attribute. After confirming the package came from this project's Releases, run:
 >
 >   ```bash
 >   APP="/Applications/OpenBiliClaw.app"
 >   xattr -dr com.apple.quarantine "$APP"
->   codesign --force --deep --sign - "$APP"
->   open "$APP"
 >   ```
+>
+>   Then open the app again.
 > - **Windows**: on the SmartScreen prompt, click "More info → Run anyway".
 >
 > This is an **experimental pre-release**: unsigned, rolling with the backend version, best for trying it fast without the command line. To hack on the source, use Option B.

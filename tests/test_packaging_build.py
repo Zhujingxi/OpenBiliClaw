@@ -141,10 +141,13 @@ def test_write_macos_first_launch_guide_explains_gatekeeper_paths(tmp_path: Path
 
     assert guide.name == build_module.MACOS_FIRST_LAUNCH_GUIDE_NAME
     assert "Control-click" in text
+    assert "无法验证开发者" in text
     assert "System Settings" in text
     assert "Privacy & Security" in text
     assert "仍要打开" in text
+    assert "已损坏" in text
     assert "xattr -dr com.apple.quarantine" in text
+    assert "codesign --force" not in text
 
 
 def test_make_macos_dmg_stages_first_launch_guidance(tmp_path: Path, monkeypatch) -> None:
@@ -351,8 +354,11 @@ def test_desktop_release_workflow_mentions_macos_first_launch_guide() -> None:
     ).read_text(encoding="utf-8")
 
     assert "DMG 内已放入首次打开说明" in workflow
+    assert "macOS 安全阻挡" in workflow
     assert "Control-click" in workflow
     assert "Privacy & Security" in workflow
+    assert "xattr -dr com.apple.quarantine" in workflow
+    assert "codesign --force" not in workflow
 
 
 def test_manual_installer_workflow_uses_official_macos_ollama_bundle() -> None:
