@@ -77,7 +77,7 @@ def _chunks(values: Sequence[str], size: int) -> list[list[str]]:
 # leaf module (no openbiliclaw imports), so the value is duplicated here and
 # pinned by tests/test_delight_scorer.py::test_delight_claim_threshold_floor_in_sync.
 _DELIGHT_CLAIM_MIN_SCORE = 0.70
-_DELIGHT_DYNAMIC_TOP_FRACTION = 0.05
+_DELIGHT_DYNAMIC_TOP_FRACTION = 0.10
 _DELIGHT_DYNAMIC_MIN_SAMPLE_SIZE = 20
 _DELIGHT_SCORE_SYNC_EPSILON = 0.000001
 _DEFAULT_ADMISSION_MIN_SCORE = 0.60
@@ -5597,7 +5597,7 @@ class Database:
         *,
         default_threshold: float = _DELIGHT_CLAIM_MIN_SCORE,
     ) -> float:
-        """Return the profile floor raised to the pool Top 5% boundary.
+        """Return the profile floor raised to the pool Top 10% boundary.
 
         The dynamic component uses the current formal candidate pool, not raw
         ``discovery_candidates``. When the pool is too small for a meaningful

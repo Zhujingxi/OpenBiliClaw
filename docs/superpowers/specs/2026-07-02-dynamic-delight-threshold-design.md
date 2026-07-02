@@ -2,7 +2,7 @@
 
 ## Goal
 
-惊喜推荐不再只依赖固定分数线。候选已经进入正式推荐池后，只有当前池内分数分布的 Top 5% 才应被当作主动惊喜推荐；初始化或样本不足时继续使用现有默认阈值。
+惊喜推荐不再只依赖固定分数线。候选已经进入正式推荐池后，只有当前池内分数分布的 Top 10% 才应被当作主动惊喜推荐；初始化或样本不足时继续使用现有默认阈值。
 
 ## Scope
 
@@ -19,7 +19,7 @@ It does not apply to raw `discovery_candidates` rows that have not passed evalua
 Compute the effective delight threshold as:
 
 ```text
-effective_threshold = max(profile_default_threshold, pool_score_p95)
+effective_threshold = max(profile_default_threshold, pool_score_p90)
 ```
 
 Where:
@@ -27,12 +27,12 @@ Where:
 - `profile_default_threshold` is the current profile-aware floor:
   - `0.70` normally
   - `0.80` when `exploration_openness < 0.3`
-- `pool_score_p95` is the Top 5% boundary among the current formal candidate pool
-- if the pool has too few usable scored rows, `pool_score_p95` is unavailable and the default floor is used
+- `pool_score_p90` is the Top 10% boundary among the current formal candidate pool
+- if the pool has too few usable scored rows, `pool_score_p90` is unavailable and the default floor is used
 
-Using `max()` prevents a weak pool from lowering the quality bar just because an item is technically in the top 5%.
+Using `max()` prevents a weak pool from lowering the quality bar just because an item is technically in the top 10%.
 
-Implementation detail: sort usable pool scores descending, take `ceil(n * 0.05)` rows, and use the last selected row's score as the boundary. If `n < 20`, skip percentile calculation and use the profile-aware default. This makes "Top 5%" concrete and avoids one or two startup rows creating an artificial dynamic threshold.
+Implementation detail: sort usable pool scores descending, take `ceil(n * 0.10)` rows, and use the last selected row's score as the boundary. If `n < 20`, skip percentile calculation and use the profile-aware default. This makes "Top 10%" concrete and avoids one or two startup rows creating an artificial dynamic threshold.
 
 ## Data Source
 
@@ -71,7 +71,7 @@ When the pool is empty or too small:
 
 Add focused tests for:
 
-- percentile threshold returns the Top 5% boundary when enough scored pool rows exist
+- percentile threshold returns the Top 10% boundary when enough scored pool rows exist
 - dynamic threshold never drops below the profile-aware default
 - insufficient samples fall back to the default threshold
 - runtime pending delight queries pass the dynamic threshold to storage

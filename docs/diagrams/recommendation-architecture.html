@@ -149,7 +149,7 @@
   <rect x="663" y="150" width="172" height="74" rx="6" fill="#1a1208" stroke="#f0883e" stroke-width="1.3"/>
   <text x="749" y="170" text-anchor="middle" fill="#f0883e" font-size="10.5" font-weight="600">precompute_delight_scores</text>
   <text x="749" y="186" text-anchor="middle" fill="#8b949e" font-size="8.5">复用 Evo relevance</text>
-  <text x="749" y="199" text-anchor="middle" fill="#8b949e" font-size="8.5">动态阈值：floor + Top5%</text>
+  <text x="749" y="199" text-anchor="middle" fill="#8b949e" font-size="8.5">动态阈值：floor + Top10%</text>
   <text x="749" y="212" text-anchor="middle" fill="#8b949e" font-size="8.5">→ delight_score/reason/hook</text>
 
   <!-- ranking row -->
@@ -519,7 +519,7 @@
   <text x="760" y="228" fill="#8b949e" font-size="9.5">粗筛：relevance≥0.55，DESC top 50</text>
   <text x="760" y="243" fill="#8b949e" font-size="9.5">复用 Evo：delight_score = relevance_score</text>
   <text x="760" y="258" fill="#8b949e" font-size="9.5">reason 优先复用 pool_expression；hook 来自 topic labels</text>
-  <text x="760" y="276" fill="#3fb950" font-size="9.5">阈值 max(profile floor, pool Top5%)</text>
+  <text x="760" y="276" fill="#3fb950" font-size="9.5">阈值 max(profile floor, pool Top10%)</text>
   <text x="760" y="291" fill="#3fb950" font-size="9.5">→ delight_score / delight_reason / delight_hook</text>
   <text x="760" y="309" fill="#6e7681" font-size="9">无独立 Delight LLM scorer；只复用已有结果</text>
   <text x="760" y="324" fill="#6e7681" font-size="9">低于阈值 → 存分 (≥0.01) 但 reason/hook 空</text>
@@ -680,7 +680,7 @@
   <text x="792" y="152" fill="#f0883e" font-size="10">copy 限流策略</text><text x="1104" y="152" text-anchor="end" fill="#8b949e" font-size="10">return 0 → 下轮重试</text>
   <text x="792" y="176" fill="#f778ba" font-size="10">delight limit / batch</text><text x="1104" y="176" text-anchor="end" fill="#8b949e" font-size="10">30 / 5</text>
   <text x="792" y="200" fill="#f778ba" font-size="10">delight 粗筛</text><text x="1104" y="200" text-anchor="end" fill="#8b949e" font-size="10">relevance≥0.55, top 50</text>
-  <text x="792" y="224" fill="#f778ba" font-size="10">delight 阈值</text><text x="1104" y="224" text-anchor="end" fill="#8b949e" font-size="10">floor 0.70/0.80 + Top5%</text>
+  <text x="792" y="224" fill="#f778ba" font-size="10">delight 阈值</text><text x="1104" y="224" text-anchor="end" fill="#8b949e" font-size="10">floor 0.70/0.80 + Top10%</text>
   <text x="792" y="248" fill="#f778ba" font-size="10">delight 推送冷却</text><text x="1104" y="248" text-anchor="end" fill="#8b949e" font-size="10">4h</text>
   <text x="792" y="272" fill="#f778ba" font-size="10">主动推送间隔</text><text x="1104" y="272" text-anchor="end" fill="#8b949e" font-size="10">120s</text>
   <text x="792" y="296" fill="#3fb950" font-size="10">delight like 加成</text><text x="1104" y="296" text-anchor="end" fill="#8b949e" font-size="10">+0.15 (cap 1.0)</text>
@@ -721,7 +721,7 @@
   <div class="src-body"><ol>
     <li><b>源无关分类</b> <code>classify_pool_backlog</code>：给跨源（小红书 / 抖音扩展）那些没分类的内容补上 风格 / 话题 / 相关度，用的是和发现侧一样的评估提示（含「近期反例」）。每批 10 条。<span class="sub">补完之后，推荐层就只看内容特征、对来源平台透明。</span></li>
     <li><b>预生成文案</b> <code>precompute_pool_copy</code>：后台批量写「推荐语 / 话题标签」，默认每批 30 条、2 worker 并发；解析失败先拆半重试，遇到限流就<b>留空、下一轮重试</b>，不卡住。</li>
-    <li><b>惊喜打分</b> <code>precompute_delight_scores</code>：先免费粗筛相关度≥0.55 取前 50，然后直接复用 Evo 的 <code>relevance_score</code> 写入 <code>delight_score</code>，优先复用 <code>pool_expression</code> 写入 <code>delight_reason</code>，并用 topic 标签生成 <code>delight_hook</code>；过动态阈值（profile floor 与池内 Top 5% 取高）才留下理由和钩子，不再单独调用 LLM scorer。</li>
+    <li><b>惊喜打分</b> <code>precompute_delight_scores</code>：先免费粗筛相关度≥0.55 取前 50，然后直接复用 Evo 的 <code>relevance_score</code> 写入 <code>delight_score</code>，优先复用 <code>pool_expression</code> 写入 <code>delight_reason</code>，并用 topic 标签生成 <code>delight_hook</code>；过动态阈值（profile floor 与池内 Top 10% 取高）才留下理由和钩子，不再单独调用 LLM scorer。</li>
     <li><span class="sub">三者各自独立加锁，互不阻塞 —— 文案队列短不会饿死惊喜打分。</span></li>
   </ol></div>
 </div>

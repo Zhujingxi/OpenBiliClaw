@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make proactive delight recommendations use the current formal candidate pool's Top 5% score boundary, with the existing 0.70/0.80 thresholds as profile-aware floors and startup fallbacks.
+**Goal:** Make proactive delight recommendations use the current formal candidate pool's Top 10% score boundary, with the existing 0.70/0.80 thresholds as profile-aware floors and startup fallbacks.
 
 **Architecture:** Storage owns the percentile calculation because it owns `content_cache` and delight queue predicates. Runtime/API/CLI ask storage for the effective dynamic threshold after deciding the profile-aware floor. The regular recommendation feed uses the same dynamic threshold in its delight-claim guard so delight queue and regular feed exclusion stay in sync.
 
@@ -21,7 +21,7 @@
 Add tests near the existing delight storage tests:
 
 ```python
-def test_database_dynamic_delight_threshold_uses_top_five_percent_boundary(tmp_path: Path) -> None:
+def test_database_dynamic_delight_threshold_uses_top_ten_percent_boundary(tmp_path: Path) -> None:
     database = _make_database(tmp_path)
     for index in range(40):
         score = 0.50 + (index * 0.01)
@@ -43,7 +43,7 @@ def test_database_dynamic_delight_threshold_uses_top_five_percent_boundary(tmp_p
 
     threshold = database.dynamic_delight_threshold(default_threshold=0.70)
 
-    assert threshold == pytest.approx(0.88)
+    assert threshold == pytest.approx(0.86)
 ```
 
 ```python
@@ -69,7 +69,7 @@ def test_database_dynamic_delight_threshold_never_drops_below_default(tmp_path: 
 Run:
 
 ```bash
-pytest tests/test_delight_scorer.py::test_database_dynamic_delight_threshold_uses_top_five_percent_boundary tests/test_delight_scorer.py::test_database_dynamic_delight_threshold_falls_back_when_pool_is_small tests/test_delight_scorer.py::test_database_dynamic_delight_threshold_never_drops_below_default -q
+pytest tests/test_delight_scorer.py::test_database_dynamic_delight_threshold_uses_top_ten_percent_boundary tests/test_delight_scorer.py::test_database_dynamic_delight_threshold_falls_back_when_pool_is_small tests/test_delight_scorer.py::test_database_dynamic_delight_threshold_never_drops_below_default -q
 ```
 
 Expected: fail because `Database.dynamic_delight_threshold` does not exist.
@@ -79,7 +79,7 @@ Expected: fail because `Database.dynamic_delight_threshold` does not exist.
 Add constants and method in `database.py`:
 
 ```python
-_DELIGHT_DYNAMIC_TOP_FRACTION = 0.05
+_DELIGHT_DYNAMIC_TOP_FRACTION = 0.10
 _DELIGHT_DYNAMIC_MIN_SAMPLE_SIZE = 20
 ```
 
@@ -309,7 +309,7 @@ Run the new test. Expected: pass.
 Replace fixed-threshold language with the dynamic rule:
 
 ```text
-默认 0.70；探索开放度低时底线 0.80；正式候选池样本足够时取 max(profile floor, pool Top 5% boundary)。
+默认 0.70；探索开放度低时底线 0.80；正式候选池样本足够时取 max(profile floor, pool Top 10% boundary)。
 ```
 
 - [ ] **Step 2: Run targeted tests**

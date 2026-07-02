@@ -482,7 +482,7 @@ def test_database_count_delight_candidates(tmp_path: Path) -> None:
     assert count == 1
 
 
-def test_database_dynamic_delight_threshold_uses_top_five_percent_boundary(
+def test_database_dynamic_delight_threshold_uses_top_ten_percent_boundary(
     tmp_path: Path,
 ) -> None:
     database = _make_database(tmp_path)
@@ -492,7 +492,7 @@ def test_database_dynamic_delight_threshold_uses_top_five_percent_boundary(
 
     threshold = database.dynamic_delight_threshold(default_threshold=0.70)
 
-    assert threshold == pytest.approx(0.88)
+    assert threshold == pytest.approx(0.86)
 
 
 def test_database_dynamic_delight_threshold_falls_back_when_pool_is_small(

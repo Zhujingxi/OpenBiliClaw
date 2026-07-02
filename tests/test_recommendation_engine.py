@@ -3273,7 +3273,7 @@ async def test_precompute_delight_scores_resyncs_legacy_stale_delight_score() ->
             "BV1STALE",
             title="旧分数但新相关度很高",
             relevance_score=0.92,
-            relevance_reason="Evo 已判断它进入当前 Top 5%",
+            relevance_reason="Evo 已判断它进入当前 Top 10%",
             topic_group="旧分数迁移",
             pool_topic_label="旧分数迁移",
             pool_expression="这条应该按新的 Evo relevance 重新成为惊喜候选。",
