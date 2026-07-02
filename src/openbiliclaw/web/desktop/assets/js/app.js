@@ -4704,16 +4704,17 @@
         return;
       }
       const mode = String(backend.install_mode || "");
-      // Older backends predate install_mode — keep the toggle usable there.
-      const unsupportedInstall = Boolean(mode) && mode !== "git";
-      const isFrozen = mode === "frozen";
+      const isGitInstall = mode === "git";
+      const isFrozenInstall = mode === "frozen";
+      const isDesktopInstallerUpdate = String(backend.latest_tag || "").startsWith("desktop-v");
+      const unsupportedInstall = !isGitInstall;
       const toggle = $("#autoUpdate");
       const interval = $("#autoUpdateInterval");
       // The toggle governs auto-apply, which non-git installs can never do —
       // frozen check-reminders run unconditionally on the backend side.
       if (toggle) toggle.disabled = unsupportedInstall;
       if (interval) interval.disabled = unsupportedInstall;
-      if (isFrozen) {
+      if (isFrozenInstall || isDesktopInstallerUpdate) {
         const { text, tone } = describeFrozenUpdateStatus(backend);
         line.dataset.tone = tone;
         line.textContent = text;
@@ -4729,17 +4730,17 @@
       // 立即检查 works on git checkouts AND frozen bundles (check-only there);
       // 立即应用 only when a newer tag is ready to fast-forward on git; the
       // download link replaces 立即应用 on frozen when a new installer exists.
-      const lockActions = unsupportedInstall && !isFrozen;
+      const lockActions = unsupportedInstall && !isFrozenInstall && !isDesktopInstallerUpdate;
       if (actions) actions.hidden = lockActions;
       if (checkBtn) checkBtn.disabled = lockActions || backend.state === "checking" || backend.state === "applying";
       if (applyBtn) {
-        const canApply = !unsupportedInstall && backend.state === "update_available" && Boolean(backend.latest_tag);
+        const canApply = isGitInstall && backend.state === "update_available" && Boolean(backend.latest_tag) && !isDesktopInstallerUpdate;
         applyBtn.hidden = !canApply;
         applyBtn.disabled = !canApply || backend.state === "applying";
         if (canApply) applyBtn.dataset.tag = String(backend.latest_tag);
       }
       if (downloadLink) {
-        const showDownload = isFrozen && backend.state === "update_available";
+        const showDownload = (isFrozenInstall || isDesktopInstallerUpdate) && backend.state === "update_available";
         downloadLink.hidden = !showDownload;
         if (showDownload) {
           downloadLink.href = backend.latest_tag

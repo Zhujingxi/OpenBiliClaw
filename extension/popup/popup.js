@@ -5857,17 +5857,31 @@ function bindSettings() {
   }
 
   const BACKEND_UPDATE_REASON_TEXT = {
+    dirty_worktree: "代码目录有未提交改动，更新被阻止",
+    unsupported_install_mode: "当前安装方式不支持自动更新",
+    untrusted_remote: "git 远端不在允许列表，更新被阻止",
+    branch_not_fast_forwardable: "本地代码与发布版本分叉，无法快进更新",
+    merge_or_rebase_in_progress: "代码目录正在合并 / 变基，更新暂缓",
     github_rate_limited: "GitHub API 限流，请稍后再试",
     github_unreachable: "无法访问 GitHub 检查更新",
+    missing_target_tag: "远端未找到目标版本标签",
+    dependency_sync_failed: "更新后依赖安装失败",
+    restart_failed: "更新后重启失败",
     no_backend_tag_yet: "远端暂无后端发布标签",
     prerelease_ignored: "仅有预发布版本，已忽略",
+    already_applying: "正在更新中",
   };
+
+  function formatBackendUpdateReason(reason) {
+    const key = reason && reason !== "none" ? String(reason) : "";
+    if (!key) return "";
+    return BACKEND_UPDATE_REASON_TEXT[key] || key;
+  }
 
   function formatBackendUpdateError(backend) {
     const key =
       backend.last_error || (backend.reason && backend.reason !== "none" ? backend.reason : "");
-    if (!key) return "—";
-    return BACKEND_UPDATE_REASON_TEXT[key] || key;
+    return formatBackendUpdateReason(key) || "—";
   }
 
   function renderBackendUpdateStatus(payload) {
@@ -5884,19 +5898,24 @@ function bindSettings() {
     setText("extensionVersionValue", getExtensionVersionLabel());
 
     const installMode = String(backend.install_mode || "");
-    const unsupportedInstall = Boolean(installMode) && installMode !== "git";
-    const isFrozen = installMode === "frozen";
+    const isGitInstall = installMode === "git";
+    const isFrozenInstall = installMode === "frozen";
+    const isDesktopInstallerUpdate = String(backend.latest_tag || "").startsWith("desktop-v");
     const applyBtn = document.getElementById("backendUpdateApply");
     if (applyBtn instanceof HTMLButtonElement) {
       const canApply =
-        !unsupportedInstall && backend.state === "update_available" && Boolean(backend.latest_tag);
+        isGitInstall &&
+        backend.state === "update_available" &&
+        Boolean(backend.latest_tag) &&
+        !isDesktopInstallerUpdate;
       applyBtn.hidden = !canApply;
       applyBtn.disabled = !canApply;
       applyBtn.dataset.tag = backend.latest_tag || "";
     }
     const downloadLink = document.getElementById("backendUpdateDownload");
     if (downloadLink instanceof HTMLAnchorElement) {
-      const showDownload = isFrozen && backend.state === "update_available";
+      const showDownload =
+        (isFrozenInstall || isDesktopInstallerUpdate) && backend.state === "update_available";
       downloadLink.hidden = !showDownload;
       downloadLink.href =
         showDownload && backend.latest_tag
@@ -6723,9 +6742,15 @@ function bindSettings() {
         const payload = await applyBackendUpdate(tag);
         renderBackendUpdateStatus({ state: payload.state, reason: payload.reason, latest_tag: tag });
         showToast("后端更新已开始，稍后会重启", "success");
-      } catch {
-        showToast("后端更新未能开始", "error");
+      } catch (error) {
+        const details = error?.details;
+        if (details && typeof details === "object") {
+          renderBackendUpdateStatus(details);
+        }
+        const reason = details?.reason || error?.message || "未知原因";
+        showToast(`后端更新未能开始：${formatBackendUpdateReason(reason) || reason}`, "error");
       } finally {
+        await loadBackendUpdateStatus();
         backendApplyBtn.disabled = false;
       }
     });
