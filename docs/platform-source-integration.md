@@ -348,7 +348,7 @@ npm run package:firefox:only -- --archive-version <extension-version>
 - 本地可先用 `uv build` 验证后端 sdist / wheel；当前项目 venv 可能没有 `python -m build`，不要因此把 `build` 加进运行时依赖。
 - 插件本地包验证后，release 产物仍以 tag-triggered GitHub Actions 为准；本地 zip 只是验证，不提交。
 - backend release 是 source tag 校验，不一定有 GitHub Release 资产；插件和桌面安装包由对应 workflow 发布，聚合 release 再收敛当前插件 / 桌面资产。
-- 推 main 后再推 tag，确认 CI、backend source tag、extension package、desktop installers、pages build 都成功；desktop workflow 完成前聚合 release 可能暂时挂上一版桌面资产，必须等 desktop publish job 完成后再确认。
+- 推 main 后再推 tag，确认 CI、backend source tag、extension package、desktop installers、pages build 都成功；聚合 release 只允许收录同版本资产，某个 channel 还没完成时应显示未发布，不能回填上一版桌面或插件包。
 - 确认聚合 release `openbiliclaw-vX.Y.Z` 只包含当前版本资产，尤其不要混入旧 `.dmg` / `.exe`。
 - 如果有 Chrome Web Store / Firefox AMO / 其他插件市场，按项目 workflow 触发上传或说明为什么不能发；Chrome Web Store 审核异步，成功上传不等于立刻对用户可见。
 - 发布后把 release 链接、tag、commit、workflow 结果和本地残留未提交文件一起汇报。
@@ -373,6 +373,6 @@ npm run package:firefox:only -- --archive-version <extension-version>
 - 把根目录截图、`dist/`、zip 包等临时产物提交进仓库。
 - 发布时复用已存在的版本号或 tag。
 - 已经存在 release tag 后继续改旧版本 changelog / README，导致“旧 tag 说明包含新代码”。
-- 只确认插件 / 后端 workflow 成功，没等桌面 workflow 更新聚合 release，导致 Latest Release 里桌面包仍是上一版。
+- 只确认插件 / 后端 workflow 成功，没等桌面 workflow 更新聚合 release；或发现 Latest Release 里混入上一版插件 / 桌面资产却没有清理。
 - Chrome Web Store workflow 没触发，或把“GitHub 插件包已发”误当成“插件市场已提交审核”。
 - 混合后端 fallback 成功后，把默认 CLI / SDK credential 也说成已通。

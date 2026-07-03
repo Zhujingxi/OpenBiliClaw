@@ -27,33 +27,22 @@ notes_file="$(mktemp)"
 download_dir="$(mktemp -d)"
 trap 'rm -f "$notes_file"; rm -rf "$download_dir"' EXIT
 
-latest_release_with_prefix() {
+release_with_project_version() {
   local prefix="$1"
+  local expected_tag="${prefix}${project_version}"
 
-  if [ -n "$release_tag" ] && [[ "$release_tag" == "$prefix"* ]]; then
+  if [ -n "$release_tag" ] && [ "$release_tag" = "$expected_tag" ]; then
     printf '%s\n' "$release_tag"
     return
   fi
 
-  local releases
-  releases="$(
-    gh release list \
-      --repo "$repo" \
-      --limit 100 \
-      --json tagName,isDraft \
-      --jq '.[] | select(.isDraft == false) | .tagName'
-  )"
-
-  while IFS= read -r tag_name; do
-    if [[ "$tag_name" == "$prefix"* ]]; then
-      printf '%s\n' "$tag_name"
-      return
-    fi
-  done <<< "$releases"
+  if gh release view "$expected_tag" --repo "$repo" >/dev/null 2>&1; then
+    printf '%s\n' "$expected_tag"
+  fi
 }
 
-extension_tag="$(latest_release_with_prefix "extension-v")"
-desktop_tag="$(latest_release_with_prefix "desktop-v")"
+extension_tag="$(release_with_project_version "extension-v")"
+desktop_tag="$(release_with_project_version "desktop-v")"
 
 extension_line="Not published yet."
 chrome_extension_asset_line="No Chrome-compatible extension release asset is available yet."
@@ -70,9 +59,6 @@ desktop_line="Not published yet."
 desktop_note=""
 if [ -n "$desktop_tag" ]; then
   desktop_line="[${desktop_tag}](https://github.com/${repo}/releases/tag/${desktop_tag})"
-  if [ "$desktop_tag" != "desktop-v${project_version}" ]; then
-    desktop_note=" The latest desktop installer can differ from the backend source version when a desktop-only package hotfix is published."
-  fi
 fi
 
 declare -a assets=()
@@ -282,21 +268,39 @@ prune_existing_package_assets() {
       continue
     fi
 
-    for attempt in 1 2 3; do
-      if gh release delete-asset "$aggregate_tag" "$asset_name" --repo "$repo" --yes >/dev/null; then
-        break
-      fi
-      if [ "$attempt" -eq 3 ]; then
-        exit 1
-      fi
-      sleep "$((attempt * 5))"
-    done
+    delete_existing_package_asset "$asset_name"
   done < <(
     gh release view "$aggregate_tag" \
       --repo "$repo" \
       --json assets \
       --jq '.assets[].name'
   )
+}
+
+delete_existing_package_asset() {
+  local asset_name="$1"
+  local attempt
+  local delete_log
+  delete_log="$(mktemp)"
+
+  for attempt in 1 2 3; do
+    if gh release delete-asset "$aggregate_tag" "$asset_name" --repo "$repo" --yes > /dev/null 2>"$delete_log"; then
+      rm -f "$delete_log"
+      return 0
+    fi
+
+    if grep -qi "not found" "$delete_log"; then
+      rm -f "$delete_log"
+      return 0
+    fi
+
+    cat "$delete_log" >&2
+    if [ "$attempt" -eq 3 ]; then
+      rm -f "$delete_log"
+      return 1
+    fi
+    sleep "$((attempt * 5))"
+  done
 }
 
 prune_existing_package_assets

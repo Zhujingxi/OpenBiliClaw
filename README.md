@@ -46,7 +46,7 @@
 
 1. **安装浏览器插件**：推荐从 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 的 `openbiliclaw-v*` 聚合页下载手动安装（Chrome / Edge / Brave 用 `openbiliclaw-extension-v*.zip`，Firefox 用已签名的 `openbiliclaw-extension-v*-firefox.xpi`）；也可从 [Chrome 应用商店](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg)一键安装（自动更新，但受审核排期影响，版本可能滞后于 Releases）。
 2. **部署后端（两种方式，按需选一，都推荐）**：
-   - 🖥️ **下载桌面安装包（最省事）**：同一个 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 聚合页会把当前后端源码、插件包和可用桌面安装包放在一起；桌面包可能单独热修或暂时不同步，页面里的 `Current Channels` 会标出对应 `desktop-v*`。下载 macOS `.dmg` / Windows `.exe` 后按平台提示安装启动，自带本地 embedding、常驻菜单栏/托盘。当前为**未签名的实验性预发布**，macOS DMG 内会显示首次打开说明，详见 [安装与部署详情](#安装与部署详情)。
+   - 🖥️ **下载桌面安装包（最省事）**：同一个 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 聚合页只收录同一版本的后端源码、插件包和可用桌面安装包；若某个 channel 尚未发布，`Current Channels` 会显示未发布，不会回填上一版资产。下载 macOS `.dmg` / Windows `.exe` 后按平台提示安装启动，自带本地 embedding、常驻菜单栏/托盘。当前为**未签名的实验性预发布**，macOS DMG 内会显示首次打开说明，详见 [安装与部署详情](#安装与部署详情)。
    - 🤖 **让 AI 助手部署（想改源码 / 深度定制选它）**：把下面整句粘给 Claude Code、Codex CLI、Cursor、Windsurf 或其他 AI 编程助手。
 
 ```text

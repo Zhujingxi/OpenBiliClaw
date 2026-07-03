@@ -14,6 +14,7 @@
 - **桌面安装包坏配置自愈**：Windows / macOS 冻结包启动时会先校验用户数据目录里的 `config.toml` 与 `config.local.toml`。若文件无法按 TOML 解析，或 TOML 结构导致运行时配置对象无法构建，入口会把坏文件改名为 `*.invalid[.N]` 备份，从打包内置 `config.example.toml` 重新生成默认 `config.toml`，并打开 `/setup/` 重新初始化；`data/` 目录不会被移动或删除。
 - **惊喜推荐改为池内 Top 10% 动态阈值**：`precompute_delight_scores()`、runtime 主动推送、pending-batch、CLI 和普通推荐池的 delight 占位排除都改用动态门槛。默认底线仍是 `0.70`，低探索开放度用户底线仍是 `0.80`；正式候选池样本不少于 20 条时，会取 `max(profile floor, 当前池内 Top 10% 分数边界)`，避免普通高分内容被过早包装成“惊喜推荐”。生产库副本验证还暴露了旧版 `delight_score` 标尺残留，因此 backfill 现在会重新领取并同步 `delight_score != relevance_score` 的历史行，包括 `shown` 且已有普通推荐历史的行。
 - **聚合 Release 不再误列缺失的 Firefox XPI**：`sync-aggregate-release.sh` 现在只有在实际收集到 `openbiliclaw-extension-v*-firefox.xpi` 资产时，才把 signed XPI 写进 `openbiliclaw-v*` 聚合页；未启用 AMO signing 时只列 Chrome zip 与 Firefox 临时加载 zip，避免用户看到不存在的下载文件。
+- **聚合 Release 只收同版本资产**：`openbiliclaw-vX.Y.Z` 现在只引用 `extension-vX.Y.Z` / `desktop-vX.Y.Z` 的包；某个 channel 尚未完成时显示未发布，不再从上一版 release 回填旧 `.zip` / `.dmg` / `.exe`。旧包清理同时把 GitHub API 超时后返回的 `not found` 视为幂等成功，避免删除实际已生效却导致 workflow 失败。
 
 ## v0.3.151 / extension v0.3.151 / desktop v0.3.151: LLM 探测诊断与发布渠道版本对齐（2026-07-02）
 

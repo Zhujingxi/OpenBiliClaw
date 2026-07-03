@@ -44,7 +44,7 @@ Most users only need these four steps. Firefox, Docker, and manual setup paths a
 
 1. **Install the extension** — recommended: open the latest aggregate `openbiliclaw-v*` page on [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) and download the manual package (Chrome / Edge / Brave use `openbiliclaw-extension-v*.zip`; Firefox uses the signed `openbiliclaw-extension-v*-firefox.xpi`); or one-click from the [Chrome Web Store](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg) (auto-updates, but the listed version can lag behind Releases due to review delays).
 2. **Deploy the backend (two ways — pick one, both recommended)**:
-   - 🖥️ **Download the desktop installer (easiest)**: the same [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) aggregate page keeps the current backend source, extension packages, and available desktop installers together; if the desktop package has a package-only hotfix or temporarily differs from the backend source, `Current Channels` names the matching `desktop-v*`. Grab the macOS `.dmg` / Windows `.exe`, install using the platform-specific prompt, and launch — it bundles local embedding and lives in the menu bar / system tray. It's an **unsigned experimental pre-release**, and the macOS DMG includes first-launch instructions; see [Setup Details](#setup-details).
+   - 🖥️ **Download the desktop installer (easiest)**: the same [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) aggregate page only keeps same-version backend source, extension packages, and available desktop installers together; if a channel has not shipped yet, `Current Channels` shows it as unpublished instead of backfilling previous-version assets. Grab the macOS `.dmg` / Windows `.exe`, install using the platform-specific prompt, and launch — it bundles local embedding and lives in the menu bar / system tray. It's an **unsigned experimental pre-release**, and the macOS DMG includes first-launch instructions; see [Setup Details](#setup-details).
    - 🤖 **Let an AI coding agent deploy it (pick this to customize / edit the source)**: paste this prompt into Claude Code, Codex CLI, Cursor, Windsurf, or another coding agent.
 
 ```text
@@ -279,7 +279,7 @@ Grab the installer for your OS from the `openbiliclaw-v*` aggregate [Latest Rele
 
 - Current backend source tag: `backend-v*`
 - Current extension release: `extension-v*`, with `openbiliclaw-extension-v*.zip` / `openbiliclaw-extension-v*-firefox.xpi` (regular Firefox install) / `openbiliclaw-extension-v*-firefox.zip` (Firefox temporary debugging)
-- Current desktop installer release: `desktop-v*`, with available `.dmg` / `.exe` assets; the desktop package can have package-only hotfixes or temporarily differ from the backend source version, so trust the page's `Current Channels`
+- Current desktop installer release: `desktop-v*`, with available `.dmg` / `.exe` assets when the same-version desktop channel has shipped; missing channels are shown as unpublished instead of being backfilled from a previous release
 
 - **macOS**: download the DMG that matches your Mac: `OpenBiliClaw-macos-v*-arm64.dmg` for Apple silicon, or `OpenBiliClaw-macos-v*-x64.dmg` for Intel when the release provides it. Open `首次打开说明 First Launch.html` in the DMG, then drag OpenBiliClaw into Applications.
 - **Windows**: download `OpenBiliClaw-windows-*-Setup.exe` — double-click to install.
