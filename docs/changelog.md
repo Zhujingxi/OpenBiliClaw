@@ -13,6 +13,7 @@
 - **macOS 安全阻挡提示收敛**：README、官网首页、desktop Release notes 和 DMG 内 `首次打开说明 First Launch.html` 统一改成“右键 / Control-click 打开 → 隐私与安全性仍要打开 → 已损坏时清除 quarantine”的顺序；用户侧不再被提示执行额外 `codesign` 命令，下载后安装包内也能直接看到同一段说明。
 - **插件更新失败原因可见**：side panel 设置页点击“立即应用”后，如果后端自动更新被 `dirty_worktree`、`untrusted_remote`、`branch_not_fast_forwardable` 等安全守卫拒绝，插件会展示本地化原因并刷新状态卡，不再只提示“后端更新未能开始”。
 - **更新入口严格区分安装渠道**：side panel 和桌面 Web 的版本面板现在只有在后端明确报告 `install_mode="git"` 且存在 `backend-v*` 更新时才显示“立即应用”；`install_mode="frozen"` 或最新 tag 为 `desktop-v*` 时只显示 Release 下载入口，空 / 未知安装方式不再误入源码自动更新分支。
+- **桌面安装包坏配置自愈**：Windows / macOS 冻结包启动时会先校验用户数据目录里的 `config.toml` 与 `config.local.toml`。若文件无法按 TOML 解析，或 TOML 结构导致运行时配置对象无法构建，入口会把坏文件改名为 `*.invalid[.N]` 备份，从打包内置 `config.example.toml` 重新生成默认 `config.toml`，并打开 `/setup/` 重新初始化；`data/` 目录不会被移动或删除。
 - **惊喜推荐改为池内 Top 10% 动态阈值**：`precompute_delight_scores()`、runtime 主动推送、pending-batch、CLI 和普通推荐池的 delight 占位排除都改用动态门槛。默认底线仍是 `0.70`，低探索开放度用户底线仍是 `0.80`；正式候选池样本不少于 20 条时，会取 `max(profile floor, 当前池内 Top 10% 分数边界)`，避免普通高分内容被过早包装成“惊喜推荐”。生产库副本验证还暴露了旧版 `delight_score` 标尺残留，因此 backfill 现在会重新领取并同步 `delight_score != relevance_score` 的历史行，包括 `shown` 且已有普通推荐历史的行。
 - **发布流程文档同步**：收紧平台来源发布 checklist，并刷新 README / 文档索引中的当前版本标识，确保本轮插件包、后端源码 tag 和桌面安装包 tag 对外一致。
 
