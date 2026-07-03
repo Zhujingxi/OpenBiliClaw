@@ -63,7 +63,6 @@ if [ -n "$extension_tag" ]; then
   extension_version="${extension_tag#extension-v}"
   extension_line="[${extension_tag}](https://github.com/${repo}/releases/tag/${extension_tag})"
   chrome_extension_asset_line="\`openbiliclaw-extension-v${extension_version}.zip\`"
-  firefox_signed_asset_line="\`openbiliclaw-extension-v${extension_version}-firefox.xpi\`"
   firefox_dev_asset_line="\`openbiliclaw-extension-v${extension_version}-firefox.zip\`"
 fi
 
@@ -159,6 +158,13 @@ download_release_assets() {
 
 download_release_assets "$extension_tag" "openbiliclaw-extension-v*.zip" "openbiliclaw-extension-v*.xpi"
 download_release_assets "$desktop_tag" "*.dmg" "*.exe"
+
+if [ -n "$extension_tag" ]; then
+  firefox_xpi_asset_name="openbiliclaw-extension-v${extension_version}-firefox.xpi"
+  if asset_name_seen "$firefox_xpi_asset_name"; then
+    firefox_signed_asset_line="\`$firefox_xpi_asset_name\`"
+  fi
+fi
 
 asset_list="No package assets were attached by this run."
 if [ "${#assets[@]}" -gt 0 ]; then

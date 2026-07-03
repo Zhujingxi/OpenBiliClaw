@@ -36,6 +36,21 @@ def test_aggregate_release_helper_prunes_stale_package_assets() -> None:
     assert "OpenBiliClaw-windows-*-Setup.exe" in script
 
 
+def test_aggregate_release_helper_only_lists_signed_firefox_xpi_when_asset_exists() -> None:
+    script = read_text(".github/scripts/sync-aggregate-release.sh")
+
+    expected_xpi_name_assignment = (
+        'firefox_xpi_asset_name="openbiliclaw-extension-v${extension_version}-firefox.xpi"'
+    )
+    assert expected_xpi_name_assignment in script
+    assert "asset_name_seen \"$firefox_xpi_asset_name\"" in script
+    assert "No signed Firefox extension XPI is available yet." in script
+    assert (
+        "firefox_signed_asset_line=\"\\`openbiliclaw-extension-v${extension_version}-firefox.xpi\\`\""
+        not in script
+    )
+
+
 def test_release_channels_sync_assets_to_aggregate_release() -> None:
     extension = read_text(".github/workflows/release-extension.yml")
     desktop = read_text(".github/workflows/release-desktop.yml")

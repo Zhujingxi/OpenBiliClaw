@@ -676,7 +676,7 @@ OpenBiliClaw/
 
 ## 📜 Release History
 
-Latest: **v0.3.151 / extension v0.3.151 / desktop v0.3.151: LLM probe diagnostics and aligned release channels (2026-07-02)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Most users should use the `openbiliclaw-v*` aggregate [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) for extension packages and available desktop installers; automation-channel releases remain available as `backend-v*`, `extension-v*`, and `desktop-v*`.
+Latest: **v0.3.152 / extension v0.3.152 / desktop v0.3.152: desktop startup recovery and dynamic delight threshold (2026-07-04)**. The recent updates section keeps the current release visible; full history lives in [docs/changelog.md](docs/changelog.md). Most users should use the `openbiliclaw-v*` aggregate [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) for extension packages and available desktop installers; automation-channel releases remain available as `backend-v*`, `extension-v*`, and `desktop-v*`.
 
 ## 🗺️ Roadmap
 
