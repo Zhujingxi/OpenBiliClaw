@@ -4031,17 +4031,22 @@
         setInput("llmModel", llm[provider]?.model);
         setInput("llmApiKey", llm[provider]?.api_key);
         setInput("llmBaseUrl", llm[provider]?.base_url);
+        setSelect("llmApiFlavor", llm[provider]?.api_flavor || "");
+      } else {
+        setSelect("llmApiFlavor", "");
       }
       if (fallbackProvider) {
         setSelect("llmFallbackAuthMode", llm[fallbackProvider]?.auth_mode || "api_key");
         setInput("llmFallbackModel", llm[fallbackProvider]?.model);
         setInput("llmFallbackApiKey", llm[fallbackProvider]?.api_key);
         setInput("llmFallbackBaseUrl", llm[fallbackProvider]?.base_url);
+        setSelect("llmFallbackApiFlavor", llm[fallbackProvider]?.api_flavor || "");
       } else {
         setSelect("llmFallbackAuthMode", "api_key");
         setInput("llmFallbackModel", "");
         setInput("llmFallbackApiKey", "");
         setInput("llmFallbackBaseUrl", "");
+        setSelect("llmFallbackApiFlavor", "");
       }
       setInput("openrouterReferer", llm.openrouter?.http_referer);
       setInput("openrouterTitle", llm.openrouter?.x_title);
@@ -4422,10 +4427,13 @@
       const fallbackProvider = getInput("llmFallbackProvider");
       const llmProviderConfig = { model: getInput("llmModel") };
       if (provider === "openai") llmProviderConfig.auth_mode = getInput("llmAuthMode") || "api_key";
+      // api_flavor 仅对 OpenAI 协议家族有意义;空值表示回到 chat/completions 默认
+      if (provider === "openai" || provider === "openai_compatible") llmProviderConfig.api_flavor = getInput("llmApiFlavor");
       if (getInput("llmApiKey")) llmProviderConfig.api_key = getInput("llmApiKey");
       if (getInput("llmBaseUrl")) llmProviderConfig.base_url = getInput("llmBaseUrl");
       const llmFallbackConfig = { model: getInput("llmFallbackModel") };
       if (fallbackProvider === "openai") llmFallbackConfig.auth_mode = getInput("llmFallbackAuthMode") || "api_key";
+      if (fallbackProvider === "openai" || fallbackProvider === "openai_compatible") llmFallbackConfig.api_flavor = getInput("llmFallbackApiFlavor");
       if (getInput("llmFallbackApiKey")) llmFallbackConfig.api_key = getInput("llmFallbackApiKey");
       if (getInput("llmFallbackBaseUrl")) llmFallbackConfig.base_url = getInput("llmFallbackBaseUrl");
       const logPath = splitLogPath(getInput("logPath"), state.config?.logging);

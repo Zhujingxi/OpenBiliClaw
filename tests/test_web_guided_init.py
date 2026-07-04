@@ -107,3 +107,32 @@ def test_guided_init_web_docs_belong_to_v03110_release_block() -> None:
     assert "/web" in top_block
     assert "已落地 v0.3.111" in gui_spec
     assert "已落地 v0.3.109" not in gui_spec
+
+
+def test_issue72_gateway_fields_present_on_all_config_surfaces() -> None:
+    """issue #72 — third-party gateway controls exist on every web config
+    surface: Claude gets an optional Base URL, the OpenAI-protocol family
+    gets an api_flavor (/v1/responses) selector, and stale Base URLs are
+    never submitted for providers that don't show the field."""
+    setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
+    desktop_html = Path("src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    # /setup/ wizard: Claude shows optional Base URL with a relay hint;
+    # openai_compatible shows the protocol selector; base_url is only
+    # submitted for providers whose form actually displayed it.
+    assert 'id="baseHint"' in setup_html
+    assert 'id="flavorWrap"' in setup_html
+    assert 'id="apiFlavor"' in setup_html
+    assert "(isCompat || isClaude)" in setup_html
+    assert 'provider === "openai_compatible" || provider === "claude"' in setup_html
+    assert 'pcfg.api_flavor = $("#apiFlavor").value' in setup_html
+
+    # Desktop settings: flavor select for both the default and the fallback
+    # provider panels, wired into load + save paths.
+    assert 'id="llmApiFlavor"' in desktop_html
+    assert 'id="llmFallbackApiFlavor"' in desktop_html
+    assert "llmProviderConfig.api_flavor" in app_js
+    assert "llmFallbackConfig.api_flavor" in app_js
+    assert 'setSelect("llmApiFlavor"' in app_js
+    assert 'setSelect("llmFallbackApiFlavor"' in app_js

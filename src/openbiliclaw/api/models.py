@@ -951,6 +951,7 @@ class LLMProviderConfigOut(BaseModel):
     model: str = ""
     base_url: str = ""
     auth_mode: str = ""
+    api_flavor: str = ""
     http_referer: str = ""
     x_title: str = ""
     reasoning_effort: str = ""

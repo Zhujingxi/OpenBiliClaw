@@ -593,6 +593,74 @@ def test_collect_issues_flags_missing_base_url_for_openai_compatible() -> None:
     assert "llm.openai_compatible.base_url" in fields
 
 
+def test_save_config_round_trips_claude_base_url(tmp_path: Path) -> None:
+    """issue #72 — [llm.claude].base_url must be written back by
+    save_config; it used to be dropped by the provider-section whitelist."""
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.llm.claude.api_key = "sk-ant-test"
+    config.llm.claude.base_url = "https://relay.example.com/api"
+
+    save_config(config, config_path)
+    loaded = load_config(config_path)
+
+    assert loaded.llm.claude.base_url == "https://relay.example.com/api"
+
+
+def test_save_config_round_trips_api_flavor(tmp_path: Path) -> None:
+    """issue #72 — api_flavor survives a save/load cycle for the
+    OpenAI-protocol family."""
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.llm.openai.api_flavor = "responses"
+    config.llm.openai_compatible.api_key = "sk-relay"
+    config.llm.openai_compatible.base_url = "https://relay.example.com/v1"
+    config.llm.openai_compatible.api_flavor = "responses"
+
+    save_config(config, config_path)
+    loaded = load_config(config_path)
+
+    assert loaded.llm.openai.api_flavor == "responses"
+    assert loaded.llm.openai_compatible.api_flavor == "responses"
+
+
+def test_collect_issues_blocks_invalid_api_flavor() -> None:
+    from openbiliclaw.config import _collect_config_issues
+
+    config = Config(
+        llm=LLMConfig(
+            default_provider="openai_compatible",
+            openai_compatible=LLMProviderConfig(
+                api_key="sk-relay",
+                base_url="https://relay.example.com/v1",
+                api_flavor="banana",
+            ),
+        )
+    )
+
+    issues = _collect_config_issues(config)
+    flavor_issues = [i for i in issues if i.field == "llm.openai_compatible.api_flavor"]
+    assert flavor_issues and flavor_issues[0].severity == "blocking"
+
+
+def test_collect_issues_allows_responses_api_flavor() -> None:
+    from openbiliclaw.config import _collect_config_issues
+
+    config = Config(
+        llm=LLMConfig(
+            default_provider="openai_compatible",
+            openai_compatible=LLMProviderConfig(
+                api_key="sk-relay",
+                base_url="https://relay.example.com/v1",
+                api_flavor="responses",
+            ),
+        )
+    )
+
+    fields = [i.field for i in _collect_config_issues(config)]
+    assert "llm.openai_compatible.api_flavor" not in fields
+
+
 def test_build_config_supports_gemini_provider() -> None:
     config = _build_config(
         {

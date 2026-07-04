@@ -76,10 +76,15 @@ class OpenAIProvider(LLMProvider):
         token_provider: Callable[[bool], Awaitable[str]] | None = None,
         timeout: float = 300.0,
         embedding_output_dimensionality: int = 0,
+        api_flavor: str = "",
     ) -> None:
         self._model = model
         self._provider_name = provider_name
         self.base_url = base_url or ""
+        # "" / "chat_completions" → /v1/chat/completions (default).
+        # "responses" → /v1/responses — needed by third-party gateways that
+        # expose GPT models only through the Responses API (issue #72).
+        self._api_flavor = api_flavor.strip().lower()
         self._token_provider = token_provider
         self._timeout = timeout
         self._embedding_output_dimensionality = max(0, int(embedding_output_dimensionality or 0))
@@ -108,6 +113,14 @@ class OpenAIProvider(LLMProvider):
         # base OpenAI provider accepts it for signature compatibility
         # but doesn't act on it (vanilla GPT-4o has no thinking knob).
         del reasoning_effort
+        if self._api_flavor == "responses":
+            return await self._complete_via_responses(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                json_mode=json_mode,
+                model=model,
+            )
         effective_model = (model or "").strip() or self._model
         kwargs: dict[str, Any] = {
             "model": effective_model,
@@ -198,19 +211,168 @@ class OpenAIProvider(LLMProvider):
             raw=response,
         )
 
+    async def _complete_via_responses(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+        max_tokens: int,
+        json_mode: bool,
+        model: str | None,
+    ) -> LLMResponse:
+        """Serve ``complete()`` through the ``/v1/responses`` endpoint.
+
+        Parameter mapping: the first system message → ``instructions``,
+        remaining messages → ``input``; ``max_tokens`` →
+        ``max_output_tokens``; ``json_mode`` → ``text.format``.
+        """
+        effective_model = (model or "").strip() or self._model
+        instructions = ""
+        input_messages: list[dict[str, str]] = []
+        for msg in messages:
+            if msg["role"] == "system" and not instructions:
+                instructions = msg["content"]
+            else:
+                input_messages.append(msg)
+        kwargs: dict[str, Any] = {
+            "model": effective_model,
+            "input": input_messages,
+            "max_output_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if instructions:
+            kwargs["instructions"] = instructions
+        if json_mode:
+            kwargs["text"] = {"format": {"type": "json_object"}}
+        extra_headers = self._extra_headers()
+        if extra_headers:
+            kwargs["extra_headers"] = extra_headers
+        extra_body = self._extra_body()
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+
+        response = await self._responses_request_dropping_rejected_temperature(kwargs)
+        content = self._responses_output_text(response)
+        if not content.strip() and json_mode and "text" in kwargs:
+            # Same backend quirk as the chat-completions path: HTTP 200 with
+            # empty content when an output-format constraint is set. The
+            # prompt already demands JSON, so drop the constraint and retry.
+            logger.warning(
+                "%s returned empty content with text.format=json_object; "
+                "retrying without the format constraint",
+                self._provider_name,
+            )
+            kwargs.pop("text")
+            response = await self._responses_request_dropping_rejected_temperature(kwargs)
+            content = self._responses_output_text(response)
+        if not content.strip():
+            raise LLMResponseError(f"{self._provider_name} returned empty content")
+
+        usage = None
+        raw_usage = getattr(response, "usage", None)
+        if raw_usage is not None:
+            input_tokens = int(getattr(raw_usage, "input_tokens", 0) or 0)
+            output_tokens = int(getattr(raw_usage, "output_tokens", 0) or 0)
+            total_tokens = int(
+                getattr(raw_usage, "total_tokens", 0) or (input_tokens + output_tokens)
+            )
+            usage = {
+                "prompt_tokens": input_tokens,
+                "completion_tokens": output_tokens,
+                "total_tokens": total_tokens,
+            }
+            # Responses API nests the cache counter under
+            # ``input_tokens_details.cached_tokens``; normalize to the
+            # universal ``cached_input_tokens`` key (see chat path above).
+            details = getattr(raw_usage, "input_tokens_details", None)
+            cached = int(getattr(details, "cached_tokens", 0) or 0) if details is not None else 0
+            if cached:
+                usage["cached_input_tokens"] = cached
+
+        return LLMResponse(
+            content=content,
+            model=str(getattr(response, "model", "") or effective_model),
+            provider=self._provider_name,
+            usage=usage,
+            raw=response,
+        )
+
+    async def _responses_request_dropping_rejected_temperature(self, kwargs: dict[str, Any]) -> Any:
+        """Send a Responses request, dropping ``temperature`` if rejected.
+
+        Reasoning-first models (gpt-5 family, o-series) reject the
+        ``temperature`` parameter outright. Rather than maintaining a
+        model allowlist, probe optimistically and retry once without it.
+        ``kwargs`` is mutated on purpose so a later json-mode retry with
+        the same dict doesn't reintroduce the rejected parameter.
+        """
+        try:
+            return await self._responses_request_with_retry(**kwargs)
+        except LLMProviderError as exc:
+            if "temperature" in kwargs and self._temperature_rejected(exc):
+                logger.info(
+                    "%s rejected temperature on /v1/responses; retrying without it",
+                    self._provider_name,
+                )
+                kwargs.pop("temperature")
+                return await self._responses_request_with_retry(**kwargs)
+            raise
+
+    @staticmethod
+    def _temperature_rejected(exc: LLMProviderError) -> bool:
+        message = str(exc).lower()
+        if "temperature" not in message:
+            return False
+        return (
+            "unsupported" in message or "not supported" in message or "does not support" in message
+        )
+
+    @staticmethod
+    def _responses_output_text(response: Any) -> str:
+        """Extract assistant text from a Responses API payload.
+
+        Prefer the SDK's aggregated ``output_text``; fall back to walking
+        ``output`` message items for gateways whose SDK objects (or raw
+        namespaces) don't provide the convenience property.
+        """
+        text = getattr(response, "output_text", None)
+        if text:
+            return str(text)
+        parts: list[str] = []
+        for item in getattr(response, "output", None) or []:
+            if getattr(item, "type", "") != "message":
+                continue
+            for block in getattr(item, "content", None) or []:
+                block_text = getattr(block, "text", "")
+                if block_text:
+                    parts.append(str(block_text))
+        return "".join(parts)
+
     async def _request_with_retry(self, **kwargs: Any) -> Any:
+        return await self._send_with_retry(self._create_chat_completion, **kwargs)
+
+    async def _responses_request_with_retry(self, **kwargs: Any) -> Any:
+        return await self._send_with_retry(self._create_response, **kwargs)
+
+    async def _create_chat_completion(self, **kwargs: Any) -> Any:
+        return await self._client.chat.completions.create(**kwargs)
+
+    async def _create_response(self, **kwargs: Any) -> Any:
+        return await self._client.responses.create(**kwargs)
+
+    async def _send_with_retry(self, send: Callable[..., Awaitable[Any]], **kwargs: Any) -> Any:
         """Send a request with bounded retry for transient failures."""
         last_error: Exception | None = None
 
         for attempt in range(1, self._MAX_RETRIES + 1):
             try:
                 await self._apply_dynamic_token(force_refresh=False)
-                return await self._client.chat.completions.create(**kwargs)
+                return await send(**kwargs)
             except Exception as exc:
                 if self._is_unauthorized(exc) and self._token_provider is not None:
                     try:
                         await self._apply_dynamic_token(force_refresh=True)
-                        return await self._client.chat.completions.create(**kwargs)
+                        return await send(**kwargs)
                     except Exception as refresh_exc:
                         mapped_refresh = self._map_error(refresh_exc)
                         raise mapped_refresh from refresh_exc

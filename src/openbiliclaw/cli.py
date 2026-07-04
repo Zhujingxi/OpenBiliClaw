@@ -1767,7 +1767,16 @@ def _prompt_provider_triplet(menu_choice: str) -> tuple[str, str, str, str]:
         ).strip()
         or default_model
     )
-    return provider, default_base_url, api_key, model
+    base_url = default_base_url
+    if provider == "claude":
+        # issue #72 — Claude keys bought from third-party relays need a
+        # custom Anthropic-protocol (/v1/messages) endpoint. Enter = official.
+        base_url = typer.prompt(
+            "Base URL（直接回车 = Anthropic 官方；第三方中转填其地址）",
+            default="",
+            show_default=False,
+        ).strip()
+    return provider, base_url, api_key, model
 
 
 def _interactive_embedding_setup(default_provider: str, *, auto_if_ready: bool = False) -> None:

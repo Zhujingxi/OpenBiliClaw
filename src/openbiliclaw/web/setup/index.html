@@ -131,6 +131,15 @@
         <div id="baseWrap" style="display:none">
           <label for="baseUrl">接口地址 Base URL</label>
           <input id="baseUrl" type="text" placeholder="https://your-endpoint/v1">
+          <div class="hint" id="baseHint" style="display:none">用第三方中转/网关时填写(Anthropic 协议 /v1/messages);直连官方请留空。</div>
+        </div>
+
+        <div id="flavorWrap" style="display:none">
+          <label for="apiFlavor">接口协议</label>
+          <select id="apiFlavor">
+            <option value="">chat/completions（默认，绝大多数服务）</option>
+            <option value="responses">responses（部分第三方网关的 GPT 模型只开放这个）</option>
+          </select>
         </div>
 
         <div id="ollamaNote" class="hint" style="display:none; margin-top:14px">
@@ -275,8 +284,13 @@
       const p = $("#provider").value;
       const isOllama = p === "ollama";
       const isCompat = p === "openai_compatible";
+      const isClaude = p === "claude";
       $("#keyWrap").style.display = isOllama ? "none" : "block";
-      $("#baseWrap").style.display = isCompat ? "block" : "none";
+      // Claude 也开放 Base URL（可选，第三方 Anthropic 协议网关，见 issue #72）
+      $("#baseWrap").style.display = (isCompat || isClaude) ? "block" : "none";
+      $("#baseHint").style.display = isClaude ? "block" : "none";
+      // openai_compatible 可切 /v1/responses 协议（issue #72）
+      $("#flavorWrap").style.display = isCompat ? "block" : "none";
       $("#ollamaNote").style.display = isOllama ? "block" : "none";
       const [url, name] = KEY_LINKS[p] || ["", ""];
       $("#keyHint").innerHTML = url ? `还没有 key？去 <a href="${url}" target="_blank" rel="noopener">${name}</a> 免费申请,粘贴回来即可。` : "";
@@ -308,7 +322,10 @@
 
       const pcfg = {};
       if (apiKey) pcfg.api_key = apiKey;
-      if (baseUrl) pcfg.base_url = baseUrl;
+      // 只有展示了 Base URL 输入框的 provider 才提交它,避免切换 provider 时
+      // 把上一个 provider 残留的地址写进错误的配置段。
+      if (baseUrl && (provider === "openai_compatible" || provider === "claude")) pcfg.base_url = baseUrl;
+      if (provider === "openai_compatible") pcfg.api_flavor = $("#apiFlavor").value;
       pcfg.model = model;
       const payload = {
         suppress_background_llm_work: true,

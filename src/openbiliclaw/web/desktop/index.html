@@ -239,7 +239,8 @@
             <label class="settings-field"><span>LLM 并发数</span><input id="llmConcurrency" inputmode="numeric" placeholder="3"></label>
             <label class="settings-field"><span>LLM 超时（秒）</span><input id="llmTimeout" inputmode="numeric" placeholder="60"></label>
             <label class="settings-field"><span>当前 Provider API Key</span><input id="llmApiKey" autocomplete="off" placeholder="只保存当前选中的 Provider"></label>
-            <label class="settings-field"><span>当前 Provider Base URL</span><input id="llmBaseUrl" placeholder="OpenAI-compatible / DeepSeek / Ollama 等"></label>
+            <label class="settings-field"><span>当前 Provider Base URL</span><input id="llmBaseUrl" placeholder="OpenAI-compatible / Claude 第三方网关 / DeepSeek / Ollama 等"></label>
+            <label class="settings-field"><span>API 协议（OpenAI / 兼容）</span><select id="llmApiFlavor"><option value="">chat/completions（默认）</option><option value="responses">responses（第三方网关）</option></select></label>
             <label class="settings-field"><span>DeepSeek Reasoning Effort</span><select id="deepseekReasoning"><option value="">默认</option><option value="high">high</option><option value="max">max</option></select></label>
             <label class="settings-field"><span>OpenRouter Referer</span><input id="openrouterReferer" placeholder="https://example.com"></label>
             <label class="settings-field"><span>OpenRouter X-Title</span><input id="openrouterTitle" placeholder="OpenBiliClaw"></label>
@@ -256,6 +257,7 @@
             <label class="settings-field"><span>备选模型</span><input id="llmFallbackModel" placeholder="留空使用该 Provider 现有模型"></label>
             <label class="settings-field"><span>备选 Provider API Key</span><input id="llmFallbackApiKey" autocomplete="off" placeholder="只保存备选 Provider"></label>
             <label class="settings-field"><span>备选 Provider Base URL</span><input id="llmFallbackBaseUrl" placeholder="OpenAI-compatible / DeepSeek / Ollama 等"></label>
+            <label class="settings-field"><span>备选 API 协议（OpenAI / 兼容）</span><select id="llmFallbackApiFlavor"><option value="">chat/completions（默认）</option><option value="responses">responses（第三方网关）</option></select></label>
           </div>
 
           <p class="settings-section-title">Embedding</p>

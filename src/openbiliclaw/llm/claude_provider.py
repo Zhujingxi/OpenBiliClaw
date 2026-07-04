@@ -30,10 +30,22 @@ class ClaudeProvider(LLMProvider):
     _BASE_RETRY_DELAY = 0.25
 
     def __init__(
-        self, api_key: str, model: str = "claude-sonnet-4-20250514", timeout: float = 300.0
+        self,
+        api_key: str,
+        model: str = "claude-sonnet-4-20250514",
+        timeout: float = 300.0,
+        base_url: str = "",
     ) -> None:
         self._model = model
-        self._client = AsyncAnthropic(api_key=api_key, timeout=timeout)
+        self.base_url = base_url.strip()
+        # Empty base_url → SDK default (https://api.anthropic.com). A custom
+        # value points at any Anthropic-protocol gateway serving /v1/messages
+        # (third-party relays, LiteLLM, etc.) — see issue #72.
+        self._client = AsyncAnthropic(
+            api_key=api_key,
+            timeout=timeout,
+            base_url=self.base_url or None,
+        )
 
     @property
     def name(self) -> str:

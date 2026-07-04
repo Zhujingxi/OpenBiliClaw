@@ -8079,6 +8079,7 @@ def create_app(
                 model=p.model,
                 base_url=p.base_url,
                 auth_mode=getattr(p, "auth_mode", ""),
+                api_flavor=getattr(p, "api_flavor", ""),
                 http_referer=getattr(p, "http_referer", ""),
                 x_title=getattr(p, "x_title", ""),
                 reasoning_effort=getattr(p, "reasoning_effort", ""),
@@ -8360,6 +8361,7 @@ def create_app(
                     "model",
                     "base_url",
                     "auth_mode",
+                    "api_flavor",
                     "http_referer",
                     "x_title",
                     "reasoning_effort",
@@ -8371,7 +8373,9 @@ def create_app(
                             continue
                         existing = getattr(provider_cfg, field_name, "")
                         if (
-                            field_name not in {"auth_mode", "reasoning_effort"}
+                            # These accept an explicit empty value ("" = back
+                            # to default); the others treat empty as "keep".
+                            field_name not in {"auth_mode", "reasoning_effort", "api_flavor"}
                             and not new_value.strip()
                             and isinstance(existing, str)
                             and existing.strip()

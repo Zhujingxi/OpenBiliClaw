@@ -177,6 +177,44 @@ def test_build_llm_registry_refuses_openai_compatible_without_base_url() -> None
     assert "openai_compatible" not in registry.available_providers
 
 
+def test_build_llm_registry_passes_claude_base_url_through() -> None:
+    """issue #72 — [llm.claude].base_url must reach the Anthropic client so
+    third-party /v1/messages gateways work; it used to be silently ignored."""
+    config = Config(
+        llm=LLMConfig(
+            default_provider="claude",
+            claude=LLMProviderConfig(
+                api_key="sk-ant-test",
+                base_url="https://relay.example.com/api",
+            ),
+        )
+    )
+    registry = build_llm_registry(config)
+    provider = registry.get("claude")
+    # The Anthropic SDK normalizes the URL with a trailing slash.
+    assert str(provider._client.base_url).rstrip("/") == "https://relay.example.com/api"
+
+
+def test_build_llm_registry_passes_api_flavor_through() -> None:
+    """issue #72 — api_flavor="responses" routes the OpenAI-protocol family
+    through /v1/responses for gateways that only expose that endpoint."""
+    config = Config(
+        llm=LLMConfig(
+            default_provider="openai_compatible",
+            openai=LLMProviderConfig(api_key="sk-openai", api_flavor="responses"),
+            openai_compatible=LLMProviderConfig(
+                api_key="sk-relay",
+                model="gpt-5.4",
+                base_url="https://relay.example.com/v1",
+                api_flavor="responses",
+            ),
+        )
+    )
+    registry = build_llm_registry(config)
+    assert registry.get("openai")._api_flavor == "responses"
+    assert registry.get("openai_compatible")._api_flavor == "responses"
+
+
 def test_openai_compatible_can_serve_as_embedding_provider(tmp_path) -> None:
     """Most OpenAI-compat backends (Together, vLLM, Azure) expose
     /v1/embeddings. ``openai_compatible`` must therefore be valid as

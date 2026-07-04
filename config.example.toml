@@ -69,6 +69,9 @@ api_key = ""
 model = "gpt-5-nano"
 base_url = ""  # Leave empty for default, or set for compatible APIs
 auth_mode = ""  # "" / "api_key" / "codex_oauth"
+# API 端点协议: "" / "chat_completions" = /v1/chat/completions (默认);
+# "responses" = /v1/responses (部分第三方网关的 GPT 模型只开放这个端点)。
+api_flavor = ""
 
 [llm.claude]
 # 若 default_provider = "claude"，api_key 必填
@@ -76,6 +79,9 @@ auth_mode = ""  # "" / "api_key" / "codex_oauth"
 #                  claude-haiku-4-5 (便宜)
 api_key = ""
 model = "claude-sonnet-4-6"
+# 留空 = Anthropic 官方 (https://api.anthropic.com)。使用第三方中转/网关时
+# 填其地址(需实现 Anthropic 协议 /v1/messages)。
+base_url = ""
 
 [llm.gemini]
 # 若 default_provider = "gemini"，推荐设置 GEMINI_API_KEY / GOOGLE_API_KEY；
@@ -157,6 +163,9 @@ x_title = "OpenBiliClaw"
 api_key = ""
 model = ""
 base_url = ""
+# API 端点协议: "" / "chat_completions" = /v1/chat/completions (默认);
+# "responses" = /v1/responses (部分第三方网关的 GPT 模型只开放这个端点)。
+api_flavor = ""
 
 [llm.embedding]
 # Embedding model for semantic similarity (topic dedup, fatigue, feedback)

@@ -23,6 +23,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _PROJECT_ROOT_ENV = "OPENBILICLAW_PROJECT_ROOT"
 _SUPPORTED_AUTH_METHODS = {"cookie", "qrcode", "none"}
 _SUPPORTED_OPENAI_AUTH_MODES = {"", "api_key", "codex_oauth"}
+_SUPPORTED_OPENAI_API_FLAVORS = {"", "chat_completions", "responses"}
 _MIN_POOL_TARGET_COUNT = 1
 _MAX_POOL_TARGET_COUNT = 600
 _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS = 90
@@ -117,6 +118,12 @@ class LLMProviderConfig:
     model: str = ""
     base_url: str = ""
     auth_mode: str = ""
+    # OpenAI-protocol endpoint selector: "" / "chat_completions" →
+    # /v1/chat/completions (default); "responses" → /v1/responses. Some
+    # third-party gateways expose GPT models only via the Responses API
+    # (issue #72). Honored by [llm.openai] and [llm.openai_compatible];
+    # ignored by all other providers.
+    api_flavor: str = ""
     http_referer: str = ""
     x_title: str = ""
     # DeepSeek v4 thinking-mode control. "" disables; "high" / "max" enable
@@ -1485,6 +1492,20 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
         )
         return issues
 
+    for flavor_provider in ("openai", "openai_compatible"):
+        flavor = provider_configs[flavor_provider].api_flavor.strip().lower()
+        if flavor not in _SUPPORTED_OPENAI_API_FLAVORS:
+            issues.append(
+                ConfigIssue(
+                    field=f"llm.{flavor_provider}.api_flavor",
+                    message=(
+                        f"`llm.{flavor_provider}.api_flavor` 仅支持: "
+                        '"", "chat_completions", "responses"。'
+                    ),
+                    severity="blocking",
+                )
+            )
+
     openai_auth_mode = config.llm.openai.auth_mode.strip().lower()
     if openai_auth_mode not in _SUPPORTED_OPENAI_AUTH_MODES:
         issues.append(
@@ -2130,10 +2151,12 @@ def _render_provider_section(name: str, provider: LLMProviderConfig) -> list[str
     lines = [f"[llm.{name}]"]
     lines.append(f"api_key = {_toml_string(provider.api_key)}")
     lines.append(f"model = {_toml_string(provider.model)}")
-    if name in {"openai", "deepseek", "ollama", "openrouter", "openai_compatible"}:
+    if name in {"openai", "claude", "deepseek", "ollama", "openrouter", "openai_compatible"}:
         lines.append(f"base_url = {_toml_string(provider.base_url)}")
     if name == "openai":
         lines.append(f"auth_mode = {_toml_string(provider.auth_mode)}")
+    if name in {"openai", "openai_compatible"}:
+        lines.append(f"api_flavor = {_toml_string(provider.api_flavor)}")
     if name == "deepseek":
         lines.append(f"reasoning_effort = {_toml_string(provider.reasoning_effort)}")
     if name == "openrouter":

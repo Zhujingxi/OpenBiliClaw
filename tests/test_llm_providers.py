@@ -1141,3 +1141,167 @@ async def test_health_check_returns_false_on_failure(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(provider, "complete", fake_complete)
 
     assert await provider.health_check() is False
+
+
+# --- issue #72: third-party gateway adaptation ---
+
+
+def test_claude_provider_accepts_custom_base_url() -> None:
+    provider = ClaudeProvider(api_key="sk-test", base_url="https://relay.example.com/api")
+    # The Anthropic SDK normalizes the URL with a trailing slash.
+    assert str(provider._client.base_url).rstrip("/") == "https://relay.example.com/api"
+
+
+def test_claude_provider_defaults_to_official_base_url() -> None:
+    provider = ClaudeProvider(api_key="sk-test")
+    assert "api.anthropic.com" in str(provider._client.base_url)
+
+
+def _responses_response(text: str = "ok", *, with_output_text: bool = True) -> SimpleNamespace:
+    response = SimpleNamespace(
+        model="gpt-5-mini",
+        output=[
+            SimpleNamespace(
+                type="message",
+                content=[SimpleNamespace(type="output_text", text=text)],
+            )
+        ],
+        usage=SimpleNamespace(
+            input_tokens=10,
+            output_tokens=5,
+            total_tokens=15,
+            input_tokens_details=SimpleNamespace(cached_tokens=4),
+        ),
+    )
+    if with_output_text:
+        response.output_text = text
+    return response
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_responses_flavor_maps_params_and_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider(
+        api_key="test-key",
+        model="gpt-5-mini",
+        base_url="https://relay.example.com/v1",
+        provider_name="openai_compatible",
+        api_flavor="responses",
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_create(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return _responses_response('{"ok": true}')
+
+    monkeypatch.setattr(provider._client.responses, "create", fake_create)
+
+    response = await provider.complete(
+        [
+            {"role": "system", "content": "be terse"},
+            {"role": "user", "content": "hi"},
+        ],
+        max_tokens=512,
+        json_mode=True,
+    )
+
+    assert captured["instructions"] == "be terse"
+    assert captured["input"] == [{"role": "user", "content": "hi"}]
+    assert captured["max_output_tokens"] == 512
+    assert captured["text"] == {"format": {"type": "json_object"}}
+    assert "messages" not in captured and "max_tokens" not in captured
+    assert response.content == '{"ok": true}'
+    assert response.provider == "openai_compatible"
+    assert response.usage == {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "cached_input_tokens": 4,
+    }
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_responses_flavor_walks_output_without_output_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider(api_key="test-key", api_flavor="responses")
+
+    async def fake_create(**_: object) -> SimpleNamespace:
+        return _responses_response("fallback-text", with_output_text=False)
+
+    monkeypatch.setattr(provider._client.responses, "create", fake_create)
+
+    response = await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert response.content == "fallback-text"
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_responses_flavor_drops_rejected_temperature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider(api_key="test-key", model="gpt-5.4", api_flavor="responses")
+    calls: list[dict[str, object]] = []
+
+    async def fake_create(**kwargs: object) -> SimpleNamespace:
+        calls.append(dict(kwargs))
+        if "temperature" in kwargs:
+            raise LLMProviderError(
+                "openai request failed: HTTP 400: Unsupported parameter: 'temperature'"
+            )
+        return _responses_response("ok")
+
+    monkeypatch.setattr(provider._client.responses, "create", fake_create)
+
+    response = await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert response.content == "ok"
+    # The rejection first exhausts the generic retry loop (mapped
+    # LLMProviderError is retryable), then the flavor-level fallback
+    # re-sends without temperature — so only the final call drops it.
+    assert "temperature" in calls[0]
+    assert "temperature" not in calls[-1]
+    assert len(calls) >= 2
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_responses_flavor_retries_without_format_on_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider(api_key="test-key", api_flavor="responses")
+    calls: list[dict[str, object]] = []
+
+    async def fake_create(**kwargs: object) -> SimpleNamespace:
+        calls.append(dict(kwargs))
+        if "text" in kwargs:
+            return _responses_response("")
+        return _responses_response('{"ok": true}')
+
+    monkeypatch.setattr(provider._client.responses, "create", fake_create)
+
+    response = await provider.complete([{"role": "user", "content": "hi"}], json_mode=True)
+
+    assert response.content == '{"ok": true}'
+    assert "text" in calls[0]
+    assert "text" not in calls[1]
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_default_flavor_still_uses_chat_completions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider(api_key="test-key")
+
+    async def fake_chat_create(**_: object) -> SimpleNamespace:
+        return _openai_response("chat-path")
+
+    async def fail_responses_create(**_: object) -> SimpleNamespace:
+        raise AssertionError("default flavor must not call /v1/responses")
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", fake_chat_create)
+    monkeypatch.setattr(provider._client.responses, "create", fail_responses_create)
+
+    response = await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert response.content == "chat-path"

@@ -444,6 +444,7 @@ def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) ->
             base_url=config.llm.openai.base_url,
             token_provider=_codex_token_provider,
             timeout=float(config.llm.timeout),
+            api_flavor=config.llm.openai.api_flavor,
         )
     if not config.llm.openai.api_key.strip():
         return None
@@ -452,6 +453,7 @@ def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         model=config.llm.openai.model or "gpt-4o",
         base_url=config.llm.openai.base_url,
         timeout=float(config.llm.timeout),
+        api_flavor=config.llm.openai.api_flavor,
     )
 
 
@@ -464,6 +466,7 @@ def _maybe_claude_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         api_key=config.llm.claude.api_key,
         model=config.llm.claude.model or "claude-sonnet-4-20250514",
         timeout=float(config.llm.timeout),
+        base_url=config.llm.claude.base_url,
     )
 
 
@@ -617,4 +620,5 @@ def _maybe_openai_compatible_provider(
         base_url=cfg.base_url,
         provider_name="openai_compatible",
         timeout=float(config.llm.timeout),
+        api_flavor=cfg.api_flavor,
     )
