@@ -93,6 +93,12 @@ def test_build_reddit_dependency_install_command_uses_default_dependency_spec() 
     assert cmd[4].startswith("rdt-cli>=")
 
 
+def test_default_runtime_dependency_enables_httpx_socks_proxy_support() -> None:
+    requirement = build_module.project_dependency_spec("httpx")
+
+    assert requirement.startswith("httpx[socks]>=")
+
+
 def test_pyinstaller_spec_collects_reddit_dependency() -> None:
     spec = (Path(__file__).resolve().parent.parent / "packaging" / "openbiliclaw.spec").read_text(
         encoding="utf-8"
@@ -102,6 +108,23 @@ def test_pyinstaller_spec_collects_reddit_dependency() -> None:
     assert "rdt_cli" in spec
     assert "browser_cookie3" in spec
     assert "_reddit_hiddenimports" in spec
+
+
+def test_pyinstaller_spec_collects_httpx_socks_dependency() -> None:
+    spec = (Path(__file__).resolve().parent.parent / "packaging" / "openbiliclaw.spec").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"socksio"' in spec
+
+
+def test_pyinstaller_spec_collects_websocket_protocol_dependency() -> None:
+    spec = (Path(__file__).resolve().parent.parent / "packaging" / "openbiliclaw.spec").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"websockets"' in spec
+    assert '"uvicorn.protocols.websockets.websockets_impl"' in spec
 
 
 def test_find_packaged_root_prefers_app_bundle_on_macos(tmp_path: Path) -> None:

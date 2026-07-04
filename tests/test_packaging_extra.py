@@ -43,6 +43,24 @@ def test_default_dependencies_include_rdt_cli() -> None:
     )
 
 
+def test_default_dependencies_include_websockets_for_runtime_stream() -> None:
+    requirements = _runtime_dependencies()
+    websocket_reqs = [r for r in requirements if r.replace("_", "-").startswith("websockets")]
+    assert websocket_reqs, f"runtime-stream requires websockets, got {requirements!r}"
+    assert any(">=" in r for r in websocket_reqs), (
+        f"websockets requirement must pin a minimum version, got {websocket_reqs!r}"
+    )
+
+
+def test_default_dependencies_include_pillow_for_runtime_image_processing() -> None:
+    requirements = _runtime_dependencies()
+    pillow_reqs = [r for r in requirements if r.replace("_", "-").lower().startswith("pillow")]
+    assert pillow_reqs, f"runtime image processing requires Pillow, got {requirements!r}"
+    assert any(">=" in r for r in pillow_reqs), (
+        f"Pillow requirement must pin a minimum version, got {pillow_reqs!r}"
+    )
+
+
 def test_x_extra_is_declared() -> None:
     extras = _optional_dependencies()
     assert "x" in extras, "expected an [project.optional-dependencies] 'x' extra"
