@@ -4,7 +4,9 @@
 #
 #   curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml
 #   docker compose -f docker-compose.prebuilt.yml up -d
-#   # then open http://127.0.0.1:8420/setup/ to finish initialization
+#   # then open http://127.0.0.1:8420/setup/ for AI config + prereq checks,
+#   # and run the (container-required) init step from the host:
+#   #   docker exec -it openbiliclaw-backend openbiliclaw init
 #
 # Upgrade to the newest release:
 #

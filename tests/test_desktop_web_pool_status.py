@@ -55,9 +55,10 @@ def test_desktop_hydration_refetches_runtime_after_recommendation_bootstrap() ->
     )
     assert hydrate is not None, "desktop hydrateFromBackend not found"
     body = hydrate.group("body")
-    assert (
-        "await requestJson(ENDPOINTS.runtimeStatus).catch(() => runtime?.status || runtime)" in body
-    )
+    # requestJson resolves null on failure (never rejects), so the fallback to
+    # the Promise.all snapshot must be `||`, not a dead `.catch()`.
+    assert "(await requestJson(ENDPOINTS.runtimeStatus)) || runtime" in body
+    assert "requestJson(ENDPOINTS.runtimeStatus).catch(" not in body
     assert "applyRuntimeStatus(effectiveRuntime?.status || effectiveRuntime);" in body
 
 

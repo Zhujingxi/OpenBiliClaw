@@ -53,7 +53,15 @@ OpenBiliClaw 不爬登录态——它复用**你**当前浏览器的登录会话
 
 ## 快速开始
 
-三种方式按省事程度排序。**无论选哪种，启动后端后都建议打开图形化引导页 `http://127.0.0.1:8420/setup/` 完成初始化**——它和桌面安装包是同一套向导：配置 LLM / embedding、选择初始化来源（B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit）、真实校验前置条件，然后看着画像和首轮内容池建起来。
+三种方式按省事程度排序。**无论选哪种，启动后端后都建议打开图形化引导页 `http://127.0.0.1:8420/setup/` 完成 AI 配置与前置检查**——它和桌面安装包是同一套向导：配置 LLM / embedding、选择初始化来源（B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit）、真实校验前置条件。
+
+> ⚠️ **容器内「开始初始化」按钮不可用**：Docker 运行时后端会拒绝网页发起的图形化初始化（`unsupported_runtime`），向导页会直接给出替代命令。在 `/setup/` 完成配置和前置检查后，初始化本身在宿主机执行：
+>
+> ```bash
+> docker exec -it openbiliclaw-backend openbiliclaw init
+> ```
+>
+> 方式 C 的一行安装脚本会自动跑这一步，无需手动执行。
 
 ### 方式 A：预构建镜像（最快，无需克隆源码）
 
@@ -65,7 +73,7 @@ curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/dock
 docker compose -f docker-compose.prebuilt.yml up -d
 ```
 
-然后打开 `http://127.0.0.1:8420/setup/` 完成初始化。想固定版本，把 compose 文件里的 `latest` 换成具体版本号（如 `0.3.152`）。
+然后打开 `http://127.0.0.1:8420/setup/` 完成 AI 配置与前置检查，再运行 `docker exec -it openbiliclaw-backend openbiliclaw init` 完成初始化。想固定版本，把 compose 文件里的 `latest` 换成具体版本号（如 `0.3.152`）。
 
 升级到最新版本：
 
@@ -84,7 +92,7 @@ cd OpenBiliClaw
 docker compose up -d --build
 ```
 
-同样打开 `http://127.0.0.1:8420/setup/` 完成初始化。更新：`git pull && docker compose up -d --build`（Dockerfile 已做依赖分层，依赖没变时重建只需数秒）。
+同样打开 `http://127.0.0.1:8420/setup/` 完成 AI 配置与前置检查，再运行 `docker exec -it openbiliclaw-backend openbiliclaw init` 完成初始化。更新：`git pull && docker compose up -d --build`（Dockerfile 已做依赖分层，依赖没变时重建只需数秒）。
 
 ### 方式 C：一行安装脚本 / AI agent 部署（终端向导 + 自动 init）
 

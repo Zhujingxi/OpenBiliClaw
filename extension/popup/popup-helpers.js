@@ -1105,6 +1105,20 @@ export function getPopupState({ online, items = [], error = null, runtimeStatus 
   }
 
   const normalizedItems = items.map(normalizeRecommendation);
+  if (normalizedItems.length === 0 && runtimeStatus == null) {
+    // Backend online but the runtime snapshot is unavailable: we cannot tell
+    // "never initialized" apart from "initialized with a drained pool plus a
+    // transient /runtime-status failure". Claiming uninitialized here would
+    // flash the init CTA at a healthy backend, so render a transient degraded
+    // state instead — pollers / runtime-stream reclassify on the next pass,
+    // and a genuinely uninitialized backend still gets the toolbar badge from
+    // the service worker's own runtime-status check.
+    return {
+      kind: "error",
+      message: "后端状态暂时没读到，稍后自动重试。",
+      items: [],
+    };
+  }
   const runtime = normalizeRuntimeStatus(runtimeStatus);
   const hasPostInitRuntimeSignals =
     runtime.recommendation_count > 0 ||

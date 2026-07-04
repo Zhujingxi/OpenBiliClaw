@@ -510,6 +510,21 @@ def test_main_opens_setup_after_repairing_unloadable_config(
     monkeypatch.setattr(entry, "_should_use_tray", lambda: False)
     opened: list[str] = []
     monkeypatch.setattr(entry.webbrowser, "open", lambda url: opened.append(url) or True)
+    # The landing page now opens from a health-gated background thread; run it
+    # inline with the probes stubbed so the assertion below stays synchronous.
+    monkeypatch.setattr(entry, "_wait_for_backend_ready", lambda base: True)
+    monkeypatch.setattr(entry, "_fetch_backend_initialized", lambda base: None)
+
+    class _InlineThread:
+        def __init__(self, *, target, args=(), kwargs=None, name=None, daemon=None) -> None:
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self) -> None:
+            self._target(*self._args, **self._kwargs)
+
+    monkeypatch.setattr(entry.threading, "Thread", _InlineThread)
 
     import uvicorn
 
@@ -787,6 +802,93 @@ def test_view_runtime_logs_macos_falls_back_when_terminal_fails(
 
     # Non-zero return code → fall back to opening the file in the default app.
     assert opened == [log]
+
+
+# --------------------------------------------------------------------------- #
+# Landing-page decision + health-gated browser open
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("seeded", "repaired", "initialized", "expected"),
+    [
+        (True, False, None, "/setup/"),
+        (False, True, None, "/setup/"),
+        (True, False, True, "/setup/"),
+        # Configured relaunch that never completed init → wizard, not /web.
+        (False, False, False, "/setup/"),
+        (False, False, True, "/web/"),
+        # Unknown init state (probe failed) keeps the /web fallback.
+        (False, False, None, "/web/"),
+    ],
+)
+def test_decide_landing_path(
+    seeded: bool, repaired: bool, initialized: bool | None, expected: str
+) -> None:
+    assert entry._decide_landing_path(seeded, repaired, initialized) == expected
+
+
+def test_fetch_backend_initialized_parses_bool_and_swallows_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+
+    class _Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self.close()
+
+    # The helpers go through _LOOPBACK_OPENER (proxy-env-immune), so stub the
+    # opener's open method rather than urllib.request.urlopen.
+    def _open_ok(url: str, timeout: float = 0):
+        assert url.endswith("/api/init-status")
+        return _Response(b'{"initialized": false, "running": false}')
+
+    monkeypatch.setattr(entry._LOOPBACK_OPENER, "open", _open_ok)
+    assert entry._fetch_backend_initialized("http://127.0.0.1:8420") is False
+
+    def _open_boom(url: str, timeout: float = 0):
+        raise OSError("refused")
+
+    monkeypatch.setattr(entry._LOOPBACK_OPENER, "open", _open_boom)
+    assert entry._fetch_backend_initialized("http://127.0.0.1:8420") is None
+
+    def _open_garbage(url: str, timeout: float = 0):
+        return _Response(b'{"initialized": "yes"}')
+
+    monkeypatch.setattr(entry._LOOPBACK_OPENER, "open", _open_garbage)
+    assert entry._fetch_backend_initialized("http://127.0.0.1:8420") is None
+
+
+def test_open_landing_page_waits_for_health_then_routes_uninitialized_to_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(entry, "_wait_for_backend_ready", lambda base: True)
+    monkeypatch.setattr(entry, "_fetch_backend_initialized", lambda base: False)
+    opened: list[str] = []
+    monkeypatch.setattr(entry.webbrowser, "open", lambda url: opened.append(url))
+
+    entry._open_landing_page_when_ready("http://127.0.0.1:8420", seeded=False, repaired=False)
+
+    assert opened == ["http://127.0.0.1:8420/setup/"]
+
+
+def test_open_landing_page_still_opens_web_on_health_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(entry, "_wait_for_backend_ready", lambda base: False)
+    probed: list[str] = []
+    monkeypatch.setattr(entry, "_fetch_backend_initialized", lambda base: probed.append(base))
+    opened: list[str] = []
+    monkeypatch.setattr(entry.webbrowser, "open", lambda url: opened.append(url))
+
+    entry._open_landing_page_when_ready("http://127.0.0.1:8420", seeded=False, repaired=False)
+
+    # Timeout → best-effort open of /web without an init-status probe.
+    assert opened == ["http://127.0.0.1:8420/web/"]
+    assert probed == []
 
 
 if __name__ == "__main__":  # pragma: no cover - convenience

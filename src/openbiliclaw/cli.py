@@ -447,7 +447,8 @@ def _build_auth_manager() -> Any:
     from openbiliclaw.bilibili.auth import AuthManager
     from openbiliclaw.config import load_config
 
-    return AuthManager(load_config().data_path)
+    config = load_config()
+    return AuthManager(config.data_path, proxy=config.bilibili.proxy or None)
 
 
 def _build_browser() -> Any:
@@ -478,7 +479,8 @@ def _build_bilibili_client() -> Any:
         cookie=resolve_runtime_cookie(
             data_dir=config.data_path,
             configured_cookie=config.bilibili.cookie,
-        )
+        ),
+        proxy=config.bilibili.proxy or None,
     )
 
 
@@ -624,6 +626,21 @@ def _build_memory_manager() -> Any:
     memory.initialize()
     _RUNTIME_COMPONENTS["memory_manager"] = memory
     return memory
+
+
+def _guided_init_completed_best_effort() -> bool | None:
+    """Cheap pre-server read of whether guided init ever completed.
+
+    Mirrors the runtime's soul-layer check. Returns ``None`` when the check
+    itself fails — callers should stay silent on unknown state rather than
+    nag a healthy install.
+    """
+    try:
+        layer = _build_memory_manager().get_layer("soul")
+        data = getattr(layer, "data", {})
+        return isinstance(data, dict) and bool(data)
+    except Exception:
+        return None
 
 
 def _build_discovery_engine() -> Any:
@@ -4242,6 +4259,14 @@ def start(
         "API 服务",
         f"正在启动本地后端，当前监听 {effective_host}:{effective_port}。",
     )
+    if _guided_init_completed_best_effort() is False:
+        hint_host = "127.0.0.1" if effective_host == "0.0.0.0" else effective_host  # noqa: S104
+        _print_status_panel(
+            "warning",
+            "还没初始化",
+            f"启动后打开 http://{hint_host}:{effective_port}/setup/ 完成引导初始化；"
+            "无浏览器环境改用 `openbiliclaw init`。",
+        )
     _warn_if_pause_on_disconnect_requires_presence()
     if cfg.api.auth.enabled:
         _print_status_panel(
@@ -4651,6 +4676,15 @@ def serve_api(
         "API 服务",
         f"正在启动容器友好的后端入口，当前监听 {host}:{port}。",
     )
+    if _guided_init_completed_best_effort() is False:
+        hint_host = "127.0.0.1" if host == "0.0.0.0" else host  # noqa: S104
+        _print_status_panel(
+            "warning",
+            "还没初始化",
+            f"打开 http://{hint_host}:{port}/setup/ 可完成 AI 配置与前置检查；"
+            "容器内图形化初始化不可用，请在容器里运行 `openbiliclaw init`"
+            "（宿主机执行 `docker exec -it openbiliclaw-backend openbiliclaw init`）。",
+        )
     _warn_if_pause_on_disconnect_requires_presence()
     _run_api_server(host=host, port=port)
 

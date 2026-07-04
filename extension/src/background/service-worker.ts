@@ -8,6 +8,7 @@
  * from the runtime-stream, not HTTP polling.
  */
 
+import { computeActionBadge, flushResponseReportsUninitialized } from "./badge.js";
 import { enqueueBufferedEvent, shouldFlushImmediately } from "./buffer.js";
 import {
   startXhsTaskPolling,
@@ -212,6 +213,17 @@ async function handleRuntimeEvent(event: Record<string, unknown>): Promise<void>
 
   const eventType = String(event.type ?? "");
 
+  // Guided init finished (started from any surface) → the uninitialized
+  // toolbar badge must clear without waiting for the next WS reconnect.
+  // refresh.pool_updated implies an initialized backend too.
+  if (
+    backendUninitialized &&
+    (eventType === "init_completed" || eventType === "refresh.pool_updated")
+  ) {
+    backendUninitialized = false;
+    renderActionBadge();
+  }
+
   // Task-kick events: the backend broadcasts these from
   // /api/sources/{xhs,dy}/kick when the CLI enqueues a bootstrap
   // task. Poking the dispatcher here cuts the worst-case
@@ -323,19 +335,47 @@ async function isBackendAlive(): Promise<boolean> {
   }
 }
 
-function setBackendBadge(reachable: boolean): void {
+let backendReachable: boolean | null = null;
+let backendUninitialized = false;
+
+function renderActionBadge(): void {
   // Subtle "!" badge so a fresh-install user (or anyone whose daemon
   // crashed) sees the toolbar icon flag the issue without opening the
-  // popup. The popup itself still shows the "openbiliclaw start" hint.
+  // popup. Gray = backend unreachable; orange = reachable but guided init
+  // never completed — previously that state cleared the badge and was
+  // visually identical to a healthy backend, so fresh installs got zero
+  // proactive signal to initialize.
   try {
-    if (reachable) {
-      void chrome.action.setBadgeText({ text: "" });
-    } else {
-      void chrome.action.setBadgeText({ text: "!" });
-      void chrome.action.setBadgeBackgroundColor({ color: "#9CA3AF" });
-    }
+    const view = computeActionBadge(backendReachable, backendUninitialized);
+    void chrome.action.setBadgeText({ text: view.text });
+    if (view.color) void chrome.action.setBadgeBackgroundColor({ color: view.color });
+    void chrome.action.setTitle({ title: view.title });
   } catch {
     // chrome.action is missing in some contexts (e.g. tests) — best-effort.
+  }
+}
+
+function setBackendBadge(reachable: boolean): void {
+  backendReachable = reachable;
+  // A down backend's init state is unknown; drop the stale flag so the
+  // gray unreachable badge (and its hint) wins.
+  if (!reachable) backendUninitialized = false;
+  renderActionBadge();
+}
+
+async function refreshInitBadge(): Promise<void> {
+  // /api/runtime-status carries `initialized` without running any billable
+  // prereq probes (unlike an uninitialized /api/init-status read), so it is
+  // the right cheap source for the toolbar signal. Best-effort: on any
+  // failure keep the last known state.
+  try {
+    const response = await fetch(await apiUrl("/runtime-status"), { method: "GET" });
+    if (!response.ok) return;
+    const payload = (await response.json()) as Record<string, unknown>;
+    backendUninitialized = payload.initialized === false;
+    renderActionBadge();
+  } catch {
+    // Keep the last rendered state.
   }
 }
 
@@ -361,6 +401,7 @@ async function connectRuntimeStream(): Promise<void> {
 
     runtimeSocket.onopen = () => {
       setBackendBadge(true);
+      void refreshInitBadge();
     };
 
     runtimeSocket.onmessage = (msg) => {
@@ -419,6 +460,20 @@ async function flushEvents(): Promise<void> {
       console.warn("[OpenBiliClaw] Backend returned", response.status);
       eventBuffer.unshift(...events);
       return;
+    }
+    try {
+      // Pre-init the backend consumes-and-drops events (200 + rejected:
+      // not_initialized). Don't re-buffer — init refetches history wholesale —
+      // but surface the state on the toolbar badge instead of staying silent.
+      if (flushResponseReportsUninitialized(await response.json())) {
+        if (!backendUninitialized) {
+          backendUninitialized = true;
+          renderActionBadge();
+        }
+        console.debug("[OpenBiliClaw] Events dropped: backend not initialized yet");
+      }
+    } catch {
+      // Non-JSON response — nothing to inspect.
     }
     await checkPendingNotification();
   } catch {

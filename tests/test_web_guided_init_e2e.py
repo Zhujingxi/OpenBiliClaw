@@ -625,7 +625,7 @@ def test_desktop_web_e2e_surfaces_init_start_conflict(
     [
         ("bilibili_not_logged_in", "还没检测到 B 站登录"),
         ("llm_not_ready", "AI 服务还没配好"),
-        ("unsupported_runtime", "当前运行环境不支持"),
+        ("unsupported_runtime", "docker exec -it openbiliclaw-backend openbiliclaw init"),
         ("already_initialized", "已经初始化过了"),
     ],
 )
@@ -672,3 +672,50 @@ def test_desktop_web_e2e_retries_status_after_terminal_event_fetch_failure(
     stub.runtime_status.update({"initialized": True, "pool_available_count": 12})
     chromium_page.evaluate("""() => window.__emitRuntimeEvent({ type: "init_completed" })""")
     chromium_page.wait_for_function("() => document.querySelector('.init-onboarding') === null")
+
+
+def test_setup_wizard_e2e_resumes_running_init_on_page_load(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+) -> None:
+    """A reload mid-init must land on the live progress, not silently on step 0."""
+    base_url, stub = guided_init_server
+    _install_fake_runtime_stream(chromium_page)
+    stub.set_running()
+
+    chromium_page.goto(f"{base_url}/setup/")
+
+    chromium_page.wait_for_selector('[data-panel="2"].active')
+    chromium_page.wait_for_function(
+        "() => document.querySelector('#initProgress')?.hidden === false"
+    )
+    chromium_page.wait_for_function(
+        "() => document.querySelector('#initProgressLabel')?.innerText.includes('1/4')"
+    )
+    assert chromium_page.locator("#startInit").is_disabled()
+    # Re-attach only observes: no second POST /api/init.
+    assert stub.init_posts == []
+
+
+def test_setup_wizard_e2e_waiting_state_offers_escape_to_web(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+) -> None:
+    """Initialized backend + empty first pool → waiting state with a /web way out."""
+    base_url, stub = guided_init_server
+    _install_fake_runtime_stream(chromium_page)
+    stub.set_initialized()
+    stub.runtime_status.update({"initialized": True, "pool_available_count": 0})
+
+    chromium_page.goto(f"{base_url}/setup/")
+
+    chromium_page.wait_for_selector('[data-panel="2"].active')
+    chromium_page.wait_for_function(
+        "() => document.querySelector('#initProgressLabel')?.innerText.includes('整理首轮内容池')"
+    )
+    escape = chromium_page.locator("#initEscape")
+    chromium_page.wait_for_function(
+        "() => document.querySelector('#initEscape')?.classList.contains('show')"
+    )
+    assert escape.locator("a").get_attribute("href") == "/web"
+    assert chromium_page.locator("#startInit").is_disabled()

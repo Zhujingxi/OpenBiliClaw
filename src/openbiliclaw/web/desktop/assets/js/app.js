@@ -105,7 +105,7 @@
     ];
     const INIT_SOURCE_LOGIN_HINT = "勾选要纳入初始化的平台（至少一个）。使用某个平台前，请先在当前浏览器登录该平台账号；勾选会同时开启该来源。";
     const INIT_REASON_TEXT = {
-      unsupported_runtime: "当前运行环境不支持图形化初始化，请改用 CLI 初始化入口。",
+      unsupported_runtime: "Docker / 容器环境不支持在网页里启动初始化。请在宿主机运行：docker exec -it openbiliclaw-backend openbiliclaw init",
       already_running: "初始化正在进行中。",
       bilibili_not_logged_in: "还没检测到 B 站登录。",
       llm_not_ready: "AI 服务还没配好或当前不可用。",
@@ -745,13 +745,20 @@
       // B 站登录只在勾选了 B 站时才是硬前置。
       const biliSelected = selectedSources ? selectedSources.includes("bilibili") : true;
       const embeddingRequired = Boolean(prereq.embedding_required);
+      // label 必须反映探测的真实结果——固定写“已登录”的条目名一旦不再是红 ✗，
+      // 用户就会把它读成“已经登录了”。
+      const biliOk = Boolean(prereq.bilibili_logged_in);
+      const biliState = biliOk ? "B 站已登录" : "B 站登录检测未通过";
+      const biliDetail = String(prereq.bilibili_detail || "").trim();
       return [
         {
           key: "bilibili",
-          label: biliSelected ? "B 站已登录" : "B 站已登录（未勾选 B 站，可跳过）",
-          ok: Boolean(prereq.bilibili_logged_in),
+          label: biliSelected ? biliState : `${biliState}（未勾选 B 站，可跳过）`,
+          ok: biliOk,
           hard: biliSelected,
-          hint: "在浏览器里登录 bilibili.com，扩展会自动把 Cookie 同步给后端；不想接 B 站也可以直接取消勾选。"
+          hint:
+            (biliDetail ? `${biliDetail} ` : "") +
+            "在浏览器里登录 bilibili.com，扩展会自动把 Cookie 同步给后端；不想接 B 站也可以直接取消勾选。"
         },
         {
           key: "llm",
@@ -3513,6 +3520,14 @@
       const runtime = normalizeRuntimeStatus(status);
       if (initWaitingForFirstPool(state.initStatus)) return true;
       if (Boolean(state.initStatus?.running)) return true;
+      // /api/init-status is the authoritative pre-init source. runtime-status
+      // can be transiently unreachable (state.runtimeStatus stays null) or get
+      // rebuilt from field-less runtime events / message merges, where the
+      // missing `initialized` defaults to true — neither may hide the guided
+      // init card while the backend explicitly reports it never initialized.
+      if (state.initStatus?.initialized === false && !state.videos.length && !hasPostInitRuntimeSignals(runtime)) {
+        return true;
+      }
       return Boolean(status) && runtime.initialized === false && !hasPostInitRuntimeSignals(runtime);
     }
 
@@ -4341,7 +4356,17 @@
       try {
         const socket = new WebSocket(getRuntimeStreamUrl());
         state.runtimeSocket = socket;
-        socket.addEventListener("open", () => { $("#statusLabel").textContent = "实时连接中"; });
+        socket.addEventListener("open", () => {
+          $("#statusLabel").textContent = "实时连接中";
+          // The page may load before the backend binds (frozen-entry launch
+          // race): the boot hydrate then swallows every failure into nulls and
+          // nothing else ever re-fetches — an uninitialized backend emits no
+          // runtime events, so the guided-init card would stay hidden forever.
+          // First successful (re)connect with no backend data yet → hydrate.
+          // Scoped to the never-hydrated case so transient reconnects don't
+          // wipe locally appended recommendation cards (see fix 79042ce).
+          if (!state.initStatus && !state.runtimeStatus) scheduleBackendHydration();
+        });
         socket.addEventListener("message", (event) => {
           try { handleRuntimeEvent(JSON.parse(event.data)); } catch {}
         });
@@ -4404,7 +4429,11 @@
           { role: "agent", text: turn.reply || turn.assistant_message || turn.status || "等待后端回复中。" }
         ]).filter((item) => item.text);
       }
-      const effectiveRuntime = await requestJson(ENDPOINTS.runtimeStatus).catch(() => runtime?.status || runtime);
+      // requestJson resolves null on failure (it never rejects), so the
+      // fallback to the Promise.all snapshot must be `||`, not `.catch()` —
+      // otherwise a failed re-fetch discards the runtime status we already
+      // have and the init-onboarding gate loses its initialized=false signal.
+      const effectiveRuntime = (await requestJson(ENDPOINTS.runtimeStatus)) || runtime;
       applyRuntimeStatus(effectiveRuntime?.status || effectiveRuntime);
       applyDelights(delights);
       const delightChatItems = Array.isArray(delightChatTurns) ? delightChatTurns : asArray(delightChatTurns?.items);

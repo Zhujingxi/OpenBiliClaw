@@ -618,11 +618,26 @@ test("getPopupState distinguishes offline uninitialized refreshing empty and rea
     items: [],
   });
 
+  // Missing runtime snapshot ≠ uninitialized: a transient /runtime-status
+  // failure on an initialized backend must not flash the init CTA.
   assert.deepEqual(getPopupState({ online: true, items: [] }), {
-    kind: "uninitialized",
-    message: "还没完成初始化，先运行 openbiliclaw init",
+    kind: "error",
+    message: "后端状态暂时没读到，稍后自动重试。",
     items: [],
   });
+
+  assert.deepEqual(
+    getPopupState({
+      online: true,
+      items: [],
+      runtimeStatus: { initialized: false },
+    }),
+    {
+      kind: "uninitialized",
+      message: "还没完成初始化，先运行 openbiliclaw init",
+      items: [],
+    },
+  );
 
   assert.deepEqual(
     getPopupState({

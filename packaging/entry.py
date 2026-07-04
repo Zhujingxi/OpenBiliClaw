@@ -24,13 +24,16 @@ In both packaged layouts the read-only bundle provides the template config +
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
 import threading
+import time
 import tomllib
+import urllib.request
 import webbrowser
 from contextlib import suppress
 from pathlib import Path
@@ -741,6 +744,81 @@ def _run_server_in_tray(server: Any, host: str, port: int, project_root: Path) -
             server_thread.join(timeout=5)
 
 
+_LANDING_HEALTH_TIMEOUT_SECONDS = 30.0
+_LANDING_HEALTH_POLL_SECONDS = 0.5
+
+# Loopback probes must never detour through a system proxy: users with
+# HTTP(S)_PROXY set but no 127.0.0.1 NO_PROXY entry would otherwise have the
+# health wait answered (or hung) by the proxy instead of the local backend.
+_LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _wait_for_backend_ready(
+    base_url: str, timeout_seconds: float = _LANDING_HEALTH_TIMEOUT_SECONDS
+) -> bool:
+    """Poll ``/api/health`` until the backend answers.
+
+    The static ``/setup/`` / ``/web/`` shells cannot self-retry a refused
+    first GET, so the browser must only be pointed at a live server.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        with (
+            suppress(Exception),
+            _LOOPBACK_OPENER.open(f"{base_url}/api/health", timeout=2) as response,  # noqa: S310
+        ):
+            if 200 <= response.status < 300:
+                return True
+        time.sleep(_LANDING_HEALTH_POLL_SECONDS)
+    return False
+
+
+def _fetch_backend_initialized(base_url: str) -> bool | None:
+    """Read ``initialized`` from ``/api/init-status``; ``None`` when unknown.
+
+    An UNinitialized backend answers this read only after running its real
+    prereq probes (LLM / bilibili, gather-bounded by the slowest), which can
+    take well over 5s on a cold start — keep the timeout generous or the
+    /setup/ routing silently degrades to the /web fallback.
+    """
+    try:
+        with _LOOPBACK_OPENER.open(f"{base_url}/api/init-status", timeout=15) as response:  # noqa: S310
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+    value = payload.get("initialized") if isinstance(payload, dict) else None
+    return value if isinstance(value, bool) else None
+
+
+def _decide_landing_path(seeded: bool, repaired: bool, initialized: bool | None) -> str:
+    """Pick the page the launcher opens.
+
+    Fresh or repaired config → setup wizard. A configured relaunch whose init
+    never completed must land on the wizard too — the old config-existence-only
+    rule sent those users to ``/web/`` and relied entirely on the SPA's
+    onboarding gate. Unknown init state (probe failed) keeps the ``/web/``
+    fallback: the SPA gate is the safety net, not a wall.
+    """
+    if seeded or repaired:
+        return "/setup/"
+    if initialized is False:
+        return "/setup/"
+    return "/web/"
+
+
+def _open_landing_page_when_ready(base_url: str, *, seeded: bool, repaired: bool) -> None:
+    """Open the landing page once the backend is reachable (best effort).
+
+    On health timeout the browser still opens — matching the old immediate-open
+    behaviour rather than silently never showing a page.
+    """
+    healthy = _wait_for_backend_ready(base_url)
+    initialized = _fetch_backend_initialized(base_url) if healthy else None
+    landing = _decide_landing_path(seeded, repaired, initialized)
+    with suppress(Exception):
+        webbrowser.open(base_url + landing)
+
+
 def main() -> None:
     project_root, bundled_resources = _resolve_runtime_paths()
     # Windowed (no-console) build: route output to a log file FIRST, before any
@@ -832,8 +910,12 @@ def main() -> None:
             existing_host = "127.0.0.1" if host == "0.0.0.0" else host  # noqa: S104
             _close_splash()
             print("[OpenBiliClaw] 已有实例在运行;打开 Web 界面,本次不启动新后端。")
+            # The other instance already owns the port, so it is safe to ask it
+            # whether init ever completed and route to the wizard when not.
+            existing_base = f"http://{existing_host}:{port}"
+            landing = _decide_landing_path(False, False, _fetch_backend_initialized(existing_base))
             with suppress(Exception):
-                webbrowser.open(f"http://{existing_host}:{port}/web/")
+                webbrowser.open(existing_base + landing)
             return
     _ = lock_handle  # keep a reference so the lock is held for the process lifetime
 
@@ -849,13 +931,20 @@ def main() -> None:
     print(f"[OpenBiliClaw] 数据目录: {project_root}")
     print(f"[OpenBiliClaw] 正在启动后端服务 http://{host}:{port} ...")
 
-    # First launch → open the step-by-step setup wizard; afterwards → the app
-    # itself. When bound to all interfaces, loopback is the address a local
-    # browser can actually hit.
-    landing = "/setup/" if seeded or repair_result.repaired else "/web/"
+    # Landing page opens from a background thread only after /api/health
+    # answers: opening before uvicorn binds showed ERR_CONNECTION_REFUSED, and
+    # the static shells cannot retry a refused first GET. The thread also asks
+    # /api/init-status so a configured-but-never-initialized relaunch lands on
+    # the wizard instead of relying on /web's onboarding gate alone. When bound
+    # to all interfaces, loopback is the address a local browser can hit.
     browser_host = "127.0.0.1" if host == "0.0.0.0" else host  # noqa: S104
-    with suppress(Exception):
-        webbrowser.open(f"http://{browser_host}:{port}{landing}")
+    threading.Thread(
+        target=_open_landing_page_when_ready,
+        args=(f"http://{browser_host}:{port}",),
+        kwargs={"seeded": seeded, "repaired": repair_result.repaired},
+        name="obc-open-landing",
+        daemon=True,
+    ).start()
 
     # Start the server
     import uvicorn

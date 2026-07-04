@@ -190,6 +190,7 @@
           <p class="progress-label" id="initProgressLabel">等待开始</p>
         </div>
         <div class="msg" id="initReason"></div>
+        <div class="msg" id="initEscape">后台会继续补齐首轮内容池，你可以<a href="/web">先进入应用 →</a>，首池就绪后推荐会自动出现。</div>
         <div class="row-actions">
           <button class="ghost" id="backInit">← 上一步</button>
           <button class="primary" id="startInit">开始初始化</button>
@@ -248,7 +249,7 @@
       { key: "reddit", label: "Reddit" },
     ];
     const INIT_REASON_TEXT = {
-      unsupported_runtime: "当前运行环境不支持图形化初始化，请改用 CLI 初始化入口。",
+      unsupported_runtime: "Docker / 容器环境不支持在网页里启动初始化。配置和前置检查在这里完成后，请在宿主机运行：docker exec -it openbiliclaw-backend openbiliclaw init",
       already_running: "初始化正在进行中。",
       bilibili_not_logged_in: "还没检测到 B站 登录。",
       llm_not_ready: "AI 服务还没配好或当前不可用。",
@@ -267,6 +268,10 @@
     let step = 0, biliConnected = false, biliPoll = null, initPoll = null, initSocket = null;
     let lastAutoModel = "";
     let initPollInFlight = false, initPollPending = false;
+    // Providers whose api_key is already persisted server-side (GET /api/config
+    // returns it masked). Lets a relaunch save step 0 without re-pasting the
+    // key: PUT /api/config only touches fields present in the payload.
+    const savedKeyProviders = new Set();
 
     function setStep(n) {
       step = n;
@@ -285,6 +290,7 @@
       const isOllama = p === "ollama";
       const isCompat = p === "openai_compatible";
       const isClaude = p === "claude";
+      $("#apiKey").placeholder = savedKeyProviders.has(p) ? "已保存，留空则沿用当前 Key" : "粘贴你的 API Key";
       $("#keyWrap").style.display = isOllama ? "none" : "block";
       // Claude 也开放 Base URL（可选，第三方 Anthropic 协议网关，见 issue #72）
       $("#baseWrap").style.display = (isCompat || isClaude) ? "block" : "none";
@@ -316,7 +322,7 @@
       const apiKey = $("#apiKey").value.trim();
       const baseUrl = $("#baseUrl").value.trim();
       const model = $("#model").value.trim();
-      if (provider !== "ollama" && !apiKey) { showMsg("#msg0", "请先填入 API Key（本地 Ollama 才可免 key）。", "err"); return; }
+      if (provider !== "ollama" && !apiKey && !savedKeyProviders.has(provider)) { showMsg("#msg0", "请先填入 API Key（本地 Ollama 才可免 key）。", "err"); return; }
       if (provider === "openai_compatible" && !baseUrl) { showMsg("#msg0", "OpenAI 兼容接口需要填 Base URL。", "err"); return; }
       if (!model) { showMsg("#msg0", "请填写模型名。", "err"); return; }
 
@@ -338,6 +344,13 @@
         const r = await fetch("/api/config", {
           method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
         });
+        if (r.status === 401) {
+          // Remote browser + auth enabled: /api/config is session-gated (only
+          // the init endpoints are public). Point at the login path instead of
+          // dead-ending on a bare HTTP 401.
+          showMsg("#msg0", '后端开启了访问密码，当前浏览器还没登录。先打开 <a href="/web">/web</a> 输入访问密码登录，再回到本页重试；或直接在运行后端的电脑上完成设置。', "err");
+          return;
+        }
         if (!r.ok) throw new Error("HTTP " + r.status + " " + (await r.text()).slice(0, 200));
         const label = provider === "ollama" ? "本地 Ollama" : provider;
         $("#doneLlm").textContent = "已连接 · " + label;
@@ -382,13 +395,20 @@
       // B站 login only blocks when bilibili is among the checked sources.
       const biliSelected = selectedSources ? selectedSources.includes("bilibili") : true;
       const embeddingRequired = Boolean(prereq.embedding_required);
+      // Label must state the ACTUAL probe result — a fixed "已登录" item name
+      // reads as "logged in" the moment the row stops being a red ✗.
+      const biliOk = Boolean(prereq.bilibili_logged_in);
+      const biliState = biliOk ? "B站 已登录" : "B站 登录检测未通过";
+      const biliDetail = String(prereq.bilibili_detail || "").trim();
       return [
         {
           key: "bilibili",
-          label: biliSelected ? "B站 已登录" : "B站 已登录（未勾选 B 站，可跳过）",
-          ok: Boolean(prereq.bilibili_logged_in),
+          label: biliSelected ? biliState : `${biliState}（未勾选 B 站，可跳过）`,
+          ok: biliOk,
           hard: biliSelected,
-          hint: "在浏览器里登录 bilibili.com，扩展会自动把 Cookie 同步给后端；不想接 B 站也可以直接取消勾选。",
+          hint:
+            (biliDetail ? `${biliDetail} ` : "") +
+            "在浏览器里登录 bilibili.com，扩展会自动把 Cookie 同步给后端；不想接 B 站也可以直接取消勾选。",
         },
         {
           key: "llm",
@@ -512,6 +532,9 @@
       $("#startInit").disabled = true;
       $("#startInit").textContent = "整理首轮内容…";
       setInitReason("等第一批内容入池可刷后，初始化才会完成。", "info");
+      // Escape hatch: replenishment can be slow (or stuck) — never park the
+      // user on a disabled button with no way out of the wizard.
+      $("#initEscape").className = "msg show info";
     }
 
     function progressView(status) {
@@ -536,6 +559,7 @@
 
     function renderInitProgress(status) {
       $("#initSources").style.display = "none";
+      $("#initEscape").className = "msg";
       $("#initProgress").hidden = false;
       const view = progressView(status);
       $("#initProgressBar").style.width = `${view.pct}%`;
@@ -547,6 +571,7 @@
     function renderInitIdle() {
       clearInitPoll();
       renderInitSources();
+      $("#initEscape").className = "msg";
       $("#initSources").style.display = "";
       $("#initChecklist").innerHTML = '<li class="init-hint-row">点「开始初始化」会先检查 AI 服务 / 向量模型，以及所选平台的登录状态，通过才开始。</li>';
       $("#initProgress").hidden = true;
@@ -735,13 +760,19 @@
       location.href = "/web";
     }
 
-    // If already configured (e.g. opened by mistake on a set-up install), offer the app.
+    // Resume where the user actually is: prefill saved config, then ask
+    // /api/init-status — a reload mid-init must re-attach to the live progress
+    // instead of silently landing on step 0, and an initialized backend goes
+    // straight to done / first-pool waiting.
     (async function guard() {
       try {
         const r = await fetch("/api/config");
         if (r.ok) {
           const data = await r.json();
           const llm = (data.config || data)?.llm || {};
+          for (const [name, cfg] of Object.entries(llm)) {
+            if (cfg && typeof cfg === "object" && String(cfg.api_key || "").trim()) savedKeyProviders.add(name);
+          }
           const prov = llm.default_provider || "";
           const providerCfg = (llm[prov] && typeof llm[prov] === "object") ? llm[prov] : {};
           const hasKey = prov && (prov === "ollama" || providerCfg.api_key);
@@ -755,6 +786,26 @@
         }
       } catch {}
       renderProvider();
+      try {
+        const status = await fetchInitStatus();
+        if (status.running) {
+          setStep(2);
+          renderInitProgress(status);
+          connectInitStream();
+          scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_POLL_MS);
+          return;
+        }
+        if (status.initialized) {
+          if (await firstInitPoolReady()) {
+            setStep(3);
+            return;
+          }
+          setStep(2);
+          renderWaitingForFirstPool();
+          connectInitStream();
+          scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_POLL_MS);
+        }
+      } catch {}
     })();
 
     $("#provider").addEventListener("change", renderProvider);
