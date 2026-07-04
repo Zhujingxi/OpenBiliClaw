@@ -1988,6 +1988,7 @@ def create_app(
             prerequisites=InitPrerequisitesOut(
                 bilibili_logged_in=(bili == "ok"),
                 bilibili_check=bili,
+                bilibili_detail=prereqs.peek_bilibili_detail() if bili == "failed" else "",
                 llm_ready=chat,
                 embedding_ready=embedding,
                 embedding_required=embedding_required,
@@ -2200,7 +2201,13 @@ def create_app(
             bili = await ctx.init_prereqs.bilibili_check()
             if bili != "ok":
                 coord.reset_to_idle(run_id, reason="bilibili_not_logged_in")
-                return JSONResponse({"error": "bilibili_not_logged_in"}, status_code=409)
+                return JSONResponse(
+                    {
+                        "error": "bilibili_not_logged_in",
+                        "detail": ctx.init_prereqs.peek_bilibili_detail(),
+                    },
+                    status_code=409,
+                )
         chat = await ctx.init_prereqs.chat_ready()
         if not chat:
             coord.reset_to_idle(run_id, reason="llm_not_ready")
@@ -2346,7 +2353,7 @@ def create_app(
         config, diagnostics = load_config_with_diagnostics()
         # 1) Validate the cookie if requested. We use the same auth
         # manager the CLI's interactive wizard uses, for consistency.
-        auth_manager = AuthManager(data_dir=config.data_path)
+        auth_manager = AuthManager(data_dir=config.data_path, proxy=config.bilibili.proxy or None)
         if payload.validate_with_bilibili:
             status = await auth_manager.validate_cookie(cookie_value)
             if not status.authenticated:

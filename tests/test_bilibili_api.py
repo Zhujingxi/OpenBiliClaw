@@ -788,3 +788,41 @@ async def test_get_video_info_returns_defaults_when_data_is_null() -> None:
     assert info.title == ""
     assert info.up_name == ""
     assert info.view_count == 0
+
+
+def test_client_bypasses_env_and_system_proxies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """B站 traffic must never inherit env/system proxies: proxy exit IPs trip
+    B站 risk control and a valid cookie reads as "not logged in" (field
+    report 2026-07). trust_env stays off; proxy=None means direct."""
+    captured: dict[str, object] = {}
+    real_async_client = httpx.AsyncClient
+
+    def _capture(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        captured.update(kwargs)
+        return real_async_client(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("openbiliclaw.bilibili.api.httpx.AsyncClient", _capture)
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+
+    client = BilibiliAPIClient(cookie="SESSDATA=abc")
+
+    assert captured["trust_env"] is False
+    assert captured["proxy"] is None
+    assert client._proxy is None
+
+
+def test_client_honors_explicit_proxy_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+    real_async_client = httpx.AsyncClient
+
+    def _capture(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        captured.update(kwargs)
+        return real_async_client(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("openbiliclaw.bilibili.api.httpx.AsyncClient", _capture)
+
+    client = BilibiliAPIClient(cookie="", proxy="http://10.0.0.1:8080")
+
+    assert captured["proxy"] == "http://10.0.0.1:8080"
+    assert captured["trust_env"] is False
+    assert client._proxy == "http://10.0.0.1:8080"

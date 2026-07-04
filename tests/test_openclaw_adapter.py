@@ -730,8 +730,9 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
             self.database = database
 
     class FakeBilibiliClient:
-        def __init__(self, *, cookie: str) -> None:
+        def __init__(self, *, cookie: str, proxy: str | None = None) -> None:
             self.cookie = cookie
+            self.proxy = proxy
 
     class FakeDiscoveryEngine:
         def __init__(
@@ -771,7 +772,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
             recommendation=SimpleNamespace(provider="", model=""),
             evaluation=SimpleNamespace(provider="", model="gpt-4o-mini"),
         ),
-        bilibili=SimpleNamespace(cookie="raw-cookie"),
+        bilibili=SimpleNamespace(cookie="raw-cookie", proxy=""),
         sources=SimpleNamespace(
             xiaohongshu=SimpleNamespace(enabled=False),
             douyin=SimpleNamespace(enabled=False),

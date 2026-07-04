@@ -313,6 +313,7 @@ model    = "deepseek-v4-flash"
 |----|------|--------|------|
 | `auth_method` | string | `"cookie"` | 认证方式：`cookie` / `qrcode` / `none` |
 | `cookie` | string | `""` | 浏览器 Cookie（推荐通过 `auth login` 命令设置） |
+| `proxy` | string | `""` | B站 请求专用代理（v0.3.153+）。留空 = 恒直连：客户端忽略环境变量与系统代理（代理出口 IP 常触发 B站 风控，导致已登录仍显示"未登录"）。仅当网络无法直连 B站 时才填，如 `"http://127.0.0.1:7890"` |
 
 ### `[bilibili.browser]`
 

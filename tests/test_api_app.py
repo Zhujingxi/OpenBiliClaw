@@ -894,12 +894,13 @@ class TestBackendAPI:
                 self.concurrency = concurrency
 
         class FakeBilibiliClient:
-            def __init__(self, *, cookie: str) -> None:
+            def __init__(self, *, cookie: str, proxy: str | None = None) -> None:
                 self.cookie = cookie
+                self.proxy = proxy
 
         fake_config = SimpleNamespace(
             data_path=Path("/tmp/openbiliclaw-test-data"),
-            bilibili=SimpleNamespace(cookie=""),
+            bilibili=SimpleNamespace(cookie="", proxy=""),
         )
 
         monkeypatch.setattr("openbiliclaw.config.load_config", lambda: fake_config)
@@ -1052,8 +1053,9 @@ class TestBackendAPI:
                 self.concurrency = concurrency
 
         class FakeBilibiliClient:
-            def __init__(self, *, cookie: str) -> None:
+            def __init__(self, *, cookie: str, proxy: str | None = None) -> None:
                 self.cookie = cookie
+                self.proxy = proxy
 
         class FakeSoulEngine:
             def __init__(
@@ -1146,7 +1148,9 @@ class TestBackendAPI:
 
         fake_config = SimpleNamespace(
             data_path=Path("/tmp/openbiliclaw-test-data"),
-            bilibili=SimpleNamespace(cookie="", browser_executable="", browser_headed=False),
+            bilibili=SimpleNamespace(
+                cookie="", proxy="", browser_executable="", browser_headed=False
+            ),
             llm=SimpleNamespace(concurrency=3),
             sources=SimpleNamespace(
                 browser_cdp_url="",
@@ -9589,6 +9593,9 @@ class _FakeInitPrereqs:
     def peek_bilibili(self) -> str:
         return self._bili
 
+    def peek_bilibili_detail(self) -> str:
+        return "" if self._bili == "ok" else "检测请求失败（stub 网络错误）。"
+
     def peek_chat(self) -> bool:
         return self._chat
 
@@ -10181,6 +10188,9 @@ class TestGuidedInitEndpoints:
         assert body["can_start"] is True
         assert body["reason"] == "bilibili_not_logged_in"
         assert body["prerequisites"]["bilibili_logged_in"] is False
+        # The probe's failure reason rides along so the UI can distinguish
+        # an expired cookie from a proxy-broken probe (field report 2026-07).
+        assert body["prerequisites"]["bilibili_detail"] == "检测请求失败（stub 网络错误）。"
 
     def test_init_status_llm_still_hard_gates_can_start(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient

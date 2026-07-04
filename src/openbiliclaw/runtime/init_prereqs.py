@@ -36,6 +36,18 @@ _BILI_OK_TTL = 60.0
 _BILI_FAIL_TTL = 10.0
 _BILI_PROBE_TIMEOUT = 12.0
 
+# A cookie can be perfectly valid while the *probe request* dies in transit.
+# The client already bypasses env/system proxies (BilibiliAPIClient
+# trust_env=False — proxy exits trip B站 risk control; field report 2026-07),
+# so a transport failure here means direct connectivity itself is broken:
+# genuine network outage, a TUN/global-mode proxy intercepting at the network
+# layer, or a misconfigured [bilibili].proxy override.
+_BILI_NETWORK_HINT = (
+    "检测已绕过系统代理直连 B站 仍失败：请检查本机网络；"
+    "TUN / 全局模式代理请为 bilibili.com 添加直连分流规则；"
+    "如果你的网络必须走代理才能访问 B站，可在 config.toml 的 [bilibili] proxy 单独指定。"
+)
+
 _PLATFORM_SOURCE_FIELDS = (
     "bilibili",
     "xiaohongshu",
@@ -56,6 +68,7 @@ class InitPrereqs:
         self._chat_at = float("-inf")
         self._chat_lock = asyncio.Lock()
         self._bili_value = "checking"
+        self._bili_detail = ""
         self._bili_at = float("-inf")
         self._bili_lock = asyncio.Lock()
 
@@ -70,6 +83,10 @@ class InitPrereqs:
     def peek_bilibili(self) -> str:
         """Last cached Bilibili probe result, without firing a new probe."""
         return self._bili_value
+
+    def peek_bilibili_detail(self) -> str:
+        """Why the last Bilibili probe failed ("" when it succeeded)."""
+        return self._bili_detail
 
     async def chat_ready(self) -> bool:
         """Whether the default chat provider can *currently* complete.
@@ -119,6 +136,7 @@ class InitPrereqs:
         if cfg is not None:
             cookie = str(getattr(getattr(cfg, "bilibili", None), "cookie", "") or "").strip()
         if cfg is None or not cookie:
+            self._bili_detail = "后端还没有收到 B站 Cookie。"
             return "failed"
 
         ttl = _BILI_OK_TTL if self._bili_value == "ok" else _BILI_FAIL_TTL
@@ -129,15 +147,38 @@ class InitPrereqs:
             ttl = _BILI_OK_TTL if self._bili_value == "ok" else _BILI_FAIL_TTL
             if self._bili_value != "checking" and time.monotonic() - self._bili_at < ttl:
                 return self._bili_value
+            proxy = str(getattr(getattr(cfg, "bilibili", None), "proxy", "") or "").strip()
+            # The hint must match the actual transport: default is a direct
+            # connection (client bypasses env/system proxies), but an explicit
+            # [bilibili].proxy override means the failure is on THAT proxy.
+            network_hint = (
+                f"当前经 config.toml [bilibili] proxy（{proxy}）检测 B站 失败："
+                "请确认该代理可达且能访问 B站，或清空该配置改回直连。"
+                if proxy
+                else _BILI_NETWORK_HINT
+            )
             try:
-                manager = AuthManager(data_dir=cfg.data_path)
+                manager = AuthManager(data_dir=cfg.data_path, proxy=proxy or None)
                 status = await asyncio.wait_for(
                     manager.validate_cookie(cookie), timeout=_BILI_PROBE_TIMEOUT
                 )
-                self._bili_value = "ok" if status.authenticated else "failed"
-            except Exception:
-                logger.debug("Bilibili cookie probe errored/timed out", exc_info=True)
+                if status.authenticated:
+                    self._bili_value, self._bili_detail = "ok", ""
+                else:
+                    self._bili_value = "failed"
+                    message = str(getattr(status, "message", "") or "").strip()
+                    if getattr(status, "network_error", False):
+                        self._bili_detail = f"检测请求失败（{message}）。{network_hint}"
+                    else:
+                        self._bili_detail = message or "当前 Cookie 未登录或已失效。"
+            except TimeoutError:
+                logger.debug("Bilibili cookie probe timed out", exc_info=True)
                 self._bili_value = "failed"
+                self._bili_detail = f"检测超时，B站 接口未在时限内响应。{network_hint}"
+            except Exception as exc:
+                logger.debug("Bilibili cookie probe errored", exc_info=True)
+                self._bili_value = "failed"
+                self._bili_detail = f"检测请求失败（{exc}）。{network_hint}"
             self._bili_at = time.monotonic()
             return self._bili_value
 

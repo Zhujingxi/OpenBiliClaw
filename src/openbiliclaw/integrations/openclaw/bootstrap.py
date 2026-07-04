@@ -134,7 +134,8 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         cookie=resolve_runtime_cookie(
             data_dir=config.data_path,
             configured_cookie=config.bilibili.cookie,
-        )
+        ),
+        proxy=config.bilibili.proxy or None,
     )
 
     from openbiliclaw.discovery.engine import DiscoveryConcurrencyController

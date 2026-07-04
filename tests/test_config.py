@@ -86,6 +86,7 @@ class TestConfigDefaults:
         assert config.llm.default_provider == "deepseek"
         assert config.llm.concurrency == 3
         assert config.bilibili.auth_method == "cookie"
+        assert config.bilibili.proxy == ""  # direct connection by default
         assert config.scheduler.enabled is True
         assert config.scheduler.discovery_cron == "0 */8 * * *"
         assert config.scheduler.pool_target_count == 300
@@ -188,6 +189,18 @@ manage_ollama = true
         assert "port = 19090" in rendered
         assert loaded.api.host == "127.0.0.1"
         assert loaded.api.port == 19090
+
+    def test_bilibili_proxy_round_trips_through_toml(self, tmp_path: Path) -> None:
+        config = Config()
+        config.bilibili.proxy = "http://127.0.0.1:7890"
+
+        target = tmp_path / "config.toml"
+        save_config(config, target)
+        rendered = target.read_text(encoding="utf-8")
+        loaded = load_config(target)
+
+        assert 'proxy = "http://127.0.0.1:7890"' in rendered
+        assert loaded.bilibili.proxy == "http://127.0.0.1:7890"
 
     def test_data_path_relative(self) -> None:
         config = Config(data_dir="data")

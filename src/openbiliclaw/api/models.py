@@ -59,6 +59,7 @@ class InitPrerequisitesOut(BaseModel):
 
     bilibili_logged_in: bool = False
     bilibili_check: str = "checking"  # ok | failed | checking
+    bilibili_detail: str = ""  # why the last probe failed ("" when ok)
     llm_ready: bool = False
     embedding_ready: bool = False
     embedding_required: bool = False

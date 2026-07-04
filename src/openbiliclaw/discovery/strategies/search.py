@@ -288,6 +288,7 @@ class SearchStrategy(DiscoveryStrategy):
             return BilibiliAPIClient(
                 cookie=str(getattr(self.bilibili_client, "_cookie", "")),
                 min_request_interval=0.8,
+                proxy=getattr(self.bilibili_client, "_proxy", None),
             )
         except Exception:
             logger.debug("Could not create dedicated search client, using shared")

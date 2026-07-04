@@ -91,7 +91,7 @@ def api_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
     fake_config = SimpleNamespace(
         data_path=tmp_path,
-        bilibili=SimpleNamespace(cookie="", browser_executable="", browser_headed=False),
+        bilibili=SimpleNamespace(cookie="", proxy="", browser_executable="", browser_headed=False),
         sources=SimpleNamespace(
             browser_cdp_url="",
             browser_headed=False,

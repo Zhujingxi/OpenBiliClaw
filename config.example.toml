@@ -244,6 +244,11 @@ model = ""
 auth_method = "cookie"
 # Cookie string (from browser)
 cookie = ""
+# B站 请求专用代理（默认留空 = 恒直连）。
+# 后端访问 B站 时会忽略环境变量和系统代理——代理出口 IP 常触发 B站 风控，
+# 导致明明已登录却显示"未登录"。只有你的网络确实无法直连 B站 时才需要填，
+# 例如 "http://127.0.0.1:7890"。
+proxy = ""
 
 [bilibili.browser]
 # agent-browser executable path (leave empty for global install)

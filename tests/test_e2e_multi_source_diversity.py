@@ -445,7 +445,9 @@ class TestMultiSourceDiversityE2E:
 
             fake_config = SimpleNamespace(
                 data_path=Path(tmpdir),
-                bilibili=SimpleNamespace(cookie="", browser_executable="", browser_headed=False),
+                bilibili=SimpleNamespace(
+                    cookie="", proxy="", browser_executable="", browser_headed=False
+                ),
                 sources=SimpleNamespace(
                     browser_cdp_url="",
                     browser_headed=False,

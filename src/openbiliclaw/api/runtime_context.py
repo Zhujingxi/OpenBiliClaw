@@ -398,7 +398,8 @@ class RuntimeContext:
             cookie=resolve_runtime_cookie(
                 data_dir=new_config.data_path,
                 configured_cookie=new_config.bilibili.cookie,
-            )
+            ),
+            proxy=new_config.bilibili.proxy or None,
         )
 
         # 3. Soul engine (reuses stable memory_manager)

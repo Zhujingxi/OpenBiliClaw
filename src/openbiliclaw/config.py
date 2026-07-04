@@ -211,6 +211,11 @@ class BilibiliConfig:
 
     auth_method: str = "cookie"
     cookie: str = ""
+    # Explicit proxy for Bilibili requests only. Empty (default) means
+    # direct connection: the client ignores env/system proxies because
+    # they routinely trip B站 risk control (valid cookie shows as "not
+    # logged in"). Set only if your network cannot reach B站 directly.
+    proxy: str = ""
     browser_executable: str = ""
     browser_headed: bool = False
 
@@ -778,6 +783,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
     bilibili = BilibiliConfig(
         auth_method=bili_raw.get("auth_method", "cookie"),
         cookie=bili_raw.get("cookie", ""),
+        proxy=bili_raw.get("proxy", ""),
         browser_executable=browser_raw.get("executable", ""),
         browser_headed=browser_raw.get("headed", False),
     )
@@ -1971,6 +1977,7 @@ def _render_config_toml(
             "[bilibili]",
             f"auth_method = {_toml_string(config.bilibili.auth_method)}",
             f"cookie = {_toml_string(config.bilibili.cookie)}",
+            f"proxy = {_toml_string(config.bilibili.proxy)}",
             "",
             "[bilibili.browser]",
             f"executable = {_toml_string(config.bilibili.browser_executable)}",

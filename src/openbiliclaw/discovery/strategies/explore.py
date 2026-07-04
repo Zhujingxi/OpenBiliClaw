@@ -355,7 +355,11 @@ class ExploreStrategy(DiscoveryStrategy):
         if not isinstance(self.bilibili_client, BilibiliAPIClient):
             return self.bilibili_client
         try:
-            return BilibiliAPIClient(cookie="", min_request_interval=0.8)
+            return BilibiliAPIClient(
+                cookie="",
+                min_request_interval=0.8,
+                proxy=getattr(self.bilibili_client, "_proxy", None),
+            )
         except Exception:
             logger.debug("Could not create dedicated explore search client, using shared")
         return self.bilibili_client
