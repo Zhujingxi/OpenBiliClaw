@@ -31,6 +31,17 @@ xattr -dr com.apple.quarantine "$APP"
 
 正常。商店版受审核排期影响，通常滞后几天到一两周。想第一时间拿到新功能，从 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 下载 zip 手动安装即可（缺点是需要手动更新）。
 
+### 想用 Docker 部署后端？
+
+不需要克隆源码：下载一个 compose 文件启动预构建镜像（自带 Ollama embedding sidecar），再打开 `http://127.0.0.1:8420/setup/` 完成初始化：
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml
+docker compose -f docker-compose.prebuilt.yml up -d
+```
+
+升级到最新版：`docker compose -f docker-compose.prebuilt.yml pull` 再 `up -d`。源码构建、代理与排查见 [Docker 部署指南](docker-deployment.md)。
+
 ## 连接与初始化
 
 ### 插件显示「后端还没开张」/ 连不上后端？

@@ -342,6 +342,14 @@ git pull
 docker compose up -d --build
 ```
 
+**Q: 启动时报 `container name "/openbiliclaw-backend" is already in use`？**
+
+两个 compose 文件（源码构建的 `docker-compose.yml` 和预构建的 `docker-compose.prebuilt.yml`）管理的是同一组固定容器名。从一种方式切到另一种前，先在旧目录里 `docker compose down`（数据在 named volume 里，不会丢）；或直接移除残留容器后重试：
+
+```bash
+docker rm -f openbiliclaw-backend openbiliclaw-ollama
+```
+
 **Q: 端口 8420 被占用怎么办？**
 
 修改 `docker-compose.yml` 中的端口映射：
