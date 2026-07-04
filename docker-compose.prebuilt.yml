@@ -1,3 +1,19 @@
+# OpenBiliClaw backend via the prebuilt multi-arch image on GHCR.
+#
+# This file is self-contained — no git clone or local build needed:
+#
+#   curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml
+#   docker compose -f docker-compose.prebuilt.yml up -d
+#   # then open http://127.0.0.1:8420/setup/ to finish initialization
+#
+# Upgrade to the newest release:
+#
+#   docker compose -f docker-compose.prebuilt.yml pull
+#   docker compose -f docker-compose.prebuilt.yml up -d
+#
+# To build from source instead (customization / development), use the
+# docker-compose.yml at the repository root — see docs/docker-deployment.md.
+
 services:
   # Ollama sidecar — bundled embedding service so users don't need to
   # install Ollama on their host. Pulls bge-m3 on first start (~568MB,
@@ -5,10 +21,8 @@ services:
   # network at http://ollama:11434. The backend's [llm.embedding] gets
   # seeded to point here automatically on first config bootstrap.
   #
-  # Disable this entire block by removing it (and the depends_on +
-  # OPENBILICLAW_SEED_OLLAMA_DEFAULTS env in the backend service) if
-  # you'd rather run an embedding API key from a cloud provider — see
-  # docs/docker-deployment.md.
+  # Prefer a cloud embedding provider instead? Remove this block plus
+  # the backend's depends_on and OPENBILICLAW_SEED_OLLAMA_DEFAULTS.
   ollama:
     image: ollama/ollama:latest
     container_name: openbiliclaw-ollama
@@ -45,25 +59,17 @@ services:
     restart: unless-stopped
 
   openbiliclaw-backend:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      # The Dockerfile only depends on python:3.11-slim, which is
-      # published as a multi-arch manifest. ``docker compose build``
-      # picks the architecture matching the host (amd64 on Intel,
-      # arm64 on Apple Silicon / Raspberry Pi). To explicitly cross-
-      # build a release image, use buildx:
-      #   docker buildx build --platform linux/amd64,linux/arm64 \
-      #     -t openbiliclaw-backend:vX.Y.Z .
+    # Multi-arch image (linux/amd64 + linux/arm64) published by
+    # .github/workflows/release-docker.yml on every backend release.
+    # Pin a specific version by replacing `latest` with e.g. `0.3.152`.
+    image: ghcr.io/whiteguo233/openbiliclaw-backend:latest
     container_name: openbiliclaw-backend
     depends_on:
       # service_started (not service_healthy) on purpose: the sidecar is
-      # only "healthy" once bge-m3 finished downloading (~568MB). If that
-      # first pull fails or crawls on a slow network, a service_healthy
-      # gate would keep the backend from EVER starting — the user gets a
-      # dead install with no UI to see why. Instead the backend boots
-      # immediately; the /setup/ wizard and init prereq checks surface
-      # "embedding not ready yet" until the pull completes.
+      # only "healthy" once bge-m3 finished downloading. A health gate
+      # here would keep the backend from ever starting when the first
+      # pull fails — instead the backend boots immediately and /setup/
+      # surfaces "embedding not ready yet" until the pull completes.
       ollama:
         condition: service_started
     environment:
@@ -73,32 +79,14 @@ services:
       OPENBILICLAW_PROXY_PORT: ${OPENBILICLAW_PROXY_PORT:-7897}
       OPENBILICLAW_PROXY_TIMEOUT: ${OPENBILICLAW_PROXY_TIMEOUT:-1.0}
       # On first config bootstrap, seed [llm.ollama] base_url and
-      # [llm.embedding] to point at the bundled sidecar above. Lets
-      # Docker users have local embedding out of the box, even if they
-      # later pick OpenAI / Claude / etc for chat. Existing config.toml
-      # is never overwritten.
+      # [llm.embedding] to point at the bundled sidecar above. Existing
+      # config.toml is never overwritten.
       OPENBILICLAW_SEED_OLLAMA_DEFAULTS: "1"
       OPENBILICLAW_OLLAMA_BASE_URL: "http://ollama:11434/v1"
       OPENBILICLAW_EMBEDDING_MODEL: "bge-m3"
-      # OPENBILICLAW_XHS_SIDECAR_URL: http://xhs-sidecar:5556  # sidecar removed — extension extracts metadata from DOM
-    command:
-      - python
-      - -m
-      - openbiliclaw.docker_runtime
-      - openbiliclaw
-      - serve-api
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8420"
-    # ``host.docker.internal`` resolves the host machine from inside
-    # the container. Used by:
-    #   - HTTP proxy auto-detect (OPENBILICLAW_PROXY_HOST)
-    #   - any user that picks "use my host's Ollama instead of the
-    #     bundled sidecar" by overriding OPENBILICLAW_OLLAMA_BASE_URL
-    # Required on Linux Docker; auto-provided by Docker Desktop on
-    # Mac / Windows. The ``host-gateway`` magic value tells the engine
-    # to inject the right address per platform.
+    # ``host.docker.internal`` resolves the host machine from inside the
+    # container (proxy auto-detect, host-side Ollama). Required on Linux
+    # Docker; auto-provided by Docker Desktop on Mac / Windows.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -107,9 +95,6 @@ services:
       - openbiliclaw_config:/app/runtime
       - openbiliclaw_data:/app/runtime/data
       - openbiliclaw_logs:/app/runtime/logs
-    # Compose-level healthcheck mirrors the Dockerfile HEALTHCHECK so
-    # ``docker compose ps`` shows ``healthy`` only when /api/health
-    # returns 200, not just when the container process is alive.
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8420/api/health', timeout=4).status==200 else 1)"]
       interval: 30s

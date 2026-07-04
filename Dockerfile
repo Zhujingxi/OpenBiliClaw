@@ -5,15 +5,33 @@
 # with Docker Desktop (which runs linux containers via WSL2 by default).
 FROM python:3.11-slim
 
+# Link the GHCR package to this repository and make `docker inspect`
+# self-describing.
+LABEL org.opencontainers.image.source="https://github.com/whiteguo233/OpenBiliClaw" \
+      org.opencontainers.image.description="OpenBiliClaw backend — local-first cross-platform AI content discovery agent" \
+      org.opencontainers.image.licenses="MIT"
+
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
-COPY pyproject.toml README.md config.example.toml ./
+# Dependency layer, keyed on pyproject.toml alone: `git pull` + rebuild
+# reuses this cached layer unless the dependency list actually changed.
+# Copying src/ before installing dependencies would invalidate the layer
+# on every source edit and force a full multi-minute reinstall.
+COPY pyproject.toml ./
+RUN python -c "import tomllib, pathlib; deps = tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies']; pathlib.Path('/tmp/requirements.txt').write_text('\n'.join(deps) + '\n')" \
+    && pip install -r /tmp/requirements.txt \
+    && rm /tmp/requirements.txt
+
+COPY README.md config.example.toml ./
 COPY src ./src
 
-RUN pip install .
+# Dependencies are already satisfied by the layer above; this only
+# installs the openbiliclaw package itself, so rebuilds after source
+# changes finish in seconds.
+RUN pip install --no-deps .
 
 EXPOSE 8420
 

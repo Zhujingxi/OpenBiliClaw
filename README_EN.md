@@ -355,13 +355,22 @@ The script needs `git` and Python 3.11+. It clones the repo, then asks for LLM p
 <details>
 <summary>Advanced: Docker deployment</summary>
 
-Good if you already have Docker Desktop installed. v0.3.11+ includes an Ollama embedding sidecar.
+Good if you already have Docker installed; ships with an Ollama embedding sidecar. The prebuilt image needs no source checkout:
+
+```bash
+mkdir -p ~/openbiliclaw && cd ~/openbiliclaw
+curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml
+docker compose -f docker-compose.prebuilt.yml up -d
+# then open http://127.0.0.1:8420/setup/ to finish initialization
+```
+
+Or paste this into an AI coding agent for the terminal wizard + auto-init path:
 
 ```text
 Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/docker-deployment.md to deploy the OpenBiliClaw backend via Docker Compose (use Bash `curl` to fetch the document, NOT WebFetch).
 ```
 
-See the [Docker Deployment Guide](docs/docker-deployment.md). The primary Docker path also goes through `agent_bootstrap.py --mode docker`; after LLM, embedding, Bilibili cookie, and source opt-in confirmations it verifies the AI services and then automatically runs init. `docker exec ... openbiliclaw init` remains an advanced manual fallback.
+Source builds, upgrades, and troubleshooting: [Docker Deployment Guide](docs/docker-deployment.md).
 
 </details>
 

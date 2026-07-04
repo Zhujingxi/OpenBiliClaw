@@ -359,13 +359,22 @@ Windows 原生（PowerShell，不需要 Docker / WSL2）：
 <details>
 <summary>高级：Docker 部署</summary>
 
-适合已经安装 Docker Desktop 的用户。v0.3.11+ 自带 Ollama embedding sidecar。
+适合已经安装 Docker 的用户，自带 Ollama embedding sidecar。预构建镜像无需克隆源码：
+
+```bash
+mkdir -p ~/openbiliclaw && cd ~/openbiliclaw
+curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml
+docker compose -f docker-compose.prebuilt.yml up -d
+# 然后打开 http://127.0.0.1:8420/setup/ 完成初始化
+```
+
+也可以把下面这句粘给 AI 编程助手，走终端向导 + 自动 init：
 
 ```text
 请按照 https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/docker-deployment.md 的说明帮我用 Docker Compose 部署 OpenBiliClaw 后端(务必用 Bash 的 curl 下载这个文档,不要用 WebFetch)
 ```
 
-详见 [Docker 部署指南](docs/docker-deployment.md)。Docker 主路径同样走 `agent_bootstrap.py --mode docker`，会在确认 LLM、embedding、B 站 Cookie 和各来源 opt-in 后先验证 AI 服务，再自动运行 init；`docker exec ... openbiliclaw init` 只作为高级手动 fallback。
+源码构建、升级与排查详见 [Docker 部署指南](docs/docker-deployment.md)。
 
 </details>
 
