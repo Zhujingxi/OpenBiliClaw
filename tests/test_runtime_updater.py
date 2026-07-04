@@ -1037,3 +1037,174 @@ def test_adopt_status_from_skips_transient_state_but_keeps_versions(
     assert status["state"] == "disabled"
     assert status["latest_tag"] == "backend-v0.3.118"
     assert status["last_check_at"] == "2026-06-11T04:43:30+00:00"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://github.com/whiteguo233/OpenBiliClaw.git", "github.com/whiteguo233/openbiliclaw"),
+        ("https://github.com/whiteguo233/OpenBiliClaw", "github.com/whiteguo233/openbiliclaw"),
+        ("https://github.com/whiteguo233/OpenBiliClaw/", "github.com/whiteguo233/openbiliclaw"),
+        ("git@github.com:whiteguo233/OpenBiliClaw.git", "github.com/whiteguo233/openbiliclaw"),
+        ("git@github.com:whiteguo233/OpenBiliClaw", "github.com/whiteguo233/openbiliclaw"),
+        (
+            "ssh://git@github.com/whiteguo233/OpenBiliClaw.git",
+            "github.com/whiteguo233/openbiliclaw",
+        ),
+        ("HTTPS://GitHub.com/WhiteGuo233/OpenBiliClaw.GIT", "github.com/whiteguo233/openbiliclaw"),
+        # Mirror wrappers must NOT collapse to the wrapped GitHub path — a
+        # mirror user allowlists the mirror URL verbatim in config instead,
+        # and the canonical form is stable so it still matches itself.
+        (
+            "https://gh-proxy.com/https://github.com/whiteguo233/OpenBiliClaw.git",
+            "gh-proxy.com/https://github.com/whiteguo233/openbiliclaw",
+        ),
+        ("/Users/someone/workspace/OpenBiliClaw", "/users/someone/workspace/openbiliclaw"),
+        ("", ""),
+    ],
+)
+def test_canonicalize_remote_url(url: str, expected: str) -> None:
+    assert updater._canonicalize_remote_url(url) == expected
+
+
+@pytest.mark.parametrize(
+    "remote_url",
+    [
+        "https://github.com/whiteguo233/OpenBiliClaw",  # .git-less manual clone
+        "git@github.com:whiteguo233/OpenBiliClaw",  # .git-less ssh clone
+        "ssh://git@github.com/whiteguo233/OpenBiliClaw.git",  # explicit ssh scheme
+    ],
+)
+@pytest.mark.asyncio
+async def test_request_apply_accepts_equivalent_remote_spellings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    remote_url: str,
+) -> None:
+    """Clones made without the .git suffix (or via ssh://) must not be
+    rejected as untrusted — exact-string matching used to block them forever."""
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    restarted = False
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(command, 0, f"{remote_url}\n", "")
+        if command == ["git", "status", "--porcelain"]:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command == ["git", "rev-parse", "--git-dir"]:
+            return subprocess.CompletedProcess(command, 0, ".git\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def _restart() -> None:
+        nonlocal restarted
+        restarted = True
+
+    service = updater.AutoUpdateService(enabled=False)
+    monkeypatch.setattr(service, "_run_command", _run_command)
+    monkeypatch.setattr(service, "_restart_process", _restart)
+
+    status_code, payload = await service.request_apply(tag="backend-v0.3.92")
+    if service._apply_task is not None:
+        await asyncio.wait_for(service._apply_task, timeout=0.5)
+
+    assert status_code == 202
+    assert payload["accepted"] is True
+    assert restarted is True
+
+
+@pytest.mark.asyncio
+async def test_request_apply_untrusted_remote_logs_url_and_sets_last_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The guard path used to be fully silent — no log line, empty last_error."""
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService(enabled=False)
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                command, 0, "https://github.com/someone-else/OpenBiliClaw.git\n", ""
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    with caplog.at_level(logging.WARNING, logger="openbiliclaw.runtime.updater"):
+        status_code, payload = await service.request_apply(tag="backend-v0.3.92")
+
+    assert status_code == 409
+    assert payload["reason"] == "untrusted_remote"
+    assert service.get_update_status()["last_error"] == "untrusted_remote"
+    assert any("someone-else/OpenBiliClaw" in record.getMessage() for record in caplog.records), (
+        "the rejected remote URL must appear in the log"
+    )
+
+
+def test_detect_install_mode_docker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Container marker wins over a co-located git checkout: the image is the
+    code, so fast-forwarding a mounted checkout would not update the runtime."""
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("OPENBILICLAW_IN_CONTAINER", "1")
+    assert updater.detect_install_mode() == "docker"
+
+
+@pytest.mark.asyncio
+async def test_request_apply_refuses_docker_install(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("OPENBILICLAW_IN_CONTAINER", "1")
+    service = updater.AutoUpdateService(enabled=True)
+
+    status_code, payload = await service.request_apply(tag="backend-v0.3.92")
+
+    assert status_code == 409
+    assert payload["state"] == "unsupported"
+    assert payload["reason"] == "docker_install_mode"
+    assert service.get_update_status()["last_error"] == "docker_install_mode"
+
+
+@pytest.mark.asyncio
+async def test_docker_install_polls_check_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Docker installs poll for new images regardless of the auto-apply toggle
+    and never attempt an apply."""
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("OPENBILICLAW_IN_CONTAINER", "1")
+    service = updater.AutoUpdateService(enabled=False)
+    assert service._background_loop_enabled() is True
+
+    applied: list[str] = []
+
+    async def _check_now() -> dict[str, object]:
+        return {
+            "state": "update_available",
+            "current_version": "0.3.152",
+            "latest_tag": "backend-v0.3.153",
+        }
+
+    async def _request_apply(*, tag: str = ""):
+        applied.append(tag)
+        return 202, {}
+
+    monkeypatch.setattr(service, "check_now", _check_now)
+    monkeypatch.setattr(service, "request_apply", _request_apply)
+
+    result = await service.check_and_update_if_due()
+
+    assert result["checked"] is True
+    assert result["updated"] is False
+    assert result["reason"] == "docker_install_mode"
+    assert applied == []

@@ -77,6 +77,19 @@ docker compose -f docker-compose.prebuilt.yml up -d
 
 后端自动更新有安全守卫：本地有未提交改动（`dirty_worktree`）、remote 不受信任（`untrusted_remote`）、分支无法快进（`branch_not_fast_forwardable`）等情况会拒绝更新，插件会展示具体原因。源码安装用户可进仓库目录手动处理后重试（如 `git status` 清理本地改动）。
 
+### 一直提示「git 远端不在允许列表，更新被阻止」？
+
+老版本（≤0.3.153）的允许列表按**精确字符串**匹配 `origin` 地址，`git clone` 时少写 `.git` 后缀、或用了与列表拼法不一致的 HTTPS/SSH 地址都会被永久拦住——而且被拦住的安装无法通过自动更新拿到修复版本，需要一次手动解锁（进入安装目录执行）：
+
+```bash
+git remote -v                      # 先看实际的 origin 地址
+git pull --ff-only                 # 手动拉一次最新代码即可解锁
+# 或者把 origin 改成官方地址后重试自动更新：
+git remote set-url origin https://github.com/whiteguo233/OpenBiliClaw.git
+```
+
+新版本起允许列表按规范化形式比较（`.git` 后缀可省、HTTPS/SSH 拼法等价、大小写不敏感），正常克隆不会再触发；通过 GitHub 镜像克隆的安装把镜像地址加入 `config.toml` 的 `[scheduler] auto_update_allowed_remotes` 即可。被拒绝时后端日志会打出实际的 remote 地址和修复命令。
+
 ### 我的数据存在哪里？会上传吗？
 
 所有数据存在本机的一个 SQLite 文件里，数据目录为 `~/OpenBiliClaw`（macOS / Linux）或 `%USERPROFILE%\OpenBiliClaw`（Windows），升级和卸载不会动它。插件不会把数据发送到 OpenBiliClaw 开发者运营的服务器；只有你配置了云端 LLM / embedding 时，相关内容才会按你的配置发给对应服务商。详见 [隐私政策](privacy.md)。

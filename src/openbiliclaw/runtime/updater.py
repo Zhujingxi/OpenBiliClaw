@@ -28,6 +28,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 
 import openbiliclaw
+from openbiliclaw.docker_runtime import is_running_in_container
 
 logger = logging.getLogger(__name__)
 
@@ -86,12 +87,19 @@ def detect_install_mode() -> str:
     - ``frozen``: PyInstaller desktop bundle. There is no git checkout to
       fast-forward, so backend self-update is structurally unsupported —
       users update by installing a newer desktop package.
+    - ``docker``: running inside a container. The code is baked into the
+      image, so in-place self-update is impossible — users upgrade by
+      pulling a newer image. Checked before ``git`` on purpose: even if a
+      checkout is mounted into the container, fast-forwarding it would not
+      change the code the running image executes.
     - ``git``: the project root is a git checkout (one-line installer,
       agent install, or dev checkout) — the auto-update flow can apply.
     - ``unsupported``: anything else (e.g. a bare pip install).
     """
     if getattr(sys, "frozen", False):
         return "frozen"
+    if is_running_in_container():
+        return "docker"
     if (_project_root() / ".git").exists():
         return "git"
     return "unsupported"
@@ -196,6 +204,43 @@ def _remote_has_credentials(remote_url: str) -> bool:
     if parsed.scheme in {"http", "https"}:
         return bool(parsed.username or parsed.password)
     return False
+
+
+def _canonicalize_remote_url(url: str) -> str:
+    """Reduce equivalent git remote spellings to one comparable form.
+
+    ``https://github.com/owner/repo``, ``https://github.com/owner/repo.git``,
+    ``git@github.com:owner/repo.git`` and ``ssh://git@github.com/owner/repo``
+    all canonicalize to ``github.com/owner/repo`` (lowercase — GitHub treats
+    owner/repo case-insensitively). Exact-string matching used to reject
+    every clone made without the ``.git`` suffix, permanently blocking
+    auto-update on otherwise-legitimate installs.
+
+    Mirror/proxy wrappers (``https://mirror.example/https://github.com/...``)
+    intentionally do NOT canonicalize to the wrapped GitHub URL — trusting
+    them automatically would let any host that embeds the official path into
+    its URL serve tags. Mirror users allowlist their mirror URL explicitly in
+    ``[scheduler] auto_update_allowed_remotes``.
+    """
+    text = url.strip().lower().rstrip("/")
+    if not text:
+        return ""
+    if "://" in text:
+        scheme, _, rest = text.partition("://")
+        if scheme in {"http", "https", "ssh", "git", "git+ssh"}:
+            head, slash, tail = rest.partition("/")
+            host_path = head.rsplit("@", 1)[-1] + slash + tail
+        else:
+            host_path = text
+    elif ":" in text.split("/", 1)[0]:
+        # scp-like syntax: [user@]host:path
+        head, _, tail = text.partition(":")
+        host_path = f"{head.rsplit('@', 1)[-1]}/{tail.lstrip('/')}"
+    else:
+        host_path = text
+    if host_path.endswith(".git"):
+        host_path = host_path[: -len(".git")]
+    return host_path.rstrip("/")
 
 
 def _is_tls_verification_error(exc: Exception) -> bool:
@@ -357,12 +402,14 @@ class AutoUpdateService:
 
     async def check_and_update_if_due(self) -> dict[str, object]:
         """Run the update check only when the configured interval has elapsed."""
-        if detect_install_mode() == "frozen":
-            # Desktop bundles can't self-apply (the binary IS the code; there is
-            # no git checkout of their own to fast-forward), but they still poll
-            # for new installer releases — regardless of the auto-update toggle,
-            # which only governs auto-apply — so the settings page and runtime
-            # stream can nudge the user to download the next desktop package.
+        mode = detect_install_mode()
+        if mode in ("frozen", "docker"):
+            # Desktop bundles and docker containers can't self-apply (the
+            # binary / image IS the code; there is no git checkout of their
+            # own to fast-forward), but they still poll for new releases —
+            # regardless of the auto-update toggle, which only governs
+            # auto-apply — so the settings page and runtime stream can nudge
+            # the user to download the next installer / pull the next image.
             # ``request_apply`` refuses non-git installs separately, so this
             # can never mutate a co-located git checkout.
             if not self._is_due():
@@ -371,7 +418,9 @@ class AutoUpdateService:
             return {
                 "checked": True,
                 "updated": False,
-                "reason": "unsupported_install_mode",
+                "reason": (
+                    "docker_install_mode" if mode == "docker" else "unsupported_install_mode"
+                ),
                 "current_version": backend["current_version"],
                 "remote_version": backend["latest_tag"],
             }
@@ -397,7 +446,8 @@ class AutoUpdateService:
                 "current_version": backend["current_version"],
                 "remote_version": backend["latest_tag"],
             }
-        if detect_install_mode() != "git":
+        mode = detect_install_mode()
+        if mode != "git":
             # Non-git installs surface the update but never attempt to apply —
             # request_apply would refuse anyway; returning here keeps the
             # freshly-set update_available state from being clobbered by an
@@ -405,7 +455,9 @@ class AutoUpdateService:
             return {
                 "checked": True,
                 "updated": False,
-                "reason": "unsupported_install_mode",
+                "reason": (
+                    "docker_install_mode" if mode == "docker" else "unsupported_install_mode"
+                ),
                 "current_version": backend["current_version"],
                 "remote_version": backend["latest_tag"],
             }
@@ -500,6 +552,7 @@ class AutoUpdateService:
             if not target_tag:
                 self._state = "blocked"
                 self._reason = "missing_target_tag"
+                self._update_error = "missing_target_tag"
                 return 409, self._apply_response(
                     state="blocked",
                     reason="missing_target_tag",
@@ -510,12 +563,16 @@ class AutoUpdateService:
             if guard_reason:
                 self._state = (
                     "unsupported"
-                    if guard_reason.startswith("unsupported_")
+                    if guard_reason in ("unsupported_install_mode", "docker_install_mode")
                     else "error"
                     if guard_reason == "github_unreachable"
                     else "blocked"
                 )
                 self._reason = guard_reason
+                # Surface the refusal in ``last_error`` too — the guard path
+                # used to be fully silent, leaving the status card's 最近错误
+                # empty while the apply kept failing.
+                self._update_error = guard_reason
                 return 409, self._apply_response(
                     state=self._state,
                     reason=guard_reason,
@@ -524,6 +581,7 @@ class AutoUpdateService:
 
             self._state = "applying"
             self._reason = "none"
+            self._update_error = ""
             self._apply_task = asyncio.create_task(self._apply_update_to_tag(target_tag))
             return 202, self._apply_response(
                 state="applying",
@@ -584,13 +642,14 @@ class AutoUpdateService:
         self._update_error = other._update_error
 
     def _background_loop_enabled(self) -> bool:
-        """The loop runs when auto-update is on — or always on frozen bundles.
+        """The loop runs when auto-update is on — or always on frozen/docker.
 
-        Frozen desktop installs run a check-only loop (the toggle governs
-        auto-apply, which frozen can never do) so users get a "new installer
-        available, go download it" reminder without opting in to anything.
+        Frozen desktop installs and docker containers run a check-only loop
+        (the toggle governs auto-apply, which neither can ever do) so users
+        get a "new installer / image available" reminder without opting in
+        to anything.
         """
-        return self.enabled or detect_install_mode() == "frozen"
+        return self.enabled or detect_install_mode() in ("frozen", "docker")
 
     async def run_forever(self) -> None:
         """Background loop: periodically check (and on git installs apply) updates."""
@@ -731,43 +790,93 @@ class AutoUpdateService:
         # someone else's source + venv while the packaged binary keeps running
         # its bundled old code on restart — an endless update loop. Refuse
         # structurally, regardless of the on-disk ``.git``.
-        if detect_install_mode() != "git":
-            return "unsupported_install_mode"
+        mode = detect_install_mode()
+        if mode != "git":
+            logger.warning(
+                "Auto-update apply refused: install mode %r cannot self-update "
+                "(frozen bundles ship a new installer, docker ships a new image)",
+                mode,
+            )
+            return "docker_install_mode" if mode == "docker" else "unsupported_install_mode"
         root = _project_root()
         if not (root / ".git").exists():
             inside = await self._run_git(["rev-parse", "--is-inside-work-tree"], root)
             if inside.returncode != 0 or inside.stdout.strip().lower() != "true":
+                logger.warning("Auto-update apply refused: %s is not a git work tree", root)
                 return "unsupported_install_mode"
 
         remote = await self._run_git(["config", "--get", "remote.origin.url"], root)
         remote_url = remote.stdout.strip() if remote.returncode == 0 else ""
-        if not remote_url or _remote_has_credentials(remote_url):
+        if not remote_url:
+            logger.warning(
+                "Auto-update apply refused: no 'origin' remote configured in %s (git stderr: %s)",
+                root,
+                remote.stderr.strip() or "<empty>",
+            )
             return "untrusted_remote"
-        if remote_url not in set(self.allowed_remotes):
+        if _remote_has_credentials(remote_url):
+            logger.warning("Auto-update apply refused: remote URL embeds credentials")
+            return "untrusted_remote"
+        allowed = {_canonicalize_remote_url(item) for item in self.allowed_remotes}
+        if _canonicalize_remote_url(remote_url) not in allowed:
+            logger.warning(
+                "Auto-update apply refused: remote %r is not in the allowlist %s "
+                "(compared after canonicalization; add it to [scheduler] "
+                "auto_update_allowed_remotes or run: git remote set-url origin %s)",
+                remote_url,
+                list(self.allowed_remotes),
+                DEFAULT_ALLOWED_REMOTES[0],
+            )
             return "untrusted_remote"
 
         status = await self._run_git(["status", "--porcelain"], root)
         if status.returncode != 0:
+            logger.warning(
+                "Auto-update apply refused: git status failed in %s: %s",
+                root,
+                status.stderr.strip(),
+            )
             return "unsupported_install_mode"
-        if _dirty_paths_besides_uv_lock(status.stdout):
+        dirty = _dirty_paths_besides_uv_lock(status.stdout)
+        if dirty:
+            logger.warning(
+                "Auto-update apply refused: worktree has uncommitted changes: %s",
+                ", ".join(dirty[:10]) + (" …" if len(dirty) > 10 else ""),
+            )
             return "dirty_worktree"
 
         git_dir = await self._run_git(["rev-parse", "--git-dir"], root)
         if git_dir.returncode != 0:
+            logger.warning(
+                "Auto-update apply refused: git rev-parse --git-dir failed in %s: %s",
+                root,
+                git_dir.stderr.strip(),
+            )
             return "unsupported_install_mode"
         if _merge_or_rebase_in_progress(root, git_dir.stdout.strip()):
+            logger.warning("Auto-update apply refused: merge or rebase in progress in %s", root)
             return "merge_or_rebase_in_progress"
 
         fetch = await self._run_git(["fetch", "--force", "--tags", "origin"], root, timeout=120)
         if fetch.returncode != 0:
+            logger.warning(
+                "Auto-update apply refused: git fetch failed: %s",
+                fetch.stderr.strip(),
+            )
             return "github_unreachable"
 
         target = await self._run_git(["rev-parse", "--verify", f"{tag}^{{commit}}"], root)
         if target.returncode != 0:
+            logger.warning("Auto-update apply refused: target tag %r not found after fetch", tag)
             return "missing_target_tag"
 
         ff = await self._run_git(["merge-base", "--is-ancestor", "HEAD", tag], root)
         if ff.returncode != 0:
+            logger.warning(
+                "Auto-update apply refused: HEAD is not an ancestor of %r "
+                "(local branch diverged from the release line)",
+                tag,
+            )
             return "branch_not_fast_forwardable"
         return ""
 

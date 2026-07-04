@@ -11,8 +11,12 @@ LABEL org.opencontainers.image.source="https://github.com/whiteguo233/OpenBiliCl
       org.opencontainers.image.description="OpenBiliClaw backend — local-first cross-platform AI content discovery agent" \
       org.opencontainers.image.licenses="MIT"
 
+# OPENBILICLAW_IN_CONTAINER makes install-mode detection ("docker") work on
+# every container runtime — /.dockerenv exists under Docker but not under
+# containerd/Kubernetes, so the marker is baked into the image itself.
 ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    OPENBILICLAW_IN_CONTAINER=1
 
 WORKDIR /app
 

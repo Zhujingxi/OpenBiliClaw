@@ -423,7 +423,8 @@ auto_update_allow_prerelease = false  # 是否允许 backend-vX.Y.Z-rc/beta/dev 
 auto_update_allowed_remotes = [
   "https://github.com/whiteguo233/OpenBiliClaw.git",
   "git@github.com:whiteguo233/OpenBiliClaw.git",
-] # 只有 origin 精确匹配这些远端时才允许自动快进；带凭据的 URL 一律拒绝
+] # 只有 origin 匹配这些远端时才允许自动快进（.git 后缀可省、HTTPS/SSH 拼法等价、大小写
+  # 不敏感）；带凭据的 URL 一律拒绝；走 GitHub 镜像克隆的安装把镜像 URL 加进来即可
 
 [scheduler.pool_source_shares]
 # Candidate-pool source mix by platform family. The saved default 5:1:1:1:1:1

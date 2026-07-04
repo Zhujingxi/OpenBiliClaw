@@ -4629,7 +4629,8 @@
     const UPDATE_REASON_TEXT = {
       dirty_worktree: "代码目录有未提交改动，更新被阻止",
       unsupported_install_mode: "当前安装方式不支持自动更新",
-      untrusted_remote: "git 远端不在允许列表，更新被阻止",
+      docker_install_mode: "Docker 安装通过拉取新镜像升级，无法就地自更新",
+      untrusted_remote: "git 远端不在允许列表，更新被阻止（可在后端日志查看实际远端地址）",
       branch_not_fast_forwardable: "本地代码与发布版本分叉，无法快进更新",
       merge_or_rebase_in_progress: "代码目录正在合并 / 变基，更新暂缓",
       github_rate_limited: "GitHub API 限流，请稍后再试",
@@ -4680,6 +4681,30 @@
       }
     }
 
+    // Docker containers can't self-apply — the image is the code. The backend
+    // runs a check-only loop against backend-v* tags and the UI guides the
+    // user to pull the new image instead.
+    function describeDockerUpdateStatus(backend) {
+      const reasonKey = backend.reason && backend.reason !== "none" ? String(backend.reason) : "";
+      const reasonText = UPDATE_REASON_TEXT[reasonKey] || reasonKey;
+      const current = backend.current_version ? `v${backend.current_version}` : "";
+      const latest = backend.latest_version ? `v${backend.latest_version}` : "";
+      const checkedAt = formatUpdateCheckTime(backend.last_check_at);
+      const suffix = checkedAt ? `（${checkedAt} 检查）` : "";
+      switch (backend.state) {
+        case "checking":
+          return { text: "正在检查新版镜像…", tone: "" };
+        case "up_to_date":
+          return { text: `当前镜像已是最新${current ? ` ${current}` : ""}${suffix}`, tone: "success" };
+        case "update_available":
+          return { text: `发现新版镜像 ${latest}（当前 ${current}），在部署目录执行 docker compose pull && docker compose up -d 完成升级${suffix}`, tone: "" };
+        case "error":
+          return { text: `检查新版镜像出错：${reasonText || backend.last_error || "未知错误"}${suffix}`, tone: "error" };
+        default:
+          return { text: `Docker 安装通过拉取新镜像升级；后台会定期检查新版并在这里提醒${current ? `（当前 ${current}）` : ""}。`, tone: "" };
+      }
+    }
+
     // Frozen desktop bundles can't self-apply — the backend runs a check-only
     // loop against desktop-v* installer tags and the UI guides the user to
     // download the new installer instead.
@@ -4719,16 +4744,21 @@
       const mode = String(backend.install_mode || "");
       const isGitInstall = mode === "git";
       const isFrozenInstall = mode === "frozen";
+      const isDockerInstall = mode === "docker";
       const isDesktopInstallerUpdate = String(backend.latest_tag || "").startsWith("desktop-v");
       const unsupportedInstall = !isGitInstall;
       const toggle = $("#autoUpdate");
       const interval = $("#autoUpdateInterval");
       // The toggle governs auto-apply, which non-git installs can never do —
-      // frozen check-reminders run unconditionally on the backend side.
+      // frozen / docker check-reminders run unconditionally on the backend side.
       if (toggle) toggle.disabled = unsupportedInstall;
       if (interval) interval.disabled = unsupportedInstall;
       if (isFrozenInstall || isDesktopInstallerUpdate) {
         const { text, tone } = describeFrozenUpdateStatus(backend);
+        line.dataset.tone = tone;
+        line.textContent = text;
+      } else if (isDockerInstall) {
+        const { text, tone } = describeDockerUpdateStatus(backend);
         line.dataset.tone = tone;
         line.textContent = text;
       } else if (unsupportedInstall) {
@@ -4740,10 +4770,12 @@
         line.textContent = text;
       }
       line.hidden = false;
-      // 立即检查 works on git checkouts AND frozen bundles (check-only there);
-      // 立即应用 only when a newer tag is ready to fast-forward on git; the
-      // download link replaces 立即应用 on frozen when a new installer exists.
-      const lockActions = unsupportedInstall && !isFrozenInstall && !isDesktopInstallerUpdate;
+      // 立即检查 works on git checkouts, frozen bundles AND docker containers
+      // (check-only on the latter two); 立即应用 only when a newer tag is ready
+      // to fast-forward on git; the download link replaces 立即应用 on frozen
+      // when a new installer exists.
+      const lockActions =
+        unsupportedInstall && !isFrozenInstall && !isDockerInstall && !isDesktopInstallerUpdate;
       if (actions) actions.hidden = lockActions;
       if (checkBtn) checkBtn.disabled = lockActions || backend.state === "checking" || backend.state === "applying";
       if (applyBtn) {

@@ -5475,12 +5475,13 @@
             <strong id="backendUpdateLastCheck">—</strong>
           </div>
         </div>
-        <p class="settings-hint">自动更新只作用于 git / AI 安装的后端源码：开启并保存后，后台定时检查可信 backend tag，满足安全条件才会快进、同步依赖并重启后端；安装包版本会提示下载新版安装包；浏览器扩展由商店自动更新或由 GitHub zip 用户手动重载。</p>
+        <p class="settings-hint">自动更新只作用于 git / AI 安装的后端源码：开启并保存后，后台定时检查可信 backend tag，满足安全条件才会快进、同步依赖并重启后端；安装包版本会提示下载新版安装包；Docker 版会提示拉取新镜像；浏览器扩展由商店自动更新或由 GitHub zip 用户手动重载。</p>
         <div class="settings-actions">
           <button id="backendUpdateCheck" type="button" class="settings-secondary-btn">立即检查</button>
           <button id="backendUpdateApply" type="button" class="settings-secondary-btn" hidden>立即应用</button>
           <a id="backendUpdateDownload" class="settings-secondary-btn" href="https://github.com/whiteguo233/OpenBiliClaw/releases" target="_blank" rel="noopener" hidden>前往下载新安装包</a>
         </div>
+        <p class="settings-hint" id="backendUpdateModeHint" hidden></p>
         <p class="settings-hint">最近错误：<span id="backendUpdateError">—</span></p>
         <div class="settings-status-cell">
           <span>插件版本</span>

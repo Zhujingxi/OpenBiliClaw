@@ -221,7 +221,8 @@ test("settings backend update apply failures show backend reason and refresh sta
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
 
   assert.match(popupJs, /dirty_worktree:\s*"代码目录有未提交改动，更新被阻止"/);
-  assert.match(popupJs, /untrusted_remote:\s*"git 远端不在允许列表，更新被阻止"/);
+  assert.match(popupJs, /untrusted_remote:\s*"git 远端不在允许列表，更新被阻止（可在后端日志查看实际远端地址）"/);
+  assert.match(popupJs, /docker_install_mode:\s*"Docker 安装通过拉取新镜像升级，无法就地自更新"/);
   assert.match(popupJs, /branch_not_fast_forwardable:\s*"本地代码与发布版本分叉，无法快进更新"/);
   assert.match(popupJs, /missing_target_tag:\s*"远端未找到目标版本标签"/);
 
@@ -236,6 +237,8 @@ test("settings backend update actions require explicit install branch", () => {
 
   assert.match(popupJs, /const isGitInstall = installMode === "git"/);
   assert.match(popupJs, /const isFrozenInstall = installMode === "frozen"/);
+  assert.match(popupJs, /const isDockerInstall = installMode === "docker"/);
+  assert.match(popupJs, /docker compose pull && docker compose up -d/);
   assert.match(
     popupJs,
     /const isDesktopInstallerUpdate = String\(backend\.latest_tag \|\| ""\)\.startsWith\("desktop-v"\)/,

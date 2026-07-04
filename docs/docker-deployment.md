@@ -74,6 +74,8 @@ docker compose -f docker-compose.prebuilt.yml pull
 docker compose -f docker-compose.prebuilt.yml up -d
 ```
 
+> 后端能识别自己跑在容器里（install mode `docker`）：设置页「版本与更新」会定期检查新版镜像并提示上面这两条命令，「立即检查」可用；容器内无法就地自更新，误点应用会以 `docker_install_mode` 明确拒绝。
+
 ### 方式 B：源码构建（想改代码 / 本地定制）
 
 ```bash

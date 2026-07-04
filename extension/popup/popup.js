@@ -5859,7 +5859,8 @@ function bindSettings() {
   const BACKEND_UPDATE_REASON_TEXT = {
     dirty_worktree: "代码目录有未提交改动，更新被阻止",
     unsupported_install_mode: "当前安装方式不支持自动更新",
-    untrusted_remote: "git 远端不在允许列表，更新被阻止",
+    docker_install_mode: "Docker 安装通过拉取新镜像升级，无法就地自更新",
+    untrusted_remote: "git 远端不在允许列表，更新被阻止（可在后端日志查看实际远端地址）",
     branch_not_fast_forwardable: "本地代码与发布版本分叉，无法快进更新",
     merge_or_rebase_in_progress: "代码目录正在合并 / 变基，更新暂缓",
     github_rate_limited: "GitHub API 限流，请稍后再试",
@@ -5900,6 +5901,7 @@ function bindSettings() {
     const installMode = String(backend.install_mode || "");
     const isGitInstall = installMode === "git";
     const isFrozenInstall = installMode === "frozen";
+    const isDockerInstall = installMode === "docker";
     const isDesktopInstallerUpdate = String(backend.latest_tag || "").startsWith("desktop-v");
     const applyBtn = document.getElementById("backendUpdateApply");
     if (applyBtn instanceof HTMLButtonElement) {
@@ -5921,6 +5923,24 @@ function bindSettings() {
         showDownload && backend.latest_tag
           ? `https://github.com/whiteguo233/OpenBiliClaw/releases/tag/${encodeURIComponent(String(backend.latest_tag))}`
           : "https://github.com/whiteguo233/OpenBiliClaw/releases";
+    }
+    // Non-git installs never get the apply button; tell the user how their
+    // install actually upgrades instead of leaving the card action-less.
+    const modeHint = document.getElementById("backendUpdateModeHint");
+    if (modeHint instanceof HTMLElement) {
+      let hint = "";
+      if (isDockerInstall) {
+        hint =
+          backend.state === "update_available"
+            ? "Docker 安装：发现新版镜像，在部署目录执行 docker compose pull && docker compose up -d 完成升级。"
+            : "Docker 安装：升级通过拉取新镜像完成（docker compose pull && docker compose up -d）。";
+      } else if (isFrozenInstall) {
+        hint = "桌面安装包：发现新版时点击上方链接下载新安装包完成升级。";
+      } else if (installMode && !isGitInstall) {
+        hint = "当前安装方式不支持自动更新；建议使用 git / AI 安装以获得就地升级能力。";
+      }
+      modeHint.textContent = hint;
+      modeHint.hidden = !hint;
     }
   }
 
