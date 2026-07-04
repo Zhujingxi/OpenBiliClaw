@@ -13,6 +13,7 @@
 - **聚合 Release 页新增 Docker 渠道行**：`sync-aggregate-release.sh` 匿名探测 GHCR 上该版本 manifest 是否可拉取，可拉取才展示镜像引用与 compose 下载指引（与其他 channel 同样不回填）；`release-docker.yml` 推完镜像后在 tag push 场景自动重跑聚合页同步；顺带修正 Firefox XPI 缺失时的病句文案。
 - **README / 文档首页 / GitHub About 优化**：README 中英双版第一屏瘦身（删除开发版 E2E 段落、快速开始压缩为四短步、「最近更新」只保留用户可感知亮点并与更新日志板块去重）、核心特性与架构概览精简并链接模块文档、新增 Release / CI 徽章与结尾 star 引导、英文版补 RedNote / Chinese TikTok 平台注释；`docs/index.md` 拆分「用户 / 开发者」两个区块并去掉重复条目；新增 `docs/faq.md` 常见问题页（含 Docker 部署条目）；官网首页安装区新增「Docker 预构建镜像」双语面板；GitHub About 补 Reddit、缩短为卖点前置的双语文案。
 - **插件与桌面安装包同步发布**：插件版本提升到 `extension-v0.3.153`（功能代码与 `extension-v0.3.152` 一致，纯版本号对齐）；桌面安装包提升到 `desktop-v0.3.153`，冻结包用户直接获得本轮探活修复与桌面 Web checklist 调整。
+- **Docker 启动不再因缺少宿主代理而退出**：用户反馈 Docker 部署后端会检测 `host.docker.internal:7897`，端口上没有代理就直接退出容器。根因是 `docker_runtime.can_connect()` 契约上应返回布尔（端口可达性），实现里却让 `socket.create_connection` 的 `ConnectionRefusedError` / 超时 / DNS 异常直接抛出——容器内 `main()` 引导阶段探测宿主 Clash 代理失败时异常一路冒泡，进程在 `os.execvpe` 启动 `serve-api` 之前就崩溃，表现为容器一启动就退出。现在 `can_connect()` 捕获 `OSError` 系列并返回 `False`，无代理时 `resolve_optional_proxy_env()` 正常返回空更新、跳过代理注入，容器照常启动。此前所有相关测试都用返回干净布尔的 mock `can_connect`，掩盖了真实实现会抛异常；新增两条使用真实 `can_connect` 打死端口的回归测试。顺带加固同类隐患：`bootstrap_runtime_environment` 里 `int(OPENBILICLAW_PROXY_PORT)` / `float(OPENBILICLAW_PROXY_TIMEOUT)` 遇到用户填的空值或非法值也会抛 `ValueError` 崩在启动前，现改为空值回落默认端口 7897、并将整个可选代理探测步骤包进守卫——任何异常只打印一行 stderr 并跳过，绝不阻断 `serve-api` 启动。
 
 ## v0.3.152 / extension v0.3.152 / desktop v0.3.152: 桌面启动自愈与动态惊喜阈值（2026-07-04）
 
