@@ -45,20 +45,42 @@ extension_tag="$(release_with_project_version "extension-v")"
 desktop_tag="$(release_with_project_version "desktop-v")"
 
 extension_line="Not published yet."
-chrome_extension_asset_line="No Chrome-compatible extension release asset is available yet."
-firefox_signed_asset_line="No signed Firefox extension XPI is available yet."
-firefox_dev_asset_line="No Firefox temporary-loading zip is available yet."
+chrome_extension_asset_line="not available yet for this version"
+firefox_signed_asset_line="no signed XPI in this release — load the temporary zip below instead"
+firefox_dev_asset_line="not available yet for this version"
 if [ -n "$extension_tag" ]; then
   extension_version="${extension_tag#extension-v}"
   extension_line="[${extension_tag}](https://github.com/${repo}/releases/tag/${extension_tag})"
-  chrome_extension_asset_line="\`openbiliclaw-extension-v${extension_version}.zip\`"
-  firefox_dev_asset_line="\`openbiliclaw-extension-v${extension_version}-firefox.zip\`"
+  chrome_extension_asset_line="use \`openbiliclaw-extension-v${extension_version}.zip\`"
+  firefox_dev_asset_line="use \`openbiliclaw-extension-v${extension_version}-firefox.zip\` via \`about:debugging\`"
 fi
 
 desktop_line="Not published yet."
 desktop_note=""
 if [ -n "$desktop_tag" ]; then
   desktop_line="[${desktop_tag}](https://github.com/${repo}/releases/tag/${desktop_tag})"
+fi
+
+# Docker channel: report the GHCR image only when this exact version's
+# manifest is actually pullable (same "no backfill" rule as the other
+# channels). Anonymous registry check; any failure degrades to
+# "Not published yet." without breaking the sync.
+docker_image_owner="$(printf '%s' "${repo%%/*}" | tr '[:upper:]' '[:lower:]')"
+docker_image="ghcr.io/${docker_image_owner}/openbiliclaw-backend"
+docker_line="Not published yet."
+docker_download_line=""
+ghcr_token="$(
+  curl -fsSL "https://ghcr.io/token?scope=repository:${docker_image#ghcr.io/}:pull" 2>/dev/null \
+    | python3 -c 'import sys, json; print(json.load(sys.stdin).get("token", ""))' 2>/dev/null \
+    || true
+)"
+if [ -n "$ghcr_token" ] && curl -fsSL -o /dev/null \
+    -H "Authorization: Bearer ${ghcr_token}" \
+    -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json" \
+    "https://ghcr.io/v2/${docker_image#ghcr.io/}/manifests/${project_version}" 2>/dev/null; then
+  docker_line="[\`${docker_image}:${project_version}\`](https://github.com/${repo}/pkgs/container/openbiliclaw-backend) (multi-arch: amd64 + arm64)"
+  docker_download_line="- Docker (self-hosted): download [\`docker-compose.prebuilt.yml\`](https://github.com/${repo}/blob/main/docker-compose.prebuilt.yml), run \`docker compose -f docker-compose.prebuilt.yml up -d\`, then open \`http://127.0.0.1:8420/setup/\`
+"
 fi
 
 declare -a assets=()
@@ -148,7 +170,7 @@ download_release_assets "$desktop_tag" "*.dmg" "*.exe"
 if [ -n "$extension_tag" ]; then
   firefox_xpi_asset_name="openbiliclaw-extension-v${extension_version}-firefox.xpi"
   if asset_name_seen "$firefox_xpi_asset_name"; then
-    firefox_signed_asset_line="\`$firefox_xpi_asset_name\`"
+    firefox_signed_asset_line="use \`$firefox_xpi_asset_name\`"
   fi
 fi
 
@@ -169,13 +191,15 @@ This is the user-facing aggregate release. It keeps the current backend source t
 - Backend source: [${backend_tag}](https://github.com/${repo}/tree/${backend_tag})
 - Browser extension: ${extension_line}
 - Desktop installer: ${desktop_line}.${desktop_note}
+- Docker image: ${docker_line}
 
 ## Downloads
 
-- Chrome / Edge / Brave extension: use ${chrome_extension_asset_line}
-- Firefox 140+ extension: use ${firefox_signed_asset_line}
-- Firefox temporary debugging package: use ${firefox_dev_asset_line} via \`about:debugging\`
+- Chrome / Edge / Brave extension: ${chrome_extension_asset_line}
+- Firefox 140+ extension: ${firefox_signed_asset_line}
+- Firefox temporary debugging package: ${firefox_dev_asset_line}
 - macOS / Windows desktop app: use the attached \`.dmg\` / \`.exe\` installer when present
+${docker_download_line}
 
 Attached package assets:
 
@@ -184,7 +208,7 @@ ${asset_list}
 
 - Chrome Web Store updates can lag GitHub releases because Google review is asynchronous.
 - The desktop app is still unsigned and experimental; first launch may need the README bypass steps.
-- Automation channel releases remain available as \`backend-v*\`, \`extension-v*\`, and \`desktop-v*\`.
+- Automation channel releases remain available as \`backend-v*\`, \`extension-v*\`, and \`desktop-v*\`; Docker images ride \`backend-v*\` tags to GHCR automatically.
 
 Synced by channel: \`${channel}\`
 EOF

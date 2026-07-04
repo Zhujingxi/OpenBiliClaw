@@ -15,8 +15,9 @@ on:
       - "backend-v*"
   workflow_dispatch:
 
+# contents: write is needed by the aggregate-release sync step below.
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 env:
@@ -82,3 +83,17 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # The docker build finishes well after the backend-channel sync
+      # ran, so re-sync the aggregate release here to flip the Docker
+      # line from "Not published yet." to the pullable image reference.
+      # Tag pushes only — a manual dispatch mid-cycle must not create
+      # the next version's aggregate release early.
+      - name: Update aggregate latest release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          CHANNEL: docker
+        run: bash .github/scripts/sync-aggregate-release.sh
