@@ -278,6 +278,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │     request_replenishment + 定时/手动补货 + B/XHS/DY/YT/X/Zhihu/Reddit=5/1/1/1/1/1/1 │ │
 │  │     DiscoveryCandidatePipeline: raw candidates -> periodic/refresh eval -> pool │ │
 │  │     Query inspiration cache: search preview -> inspiration/expansion -> keyword provenance │ │
+│  │     InspirationKeywordPipeline: axis library learning loop (yield backfill/lifecycle) + breadth config │ │
 │  │     LLM gate: scheduler + extension presence          │   │
 │  │     Soul taxonomy: CATEGORY_VOCAB + category migration + homonym-aware consolidation │ │
 │  │     Autostart: user login item + Ollama preflight/self-heal + Ollama.app runtime 校验 │ │

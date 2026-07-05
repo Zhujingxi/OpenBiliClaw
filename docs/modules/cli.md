@@ -142,7 +142,7 @@ $ openbiliclaw keyword-inspiration-preview --platform bilibili --persist-axes
 - `materialize_telemetry`：coverage-first 装配过程中的 `deterministic_fill`、`coverage_shortfall`、硬闸拒绝和软分分布；
 - `rejected_reasons`：按平台保留的硬闸拒绝明细；preview report 会继续过滤 `platform_style_mismatch`，因为平台 style 已改为软分，不再硬拒绝。
 
-`--interest-limit` 只覆盖本次 preview 的二级兴趣样本数，不写回 `config.toml`；真实画像很大时建议先用 `2..4` 做 smoke，再放大窗口观察多样性。`--persist-axes` 会把本次 LLM 返回的新轴写入 / 合并到 `discovery_inspiration_axis`，但不增加 axis 使用计数，也不写关键词池；不传时 preview 只读轴库和 selection ledger。regular + explore 同轮触发时，runtime 会共用同一批 selected interests、grounding evidence 和单次 `discovery.keyword_inspiration` 输出；preview 单独预览指定 `--kind`。
+`--limit`（每平台关键词上限）和 `--interest-limit`（二级兴趣样本数）是**本次 preview 的一次性覆盖**（Phase 2 config 收敛后语义）：inspiration 的细粒度参数不再是 `config.toml` 字段，而是由 `[discovery].inspiration_breadth` 档位（默认 `medium`）派生成一个内部参数对象；不传这两个 flag 时该对象来自 `derive(breadth)`，传了则在派生对象上套一次性覆盖（`max_keywords_per_platform` / `interest_sample_size`），经 planner / pipeline 构造注入，**不写回 `config.toml`、不改四个兼容委托的签名**，用户可见行为与收敛前一致。真实画像很大时建议先用 `--interest-limit 2..4` 做 smoke，再放大窗口观察多样性。`--persist-axes` 会把本次 LLM 返回的新轴写入 / 合并到 `discovery_inspiration_axis`，但不增加 axis 使用计数，也不写关键词池；不传时 preview 只读轴库和 selection ledger。preview 永不触发 yield 回填 / 生命周期迁移（观测不改变被观测系统）。regular + explore 同轮触发时，runtime 会共用同一批 selected interests、grounding evidence 和单次 `discovery.keyword_inspiration` 输出；preview 单独预览指定 `--kind`。
 
 ### `openbiliclaw keyword-inspiration-report`
 
