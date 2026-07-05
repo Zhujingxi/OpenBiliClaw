@@ -216,6 +216,7 @@ class _FakeHTTPX:
         self.responses: dict[str, _FakeResp] = {}
         self.timeouts: set[str] = set()
         self.sent_urls: list[str] = []
+        self.client_kwargs: list[dict[str, object]] = []
 
     def add(
         self,
@@ -232,7 +233,7 @@ class _FakeHTTPX:
 
         class _Client:
             def __init__(self, *_a: object, **_k: object) -> None:
-                pass
+                fake.client_kwargs.append(dict(_k))
 
             async def __aenter__(self) -> _Client:
                 return self
@@ -300,6 +301,23 @@ async def test_fetch_cover_bytes_success(fake_httpx: _FakeHTTPX) -> None:
     data, content_type = await fetch_cover_bytes(XHS)
     assert data == b"webp"
     assert content_type == "image/webp"
+
+
+async def test_fetch_routes_cn_cdn_direct_and_overseas_via_env_proxy(
+    fake_httpx: _FakeHTTPX,
+) -> None:
+    """CN CDNs bypass env/system proxies (proxy exit IPs get risk-controlled,
+    same failure mode as the Bilibili login probe); overseas CDNs keep
+    trust_env so users who NEED the proxy to reach YouTube still fetch them."""
+    yt = "https://i.ytimg.com/vi/abc/hqdefault.jpg"
+    fake_httpx.add(XHS, status_code=200, headers={"content-type": "image/webp"}, chunks=[b"a"])
+    fake_httpx.add(yt, status_code=200, headers={"content-type": "image/jpeg"}, chunks=[b"b"])
+
+    await fetch_cover_bytes(XHS)
+    await fetch_cover_bytes(yt)
+
+    assert fake_httpx.client_kwargs[0]["trust_env"] is False  # xhscdn → direct
+    assert fake_httpx.client_kwargs[1]["trust_env"] is True  # ytimg → env proxy ok
 
 
 async def test_fetch_cover_bytes_rejects_non_whitelisted() -> None:

@@ -84,6 +84,17 @@ async def test_direct_client_rejects_missing_cookie() -> None:
         DouyinDirectClient(cookie="")
 
 
+async def test_direct_client_default_http_bypasses_env_proxies() -> None:
+    """douyin.com is a CN domain: the default client must not inherit
+    env/system proxies (proxy exit IPs trip Douyin risk control — same
+    failure mode as the Bilibili login probe)."""
+    client = DouyinDirectClient(cookie="sessionid=abc")
+    try:
+        assert client._http.trust_env is False
+    finally:
+        await client.aclose()
+
+
 @pytest.mark.asyncio
 async def test_direct_client_search_normalizes_aweme_info() -> None:
     def handler(request: httpx.Request) -> httpx.Response:

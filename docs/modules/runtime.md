@@ -236,7 +236,7 @@ autostart.unregister()
 
 #### 发现即缓存（封面预取）
 
-白名单 / redirect / 大小 / 类型校验的抓取核心 `fetch_cover_bytes` 是唯一真源，由 proxy 路由和预取共用；失败抛 `CoverFetchError`（携带 400/403/413/502/504），proxy 路由再映射回对应 HTTP 状态。`get_or_fetch_cover_bytes` 是缓存优先入口：先按同一白名单边界校验 URL，再读取 `data/image-cache/` 的非空文件，未命中才调用 `fetch_cover_bytes` 并写回缓存。多模态 discovery evaluator 使用这个入口，因此小红书已缓存头图即使原 CDN token 过期，也能继续参与封面图评估。
+白名单 / redirect / 大小 / 类型校验的抓取核心 `fetch_cover_bytes` 是唯一真源，由 proxy 路由和预取共用；失败抛 `CoverFetchError`（携带 400/403/413/502/504），proxy 路由再映射回对应 HTTP 状态。v0.3.153+：抓取按主机分流代理——国内 CDN（hdslb / xhscdn / pstatp / douyinpic / douyinvod）恒直连（`trust_env=False`，代理出口 IP 易被风控，与 B站 登录探测同因），境外 CDN（ytimg / ggpht）保持继承环境 / 系统代理，需要代理才能拉 YouTube 封面的用户不受影响。`get_or_fetch_cover_bytes` 是缓存优先入口：先按同一白名单边界校验 URL，再读取 `data/image-cache/` 的非空文件，未命中才调用 `fetch_cover_bytes` 并写回缓存。多模态 discovery evaluator 使用这个入口，因此小红书已缓存头图即使原 CDN token 过期，也能继续参与封面图评估。
 
 `RefreshRuntime._loop_cover_prefetch` 每 60 秒做一次「发现即缓存」：从 `Database.iter_servable_cover_urls` 取最近 12 小时内、仍可展示（`fresh / shown / suppressed` 或已保存）的封面（最新优先），`select_prefetch_targets` 过滤掉非白名单和已缓存项、把**无法重抓的小红书封面排在最前**，每轮最多抓 40 张写入缓存。这修复了此前封面只在「展示时」才懒加载、而小红书签名 token 早已过期导致 502 破图的问题——预取趁 token 新鲜时就把图落盘；最近窗口也避免对 token 已死的旧内容反复重试。预取按 `content_cache.cover_url` 原始值（可能是 `//` 或 `http://`）归一化后再抓，落盘 key 与 proxy 查找一致，故预取的封面 proxy 能直接命中。
 
