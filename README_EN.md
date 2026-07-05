@@ -189,12 +189,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.154 (2026-07-05)**
+📌 Latest: **v0.3.155 (2026-07-05)**
 
-- **Third-party API gateways** — Claude accepts a custom base URL for relay gateways; OpenAI / compatible providers gain a Responses-API (`/v1/responses`) option.
-- **Proxies no longer break Bilibili login checks** — probes always connect directly (keep your proxy on); failures now say exactly why with troubleshooting hints.
-- **Auto-update works on every install mode** — `.git`-less clones are no longer stuck on "remote not in allowlist"; Docker installs get pull reminders; refusals show their reason.
-- **Windows desktop build works with system SOCKS proxies** — no more crash-on-launch when a socks5 proxy is set; guided init is hardened across web, installer, extension, and Docker entrypoints.
+- **Vector-model issues self-diagnose & self-repair** — the init page names the exact cause (Ollama down / model missing / model broken) and one click pulls bge-m3 with live progress.
+- **Mobile taps open the native app directly** — deep links for Bilibili / RedNote / Douyin / YouTube / X / Zhihu; prominent new mobile QR entries in the extension and desktop web.
+- **Restarts no longer leave recommendations empty forever** — candidates orphaned by an interrupted evaluation are reclaimed at startup.
+- **Browser page translation can no longer corrupt config** — settings dropdowns are translation-proof and the backend rejects translated provider values.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
