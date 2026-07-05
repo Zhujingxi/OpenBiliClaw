@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from openbiliclaw.llm.base import (
     LLM_CONNECTIVITY_PROBE_MAX_TOKENS,
@@ -927,6 +934,57 @@ async def test_openrouter_provider_inherits_per_call_model_override(
 def test_gemini_provider_defaults() -> None:
     provider = GeminiProvider(api_key="test-key")
     assert provider.name == "gemini"
+
+
+def test_cli_import_survives_broken_gemini_sdk_native_deps(tmp_path: Path) -> None:
+    """Issue #80: google-genai installed but raising plain ImportError at load
+    time (e.g. cryptography's native wheel failing to dlopen on Termux/Android)
+    must degrade the Gemini provider instead of crashing CLI startup."""
+    fake_google = tmp_path / "google"
+    fake_genai = fake_google / "genai"
+    fake_genai.mkdir(parents=True)
+    (fake_google / "__init__.py").write_text("", encoding="utf-8")
+    (fake_genai / "__init__.py").write_text(
+        "raise ImportError('dlopen failed: cannot locate symbol \"PyExc_Warning\"')\n",
+        encoding="utf-8",
+    )
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = f"{tmp_path}{os.pathsep}{env.get('PYTHONPATH', '')}"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import openbiliclaw.cli; "
+            "from openbiliclaw.llm.gemini_provider import gemini_sdk_available; "
+            "assert not gemini_sdk_available(); "
+            "print('degraded-ok')",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "degraded-ok" in result.stdout
+
+
+def test_gemini_missing_sdk_error_includes_import_failure_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import openbiliclaw.llm.gemini_provider as gemini_provider_mod
+
+    monkeypatch.setattr(gemini_provider_mod, "genai", None)
+    monkeypatch.setattr(gemini_provider_mod, "types", None)
+    monkeypatch.setattr(
+        gemini_provider_mod,
+        "_SDK_IMPORT_ERROR",
+        'dlopen failed: cannot locate symbol "PyExc_Warning"',
+    )
+
+    with pytest.raises(LLMProviderError, match="PyExc_Warning"):
+        GeminiProvider(api_key="test-key")
 
 
 @pytest.mark.asyncio
