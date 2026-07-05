@@ -211,6 +211,10 @@ class MaterializeCandidate:
     decoration: str
     recency_sensitivity: str
     origin: str
+    # Real ``discovery_inspiration_axis.axis_id`` when the concept traces back to
+    # a library axis (deterministic fill / an LLM ref that resolved to an axis).
+    # Empty when unknown — the realize path derives it from interest + label.
+    axis_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -556,6 +560,7 @@ def _deterministic_fill_candidate(
                     decoration="",
                     recency_sensitivity="low",
                     origin="deterministic_fill",
+                    axis_id=axis.axis_id,
                 ),
                 keyword=keyword,
                 platform=platform,
@@ -708,6 +713,7 @@ def _realized_from_materialize(item: _ScoredMaterializeCandidate) -> RealizedKey
             "source_interest": item.interest,
             "source_domain": item.platform,
             "axis_label": item.axis_label,
+            "axis_id": item.candidate.axis_id,
             "origin": item.candidate.origin,
             "recency_sensitivity": item.candidate.recency_sensitivity,
             "platform_style_score": item.score,

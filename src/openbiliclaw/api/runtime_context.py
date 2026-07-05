@@ -775,11 +775,15 @@ class RuntimeContext:
         # no-ops → zero behavior change.
         inspiration_provider = None
         if bool(getattr(discovery_cfg, "inspiration_search_enabled", False)):
+            from openbiliclaw.config import derive_inspiration_breadth_params
             from openbiliclaw.discovery.inspiration_provider import (
                 build_inspiration_search_provider,
                 build_platform_source_backends,
             )
 
+            inspiration_params = derive_inspiration_breadth_params(
+                getattr(discovery_cfg, "inspiration_breadth", "medium")
+            )
             inspiration_provider = build_inspiration_search_provider(
                 getattr(discovery_cfg, "inspiration_search_backends", None),
                 database=self.database,
@@ -788,15 +792,9 @@ class RuntimeContext:
                     bilibili_client=new_bilibili_client,
                     x_client=new_x_client,
                 ),
-                platforms_per_probe=int(
-                    getattr(discovery_cfg, "inspiration_platforms_per_probe", 2)
-                ),
-                riskcontrolled_probe_budget=int(
-                    getattr(discovery_cfg, "inspiration_riskcontrolled_probe_budget", 4)
-                ),
-                pages_per_probe=int(
-                    getattr(discovery_cfg, "inspiration_search_pages_per_probe", 1)
-                ),
+                platforms_per_probe=int(inspiration_params.platforms_per_probe),
+                riskcontrolled_probe_budget=int(inspiration_params.riskcontrolled_probe_budget),
+                pages_per_probe=int(inspiration_params.search_pages_per_probe),
             )
         from openbiliclaw.runtime.keyword_planner import KeywordPlanner
 

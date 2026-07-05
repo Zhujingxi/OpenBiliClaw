@@ -17,7 +17,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, urlparse
 
-from openbiliclaw.discovery.inspiration import AxisRow, _normalize_match_text
+from openbiliclaw.discovery.inspiration import (
+    AxisRow,
+    _normalize_match_text,
+    derive_inspiration_axis_id,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -67,8 +71,28 @@ _DISCOVERY_KEYWORD_METADATA_COLUMNS = {
     "normalized_keyword": "TEXT NOT NULL DEFAULT ''",
     "grounding_source": "TEXT NOT NULL DEFAULT ''",
 }
+# Yield-learning columns bolted onto ``discovery_inspiration_axis`` after the
+# table shipped — added tolerantly via ADD COLUMN so pre-existing dbs upgrade
+# in place (mirrors ``_DISCOVERY_KEYWORD_METADATA_COLUMNS``).
+_DISCOVERY_INSPIRATION_AXIS_YIELD_COLUMNS = {
+    "window_uses": "INTEGER NOT NULL DEFAULT 0",
+    "yield_backfilled_at": "TEXT",
+}
+# discovery_keywords statuses meaning the keyword was actually leased for a
+# fetch (it left 'pending'). 'pending' (never leased) and 'expired' (a stale
+# digest superseded a still-pending row) were never consumed, so neither
+# counts toward an axis's ``window_uses``. Locked against the status machine
+# documented above ``insert_pending_keywords``.
+_INSPIRATION_CONSUMED_KEYWORD_STATUSES = frozenset({"claimed", "executing", "used", "failed"})
 _INSPIRATION_AXIS_ACTIVE_CAP = 16
 _INSPIRATION_AXIS_EXPLORATION_PRIOR = 0.3
+# Lifecycle thresholds (Phase 2 Part B). Retirement keys on the backfilled
+# ``window_uses`` (keywords actually consumed), NOT the selection-bookkeeping
+# ``use_count``: 5 consumption chances with a post-backfill score below 0.08
+# (≈ zero admissions, e.g. 0.3/6 = 0.05) means the axis earned its exit.
+_INSPIRATION_AXIS_RETIRE_MIN_WINDOW_USES = 5
+_INSPIRATION_AXIS_RETIRE_YIELD_SCORE = 0.08
+_INSPIRATION_AXIS_PURGE_AFTER_DAYS = 90
 _INSPIRATION_AXIS_FRESHNESS_SCALE_DAYS = 30.0
 _INSPIRATION_AXIS_KIND_ROTATION = (
     "subgenre",
@@ -198,11 +222,24 @@ def _axis_kind_rank(value: object) -> int:
     )
 
 
+def _axis_effective_score(row: sqlite3.Row) -> float:
+    """Return the ranking score with a *conditional* exploration prior floor.
+
+    The prior only protects axes that have never been consumed
+    (``window_uses == 0`` — genuine exploration). Once an axis has produced
+    keywords that were consumed, it ranks on its real ``yield_score`` so a
+    proven-bad axis (e.g. 5 uses / 0 admissions → 0.05) sinks below an unused
+    one (0.3) instead of being floored back up to parity.
+    """
+
+    yield_score = _metric_float(row["yield_score"])
+    if _metric_int(row["window_uses"]) > 0:
+        return yield_score
+    return max(yield_score, _INSPIRATION_AXIS_EXPLORATION_PRIOR)
+
+
 def _axis_list_sort_key(row: sqlite3.Row, now: datetime) -> tuple[float, float, int, int, str]:
-    score = _axis_freshness(row, now) * max(
-        _metric_float(row["yield_score"]),
-        _INSPIRATION_AXIS_EXPLORATION_PRIOR,
-    )
+    score = _axis_freshness(row, now) * _axis_effective_score(row)
     return (
         -score,
         -_axis_datetime_timestamp(row["last_refreshed_at"]),
@@ -214,7 +251,7 @@ def _axis_list_sort_key(row: sqlite3.Row, now: datetime) -> tuple[float, float, 
 
 def _axis_cap_sort_key(row: sqlite3.Row) -> tuple[float, float, int, int, str]:
     return (
-        -max(_metric_float(row["yield_score"]), _INSPIRATION_AXIS_EXPLORATION_PRIOR),
+        -_axis_effective_score(row),
         -_axis_datetime_timestamp(row["last_refreshed_at"]),
         _metric_int(row["use_count"]),
         _axis_kind_rank(row["axis_kind"]),
@@ -236,6 +273,29 @@ def _axis_is_time_expired(row: sqlite3.Row, now: datetime) -> bool:
         return False
     age_seconds = (_axis_now_utc(now) - refreshed_at).total_seconds()
     return age_seconds > float(ttl_days) * 86400.0
+
+
+def _attribute_inspiration_axis_id(
+    *,
+    angle_id: str,
+    source_interest: str,
+    angle_label: str,
+    known_axis_ids: set[str],
+) -> str | None:
+    """Resolve a keyword row's owning axis id for yield attribution.
+
+    ``angle_id`` is trusted only when it is a real axis (present in
+    ``known_axis_ids``) — that guards against a legacy row whose ``angle_id``
+    was set to its ``angle_label`` and merely looks id-shaped. Otherwise the id
+    is re-derived from ``(source_interest, angle_label)``, matching how the axis
+    itself hashes its id. Returns ``None`` when nothing is attributable.
+    """
+
+    if angle_id and angle_id in known_axis_ids:
+        return angle_id
+    if angle_label:
+        return derive_inspiration_axis_id(source_interest, angle_label)
+    return None
 
 
 def _empty_interest_coverage() -> dict[str, object]:
@@ -4842,6 +4902,15 @@ class Database:
                     selection_scope, query_kind, normalized_interest, selected_at
                 );
         """)
+        axis_columns = {
+            str(row[1])
+            for row in self.conn.execute("PRAGMA table_info(discovery_inspiration_axis)").fetchall()
+        }
+        for name, definition in _DISCOVERY_INSPIRATION_AXIS_YIELD_COLUMNS.items():
+            if name not in axis_columns:
+                self.conn.execute(
+                    f"ALTER TABLE discovery_inspiration_axis ADD COLUMN {name} {definition}"
+                )
 
     # ── Discovery keyword store (unified search-keyword planner) ──
     #
@@ -5920,6 +5989,16 @@ class Database:
                     ),
                 )
             else:
+                # No resurrection: a retired axis keeps merging evidence but its
+                # status never flips back — a proven-bad axis must not return via
+                # the LLM re-proposing the same label. ``stale`` MAY be revived by
+                # a fresh upsert (deliberate asymmetry: a topic can come back).
+                existing_status = str(existing["status"] or "active")
+                next_status = (
+                    existing_status
+                    if existing_status == "retired"
+                    else (axis.status or existing_status)
+                )
                 use_count = _metric_int(existing["use_count"]) + (1 if bump_usage else 0)
                 last_used_at = (
                     axis.last_used_at or _optional_text(existing["last_used_at"])
@@ -5959,7 +6038,7 @@ class Database:
                         max(_metric_float(existing["yield_score"]), axis.yield_score),
                         max(_metric_int(existing["admissions"]), axis.admissions),
                         use_count,
-                        axis.status or str(existing["status"] or "active"),
+                        next_status,
                         last_used_at,
                         last_refreshed_at,
                         axis.axis_id,
@@ -5969,6 +6048,164 @@ class Database:
         self.conn.commit()
         for interest_label in sorted(affected_interests):
             self._enforce_inspiration_axis_active_cap(interest_label)
+
+    def backfill_inspiration_axis_yield(
+        self,
+        *,
+        window_days: int = 30,
+        now: datetime,
+    ) -> dict[str, int]:
+        """Recompute per-axis yield stats over a trailing window (SET, not add).
+
+        This is a full recompute with SET semantics, so it is idempotent by
+        construction: the same input rows always produce the same table state,
+        no watermark / dedup bookkeeping. Old admissions decay naturally as they
+        slide out of the trailing window (successes must stay fresh — a feature).
+
+        Attribution rides the persisted ``angle_id`` / ``angle_label`` columns of
+        ``discovery_keywords`` (no keyword-schema change): a row is credited to an
+        axis via ``angle_id`` ONLY when that id is a real axis; otherwise the id
+        is re-derived from ``source_interest`` + ``angle_label`` — the same stable
+        hash the axis stores. The existence check prevents a legacy row whose
+        label happens to start with ``axis:`` from being mistaken for a real id.
+
+        For every axis the yield fields are SET (even to zero) so an axis with no
+        window rows lands at ``window_uses=0`` / ``admissions=0`` /
+        ``yield_score = prior`` — smooth and continuous with the prior floor.
+        """
+
+        from datetime import timedelta
+
+        window = max(1, int(window_days))
+        now_utc = _axis_now_utc(now)
+        since = (now_utc - timedelta(days=window)).strftime("%Y-%m-%d %H:%M:%S")
+        backfilled_at = now_utc.isoformat()
+        prior = _INSPIRATION_AXIS_EXPLORATION_PRIOR
+
+        axis_rows = self.conn.execute("SELECT axis_id FROM discovery_inspiration_axis").fetchall()
+        known_axis_ids = {str(row["axis_id"]) for row in axis_rows}
+
+        uses: dict[str, int] = {}
+        admissions: dict[str, int] = {}
+        keyword_rows = self.conn.execute(
+            """
+            SELECT angle_id, angle_label, source_interest, status,
+                   COALESCE(yield_count, 0) AS yield_count
+            FROM discovery_keywords
+            WHERE created_at >= ?
+              AND (COALESCE(angle_id, '') != '' OR COALESCE(angle_label, '') != '')
+            """,
+            (since,),
+        ).fetchall()
+        for row in keyword_rows:
+            axis_id = _attribute_inspiration_axis_id(
+                angle_id=str(row["angle_id"] or ""),
+                source_interest=str(row["source_interest"] or ""),
+                angle_label=str(row["angle_label"] or ""),
+                known_axis_ids=known_axis_ids,
+            )
+            if axis_id is None or axis_id not in known_axis_ids:
+                continue
+            admissions[axis_id] = admissions.get(axis_id, 0) + _metric_int(row["yield_count"])
+            if str(row["status"] or "") in _INSPIRATION_CONSUMED_KEYWORD_STATUSES:
+                uses[axis_id] = uses.get(axis_id, 0) + 1
+
+        for row in axis_rows:
+            axis_id = str(row["axis_id"])
+            window_uses = uses.get(axis_id, 0)
+            axis_admissions = admissions.get(axis_id, 0)
+            yield_score = (axis_admissions + prior) / (window_uses + 1.0)
+            self.conn.execute(
+                """
+                UPDATE discovery_inspiration_axis
+                SET window_uses = ?,
+                    admissions = ?,
+                    yield_score = ?,
+                    yield_backfilled_at = ?
+                WHERE axis_id = ?
+                """,
+                (window_uses, axis_admissions, yield_score, backfilled_at, axis_id),
+            )
+        self.conn.commit()
+        return {
+            "axes": len(axis_rows),
+            "attributed_axes": len(set(uses) | set(admissions)),
+            "window_days": window,
+        }
+
+    def apply_inspiration_axis_lifecycle(self, *, now: datetime) -> dict[str, int]:
+        """Apply the deterministic axis lifecycle transitions (post-backfill).
+
+        Three transitions, in order, all keyed on the injected ``now``:
+
+        1. ``time_sensitive`` axes past their ``freshness_ttl_days`` →
+           persisted ``status='stale'`` (Phase 1 only filtered them at read
+           time).
+        2. Active axes given ≥ ``_INSPIRATION_AXIS_RETIRE_MIN_WINDOW_USES``
+           consumption chances whose post-backfill ``yield_score`` stays below
+           ``_INSPIRATION_AXIS_RETIRE_YIELD_SCORE`` → ``status='retired'``.
+           Retired axes never re-enter selection and are not resurrected by
+           upsert.
+        3. Stale/retired rows whose ``last_refreshed_at`` is older than
+           ``_INSPIRATION_AXIS_PURGE_AFTER_DAYS`` days → physical DELETE.
+
+        Returns a ``{"staled": n, "retired": n, "purged": n}`` transition
+        summary for stage telemetry.
+        """
+
+        from datetime import timedelta
+
+        now_utc = _axis_now_utc(now)
+        purge_cutoff = now_utc - timedelta(days=_INSPIRATION_AXIS_PURGE_AFTER_DAYS)
+
+        staled_ids: list[str] = []
+        active_rows = self.conn.execute(
+            "SELECT * FROM discovery_inspiration_axis WHERE status = 'active'"
+        ).fetchall()
+        for row in active_rows:
+            if _axis_is_time_expired(row, now_utc):
+                staled_ids.append(str(row["axis_id"]))
+        if staled_ids:
+            self.conn.executemany(
+                "UPDATE discovery_inspiration_axis SET status = 'stale' WHERE axis_id = ?",
+                [(axis_id,) for axis_id in staled_ids],
+            )
+
+        retired = self.conn.execute(
+            """
+            UPDATE discovery_inspiration_axis
+            SET status = 'retired'
+            WHERE status = 'active'
+              AND window_uses >= ?
+              AND yield_score < ?
+            """,
+            (
+                _INSPIRATION_AXIS_RETIRE_MIN_WINDOW_USES,
+                _INSPIRATION_AXIS_RETIRE_YIELD_SCORE,
+            ),
+        ).rowcount
+
+        purged_ids: list[str] = []
+        inactive_rows = self.conn.execute(
+            "SELECT axis_id, last_refreshed_at FROM discovery_inspiration_axis "
+            "WHERE status IN ('stale', 'retired')"
+        ).fetchall()
+        for row in inactive_rows:
+            refreshed_at = _parse_axis_datetime(row["last_refreshed_at"])
+            if refreshed_at is not None and refreshed_at < purge_cutoff:
+                purged_ids.append(str(row["axis_id"]))
+        if purged_ids:
+            self.conn.executemany(
+                "DELETE FROM discovery_inspiration_axis WHERE axis_id = ?",
+                [(axis_id,) for axis_id in purged_ids],
+            )
+
+        self.conn.commit()
+        return {
+            "staled": len(staled_ids),
+            "retired": max(0, int(retired)),
+            "purged": len(purged_ids),
+        }
 
     def list_inspiration_axes(
         self,

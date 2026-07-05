@@ -248,6 +248,96 @@ def test_keyword_inspiration_report_command_is_registered(runner: CliRunner) -> 
     assert "--window-days" in result.output
 
 
+def test_keyword_inspiration_preview_one_shot_overrides_apply_on_derived_params(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    """Post config-collapse, --limit / --interest-limit apply as one-shot
+    overrides on the derived breadth params injected at planner construction —
+    the user-visible flag behavior is unchanged (Spec AC6b)."""
+    cfg = config_module.Config()
+    captured: dict[str, object] = {}
+
+    class FakeLLMService:
+        def __init__(self, **_: object) -> None:
+            pass
+
+    class FakeSoulEngine:
+        async def get_profile(self) -> SoulProfile:
+            return SoulProfile(
+                preferences=PreferenceLayer(
+                    interests=[InterestTag(name="游戏评价", category="游戏", weight=0.9)]
+                )
+            )
+
+    class FakePlanner:
+        def __init__(self, **kwargs: object) -> None:
+            captured["inspiration_params"] = kwargs.get("inspiration_params")
+
+        async def preview_inspiration_keywords(
+            self,
+            platforms: list[str],
+            *,
+            profile: SoulProfile | None = None,
+            query_kind: str = "regular",
+            persist_axes: bool = False,
+        ) -> dict[str, object]:
+            return {"ok": True}
+
+    _ignore_runtime_config_error(monkeypatch)
+    monkeypatch.setattr(config_module, "load_config", lambda: cfg, raising=False)
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None, raising=False)
+    monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: object(), raising=False)
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: object(), raising=False)
+    monkeypatch.setattr(cli_module, "_build_registry", lambda: object(), raising=False)
+    monkeypatch.setattr(cli_module, "_build_usage_recorder", lambda: None, raising=False)
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine(), raising=False)
+    monkeypatch.setattr("openbiliclaw.llm.service.LLMService", FakeLLMService, raising=False)
+    monkeypatch.setattr(
+        "openbiliclaw.llm.service.module_overrides_from_config",
+        lambda loaded_cfg: {},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.keyword_planner.KeywordPlanner",
+        FakePlanner,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.discovery.inspiration_provider.build_inspiration_search_provider",
+        lambda *args, **kwargs: object(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.discovery.inspiration_provider.build_platform_source_backends",
+        lambda *args, **kwargs: {},
+        raising=False,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "keyword-inspiration-preview",
+            "--platform",
+            "bilibili",
+            "--limit",
+            "3",
+            "--interest-limit",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0
+    params = captured["inspiration_params"]
+    assert params is not None
+    assert params.max_keywords_per_platform == 3  # type: ignore[union-attr]
+    assert params.interest_sample_size == 2  # type: ignore[union-attr]
+    # Non-overridden knobs stay at the derived medium-tier values.
+    medium = config_module.derive_inspiration_breadth_params("medium")
+    assert params.max_probe_searches_per_stage == medium.max_probe_searches_per_stage  # type: ignore[union-attr]
+    assert params.search_results_per_query == medium.search_results_per_query  # type: ignore[union-attr]
+
+
 def test_main_bootstraps_container_runtime_when_project_root_is_configured(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
 ) -> None:

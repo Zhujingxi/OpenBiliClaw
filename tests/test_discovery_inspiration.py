@@ -17,6 +17,7 @@ from openbiliclaw.discovery.inspiration import (
     SecondaryInterest,
     build_grounding_probes,
     build_like_secondary_interest_window,
+    derive_inspiration_axis_id,
     derive_inspiration_seeds,
     materialize_platform_keywords,
     platform_style_score,
@@ -342,6 +343,8 @@ def test_inspiration_axis_table_schema_and_interest_index_created(db: Database) 
         "created_at",
         "last_used_at",
         "last_refreshed_at",
+        "window_uses",
+        "yield_backfilled_at",
     }
     assert "idx_discovery_inspiration_axis_interest" in indexes
 
@@ -1466,3 +1469,436 @@ def test_materialize_platform_keywords_appends_decoration_only_within_budget() -
         "game design combat tuning designer interview",
         "game design community discourse near limit",
     ]
+
+
+# ── Phase 2 Task 1: axis_id attribution + yield backfill ────────────────
+
+
+def _insert_inspiration_keyword(
+    db: Database,
+    *,
+    keyword: str,
+    angle_id: str = "",
+    angle_label: str = "",
+    source_interest: str = "",
+    status: str = "used",
+    yield_count: int = 0,
+    created_at: str = "2026-07-01 12:00:00",
+    platform: str = "bilibili",
+) -> None:
+    db.conn.execute(
+        """
+        INSERT INTO discovery_keywords (
+            platform, keyword, keyword_kind, profile_kw_digest,
+            angle_id, angle_label, source_interest,
+            inspiration_backend, status, yield_count, created_at
+        )
+        VALUES (?, ?, 'regular', 'digest', ?, ?, ?, 'axis_keyword', ?, ?, ?)
+        """,
+        (
+            platform,
+            keyword,
+            angle_id,
+            angle_label,
+            source_interest,
+            status,
+            yield_count,
+            created_at,
+        ),
+    )
+    db.conn.commit()
+
+
+def _dump_axis_table(db: Database) -> list[tuple[object, ...]]:
+    rows = db.conn.execute("SELECT * FROM discovery_inspiration_axis ORDER BY axis_id").fetchall()
+    return [tuple(row) for row in rows]
+
+
+def test_materialize_carries_axis_id_into_realized_metadata() -> None:
+    candidates = [
+        MaterializeCandidate(
+            interest="游戏评价",
+            axis_label="机制拆解",
+            platform="bilibili",
+            core_concept="机制拆解 设计理念",
+            decoration="",
+            recency_sensitivity="low",
+            origin="llm_axis_keyword",
+            axis_id="axis:real-id-123",
+        )
+    ]
+
+    keywords, _telemetry = materialize_platform_keywords(
+        candidates,
+        {"游戏评价": AllocationTarget(platforms=("bilibili",), min_axes=1)},
+        max_keywords_per_platform=4,
+    )
+
+    assert keywords
+    assert keywords[0].metadata["axis_id"] == "axis:real-id-123"
+
+
+def test_resolve_realized_axis_id_prefers_explicit_id_then_maps_then_derives() -> None:
+    from openbiliclaw.runtime.keyword_planner import KeywordPlanner
+
+    axis = _axis_row("机制拆解", interest_label="游戏评价")
+    index = KeywordPlanner._build_axis_id_index([axis])
+
+    # Explicit axis_id wins verbatim.
+    assert (
+        KeywordPlanner._resolve_realized_axis_id(
+            raw_axis_id="axis:explicit",
+            source_interest="游戏评价",
+            axis_label="机制拆解",
+            axis_id_index=index,
+        )
+        == "axis:explicit"
+    )
+    # An LLM ``axis_id_or_label`` that is itself a real axis id → verbatim.
+    assert (
+        KeywordPlanner._resolve_realized_axis_id(
+            raw_axis_id="",
+            source_interest="游戏评价",
+            axis_label=axis.axis_id,
+            axis_id_index=index,
+        )
+        == axis.axis_id
+    )
+    # A label matching an existing axis maps to that axis's id.
+    assert (
+        KeywordPlanner._resolve_realized_axis_id(
+            raw_axis_id="",
+            source_interest="游戏评价",
+            axis_label="机制拆解",
+            axis_id_index=index,
+        )
+        == axis.axis_id
+    )
+    # Unknown label derives the stable id from interest + label.
+    assert KeywordPlanner._resolve_realized_axis_id(
+        raw_axis_id="",
+        source_interest="科技",
+        axis_label="发布会",
+        axis_id_index=index,
+    ) == derive_inspiration_axis_id("科技", "发布会")
+
+
+def test_inspiration_axis_yield_columns_backfilled_on_preexisting_db(tmp_path: Path) -> None:
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE discovery_inspiration_axis (
+            axis_id            TEXT PRIMARY KEY,
+            interest_label     TEXT NOT NULL,
+            interest_id        TEXT,
+            axis_label         TEXT NOT NULL,
+            axis_kind          TEXT NOT NULL,
+            example_terms      TEXT,
+            evidence_refs      TEXT,
+            source             TEXT NOT NULL,
+            time_sensitive     INTEGER NOT NULL DEFAULT 0,
+            freshness_ttl_days INTEGER,
+            yield_score        REAL NOT NULL DEFAULT 0.0,
+            admissions         INTEGER NOT NULL DEFAULT 0,
+            use_count          INTEGER NOT NULL DEFAULT 0,
+            status             TEXT NOT NULL DEFAULT 'active',
+            created_at         TEXT NOT NULL,
+            last_used_at       TEXT,
+            last_refreshed_at  TEXT
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    db.initialize()
+    columns = {
+        str(row["name"])
+        for row in db.conn.execute("PRAGMA table_info(discovery_inspiration_axis)").fetchall()
+    }
+    assert "window_uses" in columns
+    assert "yield_backfilled_at" in columns
+
+
+def test_backfill_sets_yield_from_admissions_and_window_uses(db: Database) -> None:
+    now = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    axis = _axis_row("机制拆解", interest_label="游戏评价")
+    db.upsert_inspiration_axes([axis], bump_usage=False)
+
+    for _ in range(3):
+        _insert_inspiration_keyword(
+            db, keyword="k", angle_id=axis.axis_id, status="used", yield_count=2
+        )
+    # A still-pending row is not "consumed": excluded from window_uses.
+    _insert_inspiration_keyword(db, keyword="p", angle_id=axis.axis_id, status="pending")
+
+    db.backfill_inspiration_axis_yield(window_days=30, now=now)
+
+    row = db.conn.execute(
+        "SELECT window_uses, admissions, yield_score, yield_backfilled_at "
+        "FROM discovery_inspiration_axis WHERE axis_id = ?",
+        (axis.axis_id,),
+    ).fetchone()
+    assert row["window_uses"] == 3
+    assert row["admissions"] == 6
+    assert row["yield_score"] == pytest.approx((6 + 0.3) / (3 + 1.0))
+    assert row["yield_backfilled_at"]
+
+
+def test_backfill_attributes_legacy_rows_via_derived_id(db: Database) -> None:
+    now = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    axis = _axis_row("发布会", interest_label="科技")
+    db.upsert_inspiration_axes([axis], bump_usage=False)
+
+    # Phase-1-era row: angle_id == angle_label (the label, not a real id).
+    _insert_inspiration_keyword(
+        db,
+        keyword="k",
+        angle_id="发布会",
+        angle_label="发布会",
+        source_interest="科技",
+        status="used",
+        yield_count=4,
+    )
+
+    db.backfill_inspiration_axis_yield(window_days=30, now=now)
+
+    row = db.conn.execute(
+        "SELECT window_uses, admissions FROM discovery_inspiration_axis WHERE axis_id = ?",
+        (axis.axis_id,),
+    ).fetchone()
+    assert row["window_uses"] == 1
+    assert row["admissions"] == 4
+
+
+def test_backfill_does_not_trust_axis_prefixed_legacy_angle_id(db: Database) -> None:
+    now = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    # A label that merely *looks* id-shaped. The real axis id is the hash of
+    # (interest, label), NOT the literal "axis:怪标签".
+    axis = _axis_row("axis:怪标签", interest_label="科技")
+    assert axis.axis_id != "axis:怪标签"
+    db.upsert_inspiration_axes([axis], bump_usage=False)
+
+    _insert_inspiration_keyword(
+        db,
+        keyword="k",
+        angle_id="axis:怪标签",
+        angle_label="axis:怪标签",
+        source_interest="科技",
+        status="used",
+        yield_count=5,
+    )
+
+    db.backfill_inspiration_axis_yield(window_days=30, now=now)
+
+    row = db.conn.execute(
+        "SELECT window_uses, admissions FROM discovery_inspiration_axis WHERE axis_id = ?",
+        (axis.axis_id,),
+    ).fetchone()
+    # Attributed via derive(interest, label), not via the bogus direct id.
+    assert row["window_uses"] == 1
+    assert row["admissions"] == 5
+
+
+def test_backfill_unused_axis_gets_prior_score(db: Database) -> None:
+    now = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    axis = _axis_row("冷门佳作", interest_label="游戏评价", yield_score=0.9, admissions=7)
+    db.upsert_inspiration_axes([axis], bump_usage=False)
+
+    db.backfill_inspiration_axis_yield(window_days=30, now=now)
+
+    row = db.conn.execute(
+        "SELECT window_uses, admissions, yield_score, yield_backfilled_at "
+        "FROM discovery_inspiration_axis WHERE axis_id = ?",
+        (axis.axis_id,),
+    ).fetchone()
+    # SET semantics: zero window rows resets to prior, continuous with unused.
+    assert row["window_uses"] == 0
+    assert row["admissions"] == 0
+    assert row["yield_score"] == pytest.approx(0.3)
+    assert row["yield_backfilled_at"]
+
+
+def test_backfill_is_idempotent(db: Database) -> None:
+    now = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    axis = _axis_row("机制拆解", interest_label="游戏评价")
+    other = _axis_row("冷门佳作", interest_label="游戏评价")
+    db.upsert_inspiration_axes([axis, other], bump_usage=False)
+    _insert_inspiration_keyword(
+        db, keyword="k", angle_id=axis.axis_id, status="used", yield_count=3
+    )
+
+    db.backfill_inspiration_axis_yield(window_days=30, now=now)
+    first = _dump_axis_table(db)
+    db.backfill_inspiration_axis_yield(window_days=30, now=now)
+    second = _dump_axis_table(db)
+
+    assert first == second
+
+
+def test_axis_list_sort_sinks_consumed_zero_yield_below_unused(db: Database) -> None:
+    now = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    bad = _axis_row("坏轴-有消费零产出", interest_label="游戏评价")
+    unused = _axis_row("新轴-从未消费", interest_label="游戏评价")
+    db.upsert_inspiration_axes([bad, unused], bump_usage=False)
+
+    # Bad axis: consumed 5×, near-zero yield (0.05). Unused: window_uses 0.
+    db.conn.execute(
+        "UPDATE discovery_inspiration_axis SET window_uses = 5, yield_score = 0.05 "
+        "WHERE axis_id = ?",
+        (bad.axis_id,),
+    )
+    db.conn.execute(
+        "UPDATE discovery_inspiration_axis SET window_uses = 0, yield_score = 0.05 "
+        "WHERE axis_id = ?",
+        (unused.axis_id,),
+    )
+    db.conn.commit()
+
+    axes = db.list_inspiration_axes(["游戏评价"], limit=10, now=now)
+
+    # Prior floor (0.3) protects only the never-consumed axis, so it ranks first;
+    # the unconditional max(yield, prior) of Phase 1 would have tied them.
+    assert [a.axis_label for a in axes] == ["新轴-从未消费", "坏轴-有消费零产出"]
+
+
+# ── Phase 2 Task 2: axis lifecycle (stale / retired / purge) ─────────────
+
+
+def _set_axis_yield(
+    db: Database,
+    axis_id: str,
+    *,
+    window_uses: int,
+    yield_score: float,
+) -> None:
+    db.conn.execute(
+        "UPDATE discovery_inspiration_axis SET window_uses = ?, yield_score = ? WHERE axis_id = ?",
+        (window_uses, yield_score, axis_id),
+    )
+    db.conn.commit()
+
+
+def _axis_status(db: Database, axis_id: str) -> str | None:
+    row = db.conn.execute(
+        "SELECT status FROM discovery_inspiration_axis WHERE axis_id = ?",
+        (axis_id,),
+    ).fetchone()
+    return None if row is None else str(row["status"])
+
+
+def test_lifecycle_marks_time_expired_axes_stale(db: Database) -> None:
+    now = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    expired = _axis_row(
+        "过期时效轴",
+        time_sensitive=True,
+        freshness_ttl_days=7,
+        last_refreshed_at="2026-06-01T12:00:00Z",
+    )
+    fresh = _axis_row(
+        "新鲜时效轴",
+        time_sensitive=True,
+        freshness_ttl_days=7,
+        last_refreshed_at="2026-07-03T12:00:00Z",
+    )
+    evergreen = _axis_row("常青轴", last_refreshed_at="2026-01-01T12:00:00Z")
+    db.upsert_inspiration_axes([expired, fresh, evergreen], bump_usage=False)
+
+    summary = db.apply_inspiration_axis_lifecycle(now=now)
+
+    assert summary["staled"] == 1
+    assert _axis_status(db, expired.axis_id) == "stale"
+    assert _axis_status(db, fresh.axis_id) == "active"
+    assert _axis_status(db, evergreen.axis_id) == "active"
+
+
+def test_lifecycle_retires_consumed_low_yield_axes_on_window_uses_not_use_count(
+    db: Database,
+) -> None:
+    now = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    bad = _axis_row("坏轴")
+    few_uses = _axis_row("消费不足轴", use_count=50)
+    good_yield = _axis_row("低分但过线轴")
+    db.upsert_inspiration_axes([bad, few_uses, good_yield], bump_usage=False)
+    # 5 consumption chances, near-zero score → retires.
+    _set_axis_yield(db, bad.axis_id, window_uses=5, yield_score=0.05)
+    # Heavy selection bookkeeping (use_count=50) but only 4 real consumptions:
+    # NOT retired — retirement keys on window_uses, never use_count.
+    _set_axis_yield(db, few_uses.axis_id, window_uses=4, yield_score=0.05)
+    # Enough uses but score at/above the line → stays active.
+    _set_axis_yield(db, good_yield.axis_id, window_uses=10, yield_score=0.08)
+
+    summary = db.apply_inspiration_axis_lifecycle(now=now)
+
+    assert summary["retired"] == 1
+    assert _axis_status(db, bad.axis_id) == "retired"
+    assert _axis_status(db, few_uses.axis_id) == "active"
+    assert _axis_status(db, good_yield.axis_id) == "active"
+
+
+def test_lifecycle_purges_stale_and_retired_rows_older_than_90_days(db: Database) -> None:
+    now = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    old_stale = _axis_row("陈旧stale", status="stale", last_refreshed_at="2026-03-01T12:00:00Z")
+    old_retired = _axis_row(
+        "陈旧retired", status="retired", last_refreshed_at="2026-02-01T12:00:00Z"
+    )
+    recent_stale = _axis_row("新近stale", status="stale", last_refreshed_at="2026-06-01T12:00:00Z")
+    old_active = _axis_row("陈旧active", last_refreshed_at="2026-01-01T12:00:00Z")
+    db.upsert_inspiration_axes([old_stale, old_retired, recent_stale, old_active], bump_usage=False)
+
+    summary = db.apply_inspiration_axis_lifecycle(now=now)
+
+    assert summary["purged"] == 2
+    assert _axis_status(db, old_stale.axis_id) is None
+    assert _axis_status(db, old_retired.axis_id) is None
+    assert _axis_status(db, recent_stale.axis_id) == "stale"
+    # Purge only touches stale/retired rows — an old but active axis survives.
+    assert _axis_status(db, old_active.axis_id) == "active"
+
+
+def test_lifecycle_returns_full_transition_summary(db: Database) -> None:
+    now = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    db.upsert_inspiration_axes([_axis_row("无事发生轴")], bump_usage=False)
+
+    summary = db.apply_inspiration_axis_lifecycle(now=now)
+
+    assert summary == {"staled": 0, "retired": 0, "purged": 0}
+
+
+def test_upsert_does_not_resurrect_retired_axis_but_revives_stale(db: Database) -> None:
+    retired = _axis_row("退休轴", status="retired", evidence_refs=("old-ref",))
+    stale = _axis_row("陈旧轴", status="stale", evidence_refs=("old-ref",))
+    db.upsert_inspiration_axes([retired, stale], bump_usage=False)
+
+    # LLM re-proposes both axes as fresh active rows with new evidence.
+    db.upsert_inspiration_axes(
+        [
+            _axis_row(
+                "退休轴",
+                status="active",
+                evidence_refs=("new-ref",),
+                last_refreshed_at=_AXIS_LATER,
+            ),
+            _axis_row(
+                "陈旧轴",
+                status="active",
+                evidence_refs=("new-ref",),
+                last_refreshed_at=_AXIS_LATER,
+            ),
+        ],
+        bump_usage=False,
+    )
+
+    retired_row = db.conn.execute(
+        "SELECT status, evidence_refs FROM discovery_inspiration_axis WHERE axis_id = ?",
+        (retired.axis_id,),
+    ).fetchone()
+    # Evidence merged, status pinned: no resurrection for retired.
+    assert str(retired_row["status"]) == "retired"
+    assert set(json.loads(str(retired_row["evidence_refs"]))) == {"old-ref", "new-ref"}
+    # Deliberate asymmetry: stale MAY come back via a fresh upsert.
+    assert _axis_status(db, stale.axis_id) == "active"

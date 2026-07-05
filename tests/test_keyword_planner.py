@@ -9,6 +9,7 @@ a fake ``llm_service``, a fake deficit source, and a REAL temporary
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -16,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from openbiliclaw.config import DiscoveryConfig
+from openbiliclaw.config import DiscoveryConfig, derive_inspiration_breadth_params
 from openbiliclaw.discovery.inspiration import (
     AllocationTarget,
     AxisRow,
@@ -316,6 +317,23 @@ def _profile(*names_weights: tuple[str, float]) -> SoulProfile:
     )
 
 
+# Phase-2 config collapse: the per-knob inspiration_* config fields became
+# derived breadth params. Tests keep passing the old knob kwargs to
+# ``_discovery_cfg`` — they are split out here and injected into the planner as
+# an ``InspirationBreadthParams`` override, so no test body changed.
+_INSPIRATION_TIER_KEY_TO_PARAM = {
+    "inspiration_aspect_window_size": "aspect_window_size",
+    "inspiration_interest_sample_size": "interest_sample_size",
+    "inspiration_max_probe_searches_per_stage": "max_probe_searches_per_stage",
+    "inspiration_platforms_per_probe": "platforms_per_probe",
+    "inspiration_riskcontrolled_probe_budget": "riskcontrolled_probe_budget",
+    "inspiration_search_pages_per_probe": "search_pages_per_probe",
+    "inspiration_search_results_per_query": "search_results_per_query",
+    "inspiration_max_seeds_per_aspect": "max_seeds_per_aspect",
+    "inspiration_max_keywords_per_platform": "max_keywords_per_platform",
+}
+
+
 def _discovery_cfg(**overrides: object) -> DiscoveryConfig:
     base: dict[str, object] = {
         "unified_keyword_planner_enabled": True,
@@ -329,7 +347,17 @@ def _discovery_cfg(**overrides: object) -> DiscoveryConfig:
         "plan_ttl_hours": 12,
     }
     base.update(overrides)
-    return DiscoveryConfig(**base)  # type: ignore[arg-type]
+    param_overrides = {
+        param: int(base.pop(key))  # type: ignore[call-overload]
+        for key, param in _INSPIRATION_TIER_KEY_TO_PARAM.items()
+        if key in base
+    }
+    cfg = DiscoveryConfig(**base)  # type: ignore[arg-type]
+    if param_overrides:
+        cfg._test_inspiration_params = dataclasses.replace(  # type: ignore[attr-defined]
+            derive_inspiration_breadth_params("medium"), **param_overrides
+        )
+    return cfg
 
 
 def _make_planner(
@@ -342,14 +370,16 @@ def _make_planner(
     pool_target_count: int = 300,
     inspiration_provider: Any | None = None,
 ) -> KeywordPlanner:
+    cfg = discovery or _discovery_cfg()
     planner = KeywordPlanner(
         llm_service=llm,
         database=db,
-        config=_FakeConfig(discovery or _discovery_cfg(), pool_target_count),
+        config=_FakeConfig(cfg, pool_target_count),
         soul_engine=_FakeSoulEngine(profile),
         pool_target_count=pool_target_count,
         signal_event_threshold=6,
         inspiration_provider=inspiration_provider,
+        inspiration_params=getattr(cfg, "_test_inspiration_params", None),
     )
     planner.bind_deficit_source(deficit)
     return planner
@@ -2739,3 +2769,201 @@ async def test_merged_max_tokens_scales_with_total_ask(db: Database) -> None:
     cfg = _discovery_cfg(kw_cache_high=30, gen_batch=30)
     await _make_planner(db, llm=llm, profile=profile, deficit=deficit, discovery=cfg).run_once()
     assert llm.max_tokens_seen[0] == 210 * 48 + 1024
+
+
+# ── Phase 2 Task 3: axis backfill tick wiring + ordering regression ──────
+
+
+class _RecordingDb:
+    """Delegating db wrapper recording learning-tick + axis-fetch call order."""
+
+    _SPIED = frozenset(
+        {
+            "backfill_inspiration_axis_yield",
+            "apply_inspiration_axis_lifecycle",
+            "list_inspiration_axes",
+        }
+    )
+
+    def __init__(self, real: Database) -> None:
+        self._real = real
+        self.calls: list[str] = []
+
+    def __getattr__(self, name: str) -> Any:
+        value = getattr(self._real, name)
+        if name in self._SPIED and callable(value):
+
+            def wrapper(*args: Any, **kwargs: Any) -> Any:
+                self.calls.append(name)
+                return value(*args, **kwargs)
+
+            return wrapper
+        return value
+
+
+def _seed_axis(db: Database, label: str, *, interest: str, refreshed_at: str) -> AxisRow:
+    axis = AxisRow(
+        interest_label=interest,
+        axis_label=label,
+        axis_kind="subgenre",
+        source="external_search",
+        created_at=refreshed_at,
+        last_refreshed_at=refreshed_at,
+    )
+    db.upsert_inspiration_axes([axis], bump_usage=False)
+    return axis
+
+
+def _seed_consumed_keywords(
+    db: Database,
+    axis: AxisRow,
+    *,
+    count: int,
+    yield_each: int,
+    created_at: str = "2026-07-01 12:00:00",
+) -> None:
+    for index in range(count):
+        db.conn.execute(
+            """
+            INSERT INTO discovery_keywords (
+                platform, keyword, keyword_kind, profile_kw_digest,
+                angle_id, angle_label, source_interest,
+                inspiration_backend, status, yield_count, created_at
+            )
+            VALUES (?, ?, 'regular', 'digest', ?, ?, ?, 'axis_keyword', 'used', ?, ?)
+            """,
+            (
+                _BILI,
+                f"{axis.axis_label}-{index}",
+                axis.axis_id,
+                axis.axis_label,
+                axis.interest_label,
+                yield_each,
+                created_at,
+            ),
+        )
+    db.conn.commit()
+
+
+def _tick_planner(spy_db: _RecordingDb, *, profile: SoulProfile) -> KeywordPlanner:
+    return _make_planner(
+        spy_db,  # type: ignore[arg-type]
+        llm=_SequentialLLM(payloads=[{"axes": [], "keywords": []}] * 4),
+        profile=profile,
+        deficit=_FakeDeficitSource(),
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True,
+            inspiration_search_results_per_query=1,
+        ),
+        inspiration_provider=_FakeInspirationProvider(previews_by_query={}),
+    )
+
+
+async def test_production_stage_runs_backfill_and_lifecycle_before_axis_fetch(
+    db: Database,
+) -> None:
+    profile = _profile(("Switch 独立游戏", 0.95))
+    axis = _seed_axis(
+        db, "冷门佳作", interest="Switch 独立游戏", refreshed_at="2026-07-04T12:00:00Z"
+    )
+    _seed_consumed_keywords(db, axis, count=2, yield_each=1)
+    spy = _RecordingDb(db)
+    planner = _tick_planner(spy, profile=profile)
+
+    await planner._run_inspiration_stage([_BILI], profile=profile, digest="d1")
+
+    assert spy.calls[0] == "backfill_inspiration_axis_yield"
+    assert spy.calls[1] == "apply_inspiration_axis_lifecycle"
+    assert "list_inspiration_axes" in spy.calls
+    assert spy.calls.index("backfill_inspiration_axis_yield") < spy.calls.index(
+        "list_inspiration_axes"
+    )
+    assert planner.last_axis_backfill["ran"] is True
+    row = db.conn.execute(
+        "SELECT window_uses, admissions, yield_backfilled_at "
+        "FROM discovery_inspiration_axis WHERE axis_id = ?",
+        (axis.axis_id,),
+    ).fetchone()
+    assert row["window_uses"] == 2
+    assert row["admissions"] == 2
+    assert row["yield_backfilled_at"]
+
+
+async def test_shared_production_stage_runs_backfill_tick(db: Database) -> None:
+    profile = _profile(("独立游戏叙事", 0.93))
+    _seed_axis(db, "环境叙事", interest="独立游戏叙事", refreshed_at="2026-07-04T12:00:00Z")
+    spy = _RecordingDb(db)
+    planner = _tick_planner(spy, profile=profile)
+
+    await planner._run_shared_inspiration_stage(
+        [_BILI], explore_platforms=[_REDDIT], profile=profile, digest="d1"
+    )
+
+    assert spy.calls[0] == "backfill_inspiration_axis_yield"
+    assert spy.calls[1] == "apply_inspiration_axis_lifecycle"
+    assert planner.last_axis_backfill["ran"] is True
+
+
+async def test_second_production_stage_within_six_hours_skips_backfill(db: Database) -> None:
+    profile = _profile(("Switch 独立游戏", 0.95))
+    _seed_axis(db, "冷门佳作", interest="Switch 独立游戏", refreshed_at="2026-07-04T12:00:00Z")
+    spy = _RecordingDb(db)
+    planner = _tick_planner(spy, profile=profile)
+
+    await planner._run_inspiration_stage([_BILI], profile=profile, digest="d1")
+    assert planner.last_axis_backfill["ran"] is True
+    first_backfills = spy.calls.count("backfill_inspiration_axis_yield")
+
+    await planner._run_inspiration_stage([_BILI], profile=profile, digest="d1")
+
+    # yield_backfilled_at was just written → the second stage is inside the 6h
+    # throttle window and must skip (telemetry says so, spy confirms no call).
+    assert planner.last_axis_backfill == {"ran": False, "staled": 0, "retired": 0, "purged": 0}
+    assert spy.calls.count("backfill_inspiration_axis_yield") == first_backfills
+
+
+async def test_preview_never_triggers_backfill_or_lifecycle(db: Database) -> None:
+    profile = _profile(("Switch 独立游戏", 0.95))
+    axis = _seed_axis(
+        db, "冷门佳作", interest="Switch 独立游戏", refreshed_at="2026-07-04T12:00:00Z"
+    )
+    _seed_consumed_keywords(db, axis, count=2, yield_each=1)
+    spy = _RecordingDb(db)
+    planner = _tick_planner(spy, profile=profile)
+
+    report = await planner.preview_inspiration_keywords([_BILI], profile=profile)
+    report_second = await planner.preview_inspiration_keywords([_BILI], profile=profile)
+
+    # No backfill timestamp exists (maximally stale) — preview still never ticks.
+    assert "backfill_inspiration_axis_yield" not in spy.calls
+    assert "apply_inspiration_axis_lifecycle" not in spy.calls
+    assert report["axis_backfill"] == {"ran": False, "staled": 0, "retired": 0, "purged": 0}
+    assert report_second["axis_backfill"] == report["axis_backfill"]
+    row = db.conn.execute(
+        "SELECT yield_backfilled_at, window_uses FROM discovery_inspiration_axis WHERE axis_id = ?",
+        (axis.axis_id,),
+    ).fetchone()
+    assert row["yield_backfilled_at"] is None
+    assert row["window_uses"] == 0
+
+
+def test_backfilled_yield_reorders_axis_list_end_to_end(db: Database) -> None:
+    now = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    interest = "游戏评价"
+    # X: older but genuinely yielding. W: fresher, consumed, zero admissions.
+    # Z: unused (== prior). Y: less fresh than W, consumed, zero admissions.
+    x = _seed_axis(db, "X-有产出", interest=interest, refreshed_at="2026-06-25T12:00:00Z")
+    w = _seed_axis(db, "W-新鲜零产出", interest=interest, refreshed_at="2026-07-05T11:00:00Z")
+    _seed_axis(db, "Z-未使用", interest=interest, refreshed_at="2026-07-05T11:00:00Z")
+    y = _seed_axis(db, "Y-较旧零产出", interest=interest, refreshed_at="2026-06-30T12:00:00Z")
+    _seed_consumed_keywords(db, x, count=3, yield_each=2)
+    _seed_consumed_keywords(db, w, count=5, yield_each=0)
+    _seed_consumed_keywords(db, y, count=5, yield_each=0)
+
+    db.backfill_inspiration_axis_yield(window_days=30, now=now)
+    axes = db.list_inspiration_axes([interest], limit=10, now=now)
+
+    # Spec AC2: X (yield) > Z (unused == prior) > W/Y (consumed, zero
+    # admissions); the freshness crossover holds — old-but-yielding X outranks
+    # the much fresher zero-yield W.
+    assert [a.axis_label for a in axes] == ["X-有产出", "Z-未使用", "W-新鲜零产出", "Y-较旧零产出"]

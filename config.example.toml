@@ -470,16 +470,13 @@ inspiration_search_backends = ["local_cache", "platform_sources", "exa", "you"]
 # 实验开关：开启且 inspiration provider 可用时，跳过旧 merged keyword planner，
 # 每轮 due 平台只用 inspiration flow 产词。
 inspiration_replace_merged_keywords = false
-inspiration_aspect_window_size = 32
-inspiration_interest_sample_size = 6
-inspiration_max_probe_searches_per_stage = 12
-inspiration_platforms_per_probe = 2
-inspiration_riskcontrolled_probe_budget = 4
-inspiration_search_pages_per_probe = 1
-inspiration_search_results_per_query = 5
-inspiration_max_seeds_per_aspect = 3
-inspiration_max_expansions_per_seed = 4
-inspiration_max_keywords_per_platform = 12
+# 探索广度档位：low / medium / high。medium 与旧默认逐项等值；十个旧的
+# inspiration_* 细粒度旋钮（aspect_window_size / interest_sample_size /
+# max_probe_searches_per_stage / platforms_per_probe / riskcontrolled_probe_budget /
+# search_pages_per_probe / search_results_per_query / max_seeds_per_aspect /
+# max_expansions_per_seed / max_keywords_per_platform）已移除，写了也会被忽略
+# 并在启动提示中给出迁移说明。
+inspiration_breadth = "medium"
 # 可选封面图评估。默认关闭；开启后 discovery evaluator 会在模型支持图像输入时
 # 把已压缩的候选封面一并送入评估器，模型不支持时自动退回纯文本评估。
 multimodal_evaluation_enabled = false

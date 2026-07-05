@@ -49,6 +49,9 @@ _DEFAULT_HISTORY_WINDOW_HOURS = 48
 _DEFAULT_CLAIM_LEASE_MINUTES = 10
 _DEFAULT_PLANNER_POLL_SECONDS = 120
 _DEFAULT_PLAN_TTL_HOURS = 12
+# Phase-2 config collapse: these constants are the ``medium`` breadth tier
+# (the pre-collapse per-knob defaults, item-identical — a table-driven test
+# guards the equality so upgrading is zero behavior drift).
 _DEFAULT_INSPIRATION_ASPECT_WINDOW_SIZE = 32
 _DEFAULT_INSPIRATION_INTEREST_SAMPLE_SIZE = 6
 _DEFAULT_INSPIRATION_MAX_PROBE_SEARCHES_PER_STAGE = 12
@@ -57,8 +60,8 @@ _DEFAULT_INSPIRATION_RISKCONTROLLED_PROBE_BUDGET = 4
 _DEFAULT_INSPIRATION_SEARCH_PAGES_PER_PROBE = 1
 _DEFAULT_INSPIRATION_SEARCH_RESULTS_PER_QUERY = 5
 _DEFAULT_INSPIRATION_MAX_SEEDS_PER_ASPECT = 3
-_DEFAULT_INSPIRATION_MAX_EXPANSIONS_PER_SEED = 4
 _DEFAULT_INSPIRATION_MAX_KEYWORDS_PER_PLATFORM = 12
+_DEFAULT_INSPIRATION_BREADTH = "medium"
 _DEFAULT_INSPIRATION_SEARCH_BACKENDS: tuple[str, ...] = (
     "local_cache",
     "platform_sources",
@@ -123,6 +126,110 @@ class ConfigDiagnostics:
     created_default_config: bool = False
     messages: list[str] = field(default_factory=list)
     issues: list[ConfigIssue] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class InspirationBreadthParams:
+    """Effective keyword-inspiration knobs derived from ``inspiration_breadth``.
+
+    Phase-2 config collapse (13 → 4): the ten per-knob ``inspiration_*`` config
+    fields were removed; consumers read this derived view instead. CLI one-shot
+    overrides (``--limit`` / ``--interest-limit``) are applied on a copy of this
+    object and injected via planner construction — never through config fields.
+    """
+
+    aspect_window_size: int
+    interest_sample_size: int
+    max_probe_searches_per_stage: int
+    platforms_per_probe: int
+    riskcontrolled_probe_budget: int
+    search_pages_per_probe: int
+    search_results_per_query: int
+    max_seeds_per_aspect: int
+    max_keywords_per_platform: int
+
+
+_INSPIRATION_BREADTH_TIERS: dict[str, InspirationBreadthParams] = {
+    "low": InspirationBreadthParams(
+        aspect_window_size=16,
+        interest_sample_size=3,
+        max_probe_searches_per_stage=6,
+        platforms_per_probe=1,
+        riskcontrolled_probe_budget=2,
+        search_pages_per_probe=1,
+        search_results_per_query=3,
+        max_seeds_per_aspect=2,
+        max_keywords_per_platform=8,
+    ),
+    "medium": InspirationBreadthParams(
+        aspect_window_size=_DEFAULT_INSPIRATION_ASPECT_WINDOW_SIZE,
+        interest_sample_size=_DEFAULT_INSPIRATION_INTEREST_SAMPLE_SIZE,
+        max_probe_searches_per_stage=_DEFAULT_INSPIRATION_MAX_PROBE_SEARCHES_PER_STAGE,
+        platforms_per_probe=_DEFAULT_INSPIRATION_PLATFORMS_PER_PROBE,
+        riskcontrolled_probe_budget=_DEFAULT_INSPIRATION_RISKCONTROLLED_PROBE_BUDGET,
+        search_pages_per_probe=_DEFAULT_INSPIRATION_SEARCH_PAGES_PER_PROBE,
+        search_results_per_query=_DEFAULT_INSPIRATION_SEARCH_RESULTS_PER_QUERY,
+        max_seeds_per_aspect=_DEFAULT_INSPIRATION_MAX_SEEDS_PER_ASPECT,
+        max_keywords_per_platform=_DEFAULT_INSPIRATION_MAX_KEYWORDS_PER_PLATFORM,
+    ),
+    "high": InspirationBreadthParams(
+        aspect_window_size=48,
+        interest_sample_size=8,
+        max_probe_searches_per_stage=20,
+        platforms_per_probe=3,
+        riskcontrolled_probe_budget=8,
+        search_pages_per_probe=2,
+        search_results_per_query=8,
+        max_seeds_per_aspect=5,
+        max_keywords_per_platform=16,
+    ),
+}
+
+# The ten collapsed ``[discovery]`` keys (hard-removed, no compat shim). A
+# raw-config scan surfaces a removal notice through the diagnostics channel.
+_REMOVED_INSPIRATION_DISCOVERY_KEYS: tuple[str, ...] = (
+    "inspiration_aspect_window_size",
+    "inspiration_interest_sample_size",
+    "inspiration_max_probe_searches_per_stage",
+    "inspiration_platforms_per_probe",
+    "inspiration_riskcontrolled_probe_budget",
+    "inspiration_search_pages_per_probe",
+    "inspiration_search_results_per_query",
+    "inspiration_max_seeds_per_aspect",
+    "inspiration_max_expansions_per_seed",
+    "inspiration_max_keywords_per_platform",
+)
+
+
+def derive_inspiration_breadth_params(breadth: object) -> InspirationBreadthParams:
+    """Return the effective inspiration knobs for a breadth tier.
+
+    Raises :class:`ConfigError` for anything but ``low`` / ``medium`` / ``high``.
+    """
+
+    tier = str(breadth or "").strip().lower()
+    params = _INSPIRATION_BREADTH_TIERS.get(tier)
+    if params is None:
+        raise ConfigError(
+            f"discovery.inspiration_breadth 必须是 low / medium / high，收到 {breadth!r}。"
+        )
+    return params
+
+
+def _removed_discovery_key_issues(raw: dict[str, Any]) -> list[ConfigIssue]:
+    discovery_raw = raw.get("discovery")
+    if not isinstance(discovery_raw, dict):
+        return []
+    return [
+        ConfigIssue(
+            field=f"discovery.{key}",
+            message=(
+                f"`{key}` 已移除，值被忽略，请改用 `inspiration_breadth`（low / medium / high）。"
+            ),
+        )
+        for key in _REMOVED_INSPIRATION_DISCOVERY_KEYS
+        if key in discovery_raw
+    ]
 
 
 @dataclass
@@ -327,18 +434,9 @@ class DiscoveryConfig:
     # due platforms skip the legacy merged keyword planner and are filled only
     # through the search-inspired flow.
     inspiration_replace_merged_keywords: bool = False
-    inspiration_aspect_window_size: int = _DEFAULT_INSPIRATION_ASPECT_WINDOW_SIZE
-    inspiration_interest_sample_size: int = _DEFAULT_INSPIRATION_INTEREST_SAMPLE_SIZE
-    inspiration_max_probe_searches_per_stage: int = (
-        _DEFAULT_INSPIRATION_MAX_PROBE_SEARCHES_PER_STAGE
-    )
-    inspiration_platforms_per_probe: int = _DEFAULT_INSPIRATION_PLATFORMS_PER_PROBE
-    inspiration_riskcontrolled_probe_budget: int = _DEFAULT_INSPIRATION_RISKCONTROLLED_PROBE_BUDGET
-    inspiration_search_pages_per_probe: int = _DEFAULT_INSPIRATION_SEARCH_PAGES_PER_PROBE
-    inspiration_search_results_per_query: int = _DEFAULT_INSPIRATION_SEARCH_RESULTS_PER_QUERY
-    inspiration_max_seeds_per_aspect: int = _DEFAULT_INSPIRATION_MAX_SEEDS_PER_ASPECT
-    inspiration_max_expansions_per_seed: int = _DEFAULT_INSPIRATION_MAX_EXPANSIONS_PER_SEED
-    inspiration_max_keywords_per_platform: int = _DEFAULT_INSPIRATION_MAX_KEYWORDS_PER_PLATFORM
+    # Breadth tier (low / medium / high) replacing the ten per-knob fields —
+    # effective values come from ``derive_inspiration_breadth_params``.
+    inspiration_breadth: str = _DEFAULT_INSPIRATION_BREADTH
     # Unified recommendation-pool admission floor. Source/provenance metadata
     # must never bypass this; explicit strategy thresholds live on candidates.
     admission_min_score: float = _DEFAULT_ADMISSION_MIN_SCORE
@@ -1103,65 +1201,8 @@ def _build_discovery(discovery_raw: dict[str, Any]) -> DiscoveryConfig:
             discovery_raw.get("inspiration_replace_merged_keywords"),
             default=False,
         ),
-        inspiration_aspect_window_size=_normalize_scheduler_int(
-            discovery_raw.get("inspiration_aspect_window_size"),
-            default=_DEFAULT_INSPIRATION_ASPECT_WINDOW_SIZE,
-            min_value=1,
-            max_value=96,
-        ),
-        inspiration_interest_sample_size=_normalize_inspiration_budget_int(
-            discovery_raw.get("inspiration_interest_sample_size"),
-            default=_DEFAULT_INSPIRATION_INTEREST_SAMPLE_SIZE,
-            min_value=1,
-            max_value=16,
-        ),
-        inspiration_max_probe_searches_per_stage=_normalize_inspiration_budget_int(
-            discovery_raw.get("inspiration_max_probe_searches_per_stage"),
-            default=_DEFAULT_INSPIRATION_MAX_PROBE_SEARCHES_PER_STAGE,
-            min_value=1,
-            max_value=64,
-        ),
-        inspiration_platforms_per_probe=_normalize_inspiration_budget_int(
-            discovery_raw.get("inspiration_platforms_per_probe"),
-            default=_DEFAULT_INSPIRATION_PLATFORMS_PER_PROBE,
-            min_value=1,
-            max_value=4,
-        ),
-        inspiration_riskcontrolled_probe_budget=_normalize_inspiration_budget_int(
-            discovery_raw.get("inspiration_riskcontrolled_probe_budget"),
-            default=_DEFAULT_INSPIRATION_RISKCONTROLLED_PROBE_BUDGET,
-            min_value=0,
-            max_value=32,
-        ),
-        inspiration_search_pages_per_probe=_normalize_inspiration_budget_int(
-            discovery_raw.get("inspiration_search_pages_per_probe"),
-            default=_DEFAULT_INSPIRATION_SEARCH_PAGES_PER_PROBE,
-            min_value=1,
-            max_value=5,
-        ),
-        inspiration_search_results_per_query=_normalize_scheduler_int(
-            discovery_raw.get("inspiration_search_results_per_query"),
-            default=_DEFAULT_INSPIRATION_SEARCH_RESULTS_PER_QUERY,
-            min_value=1,
-            max_value=10,
-        ),
-        inspiration_max_seeds_per_aspect=_normalize_scheduler_int(
-            discovery_raw.get("inspiration_max_seeds_per_aspect"),
-            default=_DEFAULT_INSPIRATION_MAX_SEEDS_PER_ASPECT,
-            min_value=1,
-            max_value=8,
-        ),
-        inspiration_max_expansions_per_seed=_normalize_scheduler_int(
-            discovery_raw.get("inspiration_max_expansions_per_seed"),
-            default=_DEFAULT_INSPIRATION_MAX_EXPANSIONS_PER_SEED,
-            min_value=1,
-            max_value=12,
-        ),
-        inspiration_max_keywords_per_platform=_normalize_scheduler_int(
-            discovery_raw.get("inspiration_max_keywords_per_platform"),
-            default=_DEFAULT_INSPIRATION_MAX_KEYWORDS_PER_PLATFORM,
-            min_value=1,
-            max_value=48,
+        inspiration_breadth=_normalize_inspiration_breadth(
+            discovery_raw.get("inspiration_breadth")
         ),
         admission_min_score=_normalize_probability(
             discovery_raw.get("admission_min_score"),
@@ -1571,26 +1612,13 @@ def _normalize_scheduler_int(
     return normalized
 
 
-def _normalize_inspiration_budget_int(
-    value: object,
-    *,
-    default: int,
-    min_value: int,
-    max_value: int,
-) -> int:
-    """Normalize bounded inspiration budget knobs with max-side clamping."""
-    if isinstance(value, int | float):
-        normalized = int(value)
-    elif isinstance(value, str):
-        try:
-            normalized = int(value.strip())
-        except ValueError:
-            return default
-    else:
-        return default
-    if normalized < min_value:
-        return default
-    return min(normalized, max_value)
+def _normalize_inspiration_breadth(value: object) -> str:
+    """Validate the breadth tier; unset → default, invalid → ConfigError."""
+    if value is None:
+        return _DEFAULT_INSPIRATION_BREADTH
+    tier = str(value).strip().lower()
+    derive_inspiration_breadth_params(tier)  # raises ConfigError when invalid
+    return tier
 
 
 def _normalize_auto_update_allowed_remotes(value: object) -> list[str]:
@@ -1788,6 +1816,9 @@ def load_config_with_diagnostics(
                 raw = _deep_merge(raw, file_data)
 
     raw = _apply_env_overrides(raw)
+    # Removed-key notices are collected from the RAW [discovery] table before
+    # _build_discovery ever runs — the values are ignored, never fail-fast.
+    diagnostics.issues.extend(_removed_discovery_key_issues(raw))
     config = _build_config(raw)
     diagnostics.issues.extend(_collect_config_issues(config))
     return config, diagnostics
@@ -2252,24 +2283,7 @@ def _render_config_toml(
             f"{_toml_str_list(list(config.discovery.inspiration_search_backends))}",
             "inspiration_replace_merged_keywords = "
             f"{_toml_bool(config.discovery.inspiration_replace_merged_keywords)}",
-            f"inspiration_aspect_window_size = {config.discovery.inspiration_aspect_window_size}",
-            "inspiration_interest_sample_size = "
-            f"{config.discovery.inspiration_interest_sample_size}",
-            "inspiration_max_probe_searches_per_stage = "
-            f"{config.discovery.inspiration_max_probe_searches_per_stage}",
-            f"inspiration_platforms_per_probe = {config.discovery.inspiration_platforms_per_probe}",
-            "inspiration_riskcontrolled_probe_budget = "
-            f"{config.discovery.inspiration_riskcontrolled_probe_budget}",
-            "inspiration_search_pages_per_probe = "
-            f"{config.discovery.inspiration_search_pages_per_probe}",
-            "inspiration_search_results_per_query = "
-            f"{config.discovery.inspiration_search_results_per_query}",
-            "inspiration_max_seeds_per_aspect = "
-            f"{config.discovery.inspiration_max_seeds_per_aspect}",
-            "inspiration_max_expansions_per_seed = "
-            f"{config.discovery.inspiration_max_expansions_per_seed}",
-            "inspiration_max_keywords_per_platform = "
-            f"{config.discovery.inspiration_max_keywords_per_platform}",
+            f"inspiration_breadth = {_toml_string(config.discovery.inspiration_breadth)}",
             "multimodal_evaluation_enabled = "
             f"{_toml_bool(config.discovery.multimodal_evaluation_enabled)}",
             f"multimodal_batch_size = {config.discovery.multimodal_batch_size}",

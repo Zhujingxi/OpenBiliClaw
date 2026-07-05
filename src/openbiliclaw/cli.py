@@ -8575,7 +8575,9 @@ def keyword_inspiration_dry_run(
 ) -> None:
     """预览 search-backed inspiration 关键词生成链路，不写入关键词池."""
 
-    from openbiliclaw.config import load_config
+    import dataclasses
+
+    from openbiliclaw.config import derive_inspiration_breadth_params, load_config
     from openbiliclaw.discovery.douyin import split_csv_values
     from openbiliclaw.discovery.inspiration_provider import (
         build_inspiration_search_provider,
@@ -8611,10 +8613,20 @@ def keyword_inspiration_dry_run(
     _require_runtime_config()
     config = load_config()
     config.discovery.inspiration_search_enabled = True
+    # One-shot overrides apply on the DERIVED breadth params (internal config
+    # view injected via planner construction) — the per-knob config fields are
+    # gone (Phase-2 collapse), so nothing mutates config.discovery here.
+    inspiration_params = derive_inspiration_breadth_params(
+        getattr(config.discovery, "inspiration_breadth", "medium")
+    )
     if limit is not None:
-        config.discovery.inspiration_max_keywords_per_platform = int(limit)
+        inspiration_params = dataclasses.replace(
+            inspiration_params, max_keywords_per_platform=int(limit)
+        )
     if interest_limit is not None:
-        config.discovery.inspiration_interest_sample_size = int(interest_limit)
+        inspiration_params = dataclasses.replace(
+            inspiration_params, interest_sample_size=int(interest_limit)
+        )
     memory = _build_memory_manager()
     database = _get_runtime_database()
     registry = _build_registry()
@@ -8667,14 +8679,11 @@ def keyword_inspiration_dry_run(
                 ),
                 x_client=x_client,
             ),
-            platforms_per_probe=int(
-                getattr(config.discovery, "inspiration_platforms_per_probe", 2)
-            ),
-            riskcontrolled_probe_budget=int(
-                getattr(config.discovery, "inspiration_riskcontrolled_probe_budget", 4)
-            ),
-            pages_per_probe=int(getattr(config.discovery, "inspiration_search_pages_per_probe", 1)),
+            platforms_per_probe=int(inspiration_params.platforms_per_probe),
+            riskcontrolled_probe_budget=int(inspiration_params.riskcontrolled_probe_budget),
+            pages_per_probe=int(inspiration_params.search_pages_per_probe),
         ),
+        inspiration_params=inspiration_params,
     )
     report = asyncio.run(
         planner.preview_inspiration_keywords(

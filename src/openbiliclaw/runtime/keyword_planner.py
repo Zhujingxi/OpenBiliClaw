@@ -48,9 +48,10 @@ import socket
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
+from openbiliclaw.config import InspirationBreadthParams, derive_inspiration_breadth_params
 from openbiliclaw.discovery.inspiration import (
     AllocationTarget,
     AxisRow,
@@ -62,6 +63,7 @@ from openbiliclaw.discovery.inspiration import (
     SecondaryInterest,
     build_grounding_probes,
     build_like_secondary_interest_window,
+    derive_inspiration_axis_id,
     derive_inspiration_seeds,
     materialize_platform_keywords,
     normalize_lens_family,
@@ -84,6 +86,7 @@ from openbiliclaw.llm.prompts import (
     platform_supply_advantage,
 )
 from openbiliclaw.llm.task_options import without_core_memory_kwargs
+from openbiliclaw.storage.database import _parse_axis_datetime
 
 if TYPE_CHECKING:
     from openbiliclaw.config import Config, DiscoveryConfig
@@ -301,6 +304,10 @@ _INSPIRATION_AXIS_KEYWORD_MAX_EVIDENCE_TOTAL = 24
 _INSPIRATION_AXIS_KEYWORD_MAX_EVIDENCE_PER_INTEREST = 8
 # Spec AC3 requires every interest to cover at least two axes or report a shortfall.
 _INSPIRATION_MIN_AXES_PER_INTEREST = 2
+# Axis yield backfill + lifecycle run at most once per this interval (checked
+# against the table-wide MAX(yield_backfilled_at)). Production stages only —
+# preview never triggers the tick (observation must not mutate the observed).
+_AXIS_BACKFILL_MIN_INTERVAL_HOURS = 6
 
 
 def _as_str_list(value: object) -> list[str]:
@@ -745,6 +752,7 @@ class KeywordPlanner:
         owner: str | None = None,
         embedding_service: Any | None = None,
         inspiration_provider: Any | None = None,
+        inspiration_params: InspirationBreadthParams | None = None,
     ) -> None:
         self._llm = llm_service
         self._db = database
@@ -752,6 +760,10 @@ class KeywordPlanner:
         self._soul_engine = soul_engine
         self._embedding_service = embedding_service
         self._inspiration_provider = inspiration_provider
+        # Internal config view for the inspiration knobs. When injected (CLI
+        # one-shot overrides, tests) it wins; otherwise the values derive from
+        # the ``inspiration_breadth`` tier at read time.
+        self._inspiration_params_override = inspiration_params
         self._deficit_source: KeywordDeficitSource | None = None
         self._pool_target_count = pool_target_count
         self._signal_event_threshold = signal_event_threshold
@@ -768,6 +780,14 @@ class KeywordPlanner:
         # ``{platform: {"generated": n, "yield": y}}`` snapshot emitted by a
         # generation pass. Empty until the first pass that generates anything.
         self.last_cycle_ledger: dict[str, dict[str, int]] = {}
+        # Latest axis backfill+lifecycle tick summary (production stages only;
+        # preview never runs the tick). ``ran=False`` until the first tick.
+        self.last_axis_backfill: dict[str, object] = {
+            "ran": False,
+            "staled": 0,
+            "retired": 0,
+            "purged": 0,
+        }
         self._profile_prompt_cache = PromptLayerRenderCache()
         self._generation_cache: dict[
             str,
@@ -793,6 +813,14 @@ class KeywordPlanner:
     @property
     def _discovery(self) -> DiscoveryConfig:
         return self._config.discovery
+
+    @property
+    def _inspiration_params(self) -> InspirationBreadthParams:
+        if self._inspiration_params_override is not None:
+            return self._inspiration_params_override
+        return derive_inspiration_breadth_params(
+            getattr(self._discovery, "inspiration_breadth", "medium")
+        )
 
     @property
     def enabled(self) -> bool:
@@ -963,6 +991,7 @@ class KeywordPlanner:
                                         decoration="",
                                         recency_sensitivity="low",
                                         origin="deterministic_fill",
+                                        axis_id=axis.axis_id,
                                     )
                                 )
                 continue
@@ -988,6 +1017,48 @@ class KeywordPlanner:
     def _storage_platform_from_materialized(platform: object) -> str:
         value = str(platform or "").strip()
         return "twitter" if value == "x" else value
+
+    @staticmethod
+    def _build_axis_id_index(
+        axes: Sequence[AxisRow],
+    ) -> tuple[set[str], dict[tuple[str, str], str]]:
+        """Return (known axis ids, (interest, label) → axis id) for attribution."""
+
+        known_ids: set[str] = set()
+        by_interest_label: dict[tuple[str, str], str] = {}
+        for axis in axes:
+            if not axis.axis_id:
+                continue
+            known_ids.add(axis.axis_id)
+            key = (
+                KeywordPlanner._match_text(axis.interest_label),
+                KeywordPlanner._match_text(axis.axis_label),
+            )
+            by_interest_label.setdefault(key, axis.axis_id)
+        return known_ids, by_interest_label
+
+    @staticmethod
+    def _resolve_realized_axis_id(
+        *,
+        raw_axis_id: str,
+        source_interest: str,
+        axis_label: str,
+        axis_id_index: tuple[set[str], dict[tuple[str, str], str]],
+    ) -> str:
+        known_ids, by_interest_label = axis_id_index
+        if raw_axis_id:
+            return raw_axis_id
+        # An LLM ``axis_id_or_label`` that is itself a real axis id → use verbatim.
+        if axis_label and axis_label in known_ids:
+            return axis_label
+        mapped = by_interest_label.get(
+            (KeywordPlanner._match_text(source_interest), KeywordPlanner._match_text(axis_label))
+        )
+        if mapped:
+            return mapped
+        if axis_label:
+            return derive_inspiration_axis_id(source_interest, axis_label)
+        return ""
 
     @staticmethod
     def _axes_for_upsert(axes: Sequence[AxisRow], *, bump_usage: bool) -> list[AxisRow]:
@@ -1035,6 +1106,67 @@ class KeywordPlanner:
         except Exception:
             logger.debug("keyword inspiration axis upsert failed", exc_info=True)
 
+    def _axis_backfill_last_run(self) -> datetime | None:
+        """Return the parsed table-wide MAX(yield_backfilled_at), if any.
+
+        Parsed Python-side (not SQL MAX) because the column holds mixed ISO
+        shapes (``Z`` vs ``+00:00``) where string ordering is unreliable —
+        same rationale as the lifecycle purge comparison.
+        """
+
+        conn = getattr(self._db, "conn", None)
+        if conn is None:
+            return None
+        try:
+            rows = conn.execute(
+                "SELECT yield_backfilled_at FROM discovery_inspiration_axis "
+                "WHERE yield_backfilled_at IS NOT NULL"
+            ).fetchall()
+        except Exception:
+            logger.debug("keyword inspiration axis backfill timestamp lookup failed", exc_info=True)
+            return None
+        parsed = [_parse_axis_datetime(row["yield_backfilled_at"]) for row in rows]
+        stamps = [stamp for stamp in parsed if stamp is not None]
+        return max(stamps) if stamps else None
+
+    def _run_axis_backfill_tick(self) -> dict[str, object]:
+        """Run the yield backfill + lifecycle pass, throttled to once per 6h.
+
+        Called at the start of PRODUCTION inspiration stages only (before the
+        axis fetch, so this round's selection sees fresh scores). Pure SQL —
+        zero LLM calls. Preview never reaches this method.
+        """
+
+        telemetry: dict[str, object] = {
+            "ran": False,
+            "staled": 0,
+            "retired": 0,
+            "purged": 0,
+        }
+        backfill = getattr(self._db, "backfill_inspiration_axis_yield", None)
+        lifecycle = getattr(self._db, "apply_inspiration_axis_lifecycle", None)
+        if not callable(backfill) or not callable(lifecycle):
+            return telemetry
+        now = datetime.now(UTC)
+        last_run = self._axis_backfill_last_run()
+        if last_run is not None and (now - last_run) < timedelta(
+            hours=_AXIS_BACKFILL_MIN_INTERVAL_HOURS
+        ):
+            self.last_axis_backfill = telemetry
+            return telemetry
+        try:
+            backfill(now=now)
+            summary = lifecycle(now=now)
+        except Exception:
+            logger.debug("keyword inspiration axis backfill tick failed", exc_info=True)
+            return telemetry
+        telemetry["ran"] = True
+        if isinstance(summary, Mapping):
+            for key in ("staled", "retired", "purged"):
+                telemetry[key] = int(summary.get(key, 0) or 0)
+        self.last_axis_backfill = telemetry
+        return telemetry
+
     @staticmethod
     def _empty_inspiration_axis_report(
         platforms: Sequence[str],
@@ -1061,6 +1193,7 @@ class KeywordPlanner:
             "coverage_shortfall": [],
             "parse_salvaged": False,
             "llm_call_failed": False,
+            "axis_backfill": {"ran": False, "staled": 0, "retired": 0, "purged": 0},
         }
 
     async def _run_inspiration_axis_pipeline(
@@ -1087,6 +1220,13 @@ class KeywordPlanner:
             return {}, report
         if not bool(getattr(self._discovery, "inspiration_search_enabled", False)):
             return {}, report
+
+        # Learning tick (backfill + lifecycle) runs BEFORE the axis fetch so
+        # this round's selection sees fresh scores — production only; preview
+        # must never mutate the observed system (same principle as
+        # ``bump_axis_usage=False``).
+        if selection_scope == "production":
+            report["axis_backfill"] = self._run_axis_backfill_tick()
 
         coverage_snapshot = self._keyword_interest_coverage_snapshot(
             selection_scope=selection_scope
@@ -1118,10 +1258,7 @@ class KeywordPlanner:
             selected_interests,
             existing_axes,
             self._pooled_grounding_terms(platforms),
-            limit=max(
-                1,
-                int(getattr(self._discovery, "inspiration_max_probe_searches_per_stage", 12)),
-            ),
+            limit=max(1, self._inspiration_params.max_probe_searches_per_stage),
         )
         report["brainstorm_branches"] = [
             {
@@ -1187,7 +1324,7 @@ class KeywordPlanner:
                 platforms=platforms,
             )
 
-        max_keywords = int(getattr(self._discovery, "inspiration_max_keywords_per_platform", 12))
+        max_keywords = int(self._inspiration_params.max_keywords_per_platform)
         materialized, materialize_telemetry = materialize_platform_keywords(
             candidates,
             allocation,
@@ -1260,6 +1397,7 @@ class KeywordPlanner:
                     record.secondary_interest,
                     record.grounding_source,
                 )
+        axis_id_index = self._build_axis_id_index([*existing_axes, *new_axes])
         for item in materialized:
             platform = self._storage_platform_from_materialized(item.metadata.get("source_domain"))
             if platform not in platform_set:
@@ -1268,8 +1406,21 @@ class KeywordPlanner:
             metadata = dict(item.metadata)
             axis_label = str(metadata.get("axis_label") or "").strip()
             source_interest = str(metadata.get("source_interest") or "").strip()
-            metadata.setdefault("angle_id", axis_label)
-            metadata.setdefault("angle_label", axis_label)
+            # Attribution rides the persisted angle_id/angle_label columns: write
+            # the REAL axis_id into angle_id (never the label) so backfill can key
+            # yield on the axis. Deterministic-fill candidates carry the id
+            # verbatim; an LLM ref resolves against the library; otherwise the id
+            # is derived from (source_interest, axis_label) — the same stable hash
+            # the axis stores, so legacy rows reconstruct identically.
+            axis_id = self._resolve_realized_axis_id(
+                raw_axis_id=str(metadata.get("axis_id") or "").strip(),
+                source_interest=source_interest,
+                axis_label=axis_label,
+                axis_id_index=axis_id_index,
+            )
+            metadata.pop("axis_id", None)
+            metadata["angle_id"] = axis_id
+            metadata["angle_label"] = axis_label
             metadata.setdefault("generation_reason", metadata.get("origin", ""))
             metadata.setdefault("inspiration_backend", "axis_keyword")
             metadata.setdefault(
@@ -1930,11 +2081,8 @@ class KeywordPlanner:
         profile: SoulProfile,
         coverage_snapshot: dict[str, dict[str, object]],
     ) -> list[SecondaryInterest]:
-        max_aspects = int(getattr(self._discovery, "inspiration_aspect_window_size", 32))
-        sample_size = min(
-            4,
-            int(getattr(self._discovery, "inspiration_interest_sample_size", 6)),
-        )
+        max_aspects = int(self._inspiration_params.aspect_window_size)
+        sample_size = min(4, int(self._inspiration_params.interest_sample_size))
         base_coverage = self._coverage_without_interest_selection_counts(coverage_snapshot)
         authorization_window = build_like_secondary_interest_window(
             profile,
@@ -2189,10 +2337,7 @@ class KeywordPlanner:
         platforms: list[str],
         selected_interests: list[SecondaryInterest],
     ) -> list[BrainstormBranch]:
-        probe_limit = max(
-            1,
-            int(getattr(self._discovery, "inspiration_max_probe_searches_per_stage", 12)),
-        )
+        probe_limit = max(1, self._inspiration_params.max_probe_searches_per_stage)
         axes = self._listed_inspiration_axes(selected_interests)
         pooled_terms = self._pooled_grounding_terms(platforms)
         return build_grounding_probes(
@@ -2247,11 +2392,9 @@ class KeywordPlanner:
         aspect_by_label = {aspect.label: aspect for aspect in aspects}
         seed_records: list[tuple[ProfileAspect, str, InspirationSeed]] = []
         grounding_records: list[GroundedProbe] = []
-        search_limit = int(getattr(self._discovery, "inspiration_search_results_per_query", 5))
-        max_seeds = int(getattr(self._discovery, "inspiration_max_seeds_per_aspect", 3))
-        search_budget = int(
-            getattr(self._discovery, "inspiration_max_probe_searches_per_stage", 12)
-        )
+        search_limit = int(self._inspiration_params.search_results_per_query)
+        max_seeds = int(self._inspiration_params.max_seeds_per_aspect)
+        search_budget = int(self._inspiration_params.max_probe_searches_per_stage)
         for branch in branches:
             if _ledger_int(ledger["searches"]) >= search_budget:
                 break
