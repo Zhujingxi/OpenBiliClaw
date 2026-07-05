@@ -16,7 +16,7 @@ import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import quote, urlparse
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -8691,22 +8691,57 @@ def create_app(
                 if "model" in mdata:
                     mod_cfg.model = str(mdata["model"])
 
-    async def _probe_llm_config(cfg: Any) -> ConfigServiceProbeResponse:
+    async def _probe_llm_config(
+        cfg: Any,
+        *,
+        kind: Literal["llm", "llm_fallback"] = "llm",
+    ) -> ConfigServiceProbeResponse:
         from openbiliclaw.llm.base import LLM_CONNECTIVITY_PROBE_MAX_TOKENS
         from openbiliclaw.llm.registry import build_llm_registry
 
         started = time.perf_counter()
-        provider = str(getattr(cfg.llm, "default_provider", "") or "").strip().lower()
+        is_fallback = kind == "llm_fallback"
+        default_provider = str(getattr(cfg.llm, "default_provider", "") or "").strip().lower()
+        provider = (
+            str(getattr(cfg.llm, "fallback_provider", "") or "").strip().lower()
+            if is_fallback
+            else default_provider
+        )
         model = ""
+        if is_fallback:
+            # Refuse cleanly (ok=false, not a 500) for the two dead states
+            # the registry would otherwise silently drop.
+            if not provider:
+                return ConfigServiceProbeResponse(
+                    ok=False,
+                    kind=kind,
+                    provider="",
+                    model="",
+                    error="Fallback LLM provider is not configured.",
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                )
+            if provider == default_provider:
+                return ConfigServiceProbeResponse(
+                    ok=False,
+                    kind=kind,
+                    provider=provider,
+                    model="",
+                    error=(
+                        f"Fallback provider {provider!r} is the same as the default "
+                        "provider — it would never be used."
+                    ),
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                )
         try:
             registry = build_llm_registry(cfg)
-            provider = provider or str(getattr(registry, "default_provider", "") or "")
+            if not is_fallback:
+                provider = provider or str(getattr(registry, "default_provider", "") or "")
             provider_cfg = getattr(cfg.llm, provider, None)
             model = str(getattr(provider_cfg, "model", "") or "").strip()
             if not registry.is_chat_capable(provider):
                 return ConfigServiceProbeResponse(
                     ok=False,
-                    kind="llm",
+                    kind=kind,
                     provider=provider,
                     model=model,
                     error=f"LLM provider {provider!r} is not registered or not chat-capable.",
@@ -8729,19 +8764,20 @@ def create_app(
             )
             ok = bool(str(getattr(response, "content", "") or "").strip())
             response_model = str(getattr(response, "model", "") or model)
+            label = "Fallback LLM provider" if is_fallback else "LLM provider"
             return ConfigServiceProbeResponse(
                 ok=ok,
-                kind="llm",
+                kind=kind,
                 provider=provider,
                 model=response_model,
-                message="LLM provider is available." if ok else "",
-                error="" if ok else "LLM provider returned an empty response.",
+                message=f"{label} is available." if ok else "",
+                error="" if ok else f"{label} returned an empty response.",
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
         except Exception as exc:
             return ConfigServiceProbeResponse(
                 ok=False,
-                kind="llm",
+                kind=kind,
                 provider=provider,
                 model=model,
                 error=str(exc),
@@ -8813,9 +8849,9 @@ def create_app(
         llm_data = update.get("llm")
         if isinstance(llm_data, dict):
             _apply_llm_update(cfg, llm_data)
-        if payload.kind == "llm":
-            return await _probe_llm_config(cfg)
-        return await _probe_embedding_config(cfg)
+        if payload.kind == "embedding":
+            return await _probe_embedding_config(cfg)
+        return await _probe_llm_config(cfg, kind=payload.kind)
 
     @app.put("/api/config", response_model=ConfigUpdateResponse)
     async def update_config(payload: ConfigUpdateIn) -> ConfigUpdateResponse | JSONResponse:

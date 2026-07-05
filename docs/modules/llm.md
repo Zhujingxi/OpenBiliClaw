@@ -164,6 +164,7 @@ POST /api/config/probe-service
 该接口面向设置页，不写配置文件。后端会把请求中的 `config.llm` 合并到当前配置的内存副本，然后按 `kind` 真实打一次目标服务：
 
 - `kind="llm"`：构建临时 `LLMRegistry`，校验 `default_provider` 是 chat-capable，再调用 `complete_provider(provider, ..., max_tokens=4096)` 发送最小 chat completion；如果 provider 只返回 reasoning / thinking 而没有最终 `content`，返回 `ok=false` 并显示明确诊断。
+- `kind="llm_fallback"`（v0.3.155+）：同 `llm`，但探测对象是 `[llm].fallback_provider` 这一个精确 provider（走 `complete_provider`，不走 fallback 链）。备选未配置或与 `default_provider` 同名时直接返回 `ok=false` + 明确说明（不是 500）。
 - `kind="embedding"`：构建临时 `EmbeddingService`，调用 `probe()` 绕过 L1/L2 cache 获取一次真实向量。
 
 失败以 `ok=false` 的正常响应返回，前端可直接显示 provider / model / latency / error；详见 [配置参考](config.md)。
@@ -367,6 +368,8 @@ x_title = "OpenBiliClaw"
 
 1. **retry 策略**：传输 / provider 临时错误走 3 次重试 + 线性退避（0.25s × attempt）；通用 OpenAI-compatible 的 `LLMResponseError` 默认不重试。DeepSeek 例外：线上观测到它会偶发 HTTP 200 但 `content=""`，因此 `DeepSeekProvider` 对空内容额外重试一次。`reasoning_effort=""` 会显式发送 `thinking={"type":"disabled"}`，避免 DeepSeek v4 省略字段时默认开启 thinking。HTTP 400 会记录 provider response body 摘要，避免只看到 `Error code: 400`
 2. **fallback 顺序**：默认关闭。chat 只在 `[llm].fallback_provider` 非空时按默认 provider 优先、随后这个显式备选 provider 尝试；embedding 只在 `[llm.embedding].fallback_provider` 非空时按显式 provider 优先、随后这个备选 provider 尝试。Embedding provider 留空表示禁用，不再跟随默认 LLM。
+   - **备选何时触发**：仅在 `LLMRegistry.complete()` 链上遇到 provider 级失败时——`LLMProviderError` / `LLMTimeoutError` / `LLMRateLimitError`（限流同时触发 60s cooldown）。
+   - **备选何时刻意不触发**：`LLMResponseError`（响应形状问题，如空 content / JSON 不合法——换 provider 也救不了，直接抛出）；`complete_provider()` 精确路由（per-module override 与配置探测按用户指定 provider 调用，跨 provider 兜底会违背意图）；备选与默认 provider 同名、未注册（缺凭据）或非 chat-capable 时被 `_fallback_order()` 静默丢弃——运行时静默丢弃是正确行为（不能每次补全都刷日志），死状态的可见性由两处兜底：`_collect_config_issues` 在保存 / 加载时以 blocking issue 拦截（见 [配置参考](config.md)），`build_llm_registry` 在构建时对「同名 / 未注册 / 非 chat-capable」按具体原因打一次 WARNING（v0.3.155+，覆盖 env 覆盖与手改 config.toml 绕过保存校验的场景）。
 3. **Protocol DI**：`SupportsComplete` Protocol 解耦了调用方和具体实现，测试时可注入 Fake
 4. **Prompt 集中管理**：所有 prompt 在 `prompts.py` 中定义，不散落在各模块
 5. **统一上下文注入**：`complete_with_core_memory()` / `complete_structured_task()` 默认负责把核心记忆注入到 Soul 相关任务里；已在 `user_input` 自带完整结构化上下文的高频任务可传 `inject_core_memory=False`，或通过 `llm.task_options.without_core_memory_kwargs()` 在兼容旧 stub 的前提下关闭注入，避免动态 core memory 破坏 provider prompt-cache 前缀

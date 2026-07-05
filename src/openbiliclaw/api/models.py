@@ -1275,9 +1275,13 @@ class ConfigUpdateIn(BaseModel):
 
 
 class ConfigServiceProbeIn(BaseModel):
-    """No-write request to probe the submitted LLM or embedding config."""
+    """No-write request to probe the submitted LLM or embedding config.
 
-    kind: Literal["llm", "embedding"]
+    ``llm_fallback`` probes ``[llm].fallback_provider`` (that exact
+    provider, no fallback chain) instead of the default provider.
+    """
+
+    kind: Literal["llm", "embedding", "llm_fallback"]
     config: dict[str, object] = Field(default_factory=dict)
 
 
@@ -1285,7 +1289,7 @@ class ConfigServiceProbeResponse(BaseModel):
     """Result of a user-triggered provider connectivity probe."""
 
     ok: bool
-    kind: Literal["llm", "embedding"]
+    kind: Literal["llm", "embedding", "llm_fallback"]
     provider: str = ""
     model: str = ""
     message: str = ""

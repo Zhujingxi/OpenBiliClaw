@@ -2305,3 +2305,126 @@ def test_collect_issues_blocks_unknown_embedding_provider() -> None:
     config.llm.embedding.fallback_provider = ""
     issues = _collect_config_issues(config)
     assert not any(issue.field.startswith("llm.embedding.") for issue in issues)
+
+
+def _llm_fallback_issues(config: Config) -> list[ConfigIssue]:
+    from openbiliclaw.config import _collect_config_issues
+
+    issues = _collect_config_issues(config)
+    return [issue for issue in issues if issue.field == "llm.fallback_provider"]
+
+
+def test_collect_issues_blocks_unknown_llm_fallback_provider() -> None:
+    """`_fallback_order()` silently drops an unknown fallback name (e.g. a
+    browser-translated '奥拉玛'), so the save must block with the same
+    translation hint as the embedding-provider check."""
+    config = Config()
+    config.llm.default_provider = "deepseek"
+    config.llm.deepseek.api_key = "sk-x"
+    config.llm.fallback_provider = "奥拉玛"
+
+    issues = _llm_fallback_issues(config)
+
+    assert issues
+    assert all(issue.severity == "blocking" for issue in issues)
+    assert "网页翻译" in issues[0].message
+
+
+def test_collect_issues_blocks_llm_fallback_even_when_default_is_unknown() -> None:
+    """The fallback checks must run before the default-provider early return
+    and must not crash when the default provider itself is unknown."""
+    config = Config()
+    config.llm.default_provider = "bogus"
+    config.llm.fallback_provider = "deepseek"  # no api_key -> dead fallback
+
+    issues = _llm_fallback_issues(config)
+
+    assert issues
+    assert all(issue.severity == "blocking" for issue in issues)
+
+
+def test_collect_issues_blocks_same_name_llm_fallback() -> None:
+    """A fallback identical to the default provider would never fire —
+    comparison is normalized (strip/lower)."""
+    config = Config()
+    config.llm.default_provider = "deepseek"
+    config.llm.deepseek.api_key = "sk-x"
+    config.llm.fallback_provider = " DeepSeek "
+
+    issues = _llm_fallback_issues(config)
+
+    assert issues
+    assert all(issue.severity == "blocking" for issue in issues)
+    assert "永远不会生效" in issues[0].message
+
+
+def test_collect_issues_blocks_llm_fallback_missing_api_key() -> None:
+    config = Config()
+    config.llm.default_provider = "openai"
+    config.llm.openai.api_key = "sk-main"
+    config.llm.fallback_provider = "deepseek"
+
+    issues = _llm_fallback_issues(config)
+
+    assert issues
+    assert all(issue.severity == "blocking" for issue in issues)
+    assert "llm.deepseek.api_key" in issues[0].message
+
+
+def test_collect_issues_blocks_openai_compatible_llm_fallback_without_base_url() -> None:
+    config = Config()
+    config.llm.default_provider = "openai"
+    config.llm.openai.api_key = "sk-main"
+    config.llm.fallback_provider = "openai_compatible"
+    config.llm.openai_compatible.api_key = "sk-gateway"
+    config.llm.openai_compatible.base_url = ""
+
+    issues = _llm_fallback_issues(config)
+
+    assert issues
+    assert all(issue.severity == "blocking" for issue in issues)
+    assert "base_url" in issues[0].message
+
+
+def test_collect_issues_blocks_ollama_llm_fallback_without_model_or_base_url() -> None:
+    """Mirrors `_maybe_ollama_provider`: Ollama only registers with a model
+    or base_url; a bare `fallback_provider = "ollama"` would never fire."""
+    config = Config()
+    config.llm.default_provider = "openai"
+    config.llm.openai.api_key = "sk-main"
+    config.llm.fallback_provider = "ollama"
+
+    issues = _llm_fallback_issues(config)
+
+    assert issues
+    assert all(issue.severity == "blocking" for issue in issues)
+
+    config.llm.ollama.model = "llama3"
+    assert _llm_fallback_issues(config) == []
+
+
+def test_collect_issues_allows_gemini_llm_fallback_with_env_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "env-key")
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    config = Config()
+    config.llm.default_provider = "openai"
+    config.llm.openai.api_key = "sk-main"
+    config.llm.fallback_provider = "gemini"
+
+    assert _llm_fallback_issues(config) == []
+
+
+def test_collect_issues_allows_empty_and_configured_llm_fallback() -> None:
+    config = Config()
+    config.llm.default_provider = "openai"
+    config.llm.openai.api_key = "sk-main"
+    config.llm.fallback_provider = ""
+
+    assert _llm_fallback_issues(config) == []
+
+    config.llm.fallback_provider = "deepseek"
+    config.llm.deepseek.api_key = "sk-fallback"
+
+    assert _llm_fallback_issues(config) == []

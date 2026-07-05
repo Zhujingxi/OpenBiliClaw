@@ -10629,3 +10629,136 @@ class TestEmbeddingDiagnosisAndRepair:
         assert prereq["embedding_repair_running"] is True
         assert prereq["embedding_repair_completed"] == 200_000_000
         assert prereq["embedding_repair_total"] == 400_000_000
+
+
+class TestLlmFallbackConfigValidationAndProbe:
+    """`[llm].fallback_provider` dead-state surfacing (community reports:
+    'fallback 不生效' + '配置页保存有问题').
+
+    - PUT /api/config must reject (400, ok=false) a fallback equal to the
+      default provider — previously the desktop UI silently dropped the
+      fallback panel's api_key/model/base_url in that case and the save
+      "succeeded".
+    - POST /api/config/probe-service kind="llm_fallback" probes the exact
+      fallback provider (no fallback chain) without writing config.toml.
+    """
+
+    def _client(self, monkeypatch, tmp_path, cfg):
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import save_config
+
+        config_path = tmp_path / "config.toml"
+        save_config(cfg, config_path)
+        monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+        monkeypatch.setattr(
+            "openbiliclaw.config.save_config",
+            lambda c, path=None: save_config(c, config_path),
+        )
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+        return TestClient(app), config_path
+
+    def _base_config(self):
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+
+        return Config(
+            llm=LLMConfig(
+                default_provider="openai",
+                openai=LLMProviderConfig(api_key="sk-main", model="gpt-main"),
+                deepseek=LLMProviderConfig(api_key="sk-fallback", model="deepseek-chat"),
+            ),
+        )
+
+    def test_put_config_rejects_same_name_llm_fallback(self, monkeypatch, tmp_path) -> None:
+        cfg = self._base_config()
+        client, config_path = self._client(monkeypatch, tmp_path, cfg)
+        before = config_path.read_bytes()
+
+        response = client.put(
+            "/api/config",
+            json={"llm": {"default_provider": "openai", "fallback_provider": "openai"}},
+        )
+
+        assert response.status_code == 400, response.text
+        data = response.json()
+        assert data["ok"] is False
+        issue_fields = {issue["field"] for issue in data["config"]["issues"]}
+        assert "llm.fallback_provider" in issue_fields
+        # Not persisted.
+        assert config_path.read_bytes() == before
+
+    def test_probe_llm_fallback_probes_exact_fallback_provider(self, monkeypatch, tmp_path) -> None:
+        from openbiliclaw.llm.base import LLMResponse
+
+        calls: list[tuple[str, object]] = []
+
+        class FakeRegistry:
+            available_providers = ["openai", "deepseek"]
+            default_provider = "openai"
+
+            def is_chat_capable(self, name: str) -> bool:
+                return name in ("openai", "deepseek")
+
+            async def complete_provider(self, provider_name, messages, **kwargs):  # noqa: ARG002
+                calls.append((provider_name, kwargs.get("model")))
+                return LLMResponse(
+                    content="OK",
+                    provider=provider_name,
+                    model=str(kwargs.get("model") or ""),
+                )
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.registry.build_llm_registry",
+            lambda probe_cfg: FakeRegistry(),
+        )
+        cfg = self._base_config()
+        client, config_path = self._client(monkeypatch, tmp_path, cfg)
+        before = config_path.read_bytes()
+
+        response = client.post(
+            "/api/config/probe-service",
+            json={
+                "kind": "llm_fallback",
+                "config": {"llm": {"fallback_provider": "deepseek"}},
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is True
+        assert body["kind"] == "llm_fallback"
+        assert body["provider"] == "deepseek"
+        # Exact single-provider probe — never the fallback chain.
+        assert [provider for provider, _model in calls] == ["deepseek"]
+        assert config_path.read_bytes() == before
+
+    def test_probe_llm_fallback_refuses_cleanly_when_unconfigured(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        cfg = self._base_config()
+        client, _config_path = self._client(monkeypatch, tmp_path, cfg)
+
+        response = client.post(
+            "/api/config/probe-service",
+            json={"kind": "llm_fallback", "config": {"llm": {"fallback_provider": ""}}},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is False
+        assert "not configured" in body["error"].lower()
+
+    def test_probe_llm_fallback_refuses_cleanly_for_same_name(self, monkeypatch, tmp_path) -> None:
+        cfg = self._base_config()
+        client, _config_path = self._client(monkeypatch, tmp_path, cfg)
+
+        response = client.post(
+            "/api/config/probe-service",
+            json={"kind": "llm_fallback", "config": {"llm": {"fallback_provider": "openai"}}},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is False
+        assert "same as the default" in body["error"]

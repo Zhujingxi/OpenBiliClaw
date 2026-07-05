@@ -1554,3 +1554,98 @@ async def test_ollama_named_as_fallback_provider_is_chat_capable_without_model()
 
     response = await registry.complete([{"role": "user", "content": "hi"}])
     assert response.provider == "ollama"
+
+
+def test_build_llm_registry_warns_when_fallback_same_as_default(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A fallback identical to the effective default would never fire —
+    `_fallback_order()` drops it silently, so the build must warn once."""
+    import logging
+
+    config = Config(
+        llm=LLMConfig(
+            default_provider="openai",
+            fallback_provider="openai",
+            openai=LLMProviderConfig(api_key="openai-key"),
+        )
+    )
+
+    with caplog.at_level(logging.WARNING, logger="openbiliclaw.llm.registry"):
+        build_llm_registry(config)
+
+    assert "never be used" in caplog.text
+    assert "same as" in caplog.text
+
+
+def test_build_llm_registry_warns_when_fallback_not_registered(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """deepseek fallback without api_key never registers; warn at build time."""
+    import logging
+
+    config = Config(
+        llm=LLMConfig(
+            default_provider="openai",
+            fallback_provider="deepseek",
+            openai=LLMProviderConfig(api_key="openai-key"),
+        )
+    )
+
+    with caplog.at_level(logging.WARNING, logger="openbiliclaw.llm.registry"):
+        build_llm_registry(config)
+
+    assert "never be used" in caplog.text
+    assert "not registered" in caplog.text
+
+
+def test_build_llm_registry_warns_when_fallback_not_chat_capable(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Registered-but-embedding-only fallback (chat_capable=False) warns.
+
+    `_ollama_is_chat_capable` normally returns True whenever ollama is the
+    fallback provider, so this state is only reachable through drift —
+    patch it to simulate that defensive branch."""
+    import logging
+
+    monkeypatch.setattr(
+        "openbiliclaw.llm.registry._ollama_is_chat_capable",
+        lambda _config: False,
+    )
+    config = Config(
+        llm=LLMConfig(
+            default_provider="openai",
+            fallback_provider="ollama",
+            openai=LLMProviderConfig(api_key="openai-key"),
+            ollama=LLMProviderConfig(base_url="http://localhost:11434"),
+        )
+    )
+
+    with caplog.at_level(logging.WARNING, logger="openbiliclaw.llm.registry"):
+        build_llm_registry(config)
+
+    assert "never be used" in caplog.text
+    assert "not chat-capable" in caplog.text
+
+
+def test_build_llm_registry_healthy_fallback_emits_no_dead_fallback_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    config = Config(
+        llm=LLMConfig(
+            default_provider="openai",
+            fallback_provider="deepseek",
+            openai=LLMProviderConfig(api_key="openai-key"),
+            deepseek=LLMProviderConfig(api_key="deepseek-key"),
+        )
+    )
+
+    with caplog.at_level(logging.WARNING, logger="openbiliclaw.llm.registry"):
+        registry = build_llm_registry(config)
+
+    assert registry._fallback_order() == ["openai", "deepseek"]
+    assert "never be used" not in caplog.text

@@ -87,6 +87,34 @@ def build_llm_registry(
         else registry.available_providers[0]
     )
     registry._default = effective_default
+
+    # Backstop for silently-dead fallback config: base.py `_fallback_order()`
+    # deliberately drops an unusable fallback without any runtime signal
+    # (correct — we can't spam every completion call). Surface the dead
+    # state ONCE at build time instead. Config saves are also validated in
+    # config.py `_collect_config_issues`, but env overrides / hand-edited
+    # config.toml can still reach this point.
+    fallback = registry.fallback_provider
+    if fallback:
+        if fallback == effective_default:
+            logger.warning(
+                "llm.fallback_provider=%r is the same as the effective default "
+                "provider — the fallback will never be used.",
+                fallback,
+            )
+        elif fallback not in registry.available_providers:
+            logger.warning(
+                "llm.fallback_provider=%r is not registered (likely missing "
+                "credentials such as api_key / base_url) — the fallback will "
+                "never be used.",
+                fallback,
+            )
+        elif not registry.is_chat_capable(fallback):
+            logger.warning(
+                "llm.fallback_provider=%r is registered but not chat-capable "
+                "(embedding-only) — the fallback will never be used.",
+                fallback,
+            )
     return registry
 
 
@@ -507,6 +535,9 @@ def _maybe_gemini_provider(config: Config, overrides: dict[str, LLMProvider]) ->
 
 
 def _maybe_ollama_provider(config: Config, overrides: dict[str, LLMProvider]) -> LLMProvider | None:
+    # Keep the "model or base_url required" registration condition in sync
+    # with config.py `_collect_config_issues` (the `[llm].fallback_provider`
+    # ollama check — config cannot import the registry, cycle).
     if "ollama" in overrides:
         return overrides["ollama"]
 
@@ -561,6 +592,11 @@ def _ollama_is_chat_capable(config: Config) -> bool:
     locally for the fallback to actually serve requests. That's the
     user's stated intent though, so a 404 at fallback time is a louder,
     more honest failure than silently dropping Ollama from the chain.
+
+    Keep in sync with config.py `_collect_config_issues` (the
+    `[llm].fallback_provider` ollama check replicates the minimal
+    registration/chat-capability condition — config cannot import the
+    registry, cycle).
     """
     if config.llm.ollama.model.strip():
         return True

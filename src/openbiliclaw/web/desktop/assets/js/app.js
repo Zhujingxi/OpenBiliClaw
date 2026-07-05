@@ -4093,6 +4093,22 @@
       return { reload: load };
     }
 
+    // 主/备选 Provider 同名保护：同名 fallback 永远不会触发（registry 会静默丢弃），
+    // 后端保存也会以 blocking issue 拒绝。这里 (1) 禁用备选下拉里与主 Provider 同名
+    // 的选项（主 Provider 变化时恢复其它选项），(2) 对已经处于同名状态的旧配置只
+    // 显示警告、不自动清空选择，避免悄悄改动用户数据。
+    function syncLlmFallbackSameState() {
+      const providerSelect = $("#llmProvider");
+      const fallbackSelect = $("#llmFallbackProvider");
+      if (!providerSelect || !fallbackSelect) return;
+      const provider = providerSelect.value || "";
+      Array.from(fallbackSelect.options).forEach((option) => {
+        option.disabled = Boolean(option.value) && option.value === provider;
+      });
+      const warning = $("#llmFallbackSameWarning");
+      if (warning) warning.hidden = !(fallbackSelect.value && fallbackSelect.value === provider);
+    }
+
     function applyConfig(config) {
       if (!config || typeof config !== "object") return;
       state.config = config;
@@ -4171,6 +4187,7 @@
         setInput("llmFallbackBaseUrl", "");
         setSelect("llmFallbackApiFlavor", "");
       }
+      syncLlmFallbackSameState();
       setInput("openrouterReferer", llm.openrouter?.http_referer);
       setInput("openrouterTitle", llm.openrouter?.x_title);
       setSelect("deepseekReasoning", llm.deepseek?.reasoning_effort || "");
@@ -4409,7 +4426,14 @@
       // (/api/recommendations only returns the latest top window). Header/pool counts
       // still update via applyRuntimeStatus above; user-initiated 换一批 / 加载更多 replace
       // the list explicitly. Matches recommend.js + popup.js (fix 79042ce).
-      if (["config_reloaded"].includes(event.type)) scheduleBackendHydration();
+      if (["config_reloaded"].includes(event.type)) {
+        // config_reloaded 会触发全量再水合，applyConfig 覆盖设置表单里的每个字段。
+        // 用户正在表单里编辑（焦点在 #settingsForm 内）时跳过，避免未保存的输入
+        // 被后台事件悄悄打回。
+        const settingsForm = document.getElementById("settingsForm");
+        const editingSettings = Boolean(settingsForm && settingsForm.contains(document.activeElement));
+        if (!editingSettings) scheduleBackendHydration();
+      }
       if (["init_progress", "init_failed", "init_completed"].includes(event.type)) {
         void refreshInitStatus({ schedule: event.type === "init_progress" });
       }
@@ -5058,6 +5082,24 @@
       }
     }
 
+    async function runLlmFallbackConfigProbe() {
+      const button = $("#probeLlmFallback");
+      const statusEl = $("#probeLlmFallbackStatus");
+      if (button) button.disabled = true;
+      renderProbePending(statusEl, "备选 Provider");
+      try {
+        const result = await probeConfigService("llm_fallback", buildConfigUpdate());
+        renderProbeResult(statusEl, result);
+      } catch (error) {
+        renderProbeResult(statusEl, {
+          ok: false,
+          error: configErrorMessage(error?.details) || error?.message || "备选 Provider 探测失败"
+        });
+      } finally {
+        if (button) button.disabled = false;
+      }
+    }
+
     async function runEmbeddingConfigProbe() {
       const button = $("#probeEmbedding");
       const statusEl = $("#probeEmbeddingStatus");
@@ -5273,10 +5315,11 @@
         subjectTitle: state.messageChatSubjectTitle
       });
     });
-    safeBind("#llmProvider", "change", () => applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), default_provider: $("#llmProvider")?.value || "" } }));
+    safeBind("#llmProvider", "change", () => { applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), default_provider: $("#llmProvider")?.value || "" } }); syncLlmFallbackSameState(); });
     safeBind("#llmFallbackProvider", "change", () => applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), fallback_provider: $("#llmFallbackProvider")?.value || "" } }));
     safeBind("#embeddingFallbackProvider", "change", () => applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), embedding: { ...(state.config?.llm?.embedding || {}), fallback_provider: $("#embeddingFallbackProvider")?.value || "" } } }));
     safeBind("#probeLlm", "click", () => { void runLlmConfigProbe(); });
+    safeBind("#probeLlmFallback", "click", () => { void runLlmFallbackConfigProbe(); });
     safeBind("#probeEmbedding", "click", () => { void runEmbeddingConfigProbe(); });
     lanAuthControl = initLanAuthControl();
     bootAutostartControl = initBootAutostartControl();

@@ -82,6 +82,8 @@ def test_desktop_settings_selects_survive_browser_page_translation() -> None:
     valueless = re.findall(r"<option(?:\s+selected=\"\")?>[^<]*</option>", html)
     assert valueless == [], f"value-less <option> elements: {valueless}"
     for select_id in (
+        "llmProvider",
+        "llmFallbackProvider",
         "embeddingProvider",
         "embeddingFallbackProvider",
         "moduleSoulProvider",
@@ -94,3 +96,13 @@ def test_desktop_settings_selects_survive_browser_page_translation() -> None:
         m = re.search(rf'<select id="{select_id}"[^>]*>', html)
         assert m, select_id
         assert 'translate="no"' in m.group(0), f"{select_id} missing translate=no"
+
+
+def test_desktop_settings_warns_on_same_name_llm_fallback() -> None:
+    """A fallback provider equal to the default would never fire (the
+    registry drops it silently; the backend now rejects the save with a
+    blocking issue). The settings page must carry an inline warning element
+    and disable the same-name option via syncLlmFallbackSameState."""
+    assert 'id="llmFallbackSameWarning"' in _INDEX
+    assert "function syncLlmFallbackSameState()" in _APP_JS
+    assert "syncLlmFallbackSameState();" in _APP_JS
