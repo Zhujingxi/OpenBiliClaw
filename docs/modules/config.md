@@ -753,6 +753,8 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 | `pool_target_count` | int | `300` | 前端真实可换候选目标；允许范围 `1..600`。`count_pool_candidates()`（含预生成 / 分类 / 可打开 / 最近看过过滤 / topic window）达到目标时 refresh（含 `force_refresh`）返回 `pool_at_cap` 不再 discover；后台定时 refresh 采用约 90% 的低水位，略低于目标时不立即跑 discovery，等库存真正低于水位再补货。raw 素材库存由独立 raw ceiling `max(pool_target_count * 2, pool_target_count + 120)` 控制，不再被压成与可换目标相同 |
 | `account_sync_interval_hours` | int | `6` | 账户侧长期信号同步间隔；运行时会低频拉取 history / favorites / following |
 | `refresh_check_interval_seconds` | int | `60` | `ContinuousRefreshController` 主循环轮询间隔；小于 `15` 或无法解析时回退默认值 |
+| `eval_min_batch_size` | int | `15` | raw candidate 评估 drain 的最小聚合批量；允许范围 `1..90`，小流量候选会等待凑批以减少 LLM trickle 调用 |
+| `eval_max_wait_seconds` | float | `90.0` | raw candidate 评估 drain 的最长等待秒数；允许范围 `0..600`，单个候选最多等待该时长后会小批量送评 |
 | `signal_event_threshold` | int | `6` | 累计多少条新行为事件后触发 `search + related_chain` 补池；小于 `1` 时回退默认值 |
 | `trending_refresh_minutes` | int | `3` | `trending` 策略的最小刷新间隔（分钟）；小于 `1` 时回退默认值。**v0.3.186 起单位由小时改为分钟**并与各来源 producer 的 `min_interval_minutes` 对齐；旧配置里的 `trending_refresh_hours` 仍会被读取并按 ×60 换算（`3` 小时 → `180` 分钟），保存后写回新键 |
 | `explore_refresh_minutes` | int | `3` | `explore` 策略的最小刷新间隔（分钟）；小于 `1` 时回退默认值。**v0.3.186 起单位由小时改为分钟**，旧键 `explore_refresh_hours` 同样按 ×60 换算（`12` 小时 → `720` 分钟）。**它是纯下游消费闸，不驱动关键词生产**：`KeywordPlanner._explore_domains_request()` 只在「一次常规 merged 关键词调用已经在构建中」且 B 站有真实缺口时，才把 `<explore_domains>` 块搭上去，从不为 explore 单独发起 LLM 调用；LLM 调用频率完全由 planner 自己的背压决定（`_due_platforms()` 要求 `keyword_kind="regular"` 的缓存低于 `kw_cache_low` **且**该平台有真实缺口，外加 B 站的 catalyst——池子低于目标或信号事件超阈值，均与 explore 无关）。explore 词以 `keyword_kind="explore"` 独立入库，**不计入**触发生产的那条水位。因此缩短本间隔只会让 `ExploreStrategy` 更频繁地从 explore 缓存 claim 并请求 B 站，不会增加 LLM 调用次数；缓存抽干后该策略自然停摆，由背压模型兜住。统一关键词 planner 复用同一时钟：当该间隔已到或距到期不足一个 `refresh_check_interval_seconds`，且 B 站仍有补货空间时，会把探索 query 生成合并进当轮关键词调用 |
@@ -972,7 +974,7 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 - 基础：`language`、`data_dir`、`storage.db_path`
 - LLM：展示实例、全局调用链与四个模块链摘要，允许调整全局并发 / 超时、测试默认链，并跳转桌面 Web 完整编辑；插件保存其他字段时不会回写或压扁实例路由
 - B 站与多源：`bilibili.browser.*`、`sources.bilibili.enabled`、`sources.browser.*`、`sources.xiaohongshu.*`、`sources.douyin.*`、`sources.youtube.*`、`sources.twitter.*`、`sources.zhihu.*`、`sources.reddit.*`
-- 调度：`scheduler.enabled`、`pause_on_extension_disconnect`、`extension_disconnect_grace_seconds`、`pool_target_count`、`account_sync_interval_hours`、refresh / signal / trending / explore / discovery limit / proactive push / speculator idle 等 runtime 频率参数、八个平台 `pool_source_shares`、猜测兴趣参数、不喜欢领域探针参数、自动更新参数；设置页可调用 `/api/config/source-share-suggestion` 按已有事件和当前表单开关填入建议比例
+- 调度：`scheduler.enabled`、`pause_on_extension_disconnect`、`extension_disconnect_grace_seconds`、`pool_target_count`、`account_sync_interval_hours`、eval drain 凑批参数、refresh / signal / trending / explore / discovery limit / proactive push / speculator idle 等 runtime 频率参数、八个平台 `pool_source_shares`、猜测兴趣参数、不喜欢领域探针参数、自动更新参数；设置页可调用 `/api/config/source-share-suggestion` 按已有事件和当前表单开关填入建议比例
 - 日志：控制台 / 文件级别、完整日志路径（保存时拆回 `directory` / `filename`）、轮转与非托管日志清理参数
 
 `[saved_sync].auto_sync_enabled` 已在桌面 / 移动 Web 和插件设置控件中暴露，也可通过 `config.toml` 或严格校验的 `/api/config` 管理。保留但不单独暴露的字段还包括目前只有一个有效值的内部兼容项，例如 `[sources.douyin].mode = "direct"`；保存时插件会继续按当前支持值写回，不会删除其他高级字段。

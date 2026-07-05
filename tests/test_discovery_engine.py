@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+from collections import OrderedDict
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 
 import pytest
 
+from openbiliclaw.discovery import engine as discovery_engine_module
 from openbiliclaw.discovery.engine import (
     ContentDiscoveryEngine,
     DiscoveredContent,
@@ -3317,3 +3319,76 @@ async def test_eval_cache_survives_unrelated_event_id_change() -> None:
     )
 
     assert len(llm.user_inputs) == 1
+
+
+def _eval_cache_value(label: str) -> tuple[float, str, str, str, str]:
+    return (0.7, f"reason-{label}", "topic", "deep_dive", "")
+
+
+def test_eval_cache_lru_cap_evicts_least_recently_used() -> None:
+    engine = ContentDiscoveryEngine()
+    cache_max = discovery_engine_module._EVAL_CACHE_MAX_ENTRIES
+
+    for index in range(cache_max):
+        engine._set_eval_cache_entry(f"key-{index}", _eval_cache_value(str(index)))
+    engine._set_eval_cache_entry("overflow", _eval_cache_value("overflow"))
+
+    assert len(engine._eval_cache) == cache_max
+    assert engine._get_eval_cache_entry("key-0") is None
+    assert engine._get_eval_cache_entry("key-1") == _eval_cache_value("1")
+    assert engine._get_eval_cache_entry("overflow") == _eval_cache_value("overflow")
+
+
+def test_eval_cache_get_refreshes_lru_recency() -> None:
+    engine = ContentDiscoveryEngine()
+    cache_max = discovery_engine_module._EVAL_CACHE_MAX_ENTRIES
+
+    for index in range(cache_max):
+        engine._set_eval_cache_entry(f"key-{index}", _eval_cache_value(str(index)))
+
+    assert engine._get_eval_cache_entry("key-0") == _eval_cache_value("0")
+    engine._set_eval_cache_entry("overflow", _eval_cache_value("overflow"))
+
+    assert engine._get_eval_cache_entry("key-1") is None
+    assert engine._get_eval_cache_entry("key-0") == _eval_cache_value("0")
+
+
+def test_eval_cache_tolerates_plain_dict_assignment() -> None:
+    """Tests reset the cache with ``engine._eval_cache = {}``; LRU must self-heal."""
+    engine = ContentDiscoveryEngine()
+    engine._eval_cache = {"seed": _eval_cache_value("seed")}  # type: ignore[assignment]
+
+    engine._set_eval_cache_entry("fresh", _eval_cache_value("fresh"))
+
+    assert engine._get_eval_cache_entry("seed") == _eval_cache_value("seed")
+    assert engine._get_eval_cache_entry("fresh") == _eval_cache_value("fresh")
+    assert isinstance(engine._eval_cache, OrderedDict)
+
+
+@pytest.mark.asyncio
+async def test_eval_cache_reads_legacy_four_tuple_entries() -> None:
+    db = _StubNegativeExemplarsDatabase(rows=[])
+    llm = _RecordingBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm, database=db)
+    profile = _build_profile()
+    content = DiscoveredContent(
+        bvid="BVlegacy",
+        title="候选",
+        up_name="u",
+        source_strategy="search",
+    )
+    cache_key = engine._batch_eval_cache_key(
+        content,
+        profile_digest=engine._evaluation_profile_digest(profile),
+        negative_digest=engine._negative_examples_digest(None),
+    )
+    engine._set_eval_cache_entry(cache_key, (0.77, "legacy reason", "legacy-topic", "deep_focus"))
+
+    scores = await engine.evaluate_content_batch([content], profile)
+
+    assert scores == [0.77]
+    assert content.relevance_score == 0.77
+    assert content.relevance_reason == "legacy reason"
+    assert content.topic_group == "legacy-topic"
+    assert content.style_key == "deep_focus"
+    assert llm.user_inputs == []

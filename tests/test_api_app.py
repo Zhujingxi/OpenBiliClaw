@@ -2359,6 +2359,7 @@ class TestBackendAPI:
 
         import openbiliclaw.api.app as app_module
         import openbiliclaw.bilibili.api as bilibili_api_module
+        import openbiliclaw.discovery.candidate_pipeline as candidate_pipeline_module
         import openbiliclaw.discovery.engine as discovery_engine_module
         import openbiliclaw.discovery.strategies.strategies as strategies_module
         import openbiliclaw.llm.service as llm_service_module
@@ -2486,6 +2487,12 @@ class TestBackendAPI:
             def __init__(self, **kwargs) -> None:
                 captured["runtime_controller_kwargs"] = kwargs
 
+        class FakeDiscoveryCandidatePipeline:
+            min_eval_batch_size = 23
+
+            def __init__(self, **kwargs: object) -> None:
+                captured["candidate_pipeline_kwargs"] = kwargs
+
         class FakeAccountSyncService:
             def __init__(self, **kwargs) -> None:
                 self.kwargs = kwargs
@@ -2572,6 +2579,8 @@ class TestBackendAPI:
                 enabled=True,
                 pause_on_extension_disconnect=False,
                 pool_target_count=300,
+                eval_min_batch_size=23,
+                eval_max_wait_seconds=45.5,
                 account_sync_interval_hours=24,
                 refresh_check_interval_seconds=77,
                 signal_event_threshold=9,
@@ -2614,6 +2623,11 @@ class TestBackendAPI:
         monkeypatch.setattr(soul_engine_module, "SoulEngine", FakeSoulEngine)
         monkeypatch.setattr(recommendation_module, "RecommendationEngine", FakeRecommendationEngine)
         monkeypatch.setattr(refresh_module, "ContinuousRefreshController", FakeRuntimeController)
+        monkeypatch.setattr(
+            candidate_pipeline_module,
+            "DiscoveryCandidatePipeline",
+            FakeDiscoveryCandidatePipeline,
+        )
         monkeypatch.setattr(account_sync_module, "AccountSyncService", FakeAccountSyncService)
         monkeypatch.setattr(bili_tasks_module, "BiliTaskQueue", FakeBiliTaskQueue)
         monkeypatch.setattr(dy_tasks_module, "DyTaskQueue", FakeDyTaskQueue)
@@ -2658,6 +2672,8 @@ class TestBackendAPI:
         assert captured["runtime_controller_kwargs"]["explore_refresh_minutes"] == 18
         assert captured["runtime_controller_kwargs"]["discovery_limit"] == 17
         assert captured["runtime_controller_kwargs"]["proactive_push_interval_seconds"] == 155
+        assert captured["candidate_pipeline_kwargs"]["min_eval_batch_size"] == 23
+        assert captured["candidate_pipeline_kwargs"]["max_eval_wait_seconds"] == 45.5
         assert captured["soul_engine_kwargs"]["speculation_interval_minutes"] == 22
         assert captured["soul_engine_kwargs"]["speculation_ttl_days"] == 8
         assert captured["soul_engine_kwargs"]["speculation_cooldown_days"] == 9

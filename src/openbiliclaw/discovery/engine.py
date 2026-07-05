@@ -13,7 +13,7 @@ import logging
 import re
 import time
 from abc import ABC, abstractmethod
-from collections import Counter
+from collections import Counter, OrderedDict
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
+_EvalCacheEntry = tuple[float, str, str, str] | tuple[float, str, str, str, str]
 _BILIBILI_CONTENT_ID_PATTERN = re.compile(r"^BV[0-9A-Za-z]+$")
 _CANONICAL_STORAGE_KEY_PLATFORMS = frozenset(
     {
@@ -64,6 +65,7 @@ _CANONICAL_STORAGE_KEY_PLATFORMS = frozenset(
 _EVALUATE_BATCH_HARD_CAP_DEFAULT: int = 90
 _DEFAULT_EVAL_BATCH_SIZE: int = 45
 _DEFAULT_EVAL_BATCH_CONCURRENCY: int = 2
+_EVAL_CACHE_MAX_ENTRIES: int = 4096
 _LLM_EVAL_OVERSAMPLE_FACTOR: int = 2
 
 
@@ -804,7 +806,7 @@ class ContentDiscoveryEngine:
         self.eval_batch_concurrency = max(1, min(16, int(eval_batch_concurrency)))
         self._multimodal_vision_supported_override = multimodal_vision_supported
         self.multimodal_unavailable_reason = ""
-        self._eval_cache: dict[str, tuple[float, str, str, str, str]] = {}
+        self._eval_cache: OrderedDict[str, _EvalCacheEntry] = OrderedDict()
         self._evaluation_profile_prompt_cache = PromptLayerRenderCache()
         # v0.3.x negative-anchors cache: (timestamp, latest_event_id,
         # exemplars). Refreshes when either the latest event id changes
@@ -812,6 +814,30 @@ class ContentDiscoveryEngine:
         self._negative_exemplars_cache: tuple[float, int | None, list[dict[str, object]]] | None = (
             None
         )
+
+    def _eval_cache_store(self) -> OrderedDict[str, _EvalCacheEntry]:
+        # Tests (and older call sites) reset the cache by assigning a plain
+        # dict; convert in place so LRU bookkeeping never AttributeErrors.
+        cache = self._eval_cache
+        if not isinstance(cache, OrderedDict):
+            cache = OrderedDict(cache)
+            self._eval_cache = cache
+        return cache
+
+    def _get_eval_cache_entry(self, cache_key: str) -> _EvalCacheEntry | None:
+        cache = self._eval_cache_store()
+        cached = cache.get(cache_key)
+        if cached is None:
+            return None
+        cache.move_to_end(cache_key)
+        return cached
+
+    def _set_eval_cache_entry(self, cache_key: str, entry: _EvalCacheEntry) -> None:
+        cache = self._eval_cache_store()
+        cache[cache_key] = entry
+        cache.move_to_end(cache_key)
+        while len(cache) > _EVAL_CACHE_MAX_ENTRIES:
+            cache.popitem(last=False)
 
     def _supports_multimodal_evaluation(self) -> bool:
         override = getattr(self, "_multimodal_vision_supported_override", None)
@@ -1243,9 +1269,13 @@ class ContentDiscoveryEngine:
 
         # Check eval cache (same content identity in same profile → same score)
         cache_key = f"{self._content_identity(content)}:{id(profile)}"
-        cached = self._eval_cache.get(cache_key)
+        cached = self._get_eval_cache_entry(cache_key)
         if cached is not None:
-            score, reason, topic_group, style_key, franchise_key = cached
+            score = cached[0]
+            reason = cached[1]
+            topic_group = cached[2]
+            style_key = cached[3]
+            franchise_key = cached[4] if len(cached) == 5 else ""
             style_key = normalize_style_key(style_key)
             content.relevance_score = score
             content.relevance_reason = reason
@@ -1277,12 +1307,15 @@ class ContentDiscoveryEngine:
                 if max_sim < 0.3 and content.source_strategy != "explore":
                     content.relevance_score = round(max_sim * 0.5, 4)
                     content.relevance_reason = "embedding 预过滤: 与所有兴趣相似度极低"
-                    self._eval_cache[cache_key] = (
-                        content.relevance_score,
-                        content.relevance_reason,
-                        "",
-                        "",
-                        "",
+                    self._set_eval_cache_entry(
+                        cache_key,
+                        (
+                            content.relevance_score,
+                            content.relevance_reason,
+                            "",
+                            "",
+                            "",
+                        ),
                     )
                     return content.relevance_score
 
@@ -1355,12 +1388,15 @@ class ContentDiscoveryEngine:
             content.style_key = style_key
         if franchise_key:
             content.franchise_key = franchise_key
-        self._eval_cache[cache_key] = (
-            score,
-            reason,
-            topic_group,
-            style_key,
-            franchise_key,
+        self._set_eval_cache_entry(
+            cache_key,
+            (
+                score,
+                reason,
+                topic_group,
+                style_key,
+                franchise_key,
+            ),
         )
         return score
 
@@ -1463,7 +1499,7 @@ class ContentDiscoveryEngine:
                 profile_digest=profile_digest,
                 negative_digest=negative_digest,
             )
-            cached = self._eval_cache.get(cache_key)
+            cached = self._get_eval_cache_entry(cache_key)
             if cached is not None:
                 # Cache tuple grew in v0.3.18 to carry franchise_key.
                 # Tolerate the legacy 4-tuple shape so an in-flight
@@ -1950,12 +1986,15 @@ class ContentDiscoveryEngine:
                 profile_digest=profile_digest,
                 negative_digest=negative_digest,
             )
-            self._eval_cache[cache_key] = (
-                score,
-                reason,
-                topic_group,
-                style_key,
-                franchise_key,
+            self._set_eval_cache_entry(
+                cache_key,
+                (
+                    score,
+                    reason,
+                    topic_group,
+                    style_key,
+                    franchise_key,
+                ),
             )
             results.append(score)
 

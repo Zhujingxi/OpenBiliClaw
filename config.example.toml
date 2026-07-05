@@ -380,6 +380,8 @@ pool_target_count = 300
 account_sync_interval_hours = 6
 # --- Runtime refresh tuning ---
 refresh_check_interval_seconds = 60      # Main loop poll interval; values <15 fallback
+# eval_min_batch_size = 15               # Coalesce trickle candidates into fuller eval batches; 1..90
+# eval_max_wait_seconds = 90.0           # A lone candidate waits at most this many seconds; 0..600
 signal_event_threshold = 6               # New behavior events before search+related refresh
 trending_refresh_minutes = 3               # Minimum interval for trending strategy
 explore_refresh_minutes = 3               # Minimum interval for explore strategy

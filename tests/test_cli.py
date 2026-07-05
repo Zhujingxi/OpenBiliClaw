@@ -32,7 +32,6 @@ from openbiliclaw.soul.profile import (
     ValuesLayer,
 )
 
-
 @pytest.fixture(autouse=True)
 def _restore_cli_process_state() -> Iterator[None]:
     """Keep CLI-owned process globals from leaking into later tests."""
@@ -58,6 +57,37 @@ def _restore_cli_process_state() -> Iterator[None]:
             logging.getLogger(name).setLevel(level)
         cli_module._RUNTIME_COMPONENTS.clear()
         cli_module._RUNTIME_COMPONENTS.update(original_runtime_components)
+
+
+def test_build_discovery_candidate_pipeline_uses_scheduler_eval_coalescing_config() -> None:
+    class FakeDatabase:
+        def __init__(self) -> None:
+            self.admission_min_score: float | None = None
+
+        def set_admission_min_score(self, value: float) -> None:
+            self.admission_min_score = value
+
+    config = SimpleNamespace(
+        discovery=SimpleNamespace(admission_min_score=0.72),
+        scheduler=SimpleNamespace(
+            pool_target_count=321,
+            eval_min_batch_size=23,
+            eval_max_wait_seconds=45.5,
+        ),
+    )
+
+    database = FakeDatabase()
+    pipeline = cli_module._build_discovery_candidate_pipeline(
+        config=config,
+        database=database,
+        discovery_engine=object(),
+    )
+
+    assert pipeline.pool_target_count == 321
+    assert pipeline.admission_min_score == 0.72
+    assert pipeline.min_eval_batch_size == 23
+    assert pipeline.max_eval_wait_seconds == 45.5
+    assert database.admission_min_score == 0.72
 
 
 class _FakeMemoryLayer:

@@ -1736,7 +1736,7 @@ class RecommendationEngine:
         *,
         profile: SoulProfile,
         limit: int = 30,
-        batch_size: int = 10,
+        batch_size: int = 30,
     ) -> int:
         """Legacy/recovery path for cached rows lacking style / topic / score.
 

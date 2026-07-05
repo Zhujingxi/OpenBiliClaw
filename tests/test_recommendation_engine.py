@@ -2149,6 +2149,86 @@ async def test_classify_pool_backlog_fills_metadata() -> None:
 
 
 @pytest.mark.asyncio
+async def test_classify_pool_backlog_default_batch_size_is_30_and_override_still_applies() -> None:
+    class _BatchSizingClassifyLLM:
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        async def complete_structured_task(
+            self,
+            *,
+            system_instruction: str = "",
+            user_input: str = "",
+            history: list[dict[str, str]] | None = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            caller: str = "",
+            reasoning_effort: str | None = None,
+        ) -> LLMResponse:
+            batch = _content_batch_from_prompt(user_input)
+            self.batch_sizes.append(len(batch))
+            return LLMResponse(
+                content=json.dumps(
+                    [
+                        {
+                            "score": 0.71,
+                            "reason": "batch classification",
+                            "topic_group": "批量分类",
+                            "style_key": "deep_dive",
+                        }
+                        for _item in batch
+                    ],
+                    ensure_ascii=False,
+                ),
+                provider="test",
+                model="dummy",
+                usage={},
+            )
+
+    def seed_unclassified_rows(db: Database, count: int) -> None:
+        for index in range(count):
+            _seed_visible(
+                db,
+                f"BV_classify_{index}",
+                title=f"待分类内容 {index}",
+                up_name="UP主",
+                source="search",
+                style_key="",
+                topic_group="",
+                topic_key="",
+                relevance_score=0.0,
+            )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "default.db")
+        db.initialize()
+        seed_unclassified_rows(db, 60)
+        llm = _BatchSizingClassifyLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+
+        classified = await engine.classify_pool_backlog(profile=_build_profile(), limit=60)
+
+        assert classified == 60
+        assert llm.batch_sizes == [30, 30]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "override.db")
+        db.initialize()
+        seed_unclassified_rows(db, 60)
+        llm = _BatchSizingClassifyLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+
+        classified = await engine.classify_pool_backlog(
+            profile=_build_profile(),
+            limit=60,
+            batch_size=25,
+        )
+
+        assert classified == 60
+        assert llm.batch_sizes == [25, 25, 10]
+
+
+@pytest.mark.asyncio
 async def test_classify_pool_backlog_skips_already_classified() -> None:
     """Items that already have style_key + topic_group should not be re-evaluated."""
     with tempfile.TemporaryDirectory() as tmpdir:

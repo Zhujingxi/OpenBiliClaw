@@ -161,6 +161,12 @@ class TestConfigDefaults:
 
         assert config.scheduler.pool_target_count == 300
 
+    def test_config_defaults_eval_batch_coalescing_fields(self) -> None:
+        config = Config()
+
+        assert config.scheduler.eval_min_batch_size == 15
+        assert config.scheduler.eval_max_wait_seconds == 90.0
+
     def test_scheduler_pool_source_shares_defaults(self) -> None:
         config = Config()
 
@@ -849,6 +855,31 @@ def test_validate_runtime_config_rejects_pool_target_count_above_cap() -> None:
         validate_runtime_config(config)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("eval_min_batch_size", 0),
+        ("eval_min_batch_size", 91),
+        ("eval_max_wait_seconds", -0.1),
+        ("eval_max_wait_seconds", 600.1),
+    ],
+)
+def test_validate_runtime_config_rejects_eval_batch_coalescing_out_of_range(
+    field: str,
+    value: int | float,
+) -> None:
+    config = Config(
+        llm=LLMConfig(
+            default_provider="ollama",
+            ollama=LLMProviderConfig(model="llama3", base_url="http://localhost:11434"),
+        )
+    )
+    setattr(config.scheduler, field, value)
+
+    with pytest.raises(ConfigError, match=f"scheduler.{field}"):
+        validate_runtime_config(config)
+
+
 def test_build_config_supports_account_sync_interval() -> None:
     config = _build_config(
         {
@@ -940,6 +971,8 @@ def test_load_config_reads_scheduler_runtime_fields(tmp_path: Path) -> None:
         """
 [scheduler]
 refresh_check_interval_seconds = 75
+eval_min_batch_size = 23
+eval_max_wait_seconds = 45.5
 signal_event_threshold = 9
 trending_refresh_minutes = 5
 explore_refresh_minutes = 18
@@ -958,6 +991,8 @@ avoidance_speculation_max_active = 5
     config = load_config(toml_path)
 
     assert config.scheduler.refresh_check_interval_seconds == 75
+    assert config.scheduler.eval_min_batch_size == 23
+    assert config.scheduler.eval_max_wait_seconds == 45.5
     assert config.scheduler.signal_event_threshold == 9
     assert config.scheduler.trending_refresh_minutes == 5
     assert config.scheduler.explore_refresh_minutes == 18
@@ -976,6 +1011,11 @@ avoidance_speculation_max_active = 5
     [
         ("refresh_check_interval_seconds", "0", 60),
         ("refresh_check_interval_seconds", '"abc"', 60),
+        ("eval_min_batch_size", "0", 15),
+        ("eval_min_batch_size", "91", 15),
+        ("eval_max_wait_seconds", "-1", 90.0),
+        ("eval_max_wait_seconds", "601", 90.0),
+        ("eval_max_wait_seconds", '"abc"', 90.0),
         ("signal_event_threshold", "-1", 6),
         ("trending_refresh_minutes", "0", 3),
         ("explore_refresh_minutes", "0", 3),
@@ -1025,6 +1065,8 @@ def test_save_config_round_trips_scheduler_runtime_fields(tmp_path: Path) -> Non
     config_path = tmp_path / "config.toml"
     config = Config()
     config.scheduler.refresh_check_interval_seconds = 75
+    config.scheduler.eval_min_batch_size = 23
+    config.scheduler.eval_max_wait_seconds = 45.5
     config.scheduler.signal_event_threshold = 9
     config.scheduler.trending_refresh_minutes = 5
     config.scheduler.explore_refresh_minutes = 18
@@ -1041,6 +1083,8 @@ def test_save_config_round_trips_scheduler_runtime_fields(tmp_path: Path) -> Non
     loaded = load_config(config_path)
 
     assert loaded.scheduler.refresh_check_interval_seconds == 75
+    assert loaded.scheduler.eval_min_batch_size == 23
+    assert loaded.scheduler.eval_max_wait_seconds == 45.5
     assert loaded.scheduler.signal_event_threshold == 9
     assert loaded.scheduler.trending_refresh_minutes == 5
     assert loaded.scheduler.explore_refresh_minutes == 18

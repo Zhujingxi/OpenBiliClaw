@@ -82,6 +82,12 @@ _LLM_PROVIDER_DISPLAY_NAMES = {
 }
 _MIN_POOL_TARGET_COUNT = 1
 _MAX_POOL_TARGET_COUNT = 600
+_DEFAULT_EVAL_MIN_BATCH_SIZE = 15
+_MIN_EVAL_MIN_BATCH_SIZE = 1
+_MAX_EVAL_MIN_BATCH_SIZE = 90
+_DEFAULT_EVAL_MAX_WAIT_SECONDS = 90.0
+_MIN_EVAL_MAX_WAIT_SECONDS = 0.0
+_MAX_EVAL_MAX_WAIT_SECONDS = 600.0
 _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS = 90
 _DEFAULT_EXTENSION_TOKEN_TTL_HOURS = 24
 _DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS = 60
@@ -905,6 +911,8 @@ class SchedulerConfig:
     )
     account_sync_interval_hours: int = 6
     refresh_check_interval_seconds: int = _DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS
+    eval_min_batch_size: int = _DEFAULT_EVAL_MIN_BATCH_SIZE
+    eval_max_wait_seconds: float = _DEFAULT_EVAL_MAX_WAIT_SECONDS
     signal_event_threshold: int = _DEFAULT_SIGNAL_EVENT_THRESHOLD
     # 2026-07-26: unit changed hours → minutes and both aligned to 3, so the
     # Bilibili main-discovery cadence matches every source producer's
@@ -2089,6 +2097,18 @@ def _build_config(raw: dict[str, Any]) -> Config:
                         default=_DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS,
                         min_value=15,
                     ),
+                    "eval_min_batch_size": _normalize_scheduler_int(
+                        sched_raw.get("eval_min_batch_size"),
+                        default=_DEFAULT_EVAL_MIN_BATCH_SIZE,
+                        min_value=_MIN_EVAL_MIN_BATCH_SIZE,
+                        max_value=_MAX_EVAL_MIN_BATCH_SIZE,
+                    ),
+                    "eval_max_wait_seconds": _normalize_scheduler_float(
+                        sched_raw.get("eval_max_wait_seconds"),
+                        default=_DEFAULT_EVAL_MAX_WAIT_SECONDS,
+                        min_value=_MIN_EVAL_MAX_WAIT_SECONDS,
+                        max_value=_MAX_EVAL_MAX_WAIT_SECONDS,
+                    ),
                     "signal_event_threshold": _normalize_scheduler_int(
                         sched_raw.get("signal_event_threshold"),
                         default=_DEFAULT_SIGNAL_EVENT_THRESHOLD,
@@ -2958,6 +2978,31 @@ def _normalize_inspiration_breadth(value: object) -> str:
     return tier
 
 
+def _normalize_scheduler_float(
+    value: object,
+    *,
+    default: float,
+    min_value: float,
+    max_value: float | None = None,
+) -> float:
+    """Normalize scheduler tuning values into bounded floats."""
+    if isinstance(value, int | float):
+        normalized = float(value)
+    elif isinstance(value, str):
+        try:
+            normalized = float(value.strip())
+        except ValueError:
+            return default
+    else:
+        return default
+
+    if normalized < min_value:
+        return default
+    if max_value is not None and normalized > max_value:
+        return default
+    return normalized
+
+
 def _normalize_auto_update_allowed_remotes(value: object) -> list[str]:
     """Normalize auto-update remote allowlist into non-empty string URLs."""
     if not isinstance(value, list):
@@ -3508,6 +3553,34 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
                 message=(
                     "`scheduler.pool_target_count` 必须在 "
                     f"{_MIN_POOL_TARGET_COUNT}..{_MAX_POOL_TARGET_COUNT} 之间。"
+                ),
+            )
+        )
+
+    if not (
+        _MIN_EVAL_MIN_BATCH_SIZE <= config.scheduler.eval_min_batch_size <= _MAX_EVAL_MIN_BATCH_SIZE
+    ):
+        issues.append(
+            ConfigIssue(
+                field="scheduler.eval_min_batch_size",
+                message=(
+                    "`scheduler.eval_min_batch_size` 必须在 "
+                    f"{_MIN_EVAL_MIN_BATCH_SIZE}..{_MAX_EVAL_MIN_BATCH_SIZE} 之间。"
+                ),
+            )
+        )
+
+    if not (
+        _MIN_EVAL_MAX_WAIT_SECONDS
+        <= config.scheduler.eval_max_wait_seconds
+        <= _MAX_EVAL_MAX_WAIT_SECONDS
+    ):
+        issues.append(
+            ConfigIssue(
+                field="scheduler.eval_max_wait_seconds",
+                message=(
+                    "`scheduler.eval_max_wait_seconds` 必须在 "
+                    f"{_MIN_EVAL_MAX_WAIT_SECONDS:g}..{_MAX_EVAL_MAX_WAIT_SECONDS:g} 之间。"
                 ),
             )
         )
@@ -4287,6 +4360,8 @@ def _render_config_toml(
             f"pool_target_count = {config.scheduler.pool_target_count}",
             f"account_sync_interval_hours = {config.scheduler.account_sync_interval_hours}",
             f"refresh_check_interval_seconds = {config.scheduler.refresh_check_interval_seconds}",
+            f"eval_min_batch_size = {config.scheduler.eval_min_batch_size}",
+            f"eval_max_wait_seconds = {config.scheduler.eval_max_wait_seconds:g}",
             f"signal_event_threshold = {config.scheduler.signal_event_threshold}",
             f"trending_refresh_minutes = {config.scheduler.trending_refresh_minutes}",
             f"explore_refresh_minutes = {config.scheduler.explore_refresh_minutes}",
