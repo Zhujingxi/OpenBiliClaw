@@ -3062,6 +3062,14 @@ function renderInterestTree(container, domains, fallback) {
   }
 }
 
+// Placeholders the LLM emits when it has no signal. Treated as absent so the
+// panel falls back to its "still observing" copy instead of rendering garbage.
+const UNKNOWNISH_TEXT = new Set(["", "unknown", "none", "n/a", "未知"]);
+
+function isUnknownishText(value) {
+  return UNKNOWNISH_TEXT.has(String(value ?? "").trim().toLowerCase());
+}
+
 function renderStylePreference(container, style) {
   if (!(container instanceof HTMLElement)) {
     return;
@@ -3080,8 +3088,10 @@ function renderStylePreference(container, style) {
     ["时长偏好", durationLabels[style.preferred_duration] || style.preferred_duration],
     ["节奏偏好", paceLabels[style.preferred_pace] || style.preferred_pace],
   ];
+  let hasAny = false;
   for (const [label, value] of textFields) {
-    if (!value) continue;
+    if (isUnknownishText(value)) continue;
+    hasAny = true;
     const row = document.createElement("div");
     row.className = "style-text-row";
     const lbl = document.createElement("span");
@@ -3100,6 +3110,7 @@ function renderStylePreference(container, style) {
   ];
   for (const [label, value] of barFields) {
     if (typeof value !== "number") continue;
+    hasAny = true;
     const row = document.createElement("div");
     row.className = "style-bar-row";
     const lbl = document.createElement("span");
@@ -3116,6 +3127,12 @@ function renderStylePreference(container, style) {
     pct.textContent = `${Math.round(value * 100)}%`;
     row.append(lbl, track, pct);
     container.append(row);
+  }
+  if (!hasAny) {
+    const fb = document.createElement("p");
+    fb.className = "is-fallback";
+    fb.textContent = "内容口味还在摸索中。";
+    container.append(fb);
   }
 }
 
@@ -5974,9 +5991,31 @@ function bindSettings() {
     }
   }
 
+  // 主/备选 Provider 同名保护（与桌面 Web 对齐）：同名 fallback 永远不会触发
+  // （registry 静默丢弃），后端保存也会以 blocking issue 拒绝。禁用备选下拉里
+  // 与默认 Provider 同名的选项；旧配置已处于同名状态时只显示警告、不静默改数据。
+  function syncLlmFallbackSameState() {
+    const fallbackSelect = document.getElementById("cfgLlmFallbackProvider");
+    const warning = document.getElementById("cfgLlmFallbackSameWarning");
+    if (!(fallbackSelect instanceof HTMLSelectElement)) return;
+    const mainValue = providerSelect.value;
+    for (const option of fallbackSelect.options) {
+      option.disabled = Boolean(option.value) && option.value === mainValue;
+    }
+    if (warning) {
+      warning.hidden = !fallbackSelect.value || fallbackSelect.value !== mainValue;
+    }
+  }
+
   providerSelect.addEventListener("change", () => {
     showProviderFields(providerSelect.value);
+    syncLlmFallbackSameState();
   });
+
+  const fallbackProviderSelect = document.getElementById("cfgLlmFallbackProvider");
+  if (fallbackProviderSelect instanceof HTMLSelectElement) {
+    fallbackProviderSelect.addEventListener("change", syncLlmFallbackSameState);
+  }
 
   // ── Embedding section: dynamic visibility + placeholder ──
   // Mirrors the backend resolution order in
@@ -6284,6 +6323,7 @@ function bindSettings() {
     setVal("cfgLlmConcurrency", cfg.llm?.concurrency ?? 3);
     setVal("cfgLlmTimeout", cfg.llm?.timeout ?? 300);
     setVal("cfgLlmFallbackProvider", cfg.llm?.fallback_provider);
+    syncLlmFallbackSameState();
 
     setVal("cfgOpenaiAuthMode", cfg.llm?.openai?.auth_mode || "api_key");
     setVal("cfgOpenaiKey", cfg.llm?.openai?.api_key);
@@ -6732,6 +6772,31 @@ function bindSettings() {
   if (probeLlmBtn instanceof HTMLButtonElement) {
     probeLlmBtn.addEventListener("click", () => {
       void runLlmConfigProbe(probeLlmBtn, probeLlmStatus);
+    });
+  }
+
+  async function runLlmFallbackConfigProbe(button, statusEl) {
+    if (!button) return;
+    button.disabled = true;
+    renderProbePending(statusEl, "备选 Provider");
+    try {
+      const result = await probeConfigService("llm_fallback", collectForm());
+      renderProbeResult(statusEl, result);
+    } catch (err) {
+      renderProbeResult(statusEl, {
+        ok: false,
+        error: err?.message || "备选 Provider 探测失败",
+      });
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  const probeLlmFallbackBtn = document.getElementById("cfgProbeLlmFallback");
+  const probeLlmFallbackStatus = document.getElementById("cfgProbeLlmFallbackStatus");
+  if (probeLlmFallbackBtn instanceof HTMLButtonElement) {
+    probeLlmFallbackBtn.addEventListener("click", () => {
+      void runLlmFallbackConfigProbe(probeLlmFallbackBtn, probeLlmFallbackStatus);
     });
   }
 

@@ -474,9 +474,26 @@ test("settings page exposes and wires LLM and embedding probe buttons", () => {
   assert.match(popupHtml, /id="cfgProbeEmbedding"/);
   assert.match(popupHtml, /id="cfgProbeLlmStatus"/);
   assert.match(popupHtml, /id="cfgProbeEmbeddingStatus"/);
+  assert.match(popupHtml, /id="cfgProbeLlmFallback"/);
+  assert.match(popupHtml, /id="cfgProbeLlmFallbackStatus"/);
   assert.match(popupJs, /probeConfigService\("llm", collectForm\(\)\)/);
   assert.match(popupJs, /probeConfigService\("embedding", collectForm\(\)\)/);
+  assert.match(popupJs, /probeConfigService\("llm_fallback", collectForm\(\)\)/);
   assert.match(popupJs, /function renderProbeResult/);
+});
+
+test("settings page guards against a same-name LLM fallback (aligned with desktop web)", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  // Inline warning for legacy same-name configs (data is never silently reset).
+  assert.match(popupHtml, /id="cfgLlmFallbackSameWarning"/);
+  assert.match(popupHtml, /备选与默认 Provider 相同时永远不会生效/);
+  // The sync disables the same-name option and runs on hydration + both selects.
+  assert.match(popupJs, /function syncLlmFallbackSameState/);
+  assert.match(popupJs, /option\.value === mainValue/);
+  const syncCalls = popupJs.match(/syncLlmFallbackSameState\(\)/g) ?? [];
+  assert.ok(syncCalls.length >= 2, "sync must run from hydration and the provider change handler");
 });
 
 test("settings page placeholders match config example defaults", () => {

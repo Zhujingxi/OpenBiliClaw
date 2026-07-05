@@ -4167,6 +4167,11 @@
       line-height: 1.5;
     }
 
+    .settings-hint-warning {
+      background: rgba(248, 113, 113, 0.12);
+      color: #b91c1c;
+    }
+
     .settings-status-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4848,9 +4853,14 @@
           </select>
         </div>
         <p class="settings-hint">默认空；只有显式选择备选 Provider 时才会 fallback，不再自动尝试其它 Provider。</p>
+        <p id="cfgLlmFallbackSameWarning" class="settings-hint settings-hint-warning" hidden>备选与默认 Provider 相同时永远不会生效，保存会被拒绝；请换一个不同类型的 Provider 或留空关闭 fallback。</p>
         <div class="settings-probe-row">
           <button id="cfgProbeLlm" class="settings-secondary-btn" type="button">测试 LLM</button>
           <span id="cfgProbeLlmStatus" class="settings-probe-status" aria-live="polite"></span>
+        </div>
+        <div class="settings-probe-row">
+          <button id="cfgProbeLlmFallback" class="settings-secondary-btn" type="button">测试备选 Provider</button>
+          <span id="cfgProbeLlmFallbackStatus" class="settings-probe-status" aria-live="polite"></span>
         </div>
         <!-- OpenAI -->
         <div class="settings-provider-fields" data-provider="openai">
