@@ -16,7 +16,10 @@ States:
 
 401 / 403 require the user to log back in on x.com (the extension re-syncs the
 cookie), so the source stays "not ready" until a later success flips it back
-to ``ok``. 429 sets a timed cooldown and recovers on its own.
+to ``ok``. 429 sets a timed cooldown and recovers on its own; consecutive 429s
+escalate that cooldown (30 min → 2 h → 6 h with the default base step) so a
+persistently rate-limited account backs off instead of re-poking x.com every
+30 minutes. Any successful fetch resets the escalation to the base step.
 
 For-You is the highest-visibility (and riskiest) fetch, so it auto-pauses
 after ``feed_pause_after`` consecutive For-You failures; any For-You success
@@ -58,6 +61,13 @@ _RELOGIN_STATES = frozenset({MISSING_COOKIE, EXPIRED_COOKIE, BLOCKED})
 
 # The singleton key (single-user model — one X account).
 _ROW_KEY = "x"
+
+# Escalating 429 cooldown ladder, applied to the base
+# ``rate_limit_cooldown_minutes`` step. With the 30-min default this yields
+# 30 min → 2 h → 6 h (cap). A persistently rate-limited account should back
+# off progressively instead of re-poking x.com every 30 minutes forever; any
+# successful fetch resets the ladder to the base step.
+_COOLDOWN_MULTIPLIERS = (1, 4, 12)
 
 
 def health_state_for_error(exc: BaseException) -> str:
@@ -126,6 +136,16 @@ class XSourceHealthStore:
             );
             """
         )
+        # Auto-migrate: older DBs predate the escalating-cooldown counter.
+        columns = {
+            str(row["name"])
+            for row in self._db.conn.execute("PRAGMA table_info(x_source_health)").fetchall()
+        }
+        if "consecutive_rate_limits" not in columns:
+            self._db.conn.execute(
+                "ALTER TABLE x_source_health "
+                "ADD COLUMN consecutive_rate_limits INTEGER NOT NULL DEFAULT 0"
+            )
         self._db.conn.execute(
             "INSERT OR IGNORE INTO x_source_health (key, state) VALUES (?, 'ok')",
             (_ROW_KEY,),
@@ -197,6 +217,7 @@ class XSourceHealthStore:
             UPDATE x_source_health
                SET state = 'ok',
                    consecutive_failures = 0,
+                   consecutive_rate_limits = 0,
                    cooldown_until = '',
                    detail = '',
                    feed_failures = CASE WHEN ? THEN 0 ELSE feed_failures END,
@@ -229,6 +250,7 @@ class XSourceHealthStore:
             UPDATE x_source_health
                SET state = 'ok',
                    consecutive_failures = 0,
+                   consecutive_rate_limits = 0,
                    feed_failures = 0,
                    feed_paused = 0,
                    cooldown_until = '',
@@ -245,10 +267,26 @@ class XSourceHealthStore:
         """Map an error to a health state, persist it, and return the state."""
         state = health_state_for_error(exc)
         cooldown_until = ""
+        # Escalate the cooldown on CONSECUTIVE 429s; any other outcome (success
+        # or a re-login error) resets the ladder back to the base step.
+        new_rate_limits = 0
         if state == RATE_LIMITED:
-            cooldown_until = (
-                _now() + timedelta(minutes=self._rate_limit_cooldown_minutes)
-            ).isoformat()
+            raw_rl = self._db.conn.execute(
+                "SELECT consecutive_rate_limits FROM x_source_health WHERE key = ?",
+                (_ROW_KEY,),
+            ).fetchone()
+            prev_rate_limits = int(raw_rl["consecutive_rate_limits"]) if raw_rl is not None else 0
+            new_rate_limits = prev_rate_limits + 1
+            step = min(new_rate_limits - 1, len(_COOLDOWN_MULTIPLIERS) - 1)
+            cooldown_minutes = self._rate_limit_cooldown_minutes * _COOLDOWN_MULTIPLIERS[step]
+            cooldown_until = (_now() + timedelta(minutes=cooldown_minutes)).isoformat()
+            if new_rate_limits >= 2:
+                logger.warning(
+                    "X source hit %d consecutive rate limits; escalating cooldown to %d min "
+                    "(resets on next successful fetch)",
+                    new_rate_limits,
+                    cooldown_minutes,
+                )
         is_feed = self._is_feed(strategy)
         current = self.get()
         # feed_failures is an internal counter (not surfaced by get()).
@@ -267,6 +305,7 @@ class XSourceHealthStore:
             UPDATE x_source_health
                SET state = ?,
                    consecutive_failures = consecutive_failures + 1,
+                   consecutive_rate_limits = ?,
                    feed_failures = ?,
                    feed_paused = ?,
                    cooldown_until = ?,
@@ -276,6 +315,7 @@ class XSourceHealthStore:
             """,
             (
                 state,
+                new_rate_limits,
                 feed_failures,
                 1 if feed_paused else 0,
                 cooldown_until,

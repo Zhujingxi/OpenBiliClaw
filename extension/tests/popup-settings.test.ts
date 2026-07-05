@@ -573,3 +573,35 @@ test("settings page wires offline cache and degraded-mode banners", () => {
   assert.match(popupJs, /restart_required/);
   assert.match(popupJs, /保存并提示重启/);
 });
+
+test("settings page shows the budget-semantics hint for every per-source budget group", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+
+  // The hint must match the desktop web wording so users learn budget is a
+  // per-day cap, not an on/off toggle.
+  const baseNote =
+    "预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。";
+  const redditNote =
+    "预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限（Reddit 各分支默认 300）。";
+
+  // Every source card that has a daily budget input must carry a note.
+  const budgetCards = ["xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
+  for (const card of budgetCards) {
+    const start = popupHtml.indexOf(`data-source-card="${card}"`);
+    assert.ok(start >= 0, `source card ${card} should exist`);
+    const rest = popupHtml.slice(start);
+    const end = rest.indexOf("settings-source-card", 1);
+    const cardHtml = end >= 0 ? rest.slice(0, end) : rest;
+    assert.match(
+      cardHtml,
+      /class="settings-hint" data-budget-note>预算 = 每日任务次数上限/,
+      `${card} card should carry the budget-semantics hint`,
+    );
+  }
+
+  // Reddit keeps its 300-default clarification.
+  assert.ok(popupHtml.includes(redditNote), "reddit note should mention the 300 default");
+  // The other five use the base wording.
+  const baseCount = popupHtml.split(baseNote).length - 1;
+  assert.ok(baseCount >= 5, `expected >=5 base budget notes, got ${baseCount}`);
+});
