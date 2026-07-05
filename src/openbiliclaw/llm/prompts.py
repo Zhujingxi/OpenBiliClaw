@@ -1477,9 +1477,10 @@ def build_batch_content_evaluation_prompt(
     stays call-invariant after that one-time template change.
 
     v0.3.x: discovery evaluation may include item-level ``related_interests``
-    entries inside ``content_items``. They are per-candidate recall hints from
-    the full interest pool, intentionally kept out of the stable profile
-    blocks so provider prompt-cache prefixes remain byte-stable.
+    entries inside ``content_items``. They are per-candidate name-string recall
+    hints from the tail interest pool (ranks beyond the compact block's top
+    64), intentionally kept out of the stable profile blocks so provider
+    prompt-cache prefixes remain byte-stable.
     """
     user_blocks: list[str] = (
         list(profile_blocks)

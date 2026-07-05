@@ -712,8 +712,14 @@ async def run(args: argparse.Namespace) -> int:
     model_override = parse_model_override(str(args.arm_b))
     compact_profile = str(args.arm_b) == "compact"
     body_cap = str(args.arm_b) == "body-cap"
-    if not compact_profile and not body_cap and model_override is None:
-        raise ValueError("--arm-b must be compact, body-cap, or model=<provider:model>")
+    if body_cap:
+        raise ValueError(
+            "--arm-b body-cap is obsolete: body_text head+tail capping became production "
+            "behavior for both arms (Task 7); pre-capping again only corrupts the "
+            "description-dedup relation and skews the comparison."
+        )
+    if not compact_profile and model_override is None:
+        raise ValueError("--arm-b must be compact or model=<provider:model>")
 
     database = _load_read_only_database(db_path)
     rows = _fetch_replay_rows(database, sample=int(args.sample), platform=args.platform)

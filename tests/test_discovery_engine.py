@@ -928,9 +928,9 @@ async def test_related_interests_returns_tail_match_and_degrades_without_embeddi
 
     related = await engine._related_interests_for_content(content, profile, top_k=3)
 
-    assert related[0] == {"name": "稀有铁路模型", "category": "模型"}
+    assert related[0] == "稀有铁路模型"
     assert len(related) <= 3
-    assert "weight" not in related[0]
+    assert all(isinstance(entry, str) for entry in related)
     engine_without_init = ContentDiscoveryEngine.__new__(ContentDiscoveryEngine)
     assert await engine_without_init._related_interests_for_content(content, profile) == []
 
@@ -988,7 +988,7 @@ async def test_evaluate_batch_adds_related_interests_without_changing_profile_pr
     without_recall_input = llm_without_recall.user_inputs[0]
     related = _batch_prompt_items(with_recall_input)[0]["related_interests"]
     assert isinstance(related, list)
-    assert related[0] == {"category": "模型", "name": "稀有铁路模型"}
+    assert related[0] == "稀有铁路模型"
     assert len(related) <= 3
     assert "related_interests" not in _batch_prompt_items(without_recall_input)[0]
     assert _profile_block_prefix(with_recall_input) == _profile_block_prefix(without_recall_input)
@@ -1025,7 +1025,7 @@ async def test_evaluate_content_single_adds_related_interests_to_content_summary
     content_summary = _single_prompt_content_summary(user_input)
     related = content_summary["related_interests"]
     assert isinstance(related, list)
-    assert related[0] == {"category": "模型", "name": "稀有铁路模型"}
+    assert related[0] == "稀有铁路模型"
     assert len(related) <= 3
 
 

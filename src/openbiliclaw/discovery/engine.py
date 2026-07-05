@@ -102,6 +102,7 @@ _EMBEDDING_PREFILTER_MIN_SIMILARITY = 0.2
 _EMBEDDING_PREFILTER_REASON = "embedding 预过滤: 与所有兴趣相似度极低"
 _NEGATIVE_EXAMPLES_UNSET = object()
 _EVAL_RECALL_POOL_CAP = 256
+_EVAL_RECALL_MIN_SIMILARITY = 0.45
 compact_evaluation_profile_summary = compact_content_prompt_profile_summary
 
 
@@ -142,8 +143,15 @@ def _profile_interests_by_weight(profile: SoulProfile) -> list[object]:
 
 
 def _evaluation_recall_interests(profile: SoulProfile) -> list[dict[str, object]]:
+    """Tail interests only: ranks beyond the compact block's top-64.
+
+    Interests inside the compact profile block are already visible to the
+    model; recalling them per item would duplicate tokens for nothing. On a
+    young profile (< 64 interests) this list is empty and recall costs zero.
+    """
     interests: list[dict[str, object]] = []
-    for interest in _profile_interests_by_weight(profile)[:_EVAL_RECALL_POOL_CAP]:
+    tail = _profile_interests_by_weight(profile)[_CONTENT_PROMPT_INTEREST_CAP:_EVAL_RECALL_POOL_CAP]
+    for interest in tail:
         name = str(getattr(interest, "name", "") or "").strip()
         if not name:
             continue
@@ -1914,8 +1922,8 @@ class ContentDiscoveryEngine:
         profile: SoulProfile,
         *,
         top_k: int = 3,
-    ) -> list[dict[str, str]]:
-        """Return content-relevant interests from the full eval recall pool."""
+    ) -> list[str]:
+        """Return content-relevant tail-interest names for one candidate."""
 
         embedding_service = getattr(self, "_embedding_service", None)
         if embedding_service is None:
@@ -1949,7 +1957,7 @@ class ContentDiscoveryEngine:
         profile: SoulProfile,
         *,
         top_k: int = 3,
-    ) -> dict[int, list[dict[str, str]]]:
+    ) -> dict[int, list[str]]:
         embedding_service = getattr(self, "_embedding_service", None)
         if embedding_service is None or not contents:
             return {}
@@ -1965,7 +1973,7 @@ class ContentDiscoveryEngine:
             logger.debug("related_interests: interest embedding batch failed", exc_info=True)
             return {}
 
-        related_by_index: dict[int, list[dict[str, str]]] = {}
+        related_by_index: dict[int, list[str]] = {}
         for index, content in enumerate(contents):
             try:
                 content_vec = await embedding_service.embed(
@@ -2008,7 +2016,7 @@ class ContentDiscoveryEngine:
         interest_vectors: list[list[float]],
         *,
         top_k: int,
-    ) -> list[dict[str, str]]:
+    ) -> list[str]:
         from openbiliclaw.llm.embedding import cosine_similarity
 
         scored: list[tuple[dict[str, object], float]] = []
@@ -2017,17 +2025,18 @@ class ContentDiscoveryEngine:
                 continue
             weight = _coerce_recall_weight(interest.get("weight", 0.0))
             sim = cosine_similarity(content_vec, interest_vec)
+            if sim < _EVAL_RECALL_MIN_SIMILARITY:
+                # Recall is a targeted hint, not a mandatory tag: an item
+                # unrelated to every tail interest gets no entries at all.
+                continue
             scored.append((interest, sim * 0.7 + weight * 0.3))
 
         scored.sort(key=lambda item: -item[1])
         limit = max(0, int(top_k))
-        return [
-            {
-                "name": str(interest["name"]),
-                "category": str(interest["category"]),
-            }
-            for interest, _score in scored[:limit]
-        ]
+        # Plain name strings: ~30 chars per entry in the indent=2 prompt JSON
+        # versus ~300 for {name, category} objects — the field must stay far
+        # cheaper than the profile tokens it recalls.
+        return [str(interest["name"]) for interest, _score in scored[:limit]]
 
     def _evaluation_profile_prompt_cache_obj(self) -> PromptLayerRenderCache:
         """Return eval profile prompt cache, creating it for lightweight tests."""
