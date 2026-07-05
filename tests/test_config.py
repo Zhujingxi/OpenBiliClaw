@@ -1951,6 +1951,24 @@ class TestDiscoveryConfig:
         assert config.discovery.planner_poll_seconds == 120
         assert config.discovery.plan_ttl_hours == 12
         assert config.discovery.admission_min_score == 0.60
+        assert config.discovery.inspiration_search_enabled is False
+        assert config.discovery.inspiration_replace_merged_keywords is False
+        assert config.discovery.inspiration_search_backends == (
+            "local_cache",
+            "platform_sources",
+            "exa",
+            "you",
+        )
+        assert config.discovery.inspiration_aspect_window_size == 32
+        assert config.discovery.inspiration_interest_sample_size == 6
+        assert config.discovery.inspiration_max_probe_searches_per_stage == 12
+        assert config.discovery.inspiration_platforms_per_probe == 2
+        assert config.discovery.inspiration_riskcontrolled_probe_budget == 4
+        assert config.discovery.inspiration_search_pages_per_probe == 1
+        assert config.discovery.inspiration_search_results_per_query == 5
+        assert config.discovery.inspiration_max_seeds_per_aspect == 3
+        assert config.discovery.inspiration_max_expansions_per_seed == 4
+        assert config.discovery.inspiration_max_keywords_per_platform == 12
         assert config.discovery.multimodal_evaluation_enabled is False
         assert config.discovery.multimodal_batch_size == 8
         assert config.discovery.multimodal_image_max_px == 384
@@ -1964,6 +1982,20 @@ class TestDiscoveryConfig:
         assert config.discovery.kw_cache_high == 30
         assert config.discovery.plan_ttl_hours == 12
         assert config.discovery.admission_min_score == 0.60
+        assert config.discovery.inspiration_search_enabled is False
+        assert config.discovery.inspiration_replace_merged_keywords is False
+        assert config.discovery.inspiration_search_backends == (
+            "local_cache",
+            "platform_sources",
+            "exa",
+            "you",
+        )
+        assert config.discovery.inspiration_aspect_window_size == 32
+        assert config.discovery.inspiration_interest_sample_size == 6
+        assert config.discovery.inspiration_max_probe_searches_per_stage == 12
+        assert config.discovery.inspiration_platforms_per_probe == 2
+        assert config.discovery.inspiration_riskcontrolled_probe_budget == 4
+        assert config.discovery.inspiration_search_pages_per_probe == 1
         assert config.discovery.multimodal_evaluation_enabled is False
         assert config.discovery.multimodal_batch_size == 8
 
@@ -1998,6 +2030,19 @@ claim_lease_minutes = 15
 planner_poll_seconds = 90
 plan_ttl_hours = 6
 admission_min_score = 0.72
+inspiration_search_enabled = true
+inspiration_replace_merged_keywords = true
+inspiration_search_backends = ["platform_sources", "exa", "you"]
+inspiration_aspect_window_size = 48
+inspiration_interest_sample_size = 9
+inspiration_max_probe_searches_per_stage = 20
+inspiration_platforms_per_probe = 3
+inspiration_riskcontrolled_probe_budget = 5
+inspiration_search_pages_per_probe = 3
+inspiration_search_results_per_query = 7
+inspiration_max_seeds_per_aspect = 4
+inspiration_max_expansions_per_seed = 6
+inspiration_max_keywords_per_platform = 18
 multimodal_evaluation_enabled = true
 multimodal_batch_size = 4
 multimodal_image_max_px = 512
@@ -2020,6 +2065,19 @@ multimodal_image_timeout_seconds = 10
         assert config.discovery.planner_poll_seconds == 90
         assert config.discovery.plan_ttl_hours == 6
         assert config.discovery.admission_min_score == 0.72
+        assert config.discovery.inspiration_search_enabled is True
+        assert config.discovery.inspiration_replace_merged_keywords is True
+        assert config.discovery.inspiration_search_backends == ("platform_sources", "exa", "you")
+        assert config.discovery.inspiration_aspect_window_size == 48
+        assert config.discovery.inspiration_interest_sample_size == 9
+        assert config.discovery.inspiration_max_probe_searches_per_stage == 20
+        assert config.discovery.inspiration_platforms_per_probe == 3
+        assert config.discovery.inspiration_riskcontrolled_probe_budget == 5
+        assert config.discovery.inspiration_search_pages_per_probe == 3
+        assert config.discovery.inspiration_search_results_per_query == 7
+        assert config.discovery.inspiration_max_seeds_per_aspect == 4
+        assert config.discovery.inspiration_max_expansions_per_seed == 6
+        assert config.discovery.inspiration_max_keywords_per_platform == 18
         assert config.discovery.multimodal_evaluation_enabled is True
         assert config.discovery.multimodal_batch_size == 4
         assert config.discovery.multimodal_image_max_px == 512
@@ -2041,6 +2099,25 @@ multimodal_image_timeout_seconds = 10
             is False
         )
 
+    def test_discovery_inspiration_budget_fields_are_clamped(self) -> None:
+        config = _build_config(
+            {
+                "discovery": {
+                    "inspiration_interest_sample_size": 99,
+                    "inspiration_max_probe_searches_per_stage": 999,
+                    "inspiration_platforms_per_probe": 99,
+                    "inspiration_riskcontrolled_probe_budget": 99,
+                    "inspiration_search_pages_per_probe": 99,
+                }
+            }
+        )
+
+        assert config.discovery.inspiration_interest_sample_size == 16
+        assert config.discovery.inspiration_max_probe_searches_per_stage == 64
+        assert config.discovery.inspiration_platforms_per_probe == 4
+        assert config.discovery.inspiration_riskcontrolled_probe_budget == 32
+        assert config.discovery.inspiration_search_pages_per_probe == 5
+
     @pytest.mark.parametrize(
         ("field", "literal", "expected"),
         [
@@ -2054,6 +2131,11 @@ multimodal_image_timeout_seconds = 10
             ("claim_lease_minutes", "0", 10),
             ("planner_poll_seconds", '"nope"', 120),
             ("plan_ttl_hours", "0", 12),
+            ("inspiration_interest_sample_size", "0", 6),
+            ("inspiration_max_probe_searches_per_stage", "0", 12),
+            ("inspiration_platforms_per_probe", "0", 2),
+            ("inspiration_riskcontrolled_probe_budget", "-1", 4),
+            ("inspiration_search_pages_per_probe", "0", 1),
             ("multimodal_batch_size", "0", 8),
             ("multimodal_batch_size", "13", 8),
             ("multimodal_image_max_px", "127", 384),
@@ -2162,6 +2244,19 @@ admission_min_score = {literal}
         config.discovery.planner_poll_seconds = 100
         config.discovery.plan_ttl_hours = 8
         config.discovery.admission_min_score = 0.72
+        config.discovery.inspiration_search_enabled = True
+        config.discovery.inspiration_replace_merged_keywords = True
+        config.discovery.inspiration_search_backends = ("you",)
+        config.discovery.inspiration_aspect_window_size = 40
+        config.discovery.inspiration_interest_sample_size = 7
+        config.discovery.inspiration_max_probe_searches_per_stage = 14
+        config.discovery.inspiration_platforms_per_probe = 3
+        config.discovery.inspiration_riskcontrolled_probe_budget = 2
+        config.discovery.inspiration_search_pages_per_probe = 2
+        config.discovery.inspiration_search_results_per_query = 6
+        config.discovery.inspiration_max_seeds_per_aspect = 4
+        config.discovery.inspiration_max_expansions_per_seed = 5
+        config.discovery.inspiration_max_keywords_per_platform = 16
         config.discovery.multimodal_evaluation_enabled = True
         config.discovery.multimodal_batch_size = 4
         config.discovery.multimodal_image_max_px = 512
@@ -2182,6 +2277,19 @@ admission_min_score = {literal}
         assert loaded.discovery.planner_poll_seconds == 100
         assert loaded.discovery.plan_ttl_hours == 8
         assert loaded.discovery.admission_min_score == 0.72
+        assert loaded.discovery.inspiration_search_enabled is True
+        assert loaded.discovery.inspiration_replace_merged_keywords is True
+        assert loaded.discovery.inspiration_search_backends == ("you",)
+        assert loaded.discovery.inspiration_aspect_window_size == 40
+        assert loaded.discovery.inspiration_interest_sample_size == 7
+        assert loaded.discovery.inspiration_max_probe_searches_per_stage == 14
+        assert loaded.discovery.inspiration_platforms_per_probe == 3
+        assert loaded.discovery.inspiration_riskcontrolled_probe_budget == 2
+        assert loaded.discovery.inspiration_search_pages_per_probe == 2
+        assert loaded.discovery.inspiration_search_results_per_query == 6
+        assert loaded.discovery.inspiration_max_seeds_per_aspect == 4
+        assert loaded.discovery.inspiration_max_expansions_per_seed == 5
+        assert loaded.discovery.inspiration_max_keywords_per_platform == 16
         assert loaded.discovery.multimodal_evaluation_enabled is True
         assert loaded.discovery.multimodal_batch_size == 4
         assert loaded.discovery.multimodal_image_max_px == 512
@@ -2198,6 +2306,19 @@ admission_min_score = {literal}
         assert "kw_cache_high = 30" in rendered
         assert "plan_ttl_hours = 12" in rendered
         assert "admission_min_score = 0.6" in rendered
+        assert "inspiration_search_enabled = false" in rendered
+        assert "inspiration_replace_merged_keywords = false" in rendered
+        assert (
+            'inspiration_search_backends = ["local_cache", "platform_sources", "exa", "you"]'
+            in rendered
+        )
+        assert "inspiration_aspect_window_size = 32" in rendered
+        assert "inspiration_interest_sample_size = 6" in rendered
+        assert "inspiration_max_probe_searches_per_stage = 12" in rendered
+        assert "inspiration_platforms_per_probe = 2" in rendered
+        assert "inspiration_riskcontrolled_probe_budget = 4" in rendered
+        assert "inspiration_search_pages_per_probe = 1" in rendered
+        assert "inspiration_max_keywords_per_platform = 12" in rendered
         assert "multimodal_evaluation_enabled = false" in rendered
         assert "multimodal_batch_size = 8" in rendered
         assert "multimodal_image_max_px = 384" in rendered

@@ -457,6 +457,29 @@ planner_poll_seconds = 120
 plan_ttl_hours = 12
 # 统一推荐池入池最低分。来源/插件 observed 标签不能绕过该门槛。
 admission_min_score = 0.6
+# 可选 query inspiration 脑暴。默认关闭；开启后 planner 会通过本机 mcporter 调用
+# 搜索 provider 链获取预览，再由 discovery.keyword_inspiration 生成带溯源 metadata 的搜索词。
+inspiration_search_enabled = false
+# 搜索后端按顺序尝试。默认先用 local_cache 复用本地 content_cache evidence；
+# 本地证据不足时再用已启用的平台源做 inspiration-only grounding（当前同步支持
+# B站 / YouTube / X / Reddit，抖音 direct client；小红书 / 知乎 bridge 可用时
+# 也会加入；不写候选池），再用 Exa；Exa 免费 MCP 限流 / 返回空时再用
+# You.com 免费 MCP profile 兜底。远端 MCP 需要在本机 mcporter 配置里有
+# `exa` 和 / 或 `you` server。
+inspiration_search_backends = ["local_cache", "platform_sources", "exa", "you"]
+# 实验开关：开启且 inspiration provider 可用时，跳过旧 merged keyword planner，
+# 每轮 due 平台只用 inspiration flow 产词。
+inspiration_replace_merged_keywords = false
+inspiration_aspect_window_size = 32
+inspiration_interest_sample_size = 6
+inspiration_max_probe_searches_per_stage = 12
+inspiration_platforms_per_probe = 2
+inspiration_riskcontrolled_probe_budget = 4
+inspiration_search_pages_per_probe = 1
+inspiration_search_results_per_query = 5
+inspiration_max_seeds_per_aspect = 3
+inspiration_max_expansions_per_seed = 4
+inspiration_max_keywords_per_platform = 12
 # 可选封面图评估。默认关闭；开启后 discovery evaluator 会在模型支持图像输入时
 # 把已压缩的候选封面一并送入评估器，模型不支持时自动退回纯文本评估。
 multimodal_evaluation_enabled = false

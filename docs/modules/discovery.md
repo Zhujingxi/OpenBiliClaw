@@ -28,6 +28,7 @@
 - **RelatedChainStrategy** — 从近期高价值视频种子出发，沿相关推荐链扩展候选内容
 - **ExploreStrategy** — 消费统一 `KeywordPlanner` 生成的 B 站探索 query 候选池，寻找更有陌生感但仍可解释的内容；planner 关闭时保留旧的现场 domain 生成回退路径
 - **PoolDistributionSnapshot** — runtime 在补池前构建的候选池分布快照，给 discovery 提供当前供给拥挤/缺口的软信号
+- **inspiration.py / inspiration_provider.py** — keyword inspiration 轴库流程：可选从 like 二级兴趣构建 coverage-aware 候选窗口，再按 `inspiration_interest_sample_size` 抽样进入本轮 `select`；`OnionProfile.interest.likes[].specifics` 优先，一级 domain 只在缺少 specifics 时作为低特异性兜底，并按 parent 计数、production selection ledger、历史 coverage 和 axis saturation 降权。planner 选中二级兴趣后立即写入 `discovery_interest_selection_ledger`；真实运行用 production scope，`keyword-inspiration-dry-run` / `keyword-inspiration-preview` 用 preview scope，因此 preview 可连续验证轮转但不污染正式抽样。随后流程固定为 `select → probe → ground → single-call → assemble → writeback`：`build_grounding_probes()` 先从 `discovery_inspiration_axis` 取 active 轴，再用二级兴趣标签、本地 pooled terms 生成确定性探针；search provider 链（默认 local cache / 已启用平台源 / Exa / You.com）只做 grounding，不写 `discovery_candidates` 或推荐池，并受 `inspiration_max_probe_searches_per_stage`、`inspiration_platforms_per_probe`、`inspiration_search_pages_per_probe` 和 `inspiration_riskcontrolled_probe_budget` 约束。`discovery.keyword_inspiration` 现在是 regular/shared inspiration stage 的唯一 LLM 调用：一次接收 platform guides、已选兴趣、轴库、fresh evidence 和 allocation targets，返回 `{axes[], keywords[]}`；输出截断时解析器会 salvage 已完整返回的 axes / keywords，LLM 失败时才进入两级确定性 fallback：先复用现有轴库 / 轴 example terms 生成 `MaterializeCandidate`，仍缺 coverage 时由 `materialize_platform_keywords()` 做 `deterministic_fill`。装配按 interest × axis × platform coverage 优先，再按 `platform_style_score()` 软分排序；平台 style mismatch 不再硬拒绝，脚本不匹配、轴不足或目标平台缺词会进入 `coverage_shortfall` telemetry。新轴可通过 `upsert_inspiration_axes()` 写回轴库，生产运行会 `bump_usage=True`，preview 只有显式 `--persist-axes` 才持久化轴且不写关键词池。coverage join 统一走 `_normalize_match_text()`，画像整理产生兴趣重命名 mapping 时会同步迁移 `discovery_keywords.source_interest` 和 `discovery_interest_selection_ledger.source_interest`。
 - **SourcePolicy** — 统一读取 `sources.<platform>.enabled` 与 `[scheduler.pool_source_shares]`，生成有效平台配比；关闭的平台保留配置但不占 runtime quota
 - **SourceAdapter 协议** — 多源适配层（`sources/`），在上述 4 个 B 站策略之外挂载非 B 站内容源（小红书、抖音初始化画像信号与 DOM-first search / hot / feed discovery、YouTube 初始化画像信号、知乎初始化画像信号与 search / hot / feed / creator / related discovery、Reddit 初始化画像信号与 search / hot / subreddit / related discovery、V2EX 等）
 
@@ -79,7 +80,7 @@
    - 来源平台分布、近期觉察和当前洞察
    - `exploration_openness`，也就是系统能不能适当推远一点
 
-   真正进入发现策略时，画像会被压缩成更容易消费的结构化摘要。query / domain / keyword planner 生成使用 `build_query_generation_profile_summary()`，只保留稳定的高权重兴趣、兴趣域、核心特质、认知风格、价值观、动机、deep needs、`disliked_topics`、观看风格和探索开放度；flat `interests` 从最多 128 个候选里选出 64 个。如果 embedding cache 已有向量，选择器会用 MMR 风格优先覆盖更多语义簇，并降低贴近 `disliked_topics` 的 interest；`disliked_topics` 自身也做 embedding 多样性去重。选择器会预计算 dislike 相似度并增量维护“距已选最近相似度”，避免真实 bge-m3 向量命中时在 prompt 构建阶段重复计算大量 cosine。没有 cached embedding 时保持原来的权重顺序，不在 prompt 构建热路径新增 embedding 请求。近期觉察、当前洞察、session context、兴趣时间戳和来源 provenance 不进入这类 prompt，避免高频状态把 `discovery.search.queries` / `discovery.explore.queries` / `discovery.keyword_planner` 固定输入撑大。`TrendingStrategy` 的排行榜分区 rid 不再走 LLM，而是本地确定性洗牌轮转覆盖；内容评估仍使用自己的 eval profile 压缩口径，保留近期负样本和必要语境。
+   真正进入发现策略时，画像会被压缩成更容易消费的结构化摘要。query / domain / keyword planner 生成使用 `build_query_generation_profile_summary()`，只保留稳定的高权重兴趣、兴趣域、核心特质、认知风格、价值观、动机、deep needs、`disliked_topics`、观看风格和探索开放度；flat `interests` 从最多 128 个候选里选出 64 个。如果 embedding cache 已有向量，选择器会用 MMR 风格优先覆盖更多语义簇，并降低贴近 `disliked_topics` 的 interest；`disliked_topics` 自身也做 embedding 多样性去重。选择器会预计算 dislike 相似度并增量维护“距已选最近相似度”，避免真实 bge-m3 向量命中时在 prompt 构建阶段重复计算大量 cosine。没有 cached embedding 时保持原来的权重顺序，不在 prompt 构建热路径新增 embedding 请求。近期觉察、当前洞察、session context、兴趣时间戳和来源 provenance 不进入这类 prompt，避免高频状态把 `discovery.search.queries` / `discovery.explore.queries` / `discovery.keyword_planner` 固定输入撑大。`[discovery].inspiration_search_enabled=true` 时，planner 会读取 `discovery_interest_selection_ledger`、`discovery_keywords.source_interest`、`discovery_candidates.raw_payload/source_keyword_id/topic_group` 和 `content_cache.topic_group/pool_topic_label` 构建 coverage snapshot，join 前统一用 `_normalize_match_text()` 折叠大小写 / 空白漂移：某个二级兴趣最近被抽中过、生成过的词越多、raw candidate 数量 / 占比越高、raw candidate dominant content type 越集中、最终入池占比越高，下一轮抽样概率越低；如果该兴趣的 active inspiration 轴近期全部被用过，也会作为 axis saturation penalty 降权。随后 planner 从 like 二级兴趣中抽样；`OnionProfile.interest.likes` 会先展开 specifics，一级 domain 只作为缺少 specifics 时的兜底，且同一 parent 已入选越多后续候选越会被降权。选中后立刻写 selection ledger，并按 `select → probe → ground → single-call → assemble → writeback` 执行 inspiration 轴流程：先从 `discovery_inspiration_axis` 取 active 轴，再用 `build_grounding_probes()` 确定性生成搜索探针；local cache 和平台源 / Exa / You.com 只提供 fresh evidence，不写候选池。单个 stage 最多执行 `inspiration_max_probe_searches_per_stage` 次外部 probe 搜索，平台源每个 probe 最多扇出 `inspiration_platforms_per_probe` 个来源，每个 probe 可由 `inspiration_search_pages_per_probe` 控制翻页 / 扩大结果量，B 站 / 抖音 / X 等 risk-controlled 来源受 `inspiration_riskcontrolled_probe_budget` 和 cooldown / 限流约束。`discovery.keyword_inspiration` 是该阶段唯一 LLM 调用，输入包含 platform guides、已选兴趣、既有轴、fresh evidence 和 allocation targets，输出 `{axes[], keywords[]}`；输出被截断时会 salvage 已完整的 axes / keywords。LLM 失败时不重试 repair，而是两级确定性 fallback：优先复用轴库 / example terms 生成候选，仍缺 interest × platform 覆盖时由 `materialize_platform_keywords()` 产生 `deterministic_fill`，无法补齐的槽位进入 `coverage_shortfall`。装配按 interest × axis × platform 覆盖优先，再按 `platform_style_score()` 软分排序；平台 style mismatch 不再硬拒绝，脚本不匹配只记录为 telemetry。关键词会携带 `grounding_source`、`source_interest`、`axis_label` 等溯源 metadata 写入 `discovery_keywords`；新轴可写回 `discovery_inspiration_axis`，生产运行会 bump usage，preview 只有显式 `--persist-axes` 才持久化轴且不写关键词池。该阶段默认关闭，避免默认增加搜索 / LLM 成本；如果同时打开 `[discovery].inspiration_replace_merged_keywords=true`，due 平台会跳过旧 `discovery.keyword_planner` merged call，只用 search-backed inspiration flow 产词，且 B 站 explore 到期时会额外写入 `keyword_kind="explore"` 的探索词池。replace 开启前应先跑 `keyword-inspiration-report` 的 cohort 门禁。`TrendingStrategy` 的排行榜分区 rid 不再走 LLM，而是本地确定性洗牌轮转覆盖；内容评估仍使用自己的 eval profile 压缩口径，保留近期负样本和必要语境。
 
    这一步的目标不是“把画像完整搬过去”，而是从画像里抽出对找内容最有用的信号。
 
@@ -557,14 +558,14 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 
 > Discover 背压重构 P1。挂在 `[discovery].unified_keyword_planner_enabled` 后面，**v0.3.124 起默认 `true`**——七个 search 关键词走统一规划器 + 关键词存储；设为 `false` 可逐字回退到各自旧的逐平台 LLM 生成路径（旧路径保留、回退无副作用）。
 
-此前多个 search 关键词生成器（B 站 `search`、小红书 `xhs-search`、抖音 `search`、YouTube `yt_search`、X `x-search`、知乎 `zhihu-search`、Reddit `reddit-search`）各自独立调 LLM、各发一份画像。统一 planner 把它们收敛成一套「双缓冲 + 缺口拉动」的背压模型，只接管 **search 这一路**——`trending / explore / related / hot / feed / channel / creator / subreddit` 及其各自的 budget/cadence **原样不动**。
+此前多个 search 关键词生成器（B 站 `search`、小红书 `xhs-search`、抖音 `search`、YouTube `yt_search`、X `x-search`、知乎 `zhihu-search`、Reddit `reddit-search`）各自独立调 LLM、各发一份画像。统一 planner 把它们收敛成一套「双缓冲 + 缺口拉动」的背压模型，接管各平台 **search 关键词**，并接管 B 站 `ExploreStrategy` 的 `keyword_kind="explore"` query cache 生成；`trending / related / hot / feed / channel / creator / subreddit` 及各自的 budget/cadence **原样不动**。
 
 **关键词存储**（`storage/database.py`，表 `discovery_keywords` + `discovery_keyword_yield` + CAS 单飞锁 `discovery_planner_lock`）是生成侧的缓存 / 历史 / yield 账本。状态机：`pending → claimed → (内联) used / failed` 或 `→ (异步) executing → used / failed`；任意在途态可经租约回收 / 预算回滚回到 `pending`；旧画像 digest 的 `pending` 作废为 `expired`。`keyword_kind` 区分 `regular` 与 `explore`：普通 search 只 claim `regular`，老 B 站 `ExploreStrategy` 在 planner 开启时只 claim `explore`。在途四元组 `(platform, keyword, profile_kw_digest, keyword_kind)` 部分唯一，`used/expired` 历史不挡同词再生成。
 
 **生成（planner loop）**：`runtime/keyword_planner.py::KeywordPlanner` 作为独立后台对象（在 `api/runtime_context.py` 构造、持 `llm_service`+db+config，由 refresh controller 的 `run_forever` 拉起），每 `planner_poll_seconds` 轮一次：
 
 1. 算 `due` = 缓存 `pending` 低于 `kw_cache_low` **且** 真实缺口 > 0（复用 controller 的补池口径，含 raw headroom + 在途）；B 站额外催化（池低于目标 / ≥ `signal_event_threshold` 信号）也进 due。
-2. due 非空 → 现读最新画像 → 取**短事务单飞锁并在调用 LLM 前释放** → `build_merged_keywords_prompt`（一次合并调用、compact 画像只发一份并按 profile layer 稳定前置、按平台分块、静态 system 命中 prompt-cache；调用时关闭 thinking 和额外 core memory 注入）→ 解析 `{platform: [...]}` → 按当前 `profile_kw_digest` 写 `regular/pending` 补到 `kw_cache_high`。如果同轮带 `<explore_domains>`，其 `queries` 写成 `keyword_kind="explore"`，供 `ExploreStrategy` 后续 claim。
+2. due 非空 → 现读最新画像 → 取**短事务单飞锁并在调用 LLM 前释放** → `build_merged_keywords_prompt`（一次合并调用、compact 画像只发一份并按 profile layer 稳定前置、按平台分块、静态 system 命中 prompt-cache；调用时关闭 thinking 和额外 core memory 注入）→ 解析 `{platform: [...]}` → 按当前 `profile_kw_digest` 写 `regular/pending` 补到 `kw_cache_high`。如果同轮带 `<explore_domains>`，其 `queries` 写成 `keyword_kind="explore"`，供 `ExploreStrategy` 后续 claim。启用 inspiration-only 实验模式时，due 平台跳过这次 merged call，改为 coverage snapshot → like 二级兴趣抽样 → 轴库 + 确定性 probe → search provider grounding（默认 local cache / 平台源 / Exa / You.com）→ 单次 `discovery.keyword_inspiration` 生成 `{axes[], keywords[]}` → `materialize_platform_keywords()` 按 coverage-first 装配并输出 `deterministic_fill` / `coverage_shortfall` telemetry → 各平台 `regular/pending` 池；如果 B 站 explore 到期且有补货空间，同轮使用同一批 selected interests / grounding / 单次 LLM 输出填充 B 站 `explore/pending` 词，成功写入后推进 explore 计划时间。
 3. LLM 失败 / 缺某平台块 → 该平台回退确定性权重排序兴趣名；仍无新词（稀疏画像）→ 回收该平台最旧 `used` 词。
 
 **缺口驱动抓取 + 三种执行形态**（`runtime/keyword_fetch.py::KeywordFetchCoordinator`，每个 search 抓取点显式 flag 分支，flag-off 行为逐字不变）：距上次 ≥ 各平台自身 `min_interval`、缺口 > 0、且 store 有可领词 → 原子 `claim` `fetch_batch` 个 → 经 P1.5 注入口（`queries` / `keyword_ids`）喂进搜索：
@@ -671,6 +672,38 @@ profile_summary = build_profile_summary(profile)
 - 摘要会带入消费上下文：`style`（含 `quality_sensitivity`）、`context`、`exploration_openness`、`source_platform_mix` 和 `_active_speculations`。
 - 摘要**不再带入** `favorite_up_users`：「常看某创作者」≠「对该创作者内容类型感兴趣」，它只会诱导模型从创作者名反推兴趣方向。用户的 UP 主清单仍保留在 `/api/profile-summary`（用户自己的可视 / 可编辑视图）并直接给 `RelatedChainStrategy` 当种子，只是不进 LLM 画像输出。
 - 摘要是 discovery 的只读输入，不会修改 profile；字段数量按 prompt 需要裁剪到前若干项，避免把整份画像无界塞进 LLM。
+
+### materialize_platform_keywords
+
+```python
+from openbiliclaw.discovery.inspiration import (
+    AllocationTarget,
+    MaterializeCandidate,
+    materialize_platform_keywords,
+)
+
+keywords, telemetry = materialize_platform_keywords(
+    [
+        MaterializeCandidate(
+            interest="game design",
+            axis_label="mechanics",
+            platform="youtube",
+            core_concept="game design combat tuning",
+            decoration="designer interview",
+            recency_sensitivity="high",
+            origin="llm",
+        )
+    ],
+    {"game design": AllocationTarget(platforms=("youtube",), min_axes=1)},
+)
+```
+
+行为说明：
+
+- 这是 inspiration 轴化重构的纯装配函数，不调用 LLM、不写数据库。
+- 硬门只包含 dedup、URL、长度和平台脚本兼容；平台检索语法由 `platform_style_score()` 作为软排序信号，不再硬拒绝候选。
+- 分配按 interest × axis × platform 覆盖优先，再按软分排序；候选不足时可用 axis `example_terms` 做 `origin="deterministic_fill"` 的确定性补位。
+- 无法补位的槽位会在 telemetry 中返回 `coverage_shortfall`，脚本不匹配会记录 `reason="script_mismatch"`，不会硬塞跨脚本垃圾词。
 
 ### ContentDiscoveryEngine
 

@@ -585,8 +585,9 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 │ Runtime: account sync + producers + candidate eval + probe arbiter │
 │ Runtime status: pool_available/raw/pending/eval_count      │
 │ Profile pipeline: accepted browser events -> interest/surface/role buffers │
-│ SQLite: events · discovery_candidates · content_cache   │
-│         recommendations · chat_turns · avoidance_state  │
+│ SQLite: events · discovery_candidates · discovery_keywords/cohort gate │
+│         discovery_inspiration_* · content_cache · recommendations │
+│         chat_turns · avoidance_state                  │
 │ Profile overrides: edits -> profile_overrides.json overlay │
 │         (merged at read · rebuild-proof · 3 frontends)   │
 │ Profile taxonomy: fixed interest categories · migration · homonym-safe cleanup │
@@ -596,6 +597,8 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 ### Content Discovery Engine
 
 Four Bilibili strategies work in coordination, each with independent API quota; while backend Bilibili search is degraded or cooling down, the runtime can enqueue extension search fallback tasks, have the extension open a real rendered Bilibili search page in the logged-in browser, and accept the visible DOM results. The source layer also accepts Xiaohongshu extension-proxy signals, YouTube init signals plus a backend-direct YouTube producer, Douyin init signals / DOM-first search / hot / feed discovery, X (Twitter) server-side cookie-replay discovery (search / For-You / followed authors), Zhihu guided-init signals plus extension-backed search / hot / feed / creator / related discovery, and Reddit guided-init signals plus rdt-cli-backed search / hot / subreddit / related discovery with extension fallback:
+
+On the query-generation side, optional search-backed query inspiration samples like secondary interests with coverage pressure, brainstorms probe branches, searches through the configured provider chain (default enabled platform sources -> Exa -> You.com free MCP), then `discovery.keyword_inspiration` turns those search-derived ideas into platform-specific, provenance-bearing concrete keywords. Platform sources use Bilibili / YouTube / X / Reddit, Douyin direct-client, and Xiaohongshu / Zhihu bridge results as evidence only when those sources are available, and never write candidates to the pool; regular and explore refills share one brainstorm / grounding stage when they are due together, and risk-controlled sources such as Bilibili, Douyin, and X obey a separate probe budget, per-probe page budget, and cooldown / rate limits. An experimental replacement mode can skip the old merged keyword planner entirely, fill each due platform's regular keyword pool through this new flow, and refill Bilibili's explore keyword pool when explore is due. `keyword-inspiration-report` compares inspiration vs merged cohorts before enabling replacement.
 
 | Strategy | Description | Quota |
 |----------|-------------|-------|

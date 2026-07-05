@@ -49,6 +49,22 @@ _DEFAULT_HISTORY_WINDOW_HOURS = 48
 _DEFAULT_CLAIM_LEASE_MINUTES = 10
 _DEFAULT_PLANNER_POLL_SECONDS = 120
 _DEFAULT_PLAN_TTL_HOURS = 12
+_DEFAULT_INSPIRATION_ASPECT_WINDOW_SIZE = 32
+_DEFAULT_INSPIRATION_INTEREST_SAMPLE_SIZE = 6
+_DEFAULT_INSPIRATION_MAX_PROBE_SEARCHES_PER_STAGE = 12
+_DEFAULT_INSPIRATION_PLATFORMS_PER_PROBE = 2
+_DEFAULT_INSPIRATION_RISKCONTROLLED_PROBE_BUDGET = 4
+_DEFAULT_INSPIRATION_SEARCH_PAGES_PER_PROBE = 1
+_DEFAULT_INSPIRATION_SEARCH_RESULTS_PER_QUERY = 5
+_DEFAULT_INSPIRATION_MAX_SEEDS_PER_ASPECT = 3
+_DEFAULT_INSPIRATION_MAX_EXPANSIONS_PER_SEED = 4
+_DEFAULT_INSPIRATION_MAX_KEYWORDS_PER_PLATFORM = 12
+_DEFAULT_INSPIRATION_SEARCH_BACKENDS: tuple[str, ...] = (
+    "local_cache",
+    "platform_sources",
+    "exa",
+    "you",
+)
 _DEFAULT_ADMISSION_MIN_SCORE = 0.60
 _DEFAULT_MULTIMODAL_BATCH_SIZE = 8
 _DEFAULT_MULTIMODAL_IMAGE_MAX_PX = 384
@@ -302,6 +318,27 @@ class DiscoveryConfig:
     # Plan staleness backstop: pending keywords older than this expire even if
     # the profile digest hasn't changed.
     plan_ttl_hours: int = _DEFAULT_PLAN_TTL_HOURS
+    # Optional search-inspired query brainstorming stage. Default off: when
+    # enabled, the keyword planner may use an injected search provider to mine
+    # adjacent concepts and insert metadata-bearing keywords.
+    inspiration_search_enabled: bool = False
+    inspiration_search_backends: tuple[str, ...] = _DEFAULT_INSPIRATION_SEARCH_BACKENDS
+    # Optional experiment mode: when true and inspiration search is available,
+    # due platforms skip the legacy merged keyword planner and are filled only
+    # through the search-inspired flow.
+    inspiration_replace_merged_keywords: bool = False
+    inspiration_aspect_window_size: int = _DEFAULT_INSPIRATION_ASPECT_WINDOW_SIZE
+    inspiration_interest_sample_size: int = _DEFAULT_INSPIRATION_INTEREST_SAMPLE_SIZE
+    inspiration_max_probe_searches_per_stage: int = (
+        _DEFAULT_INSPIRATION_MAX_PROBE_SEARCHES_PER_STAGE
+    )
+    inspiration_platforms_per_probe: int = _DEFAULT_INSPIRATION_PLATFORMS_PER_PROBE
+    inspiration_riskcontrolled_probe_budget: int = _DEFAULT_INSPIRATION_RISKCONTROLLED_PROBE_BUDGET
+    inspiration_search_pages_per_probe: int = _DEFAULT_INSPIRATION_SEARCH_PAGES_PER_PROBE
+    inspiration_search_results_per_query: int = _DEFAULT_INSPIRATION_SEARCH_RESULTS_PER_QUERY
+    inspiration_max_seeds_per_aspect: int = _DEFAULT_INSPIRATION_MAX_SEEDS_PER_ASPECT
+    inspiration_max_expansions_per_seed: int = _DEFAULT_INSPIRATION_MAX_EXPANSIONS_PER_SEED
+    inspiration_max_keywords_per_platform: int = _DEFAULT_INSPIRATION_MAX_KEYWORDS_PER_PLATFORM
     # Unified recommendation-pool admission floor. Source/provenance metadata
     # must never bypass this; explicit strategy thresholds live on candidates.
     admission_min_score: float = _DEFAULT_ADMISSION_MIN_SCORE
@@ -1055,6 +1092,77 @@ def _build_discovery(discovery_raw: dict[str, Any]) -> DiscoveryConfig:
             default=_DEFAULT_PLAN_TTL_HOURS,
             min_value=1,
         ),
+        inspiration_search_enabled=_coerce_bool(
+            discovery_raw.get("inspiration_search_enabled"),
+            default=False,
+        ),
+        inspiration_search_backends=_normalize_inspiration_search_backends(
+            discovery_raw.get("inspiration_search_backends")
+        ),
+        inspiration_replace_merged_keywords=_coerce_bool(
+            discovery_raw.get("inspiration_replace_merged_keywords"),
+            default=False,
+        ),
+        inspiration_aspect_window_size=_normalize_scheduler_int(
+            discovery_raw.get("inspiration_aspect_window_size"),
+            default=_DEFAULT_INSPIRATION_ASPECT_WINDOW_SIZE,
+            min_value=1,
+            max_value=96,
+        ),
+        inspiration_interest_sample_size=_normalize_inspiration_budget_int(
+            discovery_raw.get("inspiration_interest_sample_size"),
+            default=_DEFAULT_INSPIRATION_INTEREST_SAMPLE_SIZE,
+            min_value=1,
+            max_value=16,
+        ),
+        inspiration_max_probe_searches_per_stage=_normalize_inspiration_budget_int(
+            discovery_raw.get("inspiration_max_probe_searches_per_stage"),
+            default=_DEFAULT_INSPIRATION_MAX_PROBE_SEARCHES_PER_STAGE,
+            min_value=1,
+            max_value=64,
+        ),
+        inspiration_platforms_per_probe=_normalize_inspiration_budget_int(
+            discovery_raw.get("inspiration_platforms_per_probe"),
+            default=_DEFAULT_INSPIRATION_PLATFORMS_PER_PROBE,
+            min_value=1,
+            max_value=4,
+        ),
+        inspiration_riskcontrolled_probe_budget=_normalize_inspiration_budget_int(
+            discovery_raw.get("inspiration_riskcontrolled_probe_budget"),
+            default=_DEFAULT_INSPIRATION_RISKCONTROLLED_PROBE_BUDGET,
+            min_value=0,
+            max_value=32,
+        ),
+        inspiration_search_pages_per_probe=_normalize_inspiration_budget_int(
+            discovery_raw.get("inspiration_search_pages_per_probe"),
+            default=_DEFAULT_INSPIRATION_SEARCH_PAGES_PER_PROBE,
+            min_value=1,
+            max_value=5,
+        ),
+        inspiration_search_results_per_query=_normalize_scheduler_int(
+            discovery_raw.get("inspiration_search_results_per_query"),
+            default=_DEFAULT_INSPIRATION_SEARCH_RESULTS_PER_QUERY,
+            min_value=1,
+            max_value=10,
+        ),
+        inspiration_max_seeds_per_aspect=_normalize_scheduler_int(
+            discovery_raw.get("inspiration_max_seeds_per_aspect"),
+            default=_DEFAULT_INSPIRATION_MAX_SEEDS_PER_ASPECT,
+            min_value=1,
+            max_value=8,
+        ),
+        inspiration_max_expansions_per_seed=_normalize_scheduler_int(
+            discovery_raw.get("inspiration_max_expansions_per_seed"),
+            default=_DEFAULT_INSPIRATION_MAX_EXPANSIONS_PER_SEED,
+            min_value=1,
+            max_value=12,
+        ),
+        inspiration_max_keywords_per_platform=_normalize_scheduler_int(
+            discovery_raw.get("inspiration_max_keywords_per_platform"),
+            default=_DEFAULT_INSPIRATION_MAX_KEYWORDS_PER_PLATFORM,
+            min_value=1,
+            max_value=48,
+        ),
         admission_min_score=_normalize_probability(
             discovery_raw.get("admission_min_score"),
             default=_DEFAULT_ADMISSION_MIN_SCORE,
@@ -1192,6 +1300,38 @@ def _coerce_str_list(value: object) -> list[str]:
     if isinstance(value, (list, tuple)):
         return [str(item).strip() for item in value if str(item).strip()]
     return []
+
+
+def _normalize_inspiration_search_backends(value: object) -> tuple[str, ...]:
+    """Normalize inspiration search backend names for the mcporter provider chain."""
+
+    raw_values = (
+        list(_DEFAULT_INSPIRATION_SEARCH_BACKENDS) if value is None else _coerce_str_list(value)
+    )
+    aliases = {
+        "exa": "exa",
+        "local": "local_cache",
+        "cache": "local_cache",
+        "local_cache": "local_cache",
+        "local-cache": "local_cache",
+        "platform-source": "platform_sources",
+        "platform_sources": "platform_sources",
+        "platform": "platform_sources",
+        "you": "you",
+        "you.com": "you",
+        "youcom": "you",
+        "you-search": "you",
+        "you_search": "you",
+    }
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        backend = aliases.get(raw.strip().lower())
+        if backend is None or backend in seen:
+            continue
+        normalized.append(backend)
+        seen.add(backend)
+    return tuple(normalized or _DEFAULT_INSPIRATION_SEARCH_BACKENDS)
 
 
 # Single source of truth: every env var ``_build_api_auth`` honors for
@@ -1429,6 +1569,28 @@ def _normalize_scheduler_int(
     if max_value is not None and normalized > max_value:
         return default
     return normalized
+
+
+def _normalize_inspiration_budget_int(
+    value: object,
+    *,
+    default: int,
+    min_value: int,
+    max_value: int,
+) -> int:
+    """Normalize bounded inspiration budget knobs with max-side clamping."""
+    if isinstance(value, int | float):
+        normalized = int(value)
+    elif isinstance(value, str):
+        try:
+            normalized = int(value.strip())
+        except ValueError:
+            return default
+    else:
+        return default
+    if normalized < min_value:
+        return default
+    return min(normalized, max_value)
 
 
 def _normalize_auto_update_allowed_remotes(value: object) -> list[str]:
@@ -2084,6 +2246,30 @@ def _render_config_toml(
             f"planner_poll_seconds = {config.discovery.planner_poll_seconds}",
             f"plan_ttl_hours = {config.discovery.plan_ttl_hours}",
             f"admission_min_score = {config.discovery.admission_min_score:g}",
+            "inspiration_search_enabled = "
+            f"{_toml_bool(config.discovery.inspiration_search_enabled)}",
+            "inspiration_search_backends = "
+            f"{_toml_str_list(list(config.discovery.inspiration_search_backends))}",
+            "inspiration_replace_merged_keywords = "
+            f"{_toml_bool(config.discovery.inspiration_replace_merged_keywords)}",
+            f"inspiration_aspect_window_size = {config.discovery.inspiration_aspect_window_size}",
+            "inspiration_interest_sample_size = "
+            f"{config.discovery.inspiration_interest_sample_size}",
+            "inspiration_max_probe_searches_per_stage = "
+            f"{config.discovery.inspiration_max_probe_searches_per_stage}",
+            f"inspiration_platforms_per_probe = {config.discovery.inspiration_platforms_per_probe}",
+            "inspiration_riskcontrolled_probe_budget = "
+            f"{config.discovery.inspiration_riskcontrolled_probe_budget}",
+            "inspiration_search_pages_per_probe = "
+            f"{config.discovery.inspiration_search_pages_per_probe}",
+            "inspiration_search_results_per_query = "
+            f"{config.discovery.inspiration_search_results_per_query}",
+            "inspiration_max_seeds_per_aspect = "
+            f"{config.discovery.inspiration_max_seeds_per_aspect}",
+            "inspiration_max_expansions_per_seed = "
+            f"{config.discovery.inspiration_max_expansions_per_seed}",
+            "inspiration_max_keywords_per_platform = "
+            f"{config.discovery.inspiration_max_keywords_per_platform}",
             "multimodal_evaluation_enabled = "
             f"{_toml_bool(config.discovery.multimodal_evaluation_enabled)}",
             f"multimodal_batch_size = {config.discovery.multimodal_batch_size}",

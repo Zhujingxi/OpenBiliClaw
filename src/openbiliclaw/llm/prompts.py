@@ -1909,6 +1909,49 @@ _CATEGORY_MAPPING_SYSTEM_PROMPT = (
 # platform (it describes where each platform structurally has good content,
 # never anything about *this* user), so it belongs in the system constant and
 # the call-invariance test still holds.
+PLATFORM_SUPPLY_ADVANTAGES: dict[str, str] = {
+    "bilibili": (
+        "学习区 / 知识科普 / 深度长视频 / 梗文化 / 技术。把兴趣做成"
+        "主题 + 风格词(盘点 / 入门 / 测评 / 教程 / 整活)。"
+    ),
+    "xiaohongshu": (
+        "生活方式 / 好物种草 / 教程攻略 / 美妆 / 体验分享。具象、带场景的"
+        "长尾(教程 / 攻略 / vlog / 踩坑 / 真实体验),避免裸类目词。"
+    ),
+    "douyin": "短视频 / 娱乐 / 热点 / 搞笑 / 才艺。短平快、口语、跟得上当下热度。",
+    "youtube": ("英文长内容 / 纪录片 / 讲座 / 国际视角。2-4 词,中英文按话题选最常见的搜索语言。"),
+    "twitter": (
+        "实时讨论 / 英文技术 / 观点 / 资讯。1-4 词,技术 / 小众话题尤其优先英文,华语圈话题可用中文。"
+    ),
+    "zhihu": (
+        "知乎中文问答 / 深度回答 / 经验复盘 / 专业解释 / 观点辨析。适合"
+        "问题式、场景式或概念 + 经验词的中文关键词。"
+    ),
+    "reddit": (
+        "subreddit 经验讨论 / 技术问答 / 开源项目 / 长帖复盘 / 社区观点。"
+        "优先英文关键词,1-5 词,可带 subreddit 或社区语境词。"
+    ),
+}
+
+
+def platform_supply_advantage(platform: str) -> str:
+    """Return the static supply advantage text for one discovery platform."""
+
+    return PLATFORM_SUPPLY_ADVANTAGES.get(str(platform or "").strip().lower(), "")
+
+
+def render_platform_supply_advantages(platforms: list[str] | tuple[str, ...] | None = None) -> str:
+    """Render static platform supply advantages for prompts."""
+
+    selected = tuple(platforms) if platforms is not None else tuple(PLATFORM_SUPPLY_ADVANTAGES)
+    lines: list[str] = []
+    for platform in selected:
+        guide = platform_supply_advantage(platform)
+        if guide:
+            lines.append(f"  - {platform}:{guide}")
+    return "\n".join(lines)
+
+
 _MERGED_KEYWORDS_SYSTEM_PROMPT = (
     "<task>\n"
     "你要为多个平台的内容发现一次性生成搜索关键词。\n"
@@ -1927,19 +1970,7 @@ _MERGED_KEYWORDS_SYSTEM_PROMPT = (
     "<supply_advantage>\n"
     "每个平台结构性擅长的内容方向不同(下面是平台的固有供给优势,与具体用户无关)。"
     "请把用户画像里的兴趣,映射到该平台真正有好内容的形态上:\n"
-    "  - bilibili:学习区 / 知识科普 / 深度长视频 / 梗文化 / 技术。把兴趣做成"
-    "主题 + 风格词(盘点 / 入门 / 测评 / 教程 / 整活)。\n"
-    "  - xiaohongshu:生活方式 / 好物种草 / 教程攻略 / 美妆 / 体验分享。具象、带场景的"
-    "长尾(教程 / 攻略 / vlog / 踩坑 / 真实体验),避免裸类目词。\n"
-    "  - douyin:短视频 / 娱乐 / 热点 / 搞笑 / 才艺。短平快、口语、跟得上当下热度。\n"
-    "  - youtube:英文长内容 / 纪录片 / 讲座 / 国际视角。2-4 词,中英文按话题选最常见的"
-    "搜索语言。\n"
-    "  - twitter:实时讨论 / 英文技术 / 观点 / 资讯。1-4 词,技术 / 小众话题尤其优先英文,"
-    "华语圈话题可用中文。\n"
-    "  - zhihu:知乎中文问答 / 深度回答 / 经验复盘 / 专业解释 / 观点辨析。适合"
-    "问题式、场景式或概念 + 经验词的中文关键词。\n"
-    "  - reddit:subreddit 经验讨论 / 技术问答 / 开源项目 / 长帖复盘 / 社区观点。"
-    "优先英文关键词,1-5 词,可带 subreddit 或社区语境词。\n"
+    f"{render_platform_supply_advantages()}\n"
     "</supply_advantage>\n\n"
     "<rules>\n"
     "1. 输出必须是严格 JSON 对象,不要附带解释。\n"
@@ -1989,6 +2020,96 @@ _MERGED_KEYWORDS_SYSTEM_PROMPT = (
     "}\n"
     "</output_schema>"
 )
+
+
+_INSPIRATION_AXIS_KEYWORD_SYSTEM_PROMPT = """
+You are the keyword-inspiration axis planner for OpenBiliClaw discovery.
+
+Return ONLY a strict JSON object with exactly this shape:
+{
+  "axes": [
+    {
+      "interest": "string",
+      "axis_label": "string",
+      "axis_kind": "subgenre|creator_lens|method|artifact|community_language|debate|other",
+      "example_terms": ["string"],
+      "evidence_refs": ["url or evidence id"],
+      "time_sensitive": false
+    }
+  ],
+  "keywords": [
+    {
+      "interest": "string",
+      "axis_id_or_label": "existing axis_id or exact axis_label",
+      "platform": "bilibili|xiaohongshu|douyin|youtube|twitter|zhihu|reddit",
+      "core_concept": "short searchable concept",
+      "decoration": "optional style marker",
+      "recency_sensitivity": "low|medium|high"
+    }
+  ]
+}
+
+Rules:
+1. Generate axes and platform-native keyword candidates in one response.
+2. For each interest, keywords must span at least allocation_targets.min_axes different axes.
+3. Over-generate: produce at least two keyword candidates for every interest-platform allocation
+   slot when the evidence supports it.
+4. If an output axis is semantically the same as an existing axis, reuse the existing axis_id or
+   axis_label verbatim in keywords. Do not rename or paraphrase same-meaning existing axes.
+5. Output core_concept, decoration, and recency_sensitivity as separate fields. Do not merge
+   decoration words into core_concept unless they are part of the actual search concept.
+6. Never put literal years such as 2025 or 2026 in core_concept. Use recency_sensitivity=high
+   for time-sensitive topics instead.
+7. Use platform_guides as platform style guidance, not as hard gates. Only output platforms that
+   appear in allocation_targets.
+8. Keep axes grounded in fresh_evidence. evidence_refs should point to the provided URL or compact
+   evidence identifier when available.
+9. Keep JSON compact and valid. No markdown, no commentary, no trailing prose.
+""".strip()
+
+
+def build_inspiration_axis_keyword_prompt(
+    *,
+    profile_digest: object,
+    platform_guides: object,
+    selected_interests: object,
+    existing_axes: object,
+    fresh_evidence: object,
+    allocation_targets: object,
+) -> list[dict[str, str]]:
+    """Build the merged axis-plus-keyword inspiration prompt.
+
+    Cache-friendly per CLAUDE.md: ``system_prompt`` is the module-level
+    ``_INSPIRATION_AXIS_KEYWORD_SYSTEM_PROMPT`` constant (100% static). All
+    per-call data lives in ``user_prompt`` blocks ordered most-stable
+    (profile_digest) → most-variable (allocation_targets), serialized with
+    ``ensure_ascii=False, indent=2, sort_keys=True``.
+    """
+
+    user_blocks = [
+        "<profile_digest>",
+        json.dumps(profile_digest, ensure_ascii=False, indent=2, sort_keys=True),
+        "</profile_digest>",
+        "<platform_guides>",
+        json.dumps(platform_guides, ensure_ascii=False, indent=2, sort_keys=True),
+        "</platform_guides>",
+        "<selected_interests>",
+        json.dumps(selected_interests, ensure_ascii=False, indent=2, sort_keys=True),
+        "</selected_interests>",
+        "<existing_axes>",
+        json.dumps(existing_axes, ensure_ascii=False, indent=2, sort_keys=True),
+        "</existing_axes>",
+        "<fresh_evidence>",
+        json.dumps(fresh_evidence, ensure_ascii=False, indent=2, sort_keys=True),
+        "</fresh_evidence>",
+        "<allocation_targets>",
+        json.dumps(allocation_targets, ensure_ascii=False, indent=2, sort_keys=True),
+        "</allocation_targets>",
+    ]
+    return [
+        {"role": "system", "content": _INSPIRATION_AXIS_KEYWORD_SYSTEM_PROMPT},
+        {"role": "user", "content": "\n\n".join(user_blocks)},
+    ]
 
 
 def _category_tag_count(category: dict[str, object]) -> int:

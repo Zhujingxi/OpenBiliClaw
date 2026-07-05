@@ -843,6 +843,51 @@ def _builder_test_inputs() -> list[tuple[str, dict, dict]]:
                 ],
             ),
         ),
+        (
+            "build_inspiration_axis_keyword_prompt",
+            dict(
+                profile_digest={"interests": ["游戏评价"]},
+                platform_guides={"bilibili": {"query_style": ["拆解", "测评"]}},
+                selected_interests=[{"label": "游戏评价", "parent": "游戏", "weight": 0.9}],
+                existing_axes=[
+                    {
+                        "axis_id": "axis:mechanics",
+                        "interest": "游戏评价",
+                        "axis_label": "机制拆解",
+                        "axis_kind": "creator_lens",
+                    }
+                ],
+                fresh_evidence=[
+                    {
+                        "interest": "游戏评价",
+                        "title": "忍义手设计理念",
+                        "url": "https://example.test/a",
+                    }
+                ],
+                allocation_targets={"游戏评价": {"platforms": ["bilibili"], "min_axes": 2}},
+            ),
+            dict(
+                profile_digest={"interests": ["咖啡器具"]},
+                platform_guides={"youtube": {"query_style": ["review", "explained"]}},
+                selected_interests=[{"label": "咖啡器具", "parent": "生活", "weight": 0.7}],
+                existing_axes=[
+                    {
+                        "axis_id": "axis:gear",
+                        "interest": "咖啡器具",
+                        "axis_label": "器具对比",
+                        "axis_kind": "artifact",
+                    }
+                ],
+                fresh_evidence=[
+                    {
+                        "interest": "咖啡器具",
+                        "title": "手磨对比",
+                        "url": "https://example.test/b",
+                    }
+                ],
+                allocation_targets={"咖啡器具": {"platforms": ["youtube"], "min_axes": 1}},
+            ),
+        ),
         # NOTE: build_socratic_dialogue_prompt is intentionally NOT in
         # this list — its system prompt embeds per-user core memory /
         # tone / friend label, which is fine for OpenBiliClaw's single-
