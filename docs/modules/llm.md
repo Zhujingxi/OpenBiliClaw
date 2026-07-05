@@ -371,14 +371,28 @@ stats = cache.stats()
 #### 分模块路由
 
 `LLMService` 的 `module_overrides` 来自 `module_overrides_from_config(config)`，每项是“继承全局链”或一条独立的实例 ID 链。
-路由不使用 caller 第一段朴素判断，而是内置 bucket：
+路由不使用 caller 第一段朴素判断，而是内置 bucket。匹配规则支持精确匹配、`.` 子调用和 `_` 后缀调用，因此 `discovery.keyword` 可以覆盖当前的 `discovery.keyword_planner`，也能覆盖后续 `discovery.keyword_*` 形态：
 
-| caller 前缀 | module bucket |
-|---|---|
-| `soul.*` | `soul` |
-| `discovery.search/explore/trending/related.*`、`yt_search.*`、`sources.xhs.*` | `discovery` |
-| `recommendation.evaluate_batch`、`discovery.evaluate*`、`eval.*` | `evaluation` |
-| 其他 `recommendation.*` | `recommendation` |
+| caller 前缀 | module bucket | 说明 |
+|---|---|---|
+| `recommendation.evaluate_batch` | `evaluation` | 推荐侧复用 evaluator 做候选评分 / 分类的质量模型 |
+| `discovery.evaluate` | `evaluation` | discovery 单条 / 批量内容评估家族 |
+| `discovery.eval` | `evaluation` | discovery eval 简写家族 |
+| `eval` | `evaluation` | 通用 eval 调用 |
+| `discovery.search` | `discovery` | B 站 search query 生成等发现查询任务 |
+| `discovery.keyword` | `discovery` | 统一关键词 planner：覆盖 `discovery.keyword_planner` 与 `discovery.keyword_*` |
+| `discovery.explore` | `discovery` | B 站 explore domain / query 生成 |
+| `discovery.trending` | `discovery` | trending 相关发现生成任务 |
+| `discovery.related` | `discovery` | related-chain 相关发现生成任务 |
+| `discovery.x` | `discovery` | X / Twitter discovery keyword generation |
+| `discovery.douyin` | `discovery` | 抖音 discovery keyword generation |
+| `runtime.bilibili_extension_search` | `discovery` | 浏览器插件 B 站扩展搜索 query 生成 |
+| `yt_search` | `discovery` | YouTube search query 生成 |
+| `sources.xhs` | `discovery` | 小红书关键词 / 抽取等来源发现任务 |
+| `recommendation` | `recommendation` | 其他推荐表达、批量文案等调用 |
+| `pool_purge` | `soul` | 候选池清理会删除内容，走画像 / 判断质量模型 |
+| `api.sentiment` | `soul` | API 情绪 / 语义判断，用户可见且质量敏感 |
+| `soul` | `soul` | 偏好、画像、觉察、洞察、聊天等 Soul 调用 |
 
 路由规则：
 
