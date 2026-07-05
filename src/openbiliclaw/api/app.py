@@ -1792,6 +1792,103 @@ def create_app(
     _embedding_ready_value = False
     _embedding_ready_checked_at = float("-inf")
     _embedding_ready_lock = asyncio.Lock()
+    # Classified not-ready cause (v0.3.155+), cached on the same cadence so
+    # init-status polls don't re-diagnose Ollama on every request.
+    _embedding_diag_value: tuple[str, str] = ("ok", "")
+    _embedding_diag_checked_at = float("-inf")
+    _embedding_diag_lock = asyncio.Lock()
+
+    def _expire_embedding_ready_cache() -> None:
+        """Force the next readiness/diagnosis check to re-probe immediately."""
+        nonlocal _embedding_ready_checked_at, _embedding_diag_checked_at
+        _embedding_ready_checked_at = float("-inf")
+        _embedding_diag_checked_at = float("-inf")
+
+    def _embedding_ollama_target() -> tuple[str, str]:
+        """(base_url, model) the embedding path would use for Ollama.
+
+        Mirrors registry defaults: empty base_url → local daemon, empty
+        model → bge-m3.
+        """
+        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
+        base_url = str(getattr(emb, "base_url", "") or "").strip() or "http://localhost:11434/v1"
+        model = str(getattr(emb, "model", "") or "").strip() or "bge-m3"
+        return base_url, model
+
+    async def _diagnose_embedding(ready: bool) -> tuple[str, str]:
+        """Classify why embedding is not ready (``("ok", "")`` when it is).
+
+        Cheap cases (disabled / misconfigured) are answered from config
+        alone; the Ollama case runs a real classification (is the daemon
+        up / is the model installed / does it load) behind a TTL cache.
+        Non-Ollama providers get a generic ``provider_error`` — their
+        failure detail already lands in logs and re-probing a cloud
+        provider from a poll loop would burn quota.
+        """
+        nonlocal _embedding_diag_value, _embedding_diag_checked_at
+        if ready:
+            return ("ok", "")
+        # An in-flight one-click repair is the freshest possible signal —
+        # report live pull progress (no TTL cache: progress changes every
+        # poll, and the classification is already known).
+        if _embedding_repair_state["running"]:
+            return ("repairing", _repair_progress_detail())
+        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
+        provider = str(getattr(emb, "provider", "") or "").strip()
+        if not provider:
+            return ("disabled", "")
+        soul_engine = getattr(ctx, "soul_engine", None)
+        service = getattr(soul_engine, "_embedding_service", None)
+        if service is None:
+            # Configured but the registry couldn't build it. Distinguish an
+            # unknown provider NAME (e.g. a browser-translated value like
+            # '奥拉玛' — re-pick in settings) from a known provider whose
+            # build failed (usually missing key / base_url — fix credentials).
+            from openbiliclaw.llm.registry import _EMBEDDING_CAPABLE_PROVIDERS
+
+            if provider.lower() in _EMBEDDING_CAPABLE_PROVIDERS:
+                return (
+                    "misconfigured",
+                    f"embedding 服务未能构建（provider={provider}）——"
+                    "请到设置页检查该 provider 的 API Key / base_url 后重新保存。",
+                )
+            return (
+                "misconfigured",
+                f"embedding 配置无效（provider={provider!r}），"
+                "请到设置页重新选择 provider 并保存。",
+            )
+        if provider.lower() != "ollama":
+            return (
+                "provider_error",
+                f"embedding provider（{provider}）探测失败——"
+                "请检查 API Key / base_url / 网络后重试。",
+            )
+
+        _diag_ttl = _EMBEDDING_FAIL_TTL_SECONDS
+        if time.monotonic() - _embedding_diag_checked_at < _diag_ttl:
+            return _embedding_diag_value
+        async with _embedding_diag_lock:
+            if time.monotonic() - _embedding_diag_checked_at < _diag_ttl:
+                return _embedding_diag_value
+            from openbiliclaw.llm.ollama_diagnostics import diagnose_ollama_embedding
+
+            base_url, model = _embedding_ollama_target()
+            try:
+                diag = await asyncio.wait_for(
+                    diagnose_ollama_embedding(base_url, model),
+                    timeout=_EMBEDDING_PROBE_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                diag = (
+                    "error",
+                    "Ollama 诊断超时——服务可能正在冷加载模型，稍后自动重试。",
+                )
+            except Exception:
+                logger.debug("Embedding diagnosis errored", exc_info=True)
+                diag = ("error", "embedding 诊断失败，请查看后端日志。")
+            _embedding_diag_value = diag
+            _embedding_diag_checked_at = time.monotonic()
+            return diag
 
     async def _health_embedding_ready() -> bool:
         """Whether the embedding service can *currently* produce a vector.
@@ -1951,12 +2048,21 @@ def create_app(
         # and E2 disagree and a client could offer "start" that E2 rejects.
         can_start = trusted and supported and hard_ok and not running and not initialized
 
+        embedding_check, embedding_detail = await _diagnose_embedding(bool(embedding))
+
         if not supported:
             reason, detail = "unsupported_runtime", "Docker 运行时不支持图形化初始化"
         elif running:
             reason, detail = "already_running", "初始化进行中"
         elif initialized:
             reason, detail = "already_initialized", "已经初始化过了；如需重建请用 force"
+        elif not trusted:
+            # trusted participates in can_start but had no reason branch, so
+            # remote/paired-mobile viewers got can_start=false with
+            # reason="none" — every client fell back to a generic "条件未满足"
+            # while the checklist showed all-green (field report 2026-07-05).
+            # All clients already map local_only to "只能在本机发起初始化。".
+            reason, detail = "local_only", "只能在本机发起初始化"
         elif not chat:
             reason, detail = "llm_not_ready", "AI 服务还没配好或当前不可用"
         elif embedding_required and not embedding:
@@ -1991,6 +2097,11 @@ def create_app(
                 bilibili_detail=prereqs.peek_bilibili_detail() if bili == "failed" else "",
                 llm_ready=chat,
                 embedding_ready=embedding,
+                embedding_check=embedding_check,
+                embedding_detail=embedding_detail,
+                embedding_repair_running=bool(_embedding_repair_state["running"]),
+                embedding_repair_completed=int(_embedding_repair_state["completed"] or 0),
+                embedding_repair_total=int(_embedding_repair_state["total"] or 0),
                 embedding_required=embedding_required,
                 enabled_platforms=platforms,
             ),
@@ -2223,6 +2334,129 @@ def create_app(
             task = asyncio.create_task(_run_guided_init_wrapper(run_id, selected_sources))
         coord.attach_task(run_id, task)
         return JSONResponse({"run_id": run_id, **coord.get_status()}, status_code=202)
+
+    # ── embedding one-click repair (v0.3.155+) ──────────────────────────
+    # Single-flight background `ollama pull` so the popup's "语义去重未启用"
+    # banner can actually FIX a missing/corrupt bge-m3 instead of retrying a
+    # call that can never succeed. State is process-local (mirrors the
+    # readiness cache): a restart simply forgets an old run.
+    _embedding_repair_state: dict[str, Any] = {
+        "running": False,
+        "model": "",
+        "status": "",
+        "completed": 0,
+        "total": 0,
+        "done": False,
+        "ok": False,
+        "error": "",
+    }
+    _embedding_repair_lock = asyncio.Lock()
+
+    def _repair_progress_detail() -> str:
+        """Human progress line for the in-flight pull (init pages render it)."""
+        state = _embedding_repair_state
+        model = str(state.get("model") or "向量模型")
+        completed = int(state.get("completed") or 0)
+        total = int(state.get("total") or 0)
+        if total > 0:
+            pct = min(99, round(completed * 100 / total))
+            done_mb = completed // (1024 * 1024)
+            total_mb = total // (1024 * 1024)
+            return f"正在下载 {model}：{pct}%（{done_mb}MB / {total_mb}MB），完成后自动就绪。"
+        return f"正在下载 {model}（准备中…），完成后自动就绪。"
+
+    async def _run_embedding_repair(base_url: str, model: str) -> None:
+        from openbiliclaw.llm.ollama_diagnostics import pull_ollama_model
+
+        def _on_progress(status: str, completed: int, total: int) -> None:
+            _embedding_repair_state.update(
+                {"status": status, "completed": completed, "total": total}
+            )
+
+        try:
+            ok, error = await pull_ollama_model(base_url, model, on_progress=_on_progress)
+        except Exception as exc:  # defensive: pull_ollama_model shouldn't raise
+            ok, error = False, f"{type(exc).__name__}: {exc}"
+        _embedding_repair_state.update(
+            {"running": False, "done": True, "ok": ok, "error": error}
+        )
+        if ok:
+            logger.info("Embedding repair: pulled %s successfully", model)
+            # Next health/init-status poll re-probes immediately, so the
+            # banner and checklist green up without waiting out the TTL.
+            _expire_embedding_ready_cache()
+        else:
+            logger.warning("Embedding repair: pull %s failed: %s", model, error)
+
+    @app.post("/api/embedding/repair")
+    async def start_embedding_repair(request: Request) -> JSONResponse:
+        """(Re-)pull the configured Ollama embedding model (local-only).
+
+        409s: not Ollama-backed (fix config instead), Ollama not running
+        (we can't start it for you), or a repair already in flight.
+        """
+        if not _get_auth_gate().is_trusted_local(request):
+            return JSONResponse({"error": "local_only"}, status_code=403)
+        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
+        provider = str(getattr(emb, "provider", "") or "").strip().lower()
+        if provider != "ollama":
+            return JSONResponse(
+                {
+                    "error": "unsupported_provider",
+                    "detail": "一键修复只支持本地 Ollama embedding；"
+                    "请到设置页把 Embedding Provider 设为 ollama 后重试。",
+                },
+                status_code=409,
+            )
+        base_url, model = _embedding_ollama_target()
+
+        from openbiliclaw.llm.ollama_diagnostics import (
+            DIAG_NOT_RUNNING,
+            DIAG_OK,
+            diagnose_ollama_embedding,
+        )
+
+        async with _embedding_repair_lock:
+            if _embedding_repair_state["running"]:
+                return JSONResponse({"error": "already_running"}, status_code=409)
+            code, detail = await diagnose_ollama_embedding(base_url, model)
+            if code == DIAG_OK:
+                _expire_embedding_ready_cache()
+                return JSONResponse({"ok": True, "already_ok": True, "model": model})
+            if code == DIAG_NOT_RUNNING:
+                return JSONResponse(
+                    {"error": "not_running", "detail": detail}, status_code=409
+                )
+            # model_missing / model_broken / error → a (re-)pull is the fix.
+            _embedding_repair_state.update(
+                {
+                    "running": True,
+                    "model": model,
+                    "status": "starting",
+                    "completed": 0,
+                    "total": 0,
+                    "done": False,
+                    "ok": False,
+                    "error": "",
+                }
+            )
+            registry = getattr(ctx, "task_registry", None)
+            coro = _run_embedding_repair(base_url, model)
+            if registry is not None:
+                registry.track("embedding_repair", coro)
+            else:
+                task = asyncio.create_task(coro)
+                _fire_and_forget_tasks.add(task)
+                task.add_done_callback(_fire_and_forget_tasks.discard)
+        return JSONResponse(
+            {"started": True, "model": model, "diagnosis": code, "detail": detail},
+            status_code=202,
+        )
+
+    @app.get("/api/embedding/repair")
+    async def embedding_repair_status() -> JSONResponse:
+        """Progress of the in-flight (or last finished) embedding repair."""
+        return JSONResponse(dict(_embedding_repair_state))
 
     @app.post("/api/init/cancel")
     async def cancel_guided_init(request: Request) -> JSONResponse:

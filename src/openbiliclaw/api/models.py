@@ -62,6 +62,18 @@ class InitPrerequisitesOut(BaseModel):
     bilibili_detail: str = ""  # why the last probe failed ("" when ok)
     llm_ready: bool = False
     embedding_ready: bool = False
+    # Classified cause when embedding_ready is False, so the UI can say
+    # WHY instead of a dead retry (v0.3.155+): ok | disabled | misconfigured |
+    # not_running | model_missing | model_broken | provider_error | error.
+    embedding_check: str = "ok"
+    embedding_detail: str = ""  # human-readable hint ("" when ok/disabled)
+    # Live pull progress while a one-click repair is downloading the model
+    # (embedding_check == "repairing"), so init pages can render a real
+    # progress indicator instead of an opaque wait. total may be 0 while
+    # Ollama resolves the manifest.
+    embedding_repair_running: bool = False
+    embedding_repair_completed: int = 0
+    embedding_repair_total: int = 0
     embedding_required: bool = False
     enabled_platforms: list[str] = Field(default_factory=list)
 

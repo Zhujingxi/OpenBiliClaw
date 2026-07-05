@@ -215,6 +215,39 @@ export function __resetPopupHealthCacheForTests() {
   healthProbeInFlight = null;
 }
 
+// One-click embedding repair (v0.3.155+): POST asks the backend to
+// (re-)pull the configured Ollama embedding model; GET reports progress.
+// Returns {status, ...payload} — callers branch on status/error instead of
+// throwing, because each 409 flavor gets its own user-facing hint. A 404
+// status means an older backend without the route.
+export async function startEmbeddingRepair() {
+  const backendUrl = await getBackendBaseUrl();
+  try {
+    const response = await fetch(`${backendUrl}/embedding/repair`, { method: "POST" });
+    let payload = {};
+    try {
+      payload = await response.json();
+    } catch {
+      payload = {};
+    }
+    return { status: response.status, ...payload };
+  } catch {
+    return { status: 0 };
+  }
+}
+
+// Progress of the in-flight (or last finished) repair; null when unreachable.
+export async function fetchEmbeddingRepairStatus() {
+  const backendUrl = await getBackendBaseUrl();
+  try {
+    const response = await fetch(`${backendUrl}/embedding/repair`, { method: "GET" });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchRecommendations() {
   const payload = await requestJson("/recommendations", { method: "GET" });
   return Array.isArray(payload.items) ? payload.items.map(normalizeRecommendation) : [];

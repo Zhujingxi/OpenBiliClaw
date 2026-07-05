@@ -307,3 +307,82 @@ test("needs-enable: selected optional sources are guided-init opt-ins", () => {
   });
   assert.deepEqual(initSelectedSourcesNeedingEnable(["bilibili"], biliDisabled), []);
 });
+
+test("embedding hint prefers backend detail, falls back to check code, then generic", () => {
+  const rows = (prereqOverrides: Record<string, unknown>) =>
+    buildInitChecklist(
+      statusWith({
+        prerequisites: {
+          bilibili_logged_in: true,
+          bilibili_check: "ok",
+          llm_ready: true,
+          embedding_ready: false,
+          enabled_platforms: ["bilibili"],
+          ...prereqOverrides,
+        },
+      }),
+    ).find((r) => r.key === "embedding");
+
+  // Backend-provided detail wins verbatim (v0.3.155+ embedding_detail).
+  const withDetail = rows({
+    embedding_check: "model_broken",
+    embedding_detail: "bge-m3 已安装但调用返回 HTTP 500",
+  });
+  assert.equal(withDetail?.hint, "bge-m3 已安装但调用返回 HTTP 500");
+
+  // No detail → per-code fallback copy.
+  const byCode = rows({ embedding_check: "model_missing", embedding_detail: "" });
+  assert.ok(byCode?.hint.includes("ollama pull bge-m3"));
+  const notRunning = rows({ embedding_check: "not_running", embedding_detail: "" });
+  assert.ok(notRunning?.hint.includes("ollama serve"));
+
+  // Older backend (no embedding_check at all) → legacy generic copy.
+  const legacy = rows({});
+  assert.ok(legacy?.hint.includes("语义检索会弱一些"));
+
+  // Ready → no hint.
+  const ready = rows({ embedding_ready: true, embedding_check: "ok" });
+  assert.equal(ready?.hint, "");
+});
+
+test("embedding row becomes a hard prereq when the backend requires it", () => {
+  // v0.3.137+ a configured embedding provider hard-gates can_start server-side;
+  // the popup used to hardcode the row soft + "非必须", contradicting the
+  // blocked start button (field report 2026-07-05).
+  const status = statusWith({
+    can_start: false,
+    reason: "embedding_not_ready",
+    prerequisites: {
+      bilibili_logged_in: true,
+      bilibili_check: "ok",
+      llm_ready: true,
+      embedding_ready: false,
+      embedding_required: true,
+      enabled_platforms: ["bilibili"],
+    },
+  });
+  const row = buildInitChecklist(status, ["bilibili"]).find((r) => r.key === "embedding");
+  assert.equal(row?.hard, true);
+  assert.equal(row?.label, "向量模型可用");
+  assert.ok(!row?.hint.includes("也能初始化"));
+  assert.equal(hardPrereqsSatisfied(status, ["bilibili"]), false);
+
+  // embedding_not_ready now maps to a real message instead of the generic
+  // "以下条件未满足" fallback.
+  assert.ok(describeInitReason("embedding_not_ready").includes("向量模型"));
+
+  // Optional (not required) keeps the soft row and legacy label.
+  const optional = statusWith({
+    prerequisites: {
+      bilibili_logged_in: true,
+      bilibili_check: "ok",
+      llm_ready: true,
+      embedding_ready: false,
+      embedding_required: false,
+      enabled_platforms: ["bilibili"],
+    },
+  });
+  const softRow = buildInitChecklist(optional, ["bilibili"]).find((r) => r.key === "embedding");
+  assert.equal(softRow?.hard, false);
+  assert.equal(softRow?.label, "向量模型可用（推荐，非必须）");
+});

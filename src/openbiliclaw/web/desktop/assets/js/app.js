@@ -27,6 +27,7 @@
       updateStatus: "/update-status",
       updateCheck: "/update/check",
       updateApply: "/update/apply",
+      embeddingRepair: "/embedding/repair",
       config: "/config?reveal_keys=true",
       watchLater: "/watch-later",
       favorites: "/favorites",
@@ -772,9 +773,17 @@
           label: embeddingRequired ? "向量模型可用" : "向量模型可用（推荐，非必须）",
           ok: Boolean(prereq.embedding_ready),
           hard: embeddingRequired,
-          hint: embeddingRequired
-            ? "本地 Ollama + bge-m3 需要完成一次真实向量请求；模型仍在下载或服务异常时请稍后重试。"
-            : "未配置 embedding 时可以先初始化；推荐去重和语义检索会弱一些。"
+          // Backend-classified cause (embedding_detail, v0.3.155+):
+          // Ollama 未运行 / 缺模型 / 模型损坏 / 配置无效 / repairing（下载中，
+          // detail 带实时百分比，3s 轮询自动刷新）。
+          hint:
+            String(prereq.embedding_detail || "").trim() ||
+            (embeddingRequired
+              ? "本地 Ollama + bge-m3 需要完成一次真实向量请求；模型仍在下载或服务异常时请稍后重试。"
+              : "未配置 embedding 时可以先初始化；推荐去重和语义检索会弱一些。"),
+          // One-click server-side `ollama pull`; hidden while repairing (the
+          // hint already shows live percent).
+          repairable: ["model_missing", "model_broken"].includes(prereq.embedding_check)
         },
         {
           key: "platforms",
@@ -850,9 +859,33 @@
         .map((row) => {
           const mark = row.ok ? "✓" : row.hard ? "✗" : "•";
           const hint = !row.ok && row.hint ? `<p class="init-hint">${escapeHtml(row.hint)}</p>` : "";
-          return `<li class="${row.ok ? "init-ok" : "init-missing"} ${row.hard ? "init-hard" : "init-soft"}"><div class="init-row"><span class="init-mark">${mark}</span><span>${escapeHtml(row.label)}</span></div>${hint}</li>`;
+          const repair = !row.ok && row.repairable
+            ? '<button class="small-btn init-repair-btn" type="button" data-embedding-repair>自动下载向量模型</button>'
+            : "";
+          return `<li class="${row.ok ? "init-ok" : "init-missing"} ${row.hard ? "init-hard" : "init-soft"}"><div class="init-row"><span class="init-mark">${mark}</span><span>${escapeHtml(row.label)}</span></div>${hint}${repair}</li>`;
         })
         .join("");
+    }
+
+    // Kick the server-side model pull; the 3s init-status poll then renders
+    // live percent on the checklist row (embedding_check="repairing"). The
+    // checklist is re-rendered per poll, so the handler is DELEGATED from the
+    // <ul> (bound once in renderInitOnboarding) instead of per-button.
+    async function handleEmbeddingRepairClick(btn) {
+      btn.disabled = true;
+      btn.textContent = "启动下载…";
+      try {
+        await requestJsonStrict(ENDPOINTS.embeddingRepair, { method: "POST" });
+      } catch (error) {
+        // 409 already_running means a pull is in flight — that's the goal
+        // state; every other error re-enables the button with the reason.
+        if (error?.status !== 409 || error?.details?.error !== "already_running") {
+          btn.disabled = false;
+          btn.textContent = "下载启动失败，重试";
+          return;
+        }
+      }
+      void refreshInitStatus({ schedule: true });
     }
 
     function initSourcesMarkup() {
@@ -961,6 +994,12 @@
       });
       grid.querySelector('[data-init-action="settings"]')?.addEventListener("click", () => {
         openSettingsPage("sources");
+      });
+      // Delegated: the checklist's innerHTML is replaced on every status
+      // poll, so listeners on the buttons themselves would be lost.
+      grid.querySelector(".init-onboarding .init-checklist")?.addEventListener("click", (event) => {
+        const btn = event.target.closest?.("[data-embedding-repair]");
+        if (btn) void handleEmbeddingRepairClick(btn);
       });
       grid.querySelectorAll("input[data-init-source]").forEach((input) => {
         input.addEventListener("change", () => {

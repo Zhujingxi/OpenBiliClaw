@@ -74,6 +74,7 @@
     .init-missing.init-hard .init-mark { background: rgba(255,107,107,.14); color: var(--err); }
     .init-missing.init-soft .init-mark { background: rgba(244,185,66,.14); color: var(--warn); }
     .init-hint { margin: 7px 0 0 32px; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+    .init-repair-btn { margin: 8px 0 0 32px; font-size: 12.5px; padding: 5px 12px; }
     .init-sources { display: grid; gap: 8px; margin: 16px 0; }
     .init-sources-title { margin: 0 0 2px; font-size: 13px; font-weight: 800; color: var(--text); }
     .init-source-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); font-size: 13px; }
@@ -422,9 +423,19 @@
           label: embeddingRequired ? "向量模型可用" : "向量模型可用（推荐，非必须）",
           ok: Boolean(prereq.embedding_ready),
           hard: embeddingRequired,
-          hint: embeddingRequired
-            ? "本地 Ollama + bge-m3 需要完成一次真实向量请求；模型仍在下载或服务异常时请稍后重试。"
-            : "未配置 embedding 时可以先初始化；推荐去重和语义检索会弱一些。",
+          // Backend classifies the cause (embedding_detail, v0.3.155+):
+          // Ollama 未运行 / 缺模型 / 模型损坏 / 配置无效 / repairing（下载中，
+          // detail 带实时百分比，3s 轮询自动刷新）。Fall back to the generic
+          // copy on older backends.
+          hint:
+            String(prereq.embedding_detail || "").trim() ||
+            (embeddingRequired
+              ? "本地 Ollama + bge-m3 需要完成一次真实向量请求；模型仍在下载或服务异常时请稍后重试。"
+              : "未配置 embedding 时可以先初始化；推荐去重和语义检索会弱一些。"),
+          // One-click server-side `ollama pull` when the missing model is the
+          // only problem (v0.3.155+). Hidden while a repair is running — the
+          // hint line already shows live progress.
+          repairable: ["model_missing", "model_broken"].includes(prereq.embedding_check),
         },
         {
           key: "platforms",
@@ -489,7 +500,37 @@
           hint.textContent = row.hint;
           li.append(hint);
         }
+        if (!row.ok && row.repairable) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "btn ghost init-repair-btn";
+          btn.setAttribute("data-embedding-repair", "1");
+          btn.textContent = "自动下载向量模型";
+          btn.addEventListener("click", () => void startEmbeddingRepairFromChecklist(btn));
+          li.append(btn);
+        }
         root.append(li);
+      }
+    }
+
+    // Kick the server-side `ollama pull` (POST /api/embedding/repair); the
+    // 3s init-status poll then renders live percent on the checklist row
+    // (embedding_check="repairing"). 409 already_running is success-shaped.
+    async function startEmbeddingRepairFromChecklist(btn) {
+      btn.disabled = true;
+      btn.textContent = "启动下载…";
+      try {
+        const r = await fetch("/api/embedding/repair", { method: "POST" });
+        if (!r.ok && r.status !== 409) throw new Error("HTTP " + r.status);
+        const body = await r.json().catch(() => ({}));
+        if (r.status === 409 && body.error && body.error !== "already_running") {
+          throw new Error(body.detail || body.error);
+        }
+        scheduleInitPoll(300);
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = "下载启动失败，重试";
+        setInitReason(`向量模型下载启动失败：${e.message || e}`);
       }
     }
 
@@ -625,6 +666,14 @@
           return;
         }
         clearInitPoll();
+        // Pre-init: keep the checklist fresh, and while a one-click model
+        // download is running keep polling so the row shows live percent
+        // (embedding_check="repairing", detail carries progress).
+        renderInitChecklist(status, readSelectedInitSources());
+        if (status?.prerequisites?.embedding_repair_running) {
+          scheduleInitPoll(INIT_POLL_MS);
+          return;
+        }
         if (status.reason && status.reason !== "none") setInitReason(describeInitReason(status.reason) || status.detail || "初始化未完成。");
       } catch {
         scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_POLL_MS);

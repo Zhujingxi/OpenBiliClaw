@@ -45,9 +45,10 @@
 
 | 端点 | 方法 | 访问 | 说明 |
 |---|---|---|---|
-| `/api/init-status` | GET | 远程可读 / 降级可读 | 权威进度 + 前置清单 + `can_start`（trusted-local && 硬前置 && 非 running && supported）/ `can_manage`（trusted-local）。前置清单包含 `embedding_ready` 与 `embedding_required`；远程不 403、`can_manage=false`。 |
+| `/api/init-status` | GET | 远程可读 / 降级可读 | 权威进度 + 前置清单 + `can_start`（trusted-local && 硬前置 && 非 running && supported）/ `can_manage`（trusted-local）。前置清单包含 `embedding_ready` 与 `embedding_required`；v0.3.155+ 还包含 `embedding_check` / `embedding_detail`——向量模型未就绪的分类原因（`disabled` / `misconfigured`（provider 名无效，如被浏览器整页翻译写坏）/ `not_running` / `model_missing` / `model_broken` / `provider_error` / `error`，Ollama 路径经 `llm/ollama_diagnostics.py` 真实分类、失败 TTL 缓存），三端向量模型行 hint 直接展示 `embedding_detail`。v0.3.155+ reason 梯子补上 not-trusted 分支：非本机（手机扫码 / 局域网）查看时 reason=`local_only` 而非 `none`，三端显示「只能在本机发起初始化」，不再出现全绿清单配「以下条件未满足」的矛盾文案。远程不 403、`can_manage=false`。 |
 | `/api/init` | POST | 仅本机 | 占坑前廉价拒绝（403 local_only / 409 unsupported_runtime / 409 already_initialized）→ `try_start`（409 already_running）→ 临界区复验前置（缺则复位 idle + 409，不留 stuck `starting` 行；包括已配置 embedding provider 时的 `embedding_not_ready`）→ 后台跑 wrapper → 202 + 初始 status。可选 body `sources`（平台来源数组）：传入时按合法平台 key 直接作为本轮显式 opt-in，并 best-effort 写回 `sources.<platform>.enabled=true`；不传则用全部已开启平台（CLI / 旧客户端行为）。 |
 | `/api/init/cancel` | POST | 仅本机 | 协作取消在跑的 run；无运行中 → 409 not_running。 |
+| `/api/embedding/repair` | POST/GET | POST 仅本机 / GET 公开 | v0.3.155+ 一键修复向量模型：POST 先经 `diagnose_ollama_embedding()` 分类（已就绪 → 200 `already_ok` 并立即过期就绪缓存；`not_running` → 409 附排查提示；非 ollama provider → 409 `unsupported_provider`；修复已在跑 → 409 `already_running`），缺失 / 损坏则启动单飞后台任务经 Ollama `/api/pull` 拉取（202）；GET 回报 `{running, status, completed, total, done, ok, error}` 供前端显示进度，成功后过期 `_health_embedding_ready` 缓存使横幅 / 清单在下一次轮询转绿。拉取期间 `init-status` 的 `embedding_check="repairing"`、`embedding_detail` 带实时百分比（绕过诊断 TTL 缓存），并下发 `embedding_repair_running/completed/total` 结构化进度；`/setup/` 与桌面 Web 的向量模型行按 3s 轮询实时刷新进度，且在 `model_missing` / `model_broken` 时渲染「自动下载向量模型」按钮（`data-embedding-repair`）触发本端点。 |
 
 `_init_wrapper`（`api/app.py`）是某次 API run 的**唯一**状态 / 事件写者：`mark_running` → `run_guided_init(coordinator=...)` → `complete(partial_success=...)`；`CancelledError` → shield `cancel`，`GuidedInitError` → `fail(reason)`，其它异常 → `fail("internal_error")`。三个 path 都在 `auth.py` 公共集 + 降级白名单。
 

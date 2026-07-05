@@ -536,6 +536,7 @@
     .init-missing.init-hard .init-mark { background: color-mix(in oklab, var(--danger), var(--surface) 84%); color: var(--danger); }
     .init-missing.init-soft .init-mark { background: color-mix(in oklab, var(--warn), var(--surface) 84%); color: color-mix(in oklab, var(--warn), black 24%); }
     .init-hint, .init-hint-row { margin: 6px 0 0 30px; color: var(--muted); font-size: var(--text-sm); line-height: 1.45; }
+    .init-repair-btn { margin: 8px 0 0 30px; }
     .init-progress { display: grid; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg); }
     .init-progress-track { height: 8px; overflow: hidden; border-radius: var(--radius-pill); background: var(--surface-warm); }
     .init-progress-fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--success)); transition: width var(--motion-base) var(--ease-standard); }

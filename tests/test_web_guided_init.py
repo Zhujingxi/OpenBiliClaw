@@ -248,3 +248,26 @@ def test_setup_wizard_config_save_401_points_to_login_instead_of_dead_end() -> N
     assert "r.status === 401" in setup_html
     assert "输入访问密码登录" in setup_html
     assert '<a href="/web">' in setup_html
+
+
+def test_web_surfaces_offer_embedding_repair_and_progress() -> None:
+    """Both web init checklists expose one-click model download + live progress.
+
+    The repair button POSTs /api/embedding/repair; while the pull runs the
+    backend classifies embedding_check="repairing" and the pages keep polling
+    so the row's hint shows live percent (user request 2026-07-05).
+    """
+    setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+    app_css = Path("src/openbiliclaw/web/desktop/assets/css/app.css").read_text(encoding="utf-8")
+
+    for surface in (setup_html, app_js):
+        assert "data-embedding-repair" in surface
+        assert "embedding_detail" in surface
+        assert "model_missing" in surface and "model_broken" in surface
+    assert '"/api/embedding/repair"' in setup_html
+    assert "embedding_repair_running" in setup_html  # keeps polling while downloading
+    assert 'embeddingRepair: "/embedding/repair"' in app_js
+    assert "handleEmbeddingRepairClick" in app_js
+    assert ".init-repair-btn" in setup_html
+    assert ".init-repair-btn" in app_css

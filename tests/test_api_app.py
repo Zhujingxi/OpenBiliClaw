@@ -10274,3 +10274,234 @@ class TestGuidedInitEndpoints:
         # serve() (writes recommendation rows + marks pool shown) must NOT run on
         # a half-built pool during init — the side-effecting GET is gated too.
         assert served == []
+
+
+class TestEmbeddingDiagnosisAndRepair:
+    """Classified embedding causes + one-click repair (v0.3.155+).
+
+    Field context (2026-07-05): bge-m3 500-ing for an hour surfaced only as
+    a dead「重试」; a browser-translated provider name ('奥拉玛') silently
+    disabled embedding; remote viewers saw "条件未满足" with an all-green
+    checklist because the reason ladder had no trusted branch.
+    """
+
+    def _make_app(self, tmp_path, *, embedding_provider=None, prereqs=None):
+        from openbiliclaw.config import Config
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "diag.db")
+        db.initialize()
+        soul = SimpleNamespace(is_profile_ready=lambda: False)
+        app = create_app(memory_manager=object(), database=db, soul_engine=soul)
+        app.state.auth_gate.is_trusted_local = lambda request: True
+        if embedding_provider is not None:
+            app.state.runtime_context.config = Config()
+            data_dir = tmp_path / "data"
+            data_dir.mkdir(exist_ok=True)
+            app.state.runtime_context.config.data_dir = str(data_dir)
+            app.state.runtime_context.config.llm.embedding.provider = embedding_provider
+            if embedding_provider == "ollama":
+                # Every real write path (CLI setup, popup banner, settings
+                # page) sets the model together with the provider.
+                app.state.runtime_context.config.llm.embedding.model = "bge-m3"
+        if prereqs is not None:
+            app.state.runtime_context._init_prereqs = prereqs
+        return app, db
+
+    def test_init_status_reason_local_only_when_untrusted(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        # trusted participates in can_start but had no reason branch — remote
+        # viewers got reason="none" and a generic "条件未满足" over an
+        # all-green checklist. All clients already map local_only.
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, embedding_provider="", prereqs=prereqs)
+        app.state.auth_gate.is_trusted_local = lambda request: False
+        with TestClient(app) as client:
+            body = client.get("/api/init-status").json()
+        assert body["can_start"] is False
+        assert body["reason"] == "local_only"
+        assert body["prerequisites"]["llm_ready"] is True
+
+    def test_init_status_classifies_misconfigured_embedding_provider(
+        self, tmp_path: Path
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        # A browser-translated provider name must surface as misconfigured,
+        # not silently degrade into a generic not-ready.
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, embedding_provider="奥拉玛", prereqs=prereqs)
+        with TestClient(app) as client:
+            body = client.get("/api/init-status").json()
+        prereq = body["prerequisites"]
+        assert prereq["embedding_ready"] is False
+        assert prereq["embedding_check"] == "misconfigured"
+        assert "奥拉玛" in prereq["embedding_detail"]
+
+    def test_init_status_reports_disabled_embedding_quietly(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, embedding_provider="", prereqs=prereqs)
+        with TestClient(app) as client:
+            body = client.get("/api/init-status").json()
+        prereq = body["prerequisites"]
+        assert prereq["embedding_check"] == "disabled"
+        assert prereq["embedding_detail"] == ""
+
+    def test_repair_rejects_non_local(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        app.state.auth_gate.is_trusted_local = lambda request: False
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "local_only"
+
+    def test_repair_rejects_non_ollama_provider(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        app, _ = self._make_app(tmp_path, embedding_provider="gemini")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "unsupported_provider"
+
+    def test_repair_409_when_ollama_not_running(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("not_running", "Ollama 服务无法连接")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body["error"] == "not_running"
+        assert "无法连接" in body["detail"]
+
+    def test_repair_pulls_model_and_reports_done(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("model_missing", "缺 bge-m3")
+
+        async def fake_pull(base_url: str, model: str, *, on_progress=None, **_kw: object):
+            if on_progress is not None:
+                on_progress("downloading", 100, 400)
+                on_progress("success", 0, 0)
+            return (True, "")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", fake_pull
+        )
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+            assert resp.status_code == 202
+            started = resp.json()
+            assert started["started"] is True
+            assert started["model"] == "bge-m3"
+            assert started["diagnosis"] == "model_missing"
+
+            status: dict = {}
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                status = client.get("/api/embedding/repair").json()
+                if status.get("done"):
+                    break
+                time.sleep(0.05)
+        assert status.get("done") is True
+        assert status.get("ok") is True
+        assert status.get("error") == ""
+
+    def test_repair_single_flight_while_running(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("model_missing", "缺 bge-m3")
+
+        release = asyncio.Event()
+
+        async def slow_pull(base_url: str, model: str, *, on_progress=None, **_kw: object):
+            await release.wait()
+            return (True, "")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", slow_pull)
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            first = client.post("/api/embedding/repair")
+            assert first.status_code == 202
+            second = client.post("/api/embedding/repair")
+            assert second.status_code == 409
+            assert second.json()["error"] == "already_running"
+            release.set()
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if client.get("/api/embedding/repair").json().get("done"):
+                    break
+                time.sleep(0.05)
+
+    def test_init_status_reports_live_pull_progress_while_repairing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        # While a one-click repair is downloading, init pages must see a
+        # "repairing" classification with live percent — that's how users
+        # know how long to wait (user request 2026-07-05).
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("model_missing", "缺 bge-m3")
+
+        release = asyncio.Event()
+
+        async def slow_pull(base_url: str, model: str, *, on_progress=None, **_kw: object):
+            if on_progress is not None:
+                on_progress("downloading", 200_000_000, 400_000_000)
+            await release.wait()
+            return (True, "")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", slow_pull)
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama", prereqs=prereqs)
+        with TestClient(app) as client:
+            assert client.post("/api/embedding/repair").status_code == 202
+            prereq: dict = {}
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                prereq = client.get("/api/init-status").json()["prerequisites"]
+                if prereq.get("embedding_repair_total"):
+                    break
+                time.sleep(0.05)
+            release.set()
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if client.get("/api/embedding/repair").json().get("done"):
+                    break
+                time.sleep(0.05)
+        assert prereq["embedding_check"] == "repairing"
+        assert "50%" in prereq["embedding_detail"]
+        assert prereq["embedding_repair_running"] is True
+        assert prereq["embedding_repair_completed"] == 200_000_000
+        assert prereq["embedding_repair_total"] == 400_000_000

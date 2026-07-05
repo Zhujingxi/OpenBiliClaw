@@ -76,6 +76,7 @@ import {
   fetchChatTurn,
   fetchChatTurns,
   fetchConfig,
+  fetchEmbeddingRepairStatus,
   fetchHealth,
   fetchInitStatus,
   fetchPendingDelight,
@@ -87,6 +88,7 @@ import {
   fetchSourcesStatus,
   markDelightSent,
   probeConfigService,
+  startEmbeddingRepair,
   startInit,
   readCachedConfigSnapshot,
   reportRecommendationClick,
@@ -6953,8 +6955,40 @@ function bindSettings() {
 // is still disabled.
 const EMBEDDING_BANNER_DISMISS_KEY = "embeddingBannerDismissed";
 
+// Repair polling: a bge-m3 pull is ~568MB, so allow up to 20 minutes. The
+// pull continues server-side even if the panel closes; the banner's
+// auto-refresh clears it once embedding recovers.
+const EMBEDDING_REPAIR_POLL_MS = 1_500;
+const EMBEDDING_REPAIR_POLL_LIMIT = Math.ceil((20 * 60 * 1_000) / EMBEDDING_REPAIR_POLL_MS);
+
+function formatRepairProgress(repair) {
+  if (repair && repair.total > 0) {
+    const pct = Math.min(99, Math.round((repair.completed / repair.total) * 100));
+    return `拉取中 ${pct}%`;
+  }
+  return "拉取中…";
+}
+
+// Wait for the server-side pull to finish, mirroring progress onto the
+// button. Returns the final repair state (or null if the backend vanished).
+async function waitForEmbeddingRepair(enableBtn) {
+  for (let i = 0; i < EMBEDDING_REPAIR_POLL_LIMIT; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, EMBEDDING_REPAIR_POLL_MS));
+    const repair = await fetchEmbeddingRepairStatus();
+    if (!repair) return null;
+    if (repair.done) return repair;
+    if (enableBtn) enableBtn.textContent = formatRepairProgress(repair);
+  }
+  return { done: false, ok: false, error: "拉取超时" };
+}
+
 async function enableLocalOllamaEmbedding(enableBtn) {
-  const original = enableBtn ? enableBtn.textContent : "";
+  const failBtn = (label) => {
+    if (enableBtn) {
+      enableBtn.disabled = false;
+      enableBtn.textContent = label;
+    }
+  };
   if (enableBtn) {
     enableBtn.disabled = true;
     enableBtn.textContent = "启用中…";
@@ -6973,26 +7007,65 @@ async function enableLocalOllamaEmbedding(enableBtn) {
     // /api/health probes it live, so embedding_ready only flips true once
     // Ollama actually serves a vector. Don't claim success on a config
     // write alone.
-    const health = await fetchHealth();
+    let health = await fetchHealth();
     const banner = document.getElementById("embeddingBanner");
     if (health && health.embedding_ready) {
       if (banner) banner.hidden = true;
       setHint("已启用本地 Ollama 语义去重，重复内容会少很多。", "success");
-    } else {
-      if (enableBtn) {
-        enableBtn.disabled = false;
-        enableBtn.textContent = "重试";
+      return;
+    }
+    // Not ready → let the backend classify the cause and, when the fix is
+    // "pull the model", do it server-side with real progress (v0.3.155+).
+    const kicked = await startEmbeddingRepair();
+    if (kicked.status === 409 && kicked.error === "not_running") {
+      failBtn("重试");
+      setHint(kicked.detail || "Ollama 没有在运行，请先启动 Ollama（或运行 `ollama serve`）。", "error");
+      return;
+    }
+    if (kicked.status === 409 && kicked.error === "unsupported_provider") {
+      failBtn("重试");
+      setHint(kicked.detail || "一键修复只支持本地 Ollama embedding。", "error");
+      return;
+    }
+    if (kicked.status === 403) {
+      failBtn("重试");
+      setHint("只能在本机操作 embedding 修复；请在装有后端的电脑上打开扩展。", "error");
+      return;
+    }
+    if (
+      kicked.status === 202 ||
+      kicked.already_ok ||
+      (kicked.status === 409 && kicked.error === "already_running")
+    ) {
+      if (!kicked.already_ok) {
+        setHint("正在拉取 bge-m3（约 568MB）。关闭面板下载也会继续。");
+        const repair = await waitForEmbeddingRepair(enableBtn);
+        if (repair && repair.done && !repair.ok) {
+          failBtn("重试");
+          setHint(`bge-m3 拉取失败：${repair.error || "未知错误"}`, "error");
+          return;
+        }
       }
-      setHint(
-        "配置已写入，但 Ollama 还没就绪。请确认已运行 `ollama serve` 并 `ollama pull bge-m3`。",
-        "error",
-      );
+      // Health TTL is short (3s client / server-side cache expired on
+      // success), so one more read reflects the repaired state.
+      health = await fetchHealth();
+      if (health && health.embedding_ready) {
+        if (banner) banner.hidden = true;
+        setHint("已启用本地 Ollama 语义去重，重复内容会少很多。", "success");
+        return;
+      }
+      failBtn("重试");
+      setHint("模型已就绪但探测还没通过，稍等几秒后重试。", "error");
+      return;
     }
+    // Older backend without /api/embedding/repair (404) or unreachable (0).
+    failBtn("重试");
+    setHint(
+      "配置已写入，但 Ollama 还没就绪。请确认已运行 `ollama serve` 并 `ollama pull bge-m3`。",
+      "error",
+    );
   } catch {
-    if (enableBtn) {
-      enableBtn.disabled = false;
-      enableBtn.textContent = "重试";
-    }
+    failBtn("重试");
     setHint("启用失败，请检查后端连接后重试。", "error");
   }
 }

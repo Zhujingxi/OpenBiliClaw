@@ -12,6 +12,10 @@ const REASON_TEXT = {
   already_running: "初始化正在进行中。",
   bilibili_not_logged_in: "还没检测到 B 站登录。",
   llm_not_ready: "AI 服务还没配好或当前不可用。",
+  // v0.3.137+ 配置了 embedding provider 时向量模型是服务端硬前置；此前
+  // popup 独缺这条映射（desktop / setup 都有），用户只能看到与清单矛盾的
+  // 通用「以下条件未满足」（field report 2026-07-05, machine B）。
+  embedding_not_ready: "向量模型还没就绪，请等待 bge-m3 下载完成或修复 Ollama 后重试。",
   already_initialized: "已经初始化过了；如需重建，请到设置页。",
   local_only: "只能在本机发起初始化。",
   no_sources_selected: "至少勾选一个数据来源。",
@@ -25,6 +29,41 @@ export function describeInitReason(reason) {
     return "";
   }
   return REASON_TEXT[reason] || "";
+}
+
+// Classified embedding-not-ready causes (init-status prerequisites
+// ``embedding_check``, v0.3.155+). The backend's ``embedding_detail``
+// wins when present; these are fallbacks for older backends.
+const EMBEDDING_CHECK_TEXT = {
+  repairing: "正在下载向量模型，完成后自动就绪。",
+  not_running: "Ollama 没有在运行。启动 Ollama（或运行 `ollama serve`）后再试。",
+  model_missing:
+    "Ollama 已在运行，但缺 bge-m3 模型——推荐页横幅可一键拉取，或手动 `ollama pull bge-m3`。",
+  model_broken:
+    "bge-m3 已安装但调用持续失败——建议重新拉取（`ollama pull bge-m3`）或重启 Ollama。",
+  misconfigured: "embedding 配置无效，请到设置页重新选择 provider 并保存。",
+  provider_error: "embedding 服务探测失败，请检查 provider 的 Key / 地址 / 网络。",
+};
+
+// Actionable hint for the embedding checklist row / banner. "" when ready.
+export function describeEmbeddingHint(prereq) {
+  if (!prereq || prereq.embedding_ready) {
+    return "";
+  }
+  const detail =
+    typeof prereq.embedding_detail === "string" ? prereq.embedding_detail.trim() : "";
+  if (detail) {
+    return detail;
+  }
+  const byCode = EMBEDDING_CHECK_TEXT[prereq.embedding_check];
+  if (byCode) {
+    return byCode;
+  }
+  // Required (provider configured) blocks init server-side — the legacy
+  // "也能初始化" copy would contradict the blocked start button.
+  return prereq.embedding_required
+    ? "本地 Ollama + bge-m3 需要完成一次真实向量请求；模型仍在下载或服务异常时请稍后重试。"
+    : "本地 Ollama + bge-m3 没就绪也能初始化，但语义检索会弱一些。";
 }
 
 // Pre-init checklist rows. ``hard`` rows must be satisfied before init can
@@ -58,12 +97,13 @@ export function buildInitChecklist(status, selected = null) {
     },
     {
       key: "embedding",
-      label: "向量模型可用（推荐，非必须）",
+      // v0.3.137+ a configured embedding provider is a HARD server-side init
+      // gate (can_start waits for embedding_ready) — mirroring setup / desktop
+      // web. A fixed "非必须" label here contradicted the blocked start.
+      label: prereq.embedding_required ? "向量模型可用" : "向量模型可用（推荐，非必须）",
       ok: Boolean(prereq.embedding_ready),
-      hard: false,
-      hint: prereq.embedding_ready
-        ? ""
-        : "本地 Ollama + bge-m3 没就绪也能初始化，但语义检索会弱一些。",
+      hard: Boolean(prereq.embedding_required),
+      hint: describeEmbeddingHint(prereq),
     },
     {
       key: "platforms",
