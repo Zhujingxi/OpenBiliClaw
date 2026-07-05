@@ -20,6 +20,8 @@ const REASON_TEXT = {
   local_only: "只能在本机发起初始化。",
   no_sources_selected: "至少勾选一个数据来源。",
   internal_error: "初始化过程中出错了，请稍后重试。",
+  interrupted: "上次初始化被打断（后端重启），可重试。",
+  cancelled: "初始化已取消。",
   none: "",
 };
 
@@ -29,6 +31,19 @@ export function describeInitReason(reason) {
     return "";
   }
   return REASON_TEXT[reason] || "";
+}
+
+// Human text for a failed/cancelled run. ``status.detail`` carries the
+// backend's stored failure specifics (exception summary / GuidedInitError
+// message, v0.3.156+) — append it so an internal_error is diagnosable from
+// the UI instead of only the generic "请稍后重试" (field report 2026-07-05).
+export function describeInitFailure(status, progress = null) {
+  const base = describeInitReason(status && status.reason) || "";
+  const detail = String((status && status.detail) || "").trim();
+  if (base && detail) {
+    return `${base}（${detail}）`;
+  }
+  return base || detail || (progress && progress.failedReason) || "请稍后重试";
 }
 
 // Classified embedding-not-ready causes (init-status prerequisites

@@ -5140,12 +5140,21 @@ class Database:
                 stages_json     TEXT,  -- JSON: per-stage [{n,status,reason}]
                 partial_success INTEGER NOT NULL DEFAULT 0,
                 error_reason    TEXT,
+                -- Human-readable failure specifics (exception summary /
+                -- GuidedInitError message) surfaced by /api/init-status so
+                -- an internal_error is diagnosable without server logs.
+                error_detail    TEXT,
                 sequence        INTEGER NOT NULL DEFAULT 0,
                 started_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 finished_at     TIMESTAMP
             );
         """)
+        existing_columns = {
+            str(row["name"]) for row in self.conn.execute("PRAGMA table_info(init_runs)").fetchall()
+        }
+        if "error_detail" not in existing_columns:
+            self.conn.execute("ALTER TABLE init_runs ADD COLUMN error_detail TEXT")
 
     def get_latest_init_run(self) -> dict[str, Any] | None:
         """Return the most recent init run as a dict, or None if none exist.
@@ -5182,7 +5191,8 @@ class Database:
                 VALUES (?, 'starting', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT(run_id) DO UPDATE SET
                     status='starting', stage=0, sequence=0, partial_success=0,
-                    error_reason=NULL, finished_at=NULL, updated_at=CURRENT_TIMESTAMP
+                    error_reason=NULL, error_detail=NULL, finished_at=NULL,
+                    updated_at=CURRENT_TIMESTAMP
                 """,
                 (run_id,),
             )
@@ -5203,6 +5213,7 @@ class Database:
             "stages_json",
             "partial_success",
             "error_reason",
+            "error_detail",
             "sequence",
             "finished_at",
         }

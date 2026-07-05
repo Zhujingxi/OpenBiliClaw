@@ -40,6 +40,7 @@ import { createRuntimeStreamClient } from "./popup-stream.js";
 import { createOfflineBackendPoller } from "./popup-connection-poller.js";
 import {
   buildInitChecklist,
+  describeInitFailure,
   describeInitReason,
   describeInitStartError,
   initProgressView,
@@ -922,7 +923,7 @@ function renderInitProgress(status) {
     }
     if (elements.initProgressLabel instanceof HTMLElement) {
       elements.initProgressLabel.textContent = progress.failed
-        ? `初始化未完成：${describeInitReason(status && status.reason) || progress.failedReason || "请稍后重试"}`
+        ? `初始化未完成：${describeInitFailure(status, progress)}`
         : progress.active
           ? `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`
           : "初始化完成！";

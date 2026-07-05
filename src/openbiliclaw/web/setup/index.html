@@ -259,6 +259,8 @@
       local_only: "只能在本机发起初始化。",
       no_sources_selected: "至少勾选一个数据来源。",
       internal_error: "初始化过程中出错了，请稍后重试。",
+      interrupted: "上次初始化被打断（后端重启），可重试。",
+      cancelled: "初始化已取消。",
       none: "",
     };
     const INIT_SOURCE_LOGIN_HINT =
@@ -578,6 +580,21 @@
       $("#initEscape").className = "msg show info";
     }
 
+    // Human text for a failed/cancelled run. ``status.detail`` carries the
+    // backend's stored failure specifics (exception summary / GuidedInitError
+    // message, v0.3.156+) — append it so internal_error is diagnosable from
+    // the UI instead of only the generic "请稍后重试".
+    function initFailureText(status, failedStage) {
+      const base = describeInitReason(status?.reason) || "";
+      const detail = String(status?.detail || "").trim();
+      // Unmapped codes (empty_history / empty_signals / profile_failed …)
+      // carry their authoritative human message in detail — show it alone
+      // instead of "未知初始化状态：code（message）".
+      if (detail && (!base || base.startsWith("未知初始化状态"))) return detail;
+      if (base && detail) return `${base}（${detail}）`;
+      return base || failedStage?.reason || "请稍后重试";
+    }
+
     function progressView(status) {
       const total = status?.total_stages || 4;
       const stages = Array.isArray(status?.stages) ? status.stages : [];
@@ -591,7 +608,7 @@
         pct: running ? Math.max(pct, 1) : pct,
         failed,
         label: failed
-          ? `初始化未完成：${describeInitReason(status?.reason) || failed.reason || "请稍后重试"}`
+          ? `初始化未完成：${initFailureText(status, failed)}`
           : running
             ? `${currentStage ? `${currentStage.n}/${total} ${currentStage.label}` : "正在初始化"}（${Math.max(pct, 1)}%）`
             : "初始化完成",
@@ -602,6 +619,16 @@
       $("#initSources").style.display = "none";
       $("#initEscape").className = "msg";
       $("#initProgress").hidden = false;
+      // The transient "正在检查 AI 服务…" row is only meaningful between the
+      // start click and the run launch — once a run is rendering (running or
+      // terminal) it reads as a stuck state, so swap it out (field report
+      // 2026-07-05: a failed run showed the stale checking row above the
+      // failure banner).
+      if ($("#initChecklist").querySelector(".init-checking")) {
+        $("#initChecklist").innerHTML = status?.running
+          ? '<li class="init-hint-row">前置检查已通过，初始化进行中…</li>'
+          : '<li class="init-hint-row">点「开始初始化」会先检查 AI 服务 / 向量模型，以及所选平台的登录状态。</li>';
+      }
       const view = progressView(status);
       $("#initProgressBar").style.width = `${view.pct}%`;
       $("#initProgressLabel").textContent = view.label;
@@ -674,7 +701,15 @@
           scheduleInitPoll(INIT_POLL_MS);
           return;
         }
-        if (status.reason && status.reason !== "none") setInitReason(describeInitReason(status.reason) || status.detail || "初始化未完成。");
+        if (status.reason && status.reason !== "none") {
+          const failedStage = (Array.isArray(status.stages) ? status.stages : [])
+            .find((s) => s.status === "failed" || s.status === "cancelled");
+          setInitReason(
+            failedStage
+              ? initFailureText(status, failedStage)
+              : describeInitReason(status.reason) || status.detail || "初始化未完成。"
+          );
+        }
       } catch {
         scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_POLL_MS);
       } finally {

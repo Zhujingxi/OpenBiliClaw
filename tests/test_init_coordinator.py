@@ -89,6 +89,32 @@ async def test_fail_marks_failed_with_reason(tmp_path: Path) -> None:
     }
 
 
+async def test_fail_stores_detail_and_status_exposes_it(tmp_path: Path) -> None:
+    """``fail(detail=...)`` persists the failure specifics and get_status
+    surfaces them, so an internal_error is diagnosable from the UI without
+    server logs (field report 2026-07-05)."""
+    coord, db, _ = _coord(tmp_path)
+    coord.try_start("run-1")
+    await coord.fail("run-1", "internal_error", detail="RuntimeError: boom during stage 2")
+    run = db.get_latest_init_run()
+    assert run["error_detail"] == "RuntimeError: boom during stage 2"
+    status = coord.get_status()
+    assert status["reason"] == "internal_error"
+    assert status["detail"] == "RuntimeError: boom during stage 2"
+
+    # Re-reserving the SAME run_id (ON CONFLICT path) clears the stale detail.
+    assert coord.try_start("run-1") is True
+    assert db.get_latest_init_run()["error_detail"] is None
+    assert coord.get_status()["detail"] == ""
+
+
+async def test_fail_without_detail_keeps_empty_detail(tmp_path: Path) -> None:
+    coord, _, _ = _coord(tmp_path)
+    coord.try_start("run-1")
+    await coord.fail("run-1", "empty_history")
+    assert coord.get_status()["detail"] == ""
+
+
 async def test_parallel_stage_3_4_no_sequence_loss(tmp_path: Path) -> None:
     coord, db, _ = _coord(tmp_path)
     coord.try_start("run-1")

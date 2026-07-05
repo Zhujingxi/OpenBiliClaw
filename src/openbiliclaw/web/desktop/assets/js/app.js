@@ -115,6 +115,8 @@
       local_only: "只能在本机发起初始化。",
       no_sources_selected: "至少勾选一个数据来源。",
       internal_error: "初始化过程中出错了，请稍后重试。",
+      interrupted: "上次初始化被打断（后端重启），可重试。",
+      cancelled: "初始化已取消。",
       none: ""
     };
     const INIT_STATUS_POLL_MS = Number(window.__OBC_TEST_INIT_POLL_MS) || 3000;
@@ -848,6 +850,21 @@
       };
     }
 
+    // Human text for a failed/cancelled run. ``status.detail`` carries the
+    // backend's stored failure specifics (exception summary / GuidedInitError
+    // message, v0.3.156+) — append it so internal_error is diagnosable from
+    // the UI instead of only the generic "请稍后重试".
+    function initFailureText(status, progress) {
+      const base = describeInitReason(status?.reason) || "";
+      const detail = String(status?.detail || "").trim();
+      // Unmapped codes (empty_history / empty_signals / profile_failed …)
+      // carry their authoritative human message in detail — show it alone
+      // instead of "未知初始化状态：code（message）".
+      if (detail && (!base || base.startsWith("未知初始化状态"))) return detail;
+      if (base && detail) return `${base}（${detail}）`;
+      return base || progress?.failedReason || "初始化未完成，请稍后重试。";
+    }
+
     function initContentReadyFromRuntime(status = state.runtimeStatus) {
       const runtime = normalizeRuntimeStatus(status);
       return Boolean(runtime) && (
@@ -945,7 +962,7 @@
       const progressFill = section.querySelector(".init-progress-fill");
       const progressText = progressBox?.querySelector("p");
       const progressLabel = progress.failed
-        ? (describeInitReason(status?.reason) || progress.failedReason || "初始化未完成，请稍后重试。")
+        ? initFailureText(status, progress)
         : progress.active
           ? `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`
           : "等待开始";
@@ -977,7 +994,9 @@
       const showProgress = isRunning || displayProgress.failed || waitingForFirstPool;
       const reason = waitingForFirstPool
         ? (state.initReason || INIT_FIRST_POOL_WAIT_TEXT)
-        : (state.initReason || describeInitReason(status?.reason) || status?.detail || "");
+        : displayProgress.failed
+          ? (state.initReason || initFailureText(status, displayProgress))
+          : (state.initReason || describeInitReason(status?.reason) || status?.detail || "");
       const phase = initOnboardingPhase(status, displayProgress);
       const buttonLabel = state.initBusy
         ? "检查中…"
@@ -1009,7 +1028,7 @@
           <ul class="init-checklist">${initChecklistMarkup(status, state.initSelectedSources)}</ul>
           <div class="init-progress"${showProgress ? "" : " hidden"}>
             <div class="init-progress-track"><div class="init-progress-fill" style="width:${displayProgress.pct}%"></div></div>
-            <p>${escapeHtml(displayProgress.failed ? (describeInitReason(status?.reason) || displayProgress.failedReason || "初始化未完成，请稍后重试。") : displayProgress.active ? `${displayProgress.stageLabel || "正在初始化"}（${displayProgress.pct}%）` : "等待开始")}</p>
+            <p>${escapeHtml(displayProgress.failed ? initFailureText(status, displayProgress) : displayProgress.active ? `${displayProgress.stageLabel || "正在初始化"}（${displayProgress.pct}%）` : "等待开始")}</p>
           </div>
           <p class="init-reason"${reason ? "" : " hidden"}>${escapeHtml(reason)}</p>
           <div class="init-actions">

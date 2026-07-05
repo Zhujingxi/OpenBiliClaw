@@ -490,6 +490,20 @@ def _normalize_init_source_key(source: object) -> str:
     return _normalize_source_platform(source_key)
 
 
+def _init_crash_detail(exc: BaseException) -> str:
+    """One-line, length-capped exception summary for guided-init failures.
+
+    Persisted with the ``internal_error`` reason and surfaced through
+    ``GET /api/init-status`` so a community user can report the actual cause
+    without digging through server logs (field report 2026-07-05: the generic
+    「初始化过程中出错了」left the failure undiagnosable from the UI).
+    """
+    lines = str(exc).strip().splitlines()
+    message = lines[0].strip() if lines else ""
+    text = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+    return text[:300]
+
+
 def _normalize_source_platform(source: object) -> str:
     source_key = str(source or "").strip().lower()
     if source_key in {"x", "twitter"}:
@@ -2074,9 +2088,11 @@ def create_app(
         elif run.get("status") in ("failed", "cancelled"):
             # Prereqs are fine and nothing is running, but the last run ended
             # badly — surface why so the UI can show it (can_start stays true so
-            # the user can retry) (gui-init review).
+            # the user can retry) (gui-init review). ``detail`` carries the
+            # stored failure specifics (exception summary / GuidedInitError
+            # message) so an internal_error is diagnosable from the UI.
             reason = run.get("reason") or str(run.get("status"))
-            detail = "上次初始化未完成，可重试"
+            detail = str(run.get("detail") or "")
         else:
             reason, detail = "none", ""
 
@@ -2243,11 +2259,11 @@ def create_app(
         except GuidedInitError as exc:
             logger.warning("guided init %s failed: %s", run_id, exc.reason)
             with suppress(Exception):
-                await coord.fail(run_id, exc.reason)
-        except Exception:
+                await coord.fail(run_id, exc.reason, detail=exc.message)
+        except Exception as exc:
             logger.exception("guided init %s crashed", run_id)
             with suppress(Exception):
-                await coord.fail(run_id, "internal_error")
+                await coord.fail(run_id, "internal_error", detail=_init_crash_detail(exc))
         finally:
             if not bool(getattr(ctx, "degraded", False)):
                 with suppress(Exception):

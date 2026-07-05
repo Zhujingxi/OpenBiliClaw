@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildInitChecklist,
+  describeInitFailure,
   describeInitReason,
   describeInitStartError,
   getEnabledPlatforms,
@@ -214,6 +215,36 @@ test("reason + start-error text mapping", () => {
     details: { error: "already_running" },
   });
   assert.ok(describeInitStartError(err).includes("进行中"));
+});
+
+test("failure text appends backend detail so internal_error is diagnosable", () => {
+  // Mapped reason + stored crash detail → generic copy with specifics appended.
+  const crashed = statusWith({
+    reason: "internal_error",
+    detail: "RuntimeError: provider exploded mid-run",
+  });
+  const text = describeInitFailure(crashed);
+  assert.ok(text.includes("初始化过程中出错了"));
+  assert.ok(text.includes("RuntimeError: provider exploded mid-run"));
+  // Mapped reason without detail (pre-v0.3.156 backend) → generic copy only.
+  assert.equal(
+    describeInitFailure(statusWith({ reason: "internal_error", detail: "" })),
+    "初始化过程中出错了，请稍后重试。",
+  );
+  // Unmapped typed reason (empty_signals …) → its human message stands alone.
+  assert.equal(
+    describeInitFailure(statusWith({ reason: "empty_signals", detail: "没有拉到任何行为信号。" })),
+    "没有拉到任何行为信号。",
+  );
+  // Nothing at all → stage reason, then the generic retry hint.
+  assert.equal(
+    describeInitFailure(statusWith({ reason: "none" }), { failedReason: "stage-2-broke" }),
+    "stage-2-broke",
+  );
+  assert.equal(describeInitFailure(statusWith({ reason: "none" })), "请稍后重试");
+  // interrupted / cancelled now map to human copy instead of raw codes.
+  assert.ok(describeInitReason("interrupted").includes("打断"));
+  assert.ok(describeInitReason("cancelled").includes("取消"));
 });
 
 // ── Per-run platform source selection ──────────────────────────────────────

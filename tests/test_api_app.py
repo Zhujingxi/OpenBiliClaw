@@ -9654,6 +9654,19 @@ class _FakeInitPrereqs:
         return list(self._platforms)
 
 
+def test_init_crash_detail_summarizes_exception() -> None:
+    """One line, class-prefixed, capped — safe to surface in init-status."""
+    from openbiliclaw.api.app import _init_crash_detail
+
+    assert _init_crash_detail(RuntimeError("boom")) == "RuntimeError: boom"
+    # Multi-line messages collapse to the first line.
+    assert _init_crash_detail(ValueError("first line\nsecond line")) == "ValueError: first line"
+    # Empty message still identifies the exception class.
+    assert _init_crash_detail(KeyError()) == "KeyError"
+    # Length-capped so a huge provider error body can't flood the status.
+    assert len(_init_crash_detail(RuntimeError("x" * 1000))) == 300
+
+
 def test_select_init_platforms_none_selection_uses_all_enabled() -> None:
     from openbiliclaw.api.app import _select_init_platforms
 
@@ -9897,6 +9910,66 @@ class TestGuidedInitEndpoints:
             client.get("/api/init-status")
             time.sleep(0.02)
         return captured
+
+    def _drive_until_status(self, client, reason):
+        # Pump init-status until the background wrapper lands the terminal
+        # failure write; returns the final status body.
+        import time
+
+        body = {}
+        for _ in range(100):
+            body = client.get("/api/init-status").json()
+            if body.get("reason") == reason:
+                break
+            time.sleep(0.02)
+        return body
+
+    def test_init_crash_surfaces_exception_detail_in_status(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unexpected pipeline crash must be diagnosable from init-status:
+        reason stays the stable ``internal_error`` code, ``detail`` carries the
+        exception summary (field report 2026-07-05 — the generic 「初始化过程中
+        出错了」 left community users with nothing to report)."""
+        from fastapi.testclient import TestClient
+
+        async def _boom(**kwargs):
+            raise RuntimeError("provider exploded mid-run\nstack noise")
+
+        monkeypatch.setattr("openbiliclaw.cli.run_guided_init", _boom)
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, db = self._make_app(tmp_path, prereqs=prereqs)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={"sources": ["bilibili"]})
+            assert resp.status_code == 202
+            body = self._drive_until_status(client, "internal_error")
+        assert body["reason"] == "internal_error"
+        assert body["detail"] == "RuntimeError: provider exploded mid-run"
+        assert db.get_latest_init_run()["error_detail"] == (
+            "RuntimeError: provider exploded mid-run"
+        )
+
+    def test_init_guided_error_message_lands_in_detail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Typed GuidedInitError failures surface their human message (the API
+        path used to discard it — only the CLI printed it)."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.cli import GuidedInitError
+
+        async def _typed_failure(**kwargs):
+            raise GuidedInitError("empty_signals", "所选数据来源没有拉到任何行为信号。")
+
+        monkeypatch.setattr("openbiliclaw.cli.run_guided_init", _typed_failure)
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={"sources": ["bilibili"]})
+            assert resp.status_code == 202
+            body = self._drive_until_status(client, "empty_signals")
+        assert body["reason"] == "empty_signals"
+        assert body["detail"] == "所选数据来源没有拉到任何行为信号。"
 
     def test_init_honors_source_selection(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
