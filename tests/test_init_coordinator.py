@@ -240,7 +240,15 @@ def test_init_status_endpoint_shape(tmp_path: Path) -> None:
     # No configured cookie / chat creds in this minimal app → can't start.
     assert body["prerequisites"]["bilibili_check"] == "failed"
     assert body["can_start"] is False
-    assert body["reason"] in ("bilibili_not_logged_in", "unsupported_runtime", "llm_not_ready")
+    # local_only: TestClient's peer is not loopback, and v0.3.155+ the reason
+    # ladder surfaces the untrusted cause instead of falling through to a
+    # generic "none".
+    assert body["reason"] in (
+        "local_only",
+        "bilibili_not_logged_in",
+        "unsupported_runtime",
+        "llm_not_ready",
+    )
 
 
 def test_background_llm_work_paused_during_init(tmp_path: Path) -> None:
