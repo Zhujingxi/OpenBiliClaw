@@ -2426,12 +2426,17 @@
       return `<div class="profile-meter"><div class="profile-meter-head"><span>${escapeHtml(label)}</span><strong>${Math.round(score * 100)}%</strong></div><div class="profile-meter-track"><div class="profile-meter-fill" style="width:${score * 100}%"></div></div></div>`;
     }
 
+    function isKnownText(value) {
+      const text = String(value == null ? "" : value).trim().toLowerCase();
+      return text !== "" && !["unknown", "none", "n/a", "未知"].includes(text);
+    }
+
     function styleHtml(style) {
       if (!style || typeof style !== "object" || Array.isArray(style)) return paragraphsHtml(style, "内容口味还在继续归拢。");
       const textRows = [
         ["偏好时长", style.preferred_duration],
         ["偏好节奏", style.preferred_pace]
-      ].filter(([, value]) => value).map(([label, value]) => `<div class="profile-context-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+      ].filter(([, value]) => isKnownText(value)).map(([label, value]) => `<div class="profile-context-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
       const bars = [
         ["质量敏感度", style.quality_sensitivity],
         ["幽默偏好", style.humor_preference],
@@ -2447,7 +2452,7 @@
         ["周末", context.weekend_patterns],
         ["一天中的时段", context.time_of_day_patterns],
         ["观看会话", context.session_type]
-      ].filter(([, value]) => value).map(([label, value]) => `<div class="profile-context-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+      ].filter(([, value]) => isKnownText(value)).map(([label, value]) => `<div class="profile-context-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
       return rows ? `<div class="profile-context">${rows}</div>` : paragraphsHtml("", "使用场景还在继续观察。");
     }
 

@@ -3156,7 +3156,7 @@ function renderContextMode(container, ctx) {
   ];
   let hasAny = false;
   for (const [label, value] of fields) {
-    if (!value) continue;
+    if (isUnknownishText(value)) continue;
     hasAny = true;
     const row = document.createElement("div");
     row.className = "context-row";

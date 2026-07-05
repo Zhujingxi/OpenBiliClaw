@@ -249,6 +249,14 @@ _PREFERENCE_ANALYSIS_SYSTEM_PROMPT = """
     - awareness_candidates 是对本批事件的直接观察，不是人格结论，最多 3 条；
     - insight_candidates 是有证据支撑的轻量假设，最多 2 条，confidence 0~1；
     - 它们只用于下一步初始画像生成的临时上下文，不要为了完整而编造。
+14. style / exploration_openness 字段有严格取值约束，违反会被系统丢弃：
+    - style.preferred_duration 只能是 short | medium | long 之一；
+    - style.preferred_pace 只能是 fast | moderate | slow 之一；
+    - style.quality_sensitivity / humor_preference / depth_preference 以及
+      exploration_openness 都是 0~1 之间的浮点数。
+    当证据不足以判断时，直接省略该字段或填 0.5（openness/数值型）；
+    严禁用 "unknown"、"未知"、"none" 之类占位符或用 0 当"没数据"的替身
+    （0 会被当作"该维度确实极低"的真实取值）。
 </rules>
 
 <output_schema>

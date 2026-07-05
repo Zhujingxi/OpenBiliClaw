@@ -11,6 +11,15 @@ function normalizeText(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+// Placeholders the LLM emits when it has no signal for a text field. Treated as
+// absent so the profile panel falls back to its "still observing" copy.
+const UNKNOWNISH_TEXT = new Set(["", "unknown", "none", "n/a", "未知"]);
+
+function stripPlaceholderText(value) {
+  const text = normalizeText(value);
+  return UNKNOWNISH_TEXT.has(text.toLowerCase()) ? "" : text;
+}
+
 function normalizeStrList(raw) {
   return Array.isArray(raw) ? raw.map(normalizeText).filter(Boolean) : [];
 }
@@ -957,18 +966,18 @@ export function getProfileStyleDisplay(style) {
   if (!normalized) return null;
   return {
     ...normalized,
-    preferred_duration: mappedLabel(DURATION_LABELS, normalized.preferred_duration),
-    preferred_pace: mappedLabel(PACE_LABELS, normalized.preferred_pace),
+    preferred_duration: mappedLabel(DURATION_LABELS, stripPlaceholderText(normalized.preferred_duration)),
+    preferred_pace: mappedLabel(PACE_LABELS, stripPlaceholderText(normalized.preferred_pace)),
   };
 }
 
 function normalizeContext(raw) {
   if (!raw) return null;
   return {
-    weekday_patterns: normalizeText(raw.weekday_patterns),
-    weekend_patterns: normalizeText(raw.weekend_patterns),
-    time_of_day_patterns: normalizeText(raw.time_of_day_patterns),
-    session_type: normalizeText(raw.session_type),
+    weekday_patterns: stripPlaceholderText(raw.weekday_patterns),
+    weekend_patterns: stripPlaceholderText(raw.weekend_patterns),
+    time_of_day_patterns: stripPlaceholderText(raw.time_of_day_patterns),
+    session_type: stripPlaceholderText(raw.session_type),
   };
 }
 
