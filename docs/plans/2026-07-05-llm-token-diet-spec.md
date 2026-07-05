@@ -176,6 +176,20 @@ stricter bar (flip ≤ 1%) is a one-line change if desired. A failing gate means
 batch calls (~¥0.1), cheap enough to run on every candidate change and on every future
 model-tier switch.
 
+**Measured revision (2026-07-05, Phase 1 acceptance).** A/A control runs (identical inputs
+both arms, same model) showed the provider's single-sample noise floor alone is flip rate
+17–28%, Spearman 0.57–0.67, signed drift up to ±0.05, admission-rate swing up to ±11pp —
+temperature pinning did not reduce it (gateway/model-side nondeterminism). The absolute gates
+above are therefore unattainable for *any* change, including production-vs-itself. Operative
+gate: **run an A/A control the same day, then require (a) the candidate change's flip rate /
+Spearman / mean `|Δ|` to sit inside the A/A envelope, and (b) the noise-robust drift metrics
+(mean signed delta, admission-rate delta, per-platform signed drift — symmetric noise cancels
+in these) to be no worse than the A/A reference.** Phase 1 passed this gate on all metrics
+(signed drift +0.007 vs noise +0.051; max platform drift +0.095 vs noise +0.097).
+Follow-up insight (out of scope here): production admission decisions near threshold carry
+this same single-sample randomness today; pinning evaluation temperature and/or
+threshold-hysteresis is a future quality lever.
+
 ### Phase 1 — Eval prompt diet (+ long-tail interest recall)
 
 `_evaluation_profile_summary` returns
