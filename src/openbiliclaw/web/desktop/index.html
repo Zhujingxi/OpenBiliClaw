@@ -352,35 +352,42 @@
             </div>
           </div>
           <p class="settings-section-title">当前 Cookie / 登录凭据</p>
-          <p class="settings-note-inline">默认折叠；展开后只读查看当前后端可读取的 Cookie 或令牌。手动粘贴新 Cookie 请使用下方覆盖输入框。</p>
+          <p class="settings-note-inline">默认折叠；展开后只读查看当前后端可读取的 Cookie 或令牌，只能复制、不能编辑或粘贴。手动粘贴入口只提供给后端直接带 Cookie 请求平台接口的源——B站、抖音、X、Reddit（下方各自的覆盖输入框，留空保存不会覆盖）；小红书、知乎由浏览器插件用你的登录态取数，YouTube 走公开接口，这三个平台没有也不需要 Cookie 输入框，浏览器登录后插件自动接通。</p>
           <div id="sourceCredentialList" class="source-credential-list">
             <details class="source-credential-row" data-source-credential="bilibili">
-              <summary><strong>Bilibili</strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>Bilibili<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="xiaohongshu">
-              <summary><strong>小红书</strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>小红书<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="douyin">
-              <summary><strong>抖音</strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>抖音<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="youtube">
-              <summary><strong>YouTube</strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>YouTube<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="twitter">
-              <summary><strong>X (Twitter)</strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>X (Twitter)<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="zhihu">
-              <summary><strong>知乎</strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>知乎<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="reddit">
-              <summary><strong>Reddit</strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>Reddit<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
           </div>
           <label class="settings-field"><span>B 站认证</span><select id="biliAuth"><option value="cookie">Cookie</option><option value="qrcode">二维码</option><option value="none">无</option></select></label>
@@ -442,6 +449,7 @@
           <p class="settings-section-title">Reddit</p>
           <p class="settings-note-inline">Reddit 日常 discovery 默认使用 rdt-cli 登录态命令后端；rdt / opencli 不可用时自动 fallback 到 OpenBiliClaw 插件任务。初始化 saved/upvoted/subscribed 信号仍通过插件复用当前浏览器登录态。每个 discovery 分支默认每日 300 条。</p>
           <label class="settings-field"><span>Reddit 后端</span><select id="redditBackend"><option value="rdt">rdt-cli</option><option value="extension">OpenBiliClaw 插件</option><option value="opencli">OpenCLI extension</option><option value="auto">自动选择命令后端</option></select></label>
+          <label class="settings-field full"><span>Reddit Cookie（需含 reddit_session）</span><textarea id="redditCookie" rows="2" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="保留空值表示不覆盖现有 cookie（登录 reddit.com 后插件会自动同步）"></textarea></label>
           <div class="inline-row">
             <label class="settings-field"><span>搜索分支</span><input id="redditModeSearch" type="checkbox"></label>
             <label class="settings-field"><span>热门分支</span><input id="redditModeHot" type="checkbox"></label>

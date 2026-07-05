@@ -7477,7 +7477,8 @@ def create_app(
                 value=", ".join(reddit_cookie_names),
                 available=bool(reddit_cookie_names),
                 detail=(
-                    "Reddit Cookie 由插件同步到 rdt-cli credential store；这里只展示 Cookie 名称。"
+                    "Reddit Cookie 由插件同步到 rdt-cli credential store；这里只展示 Cookie 名称，"
+                    "需要更换时可在下方 Reddit Cookie 覆盖输入框手动粘贴。"
                 ),
             ),
         )
@@ -9065,6 +9066,36 @@ def create_app(
                         cfg.sources.reddit.backend = (
                             backend if backend in {"extension", "opencli", "rdt", "auto"} else "rdt"
                         )
+                    if "cookie" in reddit_data:
+                        # Manual paste — routed to rdt-cli's credential store,
+                        # same shape the extension auto-sync endpoint
+                        # (POST /api/sources/reddit/cookie) writes; secrets
+                        # never land in config.toml.
+                        from openbiliclaw.sources.reddit_tasks import (
+                            sync_rdt_credential_from_cookie_header,
+                        )
+
+                        new_cookie = str(reddit_data["cookie"]).strip()
+                        if new_cookie and not _is_masked_echo(new_cookie):
+                            sync_result = sync_rdt_credential_from_cookie_header(
+                                new_cookie, source="config-update"
+                            )
+                            if not sync_result.has_cookie:
+                                # Unlike douyin/x, rdt-cli has a hard cookie
+                                # requirement — reject visibly instead of
+                                # pretending the paste took effect.
+                                raise HTTPException(
+                                    status_code=400,
+                                    detail={
+                                        "error": sync_result.error_code or "reddit_cookie_invalid",
+                                        "message": (
+                                            "Reddit Cookie 未保存：缺少 reddit_session，"
+                                            "请从已登录 reddit.com 的浏览器复制完整 Cookie。"
+                                            if sync_result.error_code == "missing_reddit_session"
+                                            else sync_result.message
+                                        ),
+                                    },
+                                )
                     if "source_modes" in reddit_data:
                         raw_modes = reddit_data["source_modes"]
                         if isinstance(raw_modes, str):

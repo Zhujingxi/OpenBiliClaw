@@ -3859,11 +3859,13 @@
         if (!row) return;
         const summary = row.querySelector(".source-credential-summary");
         const value = row.querySelector(".source-credential-value");
+        const copyBtn = row.querySelector(".source-credential-copy");
         const item = data?.[key];
         if (!item) {
           row.dataset.available = "false";
           if (summary) summary.textContent = "状态暂不可用";
           if (value) value.value = "暂时无法读取当前 Cookie / 登录凭据。";
+          if (copyBtn) copyBtn.disabled = true;
           return;
         }
         row.dataset.available = item.available ? "true" : "false";
@@ -3875,8 +3877,26 @@
         if (value) {
           value.value = item.value || item.detail || "当前没有可展示 Cookie / 登录凭据。";
         }
+        if (copyBtn) copyBtn.disabled = !item.available;
       });
+      // Reddit's paste box has no config-side cookie field (the value goes to
+      // rdt-cli's credential store), so its "已保存/未保存" placeholder is driven
+      // by credential availability instead of the config snapshot.
+      setCookieOverrideInput("redditCookie", data?.reddit?.available ? "synced" : "", " Reddit");
     }
+
+    $("#sourceCredentialList")?.addEventListener("click", async (event) => {
+      const btn = event.target.closest(".source-credential-copy");
+      if (!btn || btn.disabled) return;
+      const value = btn.closest(".source-credential-row")?.querySelector(".source-credential-value")?.value?.trim() || "";
+      if (!value) return;
+      try {
+        await navigator.clipboard.writeText(value);
+        showToast("已复制当前凭据");
+      } catch {
+        showToast("复制失败：浏览器未授予剪贴板访问权限");
+      }
+    });
 
     async function renderSourceCredentials() {
       let data = null;
@@ -4522,6 +4542,7 @@
       const cookie = getInput("biliCookie");
       const douyinCookie = getInput("douyinCookie");
       const twitterCookie = getInput("twitterCookie");
+      const redditCookie = getInput("redditCookie");
       const llm = {
         ...(state.config?.llm || {}),
         default_provider: provider,
@@ -4627,6 +4648,7 @@
           reddit: {
             enabled: $("#redditEnabled").value === "on",
             backend: getInput("redditBackend") || "rdt",
+            ...(redditCookie ? { cookie: redditCookie } : {}),
             source_modes: collectRedditSourceModes(),
             daily_search_budget: getIntInput("redditDailySearchBudget", 300),
             daily_hot_budget: getIntInput("redditDailyHotBudget", 300),

@@ -8685,6 +8685,57 @@ class TestEmbeddingAndCompatProviderE2E:
         assert data["logging"]["unmanaged_truncate_mb"] == 78
         assert data["logging"]["unmanaged_max_age_days"] == 9
 
+    def test_put_config_reddit_cookie_paste_writes_rdt_credential_store(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Manual Reddit Cookie paste rides PUT /api/config like douyin/x,
+        but lands in rdt-cli's credential store — never in config.toml."""
+        import json as _json
+
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+        from openbiliclaw.sources import reddit_tasks
+
+        credential_file = tmp_path / "rdt" / "credential.json"
+        monkeypatch.setattr(reddit_tasks, "_rdt_credential_file", lambda: credential_file)
+
+        cfg = Config(llm=LLMConfig(openai=LLMProviderConfig(api_key="sk-openai")))
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.put(
+            "/api/config",
+            json={"sources": {"reddit": {"cookie": "reddit_session=abc123; token_v2=tok; loid=x"}}},
+        )
+        assert response.status_code == 200
+
+        stored = _json.loads(credential_file.read_text(encoding="utf-8"))
+        assert stored["cookies"]["reddit_session"] == "abc123"
+        assert stored["source"] == "openbiliclaw:config-update"
+        assert "abc123" not in (tmp_path / "config.toml").read_text(encoding="utf-8")
+
+    def test_put_config_reddit_cookie_without_session_rejected_visibly(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A pasted Cookie missing reddit_session cannot be stored by
+        rdt-cli — the save must fail loudly instead of silently no-oping."""
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+        from openbiliclaw.sources import reddit_tasks
+
+        credential_file = tmp_path / "rdt" / "credential.json"
+        monkeypatch.setattr(reddit_tasks, "_rdt_credential_file", lambda: credential_file)
+
+        cfg = Config(llm=LLMConfig(openai=LLMProviderConfig(api_key="sk-openai")))
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.put(
+            "/api/config",
+            json={"sources": {"reddit": {"cookie": "token_v2=tok; loid=x"}}},
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["error"] == "missing_reddit_session"
+        assert "reddit_session" in detail["message"]
+        assert not credential_file.exists()
+
     def test_put_config_updates_multimodal_discovery_settings(self, monkeypatch, tmp_path) -> None:
         from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
 

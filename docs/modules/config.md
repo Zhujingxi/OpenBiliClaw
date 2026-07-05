@@ -437,7 +437,7 @@ X 源健康状态（`ok` / `missing_cookie` / `expired_cookie` / `rate_limited` 
 
 ### `[sources.reddit]`
 
-Reddit 来源配置。Reddit 日常 discovery 默认走随 OpenBiliClaw 安装的 `rdt-cli` 登录态命令后端；已连接浏览器插件会把 `reddit_session` 自动同步到 `~/.config/rdt-cli/credential.json`，插件不可用时才需要手动运行 `rdt login`。后端会拉取 `search` / `hot` / `subreddit` / `related` 候选后转换为 `source_platform="reddit"` 的 `DiscoveredContent` 并只写入统一待评估候选池；LLM 评估和入正式推荐池由后台 `DiscoveryCandidatePipeline` 统一处理。初始化阶段仍可入队 `reddit_tasks(type="bootstrap_events")`，插件在已登录 `reddit.com` 会话里读取 saved / upvoted / subscribed subreddit 并转换为 `favorite` / `like` / `follow` 画像信号。`extension` 可显式作为浏览器登录态 discovery 后端；默认 `rdt` / `opencli` 命令后端不可用或未登录时也会自动 fallback 到插件任务。
+Reddit 来源配置。Reddit 日常 discovery 默认走随 OpenBiliClaw 安装的 `rdt-cli` 登录态命令后端；已连接浏览器插件会把 `reddit_session` 自动同步到 `~/.config/rdt-cli/credential.json`，插件不可用时才需要手动运行 `rdt login`。Cookie 不写进 `config.toml`：桌面 Web 设置页的 Reddit Cookie 覆盖输入框可手动粘贴（`PUT /api/config` 的 `sources.reddit.cookie` 为 API-only 字段，非 `config.toml` 键），非空新值路由到 rdt-cli credential store，与插件自动同步同一存储；粘贴内容缺少 `reddit_session` 时保存以 400 `missing_reddit_session` 显式拒绝，不静默丢弃。后端会拉取 `search` / `hot` / `subreddit` / `related` 候选后转换为 `source_platform="reddit"` 的 `DiscoveredContent` 并只写入统一待评估候选池；LLM 评估和入正式推荐池由后台 `DiscoveryCandidatePipeline` 统一处理。初始化阶段仍可入队 `reddit_tasks(type="bootstrap_events")`，插件在已登录 `reddit.com` 会话里读取 saved / upvoted / subscribed subreddit 并转换为 `favorite` / `like` / `follow` 画像信号。`extension` 可显式作为浏览器登录态 discovery 后端；默认 `rdt` / `opencli` 命令后端不可用或未登录时也会自动 fallback 到插件任务。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|

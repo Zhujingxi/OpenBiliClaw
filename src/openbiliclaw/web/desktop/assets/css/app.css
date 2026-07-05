@@ -610,7 +610,11 @@
     .source-credential-row summary strong { min-width: 0; overflow-wrap: anywhere; }
     .source-credential-summary { min-width: 0; color: var(--muted); font-size: 12px; line-height: 1.35; text-align: right; overflow-wrap: anywhere; }
     .source-credential-row[data-available="true"] .source-credential-summary { color: color-mix(in oklab, var(--success), var(--fg) 36%); }
-    .source-credential-value { width: calc(100% - 24px); min-height: 92px; margin: 0 var(--space-3) var(--space-3); font-family: var(--font-mono); font-size: 12px; line-height: 1.45; resize: vertical; white-space: pre; }
+    .source-credential-value { width: calc(100% - 24px); min-height: 92px; margin: 0 var(--space-3) var(--space-2); font-family: var(--font-mono); font-size: 12px; line-height: 1.45; resize: vertical; white-space: pre; cursor: default; border-style: dashed; background: color-mix(in oklab, var(--surface), var(--bg) 60%); color: var(--muted); }
+    .source-credential-ro-tag { display: inline-block; margin-left: 6px; padding: 1px 7px; border: 1px solid var(--border-soft); border-radius: var(--radius-pill); font-size: 11px; font-weight: 500; color: var(--meta); vertical-align: 1px; }
+    .source-credential-actions { display: flex; justify-content: flex-end; margin: 0 var(--space-3) var(--space-3); }
+    .source-credential-actions .small-btn { min-height: 28px; padding: 4px 12px; font-size: 12px; }
+    .source-credential-actions .small-btn:disabled { opacity: 0.5; cursor: not-allowed; }
     .toast { position: fixed; left: 50%; bottom: var(--space-6); translate: -50% 0; z-index: 90; display: none; max-width: min(560px, calc(100% - 32px)); padding: var(--space-3) var(--space-5); border-radius: var(--radius-pill); background: var(--fg); color: var(--surface); box-shadow: var(--elev-raised); }
     .toast.is-open { display: block; }
     .fatal-banner { display: none; margin: var(--space-4) clamp(var(--space-4), 3vw, var(--space-8)) 0; padding: var(--space-3) var(--space-4); border: 1px solid color-mix(in oklab, var(--danger), var(--border-soft) 55%); border-radius: var(--radius-md); background: color-mix(in oklab, var(--danger), var(--surface) 92%); color: var(--fg); }
@@ -739,7 +743,7 @@
       .video-card .card-actions.is-composing .chat-action { grid-column: 3; grid-row: 1; }
       .card-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .small-btn { width: 100%; }
-      .mobile-back-btn, .mobile-search .pill-btn, .mobile-summary-head .small-btn { width: auto; }
+      .mobile-back-btn, .mobile-search .pill-btn, .mobile-summary-head .small-btn, .source-credential-actions .small-btn { width: auto; }
       .delight-feedback-actions .feedback-icon-btn { flex: 0 0 26px; width: 26px; height: 26px; min-height: 26px; }
     }
 

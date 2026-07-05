@@ -48,6 +48,7 @@ test("settings page exposes advanced config fields from backend schema", () => {
     "cfgYoutubeMinInterval",
     "cfgRedditEnabled",
     "cfgRedditBackend",
+    "cfgRedditCookie",
     "cfgRedditModeSearch",
     "cfgRedditModeHot",
     "cfgRedditModeSubreddit",
@@ -320,6 +321,7 @@ test("settings page round-trips Reddit discovery config", () => {
   for (const id of [
     "cfgRedditEnabled",
     "cfgRedditBackend",
+    "cfgRedditCookie",
     "cfgRedditModeSearch",
     "cfgRedditModeHot",
     "cfgRedditModeSubreddit",
@@ -398,6 +400,7 @@ test("settings page round-trips douyin and x cookies like the bilibili card", ()
   assert.match(popupHtml, /<textarea id="cfgBiliCookie"/);
   assert.match(popupHtml, /<textarea id="cfgDouyinCookie"/);
   assert.match(popupHtml, /<textarea id="cfgTwitterCookie"/);
+  assert.match(popupHtml, /<textarea id="cfgRedditCookie"/);
 
   assert.match(popupJs, /setVal\("cfgDouyinCookie", cfg\.sources\?\.douyin\?\.cookie\)/);
   assert.match(popupJs, /setVal\("cfgTwitterCookie", cfg\.sources\?\.twitter\?\.cookie\)/);
@@ -415,6 +418,12 @@ test("settings page round-trips douyin and x cookies like the bilibili card", ()
   assert.match(
     popupJs,
     /\.\.\.\(getVal\("cfgTwitterCookie"\) \? \{ cookie: getVal\("cfgTwitterCookie"\) \} : \{\}\)/,
+  );
+  // Reddit has no config-side cookie echo (GET /api/config carries no
+  // sources.reddit.cookie) — paste-only, routed to rdt-cli's store.
+  assert.match(
+    popupJs,
+    /\.\.\.\(getVal\("cfgRedditCookie"\) \? \{ cookie: getVal\("cfgRedditCookie"\) \} : \{\}\)/,
   );
 });
 

@@ -6604,6 +6604,7 @@ function bindSettings() {
         reddit: {
           enabled: checked("cfgRedditEnabled"),
           backend: getVal("cfgRedditBackend") || "rdt",
+          ...(getVal("cfgRedditCookie") ? { cookie: getVal("cfgRedditCookie") } : {}),
           source_modes: collectRedditSourceModes(),
           daily_search_budget: getInt("cfgRedditDailySearchBudget", 300),
           daily_hot_budget: getInt("cfgRedditDailyHotBudget", 300),
