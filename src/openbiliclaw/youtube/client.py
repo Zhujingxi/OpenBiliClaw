@@ -1,13 +1,16 @@
 """YouTube scraper client for discovery strategies.
 
 Wraps scrapetube (search + channel) and YouTube InnerTube API (trending)
-behind a single async interface. All blocking calls run in the default thread
-executor so they don't stall the event loop.
+behind a single async interface, with anonymous yt-dlp flat-playlist
+extraction as the fallback layer where yt-dlp has a working entry point
+(yt-dlp tracks YouTube markup changes fastest, so a broken primary
+degrades instead of silently starving the source). All blocking calls run
+in the default thread executor so they don't stall the event loop.
 
 Supports three discovery modes:
-  - search_videos       — keyword search via scrapetube
-  - get_trending        — trending feed via InnerTube browse API
-  - get_channel_videos  — recent uploads from a channel via scrapetube
+  - search_videos       — keyword search via scrapetube → yt-dlp ytsearch
+  - get_trending        — InnerTube FEtrending → public topic pages
+  - get_channel_videos  — channel uploads via scrapetube → yt-dlp
 
 Field-name notes (scrapetube returns YouTube's internal renderer dicts):
   title         → {"runs": [{"text": "..."}]}  or  {"simpleText": "..."}
@@ -55,6 +58,17 @@ _INNERTUBE_CONTEXT = {
     }
 }
 
+# Shared yt-dlp options for anonymous flat-playlist metadata extraction
+# (search / channel / trending fallbacks — never downloads media).
+_YTDLP_FLAT_OPTIONS: dict[str, Any] = {
+    "quiet": True,
+    "extract_flat": True,
+    "skip_download": True,
+    "noplaylist": False,
+    "ignoreerrors": True,
+    "socket_timeout": 20,
+}
+
 
 @dataclass(frozen=True)
 class InnerTubeConfig:
@@ -73,9 +87,32 @@ def _scrapetube_search(query: str, limit: int) -> list[dict[str, Any]]:
     try:
         import scrapetube  # type: ignore[import-untyped]
 
-        return [dict(v) for v in scrapetube.get_search(query, results_type="video", limit=limit)]
+        results = [dict(v) for v in scrapetube.get_search(query, results_type="video", limit=limit)]
+        if results:
+            return results
+        logger.info("scrapetube.search(%r) returned 0 items; falling back to yt-dlp", query)
     except Exception as exc:
-        logger.warning("scrapetube.search(%r) failed: %s", query, exc)
+        logger.warning("scrapetube.search(%r) failed (%s); falling back to yt-dlp", query, exc)
+    return _ytdlp_search(query, limit)
+
+
+def _ytdlp_search(query: str, limit: int) -> list[dict[str, Any]]:
+    """Search fallback via yt-dlp's ``ytsearchN:`` pseudo-URL.
+
+    yt-dlp tracks YouTube markup changes far faster than scrapetube, so a
+    broken/blocked scrapetube search degrades to a slower-but-working path
+    instead of silently starving the YouTube candidate supply.
+    """
+    if not query.strip():
+        return []
+    try:
+        from yt_dlp import YoutubeDL  # type: ignore[import-untyped]
+
+        with YoutubeDL(_YTDLP_FLAT_OPTIONS) as ydl:
+            info = ydl.extract_info(f"ytsearch{max(1, limit)}:{query}", download=False)
+        return _ytdlp_entries(info, limit)
+    except Exception as exc:
+        logger.warning("yt-dlp.search(%r) failed: %s", query, exc)
         return []
 
 
@@ -99,41 +136,37 @@ def _scrapetube_channel(channel_id: str, limit: int) -> list[dict[str, Any]]:
     return _ytdlp_channel(channel_id, limit)
 
 
+def _ytdlp_entries(info: Any, limit: int) -> list[dict[str, Any]]:
+    """Map a yt-dlp flat-playlist info dict to video dicts for normalize_yt_video."""
+    if not isinstance(info, dict):
+        return []
+    entries = info.get("entries")
+    if not isinstance(entries, list):
+        return []
+    results: list[dict[str, Any]] = []
+    for entry in entries[:limit]:
+        if not isinstance(entry, dict):
+            continue
+        item = dict(entry)
+        if not item.get("videoId") and item.get("id"):
+            item["videoId"] = item["id"]
+        if not item.get("channel") and info.get("channel"):
+            item["channel"] = info.get("channel")
+        results.append(item)
+    return results
+
+
 def _ytdlp_channel(channel_ref: str, limit: int) -> list[dict[str, Any]]:
     """Fetch channel uploads with yt-dlp when scrapetube cannot resolve handles."""
     url = _channel_uploads_url(channel_ref)
     if not url:
         return []
     try:
-        from yt_dlp import YoutubeDL  # type: ignore[import-untyped]
+        from yt_dlp import YoutubeDL
 
-        options = {
-            "quiet": True,
-            "extract_flat": True,
-            "skip_download": True,
-            "playlistend": limit,
-            "noplaylist": False,
-            "ignoreerrors": True,
-            "socket_timeout": 20,
-        }
-        with YoutubeDL(options) as ydl:
+        with YoutubeDL({**_YTDLP_FLAT_OPTIONS, "playlistend": limit}) as ydl:
             info = ydl.extract_info(url, download=False)
-        if not isinstance(info, dict):
-            return []
-        entries = info.get("entries")
-        if not isinstance(entries, list):
-            return []
-        results: list[dict[str, Any]] = []
-        for entry in entries[:limit]:
-            if not isinstance(entry, dict):
-                continue
-            item = dict(entry)
-            if not item.get("videoId") and item.get("id"):
-                item["videoId"] = item["id"]
-            if not item.get("channel") and info.get("channel"):
-                item["channel"] = info.get("channel")
-            results.append(item)
-        return results
+        return _ytdlp_entries(info, limit)
     except Exception as exc:
         logger.warning("yt-dlp.channel(%r) failed: %s", channel_ref, exc)
         return []
@@ -158,7 +191,10 @@ def _innertube_trending(region_code: str, limit: int) -> list[dict[str, Any]]:
 
     Uses the FEtrending browseId when YouTube still exposes it. If that
     endpoint is unavailable, falls back to public YouTube topic pages that
-    still ship video renderers in ytInitialData.
+    still ship video renderers in ytInitialData. (yt-dlp is deliberately NOT
+    a layer here: /feed/trending was removed by YouTube — verified 2026-07 to
+    redirect to the home page — and yt-dlp's flat extraction gets nothing out
+    of the shelf-based topic/browse surfaces.)
     Returns a flat list of video dicts ready for normalize_yt_video().
     """
     results = _innertube_trending_feed(region_code, limit)

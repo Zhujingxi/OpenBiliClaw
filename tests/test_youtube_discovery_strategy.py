@@ -612,3 +612,101 @@ async def test_youtube_search_without_injection_still_generates() -> None:
 
     assert [call[0] for call in client.calls] == ["ai documentary"]
     assert len(llm.calls) == 1
+
+
+# ── yt-dlp fallback layer (search / trending) ──────────────────────
+
+
+class _FakeYoutubeDL:
+    """Minimal yt-dlp stand-in: context manager + canned extract_info."""
+
+    captured_urls: list[str] = []
+    info: dict[str, Any] = {}
+
+    def __init__(self, options: dict[str, Any]) -> None:
+        self.options = options
+
+    def __enter__(self) -> _FakeYoutubeDL:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def extract_info(self, url: str, download: bool = True) -> dict[str, Any]:
+        type(self).captured_urls.append(url)
+        return type(self).info
+
+
+def _install_fake_ytdlp(monkeypatch: pytest.MonkeyPatch, info: dict[str, Any]) -> type:
+    import sys
+    import types
+
+    _FakeYoutubeDL.captured_urls = []
+    _FakeYoutubeDL.info = info
+    module = types.ModuleType("yt_dlp")
+    module.YoutubeDL = _FakeYoutubeDL  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "yt_dlp", module)
+    return _FakeYoutubeDL
+
+
+def test_ytdlp_search_maps_flat_entries_to_video_dicts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.youtube.client import _ytdlp_search
+
+    fake = _install_fake_ytdlp(
+        monkeypatch,
+        {
+            "entries": [
+                {"id": "vid1", "title": "AI 纪录片", "channel": "SomeChannel"},
+                "not-a-dict",
+                {"id": "vid2", "title": "第二条"},
+            ]
+        },
+    )
+
+    results = _ytdlp_search("ai documentary", 5)
+
+    assert fake.captured_urls == ["ytsearch5:ai documentary"]
+    assert [item["videoId"] for item in results] == ["vid1", "vid2"]
+    assert normalize_yt_video(results[0], source_strategy="yt_search") is not None
+
+
+def test_scrapetube_search_falls_back_to_ytdlp_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+    import types
+
+    from openbiliclaw.youtube import client as yt_client
+
+    broken = types.ModuleType("scrapetube")
+
+    def _boom(*_a: object, **_kw: object) -> object:
+        raise RuntimeError("markup changed")
+
+    broken.get_search = _boom  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "scrapetube", broken)
+
+    sentinel = [{"videoId": "fallback1", "title": "from yt-dlp"}]
+    monkeypatch.setattr(yt_client, "_ytdlp_search", lambda query, limit: sentinel)
+
+    assert yt_client._scrapetube_search("ai", 5) == sentinel
+
+
+def test_scrapetube_search_falls_back_to_ytdlp_on_empty_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+    import types
+
+    from openbiliclaw.youtube import client as yt_client
+
+    empty = types.ModuleType("scrapetube")
+    empty.get_search = lambda *_a, **_kw: iter(())  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "scrapetube", empty)
+
+    sentinel = [{"videoId": "fallback2", "title": "from yt-dlp"}]
+    monkeypatch.setattr(yt_client, "_ytdlp_search", lambda query, limit: sentinel)
+
+    assert yt_client._scrapetube_search("ai", 5) == sentinel
