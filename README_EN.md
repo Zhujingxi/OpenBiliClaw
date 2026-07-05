@@ -189,12 +189,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.155 (2026-07-05)**
+📌 Latest: **v0.3.156 (2026-07-05)**
 
-- **Vector-model issues self-diagnose & self-repair** — the init page names the exact cause (Ollama down / model missing / model broken) and one click pulls bge-m3 with live progress.
-- **Mobile taps open the native app directly** — deep links for Bilibili / RedNote / Douyin / YouTube / X / Zhihu; prominent new mobile QR entries in the extension and desktop web.
-- **Restarts no longer leave recommendations empty forever** — candidates orphaned by an interrupted evaluation are reclaimed at startup.
-- **Browser page translation can no longer corrupt config** — settings dropdowns are translation-proof and the backend rejects translated provider values.
+- **Douyin / Reddit collection fixed on Firefox** — a packaged-build injection-path bug left both sources unable to collect anything on Firefox; now fixed.
+- **Non-Bilibili tabs no longer sit empty for hours** — serving now tops up stocked platforms, so Zhihu / RedNote / Douyin content surfaces much sooner.
+- **Init failures show the actual cause** — no more bare "something went wrong"; the real error detail is visible in all three UIs.
+- **Fallback LLM provider is diagnosable & testable** — same-name fallbacks are rejected at save, silent dead states warn, and settings gains a "Test fallback provider" button.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
