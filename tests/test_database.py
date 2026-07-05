@@ -126,3 +126,84 @@ def test_get_recommendations_rows_carry_card_metadata_columns(tmp_path: Path) ->
     assert row["like_count"] == 4567
     assert row["danmaku_count"] == 890
     assert row["up_mid"] == 12345
+# --- recent_event_urls (cross-source dedup helper) -------------------------
+
+from datetime import UTC, datetime, timedelta  # noqa: E402
+
+
+def _insert_event_with_age(
+    db: Database,
+    *,
+    event_type: str,
+    url: str,
+    source: str = "extension",
+    age_hours: float = 1.0,
+) -> int:
+    metadata: dict[str, object] = {"source": source} if source else {}
+    row_id = db.insert_event(
+        event_type,
+        url=url,
+        title="title",
+        context="",
+        metadata=metadata,
+    )
+    created = (datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=age_hours)).isoformat(
+        sep=" "
+    )
+    db.conn.execute("UPDATE events SET created_at = ? WHERE id = ?", (created, row_id))
+    db.conn.commit()
+    return row_id
+
+
+def test_recent_event_urls_returns_recent_view_urls_only(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    recent = "https://www.bilibili.com/video/BVRECENT"
+    old = "https://www.bilibili.com/video/BVOLD"
+    other_type = "https://www.bilibili.com/video/BVFAV"
+    _insert_event_with_age(db, event_type="view", url=recent, age_hours=1.0)
+    _insert_event_with_age(db, event_type="view", url=old, age_hours=72.0)
+    _insert_event_with_age(db, event_type="favorite", url=other_type, age_hours=1.0)
+
+    urls = db.recent_event_urls(["view"], within_hours=48)
+
+    assert urls == {recent}
+
+
+def test_recent_event_urls_excludes_empty_urls(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    good = "https://www.bilibili.com/video/BVGOOD"
+    _insert_event_with_age(db, event_type="view", url=good, age_hours=1.0)
+    _insert_event_with_age(db, event_type="view", url="", age_hours=1.0)
+
+    urls = db.recent_event_urls(["view"], within_hours=48)
+
+    assert urls == {good}
+
+
+def test_recent_event_urls_respects_limit(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    for i, age in enumerate((3.0, 2.0, 1.0)):
+        _insert_event_with_age(
+            db,
+            event_type="view",
+            url=f"https://www.bilibili.com/video/BV{i}",
+            age_hours=age,
+        )
+
+    urls = db.recent_event_urls(["view"], within_hours=48, limit=2)
+
+    # Newest two only (created_at DESC ordering, SQL LIMIT applied).
+    assert len(urls) == 2
+    assert "https://www.bilibili.com/video/BV0" not in urls
+
+
+def test_recent_event_urls_exclude_source_drops_matching_rows(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    extension_url = "https://www.bilibili.com/video/BVEXT"
+    account_sync_url = "https://www.bilibili.com/video/BVACC"
+    _insert_event_with_age(db, event_type="view", url=extension_url, source="extension")
+    _insert_event_with_age(db, event_type="view", url=account_sync_url, source="account_sync")
+
+    urls = db.recent_event_urls(["view"], within_hours=48, exclude_source="account_sync")
+
+    assert urls == {extension_url}

@@ -284,7 +284,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │     Probe arbiter: interest / avoidance 每轮最多推送一条   │   │
 │  │     Interest probes: near 5 + challenge 3 独立 active 额度 │   │
 │  │     Probe memory: domain / axis / distance + exploration buffer │ │
-│  │     AccountSync: B 站账号增量 -> Memory/Soul bootstrap     │   │
+│  │     AccountSync: B站+X 账号增量 -> 48h 跨源去重 -> Pipeline │   │
 │  │     Guided init: selected profile-signal sources + LLM/embedding live probe -> run_guided_init + InitCoordinator │ │
 │  │     Pool readiness: servable/raw/pending 统一库存口径       │   │
 │  │     Source bootstrap seen-key guard -> Memory/Profile      │   │

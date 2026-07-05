@@ -3925,6 +3925,9 @@
         manual_refresh_state: manualRefreshState || "idle",
         manual_refresh_message: String(merged.manual_refresh_message || ""),
         runtime_event_type: incomingType || String(merged.runtime_event_type || ""),
+        last_account_sync_at: String(merged.last_account_sync_at ?? ""),
+        last_account_sync_error: String(merged.last_account_sync_error ?? ""),
+        last_account_sync_error_kind: String(merged.last_account_sync_error_kind ?? ""),
         live_summary: String(merged.live_summary || merged.message || merged.state || "")
       };
     }
@@ -4023,6 +4026,32 @@
       $("#poolRefreshState").textContent = getPoolRefreshLabel(runtime);
     }
 
+    function renderAccountSyncStatus(runtime) {
+      const el = document.getElementById("accountSyncStatus");
+      if (!el) return;
+      const kind = String(runtime?.last_account_sync_error_kind || "");
+      const error = String(runtime?.last_account_sync_error || "");
+      // Healthy installs (no error) show nothing — zero visual change.
+      if (!error && !kind) {
+        el.hidden = true;
+        el.textContent = "";
+        el.classList.remove("is-auth-expired", "is-error");
+        return;
+      }
+      el.hidden = false;
+      if (runtime.last_account_sync_error_kind === "auth_expired") {
+        el.classList.add("is-auth-expired");
+        el.classList.remove("is-error");
+        el.textContent = "B 站登录已失效，账号同步已停止 — 请重新登录";
+        return;
+      }
+      el.classList.add("is-error");
+      el.classList.remove("is-auth-expired");
+      const when = String(runtime?.last_account_sync_at || "");
+      const detail = error || "账号同步出错";
+      el.textContent = when ? `账号同步出错：${detail}（上次同步 ${when}）` : `账号同步出错：${detail}`;
+    }
+
     function applyRuntimeStatus(payload) {
       if (!payload) return;
       state.runtimeStatus = normalizeRuntimeStatus(payload);
@@ -4033,6 +4062,7 @@
       syncSourceMetric();
       $("#runtimeSummary").textContent = state.runtimeStatus.live_summary || summary?.available || "后端在线，推荐池与采集运行时可读取。";
       renderPoolStatus(state.runtimeStatus);
+      renderAccountSyncStatus(state.runtimeStatus);
     }
 
     function setInput(id, value) {

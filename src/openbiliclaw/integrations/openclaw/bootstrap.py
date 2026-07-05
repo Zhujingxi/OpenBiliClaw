@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -31,6 +32,8 @@ from openbiliclaw.storage.database import Database
 
 from .operations import OpenClawAdapter
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(slots=True)
 class OpenClawAdapterServices:
@@ -46,6 +49,27 @@ class OpenClawAdapterServices:
     recommendation_engine: RecommendationEngine | Any
     runtime_controller: ContinuousRefreshController | Any
     account_sync_service: AccountSyncService | Any
+
+
+def _build_account_sync_x_client(config: Config | Any) -> Any | None:
+    """Build an ``XClient`` for scheduled X sync when a cookie resolves.
+
+    Reuses ``resolve_x_cookie`` exactly as init does; returns ``None`` when no
+    cookie is available so account_sync's X path stays fully inert.
+    """
+    try:
+        from openbiliclaw.sources.x_auth import resolve_x_cookie
+        from openbiliclaw.sources.x_client import XClient
+
+        twitter_cfg = getattr(getattr(config, "sources", None), "twitter", None)
+        cookie_env = str(getattr(twitter_cfg, "cookie_env", "OPENBILICLAW_X_COOKIE"))
+        cookie = resolve_x_cookie(data_dir=config.data_path, cookie_env=cookie_env)
+        if not cookie:
+            return None
+        return XClient(cookie=cookie)
+    except Exception:
+        logger.debug("account_sync: X client construction skipped", exc_info=True)
+        return None
 
 
 def build_openclaw_adapter_services() -> OpenClawAdapterServices:
@@ -230,6 +254,8 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         bilibili_client=bilibili_client,
         soul_engine=soul_engine,
         sync_interval_hours=config.scheduler.account_sync_interval_hours,
+        database=database,
+        x_client=_build_account_sync_x_client(config),
     )
 
     return OpenClawAdapterServices(

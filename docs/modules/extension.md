@@ -172,6 +172,8 @@ extension/
 - 强信号行为优先 flush；`feedback/follow/share/view` 以及带 `watch_seconds` / `video_duration_seconds` / `dwell_source` 的 `click` 会尽快上报
 - `chrome.alarms` 周期性批量发送
 - 发送失败时把事件回填到缓冲区
+- **缓冲持久化（MV3 SW 回收防丢）**：事件缓冲由 `buffer.ts` 持有并以 awaited 写穿方式镜像到 `chrome.storage.local`（key `obc_event_buffer`，无 debounce——挂起的 `setTimeout` 会随 SW 一起被杀）；强信号在网络 flush 开始前就已落盘。SW 冷启动经模块级 `bufferReady()` init gate 恢复镜像事件（所有触碰缓冲的入口先 await 它），内存与镜像合计仍受 `BUFFER_MAX_SIZE` 约束，超限丢最老并记日志
+- **`not_initialized` 停车场**：后端未初始化时整批事件不再消费即弃，而是移入 `obc_parked_events`（上限 500 条 FIFO、48h TTL），后续任一次成功 flush 会按原顺序 drain 回缓冲队首补发——浏览行为类事件（dwell/click）不再在初始化前永久丢失
 - flush 成功后检查一次待发通知
 - 缓冲为空时也会周期轮询高置信通知
 - 每次 service worker 冷启动都会启动 B 站和抖音 Cookie 同步；如果已配置后端暂时不可用，会通过 `chrome.alarms` 以 1 分钟间隔重试，成功同步后恢复为 60 分钟刷新

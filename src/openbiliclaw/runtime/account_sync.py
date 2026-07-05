@@ -9,12 +9,91 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 
+from openbiliclaw.bilibili.api import BilibiliAuthExpiredError
 from openbiliclaw.llm.base import classify_llm_unavailability
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
+
+# Cross-source dedup lookback. 48h > 2× the 6h sync interval (one full missed
+# cycle) while comfortably shorter than typical organic re-watch gaps, so a
+# genuine re-watch after the window still produces a fresh signal.
+_CROSS_SOURCE_DEDUP_WINDOW_HOURS = 48
+
+# X (Twitter) scheduled incremental sync bounds — mirror init's read limits.
+_X_FETCH_LIMIT = 200
+# Bound the per-account seen-tweet-id state so it can't grow without limit.
+_X_ID_CAP = 2000
+# First-sync seeding reads *all* persisted X events (init may be months old), so
+# the lookback is effectively unwindowed rather than the 48h dedup window.
+_X_SEED_WINDOW_HOURS = 24 * 365 * 10
+
+
+def _bvid_from_url(url: str) -> str:
+    """Extract the ``BV...`` id from a ``bilibili.com/video/<bvid>`` URL."""
+    marker = "bilibili.com/video/"
+    if marker not in url:
+        return ""
+    tail = url.split(marker, 1)[1]
+    return tail.split("/", 1)[0].split("?", 1)[0].strip()
+
+
+def _mid_from_url(url: str) -> str:
+    """Extract the UP mid from a ``space.bilibili.com/<mid>`` URL."""
+    marker = "space.bilibili.com/"
+    if marker not in url:
+        return ""
+    tail = url.split(marker, 1)[1]
+    return tail.split("/", 1)[0].split("?", 1)[0].strip()
+
+
+def _tweet_id_from_url(url: str) -> str:
+    """Extract the tweet id from the trailing ``/status/<id>`` URL segment.
+
+    Handles both ``x.com/i/status/<id>`` (extension GraphQL tap) and
+    ``x.com/<handle>/status/<id>`` (server-side events).
+    """
+    marker = "/status/"
+    if marker not in url:
+        return ""
+    tail = url.split(marker, 1)[1]
+    return tail.split("/", 1)[0].split("?", 1)[0].strip()
+
+
+def _dedup_key(url: str) -> str:
+    """Map an event URL to a normalized cross-source identity key.
+
+    X keys on the tweet id (URL handle differs across sources), bilibili
+    videos on the bvid, follows on the UP mid. Empty when no key applies.
+    """
+    tweet_id = _tweet_id_from_url(url)
+    if tweet_id:
+        return f"x:{tweet_id}"
+    bvid = _bvid_from_url(url)
+    if bvid:
+        return f"bv:{bvid}"
+    mid = _mid_from_url(url)
+    if mid:
+        return f"mid:{mid}"
+    return ""
+
+
+class SupportsRecentEventUrls(Protocol):
+    def recent_event_urls(
+        self,
+        event_types: list[str],
+        *,
+        within_hours: int,
+        exclude_source: str | None = ...,
+        limit: int = ...,
+    ) -> set[str]: ...
+
+
+class SupportsXClient(Protocol):
+    async def likes(self, *, limit: int) -> list[dict[str, Any]]: ...
+    async def bookmarks(self, *, limit: int) -> list[dict[str, Any]]: ...
 
 
 class SupportsAccountSyncState(Protocol):
@@ -71,6 +150,8 @@ class AccountSyncService:
     following_page_size: int = 100
     check_interval_seconds: int = 300
     llm_work_allowed: Callable[[], bool] | None = None
+    database: SupportsRecentEventUrls | None = None
+    x_client: SupportsXClient | None = None
     _auto_bootstrap_attempted: bool = False
     # v0.3.57+: tracks the cookie-not-ready → ready transition so
     # ``sync_if_due`` only emits the "auth ready" INFO log once per
@@ -130,6 +211,7 @@ class AccountSyncService:
         state = self.memory_manager.load_account_sync_state()
         events: list[dict[str, Any]] = []
         errors: list[str] = []
+        error_kind = ""
 
         try:
             history = await self.bilibili_client.get_user_history(max_items=self.history_max_items)
@@ -156,6 +238,7 @@ class AccountSyncService:
             )
         except Exception as exc:
             errors.append(str(exc))
+            error_kind = self._record_stage_error("history", exc, error_kind)
 
         try:
             favorites = await self.bilibili_client.get_all_favorites(
@@ -175,6 +258,7 @@ class AccountSyncService:
                 state["favorite_bvids"] = self._favorite_bvids(favorites)
         except Exception as exc:
             errors.append(str(exc))
+            error_kind = self._record_stage_error("favorites", exc, error_kind)
 
         try:
             following = await self.bilibili_client.get_following(
@@ -194,15 +278,22 @@ class AccountSyncService:
                 state["following_mids"] = self._following_mids(following)
         except Exception as exc:
             errors.append(str(exc))
+            error_kind = self._record_stage_error("following", exc, error_kind)
+
+        if self.x_client is not None:
+            error_kind = await self._sync_x(state, events, errors, error_kind)
+
+        if events:
+            events = self._dedup_cross_source(events)
 
         if events:
             for event in events:
                 await self.memory_manager.propagate_event(event)
-            await self.soul_engine.analyze_events(events)
-            await self._auto_bootstrap_soul_profile(len(events))
+            await self._apply_profile_update(events)
 
         state["last_account_sync_at"] = self._now().isoformat()
         state["last_sync_error"] = " | ".join(errors)
+        state["last_sync_error_kind"] = error_kind
         self.memory_manager.save_account_sync_state(state)
         return {
             "synced": bool(events),
@@ -210,29 +301,312 @@ class AccountSyncService:
             "errors": errors,
         }
 
+    @staticmethod
+    def _record_stage_error(stage: str, exc: Exception, current_kind: str) -> str:
+        """Log a swallowed fetch-stage error and classify it.
+
+        ``auth_expired`` (expired/logged-out cookie) always wins over a generic
+        ``error`` so the UI can surface a "re-login needed" state even when
+        another stage also failed for an unrelated reason.
+        """
+        logger.warning("account_sync: %s fetch failed: %s", stage, exc)
+        if isinstance(exc, BilibiliAuthExpiredError):
+            return "auth_expired"
+        if current_kind == "auth_expired":
+            return current_kind
+        return "error"
+
+    async def _apply_profile_update(self, events: list[dict[str, Any]]) -> None:
+        """Route pulled events through the same profile machinery as live events.
+
+        Fallback matrix (default degrades to the legacy path, never to nothing):
+
+        * profile ready + pipeline present + ``ingest_batch`` succeeds → pipeline
+          only (no ``analyze_events``, no bootstrap);
+        * ready but pipeline missing / ``ingest_batch`` absent / raises → WARN
+          and fall back to ``analyze_events`` (no bootstrap — a profile exists);
+        * not ready → legacy ``analyze_events`` + ``_auto_bootstrap_soul_profile``;
+        * ``is_profile_ready`` missing or raising → treated as not ready
+          (conservative legacy path).
+
+        ``propagate_event`` persistence has already run unconditionally in the
+        caller, so events are never lost to a profile-path failure here.
+        """
+        # Single readiness probe per sync serves both routing and the
+        # bootstrap gate, so the pre-profile bootstrap fires at most once.
+        readiness = self._profile_readiness()
+
+        if readiness is True:
+            if await self._try_pipeline_ingest(events):
+                return
+            logger.warning(
+                "account_sync: profile pipeline unavailable/failed; falling back to analyze_events"
+            )
+            await self.soul_engine.analyze_events(events)
+            return
+
+        # Not ready (or readiness unknown) → legacy analyze_events. Bootstrap
+        # only when readiness is *definitively* False (a profile can still be
+        # built); unknown readiness stays conservative and skips the bootstrap.
+        await self.soul_engine.analyze_events(events)
+        if readiness is False:
+            await self._auto_bootstrap_soul_profile(len(events))
+
+    def _profile_readiness(self) -> bool | None:
+        """Return profile readiness, or ``None`` when it cannot be determined.
+
+        ``None`` (``is_profile_ready`` missing or raising) is treated as *not
+        ready* for routing but skips the first-profile bootstrap, preserving
+        the original conservative behavior.
+        """
+        is_ready = getattr(self.soul_engine, "is_profile_ready", None)
+        if not callable(is_ready):
+            return None
+        try:
+            return bool(is_ready())
+        except Exception:
+            logger.debug("account_sync: is_profile_ready check failed", exc_info=True)
+            return None
+
+    async def _try_pipeline_ingest(self, events: list[dict[str, Any]]) -> bool:
+        """Feed events into ``soul_engine.pipeline.ingest_batch``.
+
+        Returns ``True`` only when the batch was ingested. Any missing handle
+        or raised exception returns ``False`` so the caller can fall back.
+        """
+        pipeline = getattr(self.soul_engine, "pipeline", None)
+        if pipeline is None:
+            return False
+        ingest_batch = getattr(pipeline, "ingest_batch", None)
+        if not callable(ingest_batch):
+            return False
+        try:
+            from openbiliclaw.soul.pipeline import signals_from_events
+
+            signals = signals_from_events(events)
+            await ingest_batch(signals)
+            return True
+        except Exception:
+            logger.warning("account_sync: profile pipeline ingest failed", exc_info=True)
+            return False
+
+    def _dedup_cross_source(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Drop events whose identity key already appears in the events table.
+
+        Guards against double-counting an observation that the browser
+        extension already recorded (extension ``view`` + history ``view`` for
+        the same bvid, etc.). Watermark/cursor state is advanced by the caller
+        before this runs, so a deduped item never stalls the cursor. Own prior
+        rows are excluded via ``exclude_source="account_sync"`` so a re-watch
+        seen only via the pulled API still flows.
+        """
+        if self.database is None:
+            return events
+
+        recent_keys_by_type: dict[str, set[str]] = {}
+        for event_type in {str(event.get("event_type", "")) for event in events}:
+            if not event_type:
+                continue
+            try:
+                recent_urls = self.database.recent_event_urls(
+                    [event_type],
+                    within_hours=_CROSS_SOURCE_DEDUP_WINDOW_HOURS,
+                    exclude_source="account_sync",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "account_sync: cross-source dedup lookup for %s failed: %s",
+                    event_type,
+                    exc,
+                )
+                recent_urls = set()
+            recent_keys_by_type[event_type] = {
+                key for url in recent_urls if (key := _dedup_key(url))
+            }
+
+        kept: list[dict[str, Any]] = []
+        dropped_counts: dict[str, int] = {}
+        for event in events:
+            event_type = str(event.get("event_type", ""))
+            key = _dedup_key(str(event.get("url", "")))
+            if key and key in recent_keys_by_type.get(event_type, set()):
+                dropped_counts[event_type] = dropped_counts.get(event_type, 0) + 1
+                continue
+            kept.append(event)
+
+        if dropped_counts:
+            summary = " / ".join(
+                f"{count} {event_type}" for event_type, count in sorted(dropped_counts.items())
+            )
+            logger.info("account_sync: deduped %s events already observed by extension", summary)
+        return kept
+
+    async def _sync_x(
+        self,
+        state: dict[str, Any],
+        events: list[dict[str, Any]],
+        errors: list[str],
+        error_kind: str,
+    ) -> str:
+        """Fetch X likes/bookmarks server-side and append incremental events.
+
+        Read-only, one fetch pair per cycle, set-based dedup on normalized tweet
+        ids. First sync (empty state sets) seeds from tweet ids already persisted
+        in the events table so a like made between init and the first cycle is
+        NOT silently swallowed. Failures feed the shared error list + WARN log
+        (Task 4) and never block the bilibili sync.
+        """
+        if self.x_client is None:
+            return error_kind
+
+        like_ids = self._string_list(state.get("x_like_ids", []))
+        bookmark_ids = self._string_list(state.get("x_bookmark_ids", []))
+        if not like_ids and not bookmark_ids:
+            seed = self._seed_x_ids_from_events()
+            like_ids = list(seed)
+            bookmark_ids = list(seed)
+
+        try:
+            likes = await self.x_client.likes(limit=_X_FETCH_LIMIT)
+            like_events, like_ids = self._x_ingest(likes, event_type="like", seen_ids=like_ids)
+            events.extend(like_events)
+            state["x_like_ids"] = like_ids
+        except Exception as exc:
+            errors.append(str(exc))
+            error_kind = self._record_stage_error("x likes", exc, error_kind)
+
+        try:
+            bookmarks = await self.x_client.bookmarks(limit=_X_FETCH_LIMIT)
+            bookmark_events, bookmark_ids = self._x_ingest(
+                bookmarks, event_type="favorite", seen_ids=bookmark_ids
+            )
+            events.extend(bookmark_events)
+            state["x_bookmark_ids"] = bookmark_ids
+        except Exception as exc:
+            errors.append(str(exc))
+            error_kind = self._record_stage_error("x bookmarks", exc, error_kind)
+
+        return error_kind
+
+    def _seed_x_ids_from_events(self) -> list[str]:
+        """Seed the seen-tweet-id set from persisted X ``like``/``favorite`` events."""
+        if self.database is None:
+            return []
+        try:
+            urls = self.database.recent_event_urls(
+                ["like", "favorite"],
+                within_hours=_X_SEED_WINDOW_HOURS,
+                exclude_source=None,
+                limit=_X_ID_CAP,
+            )
+        except Exception as exc:
+            logger.warning("account_sync: X first-sync seed lookup failed: %s", exc)
+            return []
+        seeded: list[str] = []
+        for url in urls:
+            if "x.com" not in url and "twitter.com" not in url:
+                continue
+            tweet_id = _tweet_id_from_url(url)
+            if tweet_id:
+                seeded.append(tweet_id)
+        return seeded
+
+    def _x_ingest(
+        self,
+        tweets: list[dict[str, Any]],
+        *,
+        event_type: str,
+        seen_ids: list[str],
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """Build events for tweets whose id is unseen; return (events, capped ids)."""
+        seen = set(seen_ids)
+        emitted: list[dict[str, Any]] = []
+        fetched_ids: list[str] = []
+        for tweet in tweets:
+            if not isinstance(tweet, dict):
+                continue
+            tweet_id = str(tweet.get("id", "") or "").strip()
+            if not tweet_id:
+                continue
+            fetched_ids.append(tweet_id)
+            if tweet_id in seen:
+                continue
+            event = self._x_event(tweet, event_type=event_type)
+            if event is not None:
+                emitted.append(event)
+        return emitted, self._cap_x_ids(fetched_ids, seen_ids)
+
+    @staticmethod
+    def _cap_x_ids(fetched_newest_first: list[str], existing: list[str]) -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for tweet_id in [*fetched_newest_first, *existing]:
+            if tweet_id and tweet_id not in seen:
+                seen.add(tweet_id)
+                ordered.append(tweet_id)
+        return ordered[:_X_ID_CAP]
+
+    @staticmethod
+    def _x_event(tweet: dict[str, Any], *, event_type: str) -> dict[str, Any] | None:
+        """Normalize a ``tweet_to_dict`` payload into a unified account_sync event.
+
+        Mirrors ``cli._x_tweet_to_event`` (init backfill) so scheduled and init
+        X events share one shape. ``source_platform`` is the canonical
+        ``"twitter"`` — never ``"x"``, which would split source-mix accounting.
+        """
+        from openbiliclaw.sources.event_format import SOURCE_TWITTER, build_event
+
+        tweet_id = str(tweet.get("id", "") or "").strip()
+        if not tweet_id:
+            return None
+        raw_author = tweet.get("author")
+        author = raw_author if isinstance(raw_author, dict) else {}
+        screen_name = str(author.get("screenName", "") or "").strip()
+        if screen_name:
+            author_name = f"@{screen_name}"
+        else:
+            author_name = str(author.get("name", "") or "").strip()
+        handle = screen_name or "i"  # x.com/i/status/<id> resolves without a handle
+        text = str(tweet.get("articleText") or tweet.get("text") or "").strip()
+        first_line = text.splitlines()[0] if text else ""
+        title = first_line[:120]
+        return build_event(
+            event_type=event_type,
+            source_platform=SOURCE_TWITTER,
+            title=title,
+            url=f"https://x.com/{handle}/status/{tweet_id}",
+            author=author_name,
+            metadata={
+                "tweet_id": tweet_id,
+                "screen_name": screen_name,
+                "body_text": text,
+                "source": "account_sync",
+            },
+        )
+
+    @staticmethod
+    def _string_list(value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [item for raw in value if (item := str(raw).strip())]
+
     def get_runtime_status(self) -> dict[str, object]:
         """Expose lightweight account sync runtime fields."""
         state = self.memory_manager.load_account_sync_state()
         return {
             "last_account_sync_at": str(state.get("last_account_sync_at", "")),
             "last_account_sync_error": str(state.get("last_sync_error", "")),
+            "last_account_sync_error_kind": str(state.get("last_sync_error_kind", "")),
         }
 
     async def _auto_bootstrap_soul_profile(self, event_count: int) -> None:
-        """Build the first soul profile after account sync learns preferences."""
+        """Build the first soul profile after account sync learns preferences.
+
+        The caller (:meth:`_apply_profile_update`) only reaches this when the
+        profile is *definitively* not ready, so readiness is no longer
+        re-probed here — that keeps ``is_profile_ready`` to one call per sync.
+        """
         if self._auto_bootstrap_attempted:
-            return
-
-        is_ready_candidate = getattr(self.soul_engine, "is_profile_ready", None)
-        if not callable(is_ready_candidate):
-            return
-        is_ready_fn = cast("Callable[[], bool]", is_ready_candidate)
-
-        try:
-            if is_ready_fn():
-                return
-        except Exception:
-            logger.debug("Auto-bootstrap soul profile readiness check failed", exc_info=True)
             return
 
         build_candidate = getattr(self.soul_engine, "build_initial_profile", None)

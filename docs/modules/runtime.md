@@ -39,7 +39,7 @@
 | 自动更新 | ✅ | `AutoUpdateService` 检查 backend git tag，支持 `/api/update-status`、`/api/runtime-status` 更新摘要、手动 check/apply、apply 锁、可信 remote / dirty worktree / fast-forward guard，并通过 runtime stream 推送后端更新事件。dirty worktree guard 豁免 `uv.lock`、未跟踪文件、纯 index-only 条目和本地 `ollama-models/`；apply 前会重置 `uv.lock` 再快进。git 命令通过 `asyncio.create_subprocess_exec` 执行，避免 Windows 长时间运行后线程池 `subprocess.run` 卡死或异常返回；tag fetch 使用 `git fetch --force --tags origin`，避免本地旧 tag 被远端重打后卡在 `would clobber existing tag`。GitHub tags API 的 403/429 限流会先尝试 GitHub tags Atom feed 兜底，兜底失败才稳定上报 `github_rate_limited`，区别于真正网络不可达的 `github_unreachable`。`detect_install_mode()` 上报 `frozen / docker / git / unsupported` 安装形态，桌面冻结包与 Docker 容器据此在前端禁用自动更新开关。**可信 remote 按规范化形式比较**（大小写不敏感、`.git` 后缀可选、`https://` 与 `git@…:` / `ssh://` 等价），手动克隆少写 `.git` 后缀不再被 `untrusted_remote` 永久拦截；镜像/代理包装 URL 不会自动折算成官方地址，镜像用户需把镜像 URL 显式加入 `auto_update_allowed_remotes`。**守卫拒绝不再静默**：每条 guard 拒绝都 `logger.warning` 写明细（含实际 remote URL、脏文件列表等），并把原因写入 `last_error` 供状态卡展示。**冻结守卫**：apply 路径显式判 `install_mode == "git"`，冻结包即便与 git 检出共用目录也以 `unsupported_install_mode` 拒绝（Docker 容器同理以 `docker_install_mode` 拒绝），杜绝无限重启循环；冻结包后台改跑 check-only 提醒循环（无论开关状态），跟踪 `desktop-v*` 安装包 tag，发现新包时设置页提示并附「前往下载新安装包」直达链接 + toast 提醒；Docker 容器同样跑 check-only 循环（跟踪 `backend-v*`，镜像随后端版本发布），发现新版时设置页提示 `docker compose pull && docker compose up -d` 升级。桌面 Web 设置页提供「立即检查 / 立即应用」按钮并随 runtime stream 更新事件实时刷新状态行；配置保存重建服务时经 `adopt_status_from` 保留上次检查结果。降级模式（LLM 注册表不可用）放行 update-status / check / apply 并构建真实 `AutoUpdateService`，便于拉取修复版本恢复。 |
 | 开机自启动管理 | ✅ | `runtime.autostart` 提供 macOS LaunchAgent、Windows HKCU Run + `.pyw`、Linux XDG autostart 三套当前用户作用域 manager；`/api/autostart-status`、`/api/autostart/apply`、`openbiliclaw autostart` 和插件设置页共用 env / shadow guard 与方向化 enable/disable 事务。 |
 | Ollama 启动预检与生命周期 | ✅ | `runtime.ollama_supervisor` 统一提供 `ollama_required()`、endpoint 归一化、loopback 判定和 `_ollama_is_running()` / `_ollama_start_serve_background()`；`start` 仅在默认 `localhost:11434` 需要本机 Ollama 时尝试后台拉起，远端 / 自定义端口不强行 `serve`。托管启动会给子进程默认传入 `OLLAMA_KEEP_ALIVE=24h`（若用户已设置则保留用户值），减少 `bge-m3` / `llama-server` 在 UI 请求间隔中卸载再冷启动。Windows 模型路径编码故障自愈使用 `ollama_models_relocation_candidate()` 选 `%PROGRAMDATA%\OpenBiliClaw\ollama-models`（路径含非 ASCII 时放弃自动迁移），目录存在即视作 `managed_models_dir()` 持久迁移标记；后续托管启动用 `env.setdefault("OLLAMA_MODELS", managed_models_dir)`，显式用户环境变量优先。`restart_managed_ollama_with_models_dir()` 只重启本进程管理的 Ollama；若检测到外部启动的 daemon（运行中但没有 `_managed_proc`）则返回 `external_ollama`，避免杀掉用户自己开的官方 App / 服务。`_ollama_start_serve_background()` 现在记录**亲手拉起**的 `Popen` 句柄（复用外部已运行实例时句柄留空），`stop_managed_ollama()` 据此在退出时停掉整棵进程树（Windows `taskkill /T`、类 Unix 进程组 `SIGTERM`），对外部托管的 Ollama 一律不动 —— 桌面托盘「退出」经此调用，clean quit 不再遗留孤儿 `ollama serve` / `llama-server` runner。macOS 桌面包构建必须使用官方 `Ollama.app/Contents/Resources/ollama`，并同时打入同目录 `llama-server`、`llama-*`、`lib*.dylib`、`lib*.so` 和 `mlx_metal_*`；如果只发现 Homebrew 风格单独主程序或缺关键动态库，打包会失败，避免随包 daemon `/api/version` 正常但真实 embedding 500。 |
-| 账号同步 | ✅ | `AccountSyncService` 同步 B 站账号历史、收藏和关注等信号；历史按 `view_at + 同秒 bvid 集合` 增量导入，收藏 / 关注只把新增 ID 转成画像事件，避免重放旧信号。 |
+| 账号同步 | ✅ | `AccountSyncService` 同步 B 站账号历史、收藏和关注等信号；历史按 `view_at + 同秒 bvid 集合` 增量导入，收藏 / 关注只把新增 ID 转成画像事件，避免重放旧信号。新增事件先经 48h 跨源去重（扩展已上报的同一行为不再双计，`exclude_source="account_sync"` 防自压制），画像就绪后走 `ProfileUpdatePipeline` 增量管线而非整层重算；同步失败按 `auth_expired`/`error` 分类经 runtime-status 下发到桌面 Web。可选注入 `x_client` 后同周期增量拉取 X likes/bookmarks（tweet ID 集合去重，首轮从 events 表播种）。 |
 | 多源 bootstrap 去重 | ✅ | `/api/sources/{xhs,dy,yt}/task-result` 会用 `source_bootstrap_state.json` 过滤跨任务旧 identity key；任务结果仍完整保留，只有新增项进入 memory / profile pipeline。 |
 | 扩展任务 claim / 复用 | ✅ | XHS / 抖音 / YouTube bootstrap 任务在扩展 poll 时用短生命周期 SQLite 连接标记 `in_progress`，CLI 默认复用 6 小时内近期任务，避免重复打开前台 tab 全量扫描，也避免 FastAPI 并发 poll 在共享 connection 上嵌套事务。 |
 | Soul 画像自动 bootstrap | ✅ | `AccountSyncService` 首次成功写入账号行为并完成 `analyze_events()` 后，若 soul 画像仍为空，会自动调用 `build_initial_profile([])`；每进程生命周期最多尝试一次。 |
@@ -255,15 +255,32 @@ service = AccountSyncService(
     memory_manager=memory,
     bilibili_client=bilibili_client,
     soul_engine=soul_engine,
+    database=database,      # 可选：跨源去重
+    x_client=x_client,      # 可选：X 定时增量（resolve_x_cookie 有 cookie 时装配）
 )
 result = await service.sync_now()
 ```
 
-`sync_now()` 会拉取最近一批 B 站历史、收藏夹和关注列表，但只有新增信号会进入 `memory.propagate_event()` 与 `soul_engine.analyze_events()`：
+`sync_now()` 会拉取最近一批 B 站历史、收藏夹和关注列表，只有新增信号会进入 `memory.propagate_event()` 与画像更新：
 
 - 历史记录：使用 `last_history_view_at`、`last_history_bvid` 和 `history_bvids_at_last_view_at` 跳过已经处理过的同秒历史项。
 - 收藏夹：使用稳定排序后的 `favorite_signature` 和 `favorite_bvids`，签名变化时只导入新增 bvid。
 - 关注列表：使用 `following_signature` 和 `following_mids`，签名变化时只导入新增 mid。
+
+**跨源去重**：注入 `database` 后，构造事件前会经 `_dedup_cross_source` 过滤——48 小时窗口（`_CROSS_SOURCE_DEDUP_WINDOW_HOURS`）内 events 表已有同键事件（view/favorite 按 bvid、follow 按 mid、X 按 tweet ID）则跳过，避免扩展实时上报与账号拉取对同一次行为双写双计。查询恒带 `exclude_source="account_sync"`：自己上一轮写的行不参与压制，只被历史 API 观察到的窗口内重看仍会正常发事件。游标照常前进，去重不阻塞水位线；丢弃数量记 INFO 日志。
+
+**画像更新路径（四行回退矩阵，`_apply_profile_update`）**：`propagate_event` 持久化永远无条件先行，之后——
+
+| 条件 | 动作 |
+| --- | --- |
+| 画像就绪 + `soul_engine.pipeline.ingest_batch` 可用且成功 | 只走增量管线（`signals_from_events` → `ingest_batch`），不再整层重算 preference |
+| 画像就绪，但管线缺失 / 抛错 | WARN 回退 `analyze_events`（不 bootstrap——画像已存在） |
+| 画像未就绪 | 旧路径：`analyze_events` + `_auto_bootstrap_soul_profile` |
+| `is_profile_ready` 缺失 / 抛错 | 按未就绪保守处理 |
+
+**错误可见化**：每个拉取阶段的异常都会 `logger.warning` 并分类进状态字段 `last_sync_error_kind`（`auth_expired`——B 站 Cookie 已失效，优先级高于其他 / `error`——一般失败 / 空——干净同步时清除），经 `get_runtime_status()` 与 `/api/runtime-status` 的 `last_account_sync_error_kind` 下发，桌面 Web 在有错时渲染状态 chip（auth_expired 显示"重新登录"提示；新字段需重启后端生效）。
+
+**X 定时增量**：注入 `x_client`（两处装配点在 `sources.x_auth.resolve_x_cookie` 解析到 cookie 时构造 `XClient`）后，同一 6h 周期内在 B 站各阶段之后拉取 likes / bookmarks（各上限 200，`_X_FETCH_LIMIT`），分别映射为 `like` / `favorite` 事件（`source_platform="twitter"`）。去重用状态集合 `x_like_ids` / `x_bookmark_ids`（归一化 tweet ID，取 URL 的 `/status/<id>` 尾段，兼容 `x.com/i/status/<id>` 与 `x.com/<handle>/status/<id>` 两种形态，集合上限 2000 保最新）；集合为空的首轮从 events 表已持久化的 X 事件播种，init 之后、首轮之前新增的 like 仍会正常发事件。X 拉取失败只记入 errors + WARN，不影响 B 站同步，反之亦然。
 
 ### YoutubeDiscoveryProducer
 
