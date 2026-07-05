@@ -271,9 +271,9 @@ Test `tests/test_discovery_engine.py`, `tests/test_recommendation_engine.py`
 1. Failing tests:
    - `_eval_cache` holds ≤ 4096 entries; inserting 4097 evicts the least-recently-used (a get
      refreshes recency); legacy 4-tuple entries still read correctly.
-   - Eval batch item and single-eval `body_text` truncated **head+tail** (1600 head + 400 tail,
+   - Eval batch item and single-eval `body_text` truncated **head+tail** (200 head + 100 tail,
      fixed `…` joiner — keeps thesis *and* conclusion of long posts); expression batch item
-     1000 head + 200 tail; text shorter than head+tail passes through byte-identical;
+     same 200+100; text shorter than head+tail passes through byte-identical;
      `None`/empty passthrough unchanged; output is deterministic (same input → same bytes).
    - `classify_pool_backlog` default splits 60 rows into 2 batches (batch_size 30), and an
      explicit `batch_size=` argument still overrides.
@@ -282,8 +282,10 @@ Test `tests/test_discovery_engine.py`, `tests/test_recommendation_engine.py`
    five existing touch points — `:1158,1192,1256,1364,1853` — go through them).
 3. Add `_prompt_body_text(value: str | None, *, head: int, tail: int) -> str` (deterministic
    head+tail slices, fixed `…` joiner) in a shared spot (`discovery/strategies/_utils.py`),
-   apply at `discovery/engine.py:1675`, `:1210` (head 1600 / tail 400) and
-   `recommendation/engine.py:1361` (head 1000 / tail 200). Constants module-level.
+   apply at `discovery/engine.py:1675`, `:1210` and
+   `recommendation/engine.py:1361` — all head 200 / tail 100 (tightened from the draft
+   1600+400 / 1000+200 by user decision; title/description already carry the gist).
+   Constants module-level.
    Then run the Task 0 replay with `--arm-b body-cap --platform x` (or whichever text source
    has rows) — bilibili-only DBs trivially pass (empty `body_text`); record the result.
 4. `classify_pool_backlog` `batch_size: int = 10` → `30` (`recommendation/engine.py:1024`).

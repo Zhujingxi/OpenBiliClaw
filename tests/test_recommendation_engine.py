@@ -2974,7 +2974,7 @@ async def test_precompute_batch_caps_body_text_head_tail() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Database(Path(tmpdir) / "test.db")
         db.initialize()
-        body_text = "H" * 1100 + "T" * 300
+        body_text = "H" * 300 + "T" * 200
         item = DiscoveredContent(
             bvid="BV_EXPR_BODY",
             title="长线程怎么拆",
@@ -2992,7 +2992,7 @@ async def test_precompute_batch_caps_body_text_head_tail() -> None:
 
         assert completed == 1
         batch = _content_batch_from_prompt(llm.user_inputs[0])
-        assert batch[0]["body_text"] == ("H" * 1000) + "…" + ("T" * 200)
+        assert batch[0]["body_text"] == ("H" * 200) + "…" + ("T" * 100)
 
 
 @pytest.mark.asyncio

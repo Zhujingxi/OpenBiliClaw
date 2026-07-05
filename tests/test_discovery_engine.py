@@ -887,7 +887,7 @@ async def test_evaluate_content_single_caps_body_text_head_tail() -> None:
         '{"score": 0.82, "reason": "匹配", "topic_group": "系统", "style_key": "deep_dive"}'
     )
     engine = ContentDiscoveryEngine(llm_service=llm_service)
-    body_text = "H" * 1700 + "T" * 500
+    body_text = "H" * 300 + "T" * 200
 
     await engine.evaluate_content(
         DiscoveredContent(
@@ -902,7 +902,7 @@ async def test_evaluate_content_single_caps_body_text_head_tail() -> None:
     )
 
     user_input = str(llm_service.calls[0]["user_input"])
-    assert ("H" * 1600) + "…" + ("T" * 400) in user_input
+    assert ("H" * 200) + "…" + ("T" * 100) in user_input
     assert body_text not in user_input
 
 
@@ -1200,7 +1200,7 @@ async def test_evaluate_content_batch_omits_duplicate_text_description() -> None
 async def test_evaluate_content_batch_caps_body_text_head_tail() -> None:
     llm_service = _DynamicBatchLLMService()
     engine = ContentDiscoveryEngine(llm_service=llm_service)
-    body_text = "H" * 1700 + "T" * 500
+    body_text = "H" * 300 + "T" * 200
 
     scores = await engine.evaluate_content_batch(
         [
@@ -1227,7 +1227,7 @@ async def test_evaluate_content_batch_caps_body_text_head_tail() -> None:
         )[0]
     )
     items = json.loads(batch_json.strip())
-    assert items[0]["body_text"] == ("H" * 1600) + "…" + ("T" * 400)
+    assert items[0]["body_text"] == ("H" * 200) + "…" + ("T" * 100)
 
 
 @pytest.mark.asyncio

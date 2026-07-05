@@ -320,7 +320,7 @@ chosen so first-run init (large pending backlog) is never delayed.
   on insert). Keep the 4/5-tuple legacy tolerance (`engine.py:1370-1374`).
 - `body_text` caps via one shared **head+tail** helper (keep the opening *and* the conclusion —
   long posts put the thesis up front and the takeaway at the end; a head-only slice loses the
-  latter): eval paths 1600 head + 400 tail chars, expression 1000 head + 200 tail chars, with a
+  latter): eval and expression paths 200 head + 100 tail chars (tightened from the draft 1600+400 by user decision - title/description already carry the gist), with a
   fixed `…` joiner. Deterministic (plain slices — cache convention). Cap values are module
   constants, and the eval cap change rides the Phase 0 replay gate on a text-source sample
   (bilibili items have empty `body_text`, so bilibili-only replays trivially pass).

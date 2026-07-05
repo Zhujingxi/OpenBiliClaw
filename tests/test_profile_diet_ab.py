@@ -135,10 +135,10 @@ def test_select_replay_rows_interleaves_platform_strategy_groups() -> None:
 
 def test_cap_body_text_keeps_short_text_and_caps_long_text() -> None:
     short = "short body"
-    long = "h" * 1700 + "m" * 300 + "t" * 500
+    long = "h" * 300 + "m" * 100 + "t" * 200
 
     assert cap_body_text(short) == short
-    assert cap_body_text(long) == ("h" * 1600) + "\u2026" + ("t" * 400)
+    assert cap_body_text(long) == ("h" * 200) + "\u2026" + ("t" * 100)
 
 
 class _ReplayDiscoveryConfig:
