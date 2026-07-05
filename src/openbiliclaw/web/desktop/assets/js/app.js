@@ -252,8 +252,38 @@
       console.error(context, error);
     }
 
-    window.addEventListener("error", (event) => showFatal(event.error || event.message, "页面脚本"));
-    window.addEventListener("unhandledrejection", (event) => showFatal(event.reason, "异步加载"));
+    const FOREIGN_SCRIPT_URL_RE = /\b(?:chrome-extension|moz-extension|safari-web-extension|safari-extension|user-script|greasemonkey-script):/i;
+
+    function isForeignScriptError(event) {
+      const filename = event?.filename || "";
+      // 跨域脚本的错误会被浏览器脱敏成空 filename + "Script error."，本站资源不会
+      if (!filename) return true;
+      try {
+        return new URL(filename, window.location.href).origin !== window.location.origin;
+      } catch {
+        return true;
+      }
+    }
+
+    function isForeignRejection(reason) {
+      const stack = typeof reason?.stack === "string" ? reason.stack : "";
+      return FOREIGN_SCRIPT_URL_RE.test(stack) && !stack.includes(window.location.origin);
+    }
+
+    window.addEventListener("error", (event) => {
+      if (isForeignScriptError(event)) {
+        console.warn("已忽略非本站脚本错误（通常来自浏览器扩展/油猴脚本）:", event.filename || "(跨域)", event.message);
+        return;
+      }
+      showFatal(event.error || event.message, "页面脚本");
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      if (isForeignRejection(event.reason)) {
+        console.warn("已忽略非本站脚本 Promise 错误（通常来自浏览器扩展/油猴脚本）:", event.reason);
+        return;
+      }
+      showFatal(event.reason, "异步加载");
+    });
 
     function storageGet(key) {
       try { return window.localStorage?.getItem(key) || ""; } catch { return ""; }
