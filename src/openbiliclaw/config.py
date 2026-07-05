@@ -136,6 +136,8 @@ _DEFAULT_INSPIRATION_SEARCH_BACKENDS: tuple[str, ...] = (
 )
 _DEFAULT_ADMISSION_MIN_SCORE = 0.60
 _DEFAULT_CANDIDATE_EVAL_CONCURRENCY = 3
+_DEFAULT_EVAL_PREFILTER_MODE = "shadow"
+_SUPPORTED_EVAL_PREFILTER_MODES = {"off", "shadow", "enforce"}
 _DEFAULT_MULTIMODAL_BATCH_SIZE = 8
 _DEFAULT_MULTIMODAL_IMAGE_MAX_PX = 384
 _DEFAULT_MULTIMODAL_IMAGE_QUALITY = 72
@@ -1023,6 +1025,9 @@ class DiscoveryConfig:
     # 3×30 design caps this at three (90 raw candidates in flight); runtime
     # also reserves one global LLM slot, so the effective count may be lower.
     candidate_eval_concurrency: int = _DEFAULT_CANDIDATE_EVAL_CONCURRENCY
+    # Embedding pre-filter rollout for discovery evaluation. ``shadow`` logs
+    # would-be filtered candidates without suppressing LLM evaluation.
+    eval_prefilter_mode: str = _DEFAULT_EVAL_PREFILTER_MODE
     # Optional cover-image evaluation. Kept off by default because it changes
     # LLM cost/latency and requires a vision-capable evaluation model.
     multimodal_evaluation_enabled: bool = False
@@ -2329,6 +2334,9 @@ def _build_discovery(discovery_raw: dict[str, Any]) -> DiscoveryConfig:
             min_value=1,
             max_value=3,
         ),
+        eval_prefilter_mode=_normalize_eval_prefilter_mode(
+            discovery_raw.get("eval_prefilter_mode")
+        ),
         multimodal_evaluation_enabled=_coerce_bool(
             discovery_raw.get("multimodal_evaluation_enabled"),
             default=False,
@@ -2409,6 +2417,13 @@ def _normalize_probability(value: object, *, default: float) -> float:
     if score <= 0.0 or score > 1.0:
         return default
     return score
+
+
+def _normalize_eval_prefilter_mode(value: object) -> str:
+    if not isinstance(value, str):
+        return _DEFAULT_EVAL_PREFILTER_MODE
+    mode = value.strip().lower()
+    return mode or _DEFAULT_EVAL_PREFILTER_MODE
 
 
 def _coerce_bool(value: object, *, default: bool = False) -> bool:
@@ -3585,6 +3600,16 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
             )
         )
 
+    eval_prefilter_mode = str(config.discovery.eval_prefilter_mode or "").strip().lower()
+    if eval_prefilter_mode not in _SUPPORTED_EVAL_PREFILTER_MODES:
+        issues.append(
+            ConfigIssue(
+                field="discovery.eval_prefilter_mode",
+                message='`discovery.eval_prefilter_mode` 仅支持: "off", "shadow", "enforce"。',
+                severity="blocking",
+            )
+        )
+
     return issues
 
 
@@ -4444,6 +4469,7 @@ def _render_config_toml(
             "inspiration_replace_merged_keywords = "
             f"{_toml_bool(config.discovery.inspiration_replace_merged_keywords)}",
             f"inspiration_breadth = {_toml_string(config.discovery.inspiration_breadth)}",
+            f"eval_prefilter_mode = {_toml_string(config.discovery.eval_prefilter_mode)}",
             "multimodal_evaluation_enabled = "
             f"{_toml_bool(config.discovery.multimodal_evaluation_enabled)}",
             f"visual_profile_enabled = {_toml_bool(config.discovery.visual_profile_enabled)}",

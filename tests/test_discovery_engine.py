@@ -137,6 +137,53 @@ class _DynamicBatchLLMService:
         return _SlowResponse(json.dumps(payload, ensure_ascii=False))
 
 
+class _CountingEmbeddingService:
+    similarity_threshold = 0.82
+
+    def __init__(
+        self,
+        vectors: dict[str, list[float]],
+        *,
+        failures: set[str] | None = None,
+    ) -> None:
+        self.vectors = vectors
+        self.failures = failures or set()
+        self.calls: list[str] = []
+
+    async def embed(self, text: str) -> list[float]:
+        self.calls.append(text)
+        if text in self.failures:
+            raise RuntimeError(f"embedding failed for {text}")
+        return self.vectors.get(text, [])
+
+    def lookup_cached(self, text: str) -> list[float]:
+        return self.vectors.get(text, [])
+
+
+_MATCH_VEC = [1.0, 0.0]
+_LOW_SIM_VEC = [0.2, 0.9797958971]
+
+
+def _prefilter_vectors(*, low_texts: list[str] | None = None) -> dict[str, list[float]]:
+    vectors = {
+        "纪录片": _MATCH_VEC,
+        "摄影": _MATCH_VEC,
+        "知识": _MATCH_VEC,
+        "创作": _MATCH_VEC,
+        "匹配内容 深度纪录片解析": _MATCH_VEC,
+    }
+    for text in low_texts or []:
+        vectors[text] = _LOW_SIM_VEC
+    return vectors
+
+
+def _batch_prompt_items(user_input: str) -> list[dict[str, object]]:
+    batch_json = user_input.split("<content_batch>", 1)[1].split("</content_batch>", 1)[0]
+    raw_items = json.loads(batch_json.strip())
+    assert isinstance(raw_items, list)
+    return [item for item in raw_items if isinstance(item, dict)]
+
+
 class _SplitRetryBatchLLMService:
     """Controllable batch fake for split-retry tests."""
 
@@ -767,6 +814,295 @@ async def test_evaluate_content_batch_omits_duplicate_text_description() -> None
     assert items[0]["description"] == ""
     assert items[1]["body_text"] == "完整推文正文"
     assert items[1]["description"] == "短描述补充"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_batch_prefilter_enforce_filters_cache_and_excludes_llm(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    low_text = "不相关内容 厨房技巧"
+    embedding = _CountingEmbeddingService(_prefilter_vectors(low_texts=[low_text]))
+    llm_service = _DynamicBatchLLMService()
+    engine = ContentDiscoveryEngine(
+        llm_service=llm_service,
+        embedding_service=embedding,
+        eval_prefilter_mode="enforce",
+    )
+    profile = _build_profile()
+    filtered = DiscoveredContent(
+        bvid="BVFILTER",
+        title="不相关内容",
+        description="厨房技巧",
+        source_strategy="trending",
+    )
+    relevant = DiscoveredContent(
+        bvid="BVKEEP",
+        title="匹配内容",
+        description="深度纪录片解析",
+        source_strategy="trending",
+    )
+
+    with caplog.at_level("INFO", logger="openbiliclaw.discovery.engine"):
+        scores = await engine.evaluate_content_batch([filtered, relevant], profile, batch_size=2)
+
+    assert scores == [0.1, 0.8]
+    assert filtered.relevance_score == 0.1
+    assert filtered.relevance_reason == "embedding 预过滤: 与所有兴趣相似度极低"
+    assert len(llm_service.user_inputs) == 1
+    llm_items = _batch_prompt_items(llm_service.user_inputs[0])
+    assert [item["content_id"] for item in llm_items] == ["BVKEEP"]
+
+    profile_digest = engine._evaluation_profile_digest(profile)
+    negative_digest = engine._negative_examples_digest(None)
+    cache_key = engine._batch_eval_cache_key(
+        filtered,
+        profile_digest=profile_digest,
+        negative_digest=negative_digest,
+    )
+    cached = engine._get_eval_cache_entry(cache_key)
+    assert cached is not None
+    assert cached[:2] == (0.1, "embedding 预过滤: 与所有兴趣相似度极低")
+    assert any(
+        "eval_batch embedding prefilter" in record.message
+        and "in=2" in record.message
+        and "prefiltered=1" in record.message
+        and "to_llm=1" in record.message
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_batch_prefilter_shadow_logs_but_sends_all(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    low_text = "不相关内容 厨房技巧"
+    embedding = _CountingEmbeddingService(_prefilter_vectors(low_texts=[low_text]))
+    llm_service = _DynamicBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm_service, embedding_service=embedding)
+    content = DiscoveredContent(
+        bvid="BVSHADOW",
+        title="不相关内容",
+        description="厨房技巧",
+        source_strategy="trending",
+    )
+
+    with caplog.at_level("INFO", logger="openbiliclaw.discovery.engine"):
+        scores = await engine.evaluate_content_batch([content], _build_profile())
+
+    assert scores == [0.8]
+    assert content.relevance_score == 0.8
+    assert content.relevance_reason == "ok"
+    assert len(llm_service.user_inputs) == 1
+    assert _batch_prompt_items(llm_service.user_inputs[0])[0]["content_id"] == "BVSHADOW"
+    assert any(
+        "prefilter-shadow" in record.message
+        and "不相关内容" in record.message
+        and "max_sim=0.2000" in record.message
+        and "strategy=trending" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        "eval_batch embedding prefilter" in record.message
+        and "would_filter=1" in record.message
+        and "to_llm=1" in record.message
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_batch_prefilter_off_skips_embedding() -> None:
+    low_text = "不相关内容 厨房技巧"
+    embedding = _CountingEmbeddingService(_prefilter_vectors(low_texts=[low_text]))
+    llm_service = _DynamicBatchLLMService()
+    engine = ContentDiscoveryEngine(
+        llm_service=llm_service,
+        embedding_service=embedding,
+        eval_prefilter_mode="off",
+    )
+
+    scores = await engine.evaluate_content_batch(
+        [
+            DiscoveredContent(
+                bvid="BVOFF",
+                title="不相关内容",
+                description="厨房技巧",
+                source_strategy="trending",
+            )
+        ],
+        _build_profile(),
+    )
+
+    assert scores == [0.8]
+    assert embedding.calls == []
+    assert len(llm_service.user_inputs) == 1
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_batch_prefilter_exempts_explore_in_enforce() -> None:
+    low_text = "跨域内容 厨房技巧"
+    embedding = _CountingEmbeddingService(_prefilter_vectors(low_texts=[low_text]))
+    llm_service = _DynamicBatchLLMService()
+    engine = ContentDiscoveryEngine(
+        llm_service=llm_service,
+        embedding_service=embedding,
+        eval_prefilter_mode="enforce",
+    )
+    content = DiscoveredContent(
+        bvid="BVEXPLORE",
+        title="跨域内容",
+        description="厨房技巧",
+        source_strategy="explore",
+    )
+
+    scores = await engine.evaluate_content_batch([content], _build_profile())
+
+    assert scores == [0.8]
+    assert len(llm_service.user_inputs) == 1
+    assert _batch_prompt_items(llm_service.user_inputs[0])[0]["content_id"] == "BVEXPLORE"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_batch_prefilter_enforce_kill_rate_guard(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    low_texts = ["低相似 A 厨房技巧", "低相似 B 家务技巧"]
+    embedding = _CountingEmbeddingService(_prefilter_vectors(low_texts=low_texts))
+    llm_service = _DynamicBatchLLMService()
+    engine = ContentDiscoveryEngine(
+        llm_service=llm_service,
+        embedding_service=embedding,
+        eval_prefilter_mode="enforce",
+    )
+    contents = [
+        DiscoveredContent(bvid="BVA", title="低相似 A", description="厨房技巧"),
+        DiscoveredContent(bvid="BVB", title="低相似 B", description="家务技巧"),
+        DiscoveredContent(bvid="BVC", title="匹配内容", description="深度纪录片解析"),
+    ]
+
+    with caplog.at_level("WARNING", logger="openbiliclaw.discovery.engine"):
+        scores = await engine.evaluate_content_batch(contents, _build_profile(), batch_size=3)
+
+    assert scores == [0.8, 0.8, 0.8]
+    assert len(llm_service.user_inputs) == 1
+    assert [item["content_id"] for item in _batch_prompt_items(llm_service.user_inputs[0])] == [
+        "BVA",
+        "BVB",
+        "BVC",
+    ]
+    assert any("embedding prefilter kill-rate guard" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_batch_prefilter_skips_without_service_or_interests() -> None:
+    llm_without_service = _DynamicBatchLLMService()
+    engine_without_service = ContentDiscoveryEngine(
+        llm_service=llm_without_service,
+        eval_prefilter_mode="enforce",
+    )
+
+    scores_without_service = await engine_without_service.evaluate_content_batch(
+        [DiscoveredContent(bvid="BVNOSVC", title="不相关内容", description="厨房技巧")],
+        _build_profile(),
+    )
+
+    assert scores_without_service == [0.8]
+    assert len(llm_without_service.user_inputs) == 1
+
+    low_text = "不相关内容 厨房技巧"
+    embedding = _CountingEmbeddingService(_prefilter_vectors(low_texts=[low_text]))
+    llm_empty_interests = _DynamicBatchLLMService()
+    engine_empty_interests = ContentDiscoveryEngine(
+        llm_service=llm_empty_interests,
+        embedding_service=embedding,
+        eval_prefilter_mode="enforce",
+    )
+
+    scores_empty_interests = await engine_empty_interests.evaluate_content_batch(
+        [DiscoveredContent(bvid="BVEMPTY", title="不相关内容", description="厨房技巧")],
+        SoulProfile(),
+    )
+
+    assert scores_empty_interests == [0.8]
+    assert embedding.calls == []
+    assert len(llm_empty_interests.user_inputs) == 1
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_batch_prefilter_item_embedding_failure_fails_open() -> None:
+    failing_text = "异常内容 厨房技巧"
+    embedding = _CountingEmbeddingService(
+        _prefilter_vectors(),
+        failures={failing_text},
+    )
+    llm_service = _DynamicBatchLLMService()
+    engine = ContentDiscoveryEngine(
+        llm_service=llm_service,
+        embedding_service=embedding,
+        eval_prefilter_mode="enforce",
+    )
+
+    scores = await engine.evaluate_content_batch(
+        [
+            DiscoveredContent(
+                bvid="BVFAILOPEN",
+                title="异常内容",
+                description="厨房技巧",
+                source_strategy="trending",
+            )
+        ],
+        _build_profile(),
+    )
+
+    assert scores == [0.8]
+    assert len(llm_service.user_inputs) == 1
+    assert _batch_prompt_items(llm_service.user_inputs[0])[0]["content_id"] == "BVFAILOPEN"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_batch_prefilter_all_filtered_batch_of_one_skips_llm() -> None:
+    low_text = "不相关内容 厨房技巧"
+    embedding = _CountingEmbeddingService(_prefilter_vectors(low_texts=[low_text]))
+    llm_service = _DynamicBatchLLMService()
+    engine = ContentDiscoveryEngine(
+        llm_service=llm_service,
+        embedding_service=embedding,
+        eval_prefilter_mode="enforce",
+    )
+
+    scores = await engine.evaluate_content_batch(
+        [
+            DiscoveredContent(
+                bvid="BVONLY",
+                title="不相关内容",
+                description="厨房技巧",
+                source_strategy="trending",
+            )
+        ],
+        _build_profile(),
+    )
+
+    assert scores == [0.1]
+    assert llm_service.user_inputs == []
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_prefilter_shadow_single_path_uses_llm() -> None:
+    low_text = "不相关内容 厨房技巧"
+    embedding = _CountingEmbeddingService(_prefilter_vectors(low_texts=[low_text]))
+    llm_service = FakeLLMService('{"score": 0.84, "reason": "llm kept it"}')
+    engine = ContentDiscoveryEngine(llm_service=llm_service, embedding_service=embedding)
+    content = DiscoveredContent(
+        bvid="BVSINGLE",
+        title="不相关内容",
+        description="厨房技巧",
+        source_strategy="trending",
+    )
+
+    score = await engine.evaluate_content(content, _build_profile())
+
+    assert score == 0.84
+    assert content.relevance_reason == "llm kept it"
+    assert len(llm_service.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -3351,6 +3687,15 @@ def test_eval_cache_get_refreshes_lru_recency() -> None:
 
     assert engine._get_eval_cache_entry("key-1") is None
     assert engine._get_eval_cache_entry("key-0") == _eval_cache_value("0")
+
+
+async def test_embedding_prefilter_tolerates_engine_built_without_init() -> None:
+    """E2E tests construct engines via ``__new__``; prefilter must not AttributeError."""
+    engine = ContentDiscoveryEngine.__new__(ContentDiscoveryEngine)
+    profile = _build_profile()
+    content = DiscoveredContent(bvid="BVNOINIT", title="t", up_name="u", source_strategy="search")
+
+    assert await engine._embedding_prefilter([content], profile) == {}
 
 
 def test_eval_cache_tolerates_plain_dict_assignment() -> None:

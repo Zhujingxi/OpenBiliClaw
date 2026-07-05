@@ -95,6 +95,10 @@ _EVAL_PROFILE_RECENT_CAP = 12
 _EVAL_PROFILE_EVIDENCE_CAP = 8
 _EVAL_PROFILE_SPECULATION_CAP = 12
 _EVAL_BATCH_CACHE_VERSION = "batch-content-eval-v1"
+_EMBEDDING_PREFILTER_DEFAULT_MODE = "shadow"
+_EMBEDDING_PREFILTER_MODES = {"off", "shadow", "enforce"}
+_EMBEDDING_PREFILTER_MIN_SIMILARITY = 0.3
+_EMBEDDING_PREFILTER_REASON = "embedding 预过滤: 与所有兴趣相似度极低"
 _NEGATIVE_EXAMPLES_UNSET = object()
 
 
@@ -787,6 +791,7 @@ class ContentDiscoveryEngine:
         multimodal_image_timeout_seconds: int = 6,
         multimodal_vision_supported: bool | None = None,
         eval_batch_concurrency: int = _DEFAULT_EVAL_BATCH_CONCURRENCY,
+        eval_prefilter_mode: str = _EMBEDDING_PREFILTER_DEFAULT_MODE,
     ) -> None:
         self._strategies: list[DiscoveryStrategy] = []
         self._llm_service = llm_service
@@ -804,6 +809,7 @@ class ContentDiscoveryEngine:
             min(20, int(multimodal_image_timeout_seconds)),
         )
         self.eval_batch_concurrency = max(1, min(16, int(eval_batch_concurrency)))
+        self.eval_prefilter_mode = self._normalize_eval_prefilter_mode(eval_prefilter_mode)
         self._multimodal_vision_supported_override = multimodal_vision_supported
         self.multimodal_unavailable_reason = ""
         self._eval_cache: OrderedDict[str, _EvalCacheEntry] = OrderedDict()
@@ -838,6 +844,111 @@ class ContentDiscoveryEngine:
         cache.move_to_end(cache_key)
         while len(cache) > _EVAL_CACHE_MAX_ENTRIES:
             cache.popitem(last=False)
+
+    @staticmethod
+    def _normalize_eval_prefilter_mode(mode: str) -> str:
+        normalized = str(mode or "").strip().lower()
+        if normalized in _EMBEDDING_PREFILTER_MODES:
+            return normalized
+        return _EMBEDDING_PREFILTER_DEFAULT_MODE
+
+    @staticmethod
+    def _embedding_prefilter_content_text(content: DiscoveredContent) -> str:
+        return f"{content.title} {content.description or ''}".strip()
+
+    def _embedding_prefilter_interest_labels(self, profile: SoulProfile) -> list[str]:
+        labels: list[str] = []
+        seen: set[str] = set()
+
+        def append_label(value: object) -> None:
+            label = str(value or "").strip()
+            if not label or label in seen:
+                return
+            labels.append(label)
+            seen.add(label)
+
+        ranked_interests = sorted(
+            profile.preferences.interests,
+            key=lambda interest: float(interest.weight or 0.0),
+            reverse=True,
+        )
+        for interest in ranked_interests[:_EVAL_PROFILE_INTEREST_CAP]:
+            append_label(interest.name)
+
+        compact_profile = compact_evaluation_profile_summary(
+            self._evaluation_profile_summary(profile)
+        )
+        raw_domains = compact_profile.get("interest_domains")
+        if isinstance(raw_domains, list):
+            for domain in raw_domains[:_EVAL_PROFILE_DOMAIN_CAP]:
+                if isinstance(domain, dict):
+                    append_label(domain.get("domain"))
+                else:
+                    append_label(domain)
+
+        return labels
+
+    async def _embedding_prefilter(
+        self,
+        contents: Sequence[DiscoveredContent],
+        profile: SoulProfile,
+    ) -> dict[int, float]:
+        """Return candidate indexes that are too dissimilar for LLM evaluation."""
+
+        # getattr: e2e tests build engines via __new__ without __init__.
+        embedding_service = getattr(self, "_embedding_service", None)
+        if embedding_service is None or not contents or not profile.preferences.interests:
+            return {}
+        if not any(
+            str(content.source_strategy or "").strip().lower() != "explore" for content in contents
+        ):
+            return {}
+
+        labels = self._embedding_prefilter_interest_labels(profile)
+        if not labels:
+            return {}
+
+        from openbiliclaw.llm.embedding import cosine_similarity
+
+        interest_vectors: list[list[float]] = []
+        for label in labels:
+            try:
+                vector = await embedding_service.embed(label)
+            except Exception:
+                logger.debug(
+                    "embedding prefilter: interest embed failed for %r", label, exc_info=True
+                )
+                continue
+            if vector:
+                interest_vectors.append(vector)
+        if not interest_vectors:
+            return {}
+
+        filtered_scores: dict[int, float] = {}
+        for index, content in enumerate(contents):
+            if str(content.source_strategy or "").strip().lower() == "explore":
+                continue
+            content_text = self._embedding_prefilter_content_text(content)
+            if not content_text:
+                continue
+            try:
+                content_vec = await embedding_service.embed(content_text)
+            except Exception:
+                logger.debug(
+                    "embedding prefilter: content embed failed for %s",
+                    content.content_id or content.bvid or content.title,
+                    exc_info=True,
+                )
+                continue
+            if not content_vec:
+                continue
+            max_sim = max(
+                (cosine_similarity(content_vec, interest_vec) for interest_vec in interest_vectors),
+                default=0.0,
+            )
+            if max_sim < _EMBEDDING_PREFILTER_MIN_SIMILARITY:
+                filtered_scores[index] = round(max_sim * 0.5, 4)
+        return filtered_scores
 
     def _supports_multimodal_evaluation(self) -> bool:
         override = getattr(self, "_multimodal_vision_supported_override", None)
@@ -1287,26 +1398,24 @@ class ContentDiscoveryEngine:
                 content.franchise_key = franchise_key
             return score
 
-        # Embedding pre-filter: skip LLM call for content with very low
-        # similarity to any user interest (saves API cost)
-        if self._embedding_service is not None and profile.preferences.interests:
-            from openbiliclaw.llm.embedding import cosine_similarity
-
-            content_text = f"{content.title} {content.description or ''}"
-            content_vec = await self._embedding_service.embed(content_text)
-            if content_vec:
-                max_sim = 0.0
-                for interest_item in profile.preferences.interests[:10]:
-                    interest_vec = await self._embedding_service.embed(interest_item.name)
-                    if interest_vec:
-                        sim = cosine_similarity(content_vec, interest_vec)
-                        if sim > max_sim:
-                            max_sim = sim
-                # Very low similarity to all interests AND not from explore strategy
-                # (explore is intentionally cross-domain, so don't pre-filter it)
-                if max_sim < 0.3 and content.source_strategy != "explore":
-                    content.relevance_score = round(max_sim * 0.5, 4)
-                    content.relevance_reason = "embedding 预过滤: 与所有兴趣相似度极低"
+        prefilter_mode = self._normalize_eval_prefilter_mode(
+            getattr(self, "eval_prefilter_mode", _EMBEDDING_PREFILTER_DEFAULT_MODE)
+        )
+        if prefilter_mode != "off":
+            prefiltered = await self._embedding_prefilter([content], profile)
+            if 0 in prefiltered:
+                prefilter_score = prefiltered[0]
+                max_sim = prefilter_score * 2.0
+                if prefilter_mode == "shadow":
+                    logger.info(
+                        "prefilter-shadow title=%r max_sim=%.4f strategy=%s",
+                        content.title,
+                        max_sim,
+                        content.source_strategy,
+                    )
+                elif prefilter_mode == "enforce":
+                    content.relevance_score = prefilter_score
+                    content.relevance_reason = _EMBEDDING_PREFILTER_REASON
                     self._set_eval_cache_entry(
                         cache_key,
                         (
@@ -1527,6 +1636,86 @@ class ContentDiscoveryEngine:
             if len(scores) < original_len:
                 scores = scores + [0.0] * (original_len - len(scores))
             return scores
+
+        prefilter_mode = self._normalize_eval_prefilter_mode(
+            getattr(self, "eval_prefilter_mode", _EMBEDDING_PREFILTER_DEFAULT_MODE)
+        )
+        if prefilter_mode != "off":
+            prefilter_contents = [eval_contents[i] for i in uncached_indices]
+            prefiltered_scores = await self._embedding_prefilter(prefilter_contents, profile)
+            would_filter_count = len(prefiltered_scores)
+            if prefilter_mode == "shadow":
+                for local_index, prefilter_score in prefiltered_scores.items():
+                    content = prefilter_contents[local_index]
+                    logger.info(
+                        "prefilter-shadow title=%r max_sim=%.4f strategy=%s",
+                        content.title,
+                        prefilter_score * 2.0,
+                        content.source_strategy,
+                    )
+                logger.info(
+                    "eval_batch embedding prefilter: mode=shadow source=%s in=%d "
+                    "would_filter=%d to_llm=%d",
+                    source_context or "mixed",
+                    len(prefilter_contents),
+                    would_filter_count,
+                    len(uncached_indices),
+                )
+            elif prefilter_mode == "enforce":
+                if (
+                    len(prefilter_contents) > 1
+                    and would_filter_count / len(prefilter_contents) > 0.5
+                ):
+                    logger.warning(
+                        "eval_batch embedding prefilter kill-rate guard: source=%s in=%d "
+                        "would_filter=%d to_llm=%d",
+                        source_context or "mixed",
+                        len(prefilter_contents),
+                        would_filter_count,
+                        len(uncached_indices),
+                    )
+                    prefiltered_scores = {}
+                    would_filter_count = 0
+                else:
+                    filtered_local_indices = set(prefiltered_scores)
+                    for local_index, prefilter_score in prefiltered_scores.items():
+                        content = prefilter_contents[local_index]
+                        eval_content_index = uncached_indices[local_index]
+                        content.relevance_score = prefilter_score
+                        content.relevance_reason = _EMBEDDING_PREFILTER_REASON
+                        scores[eval_indices[eval_content_index]] = prefilter_score
+                        cache_key = self._batch_eval_cache_key(
+                            content,
+                            profile_digest=profile_digest,
+                            negative_digest=negative_digest,
+                        )
+                        self._set_eval_cache_entry(
+                            cache_key,
+                            (
+                                prefilter_score,
+                                _EMBEDDING_PREFILTER_REASON,
+                                "",
+                                "",
+                                "",
+                            ),
+                        )
+                    uncached_indices = [
+                        eval_content_index
+                        for local_index, eval_content_index in enumerate(uncached_indices)
+                        if local_index not in filtered_local_indices
+                    ]
+                logger.info(
+                    "eval_batch embedding prefilter: mode=enforce source=%s in=%d "
+                    "prefiltered=%d to_llm=%d",
+                    source_context or "mixed",
+                    len(prefilter_contents),
+                    would_filter_count,
+                    len(uncached_indices),
+                )
+                if not uncached_indices:
+                    if len(scores) < original_len:
+                        scores = scores + [0.0] * (original_len - len(scores))
+                    return scores
 
         batch_size = self._effective_eval_batch_size(
             [eval_contents[i] for i in uncached_indices],

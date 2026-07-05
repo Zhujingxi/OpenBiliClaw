@@ -2426,6 +2426,7 @@ class TestDiscoveryConfig:
             "you",
         )
         assert config.discovery.inspiration_breadth == "high"
+        assert config.discovery.eval_prefilter_mode == "shadow"
         assert config.discovery.multimodal_evaluation_enabled is False
         assert config.discovery.visual_profile_enabled is False
         assert config.discovery.keyframe_enabled is False
@@ -2456,6 +2457,7 @@ class TestDiscoveryConfig:
             "you",
         )
         assert config.discovery.inspiration_breadth == "high"
+        assert config.discovery.eval_prefilter_mode == "shadow"
         assert config.discovery.multimodal_evaluation_enabled is False
         assert config.discovery.visual_profile_enabled is False
         assert config.discovery.keyframe_enabled is False
@@ -2526,6 +2528,7 @@ inspiration_search_enabled = true
 inspiration_replace_merged_keywords = true
 inspiration_search_backends = ["platform_sources", "exa", "you"]
 inspiration_breadth = "high"
+eval_prefilter_mode = "enforce"
 multimodal_evaluation_enabled = true
 candidate_eval_concurrency = 3
 multimodal_batch_size = 4
@@ -2553,6 +2556,7 @@ multimodal_image_timeout_seconds = 10
         assert config.discovery.inspiration_replace_merged_keywords is True
         assert config.discovery.inspiration_search_backends == ("platform_sources", "exa", "you")
         assert config.discovery.inspiration_breadth == "high"
+        assert config.discovery.eval_prefilter_mode == "enforce"
         assert config.discovery.multimodal_evaluation_enabled is True
         assert config.discovery.candidate_eval_concurrency == 3
         assert config.discovery.multimodal_batch_size == 4
@@ -2658,6 +2662,28 @@ admission_min_score = {literal}
 
         assert config.discovery.admission_min_score == 0.60
 
+    def test_discovery_eval_prefilter_mode_normalizes_from_toml(self, tmp_path: Path) -> None:
+        toml_path = tmp_path / "c.toml"
+        toml_path.write_text(
+            """
+[discovery]
+eval_prefilter_mode = "  Shadow  "
+""".strip(),
+            encoding="utf-8",
+        )
+
+        config = load_config(toml_path)
+
+        assert config.discovery.eval_prefilter_mode == "shadow"
+
+    def test_validate_runtime_config_rejects_invalid_eval_prefilter_mode(self) -> None:
+        config = Config()
+        config.llm.default_provider = "ollama"
+        config.discovery.eval_prefilter_mode = "aggressive"
+
+        with pytest.raises(ConfigError, match="discovery\\.eval_prefilter_mode"):
+            validate_runtime_config(config)
+
     def test_discovery_missing_table_uses_defaults(self, tmp_path: Path) -> None:
         toml_path = tmp_path / "c.toml"
         toml_path.write_text("[scheduler]\nenabled = true\n", encoding="utf-8")
@@ -2727,6 +2753,7 @@ admission_min_score = {literal}
         config.discovery.inspiration_replace_merged_keywords = True
         config.discovery.inspiration_search_backends = ("you",)
         config.discovery.inspiration_breadth = "low"
+        config.discovery.eval_prefilter_mode = "enforce"
         config.discovery.multimodal_evaluation_enabled = True
         config.discovery.multimodal_batch_size = 4
         config.discovery.multimodal_image_max_px = 512
@@ -2751,6 +2778,7 @@ admission_min_score = {literal}
         assert loaded.discovery.inspiration_replace_merged_keywords is True
         assert loaded.discovery.inspiration_search_backends == ("you",)
         assert loaded.discovery.inspiration_breadth == "low"
+        assert loaded.discovery.eval_prefilter_mode == "enforce"
         assert loaded.discovery.multimodal_evaluation_enabled is True
         assert loaded.discovery.multimodal_batch_size == 4
         assert loaded.discovery.multimodal_image_max_px == 512
@@ -2774,6 +2802,7 @@ admission_min_score = {literal}
             in rendered
         )
         assert 'inspiration_breadth = "high"' in rendered
+        assert 'eval_prefilter_mode = "shadow"' in rendered
         assert "multimodal_evaluation_enabled = false" in rendered
         assert "multimodal_batch_size = 8" in rendered
         assert "multimodal_image_max_px = 384" in rendered

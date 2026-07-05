@@ -731,7 +731,7 @@ localhost-only. The two edges are mutually exclusive, and the default HTTP path 
 What happens after discovery:
 
 - **Safe fetching** — the backend never logs in for you and never crawls content you can't see; every platform reuses the sessions already in your browser, and first-run profile signals are pulled only after you click "Start initialization".
-- **Continuous unified evaluation** — raw candidates share one eval pool with 3×30 immediate-refill workers; scheduling counts only available, copy-pending, and evaluated durable stock, while serial admission is capped by current headroom.
+- **Continuous unified evaluation** — raw candidates share one eval pool and are scored against your Soul profile, content text, and recent negative feedback. The default 3×30 workers refill immediately, scheduling counts only durable stock, and serial admission is capped by current headroom. Optional embedding prefiltering starts in shadow mode before enforce may skip clearly low-similarity items.
 - **Diversity selection** — platform quotas → topic dedup → style balancing → cross-platform interleaving → count caps; only Bilibili is enabled out of the box, other platforms are switched on in settings.
 
 > Per-platform task pipelines, pool accounting, and fallback strategies are documented in the [Discovery Engine docs](docs/modules/discovery.md).
