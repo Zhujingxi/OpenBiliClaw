@@ -172,7 +172,7 @@ class _CountingEmbeddingService:
 
 
 _MATCH_VEC = [1.0, 0.0]
-_LOW_SIM_VEC = [0.2, 0.9797958971]
+_LOW_SIM_VEC = [0.1, 0.9949874371]
 
 
 def _prefilter_vectors(*, low_texts: list[str] | None = None) -> dict[str, list[float]]:
@@ -1259,8 +1259,8 @@ async def test_evaluate_content_batch_prefilter_enforce_filters_cache_and_exclud
     with caplog.at_level("INFO", logger="openbiliclaw.discovery.engine"):
         scores = await engine.evaluate_content_batch([filtered, relevant], profile, batch_size=2)
 
-    assert scores == [0.1, 0.8]
-    assert filtered.relevance_score == 0.1
+    assert scores == [0.05, 0.8]
+    assert filtered.relevance_score == 0.05
     assert filtered.relevance_reason == "embedding 预过滤: 与所有兴趣相似度极低"
     assert len(llm_service.user_inputs) == 1
     llm_items = _batch_prompt_items(llm_service.user_inputs[0])
@@ -1275,7 +1275,7 @@ async def test_evaluate_content_batch_prefilter_enforce_filters_cache_and_exclud
     )
     cached = engine._get_eval_cache_entry(cache_key)
     assert cached is not None
-    assert cached[:2] == (0.1, "embedding 预过滤: 与所有兴趣相似度极低")
+    assert cached[:2] == (0.05, "embedding 预过滤: 与所有兴趣相似度极低")
     assert any(
         "eval_batch embedding prefilter" in record.message
         and "in=2" in record.message
@@ -1311,7 +1311,7 @@ async def test_evaluate_content_batch_prefilter_shadow_logs_but_sends_all(
     assert any(
         "prefilter-shadow" in record.message
         and "不相关内容" in record.message
-        and "max_sim=0.2000" in record.message
+        and "max_sim=0.1000" in record.message
         and "strategy=trending" in record.message
         for record in caplog.records
     )
@@ -1495,7 +1495,7 @@ async def test_evaluate_content_batch_prefilter_all_filtered_batch_of_one_skips_
         _build_profile(),
     )
 
-    assert scores == [0.1]
+    assert scores == [0.05]
     assert llm_service.user_inputs == []
 
 
