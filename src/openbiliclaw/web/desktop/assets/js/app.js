@@ -2114,6 +2114,27 @@
       scheduleActivityRailHeightSync();
     }
 
+    // 用户是否正在惊喜卡上互动：聊天输入框展开 / 有焦点 / 有未发送草稿。
+    // 后台推送（新候选、队列刷新）在此期间不得切卡或重渲染——setActiveDelight
+    // 会 closeDelightComposer 收起输入框（field report 2026-07-05「打着打着惊喜
+    // 推荐突然变了」），切卡更会让随后的发送把这条反馈记到换上来的新卡上。
+    // 有未发送草稿也算互动中：草稿属于当前这张卡，换卡同样会串。
+    function delightUserEngaged() {
+      const input = document.getElementById("delightCommentInput");
+      if (!input) return false;
+      const composing = Boolean(document.querySelector(".delight-main-actions.is-composing"));
+      const focused = document.activeElement === input;
+      const hasDraft = Boolean(String(input.value || "").trim());
+      return composing || focused || hasDraft;
+    }
+
+    // 互动中新候选静默入队时只刷新右上角计数，不触碰卡片 DOM。
+    function syncDelightCount() {
+      if ($("#delightCount") && state.delights.length) {
+        $("#delightCount").textContent = `${state.delightIndex + 1}/${state.delights.length}`;
+      }
+    }
+
     async function handleCardAction(action, item, card) {
       const status = card.querySelector(".status-line");
       if (card.dataset.feedbackPending === "true") return;
@@ -4707,10 +4728,20 @@
         if (existingIndex >= 0) state.delights[existingIndex] = merged;
         else state.delights.push(merged);
       }
-      const nextIndex = previousActiveBvid
-        ? Math.max(0, state.delights.findIndex((item) => String(item.bvid || "") === previousActiveBvid))
-        : 0;
-      setActiveDelight(nextIndex);
+      const activePosition = previousActiveBvid
+        ? state.delights.findIndex((item) => String(item.bvid || "") === previousActiveBvid)
+        : -1;
+      if (delightUserEngaged() && state.delight) {
+        // 打字中：只同步队列数据与计数。当前卡还在队列里就更新引用；即便已被
+        // 后端消费 / 过期也保留 state.delight——发送必须落在用户正对着的这张卡上。
+        if (activePosition >= 0) {
+          state.delightIndex = activePosition;
+          state.delight = state.delights[activePosition];
+        }
+        syncDelightCount();
+        return;
+      }
+      setActiveDelight(activePosition >= 0 ? activePosition : 0);
     }
 
     function mergeMessages(items) {
@@ -4768,10 +4799,23 @@
           const existingIndex = state.delights.findIndex((item) => String(item.bvid || "") === key);
           if (existingIndex >= 0) {
             state.delights[existingIndex] = mergeDelightItem(state.delights[existingIndex], delight);
-            if (state.delight && String(state.delight.bvid || "") === key) setActiveDelight(existingIndex);
+            if (state.delight && String(state.delight.bvid || "") === key) {
+              if (delightUserEngaged()) {
+                // 正在这张卡上打字：只更新数据引用，不重渲染（重渲染会收起输入框）。
+                state.delight = state.delights[existingIndex];
+              } else {
+                setActiveDelight(existingIndex);
+              }
+            }
           } else {
             state.delights.push(delight);
-            setActiveDelight(state.delights.length - 1);
+            if (delightUserEngaged()) {
+              // 用户正在当前卡的聊天框里打字：新候选只静默入队并更新计数，
+              // 不抢走当前卡——否则输入被收起、随后的发送还会串到新卡上。
+              syncDelightCount();
+            } else {
+              setActiveDelight(state.delights.length - 1);
+            }
           }
         }
       }

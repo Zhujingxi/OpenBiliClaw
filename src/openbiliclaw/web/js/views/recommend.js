@@ -1439,7 +1439,13 @@ export function onStreamEvent(payload) {
       patchState({
         activeDelights: [...state.activeDelights, normalizeDelightCandidate(item)],
       });
-      rerenderDelightOnly();
+      // 用户正在惊喜卡的输入框里打字时不重建 DOM——textarea 会失焦、手机
+      // 键盘收起（field report 2026-07-05）。draft 已实时存进 state，队列
+      // 数据照常更新，用户发送 / 收起后的下一次交互自然刷新。
+      const typingInComposer = document.activeElement?.classList?.contains(
+        "delight-composer-input",
+      );
+      if (!typingInComposer) rerenderDelightOnly();
     }
   } else if (type === "delight.liked") {
     // Positive feedback should keep the card visible across clients.
