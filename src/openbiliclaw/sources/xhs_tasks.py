@@ -258,7 +258,9 @@ class XhsTaskQueue:
 
         if daily_budget > 0 and count_today >= daily_budget:
             logger.info(
-                "xhs task budget exhausted: type=%s, count=%d, budget=%d",
+                "xhs task budget exhausted: type=%s used_today=%d budget=%d "
+                "(per-day UTC cap from config [sources.xiaohongshu] daily_*_budget; "
+                "0 = unlimited)",
                 task_type,
                 count_today,
                 daily_budget,

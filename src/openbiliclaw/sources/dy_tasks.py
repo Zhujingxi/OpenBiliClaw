@@ -358,7 +358,9 @@ class DyTaskQueue:
 
         if daily_budget > 0 and count_today >= daily_budget:
             logger.info(
-                "dy task budget exhausted: type=%s, count=%d, budget=%d",
+                "dy task budget exhausted: type=%s used_today=%d budget=%d "
+                "(per-day UTC cap from config [sources.douyin] daily_*_budget; "
+                "0 = unlimited)",
                 task_type,
                 count_today,
                 daily_budget,

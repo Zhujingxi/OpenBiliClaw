@@ -6,16 +6,27 @@ SchedulerConfig.enabled is the authoritative gate for background LLM loops.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+logger = logging.getLogger(__name__)
+
+# A per-day task-count cap in this range almost always means the user mistook
+# ``daily_*_budget`` for an on/off toggle (typed ``1`` to "enable" a source,
+# which actually throttles it to one task per day). ``0`` = unlimited.
+_SUSPICIOUS_BUDGET_LOW = 1
+_SUSPICIOUS_BUDGET_HIGH = 4
+# Guards the once-per-process warning so repeated config reloads don't spam.
+_warned_budget_keys: set[str] = set()
 
 # Default config search paths
 _CONFIG_FILENAMES = ["config.toml", "config.local.toml"]
@@ -30,6 +41,20 @@ _SUPPORTED_OPENAI_API_FLAVORS = {"", "chat_completions", "responses"}
 # browser page-translation rewrote '奥拉玛' into config via value-less
 # <option> elements).
 _SUPPORTED_EMBEDDING_PROVIDERS = {"", "ollama", "openai", "gemini", "openai_compatible"}
+# Keep in sync with llm/registry.py `build_llm_registry` provider_specs
+# (config cannot import the registry — cycle). Used to validate
+# `[llm].fallback_provider`: an unknown name is silently dropped by the
+# chat fallback chain (`base.py:_fallback_order`), so saves are validated
+# as blocking.
+_SUPPORTED_CHAT_PROVIDERS = {
+    "openai",
+    "claude",
+    "gemini",
+    "deepseek",
+    "ollama",
+    "openrouter",
+    "openai_compatible",
+}
 _MIN_POOL_TARGET_COUNT = 1
 _MAX_POOL_TARGET_COUNT = 600
 _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS = 90
@@ -719,6 +744,42 @@ def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+def _warn_suspicious_budgets(sources: SourcesConfig) -> None:
+    """Warn once per process for per-source budgets that look like misused toggles.
+
+    ``daily_*_budget`` is a per-UTC-day task-count cap, not an on/off switch; ``0``
+    means unlimited. A value of 1–4 almost always means the user typed ``1`` to
+    "enable" a source and unknowingly throttled it to a single task per day.
+    """
+    source_configs: list[tuple[str, Any]] = [
+        ("xiaohongshu", sources.xiaohongshu),
+        ("douyin", sources.douyin),
+        ("youtube", sources.youtube),
+        ("twitter", sources.twitter),
+        ("zhihu", sources.zhihu),
+        ("reddit", sources.reddit),
+    ]
+    for source_name, source_config in source_configs:
+        for source_field in fields(source_config):
+            name = source_field.name
+            if not (name.startswith("daily_") and name.endswith("_budget")):
+                continue
+            value = getattr(source_config, name)
+            if not isinstance(value, int) or isinstance(value, bool):
+                continue
+            if not (_SUSPICIOUS_BUDGET_LOW <= value <= _SUSPICIOUS_BUDGET_HIGH):
+                continue
+            key = f"sources.{source_name}.{name}"
+            if key in _warned_budget_keys:
+                continue
+            _warned_budget_keys.add(key)
+            logger.warning(
+                "config: %s=%d — 这是每日任务次数上限,不是开关;想不限次数请设为 0",
+                key,
+                value,
+            )
+
+
 def _build_config(raw: dict[str, Any]) -> Config:
     """Build a Config dataclass from raw dict."""
     general = raw.get("general", {})
@@ -878,6 +939,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
             min_interval_minutes=max(0, int(reddit_raw.get("min_interval_minutes", 60))),
         ),
     )
+    _warn_suspicious_budgets(sources)
 
     soul_raw = raw.get("soul", {}) if isinstance(raw.get("soul"), dict) else {}
     soul_preference_raw = (
@@ -1503,6 +1565,106 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
                     severity="blocking",
                 )
             )
+
+    # `[llm].fallback_provider` dead-state validation. The chat fallback
+    # chain (llm/base.py `_fallback_order`) deliberately drops an unusable
+    # fallback WITHOUT any runtime signal — surfacing the dead state here
+    # at save/load time is the only user-visible diagnosis. Runs before the
+    # default-provider early return so a broken default provider does not
+    # hide fallback problems.
+    fallback_name = str(config.llm.fallback_provider or "").strip().lower()
+    if fallback_name:
+        default_name = str(config.llm.default_provider or "").strip().lower()
+        if fallback_name not in _SUPPORTED_CHAT_PROVIDERS:
+            supported = ", ".join(sorted(_SUPPORTED_CHAT_PROVIDERS))
+            issues.append(
+                ConfigIssue(
+                    field="llm.fallback_provider",
+                    message=(
+                        f"不支持的备选 provider: `{config.llm.fallback_provider}`。"
+                        f"仅支持: {supported}。"
+                        "如果这个值看起来像被翻译过（例如「奥拉玛」），"
+                        "请关闭浏览器的网页翻译后到设置页重新选择。"
+                    ),
+                    severity="blocking",
+                )
+            )
+        elif fallback_name == default_name:
+            issues.append(
+                ConfigIssue(
+                    field="llm.fallback_provider",
+                    message=(
+                        "备选与主 Provider 相同时永远不会生效；"
+                        "请换一个不同类型的 Provider 或留空关闭 fallback。"
+                    ),
+                    severity="blocking",
+                )
+            )
+        else:
+            # Mirrors the default-provider credential logic below: gemini
+            # may take its key from GOOGLE_API_KEY / GEMINI_API_KEY, and
+            # openai may authenticate via Codex OAuth instead of api_key.
+            fallback_cfg = getattr(config.llm, fallback_name, None)
+            fallback_required_field = _REMOTE_PROVIDER_FIELDS.get(fallback_name)
+            fallback_has_env_key = fallback_name == "gemini" and bool(_gemini_api_key_from_env())
+            fallback_uses_codex_oauth = (
+                fallback_name == "openai"
+                and config.llm.openai.auth_mode.strip().lower() == "codex_oauth"
+            )
+            if (
+                fallback_required_field
+                and fallback_cfg is not None
+                and not fallback_cfg.api_key.strip()
+                and not fallback_has_env_key
+                and not fallback_uses_codex_oauth
+            ):
+                issues.append(
+                    ConfigIssue(
+                        field="llm.fallback_provider",
+                        message=(
+                            f"备选 provider `{fallback_name}` 缺少 `api_key`，不会被注册，"
+                            f"fallback 永远不会生效；请填写 `{fallback_required_field}` "
+                            "或留空关闭 fallback。"
+                        ),
+                        severity="blocking",
+                    )
+                )
+            if (
+                fallback_name == "openai_compatible"
+                and not config.llm.openai_compatible.base_url.strip()
+            ):
+                issues.append(
+                    ConfigIssue(
+                        field="llm.fallback_provider",
+                        message=(
+                            "备选 provider `openai_compatible` 必须填 `base_url` "
+                            "(例如 Groq: https://api.groq.com/openai/v1)，"
+                            "否则不会被注册，fallback 永远不会生效。"
+                        ),
+                        severity="blocking",
+                    )
+                )
+            # Keep in sync with llm/registry.py `_maybe_ollama_provider` /
+            # `_ollama_is_chat_capable` (config cannot import the registry —
+            # cycle): Ollama only registers when `[llm.ollama]` has a model
+            # or base_url, and naming it as fallback_provider already marks
+            # it chat-capable — so non-registration is the only dead state
+            # left to check here.
+            if (
+                fallback_name == "ollama"
+                and not config.llm.ollama.model.strip()
+                and not config.llm.ollama.base_url.strip()
+            ):
+                issues.append(
+                    ConfigIssue(
+                        field="llm.fallback_provider",
+                        message=(
+                            "备选 provider `ollama` 需要在 `[llm.ollama]` 填 `model` "
+                            "或 `base_url`，否则不会被注册，fallback 永远不会生效。"
+                        ),
+                        severity="blocking",
+                    )
+                )
 
     provider_name = config.llm.default_provider
     provider_configs: dict[str, LLMProviderConfig] = {

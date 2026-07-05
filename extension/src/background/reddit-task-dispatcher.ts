@@ -6,6 +6,7 @@ import type { RedditTaskResult, RedditTaskType } from "../content/reddit/task-ex
 import { REDDIT_TASK_TAB_URL } from "../content/reddit/task-mode.ts";
 import { releaseDispatcherMutex, tryAcquireDispatcherMutex } from "./dispatcher-mutex.ts";
 import { apiUrl } from "../shared/backend-endpoint.ts";
+import { ASSET_PREFIX } from "../shared/asset-prefix.ts";
 
 const DEFAULT_POLL_INTERVAL_MS = 60_000;
 const POLL_ALARM_NAME = "openbiliclaw-reddit-task-poll";
@@ -167,7 +168,7 @@ async function injectRedditContentScriptInto(tabId: number): Promise<void> {
   try {
     await chrome.scripting.executeScript({
       target: { tabId, allFrames: false },
-      files: ["dist/content/reddit.js"],
+      files: [`${ASSET_PREFIX}content/reddit.js`],
       world: "ISOLATED",
     });
   } catch {

@@ -396,6 +396,7 @@
           <label class="settings-field"><span>B 站登录窗口</span><select id="biliBrowserHeaded"><option value="off">隐藏</option><option value="on">显示</option></select></label>
           <label class="settings-field"><span>通用网页 CDP URL</span><input id="sourcesBrowserCdp" placeholder="http://localhost:9222"></label>
           <label class="settings-field"><span>回退浏览器窗口</span><select id="sourcesBrowserHeaded"><option value="off">隐藏</option><option value="on">显示</option></select></label>
+          <p class="settings-note-inline">预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
           <div class="inline-row">
             <label class="settings-field"><span>小红书每日搜索</span><input id="xhsDailySearchBudget" inputmode="numeric" placeholder="0 = 不限"></label>
             <label class="settings-field"><span>小红书每日创作者</span><input id="xhsDailyCreatorBudget" inputmode="numeric" placeholder="0 = 不限"></label>
@@ -421,6 +422,7 @@
           <p class="settings-note-inline">在浏览器登录 x.com 后，插件会自动同步 cookie；也可在下方手动粘贴（需含 auth_token 和 ct0）。</p>
           <label class="settings-field full"><span>X Cookie</span><textarea id="twitterCookie" rows="2" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="保留空值表示不覆盖现有 cookie（登录 x.com 后插件会自动同步）"></textarea></label>
           <label class="settings-field"><span>X Cookie 环境变量</span><input id="twitterCookieEnv" placeholder="OPENBILICLAW_X_COOKIE"></label>
+          <p class="settings-note-inline">预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
           <div class="inline-row">
             <label class="settings-field"><span>X 每日搜索</span><input id="twitterDailySearchBudget" inputmode="numeric" placeholder="0 = 不限"></label>
             <label class="settings-field"><span>X 每日 For-You</span><input id="twitterDailyFeedBudget" inputmode="numeric" placeholder="0 = 不限"></label>
@@ -437,6 +439,7 @@
             <label class="settings-field"><span>作者分支</span><input id="zhihuModeCreator" type="checkbox"></label>
             <label class="settings-field"><span>相关分支</span><input id="zhihuModeRelated" type="checkbox"></label>
           </div>
+          <p class="settings-note-inline">预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
           <div class="inline-row">
             <label class="settings-field"><span>知乎每日搜索</span><input id="zhihuDailySearchBudget" inputmode="numeric" placeholder="0 = 不限"></label>
             <label class="settings-field"><span>知乎每日热榜</span><input id="zhihuDailyHotBudget" inputmode="numeric" placeholder="0 = 不限"></label>
@@ -456,6 +459,7 @@
             <label class="settings-field"><span>Subreddit 分支</span><input id="redditModeSubreddit" type="checkbox"></label>
             <label class="settings-field"><span>相关分支</span><input id="redditModeRelated" type="checkbox"></label>
           </div>
+          <p class="settings-note-inline">预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限（Reddit 各分支默认 300）。</p>
           <div class="inline-row">
             <label class="settings-field"><span>Reddit 每日搜索</span><input id="redditDailySearchBudget" inputmode="numeric" placeholder="300"></label>
             <label class="settings-field"><span>Reddit 每日热门</span><input id="redditDailyHotBudget" inputmode="numeric" placeholder="300"></label>

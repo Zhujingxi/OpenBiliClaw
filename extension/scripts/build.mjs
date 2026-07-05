@@ -72,6 +72,16 @@ for (const target of entrypoints) {
     target: buildTarget,
     sourcemap: true,
     logLevel: "info",
+    // Runtime asset paths differ by layout: Chrome loads from the repo root so
+    // bundles live under dist/; Firefox packaged builds zip dist-firefox/ as the
+    // root, placing bundles at main/…, content/… with no dist/ prefix. Inject the
+    // right prefix so dynamic executeScript/getURL paths resolve in both.
+    define: { __OBC_ASSET_PREFIX__: JSON.stringify(isFirefox ? "" : "dist/") },
+    // Firefox structured-clones the completion value of MAIN-world file
+    // injections and rejects non-clonable results (the script still executes);
+    // a trailing `null;` guarantees every bundle ends with a clonable value.
+    // Safe globally here because all bundles are classic IIFE scripts.
+    footer: { js: "null;" },
   });
 }
 

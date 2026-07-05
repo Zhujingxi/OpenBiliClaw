@@ -26,6 +26,7 @@ import type {
   DouyinSearchScope,
 } from "../main/dy-fetch-tap.js";
 import { apiUrl } from "../shared/backend-endpoint.ts";
+import { ASSET_PREFIX } from "../shared/asset-prefix.ts";
 import { douyinAdapter } from "../shared/platforms/douyin.ts";
 import { registerE2EExecutor } from "./e2e-executor.ts";
 
@@ -89,7 +90,7 @@ function debugLog(event: string, data?: unknown): void {
 function reinjectFetchTap(): void {
   if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.getURL) return;
   const script = document.createElement("script");
-  script.src = chrome.runtime.getURL("dist/main/dy-fetch-tap.js");
+  script.src = chrome.runtime.getURL(`${ASSET_PREFIX}main/dy-fetch-tap.js`);
   script.onload = () => script.remove();
   script.onerror = () => script.remove();
   (document.head || document.documentElement).appendChild(script);
