@@ -154,21 +154,30 @@ multimodal_enabled = false
 
 [llm.routes.soul]
 # Soul profile generation / incremental updates (init, role/values/core delta)
+# Keep this bucket on the quality model; it owns durable preference and sentiment judgment.
 inherit = true
 chain = []
 
 [llm.routes.discovery]
 # Content discovery (search query generation, domain exploration)
+# Covers caller families: discovery.search/explore/trending/related/keyword/x/douyin,
+# runtime.bilibili_extension_search, yt_search, sources.xhs.
 inherit = true
 chain = []
+# Example custom chain: ["deepseek-fast"]
 
 [llm.routes.recommendation]
 # Recommendation expression generation
+# Covers caller families: recommendation.* except recommendation.evaluate_batch.
 inherit = true
 chain = []
 
 [llm.routes.evaluation]
 # Content relevance evaluation (LLM-as-judge for discovered content)
+# Covers caller families: recommendation.evaluate_batch, discovery.evaluate*, discovery.eval*, eval*.
+# Validate a downgrade with:
+# scripts/run_profile_diet_ab.py --arm-b model=<instance-id> --sample 100 \
+#   --repeats 3 --output data/eval/model-route.json
 inherit = true
 chain = []
 

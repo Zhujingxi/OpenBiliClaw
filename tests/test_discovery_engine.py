@@ -135,6 +135,93 @@ class _DynamicBatchLLMService:
         return _SlowResponse(json.dumps(payload, ensure_ascii=False))
 
 
+class _SplitRetryBatchLLMService:
+    """Controllable batch fake for split-retry tests."""
+
+    def __init__(
+        self,
+        *,
+        invalid_batch_calls: set[int] | None = None,
+        invalid_all_batches: bool = False,
+        count_mismatch_batch_calls: set[int] | None = None,
+        rate_limit_batch_calls: set[int] | None = None,
+    ) -> None:
+        self.invalid_batch_calls = invalid_batch_calls or set()
+        self.invalid_all_batches = invalid_all_batches
+        self.count_mismatch_batch_calls = count_mismatch_batch_calls or set()
+        self.rate_limit_batch_calls = rate_limit_batch_calls or set()
+        self.batch_call_sizes: list[int] = []
+        self.single_calls = 0
+
+    async def complete_structured_task(
+        self,
+        *,
+        system_instruction: str,
+        user_input: str,
+        history: list[dict[str, str]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        caller: str = "",
+        reasoning_effort: str | None = None,
+    ) -> object:
+        if "<content_batch>" not in user_input:
+            self.single_calls += 1
+            return _SlowResponse('{"score": 0.51, "reason": "single"}')
+
+        batch_json = user_input.split("<content_batch>", 1)[1].split("</content_batch>", 1)[0]
+        items = json.loads(batch_json.strip())
+        self.batch_call_sizes.append(len(items))
+        call_index = len(self.batch_call_sizes)
+        if call_index in self.rate_limit_batch_calls:
+            raise LLMProviderExecutionError("Provider returned 429 rate limit")
+        if self.invalid_all_batches or call_index in self.invalid_batch_calls:
+            return _SlowResponse("not json")
+
+        payload_items = items
+        include_ids = True
+        if call_index in self.count_mismatch_batch_calls:
+            payload_items = items[:-1]
+            include_ids = False
+        payload: list[dict[str, object]] = []
+        style_keys = (
+            "deep_focus",
+            "quick_scan",
+            "hands_on",
+            "decision_support",
+            "story_immersion",
+            "opinion_sparring",
+            "social_chat",
+            "daily_wander",
+            "mood_release",
+            "aesthetic_browse",
+            "ambient_companion",
+            "live_pulse",
+            "curiosity_spark",
+        )
+        for index, item in enumerate(payload_items):
+            result: dict[str, object] = {
+                "score": 0.73,
+                "reason": "batch",
+                "style_key": style_keys[index % len(style_keys)],
+            }
+            if include_ids:
+                result["content_id"] = item.get("content_id") or item.get("bvid") or str(index)
+            payload.append(result)
+        return _SlowResponse(json.dumps(payload, ensure_ascii=False))
+
+
+def _split_retry_contents(count: int, *, prefix: str) -> list[DiscoveredContent]:
+    return [
+        DiscoveredContent(
+            bvid=f"BV{prefix}{index:04d}",
+            title=f"candidate {index}",
+            up_name="u",
+            source_strategy="trending",
+        )
+        for index in range(count)
+    ]
+
+
 class _ConcurrentBatchLLMService(_DynamicBatchLLMService):
     def __init__(self, delay: float = 0.01) -> None:
         super().__init__()
@@ -2351,6 +2438,59 @@ async def test_evaluate_batch_propagates_provider_cooldown_without_single_fallba
         await engine._evaluate_batch(batch, _build_profile())
 
     assert llm_service.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_batch_splits_once_after_first_parse_failure() -> None:
+    llm_service = _SplitRetryBatchLLMService(invalid_batch_calls={1})
+    engine = ContentDiscoveryEngine(llm_service=llm_service)
+    contents = _split_retry_contents(45, prefix="SPLIT")
+
+    scores = await engine.evaluate_content_batch(contents, _build_profile(), batch_size=45)
+
+    assert llm_service.batch_call_sizes == [45, 22, 23]
+    assert llm_service.single_calls == 0
+    assert scores == [0.73] * 45
+    assert all(content.relevance_score == 0.73 for content in contents)
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_batch_persistent_parse_failure_splits_to_single_eval() -> None:
+    llm_service = _SplitRetryBatchLLMService(invalid_all_batches=True)
+    engine = ContentDiscoveryEngine(llm_service=llm_service)
+    contents = _split_retry_contents(16, prefix="FAIL")
+
+    scores = await engine.evaluate_content_batch(contents, _build_profile(), batch_size=16)
+
+    assert llm_service.batch_call_sizes == [16, 8, 8]
+    assert llm_service.single_calls == 16
+    assert scores == [0.51] * 16
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_batch_rate_limit_propagates_without_split_retry() -> None:
+    llm_service = _SplitRetryBatchLLMService(rate_limit_batch_calls={1})
+    engine = ContentDiscoveryEngine(llm_service=llm_service)
+    contents = _split_retry_contents(16, prefix="LIMIT")
+
+    with pytest.raises(LLMProviderExecutionError):
+        await engine.evaluate_content_batch(contents, _build_profile(), batch_size=16)
+
+    assert llm_service.batch_call_sizes == [16]
+    assert llm_service.single_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_batch_splits_idless_count_mismatch() -> None:
+    llm_service = _SplitRetryBatchLLMService(count_mismatch_batch_calls={1})
+    engine = ContentDiscoveryEngine(llm_service=llm_service)
+    contents = _split_retry_contents(45, prefix="COUNT")
+
+    scores = await engine.evaluate_content_batch(contents, _build_profile(), batch_size=45)
+
+    assert llm_service.batch_call_sizes == [45, 22, 23]
+    assert llm_service.single_calls == 0
+    assert scores == [0.73] * 45
 
 
 @pytest.mark.asyncio
