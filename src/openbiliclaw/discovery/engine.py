@@ -100,6 +100,15 @@ _EMBEDDING_PREFILTER_MODES = {"off", "shadow", "enforce"}
 _EMBEDDING_PREFILTER_MIN_SIMILARITY = 0.3
 _EMBEDDING_PREFILTER_REASON = "embedding 预过滤: 与所有兴趣相似度极低"
 _NEGATIVE_EXAMPLES_UNSET = object()
+_EVAL_RECALL_POOL_CAP = 256
+_RECENT_CONTEXT_VOLATILE_KEYS = {
+    "created_at",
+    "date",
+    "session_context",
+    "session_id",
+    "timestamp",
+    "updated_at",
+}
 
 
 def discovery_raw_candidate_mode_enabled() -> bool:
@@ -129,10 +138,12 @@ def compact_evaluation_profile_summary(profile_summary: dict[str, object]) -> di
     compacted["interest_domains"] = _compact_interest_domains(
         profile_summary.get("interest_domains"),
     )
-    compacted["recent_awareness"] = _cap_profile_sequence(
-        profile_summary.get("recent_awareness"),
-        _EVAL_PROFILE_RECENT_CAP,
-        newest=True,
+    compacted["recent_awareness"] = _strip_volatile_profile_entry_fields(
+        _cap_profile_sequence(
+            profile_summary.get("recent_awareness"),
+            _EVAL_PROFILE_RECENT_CAP,
+            newest=True,
+        )
     )
     compacted["active_insights"] = _compact_active_insights(
         profile_summary.get("active_insights"),
@@ -157,6 +168,24 @@ def _cap_profile_sequence(value: object, cap: int, *, newest: bool = False) -> o
     if len(value) <= cap:
         return list(value)
     return list(value[-cap:] if newest else value[:cap])
+
+
+def _strip_volatile_profile_entry_fields(value: object) -> object:
+    if not isinstance(value, list):
+        return value if value is not None else []
+    compacted: list[object] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            compacted.append(entry)
+            continue
+        compacted.append(
+            {
+                key: entry_value
+                for key, entry_value in entry.items()
+                if key not in _RECENT_CONTEXT_VOLATILE_KEYS
+            }
+        )
+    return compacted
 
 
 def _profile_weight(value: object) -> float:
@@ -203,11 +232,64 @@ def _compact_active_insights(value: object) -> list[object]:
             compacted.append(insight)
             continue
         item = dict(insight)
+        for key in _RECENT_CONTEXT_VOLATILE_KEYS:
+            item.pop(key, None)
         evidence = item.get("evidence")
         if isinstance(evidence, list):
             item["evidence"] = list(evidence[:_EVAL_PROFILE_EVIDENCE_CAP])
         compacted.append(item)
     return compacted
+
+
+def _profile_interest_weight(interest: object) -> float:
+    return _coerce_recall_weight(getattr(interest, "weight", 0.0))
+
+
+def _coerce_recall_weight(value: object) -> float:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, int | float | str):
+        try:
+            return float(value or 0.0)
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _profile_interests_by_weight(profile: SoulProfile) -> list[object]:
+    preferences = getattr(profile, "preferences", None)
+    raw_interests = getattr(preferences, "interests", []) if preferences is not None else []
+    if not isinstance(raw_interests, list):
+        return []
+    return sorted(raw_interests, key=_profile_interest_weight, reverse=True)
+
+
+def _evaluation_recall_interests(profile: SoulProfile) -> list[dict[str, object]]:
+    interests: list[dict[str, object]] = []
+    for interest in _profile_interests_by_weight(profile)[:_EVAL_RECALL_POOL_CAP]:
+        name = str(getattr(interest, "name", "") or "").strip()
+        if not name:
+            continue
+        category = str(getattr(interest, "category", "") or "").strip()
+        interests.append(
+            {
+                "name": name,
+                "category": category,
+                "weight": _profile_interest_weight(interest),
+            }
+        )
+    return interests
+
+
+def _evaluation_recall_pool_digest_payload(profile: SoulProfile) -> list[tuple[str, str, float]]:
+    return [
+        (
+            str(interest["name"]),
+            str(interest["category"]),
+            round(_coerce_recall_weight(interest["weight"]), 2),
+        )
+        for interest in _evaluation_recall_interests(profile)
+    ]
 
 
 @dataclass
@@ -1430,22 +1512,27 @@ class ContentDiscoveryEngine:
 
         from openbiliclaw.llm.prompts import build_content_evaluation_prompt
 
+        content_summary: dict[str, object] = {
+            "content_id": content.content_id or content.bvid,
+            "content_url": content.content_url,
+            "source_platform": content.source_platform or "bilibili",
+            "content_type": content.content_type,
+            "body_text": content.body_text,
+            "title": content.title,
+            "up_name": content.up_name,
+            "author_name": content.author_name or content.up_name,
+            "description": _prompt_description_for_content(content),
+            "duration": content.duration,
+            "source_strategy": content.source_strategy,
+            **_prompt_visible_content_fields(content),
+        }
+        related_interests = await self._related_interests_for_content(content, profile)
+        if related_interests:
+            content_summary["related_interests"] = related_interests
+
         messages = build_content_evaluation_prompt(
-            profile_summary=build_profile_summary(profile),
-            content_summary={
-                "content_id": content.content_id or content.bvid,
-                "content_url": content.content_url,
-                "source_platform": content.source_platform or "bilibili",
-                "content_type": content.content_type,
-                "body_text": content.body_text,
-                "title": content.title,
-                "up_name": content.up_name,
-                "author_name": content.author_name or content.up_name,
-                "description": _prompt_description_for_content(content),
-                "duration": content.duration,
-                "source_strategy": content.source_strategy,
-                **_prompt_visible_content_fields(content),
-            },
+            profile_summary=self._evaluation_profile_summary(profile),
+            content_summary=content_summary,
             source_context=source_context or content.source_strategy,
             source_platform=content.source_platform or "bilibili",
         )
@@ -1926,13 +2013,140 @@ class ContentDiscoveryEngine:
         return exemplars
 
     def _evaluation_profile_digest(self, profile: SoulProfile) -> str:
-        """Digest the full structured profile shape visible to batch evaluation."""
+        """Digest the structured profile slice and recall pool visible to evaluation."""
 
-        return stable_json_digest(self._evaluation_profile_summary(profile))
+        compacted = self._evaluation_profile_summary(profile)
+        return stable_json_digest(
+            {
+                "summary": compacted,
+                "recall_pool": _evaluation_recall_pool_digest_payload(profile),
+            }
+        )
 
     @staticmethod
     def _evaluation_profile_summary(profile: SoulProfile) -> dict[str, object]:
-        return build_profile_summary(profile)
+        return compact_evaluation_profile_summary(build_profile_summary(profile))
+
+    async def _related_interests_for_content(
+        self,
+        content: DiscoveredContent,
+        profile: SoulProfile,
+        *,
+        top_k: int = 3,
+    ) -> list[dict[str, str]]:
+        """Return content-relevant interests from the full eval recall pool."""
+
+        embedding_service = getattr(self, "_embedding_service", None)
+        if embedding_service is None:
+            return []
+        interests = _evaluation_recall_interests(profile)
+        if not interests:
+            return []
+        try:
+            interest_vectors = await self._embed_related_interest_vectors(
+                embedding_service,
+                interests,
+            )
+            content_vec = await embedding_service.embed(
+                self._embedding_prefilter_content_text(content)
+            )
+        except Exception:
+            logger.debug("related_interests: embedding failed", exc_info=True)
+            return []
+        if not content_vec:
+            return []
+        return self._score_related_interests(
+            content_vec,
+            interests,
+            interest_vectors,
+            top_k=top_k,
+        )
+
+    async def _related_interests_for_batch(
+        self,
+        contents: Sequence[DiscoveredContent],
+        profile: SoulProfile,
+        *,
+        top_k: int = 3,
+    ) -> dict[int, list[dict[str, str]]]:
+        embedding_service = getattr(self, "_embedding_service", None)
+        if embedding_service is None or not contents:
+            return {}
+        interests = _evaluation_recall_interests(profile)
+        if not interests:
+            return {}
+        try:
+            interest_vectors = await self._embed_related_interest_vectors(
+                embedding_service,
+                interests,
+            )
+        except Exception:
+            logger.debug("related_interests: interest embedding batch failed", exc_info=True)
+            return {}
+
+        related_by_index: dict[int, list[dict[str, str]]] = {}
+        for index, content in enumerate(contents):
+            try:
+                content_vec = await embedding_service.embed(
+                    self._embedding_prefilter_content_text(content)
+                )
+            except Exception:
+                logger.debug(
+                    "related_interests: content embedding failed for %s",
+                    content.content_id or content.bvid or content.title,
+                    exc_info=True,
+                )
+                continue
+            if not content_vec:
+                continue
+            related = self._score_related_interests(
+                content_vec,
+                interests,
+                interest_vectors,
+                top_k=top_k,
+            )
+            if related:
+                related_by_index[index] = related
+        return related_by_index
+
+    @staticmethod
+    async def _embed_related_interest_vectors(
+        embedding_service: SupportsEmbeddingService,
+        interests: list[dict[str, object]],
+    ) -> list[list[float]]:
+        vectors: list[list[float]] = []
+        for interest in interests:
+            vector = await embedding_service.embed(str(interest["name"]))
+            vectors.append(vector)
+        return vectors
+
+    @staticmethod
+    def _score_related_interests(
+        content_vec: list[float],
+        interests: list[dict[str, object]],
+        interest_vectors: list[list[float]],
+        *,
+        top_k: int,
+    ) -> list[dict[str, str]]:
+        from openbiliclaw.llm.embedding import cosine_similarity
+
+        scored: list[tuple[dict[str, object], float]] = []
+        for interest, interest_vec in zip(interests, interest_vectors, strict=False):
+            if not interest_vec:
+                continue
+            weight = _coerce_recall_weight(interest.get("weight", 0.0))
+            sim = cosine_similarity(content_vec, interest_vec)
+            scored.append((interest, sim * 0.7 + weight * 0.3))
+
+        scored.sort(key=lambda item: -item[1])
+        limit = max(0, int(top_k))
+        return [
+            {
+                "name": str(interest["name"]),
+                "category": str(interest["category"]),
+            }
+            for interest, _score in scored[:limit]
+        ]
 
     def _evaluation_profile_prompt_cache_obj(self) -> PromptLayerRenderCache:
         """Return eval profile prompt cache, creating it for lightweight tests."""
@@ -1978,8 +2192,9 @@ class ContentDiscoveryEngine:
         from openbiliclaw.llm.prompts import build_batch_content_evaluation_prompt
 
         profile_data = self._evaluation_profile_summary(profile)
+        related_interests_by_index = await self._related_interests_for_batch(batch, profile)
         content_items: list[dict[str, object]] = []
-        for c in batch:
+        for index, c in enumerate(batch):
             platform = (c.source_platform or ("bilibili" if c.bvid else "")).strip().lower()
             if platform == "xhs":
                 platform = "xiaohongshu"
@@ -1991,25 +2206,27 @@ class ContentDiscoveryEngine:
                 platform = "bilibili"
             if not platform:
                 platform = "bilibili"
-            content_items.append(
-                {
-                    "bvid": c.bvid,
-                    "content_id": c.content_id or c.bvid,
-                    "content_url": c.content_url,
-                    "source_platform": platform,
-                    "source_strategy": c.source_strategy,
-                    "source_context": source_context or c.source_strategy,
-                    "content_type": resolve_content_type(c.content_type, platform),
-                    "body_text": c.body_text,
-                    "title": c.title,
-                    "up_name": c.up_name,
-                    "author_name": c.author_name or c.up_name,
-                    "description": _prompt_description_for_content(c, limit=400),
-                    "cover_url": c.cover_url,
-                    "duration": c.duration,
-                    **_prompt_visible_content_fields(c),
-                }
-            )
+            item: dict[str, object] = {
+                "bvid": c.bvid,
+                "content_id": c.content_id or c.bvid,
+                "content_url": c.content_url,
+                "source_platform": platform,
+                "source_strategy": c.source_strategy,
+                "source_context": source_context or c.source_strategy,
+                "content_type": resolve_content_type(c.content_type, platform),
+                "body_text": c.body_text,
+                "title": c.title,
+                "up_name": c.up_name,
+                "author_name": c.author_name or c.up_name,
+                "description": _prompt_description_for_content(c, limit=400),
+                "cover_url": c.cover_url,
+                "duration": c.duration,
+                **_prompt_visible_content_fields(c),
+            }
+            related_interests = related_interests_by_index.get(index)
+            if related_interests:
+                item["related_interests"] = related_interests
+            content_items.append(item)
         image_inputs: list[dict[str, str]] = []
         multimodal_enabled = bool(getattr(self, "multimodal_evaluation_enabled", False))
         if (

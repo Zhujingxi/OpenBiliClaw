@@ -4,6 +4,12 @@ Usage:
     .venv/bin/python scripts/run_profile_diet_ab.py --arm-b compact --sample 100
     .venv/bin/python scripts/run_profile_diet_ab.py --arm-b body-cap --sample 100
     .venv/bin/python scripts/run_profile_diet_ab.py --arm-b model=deepseek:deepseek-chat
+
+For ``--arm-b compact``, arm A forces the legacy full-profile/no-recall prompt
+shape and arm B uses current production inputs: compact profile plus per-item
+``related_interests`` recall when an embedding service is configured. For
+``body-cap`` and ``model=...`` arms, both sides use production profile/recall
+shape so the requested arm remains the only intentional difference.
 """
 
 from __future__ import annotations
@@ -27,7 +33,7 @@ logger = logging.getLogger("eval.profile_diet_ab")
 
 FLIP_RATE_MAX = 0.03
 SPEARMAN_MIN = 0.95
-CHUNK_TIMEOUT_SECONDS = 300.0
+CHUNK_TIMEOUT_SECONDS = 900.0
 
 BODY_CAP_HEAD = 1600
 BODY_CAP_TAIL = 400
@@ -418,23 +424,59 @@ def _build_llm_service(
     )
 
 
+def _build_embedding_service(config: object) -> object | None:
+    from openbiliclaw.llm.registry import build_embedding_service, build_llm_registry
+
+    try:
+        registry = build_llm_registry(config)
+        return build_embedding_service(config, registry)
+    except Exception:
+        logger.debug("Failed to build replay embedding service", exc_info=True)
+        return None
+
+
+class _DeterministicLLMService:
+    """Force temperature=0 so the replay measures prompt changes, not sampling noise.
+
+    The production evaluator samples at the provider default temperature; an
+    A/A control run showed that single-sample noise alone produces ~17% admission
+    flips at N=100 — far above the 3% gate. Pinning temperature makes the two
+    arms comparable.
+    """
+
+    def __init__(self, inner: object) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+    async def complete_structured_task(self, **kwargs: Any) -> object:
+        kwargs["temperature"] = 0.0
+        result = self._inner.complete_structured_task(**kwargs)  # type: ignore[attr-defined]
+        return await result
+
+
 def _build_engine(
     llm_service: object,
     config: object,
     *,
     compact_profile: bool,
     negative_examples: list[dict[str, object]] | None,
+    legacy_profile: bool,
+    embedding_service: object | None,
 ) -> object:
     from openbiliclaw.discovery.engine import (
         ContentDiscoveryEngine,
         DiscoveryConcurrencyController,
         compact_evaluation_profile_summary,
     )
+    from openbiliclaw.discovery.strategies._utils import build_profile_summary
 
     class ReplayDiscoveryEngine(ContentDiscoveryEngine):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             self._replay_negative_examples = negative_examples
             self._replay_compact_profile = compact_profile
+            self._replay_legacy_profile = legacy_profile
             super().__init__(*args, **kwargs)
 
         def _get_eval_cache_entry(self, cache_key: str) -> None:
@@ -453,17 +495,41 @@ def _build_engine(
             return set()
 
         def _evaluation_profile_summary(self, profile: object) -> dict[str, object]:
+            if bool(getattr(self, "_replay_legacy_profile", False)):
+                return build_profile_summary(profile)
             summary = ContentDiscoveryEngine._evaluation_profile_summary(profile)
             if not bool(getattr(self, "_replay_compact_profile", False)):
                 return summary
             return compact_evaluation_profile_summary(summary)
+
+        async def _related_interests_for_content(
+            self,
+            content: object,
+            profile: object,
+            *,
+            top_k: int = 3,
+        ) -> list[dict[str, str]]:
+            if bool(getattr(self, "_replay_legacy_profile", False)):
+                return []
+            return await super()._related_interests_for_content(content, profile, top_k=top_k)
+
+        async def _related_interests_for_batch(
+            self,
+            contents: Sequence[object],
+            profile: object,
+            *,
+            top_k: int = 3,
+        ) -> dict[int, list[dict[str, str]]]:
+            if bool(getattr(self, "_replay_legacy_profile", False)):
+                return {}
+            return await super()._related_interests_for_batch(contents, profile, top_k=top_k)
 
     discovery_cfg = getattr(config, "discovery", None)
     return ReplayDiscoveryEngine(
         llm_service=llm_service,
         database=None,
         concurrency=DiscoveryConcurrencyController(llm_evaluation_concurrency=2),
-        embedding_service=None,
+        embedding_service=embedding_service,
         multimodal_evaluation_enabled=bool(
             getattr(discovery_cfg, "multimodal_evaluation_enabled", False)
         ),
@@ -498,7 +564,11 @@ async def _score_contents(
 ) -> list[float]:
     if not contents:
         return []
+    # Chunk at the batch size (45), not the 90 hard cap: each chunk carries
+    # its own recall-embedding warm-up, so smaller chunks keep the per-chunk
+    # timeout budget meaningful.
     hard_cap = max(1, int(getattr(engine, "_EVALUATE_BATCH_HARD_CAP", 90) or 90))
+    hard_cap = min(hard_cap, _DEFAULT_BATCH_SIZE)
     scores: list[float] = []
     evaluate = getattr(engine, "evaluate_content_batch", None)
     if not callable(evaluate):
@@ -550,6 +620,7 @@ def _print_report(
     scores_a: Sequence[float],
     scores_b: Sequence[float],
     platform: str | None,
+    recall_note: str = "",
 ) -> bool:
     delta = score_delta_summary(scores_a, scores_b)
     spearman = spearman_rank_correlation(scores_a, scores_b)
@@ -559,8 +630,11 @@ def _print_report(
     print("\nProfile Diet A/B Replay")
     print(f"  sample: {len(candidates)}")
     print(f"  platform: {platform or 'all'}")
-    print("  arm A: baseline")
+    arm_a_label = "legacy full-profile/no-recall" if arm_b == "compact" else "production"
+    print(f"  arm A: {arm_a_label}")
     print(f"  arm B: {arm_b}")
+    if recall_note:
+        print(f"  note: {recall_note}")
     print()
     print("Metrics")
     print(f"  mean |delta|: {delta.mean_abs_delta:.4f}")
@@ -570,6 +644,37 @@ def _print_report(
         f"  flip rate:    {flips.flip_rate:.2%} "
         f"({flips.flip_count}/{flips.item_count}, gate <= {FLIP_RATE_MAX:.0%})"
     )
+    print()
+    print("Drift (noise-robust: symmetric sampling noise cancels, one-sided bias does not)")
+    signed = [float(b) - float(a) for a, b in zip(scores_a, scores_b, strict=True)]
+    mean_signed = sum(signed) / len(signed) if signed else 0.0
+    thresholds = _default_strategy_thresholds()
+    default_threshold = thresholds.get("default", 0.60)
+
+    def _admit_count(scores: Sequence[float]) -> int:
+        count = 0
+        for candidate, score in zip(candidates, scores, strict=True):
+            threshold = thresholds.get(_candidate_strategy(candidate), default_threshold)
+            if score >= threshold:
+                count += 1
+        return count
+
+    admit_a = _admit_count(scores_a)
+    admit_b = _admit_count(scores_b)
+    print(f"  mean signed delta (B-A): {mean_signed:+.4f}")
+    print(
+        f"  admitted: arm A {admit_a}/{len(candidates)}, arm B {admit_b}/{len(candidates)} "
+        f"(rate delta {(admit_b - admit_a) / len(candidates):+.1%})"
+        if candidates
+        else "  admitted: n/a"
+    )
+    per_platform: dict[str, list[float]] = {}
+    for candidate, signed_delta in zip(candidates, signed, strict=True):
+        per_platform.setdefault(candidate.source_platform or "unknown", []).append(signed_delta)
+    print("  per-platform mean signed delta:")
+    for platform_key in sorted(per_platform):
+        values = per_platform[platform_key]
+        print(f"    {platform_key}: {sum(values) / len(values):+.4f} (n={len(values)})")
     print()
     print("Per-strategy flips")
     if flips.per_strategy:
@@ -619,23 +724,39 @@ async def run(args: argparse.Namespace) -> int:
         )
 
     data_root = db_path.parent
+    # Point every data-relative consumer (embedding L2 cache, memory layers)
+    # at the deployment's data dir — package-relative resolution breaks in
+    # multi-checkout layouts and silently produces cold caches.
+    config.data_dir = str(data_root)  # type: ignore[attr-defined]
     profile = _load_current_profile(data_root)
     negative_examples = _recent_negative_exemplars(database)
     candidates = [_row_to_replay_candidate(row) for row in rows]
 
-    arm_a_service = _build_llm_service(config, data_root)
-    arm_b_service = _build_llm_service(config, data_root, model_override=model_override)
+    arm_a_service = _DeterministicLLMService(_build_llm_service(config, data_root))
+    arm_b_service = _DeterministicLLMService(
+        _build_llm_service(config, data_root, model_override=model_override)
+    )
+    embedding_service = _build_embedding_service(config)
+    recall_note = (
+        "related_interests recall disabled: embedding service unavailable"
+        if embedding_service is None
+        else ""
+    )
     arm_a_engine = _build_engine(
         arm_a_service,
         config,
         compact_profile=False,
         negative_examples=negative_examples,
+        legacy_profile=compact_profile,
+        embedding_service=None if compact_profile else embedding_service,
     )
     arm_b_engine = _build_engine(
         arm_b_service,
         config,
         compact_profile=compact_profile,
         negative_examples=negative_examples,
+        legacy_profile=False,
+        embedding_service=embedding_service,
     )
 
     scores_a = await _score_contents(
@@ -657,6 +778,7 @@ async def run(args: argparse.Namespace) -> int:
         scores_a=scores_a,
         scores_b=scores_b,
         platform=args.platform,
+        recall_note=recall_note,
     )
     return 0 if gate_passed else 1
 

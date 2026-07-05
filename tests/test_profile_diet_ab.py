@@ -5,12 +5,18 @@ from __future__ import annotations
 import pytest
 from scripts.run_profile_diet_ab import (
     ReplayCandidate,
+    _build_engine,
+    _print_report,
     admission_flip_summary,
     cap_body_text,
     score_delta_summary,
     select_replay_rows,
     spearman_rank_correlation,
 )
+
+from openbiliclaw.discovery.engine import ContentDiscoveryEngine, compact_evaluation_profile_summary
+from openbiliclaw.discovery.strategies._utils import build_profile_summary
+from openbiliclaw.soul.profile import InterestTag, SoulProfile
 
 
 def test_score_delta_summary_reports_mean_and_nearest_rank_p95() -> None:
@@ -133,3 +139,89 @@ def test_cap_body_text_keeps_short_text_and_caps_long_text() -> None:
 
     assert cap_body_text(short) == short
     assert cap_body_text(long) == ("h" * 1600) + "\u2026" + ("t" * 400)
+
+
+class _ReplayDiscoveryConfig:
+    multimodal_evaluation_enabled = False
+    multimodal_batch_size = 8
+    multimodal_image_max_px = 384
+    multimodal_image_quality = 72
+    multimodal_image_timeout_seconds = 6
+
+
+class _ReplayConfig:
+    discovery = _ReplayDiscoveryConfig()
+
+
+class _ReplayEmbedding:
+    async def embed(self, text: str) -> list[float]:
+        return [1.0, 0.0] if text else []
+
+
+def _many_interest_profile() -> SoulProfile:
+    profile = SoulProfile()
+    profile.preferences.interests = [
+        InterestTag(name=f"兴趣{index}", category="测试", weight=1.0 - index / 1000)
+        for index in range(80)
+    ]
+    return profile
+
+
+def test_compact_replay_arm_a_forces_legacy_full_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After production becomes compact, compact-arm A must still be full-profile legacy."""
+
+    def production_summary(profile: SoulProfile) -> dict[str, object]:
+        return compact_evaluation_profile_summary(build_profile_summary(profile))
+
+    monkeypatch.setattr(
+        ContentDiscoveryEngine,
+        "_evaluation_profile_summary",
+        staticmethod(production_summary),
+    )
+
+    engine = _build_engine(
+        object(),
+        _ReplayConfig(),
+        compact_profile=False,
+        negative_examples=None,
+        legacy_profile=True,
+        embedding_service=None,
+    )
+
+    summary = engine._evaluation_profile_summary(_many_interest_profile())
+    interests = summary["interests"]
+    assert isinstance(interests, list)
+    assert len(interests) == 80
+
+
+def test_replay_engine_receives_embedding_service_for_production_recall() -> None:
+    embedding = _ReplayEmbedding()
+
+    engine = _build_engine(
+        object(),
+        _ReplayConfig(),
+        compact_profile=True,
+        negative_examples=None,
+        legacy_profile=False,
+        embedding_service=embedding,
+    )
+
+    assert engine._embedding_service is embedding  # noqa: SLF001
+
+
+def test_replay_report_mentions_when_compact_recall_is_unavailable(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _print_report(
+        arm_b="compact",
+        candidates=[ReplayCandidate(candidate_id=1, title="item", source_strategy="search")],
+        scores_a=[0.7],
+        scores_b=[0.7],
+        platform=None,
+        recall_note="related_interests recall disabled: embedding service unavailable",
+    )
+
+    output = capsys.readouterr().out
+    assert "related_interests recall disabled: embedding service unavailable" in output

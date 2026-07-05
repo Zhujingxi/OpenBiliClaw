@@ -1475,6 +1475,11 @@ def build_batch_content_evaluation_prompt(
     prefix unchanged for cold-start users). System prompt picks up two
     permanent rules about how to consume the block (rules 10 + 11) and
     stays call-invariant after that one-time template change.
+
+    v0.3.x: discovery evaluation may include item-level ``related_interests``
+    entries inside ``content_items``. They are per-candidate recall hints from
+    the full interest pool, intentionally kept out of the stable profile
+    blocks so provider prompt-cache prefixes remain byte-stable.
     """
     user_blocks: list[str] = (
         list(profile_blocks)

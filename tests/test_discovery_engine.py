@@ -20,11 +20,22 @@ from openbiliclaw.discovery.engine import (
     _prompt_visible_content_fields,
     compact_evaluation_profile_summary,
     discovery_raw_candidate_mode_enabled,
+    evaluation_profile_prompt_layers,
     llm_eval_candidate_limit,
 )
 from openbiliclaw.discovery.pool_snapshot import PoolDistributionSnapshot
+from openbiliclaw.discovery.strategies._utils import build_profile_summary
+from openbiliclaw.llm.prompt_cache import PromptLayerRenderCache
 from openbiliclaw.llm.service import LLMProviderExecutionError
-from openbiliclaw.soul.profile import AwarenessNote, InterestTag, SoulProfile
+from openbiliclaw.soul.profile import (
+    AwarenessNote,
+    InsightHypothesis,
+    InterestDomain,
+    InterestSpecific,
+    InterestTag,
+    OnionProfile,
+    SoulProfile,
+)
 from openbiliclaw.storage.database import Database
 
 from .test_explore_strategy import (
@@ -182,6 +193,87 @@ def _batch_prompt_items(user_input: str) -> list[dict[str, object]]:
     raw_items = json.loads(batch_json.strip())
     assert isinstance(raw_items, list)
     return [item for item in raw_items if isinstance(item, dict)]
+
+
+def _single_prompt_content_summary(user_input: str) -> dict[str, object]:
+    summary_json = user_input.split("<content_summary>", 1)[1].split(
+        "</content_summary>",
+        1,
+    )[0]
+    raw_summary = json.loads(summary_json.strip())
+    assert isinstance(raw_summary, dict)
+    return raw_summary
+
+
+def _profile_block_prefix(user_input: str) -> str:
+    return user_input.split("<source_platform>", 1)[0]
+
+
+def _maxed_onion_profile() -> OnionProfile:
+    profile = OnionProfile()
+    profile.core.core_traits = [f"trait-{index}" for index in range(35)]
+    profile.core.deep_needs = [f"need-{index}" for index in range(35)]
+    profile.values_layer.values = [f"value-{index}" for index in range(35)]
+    profile.values_layer.motivational_drivers = [f"driver-{index}" for index in range(35)]
+    profile.surface.cognitive_style = [f"style-{index}" for index in range(35)]
+    profile.recent_awareness = [
+        AwarenessNote(
+            date=f"2026-07-{(index % 28) + 1:02d}",
+            observation=f"awareness-{index}-" + ("x" * 40),
+            trend=f"trend-{index}",
+        )
+        for index in range(30)
+    ]
+    profile.active_insights = [
+        InsightHypothesis(
+            hypothesis=f"insight-{index}-" + ("y" * 40),
+            evidence=[f"evidence-{index}-{item}-" + ("z" * 24) for item in range(30)],
+            created_at=f"2026-07-{(index % 28) + 1:02d}T12:00:00",
+        )
+        for index in range(30)
+    ]
+    profile.interest.likes = [
+        InterestDomain(
+            domain=f"domain-{domain:02d}-" + ("wide" * 4),
+            weight=1.0 - domain / 100,
+            specifics=[
+                InterestSpecific(
+                    name=f"specific-{domain:02d}-{specific:02d}-" + ("tail" * 4),
+                    weight=1.0 - (specific / 1000),
+                )
+                for specific in range(20)
+            ],
+            first_seen=f"2026-06-{(domain % 28) + 1:02d}",
+            last_seen=f"2026-07-{(domain % 28) + 1:02d}",
+            source="test",
+        )
+        for domain in range(40)
+    ]
+    profile.interest.dislikes = [
+        InterestDomain(domain=f"avoid-{index}", weight=0.9) for index in range(110)
+    ]
+    return profile
+
+
+def _profile_with_ranked_interests(count: int = 70) -> SoulProfile:
+    profile = SoulProfile()
+    profile.preferences.interests = [
+        InterestTag(
+            name=f"头部兴趣{index:02d}",
+            category="共同领域",
+            weight=1.0 - index / 1000,
+        )
+        for index in range(count)
+    ]
+    return profile
+
+
+def _profile_with_tail_interest(*, category: str = "模型") -> SoulProfile:
+    profile = _profile_with_ranked_interests()
+    profile.preferences.interests.append(
+        InterestTag(name="稀有铁路模型", category=category, weight=0.01)
+    )
+    return profile
 
 
 class _SplitRetryBatchLLMService:
@@ -389,6 +481,113 @@ def test_compact_evaluation_profile_summary_keeps_high_signal_context() -> None:
     assert len(compacted["active_insights"]) == 12
     assert len(compacted["active_insights"][0]["evidence"]) == 8
     assert len(compacted["speculative_interests"]) == 12
+
+
+def test_evaluation_profile_summary_uses_compactor_and_preserves_dislikes() -> None:
+    profile = _maxed_onion_profile()
+
+    summary = ContentDiscoveryEngine._evaluation_profile_summary(profile)
+    expected = compact_evaluation_profile_summary(build_profile_summary(profile))
+    full_summary = build_profile_summary(profile)
+
+    assert summary == expected
+    assert summary["disliked_topics"] == full_summary["disliked_topics"]
+    assert len(summary["disliked_topics"]) == len(full_summary["disliked_topics"])
+
+
+def test_evaluation_profile_digest_covers_tail_recall_pool() -> None:
+    engine = ContentDiscoveryEngine(llm_service=None)
+    base = _profile_with_ranked_interests()
+    tail = _profile_with_tail_interest(category="共同领域")
+
+    assert engine._evaluation_profile_summary(base) == engine._evaluation_profile_summary(tail)
+    assert engine._evaluation_profile_digest(base) != engine._evaluation_profile_digest(tail)
+
+
+def test_evaluation_profile_digest_changes_when_compacted_domain_changes() -> None:
+    engine = ContentDiscoveryEngine(llm_service=None)
+    base = _profile_with_ranked_interests()
+    changed = _profile_with_ranked_interests()
+    changed.preferences.interests.append(
+        InterestTag(name="新增高权重领域", category="新增高权重领域", weight=2.0)
+    )
+
+    assert engine._evaluation_profile_digest(base) != engine._evaluation_profile_digest(changed)
+
+
+def test_evaluation_profile_digest_ignores_recent_context_timestamps() -> None:
+    engine = ContentDiscoveryEngine(llm_service=None)
+    profile_a = _profile_with_ranked_interests()
+    profile_b = _profile_with_ranked_interests()
+    profile_a.recent_awareness = [
+        AwarenessNote(date="2026-07-05T10:00:00", observation="最近反复看铁路模型")
+    ]
+    profile_b.recent_awareness = [
+        AwarenessNote(date="2026-07-05T11:30:00", observation="最近反复看铁路模型")
+    ]
+    profile_a.active_insights = [
+        InsightHypothesis(
+            hypothesis="偏好慢节奏结构拆解",
+            evidence=["多次看完长视频"],
+            created_at="2026-07-05T10:00:00",
+        )
+    ]
+    profile_b.active_insights = [
+        InsightHypothesis(
+            hypothesis="偏好慢节奏结构拆解",
+            evidence=["多次看完长视频"],
+            created_at="2026-07-05T11:30:00",
+        )
+    ]
+
+    assert engine._evaluation_profile_digest(profile_a) == engine._evaluation_profile_digest(
+        profile_b
+    )
+
+
+def test_compact_evaluation_profile_summary_strips_recent_context_volatile_fields() -> None:
+    compacted = compact_evaluation_profile_summary(
+        {
+            "recent_awareness": [
+                {
+                    "date": "2026-07-05T10:00:00",
+                    "observation": "偏好铁路模型",
+                    "session_context": "run-a",
+                }
+            ],
+            "active_insights": [
+                {
+                    "created_at": "2026-07-05T10:00:00",
+                    "hypothesis": "偏好慢节奏结构拆解",
+                    "session_context": "run-a",
+                    "evidence": ["看完长视频"],
+                }
+            ],
+        }
+    )
+
+    recent = compacted["recent_awareness"][0]
+    insight = compacted["active_insights"][0]
+    assert isinstance(recent, dict)
+    assert isinstance(insight, dict)
+    assert "date" not in recent
+    assert "session_context" not in recent
+    assert "created_at" not in insight
+    assert "session_context" not in insight
+
+
+def test_evaluation_profile_prompt_block_shrinks_by_at_least_sixty_percent() -> None:
+    profile = _maxed_onion_profile()
+    full_summary = build_profile_summary(profile)
+    compacted = ContentDiscoveryEngine._evaluation_profile_summary(profile)
+    full_block = "\n\n".join(
+        PromptLayerRenderCache().render_json_layers(evaluation_profile_prompt_layers(full_summary))
+    )
+    compact_block = "\n\n".join(
+        PromptLayerRenderCache().render_json_layers(evaluation_profile_prompt_layers(compacted))
+    )
+
+    assert len(compact_block) <= len(full_block) * 0.40
 
 
 class _RecentViewedDatabase:
@@ -647,6 +846,129 @@ async def test_evaluate_content_single_passes_text_metrics_and_tags_to_prompt() 
     assert '"reply_count": 40' in user_input
     assert '"retweet_count": 30' in user_input
     assert '"bookmark_count": 20' in user_input
+
+
+@pytest.mark.asyncio
+async def test_related_interests_returns_tail_match_and_degrades_without_embedding() -> None:
+    profile = _profile_with_tail_interest()
+    content = DiscoveredContent(
+        bvid="BVTAIL",
+        title="稀有铁路模型",
+        description="开箱评测",
+        source_strategy="search",
+    )
+    content_text = "稀有铁路模型 开箱评测"
+    vectors = {
+        content_text: _MATCH_VEC,
+        "稀有铁路模型": _MATCH_VEC,
+        **{f"头部兴趣{index:02d}": _LOW_SIM_VEC for index in range(70)},
+    }
+    engine = ContentDiscoveryEngine(
+        llm_service=None,
+        embedding_service=_CountingEmbeddingService(vectors),
+    )
+
+    related = await engine._related_interests_for_content(content, profile, top_k=3)
+
+    assert related[0] == {"name": "稀有铁路模型", "category": "模型"}
+    assert len(related) <= 3
+    assert "weight" not in related[0]
+    engine_without_init = ContentDiscoveryEngine.__new__(ContentDiscoveryEngine)
+    assert await engine_without_init._related_interests_for_content(content, profile) == []
+
+
+@pytest.mark.asyncio
+async def test_related_interests_returns_empty_when_embedding_fails() -> None:
+    profile = _profile_with_tail_interest()
+    content = DiscoveredContent(
+        bvid="BVFAIL",
+        title="稀有铁路模型",
+        description="开箱评测",
+        source_strategy="search",
+    )
+    content_text = "稀有铁路模型 开箱评测"
+    engine = ContentDiscoveryEngine(
+        llm_service=None,
+        embedding_service=_CountingEmbeddingService({}, failures={content_text}),
+    )
+
+    assert await engine._related_interests_for_content(content, profile) == []
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_adds_related_interests_without_changing_profile_prefix() -> None:
+    profile = _profile_with_tail_interest()
+    content = DiscoveredContent(
+        bvid="BVTAIL",
+        title="稀有铁路模型",
+        description="开箱评测",
+        source_strategy="search",
+    )
+    content_text = "稀有铁路模型 开箱评测"
+    vectors = {
+        content_text: _MATCH_VEC,
+        "稀有铁路模型": _MATCH_VEC,
+        **{f"头部兴趣{index:02d}": _LOW_SIM_VEC for index in range(70)},
+    }
+    llm_with_recall = _DynamicBatchLLMService()
+    engine_with_recall = ContentDiscoveryEngine(
+        llm_service=llm_with_recall,
+        embedding_service=_CountingEmbeddingService(vectors),
+        eval_prefilter_mode="off",
+    )
+    llm_without_recall = _DynamicBatchLLMService()
+    engine_without_recall = ContentDiscoveryEngine(
+        llm_service=llm_without_recall,
+        embedding_service=None,
+        eval_prefilter_mode="off",
+    )
+
+    await engine_with_recall._evaluate_batch([content], profile)
+    await engine_without_recall._evaluate_batch([content], profile)
+
+    with_recall_input = llm_with_recall.user_inputs[0]
+    without_recall_input = llm_without_recall.user_inputs[0]
+    related = _batch_prompt_items(with_recall_input)[0]["related_interests"]
+    assert isinstance(related, list)
+    assert related[0] == {"category": "模型", "name": "稀有铁路模型"}
+    assert len(related) <= 3
+    assert "related_interests" not in _batch_prompt_items(without_recall_input)[0]
+    assert _profile_block_prefix(with_recall_input) == _profile_block_prefix(without_recall_input)
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_single_adds_related_interests_to_content_summary() -> None:
+    profile = _profile_with_tail_interest()
+    content = DiscoveredContent(
+        bvid="BVTAILSINGLE",
+        title="稀有铁路模型",
+        description="开箱评测",
+        source_strategy="search",
+    )
+    content_text = "稀有铁路模型 开箱评测"
+    llm_service = FakeLLMService(
+        '{"score": 0.82, "reason": "匹配", "topic_group": "模型", "style_key": "deep_dive"}'
+    )
+    engine = ContentDiscoveryEngine(
+        llm_service=llm_service,
+        embedding_service=_CountingEmbeddingService(
+            {
+                content_text: _MATCH_VEC,
+                "稀有铁路模型": _MATCH_VEC,
+                **{f"头部兴趣{index:02d}": _LOW_SIM_VEC for index in range(70)},
+            }
+        ),
+        eval_prefilter_mode="off",
+    )
+
+    await engine.evaluate_content(content, profile)
+
+    user_input = str(llm_service.calls[0]["user_input"])
+    content_summary = _single_prompt_content_summary(user_input)
+    related = content_summary["related_interests"]
+    assert isinstance(related, list)
+    assert related[0] == {"category": "模型", "name": "稀有铁路模型"}
+    assert len(related) <= 3
 
 
 @pytest.mark.asyncio
@@ -910,7 +1232,7 @@ async def test_evaluate_content_batch_prefilter_shadow_logs_but_sends_all(
 
 
 @pytest.mark.asyncio
-async def test_evaluate_content_batch_prefilter_off_skips_embedding() -> None:
+async def test_evaluate_content_batch_prefilter_off_still_sends_item_to_llm() -> None:
     low_text = "不相关内容 厨房技巧"
     embedding = _CountingEmbeddingService(_prefilter_vectors(low_texts=[low_text]))
     llm_service = _DynamicBatchLLMService()
@@ -933,8 +1255,8 @@ async def test_evaluate_content_batch_prefilter_off_skips_embedding() -> None:
     )
 
     assert scores == [0.8]
-    assert embedding.calls == []
     assert len(llm_service.user_inputs) == 1
+    assert _batch_prompt_items(llm_service.user_inputs[0])[0]["content_id"] == "BVOFF"
 
 
 @pytest.mark.asyncio
@@ -3383,7 +3705,7 @@ def _json_prompt_block(user_input: str, tag: str) -> dict[str, object]:
 
 
 @pytest.mark.asyncio
-async def test_evaluate_batch_uses_layered_profile_prompt_with_full_interests() -> None:
+async def test_evaluate_batch_uses_layered_profile_prompt_with_compacted_interests() -> None:
     llm = _RecordingBatchLLMService()
     engine = ContentDiscoveryEngine(llm_service=llm)
     profile = _build_profile()
@@ -3410,8 +3732,8 @@ async def test_evaluate_batch_uses_layered_profile_prompt_with_full_interests() 
     profile_interests = _json_prompt_block(user_input, "profile_interests")
     interests = profile_interests["interests"]
     assert isinstance(interests, list)
-    assert len(interests) == 80
-    assert interests[-1]["name"] == "兴趣79"
+    assert len(interests) == 64
+    assert interests[-1]["name"] == "兴趣63"
 
 
 @pytest.mark.asyncio
