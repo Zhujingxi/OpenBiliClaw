@@ -5030,6 +5030,73 @@
       button.addEventListener("click", returnToMobileMenu);
     });
 
+    const MOBILE_QR_SEEN_KEY = "openbiliclaw.webui.mobileQrSeen";
+    function markMobileQrSeen() {
+      storageSet(MOBILE_QR_SEEN_KEY, "1");
+      const dot = $("#mobileQrDot");
+      const callout = $("#mobileQrCallout");
+      if (dot) dot.hidden = true;
+      if (callout) callout.hidden = true;
+    }
+    function initMobileQrDiscovery() {
+      if (storageGet(MOBILE_QR_SEEN_KEY)) return;
+      const dot = $("#mobileQrDot");
+      const callout = $("#mobileQrCallout");
+      if (dot) dot.hidden = false;
+      if (callout) {
+        callout.hidden = false;
+        // Quiet down on its own — the dot keeps marking the entry until the
+        // drawer is actually opened once.
+        window.setTimeout(() => { callout.hidden = true; }, 15000);
+      }
+    }
+    async function openMobileQrDrawer() {
+      markMobileQrSeen();
+      openPanel("mobileQrDrawer");
+      const canvas = $("#mobileQrCanvas");
+      const urlEl = $("#mobileQrUrl");
+      const hintEl = $("#mobileQrHint");
+      const qr = window.OBCMobileQr;
+      if (!canvas || !urlEl || !hintEl || !qr) return;
+      canvas.textContent = "";
+      urlEl.textContent = "正在获取局域网地址…";
+      hintEl.hidden = true;
+      hintEl.textContent = "";
+      // The backend knows its own LAN IP; the page host may be 127.0.0.1,
+      // which a phone cannot reach.
+      const health = await requestJson(ENDPOINTS.health);
+      const lanIp = String(health?.lan_ip || "").trim();
+      const def = locationApiDefault();
+      const typedHost = (storageGet("openbiliclaw.webui.backendHost") || "").trim();
+      const typedPort = (storageGet("openbiliclaw.webui.backendPort") || "").trim();
+      const host = lanIp || typedHost || def.host;
+      const url = qr.buildMobileWebUrl({ host, port: typedPort || def.port });
+      urlEl.textContent = url;
+      if (qr.isLoopbackMobileHost(host)) {
+        hintEl.textContent =
+          "没拿到局域网 IP（后端可能只监听了本机地址）。手机打不开本机地址：请用 --host 0.0.0.0 启动后端，或手动把地址里的 127.0.0.1 换成电脑的局域网 IP。";
+        hintEl.hidden = false;
+      }
+      try {
+        canvas.innerHTML = qr.createQrSvgMarkup(url);
+      } catch {
+        canvas.textContent = "二维码生成失败，请直接复制上方链接。";
+      }
+    }
+    safeBind("#mobileQrBtn", "click", () => { closeSideDrawer(); void openMobileQrDrawer(); });
+    safeBind("#mobileQrCalloutOpen", "click", () => { closeSideDrawer(); void openMobileQrDrawer(); });
+    safeBind("#mobileQrCalloutClose", "click", markMobileQrSeen);
+    initMobileQrDiscovery();
+    safeBind("#mobileQrCopyBtn", "click", async () => {
+      const url = $("#mobileQrUrl")?.textContent || "";
+      if (!url.startsWith("http")) return;
+      try {
+        await navigator.clipboard.writeText(url);
+        showToast("手机版链接已复制");
+      } catch {
+        showToast("复制失败，请手动选中链接复制");
+      }
+    });
     safeBind("#profileBtn", "click", openProfilePage);
     safeBind("#homeBtn", "click", openHomePage);
     safeBind("#watchLaterBtn", "click", openWatchLaterPage);

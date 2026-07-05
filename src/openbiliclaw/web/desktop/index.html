@@ -33,6 +33,17 @@
         <button class="backend-status-pill" id="openSettingsHero" type="button">
           <span class="badge-dot"></span><span id="statusLabel">已连接本地后端</span>
         </button>
+        <div class="mobile-entry-wrap">
+          <button class="top-mobile-btn" id="mobileQrBtn" type="button" title="扫码在手机上使用" aria-label="手机版入口：扫码在手机上使用">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6.5" y="2" width="11" height="20" rx="2.8"/><path d="M10.2 5.2h3.6"/><circle cx="12" cy="18.4" r="0.5" fill="currentColor" stroke="none"/></svg>
+            <span>手机版</span>
+            <span class="mobile-new-dot" id="mobileQrDot" hidden></span>
+          </button>
+          <div class="mobile-qr-callout" id="mobileQrCallout" hidden>
+            <button class="mobile-qr-callout-body" id="mobileQrCalloutOpen" type="button">手机扫码，躺着刷推荐 →</button>
+            <button class="mobile-qr-callout-close" id="mobileQrCalloutClose" type="button" aria-label="关闭提示">×</button>
+          </div>
+        </div>
         <button class="top-message-btn" id="messagesBtn" type="button" aria-label="消息">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
             <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" stroke-linecap="round" stroke-linejoin="round"/>
@@ -621,6 +632,27 @@
     </div>
   </section>
 
+  <section class="drawer" id="mobileQrDrawer" aria-label="手机版入口" data-od-id="mobile-qr-drawer">
+    <div class="scrim" data-close="mobileQrDrawer"></div>
+    <div class="drawer-panel mobile-qr-panel">
+      <div class="drawer-head"><div><p class="eyebrow">Mobile web</p><h2>手机上也能用</h2></div><button class="icon-btn" data-close="mobileQrDrawer" type="button">×</button></div>
+      <p class="video-meta mobile-qr-lead">推荐点开直接拉起 B站 / 小红书等 App，躺着刷更顺手。</p>
+      <div class="mobile-qr-card">
+        <div class="mobile-qr-canvas" id="mobileQrCanvas" aria-live="polite"></div>
+        <code class="mobile-qr-url" id="mobileQrUrl"></code>
+        <div class="drawer-actions">
+          <button class="pill-btn primary" id="mobileQrCopyBtn" type="button">复制链接</button>
+        </div>
+      </div>
+      <ol class="mobile-qr-steps" aria-label="使用步骤">
+        <li><span class="step-num">1</span>手机和这台电脑连同一个 WiFi</li>
+        <li><span class="step-num">2</span>用相机或浏览器扫码打开</li>
+        <li><span class="step-num">3</span>「添加到主屏幕」，下次像 App 一样直接开</li>
+      </ol>
+      <p class="mobile-qr-hint" id="mobileQrHint" hidden></p>
+    </div>
+  </section>
+
   <section class="drawer" id="activityDrawer" aria-label="动态历史" data-od-id="activity-drawer">
     <div class="scrim" data-close="activityDrawer"></div>
     <div class="drawer-panel">
@@ -631,5 +663,6 @@
   </section>
 
   <div class="toast" id="toast" role="status"></div>
+  <script src="/web/assets/js/mobile-qr.js" defer></script>
   <script src="/web/assets/js/app.js" defer></script>
 </body></html>

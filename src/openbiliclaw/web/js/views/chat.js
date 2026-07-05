@@ -42,6 +42,7 @@ import {
   getSourceLabel,
   buildContentUrl,
 } from "../view-models.js";
+import { openContentUrl } from "../app-launch.js";
 import { state, patchState } from "../state.js";
 
 let $root = null;
@@ -465,7 +466,7 @@ function renderOverlay() {
       if (action === "view") {
         const item = normalizeDelightCandidate({ bvid, title });
         const url = buildContentUrl(item);
-        if (url) window.open(url, "_blank");
+        if (url) openContentUrl(url);
       }
     });
   }

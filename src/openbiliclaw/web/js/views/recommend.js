@@ -50,6 +50,7 @@ import {
   getMobileChatSession,
   shouldAutoAppendRecommendations,
 } from "../view-models.js";
+import { openContentUrl } from "../app-launch.js";
 
 let $root = null;
 let loaded = false;
@@ -687,7 +688,7 @@ async function handleDelightAction(d, action) {
 
   if (action === "view") {
     const url = buildContentUrl(d);
-    if (url) window.open(url, "_blank");
+    if (url) openContentUrl(url);
   }
 }
 
@@ -898,7 +899,7 @@ function renderCard(rawItem, index = 0) {
     "打开",
     () => {
       reportClick(buildRecommendationClickPayload(item, url));
-      if (url) window.open(url, "_blank");
+      if (url) openContentUrl(url);
     },
     { ariaLabel: "打开", iconHtml: LINK_SVG_ICON, showText: true },
   );
@@ -1057,7 +1058,7 @@ function renderCard(rawItem, index = 0) {
     card.style.cursor = "pointer";
     card.addEventListener("click", () => {
       reportClick(buildRecommendationClickPayload(item, url));
-      window.open(url, "_blank");
+      openContentUrl(url);
     });
   }
 

@@ -30,6 +30,7 @@
    - 推荐列表（封面、标题、UP 主、推荐理由）
    - 来源标识（Bilibili / Xiaohongshu / Douyin / YouTube / Web）
    - 点击跳转原始内容链接（`content_url` 优先，B 站 `bvid` fallback）
+   - 移动端点击优先拉起目标平台 App（`js/app-launch.js`：B站 / 小红书 / 抖音 / YouTube / X / 知乎 URL scheme 深链，小红书携带 `xsec_token`）。回落策略保证 `/m/` 当前页永不被跳走：1.6s 内页面未被切走视为拉起失败，优先 `window.open` 新标签页打开网页；弹窗被拦（用户手势已过期，iOS Safari 必拦）则显示页内提示条「打开网页版」按钮由用户新手势打开。系统弹窗（iOS「在 App 中打开?」确认 / 打不开提示）挂起时 `blur` 暂停回落计时、关闭后 `focus` 续 0.9s 再回落，避免拉起成功却误跳当前页。桌面端及无法解析深链的地址（b23.tv / xhslink 短链、Reddit 等）保持新标签页打开网页
    - 点击直达上报（best-effort，不追踪观看时长）
    - "换一批" 按钮（reshuffle）
    - 接近列表底部自动 append 下一批，底部 "加载更多" 保留为手动兜底
@@ -89,6 +90,7 @@ src/openbiliclaw/web/
 │   ├── api.js          # 后端 API 封装（同插件 popup-api.js）
 │   ├── stream.js       # WebSocket 客户端（同插件 popup-stream.js）
 │   ├── view-models.js  # 后端响应 → 移动端渲染字段适配
+│   ├── app-launch.js   # 移动端深链拉起目标平台 App + 网页回落
 │   ├── views/
 │   │   ├── recommend.js  # 推荐页渲染 & 交互
 │   │   ├── profile.js    # 画像页渲染 & 交互
@@ -247,3 +249,5 @@ http://<电脑局域网IP>:8420/m/
 ```
 
 打开 `/m/` 后可在 iOS Safari 通过「分享 → 添加到主屏幕」保存为桌面图标；Android Chrome / Chromium 浏览器可通过菜单里的「安装应用」或「添加到主屏幕」保存。局域网 HTTP 在部分 Android 浏览器上可能只生成快捷方式；完整 PWA 安装提示对 HTTPS 更稳定。
+
+不想手敲地址时有两个扫码入口：插件 popup / side panel 顶部的「手机版」胶囊按钮（品牌色带文字，点开二维码浮层），以及桌面 Web（`/web`）顶栏的「手机版」入口（点开抽屉，二维码由自包含的 `desktop/assets/js/mobile-qr.js` 生成，地址取后端 `/api/health` 的 `lan_ip`）。

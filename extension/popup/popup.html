@@ -1606,6 +1606,13 @@
         width: 28px;
         height: 28px;
       }
+
+      /* The labelled 手机版 pill must keep its intrinsic width — a forced
+         28px box makes the label overflow onto the neighbouring buttons. */
+      .hero-actions button.mobile-button {
+        width: auto;
+        padding: 0 8px;
+      }
     }
 
     .recommendation-actions {
@@ -3615,6 +3622,22 @@
       color: var(--text-secondary);
     }
 
+    /* Same treatment as the sibling icon buttons — the 手机版 label (not
+       color) is what makes the entry discoverable. */
+    .mobile-button {
+      width: auto;
+      padding: 0 10px;
+      gap: 5px;
+    }
+
+    .mobile-button-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      white-space: nowrap;
+    }
+
+
     .message-badge {
       position: absolute;
       top: -4px;
@@ -4459,11 +4482,12 @@
           </div>
         </div>
         <div class="hero-actions">
-          <button id="openWebButton" class="webui-button" type="button" title="在浏览器中打开 Web 版" aria-label="在浏览器中打开 Web 版">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          <button id="openWebButton" class="webui-button" type="button" title="电脑版：在浏览器中打开 Web 版" aria-label="电脑版入口：在浏览器中打开 Web 版">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M9 20.5h6"/><path d="M12 17v3.5"/></svg>
           </button>
-          <button id="mobileQrButton" class="mobile-button" type="button" title="手机打开" aria-label="显示移动端二维码">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h2v2h-2zM18 14h3M14 18h3M19 18h2v3h-5"/></svg>
+          <button id="mobileQrButton" class="mobile-button" type="button" title="手机版：扫码在手机上使用" aria-label="手机版入口：显示移动端二维码">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6.5" y="2" width="11" height="20" rx="2.8"/><path d="M10.2 5.2h3.6"/><circle cx="12" cy="18.4" r="0.5" fill="currentColor" stroke="none"/></svg>
+            <span class="mobile-button-label">手机版</span>
           </button>
           <button id="messagesButton" class="messages-button" type="button" title="消息" aria-label="查看消息">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>

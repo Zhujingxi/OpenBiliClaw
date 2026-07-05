@@ -157,6 +157,36 @@
     .top-message-btn svg { width: 18px; height: 18px; stroke-width: 1.8; }
     .message-dot { position: absolute; top: 7px; right: 7px; width: 8px; height: 8px; border-radius: var(--radius-pill); background: var(--danger); box-shadow: 0 0 0 2px var(--surface); }
     .message-dot[hidden] { display: none; }
+    /* Header entry speaks the house "solid dark pill" language (search / star
+       buttons) — prominent without diluting terracotta, which stays reserved
+       for the dialog's single CTA. */
+    .mobile-entry-wrap { position: relative; flex-shrink: 0; }
+    .top-mobile-btn { position: relative; flex-shrink: 0; display: inline-flex; align-items: center; gap: 7px; min-height: 38px; padding: 0 var(--space-4); border: 1px solid var(--fg); border-radius: var(--radius-pill); background: var(--fg); color: var(--surface); box-shadow: var(--elev-ring); font-size: 13px; font-weight: 750; cursor: pointer; transition: background 0.15s ease, border-color 0.15s ease; }
+    .top-mobile-btn:hover { background: var(--fg-2); border-color: var(--fg-2); }
+    .top-mobile-btn svg { width: 15px; height: 15px; }
+    /* Unseen indicator: terracotta dot until the drawer is opened once. */
+    .mobile-new-dot { position: absolute; top: -2px; right: -1px; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg); }
+    /* First-visit callout: a dark bubble pointing at the entry, dismissed
+       forever once clicked or closed (openbiliclaw.webui.mobileQrSeen). */
+    .mobile-qr-callout { position: absolute; top: calc(100% + 12px); right: 0; z-index: 80; display: flex; align-items: center; gap: 2px; padding: 4px 6px 4px 4px; background: var(--fg); color: var(--surface); border-radius: 12px; box-shadow: var(--elev-raised); white-space: nowrap; }
+    .mobile-qr-callout::before { content: ""; position: absolute; top: -4px; right: 30px; width: 9px; height: 9px; background: var(--fg); rotate: 45deg; }
+    .mobile-qr-callout-body { border: 0; background: none; color: var(--surface); font-size: 13px; font-weight: 600; padding: 6px 8px; cursor: pointer; }
+    .mobile-qr-callout-close { border: 0; background: none; color: var(--surface); opacity: 0.65; font-size: 15px; line-height: 1; padding: 6px 8px; cursor: pointer; }
+    .mobile-qr-callout-close:hover { opacity: 1; }
+    /* The QR share is a compact focused task — a centered dialog, not a
+       full-height side sheet with dead space below the content. Doubled
+       class beats the later-declared .drawer-panel base (right sheet). */
+    .drawer-panel.mobile-qr-panel { right: auto; left: 50%; top: 50%; translate: -50% -50%; width: min(420px, calc(100% - 32px)); height: auto; max-height: calc(100vh - 48px); border-radius: 28px; }
+    .mobile-qr-lead { margin: 0 0 var(--space-4); }
+    .mobile-qr-card { display: flex; flex-direction: column; align-items: center; gap: var(--space-4); margin: 0 0 var(--space-5); padding: var(--space-6) var(--space-5) var(--space-5); border: 1px solid var(--border-soft); border-radius: 20px; background: var(--surface); box-shadow: var(--elev-ring); }
+    .mobile-qr-canvas svg { display: block; width: 188px; height: 188px; border-radius: 10px; }
+    .mobile-qr-url { display: inline-block; max-width: 100%; padding: 6px 14px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg); font-family: var(--font-mono); font-size: 12.5px; color: var(--fg-2); word-break: break-all; text-align: center; }
+    .mobile-qr-card .drawer-actions { width: 100%; margin: 0; }
+    .mobile-qr-card .pill-btn { width: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
+    .mobile-qr-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+    .mobile-qr-steps li { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .mobile-qr-steps .step-num { flex: 0 0 auto; width: 19px; height: 19px; border-radius: 50%; display: inline-grid; place-items: center; background: var(--surface-warm); color: var(--fg-2); font-size: 11px; font-weight: 700; }
+    .mobile-qr-hint { margin: var(--space-4) 0 0; padding: 10px var(--space-3); border: 1px solid color-mix(in oklab, var(--danger), var(--border) 65%); border-radius: var(--radius-md); background: color-mix(in oklab, var(--danger), var(--surface) 92%); color: var(--danger); font-size: 13px; line-height: 1.5; }
     [hidden] { display: none !important; }
     :root { --side-drawer-width: 312px; --topbar-height: 75px; }
     .layout, .fatal-banner { transition: transform var(--motion-base) var(--ease-standard), margin var(--motion-base) var(--ease-standard), width var(--motion-base) var(--ease-standard); }
