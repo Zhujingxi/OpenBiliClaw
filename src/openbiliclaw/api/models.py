@@ -117,6 +117,12 @@ class RecommendationOut(BaseModel):
     # cover_url is empty.
     content_type: str = "video"
     body_text: str = ""
+    # Desktop card metadata (additive for issue #75; extension popup ignores unknown keys).
+    duration: int = 0
+    view_count: int = 0
+    like_count: int = 0
+    danmaku_count: int = 0
+    up_mid: int = 0
 
 
 class RecommendationListResponse(BaseModel):

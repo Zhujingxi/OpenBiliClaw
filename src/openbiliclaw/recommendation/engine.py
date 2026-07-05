@@ -2493,6 +2493,7 @@ class RecommendationEngine:
                 cover_url=str(row.get("cover_url", "")),
                 view_count=int(row.get("view_count", 0) or 0),
                 like_count=int(row.get("like_count", 0) or 0),
+                danmaku_count=int(row.get("danmaku_count", 0) or 0),
                 tags=self._parse_tags(row.get("tags", "[]")),
                 topic_key=str(row.get("topic_key", "")),
                 topic_group=str(row.get("topic_group", "")),

@@ -3,7 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>OpenBiliClaw 推荐首页</title>
+  <script>
+    (() => {
+      try {
+        const theme = window.localStorage?.getItem("obc.theme");
+        if (theme === "light" || theme === "dark") {
+          document.documentElement.dataset.theme = theme;
+        }
+      } catch {}
+    })();
+  </script>
   <link rel="stylesheet" href="/web/assets/css/app.css">
 </head>
 <body>
@@ -32,6 +43,9 @@
         </button>
         <button class="backend-status-pill" id="openSettingsHero" type="button">
           <span class="badge-dot"></span><span id="statusLabel">已连接本地后端</span>
+        </button>
+        <button class="top-theme-btn icon-btn" id="themeToggleBtn" type="button" title="主题：跟随系统" aria-label="主题：跟随系统">
+          <span id="themeToggleGlyph" aria-hidden="true">◐</span>
         </button>
         <div class="mobile-entry-wrap">
           <button class="top-mobile-btn" id="mobileQrBtn" type="button" title="扫码在手机上使用" aria-label="手机版入口：扫码在手机上使用">
@@ -167,6 +181,7 @@
           </div>
           <div class="filter-row" id="filterRow" aria-label="推荐筛选"></div>
           <div class="card-grid" id="videoGrid"></div>
+          <div id="loadMoreSentinel" aria-hidden="true"></div>
           <div class="load-row"><button class="pill-btn dark" id="loadMoreBtn" type="button">加载更多推荐</button></div>
         </section>
       </section>
@@ -562,6 +577,14 @@
           <label class="settings-field"><span>后端地址</span><input id="backendHost" placeholder="默认跟随当前页面地址"></label>
           <label class="settings-field"><span>后端端口</span><input id="backendPort" inputmode="numeric" placeholder="默认跟随当前页面端口"></label>
           <label class="settings-field"><span>惊喜推荐加载数量</span><input id="delightQueueLimit" value="20" inputmode="numeric" min="1" max="100"></label>
+          <div class="settings-field full settings-theme-field">
+            <span>外观主题</span>
+            <div class="theme-segmented" id="themeModeSetting" role="radiogroup" aria-label="外观主题">
+              <button type="button" data-theme-choice="auto">跟随系统</button>
+              <button type="button" data-theme-choice="light">浅色</button>
+              <button type="button" data-theme-choice="dark">深色</button>
+            </div>
+          </div>
           <label class="settings-field full settings-switch-field" title="开启：换一批前先将当前显示的推荐标记为忽略；关闭：只重排当前推荐池，不反馈当前内容。">
             <span>换一批时忽略当前</span>
             <span class="settings-switch-copy">开启：换一批前先将当前显示的推荐标记为忽略；关闭：只重排当前推荐池，不反馈当前内容。</span>
@@ -571,7 +594,16 @@
               <span id="dismissOnReshuffleSettingText">关闭</span>
             </span>
           </label>
-          <p class="settings-note-inline">后端地址、端口和换一批偏好保存在当前浏览器；惊喜推荐加载数量会随保存配置写入后端，供桌面 Web、移动 Web 和插件共享。</p>
+          <label class="settings-field full settings-switch-field" title="开启：滚动到底部且推荐池可用时自动加载更多；关闭：保留纯手动加载。">
+            <span>滚动到底自动加载推荐</span>
+            <span class="settings-switch-copy">开启：滚动到底部且推荐池可用时自动加载更多；关闭：保留纯手动加载。</span>
+            <span class="reshuffle-toggle settings-toggle-inline">
+              <input id="autoLoadOnScrollSetting" type="checkbox" checked>
+              <span class="reshuffle-switch" aria-hidden="true"></span>
+              <span id="autoLoadOnScrollSettingText">开启</span>
+            </span>
+          </label>
+          <p class="settings-note-inline">后端地址、端口、外观主题、换一批偏好和自动加载偏好保存在当前浏览器；惊喜推荐加载数量会随保存配置写入后端，供桌面 Web、移动 Web 和插件共享。</p>
         </div>
 
         <div class="settings-panel" data-settings-panel="logging" hidden>

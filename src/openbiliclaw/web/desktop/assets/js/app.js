@@ -297,12 +297,23 @@
 
     const DISMISS_ON_RESHUFFLE_KEY = "openbiliclaw.dismissOnReshuffle";
     state.dismissOnReshuffle = storageGet(DISMISS_ON_RESHUFFLE_KEY) === "1";
+    const AUTO_LOAD_ON_SCROLL_KEY = "openbiliclaw.webui.autoLoadOnScroll";
+    const AUTO_LOAD_COOLDOWN_MS = 8000;
+    state.autoLoadOnScroll = storageGet(AUTO_LOAD_ON_SCROLL_KEY) !== "0";
+    const THEME_STORAGE_KEY = "obc.theme";
+    const THEME_OPTIONS = ["auto", "light", "dark"];
+    const THEME_LABELS = { auto: "跟随系统", light: "浅色", dark: "深色" };
+    const THEME_GLYPHS = { auto: "◐", light: "☼", dark: "☾" };
+    state.themeMode = THEME_OPTIONS.includes(storageGet(THEME_STORAGE_KEY)) ? storageGet(THEME_STORAGE_KEY) : "auto";
     const SIDE_DRAWER_OPEN_KEY = "openbiliclaw.sideDrawerOpen";
     const DELIGHT_QUEUE_LIMIT_KEY = "openbiliclaw.webui.delightQueueLimit";
     const STAR_REPO_URL = "https://github.com/whiteguo233/OpenBiliClaw";
     const STAR_REPO_SLUG = "whiteguo233/OpenBiliClaw";
     const STAR_COUNT_CACHE_KEY = "openbiliclaw.webui.starCount";
     const STAR_COUNT_TTL_MS = 12 * 60 * 60 * 1000;
+    let autoLoadObserver = null;
+    let appendMoreInFlight = false;
+    let lastAutoLoadAt = 0;
 
     function formatStarCount(n) {
       if (typeof n !== "number" || !Number.isFinite(n)) return "";
@@ -430,16 +441,24 @@
       const configuredLimit = config.scheduler?.delight_queue_limit;
       const limit = configuredLimit || storageGet(DELIGHT_QUEUE_LIMIT_KEY) || "20";
       setInput("delightQueueLimit", String(limit));
+      applyThemeMode(state.themeMode);
       renderReshuffleToggle();
+      renderAutoLoadOnScrollToggle();
+      syncAutoLoadObserver();
     }
 
     function persistFrontendSettings() {
       const limit = getDelightQueueLimit();
       setInput("delightQueueLimit", String(limit));
       storageSet(DELIGHT_QUEUE_LIMIT_KEY, String(limit));
+      storageSet(THEME_STORAGE_KEY, state.themeMode);
       storageSet(DISMISS_ON_RESHUFFLE_KEY, state.dismissOnReshuffle ? "1" : "0");
+      storageSet(AUTO_LOAD_ON_SCROLL_KEY, state.autoLoadOnScroll ? "1" : "0");
+      applyThemeMode(state.themeMode);
       renderReshuffleToggle();
-      return { delightQueueLimit: limit, dismissOnReshuffle: state.dismissOnReshuffle };
+      renderAutoLoadOnScrollToggle();
+      syncAutoLoadObserver();
+      return { delightQueueLimit: limit, themeMode: state.themeMode, dismissOnReshuffle: state.dismissOnReshuffle, autoLoadOnScroll: state.autoLoadOnScroll };
     }
 
     function getRuntimeStreamUrl() {
@@ -526,21 +545,17 @@
       _authOverlayShown = true;
       const overlay = document.createElement("div");
       overlay.id = "authOverlay";
+      overlay.className = "auth-overlay";
       overlay.setAttribute("role", "dialog");
       overlay.setAttribute("aria-modal", "true");
-      overlay.style.cssText =
-        "position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;" +
-        "background:rgba(20,28,46,0.55);backdrop-filter:blur(4px);";
       overlay.innerHTML =
-        '<form id="authForm" autocomplete="off" style="width:min(360px,90vw);display:flex;flex-direction:column;gap:14px;' +
-        'padding:28px 24px;background:#fff;border-radius:18px;box-shadow:0 18px 48px rgba(0,0,0,.22);">' +
-        '<h2 style="margin:0;font-size:20px;color:#fb7299;text-align:center;">OpenBiliClaw</h2>' +
-        '<p style="margin:0;font-size:14px;color:#60708c;text-align:center;">请输入访问密码</p>' +
+        '<form id="authForm" class="auth-form" autocomplete="off">' +
+        '<h2 class="auth-title">OpenBiliClaw</h2>' +
+        '<p class="auth-copy">请输入访问密码</p>' +
         '<input id="authPassword" type="password" placeholder="密码" autocomplete="current-password" ' +
-        'aria-label="访问密码" style="padding:12px 14px;font-size:15px;border:1px solid #e2e6ef;border-radius:10px;">' +
-        '<button type="submit" style="padding:12px;font-size:15px;font-weight:600;color:#fff;background:#fb7299;' +
-        'border:none;border-radius:10px;cursor:pointer;">登录</button>' +
-        '<p id="authError" role="alert" hidden style="margin:0;font-size:13px;color:#ef4444;text-align:center;"></p>' +
+        'aria-label="访问密码" class="auth-input">' +
+        '<button class="auth-submit" type="submit">登录</button>' +
+        '<p id="authError" class="auth-error" role="alert" hidden></p>' +
         "</form>";
       document.body.appendChild(overlay);
       const input = overlay.querySelector("#authPassword");
@@ -653,6 +668,30 @@
       return explicit || "bilibili";
     }
 
+    function formatDuration(seconds) {
+      const total = Math.floor(Number(seconds) || 0);
+      if (total <= 0) return "";
+      const hours = Math.floor(total / 3600);
+      const minutes = Math.floor((total % 3600) / 60);
+      const secondsPart = total % 60;
+      if (hours > 0) {
+        return `${hours}:${String(minutes).padStart(2, "0")}:${String(secondsPart).padStart(2, "0")}`;
+      }
+      return `${minutes}:${String(secondsPart).padStart(2, "0")}`;
+    }
+
+    function formatCountCn(n) {
+      const value = Math.floor(Number(n) || 0);
+      if (value <= 0) return "";
+      if (value >= 100000000) {
+        return `${(Math.floor((value / 100000000) * 10) / 10).toFixed(1).replace(/\.0$/, "")}亿`;
+      }
+      if (value >= 10000) {
+        return `${(Math.floor((value / 10000) * 10) / 10).toFixed(1).replace(/\.0$/, "")}万`;
+      }
+      return String(value);
+    }
+
     function normalizeRecommendation(item) {
       const contentId = String(item?.content_id ?? item?.bvid ?? "");
       return {
@@ -667,7 +706,11 @@
         platform: normalizeSourcePlatform(item),
         content_type: String(item?.content_type ?? "video").trim().toLowerCase() || "video",
         body_text: decodeHtmlEntities(item?.body_text ?? ""),
-        duration: String(item?.duration ?? ""),
+        duration: Number(item?.duration ?? 0) || 0,
+        view_count: Number(item?.view_count ?? 0) || 0,
+        like_count: Number(item?.like_count ?? 0) || 0,
+        danmaku_count: Number(item?.danmaku_count ?? 0) || 0,
+        up_mid: Number(item?.up_mid ?? 0) || 0,
         presented: Boolean(item?.presented),
         feedback_type: String(item?.feedback_type ?? item?.feedback ?? ""),
         pool_status: String(item?.pool_status ?? item?.status ?? ""),
@@ -1198,14 +1241,45 @@
       }
     }
 
-    function openPanel(id) { document.getElementById(id)?.classList.add("is-open"); }
+    function openPanel(id) {
+      const panel = document.getElementById(id);
+      if (!panel) return;
+      if (panel._closeTimer) {
+        window.clearTimeout(panel._closeTimer);
+        panel._closeTimer = null;
+      }
+      if (panel._closeHandler) {
+        panel.removeEventListener("animationend", panel._closeHandler);
+        panel._closeHandler = null;
+      }
+      panel.classList.remove("is-closing");
+      panel.classList.add("is-open");
+    }
+
     function closePanel(id) {
       const panel = document.getElementById(id);
-      panel?.classList.remove("is-open", "from-mobile-menu");
-      if (id === "messagesDrawer") {
-        state.messageListSnapshot = null;
-        state.messageListDomLocked = false;
-      }
+      if (!panel || !panel.classList.contains("is-open") || panel.classList.contains("is-closing")) return;
+
+      const finishClose = () => {
+        if (panel._closeTimer) {
+          window.clearTimeout(panel._closeTimer);
+          panel._closeTimer = null;
+        }
+        if (panel._closeHandler) {
+          panel.removeEventListener("animationend", panel._closeHandler);
+          panel._closeHandler = null;
+        }
+        panel.classList.remove("is-open", "is-closing", "from-mobile-menu");
+        if (id === "messagesDrawer") {
+          state.messageListSnapshot = null;
+          state.messageListDomLocked = false;
+        }
+      };
+
+      panel._closeHandler = finishClose;
+      panel.classList.add("is-closing");
+      panel.addEventListener("animationend", finishClose, { once: true });
+      panel._closeTimer = window.setTimeout(finishClose, 220);
     }
 
     const MAIN_PAGE_IDS = ["homePage", "watchLaterPage", "favoritesPage", "profilePage", "chatPage", "settingsPage"];
@@ -1303,11 +1377,14 @@
         const card = document.createElement("article");
         card.className = "video-card saved-card";
         const url = contentUrl(item);
-        card.innerHTML = `
-          <button class="cover" data-platform="${escapeHtml(item.source_platform || item.platform || "bilibili")}" type="button" aria-label="打开 ${escapeHtml(item.title || item.bvid)}">
+        const coverContent = `
             ${coverImg(item)}
             <span class="platform">${escapeHtml(platformName(item.source_platform || item.platform))}</span>
-          </button>
+          `;
+        card.innerHTML = `
+          ${url
+            ? `<a class="cover" data-platform="${escapeHtml(item.source_platform || item.platform || "bilibili")}" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" aria-label="打开 ${escapeHtml(item.title || item.bvid)}">${coverContent}</a>`
+            : `<button class="cover" data-platform="${escapeHtml(item.source_platform || item.platform || "bilibili")}" type="button" aria-label="打开 ${escapeHtml(item.title || item.bvid)}">${coverContent}</button>`}
           <div>
             <p class="video-title">${escapeHtml(item.title || item.bvid)}</p>
             <p class="video-meta">${escapeHtml(item.up_name || "")}</p>
@@ -1315,8 +1392,12 @@
           <div class="card-actions saved-card-actions">
             <button class="small-btn saved-remove" type="button">移除</button>
           </div>`;
-        card.querySelector(".cover").addEventListener("click", () => {
-          if (url) window.open(url, "_blank", "noopener,noreferrer");
+        const cover = card.querySelector(".cover");
+        cover.addEventListener("click", () => {
+          if (url) trackRecommendationClick(item);
+        });
+        cover.addEventListener("auxclick", (event) => {
+          if (url && event.button === 1) trackRecommendationClick(item);
         });
         card.querySelector(".saved-remove").addEventListener("click", async (e) => {
           const btn = e.currentTarget;
@@ -1511,6 +1592,49 @@
       });
     }
 
+    function normalizeThemeMode(value) {
+      return THEME_OPTIONS.includes(value) ? value : "auto";
+    }
+
+    function applyThemeMode(mode = state.themeMode) {
+      state.themeMode = normalizeThemeMode(mode);
+      if (state.themeMode === "auto") {
+        document.documentElement.removeAttribute("data-theme");
+      } else {
+        document.documentElement.dataset.theme = state.themeMode;
+      }
+      renderThemeControls();
+    }
+
+    function setThemeMode(mode, { persist = true, toast = false } = {}) {
+      applyThemeMode(mode);
+      if (persist) storageSet(THEME_STORAGE_KEY, state.themeMode);
+      if (toast) showToast(`主题已切换为${THEME_LABELS[state.themeMode]}`);
+    }
+
+    function cycleThemeMode() {
+      const index = THEME_OPTIONS.indexOf(normalizeThemeMode(state.themeMode));
+      setThemeMode(THEME_OPTIONS[(index + 1) % THEME_OPTIONS.length], { toast: true });
+    }
+
+    function renderThemeControls() {
+      const mode = normalizeThemeMode(state.themeMode);
+      const label = THEME_LABELS[mode];
+      const toggle = $("#themeToggleBtn");
+      if (toggle) {
+        toggle.title = `主题：${label}`;
+        toggle.setAttribute("aria-label", `主题：${label}`);
+      }
+      const glyph = $("#themeToggleGlyph");
+      if (glyph) glyph.textContent = THEME_GLYPHS[mode];
+      document.querySelectorAll("[data-theme-choice]").forEach((button) => {
+        const isActive = button.dataset.themeChoice === mode;
+        button.classList.toggle("is-active", isActive);
+        button.setAttribute("aria-checked", isActive ? "true" : "false");
+        button.tabIndex = isActive ? 0 : -1;
+      });
+    }
+
     function setDismissOnReshuffle(enabled, { persist = true, toast = false } = {}) {
       state.dismissOnReshuffle = Boolean(enabled);
       if (persist) storageSet(DISMISS_ON_RESHUFFLE_KEY, state.dismissOnReshuffle ? "1" : "0");
@@ -1525,6 +1649,71 @@
       });
       const settingText = $("#dismissOnReshuffleSettingText");
       if (settingText) settingText.textContent = state.dismissOnReshuffle ? "开启" : "关闭";
+    }
+
+    function setAutoLoadOnScroll(enabled, { persist = true, toast = false } = {}) {
+      state.autoLoadOnScroll = Boolean(enabled);
+      if (persist) storageSet(AUTO_LOAD_ON_SCROLL_KEY, state.autoLoadOnScroll ? "1" : "0");
+      renderAutoLoadOnScrollToggle();
+      syncAutoLoadObserver();
+      if (toast) showToast(state.autoLoadOnScroll ? "滚动到底会自动加载推荐" : "已关闭滚动自动加载");
+    }
+
+    function renderAutoLoadOnScrollToggle() {
+      const toggle = $("#autoLoadOnScrollSetting");
+      if (toggle && toggle.checked !== state.autoLoadOnScroll) toggle.checked = state.autoLoadOnScroll;
+      const settingText = $("#autoLoadOnScrollSettingText");
+      if (settingText) settingText.textContent = state.autoLoadOnScroll ? "开启" : "关闭";
+    }
+
+    function syncAutoLoadObserver() {
+      if (autoLoadObserver) {
+        autoLoadObserver.disconnect();
+        autoLoadObserver = null;
+      }
+      if (!state.autoLoadOnScroll) return;
+      const sentinel = $("#loadMoreSentinel");
+      if (!sentinel || typeof IntersectionObserver === "undefined") return;
+      autoLoadObserver = new IntersectionObserver(handleAutoLoadIntersect, { rootMargin: "300px" });
+      autoLoadObserver.observe(sentinel);
+    }
+
+    function handleAutoLoadIntersect(entries) {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      void autoLoadMoreIfNeeded().catch(() => {});
+    }
+
+    function shouldAutoLoadMore(now) {
+      if (!state.autoLoadOnScroll) return false;
+      if (appendMoreInFlight) return false;
+      if (now - lastAutoLoadAt < AUTO_LOAD_COOLDOWN_MS) return false;
+      if (!(state.runtimeStatus?.pool_available_count > 0)) return false;
+      const homePage = $("#homePage");
+      if (!homePage || homePage.hidden) return false;
+      const loadMore = $("#loadMoreBtn");
+      if (!loadMore || loadMore.hidden) return false;
+      if (!grid.querySelector(".video-card")) return false;
+      return true;
+    }
+
+    async function autoLoadMoreIfNeeded() {
+      const now = Date.now();
+      if (!shouldAutoLoadMore(now)) return;
+      lastAutoLoadAt = now;
+      const button = $("#loadMoreBtn");
+      const previousText = button?.textContent || "加载更多推荐";
+      if (button) {
+        button.disabled = true;
+        button.textContent = "正在自动加载…";
+      }
+      try {
+        await appendMore();
+      } finally {
+        if (button) {
+          button.disabled = false;
+          button.textContent = previousText;
+        }
+      }
     }
 
     function renderFilters() {
@@ -1611,11 +1800,12 @@
     }
 
     function contentUrl(item) {
+      const platform = item.platform || item.source_platform;
       if (item.content_url) return item.content_url;
-      if (item.platform === "bilibili" && item.bvid) return `https://www.bilibili.com/video/${encodeURIComponent(item.bvid)}`;
-      if (item.platform === "youtube" && item.content_id) return `https://www.youtube.com/watch?v=${encodeURIComponent(item.content_id)}`;
-      if (item.platform === "twitter" && item.content_id) return `https://x.com/i/status/${encodeURIComponent(item.content_id)}`;
-      if (item.platform === "reddit") return "";
+      if (platform === "bilibili" && item.bvid) return `https://www.bilibili.com/video/${encodeURIComponent(item.bvid)}`;
+      if (platform === "youtube" && item.content_id) return `https://www.youtube.com/watch?v=${encodeURIComponent(item.content_id)}`;
+      if (platform === "twitter" && item.content_id) return `https://x.com/i/status/${encodeURIComponent(item.content_id)}`;
+      if (platform === "reddit") return "";
       return "";
     }
 
@@ -1646,6 +1836,28 @@
         .join(" · ");
     }
 
+    function recommendationMetaHtml(item) {
+      const up = String(item.up || "").trim();
+      const topic = String(item.topic || "").trim();
+      const parts = [];
+      if (up) {
+        const upHtml = item.platform === "bilibili" && item.up_mid > 0
+          ? `<a class="up-link" href="https://space.bilibili.com/${item.up_mid}" target="_blank" rel="noopener noreferrer">${escapeHtml(up)}</a>`
+          : escapeHtml(up);
+        parts.push(upHtml);
+      }
+      if (topic) parts.push(escapeHtml(topic));
+      return parts.join(" · ");
+    }
+
+    function recommendationStats(item) {
+      const segments = [];
+      if (item.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
+      if (item.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
+      if (item.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
+      return segments.join(" · ");
+    }
+
     function renderVideos() {
       if (shouldShowInitOnboarding(state.runtimeStatus)) {
         renderInitOnboarding();
@@ -1665,16 +1877,29 @@
       }
       grid.replaceChildren(...items.map((item) => {
         const card = document.createElement("article");
+        const url = contentUrl(item);
+        const durationBadge = item.content_type === "video" && item.duration > 0
+          ? `<span class="duration-badge">${escapeHtml(formatDuration(item.duration))}</span>`
+          : "";
+        const stats = recommendationStats(item);
         card.className = "video-card";
         card.dataset.bvid = item.bvid || item.id;
         card.innerHTML = `
-          <button class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" type="button" aria-label="打开 ${escapeHtml(item.title)}">
+          ${url
+            ? `<a class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" aria-label="打开 ${escapeHtml(item.title)}">
             ${recommendationMediaHtml(item)}
             <span class="platform">${escapeHtml(platformName(item.platform))}</span>
-          </button>
+            ${durationBadge}
+          </a>`
+            : `<button class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" type="button" aria-label="打开 ${escapeHtml(item.title)}">
+            ${recommendationMediaHtml(item)}
+            <span class="platform">${escapeHtml(platformName(item.platform))}</span>
+            ${durationBadge}
+          </button>`}
           <div>
             <p class="video-title">${escapeHtml(item.title)}</p>
-            <p class="video-meta">${escapeHtml(recommendationMeta(item))}</p>
+            <p class="video-meta">${recommendationMetaHtml(item)}</p>
+            ${stats ? `<p class="video-stats">${escapeHtml(stats)}</p>` : ""}
           </div>
           <p class="reason" role="button" tabindex="0" aria-expanded="false" title="${escapeHtml(item.reason)}"><span class="reason-text">${escapeHtml(item.reason)}</span></p>
           <div class="card-actions" aria-label="推荐反馈操作">
@@ -1716,7 +1941,11 @@
             toggleReason();
           }
         });
-        card.querySelector(".cover").addEventListener("click", () => openRecommendation(item, card));
+        const cover = card.querySelector(".cover");
+        cover.addEventListener("click", () => openRecommendation(item, card));
+        cover.addEventListener("auxclick", (event) => {
+          if (event.button === 1) trackRecommendationClick(item);
+        });
         card.querySelectorAll("[data-action]").forEach((btn) => btn.addEventListener("click", () => handleCardAction(btn.dataset.action, item, card)));
         card.querySelector(".comment-field input").addEventListener("keydown", (event) => {
           if (event.key === "Enter") handleCardAction("send-comment", item, card);
@@ -1760,18 +1989,17 @@
           bvid: item.bvid,
           content_id: item.content_id || item.bvid,
           content_url: url || item.content_url,
-          source_platform: item.platform,
+          source_platform: item.platform || item.source_platform,
           title: item.title,
           recommendation_id: item.id,
           topic_label: item.topic,
-          up_name: item.up
+          up_name: item.up || item.up_name
         })
       }).catch(() => {});
     }
 
     function openRecommendation(item, card) {
       const url = contentUrl(item);
-      if (url) window.open(url, "_blank", "noopener,noreferrer");
       trackRecommendationClick(item);
       card.querySelector(".status-line").textContent = url ? "已打开真实内容链接，点击信号会在后台记录。" : "后端没有返回可打开链接；点击信号会在后台记录。";
       showToast(url ? `打开：${item.title}` : "后端没有返回可打开链接");
@@ -2600,34 +2828,52 @@
       if (!root) return;
       root.querySelector('[data-profile-edit-toggle="exit"]')?.addEventListener("click", () => { void exitProfileEdit(); });
       root.querySelectorAll("[data-edit-remove]").forEach((btn) => {
-        btn.addEventListener("click", () => void applyProfileEdit({ target: btn.dataset.editRemove, op: "remove", value: btn.dataset.editValue }));
+        btn.addEventListener("click", async () => {
+          if (btn.disabled) return;
+          const chip = btn.closest(".edit-chip");
+          if (chip?.classList.contains("is-pending")) return;
+          chip?.classList.add("is-pending");
+          btn.disabled = true;
+          await applyProfileEdit({ target: btn.dataset.editRemove, op: "remove", value: btn.dataset.editValue });
+        });
       });
       root.querySelectorAll("[data-edit-remove-specific]").forEach((btn) => {
-        btn.addEventListener("click", () => void applyProfileEdit({
-          target: btn.dataset.editRemoveSpecific,
-          op: "remove",
-          value: btn.dataset.editValue,
-          parent: btn.dataset.editParent || ""
-        }));
+        btn.addEventListener("click", async () => {
+          if (btn.disabled) return;
+          const chip = btn.closest(".edit-chip");
+          if (chip?.classList.contains("is-pending")) return;
+          chip?.classList.add("is-pending");
+          btn.disabled = true;
+          await applyProfileEdit({
+            target: btn.dataset.editRemoveSpecific,
+            op: "remove",
+            value: btn.dataset.editValue,
+            parent: btn.dataset.editParent || ""
+          });
+        });
       });
       root.querySelectorAll("[data-edit-reset]").forEach((btn) => {
         btn.addEventListener("click", () => void applyProfileEdit({ target: btn.dataset.editReset, op: "reset" }));
       });
       root.querySelectorAll("[data-edit-add]").forEach((btn) => {
-        btn.addEventListener("click", () => {
+        btn.addEventListener("click", async () => {
+          if (btn.disabled) return;
           const path = btn.dataset.editAdd;
           const input = root.querySelector(`[data-edit-add-input="${path}"]`);
           const value = input?.value.trim();
           if (!value) return;
-          void applyProfileEdit({ target: path, op: "add", value });
+          btn.disabled = true;
+          await applyProfileEdit({ target: path, op: "add", value });
         });
       });
       root.querySelectorAll("[data-edit-add-specific]").forEach((btn) => {
-        btn.addEventListener("click", () => {
+        btn.addEventListener("click", async () => {
+          if (btn.disabled) return;
           const input = btn.closest(".edit-add-row")?.querySelector("[data-edit-specific-input]");
           const value = input?.value.trim();
           if (!value) return;
-          void applyProfileEdit({
+          btn.disabled = true;
+          await applyProfileEdit({
             target: btn.dataset.editAddSpecific,
             op: "add",
             value,
@@ -2636,21 +2882,27 @@
         });
       });
       root.querySelectorAll("[data-edit-add-input]").forEach((input) => {
-        input.addEventListener("keydown", (event) => {
+        input.addEventListener("keydown", async (event) => {
           if (event.key !== "Enter") return;
           event.preventDefault();
           const value = input.value.trim();
           if (!value) return;
-          void applyProfileEdit({ target: input.dataset.editAddInput, op: "add", value });
+          const button = root.querySelector(`[data-edit-add="${input.dataset.editAddInput}"]`);
+          if (button?.disabled) return;
+          if (button) button.disabled = true;
+          await applyProfileEdit({ target: input.dataset.editAddInput, op: "add", value });
         });
       });
       root.querySelectorAll("[data-edit-specific-input]").forEach((input) => {
-        input.addEventListener("keydown", (event) => {
+        input.addEventListener("keydown", async (event) => {
           if (event.key !== "Enter") return;
           event.preventDefault();
           const value = input.value.trim();
           if (!value) return;
-          void applyProfileEdit({
+          const button = input.closest(".edit-add-row")?.querySelector("[data-edit-add-specific]");
+          if (button?.disabled) return;
+          if (button) button.disabled = true;
+          await applyProfileEdit({
             target: input.dataset.editSpecificInput,
             op: "add",
             value,
@@ -2850,8 +3102,18 @@
         el.dataset.messageKey = key;
         if (messageType(msg) === "notification") {
           el.classList.add("is-notification");
-          el.innerHTML = `<p class="eyebrow">待通知候选</p><h3>${escapeHtml(msg.title)}</h3><p class="video-meta">${escapeHtml(msg.reason)}</p><div class="message-note">这类消息来自后端挑出的高置信推荐，用于插件通知；标记已通知后不会反复出现。</div><div class="message-card-actions"><div class="card-feedback-icons" aria-label="通知候选状态"><button class="feedback-icon-btn" data-notification-msg="dismiss" type="button" aria-label="标记已通知" title="标记已通知"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></button></div><div class="message-primary-actions"><button class="small-btn" data-notification-msg="view">去看看</button></div></div>`;
-          el.querySelectorAll("[data-notification-msg]").forEach((btn) => btn.addEventListener("click", () => respondNotification(msg, btn.dataset.notificationMsg, el)));
+          const viewAction = msg.content_url
+            ? `<a class="small-btn" data-notification-msg="view" href="${escapeHtml(msg.content_url)}" target="_blank" rel="noopener noreferrer">去看看</a>`
+            : `<button class="small-btn" data-notification-msg="view" type="button">去看看</button>`;
+          el.innerHTML = `<p class="eyebrow">待通知候选</p><h3>${escapeHtml(msg.title)}</h3><p class="video-meta">${escapeHtml(msg.reason)}</p><div class="message-note">这类消息来自后端挑出的高置信推荐，用于插件通知；标记已通知后不会反复出现。</div><div class="message-card-actions"><div class="card-feedback-icons" aria-label="通知候选状态"><button class="feedback-icon-btn" data-notification-msg="dismiss" type="button" aria-label="标记已通知" title="标记已通知"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></button></div><div class="message-primary-actions">${viewAction}</div></div>`;
+          el.querySelectorAll("[data-notification-msg]").forEach((btn) => {
+            btn.addEventListener("click", () => respondNotification(msg, btn.dataset.notificationMsg, el));
+            btn.addEventListener("auxclick", (event) => {
+              if (event.button === 1 && btn.dataset.notificationMsg === "view") {
+                respondNotification(msg, "view", el);
+              }
+            });
+          });
         } else {
           const isAvoidance = messageType(msg) === "avoidance.probe";
           const isChallenge = !isAvoidance && isChallengeProbe(msg);
@@ -2879,7 +3141,7 @@
     }
 
     async function respondNotification(msg, response, el) {
-      if (response === "view" && msg.content_url) window.open(msg.content_url, "_blank", "noopener,noreferrer");
+      if (response === "view" && msg.content_url) trackRecommendationClick(msg);
       await requestJson(ENDPOINTS.notificationSent, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bvid: msg.bvid }) });
       state.messages = state.messages.filter((item) => !(messageType(item) === "notification" && String(item.bvid) === String(msg.bvid)));
       renderMessages();
@@ -3246,6 +3508,45 @@
       return current;
     }
 
+    function delightContentUrl(delight) {
+      if (!delight) return "";
+      return delight.content_url || (delight.bvid ? `https://www.bilibili.com/video/${encodeURIComponent(delight.bvid)}` : "");
+    }
+
+    function ensureDelightThumbAnchor() {
+      const thumb = $("#delightThumb");
+      if (!thumb || thumb.tagName.toLowerCase() === "a") return thumb;
+      const anchor = document.createElement("a");
+      Array.from(thumb.attributes).forEach((attr) => {
+        if (attr.name !== "role" && attr.name !== "tabindex") {
+          anchor.setAttribute(attr.name, attr.value);
+        }
+      });
+      while (thumb.firstChild) anchor.append(thumb.firstChild);
+      thumb.replaceWith(anchor);
+      return anchor;
+    }
+
+    function syncDelightThumbLink(delight) {
+      const thumb = ensureDelightThumbAnchor();
+      if (!thumb) return null;
+      const url = delightContentUrl(delight);
+      if (url) {
+        thumb.href = url;
+        thumb.target = "_blank";
+        thumb.rel = "noopener noreferrer";
+        thumb.removeAttribute("role");
+        thumb.removeAttribute("tabindex");
+        return thumb;
+      }
+      thumb.removeAttribute("href");
+      thumb.removeAttribute("target");
+      thumb.removeAttribute("rel");
+      thumb.setAttribute("role", "button");
+      thumb.setAttribute("tabindex", "0");
+      return thumb;
+    }
+
     function applyTurnToDelight(turn) {
       const subjectId = String(turn?.subject_id || turn?.bvid || "");
       if (!turn || (turn.scope && turn.scope !== "delight") || !subjectId) return null;
@@ -3353,8 +3654,7 @@
         return;
       }
       if (response === "view") {
-        const url = delight.content_url || (delight.bvid ? `https://www.bilibili.com/video/${encodeURIComponent(delight.bvid)}` : "");
-        if (url) window.open(url, "_blank", "noopener,noreferrer");
+        const url = delightContentUrl(delight);
         trackRecommendationClick(delight);
         // 浏览过即已读：上报 view 让后端标记 delight_notified，下次重灌不再出现。
         // fire-and-forget，不阻塞打开内容；当场卡片仍保留。
@@ -3547,17 +3847,23 @@
     }
 
     async function appendMore() {
-      const payload = await requestJson(ENDPOINTS.append, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ excluded_bvids: state.videos.map((v) => v.bvid) }) });
-      if (payload?.items?.length) {
-        const freshItems = normalizeRecommendationList(payload.items);
-        state.videos = state.videos.concat(freshItems);
-        renderAll();
-        // Keep decoding off the interaction path: slow first-miss covers should
-        // not delay the new recommendation cards from appearing.
-        void warmCoverImages(freshItems, { waitForDecode: true }).catch(() => {});
-        showToast(freshItems.length ? "已加载更多推荐" : "后端返回的内容都已反馈过");
-      } else {
-        showToast("加载更多失败：后端没有返回新候选");
+      if (appendMoreInFlight) return;
+      appendMoreInFlight = true;
+      try {
+        const payload = await requestJson(ENDPOINTS.append, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ excluded_bvids: state.videos.map((v) => v.bvid) }) });
+        if (payload?.items?.length) {
+          const freshItems = normalizeRecommendationList(payload.items);
+          state.videos = state.videos.concat(freshItems);
+          renderAll();
+          // Keep decoding off the interaction path: slow first-miss covers should
+          // not delay the new recommendation cards from appearing.
+          void warmCoverImages(freshItems, { waitForDecode: true }).catch(() => {});
+          showToast(freshItems.length ? "已加载更多推荐" : "后端返回的内容都已反馈过");
+        } else {
+          showToast("加载更多失败：后端没有返回新候选");
+        }
+      } finally {
+        appendMoreInFlight = false;
       }
     }
 
@@ -4308,7 +4614,7 @@
     }
 
     function renderDelightCover(delight) {
-      const thumb = $("#delightBanner .thumb");
+      const thumb = syncDelightThumbLink(delight);
       if (!thumb) return;
       const url = imageProxyUrl(delight?.cover_url);
       thumb.replaceChildren();
@@ -5272,15 +5578,27 @@
     bindStarButton();
     syncTopbarHeight();
     window.addEventListener("resize", syncTopbarHeight);
+    safeBind("#themeToggleBtn", "click", cycleThemeMode);
+    document.querySelectorAll("[data-theme-choice]").forEach((button) => {
+      button.addEventListener("click", () => setThemeMode(button.dataset.themeChoice, { toast: true }));
+    });
     ["#dismissOnReshuffleToggle", "#dismissOnReshuffleSetting"].forEach((selector) => {
       safeBind(selector, "change", (event) => {
         setDismissOnReshuffle(Boolean(event.target.checked), { toast: true });
       });
     });
+    safeBind("#autoLoadOnScrollSetting", "change", (event) => {
+      setAutoLoadOnScroll(Boolean(event.target.checked), { toast: true });
+    });
     safeBind("#reshuffleBtn", "click", reshuffle);
     safeBind("#loadMoreBtn", "click", appendMore);
+    ensureDelightThumbAnchor();
     safeBind("#delightThumb", "click", () => respondDelight(state.delight, "view"));
+    safeBind("#delightThumb", "auxclick", (event) => {
+      if (event.button === 1) respondDelight(state.delight, "view");
+    });
     safeBind("#delightThumb", "keydown", (event) => {
+      if (event.currentTarget?.getAttribute("href")) return;
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
       respondDelight(state.delight, "view");
@@ -5352,7 +5670,7 @@
       }
       const endpoint = persistBackendEndpoint();
       const frontend = persistFrontendSettings();
-      if ($("#configStatus")) $("#configStatus").value = `正在保存到 ${endpoint.host}:${endpoint.port}，惊喜队列加载 ${frontend.delightQueueLimit} 条，换一批忽略当前${frontend.dismissOnReshuffle ? "已开启" : "已关闭"}，后端热重载可能需要几秒。`;
+      if ($("#configStatus")) $("#configStatus").value = `正在保存到 ${endpoint.host}:${endpoint.port}，惊喜队列加载 ${frontend.delightQueueLimit} 条，主题${THEME_LABELS[frontend.themeMode]}，换一批忽略当前${frontend.dismissOnReshuffle ? "已开启" : "已关闭"}，滚动自动加载${frontend.autoLoadOnScroll ? "已开启" : "已关闭"}，后端热重载可能需要几秒。`;
       try {
         const payload = buildConfigUpdate();
         const result = await requestJsonStrict(ENDPOINTS.config.replace("?reveal_keys=true", ""), {

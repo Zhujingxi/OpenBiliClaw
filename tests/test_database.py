@@ -93,3 +93,36 @@ def test_update_init_run_rejects_unknown_column(tmp_path: Path) -> None:
     db.try_reserve_init_starting("run-1")
     with pytest.raises(ValueError, match="unknown columns"):
         db.update_init_run("run-1", bogus="x")
+
+
+def test_get_recommendations_rows_carry_card_metadata_columns(tmp_path: Path) -> None:
+    """Regression (issue #75): the history join must SELECT the card-metadata
+    columns, otherwise /api/recommendations serializes them all as 0 even
+    though content_cache has real values (stub-based endpoint tests can't
+    catch a missing SQL column)."""
+    db = _db(tmp_path)
+    db.cache_content(
+        "BV1meta",
+        title="元信息视频",
+        up_name="某UP",
+        up_mid=12345,
+        duration=3723,
+        view_count=120000,
+        like_count=4567,
+        danmaku_count=890,
+        cover_url="https://example.com/cover.jpg",
+        source_platform="bilibili",
+        content_type="video",
+        relevance_score=0.9,
+    )
+    db.insert_recommendation("BV1meta", confidence=0.9, expression="试试", topic="测试")
+
+    rows = db.get_recommendations(limit=10)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["duration"] == 3723
+    assert row["view_count"] == 120000
+    assert row["like_count"] == 4567
+    assert row["danmaku_count"] == 890
+    assert row["up_mid"] == 12345

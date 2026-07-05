@@ -3948,7 +3948,12 @@ class Database:
                 COALESCE(c.source_platform, '') AS source_platform,
                 COALESCE(c.content_type, 'video') AS content_type,
                 COALESCE(c.body_text, '') AS body_text,
-                COALESCE(c.franchise_key, '') AS franchise_key
+                COALESCE(c.franchise_key, '') AS franchise_key,
+                COALESCE(c.duration, 0) AS duration,
+                COALESCE(c.view_count, 0) AS view_count,
+                COALESCE(c.like_count, 0) AS like_count,
+                COALESCE(c.danmaku_count, 0) AS danmaku_count,
+                COALESCE(c.up_mid, 0) AS up_mid
             FROM recommendations AS r
             LEFT JOIN content_cache AS c ON c.bvid = COALESCE(
                 (SELECT bvid FROM content_cache WHERE bvid = r.bvid),

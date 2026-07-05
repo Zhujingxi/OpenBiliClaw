@@ -2881,6 +2881,11 @@ def create_app(
                 source_platform=str(getattr(item.content, "source_platform", "") or "bilibili"),
                 content_type=str(getattr(item.content, "content_type", "") or "video"),
                 body_text=str(getattr(item.content, "body_text", "") or ""),
+                duration=int(getattr(item.content, "duration", 0) or 0),
+                view_count=int(getattr(item.content, "view_count", 0) or 0),
+                like_count=int(getattr(item.content, "like_count", 0) or 0),
+                danmaku_count=int(getattr(item.content, "danmaku_count", 0) or 0),
+                up_mid=int(getattr(item.content, "up_mid", 0) or 0),
             )
             for item in items
         ]
@@ -3653,6 +3658,11 @@ def create_app(
                     source_platform=str(row.get("source_platform", "") or "bilibili"),
                     content_type=str(row.get("content_type", "") or "video"),
                     body_text=str(row.get("body_text", "") or ""),
+                    duration=int(row.get("duration", 0) or 0),
+                    view_count=int(row.get("view_count", 0) or 0),
+                    like_count=int(row.get("like_count", 0) or 0),
+                    danmaku_count=int(row.get("danmaku_count", 0) or 0),
+                    up_mid=int(row.get("up_mid", 0) or 0),
                 )
                 for row in rows
             ]

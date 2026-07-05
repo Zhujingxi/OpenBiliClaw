@@ -3199,6 +3199,11 @@ class TestBackendAPI:
                         "topic": "你最近那股想把结构想透的劲头",
                         "presented": 1,
                         "franchise_key": "",  # general-interest content
+                        "duration": 3723,
+                        "view_count": 12000,
+                        "like_count": 3400,
+                        "danmaku_count": 890,
+                        "up_mid": 112233,
                     }
                 ]
 
@@ -3213,6 +3218,11 @@ class TestBackendAPI:
         assert data["items"][0]["id"] == 7
         assert data["items"][0]["title"] == "讲透城市与建筑"
         assert data["items"][0]["cover_url"] == "https://i0.hdslb.com/bfs/archive/cover.jpg"
+        assert data["items"][0]["duration"] == 3723
+        assert data["items"][0]["view_count"] == 12000
+        assert data["items"][0]["like_count"] == 3400
+        assert data["items"][0]["danmaku_count"] == 890
+        assert data["items"][0]["up_mid"] == 112233
 
     def test_recommendations_endpoint_caps_same_franchise(self) -> None:
         """End-to-end: when the DB returns 5 同 IP rows in the
@@ -4087,13 +4097,30 @@ class TestBackendAPI:
                             title="新的一批",
                             up_name="UPA",
                             cover_url="https://i0.hdslb.com/bfs/archive/new-cover.jpg",
+                            duration=3671,
+                            view_count=12500,
+                            like_count=3400,
+                            danmaku_count=890,
+                            up_mid=987654321,
                         ),
                         recommendation_id=11,
                         expression="先给你捞一条新的。",
                         topic_label="刚补进来的新东西",
                         confidence=0.88,
                         presented=False,
-                    )
+                    ),
+                    SimpleNamespace(
+                        content=SimpleNamespace(
+                            bvid="BV1PLAIN",
+                            title="朴素对象",
+                            up_name="UPB",
+                            cover_url="https://i0.hdslb.com/bfs/archive/plain-cover.jpg",
+                        ),
+                        recommendation_id=12,
+                        expression="没有扩展字段也要稳。",
+                        topic_label="兼容旧对象",
+                        presented=False,
+                    ),
                 ]
 
         hub = FakeEventHub()
@@ -4127,7 +4154,33 @@ class TestBackendAPI:
                     "source_platform": "bilibili",
                     "content_type": "video",
                     "body_text": "",
-                }
+                    "duration": 3671,
+                    "view_count": 12500,
+                    "like_count": 3400,
+                    "danmaku_count": 890,
+                    "up_mid": 987654321,
+                },
+                {
+                    "id": 12,
+                    "bvid": "BV1PLAIN",
+                    "title": "朴素对象",
+                    "up_name": "UPB",
+                    "cover_url": "https://i0.hdslb.com/bfs/archive/plain-cover.jpg",
+                    "expression": "没有扩展字段也要稳。",
+                    "topic_label": "兼容旧对象",
+                    "presented": False,
+                    "feedback_type": "",
+                    "content_id": "BV1PLAIN",
+                    "content_url": "",
+                    "source_platform": "bilibili",
+                    "content_type": "video",
+                    "body_text": "",
+                    "duration": 0,
+                    "view_count": 0,
+                    "like_count": 0,
+                    "danmaku_count": 0,
+                    "up_mid": 0,
+                },
             ]
         }
         assert hub.events[-1]["type"] == "refresh.pool_updated"
@@ -4233,6 +4286,11 @@ class TestBackendAPI:
                     "source_platform": "bilibili",
                     "content_type": "video",
                     "body_text": "",
+                    "duration": 0,
+                    "view_count": 0,
+                    "like_count": 0,
+                    "danmaku_count": 0,
+                    "up_mid": 0,
                 }
             ]
         }
@@ -10451,9 +10509,7 @@ class TestEmbeddingDiagnosisAndRepair:
         assert body["reason"] == "local_only"
         assert body["prerequisites"]["llm_ready"] is True
 
-    def test_init_status_classifies_misconfigured_embedding_provider(
-        self, tmp_path: Path
-    ) -> None:
+    def test_init_status_classifies_misconfigured_embedding_provider(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient
 
         # A browser-translated provider name must surface as misconfigured,
@@ -10533,9 +10589,7 @@ class TestEmbeddingDiagnosisAndRepair:
         monkeypatch.setattr(
             "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
         )
-        monkeypatch.setattr(
-            "openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", fake_pull
-        )
+        monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", fake_pull)
         app, _ = self._make_app(tmp_path, embedding_provider="ollama")
         with TestClient(app) as client:
             resp = client.post("/api/embedding/repair")
