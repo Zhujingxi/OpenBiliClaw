@@ -216,6 +216,84 @@ def test_start_serve_sets_default_keep_alive(monkeypatch: pytest.MonkeyPatch) ->
     assert env["OLLAMA_KEEP_ALIVE"] == "24h"
 
 
+def test_managed_models_dir_uses_existing_relocation_marker(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbiliclaw.runtime import ollama_supervisor as sup
+
+    marker = tmp_path / "ollama-models"
+    monkeypatch.setattr(sup, "ollama_models_relocation_candidate", lambda: str(marker))
+
+    assert sup.managed_models_dir() is None
+    marker.mkdir()
+    assert sup.managed_models_dir() == str(marker)
+
+
+def test_start_serve_sets_managed_ollama_models_dir(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbiliclaw.runtime import ollama_supervisor as sup
+
+    models_dir = tmp_path / "ollama-models"
+    models_dir.mkdir()
+    monkeypatch.setattr(sup, "ollama_models_relocation_candidate", lambda: str(models_dir))
+    monkeypatch.setattr(sup, "_managed_proc", None)
+    monkeypatch.delenv("OLLAMA_MODELS", raising=False)
+    health = iter([False, True])
+    monkeypatch.setattr(sup, "_ollama_is_running", lambda *a, **k: next(health))
+
+    calls: list[dict[str, object]] = []
+
+    class _FakePopen:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.pid = 999
+            calls.append(kwargs)
+
+        def poll(self) -> None:
+            return None
+
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ollama")
+    monkeypatch.setattr("subprocess.Popen", _FakePopen)
+
+    assert sup._ollama_start_serve_background() is True
+    env = calls[0]["env"]
+    assert isinstance(env, dict)
+    assert env["OLLAMA_MODELS"] == str(models_dir)
+
+
+def test_start_serve_preserves_explicit_ollama_models_env(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbiliclaw.runtime import ollama_supervisor as sup
+
+    models_dir = tmp_path / "ollama-models"
+    explicit_dir = tmp_path / "explicit-models"
+    models_dir.mkdir()
+    monkeypatch.setattr(sup, "ollama_models_relocation_candidate", lambda: str(models_dir))
+    monkeypatch.setattr(sup, "_managed_proc", None)
+    monkeypatch.setenv("OLLAMA_MODELS", str(explicit_dir))
+    health = iter([False, True])
+    monkeypatch.setattr(sup, "_ollama_is_running", lambda *a, **k: next(health))
+
+    calls: list[dict[str, object]] = []
+
+    class _FakePopen:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.pid = 999
+            calls.append(kwargs)
+
+        def poll(self) -> None:
+            return None
+
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ollama")
+    monkeypatch.setattr("subprocess.Popen", _FakePopen)
+
+    assert sup._ollama_start_serve_background() is True
+    env = calls[0]["env"]
+    assert isinstance(env, dict)
+    assert env["OLLAMA_MODELS"] == str(explicit_dir)
+
+
 def test_start_serve_does_not_record_when_already_running(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -228,6 +306,22 @@ def test_start_serve_does_not_record_when_already_running(
 
     assert sup._ollama_start_serve_background() is True
     assert sup._managed_proc is None
+
+
+def test_restart_managed_ollama_refuses_foreign_daemon(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbiliclaw.runtime import ollama_supervisor as sup
+
+    models_dir = tmp_path / "ollama-models"
+    monkeypatch.setattr(sup, "_managed_proc", None)
+    monkeypatch.setattr(sup, "_ollama_is_running", lambda *a, **k: True)
+
+    ok, reason = sup.restart_managed_ollama_with_models_dir(str(models_dir))
+
+    assert ok is False
+    assert reason == "external_ollama"
+    assert models_dir.is_dir()
 
 
 def test_cli_keeps_ollama_re_exports() -> None:

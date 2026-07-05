@@ -15,6 +15,7 @@ from openbiliclaw.llm.ollama_diagnostics import (
     DIAG_ERROR,
     DIAG_MODEL_BROKEN,
     DIAG_MODEL_MISSING,
+    DIAG_MODEL_PATH_ENCODING,
     DIAG_NOT_RUNNING,
     DIAG_OK,
     diagnose_ollama_embedding,
@@ -88,6 +89,63 @@ async def test_diagnose_model_broken_when_installed_but_500s() -> None:
     assert code == DIAG_MODEL_BROKEN
     assert "500" in detail
     assert "failed to load model" in detail
+
+
+async def test_diagnose_model_path_encoding_on_mojibake_windows_path() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/tags":
+            return _tags_response("bge-m3")
+        return httpx.Response(
+            500,
+            json={
+                "error": (
+                    "llama-server process has terminated: exit status 1: "
+                    "error loading model: llama_model_loader: failed to load model "
+                    "from C:\\Users\\��\\ .ollama\\models\\blobs\\sha256-abc"
+                )
+            },
+        )
+
+    code, detail = await diagnose_ollama_embedding(
+        BASE_URL, "bge-m3", transport=_transport(handler)
+    )
+    assert code == DIAG_MODEL_PATH_ENCODING
+    assert "OLLAMA_MODELS" in detail
+    assert "重新下载不能解决" in detail
+
+
+async def test_diagnose_plain_load_failure_stays_model_broken() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/tags":
+            return _tags_response("bge-m3")
+        return httpx.Response(
+            500,
+            json={
+                "error": (
+                    "llama_model_loader: failed to load model from "
+                    "C:\\Users\\alice\\.ollama\\models\\blobs\\sha256-abc"
+                )
+            },
+        )
+
+    code, detail = await diagnose_ollama_embedding(
+        BASE_URL, "bge-m3", transport=_transport(handler)
+    )
+    assert code == DIAG_MODEL_BROKEN
+    assert "500" in detail
+
+
+async def test_diagnose_memory_ish_500_stays_model_broken() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/tags":
+            return _tags_response("bge-m3")
+        return httpx.Response(500, json={"error": "llama runner process no memory"})
+
+    code, detail = await diagnose_ollama_embedding(
+        BASE_URL, "bge-m3", transport=_transport(handler)
+    )
+    assert code == DIAG_MODEL_BROKEN
+    assert "no memory" in detail
 
 
 async def test_diagnose_model_broken_on_empty_vector() -> None:

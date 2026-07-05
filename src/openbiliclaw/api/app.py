@@ -2427,6 +2427,7 @@ def create_app(
         base_url, model = _embedding_ollama_target()
 
         from openbiliclaw.llm.ollama_diagnostics import (
+            DIAG_MODEL_PATH_ENCODING,
             DIAG_NOT_RUNNING,
             DIAG_OK,
             diagnose_ollama_embedding,
@@ -2440,9 +2441,48 @@ def create_app(
                 _expire_embedding_ready_cache()
                 return JSONResponse({"ok": True, "already_ok": True, "model": model})
             if code == DIAG_NOT_RUNNING:
-                return JSONResponse(
-                    {"error": "not_running", "detail": detail}, status_code=409
+                return JSONResponse({"error": "not_running", "detail": detail}, status_code=409)
+            if code == DIAG_MODEL_PATH_ENCODING:
+                from openbiliclaw.runtime.ollama_supervisor import (
+                    ollama_models_relocation_candidate,
+                    restart_managed_ollama_with_models_dir,
                 )
+
+                manual_detail = (
+                    "检测到模型路径含非 ASCII 字符（常见于中文 Windows 用户名），"
+                    "llama-server 无法从该路径加载模型，重新下载不能解决。"
+                    "请手动设置系统环境变量 OLLAMA_MODELS 为纯英文路径"
+                    f"（如 D:\\ollama\\models），然后重启 Ollama 并重新拉取 {model}。"
+                )
+                models_dir = ollama_models_relocation_candidate()
+                if models_dir is None:
+                    return JSONResponse(
+                        {"error": "manual_fix_required", "detail": manual_detail},
+                        status_code=409,
+                    )
+                restarted, reason = restart_managed_ollama_with_models_dir(models_dir)
+                if not restarted and reason == "external_ollama":
+                    return JSONResponse(
+                        {
+                            "error": "external_ollama",
+                            "detail": (
+                                "检测到外部启动的 Ollama，我们无法带新模型目录重启它；"
+                                "请手动设置 OLLAMA_MODELS，或退出外部 Ollama 后重试。"
+                            ),
+                        },
+                        status_code=409,
+                    )
+                if not restarted:
+                    return JSONResponse(
+                        {
+                            "error": "restart_failed",
+                            "detail": (
+                                "迁移模型目录后重启 Ollama 失败，"
+                                "请重启应用或手动设置 OLLAMA_MODELS。"
+                            ),
+                        },
+                        status_code=409,
+                    )
             # model_missing / model_broken / error → a (re-)pull is the fix.
             _embedding_repair_state.update(
                 {

@@ -858,7 +858,8 @@
               : "未配置 embedding 时可以先初始化；推荐去重和语义检索会弱一些。"),
           // One-click server-side `ollama pull`; hidden while repairing (the
           // hint already shows live percent).
-          repairable: ["model_missing", "model_broken"].includes(prereq.embedding_check)
+          repairable: ["model_missing", "model_broken", "model_path_encoding"].includes(prereq.embedding_check),
+          repairLabel: prereq.embedding_check === "model_path_encoding" ? "迁移模型目录并修复" : "自动下载向量模型"
         },
         {
           key: "platforms",
@@ -950,7 +951,7 @@
           const mark = row.ok ? "✓" : row.hard ? "✗" : "•";
           const hint = !row.ok && row.hint ? `<p class="init-hint">${escapeHtml(row.hint)}</p>` : "";
           const repair = !row.ok && row.repairable
-            ? '<button class="small-btn init-repair-btn" type="button" data-embedding-repair>自动下载向量模型</button>'
+            ? `<button class="small-btn init-repair-btn" type="button" data-embedding-repair>${escapeHtml(row.repairLabel || "自动下载向量模型")}</button>`
             : "";
           return `<li class="${row.ok ? "init-ok" : "init-missing"} ${row.hard ? "init-hard" : "init-soft"}"><div class="init-row"><span class="init-mark">${mark}</span><span>${escapeHtml(row.label)}</span></div>${hint}${repair}</li>`;
         })
@@ -972,6 +973,8 @@
         if (error?.status !== 409 || error?.details?.error !== "already_running") {
           btn.disabled = false;
           btn.textContent = "下载启动失败，重试";
+          state.initReason = error?.details?.detail || error?.message || "向量模型修复启动失败。";
+          renderInitOnboarding();
           return;
         }
       }

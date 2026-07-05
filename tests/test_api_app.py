@@ -10610,6 +10610,110 @@ class TestEmbeddingDiagnosisAndRepair:
         assert status.get("ok") is True
         assert status.get("error") == ""
 
+    def test_repair_model_path_encoding_restarts_then_pulls(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        models_dir = tmp_path / "relocated-models"
+        restarted: dict[str, str] = {}
+        pulled: dict[str, str] = {}
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("model_path_encoding", "模型路径含非 ASCII 字符；请设置 OLLAMA_MODELS")
+
+        def fake_restart(path: str) -> tuple[bool, str]:
+            restarted["path"] = path
+            return (True, "")
+
+        async def fake_pull(base_url: str, model: str, *, on_progress=None, **_kw: object):
+            pulled["model"] = model
+            if on_progress is not None:
+                on_progress("success", 0, 0)
+            return (True, "")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", fake_pull)
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor.ollama_models_relocation_candidate",
+            lambda: str(models_dir),
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor.restart_managed_ollama_with_models_dir",
+            fake_restart,
+        )
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+            assert resp.status_code == 202
+            body = resp.json()
+            assert body["diagnosis"] == "model_path_encoding"
+
+            status: dict = {}
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                status = client.get("/api/embedding/repair").json()
+                if status.get("done"):
+                    break
+                time.sleep(0.05)
+
+        assert restarted["path"] == str(models_dir)
+        assert pulled["model"] == "bge-m3"
+        assert status.get("ok") is True
+
+    def test_repair_model_path_encoding_rejects_external_ollama(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("model_path_encoding", "模型路径含非 ASCII 字符")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor.ollama_models_relocation_candidate",
+            lambda: str(tmp_path / "relocated-models"),
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor.restart_managed_ollama_with_models_dir",
+            lambda _path: (False, "external_ollama"),
+        )
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body["error"] == "external_ollama"
+        assert "外部启动的 Ollama" in body["detail"]
+
+    def test_repair_model_path_encoding_requires_manual_fix_when_no_safe_candidate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("model_path_encoding", "模型路径含非 ASCII 字符")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor.ollama_models_relocation_candidate",
+            lambda: None,
+        )
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body["error"] == "manual_fix_required"
+        assert "OLLAMA_MODELS" in body["detail"]
+        assert "重启 Ollama" in body["detail"]
+
     def test_repair_single_flight_while_running(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

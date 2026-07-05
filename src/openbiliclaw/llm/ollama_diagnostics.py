@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -31,6 +32,7 @@ DIAG_OK = "ok"
 DIAG_NOT_RUNNING = "not_running"
 DIAG_MODEL_MISSING = "model_missing"
 DIAG_MODEL_BROKEN = "model_broken"
+DIAG_MODEL_PATH_ENCODING = "model_path_encoding"
 DIAG_ERROR = "error"
 
 _TAGS_TIMEOUT_SECONDS = 5.0
@@ -63,6 +65,19 @@ def _error_snippet(response: httpx.Response) -> str:
     except Exception:
         pass
     return response.text[:200]
+
+
+def _looks_like_path_encoding_failure(text: str) -> bool:
+    """Detect the Windows non-ASCII model path failure without overmatching OOMs."""
+    if not ("failed to load model" in text or "llama_model_loader" in text):
+        return False
+    if "�" in text:
+        return True
+    for match in re.finditer(r"[A-Za-z]:\\Users\\([^\\/\r\n]+)", text):
+        user_fragment = match.group(1)
+        if any(ord(ch) > 127 for ch in user_fragment):
+            return True
+    return False
 
 
 async def diagnose_ollama_embedding(
@@ -130,10 +145,19 @@ async def diagnose_ollama_embedding(
                 f"建议 `ollama pull {model}` 重新拉取，或重启 Ollama。",
             )
         if probe.status_code != 200:
+            snippet = _error_snippet(probe)
+            if _looks_like_path_encoding_failure(snippet):
+                return (
+                    DIAG_MODEL_PATH_ENCODING,
+                    f"{model} 已安装，但模型路径含非 ASCII 字符（常见于中文 Windows 用户名），"
+                    "llama-server 无法从该路径加载模型，重新下载不能解决；"
+                    "可一键迁移模型目录修复，或手动设置系统环境变量 "
+                    "OLLAMA_MODELS 为纯英文路径（如 D:\\ollama\\models）后重启 Ollama 并重新拉取。",
+                )
             return (
                 DIAG_MODEL_BROKEN,
                 f"{model} 已安装但调用返回 HTTP {probe.status_code}"
-                f"（{_error_snippet(probe)}）。可能下载不完整或内存不足："
+                f"（{snippet}）。可能下载不完整或内存不足："
                 f"可一键修复重新拉取，或重启 Ollama 后重试。",
             )
         try:

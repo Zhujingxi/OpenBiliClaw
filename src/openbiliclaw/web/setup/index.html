@@ -437,7 +437,8 @@
           // One-click server-side `ollama pull` when the missing model is the
           // only problem (v0.3.155+). Hidden while a repair is running — the
           // hint line already shows live progress.
-          repairable: ["model_missing", "model_broken"].includes(prereq.embedding_check),
+          repairable: ["model_missing", "model_broken", "model_path_encoding"].includes(prereq.embedding_check),
+          repairLabel: prereq.embedding_check === "model_path_encoding" ? "迁移模型目录并修复" : "自动下载向量模型",
         },
         {
           key: "platforms",
@@ -507,7 +508,7 @@
           btn.type = "button";
           btn.className = "btn ghost init-repair-btn";
           btn.setAttribute("data-embedding-repair", "1");
-          btn.textContent = "自动下载向量模型";
+          btn.textContent = row.repairLabel || "自动下载向量模型";
           btn.addEventListener("click", () => void startEmbeddingRepairFromChecklist(btn));
           li.append(btn);
         }

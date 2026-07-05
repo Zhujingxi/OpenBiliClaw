@@ -99,6 +99,31 @@ def _ollama_is_running(host: str = _DEFAULT_OLLAMA_ENDPOINT) -> bool:
         return False
 
 
+def _contains_non_ascii(text: str) -> bool:
+    return any(ord(ch) > 127 for ch in text)
+
+
+def ollama_models_relocation_candidate() -> str | None:
+    """Return a safe model directory for managed Ollama relocation."""
+    if os.name == "nt":
+        root = os.environ.get("PROGRAMDATA") or r"C:\ProgramData"
+        candidate = os.path.join(root, "OpenBiliClaw", "ollama-models")
+    else:
+        candidate = "~/.openbiliclaw/ollama-models"
+    path = os.path.abspath(os.path.expanduser(candidate))
+    if _contains_non_ascii(path):
+        return None
+    return path
+
+
+def managed_models_dir() -> str | None:
+    """Return the durable managed Ollama model directory, if already migrated."""
+    candidate = ollama_models_relocation_candidate()
+    if candidate and os.path.isdir(candidate):
+        return candidate
+    return None
+
+
 def _ollama_start_serve_background() -> bool:
     """Start ``ollama serve`` detached, waiting up to 15s for health."""
     import shutil
@@ -115,6 +140,8 @@ def _ollama_start_serve_background() -> bool:
     try:
         env = os.environ.copy()
         env.setdefault("OLLAMA_KEEP_ALIVE", _DEFAULT_OLLAMA_KEEP_ALIVE)
+        if models_dir := managed_models_dir():
+            env.setdefault("OLLAMA_MODELS", models_dir)
         if os.name == "nt":
             # CREATE_NO_WINDOW (not DETACHED_PROCESS): give `ollama serve` a
             # hidden console that its child `ollama runner` inherits, so neither
@@ -155,6 +182,17 @@ def _ollama_start_serve_background() -> bool:
             return True
         time.sleep(0.5)
     return False
+
+
+def restart_managed_ollama_with_models_dir(models_dir: str) -> tuple[bool, str]:
+    """Restart a daemon we own so future pulls use ``models_dir``."""
+    target = os.path.abspath(os.path.expanduser(models_dir))
+    os.makedirs(target, exist_ok=True)
+    if _ollama_is_running() and _managed_proc is None:
+        return (False, "external_ollama")
+    stop_managed_ollama()
+    ok = _ollama_start_serve_background()
+    return (ok, "" if ok else "start_failed")
 
 
 def stop_managed_ollama() -> bool:
