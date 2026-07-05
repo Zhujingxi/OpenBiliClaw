@@ -8,7 +8,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from openbiliclaw.llm.base import LLMProviderError, LLMRateLimitError, LLMResponse
+from openbiliclaw.llm.base import (
+    LLMFallbackError,
+    LLMProviderError,
+    LLMRateLimitError,
+    LLMResponse,
+    classify_llm_unavailability,
+)
 from openbiliclaw.llm.service import (
     LLMProviderExecutionError,
     LLMResponseContentError,
@@ -112,6 +118,58 @@ def test_is_llm_rate_limit_error_detects_wrapped_provider_backoff() -> None:
         LLMProviderExecutionError("Provider deepseek failed: HTTP 402: Insufficient Balance")
     )
     assert not is_llm_rate_limit_error(ValueError("Expected scored JSON array"))
+
+
+def test_classify_llm_unavailability_rate_limited_through_fallback_chain() -> None:
+    with pytest.raises(LLMFallbackError) as exc_info:
+        try:
+            try:
+                raise RuntimeError("openai RateLimitError: HTTP 429")
+            except RuntimeError as base_err:
+                raise LLMRateLimitError("rate limit; cooling down") from base_err
+        except LLMRateLimitError as rl_err:
+            raise LLMFallbackError(
+                "All providers failed (deepseek, openai). Last error: rate limit"
+            ) from rl_err
+    assert classify_llm_unavailability(exc_info.value) == "rate_limited"
+
+
+def test_classify_llm_unavailability_no_provider_message() -> None:
+    assert (
+        classify_llm_unavailability(
+            LLMFallbackError("No provider was available to process the request.")
+        )
+        == "no_provider"
+    )
+    # Wrapped in the service-layer execution error the way production does.
+    try:
+        try:
+            raise LLMFallbackError("No provider was available to process the request.")
+        except LLMFallbackError as inner:
+            raise LLMProviderExecutionError(str(inner)) from inner
+    except LLMProviderExecutionError as wrapped:
+        assert classify_llm_unavailability(wrapped) == "no_provider"
+
+
+def test_classify_llm_unavailability_returns_none_for_unrelated_error() -> None:
+    assert classify_llm_unavailability(ValueError("Expected scored JSON array")) is None
+
+
+def test_classify_llm_unavailability_rate_limit_wins_over_no_provider() -> None:
+    with pytest.raises(LLMRateLimitError) as exc_info:
+        try:
+            raise LLMFallbackError("No provider was available to process the request.")
+        except LLMFallbackError as np_err:
+            raise LLMRateLimitError("rate limit hit") from np_err
+    assert classify_llm_unavailability(exc_info.value) == "rate_limited"
+
+
+def test_classify_llm_unavailability_is_cycle_safe() -> None:
+    first = ValueError("boom a")
+    second = ValueError("boom b")
+    first.__cause__ = second
+    second.__cause__ = first  # deliberate cycle
+    assert classify_llm_unavailability(first) is None
 
 
 @pytest.mark.asyncio

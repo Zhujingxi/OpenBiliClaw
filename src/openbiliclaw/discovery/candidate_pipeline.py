@@ -20,6 +20,7 @@ from openbiliclaw.discovery.candidate_pool import (
     discovery_candidate_pending_cap,
     row_to_discovered_content,
 )
+from openbiliclaw.llm.base import classify_llm_unavailability
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -416,7 +417,22 @@ class DiscoveryCandidatePipeline:
             self.last_admitted_items = list(admitted_items)
             raise
         except Exception as exc:
-            logger.exception("discovery candidate batch evaluation failed")
+            # Expected-transient LLM outages (provider rate-limit cooldown, or
+            # no chat provider configured yet during guided init) are retried on
+            # the next drain tick by design — log one calm line, mirroring
+            # engine.py's "propagating transient failure so callers can retry
+            # later" style, instead of an ERROR+traceback.
+            kind = classify_llm_unavailability(exc)
+            if kind is not None:
+                logger.warning(
+                    "discovery candidate batch evaluation deferred (%s) for %d "
+                    "candidate(s); releasing claims to retry on the next tick: %s",
+                    kind,
+                    len(rows),
+                    exc,
+                )
+            else:
+                logger.exception("discovery candidate batch evaluation failed")
             self._release_eval_claims(rows, reason=str(exc), increment_attempts=False)
             self.last_admitted_items = list(admitted_items)
             return {

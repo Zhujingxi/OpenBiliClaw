@@ -311,6 +311,7 @@ class RecommendationEngine:
 
         candidates = self._load_pool_candidates(limit=max(limit * multiplier, 40))
         loaded_count = len(candidates)
+        candidates = self._apply_platform_floor(candidates)
         if excluded_bvids:
             candidates = [c for c in candidates if c.bvid not in excluded_bvids]
         after_exclude_count = len(candidates)
@@ -2518,6 +2519,65 @@ class RecommendationEngine:
             limit=limit, xhs_self_nickname=self._xhs_self_nickname()
         )
         return self._rows_to_discovered(rows)
+
+    def _apply_platform_floor(self, candidates: list[DiscoveredContent]) -> list[DiscoveredContent]:
+        """Guarantee every stocked platform is represented in the serve window.
+
+        A single relevance-ordered window can be 100% one platform (e.g. all
+        bilibili early in a session) even while zhihu/xhs/douyin rows sit
+        servable in the pool, leaving those tabs empty for hours. For each
+        servable platform missing from the window, pull up to 5 rows and append
+        them (dedup by bvid). The downstream MMR/diversifier is unchanged — it
+        just can no longer silently drop a stocked platform. Skipped entirely
+        for single-platform pools (common bilibili-only installs).
+        """
+        list_platforms = getattr(self._database, "list_servable_pool_platforms", None)
+        fetch_for_platform = getattr(self._database, "get_pool_candidates_for_platform", None)
+        if not callable(list_platforms) or not callable(fetch_for_platform):
+            return candidates
+        nickname = self._xhs_self_nickname()
+        try:
+            servable_platforms = [
+                str(token).strip().lower()
+                for token in list_platforms(xhs_self_nickname=nickname)
+                if str(token).strip()
+            ]
+        except Exception:
+            logger.debug("platform floor: servable platform lookup failed", exc_info=True)
+            return candidates
+        # Single-platform pools never need a floor — zero behavior change there.
+        if len(servable_platforms) <= 1:
+            return candidates
+
+        present = {self._platform_token(item) for item in candidates}
+        missing = [token for token in servable_platforms if token not in present]
+        if not missing:
+            return candidates
+
+        seen_bvids = {item.bvid for item in candidates if item.bvid}
+        topped_up: list[tuple[str, int]] = []
+        for platform in missing:
+            try:
+                rows = fetch_for_platform(platform, limit=5, xhs_self_nickname=nickname)
+            except Exception:
+                logger.debug("platform floor: fetch failed for %s", platform, exc_info=True)
+                continue
+            added = 0
+            for item in self._rows_to_discovered(rows):
+                if item.bvid and item.bvid in seen_bvids:
+                    continue
+                if item.bvid:
+                    seen_bvids.add(item.bvid)
+                candidates.append(item)
+                added += 1
+            if added:
+                topped_up.append((platform, added))
+        if topped_up:
+            logger.info(
+                "serve platform floor topped up %s",
+                ", ".join(f"{name}+{count}" for name, count in topped_up),
+            )
+        return candidates
 
     def _load_pool_candidates_needing_copy(self, *, limit: int) -> list[DiscoveredContent]:
         rows = self._database.get_pool_candidates_needing_copy(

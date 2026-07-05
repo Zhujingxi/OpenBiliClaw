@@ -62,6 +62,23 @@ class _FailingEvalEngine:
         raise RuntimeError("temporary llm outage")
 
 
+class _RateLimitedEvalEngine:
+    async def evaluate_content_batch(
+        self,
+        items: list[object],
+        profile: object,
+        **kwargs: object,
+    ) -> list[float]:
+        from openbiliclaw.llm.base import LLMFallbackError, LLMRateLimitError
+
+        try:
+            raise LLMRateLimitError("429 rate limit exceeded")
+        except LLMRateLimitError as inner:
+            raise LLMFallbackError(
+                "All providers failed (deepseek). Last error: rate limit"
+            ) from inner
+
+
 class _AdmissionCountingEngine:
     def __init__(self, visible_count: dict[str, int]) -> None:
         self.visible_count = visible_count
@@ -650,6 +667,44 @@ async def test_pipeline_resets_transient_eval_failures_to_pending(
 
     assert result == {"evaluated": 0, "cached": 0, "rejected": 0, "failed": 1}
     assert db.count_discovery_candidates_by_status()["pending_eval"] == 1
+
+
+@pytest.mark.asyncio
+async def test_pipeline_logs_rate_limited_eval_calmly_and_requeues(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    import logging
+
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    db.enqueue_discovery_candidates(
+        [
+            DiscoveryCandidateWrite(
+                candidate_key="bilibili:BVRL",
+                source_platform="bilibili",
+                source_strategy="search",
+                content_id="BVRL",
+                title="Rate limited",
+            )
+        ]
+    )
+    pipeline = DiscoveryCandidatePipeline(
+        database=db,
+        discovery_engine=_RateLimitedEvalEngine(),  # type: ignore[arg-type]
+        pool_target_count=30,
+    )
+
+    caplog.set_level(logging.INFO)
+    result = await pipeline.drain_pending(profile=_build_profile(), batch_size=30)
+
+    assert result == {"evaluated": 0, "cached": 0, "rejected": 0, "failed": 1}
+    # Row is re-queued for a later drain tick, not dropped.
+    assert db.count_discovery_candidates_by_status()["pending_eval"] == 1
+    # Calm single-line warning, not a scary ERROR+traceback.
+    assert "batch evaluation deferred (rate_limited)" in caplog.text
+    assert "discovery candidate batch evaluation failed" not in caplog.text
+    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -1567,9 +1622,7 @@ async def test_drain_requeues_stale_evaluating_claims(
         ]
     )
     assert len(db.claim_discovery_candidates_for_eval(limit=1)) == 1
-    db.conn.execute(
-        "UPDATE discovery_candidates SET claimed_at = datetime('now', '-45 minutes')"
-    )
+    db.conn.execute("UPDATE discovery_candidates SET claimed_at = datetime('now', '-45 minutes')")
     db.conn.commit()
 
     engine = _BatchRecordingEvalEngine()

@@ -2152,6 +2152,122 @@ class Database:
         )
         return self._balance_pool_rows(rows, limit=limit)
 
+    def _pool_servable_where_clause(self, xhs_self_nickname: str) -> tuple[str, tuple[Any, ...]]:
+        """Shared WHERE fragment + params defining a ``serve()``-loadable row.
+
+        Central definition of "servable right now", mirroring the gate baked
+        into ``get_pool_candidates`` / ``_load_available_pool_candidate_rows``:
+        fresh, not disliked, at/above the admission floor, fully classified
+        (pool_expression / pool_topic_label / style_key / topic_group), xhs
+        rows carrying an ``xsec_token``, not claimed by the delight channel,
+        and not already recommended. Returns the fragment (no leading
+        ``WHERE``, references the ``content_cache`` table) and its bind params.
+        """
+        min_score = self._pool_admission_min_score()
+        guard_sql = _xhs_self_author_guard_sql()
+        guard_params = _xhs_self_author_guard_params(xhs_self_nickname)
+        delight_threshold = self.dynamic_delight_threshold(
+            default_threshold=_DELIGHT_CLAIM_MIN_SCORE
+        )
+        delight_guard_sql = _delight_claim_guard_sql()
+        clause = f"""
+            COALESCE(pool_status, 'fresh') = 'fresh'
+              AND COALESCE(feedback_type, '') != 'dislike'
+              AND COALESCE(relevance_score, 0.0) >= ?
+              AND COALESCE(pool_expression, '') != ''
+              AND COALESCE(pool_topic_label, '') != ''
+              AND COALESCE(style_key, '') != ''
+              AND COALESCE(topic_group, '') != ''
+              AND (
+                source_platform != 'xiaohongshu'
+                OR content_url LIKE '%xsec_token=%'
+              )
+              {guard_sql}
+              {delight_guard_sql}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM recommendations AS r
+                WHERE r.bvid = content_cache.bvid
+              )
+        """
+        return clause, (min_score, *guard_params, delight_threshold)
+
+    def get_pool_candidates_for_platform(
+        self,
+        platform: str,
+        limit: int = 5,
+        *,
+        xhs_self_nickname: str = "",
+    ) -> list[dict[str, Any]]:
+        """Fetch up to ``limit`` servable pool rows for one platform token.
+
+        Companion to ``get_pool_candidates`` powering the recommendation serve
+        window's platform floor: when a relevance-ordered window happens to be
+        all-bilibili, this back-fills a stocked non-bilibili platform so it
+        can't be silently dropped for hours. Applies the exact servability
+        guards and relevance ordering of ``get_pool_candidates`` plus a
+        ``source_platform`` filter (``COALESCE(NULLIF(source_platform, ''),
+        'bilibili')``), and drops recently-viewed / non-linkable rows so every
+        returned row is one ``serve()`` can actually load.
+        """
+        token = str(platform or "").strip().lower() or "bilibili"
+        fetch_limit = max(0, int(limit))
+        if fetch_limit <= 0:
+            return []
+        self._ensure_fresh_read()
+        where_clause, where_params = self._pool_servable_where_clause(xhs_self_nickname)
+        sql = f"""
+            SELECT *
+            FROM content_cache
+            WHERE {where_clause}
+              AND LOWER(COALESCE(NULLIF(source_platform, ''), 'bilibili')) = ?
+            ORDER BY
+                CASE candidate_tier WHEN 'primary' THEN 0 ELSE 1 END ASC,
+                relevance_score DESC,
+                last_scored_at DESC,
+                view_count DESC,
+                bvid ASC
+            LIMIT ?
+        """
+        # Over-fetch so viewed / non-linkable drops still leave up to `limit`.
+        cursor = self.conn.execute(sql, (*where_params, token, fetch_limit * 4 + 8))
+        viewed_content_keys = self.get_recent_viewed_content_keys()
+        rows: list[dict[str, Any]] = []
+        for row in cursor.fetchall():
+            row_dict = dict(row)
+            if not str(row_dict.get("bvid", "")).strip():
+                continue
+            if self._is_viewed_row(row_dict, viewed_content_keys):
+                continue
+            if not _is_linkable_pool_source(
+                row_dict.get("source"),
+                row_dict.get("source_platform"),
+                row_dict.get("content_url"),
+            ):
+                continue
+            rows.append(row_dict)
+            if len(rows) >= fetch_limit:
+                break
+        return rows
+
+    def list_servable_pool_platforms(self, *, xhs_self_nickname: str = "") -> list[str]:
+        """Return the distinct platform tokens among currently-servable rows.
+
+        Same servability gate as ``get_pool_candidates`` (via
+        ``_load_available_pool_candidate_rows``, which also drops
+        recently-viewed and non-linkable rows). Used by the serve window's
+        platform floor to detect stocked platforms a single relevance-ordered
+        window can silently drop. Tokens are lowercased and default to
+        ``"bilibili"`` when ``source_platform`` is blank, matching
+        ``RecommendationEngine._platform_token``.
+        """
+        rows = self._load_available_pool_candidate_rows(xhs_self_nickname=xhs_self_nickname)
+        platforms: set[str] = set()
+        for row in rows:
+            token = str(row.get("source_platform", "") or "").strip().lower() or "bilibili"
+            platforms.add(token)
+        return sorted(platforms)
+
     def count_pool_candidates(
         self, *, max_per_topic_group: int = 3, xhs_self_nickname: str = ""
     ) -> int:

@@ -37,6 +37,49 @@ class LLMFallbackError(LLMProviderError):
     """Raised when all candidate providers fail."""
 
 
+def classify_llm_unavailability(exc: BaseException) -> str | None:
+    """Classify an exception chain as an expected-transient LLM outage.
+
+    Walks the ``__cause__`` / ``__context__`` chain (cycle-safe) and returns:
+
+    - ``"rate_limited"`` when any link is an :class:`LLMRateLimitError` or
+      carries a "rate limit" message — a provider is cooling down and the
+      caller should simply retry on its next cycle.
+    - ``"no_provider"`` when any :class:`LLMFallbackError` /
+      ``LLMProviderExecutionError`` in the chain reports that no provider was
+      available (typically during guided init, before a chat LLM is
+      configured).
+    - ``None`` for anything else — a genuine error the caller should keep
+      logging loudly.
+
+    ``rate_limited`` wins when both apply: an "all providers failed … rate
+    limit" fallback wraps a rate-limit cause and should read as backoff, not a
+    missing provider.
+    """
+    # Lazily imported to avoid a circular import (service imports this module).
+    from openbiliclaw.llm.service import LLMProviderExecutionError
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    rate_limited = False
+    no_provider = False
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = str(current).lower()
+        if isinstance(current, LLMRateLimitError) or "rate limit" in message:
+            rate_limited = True
+        if isinstance(current, LLMFallbackError | LLMProviderExecutionError) and (
+            "no provider was available" in message
+        ):
+            no_provider = True
+        current = current.__cause__ or current.__context__
+    if rate_limited:
+        return "rate_limited"
+    if no_provider:
+        return "no_provider"
+    return None
+
+
 @dataclass
 class LLMResponse:
     """Standardized response from any LLM provider."""

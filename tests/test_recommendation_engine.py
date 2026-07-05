@@ -3303,3 +3303,177 @@ async def test_precompute_delight_scores_resyncs_legacy_stale_delight_score() ->
         assert float(row["delight_score"]) == pytest.approx(0.92)
         assert row["delight_reason"] == "这条应该按新的 Evo relevance 重新成为惊喜候选。"
         assert row["delight_hook"] == "旧分数迁移"
+
+
+# ── Fix 3: serve-window platform floor ──────────────────────────────
+
+
+class _PlatformFloorStubDB:
+    """Minimal DB stub exercising ``_apply_platform_floor`` in isolation."""
+
+    def __init__(
+        self,
+        servable_platforms: list[str],
+        platform_rows: dict[str, list[dict[str, Any]]],
+    ) -> None:
+        self._servable_platforms = servable_platforms
+        self._platform_rows = platform_rows
+        self.fetch_calls: list[tuple[str, int]] = []
+
+    def list_servable_pool_platforms(self, *, xhs_self_nickname: str = "") -> list[str]:
+        return list(self._servable_platforms)
+
+    def get_pool_candidates_for_platform(
+        self, platform: str, limit: int = 5, *, xhs_self_nickname: str = ""
+    ) -> list[dict[str, Any]]:
+        self.fetch_calls.append((platform, limit))
+        return [dict(row) for row in self._platform_rows.get(platform, [])][:limit]
+
+
+def test_apply_platform_floor_tops_up_missing_platform() -> None:
+    stub = _PlatformFloorStubDB(
+        servable_platforms=["bilibili", "zhihu"],
+        platform_rows={
+            "zhihu": [{"bvid": "ZH01", "title": "zhihu answer", "source_platform": "zhihu"}]
+        },
+    )
+    engine = RecommendationEngine(llm=_DummyLLM(), database=stub)  # type: ignore[arg-type]
+    window = [
+        DiscoveredContent(bvid=f"BV{i:02d}", title=f"bili {i}", source_platform="bilibili")
+        for i in range(5)
+    ]
+
+    result = engine._apply_platform_floor(window)
+
+    tokens = {RecommendationEngine._platform_token(item) for item in result}
+    assert "zhihu" in tokens
+    assert any(item.bvid == "ZH01" for item in result)
+    # Only the missing platform is topped up, capped at 5 rows.
+    assert stub.fetch_calls == [("zhihu", 5)]
+
+
+def test_apply_platform_floor_skips_single_platform_pool() -> None:
+    stub = _PlatformFloorStubDB(
+        servable_platforms=["bilibili"],
+        platform_rows={"zhihu": [{"bvid": "ZH01", "title": "unused", "source_platform": "zhihu"}]},
+    )
+    engine = RecommendationEngine(llm=_DummyLLM(), database=stub)  # type: ignore[arg-type]
+    window = [DiscoveredContent(bvid="BV01", title="bili", source_platform="bilibili")]
+
+    result = engine._apply_platform_floor(window)
+
+    assert [item.bvid for item in result] == ["BV01"]
+    # Single-platform pool must not issue any per-platform query.
+    assert stub.fetch_calls == []
+
+
+def test_apply_platform_floor_no_fetch_when_all_platforms_present() -> None:
+    stub = _PlatformFloorStubDB(
+        servable_platforms=["bilibili", "zhihu"],
+        platform_rows={"zhihu": [{"bvid": "ZH99", "title": "unused", "source_platform": "zhihu"}]},
+    )
+    engine = RecommendationEngine(llm=_DummyLLM(), database=stub)  # type: ignore[arg-type]
+    window = [
+        DiscoveredContent(bvid="BV01", title="bili", source_platform="bilibili"),
+        DiscoveredContent(bvid="ZH01", title="zhihu", source_platform="zhihu"),
+    ]
+
+    result = engine._apply_platform_floor(window)
+
+    assert [item.bvid for item in result] == ["BV01", "ZH01"]
+    assert stub.fetch_calls == []
+
+
+def test_get_pool_candidates_for_platform_returns_only_that_platform() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "pool.db")
+        db.initialize()
+        for i in range(3):
+            _seed_visible(
+                db,
+                f"BV{i:02d}",
+                title=f"bili {i}",
+                source="search",
+                source_platform="bilibili",
+                relevance_score=0.9,
+            )
+        _seed_visible(
+            db,
+            "ZH01",
+            title="zhihu servable",
+            source="zhihu-extension-task",
+            source_platform="zhihu",
+            content_id="zh1",
+            content_url="https://www.zhihu.com/question/1/answer/1",
+            relevance_score=0.85,
+        )
+
+        rows = db.get_pool_candidates_for_platform("zhihu", limit=5)
+
+        assert [row["bvid"] for row in rows] == ["ZH01"]
+        assert all(str(row.get("source_platform")) == "zhihu" for row in rows)
+
+
+def test_get_pool_candidates_for_platform_excludes_non_servable_rows() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "pool.db")
+        db.initialize()
+        # Fully-classified zhihu row — genuinely servable.
+        _seed_visible(
+            db,
+            "ZHOK",
+            title="ok",
+            source="zhihu-extension-task",
+            source_platform="zhihu",
+            content_url="https://www.zhihu.com/question/1/answer/1",
+            relevance_score=0.85,
+        )
+        # Non-servable zhihu row: no pool_expression / pool_topic_label, so
+        # serve() could never load it. cache_content leaves them empty.
+        db.cache_content(
+            "ZHBAD",
+            title="bad",
+            source="zhihu-extension-task",
+            source_platform="zhihu",
+            content_url="https://www.zhihu.com/question/2/answer/2",
+            relevance_score=0.85,
+            style_key="tutorial",
+            topic_group="g",
+        )
+
+        rows = db.get_pool_candidates_for_platform("zhihu", limit=5)
+
+        assert [row["bvid"] for row in rows] == ["ZHOK"]
+
+
+def test_list_servable_pool_platforms_returns_distinct_tokens() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "pool.db")
+        db.initialize()
+        _seed_visible(
+            db,
+            "BV01",
+            title="b",
+            source="search",
+            source_platform="bilibili",
+            relevance_score=0.9,
+        )
+        _seed_visible(
+            db,
+            "BV02",
+            title="b2",
+            source="search",
+            source_platform="bilibili",
+            relevance_score=0.9,
+        )
+        _seed_visible(
+            db,
+            "ZH01",
+            title="z",
+            source="zhihu-extension-task",
+            source_platform="zhihu",
+            content_url="https://www.zhihu.com/question/1/answer/1",
+            relevance_score=0.85,
+        )
+
+        assert db.list_servable_pool_platforms() == ["bilibili", "zhihu"]

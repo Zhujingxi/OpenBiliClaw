@@ -9,6 +9,8 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 
+from openbiliclaw.llm.base import classify_llm_unavailability
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -266,8 +268,20 @@ class AccountSyncService:
             authed_before = self._last_seen_authenticated
             try:
                 await self.sync_if_due()
-            except Exception:
-                logger.exception("Unexpected error in account sync loop")
+            except Exception as exc:
+                kind = classify_llm_unavailability(exc)
+                if kind == "no_provider":
+                    logger.info(
+                        "account sync skipped: no chat LLM provider configured yet "
+                        "(retry next cycle)"
+                    )
+                elif kind == "rate_limited":
+                    logger.warning(
+                        "account sync deferred: LLM provider rate-limited/cooling "
+                        "down (retry next cycle)"
+                    )
+                else:
+                    logger.exception("Unexpected error in account sync loop")
             interval = (
                 self.check_interval_seconds
                 if self._last_seen_authenticated or authed_before

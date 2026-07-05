@@ -551,3 +551,80 @@ async def test_account_sync_run_forever_recovers_from_iteration_error(caplog) ->
         asyncio.sleep = original_sleep
 
     assert "Unexpected error in account sync loop" in caplog.text
+
+
+async def _run_forever_once_with_error(
+    exc: BaseException,
+) -> tuple[Any, Any]:
+    """Drive one run_forever iteration whose sync raises ``exc``, then cancel.
+
+    Returns the ``AccountSyncService`` and lets callers inspect ``caplog``.
+    """
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    service = AccountSyncService(
+        memory_manager=_FakeMemoryManager(),
+        bilibili_client=_FakeClient(history_items=[], favorites=[], following=[]),
+        soul_engine=_FakeSoulEngine(),
+        check_interval_seconds=1,
+    )
+
+    async def _raising_sync_if_due() -> dict[str, object]:
+        raise exc
+
+    async def _cancel_sleep(_: int) -> None:
+        raise asyncio.CancelledError
+
+    service.sync_if_due = _raising_sync_if_due  # type: ignore[method-assign]
+    original_sleep = asyncio.sleep
+    try:
+        asyncio.sleep = _cancel_sleep
+        with pytest.raises(asyncio.CancelledError):
+            await service.run_forever()
+    finally:
+        asyncio.sleep = original_sleep
+    return service, exc
+
+
+@pytest.mark.asyncio
+async def test_account_sync_run_forever_logs_info_when_no_provider(caplog) -> None:
+    import logging
+
+    from openbiliclaw.llm.base import LLMFallbackError
+    from openbiliclaw.llm.service import LLMProviderExecutionError
+
+    caplog.set_level(logging.INFO)
+    try:
+        raise LLMFallbackError("No provider was available to process the request.")
+    except LLMFallbackError as inner:
+        chained: BaseException = LLMProviderExecutionError(str(inner))
+        chained.__cause__ = inner
+
+    await _run_forever_once_with_error(chained)
+
+    assert "no chat LLM provider configured yet" in caplog.text
+    assert "Unexpected error in account sync loop" not in caplog.text
+    # No scary ERROR/traceback for an expected-transient outage.
+    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_account_sync_run_forever_logs_warning_when_rate_limited(caplog) -> None:
+    import logging
+
+    from openbiliclaw.llm.base import LLMFallbackError, LLMRateLimitError
+
+    caplog.set_level(logging.INFO)
+    try:
+        raise LLMRateLimitError("429 rate limit exceeded")
+    except LLMRateLimitError as inner:
+        chained: BaseException = LLMFallbackError(
+            "All providers failed (deepseek). Last error: rate limit"
+        )
+        chained.__cause__ = inner
+
+    await _run_forever_once_with_error(chained)
+
+    assert "rate-limited/cooling down" in caplog.text
+    assert "Unexpected error in account sync loop" not in caplog.text
+    assert not any(record.levelno >= logging.ERROR for record in caplog.records)

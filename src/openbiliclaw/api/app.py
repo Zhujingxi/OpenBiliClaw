@@ -7634,7 +7634,7 @@ def create_app(
         source = str(payload.get("source", "?"))[:8]
         event = str(payload.get("event", "?"))[:80]
         data = payload.get("data")
-        logger.warning("[ext-debug] [%s] %s data=%s", source, event, data)
+        logger.debug("[ext-debug] [%s] %s data=%s", source, event, data)
         return {"ok": True}
 
     @app.post("/api/sources/xhs/kick")
