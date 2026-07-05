@@ -188,12 +188,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.153 (2026-07-04)**
+📌 Latest: **v0.3.154 (2026-07-05)**
 
-- **One-command Docker deploy** — prebuilt multi-arch images on GHCR: curl one compose file, `docker compose up -d`, finish in the `/setup/` wizard; no clone or local build.
-- **Sturdier, faster Docker** — the backend no longer blocks on the embedding model download, and source rebuilds drop to seconds via dependency layering.
-- **LLM probe noise fixed** — initialized instances stop sending tiny billable health-check requests, and probe frequency is cut 10x.
-- **New FAQ and docs split** — quick answers for install / connection / update issues, with the docs hub split into user vs developer sections.
+- **Third-party API gateways** — Claude accepts a custom base URL for relay gateways; OpenAI / compatible providers gain a Responses-API (`/v1/responses`) option.
+- **Proxies no longer break Bilibili login checks** — probes always connect directly (keep your proxy on); failures now say exactly why with troubleshooting hints.
+- **Auto-update works on every install mode** — `.git`-less clones are no longer stuck on "remote not in allowlist"; Docker installs get pull reminders; refusals show their reason.
+- **Windows desktop build works with system SOCKS proxies** — no more crash-on-launch when a socks5 proxy is set; guided init is hardened across web, installer, extension, and Docker entrypoints.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
