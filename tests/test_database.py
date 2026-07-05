@@ -126,6 +126,8 @@ def test_get_recommendations_rows_carry_card_metadata_columns(tmp_path: Path) ->
     assert row["like_count"] == 4567
     assert row["danmaku_count"] == 890
     assert row["up_mid"] == 12345
+
+
 # --- recent_event_urls (cross-source dedup helper) -------------------------
 
 from datetime import UTC, datetime, timedelta  # noqa: E402

@@ -18,6 +18,12 @@ test("twitterAdapter exposes the correct source identity", () => {
   assert.equal(twitterAdapter.sourcePlatform, "twitter");
 });
 
+test("twitterAdapter marks the GraphQL tap as its authoritative strong-signal source", () => {
+  // On X the MAIN-world tap emits the real retraction; the DOM click path
+  // must only suppress (never double-emit) when a pressed control is clicked.
+  assert.equal(twitterAdapter.strongSignalSource, "tap");
+});
+
 test("extractContentId pulls the tweet id from a status URL", () => {
   assert.equal(
     twitterAdapter.extractContentId("https://x.com/h/status/1790000000000000001"),

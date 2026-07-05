@@ -157,6 +157,56 @@ test("buildActionHintFromClickTarget prefers a nested button over an outer card 
   assert.equal(hint.className, "tweet-share");
 });
 
+test("buildActionHintFromClickTarget reads aria-pressed from the attributed element", () => {
+  const makeButton = (pressed: string | null) => {
+    const button = {
+      textContent: "Like",
+      className: "like-btn",
+      getAttribute(name: string) {
+        if (name === "aria-label") return "Like";
+        if (name === "aria-pressed") return pressed;
+        return null;
+      },
+      closest() {
+        return button;
+      },
+    };
+    return button;
+  };
+
+  assert.equal(
+    buildActionHintFromClickTarget(makeButton("true") as unknown as Element).pressed,
+    true,
+  );
+  assert.equal(
+    buildActionHintFromClickTarget(makeButton("false") as unknown as Element).pressed,
+    false,
+  );
+  assert.equal(
+    buildActionHintFromClickTarget(makeButton(null) as unknown as Element).pressed,
+    null,
+  );
+  // Any non-boolean aria-pressed value ("mixed") degrades to null (fail open).
+  assert.equal(
+    buildActionHintFromClickTarget(makeButton("mixed") as unknown as Element).pressed,
+    null,
+  );
+});
+
+test("buildActionHintFromClickTarget defaults pressed to null when the attr is absent", () => {
+  const button = {
+    textContent: "分享",
+    className: "yt-spec-button",
+    getAttribute(name: string) {
+      return name === "aria-label" ? "分享" : null;
+    },
+    closest() {
+      return button;
+    },
+  };
+  assert.equal(buildActionHintFromClickTarget(button as unknown as Element).pressed, null);
+});
+
 test("inferBilibiliActionType recognizes negative feedback controls", () => {
   assert.equal(
     inferBilibiliActionType({ text: "不感兴趣", ariaLabel: null, className: "" }),

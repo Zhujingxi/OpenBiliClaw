@@ -3,6 +3,7 @@
  */
 
 import type { ActionHint, PageType, PlatformAdapter } from "../types.js";
+import { queryParam } from "./search-query.ts";
 
 const ANSWER_PATTERN = /zhihu\.com\/question\/(\d+)\/answer\/(\d+)/;
 const QUESTION_PATTERN = /zhihu\.com\/question\/(\d+)(?:[/?#]|$)/;
@@ -65,9 +66,11 @@ export const zhihuAdapter: PlatformAdapter = {
   sourcePlatform: "zhihu",
   detectPageType: detectZhihuPageType,
   extractContentId: extractZhihuContentId,
+  extractSearchQuery: (url) => queryParam(url, "q"),
   cardSelector: CARD_SELECTOR,
   searchInputSelector: SEARCH_INPUT_SELECTOR,
   videoSelector: null,
+  dwellPageTypes: ["answer", "article", "question"],
   inferActionType: inferZhihuActionType,
   buildEventMetadata(url: string): Record<string, unknown> {
     const contentId = extractZhihuContentId(url);

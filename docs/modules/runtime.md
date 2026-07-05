@@ -264,8 +264,8 @@ result = await service.sync_now()
 `sync_now()` 会拉取最近一批 B 站历史、收藏夹和关注列表，只有新增信号会进入 `memory.propagate_event()` 与画像更新：
 
 - 历史记录：使用 `last_history_view_at`、`last_history_bvid` 和 `history_bvids_at_last_view_at` 跳过已经处理过的同秒历史项。
-- 收藏夹：使用稳定排序后的 `favorite_signature` 和 `favorite_bvids`，签名变化时只导入新增 bvid。
-- 关注列表：使用 `following_signature` 和 `following_mids`，签名变化时只导入新增 mid。
+- 收藏夹：使用稳定排序后的 `favorite_signature` 和 `favorite_bvids`，签名变化时只导入新增 bvid。扫描上限对齐 init（`max_folders=200`），并带 `max_total_items=500` 预算封顶请求数（最坏约 26 次请求），覆盖第 11 个及以后收藏夹的新收藏。
+- 关注列表：使用 `following_signature` 和 `following_mids`，签名变化时只导入新增 mid。改为翻页循环（`page_size=100`，页满续翻，短页停，硬上限 `following_max_pages=5` → 500 人），覆盖第 2 页及以后的新关注；中途某页失败保留已拉页面、记 `_record_stage_error`（auth-expired 优先级不变）、照常打时间戳。
 
 **跨源去重**：注入 `database` 后，构造事件前会经 `_dedup_cross_source` 过滤——48 小时窗口（`_CROSS_SOURCE_DEDUP_WINDOW_HOURS`）内 events 表已有同键事件（view/favorite 按 bvid、follow 按 mid、X 按 tweet ID）则跳过，避免扩展实时上报与账号拉取对同一次行为双写双计。查询恒带 `exclude_source="account_sync"`：自己上一轮写的行不参与压制，只被历史 API 观察到的窗口内重看仍会正常发事件。游标照常前进，去重不阻塞水位线；丢弃数量记 INFO 日志。
 

@@ -578,6 +578,99 @@ async def test_process_feedback_batch_updates_preference_after_threshold(
 
 
 @pytest.mark.asyncio
+async def test_process_feedback_batch_ignores_retractions_for_threshold(tmp_path: Path) -> None:
+    """3 retraction rows alone must NOT reach the feedback_batch_threshold —
+    retraction is a neutralization, not preference-learning input."""
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    for index in range(3):
+        await memory.propagate_event(
+            {
+                "event_type": "feedback",
+                "title": f"withdrawn {index}",
+                "metadata": {"feedback_type": "retraction", "retracted_action": "like"},
+            }
+        )
+
+    result = await engine.process_feedback_batch_if_needed()
+
+    assert result["triggered"] is False
+    assert result["feedback_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_process_feedback_batch_excludes_retractions_from_count_and_input(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A mix of 2 dislikes + 2 retractions counts 2 (below threshold=3), and
+    when it does fire the analysis input carries no retraction rows."""
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    # Interleave so a naive "last N" slice would include retractions.
+    rows = [
+        ("dislike", "dis 0"),
+        ("retraction", "ret 0"),
+        ("dislike", "dis 1"),
+        ("retraction", "ret 1"),
+    ]
+    for feedback_type, title in rows:
+        await memory.propagate_event(
+            {
+                "event_type": "feedback",
+                "title": title,
+                "metadata": {"feedback_type": feedback_type},
+            }
+        )
+
+    # 2 real feedback rows < threshold(3) → below threshold.
+    below = await engine.process_feedback_batch_if_needed()
+    assert below["triggered"] is False
+    assert below["feedback_count"] == 2
+
+    # Add one more real dislike → 3 real rows, fires; input excludes retractions.
+    await memory.propagate_event(
+        {
+            "event_type": "feedback",
+            "title": "dis 2",
+            "metadata": {"feedback_type": "dislike"},
+        }
+    )
+
+    captured: list[dict[str, object]] = []
+
+    async def fake_analyze_events(
+        *,
+        events: list[dict[str, object]],
+        existing_preference: dict[str, object],
+        event_chunk_size: int = 0,
+    ) -> dict[str, object]:
+        del existing_preference, event_chunk_size
+        captured.extend(events)
+        return {
+            "interests": [],
+            "style": {},
+            "context": {},
+            "exploration_openness": 0.4,
+            "disliked_topics": [],
+            "favorite_up_users": [],
+        }
+
+    monkeypatch.setattr(engine._preference_analyzer, "analyze_events", fake_analyze_events)
+
+    fired = await engine.process_feedback_batch_if_needed()
+    assert fired["triggered"] is True
+    assert fired["feedback_count"] == 3
+    assert len(captured) == 3
+    for event in captured:
+        metadata = event.get("metadata")
+        if isinstance(metadata, dict):
+            assert metadata.get("feedback_type") != "retraction"
+        assert "ret " not in str(event.get("title", ""))
+
+
+@pytest.mark.asyncio
 async def test_process_feedback_batch_single_flights_concurrent_calls(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

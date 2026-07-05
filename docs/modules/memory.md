@@ -155,6 +155,9 @@ stats = memory.get_event_stats()  # {"view": 42, "search": 7, ...}
 # API 入口 POST /api/events 会逐条写入。raw dislike 会规范成
 # feedback + metadata.feedback_type="dislike"；未知类型只进入响应的
 # rejected 明细，不再让整批 500。
+# X 的取消赞/取消收藏归一为 feedback + metadata.feedback_type="retraction"
+# （satisfaction 恒 neutral），但反馈批学习 process_feedback_batch_if_needed
+# 会把 retraction 行从阈值计数与 LLM 分析输入中剔除——撤销是"中和"不是负偏好。
 
 # 插件 side panel 的 durable chat turn 由 Database 管理：
 from openbiliclaw.storage.database import Database

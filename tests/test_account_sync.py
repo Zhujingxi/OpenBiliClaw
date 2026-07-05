@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -562,6 +562,76 @@ async def _run_forever_once_with_error(
 
     Returns the ``AccountSyncService`` and lets callers inspect ``caplog``.
     """
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    service = AccountSyncService(
+        memory_manager=_FakeMemoryManager(),
+        bilibili_client=_FakeClient(history_items=[], favorites=[], following=[]),
+        soul_engine=_FakeSoulEngine(),
+        check_interval_seconds=1,
+    )
+
+    async def _raising_sync_if_due() -> dict[str, object]:
+        raise exc
+
+    async def _cancel_sleep(_: int) -> None:
+        raise asyncio.CancelledError
+
+    service.sync_if_due = _raising_sync_if_due  # type: ignore[method-assign]
+    original_sleep = asyncio.sleep
+    try:
+        asyncio.sleep = _cancel_sleep
+        with pytest.raises(asyncio.CancelledError):
+            await service.run_forever()
+    finally:
+        asyncio.sleep = original_sleep
+    return service, exc
+
+
+@pytest.mark.asyncio
+async def test_account_sync_run_forever_logs_info_when_no_provider(caplog) -> None:
+    import logging
+
+    from openbiliclaw.llm.base import LLMFallbackError
+    from openbiliclaw.llm.service import LLMProviderExecutionError
+
+    caplog.set_level(logging.INFO)
+    try:
+        raise LLMFallbackError("No provider was available to process the request.")
+    except LLMFallbackError as inner:
+        chained: BaseException = LLMProviderExecutionError(str(inner))
+        chained.__cause__ = inner
+
+    await _run_forever_once_with_error(chained)
+
+    assert "no chat LLM provider configured yet" in caplog.text
+    assert "Unexpected error in account sync loop" not in caplog.text
+    # No scary ERROR/traceback for an expected-transient outage.
+    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_account_sync_run_forever_logs_warning_when_rate_limited(caplog) -> None:
+    import logging
+
+    from openbiliclaw.llm.base import LLMFallbackError, LLMRateLimitError
+
+    caplog.set_level(logging.INFO)
+    try:
+        raise LLMRateLimitError("429 rate limit exceeded")
+    except LLMRateLimitError as inner:
+        chained: BaseException = LLMFallbackError(
+            "All providers failed (deepseek). Last error: rate limit"
+        )
+        chained.__cause__ = inner
+
+    await _run_forever_once_with_error(chained)
+
+    assert "rate-limited/cooling down" in caplog.text
+    assert "Unexpected error in account sync loop" not in caplog.text
+    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
+
+
 # --- Task 2: cross-source dedup against extension-observed events -----------
 
 
@@ -1035,70 +1105,6 @@ async def test_account_sync_logs_warning_on_stage_failure(caplog) -> None:
 
     service = AccountSyncService(
         memory_manager=_FakeMemoryManager(),
-        bilibili_client=_FakeClient(history_items=[], favorites=[], following=[]),
-        soul_engine=_FakeSoulEngine(),
-        check_interval_seconds=1,
-    )
-
-    async def _raising_sync_if_due() -> dict[str, object]:
-        raise exc
-
-    async def _cancel_sleep(_: int) -> None:
-        raise asyncio.CancelledError
-
-    service.sync_if_due = _raising_sync_if_due  # type: ignore[method-assign]
-    original_sleep = asyncio.sleep
-    try:
-        asyncio.sleep = _cancel_sleep
-        with pytest.raises(asyncio.CancelledError):
-            await service.run_forever()
-    finally:
-        asyncio.sleep = original_sleep
-    return service, exc
-
-
-@pytest.mark.asyncio
-async def test_account_sync_run_forever_logs_info_when_no_provider(caplog) -> None:
-    import logging
-
-    from openbiliclaw.llm.base import LLMFallbackError
-    from openbiliclaw.llm.service import LLMProviderExecutionError
-
-    caplog.set_level(logging.INFO)
-    try:
-        raise LLMFallbackError("No provider was available to process the request.")
-    except LLMFallbackError as inner:
-        chained: BaseException = LLMProviderExecutionError(str(inner))
-        chained.__cause__ = inner
-
-    await _run_forever_once_with_error(chained)
-
-    assert "no chat LLM provider configured yet" in caplog.text
-    assert "Unexpected error in account sync loop" not in caplog.text
-    # No scary ERROR/traceback for an expected-transient outage.
-    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
-
-
-@pytest.mark.asyncio
-async def test_account_sync_run_forever_logs_warning_when_rate_limited(caplog) -> None:
-    import logging
-
-    from openbiliclaw.llm.base import LLMFallbackError, LLMRateLimitError
-
-    caplog.set_level(logging.INFO)
-    try:
-        raise LLMRateLimitError("429 rate limit exceeded")
-    except LLMRateLimitError as inner:
-        chained: BaseException = LLMFallbackError(
-            "All providers failed (deepseek). Last error: rate limit"
-        )
-        chained.__cause__ = inner
-
-    await _run_forever_once_with_error(chained)
-
-    assert "rate-limited/cooling down" in caplog.text
-    assert "Unexpected error in account sync loop" not in caplog.text
-    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
         bilibili_client=_KindClient(history_exc=RuntimeError("history boom")),
         soul_engine=_FakeSoulEngine(),
     )
@@ -1428,3 +1434,200 @@ async def test_x_cross_source_dedup_keys_on_tweet_id(tmp_path) -> None:
     # tweet 123 already observed by the extension → suppressed by cross-source dedup.
     assert result["new_event_count"] == 0
     assert memory.events == []
+
+
+# --- Task 6: favorites budget + following pagination ------------------------
+
+
+@dataclass
+class _PaginatedClient:
+    """Stub that paginates ``get_following`` and records fetch call args."""
+
+    following_pages: list[list[FollowingUser]] = field(default_factory=list)
+    favorites: list[FavoriteFolderWithItems] = field(default_factory=list)
+    fail_following_page: int | None = None
+    following_page_exc: Exception | None = None
+    favorites_call_kwargs: dict[str, Any] | None = None
+    following_calls: list[tuple[int, int]] = field(default_factory=list)
+
+    async def get_user_history(self, max_items: int = 100) -> list[dict[str, Any]]:
+        return []
+
+    async def get_all_favorites(
+        self,
+        *,
+        max_folders: int = 10,
+        max_items_per_folder: int = 50,
+        max_total_items: int | None = None,
+    ) -> list[FavoriteFolderWithItems]:
+        self.favorites_call_kwargs = {
+            "max_folders": max_folders,
+            "max_items_per_folder": max_items_per_folder,
+            "max_total_items": max_total_items,
+        }
+        return list(self.favorites)
+
+    async def get_following(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> list[FollowingUser]:
+        self.following_calls.append((page, page_size))
+        if self.fail_following_page is not None and page == self.fail_following_page:
+            raise self.following_page_exc or RuntimeError("following page boom")
+        idx = page - 1
+        if 0 <= idx < len(self.following_pages):
+            return list(self.following_pages[idx])
+        return []
+
+
+def _following_page(mids: range | list[int]) -> list[FollowingUser]:
+    return [FollowingUser(mid=mid, uname=f"up-{mid}") for mid in mids]
+
+
+@pytest.mark.asyncio
+async def test_account_sync_favorites_budget_passes_max_total_items() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    client = _PaginatedClient()
+    service = AccountSyncService(
+        memory_manager=_FakeMemoryManager(),
+        bilibili_client=client,
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    await service.sync_now()
+
+    assert client.favorites_call_kwargs == {
+        "max_folders": 200,
+        "max_items_per_folder": 50,
+        "max_total_items": 500,
+    }
+
+
+@pytest.mark.asyncio
+async def test_account_sync_following_paginates_until_short_page() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    client = _PaginatedClient(
+        following_pages=[
+            _following_page(range(1, 101)),  # full page (100)
+            _following_page(range(101, 201)),  # full page (100)
+            _following_page(range(201, 231)),  # short page (30) -> stop
+        ],
+    )
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=client,
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    result = await service.sync_now()
+
+    assert client.following_calls == [(1, 100), (2, 100), (3, 100)]
+    follow_events = [e for e in memory.events if e["event_type"] == "follow"]
+    assert len(follow_events) == 230
+    assert result["new_event_count"] == 230
+
+
+@pytest.mark.asyncio
+async def test_account_sync_following_stops_at_max_pages() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    client = _PaginatedClient(
+        following_pages=[_following_page(range(i * 100 + 1, i * 100 + 101)) for i in range(8)],
+    )
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=client,
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    await service.sync_now()
+
+    assert [page for page, _ in client.following_calls] == [1, 2, 3, 4, 5]
+    follow_events = [e for e in memory.events if e["event_type"] == "follow"]
+    assert len(follow_events) == 500
+
+
+@pytest.mark.asyncio
+async def test_account_sync_following_single_short_page_makes_one_call() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    client = _PaginatedClient(following_pages=[_following_page([1, 2, 3])])
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=client,
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    await service.sync_now()
+
+    assert client.following_calls == [(1, 100)]
+    follow_events = [e for e in memory.events if e["event_type"] == "follow"]
+    assert len(follow_events) == 3
+
+
+@pytest.mark.asyncio
+async def test_account_sync_following_dedups_across_paginated_union() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    # State already saw mids 1..100 (a prior page-1). New sync pulls two pages;
+    # only the genuinely-new mids (101..130) become follow events.
+    base_state = _FakeMemoryManager().state
+    memory = _FakeMemoryManager(
+        {**base_state, "following_mids": [str(mid) for mid in range(1, 101)]}
+    )
+    client = _PaginatedClient(
+        following_pages=[
+            _following_page(range(1, 101)),  # all already seen
+            _following_page(range(101, 131)),  # short page, all new
+        ],
+    )
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=client,
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    await service.sync_now()
+
+    assert client.following_calls == [(1, 100), (2, 100)]
+    follow_mids = {e["metadata"]["up_mid"] for e in memory.events if e["event_type"] == "follow"}
+    assert follow_mids == set(range(101, 131))
+
+
+@pytest.mark.asyncio
+async def test_account_sync_following_partial_page_failure_still_imports() -> None:
+    from openbiliclaw.bilibili.api import BilibiliAuthExpiredError
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    client = _PaginatedClient(
+        following_pages=[
+            _following_page(range(1, 101)),  # full page -> continue
+            [],  # unused; page 2 raises before returning
+        ],
+        fail_following_page=2,
+        following_page_exc=BilibiliAuthExpiredError("logged out"),
+    )
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=client,
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    result = await service.sync_now()
+
+    # Page 1's follows are still imported despite page 2 failing.
+    follow_events = [e for e in memory.events if e["event_type"] == "follow"]
+    assert len(follow_events) == 100
+    assert result["new_event_count"] == 100
+    # The error is recorded, auth-expired precedence intact, timestamp stamped.
+    assert memory.state["last_sync_error_kind"] == "auth_expired"
+    assert "logged out" in str(memory.state["last_sync_error"])
+    assert memory.state["last_account_sync_at"]

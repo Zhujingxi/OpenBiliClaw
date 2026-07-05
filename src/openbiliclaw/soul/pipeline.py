@@ -384,7 +384,18 @@ def signals_from_events(events: list[dict[str, Any]]) -> list[ProfileSignal]:
     result: list[ProfileSignal] = []
     for event in events:
         event_type = str(event.get("event_type") or event.get("type") or "")
-        if event_type in _ENGAGEMENT_TYPES:
+        metadata = event.get("metadata")
+        feedback_type = (
+            str(metadata.get("feedback_type") or "").strip().lower()
+            if isinstance(metadata, dict)
+            else ""
+        )
+        if event_type == "feedback" and feedback_type == "retraction":
+            # A retraction (an X unlike/unbookmark) is a neutralization, not a
+            # strong preference signal — force the plain BEHAVIOR_EVENT path so
+            # it never gets the min_signals=1 bypass into VALUES/CORE.
+            sig_type = SignalType.BEHAVIOR_EVENT
+        elif event_type in _ENGAGEMENT_TYPES:
             sig_type = SignalType.ENGAGEMENT_EVENT
         else:
             sig_type = SignalType.BEHAVIOR_EVENT

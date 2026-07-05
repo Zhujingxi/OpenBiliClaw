@@ -242,6 +242,34 @@ def _make_gated_pipeline(
 
 
 # ===========================================================================
+# 0. signals_from_events classification
+# ===========================================================================
+
+
+def test_signals_from_events_retraction_is_behavior_not_strong_signal() -> None:
+    """A retraction feedback event must ride the plain BEHAVIOR_EVENT path,
+    never the FEEDBACK strong-signal type — no min_signals=1 bypass into
+    VALUES/CORE (invariant 2)."""
+    signals = signals_from_events(
+        [
+            {
+                "event_type": "feedback",
+                "title": "a withdrawn like",
+                "metadata": {"feedback_type": "retraction", "retracted_action": "like"},
+            }
+        ]
+    )
+    assert len(signals) == 1
+    assert signals[0].signal_type == SignalType.BEHAVIOR_EVENT
+
+
+def test_signals_from_events_engagement_types_still_strong() -> None:
+    """Regression: like/favorite events remain ENGAGEMENT_EVENT signals."""
+    signals = signals_from_events([{"event_type": "like", "title": "x"}])
+    assert signals[0].signal_type == SignalType.ENGAGEMENT_EVENT
+
+
+# ===========================================================================
 # 1. Control flow tests
 # ===========================================================================
 

@@ -145,9 +145,14 @@ class AccountSyncService:
     soul_engine: SupportsSoulAnalyzer
     sync_interval_hours: int = 6
     history_max_items: int = 200
-    max_folders: int = 10
+    # v0.3.x: favorites budget parity with ``openbiliclaw init``. Folders 11+
+    # and follows 101+ used to silently never sync. ``max_total_items`` bounds
+    # the worst case at ~1 + ceil(500/20) requests instead of 200×3.
+    max_folders: int = 200
     max_items_per_folder: int = 50
+    max_total_items: int = 500
     following_page_size: int = 100
+    following_max_pages: int = 5
     check_interval_seconds: int = 300
     llm_work_allowed: Callable[[], bool] | None = None
     database: SupportsRecentEventUrls | None = None
@@ -244,6 +249,7 @@ class AccountSyncService:
             favorites = await self.bilibili_client.get_all_favorites(
                 max_folders=self.max_folders,
                 max_items_per_folder=self.max_items_per_folder,
+                max_total_items=self.max_total_items,
             )
             current_signature = self._favorite_signature(favorites)
             previous_signature = str(state.get("favorite_signature", ""))
@@ -260,25 +266,25 @@ class AccountSyncService:
             errors.append(str(exc))
             error_kind = self._record_stage_error("favorites", exc, error_kind)
 
-        try:
-            following = await self.bilibili_client.get_following(
-                page=1,
-                page_size=self.following_page_size,
-            )
-            current_signature = self._following_signature(following)
-            previous_signature = str(state.get("following_signature", ""))
-            previous_mids = self._following_mids_from_state(state)
-            if current_signature and current_signature != previous_signature:
-                new_following = self._filter_following(following, previous_mids)
-                events.extend(self._following_events(new_following))
-                state["following_signature"] = current_signature
-                state["following_mids"] = self._following_mids(following)
-                state["last_following_sync_at"] = self._now().isoformat()
-            elif current_signature and not state.get("following_mids"):
-                state["following_mids"] = self._following_mids(following)
-        except Exception as exc:
-            errors.append(str(exc))
-            error_kind = self._record_stage_error("following", exc, error_kind)
+        # Following is paginated (page_size=100, hard cap following_max_pages)
+        # so follows past position 100 finally sync. On a mid-loop page failure
+        # the pages fetched so far are still ingested; the ``following_mids``
+        # set-diff makes the next sync re-cover anything missed.
+        following, following_error = await self._collect_following()
+        current_signature = self._following_signature(following)
+        previous_signature = str(state.get("following_signature", ""))
+        previous_mids = self._following_mids_from_state(state)
+        if current_signature and current_signature != previous_signature:
+            new_following = self._filter_following(following, previous_mids)
+            events.extend(self._following_events(new_following))
+            state["following_signature"] = current_signature
+            state["following_mids"] = self._following_mids(following)
+            state["last_following_sync_at"] = self._now().isoformat()
+        elif current_signature and not state.get("following_mids"):
+            state["following_mids"] = self._following_mids(following)
+        if following_error is not None:
+            errors.append(str(following_error))
+            error_kind = self._record_stage_error("following", following_error, error_kind)
 
         if self.x_client is not None:
             error_kind = await self._sync_x(state, events, errors, error_kind)
@@ -826,6 +832,32 @@ class AccountSyncService:
                     }
                 )
         return events
+
+    async def _collect_following(self) -> tuple[list[Any], Exception | None]:
+        """Fetch following across pages (cli.py:5477-5494 pattern).
+
+        Stops on a short page or once ``following_max_pages`` is reached. On a
+        page fetch raising, returns the users collected so far plus the
+        exception so the caller can ingest the partial import *and* record the
+        error (auth-expired precedence preserved upstream).
+        """
+        collected: list[Any] = []
+        page = 1
+        while page <= self.following_max_pages:
+            try:
+                page_users = await self.bilibili_client.get_following(
+                    page=page,
+                    page_size=self.following_page_size,
+                )
+            except Exception as exc:
+                return collected, exc
+            if not page_users:
+                break
+            collected.extend(page_users)
+            if len(page_users) < self.following_page_size:
+                break
+            page += 1
+        return collected, None
 
     def _following_signature(self, following: list[Any]) -> str:
         return ",".join(self._following_mids(following))

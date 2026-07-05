@@ -74,6 +74,13 @@ _MEANINGFUL_DWELL_MIN_SECONDS = 15
 _MEANINGFUL_DWELL_MIN_RATIO = 0.3
 _QUICK_EXIT_MAX_SECONDS = 5
 
+# Content pages (xhs note / zhihu answer / reddit post / X status) carry no
+# video duration, so the ratio rule can't apply. A duration-less
+# `content_page_exit` dwell is scored on visible reading time alone: >= 30s is
+# engaged reading (positive); < 5s reuses the quick-exit negative; between is
+# neutral.
+_CONTENT_DWELL_POSITIVE_MIN_SECONDS = 30
+
 # Explicit engagement event types (no dwell needed to read intent).
 _EXPLICIT_POSITIVE_EVENT_TYPES = frozenset({"like", "coin", "favorite", "comment"})
 
@@ -130,6 +137,12 @@ def classify_event_satisfaction(event: dict[str, Any]) -> tuple[SatisfactionCate
     if event_type == "feedback":
         feedback_type = str(metadata.get("feedback_type") or "").strip().lower()
         reaction = str(metadata.get("reaction") or "").strip().lower()
+        # Retraction (an unlike / unbookmark) is a neutralization, never a
+        # negative preference — checked BEFORE any feedback-negative rule so an
+        # incidental negative reaction can't flip it (invariant: retraction is
+        # neutral).
+        if feedback_type == "retraction":
+            return ("neutral", "retraction")
         if feedback_type in _NEGATIVE_FEEDBACK_TYPES or reaction in _NEGATIVE_REACTIONS:
             return ("negative", "explicit_negative")
         if feedback_type in _POSITIVE_FEEDBACK_TYPES or reaction in _POSITIVE_REACTIONS:
@@ -158,6 +171,13 @@ def _classify_click_dwell(
 
     if watch_seconds < _QUICK_EXIT_MAX_SECONDS:
         return ("negative", "quick_exit")
+
+    # Content-page dwell has no video duration — score on reading time alone.
+    dwell_source = str(metadata.get("dwell_source") or "").strip()
+    if dwell_source == "content_page_exit":
+        if watch_seconds >= _CONTENT_DWELL_POSITIVE_MIN_SECONDS:
+            return ("positive", "engaged_reading")
+        return ("neutral", "shallow_view")
 
     duration = _read_dwell_field(event, metadata, "video_duration_seconds")
     if duration is None:
@@ -247,7 +267,10 @@ _DEFAULT_SIGNAL_STRENGTH_BY_EVENT_TYPE: dict[str, float] = {
     "follow": 0.6,
     "view": 0.35,
     "click": 0.3,
-    "search": 0.25,
+    # Search is an explicit-intent signal (the user names a topic), weighted
+    # above passive view. It stays satisfaction-neutral (_PASSIVE_BROWSE_EVENT_TYPES)
+    # since a query says what they want, not whether they were satisfied.
+    "search": 0.5,
     "hover": 0.1,
     "scroll": 0.1,
     "snapshot": 0.1,
@@ -271,6 +294,11 @@ def default_signal_strength_for_event(
     if normalized_event_type == "feedback":
         feedback_type = str(metadata.get("feedback_type") or "").strip().lower()
         reaction = str(metadata.get("reaction") or "").strip().lower()
+        # A retraction is weak evidence (0.2) — defended here for server-built
+        # or metadata-stripped events where the extension's explicit 0.2 is
+        # absent and the plain feedback default (0.5) would otherwise apply.
+        if feedback_type == "retraction":
+            return 0.2
         if feedback_type == "dislike" or reaction == "thumbs_down":
             return 1.0
         if feedback_type == "like" or reaction == "thumbs_up":
