@@ -19,7 +19,15 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
 from openbiliclaw.discovery.admission import effective_admission_threshold
-from openbiliclaw.discovery.strategies._utils import build_profile_summary
+from openbiliclaw.discovery.strategies._utils import (
+    _CONTENT_PROMPT_DOMAIN_CAP,
+    _CONTENT_PROMPT_INTEREST_CAP,
+    _EVALUATION_BODY_TEXT_HEAD_CAP,
+    _EVALUATION_BODY_TEXT_TAIL_CAP,
+    _prompt_body_text,
+    build_profile_summary,
+    compact_content_prompt_profile_summary,
+)
 from openbiliclaw.discovery.style_keys import VALID_STYLE_KEYS, normalize_style_key
 from openbiliclaw.llm.json_utils import (
     extract_llm_json_list,
@@ -87,13 +95,6 @@ _RAW_CANDIDATE_MODE: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "openbiliclaw_discovery_raw_candidate_mode",
     default=False,
 )
-_EVAL_PROFILE_CORE_CAP = 20
-_EVAL_PROFILE_INTEREST_CAP = 64
-_EVAL_PROFILE_DOMAIN_CAP = 32
-_EVAL_PROFILE_SPECIFICS_PER_DOMAIN_CAP = 12
-_EVAL_PROFILE_RECENT_CAP = 12
-_EVAL_PROFILE_EVIDENCE_CAP = 8
-_EVAL_PROFILE_SPECULATION_CAP = 12
 _EVAL_BATCH_CACHE_VERSION = "batch-content-eval-v1"
 _EMBEDDING_PREFILTER_DEFAULT_MODE = "shadow"
 _EMBEDDING_PREFILTER_MODES = {"off", "shadow", "enforce"}
@@ -101,14 +102,7 @@ _EMBEDDING_PREFILTER_MIN_SIMILARITY = 0.3
 _EMBEDDING_PREFILTER_REASON = "embedding 预过滤: 与所有兴趣相似度极低"
 _NEGATIVE_EXAMPLES_UNSET = object()
 _EVAL_RECALL_POOL_CAP = 256
-_RECENT_CONTEXT_VOLATILE_KEYS = {
-    "created_at",
-    "date",
-    "session_context",
-    "session_id",
-    "timestamp",
-    "updated_at",
-}
+compact_evaluation_profile_summary = compact_content_prompt_profile_summary
 
 
 def discovery_raw_candidate_mode_enabled() -> bool:
@@ -117,128 +111,11 @@ def discovery_raw_candidate_mode_enabled() -> bool:
     return bool(_RAW_CANDIDATE_MODE.get())
 
 
-def compact_evaluation_profile_summary(profile_summary: dict[str, object]) -> dict[str, object]:
-    """Return a smaller profile summary for high-volume candidate evaluation.
-
-    Discovery evaluation pays the full profile prompt on every batch. Keep the
-    highest-signal interests plus the newest awareness/insight windows, while
-    preserving hard negatives such as ``disliked_topics`` unchanged.
-    """
-
-    compacted = dict(profile_summary)
-    for key in ("core_traits", "cognitive_style", "values", "motivational_drivers", "deep_needs"):
-        compacted[key] = _cap_profile_sequence(
-            profile_summary.get(key),
-            _EVAL_PROFILE_CORE_CAP,
-        )
-    compacted["interests"] = _cap_weighted_profile_dicts(
-        profile_summary.get("interests"),
-        _EVAL_PROFILE_INTEREST_CAP,
-    )
-    compacted["interest_domains"] = _compact_interest_domains(
-        profile_summary.get("interest_domains"),
-    )
-    compacted["recent_awareness"] = _strip_volatile_profile_entry_fields(
-        _cap_profile_sequence(
-            profile_summary.get("recent_awareness"),
-            _EVAL_PROFILE_RECENT_CAP,
-            newest=True,
-        )
-    )
-    compacted["active_insights"] = _compact_active_insights(
-        profile_summary.get("active_insights"),
-    )
-    compacted["speculative_interests"] = _cap_profile_sequence(
-        profile_summary.get("speculative_interests"),
-        _EVAL_PROFILE_SPECULATION_CAP,
-    )
-    return compacted
-
-
 def evaluation_profile_prompt_layers(
     profile_summary: dict[str, object],
 ) -> list[tuple[str, dict[str, object]]]:
     """Split eval profile prompt input from most stable to most volatile."""
     return profile_prompt_layers(profile_summary)
-
-
-def _cap_profile_sequence(value: object, cap: int, *, newest: bool = False) -> object:
-    if not isinstance(value, list):
-        return value if value is not None else []
-    if len(value) <= cap:
-        return list(value)
-    return list(value[-cap:] if newest else value[:cap])
-
-
-def _strip_volatile_profile_entry_fields(value: object) -> object:
-    if not isinstance(value, list):
-        return value if value is not None else []
-    compacted: list[object] = []
-    for entry in value:
-        if not isinstance(entry, dict):
-            compacted.append(entry)
-            continue
-        compacted.append(
-            {
-                key: entry_value
-                for key, entry_value in entry.items()
-                if key not in _RECENT_CONTEXT_VOLATILE_KEYS
-            }
-        )
-    return compacted
-
-
-def _profile_weight(value: object) -> float:
-    if not isinstance(value, dict):
-        return 0.0
-    try:
-        return float(value.get("weight", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _cap_weighted_profile_dicts(value: object, cap: int) -> list[object]:
-    if not isinstance(value, list):
-        return []
-    return sorted(list(value), key=_profile_weight, reverse=True)[:cap]
-
-
-def _compact_interest_domains(value: object) -> list[object]:
-    if not isinstance(value, list):
-        return []
-    domains = _cap_weighted_profile_dicts(value, _EVAL_PROFILE_DOMAIN_CAP)
-    compacted: list[object] = []
-    for domain in domains:
-        if not isinstance(domain, dict):
-            compacted.append(domain)
-            continue
-        item = dict(domain)
-        specifics = item.get("specifics")
-        item["specifics"] = _cap_weighted_profile_dicts(
-            specifics,
-            _EVAL_PROFILE_SPECIFICS_PER_DOMAIN_CAP,
-        )
-        compacted.append(item)
-    return compacted
-
-
-def _compact_active_insights(value: object) -> list[object]:
-    if not isinstance(value, list):
-        return []
-    insights = list(value[-_EVAL_PROFILE_RECENT_CAP:])
-    compacted: list[object] = []
-    for insight in insights:
-        if not isinstance(insight, dict):
-            compacted.append(insight)
-            continue
-        item = dict(insight)
-        for key in _RECENT_CONTEXT_VOLATILE_KEYS:
-            item.pop(key, None)
-        evidence = item.get("evidence")
-        if isinstance(evidence, list):
-            item["evidence"] = list(evidence[:_EVAL_PROFILE_EVIDENCE_CAP])
-        compacted.append(item)
-    return compacted
 
 
 def _profile_interest_weight(interest: object) -> float:
@@ -954,7 +831,7 @@ class ContentDiscoveryEngine:
             key=lambda interest: float(interest.weight or 0.0),
             reverse=True,
         )
-        for interest in ranked_interests[:_EVAL_PROFILE_INTEREST_CAP]:
+        for interest in ranked_interests[:_CONTENT_PROMPT_INTEREST_CAP]:
             append_label(interest.name)
 
         compact_profile = compact_evaluation_profile_summary(
@@ -962,7 +839,7 @@ class ContentDiscoveryEngine:
         )
         raw_domains = compact_profile.get("interest_domains")
         if isinstance(raw_domains, list):
-            for domain in raw_domains[:_EVAL_PROFILE_DOMAIN_CAP]:
+            for domain in raw_domains[:_CONTENT_PROMPT_DOMAIN_CAP]:
                 if isinstance(domain, dict):
                     append_label(domain.get("domain"))
                 else:
@@ -1517,7 +1394,11 @@ class ContentDiscoveryEngine:
             "content_url": content.content_url,
             "source_platform": content.source_platform or "bilibili",
             "content_type": content.content_type,
-            "body_text": content.body_text,
+            "body_text": _prompt_body_text(
+                content.body_text,
+                head=_EVALUATION_BODY_TEXT_HEAD_CAP,
+                tail=_EVALUATION_BODY_TEXT_TAIL_CAP,
+            ),
             "title": content.title,
             "up_name": content.up_name,
             "author_name": content.author_name or content.up_name,
@@ -2214,7 +2095,11 @@ class ContentDiscoveryEngine:
                 "source_strategy": c.source_strategy,
                 "source_context": source_context or c.source_strategy,
                 "content_type": resolve_content_type(c.content_type, platform),
-                "body_text": c.body_text,
+                "body_text": _prompt_body_text(
+                    c.body_text,
+                    head=_EVALUATION_BODY_TEXT_HEAD_CAP,
+                    tail=_EVALUATION_BODY_TEXT_TAIL_CAP,
+                ),
                 "title": c.title,
                 "up_name": c.up_name,
                 "author_name": c.author_name or c.up_name,

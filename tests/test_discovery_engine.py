@@ -483,6 +483,23 @@ def test_compact_evaluation_profile_summary_keeps_high_signal_context() -> None:
     assert len(compacted["speculative_interests"]) == 12
 
 
+def test_content_prompt_profile_compactor_is_eval_backcompat_alias() -> None:
+    from openbiliclaw.discovery.strategies._utils import compact_content_prompt_profile_summary
+
+    profile_summary = {
+        "core_traits": [f"trait-{index}" for index in range(30)],
+        "interests": [
+            {"name": f"interest-{index}", "weight": 1.0 - index / 100} for index in range(90)
+        ],
+        "disliked_topics": ["avoid"],
+    }
+
+    assert compact_evaluation_profile_summary is compact_content_prompt_profile_summary
+    assert compact_content_prompt_profile_summary(profile_summary) == (
+        compact_evaluation_profile_summary(profile_summary)
+    )
+
+
 def test_evaluation_profile_summary_uses_compactor_and_preserves_dislikes() -> None:
     profile = _maxed_onion_profile()
 
@@ -574,6 +591,22 @@ def test_compact_evaluation_profile_summary_strips_recent_context_volatile_field
     assert "session_context" not in recent
     assert "created_at" not in insight
     assert "session_context" not in insight
+
+
+def test_prompt_body_text_head_tail_truncates_deterministically() -> None:
+    from openbiliclaw.discovery.strategies._utils import _prompt_body_text
+
+    short = "short-body"
+    long = "H" * 12 + "M" * 8 + "T" * 6
+
+    assert _prompt_body_text(None, head=12, tail=6) is None
+    assert _prompt_body_text("", head=12, tail=6) == ""
+    assert _prompt_body_text(short, head=12, tail=6) == short
+    assert _prompt_body_text(long, head=12, tail=6) == ("H" * 12) + "…" + ("T" * 6)
+    assert (
+        _prompt_body_text(long, head=12, tail=6).encode()
+        == (_prompt_body_text(long, head=12, tail=6) or "").encode()
+    )
 
 
 def test_evaluation_profile_prompt_block_shrinks_by_at_least_sixty_percent() -> None:
@@ -846,6 +879,31 @@ async def test_evaluate_content_single_passes_text_metrics_and_tags_to_prompt() 
     assert '"reply_count": 40' in user_input
     assert '"retweet_count": 30' in user_input
     assert '"bookmark_count": 20' in user_input
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_single_caps_body_text_head_tail() -> None:
+    llm_service = FakeLLMService(
+        '{"score": 0.82, "reason": "匹配", "topic_group": "系统", "style_key": "deep_dive"}'
+    )
+    engine = ContentDiscoveryEngine(llm_service=llm_service)
+    body_text = "H" * 1700 + "T" * 500
+
+    await engine.evaluate_content(
+        DiscoveredContent(
+            content_id="tweet-long",
+            title="长文首行",
+            body_text=body_text,
+            source_platform="twitter",
+            content_type="thread",
+            source_strategy="x-search",
+        ),
+        _build_profile(),
+    )
+
+    user_input = str(llm_service.calls[0]["user_input"])
+    assert ("H" * 1600) + "…" + ("T" * 400) in user_input
+    assert body_text not in user_input
 
 
 @pytest.mark.asyncio
@@ -1136,6 +1194,40 @@ async def test_evaluate_content_batch_omits_duplicate_text_description() -> None
     assert items[0]["description"] == ""
     assert items[1]["body_text"] == "完整推文正文"
     assert items[1]["description"] == "短描述补充"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_batch_caps_body_text_head_tail() -> None:
+    llm_service = _DynamicBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm_service)
+    body_text = "H" * 1700 + "T" * 500
+
+    scores = await engine.evaluate_content_batch(
+        [
+            DiscoveredContent(
+                content_id="twitter:tweet:long",
+                source_platform="twitter",
+                content_type="thread",
+                title="Long tweet first line",
+                body_text=body_text,
+                source_strategy="x-feed",
+            )
+        ],
+        _build_profile(),
+        batch_size=1,
+    )
+
+    assert scores == [0.8]
+    batch_json = (
+        llm_service.user_inputs[0]
+        .split("<content_batch>", 1)[1]
+        .split(
+            "</content_batch>",
+            1,
+        )[0]
+    )
+    items = json.loads(batch_json.strip())
+    assert items[0]["body_text"] == ("H" * 1600) + "…" + ("T" * 400)
 
 
 @pytest.mark.asyncio

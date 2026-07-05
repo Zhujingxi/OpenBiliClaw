@@ -35,6 +35,159 @@ _QUERY_INTEREST_CANDIDATE_POOL_CAP = 128
 _QUERY_DISLIKED_TOPICS_CAP = 64
 _QUERY_DISLIKED_TOPIC_CANDIDATE_POOL_CAP = 128
 _QUERY_SPECULATIVE_INTEREST_CAP = 8
+_CONTENT_PROMPT_CORE_CAP = 20
+_CONTENT_PROMPT_INTEREST_CAP = 64
+_CONTENT_PROMPT_DOMAIN_CAP = 32
+_CONTENT_PROMPT_SPECIFICS_PER_DOMAIN_CAP = 12
+_CONTENT_PROMPT_RECENT_CAP = 12
+_CONTENT_PROMPT_EVIDENCE_CAP = 8
+_CONTENT_PROMPT_SPECULATION_CAP = 12
+_EVALUATION_BODY_TEXT_HEAD_CAP = 1600
+_EVALUATION_BODY_TEXT_TAIL_CAP = 400
+_EXPRESSION_BODY_TEXT_HEAD_CAP = 1000
+_EXPRESSION_BODY_TEXT_TAIL_CAP = 200
+_PROMPT_BODY_TEXT_JOINER = "…"
+_RECENT_CONTEXT_VOLATILE_KEYS = {
+    "created_at",
+    "date",
+    "session_context",
+    "session_id",
+    "timestamp",
+    "updated_at",
+}
+
+
+def compact_content_prompt_profile_summary(
+    profile_summary: dict[str, object],
+) -> dict[str, object]:
+    """Return a smaller profile summary for high-volume content prompts.
+
+    Discovery evaluation, recommendation expression, and pool classification
+    all pay profile context repeatedly. Keep the highest-signal interests plus
+    the newest awareness/insight windows, while preserving hard negatives such
+    as ``disliked_topics`` unchanged.
+    """
+
+    compacted = dict(profile_summary)
+    for key in ("core_traits", "cognitive_style", "values", "motivational_drivers", "deep_needs"):
+        compacted[key] = _cap_profile_sequence(
+            profile_summary.get(key),
+            _CONTENT_PROMPT_CORE_CAP,
+        )
+    compacted["interests"] = _cap_weighted_profile_dicts(
+        profile_summary.get("interests"),
+        _CONTENT_PROMPT_INTEREST_CAP,
+    )
+    compacted["interest_domains"] = _compact_interest_domains(
+        profile_summary.get("interest_domains"),
+    )
+    compacted["recent_awareness"] = _strip_volatile_profile_entry_fields(
+        _cap_profile_sequence(
+            profile_summary.get("recent_awareness"),
+            _CONTENT_PROMPT_RECENT_CAP,
+            newest=True,
+        )
+    )
+    compacted["active_insights"] = _compact_active_insights(
+        profile_summary.get("active_insights"),
+    )
+    compacted["speculative_interests"] = _cap_profile_sequence(
+        profile_summary.get("speculative_interests"),
+        _CONTENT_PROMPT_SPECULATION_CAP,
+    )
+    return compacted
+
+
+def _prompt_body_text(value: str | None, *, head: int, tail: int) -> str | None:
+    if value is None or value == "":
+        return value
+
+    head = max(0, head)
+    tail = max(0, tail)
+    if len(value) <= head + tail:
+        return value
+
+    suffix = value[-tail:] if tail else ""
+    return f"{value[:head]}{_PROMPT_BODY_TEXT_JOINER}{suffix}"
+
+
+def _cap_profile_sequence(value: object, cap: int, *, newest: bool = False) -> object:
+    if not isinstance(value, list):
+        return value if value is not None else []
+    if len(value) <= cap:
+        return list(value)
+    return list(value[-cap:] if newest else value[:cap])
+
+
+def _strip_volatile_profile_entry_fields(value: object) -> object:
+    if not isinstance(value, list):
+        return value if value is not None else []
+    compacted: list[object] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            compacted.append(entry)
+            continue
+        compacted.append(
+            {
+                key: entry_value
+                for key, entry_value in entry.items()
+                if key not in _RECENT_CONTEXT_VOLATILE_KEYS
+            }
+        )
+    return compacted
+
+
+def _profile_weight(value: object) -> float:
+    if not isinstance(value, dict):
+        return 0.0
+    try:
+        return float(value.get("weight", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _cap_weighted_profile_dicts(value: object, cap: int) -> list[object]:
+    if not isinstance(value, list):
+        return []
+    return sorted(list(value), key=_profile_weight, reverse=True)[:cap]
+
+
+def _compact_interest_domains(value: object) -> list[object]:
+    if not isinstance(value, list):
+        return []
+    domains = _cap_weighted_profile_dicts(value, _CONTENT_PROMPT_DOMAIN_CAP)
+    compacted: list[object] = []
+    for domain in domains:
+        if not isinstance(domain, dict):
+            compacted.append(domain)
+            continue
+        item = dict(domain)
+        specifics = item.get("specifics")
+        item["specifics"] = _cap_weighted_profile_dicts(
+            specifics,
+            _CONTENT_PROMPT_SPECIFICS_PER_DOMAIN_CAP,
+        )
+        compacted.append(item)
+    return compacted
+
+
+def _compact_active_insights(value: object) -> list[object]:
+    if not isinstance(value, list):
+        return []
+    insights = list(value[-_CONTENT_PROMPT_RECENT_CAP:])
+    compacted: list[object] = []
+    for insight in insights:
+        if not isinstance(insight, dict):
+            compacted.append(insight)
+            continue
+        item = dict(insight)
+        for key in _RECENT_CONTEXT_VOLATILE_KEYS:
+            item.pop(key, None)
+        evidence = item.get("evidence")
+        if isinstance(evidence, list):
+            item["evidence"] = list(evidence[:_CONTENT_PROMPT_EVIDENCE_CAP])
+        compacted.append(item)
+    return compacted
 
 
 @dataclass(frozen=True)

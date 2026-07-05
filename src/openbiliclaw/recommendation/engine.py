@@ -18,6 +18,13 @@ from datetime import datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
+from openbiliclaw.discovery.strategies._utils import (
+    _EXPRESSION_BODY_TEXT_HEAD_CAP,
+    _EXPRESSION_BODY_TEXT_TAIL_CAP,
+    _prompt_body_text,
+    build_profile_summary,
+    compact_content_prompt_profile_summary,
+)
 from openbiliclaw.discovery.style_keys import VALID_STYLE_KEYS, normalize_style_key
 from openbiliclaw.llm.base import classify_llm_failure_kind
 from openbiliclaw.llm.json_utils import (
@@ -278,9 +285,9 @@ def _recommendation_profile_summary(
     embedding-selected, content-relevant tag list for the default weight-ranked
     one.
     """
-    from openbiliclaw.discovery.strategies._utils import build_profile_summary
-
-    return build_profile_summary(profile, interests=interests)
+    return compact_content_prompt_profile_summary(
+        build_profile_summary(profile, interests=interests)
+    )
 
 
 def _content_result_keys(content: DiscoveredContent) -> set[str]:
@@ -3713,7 +3720,7 @@ class RecommendationEngine:
             },
             recent_feedback=[],
         )
-        content_items = [
+        content_items: list[dict[str, object]] = [
             {
                 "bvid": item.bvid,
                 "content_id": item.content_id or item.bvid,
@@ -3725,7 +3732,11 @@ class RecommendationEngine:
                 "topic_group": item.topic_group,
                 "relevance_score": item.relevance_score,
                 "content_type": item.content_type,
-                "body_text": item.body_text,
+                "body_text": _prompt_body_text(
+                    item.body_text,
+                    head=_EXPRESSION_BODY_TEXT_HEAD_CAP,
+                    tail=_EXPRESSION_BODY_TEXT_TAIL_CAP,
+                ),
             }
             for item in batch
         ]
