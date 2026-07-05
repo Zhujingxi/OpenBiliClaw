@@ -376,3 +376,65 @@ def test_candidate_write_carries_social_metrics(tmp_path: Path) -> None:
     assert back.reply_count == 60
     assert back.retweet_count == 50
     assert back.bookmark_count == 40
+
+
+def _enqueue_one(db: Database, key: str) -> None:
+    db.enqueue_discovery_candidates(
+        [
+            DiscoveryCandidateWrite(
+                candidate_key=f"bilibili:{key}",
+                source_platform="bilibili",
+                source_strategy="search",
+                content_id=key,
+                title=key,
+            )
+        ]
+    )
+
+
+def test_reset_stale_evaluations_zero_minutes_releases_fresh_and_null_claims(
+    tmp_path: Path,
+) -> None:
+    """minutes=0 is the process-start sweep: seconds-old restart orphans and
+    un-ageable NULL claimed_at rows must all rejoin pending_eval."""
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    _enqueue_one(db, "BVFRESH")
+    _enqueue_one(db, "BVNULL")
+    rows = db.claim_discovery_candidates_for_eval(limit=2)
+    assert len(rows) == 2
+    db.conn.execute(
+        "UPDATE discovery_candidates SET claimed_at = NULL WHERE content_id = 'BVNULL'"
+    )
+    db.conn.commit()
+
+    released = db.reset_stale_discovery_candidate_evaluations(max_age_minutes=0)
+
+    assert released == 2
+    counts = db.count_discovery_candidates_by_status()
+    assert counts["pending_eval"] == 2
+    assert counts.get("evaluating", 0) == 0
+
+
+def test_reset_stale_evaluations_default_keeps_fresh_but_releases_null_claimed_at(
+    tmp_path: Path,
+) -> None:
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    _enqueue_one(db, "BVLIVE")
+    _enqueue_one(db, "BVNULL2")
+    rows = db.claim_discovery_candidates_for_eval(limit=2)
+    assert len(rows) == 2
+    db.conn.execute(
+        "UPDATE discovery_candidates SET claimed_at = NULL WHERE content_id = 'BVNULL2'"
+    )
+    db.conn.commit()
+
+    released = db.reset_stale_discovery_candidate_evaluations(max_age_minutes=30)
+
+    # The live (seconds-old) claim survives; the NULL claimed_at row cannot
+    # age out so the periodic sweep must release it.
+    assert released == 1
+    counts = db.count_discovery_candidates_by_status()
+    assert counts["pending_eval"] == 1
+    assert counts["evaluating"] == 1

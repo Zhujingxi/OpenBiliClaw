@@ -24,6 +24,12 @@ _PROJECT_ROOT_ENV = "OPENBILICLAW_PROJECT_ROOT"
 _SUPPORTED_AUTH_METHODS = {"cookie", "qrcode", "none"}
 _SUPPORTED_OPENAI_AUTH_MODES = {"", "api_key", "codex_oauth"}
 _SUPPORTED_OPENAI_API_FLAVORS = {"", "chat_completions", "responses"}
+# Keep in sync with llm/registry.py `_EMBEDDING_CAPABLE_PROVIDERS` (config
+# cannot import the registry — cycle). An unknown name silently disables the
+# embedding service, so saves are validated as blocking (field 2026-07-05:
+# browser page-translation rewrote '奥拉玛' into config via value-less
+# <option> elements).
+_SUPPORTED_EMBEDDING_PROVIDERS = {"", "ollama", "openai", "gemini", "openai_compatible"}
 _MIN_POOL_TARGET_COUNT = 1
 _MAX_POOL_TARGET_COUNT = 600
 _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS = 90
@@ -1476,6 +1482,27 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
                 message=f"`bilibili.auth_method` 仅支持: {supported}。",
             )
         )
+
+    # Before the default-provider early return: embedding validation must run
+    # even when default_provider itself is broken.
+    for emb_field, emb_value in (
+        ("provider", config.llm.embedding.provider),
+        ("fallback_provider", config.llm.embedding.fallback_provider),
+    ):
+        normalized = str(emb_value or "").strip().lower()
+        if normalized not in _SUPPORTED_EMBEDDING_PROVIDERS:
+            supported = '"", "ollama", "openai", "gemini", "openai_compatible"'
+            issues.append(
+                ConfigIssue(
+                    field=f"llm.embedding.{emb_field}",
+                    message=(
+                        f"不支持的 embedding {emb_field}: `{emb_value}`。仅支持: {supported}。"
+                        "如果这个值看起来像被翻译过（例如「奥拉玛」），"
+                        "请关闭浏览器的网页翻译后到设置页重新选择。"
+                    ),
+                    severity="blocking",
+                )
+            )
 
     provider_name = config.llm.default_provider
     provider_configs: dict[str, LLMProviderConfig] = {

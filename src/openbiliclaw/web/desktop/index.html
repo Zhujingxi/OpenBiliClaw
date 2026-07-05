@@ -278,7 +278,7 @@
           </div>
 
           <div class="settings-subpanel is-active" data-model-settings-group="embedding" data-model-settings-panel="default">
-            <label class="settings-field"><span>Embedding Provider</span><select id="embeddingProvider"><option value="">跟随默认</option><option>ollama</option><option>openai</option><option>gemini</option><option>openai_compatible</option></select></label>
+            <label class="settings-field"><span>Embedding Provider</span><select id="embeddingProvider" translate="no"><option value="">跟随默认</option><option value="ollama">ollama</option><option value="openai">openai</option><option value="gemini">gemini</option><option value="openai_compatible">openai_compatible</option></select></label>
             <label class="settings-field"><span>Embedding 模型</span><input id="embeddingModel" value="bge-m3"></label>
             <label class="settings-field"><span>Embedding API Key</span><input id="embeddingApiKey" autocomplete="off"></label>
             <label class="settings-field"><span>Embedding Base URL</span><input id="embeddingBaseUrl"></label>
@@ -292,20 +292,20 @@
 
           <div class="settings-subpanel" data-model-settings-group="embedding" data-model-settings-panel="fallback" hidden>
             <p class="settings-note-inline">默认 Embedding Provider 不可用时才会使用备选 Provider；这里编辑的是所选 Provider 的现有配置。</p>
-            <label class="settings-field"><span>备选 Embedding Provider</span><select id="embeddingFallbackProvider"><option value="">不启用 fallback</option><option>ollama</option><option>openai</option><option>gemini</option><option>openai_compatible</option></select></label>
+            <label class="settings-field"><span>备选 Embedding Provider</span><select id="embeddingFallbackProvider" translate="no"><option value="">不启用 fallback</option><option value="ollama">ollama</option><option value="openai">openai</option><option value="gemini">gemini</option><option value="openai_compatible">openai_compatible</option></select></label>
             <label class="settings-field"><span>备选 Provider 模型</span><input id="embeddingFallbackModel" placeholder="写入所选 Provider 的 model"></label>
             <label class="settings-field"><span>备选 Provider API Key</span><input id="embeddingFallbackApiKey" autocomplete="off"></label>
             <label class="settings-field"><span>备选 Provider Base URL</span><input id="embeddingFallbackBaseUrl"></label>
           </div>
 
           <p class="settings-section-title">模块覆盖</p>
-          <label class="settings-field"><span>画像 Provider</span><select id="moduleSoulProvider"><option value="">继承默认</option><option>openai</option><option>claude</option><option>gemini</option><option>deepseek</option><option>ollama</option><option>openrouter</option><option>openai_compatible</option></select></label>
+          <label class="settings-field"><span>画像 Provider</span><select id="moduleSoulProvider" translate="no"><option value="">继承默认</option><option value="openai">openai</option><option value="claude">claude</option><option value="gemini">gemini</option><option value="deepseek">deepseek</option><option value="ollama">ollama</option><option value="openrouter">openrouter</option><option value="openai_compatible">openai_compatible</option></select></label>
           <label class="settings-field"><span>画像 Model</span><input id="moduleSoulModel" placeholder="留空继承"></label>
-          <label class="settings-field"><span>发现 Provider</span><select id="moduleDiscoveryProvider"><option value="">继承默认</option><option>openai</option><option>claude</option><option>gemini</option><option>deepseek</option><option>ollama</option><option>openrouter</option><option>openai_compatible</option></select></label>
+          <label class="settings-field"><span>发现 Provider</span><select id="moduleDiscoveryProvider" translate="no"><option value="">继承默认</option><option value="openai">openai</option><option value="claude">claude</option><option value="gemini">gemini</option><option value="deepseek">deepseek</option><option value="ollama">ollama</option><option value="openrouter">openrouter</option><option value="openai_compatible">openai_compatible</option></select></label>
           <label class="settings-field"><span>发现 Model</span><input id="moduleDiscoveryModel" placeholder="留空继承"></label>
-          <label class="settings-field"><span>推荐表达 Provider</span><select id="moduleRecommendationProvider"><option value="">继承默认</option><option>openai</option><option>claude</option><option>gemini</option><option>deepseek</option><option>ollama</option><option>openrouter</option><option>openai_compatible</option></select></label>
+          <label class="settings-field"><span>推荐表达 Provider</span><select id="moduleRecommendationProvider" translate="no"><option value="">继承默认</option><option value="openai">openai</option><option value="claude">claude</option><option value="gemini">gemini</option><option value="deepseek">deepseek</option><option value="ollama">ollama</option><option value="openrouter">openrouter</option><option value="openai_compatible">openai_compatible</option></select></label>
           <label class="settings-field"><span>推荐表达 Model</span><input id="moduleRecommendationModel" placeholder="留空继承"></label>
-          <label class="settings-field"><span>评估 Provider</span><select id="moduleEvaluationProvider"><option value="">继承默认</option><option>openai</option><option>claude</option><option>gemini</option><option>deepseek</option><option>ollama</option><option>openrouter</option><option>openai_compatible</option></select></label>
+          <label class="settings-field"><span>评估 Provider</span><select id="moduleEvaluationProvider" translate="no"><option value="">继承默认</option><option value="openai">openai</option><option value="claude">claude</option><option value="gemini">gemini</option><option value="deepseek">deepseek</option><option value="ollama">ollama</option><option value="openrouter">openrouter</option><option value="openai_compatible">openai_compatible</option></select></label>
           <label class="settings-field"><span>评估 Model</span><input id="moduleEvaluationModel" placeholder="留空继承"></label>
         </div>
 
@@ -559,8 +559,8 @@
 
         <div class="settings-panel" data-settings-panel="logging" hidden>
           <p class="settings-section-title">日志</p>
-          <label class="settings-field"><span>控制台级别</span><select id="logLevel"><option>DEBUG</option><option selected="">INFO</option><option>WARNING</option><option>ERROR</option></select></label>
-          <label class="settings-field"><span>文件级别</span><select id="logFileLevel"><option selected="">DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option></select></label>
+          <label class="settings-field"><span>控制台级别</span><select id="logLevel" translate="no"><option value="DEBUG">DEBUG</option><option value="INFO" selected="">INFO</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option></select></label>
+          <label class="settings-field"><span>文件级别</span><select id="logFileLevel" translate="no"><option value="DEBUG" selected="">DEBUG</option><option value="INFO">INFO</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option></select></label>
           <label class="settings-field full"><span>完整日志路径</span><input id="logPath" placeholder="logs/openbiliclaw.log"></label>
           <div class="inline-row">
             <label class="settings-field"><span>单日志文件上限 MB</span><input id="logMaxFileSize" inputmode="numeric" placeholder="100"></label>

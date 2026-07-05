@@ -1496,3 +1496,90 @@ async def test_pipeline_supply_retries_after_zero_insert_duplicate_batch(
     assert engine.calls == [1, 2]
     rows = db.claim_discovery_candidates_for_eval(limit=10)
     assert [row["bvid"] for row in rows] == ["BVNEW"]
+
+
+def test_first_pipeline_of_process_releases_restart_orphans(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart mid-batch leaves seconds-old 'evaluating' claims that the
+    Database.initialize() 30-min sweep misses; the first pipeline of the
+    process must release them all, or the pool starves (field log 2026-07-05:
+    supply fill reports target_reached against 40 immortal rows forever)."""
+    import openbiliclaw.discovery.candidate_pipeline as cp
+
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    db.enqueue_discovery_candidates(
+        [
+            DiscoveryCandidateWrite(
+                candidate_key="bilibili:BVORPHAN",
+                source_platform="bilibili",
+                source_strategy="search",
+                content_id="BVORPHAN",
+                title="Orphan",
+            )
+        ]
+    )
+    assert len(db.claim_discovery_candidates_for_eval(limit=1)) == 1
+
+    monkeypatch.setattr(cp, "_orphan_eval_claims_released", False)
+    DiscoveryCandidatePipeline(
+        database=db,
+        discovery_engine=_BatchRecordingEvalEngine(),  # type: ignore[arg-type]
+        pool_target_count=30,
+    )
+    counts = db.count_discovery_candidates_by_status()
+    assert counts["pending_eval"] == 1
+    assert counts.get("evaluating", 0) == 0
+
+    # Later rebuilds (config reload) must NOT sweep — an in-flight batch from
+    # the previous pipeline instance would be needlessly re-queued.
+    assert len(db.claim_discovery_candidates_for_eval(limit=1)) == 1
+    DiscoveryCandidatePipeline(
+        database=db,
+        discovery_engine=_BatchRecordingEvalEngine(),  # type: ignore[arg-type]
+        pool_target_count=30,
+    )
+    assert db.count_discovery_candidates_by_status()["evaluating"] == 1
+
+
+@pytest.mark.asyncio
+async def test_drain_requeues_stale_evaluating_claims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A claim whose evaluator died mid-run (>30 min old) is re-queued by the
+    periodic drain tick and evaluated like any pending candidate."""
+    import openbiliclaw.discovery.candidate_pipeline as cp
+
+    monkeypatch.setattr(cp, "_orphan_eval_claims_released", True)
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    db.enqueue_discovery_candidates(
+        [
+            DiscoveryCandidateWrite(
+                candidate_key="bilibili:BVSTUCK",
+                source_platform="bilibili",
+                source_strategy="search",
+                content_id="BVSTUCK",
+                content_url="https://www.bilibili.com/video/BVSTUCK",
+                title="Stuck",
+            )
+        ]
+    )
+    assert len(db.claim_discovery_candidates_for_eval(limit=1)) == 1
+    db.conn.execute(
+        "UPDATE discovery_candidates SET claimed_at = datetime('now', '-45 minutes')"
+    )
+    db.conn.commit()
+
+    engine = _BatchRecordingEvalEngine()
+    pipeline = DiscoveryCandidatePipeline(
+        database=db,
+        discovery_engine=engine,  # type: ignore[arg-type]
+        pool_target_count=30,
+    )
+    result = await pipeline.drain_pending(profile=_build_profile(), batch_size=5)
+
+    assert result["evaluated"] == 1
+    assert engine.batch_lengths == [1]
+    assert db.count_discovery_candidates_by_status().get("evaluating", 0) == 0

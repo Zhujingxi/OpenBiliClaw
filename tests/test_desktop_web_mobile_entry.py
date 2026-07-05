@@ -66,3 +66,31 @@ def test_qr_generator_is_self_contained_global() -> None:
     for symbol in ("buildMobileWebUrl", "isLoopbackMobileHost", "createQrSvgMarkup"):
         assert symbol in _QR_JS
     assert "import " not in _QR_JS, "desktop web has no module build; keep it dependency-free"
+
+
+def test_desktop_settings_selects_survive_browser_page_translation() -> None:
+    """Every <option> must carry an explicit value attribute and code-like
+    selects must opt out of translation. Chrome/Edge page translation
+    rewrites option TEXT nodes; without a value attribute select.value falls
+    back to the translated text and garbage like '奥拉玛' lands in
+    config.toml (field log 2026-07-05)."""
+    import re
+    from pathlib import Path
+
+    html = Path("src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")
+
+    valueless = re.findall(r"<option(?:\s+selected=\"\")?>[^<]*</option>", html)
+    assert valueless == [], f"value-less <option> elements: {valueless}"
+    for select_id in (
+        "embeddingProvider",
+        "embeddingFallbackProvider",
+        "moduleSoulProvider",
+        "moduleDiscoveryProvider",
+        "moduleRecommendationProvider",
+        "moduleEvaluationProvider",
+        "logLevel",
+        "logFileLevel",
+    ):
+        m = re.search(rf'<select id="{select_id}"[^>]*>', html)
+        assert m, select_id
+        assert 'translate="no"' in m.group(0), f"{select_id} missing translate=no"

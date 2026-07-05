@@ -2282,3 +2282,26 @@ admission_min_score = {literal}
         assert "multimodal_evaluation_enabled = false" in rendered
         assert "multimodal_batch_size = 8" in rendered
         assert "multimodal_image_max_px = 384" in rendered
+
+
+def test_collect_issues_blocks_unknown_embedding_provider() -> None:
+    """A browser page-translator once rewrote value-less <option> text into
+    config ('奥拉玛'), silently disabling the embedding service. Unknown
+    embedding provider names must block the save instead of persisting."""
+    from openbiliclaw.config import _collect_config_issues
+
+    config = Config()
+    config.llm.embedding.provider = "奥拉玛"
+    config.llm.embedding.fallback_provider = "双子座"
+
+    issues = _collect_config_issues(config)
+
+    fields = {issue.field for issue in issues if issue.severity == "blocking"}
+    assert "llm.embedding.provider" in fields
+    assert "llm.embedding.fallback_provider" in fields
+
+    # Legit values (any case) and empty stay clean.
+    config.llm.embedding.provider = "Ollama"
+    config.llm.embedding.fallback_provider = ""
+    issues = _collect_config_issues(config)
+    assert not any(issue.field.startswith("llm.embedding.") for issue in issues)

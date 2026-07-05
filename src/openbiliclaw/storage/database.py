@@ -1522,9 +1522,30 @@ class Database:
         *,
         max_age_minutes: int = 30,
     ) -> int:
-        """Release evaluator claims left behind by a crashed process."""
+        """Release evaluator claims left behind by a crashed process.
 
-        minutes = max(1, int(max_age_minutes))
+        ``max_age_minutes=0`` releases EVERY ``evaluating`` row regardless of
+        age — the startup case: the evaluator lives in-process, so any claim
+        that survives a restart is orphaned by definition. Rows with a NULL
+        ``claimed_at`` can never age out, so both modes include them.
+        Without this a restart mid-batch starves the pool forever: stuck
+        rows count toward the supply target but the drain only claims
+        ``pending_eval`` (field log 2026-07-05: pool_available=0 with 40
+        immortal ``evaluating`` rows).
+        """
+
+        minutes = max(0, int(max_age_minutes))
+        if minutes == 0:
+            cursor = self._execute_write(
+                """
+                UPDATE discovery_candidates
+                SET status = 'pending_eval',
+                    claimed_at = NULL,
+                    eval_error = 'orphaned evaluating claim reset'
+                WHERE status = 'evaluating'
+                """
+            )
+            return int(cursor.rowcount)
         cursor = self._execute_write(
             """
             UPDATE discovery_candidates
@@ -1532,8 +1553,7 @@ class Database:
                 claimed_at = NULL,
                 eval_error = 'stale evaluating claim reset'
             WHERE status = 'evaluating'
-              AND claimed_at IS NOT NULL
-              AND claimed_at < datetime('now', ?)
+              AND (claimed_at IS NULL OR claimed_at < datetime('now', ?))
             """,
             (f"-{minutes} minutes",),
         )

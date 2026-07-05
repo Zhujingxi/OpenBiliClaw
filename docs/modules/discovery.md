@@ -129,6 +129,8 @@
 
    候选队列表本身按来源保留上限，默认上限为 `max(pool_target_count*2, pool_target_count+120, 600)`；入队时会把 `evaluating` 行纳入 cap 计数，但删除时保护 in-flight 行，并优先清理 terminal rows。这样正式池长期满时仍不继续消耗 discovery / LLM，同时不会让外部 observed / producer 队列无限增长，即使 `pool_target_count <= 0` 也保留 600 条的兜底上限。
 
+   `evaluating` claim 的崩溃回收（v0.3.155+）：评估器活在进程内，重启后残留的 `evaluating` 行必然是孤儿——它们计入补货 target（表现为 `target_reached`）却永远不会被 drain（只 claim `pending_eval`）、也不被 cap 清理（保护 in-flight），会让池子永久饿死。三层回收：`Database.initialize()` 打开库时回收 ≥30 分钟的旧 claim（既有行为）；进程内**首个** `DiscoveryCandidatePipeline` 构造时全量回收所有 `evaluating`（含 `claimed_at` 为 NULL 的行；config reload 重建不重扫，避免误伤上一实例在飞的 batch）；每次 `drain_pending` tick 先回收超过 30 分钟的 stale claim（治评估任务中途死亡）。
+
    引擎缓存收口仍会按跨源内容身份去重：B 站内容使用 `bvid`，YouTube / 小红书 / 抖音等多源内容使用 `source_platform + content_id`，缺失时再退到 URL / 标题。这样同一个视频被多个策略同时找到时，会保留可入池的一条版本，同时不会把多个非 B 站候选因为空 `bvid` 误合并。
 
    直接调用 `ContentDiscoveryEngine.discover()` 的 CLI / 测试 / fallback 路径仍保留旧的 inline 评估、排序、压缩和缓存能力；daemon runtime 的正常路径则优先走待评估池。
