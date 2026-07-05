@@ -1183,14 +1183,14 @@ def test_openai_provider_supports_embedding_flag_is_set() -> None:
 
 
 @pytest.mark.asyncio
-async def test_registry_complete_does_not_fallback_when_disabled() -> None:
+async def test_registry_complete_does_not_fallback_without_fallback_provider() -> None:
+    """An empty fallback_provider IS the off switch — no provider walk."""
     openai = FakeProvider("openai", errors=[LLMProviderError("down")])
     claude = FakeProvider("claude", responses=[LLMResponse(content="ok", provider="claude")])
     registry = build_llm_registry(
         Config(
             llm=LLMConfig(
                 default_provider="openai",
-                fallback_enabled=False,
                 openai=LLMProviderConfig(api_key="openai-key"),
                 claude=LLMProviderConfig(api_key="claude-key"),
             )
@@ -1215,7 +1215,6 @@ async def test_registry_falls_back_on_retryable_errors() -> None:
         Config(
             llm=LLMConfig(
                 default_provider="openai",
-                fallback_enabled=True,
                 fallback_provider="claude",
                 openai=LLMProviderConfig(api_key="openai-key"),
             )
@@ -1242,7 +1241,6 @@ async def test_registry_does_not_auto_fallback_without_explicit_fallback_provide
         Config(
             llm=LLMConfig(
                 default_provider="openai",
-                fallback_enabled=True,
                 fallback_provider="",
                 openai=LLMProviderConfig(api_key="openai-key"),
                 claude=LLMProviderConfig(api_key="claude-key"),
@@ -1266,12 +1264,14 @@ async def test_registry_does_not_auto_fallback_without_explicit_fallback_provide
 
 
 @pytest.mark.asyncio
-async def test_registry_does_not_fallback_on_response_error() -> None:
+async def test_registry_falls_back_on_response_error() -> None:
+    """Empty/malformed content is how flaky gateways commonly die (200 with
+    no body) — the fallback provider must take over, same as a 5xx. The
+    provider itself already did its single in-place retry before raising."""
     registry = build_llm_registry(
         Config(
             llm=LLMConfig(
                 default_provider="openai",
-                fallback_enabled=True,
                 fallback_provider="claude",
                 openai=LLMProviderConfig(api_key="openai-key"),
             )
@@ -1286,8 +1286,34 @@ async def test_registry_does_not_fallback_on_response_error() -> None:
         fallback_order=["openai", "claude"],
     )
 
-    with pytest.raises(LLMResponseError):
+    response = await registry.complete([{"role": "user", "content": "hi"}])
+
+    assert response.content == "ok"
+    assert response.provider == "claude"
+    assert registry.get("openai").call_count == 1
+    assert registry.get("claude").call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_registry_response_error_without_fallback_raises_fallback_error() -> None:
+    """Single-provider chains: an empty-content failure now surfaces as
+    LLMFallbackError (chain exhausted) with the response error as cause."""
+    registry = build_llm_registry(
+        Config(
+            llm=LLMConfig(
+                default_provider="openai",
+                openai=LLMProviderConfig(api_key="openai-key"),
+            )
+        ),
+        provider_overrides={
+            "openai": FakeProvider("openai", errors=[LLMResponseError("bad response")]),
+        },
+    )
+
+    with pytest.raises(LLMFallbackError) as exc_info:
         await registry.complete([{"role": "user", "content": "hi"}])
+
+    assert isinstance(exc_info.value.__cause__, LLMResponseError)
 
 
 @pytest.mark.asyncio
@@ -1296,7 +1322,6 @@ async def test_registry_health_check_all() -> None:
         Config(
             llm=LLMConfig(
                 default_provider="openai",
-                fallback_enabled=True,
                 fallback_provider="ollama",
                 openai=LLMProviderConfig(api_key="openai-key"),
             )
@@ -1328,7 +1353,6 @@ async def test_registry_temporarily_cools_down_rate_limited_provider(
         Config(
             llm=LLMConfig(
                 default_provider="openai",
-                fallback_enabled=True,
                 fallback_provider="claude",
                 openai=LLMProviderConfig(api_key="openai-key"),
             )
@@ -1477,7 +1501,6 @@ async def test_ollama_with_explicit_chat_model_is_chat_capable() -> None:
     cfg = Config(
         llm=LLMConfig(
             default_provider="openai",
-            fallback_enabled=True,
             fallback_provider="ollama",
             openai=LLMProviderConfig(api_key="openai-key"),
             ollama=LLMProviderConfig(
@@ -1523,7 +1546,6 @@ async def test_ollama_named_as_fallback_provider_is_chat_capable_without_model()
     cfg = Config(
         llm=LLMConfig(
             default_provider="openai",
-            fallback_enabled=True,
             fallback_provider="ollama",
             openai=LLMProviderConfig(api_key="openai-key"),
             # No explicit chat model — Ollama is named ONLY as the

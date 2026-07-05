@@ -190,7 +190,9 @@ class LLMRegistry:
         self._providers: dict[str, LLMProvider] = {}
         self._default: str = ""
         self._rate_limited_until: dict[str, float] = {}
-        self.fallback_enabled: bool = False
+        # A non-empty fallback_provider IS the enable switch — there is no
+        # separate boolean (the legacy [llm].fallback_enabled flag was never
+        # consulted and has been removed; empty provider = fallback off).
         self.fallback_provider: str = ""
         # Names of providers that should NOT appear in the chat-completion
         # fallback chain — typically an Ollama instance registered solely
@@ -285,8 +287,10 @@ class LLMRegistry:
         """Execute a completion request with sequential provider fallback."""
         last_error: Exception | None = None
         attempted: list[str] = []
+        order = self._fallback_order()
 
-        for provider_name in self._fallback_order():
+        for position, provider_name in enumerate(order):
+            has_next = position + 1 < len(order)
             attempted.append(provider_name)
             if self._provider_on_cooldown(provider_name):
                 last_error = LLMRateLimitError(
@@ -305,15 +309,18 @@ class LLMRegistry:
                 )
                 self._rate_limited_until.pop(provider_name, None)
                 return response
-            except LLMResponseError:
-                raise
             except LLMRateLimitError as exc:
                 last_error = exc
                 self._mark_rate_limited(provider_name)
-                logger.warning("Provider %s failed, trying next fallback.", provider_name)
+                self._log_provider_failure(provider_name, has_next=has_next)
+            # LLMResponseError (empty/malformed content — flaky gateways
+            # commonly die by returning 200 with no content) falls through to
+            # the next provider like any other failure: the provider already
+            # did its own single in-place retry, and a different provider may
+            # well answer the same prompt.
             except (LLMProviderError, LLMTimeoutError) as exc:
                 last_error = exc
-                logger.warning("Provider %s failed, trying next fallback.", provider_name)
+                self._log_provider_failure(provider_name, has_next=has_next)
 
         attempted_list = ", ".join(attempted)
         if last_error is None:
@@ -321,6 +328,13 @@ class LLMRegistry:
         raise LLMFallbackError(
             f"All providers failed ({attempted_list}). Last error: {last_error}"
         ) from last_error
+
+    @staticmethod
+    def _log_provider_failure(provider_name: str, *, has_next: bool) -> None:
+        if has_next:
+            logger.warning("Provider %s failed, trying next fallback.", provider_name)
+        else:
+            logger.warning("Provider %s failed; no fallback provider left to try.", provider_name)
 
     async def complete_provider(
         self,

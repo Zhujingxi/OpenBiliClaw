@@ -210,7 +210,9 @@ class LLMConfig:
     default_provider: str = "deepseek"
     concurrency: int = DEFAULT_LLM_CONCURRENCY
     timeout: int = _DEFAULT_LLM_TIMEOUT
-    fallback_enabled: bool = False
+    # Non-empty = chat fallback on. There is no separate enable flag: the
+    # legacy ``fallback_enabled`` bool was never consulted by the fallback
+    # chain and has been removed (stale keys in old config.toml are ignored).
     fallback_provider: str = ""
     openai: LLMProviderConfig = field(default_factory=LLMProviderConfig)
     claude: LLMProviderConfig = field(default_factory=LLMProviderConfig)
@@ -802,7 +804,6 @@ def _build_config(raw: dict[str, Any]) -> Config:
         default_provider=llm_raw.get("default_provider", "deepseek"),
         concurrency=_normalize_llm_concurrency(llm_raw.get("concurrency")),
         timeout=_normalize_llm_timeout(llm_raw.get("timeout")),
-        fallback_enabled=bool(llm_raw.get("fallback_enabled", False)),
         fallback_provider=llm_raw.get("fallback_provider", ""),
         openai=LLMProviderConfig(**llm_raw.get("openai", {})),
         claude=LLMProviderConfig(**llm_raw.get("claude", {})),
@@ -2119,7 +2120,6 @@ def _render_config_toml(
         f"default_provider = {_toml_string(config.llm.default_provider)}",
         f"concurrency = {_normalize_llm_concurrency(config.llm.concurrency)}",
         f"timeout = {_normalize_llm_timeout(config.llm.timeout)}",
-        f"fallback_enabled = {_toml_bool(config.llm.fallback_enabled)}",
         f"fallback_provider = {_toml_string(config.llm.fallback_provider)}",
         "",
     ]

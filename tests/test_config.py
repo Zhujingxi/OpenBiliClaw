@@ -1310,7 +1310,6 @@ def test_save_config_round_trips_runtime_changes(tmp_path: Path) -> None:
     config.data_dir = "runtime-data"
     config.llm.default_provider = "gemini"
     config.llm.concurrency = 6
-    config.llm.fallback_enabled = True
     config.llm.fallback_provider = "openai"
     config.llm.gemini.api_key = "gemini-test-key"
     config.llm.gemini.model = "gemini-2.5-flash"
@@ -1324,7 +1323,6 @@ def test_save_config_round_trips_runtime_changes(tmp_path: Path) -> None:
     assert loaded.data_dir == "runtime-data"
     assert loaded.llm.default_provider == "gemini"
     assert loaded.llm.concurrency == 6
-    assert loaded.llm.fallback_enabled is True
     assert loaded.llm.fallback_provider == "openai"
     assert loaded.llm.gemini.api_key == "gemini-test-key"
     assert loaded.llm.gemini.model == "gemini-2.5-flash"
@@ -1348,7 +1346,9 @@ def test_save_config_round_trips_empty_deepseek_reasoning_effort(tmp_path: Path)
 def test_llm_and_embedding_fallback_defaults_are_disabled() -> None:
     config = Config()
 
-    assert config.llm.fallback_enabled is False
+    # Chat side: a non-empty fallback_provider IS the enable switch — the
+    # legacy [llm].fallback_enabled bool has been removed entirely.
+    assert not hasattr(config.llm, "fallback_enabled")
     assert config.llm.fallback_provider == ""
     assert config.llm.embedding.fallback_enabled is False
     assert config.llm.embedding.fallback_provider == ""

@@ -4619,7 +4619,7 @@
       const llm = {
         ...(state.config?.llm || {}),
         default_provider: provider,
-        fallback_enabled: Boolean(fallbackProvider),
+        // 非空 fallback_provider 即启用 fallback；旧的 fallback_enabled 布尔字段已移除。
         fallback_provider: fallbackProvider,
         concurrency: getIntInput("llmConcurrency", 3),
         timeout: getIntInput("llmTimeout", 60),

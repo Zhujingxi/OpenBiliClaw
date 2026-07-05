@@ -6472,7 +6472,8 @@ function bindSettings() {
         default_provider: providerSelect.value,
         concurrency: getInt("cfgLlmConcurrency", 3),
         timeout: getInt("cfgLlmTimeout", 300),
-        fallback_enabled: Boolean(llmFallbackProvider),
+        // 非空 fallback_provider 即启用 fallback；旧的 fallback_enabled 布尔字段已移除
+        // （老后端会忽略未知字段，新后端不再回显它）。
         fallback_provider: llmFallbackProvider,
         openai: {
           auth_mode: getVal("cfgOpenaiAuthMode") || "api_key",

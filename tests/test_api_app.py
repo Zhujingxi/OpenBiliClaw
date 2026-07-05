@@ -7706,7 +7706,8 @@ class TestBackendAPI:
         cfg = Config(
             llm=LLMConfig(
                 default_provider="gemini",
-                fallback_enabled=True,
+                fallback_provider="openai",
+                openai=LLMProviderConfig(api_key="test-openai-key"),
                 gemini=LLMProviderConfig(api_key="test-gemini-key", model="gemini-2.5-flash"),
                 embedding=EmbeddingConfig(
                     provider="gemini",
@@ -7732,7 +7733,8 @@ class TestBackendAPI:
 
         # LLM provider fields
         assert data["llm"]["default_provider"] == "gemini"
-        assert data["llm"]["fallback_enabled"] is True
+        assert data["llm"]["fallback_provider"] == "openai"
+        assert "fallback_enabled" not in data["llm"]  # removed legacy flag
         assert data["llm"]["gemini"]["api_key"] == "test-gemini-key"
         assert data["llm"]["gemini"]["model"] == "gemini-2.5-flash"
 
@@ -7841,7 +7843,9 @@ class TestBackendAPI:
         assert response.status_code == 200
         data = response.json()
         assert data["ok"] is True
-        assert data["config"]["llm"]["fallback_enabled"] is True
+        # Chat-side "fallback_enabled" from legacy clients is accepted but
+        # ignored and no longer echoed (removed field); embedding keeps its.
+        assert "fallback_enabled" not in data["config"]["llm"]
         assert data["config"]["llm"]["embedding"]["fallback_enabled"] is True
 
         # Verify the embedding was updated on the config object

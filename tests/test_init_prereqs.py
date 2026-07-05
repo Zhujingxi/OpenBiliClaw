@@ -54,6 +54,52 @@ async def test_chat_ready_false_when_no_registry() -> None:
     assert await pr.chat_ready() is False
 
 
+def _ctx_with_fallback(default: Any, fallback: Any, *, fallback_name: str = "claude") -> Any:
+    """Context whose registry carries a chat-capable fallback provider."""
+    ctx = _ctx(provider=default)
+    providers = {"": default, fallback_name: fallback}
+    ctx.llm_registry = SimpleNamespace(
+        get=lambda name="": providers[name],
+        default_provider="openai",
+        fallback_provider=fallback_name,
+        is_chat_capable=lambda name: name == fallback_name,
+    )
+    return ctx
+
+
+async def test_chat_ready_true_via_fallback_when_default_is_down() -> None:
+    """A healthy [llm].fallback_provider serves every runtime chat call, so
+    init must not be blocked just because the primary provider is down."""
+    default, fallback = _Provider(ok=False), _Provider(ok=True)
+    pr = InitPrereqs(_ctx_with_fallback(default, fallback))
+    assert await pr.chat_ready() is True
+    assert default.calls == 1
+    assert fallback.calls == 1
+
+
+async def test_chat_ready_false_when_default_and_fallback_are_both_down() -> None:
+    default, fallback = _Provider(ok=False), _Provider(ok=False)
+    pr = InitPrereqs(_ctx_with_fallback(default, fallback))
+    assert await pr.chat_ready() is False
+    assert fallback.calls == 1
+
+
+async def test_chat_ready_skips_fallback_probe_when_same_as_default() -> None:
+    """A same-name fallback is dead config (the chain drops it) — probing it
+    again would just double the cost of a failing default probe."""
+    default, fallback = _Provider(ok=False), _Provider(ok=True)
+    pr = InitPrereqs(_ctx_with_fallback(default, fallback, fallback_name="openai"))
+    assert await pr.chat_ready() is False
+    assert fallback.calls == 0
+
+
+async def test_chat_ready_skips_fallback_probe_when_default_is_healthy() -> None:
+    default, fallback = _Provider(ok=True), _Provider(ok=True)
+    pr = InitPrereqs(_ctx_with_fallback(default, fallback))
+    assert await pr.chat_ready() is True
+    assert fallback.calls == 0
+
+
 async def test_bilibili_check_failed_without_cookie() -> None:
     pr = InitPrereqs(_ctx(provider=_Provider(ok=True), cookie=""))
     assert await pr.bilibili_check() == "failed"

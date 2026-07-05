@@ -991,7 +991,9 @@ class LLMConfigOut(BaseModel):
     default_provider: str = "deepseek"
     concurrency: int = 3
     timeout: int = 300
-    fallback_enabled: bool = False
+    # Non-empty fallback_provider = chat fallback on (the legacy
+    # fallback_enabled bool was never consulted and is no longer echoed;
+    # old clients still sending it are ignored on PUT).
     fallback_provider: str = ""
     openai: LLMProviderConfigOut = Field(default_factory=LLMProviderConfigOut)
     claude: LLMProviderConfigOut = Field(default_factory=LLMProviderConfigOut)

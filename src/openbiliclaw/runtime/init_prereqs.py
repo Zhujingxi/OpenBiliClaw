@@ -89,12 +89,18 @@ class InitPrereqs:
         return self._bili_detail
 
     async def chat_ready(self) -> bool:
-        """Whether the default chat provider can *currently* complete.
+        """Whether chat completions can *currently* be served.
 
         Registry-built is necessary-not-sufficient (a configured Ollama whose
         model was never pulled 404s at call time), so this does a real
         ``health_check`` (tiny completion) — cached, single-flighted, and
-        optimistic on a cold-load timeout (matches embedding readiness).
+        strict on timeout (matches embedding readiness).
+
+        The default provider is probed first; when it fails and a usable
+        ``[llm].fallback_provider`` is registered, that provider is probed
+        too — every runtime chat call goes through the fallback chain, so a
+        healthy fallback means chat genuinely works and init must not be
+        blocked just because the primary is down.
         """
         registry = getattr(self._ctx, "llm_registry", None)
         if registry is None:
@@ -106,24 +112,42 @@ class InitPrereqs:
             ttl = _CHAT_OK_TTL if self._chat_value else _CHAT_FAIL_TTL
             if time.monotonic() - self._chat_at < ttl:
                 return self._chat_value
-            try:
-                provider = registry.get()  # default chat provider
-                ready = bool(
-                    await asyncio.wait_for(provider.health_check(), timeout=_CHAT_PROBE_TIMEOUT)
-                )
-            except TimeoutError:
-                # Strict: the prereq must confirm a REAL request succeeded. A
-                # timeout means we could NOT confirm the provider answers within
-                # a (generous, cold-load-tolerant) window → report not-ready so
-                # the checklist never greenlights an unverified chat service.
-                logger.debug("Chat readiness probe timed out; reporting not ready")
-                ready = False
-            except Exception:
-                logger.debug("Chat readiness probe errored", exc_info=True)
-                ready = False
+            ready = await self._probe_chat_provider(registry.get())  # default provider
+            if not ready:
+                fallback_name = str(getattr(registry, "fallback_provider", "") or "")
+                if (
+                    fallback_name
+                    and fallback_name != registry.default_provider
+                    and registry.is_chat_capable(fallback_name)
+                ):
+                    ready = await self._probe_chat_provider(registry.get(fallback_name))
+                    if ready:
+                        logger.info(
+                            "Chat readiness: default provider %s failed the probe but "
+                            "fallback provider %s answered — chat is served via fallback.",
+                            registry.default_provider,
+                            fallback_name,
+                        )
             self._chat_value = ready
             self._chat_at = time.monotonic()
             return ready
+
+    async def _probe_chat_provider(self, provider: Any) -> bool:
+        """One strict, bounded health_check; False on timeout or any error."""
+        try:
+            return bool(
+                await asyncio.wait_for(provider.health_check(), timeout=_CHAT_PROBE_TIMEOUT)
+            )
+        except TimeoutError:
+            # Strict: the prereq must confirm a REAL request succeeded. A
+            # timeout means we could NOT confirm the provider answers within
+            # a (generous, cold-load-tolerant) window → report not-ready so
+            # the checklist never greenlights an unverified chat service.
+            logger.debug("Chat readiness probe timed out; reporting not ready")
+            return False
+        except Exception:
+            logger.debug("Chat readiness probe errored", exc_info=True)
+            return False
 
     async def bilibili_check(self) -> str:
         """``ok`` / ``failed`` / ``checking`` for the configured B站 cookie.

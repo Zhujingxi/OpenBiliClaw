@@ -43,7 +43,6 @@ def build_llm_registry(
     """Build an LLM registry from application config."""
     overrides = provider_overrides or {}
     registry = LLMRegistry()
-    registry.fallback_enabled = bool(getattr(config.llm, "fallback_enabled", False))
     registry.fallback_provider = str(getattr(config.llm, "fallback_provider", "")).strip().lower()
 
     provider_specs = [
