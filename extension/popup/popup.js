@@ -2219,9 +2219,43 @@ function bindMobileQr() {
   }
 }
 
+// Single delegated click handler for every message card's action buttons.
+// Bound once on the (persistent) container so it survives the frequent
+// container.replaceChildren() re-renders that used to orphan per-button
+// listeners and silently drop clicks.
+function onMessageActionClick(event) {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  const btn = target.closest("[data-msg-action]");
+  if (!(btn instanceof HTMLElement) || btn.disabled) return;
+  const card = btn.closest(".message-item");
+  if (!(card instanceof HTMLElement)) return;
+  const domain = card.dataset.domain || "";
+  const type = card.dataset.type || "interest.probe";
+  const action = btn.dataset.msgAction;
+  if (action === "dismiss") {
+    dismissMessage(domain, type);
+  } else if (action === "chat") {
+    expandInlineChat(card, domain, type);
+  } else if (action === "confirm" || action === "reject") {
+    // Guard against a double-click firing the API twice before the card is
+    // replaced with its success state; clear on settle so an error path (card
+    // kept) can be retried (success replaces the card, so it's moot there).
+    if (card.dataset.responding === "1") return;
+    card.dataset.responding = "1";
+    void handleMessageResponse(domain, action, type).finally(() => {
+      delete card.dataset.responding;
+    });
+  }
+}
+
 function renderMessagesList() {
   const container = elements.messagesList;
   if (!(container instanceof HTMLElement)) return;
+  if (!container.dataset.actionsDelegated) {
+    container.dataset.actionsDelegated = "1";
+    container.addEventListener("click", onMessageActionClick);
+  }
   container.replaceChildren();
 
   if (state.messages.length === 0) {
@@ -2250,11 +2284,16 @@ function buildMessageCard(probe) {
   item.dataset.type = type;
 
   // Dismiss button (×)
+  // Actions are wired via ONE delegated listener on the messages container
+  // (see renderMessagesList) rather than per-button, so a background re-render
+  // \u2014 chat-turn polling, the post-fetch re-render in openMessagesPanel, or
+  // another card's response \u2014 can't orphan the handler and swallow the click
+  // (field report 2026-07-06: "\u8FD9\u4E2A\u6309\u94AE\u6709\u65F6\u5019\u6CA1\u53CD\u5E94").
   const dismiss = document.createElement("button");
   dismiss.className = "message-dismiss";
   dismiss.textContent = "\u00D7";
   dismiss.title = "\u5173\u95ED";
-  dismiss.addEventListener("click", () => dismissMessage(probe.domain, type));
+  dismiss.dataset.msgAction = "dismiss";
   item.append(dismiss);
 
   const eyebrow = document.createElement("div");
@@ -2310,17 +2349,17 @@ function buildMessageCard(probe) {
   const confirmBtn = document.createElement("button");
   confirmBtn.className = "probe-btn is-confirm";
   confirmBtn.textContent = isAvoidance ? "确实不喜欢" : "\u559C\u6B22";
-  confirmBtn.addEventListener("click", () => handleMessageResponse(probe.domain, "confirm", type));
+  confirmBtn.dataset.msgAction = "confirm";
 
   const rejectBtn = document.createElement("button");
   rejectBtn.className = "probe-btn is-reject";
   rejectBtn.textContent = isAvoidance ? "不是" : "\u4E0D\u559C\u6B22";
-  rejectBtn.addEventListener("click", () => handleMessageResponse(probe.domain, "reject", type));
+  rejectBtn.dataset.msgAction = "reject";
 
   const chatBtn = document.createElement("button");
   chatBtn.className = "probe-btn is-chat";
   chatBtn.textContent = "\u591A\u804A\u804A";
-  chatBtn.addEventListener("click", () => expandInlineChat(item, probe.domain, type));
+  chatBtn.dataset.msgAction = "chat";
 
   if (probe.chat_status === "pending") {
     confirmBtn.disabled = true;
@@ -6266,6 +6305,7 @@ function bindSettings() {
   const SOURCE_STATUS_DOT = {
     ok: "#2ecc71",
     ready: "#2ecc71",
+    syncing: "#9aa0a6",
     no_auth: "#9aa0a6",
     missing: "#e0a800",
     missing_cookie: "#e0a800",
@@ -6276,6 +6316,9 @@ function bindSettings() {
     error: "#e74c3c",
     expired_cookie: "#e74c3c",
     blocked: "#e74c3c",
+  };
+  const SOURCE_STATUS_LABEL = {
+    syncing: "接入中",
   };
   const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
 
@@ -6299,7 +6342,11 @@ function bindSettings() {
         row.style.opacity = "1";
         continue;
       }
-      if (detail) detail.textContent = (item.enabled ? "" : "(未启用) ") + (item.detail || "");
+      if (detail) {
+        const label = SOURCE_STATUS_LABEL[item.state] || "";
+        const statusDetail = label && item.detail ? `${label}：${item.detail}` : label || item.detail || "";
+        detail.textContent = (item.enabled ? "" : "(未启用) ") + statusDetail;
+      }
       if (dot) dot.style.color = SOURCE_STATUS_DOT[item.state] || "#9aa0a6";
       row.style.opacity = item.enabled ? "1" : "0.6";
     }
