@@ -4744,10 +4744,20 @@
       // 「已喜欢」文案，让用户看出这条已经表过态。
       const serverState = String(item.state ?? "");
       const fallbackMessage = serverState === "liked" ? "好，这类多来点。" : "";
+      // Same defense as the grid (issue #79): the delight card was the exact
+      // `<h3 id="delightTitle">answer_<id>` the report screenshotted. Route the
+      // title through the ID fallback (derive from body / placeholder), but
+      // keep the friendly delight default when there is genuinely no title.
+      const delightBody = decodeHtmlEntities(item.body_text ?? "");
+      const delightCt = String(item.content_type ?? "").trim().toLowerCase();
+      const derivedTitle = displayRecommendationTitle(
+        decodeHtmlEntities(item.title ?? ""), delightBody, delightCt);
       return {
         type: "delight",
         bvid: String(item.bvid ?? item.content_id ?? ""),
-        title: decodeHtmlEntities(item.title ?? "发现了一条你可能会意外喜欢的内容"),
+        title: derivedTitle && derivedTitle !== "未命名内容"
+          ? derivedTitle
+          : "发现了一条你可能会意外喜欢的内容",
         reason: decodeHtmlEntities(item.delight_reason ?? item.reason ?? item.delight_hook ?? item.message ?? "这条来自后端高惊喜分候选。"),
         cover_url: normalizeImageUrl(item.cover_url ?? item.cover ?? item.pic ?? item.thumbnail_url ?? item.thumbnail ?? item.image_url),
         content_url: String(item.content_url ?? ""),

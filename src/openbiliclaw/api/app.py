@@ -4490,6 +4490,10 @@ def create_app(
                 "cover_url": str(row.get("cover_url", "")),
                 "content_url": str(row.get("content_url", "")),
                 "source_platform": str(row.get("source_platform", "bilibili")),
+                # body_text / content_type let the desktop delight card derive a
+                # readable title for legacy rows still holding answer_<id> (#79).
+                "content_type": str(row.get("content_type", "") or ""),
+                "body_text": str(row.get("body_text", "") or ""),
             }
             with suppress(Exception):
                 await ctx.event_hub.publish(payload_event)
@@ -4572,6 +4576,10 @@ def create_app(
                 "cover_url": str(row.get("cover_url", "")),
                 "content_url": str(row.get("content_url", "")),
                 "source_platform": str(row.get("source_platform", "bilibili")),
+                # body_text / content_type let the desktop delight card derive a
+                # readable title for legacy rows still holding answer_<id> (#79).
+                "content_type": str(row.get("content_type", "") or ""),
+                "body_text": str(row.get("body_text", "") or ""),
                 "state": (
                     "liked" if str(row.get("feedback_type", "") or "") == "like" else "pending"
                 ),

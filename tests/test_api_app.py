@@ -7644,6 +7644,42 @@ class TestBackendAPI:
         ]
         assert database.calls and database.calls[0]["include_liked"] is True
 
+    def test_delight_pending_batch_surfaces_body_text_and_content_type(self) -> None:
+        """The delight card derives a readable title for legacy answer_<id> rows
+        from body_text/content_type (issue #79), so the batch payload must carry
+        both fields through — the delight card was the exact
+        <h3 id="delightTitle">answer_<id> the report screenshotted."""
+        from fastapi.testclient import TestClient
+
+        class FakeDatabase:
+            def get_delight_candidates(
+                self,
+                *,
+                min_delight_score: float,
+                limit: int,
+                include_liked: bool = False,
+            ) -> list[dict[str, object]]:
+                return [
+                    {
+                        "bvid": "answer:2001",
+                        "title": "answer_2001",
+                        "delight_reason": "讲透了数据需求",
+                        "delight_score": 0.95,
+                        "delight_hook": "偷偷翻到一条好东西",
+                        "content_type": "answer",
+                        "body_text": "深度学习为什么需要这么多数据？其实关键在于泛化。",
+                        "source_platform": "zhihu",
+                        "feedback_type": "",
+                    },
+                ]
+
+        app = create_app(memory_manager=object(), database=FakeDatabase(), soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/delight/pending-batch").json()["items"][0]
+        assert item["content_type"] == "answer"
+        assert item["body_text"].startswith("深度学习为什么需要这么多数据")
+
     def test_delight_pending_batch_uses_configured_default_limit(self) -> None:
         """Clients that omit ``limit`` should inherit the shared queue setting."""
         from fastapi.testclient import TestClient
