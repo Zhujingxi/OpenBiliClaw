@@ -5310,8 +5310,16 @@
           return { text: `正在更新到 ${latest || "新版本"}…`, tone: "" };
         case "restart_pending":
           return { text: "更新完成，等待后端重启生效。", tone: "success" };
-        case "blocked":
-          return { text: `更新被阻止：${reasonText || "未知原因"}${suffix}`, tone: "error" };
+        case "blocked": {
+          // Prefer the backend's detailed refusal (actual redacted remote URL
+          // + fix command) over the generic reason mapping when present — a
+          // bare reason code stays mapped via UPDATE_REASON_TEXT.
+          const detail =
+            backend.last_error && !UPDATE_REASON_TEXT[backend.last_error]
+              ? backend.last_error
+              : "";
+          return { text: `更新被阻止：${detail || reasonText || "未知原因"}${suffix}`, tone: "error" };
+        }
         case "unsupported":
           return { text: reasonText || "当前安装方式不支持自动更新。", tone: "error" };
         case "error":

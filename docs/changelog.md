@@ -4,6 +4,12 @@
 
 ---
 
+## v0.3.159 / extension v0.3.159 / desktop v0.3.159：自动更新被拒时暴露真实远端地址（2026-07-07）
+
+后端源码走 `backend-v0.3.159`，浏览器插件走 `extension-v0.3.159`，桌面安装包走 `desktop-v0.3.159`。
+
+- **自动更新 `untrusted_remote` 被拒时把真实远端地址带到 UI**：用户群实测——git 安装点「立即应用」被「git 远端不在允许列表」拦下，但状态卡的「最近错误」只有这句泛化文案，用户无从知道自己的 origin 到底是什么、该怎么改，只能去翻后端日志。根因是 v0.3.152 承诺「每条拒绝把实际 remote URL 写入 `last_error` 供状态卡展示」但实现只把裸 reason 码 `untrusted_remote` 塞进了 `last_error`（`AutoUpdateService._apply` 覆盖成 `guard_reason`），前端再把该码映射回同一句泛化文案，真实地址永远只进日志、进不了 UI。修复：`_check_apply_guards` 三条拒绝路径（无 origin / 内嵌凭证 / 不在允许列表）各生成含**实际远端地址 + 一键修复命令**的中文明细存入新增的 `_guard_detail`，apply 优先用它写 `last_error`（无明细的守卫仍回落裸码经 i18n 映射）；新增 `_redact_remote_url` 确保 `https://<token>@github.com/...` 这类内嵌凭证不泄露到 UI。桌面 Web 的 `blocked` 分支此前完全没读 `last_error`，补上（与 `error` 分支对齐）；插件 popup 依赖既有「非 reason 码则原样显示」的回退，后端带明细即自动展示，无需改动。**这不是自动解封**——被拒的 git 安装用户（origin 是镜像 / 带 token / fork）修完后能在「最近错误」直接看到自己实际的 origin 与 `git remote set-url origin …` 修复命令自助解决；安装包（frozen）用户走 `unsupported_install_mode` 检查-提醒-下载新包路径，不受影响。新增守卫明细含 URL + 修复命令、内嵌凭证脱敏两条回归测试。
+
 ## v0.3.158 / extension v0.3.158 / desktop v0.3.158：向量模型部署自愈完备、首启拉取进度可见、MiniMax-M3（2026-07-06）
 
 后端源码走 `backend-v0.3.158`，浏览器插件走 `extension-v0.3.158`，桌面安装包走 `desktop-v0.3.158`。

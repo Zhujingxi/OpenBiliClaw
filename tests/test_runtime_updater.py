@@ -1137,11 +1137,49 @@ async def test_request_apply_untrusted_remote_logs_url_and_sets_last_error(
         status_code, payload = await service.request_apply(tag="backend-v0.3.92")
 
     assert status_code == 409
+    # ``reason`` stays the stable machine code (frontends map it to i18n text),
+    # but ``last_error`` now carries the actual rejected remote URL + fix
+    # command so the status card is self-diagnosing instead of pointing users
+    # at the backend log.
     assert payload["reason"] == "untrusted_remote"
-    assert service.get_update_status()["last_error"] == "untrusted_remote"
+    last_error = service.get_update_status()["last_error"]
+    assert last_error != "untrusted_remote"
+    assert "someone-else/OpenBiliClaw" in last_error
+    assert "git remote set-url origin" in last_error
     assert any("someone-else/OpenBiliClaw" in record.getMessage() for record in caplog.records), (
         "the rejected remote URL must appear in the log"
     )
+
+
+@pytest.mark.asyncio
+async def test_request_apply_credentialed_remote_redacts_token_in_last_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """An embedded token is rejected, but must never leak into the UI detail."""
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService(enabled=False)
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                "https://ghp_secretTOKEN@github.com/whiteguo233/OpenBiliClaw.git\n",
+                "",
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    status_code, payload = await service.request_apply(tag="backend-v0.3.92")
+
+    assert status_code == 409
+    assert payload["reason"] == "untrusted_remote"
+    last_error = service.get_update_status()["last_error"]
+    assert "ghp_secretTOKEN" not in last_error
+    assert "github.com/whiteguo233/OpenBiliClaw" in last_error
 
 
 def test_detect_install_mode_docker(

@@ -23,7 +23,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlparse, urlunparse
 
 import httpx
 
@@ -204,6 +204,22 @@ def _remote_has_credentials(remote_url: str) -> bool:
     if parsed.scheme in {"http", "https"}:
         return bool(parsed.username or parsed.password)
     return False
+
+
+def _redact_remote_url(remote_url: str) -> str:
+    """Strip any embedded ``user[:pass]@`` credentials for safe display.
+
+    The refusal detail is shown in the UI's 最近错误 card, so a remote spelled
+    ``https://ghp_xxx@github.com/owner/repo.git`` must not leak the token.
+    """
+    parsed = urlparse(remote_url)
+    if parsed.scheme in {"http", "https"} and (parsed.username or parsed.password):
+        host = parsed.hostname or ""
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
+        rebuilt = parsed._replace(netloc=host)
+        return urlunparse(rebuilt)
+    return remote_url
 
 
 def _canonicalize_remote_url(url: str) -> str:
@@ -395,6 +411,12 @@ class AutoUpdateService:
     _state: str = field(default="", repr=False)
     _reason: str = field(default="none", repr=False)
     _update_error: str = field(default="", repr=False)
+    # Human-readable detail for the most recent apply-guard refusal (includes
+    # the actual, credential-redacted remote URL + fix command). Surfaced to
+    # the status card's 最近错误 so blocked users can self-diagnose without
+    # digging through backend logs — the generic ``reason`` code alone doesn't
+    # tell them *which* remote was rejected.
+    _guard_detail: str = field(default="", repr=False)
     _apply_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     _apply_task: asyncio.Task[None] | None = field(default=None, repr=False)
 
@@ -571,8 +593,10 @@ class AutoUpdateService:
                 self._reason = guard_reason
                 # Surface the refusal in ``last_error`` too — the guard path
                 # used to be fully silent, leaving the status card's 最近错误
-                # empty while the apply kept failing.
-                self._update_error = guard_reason
+                # empty while the apply kept failing. Prefer the detailed
+                # message (actual redacted remote URL + fix command) when the
+                # guard produced one; fall back to the bare reason code.
+                self._update_error = self._guard_detail or guard_reason
                 return 409, self._apply_response(
                     state=self._state,
                     reason=guard_reason,
@@ -783,6 +807,7 @@ class AutoUpdateService:
 
     async def _check_apply_guards(self, tag: str) -> str:
         """Return a stable reason when local state makes apply unsafe."""
+        self._guard_detail = ""
         # A PyInstaller desktop bundle reports ``frozen`` even when it shares a
         # data root with a co-located git checkout (entry.py points
         # OPENBILICLAW_PROJECT_ROOT at ~/OpenBiliClaw, the same dir an AI /
@@ -813,9 +838,18 @@ class AutoUpdateService:
                 root,
                 remote.stderr.strip() or "<empty>",
             )
+            self._guard_detail = (
+                f"未配置 origin 远端({root});"
+                f"运行:git -C {root} remote add origin {DEFAULT_ALLOWED_REMOTES[0]}"
+            )
             return "untrusted_remote"
+        redacted = _redact_remote_url(remote_url)
         if _remote_has_credentials(remote_url):
             logger.warning("Auto-update apply refused: remote URL embeds credentials")
+            self._guard_detail = (
+                f"origin 远端内嵌了凭证({redacted});"
+                f"改用不带 token 的地址:git remote set-url origin {DEFAULT_ALLOWED_REMOTES[0]}"
+            )
             return "untrusted_remote"
         allowed = {_canonicalize_remote_url(item) for item in self.allowed_remotes}
         if _canonicalize_remote_url(remote_url) not in allowed:
@@ -826,6 +860,11 @@ class AutoUpdateService:
                 remote_url,
                 list(self.allowed_remotes),
                 DEFAULT_ALLOWED_REMOTES[0],
+            )
+            self._guard_detail = (
+                f"origin 远端 {redacted} 不在允许列表;"
+                f"指回官方:git remote set-url origin {DEFAULT_ALLOWED_REMOTES[0]}"
+                f",或把该地址加入 config.toml 的 [scheduler] auto_update_allowed_remotes"
             )
             return "untrusted_remote"
 
