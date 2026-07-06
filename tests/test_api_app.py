@@ -10462,6 +10462,85 @@ class TestGuidedInitEndpoints:
         assert served == []
 
 
+class TestRecommendationsFirstPageTopUp:
+    """GET /api/recommendations thin-history top-up (issue #81 挤牙膏首载).
+
+    A first page of 2-3 unprocessed history rows reads as broken even though
+    the pool has stock — the endpoint now serves from the pool whenever the
+    window is thinner than 10 rows, not only when it is empty. The non-empty
+    case is debounced (side-effecting write on a GET, polled by clients).
+    """
+
+    def _make_app(self, tmp_path: Path, *, history_rows: int):
+        from openbiliclaw.storage.database import Database
+
+        served: list[int] = []
+
+        class _FakeRec:
+            async def serve(self, profile: object, limit: int = 10) -> list[object]:
+                served.append(limit)
+                return []
+
+        class _FakeSoul:
+            def is_profile_ready(self) -> bool:
+                return True
+
+            async def get_profile(self) -> object:
+                return object()
+
+        db = Database(tmp_path / "rec.db")
+        db.initialize()
+        for index in range(history_rows):
+            db.insert_recommendation(
+                f"BVthin{index}", confidence=0.9, expression="看看这个", topic="测试"
+            )
+        # Pretend the pool has servable candidates so the top-up gate opens.
+        db.count_pool_candidates = lambda **_kw: 5  # type: ignore[method-assign]
+        app = create_app(memory_manager=object(), database=db, soul_engine=_FakeSoul())
+        app.state.auth_gate.is_trusted_local = lambda request: True
+        app.state.runtime_context.recommendation_engine = _FakeRec()
+        return app, served
+
+    def test_thin_history_tops_up_from_pool(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        app, served = self._make_app(tmp_path, history_rows=3)
+        with TestClient(app) as client:
+            resp = client.get("/api/recommendations")
+        assert resp.status_code == 200
+        assert served == [10]
+
+    def test_thin_history_topup_is_debounced(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        app, served = self._make_app(tmp_path, history_rows=3)
+        with TestClient(app) as client:
+            client.get("/api/recommendations")
+            client.get("/api/recommendations")
+        # Second GET lands inside the debounce window → no repeated serve().
+        assert served == [10]
+
+    def test_full_first_page_does_not_top_up(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        app, served = self._make_app(tmp_path, history_rows=10)
+        with TestClient(app) as client:
+            resp = client.get("/api/recommendations")
+        assert resp.status_code == 200
+        assert served == []
+
+    def test_empty_history_bootstrap_is_not_debounced(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        # Fresh-install bootstrap keeps its original semantics: while the
+        # history stays empty every GET may retry the bootstrap serve.
+        app, served = self._make_app(tmp_path, history_rows=0)
+        with TestClient(app) as client:
+            client.get("/api/recommendations")
+            client.get("/api/recommendations")
+        assert served == [10, 10]
+
+
 class TestEmbeddingDiagnosisAndRepair:
     """Classified embedding causes + one-click repair (v0.3.155+).
 

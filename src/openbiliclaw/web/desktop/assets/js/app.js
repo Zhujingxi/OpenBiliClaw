@@ -311,9 +311,15 @@
     const STAR_REPO_SLUG = "whiteguo233/OpenBiliClaw";
     const STAR_COUNT_CACHE_KEY = "openbiliclaw.webui.starCount";
     const STAR_COUNT_TTL_MS = 12 * 60 * 60 * 1000;
+    // 加载更多一次向后端请求的条数（后端 append 端点固定 limit=10）；
+    // 返回少于这个数说明候选池当轮见底，据此切换文案并等待补货重试。
+    const APPEND_BATCH_SIZE = 10;
+    const APPEND_SKELETON_COUNT = 4;
     let autoLoadObserver = null;
     let appendMoreInFlight = false;
     let lastAutoLoadAt = 0;
+    let sentinelInView = false;
+    let lastAppendCameUpShort = false;
 
     function formatStarCount(n) {
       if (typeof n !== "number" || !Number.isFinite(n)) return "";
@@ -1673,6 +1679,7 @@
       if (autoLoadObserver) {
         autoLoadObserver.disconnect();
         autoLoadObserver = null;
+        sentinelInView = false;
       }
       if (!state.autoLoadOnScroll) return;
       const sentinel = $("#loadMoreSentinel");
@@ -1682,7 +1689,15 @@
     }
 
     function handleAutoLoadIntersect(entries) {
-      if (!entries.some((entry) => entry.isIntersecting)) return;
+      sentinelInView = entries.some((entry) => entry.isIntersecting);
+      if (!sentinelInView) return;
+      void autoLoadMoreIfNeeded().catch(() => {});
+    }
+
+    // 上一次「加载更多」吃到了不满一批（候选池当轮见底）而用户还停在列表底部时，
+    // 观察器不会再触发（位置没变），得靠运行时状态推送里的库存回升来补一脚。
+    function maybeAutoLoadAfterPoolRefill() {
+      if (!lastAppendCameUpShort || !sentinelInView) return;
       void autoLoadMoreIfNeeded().catch(() => {});
     }
 
@@ -1695,7 +1710,7 @@
       if (!homePage || homePage.hidden) return false;
       const loadMore = $("#loadMoreBtn");
       if (!loadMore || loadMore.hidden) return false;
-      if (!grid.querySelector(".video-card")) return false;
+      if (!grid.querySelector(".video-card:not(.is-skeleton)")) return false;
       return true;
     }
 
@@ -1859,6 +1874,30 @@
       if (item.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
       if (item.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
       return segments.join(" · ");
+    }
+
+    function makeSkeletonCard() {
+      const card = document.createElement("article");
+      card.className = "video-card is-skeleton";
+      card.setAttribute("aria-hidden", "true");
+      card.innerHTML = `
+        <div class="cover skeleton-shimmer"></div>
+        <div>
+          <p class="video-title skeleton-line skeleton-shimmer"></p>
+          <p class="video-meta skeleton-line skeleton-shimmer short"></p>
+        </div>
+        <p class="reason skeleton-line skeleton-shimmer"></p>`;
+      return card;
+    }
+
+    function showAppendSkeletons(count = APPEND_SKELETON_COUNT) {
+      removeAppendSkeletons();
+      if (grid.querySelector(".empty-state")) grid.replaceChildren();
+      for (let i = 0; i < count; i += 1) grid.appendChild(makeSkeletonCard());
+    }
+
+    function removeAppendSkeletons() {
+      grid.querySelectorAll(".video-card.is-skeleton").forEach((el) => el.remove());
     }
 
     function renderVideos() {
@@ -3878,20 +3917,34 @@
     async function appendMore() {
       if (appendMoreInFlight) return;
       appendMoreInFlight = true;
+      showAppendSkeletons();
       try {
         const payload = await requestJson(ENDPOINTS.append, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ excluded_bvids: state.videos.map((v) => v.bvid) }) });
+        const retryHint = state.autoLoadOnScroll ? "补上后会自动加载" : "稍后可再点一次";
         if (payload?.items?.length) {
           const freshItems = normalizeRecommendationList(payload.items);
+          lastAppendCameUpShort = freshItems.length < APPEND_BATCH_SIZE;
           state.videos = state.videos.concat(freshItems);
           renderAll();
           // Keep decoding off the interaction path: slow first-miss covers should
           // not delay the new recommendation cards from appearing.
           void warmCoverImages(freshItems, { waitForDecode: true }).catch(() => {});
-          showToast(freshItems.length ? "已加载更多推荐" : "后端返回的内容都已反馈过");
+          if (freshItems.length >= APPEND_BATCH_SIZE) {
+            showToast("已加载更多推荐");
+          } else if (freshItems.length) {
+            showToast(`已加载 ${freshItems.length} 条，候选池暂时见底，后台正在补货，${retryHint}`);
+          } else {
+            showToast(`这批内容都已反馈过，后台正在补货，${retryHint}`);
+          }
         } else {
-          showToast("加载更多失败：后端没有返回新候选");
+          lastAppendCameUpShort = true;
+          showToast(`候选池暂时没有新内容，已请求后台补货，${retryHint}`);
         }
       } finally {
+        removeAppendSkeletons();
+        // showAppendSkeletons may have cleared an empty-state placeholder; if
+        // nothing came back, re-render so the grid never ends up blank.
+        if (!grid.childElementCount) renderVideos();
         appendMoreInFlight = false;
       }
     }
@@ -4033,6 +4086,7 @@
       syncSourceMetric();
       $("#runtimeSummary").textContent = state.runtimeStatus.live_summary || summary?.available || "后端在线，推荐池与采集运行时可读取。";
       renderPoolStatus(state.runtimeStatus);
+      maybeAutoLoadAfterPoolRefill();
     }
 
     function setInput(id, value) {

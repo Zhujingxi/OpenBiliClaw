@@ -180,6 +180,15 @@ _EMBEDDING_PROBE_TIMEOUT_SECONDS = 15.0
 _LAN_IP_TTL_SECONDS = 30.0
 _AUTO_REPLENISH_DEBOUNCE_SECONDS = 30.0
 _FEEDBACK_BATCH_DEBOUNCE_SECONDS = 5.0
+# GET /api/recommendations serves from the pool when the unprocessed history
+# window is thinner than this — a first page of 2-3 cards reads as "broken"
+# even though the pool has stock (issue #81 挤牙膏首载).
+_FIRST_PAGE_TOPUP_FLOOR = 10
+# The thin-history top-up is a side-effecting write on a GET, so debounce it:
+# if serve() cannot actually raise the row count (all pool items filtered),
+# polling clients must not re-run it every few seconds. An empty history
+# (fresh install) bypasses the debounce — matching the original bootstrap.
+_FIRST_PAGE_TOPUP_DEBOUNCE_SECONDS = 30.0
 _PROFILE_UPDATE_BACKFILL_LIMIT = 200
 _PROFILE_UPDATE_BACKFILL_EVENT_TYPES = [
     "view",
@@ -1094,6 +1103,7 @@ def create_app(
     app.state.runtime_context = ctx
     auto_replenishment_task: asyncio.Task[None] | None = None
     auto_replenishment_started_at = 0.0
+    first_page_topup_attempted_at = 0.0
     app.state.degraded = bool(getattr(ctx, "degraded", False))
     app.state.degraded_reason = str(getattr(ctx, "degraded_reason", ""))
     app.state.degraded_issues = list(getattr(ctx, "degraded_issues", []))
@@ -3608,6 +3618,8 @@ def create_app(
 
     @app.get("/api/recommendations", response_model=RecommendationListResponse)
     async def recommendations() -> RecommendationListResponse:
+        nonlocal first_page_topup_attempted_at
+
         def _admission_min_score() -> float:
             runtime_config = getattr(ctx, "config", None) or config
             discovery_config = getattr(runtime_config, "discovery", None)
@@ -3641,32 +3653,42 @@ def create_app(
             ctx.database.get_recommendations(limit=40, exclude_processed=True)
         )
 
-        # Fresh-install bootstrap: ``recommendations`` table is the
-        # write-only history of items we've ever served. On first popup
-        # load nobody has called ``reshuffle`` / ``append`` / CLI
-        # ``recommend`` yet, so the table is empty even if the discovery
-        # pool already has 100+ scored candidates. Surface those by
-        # bootstrapping a single ``serve()`` call right here — it writes
-        # 10 fresh entries to the history table that the next ``rows =
-        # get_recommendations`` re-read will pick up. Failure is fully
-        # silent: any error returns the original empty list, leaving
-        # the popup's "正在补货" state intact and giving the regular
-        # refresh tick another chance.
-        # gui-init D1: this empty-history bootstrap calls serve(), which WRITES
+        # Fresh-install bootstrap + thin-first-page top-up (issue #81):
+        # ``recommendations`` table is the write-only history of items we've
+        # ever served. On first popup load nobody has called ``reshuffle`` /
+        # ``append`` / CLI ``recommend`` yet, so the table is empty even if
+        # the discovery pool already has 100+ scored candidates. And after a
+        # session of feedback the unprocessed window can shrink to 2-3 rows —
+        # a "挤牙膏" first page — while the pool still has stock. In both
+        # cases surface pool candidates by bootstrapping a ``serve()`` call
+        # right here — it writes up to 10 fresh entries to the history table
+        # that the next ``rows = get_recommendations`` re-read will pick up.
+        # Failure is fully silent: any error returns the original list,
+        # leaving the popup's "正在补货" state intact and giving the regular
+        # refresh tick another chance. The non-empty case is debounced so a
+        # filtered-out pool cannot make polling clients re-serve every tick.
+        # gui-init D1: this bootstrap calls serve(), which WRITES
         # (recommendation rows + pool "shown" markers). It's a side-effecting
         # GET, so the deny-by-default middleware (POST/PUT/PATCH/DELETE) doesn't
         # cover it — skip it during an active init so a read can't serve from /
         # mark a half-built pool. The post-init refresh tick serves normally.
         if (
-            not rows
+            len(rows) < _FIRST_PAGE_TOPUP_FLOOR
             and not _init_active_now()
             and ctx.recommendation_engine is not None
             and ctx.soul_engine is not None
+            and (
+                not rows
+                or time.monotonic() - first_page_topup_attempted_at
+                >= _FIRST_PAGE_TOPUP_DEBOUNCE_SECONDS
+            )
         ):
             with suppress(Exception):
                 pool_count_fn = getattr(ctx.database, "count_pool_candidates", None)
                 pool_count = int(pool_count_fn()) if callable(pool_count_fn) else 0
                 if pool_count > 0:
+                    first_page_topup_attempted_at = time.monotonic()
+                    row_count_before = len(rows)
                     profile = await ctx.soul_engine.get_profile()
                     await ctx.recommendation_engine.serve(profile, limit=10)
                     rows = _filter_low_confidence(
@@ -3674,8 +3696,9 @@ def create_app(
                     )
                     await _publish_pool_status_snapshot()
                     logger.info(
-                        "GET /api/recommendations bootstrap: served from "
-                        "empty history (pool_count=%d → wrote %d to history)",
+                        "GET /api/recommendations top-up: history had %d "
+                        "unprocessed row(s) (pool_count=%d → now %d rows)",
+                        row_count_before,
                         pool_count,
                         len(rows),
                     )

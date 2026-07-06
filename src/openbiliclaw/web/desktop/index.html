@@ -180,7 +180,17 @@
             </div>
           </div>
           <div class="filter-row" id="filterRow" aria-label="推荐筛选"></div>
-          <div class="card-grid" id="videoGrid"></div>
+          <!-- 首屏骨架占位：后端推荐取回前先撑住版面，renderVideos 首次渲染时整体替换 -->
+          <div class="card-grid" id="videoGrid">
+            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
+            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
+            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
+            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
+            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
+            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
+            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
+            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
+          </div>
           <div id="loadMoreSentinel" aria-hidden="true"></div>
           <div class="load-row"><button class="pill-btn dark" id="loadMoreBtn" type="button">加载更多推荐</button></div>
         </section>

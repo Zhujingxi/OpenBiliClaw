@@ -468,6 +468,16 @@
     .cover[data-platform="zhihu"] { background: linear-gradient(135deg, var(--surface), color-mix(in oklab, var(--platform-zhihu), var(--surface-warm) 62%)); }
     .cover[data-platform="reddit"] { background: linear-gradient(135deg, var(--surface), color-mix(in oklab, var(--platform-reddit), var(--surface-warm) 62%)); }
     .cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .video-card.is-skeleton { pointer-events: none; }
+    .video-card.is-skeleton:hover { transform: none; box-shadow: var(--elev-ring); }
+    .video-card.is-skeleton .cover { background: color-mix(in oklab, var(--fg), var(--surface) 93%); cursor: default; }
+    .skeleton-line { height: 14px; border-radius: var(--radius-pill); border: 0; padding: 0; background: color-mix(in oklab, var(--fg), var(--surface) 93%); }
+    .skeleton-line.short { width: 60%; margin-top: 8px; }
+    .video-card.is-skeleton .reason { height: 56px; border-radius: var(--radius-md); }
+    .skeleton-shimmer { position: relative; overflow: hidden; }
+    .skeleton-shimmer::after { content: ""; position: absolute; inset: 0; transform: translateX(-100%); background: linear-gradient(90deg, transparent, color-mix(in oklab, var(--surface), transparent 40%), transparent); animation: skeleton-sweep 1.4s var(--ease-standard) infinite; }
+    @keyframes skeleton-sweep { to { transform: translateX(100%); } }
+    @media (prefers-reduced-motion: reduce) { .skeleton-shimmer::after { animation: none; } }
     .cover.is-text-card { display: flex; align-items: flex-start; justify-content: flex-start; min-height: 132px; padding: var(--space-3) calc(var(--space-3) + 76px) var(--space-3) var(--space-3); text-align: left; }
     .cover-text { margin: 0; color: var(--fg-2); font-size: var(--text-sm); line-height: 1.55; font-weight: 550; white-space: pre-wrap; word-break: break-word; display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
     .platform { position: absolute; right: var(--space-2); top: var(--space-2); border-radius: var(--radius-pill); background: color-mix(in oklab, var(--fg), transparent 8%); color: var(--surface); padding: 4px 9px; font-size: 12px; }

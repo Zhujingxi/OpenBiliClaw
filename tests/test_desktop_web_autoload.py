@@ -61,7 +61,8 @@ def test_autoload_guards_cooldown_pool_page_grid_and_button_state() -> None:
     assert "state.runtimeStatus?.pool_available_count > 0" in guard
     assert '$("#homePage")' in guard
     assert "homePage.hidden" in guard
-    assert 'grid.querySelector(".video-card")' in guard
+    # 骨架占位卡不算真实内容，不能触发自动加载（issue #81 skeleton cards）。
+    assert 'grid.querySelector(".video-card:not(.is-skeleton)")' in guard
     assert "loadMore.hidden" in guard
 
 
