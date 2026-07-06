@@ -189,12 +189,11 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.157 (2026-07-05)**
+📌 Latest: **v0.3.158 (2026-07-06)**
 
-- **Surprise picks no longer interrupt your typing** — while you type in a surprise card's chat box, background pushes no longer steal the card or collapse the input.
-- **Desktop web polish** — video cards are real links (middle / Ctrl+click) with duration / views / likes metadata, plus dark mode and load-more-on-scroll.
-- **More resilient fallback LLM provider** — an empty response from the primary now fails over to the fallback, and the init preflight recognizes the fallback so a dead primary with a healthy one no longer blocks setup.
-- **Self-heal for Chinese Windows usernames** — when a non-ASCII model path breaks bge-m3 loading, one click migrates the model dir to an ASCII path and re-pulls.
+- **Fully automatic one-click embedding repair** — the "Retry" button is now a detect→remediate orchestrator: it auto-starts a stopped Ollama, auto-pulls a missing model, and precisely diagnoses disk-full / network / out-of-memory / proxy-hijack with actionable guidance — no more repeated clicking.
+- **First-launch embedding download progress is visible** — the desktop app's background bge-m3 pull (~568MB) is no longer a black box; the init page shows a live progress bar and an "Ollama starting…" phase.
+- **New MiniMax-M3 model** — 1M context with image/video input, added to the built-in provider menu and set as MiniMax's default model.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
