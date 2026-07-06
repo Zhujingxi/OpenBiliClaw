@@ -476,7 +476,7 @@ inspiration_replace_merged_keywords = false
 # search_pages_per_probe / search_results_per_query / max_seeds_per_aspect /
 # max_expansions_per_seed / max_keywords_per_platform）已移除，写了也会被忽略
 # 并在启动提示中给出迁移说明。
-inspiration_breadth = "medium"
+inspiration_breadth = "high"
 # 可选封面图评估。默认关闭；开启后 discovery evaluator 会在模型支持图像输入时
 # 把已压缩的候选封面一并送入评估器，模型不支持时自动退回纯文本评估。
 multimodal_evaluation_enabled = false

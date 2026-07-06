@@ -1959,7 +1959,7 @@ class TestDiscoveryConfig:
             "exa",
             "you",
         )
-        assert config.discovery.inspiration_breadth == "medium"
+        assert config.discovery.inspiration_breadth == "high"
         assert config.discovery.multimodal_evaluation_enabled is False
         assert config.discovery.multimodal_batch_size == 8
         assert config.discovery.multimodal_image_max_px == 384
@@ -1981,7 +1981,7 @@ class TestDiscoveryConfig:
             "exa",
             "you",
         )
-        assert config.discovery.inspiration_breadth == "medium"
+        assert config.discovery.inspiration_breadth == "high"
         assert config.discovery.multimodal_evaluation_enabled is False
         assert config.discovery.multimodal_batch_size == 8
 
@@ -2238,7 +2238,7 @@ admission_min_score = {literal}
             'inspiration_search_backends = ["local_cache", "platform_sources", "exa", "you"]'
             in rendered
         )
-        assert 'inspiration_breadth = "medium"' in rendered
+        assert 'inspiration_breadth = "high"' in rendered
         assert "multimodal_evaluation_enabled = false" in rendered
         assert "multimodal_batch_size = 8" in rendered
         assert "multimodal_image_max_px = 384" in rendered
@@ -2392,4 +2392,4 @@ inspiration_breadth = "low"
             "inspiration_search_backends",
             "inspiration_search_enabled",
         ]
-        assert 'inspiration_breadth = "medium"' in inspiration_lines
+        assert 'inspiration_breadth = "high"' in inspiration_lines

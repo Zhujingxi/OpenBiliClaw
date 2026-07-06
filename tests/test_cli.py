@@ -332,10 +332,10 @@ def test_keyword_inspiration_preview_one_shot_overrides_apply_on_derived_params(
     assert params is not None
     assert params.max_keywords_per_platform == 3  # type: ignore[union-attr]
     assert params.interest_sample_size == 2  # type: ignore[union-attr]
-    # Non-overridden knobs stay at the derived medium-tier values.
-    medium = config_module.derive_inspiration_breadth_params("medium")
-    assert params.max_probe_searches_per_stage == medium.max_probe_searches_per_stage  # type: ignore[union-attr]
-    assert params.search_results_per_query == medium.search_results_per_query  # type: ignore[union-attr]
+    # Non-overridden knobs stay at the derived default-tier (high) values.
+    base = config_module.derive_inspiration_breadth_params("high")
+    assert params.max_probe_searches_per_stage == base.max_probe_searches_per_stage  # type: ignore[union-attr]
+    assert params.search_results_per_query == base.search_results_per_query  # type: ignore[union-attr]
 
 
 def test_main_bootstraps_container_runtime_when_project_root_is_configured(
