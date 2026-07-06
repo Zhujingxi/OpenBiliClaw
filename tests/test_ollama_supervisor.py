@@ -188,6 +188,43 @@ def test_start_serve_records_managed_handle(monkeypatch: pytest.MonkeyPatch) -> 
     assert sup._managed_proc.pid == 999
 
 
+def test_start_serve_reports_starting_and_ready_phases(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openbiliclaw.runtime import embedding_progress
+    from openbiliclaw.runtime import ollama_supervisor as sup
+
+    phases: list[str] = []
+    monkeypatch.setattr(embedding_progress, "report_ollama_phase", phases.append)
+    monkeypatch.setattr(sup, "_managed_proc", None)
+    health = iter([False, True])
+    monkeypatch.setattr(sup, "_ollama_is_running", lambda *a, **k: next(health))
+
+    class _FakePopen:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.pid = 999
+
+        def poll(self) -> None:
+            return None
+
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ollama")
+    monkeypatch.setattr("subprocess.Popen", _FakePopen)
+
+    assert sup._ollama_start_serve_background() is True
+    assert phases == ["starting", "ready"]
+
+
+def test_start_serve_reports_down_when_binary_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openbiliclaw.runtime import embedding_progress
+    from openbiliclaw.runtime import ollama_supervisor as sup
+
+    phases: list[str] = []
+    monkeypatch.setattr(embedding_progress, "report_ollama_phase", phases.append)
+    monkeypatch.setattr(sup, "_ollama_is_running", lambda *a, **k: False)
+    monkeypatch.setattr("shutil.which", lambda name: None)
+
+    assert sup._ollama_start_serve_background() is False
+    assert phases == ["starting", "down"]
+
+
 def test_start_serve_sets_default_keep_alive(monkeypatch: pytest.MonkeyPatch) -> None:
     """Managed Ollama keeps bge-m3/llama-server warm across UI poll gaps."""
     from openbiliclaw.runtime import ollama_supervisor as sup

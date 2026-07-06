@@ -21,6 +21,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from openbiliclaw.runtime.ollama_supervisor import (
+    _is_default_ollama_endpoint,
     _ollama_is_running,
     _ollama_start_serve_background,
     effective_ollama_endpoint,
@@ -262,14 +263,6 @@ def _warn_if_pause_on_disconnect_requires_presence() -> None:
             f"[yellow]{_EXTENSION_PRESENCE_REQUIRED_WARNING}[/yellow]",
             soft_wrap=True,
         )
-
-
-def _is_default_ollama_endpoint(endpoint: str) -> bool:
-    from urllib.parse import urlparse
-
-    parsed = urlparse(endpoint)
-    host = (parsed.hostname or "").strip().lower()
-    return host in {"localhost", "127.0.0.1", "::1"} and parsed.port == 11434
 
 
 def _preflight_loopback_ollama(cfg: Any) -> None:

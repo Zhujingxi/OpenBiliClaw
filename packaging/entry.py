@@ -24,6 +24,7 @@ In both packaged layouts the read-only bundle provides the template config +
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -442,6 +443,7 @@ def _packaged_ollama_preflight() -> None:
     try:
         from openbiliclaw.config import load_config
         from openbiliclaw.runtime.ollama_supervisor import (
+            _is_default_ollama_endpoint,
             _ollama_is_running,
             _ollama_start_serve_background,
             effective_ollama_endpoint,
@@ -454,6 +456,8 @@ def _packaged_ollama_preflight() -> None:
             return
         endpoint = effective_ollama_endpoint(cfg)
         if not is_loopback(endpoint) or _ollama_is_running(host=endpoint):
+            return
+        if not _is_default_ollama_endpoint(endpoint):
             return
         if not _ollama_start_serve_background():
             print("[OpenBiliClaw] Ollama 未能自动拉起；embedding 可能降级。")
@@ -475,17 +479,42 @@ def _ensure_embedding_model_async() -> None:
         try:
             from openbiliclaw.config import load_config
 
-            emb = load_config().llm.embedding
+            cfg = load_config()
+            emb = cfg.llm.embedding
             if str(emb.provider).strip().lower() != "ollama":
                 return
             model = str(emb.model).strip() or "bge-m3"
-            from openbiliclaw.cli import _ollama_has_model, _ollama_pull_model
+            base_url = (
+                str(emb.base_url).strip()
+                or str(cfg.llm.ollama.base_url).strip()
+                or "http://localhost:11434/v1"
+            )
+            from openbiliclaw.cli import _ollama_has_model
+            from openbiliclaw.llm.ollama_diagnostics import native_root, pull_ollama_model
+            from openbiliclaw.runtime import embedding_progress
 
-            if _ollama_has_model(model):
+            if _ollama_has_model(model, native_root(base_url)):
                 return
             print(f"[OpenBiliClaw] 后台拉取本地 embedding 模型 {model}(约 568MB,仅首次)…")
-            if _ollama_pull_model(model):
+            embedding_progress.mark_pull_running(model)
+            ok = False
+            error = ""
+            try:
+                ok, error = asyncio.run(
+                    pull_ollama_model(
+                        base_url,
+                        model,
+                        on_progress=embedding_progress.report_pull,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 — background best-effort only
+                error = f"{type(exc).__name__}: {exc}"
+            finally:
+                embedding_progress.mark_pull_done(ok, error)
+            if ok:
                 print(f"[OpenBiliClaw] 本地 embedding 模型 {model} 就绪")
+            elif error:
+                print(f"[OpenBiliClaw] 本地 embedding 模型 {model} 拉取失败: {error}")
         except Exception as exc:  # noqa: BLE001 — background best-effort only
             print(f"[OpenBiliClaw] 模型自动拉取跳过: {exc}")
 

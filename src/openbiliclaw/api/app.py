@@ -129,6 +129,7 @@ from openbiliclaw.api.models import (
     YoutubeSourceConfigOut,
     ZhihuSourceConfigOut,
 )
+from openbiliclaw.runtime import embedding_progress
 from openbiliclaw.runtime.feedback_scheduler import FeedbackBatchScheduler
 from openbiliclaw.runtime.image_cache import (
     CoverFetchError,
@@ -1855,8 +1856,9 @@ def create_app(
         # An in-flight one-click repair is the freshest possible signal —
         # report live pull progress (no TTL cache: progress changes every
         # poll, and the classification is already known).
-        if _embedding_repair_state["running"]:
-            return ("repairing", _repair_progress_detail())
+        pull_progress = _embedding_pull_progress_view()
+        if pull_progress["running"]:
+            return ("repairing", str(pull_progress["status_text"] or _repair_progress_detail()))
         emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
         provider = str(getattr(emb, "provider", "") or "").strip()
         if not provider:
@@ -2073,6 +2075,8 @@ def create_app(
         can_start = trusted and supported and hard_ok and not running and not initialized
 
         embedding_check, embedding_detail = await _diagnose_embedding(bool(embedding))
+        pull_progress = _embedding_pull_progress_view()
+        pull_status = str(pull_progress.get("status_text") or "")
 
         if not supported:
             reason, detail = "unsupported_runtime", "Docker 运行时不支持图形化初始化"
@@ -2125,9 +2129,11 @@ def create_app(
                 embedding_ready=embedding,
                 embedding_check=embedding_check,
                 embedding_detail=embedding_detail,
-                embedding_repair_running=bool(_embedding_repair_state["running"]),
-                embedding_repair_completed=int(_embedding_repair_state["completed"] or 0),
-                embedding_repair_total=int(_embedding_repair_state["total"] or 0),
+                embedding_repair_running=bool(pull_progress["running"]),
+                embedding_repair_completed=_progress_int(pull_progress.get("completed")),
+                embedding_repair_total=_progress_int(pull_progress.get("total")),
+                ollama_phase=embedding_progress.ollama_phase(),
+                embedding_pull_status=pull_status,
                 embedding_required=embedding_required,
                 enabled_platforms=platforms,
             ),
@@ -2391,10 +2397,45 @@ def create_app(
             return f"正在下载 {model}：{pct}%（{done_mb}MB / {total_mb}MB），完成后自动就绪。"
         return f"正在下载 {model}（准备中…），完成后自动就绪。"
 
+    def _progress_int(value: object) -> int:
+        if isinstance(value, int):
+            return value
+        if value is None:
+            return 0
+        try:
+            return int(str(value))
+        except ValueError:
+            return 0
+
+    def _embedding_pull_progress_view() -> dict[str, object]:
+        """Combined app-local repair + process-global auto-pull progress."""
+        snap = embedding_progress.snapshot()
+        if bool(snap.get("running")):
+            return {
+                "running": True,
+                "completed": _progress_int(snap.get("completed")),
+                "total": _progress_int(snap.get("total")),
+                "status_text": str(snap.get("status_text") or _repair_progress_detail()),
+            }
+        if _embedding_repair_state["running"]:
+            return {
+                "running": True,
+                "completed": _progress_int(_embedding_repair_state.get("completed")),
+                "total": _progress_int(_embedding_repair_state.get("total")),
+                "status_text": _repair_progress_detail(),
+            }
+        return {
+            "running": False,
+            "completed": 0,
+            "total": 0,
+            "status_text": str(snap.get("status_text") or ""),
+        }
+
     async def _run_embedding_repair(base_url: str, model: str) -> None:
         from openbiliclaw.llm.ollama_diagnostics import pull_ollama_model
 
         def _on_progress(status: str, completed: int, total: int) -> None:
+            embedding_progress.report_pull(status, completed, total)
             _embedding_repair_state.update(
                 {"status": status, "completed": completed, "total": total}
             )
@@ -2403,9 +2444,8 @@ def create_app(
             ok, error = await pull_ollama_model(base_url, model, on_progress=_on_progress)
         except Exception as exc:  # defensive: pull_ollama_model shouldn't raise
             ok, error = False, f"{type(exc).__name__}: {exc}"
-        _embedding_repair_state.update(
-            {"running": False, "done": True, "ok": ok, "error": error}
-        )
+        embedding_progress.mark_pull_done(ok, error)
+        _embedding_repair_state.update({"running": False, "done": True, "ok": ok, "error": error})
         if ok:
             logger.info("Embedding repair: pulled %s successfully", model)
             # Next health/init-status poll re-probes immediately, so the
@@ -2418,8 +2458,8 @@ def create_app(
     async def start_embedding_repair(request: Request) -> JSONResponse:
         """(Re-)pull the configured Ollama embedding model (local-only).
 
-        409s: not Ollama-backed (fix config instead), Ollama not running
-        (we can't start it for you), or a repair already in flight.
+        409s: not Ollama-backed (fix config instead), unmanaged Ollama is not
+        running, managed Ollama failed to start, or a repair already in flight.
         """
         if not _get_auth_gate().is_trusted_local(request):
             return JSONResponse({"error": "local_only"}, status_code=403)
@@ -2451,7 +2491,36 @@ def create_app(
                 _expire_embedding_ready_cache()
                 return JSONResponse({"ok": True, "already_ok": True, "model": model})
             if code == DIAG_NOT_RUNNING:
-                return JSONResponse({"error": "not_running", "detail": detail}, status_code=409)
+                from openbiliclaw.runtime.ollama_supervisor import (
+                    _is_default_ollama_endpoint,
+                    _ollama_start_serve_background,
+                    effective_ollama_endpoint,
+                    is_loopback,
+                    ollama_required,
+                )
+
+                cfg = ctx.config
+                endpoint = effective_ollama_endpoint(cfg)
+                may_manage = (
+                    bool(getattr(getattr(cfg, "autostart", None), "manage_ollama", False))
+                    and ollama_required(cfg)
+                    and is_loopback(endpoint)
+                    and _is_default_ollama_endpoint(endpoint)
+                )
+                if not may_manage or not _ollama_start_serve_background():
+                    return JSONResponse(
+                        {"error": "not_running", "detail": detail},
+                        status_code=409,
+                    )
+                code, detail = await diagnose_ollama_embedding(base_url, model)
+                if code == DIAG_OK:
+                    _expire_embedding_ready_cache()
+                    return JSONResponse({"ok": True, "already_ok": True, "model": model})
+                if code == DIAG_NOT_RUNNING:
+                    return JSONResponse(
+                        {"error": "not_running", "detail": detail},
+                        status_code=409,
+                    )
             if code == DIAG_MODEL_PATH_ENCODING:
                 from openbiliclaw.runtime.ollama_supervisor import (
                     ollama_models_relocation_candidate,
@@ -2506,6 +2575,7 @@ def create_app(
                     "error": "",
                 }
             )
+            embedding_progress.mark_pull_running(model)
             registry = getattr(ctx, "task_registry", None)
             coro = _run_embedding_repair(base_url, model)
             if registry is not None:

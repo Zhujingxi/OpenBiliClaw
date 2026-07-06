@@ -820,6 +820,22 @@
       return (Array.isArray(keys) ? keys : []).map((key) => byKey.get(key) || key);
     }
 
+    function embeddingPhaseHint(prereq) {
+      return prereq?.ollama_phase === "starting" ? "Ollama 启动中…" : "";
+    }
+
+    function embeddingPullProgressView(status) {
+      const prereq = status?.prerequisites || {};
+      const active = Boolean(prereq.embedding_repair_running || prereq.embedding_check === "repairing");
+      const completed = Number(prereq.embedding_repair_completed || 0);
+      const total = Number(prereq.embedding_repair_total || 0);
+      const pct = total > 0
+        ? Math.max(1, Math.min(99, Math.round((completed * 100) / total)))
+        : active ? 1 : 0;
+      const label = String(prereq.embedding_pull_status || prereq.embedding_detail || "").trim() || "正在下载向量模型…";
+      return { active, pct, label };
+    }
+
     function buildInitChecklist(status, selected = null) {
       const prereq = status?.prerequisites || {};
       const enabled = initEnabledPlatforms(status);
@@ -827,6 +843,10 @@
       // B 站登录只在勾选了 B 站时才是硬前置。
       const biliSelected = selectedSources ? selectedSources.includes("bilibili") : true;
       const embeddingRequired = Boolean(prereq.embedding_required);
+      const embeddingHint = [
+        embeddingPhaseHint(prereq),
+        String(prereq.embedding_pull_status || prereq.embedding_detail || "").trim()
+      ].filter(Boolean).join(" ");
       // label 必须反映探测的真实结果——固定写“已登录”的条目名一旦不再是红 ✗，
       // 用户就会把它读成“已经登录了”。
       const biliOk = Boolean(prereq.bilibili_logged_in);
@@ -858,7 +878,7 @@
           // Ollama 未运行 / 缺模型 / 模型损坏 / 配置无效 / repairing（下载中，
           // detail 带实时百分比，3s 轮询自动刷新）。
           hint:
-            String(prereq.embedding_detail || "").trim() ||
+            embeddingHint ||
             (embeddingRequired
               ? "本地 Ollama + bge-m3 需要完成一次真实向量请求；模型仍在下载或服务异常时请稍后重试。"
               : "未配置 embedding 时可以先初始化；推荐去重和语义检索会弱一些。"),
@@ -1016,7 +1036,7 @@
       const progressLabel = progress.failed
         ? initFailureText(status, progress)
         : progress.active
-          ? `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`
+          ? progress.label || `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`
           : "等待开始";
       if (progressBox) progressBox.hidden = !(Boolean(status?.running) || progress.failed);
       if (progressFill) progressFill.style.width = `${progress.pct}%`;
@@ -1039,11 +1059,14 @@
       const progress = initProgressView(status);
       const isRunning = Boolean(status?.running);
       const waitingForFirstPool = initWaitingForFirstPool(status);
+      const embeddingPull = embeddingPullProgressView(status);
       const displayProgress = waitingForFirstPool
         ? { ...progress, active: true, failed: false, pct: 95, stageLabel: "4/4 整理首轮内容池" }
+        : embeddingPull.active && !isRunning
+          ? { active: true, failed: false, pct: embeddingPull.pct, label: embeddingPull.label, stageLabel: "" }
         : progress;
       const alreadyInitialized = Boolean(status?.initialized) && !waitingForFirstPool;
-      const showProgress = isRunning || displayProgress.failed || waitingForFirstPool;
+      const showProgress = isRunning || displayProgress.failed || waitingForFirstPool || embeddingPull.active;
       const reason = waitingForFirstPool
         ? (state.initReason || INIT_FIRST_POOL_WAIT_TEXT)
         : displayProgress.failed
@@ -1080,7 +1103,7 @@
           <ul class="init-checklist">${initChecklistMarkup(status, state.initSelectedSources)}</ul>
           <div class="init-progress"${showProgress ? "" : " hidden"}>
             <div class="init-progress-track"><div class="init-progress-fill" style="width:${displayProgress.pct}%"></div></div>
-            <p>${escapeHtml(displayProgress.failed ? initFailureText(status, displayProgress) : displayProgress.active ? `${displayProgress.stageLabel || "正在初始化"}（${displayProgress.pct}%）` : "等待开始")}</p>
+            <p>${escapeHtml(displayProgress.failed ? initFailureText(status, displayProgress) : displayProgress.active ? displayProgress.label || `${displayProgress.stageLabel || "正在初始化"}（${displayProgress.pct}%）` : "等待开始")}</p>
           </div>
           <p class="init-reason"${reason ? "" : " hidden"}>${escapeHtml(reason)}</p>
           <div class="init-actions">
@@ -1159,7 +1182,7 @@
           return;
         }
         renderAll();
-        if (status?.running) {
+        if (status?.running || embeddingPullProgressView(status).active) {
           scheduleInitStatusRefresh(schedule ? INIT_STATUS_POLL_MS : INIT_STATUS_WATCHDOG_MS);
         } else if (!status?.running) {
           clearInitPolling();

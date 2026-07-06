@@ -12,6 +12,7 @@ import httpx
 from rich.console import Console
 
 from openbiliclaw.llm.registry import _ollama_is_chat_capable
+from openbiliclaw.runtime import embedding_progress
 
 if TYPE_CHECKING:
     import subprocess
@@ -87,6 +88,13 @@ def is_loopback(url: str) -> bool:
         return False
 
 
+def _is_default_ollama_endpoint(endpoint: str) -> bool:
+    """Return whether ``endpoint`` is the default loopback Ollama daemon."""
+    parsed = urlparse(endpoint)
+    host = (parsed.hostname or "").strip().lower()
+    return host in {"localhost", "127.0.0.1", "::1"} and parsed.port == 11434
+
+
 def _ollama_is_running(host: str = _DEFAULT_OLLAMA_ENDPOINT) -> bool:
     """Probe Ollama's HTTP API; return True only on a healthy 200 response."""
     try:
@@ -131,10 +139,13 @@ def _ollama_start_serve_background() -> bool:
     import time
 
     if _ollama_is_running():
+        embedding_progress.report_ollama_phase("ready")
         return True
+    embedding_progress.report_ollama_phase("starting")
 
     ollama = shutil.which("ollama")
     if ollama is None:
+        embedding_progress.report_ollama_phase("down")
         return False
 
     try:
@@ -170,6 +181,7 @@ def _ollama_start_serve_background() -> bool:
             )
     except Exception as exc:
         console.print(f"[red]启动 ollama serve 失败: {exc}[/red]")
+        embedding_progress.report_ollama_phase("down")
         return False
 
     # Remember the daemon WE started so it can be cleanly stopped on exit (and
@@ -179,8 +191,10 @@ def _ollama_start_serve_background() -> bool:
 
     for _ in range(30):
         if _ollama_is_running():
+            embedding_progress.report_ollama_phase("ready")
             return True
         time.sleep(0.5)
+    embedding_progress.report_ollama_phase("down")
     return False
 
 

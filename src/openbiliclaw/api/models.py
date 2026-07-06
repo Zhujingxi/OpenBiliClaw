@@ -74,6 +74,8 @@ class InitPrerequisitesOut(BaseModel):
     embedding_repair_running: bool = False
     embedding_repair_completed: int = 0
     embedding_repair_total: int = 0
+    ollama_phase: str = "ready"
+    embedding_pull_status: str = ""
     embedding_required: bool = False
     enabled_platforms: list[str] = Field(default_factory=list)
 

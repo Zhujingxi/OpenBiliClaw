@@ -436,6 +436,48 @@ def test_close_splash_noop_without_pyi_splash() -> None:
     entry._close_splash()  # must not raise
 
 
+def test_ensure_embedding_model_async_reports_global_pull_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.config import Config
+    from openbiliclaw.runtime import embedding_progress
+
+    cfg = Config()
+    cfg.llm.embedding.provider = "ollama"
+    cfg.llm.embedding.model = "bge-m3"
+    cfg.llm.embedding.base_url = "http://localhost:11434/v1"
+    pulled: list[tuple[str, str]] = []
+
+    class _InlineThread:
+        def __init__(self, *, target, name=None, daemon=None) -> None:
+            self._target = target
+
+        def start(self) -> None:
+            self._target()
+
+    async def fake_pull(base_url: str, model: str, *, on_progress=None, **_kw: object):
+        pulled.append((base_url, model))
+        if on_progress is not None:
+            on_progress("downloading", 240 * 1024 * 1024, 568 * 1024 * 1024)
+        return (True, "")
+
+    monkeypatch.setattr(entry.threading, "Thread", _InlineThread)
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+    monkeypatch.setattr("openbiliclaw.cli._ollama_has_model", lambda *_args: False)
+    monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", fake_pull)
+
+    entry._ensure_embedding_model_async()
+
+    snap = embedding_progress.snapshot()
+    assert pulled == [("http://localhost:11434/v1", "bge-m3")]
+    assert snap["running"] is False
+    assert snap["done"] is True
+    assert snap["ok"] is True
+    assert snap["model"] == "bge-m3"
+    assert snap["completed"] == 240 * 1024 * 1024
+    assert snap["total"] == 568 * 1024 * 1024
+
+
 def test_main_uses_configured_api_host_when_env_host_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

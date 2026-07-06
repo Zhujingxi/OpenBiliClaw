@@ -10632,16 +10632,80 @@ class TestEmbeddingDiagnosisAndRepair:
         assert resp.status_code == 409
         assert resp.json()["error"] == "unsupported_provider"
 
-    def test_repair_409_when_ollama_not_running(
+    def test_repair_starts_managed_ollama_then_pulls_missing_model(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from fastapi.testclient import TestClient
 
+        diagnoses = iter(
+            [
+                ("not_running", "Ollama 服务无法连接"),
+                ("model_missing", "缺 bge-m3"),
+            ]
+        )
+        start_calls: list[str] = []
+        pulled: list[str] = []
+
         async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
-            return ("not_running", "Ollama 服务无法连接")
+            return next(diagnoses)
+
+        def fake_start() -> bool:
+            start_calls.append("start")
+            return True
+
+        async def fake_pull(base_url: str, model: str, *, on_progress=None, **_kw: object):
+            pulled.append(model)
+            if on_progress is not None:
+                on_progress("success", 0, 0)
+            return (True, "")
 
         monkeypatch.setattr(
             "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor._ollama_start_serve_background",
+            fake_start,
+        )
+        monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", fake_pull)
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+            assert resp.status_code == 202
+            body = resp.json()
+            assert body["diagnosis"] == "model_missing"
+
+            status: dict = {}
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                status = client.get("/api/embedding/repair").json()
+                if status.get("done"):
+                    break
+                time.sleep(0.05)
+
+        assert start_calls == ["start"]
+        assert pulled == ["bge-m3"]
+        assert status.get("ok") is True
+
+    def test_repair_409_when_managed_ollama_start_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        start_calls: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("not_running", "Ollama 服务无法连接")
+
+        def fake_start() -> bool:
+            start_calls.append("start")
+            return False
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor._ollama_start_serve_background",
+            fake_start,
         )
         app, _ = self._make_app(tmp_path, embedding_provider="ollama")
         with TestClient(app) as client:
@@ -10650,6 +10714,50 @@ class TestEmbeddingDiagnosisAndRepair:
         body = resp.json()
         assert body["error"] == "not_running"
         assert "无法连接" in body["detail"]
+        assert start_calls == ["start"]
+
+    @pytest.mark.parametrize(
+        ("manage_ollama", "embedding_base_url"),
+        [
+            (False, ""),
+            (True, "http://127.0.0.1:11500/v1"),
+            (True, "http://10.0.0.2:11434/v1"),
+        ],
+    )
+    def test_repair_not_running_does_not_start_unmanaged_or_custom_endpoint(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        manage_ollama: bool,
+        embedding_base_url: str,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        start_calls: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("not_running", "Ollama 服务无法连接")
+
+        def fake_start() -> bool:
+            start_calls.append("start")
+            return True
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor._ollama_start_serve_background",
+            fake_start,
+        )
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        cfg = app.state.runtime_context.config
+        cfg.autostart.manage_ollama = manage_ollama
+        cfg.llm.embedding.base_url = embedding_base_url
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "not_running"
+        assert start_calls == []
 
     def test_repair_pulls_model_and_reports_done(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -10870,6 +10978,33 @@ class TestEmbeddingDiagnosisAndRepair:
         assert prereq["embedding_repair_running"] is True
         assert prereq["embedding_repair_completed"] == 200_000_000
         assert prereq["embedding_repair_total"] == 400_000_000
+
+    def test_init_status_reports_process_global_auto_pull_progress(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.runtime import embedding_progress
+
+        completed = 240 * 1024 * 1024
+        total = 568 * 1024 * 1024
+        embedding_progress.mark_pull_running("bge-m3")
+        embedding_progress.report_pull("downloading", completed, total)
+        embedding_progress.report_ollama_phase("starting")
+        try:
+            prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+            app, _ = self._make_app(tmp_path, embedding_provider="ollama", prereqs=prereqs)
+            with TestClient(app) as client:
+                body = client.get("/api/init-status").json()
+            prereq = body["prerequisites"]
+            assert prereq["embedding_check"] == "repairing"
+            assert prereq["embedding_repair_running"] is True
+            assert prereq["embedding_repair_completed"] == completed
+            assert prereq["embedding_repair_total"] == total
+            assert "42%" in prereq["embedding_pull_status"]
+            assert prereq["embedding_detail"] == prereq["embedding_pull_status"]
+            assert prereq["ollama_phase"] == "starting"
+        finally:
+            embedding_progress.mark_pull_done(True, "")
+            embedding_progress.report_ollama_phase("ready")
 
 
 class TestLlmFallbackConfigValidationAndProbe:

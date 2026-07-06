@@ -8,6 +8,7 @@
 
 后端源码走 `backend-v0.3.157`，浏览器插件走 `extension-v0.3.157`，桌面安装包走 `desktop-v0.3.157`。
 
+- **首启 bge-m3 下载进度可见 + Ollama 未运行自愈**：桌面包首启后台自动拉取 `bge-m3`（约 568MB）不再只在控制台输出，新增进程全局 `runtime.embedding_progress`，让 `/setup/` 与 `/web` 的 guided-init checklist 共享显示自动拉取和手动修复的进度条、百分比文案与「Ollama 启动中…」阶段提示。`/api/embedding/repair` 遇到 `not_running` 时会在 `autostart.manage_ollama=true` 且 endpoint 是默认 loopback `localhost:11434` 时先尝试拉起托管 Ollama，成功后重新诊断并继续既有 ok / 拉取 / 路径迁移流程；远端、自定义端口或外部 Ollama 仍保持 409，不越权接管。
 - **Windows 中文用户名导致向量模型加载失败可自愈**：用户截图实锤——`bge-m3` 已下载但 `llama-server` 以 `failed to load model from C:\Users\<乱码>\.ollama\models\...` 退出，根因是模型路径含非 ASCII 字符（常见于中文 Windows 用户名），重新下载无法解决。新增诊断码 `model_path_encoding` 精确区分此类失败（命中「failed to load model / llama_model_loader」且路径含乱码或非 ASCII 用户名，不误伤真·下载损坏与内存不足）；托管 Ollama（本应用亲手拉起）时「自动下载向量模型」按钮升级为「迁移模型目录并修复」，把模型目录迁到纯 ASCII 的 `%PROGRAMDATA%\OpenBiliClaw\ollama-models` 并带 `OLLAMA_MODELS` 重启后重拉（目录存在即持久迁移标记，`setdefault` 保证用户显式 env 优先）；检测到外部启动的 Ollama 则拒绝越权重启、返回明确的手动设置 `OLLAMA_MODELS` 指引。三端修复按钮文案与 409 失败详情同步。
 - **桌面 Web 交互打磨（issue #75）**：视频卡片改真链接（中键 / Ctrl+点击可用）+ 时长 / 播放 / 点赞 / 弹幕元信息 + UP 主跳转；新增暗色模式（跟随系统 / 手动）；抽屉退出动画、分区切换过渡、滚动条防抖动；滚动到底自动加载（带候选池保护）；画像编辑即时反馈。
 - **插件配置页预算说明补齐（与桌面 Web 同文案）**：桌面 Web 设置页已给每源预算行补的中文说明，插件 popup 的同批 `daily_*_budget` 数字框此前只有 `placeholder="0 = 不限"`、没有解释，用户仍会把「填 1」误当成打开该源。现在六个源（小红书 / 抖音 / YouTube / X / 知乎 / Reddit）的预算组各补一行与桌面 Web 逐字一致的 hint（Reddit 变体附「各分支默认 300」）。新增 `popup-settings.test.ts` 静态契约断言每个预算组都带该说明。

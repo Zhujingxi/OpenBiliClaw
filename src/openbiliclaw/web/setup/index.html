@@ -391,6 +391,22 @@
       return (Array.isArray(keys) ? keys : []).map((key) => byKey.get(key) || key);
     }
 
+    function embeddingPhaseHint(prereq) {
+      return prereq?.ollama_phase === "starting" ? "Ollama 启动中…" : "";
+    }
+
+    function embeddingPullProgressView(status) {
+      const prereq = status?.prerequisites || {};
+      const active = Boolean(prereq.embedding_repair_running || prereq.embedding_check === "repairing");
+      const completed = Number(prereq.embedding_repair_completed || 0);
+      const total = Number(prereq.embedding_repair_total || 0);
+      const pct = total > 0
+        ? Math.max(1, Math.min(99, Math.round((completed * 100) / total)))
+        : active ? 1 : 0;
+      const label = String(prereq.embedding_pull_status || prereq.embedding_detail || "").trim() || "正在下载向量模型…";
+      return { active, pct, label };
+    }
+
     function buildInitChecklist(status, selected = null) {
       const prereq = status?.prerequisites || {};
       const enabled = enabledPlatforms(status);
@@ -398,6 +414,10 @@
       // B站 login only blocks when bilibili is among the checked sources.
       const biliSelected = selectedSources ? selectedSources.includes("bilibili") : true;
       const embeddingRequired = Boolean(prereq.embedding_required);
+      const embeddingHint = [
+        embeddingPhaseHint(prereq),
+        String(prereq.embedding_pull_status || prereq.embedding_detail || "").trim(),
+      ].filter(Boolean).join(" ");
       // Label must state the ACTUAL probe result — a fixed "已登录" item name
       // reads as "logged in" the moment the row stops being a red ✗.
       const biliOk = Boolean(prereq.bilibili_logged_in);
@@ -430,7 +450,7 @@
           // detail 带实时百分比，3s 轮询自动刷新）。Fall back to the generic
           // copy on older backends.
           hint:
-            String(prereq.embedding_detail || "").trim() ||
+            embeddingHint ||
             (embeddingRequired
               ? "本地 Ollama + bge-m3 需要完成一次真实向量请求；模型仍在下载或服务异常时请稍后重试。"
               : "未配置 embedding 时可以先初始化；推荐去重和语义检索会弱一些。"),
@@ -597,6 +617,10 @@
     }
 
     function progressView(status) {
+      const pull = embeddingPullProgressView(status);
+      if (pull.active && !status?.running) {
+        return { pct: pull.pct, failed: null, label: pull.label };
+      }
       const total = status?.total_stages || 4;
       const stages = Array.isArray(status?.stages) ? status.stages : [];
       const done = stages.filter((s) => s.status === "ok").length;
