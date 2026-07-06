@@ -253,6 +253,14 @@ class PendingDelightOut(BaseModel):
     cover_url: str = ""
     content_url: str = ""
     source_platform: str = ""
+    # Engagement stats (from content_cache), so the delight card can show the
+    # same ▶ / 👍 / 💬 metadata row as the recommendation grid. 0 = unknown /
+    # not fetched (platforms that don't populate a metric render nothing).
+    view_count: int = 0
+    like_count: int = 0
+    comment_count: int = 0
+    danmaku_count: int = 0
+    favorite_count: int = 0
 
 
 class PendingDelightResponse(BaseModel):

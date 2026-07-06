@@ -63,3 +63,29 @@ def test_card_metadata_css_defines_duration_badge_and_stats_line() -> None:
     assert ".video-stats" in APP_CSS
     assert "background: var(--overlay);" in APP_CSS
     assert "color: var(--muted);" in APP_CSS
+
+
+def test_delight_card_renders_the_same_engagement_stats_as_the_grid() -> None:
+    """Field report 2026-07-07: the surprise (delight) card never showed the
+    ▶/👍/💬 metadata the grid cards do. normalizeDelight now carries the counts
+    and setActiveDelight fills #delightStats via the shared recommendationStats.
+    """
+    # normalizeDelight carries the stat fields (same parse as the grid).
+    normalize = _function_body("normalizeDelight")
+    for field in ("view_count", "like_count", "comment_count", "danmaku_count", "favorite_count"):
+        assert f"{field}: Number(item?.{field} ?? 0) || 0" in normalize, field
+
+    # The delight card fills #delightStats from recommendationStats and hides it
+    # when there are no counts (reusing the grid's .video-stats treatment).
+    assert 'const delightStats = recommendationStats(state.delight);' in APP_JS
+    assert "delightStatsEl.textContent = delightStats;" in APP_JS
+    assert "delightStatsEl.hidden = !delightStats;" in APP_JS
+
+    # comment_count (💬) is in the shared stats renderer so both cards show it.
+    stats = _function_body("recommendationStats")
+    assert "if (item.comment_count > 0)" in stats
+    assert '💬 ' in stats
+
+    # The DOM has the stats element on the delight card.
+    index_html = Path("src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")
+    assert '<p id="delightStats" class="video-stats" hidden></p>' in index_html

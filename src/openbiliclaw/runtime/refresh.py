@@ -932,6 +932,11 @@ class ContinuousRefreshController:
             "cover_url": str(candidate.get("cover_url", "")),
             "content_url": str(candidate.get("content_url", "")),
             "source_platform": str(candidate.get("source_platform", "") or "bilibili"),
+            "view_count": int(candidate.get("view_count", 0) or 0),
+            "like_count": int(candidate.get("like_count", 0) or 0),
+            "comment_count": int(candidate.get("comment_count", 0) or 0),
+            "danmaku_count": int(candidate.get("danmaku_count", 0) or 0),
+            "favorite_count": int(candidate.get("favorite_count", 0) or 0),
         }
 
     def _load_disliked_topic_phrases(self) -> list[str]:
@@ -2346,6 +2351,14 @@ class ContinuousRefreshController:
                 "cover_url": candidate.get("cover_url", ""),
                 "content_url": candidate.get("content_url", ""),
                 "source_platform": candidate.get("source_platform", "bilibili"),
+                # Engagement stats so a live-pushed delight card shows the same
+                # ▶/👍/💬 row as the pending-batch path (0 = not fetched). Passed
+                # through as-is like the other row fields; the client coerces.
+                "view_count": candidate.get("view_count", 0),
+                "like_count": candidate.get("like_count", 0),
+                "comment_count": candidate.get("comment_count", 0),
+                "danmaku_count": candidate.get("danmaku_count", 0),
+                "favorite_count": candidate.get("favorite_count", 0),
             }
         )
 

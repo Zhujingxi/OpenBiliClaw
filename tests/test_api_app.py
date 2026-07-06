@@ -7680,6 +7680,46 @@ class TestBackendAPI:
         assert item["content_type"] == "answer"
         assert item["body_text"].startswith("深度学习为什么需要这么多数据")
 
+    def test_delight_pending_batch_surfaces_engagement_stats(self) -> None:
+        """The delight card renders the same ▶/👍/💬 row as the grid, so the
+        batch payload must carry the engagement counts from content_cache
+        (field report 2026-07-07: some cards showed stats, the surprise card
+        never did)."""
+        from fastapi.testclient import TestClient
+
+        class FakeDatabase:
+            def get_delight_candidates(
+                self,
+                *,
+                min_delight_score: float,
+                limit: int,
+                include_liked: bool = False,
+            ) -> list[dict[str, object]]:
+                return [
+                    {
+                        "bvid": "BV1stats",
+                        "title": "带统计的候选",
+                        "delight_score": 0.95,
+                        "source_platform": "bilibili",
+                        "view_count": 69000,
+                        "like_count": 3200,
+                        "comment_count": 880,
+                        "danmaku_count": 150,
+                        "favorite_count": 12,
+                        "feedback_type": "",
+                    },
+                ]
+
+        app = create_app(memory_manager=object(), database=FakeDatabase(), soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/delight/pending-batch").json()["items"][0]
+        assert item["view_count"] == 69000
+        assert item["like_count"] == 3200
+        assert item["comment_count"] == 880
+        assert item["danmaku_count"] == 150
+        assert item["favorite_count"] == 12
+
     def test_delight_pending_batch_uses_configured_default_limit(self) -> None:
         """Clients that omit ``limit`` should inherit the shared queue setting."""
         from fastapi.testclient import TestClient

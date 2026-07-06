@@ -4580,6 +4580,13 @@ def create_app(
                 # readable title for legacy rows still holding answer_<id> (#79).
                 "content_type": str(row.get("content_type", "") or ""),
                 "body_text": str(row.get("body_text", "") or ""),
+                # Engagement stats so the delight card shows the same ▶/👍/💬 row
+                # as the grid (0 = not fetched → the card renders nothing for it).
+                "view_count": int(row.get("view_count", 0) or 0),
+                "like_count": int(row.get("like_count", 0) or 0),
+                "comment_count": int(row.get("comment_count", 0) or 0),
+                "danmaku_count": int(row.get("danmaku_count", 0) or 0),
+                "favorite_count": int(row.get("favorite_count", 0) or 0),
                 "state": (
                     "liked" if str(row.get("feedback_type", "") or "") == "like" else "pending"
                 ),

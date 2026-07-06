@@ -4772,6 +4772,13 @@
         chat_draft: String(item.chat_draft ?? ""),
         state: serverState,
         response_message: String(item.response_message ?? "") || fallbackMessage,
+        // Engagement stats so the delight card shows the same ▶/👍/💬 row as the
+        // grid (v0.3.159+; 0 = not fetched → recommendationStats renders nothing).
+        view_count: Number(item?.view_count ?? 0) || 0,
+        like_count: Number(item?.like_count ?? 0) || 0,
+        comment_count: Number(item?.comment_count ?? 0) || 0,
+        danmaku_count: Number(item?.danmaku_count ?? 0) || 0,
+        favorite_count: Number(item?.favorite_count ?? 0) || 0,
         turns: delightTurnList(item.turns)
       };
     }
@@ -4807,6 +4814,7 @@
         renderDelightTurns(null);
         $("#delightTitle").textContent = "暂无惊喜队列";
         $("#delightReason").textContent = "后端产生新的高惊喜候选后会通过实时流出现在这里。";
+        if ($("#delightStats")) $("#delightStats").hidden = true;
         if ($("#delightStatus")) $("#delightStatus").textContent = "";
         if ($("#delightCount")) $("#delightCount").textContent = "0/0";
         controls.forEach((btn) => { btn.disabled = true; });
@@ -4819,6 +4827,14 @@
       renderDelightCover(state.delight);
       renderDelightTurns(state.delight);
       $("#delightTitle").textContent = state.delight.title;
+      // Same ▶/👍/💬 metadata row as the grid card; hidden when the item carries
+      // no counts (0 — e.g. platforms whose discovery path doesn't fetch stats).
+      const delightStatsEl = $("#delightStats");
+      if (delightStatsEl) {
+        const delightStats = recommendationStats(state.delight);
+        delightStatsEl.textContent = delightStats;
+        delightStatsEl.hidden = !delightStats;
+      }
       $("#delightReason").textContent = state.delight.reason;
       if ($("#delightStatus")) $("#delightStatus").textContent = state.delight.response_message || "";
       if ($("#delightCount")) $("#delightCount").textContent = `${state.delightIndex + 1}/${state.delights.length}`;
