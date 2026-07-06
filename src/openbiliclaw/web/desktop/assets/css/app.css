@@ -479,6 +479,13 @@
     @keyframes skeleton-sweep { to { transform: translateX(100%); } }
     @media (prefers-reduced-motion: reduce) { .skeleton-shimmer::after { animation: none; } }
     .cover.is-text-card { display: flex; align-items: flex-start; justify-content: flex-start; min-height: 132px; padding: var(--space-3) calc(var(--space-3) + 76px) var(--space-3) var(--space-3); text-align: left; }
+    /* issue #79 §2: glassmorphism backdrop for text cards that carry a cover —
+       the blurred image unifies the look with photo cards, and a translucent
+       scrim keeps the excerpt legible on top of any image. */
+    .cover.is-text-card.has-backdrop { position: relative; isolation: isolate; }
+    .cover.is-text-card.has-backdrop .cover-backdrop { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; filter: blur(18px) saturate(1.15); transform: scale(1.18); z-index: -2; }
+    .cover.is-text-card.has-backdrop::before { content: ""; position: absolute; inset: 0; z-index: -1; background: color-mix(in oklab, var(--surface), transparent 22%); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+    .cover.is-text-card.has-backdrop .cover-text { color: var(--fg); font-weight: 600; text-shadow: 0 1px 2px color-mix(in oklab, var(--surface), transparent 40%); }
     .cover-text { margin: 0; color: var(--fg-2); font-size: var(--text-sm); line-height: 1.55; font-weight: 550; white-space: pre-wrap; word-break: break-word; display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
     .platform { position: absolute; right: var(--space-2); top: var(--space-2); border-radius: var(--radius-pill); background: color-mix(in oklab, var(--fg), transparent 8%); color: var(--surface); padding: 4px 9px; font-size: 12px; }
     .duration-badge { position: absolute; right: var(--space-2); bottom: var(--space-2); border-radius: var(--radius-pill); background: var(--overlay); color: var(--surface); padding: 3px 7px; font-size: 12px; font-weight: 700; line-height: 1.2; font-variant-numeric: tabular-nums; }

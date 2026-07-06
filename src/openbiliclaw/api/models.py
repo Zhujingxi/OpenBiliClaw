@@ -125,6 +125,11 @@ class RecommendationOut(BaseModel):
     view_count: int = 0
     like_count: int = 0
     danmaku_count: int = 0
+    # Cross-platform engagement counts (issue #79): text-first sources like
+    # Zhihu have no view/danmaku but do carry favorites/comments — surface them
+    # so the card stats row is not left with a lone like count.
+    favorite_count: int = 0
+    comment_count: int = 0
     up_mid: int = 0
 
 

@@ -110,6 +110,8 @@ def test_get_recommendations_rows_carry_card_metadata_columns(tmp_path: Path) ->
         view_count=120000,
         like_count=4567,
         danmaku_count=890,
+        favorite_count=321,
+        comment_count=654,
         cover_url="https://example.com/cover.jpg",
         source_platform="bilibili",
         content_type="video",
@@ -125,4 +127,6 @@ def test_get_recommendations_rows_carry_card_metadata_columns(tmp_path: Path) ->
     assert row["view_count"] == 120000
     assert row["like_count"] == 4567
     assert row["danmaku_count"] == 890
+    assert row["favorite_count"] == 321
+    assert row["comment_count"] == 654
     assert row["up_mid"] == 12345

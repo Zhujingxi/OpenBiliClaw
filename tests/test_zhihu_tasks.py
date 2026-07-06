@@ -174,6 +174,40 @@ def test_zhihu_discovery_items_to_contents_maps_non_search_sources() -> None:
     assert contents[1].author_name == "作者 F"
 
 
+def test_zhihu_discovery_items_to_contents_maps_cover_and_derives_title() -> None:
+    from openbiliclaw.sources.zhihu_tasks import zhihu_discovery_items_to_contents
+
+    contents = zhihu_discovery_items_to_contents(
+        [
+            {
+                "scope": "zhihu_search",
+                "search_keyword": "AI",
+                "title": "answer_2",
+                "url": "https://www.zhihu.com/question/1/answer/2",
+                "content_type": "answer",
+                "content_id": "2",
+                "summary": "这是回答的第一句话。后面还有更多内容。",
+                "cover": "https://pic1.zhimg.com/v2-abc.jpg",
+            },
+            {
+                "scope": "zhihu_hot",
+                "title": "answer_9",
+                "url": "https://www.zhihu.com/question/9",
+                "content_type": "question",
+                "content_id": "9",
+                "cover": "javascript:alert(1)",
+            },
+        ]
+    )
+
+    assert contents[0].title == "这是回答的第一句话"
+    assert contents[0].cover_url == "https://pic1.zhimg.com/v2-abc.jpg"
+    # No excerpt to derive from → readable placeholder, never the raw ID.
+    assert contents[1].title == "来自知乎的提问"
+    # Non-http cover values are rejected.
+    assert contents[1].cover_url == ""
+
+
 def test_zhihu_task_queue_claims_pending_task_until_terminal_status(
     database: Database,
 ) -> None:

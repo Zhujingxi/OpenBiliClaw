@@ -3953,6 +3953,8 @@ class Database:
                 COALESCE(c.view_count, 0) AS view_count,
                 COALESCE(c.like_count, 0) AS like_count,
                 COALESCE(c.danmaku_count, 0) AS danmaku_count,
+                COALESCE(c.favorite_count, 0) AS favorite_count,
+                COALESCE(c.comment_count, 0) AS comment_count,
                 COALESCE(c.up_mid, 0) AS up_mid
             FROM recommendations AS r
             LEFT JOIN content_cache AS c ON c.bvid = COALESCE(

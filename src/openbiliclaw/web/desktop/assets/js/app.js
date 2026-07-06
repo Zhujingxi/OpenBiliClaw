@@ -698,24 +698,45 @@
       return String(value);
     }
 
+    // Legacy content_cache rows persisted before issue #79 still carry raw
+    // `answer_<id>` / `zhihu_<id>` titles. Derive something readable from the
+    // body text (first sentence), else a generic label, so the card header is
+    // never a bare ID even without re-fetching.
+    const ID_TITLE_RE = /^(answer|article|question|zhihu)_\S+$/;
+    const ZHIHU_TITLE_PLACEHOLDERS = { answer: "来自知乎的回答", article: "来自知乎的文章", question: "来自知乎的提问" };
+    function displayRecommendationTitle(rawTitle, bodyText, contentType) {
+      const title = String(rawTitle || "").trim();
+      if (title && !ID_TITLE_RE.test(title)) return title;
+      const body = String(bodyText || "").trim();
+      if (body) {
+        const first = (body.split(/[。！？!?\n]/, 1)[0] || "").trim() || body;
+        return first.length > 40 ? `${first.slice(0, 40)}…` : first;
+      }
+      return ZHIHU_TITLE_PLACEHOLDERS[contentType] || (title || "未命名内容");
+    }
+
     function normalizeRecommendation(item) {
       const contentId = String(item?.content_id ?? item?.bvid ?? "");
+      const contentType = String(item?.content_type ?? "video").trim().toLowerCase() || "video";
+      const bodyText = decodeHtmlEntities(item?.body_text ?? "");
       return {
         id: Number(item?.id ?? Date.now()),
         bvid: String(item?.bvid ?? contentId),
         content_id: contentId,
-        title: decodeHtmlEntities(item?.title ?? "未命名内容"),
+        title: displayRecommendationTitle(decodeHtmlEntities(item?.title ?? ""), bodyText, contentType) || "未命名内容",
         up: decodeHtmlEntities(item?.up_name ?? item?.up ?? "未知创作者"),
         cover_url: normalizeImageUrl(item?.cover_url ?? item?.cover ?? item?.pic ?? item?.thumbnail_url ?? item?.thumbnail ?? item?.image_url),
         content_url: String(item?.content_url ?? ""),
         topic: decodeHtmlEntities(item?.topic_label ?? item?.topic ?? "未归类"),
         platform: normalizeSourcePlatform(item),
-        content_type: String(item?.content_type ?? "video").trim().toLowerCase() || "video",
-        body_text: decodeHtmlEntities(item?.body_text ?? ""),
+        content_type: contentType,
+        body_text: bodyText,
         duration: Number(item?.duration ?? 0) || 0,
         view_count: Number(item?.view_count ?? 0) || 0,
         like_count: Number(item?.like_count ?? 0) || 0,
         danmaku_count: Number(item?.danmaku_count ?? 0) || 0,
+        favorite_count: Number(item?.favorite_count ?? 0) || 0,
+        comment_count: Number(item?.comment_count ?? 0) || 0,
         up_mid: Number(item?.up_mid ?? 0) || 0,
         presented: Boolean(item?.presented),
         feedback_type: String(item?.feedback_type ?? item?.feedback ?? ""),
@@ -1865,13 +1886,26 @@
       return textCardContentTypes.has(String(item.content_type || "").toLowerCase()) || !hasCover;
     }
 
+    // A text card that still carries a cover (e.g. a Zhihu answer with an
+    // extracted thumbnail) renders the cover as a blurred backdrop behind the
+    // excerpt — issue #79 §2: glassmorphism unifies covered and cover-less
+    // cards instead of the flat gradient reading as a different visual style.
+    function recommendationTextCardBackdrop(item) {
+      return recommendationIsTextCard(item) ? imageProxyUrl(item.cover_url) : "";
+    }
+
     function recommendationCoverClass(item) {
-      return recommendationIsTextCard(item) ? " is-text-card" : "";
+      if (!recommendationIsTextCard(item)) return "";
+      return recommendationTextCardBackdrop(item) ? " is-text-card has-backdrop" : " is-text-card";
     }
 
     function recommendationMediaHtml(item) {
       if (recommendationIsTextCard(item)) {
-        return `<p class="cover-text">${escapeHtml(recommendationTextCardText(item))}</p>`;
+        const backdrop = recommendationTextCardBackdrop(item);
+        const backdropHtml = backdrop
+          ? `<img class="cover-backdrop" src="${escapeHtml(backdrop)}"${imgCrossOriginAttr()} alt="" aria-hidden="true" loading="eager" decoding="async" referrerpolicy="no-referrer">`
+          : "";
+        return `${backdropHtml}<p class="cover-text">${escapeHtml(recommendationTextCardText(item))}</p>`;
       }
       return coverImg(item);
     }
@@ -1901,6 +1935,8 @@
       const segments = [];
       if (item.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
       if (item.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
+      if (item.comment_count > 0) segments.push(`💬 ${formatCountCn(item.comment_count)}`);
+      if (item.favorite_count > 0) segments.push(`⭐ ${formatCountCn(item.favorite_count)}`);
       if (item.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
       return segments.join(" · ");
     }
