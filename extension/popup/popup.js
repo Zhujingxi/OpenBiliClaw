@@ -7095,6 +7095,11 @@ async function enableLocalOllamaEmbedding(enableBtn) {
       setHint(kicked.detail || "一键修复只支持本地 Ollama embedding。", "error");
       return;
     }
+    if (kicked.status === 409 && kicked.error !== "already_running" && kicked.detail) {
+      failBtn("重试");
+      setHint(kicked.detail, "error");
+      return;
+    }
     if (kicked.status === 403) {
       failBtn("重试");
       setHint("只能在本机操作 embedding 修复；请在装有后端的电脑上打开扩展。", "error");

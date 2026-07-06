@@ -56,6 +56,8 @@ const EMBEDDING_CHECK_TEXT = {
     "Ollama 已在运行，但缺 bge-m3 模型——推荐页横幅可一键拉取，或手动 `ollama pull bge-m3`。",
   model_broken:
     "bge-m3 已安装但调用持续失败——建议重新拉取（`ollama pull bge-m3`）或重启 Ollama。",
+  model_path_encoding:
+    "bge-m3 已安装，但模型路径含非 ASCII 字符。请设置 OLLAMA_MODELS 为纯英文路径后重启 Ollama 并重新拉取。",
   misconfigured: "embedding 配置无效，请到设置页重新选择 provider 并保存。",
   provider_error: "embedding 服务探测失败，请检查 provider 的 Key / 地址 / 网络。",
 };
