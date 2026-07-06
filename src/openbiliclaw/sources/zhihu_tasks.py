@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -49,6 +50,35 @@ ZHIHU_DISCOVERY_SCOPE_STRATEGIES = {
     "zhihu_creator": "zhihu-creator",
     "zhihu_related": "zhihu-related",
 }
+
+
+_ZHIHU_ID_TITLE_RE = re.compile(r"^(answer|article|question|zhihu)_\S+$")
+_ZHIHU_TITLE_PLACEHOLDERS = {
+    "answer": "来自知乎的回答",
+    "article": "来自知乎的文章",
+    "question": "来自知乎的提问",
+}
+_ZHIHU_TITLE_CLIP_LENGTH = 40
+
+
+def zhihu_display_title(title: str, summary: str, content_type: str) -> str:
+    """Readable title for Zhihu rows whose upstream title is missing (issue #79).
+
+    Older extension builds emit raw ``answer_<id>`` placeholders when the API
+    row lacks an embedded question title. Derive a title from the excerpt's
+    first sentence instead, falling back to a generic label so cards never
+    surface bare IDs.
+    """
+    cleaned = title.strip()
+    if cleaned and not _ZHIHU_ID_TITLE_RE.match(cleaned):
+        return cleaned
+    text = summary.strip()
+    if text:
+        first = re.split(r"[。！？!?\n]", text, maxsplit=1)[0].strip() or text
+        if len(first) > _ZHIHU_TITLE_CLIP_LENGTH:
+            return first[:_ZHIHU_TITLE_CLIP_LENGTH] + "…"
+        return first
+    return _ZHIHU_TITLE_PLACEHOLDERS.get(content_type, "来自知乎的内容")
 
 
 def _activity_event_type(action: str) -> str | None:
@@ -97,6 +127,7 @@ def zhihu_bootstrap_items_to_events(items: list[dict[str, Any]]) -> list[dict[st
         author = str(item.get("author", "")).strip()
         scope = str(item.get("scope", "")).strip()
         content_type = str(item.get("content_type", "")).strip()
+        title = zhihu_display_title(title, str(item.get("summary", "")), content_type)
         content_id = str(item.get("content_id", "")).strip()
         question_id = str(item.get("question_id", "")).strip()
         collection_name = str(item.get("collection_name", "")).strip()
@@ -196,6 +227,9 @@ def zhihu_discovery_items_to_contents(
         seen.add(key)
 
         summary = str(item.get("summary", "")).strip()
+        cover_url = str(item.get("cover", "")).strip()
+        if not cover_url.startswith(("https://", "http://")):
+            cover_url = ""
         keyword = str(item.get("search_keyword", "")).strip()
         source_keyword_id = _optional_int(item.get("source_keyword_id"))
         if scope == "zhihu_search" and source_keyword_id is None and keyword:
@@ -204,11 +238,12 @@ def zhihu_discovery_items_to_contents(
         contents.append(
             DiscoveredContent(
                 bvid=content_id or url,
-                title=title or url,
+                title=zhihu_display_title(title, summary, content_type),
                 up_name=str(item.get("author", "")).strip(),
                 author_name=str(item.get("author", "")).strip(),
                 description=summary,
                 body_text=summary,
+                cover_url=cover_url,
                 content_id=content_id or url,
                 content_url=url,
                 content_type=content_type,

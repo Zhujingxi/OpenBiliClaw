@@ -109,6 +109,96 @@ test("normalizeZhihuSearchResult maps search answers", () => {
   assert.equal(item?.url, "https://www.zhihu.com/question/1/answer/2");
 });
 
+test("normalizeZhihuSearchResult derives title from excerpt when question title is missing", () => {
+  const item = normalizeZhihuSearchResult(
+    {
+      type: "search_result",
+      object: {
+        type: "answer",
+        id: "2",
+        excerpt: "这是回答的第一句话。后面还有很长的内容不应该进标题。",
+        question: { id: "1" },
+        author: { name: "作者" },
+      },
+    },
+    "AI 工程化",
+  );
+
+  assert.equal(item?.title, "这是回答的第一句话");
+});
+
+test("normalizeZhihuSearchResult falls back to readable placeholder without title or excerpt", () => {
+  const item = normalizeZhihuSearchResult(
+    {
+      type: "search_result",
+      object: {
+        type: "answer",
+        id: "2",
+        question: { id: "1" },
+        author: { name: "作者" },
+      },
+    },
+    "AI 工程化",
+  );
+
+  assert.equal(item?.title, "来自知乎的回答");
+});
+
+test("normalizeZhihuSearchResult extracts covers from thumbnail field shapes", () => {
+  const direct = normalizeZhihuSearchResult(
+    {
+      object: {
+        type: "answer",
+        id: "2",
+        thumbnail: "https://pic1.zhimg.com/v2-abc.jpg",
+        question: { id: "1", title: "问题标题" },
+      },
+    },
+    "AI",
+  );
+  assert.equal(direct?.cover, "https://pic1.zhimg.com/v2-abc.jpg");
+
+  const nested = normalizeZhihuSearchResult(
+    {
+      object: {
+        type: "answer",
+        id: "2",
+        thumbnail_info: { thumbnails: [{ url: "//pic2.zhimg.com/v2-def.jpg" }] },
+        question: { id: "1", title: "问题标题" },
+      },
+    },
+    "AI",
+  );
+  assert.equal(nested?.cover, "https://pic2.zhimg.com/v2-def.jpg");
+
+  const none = normalizeZhihuSearchResult(
+    {
+      object: {
+        type: "answer",
+        id: "2",
+        question: { id: "1", title: "问题标题" },
+      },
+    },
+    "AI",
+  );
+  assert.equal(none?.cover, undefined);
+});
+
+test("normalizeZhihuActivity uses placeholder instead of answer_<id> when question title missing", () => {
+  const item = normalizeZhihuActivity({
+    id: "1710000000000",
+    action_text: "赞同了回答",
+    target: {
+      type: "answer",
+      id: "2",
+      url: "https://www.zhihu.com/question/1/answer/2",
+      author: { name: "作者" },
+    },
+  });
+
+  assert.equal(item?.title, "来自知乎的回答");
+});
+
 test("normalizeZhihuHotItem maps hot-list targets", () => {
   const item = normalizeZhihuHotItem({
     target: {
