@@ -25,13 +25,16 @@ def test_recommendation_click_tracking_uses_click_and_auxclick_without_window_op
     assert open_match is not None, "openRecommendation function not found"
     open_body = open_match.group("body")
 
+    # Recommendation card opening is anchor-native: openRecommendation only
+    # tracks, never window.open()s. (The delight 去看看 button IS a plain button
+    # and legitimately window.open()s — see the delight test below — so this
+    # guard is scoped to openRecommendation, not the whole file.)
     assert "window.open" not in open_body
     assert "preventDefault" not in open_body
     assert "trackRecommendationClick(item);" in open_body
     assert 'addEventListener("click", () => openRecommendation(item, card))' in app_js
     assert 'addEventListener("auxclick", (event)' in app_js
     assert "event.button === 1" in app_js
-    assert 'window.open(url, "_blank", "noopener,noreferrer")' not in app_js
 
 
 def test_saved_message_and_delight_content_opens_use_anchor_semantics() -> None:
@@ -48,6 +51,37 @@ def test_saved_message_and_delight_content_opens_use_anchor_semantics() -> None:
     assert 'document.createElement("a")' in app_js
     assert "function delightContentUrl(delight)" in app_js
     assert 'window.open(msg.content_url, "_blank", "noopener,noreferrer")' not in app_js
+
+
+def test_delight_view_button_actually_opens_the_content() -> None:
+    """The 去看看 button on the delight card is a plain <button> (only the cover
+    thumbnail is an <a>), so its click must open the URL from JS. It previously
+    only tracked + toasted 「已打开」 without opening anything (field report
+    2026-07-07). The cover anchor keeps opening natively, so respondDelight
+    only window.open()s when the caller asks (openUrl), avoiding a double-open.
+    """
+    app_js = APP_JS.read_text(encoding="utf-8")
+
+    # respondDelight takes an openUrl flag and opens in the view branch.
+    assert (
+        "async function respondDelight(delight, response, el = null, openUrl = false)" in app_js
+    )
+    view_match = re.search(
+        r'if \(response === "view"\) \{(?P<body>.*?)\n        return;\n      \}',
+        app_js,
+        flags=re.S,
+    )
+    assert view_match is not None, "delight view branch not found"
+    view_body = view_match.group("body")
+    assert 'if (openUrl && url) window.open(url, "_blank", "noopener,noreferrer");' in view_body
+
+    # The 去看看 button ([data-delight] handler) passes openUrl=true for view.
+    assert 'await respondDelight(state.delight, response, null, response === "view");' in app_js
+
+    # The cover thumbnail triggers must NOT pass openUrl (they navigate via the
+    # native <a href>), so there's no double-open.
+    assert 'respondDelight(state.delight, "view"));' in app_js
+    assert 'if (event.button === 1) respondDelight(state.delight, "view");' in app_js
 
 
 def test_cover_css_resets_anchor_defaults() -> None:

@@ -3718,7 +3718,7 @@
       window.setTimeout(poll, 1200);
     }
 
-    async function respondDelight(delight, response, el = null) {
+    async function respondDelight(delight, response, el = null, openUrl = false) {
       if (!delight) return;
       if (response === "chat") { openDelightComposer(); return; }
       if (response === "cancel-comment") { closeDelightComposer(); return; }
@@ -3788,6 +3788,11 @@
       }
       if (response === "view") {
         const url = delightContentUrl(delight);
+        // 「去看看」按钮是纯 <button>（不是封面那个 <a>），必须在这里显式打开，
+        // 否则点了只弹 toast 却什么都不开（field report 2026-07-07）。封面缩略图
+        // 已是带 href 的 <a> 靠原生导航打开，openUrl=false 不重复开、避免双开。
+        // window.open 在点击手势的同步栈内调用，不会被拦截。
+        if (openUrl && url) window.open(url, "_blank", "noopener,noreferrer");
         trackRecommendationClick(delight);
         // 浏览过即已读：上报 view 让后端标记 delight_notified，下次重灌不再出现。
         // fire-and-forget，不阻塞打开内容；当场卡片仍保留。
@@ -5890,7 +5895,8 @@
       const response = btn.dataset.delight;
       if (response === "prev") { setActiveDelight(state.delightIndex - 1); return; }
       if (response === "next") { setActiveDelight(state.delightIndex + 1); return; }
-      await respondDelight(state.delight, response);
+      // 「去看看」是纯按钮（不像封面 <a> 能原生导航），必须由 JS 打开内容。
+      await respondDelight(state.delight, response, null, response === "view");
     }));
 
     restoreBackendEndpoint();
