@@ -269,7 +269,10 @@ def test_web_surfaces_offer_embedding_repair_and_progress() -> None:
         assert "Ollama 启动中" in surface
         assert "model_missing" in surface and "model_broken" in surface
         assert "model_path_encoding" in surface
+        assert "disk_full" in surface and "network" in surface and "model_oom" in surface
+        assert "provider_error" in surface
         assert "迁移模型目录并修复" in surface
+        assert "重新检测" in surface
         assert "embeddingPullProgressView" in surface
     assert '"/api/embedding/repair"' in setup_html
     assert "embedding_repair_running" in setup_html  # keeps polling while downloading

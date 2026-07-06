@@ -847,6 +847,9 @@
         embeddingPhaseHint(prereq),
         String(prereq.embedding_pull_status || prereq.embedding_detail || "").trim()
       ].filter(Boolean).join(" ");
+      const embeddingCheck = String(prereq.embedding_check || "");
+      const embeddingAutoRepairable = ["model_missing", "model_broken", "model_path_encoding"].includes(embeddingCheck);
+      const embeddingGuidanceOnly = ["disk_full", "network", "model_oom", "provider_error"].includes(embeddingCheck);
       // label 必须反映探测的真实结果——固定写“已登录”的条目名一旦不再是红 ✗，
       // 用户就会把它读成“已经登录了”。
       const biliOk = Boolean(prereq.bilibili_logged_in);
@@ -884,8 +887,10 @@
               : "未配置 embedding 时可以先初始化；推荐去重和语义检索会弱一些。"),
           // One-click server-side `ollama pull`; hidden while repairing (the
           // hint already shows live percent).
-          repairable: ["model_missing", "model_broken", "model_path_encoding"].includes(prereq.embedding_check),
-          repairLabel: prereq.embedding_check === "model_path_encoding" ? "迁移模型目录并修复" : "自动下载向量模型"
+          repairable: embeddingAutoRepairable || embeddingGuidanceOnly,
+          repairLabel: embeddingCheck === "model_path_encoding"
+            ? "迁移模型目录并修复"
+            : embeddingGuidanceOnly ? "重新检测" : "自动下载向量模型"
         },
         {
           key: "platforms",
@@ -989,8 +994,9 @@
     // checklist is re-rendered per poll, so the handler is DELEGATED from the
     // <ul> (bound once in renderInitOnboarding) instead of per-button.
     async function handleEmbeddingRepairClick(btn) {
+      const originalLabel = btn.textContent || "自动下载向量模型";
       btn.disabled = true;
-      btn.textContent = "启动下载…";
+      btn.textContent = originalLabel === "重新检测" ? "检测中…" : "启动下载…";
       try {
         await requestJsonStrict(ENDPOINTS.embeddingRepair, { method: "POST" });
       } catch (error) {
@@ -998,7 +1004,7 @@
         // state; every other error re-enables the button with the reason.
         if (error?.status !== 409 || error?.details?.error !== "already_running") {
           btn.disabled = false;
-          btn.textContent = "下载启动失败，重试";
+          btn.textContent = originalLabel;
           state.initReason = error?.details?.detail || error?.message || "向量模型修复启动失败。";
           renderInitOnboarding();
           return;

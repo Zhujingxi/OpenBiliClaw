@@ -418,6 +418,9 @@
         embeddingPhaseHint(prereq),
         String(prereq.embedding_pull_status || prereq.embedding_detail || "").trim(),
       ].filter(Boolean).join(" ");
+      const embeddingCheck = String(prereq.embedding_check || "");
+      const embeddingAutoRepairable = ["model_missing", "model_broken", "model_path_encoding"].includes(embeddingCheck);
+      const embeddingGuidanceOnly = ["disk_full", "network", "model_oom", "provider_error"].includes(embeddingCheck);
       // Label must state the ACTUAL probe result — a fixed "已登录" item name
       // reads as "logged in" the moment the row stops being a red ✗.
       const biliOk = Boolean(prereq.bilibili_logged_in);
@@ -457,8 +460,10 @@
           // One-click server-side `ollama pull` when the missing model is the
           // only problem (v0.3.155+). Hidden while a repair is running — the
           // hint line already shows live progress.
-          repairable: ["model_missing", "model_broken", "model_path_encoding"].includes(prereq.embedding_check),
-          repairLabel: prereq.embedding_check === "model_path_encoding" ? "迁移模型目录并修复" : "自动下载向量模型",
+          repairable: embeddingAutoRepairable || embeddingGuidanceOnly,
+          repairLabel: embeddingCheck === "model_path_encoding"
+            ? "迁移模型目录并修复"
+            : embeddingGuidanceOnly ? "重新检测" : "自动下载向量模型",
         },
         {
           key: "platforms",
@@ -540,8 +545,9 @@
     // 3s init-status poll then renders live percent on the checklist row
     // (embedding_check="repairing"). 409 already_running is success-shaped.
     async function startEmbeddingRepairFromChecklist(btn) {
+      const originalLabel = btn.textContent || "自动下载向量模型";
       btn.disabled = true;
-      btn.textContent = "启动下载…";
+      btn.textContent = originalLabel === "重新检测" ? "检测中…" : "启动下载…";
       try {
         const r = await fetch("/api/embedding/repair", { method: "POST" });
         if (!r.ok && r.status !== 409) throw new Error("HTTP " + r.status);
@@ -552,7 +558,7 @@
         scheduleInitPoll(300);
       } catch (e) {
         btn.disabled = false;
-        btn.textContent = "下载启动失败，重试";
+        btn.textContent = originalLabel;
         setInitReason(`向量模型下载启动失败：${e.message || e}`);
       }
     }

@@ -10645,8 +10645,10 @@ class TestEmbeddingDiagnosisAndRepair:
         )
         start_calls: list[str] = []
         pulled: list[str] = []
+        diagnose_calls: list[tuple[str, str]] = []
 
         async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            diagnose_calls.append((base_url, model))
             return next(diagnoses)
 
         def fake_start() -> bool:
@@ -10683,6 +10685,7 @@ class TestEmbeddingDiagnosisAndRepair:
                 time.sleep(0.05)
 
         assert start_calls == ["start"]
+        assert len(diagnose_calls) == 2
         assert pulled == ["bge-m3"]
         assert status.get("ok") is True
 
@@ -10758,6 +10761,176 @@ class TestEmbeddingDiagnosisAndRepair:
         assert resp.status_code == 409
         assert resp.json()["error"] == "not_running"
         assert start_calls == []
+
+    @pytest.mark.parametrize(
+        ("diagnosis", "detail"),
+        [
+            ("disk_full", "磁盘空间不足，至少需要 2.0 GB。"),
+            ("network", "无法访问模型下载源 registry，请检查网络。"),
+            ("model_oom", "内存不足以加载模型，重新下载无效。"),
+        ],
+    )
+    def test_repair_terminal_guidance_causes_do_not_start_pull(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        diagnosis: str,
+        detail: str,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        pulled: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return (diagnosis, detail)
+
+        async def fake_pull(base_url: str, model: str, *, on_progress=None, **_kw: object):
+            pulled.append(model)
+            return (True, "")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", fake_pull)
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body["error"] == diagnosis
+        assert body["detail"] == detail
+        assert pulled == []
+
+    def test_repair_disk_precheck_short_circuits_missing_model_pull(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        pulled: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("model_missing", "缺 bge-m3")
+
+        async def fake_pull(base_url: str, model: str, *, on_progress=None, **_kw: object):
+            pulled.append(model)
+            return (True, "")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.ollama_embedding_disk_space_error",
+            lambda *_args, **_kw: ("disk_full", "磁盘空间不足，至少需要 2.0 GB。"),
+        )
+        monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", fake_pull)
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "disk_full"
+        assert pulled == []
+
+    def test_repair_provider_error_restarts_managed_ollama_once_then_409(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        diagnoses = iter(
+            [
+                ("error", "Ollama 响应异常（GET /api/tags -> 500）：server busy"),
+                ("error", "Ollama 响应异常（GET /api/tags -> 500）：server busy"),
+            ]
+        )
+        restart_calls: list[str] = []
+        pulled: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return next(diagnoses)
+
+        def fake_restart() -> tuple[bool, str]:
+            restart_calls.append("restart")
+            return (True, "")
+
+        async def fake_pull(base_url: str, model: str, *, on_progress=None, **_kw: object):
+            pulled.append(model)
+            return (True, "")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor.restart_managed_ollama", fake_restart
+        )
+        monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", fake_pull)
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body["error"] == "provider_error"
+        assert "server busy" in body["detail"]
+        assert "NO_PROXY" in body["detail"]
+        assert restart_calls == ["restart"]
+        assert pulled == []
+
+    def test_repair_provider_error_never_restarts_external_ollama(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        restart_calls: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("error", "Ollama 响应异常（GET /api/tags -> 500）：server busy")
+
+        def fake_restart() -> tuple[bool, str]:
+            restart_calls.append("restart")
+            return (True, "")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor.restart_managed_ollama", fake_restart
+        )
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        cfg = app.state.runtime_context.config
+        cfg.autostart.manage_ollama = False
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "provider_error"
+        assert restart_calls == []
+
+    def test_repair_loop_is_bounded_when_remediation_does_not_change_diagnosis(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        start_calls: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("not_running", "Ollama 服务无法连接")
+
+        def fake_start() -> bool:
+            start_calls.append("start")
+            return True
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor._ollama_start_serve_background",
+            fake_start,
+        )
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body["error"] == "not_running"
+        assert "自动修复已达到上限" in body["detail"]
+        assert len(start_calls) == 3
 
     def test_repair_pulls_model_and_reports_done(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -213,6 +213,15 @@ def restart_managed_ollama_with_models_dir(models_dir: str) -> tuple[bool, str]:
     return (ok, "" if ok else "start_failed")
 
 
+def restart_managed_ollama() -> tuple[bool, str]:
+    """Restart the daemon this process owns without changing its model directory."""
+    if _ollama_is_running() and _managed_proc is None:
+        return (False, "external_ollama")
+    stop_managed_ollama()
+    ok = _ollama_start_serve_background()
+    return (ok, "" if ok else "start_failed")
+
+
 def stop_managed_ollama() -> bool:
     """Stop the ``ollama serve`` daemon this process started, if any.
 

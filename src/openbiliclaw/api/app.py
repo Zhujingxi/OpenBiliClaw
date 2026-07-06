@@ -1904,14 +1904,16 @@ def create_app(
                     diagnose_ollama_embedding(base_url, model),
                     timeout=_EMBEDDING_PROBE_TIMEOUT_SECONDS,
                 )
+                if diag[0] == "error":
+                    diag = ("provider_error", _provider_error_detail(diag[1]))
             except TimeoutError:
                 diag = (
-                    "error",
+                    "provider_error",
                     "Ollama 诊断超时——服务可能正在冷加载模型，稍后自动重试。",
                 )
             except Exception:
                 logger.debug("Embedding diagnosis errored", exc_info=True)
-                diag = ("error", "embedding 诊断失败，请查看后端日志。")
+                diag = ("provider_error", "embedding 诊断失败，请查看后端日志。")
             _embedding_diag_value = diag
             _embedding_diag_checked_at = time.monotonic()
             return diag
@@ -2383,6 +2385,7 @@ def create_app(
         "error": "",
     }
     _embedding_repair_lock = asyncio.Lock()
+    _max_embedding_repair_actions = 3
 
     def _repair_progress_detail() -> str:
         """Human progress line for the in-flight pull (init pages render it)."""
@@ -2431,6 +2434,13 @@ def create_app(
             "status_text": str(snap.get("status_text") or ""),
         }
 
+    def _provider_error_detail(detail: str) -> str:
+        base = detail.strip() or "Ollama 响应异常。"
+        return (
+            f"{base} 请升级 Ollama 到较新版本，确认 11434 端口没有被其他程序占用；"
+            "如果本机回环被代理劫持，请关闭代理或设置 NO_PROXY=127.0.0.1,localhost 后重试。"
+        )
+
     async def _run_embedding_repair(base_url: str, model: str) -> None:
         from openbiliclaw.llm.ollama_diagnostics import pull_ollama_model
 
@@ -2477,92 +2487,157 @@ def create_app(
         base_url, model = _embedding_ollama_target()
 
         from openbiliclaw.llm.ollama_diagnostics import (
+            DIAG_DISK_FULL,
+            DIAG_ERROR,
+            DIAG_MODEL_BROKEN,
+            DIAG_MODEL_MISSING,
+            DIAG_MODEL_OOM,
             DIAG_MODEL_PATH_ENCODING,
+            DIAG_NETWORK,
             DIAG_NOT_RUNNING,
             DIAG_OK,
             diagnose_ollama_embedding,
+            ollama_embedding_disk_space_error,
         )
 
         async with _embedding_repair_lock:
             if _embedding_repair_state["running"]:
                 return JSONResponse({"error": "already_running"}, status_code=409)
-            code, detail = await diagnose_ollama_embedding(base_url, model)
-            if code == DIAG_OK:
-                _expire_embedding_ready_cache()
-                return JSONResponse({"ok": True, "already_ok": True, "model": model})
-            if code == DIAG_NOT_RUNNING:
-                from openbiliclaw.runtime.ollama_supervisor import (
-                    _is_default_ollama_endpoint,
-                    _ollama_start_serve_background,
-                    effective_ollama_endpoint,
-                    is_loopback,
-                    ollama_required,
-                )
-
-                cfg = ctx.config
-                endpoint = effective_ollama_endpoint(cfg)
-                may_manage = (
-                    bool(getattr(getattr(cfg, "autostart", None), "manage_ollama", False))
-                    and ollama_required(cfg)
-                    and is_loopback(endpoint)
-                    and _is_default_ollama_endpoint(endpoint)
-                )
-                if not may_manage or not _ollama_start_serve_background():
-                    return JSONResponse(
-                        {"error": "not_running", "detail": detail},
-                        status_code=409,
-                    )
+            actions = 0
+            provider_error_restarted = False
+            while True:
                 code, detail = await diagnose_ollama_embedding(base_url, model)
                 if code == DIAG_OK:
                     _expire_embedding_ready_cache()
                     return JSONResponse({"ok": True, "already_ok": True, "model": model})
                 if code == DIAG_NOT_RUNNING:
-                    return JSONResponse(
-                        {"error": "not_running", "detail": detail},
-                        status_code=409,
+                    from openbiliclaw.runtime.ollama_supervisor import (
+                        _is_default_ollama_endpoint,
+                        _ollama_start_serve_background,
+                        effective_ollama_endpoint,
+                        is_loopback,
+                        ollama_required,
                     )
-            if code == DIAG_MODEL_PATH_ENCODING:
-                from openbiliclaw.runtime.ollama_supervisor import (
-                    ollama_models_relocation_candidate,
-                    restart_managed_ollama_with_models_dir,
-                )
 
-                manual_detail = (
-                    "检测到模型路径含非 ASCII 字符（常见于中文 Windows 用户名），"
-                    "llama-server 无法从该路径加载模型，重新下载不能解决。"
-                    "请手动设置系统环境变量 OLLAMA_MODELS 为纯英文路径"
-                    f"（如 D:\\ollama\\models），然后重启 Ollama 并重新拉取 {model}。"
+                    cfg = ctx.config
+                    endpoint = effective_ollama_endpoint(cfg)
+                    may_manage = (
+                        bool(getattr(getattr(cfg, "autostart", None), "manage_ollama", False))
+                        and ollama_required(cfg)
+                        and is_loopback(endpoint)
+                        and _is_default_ollama_endpoint(endpoint)
+                    )
+                    if not may_manage:
+                        return JSONResponse(
+                            {"error": "not_running", "detail": detail},
+                            status_code=409,
+                        )
+                    if actions >= _max_embedding_repair_actions:
+                        return JSONResponse(
+                            {
+                                "error": "not_running",
+                                "detail": f"自动修复已达到上限：{detail}",
+                            },
+                            status_code=409,
+                        )
+                    if not _ollama_start_serve_background():
+                        return JSONResponse(
+                            {"error": "not_running", "detail": detail},
+                            status_code=409,
+                        )
+                    actions += 1
+                    continue
+                if code == DIAG_MODEL_PATH_ENCODING:
+                    from openbiliclaw.runtime.ollama_supervisor import (
+                        ollama_models_relocation_candidate,
+                        restart_managed_ollama_with_models_dir,
+                    )
+
+                    manual_detail = (
+                        "检测到模型路径含非 ASCII 字符（常见于中文 Windows 用户名），"
+                        "llama-server 无法从该路径加载模型，重新下载不能解决。"
+                        "请手动设置系统环境变量 OLLAMA_MODELS 为纯英文路径"
+                        f"（如 D:\\ollama\\models），然后重启 Ollama 并重新拉取 {model}。"
+                    )
+                    models_dir = ollama_models_relocation_candidate()
+                    if models_dir is None:
+                        return JSONResponse(
+                            {"error": "manual_fix_required", "detail": manual_detail},
+                            status_code=409,
+                        )
+                    restarted, reason = restart_managed_ollama_with_models_dir(models_dir)
+                    if not restarted and reason == "external_ollama":
+                        return JSONResponse(
+                            {
+                                "error": "external_ollama",
+                                "detail": (
+                                    "检测到外部启动的 Ollama，我们无法带新模型目录重启它；"
+                                    "请手动设置 OLLAMA_MODELS，或退出外部 Ollama 后重试。"
+                                ),
+                            },
+                            status_code=409,
+                        )
+                    if not restarted:
+                        return JSONResponse(
+                            {
+                                "error": "restart_failed",
+                                "detail": (
+                                    "迁移模型目录后重启 Ollama 失败，"
+                                    "请重启应用或手动设置 OLLAMA_MODELS。"
+                                ),
+                            },
+                            status_code=409,
+                        )
+                    if disk_error := ollama_embedding_disk_space_error(model):
+                        disk_code, disk_detail = disk_error
+                        return JSONResponse(
+                            {"error": disk_code, "detail": disk_detail},
+                            status_code=409,
+                        )
+                    break
+                if code in {DIAG_DISK_FULL, DIAG_NETWORK, DIAG_MODEL_OOM}:
+                    return JSONResponse({"error": code, "detail": detail}, status_code=409)
+                if code == DIAG_ERROR:
+                    if not provider_error_restarted:
+                        from openbiliclaw.runtime.ollama_supervisor import (
+                            _is_default_ollama_endpoint,
+                            effective_ollama_endpoint,
+                            is_loopback,
+                            ollama_required,
+                            restart_managed_ollama,
+                        )
+
+                        cfg = ctx.config
+                        endpoint = effective_ollama_endpoint(cfg)
+                        may_manage = (
+                            bool(getattr(getattr(cfg, "autostart", None), "manage_ollama", False))
+                            and ollama_required(cfg)
+                            and is_loopback(endpoint)
+                            and _is_default_ollama_endpoint(endpoint)
+                        )
+                        provider_error_restarted = True
+                        if may_manage and actions < _max_embedding_repair_actions:
+                            restarted, _reason = restart_managed_ollama()
+                            if restarted:
+                                actions += 1
+                                continue
+                    return JSONResponse(
+                        {"error": "provider_error", "detail": _provider_error_detail(detail)},
+                        status_code=409,
+                    )
+                if code in {DIAG_MODEL_MISSING, DIAG_MODEL_BROKEN}:
+                    if disk_error := ollama_embedding_disk_space_error(model):
+                        disk_code, disk_detail = disk_error
+                        return JSONResponse(
+                            {"error": disk_code, "detail": disk_detail},
+                            status_code=409,
+                        )
+                    break
+                return JSONResponse(
+                    {"error": "provider_error", "detail": _provider_error_detail(detail)},
+                    status_code=409,
                 )
-                models_dir = ollama_models_relocation_candidate()
-                if models_dir is None:
-                    return JSONResponse(
-                        {"error": "manual_fix_required", "detail": manual_detail},
-                        status_code=409,
-                    )
-                restarted, reason = restart_managed_ollama_with_models_dir(models_dir)
-                if not restarted and reason == "external_ollama":
-                    return JSONResponse(
-                        {
-                            "error": "external_ollama",
-                            "detail": (
-                                "检测到外部启动的 Ollama，我们无法带新模型目录重启它；"
-                                "请手动设置 OLLAMA_MODELS，或退出外部 Ollama 后重试。"
-                            ),
-                        },
-                        status_code=409,
-                    )
-                if not restarted:
-                    return JSONResponse(
-                        {
-                            "error": "restart_failed",
-                            "detail": (
-                                "迁移模型目录后重启 Ollama 失败，"
-                                "请重启应用或手动设置 OLLAMA_MODELS。"
-                            ),
-                        },
-                        status_code=409,
-                    )
-            # model_missing / model_broken / error → a (re-)pull is the fix.
+            # model_missing / model_broken (and path migration) are pull-fixable.
             _embedding_repair_state.update(
                 {
                     "running": True,

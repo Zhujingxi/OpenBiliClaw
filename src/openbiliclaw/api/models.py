@@ -64,7 +64,8 @@ class InitPrerequisitesOut(BaseModel):
     embedding_ready: bool = False
     # Classified cause when embedding_ready is False, so the UI can say
     # WHY instead of a dead retry (v0.3.155+): ok | disabled | misconfigured |
-    # not_running | model_missing | model_broken | provider_error | error.
+    # not_running | model_missing | model_broken | model_path_encoding |
+    # disk_full | network | model_oom | provider_error | error.
     embedding_check: str = "ok"
     embedding_detail: str = ""  # human-readable hint ("" when ok/disabled)
     # Live pull progress while a one-click repair is downloading the model
