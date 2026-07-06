@@ -983,8 +983,14 @@ def test_gemini_missing_sdk_error_includes_import_failure_detail(
         'dlopen failed: cannot locate symbol "PyExc_Warning"',
     )
 
+    # Use the class off the just-patched module object, NOT the top-level
+    # `GeminiProvider` binding: test_gemini_optional_import does a delete+reimport
+    # of this module, which can leave the top-level binding pointing at a
+    # different module object than sys.modules — then __init__ would read a
+    # DIFFERENT module's (unpatched) genai/types and spuriously not raise when
+    # the whole suite runs (green in isolation, red in CI).
     with pytest.raises(LLMProviderError, match="PyExc_Warning"):
-        GeminiProvider(api_key="test-key")
+        gemini_provider_mod.GeminiProvider(api_key="test-key")
 
 
 @pytest.mark.asyncio
