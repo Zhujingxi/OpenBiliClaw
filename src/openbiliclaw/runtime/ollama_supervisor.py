@@ -187,9 +187,13 @@ def _ollama_start_serve_background() -> bool:
 def restart_managed_ollama_with_models_dir(models_dir: str) -> tuple[bool, str]:
     """Restart a daemon we own so future pulls use ``models_dir``."""
     target = os.path.abspath(os.path.expanduser(models_dir))
-    os.makedirs(target, exist_ok=True)
+    # Refuse an external daemon *before* creating the dir: ``managed_models_dir``
+    # treats the dir's existence as the migration marker, so leaving an empty one
+    # behind on a refused attempt would make a later managed start point
+    # OLLAMA_MODELS at a modeless dir. Bail first, create only when we own it.
     if _ollama_is_running() and _managed_proc is None:
         return (False, "external_ollama")
+    os.makedirs(target, exist_ok=True)
     stop_managed_ollama()
     ok = _ollama_start_serve_background()
     return (ok, "" if ok else "start_failed")

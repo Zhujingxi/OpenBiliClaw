@@ -321,7 +321,10 @@ def test_restart_managed_ollama_refuses_foreign_daemon(
 
     assert ok is False
     assert reason == "external_ollama"
-    assert models_dir.is_dir()
+    # A refused attempt must NOT leave the migration-marker dir behind: its mere
+    # existence would make a later managed start point OLLAMA_MODELS at a
+    # modeless dir (managed_models_dir uses existence as the marker).
+    assert not models_dir.exists()
 
 
 def test_cli_keeps_ollama_re_exports() -> None:
