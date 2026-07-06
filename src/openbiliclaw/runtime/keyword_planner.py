@@ -287,6 +287,20 @@ _MERGED_TOKENS_PER_KEYWORD = 48
 _MERGED_JSON_OVERHEAD_TOKENS = 1024
 _MERGED_MIN_MAX_TOKENS = 4096
 _INSPIRATION_AXIS_KEYWORD_MAX_TOKENS = 8192
+# F2 (Phase 2.1): the single axis+keyword call keeps the 8192 floor for small
+# slot counts and only scales past a comfortable threshold, so high-platform
+# runs (F1 makes each core_concept longer) do not brush the output ceiling.
+# ``max_tokens = min(CEIL, floor + max(0, slots - THRESHOLD) * PER_SLOT)``;
+# slots = len(selected_interests) * len(target_platforms). THRESHOLD=12 is the
+# 3-platform comfort point (production caps interests at 4, so 3×4=12); the
+# 6-platform case (4×6=24) therefore gets real headroom (11264) instead of
+# sitting exactly on the threshold. CEIL stays 16384 — the bounded single retry
+# at the floor is the fallback for a provider/gateway whose real ceiling turns
+# out lower (see report: deepseek-v4-flash's own ceiling is 64K, but the
+# sensenova gateway cap could not be confirmed here).
+_INSPIRATION_AXIS_KEYWORD_MAX_TOKENS_CEIL = 16384
+_PER_SLOT_TOKEN_BUDGET = 256
+_INSPIRATION_AXIS_KEYWORD_SLOT_THRESHOLD = 12
 _INSPIRATION_AXIS_KEYWORD_MAX_INTERESTS = 4
 _INSPIRATION_AXIS_KEYWORD_MAX_AXES_PER_INTEREST = 6
 _INSPIRATION_AXIS_KEYWORD_MAX_EVIDENCE_TOTAL = 24

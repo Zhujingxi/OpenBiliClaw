@@ -47,8 +47,11 @@ from openbiliclaw.llm.task_options import without_core_memory_kwargs
 from openbiliclaw.runtime.keyword_planner import (
     _AXIS_BACKFILL_MIN_INTERVAL_HOURS,
     _INSPIRATION_AXIS_KEYWORD_MAX_TOKENS,
+    _INSPIRATION_AXIS_KEYWORD_MAX_TOKENS_CEIL,
+    _INSPIRATION_AXIS_KEYWORD_SLOT_THRESHOLD,
     _INSPIRATION_MIN_AXES_PER_INTEREST,
     _INSPIRATION_PROVIDER_TIMEOUT_SECONDS,
+    _PER_SLOT_TOKEN_BUDGET,
     _PLATFORM_QUERY_STYLES,
     _allocation_target_platforms,
     _as_str_list,
@@ -71,6 +74,29 @@ logger = logging.getLogger(__name__)
 # resolution happens in this async layer; the sync upsert DAO stays zero-I/O.
 _AXIS_EMBEDDING_MERGE_THRESHOLD = 0.92
 _AXIS_EMBEDDING_TIMEOUT_SECONDS = 4.0
+
+# Substrings that identify a max_tokens / context-length rejection surfaced by
+# the provider as a generic API error (there is no dedicated exception type —
+# openai_compatible passes max_tokens verbatim and the gateway returns a 400).
+# Only these errors trigger the bounded floor-retry (F2, Codex R1 S2); every
+# other exception falls straight through to the deterministic fallback.
+_MAX_TOKENS_ERROR_MARKERS: tuple[str, ...] = (
+    "max_tokens",
+    "max tokens",
+    "maximum tokens",
+    "max_completion_tokens",
+    "maximum context length",
+    "context length",
+    "context_length_exceeded",
+    "too many tokens",
+    "reduce the length",
+    "exceeds the maximum",
+)
+
+
+def _is_max_tokens_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _MAX_TOKENS_ERROR_MARKERS)
 
 
 class InspirationKeywordPipeline:
@@ -161,20 +187,43 @@ class InspirationKeywordPipeline:
             fresh_evidence=capped_evidence,
             allocation_targets=allocation_targets,
         )
+        # F2: scale max_tokens with the slot count so high-platform runs (longer
+        # core_concepts) don't clip the output. slots use the pre-cap counts the
+        # formula names; the value is recorded on telemetry.
+        target_platforms = _allocation_target_platforms(allocation_targets)
+        slots = len(list(selected_interests)) * len(target_platforms)
+        requested_max_tokens = self._axis_keyword_max_tokens(slots)
+        telemetry["max_tokens_requested"] = requested_max_tokens
+        telemetry["max_tokens_retry"] = False
         complete_structured = self._llm.complete_structured_task
         try:
-            response = await complete_structured(
-                system_instruction=messages[0]["content"],
-                user_input=messages[1]["content"],
-                caller="discovery.keyword_inspiration",
-                reasoning_effort="",
-                max_tokens=_INSPIRATION_AXIS_KEYWORD_MAX_TOKENS,
-                **without_core_memory_kwargs(complete_structured),
+            response = await self._invoke_axis_keyword_call(
+                complete_structured, messages, requested_max_tokens
             )
-        except Exception:
-            logger.debug("keyword inspiration axis-keyword LLM call failed", exc_info=True)
-            telemetry["llm_call_failed"] = True
-            return [], [], telemetry
+        except Exception as exc:
+            # provider protection (Codex R1 S2): a max_tokens rejection at a
+            # scaled request gets ONE bounded retry at the 8192 floor — error
+            # recovery, NOT a salvage-repair loop. Only max_tokens errors, and
+            # only when we actually asked for more than the floor.
+            if requested_max_tokens > _INSPIRATION_AXIS_KEYWORD_MAX_TOKENS and _is_max_tokens_error(
+                exc
+            ):
+                telemetry["max_tokens_retry"] = True
+                telemetry["max_tokens_requested"] = _INSPIRATION_AXIS_KEYWORD_MAX_TOKENS
+                try:
+                    response = await self._invoke_axis_keyword_call(
+                        complete_structured, messages, _INSPIRATION_AXIS_KEYWORD_MAX_TOKENS
+                    )
+                except Exception:
+                    logger.debug(
+                        "keyword inspiration axis-keyword retry at floor failed", exc_info=True
+                    )
+                    telemetry["llm_call_failed"] = True
+                    return [], [], telemetry
+            else:
+                logger.debug("keyword inspiration axis-keyword LLM call failed", exc_info=True)
+                telemetry["llm_call_failed"] = True
+                return [], [], telemetry
 
         axes, candidates, parse_telemetry = _parse_inspiration_axis_keyword_payload(
             str(getattr(response, "content", "") or ""),
@@ -185,6 +234,30 @@ class InspirationKeywordPipeline:
         if not axes and not candidates:
             telemetry["llm_call_failed"] = True
         return axes, candidates, telemetry
+
+    @staticmethod
+    def _axis_keyword_max_tokens(slots: int) -> int:
+        """Scale max_tokens with slot count (F2): floor below the threshold."""
+        over = max(0, int(slots) - _INSPIRATION_AXIS_KEYWORD_SLOT_THRESHOLD)
+        return min(
+            _INSPIRATION_AXIS_KEYWORD_MAX_TOKENS_CEIL,
+            _INSPIRATION_AXIS_KEYWORD_MAX_TOKENS + over * _PER_SLOT_TOKEN_BUDGET,
+        )
+
+    async def _invoke_axis_keyword_call(
+        self,
+        complete_structured: Any,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+    ) -> Any:
+        return await complete_structured(
+            system_instruction=messages[0]["content"],
+            user_input=messages[1]["content"],
+            caller="discovery.keyword_inspiration",
+            reasoning_effort="",
+            max_tokens=max_tokens,
+            **without_core_memory_kwargs(complete_structured),
+        )
 
     @staticmethod
     def _inspiration_allocation_targets(
@@ -843,6 +916,11 @@ class InspirationKeywordPipeline:
             ]
             for platform in platforms
         }
+        # F3 (Codex R1 S2): expose the per-keyword metadata (incl. core_concept /
+        # decoration) on the report explicitly. ``metadata_by_platform`` is
+        # otherwise built only for the insert call, and preview returns BEFORE
+        # inserting — so without this the preview path would never surface it.
+        report["metadata_by_platform"] = metadata_by_platform
 
         ledger: dict[str, int] = {}
         if not persist_keywords:

@@ -2058,13 +2058,21 @@ Rules:
    axis_label verbatim in keywords. Do not rename or paraphrase same-meaning existing axes.
 5. Output core_concept, decoration, and recency_sensitivity as separate fields. Do not merge
    decoration words into core_concept unless they are part of the actual search concept.
-6. Never put literal years such as 2025 or 2026 in core_concept. Use recency_sensitivity=high
+6. core_concept MUST anchor on a specific entity, event, work, person, or mechanism taken from
+   fresh_evidence (a proper noun, title, named controversy, or concrete mechanic). Do NOT restate
+   the interest or the axis_label as the core_concept. Example: when interest is "游戏资讯与推荐",
+   a core_concept like "新游推荐" or "游戏资讯" that just echoes the topic name is UNACCEPTABLE;
+   anchor on something concrete instead, e.g. "士官长 登陆PS5" or "腾讯网易 新游发布". Only when a
+   slot's fresh_evidence truly has no specific anchor may you fall back to a topic-level
+   core_concept — treat that as the exception, and never invent proper nouns that are not in the
+   evidence.
+7. Never put literal years such as 2025 or 2026 in core_concept. Use recency_sensitivity=high
    for time-sensitive topics instead.
-7. Use platform_guides as platform style guidance, not as hard gates. Only output platforms that
+8. Use platform_guides as platform style guidance, not as hard gates. Only output platforms that
    appear in allocation_targets.
-8. Keep axes grounded in fresh_evidence. evidence_refs should point to the provided URL or compact
+9. Keep axes grounded in fresh_evidence. evidence_refs should point to the provided URL or compact
    evidence identifier when available.
-9. Keep JSON compact and valid. No markdown, no commentary, no trailing prose.
+10. Keep JSON compact and valid. No markdown, no commentary, no trailing prose.
 """.strip()
 
 

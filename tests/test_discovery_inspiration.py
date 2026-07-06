@@ -19,8 +19,10 @@ from openbiliclaw.discovery.inspiration import (
     build_like_secondary_interest_window,
     derive_inspiration_axis_id,
     derive_inspiration_seeds,
+    is_specific,
     materialize_platform_keywords,
     platform_style_score,
+    restatement_rate,
 )
 from openbiliclaw.soul.profile import (
     InterestDomain,
@@ -1902,3 +1904,250 @@ def test_upsert_does_not_resurrect_retired_axis_but_revives_stale(db: Database) 
     assert set(json.loads(str(retired_row["evidence_refs"]))) == {"old-ref", "new-ref"}
     # Deliberate asymmetry: stale MAY come back via a fresh upsert.
     assert _axis_status(db, stale.axis_id) == "active"
+
+
+# ── Phase 2.1 Task 1.5: assembler specificity ordering (F1.5) ───────────
+
+
+def _mc(
+    *,
+    interest: str,
+    axis_label: str,
+    platform: str,
+    core_concept: str,
+    decoration: str = "",
+) -> MaterializeCandidate:
+    return MaterializeCandidate(
+        interest=interest,
+        axis_label=axis_label,
+        platform=platform,
+        core_concept=core_concept,
+        decoration=decoration,
+        recency_sensitivity="low",
+        origin="llm_axis_keyword",
+    )
+
+
+def test_is_specific_strips_spans_by_substring_including_no_space_cjk() -> None:
+    # Restatements (topic name + filler) → False, spaced AND space-free.
+    assert is_specific("新游推荐 盘点", interest="游戏资讯", axis_label="新游推荐") is False
+    assert is_specific("新游推荐盘点", interest="游戏资讯", axis_label="新游推荐") is False
+    # Real anchors survive the strip → True, spaced AND space-free (the R3 CJK
+    # case a whitespace-token equality check would wrongly mark True).
+    assert is_specific("游戏资讯 士官长登陆PS5", interest="游戏资讯", axis_label="新游推荐") is True
+    assert is_specific("游戏资讯士官长登陆PS5", interest="游戏资讯", axis_label="新游推荐") is True
+    # A bare marker word that equals the whole core_concept → empty → False.
+    assert is_specific("盘点", interest="游戏资讯", axis_label="新游推荐") is False
+    # Exact interest / axis restatement → False; empty → False.
+    assert is_specific("游戏资讯", interest="游戏资讯", axis_label="新游推荐") is False
+    assert is_specific("", interest="游戏资讯", axis_label="新游推荐") is False
+
+
+def test_materialize_prefers_specific_candidate_over_generic_in_same_slot() -> None:
+    interest, axis, platform = "游戏资讯", "新游推荐", "bilibili"
+    candidates = [
+        # Generic restatement, higher style_score (carries a 盘点 marker).
+        _mc(
+            interest=interest,
+            axis_label=axis,
+            platform=platform,
+            core_concept="新游推荐",
+            decoration="盘点",
+        ),
+        # Specific anchor, NO style marker → lower style_score.
+        _mc(interest=interest, axis_label=axis, platform=platform, core_concept="士官长登陆PS5"),
+    ]
+    keywords, _telemetry = materialize_platform_keywords(
+        candidates,
+        {interest: AllocationTarget(platforms=(platform,), min_axes=1)},
+        max_keywords_per_platform=1,
+    )
+    # is_specific outranks the higher style_score → the anchor wins the slot.
+    assert [k.keyword for k in keywords] == ["士官长登陆PS5"]
+
+
+def test_materialize_falls_back_to_style_when_both_candidates_specific() -> None:
+    interest, axis, platform = "游戏资讯", "新游推荐", "bilibili"
+    candidates = [
+        _mc(
+            interest=interest,
+            axis_label=axis,
+            platform=platform,
+            core_concept="士官长登陆PS5",
+            decoration="盘点",
+        ),  # style marker → higher
+        _mc(
+            interest=interest, axis_label=axis, platform=platform, core_concept="马里奥新作"
+        ),  # specific but no marker → lower style
+    ]
+    keywords, _telemetry = materialize_platform_keywords(
+        candidates,
+        {interest: AllocationTarget(platforms=(platform,), min_axes=1)},
+        max_keywords_per_platform=1,
+    )
+    # Both specific → tie on is_specific → original style_score order decides.
+    assert [k.keyword for k in keywords] == ["士官长登陆PS5 盘点"]
+
+
+def test_materialize_falls_back_to_style_when_both_candidates_generic() -> None:
+    interest, axis, platform = "游戏资讯", "新游推荐", "bilibili"
+    candidates = [
+        _mc(
+            interest=interest,
+            axis_label=axis,
+            platform=platform,
+            core_concept="新游推荐",
+            decoration="盘点",
+        ),  # False, style 0.25
+        _mc(
+            interest=interest, axis_label=axis, platform=platform, core_concept="游戏资讯"
+        ),  # restates interest → False, style 0
+    ]
+    keywords, _telemetry = materialize_platform_keywords(
+        candidates,
+        {interest: AllocationTarget(platforms=(platform,), min_axes=1)},
+        max_keywords_per_platform=1,
+    )
+    # Both generic → tie on is_specific → higher style_score wins.
+    assert [k.keyword for k in keywords] == ["新游推荐 盘点"]
+
+
+def _six_platform_candidates(*, specific: bool) -> list[MaterializeCandidate]:
+    # Latin interest / candidates so all 6 platforms (incl. english-script
+    # youtube / reddit) accept the same keyword text without script mismatch.
+    interest, axis = "game news", "new game recommendation"
+    platforms = ("bilibili", "xiaohongshu", "douyin", "youtube", "reddit", "zhihu")
+    out: list[MaterializeCandidate] = []
+    for platform in platforms:
+        # Generic restatement of the axis, carries a review marker.
+        out.append(
+            _mc(
+                interest=interest,
+                axis_label=axis,
+                platform=platform,
+                core_concept="new game recommendation",
+                decoration="review",
+            )
+        )
+        if specific:
+            out.append(
+                _mc(
+                    interest=interest,
+                    axis_label=axis,
+                    platform=platform,
+                    core_concept="halo infinite ps5",
+                )
+            )
+    return out
+
+
+def test_restatement_rate_drops_below_threshold_after_specificity_sort() -> None:
+    interest = "game news"
+    platforms = ("bilibili", "xiaohongshu", "douyin", "youtube", "reddit", "zhihu")
+    allocation = {interest: AllocationTarget(platforms=platforms, min_axes=1)}
+
+    # Old regime: only generic (topic-restatement) candidates exist → every slot
+    # is a restatement.
+    generic_only, _t1 = materialize_platform_keywords(
+        _six_platform_candidates(specific=False), allocation, max_keywords_per_platform=1
+    )
+    assert restatement_rate(generic_only) > 0.3
+
+    # F1.5: with a specific anchor available in each slot, the assembler now
+    # selects it even though the generic candidate has the higher style_score.
+    with_specific, _t2 = materialize_platform_keywords(
+        _six_platform_candidates(specific=True), allocation, max_keywords_per_platform=1
+    )
+    assert restatement_rate(with_specific) <= 0.3
+    assert all(k.keyword == "halo infinite ps5" for k in with_specific)
+
+
+def test_thin_evidence_does_not_fabricate_specific_candidate() -> None:
+    # Evidence has no proper noun → only topic-level candidates are produced.
+    interest, axis, platform = "游戏资讯", "新游推荐", "bilibili"
+    candidates = [
+        _mc(
+            interest=interest,
+            axis_label=axis,
+            platform=platform,
+            core_concept="新游推荐",
+            decoration="盘点",
+        ),
+        _mc(
+            interest=interest,
+            axis_label=axis,
+            platform=platform,
+            core_concept="游戏资讯",
+            decoration="速看",
+        ),
+    ]
+    keywords, _telemetry = materialize_platform_keywords(
+        candidates,
+        {interest: AllocationTarget(platforms=(platform,), min_axes=1)},
+        max_keywords_per_platform=1,
+    )
+    # The assembler picks a real (topic-level) candidate; it never invents a
+    # proper noun that was not in the evidence.
+    assert len(keywords) == 1
+    assert keywords[0].keyword in {"新游推荐 盘点", "游戏资讯 速看"}
+    assert (
+        is_specific(
+            keywords[0].keyword,
+            keywords[0].metadata.get("source_interest"),
+            keywords[0].metadata.get("axis_label"),
+        )
+        is False
+    )
+    assert restatement_rate(keywords) == 1.0
+
+
+# ── Phase 2.1 Task 3: core_concept / decoration in metadata (F3) ────────
+
+
+def test_realized_metadata_carries_core_concept_and_decoration() -> None:
+    candidates = [
+        _mc(
+            interest="游戏评价",
+            axis_label="机制拆解",
+            platform="bilibili",
+            core_concept="忍义手 设计",
+            decoration="盘点",
+        )
+    ]
+    keywords, _telemetry = materialize_platform_keywords(
+        candidates,
+        {"游戏评价": AllocationTarget(platforms=("bilibili",), min_axes=1)},
+        max_keywords_per_platform=1,
+    )
+
+    assert keywords
+    metadata = keywords[0].metadata
+    # F3: source concept + decoration are carried verbatim from the candidate.
+    assert metadata["core_concept"] == "忍义手 设计"
+    assert metadata["decoration"] == "盘点"
+    # Observation-only: the assembled keyword text is unchanged.
+    assert keywords[0].keyword == "忍义手 设计 盘点"
+
+
+def test_deterministic_fill_metadata_carries_template_core_and_empty_decoration() -> None:
+    axis = inspiration_module.AxisRow(
+        interest_label="游戏评价",
+        axis_label="机制拆解",
+        axis_kind="method",
+        source="test",
+        example_terms=("设计理念",),
+    )
+    keywords, telemetry = materialize_platform_keywords(
+        [],
+        {"游戏评价": AllocationTarget(platforms=("bilibili",), min_axes=1)},
+        axes=[axis],
+        max_keywords_per_platform=1,
+    )
+
+    assert telemetry["deterministic_fill_count"] >= 1
+    assert keywords
+    metadata = keywords[0].metadata
+    assert metadata["origin"] == "deterministic_fill"
+    # Deterministic fill carries its template core + empty decoration.
+    assert metadata["core_concept"] == keywords[0].keyword
+    assert metadata["decoration"] == ""

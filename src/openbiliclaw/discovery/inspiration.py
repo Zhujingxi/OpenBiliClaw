@@ -241,6 +241,99 @@ def platform_style_score(keyword: str, platform: str) -> float:
     return min(1.0, score)
 
 
+# Generic / style marker vocabulary the specificity check strips off a
+# core_concept before deciding whether a real anchor remains. Reuses the
+# assembler's own platform-style markers (`_PLATFORM_STYLE_MARKERS`) plus the
+# extra topic-level fillers named in the richness spec (§F1.5).
+_SPECIFICITY_EXTRA_MARKERS: tuple[str, ...] = (
+    "盘点",
+    "推荐",
+    "资讯",
+    "速看",
+    "合集",
+    "攻略",
+    "测评",
+    "解析",
+    "科普",
+    "避坑",
+    "亲测",
+    "清单",
+    "如何",
+    "评价",
+    "原理",
+    "discussion",
+    "review",
+    "explained",
+    "recommendation",
+    "tips",
+)
+# Normalized inline (``strip().casefold()``) rather than via
+# ``_normalize_match_text`` because this module-level constant is evaluated
+# before that helper is defined; markers are whitespace-free tokens so the two
+# agree. ``is_specific`` normalizes the per-call core_concept / spans with the
+# real helper at call time.
+_SPECIFICITY_MARKER_TERMS: frozenset[str] = frozenset(
+    normalized
+    for marker in (
+        *(term for markers in _PLATFORM_STYLE_MARKERS.values() for term in markers),
+        *_SPECIFICITY_EXTRA_MARKERS,
+    )
+    if (normalized := str(marker).strip().casefold())
+)
+
+
+def is_specific(core_concept: object, interest: object, axis_label: object) -> bool:
+    """Whether a ``core_concept`` anchors on a real entity vs restates the topic.
+
+    Strip-residual by *substring span*, not whitespace tokens (CJK keywords are
+    often space-free, so token-equality would miss removals — richness spec
+    §F1.5, Codex R3 CJK fix): from the normalized ``core_concept`` string,
+    remove the ``interest`` span, the ``axis_label`` span, and every generic /
+    style marker, longest-first as substrings; strip residual whitespace /
+    punctuation; a non-empty remainder means a genuine anchor survives
+    (``True``), an empty remainder is a topic-name + filler restatement
+    (``False``). A marker that equals the whole core_concept therefore strips to
+    empty → ``False`` (a bare filler word is never specific).
+    """
+
+    text = _normalize_match_text(core_concept)
+    if not text:
+        return False
+    spans: set[str] = set(_SPECIFICITY_MARKER_TERMS)
+    for value in (interest, axis_label):
+        normalized = _normalize_match_text(value)
+        if normalized:
+            spans.add(normalized)
+    for span in sorted(spans, key=len, reverse=True):
+        text = text.replace(span, " ")
+    remainder = re.sub(r"[\W_]+", "", text, flags=re.UNICODE)
+    return bool(remainder)
+
+
+def restatement_rate(keywords: Sequence[RealizedKeyword]) -> float:
+    """Fraction of realized keywords that merely restate their interest / axis.
+
+    Deterministic richness metric (Spec AC5): a keyword counts as a restatement
+    when :func:`is_specific` finds no anchor left after stripping the interest,
+    axis_label and generic markers. ``0.0`` for an empty input.
+    """
+
+    items = list(keywords)
+    if not items:
+        return 0.0
+    restated = sum(
+        0
+        if is_specific(
+            item.keyword,
+            item.metadata.get("source_interest"),
+            item.metadata.get("axis_label"),
+        )
+        else 1
+        for item in items
+    )
+    return restated / len(items)
+
+
 def materialize_platform_keywords(
     candidates: Sequence[MaterializeCandidate],
     allocation: Mapping[str, AllocationTarget],
@@ -503,6 +596,7 @@ def _choose_materialize_candidate(
         key=lambda item: (
             len(selected_axes) < min_axes
             and _normalize_match_text(item.axis_label) not in selected_axes,
+            is_specific(item.candidate.core_concept, item.interest, item.axis_label),
             item.score,
             -item.index,
         ),
@@ -714,6 +808,11 @@ def _realized_from_materialize(item: _ScoredMaterializeCandidate) -> RealizedKey
             "source_domain": item.platform,
             "axis_label": item.axis_label,
             "axis_id": item.candidate.axis_id,
+            # F3 (observation-only): carry the source concept + decoration for
+            # richness diagnostics. Does NOT change the assembled ``keyword``.
+            # Deterministic-fill candidates carry their template core + "".
+            "core_concept": item.candidate.core_concept,
+            "decoration": item.candidate.decoration,
             "origin": item.candidate.origin,
             "recency_sensitivity": item.candidate.recency_sensitivity,
             "platform_style_score": item.score,

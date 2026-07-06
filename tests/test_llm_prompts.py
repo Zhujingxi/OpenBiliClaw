@@ -1647,3 +1647,27 @@ def test_parse_merged_keywords_still_collapses_present_and_absent() -> None:
         content, ["bilibili", "xiaohongshu", "douyin"], per_platform_cap=10
     )
     assert parsed == {"bilibili": ["a"], "xiaohongshu": [], "douyin": []}
+
+
+def test_inspiration_axis_system_prompt_requires_specific_core_concept() -> None:
+    """F1 (Phase 2.1): the inspiration axis-keyword system prompt must carry a
+    static rule forcing ``core_concept`` to anchor on a specific
+    entity/event/work/person/mechanism from ``fresh_evidence`` — never a mere
+    restatement of the interest or axis_label — with a topic-level fallback only
+    when no anchor exists, plus at least one explicit bad/good counter-example.
+    """
+    prompt = prompt_module._INSPIRATION_AXIS_KEYWORD_SYSTEM_PROMPT
+
+    lowered = prompt.lower()
+    # Anchors on a specific evidence entity, not the topic name.
+    assert "core_concept" in prompt
+    assert "fresh_evidence" in prompt
+    assert "anchor" in lowered
+    # Must forbid restating the interest / axis_label.
+    assert "axis_label" in prompt
+    assert "interest" in prompt
+    # Explicit counter-examples: bad restatement vs good specific anchor.
+    assert "新游推荐" in prompt  # bad: echoes the topic name
+    assert "士官长 登陆PS5" in prompt  # good: specific evidence anchor
+    # Topic-level fallback escape hatch must exist (no hallucinated proper nouns).
+    assert "fall back" in lowered or "fallback" in lowered

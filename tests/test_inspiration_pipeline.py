@@ -446,3 +446,184 @@ async def test_stage_embedding_merge_writes_single_row_and_flags_clean(db: Datab
     ).fetchall()
     # The near-duplicate "小众神作" was folded into "冷门佳作" — still one row.
     assert [str(r["axis_label"]) for r in rows] == ["冷门佳作"]
+
+
+# ── Phase 2.1 Task 2: dynamic max_tokens + provider protection (F2) ─────
+
+_SIX_PLATFORMS = ["bilibili", "xiaohongshu", "douyin", "youtube", "reddit", "zhihu"]
+
+
+@dataclass
+class _MaxTokensLLM:
+    """Records the max_tokens of each call and can raise a per-call error."""
+
+    payload: dict[str, object] = field(default_factory=lambda: {"axes": [], "keywords": []})
+    errors: list[Exception | None] = field(default_factory=list)
+    max_tokens_seen: list[int] = field(default_factory=list)
+    calls: list[str] = field(default_factory=list)
+
+    async def complete_structured_task(
+        self, *, caller: str = "", max_tokens: int = 4096, **_: object
+    ) -> Any:
+        self.calls.append(caller)
+        self.max_tokens_seen.append(int(max_tokens))
+        index = len(self.calls) - 1
+        err = self.errors[index] if index < len(self.errors) else None
+        if err is not None:
+            raise err
+        from openbiliclaw.llm.base import LLMResponse
+
+        return LLMResponse(
+            content=json.dumps(self.payload, ensure_ascii=False),
+            provider="test",
+            model="test-model",
+        )
+
+
+def _valid_axis_payload() -> dict[str, object]:
+    return {
+        "axes": [
+            {
+                "interest": "i0",
+                "axis_label": "冷门佳作",
+                "axis_kind": "other",
+                "example_terms": ["冷门佳作"],
+            }
+        ],
+        "keywords": [],
+    }
+
+
+def _axis_call_pipeline(db: Database, llm: Any) -> InspirationKeywordPipeline:
+    return InspirationKeywordPipeline(
+        host=_FakeHost(profile=_profile()),
+        db=db,
+        llm_service=llm,
+        inspiration_provider=_FakeProvider(previews_by_query={}),
+        discovery=lambda: DiscoveryConfig(inspiration_search_enabled=True),  # type: ignore[call-arg]
+        inspiration_params=lambda: derive_inspiration_breadth_params("medium"),
+        clock=lambda: _CLOCK,
+    )
+
+
+async def _run_axis_call(
+    pipeline: InspirationKeywordPipeline, *, interests: int, platforms: int
+) -> tuple[list[Any], list[Any], dict[str, Any]]:
+    selected = [{"label": f"i{n}", "weight": 0.5} for n in range(interests)]
+    allocation = {"i0": {"platforms": _SIX_PLATFORMS[:platforms], "min_axes": 1}}
+    return await pipeline.plan_inspiration_axis_keywords(
+        profile_digest={},
+        platform_guides={},
+        selected_interests=selected,
+        existing_axes=[],
+        fresh_evidence=[],
+        allocation_targets=allocation,
+    )
+
+
+@pytest.mark.parametrize(
+    ("interests", "platforms", "expected"),
+    [(4, 2, 8192), (4, 6, 11264), (8, 6, 16384)],
+)
+async def test_axis_keyword_max_tokens_scales_with_slots(
+    db: Database, interests: int, platforms: int, expected: int
+) -> None:
+    llm = _MaxTokensLLM()
+    pipeline = _axis_call_pipeline(db, llm)
+
+    _axes, _candidates, telemetry = await _run_axis_call(
+        pipeline, interests=interests, platforms=platforms
+    )
+
+    # slots = interests * distinct platforms; THRESHOLD=12 → 8 slots stay at the
+    # 8192 floor, 24 slots (6 platforms) scale to 8192+(24-12)*256=11264, and 48
+    # slots hit the 16384 ceil (8192+36*256=17408, clamped).
+    assert telemetry["max_tokens_requested"] == expected
+    assert llm.max_tokens_seen == [expected]
+    # Exactly one call on the happy path (≤1 successful generation invariant).
+    assert llm.calls == ["discovery.keyword_inspiration"]
+
+
+async def test_axis_keyword_retries_once_at_floor_on_max_tokens_error(db: Database) -> None:
+    err = RuntimeError("Requested max_tokens exceeds the maximum allowed for this model")
+    llm = _MaxTokensLLM(payload=_valid_axis_payload(), errors=[err])  # 1st raises, 2nd ok
+    pipeline = _axis_call_pipeline(db, llm)
+
+    axes, _candidates, telemetry = await _run_axis_call(pipeline, interests=8, platforms=6)
+
+    # Scaled 16384 rejected → bounded single retry at the 8192 floor recovers.
+    assert llm.max_tokens_seen == [16384, 8192]
+    assert len(llm.calls) == 2
+    assert telemetry["max_tokens_retry"] is True
+    assert telemetry["max_tokens_requested"] == 8192
+    assert telemetry["llm_call_failed"] is False
+    assert axes  # the retry's output parsed successfully
+
+
+async def test_axis_keyword_retry_only_once_then_deterministic_fallback(db: Database) -> None:
+    err = RuntimeError("max_tokens value is too large")
+    llm = _MaxTokensLLM(errors=[err, err, err])  # both attempts raise
+    pipeline = _axis_call_pipeline(db, llm)
+
+    axes, candidates, telemetry = await _run_axis_call(pipeline, interests=8, platforms=6)
+
+    # Retry is bounded to exactly one — never a third attempt.
+    assert llm.max_tokens_seen == [16384, 8192]
+    assert len(llm.calls) == 2
+    assert telemetry["llm_call_failed"] is True
+    assert axes == [] and candidates == []
+
+
+async def test_non_max_tokens_error_does_not_retry(db: Database) -> None:
+    llm = _MaxTokensLLM(errors=[RuntimeError("network connection reset by peer")])
+    pipeline = _axis_call_pipeline(db, llm)
+
+    axes, candidates, telemetry = await _run_axis_call(pipeline, interests=8, platforms=6)
+
+    # A non-max_tokens error goes straight to fallback — no floor retry.
+    assert llm.max_tokens_seen == [16384]
+    assert len(llm.calls) == 1
+    assert telemetry["max_tokens_retry"] is False
+    assert telemetry["llm_call_failed"] is True
+    assert axes == [] and candidates == []
+
+
+async def test_max_tokens_error_at_floor_request_does_not_retry(db: Database) -> None:
+    # slots=8 → requested is already the 8192 floor; a max_tokens error there
+    # must NOT retry (retrying at the same value is pointless).
+    llm = _MaxTokensLLM(errors=[RuntimeError("max_tokens exceeded")])
+    pipeline = _axis_call_pipeline(db, llm)
+
+    _axes, _candidates, telemetry = await _run_axis_call(pipeline, interests=4, platforms=2)
+
+    assert llm.max_tokens_seen == [8192]
+    assert len(llm.calls) == 1
+    assert telemetry["max_tokens_retry"] is False
+    assert telemetry["llm_call_failed"] is True
+
+
+async def test_preview_report_surfaces_core_concept_and_decoration_metadata(db: Database) -> None:
+    # F3 (Codex R1 S2): preview returns before insertion, so the pipeline must
+    # explicitly write report["metadata_by_platform"] for observation.
+    profile = _profile()
+    host = _FakeHost(profile=profile)
+    llm = _FakeLLM(payload=_axis_payload())
+    provider = _FakeProvider(
+        previews_by_query={
+            "Switch 独立游戏": [
+                ExaPreviewItem(title="gem", url="https://x.test/a", highlights=("Balatro",))
+            ]
+        }
+    )
+    pipeline = _make_pipeline(db, llm=llm, host=host, provider=provider)
+
+    report = await pipeline.preview_inspiration_keywords(
+        [_BILI], profile=profile, persist_axes=False
+    )
+
+    keyword = report["platform_keywords"][_BILI][0]
+    assert keyword == "Switch 独立游戏 冷门佳作 盘点"
+    metadata_by_platform = report["metadata_by_platform"]
+    entry = metadata_by_platform[_BILI][keyword]
+    assert entry["core_concept"] == "Switch 独立游戏 冷门佳作"
+    assert entry["decoration"] == "盘点"

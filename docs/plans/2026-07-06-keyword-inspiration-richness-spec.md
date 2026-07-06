@@ -74,12 +74,13 @@
 虽然当前没触发截断，但 F1 会让每个 core_concept 变长（具体锚点比话题名长），48 槽 × 更长
 输出可能逼近 8192。因此：
 
-- **阈值式公式（修 R1 S2 矛盾）**：低槽位保持 floor 8192,只在超阈值后才加码：
-  `max_tokens = min(CEIL, 8192 + max(0, slots - 24) * 256)`，`slots = len(selected_interests)
-  * len(target_platforms)`。→ 8 槽=8192、24 槽=8192、48 槽=8192+24*256=14336（≤16384）。
-  阈值 24 = 已知舒适区（3 平台×4 兴趣,诊断里 3 平台丰富度尚可）。
+- **阈值式公式（修 R1 S2 矛盾 + 阈值定位修正）**：低槽位保持 floor 8192,只在超阈值后才加码：
+  `max_tokens = min(CEIL, 8192 + max(0, slots - 12) * 256)`，`slots = len(selected_interests)
+  * len(target_platforms)`。→ 8 槽=8192、12 槽=8192、24 槽（6 平台）=8192+12*256=**11264**、
+  48 槽=min(16384, 8192+36*256)=**16384**。**阈值 12 = 3 平台×4 兴趣（生产 interest cap=4）的
+  舒适点**；阈值取 24 是错的——那恰是 6 平台槽数,会让本方案要救的正主(6 平台)停在 floor 无 headroom。
 - 常量:floor 复用 `_INSPIRATION_AXIS_KEYWORD_MAX_TOKENS=8192`；新增
-  `_INSPIRATION_AXIS_KEYWORD_MAX_TOKENS_CEIL=16384`、`_PER_SLOT_TOKEN_BUDGET=256`、阈值 24。
+  `_INSPIRATION_AXIS_KEYWORD_MAX_TOKENS_CEIL=16384`、`_PER_SLOT_TOKEN_BUDGET=256`、阈值 12。
 - **provider 保护（修 R1 S2）**：`openai_compatible` 把 max_tokens 原样透传,provider 上限
   <16384 会让请求直接失败 → 触发确定性 fallback(整轮 LLM 白丢,坏)。因此:
   - 实际请求的 max_tokens 写进 telemetry(`llm_telemetry.max_tokens_requested`)。
@@ -113,8 +114,8 @@
    `materialize_platform_keywords` 选中**具体候选**;两者都具体或都泛化时退回 style_score 排序
    (加断言防过度改动)。`is_specific` 判定单测（剥离残留法）:`话题名+泛化后缀`→False,
    `话题名+真实体`→True,纯专名→True。
-3. **max_tokens 动态**：单测 slots ∈ {8, 24, 48} 断言 `min(16384, 8192+max(0,slots-24)*256)`
-   （8→8192、24→8192、48→14336）;telemetry 记 `max_tokens_requested`;一轮仍恰好 1 次成功 LLM
+3. **max_tokens 动态**：单测 slots ∈ {8, 24, 48} 断言 `min(16384, 8192+max(0,slots-12)*256)`
+   （8→8192、24→11264、48→16384）;telemetry 记 `max_tokens_requested`;一轮仍恰好 1 次成功 LLM
    调用（max_tokens 拒绝的降 floor 重试是错误恢复,mock provider 抛 max_tokens 错→断言重试到
    8192 且只重试一次）。
 4. **metadata 回填 + preview 可见**：`RealizedKeyword.metadata` 含 `core_concept`/`decoration`
@@ -141,8 +142,8 @@
   marker 后**还剩非空 token 即具体**（不是旧的"被 axis_label 包含"——那对更长的
   `话题名+泛化后缀` 会误判成具体）,进排序键 `(需要新轴, is_specific, style_score, -index)` —
   locked（R1 S1 + R2 S2 方向修正）。
-- **max_tokens 阈值式 `8192 + max(0, slots-24)*256`,CEIL 16384**,请求值进 telemetry,max_tokens
-  拒绝降 floor 重试一次 — locked（R1 S2 修公式矛盾 + provider 保护）。
+- **max_tokens 阈值式 `8192 + max(0, slots-12)*256`,CEIL 16384**（阈值 12=3 平台点,让 6 平台
+  真拿 headroom）,请求值进 telemetry,max_tokens 拒绝降 floor 重试一次 — locked（R1 S2 + 验收期阈值修正）。
 - **preview 必须显式写 `report["metadata_by_platform"]`** —— locked（R1 S2:现码 preview 根本不写）。
 - **验收用确定性 `restatement_rate` 指标 + 薄证据不幻觉 fixture** 替换定性描述 — locked（R1 S2）。
 - **core_concept/decoration 进 metadata 仅为观测**,不改最终词 — locked。
