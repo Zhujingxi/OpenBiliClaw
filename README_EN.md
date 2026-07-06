@@ -189,12 +189,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.156 (2026-07-05)**
+📌 Latest: **v0.3.157 (2026-07-05)**
 
-- **Douyin / Reddit collection fixed on Firefox** — a packaged-build injection-path bug left both sources unable to collect anything on Firefox; now fixed.
-- **Non-Bilibili tabs no longer sit empty for hours** — serving now tops up stocked platforms, so Zhihu / RedNote / Douyin content surfaces much sooner.
-- **Init failures show the actual cause** — no more bare "something went wrong"; the real error detail is visible in all three UIs.
-- **Fallback LLM provider is diagnosable & testable** — same-name fallbacks are rejected at save, silent dead states warn, and settings gains a "Test fallback provider" button.
+- **Surprise picks no longer interrupt your typing** — while you type in a surprise card's chat box, background pushes no longer steal the card or collapse the input.
+- **Desktop web polish** — video cards are real links (middle / Ctrl+click) with duration / views / likes metadata, plus dark mode and load-more-on-scroll.
+- **More resilient fallback LLM provider** — an empty response from the primary now fails over to the fallback, and the init preflight recognizes the fallback so a dead primary with a healthy one no longer blocks setup.
+- **Self-heal for Chinese Windows usernames** — when a non-ASCII model path breaks bge-m3 loading, one click migrates the model dir to an ASCII path and re-pulls.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
