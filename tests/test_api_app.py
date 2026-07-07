@@ -11736,3 +11736,187 @@ class TestLlmFallbackConfigValidationAndProbe:
         body = response.json()
         assert body["ok"] is False
         assert "same as the default" in body["error"]
+
+
+class TestKeywordGenerationMode:
+    """Backend read-derivation of the UI-facing keyword_generation_mode enum
+    from the two canonical DiscoveryConfig booleans (Task 1)."""
+
+    @pytest.mark.parametrize(
+        ("enabled", "replace", "expected"),
+        [
+            (False, False, "legacy"),
+            (False, True, "legacy"),  # tolerant read: enabled=false → legacy
+            (True, False, "hybrid"),
+            (True, True, "inspiration"),
+        ],
+    )
+    def test_derive_keyword_generation_mode_pure_fn(
+        self, enabled: bool, replace: bool, expected: str
+    ) -> None:
+        from openbiliclaw.api.app import _derive_keyword_generation_mode
+
+        assert _derive_keyword_generation_mode(enabled, replace) == expected
+
+    @pytest.mark.parametrize(
+        ("enabled", "replace", "expected"),
+        [
+            (False, False, "legacy"),
+            (False, True, "legacy"),  # edge: enabled=false & replace=true → legacy
+            (True, False, "hybrid"),
+            (True, True, "inspiration"),
+        ],
+    )
+    def test_get_config_returns_derived_keyword_generation_mode(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        enabled: bool,
+        replace: bool,
+        expected: str,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+
+        cfg = Config()
+        cfg.discovery.inspiration_search_enabled = enabled
+        cfg.discovery.inspiration_replace_merged_keywords = replace
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+        app = create_app()
+        client = TestClient(app)
+
+        response = client.get("/api/config")
+
+        assert response.status_code == 200
+        assert response.json()["discovery"]["keyword_generation_mode"] == expected
+
+
+class TestKeywordGenerationModeWrite:
+    """PUT /api/config translation of keyword_generation_mode → the two
+    canonical DiscoveryConfig booleans (Task 2)."""
+
+    @pytest.mark.parametrize(
+        ("mode", "enabled", "replace"),
+        [
+            ("legacy", False, False),
+            ("hybrid", True, False),
+            ("inspiration", True, True),
+        ],
+    )
+    def test_mode_to_flags_pure_fn(self, mode: str, enabled: bool, replace: bool) -> None:
+        from openbiliclaw.api.app import _mode_to_flags
+
+        assert _mode_to_flags(mode) == (enabled, replace)
+
+    @staticmethod
+    def _valid_config():  # type: ignore[no-untyped-def]
+        # A config that passes LLM validation so PUT actually persists (an
+        # unconfigured default deepseek provider makes the handler return 400).
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+
+        return Config(
+            llm=LLMConfig(
+                default_provider="ollama",
+                ollama=LLMProviderConfig(model="llama3", base_url="http://localhost:11434"),
+            ),
+        )
+
+    @staticmethod
+    def _client(monkeypatch: pytest.MonkeyPatch, tmp_path, cfg):  # type: ignore[no-untyped-def]
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import save_config
+
+        config_path = tmp_path / "config.toml"
+        save_config(cfg, config_path)
+        monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+        monkeypatch.setattr(
+            "openbiliclaw.config.save_config",
+            lambda c, path=None: save_config(c, config_path),
+        )
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+        return TestClient(app), config_path
+
+    @pytest.mark.parametrize(
+        ("mode", "enabled", "replace"),
+        [
+            ("legacy", False, False),
+            ("hybrid", True, False),
+            ("inspiration", True, True),
+        ],
+    )
+    def test_put_config_mode_persists_canonical_booleans(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path, mode: str, enabled: bool, replace: bool
+    ) -> None:
+        cfg = self._valid_config()
+        client, config_path = self._client(monkeypatch, tmp_path, cfg)
+
+        response = client.put("/api/config", json={"discovery": {"keyword_generation_mode": mode}})
+
+        assert response.status_code == 200, response.text
+        # Both canonical booleans set (no stale residue).
+        assert cfg.discovery.inspiration_search_enabled is enabled
+        assert cfg.discovery.inspiration_replace_merged_keywords is replace
+        # config.toml holds the two booleans, NEVER the derived mode key.
+        written = config_path.read_text(encoding="utf-8")
+        assert "keyword_generation_mode" not in written
+        assert f"inspiration_search_enabled = {'true' if enabled else 'false'}" in written
+        assert f"inspiration_replace_merged_keywords = {'true' if replace else 'false'}" in written
+        # Round-trip: the PUT response reflects the derived mode (Task 1 read path).
+        assert response.json()["config"]["discovery"]["keyword_generation_mode"] == mode
+
+    def test_put_config_mode_change_clears_stale_replace(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        cfg = self._valid_config()
+        client, config_path = self._client(monkeypatch, tmp_path, cfg)
+
+        # First set inspiration (both booleans true)...
+        r1 = client.put(
+            "/api/config", json={"discovery": {"keyword_generation_mode": "inspiration"}}
+        )
+        assert r1.status_code == 200
+        assert cfg.discovery.inspiration_search_enabled is True
+        assert cfg.discovery.inspiration_replace_merged_keywords is True
+
+        # ...then legacy: replace MUST go back to false (no stale residue, R1 S2).
+        r2 = client.put("/api/config", json={"discovery": {"keyword_generation_mode": "legacy"}})
+        assert r2.status_code == 200
+        assert cfg.discovery.inspiration_search_enabled is False
+        assert cfg.discovery.inspiration_replace_merged_keywords is False
+        assert r2.json()["config"]["discovery"]["keyword_generation_mode"] == "legacy"
+
+    def test_put_config_illegal_mode_returns_422(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        cfg = self._valid_config()
+        client, _config_path = self._client(monkeypatch, tmp_path, cfg)
+
+        response = client.put(
+            "/api/config", json={"discovery": {"keyword_generation_mode": "garbage"}}
+        )
+
+        assert response.status_code == 422
+
+    def test_put_config_mode_wins_over_explicit_booleans(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        cfg = self._valid_config()
+        client, _config_path = self._client(monkeypatch, tmp_path, cfg)
+
+        # mode=legacy alongside an explicit inspiration_search_enabled=true → mode wins.
+        response = client.put(
+            "/api/config",
+            json={
+                "discovery": {
+                    "keyword_generation_mode": "legacy",
+                    "inspiration_search_enabled": True,
+                    "inspiration_replace_merged_keywords": True,
+                }
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        assert cfg.discovery.inspiration_search_enabled is False
+        assert cfg.discovery.inspiration_replace_merged_keywords is False

@@ -45,6 +45,9 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `recommend` | 查看推荐 | ✅ |
 | `feedback <id> <like\|dislike\|comment\|dismiss>` | 对推荐提交反馈 | ✅ |
 | `profile` | 查看用户画像 | ✅ |
+| `keyword-inspiration-dry-run` | 真实调用当前 LLM + inspiration 搜索 provider 链，预览关键词生成中间链路，不写关键词池；支持 `--persist-axes` | ✅ |
+| `keyword-inspiration-preview` | `keyword-inspiration-dry-run` 的等价别名；支持 `--persist-axes` | ✅ |
+| `keyword-inspiration-report` | 输出 inspiration / merged 关键词 cohort 对比和 replace 启用门禁判定 | ✅ |
 | `profile-consolidate` | LLM 整理合并画像里重复的喜欢 / 讨厌主题；也支持一级分类词表迁移（默认 dry-run；`--apply` 写入；`--revert <run_id>` 回滚） | ✅ |
 | `discover` | 手动触发发现 | ✅ |
 | `discover-douyin` | 单独调试抖音 search / hot / feed 内容发现 | ✅ |
@@ -119,6 +122,37 @@ $ openbiliclaw auth status
   用户名: alice
   UID: 10086
 ```
+
+### `openbiliclaw keyword-inspiration-dry-run`
+
+真实跑一轮 query inspiration 关键词生成，但不写入 `discovery_keywords`。`openbiliclaw keyword-inspiration-preview` 是同一命令的等价别名。命令会临时启用 inspiration preview，读取当前 Soul 画像、`config.toml` 的 discovery LLM 路由和搜索 provider 链（默认 local cache / 已启用平台源 / Exa / You.com），输出 JSON report。平台源只做灵感 grounding，不写候选池；被抽中的二级兴趣会写入独立的 preview selection scope，用于连续 preview 验证兴趣冷却轮转，不影响正式 production 抽样：
+
+```bash
+$ openbiliclaw keyword-inspiration-dry-run --platform bilibili --platform reddit --kind regular --limit 6 --interest-limit 4
+$ openbiliclaw keyword-inspiration-preview --platform bilibili --persist-axes
+```
+
+输出包含：
+
+- `selected_secondary_interests`：本轮从 like / accepted / profile-backed 兴趣里抽到的二级兴趣；
+- `brainstorm_branches`：由轴库、二级兴趣标签和 pooled terms 确定性生成的 grounding probe query（字段名保留兼容旧 report）；
+- `grounding_records`：搜索预览抽到的具体实体 / 社区词 / 证据标题；
+- `grounding_ledger`：本轮 grounding 搜索次数、平台源命中分布、cooldown / risk budget / timeout，以及 Exa / You.com 等 fallback provider 的成功、失败、空结果和补充次数；
+- `platform_keywords`：按平台生成并通过 quota / explore 校验后的最终搜索词；
+- `materialize_telemetry`：coverage-first 装配过程中的 `deterministic_fill`、`coverage_shortfall`、硬闸拒绝和软分分布；
+- `rejected_reasons`：按平台保留的硬闸拒绝明细；preview report 会继续过滤 `platform_style_mismatch`，因为平台 style 已改为软分，不再硬拒绝。
+
+`--limit`（每平台关键词上限）和 `--interest-limit`（二级兴趣样本数）是**本次 preview 的一次性覆盖**（Phase 2 config 收敛后语义）：inspiration 的细粒度参数不再是 `config.toml` 字段，而是由 `[discovery].inspiration_breadth` 档位（默认 `medium`）派生成一个内部参数对象；不传这两个 flag 时该对象来自 `derive(breadth)`，传了则在派生对象上套一次性覆盖（`max_keywords_per_platform` / `interest_sample_size`），经 planner / pipeline 构造注入，**不写回 `config.toml`、不改四个兼容委托的签名**，用户可见行为与收敛前一致。真实画像很大时建议先用 `--interest-limit 2..4` 做 smoke，再放大窗口观察多样性。`--persist-axes` 会把本次 LLM 返回的新轴写入 / 合并到 `discovery_inspiration_axis`，但不增加 axis 使用计数，也不写关键词池；不传时 preview 只读轴库和 selection ledger。preview 永不触发 yield 回填 / 生命周期迁移（观测不改变被观测系统）。regular + explore 同轮触发时，runtime 会共用同一批 selected interests、grounding evidence 和单次 `discovery.keyword_inspiration` 输出；preview 单独预览指定 `--kind`。
+
+### `openbiliclaw keyword-inspiration-report`
+
+读取本地 `discovery_keywords`、`discovery_keyword_yield`、`content_cache` 和 `discovery_interest_selection_ledger`，按 `inspiration_id` 溯源把关键词分成 `inspiration` 与 `merged` 两组，输出认领率、每个被认领关键词的入池数、平均 delight、topic 多样性、production / preview 二级兴趣抽中分布和 replace 启用门禁：
+
+```bash
+$ openbiliclaw keyword-inspiration-report --window-days 14
+```
+
+报告内会同时输出本次使用的阈值。默认门禁要求：窗口至少 14 天、inspiration 组至少 200 个被认领关键词、准入率不低于 merged 的 `0.8x`、平均 delight 不低于 merged 的 `0.95x`，且 topic 多样性严格更高。未通过时不要开启 `[discovery].inspiration_replace_merged_keywords=true`，应只修改一个可测因素后继续附加模式观察。
 
 ### `openbiliclaw login codex`
 

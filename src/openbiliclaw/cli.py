@@ -6,6 +6,7 @@ Provides the command-line entry point using Typer.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import sys
@@ -131,6 +132,39 @@ _DOUYIN_SEARCH_KEYWORDS_OPTION = typer.Option(
     "--keyword",
     "-k",
     help="抖音搜索关键词，可重复传或用逗号分隔。",
+)
+_KEYWORD_INSPIRATION_PLATFORMS_OPTION = typer.Option(
+    None,
+    "--platform",
+    "-p",
+    help=(
+        "目标平台，可重复传或逗号分隔。默认 bilibili；可选 bilibili/xiaohongshu/"
+        "douyin/youtube/twitter/zhihu/reddit。"
+    ),
+)
+_KEYWORD_INSPIRATION_KIND_OPTION = typer.Option(
+    "regular",
+    "--kind",
+    help="关键词类型：regular 或 explore。",
+)
+_KEYWORD_INSPIRATION_LIMIT_OPTION = typer.Option(
+    None,
+    "--limit",
+    min=1,
+    max=48,
+    help="本次 dry-run 每个平台最多生成多少关键词；不传则使用 config.toml。",
+)
+_KEYWORD_INSPIRATION_INTEREST_LIMIT_OPTION = typer.Option(
+    None,
+    "--interest-limit",
+    min=1,
+    max=16,
+    help="本次 dry-run 最多抽取多少个二级兴趣；只影响预览成本，不写回 config.toml。",
+)
+_KEYWORD_INSPIRATION_PERSIST_AXES_OPTION = typer.Option(
+    False,
+    "--persist-axes",
+    help="预览时写入 / 合并 inspiration axis 库；不增加 axis 使用计数。",
 )
 _CODEX_LOGIN_IMPORT_OPTION = typer.Option(
     False,
@@ -532,6 +566,7 @@ def _build_soul_engine() -> Any:
         ),
         profile_consolidation_like_target_soft=cfg.scheduler.profile_consolidation_like_target_soft,
         profile_consolidation_archive_enabled=(cfg.scheduler.profile_consolidation_archive_enabled),
+        database=_get_runtime_database(),
     )
 
 
@@ -6864,6 +6899,7 @@ def profile_consolidate(
             like_target_upper=cfg.scheduler.profile_consolidation_like_target_upper,
             like_target_soft=cfg.scheduler.profile_consolidation_like_target_soft,
             archive_enabled=cfg.scheduler.profile_consolidation_archive_enabled,
+            database=_get_runtime_database(),
         )
     else:
         consolidator = ProfileConsolidator(
@@ -6873,6 +6909,7 @@ def profile_consolidate(
             like_target_upper=cfg.scheduler.profile_consolidation_like_target_upper,
             like_target_soft=cfg.scheduler.profile_consolidation_like_target_soft,
             archive_enabled=cfg.scheduler.profile_consolidation_archive_enabled,
+            database=_get_runtime_database(),
         )
 
     if revert.strip():
@@ -8570,6 +8607,157 @@ def profile() -> None:
         f"  [bold]深度偏好[/bold]：{surface.style.depth_preference:.2f}"
         f"   [bold]探索开放度[/bold]：{surface.exploration_openness:.2f}"
     )
+
+
+@app.command("keyword-inspiration-dry-run")
+@app.command("keyword-inspiration-preview")
+def keyword_inspiration_dry_run(
+    platforms: list[str] | None = _KEYWORD_INSPIRATION_PLATFORMS_OPTION,
+    query_kind: str = _KEYWORD_INSPIRATION_KIND_OPTION,
+    limit: int | None = _KEYWORD_INSPIRATION_LIMIT_OPTION,
+    interest_limit: int | None = _KEYWORD_INSPIRATION_INTEREST_LIMIT_OPTION,
+    persist_axes: bool = _KEYWORD_INSPIRATION_PERSIST_AXES_OPTION,
+) -> None:
+    """预览 search-backed inspiration 关键词生成链路，不写入关键词池."""
+
+    import dataclasses
+
+    from openbiliclaw.config import derive_inspiration_breadth_params, load_config
+    from openbiliclaw.discovery.douyin import split_csv_values
+    from openbiliclaw.discovery.inspiration_provider import (
+        build_inspiration_search_provider,
+        build_platform_source_backends,
+    )
+    from openbiliclaw.llm.service import LLMService, module_overrides_from_config
+    from openbiliclaw.runtime.keyword_planner import KeywordPlanner
+    from openbiliclaw.soul.engine import SoulProfileNotInitializedError
+
+    allowed = {
+        "bilibili",
+        "xiaohongshu",
+        "douyin",
+        "youtube",
+        "twitter",
+        "zhihu",
+        "reddit",
+    }
+    selected_platforms = list(split_csv_values(platforms or [])) or ["bilibili"]
+    unknown = [platform for platform in selected_platforms if platform not in allowed]
+    if unknown:
+        _print_status_panel(
+            "error",
+            "平台参数无效",
+            f"未知平台：{', '.join(unknown)}。可选：{', '.join(sorted(allowed))}",
+        )
+        raise typer.Exit(code=1)
+    normalized_kind = query_kind.strip().lower()
+    if normalized_kind not in {"regular", "explore"}:
+        _print_status_panel("error", "kind 参数无效", "仅支持 regular / explore。")
+        raise typer.Exit(code=1)
+
+    _require_runtime_config()
+    config = load_config()
+    config.discovery.inspiration_search_enabled = True
+    # One-shot overrides apply on the DERIVED breadth params (internal config
+    # view injected via planner construction) — the per-knob config fields are
+    # gone (Phase-2 collapse), so nothing mutates config.discovery here.
+    inspiration_params = derive_inspiration_breadth_params(
+        getattr(config.discovery, "inspiration_breadth", "medium")
+    )
+    if limit is not None:
+        inspiration_params = dataclasses.replace(
+            inspiration_params, max_keywords_per_platform=int(limit)
+        )
+    if interest_limit is not None:
+        inspiration_params = dataclasses.replace(
+            inspiration_params, interest_sample_size=int(interest_limit)
+        )
+    memory = _build_memory_manager()
+    database = _get_runtime_database()
+    registry = _build_registry()
+    llm_service = LLMService(
+        registry=registry,
+        memory=memory,
+        usage_recorder=_build_usage_recorder(),
+        module_overrides=module_overrides_from_config(config),
+    )
+    soul_engine = _build_soul_engine()
+    try:
+        profile_data = asyncio.run(soul_engine.get_profile())
+    except SoulProfileNotInitializedError as exc:
+        _print_status_panel(
+            "warning",
+            "尚未初始化用户画像",
+            "请先执行 `openbiliclaw init` 拉取历史并生成初始画像。",
+        )
+        raise typer.Exit(code=1) from exc
+
+    x_client: object | None = None
+    twitter_cfg = getattr(getattr(config, "sources", None), "twitter", None)
+    if twitter_cfg is not None and bool(getattr(twitter_cfg, "enabled", False)):
+        from openbiliclaw.sources.x_auth import resolve_x_cookie
+        from openbiliclaw.sources.x_client import XClient
+
+        x_client = XClient(
+            cookie=resolve_x_cookie(
+                data_dir=config.data_path,
+                cookie_env=str(getattr(twitter_cfg, "cookie_env", "OPENBILICLAW_X_COOKIE")),
+            )
+        )
+
+    planner = KeywordPlanner(
+        llm_service=llm_service,
+        database=database,
+        config=config,
+        soul_engine=soul_engine,
+        pool_target_count=int(getattr(config.scheduler, "pool_target_count", 300)),
+        signal_event_threshold=int(getattr(config.scheduler, "signal_event_threshold", 6)),
+        inspiration_provider=build_inspiration_search_provider(
+            getattr(config.discovery, "inspiration_search_backends", None),
+            database=database,
+            platform_backends=build_platform_source_backends(
+                config,
+                bilibili_client=(
+                    _build_bilibili_client()
+                    if bool(getattr(getattr(config.sources, "bilibili", None), "enabled", True))
+                    else None
+                ),
+                x_client=x_client,
+            ),
+            platforms_per_probe=int(inspiration_params.platforms_per_probe),
+            riskcontrolled_probe_budget=int(inspiration_params.riskcontrolled_probe_budget),
+            pages_per_probe=int(inspiration_params.search_pages_per_probe),
+        ),
+        inspiration_params=inspiration_params,
+    )
+    report = asyncio.run(
+        planner.preview_inspiration_keywords(
+            selected_platforms,
+            profile=profile_data,
+            query_kind=normalized_kind,
+            persist_axes=persist_axes,
+        )
+    )
+    sys.stdout.write(json.dumps(report, ensure_ascii=False, indent=2))
+    sys.stdout.write("\n")
+
+
+@app.command("keyword-inspiration-report")
+def keyword_inspiration_report(
+    window_days: int = typer.Option(
+        14,
+        "--window-days",
+        min=1,
+        help="统计最近 N 天 additive inspiration / merged 关键词 cohort。",
+    ),
+) -> None:
+    """输出 inspiration additive cohort 对比与 replace 启用门禁."""
+
+    _require_runtime_config()
+    database = _get_runtime_database()
+    stats = database.get_keyword_cohort_stats(window_days=int(window_days))
+    sys.stdout.write(json.dumps(stats, ensure_ascii=False, indent=2))
+    sys.stdout.write("\n")
 
 
 _BILIBILI_STRATEGY_NAMES = ("search", "trending", "explore", "related_chain")

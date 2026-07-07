@@ -246,6 +246,7 @@ class LLMService:
         ("discovery.evaluate", "evaluation"),
         ("discovery.eval", "evaluation"),
         ("eval", "evaluation"),
+        ("discovery.keyword", "discovery"),
         ("discovery.search", "discovery"),
         ("discovery.explore", "discovery"),
         ("discovery.trending", "discovery"),
