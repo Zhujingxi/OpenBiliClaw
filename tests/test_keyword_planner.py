@@ -2967,3 +2967,225 @@ def test_backfilled_yield_reorders_axis_list_end_to_end(db: Database) -> None:
     # admissions); the freshness crossover holds — old-but-yielding X outranks
     # the much fresher zero-yield W.
     assert [a.axis_label for a in axes] == ["X-有产出", "Z-未使用", "W-新鲜零产出", "Y-较旧零产出"]
+
+
+# ── Phase 2.3 Task 5: coexist explore dispatch (rich + degrade) ─────────
+
+
+@dataclass
+class _CoexistLLM:
+    """Dispatches by caller: merged-keyword payload for discovery.keyword_planner,
+    the axis-keyword payload (or a raise) for discovery.keyword_inspiration."""
+
+    merged_payload: dict[str, object]
+    inspiration_payload: dict[str, object] | None
+    calls: list[dict[str, str]] = field(default_factory=list)
+
+    async def complete_structured_task(
+        self,
+        *,
+        system_instruction: str = "",
+        user_input: str = "",
+        max_tokens: int = 4096,
+        caller: str = "",
+        reasoning_effort: str | None = None,
+        inject_core_memory: bool = True,
+        **_: object,
+    ) -> Any:
+        self.calls.append({"caller": caller, "user": user_input})
+        if caller == "discovery.keyword_planner":
+            payload: dict[str, object] | None = self.merged_payload
+        else:
+            payload = self.inspiration_payload
+        if payload is None:
+            raise RuntimeError("inspiration llm down")
+        from openbiliclaw.llm.base import LLMResponse
+
+        return LLMResponse(
+            content=json.dumps(payload, ensure_ascii=False), provider="test", model="test"
+        )
+
+
+def _merged_explore_payload() -> dict[str, object]:
+    return {
+        _BILI: ["人工智能 盘点"],
+        "explore_domains": [
+            {
+                "domain": "天文摄影",
+                "novelty_level": 0.84,
+                "queries": ["天文摄影 入门 盘点", "星空 拍摄 教程"],
+            }
+        ],
+    }
+
+
+def _explore_axis_payload() -> dict[str, object]:
+    return {
+        "axes": [
+            {
+                "interest": "天文摄影",
+                "axis_label": "深空拍摄",
+                "axis_kind": "method",
+                "example_terms": ["深空拍摄"],
+            }
+        ],
+        "keywords": [
+            {
+                "interest": "天文摄影",
+                "axis_id_or_label": "深空拍摄",
+                "platform": _BILI,
+                "core_concept": "詹姆斯韦伯 深空图像",
+                "decoration": "盘点",
+            }
+        ],
+    }
+
+
+async def test_coexist_explore_routes_through_rich_stage_when_due(db: Database) -> None:
+    profile = _profile(("人工智能", 0.9))
+    digest = profile_kw_digest(profile)
+    llm = _CoexistLLM(
+        merged_payload=_merged_explore_payload(), inspiration_payload=_explore_axis_payload()
+    )
+    deficit = _FakeDeficitSource(
+        deficits={_BILI: 40}, explore_due_soon=True, covered_topic_groups=["人工智能"]
+    )
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=deficit,
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True, inspiration_max_keywords_per_platform=1
+        ),
+        inspiration_provider=_FakeInspirationProvider(previews_by_query={}),
+    )
+
+    await planner.run_once()
+
+    # Explore pool carries the RICH cross-domain keyword, NOT the flat domain
+    # queries — the new stage handled it, not _explore_domain_queries.
+    explore_pool = _pending(db, _BILI, digest, keyword_kind="explore")
+    assert explore_pool == ["詹姆斯韦伯 深空图像 盘点"]
+    assert "天文摄影 入门 盘点" not in explore_pool
+    assert deficit.explore_marked == 1
+    assert planner.last_explore_inspiration_degraded is False
+    # Regular channel is unaffected.
+    assert _pending(db, _BILI, digest) == ["人工智能 盘点"]
+
+
+async def test_coexist_explore_not_triggered_when_not_due(db: Database) -> None:
+    profile = _profile(("人工智能", 0.9))
+    digest = profile_kw_digest(profile)
+    llm = _CoexistLLM(
+        merged_payload=_merged_explore_payload(), inspiration_payload=_explore_axis_payload()
+    )
+    deficit = _FakeDeficitSource(deficits={_BILI: 40}, explore_due_soon=False)
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=deficit,
+        discovery=_discovery_cfg(inspiration_search_enabled=True),
+        inspiration_provider=_FakeInspirationProvider(previews_by_query={}),
+    )
+
+    await planner.run_once()
+
+    assert _pending(db, _BILI, digest, keyword_kind="explore") == []
+    assert deficit.explore_marked == 0
+    assert "<explore_domains>" not in llm.calls[0]["user"]
+
+
+async def test_coexist_explore_degrades_to_flatten_never_bare(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = _profile(("人工智能", 0.9))
+    digest = profile_kw_digest(profile)
+    llm = _CoexistLLM(
+        merged_payload=_merged_explore_payload(), inspiration_payload=_explore_axis_payload()
+    )
+    deficit = _FakeDeficitSource(
+        deficits={_BILI: 40}, explore_due_soon=True, covered_topic_groups=[]
+    )
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=deficit,
+        discovery=_discovery_cfg(inspiration_search_enabled=True),
+        inspiration_provider=_FakeInspirationProvider(previews_by_query={}),
+    )
+
+    async def _degraded_stage(
+        explore_platforms: list[str],
+        *,
+        profile: SoulProfile,
+        digest: str,
+        explore_domains: Any,
+        covered_topic_groups: Any,
+    ) -> tuple[dict[str, int], dict[str, object]]:
+        return {}, {"explore_degraded": True}
+
+    monkeypatch.setattr(planner, "_run_explore_inspiration_stage", _degraded_stage)
+
+    await planner.run_once()
+
+    # Rich-gen degraded → fall back to the flat merged explore_domains queries so
+    # the explore pool still replenishes (never bare).
+    explore_pool = _pending(db, _BILI, digest, keyword_kind="explore")
+    assert explore_pool == ["天文摄影 入门 盘点", "星空 拍摄 教程"]
+    assert explore_pool  # non-empty
+    assert deficit.explore_marked == 1
+    assert planner.last_explore_inspiration_degraded is True
+
+
+async def test_coexist_explore_budget_one_extra_call_when_due(db: Database) -> None:
+    profile = _profile(("人工智能", 0.9))
+
+    def _fresh() -> tuple[_CoexistLLM, _FakeDeficitSource]:
+        return (
+            _CoexistLLM(
+                merged_payload=_merged_explore_payload(),
+                inspiration_payload=_explore_axis_payload(),
+            ),
+            _FakeDeficitSource(deficits={_BILI: 40}, covered_topic_groups=["人工智能"]),
+        )
+
+    # Not-due cycle.
+    llm_off, deficit_off = _fresh()
+    deficit_off.explore_due_soon = False
+    planner_off = _make_planner(
+        db,
+        llm=llm_off,
+        profile=profile,
+        deficit=deficit_off,
+        discovery=_discovery_cfg(inspiration_search_enabled=True),
+        inspiration_provider=_FakeInspirationProvider(previews_by_query={}),
+    )
+    await planner_off.run_once()
+
+    # Due cycle (fresh db digest is the same; use a second planner + fresh fakes).
+    llm_on, deficit_on = _fresh()
+    deficit_on.explore_due_soon = True
+    planner_on = _make_planner(
+        db,
+        llm=llm_on,
+        profile=profile,
+        deficit=deficit_on,
+        discovery=_discovery_cfg(inspiration_search_enabled=True),
+        inspiration_provider=_FakeInspirationProvider(previews_by_query={}),
+    )
+    await planner_on.run_once()
+
+    def _by_caller(calls: list[dict[str, str]], caller: str) -> int:
+        return sum(1 for c in calls if c["caller"] == caller)
+
+    # Exactly ONE more explore rich-gen (keyword_inspiration) call when due...
+    assert _by_caller(llm_on.calls, "discovery.keyword_inspiration") == (
+        _by_caller(llm_off.calls, "discovery.keyword_inspiration") + 1
+    )
+    # ...while the regular merged channel's call count is unchanged.
+    assert _by_caller(llm_on.calls, "discovery.keyword_planner") == _by_caller(
+        llm_off.calls, "discovery.keyword_planner"
+    )

@@ -865,6 +865,10 @@ def _builder_test_inputs() -> list[tuple[str, dict, dict]]:
                     }
                 ],
                 allocation_targets={"游戏评价": {"platforms": ["bilibili"], "min_axes": 2}},
+                # E2: with an explore_request block (per-call data in the user
+                # message). args2 omits it — the system message must stay
+                # byte-identical across both, proving explore adds no system data.
+                explore_request={"avoid_covered": ["游戏", "动漫"]},
             ),
             dict(
                 profile_digest={"interests": ["咖啡器具"]},
@@ -1671,3 +1675,25 @@ def test_inspiration_axis_system_prompt_requires_specific_core_concept() -> None
     assert "士官长 登陆PS5" in prompt  # good: specific evidence anchor
     # Topic-level fallback escape hatch must exist (no hallucinated proper nouns).
     assert "fall back" in lowered or "fallback" in lowered
+
+
+def test_inspiration_axis_system_prompt_requires_crossdomain_specific_on_explore() -> None:
+    """E2 (Phase 2.3): the inspiration axis-keyword system prompt must carry a
+    STATIC rule for cross-domain explore rounds — when the user message includes
+    an ``explore_request``, core_concept must anchor on an UNCOVERED-but-relevant
+    cross-domain specific entity and avoid the topics in
+    ``explore_request.avoid_covered`` — with a bad/good counter-example. The rule
+    is always present (static); only the explore_request DATA is per-call.
+    """
+    prompt = prompt_module._INSPIRATION_AXIS_KEYWORD_SYSTEM_PROMPT
+    lowered = prompt.lower()
+
+    # References the per-call explore_request block + its avoid_covered field.
+    assert "explore_request" in prompt
+    assert "avoid_covered" in prompt
+    # Cross-domain, uncovered-but-relevant intent.
+    assert "cross-domain" in lowered
+    assert "uncovered" in lowered
+    # Bad (covered/same-domain) vs good (uncovered cross-domain) counter-example.
+    assert "游戏新作" in prompt  # bad: stays in the covered domain
+    assert "詹姆斯韦伯 深空图像" in prompt  # good: uncovered cross-domain anchor

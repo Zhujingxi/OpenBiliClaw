@@ -2066,13 +2066,20 @@ Rules:
    slot's fresh_evidence truly has no specific anchor may you fall back to a topic-level
    core_concept — treat that as the exception, and never invent proper nouns that are not in the
    evidence.
-7. Never put literal years such as 2025 or 2026 in core_concept. Use recency_sensitivity=high
+7. When the user message includes an explore_request block, this is a cross-domain exploration
+   round: every core_concept MUST anchor on a specific entity/event/work/person/mechanism from a
+   DIFFERENT domain than the user's usual interests — something currently uncovered but plausibly
+   relevant — and MUST avoid every topic listed in explore_request.avoid_covered. Example: for a
+   user already saturated on 游戏, a core_concept like 游戏新作 (still the covered domain) is
+   UNACCEPTABLE; anchor on an uncovered but adjacent concrete thing such as 詹姆斯韦伯 深空图像
+   (from 天文, uncovered) instead. When there is no explore_request block, ignore this rule.
+8. Never put literal years such as 2025 or 2026 in core_concept. Use recency_sensitivity=high
    for time-sensitive topics instead.
-8. Use platform_guides as platform style guidance, not as hard gates. Only output platforms that
+9. Use platform_guides as platform style guidance, not as hard gates. Only output platforms that
    appear in allocation_targets.
-9. Keep axes grounded in fresh_evidence. evidence_refs should point to the provided URL or compact
+10. Keep axes grounded in fresh_evidence. evidence_refs should point to the provided URL or compact
    evidence identifier when available.
-10. Keep JSON compact and valid. No markdown, no commentary, no trailing prose.
+11. Keep JSON compact and valid. No markdown, no commentary, no trailing prose.
 """.strip()
 
 
@@ -2084,6 +2091,7 @@ def build_inspiration_axis_keyword_prompt(
     existing_axes: object,
     fresh_evidence: object,
     allocation_targets: object,
+    explore_request: object | None = None,
 ) -> list[dict[str, str]]:
     """Build the merged axis-plus-keyword inspiration prompt.
 
@@ -2092,6 +2100,12 @@ def build_inspiration_axis_keyword_prompt(
     per-call data lives in ``user_prompt`` blocks ordered most-stable
     (profile_digest) → most-variable (allocation_targets), serialized with
     ``ensure_ascii=False, indent=2, sort_keys=True``.
+
+    ``explore_request`` is an optional per-call block (Phase 2.3, E2): when
+    provided it flags a cross-domain exploration round and carries
+    ``avoid_covered``. It lives ONLY in the user message — the static explore
+    rule is always present in the system prompt — so the system prefix stays
+    byte-identical with or without it (prompt-cache invariant).
     """
 
     user_blocks = [
@@ -2114,6 +2128,14 @@ def build_inspiration_axis_keyword_prompt(
         json.dumps(allocation_targets, ensure_ascii=False, indent=2, sort_keys=True),
         "</allocation_targets>",
     ]
+    if explore_request is not None:
+        user_blocks.extend(
+            [
+                "<explore_request>",
+                json.dumps(explore_request, ensure_ascii=False, indent=2, sort_keys=True),
+                "</explore_request>",
+            ]
+        )
     return [
         {"role": "system", "content": _INSPIRATION_AXIS_KEYWORD_SYSTEM_PROMPT},
         {"role": "user", "content": "\n\n".join(user_blocks)},

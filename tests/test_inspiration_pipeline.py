@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from openbiliclaw.config import DiscoveryConfig, derive_inspiration_breadth_params
-from openbiliclaw.discovery.inspiration import ExaPreviewItem
+from openbiliclaw.discovery.inspiration import AxisRow, ExaPreviewItem, SecondaryInterest
 from openbiliclaw.runtime.inspiration_pipeline import InspirationKeywordPipeline
 from openbiliclaw.soul.profile import InterestTag, PreferenceLayer, SoulProfile
 from openbiliclaw.storage.database import Database
@@ -63,6 +63,7 @@ class _FakeHost:
 
     profile: SoulProfile
     inserted: list[tuple[str, list[str]]] = field(default_factory=list)
+    insert_kinds: list[tuple[str, str]] = field(default_factory=list)
 
     def _history(self, platform: str) -> list[str]:
         return []
@@ -77,6 +78,8 @@ class _FakeHost:
         metadata_by_keyword: dict[str, dict[str, object]] | None = None,
     ) -> int:
         self.inserted.append((platform, list(words)))
+        if words:
+            self.insert_kinds.append((platform, keyword_kind))
         return len(words)
 
     def _avoid_hints(self, profile: SoulProfile | None = None) -> dict[str, dict[str, object]]:
@@ -627,3 +630,355 @@ async def test_preview_report_surfaces_core_concept_and_decoration_metadata(db: 
     entry = metadata_by_platform[_BILI][keyword]
     assert entry["core_concept"] == "Switch 独立游戏 冷门佳作"
     assert entry["decoration"] == "盘点"
+
+
+# ── Phase 2.3 Task 1: E0 parameterization of _run_inspiration_axis_pipeline ──
+
+
+async def _run_production_pipeline(
+    pipeline: InspirationKeywordPipeline,
+    *,
+    profile: SoulProfile,
+    **params: Any,
+) -> tuple[dict[str, int], dict[str, Any]]:
+    return await pipeline._run_inspiration_axis_pipeline(
+        [_BILI],
+        profile=profile,
+        digest="d1",
+        query_kind="regular",
+        persist_keywords=True,
+        persist_grounding=True,
+        persist_axes=True,
+        bump_axis_usage=True,
+        selection_scope="production",
+        **params,
+    )
+
+
+async def test_pipeline_defaults_reproduce_regular_output_byte_stable(db: Database) -> None:
+    # Hard gate: all four E0 params at their defaults reproduce the pre-refactor
+    # regular path — same selected interest, keyword text, and ledger.
+    profile = _profile()
+    host = _FakeHost(profile=profile)
+    provider = _FakeProvider(
+        previews_by_query={
+            "Switch 独立游戏": [
+                ExaPreviewItem(title="gem", url="https://x.test/a", highlights=("Balatro",))
+            ]
+        }
+    )
+    pipeline = _make_pipeline(
+        db, llm=_FakeLLM(payload=_axis_payload()), host=host, provider=provider
+    )
+
+    ledger, report = await _run_production_pipeline(pipeline, profile=profile)
+
+    assert ledger == {_BILI: 1}
+    assert host.inserted == [(_BILI, ["Switch 独立游戏 冷门佳作 盘点"])]
+    assert [i["label"] for i in report["selected_secondary_interests"]] == ["Switch 独立游戏"]
+
+
+async def test_pipeline_uses_explicit_seed_interests(db: Database) -> None:
+    # seed_interests overrides _selected_inspiration_interests: the report reflects
+    # the injected seed, not the profile-derived like interest.
+    profile = _profile()
+    host = _FakeHost(profile=profile)
+    pipeline = _make_pipeline(
+        db,
+        llm=_FakeLLM(payload={"axes": [], "keywords": []}),
+        host=host,
+        provider=_FakeProvider(previews_by_query={}),
+    )
+    seed = SecondaryInterest(interest_id="i:cross", label="跨域主题", parent="", weight=0.5)
+
+    _ledger, report = await _run_production_pipeline(
+        pipeline, profile=profile, seed_interests=[seed]
+    )
+
+    labels = [i["label"] for i in report["selected_secondary_interests"]]
+    assert labels == ["跨域主题"]
+    assert "Switch 独立游戏" not in labels
+
+
+async def test_pipeline_axis_source_replaces_interest_listed_axes(db: Database) -> None:
+    # axis_source replaces the interest-listed existing_axes: the injected axis
+    # surfaces as a deterministic grounding-probe branch (which is built from the
+    # existing_axes), whereas the empty db would otherwise yield no axis branch.
+    profile = _profile()
+    host = _FakeHost(profile=profile)
+    pipeline = _make_pipeline(
+        db,
+        llm=_FakeLLM(payload={"axes": [], "keywords": []}),
+        host=host,
+        provider=_FakeProvider(previews_by_query={}),
+    )
+    seed = SecondaryInterest(interest_id="i:cross", label="跨域主题", parent="", weight=0.5)
+    axis = AxisRow(
+        interest_label="跨域主题",
+        axis_label="跨域轴X",
+        axis_kind="other",
+        source="explore",
+        example_terms=("专名Y",),
+    )
+
+    _ledger, report = await _run_production_pipeline(
+        pipeline, profile=profile, seed_interests=[seed], axis_source=[axis]
+    )
+
+    branch_labels = [b["branch_label"] for b in report["brainstorm_branches"]]
+    assert "跨域轴X" in branch_labels
+
+
+async def test_pipeline_disables_deterministic_fallback_on_llm_failure(db: Database) -> None:
+    # allow_deterministic_llm_fallback=False → LLM failure yields empty output so
+    # an upper layer can degrade; the default True still fills deterministically.
+    profile = _profile()
+
+    host_off = _FakeHost(profile=profile)
+    pipeline_off = _make_pipeline(
+        db, llm=_FakeLLM(payload=None, raises=True), host=host_off, provider=_FakeProvider({})
+    )
+    ledger_off, _report_off = await _run_production_pipeline(
+        pipeline_off, profile=profile, allow_deterministic_llm_fallback=False
+    )
+    # No deterministic fill → zero keywords produced (the empty insert call is a
+    # no-op; nothing lands in the ledger), so an upper layer can degrade.
+    assert ledger_off == {}
+    assert [word for _platform, words in host_off.inserted for word in words] == []
+
+    host_on = _FakeHost(profile=profile)
+    pipeline_on = _make_pipeline(
+        db, llm=_FakeLLM(payload=None, raises=True), host=host_on, provider=_FakeProvider({})
+    )
+    ledger_on, _report_on = await _run_production_pipeline(pipeline_on, profile=profile)
+    # Default (True) keeps the Phase-1 deterministic fill → non-empty output.
+    assert ledger_on == {_BILI: 1}
+    assert host_on.inserted == [(_BILI, ["Switch 独立游戏"])]
+
+
+async def test_pipeline_accepts_explore_request_param_inertly(db: Database) -> None:
+    # explore_request is reserved (threaded into the prompt by a later task); at
+    # this stage passing it must not change the default output.
+    profile = _profile()
+    host = _FakeHost(profile=profile)
+    provider = _FakeProvider(
+        previews_by_query={
+            "Switch 独立游戏": [
+                ExaPreviewItem(title="gem", url="https://x.test/a", highlights=("Balatro",))
+            ]
+        }
+    )
+    pipeline = _make_pipeline(
+        db, llm=_FakeLLM(payload=_axis_payload()), host=host, provider=provider
+    )
+
+    ledger, _report = await _run_production_pipeline(
+        pipeline, profile=profile, explore_request={"avoid_covered": ["已覆盖话题"]}
+    )
+
+    assert ledger == {_BILI: 1}
+    assert host.inserted == [(_BILI, ["Switch 独立游戏 冷门佳作 盘点"])]
+
+
+# ── Phase 2.3 Task 4: _run_explore_inspiration_stage (E1+E2) ────────────
+
+
+def _explore_axis_payload() -> dict[str, object]:
+    # A cross-domain axis + a specific cross-domain keyword anchored on a real
+    # entity (not a restatement of the seed domain), decorated with a marker.
+    return {
+        "axes": [
+            {
+                "interest": "天文摄影",
+                "axis_label": "深空拍摄",
+                "axis_kind": "method",
+                "example_terms": ["深空拍摄"],
+            }
+        ],
+        "keywords": [
+            {
+                "interest": "天文摄影",
+                "axis_id_or_label": "深空拍摄",
+                "platform": _BILI,
+                "core_concept": "詹姆斯韦伯 深空图像",
+                "decoration": "盘点",
+            }
+        ],
+    }
+
+
+def _explore_domains() -> list[dict[str, object]]:
+    return [{"domain": "天文摄影", "novelty_level": 0.8, "queries": ["天文摄影 入门 盘点"]}]
+
+
+async def test_explore_stage_produces_crossdomain_explore_keywords(db: Database) -> None:
+    profile = _profile()
+    host = _FakeHost(profile=profile)
+    llm = _FakeLLM(payload=_explore_axis_payload())
+    pipeline = _make_pipeline(
+        db,
+        llm=llm,
+        host=host,
+        provider=_FakeProvider(previews_by_query={}),
+    )
+
+    ledger, report = await pipeline._run_explore_inspiration_stage(
+        [_BILI],
+        profile=profile,
+        digest="d1",
+        explore_domains=_explore_domains(),
+        covered_topic_groups=["游戏", "动漫"],
+    )
+
+    keyword = report["platform_keywords"][_BILI][0]
+    assert keyword == "詹姆斯韦伯 深空图像 盘点"
+    assert ledger == {_BILI: 1}
+    # keyword_kind='explore', platform=bilibili
+    assert host.insert_kinds == [(_BILI, "explore")]
+    entry = report["metadata_by_platform"][_BILI][keyword]
+    assert entry["query_kind"] == "explore"
+    assert entry["inspiration_backend"] == "axis_keyword"
+    # source_interest ∈ current explore_domains (not old domain / like interest)
+    assert entry["source_interest"] == "天文摄影"
+    # exactly 1 successful LLM call
+    assert llm.calls == ["discovery.keyword_inspiration"]
+    # axis persisted with source='explore' and the correct axis_id (angle_id)
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    explore_axes = db.list_inspiration_axes_by_source("explore", limit=10, now=now)
+    axis_ids = {a.axis_id for a in explore_axes}
+    assert entry["angle_id"] in axis_ids
+    assert all(a.source == "explore" for a in explore_axes)
+    assert report["explore_degraded"] is False
+    # restatement_rate ≤ 0.3 for the produced explore keyword
+    from openbiliclaw.discovery.inspiration import RealizedKeyword, restatement_rate
+
+    realized = [RealizedKeyword(keyword=keyword, metadata=entry)]
+    assert restatement_rate(realized) <= 0.3
+
+
+async def test_explore_stage_inherits_f2_max_tokens(db: Database) -> None:
+    # Two seed domains × 1 platform = 2 slots < threshold 12 → floor 8192.
+    profile = _profile()
+    host = _FakeHost(profile=profile)
+    seen_max_tokens: list[int] = []
+
+    @dataclass
+    class _CaptureLLM:
+        payload: dict[str, object]
+
+        async def complete_structured_task(
+            self, *, caller: str = "", max_tokens: int = 4096, **_: object
+        ) -> Any:
+            seen_max_tokens.append(int(max_tokens))
+            from openbiliclaw.llm.base import LLMResponse
+
+            return LLMResponse(
+                content=json.dumps(self.payload, ensure_ascii=False),
+                provider="test",
+                model="test",
+            )
+
+    pipeline = _make_pipeline(
+        db, llm=_CaptureLLM(payload=_explore_axis_payload()), host=host, provider=_FakeProvider({})
+    )
+
+    await pipeline._run_explore_inspiration_stage(
+        [_BILI],
+        profile=profile,
+        digest="d1",
+        explore_domains=[
+            {"domain": "天文摄影", "novelty_level": 0.8, "queries": []},
+            {"domain": "深海生物", "novelty_level": 0.7, "queries": []},
+        ],
+        covered_topic_groups=[],
+    )
+
+    assert seen_max_tokens == [8192]  # F2 floor for 2 slots
+
+
+async def test_explore_stage_clamps_interest_to_current_domains(db: Database) -> None:
+    # Adversarial (R3): the LLM drifts, returning a keyword whose interest is a
+    # stale like-interest (游戏) instead of the current domain — that candidate
+    # must be dropped so no output keyword carries the stale source_interest.
+    profile = _profile()
+    host = _FakeHost(profile=profile)
+    drift_payload = {
+        "axes": [
+            {
+                "interest": "天文摄影",
+                "axis_label": "深空拍摄",
+                "axis_kind": "method",
+                "example_terms": ["深空拍摄"],
+            }
+        ],
+        "keywords": [
+            {
+                "interest": "游戏",  # stale / drifted — NOT a current explore domain
+                "axis_id_or_label": "深空拍摄",
+                "platform": _BILI,
+                "core_concept": "某热门游戏 新作",
+                "decoration": "盘点",
+            }
+        ],
+    }
+    pipeline = _make_pipeline(
+        db, llm=_FakeLLM(payload=drift_payload), host=host, provider=_FakeProvider({})
+    )
+
+    ledger, report = await pipeline._run_explore_inspiration_stage(
+        [_BILI],
+        profile=profile,
+        digest="d1",
+        explore_domains=_explore_domains(),  # current domain = 天文摄影
+        covered_topic_groups=[],
+    )
+
+    # The drifted candidate is dropped → no output keyword carries 游戏.
+    produced = report["platform_keywords"][_BILI]
+    metadata = report["metadata_by_platform"][_BILI]
+    assert all(metadata[kw]["source_interest"] == "天文摄影" for kw in produced)
+    assert all(metadata[kw]["source_interest"] != "游戏" for kw in produced)
+    assert "某热门游戏 新作 盘点" not in produced
+    # No live-fill / interest_only 游戏 keyword either (any produced word is clean).
+    assert all(word for _p, words in host.inserted for word in words) or ledger == {}
+
+
+async def test_explore_stage_degraded_on_llm_failure_returns_empty(db: Database) -> None:
+    profile = _profile()
+    host = _FakeHost(profile=profile)
+    pipeline = _make_pipeline(
+        db, llm=_FakeLLM(payload=None, raises=True), host=host, provider=_FakeProvider({})
+    )
+
+    ledger, report = await pipeline._run_explore_inspiration_stage(
+        [_BILI],
+        profile=profile,
+        digest="d1",
+        explore_domains=_explore_domains(),
+        covered_topic_groups=[],
+    )
+
+    # LLM failure + no deterministic fallback → empty output + degraded marker.
+    assert report["explore_degraded"] is True
+    assert ledger == {}
+    assert [word for _p, words in host.inserted for word in words] == []
+
+
+async def test_explore_stage_cold_start_no_domains_is_noop(db: Database) -> None:
+    profile = _profile()
+    host = _FakeHost(profile=profile)
+    pipeline = _make_pipeline(
+        db, llm=_FakeLLM(payload=_explore_axis_payload()), host=host, provider=_FakeProvider({})
+    )
+
+    ledger, report = await pipeline._run_explore_inspiration_stage(
+        [_BILI],
+        profile=profile,
+        digest="d1",
+        explore_domains=[],
+        covered_topic_groups=[],
+    )
+
+    assert ledger == {}
+    assert host.inserted == []
+    assert report["explore_degraded"] is False

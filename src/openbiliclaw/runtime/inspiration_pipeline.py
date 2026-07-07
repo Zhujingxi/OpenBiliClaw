@@ -19,6 +19,7 @@ import asyncio
 import logging
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
@@ -153,11 +154,14 @@ class InspirationKeywordPipeline:
         existing_axes: Sequence[object],
         fresh_evidence: Sequence[object],
         allocation_targets: Mapping[str, object],
+        explore_request: Mapping[str, object] | None = None,
     ) -> tuple[list[AxisRow], list[MaterializeCandidate], dict[str, object]]:
         """Run the standalone axis-plus-keyword inspiration LLM call.
 
-        This is Task 6's isolated ④ surface only. It intentionally does not
-        rewire either inspiration stage; Task 7 owns that integration.
+        ``explore_request`` (Phase 2.3, E2) is an optional per-call block: when
+        provided it is threaded into the (static-system) prompt's user message to
+        flag a cross-domain exploration round. ``None`` (the default) leaves the
+        prompt byte-identical to the regular path.
         """
 
         (
@@ -186,6 +190,7 @@ class InspirationKeywordPipeline:
             existing_axes=capped_axes,
             fresh_evidence=capped_evidence,
             allocation_targets=allocation_targets,
+            explore_request=explore_request,
         )
         # F2: scale max_tokens with the slot count so high-platform runs (longer
         # core_concepts) don't clip the output. slots use the pre-cap counts the
@@ -542,6 +547,9 @@ class InspirationKeywordPipeline:
 
         Carries the existing axis id and identity fields (so the upsert UPDATEs
         that row, never inserting) while unioning example terms / evidence refs.
+        Cross-source rule (E5): ``source`` comes from ``existing`` — an
+        explore-source axis merging onto a regular axis keeps ``source`` regular;
+        only a genuinely new cross-domain axis stays ``source='explore'``.
         """
 
         return AxisRow(
@@ -668,7 +676,23 @@ class InspirationKeywordPipeline:
         bump_axis_usage: bool,
         selection_scope: str,
         keyword_kind_by_platform: Mapping[str, str] | None = None,
+        seed_interests: Sequence[SecondaryInterest] | None = None,
+        axis_source: Sequence[AxisRow] | None = None,
+        explore_request: Mapping[str, object] | None = None,
+        allow_deterministic_llm_fallback: bool = True,
+        allowed_interest_labels: Sequence[str] | None = None,
+        new_axis_source: str | None = None,
     ) -> tuple[dict[str, int], dict[str, object]]:
+        # E0 parameterization (Phase 2.3): the keyword-only params below let an
+        # upper layer (the explore stage) reuse this skeleton without forking or
+        # polluting the regular path. Every default reproduces the pre-refactor
+        # behaviour BYTE-FOR-BYTE — ``seed_interests=None`` falls back to
+        # ``_selected_inspiration_interests`` (like interests), ``axis_source=None``
+        # to the interest-listed axes, ``explore_request=None`` adds no prompt
+        # extras, ``allow_deterministic_llm_fallback=True`` keeps the Phase-1
+        # two-level deterministic fill on LLM failure, ``allowed_interest_labels
+        # =None`` clamps nothing, and ``new_axis_source=None`` keeps the axes'
+        # LLM-assigned source.
         report = self._empty_inspiration_axis_report(
             platforms,
             query_kind=query_kind,
@@ -687,10 +711,13 @@ class InspirationKeywordPipeline:
         if selection_scope == "production":
             report["axis_backfill"] = self._run_axis_backfill_tick()
 
-        coverage_snapshot = self._keyword_interest_coverage_snapshot(
-            selection_scope=selection_scope
-        )
-        selected_interests = self._selected_inspiration_interests(profile, coverage_snapshot)
+        if seed_interests is None:
+            coverage_snapshot = self._keyword_interest_coverage_snapshot(
+                selection_scope=selection_scope
+            )
+            selected_interests = self._selected_inspiration_interests(profile, coverage_snapshot)
+        else:
+            selected_interests = list(seed_interests)
         self._record_inspiration_interest_selection(
             selected_interests,
             digest=digest,
@@ -712,7 +739,10 @@ class InspirationKeywordPipeline:
         if not selected_interests:
             return {}, report
 
-        existing_axes = self._listed_inspiration_axes(selected_interests)
+        if axis_source is None:
+            existing_axes = self._listed_inspiration_axes(selected_interests)
+        else:
+            existing_axes = list(axis_source)
         branches = build_grounding_probes(
             selected_interests,
             existing_axes,
@@ -776,14 +806,27 @@ class InspirationKeywordPipeline:
             existing_axes=existing_axes,
             fresh_evidence=self._fresh_evidence_from_grounding(grounding_records),
             allocation_targets=self._prompt_allocation_targets(allocation),
+            explore_request=explore_request,
         )
         report["llm_telemetry"] = llm_telemetry
-        if bool(llm_telemetry.get("llm_call_failed")):
+        # When the LLM call fails, the Phase-1 two-level deterministic fill kicks
+        # in — UNLESS the caller opted out (explore stage), in which case the
+        # empty output signals "degraded" so an upper layer can fall back.
+        if bool(llm_telemetry.get("llm_call_failed")) and allow_deterministic_llm_fallback:
             candidates = self._deterministic_fallback_materialize_candidates(
                 selected_interests=selected_interests,
                 existing_axes=existing_axes,
                 platforms=platforms,
             )
+
+        # Allowed-interest clamp (R3, explore's mechanical AC2 guarantee): the
+        # parser trusts the LLM's raw ``interest`` verbatim, so a drifted keyword
+        # could carry a stale/old-domain ``source_interest``. Dropping candidates
+        # whose interest is not in the current seed-label set (normalized match)
+        # guarantees every emitted keyword's source_interest ∈ the seeds.
+        if allowed_interest_labels is not None:
+            allowed = {self._match_text(label) for label in allowed_interest_labels}
+            candidates = [c for c in candidates if self._match_text(c.interest) in allowed]
 
         max_keywords = int(self._inspiration_params.max_keywords_per_platform)
         materialized, materialize_telemetry = materialize_platform_keywords(
@@ -844,6 +887,13 @@ class InspirationKeywordPipeline:
                     )
             report["coverage_shortfall"] = shortfalls
         if persist_axes:
+            # Retag freshly-generated axes with the caller's source (explore →
+            # ``source='explore'``) so the axis library records them under that
+            # source and Phase-2 backfill + ``list_inspiration_axes_by_source``
+            # can surface them as the explore lane's own reusable axes (E5).
+            # axis_id is derived from (interest, label), so retagging is stable.
+            if new_axis_source is not None:
+                new_axes = [replace(axis, source=new_axis_source) for axis in new_axes]
             # ⑥ Embedding near-dup axis merge (Spec Part E), resolved here in the
             # async layer so the synchronous upsert DAO stays zero-I/O. Preview
             # (persist_axes=False) never embeds — observation stays read-only.
@@ -1038,6 +1088,104 @@ class InspirationKeywordPipeline:
             selection_scope="production",
         )
         return ledger
+
+    async def _run_explore_inspiration_stage(
+        self,
+        explore_platforms: list[str],
+        *,
+        profile: SoulProfile,
+        digest: str,
+        explore_domains: Sequence[Mapping[str, object]],
+        covered_topic_groups: Sequence[str],
+    ) -> tuple[dict[str, int], dict[str, object]]:
+        """Cross-domain explore stage (Phase 2.3, E1+E2) via the E0 skeleton.
+
+        Seeds are the CURRENT merged ``explore_domains`` ONLY (each domain becomes
+        a pseudo ``seed_interest``) — never like interests, never historical
+        explore axes (those are old domains; seeding them would drift
+        ``source_interest`` to a stale domain and break AC2). Historical
+        high-yield explore axes matched to the current domains ride in as
+        ``existing_axes`` to enrich them (E5). The round asks the parameterized
+        pipeline for ``keyword_kind='explore'`` on Bilibili, tags fresh axes
+        ``source='explore'``, sends the explore_request prompt block, opts OUT of
+        the deterministic fallback (LLM failure → empty + degraded so the
+        dispatch layer can fall back to the flat ``explore_domains`` queries), and
+        clamps candidate interests to the seed set. Cold-start (no domains / no
+        explore axes) is a no-op, not an error.
+        """
+
+        empty_report = self._empty_inspiration_axis_report(
+            explore_platforms, query_kind="explore", inserted=False
+        )
+        empty_report["explore_degraded"] = False
+        provider = self._inspiration_provider
+        if not explore_platforms or provider is None:
+            return {}, empty_report
+        if not bool(getattr(self._discovery, "inspiration_search_enabled", False)):
+            return {}, empty_report
+
+        domain_labels: list[str] = []
+        seen_labels: set[str] = set()
+        for item in explore_domains:
+            if not isinstance(item, Mapping):
+                continue
+            label = str(item.get("domain") or "").strip()
+            norm = self._match_text(label)
+            if not label or not norm or norm in seen_labels:
+                continue
+            seen_labels.add(norm)
+            domain_labels.append(label)
+        if not domain_labels:
+            return {}, empty_report
+
+        seed_interests = [
+            SecondaryInterest(
+                interest_id=f"explore:{label}",
+                label=label,
+                source="explore",
+                weight=1.0,
+            )
+            for label in domain_labels
+        ]
+
+        # E5: historical explore axes matched to the CURRENT domains feed in as
+        # existing_axes only (never as seeds).
+        lister = getattr(self._db, "list_inspiration_axes_by_source", None)
+        matched_axes: list[AxisRow] = []
+        if callable(lister):
+            axis_limit = max(1, int(self._inspiration_params.aspect_window_size))
+            try:
+                explore_axes = lister("explore", limit=axis_limit, now=self._clock())
+            except Exception:
+                logger.debug("explore axis-by-source lookup failed", exc_info=True)
+                explore_axes = []
+            matched_axes = [
+                axis
+                for axis in explore_axes
+                if self._match_text(axis.interest_label) in seen_labels
+            ]
+
+        keyword_kind_by_platform = {platform: "explore" for platform in explore_platforms}
+        ledger, report = await self._run_inspiration_axis_pipeline(
+            explore_platforms,
+            profile=profile,
+            digest=digest,
+            query_kind="explore",
+            persist_keywords=True,
+            persist_grounding=True,
+            persist_axes=True,
+            bump_axis_usage=True,
+            selection_scope="production",
+            keyword_kind_by_platform=keyword_kind_by_platform,
+            seed_interests=seed_interests,
+            axis_source=matched_axes,
+            explore_request={"avoid_covered": list(covered_topic_groups)},
+            allow_deterministic_llm_fallback=False,
+            allowed_interest_labels=domain_labels,
+            new_axis_source="explore",
+        )
+        report["explore_degraded"] = bool(report.get("llm_call_failed"))
+        return ledger, report
 
     @staticmethod
     def _keyword_quality_norm(value: object) -> str:

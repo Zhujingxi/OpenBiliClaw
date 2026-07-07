@@ -783,6 +783,10 @@ class KeywordPlanner:
         # ``{platform: {"generated": n, "yield": y}}`` snapshot emitted by a
         # generation pass. Empty until the first pass that generates anything.
         self.last_cycle_ledger: dict[str, dict[str, int]] = {}
+        # Phase 2.3 telemetry: True when the last coexist explore round fell back
+        # from rich axis-library generation to the flat ``explore_domains``
+        # queries (rich-gen degraded / empty). Reset each explore attempt.
+        self.last_explore_inspiration_degraded: bool = False
         self._profile_prompt_cache = PromptLayerRenderCache()
         self._generation_cache: dict[
             str,
@@ -920,6 +924,23 @@ class KeywordPlanner:
             profile=profile,
             digest=digest,
             query_kind=query_kind,
+        )
+
+    async def _run_explore_inspiration_stage(
+        self,
+        explore_platforms: list[str],
+        *,
+        profile: SoulProfile,
+        digest: str,
+        explore_domains: Sequence[Mapping[str, object]],
+        covered_topic_groups: Sequence[str],
+    ) -> tuple[dict[str, int], dict[str, object]]:
+        return await self._inspiration_pipeline._run_explore_inspiration_stage(
+            explore_platforms,
+            profile=profile,
+            digest=digest,
+            explore_domains=explore_domains,
+            covered_topic_groups=covered_topic_groups,
         )
 
     def _selected_inspiration_interests(
@@ -1298,11 +1319,15 @@ class KeywordPlanner:
             ledger[platform] = inserted
 
         if explore_request is not None and explore_domains:
-            explore_queries = self._explore_domain_queries(explore_domains)
-            inserted = self._insert(_BILIBILI, explore_queries, digest, keyword_kind="explore")
-            if inserted > 0:
-                ledger[_BILIBILI] = int(ledger.get(_BILIBILI, 0)) + inserted
-                self._mark_explore_planned()
+            covered = _as_str_list(explore_request.get("covered_topic_groups"))
+            explore_ledger = await self._run_coexist_explore(
+                profile=profile,
+                digest=digest,
+                explore_domains=explore_domains,
+                covered_topic_groups=covered,
+            )
+            for platform, inserted in explore_ledger.items():
+                ledger[platform] = int(ledger.get(platform, 0)) + int(inserted)
 
         inspiration_ledger = await self._run_inspiration_stage(
             inspiration_platforms,
@@ -1313,6 +1338,65 @@ class KeywordPlanner:
             ledger[platform] = int(ledger.get(platform, 0)) + int(inserted)
 
         self._emit_cycle_ledger(ledger, digest)
+        return ledger
+
+    async def _run_coexist_explore(
+        self,
+        *,
+        profile: SoulProfile,
+        digest: str,
+        explore_domains: list[dict[str, object]],
+        covered_topic_groups: list[str],
+    ) -> dict[str, int]:
+        """Coexist explore channel (Phase 2.3): rich axis-library generation with
+        a flat-``explore_domains`` fallback.
+
+        When inspiration search is enabled, route the due explore round through
+        the cross-domain axis pipeline (``_run_explore_inspiration_stage``). If it
+        degrades — LLM failure / empty output (``explore_degraded``) or it raises
+        — fall back to the OLD ``_explore_domain_queries`` flatten so the explore
+        pool is never left bare (the merged call already produced these domains,
+        so the fallback has real data). When inspiration is disabled, take the
+        flatten path directly (byte-identical to the pre-2.3 behaviour). Marks the
+        explore plan exactly once, on whichever path actually inserted words.
+        """
+
+        self.last_explore_inspiration_degraded = False
+        ledger: dict[str, int] = {}
+        if not explore_domains:
+            return ledger
+
+        use_rich = (
+            bool(getattr(self._discovery, "inspiration_search_enabled", False))
+            and self._inspiration_provider is not None
+        )
+        if use_rich:
+            try:
+                explore_ledger, report = await self._run_explore_inspiration_stage(
+                    [_BILIBILI],
+                    profile=profile,
+                    digest=digest,
+                    explore_domains=explore_domains,
+                    covered_topic_groups=covered_topic_groups,
+                )
+            except Exception:
+                logger.debug("explore rich generation raised; degrading to flatten", exc_info=True)
+                explore_ledger, report = {}, {"explore_degraded": True}
+            degraded = bool(report.get("explore_degraded")) or not explore_ledger
+            if not degraded:
+                for platform, inserted in explore_ledger.items():
+                    ledger[platform] = int(ledger.get(platform, 0)) + int(inserted)
+                self._mark_explore_planned()
+                return ledger
+            # Rich generation degraded → fall through to the flat fallback so the
+            # explore pool still replenishes (never bare).
+            self.last_explore_inspiration_degraded = True
+
+        explore_queries = self._explore_domain_queries(explore_domains)
+        inserted = self._insert(_BILIBILI, explore_queries, digest, keyword_kind="explore")
+        if inserted > 0:
+            ledger[_BILIBILI] = int(ledger.get(_BILIBILI, 0)) + inserted
+            self._mark_explore_planned()
         return ledger
 
     def _inspiration_replaces_merged_keywords(self) -> bool:

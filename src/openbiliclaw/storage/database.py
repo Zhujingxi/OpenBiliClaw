@@ -6247,6 +6247,47 @@ class Database:
             )
         return result
 
+    def list_inspiration_axes_by_source(
+        self,
+        source: str,
+        *,
+        min_yield: float = 0.0,
+        limit: int,
+        now: datetime,
+    ) -> list[AxisRow]:
+        """Return active axes filtered by ``source`` (Phase 2.3, E5).
+
+        Explore axes carry cross-domain ``interest_label``s that never match a
+        selected like interest, so :meth:`list_inspiration_axes` (interest-keyed)
+        cannot surface them. This mirrors that DAO's ``status='active'`` filter,
+        the SAME ``_axis_is_time_expired`` time-sensitive suppression, and the
+        SAME Phase-2 ``_axis_list_sort_key`` ordering (freshness × conditional
+        prior floor), but keys on ``source`` and applies a raw ``yield_score >=
+        min_yield`` floor — letting the explore stage reuse its own high-yield
+        cross-domain axes. ``limit`` is a global (not per-interest) bound.
+        """
+
+        source_key = str(source or "").strip()
+        bounded_limit = max(0, int(limit))
+        if not source_key or bounded_limit <= 0:
+            return []
+        self._ensure_fresh_read()
+        rows = self.conn.execute(
+            """
+            SELECT *
+            FROM discovery_inspiration_axis
+            WHERE status = 'active'
+              AND source = ?
+              AND yield_score >= ?
+            """,
+            (source_key, float(min_yield)),
+        ).fetchall()
+        ranked = sorted(
+            (row for row in rows if not _axis_is_time_expired(row, now)),
+            key=lambda row: _axis_list_sort_key(row, now),
+        )
+        return [self._row_to_discovery_inspiration_axis(row) for row in ranked[:bounded_limit]]
+
     def _enforce_inspiration_axis_active_cap(self, interest_label: str) -> None:
         rows = self.conn.execute(
             """

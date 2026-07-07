@@ -2151,3 +2151,190 @@ def test_deterministic_fill_metadata_carries_template_core_and_empty_decoration(
     # Deterministic fill carries its template core + empty decoration.
     assert metadata["core_concept"] == keywords[0].keyword
     assert metadata["decoration"] == ""
+
+
+# ── Phase 2.3 Task 2: source-filtered axis query DAO (E5) ───────────────
+
+
+def test_list_inspiration_axes_by_source_returns_explore_axis_not_findable_by_interest(
+    db: Database,
+) -> None:
+    now = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    explore = _axis_row(
+        "暗物质观测",
+        interest_label="宇宙探索",  # cross-domain label, not a selected like interest
+        source="explore",
+        yield_score=0.5,
+    )
+    db.upsert_inspiration_axes([explore], bump_usage=False)
+
+    by_source = db.list_inspiration_axes_by_source("explore", limit=10, now=now)
+    # (a) the explore axis IS surfaced by source...
+    assert [a.axis_label for a in by_source] == ["暗物质观测"]
+    assert by_source[0].source == "explore"
+    # ...but the interest-keyed DAO cannot find it (its label is cross-domain).
+    by_interest = db.list_inspiration_axes(["宇宙探索"], limit=10, now=now)
+    assert [a.axis_label for a in by_interest] == ["暗物质观测"]  # sanity: same label works
+    assert db.list_inspiration_axes(["游戏评价"], limit=10, now=now) == []
+
+
+def test_list_inspiration_axes_by_source_suppresses_time_expired(db: Database) -> None:
+    now = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    fresh = _axis_row(
+        "新引擎发布",
+        interest_label="宇宙探索",
+        source="explore",
+        yield_score=0.6,
+        last_refreshed_at="2026-07-04T12:00:00Z",
+    )
+    expired = _axis_row(
+        "过期时效轴",
+        interest_label="宇宙探索",
+        source="explore",
+        yield_score=0.9,
+        time_sensitive=True,
+        freshness_ttl_days=7,
+        last_refreshed_at="2026-06-01T12:00:00Z",
+    )
+    db.upsert_inspiration_axes([fresh, expired], bump_usage=False)
+
+    by_source = db.list_inspiration_axes_by_source("explore", limit=10, now=now)
+    # (b) the time-expired time-sensitive explore axis is suppressed (same
+    # _axis_is_time_expired filter as list_inspiration_axes).
+    assert [a.axis_label for a in by_source] == ["新引擎发布"]
+
+
+def test_list_inspiration_axes_by_source_applies_min_yield_floor(db: Database) -> None:
+    now = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    high = _axis_row("高产轴", interest_label="宇宙探索", source="explore", yield_score=0.5)
+    low = _axis_row("低产轴", interest_label="宇宙探索", source="explore", yield_score=0.05)
+    db.upsert_inspiration_axes([high, low], bump_usage=False)
+
+    filtered = db.list_inspiration_axes_by_source("explore", min_yield=0.1, limit=10, now=now)
+    assert [a.axis_label for a in filtered] == ["高产轴"]
+    # Default floor 0.0 returns both.
+    assert len(db.list_inspiration_axes_by_source("explore", limit=10, now=now)) == 2
+
+
+def test_list_inspiration_axes_by_source_reuses_phase2_ordering_and_limit(db: Database) -> None:
+    now = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    strong = _axis_row("强轴", interest_label="宇宙探索", source="explore", yield_score=0.9)
+    weak = _axis_row("弱轴", interest_label="宇宙探索", source="explore", yield_score=0.4)
+    db.upsert_inspiration_axes([strong, weak], bump_usage=False)
+
+    ranked = db.list_inspiration_axes_by_source("explore", limit=10, now=now)
+    # Same _axis_list_sort_key ordering: higher effective yield ranks first.
+    assert [a.axis_label for a in ranked] == ["强轴", "弱轴"]
+    # Bounded limit.
+    assert [
+        a.axis_label for a in db.list_inspiration_axes_by_source("explore", limit=1, now=now)
+    ] == ["强轴"]
+
+
+def test_merge_axis_into_keeps_existing_source_across_sources() -> None:
+    from openbiliclaw.runtime.inspiration_pipeline import InspirationKeywordPipeline
+
+    regular_existing = _axis_row(
+        "共享轴", interest_label="宇宙探索", source="external_search", example_terms=("旧证据",)
+    )
+    explore_new = _axis_row(
+        "共享轴", interest_label="宇宙探索", source="explore", example_terms=("新证据",)
+    )
+
+    merged = InspirationKeywordPipeline._merge_axis_into(explore_new, regular_existing)
+    # Cross-source rule: an explore axis merging onto a regular axis keeps the
+    # existing (regular) source and identity, unioning evidence.
+    assert merged.source == "external_search"
+    assert merged.axis_id == regular_existing.axis_id
+    assert set(merged.example_terms) == {"旧证据", "新证据"}
+
+
+def test_new_cross_domain_axis_keeps_explore_source(db: Database) -> None:
+    now = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    # A genuinely new cross-domain axis (no collision) stays source='explore'.
+    db.upsert_inspiration_axes(
+        [_axis_row("全新跨域轴", interest_label="深海生物", source="explore", yield_score=0.3)],
+        bump_usage=False,
+    )
+    by_source = db.list_inspiration_axes_by_source("explore", limit=10, now=now)
+    assert [a.source for a in by_source] == ["explore"]
+
+
+# ── Phase 2.3 Task 6: comfort-zone expansion attribution (E5 closed loop) ──
+
+
+def _insert_explore_keyword(
+    db: Database,
+    *,
+    keyword: str,
+    angle_id: str,
+    source_interest: str,
+    status: str = "used",
+    yield_count: int = 0,
+    created_at: str = "2026-07-01 12:00:00",
+) -> None:
+    # Explicitly keyword_kind='explore' — proves the backfill cohort filter
+    # (which keys only on angle_id/angle_label, not keyword_kind) includes them.
+    db.conn.execute(
+        """
+        INSERT INTO discovery_keywords (
+            platform, keyword, keyword_kind, profile_kw_digest,
+            angle_id, angle_label, source_interest,
+            inspiration_backend, status, yield_count, created_at
+        )
+        VALUES ('bilibili', ?, 'explore', 'digest', ?, ?, ?, 'axis_keyword', ?, ?, ?)
+        """,
+        (keyword, angle_id, source_interest, source_interest, status, yield_count, created_at),
+    )
+    db.conn.commit()
+
+
+def test_explore_axis_yield_rises_via_phase2_backfill_and_surfaces_by_source(
+    db: Database,
+) -> None:
+    now = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    axis = _axis_row("深空拍摄", interest_label="天文摄影", source="explore")
+    db.upsert_inspiration_axes([axis], bump_usage=False)
+
+    # Baseline: freshly-persisted explore axis has raw yield_score 0.0.
+    before = db.conn.execute(
+        "SELECT yield_score FROM discovery_inspiration_axis WHERE axis_id = ?",
+        (axis.axis_id,),
+    ).fetchone()
+    assert float(before["yield_score"]) == 0.0
+
+    # Seed explore-cohort keyword history attributed to the explore axis by
+    # angle_id (3 consumed rows, 2 admissions each).
+    for index in range(3):
+        _insert_explore_keyword(
+            db,
+            keyword=f"詹姆斯韦伯 深空图像 {index}",
+            angle_id=axis.axis_id,
+            source_interest="天文摄影",
+            status="used",
+            yield_count=2,
+        )
+
+    # Phase-2 backfill attributes by axis_id (source-agnostic) — no explore logic.
+    db.backfill_inspiration_axis_yield(window_days=30, now=now)
+
+    row = db.conn.execute(
+        "SELECT window_uses, admissions, yield_score, source FROM discovery_inspiration_axis "
+        "WHERE axis_id = ?",
+        (axis.axis_id,),
+    ).fetchone()
+    assert row["window_uses"] == 3
+    assert row["admissions"] == 6
+    # yield_score rose from 0.0 → (6 + 0.3) / (3 + 1) = 1.575, well above prior.
+    assert float(row["yield_score"]) == pytest.approx((6 + 0.3) / (3 + 1.0))
+    assert float(row["yield_score"]) > float(before["yield_score"])
+    assert str(row["source"]) == "explore"
+
+    # The proven explore axis now surfaces as a high-yield axis by source — the
+    # comfort-zone expansion mechanism Task 4 reuses on a later cycle.
+    surfaced = db.list_inspiration_axes_by_source("explore", min_yield=1.0, limit=10, now=now)
+    assert [a.axis_label for a in surfaced] == ["深空拍摄"]
+    assert surfaced[0].axis_id == axis.axis_id
+    assert surfaced[0].source == "explore"
+    # min_yield floors on the backfilled raw yield_score.
+    assert db.list_inspiration_axes_by_source("explore", min_yield=2.0, limit=10, now=now) == []
