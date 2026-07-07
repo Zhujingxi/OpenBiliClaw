@@ -3084,7 +3084,11 @@ def create_app(
                 view_count=int(getattr(item.content, "view_count", 0) or 0),
                 like_count=int(getattr(item.content, "like_count", 0) or 0),
                 danmaku_count=int(getattr(item.content, "danmaku_count", 0) or 0),
-                favorite_count=int(getattr(item.content, "favorite_count", 0) or 0),
+                favorite_count=int(
+                    getattr(item.content, "favorite_count", 0)
+                    or getattr(item.content, "collect_count", 0)
+                    or 0
+                ),
                 comment_count=int(getattr(item.content, "comment_count", 0) or 0),
                 up_mid=int(getattr(item.content, "up_mid", 0) or 0),
             )
@@ -3876,7 +3880,9 @@ def create_app(
                     view_count=int(row.get("view_count", 0) or 0),
                     like_count=int(row.get("like_count", 0) or 0),
                     danmaku_count=int(row.get("danmaku_count", 0) or 0),
-                    favorite_count=int(row.get("favorite_count", 0) or 0),
+                    favorite_count=int(
+                        row.get("favorite_count", 0) or row.get("collect_count", 0) or 0
+                    ),
                     comment_count=int(row.get("comment_count", 0) or 0),
                     up_mid=int(row.get("up_mid", 0) or 0),
                 )
@@ -4590,7 +4596,9 @@ def create_app(
                 "like_count": int(row.get("like_count", 0) or 0),
                 "comment_count": int(row.get("comment_count", 0) or 0),
                 "danmaku_count": int(row.get("danmaku_count", 0) or 0),
-                "favorite_count": int(row.get("favorite_count", 0) or 0),
+                "favorite_count": int(
+                    row.get("favorite_count", 0) or row.get("collect_count", 0) or 0
+                ),
                 "state": (
                     "liked" if str(row.get("feedback_type", "") or "") == "like" else "pending"
                 ),

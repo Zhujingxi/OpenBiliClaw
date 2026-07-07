@@ -178,6 +178,11 @@ test("reshuffleRecommendations posts to reshuffle endpoint", async () => {
         source_platform: "bilibili",
         content_type: "video",
         body_text: "",
+        view_count: 0,
+        like_count: 0,
+        comment_count: 0,
+        favorite_count: 0,
+        danmaku_count: 0,
       },
     ],
   });
@@ -231,6 +236,11 @@ test("appendRecommendations posts excluded bvids to append endpoint", async () =
         source_platform: "bilibili",
         content_type: "video",
         body_text: "",
+        view_count: 0,
+        like_count: 0,
+        comment_count: 0,
+        favorite_count: 0,
+        danmaku_count: 0,
       },
     ],
   });
@@ -324,6 +334,11 @@ test("fetchRecommendations normalizes cover urls from the recommend endpoint", a
       source_platform: "bilibili",
       content_type: "video",
       body_text: "",
+      view_count: 0,
+      like_count: 0,
+      comment_count: 0,
+      favorite_count: 0,
+      danmaku_count: 0,
     },
   ]);
 });

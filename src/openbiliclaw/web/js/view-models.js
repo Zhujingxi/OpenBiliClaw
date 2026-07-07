@@ -322,7 +322,37 @@ export function normalizeRecommendation(item) {
     source_platform: normalizeSourcePlatform(item),
     content_type: normalizeText(item?.content_type) || "video",
     body_text: normalizeText(item?.body_text),
+    view_count: Number(item?.view_count ?? 0),
+    like_count: Number(item?.like_count ?? 0),
+    comment_count: Number(item?.comment_count ?? 0),
+    favorite_count: Number(item?.favorite_count ?? 0),
+    danmaku_count: Number(item?.danmaku_count ?? 0),
   };
+}
+
+// ── Engagement stats ─────────────────────────────────────────
+// Condense a raw count into Chinese-style 万/亿 units. Empty string for
+// non-positive values so callers render nothing.
+export function formatCountCn(n) {
+  const value = Math.floor(Number(n) || 0);
+  if (value <= 0) return "";
+  if (value >= 100000000)
+    return `${(Math.floor((value / 100000000) * 10) / 10).toFixed(1).replace(/\.0$/, "")}亿`;
+  if (value >= 10000)
+    return `${(Math.floor((value / 10000) * 10) / 10).toFixed(1).replace(/\.0$/, "")}万`;
+  return String(value);
+}
+
+// Build the "▶ … · 👍 … · 💬 … · ⭐ … · 弹幕 …" stats line. Only counts
+// > 0 appear; when nothing qualifies the result is "" (render nothing).
+export function recommendationStats(item) {
+  const segments = [];
+  if (item?.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
+  if (item?.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
+  if (item?.comment_count > 0) segments.push(`💬 ${formatCountCn(item.comment_count)}`);
+  if (item?.favorite_count > 0) segments.push(`⭐ ${formatCountCn(item.favorite_count)}`);
+  if (item?.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
+  return segments.join(" · ");
 }
 
 const TEXT_CARD_CONTENT_TYPES = new Set([
@@ -399,6 +429,11 @@ export function normalizeDelightCandidate(item) {
     state: normalizeText(item?.state) || "pending",
     response_message: normalizeText(item?.response_message),
     chat_reply: normalizeText(item?.chat_reply),
+    view_count: Number(item?.view_count ?? 0),
+    like_count: Number(item?.like_count ?? 0),
+    comment_count: Number(item?.comment_count ?? 0),
+    favorite_count: Number(item?.favorite_count ?? 0),
+    danmaku_count: Number(item?.danmaku_count ?? 0),
     // Local UI fields preserved across re-normalizations
     turns: Array.isArray(item?.turns) ? item.turns : [],
     composer_open: Boolean(item?.composer_open),

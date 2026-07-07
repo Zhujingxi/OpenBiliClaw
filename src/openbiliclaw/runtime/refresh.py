@@ -936,7 +936,9 @@ class ContinuousRefreshController:
             "like_count": int(candidate.get("like_count", 0) or 0),
             "comment_count": int(candidate.get("comment_count", 0) or 0),
             "danmaku_count": int(candidate.get("danmaku_count", 0) or 0),
-            "favorite_count": int(candidate.get("favorite_count", 0) or 0),
+            "favorite_count": int(
+                candidate.get("favorite_count", 0) or candidate.get("collect_count", 0) or 0
+            ),
         }
 
     def _load_disliked_topic_phrases(self) -> list[str]:
@@ -2358,7 +2360,8 @@ class ContinuousRefreshController:
                 "like_count": candidate.get("like_count", 0),
                 "comment_count": candidate.get("comment_count", 0),
                 "danmaku_count": candidate.get("danmaku_count", 0),
-                "favorite_count": candidate.get("favorite_count", 0),
+                "favorite_count": candidate.get("favorite_count", 0)
+                or candidate.get("collect_count", 0),
             }
         )
 

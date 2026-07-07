@@ -31,6 +31,7 @@ import {
   getRecommendationCoverPreloadUrls,
   getRecommendationImageLoadingAttrs,
   normalizeRecommendation,
+  recommendationStats,
   normalizeRuntimeStatus,
   mergeRuntimeStatusEvent,
   getReadyRecommendationHint,
@@ -382,6 +383,7 @@ function renderDelightTray() {
     ? `<span class="delight-thumb"><img src="${esc(cover.src)}" alt="" loading="lazy" onerror="this.parentElement.classList.add('is-fallback');this.remove()"></span>`
     : `<span class="delight-thumb is-fallback">\u2728</span>`;
   const reasonText = d.delight_reason || d.delight_hook || "";
+  const statsText = recommendationStats(d);
 
   tray.innerHTML = `
     ${delights.length > 1 ? `
@@ -399,6 +401,7 @@ function renderDelightTray() {
       </div>
       <div class="delight-feature-copy">
         <div class="delight-title">${esc(d.title)}</div>
+        ${statsText ? `<div class="card-stats delight-stats">${esc(statsText)}</div>` : ""}
         ${reasonText ? `
           <div class="delight-reason-wrap">
             ${coverHtml}
@@ -885,6 +888,7 @@ function renderCard(rawItem, index = 0) {
         ${item.up_name ? `<span>${esc(item.up_name)}</span>` : ""}
         ${item.topic_label ? `<span style="color:var(--text-muted)">${esc(item.topic_label)}</span>` : ""}
       </div>
+      ${recommendationStats(item) ? `<div class="card-stats">${esc(recommendationStats(item))}</div>` : ""}
       ${item.expression ? `<div class="card-expression">${esc(item.expression)}</div>` : ""}
     </div>`;
 

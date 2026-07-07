@@ -237,6 +237,13 @@ export function normalizeRecommendation(item) {
     source_platform: normalizeSourcePlatform(item?.source_platform, item?.content_url) || "bilibili",
     content_type: normalizeText(item?.content_type) || "video",
     body_text: normalizeText(item?.body_text),
+    // Engagement counts so the card can render the ▶/👍/💬/⭐ stats row
+    // (favorite_count already folds in Xiaohongshu 收藏 backend-side).
+    view_count: Number(item?.view_count ?? 0) || 0,
+    like_count: Number(item?.like_count ?? 0) || 0,
+    comment_count: Number(item?.comment_count ?? 0) || 0,
+    favorite_count: Number(item?.favorite_count ?? 0) || 0,
+    danmaku_count: Number(item?.danmaku_count ?? 0) || 0,
   };
 }
 
@@ -303,6 +310,11 @@ export function normalizeDelightCandidate(item) {
     state: normalizedState,
     response_message: normalizeText(item?.response_message),
     chat_reply: normalizeText(item?.chat_reply),
+    view_count: Number(item?.view_count ?? 0),
+    like_count: Number(item?.like_count ?? 0),
+    comment_count: Number(item?.comment_count ?? 0),
+    favorite_count: Number(item?.favorite_count ?? 0),
+    danmaku_count: Number(item?.danmaku_count ?? 0),
     // Local UI fields preserved across re-normalizations
     turns: Array.isArray(item?.turns) ? item.turns : [],
     composer_open: Boolean(item?.composer_open),

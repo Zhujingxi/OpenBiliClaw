@@ -2372,6 +2372,42 @@ function buildMessageCard(probe) {
   return item;
 }
 
+// ── Engagement stats ───────────────────────────────────────────
+// Condense a raw count into Chinese-style 万/亿 units. Empty string for
+// non-positive values so callers render nothing.
+function formatCountCn(n) {
+  const value = Math.floor(Number(n) || 0);
+  if (value <= 0) return "";
+  if (value >= 100000000)
+    return `${(Math.floor((value / 100000000) * 10) / 10).toFixed(1).replace(/\.0$/, "")}亿`;
+  if (value >= 10000)
+    return `${(Math.floor((value / 10000) * 10) / 10).toFixed(1).replace(/\.0$/, "")}万`;
+  return String(value);
+}
+
+// Build the "▶ … · 👍 … · 💬 … · ⭐ … · 弹幕 …" stats line. Only counts
+// > 0 appear; when nothing qualifies the result is "" (render nothing).
+function recommendationStats(item) {
+  const segments = [];
+  if (item?.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
+  if (item?.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
+  if (item?.comment_count > 0) segments.push(`💬 ${formatCountCn(item.comment_count)}`);
+  if (item?.favorite_count > 0) segments.push(`⭐ ${formatCountCn(item.favorite_count)}`);
+  if (item?.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
+  return segments.join(" · ");
+}
+
+// Append a muted stats line to `parent` when the item has any positive
+// engagement count. No-op (renders nothing) otherwise.
+function appendRecommendationStats(parent, item) {
+  const text = recommendationStats(item);
+  if (!text) return;
+  const stats = document.createElement("div");
+  stats.className = "recommendation-stats";
+  stats.textContent = text;
+  parent.append(stats);
+}
+
 // ── Delight (surprise recommendation) card ─────────────────────
 
 function buildDelightCard(delight) {
@@ -2439,6 +2475,8 @@ function buildDelightCard(delight) {
     reason.textContent = delight.delight_reason;
     item.append(reason);
   }
+
+  appendRecommendationStats(item, delight);
 
   if (delight.chat_status === "pending") {
     item.append(createChatThinkingPlaceholder("阿B 正在品你这句话"));
@@ -5049,6 +5087,7 @@ function renderRecommendations(items, { append = false } = {}) {
     metaLine.textContent = `这位 UP：${item.up_name}`;
 
     content.append(top, copyBlock, metaLine);
+    appendRecommendationStats(content, item);
     preview.append(cover, content);
 
     const feedbackStatus = document.createElement("p");
