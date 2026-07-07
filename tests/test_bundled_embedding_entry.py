@@ -71,12 +71,12 @@ def _write_config(tmp_path: Path, *, provider: str = "") -> Path:
     return cfg
 
 
-def test_set_embedding_base_url_edits_only_that_line(tmp_path: Path) -> None:
+def test_set_embedding_field_edits_only_that_line(tmp_path: Path) -> None:
     cfg = _write_config(tmp_path)
-    entry._set_embedding_base_url(cfg, "http://127.0.0.1:11435/v1")
+    entry._set_embedding_field(cfg, "base_url", "http://127.0.0.1:11435/v1")
     text = cfg.read_text()
     assert 'base_url = "http://127.0.0.1:11435/v1"' in text
-    assert 'model = "bge-m3"' in text  # untouched
+    assert 'provider = ""' in text  # other lines untouched
 
 
 def test_seed_bundled_lean_variant_is_noop(tmp_path: Path) -> None:

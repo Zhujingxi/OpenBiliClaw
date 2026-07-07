@@ -527,10 +527,9 @@ def _ensure_embedding_model_async() -> None:
 _PRIVATE_OLLAMA_PORT = 11435
 
 
-def _set_embedding_base_url(config_path: Path, base_url: str) -> None:
-    """Point ``[llm.embedding].base_url`` at our private daemon, editing only
-    that one line so the comment-heavy template survives (mirrors
-    ``_enable_ollama_embedding_default``)."""
+def _set_embedding_field(config_path: Path, field: str, value: str) -> None:
+    """Set a single ``[llm.embedding].<field>`` line, editing only that line so
+    the comment-heavy template survives (mirrors ``_enable_ollama_embedding_default``)."""
     try:
         lines = config_path.read_text(encoding="utf-8").splitlines(keepends=True)
     except OSError:
@@ -541,9 +540,9 @@ def _set_embedding_base_url(config_path: Path, base_url: str) -> None:
         if stripped.startswith("[") and stripped.endswith("]"):
             in_block = stripped == "[llm.embedding]"
             continue
-        if in_block and re.match(r"\s*base_url\s*=", line):
+        if in_block and re.match(rf"\s*{re.escape(field)}\s*=", line):
             indent = line[: len(line) - len(line.lstrip())]
-            lines[i] = f'{indent}base_url = "{base_url}"\n'
+            lines[i] = f'{indent}{field} = "{value}"\n'
             config_path.write_text("".join(lines), encoding="utf-8")
             return
 
@@ -591,8 +590,12 @@ def _seed_bundled_embedding_model(bundled_resources: Path, config_path: Path) ->
 
         host = f"127.0.0.1:{_PRIVATE_OLLAMA_PORT}"
         base_url = f"http://{host}/v1"
+        # Provider + base_url + model all point at the private daemon, which
+        # only serves the bundled bge-m3. Forcing the model guards against a
+        # stale/other embedding model name 404-ing against the private daemon.
         _enable_ollama_embedding_default(config_path)
-        _set_embedding_base_url(config_path, base_url)
+        _set_embedding_field(config_path, "base_url", base_url)
+        _set_embedding_field(config_path, "model", "bge-m3")
 
         if not start_managed_ollama_at(str(target), host):
             print("[OpenBiliClaw] 私有 Ollama 未能启动,内置向量模型交回默认流程。")
