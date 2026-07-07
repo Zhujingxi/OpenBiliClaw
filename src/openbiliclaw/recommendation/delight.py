@@ -78,12 +78,12 @@ class DelightWeights:
 # ---------------------------------------------------------------------------
 
 # Delight threshold:
-# Runtime delight scoring reuses Evo's candidate relevance result. The
-# 0.70 default is the line where an item becomes eligible for proactive
-# delight copy; lower scores are stored only as non-eligible progress
-# markers so the background sweep does not retry them endlessly.
+# Runtime delight scoring reuses Evo's candidate relevance result as the
+# delight score. The 0.75 default is the line where an item becomes eligible
+# for proactive delight copy; lower scores are stored only as non-eligible
+# progress markers so the background sweep does not retry them endlessly.
 # Conservative users keep a higher 0.80 bar.
-DEFAULT_DELIGHT_THRESHOLD: float = 0.70
+DEFAULT_DELIGHT_THRESHOLD: float = 0.75
 CONSERVATIVE_DELIGHT_THRESHOLD: float = 0.80
 _LOW_EXPLORATION_OPENNESS: float = 0.3
 _DEFAULT_WEIGHTS = DelightWeights()

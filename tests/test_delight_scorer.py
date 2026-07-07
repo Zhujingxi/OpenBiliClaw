@@ -16,6 +16,7 @@ from openbiliclaw.recommendation.delight import (
 from openbiliclaw.storage.database import Database
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -182,11 +183,8 @@ def test_default_thresholds_keep_evo_delight_bar_high() -> None:
         DEFAULT_DELIGHT_THRESHOLD,
     )
 
-    assert DEFAULT_DELIGHT_THRESHOLD >= 0.70, (
-        "Default threshold must keep proactive delight copy limited to high-confidence "
-        "Evo relevance results."
-    )
-    assert CONSERVATIVE_DELIGHT_THRESHOLD >= 0.80
+    assert DEFAULT_DELIGHT_THRESHOLD == 0.75
+    assert CONSERVATIVE_DELIGHT_THRESHOLD == 0.80
     # And the conservative bar must remain strictly above the default.
     assert CONSERVATIVE_DELIGHT_THRESHOLD > DEFAULT_DELIGHT_THRESHOLD
 
@@ -409,6 +407,29 @@ def test_delight_claim_threshold_floor_in_sync() -> None:
     assert _DELIGHT_CLAIM_MIN_SCORE == DEFAULT_DELIGHT_THRESHOLD
 
 
+def _seed_delight_scored_pool(
+    database: Database,
+    count: int,
+    *,
+    relevance_score: Callable[[int], float],
+    delight_score: Callable[[int], float],
+    prefix: str,
+) -> None:
+    for index in range(count):
+        bvid = f"BV1{prefix}{index:04d}"
+        database.cache_content(
+            bvid,
+            title=f"{prefix} {index}",
+            relevance_score=relevance_score(index),
+        )
+        database.update_delight_score(
+            bvid,
+            delight_score=delight_score(index),
+            delight_reason="",
+            delight_hook="",
+        )
+
+
 def test_database_delight_candidates_include_liked_keeps_liked_rows(tmp_path: Path) -> None:
     """Queue re-hydration must keep liked delights visible (v0.3.63 contract).
 
@@ -482,35 +503,95 @@ def test_database_count_delight_candidates(tmp_path: Path) -> None:
     assert count == 1
 
 
-def test_database_dynamic_delight_threshold_uses_top_ten_percent_boundary(
+def test_database_dynamic_delight_threshold_keeps_floor_before_min_sample_size(
     tmp_path: Path,
 ) -> None:
     database = _make_database(tmp_path)
-    for index in range(40):
-        score = 0.50 + (index * 0.01)
-        database.cache_content(f"BV1DYN{index:02d}", title="dynamic", relevance_score=score)
+    _seed_delight_scored_pool(
+        database,
+        149,
+        relevance_score=lambda index: 0.91 + (index * 0.0001),
+        delight_score=lambda index: 0.91 + (index * 0.0001),
+        prefix="SMPL",
+    )
 
-    threshold = database.dynamic_delight_threshold(default_threshold=0.70)
+    threshold = database.dynamic_delight_threshold(default_threshold=0.75)
 
-    assert threshold == pytest.approx(0.86)
+    assert threshold == pytest.approx(0.75)
 
 
-def test_database_dynamic_delight_threshold_falls_back_when_pool_is_small(
+def test_database_dynamic_delight_threshold_keeps_floor_for_homogeneous_pool(
     tmp_path: Path,
 ) -> None:
     database = _make_database(tmp_path)
-    for index in range(19):
-        database.cache_content(f"BV1SMALL{index:02d}", title="small", relevance_score=0.95)
+    _seed_delight_scored_pool(
+        database,
+        160,
+        relevance_score=lambda index: 0.91 + (index * 0.0001),
+        delight_score=lambda index: 0.91 + (index * 0.0001),
+        prefix="HOMO",
+    )
 
-    assert database.dynamic_delight_threshold(default_threshold=0.70) == pytest.approx(0.70)
+    assert database.dynamic_delight_threshold(default_threshold=0.75) == pytest.approx(0.75)
+
+
+def test_database_dynamic_delight_threshold_uses_delight_top_ten_percent_boundary(
+    tmp_path: Path,
+) -> None:
+    database = _make_database(tmp_path)
+    _seed_delight_scored_pool(
+        database,
+        160,
+        relevance_score=lambda index: 0.30 + (index * 0.004),
+        delight_score=lambda index: 0.30 + (index * 0.004),
+        prefix="DYNB",
+    )
+
+    threshold = database.dynamic_delight_threshold(default_threshold=0.75)
+
+    assert threshold == pytest.approx(0.876)
+
+
+def test_database_dynamic_delight_threshold_uses_delight_score_not_relevance_score(
+    tmp_path: Path,
+) -> None:
+    database = _make_database(tmp_path)
+    _seed_delight_scored_pool(
+        database,
+        160,
+        relevance_score=lambda index: 0.60 + (index * 0.001),
+        delight_score=lambda index: 0.35 + (index * 0.004),
+        prefix="DSRC",
+    )
+
+    threshold = database.dynamic_delight_threshold(default_threshold=0.75)
+
+    assert threshold == pytest.approx(0.926)
 
 
 def test_database_dynamic_delight_threshold_never_drops_below_default(tmp_path: Path) -> None:
     database = _make_database(tmp_path)
-    for index in range(40):
-        database.cache_content(f"BV1LOW{index:02d}", title="low", relevance_score=0.40)
+    _seed_delight_scored_pool(
+        database,
+        160,
+        relevance_score=lambda index: 0.01 + (index * 0.003),
+        delight_score=lambda index: 0.01 + (index * 0.003),
+        prefix="LOWB",
+    )
 
-    assert database.dynamic_delight_threshold(default_threshold=0.70) == pytest.approx(0.70)
+    assert database.dynamic_delight_threshold(default_threshold=0.75) == pytest.approx(0.75)
+
+
+def test_database_dynamic_delight_threshold_bad_default_uses_claim_floor(
+    tmp_path: Path,
+) -> None:
+    from openbiliclaw.storage.database import _DELIGHT_CLAIM_MIN_SCORE
+
+    database = _make_database(tmp_path)
+
+    assert database.dynamic_delight_threshold(default_threshold="bad") == pytest.approx(
+        _DELIGHT_CLAIM_MIN_SCORE
+    )
 
 
 def test_pool_candidates_use_dynamic_delight_claim_threshold(tmp_path: Path) -> None:
@@ -582,14 +663,14 @@ def test_database_get_pool_candidates_needing_delight_score_includes_high_score_
     database.cache_content("BV1READY", title="Ready", relevance_score=0.9)
     database.update_delight_score(
         "BV1READY",
-        delight_score=0.72,
+        delight_score=0.77,
         delight_reason="已经有解释",
         delight_hook="已完成",
     )
     database.cache_content("BV1BACKFILL", title="Backfill", relevance_score=0.88)
     database.update_delight_score(
         "BV1BACKFILL",
-        delight_score=0.71,
+        delight_score=0.76,
         delight_reason="",
         delight_hook="",
     )
@@ -608,7 +689,7 @@ def test_database_get_pool_candidates_needing_delight_score_includes_high_score_
 
     candidates = database.get_pool_candidates_needing_delight_score(
         limit=10,
-        min_delight_score_for_reason=0.70,
+        min_delight_score_for_reason=0.75,
     )
 
     bvids = [c["bvid"] for c in candidates]

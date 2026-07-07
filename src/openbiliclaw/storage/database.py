@@ -11,6 +11,7 @@ import logging
 import math
 import re
 import sqlite3
+import statistics
 import time
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -76,9 +77,10 @@ def _chunks(values: Sequence[str], size: int) -> list[list[str]]:
 # Mirrors recommendation.delight.DEFAULT_DELIGHT_THRESHOLD. Storage stays a
 # leaf module (no openbiliclaw imports), so the value is duplicated here and
 # pinned by tests/test_delight_scorer.py::test_delight_claim_threshold_floor_in_sync.
-_DELIGHT_CLAIM_MIN_SCORE = 0.70
+_DELIGHT_CLAIM_MIN_SCORE = 0.75
 _DELIGHT_DYNAMIC_TOP_FRACTION = 0.10
-_DELIGHT_DYNAMIC_MIN_SAMPLE_SIZE = 20
+_DELIGHT_DYNAMIC_MIN_SAMPLE_SIZE = 150
+_DELIGHT_DYNAMIC_MIN_STDDEV = 0.08
 _DELIGHT_SCORE_SYNC_EPSILON = 0.000001
 _DEFAULT_ADMISSION_MIN_SCORE = 0.60
 
@@ -5819,11 +5821,13 @@ class Database:
         *,
         default_threshold: float = _DELIGHT_CLAIM_MIN_SCORE,
     ) -> float:
-        """Return the profile floor raised to the pool Top 10% boundary.
+        """Return the profile floor raised to the delight pool Top 10% boundary.
 
         The dynamic component uses the current formal candidate pool, not raw
-        ``discovery_candidates``. When the pool is too small for a meaningful
-        percentile, the caller-provided default is returned unchanged.
+        ``discovery_candidates``. The percentile is computed over rows that
+        already have ``delight_score``. When the scored pool is too small or
+        too homogeneous for a meaningful percentile, the caller-provided
+        default is returned unchanged.
         """
         try:
             floor = float(default_threshold)
@@ -5834,16 +5838,18 @@ class Database:
         self._ensure_fresh_read()
         cursor = self.conn.execute(
             """
-            SELECT COALESCE(relevance_score, 0.0) AS score
+            SELECT COALESCE(delight_score, 0.0) AS score
             FROM content_cache
             WHERE COALESCE(pool_status, 'fresh') IN ('fresh', 'shown')
               AND COALESCE(feedback_type, '') != 'dislike'
-              AND COALESCE(relevance_score, 0.0) > 0.0
+              AND COALESCE(delight_score, 0.0) > 0.0
             ORDER BY score DESC
             """
         )
         scores = [float(row["score"]) for row in cursor.fetchall()]
         if len(scores) < _DELIGHT_DYNAMIC_MIN_SAMPLE_SIZE:
+            return floor
+        if statistics.pstdev(scores) < _DELIGHT_DYNAMIC_MIN_STDDEV:
             return floor
 
         top_count = max(1, math.ceil(len(scores) * _DELIGHT_DYNAMIC_TOP_FRACTION))
