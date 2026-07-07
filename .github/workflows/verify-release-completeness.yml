@@ -61,6 +61,9 @@ jobs:
             gh release view "$1" --repo "$REPO" --json assets \
               --jq '.assets[].name' 2>/dev/null | grep -qx "$2"
           }
+          have_tag () {
+            gh api "repos/${REPO}/git/ref/tags/$1" >/dev/null 2>&1
+          }
 
           # Wait for a release (and an optional asset) to appear, until deadline.
           wait_for () {
@@ -79,7 +82,25 @@ jobs:
             done
           }
 
-          wait_for "backend release"  "backend-v${VERSION}"  ""                                                  || missing+=("backend-v${VERSION} release")
+          # backend ships via GHCR + the aggregate release (no standalone
+          # backend-v* GitHub release), so verify its TAG rather than a release.
+          wait_tag () {
+            local label="$1" tag="$2"
+            while :; do
+              if have_tag "$tag"; then
+                echo "OK: $label ($tag)"
+                return 0
+              fi
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "MISSING: $label ($tag)"
+                return 1
+              fi
+              echo "waiting for $label ($tag) ..."
+              sleep 30
+            done
+          }
+
+          wait_tag "backend tag"      "backend-v${VERSION}"                                                      || missing+=("backend-v${VERSION} tag")
           wait_for "desktop release"  "desktop-v${VERSION}"  ""                                                  || missing+=("desktop-v${VERSION} release")
           wait_for "extension chrome" "extension-v${VERSION}" "openbiliclaw-extension-v${VERSION}.zip"           || missing+=("extension-v${VERSION} chrome zip")
           wait_for "extension firefox" "extension-v${VERSION}" "openbiliclaw-extension-v${VERSION}-firefox.zip"  || missing+=("extension-v${VERSION} firefox zip")
