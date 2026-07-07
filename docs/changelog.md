@@ -4,9 +4,9 @@
 
 ---
 
-## Unreleased：把 bge-m3 打进交付物,消灭装机时的模型下载（2026-07-07）
+## v0.3.160 / extension v0.3.160 / desktop v0.3.160：把 bge-m3 打进交付物,消灭装机时的模型下载（2026-07-07）
 
-> 版本号在合并/发版时确定(避免与并行分支撞号)。设计见 `docs/plans/2026-07-07-bundled-embedding-model-{spec,plan}.md`(经 codex 3 轮对抗 review 收敛)。
+后端源码走 `backend-v0.3.160`,桌面安装包走 `desktop-v0.3.160`(浏览器插件本版无代码改动,不单独发 `extension-v*`)。设计见 `docs/plans/2026-07-07-bundled-embedding-model-{spec,plan}.md`(经 codex 3 轮对抗 review 收敛)。
 
 - **Docker:bge-m3 烤进镜像,容器零 pull 离线就绪**。新增 `openbiliclaw-ollama` 内置模型镜像(`docker/ollama-bundled.Dockerfile`:构建时 `ollama pull bge-m3` 并校验 digest 对齐 allowlist,快照到 `/opt/bge-m3-seed/` 避开命名卷遮盖)+ 独立 shell seeder(`docker/seed-bge-m3.sh`,`sha256sum` 逐 blob 校验、manifest 最后写作提交标记)。entrypoint 启动时缺模型才播种,**播种失败明确报 unhealthy 不静默降级**,网络补拉改 `OPENBILICLAW_OLLAMA_ALLOW_PULL=1` 显式 opt-in。两个 compose 换用该镜像;`release-docker.yml` 多架构构建/推送 backend + ollama 两镜像,聚合页 docker 就绪需两镜像都可拉。
 - **桌面:发 lean / with-embedding 两个安装包,Release 可选**。`with-embedding` 变体把 bge-m3 预置进包(`build.py --bundle-embedding` / `OPENBILICLAW_BUNDLE_EMBEDDING=1`,`packaging/make_model_seed.py` 制种),首启在任何 ollama 启动前**自起私有 Ollama**(独立端口 `127.0.0.1:11435` + 用户可写纯 ASCII 模型目录),把权重播种进去再 serve,embedding base_url 指向私有端点——彻底绕开外部/官方 Ollama 的 store 竞态与中文用户名路径 bug。lean 变体行为逐字不变(无 seed 目录时全部 no-op)。Windows 变体名由 Inno `MyAppVariantSuffix` 区分,mac 名追加 `-with-embedding`;CI 双变体矩阵 + 每资产 < 2GB 硬门;聚合页 prune 改为**只删被同名替换的资产**,某变体构建失败不误删上一版完整包。
