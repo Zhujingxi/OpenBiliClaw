@@ -19,6 +19,13 @@
   #define MyAppVersionInfoVersion MyAppVersion
 #endif
 
+; Installer filename variant suffix, e.g. iscc /DMyAppVariantSuffix=-with-embedding
+; Lets the lean and with-embedding installers coexist in one Release without
+; clobbering each other. Defaults to empty (lean).
+#ifndef MyAppVariantSuffix
+  #define MyAppVariantSuffix ""
+#endif
+
 #define MyAppName "OpenBiliClaw"
 #define MyAppPublisher "OpenBiliClaw Contributors"
 #define MyAppURL "https://github.com/whiteguo233/OpenBiliClaw"
@@ -55,7 +62,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ; Script lives in packaging\; resolve [Files] Source + OutputDir from repo root.
 SourceDir=..
 OutputDir=dist\release
-OutputBaseFilename=OpenBiliClaw-windows-{#MyAppVersion}-Setup
+OutputBaseFilename=OpenBiliClaw-windows-{#MyAppVersion}{#MyAppVariantSuffix}-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

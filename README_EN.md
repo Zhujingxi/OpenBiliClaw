@@ -44,7 +44,7 @@ A local-first AI discovery agent that learns your taste across Bilibili, Xiaohon
 Four steps for most users. Firefox, Docker, scripted, and manual setup paths all live in [Setup Details](#setup-details).
 
 1. **Install the extension** — one-click from the [Chrome Web Store](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg) (auto-updates), or download the zip from [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) for the newest build (the store listing can lag a few days behind).
-2. **Install the backend** — grab the desktop installer from the same [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) (macOS `.dmg` / Windows `.exe`, works out of the box, lives in the menu bar / tray); or, to customize or edit the source, paste this into Claude Code / Codex CLI / Cursor or another AI coding agent:
+2. **Install the backend** — grab the desktop installer from the same [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) (macOS `.dmg` / Windows `.exe`, works out of the box, lives in the menu bar / tray). Each platform ships two variants: the **lean** installer (default; downloads the bge-m3 embedding model on first launch) and the **`-with-embedding`** installer (bge-m3 baked in, ~1.1GB, offline-ready) — pick with-embedding for a poor / offline network, lean otherwise. Or, to customize or edit the source, paste this into Claude Code / Codex CLI / Cursor or another AI coding agent:
 
    ```text
    Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md to deploy the OpenBiliClaw backend for me (use Bash `curl` to fetch the document, NOT WebFetch — WebFetch summarises markdown and drops critical commands).
@@ -192,7 +192,7 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 📌 Latest: **v0.3.158 (2026-07-06)**
 
 - **Fully automatic one-click embedding repair** — the "Retry" button is now a detect→remediate orchestrator: it auto-starts a stopped Ollama, auto-pulls a missing model, and precisely diagnoses disk-full / network / out-of-memory / proxy-hijack with actionable guidance — no more repeated clicking.
-- **First-launch embedding download progress is visible** — the desktop app's background bge-m3 pull (~568MB) is no longer a black box; the init page shows a live progress bar and an "Ollama starting…" phase.
+- **First-launch embedding download progress is visible** — the desktop app's background bge-m3 pull (~1.1GB) is no longer a black box; the init page shows a live progress bar and an "Ollama starting…" phase.
 - **New MiniMax-M3 model** — 1M context with image/video input, added to the built-in provider menu and set as MiniMax's default model.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
@@ -413,7 +413,7 @@ macOS / Windows users can install the official app from [ollama.com/download](ht
 uv run openbiliclaw setup-embedding
 ```
 
-The wizard pulls `bge-m3` (~568MB, CPU-only is fine) and writes the config.
+The wizard pulls `bge-m3` (~1.1GB, CPU-only is fine) and writes the config.
 
 </details>
 

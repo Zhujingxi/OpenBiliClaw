@@ -46,7 +46,7 @@
 普通用户只需四步；Firefox、Docker、脚本和手动部署等备用路径都在 [安装与部署详情](#安装与部署详情)。
 
 1. **装插件** —— [Chrome 应用商店一键安装](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg)（自动更新），或从 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 下载 zip 手动安装（最新功能先到，商店版可能滞后几天）。
-2. **装后端** —— 从同一个 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 下载桌面安装包（macOS `.dmg` / Windows `.exe`，开箱即用、常驻菜单栏/托盘）；想改源码或深度定制，就把下面这句话粘给 Claude Code / Codex CLI / Cursor 等 AI 编程助手：
+2. **装后端** —— 从同一个 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 下载桌面安装包（macOS `.dmg` / Windows `.exe`，开箱即用、常驻菜单栏/托盘）。每个平台有两种安装包:**精简版**(默认,首启自动下载向量模型 bge-m3)与 **`-with-embedding` 完整版**(已内置 bge-m3 ~1.1GB,离线开箱即用)——网络差 / 想离线的选完整版,其余选精简版。想改源码或深度定制,就把下面这句话粘给 Claude Code / Codex CLI / Cursor 等 AI 编程助手：
 
    ```text
    请按照 https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md 的说明帮我部署 OpenBiliClaw 后端(务必用 Bash 的 curl 下载这个文档,不要用 WebFetch — 会丢关键指令)
@@ -212,7 +212,7 @@
 📌 最新版本：**v0.3.158（2026-07-06）**
 
 - **向量模型一键修复全自动** —— 「重试」按钮变成检测→修复编排：Ollama 没起自动拉起、缺模型自动下载、磁盘满 / 网络 / 内存不足 / 代理劫持精确诊断并给指引，告别反复点击。
-- **首启向量模型下载进度可见** —— 桌面包首次启动后台拉取 bge-m3（约 568MB）不再是黑盒，初始化页显示实时进度条与「Ollama 启动中…」阶段。
+- **首启向量模型下载进度可见** —— 桌面包首次启动后台拉取 bge-m3（约 1.1GB）不再是黑盒，初始化页显示实时进度条与「Ollama 启动中…」阶段。
 - **新增 MiniMax-M3 模型** —— 1M 上下文 / 图文视频输入，加入内置 provider 选单并设为 MiniMax 默认模型。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
@@ -417,7 +417,7 @@ macOS / Windows 用户可以从 [ollama.com/download](https://ollama.com/downloa
 uv run openbiliclaw setup-embedding
 ```
 
-向导会自动拉取 `bge-m3`（约 568MB，CPU 可跑）并写入配置。
+向导会自动拉取 `bge-m3`（约 1.1GB，CPU 可跑）并写入配置。
 
 </details>
 

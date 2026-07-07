@@ -1,42 +1,30 @@
 services:
-  # Ollama sidecar — bundled embedding service so users don't need to
-  # install Ollama on their host. Pulls bge-m3 on first start (~568MB,
-  # CPU-only) and keeps the daemon running on the internal Docker
-  # network at http://ollama:11434. The backend's [llm.embedding] gets
-  # seeded to point here automatically on first config bootstrap.
+  # Ollama sidecar — embedding service so users don't need Ollama on their
+  # host. This image BAKES bge-m3 (~1.1GB) at build time and its entrypoint
+  # seeds it into the store before serving, so the container reaches
+  # embedding-ready with ZERO network pull (offline / China-network friendly).
+  # The daemon runs on the internal Docker network at http://ollama:11434;
+  # the backend's [llm.embedding] is seeded to point here on first bootstrap.
   #
   # Disable this entire block by removing it (and the depends_on +
   # OPENBILICLAW_SEED_OLLAMA_DEFAULTS env in the backend service) if
   # you'd rather run an embedding API key from a cloud provider — see
   # docs/docker-deployment.md.
   ollama:
-    image: ollama/ollama:latest
+    build:
+      context: .
+      dockerfile: docker/ollama-bundled.Dockerfile
     container_name: openbiliclaw-ollama
     volumes:
       - openbiliclaw_ollama:/root/.ollama
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        ollama serve &
-        SERVE_PID=$$!
-        echo "[ollama-init] waiting for daemon..."
-        i=0
-        while [ $$i -lt 90 ]; do
-          ollama list >/dev/null 2>&1 && break
-          sleep 1
-          i=$$((i+1))
-        done
-        echo "[ollama-init] daemon ready"
-        if ! ollama list 2>/dev/null | grep -q '^bge-m3'; then
-          echo "[ollama-init] pulling bge-m3 (~568MB, may take a few minutes on first start)..."
-          ollama pull bge-m3 || echo "[ollama-init] pull failed; daemon stays up so you can retry"
-        fi
-        echo "[ollama-init] bge-m3 ready, daemon staying up"
-        wait $$SERVE_PID
+    # No custom entrypoint / runtime pull: the bundled image self-seeds the
+    # baked model on start. Set OPENBILICLAW_OLLAMA_ALLOW_PULL=1 to opt into a
+    # network pull if the baked seed is ever missing/corrupt (default: fail
+    # loud via the healthcheck instead of silently degrading).
     healthcheck:
-      # Healthy = daemon up AND bge-m3 is locally available. start_period
-      # covers the first-time pull on slow networks.
+      # Healthy = daemon up AND bge-m3 is locally available. With the baked
+      # seed this greens up in seconds; start_period stays generous only for
+      # the opt-in runtime-pull fallback.
       test: ["CMD-SHELL", "ollama list 2>/dev/null | grep -q '^bge-m3'"]
       interval: 30s
       timeout: 10s
@@ -58,7 +46,7 @@ services:
     container_name: openbiliclaw-backend
     depends_on:
       # service_started (not service_healthy) on purpose: the sidecar is
-      # only "healthy" once bge-m3 finished downloading (~568MB). If that
+      # only "healthy" once bge-m3 finished downloading (~1.1GB). If that
       # first pull fails or crawls on a slow network, a service_healthy
       # gate would keep the backend from EVER starting — the user gets a
       # dead install with no UI to see why. Instead the backend boots

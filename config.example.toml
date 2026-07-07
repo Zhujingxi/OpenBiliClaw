@@ -179,7 +179,7 @@ api_flavor = ""
 # model:    matched to provider when empty:
 #             gemini → gemini-embedding-001
 #             openai → text-embedding-3-small
-#             ollama → bge-m3   (multilingual, ~568MB, sub-second on CPU)
+#             ollama → bge-m3   (multilingual, ~1.1GB, sub-second on CPU)
 #
 # To enable local Ollama embedding:
 #   1. install Ollama   (Mac: `brew install ollama` ; Windows: ollama.com/download)

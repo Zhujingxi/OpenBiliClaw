@@ -4,6 +4,16 @@
 
 ---
 
+## Unreleased：把 bge-m3 打进交付物,消灭装机时的模型下载（2026-07-07）
+
+> 版本号在合并/发版时确定(避免与并行分支撞号)。设计见 `docs/plans/2026-07-07-bundled-embedding-model-{spec,plan}.md`(经 codex 3 轮对抗 review 收敛)。
+
+- **Docker:bge-m3 烤进镜像,容器零 pull 离线就绪**。新增 `openbiliclaw-ollama` 内置模型镜像(`docker/ollama-bundled.Dockerfile`:构建时 `ollama pull bge-m3` 并校验 digest 对齐 allowlist,快照到 `/opt/bge-m3-seed/` 避开命名卷遮盖)+ 独立 shell seeder(`docker/seed-bge-m3.sh`,`sha256sum` 逐 blob 校验、manifest 最后写作提交标记)。entrypoint 启动时缺模型才播种,**播种失败明确报 unhealthy 不静默降级**,网络补拉改 `OPENBILICLAW_OLLAMA_ALLOW_PULL=1` 显式 opt-in。两个 compose 换用该镜像;`release-docker.yml` 多架构构建/推送 backend + ollama 两镜像,聚合页 docker 就绪需两镜像都可拉。
+- **桌面:发 lean / with-embedding 两个安装包,Release 可选**。`with-embedding` 变体把 bge-m3 预置进包(`build.py --bundle-embedding` / `OPENBILICLAW_BUNDLE_EMBEDDING=1`,`packaging/make_model_seed.py` 制种),首启在任何 ollama 启动前**自起私有 Ollama**(独立端口 `127.0.0.1:11435` + 用户可写纯 ASCII 模型目录),把权重播种进去再 serve,embedding base_url 指向私有端点——彻底绕开外部/官方 Ollama 的 store 竞态与中文用户名路径 bug。lean 变体行为逐字不变(无 seed 目录时全部 no-op)。Windows 变体名由 Inno `MyAppVariantSuffix` 区分,mac 名追加 `-with-embedding`;CI 双变体矩阵 + 每资产 < 2GB 硬门;聚合页 prune 改为**只删被同名替换的资产**,某变体构建失败不误删上一版完整包。
+- **播种核心**(`runtime/embedding_seed.py`):共享 blobs 目录上逐 blob 临时→sha256 校验→原子 rename,manifest 最后提交,目录锁,幂等,绝不动其它模型 blob,任何完整性失败即回落网络下载;`effective_embedding_models_dir` 选 ASCII+用户可写目录(合法 `OLLAMA_MODELS` > `%PROGRAMDATA%` > `/var/tmp/openbiliclaw-<uid>`)。
+- **真机验证**:用真实 1.08GB bge-m3 制种→播种→私有端口 ollama 零 pull 识别 `bge-m3:latest` 并产出真实 1024 维 embedding;21 单测 + mypy/ruff 全绿;docker/CI 部分因本地无 daemon 仅 shell/YAML 校验,待真发验证。
+- 更正过期文案:全仓库 bge-m3 体积 `~568MB` → 实测 `~1.1GB`。
+
 ## v0.3.159 / extension v0.3.159 / desktop v0.3.159：自动更新被拒时暴露真实远端地址（2026-07-07）
 
 后端源码走 `backend-v0.3.159`，浏览器插件走 `extension-v0.3.159`，桌面安装包走 `desktop-v0.3.159`。

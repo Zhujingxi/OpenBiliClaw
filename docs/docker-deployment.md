@@ -10,11 +10,15 @@
 - [Docker Compose](https://docs.docker.com/compose/install/) V2（`docker compose` 命令）
 - 一个 LLM API Key（OpenAI / Claude / Gemini / DeepSeek / OpenRouter）—— **Embedding 用 compose 自带的 Ollama 不再需要单独申请**
 
-### v0.3.11+ 自带 Ollama embedding sidecar
+### 自带 Ollama embedding sidecar（bge-m3 已烤进镜像,离线开箱即用）
 
-`docker-compose.yml` 现在多了一个 `ollama` 服务：自动拉 `bge-m3` 模型，对外暴露 `http://ollama:11434`，用 Docker 网络和后端互通。第一次 `docker compose up -d --build` 会多花 2–4 分钟下载模型（~568MB），之后用 named volume `openbiliclaw_ollama` 持久化，重建容器不重拉。
+`docker-compose.yml` 有一个 `ollama` 服务,对外暴露 `http://ollama:11434`,用 Docker 网络和后端互通。**bge-m3(~1.1GB)已在构建时烤进镜像 `openbiliclaw-ollama`**:容器启动时其 entrypoint 把烤好的模型播种进存储再 serve,**零网络拉取、离线可用**,对国内网络尤其友好。named volume `openbiliclaw_ollama` 持久化,重建容器不丢。
 
-后端容器首次启动时会自动把 `[llm.embedding] provider="ollama" model="bge-m3" base_url="http://ollama:11434/v1"` 写进生成的 `config.toml`，所以你**只需要给一个 chat 模型的 Key**，embedding 完全免费 + 离线可用。
+- 预构建路径(`docker-compose.prebuilt.yml`):直接拉 GHCR 上的 `openbiliclaw-ollama:<version>` 镜像。
+- 源码构建路径(`docker-compose.yml`):`ollama` 服务用 `docker/ollama-bundled.Dockerfile` 本地构建(构建时联网拉一次 bge-m3 烤进镜像;之后运行离线)。
+- 万一烤好的种子缺失/损坏,healthcheck 会**明确报 unhealthy**(不静默降级);设 `OPENBILICLAW_OLLAMA_ALLOW_PULL=1` 可显式允许运行时联网补拉。
+
+后端容器首次启动时会自动把 `[llm.embedding] provider="ollama" model="bge-m3" base_url="http://ollama:11434/v1"` 写进生成的 `config.toml`,所以你**只需要给一个 chat 模型的 Key**,embedding 完全免费 + 离线可用。
 
 不需要这个 sidecar？删掉 `docker-compose.yml` 里 `ollama` 服务块和后端的 `OPENBILICLAW_SEED_OLLAMA_DEFAULTS` 环境变量即可。
 

@@ -720,6 +720,44 @@ def repair_macos_ad_hoc_signature(app_bundle: Path) -> None:
     )
 
 
+def stage_embedding_seed(
+    dist_dir: Path,
+    seed_dir: Path,
+    platform_name: str | None = None,
+) -> list[Path]:
+    """Copy the bge-m3 seed (produced by ``make_model_seed.py``) into the
+    packaged outputs, where ``entry.py`` resolves ``bundled_resources`` — next
+    to the exe (onedir) and ``Contents/Resources`` (macOS ``.app``). This is
+    the ``with-embedding`` variant: the model ships in the installer so a fresh
+    machine reaches embedding-ready fully offline (see
+    docs/plans/2026-07-07-bundled-embedding-model-*)."""
+    resolved = platform_name or platform.system()
+    written: list[Path] = []
+    dests: list[Path] = []
+    onedir = dist_dir / "OpenBiliClaw"
+    if onedir.is_dir():
+        dests.append(onedir / "bge-m3-seed")
+    if resolved == "Darwin":
+        app_resources = dist_dir / "OpenBiliClaw.app" / "Contents" / "Resources"
+        if app_resources.is_dir():
+            dests.append(app_resources / "bge-m3-seed")
+    for dest in dests:
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(seed_dir, dest)
+        written.append(dest)
+    return written
+
+
+def _resolve_model_seed_dir(model_seed_dir: str | None) -> Path | None:
+    candidate = Path(
+        model_seed_dir
+        or os.environ.get("OPENBILICLAW_MODEL_SEED_DIR")
+        or (PROJECT_ROOT / "packaging" / "model-seed")
+    )
+    return candidate if (candidate / "seed.manifest.json").is_file() else None
+
+
 def build(
     *,
     archive_version: str | None = None,
@@ -727,6 +765,8 @@ def build(
     ollama_bin: str | None = None,
     bundle_x: bool = True,
     bundle_reddit: bool = True,
+    bundle_embedding: bool = False,
+    model_seed_dir: str | None = None,
 ) -> None:
     """Run PyInstaller."""
     ensure_pyinstaller()
@@ -794,6 +834,19 @@ def build(
                     "or --ollama-bin); packaged app will fall back to a user-installed ollama"
                 )
 
+        # with-embedding variant: stage the baked bge-m3 seed so the installer
+        # ships the model (offline-ready). Must land before archive creation.
+        if bundle_embedding:
+            seed_dir = _resolve_model_seed_dir(model_seed_dir)
+            if seed_dir is None:
+                print(
+                    "[build] ERROR: --bundle-embedding set but no model seed found "
+                    "(run packaging/make_model_seed.py or set OPENBILICLAW_MODEL_SEED_DIR)"
+                )
+                sys.exit(1)
+            staged = stage_embedding_seed(DIST_DIR, seed_dir)
+            print(f"[build] Staged bge-m3 seed into {len(staged)} target(s): {seed_dir}")
+
         if platform.system() == "Darwin":
             app_bundle = DIST_DIR / "OpenBiliClaw.app"
             if app_bundle.exists():
@@ -817,11 +870,16 @@ def build(
             print(f"    {output / 'OpenBiliClaw'}")
 
         if archive_version:
+            # The with-embedding installer name carries a variant suffix so it
+            # sits next to the lean asset in the Release without clobbering it.
+            asset_version = (
+                f"{archive_version}-with-embedding" if bundle_embedding else archive_version
+            )
             target = detect_target()
             archive_path = create_archive(
                 packaged_root=packaged_root,
                 output_dir=RELEASE_DIR,
-                version=archive_version,
+                version=asset_version,
                 target=target,
             )
             print()
@@ -832,7 +890,7 @@ def build(
                     dmg_path = make_macos_dmg(
                         app_bundle=app_bundle,
                         output_dir=RELEASE_DIR,
-                        version=archive_version,
+                        version=asset_version,
                     )
                     print(f"  Release installer: {dmg_path}")
         print("=" * 60)
@@ -867,7 +925,23 @@ def main() -> None:
         action="store_true",
         help="Do not bundle the Reddit discovery dependency (rdt-cli)",
     )
+    parser.add_argument(
+        "--bundle-embedding",
+        action="store_true",
+        help="Ship the bge-m3 embedding model in the installer (the 'with-embedding' "
+        "variant; also enabled by OPENBILICLAW_BUNDLE_EMBEDDING=1). Needs a seed from "
+        "packaging/make_model_seed.py (or $OPENBILICLAW_MODEL_SEED_DIR).",
+    )
+    parser.add_argument(
+        "--model-seed-dir",
+        help="Path to the bge-m3 seed dir for --bundle-embedding "
+        "(default: $OPENBILICLAW_MODEL_SEED_DIR or packaging/model-seed)",
+    )
     args = parser.parse_args()
+
+    bundle_embedding = args.bundle_embedding or os.environ.get(
+        "OPENBILICLAW_BUNDLE_EMBEDDING", ""
+    ).strip() in ("1", "true", "True")
 
     if args.clean:
         clean()
@@ -877,6 +951,8 @@ def main() -> None:
         ollama_bin=args.ollama_bin,
         bundle_x=not args.no_bundle_x,
         bundle_reddit=not args.no_bundle_reddit,
+        bundle_embedding=bundle_embedding,
+        model_seed_dir=args.model_seed_dir,
     )
 
 

@@ -27,10 +27,12 @@ import json
 import os
 import shutil
 import time
-from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 _REGISTRY_REL = Path("manifests/registry.ollama.ai/library")
 

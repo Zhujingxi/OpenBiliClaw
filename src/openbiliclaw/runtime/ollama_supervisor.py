@@ -198,6 +198,83 @@ def _ollama_start_serve_background() -> bool:
     return False
 
 
+def pick_free_port() -> int:
+    """Pick a currently-free 127.0.0.1 TCP port for a private Ollama daemon."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def start_managed_ollama_at(models_dir: str, host: str) -> bool:
+    """Start a PRIVATE ``ollama serve`` bound to ``host`` (``127.0.0.1:<port>``)
+    reading models from ``models_dir`` (``OLLAMA_MODELS``).
+
+    Used by the ``with-embedding`` desktop variant so the bundled model is
+    served from our own ASCII, user-writable directory on a dedicated port,
+    independent of any external/official Ollama the user may run on 11434.
+    Records ``_managed_proc`` so it is cleanly stopped on exit.
+    """
+    import shutil
+    import subprocess
+    import time
+
+    base_url = host if host.startswith("http") else f"http://{host}"
+    hostport = base_url.removeprefix("http://").removeprefix("https://")
+    if _ollama_is_running(base_url):
+        embedding_progress.report_ollama_phase("ready")
+        return True
+    embedding_progress.report_ollama_phase("starting")
+
+    ollama = shutil.which("ollama")
+    if ollama is None:
+        embedding_progress.report_ollama_phase("down")
+        return False
+
+    try:
+        env = os.environ.copy()
+        env.setdefault("OLLAMA_KEEP_ALIVE", _DEFAULT_OLLAMA_KEEP_ALIVE)
+        env["OLLAMA_HOST"] = hostport
+        env["OLLAMA_MODELS"] = os.path.abspath(os.path.expanduser(models_dir))
+        if os.name == "nt":
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) | getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
+            )
+            proc = subprocess.Popen(
+                [ollama, "serve"],
+                creationflags=creationflags,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                env=env,
+            )
+        else:
+            proc = subprocess.Popen(
+                [ollama, "serve"],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                env=env,
+            )
+    except Exception as exc:
+        console.print(f"[red]启动私有 ollama serve 失败: {exc}[/red]")
+        embedding_progress.report_ollama_phase("down")
+        return False
+
+    global _managed_proc
+    _managed_proc = proc
+
+    for _ in range(30):
+        if _ollama_is_running(base_url):
+            embedding_progress.report_ollama_phase("ready")
+            return True
+        time.sleep(0.5)
+    embedding_progress.report_ollama_phase("down")
+    return False
+
+
 def restart_managed_ollama_with_models_dir(models_dir: str) -> tuple[bool, str]:
     """Restart a daemon we own so future pulls use ``models_dir``."""
     target = os.path.abspath(os.path.expanduser(models_dir))

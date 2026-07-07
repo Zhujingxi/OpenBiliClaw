@@ -61,24 +61,35 @@ if [ -n "$desktop_tag" ]; then
   desktop_line="[${desktop_tag}](https://github.com/${repo}/releases/tag/${desktop_tag})"
 fi
 
-# Docker channel: report the GHCR image only when this exact version's
+# Docker channel: report the GHCR images only when this exact version's
 # manifest is actually pullable (same "no backfill" rule as the other
 # channels). Anonymous registry check; any failure degrades to
-# "Not published yet." without breaking the sync.
+# "Not published yet." without breaking the sync. Both the backend image AND
+# the bundled-bge-m3 Ollama image must be present — the prebuilt compose needs
+# both, so half a release must not read as "Docker ready".
 docker_image_owner="$(printf '%s' "${repo%%/*}" | tr '[:upper:]' '[:lower:]')"
 docker_image="ghcr.io/${docker_image_owner}/openbiliclaw-backend"
+docker_ollama_image="ghcr.io/${docker_image_owner}/openbiliclaw-ollama"
 docker_line="Not published yet."
 docker_download_line=""
-ghcr_token="$(
-  curl -fsSL "https://ghcr.io/token?scope=repository:${docker_image#ghcr.io/}:pull" 2>/dev/null \
-    | python3 -c 'import sys, json; print(json.load(sys.stdin).get("token", ""))' 2>/dev/null \
-    || true
-)"
-if [ -n "$ghcr_token" ] && curl -fsSL -o /dev/null \
-    -H "Authorization: Bearer ${ghcr_token}" \
+
+_ghcr_manifest_pullable() {
+  # $1 = ghcr.io/owner/name ; checks the ${project_version} manifest anonymously
+  local image="$1" token
+  token="$(
+    curl -fsSL "https://ghcr.io/token?scope=repository:${image#ghcr.io/}:pull" 2>/dev/null \
+      | python3 -c 'import sys, json; print(json.load(sys.stdin).get("token", ""))' 2>/dev/null \
+      || true
+  )"
+  [ -n "$token" ] || return 1
+  curl -fsSL -o /dev/null \
+    -H "Authorization: Bearer ${token}" \
     -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json" \
-    "https://ghcr.io/v2/${docker_image#ghcr.io/}/manifests/${project_version}" 2>/dev/null; then
-  docker_line="[\`${docker_image}:${project_version}\`](https://github.com/${repo}/pkgs/container/openbiliclaw-backend) (multi-arch: amd64 + arm64)"
+    "https://ghcr.io/v2/${image#ghcr.io/}/manifests/${project_version}" 2>/dev/null
+}
+
+if _ghcr_manifest_pullable "$docker_image" && _ghcr_manifest_pullable "$docker_ollama_image"; then
+  docker_line="[\`${docker_image}:${project_version}\`](https://github.com/${repo}/pkgs/container/openbiliclaw-backend) + [\`${docker_ollama_image}:${project_version}\`](https://github.com/${repo}/pkgs/container/openbiliclaw-ollama) (multi-arch: amd64 + arm64; bge-m3 baked in)"
   docker_download_line="- Docker (self-hosted): download [\`docker-compose.prebuilt.yml\`](https://github.com/${repo}/blob/main/docker-compose.prebuilt.yml), run \`docker compose -f docker-compose.prebuilt.yml up -d\`, then open \`http://127.0.0.1:8420/setup/\`
 "
 fi
@@ -284,6 +295,17 @@ is_aggregate_package_asset() {
 prune_existing_package_assets() {
   local asset_name
 
+  # Only prune an existing package asset when we actually have a replacement of
+  # the SAME NAME to upload this run. A partial release (e.g. the with-embedding
+  # desktop variant failed to build) must NOT delete the previous good asset it
+  # can't replace — otherwise half a release wipes the other half's downloads.
+  local replacing=$'\n'
+  local path base
+  for path in "${assets[@]}"; do
+    base="$(basename "$path")"
+    replacing+="${base}"$'\n'
+  done
+
   while IFS= read -r asset_name; do
     if [ -z "$asset_name" ]; then
       continue
@@ -291,6 +313,11 @@ prune_existing_package_assets() {
     if ! is_aggregate_package_asset "$asset_name"; then
       continue
     fi
+    # Skip unless a same-named file is in this run's upload set.
+    case "$replacing" in
+      *$'\n'"$asset_name"$'\n'*) ;;
+      *) continue ;;
+    esac
 
     delete_existing_package_asset "$asset_name"
   done < <(

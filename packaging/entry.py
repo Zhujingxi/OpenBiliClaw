@@ -468,9 +468,9 @@ def _packaged_ollama_preflight() -> None:
 def _ensure_embedding_model_async() -> None:
     """Pull the local embedding model in the background if it's missing.
 
-    Honours the "bundle the runtime, fetch the 568MB weights once" approach: a
+    Honours the "bundle the runtime, fetch the 1.1GB weights once" approach: a
     fresh machine reaches embedding-ready on its own without the user running
-    ``setup-embedding``. Runs in a daemon thread so the 568MB download never
+    ``setup-embedding``. Runs in a daemon thread so the 1.1GB download never
     blocks the API; reuses the battle-tested ``cli`` pull helpers (already in the
     bundle). No-op when embedding isn't Ollama or the model is already present.
     """
@@ -495,7 +495,7 @@ def _ensure_embedding_model_async() -> None:
 
             if _ollama_has_model(model, native_root(base_url)):
                 return
-            print(f"[OpenBiliClaw] 后台拉取本地 embedding 模型 {model}(约 568MB,仅首次)…")
+            print(f"[OpenBiliClaw] 后台拉取本地 embedding 模型 {model}(约 1.1GB,仅首次)…")
             embedding_progress.mark_pull_running(model)
             ok = False
             error = ""
@@ -519,6 +519,89 @@ def _ensure_embedding_model_async() -> None:
             print(f"[OpenBiliClaw] 模型自动拉取跳过: {exc}")
 
     threading.Thread(target=_worker, name="obc-embed-pull", daemon=True).start()
+
+
+# Dedicated port for the ``with-embedding`` variant's PRIVATE Ollama daemon, so
+# the baked model is served from our own ASCII/user-writable dir independently
+# of any external/official Ollama the user runs on the default 11434.
+_PRIVATE_OLLAMA_PORT = 11435
+
+
+def _set_embedding_base_url(config_path: Path, base_url: str) -> None:
+    """Point ``[llm.embedding].base_url`` at our private daemon, editing only
+    that one line so the comment-heavy template survives (mirrors
+    ``_enable_ollama_embedding_default``)."""
+    try:
+        lines = config_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError:
+        return
+    in_block = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_block = stripped == "[llm.embedding]"
+            continue
+        if in_block and re.match(r"\s*base_url\s*=", line):
+            indent = line[: len(line) - len(line.lstrip())]
+            lines[i] = f'{indent}base_url = "{base_url}"\n'
+            config_path.write_text("".join(lines), encoding="utf-8")
+            return
+
+
+def _seed_bundled_embedding_model(bundled_resources: Path, config_path: Path) -> bool:
+    """``with-embedding`` variant: seed the baked bge-m3 into an ASCII,
+    user-writable dir and serve it from a PRIVATE Ollama on a dedicated port,
+    BEFORE any other Ollama start.
+
+    Returns True when the private embedding daemon is up (the caller then skips
+    the default preflight + network pull). Returns False — a no-op — for the
+    lean variant (no seed dir), when the user picked a remote embedding
+    provider, or when anything can't complete (=> fall back to the normal
+    preflight + online pull). Never crashes startup.
+    """
+    seed_dir = bundled_resources / "bge-m3-seed"
+    if not seed_dir.is_dir():
+        return False  # lean variant — nothing bundled
+    try:
+        from openbiliclaw.config import load_config
+        from openbiliclaw.runtime.embedding_seed import (
+            effective_embedding_models_dir,
+            seed_embedding_model,
+        )
+        from openbiliclaw.runtime.ollama_supervisor import start_managed_ollama_at
+
+        cfg = load_config()
+        provider = str(cfg.llm.embedding.provider).strip().lower()
+        if provider not in ("", "ollama"):
+            return False  # user chose a remote embedding provider — respect it
+
+        target = effective_embedding_models_dir(
+            user_ollama_models=os.environ.get("OLLAMA_MODELS"),
+            platform=sys.platform,
+            home=Path.home(),
+            programdata=os.environ.get("PROGRAMDATA"),
+        )
+        if target is None:
+            return False
+
+        result = seed_embedding_model(seed_dir, target)
+        if not result.ok:
+            print(f"[OpenBiliClaw] 内置向量模型播种失败,改为在线拉取: {result.detail}")
+            return False
+
+        host = f"127.0.0.1:{_PRIVATE_OLLAMA_PORT}"
+        base_url = f"http://{host}/v1"
+        _enable_ollama_embedding_default(config_path)
+        _set_embedding_base_url(config_path, base_url)
+
+        if not start_managed_ollama_at(str(target), host):
+            print("[OpenBiliClaw] 私有 Ollama 未能启动,内置向量模型交回默认流程。")
+            return False
+        print(f"[OpenBiliClaw] 内置向量模型 bge-m3 已就绪(私有 Ollama :{_PRIVATE_OLLAMA_PORT})")
+        return True
+    except Exception as exc:  # noqa: BLE001 — must never crash startup
+        print(f"[OpenBiliClaw] 内置向量模型初始化跳过: {exc}")
+        return False
 
 
 def _redirect_output_to_logfile(project_root: Path) -> Path | None:
@@ -948,14 +1031,18 @@ def main() -> None:
             return
     _ = lock_handle  # keep a reference so the lock is held for the process lifetime
 
-    # Packaged entry bypasses ``openbiliclaw start``, so run the same loopback
-    # Ollama preflight here to bring up the (bundled) daemon when needed.
-    _packaged_ollama_preflight()
+    # with-embedding variant: seed the baked bge-m3 and bring up a private
+    # Ollama for it BEFORE any other Ollama start. On success the default
+    # preflight + online pull are superseded (embedding is already ready).
+    if not _seed_bundled_embedding_model(bundled_resources, project_root / "config.toml"):
+        # Packaged entry bypasses ``openbiliclaw start``, so run the same loopback
+        # Ollama preflight here to bring up the (bundled) daemon when needed.
+        _packaged_ollama_preflight()
 
-    # With a bundled ollama, fetch the embedding weights once in the background
-    # so a fresh install becomes embedding-ready without manual setup.
-    if has_bundled_ollama:
-        _ensure_embedding_model_async()
+        # With a bundled ollama, fetch the embedding weights once in the background
+        # so a fresh install becomes embedding-ready without manual setup.
+        if has_bundled_ollama:
+            _ensure_embedding_model_async()
 
     print(f"[OpenBiliClaw] 数据目录: {project_root}")
     print(f"[OpenBiliClaw] 正在启动后端服务 http://{host}:{port} ...")

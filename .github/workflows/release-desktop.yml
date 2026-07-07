@@ -23,8 +23,13 @@ permissions:
 
 jobs:
   macos:
-    name: macOS installer (.dmg, arm64)
+    name: macOS installer (.dmg, arm64, ${{ matrix.variant }})
     runs-on: macos-14 # Apple Silicon
+    strategy:
+      # fail-fast off so a failing variant doesn't cancel the other.
+      fail-fast: false
+      matrix:
+        variant: [lean, with-embedding]
     steps:
       - uses: actions/checkout@v6
 
@@ -55,20 +60,48 @@ jobs:
           v="${GITHUB_REF_NAME#desktop-}"
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
+      - name: Produce bge-m3 seed (with-embedding only)
+        if: matrix.variant == 'with-embedding'
+        run: |
+          export OLLAMA_HOST=127.0.0.1:11500
+          "$OPENBILICLAW_OLLAMA_BIN" serve &
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:11500/api/version >/dev/null && break; sleep 1; done
+          "$OPENBILICLAW_OLLAMA_BIN" pull bge-m3
+          python packaging/make_model_seed.py --model bge-m3 --out packaging/model-seed \
+            --expect-digest sha256:0c4c9c2a325fb1cdafec606e6809cb745f1cb26a6d919994400d27372303e276 \
+            --expect-digest sha256:daec91ffb5dd0c27411bd71f29932917c49cf529a641d0168496c3a501e3062c \
+            --expect-digest sha256:a406579cd136771c705c521db86ca7d60a6f3de7c9b5460e6193a2df27861bde
+
       - name: Build .app + .dmg (auto-bundles ollama)
-        run: python packaging/build.py --clean --archive-version "${{ steps.ver.outputs.version }}-arm64"
+        run: |
+          flags=""
+          [ "${{ matrix.variant }}" = "with-embedding" ] && flags="--bundle-embedding"
+          python packaging/build.py --clean $flags --archive-version "${{ steps.ver.outputs.version }}-arm64"
+
+      - name: Enforce GitHub asset size limit (< 2GB)
+        run: |
+          for f in dist/release/*.dmg dist/release/*.zip; do
+            [ -e "$f" ] || continue
+            sz=$(stat -f%z "$f")
+            printf '%s = %s MiB\n' "$f" "$((sz / 1024 / 1024))"
+            [ "$sz" -le 2147483648 ] || { echo "ERROR: $f exceeds GitHub's 2GB asset limit"; exit 1; }
+          done
 
       - uses: actions/upload-artifact@v7
         with:
-          name: openbiliclaw-macos-installer-arm64
+          name: openbiliclaw-macos-installer-arm64-${{ matrix.variant }}
           path: |
             dist/release/*.dmg
             dist/release/*.zip
           if-no-files-found: error
 
   windows:
-    name: Windows installer (.exe)
+    name: Windows installer (.exe, ${{ matrix.variant }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [lean, with-embedding]
     steps:
       - uses: actions/checkout@v6
 
@@ -91,20 +124,46 @@ jobs:
           echo "bare=${v#v}" >> "$GITHUB_OUTPUT"
           numeric="$(python -c 'import re,sys; m=re.match(r"v?(\d+)\.(\d+)\.(\d+)", sys.argv[1]); print(f"{m.group(1)}.{m.group(2)}.{m.group(3)}.0" if m else "0.0.0.0")' "$v")"
           echo "version_info=$numeric" >> "$GITHUB_OUTPUT"
+          if [ "${{ matrix.variant }}" = "with-embedding" ]; then
+            echo "variant_suffix=-with-embedding" >> "$GITHUB_OUTPUT"
+          else
+            echo "variant_suffix=" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: PyInstaller onedir build (ollama staged separately below)
-        run: python packaging/build.py --clean --no-bundle-ollama --archive-version "${{ steps.ver.outputs.version }}"
-
-      - name: Stage bundled Ollama (CPU runner only — bge-m3 embedding is CPU)
+      - name: Download Ollama (staged now; also used to produce the seed)
+        id: ollama
         shell: pwsh
         run: |
           $ver = "0.30.6"
           Invoke-WebRequest "https://github.com/ollama/ollama/releases/download/v$ver/ollama-windows-amd64.zip" -OutFile ollama.zip
           Expand-Archive ollama.zip -DestinationPath ollama_win -Force
-          # Locate ollama.exe (root of the zip historically; search as a safety
-          # net in case the layout changes), then its sibling lib/ runners.
           $exe = Get-ChildItem ollama_win -Recurse -Filter ollama.exe | Select-Object -First 1
           if (-not $exe) { throw "ollama.exe not found in ollama-windows-amd64.zip" }
+          "path=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Produce bge-m3 seed (with-embedding only)
+        if: matrix.variant == 'with-embedding'
+        shell: pwsh
+        run: |
+          $env:OLLAMA_HOST = "127.0.0.1:11500"
+          Start-Process -FilePath "${{ steps.ollama.outputs.path }}" -ArgumentList "serve" -NoNewWindow
+          for ($i = 0; $i -lt 60; $i++) { try { Invoke-WebRequest "http://127.0.0.1:11500/api/version" -UseBasicParsing | Out-Null; break } catch { Start-Sleep 1 } }
+          & "${{ steps.ollama.outputs.path }}" pull bge-m3
+          python packaging\make_model_seed.py --model bge-m3 --out packaging\model-seed `
+            --expect-digest sha256:0c4c9c2a325fb1cdafec606e6809cb745f1cb26a6d919994400d27372303e276 `
+            --expect-digest sha256:daec91ffb5dd0c27411bd71f29932917c49cf529a641d0168496c3a501e3062c `
+            --expect-digest sha256:a406579cd136771c705c521db86ca7d60a6f3de7c9b5460e6193a2df27861bde
+
+      - name: PyInstaller onedir build (ollama staged separately below)
+        shell: pwsh
+        run: |
+          $flags = if ("${{ matrix.variant }}" -eq "with-embedding") { "--bundle-embedding" } else { "" }
+          python packaging/build.py --clean --no-bundle-ollama $flags --archive-version "${{ steps.ver.outputs.version }}"
+
+      - name: Stage bundled Ollama (CPU runner only — bge-m3 embedding is CPU)
+        shell: pwsh
+        run: |
+          $exe = Get-Item "${{ steps.ollama.outputs.path }}"
           Copy-Item $exe.FullName dist\OpenBiliClaw\ollama.exe -Force
           $lib = Join-Path $exe.Directory.FullName "lib"
           if (Test-Path $lib) {
@@ -130,11 +189,20 @@ jobs:
       - name: Compile installer
         shell: pwsh
         run: |
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ steps.ver.outputs.bare }} /DMyAppVersionInfoVersion=${{ steps.ver.outputs.version_info }} packaging\openbiliclaw.iss
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ steps.ver.outputs.bare }} /DMyAppVersionInfoVersion=${{ steps.ver.outputs.version_info }} /DMyAppVariantSuffix=${{ steps.ver.outputs.variant_suffix }} packaging\openbiliclaw.iss
+
+      - name: Enforce GitHub asset size limit (< 2GB)
+        shell: pwsh
+        run: |
+          Get-ChildItem dist\release\*.exe | ForEach-Object {
+            $mib = [math]::Round($_.Length / 1MB)
+            Write-Host "$($_.Name) = $mib MiB"
+            if ($_.Length -gt 2147483648) { throw "$($_.Name) exceeds GitHub's 2GB asset limit" }
+          }
 
       - uses: actions/upload-artifact@v7
         with:
-          name: openbiliclaw-windows-installer
+          name: openbiliclaw-windows-installer-${{ matrix.variant }}
           path: dist/release/*.exe
           if-no-files-found: error
 

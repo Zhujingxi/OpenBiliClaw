@@ -22,6 +22,7 @@ permissions:
 
 env:
   IMAGE: ghcr.io/whiteguo233/openbiliclaw-backend
+  OLLAMA_IMAGE: ghcr.io/whiteguo233/openbiliclaw-ollama
 
 jobs:
   publish:
@@ -55,11 +56,14 @@ jobs:
                   )
 
           image = os.environ["IMAGE"]
+          ollama_image = os.environ["OLLAMA_IMAGE"]
           tags = f"{image}:{version},{image}:latest"
+          ollama_tags = f"{ollama_image}:{version},{ollama_image}:latest"
           output = Path(os.environ["GITHUB_OUTPUT"])
           with output.open("a", encoding="utf-8") as handle:
               handle.write(f"version={version}\n")
               handle.write(f"tags={tags}\n")
+              handle.write(f"ollama_tags={ollama_tags}\n")
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -74,7 +78,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
+      - name: Build and push backend image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -83,6 +87,21 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Bundled Ollama image with bge-m3 baked in (~1.1GB). Built here so the
+      # prebuilt compose reaches embedding-ready offline. Separate cache scope
+      # so it doesn't thrash the backend image cache. The Dockerfile pulls the
+      # model at build and verifies its digest against the Task 0 allowlist.
+      - name: Build and push bundled Ollama image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/ollama-bundled.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.ollama_tags }}
+          cache-from: type=gha,scope=ollama
+          cache-to: type=gha,mode=max,scope=ollama
 
       # The docker build finishes well after the backend-channel sync
       # ran, so re-sync the aggregate release here to flip the Docker
