@@ -30,6 +30,12 @@
 | env-managed 写保护 | ✅ | `load_config` 给 env 优先级，故 `save_config` 若把内存 Config 整段 `[api.auth]` 写回，会把 env 值烤成陈旧字面量。**保护下沉到 `save_config`**：凡有 `OPENBILICLAW_API_AUTH_*` 在场，被覆盖字段改用磁盘原值渲染、磁盘无值则省略整行——覆盖启动 secret 生成 / `PUT /api/config` / cookie 同步等所有写路径，而非仅 admin / CLI。 |
 | config.local 遮蔽检测 | ✅ | `config.local.toml` 合并盖在 `config.toml` 之上（local 胜），写 `config.toml` 的改动会被它悄悄盖回。`/api/auth/admin` 在 `_save` 后重载有效合并配置校验改动确已生效，被遮蔽则回滚并 `409 shadowed`；CLI `set-password` 写盘前用 `config_local_auth_keys()` 检测并拒绝。 |
 | 撤销判定（指纹漂移） | ✅ | `revoke_and_set_fingerprint` 在事务内 CAS 比对指纹：除 enabled 开关 / 显式改密的 `force_bump` 外，新指纹 ≠ 已存即 bump，堵住「后台 `set-password` 改盘上 hash → admin 无密码热发布却不撤销」窗口；首次写入（无既存指纹）不 bump。 |
+| 扩展 origin 独立路径 | ✅ | `is_extension_origin()` 识别 `chrome-extension://` / `moz-extension://`，`pick_token()` 和登录端点对扩展 origin 走独立分支，不依赖 `allowed_bearer_origins`。 |
+| 扩展 ID 白名单 | ✅ | `_extension_allowed()` 根据 `verify_extension_id`（默认 `false`）+ `allowed_extension_ids` 校验扩展身份；白名单关闭时任意扩展均可连接，开启后仅白名单内 ID 放行。 |
+| Docker 网关 IP 识别 | ✅ | `_detect_default_gateway()` 启动时读 `/proc/net/route` 检测默认网关 IP（如 `172.18.0.1`），加入 `_TRUSTED_LOCAL_IPS`；宿主机访问容器后端时识别为本地。非 Linux 静默退回仅 loopback。 |
+| 扩展 token query-param | ✅ | 扩展无法设 `Authorization: Bearer` header（GET / WebSocket / `<img src>`），统一通过 `?token=...` query-param 传 token，`pick_token()` 和 `authorize_websocket()` 均支持提取。 |
+| WebSocket token-first | ✅ | `authorize_websocket()` 先尝试 `pick_token()` 提取 token，有效则跳过 origin 检查；无有效 token 则拒绝。与原 HTTP 中间件行为一致。 |
+| ext-key CLI 命令组 | ✅ | `ext-key generate` 生成 2048-bit RSA 密钥 + 派生 Chrome 扩展 ID；`enable` / `disable` 开关白名单校验；`add` / `remove` 管理白名单；`status` 查看当前状态。 |
 
 ## 端点
 
@@ -53,6 +59,7 @@ from openbiliclaw.auth_core import (
     sign_token, verify_token, token_expires_at,
     resolve_client_ip, is_trusted_local,
     effective_scheme_host, same_origin, origin_allowed_for_bearer,
+    is_extension_origin, extract_extension_id, extension_id_allowed,
 )
 from openbiliclaw.api.auth import (
     AuthGate, make_auth_middleware, register_auth_routes, authorize_websocket,
@@ -61,6 +68,7 @@ from openbiliclaw.api.auth import (
 ```
 
 - `auth_core` 函数无副作用、不依赖 FastAPI，便于单元测试。
+- `is_extension_origin()` / `extract_extension_id()` / `extension_id_allowed()` 为扩展认证原语，纯函数无状态。
 - `api/auth.py` 的 `AuthGate` 持有运行期门禁状态（config + DB 句柄），中间件 / 路由都通过它取 token、验签、读写 `auth_epoch`。
 - `ensure_session_secret()` 在首次启用且 `session_secret` 为空时生成并写回 config；`reconcile_password_fingerprint()` 实现「改密即撤销」的指纹比对与按需 bump。
 
