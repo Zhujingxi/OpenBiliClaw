@@ -1,0 +1,97 @@
+name: Verify Release Completeness
+
+# Guards against the "forgot to push a component tag" failure mode: a release
+# is cut by pushing backend-v* / extension-v* / desktop-v* / openbiliclaw-v*
+# tags one by one (GitHub drops events when >3 tags are pushed at once), and
+# the aggregate sync silently tolerates a missing component ("Not published
+# yet."). In v0.3.159/v0.3.160 the extension-v* tag was never pushed, so the
+# Chrome/Firefox zips were absent from the release and nobody noticed.
+#
+# This job runs when the aggregate openbiliclaw-v* tag lands (the last tag of a
+# release) and fails loudly if any component tag / release / key asset is
+# missing, so the gap surfaces in the Actions tab instead of shipping silently.
+
+on:
+  push:
+    tags:
+      - "openbiliclaw-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to verify without prefix, e.g. 0.3.160"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine version
+        id: ver
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            version="$INPUT_VERSION"
+          else
+            version="${REF_NAME#openbiliclaw-v}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Verifying release completeness for v$version"
+
+      - name: Verify component tags, releases, and key assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -uo pipefail
+          # Component builds arrive out of order after the aggregate tag fires,
+          # so poll up to ~12 min before declaring anything missing.
+          deadline=$(( $(date +%s) + 720 ))
+          missing=()
+
+          have_release () {
+            gh release view "$1" --repo "$REPO" >/dev/null 2>&1
+          }
+          have_asset () {
+            gh release view "$1" --repo "$REPO" --json assets \
+              --jq '.assets[].name' 2>/dev/null | grep -qx "$2"
+          }
+
+          # Wait for a release (and an optional asset) to appear, until deadline.
+          wait_for () {
+            local label="$1" tag="$2" asset="${3:-}"
+            while :; do
+              if have_release "$tag" && { [ -z "$asset" ] || have_asset "$tag" "$asset"; }; then
+                echo "OK: $label ($tag${asset:+ / $asset})"
+                return 0
+              fi
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "MISSING: $label ($tag${asset:+ / $asset})"
+                return 1
+              fi
+              echo "waiting for $label ($tag${asset:+ / $asset}) ..."
+              sleep 30
+            done
+          }
+
+          wait_for "backend release"  "backend-v${VERSION}"  ""                                                  || missing+=("backend-v${VERSION} release")
+          wait_for "desktop release"  "desktop-v${VERSION}"  ""                                                  || missing+=("desktop-v${VERSION} release")
+          wait_for "extension chrome" "extension-v${VERSION}" "openbiliclaw-extension-v${VERSION}.zip"           || missing+=("extension-v${VERSION} chrome zip")
+          wait_for "extension firefox" "extension-v${VERSION}" "openbiliclaw-extension-v${VERSION}-firefox.zip"  || missing+=("extension-v${VERSION} firefox zip")
+          # The aggregate release must carry the extension zip (sync-aggregate-release pulls it in).
+          wait_for "aggregate ext zip" "openbiliclaw-v${VERSION}" "openbiliclaw-extension-v${VERSION}.zip"       || missing+=("aggregate openbiliclaw-v${VERSION} missing extension zip")
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo ""
+            echo "::error::Release v${VERSION} is INCOMPLETE — missing: ${missing[*]}"
+            echo "Most likely a component tag was not pushed. Recreate it at the release commit, e.g.:"
+            echo "    git tag extension-v${VERSION} <release-commit> && git push origin extension-v${VERSION}"
+            echo "then re-run this workflow (workflow_dispatch) with version=${VERSION}."
+            exit 1
+          fi
+          echo "Release v${VERSION} is COMPLETE: backend + extension + desktop tags, extension zips, and aggregate assets all present."
