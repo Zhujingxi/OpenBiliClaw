@@ -10135,6 +10135,25 @@ def test_init_crash_detail_summarizes_exception() -> None:
     assert len(_init_crash_detail(RuntimeError("x" * 1000))) == 300
 
 
+def test_init_crash_detail_rewrites_llm_failure_to_advice() -> None:
+    """An LLM-shaped crash surfaces actionable advice, not the raw 500 body."""
+    from openbiliclaw.api.app import _init_crash_detail
+    from openbiliclaw.llm.base import LLMProviderError
+
+    try:
+        try:
+            raise RuntimeError(
+                "Error code: 500 - 根据相关法律法规，我们无法提供关于以下内容的答案"
+            )
+        except RuntimeError as upstream:
+            raise LLMProviderError("openai_compatible request failed") from upstream
+    except LLMProviderError as exc:
+        detail = _init_crash_detail(exc)
+    # Content-moderation advice, not "LLMProviderError: openai_compatible …".
+    assert "内容合规" in detail
+    assert not detail.startswith("LLMProviderError")
+
+
 def test_select_init_platforms_none_selection_uses_all_enabled() -> None:
     from openbiliclaw.api.app import _select_init_platforms
 

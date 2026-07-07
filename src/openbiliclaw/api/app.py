@@ -511,7 +511,16 @@ def _init_crash_detail(exc: BaseException) -> str:
     ``GET /api/init-status`` so a community user can report the actual cause
     without digging through server logs (field report 2026-07-05: the generic
     「初始化过程中出错了」left the failure undiagnosable from the UI).
+
+    An LLM-shaped failure (moderation refusal / exhausted providers / rate
+    limit) is rewritten into a human-readable reason so the page shows advice
+    instead of a raw ``InternalServerError: 非常抱歉…`` traceback fragment.
     """
+    from openbiliclaw.llm.base import describe_llm_failure
+
+    llm_reason = describe_llm_failure(exc)
+    if llm_reason:
+        return llm_reason[:300]
     lines = str(exc).strip().splitlines()
     message = lines[0].strip() if lines else ""
     text = f"{type(exc).__name__}: {message}" if message else type(exc).__name__

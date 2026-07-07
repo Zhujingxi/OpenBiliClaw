@@ -80,6 +80,77 @@ def classify_llm_unavailability(exc: BaseException) -> str | None:
     return None
 
 
+# Substrings that mark an upstream content-moderation / compliance refusal.
+# Chinese compat gateways (e.g. iFlytek code 10013) return the refusal *as a
+# 500*, so we cannot key off the HTTP status — we sniff the message instead.
+_LLM_MODERATION_MARKERS = (
+    "法律法规",
+    "健康和谐",
+    "无法提供关于",
+    "内容审查",
+    "content policy",
+    "content_filter",
+    "content management",
+    "risk_control",
+    "10013",
+)
+
+
+def describe_llm_failure(exc: BaseException) -> str | None:
+    """Translate an LLM exception chain into a short, human-readable Chinese
+    reason suitable for page-side display during guided init.
+
+    Walks the ``__cause__`` / ``__context__`` chain (cycle-safe) and returns a
+    one-line explanation the user can act on — a content-moderation refusal, an
+    exhausted provider/fallback chain, rate limiting, a timeout, or an empty
+    response. Returns ``None`` when the chain carries no recognizable LLM
+    signal, so callers can fall back to their own generic message.
+
+    Ordering is by specificity: a moderation refusal is the most actionable
+    (switch models), so it wins over the coarser transient buckets.
+    """
+    # Lazily imported to avoid a circular import (service imports this module).
+    from openbiliclaw.llm.service import LLMProviderExecutionError
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    moderation = rate_limited = timed_out = no_provider = empty_response = False
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = str(current).lower()
+        if any(marker.lower() in message for marker in _LLM_MODERATION_MARKERS):
+            moderation = True
+        if isinstance(current, LLMRateLimitError) or "rate limit" in message:
+            rate_limited = True
+        if isinstance(current, LLMTimeoutError) or "timed out" in message:
+            timed_out = True
+        if isinstance(current, LLMFallbackError | LLMProviderExecutionError) and (
+            "no provider was available" in message
+        ):
+            no_provider = True
+        if isinstance(current, LLMResponseError):
+            empty_response = True
+        current = current.__cause__ or current.__context__
+
+    if moderation:
+        return (
+            "AI 服务上游因内容合规策略拒绝了本次请求；"
+            "可更换一个不带内容审查的模型 / 服务商后重试。"
+        )
+    if rate_limited:
+        return "AI 服务触发了限流（rate limit）；稍等片刻再重试即可。"
+    if timed_out:
+        return "AI 服务响应超时；请检查网络连通性或稍后重试。"
+    if no_provider:
+        return (
+            "没有可用的 AI 服务：主 Provider 与备用 Provider 都调用失败，"
+            "请检查 LLM 配置、密钥与网络。"
+        )
+    if empty_response:
+        return "AI 服务返回了空响应或无法解析的内容；请更换模型或稍后重试。"
+    return None
+
+
 @dataclass
 class LLMResponse:
     """Standardized response from any LLM provider."""

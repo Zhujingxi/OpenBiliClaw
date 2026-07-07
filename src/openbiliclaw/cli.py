@@ -6020,10 +6020,19 @@ async def run_guided_init(
         try:
             profile_data = await profile_task
         except Exception as exc:
-            raise GuidedInitError(
-                "profile_failed",
-                "画像生成阶段出错。可稍后手动重试 `openbiliclaw init`。",
-            ) from exc
+            # Surface the real LLM cause (moderation refusal / no provider /
+            # rate limit / timeout) so the init page shows *why* it failed
+            # instead of a generic "稍后重试". Falls back to generic when the
+            # failure carries no recognizable LLM signal.
+            from openbiliclaw.llm.base import describe_llm_failure
+
+            llm_reason = describe_llm_failure(exc)
+            message = (
+                f"画像生成失败：{llm_reason}"
+                if llm_reason
+                else "画像生成阶段出错。可稍后手动重试 `openbiliclaw init`。"
+            )
+            raise GuidedInitError("profile_failed", message) from exc
         await _stage_done(3)
 
         # Discover is best-effort: a normal failure leaves a partial pool the

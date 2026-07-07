@@ -13,7 +13,10 @@ from openbiliclaw.llm.base import (
     LLMProviderError,
     LLMRateLimitError,
     LLMResponse,
+    LLMResponseError,
+    LLMTimeoutError,
     classify_llm_unavailability,
+    describe_llm_failure,
 )
 from openbiliclaw.llm.service import (
     LLMProviderExecutionError,
@@ -162,6 +165,55 @@ def test_classify_llm_unavailability_rate_limit_wins_over_no_provider() -> None:
         except LLMFallbackError as np_err:
             raise LLMRateLimitError("rate limit hit") from np_err
     assert classify_llm_unavailability(exc_info.value) == "rate_limited"
+
+
+def test_describe_llm_failure_content_moderation_500() -> None:
+    # A Chinese compat gateway returns a compliance refusal *as a 500*; the
+    # cause chain carries the 法律法规 text. Guided init must show "switch model"
+    # advice, not the raw traceback fragment.
+    try:
+        try:
+            raise RuntimeError(
+                "Error code: 500 - 非常抱歉，根据相关法律法规，"
+                "我们无法提供关于以下内容的答案 (code 10013)"
+            )
+        except RuntimeError as upstream:
+            raise LLMProviderError("openai_compatible request failed") from upstream
+    except LLMProviderError as exc:
+        reason = describe_llm_failure(exc)
+    assert reason is not None
+    assert "内容合规" in reason
+
+
+def test_describe_llm_failure_no_provider() -> None:
+    reason = describe_llm_failure(
+        LLMFallbackError("No provider was available to process the request.")
+    )
+    assert reason is not None
+    assert "没有可用的 AI 服务" in reason
+
+
+def test_describe_llm_failure_rate_limit_wins_over_no_provider() -> None:
+    try:
+        try:
+            raise LLMFallbackError("No provider was available to process the request.")
+        except LLMFallbackError as np_err:
+            raise LLMRateLimitError("rate limit hit") from np_err
+    except LLMRateLimitError as exc:
+        reason = describe_llm_failure(exc)
+    assert reason is not None
+    assert "限流" in reason
+
+
+def test_describe_llm_failure_timeout_and_empty_response() -> None:
+    assert "超时" in (describe_llm_failure(LLMTimeoutError("request timed out")) or "")
+    assert "空响应" in (describe_llm_failure(LLMResponseError("empty completion")) or "")
+
+
+def test_describe_llm_failure_returns_none_for_unrelated_error() -> None:
+    # A non-LLM failure (e.g. bad history data) must not be mislabeled as an
+    # LLM outage — callers fall back to their own generic message.
+    assert describe_llm_failure(ValueError("history parse failed")) is None
 
 
 def test_classify_llm_unavailability_is_cycle_safe() -> None:
