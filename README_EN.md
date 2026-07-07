@@ -707,7 +707,13 @@ Contributions welcome! See the [Contributing Guide](docs/contributing.md) to get
 
 If OpenBiliClaw gave you back control of your feed, [a star](https://github.com/whiteguo233/OpenBiliClaw) is the most direct vote for "keep adding platforms".
 
-[![Star History Chart](https://api.star-history.com/svg?repos=whiteguo233/OpenBiliClaw&type=Date)](https://www.star-history.com/#whiteguo233/OpenBiliClaw&Date)
+<a href="https://www.star-history.com/?type=date&repos=whiteguo233%2FOpenBiliClaw">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=whiteguo233/OpenBiliClaw&type=date&theme=dark&legend=top-left&sealed_token=1fDGODQkTTYiiU6QJ7F0nashHo3tbMDGZnmqCKDGTGg2P9q1Ukkxv21R3vab-oDvKPMAb5ZCC-hqY_70gspsAqK_gdvCBooa5QSkgwcR-XN3JD1F6vQ03bmVMrjAcMwGn_nqgoZ5TX1OWcv_92lXeBQAfa2Je-bhkYGk8-S0M0R6kOuJuBsXaANiI-am" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=whiteguo233/OpenBiliClaw&type=date&legend=top-left&sealed_token=1fDGODQkTTYiiU6QJ7F0nashHo3tbMDGZnmqCKDGTGg2P9q1Ukkxv21R3vab-oDvKPMAb5ZCC-hqY_70gspsAqK_gdvCBooa5QSkgwcR-XN3JD1F6vQ03bmVMrjAcMwGn_nqgoZ5TX1OWcv_92lXeBQAfa2Je-bhkYGk8-S0M0R6kOuJuBsXaANiI-am" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=whiteguo233/OpenBiliClaw&type=date&legend=top-left&sealed_token=1fDGODQkTTYiiU6QJ7F0nashHo3tbMDGZnmqCKDGTGg2P9q1Ukkxv21R3vab-oDvKPMAb5ZCC-hqY_70gspsAqK_gdvCBooa5QSkgwcR-XN3JD1F6vQ03bmVMrjAcMwGn_nqgoZ5TX1OWcv_92lXeBQAfa2Je-bhkYGk8-S0M0R6kOuJuBsXaANiI-am" />
+ </picture>
+</a>
 
 ## Privacy at a glance
 
