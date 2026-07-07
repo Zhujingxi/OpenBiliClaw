@@ -95,6 +95,62 @@ def test_update_init_run_rejects_unknown_column(tmp_path: Path) -> None:
         db.update_init_run("run-1", bogus="x")
 
 
+def test_xhs_login_state_roundtrips_through_auth_state(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+
+    assert db.get_xhs_login_state() == (False, "")
+
+    db.set_xhs_login_state(True, when_iso="2026-07-07T01:02:03+00:00")
+    assert db.get_xhs_login_state() == (True, "2026-07-07T01:02:03+00:00")
+    assert (
+        db.conn.execute("SELECT value FROM auth_state WHERE key = 'xhs_login_state'").fetchone()[0]
+        == "1"
+    )
+    assert (
+        db.conn.execute("SELECT value FROM auth_state WHERE key = 'xhs_login_state_at'").fetchone()[
+            0
+        ]
+        == "2026-07-07T01:02:03+00:00"
+    )
+
+    db.set_xhs_login_state(False, when_iso="2026-07-07T02:03:04+00:00")
+    assert db.get_xhs_login_state() == (False, "2026-07-07T02:03:04+00:00")
+    assert (
+        db.conn.execute("SELECT value FROM auth_state WHERE key = 'xhs_login_state'").fetchone()[0]
+        == "0"
+    )
+
+
+def test_zhihu_login_state_roundtrips_through_auth_state(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+
+    assert db.get_zhihu_login_state() == (False, "")
+
+    db.set_zhihu_login_state(True, when_iso="2026-07-07T03:04:05+00:00")
+    assert db.get_zhihu_login_state() == (True, "2026-07-07T03:04:05+00:00")
+    assert (
+        db.conn.execute("SELECT value FROM auth_state WHERE key = 'zhihu_login_state'").fetchone()[
+            0
+        ]
+        == "1"
+    )
+    assert (
+        db.conn.execute(
+            "SELECT value FROM auth_state WHERE key = 'zhihu_login_state_at'"
+        ).fetchone()[0]
+        == "2026-07-07T03:04:05+00:00"
+    )
+
+    db.set_zhihu_login_state(False, when_iso="2026-07-07T04:05:06+00:00")
+    assert db.get_zhihu_login_state() == (False, "2026-07-07T04:05:06+00:00")
+    assert (
+        db.conn.execute("SELECT value FROM auth_state WHERE key = 'zhihu_login_state'").fetchone()[
+            0
+        ]
+        == "0"
+    )
+
+
 def test_get_recommendations_rows_carry_card_metadata_columns(tmp_path: Path) -> None:
     """Regression (issue #75): the history join must SELECT the card-metadata
     columns, otherwise /api/recommendations serializes them all as 0 even

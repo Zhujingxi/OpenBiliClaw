@@ -124,9 +124,13 @@ from openbiliclaw.api.models import (
     WatchLaterStateResponse,
     XCookieIn,
     XCookieResponse,
+    XhsLoginStateIn,
+    XhsLoginStateResponse,
     XiaohongshuSourceConfigOut,
     XStatusResponse,
     YoutubeSourceConfigOut,
+    ZhihuLoginStateIn,
+    ZhihuLoginStateResponse,
     ZhihuSourceConfigOut,
 )
 from openbiliclaw.runtime import embedding_progress
@@ -6879,6 +6883,32 @@ def create_app(
         upgraded = _backfill_xhs_tokens(ctx.database, urls)
         return {"ok": True, "upgraded": upgraded}
 
+    @app.post("/api/sources/xhs/login-state", response_model=XhsLoginStateResponse)
+    def update_xhs_login_state(payload: XhsLoginStateIn) -> XhsLoginStateResponse:
+        """Persist the extension-observed xhs login state without storing cookies."""
+        if not hasattr(ctx.database, "set_xhs_login_state"):
+            raise HTTPException(status_code=503, detail="database not configured")
+        ctx.database.set_xhs_login_state(payload.logged_in)
+        _stored_logged_in, updated_at = ctx.database.get_xhs_login_state()
+        return XhsLoginStateResponse(
+            ok=True,
+            logged_in=payload.logged_in,
+            updated_at=updated_at,
+        )
+
+    @app.post("/api/sources/zhihu/login-state", response_model=ZhihuLoginStateResponse)
+    def update_zhihu_login_state(payload: ZhihuLoginStateIn) -> ZhihuLoginStateResponse:
+        """Persist the extension-observed Zhihu login state without storing cookies."""
+        if not hasattr(ctx.database, "set_zhihu_login_state"):
+            raise HTTPException(status_code=503, detail="database not configured")
+        ctx.database.set_zhihu_login_state(payload.logged_in)
+        _stored_logged_in, updated_at = ctx.database.get_zhihu_login_state()
+        return ZhihuLoginStateResponse(
+            ok=True,
+            logged_in=payload.logged_in,
+            updated_at=updated_at,
+        )
+
     # ── Bilibili extension search fallback endpoints ────────────────
 
     from openbiliclaw.sources.bili_tasks import (
@@ -7261,11 +7291,11 @@ def create_app(
             updated_at=str(health.get("updated_at", "")),
         )
 
-    # Window for treating synced 小红书 access tokens as fresh. xsec_tokens
-    # die well within a day, so /api/sources/status only reports "ready" when
-    # token activity happened inside this window — older-only rows degrade to
-    # the yellow "stale" state instead of staying green forever.
-    _xhs_token_fresh_hours = 24
+    # Window for trusting the extension's privacy-preserving xhs login-state
+    # heartbeat. A live browser pushes on startup, cookie changes, and the
+    # periodic cookie-sync alarm; stale rows fall back to missing.
+    _xhs_login_fresh_hours = 72
+    _zhihu_login_fresh_hours = 72
 
     # Human-readable detail for each X (twitter) health state, reused by the
     # unified /api/sources/status chip below.
@@ -7334,69 +7364,58 @@ def create_app(
                 detail="未配置 Cookie —— 在浏览器登录 bilibili.com，插件会自动同步。",
             )
 
-        # ── 小红书: token-bearing cache rows = extension is syncing tokens ──
-        # A bare COUNT(*) is sticky: one token row from weeks ago keeps the
-        # status green forever after the extension stops syncing, while the
-        # stored tokens are long dead (xhs 300031 access-denied). Gate "ready"
-        # on recent activity instead — a token-bearing cache row discovered,
-        # or a candidate token-backfilled (``_backfill_xhs_tokens`` refreshes
-        # ``last_seen_at`` without touching ``discovered_at``), inside the
-        # freshness window. Old-only rows degrade to ``stale``.
+        # ── 小红书: browser login cookie presence, reported as a boolean ──
+        # XHS fetching is client-side, so the backend never stores/replays the
+        # raw ``web_session`` cookie. The extension reports only login state;
+        # xsec_token/content cache rows are secondary hints, never the login
+        # gate (a fresh account can be logged in with zero tokenized rows).
         xhs_enabled = bool(getattr(srcs.xiaohongshu, "enabled", False))
         xhs_tokens = 0
-        xhs_fresh = 0
         if hasattr(ctx.database, "conn"):
-            window = f"-{_xhs_token_fresh_hours} hours"
             try:
                 row = ctx.database.conn.execute(
-                    "SELECT COUNT(*), "
-                    "COALESCE(SUM(discovered_at >= datetime('now', ?)), 0) "
-                    "FROM content_cache "
+                    "SELECT COUNT(*) FROM content_cache "
                     "WHERE source_platform = 'xiaohongshu' "
-                    "AND content_url LIKE '%xsec_token=%'",
-                    (window,),
+                    "AND content_url LIKE '%xsec_token=%'"
                 ).fetchone()
                 xhs_tokens = int(row[0]) if row else 0
-                xhs_fresh = int(row[1]) if row else 0
             except Exception:  # pragma: no cover - defensive
                 xhs_tokens = 0
-                xhs_fresh = 0
-            if xhs_tokens and not xhs_fresh:
-                try:
-                    row = ctx.database.conn.execute(
-                        "SELECT COUNT(*) FROM discovery_candidates "
-                        "WHERE source_platform = 'xiaohongshu' "
-                        "AND content_url LIKE '%xsec_token=%' "
-                        "AND last_seen_at >= datetime('now', ?)",
-                        (window,),
-                    ).fetchone()
-                    xhs_fresh = int(row[0]) if row else 0
-                except Exception:  # pragma: no cover - defensive
-                    xhs_fresh = 0
-        if xhs_fresh > 0:
+        xhs_stored_logged_in = False
+        xhs_login_at = ""
+        if hasattr(ctx.database, "get_xhs_login_state"):
+            try:
+                xhs_stored_logged_in, xhs_login_at = ctx.database.get_xhs_login_state()
+            except Exception:  # pragma: no cover - defensive
+                xhs_stored_logged_in, xhs_login_at = False, ""
+        xhs_login_fresh = False
+        if xhs_stored_logged_in and xhs_login_at:
+            try:
+                from datetime import UTC, datetime, timedelta
+
+                parsed_login_at = datetime.fromisoformat(
+                    xhs_login_at.strip().replace("Z", "+00:00")
+                )
+                if parsed_login_at.tzinfo is None:
+                    parsed_login_at = parsed_login_at.replace(tzinfo=UTC)
+                xhs_login_fresh = datetime.now(UTC) - parsed_login_at.astimezone(UTC) <= timedelta(
+                    hours=_xhs_login_fresh_hours
+                )
+            except Exception:  # pragma: no cover - defensive
+                xhs_login_fresh = False
+        if xhs_stored_logged_in and xhs_login_fresh:
+            token_hint = f"内容令牌 {xhs_tokens} 条。" if xhs_tokens else ""
             xiaohongshu = SourceStatusItem(
                 enabled=xhs_enabled,
                 state="ready",
-                detail=(
-                    f"访问令牌已同步（最近 {_xhs_token_fresh_hours} 小时内 {xhs_fresh} 条，"
-                    f"共 {xhs_tokens} 条带 xsec_token 的缓存内容）。"
-                ),
+                detail=f"已登录小红书。{token_hint}",
                 logged_in=True,
-            )
-        elif xhs_tokens > 0:
-            xiaohongshu = SourceStatusItem(
-                enabled=xhs_enabled,
-                state="stale",
-                detail=(
-                    f"令牌可能已失效 —— 超过 {_xhs_token_fresh_hours} 小时未同步新令牌"
-                    f"（存量 {xhs_tokens} 条）。在浏览器逛逛小红书即可自动刷新。"
-                ),
             )
         else:
             xiaohongshu = SourceStatusItem(
                 enabled=xhs_enabled,
                 state="missing",
-                detail="未检测到访问令牌 —— 在浏览器登录小红书后插件会自动同步。",
+                detail="未检测到小红书登录 —— 在浏览器登录小红书后插件会自动同步。",
             )
 
         # ── 抖音: cookie resolvable from env / data/douyin_cookie.json ──
@@ -7473,7 +7492,36 @@ def create_app(
             ),
             logged_in=False,
         )
-        if hasattr(ctx.database, "conn"):
+        zhihu_stored_logged_in = False
+        zhihu_login_at = ""
+        if hasattr(ctx.database, "get_zhihu_login_state"):
+            try:
+                zhihu_stored_logged_in, zhihu_login_at = ctx.database.get_zhihu_login_state()
+            except Exception:  # pragma: no cover - defensive
+                zhihu_stored_logged_in, zhihu_login_at = False, ""
+        zhihu_login_fresh = False
+        if zhihu_stored_logged_in and zhihu_login_at:
+            try:
+                from datetime import UTC, datetime, timedelta
+
+                parsed_login_at = datetime.fromisoformat(
+                    zhihu_login_at.strip().replace("Z", "+00:00")
+                )
+                if parsed_login_at.tzinfo is None:
+                    parsed_login_at = parsed_login_at.replace(tzinfo=UTC)
+                zhihu_login_fresh = datetime.now(UTC) - parsed_login_at.astimezone(
+                    UTC
+                ) <= timedelta(hours=_zhihu_login_fresh_hours)
+            except Exception:  # pragma: no cover - defensive
+                zhihu_login_fresh = False
+        if zhihu_stored_logged_in and zhihu_login_fresh:
+            zhihu = SourceStatusItem(
+                enabled=zh_enabled,
+                state="ready",
+                detail="已登录知乎。",
+                logged_in=True,
+            )
+        elif hasattr(ctx.database, "conn"):
             try:
                 row = ctx.database.conn.execute(
                     """
@@ -7542,65 +7590,80 @@ def create_app(
                 detail="Reddit 使用 OpenBiliClaw 插件登录态；尚未看到成功任务结果。",
                 logged_in=False,
             )
-            db_conn = getattr(ctx.database, "conn", None)
-            if db_conn is not None and hasattr(db_conn, "execute"):
-                with suppress(Exception):
-                    row = db_conn.execute(
-                        """
-                        SELECT type, status, result_json
-                        FROM reddit_tasks
-                        ORDER BY COALESCE(completed_at, claimed_at, created_at) DESC,
-                                 created_at DESC
-                        LIMIT 1
-                        """
-                    ).fetchone()
-                    if row is not None:
-                        task_type = str(row["type"] if hasattr(row, "keys") else row[0])
-                        status = str(row["status"] if hasattr(row, "keys") else row[1])
-                        result_json = row["result_json"] if hasattr(row, "keys") else row[2]
-                        error_code = ""
-                        reddit_debug: dict[str, Any] = {}
-                        with suppress(Exception):
-                            parsed = json.loads(str(result_json or "{}"))
-                            if isinstance(parsed, dict):
-                                error_code = str(parsed.get("error", "") or "")
-                                if isinstance(parsed.get("debug"), dict):
-                                    reddit_debug = parsed["debug"]
-                        login_required = error_code == "reddit_login_required" or bool(
-                            reddit_debug.get("login_required")
-                        )
-                        if status == "completed":
-                            reddit = SourceStatusItem(
-                                enabled=rd_enabled,
-                                state="ready",
-                                detail=f"最近 Reddit 插件任务已完成（{task_type}）。",
-                                logged_in=True,
+            reddit_cookie_names: tuple[str, ...] = ()
+            with suppress(Exception):
+                from openbiliclaw.sources.reddit_tasks import rdt_credential_cookie_names
+
+                reddit_cookie_names = rdt_credential_cookie_names()
+            if "reddit_session" in reddit_cookie_names:
+                reddit = SourceStatusItem(
+                    enabled=rd_enabled,
+                    state="ready",
+                    detail="已登录 Reddit（reddit_session 已同步）。",
+                    logged_in=True,
+                )
+            else:
+                db_conn = getattr(ctx.database, "conn", None)
+                if db_conn is not None and hasattr(db_conn, "execute"):
+                    with suppress(Exception):
+                        row = db_conn.execute(
+                            """
+                            SELECT type, status, result_json
+                            FROM reddit_tasks
+                            ORDER BY COALESCE(completed_at, claimed_at, created_at) DESC,
+                                     created_at DESC
+                            LIMIT 1
+                            """
+                        ).fetchone()
+                        if row is not None:
+                            task_type = str(row["type"] if hasattr(row, "keys") else row[0])
+                            status = str(row["status"] if hasattr(row, "keys") else row[1])
+                            result_json = row["result_json"] if hasattr(row, "keys") else row[2]
+                            error_code = ""
+                            reddit_debug: dict[str, Any] = {}
+                            with suppress(Exception):
+                                parsed = json.loads(str(result_json or "{}"))
+                                if isinstance(parsed, dict):
+                                    error_code = str(parsed.get("error", "") or "")
+                                    if isinstance(parsed.get("debug"), dict):
+                                        reddit_debug = parsed["debug"]
+                            login_required = error_code == "reddit_login_required" or bool(
+                                reddit_debug.get("login_required")
                             )
-                        elif login_required:
-                            reddit = SourceStatusItem(
-                                enabled=rd_enabled,
-                                state="missing",
-                                detail=(
-                                    "最近 Reddit 任务提示需要登录 Reddit。"
-                                    "请在当前浏览器登录后重试。"
-                                ),
-                                logged_in=False,
-                            )
-                        elif status == "failed":
-                            suffix = f"：{error_code}" if error_code else ""
-                            reddit = SourceStatusItem(
-                                enabled=rd_enabled,
-                                state="partial",
-                                detail=f"最近 Reddit 插件任务失败{suffix}。",
-                                logged_in=False,
-                            )
-                        elif status in {"pending", "in_progress"}:
-                            reddit = SourceStatusItem(
-                                enabled=rd_enabled,
-                                state="unverified",
-                                detail=f"Reddit 任务正在等待插件执行（{task_type} / {status}）。",
-                                logged_in=False,
-                            )
+                            if status == "completed":
+                                reddit = SourceStatusItem(
+                                    enabled=rd_enabled,
+                                    state="ready",
+                                    detail=f"最近 Reddit 插件任务已完成（{task_type}）。",
+                                    logged_in=True,
+                                )
+                            elif login_required:
+                                reddit = SourceStatusItem(
+                                    enabled=rd_enabled,
+                                    state="missing",
+                                    detail=(
+                                        "最近 Reddit 任务提示需要登录 Reddit。"
+                                        "请在当前浏览器登录后重试。"
+                                    ),
+                                    logged_in=False,
+                                )
+                            elif status == "failed":
+                                suffix = f"：{error_code}" if error_code else ""
+                                reddit = SourceStatusItem(
+                                    enabled=rd_enabled,
+                                    state="partial",
+                                    detail=f"最近 Reddit 插件任务失败{suffix}。",
+                                    logged_in=False,
+                                )
+                            elif status in {"pending", "in_progress"}:
+                                reddit = SourceStatusItem(
+                                    enabled=rd_enabled,
+                                    state="unverified",
+                                    detail=(
+                                        f"Reddit 任务正在等待插件执行（{task_type} / {status}）。"
+                                    ),
+                                    logged_in=False,
+                                )
         else:
             try:
                 from openbiliclaw.sources.reddit_tasks import probe_reddit_command_backend

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 
 class BehaviorEventIn(BaseModel):
@@ -405,6 +405,34 @@ class RedditCookieResponse(BaseModel):
     error_code: str = ""
 
 
+class XhsLoginStateIn(BaseModel):
+    """Privacy-preserving xhs login state reported by the browser extension."""
+
+    logged_in: StrictBool
+
+
+class XhsLoginStateResponse(BaseModel):
+    """Result of persisting the browser-observed xhs login state."""
+
+    ok: bool = True
+    logged_in: bool
+    updated_at: str = ""
+
+
+class ZhihuLoginStateIn(BaseModel):
+    """Privacy-preserving Zhihu login state reported by the browser extension."""
+
+    logged_in: StrictBool
+
+
+class ZhihuLoginStateResponse(BaseModel):
+    """Result of persisting the browser-observed Zhihu login state."""
+
+    ok: bool = True
+    logged_in: bool
+    updated_at: str = ""
+
+
 class XStatusResponse(BaseModel):
     """Current X (Twitter) source health (spec §7).
 
@@ -431,11 +459,11 @@ class SourceStatusItem(BaseModel):
       health store).
     - ``ready``      — credential present and structurally valid, but not
       live-validated (B站 cookie with login fields, 抖音 cookie present, 小红书
-      access tokens synced within the freshness window).
+      browser login state recently synced).
     - ``partial``    — credential present but structurally incomplete, likely
       broken (B站 cookie missing some of the core login fields).
     - ``stale``      — credential synced before but not recently, likely
-      expired (小红书 tokens older than the freshness window).
+      expired.
     - ``missing``    — source enabled but no usable credential.
     - ``unverified`` — plugin-backed source is enabled but local task history
       does not prove a recent successful or failed login-state run yet.
@@ -459,7 +487,7 @@ class SourcesStatusResponse(BaseModel):
     Backs the unified status chip shown on both the desktop-Web and the
     extension settings pages. Derived entirely from local signals (config
     cookie fields, the X health store, the Douyin cookie file/env, and the
-    recency of token-bearing 小红书 cache rows) — no outbound platform calls.
+    privacy-preserving 小红书 browser login-state flag) — no outbound platform calls.
     """
 
     bilibili: SourceStatusItem = Field(default_factory=SourceStatusItem)

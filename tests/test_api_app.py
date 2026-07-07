@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +23,28 @@ def _wait_for_presence_count(ctx: object, expected: int) -> None:
             return
         time.sleep(0.01)
     assert ctx.presence.snapshot()["active_count"] == expected
+
+
+def _store_xhs_login_state(db: object, *, logged_in: bool, when_iso: str) -> None:
+    db.conn.executemany(
+        "INSERT OR REPLACE INTO auth_state (key, value) VALUES (?, ?)",
+        [
+            ("xhs_login_state", "1" if logged_in else "0"),
+            ("xhs_login_state_at", when_iso),
+        ],
+    )
+    db.conn.commit()
+
+
+def _store_zhihu_login_state(db: object, *, logged_in: bool, when_iso: str) -> None:
+    db.conn.executemany(
+        "INSERT OR REPLACE INTO auth_state (key, value) VALUES (?, ?)",
+        [
+            ("zhihu_login_state", "1" if logged_in else "0"),
+            ("zhihu_login_state_at", when_iso),
+        ],
+    )
+    db.conn.commit()
 
 
 class _ReadySoulEngine:
@@ -1391,35 +1414,44 @@ class TestBackendAPI:
         assert masked["bilibili"]["value"] != body["bilibili"]["value"]
         assert "*" in masked["bilibili"]["value"]
 
-    def test_sources_status_xhs_old_tokens_report_stale_not_ready(self, tmp_path: Path) -> None:
-        """小红书 token rows outside the freshness window degrade to ``stale``.
-
-        A bare COUNT(*) used to keep the status green forever once a single
-        token row ever existed, even weeks after the extension stopped syncing
-        and the tokens died (xhs 300031).
-        """
+    def test_sources_status_xhs_recent_login_state_ready_without_tokens(
+        self, tmp_path: Path
+    ) -> None:
+        """A fresh web_session signal is the xhs login gate, not xsec_token rows."""
         from fastapi.testclient import TestClient
 
         from openbiliclaw.storage.database import Database
 
         db = Database(tmp_path / "status.db")
         db.initialize()
-        db.conn.execute(
-            "INSERT INTO content_cache (bvid, source_platform, content_url, discovered_at) "
-            "VALUES ('xhsold', 'xiaohongshu', "
-            "'https://www.xiaohongshu.com/explore/xhsold?xsec_token=dead', "
-            "datetime('now', '-3 days'))"
+        _store_xhs_login_state(
+            db,
+            logged_in=True,
+            when_iso=(datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
         )
-        db.conn.commit()
 
         app = create_app(memory_manager=object(), database=db, soul_engine=object())
         client = TestClient(app)
 
         item = client.get("/api/sources/status").json()["xiaohongshu"]
-        assert item["state"] == "stale"
-        assert item["logged_in"] is False
+        assert item["state"] == "ready"
+        assert item["logged_in"] is True
+        assert "已登录小红书" in item["detail"]
 
-        # A freshly discovered token row flips the status back to ready.
+    def test_sources_status_xhs_logged_out_state_wins_over_fresh_tokens(
+        self, tmp_path: Path
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        _store_xhs_login_state(
+            db,
+            logged_in=False,
+            when_iso=(datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
+        )
         db.conn.execute(
             "INSERT INTO content_cache (bvid, source_platform, content_url) "
             "VALUES ('xhsnew', 'xiaohongshu', "
@@ -1427,34 +1459,32 @@ class TestBackendAPI:
         )
         db.conn.commit()
 
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
         item = client.get("/api/sources/status").json()["xiaohongshu"]
-        assert item["state"] == "ready"
-        assert item["logged_in"] is True
+        assert item["state"] == "missing"
+        assert item["logged_in"] is False
+        assert "未检测到小红书登录" in item["detail"]
 
-    def test_sources_status_xhs_token_backfill_counts_as_fresh(self, tmp_path: Path) -> None:
-        """Token backfill only touches discovery_candidates.last_seen_at.
-
-        ``_backfill_xhs_tokens`` upgrades a candidate's content_url in place
-        without rewriting content_cache.discovered_at, so a recently
-        backfilled candidate must keep the status ``ready`` even when every
-        cache row is old.
-        """
+    def test_sources_status_xhs_stale_login_state_missing_even_with_fresh_tokens(
+        self, tmp_path: Path
+    ) -> None:
         from fastapi.testclient import TestClient
 
         from openbiliclaw.storage.database import Database
 
         db = Database(tmp_path / "status.db")
         db.initialize()
-        db.conn.execute(
-            "INSERT INTO content_cache (bvid, source_platform, content_url, discovered_at) "
-            "VALUES ('xhsold', 'xiaohongshu', "
-            "'https://www.xiaohongshu.com/explore/xhsold?xsec_token=dead', "
-            "datetime('now', '-3 days'))"
+        _store_xhs_login_state(
+            db,
+            logged_in=True,
+            when_iso=(datetime.now(UTC) - timedelta(hours=73)).isoformat(),
         )
         db.conn.execute(
-            "INSERT INTO discovery_candidates (candidate_key, source_platform, content_url) "
-            "VALUES ('xhs:backfilled', 'xiaohongshu', "
-            "'https://www.xiaohongshu.com/explore/backfilled?xsec_token=live')"
+            "INSERT INTO content_cache (bvid, source_platform, content_url) "
+            "VALUES ('xhsnew', 'xiaohongshu', "
+            "'https://www.xiaohongshu.com/explore/xhsnew?xsec_token=live')"
         )
         db.conn.commit()
 
@@ -1462,7 +1492,272 @@ class TestBackendAPI:
         client = TestClient(app)
 
         item = client.get("/api/sources/status").json()["xiaohongshu"]
+        assert item["state"] == "missing"
+        assert item["logged_in"] is False
+
+    def test_xhs_login_state_endpoint_persists_state(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        response = client.post("/api/sources/xhs/login-state", json={"logged_in": True})
+
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        logged_in, updated_at = db.get_xhs_login_state()
+        assert logged_in is True
+        assert updated_at
+
+    def test_xhs_login_state_endpoint_rejects_non_bool(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        response = client.post("/api/sources/xhs/login-state", json={"logged_in": "true"})
+
+        assert response.status_code == 422
+
+    def test_sources_status_reddit_extension_backend_uses_synced_session_without_task(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.sources import reddit_tasks
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config()
+        cfg.sources.reddit.enabled = True
+        cfg.sources.reddit.backend = "extension"
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+        monkeypatch.setattr(
+            reddit_tasks,
+            "_rdt_credential_file",
+            lambda: tmp_path / "rdt" / "credential.json",
+        )
+        sync_result = reddit_tasks.sync_rdt_credential_from_cookie_header(
+            "reddit_session=rs; loid=loid", source="test"
+        )
+        assert sync_result.has_cookie is True
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/sources/status").json()["reddit"]
+        assert item["enabled"] is True
         assert item["state"] == "ready"
+        assert item["logged_in"] is True
+        assert "reddit_session" in item["detail"]
+
+    def test_sources_status_reddit_extension_backend_without_session_keeps_unverified(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.sources import reddit_tasks
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config()
+        cfg.sources.reddit.enabled = True
+        cfg.sources.reddit.backend = "extension"
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+        monkeypatch.setattr(
+            reddit_tasks,
+            "_rdt_credential_file",
+            lambda: tmp_path / "rdt" / "credential.json",
+        )
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/sources/status").json()["reddit"]
+        assert item["enabled"] is True
+        assert item["state"] == "unverified"
+        assert item["logged_in"] is False
+
+    def test_sources_status_reddit_extension_backend_login_required_without_session_missing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.sources import reddit_tasks
+        from openbiliclaw.sources.reddit_tasks import RedditTaskQueue
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config()
+        cfg.sources.reddit.enabled = True
+        cfg.sources.reddit.backend = "extension"
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+        monkeypatch.setattr(
+            reddit_tasks,
+            "_rdt_credential_file",
+            lambda: tmp_path / "rdt" / "credential.json",
+        )
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        queue = RedditTaskQueue(db)
+        task_id = queue.enqueue_with_id("bootstrap_events", {"scopes": ["reddit_saved"]})
+        assert task_id is not None
+        queue.fail(task_id, error="reddit_login_required", debug={"login_required": True})
+
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/sources/status").json()["reddit"]
+        assert item["enabled"] is True
+        assert item["state"] == "missing"
+        assert item["logged_in"] is False
+
+    def test_sources_status_zhihu_recent_login_state_ready_without_tasks(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config()
+        cfg.sources.zhihu.enabled = True
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        _store_zhihu_login_state(
+            db,
+            logged_in=True,
+            when_iso=(datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
+        )
+
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/sources/status").json()["zhihu"]
+        assert item["enabled"] is True
+        assert item["state"] == "ready"
+        assert item["logged_in"] is True
+        assert "已登录知乎" in item["detail"]
+
+    @pytest.mark.parametrize(
+        ("stored_logged_in", "age_hours", "task_case", "expected_state", "expected_logged_in"),
+        [
+            (False, 0.1, "completed", "ready", True),
+            (True, 73.0, "login_required", "missing", False),
+            (False, 0.1, "failed", "partial", False),
+            (True, 73.0, "pending", "unverified", False),
+        ],
+    )
+    def test_sources_status_zhihu_logged_out_or_stale_falls_back_to_task_history(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        stored_logged_in: bool,
+        age_hours: float,
+        task_case: str,
+        expected_state: str,
+        expected_logged_in: bool,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.sources.zhihu_tasks import ZhihuTaskQueue
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config()
+        cfg.sources.zhihu.enabled = True
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        _store_zhihu_login_state(
+            db,
+            logged_in=stored_logged_in,
+            when_iso=(datetime.now(UTC) - timedelta(hours=age_hours)).isoformat(),
+        )
+        queue = ZhihuTaskQueue(db)
+        task_id = queue.enqueue_with_id("bootstrap_events", {"scopes": ["zhihu_read_history"]})
+        assert task_id is not None
+        if task_case == "completed":
+            queue.merge_result(
+                task_id,
+                items=[
+                    {
+                        "scope": "zhihu_read_history",
+                        "title": "知乎阅读",
+                        "url": "https://www.zhihu.com/question/1/answer/2",
+                    }
+                ],
+                scope_counts={"zhihu_read_history": 1},
+                complete=True,
+            )
+        elif task_case == "login_required":
+            queue.fail(task_id, error="zhihu_login_required", debug={"login_required": True})
+        elif task_case == "failed":
+            queue.fail(task_id, error="zhihu_fetch_failed")
+
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/sources/status").json()["zhihu"]
+        assert item["enabled"] is True
+        assert item["state"] == expected_state
+        assert item["logged_in"] is expected_logged_in
+
+    def test_zhihu_login_state_endpoint_persists_state(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        response = client.post("/api/sources/zhihu/login-state", json={"logged_in": True})
+
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        logged_in, updated_at = db.get_zhihu_login_state()
+        assert logged_in is True
+        assert updated_at
+
+    def test_zhihu_login_state_endpoint_rejects_non_bool(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        response = client.post("/api/sources/zhihu/login-state", json={"logged_in": "true"})
+
+        assert response.status_code == 422
 
     def test_sources_status_zhihu_login_required_reports_missing(
         self,
@@ -7719,6 +8014,41 @@ class TestBackendAPI:
         assert item["comment_count"] == 880
         assert item["danmaku_count"] == 150
         assert item["favorite_count"] == 12
+
+    def test_delight_pending_batch_maps_xhs_collect_to_favorite(self) -> None:
+        """Xiaohongshu stores 收藏 in collect_count, but the card's ⭐ renders
+        favorite_count — so favorite_count falls back to collect_count, letting
+        XHS favorites show like every other platform (field report 2026-07-07)."""
+        from fastapi.testclient import TestClient
+
+        class FakeDatabase:
+            def get_delight_candidates(
+                self,
+                *,
+                min_delight_score: float,
+                limit: int,
+                include_liked: bool = False,
+            ) -> list[dict[str, object]]:
+                return [
+                    {
+                        "bvid": "xhsnote1",
+                        "title": "小红书笔记",
+                        "delight_score": 0.9,
+                        "source_platform": "xiaohongshu",
+                        "like_count": 3200,
+                        "comment_count": 880,
+                        "collect_count": 455,  # XHS 收藏 lands here, favorite_count absent
+                        "feedback_type": "",
+                    },
+                ]
+
+        app = create_app(memory_manager=object(), database=FakeDatabase(), soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/delight/pending-batch").json()["items"][0]
+        assert item["favorite_count"] == 455  # surfaced from collect_count
+        assert item["like_count"] == 3200
+        assert item["comment_count"] == 880
 
     def test_delight_pending_batch_uses_configured_default_limit(self) -> None:
         """Clients that omit ``limit`` should inherit the shared queue setting."""

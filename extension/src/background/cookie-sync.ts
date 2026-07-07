@@ -19,7 +19,10 @@
  * Douyin cookie for direct discovery smoke / recall; POST /api/sources/x/cookie
  * stores the browser X (Twitter) cookie for server-side cookie-replay discovery;
  * POST /api/sources/reddit/cookie stores the browser Reddit cookie in rdt-cli's
- * credential store for command-backed Reddit discovery.
+ * credential store for command-backed Reddit discovery; POST
+ * /api/sources/xhs/login-state reports only whether xhs's web_session login
+ * cookie exists; POST /api/sources/zhihu/login-state does the same for Zhihu's
+ * z_c0 login cookie. Neither endpoint receives raw cookie values.
  */
 
 // .ts extension: see service-worker.ts for the node:test resolver rationale.
@@ -32,6 +35,8 @@ const BILI_COOKIE_SYNC_ALARM = "openbiliclaw-cookie-sync-bili";
 const DY_COOKIE_SYNC_ALARM = "openbiliclaw-cookie-sync-dy";
 const X_COOKIE_SYNC_ALARM = "openbiliclaw-cookie-sync-x";
 const REDDIT_COOKIE_SYNC_ALARM = "openbiliclaw-cookie-sync-reddit";
+const XHS_LOGIN_STATE_SYNC_ALARM = "openbiliclaw-cookie-sync-xhs";
+const ZHIHU_LOGIN_STATE_SYNC_ALARM = "openbiliclaw-cookie-sync-zhihu";
 // Pre-split shared alarm. chrome.alarms persist across extension updates,
 // so an old install can still fire this name once after upgrading.
 const LEGACY_COOKIE_SYNC_ALARM = "openbiliclaw-cookie-sync";
@@ -83,8 +88,10 @@ const IMPORTANT_DOUYIN_COOKIE_NAMES = [
 // 401 immediately, so we don't bother pushing partial jars to the backend.
 const REQUIRED_X_COOKIE_NAMES = ["auth_token", "ct0"];
 const REQUIRED_REDDIT_COOKIE_NAMES = ["reddit_session"];
+const XHS_LOGIN_COOKIE_NAME = "web_session";
+const ZHIHU_LOGIN_COOKIE_NAME = "z_c0";
 
-type CookieSyncPlatform = "bilibili" | "douyin" | "x" | "reddit";
+type CookieSyncPlatform = "bilibili" | "douyin" | "x" | "reddit" | "xhs" | "zhihu";
 
 const debounceTimers: Partial<Record<CookieSyncPlatform, ReturnType<typeof setTimeout>>> = {};
 let cookieSyncStarted = false;
@@ -213,6 +220,42 @@ export async function readRedditCookieHeader(): Promise<string | null> {
     }
   }
   return cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+}
+
+/**
+ * Return whether the user is logged into xiaohongshu.com.
+ *
+ * XHS uses `web_session` as the logged-in session cookie. Device / guest
+ * cookies such as `a1` and `webId` are deliberately ignored because they are
+ * present when logged out.
+ */
+export async function readXhsLoginState(): Promise<boolean> {
+  const chromeApi = getChromeApi();
+  if (!chromeApi?.cookies?.getAll) {
+    return false;
+  }
+  const cookies = await chromeApi.cookies.getAll({ domain: "xiaohongshu.com" });
+  return cookies.some(
+    (cookie) => cookie.name === XHS_LOGIN_COOKIE_NAME && String(cookie.value || "").trim() !== "",
+  );
+}
+
+/**
+ * Return whether the user is logged into zhihu.com.
+ *
+ * Zhihu's `z_c0` is the authenticated session token. Guest cookies such as
+ * `_xsrf` and `d_c0` are deliberately ignored because they exist for logged-out
+ * visitors too.
+ */
+export async function readZhihuLoginState(): Promise<boolean> {
+  const chromeApi = getChromeApi();
+  if (!chromeApi?.cookies?.getAll) {
+    return false;
+  }
+  const cookies = await chromeApi.cookies.getAll({ domain: "zhihu.com" });
+  return cookies.some(
+    (cookie) => cookie.name === ZHIHU_LOGIN_COOKIE_NAME && String(cookie.value || "").trim() !== "",
+  );
 }
 
 /**
@@ -424,6 +467,86 @@ export async function syncRedditCookieToBackend(
   }
 }
 
+export async function syncXhsLoginStateToBackend(
+  source: string = "extension",
+): Promise<boolean> {
+  const loggedIn = await readXhsLoginState();
+  try {
+    const response = await fetch(await apiUrl("/sources/xhs/login-state"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ logged_in: loggedIn }),
+    });
+    if (!response.ok) {
+      console.warn(`[openbiliclaw] xhs login-state sync HTTP ${response.status}`);
+      scheduleCookieSyncAlarm(XHS_LOGIN_STATE_SYNC_ALARM, COOKIE_SYNC_RETRY_MINUTES);
+      return false;
+    }
+    const result = (await response.json()) as {
+      ok: boolean;
+      logged_in: boolean;
+      updated_at?: string;
+      message?: string;
+    };
+    if (result.ok) {
+      console.log(
+        `[openbiliclaw] xhs login-state synced via ${source}` +
+          ` (${result.logged_in ? "logged in" : "logged out"})`,
+      );
+      scheduleHourlyCookieSync(XHS_LOGIN_STATE_SYNC_ALARM);
+      return true;
+    }
+    const message = String(result.message || "");
+    console.warn(`[openbiliclaw] xhs login-state sync rejected (${source}): ${message}`);
+    scheduleCookieSyncAlarm(XHS_LOGIN_STATE_SYNC_ALARM, COOKIE_SYNC_RETRY_MINUTES);
+    return false;
+  } catch (err) {
+    console.warn("[openbiliclaw] xhs login-state sync failed:", err);
+    scheduleCookieSyncAlarm(XHS_LOGIN_STATE_SYNC_ALARM, COOKIE_SYNC_RETRY_MINUTES);
+    return false;
+  }
+}
+
+export async function syncZhihuLoginStateToBackend(
+  source: string = "extension",
+): Promise<boolean> {
+  const loggedIn = await readZhihuLoginState();
+  try {
+    const response = await fetch(await apiUrl("/sources/zhihu/login-state"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ logged_in: loggedIn }),
+    });
+    if (!response.ok) {
+      console.warn(`[openbiliclaw] zhihu login-state sync HTTP ${response.status}`);
+      scheduleCookieSyncAlarm(ZHIHU_LOGIN_STATE_SYNC_ALARM, COOKIE_SYNC_RETRY_MINUTES);
+      return false;
+    }
+    const result = (await response.json()) as {
+      ok: boolean;
+      logged_in: boolean;
+      updated_at?: string;
+      message?: string;
+    };
+    if (result.ok) {
+      console.log(
+        `[openbiliclaw] zhihu login-state synced via ${source}` +
+          ` (${result.logged_in ? "logged in" : "logged out"})`,
+      );
+      scheduleHourlyCookieSync(ZHIHU_LOGIN_STATE_SYNC_ALARM);
+      return true;
+    }
+    const message = String(result.message || "");
+    console.warn(`[openbiliclaw] zhihu login-state sync rejected (${source}): ${message}`);
+    scheduleCookieSyncAlarm(ZHIHU_LOGIN_STATE_SYNC_ALARM, COOKIE_SYNC_RETRY_MINUTES);
+    return false;
+  } catch (err) {
+    console.warn("[openbiliclaw] zhihu login-state sync failed:", err);
+    scheduleCookieSyncAlarm(ZHIHU_LOGIN_STATE_SYNC_ALARM, COOKIE_SYNC_RETRY_MINUTES);
+    return false;
+  }
+}
+
 /**
  * Handle backend runtime-stream events that explicitly ask the extension
  * to push the current site cookie now.
@@ -468,8 +591,12 @@ function scheduleCookieSync(platform: CookieSyncPlatform, source: string): void 
       void syncDouyinCookieToBackend(source);
     } else if (platform === "x") {
       void syncXCookieToBackend(source);
-    } else {
+    } else if (platform === "reddit") {
       void syncRedditCookieToBackend(source);
+    } else if (platform === "xhs") {
+      void syncXhsLoginStateToBackend(source);
+    } else {
+      void syncZhihuLoginStateToBackend(source);
     }
   }, COOKIE_SYNC_DEBOUNCE_MS);
 }
@@ -499,6 +626,8 @@ export function startCookieSync(): void {
   void syncDouyinCookieToBackend("startup");
   void syncXCookieToBackend("startup");
   void syncRedditCookieToBackend("startup");
+  void syncXhsLoginStateToBackend("startup");
+  void syncZhihuLoginStateToBackend("startup");
 
   // React to login / logout / refresh.
   chromeApi.cookies.onChanged.addListener((changeInfo) => {
@@ -536,6 +665,20 @@ export function startCookieSync(): void {
         "reddit",
         changeInfo.removed ? "reddit-logout" : "reddit-cookies-onchange",
       );
+      return;
+    }
+    if (domain.endsWith("xiaohongshu.com")) {
+      if (changeInfo.cookie.name !== XHS_LOGIN_COOKIE_NAME) {
+        return;
+      }
+      scheduleCookieSync("xhs", changeInfo.removed ? "xhs-logout" : "xhs-cookies-onchange");
+      return;
+    }
+    if (domain.endsWith("zhihu.com")) {
+      if (changeInfo.cookie.name !== ZHIHU_LOGIN_COOKIE_NAME) {
+        return;
+      }
+      scheduleCookieSync("zhihu", changeInfo.removed ? "zhihu-logout" : "zhihu-cookies-onchange");
     }
   });
 
@@ -547,6 +690,8 @@ export function startCookieSync(): void {
   scheduleHourlyCookieSync(DY_COOKIE_SYNC_ALARM);
   scheduleHourlyCookieSync(X_COOKIE_SYNC_ALARM);
   scheduleHourlyCookieSync(REDDIT_COOKIE_SYNC_ALARM);
+  scheduleHourlyCookieSync(XHS_LOGIN_STATE_SYNC_ALARM);
+  scheduleHourlyCookieSync(ZHIHU_LOGIN_STATE_SYNC_ALARM);
 }
 
 /**
@@ -571,6 +716,14 @@ export function handleCookieSyncAlarm(alarmName: string): boolean {
     void syncRedditCookieToBackend("hourly-alarm");
     return true;
   }
+  if (alarmName === XHS_LOGIN_STATE_SYNC_ALARM) {
+    void syncXhsLoginStateToBackend("hourly-alarm");
+    return true;
+  }
+  if (alarmName === ZHIHU_LOGIN_STATE_SYNC_ALARM) {
+    void syncZhihuLoginStateToBackend("hourly-alarm");
+    return true;
+  }
   if (alarmName === LEGACY_COOKIE_SYNC_ALARM) {
     // One last full round for an alarm persisted by an older version; each
     // sync re-registers its own per-platform alarm on success/failure and
@@ -579,6 +732,8 @@ export function handleCookieSyncAlarm(alarmName: string): boolean {
     void syncDouyinCookieToBackend("hourly-alarm");
     void syncXCookieToBackend("hourly-alarm");
     void syncRedditCookieToBackend("hourly-alarm");
+    void syncXhsLoginStateToBackend("hourly-alarm");
+    void syncZhihuLoginStateToBackend("hourly-alarm");
     return true;
   }
   return false;

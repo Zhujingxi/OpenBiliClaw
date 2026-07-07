@@ -63,10 +63,16 @@ test("startCookieSync retries quickly when the backend is not ready", async () =
   startCookieSync();
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  assert.deepEqual(alarms.at(-1), {
-    name: "openbiliclaw-cookie-sync-bili",
-    info: { delayInMinutes: 1, periodInMinutes: 1 },
-  });
+  assert.deepEqual(
+    alarms.find(
+      (alarm) =>
+        alarm.name === "openbiliclaw-cookie-sync-bili" && alarm.info.delayInMinutes === 1,
+    ),
+    {
+      name: "openbiliclaw-cookie-sync-bili",
+      info: { delayInMinutes: 1, periodInMinutes: 1 },
+    },
+  );
 });
 
 test("startCookieSync registers cookie listener only once", async () => {
@@ -198,17 +204,26 @@ test("legacy shared cookie sync alarm refreshes bilibili and douyin cookies", as
 
   assert.equal(handled, true);
   // Regression: the bilibili + douyin alarm paths still fire after adding X.
-  // (No x.com cookies installed here, so X sends nothing.)
+  // (No x.com cookies installed here, so X sends nothing; xhs still reports
+  // logged_in=false because login state itself is the synced value.)
   assert.deepEqual(
     calls.map((call) => call.url).sort(),
     [
       "http://127.0.0.1:8420/api/bilibili/cookie",
       "http://127.0.0.1:8420/api/sources/dy/cookie",
+      "http://127.0.0.1:8420/api/sources/xhs/login-state",
+      "http://127.0.0.1:8420/api/sources/zhihu/login-state",
     ],
   );
   assert.deepEqual(calls.find((call) => call.url.endsWith("/api/sources/dy/cookie"))?.body, {
     cookie: "sessionid=dy-sess; sid_guard=dy-guard; ttwid=dy-tw",
     source: "hourly-alarm",
+  });
+  assert.deepEqual(calls.find((call) => call.url.endsWith("/api/sources/xhs/login-state"))?.body, {
+    logged_in: false,
+  });
+  assert.deepEqual(calls.find((call) => call.url.endsWith("/api/sources/zhihu/login-state"))?.body, {
+    logged_in: false,
   });
 });
 
@@ -290,6 +305,93 @@ test("readRedditCookieHeader returns null without reddit_session", async () => {
   assert.equal(await readRedditCookieHeader(), null);
 });
 
+test("readXhsLoginState returns true when web_session is non-empty", async () => {
+  const { readXhsLoginState } = await importCookieSync();
+  installChromeMock([
+    { name: "web_session", value: "session", domain: ".xiaohongshu.com" },
+    { name: "a1", value: "device", domain: ".xiaohongshu.com" },
+  ]);
+
+  assert.equal(await readXhsLoginState(), true);
+});
+
+test("readXhsLoginState returns false when web_session is absent or empty", async () => {
+  const { readXhsLoginState } = await importCookieSync();
+  installChromeMock([{ name: "web_session", value: "", domain: ".xiaohongshu.com" }]);
+  assert.equal(await readXhsLoginState(), false);
+
+  installChromeMock([{ name: "webId", value: "guest", domain: ".xiaohongshu.com" }]);
+  assert.equal(await readXhsLoginState(), false);
+});
+
+test("readZhihuLoginState returns true when z_c0 is non-empty", async () => {
+  const { readZhihuLoginState } = await importCookieSync();
+  installChromeMock([
+    { name: "z_c0", value: "token", domain: ".zhihu.com" },
+    { name: "_xsrf", value: "guest-xsrf", domain: ".zhihu.com" },
+  ]);
+
+  assert.equal(await readZhihuLoginState(), true);
+});
+
+test("readZhihuLoginState returns false when z_c0 is absent or empty", async () => {
+  const { readZhihuLoginState } = await importCookieSync();
+  installChromeMock([{ name: "z_c0", value: "", domain: ".zhihu.com" }]);
+  assert.equal(await readZhihuLoginState(), false);
+
+  installChromeMock([
+    { name: "_xsrf", value: "guest-xsrf", domain: ".zhihu.com" },
+    { name: "d_c0", value: "guest-device", domain: ".zhihu.com" },
+  ]);
+  assert.equal(await readZhihuLoginState(), false);
+});
+
+test("xhs login-state sync posts only the boolean login state", async () => {
+  const { syncXhsLoginStateToBackend } = await importCookieSync();
+  installChromeMock([
+    { name: "web_session", value: "session", domain: ".xiaohongshu.com" },
+    { name: "a1", value: "device", domain: ".xiaohongshu.com" },
+  ]);
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({
+      url: String(url),
+      body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+    });
+    return new Response(JSON.stringify({ ok: true, logged_in: true }), { status: 200 });
+  };
+
+  const synced = await syncXhsLoginStateToBackend();
+
+  assert.equal(synced, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "http://127.0.0.1:8420/api/sources/xhs/login-state");
+  assert.deepEqual(calls[0].body, { logged_in: true });
+});
+
+test("zhihu login-state sync posts only the boolean login state", async () => {
+  const { syncZhihuLoginStateToBackend } = await importCookieSync();
+  installChromeMock([
+    { name: "z_c0", value: "token", domain: ".zhihu.com" },
+    { name: "_xsrf", value: "guest-xsrf", domain: ".zhihu.com" },
+  ]);
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({
+      url: String(url),
+      body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+    });
+    return new Response(JSON.stringify({ ok: true, logged_in: true }), { status: 200 });
+  };
+
+  const synced = await syncZhihuLoginStateToBackend();
+
+  assert.equal(synced, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "http://127.0.0.1:8420/api/sources/zhihu/login-state");
+  assert.deepEqual(calls[0].body, { logged_in: true });
+});
+
 test("cookie sync runtime event posts the current reddit cookie immediately", async () => {
   const { handleCookieSyncRuntimeEvent } = await importCookieSync();
   installChromeMock([
@@ -354,11 +456,19 @@ test("legacy shared cookie sync alarm refreshes bilibili, douyin AND x cookies t
       "http://127.0.0.1:8420/api/bilibili/cookie",
       "http://127.0.0.1:8420/api/sources/dy/cookie",
       "http://127.0.0.1:8420/api/sources/x/cookie",
+      "http://127.0.0.1:8420/api/sources/xhs/login-state",
+      "http://127.0.0.1:8420/api/sources/zhihu/login-state",
     ],
   );
   assert.deepEqual(calls.find((call) => call.url.endsWith("/api/sources/x/cookie"))?.body, {
     cookie: "auth_token=x-at; ct0=x-csrf",
     source: "hourly-alarm",
+  });
+  assert.deepEqual(calls.find((call) => call.url.endsWith("/api/sources/xhs/login-state"))?.body, {
+    logged_in: false,
+  });
+  assert.deepEqual(calls.find((call) => call.url.endsWith("/api/sources/zhihu/login-state"))?.body, {
+    logged_in: false,
   });
 });
 
@@ -426,6 +536,75 @@ test("per-platform alarm only syncs its own platform", async () => {
   assert.deepEqual(calls, ["http://127.0.0.1:8420/api/sources/dy/cookie"]);
 });
 
+test("xhs per-platform alarm posts the latest login state", async () => {
+  const { handleCookieSyncAlarm } = await importCookieSync();
+  installChromeMock([
+    { name: "web_session", value: "session", domain: ".xiaohongshu.com" },
+  ]);
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({
+      url: String(url),
+      body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+    });
+    return new Response(JSON.stringify({ ok: true, logged_in: true }), { status: 200 });
+  };
+
+  const handled = handleCookieSyncAlarm("openbiliclaw-cookie-sync-xhs");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(handled, true);
+  assert.deepEqual(calls, [
+    {
+      url: "http://127.0.0.1:8420/api/sources/xhs/login-state",
+      body: { logged_in: true },
+    },
+  ]);
+});
+
+test("zhihu per-platform alarm posts the latest login state", async () => {
+  const { handleCookieSyncAlarm } = await importCookieSync();
+  installChromeMock([{ name: "z_c0", value: "token", domain: ".zhihu.com" }]);
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({
+      url: String(url),
+      body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+    });
+    return new Response(JSON.stringify({ ok: true, logged_in: true }), { status: 200 });
+  };
+
+  const handled = handleCookieSyncAlarm("openbiliclaw-cookie-sync-zhihu");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(handled, true);
+  assert.deepEqual(calls, [
+    {
+      url: "http://127.0.0.1:8420/api/sources/zhihu/login-state",
+      body: { logged_in: true },
+    },
+  ]);
+});
+
+test("startCookieSync triggers a zhihu login-state sync at startup", async () => {
+  const { startCookieSync } = await importCookieSync();
+  installChromeMock([{ name: "z_c0", value: "token", domain: ".zhihu.com" }]);
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({
+      url: String(url),
+      body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+    });
+    return new Response(JSON.stringify({ ok: true, logged_in: true }), { status: 200 });
+  };
+
+  startCookieSync();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const zhihuCall = calls.find((call) => call.url.endsWith("/api/sources/zhihu/login-state"));
+  assert.deepEqual(zhihuCall?.body, { logged_in: true });
+});
+
 test("a douyin sync failure does not reschedule the bilibili alarm", async () => {
   const { handleCookieSyncAlarm } = await importCookieSync();
   const { alarms } = installChromeMock([
@@ -480,4 +659,58 @@ test("onChanged on an x.com session cookie schedules a sync", async () => {
   await new Promise((resolve) => setTimeout(resolve, 2_100));
 
   assert.ok(calls.includes("http://127.0.0.1:8420/api/sources/x/cookie"));
+});
+
+test("onChanged on a xiaohongshu.com web_session cookie schedules a login-state sync", async () => {
+  const { startCookieSync } = await importCookieSync();
+  const { listeners } = installChromeMock([
+    { name: "web_session", value: "session", domain: ".xiaohongshu.com" },
+  ]);
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({
+      url: String(url),
+      body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+    });
+    return new Response(JSON.stringify({ ok: true, logged_in: true }), { status: 200 });
+  };
+
+  startCookieSync();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  calls.length = 0;
+
+  listeners[0]({
+    cookie: { name: "web_session", domain: ".xiaohongshu.com" },
+    removed: false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 2_100));
+
+  const xhsCall = calls.find((call) => call.url.endsWith("/api/sources/xhs/login-state"));
+  assert.deepEqual(xhsCall?.body, { logged_in: true });
+});
+
+test("onChanged on a zhihu.com z_c0 cookie schedules a login-state sync", async () => {
+  const { startCookieSync } = await importCookieSync();
+  const { listeners } = installChromeMock([{ name: "z_c0", value: "token", domain: ".zhihu.com" }]);
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({
+      url: String(url),
+      body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+    });
+    return new Response(JSON.stringify({ ok: true, logged_in: true }), { status: 200 });
+  };
+
+  startCookieSync();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  calls.length = 0;
+
+  listeners[0]({
+    cookie: { name: "z_c0", domain: ".zhihu.com" },
+    removed: false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 2_100));
+
+  const zhihuCall = calls.find((call) => call.url.endsWith("/api/sources/zhihu/login-state"));
+  assert.deepEqual(zhihuCall?.body, { logged_in: true });
 });
