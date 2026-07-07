@@ -530,3 +530,32 @@ test("settings page wires offline cache and degraded-mode banners", () => {
   assert.match(popupJs, /restart_required/);
   assert.match(popupJs, /保存并提示重启/);
 });
+
+test("settings page wires the keyword generation mode selector (matches desktop web)", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  // Select + the three options — values/labels byte-identical to desktop web.
+  assert.match(popupHtml, /id="cfgKeywordGenerationMode"/);
+  assert.match(popupHtml, /<option value="legacy">经典<\/option>/);
+  assert.match(popupHtml, /<option value="hybrid">混合<\/option>/);
+  assert.match(popupHtml, /<option value="inspiration">灵感<\/option>/);
+  // Cost hint conveys 混合最贵.
+  assert.match(popupHtml, /混合最贵/);
+
+  // Load fills the select from the derived discovery field.
+  assert.match(
+    popupJs,
+    /setVal\("cfgKeywordGenerationMode", cfg\.discovery\?\.keyword_generation_mode \|\| "legacy"\)/,
+  );
+
+  // Save collects it into the discovery payload AFTER the snapshot spread, so a
+  // loaded value never clobbers the user's live selection (R2 spread-order).
+  const saveKey = 'keyword_generation_mode: getVal("cfgKeywordGenerationMode")';
+  assert.ok(popupJs.includes(saveKey), "save key should be present");
+  const spread = "...(state.runtimeConfig?.discovery || {})";
+  assert.ok(
+    popupJs.indexOf(spread) !== -1 && popupJs.indexOf(spread) < popupJs.indexOf(saveKey),
+    "keyword_generation_mode must be written after the discovery spread",
+  );
+});

@@ -5536,6 +5536,15 @@
           <label for="cfgDiscoveryLimit">单轮发现上限</label>
           <input id="cfgDiscoveryLimit" type="number" min="1" max="60" step="1" placeholder="30">
         </div>
+        <div class="settings-field">
+          <label for="cfgKeywordGenerationMode">搜索词生成模式</label>
+          <select id="cfgKeywordGenerationMode">
+            <option value="legacy">经典</option>
+            <option value="hybrid">混合</option>
+            <option value="inspiration">灵感</option>
+          </select>
+        </div>
+        <p class="settings-hint">经典：仅用合并关键词生成器；混合：在经典基础上再叠加 search-backed 灵感轴链路（最丰富，但同时跑两套，混合最贵）；灵感：完全用灵感轴链路替代经典。</p>
         <div class="settings-field-row">
           <input id="cfgMultimodalEvaluationEnabled" type="checkbox">
           <label for="cfgMultimodalEvaluationEnabled">启用封面图评估</label>

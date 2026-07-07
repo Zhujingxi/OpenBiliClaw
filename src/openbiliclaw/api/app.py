@@ -16,7 +16,7 @@ import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import quote, urlparse
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -937,6 +937,35 @@ def _image_cache_response(url: str) -> FileResponse | None:
             "X-Image-Cache": "hit",
         },
     )
+
+
+def _derive_keyword_generation_mode(
+    enabled: bool, replace: bool
+) -> Literal["legacy", "hybrid", "inspiration"]:
+    """Derive the UI-facing keyword-generation mode from the two canonical
+    ``DiscoveryConfig`` booleans (``inspiration_search_enabled`` /
+    ``inspiration_replace_merged_keywords``).
+
+    Read-tolerant: ``enabled=False`` → ``"legacy"`` regardless of ``replace``
+    (an off inspiration switch is legacy no matter what the stale replace flag
+    says). ``enabled=True`` → ``"inspiration"`` when ``replace`` else
+    ``"hybrid"``. This is a derived convenience for the UI/API only; the two
+    booleans remain the single source of truth in ``config.toml``.
+    """
+    if not enabled:
+        return "legacy"
+    return "inspiration" if replace else "hybrid"
+
+
+def _mode_to_flags(mode: str) -> tuple[bool, bool]:
+    """Translate a UI keyword-generation mode into the canonical
+    ``(inspiration_search_enabled, inspiration_replace_merged_keywords)``
+    booleans. Every mode writes BOTH booleans so no stale ``replace`` residue
+    survives a mode change: ``legacy → (False, False)``, ``hybrid → (True,
+    False)``, ``inspiration → (True, True)``. ``mode`` must already be a valid
+    Literal (the handler validates before calling).
+    """
+    return (mode != "legacy", mode == "inspiration")
 
 
 def create_app(
@@ -7212,8 +7241,7 @@ def create_app(
                 value=", ".join(reddit_cookie_names),
                 available=bool(reddit_cookie_names),
                 detail=(
-                    "Reddit Cookie 由插件同步到 rdt-cli credential store；"
-                    "这里只展示 Cookie 名称。"
+                    "Reddit Cookie 由插件同步到 rdt-cli credential store；这里只展示 Cookie 名称。"
                 ),
             ),
         )
@@ -8250,6 +8278,10 @@ def create_app(
                 multimodal_image_max_px=cfg.discovery.multimodal_image_max_px,
                 multimodal_image_quality=cfg.discovery.multimodal_image_quality,
                 multimodal_image_timeout_seconds=(cfg.discovery.multimodal_image_timeout_seconds),
+                keyword_generation_mode=_derive_keyword_generation_mode(
+                    cfg.discovery.inspiration_search_enabled,
+                    cfg.discovery.inspiration_replace_merged_keywords,
+                ),
             ),
             autostart=AutostartConfigOut(
                 enabled=cfg.autostart.enabled,
@@ -8973,6 +9005,27 @@ def create_app(
                                 max_value=max_value,
                             ),
                         )
+                # Keyword-generation mode: a UI/API-derived enum translated to the
+                # two canonical DiscoveryConfig booleans. discovery is a raw dict
+                # (Pydantic does NOT validate the nested Literal), so validate the
+                # value manually → 422 on anything illegal. This block runs LAST
+                # in the discovery section so that if a request also carries the
+                # raw inspiration_* booleans, the mode wins (deterministic UI
+                # semantics). ``keyword_generation_mode`` itself is never set on
+                # cfg.discovery / written to config.toml — only the two booleans.
+                if "keyword_generation_mode" in ddata:
+                    raw_mode = ddata["keyword_generation_mode"]
+                    if raw_mode not in ("legacy", "hybrid", "inspiration"):
+                        raise HTTPException(
+                            status_code=422,
+                            detail=(
+                                "discovery.keyword_generation_mode must be one of: "
+                                "legacy, hybrid, inspiration"
+                            ),
+                        )
+                    enabled, replace = _mode_to_flags(cast("str", raw_mode))
+                    cfg.discovery.inspiration_search_enabled = enabled
+                    cfg.discovery.inspiration_replace_merged_keywords = replace
 
         # Apply storage updates
         if "storage" in update:
