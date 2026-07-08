@@ -408,7 +408,7 @@
     .chip { white-space: nowrap; border: 1px solid var(--border-soft); border-radius: var(--radius-pill); background: var(--surface); color: var(--fg-2); padding: 8px var(--space-4); }
     .chip.is-active { background: var(--fg); color: var(--surface); border-color: var(--fg); }
     .delight { display: grid; grid-template-columns: minmax(280px, 40%) minmax(0, 1fr); gap: var(--space-4); align-items: stretch; margin-top: var(--space-6); padding: var(--space-4); border: 1px solid var(--border-soft); border-radius: 28px; background: var(--surface-warm); overflow: hidden; }
-    .delight .thumb { display: block; width: 100%; aspect-ratio: 16 / 9; min-height: 0; align-self: center; border-radius: 22px; box-shadow: 0 0 0 1px color-mix(in oklab, var(--fg), transparent 88%); color: inherit; text-decoration: none; cursor: pointer; }
+    .delight .thumb { position: relative; display: block; width: 100%; aspect-ratio: 16 / 9; min-height: 0; align-self: center; border-radius: 22px; box-shadow: 0 0 0 1px color-mix(in oklab, var(--fg), transparent 88%); color: inherit; text-decoration: none; cursor: pointer; }
     .delight .thumb:focus-visible { outline: none; box-shadow: var(--focus-ring), 0 0 0 1px color-mix(in oklab, var(--fg), transparent 88%); }
     .delight .thumb::after { display: none; }
     .delight .thumb img, .delight .thumb video, .delight .thumb iframe { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border: 0; display: block; }
@@ -431,6 +431,39 @@
     .delight-copy p { margin: var(--space-2) 0 0; color: var(--muted); max-width: 720px; }
     .delight-chat-turns { display: grid; gap: 8px; margin-top: var(--space-3); max-height: 220px; overflow: auto; padding-right: 2px; }
     .delight-chat-turns[hidden] { display: none; }
+        .delight-copy {
+            transition: opacity 250ms ease, transform 250ms ease;
+        }
+    
+        .delight-copy.is-exiting {
+            opacity: 0;
+            transform: translateY(6px);
+        }
+    
+        .delight .thumb img {
+            transition: opacity 250ms ease;
+        }
+    
+        .delight .thumb.is-exiting img {
+            opacity: 0;
+        }
+    
+        .delight.is-dragging {
+            cursor: grabbing;
+            user-select: none;
+        }
+    
+        .delight.is-dragging .delight-body,
+        .delight.is-dragging .thumb {
+            transition: none;
+            transform: translateX(var(--drag-offset, 0px));
+            will-change: transform;
+        }
+    
+        .delight:not(.is-dragging) .delight-body,
+        .delight:not(.is-dragging) .thumb {
+            transition: transform 350ms cubic-bezier(0.2, 0, 0, 1);
+        }
     .delight-turn-bubble { width: fit-content; max-width: min(100%, 520px); border: 1px solid var(--border); border-radius: 14px; padding: 8px 10px; font-size: 13px; line-height: 1.45; background: var(--surface); color: var(--fg-2); }
     .delight-turn-bubble.is-user { justify-self: end; background: var(--surface); border-color: var(--border-soft); }
     .delight-turn-bubble.is-assistant { justify-self: start; background: color-mix(in oklab, var(--surface), var(--surface-warm) 55%); }
@@ -454,6 +487,9 @@
     .delight-feedback-actions .feedback-icon-btn { flex: 0 0 26px; width: 26px; height: 26px; min-height: 26px; }
     .delight-feedback-actions .feedback-icon-btn svg { width: 14px; height: 14px; }
     .delight-feedback-actions .feedback-separator { font-size: 12px; transform: none; }
+    .delight { min-height: 200px; }
+    .delight.is-height-locked { overflow: hidden; }
+    .delight.is-height-settling { transition: height 200ms ease; overflow: hidden; }
     .small-btn.ghost-danger { color: var(--danger); background: color-mix(in oklab, var(--danger), var(--surface) 92%); border-color: color-mix(in oklab, var(--danger), var(--border-soft) 70%); }
     .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--recommendation-card-min)), var(--recommendation-card-max))); justify-content: center; gap: var(--space-4); max-width: var(--recommendation-grid-max); margin-inline: auto; }
     .video-card { min-width: 0; display: grid; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--border); border-radius: 22px; background: var(--surface); box-shadow: var(--elev-ring); transition: transform var(--motion-fast) var(--ease-standard), box-shadow var(--motion-fast) var(--ease-standard), opacity var(--motion-base) var(--ease-standard); }
