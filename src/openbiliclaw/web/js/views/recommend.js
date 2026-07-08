@@ -77,6 +77,12 @@ let autoAppendUserArmed = false;
 let autoAppendTouchY = null;
 let autoAppendIntentInitialized = false;
 
+// Delight auto-advance
+let _delightAutoTimer = null;
+let _delightDragging = false;
+let _delightSwipeStartX = 0;
+let _delightNavTimer = null;
+
 // ── Escape helper ────────────────────────────────────────────
 function esc(s) {
   const el = document.createElement("span");
@@ -616,22 +622,189 @@ function renderDelightTray() {
 
   if (delights.length > 1) {
     tray.querySelector("#delight-prev")?.addEventListener("click", () => {
-      if (idx > 0) { patchState({ delightCurrentIndex: idx - 1 }); rerenderDelightOnly(); }
+      navigateDelight(idx <= 0 ? delights.length - 1 : idx - 1);
     });
     tray.querySelector("#delight-next")?.addEventListener("click", () => {
-      if (idx < delights.length - 1) { patchState({ delightCurrentIndex: idx + 1 }); rerenderDelightOnly(); }
+      navigateDelight(idx >= delights.length - 1 ? 0 : idx + 1);
     });
   }
 
+  // 交互元素阻止事件冒泡，避免触发拖拽
+  tray.querySelectorAll("button, [data-delight], input, select, textarea, .delight-composer, .delight-corner-nav, .delight-inline-nav").forEach((el) => {
+    el.addEventListener("pointerdown", (e) => e.stopPropagation());
+  });
+  // 指针拖拽切换
+  tray.addEventListener("pointerdown", (e) => {
+    _stopDelightAutoAdvance();
+    _delightDragging = true;
+    _delightSwipeStartX = e.clientX;
+    tray.setPointerCapture(e.pointerId);
+    tray.classList.add("is-dragging");
+    e.preventDefault();
+  });
+  tray.addEventListener("pointermove", (e) => {
+    if (!_delightDragging) return;
+    const dx = e.clientX - _delightSwipeStartX;
+    const maxDrag = tray.offsetWidth * 0.3;
+    const clamped = Math.max(-maxDrag, Math.min(maxDrag, dx));
+    const atEdge = (dx > 0 && state.delightCurrentIndex === 0) || (dx < 0 && state.delightCurrentIndex >= delights.length - 1);
+    const factor = atEdge ? 0.25 : 1;
+    tray.style.setProperty("--drag-offset", `${clamped * factor}px`);
+  });
+  tray.addEventListener("pointerup", (e) => {
+    if (!_delightDragging) return;
+    _delightDragging = false;
+    tray.classList.remove("is-dragging");
+    tray.releasePointerCapture(e.pointerId);
+    const dx = e.clientX - _delightSwipeStartX;
+    if (Math.abs(dx) >= 50) {
+      if (dx > 0) {
+        navigateDelight(state.delightCurrentIndex <= 0 ? delights.length - 1 : state.delightCurrentIndex - 1);
+      } else {
+        navigateDelight(state.delightCurrentIndex >= delights.length - 1 ? 0 : state.delightCurrentIndex + 1);
+      }
+    } else {
+      _startDelightAutoAdvance();
+    }
+    tray.style.removeProperty("--drag-offset");
+  });
+  tray.addEventListener("pointercancel", () => {
+    _delightDragging = false;
+    tray.classList.remove("is-dragging");
+    tray.style.removeProperty("--drag-offset");
+  });
+
   $root.appendChild(tray);
+  if (delights.length > 1) {
+    _startDelightAutoAdvance();
+    _initDelightVisibilityObserver();
+  }
 }
 
-/** Re-render only the delight tray without touching the rest of the page. */
+let _delightVisibilityObserver = null;
+function _initDelightVisibilityObserver() {
+  if (_delightVisibilityObserver) return;
+  const slot = document.getElementById("delight-slot");
+  if (!slot) return;
+  _delightVisibilityObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (entry.isIntersecting) _startDelightAutoAdvance();
+      else _stopDelightAutoAdvance();
+    }
+  }, { threshold: 0.3 });
+  _delightVisibilityObserver.observe(slot);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) _stopDelightAutoAdvance();
+    else {
+      const rect = slot.getBoundingClientRect();
+      if (rect.top < window.innerHeight && rect.bottom > 0) _startDelightAutoAdvance();
+    }
+  });
+}
+
+/** Navigate to a delight index with fade-out/in + height FLIP animation. */
+function navigateDelight(newIndex) {
+  const slot = document.getElementById("delight-slot");
+  if (!slot) return;
+  const oldTray = slot.querySelector(".delight-tray");
+  if (!oldTray) {
+    patchState({ delightCurrentIndex: newIndex });
+    rerenderDelightOnly();
+    return;
+  }
+  const oldH = oldTray.offsetHeight;
+
+  // 取消上一次未完成的导航动画
+  if (_delightNavTimer) { clearTimeout(_delightNavTimer); _delightNavTimer = null; }
+
+  // 仅文本内容渐入渐出，缩略图和按钮保持不动
+  _stopDelightAutoAdvance();
+  const textEls = oldTray.querySelectorAll(".delight-title, .delight-stats, .delight-reason, .delight-meta, .delight-kicker-line, .delight-hook-badge");
+  textEls.forEach((el) => {
+    el.style.transition = "opacity 200ms ease";
+    el.style.opacity = "0";
+  });
+
+  _delightNavTimer = setTimeout(() => {
+    _delightNavTimer = null;
+    patchState({ delightCurrentIndex: newIndex });
+    slot.innerHTML = "";
+    renderInto(slot, renderDelightTray);
+    const newTray = slot.querySelector(".delight-tray");
+    if (!newTray) return;
+    const newTextEls = newTray.querySelectorAll(".delight-title, .delight-stats, .delight-reason, .delight-meta, .delight-kicker-line, .delight-hook-badge");
+    const newH = newTray.offsetHeight;
+
+    newTextEls.forEach((el) => { el.style.opacity = "0"; el.style.transition = "none"; });
+    newTray.offsetHeight;
+    const needsHeight = oldH > 0 && Math.abs(newH - oldH) >= 0.5;
+    if (needsHeight) {
+      newTray.style.height = `${oldH}px`;
+      newTray.classList.add("is-height-animating");
+      newTray.offsetHeight;
+    }
+    const duration = 200;
+    const t0 = performance.now();
+    const step = (now) => {
+      const p = Math.min((now - t0) / duration, 1);
+      const ease = 1 - (1 - p) * (1 - p);
+      if (needsHeight) newTray.style.height = `${oldH + (newH - oldH) * ease}px`;
+      const op = Math.min(p * 1.4, 1);
+      newTextEls.forEach((el) => { el.style.opacity = `${op}`; });
+      if (p < 1) requestAnimationFrame(step);
+      else {
+        if (needsHeight) { newTray.style.removeProperty("height"); newTray.classList.remove("is-height-animating"); }
+        newTextEls.forEach((el) => { el.style.removeProperty("opacity"); el.style.removeProperty("transition"); });
+      }
+    };
+    requestAnimationFrame(step);
+  }, 200);
+}
 function rerenderDelightOnly() {
   const slot = document.getElementById("delight-slot");
   if (!slot) return;
+  const oldTray = slot.querySelector(".delight-tray");
+  const oldH = oldTray ? oldTray.offsetHeight : 0;
   slot.innerHTML = "";
   renderInto(slot, renderDelightTray);
+  const newTray = slot.querySelector(".delight-tray");
+  if (newTray && oldH > 0) {
+    const newH = newTray.offsetHeight;
+    if (Math.abs(newH - oldH) >= 0.5) {
+      newTray.style.height = `${oldH}px`;
+      newTray.classList.add("is-height-animating");
+      newTray.offsetHeight;
+      const duration = 200;
+      const t0 = performance.now();
+      const step = (now) => {
+        const p = Math.min((now - t0) / duration, 1);
+        const ease = 1 - (1 - p) * (1 - p);
+        newTray.style.height = `${oldH + (newH - oldH) * ease}px`;
+        if (p < 1) requestAnimationFrame(step);
+        else {
+          newTray.style.removeProperty("height");
+          newTray.classList.remove("is-height-animating");
+        }
+      };
+      requestAnimationFrame(step);
+    }
+  }
+}
+
+function _startDelightAutoAdvance() {
+  _stopDelightAutoAdvance();
+  if (state.activeDelights.length < 2) return;
+  _delightAutoTimer = setInterval(() => {
+    const next = state.delightCurrentIndex + 1;
+    navigateDelight(next >= state.activeDelights.length ? 0 : next);
+  }, 4000);
+}
+
+function _stopDelightAutoAdvance() {
+  if (_delightAutoTimer !== null) {
+    clearInterval(_delightAutoTimer);
+    _delightAutoTimer = null;
+  }
 }
 
 function skipDelightAt(index) {
