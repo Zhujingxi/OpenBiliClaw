@@ -4799,6 +4799,9 @@
       const url = imageProxyUrl(delight?.cover_url);
       thumb.replaceChildren();
       thumb.classList.toggle("has-image", Boolean(url));
+      // 设置 banner 背景图（模糊用）
+      const banner = $("#delightBanner");
+      if (banner) banner.style.setProperty("--cover-url", url ? `url("${url}")` : "none");
       if (!url) return;
       const image = document.createElement("img");
       if (isCrossOriginBase()) image.crossOrigin = "anonymous";
