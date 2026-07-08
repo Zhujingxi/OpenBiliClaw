@@ -79,3 +79,5 @@ output/
 *.log
 logs/
 extension/dist-firefox/
+backend.err
+.gitignore

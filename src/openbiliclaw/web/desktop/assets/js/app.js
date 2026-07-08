@@ -2051,7 +2051,7 @@
         const cover = card.querySelector(".cover");
         cover.addEventListener("click", () => openRecommendation(item, card));
         cover.addEventListener("auxclick", (event) => {
-          if (event.button === 1) trackRecommendationClick(item);
+          if (event.button === 1) openRecommendation(item, card);
         });
         card.querySelectorAll("[data-action]").forEach((btn) => btn.addEventListener("click", () => handleCardAction(btn.dataset.action, item, card)));
         card.querySelector(".comment-field input").addEventListener("keydown", (event) => {
