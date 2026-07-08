@@ -2,6 +2,7 @@
     const DEFAULT_API_BASE = "http://127.0.0.1:8420/api";
     const ENDPOINTS = {
       health: "/health",
+      qrInfo: "/qr-info",
       initStatus: "/init-status",
       startInit: "/init",
       recommendations: "/recommendations",
@@ -320,6 +321,7 @@
     let lastAutoLoadAt = 0;
     let sentinelInView = false;
     let lastAppendCameUpShort = false;
+    let _cachedLanIp = "";
 
     function formatStarCount(n) {
       if (typeof n !== "number" || !Number.isFinite(n)) return "";
@@ -5082,6 +5084,8 @@
       if (notification?.item) mergeMessages([{ ...notification.item, type: "notification" }]);
       applyConfig(config?.config || config);
       renderAll();
+      // 预取 LAN IP，供二维码面板使用
+      requestJson(ENDPOINTS.qrInfo).then((info) => { if (info?.lan_ip) _cachedLanIp = info.lan_ip; }).catch(() => {});
     }
 
     function renderAll() {
@@ -5733,9 +5737,9 @@
       hintEl.hidden = true;
       hintEl.textContent = "";
       // The backend knows its own LAN IP; the page host may be 127.0.0.1,
-      // which a phone cannot reach.
-      const health = await requestJson(ENDPOINTS.health);
-      const lanIp = String(health?.lan_ip || "").trim();
+      // which a phone cannot reach. Use the cached value from page load
+      // prefetch, falling back to a fresh request if unavailable.
+      const lanIp = _cachedLanIp || String((await requestJson(ENDPOINTS.qrInfo))?.lan_ip || "").trim();
       const def = locationApiDefault();
       const typedHost = (storageGet("openbiliclaw.webui.backendHost") || "").trim();
       const typedPort = (storageGet("openbiliclaw.webui.backendPort") || "").trim();

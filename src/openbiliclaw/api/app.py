@@ -1348,6 +1348,7 @@ def create_app(
         allowed = (
             method == "OPTIONS"
             or path == "/api/ping"
+            or path == "/api/qr-info"
             or path == "/api/health"
             or path == "/api/runtime-status"
             or path == "/favicon.ico"
@@ -2040,6 +2041,15 @@ def create_app(
         ``/api/health`` for profile/embedding state.
         """
         return JSONResponse({"status": "ok", "service": "openbiliclaw-api"})
+
+    @app.get("/api/qr-info")
+    async def qr_info() -> JSONResponse:
+        """Lightweight endpoint for mobile QR code: LAN IP only.
+
+        Unlike ``/api/health``, this skips the embedding readiness probe
+        so the QR drawer never blocks on a cold Ollama model load.
+        """
+        return JSONResponse({"lan_ip": _health_lan_ip()})
 
     @app.get("/api/health", response_model=HealthResponse, response_model_exclude_none=True)
     async def health() -> HealthResponse | JSONResponse:
