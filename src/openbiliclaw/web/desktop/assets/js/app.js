@@ -1739,7 +1739,7 @@
       if (!state.autoLoadOnScroll) return;
       const sentinel = $("#loadMoreSentinel");
       if (!sentinel || typeof IntersectionObserver === "undefined") return;
-      autoLoadObserver = new IntersectionObserver(handleAutoLoadIntersect, { rootMargin: "300px" });
+      autoLoadObserver = new IntersectionObserver(handleAutoLoadIntersect, { rootMargin: "50px" });
       autoLoadObserver.observe(sentinel);
     }
 
@@ -4949,7 +4949,7 @@
         banner.dataset.swipeInited = "1";
         const inner = banner.querySelector(".delight-body, .thumb");
         // 交互元素阻止事件冒泡，避免触发拖拽
-        banner.querySelectorAll("button, [data-delight], input, select, textarea").forEach((el) => {
+        banner.querySelectorAll("button, [data-delight], input, select, textarea, a").forEach((el) => {
             el.addEventListener("pointerdown", (e) => e.stopPropagation());
         });
         banner.addEventListener("pointerdown", (e) => {
