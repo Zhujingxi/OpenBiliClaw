@@ -26,6 +26,7 @@ import type {
   DouyinSearchScope,
 } from "../main/dy-fetch-tap.js";
 import { apiUrl } from "../shared/backend-endpoint.ts";
+import { authenticatedFetch } from "../shared/auth.ts";
 import { ASSET_PREFIX } from "../shared/asset-prefix.ts";
 import { douyinAdapter } from "../shared/platforms/douyin.ts";
 import { registerE2EExecutor } from "./e2e-executor.ts";
@@ -59,7 +60,7 @@ registerE2EExecutor("douyin");
 function debugLog(event: string, data?: unknown): void {
   void (async () => {
     try {
-      await fetch(await apiUrl("/sources/_debug/log"), {
+      await authenticatedFetch(await apiUrl("/sources/_debug/log"), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ source: "dy-cs", event, data: data ?? null }),

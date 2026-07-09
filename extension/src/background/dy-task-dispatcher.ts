@@ -29,6 +29,7 @@ import type {
   DouyinSearchItem,
 } from "../main/dy-fetch-tap.js";
 import { apiUrl } from "../shared/backend-endpoint.ts";
+import { authenticatedFetch } from "../shared/auth.ts";
 import { ASSET_PREFIX } from "../shared/asset-prefix.ts";
 // Cross-source mutex via globalThis. Mirror of the helper inlined
 // in xhs-task-dispatcher; both dispatchers coordinate by writing to
@@ -66,7 +67,7 @@ function releaseDispatcherMutex(label: string): void {
 function debugLog(event: string, data?: unknown): void {
   void (async () => {
     try {
-      await fetch(await apiUrl("/sources/_debug/log"), {
+      await authenticatedFetch(await apiUrl("/sources/_debug/log"), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ source: "dy", event, data: data ?? null }),
@@ -332,7 +333,7 @@ export function shouldOpenDyTaskActive(task: DyTask): boolean {
 
 async function fetchNextTask(): Promise<DyTask | null> {
   try {
-    const resp = await fetch(await apiUrl("/sources/dy/next-task"));
+    const resp = await authenticatedFetch(await apiUrl("/sources/dy/next-task"));
     if (resp.status === 204) return null; // no pending task
     if (!resp.ok) return null;
     const payload: unknown = await resp.json();
@@ -344,7 +345,7 @@ async function fetchNextTask(): Promise<DyTask | null> {
 
 async function postTaskResult(result: DyTaskResult): Promise<void> {
   try {
-    await fetch(await apiUrl("/sources/dy/task-result"), {
+    await authenticatedFetch(await apiUrl("/sources/dy/task-result"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(result),

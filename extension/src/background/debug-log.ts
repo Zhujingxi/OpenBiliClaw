@@ -5,13 +5,14 @@
  */
 
 import { apiUrl } from "../shared/backend-endpoint.ts";
+import { authenticatedFetch } from "../shared/auth.ts";
 
 export function debugLog(source: "xhs" | "dy" | "sw", event: string, data?: unknown): void {
   // Fire-and-forget. If daemon is down, swallow silently — dispatcher
   // operation must not depend on debug logging.
   void (async () => {
     try {
-      await fetch(await apiUrl("/sources/_debug/log"), {
+      await authenticatedFetch(await apiUrl("/sources/_debug/log"), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ source, event, data: data ?? null }),

@@ -6,6 +6,7 @@ import type { RedditTaskResult, RedditTaskType } from "../content/reddit/task-ex
 import { REDDIT_TASK_TAB_URL } from "../content/reddit/task-mode.ts";
 import { releaseDispatcherMutex, tryAcquireDispatcherMutex } from "./dispatcher-mutex.ts";
 import { apiUrl } from "../shared/backend-endpoint.ts";
+import { authenticatedFetch } from "../shared/auth.ts";
 import { ASSET_PREFIX } from "../shared/asset-prefix.ts";
 
 const DEFAULT_POLL_INTERVAL_MS = 60_000;
@@ -78,7 +79,7 @@ let currentTask: RedditTask | null = null;
 
 async function fetchNextTask(): Promise<RedditTask | null> {
   try {
-    const resp = await fetch(await apiUrl("/sources/reddit/next-task"));
+    const resp = await authenticatedFetch(await apiUrl("/sources/reddit/next-task"));
     if (resp.status === 204) return null;
     if (!resp.ok) return null;
     const payload: unknown = await resp.json();
@@ -90,7 +91,7 @@ async function fetchNextTask(): Promise<RedditTask | null> {
 
 async function postTaskResult(result: RedditTaskResult): Promise<void> {
   try {
-    await fetch(await apiUrl("/sources/reddit/task-result"), {
+    await authenticatedFetch(await apiUrl("/sources/reddit/task-result"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(result),

@@ -27,6 +27,7 @@
 
 // .ts extension: see service-worker.ts for the node:test resolver rationale.
 import { apiUrl } from "../shared/backend-endpoint.ts";
+import { authenticatedFetch } from "../shared/auth.ts";
 
 // Per-platform alarms: each site's retry cadence is independent, so a
 // douyin/x success can no longer reset a pending bilibili quick-retry back
@@ -275,7 +276,7 @@ export async function syncBilibiliCookieToBackend(
     return false;
   }
   try {
-    const response = await fetch(await apiUrl("/bilibili/cookie"), {
+    const response = await authenticatedFetch(await apiUrl("/bilibili/cookie"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -345,7 +346,7 @@ export async function syncDouyinCookieToBackend(
     return false;
   }
   try {
-    const response = await fetch(await apiUrl("/sources/dy/cookie"), {
+    const response = await authenticatedFetch(await apiUrl("/sources/dy/cookie"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -389,7 +390,7 @@ export async function syncXCookieToBackend(
     return false;
   }
   try {
-    const response = await fetch(await apiUrl("/sources/x/cookie"), {
+    const response = await authenticatedFetch(await apiUrl("/sources/x/cookie"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -432,7 +433,7 @@ export async function syncRedditCookieToBackend(
     return false;
   }
   try {
-    const response = await fetch(await apiUrl("/sources/reddit/cookie"), {
+    const response = await authenticatedFetch(await apiUrl("/sources/reddit/cookie"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -472,7 +473,7 @@ export async function syncXhsLoginStateToBackend(
 ): Promise<boolean> {
   const loggedIn = await readXhsLoginState();
   try {
-    const response = await fetch(await apiUrl("/sources/xhs/login-state"), {
+    const response = await authenticatedFetch(await apiUrl("/sources/xhs/login-state"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ logged_in: loggedIn }),
@@ -512,7 +513,7 @@ export async function syncZhihuLoginStateToBackend(
 ): Promise<boolean> {
   const loggedIn = await readZhihuLoginState();
   try {
-    const response = await fetch(await apiUrl("/sources/zhihu/login-state"), {
+    const response = await authenticatedFetch(await apiUrl("/sources/zhihu/login-state"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ logged_in: loggedIn }),

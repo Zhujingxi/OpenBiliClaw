@@ -5,6 +5,7 @@
 import type { ZhihuScope, ZhihuTaskResult, ZhihuTaskType } from "../content/zhihu/task-executor.ts";
 import { ZHIHU_TASK_TAB_URL } from "../content/zhihu/task-mode.ts";
 import { apiUrl } from "../shared/backend-endpoint.ts";
+import { authenticatedFetch } from "../shared/auth.ts";
 
 const _MUTEX_STALE_MS = 6 * 60 * 1000;
 function tryAcquireDispatcherMutex(label: string): boolean {
@@ -110,7 +111,7 @@ let currentTask: ZhihuTask | null = null;
 
 async function fetchNextTask(): Promise<ZhihuTask | null> {
   try {
-    const resp = await fetch(await apiUrl("/sources/zhihu/next-task"));
+    const resp = await authenticatedFetch(await apiUrl("/sources/zhihu/next-task"));
     if (resp.status === 204) return null;
     if (!resp.ok) return null;
     const payload: unknown = await resp.json();
@@ -122,7 +123,7 @@ async function fetchNextTask(): Promise<ZhihuTask | null> {
 
 async function postTaskResult(result: ZhihuTaskResult): Promise<void> {
   try {
-    await fetch(await apiUrl("/sources/zhihu/task-result"), {
+    await authenticatedFetch(await apiUrl("/sources/zhihu/task-result"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(result),

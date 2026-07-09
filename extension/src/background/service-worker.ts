@@ -77,7 +77,11 @@ import { handleE2ERuntimeEvent } from "./e2e-runner.ts";
 // the import when test files load these dispatchers directly. esbuild
 // bundles either extension, so production builds are unaffected.
 import { apiUrl, onBackendEndpointChange, wsUrl } from "../shared/backend-endpoint.ts";
-import { autoLogin } from "../shared/auth.js";
+import {
+  authenticatedFetch,
+  clearSession,
+  ensureSession,
+} from "../shared/auth.ts";
 import type { BehaviorEvent } from "../shared/types.js";
 
 let eventBuffer: BehaviorEvent[] = [];
@@ -108,7 +112,7 @@ type PendingCognitionUpdate = import("./notifications.js").PendingCognitionUpdat
 
 async function acknowledgeNotificationSent(bvid: string): Promise<void> {
   if (!bvid) return;
-  await fetch(await apiUrl("/notifications/sent"), {
+  await authenticatedFetch(await apiUrl("/notifications/sent"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ bvid }),
@@ -116,7 +120,9 @@ async function acknowledgeNotificationSent(bvid: string): Promise<void> {
 }
 
 async function fetchPendingNotification(): Promise<PendingNotification | null> {
-  const response = await fetch(await apiUrl("/notifications/pending"), { method: "GET" });
+  const response = await authenticatedFetch(await apiUrl("/notifications/pending"), {
+    method: "GET",
+  });
   if (!response.ok) {
     throw new Error(`pending notifications failed: ${response.status}`);
   }
@@ -125,7 +131,9 @@ async function fetchPendingNotification(): Promise<PendingNotification | null> {
 }
 
 async function fetchPendingCognitionUpdate(): Promise<PendingCognitionUpdate | null> {
-  const response = await fetch(await apiUrl("/cognition-updates/pending"), { method: "GET" });
+  const response = await authenticatedFetch(await apiUrl("/cognition-updates/pending"), {
+    method: "GET",
+  });
   if (!response.ok) {
     throw new Error(`pending cognition updates failed: ${response.status}`);
   }
@@ -135,7 +143,7 @@ async function fetchPendingCognitionUpdate(): Promise<PendingCognitionUpdate | n
 
 async function acknowledgeCognitionUpdateSeen(id: string): Promise<void> {
   if (!id) return;
-  await fetch(await apiUrl("/cognition-updates/seen"), {
+  await authenticatedFetch(await apiUrl("/cognition-updates/seen"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id }),
@@ -148,7 +156,7 @@ async function acknowledgeCognitionUpdateSeen(id: string): Promise<void> {
 
 async function acknowledgeDelightSent(bvid: string): Promise<void> {
   if (!bvid) return;
-  await fetch(await apiUrl("/delight/sent"), {
+  await authenticatedFetch(await apiUrl("/delight/sent"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ bvid }),
@@ -370,7 +378,7 @@ async function refreshInitBadge(): Promise<void> {
   // the right cheap source for the toolbar signal. Best-effort: on any
   // failure keep the last known state.
   try {
-    const response = await fetch(await apiUrl("/runtime-status"), { method: "GET" });
+    const response = await authenticatedFetch(await apiUrl("/runtime-status"), { method: "GET" });
     if (!response.ok) return;
     const payload = (await response.json()) as Record<string, unknown>;
     backendUninitialized = payload.initialized === false;
@@ -392,7 +400,7 @@ async function connectRuntimeStream(): Promise<void> {
     }
 
     try {
-      const url = await wsUrl("/runtime-stream?client=background");
+      const url = await wsUrl("/runtime-stream?client=background", await ensureSession());
       runtimeSocket = new WebSocket(url);
     } catch {
       setBackendBadge(false);
@@ -451,7 +459,7 @@ async function flushEvents(): Promise<void> {
   eventBuffer = [];
 
   try {
-    const response = await fetch(await apiUrl("/events"), {
+    const response = await authenticatedFetch(await apiUrl("/events"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ events }),
@@ -504,14 +512,14 @@ function startPlatformTaskPolling(): void {
 
 chrome.runtime.onInstalled.addListener(() => {
   ensureFlushAlarm();
-  void (async () => { await autoLogin(); await connectRuntimeStream(); })();
+  void (async () => { await ensureSession(); await connectRuntimeStream(); })();
   startPlatformTaskPolling();
   startCookieSync();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   ensureFlushAlarm();
-  void (async () => { await autoLogin(); await connectRuntimeStream(); })();
+  void (async () => { await ensureSession(); await connectRuntimeStream(); })();
   startPlatformTaskPolling();
   startCookieSync();
 });
@@ -525,7 +533,7 @@ chrome.action.onClicked.addListener((tab) => {
 
 async function postXhsObservedUrls(payload: Record<string, unknown>): Promise<void> {
   try {
-    await fetch(await apiUrl("/sources/xhs/observed-urls"), {
+    await authenticatedFetch(await apiUrl("/sources/xhs/observed-urls"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -540,7 +548,7 @@ async function postXhsTokens(
 ): Promise<void> {
   if (!payload?.pairs || payload.pairs.length === 0) return;
   try {
-    await fetch(await apiUrl("/sources/xhs/tokens"), {
+    await authenticatedFetch(await apiUrl("/sources/xhs/tokens"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -716,7 +724,7 @@ chrome.notifications.onClicked.addListener((notificationId) => {
 });
 
 ensureFlushAlarm();
-void (async () => { await autoLogin(); await connectRuntimeStream(); })();
+void (async () => { await ensureSession(); await connectRuntimeStream(); })();
 startPlatformTaskPolling();
 startCookieSync();
 
@@ -736,7 +744,7 @@ onBackendEndpointChange(() => {
     clearTimeout(wsReconnectTimer);
     wsReconnectTimer = null;
   }
-  void connectRuntimeStream();
+  void clearSession().then(() => connectRuntimeStream());
 });
 
 console.log("[OpenBiliClaw] Service worker initialized");
