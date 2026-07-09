@@ -32,6 +32,9 @@ def _build_app(
     trust_loopback: bool = True,
     trusted_proxies: list[str] | None = None,
     allowed_bearer_origins: list[str] | None = None,
+    extension_access_enabled: bool = False,
+    extension_access_keys: list[str] | None = None,
+    extension_token_ttl_hours: int = 24,
     env_password: str | None = None,
 ) -> tuple[object, Database]:
     from openbiliclaw.config import Config, save_config
@@ -50,6 +53,9 @@ def _build_app(
     cfg.api.auth.trust_loopback = trust_loopback
     cfg.api.auth.trusted_proxies = trusted_proxies or []
     cfg.api.auth.allowed_bearer_origins = allowed_bearer_origins or []
+    cfg.api.auth.extension_access_enabled = extension_access_enabled
+    cfg.api.auth.extension_access_keys = extension_access_keys or []
+    cfg.api.auth.extension_token_ttl_hours = extension_token_ttl_hours
     if password_hash is not None:
         cfg.api.auth.password_hash = password_hash
     elif password is not None and env_password is None:
@@ -345,6 +351,141 @@ def test_logout_all_requires_auth_and_revokes_all_tokens(tmp_path, monkeypatch) 
 
 
 # ── bearer mode (server-decided) ────────────────────────────────────────────
+
+
+def test_extension_token_exchange_is_disabled_by_default(tmp_path, monkeypatch) -> None:
+    _key_id, full_key, _record = ac.generate_extension_access_key()
+    app, _ = _build_app(tmp_path, monkeypatch)
+
+    response = _remote(app).post("/api/auth/extension-token", json={"key": full_key})
+
+    assert response.status_code == 403
+    assert response.json() == {"error": "extension_access_disabled"}
+
+
+def test_extension_token_exchange_rejects_when_auth_is_disabled(tmp_path, monkeypatch) -> None:
+    _key_id, full_key, record = ac.generate_extension_access_key()
+    app, _ = _build_app(
+        tmp_path,
+        monkeypatch,
+        enabled=False,
+        extension_access_enabled=True,
+        extension_access_keys=[record],
+    )
+
+    response = _remote(app).post("/api/auth/extension-token", json={"key": full_key})
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "auth_disabled"}
+
+
+def test_extension_token_exchange_rejects_invalid_device_keys_identically(
+    tmp_path, monkeypatch
+) -> None:
+    key_id, full_key, record = ac.generate_extension_access_key()
+    app, _ = _build_app(
+        tmp_path,
+        monkeypatch,
+        extension_access_enabled=True,
+        extension_access_keys=[record],
+    )
+    remote = _remote(app)
+
+    for key in ("not-a-key", full_key.replace(key_id, "f" * 12), full_key + "x"):
+        response = remote.post("/api/auth/extension-token", json={"key": key})
+        assert response.status_code == 401
+        assert response.json() == {"error": "invalid_device_key"}
+
+
+def test_extension_token_exchange_is_rate_limited_per_client(tmp_path, monkeypatch) -> None:
+    _key_id, full_key, record = ac.generate_extension_access_key()
+    app, _ = _build_app(
+        tmp_path,
+        monkeypatch,
+        extension_access_enabled=True,
+        extension_access_keys=[record],
+    )
+    remote = _remote(app)
+
+    for _ in range(5):
+        assert remote.post("/api/auth/extension-token", json={"key": "invalid"}).status_code == 401
+    response = remote.post("/api/auth/extension-token", json={"key": full_key})
+
+    assert response.status_code == 429
+    assert response.json() == {"error": "locked"}
+
+
+def test_extension_token_exchange_issues_finite_session(tmp_path, monkeypatch) -> None:
+    _key_id, full_key, record = ac.generate_extension_access_key()
+    app, _ = _build_app(
+        tmp_path,
+        monkeypatch,
+        extension_access_enabled=True,
+        extension_access_keys=[record],
+        extension_token_ttl_hours=1,
+    )
+
+    response = _remote(app).post("/api/auth/extension-token", json={"key": full_key})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert ac.token_expires_at(body["token"]) is not None
+    assert body["expires_at"] == ac.token_expires_at(body["token"])
+
+
+def test_spoofed_extension_origin_cannot_bypass_device_key(tmp_path, monkeypatch) -> None:
+    app, _ = _build_app(tmp_path, monkeypatch)
+    response = _remote(app).get(
+        "/api/favorites/BV1AUTH",
+        headers={"origin": "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    )
+
+    assert response.status_code == 401
+    assert response.json() == {"error": "auth_required"}
+
+
+def test_extension_bearer_header_authorizes_gated_api(tmp_path, monkeypatch) -> None:
+    _key_id, full_key, record = ac.generate_extension_access_key()
+    app, _ = _build_app(
+        tmp_path,
+        monkeypatch,
+        extension_access_enabled=True,
+        extension_access_keys=[record],
+    )
+    remote = _remote(app)
+    token = remote.post("/api/auth/extension-token", json={"key": full_key}).json()["token"]
+
+    response = remote.get(
+        "/api/favorites/BV1AUTH",
+        headers={
+            "origin": "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "authorization": f"Bearer {token}",
+        },
+    )
+
+    assert response.status_code == 200
+
+
+def test_general_http_query_token_is_rejected(tmp_path, monkeypatch) -> None:
+    app, db = _build_app(tmp_path, monkeypatch)
+    token = ac.sign_token(_SECRET, epoch=db.get_auth_epoch(), ttl_hours=1)
+
+    response = _remote(app).get(
+        f"/api/favorites/BV1AUTH?token={token}",
+        headers={"origin": "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_image_proxy_query_token_reaches_handler(tmp_path, monkeypatch) -> None:
+    app, db = _build_app(tmp_path, monkeypatch)
+    token = ac.sign_token(_SECRET, epoch=db.get_auth_epoch(), ttl_hours=1)
+
+    response = _remote(app).get(f"/api/image-proxy?token={token}")
+
+    assert response.status_code == 422
 
 
 def test_bearer_mode_requires_allowed_origin_and_ttl(tmp_path, monkeypatch) -> None:
@@ -929,6 +1070,24 @@ def test_websocket_allowed_with_valid_cookie(tmp_path, monkeypatch) -> None:
     client.post("/api/auth/login", json={"password": "hunter2"}, headers={"origin": _ORIGIN})
     # same-origin handshake with the session cookie → accepted
     with client.websocket_connect("/api/runtime-stream", headers={"origin": _ORIGIN}):
+        pass
+
+
+def test_websocket_accepts_extension_query_token(tmp_path, monkeypatch) -> None:
+    _key_id, full_key, record = ac.generate_extension_access_key()
+    app, _ = _build_app(
+        tmp_path,
+        monkeypatch,
+        extension_access_enabled=True,
+        extension_access_keys=[record],
+    )
+    client = _remote(app)
+    token = client.post("/api/auth/extension-token", json={"key": full_key}).json()["token"]
+
+    with client.websocket_connect(
+        f"/api/runtime-stream?token={token}",
+        headers={"origin": "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    ):
         pass
 
 
