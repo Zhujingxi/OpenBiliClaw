@@ -1274,6 +1274,7 @@ async def test_openai_provider_responses_flavor_maps_params_and_usage(
     assert captured["input"] == [{"role": "user", "content": "hi"}]
     assert captured["max_output_tokens"] == 512
     assert captured["text"] == {"format": {"type": "json_object"}}
+    assert captured["store"] is False
     assert "messages" not in captured and "max_tokens" not in captured
     assert response.content == '{"ok": true}'
     assert response.provider == "openai_compatible"
