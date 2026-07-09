@@ -131,13 +131,20 @@ def _ignore_runtime_config_error(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _registered_option_names(command_name: str) -> set[str]:
+    click_app = typer.main.get_command(app)
+    command = click_app.commands[command_name]
+    return {option for param in command.params for option in getattr(param, "opts", [])}
+
+
 def test_keyword_inspiration_dry_run_command_is_registered(runner: CliRunner) -> None:
     result = runner.invoke(app, ["keyword-inspiration-dry-run", "--help"])
 
     assert result.exit_code == 0
     assert "keyword-inspiration-dry-run" in result.output
-    assert "--platform" in result.output
-    assert "--interest-limit" in result.output
+    options = _registered_option_names("keyword-inspiration-dry-run")
+    assert "--platform" in options
+    assert "--interest-limit" in options
 
 
 def test_keyword_inspiration_preview_command_exposes_persist_axes(
@@ -147,7 +154,7 @@ def test_keyword_inspiration_preview_command_exposes_persist_axes(
 
     assert result.exit_code == 0
     assert "keyword-inspiration-preview" in result.output
-    assert "--persist-axes" in result.output
+    assert "--persist-axes" in _registered_option_names("keyword-inspiration-preview")
 
 
 def test_keyword_inspiration_preview_threads_persist_axes(
@@ -245,7 +252,7 @@ def test_keyword_inspiration_report_command_is_registered(runner: CliRunner) -> 
 
     assert result.exit_code == 0
     assert "keyword-inspiration-report" in result.output
-    assert "--window-days" in result.output
+    assert "--window-days" in _registered_option_names("keyword-inspiration-report")
 
 
 def test_keyword_inspiration_preview_one_shot_overrides_apply_on_derived_params(
