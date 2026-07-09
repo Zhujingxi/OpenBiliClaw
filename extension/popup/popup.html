@@ -5456,10 +5456,17 @@
       <div class="settings-section">
         <h3><span class="section-icon">&#x2699;&#xFE0F;</span> 通用</h3>
         <div class="settings-field">
+          <label for="cfgBackendScheme">后端协议</label>
+          <select id="cfgBackendScheme">
+            <option value="http">HTTP（仅本机 / 局域网）</option>
+            <option value="https">HTTPS</option>
+          </select>
+        </div>
+        <div class="settings-field">
           <label for="cfgBackendHost">后端地址</label>
           <input id="cfgBackendHost" type="text" placeholder="127.0.0.1">
           <p class="settings-hint">
-            默认 127.0.0.1（本机）。Chrome Web Store / AMO 包默认只声明本机后端权限；局域网或远程后端需要带对应 host 权限的开发者构建或后续可选授权。
+            默认 127.0.0.1（本机）。局域网或远程地址保存时会请求该地址的精确访问权限；公网地址必须使用 HTTPS。
           </p>
         </div>
         <div class="settings-field">

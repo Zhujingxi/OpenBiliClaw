@@ -42,6 +42,10 @@
         "http://127.0.0.1/*",
         "http://localhost/*"
     ],
+    "optional_host_permissions": [
+        "http://*/*",
+        "https://*/*"
+    ],
     "background": {
         "scripts": [
             "background/service-worker.js"

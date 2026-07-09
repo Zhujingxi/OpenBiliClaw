@@ -5878,6 +5878,7 @@ function bindSettings() {
   const toast = document.getElementById("settingsToast");
   const issuesContainer = document.getElementById("settingsIssues");
   const providerSelect = document.getElementById("cfgLlmProvider");
+  const backendSchemeInput = document.getElementById("cfgBackendScheme");
   const backendHostInput = document.getElementById("cfgBackendHost");
   const backendPortInput = document.getElementById("cfgBackendPort");
   const bannerOffline = document.getElementById("cfgBannerOffline");
@@ -5944,6 +5945,9 @@ function bindSettings() {
   async function populateBackendEndpoint() {
     try {
       const endpoint = await getBackendEndpointConfig();
+      if (backendSchemeInput instanceof HTMLSelectElement) {
+        backendSchemeInput.value = endpoint.scheme || "http";
+      }
       if (backendHostInput instanceof HTMLInputElement) {
         backendHostInput.value = endpoint.host || "";
       }
@@ -7045,6 +7049,8 @@ function bindSettings() {
       // updateConfig() PUT targets the new origin.
       let endpointChanged = false;
       let newEndpointLabel = null;
+      const schemeRaw = backendSchemeInput instanceof HTMLSelectElement
+        ? backendSchemeInput.value : "http";
       const hostRaw = backendHostInput instanceof HTMLInputElement
         ? backendHostInput.value.trim() : "";
       const portRaw = backendPortInput instanceof HTMLInputElement
@@ -7059,9 +7065,10 @@ function bindSettings() {
       }
       {
         const previous = await getBackendEndpointConfig();
-        const next = await updateBackendEndpoint(hostRaw, portRaw || "8420");
-        newEndpointLabel = `${next.host}:${next.port}`;
-        endpointChanged = next.host !== previous.host || next.port !== previous.port;
+        const next = await updateBackendEndpoint(schemeRaw, hostRaw, portRaw || "8420");
+        newEndpointLabel = `${next.scheme}://${next.host}:${next.port}`;
+        endpointChanged = next.scheme !== previous.scheme
+          || next.host !== previous.host || next.port !== previous.port;
       }
 
       const data = collectForm();
@@ -7111,7 +7118,13 @@ function bindSettings() {
         }
       }
     } catch (err) {
-      if (!renderStructuredConfigError(err)) {
+      if (err?.message === "https_required") {
+        showToast("公网后端必须使用 HTTPS。", "error");
+      } else if (err?.message === "backend_permission_denied") {
+        showToast("未授予该后端地址的访问权限，地址未保存。", "error");
+      } else if (err?.message === "invalid_backend_scheme") {
+        showToast("后端协议无效。", "error");
+      } else if (!renderStructuredConfigError(err)) {
         showToast(`保存失败: ${err.message}`, "error");
       }
     } finally {

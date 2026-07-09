@@ -4,13 +4,20 @@ import test from "node:test";
 import {
   __resetBackendEndpointForTests,
   getBackendBaseUrl,
+  getBackendEndpointConfig,
+  getBackendWsBaseUrl,
   isValidBackendHost as isValidPopupBackendHost,
   isValidBackendPort as isValidPopupBackendPort,
   updateBackendEndpoint,
 } from "../popup/popup-backend-config.js";
 import {
+  __resetBackendEndpointForTests as resetSharedEndpoint,
+  apiUrl,
+  getBackendEndpoint,
   isValidBackendHost as isValidSharedBackendHost,
   isValidBackendPort as isValidSharedBackendPort,
+  updateBackendEndpoint as updateSharedEndpoint,
+  wsUrl,
 } from "../src/shared/backend-endpoint.ts";
 
 const validPorts: unknown[] = [1, 8420, 65535, "1", "8420", "65535", " 19090 "];
@@ -101,18 +108,95 @@ test("popup backend endpoint update persists host and port together", async () =
   };
 
   try {
-    const endpoint = await updateBackendEndpoint(" 192.168.1.100 ", "19090");
+    const permissionsApi = {
+      contains(_details: unknown, callback: (value: boolean) => void) { callback(false); },
+      request(_details: unknown, callback: (value: boolean) => void) { callback(true); },
+    };
+    const endpoint = await updateBackendEndpoint("http", " 192.168.1.100 ", "19090", {
+      permissionsApi,
+    });
 
-    assert.deepEqual(endpoint, { host: "192.168.1.100", port: 19090 });
+    assert.deepEqual(endpoint, { scheme: "http", host: "192.168.1.100", port: 19090 });
     assert.deepEqual(writes, [
       {
         popup_backend_endpoint: {
+          scheme: "http",
           host: "192.168.1.100",
           port: 19090,
         },
       },
     ]);
     assert.equal(await getBackendBaseUrl(), "http://192.168.1.100:19090/api");
+  } finally {
+    (globalThis as { chrome?: unknown }).chrome = originalChrome;
+    __resetBackendEndpointForTests();
+  }
+});
+
+test("old endpoint storage migrates to http and https derives wss", async () => {
+  const originalChrome = (globalThis as { chrome?: unknown }).chrome;
+  (globalThis as { chrome?: unknown }).chrome = {
+    storage: { local: { get(_key: string, callback: (items: object) => void) {
+      callback({ popup_backend_endpoint: { host: "127.0.0.1", port: 8420 } });
+    } } },
+  };
+  __resetBackendEndpointForTests();
+  try {
+    assert.deepEqual(await getBackendEndpointConfig(), {
+      scheme: "http", host: "127.0.0.1", port: 8420,
+    });
+  } finally {
+    (globalThis as { chrome?: unknown }).chrome = originalChrome;
+    __resetBackendEndpointForTests();
+  }
+
+  resetSharedEndpoint();
+  await updateSharedEndpoint("https", "backend.example.com", 443);
+  assert.equal(await apiUrl("/config"), "https://backend.example.com:443/api/config");
+  assert.equal(await wsUrl("/runtime-stream", "session"),
+    "wss://backend.example.com:443/api/runtime-stream?token=session");
+  assert.equal((await getBackendEndpoint()).scheme, "https");
+  resetSharedEndpoint();
+});
+
+test("public http is rejected while private http is accepted", async () => {
+  __resetBackendEndpointForTests();
+  await assert.rejects(
+    updateBackendEndpoint("http", "backend.example.com", 8420),
+    /https_required/,
+  );
+  const endpoint = await updateBackendEndpoint("http", "192.168.1.8", 8420, {
+    permissionsApi: {
+      contains(_details: unknown, callback: (value: boolean) => void) { callback(true); },
+      request(_details: unknown, callback: (value: boolean) => void) { callback(false); },
+    },
+  });
+  assert.equal(endpoint.host, "192.168.1.8");
+  __resetBackendEndpointForTests();
+});
+
+test("permission denial leaves endpoint cache and storage unchanged", async () => {
+  __resetBackendEndpointForTests();
+  const writes: unknown[] = [];
+  const originalChrome = (globalThis as { chrome?: unknown }).chrome;
+  (globalThis as { chrome?: unknown }).chrome = {
+    storage: { local: { set(value: unknown, callback: () => void) { writes.push(value); callback(); } } },
+  };
+  try {
+    await assert.rejects(updateBackendEndpoint("https", "backend.example.com", 443, {
+      permissionsApi: {
+        contains(_details: unknown, callback: (value: boolean) => void) { callback(false); },
+        request(details: { origins: string[] }, callback: (value: boolean) => void) {
+          assert.deepEqual(details.origins, ["https://backend.example.com:443/*"]);
+          callback(false);
+        },
+      },
+    }), /backend_permission_denied/);
+    assert.deepEqual(writes, []);
+    assert.deepEqual(await getBackendEndpointConfig(), {
+      scheme: "http", host: "127.0.0.1", port: 8420,
+    });
+    assert.equal(await getBackendWsBaseUrl(), "ws://127.0.0.1:8420/api");
   } finally {
     (globalThis as { chrome?: unknown }).chrome = originalChrome;
     __resetBackendEndpointForTests();

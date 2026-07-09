@@ -16,9 +16,11 @@
 
 export const DEFAULT_BACKEND_HOST = "127.0.0.1";
 export const DEFAULT_BACKEND_PORT = 8420;
+export const DEFAULT_BACKEND_SCHEME = "http";
 export const BACKEND_ENDPOINT_STORAGE_KEY = "popup_backend_endpoint";
 
 const DEFAULT_ENDPOINT = {
+  scheme: DEFAULT_BACKEND_SCHEME,
   host: DEFAULT_BACKEND_HOST,
   port: DEFAULT_BACKEND_PORT,
 };
@@ -74,6 +76,7 @@ function sanitizeEndpoint(raw) {
   }
   const hostRaw = typeof raw.host === "string" ? raw.host.trim() : "";
   return {
+    scheme: raw.scheme === "https" ? "https" : "http",
     host: hostRaw || DEFAULT_BACKEND_HOST,
     port: coercePort(raw.port),
   };
@@ -141,17 +144,56 @@ export async function getBackendEndpointConfig() {
 
 export async function getBackendOrigin() {
   const ep = await ensureLoaded();
-  return `http://${ep.host}:${ep.port}`;
+  return `${ep.scheme}://${ep.host}:${ep.port}`;
 }
 
 export async function getBackendBaseUrl() {
   const ep = await ensureLoaded();
-  return `http://${ep.host}:${ep.port}/api`;
+  return `${ep.scheme}://${ep.host}:${ep.port}/api`;
 }
 
 export async function getBackendWsBaseUrl() {
   const ep = await ensureLoaded();
-  return `ws://${ep.host}:${ep.port}/api`;
+  return `${ep.scheme === "https" ? "wss" : "ws"}://${ep.host}:${ep.port}/api`;
+}
+
+export function isPrivateHttpHost(host) {
+  const normalized = String(host || "").trim().toLowerCase();
+  if (normalized === "localhost" || normalized.endsWith(".local") || normalized.endsWith(".lan")) {
+    return true;
+  }
+  const parts = normalized.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part))) return false;
+  const [a, b] = parts;
+  return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+function getPermissionsApi() {
+  try {
+    return globalThis.chrome?.permissions ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function invokePermission(api, method, details) {
+  return new Promise((resolve) => {
+    try {
+      api[method](details, (granted) => resolve(Boolean(granted)));
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+export async function requestBackendPermission(endpoint, permissionsApi = getPermissionsApi()) {
+  const origin = `${endpoint.scheme}://${endpoint.host}:${endpoint.port}/*`;
+  if (!permissionsApi?.contains || !permissionsApi?.request) {
+    return endpoint.scheme === "http" && ["127.0.0.1", "localhost"].includes(endpoint.host);
+  }
+  const details = { origins: [origin] };
+  if (await invokePermission(permissionsApi, "contains", details)) return true;
+  return invokePermission(permissionsApi, "request", details);
 }
 
 export function isValidBackendHost(value) {
@@ -170,7 +212,10 @@ export function isValidBackendHost(value) {
   return false;
 }
 
-export async function updateBackendEndpoint(host, port) {
+export async function updateBackendEndpoint(scheme, host, port, options = {}) {
+  if (scheme !== "http" && scheme !== "https") {
+    throw new Error("invalid_backend_scheme");
+  }
   if (!isValidBackendPort(port)) {
     throw new Error("端口必须是 1-65535 的整数");
   }
@@ -178,10 +223,17 @@ export async function updateBackendEndpoint(host, port) {
   if (hostStr !== "" && !isValidBackendHost(hostStr)) {
     throw new Error("后端地址必须是有效的 IP 地址或主机名");
   }
+  const normalizedHost = hostStr || DEFAULT_BACKEND_HOST;
+  if (scheme === "http" && !isPrivateHttpHost(normalizedHost)) {
+    throw new Error("https_required");
+  }
   const endpoint = {
-    host: hostStr || DEFAULT_BACKEND_HOST,
+    scheme,
+    host: normalizedHost,
     port: coercePort(port),
   };
+  const granted = await requestBackendPermission(endpoint, options.permissionsApi);
+  if (!granted) throw new Error("backend_permission_denied");
   cached = endpoint;
   initialized = true;
   const storage = getStorageLocal();
@@ -209,7 +261,11 @@ export async function updateBackendPort(value) {
     throw new Error("端口必须是 1-65535 的整数");
   }
   const port = coercePort(value);
-  const endpoint = { host: cached.host || DEFAULT_BACKEND_HOST, port };
+  const endpoint = {
+    scheme: cached.scheme || DEFAULT_BACKEND_SCHEME,
+    host: cached.host || DEFAULT_BACKEND_HOST,
+    port,
+  };
   cached = endpoint;
   initialized = true;
   const storage = getStorageLocal();
