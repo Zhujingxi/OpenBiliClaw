@@ -15,6 +15,9 @@ if TYPE_CHECKING:
 from openbiliclaw.llm.json_utils import DEFAULT_STRUCTURED_MAX_TOKENS, parse_llm_json_tolerant
 from openbiliclaw.llm.task_options import without_core_memory_kwargs
 from openbiliclaw.soul.speculator import (
+    PROBE_DEFER_DAYS,
+    PROBE_MAX_DEFERS,
+    DeferResult,
     _build_event_text,
     _has_probe_term_overlap,
     _normalize_entry_load,
@@ -24,6 +27,9 @@ from openbiliclaw.soul.speculator import (
     build_probe_axis,
     normalize_probe_feedback_history,
 )
+
+# Exhaustion cooldown for avoidance defers (matches the interest side / explicit reject).
+_DEFER_EXHAUSTED_COOLDOWN_DAYS: int = 30
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -148,9 +154,12 @@ class SpeculativeAvoidance:
     ttl_days: int = 3
     confirmation_count: int = 0
     confirmation_threshold: int = 3
-    status: str = "active"
+    status: str = "active"  # "active" | "confirmed" | "promoted" | "rejected" | "deferred"
     confirming_events: list[str] = field(default_factory=list)
     specifics: list[SpeculativeAvoidanceSpecific] = field(default_factory=list)
+    deferred_at: str = ""
+    deferred_until: str = ""
+    defer_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -169,6 +178,9 @@ class SpeculativeAvoidance:
             "status": self.status,
             "confirming_events": list(self.confirming_events),
             "specifics": [item.to_dict() for item in self.specifics],
+            "deferred_at": self.deferred_at,
+            "deferred_until": self.deferred_until,
+            "defer_count": self.defer_count,
         }
 
     @classmethod
@@ -193,6 +205,9 @@ class SpeculativeAvoidance:
                 for item in data.get("specifics", [])
                 if isinstance(item, dict)
             ],
+            deferred_at=str(data.get("deferred_at", "")),
+            deferred_until=str(data.get("deferred_until", "")),
+            defer_count=int(data.get("defer_count", 0)),
         )
 
 
@@ -268,6 +283,7 @@ class AvoidanceTickResult:
     generated: list[SpeculativeAvoidance] = field(default_factory=list)
     promoted: list[SpeculativeAvoidance] = field(default_factory=list)
     rejected: list[SpeculativeAvoidance] = field(default_factory=list)
+    revived: list[SpeculativeAvoidance] = field(default_factory=list)
     observed_matches: int = 0
 
 
@@ -525,6 +541,35 @@ def expire_stale_avoidances(
             valid_cooldown.append(cooldown)
     state.cooldown = valid_cooldown
     return rejected, state
+
+
+def revive_deferred_avoidances(
+    state: AvoidanceState,
+    now: datetime,
+) -> tuple[list[SpeculativeAvoidance], AvoidanceState]:
+    """Restore deferred avoidance probes whose snooze window has elapsed.
+
+    Symmetric to ``speculator.revive_deferred``. MUST run as the LAST
+    maintenance step (after expire → promote → compact), so a revived item is
+    neither promoted nor compacted in the same pass and resurfaces to the user.
+    """
+    revived: list[SpeculativeAvoidance] = []
+    for item in state.active:
+        if item.status != "deferred":
+            continue
+        try:
+            until = datetime.fromisoformat(item.deferred_until)
+        except (TypeError, ValueError):
+            continue
+        if now >= until:
+            item.status = "active"
+            item.created_at = now.isoformat()
+            item.deferred_at = ""
+            item.deferred_until = ""
+            if item.confirmation_count >= item.confirmation_threshold:
+                item.confirmation_count = max(item.confirmation_threshold - 1, 0)
+            revived.append(item)
+    return revived, state
 
 
 def _avoidance_specific_names(item: SpeculativeAvoidance) -> list[str]:
@@ -916,7 +961,7 @@ class AvoidanceSpeculator:
                 str(item.domain).strip().lower()
                 for item in state.active
                 if str(item.domain).strip()
-                and item.status in {"active", "confirmed", "user_rejected", "rejected"}
+                and item.status in {"active", "confirmed", "user_rejected", "rejected", "deferred"}
             }
             selected: list[SpeculativeAvoidance] = []
             for candidate in _select_diverse_avoidance_candidates(
@@ -995,6 +1040,57 @@ class AvoidanceSpeculator:
         self._update_state(_mutate)
         return found
 
+    def user_defer_avoidance(self, domain: str) -> DeferResult:
+        """User chose "暂时忽略" on an avoidance probe — snooze with escalation.
+
+        Symmetric to ``InterestSpeculator.user_defer_speculation``: the k-th
+        defer hides for ``PROBE_DEFER_DAYS[k-1]`` days; the ``PROBE_MAX_DEFERS``-th
+        exhausts to a 30-day cooldown (TTL-style, re-guessable, NOT a durable
+        reject).
+        """
+        result = DeferResult()
+        now = datetime.now()
+
+        def _mutate(state: AvoidanceState) -> None:
+            nonlocal result
+            remaining: list[SpeculativeAvoidance] = []
+            for item in state.active:
+                if item.domain.lower() == domain.lower() and item.status == "active":
+                    new_count = item.defer_count + 1
+                    item.defer_count = new_count
+                    if new_count >= PROBE_MAX_DEFERS:
+                        item.status = "rejected"
+                        state.total_rejected += 1
+                        state.cooldown.append(
+                            AvoidanceCooldownEntry(
+                                domain=item.domain,
+                                source_mode=item.source_mode,
+                                rejected_at=now.isoformat(),
+                                cooldown_until=(
+                                    now + timedelta(days=_DEFER_EXHAUSTED_COOLDOWN_DAYS)
+                                ).isoformat(),
+                            )
+                        )
+                        result = DeferResult(outcome="exhausted", defer_count=new_count)
+                    else:
+                        window = PROBE_DEFER_DAYS[min(new_count, len(PROBE_DEFER_DAYS)) - 1]
+                        deferred_until = (now + timedelta(days=window)).isoformat()
+                        item.status = "deferred"
+                        item.deferred_at = now.isoformat()
+                        item.deferred_until = deferred_until
+                        result = DeferResult(
+                            outcome="deferred",
+                            deferred_until=deferred_until,
+                            defer_count=new_count,
+                        )
+                        remaining.append(item)
+                else:
+                    remaining.append(item)
+            state.active = remaining
+
+        self._update_state(_mutate)
+        return result
+
     def observe(self, events: list[dict[str, Any]]) -> int:
         if not events:
             return 0
@@ -1030,6 +1126,10 @@ class AvoidanceSpeculator:
                 self._cooldown_days,
             )
             result.rejected.extend(compacted)
+            # Revive LAST (after compaction) so a revived probe is neither
+            # promoted nor compacted in the same pass (D4).
+            revived, next_state = revive_deferred_avoidances(next_state, now)
+            result.revived = revived
             return next_state
 
         state = self._update_state(_prepare)
@@ -1094,6 +1194,10 @@ class AvoidanceSpeculator:
                 self._cooldown_days,
             )
             result.rejected.extend(compacted)
+            # Revive LAST (after compaction) so a revived probe is neither
+            # promoted nor compacted in the same pass (D4).
+            revived, next_state = revive_deferred_avoidances(next_state, now)
+            result.revived = revived
             return next_state
 
         state = self._update_state(_prepare)

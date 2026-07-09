@@ -696,6 +696,11 @@ def _builder_test_inputs() -> list[tuple[str, dict, dict]]:
             ),
         ),
         (
+            "build_probe_sentiment_prompt",
+            dict(domain="桌游", user_message="先放着吧"),
+            dict(domain="城市摄影", user_message="以后多推这个"),
+        ),
+        (
             "build_recommendation_expression_prompt",
             dict(
                 profile_summary={"a": 1},
