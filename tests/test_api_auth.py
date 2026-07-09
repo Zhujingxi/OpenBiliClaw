@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -35,6 +36,7 @@ def _build_app(
     extension_access_enabled: bool = False,
     extension_access_keys: list[str] | None = None,
     extension_token_ttl_hours: int = 24,
+    runtime_event_hub: object | None = None,
     env_password: str | None = None,
 ) -> tuple[object, Database]:
     from openbiliclaw.config import Config, save_config
@@ -79,6 +81,7 @@ def _build_app(
         ),
         database=db,
         soul_engine=SimpleNamespace(get_profile=lambda: None),
+        runtime_event_hub=runtime_event_hub,
     )
     return app, db
 
@@ -465,6 +468,25 @@ def test_extension_bearer_header_authorizes_gated_api(tmp_path, monkeypatch) -> 
     )
 
     assert response.status_code == 200
+
+
+def test_login_rejects_extension_origin_even_when_bearer_allowed(tmp_path, monkeypatch) -> None:
+    extension_origin = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    app, _ = _build_app(
+        tmp_path,
+        monkeypatch,
+        session_ttl_hours=24,
+        allowed_bearer_origins=[extension_origin],
+    )
+
+    response = _remote(app).post(
+        "/api/auth/login",
+        json={"password": "hunter2"},
+        headers={"origin": extension_origin},
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"ok": False, "error": "origin_forbidden"}
 
 
 def test_general_http_query_token_is_rejected(tmp_path, monkeypatch) -> None:
@@ -1089,6 +1111,29 @@ def test_websocket_accepts_extension_query_token(tmp_path, monkeypatch) -> None:
         headers={"origin": "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
     ):
         pass
+
+
+def test_extension_query_token_survives_live_revocation_checks(tmp_path, monkeypatch) -> None:
+    from openbiliclaw.runtime.events import RuntimeEventHub
+
+    _key_id, full_key, record = ac.generate_extension_access_key()
+    hub = RuntimeEventHub()
+    app, _ = _build_app(
+        tmp_path,
+        monkeypatch,
+        extension_access_enabled=True,
+        extension_access_keys=[record],
+        runtime_event_hub=hub,
+    )
+    client = _remote(app)
+    token = client.post("/api/auth/extension-token", json={"key": full_key}).json()["token"]
+
+    with client.websocket_connect(
+        f"/api/runtime-stream?token={token}",
+        headers={"origin": "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    ) as websocket:
+        asyncio.run(hub.publish({"type": "extension_session_verified"}))
+        assert websocket.receive_json() == {"type": "extension_session_verified"}
 
 
 def test_websocket_rejected_after_revocation(tmp_path, monkeypatch) -> None:

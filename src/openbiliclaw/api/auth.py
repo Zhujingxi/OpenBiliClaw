@@ -360,6 +360,19 @@ def make_auth_middleware(get_gate: GateGetter) -> Any:
     return auth_guard
 
 
+def websocket_session_token(gate: AuthGate, websocket: Any) -> str | None:
+    """Return the permitted session token for a WebSocket handshake or lifecycle check."""
+    _used_cookie, token = gate.pick_token(websocket)
+    if token:
+        return token
+    origin = websocket.headers.get("origin")
+    if auth_core.is_extension_origin(origin) or auth_core.origin_allowed_for_bearer(
+        origin, gate.auth.allowed_bearer_origins
+    ):
+        return websocket.query_params.get("token") or None
+    return None
+
+
 def authorize_websocket(gate: AuthGate, websocket: Any) -> bool:
     """Authorize a WebSocket handshake (the http middleware does NOT cover ws).
 
@@ -376,7 +389,7 @@ def authorize_websocket(gate: AuthGate, websocket: Any) -> bool:
         return True
     if gate.is_trusted_local(websocket):
         return True
-    _used_cookie, token = gate.pick_token(websocket)
+    token = websocket_session_token(gate, websocket)
     try:
         if token and gate.token_valid(token):
             return True
@@ -385,14 +398,8 @@ def authorize_websocket(gate: AuthGate, websocket: Any) -> bool:
             "auth: websocket token validation failed; falling back to origin check", exc_info=True
         )
     origin = websocket.headers.get("origin")
-    if auth_core.is_extension_origin(origin) or auth_core.origin_allowed_for_bearer(
-        origin, gate.auth.allowed_bearer_origins
-    ):
-        query_token = websocket.query_params.get("token") or None
-        try:
-            return gate.token_valid(query_token)
-        except Exception:
-            return False
+    if auth_core.is_extension_origin(origin):
+        return False
     # No query token is allowed for ordinary Web origins. Cookie sessions keep
     # the existing same-origin / allow-list CSWSH check below.
     parsed = auth_core.parse_origin(origin)
@@ -505,6 +512,8 @@ def register_auth_routes(app: FastAPI, get_gate: GateGetter) -> None:
         gate: AuthGate = get_gate()
         if not gate.auth.enabled:
             return JSONResponse({"ok": False, "error": "auth_disabled"}, status_code=400)
+        if auth_core.is_extension_origin(request.headers.get("origin")):
+            return JSONResponse({"ok": False, "error": "origin_forbidden"}, status_code=403)
         client_ip, _local = gate.resolve_client(request)
         rate_key = client_ip or (request.client.host if request.client else "unknown")
         if gate.rate.is_locked(rate_key):
