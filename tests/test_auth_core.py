@@ -24,6 +24,16 @@ def test_extension_access_key_rejects_malformed_unknown_and_wrong_secret() -> No
     assert ac.verify_extension_access_key(full_key + "x", [record]) is False
 
 
+def test_extension_origins_recognize_mixed_case_schemes() -> None:
+    extension_id = "abcdefghijklmnop"
+    for origin in (
+        f"Chrome-Extension://{extension_id}",
+        f"mOz-ExTeNsIoN://{extension_id}",
+    ):
+        assert ac.is_extension_origin(origin) is True
+        assert ac.extract_extension_id(origin) == extension_id
+
+
 def test_trusted_local_ips_are_loopback_only() -> None:
     assert {"127.0.0.1", "::1"} == ac._TRUSTED_LOCAL_IPS
 

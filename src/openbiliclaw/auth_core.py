@@ -481,7 +481,8 @@ def is_extension_origin(origin: str | None) -> bool:
     """True if *origin* carries a browser-extension scheme."""
     if not origin:
         return False
-    return origin.startswith(_EXT_SCHEMES[0]) or origin.startswith(_EXT_SCHEMES[1])
+    normalized = origin.lower()
+    return normalized.startswith(_EXT_SCHEMES[0]) or normalized.startswith(_EXT_SCHEMES[1])
 
 
 def extract_extension_id(origin: str | None) -> str | None:
@@ -490,8 +491,9 @@ def extract_extension_id(origin: str | None) -> str | None:
     """
     if not origin:
         return None
+    normalized = origin.lower()
     for scheme in _EXT_SCHEMES:
-        if origin.startswith(scheme):
+        if normalized.startswith(scheme):
             return origin[len(scheme) :].rstrip("/") or None
     return None
 

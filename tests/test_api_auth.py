@@ -489,6 +489,33 @@ def test_login_rejects_extension_origin_even_when_bearer_allowed(tmp_path, monke
     assert response.json() == {"ok": False, "error": "origin_forbidden"}
 
 
+def test_login_rejects_mixed_case_extension_origin_when_lowercase_allowed(
+    tmp_path, monkeypatch
+) -> None:
+    extension_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    app, _ = _build_app(
+        tmp_path,
+        monkeypatch,
+        session_ttl_hours=24,
+        allowed_bearer_origins=[
+            f"chrome-extension://{extension_id}",
+            f"moz-extension://{extension_id}",
+        ],
+    )
+
+    for origin in (
+        f"Chrome-Extension://{extension_id}",
+        f"mOz-ExTeNsIoN://{extension_id}",
+    ):
+        response = _remote(app).post(
+            "/api/auth/login",
+            json={"password": "hunter2"},
+            headers={"origin": origin},
+        )
+        assert response.status_code == 403
+        assert response.json() == {"ok": False, "error": "origin_forbidden"}
+
+
 def test_general_http_query_token_is_rejected(tmp_path, monkeypatch) -> None:
     app, db = _build_app(tmp_path, monkeypatch)
     token = ac.sign_token(_SECRET, epoch=db.get_auth_epoch(), ttl_hours=1)
