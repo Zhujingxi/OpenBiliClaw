@@ -348,7 +348,7 @@ git commit -m "feat(cli): manage extension device access keys"
 
 - [ ] **Step 1: Write failing endpoint and permission tests**
 
-Require old storage rows without `scheme` to migrate to `http`, HTTPS to derive WSS, public HTTP to throw `https_required`, private HTTP to pass, and permission requests to use exactly `https://host:port/*`.
+Require old storage rows without `scheme` to migrate to `http`, HTTPS to derive WSS, public HTTP to throw `https_required`, private HTTP to pass, and permission requests to use `https://host/*`. WebExtension match patterns cannot portably scope permissions by port (Firefox ignores port-qualified patterns), while endpoint requests remain pinned to the configured port.
 
 Add manifest assertions:
 

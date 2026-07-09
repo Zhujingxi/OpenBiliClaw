@@ -17,9 +17,16 @@ import {
 
 function installStorage(initial: Record<string, unknown> = {}) {
   const values = { ...initial };
+  const listeners: Array<(
+    changes: Record<string, { newValue?: unknown }>,
+    areaName: string,
+  ) => void> = [];
   const originalChrome = (globalThis as { chrome?: unknown }).chrome;
   (globalThis as { chrome?: unknown }).chrome = {
     storage: {
+      onChanged: {
+        addListener(callback: typeof listeners[number]) { listeners.push(callback); },
+      },
       local: {
         get(keys: string | string[], callback: (items: Record<string, unknown>) => void) {
           const selected = Array.isArray(keys) ? keys : [keys];
@@ -28,6 +35,10 @@ function installStorage(initial: Record<string, unknown> = {}) {
         set(items: Record<string, unknown>, callback: () => void) {
           Object.assign(values, items);
           callback();
+          const changes = Object.fromEntries(
+            Object.entries(items).map(([key, newValue]) => [key, { newValue }]),
+          );
+          for (const listener of listeners) listener(changes, "local");
         },
         remove(keys: string | string[], callback: () => void) {
           for (const key of Array.isArray(keys) ? keys : [keys]) delete values[key];
@@ -49,6 +60,24 @@ function installStorage(initial: Record<string, unknown> = {}) {
     },
   };
 }
+
+test("token store adopts sessions written by another extension context", async () => {
+  const storage = installStorage();
+  try {
+    assert.equal(await loadSession(), null);
+    const chromeApi = (globalThis as unknown as {
+      chrome: { storage: { local: { set: (items: object, callback: () => void) => void } } };
+    }).chrome;
+    await new Promise<void>((resolve) => chromeApi.storage.local.set({
+      obc_auth_session: { token: "peer-session", expires_at: 2_000_000_000 },
+    }, resolve));
+    assert.deepEqual(await loadSession(), {
+      token: "peer-session", expires_at: 2_000_000_000,
+    });
+  } finally {
+    storage.restore();
+  }
+});
 
 test("structured sessions round-trip and legacy credentials are removed", async () => {
   const storage = installStorage({ obc_auth_password: "pw", obc_auth_token: "legacy" });

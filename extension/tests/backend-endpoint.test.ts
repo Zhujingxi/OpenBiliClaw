@@ -187,7 +187,7 @@ test("permission denial leaves endpoint cache and storage unchanged", async () =
       permissionsApi: {
         contains(_details: unknown, callback: (value: boolean) => void) { callback(false); },
         request(details: { origins: string[] }, callback: (value: boolean) => void) {
-          assert.deepEqual(details.origins, ["https://backend.example.com:443/*"]);
+          assert.deepEqual(details.origins, ["https://backend.example.com/*"]);
           callback(false);
         },
       },

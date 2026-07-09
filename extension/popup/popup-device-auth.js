@@ -92,10 +92,10 @@ export async function readPopupSessionToken() {
   return session && session.expires_at > Date.now() / 1000 ? session.token : null;
 }
 
-async function exchange(options = {}) {
-  const items = await storageGet(DEVICE_KEY_STORAGE_KEY);
-  const key = typeof items[DEVICE_KEY_STORAGE_KEY] === "string"
-    ? items[DEVICE_KEY_STORAGE_KEY].trim() : "";
+async function exchange(options = {}, keyOverride = "") {
+  const items = keyOverride ? {} : await storageGet(DEVICE_KEY_STORAGE_KEY);
+  const key = keyOverride || (typeof items[DEVICE_KEY_STORAGE_KEY] === "string"
+    ? items[DEVICE_KEY_STORAGE_KEY].trim() : "");
   if (!key) {
     lastExchangeError = "missing_device_key";
     return null;
@@ -129,7 +129,20 @@ async function exchange(options = {}) {
     await clearPopupSession();
     return null;
   }
-  await saveSession({ token: payload.token, expires_at: Number(payload.expires_at) });
+  const session = { token: payload.token, expires_at: Number(payload.expires_at) };
+  if (keyOverride) {
+    cachedSession = session;
+    sessionLoaded = true;
+    // One storage transaction prevents the service worker from observing a
+    // device key without its freshly exchanged session and racing a duplicate
+    // exchange in another extension context.
+    await storageSet({
+      [DEVICE_KEY_STORAGE_KEY]: keyOverride,
+      [SESSION_STORAGE_KEY]: session,
+    });
+  } else {
+    await saveSession(session);
+  }
   lastExchangeError = "";
   await storageRemove(LEGACY_KEYS);
   return payload.token;
@@ -150,9 +163,13 @@ export async function ensurePopupSession(options = {}) {
 export async function pairDeviceKey(key, options = {}) {
   const normalized = String(key || "").trim();
   if (!normalized) throw new Error("missing_device_key");
-  await storageSet({ [DEVICE_KEY_STORAGE_KEY]: normalized });
-  await clearPopupSession();
-  const token = await ensurePopupSession({ ...options, force: true });
+  cachedSession = null;
+  sessionLoaded = true;
+  if (refreshInFlight) await refreshInFlight;
+  refreshInFlight = exchange(options, normalized).finally(() => {
+    refreshInFlight = null;
+  });
+  const token = await refreshInFlight;
   if (!token) {
     await storageRemove(DEVICE_KEY_STORAGE_KEY);
     throw new Error(lastExchangeError || "invalid_device_key");

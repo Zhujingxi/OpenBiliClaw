@@ -11,6 +11,7 @@ import {
 
 function storageHarness(initial: Record<string, unknown> = {}) {
   const values = { ...initial };
+  const writes: Array<Record<string, unknown>> = [];
   const originalChrome = (globalThis as { chrome?: unknown }).chrome;
   (globalThis as { chrome?: unknown }).chrome = {
     storage: { local: {
@@ -19,6 +20,7 @@ function storageHarness(initial: Record<string, unknown> = {}) {
         callback(Object.fromEntries(selected.filter((key) => key in values).map((key) => [key, values[key]])));
       },
       set(items: Record<string, unknown>, callback: () => void) {
+        writes.push(items);
         Object.assign(values, items);
         callback();
       },
@@ -30,7 +32,7 @@ function storageHarness(initial: Record<string, unknown> = {}) {
   };
   __resetPopupDeviceAuthForTests();
   __resetBackendEndpointForTests();
-  return { values, restore() {
+  return { values, writes, restore() {
     (globalThis as { chrome?: unknown }).chrome = originalChrome;
     __resetPopupDeviceAuthForTests();
     __resetBackendEndpointForTests();
@@ -52,6 +54,9 @@ test("pairDeviceKey stores the key and a structured short session, then removes 
     assert.deepEqual(storage.values.obc_auth_session, {
       token: "short", expires_at: 2_000_000_000,
     });
+    assert.equal(storage.writes.some((write) => (
+      "obc_extension_device_key" in write && "obc_auth_session" in write
+    )), true);
     assert.equal("obc_auth_password" in storage.values, false);
     assert.equal("obc_auth_token" in storage.values, false);
     assert.equal(calls[0].url, "https://backend.example/api/auth/extension-token");

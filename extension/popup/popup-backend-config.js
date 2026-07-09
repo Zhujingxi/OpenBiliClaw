@@ -187,7 +187,10 @@ function invokePermission(api, method, details) {
 }
 
 export async function requestBackendPermission(endpoint, permissionsApi = getPermissionsApi()) {
-  const origin = `${endpoint.scheme}://${endpoint.host}:${endpoint.port}/*`;
+  // WebExtension match patterns cannot portably scope host permissions by port:
+  // Firefox ignores port-qualified patterns. Keep the endpoint itself pinned to
+  // its configured port, while requesting the narrowest cross-browser pattern.
+  const origin = `${endpoint.scheme}://${endpoint.host}/*`;
   if (!permissionsApi?.contains || !permissionsApi?.request) {
     return endpoint.scheme === "http" && ["127.0.0.1", "localhost"].includes(endpoint.host);
   }

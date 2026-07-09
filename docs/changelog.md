@@ -44,7 +44,7 @@
 - **跨设备扩展认证与密钥管理（PR #99）**：远程扩展访问默认关闭；CLI 生成高熵设备密钥，配置仅保存 SHA-256 摘要，扩展用其换取最长 168 小时的短会话。
 - **最小凭证暴露面**：普通 HTTP 统一使用 `Authorization: Bearer`，仅 WebSocket 与图片代理因浏览器接口限制携带短会话 query；长期设备密钥不进入普通请求、URL 或日志。
 - **设备生命周期 CLI**：`ext-key generate/enable/disable/list/revoke` 管理密钥；撤销会提升 `auth_epoch` 立即失效全部现有会话，运行库失败时配置自动回滚。
-- **精确远程权限**：扩展保存 LAN / 远程 endpoint 前请求 `scheme://host:port/*` 可选权限；公网地址强制 HTTPS，WebSocket 自动使用 WSS。
+- **最小远程 host 权限**：扩展保存 LAN / 远程 endpoint 前请求 `scheme://host/*` 可选权限；权限 API 无法跨浏览器限定端口，实际请求仍固定到配置端口。公网地址强制 HTTPS，WebSocket 自动使用 WSS。
 - **兼容升级**：清理 PR 早期的密码缓存与裸 token 存储，不采用 Extension ID / RSA manifest key 或 Docker 网关可信绕过。
 
 ## v0.3.160 / extension v0.3.160 / desktop v0.3.160：把 bge-m3 打进交付物,消灭装机时的模型下载（2026-07-07）

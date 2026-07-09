@@ -17,6 +17,7 @@ interface ChromeStorageLike {
 
 let cachedSession: DeviceSession | null = null;
 let sessionLoaded = false;
+let storageListenerInstalled = false;
 
 function getStorage(): ChromeStorageLike | null {
   try {
@@ -25,6 +26,37 @@ function getStorage(): ChromeStorageLike | null {
     return chromeApi?.storage?.local ?? null;
   } catch {
     return null;
+  }
+}
+
+function installStorageListener(): void {
+  if (storageListenerInstalled) return;
+  try {
+    const onChanged = (
+      globalThis as {
+        chrome?: {
+          storage?: {
+            onChanged?: {
+              addListener?: (
+                callback: (
+                  changes: Record<string, { newValue?: unknown }>,
+                  areaName: string,
+                ) => void,
+              ) => void;
+            };
+          };
+        };
+      }
+    ).chrome?.storage?.onChanged;
+    if (!onChanged?.addListener) return;
+    onChanged.addListener((changes, areaName) => {
+      if (areaName !== "local" || !changes[SESSION_STORAGE_KEY]) return;
+      cachedSession = parseSession(changes[SESSION_STORAGE_KEY].newValue);
+      sessionLoaded = true;
+    });
+    storageListenerInstalled = true;
+  } catch {
+    // Tests and restricted contexts may not expose storage events.
   }
 }
 
@@ -84,6 +116,7 @@ export async function setDeviceKey(key: string): Promise<void> {
 }
 
 export async function loadSession(): Promise<DeviceSession | null> {
+  installStorageListener();
   if (sessionLoaded) return cachedSession;
   const items = await storageGet(SESSION_STORAGE_KEY);
   cachedSession = parseSession(items[SESSION_STORAGE_KEY]);
@@ -117,4 +150,5 @@ export async function clearLegacyCredentials(): Promise<void> {
 export function __resetTokenStoreForTests(): void {
   cachedSession = null;
   sessionLoaded = false;
+  storageListenerInstalled = false;
 }

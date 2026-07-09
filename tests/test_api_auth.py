@@ -470,6 +470,26 @@ def test_extension_bearer_header_authorizes_gated_api(tmp_path, monkeypatch) -> 
     assert response.status_code == 200
 
 
+def test_extension_style_bearer_without_origin_authorizes_gated_api(tmp_path, monkeypatch) -> None:
+    """Chrome extension GET fetches may omit Origin despite carrying Authorization."""
+    _key_id, full_key, record = ac.generate_extension_access_key()
+    app, _ = _build_app(
+        tmp_path,
+        monkeypatch,
+        extension_access_enabled=True,
+        extension_access_keys=[record],
+    )
+    remote = _remote(app)
+    token = remote.post("/api/auth/extension-token", json={"key": full_key}).json()["token"]
+
+    response = remote.get(
+        "/api/favorites/BV1AUTH",
+        headers={"authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+
+
 def test_login_rejects_extension_origin_even_when_bearer_allowed(tmp_path, monkeypatch) -> None:
     extension_origin = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     app, _ = _build_app(

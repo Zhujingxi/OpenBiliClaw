@@ -209,8 +209,13 @@ class AuthGate:
         explicitly at their call sites.
         """
         origin = request.headers.get("origin", "")
-        if auth_core.is_extension_origin(origin):
-            return False, self._extract_bearer(request)
+        bearer = self._extract_bearer(request)
+        if auth_core.is_extension_origin(origin) or (not origin and bearer):
+            # Chrome extension fetches do not consistently send Origin on GET,
+            # even when they send Authorization. Ordinary browser pages cannot
+            # create this shape: adding Authorization triggers CORS and Origin.
+            # Non-browser Bearer clients are valid here as well.
+            return False, bearer
         # Non-extension path: cookie first, then allowed_bearer_origins
         cookie = request.cookies.get(COOKIE_NAME)
         if cookie:

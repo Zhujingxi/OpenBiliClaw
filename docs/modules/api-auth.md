@@ -35,7 +35,7 @@
 | 短会话交换 | ✅ | 限流的 `POST /api/auth/extension-token` 验证设备密钥后签发 `1..168h` 会话；错误不泄露 key ID 是否存在。 |
 | 传输边界 | ✅ | 普通扩展 HTTP 使用 `Authorization: Bearer`，URL 不含 token；仅 WebSocket 和图片代理允许扩展 Origin 携带短会话 query token。 |
 | 撤销 | ✅ | `ext-key revoke <key-id>` 删除摘要并 bump 全局 `auth_epoch`，所有 Web / 扩展会话立即失效；失败时回滚配置。 |
-| 远程 endpoint 权限 | ✅ | 扩展按 `scheme://host:port/*` 请求精确可选权限；公网 host 强制 HTTPS，HTTPS 自动派生 WSS。 |
+| 远程 endpoint 权限 | ✅ | 扩展按 `scheme://host/*` 请求跨浏览器可用的最小 host 权限；权限 API 不能可移植地限定端口，实际请求仍固定配置端口。公网 host 强制 HTTPS，HTTPS 自动派生 WSS。 |
 
 真实 LAN 浏览器链路在物理网卡地址上验证；本机没有可用 Docker runtime，因此本次没有把 Docker bridge 作为通过项。容器部署仍必须显式配置 `trusted_proxies`，不会自动信任默认网关。
 
