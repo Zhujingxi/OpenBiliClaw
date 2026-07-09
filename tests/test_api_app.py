@@ -4453,6 +4453,8 @@ class TestBackendAPI:
                     "view_count": 12500,
                     "like_count": 3400,
                     "danmaku_count": 890,
+                    "favorite_count": 0,
+                    "comment_count": 0,
                     "up_mid": 987654321,
                 },
                 {
@@ -4474,6 +4476,8 @@ class TestBackendAPI:
                     "view_count": 0,
                     "like_count": 0,
                     "danmaku_count": 0,
+                    "favorite_count": 0,
+                    "comment_count": 0,
                     "up_mid": 0,
                 },
             ]
@@ -4585,6 +4589,8 @@ class TestBackendAPI:
                     "view_count": 0,
                     "like_count": 0,
                     "danmaku_count": 0,
+                    "favorite_count": 0,
+                    "comment_count": 0,
                     "up_mid": 0,
                 }
             ]
