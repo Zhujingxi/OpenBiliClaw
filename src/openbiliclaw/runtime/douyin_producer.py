@@ -189,7 +189,7 @@ class DouyinDiscoveryProducer:
                 return selected
             return configured[:1] or ("search",)
 
-        preferred = ("feed",) if requested_limit <= 3 else ("hot", "feed")
+        preferred: tuple[str, ...] = ("feed",) if requested_limit <= 3 else ("hot", "feed")
         selected = tuple(source for source in preferred if source in configured)
         if selected:
             return selected

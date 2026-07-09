@@ -14,9 +14,16 @@ ARG BGE_M3_MODEL_DIGEST=daec91ffb5dd0c27411bd71f29932917c49cf529a641d0168496c3a5
 # then drop the build-time store so nothing double-counts.
 RUN set -eux; \
     ollama serve & pid=$!; \
+    trap 'kill "$pid" 2>/dev/null || true' EXIT; \
     i=0; while [ "$i" -lt 30 ]; do ollama list >/dev/null 2>&1 && break; i=$((i+1)); sleep 1; done; \
-    ollama pull bge-m3; \
-    kill "$pid" 2>/dev/null || true; \
+    attempts=0; \
+    until ollama pull bge-m3; do \
+        attempts=$((attempts + 1)); \
+        if [ "$attempts" -ge 3 ]; then \
+            exit 1; \
+        fi; \
+        sleep $((attempts * 15)); \
+    done; \
     test -f "/root/.ollama/models/blobs/sha256-${BGE_M3_MODEL_DIGEST}"; \
     mkdir -p /opt/bge-m3-seed; \
     cp -a /root/.ollama/models/blobs /opt/bge-m3-seed/blobs; \
