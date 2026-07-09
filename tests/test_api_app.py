@@ -1347,6 +1347,52 @@ class TestBackendAPI:
         assert response.status_code == 200
         assert response.json() == {"status": "ok", "service": "openbiliclaw-api"}
 
+    def test_qr_info_endpoint_returns_lan_ip_without_embedding_probe(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.api import app as app_module
+
+        class _FailingProbeService:
+            async def probe(self) -> bool:
+                raise AssertionError("/api/qr-info must not probe embedding readiness")
+
+        class EmbeddingSoulEngine:
+            def __init__(self) -> None:
+                self._embedding_service = _FailingProbeService()
+
+        monkeypatch.setattr(app_module, "_detect_lan_ip", lambda: "192.168.1.7")
+
+        app = create_app(
+            memory_manager=object(), database=object(), soul_engine=EmbeddingSoulEngine()
+        )
+        client = TestClient(app)
+
+        response = client.get("/api/qr-info")
+
+        assert response.status_code == 200
+        assert response.json() == {"lan_ip": "192.168.1.7"}
+
+    def test_qr_info_endpoint_stays_available_in_degraded_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.api import app as app_module
+
+        monkeypatch.setattr(app_module, "_detect_lan_ip", lambda: "192.168.1.7")
+
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+        app.state.runtime_context.degraded = True
+        app.state.runtime_context.degraded_reason = "test_degraded"
+        client = TestClient(app)
+
+        response = client.get("/api/qr-info")
+
+        assert response.status_code == 200
+        assert response.json() == {"lan_ip": "192.168.1.7"}
+
     def test_sources_status_returns_every_source(self) -> None:
         """Unified /api/sources/status reports a status item per source."""
         from fastapi.testclient import TestClient

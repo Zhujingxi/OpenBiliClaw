@@ -33,7 +33,7 @@
 
 ## 端点
 
-`/api/auth/{status,login,logout}` 由 `register_auth_routes()` 注册；`/api/auth/admin` 在 `create_app()` 内定义（需 `_CONFIG_SAVE_LOCK` + 配置快照回滚）。门禁挡所有其他 `/api/*`（含 `/api/runtime-stream` WS 与 `/api/image-proxy`）；`/api/health`、`/api/auth/admin` 与静态壳（`/`、`/m`、`/web`、`favicon`）保持公开 —— `admin` 在白名单内由 handler 自行强制可信本机，从而对任何非本机调用方（远程或跨源 loopback）统一返回 `403 local_only`，而非泄露是否带 token 的 `401`。
+`/api/auth/{status,login,logout}` 由 `register_auth_routes()` 注册；`/api/auth/admin` 在 `create_app()` 内定义（需 `_CONFIG_SAVE_LOCK` + 配置快照回滚）。门禁挡所有其他 `/api/*`（含 `/api/runtime-stream` WS 与 `/api/image-proxy`）；`/api/health`、`/api/qr-info`、`/api/auth/admin` 与静态壳（`/`、`/m`、`/web`、`favicon`）保持公开。`/api/qr-info` 只返回手机版二维码需要的 `lan_ip`，不读取画像或探测 embedding，避免扫码入口继承 readiness probe 延迟。`admin` 在白名单内由 handler 自行强制可信本机，从而对任何非本机调用方（远程或跨源 loopback）统一返回 `403 local_only`，而非泄露是否带 token 的 `401`。
 
 | 方法 & 路径 | 鉴权 | 请求 | 响应 |
 |------------|------|------|------|

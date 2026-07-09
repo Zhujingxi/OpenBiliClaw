@@ -310,7 +310,7 @@ Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/do
 
 The agent will clone the repo, install dependencies, start the backend with the LAN-accessible default bind (`0.0.0.0:8420`), run a health check, and ask a few questions with defaults. Before auto-init, it verifies that both the configured LLM provider and embedding service answer real lightweight calls; if either fails, init is blocked until you fix the service. If unsure, pick the default. Xiaohongshu, Douyin, YouTube, X, Zhihu, and Reddit signals are used in the initial profile only when you explicitly opt in.
 
-Chrome Web Store / AMO builds only declare local-backend permissions, so keep the extension pointed at `127.0.0.1` / `localhost`. To reach the Mobile Web from your phone, start the backend with `openbiliclaw start --host 0.0.0.0 --port 8420` — the extension QR code will prefer your computer's LAN IP. Pointing the extension directly at another LAN machine or a remote domain needs a developer build with the matching host permission, or a future optional-permission toggle.
+Chrome Web Store / AMO builds only declare local-backend permissions, so keep the extension pointed at `127.0.0.1` / `localhost`. To reach the Mobile Web from your phone, start the backend with `openbiliclaw start --host 0.0.0.0 --port 8420` — the extension QR code uses lightweight `/api/qr-info` to prefer your computer's LAN IP without triggering the embedding readiness probe. Pointing the extension directly at another LAN machine or a remote domain needs a developer build with the matching host permission, or a future optional-permission toggle.
 
 ### 3. Log in to content platforms in the same browser
 
@@ -580,7 +580,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 │  Behavior capture · Cookie sync · Platform tasks │
 └──────────────────────┬─────────────────────────┘
                        │ REST API / WebSocket
-                       │ + Desktop Web (/web) · Mobile Web (/m)
+                       │ + Desktop Web (/web) · Mobile Web (/m) · QR LAN-IP
 ┌──────────────────────▼─────────────────────────┐
 │               Agent Orchestration               │
 │      Skills · Dialogue · Runtime scheduling      │

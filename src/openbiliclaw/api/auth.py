@@ -275,7 +275,7 @@ def _is_public(request: Request) -> bool:
         return True
     if not path.startswith("/api"):
         return True  # static SPA shells, "/", favicon, etc.
-    if path == "/api/health":
+    if path in ("/api/health", "/api/qr-info"):
         return True
     if path in ("/api/auth/status", "/api/auth/login"):
         return True

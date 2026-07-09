@@ -44,6 +44,14 @@ def test_desktop_delight_queue_refresh_respects_in_progress_typing() -> None:
     assert apply_block.index("delightUserEngaged()") < apply_block.index("setActiveDelight(")
 
 
+def test_desktop_delight_auto_advance_respects_in_progress_typing() -> None:
+    app_js = _DESKTOP_JS.read_text(encoding="utf-8")
+
+    auto_block = app_js.split("function _startDelightAutoAdvance", 1)[1][:700]
+    assert "delightUserEngaged()" in auto_block
+    assert auto_block.index("delightUserEngaged()") < auto_block.index("setActiveDelight(")
+
+
 def test_mobile_delight_push_keeps_composer_focus() -> None:
     recommend_js = _MOBILE_RECOMMEND_JS.read_text(encoding="utf-8")
 
@@ -52,3 +60,12 @@ def test_mobile_delight_push_keeps_composer_focus() -> None:
     # drops focus and closes the mobile keyboard (drafts already live in state).
     assert "delight-composer-input" in candidate_block
     assert "rerenderDelightOnly()" in candidate_block
+
+
+def test_mobile_delight_auto_advance_respects_open_composer() -> None:
+    recommend_js = _MOBILE_RECOMMEND_JS.read_text(encoding="utf-8")
+
+    assert "function delightUserEngaged" in recommend_js
+    auto_block = recommend_js.split("function _startDelightAutoAdvance", 1)[1][:700]
+    assert "delightUserEngaged()" in auto_block
+    assert auto_block.index("delightUserEngaged()") < auto_block.index("navigateDelight(")

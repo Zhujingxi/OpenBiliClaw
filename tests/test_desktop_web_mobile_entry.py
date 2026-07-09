@@ -43,8 +43,9 @@ def test_mobile_qr_drawer_contract() -> None:
 def test_app_js_builds_url_from_backend_lan_ip() -> None:
     wiring = _APP_JS.split("async function openMobileQrDrawer", 1)
     assert len(wiring) == 2, "app.js must define openMobileQrDrawer"
-    body = wiring[1].split("safeBind(\"#profileBtn\"", 1)[0]
-    assert "ENDPOINTS.health" in body, "must ask the backend for its LAN IP"
+    body = wiring[1].split('safeBind("#profileBtn"', 1)[0]
+    assert "ENDPOINTS.qrInfo" in body, "must ask the lightweight QR endpoint for its LAN IP"
+    assert "ENDPOINTS.health" not in body, "QR drawer must not trigger readiness/embedding probes"
     assert "lan_ip" in body
     assert "isLoopbackMobileHost" in body, "must warn when only a loopback address is available"
     assert 'safeBind("#mobileQrBtn"' in _APP_JS
@@ -53,8 +54,12 @@ def test_app_js_builds_url_from_backend_lan_ip() -> None:
 
 def test_first_visit_discovery_affordance() -> None:
     """New visitors must get an unmissable pointer at the mobile entry."""
-    for marker in ('id="mobileQrDot"', 'id="mobileQrCallout"', 'id="mobileQrCalloutOpen"',
-                   'id="mobileQrCalloutClose"'):
+    for marker in (
+        'id="mobileQrDot"',
+        'id="mobileQrCallout"',
+        'id="mobileQrCalloutOpen"',
+        'id="mobileQrCalloutClose"',
+    ):
         assert marker in _INDEX, f"missing {marker}"
     assert "mobileQrSeen" in _APP_JS, "seen-state must persist so the callout shows only once"
     assert "initMobileQrDiscovery" in _APP_JS
