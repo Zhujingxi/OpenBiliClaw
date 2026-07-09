@@ -11,7 +11,10 @@ from types import SimpleNamespace
 
 from openbiliclaw.soul import speculator as speculator_module
 from openbiliclaw.soul.speculator import (
+    PROBE_DEFER_DAYS,
+    PROBE_MAX_DEFERS,
     CooldownEntry,
+    DeferResult,
     InterestSpeculator,
     SpeculativeInterest,
     SpeculativeSpecific,
@@ -21,8 +24,10 @@ from openbiliclaw.soul.speculator import (
     choose_next_probe_candidate,
     expire_stale,
     load_speculative_state,
+    normalize_probe_feedback_history,
     observe_events,
     promote_ready,
+    revive_deferred,
     save_speculative_state,
 )
 
@@ -1443,3 +1448,231 @@ def test_interval_uses_minutes():
         # 15 minutes ago → should generate
         state15 = SpeculativeState(last_generation_at=(now - timedelta(minutes=15)).isoformat())
         assert speculator._should_generate(state15, now) is True
+
+
+# ---------------------------------------------------------------------------
+# Defer / snooze lifecycle (probe "暂时忽略")
+# ---------------------------------------------------------------------------
+
+
+def test_speculative_interest_round_trips_defer_fields():
+    spec = SpeculativeInterest(
+        domain="城市探索",
+        status="deferred",
+        deferred_at="2026-07-05T10:00:00",
+        deferred_until="2026-07-12T10:00:00",
+        defer_count=2,
+    )
+    restored = SpeculativeInterest.from_dict(spec.to_dict())
+    assert restored.status == "deferred"
+    assert restored.deferred_at == "2026-07-05T10:00:00"
+    assert restored.deferred_until == "2026-07-12T10:00:00"
+    assert restored.defer_count == 2
+
+
+def test_speculative_interest_defer_fields_default_on_old_state():
+    # Old state JSON has no defer fields — must load with defaults, not crash.
+    legacy = {"domain": "老数据", "status": "active"}
+    restored = SpeculativeInterest.from_dict(legacy)
+    assert restored.deferred_at == ""
+    assert restored.deferred_until == ""
+    assert restored.defer_count == 0
+
+
+def test_user_defer_speculation_first_defer_snoozes_7_days(tmp_path: Path) -> None:
+    save_speculative_state(
+        tmp_path,
+        SpeculativeState(active=[SpeculativeInterest(domain="桌游", status="active")]),
+    )
+    speculator = InterestSpeculator(llm_service=None, data_dir=tmp_path)
+
+    result = speculator.user_defer_speculation("桌游")
+    assert isinstance(result, DeferResult)
+    assert result.outcome == "deferred"
+    assert result.defer_count == 1
+
+    state = load_speculative_state(tmp_path)
+    item = next(s for s in state.active if s.domain == "桌游")
+    assert item.status == "deferred"
+    assert item.defer_count == 1
+    until = datetime.fromisoformat(item.deferred_until)
+    delta_days = (until - datetime.now()).days
+    assert PROBE_DEFER_DAYS[0] - 1 <= delta_days <= PROBE_DEFER_DAYS[0]
+    # deferred item is absent from the active-probe view
+    assert speculator.get_active_speculations() == []
+
+
+def test_user_defer_speculation_second_defer_snoozes_14_days(tmp_path: Path) -> None:
+    # Simulate an item already deferred+revived once (defer_count=1, active again).
+    save_speculative_state(
+        tmp_path,
+        SpeculativeState(
+            active=[SpeculativeInterest(domain="桌游", status="active", defer_count=1)]
+        ),
+    )
+    speculator = InterestSpeculator(llm_service=None, data_dir=tmp_path)
+
+    result = speculator.user_defer_speculation("桌游")
+    assert result.outcome == "deferred"
+    assert result.defer_count == 2
+
+    state = load_speculative_state(tmp_path)
+    item = next(s for s in state.active if s.domain == "桌游")
+    until = datetime.fromisoformat(item.deferred_until)
+    delta_days = (until - datetime.now()).days
+    assert PROBE_DEFER_DAYS[1] - 1 <= delta_days <= PROBE_DEFER_DAYS[1]
+
+
+def test_user_defer_speculation_third_defer_exhausts_to_cooldown(tmp_path: Path) -> None:
+    save_speculative_state(
+        tmp_path,
+        SpeculativeState(
+            active=[
+                SpeculativeInterest(
+                    domain="桌游", category="娱乐", status="active", defer_count=2
+                )
+            ]
+        ),
+    )
+    speculator = InterestSpeculator(llm_service=None, data_dir=tmp_path)
+
+    result = speculator.user_defer_speculation("桌游")
+    assert result.outcome == "exhausted"
+    assert result.defer_count == PROBE_MAX_DEFERS
+
+    state = load_speculative_state(tmp_path)
+    # Dropped from active (no deferred remnant), a cooldown entry exists.
+    assert all(s.domain != "桌游" or s.status != "deferred" for s in state.active)
+    assert not any(s.domain == "桌游" and s.status == "active" for s in state.active)
+    assert any(c.domain == "桌游" for c in state.cooldown)
+
+
+def test_defer_exhausted_response_not_in_handled_set() -> None:
+    from openbiliclaw.soul.speculator import HANDLED_PROBE_FEEDBACK_RESPONSES
+
+    assert "defer" not in HANDLED_PROBE_FEEDBACK_RESPONSES
+    assert "defer_exhausted" not in HANDLED_PROBE_FEEDBACK_RESPONSES
+
+
+def test_user_defer_speculation_missing_domain_returns_not_found(tmp_path: Path) -> None:
+    speculator = InterestSpeculator(llm_service=None, data_dir=tmp_path)
+    result = speculator.user_defer_speculation("不存在")
+    assert result.outcome == "not_found"
+
+
+def test_revive_deferred_restores_when_window_elapsed() -> None:
+    now = datetime(2026, 7, 20, 12, 0, 0)
+    state = SpeculativeState(
+        active=[
+            SpeculativeInterest(
+                domain="到期复活",
+                status="deferred",
+                created_at="2026-07-01T00:00:00",
+                deferred_at="2026-07-05T00:00:00",
+                deferred_until="2026-07-12T00:00:00",  # in the past vs now
+                defer_count=1,
+            ),
+            SpeculativeInterest(
+                domain="仍在搁置",
+                status="deferred",
+                deferred_until="2026-08-01T00:00:00",  # future
+                defer_count=1,
+            ),
+        ]
+    )
+    revived, updated = revive_deferred(state, now)
+    assert [r.domain for r in revived] == ["到期复活"]
+    a = next(s for s in updated.active if s.domain == "到期复活")
+    assert a.status == "active"
+    assert a.created_at == now.isoformat()  # fresh TTL window
+    assert a.deferred_at == ""
+    assert a.deferred_until == ""
+    assert a.defer_count == 1  # preserved
+    b = next(s for s in updated.active if s.domain == "仍在搁置")
+    assert b.status == "deferred"  # untouched
+
+
+def test_revive_deferred_clamps_threshold_ready_count() -> None:
+    now = datetime(2026, 7, 20, 12, 0, 0)
+    state = SpeculativeState(
+        active=[
+            SpeculativeInterest(
+                domain="满阈值搁置",
+                status="deferred",
+                confirmation_count=3,
+                confirmation_threshold=3,
+                deferred_until="2026-07-01T00:00:00",
+                defer_count=1,
+            )
+        ]
+    )
+    revived, updated = revive_deferred(state, now)
+    assert len(revived) == 1
+    a = next(s for s in updated.active if s.domain == "满阈值搁置")
+    assert a.status == "active"
+    assert a.confirmation_count == a.confirmation_threshold - 1  # clamped below threshold
+
+
+def test_expire_stale_ignores_deferred_item() -> None:
+    now = datetime(2026, 7, 20, 12, 0, 0)
+    state = SpeculativeState(
+        active=[
+            SpeculativeInterest(
+                domain="搁置的老探针",
+                status="deferred",
+                created_at="2026-01-01T00:00:00",  # far past any TTL
+                ttl_days=3,
+                deferred_until="2026-12-01T00:00:00",
+                defer_count=1,
+            )
+        ]
+    )
+    rejected, updated = expire_stale(state, now, 30)
+    assert rejected == []
+    assert any(s.domain == "搁置的老探针" and s.status == "deferred" for s in updated.active)
+
+
+async def test_tick_revives_after_promote_no_same_pass_promotion(tmp_path: Path) -> None:
+    from openbiliclaw.soul.profile import OnionProfile
+
+    # A deferred item that is threshold-ready and past its snooze window.
+    # If revive ran BEFORE promote, it would be promoted this pass (bad).
+    save_speculative_state(
+        tmp_path,
+        SpeculativeState(
+            active=[
+                SpeculativeInterest(
+                    domain="将复活满阈值",
+                    status="deferred",
+                    confirmation_count=3,
+                    confirmation_threshold=3,
+                    deferred_until="2026-01-01T00:00:00",  # long past
+                    defer_count=1,
+                )
+            ]
+        ),
+    )
+    speculator = InterestSpeculator(llm_service=None, data_dir=tmp_path)
+    await speculator.tick(OnionProfile())
+
+    state = load_speculative_state(tmp_path)
+    item = next(s for s in state.active if s.domain == "将复活满阈值")
+    assert item.status == "active"  # revived, NOT promoted
+    assert item.confirmation_count == item.confirmation_threshold - 1  # clamped
+
+
+def test_normalize_feedback_history_preserves_defer_fields() -> None:
+    raw = [
+        {
+            "domain": "桌游",
+            "response": "defer",
+            "resulting_action": "deferred",
+            "deferred_until": "2026-07-12T00:00:00",
+            "defer_count": 2,
+        }
+    ]
+    normalized = normalize_probe_feedback_history(raw)
+    assert len(normalized) == 1
+    entry = normalized[0]
+    assert entry["deferred_until"] == "2026-07-12T00:00:00"
+    assert entry["defer_count"] == 2
