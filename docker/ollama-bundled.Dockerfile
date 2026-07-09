@@ -13,12 +13,28 @@ ARG BGE_M3_MODEL_DIGEST=daec91ffb5dd0c27411bd71f29932917c49cf529a641d0168496c3a5
 # (NOT /root/.ollama — a runtime named volume mounted there would shadow it),
 # then drop the build-time store so nothing double-counts.
 RUN set -eux; \
-    ollama serve & pid=$!; \
-    trap 'kill "$pid" 2>/dev/null || true' EXIT; \
-    i=0; while [ "$i" -lt 30 ]; do ollama list >/dev/null 2>&1 && break; i=$((i+1)); sleep 1; done; \
+    pid=""; \
+    start_ollama() { \
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then \
+            if ollama list >/dev/null 2>&1; then \
+                return 0; \
+            fi; \
+            kill "$pid" 2>/dev/null || true; \
+            sleep 1; \
+        fi; \
+        ollama serve & pid="$!"; \
+        i=0; \
+        while [ "$i" -lt 30 ]; do \
+            ollama list >/dev/null 2>&1 && return 0; \
+            i=$((i+1)); \
+            sleep 1; \
+        done; \
+        return 1; \
+    }; \
+    trap '[ -z "$pid" ] || kill "$pid" 2>/dev/null || true' EXIT; \
     model_blob="/root/.ollama/models/blobs/sha256-${BGE_M3_MODEL_DIGEST}"; \
     attempts=0; \
-    until ollama pull bge-m3 && [ -f "$model_blob" ]; do \
+    until start_ollama && ollama pull bge-m3 && [ -f "$model_blob" ]; do \
         attempts=$((attempts + 1)); \
         if [ "$attempts" -ge 3 ]; then \
             find /root/.ollama/models -maxdepth 4 -type f -print | sort >&2 || true; \
