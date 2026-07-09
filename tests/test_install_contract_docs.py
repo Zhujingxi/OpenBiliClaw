@@ -194,12 +194,14 @@ def test_ollama_bundled_dockerfile_retries_model_pull_before_verification() -> N
         "COPY docker/seed-bge-m3.sh", maxsplit=1
     )[0]
 
-    assert "until ollama pull bge-m3" in run_block
+    assert 'model_blob="/root/.ollama/models/blobs/sha256-${BGE_M3_MODEL_DIGEST}"' in run_block
+    assert 'until ollama pull bge-m3 && [ -f "$model_blob" ]; do' in run_block
     assert "attempts=$((attempts + 1))" in run_block
+    assert "find /root/.ollama/models" in run_block
 
     between_pull_and_verify = run_block[
         run_block.index("ollama pull bge-m3") : run_block.index(
-            'test -f "/root/.ollama/models/blobs/sha256-${BGE_M3_MODEL_DIGEST}"'
+            "cp -a /root/.ollama/models/blobs /opt/bge-m3-seed/blobs"
         )
     ]
     assert 'kill "$pid"' not in between_pull_and_verify
