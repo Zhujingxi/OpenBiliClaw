@@ -6337,6 +6337,135 @@ def test_fetch_xhs_handles_timeout_status(monkeypatch: pytest.MonkeyPatch) -> No
 # ── Password gate CLI (set-password / init prompt) ──────────────────────────
 
 
+def _extension_key_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> tuple[Path, "config_module.Config"]:
+    root = tmp_path / "runtime"
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(root))
+    cfg = config_module.Config()
+    config_module.save_config(cfg, root / "config.toml")
+    return root, cfg
+
+
+def test_ext_key_generate_persists_digest_once_and_keeps_switch_off(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    from openbiliclaw.auth_core import parse_extension_access_key
+
+    _root, _cfg = _extension_key_runtime(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["ext-key", "generate"])
+    assert result.exit_code == 0, result.stdout
+
+    loaded = config_module.load_config()
+    assert loaded.api.auth.extension_access_enabled is False
+    assert len(loaded.api.auth.extension_access_keys) == 1
+    record = loaded.api.auth.extension_access_keys[0]
+    key_id, digest = record.split(":")
+    assert len(key_id) == 12
+    assert len(digest) == 64
+    assert record not in result.stdout
+    full_keys = [part for part in result.stdout.split() if part.startswith("obc_ext_")]
+    assert len(full_keys) == 1
+    assert parse_extension_access_key(full_keys[0]) is not None
+
+
+def test_ext_key_list_never_prints_digest_or_secret(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    from openbiliclaw.auth_core import generate_extension_access_key
+
+    _root, cfg = _extension_key_runtime(monkeypatch, tmp_path)
+    key_id, full_key, record = generate_extension_access_key()
+    cfg.api.auth.extension_access_keys = [record]
+    config_module.save_config(cfg)
+
+    result = runner.invoke(app, ["ext-key", "list"])
+    assert result.exit_code == 0
+    assert key_id in result.stdout
+    assert record.split(":", 1)[1] not in result.stdout
+    assert full_key not in result.stdout
+
+
+def test_ext_key_enable_disable_requires_key_and_preserves_records(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    from openbiliclaw.auth_core import generate_extension_access_key
+
+    _root, cfg = _extension_key_runtime(monkeypatch, tmp_path)
+    no_key = runner.invoke(app, ["ext-key", "enable"])
+    assert no_key.exit_code == 1
+
+    _key_id, _full_key, record = generate_extension_access_key()
+    cfg.api.auth.extension_access_keys = [record]
+    config_module.save_config(cfg)
+    assert runner.invoke(app, ["ext-key", "enable"]).exit_code == 0
+    assert config_module.load_config().api.auth.extension_access_enabled is True
+
+    assert runner.invoke(app, ["ext-key", "disable"]).exit_code == 0
+    loaded = config_module.load_config()
+    assert loaded.api.auth.extension_access_enabled is False
+    assert loaded.api.auth.extension_access_keys == [record]
+
+
+def test_ext_key_revoke_removes_one_key_and_bumps_epoch(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    from openbiliclaw.auth_core import generate_extension_access_key
+    from openbiliclaw.storage.database import Database
+
+    _root, cfg = _extension_key_runtime(monkeypatch, tmp_path)
+    first_id, _first_key, first_record = generate_extension_access_key()
+    _second_id, _second_key, second_record = generate_extension_access_key()
+    cfg.api.auth.extension_access_keys = [first_record, second_record]
+    config_module.save_config(cfg)
+
+    result = runner.invoke(app, ["ext-key", "revoke", first_id])
+    assert result.exit_code == 0, result.stdout
+    loaded = config_module.load_config()
+    assert loaded.api.auth.extension_access_keys == [second_record]
+    db = Database(loaded.data_path / "openbiliclaw.db")
+    db.initialize()
+    try:
+        assert db.get_auth_epoch() == 1
+    finally:
+        db.close()
+
+
+def test_ext_key_revoke_rolls_back_config_when_epoch_bump_fails(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    from openbiliclaw.auth_core import generate_extension_access_key
+
+    root, cfg = _extension_key_runtime(monkeypatch, tmp_path)
+    key_id, _full_key, record = generate_extension_access_key()
+    cfg.api.auth.extension_access_keys = [record]
+    config_module.save_config(cfg)
+    before = (root / "config.toml").read_bytes()
+    monkeypatch.setattr(cli_module, "_bump_auth_epoch", lambda _cfg: False)
+
+    result = runner.invoke(app, ["ext-key", "revoke", key_id])
+    assert result.exit_code == 1
+    assert (root / "config.toml").read_bytes() == before
+    assert config_module.load_config().api.auth.extension_access_keys == [record]
+
+
+@pytest.mark.parametrize("mode", ["env", "local"])
+def test_ext_key_writes_refuse_shadowed_auth_config(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path, mode: str
+) -> None:
+    root, _cfg = _extension_key_runtime(monkeypatch, tmp_path)
+    if mode == "env":
+        monkeypatch.setenv("OPENBILICLAW_API_AUTH_ENABLED", "true")
+    else:
+        (root / "config.local.toml").write_text(
+            "[api.auth]\nextension_access_enabled = false\n", encoding="utf-8"
+        )
+
+    result = runner.invoke(app, ["ext-key", "generate"])
+    assert result.exit_code == 1
+    assert config_module.load_config().api.auth.extension_access_keys == []
+
+
 def test_set_password_command_sets_enables_and_disables(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
 ) -> None:
