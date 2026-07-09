@@ -23,8 +23,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
-import socket
-import struct
+import secrets
 import time
 from typing import TYPE_CHECKING
 
@@ -33,6 +32,7 @@ if TYPE_CHECKING:
 
 COOKIE_NAME = "obc_session"
 CSRF_HEADER = "x-obc-auth"
+EXTENSION_ACCESS_KEY_PREFIX = "obc_ext_"
 
 _SCRYPT_N = 2**14
 _SCRYPT_R = 8
@@ -107,6 +107,66 @@ def verify_password(plain: str, stored: str) -> bool:
     except (ValueError, MemoryError):
         return False
     return hmac.compare_digest(actual, expected)
+
+
+# ── extension device access keys ────────────────────────────────────────────
+
+
+def generate_extension_access_key() -> tuple[str, str, str]:
+    """Create an extension access key and its digest-only configuration record."""
+    key_id = secrets.token_hex(6)
+    secret = secrets.token_urlsafe(32)
+    full_key = f"{EXTENSION_ACCESS_KEY_PREFIX}{key_id}.{secret}"
+    digest = hashlib.sha256(secret.encode("utf-8")).hexdigest()
+    return key_id, full_key, f"{key_id}:{digest}"
+
+
+def parse_extension_access_key(value: str) -> tuple[str, str] | None:
+    """Parse a well-formed extension access key into its ID and secret."""
+    if not value.startswith(EXTENSION_ACCESS_KEY_PREFIX):
+        return None
+    body = value.removeprefix(EXTENSION_ACCESS_KEY_PREFIX)
+    if body.count(".") != 1:
+        return None
+    key_id, secret = body.split(".")
+    if len(key_id) != 12 or any(char not in "0123456789abcdef" for char in key_id):
+        return None
+    if not secret:
+        return None
+    return key_id, secret
+
+
+def _parse_extension_access_record(value: str) -> tuple[str, str] | None:
+    if value.count(":") != 1:
+        return None
+    key_id, digest = value.split(":")
+    if len(key_id) != 12 or any(char not in "0123456789abcdef" for char in key_id):
+        return None
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        return None
+    return key_id, digest
+
+
+def verify_extension_access_key(value: str, records: Iterable[str]) -> bool:
+    """Verify a device access key against digest-only configuration records."""
+    parsed = parse_extension_access_key(value)
+    if parsed is None:
+        return False
+    key_id, secret = parsed
+    actual_digest = hashlib.sha256(secret.encode("utf-8")).hexdigest()
+    for record in records:
+        parsed_record = _parse_extension_access_record(record)
+        if parsed_record is None:
+            continue
+        record_id, expected_digest = parsed_record
+        if record_id == key_id and hmac.compare_digest(actual_digest, expected_digest):
+            return True
+    return False
+
+
+def extension_access_key_ids(records: Iterable[str]) -> list[str]:
+    """Return IDs from valid extension access-key records in input order."""
+    return [parsed[0] for record in records if (parsed := _parse_extension_access_record(record))]
 
 
 # ── password fingerprint (stable across restarts; §4.7 v7) ──────────────────
@@ -197,35 +257,7 @@ def verify_token(
 # ── IP / proxy handling (§4.1, §6) ──────────────────────────────────────────
 
 _LOOPBACK = frozenset({"127.0.0.1", "::1"})
-
-
-def _detect_default_gateway() -> str | None:
-    """Read ``/proc/net/route`` and return the default gateway IP.
-
-    In a Docker container this is the bridge gateway (e.g. 172.18.0.1),
-    which is the only source IP that host-local requests can carry after
-    the kernel rewrites loopback through the bridge.  On a bare-metal /
-    VM host this is the LAN router, which never appears as a TCP source
-    for the local app — adding it is harmless.
-
-    Returns ``None`` when the file is unavailable (Windows, macOS, etc.).
-    """
-    try:
-        with open("/proc/net/route") as fh:
-            for line in fh:
-                parts = line.split()
-                # default route: destination=0, mask=0
-                if parts[1] == "00000000" and parts[7] == "00000000":
-                    return socket.inet_ntoa(struct.pack("<I", int(parts[2], 16)))
-    except (OSError, IndexError, ValueError):
-        pass
-    return None
-
-
-_GATEWAY_IP = _detect_default_gateway()
-_TRUSTED_LOCAL_IPS: frozenset[str] = (
-    _LOOPBACK | frozenset({_GATEWAY_IP}) if _GATEWAY_IP else _LOOPBACK
-)
+_TRUSTED_LOCAL_IPS = _LOOPBACK
 _FORWARD_HEADERS = ("x-forwarded-for", "x-real-ip", "forwarded")
 
 

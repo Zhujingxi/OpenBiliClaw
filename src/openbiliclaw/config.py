@@ -58,6 +58,7 @@ _SUPPORTED_CHAT_PROVIDERS = {
 _MIN_POOL_TARGET_COUNT = 1
 _MAX_POOL_TARGET_COUNT = 600
 _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS = 90
+_DEFAULT_EXTENSION_TOKEN_TTL_HOURS = 24
 _DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS = 60
 _DEFAULT_SIGNAL_EVENT_THRESHOLD = 6
 _DEFAULT_TRENDING_REFRESH_HOURS = 3
@@ -743,8 +744,9 @@ class ApiAuthConfig:
     trust_loopback: bool = True
     trusted_proxies: list[str] = field(default_factory=list)
     allowed_bearer_origins: list[str] = field(default_factory=list)
-    allowed_extension_ids: list[str] = field(default_factory=list)
-    verify_extension_id: bool = False
+    extension_access_enabled: bool = False
+    extension_access_keys: list[str] = field(default_factory=list)
+    extension_token_ttl_hours: int = _DEFAULT_EXTENSION_TOKEN_TTL_HOURS
 
 
 @dataclass
@@ -1375,6 +1377,19 @@ def _coerce_ttl_hours(value: object) -> int:
     return 0
 
 
+def _coerce_extension_token_ttl_hours(value: object) -> int:
+    """Normalize extension token TTL to the supported 1..168 hour range."""
+    if isinstance(value, bool):
+        return _DEFAULT_EXTENSION_TOKEN_TTL_HOURS
+    try:
+        ttl = int(value) if isinstance(value, int | str) else -1
+    except ValueError:
+        return _DEFAULT_EXTENSION_TOKEN_TTL_HOURS
+    if 1 <= ttl <= 168:
+        return ttl
+    return _DEFAULT_EXTENSION_TOKEN_TTL_HOURS
+
+
 def config_local_auth_keys() -> set[str]:
     """``[api.auth]`` keys pinned in ``config.local.toml`` (the override layer that
     ``load_config`` merges OVER ``config.toml``, local winning).
@@ -1471,7 +1486,6 @@ API_AUTH_ENV_VARS: tuple[str, ...] = (
     "OPENBILICLAW_API_AUTH_SESSION_SECRET",
     "OPENBILICLAW_API_AUTH_SESSION_TTL_HOURS",
     "OPENBILICLAW_API_AUTH_TRUST_LOOPBACK",
-    "OPENBILICLAW_API_AUTH_VERIFY_EXTENSION_ID",
 )
 
 
@@ -1528,10 +1542,10 @@ def _build_api_auth(api_raw: dict[str, Any]) -> ApiAuthConfig:
         ),
         trusted_proxies=_coerce_str_list(auth_raw.get("trusted_proxies", [])),
         allowed_bearer_origins=_coerce_str_list(auth_raw.get("allowed_bearer_origins", [])),
-        allowed_extension_ids=_coerce_str_list(auth_raw.get("allowed_extension_ids", [])),
-        verify_extension_id=_coerce_bool(
-            _env("OPENBILICLAW_API_AUTH_VERIFY_EXTENSION_ID")
-            or auth_raw.get("verify_extension_id", False)
+        extension_access_enabled=_coerce_bool(auth_raw.get("extension_access_enabled", False)),
+        extension_access_keys=_coerce_str_list(auth_raw.get("extension_access_keys", [])),
+        extension_token_ttl_hours=_coerce_extension_token_ttl_hours(
+            auth_raw.get("extension_token_ttl_hours", _DEFAULT_EXTENSION_TOKEN_TTL_HOURS)
         ),
     )
 
@@ -2088,8 +2102,9 @@ _LOCAL_AUTH_KEY_TO_FIELD = {
     "trust_loopback": "trust_loopback",
     "trusted_proxies": "trusted_proxies",
     "allowed_bearer_origins": "allowed_bearer_origins",
-    "allowed_extension_ids": "allowed_extension_ids",
-    "verify_extension_id": "verify_extension_id",
+    "extension_access_enabled": "extension_access_enabled",
+    "extension_access_keys": "extension_access_keys",
+    "extension_token_ttl_hours": "extension_token_ttl_hours",
 }
 
 
@@ -2240,14 +2255,19 @@ def _api_auth_lines(
         lambda v: _toml_str_list(_coerce_str_list(v)),
     )
     emit(
-        "allowed_extension_ids",
-        f"allowed_extension_ids = {_toml_str_list(auth.allowed_extension_ids)}",
+        "extension_access_enabled",
+        f"extension_access_enabled = {_toml_bool(auth.extension_access_enabled)}",
+        lambda v: _toml_bool(_coerce_bool(v)),
+    )
+    emit(
+        "extension_access_keys",
+        f"extension_access_keys = {_toml_str_list(auth.extension_access_keys)}",
         lambda v: _toml_str_list(_coerce_str_list(v)),
     )
     emit(
-        "verify_extension_id",
-        f"verify_extension_id = {_toml_bool(auth.verify_extension_id)}",
-        lambda v: _toml_bool(_coerce_bool(v)),
+        "extension_token_ttl_hours",
+        f"extension_token_ttl_hours = {auth.extension_token_ttl_hours}",
+        lambda v: str(_coerce_extension_token_ttl_hours(v)),
     )
     return lines
 
