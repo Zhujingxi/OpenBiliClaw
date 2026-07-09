@@ -31,7 +31,6 @@ def test_extension_origins_recognize_mixed_case_schemes() -> None:
         f"mOz-ExTeNsIoN://{extension_id}",
     ):
         assert ac.is_extension_origin(origin) is True
-        assert ac.extract_extension_id(origin) == extension_id
 
 
 def test_trusted_local_ips_are_loopback_only() -> None:

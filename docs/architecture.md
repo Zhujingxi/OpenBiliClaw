@@ -107,7 +107,7 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 - 局域网 / 远程访问的**可选密码门禁**。`create_app()` 在 degraded-mode guard 之后用 `@app.middleware("http")` 注册鉴权中间件（更外层、最先执行），挡所有 `/api/*`（含 `/api/runtime-stream` WS 与 `/api/image-proxy`）；`/api/health`、`/api/qr-info`、`/api/auth/*` 与静态壳（`/`、`/m`、`/web`）保持公开。桌面 / 插件二维码只通过 `/api/qr-info` 取 `lan_ip`，避免扫码入口触发 `/api/health` 的 embedding readiness probe。
 - `auth_core.py` 纯标准库：scrypt 密码哈希、HMAC 无状态签名 token、稳定密码指纹、反向代理 `X-Forwarded-For`（受信代理从右向左解析、fail-closed）与 Origin / scheme 归一化（CSRF `Origin==Host`、WS Origin、Bearer 裁定、`Secure` cookie 复用同一实现）。
 - 默认凭据是 HttpOnly cookie `obc_session`（同源 fetch/img/WS 自动携带，前端不持有 token）；跨源限时 Bearer 为允许列表内逃生通道。改密 / 登出所有设备 / 轮换密钥经 SQLite `auth_state` 表的单调 `auth_epoch` 真正撤销所有设备；`session_secret` / `password_hash` 永不经 `GET /api/config` 返回。详见 [API Auth 模块](modules/api-auth.md)。
-- 浏览器扩展认证：`is_extension_origin()` 识别 `chrome-extension://` / `moz-extension://` origin，`pick_token()` 和登录端点对扩展走独立分支（不依赖 `allowed_bearer_origins`）；扩展统一通过 `?token=...` query-param 传 token（GET / WebSocket / `<img src>` 无法设自定义 header）。`_extension_allowed()` 根据 `verify_extension_id`（默认 `false`）+ `allowed_extension_ids` 校验扩展身份；`ext-key` CLI 命令组提供密钥生成和白名单管理。Docker 部署时 `_detect_default_gateway()` 将宿主机网关 IP 加入可信本地集合。`authorize_websocket()` 先尝试 token 验证，有效则跳过 origin 检查，保证扩展 WebSocket 可用。
+- 远程浏览器扩展认证默认关闭：`ext-key generate` 只把设备密钥 SHA-256 摘要写入配置，`ext-key enable` 后 `/api/auth/extension-token` 才可用。扩展用长期设备密钥换取最长 168 小时的短会话；普通 HTTP 走 `Authorization: Bearer`，只有 WebSocket 和 `/api/image-proxy` 因浏览器接口限制使用短会话 query。撤销任一设备密钥会提升全局 `auth_epoch`，立即失效所有现有会话。远程扩展不依赖可伪造的 Origin 或 Docker 网关信任。
 
 ### Side Panel Durable Chat
 

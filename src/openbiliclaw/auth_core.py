@@ -485,34 +485,6 @@ def is_extension_origin(origin: str | None) -> bool:
     return normalized.startswith(_EXT_SCHEMES[0]) or normalized.startswith(_EXT_SCHEMES[1])
 
 
-def extract_extension_id(origin: str | None) -> str | None:
-    """Extract the extension ID from a ``chrome-extension://<id>`` or
-    ``moz-extension://<id>`` origin.  Returns ``None`` for non-extension origins.
-    """
-    if not origin:
-        return None
-    normalized = origin.lower()
-    for scheme in _EXT_SCHEMES:
-        if normalized.startswith(scheme):
-            return origin[len(scheme) :].rstrip("/") or None
-    return None
-
-
-def extension_id_allowed(ext_id: str | None, allowed_ids: Iterable[str]) -> bool:
-    """Whether an extension ID is in the allow-list (case-sensitive exact match).
-
-    Returns ``False`` when *ext_id* is ``None`` or *allowed_ids* is empty —
-    the caller (``AuthGate._extension_allowed``) is responsible for deciding
-    whether to call this function at all based on ``verify_extension_id``.
-    """
-    if ext_id is None:
-        return False
-    allowed = list(allowed_ids)
-    if not allowed:
-        return False  # empty whitelist = no extensions permitted
-    return ext_id in allowed
-
-
 def header_present(headers: Mapping[str, str], names: Iterable[str] = _FORWARD_HEADERS) -> bool:
     lowered = {k.lower() for k in headers}
     return any(name in lowered for name in names)

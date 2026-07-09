@@ -28,12 +28,11 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `browser content <url>` | 获取页面文本内容 | ✅ |
 | `start` | 启动本地 API 服务 | ✅ |
 | `set-password` | 设置 / 修改局域网访问密码（`--disable` 关闭门禁 / `--logout-all` / `--rotate-secret`） | ✅ |
-| `ext-key generate` | 生成扩展 manifest key + 派生扩展 ID | ✅ |
-| `ext-key enable` | 启用扩展 ID 白名单校验（`verify_extension_id=true`） | ✅ |
-| `ext-key disable` | 禁用扩展 ID 白名单校验（`verify_extension_id=false`） | ✅ |
-| `ext-key add <id>` | 将扩展 ID 加入白名单 | ✅ |
-| `ext-key remove <id>` | 将扩展 ID 移出白名单 | ✅ |
-| `ext-key status` | 查看扩展密钥状态与白名单 | ✅ |
+| `ext-key generate` | 生成并保存一个扩展设备访问密钥（明文只显示一次） | ✅ |
+| `ext-key enable` | 开启远程扩展设备认证（默认关闭） | ✅ |
+| `ext-key disable` | 关闭新会话交换但保留密钥摘要 | ✅ |
+| `ext-key list` | 仅列出设备 key ID 和开关状态 | ✅ |
+| `ext-key revoke <key-id>` | 撤销设备密钥并立即失效所有现有会话 | ✅ |
 | `autostart status` | 查看开机自启动配置、系统注册和平台支持状态 | ✅ |
 | `autostart enable` | 注册当前用户登录自启动并写入 `[autostart].enabled=true` | ✅ |
 | `autostart disable` | 移除当前用户登录自启动并写入 `[autostart].enabled=false` | ✅ |
@@ -336,45 +335,36 @@ $ openbiliclaw set-password --rotate-secret
 
 ### `openbiliclaw ext-key`
 
-管理浏览器扩展的 manifest key 与 ID 白名单（写入 `[api.auth]`，见 [配置参考](config.md#apiauth)）。用于跨设备部署场景：管理员生成密钥后分发给远端扩展，扩展将 key 嵌入 manifest.json，后端按 ID 白名单校验连接合法性。
+管理跨设备浏览器扩展的设备访问密钥。配置只保存密钥摘要；完整密钥只在生成时显示一次，由用户填入目标扩展的设置页。该能力默认关闭。
 
 ```bash
-# 生成 manifest key + 派生扩展 ID
+# 生成密钥（完整密钥只显示一次，总开关仍关闭）
 $ openbiliclaw ext-key generate
-扩展密钥生成结果
-  Extension ID: abcdefghijklmnopqrstuvwxyz
-  Origin: chrome-extension://abcdefghijklmnopqrstuvwxyz
-  manifest key: MII... (2048-bit Base64)
+设备访问密钥已生成
+  Key ID: a1b2c3d4e5f6
+  obc_ext_a1b2c3d4e5f6.<secret>
 
-# 启用扩展 ID 白名单校验
+# 至少有一个密钥后显式开启
 $ openbiliclaw ext-key enable
 
-# 禁用扩展 ID 白名单校验
+# 暂停签发新短会话，保留密钥摘要
 $ openbiliclaw ext-key disable
 
-# 将扩展 ID 加入白名单
-$ openbiliclaw ext-key add abcdefghijklmnopqrstuvwxyz
+# 只查看 key ID，不打印摘要或 secret
+$ openbiliclaw ext-key list
 
-# 将扩展 ID 移出白名单
-$ openbiliclaw ext-key remove abcdefghijklmnopqrstuvwxyz
-
-# 查看扩展密钥状态与白名单
-$ openbiliclaw ext-key status
-扩展密钥状态
-  校验状态: 已启用
-  白名单: abcdefghijklmnopqrstuvwxyz
+# 撤销设备；同时使全部 Web / 扩展会话立即失效
+$ openbiliclaw ext-key revoke a1b2c3d4e5f6
 ```
 
 子命令：
 
-- `generate`：使用 openssl 生成 2048-bit RSA 密钥并派生 Chrome 扩展 ID。生成的 key 需手动嵌入扩展的 `manifest.json`。
-- `enable`：设置 `verify_extension_id=true`，开启白名单校验。
-- `disable`：设置 `verify_extension_id=false`，关闭白名单校验（适合私有部署）。
-- `add <id>`：将指定扩展 ID 加入 `allowed_extension_ids`。
-- `remove <id>`：将指定扩展 ID 移出 `allowed_extension_ids`。
-- `status`：显示当前校验状态和白名单内容。
+- `generate`：生成 256-bit 随机 secret，配置只写 `key_id:sha256(secret)`；不会自动开启总开关。
+- `enable` / `disable`：控制 `/api/auth/extension-token` 是否签发新短会话，密钥摘要保留。
+- `list`：只显示 key ID。
+- `revoke <key-id>`：删除一个摘要并提升 `auth_epoch`。若运行库不可写，配置会回滚且命令失败。
 
-> **本地请求免除校验**：即使 `verify_extension_id=true`，本地请求（127.0.0.1 / Docker 桥接 IP）仍免除扩展 ID 校验，遵循 `local = trusted` 原则。白名单仅对远程请求生效。
+所有写命令在 auth 配置受环境变量或 `config.local.toml` 覆盖时拒绝执行，避免显示成功但重启后失效。
 
 ### `openbiliclaw autostart`
 
