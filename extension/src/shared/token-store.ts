@@ -1,17 +1,13 @@
-/**
- * OpenBiliClaw — auth token cache.
- *
- * Reads/writes the session token in chrome.storage.local and keeps an
- * in-memory cache so synchronous callers (e.g. apiUrl/wsUrl) don't need
- * to await storage.  This module imports NOTHING from the rest of the
- * extension — it is the leaf of the dependency chain and intentionally
- * avoids any circular-import risk.
- */
+/** Persistent device credential and short-lived extension session storage. */
 
-const AUTH_TOKEN_KEY = "obc_auth_token";
+export const DEVICE_KEY_STORAGE_KEY = "obc_extension_device_key";
+export const SESSION_STORAGE_KEY = "obc_auth_session";
+const LEGACY_KEYS = ["obc_auth_password", "obc_auth_token"];
 
-let cachedToken: string | null = null;
-let tokenLoaded = false;
+export interface DeviceSession {
+  token: string;
+  expires_at: number;
+}
 
 interface ChromeStorageLike {
   get?: (key: string | string[], cb: (items: Record<string, unknown>) => void) => void;
@@ -19,52 +15,106 @@ interface ChromeStorageLike {
   remove?: (key: string | string[], cb?: () => void) => void;
 }
 
+let cachedSession: DeviceSession | null = null;
+let sessionLoaded = false;
+
 function getStorage(): ChromeStorageLike | null {
   try {
-    const c = (globalThis as { chrome?: { storage?: { local?: ChromeStorageLike } } }).chrome;
-    return c?.storage?.local ?? null;
+    const chromeApi = (globalThis as { chrome?: { storage?: { local?: ChromeStorageLike } } })
+      .chrome;
+    return chromeApi?.storage?.local ?? null;
   } catch {
     return null;
   }
 }
 
-export async function ensureTokenLoaded(): Promise<string | null> {
-  if (tokenLoaded) return cachedToken;
+function storageGet(keys: string | string[]): Promise<Record<string, unknown>> {
   const storage = getStorage();
-  if (!storage?.get) return null;
+  if (!storage?.get) return Promise.resolve({});
   return new Promise((resolve) => {
-    storage.get!([AUTH_TOKEN_KEY], (items) => {
-      const v = items?.[AUTH_TOKEN_KEY];
-      cachedToken = typeof v === "string" && v.trim() ? v.trim() : null;
-      tokenLoaded = true;
-      resolve(cachedToken);
-    });
+    try {
+      storage.get?.(keys, (items) => resolve(items ?? {}));
+    } catch {
+      resolve({});
+    }
   });
 }
 
-/** Synchronous read — returns the cached token (may be null before first load). */
-export function getToken(): string | null {
-  return cachedToken;
+function storageSet(items: Record<string, unknown>): Promise<void> {
+  const storage = getStorage();
+  if (!storage?.set) return Promise.resolve();
+  return new Promise((resolve) => {
+    try {
+      storage.set?.(items, () => resolve());
+    } catch {
+      resolve();
+    }
+  });
 }
 
-export async function setToken(token: string): Promise<void> {
-  cachedToken = token;
-  tokenLoaded = true;
+function storageRemove(keys: string | string[]): Promise<void> {
   const storage = getStorage();
-  if (storage?.set) {
-    await new Promise<void>((resolve) => {
-      storage.set!({ [AUTH_TOKEN_KEY]: token }, () => resolve());
-    });
-  }
+  if (!storage?.remove) return Promise.resolve();
+  return new Promise((resolve) => {
+    try {
+      storage.remove?.(keys, () => resolve());
+    } catch {
+      resolve();
+    }
+  });
 }
 
-export async function clearToken(): Promise<void> {
-  cachedToken = null;
-  tokenLoaded = true;
-  const storage = getStorage();
-  if (storage?.remove) {
-    await new Promise<void>((resolve) => {
-      storage.remove!(AUTH_TOKEN_KEY, () => resolve());
-    });
-  }
+function parseSession(value: unknown): DeviceSession | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const token = typeof raw.token === "string" ? raw.token.trim() : "";
+  const expiresAt = typeof raw.expires_at === "number" ? raw.expires_at : Number(raw.expires_at);
+  if (!token || !Number.isFinite(expiresAt) || expiresAt <= 0) return null;
+  return { token, expires_at: expiresAt };
+}
+
+export async function getDeviceKey(): Promise<string | null> {
+  const items = await storageGet(DEVICE_KEY_STORAGE_KEY);
+  const value = items[DEVICE_KEY_STORAGE_KEY];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+export async function setDeviceKey(key: string): Promise<void> {
+  await storageSet({ [DEVICE_KEY_STORAGE_KEY]: key.trim() });
+}
+
+export async function loadSession(): Promise<DeviceSession | null> {
+  if (sessionLoaded) return cachedSession;
+  const items = await storageGet(SESSION_STORAGE_KEY);
+  cachedSession = parseSession(items[SESSION_STORAGE_KEY]);
+  sessionLoaded = true;
+  return cachedSession;
+}
+
+export async function saveSession(session: DeviceSession): Promise<void> {
+  const parsed = parseSession(session);
+  if (!parsed) throw new Error("invalid_device_session");
+  cachedSession = parsed;
+  sessionLoaded = true;
+  await storageSet({ [SESSION_STORAGE_KEY]: parsed });
+}
+
+export async function clearSession(): Promise<void> {
+  cachedSession = null;
+  sessionLoaded = true;
+  await storageRemove(SESSION_STORAGE_KEY);
+}
+
+export async function clearDeviceKey(): Promise<void> {
+  await storageRemove(DEVICE_KEY_STORAGE_KEY);
+  await clearSession();
+}
+
+export async function clearLegacyCredentials(): Promise<void> {
+  await storageRemove(LEGACY_KEYS);
+}
+
+export function __resetTokenStoreForTests(): void {
+  cachedSession = null;
+  sessionLoaded = false;
 }

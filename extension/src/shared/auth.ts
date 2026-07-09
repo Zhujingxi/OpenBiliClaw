@@ -1,78 +1,115 @@
-/**
- * OpenBiliClaw — auth login + autoLogin.
- *
- * Calls POST /api/auth/login with the stored password to obtain a session
- * token (bearer mode), then caches it via token-store.ts.  The password is
- * also persisted so autoLogin can work across service-worker restarts.
- *
- * Dependency chain: auth.ts → backend-endpoint.ts → token-store.ts → (none)
- * No circular imports.
- */
+/** Device-key exchange and Bearer-authenticated extension HTTP requests. */
 
-import { apiUrl } from "./backend-endpoint.js";
-import { ensureTokenLoaded, getToken, setToken } from "./token-store.js";
+import { apiUrl } from "./backend-endpoint.ts";
+import {
+  clearLegacyCredentials,
+  clearSession,
+  getDeviceKey,
+  loadSession,
+  saveSession,
+} from "./token-store.ts";
 
-const AUTH_PASSWORD_KEY = "obc_auth_password";
+const SESSION_REFRESH_SKEW_SECONDS = 60;
 
-interface ChromeStorageLike {
-  get?: (key: string | string[], cb: (items: Record<string, unknown>) => void) => void;
-  set?: (items: Record<string, unknown>, cb?: () => void) => void;
+type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+interface EnsureSessionOptions {
+  force?: boolean;
+  fetchImpl?: FetchLike;
 }
 
-function getStorage(): ChromeStorageLike | null {
-  try {
-    const c = (globalThis as { chrome?: { storage?: { local?: ChromeStorageLike } } }).chrome;
-    return c?.storage?.local ?? null;
-  } catch {
-    return null;
-  }
+let refreshInFlight: Promise<string | null> | null = null;
+
+function sessionUsable(expiresAt: number, skewSeconds = 0): boolean {
+  return expiresAt > Date.now() / 1000 + skewSeconds;
 }
 
-export async function login(password: string): Promise<string | null> {
-  const url = await apiUrl("/auth/login");
+export async function getSessionToken(): Promise<string | null> {
+  const session = await loadSession();
+  return session && sessionUsable(session.expires_at) ? session.token : null;
+}
+
+async function exchangeDeviceKey(fetchImpl: FetchLike): Promise<string | null> {
+  const key = await getDeviceKey();
+  if (!key) return null;
+  let response: Response;
   try {
-    const resp = await fetch(url, {
+    response = await fetchImpl(await apiUrl("/auth/extension-token"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ key }),
     });
-    if (!resp.ok) return null;
-    const data = (await resp.json()) as { token?: string; ok?: boolean };
-    if (!data.ok || !data.token) return null;
-    await setToken(data.token);
-    await savePassword(password);
-    return data.token;
   } catch {
     return null;
   }
+  if (!response.ok) {
+    await clearSession();
+    return null;
+  }
+  const payload = (await response.json()) as {
+    ok?: boolean;
+    token?: string;
+    expires_at?: number;
+  };
+  if (!payload.ok || !payload.token || !Number.isFinite(payload.expires_at)) {
+    await clearSession();
+    return null;
+  }
+  await saveSession({ token: payload.token, expires_at: Number(payload.expires_at) });
+  await clearLegacyCredentials();
+  return payload.token;
+}
+
+export async function ensureSession(options: EnsureSessionOptions = {}): Promise<string | null> {
+  const force = options.force === true;
+  const current = await loadSession();
+  if (!force && current && sessionUsable(current.expires_at, SESSION_REFRESH_SKEW_SECONDS)) {
+    return current.token;
+  }
+  if (refreshInFlight) return refreshInFlight;
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
+  refreshInFlight = exchangeDeviceKey(fetchImpl).finally(() => {
+    refreshInFlight = null;
+  });
+  return refreshInFlight;
+}
+
+async function refreshAfterUnauthorized(
+  rejectedToken: string | null,
+  fetchImpl: FetchLike,
+): Promise<string | null> {
+  const current = await getSessionToken();
+  if (current && current !== rejectedToken) return current;
+  return ensureSession({ force: true, fetchImpl });
+}
+
+function withBearer(init: RequestInit, token: string | null): RequestInit {
+  const headers = new Headers(init.headers);
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  else headers.delete("Authorization");
+  return { ...init, headers };
+}
+
+export async function authenticatedFetch(
+  url: string | URL,
+  init: RequestInit = {},
+  fetchImpl: FetchLike = globalThis.fetch.bind(globalThis),
+): Promise<Response> {
+  const token = await ensureSession({ fetchImpl });
+  const first = await fetchImpl(url, withBearer(init, token));
+  if (first.status !== 401 || !token) return first;
+
+  const refreshed = await refreshAfterUnauthorized(token, fetchImpl);
+  if (!refreshed) return first;
+  return fetchImpl(url, withBearer(init, refreshed));
 }
 
 export async function autoLogin(): Promise<boolean> {
-  const existing = await ensureTokenLoaded();
-  if (existing) return true;
-  const password = await getStoredPassword();
-  if (!password) return false;
-  return (await login(password)) !== null;
+  return (await ensureSession()) !== null;
 }
 
-export async function savePassword(password: string): Promise<void> {
-  const storage = getStorage();
-  if (storage?.set) {
-    await new Promise<void>((resolve) => {
-      storage.set!({ [AUTH_PASSWORD_KEY]: password }, () => resolve());
-    });
-  }
-}
+export { clearSession } from "./token-store.ts";
 
-export async function getStoredPassword(): Promise<string | null> {
-  const storage = getStorage();
-  if (!storage?.get) return null;
-  return new Promise((resolve) => {
-    storage.get!([AUTH_PASSWORD_KEY], (items) => {
-      const v = items?.[AUTH_PASSWORD_KEY];
-      resolve(typeof v === "string" && v ? v : null);
-    });
-  });
+export function __resetAuthForTests(): void {
+  refreshInFlight = null;
 }
-
-export { getToken } from "./token-store.js";
