@@ -189,11 +189,11 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.158 (2026-07-06)**
+📌 Latest: **v0.3.161 (2026-07-09)**
 
-- **Fully automatic one-click embedding repair** — the "Retry" button is now a detect→remediate orchestrator: it auto-starts a stopped Ollama, auto-pulls a missing model, and precisely diagnoses disk-full / network / out-of-memory / proxy-hijack with actionable guidance — no more repeated clicking.
-- **First-launch embedding download progress is visible** — the desktop app's background bge-m3 pull (~1.1GB) is no longer a black box; the init page shows a live progress bar and an "Ollama starting…" phase.
-- **New MiniMax-M3 model** — 1M context with image/video input, added to the built-in provider menu and set as MiniMax's default model.
+- **Keyword generation mode in settings** — choose Classic, Hybrid, or Inspiration directly from the config UI to enable search-backed keyword inspiration.
+- **Keyword inspiration axis library** — keyword generation now reuses secondary interests, real search evidence, platform supply advantages, and historical yield for more specific platform-native queries.
+- **Diagnosable inspiration flow** — new dry-run and report surfaces show selected interests, grounding evidence, keyword provenance, and cohort performance.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 

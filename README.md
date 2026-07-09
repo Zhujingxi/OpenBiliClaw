@@ -209,11 +209,11 @@
 
 ## 最近更新
 
-📌 最新版本：**v0.3.158（2026-07-06）**
+📌 最新版本：**v0.3.161（2026-07-09）**
 
-- **向量模型一键修复全自动** —— 「重试」按钮变成检测→修复编排：Ollama 没起自动拉起、缺模型自动下载、磁盘满 / 网络 / 内存不足 / 代理劫持精确诊断并给指引，告别反复点击。
-- **首启向量模型下载进度可见** —— 桌面包首次启动后台拉取 bge-m3（约 1.1GB）不再是黑盒，初始化页显示实时进度条与「Ollama 启动中…」阶段。
-- **新增 MiniMax-M3 模型** —— 1M 上下文 / 图文视频输入，加入内置 provider 选单并设为 MiniMax 默认模型。
+- **搜索词生成模式可视化** —— 设置页新增「经典 / 混合 / 灵感」下拉，release 包里可直接切换 search-backed keyword inspiration。
+- **Keyword inspiration 轴库上线** —— 搜索词生成会复用二级兴趣、真实搜索证据、平台供给优势和历史 yield，产出更具体的平台化关键词。
+- **灵感链路可诊断** —— 新增 dry-run / report 调试入口，可查看 selected interests、grounding evidence、关键词溯源和 cohort 效果。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
