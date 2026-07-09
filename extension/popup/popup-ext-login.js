@@ -1,133 +1,76 @@
-/**
- * OpenBiliClaw — extension login for password-protected backends.
- *
- * When the backend has auth.enabled=true and the extension is running on a
- * non-localhost device (cross-device / Docker), cookie-based auth won't
- * work because SameSite=Lax cookies are not sent on cross-origin requests.
- * This module provides a password → token login flow that stores the
- * session token in chrome.storage.local so that popup-api.js and
- * popup-stream.js can inject it into every request.
- */
-const AUTH_TOKEN_KEY = "obc_auth_token";
-const AUTH_PASSWORD_KEY = "obc_auth_password";
+import {
+  pairDeviceKey,
+  popupAuthenticatedFetch,
+  readPopupSessionToken,
+} from "./popup-device-auth.js";
+
+const AUTH_ERRORS = {
+  invalid_device_key: "设备访问密钥无效或已撤销",
+  extension_access_disabled: "后端尚未开启扩展设备访问",
+  locked: "尝试次数过多，请稍后重试",
+  missing_device_key: "请输入设备访问密钥",
+  backend_unreachable: "无法连接后端",
+};
 
 export function initExtLogin(els = {}, opts = {}) {
   const getBaseUrl = opts.getBaseUrl;
   const doFetch = opts.fetchImpl || ((...args) => fetch(...args));
   const setStatus = (msg, ok = null) => {
-    if (els.status) {
-      els.status.textContent = msg;
-      els.status.style.color =
-        ok === true ? "#30b980" : ok === false ? "#ef7a86" : "";
-    }
+    if (!els.status) return;
+    els.status.textContent = msg;
+    els.status.style.color = ok === true ? "#30b980" : ok === false ? "#ef7a86" : "";
   };
-
-  async function getCachedToken() {
-    return new Promise((resolve) => {
-      try {
-        chrome.storage.local.get([AUTH_TOKEN_KEY], (items) => {
-          resolve(
-            typeof items?.[AUTH_TOKEN_KEY] === "string"
-              ? items[AUTH_TOKEN_KEY]
-              : null,
-          );
-        });
-      } catch {
-        resolve(null);
-      }
-    });
-  }
+  const showFields = (visible) => {
+    if (els.deviceKey) els.deviceKey.hidden = !visible;
+    if (els.btn) els.btn.hidden = !visible;
+  };
 
   async function checkAuthStatus() {
     try {
       const base = await getBaseUrl();
-      const cached = await getCachedToken();
-      // Include cached token so backend can report authenticated=true
-      const statusUrl = cached
-        ? `${base}/auth/status?token=${encodeURIComponent(cached)}`
-        : `${base}/auth/status`;
-      const res = await doFetch(statusUrl);
-      if (!res.ok) {
-        setStatus("无法连接后端", false);
-        return;
-      }
-      const data = await res.json();
+      const response = await popupAuthenticatedFetch(`${base}/auth/status`, {}, doFetch);
+      if (!response.ok) throw new Error("unreachable");
+      const data = await response.json();
       if (!data.enabled) {
-        setStatus("后端未开启密码，无需登录", true);
-        hideFields();
-        return;
+        setStatus("后端未开启访问控制，无需配对", true);
+        showFields(false);
+      } else if (data.authenticated || await readPopupSessionToken()) {
+        setStatus("设备已配对", true);
+        showFields(false);
+      } else {
+        setStatus("需要设备访问密钥", false);
+        showFields(true);
       }
-      if (data.authenticated) {
-        setStatus("已登录 ✓", true);
-        hideFields();
-        return;
-      }
-      setStatus(
-        cached ? "已缓存登录态（如仍无法连接请重新登录）" : "需要登录",
-        cached ? true : false,
-      );
-      showFields();
     } catch {
       setStatus("无法连接后端", false);
+      showFields(true);
     }
-  }
-
-  function hideFields() {
-    if (els.password) els.password.hidden = true;
-    if (els.btn) els.btn.hidden = true;
-  }
-
-  function showFields() {
-    if (els.password) els.password.hidden = false;
-    if (els.btn) els.btn.hidden = false;
   }
 
   async function handleLogin() {
-    const pw = els.password?.value?.trim();
-    if (!pw) {
-      setStatus("请输入密码", false);
+    const key = els.deviceKey?.value?.trim();
+    if (!key) {
+      setStatus(AUTH_ERRORS.missing_device_key, false);
       return;
     }
-    setStatus("登录中…");
+    setStatus("配对中…");
     try {
-      const base = await getBaseUrl();
-      const res = await doFetch(`${base}/auth/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: pw }),
-      });
-      if (!res.ok) {
-        setStatus(
-          res.status === 403
-            ? "扩展 ID 不在白名单（检查 allowed_extension_ids）"
-            : "密码错误",
-          false,
-        );
-        return;
-      }
-      const data = await res.json();
-      if (!data.ok || !data.token) {
-        setStatus("登录失败", false);
-        return;
-      }
-      await new Promise((r) =>
-        chrome.storage.local.set(
-          { [AUTH_TOKEN_KEY]: data.token, [AUTH_PASSWORD_KEY]: pw },
-          r,
-        ),
-      );
-      setStatus("登录成功 ✓ 重新连接中…", true);
-      setTimeout(() => chrome.runtime.reload(), 800);
-    } catch (e) {
-      setStatus(`登录失败: ${e.message}`, false);
+      await pairDeviceKey(key, { getBaseUrl, fetchImpl: doFetch });
+      if (els.deviceKey) els.deviceKey.value = "";
+      setStatus("配对成功，正在重新连接…", true);
+      showFields(false);
+      opts.onPaired?.();
+    } catch (error) {
+      setStatus(AUTH_ERRORS[error?.message] || "设备配对失败", false);
     }
   }
 
   if (els.btn) els.btn.addEventListener("click", handleLogin);
-  if (els.password)
-    els.password.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") handleLogin();
+  if (els.deviceKey) {
+    els.deviceKey.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") void handleLogin();
     });
+  }
   void checkAuthStatus();
-  return { checkAuthStatus };
+  return { checkAuthStatus, handleLogin };
 }

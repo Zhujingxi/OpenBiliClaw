@@ -57,7 +57,7 @@ import {
 } from "./popup-backend-config.js";
 import { initAuthControl } from "./popup-auth-control.js";
 import { initExtLogin } from "./popup-ext-login.js";
-import { readAuthToken } from "./popup-api.js";
+import { clearPopupSession, readPopupSessionToken } from "./popup-device-auth.js";
 import { initAutostartControl } from "./popup-autostart-control.js";
 import {
   createQrSvgMarkup,
@@ -268,7 +268,7 @@ async function setProxyImageSrc(image, coverUrl) {
   const path = buildImageProxyPath(coverUrl);
   if (!path) return false;
   const origin = await getBackendOrigin();
-  const token = await readAuthToken();
+  const token = await readPopupSessionToken();
   let url = `${origin}${path}`;
   if (token) url += `&token=${encodeURIComponent(token)}`;
   image.src = url;
@@ -283,7 +283,7 @@ async function setProxyImageSrc(image, coverUrl) {
 // cover can't stall the whole batch (the rest keep warming in the background).
 async function preloadCoverImages(items, { timeoutMs = 4000 } = {}) {
   const origin = await getBackendOrigin();
-  const token = await readAuthToken();
+  const token = await readPopupSessionToken();
   const loaders = (Array.isArray(items) ? items : [])
     .map((item) => {
       const path = item?.cover_url ? buildImageProxyPath(item.cover_url) : null;
@@ -5900,10 +5900,10 @@ function bindSettings() {
   );
 
   const extLogin = initExtLogin(
-    { password: document.getElementById("cfgExtLoginPassword"),
+    { deviceKey: document.getElementById("cfgExtDeviceKey"),
       btn: document.getElementById("cfgExtLoginBtn"),
       status: document.getElementById("cfgExtLoginStatus") },
-    { getBaseUrl: getBackendBaseUrl }
+    { getBaseUrl: getBackendBaseUrl, onPaired: connectRuntimeStream }
   );
 
   const autostartControl = initAutostartControl(
@@ -7108,6 +7108,7 @@ function bindSettings() {
         // new port these will retry on the fixed liveness cadence and the popup
         // status will flip to offline — exactly the signal the user
         // needs to remember to start the daemon with --port.
+        await clearPopupSession();
         connectRuntimeStream();
         state.online = await checkBackendStatus();
         setStatus(state.online);

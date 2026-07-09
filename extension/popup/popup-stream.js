@@ -1,7 +1,7 @@
 import { getBackendBaseUrl } from "./popup-backend-config.js";
+import { readPopupSessionToken } from "./popup-device-auth.js";
 
 const DEFAULT_BACKEND_URL = "http://127.0.0.1:8420/api";
-const AUTH_TOKEN_KEY = "obc_auth_token";
 
 export function createRuntimeStreamUrl(backendUrl = DEFAULT_BACKEND_URL, token = null) {
   const base = backendUrl.replace(/\/$/, "");
@@ -17,22 +17,6 @@ export function createRuntimeStreamUrl(backendUrl = DEFAULT_BACKEND_URL, token =
   return wsUrl;
 }
 
-/** Read the cached auth token from chrome.storage.local (if available). */
-async function readStoredToken() {
-  try {
-    const storage = globalThis.chrome?.storage?.local;
-    if (!storage?.get) return null;
-    return await new Promise((resolve) => {
-      storage.get([AUTH_TOKEN_KEY], (items) => {
-        const v = items?.[AUTH_TOKEN_KEY];
-        resolve(typeof v === "string" && v.trim() ? v.trim() : null);
-      });
-    });
-  } catch {
-    return null;
-  }
-}
-
 export function createRuntimeStreamClient({
   // ``backendUrl`` stays as a test-only override. Production callers
   // omit it and ``resolveBackendUrl`` reads the configured endpoint at
@@ -40,6 +24,7 @@ export function createRuntimeStreamClient({
   // the new origin without a full popup reload.
   backendUrl = null,
   resolveBackendUrl = getBackendBaseUrl,
+  resolveSessionToken = readPopupSessionToken,
   WebSocketImpl = globalThis.WebSocket,
   reconnectDelayMs = 1000,
   onEvent = () => {},
@@ -104,7 +89,7 @@ export function createRuntimeStreamClient({
         scheduleReconnect();
         return;
       }
-      const token = await readStoredToken();
+      const token = await resolveSessionToken();
       if (stopped) return;
       attachSocket(new WebSocketImpl(createRuntimeStreamUrl(resolved, token)));
     })();

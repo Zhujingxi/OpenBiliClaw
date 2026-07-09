@@ -1,5 +1,9 @@
 import { normalizeRecommendation, normalizeSavedItem } from "./popup-helpers.js";
 import { getBackendBaseUrl } from "./popup-backend-config.js";
+import {
+  ensurePopupSession,
+  popupAuthenticatedFetch,
+} from "./popup-device-auth.js";
 
 export const CONFIG_CACHE_KEY = "openbiliclaw.config_cache";
 export const CONFIG_PUT_TIMEOUT_MS = 60_000;
@@ -58,22 +62,21 @@ function withTimeout(signal, timeoutMs) {
 export async function requestJson(path, options = {}) {
   const backendUrl = await getBackendBaseUrl();
   const { timeoutMs, signal, ...fetchOptions } = options;
+  // Storage/session refresh is outside the request timeout budget.
+  const sessionToken = await ensurePopupSession();
   const timeout = withTimeout(signal, timeoutMs);
   const requestOptions = { ...fetchOptions };
   if (timeout.signal) {
     requestOptions.signal = timeout.signal;
   }
-  // Inject auth token from chrome.storage so cross-device requests
-  // bypass CSRF without requiring a cookie round-trip.  Harmless when
-  // no token is cached — the URL simply has no extra query-param.
-  const token = await readAuthToken();
-  let url = `${backendUrl}${path}`;
-  if (token) {
-    const sep = url.includes("?") ? "&" : "?";
-    url += `${sep}token=${encodeURIComponent(token)}`;
-  }
+  const url = `${backendUrl}${path}`;
   try {
-    const response = await fetch(url, requestOptions);
+    const response = await popupAuthenticatedFetch(
+      url,
+      requestOptions,
+      globalThis.fetch.bind(globalThis),
+      { sessionToken },
+    );
     if (!response.ok) {
       let details = null;
       try {
@@ -89,22 +92,6 @@ export async function requestJson(path, options = {}) {
     return response.json();
   } finally {
     timeout.cleanup();
-  }
-}
-
-/** Read the cached auth token from chrome.storage.local (if available). */
-export async function readAuthToken() {
-  try {
-    const storage = globalThis.chrome?.storage?.local;
-    if (!storage?.get) return null;
-    return await new Promise((resolve) => {
-      storage.get(["obc_auth_token"], (items) => {
-        const v = items?.["obc_auth_token"];
-        resolve(typeof v === "string" && v.trim() ? v.trim() : null);
-      });
-    });
-  } catch {
-    return null;
   }
 }
 
@@ -248,7 +235,9 @@ export function __resetPopupHealthCacheForTests() {
 export async function startEmbeddingRepair() {
   const backendUrl = await getBackendBaseUrl();
   try {
-    const response = await fetch(`${backendUrl}/embedding/repair`, { method: "POST" });
+    const response = await popupAuthenticatedFetch(`${backendUrl}/embedding/repair`, {
+      method: "POST",
+    });
     let payload = {};
     try {
       payload = await response.json();
@@ -265,7 +254,9 @@ export async function startEmbeddingRepair() {
 export async function fetchEmbeddingRepairStatus() {
   const backendUrl = await getBackendBaseUrl();
   try {
-    const response = await fetch(`${backendUrl}/embedding/repair`, { method: "GET" });
+    const response = await popupAuthenticatedFetch(`${backendUrl}/embedding/repair`, {
+      method: "GET",
+    });
     if (!response.ok) return null;
     return await response.json();
   } catch {

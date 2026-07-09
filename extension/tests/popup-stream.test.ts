@@ -19,6 +19,10 @@ test("createRuntimeStreamUrl converts backend http url to websocket runtime stre
     createRuntimeStreamUrl("http://127.0.0.1:19090/api"),
     "ws://127.0.0.1:19090/api/runtime-stream",
   );
+  assert.equal(
+    createRuntimeStreamUrl("https://api.example.com/api", "short-session"),
+    "wss://api.example.com/api/runtime-stream?token=short-session",
+  );
 });
 
 class FakeWebSocket {
@@ -114,6 +118,7 @@ test("runtime stream client resolves backend URL dynamically when no explicit ba
   const client = createRuntimeStreamClient({
     backendUrl: null,
     resolveBackendUrl: async () => "http://127.0.0.1:19090/api",
+    resolveSessionToken: async () => "session-token",
     WebSocketImpl: FakeWebSocket as never,
   });
 
@@ -121,7 +126,10 @@ test("runtime stream client resolves backend URL dynamically when no explicit ba
   // resolveBackendUrl is async — wait one microtask flush before checking.
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  assert.equal(FakeWebSocket.latest?.url, "ws://127.0.0.1:19090/api/runtime-stream");
+  assert.equal(
+    FakeWebSocket.latest?.url,
+    "ws://127.0.0.1:19090/api/runtime-stream?token=session-token",
+  );
   client.disconnect();
 });
 

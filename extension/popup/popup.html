@@ -5477,11 +5477,11 @@
           </p>
         </div>
         <div class="settings-field" id="extLoginField">
-          <label for="cfgExtLoginPassword">扩展登录密码</label>
+          <label for="cfgExtDeviceKey">设备访问密钥</label>
           <p class="settings-hint" id="cfgExtLoginStatus">检测认证状态…</p>
-          <input id="cfgExtLoginPassword" type="password" placeholder="输入后端访问密码" autocomplete="current-password">
-          <button id="cfgExtLoginBtn" type="button" class="settings-inline-btn">登录</button>
-          <p class="settings-hint">连接局域网后端时，若后端开启了密码门禁，在此输入密码。密码会缓存到本地自动登录。</p>
+          <input id="cfgExtDeviceKey" type="password" placeholder="obc_ext_…" autocomplete="off">
+          <button id="cfgExtLoginBtn" type="button" class="settings-inline-btn">配对</button>
+          <p class="settings-hint">在后端运行 <code>openbiliclaw ext-key generate</code> 获取；密钥只保存在本扩展中。</p>
         </div>
         <div class="settings-field" id="authControlField">
           <label>局域网访问密码</label>
