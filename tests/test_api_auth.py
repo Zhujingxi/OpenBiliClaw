@@ -209,6 +209,13 @@ def test_health_stays_public_when_enabled(tmp_path, monkeypatch) -> None:
     assert _remote(app).get("/api/health").status_code == 200
 
 
+def test_qr_info_stays_public_when_enabled(tmp_path, monkeypatch) -> None:
+    app, _ = _build_app(tmp_path, monkeypatch)
+    response = _remote(app).get("/api/qr-info")
+    assert response.status_code == 200
+    assert "lan_ip" in response.json()
+
+
 # ── login (cookie mode, no token in body) ───────────────────────────────────
 
 

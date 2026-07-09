@@ -3,6 +3,7 @@ from pathlib import Path
 
 APP_JS = Path("src/openbiliclaw/web/desktop/assets/js/app.js")
 INDEX_HTML = Path("src/openbiliclaw/web/desktop/index.html")
+APP_CSS = Path("src/openbiliclaw/web/desktop/assets/css/app.css")
 
 
 def _function_body(js: str, name: str) -> str:
@@ -39,13 +40,19 @@ def test_autoload_observer_is_wired_to_load_more_sentinel() -> None:
     js = APP_JS.read_text(encoding="utf-8")
     sync_observer = _function_body(js, "syncAutoLoadObserver")
 
+    assert "const AUTO_LOAD_ROOT_MARGIN_PX = 300;" in js
     assert "autoLoadObserver.disconnect();" in sync_observer
     assert '$("#loadMoreSentinel")' in sync_observer
-    assert (
-        'new IntersectionObserver(handleAutoLoadIntersect, { rootMargin: "300px" })'
-        in sync_observer
-    )
+    assert "rootMargin: `${AUTO_LOAD_ROOT_MARGIN_PX}px`" in sync_observer
     assert "autoLoadObserver.observe(sentinel);" in sync_observer
+
+
+def test_autoload_sentinel_has_stable_hit_area() -> None:
+    css = APP_CSS.read_text(encoding="utf-8")
+
+    assert "#loadMoreSentinel" in css
+    assert "height: 1px;" in css
+    assert "max-width: var(--recommendation-grid-max);" in css
 
 
 def test_autoload_guards_cooldown_pool_page_grid_and_button_state() -> None:
@@ -64,6 +71,32 @@ def test_autoload_guards_cooldown_pool_page_grid_and_button_state() -> None:
     # 骨架占位卡不算真实内容，不能触发自动加载（issue #81 skeleton cards）。
     assert 'grid.querySelector(".video-card:not(.is-skeleton)")' in guard
     assert "loadMore.hidden" in guard
+
+
+def test_autoload_rechecks_after_scroll_render_and_runtime_status() -> None:
+    js = APP_JS.read_text(encoding="utf-8")
+    render_all = _function_body(js, "renderAll")
+    pool_refill = _function_body(js, "maybeAutoLoadAfterPoolRefill")
+
+    assert 'window.addEventListener("scroll", scheduleAutoLoadCheck, { passive: true });' in js
+    assert 'window.addEventListener("resize", scheduleAutoLoadCheck);' in js
+    assert "scheduleAutoLoadCheck();" in render_all
+    assert "scheduleAutoLoadCheck();" in pool_refill
+
+
+def test_autoload_geometry_fallback_refreshes_sentinel_visibility() -> None:
+    js = APP_JS.read_text(encoding="utf-8")
+    in_view = _function_body(js, "isAutoLoadSentinelInView")
+    refresh = _function_body(js, "refreshAutoLoadSentinelVisibility")
+    schedule = _function_body(js, "scheduleAutoLoadCheck")
+
+    assert '$("#loadMoreSentinel")' in in_view
+    assert "sentinel.getBoundingClientRect()" in in_view
+    assert "window.innerHeight" in in_view
+    assert "AUTO_LOAD_ROOT_MARGIN_PX" in in_view
+    assert "sentinelInView = isAutoLoadSentinelInView();" in refresh
+    assert "requestAnimationFrame" in schedule
+    assert "refreshAutoLoadSentinelVisibility()" in schedule
 
 
 def test_autoload_uses_single_flight_append_and_keeps_manual_button_bound() -> None:

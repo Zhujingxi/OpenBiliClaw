@@ -2,6 +2,7 @@
     const DEFAULT_API_BASE = "http://127.0.0.1:8420/api";
     const ENDPOINTS = {
       health: "/health",
+      qrInfo: "/qr-info",
       initStatus: "/init-status",
       startInit: "/init",
       recommendations: "/recommendations",
@@ -299,6 +300,7 @@
     state.dismissOnReshuffle = storageGet(DISMISS_ON_RESHUFFLE_KEY) === "1";
     const AUTO_LOAD_ON_SCROLL_KEY = "openbiliclaw.webui.autoLoadOnScroll";
     const AUTO_LOAD_COOLDOWN_MS = 8000;
+    const AUTO_LOAD_ROOT_MARGIN_PX = 300;
     state.autoLoadOnScroll = storageGet(AUTO_LOAD_ON_SCROLL_KEY) !== "0";
     const THEME_STORAGE_KEY = "obc.theme";
     const THEME_OPTIONS = ["auto", "light", "dark"];
@@ -316,10 +318,14 @@
     const APPEND_BATCH_SIZE = 10;
     const APPEND_SKELETON_COUNT = 4;
     let autoLoadObserver = null;
+    let autoLoadCheckRaf = 0;
     let appendMoreInFlight = false;
     let lastAutoLoadAt = 0;
     let sentinelInView = false;
-    let lastAppendCameUpShort = false;
+    let _cachedLanIp = "";
+    let _delightAutoTimer = null;
+    let _delightSwipeStartX = 0;
+    const _delightStatusCache = new Map();
 
     function formatStarCount(n) {
       if (typeof n !== "number" || !Number.isFinite(n)) return "";
@@ -1725,30 +1731,58 @@
       if (settingText) settingText.textContent = state.autoLoadOnScroll ? "开启" : "关闭";
     }
 
+    function isAutoLoadSentinelInView() {
+      const sentinel = $("#loadMoreSentinel");
+      if (!sentinel || typeof sentinel.getBoundingClientRect !== "function") return false;
+      const rect = sentinel.getBoundingClientRect();
+      const viewportHeight = window.innerHeight || document.documentElement?.clientHeight || 0;
+      return rect.top <= viewportHeight + AUTO_LOAD_ROOT_MARGIN_PX && rect.bottom >= -AUTO_LOAD_ROOT_MARGIN_PX;
+    }
+
+    function refreshAutoLoadSentinelVisibility() {
+      sentinelInView = isAutoLoadSentinelInView();
+      return sentinelInView;
+    }
+
+    function scheduleAutoLoadCheck() {
+      if (!state.autoLoadOnScroll || autoLoadCheckRaf) return;
+      const run = () => {
+        autoLoadCheckRaf = 0;
+        if (!refreshAutoLoadSentinelVisibility()) return;
+        void autoLoadMoreIfNeeded().catch(() => {});
+      };
+      if (typeof requestAnimationFrame === "function") {
+        autoLoadCheckRaf = requestAnimationFrame(run);
+      } else {
+        autoLoadCheckRaf = setTimeout(run, 0);
+      }
+    }
+
     function syncAutoLoadObserver() {
       if (autoLoadObserver) {
         autoLoadObserver.disconnect();
         autoLoadObserver = null;
-        sentinelInView = false;
       }
+      sentinelInView = false;
       if (!state.autoLoadOnScroll) return;
       const sentinel = $("#loadMoreSentinel");
-      if (!sentinel || typeof IntersectionObserver === "undefined") return;
-      autoLoadObserver = new IntersectionObserver(handleAutoLoadIntersect, { rootMargin: "300px" });
-      autoLoadObserver.observe(sentinel);
+      if (!sentinel) return;
+      if (typeof IntersectionObserver !== "undefined") {
+        autoLoadObserver = new IntersectionObserver(handleAutoLoadIntersect, { rootMargin: `${AUTO_LOAD_ROOT_MARGIN_PX}px`, threshold: 0 });
+        autoLoadObserver.observe(sentinel);
+      }
+      scheduleAutoLoadCheck();
     }
 
     function handleAutoLoadIntersect(entries) {
       sentinelInView = entries.some((entry) => entry.isIntersecting);
-      if (!sentinelInView) return;
-      void autoLoadMoreIfNeeded().catch(() => {});
+      if (!sentinelInView && !refreshAutoLoadSentinelVisibility()) return;
+      scheduleAutoLoadCheck();
     }
 
-    // 上一次「加载更多」吃到了不满一批（候选池当轮见底）而用户还停在列表底部时，
-    // 观察器不会再触发（位置没变），得靠运行时状态推送里的库存回升来补一脚。
+    // 观察器可能已经处于相交状态，运行时库存或渲染状态变化后要补一脚几何检查。
     function maybeAutoLoadAfterPoolRefill() {
-      if (!lastAppendCameUpShort || !sentinelInView) return;
-      void autoLoadMoreIfNeeded().catch(() => {});
+      scheduleAutoLoadCheck();
     }
 
     function shouldAutoLoadMore(now) {
@@ -2051,7 +2085,7 @@
         const cover = card.querySelector(".cover");
         cover.addEventListener("click", () => openRecommendation(item, card));
         cover.addEventListener("auxclick", (event) => {
-          if (event.button === 1) trackRecommendationClick(item);
+          if (event.button === 1) openRecommendation(item, card);
         });
         card.querySelectorAll("[data-action]").forEach((btn) => btn.addEventListener("click", () => handleCardAction(btn.dataset.action, item, card)));
         card.querySelector(".comment-field input").addEventListener("keydown", (event) => {
@@ -3728,6 +3762,7 @@
         btn.disabled = true;
         const wasSaved = btn.getAttribute("aria-pressed") === "true";
         btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
+        if (delight.bvid) _delightStatusCache.set(delight.bvid, { ...(_delightStatusCache.get(delight.bvid) || {}), watchLater: !wasSaved });
         try {
           if (wasSaved) {
             await requestJson(`${ENDPOINTS.watchLater}/${encodeURIComponent(delight.bvid)}`, { method: "DELETE" });
@@ -3736,6 +3771,7 @@
           }
         } catch {
           btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
+          if (delight.bvid) _delightStatusCache.set(delight.bvid, { ...(_delightStatusCache.get(delight.bvid) || {}), watchLater: wasSaved });
         } finally {
           btn.disabled = false;
         }
@@ -3747,6 +3783,7 @@
         btn.disabled = true;
         const wasSaved = btn.getAttribute("aria-pressed") === "true";
         btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
+        if (delight.bvid) _delightStatusCache.set(delight.bvid, { ...(_delightStatusCache.get(delight.bvid) || {}), favorite: !wasSaved });
         try {
           if (wasSaved) {
             await requestJson(`${ENDPOINTS.favorites}/${encodeURIComponent(delight.bvid)}`, { method: "DELETE" });
@@ -3755,6 +3792,7 @@
           }
         } catch {
           btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
+          if (delight.bvid) _delightStatusCache.set(delight.bvid, { ...(_delightStatusCache.get(delight.bvid) || {}), favorite: wasSaved });
         } finally {
           btn.disabled = false;
         }
@@ -3993,13 +4031,13 @@
         const retryHint = state.autoLoadOnScroll ? "补上后会自动加载" : "稍后可再点一次";
         if (payload?.items?.length) {
           const freshItems = normalizeRecommendationList(payload.items);
-          lastAppendCameUpShort = freshItems.length < APPEND_BATCH_SIZE;
+          const appendCameUpShort = freshItems.length < APPEND_BATCH_SIZE;
           state.videos = state.videos.concat(freshItems);
           renderAll();
           // Keep decoding off the interaction path: slow first-miss covers should
           // not delay the new recommendation cards from appearing.
           void warmCoverImages(freshItems, { waitForDecode: true }).catch(() => {});
-          if (freshItems.length >= APPEND_BATCH_SIZE) {
+          if (!appendCameUpShort) {
             showToast("已加载更多推荐");
           } else if (freshItems.length) {
             showToast(`已加载 ${freshItems.length} 条，候选池暂时见底，后台正在补货，${retryHint}`);
@@ -4007,7 +4045,6 @@
             showToast(`这批内容都已反馈过，后台正在补货，${retryHint}`);
           }
         } else {
-          lastAppendCameUpShort = true;
           showToast(`候选池暂时没有新内容，已请求后台补货，${retryHint}`);
         }
       } finally {
@@ -4603,6 +4640,7 @@
       setInput("speculationMaxSecondary", scheduler.speculation_max_secondary_interests);
 
       const discovery = config.discovery || {};
+      setSelect("keywordGenerationMode", discovery.keyword_generation_mode || "legacy");
       setSelect("multimodalEvaluationEnabled", discovery.multimodal_evaluation_enabled ? "on" : "off");
       setInput("multimodalBatchSize", discovery.multimodal_batch_size);
       setInput("multimodalImageMaxPx", discovery.multimodal_image_max_px);
@@ -4789,6 +4827,9 @@
       const url = imageProxyUrl(delight?.cover_url);
       thumb.replaceChildren();
       thumb.classList.toggle("has-image", Boolean(url));
+      // 设置 banner 背景图（模糊用）
+      const banner = $("#delightBanner");
+      if (banner) banner.style.setProperty("--cover-url", url ? `url("${url}")` : "none");
       if (!url) return;
       const image = document.createElement("img");
       if (isCrossOriginBase()) image.crossOrigin = "anonymous";
@@ -4803,6 +4844,27 @@
         thumb.classList.remove("has-image");
       });
       thumb.append(image);
+      const badge = document.createElement("span");
+      badge.className = "platform";
+      badge.textContent = platformName(delight.source_platform);
+      thumb.append(badge);
+    }
+
+    function _startDelightAutoAdvance() {
+        _stopDelightAutoAdvance();
+        if (state.delights.length < 2) return;
+        _delightAutoTimer = setInterval(() => {
+            if (delightUserEngaged()) return;
+            const next = state.delightIndex + 1;
+            setActiveDelight(next >= state.delights.length ? 0 : next);
+        }, 4000);
+    }
+
+    function _stopDelightAutoAdvance() {
+        if (_delightAutoTimer !== null) {
+            clearInterval(_delightAutoTimer);
+            _delightAutoTimer = null;
+        }
     }
 
     function setActiveDelight(index = state.delightIndex) {
@@ -4823,46 +4885,160 @@
       }
       state.delightIndex = Math.max(0, Math.min(index, state.delights.length - 1));
       state.delight = state.delights[state.delightIndex];
-      closeDelightComposer();
-      renderDelightCover(state.delight);
-      renderDelightTurns(state.delight);
-      $("#delightTitle").textContent = state.delight.title;
-      // Same ▶/👍/💬 metadata row as the grid card; hidden when the item carries
-      // no counts (0 — e.g. platforms whose discovery path doesn't fetch stats).
-      const delightStatsEl = $("#delightStats");
-      if (delightStatsEl) {
-        const delightStats = recommendationStats(state.delight);
-        delightStatsEl.textContent = delightStats;
-        delightStatsEl.hidden = !delightStats;
+      // 锁定容器高度防止下方布局跳变
+      const banner = $("#delightBanner");
+      if (banner) {
+        banner.style.height = `${banner.offsetHeight}px`;
+        banner.classList.add("is-height-locked");
+        banner.classList.remove("is-height-settling");
       }
-      $("#delightReason").textContent = state.delight.reason;
-      if ($("#delightStatus")) $("#delightStatus").textContent = state.delight.response_message || "";
+      // 切换动画：先淡出，再替换内容，再淡入
+      const copy = $(".delight-copy");
+      const thumb = $(".delight .thumb");
+      const applyContent = () => {
+        closeDelightComposer();
+        renderDelightCover(state.delight);
+        renderDelightTurns(state.delight);
+        $("#delightTitle").textContent = state.delight.title;
+        const delightStatsEl = $("#delightStats");
+        if (delightStatsEl) {
+          const delightStats = recommendationStats(state.delight);
+          delightStatsEl.textContent = delightStats;
+          delightStatsEl.hidden = !delightStats;
+        }
+        $("#delightReason").textContent = state.delight.reason;
+        if ($("#delightStatus")) $("#delightStatus").textContent = state.delight.response_message || "";
+        if (copy) copy.classList.remove("is-exiting");
+        if (thumb) thumb.classList.remove("is-exiting");
+        // 用 requestAnimationFrame 手动驱动高度动画（避免 CSS transition 启动时序问题）
+        if (banner) {
+          if (banner._heightRaf) cancelAnimationFrame(banner._heightRaf);
+          const startH = parseFloat(banner.style.height) || banner.offsetHeight;
+          banner.style.height = `${startH}px`;
+          banner.classList.remove("is-height-locked");
+          banner.offsetHeight; // 强制 reflow：浏览器确认当前高度为 startH
+          // 临时放开高度测量自然高度
+          banner.style.removeProperty("height");
+          const endH = banner.offsetHeight;
+          if (Math.abs(endH - startH) < 0.5) {
+            banner.style.removeProperty("height");
+            banner.classList.remove("is-height-settling");
+            return;
+          }
+          // 切回起始高度，开始动画
+          banner.style.height = `${startH}px`;
+          banner.offsetHeight;
+          const duration = 200;
+          const t0 = performance.now();
+          const step = (now) => {
+            const p = Math.min((now - t0) / duration, 1);
+            const ease = 1 - (1 - p) * (1 - p); // ease-out quad
+            banner.style.height = `${startH + (endH - startH) * ease}px`;
+            if (p < 1) {
+              banner._heightRaf = requestAnimationFrame(step);
+            } else {
+              banner._heightRaf = null;
+              banner.style.removeProperty("height");
+              banner.classList.remove("is-height-settling");
+            }
+          };
+          banner._heightRaf = requestAnimationFrame(step);
+        }
+      };
+      if (copy) copy.classList.add("is-exiting");
+      if (thumb) thumb.classList.add("is-exiting");
+      if (copy || thumb) {
+        setTimeout(applyContent, 250);
+      } else {
+        applyContent();
+      }
       if ($("#delightCount")) $("#delightCount").textContent = `${state.delightIndex + 1}/${state.delights.length}`;
       // Sync ☆ / ♥ pressed state for the current delight.
       const delightBvid = state.delight.bvid;
-      const wlBtn = document.querySelector('[data-delight="watch-later"]');
-      if (wlBtn && delightBvid) {
-        wlBtn.setAttribute("aria-pressed", "false");
-        watchLaterStatus(delightBvid).then((res) => {
-          if (state.delight?.bvid === delightBvid && res?.saved) {
-            wlBtn.setAttribute("aria-pressed", "true");
-          }
-        }).catch(() => {});
-      }
-      const favBtn = document.querySelector('[data-delight="favorite"]');
-      if (favBtn && delightBvid) {
-        favBtn.setAttribute("aria-pressed", "false");
-        favoriteStatus(delightBvid).then((res) => {
-          if (state.delight?.bvid === delightBvid && res?.saved) {
-            favBtn.setAttribute("aria-pressed", "true");
-          }
-        }).catch(() => {});
+      if (delightBvid && _delightStatusCache.has(delightBvid)) {
+        _syncDelightStatusButtons(delightBvid);
+      } else {
+        const wlBtn = document.querySelector('[data-delight="watch-later"]');
+        if (wlBtn) wlBtn.setAttribute("aria-pressed", "false");
+        const favBtn = document.querySelector('[data-delight="favorite"]');
+        if (favBtn) favBtn.setAttribute("aria-pressed", "false");
       }
       controls.forEach((btn) => {
-        const action = btn.dataset.delight;
-        btn.disabled = (action === "prev" && state.delightIndex === 0) || (action === "next" && state.delightIndex === state.delights.length - 1);
+          btn.disabled = false;
       });
       scheduleActivityRailHeightSync();
+    }
+
+    // 鼠标/触摸拖动切换 delight
+    let _delightDragging = false;
+    let _delightDragLastX = 0;
+    function _initDelightSwipe() {
+        const banner = $("#delightBanner");
+        if (!banner || banner.dataset.swipeInited) return;
+        banner.dataset.swipeInited = "1";
+        const inner = banner.querySelector(".delight-body, .thumb");
+        // 交互元素阻止事件冒泡，避免触发拖拽
+        banner.querySelectorAll("button, [data-delight], input, select, textarea, a").forEach((el) => {
+            el.addEventListener("pointerdown", (e) => e.stopPropagation());
+        });
+        banner.addEventListener("pointerdown", (e) => {
+            _delightDragging = true;
+            _delightSwipeStartX = e.clientX;
+            _delightDragLastX = e.clientX;
+            banner.setPointerCapture(e.pointerId);
+            banner.classList.add("is-dragging");
+        });
+        banner.addEventListener("pointermove", (e) => {
+            if (!_delightDragging) return;
+            const dx = e.clientX - _delightSwipeStartX;
+            const maxDrag = banner.offsetWidth * 0.3;
+            const clamped = Math.max(-maxDrag, Math.min(maxDrag, dx));
+            // 首项/末项增加阻力
+            const atEdge = (dx > 0 && state.delightIndex === 0) || (dx < 0 && state.delightIndex >= state.delights.length - 1);
+            const factor = atEdge ? 0.25 : 1;
+            banner.style.setProperty("--drag-offset", `${clamped * factor}px`);
+            _delightDragLastX = e.clientX;
+        });
+        banner.addEventListener("pointerup", (e) => {
+            if (!_delightDragging) return;
+            _delightDragging = false;
+            banner.classList.remove("is-dragging");
+            banner.releasePointerCapture(e.pointerId);
+            const dx = e.clientX - _delightSwipeStartX;
+            if (Math.abs(dx) >= 50) {
+                if (dx > 0) setActiveDelight(state.delightIndex <= 0 ? state.delights.length - 1 : state.delightIndex - 1);
+                else if (dx < 0) setActiveDelight(state.delightIndex >= state.delights.length - 1 ? 0 : state.delightIndex + 1);
+            }
+            banner.style.removeProperty("--drag-offset");
+        });
+        banner.addEventListener("pointercancel", () => {
+            _delightDragging = false;
+            banner.classList.remove("is-dragging");
+            banner.style.removeProperty("--drag-offset");
+        });
+    }
+
+    let _delightVisibilityObserver = null;
+    function _initDelightVisibilityObserver() {
+      if (_delightVisibilityObserver) return;
+      const banner = $("#delightBanner");
+      if (!banner) return;
+      _delightVisibilityObserver = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) _startDelightAutoAdvance();
+          else _stopDelightAutoAdvance();
+        }
+      }, { threshold: 0.3 });
+      _delightVisibilityObserver.observe(banner);
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) _stopDelightAutoAdvance();
+        else if (_delightVisibilityObserver) {
+          // 切回时检查 banner 是否在视口内
+          const rect = banner.getBoundingClientRect();
+          const inView = rect.top < window.innerHeight && rect.bottom > 0;
+          if (inView) _startDelightAutoAdvance();
+        }
+      });
     }
 
     function applyDelights(payload) {
@@ -4895,6 +5071,34 @@
         return;
       }
       setActiveDelight(activePosition >= 0 ? activePosition : 0);
+      _startDelightAutoAdvance();
+      _initDelightSwipe();
+      _initDelightVisibilityObserver();
+      // 批量预取 delight 队列中所有项的稍后再看/收藏状态
+      (async () => {
+        const bvids = state.delights.map((d) => String(d.bvid || "")).filter(Boolean);
+        if (!bvids.length) return;
+        const results = await Promise.allSettled(bvids.map((bvid) => watchLaterStatus(bvid).then((r) => ({ bvid, watchLater: r?.saved ?? false, favorite: false }))));
+        const favResults = await Promise.allSettled(bvids.map((bvid) => favoriteStatus(bvid).then((r) => ({ bvid, saved: r?.saved ?? false }))));
+        const favMap = new Map(favResults.filter((r) => r.status === "fulfilled").map((r) => [r.value.bvid, r.value.saved]));
+        for (const result of results) {
+          if (result.status !== "fulfilled") continue;
+          const { bvid, watchLater } = result.value;
+          _delightStatusCache.set(bvid, { watchLater, favorite: favMap.get(bvid) ?? false });
+        }
+        // 如果当前显示的 delight 缓存已就绪，立即刷新按钮状态
+        const currentBvid = String(state.delight?.bvid || "");
+        if (currentBvid && _delightStatusCache.has(currentBvid)) _syncDelightStatusButtons(currentBvid);
+      })();
+    }
+
+    function _syncDelightStatusButtons(bvid) {
+      const cached = _delightStatusCache.get(bvid);
+      if (!cached) return;
+      const wlBtn = document.querySelector('[data-delight="watch-later"]');
+      if (wlBtn) wlBtn.setAttribute("aria-pressed", cached.watchLater ? "true" : "false");
+      const favBtn = document.querySelector('[data-delight="favorite"]');
+      if (favBtn) favBtn.setAttribute("aria-pressed", cached.favorite ? "true" : "false");
     }
 
     function mergeMessages(items) {
@@ -5081,6 +5285,8 @@
       if (notification?.item) mergeMessages([{ ...notification.item, type: "notification" }]);
       applyConfig(config?.config || config);
       renderAll();
+      // 预取 LAN IP，供二维码面板使用
+      requestJson(ENDPOINTS.qrInfo).then((info) => { if (info?.lan_ip) _cachedLanIp = info.lan_ip; }).catch(() => {});
     }
 
     function renderAll() {
@@ -5089,6 +5295,7 @@
         try { step(); } catch (error) { showFatal(error, step.name || "渲染"); }
       }
       scheduleActivityRailHeightSync();
+      scheduleAutoLoadCheck();
     }
 
     function buildConfigUpdate() {
@@ -5275,6 +5482,7 @@
         },
         discovery: {
           ...(state.config?.discovery || {}),
+          keyword_generation_mode: $("#keywordGenerationMode").value,
           multimodal_evaluation_enabled: $("#multimodalEvaluationEnabled").value === "on",
           multimodal_batch_size: getIntInput("multimodalBatchSize", 8),
           multimodal_image_max_px: getIntInput("multimodalImageMaxPx", 384),
@@ -5731,9 +5939,9 @@
       hintEl.hidden = true;
       hintEl.textContent = "";
       // The backend knows its own LAN IP; the page host may be 127.0.0.1,
-      // which a phone cannot reach.
-      const health = await requestJson(ENDPOINTS.health);
-      const lanIp = String(health?.lan_ip || "").trim();
+      // which a phone cannot reach. Use the cached value from page load
+      // prefetch, falling back to a fresh request if unavailable.
+      const lanIp = _cachedLanIp || String((await requestJson(ENDPOINTS.qrInfo))?.lan_ip || "").trim();
       const def = locationApiDefault();
       const typedHost = (storageGet("openbiliclaw.webui.backendHost") || "").trim();
       const typedPort = (storageGet("openbiliclaw.webui.backendPort") || "").trim();
@@ -5800,6 +6008,8 @@
     safeBind("#autoLoadOnScrollSetting", "change", (event) => {
       setAutoLoadOnScroll(Boolean(event.target.checked), { toast: true });
     });
+    window.addEventListener("scroll", scheduleAutoLoadCheck, { passive: true });
+    window.addEventListener("resize", scheduleAutoLoadCheck);
     safeBind("#reshuffleBtn", "click", reshuffle);
     safeBind("#loadMoreBtn", "click", appendMore);
     ensureDelightThumbAnchor();
@@ -5907,10 +6117,17 @@
         }
       }
     });
+    const delightBanner = $("#delightBanner");
+    if (delightBanner) {
+        delightBanner.addEventListener("mouseenter", _stopDelightAutoAdvance);
+        delightBanner.addEventListener("mouseleave", _startDelightAutoAdvance);
+        delightBanner.addEventListener("touchstart", _stopDelightAutoAdvance, { passive: true });
+        delightBanner.addEventListener("touchend", _startDelightAutoAdvance, { passive: true });
+    }
     document.querySelectorAll("[data-delight]").forEach((btn) => btn.addEventListener("click", async () => {
       const response = btn.dataset.delight;
-      if (response === "prev") { setActiveDelight(state.delightIndex - 1); return; }
-      if (response === "next") { setActiveDelight(state.delightIndex + 1); return; }
+        if (response === "prev") { setActiveDelight(state.delightIndex <= 0 ? state.delights.length - 1 : state.delightIndex - 1); return; }
+        if (response === "next") { setActiveDelight(state.delightIndex >= state.delights.length - 1 ? 0 : state.delightIndex + 1); return; }
       // 「去看看」是纯按钮（不像封面 <a> 能原生导航），必须由 JS 打开内容。
       await respondDelight(state.delight, response, null, response === "view");
     }));

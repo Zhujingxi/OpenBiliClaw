@@ -535,6 +535,14 @@
             <label class="settings-field"><span>反馈分析积累阈值</span><input id="feedbackBatchThreshold" inputmode="numeric" placeholder="3"></label>
             <label class="settings-field"><span>单轮发现上限</span><input id="discoveryLimit" inputmode="numeric" placeholder="30"></label>
           </div>
+          <p class="settings-section-title">搜索词生成</p>
+          <div class="inline-row">
+            <label class="settings-field"><span>搜索词生成模式</span><select id="keywordGenerationMode"><option value="legacy">经典</option><option value="hybrid">混合</option><option value="inspiration">灵感</option></select></label>
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <p class="settings-note-inline">经典：仅用合并关键词生成器；混合：在经典基础上再叠加 search-backed 灵感轴链路（最丰富，但同时跑两套，混合最贵）；灵感：完全用灵感轴链路替代经典。</p>
           <p class="settings-section-title">评估输入</p>
           <div class="inline-row">
             <label class="settings-field"><span>封面图评估</span><select id="multimodalEvaluationEnabled"><option value="off">关闭</option><option value="on">开启</option></select></label>

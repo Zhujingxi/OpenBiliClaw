@@ -388,6 +388,8 @@ def test_resolve_priority_longest_prefix_wins() -> None:
 def test_route_bucket_for_caller_covers_actual_callers() -> None:
     assert LLMService._route_bucket_for_caller("soul.profile_builder") == "soul"
     assert LLMService._route_bucket_for_caller("discovery.search.query") == "discovery"
+    assert LLMService._route_bucket_for_caller("discovery.keyword_planner") == "discovery"
+    assert LLMService._route_bucket_for_caller("discovery.keyword_inspiration") == "discovery"
     assert LLMService._route_bucket_for_caller("discovery.evaluate_batch") == "evaluation"
     assert LLMService._route_bucket_for_caller("recommendation.write_batch") == "recommendation"
     assert (

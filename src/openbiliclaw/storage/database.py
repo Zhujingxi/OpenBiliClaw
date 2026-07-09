@@ -16,8 +16,14 @@ import time
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, urlparse
+
+from openbiliclaw.discovery.inspiration import (
+    AxisRow,
+    _normalize_match_text,
+    derive_inspiration_axis_id,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -38,6 +44,7 @@ logger = logging.getLogger(__name__)
 _LOCK_RETRY_ATTEMPTS = 8
 _LOCK_RETRY_SLEEP_SECONDS = 0.02
 _BVID_PATTERN = re.compile(r"(BV[0-9A-Za-z]+)")
+_LOCAL_EVIDENCE_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 _VIEW_CONTENT_ID_METADATA_KEYS = (
     "content_id",
     "bvid",
@@ -50,11 +57,87 @@ _VIEW_CONTENT_ID_METADATA_KEYS = (
 _KEYWORD_KIND_REGULAR = "regular"
 _KEYWORD_KIND_EXPLORE = "explore"
 _KEYWORD_KINDS = {_KEYWORD_KIND_REGULAR, _KEYWORD_KIND_EXPLORE}
+_DISCOVERY_KEYWORD_METADATA_COLUMNS = {
+    "aspect_id": "TEXT NOT NULL DEFAULT ''",
+    "inspiration_backend": "TEXT NOT NULL DEFAULT ''",
+    "inspiration_id": "TEXT NOT NULL DEFAULT ''",
+    "inspiration_terms": "TEXT NOT NULL DEFAULT ''",
+    "expansion_id": "TEXT NOT NULL DEFAULT ''",
+    "expansion_label": "TEXT NOT NULL DEFAULT ''",
+    "angle_id": "TEXT NOT NULL DEFAULT ''",
+    "angle_label": "TEXT NOT NULL DEFAULT ''",
+    "query_kind": "TEXT NOT NULL DEFAULT ''",
+    "source_domain": "TEXT NOT NULL DEFAULT ''",
+    "source_interest": "TEXT NOT NULL DEFAULT ''",
+    "generation_reason": "TEXT NOT NULL DEFAULT ''",
+    "normalized_keyword": "TEXT NOT NULL DEFAULT ''",
+    "grounding_source": "TEXT NOT NULL DEFAULT ''",
+}
+# Yield-learning columns bolted onto ``discovery_inspiration_axis`` after the
+# table shipped — added tolerantly via ADD COLUMN so pre-existing dbs upgrade
+# in place (mirrors ``_DISCOVERY_KEYWORD_METADATA_COLUMNS``).
+_DISCOVERY_INSPIRATION_AXIS_YIELD_COLUMNS = {
+    "window_uses": "INTEGER NOT NULL DEFAULT 0",
+    "yield_backfilled_at": "TEXT",
+}
+# discovery_keywords statuses meaning the keyword was actually leased for a
+# fetch (it left 'pending'). 'pending' (never leased) and 'expired' (a stale
+# digest superseded a still-pending row) were never consumed, so neither
+# counts toward an axis's ``window_uses``. Locked against the status machine
+# documented above ``insert_pending_keywords``.
+_INSPIRATION_CONSUMED_KEYWORD_STATUSES = frozenset({"claimed", "executing", "used", "failed"})
+_INSPIRATION_AXIS_ACTIVE_CAP = 16
+_INSPIRATION_AXIS_EXPLORATION_PRIOR = 0.3
+# Lifecycle thresholds (Phase 2 Part B). Retirement keys on the backfilled
+# ``window_uses`` (keywords actually consumed), NOT the selection-bookkeeping
+# ``use_count``: 5 consumption chances with a post-backfill score below 0.08
+# (≈ zero admissions, e.g. 0.3/6 = 0.05) means the axis earned its exit.
+_INSPIRATION_AXIS_RETIRE_MIN_WINDOW_USES = 5
+_INSPIRATION_AXIS_RETIRE_YIELD_SCORE = 0.08
+_INSPIRATION_AXIS_PURGE_AFTER_DAYS = 90
+_INSPIRATION_AXIS_FRESHNESS_SCALE_DAYS = 30.0
+_INSPIRATION_AXIS_KIND_ROTATION = (
+    "subgenre",
+    "creator_lens",
+    "hands_on",
+    "anchor",
+    "community_vocab",
+    "event",
+    "method",
+)
+_INSPIRATION_AXIS_KIND_RANK = {
+    axis_kind: index for index, axis_kind in enumerate(_INSPIRATION_AXIS_KIND_ROTATION)
+}
 
 
 def _normalize_keyword_kind(value: object) -> str:
     kind = str(value or "").strip().lower()
     return kind if kind in _KEYWORD_KINDS else _KEYWORD_KIND_REGULAR
+
+
+def _escape_like_term(token: str) -> str:
+    return token.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _local_evidence_tokens(query: str) -> list[str]:
+    parts = [part.strip() for part in re.split(r"[\s,，。:：/|]+", query) if len(part.strip()) >= 2]
+    if not parts:
+        parts = [query]
+
+    tokens: list[str] = []
+    for part in parts:
+        tokens.append(part)
+        if len(part) >= 4 and _LOCAL_EVIDENCE_CJK_RE.search(part):
+            tokens.extend(part[index : index + 2] for index in range(len(part) - 1))
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for token in tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+        ordered.append(token)
+    return ordered
 
 
 def _unique_clean_strings(values: Sequence[object]) -> list[str]:
@@ -67,6 +150,282 @@ def _unique_clean_strings(values: Sequence[object]) -> list[str]:
         seen.add(text)
         result.append(text)
     return result
+
+
+def _json_array(values: Sequence[object] | None) -> str:
+    return json.dumps(_unique_clean_strings(values or ()), ensure_ascii=False)
+
+
+def _load_json_array(value: object) -> list[str]:
+    if value is None:
+        return []
+    try:
+        loaded = json.loads(str(value))
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(loaded, list):
+        return []
+    return _unique_clean_strings(loaded)
+
+
+def _json_array_union(existing: object, incoming: Sequence[object]) -> str:
+    return _json_array([*_load_json_array(existing), *incoming])
+
+
+def _optional_text(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _parse_axis_datetime(value: object) -> datetime | None:
+    from datetime import UTC, datetime
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        try:
+            parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _axis_datetime_timestamp(value: object) -> float:
+    parsed = _parse_axis_datetime(value)
+    return parsed.timestamp() if parsed is not None else 0.0
+
+
+def _axis_now_utc(now: datetime) -> datetime:
+    from datetime import UTC
+
+    if now.tzinfo is None:
+        return now.replace(tzinfo=UTC)
+    return now.astimezone(UTC)
+
+
+def _axis_freshness(row: sqlite3.Row, now: datetime) -> float:
+    refreshed_at = _parse_axis_datetime(row["last_refreshed_at"])
+    if refreshed_at is None:
+        return 0.0
+    age_days = max(0.0, (_axis_now_utc(now) - refreshed_at).total_seconds() / 86400.0)
+    return 1.0 / (1.0 + (age_days / _INSPIRATION_AXIS_FRESHNESS_SCALE_DAYS))
+
+
+def _axis_kind_rank(value: object) -> int:
+    return _INSPIRATION_AXIS_KIND_RANK.get(
+        str(value or "").strip(),
+        len(_INSPIRATION_AXIS_KIND_RANK),
+    )
+
+
+def _axis_effective_score(row: sqlite3.Row) -> float:
+    """Return the ranking score with a *conditional* exploration prior floor.
+
+    The prior only protects axes that have never been consumed
+    (``window_uses == 0`` — genuine exploration). Once an axis has produced
+    keywords that were consumed, it ranks on its real ``yield_score`` so a
+    proven-bad axis (e.g. 5 uses / 0 admissions → 0.05) sinks below an unused
+    one (0.3) instead of being floored back up to parity.
+    """
+
+    yield_score = _metric_float(row["yield_score"])
+    if _metric_int(row["window_uses"]) > 0:
+        return yield_score
+    return max(yield_score, _INSPIRATION_AXIS_EXPLORATION_PRIOR)
+
+
+def _axis_list_sort_key(row: sqlite3.Row, now: datetime) -> tuple[float, float, int, int, str]:
+    score = _axis_freshness(row, now) * _axis_effective_score(row)
+    return (
+        -score,
+        -_axis_datetime_timestamp(row["last_refreshed_at"]),
+        _metric_int(row["use_count"]),
+        _axis_kind_rank(row["axis_kind"]),
+        str(row["axis_label"]),
+    )
+
+
+def _axis_cap_sort_key(row: sqlite3.Row) -> tuple[float, float, int, int, str]:
+    return (
+        -_axis_effective_score(row),
+        -_axis_datetime_timestamp(row["last_refreshed_at"]),
+        _metric_int(row["use_count"]),
+        _axis_kind_rank(row["axis_kind"]),
+        str(row["axis_label"]),
+    )
+
+
+def _axis_is_time_expired(row: sqlite3.Row, now: datetime) -> bool:
+    if _metric_int(row["time_sensitive"]) <= 0:
+        return False
+    ttl = row["freshness_ttl_days"]
+    if ttl is None:
+        return False
+    ttl_days = _metric_int(ttl)
+    if ttl_days <= 0:
+        return False
+    refreshed_at = _parse_axis_datetime(row["last_refreshed_at"])
+    if refreshed_at is None:
+        return False
+    age_seconds = (_axis_now_utc(now) - refreshed_at).total_seconds()
+    return age_seconds > float(ttl_days) * 86400.0
+
+
+def _attribute_inspiration_axis_id(
+    *,
+    angle_id: str,
+    source_interest: str,
+    angle_label: str,
+    known_axis_ids: set[str],
+) -> str | None:
+    """Resolve a keyword row's owning axis id for yield attribution.
+
+    ``angle_id`` is trusted only when it is a real axis (present in
+    ``known_axis_ids``) — that guards against a legacy row whose ``angle_id``
+    was set to its ``angle_label`` and merely looks id-shaped. Otherwise the id
+    is re-derived from ``(source_interest, angle_label)``, matching how the axis
+    itself hashes its id. Returns ``None`` when nothing is attributable.
+    """
+
+    if angle_id and angle_id in known_axis_ids:
+        return angle_id
+    if angle_label:
+        return derive_inspiration_axis_id(source_interest, angle_label)
+    return None
+
+
+def _empty_interest_coverage() -> dict[str, object]:
+    return {
+        "generated_keyword_count": 0,
+        "interest_selection_count": 0,
+        "selected_keyword_count": 0,
+        "candidate_count": 0,
+        "candidate_share": 0.0,
+        "admitted_count": 0,
+        "yield_count": 0,
+        "admitted_share": 0.0,
+        "dominant_content_type": "",
+        "dominant_content_type_share": 0.0,
+        "dominant_candidate_platform": "",
+        "dominant_candidate_platform_share": 0.0,
+        "dominant_candidate_content_type": "",
+        "dominant_candidate_content_type_share": 0.0,
+        "last_interest_selected_at": "",
+        "last_selected_at": "",
+        "last_yielded_at": "",
+    }
+
+
+def _empty_keyword_cohort() -> dict[str, object]:
+    return {
+        "generated_keywords": 0,
+        "claimed_keywords": 0,
+        "claimed_rate": 0.0,
+        "yield_attributed_admissions": 0,
+        "admissions_per_claimed_keyword": 0.0,
+        "mean_delight": 0.0,
+        "distinct_topics": 0,
+        "topic_diversity_per_100_admissions": 0.0,
+        "claim_counts_by_day": {},
+        "claim_counts_by_platform": {},
+        "claim_counts_by_source_interest": {},
+        "grounding_mix": {},
+        "duplicate_rate_by_grounding_source": {},
+    }
+
+
+def _empty_interest_selection_report() -> dict[str, object]:
+    return {
+        "total_selected_interests": 0,
+        "distinct_interests": 0,
+        "by_source_interest": {},
+        "by_query_kind": {},
+        "last_selected_at": "",
+    }
+
+
+def _metric_int(value: object, default: int = 0) -> int:
+    try:
+        return int(cast("Any", value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _metric_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(cast("Any", value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _keyword_inspiration_gate(
+    cohorts: dict[str, dict[str, object]],
+    thresholds: Mapping[str, object],
+    window_days: int,
+) -> dict[str, object]:
+    inspiration = cohorts.get("inspiration", {})
+    merged = cohorts.get("merged", {})
+    min_days = _metric_int(thresholds["min_window_days"])
+    min_claimed = _metric_int(thresholds["min_inspiration_claimed_keywords"])
+    claimed = _metric_int(inspiration.get("claimed_keywords", 0) or 0)
+    checks = {
+        "sample_floor": window_days >= min_days and claimed >= min_claimed,
+        "admissions_per_claimed": False,
+        "mean_delight": False,
+        "topic_diversity": False,
+    }
+    if not checks["sample_floor"]:
+        return {
+            "verdict": "insufficient_sample",
+            "checks": checks,
+            "allowed_to_replace": False,
+        }
+
+    admission_ratio = _metric_float(thresholds["min_admissions_per_claimed_ratio"])
+    delight_ratio = _metric_float(thresholds["min_mean_delight_ratio"])
+    merged_admissions = _metric_float(merged.get("admissions_per_claimed_keyword", 0.0) or 0.0)
+    merged_delight = _metric_float(merged.get("mean_delight", 0.0) or 0.0)
+    merged_diversity = _metric_float(merged.get("topic_diversity_per_100_admissions", 0.0) or 0.0)
+    inspiration_admissions = _metric_float(
+        inspiration.get("admissions_per_claimed_keyword", 0.0) or 0.0
+    )
+    inspiration_delight = _metric_float(inspiration.get("mean_delight", 0.0) or 0.0)
+    inspiration_diversity = _metric_float(
+        inspiration.get("topic_diversity_per_100_admissions", 0.0) or 0.0
+    )
+    checks["admissions_per_claimed"] = inspiration_admissions >= merged_admissions * admission_ratio
+    checks["mean_delight"] = inspiration_delight >= merged_delight * delight_ratio
+    checks["topic_diversity"] = inspiration_diversity > merged_diversity
+    allowed = all(bool(value) for value in checks.values())
+    return {
+        "verdict": "pass" if allowed else "fail",
+        "checks": checks,
+        "allowed_to_replace": allowed,
+    }
+
+
+def _metadata_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, Sequence):
+        return ",".join(_unique_clean_strings(value))
+    return str(value).strip()
+
+
+def _normalized_keyword_text(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().casefold())
+
+
+def _display_interest_label(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())
 
 
 def _chunks(values: Sequence[str], size: int) -> list[list[str]]:
@@ -1090,6 +1449,89 @@ class Database:
         sql = f"{sql} GROUP BY event_type ORDER BY event_type ASC"
         cursor = self.conn.execute(sql, params)
         return {str(row["event_type"]): int(row["count"]) for row in cursor.fetchall()}
+
+    def search_local_inspiration_evidence(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        lookback_days: int = 30,
+    ) -> list[dict[str, object]]:
+        """Return local content evidence for inspiration grounding."""
+
+        clean_query = str(query or "").strip()
+        if not clean_query:
+            return []
+        tokens = _local_evidence_tokens(clean_query)
+        if not tokens:
+            return []
+
+        like_terms = [f"%{_escape_like_term(token)}%" for token in tokens[:12]]
+        where = " OR ".join(
+            "title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'" for _ in like_terms
+        )
+        params: list[object] = []
+        for term in like_terms:
+            params.extend([term, term])
+        params.append(f"-{max(1, int(lookback_days))} days")
+
+        rows = self.conn.execute(
+            f"""
+            SELECT
+                title,
+                COALESCE(
+                    NULLIF(content_url, ''),
+                    CASE
+                        WHEN COALESCE(bvid, '') != ''
+                        THEN 'https://www.bilibili.com/video/' || bvid
+                        ELSE ''
+                    END
+                ) AS url,
+                description,
+                source_platform,
+                content_id,
+                pool_topic_label AS topic_label,
+                discovered_at AS created_at
+            FROM content_cache
+            WHERE ({where})
+              AND COALESCE(pool_status, '') NOT IN ('purged_by_dislike')
+              AND datetime(COALESCE(NULLIF(discovered_at, ''), '1970-01-01'))
+                  >= datetime('now', ?)
+            ORDER BY discovered_at DESC
+            LIMIT 200
+            """,
+            params,
+        ).fetchall()
+
+        scored: list[tuple[int, str, dict[str, object]]] = []
+        for row in rows:
+            title = str(row["title"] or "").strip()
+            url = str(row["url"] or "").strip()
+            if not title or not url:
+                continue
+            description = str(row["description"] or "").strip()
+            haystack = f"{title} {description}"
+            match_count = sum(1 for token in tokens if token in haystack)
+            if len(tokens) >= 2 and match_count < 2 and clean_query not in haystack:
+                continue
+            scored.append(
+                (
+                    match_count,
+                    str(row["created_at"] or ""),
+                    {
+                        "title": title,
+                        "url": url,
+                        "highlights": [description] if description else [],
+                        "source_table": "content_cache",
+                        "source_platform": str(row["source_platform"] or ""),
+                        "content_id": str(row["content_id"] or ""),
+                        "topic_label": str(row["topic_label"] or ""),
+                        "created_at": str(row["created_at"] or ""),
+                    },
+                )
+            )
+        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [payload for _, _, payload in scored[: max(1, int(limit))]]
 
     def cache_content(self, bvid: str, **kwargs: Any) -> None:
         """Cache discovered content.
@@ -4462,6 +4904,19 @@ class Database:
                 keyword           TEXT NOT NULL,
                 keyword_kind      TEXT NOT NULL DEFAULT 'regular',
                 profile_kw_digest TEXT NOT NULL DEFAULT '',
+                aspect_id         TEXT NOT NULL DEFAULT '',
+                inspiration_backend TEXT NOT NULL DEFAULT '',
+                inspiration_id    TEXT NOT NULL DEFAULT '',
+                inspiration_terms TEXT NOT NULL DEFAULT '',
+                expansion_id      TEXT NOT NULL DEFAULT '',
+                expansion_label   TEXT NOT NULL DEFAULT '',
+                angle_id          TEXT NOT NULL DEFAULT '',
+                angle_label       TEXT NOT NULL DEFAULT '',
+                query_kind        TEXT NOT NULL DEFAULT '',
+                source_domain     TEXT NOT NULL DEFAULT '',
+                source_interest   TEXT NOT NULL DEFAULT '',
+                generation_reason TEXT NOT NULL DEFAULT '',
+                normalized_keyword TEXT NOT NULL DEFAULT '',
                 status            TEXT NOT NULL DEFAULT 'pending',
                 created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 claimed_at        TIMESTAMP,
@@ -4478,6 +4933,9 @@ class Database:
                 "ALTER TABLE discovery_keywords "
                 "ADD COLUMN keyword_kind TEXT NOT NULL DEFAULT 'regular'"
             )
+        for name, definition in _DISCOVERY_KEYWORD_METADATA_COLUMNS.items():
+            if name not in column_names:
+                self.conn.execute(f"ALTER TABLE discovery_keywords ADD COLUMN {name} {definition}")
         self.conn.executescript("""
             -- Partial uniqueness: only the in-flight triplet is unique, so
             -- used/expired history never blocks re-generating the same word.
@@ -4509,7 +4967,119 @@ class Database:
                 created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (keyword_id, content_id)
             );
+
+            CREATE TABLE IF NOT EXISTS discovery_inspiration_probe_cache (
+                platform            TEXT NOT NULL,
+                profile_kw_digest   TEXT NOT NULL,
+                aspect_id           TEXT NOT NULL,
+                query_kind          TEXT NOT NULL,
+                probe_backend       TEXT NOT NULL DEFAULT 'exa',
+                freshness_digest    TEXT NOT NULL DEFAULT '',
+                seed_query          TEXT NOT NULL,
+                domain_filters_json TEXT NOT NULL DEFAULT '[]',
+                inspiration_id      TEXT NOT NULL,
+                source_domains_json TEXT NOT NULL DEFAULT '[]',
+                source_terms_json   TEXT NOT NULL DEFAULT '[]',
+                evidence_titles_json TEXT NOT NULL DEFAULT '[]',
+                evidence_urls_json  TEXT NOT NULL DEFAULT '[]',
+                reason              TEXT NOT NULL DEFAULT '',
+                risk_flags_json     TEXT NOT NULL DEFAULT '[]',
+                created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at          TIMESTAMP,
+                selected_count      INTEGER NOT NULL DEFAULT 0,
+                yielded_count       INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (
+                    platform, profile_kw_digest, aspect_id, query_kind, probe_backend,
+                    freshness_digest, seed_query, inspiration_id
+                )
+            );
+            CREATE INDEX IF NOT EXISTS idx_discovery_inspiration_probe_lookup
+                ON discovery_inspiration_probe_cache (
+                    platform, profile_kw_digest, aspect_id, query_kind, created_at
+                );
+
+            CREATE TABLE IF NOT EXISTS discovery_inspiration_expansion_cache (
+                platform            TEXT NOT NULL,
+                profile_kw_digest   TEXT NOT NULL,
+                aspect_id           TEXT NOT NULL,
+                query_kind          TEXT NOT NULL,
+                inspiration_id      TEXT NOT NULL,
+                parent_expansion_id TEXT NOT NULL DEFAULT '',
+                expansion_id        TEXT NOT NULL,
+                hop                 INTEGER NOT NULL DEFAULT 1,
+                relation            TEXT NOT NULL DEFAULT '',
+                text                TEXT NOT NULL DEFAULT '',
+                detail_axes_json    TEXT NOT NULL DEFAULT '[]',
+                source_terms_json   TEXT NOT NULL DEFAULT '[]',
+                curator_decision    TEXT NOT NULL DEFAULT '',
+                curator_score       REAL NOT NULL DEFAULT 0.0,
+                curator_reason      TEXT NOT NULL DEFAULT '',
+                curator_feedback    TEXT NOT NULL DEFAULT '',
+                risk_flags_json     TEXT NOT NULL DEFAULT '[]',
+                status              TEXT NOT NULL DEFAULT 'new',
+                created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at          TIMESTAMP,
+                last_selected_at    TIMESTAMP,
+                selected_count      INTEGER NOT NULL DEFAULT 0,
+                realized_count      INTEGER NOT NULL DEFAULT 0,
+                yielded_count       INTEGER NOT NULL DEFAULT 0,
+                failed_count        INTEGER NOT NULL DEFAULT 0,
+                cooldown_until      TIMESTAMP,
+                PRIMARY KEY (
+                    platform, profile_kw_digest, aspect_id, query_kind,
+                    inspiration_id, expansion_id
+                )
+            );
+            CREATE INDEX IF NOT EXISTS idx_discovery_inspiration_expansion_lookup
+                ON discovery_inspiration_expansion_cache (
+                    platform, profile_kw_digest, aspect_id, inspiration_id, status
+                );
+
+            CREATE TABLE IF NOT EXISTS discovery_inspiration_axis (
+                axis_id             TEXT PRIMARY KEY,
+                interest_label      TEXT NOT NULL,
+                interest_id         TEXT,
+                axis_label          TEXT NOT NULL,
+                axis_kind           TEXT NOT NULL,
+                example_terms       TEXT,
+                evidence_refs       TEXT,
+                source              TEXT NOT NULL,
+                time_sensitive      INTEGER NOT NULL DEFAULT 0,
+                freshness_ttl_days  INTEGER,
+                yield_score         REAL NOT NULL DEFAULT 0.0,
+                admissions          INTEGER NOT NULL DEFAULT 0,
+                use_count           INTEGER NOT NULL DEFAULT 0,
+                status              TEXT NOT NULL DEFAULT 'active',
+                created_at          TEXT NOT NULL,
+                last_used_at        TEXT,
+                last_refreshed_at   TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_discovery_inspiration_axis_interest
+                ON discovery_inspiration_axis (interest_label, status);
+
+            CREATE TABLE IF NOT EXISTS discovery_interest_selection_ledger (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_interest     TEXT NOT NULL,
+                normalized_interest TEXT NOT NULL,
+                query_kind          TEXT NOT NULL DEFAULT '',
+                selection_scope     TEXT NOT NULL DEFAULT 'production',
+                profile_kw_digest   TEXT NOT NULL DEFAULT '',
+                selected_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_discovery_interest_selection_lookup
+                ON discovery_interest_selection_ledger (
+                    selection_scope, query_kind, normalized_interest, selected_at
+                );
         """)
+        axis_columns = {
+            str(row[1])
+            for row in self.conn.execute("PRAGMA table_info(discovery_inspiration_axis)").fetchall()
+        }
+        for name, definition in _DISCOVERY_INSPIRATION_AXIS_YIELD_COLUMNS.items():
+            if name not in axis_columns:
+                self.conn.execute(
+                    f"ALTER TABLE discovery_inspiration_axis ADD COLUMN {name} {definition}"
+                )
 
     # ── Discovery keyword store (unified search-keyword planner) ──
     #
@@ -4529,6 +5099,7 @@ class Database:
         profile_kw_digest: str,
         *,
         keyword_kind: str = "regular",
+        metadata_by_keyword: Mapping[str, Mapping[str, object]] | None = None,
     ) -> int:
         """Batch-insert ``pending`` keywords, ignoring in-flight duplicates.
 
@@ -4546,21 +5117,54 @@ class Database:
         digest = profile_kw_digest.strip()
         kind = _normalize_keyword_kind(keyword_kind)
         seen: set[str] = set()
-        rows: list[tuple[str, str, str, str]] = []
+        metadata_lookup = {
+            str(key).strip(): value for key, value in (metadata_by_keyword or {}).items()
+        }
+        rows: list[tuple[Any, ...]] = []
         for raw in keywords:
             word = str(raw).strip()
             if not word or word in seen:
                 continue
             seen.add(word)
-            rows.append((platform_key, word, kind, digest))
+            metadata = metadata_lookup.get(word, {})
+            rows.append(
+                (
+                    platform_key,
+                    word,
+                    kind,
+                    digest,
+                    _metadata_text(metadata.get("aspect_id")),
+                    _metadata_text(metadata.get("inspiration_backend")),
+                    _metadata_text(metadata.get("inspiration_id")),
+                    _metadata_text(metadata.get("inspiration_terms")),
+                    _metadata_text(metadata.get("expansion_id")),
+                    _metadata_text(metadata.get("expansion_label")),
+                    _metadata_text(metadata.get("angle_id")),
+                    _metadata_text(metadata.get("angle_label")),
+                    _metadata_text(metadata.get("query_kind") or kind),
+                    _metadata_text(metadata.get("source_domain")),
+                    _metadata_text(metadata.get("source_interest")),
+                    _metadata_text(metadata.get("generation_reason")),
+                    _metadata_text(
+                        metadata.get("normalized_keyword") or _normalized_keyword_text(word)
+                    ),
+                    _metadata_text(metadata.get("grounding_source")),
+                )
+            )
         if not rows:
             return 0
         before = self.conn.total_changes
         self._execute_many_write(
             """
             INSERT OR IGNORE INTO discovery_keywords
-                (platform, keyword, keyword_kind, profile_kw_digest, status)
-            VALUES (?, ?, ?, ?, 'pending')
+                (
+                    platform, keyword, keyword_kind, profile_kw_digest,
+                    aspect_id, inspiration_backend, inspiration_id, inspiration_terms,
+                    expansion_id, expansion_label, angle_id, angle_label, query_kind,
+                    source_domain, source_interest, generation_reason, normalized_keyword,
+                    grounding_source, status
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
             """,
             rows,
         )
@@ -4923,6 +5527,440 @@ class Database:
         )
         return int(cursor.rowcount or 0)
 
+    def record_keyword_interest_selection(
+        self,
+        source_interests: Sequence[str],
+        *,
+        query_kind: str = "regular",
+        selection_scope: str = "production",
+        profile_kw_digest: str = "",
+        retention_days: int = 30,
+    ) -> int:
+        """Record secondary interests sampled for inspiration planning."""
+
+        rows: list[tuple[str, str, str, str, str]] = []
+        seen: set[str] = set()
+        normalized_query_kind = str(query_kind or "").strip() or "regular"
+        normalized_scope = str(selection_scope or "").strip() or "production"
+        digest = str(profile_kw_digest or "").strip()
+        for raw_label in source_interests:
+            label = _display_interest_label(raw_label)
+            norm = _normalize_match_text(label)
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            rows.append((label, norm, normalized_query_kind, normalized_scope, digest))
+        if not rows:
+            return 0
+        self._execute_many_write(
+            """
+            INSERT INTO discovery_interest_selection_ledger (
+                source_interest, normalized_interest, query_kind,
+                selection_scope, profile_kw_digest
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        self._execute_write(
+            """
+            DELETE FROM discovery_interest_selection_ledger
+            WHERE selected_at < datetime('now', ?)
+            """,
+            (f"-{max(1, int(retention_days))} days",),
+        )
+        return len(rows)
+
+    def get_keyword_interest_coverage_snapshot(
+        self,
+        *,
+        limit: int = 200,
+        selection_scope: str = "production",
+        selection_window_days: int = 14,
+    ) -> dict[str, dict[str, object]]:
+        """Return coverage counters keyed by keyword ``source_interest``.
+
+        The snapshot intentionally combines generation-side keyword history and
+        admitted-pool distribution. Keyword history catches repeated search
+        generation even before yield is known; admitted-pool counts cool down
+        interests that already dominate the candidate pool. The selection
+        ledger cools down interests as soon as they are sampled, even if the
+        later search/curation stage produces no keyword rows.
+        """
+
+        cap = max(1, int(limit))
+        scope = str(selection_scope or "").strip() or "production"
+        window_days = max(1, int(selection_window_days))
+        self._ensure_fresh_read()
+        snapshot: dict[str, dict[str, object]] = defaultdict(_empty_interest_coverage)
+        display_by_norm: dict[str, str] = {}
+
+        def bucket_for(raw_label: object) -> tuple[str, dict[str, object]] | None:
+            label = _display_interest_label(raw_label)
+            norm = _normalize_match_text(label)
+            if not norm:
+                return None
+            display = display_by_norm.setdefault(norm, label)
+            return display, snapshot[display]
+
+        rows = self.conn.execute(
+            """
+            SELECT source_interest,
+                   COUNT(*) AS generated_keyword_count,
+                   SUM(CASE WHEN status IN ('claimed', 'executing', 'used') THEN 1 ELSE 0 END)
+                       AS selected_keyword_count,
+                   SUM(COALESCE(yield_count, 0)) AS yield_count,
+                   MAX(COALESCE(used_at, executing_at, claimed_at, created_at)) AS last_selected_at
+            FROM discovery_keywords
+            WHERE COALESCE(source_interest, '') != ''
+            GROUP BY source_interest
+            ORDER BY generated_keyword_count DESC, source_interest ASC
+            LIMIT ?
+            """,
+            (cap,),
+        ).fetchall()
+        for row in rows:
+            bucket_record = bucket_for(row["source_interest"])
+            if bucket_record is None:
+                continue
+            _label, bucket = bucket_record
+            bucket["generated_keyword_count"] = _metric_int(
+                bucket.get("generated_keyword_count", 0) or 0
+            ) + _metric_int(row["generated_keyword_count"] or 0)
+            bucket["selected_keyword_count"] = _metric_int(
+                bucket.get("selected_keyword_count", 0) or 0
+            ) + _metric_int(row["selected_keyword_count"] or 0)
+            bucket["yield_count"] = _metric_int(bucket.get("yield_count", 0) or 0) + _metric_int(
+                row["yield_count"] or 0
+            )
+            bucket["last_selected_at"] = str(row["last_selected_at"] or "")
+
+        selection_rows = self.conn.execute(
+            """
+            SELECT source_interest,
+                   normalized_interest,
+                   COUNT(*) AS interest_selection_count,
+                   MAX(selected_at) AS last_interest_selected_at
+            FROM discovery_interest_selection_ledger
+            WHERE selection_scope = ?
+              AND selected_at >= datetime('now', ?)
+            GROUP BY normalized_interest
+            ORDER BY interest_selection_count DESC, source_interest ASC
+            LIMIT ?
+            """,
+            (scope, f"-{window_days} days", cap),
+        ).fetchall()
+        for row in selection_rows:
+            bucket_record = bucket_for(row["source_interest"])
+            if bucket_record is None:
+                continue
+            _label, bucket = bucket_record
+            bucket["interest_selection_count"] = _metric_int(
+                bucket.get("interest_selection_count", 0) or 0
+            ) + _metric_int(row["interest_selection_count"] or 0)
+            bucket["last_interest_selected_at"] = str(row["last_interest_selected_at"] or "")
+
+        pool_rows = self.conn.execute(
+            """
+            SELECT COALESCE(NULLIF(pool_topic_label, ''), NULLIF(topic_group, '')) AS interest,
+                   COALESCE(content_type, 'video') AS content_type,
+                   COUNT(*) AS n
+            FROM content_cache
+            WHERE COALESCE(feedback_type, '') != 'dislike'
+              AND COALESCE(pool_status, 'fresh') != 'purged_by_dislike'
+              AND COALESCE(NULLIF(pool_topic_label, ''), NULLIF(topic_group, '')) IS NOT NULL
+            GROUP BY interest, content_type
+            ORDER BY n DESC, interest ASC
+            LIMIT ?
+            """,
+            (cap,),
+        ).fetchall()
+        total_admitted = sum(int(row["n"] or 0) for row in pool_rows)
+        content_type_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        for row in pool_rows:
+            bucket_record = bucket_for(row["interest"])
+            if bucket_record is None:
+                continue
+            label, bucket = bucket_record
+            count = int(row["n"] or 0)
+            content_type = str(row["content_type"] or "video").strip() or "video"
+            bucket["admitted_count"] = int(str(bucket.get("admitted_count") or 0)) + count
+            content_type_counts[label][content_type] += count
+        for label, counts in content_type_counts.items():
+            bucket = snapshot[label]
+            admitted_count = int(str(bucket.get("admitted_count") or 0))
+            bucket["admitted_share"] = (
+                float(admitted_count) / float(total_admitted) if total_admitted > 0 else 0.0
+            )
+            if counts:
+                dominant_type, dominant_count = max(counts.items(), key=lambda item: item[1])
+                bucket["dominant_content_type"] = dominant_type
+                bucket["dominant_content_type_share"] = (
+                    float(dominant_count) / float(admitted_count) if admitted_count > 0 else 0.0
+                )
+        candidate_rows = self.conn.execute(
+            """
+            SELECT dc.raw_payload,
+                   dc.pool_topic_label,
+                   dc.topic_group,
+                   dc.topic_key,
+                   dc.source_platform,
+                   dc.content_type,
+                   dk.source_interest AS keyword_source_interest
+            FROM discovery_candidates dc
+            LEFT JOIN discovery_keywords dk ON dk.id = dc.source_keyword_id
+            WHERE COALESCE(dc.status, '') NOT IN ('rejected_duplicate')
+            ORDER BY dc.last_seen_at DESC, dc.id DESC
+            LIMIT ?
+            """,
+            (cap * 20,),
+        ).fetchall()
+        candidate_counts: dict[str, int] = defaultdict(int)
+        candidate_platform_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        candidate_type_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        for row in candidate_rows:
+            label = str(row["keyword_source_interest"] or "").strip()
+            raw_payload = str(row["raw_payload"] or "{}")
+            if not label:
+                try:
+                    payload = json.loads(raw_payload)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    payload = {}
+                if isinstance(payload, Mapping):
+                    label = str(payload.get("source_interest") or "").strip()
+                    nested_metadata = payload.get("metadata")
+                    if not label and isinstance(nested_metadata, Mapping):
+                        label = str(nested_metadata.get("source_interest") or "").strip()
+                    if not label:
+                        label = str(payload.get("pool_topic_label") or "").strip()
+                    if not label:
+                        label = str(payload.get("topic_group") or "").strip()
+            if not label:
+                label = str(row["pool_topic_label"] or "").strip()
+            if not label:
+                label = str(row["topic_group"] or "").strip()
+            if not label:
+                label = str(row["topic_key"] or "").strip()
+            bucket_record = bucket_for(label)
+            if bucket_record is None:
+                continue
+            label, _bucket = bucket_record
+            platform = str(row["source_platform"] or "").strip() or "unknown"
+            content_type = str(row["content_type"] or "").strip() or "unknown"
+            candidate_counts[label] += 1
+            candidate_platform_counts[label][platform] += 1
+            candidate_type_counts[label][content_type] += 1
+
+        total_candidates = sum(candidate_counts.values())
+        for label, count in candidate_counts.items():
+            bucket = snapshot[label]
+            bucket["candidate_count"] = count
+            bucket["candidate_share"] = (
+                float(count) / float(total_candidates) if total_candidates > 0 else 0.0
+            )
+            platform_counts = candidate_platform_counts[label]
+            if platform_counts:
+                dominant_platform, dominant_count = max(
+                    platform_counts.items(),
+                    key=lambda item: (item[1], item[0]),
+                )
+                bucket["dominant_candidate_platform"] = dominant_platform
+                bucket["dominant_candidate_platform_share"] = (
+                    float(dominant_count) / float(count) if count > 0 else 0.0
+                )
+            type_counts = candidate_type_counts[label]
+            if type_counts:
+                dominant_type, dominant_count = max(
+                    type_counts.items(),
+                    key=lambda item: (item[1], item[0]),
+                )
+                bucket["dominant_candidate_content_type"] = dominant_type
+                bucket["dominant_candidate_content_type_share"] = (
+                    float(dominant_count) / float(count) if count > 0 else 0.0
+                )
+        return {label: dict(values) for label, values in snapshot.items()}
+
+    def migrate_keyword_interest_labels(self, mapping: Mapping[str, str]) -> int:
+        """Rewrite keyword ``source_interest`` labels after profile consolidation."""
+
+        normalized_mapping: dict[str, str] = {}
+        for old, new in mapping.items():
+            old_norm = _normalize_match_text(old)
+            new_label = _display_interest_label(new)
+            if not old_norm or not new_label or old_norm == _normalize_match_text(new_label):
+                continue
+            normalized_mapping[old_norm] = new_label
+        if not normalized_mapping:
+            return 0
+        self._ensure_fresh_read()
+        rows = self.conn.execute(
+            """
+            SELECT id, source_interest
+            FROM discovery_keywords
+            WHERE COALESCE(source_interest, '') != ''
+            """
+        ).fetchall()
+        updates: list[tuple[str, int]] = []
+        for row in rows:
+            current = str(row["source_interest"] or "")
+            target = normalized_mapping.get(_normalize_match_text(current), "")
+            if target and _display_interest_label(current) != target:
+                updates.append((target, int(row["id"])))
+        ledger_rows = self.conn.execute(
+            """
+            SELECT id, source_interest
+            FROM discovery_interest_selection_ledger
+            WHERE COALESCE(source_interest, '') != ''
+            """
+        ).fetchall()
+        ledger_updates: list[tuple[str, str, int]] = []
+        for row in ledger_rows:
+            current = str(row["source_interest"] or "")
+            target = normalized_mapping.get(_normalize_match_text(current), "")
+            if target and _display_interest_label(current) != target:
+                ledger_updates.append((target, _normalize_match_text(target), int(row["id"])))
+        if updates:
+            self._execute_many_write(
+                "UPDATE discovery_keywords SET source_interest = ? WHERE id = ?",
+                updates,
+            )
+        if ledger_updates:
+            self._execute_many_write(
+                """
+                UPDATE discovery_interest_selection_ledger
+                SET source_interest = ?, normalized_interest = ?
+                WHERE id = ?
+                """,
+                ledger_updates,
+            )
+        return len(updates) + len(ledger_updates)
+
+    def get_keyword_cohort_stats(self, *, window_days: int = 14) -> dict[str, object]:
+        """Compare inspiration and merged keyword cohorts for enablement gating."""
+
+        days = max(1, int(window_days))
+        since_modifier = f"-{days} days"
+        thresholds = {
+            "min_window_days": 14,
+            "min_inspiration_claimed_keywords": 200,
+            "min_admissions_per_claimed_ratio": 0.8,
+            "min_mean_delight_ratio": 0.95,
+        }
+        cohorts: dict[str, dict[str, object]] = {
+            "inspiration": _empty_keyword_cohort(),
+            "merged": _empty_keyword_cohort(),
+        }
+        self._ensure_fresh_read()
+        rows = self.conn.execute(
+            """
+            SELECT CASE WHEN COALESCE(inspiration_id, '') != ''
+                        THEN 'inspiration' ELSE 'merged' END AS cohort,
+                   COUNT(*) AS generated_keywords,
+                   SUM(
+                       CASE
+                           WHEN status IN ('claimed', 'executing', 'used', 'failed')
+                                OR claimed_at IS NOT NULL
+                                OR executing_at IS NOT NULL
+                                OR used_at IS NOT NULL
+                           THEN 1 ELSE 0
+                       END
+                   ) AS claimed_keywords
+            FROM discovery_keywords
+            WHERE created_at >= datetime('now', ?)
+            GROUP BY cohort
+            """,
+            (since_modifier,),
+        ).fetchall()
+        for row in rows:
+            cohort = str(row["cohort"] or "")
+            if cohort not in cohorts:
+                continue
+            bucket = cohorts[cohort]
+            generated = int(row["generated_keywords"] or 0)
+            claimed = int(row["claimed_keywords"] or 0)
+            bucket["generated_keywords"] = generated
+            bucket["claimed_keywords"] = claimed
+            bucket["claimed_rate"] = float(claimed) / float(generated) if generated > 0 else 0.0
+
+        yield_rows = self.conn.execute(
+            """
+            SELECT CASE WHEN COALESCE(dk.inspiration_id, '') != ''
+                        THEN 'inspiration' ELSE 'merged' END AS cohort,
+                   COUNT(DISTINCT y.content_id) AS admissions,
+                   AVG(COALESCE(c.delight_score, 0.0)) AS mean_delight,
+                   COUNT(
+                       DISTINCT COALESCE(NULLIF(c.pool_topic_label, ''), NULLIF(c.topic_group, ''))
+                   ) AS distinct_topics
+            FROM discovery_keyword_yield y
+            JOIN discovery_keywords dk ON dk.id = y.keyword_id
+            LEFT JOIN content_cache c
+              ON c.bvid = y.content_id OR c.content_id = y.content_id
+            WHERE y.created_at >= datetime('now', ?)
+            GROUP BY cohort
+            """,
+            (since_modifier,),
+        ).fetchall()
+        for row in yield_rows:
+            cohort = str(row["cohort"] or "")
+            if cohort not in cohorts:
+                continue
+            bucket = cohorts[cohort]
+            admissions = int(row["admissions"] or 0)
+            claimed = _metric_int(bucket.get("claimed_keywords", 0) or 0)
+            distinct_topics = int(row["distinct_topics"] or 0)
+            bucket["yield_attributed_admissions"] = admissions
+            bucket["admissions_per_claimed_keyword"] = (
+                float(admissions) / float(claimed) if claimed > 0 else 0.0
+            )
+            bucket["mean_delight"] = float(row["mean_delight"] or 0.0)
+            bucket["distinct_topics"] = distinct_topics
+            bucket["topic_diversity_per_100_admissions"] = (
+                float(distinct_topics) * 100.0 / float(admissions) if admissions > 0 else 0.0
+            )
+        interest_selection: dict[str, dict[str, object]] = {
+            "production": _empty_interest_selection_report(),
+            "preview": _empty_interest_selection_report(),
+        }
+        selection_rows = self.conn.execute(
+            """
+            SELECT selection_scope,
+                   source_interest,
+                   query_kind,
+                   COUNT(*) AS selected_count,
+                   MAX(selected_at) AS last_selected_at
+            FROM discovery_interest_selection_ledger
+            WHERE selected_at >= datetime('now', ?)
+            GROUP BY selection_scope, source_interest, query_kind
+            ORDER BY selection_scope ASC, selected_count DESC, source_interest ASC
+            """,
+            (since_modifier,),
+        ).fetchall()
+        for row in selection_rows:
+            scope = str(row["selection_scope"] or "").strip() or "production"
+            bucket = interest_selection.setdefault(scope, _empty_interest_selection_report())
+            label = _display_interest_label(row["source_interest"])
+            query_kind = str(row["query_kind"] or "").strip() or "regular"
+            count = _metric_int(row["selected_count"] or 0)
+            by_interest = cast("dict[str, int]", bucket["by_source_interest"])
+            by_query_kind = cast("dict[str, int]", bucket["by_query_kind"])
+            by_interest[label] = by_interest.get(label, 0) + count
+            by_query_kind[query_kind] = by_query_kind.get(query_kind, 0) + count
+            bucket["total_selected_interests"] = (
+                _metric_int(bucket.get("total_selected_interests", 0) or 0) + count
+            )
+            bucket["distinct_interests"] = len(by_interest)
+            current_last = str(bucket.get("last_selected_at") or "")
+            row_last = str(row["last_selected_at"] or "")
+            if row_last > current_last:
+                bucket["last_selected_at"] = row_last
+        return {
+            "window_days": days,
+            "thresholds": thresholds,
+            "cohorts": cohorts,
+            "interest_selection": interest_selection,
+            "gate": _keyword_inspiration_gate(cohorts, thresholds, days),
+        }
+
     # ── Discovery keyword yield (P1.8 admit-time backfill) ───────
 
     def increment_keyword_yield(self, keyword_id: int, content_id: str) -> bool:
@@ -4960,6 +5998,7 @@ class Database:
             "UPDATE discovery_keywords SET yield_count = yield_count + 1 WHERE id = ?",
             (kid,),
         )
+        self._increment_inspiration_yield_for_keyword(kid)
         return True
 
     def keyword_yield_count(self, keyword_id: int) -> int:
@@ -4970,6 +6009,78 @@ class Database:
             (int(keyword_id),),
         ).fetchone()
         return int(row["yield_count"]) if row is not None else 0
+
+    def _increment_inspiration_yield_for_keyword(self, keyword_id: int) -> None:
+        """Best-effort provenance backfill from keyword yield to inspiration yield."""
+
+        try:
+            row = self.conn.execute(
+                """
+                SELECT platform, profile_kw_digest, keyword_kind, aspect_id, query_kind,
+                       inspiration_backend, inspiration_id, expansion_id
+                FROM discovery_keywords
+                WHERE id = ?
+                """,
+                (int(keyword_id),),
+            ).fetchone()
+        except Exception:
+            logger.debug("keyword inspiration provenance lookup failed", exc_info=True)
+            return
+        if row is None:
+            return
+        platform = str(row["platform"] or "").strip()
+        digest = str(row["profile_kw_digest"] or "").strip()
+        aspect_id = str(row["aspect_id"] or "").strip()
+        query_kind = str(row["query_kind"] or row["keyword_kind"] or "regular").strip()
+        backend = str(row["inspiration_backend"] or "exa").strip() or "exa"
+        inspiration_id = str(row["inspiration_id"] or "").strip()
+        expansion_id = str(row["expansion_id"] or "").strip()
+        if not platform or not digest or not aspect_id or not inspiration_id:
+            return
+        try:
+            self._execute_write(
+                """
+                UPDATE discovery_inspiration_probe_cache
+                SET yielded_count = yielded_count + 1
+                WHERE platform = ?
+                  AND profile_kw_digest = ?
+                  AND aspect_id = ?
+                  AND query_kind = ?
+                  AND probe_backend = ?
+                  AND inspiration_id = ?
+                """,
+                (
+                    platform,
+                    digest,
+                    aspect_id,
+                    _normalize_keyword_kind(query_kind),
+                    backend,
+                    inspiration_id,
+                ),
+            )
+            if expansion_id:
+                self._execute_write(
+                    """
+                    UPDATE discovery_inspiration_expansion_cache
+                    SET yielded_count = yielded_count + 1
+                    WHERE platform = ?
+                      AND profile_kw_digest = ?
+                      AND aspect_id = ?
+                      AND query_kind = ?
+                      AND inspiration_id = ?
+                      AND expansion_id = ?
+                    """,
+                    (
+                        platform,
+                        digest,
+                        aspect_id,
+                        _normalize_keyword_kind(query_kind),
+                        inspiration_id,
+                        expansion_id,
+                    ),
+                )
+        except Exception:
+            logger.debug("keyword inspiration yield backfill failed", exc_info=True)
 
     def keyword_yield_total(self, platform: str) -> int:
         """Return the platform-wide sum of ``yield_count`` across all keywords.
@@ -4995,6 +6106,735 @@ class Database:
             logger.debug("keyword_yield_total failed for %s", platform, exc_info=True)
             return 0
         return int(row["total"]) if row is not None else 0
+
+    # ── Discovery inspiration probe + lateral expansion cache ─────
+
+    def upsert_inspiration_axes(
+        self,
+        axes: Sequence[AxisRow],
+        *,
+        bump_usage: bool = True,
+    ) -> None:
+        """Insert or merge reusable keyword-inspiration axes."""
+
+        affected_interests: set[str] = set()
+        for axis in axes:
+            if not axis.axis_id or not axis.interest_label or not axis.axis_label:
+                continue
+            existing = self.conn.execute(
+                "SELECT * FROM discovery_inspiration_axis WHERE axis_id = ?",
+                (axis.axis_id,),
+            ).fetchone()
+            last_refreshed_at = axis.last_refreshed_at or axis.created_at
+            if existing is None:
+                self.conn.execute(
+                    """
+                    INSERT INTO discovery_inspiration_axis (
+                        axis_id, interest_label, interest_id, axis_label, axis_kind,
+                        example_terms, evidence_refs, source, time_sensitive,
+                        freshness_ttl_days, yield_score, admissions, use_count, status,
+                        created_at, last_used_at, last_refreshed_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        axis.axis_id,
+                        axis.interest_label,
+                        axis.interest_id,
+                        axis.axis_label,
+                        axis.axis_kind,
+                        _json_array(axis.example_terms),
+                        _json_array(axis.evidence_refs),
+                        axis.source,
+                        int(axis.time_sensitive),
+                        axis.freshness_ttl_days,
+                        axis.yield_score,
+                        axis.admissions,
+                        axis.use_count + (1 if bump_usage else 0),
+                        axis.status,
+                        axis.created_at,
+                        axis.last_used_at,
+                        last_refreshed_at,
+                    ),
+                )
+            else:
+                # No resurrection: a retired axis keeps merging evidence but its
+                # status never flips back — a proven-bad axis must not return via
+                # the LLM re-proposing the same label. ``stale`` MAY be revived by
+                # a fresh upsert (deliberate asymmetry: a topic can come back).
+                existing_status = str(existing["status"] or "active")
+                next_status = (
+                    existing_status
+                    if existing_status == "retired"
+                    else (axis.status or existing_status)
+                )
+                use_count = _metric_int(existing["use_count"]) + (1 if bump_usage else 0)
+                last_used_at = (
+                    axis.last_used_at or _optional_text(existing["last_used_at"])
+                    if bump_usage
+                    else _optional_text(existing["last_used_at"])
+                )
+                self.conn.execute(
+                    """
+                    UPDATE discovery_inspiration_axis
+                    SET interest_label = ?,
+                        interest_id = ?,
+                        axis_label = ?,
+                        axis_kind = ?,
+                        example_terms = ?,
+                        evidence_refs = ?,
+                        source = ?,
+                        time_sensitive = ?,
+                        freshness_ttl_days = ?,
+                        yield_score = ?,
+                        admissions = ?,
+                        use_count = ?,
+                        status = ?,
+                        last_used_at = ?,
+                        last_refreshed_at = ?
+                    WHERE axis_id = ?
+                    """,
+                    (
+                        axis.interest_label,
+                        axis.interest_id or str(existing["interest_id"] or ""),
+                        axis.axis_label,
+                        axis.axis_kind,
+                        _json_array_union(existing["example_terms"], axis.example_terms),
+                        _json_array_union(existing["evidence_refs"], axis.evidence_refs),
+                        axis.source or str(existing["source"] or ""),
+                        int(axis.time_sensitive),
+                        axis.freshness_ttl_days,
+                        max(_metric_float(existing["yield_score"]), axis.yield_score),
+                        max(_metric_int(existing["admissions"]), axis.admissions),
+                        use_count,
+                        next_status,
+                        last_used_at,
+                        last_refreshed_at,
+                        axis.axis_id,
+                    ),
+                )
+            affected_interests.add(axis.interest_label)
+        self.conn.commit()
+        for interest_label in sorted(affected_interests):
+            self._enforce_inspiration_axis_active_cap(interest_label)
+
+    def backfill_inspiration_axis_yield(
+        self,
+        *,
+        window_days: int = 30,
+        now: datetime,
+    ) -> dict[str, int]:
+        """Recompute per-axis yield stats over a trailing window (SET, not add).
+
+        This is a full recompute with SET semantics, so it is idempotent by
+        construction: the same input rows always produce the same table state,
+        no watermark / dedup bookkeeping. Old admissions decay naturally as they
+        slide out of the trailing window (successes must stay fresh — a feature).
+
+        Attribution rides the persisted ``angle_id`` / ``angle_label`` columns of
+        ``discovery_keywords`` (no keyword-schema change): a row is credited to an
+        axis via ``angle_id`` ONLY when that id is a real axis; otherwise the id
+        is re-derived from ``source_interest`` + ``angle_label`` — the same stable
+        hash the axis stores. The existence check prevents a legacy row whose
+        label happens to start with ``axis:`` from being mistaken for a real id.
+
+        For every axis the yield fields are SET (even to zero) so an axis with no
+        window rows lands at ``window_uses=0`` / ``admissions=0`` /
+        ``yield_score = prior`` — smooth and continuous with the prior floor.
+        """
+
+        from datetime import timedelta
+
+        window = max(1, int(window_days))
+        now_utc = _axis_now_utc(now)
+        since = (now_utc - timedelta(days=window)).strftime("%Y-%m-%d %H:%M:%S")
+        backfilled_at = now_utc.isoformat()
+        prior = _INSPIRATION_AXIS_EXPLORATION_PRIOR
+
+        axis_rows = self.conn.execute("SELECT axis_id FROM discovery_inspiration_axis").fetchall()
+        known_axis_ids = {str(row["axis_id"]) for row in axis_rows}
+
+        uses: dict[str, int] = {}
+        admissions: dict[str, int] = {}
+        keyword_rows = self.conn.execute(
+            """
+            SELECT angle_id, angle_label, source_interest, status,
+                   COALESCE(yield_count, 0) AS yield_count
+            FROM discovery_keywords
+            WHERE created_at >= ?
+              AND (COALESCE(angle_id, '') != '' OR COALESCE(angle_label, '') != '')
+            """,
+            (since,),
+        ).fetchall()
+        for row in keyword_rows:
+            axis_id = _attribute_inspiration_axis_id(
+                angle_id=str(row["angle_id"] or ""),
+                source_interest=str(row["source_interest"] or ""),
+                angle_label=str(row["angle_label"] or ""),
+                known_axis_ids=known_axis_ids,
+            )
+            if axis_id is None or axis_id not in known_axis_ids:
+                continue
+            admissions[axis_id] = admissions.get(axis_id, 0) + _metric_int(row["yield_count"])
+            if str(row["status"] or "") in _INSPIRATION_CONSUMED_KEYWORD_STATUSES:
+                uses[axis_id] = uses.get(axis_id, 0) + 1
+
+        for row in axis_rows:
+            axis_id = str(row["axis_id"])
+            window_uses = uses.get(axis_id, 0)
+            axis_admissions = admissions.get(axis_id, 0)
+            yield_score = (axis_admissions + prior) / (window_uses + 1.0)
+            self.conn.execute(
+                """
+                UPDATE discovery_inspiration_axis
+                SET window_uses = ?,
+                    admissions = ?,
+                    yield_score = ?,
+                    yield_backfilled_at = ?
+                WHERE axis_id = ?
+                """,
+                (window_uses, axis_admissions, yield_score, backfilled_at, axis_id),
+            )
+        self.conn.commit()
+        return {
+            "axes": len(axis_rows),
+            "attributed_axes": len(set(uses) | set(admissions)),
+            "window_days": window,
+        }
+
+    def apply_inspiration_axis_lifecycle(self, *, now: datetime) -> dict[str, int]:
+        """Apply the deterministic axis lifecycle transitions (post-backfill).
+
+        Three transitions, in order, all keyed on the injected ``now``:
+
+        1. ``time_sensitive`` axes past their ``freshness_ttl_days`` →
+           persisted ``status='stale'`` (Phase 1 only filtered them at read
+           time).
+        2. Active axes given ≥ ``_INSPIRATION_AXIS_RETIRE_MIN_WINDOW_USES``
+           consumption chances whose post-backfill ``yield_score`` stays below
+           ``_INSPIRATION_AXIS_RETIRE_YIELD_SCORE`` → ``status='retired'``.
+           Retired axes never re-enter selection and are not resurrected by
+           upsert.
+        3. Stale/retired rows whose ``last_refreshed_at`` is older than
+           ``_INSPIRATION_AXIS_PURGE_AFTER_DAYS`` days → physical DELETE.
+
+        Returns a ``{"staled": n, "retired": n, "purged": n}`` transition
+        summary for stage telemetry.
+        """
+
+        from datetime import timedelta
+
+        now_utc = _axis_now_utc(now)
+        purge_cutoff = now_utc - timedelta(days=_INSPIRATION_AXIS_PURGE_AFTER_DAYS)
+
+        staled_ids: list[str] = []
+        active_rows = self.conn.execute(
+            "SELECT * FROM discovery_inspiration_axis WHERE status = 'active'"
+        ).fetchall()
+        for row in active_rows:
+            if _axis_is_time_expired(row, now_utc):
+                staled_ids.append(str(row["axis_id"]))
+        if staled_ids:
+            self.conn.executemany(
+                "UPDATE discovery_inspiration_axis SET status = 'stale' WHERE axis_id = ?",
+                [(axis_id,) for axis_id in staled_ids],
+            )
+
+        retired = self.conn.execute(
+            """
+            UPDATE discovery_inspiration_axis
+            SET status = 'retired'
+            WHERE status = 'active'
+              AND window_uses >= ?
+              AND yield_score < ?
+            """,
+            (
+                _INSPIRATION_AXIS_RETIRE_MIN_WINDOW_USES,
+                _INSPIRATION_AXIS_RETIRE_YIELD_SCORE,
+            ),
+        ).rowcount
+
+        purged_ids: list[str] = []
+        inactive_rows = self.conn.execute(
+            "SELECT axis_id, last_refreshed_at FROM discovery_inspiration_axis "
+            "WHERE status IN ('stale', 'retired')"
+        ).fetchall()
+        for row in inactive_rows:
+            refreshed_at = _parse_axis_datetime(row["last_refreshed_at"])
+            if refreshed_at is not None and refreshed_at < purge_cutoff:
+                purged_ids.append(str(row["axis_id"]))
+        if purged_ids:
+            self.conn.executemany(
+                "DELETE FROM discovery_inspiration_axis WHERE axis_id = ?",
+                [(axis_id,) for axis_id in purged_ids],
+            )
+
+        self.conn.commit()
+        return {
+            "staled": len(staled_ids),
+            "retired": max(0, int(retired)),
+            "purged": len(purged_ids),
+        }
+
+    def list_inspiration_axes(
+        self,
+        interest_labels: Sequence[str],
+        *,
+        limit: int,
+        now: datetime,
+    ) -> list[AxisRow]:
+        """Return active reusable inspiration axes, ranked with a zero-yield prior."""
+
+        labels = _unique_clean_strings(interest_labels)
+        per_interest_limit = max(0, int(limit))
+        if not labels or per_interest_limit <= 0:
+            return []
+        placeholders = ", ".join("?" for _ in labels)
+        self._ensure_fresh_read()
+        rows = self.conn.execute(
+            f"""
+            SELECT *
+            FROM discovery_inspiration_axis
+            WHERE status = 'active'
+              AND interest_label IN ({placeholders})
+            """,
+            tuple(labels),
+        ).fetchall()
+        by_interest: dict[str, list[sqlite3.Row]] = {label: [] for label in labels}
+        for row in rows:
+            if _axis_is_time_expired(row, now):
+                continue
+            by_interest.setdefault(str(row["interest_label"]), []).append(row)
+
+        result: list[AxisRow] = []
+        for label in labels:
+            ranked = sorted(
+                by_interest.get(label, []), key=lambda row: _axis_list_sort_key(row, now)
+            )
+            result.extend(
+                self._row_to_discovery_inspiration_axis(row) for row in ranked[:per_interest_limit]
+            )
+        return result
+
+    def list_inspiration_axes_by_source(
+        self,
+        source: str,
+        *,
+        min_yield: float = 0.0,
+        limit: int,
+        now: datetime,
+    ) -> list[AxisRow]:
+        """Return active axes filtered by ``source`` (Phase 2.3, E5).
+
+        Explore axes carry cross-domain ``interest_label``s that never match a
+        selected like interest, so :meth:`list_inspiration_axes` (interest-keyed)
+        cannot surface them. This mirrors that DAO's ``status='active'`` filter,
+        the SAME ``_axis_is_time_expired`` time-sensitive suppression, and the
+        SAME Phase-2 ``_axis_list_sort_key`` ordering (freshness × conditional
+        prior floor), but keys on ``source`` and applies a raw ``yield_score >=
+        min_yield`` floor — letting the explore stage reuse its own high-yield
+        cross-domain axes. ``limit`` is a global (not per-interest) bound.
+        """
+
+        source_key = str(source or "").strip()
+        bounded_limit = max(0, int(limit))
+        if not source_key or bounded_limit <= 0:
+            return []
+        self._ensure_fresh_read()
+        rows = self.conn.execute(
+            """
+            SELECT *
+            FROM discovery_inspiration_axis
+            WHERE status = 'active'
+              AND source = ?
+              AND yield_score >= ?
+            """,
+            (source_key, float(min_yield)),
+        ).fetchall()
+        ranked = sorted(
+            (row for row in rows if not _axis_is_time_expired(row, now)),
+            key=lambda row: _axis_list_sort_key(row, now),
+        )
+        return [self._row_to_discovery_inspiration_axis(row) for row in ranked[:bounded_limit]]
+
+    def _enforce_inspiration_axis_active_cap(self, interest_label: str) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT *
+            FROM discovery_inspiration_axis
+            WHERE interest_label = ?
+              AND status = 'active'
+            """,
+            (interest_label,),
+        ).fetchall()
+        if len(rows) <= _INSPIRATION_AXIS_ACTIVE_CAP:
+            return
+        ranked = sorted(rows, key=_axis_cap_sort_key)
+        stale_ids = [str(row["axis_id"]) for row in ranked[_INSPIRATION_AXIS_ACTIVE_CAP:]]
+        self.conn.executemany(
+            "UPDATE discovery_inspiration_axis SET status = 'stale' WHERE axis_id = ?",
+            [(axis_id,) for axis_id in stale_ids],
+        )
+        self.conn.commit()
+
+    def upsert_discovery_inspiration_seed(
+        self,
+        *,
+        platform: str,
+        profile_kw_digest: str,
+        aspect_id: str,
+        query_kind: str,
+        seed_query: str,
+        inspiration_id: str,
+        source_terms: Sequence[object] | None = None,
+        evidence_titles: Sequence[object] | None = None,
+        evidence_urls: Sequence[object] | None = None,
+        reason: str = "",
+        risk_flags: Sequence[object] | None = None,
+        probe_backend: str = "exa",
+        freshness_digest: str = "",
+        domain_filters: Sequence[object] | None = None,
+        source_domains: Sequence[object] | None = None,
+        expires_at: str | None = None,
+    ) -> None:
+        """Insert or refresh one search-derived inspiration seed."""
+
+        self._execute_write(
+            """
+            INSERT INTO discovery_inspiration_probe_cache (
+                platform, profile_kw_digest, aspect_id, query_kind, probe_backend,
+                freshness_digest, seed_query, domain_filters_json, inspiration_id,
+                source_domains_json, source_terms_json, evidence_titles_json,
+                evidence_urls_json, reason, risk_flags_json, expires_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(
+                platform, profile_kw_digest, aspect_id, query_kind, probe_backend,
+                freshness_digest, seed_query, inspiration_id
+            ) DO UPDATE SET
+                domain_filters_json = excluded.domain_filters_json,
+                source_domains_json = excluded.source_domains_json,
+                source_terms_json = excluded.source_terms_json,
+                evidence_titles_json = excluded.evidence_titles_json,
+                evidence_urls_json = excluded.evidence_urls_json,
+                reason = excluded.reason,
+                risk_flags_json = excluded.risk_flags_json,
+                expires_at = excluded.expires_at
+            """,
+            (
+                platform.strip(),
+                profile_kw_digest.strip(),
+                aspect_id.strip(),
+                _normalize_keyword_kind(query_kind),
+                probe_backend.strip() or "exa",
+                freshness_digest.strip(),
+                seed_query.strip(),
+                _json_array(domain_filters),
+                inspiration_id.strip(),
+                _json_array(source_domains),
+                _json_array(source_terms),
+                _json_array(evidence_titles),
+                _json_array(evidence_urls),
+                reason.strip(),
+                _json_array(risk_flags),
+                expires_at,
+            ),
+        )
+
+    def list_discovery_inspiration_seeds(
+        self,
+        platform: str,
+        profile_kw_digest: str,
+        *,
+        aspect_id: str | None = None,
+        query_kind: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return cached inspiration seeds for a profile digest."""
+
+        clauses = ["platform = ?", "profile_kw_digest = ?"]
+        params: list[Any] = [platform.strip(), profile_kw_digest.strip()]
+        if aspect_id is not None:
+            clauses.append("aspect_id = ?")
+            params.append(aspect_id.strip())
+        if query_kind is not None:
+            clauses.append("query_kind = ?")
+            params.append(_normalize_keyword_kind(query_kind))
+        sql = f"""
+            SELECT *
+            FROM discovery_inspiration_probe_cache
+            WHERE {" AND ".join(clauses)}
+            ORDER BY created_at ASC, seed_query ASC, inspiration_id ASC
+        """
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(max(0, int(limit)))
+        self._ensure_fresh_read()
+        rows = self.conn.execute(sql, tuple(params)).fetchall()
+        return [self._row_to_discovery_inspiration_seed(row) for row in rows]
+
+    def increment_discovery_inspiration_yield(
+        self,
+        platform: str,
+        profile_kw_digest: str,
+        *,
+        aspect_id: str,
+        query_kind: str,
+        seed_query: str,
+        inspiration_id: str,
+        probe_backend: str = "exa",
+        freshness_digest: str = "",
+        source_terms: Sequence[object] | None = None,
+    ) -> bool:
+        """Bump the yield counter for one cached inspiration seed."""
+
+        _ = source_terms
+        cursor = self._execute_write(
+            """
+            UPDATE discovery_inspiration_probe_cache
+            SET yielded_count = yielded_count + 1
+            WHERE platform = ?
+              AND profile_kw_digest = ?
+              AND aspect_id = ?
+              AND query_kind = ?
+              AND probe_backend = ?
+              AND freshness_digest = ?
+              AND seed_query = ?
+              AND inspiration_id = ?
+            """,
+            (
+                platform.strip(),
+                profile_kw_digest.strip(),
+                aspect_id.strip(),
+                _normalize_keyword_kind(query_kind),
+                probe_backend.strip() or "exa",
+                freshness_digest.strip(),
+                seed_query.strip(),
+                inspiration_id.strip(),
+            ),
+        )
+        return int(cursor.rowcount or 0) > 0
+
+    def upsert_discovery_inspiration_expansion(
+        self,
+        *,
+        platform: str,
+        profile_kw_digest: str,
+        aspect_id: str,
+        query_kind: str,
+        inspiration_id: str,
+        expansion_id: str,
+        parent_expansion_id: str = "",
+        hop: int = 1,
+        relation: str = "",
+        text: str = "",
+        detail_axes: Sequence[object] | None = None,
+        source_terms: Sequence[object] | None = None,
+        curator_decision: str = "",
+        curator_score: float = 0.0,
+        curator_reason: str = "",
+        curator_feedback: str = "",
+        risk_flags: Sequence[object] | None = None,
+        status: str = "new",
+        expires_at: str | None = None,
+        cooldown_until: str | None = None,
+    ) -> None:
+        """Insert or refresh one lateral expansion under an inspiration seed."""
+
+        self._execute_write(
+            """
+            INSERT INTO discovery_inspiration_expansion_cache (
+                platform, profile_kw_digest, aspect_id, query_kind, inspiration_id,
+                parent_expansion_id, expansion_id, hop, relation, text,
+                detail_axes_json, source_terms_json, curator_decision, curator_score,
+                curator_reason, curator_feedback, risk_flags_json, status, expires_at,
+                cooldown_until
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(
+                platform, profile_kw_digest, aspect_id, query_kind,
+                inspiration_id, expansion_id
+            ) DO UPDATE SET
+                parent_expansion_id = excluded.parent_expansion_id,
+                hop = excluded.hop,
+                relation = excluded.relation,
+                text = excluded.text,
+                detail_axes_json = excluded.detail_axes_json,
+                source_terms_json = excluded.source_terms_json,
+                curator_decision = excluded.curator_decision,
+                curator_score = excluded.curator_score,
+                curator_reason = excluded.curator_reason,
+                curator_feedback = excluded.curator_feedback,
+                risk_flags_json = excluded.risk_flags_json,
+                status = excluded.status,
+                expires_at = excluded.expires_at,
+                cooldown_until = excluded.cooldown_until
+            """,
+            (
+                platform.strip(),
+                profile_kw_digest.strip(),
+                aspect_id.strip(),
+                _normalize_keyword_kind(query_kind),
+                inspiration_id.strip(),
+                parent_expansion_id.strip(),
+                expansion_id.strip(),
+                max(1, int(hop)),
+                relation.strip(),
+                text.strip(),
+                _json_array(detail_axes),
+                _json_array(source_terms),
+                curator_decision.strip(),
+                float(curator_score),
+                curator_reason.strip(),
+                curator_feedback.strip(),
+                _json_array(risk_flags),
+                status.strip() or "new",
+                expires_at,
+                cooldown_until,
+            ),
+        )
+
+    def list_discovery_inspiration_expansions(
+        self,
+        platform: str,
+        profile_kw_digest: str,
+        *,
+        aspect_id: str | None = None,
+        inspiration_id: str | None = None,
+        status: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return cached lateral expansions for a profile digest."""
+
+        clauses = ["platform = ?", "profile_kw_digest = ?"]
+        params: list[Any] = [platform.strip(), profile_kw_digest.strip()]
+        if aspect_id is not None:
+            clauses.append("aspect_id = ?")
+            params.append(aspect_id.strip())
+        if inspiration_id is not None:
+            clauses.append("inspiration_id = ?")
+            params.append(inspiration_id.strip())
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status.strip())
+        sql = f"""
+            SELECT *
+            FROM discovery_inspiration_expansion_cache
+            WHERE {" AND ".join(clauses)}
+            ORDER BY created_at ASC, inspiration_id ASC, expansion_id ASC
+        """
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(max(0, int(limit)))
+        self._ensure_fresh_read()
+        rows = self.conn.execute(sql, tuple(params)).fetchall()
+        return [self._row_to_discovery_inspiration_expansion(row) for row in rows]
+
+    def increment_discovery_inspiration_expansion_yield(
+        self,
+        platform: str,
+        profile_kw_digest: str,
+        *,
+        aspect_id: str,
+        query_kind: str,
+        inspiration_id: str,
+        expansion_id: str,
+    ) -> bool:
+        """Bump the yield counter for one cached lateral expansion."""
+
+        cursor = self._execute_write(
+            """
+            UPDATE discovery_inspiration_expansion_cache
+            SET yielded_count = yielded_count + 1
+            WHERE platform = ?
+              AND profile_kw_digest = ?
+              AND aspect_id = ?
+              AND query_kind = ?
+              AND inspiration_id = ?
+              AND expansion_id = ?
+            """,
+            (
+                platform.strip(),
+                profile_kw_digest.strip(),
+                aspect_id.strip(),
+                _normalize_keyword_kind(query_kind),
+                inspiration_id.strip(),
+                expansion_id.strip(),
+            ),
+        )
+        return int(cursor.rowcount or 0) > 0
+
+    @staticmethod
+    def _row_to_discovery_inspiration_axis(row: sqlite3.Row) -> AxisRow:
+        ttl_value = row["freshness_ttl_days"]
+        return AxisRow(
+            axis_id=str(row["axis_id"]),
+            interest_label=str(row["interest_label"]),
+            interest_id=str(row["interest_id"] or ""),
+            axis_label=str(row["axis_label"]),
+            axis_kind=str(row["axis_kind"]),
+            example_terms=tuple(_load_json_array(row["example_terms"])),
+            evidence_refs=tuple(_load_json_array(row["evidence_refs"])),
+            source=str(row["source"]),
+            time_sensitive=bool(_metric_int(row["time_sensitive"])),
+            freshness_ttl_days=None if ttl_value is None else _metric_int(ttl_value),
+            yield_score=_metric_float(row["yield_score"]),
+            admissions=_metric_int(row["admissions"]),
+            use_count=_metric_int(row["use_count"]),
+            status=str(row["status"]),
+            created_at=str(row["created_at"]),
+            last_used_at=_optional_text(row["last_used_at"]),
+            last_refreshed_at=_optional_text(row["last_refreshed_at"]),
+        )
+
+    @staticmethod
+    def _row_to_discovery_inspiration_seed(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "platform": str(row["platform"]),
+            "profile_kw_digest": str(row["profile_kw_digest"]),
+            "aspect_id": str(row["aspect_id"]),
+            "query_kind": str(row["query_kind"]),
+            "probe_backend": str(row["probe_backend"]),
+            "freshness_digest": str(row["freshness_digest"]),
+            "seed_query": str(row["seed_query"]),
+            "domain_filters": _load_json_array(row["domain_filters_json"]),
+            "inspiration_id": str(row["inspiration_id"]),
+            "source_domains": _load_json_array(row["source_domains_json"]),
+            "source_terms": _load_json_array(row["source_terms_json"]),
+            "evidence_titles": _load_json_array(row["evidence_titles_json"]),
+            "evidence_urls": _load_json_array(row["evidence_urls_json"]),
+            "reason": str(row["reason"]),
+            "risk_flags": _load_json_array(row["risk_flags_json"]),
+            "selected_count": int(row["selected_count"]),
+            "yielded_count": int(row["yielded_count"]),
+        }
+
+    @staticmethod
+    def _row_to_discovery_inspiration_expansion(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "platform": str(row["platform"]),
+            "profile_kw_digest": str(row["profile_kw_digest"]),
+            "aspect_id": str(row["aspect_id"]),
+            "query_kind": str(row["query_kind"]),
+            "inspiration_id": str(row["inspiration_id"]),
+            "parent_expansion_id": str(row["parent_expansion_id"]),
+            "expansion_id": str(row["expansion_id"]),
+            "hop": int(row["hop"]),
+            "relation": str(row["relation"]),
+            "text": str(row["text"]),
+            "detail_axes": _load_json_array(row["detail_axes_json"]),
+            "source_terms": _load_json_array(row["source_terms_json"]),
+            "curator_decision": str(row["curator_decision"]),
+            "curator_score": float(row["curator_score"]),
+            "curator_reason": str(row["curator_reason"]),
+            "curator_feedback": str(row["curator_feedback"]),
+            "risk_flags": _load_json_array(row["risk_flags_json"]),
+            "status": str(row["status"]),
+            "selected_count": int(row["selected_count"]),
+            "realized_count": int(row["realized_count"]),
+            "yielded_count": int(row["yielded_count"]),
+            "failed_count": int(row["failed_count"]),
+        }
 
     def used_keyword_count(self, platform: str) -> int:
         """Count ``used`` keywords for a platform (P3.2 dynamic-cap denominator).

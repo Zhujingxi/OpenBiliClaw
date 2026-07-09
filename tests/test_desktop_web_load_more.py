@@ -66,12 +66,11 @@ def test_css_defines_skeleton_shimmer_with_reduced_motion_guard() -> None:
     assert "prefers-reduced-motion" in app_css
 
 
-def test_pool_refill_retries_auto_load_only_when_parked_at_bottom() -> None:
+def test_pool_status_update_rechecks_auto_load_when_parked_at_bottom() -> None:
     app_js = _read(APP_JS)
     body = _function_body(app_js, "maybeAutoLoadAfterPoolRefill")
-    # 只有「上一批没吃饱 + 哨兵还在视口里」才补一脚，防止 AFK 挂底把整池吃光。
-    assert "lastAppendCameUpShort" in body
-    assert "sentinelInView" in body
+    # 哨兵可能已经相交但当时被库存 / 渲染 guard 拦住；状态更新后要补一次几何重检。
+    assert "scheduleAutoLoadCheck();" in body
     apply_body = _function_body(app_js, "applyRuntimeStatus")
     assert "maybeAutoLoadAfterPoolRefill();" in apply_body
 

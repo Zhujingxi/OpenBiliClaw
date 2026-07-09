@@ -81,6 +81,25 @@ _DEFAULT_HISTORY_WINDOW_HOURS = 48
 _DEFAULT_CLAIM_LEASE_MINUTES = 10
 _DEFAULT_PLANNER_POLL_SECONDS = 120
 _DEFAULT_PLAN_TTL_HOURS = 12
+# Phase-2 config collapse: these constants are the ``medium`` breadth tier
+# (the pre-collapse per-knob defaults, item-identical — a table-driven test
+# guards the equality so upgrading is zero behavior drift).
+_DEFAULT_INSPIRATION_ASPECT_WINDOW_SIZE = 32
+_DEFAULT_INSPIRATION_INTEREST_SAMPLE_SIZE = 6
+_DEFAULT_INSPIRATION_MAX_PROBE_SEARCHES_PER_STAGE = 12
+_DEFAULT_INSPIRATION_PLATFORMS_PER_PROBE = 2
+_DEFAULT_INSPIRATION_RISKCONTROLLED_PROBE_BUDGET = 4
+_DEFAULT_INSPIRATION_SEARCH_PAGES_PER_PROBE = 1
+_DEFAULT_INSPIRATION_SEARCH_RESULTS_PER_QUERY = 5
+_DEFAULT_INSPIRATION_MAX_SEEDS_PER_ASPECT = 3
+_DEFAULT_INSPIRATION_MAX_KEYWORDS_PER_PLATFORM = 12
+_DEFAULT_INSPIRATION_BREADTH = "high"
+_DEFAULT_INSPIRATION_SEARCH_BACKENDS: tuple[str, ...] = (
+    "local_cache",
+    "platform_sources",
+    "exa",
+    "you",
+)
 _DEFAULT_ADMISSION_MIN_SCORE = 0.60
 _DEFAULT_MULTIMODAL_BATCH_SIZE = 8
 _DEFAULT_MULTIMODAL_IMAGE_MAX_PX = 384
@@ -139,6 +158,110 @@ class ConfigDiagnostics:
     created_default_config: bool = False
     messages: list[str] = field(default_factory=list)
     issues: list[ConfigIssue] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class InspirationBreadthParams:
+    """Effective keyword-inspiration knobs derived from ``inspiration_breadth``.
+
+    Phase-2 config collapse (13 → 4): the ten per-knob ``inspiration_*`` config
+    fields were removed; consumers read this derived view instead. CLI one-shot
+    overrides (``--limit`` / ``--interest-limit``) are applied on a copy of this
+    object and injected via planner construction — never through config fields.
+    """
+
+    aspect_window_size: int
+    interest_sample_size: int
+    max_probe_searches_per_stage: int
+    platforms_per_probe: int
+    riskcontrolled_probe_budget: int
+    search_pages_per_probe: int
+    search_results_per_query: int
+    max_seeds_per_aspect: int
+    max_keywords_per_platform: int
+
+
+_INSPIRATION_BREADTH_TIERS: dict[str, InspirationBreadthParams] = {
+    "low": InspirationBreadthParams(
+        aspect_window_size=16,
+        interest_sample_size=3,
+        max_probe_searches_per_stage=6,
+        platforms_per_probe=1,
+        riskcontrolled_probe_budget=2,
+        search_pages_per_probe=1,
+        search_results_per_query=3,
+        max_seeds_per_aspect=2,
+        max_keywords_per_platform=8,
+    ),
+    "medium": InspirationBreadthParams(
+        aspect_window_size=_DEFAULT_INSPIRATION_ASPECT_WINDOW_SIZE,
+        interest_sample_size=_DEFAULT_INSPIRATION_INTEREST_SAMPLE_SIZE,
+        max_probe_searches_per_stage=_DEFAULT_INSPIRATION_MAX_PROBE_SEARCHES_PER_STAGE,
+        platforms_per_probe=_DEFAULT_INSPIRATION_PLATFORMS_PER_PROBE,
+        riskcontrolled_probe_budget=_DEFAULT_INSPIRATION_RISKCONTROLLED_PROBE_BUDGET,
+        search_pages_per_probe=_DEFAULT_INSPIRATION_SEARCH_PAGES_PER_PROBE,
+        search_results_per_query=_DEFAULT_INSPIRATION_SEARCH_RESULTS_PER_QUERY,
+        max_seeds_per_aspect=_DEFAULT_INSPIRATION_MAX_SEEDS_PER_ASPECT,
+        max_keywords_per_platform=_DEFAULT_INSPIRATION_MAX_KEYWORDS_PER_PLATFORM,
+    ),
+    "high": InspirationBreadthParams(
+        aspect_window_size=48,
+        interest_sample_size=8,
+        max_probe_searches_per_stage=20,
+        platforms_per_probe=3,
+        riskcontrolled_probe_budget=8,
+        search_pages_per_probe=2,
+        search_results_per_query=8,
+        max_seeds_per_aspect=5,
+        max_keywords_per_platform=16,
+    ),
+}
+
+# The ten collapsed ``[discovery]`` keys (hard-removed, no compat shim). A
+# raw-config scan surfaces a removal notice through the diagnostics channel.
+_REMOVED_INSPIRATION_DISCOVERY_KEYS: tuple[str, ...] = (
+    "inspiration_aspect_window_size",
+    "inspiration_interest_sample_size",
+    "inspiration_max_probe_searches_per_stage",
+    "inspiration_platforms_per_probe",
+    "inspiration_riskcontrolled_probe_budget",
+    "inspiration_search_pages_per_probe",
+    "inspiration_search_results_per_query",
+    "inspiration_max_seeds_per_aspect",
+    "inspiration_max_expansions_per_seed",
+    "inspiration_max_keywords_per_platform",
+)
+
+
+def derive_inspiration_breadth_params(breadth: object) -> InspirationBreadthParams:
+    """Return the effective inspiration knobs for a breadth tier.
+
+    Raises :class:`ConfigError` for anything but ``low`` / ``medium`` / ``high``.
+    """
+
+    tier = str(breadth or "").strip().lower()
+    params = _INSPIRATION_BREADTH_TIERS.get(tier)
+    if params is None:
+        raise ConfigError(
+            f"discovery.inspiration_breadth 必须是 low / medium / high，收到 {breadth!r}。"
+        )
+    return params
+
+
+def _removed_discovery_key_issues(raw: dict[str, Any]) -> list[ConfigIssue]:
+    discovery_raw = raw.get("discovery")
+    if not isinstance(discovery_raw, dict):
+        return []
+    return [
+        ConfigIssue(
+            field=f"discovery.{key}",
+            message=(
+                f"`{key}` 已移除，值被忽略，请改用 `inspiration_breadth`（low / medium / high）。"
+            ),
+        )
+        for key in _REMOVED_INSPIRATION_DISCOVERY_KEYS
+        if key in discovery_raw
+    ]
 
 
 @dataclass
@@ -347,6 +470,18 @@ class DiscoveryConfig:
     # Plan staleness backstop: pending keywords older than this expire even if
     # the profile digest hasn't changed.
     plan_ttl_hours: int = _DEFAULT_PLAN_TTL_HOURS
+    # Optional search-inspired query brainstorming stage. Default off: when
+    # enabled, the keyword planner may use an injected search provider to mine
+    # adjacent concepts and insert metadata-bearing keywords.
+    inspiration_search_enabled: bool = False
+    inspiration_search_backends: tuple[str, ...] = _DEFAULT_INSPIRATION_SEARCH_BACKENDS
+    # Optional experiment mode: when true and inspiration search is available,
+    # due platforms skip the legacy merged keyword planner and are filled only
+    # through the search-inspired flow.
+    inspiration_replace_merged_keywords: bool = False
+    # Breadth tier (low / medium / high) replacing the ten per-knob fields —
+    # effective values come from ``derive_inspiration_breadth_params``.
+    inspiration_breadth: str = _DEFAULT_INSPIRATION_BREADTH
     # Unified recommendation-pool admission floor. Source/provenance metadata
     # must never bypass this; explicit strategy thresholds live on candidates.
     admission_min_score: float = _DEFAULT_ADMISSION_MIN_SCORE
@@ -1139,6 +1274,20 @@ def _build_discovery(discovery_raw: dict[str, Any]) -> DiscoveryConfig:
             default=_DEFAULT_PLAN_TTL_HOURS,
             min_value=1,
         ),
+        inspiration_search_enabled=_coerce_bool(
+            discovery_raw.get("inspiration_search_enabled"),
+            default=False,
+        ),
+        inspiration_search_backends=_normalize_inspiration_search_backends(
+            discovery_raw.get("inspiration_search_backends")
+        ),
+        inspiration_replace_merged_keywords=_coerce_bool(
+            discovery_raw.get("inspiration_replace_merged_keywords"),
+            default=False,
+        ),
+        inspiration_breadth=_normalize_inspiration_breadth(
+            discovery_raw.get("inspiration_breadth")
+        ),
         admission_min_score=_normalize_probability(
             discovery_raw.get("admission_min_score"),
             default=_DEFAULT_ADMISSION_MIN_SCORE,
@@ -1276,6 +1425,38 @@ def _coerce_str_list(value: object) -> list[str]:
     if isinstance(value, (list, tuple)):
         return [str(item).strip() for item in value if str(item).strip()]
     return []
+
+
+def _normalize_inspiration_search_backends(value: object) -> tuple[str, ...]:
+    """Normalize inspiration search backend names for the mcporter provider chain."""
+
+    raw_values = (
+        list(_DEFAULT_INSPIRATION_SEARCH_BACKENDS) if value is None else _coerce_str_list(value)
+    )
+    aliases = {
+        "exa": "exa",
+        "local": "local_cache",
+        "cache": "local_cache",
+        "local_cache": "local_cache",
+        "local-cache": "local_cache",
+        "platform-source": "platform_sources",
+        "platform_sources": "platform_sources",
+        "platform": "platform_sources",
+        "you": "you",
+        "you.com": "you",
+        "youcom": "you",
+        "you-search": "you",
+        "you_search": "you",
+    }
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        backend = aliases.get(raw.strip().lower())
+        if backend is None or backend in seen:
+            continue
+        normalized.append(backend)
+        seen.add(backend)
+    return tuple(normalized or _DEFAULT_INSPIRATION_SEARCH_BACKENDS)
 
 
 # Single source of truth: every env var ``_build_api_auth`` honors for
@@ -1519,6 +1700,15 @@ def _normalize_scheduler_int(
     if max_value is not None and normalized > max_value:
         return default
     return normalized
+
+
+def _normalize_inspiration_breadth(value: object) -> str:
+    """Validate the breadth tier; unset → default, invalid → ConfigError."""
+    if value is None:
+        return _DEFAULT_INSPIRATION_BREADTH
+    tier = str(value).strip().lower()
+    derive_inspiration_breadth_params(tier)  # raises ConfigError when invalid
+    return tier
 
 
 def _normalize_auto_update_allowed_remotes(value: object) -> list[str]:
@@ -1851,6 +2041,9 @@ def load_config_with_diagnostics(
                 raw = _deep_merge(raw, file_data)
 
     raw = _apply_env_overrides(raw)
+    # Removed-key notices are collected from the RAW [discovery] table before
+    # _build_discovery ever runs — the values are ignored, never fail-fast.
+    diagnostics.issues.extend(_removed_discovery_key_issues(raw))
     config = _build_config(raw)
     diagnostics.issues.extend(_collect_config_issues(config))
     return config, diagnostics
@@ -2321,6 +2514,13 @@ def _render_config_toml(
             f"planner_poll_seconds = {config.discovery.planner_poll_seconds}",
             f"plan_ttl_hours = {config.discovery.plan_ttl_hours}",
             f"admission_min_score = {config.discovery.admission_min_score:g}",
+            "inspiration_search_enabled = "
+            f"{_toml_bool(config.discovery.inspiration_search_enabled)}",
+            "inspiration_search_backends = "
+            f"{_toml_str_list(list(config.discovery.inspiration_search_backends))}",
+            "inspiration_replace_merged_keywords = "
+            f"{_toml_bool(config.discovery.inspiration_replace_merged_keywords)}",
+            f"inspiration_breadth = {_toml_string(config.discovery.inspiration_breadth)}",
             "multimodal_evaluation_enabled = "
             f"{_toml_bool(config.discovery.multimodal_evaluation_enabled)}",
             f"multimodal_batch_size = {config.discovery.multimodal_batch_size}",
