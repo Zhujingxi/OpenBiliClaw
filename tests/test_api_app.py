@@ -6561,6 +6561,7 @@ class TestBackendAPI:
             def __init__(self) -> None:
                 self.confirmed: list[object] = []
                 self.rejected: list[object] = []
+                self.deferred: list[object] = []
 
             def get_active_speculations(self) -> list[object]:
                 return [SimpleNamespace(domain="抽象雕塑")]
@@ -6573,6 +6574,12 @@ class TestBackendAPI:
                 self.rejected.append((_args, _kwargs))
                 return True
 
+            def user_defer_speculation(self, *_args: object, **_kwargs: object) -> object:
+                self.deferred.append((_args, _kwargs))
+                from openbiliclaw.soul.speculator import DeferResult
+
+                return DeferResult(outcome="deferred")
+
         speculator = FakeSpeculator()
         memory = FakeMemoryManager()
         app = create_app(
@@ -6584,12 +6591,14 @@ class TestBackendAPI:
         )
         client = TestClient(app)
 
+        # An ambiguous message with no explicit defer/positive/negative keyword —
+        # LLM fails, keyword finds nothing → defaults to plain neutral.
         response = client.post(
             "/api/interest-probes/respond",
             json={
                 "domain": "抽象雕塑",
                 "response": "chat",
-                "message": "先放着吧",
+                "message": "嗯，我再想想看",
             },
         )
 
@@ -9904,7 +9913,8 @@ def test_probe_chat_sentiment_uses_plain_text_llm_call() -> None:
     method, kwargs = llm.calls[0]
     assert method == "core"
     assert kwargs["caller"] == "api.sentiment"
-    assert kwargs["max_tokens"] == 8
+    # 16 (was 8) so the longest label `neutral_deferred` can't truncate.
+    assert kwargs["max_tokens"] == 16
     assert kwargs["json_mode"] is False
 
 
@@ -11736,3 +11746,200 @@ class TestLlmFallbackConfigValidationAndProbe:
         body = response.json()
         assert body["ok"] is False
         assert "same as the default" in body["error"]
+
+
+# ---------------------------------------------------------------------------
+# Probe defer ("暂时忽略") — button + chat routing
+# ---------------------------------------------------------------------------
+
+
+def _make_defer_app(interest_defer=None, avoidance_defer=None, llm_reply="neutral"):
+    """Build a TestClient app whose speculators record defer calls."""
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+
+    from openbiliclaw.soul.speculator import DeferResult
+
+    class FakeLLM:
+        async def complete_with_core_memory(self, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(content=llm_reply)
+
+    class FakeDialogue:
+        async def respond(self, _message: str) -> str:
+            return "好的，我记住了。"
+
+    class FakeInterestSpeculator:
+        def __init__(self) -> None:
+            self.defer_calls: list[str] = []
+
+        def get_active_speculations(self) -> list[object]:
+            return []
+
+        def user_defer_speculation(self, domain: str) -> DeferResult:
+            self.defer_calls.append(domain)
+            return interest_defer or DeferResult(
+                outcome="deferred", deferred_until="2026-07-14T00:00:00", defer_count=1
+            )
+
+    class FakeAvoidanceSpeculator:
+        def __init__(self) -> None:
+            self.defer_calls: list[str] = []
+
+        def get_active_avoidances(self) -> list[object]:
+            return []
+
+        def user_defer_avoidance(self, domain: str) -> DeferResult:
+            self.defer_calls.append(domain)
+            return avoidance_defer or DeferResult(
+                outcome="deferred", deferred_until="2026-07-14T00:00:00", defer_count=1
+            )
+
+    class FakeSoulEngine:
+        def __init__(self, interest, avoidance) -> None:
+            self._speculator = interest
+            self._avoidance_speculator = avoidance
+
+    class FakeMemoryManager:
+        def load_cognition_updates(self) -> list[object]:
+            return []
+
+        def save_cognition_updates(self, _updates: list[object]) -> None:
+            return None
+
+    interest = FakeInterestSpeculator()
+    avoidance = FakeAvoidanceSpeculator()
+    app = create_app(
+        memory_manager=FakeMemoryManager(),
+        database=object(),
+        soul_engine=FakeSoulEngine(interest, avoidance),
+        dialogue=FakeDialogue(),
+        recommendation_engine=SimpleNamespace(_llm=FakeLLM()),
+    )
+    return TestClient(app), interest, avoidance
+
+
+def test_interest_probe_defer_button_returns_deferred() -> None:
+    client, interest, _ = _make_defer_app()
+    resp = client.post(
+        "/api/interest-probes/respond",
+        json={"domain": "桌游", "response": "defer"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["action"] == "deferred"
+    assert body["defer_count"] == 1
+    assert body["deferred_until"] == "2026-07-14T00:00:00"
+    assert interest.defer_calls == ["桌游"]
+
+
+def test_interest_probe_defer_button_exhausted() -> None:
+    from openbiliclaw.soul.speculator import DeferResult
+
+    client, _, _ = _make_defer_app(interest_defer=DeferResult(outcome="exhausted", defer_count=3))
+    resp = client.post(
+        "/api/interest-probes/respond",
+        json={"domain": "桌游", "response": "defer"},
+    )
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["action"] == "defer_exhausted"
+    assert body["defer_count"] == 3
+
+
+def test_interest_probe_defer_not_found() -> None:
+    from openbiliclaw.soul.speculator import DeferResult
+
+    client, _, _ = _make_defer_app(interest_defer=DeferResult(outcome="not_found"))
+    resp = client.post(
+        "/api/interest-probes/respond",
+        json={"domain": "不存在", "response": "defer"},
+    )
+    body = resp.json()
+    assert body["ok"] is False
+
+
+def test_avoidance_probe_defer_button_returns_deferred() -> None:
+    client, _, avoidance = _make_defer_app()
+    resp = client.post(
+        "/api/avoidance-probes/respond",
+        json={"domain": "标题党", "response": "defer"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["action"] == "deferred"
+    assert avoidance.defer_calls == ["标题党"]
+
+
+def test_probe_defer_validation_mentions_defer() -> None:
+    client, _, _ = _make_defer_app()
+    resp = client.post(
+        "/api/interest-probes/respond",
+        json={"domain": "桌游", "response": "bogus"},
+    )
+    assert resp.status_code == 422
+    assert "defer" in resp.json()["detail"]
+
+
+def test_interest_probe_chat_neutral_deferred_calls_defer() -> None:
+    # LLM returns neutral (falls through to keyword); keyword sees 「先放着吧」
+    # → neutral_deferred → defer method invoked.
+    client, interest, _ = _make_defer_app(llm_reply="neutral")
+    resp = client.post(
+        "/api/interest-probes/respond",
+        json={"domain": "桌游", "response": "chat", "message": "先放着吧"},
+    )
+    assert resp.status_code == 200
+    assert interest.defer_calls == ["桌游"]
+
+
+def test_defer_exhausted_not_in_handled_sets() -> None:
+    from openbiliclaw.soul.avoidance_speculator import HANDLED_AVOIDANCE_RESPONSES
+    from openbiliclaw.soul.speculator import HANDLED_PROBE_FEEDBACK_RESPONSES
+
+    for handled in (HANDLED_PROBE_FEEDBACK_RESPONSES, HANDLED_AVOIDANCE_RESPONSES):
+        assert "defer" not in handled
+        assert "defer_exhausted" not in handled
+
+
+def test_interest_pending_excludes_deferred_probes(tmp_path) -> None:
+    """The 刷新不弹回 guarantee: a deferred interest probe must NOT appear in
+    GET /api/interest-probes/pending, while active ones do."""
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+
+    from openbiliclaw.soul.speculator import (
+        SpeculativeInterest,
+        SpeculativeState,
+        save_speculative_state,
+    )
+
+    save_speculative_state(
+        tmp_path,
+        SpeculativeState(
+            active=[
+                SpeculativeInterest(domain="仍活跃", status="active"),
+                SpeculativeInterest(
+                    domain="已搁置",
+                    status="deferred",
+                    deferred_until="2099-01-01T00:00:00",
+                    defer_count=1,
+                ),
+            ]
+        ),
+    )
+
+    class FakeSoulEngine:
+        pass
+
+    app = create_app(soul_engine=FakeSoulEngine(), memory_manager=object(), database=object())
+    app.state.runtime_context.config = SimpleNamespace(data_path=tmp_path)
+    client = TestClient(app)
+
+    items = client.get("/api/interest-probes/pending").json()["items"]
+    domains = {i["domain"] for i in items}
+    assert "仍活跃" in domains
+    assert "已搁置" not in domains

@@ -632,6 +632,7 @@ class TestMobileWebViewModels:
             dedent("""
             import assert from "node:assert/strict";
             import {
+              getAvoidanceProbeMessageActions,
               getDelightMessageActions,
               getMobileChatSession,
               getProbeMessageActions,
@@ -656,7 +657,17 @@ class TestMobileWebViewModels:
               getProbeMessageActions().map((item) => [item.label, item.action]),
               [
                 ["喜欢", "confirm"],
+                ["暂时忽略", "defer"],
                 ["不喜欢", "reject"],
+                ["多聊聊", "chat"],
+              ],
+            );
+            assert.deepEqual(
+              getAvoidanceProbeMessageActions().map((item) => [item.label, item.action]),
+              [
+                ["确实不喜欢", "confirm"],
+                ["暂时忽略", "defer"],
+                ["不是", "reject"],
                 ["多聊聊", "chat"],
               ],
             );

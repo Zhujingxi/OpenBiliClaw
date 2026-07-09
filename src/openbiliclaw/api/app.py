@@ -5022,7 +5022,7 @@ def create_app(
     ) -> tuple[str, str]:
         """Return ``(classification, classifier)`` for probe chat feedback."""
         llm_result = await _llm_judge_sentiment(user_message, ai_reply, domain)
-        if llm_result in {"strong_positive", "weak_positive", "negative"}:
+        if llm_result in {"strong_positive", "weak_positive", "negative", "neutral_deferred"}:
             return llm_result, "llm"
         keyword_result = _keyword_judge_sentiment(user_message)
         if keyword_result != "neutral":
@@ -5040,6 +5040,18 @@ def create_app(
             "没兴趣",
             "不想看",
         }
+        # Explicit "shelve it for now" — routes to the defer state machine.
+        # Ambiguous phrases (「不确定」「再看看」) are intentionally excluded:
+        # they stay plain neutral (no state change). Checked AFTER negatives so
+        # a message with both (e.g. 「不喜欢，先放着吧」) classifies negative.
+        deferred_terms = {
+            "暂时忽略",
+            "先放着",
+            "稍后再看",
+            "以后再说",
+            "回头再看",
+            "过段时间再说",
+        }
         strong_positive_terms = {
             "以后多推",
             "这就是我想看的",
@@ -5055,6 +5067,8 @@ def create_app(
         }
         if any(kw in msg for kw in negative_terms):
             return "negative"
+        if any(kw in msg for kw in deferred_terms):
+            return "neutral_deferred"
         if any(kw in msg for kw in strong_positive_terms):
             return "strong_positive"
         if any(kw in msg for kw in weak_positive_terms):
@@ -5072,23 +5086,16 @@ def create_app(
         llm = getattr(ctx.recommendation_engine, "_llm", None)
         if llm is None:
             return "neutral"
+        from openbiliclaw.llm.prompts import build_probe_sentiment_prompt
+
+        messages = build_probe_sentiment_prompt(domain=domain, user_message=user_message)
         try:
             response = await asyncio.wait_for(
                 llm.complete_with_core_memory(
-                    system_instruction=(
-                        "任务：判断用户对一个兴趣方向的态度。\n\n"
-                        "规则：\n"
-                        "1. 只输出一个英文标签："
-                        "strong_positive、weak_positive、neutral 或 negative\n"
-                        "2. 不要输出任何其他内容\n\n"
-                        "判断标准：\n"
-                        "- strong_positive = 用户明确要加入画像、以后多推、这就是想看的\n"
-                        "- weak_positive = 用户表达轻微兴趣、可以看看、偶尔看看，但未直接确认\n"
-                        "- negative = 用户表达了不喜欢、不感兴趣、太难、太无聊\n"
-                        "- neutral = 态度不明确\n"
-                    ),
-                    user_input=f"方向：{domain}\n用户：{user_message}",
-                    max_tokens=8,
+                    system_instruction=messages[0]["content"],
+                    user_input=messages[1]["content"],
+                    # 16 (not 8) so the longest label `neutral_deferred` can't truncate.
+                    max_tokens=16,
                     temperature=0.0,
                     json_mode=False,
                     caller="api.sentiment",
@@ -5105,6 +5112,7 @@ def create_app(
                     "weak_positive",
                     "negative",
                     "neutral",
+                    "neutral_deferred",
                 ):
                     logger.info("Sentiment LLM for '%s': %s (raw=%r)", domain, cleaned, raw)
                     return cleaned
@@ -5334,6 +5342,20 @@ def create_app(
                     source_event="weak_positive_chat",
                 )
                 summary = f"你对「{domain}」有轻微信号，先作为短期探索方向观察。"
+            elif sentiment == "neutral_deferred":
+                defer_outcome = "deferred"
+                if speculator is not None:
+                    with suppress(Exception):
+                        defer_result = speculator.user_defer_speculation(domain)
+                        defer_outcome = defer_result.outcome
+                if defer_outcome == "exhausted":
+                    chat_response = "defer_exhausted"
+                    resulting_action = "defer_exhausted"
+                    summary = f"你多次想把「{domain}」放一放，之后先不提了。"
+                else:
+                    chat_response = "defer"
+                    resulting_action = "deferred"
+                    summary = f"你想把「{domain}」先放一放，过阵子再聊。"
             else:
                 summary = f"关于「{domain}」你说：{turn.message}"
             if speculator is not None:
@@ -5385,6 +5407,21 @@ def create_app(
                         with suppress(Exception):
                             reject_fn(domain, cooldown_days=14)
                 summary = f"你表示其实不排斥「{domain}」，已暂时搁置 14 天。"
+            elif sentiment == "neutral_deferred":
+                defer_outcome = "deferred"
+                if speculator is not None:
+                    defer_fn = getattr(speculator, "user_defer_avoidance", None)
+                    if callable(defer_fn):
+                        with suppress(Exception):
+                            defer_outcome = defer_fn(domain).outcome
+                if defer_outcome == "exhausted":
+                    chat_response = "defer_exhausted"
+                    resulting_action = "defer_exhausted"
+                    summary = f"你多次想把避雷方向「{domain}」放一放，之后先不提了。"
+                else:
+                    chat_response = "defer"
+                    resulting_action = "deferred"
+                    summary = f"你想把避雷方向「{domain}」先放一放，过阵子再聊。"
             else:
                 chat_response = "avoidance_chat_neutral"
                 resulting_action = "none"
@@ -5501,7 +5538,8 @@ def create_app(
         try:
             from openbiliclaw.soul.speculator import load_speculative_state
 
-            spec_state = load_speculative_state(ctx.config.data_path)
+            runtime_config = getattr(ctx, "config", None) or config
+            spec_state = load_speculative_state(runtime_config.data_path)
             active = [item for item in spec_state.active if item.status == "active"]
             items = []
             for item in active[:6]:
@@ -5524,10 +5562,11 @@ def create_app(
     async def respond_to_interest_probe(payload: dict[str, Any]) -> Any:
         """User responds to a speculated interest probe.
 
-        Body: { "domain": "...", "response": "confirm" | "reject" | "chat", "message": "..." }
+        Body: { "domain": "...", "response": "confirm" | "reject" | "defer" | "chat", ... }
 
         - confirm: Force-promote the speculation
         - reject: Move to cooldown (30 days)
+        - defer: Snooze the probe (暂时忽略); escalates on repeat, exhausts to cooldown
         - chat: Forward to dialogue engine with probe context, return reply
         """
         domain = str(payload.get("domain", "")).strip()
@@ -5535,8 +5574,10 @@ def create_app(
 
         if not domain:
             raise HTTPException(status_code=422, detail="domain is required")
-        if response_type not in {"confirm", "reject", "chat"}:
-            raise HTTPException(status_code=422, detail="response must be confirm, reject, or chat")
+        if response_type not in {"confirm", "reject", "defer", "chat"}:
+            raise HTTPException(
+                status_code=422, detail="response must be confirm, reject, defer, or chat"
+            )
 
         speculator = getattr(ctx.soul_engine, "_speculator", None)
         if speculator is None:
@@ -5664,6 +5705,55 @@ def create_app(
                 )
             return {"ok": ok, "action": "rejected", "domain": domain}
 
+        if response_type == "defer":
+            metadata = _probe_metadata_from_active_speculation(speculator, domain)
+            defer_result = speculator.user_defer_speculation(domain)
+            ok = defer_result.outcome in {"deferred", "exhausted"}
+            exhausted = defer_result.outcome == "exhausted"
+            if ok:
+                _record_probe_feedback_history(
+                    domain,
+                    "defer_exhausted" if exhausted else "defer",
+                    speculator=speculator,
+                    classification="defer",
+                    classifier="user_button",
+                    resulting_action="defer_exhausted" if exhausted else "deferred",
+                    metadata={
+                        **metadata,
+                        "defer_count": defer_result.defer_count,
+                        "deferred_until": defer_result.deferred_until,
+                    },
+                )
+                if exhausted:
+                    _record_probe_cognition(
+                        f"「{domain}」已被多次搁置，之后不再主动提。",
+                        domain,
+                        "rejected",
+                    )
+                    await _publish_probe_event(
+                        "interest.rejected",
+                        f"「{domain}」已被多次搁置，暂不再提。",
+                        domain,
+                    )
+                else:
+                    _record_probe_cognition(
+                        f"你把「{domain}」先放一放，过阵子再提。",
+                        domain,
+                        "deferred",
+                    )
+                    await _publish_probe_event(
+                        "interest.deferred",
+                        f"「{domain}」先放一放，过阵子可能再提。",
+                        domain,
+                    )
+            return {
+                "ok": ok,
+                "action": "defer_exhausted" if exhausted else "deferred",
+                "domain": domain,
+                "deferred_until": defer_result.deferred_until,
+                "defer_count": defer_result.defer_count,
+            }
+
         # Chat: forward to dialogue with domain context injected
         raw_message = str(payload.get("message", "")).strip()
         if not raw_message:
@@ -5727,6 +5817,16 @@ def create_app(
                 source_event="weak_positive_chat",
             )
             summary = f"你对「{domain}」有轻微信号，先作为短期探索方向观察。"
+        elif sentiment == "neutral_deferred":
+            defer_result = speculator.user_defer_speculation(domain)
+            if defer_result.outcome == "exhausted":
+                chat_response = "defer_exhausted"
+                resulting_action = "defer_exhausted"
+                summary = f"你多次想把「{domain}」放一放，之后先不提了。"
+            else:
+                chat_response = "defer"
+                resulting_action = "deferred"
+                summary = f"你想把「{domain}」先放一放，过阵子再聊。"
         else:
             summary = f"关于「{domain}」你说：{raw_message}"
 
@@ -5803,8 +5903,10 @@ def create_app(
 
         if not domain:
             raise HTTPException(status_code=422, detail="domain is required")
-        if response_type not in {"confirm", "reject", "chat"}:
-            raise HTTPException(status_code=422, detail="response must be confirm, reject, or chat")
+        if response_type not in {"confirm", "reject", "defer", "chat"}:
+            raise HTTPException(
+                status_code=422, detail="response must be confirm, reject, defer, or chat"
+            )
 
         speculator = getattr(ctx.soul_engine, "_avoidance_speculator", None)
         if speculator is None:
@@ -5893,6 +5995,59 @@ def create_app(
                 )
             return {"ok": ok, "action": "rejected", "domain": domain}
 
+        if response_type == "defer":
+            metadata = metadata_fn(domain)
+            defer_fn = getattr(speculator, "user_defer_avoidance", None)
+            defer_result = defer_fn(domain) if callable(defer_fn) else None
+            ok = defer_result is not None and defer_result.outcome in {"deferred", "exhausted"}
+            exhausted = defer_result is not None and defer_result.outcome == "exhausted"
+            if ok and defer_result is not None:
+                _record_probe_feedback_history(
+                    domain,
+                    "defer_exhausted" if exhausted else "defer",
+                    speculator=speculator,
+                    classification="defer",
+                    classifier="user_button",
+                    resulting_action="defer_exhausted" if exhausted else "deferred",
+                    state_key="avoidance_probe_feedback_history",
+                    metadata={
+                        **metadata,
+                        "defer_count": defer_result.defer_count,
+                        "deferred_until": defer_result.deferred_until,
+                    },
+                )
+                if exhausted:
+                    _record_probe_cognition(
+                        f"避雷方向「{domain}」已被多次搁置，之后不再主动提。",
+                        domain,
+                        "rejected",
+                        source="avoidance_probe",
+                    )
+                    await _publish_probe_event(
+                        "avoidance.rejected",
+                        f"避雷方向「{domain}」已被多次搁置，暂不再提。",
+                        domain,
+                    )
+                else:
+                    _record_probe_cognition(
+                        f"你把避雷方向「{domain}」先放一放，过阵子再提。",
+                        domain,
+                        "deferred",
+                        source="avoidance_probe",
+                    )
+                    await _publish_probe_event(
+                        "avoidance.deferred",
+                        f"避雷方向「{domain}」先放一放，过阵子可能再提。",
+                        domain,
+                    )
+            return {
+                "ok": ok,
+                "action": "defer_exhausted" if exhausted else "deferred",
+                "domain": domain,
+                "deferred_until": defer_result.deferred_until if defer_result else "",
+                "defer_count": defer_result.defer_count if defer_result else 0,
+            }
+
         raw_message = str(payload.get("message", "")).strip()
         if not raw_message:
             raw_message = f"我想聊聊你猜我可能想避开的「{domain}」这个方向"
@@ -5956,6 +6111,17 @@ def create_app(
             if callable(reject_fn):
                 reject_fn(domain, cooldown_days=14)
             summary = f"你表示其实不排斥「{domain}」，已暂时搁置 14 天。"
+        elif sentiment == "neutral_deferred":
+            defer_fn = getattr(speculator, "user_defer_avoidance", None)
+            defer_result = defer_fn(domain) if callable(defer_fn) else None
+            if defer_result is not None and defer_result.outcome == "exhausted":
+                chat_response = "defer_exhausted"
+                resulting_action = "defer_exhausted"
+                summary = f"你多次想把避雷方向「{domain}」放一放，之后先不提了。"
+            else:
+                chat_response = "defer"
+                resulting_action = "deferred"
+                summary = f"你想把避雷方向「{domain}」先放一放，过阵子再聊。"
         else:
             chat_response = "avoidance_chat_neutral"
             resulting_action = "none"

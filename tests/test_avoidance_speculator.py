@@ -728,3 +728,194 @@ async def test_avoidance_speculator_generation_skips_existing_source_topic(tmp_p
     result = await speculator.force_tick(OnionProfile())
 
     assert [item.domain for item in result.generated] == ["游戏争议里的单边情绪输出"]
+
+
+# ---------------------------------------------------------------------------
+# Defer / snooze lifecycle (avoidance probe "暂时忽略")
+# ---------------------------------------------------------------------------
+
+
+def test_speculative_avoidance_round_trips_defer_fields():
+    from openbiliclaw.soul.avoidance_speculator import SpeculativeAvoidance
+
+    item = SpeculativeAvoidance(
+        domain="标题党",
+        status="deferred",
+        deferred_at="2026-07-05T10:00:00",
+        deferred_until="2026-07-12T10:00:00",
+        defer_count=2,
+    )
+    restored = SpeculativeAvoidance.from_dict(item.to_dict())
+    assert restored.status == "deferred"
+    assert restored.deferred_until == "2026-07-12T10:00:00"
+    assert restored.defer_count == 2
+    # Legacy state without defer fields loads with defaults.
+    legacy = SpeculativeAvoidance.from_dict({"domain": "老数据", "status": "active"})
+    assert legacy.defer_count == 0
+    assert legacy.deferred_until == ""
+
+
+def test_user_defer_avoidance_escalates_then_exhausts(tmp_path) -> None:
+    from datetime import datetime
+
+    from openbiliclaw.soul.avoidance_speculator import (
+        AvoidanceSpeculator,
+        AvoidanceState,
+        SpeculativeAvoidance,
+        load_avoidance_state,
+        save_avoidance_state,
+    )
+    from openbiliclaw.soul.speculator import PROBE_DEFER_DAYS, PROBE_MAX_DEFERS
+
+    save_avoidance_state(
+        tmp_path,
+        AvoidanceState(active=[SpeculativeAvoidance(domain="标题党", status="active")]),
+    )
+    speculator = AvoidanceSpeculator(llm_service=None, data_dir=tmp_path)
+
+    r1 = speculator.user_defer_avoidance("标题党")
+    assert r1.outcome == "deferred"
+    assert r1.defer_count == 1
+    state = load_avoidance_state(tmp_path)
+    item = next(i for i in state.active if i.domain == "标题党")
+    assert item.status == "deferred"
+    days = (datetime.fromisoformat(item.deferred_until) - datetime.now()).days
+    assert PROBE_DEFER_DAYS[0] - 1 <= days <= PROBE_DEFER_DAYS[0]
+    # deferred avoidance is absent from the active view
+    assert speculator.get_active_avoidances() == []
+
+    # Bump to defer_count=2 then exhaust on the 3rd.
+    item.status = "active"
+    item.defer_count = PROBE_MAX_DEFERS - 1
+    save_avoidance_state(tmp_path, state)
+    r3 = speculator.user_defer_avoidance("标题党")
+    assert r3.outcome == "exhausted"
+    assert r3.defer_count == PROBE_MAX_DEFERS
+    state = load_avoidance_state(tmp_path)
+    assert not any(i.domain == "标题党" and i.status == "active" for i in state.active)
+    assert any(c.domain == "标题党" for c in state.cooldown)
+
+
+def test_user_defer_avoidance_missing_domain(tmp_path) -> None:
+    from openbiliclaw.soul.avoidance_speculator import AvoidanceSpeculator
+
+    speculator = AvoidanceSpeculator(llm_service=None, data_dir=tmp_path)
+    assert speculator.user_defer_avoidance("不存在").outcome == "not_found"
+
+
+def test_defer_responses_not_in_avoidance_handled_set() -> None:
+    from openbiliclaw.soul.avoidance_speculator import HANDLED_AVOIDANCE_RESPONSES
+
+    assert "defer" not in HANDLED_AVOIDANCE_RESPONSES
+    assert "defer_exhausted" not in HANDLED_AVOIDANCE_RESPONSES
+
+
+def test_revive_deferred_avoidances_restores_and_clamps() -> None:
+    from datetime import datetime
+
+    from openbiliclaw.soul.avoidance_speculator import (
+        AvoidanceState,
+        SpeculativeAvoidance,
+        revive_deferred_avoidances,
+    )
+
+    now = datetime(2026, 8, 1, 12, 0, 0)
+    state = AvoidanceState(
+        active=[
+            SpeculativeAvoidance(
+                domain="到期复活",
+                status="deferred",
+                confirmation_count=3,
+                confirmation_threshold=3,
+                created_at="2026-07-01T00:00:00",
+                deferred_until="2026-07-20T00:00:00",  # past
+                defer_count=1,
+            ),
+            SpeculativeAvoidance(
+                domain="仍搁置",
+                status="deferred",
+                deferred_until="2026-09-01T00:00:00",  # future
+                defer_count=1,
+            ),
+        ]
+    )
+    revived, updated = revive_deferred_avoidances(state, now)
+    assert [r.domain for r in revived] == ["到期复活"]
+    a = next(i for i in updated.active if i.domain == "到期复活")
+    assert a.status == "active"
+    assert a.created_at == now.isoformat()
+    assert a.confirmation_count == a.confirmation_threshold - 1  # clamped
+    assert a.defer_count == 1
+    b = next(i for i in updated.active if i.domain == "仍搁置")
+    assert b.status == "deferred"
+
+
+def test_expire_stale_avoidances_ignores_deferred() -> None:
+    from datetime import datetime
+
+    from openbiliclaw.soul.avoidance_speculator import (
+        AvoidanceState,
+        SpeculativeAvoidance,
+        expire_stale_avoidances,
+    )
+
+    now = datetime(2026, 8, 1, 12, 0, 0)
+    state = AvoidanceState(
+        active=[
+            SpeculativeAvoidance(
+                domain="搁置老探针",
+                status="deferred",
+                created_at="2026-01-01T00:00:00",
+                ttl_days=3,
+                deferred_until="2026-12-01T00:00:00",
+                defer_count=1,
+            )
+        ]
+    )
+    rejected, updated = expire_stale_avoidances(state, now, 30)
+    assert rejected == []
+    assert any(i.domain == "搁置老探针" and i.status == "deferred" for i in updated.active)
+
+
+async def test_tick_revives_avoidance_after_compaction_not_compacted(tmp_path) -> None:
+    """Revive must run AFTER compaction: a revived duplicate must survive the
+    same tick. If revive ran before compaction, the revived item (same domain
+    as an active one) would be compacted/rejected."""
+    from openbiliclaw.soul.avoidance_speculator import (
+        AvoidanceSpeculator,
+        AvoidanceState,
+        SpeculativeAvoidance,
+        load_avoidance_state,
+        save_avoidance_state,
+    )
+
+    save_avoidance_state(
+        tmp_path,
+        AvoidanceState(
+            active=[
+                SpeculativeAvoidance(
+                    domain="标题党复读",
+                    status="active",
+                    confirmation_count=2,  # higher priority — the "kept" one
+                    source_mode="negative_signal",
+                ),
+                SpeculativeAvoidance(
+                    domain="标题党复读",  # same domain → would be a compaction duplicate
+                    status="deferred",
+                    confirmation_count=0,
+                    source_mode="negative_signal",
+                    deferred_until="2026-01-01T00:00:00",  # long past → revives this tick
+                    defer_count=1,
+                ),
+            ]
+        ),
+    )
+    from openbiliclaw.soul.profile import OnionProfile
+
+    speculator = AvoidanceSpeculator(llm_service=None, data_dir=tmp_path)
+    await speculator.tick(OnionProfile())
+
+    state = load_avoidance_state(tmp_path)
+    revived = [i for i in state.active if i.domain == "标题党复读" and i.status == "active"]
+    # The revived duplicate survived (was not compacted in the same pass).
+    assert len(revived) == 2

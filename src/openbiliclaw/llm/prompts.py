@@ -1408,6 +1408,45 @@ def build_batch_expression_prompt(
     ]
 
 
+# 100% static system prompt for probe-chat sentiment classification.
+# Per-call variables (方向 / 用户发言) live in the user message — see
+# ``build_probe_sentiment_prompt``. ``neutral_deferred`` = user actively asks to
+# shelve the direction (routes to the defer state machine); plain ``neutral`` =
+# undecided (no state change). ``neutral_ambiguous`` is intentionally NOT a label.
+_PROBE_SENTIMENT_SYSTEM_PROMPT = (
+    "任务：判断用户对一个兴趣方向的态度。\n\n"
+    "规则：\n"
+    "1. 只输出一个英文标签："
+    "strong_positive、weak_positive、neutral_deferred、neutral、negative\n"
+    "2. 不要输出任何其他内容\n\n"
+    "判断标准：\n"
+    "- strong_positive = 用户明确要加入画像、以后多推、这就是想看的\n"
+    "- weak_positive = 用户表达轻微兴趣、可以看看、偶尔看看，但未直接确认\n"
+    "- negative = 用户表达了不喜欢、不感兴趣、太难、太无聊\n"
+    "- neutral_deferred = 用户主动要求先放一放：明确说「暂时忽略」「先放着」「稍后再看」「以后再说」\n"
+    "- neutral = 态度不明确、还在犹豫、没想好（如「不确定」「再看看」「不好说」）\n\n"
+    "方向与用户发言见 user 消息。\n"
+)
+
+
+def build_probe_sentiment_prompt(
+    *,
+    domain: str,
+    user_message: str,
+) -> list[dict[str, str]]:
+    """Build the probe-chat sentiment classification prompt.
+
+    v0.3.28+ cache-friendly: ``system_prompt`` is the module-level constant
+    ``_PROBE_SENTIMENT_SYSTEM_PROMPT`` (100% static). The direction and the
+    user's message live in ``user_prompt``.
+    """
+    user_prompt = f"方向：{domain}\n用户：{user_message}"
+    return [
+        {"role": "system", "content": _PROBE_SENTIMENT_SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
 def build_explore_domains_prompt(
     *,
     profile_summary: dict[str, object],

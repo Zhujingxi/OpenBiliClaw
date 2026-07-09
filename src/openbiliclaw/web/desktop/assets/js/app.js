@@ -2619,7 +2619,7 @@
           ${item.reason ? `<p class="video-meta">${escapeHtml(item.reason)}</p>` : ""}
           ${specifics.length ? `<div class="spec-specifics">${specifics.map((s) => `<span class="spec-specific-chip">${escapeHtml(s.name)}${s.count > 0 ? `<span class="spec-specific-count">${s.count}</span>` : ""}</span>`).join("")}</div>` : ""}
           <p class="spec-help">${isAvoidance ? `置信度表示阿B认为你会避开这个方向的把握；确认次数来自后端累计的避雷确认信号，达到 ${threshold} 次后会进入更稳定的避雷画像。` : `置信度表示阿B认为你会喜欢这个方向的把握；确认次数来自后端累计的正向确认信号（包括但不限于这里的“喜欢”），达到 ${threshold} 次后会进入更稳定的兴趣画像。`}</p>
-          ${status === "active" && domain ? `<div class="spec-actions"><button class="probe-btn is-confirm" type="button" data-spec-response="confirm" data-spec-type="${isAvoidance ? "avoidance.probe" : "interest.probe"}">${isAvoidance ? "确实不喜欢" : "喜欢"}</button><button class="probe-btn is-reject" type="button" data-spec-response="reject" data-spec-type="${isAvoidance ? "avoidance.probe" : "interest.probe"}">${isAvoidance ? "不是" : "不喜欢"}</button></div>` : ""}
+          ${status === "active" && domain ? `<div class="spec-actions"><button class="probe-btn is-confirm" type="button" data-spec-response="confirm" data-spec-type="${isAvoidance ? "avoidance.probe" : "interest.probe"}">${isAvoidance ? "确实不喜欢" : "喜欢"}</button><button class="probe-btn is-neutral" type="button" data-spec-response="defer" data-spec-type="${isAvoidance ? "avoidance.probe" : "interest.probe"}">暂时忽略</button><button class="probe-btn is-reject" type="button" data-spec-response="reject" data-spec-type="${isAvoidance ? "avoidance.probe" : "interest.probe"}">${isAvoidance ? "不是" : "不喜欢"}</button></div>` : ""}
         </div>`;
       }).join("")}</div>`;
     }
@@ -3260,7 +3260,7 @@
             : isChallenge
               ? "这是挑战方向，会把口味往侧边推一点；想继续试探就点喜欢，不准就点不喜欢。"
             : "想继续探索这个方向，就点喜欢；不准就点不喜欢。";
-          el.innerHTML = `<p class="eyebrow">${eyebrow}</p><div class="message-note probe-kind-copy">${escapeHtml(kindCopy)}</div><h3>${escapeHtml(msg.domain)}</h3><p class="video-meta">${escapeHtml(msg.reason)}</p><div class="profile-chip-row">${asArray(msg.specifics).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join("")}</div><div class="message-card-actions"><div class="card-feedback-icons" aria-label="${actionsLabel}"><button class="feedback-icon-btn" data-probe="confirm" type="button" aria-label="${confirmLabel}" title="${confirmLabel}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg></button><span class="feedback-separator" aria-hidden="true">/</span><button class="feedback-icon-btn" data-probe="reject" type="button" aria-label="${rejectLabel}" title="${rejectLabel}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg></button></div><div class="message-primary-actions"><button class="small-btn" data-probe="chat">多聊聊</button></div></div>`;
+          el.innerHTML = `<p class="eyebrow">${eyebrow}</p><div class="message-note probe-kind-copy">${escapeHtml(kindCopy)}</div><h3>${escapeHtml(msg.domain)}</h3><p class="video-meta">${escapeHtml(msg.reason)}</p><div class="profile-chip-row">${asArray(msg.specifics).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join("")}</div><div class="message-card-actions"><div class="card-feedback-icons" aria-label="${actionsLabel}"><button class="feedback-icon-btn" data-probe="confirm" type="button" aria-label="${confirmLabel}" title="${confirmLabel}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg></button><span class="feedback-separator" aria-hidden="true">/</span><button class="feedback-icon-btn is-neutral" data-probe="defer" type="button" aria-label="暂时忽略" title="暂时忽略"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="8" y1="12" x2="16" y2="12"/></svg></button><span class="feedback-separator" aria-hidden="true">/</span><button class="feedback-icon-btn" data-probe="reject" type="button" aria-label="${rejectLabel}" title="${rejectLabel}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg></button></div><div class="message-primary-actions"><button class="small-btn" data-probe="chat">多聊聊</button></div></div>`;
           if (resolvedResult) {
             el.classList.add("is-resolved");
             const resolvedActions = el.querySelector(".message-card-actions");
@@ -3446,9 +3446,15 @@
           void refreshProfile();
           return;
         }
+        const deferExhausted = apiResp?.action === "defer_exhausted";
+        const deferResult = deferExhausted ? "已多次搁置，之后先不提这个方向了。" : "已搁置，过阵子可能再提。";
         const result = isAvoidance
-          ? response === "confirm" ? "已确认避雷方向，后续会减少类似内容。" : "已搁置，暂时不作为避雷方向。"
-          : response === "confirm" ? "已确认，后续推荐会提高权重。" : "已搁置，后续会少试探这个方向。";
+          ? response === "confirm" ? "已确认避雷方向，后续会减少类似内容。"
+            : response === "defer" ? deferResult
+            : "已搁置，暂时不作为避雷方向。"
+          : response === "confirm" ? "已确认，后续推荐会提高权重。"
+            : response === "defer" ? deferResult
+            : "已搁置，后续会少试探这个方向。";
         state.resolvedMessageResults.set(key, result);
         el.classList.remove("is-resolving");
         el.classList.add("is-resolved");
@@ -3456,9 +3462,10 @@
           actions.classList.add("is-result");
           actions.innerHTML = `<div class="message-action-result" title="${escapeHtml(result)}">${escapeHtml(result)}</div>`;
         }
+        const deferToast = deferExhausted ? "好，之后先不提了" : "已暂时搁置，过阵子可能再提";
         showToast(isAvoidance
-          ? response === "confirm" ? "已确认这个避雷方向" : "已搁置这个避雷方向"
-          : response === "confirm" ? "已确认这个兴趣方向" : "已搁置这个兴趣方向");
+          ? response === "confirm" ? "已确认这个避雷方向" : response === "defer" ? deferToast : "已搁置这个避雷方向"
+          : response === "confirm" ? "已确认这个兴趣方向" : response === "defer" ? deferToast : "已搁置这个兴趣方向");
         setTimeout(() => {
           collapseMessageItem(key, el, () => {
             state.resolvingMessageKeys.delete(key);
@@ -3511,16 +3518,25 @@
           void refreshProfile();
           return;
         }
+        const deferExhausted = apiResp?.action === "defer_exhausted";
+        const deferRow = deferExhausted
+          ? `好，「${escapeHtml(domain)}」之后先不提了。`
+          : `好，「${escapeHtml(domain)}」先放一放，过阵子可能再提。`;
         const result = isAvoidance
-          ? (response === "confirm" ? `好，「${escapeHtml(domain)}」会作为避雷方向处理。` : `好，「${escapeHtml(domain)}」不记成避雷。`)
-          : (response === "confirm" ? `好，「${escapeHtml(domain)}」记住了。` : `好，「${escapeHtml(domain)}」先不看了。`);
+          ? (response === "confirm" ? `好，「${escapeHtml(domain)}」会作为避雷方向处理。`
+            : response === "defer" ? deferRow
+            : `好，「${escapeHtml(domain)}」不记成避雷。`)
+          : (response === "confirm" ? `好，「${escapeHtml(domain)}」记住了。`
+            : response === "defer" ? deferRow
+            : `好，「${escapeHtml(domain)}」先不看了。`);
         row.innerHTML = `<p class="spec-result">${result}</p>`;
         state.messages = state.messages.filter((msg) => messageKey(msg) !== key);
         if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((msg) => messageKey(msg) !== key);
         renderMessages();
+        const deferToast = deferExhausted ? "好，之后先不提了" : "已暂时搁置，过阵子可能再提";
         showToast(isAvoidance
-          ? response === "confirm" ? "已确认这个避雷方向" : "已排除这个避雷方向"
-          : response === "confirm" ? "已确认这个猜测兴趣" : "已排除这个猜测兴趣");
+          ? response === "confirm" ? "已确认这个避雷方向" : response === "defer" ? deferToast : "已排除这个避雷方向"
+          : response === "confirm" ? "已确认这个猜测兴趣" : response === "defer" ? deferToast : "已排除这个猜测兴趣");
         setTimeout(() => { void refreshProfile(); }, 1200);
       } catch (error) {
         if (key) state.handledProbeKeys.delete(key);
