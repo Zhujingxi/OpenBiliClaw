@@ -5,13 +5,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_desktop_recommendation_header_has_no_correction_entry() -> None:
     html = (ROOT / "src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")
-    header = html.split('<section data-od-id="recommendations">', 1)[1].split(
-        '<div class="drawer-actions recommendation-actions">', 1
+    recommendations = html.split('<section data-od-id="recommendations">', 1)[1].split(
+        "</section>", 1
     )[0]
 
-    assert "推荐不准？" not in header
-    assert 'id="editProfileFromRecommendations"' not in header
-    assert 'id="chatFromRecommendations"' not in header
+    assert "推荐不准？" not in recommendations
+    assert "编辑画像" not in recommendations
+    assert "直接告诉阿B" not in recommendations
+    assert 'id="editProfileFromRecommendations"' not in recommendations
+    assert 'id="chatFromRecommendations"' not in recommendations
 
 
 def test_desktop_has_no_recommendation_correction_helpers_or_styles() -> None:
