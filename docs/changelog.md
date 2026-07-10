@@ -8,6 +8,7 @@
 
 后端源码走 `backend-v0.3.161`，浏览器插件走 `extension-v0.3.161`，桌面安装包走 `desktop-v0.3.161`。
 
+- chore(dev): scripts/release.py 版本一致性检查/升版工具 + release/writing-specs 项目技能 + CLAUDE.md 防坑规则（自提交史提炼）
 - **Responses API 无状态兼容修复（issue #95）**：`api_flavor="responses"` 此前未在请求体顶层显式发送 `store`，导致由 ChatGPT/Codex Responses 端点驱动的兼容网关拒绝请求；现在官方 OpenAI 与 OpenAI-compatible provider 的每个 Responses 请求都固定发送 `store=false`，保持无状态且不改变 Chat Completions、配置或既有重试行为。新增 provider 回归断言，锁定该请求字段。
 - **前端 UI 体验优化与扫码入口降噪（PR #97 接手修复）**：桌面 / 移动端 `delight` 队列新增自动轮播、拖拽切换、首尾循环和高度/淡入动画，桌面端使用当前封面作弱化背景；自动轮播现在复用输入保护，用户正在惊喜卡聊天、聚焦或有草稿时不会切卡串反馈。桌面 Web 滚动自动加载新增 1px 稳定哨兵、300px 预触发范围和 scroll / render / runtime 状态重检，避免哨兵已相交但首次被库存或渲染 guard 拦住后不再触发。插件手机版二维码（Issue #96）改走轻量 `GET /api/qr-info` 只取 `lan_ip`，不再触发 `/api/health` 的 embedding readiness probe；该端点在 auth 开启和 degraded 模式下保持公开。补齐 QR/auth/degraded、PC 自动加载与 delight 自动轮播回归测试，并清理 `.gitignore` 噪音和 CSS whitespace。
 - **Docker 发布补丁**：`openbiliclaw-ollama` 多架构镜像构建时对 `ollama pull bge-m3` 增加 3 次有界重试，并把重试成功条件扩展为“pull 成功且 allowlist digest 对应 blob 已落盘可见”；每次重试前都会确认 `ollama serve` 仍在响应，若进程退出或不响应则重启，避免 GitHub runner / 上游模型下载偶发 `unexpected EOF`、pull 成功后 store 可见性滞后或 server 中途退出直接打断 Docker 渠道发布；发布契约测试覆盖该构建顺序。Douyin runtime source selection 拆分局部变量名，修复 `main` CI 的 MyPy literal tuple 推断误报。
