@@ -66,6 +66,7 @@
 | Layered profile cognition | ✅ | `OnionProfile` 新增 MBTI / Values / Interest 等分层，画像生成会同时消费 `history + preference + awareness + insights`，避免把兴趣 topic 堆成整段画像 |
 | 猜测兴趣系统 | ✅ | `InterestSpeculator` 定期通过 LLM 过采样生成猜测兴趣方向，并按 `[scheduler]` 的 generation interval、TTL、cooldown、确认阈值和上限运行；候选带 `probe_mode=near/lateral/bridge/wildcard` 四档距离，普通 `near` 池最多 5 条，`lateral/bridge/wildcard` 挑战池单独最多 3 条；通过事件或用户确认后按来源权重转正为正式兴趣，未确认则拒绝并冷却；`tick/force_tick` 会读取最新 `probe_feedback_history`，确认/拒绝/探针聊天后的 domain 不会被旧快照重新生成 |
 | 探针「暂时忽略」（defer/搁置） | ✅ | 用户对探针点「暂时忽略」（或聊天说「先放着」）时，`user_defer_speculation` 把探针置为 `status="deferred"` 并按阶梯隐藏：第 1 次 7 天、第 2 次 14 天（`PROBE_DEFER_DAYS`），第 3 次（`PROBE_MAX_DEFERS`）耗尽转 `rejected` + 30 天 cooldown（走 TTL 过期语义，记 `defer_exhausted`，**不**进 handled 集，冷却后可重新猜——区别于显式 reject 的永久拉黑）。`deferred` 探针从所有读侧（pending 端点 / WS 推送 / `get_active_speculations`）消失；`tick/force_tick` 维护段的最后一步 `revive_deferred` 在 `deferred_until` 到期后把它复活为 `active`（重置 `created_at` 给新 TTL 窗口、`confirmation_count` 夹到阈值-1，保证复活后先以探针形式再露面而非静默转正）。避雷探针有对称的 `user_defer_avoidance` / `revive_deferred_avoidances`（复活排在 compaction 之后） |
+| 桌面 Web 探针即时反馈与撤销 | ✅ | 正向兴趣和避雷探针的 `confirm / reject / defer` 在消息抽屉与画像页复用同一稳定 action key，先即时隐藏或更新卡片，再保留 10 秒撤销窗口；撤销不调用 respond API，提交失败恢复原卡。`chat` 需要对话回复和情绪分类，继续直接调用后端，不进入可撤销屏障。 |
 | 短期探索 buffer | ✅ | `exploration_buffer.py` 把弱正向聊天、推荐喜欢、惊喜喜欢、普通点击和负反馈汇总到 `discovery_runtime_state["short_term_exploration_buffer"]`；7 天内显式弱证据累计到阈值后以 `buffer_promoted` 写回兴趣，负向反馈会进入 48h 冷却并抵消分数 |
 | 不喜欢领域探针系统 | ✅ | `AvoidanceSpeculator` 与正向兴趣探针并行运行，最多 5 条 active 避雷假设；只在用户确认或显式负向证据达到阈值后写入 `disliked_topics`，未确认前不参与 discovery / recommendation 过滤；生成前会读取最新 `avoidance_probe_feedback_history`，确认/否认/探针聊天处理过的方向不再作为 active 避雷探针重复出现 |
 | ROLE/VALUES/CORE 增量更新器 | ✅ | `_update_role`（`build_role_delta_prompt`，基于信号证据 + LLM diff-protection）、`_update_values`（LLM delta，每周期最多 add/remove 1 条，注入完整画像上下文）、`_update_core`（`build_core_delta_prompt`，更新 traits/needs/MBTI，强 diff-protection）均已完整实现 |
@@ -179,6 +180,7 @@
 - 从 `speculative_state.json` 直接加载，最多返回 6 条活跃猜测
 - `POST /api/interest-probes/respond` 的 profile 页面确认会传 `surface="profile"` 并记录为 `profile_confirmed`；runtime/inbox 卡片确认默认仍是 `probe_confirmed`；聊天强确认记录为 `chat_confirmed`，buffer 晋升记录为 `buffer_promoted`
 - `POST /api/interest-probes/respond` 与 `POST /api/avoidance-probes/respond` 的 `response` 取值：`confirm` / `reject` / `defer` / `chat`。`defer`（暂时忽略）返回 `{ok, action: "deferred"|"defer_exhausted", deferred_until, defer_count}`，并发 `interest.deferred` / `avoidance.deferred` runtime event（耗尽时复用 `*.rejected` event）。`deferred` 不改画像，桌面 Web 因此不对这两个 event 触发 profile 刷新
+- 桌面 Web 对 `confirm / reject / defer` 使用 10 秒客户端提交屏障，并以 `probe:<messageType>:<normalizedDomain>` 作为跨消息抽屉/画像页的稳定动作键；同一探针不会在两个 surface 产生两次待提交写入。`chat` 不走该屏障
 
 ### Probe 选择
 

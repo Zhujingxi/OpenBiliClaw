@@ -48,6 +48,8 @@
 | v0.3.1 SQL per-group 候选窗口 cap | ✅ | `get_pool_candidates` 用 `ROW_NUMBER() OVER (PARTITION BY topic_group)` 把候选窗口里每个 topic_group 限到 ≤3 条；600 池子 270 个 group 的长尾真正进入候选，distinct 主题数从 ~12-15 提升到 ~18-22 |
 | v0.3.44 MMR 多样化 | ✅ | `_select_diversified_batch` 引入 Maximum Marginal Relevance：`score = α*relevance - β*max_cos_to_picked`，靠 embedding 余弦把 LLM 误聚到同一 `topic_label` 伞标签下的硬核内容真正打散。每轮 unique_topics=10/10、top_topic_share≤10% |
 | v0.3.45 MMR embedding 提前 warm | ✅ | `warm_mmr_embeddings` 在 discovery 入池 + `classify_pool_backlog` 落库后立即并行 warm L2 SQLite embedding cache（cache key 文本由 `_mmr_embedding_text` 静态方法做 single source of truth），serve() 用 `asyncio.gather` 并行兜底,新增 `MMR embedding fetch: coverage=N/M elapsed=Xms` 埋点。换一批 P50 双峰（0.7s / 6-10s）收敛到稳定 <1s。v0.3.124+（lever 4）：冷启动伴侣 `prewarm_pool_mmr_embeddings()` 返回 `-1`＝没东西可暖(无 embedding service / 空池，良性)、`0`＝有候选但全嵌入失败(后端不可达)、`>0`＝已暖,供启动包装器区分良性冷启动与真故障 |
+| issue #98 换批先展示后记录 | ✅ | 桌面 Web 调用 `POST /api/recommendations/reshuffle` 时携带当前可见 ID；新批次成功后先替换网格，再以 fire-and-forget 方式把旧卡记为 `dismiss`。API/引擎会把 `excluded_bvids` 贯穿到最终过滤，并把候选读取窗口扩大为基础窗口加排除数，避免旧卡因平台保底或 top-40 截断回流。空响应与失败都保留当前列表。 |
+| issue #98 CPU 排序脱离事件循环 | ✅ | `_select_diversified_batch_async()` 与 `_build_supergroup_canonical_map_async()` 通过 `asyncio.to_thread()` 执行 MMR/多样性选择和 supergroup 两两 union-find；同步纯函数仍是唯一算法实现，异步包装保持完全相同的确定性输出，并对超过 50ms 的工作线程耗时记录 warning。线程主要用于保持 asyncio 响应，不承诺绕过 Python GIL 提升吞吐。 |
 | v0.3.57 pool gate on precomputed copy | ✅ | `get_pool_candidates` / `count_pool_candidates` SQL 加 `AND COALESCE(pool_expression, '') != '' AND COALESCE(pool_topic_label, '') != ''` —— 未 precompute 的 row 对 serve() 不可见,消除"discovery 完成→precompute 完成"60–90s 窗口内 popup 显示占位模板的旧 bug。`engine.py:320` 的 `_fallback_expression` 路径变成 race-window 安全网,触发即 `logger.warning("Pool gate leak: ...")` |
 | v0.3.66 pool gate on classification | ✅ | `get_pool_candidates` / `count_pool_candidates` 现在同样要求 `style_key` 与 `topic_group` 非空；`get_pool_candidates_needing_copy` 也只挑已分类但缺文案的候选，避免未分类跨源内容先生成 copy 后绕过 serve 分类口径 |
 | v0.3.91 servable pool count | ✅ | `count_pool_candidates()` 在读取前刷新 SQLite/WAL snapshot，并默认应用与 `get_pool_candidates()` 相同的 `max_per_topic_group=3` 候选窗口；新增 `count_pool_readiness()` 拆分 `available/raw/pending`；`serve()` 零候选 warning 会输出 `raw/servable/pending`，用于定位“池子有素材但暂不可换”的真实原因。 |
@@ -118,6 +120,7 @@ items = await engine.generate_recommendations(
 ```python
 items = await engine.reshuffle_recommendations(
     profile=profile,
+    excluded_bvids=["BV1A", "BV1B"],
     limit=10,
 )
 ```
@@ -125,6 +128,8 @@ items = await engine.reshuffle_recommendations(
 行为说明：
 
 - 直接从 `content_cache` discovery pool 里挑选 `fresh` 候选，不等待新一轮 discover 完成
+- `excluded_bvids` 是本次换批前仍可见的内容 ID；HTTP 入口接受可选 JSON `{"excluded_bvids": [...]}`，缺省或无 body 时等价于空列表，并会去空白、去重后传入引擎
+- 候选读取窗口会额外加上排除项数量，平台保底补入候选后还会执行一次最终排除，确保旧卡不会被补回新批次
 - 过滤掉已展示、已明确反馈和已降级的候选
 - 优先按 `candidate_tier`、`relevance_score` 和最近评分时间排序
 - 同一批会优先按 `topic_key` 分桶，每个 topic 先出 1 条，再按分数回填
@@ -286,6 +291,8 @@ Content-Type: application/json
 - `feedback_at`
 
 推荐反馈会同时写入事件层，供后续偏好和洞察分析消费。
+
+桌面 Web 的 `like / dislike / dismiss` 使用 10 秒客户端提交屏障：卡片状态立即变化，撤销期间后端还没有写入；倒计时结束或页面离开时才调用 `/api/feedback`，失败则回滚卡片状态。`comment` 必须携带文本并可能产生直接学习语义，因此不进入这条延迟提交路径。
 
 ### Unified Feedback Entry
 

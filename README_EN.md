@@ -191,6 +191,7 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 📌 Latest: **v0.3.161 (2026-07-09)**
 
+- **Instant, undoable feedback** — Desktop recommendation cards and interest/avoidance probes respond immediately with a real 10-second undo window; reshuffle displays the new batch before recording old-card dismissals in the background.
 - **Keyword generation mode in settings** — choose Classic, Hybrid, or Inspiration directly from the config UI to enable search-backed keyword inspiration.
 - **Keyword inspiration axis library** — keyword generation now reuses secondary interests, real search evidence, platform supply advantages, and historical yield for more specific platform-native queries.
 - **Diagnosable inspiration flow** — new dry-run and report surfaces show selected interests, grounding evidence, keyword provenance, and cohort performance.
@@ -583,7 +584,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
                        │ + Desktop Web (/web) · Mobile Web (/m) · QR LAN-IP
 ┌──────────────────────▼─────────────────────────┐
 │               Agent Orchestration               │
-│      Skills · Dialogue · Runtime scheduling      │
+│ Skills · Dialogue · Runtime · 10s undo barrier   │
 ├─────────┬──────────┬───────────┬───────────────┤
 │  Soul   │  Memory  │ Discovery │ Recommendation │
 │ Engine  │  System  │  Engine   │     Engine     │

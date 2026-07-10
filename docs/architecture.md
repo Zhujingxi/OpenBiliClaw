@@ -39,7 +39,7 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 - `event_filters` / `satisfaction_filter_enabled` — 偏好分析前只丢弃 `negative`（quick_exit / explicit_negative）事件，保留 positive / neutral / unknown 作为上下文
 - `negative_exemplars` — 从事件层抽取近期 negative 标题，供 Discovery eval-batch 做负样本锚点
 - `/api/events` — 浏览器插件统一行为入口；批次内逐条写入，raw `dislike` 规范为 `feedback`，未知事件进入响应 `rejected` 明细而不是让整批 500，避免插件重试造成已写入事件重复。若 soul 画像明确未初始化，普通行为事件返回 `not_initialized` 拒收且不写 memory；首轮画像信号只由点击「开始初始化」后的 guided init 来源任务拉取。profile ready 后，accepted 事件会在落 memory 后通过 `signals_from_events()` 进入 `ProfileUpdatePipeline.ingest_batch()`，并会先用 `last_profile_pipeline_event_id` 补喂旧 discovery-pending 事件，再通过 `request_replenishment(reason="event_ingest")` 排队补货需求；`pending_signal_events` 只是 discovery refresh 水位，不代表画像待处理队列。
-- `/api/feedback` — 推荐卡主动反馈入口；写 recommendation 反馈字段和 memory `feedback` 事件后，不再每条反馈直接启动画像重分析，而是交给 runtime `FeedbackBatchScheduler` 做短窗口合并，再由 `SoulEngine.process_feedback_batch_if_needed()` 单飞读取反馈游标。进入 LLM 偏好分析前会剥离插件原始大字段，只保留偏好相关 metadata。
+- `/api/feedback` — 推荐卡主动反馈入口；桌面 Web 的 `like/dislike/dismiss` 先经过客户端 10 秒 pending-action 屏障，撤销时不会发出写请求，倒计时结束或 `pagehide` keepalive flush 后才进入 API；失败时客户端回滚。API 写 recommendation 反馈字段和 memory `feedback` 事件后，不再每条反馈直接启动画像重分析，而是交给 runtime `FeedbackBatchScheduler` 做短窗口合并，再由 `SoulEngine.process_feedback_batch_if_needed()` 单飞读取反馈游标。评论和探针聊天不走客户端屏障；进入 LLM 偏好分析前会剥离插件原始大字段，只保留偏好相关 metadata。
 - `InterestSpeculator` — 兴趣推测与投机性发现
 - `AvoidanceSpeculator` — 不喜欢领域探针；未确认前只展示给用户确认，不进入推荐过滤，确认后通过共享 dislike writeback 写入 `disliked_topics` 并清理候选池
 - 苏格拉底式用户对话
