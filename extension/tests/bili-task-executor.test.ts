@@ -125,6 +125,25 @@ test("extractBiliSearchVideos reads rendered search cards with dedupe and cap", 
   ]);
 });
 
+test("extractBiliSearchVideos ignores lazy-load data: URI placeholder covers", () => {
+  const doc = new FakeDocument([
+    card({
+      href: "https://www.bilibili.com/video/BV1ii4y1G7w8",
+      title: "懒加载还没换图的卡片",
+      up_name: "UP",
+      cover_url: "data:image/png;base64,iVBORw0KGgo=",
+      view_count: "1.2万",
+    }),
+  ]);
+
+  const videos = extractBiliSearchVideos(doc as unknown as Document, { limit: 1 });
+
+  assert.equal(videos.length, 1);
+  // 占位图不算封面 —— 宁可留空,让后端后续摄入补真图
+  assert.equal("cover_url" in videos[0], false);
+  assert.equal(videos[0].view_count, 12_000);
+});
+
 test("buildBiliTaskResultPayload maps videos to ok or empty", () => {
   assert.deepEqual(buildBiliTaskResultPayload("task-1", []), {
     task_id: "task-1",

@@ -9,6 +9,7 @@
 后端源码走 `backend-v0.3.161`，浏览器插件走 `extension-v0.3.161`，桌面安装包走 `desktop-v0.3.161`。
 
 - **桌面 Web 反馈响应与换批卡顿修复（issue #98）**：普通推荐卡与正向/避雷探针现在先在本地即时更新，并保留 10 秒真实撤销窗口；撤销会取消尚未发出的写请求，提交失败会恢复原状态，页面离开时用 keepalive 结清待提交动作。探针聊天继续即时发送，不进入可撤销状态机。`换一批` 改为先请求并展示新卡，再后台把旧卡记为 dismiss；请求显式携带当前可见内容 ID，推荐引擎扩大候选窗口并在平台保底后再次执行排除，避免旧卡回流。MMR 排序和 supergroup 两两聚类改由工作线程执行，保持输出确定性并避免 CPU 循环占住 asyncio 事件循环。
+- **惊喜推荐封面不再被空值抹掉 + popup/桌面补来源平台标识**：实测惊喜大卡「互动数据齐全但封面空白且无平台标识」。根因两层：`cache_content()` upsert 对 `cover_url` 无条件覆盖（旁边 `author_name` / `body_text` 早有 `COALESCE(NULLIF(...))` 保护），任何带空封面的重摄入——互动数据刷新、事件驱动 related-chain、插件在 B 站搜索页图片懒加载完成前抓到的卡片——都会把好封面永久抹掉，现已同策略保护；插件采集侧同步拒绝 `data:` 懒加载占位图。平台标识：桌面 Web 惊喜卡徽章原先写在「无封面提前 return」之后随封面一起消失，改为始终渲染；插件消息流惊喜卡与 delight banner 新增平台 chip（`platformDisplayName`）。四表面契约：本次补齐 popup + 桌面 Web，移动 Web 已有 `card-source` 角标，CLI 文本输出不适用。
 - **guided init 向量模型自愈与 popup 进度对齐**：从遗留分支 `db726daa` 手工移植仍有效能力；仅当本机 loopback Ollama 诊断为 `model_missing` / `model_broken` 且磁盘空间充足时，`POST /api/init` 才会单飞自动拉取并在 409 detail 返回实时进度；popup init checklist 现在显示进度条与修复按钮。`describe_llm_failure` 同步补齐 auth/401 与 quota/429 可操作说明；`bc2dc983` 已用 LLM 层翻译取代遗留分支的 reason-code 分类结构，因此后者未移植。四表面契约：popup 与已有 desktop Web `/setup/` 覆盖图形进度，CLI init 沿用日志输出，移动 Web 无 init 面板，后两者不适用。
 - chore(dev): scripts/release.py 版本一致性检查/升版工具 + release/writing-specs 项目技能 + CLAUDE.md 防坑规则（自提交史提炼）
 - ci: PR/main CI 新增 `scripts/release.py --check` 版本一致性强制拦截（stdlib-only，装依赖前秒级 fail-fast）

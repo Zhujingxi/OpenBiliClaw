@@ -5014,7 +5014,14 @@
       // 设置 banner 背景图（模糊用）
       const banner = $("#delightBanner");
       if (banner) banner.style.setProperty("--cover-url", url ? `url("${url}")` : "none");
-      if (!url) return;
+      // 平台徽章不依赖封面 —— 无封面(文本类内容/封面缺失)时用户仍需知道来源平台
+      const badge = document.createElement("span");
+      badge.className = "platform";
+      badge.textContent = platformName(delight.source_platform);
+      if (!url) {
+        thumb.append(badge);
+        return;
+      }
       const image = document.createElement("img");
       if (isCrossOriginBase()) image.crossOrigin = "anonymous";
       image.alt = "";
@@ -5028,9 +5035,6 @@
         thumb.classList.remove("has-image");
       });
       thumb.append(image);
-      const badge = document.createElement("span");
-      badge.className = "platform";
-      badge.textContent = platformName(delight.source_platform);
       thumb.append(badge);
     }
 

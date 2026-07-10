@@ -146,6 +146,23 @@ export function buildImageProxyPath(value) {
   return `/api/image-proxy?url=${encodeURIComponent(src)}`;
 }
 
+const PLATFORM_DISPLAY_NAMES = {
+  bilibili: "B 站",
+  youtube: "YouTube",
+  douyin: "抖音",
+  xiaohongshu: "小红书",
+  xhs: "小红书",
+  twitter: "X",
+  x: "X",
+  zhihu: "知乎",
+  reddit: "Reddit",
+};
+
+export function platformDisplayName(value) {
+  const key = normalizeText(value).toLowerCase();
+  return PLATFORM_DISPLAY_NAMES[key] || normalizeText(value);
+}
+
 export function buildVideoUrl(bvid) {
   return `https://www.bilibili.com/video/${normalizeText(bvid)}`;
 }

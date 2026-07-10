@@ -28,6 +28,7 @@ import {
   normalizeProbeType,
   normalizeRuntimeStatus,
   normalizeProfileSummary,
+  platformDisplayName,
   probeMessageKey,
   shouldDisplayProbeFromWebSocket,
   shouldHydrateProbe,
@@ -2542,6 +2543,11 @@ function buildDelightCard(delight) {
     textCol.append(hookBadge);
   }
 
+  const platformChip = document.createElement("span");
+  platformChip.className = "message-delight-platform";
+  platformChip.textContent = platformDisplayName(delight.source_platform || "bilibili");
+  textCol.append(platformChip);
+
   const title = document.createElement("div");
   title.className = "message-delight-title";
   title.textContent = delight.title || "";
@@ -4588,6 +4594,10 @@ function renderDelightSlot() {
   kicker.className = "delight-banner-kicker";
   kicker.textContent = `✨ ${delight.delight_hook || "惊喜推荐"}`;
   kickerLine.append(kicker);
+  const platformChip = document.createElement("span");
+  platformChip.className = "delight-banner-platform";
+  platformChip.textContent = platformDisplayName(delight.source_platform || "bilibili");
+  kickerLine.append(platformChip);
   if (queueLength > 1) {
     const prevBtn = document.createElement("button");
     prevBtn.type = "button";

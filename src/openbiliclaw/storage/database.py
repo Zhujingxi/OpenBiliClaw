@@ -1655,7 +1655,11 @@ class Database:
                     ''
                 ),
                 description = excluded.description,
-                cover_url = excluded.cover_url,
+                cover_url = COALESCE(
+                    NULLIF(excluded.cover_url, ''),
+                    content_cache.cover_url,
+                    ''
+                ),
                 view_count = excluded.view_count,
                 like_count = excluded.like_count,
                 favorite_count = excluded.favorite_count,
