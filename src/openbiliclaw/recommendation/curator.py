@@ -501,23 +501,29 @@ class PoolCurator:
                     if vector:
                         candidate_topic_vecs.append(vector)
 
-            if embedding_service is not None and candidate_topic_vecs:
+            if embedding_service is not None:
                 adj = 0.0
                 if item.up_mid and item.up_mid in context.feedback.disliked_up_mids:
                     adj -= _FEEDBACK_DISLIKE_UP_PENALTY
-                if any(
+                disliked_topic_match = bool(
+                    candidate_topics & context.feedback.disliked_topic_keys
+                ) or any(
                     cosine_similarity(topic_vec, disliked_vec)
                     >= embedding_service.similarity_threshold
                     for topic_vec in candidate_topic_vecs
                     for disliked_vec in _disliked_vecs.values()
-                ):
+                )
+                if disliked_topic_match:
                     adj -= _FEEDBACK_DISLIKE_TOPIC_PENALTY
-                if any(
+                liked_topic_match = bool(
+                    candidate_topics & context.feedback.liked_topic_keys
+                ) or any(
                     cosine_similarity(topic_vec, liked_vec)
                     >= embedding_service.similarity_threshold
                     for topic_vec in candidate_topic_vecs
                     for liked_vec in _liked_vecs.values()
-                ):
+                )
+                if liked_topic_match:
                     adj += _FEEDBACK_LIKE_TOPIC_BONUS
                 item_franchise = (getattr(item, "franchise_key", "") or "").strip()
                 if item_franchise and item_franchise in context.feedback.disliked_franchises:

@@ -377,6 +377,69 @@ async def test_async_feedback_embedding_checks_key_and_group_once() -> None:
     assert scores["BV_MATCH"] == scores["BV_NEUTRAL"] - 0.10
 
 
+async def _assert_async_exact_feedback_survives_partial_embeddings(
+    *,
+    polarity: str,
+    expected_adjustment: float,
+) -> None:
+    class SelectiveEmbeddingService:
+        similarity_threshold = 0.99
+
+        def __init__(self, unavailable: str) -> None:
+            self.unavailable = unavailable
+            self.exact_calls = 0
+
+        async def embed(self, text: str) -> list[float]:
+            if text == "exact":
+                self.exact_calls += 1
+                if self.unavailable == "feedback":
+                    return [] if self.exact_calls == 1 else [1.0, 0.0]
+                return [1.0, 0.0] if self.exact_calls == 1 else []
+            return [0.0, 1.0]
+
+    feedback_kwargs = {f"{polarity}_topic_keys": frozenset({"exact"})}
+    feedback = FeedbackSignals(**feedback_kwargs)
+    now = _now()
+    matching = DiscoveredContent(
+        bvid="BV_MATCH",
+        relevance_score=0.8,
+        topic_key="exact",
+        topic_group="available",
+        discovered_at=now.isoformat(),
+    )
+    neutral = DiscoveredContent(
+        bvid="BV_NEUTRAL",
+        relevance_score=0.8,
+        topic_key="neutral",
+        topic_group="available",
+        discovered_at=now.isoformat(),
+    )
+
+    for unavailable in ("feedback", "candidate"):
+        db, _ = _make_db()
+        scores = await PoolCurator(db).score_candidates_async(
+            [matching, neutral],
+            ScoringContext(feedback=feedback, now=now),
+            embedding_service=SelectiveEmbeddingService(unavailable),
+        )
+
+        assert scores["BV_MATCH"] == scores["BV_NEUTRAL"] + expected_adjustment
+
+
+async def test_async_disliked_exact_fallback_survives_partial_embeddings() -> None:
+    await _assert_async_exact_feedback_survives_partial_embeddings(
+        polarity="disliked",
+        expected_adjustment=-0.10,
+    )
+
+
+async def test_async_liked_exact_fallback_survives_partial_embeddings() -> None:
+    await _assert_async_exact_feedback_survives_partial_embeddings(
+        polarity="liked",
+        expected_adjustment=0.05,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Build context from DB
 # ---------------------------------------------------------------------------
