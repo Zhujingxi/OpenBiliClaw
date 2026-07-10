@@ -174,6 +174,7 @@ def test_reddit_source_status_uses_extension_backend_without_command_probe(
     tmp_path: Path,
 ) -> None:
     project_root = tmp_path / "runtime"
+    credential_file = tmp_path / "rdt-cli" / "credential.json"
     cfg = Config(
         llm=LLMConfig(
             default_provider="ollama",
@@ -184,6 +185,10 @@ def test_reddit_source_status_uses_extension_backend_without_command_probe(
     cfg.sources.reddit.backend = "extension"
     save_config(cfg, project_root / "config.toml")
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(project_root))
+    monkeypatch.setattr(
+        "openbiliclaw.sources.reddit_tasks._rdt_credential_file",
+        lambda: credential_file,
+    )
     monkeypatch.setattr(
         "openbiliclaw.sources.reddit_tasks.probe_reddit_command_backend",
         lambda backend: pytest.fail("extension status must not probe command backends"),
