@@ -41,6 +41,14 @@ def test_mobile_profile_uses_probe_action_descriptors() -> None:
     )
 
 
+def test_mobile_probe_action_buttons_have_explicit_button_type() -> None:
+    profile_js = (ROOT / "src/openbiliclaw/web/js/views/profile.js").read_text(encoding="utf-8")
+    chat_js = (ROOT / "src/openbiliclaw/web/js/views/chat.js").read_text(encoding="utf-8")
+
+    assert '<button type="button" class="${classes}"' in profile_js
+    assert '<button type="button" class="message-action-btn ${item.primary' in chat_js
+
+
 def _run_js(script: str) -> subprocess.CompletedProcess[str]:
     assert _NODE, "node is required"
     return subprocess.run(
@@ -982,6 +990,85 @@ class TestMobileWebViewModels:
         assert "speculative_avoidances" in profile_js
         assert "renderSpecAvoidances" in profile_js
         assert "respondToAvoidanceProbe" in profile_js
+
+    def test_mobile_avoidance_actions_do_not_bind_interest_handler(self) -> None:
+        profile_js = Path("src/openbiliclaw/web/js/views/profile.js").read_text()
+        interest_binder = (
+            "function bindSpecInterestActions()"
+            + profile_js.split("function bindSpecInterestActions()", 1)[1].split(
+                "\n}\n\nfunction bindInsightActions", 1
+            )[0]
+            + "\n}"
+        )
+        avoidance_binder = (
+            "function bindSpecAvoidanceActions()"
+            + profile_js.split("function bindSpecAvoidanceActions()", 1)[1].split(
+                "\n}\n\n// ── Cognition Cards", 1
+            )[0]
+            + "\n}"
+        )
+
+        script = (
+            dedent("""
+            import assert from "node:assert/strict";
+
+            const interestBinderSource = __INTEREST_BINDER__;
+            const avoidanceBinderSource = __AVOIDANCE_BINDER__;
+            const createBindings = new Function(
+              "$root", "state", "patchState", "respondToProbe", "respondToAvoidanceProbe",
+              "rememberHandledProbe", "forgetHandledProbe", "render",
+              `${interestBinderSource}\n${avoidanceBinderSource}\n` +
+                "return { bindSpecInterestActions, bindSpecAvoidanceActions };",
+            );
+
+            for (const action of ["confirm", "defer", "reject"]) {
+              const row = {
+                dataset: { domain: "浅层热点复读" },
+                querySelectorAll: () => buttons,
+              };
+              const buttons = ["confirm", "defer", "reject"].map((buttonAction) => ({
+                dataset: { action: buttonAction },
+                disabled: false,
+                listeners: [],
+                addEventListener(_event, listener) { this.listeners.push(listener); },
+                closest: () => row,
+              }));
+              const root = {
+                querySelectorAll(selector) {
+                  if (selector === ".spec-avoidance .spec-avoidance-btn") return buttons;
+                  if (selector === ".spec-interest .spec-btn") return buttons;
+                  if (selector === ".spec-interest:not(.spec-avoidance) .spec-btn") return [];
+                  throw new Error(`unexpected selector: ${selector}`);
+                },
+              };
+              const calls = { interest: [], avoidance: [] };
+              const state = {
+                profile: { speculative_interests: [], speculative_avoidances: [] },
+              };
+              const bindings = createBindings(
+                root,
+                state,
+                () => {},
+                async (domain, response) => calls.interest.push([domain, response]),
+                async (domain, response) => calls.avoidance.push([domain, response]),
+                () => {},
+                () => {},
+                () => {},
+              );
+
+              bindings.bindSpecInterestActions();
+              bindings.bindSpecAvoidanceActions();
+              const button = buttons.find((candidate) => candidate.dataset.action === action);
+              await Promise.all(button.listeners.map((listener) => listener({ target: button })));
+
+              assert.deepEqual(calls.avoidance, [["浅层热点复读", action]]);
+              assert.deepEqual(calls.interest, []);
+            }
+        """)
+            .replace("__INTEREST_BINDER__", repr(interest_binder))
+            .replace("__AVOIDANCE_BINDER__", repr(avoidance_binder))
+        )
+        _assert_js(script)
 
     def test_mobile_probe_card_locks_all_actions_after_tap(self) -> None:
         chat_js = Path("src/openbiliclaw/web/js/views/chat.js").read_text()

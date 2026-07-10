@@ -336,7 +336,7 @@ function renderProbeActionMarkup(actions, extraClass = "") {
         action.primary ? "confirm" : action.action,
       ].filter(Boolean).join(" ");
       return `
-        <button class="${classes}" data-action="${action.action}">${esc(action.label)}</button>`;
+        <button type="button" class="${classes}" data-action="${action.action}">${esc(action.label)}</button>`;
     })
     .join("");
 }
@@ -366,7 +366,7 @@ function renderSpecInterests(interests) {
 }
 
 function bindSpecInterestActions() {
-  for (const btn of $root.querySelectorAll(".spec-interest .spec-btn")) {
+  for (const btn of $root.querySelectorAll(".spec-interest:not(.spec-avoidance) .spec-btn")) {
     btn.addEventListener("click", async (e) => {
       const row = e.target.closest(".spec-interest");
       const domain = row?.dataset.domain;
