@@ -23,6 +23,16 @@ def test_normalize_published_time_accepts_seconds_milliseconds_iso_and_rfc2822()
     assert normalize_published_time("20260708", now=NOW).published_at == "2026-07-08T00:00:00Z"
 
 
+def test_normalize_published_time_accepts_early_unix_milliseconds() -> None:
+    assert normalize_published_time(946_684_800_000, now=NOW).published_at == "2000-01-01T00:00:00Z"
+
+
+def test_normalize_published_time_rejects_oversized_integer_without_raising() -> None:
+    assert normalize_published_time(10**1000, label="  archived  ", now=NOW) == PublishedTime(
+        "", "archived"
+    )
+
+
 def test_normalize_published_time_keeps_safe_relative_label_only() -> None:
     assert normalize_published_time(label="  3   小时前  ") == PublishedTime("", "3 小时前")
     assert normalize_published_label("x" * 80) == "x" * 64
