@@ -8,6 +8,7 @@
 
 后端源码走 `backend-v0.3.161`，浏览器插件走 `extension-v0.3.161`，桌面安装包走 `desktop-v0.3.161`。
 
+- **guided init 向量模型自愈与 popup 进度对齐**：从遗留分支 `db726daa` 手工移植仍有效能力；仅当本机 loopback Ollama 诊断为 `model_missing` / `model_broken` 且磁盘空间充足时，`POST /api/init` 才会单飞自动拉取并在 409 detail 返回实时进度；popup init checklist 现在显示进度条与修复按钮。`describe_llm_failure` 同步补齐 auth/401 与 quota/429 可操作说明；`bc2dc983` 已用 LLM 层翻译取代遗留分支的 reason-code 分类结构，因此后者未移植。四表面契约：popup 与已有 desktop Web `/setup/` 覆盖图形进度，CLI init 沿用日志输出，移动 Web 无 init 面板，后两者不适用。
 - chore(dev): scripts/release.py 版本一致性检查/升版工具 + release/writing-specs 项目技能 + CLAUDE.md 防坑规则（自提交史提炼）
 - ci: PR/main CI 新增 `scripts/release.py --check` 版本一致性强制拦截（stdlib-only，装依赖前秒级 fail-fast）
 - **平台接入指南回灌 2026-07 主干演进**：`docs/platform-source-integration.md` 补齐统一 admission policy（`discovery/admission.py`）、keyword inspiration axis 双轨生成、engagement 六项计数契约及当前 `share` 展示缺口、真实登录 cookie 优先 / 任务历史兜底链路、插件任务端点路径形状与鉴权约束、封面代理白名单（`ALLOWED_IMAGE_HOST_SUFFIXES` / CN CDN direct-fetch）、移动端 App deep-link host/path 解析分支、自定义 recipe 的 `AdapterRegistry` 边界及尚未接入运行时 `resolve()` 的现状、GHCR backend + 独立 baked-embedding Ollama 镜像发布渠道；`add-platform-source` skill 同步约束到 `.claude/skills/`（`.gitignore` 放行该子目录），两份 skill 入口保持一致。

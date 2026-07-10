@@ -205,6 +205,31 @@ def test_describe_llm_failure_rate_limit_wins_over_no_provider() -> None:
     assert "限流" in reason
 
 
+def test_describe_llm_failure_authentication_chain() -> None:
+    try:
+        try:
+            raise RuntimeError("HTTP 401 unauthorized: invalid api key")
+        except RuntimeError as upstream:
+            raise LLMProviderError("authentication failed") from upstream
+    except LLMProviderError as exc:
+        reason = describe_llm_failure(exc)
+    assert reason is not None
+    assert "鉴权失败" in reason
+    assert "API key" in reason
+
+
+def test_describe_llm_failure_insufficient_quota() -> None:
+    reason = describe_llm_failure(LLMProviderError("upstream error: insufficient_quota"))
+    assert reason is not None
+    assert "额度用尽或被限流" in reason
+
+
+def test_describe_llm_failure_http_429() -> None:
+    reason = describe_llm_failure(LLMProviderError("upstream returned HTTP 429"))
+    assert reason is not None
+    assert "额度用尽或被限流" in reason
+
+
 def test_describe_llm_failure_timeout_and_empty_response() -> None:
     assert "超时" in (describe_llm_failure(LLMTimeoutError("request timed out")) or "")
     assert "空响应" in (describe_llm_failure(LLMResponseError("empty completion")) or "")

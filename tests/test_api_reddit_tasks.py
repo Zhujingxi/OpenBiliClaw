@@ -188,6 +188,12 @@ def test_reddit_source_status_uses_extension_backend_without_command_probe(
         "openbiliclaw.sources.reddit_tasks.probe_reddit_command_backend",
         lambda backend: pytest.fail("extension status must not probe command backends"),
     )
+    # rdt-cli 的 credential.json 走 HOME 而非 OPENBILICLAW_PROJECT_ROOT;
+    # 开发机上真实登录过 Reddit 会让状态变 ready,必须隔离。
+    monkeypatch.setattr(
+        "openbiliclaw.sources.reddit_tasks.rdt_credential_cookie_names",
+        lambda: (),
+    )
 
     db = _make_database(tmp_path)
     app = create_app(memory_manager=object(), database=db, soul_engine=object())

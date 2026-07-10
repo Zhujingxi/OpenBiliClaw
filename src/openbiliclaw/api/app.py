@@ -2411,8 +2411,16 @@ def create_app(
             coord.reset_to_idle(run_id, reason="llm_not_ready")
             return JSONResponse({"error": "llm_not_ready"}, status_code=409)
         if _embedding_required_for_init() and not await _health_embedding_ready():
+            pulling = await _maybe_autostart_embedding_pull()
             coord.reset_to_idle(run_id, reason="embedding_not_ready")
-            return JSONResponse({"error": "embedding_not_ready"}, status_code=409)
+            detail = (
+                _repair_progress_detail()
+                if pulling
+                else "向量模型还没就绪。请在初始化页点「修复向量模型」，或等待自动下载完成后重试。"
+            )
+            return JSONResponse({"error": "embedding_not_ready", "detail": detail}, status_code=409)
+        with suppress(Exception):
+            await _maybe_autostart_embedding_pull()
 
         registry = getattr(ctx, "task_registry", None)
         if registry is not None:
@@ -2516,6 +2524,70 @@ def create_app(
             _expire_embedding_ready_cache()
         else:
             logger.warning("Embedding repair: pull %s failed: %s", model, error)
+
+    async def _maybe_autostart_embedding_pull() -> bool:
+        """Best-effort auto-pull for a locally hosted missing/broken model."""
+        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
+        if str(getattr(emb, "provider", "") or "").strip().lower() != "ollama":
+            return False
+        try:
+            base_url, model = _embedding_ollama_target()
+            from openbiliclaw.llm.ollama_diagnostics import (
+                DIAG_MODEL_BROKEN,
+                DIAG_MODEL_MISSING,
+                diagnose_ollama_embedding,
+                ollama_embedding_disk_space_error,
+            )
+            from openbiliclaw.runtime.ollama_supervisor import is_loopback
+
+            if not is_loopback(base_url):
+                return False
+            async with _embedding_repair_lock:
+                if _embedding_repair_state["running"] or bool(
+                    embedding_progress.snapshot().get("running")
+                ):
+                    return True
+                code, _detail = await diagnose_ollama_embedding(base_url, model)
+                if code not in {DIAG_MODEL_MISSING, DIAG_MODEL_BROKEN}:
+                    return False
+                if ollama_embedding_disk_space_error(model):
+                    return False
+                _embedding_repair_state.update(
+                    {
+                        "running": True,
+                        "model": model,
+                        "status": "starting",
+                        "completed": 0,
+                        "total": 0,
+                        "done": False,
+                        "ok": False,
+                        "error": "",
+                    }
+                )
+                embedding_progress.mark_pull_running(model)
+                coro = _run_embedding_repair(base_url, model)
+                try:
+                    registry = getattr(ctx, "task_registry", None)
+                    if registry is not None:
+                        registry.track("embedding_repair", coro)
+                    else:
+                        task = asyncio.create_task(coro)
+                        _fire_and_forget_tasks.add(task)
+                        task.add_done_callback(_fire_and_forget_tasks.discard)
+                except Exception as exc:
+                    error = f"{type(exc).__name__}: {exc}"
+                    _embedding_repair_state.update(
+                        {"running": False, "done": True, "ok": False, "error": error}
+                    )
+                    embedding_progress.mark_pull_done(False, error)
+                    coro.close()
+                    logger.debug("auto embedding pull scheduling failed", exc_info=True)
+                    return False
+            logger.info("Auto-started embedding pull for %s at init", model)
+            return True
+        except Exception:
+            logger.debug("auto embedding pull skipped", exc_info=True)
+            return False
 
     @app.post("/api/embedding/repair")
     async def start_embedding_repair(request: Request) -> JSONResponse:

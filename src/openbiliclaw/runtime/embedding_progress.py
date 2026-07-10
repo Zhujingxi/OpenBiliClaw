@@ -108,6 +108,26 @@ def snapshot() -> dict[str, object]:
         return state
 
 
+def reset() -> None:
+    """Clear all process-global pull/phase state for test isolation."""
+    global _ollama_phase
+    with _lock:
+        _pull_state.update(
+            {
+                "running": False,
+                "model": "",
+                "status": "",
+                "completed": 0,
+                "total": 0,
+                "done": False,
+                "ok": False,
+                "error": "",
+                "started_monotonic": 0.0,
+            }
+        )
+        _ollama_phase = "ready"
+
+
 def report_ollama_phase(phase: str) -> None:
     """Record the current managed-Ollama daemon phase."""
     if phase not in _VALID_OLLAMA_PHASES:
