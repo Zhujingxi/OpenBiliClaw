@@ -5014,6 +5014,7 @@
       // 设置 banner 背景图（模糊用）
       const banner = $("#delightBanner");
       if (banner) banner.style.setProperty("--cover-url", url ? `url("${url}")` : "none");
+      if (!delight) return;
       // 平台徽章不依赖封面 —— 无封面(文本类内容/封面缺失)时用户仍需知道来源平台
       const badge = document.createElement("span");
       badge.className = "platform";
