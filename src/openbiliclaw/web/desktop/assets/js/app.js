@@ -1399,15 +1399,6 @@
       window.setTimeout(() => input?.focus(), 100);
     }
 
-    async function openProfileCorrection() {
-      openProfilePage();
-      await enterProfileEdit();
-    }
-
-    function openChatCorrection() {
-      openChatPage();
-    }
-
     function openSettingsPage(panel = "models") {
       closeMobileMenu();
       document.querySelectorAll(".drawer.is-open, .overlay.is-open").forEach((drawer) => closePanel(drawer.id));
@@ -6190,13 +6181,11 @@
       }
     });
     safeBind("#profileBtn", "click", openProfilePage);
-    safeBind("#editProfileFromRecommendations", "click", openProfileCorrection);
     safeBind("#homeBtn", "click", openHomePage);
     safeBind("#watchLaterBtn", "click", openWatchLaterPage);
     safeBind("#favoritesBtn", "click", openFavoritesPage);
     safeBind("#profileMemoryMoreBtn", "click", loadMoreProfileMemory);
     safeBind("#chatBtn", "click", openChatPage);
-    safeBind("#chatFromRecommendations", "click", openChatCorrection);
     safeBind("#messagesBtn", "click", () => {
       closeSideDrawer();
       hydrateInboxFromSpeculations(state.profile?.speculative_interests);

@@ -395,29 +395,6 @@
     .metric strong { display: block; color: var(--surface); font-family: var(--font-mono); font-size: var(--text-lg); }
     .section-head { display: flex; align-items: end; justify-content: space-between; gap: var(--space-4); margin: var(--space-8) 0 var(--space-4); }
     .section-head p { margin: var(--space-1) 0 0; color: var(--muted); }
-    .preference-correction-callout {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 6px;
-      margin: 6px 0 0;
-      color: var(--muted);
-      font-size: 13px;
-    }
-    .preference-correction-callout button {
-      border: 0;
-      padding: 0;
-      background: transparent;
-      color: var(--accent);
-      font: inherit;
-      text-decoration: underline;
-      text-underline-offset: 2px;
-      cursor: pointer;
-    }
-    .preference-correction-callout button:focus-visible {
-      outline: 2px solid var(--accent);
-      outline-offset: 3px;
-    }
     .recommendation-actions { align-items: center; }
     .reshuffle-toggle { min-height: 40px; display: inline-flex; align-items: center; gap: var(--space-2); padding: 0 var(--space-3) 0 6px; border: 1px solid var(--border-soft); border-radius: var(--radius-pill); background: var(--surface); color: var(--muted); font-size: 13px; white-space: nowrap; box-shadow: var(--elev-ring); cursor: pointer; user-select: none; }
     .reshuffle-toggle input { position: absolute; opacity: 0; pointer-events: none; }
