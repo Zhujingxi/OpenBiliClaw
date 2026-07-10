@@ -70,7 +70,7 @@
 
 ### Phase 1 — 后端自动拉取
 
-接口:`_maybe_autostart_embedding_pull() -> bool`(create_app 闭包内);`POST /api/init` 的 `embedding_not_ready` 409 增加 detail 字段(拉取中 → `_repair_progress_detail()`;未拉取 → 固定手动引导文案);硬前置分支之外增加软 embedding 自愈调用(`with suppress(Exception)`)。`embedding_progress.reset() -> None` 模块级函数。基线算法对照 `git diff b2f00780 db726daa -- src/openbiliclaw/api/app.py`(锚点:`_maybe_autostart_embedding_pull` 函数体、`start_guided_init` 的 `embedding_not_ready` 分支;hunk 行号不可靠,以符号定位)与 `runtime/embedding_progress.py` hunk,**并叠加 D5 的三处修正**:(a) 端点须过 `runtime.ollama_supervisor.is_loopback(base_url)`,非 loopback 返回 False;(b) 诊断通过后、标 running 前过 `ollama_embedding_disk_space_error(model)`,非空返回 False;(c) 任务调度(`registry.track` / `create_task`)包 try,失败时回滚 `_embedding_repair_state`(running=False + error 记录)与 `embedding_progress`(reset 或等效清除),并 `coro.close()` 释放未调度协程。错误行为见不变量 4。
+接口:`_maybe_autostart_embedding_pull() -> bool`(create_app 闭包内);`POST /api/init` 的 `embedding_not_ready` 409 增加 detail 字段(拉取中 → `_repair_progress_detail()`;未拉取 → 固定手动引导文案);硬前置分支之外增加软 embedding 自愈调用(`with suppress(Exception)`)。`embedding_progress.reset() -> None` 模块级函数。基线算法对照 `git diff b2f00780 db726daa -- src/openbiliclaw/api/app.py`(锚点:`_maybe_autostart_embedding_pull` 函数体、`start_guided_init` 的 `embedding_not_ready` 分支;hunk 行号不可靠,以符号定位)与 `runtime/embedding_progress.py` hunk,**并叠加 D5 的三处修正**:(a) 端点须过 `runtime.ollama_supervisor.is_loopback(base_url)`,非 loopback 返回 False;(b) 诊断通过后、标 running 前过 `ollama_embedding_disk_space_error(model)`,非空返回 False;(c) 任务调度(`registry.track` / `create_task`)包 try,失败时回滚 `_embedding_repair_state`(running=False + error 记录)与 `embedding_progress`(必须用 `mark_pull_done(False, error)`,不得用 `reset()`),并 `coro.close()` 释放未调度协程。错误行为见不变量 4。
 
 测试(`tests/test_api_app.py`;进程级单例隔离用 **autouse yield fixture 在每个用例前后各调一次 `embedding_progress.reset()`**,且断言无仍在跑的拉取任务后才 reset):缺模型 409 带进度 detail 且拉取启动;`model_broken` 同;`not_running` 不触发;非 ollama provider 不触发;非 loopback URL(远端主机、`http://ollama:11434`)不触发;loopback `127.0.0.1:11435` 允许;磁盘不足不触发;已有拉取在跑返回 True 不重复;诊断抛异常时 409 返回手动文案;调度失败时状态回滚;auto-pull 与手动 `/api/embedding/repair` 并发只有一次拉取(竞态测试,见不变量 3 备注)。`reset()` 自身的行为测试加在 `tests/test_embedding_progress.py`(若无该文件则新建)。
 
@@ -88,7 +88,7 @@
 
 `docs/changelog.md` 当前版本块(v0.3.161)下加一条 bullet:init 缺模型自动拉取(含 loopback / 磁盘边界)+ popup 进度对齐 + `describe_llm_failure` 补 auth/quota 桶,注明源自遗留分支 `db726daa`、LLM 分类结构因 `bc2dc983` 取代未移植、CLI 面不适用(init 由 Web/popup 驱动)。`docs/modules/init.md`:更新 `/api/init` 行、`/api/embedding/repair` 行与 `_init_wrapper` 段 —— 只描述自动拉取语义,版本标注用「v0.3.162+」;**不得**引入分支版 init.md 里的 `_classify_init_llm_failure` 叙述。`docs/modules/llm.md`:`describe_llm_failure` 补 auth/quota 桶说明。`docs/modules/runtime.md`:`embedding_progress` 节补 `reset()`(注明仅测试用,生产回滚走 `mark_pull_done`)。`docs/modules/extension.md`:popup init checklist 进度条 / 修复按钮行为。
 
-验收门:四文件变更与代码一致;pre-merge checklist(CLAUDE.md)逐项过。
+验收门:五文件变更与代码一致;pre-merge checklist(CLAUDE.md)逐项过。
 
 ## Expected impact
 
