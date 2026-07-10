@@ -28,6 +28,7 @@
 | 惊喜通道占位排除 | ✅ | `get_pool_candidates()` / `count_pool_candidates()` 统一排除被惊喜通道认领的行（`delight_notified=1`，或 delight 分数达动态阈值且 reason/hook 非空即当前惊喜队列候选），普通推荐与惊喜推荐不再重复出同一条内容；`dynamic_delight_threshold()` 以 `0.70` 为默认底线，候选池样本不少于 20 条时抬高到正式池 Top 10% 分数边界；delight backfill 会重新领取旧 `delight_score` 与当前 `relevance_score` 不一致的行，包括 `shown` 历史行。 |
 | serve 平台保底查询 | ✅ | `get_pool_candidates_for_platform(platform, limit=5)` 复用 `get_pool_candidates()` 同一 servable WHERE / guards / 排序，追加 `COALESCE(NULLIF(source_platform,''),'bilibili')` 平台过滤，供推荐 serve 对窗口内缺席平台补拉；`list_servable_pool_platforms()` 返回当前可服务候选的去重平台 token（复用 `_load_available_pool_candidate_rows` 的同口径守卫）。 |
 | `style_key` 历史值迁移 | ✅ | `Database.initialize()` 会把 `content_cache` / `discovery_candidates` 中已知旧内容风格 key 迁移到新的观看模式 key；写入 `cache_content()` 和 `update_discovery_candidate_evaluations()` 时也会归一化已知旧值。 |
+| 封面粘性保护 | ✅ | `cache_content()` upsert 对 `cover_url` 用 `COALESCE(NULLIF(excluded,''), 现值)`——带空封面的重摄入（如互动数据刷新、事件驱动 related-chain）不再抹掉已有好封面，与 `author_name` / `body_text` 同一保护策略（v0.3.162+）。 |
 
 ## 公开 API
 

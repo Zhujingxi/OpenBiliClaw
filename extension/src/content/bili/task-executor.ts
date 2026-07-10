@@ -97,12 +97,18 @@ function normalizeUrl(url: string): string {
 
 function imageUrl(img: ElementLike | null): string {
   if (!img) return "";
-  return normalizeUrl(
-    attrFrom(img, "src") ||
-      attrFrom(img, "data-src") ||
-      attrFrom(img, "data-lazy-src") ||
-      attrFrom(img, "data-original"),
+  // 懒加载占位常是 data: URI —— 存进后端会当成永久封面，宁可留空
+  // 让真实封面在后续摄入时补上（后端空值不覆盖已有封面）。
+  const candidates = [
+    attrFrom(img, "src"),
+    attrFrom(img, "data-src"),
+    attrFrom(img, "data-lazy-src"),
+    attrFrom(img, "data-original"),
+  ];
+  const real = candidates.find(
+    (value) => value.trim() && !/^(data|about|blob):/i.test(value.trim()),
   );
+  return normalizeUrl(real || "");
 }
 
 export function extractBvid(href: string): string {
