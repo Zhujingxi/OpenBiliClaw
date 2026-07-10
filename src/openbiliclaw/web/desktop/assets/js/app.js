@@ -933,21 +933,120 @@
       ];
     }
 
-    function initProgressView(status) {
+    // ── Intra-stage progress + liveness (init-progress-visibility Phase 2) ──
+    // MIRROR of the reference implementation in
+    // extension/popup/popup-init-control.js — the three GUI surfaces share no
+    // module system, so keep the formulas in lock-step when editing either.
+    const STAGE_FRACTION_CAP = 0.95;
+    const STAGE_FRACTION_FALLBACK = 0.5;
+    // Calibration: backend heartbeat 30s × 3 missed beats (api/app.py
+    // _INIT_HEARTBEAT_INTERVAL_SECONDS) — change them in lock-step.
+    const INIT_STALL_THRESHOLD_SECONDS = 90;
+    const INIT_EXPECTATION_HINT = "整个过程通常需要 2–5 分钟，期间可离开此页面，进度会保留。";
+
+    const _runViewState = new Map();
+
+    function _viewState(runId) {
+      let st = _runViewState.get(runId);
+      if (!st) {
+        st = { stageStartMs: new Map(), maxPct: 0, lastMark: null, lastChangeMs: 0 };
+        _runViewState.set(runId, st);
+        if (_runViewState.size > 8) {
+          const oldest = _runViewState.keys().next().value;
+          if (oldest !== runId) _runViewState.delete(oldest);
+        }
+      }
+      return st;
+    }
+
+    function _runningStageFraction(stage, st, nowMs) {
+      const prog = stage?.progress;
+      const progTotal = prog ? Number(prog.total || 0) : 0;
+      if (progTotal > 0) {
+        const done = Math.max(0, Math.min(Number(prog.done || 0), progTotal));
+        return Math.min(STAGE_FRACTION_CAP, done / progTotal);
+      }
+      const eta = Number(stage?.eta_seconds || 0);
+      if (eta > 0 && st) {
+        let startMs = st.stageStartMs.get(stage.n);
+        if (startMs === undefined) {
+          startMs = nowMs;
+          st.stageStartMs.set(stage.n, startMs);
+        }
+        const elapsed = Math.max(0, (nowMs - startMs) / 1000);
+        return Math.min(STAGE_FRACTION_CAP, 1 - Math.exp(-elapsed / eta));
+      }
+      return STAGE_FRACTION_FALLBACK;
+    }
+
+    // "本阶段通常约 X 分钟" for a stage carrying eta_seconds ("" otherwise);
+    // X rounds UP to the nearest half minute.
+    function stageEtaText(stage) {
+      const eta = Number(stage?.eta_seconds || 0);
+      if (eta <= 0) return "";
+      const halfMinutes = Math.ceil(eta / 30) / 2;
+      return `本阶段通常约 ${halfMinutes} 分钟`;
+    }
+
+    // Liveness indicator driven by last_activity (bumped by every backend
+    // write incl. the 30s heartbeat). Staleness is measured from the CLIENT
+    // time the (sequence, last_activity) marker last changed — clock-skew
+    // immune. Old backends without the field get no stall detection.
+    function stalenessView(status, nowMs = Date.now()) {
+      if (!status?.running) return { fresh: true, staleSeconds: 0, text: "" };
+      const runId = status.run_id ? String(status.run_id) : "";
+      if (!runId || !status.last_activity) {
+        return { fresh: true, staleSeconds: 0, text: "● 进行中" };
+      }
+      const st = _viewState(runId);
+      const mark = `${status.sequence ?? ""}|${status.last_activity}`;
+      if (st.lastMark !== mark) {
+        st.lastMark = mark;
+        st.lastChangeMs = nowMs;
+      }
+      const staleSeconds = Math.max(0, Math.round((nowMs - st.lastChangeMs) / 1000));
+      if (staleSeconds > INIT_STALL_THRESHOLD_SECONDS) {
+        const minutes = Math.max(1, Math.round(staleSeconds / 60));
+        return {
+          fresh: false,
+          staleSeconds,
+          text: `后台已 ${minutes} 分钟没有新进展，可能是 AI 服务响应缓慢——可以继续等待，或取消后重试。`
+        };
+      }
+      return { fresh: true, staleSeconds, text: "● 进行中" };
+    }
+
+    function initProgressView(status, nowMs = Date.now()) {
       const total = status?.total_stages || 4;
       const stages = Array.isArray(status?.stages) ? status.stages : [];
       const doneCount = stages.filter((stage) => stage.status === "ok").length;
       const running = Boolean(status?.running);
+      const runId = status?.run_id ? String(status.run_id) : "";
+      const st = runId ? _viewState(runId) : null;
       const failedStage = stages.find((stage) => stage.status === "failed" || stage.status === "cancelled");
       const current = status?.current_stage || 0;
       const currentStage = stages.find((stage) => stage.n === current);
-      const rawPct = ((doneCount + (running ? 0.5 : 0)) / total) * 100;
-      const pct = Math.max(0, Math.min(100, Math.round(rawPct)));
+      let stageLabel = currentStage ? `${currentStage.n}/${total} ${currentStage.label}` : "";
+      const note = currentStage?.progress?.note;
+      if (stageLabel && note) stageLabel += ` · ${note}`;
+      const runningStages = stages.filter((stage) => stage.status === "running");
+      const inFlight = runningStages.length
+        ? runningStages.reduce((sum, stage) => sum + _runningStageFraction(stage, st, nowMs), 0) /
+          runningStages.length
+        : 0;
+      const rawPct = ((doneCount + (running ? inFlight : 0)) / total) * 100;
+      let pct = Math.max(0, Math.min(100, Math.round(rawPct)));
+      if (running) pct = Math.max(pct, 1);
+      if (st) {
+        st.maxPct = Math.max(st.maxPct, pct);
+        pct = st.maxPct;
+      }
       return {
         active: running,
         failed: Boolean(failedStage),
-        pct: running ? Math.max(pct, 1) : pct,
-        stageLabel: currentStage ? `${currentStage.n}/${total} ${currentStage.label}` : "",
+        pct,
+        stageLabel,
+        etaText: running ? stageEtaText(currentStage) : "",
         failedReason: failedStage?.reason || ""
       };
     }
@@ -1074,6 +1173,20 @@
       if (progressBox) progressBox.hidden = !(Boolean(status?.running) || progress.failed);
       if (progressFill) progressFill.style.width = `${progress.pct}%`;
       if (progressText) progressText.textContent = progressLabel;
+      // Liveness line: "● 进行中 (+ typical stage duration)" while the backend
+      // keeps writing; amber stall copy after >90s of silence.
+      const stallHint = section.querySelector(".init-stall-hint");
+      if (stallHint) {
+        const staleness = stalenessView(status);
+        const stallText = Boolean(status?.running)
+          ? staleness.fresh
+            ? [staleness.text, progress.etaText].filter(Boolean).join(" · ")
+            : staleness.text
+          : "";
+        stallHint.textContent = stallText;
+        stallHint.classList.toggle("stale", Boolean(status?.running) && !staleness.fresh);
+        stallHint.hidden = !stallText;
+      }
       const reasonText = section.querySelector(".init-reason");
       if (reasonText) {
         reasonText.hidden = !reason;
@@ -1118,6 +1231,15 @@
               ? "重试初始化"
               : "开始初始化";
       const buttonDisabled = state.initBusy || isRunning || waitingForFirstPool || alreadyInitialized;
+      const staleness = stalenessView(status);
+      const stallText = isRunning
+        ? staleness.fresh
+          ? [staleness.text, displayProgress.etaText].filter(Boolean).join(" · ")
+          : staleness.text
+        : "";
+      // Expectation management near the start button while a run can begin.
+      const expectationText =
+        !isRunning && !waitingForFirstPool && !alreadyInitialized ? INIT_EXPECTATION_HINT : "";
       const existing = grid.querySelector(".init-onboarding");
       if (existing?.dataset.initPhase === phase && phase !== "idle" && phase !== "busy") {
         updateInitOnboardingStatus(existing, status, displayProgress, reason, buttonLabel, buttonDisabled);
@@ -1138,6 +1260,8 @@
             <div class="init-progress-track"><div class="init-progress-fill" style="width:${displayProgress.pct}%"></div></div>
             <p>${escapeHtml(displayProgress.failed ? initFailureText(status, displayProgress) : displayProgress.active ? displayProgress.label || `${displayProgress.stageLabel || "正在初始化"}（${displayProgress.pct}%）` : "等待开始")}</p>
           </div>
+          <p class="init-stall-hint${stallText && !staleness.fresh ? " stale" : ""}"${stallText ? "" : " hidden"}>${escapeHtml(stallText)}</p>
+          <p class="init-expectation"${expectationText ? "" : " hidden"}>${escapeHtml(expectationText)}</p>
           <p class="init-reason"${reason ? "" : " hidden"}>${escapeHtml(reason)}</p>
           <div class="init-actions">
             <button class="small-btn primary" type="button" data-init-action="start"${buttonDisabled ? " disabled" : ""}>${escapeHtml(buttonLabel)}</button>
