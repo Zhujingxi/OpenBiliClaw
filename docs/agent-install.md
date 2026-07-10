@@ -89,7 +89,7 @@ Next action (AI service check failed):
 
 Next action (init has been run automatically):
   - Verify the backend is healthy: curl -sS <Health URL>
-  - Open Mobile Web: click the phone icon in the extension header and scan the QR code; if the backend address is loopback, the extension reads `/api/health.lan_ip` and shows the LAN URL automatically
+  - Open Mobile Web: click the phone icon in the extension header and scan the QR code; if the backend address is loopback, the extension calls `GET /api/qr-info` and reads the `lan_ip` response field to show the LAN URL automatically
   - See recommendations:    cd <dir> && uv run openbiliclaw recommend
   - View the soul profile:  cd <dir> && uv run openbiliclaw profile
   - Re-run init manually if needed: cd <dir> && uv run openbiliclaw init

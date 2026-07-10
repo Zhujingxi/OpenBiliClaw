@@ -250,4 +250,4 @@ http://<电脑局域网IP>:8420/m/
 
 打开 `/m/` 后可在 iOS Safari 通过「分享 → 添加到主屏幕」保存为桌面图标；Android Chrome / Chromium 浏览器可通过菜单里的「安装应用」或「添加到主屏幕」保存。局域网 HTTP 在部分 Android 浏览器上可能只生成快捷方式；完整 PWA 安装提示对 HTTPS 更稳定。
 
-不想手敲地址时有两个扫码入口：插件 popup / side panel 顶部的「手机版」胶囊按钮（品牌色带文字，点开二维码浮层），以及桌面 Web（`/web`）顶栏的「手机版」入口（点开抽屉，二维码由自包含的 `desktop/assets/js/mobile-qr.js` 生成，地址取后端 `/api/health` 的 `lan_ip`）。
+不想手敲地址时有两个扫码入口：插件 popup / side panel 顶部的「手机版」胶囊按钮（品牌色带文字，点开二维码浮层），以及桌面 Web（`/web`）顶栏的「手机版」入口（点开抽屉，二维码由自包含的 `desktop/assets/js/mobile-qr.js` 生成）；后端地址仍是 loopback 时，桌面抽屉会调用轻量端点 `GET /api/qr-info` 并读取响应中的 `lan_ip` 字段，插件入口也使用同一轻量端点生成局域网地址。
