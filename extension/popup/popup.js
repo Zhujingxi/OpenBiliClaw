@@ -2123,14 +2123,14 @@ function bindStarButton() {
 async function renderMobileQrPanel() {
   const endpoint = await getBackendEndpointConfig();
 
-  // When the configured host is loopback, try to get the server's
-  // detected LAN IP from the health endpoint so the QR code shows
-  // an address that mobile devices can actually reach.
+  // When the configured host is loopback, ask the lightweight QR endpoint
+  // for the server's detected LAN IP. Unlike the full readiness endpoint,
+  // this endpoint does not wait for embedding readiness before the QR code can be rendered.
   let effectiveEndpoint = endpoint;
   if (isLoopbackMobileHost(endpoint.host)) {
     try {
       const base = `http://${endpoint.host}:${endpoint.port}`;
-      const resp = await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(2000) });
+      const resp = await fetch(`${base}/api/qr-info`, { signal: AbortSignal.timeout(2000) });
       if (resp.ok) {
         const data = await resp.json();
         if (data.lan_ip && !isLoopbackMobileHost(data.lan_ip)) {
@@ -2138,7 +2138,7 @@ async function renderMobileQrPanel() {
         }
       }
     } catch {
-      // Health fetch failed — fall through with original endpoint.
+      // QR-info fetch failed — fall through with original endpoint.
     }
   }
 
