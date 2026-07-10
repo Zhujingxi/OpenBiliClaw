@@ -188,6 +188,27 @@ def test_backend_tag_workflow_only_updates_aggregate_release() -> None:
     assert "桌面安装包仍由 `desktop-v*` workflow 构建" in extension_doc
 
 
+def test_ollama_bundled_dockerfile_retries_model_pull_before_verification() -> None:
+    dockerfile = _read("docker/ollama-bundled.Dockerfile")
+    run_block = dockerfile.split("RUN set -eux;", maxsplit=1)[1].split(
+        "COPY docker/seed-bge-m3.sh", maxsplit=1
+    )[0]
+
+    assert "start_ollama()" in run_block
+    assert 'ollama serve & pid="$!"' in run_block
+    assert 'model_blob="/root/.ollama/models/blobs/sha256-${BGE_M3_MODEL_DIGEST}"' in run_block
+    assert 'until start_ollama && ollama pull bge-m3 && [ -f "$model_blob" ]; do' in run_block
+    assert "attempts=$((attempts + 1))" in run_block
+    assert "find /root/.ollama/models" in run_block
+
+    between_pull_and_verify = run_block[
+        run_block.index("ollama pull bge-m3") : run_block.index(
+            "cp -a /root/.ollama/models/blobs /opt/bge-m3-seed/blobs"
+        )
+    ]
+    assert 'kill "$pid"' not in between_pull_and_verify
+
+
 def test_installers_can_clone_code_into_existing_packaged_data_root() -> None:
     install_sh = _read("scripts/install.sh")
     install_ps1 = _read("scripts/install.ps1")

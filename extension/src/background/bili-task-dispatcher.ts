@@ -7,6 +7,7 @@
  */
 
 import { apiUrl } from "../shared/backend-endpoint.ts";
+import { authenticatedFetch } from "../shared/auth.ts";
 
 const _MUTEX_STALE_MS = 6 * 60 * 1000;
 function tryAcquireDispatcherMutex(label: string): boolean {
@@ -123,7 +124,9 @@ export function buildBiliExecuteMessageData(task: BiliTask): Record<string, unkn
 
 async function fetchNextTask(): Promise<BiliTask | null> {
   try {
-    const response = await fetch(await apiUrl("/sources/bili/next-task"), { method: "GET" });
+    const response = await authenticatedFetch(await apiUrl("/sources/bili/next-task"), {
+      method: "GET",
+    });
     if (response.status === 204) return null;
     if (!response.ok) return null;
     const payload: unknown = await response.json();
@@ -135,7 +138,7 @@ async function fetchNextTask(): Promise<BiliTask | null> {
 
 async function postTaskResult(result: BiliTaskResult): Promise<void> {
   try {
-    await fetch(await apiUrl("/sources/bili/task-result"), {
+    await authenticatedFetch(await apiUrl("/sources/bili/task-result"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(result),

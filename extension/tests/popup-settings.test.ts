@@ -7,7 +7,9 @@ test("settings page exposes advanced config fields from backend schema", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
   const expectedIds = [
+    "cfgBackendScheme",
     "cfgBackendPort",
+    "cfgExtDeviceKey",
     "cfgDataDir",
     "cfgLlmFallbackProvider",
     "cfgEmbeddingFallbackProvider",
@@ -109,6 +111,8 @@ test("settings page exposes advanced config fields from backend schema", () => {
     assert.match(popupHtml, new RegExp(`id="${id}"`), `${id} should exist`);
     assert.match(popupJs, new RegExp(`"${id}"`), `${id} should be wired in popup.js`);
   }
+  assert.doesNotMatch(popupHtml, /cfgExtLoginPassword|扩展登录密码/);
+  assert.doesNotMatch(popupJs, /obc_auth_password|obc_auth_token/);
   assert.doesNotMatch(popupHtml, /id="cfgDiscoveryCron"/);
   assert.doesNotMatch(popupJs, /discovery_cron:\s*getVal\("cfgDiscoveryCron"\)/);
   assert.match(
@@ -621,4 +625,33 @@ test("settings page shows the budget-semantics hint for every per-source budget 
   // The other five use the base wording.
   const baseCount = popupHtml.split(baseNote).length - 1;
   assert.ok(baseCount >= 5, `expected >=5 base budget notes, got ${baseCount}`);
+});
+
+test("settings page wires the keyword generation mode selector (matches desktop web)", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  // Select + the three options — values/labels byte-identical to desktop web.
+  assert.match(popupHtml, /id="cfgKeywordGenerationMode"/);
+  assert.match(popupHtml, /<option value="legacy">经典<\/option>/);
+  assert.match(popupHtml, /<option value="hybrid">混合<\/option>/);
+  assert.match(popupHtml, /<option value="inspiration">灵感<\/option>/);
+  // Cost hint conveys 混合最贵.
+  assert.match(popupHtml, /混合最贵/);
+
+  // Load fills the select from the derived discovery field.
+  assert.match(
+    popupJs,
+    /setVal\("cfgKeywordGenerationMode", cfg\.discovery\?\.keyword_generation_mode \|\| "legacy"\)/,
+  );
+
+  // Save collects it into the discovery payload AFTER the snapshot spread, so a
+  // loaded value never clobbers the user's live selection (R2 spread-order).
+  const saveKey = 'keyword_generation_mode: getVal("cfgKeywordGenerationMode")';
+  assert.ok(popupJs.includes(saveKey), "save key should be present");
+  const spread = "...(state.runtimeConfig?.discovery || {})";
+  assert.ok(
+    popupJs.indexOf(spread) !== -1 && popupJs.indexOf(spread) < popupJs.indexOf(saveKey),
+    "keyword_generation_mode must be written after the discovery spread",
+  );
 });

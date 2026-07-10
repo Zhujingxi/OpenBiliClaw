@@ -21,14 +21,17 @@
 
 export const DEFAULT_BACKEND_HOST = "127.0.0.1";
 export const DEFAULT_BACKEND_PORT = 8420;
+export const DEFAULT_BACKEND_SCHEME = "http";
 export const BACKEND_ENDPOINT_STORAGE_KEY = "popup_backend_endpoint";
 
 export interface BackendEndpoint {
+  scheme: "http" | "https";
   host: string;
   port: number;
 }
 
 const DEFAULT_ENDPOINT: BackendEndpoint = {
+  scheme: DEFAULT_BACKEND_SCHEME,
   host: DEFAULT_BACKEND_HOST,
   port: DEFAULT_BACKEND_PORT,
 };
@@ -109,6 +112,7 @@ function sanitizeEndpoint(raw: unknown): BackendEndpoint {
   const obj = raw as Record<string, unknown>;
   const hostRaw = typeof obj.host === "string" ? obj.host.trim() : "";
   return {
+    scheme: obj.scheme === "https" ? "https" : "http",
     host: hostRaw || DEFAULT_BACKEND_HOST,
     port: coercePort(obj.port),
   };
@@ -176,19 +180,37 @@ export async function getBackendEndpoint(): Promise<BackendEndpoint> {
 
 export async function getBackendOrigin(): Promise<string> {
   const ep = await ensureLoaded();
-  return `http://${ep.host}:${ep.port}`;
+  return `${ep.scheme}://${ep.host}:${ep.port}`;
 }
 
 export async function apiUrl(path: string): Promise<string> {
   const ep = await ensureLoaded();
   const suffix = path.startsWith("/") ? path : `/${path}`;
-  return `http://${ep.host}:${ep.port}/api${suffix}`;
+  return `${ep.scheme}://${ep.host}:${ep.port}/api${suffix}`;
 }
 
-export async function wsUrl(path: string): Promise<string> {
+export async function wsUrl(path: string, token?: string | null): Promise<string> {
   const ep = await ensureLoaded();
   const suffix = path.startsWith("/") ? path : `/${path}`;
-  return `ws://${ep.host}:${ep.port}/api${suffix}`;
+  const sep = suffix.includes("?") ? "&" : "?";
+  const qs = token ? `${sep}token=${encodeURIComponent(token)}` : "";
+  const wsScheme = ep.scheme === "https" ? "wss" : "ws";
+  return `${wsScheme}://${ep.host}:${ep.port}/api${suffix}${qs}`;
+}
+
+export function isPrivateHttpHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase();
+  if (normalized === "localhost" || normalized.endsWith(".local") || normalized.endsWith(".lan")) {
+    return true;
+  }
+  const parts = normalized.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part))) return false;
+  const [a, b] = parts;
+  return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+function normalizeScheme(value: unknown): "http" | "https" | null {
+  return value === "http" || value === "https" ? value : null;
 }
 
 export function isValidBackendHost(value: unknown): boolean {
@@ -210,9 +232,12 @@ export function isValidBackendHost(value: unknown): boolean {
 }
 
 export async function updateBackendEndpoint(
+  scheme: unknown,
   host: unknown,
   port: unknown,
 ): Promise<BackendEndpoint> {
+  const normalizedScheme = normalizeScheme(scheme);
+  if (!normalizedScheme) throw new Error("invalid_backend_scheme");
   if (!isValidBackendPort(port)) {
     throw new Error("Backend port must be an integer between 1 and 65535");
   }
@@ -220,8 +245,13 @@ export async function updateBackendEndpoint(
   if (hostStr !== "" && !isValidBackendHost(hostStr)) {
     throw new Error("Backend host must be a valid IP address or hostname");
   }
+  const normalizedHost = hostStr || DEFAULT_BACKEND_HOST;
+  if (normalizedScheme === "http" && !isPrivateHttpHost(normalizedHost)) {
+    throw new Error("https_required");
+  }
   const endpoint: BackendEndpoint = {
-    host: hostStr || DEFAULT_BACKEND_HOST,
+    scheme: normalizedScheme,
+    host: normalizedHost,
     port: coercePort(port),
   };
   cached = endpoint;
@@ -251,7 +281,11 @@ export async function updateBackendPort(value: unknown): Promise<BackendEndpoint
     throw new Error("Backend port must be an integer between 1 and 65535");
   }
   const port = coercePort(value);
-  const endpoint: BackendEndpoint = { host: cached.host || DEFAULT_BACKEND_HOST, port };
+  const endpoint: BackendEndpoint = {
+    scheme: cached.scheme || DEFAULT_BACKEND_SCHEME,
+    host: cached.host || DEFAULT_BACKEND_HOST,
+    port,
+  };
   cached = endpoint;
   initialized = true;
   const storage = getStorageLocal();

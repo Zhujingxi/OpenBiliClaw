@@ -21,6 +21,8 @@
 | discovery 历史候选查询 | ✅ | `get_existing_discovery_candidate_keys()` 与 `get_existing_content_cache_ids()` 支持 pipeline 在 enqueue 前过滤历史候选和已缓存内容，避免重复 raw 占住 Evo 前供给窗口。 |
 | discovery 状态恢复 | ✅ | 启动初始化会释放过期 `evaluating` 行；terminal 状态有 status guard，避免 stale update 改写 cached / rejected 结果。 |
 | discovery keyword store | ✅ | `discovery_keywords` 用 `keyword_kind` 区分常规 search 词与 explore 词；默认 `regular`，`explore` 词只供 `ExploreStrategy` 专用 claim，不会被普通 B 站 search 消费。 |
+| discovery inspiration cache | ✅ | 新增 `discovery_inspiration_probe_cache`、`discovery_inspiration_expansion_cache`、`discovery_inspiration_axis` 与 `discovery_interest_selection_ledger`，持久化搜索探针证据、可复用 inspiration 轴、旧横向扩展缓存、yield 反馈计数和二级兴趣抽中事件；`search_local_inspiration_evidence()` 从 `content_cache` 抽取 local-first grounding evidence；`upsert_inspiration_axes()` / `list_inspiration_axes()` 管理轴库复用和轮转；`backfill_inspiration_axis_yield()` 用 trailing-window 全量重算（SET，幂等）把轴的 `yield_score` 从恒 0 变成由真实 `admissions` / `window_uses` 驱动，`apply_inspiration_axis_lifecycle()` 落库 stale / retired 状态迁移并物理清理 90 天陈旧行；`list_inspiration_axes_by_source()` 按 `source`（非 interest_label）过滤 + `min_yield` 高产筛 + 镜像生命周期排序，供跨域 explore 通道复用 `source='explore'` 的高产轴；`get_keyword_interest_coverage_snapshot()` 归一化汇总 keyword / raw candidate / admitted pool 覆盖和 recent selection count，用于下轮二级兴趣抽样降权；`get_keyword_cohort_stats()` 输出 inspiration / merged cohort 对比、local-first stub 字段和 replace 门禁指标。 |
+| keyword interest label migration | ✅ | `migrate_keyword_interest_labels()` 根据画像整理产生的重命名 mapping 迁移 `discovery_keywords.source_interest` 和 `discovery_interest_selection_ledger.source_interest`，降低画像标签漂移造成的 coverage / selection cooldown 死桶。 |
 | 最近已看过滤 | ✅ | 可换、raw 和评估路径复用 `source_platform:content_id` 与旧 BVID key，避免已看内容重复入池。 |
 | 统一 admission 分数门 | ✅ | 推荐池读取、raw/headroom 统计、topic/franchise 分布、suppressed 复活、delight 候选和历史推荐读取都会应用统一最低分；初始化会清理旧低分 `content_cache` / `recommendations` 脏数据。 |
 | 惊喜通道占位排除 | ✅ | `get_pool_candidates()` / `count_pool_candidates()` 统一排除被惊喜通道认领的行（`delight_notified=1`，或 delight 分数达动态阈值且 reason/hook 非空即当前惊喜队列候选），普通推荐与惊喜推荐不再重复出同一条内容；`dynamic_delight_threshold()` 以 `0.70` 为默认底线，候选池样本不少于 20 条时抬高到正式池 Top 10% 分数边界；delight backfill 会重新领取旧 `delight_score` 与当前 `relevance_score` 不一致的行，包括 `shown` 历史行。 |
@@ -90,10 +92,26 @@ db.insert_pending_keywords(
     ["城市 声音 采样 纪录片"],
     digest,
     keyword_kind="explore",
+    metadata_by_keyword={
+        "城市 声音 采样 纪录片": {
+            "aspect_id": "interest:field-recording",
+            "inspiration_backend": "exa",
+            "inspiration_id": "urban-soundscape",
+            "expansion_id": "ambient-documentary",
+            "angle_id": "craft-analysis",
+            "grounding_source": "local_cache",
+            "generation_reason": "从搜索预览里的城市声音采样横向扩展。",
+        }
+    },
 )
 
 regular = db.claim_keywords("bilibili", 5)
 explore = db.claim_keywords("bilibili", 5, keyword_kind="explore")
+coverage = db.get_keyword_interest_coverage_snapshot()
+db.record_keyword_interest_selection(["独立游戏叙事"], query_kind="regular")
+stats = db.get_keyword_cohort_stats(window_days=14)
+evidence = db.search_local_inspiration_evidence("独立游戏 机制", limit=5, lookback_days=365)
+db.migrate_keyword_interest_labels({"AI 工具": "AI 工程化"})
 ```
 
 行为说明：
@@ -103,6 +121,93 @@ explore = db.claim_keywords("bilibili", 5, keyword_kind="explore")
 - 在途唯一约束包含 `(platform, keyword, profile_kw_digest, keyword_kind)`；同一个 query 可分别作为 regular 与 explore 生命周期存在，互不抢占。
 - `history_keywords()` 与 `recycle_oldest_used()` 也默认只读 `regular` 池；需要查看 / 回收探索池时必须显式传 `keyword_kind="explore"`。
 - `pending → claimed → used/failed/executing` 状态机保持不变；租约回收和失败回滚对两类 keyword 都生效。
+- `metadata_by_keyword` 是可选溯源字段，不参与唯一约束；同一个 in-flight query 的去重仍只看 `(platform, keyword, profile_kw_digest, keyword_kind)`。当前支持记录 `aspect_id`、`inspiration_backend`、`inspiration_id`、`inspiration_terms`、`expansion_id`、`angle_id`、`query_kind`、`source_domain`、`source_interest`、`grounding_source`、`generation_reason` 和 `normalized_keyword` 等字段，供 query 丰富度诊断和后续反馈学习使用。
+- `search_local_inspiration_evidence(query, limit=..., lookback_days=...)` 是 local-first inspiration grounding 的 Phase 1 DAO：它只读 `content_cache`，用 CJK 2-gram / token overlap 做相关性筛选，并在 B站 legacy 行缺少 `content_url` 时用 `bvid` 合成视频 URL；返回值只作为灵感 evidence，不写候选池。
+- `record_keyword_interest_selection(labels, query_kind=..., selection_scope=...)` 在 planner 抽中二级兴趣后立即写入 selection ledger；production 运行使用 `selection_scope="production"`，`keyword-inspiration-dry-run` 使用独立的 `preview` scope，因此多次 dry-run 可以验证冷却轮转，但不会污染正式运行的抽样状态。写入时会清理 30 天前的 selection ledger 行，coverage snapshot 默认只统计最近 14 天。
+- `get_keyword_interest_coverage_snapshot()` 返回以 `source_interest` / `pool_topic_label` / `topic_group` 为 key 的 coverage bucket，包括 `interest_selection_count`、`generated_keyword_count`、`selected_keyword_count`、`yield_count`、`candidate_count`、`candidate_share`、`admitted_count`、`admitted_share`、候选 dominant platform / content type 和入池 dominant content type 信息。join 前会统一走 `_normalize_match_text()` 折叠大小写和空白漂移，但输出仍保留可读 display label。`KeywordPlanner` 用它降低已抽中过、已生成过很多词、raw candidate 高频或最终入池占比高的二级兴趣下一轮被抽中的概率；只在 raw candidate 层高频、但尚未 admit 的兴趣也会提前被识别出来。
+- `migrate_keyword_interest_labels(mapping)` 会按同一归一化规则匹配现有 keyword `source_interest` 和 selection ledger `source_interest`，把画像整理后的旧标签迁到新标签；`ProfileConsolidator` 在 `--apply` 时记录被迁移行，`--revert` 会按行恢复，避免简单反向 mapping 误伤原本就叫新标签的 keyword / selection 记录。
+- `get_keyword_cohort_stats(window_days=14)` 按 `inspiration_id` 溯源把窗口内关键词分为 `inspiration` 与 `merged` 两组，输出 generated / claimed / claimed_rate、yield-attributed admissions、admissions_per_claimed_keyword、mean_delight、distinct_topics 和 topic_diversity_per_100_admissions；同时输出 `interest_selection.production/preview` 的 total、distinct、by_source_interest、by_query_kind 和 last_selected_at，用于诊断抽样轮转；机械 replace gate 在样本不足、准入率低于 `0.8x`、delight 低于 `0.95x` 或 topic 多样性没有严格更高时均不允许开启 replace。
+
+### Discovery Inspiration Cache
+
+```python
+from datetime import UTC, datetime
+
+from openbiliclaw.discovery.inspiration import AxisRow
+
+db.upsert_inspiration_axes(
+    [
+        AxisRow(
+            interest_label="独立游戏叙事",
+            axis_label="环境叙事",
+            axis_kind="method",
+            example_terms=("碎片化线索", "空间讲故事"),
+            evidence_refs=("https://example.test/a",),
+            yield_score=0.42,
+        )
+    ],
+    bump_usage=False,
+)
+
+axes = db.list_inspiration_axes(
+    ["独立游戏叙事", "动画制作"],
+    limit=4,
+    now=datetime.now(UTC),
+)
+
+db.upsert_discovery_inspiration_seed(
+    platform="bilibili",
+    profile_kw_digest=digest,
+    aspect_id="interest:game-design",
+    query_kind="explore",
+    probe_backend="exa",
+    freshness_digest="2026-W27",
+    seed_query="独立游戏 叙事设计",
+    inspiration_id="environmental-narrative",
+    source_terms=["环境叙事"],
+    evidence_titles=["叙事游戏如何设计碎片化线索"],
+    evidence_urls=["https://example.test/a"],
+)
+
+db.upsert_discovery_inspiration_expansion(
+    platform="bilibili",
+    profile_kw_digest=digest,
+    aspect_id="interest:game-design",
+    query_kind="explore",
+    inspiration_id="environmental-narrative",
+    expansion_id="fragmented-clues",
+    relation="adjacent-mechanic",
+    text="碎片化线索",
+    curator_decision="keep",
+    curator_score=0.86,
+)
+
+seeds = db.list_discovery_inspiration_seeds("bilibili", digest)
+expansions = db.list_discovery_inspiration_expansions("bilibili", digest)
+db.increment_discovery_inspiration_yield(
+    "bilibili",
+    digest,
+    aspect_id="interest:game-design",
+    query_kind="explore",
+    probe_backend="exa",
+    freshness_digest="2026-W27",
+    seed_query="独立游戏 叙事设计",
+    inspiration_id="environmental-narrative",
+)
+```
+
+行为说明：
+
+- `discovery_inspiration_axis` 记录可复用的 inspiration 轴库，字段包含 `axis_id`、`interest_label` / `interest_id`、`axis_label`、`axis_kind`、`example_terms`、`evidence_refs`、`source`、`time_sensitive`、`freshness_ttl_days`、`yield_score`、`admissions`、`use_count`、`status`、`created_at`、`last_used_at`、`last_refreshed_at`，以及 Phase 2 通过容错 `ALTER TABLE ... ADD COLUMN` 迁移补上的 `window_uses`（trailing window 内被实际消费的关键词行数，成绩公式与退休阈值的分母）和 `yield_backfilled_at`（上次 yield 回填时间戳，用于节流）；索引 `idx_discovery_inspiration_axis_interest(interest_label, status)` 支持按兴趣快速取 active 轴。注意 `window_uses` 与选取簿记 `use_count`（该轴被喂给 LLM 的次数，多样性 tie-break 用）分工不同：成绩与生命周期一律用 `window_uses`。
+- `upsert_inspiration_axes(axes, bump_usage=True)` 会按 `axis_id` 插入或合并：`example_terms` / `evidence_refs` 做 JSON 数组合并，`yield_score` / `admissions` 取历史与新值的较大值；`bump_usage=True` 时递增 `use_count` 并刷新 `last_used_at`，preview 只想持久化轴库时可传 `False`。合并进 `status='retired'` 行时只更新证据、**不复活状态**（防坏轴借尸还魂）；合并进 `stale` 行时允许被新鲜 upsert 复活（不对称是有意的：话题可以回来）。该 DAO 保持**同步、零 I/O**，embedding 近邻合并的目标解析在 pipeline 层完成后才把规范化轴交给它。
+- 每个 `interest_label` 最多保留 16 条 `status='active'` 轴；超过上限时按有效分（`window_uses>0` 的轴用真实 `yield_score`，从未被消费过的轴才用 `max(yield_score, 0.3)` 探索 prior 地板）、`last_refreshed_at`、`use_count`、`axis_kind` 和 `axis_label` 排序保留前 16 条，其余标为 `stale`。
+- `list_inspiration_axes(interest_labels, limit, now)` 只返回 active 且未过 `freshness_ttl_days` 的轴，并按每个兴趣独立排序：`freshness × 有效分` 优先（有效分同上——消费过的轴按真实 `yield_score` 排序，低分立刻下沉；未消费轴用 prior 0.3 地板），之后依次用 `last_refreshed_at` 较新、`use_count` 较低、`axis_kind` 排名和 `axis_label` 做 tie-break；`limit` 是每个兴趣的返回上限，不是全局总量。
+- `list_inspiration_axes_by_source(source, *, min_yield=0.0, limit, now)`（Phase 2.3）按 **`source` 过滤（不按 interest_label）** 返回一条全局排序列表，供跨域 explore 通道复用自己那一族 `source='explore'` 的高产轴。生命周期镜像 `list_inspiration_axes`：`status='active'`、复用**同一个** `_axis_is_time_expired(row, now)` 抑制过期时效轴、复用**同一个** `_axis_list_sort_key` 排序（不复制排序逻辑）；额外用 SQL `yield_score >= min_yield` 按**原始** `yield_score`（回填后的真实成绩，非 prior 地板值）做高产筛，`limit` 是全局上限。explore 轴的 `interest_label` 是跨域话题、不匹配任何 like 兴趣，所以只能靠 source 捞出；配合 Phase 2 按 `axis_id` 的 yield 回填即构成舒适区扩张闭环。
+- `backfill_inspiration_axis_yield(*, window_days=30, now)`（Phase 2）是 **trailing-window 全量重算（SET 语义），幂等按构造**——同一数据跑两遍全表字节相同，无水位线。它聚合 window 内 inspiration cohort 的 `discovery_keywords` 行：归属只有当 `angle_id` 在轴表真实存在时才直接用，否则回退 `derive_inspiration_axis_id(source_interest, angle_label)` 现场重导（存在性校验防 legacy `angle_id==angle_label` 恰好带 `axis:` 前缀的误判）；`window_uses = COUNT(status ∈ {claimed, executing, used, failed})`（离开过 pending 即算消费，`pending`/`expired` 不算），`admissions = SUM(yield_count)`，然后 SET `yield_score = (admissions + 0.3) / (window_uses + 1.0)`（Laplace 平滑，常数 0.3 刻意等于探索 prior，未使用轴回填后 score 恰为 0.3）与 `yield_backfilled_at = now`；无 window 行的轴 SET 为 `0 / 0 / 0.3`。
+- `apply_inspiration_axis_lifecycle(*, now)`（Phase 2，回填后同 tick 调用）执行三条确定性迁移并返回 `{"staled", "retired", "purged"}` telemetry：`time_sensitive=1` 且超 `freshness_ttl_days` 的 active 轴 → `status='stale'`（真正落库，不再只读取时过滤）；`window_uses >= 5` 且回填后 `yield_score < 0.08` 的 active 轴 → `status='retired'`（给过 5 次消费机会仍近乎零产出，如 0.3/6≈0.05）；`status IN ('stale','retired')` 且 `last_refreshed_at` 早于 90 天的行物理 DELETE。阈值全为模块级常量（`>=5` / `<0.08` / 90 天），`now` 注入可单测。
+- `discovery_inspiration_probe_cache` 以 `(platform, profile_kw_digest, aspect_id, query_kind, probe_backend, freshness_digest, seed_query, inspiration_id)` 为主键；同一个搜索探针的证据可以刷新，但 `selected_count` / `yielded_count` 不会被 upsert 清零。
+- `discovery_inspiration_expansion_cache` 以 `(platform, profile_kw_digest, aspect_id, query_kind, inspiration_id, expansion_id)` 为主键，记录 hop、relation、detail axes、curator decision / score / feedback、status 和 yield 计数。
+- 这些表由可选 `KeywordPlanner` inspiration stage 写入：轴库复用和 fresh grounding evidence 共同进入单次 `discovery.keyword_inspiration` 轴 + keyword 调用；旧 probe / expansion cache 仍保留历史证据和 yield 诊断。`increment_keyword_yield()` 在记录新的 `(keyword_id, content_id)` yield 后，会 best-effort 回填对应 inspiration / expansion 的 `yielded_count`，重复 content 不会 double-count。
 
 ### Pool Readiness
 

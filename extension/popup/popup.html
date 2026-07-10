@@ -5456,10 +5456,17 @@
       <div class="settings-section">
         <h3><span class="section-icon">&#x2699;&#xFE0F;</span> 通用</h3>
         <div class="settings-field">
+          <label for="cfgBackendScheme">后端协议</label>
+          <select id="cfgBackendScheme">
+            <option value="http">HTTP（仅本机 / 局域网）</option>
+            <option value="https">HTTPS</option>
+          </select>
+        </div>
+        <div class="settings-field">
           <label for="cfgBackendHost">后端地址</label>
           <input id="cfgBackendHost" type="text" placeholder="127.0.0.1">
           <p class="settings-hint">
-            默认 127.0.0.1（本机）。Chrome Web Store / AMO 包默认只声明本机后端权限；局域网或远程后端需要带对应 host 权限的开发者构建或后续可选授权。
+            默认 127.0.0.1（本机）。局域网或远程地址保存时会请求该地址的精确访问权限；公网地址必须使用 HTTPS。
           </p>
         </div>
         <div class="settings-field">
@@ -5468,6 +5475,13 @@
           <p class="settings-hint">
             默认 8420。修改后需用 <code>openbiliclaw start --port &lt;同一端口&gt;</code> 启动后端。
           </p>
+        </div>
+        <div class="settings-field" id="extLoginField">
+          <label for="cfgExtDeviceKey">设备访问密钥</label>
+          <p class="settings-hint" id="cfgExtLoginStatus">检测认证状态…</p>
+          <input id="cfgExtDeviceKey" type="password" placeholder="obc_ext_…" autocomplete="off">
+          <button id="cfgExtLoginBtn" type="button" class="settings-inline-btn">配对</button>
+          <p class="settings-hint">在后端运行 <code>openbiliclaw ext-key generate</code> 获取；密钥只保存在本扩展中。</p>
         </div>
         <div class="settings-field" id="authControlField">
           <label>局域网访问密码</label>
@@ -5589,6 +5603,15 @@
           <label for="cfgDiscoveryLimit">单轮发现上限</label>
           <input id="cfgDiscoveryLimit" type="number" min="1" max="60" step="1" placeholder="30">
         </div>
+        <div class="settings-field">
+          <label for="cfgKeywordGenerationMode">搜索词生成模式</label>
+          <select id="cfgKeywordGenerationMode">
+            <option value="legacy">经典</option>
+            <option value="hybrid">混合</option>
+            <option value="inspiration">灵感</option>
+          </select>
+        </div>
+        <p class="settings-hint">经典：仅用合并关键词生成器；混合：在经典基础上再叠加 search-backed 灵感轴链路（最丰富，但同时跑两套，混合最贵）；灵感：完全用灵感轴链路替代经典。</p>
         <div class="settings-field-row">
           <input id="cfgMultimodalEvaluationEnabled" type="checkbox">
           <label for="cfgMultimodalEvaluationEnabled">启用封面图评估</label>

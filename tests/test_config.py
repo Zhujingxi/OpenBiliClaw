@@ -93,6 +93,9 @@ class TestConfigDefaults:
         assert isinstance(config.autostart, AutostartConfig)
         assert config.autostart.enabled is False
         assert config.autostart.manage_ollama is True
+        assert config.api.auth.extension_access_enabled is False
+        assert config.api.auth.extension_access_keys == []
+        assert config.api.auth.extension_token_ttl_hours == 24
 
     def test_config_defaults_pool_target_count_to_300(self) -> None:
         config = Config()
@@ -1783,6 +1786,53 @@ def test_save_config_does_not_bake_in_config_local_auth_overrides(
     assert reloaded.api.auth.session_ttl_hours == 5
 
 
+def test_extension_access_config_round_trips_and_preserves_local_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    base = tmp_path / "config.toml"
+    base_record = "base:" + "a" * 64
+    local_records = ["local-a:" + "b" * 64, "local-b:" + "c" * 64]
+    base.write_text(
+        "[api.auth]\n"
+        "extension_access_enabled = false\n"
+        f'extension_access_keys = ["{base_record}"]\n'
+        "extension_token_ttl_hours = 12\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "config.local.toml").write_text(
+        "[api.auth]\n"
+        "extension_access_enabled = true\n"
+        f'extension_access_keys = ["{local_records[0]}", "{local_records[1]}"]\n'
+        "extension_token_ttl_hours = 48\n",
+        encoding="utf-8",
+    )
+
+    merged = load_config()
+    assert merged.api.auth.extension_access_enabled is True
+    assert merged.api.auth.extension_access_keys == local_records
+    assert merged.api.auth.extension_token_ttl_hours == 48
+
+    save_config(merged)
+    rendered = base.read_text(encoding="utf-8")
+    assert "extension_access_enabled = false" in rendered
+    assert f'extension_access_keys = ["{base_record}"]' in rendered
+    assert "extension_token_ttl_hours = 12" in rendered
+
+    (tmp_path / "config.local.toml").unlink()
+    reloaded = load_config()
+    assert reloaded.api.auth.extension_access_enabled is False
+    assert reloaded.api.auth.extension_access_keys == [base_record]
+    assert reloaded.api.auth.extension_token_ttl_hours == 12
+
+
+@pytest.mark.parametrize("value", [0, 169, "not-a-number"])
+def test_extension_access_token_ttl_normalizes_invalid_values_to_default(value: object) -> None:
+    config = _build_config({"api": {"auth": {"extension_token_ttl_hours": value}}})
+
+    assert config.api.auth.extension_token_ttl_hours == 24
+
+
 def test_save_config_does_not_bake_in_config_local_password(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2032,6 +2082,15 @@ class TestDiscoveryConfig:
         assert config.discovery.planner_poll_seconds == 120
         assert config.discovery.plan_ttl_hours == 12
         assert config.discovery.admission_min_score == 0.60
+        assert config.discovery.inspiration_search_enabled is False
+        assert config.discovery.inspiration_replace_merged_keywords is False
+        assert config.discovery.inspiration_search_backends == (
+            "local_cache",
+            "platform_sources",
+            "exa",
+            "you",
+        )
+        assert config.discovery.inspiration_breadth == "high"
         assert config.discovery.multimodal_evaluation_enabled is False
         assert config.discovery.multimodal_batch_size == 8
         assert config.discovery.multimodal_image_max_px == 384
@@ -2045,6 +2104,15 @@ class TestDiscoveryConfig:
         assert config.discovery.kw_cache_high == 30
         assert config.discovery.plan_ttl_hours == 12
         assert config.discovery.admission_min_score == 0.60
+        assert config.discovery.inspiration_search_enabled is False
+        assert config.discovery.inspiration_replace_merged_keywords is False
+        assert config.discovery.inspiration_search_backends == (
+            "local_cache",
+            "platform_sources",
+            "exa",
+            "you",
+        )
+        assert config.discovery.inspiration_breadth == "high"
         assert config.discovery.multimodal_evaluation_enabled is False
         assert config.discovery.multimodal_batch_size == 8
 
@@ -2079,6 +2147,10 @@ claim_lease_minutes = 15
 planner_poll_seconds = 90
 plan_ttl_hours = 6
 admission_min_score = 0.72
+inspiration_search_enabled = true
+inspiration_replace_merged_keywords = true
+inspiration_search_backends = ["platform_sources", "exa", "you"]
+inspiration_breadth = "high"
 multimodal_evaluation_enabled = true
 multimodal_batch_size = 4
 multimodal_image_max_px = 512
@@ -2101,6 +2173,10 @@ multimodal_image_timeout_seconds = 10
         assert config.discovery.planner_poll_seconds == 90
         assert config.discovery.plan_ttl_hours == 6
         assert config.discovery.admission_min_score == 0.72
+        assert config.discovery.inspiration_search_enabled is True
+        assert config.discovery.inspiration_replace_merged_keywords is True
+        assert config.discovery.inspiration_search_backends == ("platform_sources", "exa", "you")
+        assert config.discovery.inspiration_breadth == "high"
         assert config.discovery.multimodal_evaluation_enabled is True
         assert config.discovery.multimodal_batch_size == 4
         assert config.discovery.multimodal_image_max_px == 512
@@ -2243,6 +2319,10 @@ admission_min_score = {literal}
         config.discovery.planner_poll_seconds = 100
         config.discovery.plan_ttl_hours = 8
         config.discovery.admission_min_score = 0.72
+        config.discovery.inspiration_search_enabled = True
+        config.discovery.inspiration_replace_merged_keywords = True
+        config.discovery.inspiration_search_backends = ("you",)
+        config.discovery.inspiration_breadth = "low"
         config.discovery.multimodal_evaluation_enabled = True
         config.discovery.multimodal_batch_size = 4
         config.discovery.multimodal_image_max_px = 512
@@ -2263,6 +2343,10 @@ admission_min_score = {literal}
         assert loaded.discovery.planner_poll_seconds == 100
         assert loaded.discovery.plan_ttl_hours == 8
         assert loaded.discovery.admission_min_score == 0.72
+        assert loaded.discovery.inspiration_search_enabled is True
+        assert loaded.discovery.inspiration_replace_merged_keywords is True
+        assert loaded.discovery.inspiration_search_backends == ("you",)
+        assert loaded.discovery.inspiration_breadth == "low"
         assert loaded.discovery.multimodal_evaluation_enabled is True
         assert loaded.discovery.multimodal_batch_size == 4
         assert loaded.discovery.multimodal_image_max_px == 512
@@ -2279,6 +2363,13 @@ admission_min_score = {literal}
         assert "kw_cache_high = 30" in rendered
         assert "plan_ttl_hours = 12" in rendered
         assert "admission_min_score = 0.6" in rendered
+        assert "inspiration_search_enabled = false" in rendered
+        assert "inspiration_replace_merged_keywords = false" in rendered
+        assert (
+            'inspiration_search_backends = ["local_cache", "platform_sources", "exa", "you"]'
+            in rendered
+        )
+        assert 'inspiration_breadth = "high"' in rendered
         assert "multimodal_evaluation_enabled = false" in rendered
         assert "multimodal_batch_size = 8" in rendered
         assert "multimodal_image_max_px = 384" in rendered
@@ -2428,3 +2519,152 @@ def test_collect_issues_allows_empty_and_configured_llm_fallback() -> None:
     config.llm.deepseek.api_key = "sk-fallback"
 
     assert _llm_fallback_issues(config) == []
+# ── Phase 2 Task 4: inspiration config collapse (13 → 4) ────────────────
+
+
+class TestInspirationBreadth:
+    """Breadth tier validation, derivation tables, and removed-key notices."""
+
+    def test_medium_breadth_derivation_matches_precollapse_defaults(self) -> None:
+        """Table-driven zero-drift guard: medium == the pre-collapse
+        `_DEFAULT_INSPIRATION_*` values, item by item (Spec Part C)."""
+        params = config_module.derive_inspiration_breadth_params("medium")
+
+        expected = {
+            "aspect_window_size": 32,
+            "interest_sample_size": 6,
+            "max_probe_searches_per_stage": 12,
+            "platforms_per_probe": 2,
+            "riskcontrolled_probe_budget": 4,
+            "search_pages_per_probe": 1,
+            "search_results_per_query": 5,
+            "max_seeds_per_aspect": 3,
+            "max_keywords_per_platform": 12,
+        }
+        for field, value in expected.items():
+            assert getattr(params, field) == value, field
+        # And item-identical to the module constants the old fields defaulted to.
+        constant_by_field = {
+            "aspect_window_size": config_module._DEFAULT_INSPIRATION_ASPECT_WINDOW_SIZE,
+            "interest_sample_size": config_module._DEFAULT_INSPIRATION_INTEREST_SAMPLE_SIZE,
+            "max_probe_searches_per_stage": (
+                config_module._DEFAULT_INSPIRATION_MAX_PROBE_SEARCHES_PER_STAGE
+            ),
+            "platforms_per_probe": config_module._DEFAULT_INSPIRATION_PLATFORMS_PER_PROBE,
+            "riskcontrolled_probe_budget": (
+                config_module._DEFAULT_INSPIRATION_RISKCONTROLLED_PROBE_BUDGET
+            ),
+            "search_pages_per_probe": config_module._DEFAULT_INSPIRATION_SEARCH_PAGES_PER_PROBE,
+            "search_results_per_query": (
+                config_module._DEFAULT_INSPIRATION_SEARCH_RESULTS_PER_QUERY
+            ),
+            "max_seeds_per_aspect": config_module._DEFAULT_INSPIRATION_MAX_SEEDS_PER_ASPECT,
+            "max_keywords_per_platform": (
+                config_module._DEFAULT_INSPIRATION_MAX_KEYWORDS_PER_PLATFORM
+            ),
+        }
+        for field, constant in constant_by_field.items():
+            assert getattr(params, field) == constant, field
+
+    @pytest.mark.parametrize(
+        ("tier", "expected"),
+        [
+            (
+                "low",
+                {
+                    "aspect_window_size": 16,
+                    "interest_sample_size": 3,
+                    "max_probe_searches_per_stage": 6,
+                    "platforms_per_probe": 1,
+                    "riskcontrolled_probe_budget": 2,
+                    "search_pages_per_probe": 1,
+                    "search_results_per_query": 3,
+                    "max_seeds_per_aspect": 2,
+                    "max_keywords_per_platform": 8,
+                },
+            ),
+            (
+                "high",
+                {
+                    "aspect_window_size": 48,
+                    "interest_sample_size": 8,
+                    "max_probe_searches_per_stage": 20,
+                    "platforms_per_probe": 3,
+                    "riskcontrolled_probe_budget": 8,
+                    "search_pages_per_probe": 2,
+                    "search_results_per_query": 8,
+                    "max_seeds_per_aspect": 5,
+                    "max_keywords_per_platform": 16,
+                },
+            ),
+        ],
+    )
+    def test_low_and_high_breadth_derivation_tables(
+        self, tier: str, expected: dict[str, int]
+    ) -> None:
+        params = config_module.derive_inspiration_breadth_params(tier)
+
+        for field, value in expected.items():
+            assert getattr(params, field) == value, field
+
+    def test_breadth_tier_is_case_insensitive_and_trimmed(self) -> None:
+        config = _build_config({"discovery": {"inspiration_breadth": "  HIGH "}})
+
+        assert config.discovery.inspiration_breadth == "high"
+
+    def test_invalid_breadth_tier_raises_config_error(self) -> None:
+        with pytest.raises(ConfigError, match="inspiration_breadth"):
+            _build_config({"discovery": {"inspiration_breadth": "ultra"}})
+        with pytest.raises(ConfigError, match="inspiration_breadth"):
+            config_module.derive_inspiration_breadth_params("")
+
+    def test_removed_inspiration_keys_surface_diagnostics_and_are_ignored(
+        self, tmp_path: Path
+    ) -> None:
+        toml_path = tmp_path / "c.toml"
+        toml_path.write_text(
+            """
+[discovery]
+inspiration_max_keywords_per_platform = 99
+inspiration_interest_sample_size = 42
+inspiration_breadth = "low"
+""".strip(),
+            encoding="utf-8",
+        )
+
+        config, diagnostics = load_config_with_diagnostics(toml_path, ensure_default_file=False)
+
+        removal_fields = {
+            issue.field
+            for issue in diagnostics.issues
+            if "inspiration_breadth" in issue.message and "已移除" in issue.message
+        }
+        assert "discovery.inspiration_max_keywords_per_platform" in removal_fields
+        assert "discovery.inspiration_interest_sample_size" in removal_fields
+        # Values ignored (no fail-fast); the kept key still applies.
+        assert config.discovery.inspiration_breadth == "low"
+        assert not hasattr(config.discovery, "inspiration_max_keywords_per_platform")
+
+    def test_clean_config_gets_no_removed_key_notice(self, tmp_path: Path) -> None:
+        toml_path = tmp_path / "c.toml"
+        toml_path.write_text('[discovery]\ninspiration_breadth = "medium"', encoding="utf-8")
+
+        _config, diagnostics = load_config_with_diagnostics(toml_path, ensure_default_file=False)
+
+        assert not any("已移除" in issue.message for issue in diagnostics.issues)
+
+    def test_rendered_toml_contains_only_four_inspiration_keys(self) -> None:
+        rendered = config_module._render_config_toml(Config())
+
+        inspiration_lines = [
+            line.strip()
+            for line in rendered.splitlines()
+            if line.strip().startswith("inspiration_")
+        ]
+        assert sorted(line.split(" = ")[0] for line in inspiration_lines) == [
+            "inspiration_breadth",
+            "inspiration_replace_merged_keywords",
+            "inspiration_search_backends",
+            "inspiration_search_enabled",
+        ]
+        assert 'inspiration_breadth = "high"' in inspiration_lines

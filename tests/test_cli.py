@@ -131,6 +131,220 @@ def _ignore_runtime_config_error(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _registered_option_names(command_name: str) -> set[str]:
+    click_app = typer.main.get_command(app)
+    command = click_app.commands[command_name]
+    return {option for param in command.params for option in getattr(param, "opts", [])}
+
+
+def test_keyword_inspiration_dry_run_command_is_registered(runner: CliRunner) -> None:
+    result = runner.invoke(app, ["keyword-inspiration-dry-run", "--help"])
+
+    assert result.exit_code == 0
+    assert "keyword-inspiration-dry-run" in result.output
+    options = _registered_option_names("keyword-inspiration-dry-run")
+    assert "--platform" in options
+    assert "--interest-limit" in options
+
+
+def test_keyword_inspiration_preview_command_exposes_persist_axes(
+    runner: CliRunner,
+) -> None:
+    result = runner.invoke(app, ["keyword-inspiration-preview", "--help"])
+
+    assert result.exit_code == 0
+    assert "keyword-inspiration-preview" in result.output
+    assert "--persist-axes" in _registered_option_names("keyword-inspiration-preview")
+
+
+def test_keyword_inspiration_preview_threads_persist_axes(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    cfg = config_module.Config()
+    captured: dict[str, object] = {}
+
+    class FakeLLMService:
+        def __init__(self, **_: object) -> None:
+            pass
+
+    class FakeSoulEngine:
+        async def get_profile(self) -> SoulProfile:
+            return SoulProfile(
+                preferences=PreferenceLayer(
+                    interests=[InterestTag(name="游戏评价", category="游戏", weight=0.9)]
+                )
+            )
+
+    class FakePlanner:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def preview_inspiration_keywords(
+            self,
+            platforms: list[str],
+            *,
+            profile: SoulProfile | None = None,
+            query_kind: str = "regular",
+            persist_axes: bool = False,
+        ) -> dict[str, object]:
+            captured["platforms"] = platforms
+            captured["query_kind"] = query_kind
+            captured["persist_axes"] = persist_axes
+            captured["profile"] = profile
+            return {"ok": True}
+
+    _ignore_runtime_config_error(monkeypatch)
+    monkeypatch.setattr(config_module, "load_config", lambda: cfg, raising=False)
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None, raising=False)
+    monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: object(), raising=False)
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: object(), raising=False)
+    monkeypatch.setattr(cli_module, "_build_registry", lambda: object(), raising=False)
+    monkeypatch.setattr(cli_module, "_build_usage_recorder", lambda: None, raising=False)
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine(), raising=False)
+    monkeypatch.setattr(
+        "openbiliclaw.llm.service.LLMService",
+        FakeLLMService,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.llm.service.module_overrides_from_config",
+        lambda loaded_cfg: {},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.keyword_planner.KeywordPlanner",
+        FakePlanner,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.discovery.inspiration_provider.build_inspiration_search_provider",
+        lambda *args, **kwargs: object(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.discovery.inspiration_provider.build_platform_source_backends",
+        lambda *args, **kwargs: {},
+        raising=False,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "keyword-inspiration-preview",
+            "--platform",
+            "bilibili",
+            "--kind",
+            "explore",
+            "--persist-axes",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {"ok": True}
+    assert captured["platforms"] == ["bilibili"]
+    assert captured["query_kind"] == "explore"
+    assert captured["persist_axes"] is True
+
+
+def test_keyword_inspiration_report_command_is_registered(runner: CliRunner) -> None:
+    result = runner.invoke(app, ["keyword-inspiration-report", "--help"])
+
+    assert result.exit_code == 0
+    assert "keyword-inspiration-report" in result.output
+    assert "--window-days" in _registered_option_names("keyword-inspiration-report")
+
+
+def test_keyword_inspiration_preview_one_shot_overrides_apply_on_derived_params(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    """Post config-collapse, --limit / --interest-limit apply as one-shot
+    overrides on the derived breadth params injected at planner construction —
+    the user-visible flag behavior is unchanged (Spec AC6b)."""
+    cfg = config_module.Config()
+    captured: dict[str, object] = {}
+
+    class FakeLLMService:
+        def __init__(self, **_: object) -> None:
+            pass
+
+    class FakeSoulEngine:
+        async def get_profile(self) -> SoulProfile:
+            return SoulProfile(
+                preferences=PreferenceLayer(
+                    interests=[InterestTag(name="游戏评价", category="游戏", weight=0.9)]
+                )
+            )
+
+    class FakePlanner:
+        def __init__(self, **kwargs: object) -> None:
+            captured["inspiration_params"] = kwargs.get("inspiration_params")
+
+        async def preview_inspiration_keywords(
+            self,
+            platforms: list[str],
+            *,
+            profile: SoulProfile | None = None,
+            query_kind: str = "regular",
+            persist_axes: bool = False,
+        ) -> dict[str, object]:
+            return {"ok": True}
+
+    _ignore_runtime_config_error(monkeypatch)
+    monkeypatch.setattr(config_module, "load_config", lambda: cfg, raising=False)
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None, raising=False)
+    monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: object(), raising=False)
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: object(), raising=False)
+    monkeypatch.setattr(cli_module, "_build_registry", lambda: object(), raising=False)
+    monkeypatch.setattr(cli_module, "_build_usage_recorder", lambda: None, raising=False)
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine(), raising=False)
+    monkeypatch.setattr("openbiliclaw.llm.service.LLMService", FakeLLMService, raising=False)
+    monkeypatch.setattr(
+        "openbiliclaw.llm.service.module_overrides_from_config",
+        lambda loaded_cfg: {},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.keyword_planner.KeywordPlanner",
+        FakePlanner,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.discovery.inspiration_provider.build_inspiration_search_provider",
+        lambda *args, **kwargs: object(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.discovery.inspiration_provider.build_platform_source_backends",
+        lambda *args, **kwargs: {},
+        raising=False,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "keyword-inspiration-preview",
+            "--platform",
+            "bilibili",
+            "--limit",
+            "3",
+            "--interest-limit",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0
+    params = captured["inspiration_params"]
+    assert params is not None
+    assert params.max_keywords_per_platform == 3  # type: ignore[union-attr]
+    assert params.interest_sample_size == 2  # type: ignore[union-attr]
+    # Non-overridden knobs stay at the derived default-tier (high) values.
+    base = config_module.derive_inspiration_breadth_params("high")
+    assert params.max_probe_searches_per_stage == base.max_probe_searches_per_stage  # type: ignore[union-attr]
+    assert params.search_results_per_query == base.search_results_per_query  # type: ignore[union-attr]
+
+
 def test_main_bootstraps_container_runtime_when_project_root_is_configured(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
 ) -> None:
@@ -6121,6 +6335,135 @@ def test_fetch_xhs_handles_timeout_status(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 # ── Password gate CLI (set-password / init prompt) ──────────────────────────
+
+
+def _extension_key_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> tuple[Path, "config_module.Config"]:
+    root = tmp_path / "runtime"
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(root))
+    cfg = config_module.Config()
+    config_module.save_config(cfg, root / "config.toml")
+    return root, cfg
+
+
+def test_ext_key_generate_persists_digest_once_and_keeps_switch_off(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    from openbiliclaw.auth_core import parse_extension_access_key
+
+    _root, _cfg = _extension_key_runtime(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["ext-key", "generate"])
+    assert result.exit_code == 0, result.stdout
+
+    loaded = config_module.load_config()
+    assert loaded.api.auth.extension_access_enabled is False
+    assert len(loaded.api.auth.extension_access_keys) == 1
+    record = loaded.api.auth.extension_access_keys[0]
+    key_id, digest = record.split(":")
+    assert len(key_id) == 12
+    assert len(digest) == 64
+    assert record not in result.stdout
+    full_keys = [part for part in result.stdout.split() if part.startswith("obc_ext_")]
+    assert len(full_keys) == 1
+    assert parse_extension_access_key(full_keys[0]) is not None
+
+
+def test_ext_key_list_never_prints_digest_or_secret(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    from openbiliclaw.auth_core import generate_extension_access_key
+
+    _root, cfg = _extension_key_runtime(monkeypatch, tmp_path)
+    key_id, full_key, record = generate_extension_access_key()
+    cfg.api.auth.extension_access_keys = [record]
+    config_module.save_config(cfg)
+
+    result = runner.invoke(app, ["ext-key", "list"])
+    assert result.exit_code == 0
+    assert key_id in result.stdout
+    assert record.split(":", 1)[1] not in result.stdout
+    assert full_key not in result.stdout
+
+
+def test_ext_key_enable_disable_requires_key_and_preserves_records(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    from openbiliclaw.auth_core import generate_extension_access_key
+
+    _root, cfg = _extension_key_runtime(monkeypatch, tmp_path)
+    no_key = runner.invoke(app, ["ext-key", "enable"])
+    assert no_key.exit_code == 1
+
+    _key_id, _full_key, record = generate_extension_access_key()
+    cfg.api.auth.extension_access_keys = [record]
+    config_module.save_config(cfg)
+    assert runner.invoke(app, ["ext-key", "enable"]).exit_code == 0
+    assert config_module.load_config().api.auth.extension_access_enabled is True
+
+    assert runner.invoke(app, ["ext-key", "disable"]).exit_code == 0
+    loaded = config_module.load_config()
+    assert loaded.api.auth.extension_access_enabled is False
+    assert loaded.api.auth.extension_access_keys == [record]
+
+
+def test_ext_key_revoke_removes_one_key_and_bumps_epoch(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    from openbiliclaw.auth_core import generate_extension_access_key
+    from openbiliclaw.storage.database import Database
+
+    _root, cfg = _extension_key_runtime(monkeypatch, tmp_path)
+    first_id, _first_key, first_record = generate_extension_access_key()
+    _second_id, _second_key, second_record = generate_extension_access_key()
+    cfg.api.auth.extension_access_keys = [first_record, second_record]
+    config_module.save_config(cfg)
+
+    result = runner.invoke(app, ["ext-key", "revoke", first_id])
+    assert result.exit_code == 0, result.stdout
+    loaded = config_module.load_config()
+    assert loaded.api.auth.extension_access_keys == [second_record]
+    db = Database(loaded.data_path / "openbiliclaw.db")
+    db.initialize()
+    try:
+        assert db.get_auth_epoch() == 1
+    finally:
+        db.close()
+
+
+def test_ext_key_revoke_rolls_back_config_when_epoch_bump_fails(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    from openbiliclaw.auth_core import generate_extension_access_key
+
+    root, cfg = _extension_key_runtime(monkeypatch, tmp_path)
+    key_id, _full_key, record = generate_extension_access_key()
+    cfg.api.auth.extension_access_keys = [record]
+    config_module.save_config(cfg)
+    before = (root / "config.toml").read_bytes()
+    monkeypatch.setattr(cli_module, "_bump_auth_epoch", lambda _cfg: False)
+
+    result = runner.invoke(app, ["ext-key", "revoke", key_id])
+    assert result.exit_code == 1
+    assert (root / "config.toml").read_bytes() == before
+    assert config_module.load_config().api.auth.extension_access_keys == [record]
+
+
+@pytest.mark.parametrize("mode", ["env", "local"])
+def test_ext_key_writes_refuse_shadowed_auth_config(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path, mode: str
+) -> None:
+    root, _cfg = _extension_key_runtime(monkeypatch, tmp_path)
+    if mode == "env":
+        monkeypatch.setenv("OPENBILICLAW_API_AUTH_ENABLED", "true")
+    else:
+        (root / "config.local.toml").write_text(
+            "[api.auth]\nextension_access_enabled = false\n", encoding="utf-8"
+        )
+
+    result = runner.invoke(app, ["ext-key", "generate"])
+    assert result.exit_code == 1
+    assert config_module.load_config().api.auth.extension_access_keys == []
 
 
 def test_set_password_command_sets_enables_and_disables(

@@ -1,4 +1,5 @@
 import { apiUrl } from "../shared/backend-endpoint.ts";
+import { authenticatedFetch } from "../shared/auth.ts";
 import {
   actionsForE2EPlatform,
   E2E_PLATFORM_URLS,
@@ -238,7 +239,7 @@ async function postE2EResult(
   event: ExtensionE2ERuntimeEvent,
   platforms: E2EPlatformExecutionResult[],
 ): Promise<void> {
-  const response = await fetch(await apiUrl("/extension/e2e/result"), {
+  const response = await authenticatedFetch(await apiUrl("/extension/e2e/result"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

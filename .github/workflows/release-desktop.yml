@@ -157,8 +157,11 @@ jobs:
       - name: PyInstaller onedir build (ollama staged separately below)
         shell: pwsh
         run: |
-          $flags = if ("${{ matrix.variant }}" -eq "with-embedding") { "--bundle-embedding" } else { "" }
-          python packaging/build.py --clean --no-bundle-ollama $flags --archive-version "${{ steps.ver.outputs.version }}"
+          # Build the arg list as an array so the lean variant never passes an
+          # empty-string argument (argparse rejects "" as an unrecognized arg).
+          $buildArgs = @("--clean", "--no-bundle-ollama", "--archive-version", "${{ steps.ver.outputs.version }}")
+          if ("${{ matrix.variant }}" -eq "with-embedding") { $buildArgs += "--bundle-embedding" }
+          python packaging/build.py @buildArgs
 
       - name: Stage bundled Ollama (CPU runner only — bge-m3 embedding is CPU)
         shell: pwsh

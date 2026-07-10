@@ -879,6 +879,55 @@ def _builder_test_inputs() -> list[tuple[str, dict, dict]]:
                 ],
             ),
         ),
+        (
+            "build_inspiration_axis_keyword_prompt",
+            dict(
+                profile_digest={"interests": ["游戏评价"]},
+                platform_guides={"bilibili": {"query_style": ["拆解", "测评"]}},
+                selected_interests=[{"label": "游戏评价", "parent": "游戏", "weight": 0.9}],
+                existing_axes=[
+                    {
+                        "axis_id": "axis:mechanics",
+                        "interest": "游戏评价",
+                        "axis_label": "机制拆解",
+                        "axis_kind": "creator_lens",
+                    }
+                ],
+                fresh_evidence=[
+                    {
+                        "interest": "游戏评价",
+                        "title": "忍义手设计理念",
+                        "url": "https://example.test/a",
+                    }
+                ],
+                allocation_targets={"游戏评价": {"platforms": ["bilibili"], "min_axes": 2}},
+                # E2: with an explore_request block (per-call data in the user
+                # message). args2 omits it — the system message must stay
+                # byte-identical across both, proving explore adds no system data.
+                explore_request={"avoid_covered": ["游戏", "动漫"]},
+            ),
+            dict(
+                profile_digest={"interests": ["咖啡器具"]},
+                platform_guides={"youtube": {"query_style": ["review", "explained"]}},
+                selected_interests=[{"label": "咖啡器具", "parent": "生活", "weight": 0.7}],
+                existing_axes=[
+                    {
+                        "axis_id": "axis:gear",
+                        "interest": "咖啡器具",
+                        "axis_label": "器具对比",
+                        "axis_kind": "artifact",
+                    }
+                ],
+                fresh_evidence=[
+                    {
+                        "interest": "咖啡器具",
+                        "title": "手磨对比",
+                        "url": "https://example.test/b",
+                    }
+                ],
+                allocation_targets={"咖啡器具": {"platforms": ["youtube"], "min_axes": 1}},
+            ),
+        ),
         # NOTE: build_socratic_dialogue_prompt is intentionally NOT in
         # this list — its system prompt embeds per-user core memory /
         # tone / friend label, which is fine for OpenBiliClaw's single-
@@ -1638,3 +1687,49 @@ def test_parse_merged_keywords_still_collapses_present_and_absent() -> None:
         content, ["bilibili", "xiaohongshu", "douyin"], per_platform_cap=10
     )
     assert parsed == {"bilibili": ["a"], "xiaohongshu": [], "douyin": []}
+
+
+def test_inspiration_axis_system_prompt_requires_specific_core_concept() -> None:
+    """F1 (Phase 2.1): the inspiration axis-keyword system prompt must carry a
+    static rule forcing ``core_concept`` to anchor on a specific
+    entity/event/work/person/mechanism from ``fresh_evidence`` — never a mere
+    restatement of the interest or axis_label — with a topic-level fallback only
+    when no anchor exists, plus at least one explicit bad/good counter-example.
+    """
+    prompt = prompt_module._INSPIRATION_AXIS_KEYWORD_SYSTEM_PROMPT
+
+    lowered = prompt.lower()
+    # Anchors on a specific evidence entity, not the topic name.
+    assert "core_concept" in prompt
+    assert "fresh_evidence" in prompt
+    assert "anchor" in lowered
+    # Must forbid restating the interest / axis_label.
+    assert "axis_label" in prompt
+    assert "interest" in prompt
+    # Explicit counter-examples: bad restatement vs good specific anchor.
+    assert "新游推荐" in prompt  # bad: echoes the topic name
+    assert "士官长 登陆PS5" in prompt  # good: specific evidence anchor
+    # Topic-level fallback escape hatch must exist (no hallucinated proper nouns).
+    assert "fall back" in lowered or "fallback" in lowered
+
+
+def test_inspiration_axis_system_prompt_requires_crossdomain_specific_on_explore() -> None:
+    """E2 (Phase 2.3): the inspiration axis-keyword system prompt must carry a
+    STATIC rule for cross-domain explore rounds — when the user message includes
+    an ``explore_request``, core_concept must anchor on an UNCOVERED-but-relevant
+    cross-domain specific entity and avoid the topics in
+    ``explore_request.avoid_covered`` — with a bad/good counter-example. The rule
+    is always present (static); only the explore_request DATA is per-call.
+    """
+    prompt = prompt_module._INSPIRATION_AXIS_KEYWORD_SYSTEM_PROMPT
+    lowered = prompt.lower()
+
+    # References the per-call explore_request block + its avoid_covered field.
+    assert "explore_request" in prompt
+    assert "avoid_covered" in prompt
+    # Cross-domain, uncovered-but-relevant intent.
+    assert "cross-domain" in lowered
+    assert "uncovered" in lowered
+    # Bad (covered/same-domain) vs good (uncovered cross-domain) counter-example.
+    assert "游戏新作" in prompt  # bad: stays in the covered domain
+    assert "詹姆斯韦伯 深空图像" in prompt  # good: uncovered cross-domain anchor

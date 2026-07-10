@@ -56,7 +56,7 @@
 | v0.3.x Eval-batch 负样本锚定与跨平台公平 | ✅ | `build_batch_content_evaluation_prompt` 新增可选 `negative_examples` kwarg；非空时在 user prompt `<source_context>` 与 `<content_batch>` 之间插入 `<negative_examples>` 块（`sort_keys=True` 决定性 JSON）。`None` / `[]` 退回原 user 字节形态以保留 cold-start 缓存前缀。`_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT` 加入永久规则：按话术 / 商业意图 / 标题结构层面 pattern-match 候选与示例，不要看关键词重叠；混源 batch 中不得仅因 `source_platform` 不同而抬高或压低 preference score，只能把平台作为内容语境。规则改动一次后 system message 保持 call-invariant |
 | v0.3.x dislike-aware prompts | ✅ | `build_preference_analysis_prompt` 明确把 negative / dislike / thumbs_down 事件限制为 `disliked_topics` 与风格避让证据，禁止提取为正向兴趣；`build_awareness_prompt` 可从近期 dislike 生成“最近开始避开 X”的保守观察；单条 / 批量推荐表达 prompt 会消费 `profile_summary.disliked_topics`，命中避雷项时不得热情背书 |
 | v0.3.x 避雷探针多样性 prompt | ✅ | `build_avoidance_generation_prompt` 会携带 `existing_avoidance_details`，让 LLM 看到已有 active 的 `source_mode`、`source_signal`、体验轴和 specifics；system prompt 要求同一 `source_mode` + 同一粗主题 / 证据源只生成一个候选，已有 AI positive_boundary 时不再输出 AI 教程 / 测评 / 趋势换皮项 |
-| v0.3.x 第三方 API 网关适配（issue #72） | ✅ | 两条路径：(1) `[llm.claude].base_url` 全链路穿透到 `AsyncAnthropic`，Claude 可走任何 Anthropic 协议（`/v1/messages`）中转网关，留空仍用官方地址；(2) `[llm.openai]` / `[llm.openai_compatible]` 新增 `api_flavor` —— `""`/`"chat_completions"` 走 `/v1/chat/completions`（默认），`"responses"` 走 `/v1/responses`（system→`instructions`、`max_tokens`→`max_output_tokens`、json_mode→`text.format`、`input_tokens_details.cached_tokens` 归一为 `cached_input_tokens`；gpt-5 家族拒收 `temperature` 时自动降参重试）。非法值被 `_collect_config_issues` blocking 拦下 |
+| v0.3.x 第三方 API 网关适配（issue #72） | ✅ | 两条路径：(1) `[llm.claude].base_url` 全链路穿透到 `AsyncAnthropic`，Claude 可走任何 Anthropic 协议（`/v1/messages`）中转网关，留空仍用官方地址；(2) `[llm.openai]` / `[llm.openai_compatible]` 新增 `api_flavor` —— `""`/`"chat_completions"` 走 `/v1/chat/completions`（默认），`"responses"` 走 `/v1/responses`（system→`instructions`、`max_tokens`→`max_output_tokens`、json_mode→`text.format`、`input_tokens_details.cached_tokens` 归一为 `cached_input_tokens`；每个 Responses 请求都会显式发送顶层 `store=false`，兼容官方 OpenAI 及由 ChatGPT/Codex Responses 端点驱动的第三方网关；gpt-5 家族拒收 `temperature` 时自动降参重试）。非法值被 `_collect_config_issues` blocking 拦下 |
 
 ## 公开 API
 
@@ -259,6 +259,12 @@ keywords, present, explore_domains = parse_merged_keywords_with_presence_and_exp
 ```
 
 `explore_domains_block` 是可选项；未传时 prompt 与解析仍按普通多平台关键词生成运行。传入时，模型可在平台 key 之外额外返回 `explore_domains`，每个 domain 包含 `domain / novelty_level / queries`。这些 queries 会被 runtime 写入 B 站 `discovery_keywords` query cache，因此 prompt 规则要求它们保持探索性、跨域和 B 站可直接搜索，而不是普通兴趣关键词的换皮。
+
+### Inspiration axis-keyword prompt
+
+`build_inspiration_axis_keyword_prompt()` 是 regular / shared inspiration stage 唯一的 LLM 调用（caller `discovery.keyword_inspiration`），一次返回 `{axes[], keywords[]}`。system prompt 是模块级静态常量 `_INSPIRATION_AXIS_KEYWORD_SYSTEM_PROMPT`，所有 per-call 数据（platform guides、已选兴趣、既有轴、fresh evidence、allocation targets）都在 user message 里按稳定→易变排序、`ensure_ascii=False, indent=2, sort_keys=True` 序列化。
+
+Phase 2.1（多平台丰富度修复 F1）在该静态 Rules 里新增一条**产出具体性规则**：`core_concept` 必须锚定 `fresh_evidence` 里的具体实体 / 事件 / 作品 / 人物 / 机制（专名、作品名、具名争议、具体机制），**不得直接复述 interest 或 axis_label**；prompt 内置正反例（反：`新游推荐` 只是话题名 → 不合格；正：`士官长 登陆PS5` / `腾讯网易 新游发布`），并保留出口——某槽位 evidence 确实没有具体锚点时**允许**退回话题级、不硬造专名。该规则是纯静态文本（无 f-string、无 per-call 变量），因此仍满足 byte-identical prompt-cache 契约，`test_prompt_builder_system_messages_are_call_invariant` 覆盖 `build_inspiration_axis_keyword_prompt` 并逐字校验跨两次不同输入的 system message 相同。装配端还有确定性 `is_specific` 排序把"产出具体候选"真正落到"选中具体候选"（见 [discovery.md](./discovery.md) 的 `materialize_platform_keywords`）。
 
 ### Prompt layer render cache
 

@@ -152,6 +152,112 @@ class TestDatabase:
 
             db.close()
 
+    def test_search_local_inspiration_evidence_returns_content_cache_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            db.cache_content(
+                "BVlocal1",
+                content_id="BVlocal1",
+                source_platform="bilibili",
+                title="独立游戏 机制拆解：地图叙事如何成立",
+                content_url="https://www.bilibili.com/video/BVlocal1",
+                description="围绕独立游戏、关卡设计、叙事节奏的分析。",
+                topic_group="独立游戏",
+                pool_topic_label="独立游戏机制",
+                pool_status="fresh",
+            )
+
+            rows = db.search_local_inspiration_evidence(
+                "独立游戏 机制",
+                limit=5,
+                lookback_days=365,
+            )
+
+            assert rows
+            assert rows[0]["title"] == "独立游戏 机制拆解：地图叙事如何成立"
+            assert rows[0]["url"] == "https://www.bilibili.com/video/BVlocal1"
+            assert rows[0]["source_table"] == "content_cache"
+            assert rows[0]["source_platform"] == "bilibili"
+            db.close()
+
+    def test_search_local_inspiration_evidence_matches_spaceless_cjk_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            db.cache_content(
+                "BVlocal1",
+                content_id="BVlocal1",
+                source_platform="bilibili",
+                title="独立游戏 机制拆解：地图叙事如何成立",
+                content_url="https://www.bilibili.com/video/BVlocal1",
+                description="围绕独立游戏、关卡设计、叙事节奏的分析。",
+                topic_group="独立游戏",
+                pool_topic_label="独立游戏机制",
+                pool_status="fresh",
+            )
+
+            rows = db.search_local_inspiration_evidence(
+                "独立游戏机制",
+                limit=5,
+                lookback_days=365,
+            )
+
+            assert rows
+            assert rows[0]["title"] == "独立游戏 机制拆解：地图叙事如何成立"
+            db.close()
+
+    def test_search_local_inspiration_evidence_synthesizes_bilibili_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            db.cache_content(
+                "BVlocal1",
+                content_id="BVlocal1",
+                source_platform="bilibili",
+                title="独立游戏 机制拆解：地图叙事如何成立",
+                content_url="",
+                description="围绕独立游戏、关卡设计、叙事节奏的分析。",
+                topic_group="独立游戏",
+                pool_topic_label="独立游戏机制",
+                pool_status="fresh",
+            )
+
+            rows = db.search_local_inspiration_evidence(
+                "独立游戏 机制",
+                limit=5,
+                lookback_days=365,
+            )
+
+            assert rows
+            assert rows[0]["url"] == "https://www.bilibili.com/video/BVlocal1"
+            db.close()
+
+    def test_search_local_inspiration_evidence_excludes_single_weak_token_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            db.cache_content(
+                "BVlocal2",
+                content_id="BVlocal2",
+                source_platform="bilibili",
+                title="独立音乐人访谈实录",
+                content_url="https://www.bilibili.com/video/BVlocal2",
+                description="音乐创作与巡演生活。",
+                topic_group="音乐",
+                pool_topic_label="独立音乐",
+                pool_status="fresh",
+            )
+
+            rows = db.search_local_inspiration_evidence(
+                "独立游戏 机制",
+                limit=5,
+                lookback_days=365,
+            )
+
+            assert rows == []
+            db.close()
+
     def test_iter_cover_lifecycle_reports_status_and_saved_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(Path(tmpdir) / "test.db")

@@ -56,6 +56,8 @@ import {
   updateBackendEndpoint,
 } from "./popup-backend-config.js";
 import { initAuthControl } from "./popup-auth-control.js";
+import { initExtLogin } from "./popup-ext-login.js";
+import { clearPopupSession, readPopupSessionToken } from "./popup-device-auth.js";
 import { initAutostartControl } from "./popup-autostart-control.js";
 import {
   createQrSvgMarkup,
@@ -266,7 +268,10 @@ async function setProxyImageSrc(image, coverUrl) {
   const path = buildImageProxyPath(coverUrl);
   if (!path) return false;
   const origin = await getBackendOrigin();
-  image.src = `${origin}${path}`;
+  const token = await readPopupSessionToken();
+  let url = `${origin}${path}`;
+  if (token) url += `&token=${encodeURIComponent(token)}`;
+  image.src = url;
   return true;
 }
 
@@ -278,6 +283,7 @@ async function setProxyImageSrc(image, coverUrl) {
 // cover can't stall the whole batch (the rest keep warming in the background).
 async function preloadCoverImages(items, { timeoutMs = 4000 } = {}) {
   const origin = await getBackendOrigin();
+  const token = await readPopupSessionToken();
   const loaders = (Array.isArray(items) ? items : [])
     .map((item) => {
       const path = item?.cover_url ? buildImageProxyPath(item.cover_url) : null;
@@ -287,7 +293,9 @@ async function preloadCoverImages(items, { timeoutMs = 4000 } = {}) {
         img.decoding = "async";
         img.addEventListener("load", () => resolve(), { once: true });
         img.addEventListener("error", () => resolve(), { once: true });
-        img.src = `${origin}${path}`;
+        let url = `${origin}${path}`;
+        if (token) url += `&token=${encodeURIComponent(token)}`;
+        img.src = url;
       });
     })
     .filter(Boolean);
@@ -5870,6 +5878,7 @@ function bindSettings() {
   const toast = document.getElementById("settingsToast");
   const issuesContainer = document.getElementById("settingsIssues");
   const providerSelect = document.getElementById("cfgLlmProvider");
+  const backendSchemeInput = document.getElementById("cfgBackendScheme");
   const backendHostInput = document.getElementById("cfgBackendHost");
   const backendPortInput = document.getElementById("cfgBackendPort");
   const bannerOffline = document.getElementById("cfgBannerOffline");
@@ -5888,6 +5897,13 @@ function bindSettings() {
       hint: document.getElementById("cfgAuthHint"),
     },
     { getBaseUrl: getBackendBaseUrl },
+  );
+
+  const extLogin = initExtLogin(
+    { deviceKey: document.getElementById("cfgExtDeviceKey"),
+      btn: document.getElementById("cfgExtLoginBtn"),
+      status: document.getElementById("cfgExtLoginStatus") },
+    { getBaseUrl: getBackendBaseUrl, onPaired: connectRuntimeStream }
   );
 
   const autostartControl = initAutostartControl(
@@ -5929,6 +5945,9 @@ function bindSettings() {
   async function populateBackendEndpoint() {
     try {
       const endpoint = await getBackendEndpointConfig();
+      if (backendSchemeInput instanceof HTMLSelectElement) {
+        backendSchemeInput.value = endpoint.scheme || "http";
+      }
       if (backendHostInput instanceof HTMLInputElement) {
         backendHostInput.value = endpoint.host || "";
       }
@@ -6543,6 +6562,7 @@ function bindSettings() {
     setVal("cfgTrendingRefreshHours", cfg.scheduler?.trending_refresh_hours);
     setVal("cfgExploreRefreshHours", cfg.scheduler?.explore_refresh_hours);
     setVal("cfgDiscoveryLimit", cfg.scheduler?.discovery_limit);
+    setVal("cfgKeywordGenerationMode", cfg.discovery?.keyword_generation_mode || "legacy");
     const multimodalEvaluation = document.getElementById("cfgMultimodalEvaluationEnabled");
     if (multimodalEvaluation) {
       multimodalEvaluation.checked = cfg.discovery?.multimodal_evaluation_enabled === true;
@@ -6744,6 +6764,7 @@ function bindSettings() {
       },
       discovery: {
         ...(state.runtimeConfig?.discovery || {}),
+        keyword_generation_mode: getVal("cfgKeywordGenerationMode"),
         multimodal_evaluation_enabled: checked("cfgMultimodalEvaluationEnabled"),
         multimodal_batch_size: getInt("cfgMultimodalBatchSize", 8),
         multimodal_image_max_px: getInt("cfgMultimodalImageMaxPx", 384),
@@ -7028,6 +7049,8 @@ function bindSettings() {
       // updateConfig() PUT targets the new origin.
       let endpointChanged = false;
       let newEndpointLabel = null;
+      const schemeRaw = backendSchemeInput instanceof HTMLSelectElement
+        ? backendSchemeInput.value : "http";
       const hostRaw = backendHostInput instanceof HTMLInputElement
         ? backendHostInput.value.trim() : "";
       const portRaw = backendPortInput instanceof HTMLInputElement
@@ -7042,9 +7065,10 @@ function bindSettings() {
       }
       {
         const previous = await getBackendEndpointConfig();
-        const next = await updateBackendEndpoint(hostRaw, portRaw || "8420");
-        newEndpointLabel = `${next.host}:${next.port}`;
-        endpointChanged = next.host !== previous.host || next.port !== previous.port;
+        const next = await updateBackendEndpoint(schemeRaw, hostRaw, portRaw || "8420");
+        newEndpointLabel = `${next.scheme}://${next.host}:${next.port}`;
+        endpointChanged = next.scheme !== previous.scheme
+          || next.host !== previous.host || next.port !== previous.port;
       }
 
       const data = collectForm();
@@ -7084,6 +7108,7 @@ function bindSettings() {
         // new port these will retry on the fixed liveness cadence and the popup
         // status will flip to offline — exactly the signal the user
         // needs to remember to start the daemon with --port.
+        await clearPopupSession();
         connectRuntimeStream();
         state.online = await checkBackendStatus();
         setStatus(state.online);
@@ -7094,7 +7119,13 @@ function bindSettings() {
         }
       }
     } catch (err) {
-      if (!renderStructuredConfigError(err)) {
+      if (err?.message === "https_required") {
+        showToast("公网后端必须使用 HTTPS。", "error");
+      } else if (err?.message === "backend_permission_denied") {
+        showToast("未授予该后端地址的访问权限，地址未保存。", "error");
+      } else if (err?.message === "invalid_backend_scheme") {
+        showToast("后端协议无效。", "error");
+      } else if (!renderStructuredConfigError(err)) {
         showToast(`保存失败: ${err.message}`, "error");
       }
     } finally {
@@ -7153,7 +7184,10 @@ async function enableLocalOllamaEmbedding(enableBtn) {
         embedding: {
           provider: "ollama",
           model: "bge-m3",
-          base_url: "http://localhost:11434/v1",
+          // Don't hardcode base_url: Docker deployments use
+          // http://ollama:11434/v1 (sidecar), local deployments use
+          // the default http://localhost:11434/v1.  Omitting it
+          // preserves whatever the backend already has configured.
         },
       },
     });

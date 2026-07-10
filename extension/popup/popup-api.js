@@ -1,5 +1,9 @@
 import { normalizeRecommendation, normalizeSavedItem } from "./popup-helpers.js";
 import { getBackendBaseUrl } from "./popup-backend-config.js";
+import {
+  ensurePopupSession,
+  popupAuthenticatedFetch,
+} from "./popup-device-auth.js";
 
 export const CONFIG_CACHE_KEY = "openbiliclaw.config_cache";
 export const CONFIG_PUT_TIMEOUT_MS = 60_000;
@@ -58,13 +62,21 @@ function withTimeout(signal, timeoutMs) {
 export async function requestJson(path, options = {}) {
   const backendUrl = await getBackendBaseUrl();
   const { timeoutMs, signal, ...fetchOptions } = options;
+  // Storage/session refresh is outside the request timeout budget.
+  const sessionToken = await ensurePopupSession();
   const timeout = withTimeout(signal, timeoutMs);
   const requestOptions = { ...fetchOptions };
   if (timeout.signal) {
     requestOptions.signal = timeout.signal;
   }
+  const url = `${backendUrl}${path}`;
   try {
-    const response = await fetch(`${backendUrl}${path}`, requestOptions);
+    const response = await popupAuthenticatedFetch(
+      url,
+      requestOptions,
+      globalThis.fetch.bind(globalThis),
+      { sessionToken },
+    );
     if (!response.ok) {
       let details = null;
       try {
@@ -223,7 +235,9 @@ export function __resetPopupHealthCacheForTests() {
 export async function startEmbeddingRepair() {
   const backendUrl = await getBackendBaseUrl();
   try {
-    const response = await fetch(`${backendUrl}/embedding/repair`, { method: "POST" });
+    const response = await popupAuthenticatedFetch(`${backendUrl}/embedding/repair`, {
+      method: "POST",
+    });
     let payload = {};
     try {
       payload = await response.json();
@@ -240,7 +254,9 @@ export async function startEmbeddingRepair() {
 export async function fetchEmbeddingRepairStatus() {
   const backendUrl = await getBackendBaseUrl();
   try {
-    const response = await fetch(`${backendUrl}/embedding/repair`, { method: "GET" });
+    const response = await popupAuthenticatedFetch(`${backendUrl}/embedding/repair`, {
+      method: "GET",
+    });
     if (!response.ok) return null;
     return await response.json();
   } catch {

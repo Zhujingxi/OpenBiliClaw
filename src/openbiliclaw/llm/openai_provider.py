@@ -239,6 +239,7 @@ class OpenAIProvider(LLMProvider):
             "input": input_messages,
             "max_output_tokens": max_tokens,
             "temperature": temperature,
+            "store": False,
         }
         if instructions:
             kwargs["instructions"] = instructions

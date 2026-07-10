@@ -479,6 +479,7 @@ class RuntimeContext:
             feedback_batch_threshold=int(
                 getattr(new_config.scheduler, "feedback_batch_threshold", 3)
             ),
+            database=self.database,
         )
 
         # 4. Embedding service
@@ -608,6 +609,7 @@ class RuntimeContext:
         # twitter_cli / x_client are imported, so non-X installs (where the
         # optional ``openbiliclaw[x]`` extra is absent) never touch them.
         twitter_cfg = getattr(getattr(new_config, "sources", None), "twitter", None)
+        new_x_client: object | None = None
         if twitter_cfg is not None and bool(getattr(twitter_cfg, "enabled", False)):
             from openbiliclaw.discovery.strategies.x import (
                 XCreatorStrategy,
@@ -623,6 +625,7 @@ class RuntimeContext:
                 cookie_env=str(getattr(twitter_cfg, "cookie_env", "OPENBILICLAW_X_COOKIE")),
             )
             x_client = XClient(cookie=x_cookie)
+            new_x_client = x_client
             twitter_adapter = XAdapter(
                 client=x_client,
                 search=XSearchStrategy(client=x_client, llm_service=new_llm_service),
@@ -771,6 +774,29 @@ class RuntimeContext:
         # passed to the controller, which launches its loop in run_forever and
         # injects its own deficit / catalyst口径. Flag-off (default) → the loop
         # no-ops → zero behavior change.
+        inspiration_provider = None
+        if bool(getattr(discovery_cfg, "inspiration_search_enabled", False)):
+            from openbiliclaw.config import derive_inspiration_breadth_params
+            from openbiliclaw.discovery.inspiration_provider import (
+                build_inspiration_search_provider,
+                build_platform_source_backends,
+            )
+
+            inspiration_params = derive_inspiration_breadth_params(
+                getattr(discovery_cfg, "inspiration_breadth", "medium")
+            )
+            inspiration_provider = build_inspiration_search_provider(
+                getattr(discovery_cfg, "inspiration_search_backends", None),
+                database=self.database,
+                platform_backends=build_platform_source_backends(
+                    new_config,
+                    bilibili_client=new_bilibili_client,
+                    x_client=new_x_client,
+                ),
+                platforms_per_probe=int(inspiration_params.platforms_per_probe),
+                riskcontrolled_probe_budget=int(inspiration_params.riskcontrolled_probe_budget),
+                pages_per_probe=int(inspiration_params.search_pages_per_probe),
+            )
         from openbiliclaw.runtime.keyword_planner import KeywordPlanner
 
         new_keyword_planner = KeywordPlanner(
@@ -781,6 +807,7 @@ class RuntimeContext:
             pool_target_count=new_config.scheduler.pool_target_count,
             signal_event_threshold=int(getattr(new_config.scheduler, "signal_event_threshold", 6)),
             embedding_service=new_embedding_service,
+            inspiration_provider=inspiration_provider,
         )
 
         new_runtime_controller = ContinuousRefreshController(
