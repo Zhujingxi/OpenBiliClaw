@@ -184,7 +184,7 @@ def test_desktop_click_payload_keeps_x_source_metadata() -> None:
 
 
 def test_desktop_positive_feedback_keeps_recommendation_card_visible() -> None:
-    """Desktop feedback should match mobile: like stays, negative feedback hides."""
+    """Desktop feedback mutates one card and defers durable writes for undo."""
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
 
     decision = re.search(
@@ -195,16 +195,21 @@ def test_desktop_positive_feedback_keeps_recommendation_card_visible() -> None:
     assert decision is not None, "desktop feedback removal decision helper not found"
     assert 'return normalized === "dislike" || normalized === "dismiss";' in decision.group("body")
 
-    feedback_branch = re.search(
-        r'const feedbackType = action === "like"(?P<body>.*?)\n      \} catch',
-        app_js,
-        flags=re.S,
+    start = app_js.index("function stageRecommendationFeedback(item, card, feedbackType)")
+    end = app_js.index("\n    function finishRecommendationFeedback", start)
+    body = app_js[start:end]
+    assert "pendingActions.schedule(key" in body
+    assert 'undo.dataset.feedbackUndo = key;' in body
+    assert 'item.feedback_type = feedbackType;' in body
+    assert "renderAll()" not in body
+    assert "removeRecommendationCard" not in body
+    assert 'committed: "已记录喜欢，推荐会继续保留在当前列表。"' in body
+    assert "function feedbackActionKey(item)" in app_js
+    assert "`recommendation:${platform}:${contentId}`" in app_js
+    assert (
+        'window.addEventListener("pagehide", () => { void pendingActions.flushAll(); });'
+        in app_js
     )
-    assert feedback_branch is not None, "desktop feedback branch not found"
-    body = feedback_branch.group("body")
-    assert 'like: ["已记录喜欢，推荐会继续保留在当前列表。", "已记录喜欢"]' in body
-    assert "if (shouldRemoveRecommendationAfterFeedback(feedbackType))" in body
-    assert "finishRecommendationFeedback(card, feedbackType);" in body
 
 
 def test_desktop_recommendation_hydration_filters_only_negative_feedback() -> None:

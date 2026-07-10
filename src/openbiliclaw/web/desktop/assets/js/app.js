@@ -832,6 +832,15 @@
       window.setTimeout(() => toast.classList.remove("is-open"), 2600);
     }
 
+    const pendingActions = window.OpenBiliClawPendingActions.createPendingActionCoordinator({
+      windowMs: Number(window.__OBC_TEST_UNDO_WINDOW_MS || 10000),
+      onCommitError: (error) => {
+        const detail = configErrorMessage(error?.details) || error?.message || "反馈提交失败";
+        showToast(`${detail}，已恢复原状态。`);
+      }
+    });
+    window.addEventListener("pagehide", () => { void pendingActions.flushAll(); });
+
     function describeInitReason(reason) {
       if (!reason || reason === "none") return "";
       return INIT_REASON_TEXT[reason] || `未知初始化状态：${reason}`;
@@ -2146,29 +2155,128 @@
       showToast(url ? `打开：${item.title}` : "后端没有返回可打开链接");
     }
 
-    async function submitFeedback(item, feedback_type, note = "") {
-      return await requestJsonStrict(ENDPOINTS.feedback, {
+    function submitFeedback(item, feedback_type, note = "", { keepalive = false } = {}) {
+      return requestJsonStrict(ENDPOINTS.feedback, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ recommendation_id: item.id, feedback_type, note }),
-        timeoutMs: 30000
+        timeoutMs: 30000,
+        keepalive
       });
     }
 
-    function recommendationRemoveDelay() {
-      return isMobileViewport() ? 1000 : 2400;
+    function feedbackActionKey(item) {
+      const contentId = item?.bvid || item?.content_id;
+      if (!contentId) return "";
+      const platform = String(item?.platform || item?.source_platform || "").trim().toLowerCase();
+      return `recommendation:${platform}:${contentId}`;
     }
 
-    function removeRecommendationCard(item, card, message, delayMs = recommendationRemoveDelay()) {
-      const key = recommendationKey(item);
-      window.setTimeout(() => {
-        if (card) card.classList.add("is-removing");
-        window.setTimeout(() => {
-          state.videos = state.videos.filter((video) => recommendationKey(video) !== key);
-          renderAll();
-          if (message) showToast(message);
-        }, card ? 180 : 0);
-      }, card ? delayMs : 0);
+    function recommendationFeedbackButtons(card) {
+      return [...card.querySelectorAll('[data-action="like"], [data-action="dislike"], [data-action="dismiss"]')];
+    }
+
+    function recommendationFeedbackSnapshot(item, card, status) {
+      return {
+        feedbackType: item.feedback_type,
+        statusText: status.textContent,
+        pending: card.dataset.feedbackPending,
+        buttons: recommendationFeedbackButtons(card).map((button) => ({
+          button,
+          disabled: button.disabled,
+          pressed: button.getAttribute("aria-pressed"),
+          active: button.classList.contains("is-active")
+        }))
+      };
+    }
+
+    function restoreRecommendationFeedback(item, card, status, snapshot) {
+      item.feedback_type = snapshot.feedbackType;
+      status.classList.remove("has-feedback-action");
+      status.textContent = snapshot.statusText;
+      card.classList.remove("is-feedback-pending", "is-feedback-saving");
+      if (snapshot.pending == null) delete card.dataset.feedbackPending;
+      else card.dataset.feedbackPending = snapshot.pending;
+      snapshot.buttons.forEach(({ button, disabled, pressed, active }) => {
+        button.disabled = disabled;
+        if (pressed == null) button.removeAttribute("aria-pressed");
+        else button.setAttribute("aria-pressed", pressed);
+        button.classList.toggle("is-active", active);
+      });
+    }
+
+    function stageRecommendationFeedback(item, card, feedbackType) {
+      const key = feedbackActionKey(item);
+      if (!key) {
+        showToast("这条推荐缺少稳定内容标识，暂时无法记录反馈。");
+        return false;
+      }
+      const status = card.querySelector(".status-line");
+      const snapshot = recommendationFeedbackSnapshot(item, card, status);
+      const copy = {
+        like: {
+          pending: "已标记喜欢，10 秒内可撤销。",
+          saving: "正在保存喜欢反馈…",
+          committed: "已记录喜欢，推荐会继续保留在当前列表。",
+          toast: "已记录喜欢"
+        },
+        dislike: {
+          pending: "已标记不感兴趣，10 秒内可撤销。",
+          saving: "正在保存不感兴趣反馈…",
+          committed: "已记录不感兴趣，下次刷新列表时会隐藏。",
+          toast: "已记录不感兴趣"
+        },
+        dismiss: {
+          pending: "已标记忽略，10 秒内可撤销。",
+          saving: "正在保存忽略反馈…",
+          committed: "已忽略这条推荐，下次刷新列表时会隐藏。",
+          toast: "已忽略推荐"
+        }
+      }[feedbackType];
+      const scheduled = pendingActions.schedule(key, {
+        commit: ({ keepalive }) => {
+          if (card.isConnected && !keepalive) {
+            card.classList.remove("is-feedback-pending");
+            card.classList.add("is-feedback-saving");
+            status.classList.remove("has-feedback-action");
+            status.textContent = copy.saving;
+          }
+          return submitFeedback(item, feedbackType, "", { keepalive });
+        },
+        rollback: ({ reason }) => {
+          restoreRecommendationFeedback(item, card, status, snapshot);
+          if (reason === "undo") showToast("已撤销反馈");
+        },
+        committed: () => {
+          if (!card.isConnected) return;
+          delete card.dataset.feedbackPending;
+          card.classList.remove("is-feedback-pending", "is-feedback-saving");
+          status.classList.remove("has-feedback-action");
+          status.textContent = copy.committed;
+          showToast(copy.toast);
+        }
+      });
+      if (!scheduled) return false;
+
+      item.feedback_type = feedbackType;
+      card.dataset.feedbackPending = "true";
+      card.classList.add("is-feedback-pending");
+      const clicked = card.querySelector(`[data-action="${feedbackType}"]`);
+      recommendationFeedbackButtons(card).forEach((button) => { button.disabled = true; });
+      if (clicked) {
+        clicked.setAttribute("aria-pressed", "true");
+        clicked.classList.add("is-active");
+      }
+      const undo = document.createElement("button");
+      undo.type = "button";
+      undo.className = "feedback-undo-btn";
+      undo.dataset.feedbackUndo = key;
+      undo.textContent = "撤销";
+      undo.addEventListener("click", () => { pendingActions.undo(key); });
+      status.classList.add("has-feedback-action");
+      status.setAttribute("aria-live", "polite");
+      status.replaceChildren(document.createTextNode(`${copy.pending} `), undo);
+      return true;
     }
 
     function finishRecommendationFeedback(card, feedbackType = "") {
@@ -2326,49 +2434,31 @@
         }
         return;
       }
-      card.dataset.feedbackPending = "true";
-      card.querySelectorAll(".card-actions button, .card-actions input").forEach((control) => { control.disabled = true; });
-      try {
-        if (action === "send-comment") {
-          const input = card.querySelector(".comment-field input");
-          const note = input.value.trim();
-          if (!note) {
-            delete card.dataset.feedbackPending;
-            card.querySelectorAll(".card-actions button, .card-actions input").forEach((control) => { control.disabled = false; });
-            status.textContent = "先写一句想聊的内容，再提交这条反馈。";
-            input?.focus();
-            return;
-          }
-          await submitFeedback(item, "comment", note);
-          if (input) input.value = "";
-          closeCardComposer(card);
-          item.feedback_type = "comment";
-          status.textContent = "已提交聊天线索，推荐会继续保留在当前列表。";
-          finishRecommendationFeedback(card, "comment");
-          showToast("已提交聊天线索");
+      if (action === "send-comment") {
+        const input = card.querySelector(".comment-field input");
+        const note = input.value.trim();
+        if (!note) {
+          status.textContent = "先写一句想聊的内容，再提交这条反馈。";
+          input?.focus();
           return;
         }
-        const feedbackType = action === "like" ? "like" : action === "dismiss" ? "dismiss" : "dislike";
-        await submitFeedback(item, feedbackType);
-        const feedbackCopy = {
-          like: ["已记录喜欢，推荐会继续保留在当前列表。", "已记录喜欢"],
-          dislike: ["已记录不感兴趣，几秒后从当前列表移除。", "已记录不感兴趣"],
-          dismiss: ["已忽略这条推荐，几秒后从当前列表移除。", "已忽略推荐"]
-        }[feedbackType];
-        status.textContent = feedbackCopy[0];
-        if (shouldRemoveRecommendationAfterFeedback(feedbackType)) {
-          removeRecommendationCard(item, card, feedbackCopy[1]);
-          return;
-        }
-        item.feedback_type = feedbackType;
-        finishRecommendationFeedback(card, feedbackType);
-        showToast(feedbackCopy[1]);
-      } catch (error) {
-        delete card.dataset.feedbackPending;
-        card.querySelectorAll(".card-actions button, .card-actions input").forEach((control) => { control.disabled = false; });
-        status.textContent = configErrorMessage(error?.details) || error?.message || "反馈提交失败，请稍后重试。";
-        showToast(status.textContent);
+        const previousFeedbackType = item.feedback_type;
+        if (input) input.value = "";
+        closeCardComposer(card);
+        item.feedback_type = "comment";
+        status.textContent = "已提交聊天线索，推荐会继续保留在当前列表。";
+        finishRecommendationFeedback(card, "comment");
+        showToast("已提交聊天线索");
+        void submitFeedback(item, "comment", note).catch((error) => {
+          item.feedback_type = previousFeedbackType;
+          if (input) input.value = note;
+          status.textContent = configErrorMessage(error?.details) || error?.message || "反馈提交失败，请稍后重试。";
+          showToast(status.textContent);
+        });
+        return;
       }
+      const feedbackType = action === "like" ? "like" : action === "dismiss" ? "dismiss" : "dislike";
+      stageRecommendationFeedback(item, card, feedbackType);
     }
 
     function renderRail() {

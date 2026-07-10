@@ -76,6 +76,7 @@ const {{ createPendingActionCoordinator }} = require({json.dumps(str(SCRIPT.reso
   const timerId = coordinator.get("d").timerId;
   const staleTimerCallback = timers.get(timerId);
   const flushPromise = coordinator.flushAll();
+  assert.deepEqual(commits.at(-1), ["d", true]);
   staleTimerCallback();
   await new Promise((resolve) => setImmediate(resolve));
   await flushPromise;

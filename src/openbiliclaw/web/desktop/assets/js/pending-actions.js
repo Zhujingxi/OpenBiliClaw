@@ -15,8 +15,20 @@
       }
       entry.state = "committing";
       clearTimer(entry.timerId);
-      entry.promise = Promise.resolve()
-        .then(() => entry.commit({ keepalive }))
+      let commitResult;
+      try {
+        // Keep the actual fetch call in the pagehide event stack. Deferring it
+        // to a microtask can let the document unload before keepalive starts.
+        commitResult = entry.commit({ keepalive });
+      } catch (error) {
+        entry.state = "rolled_back";
+        entries.delete(key);
+        entry.rollback({ reason: "error", error });
+        onCommitError(error, key);
+        entry.promise = Promise.resolve(false);
+        return entry.promise;
+      }
+      entry.promise = Promise.resolve(commitResult)
         .then(() => {
           entry.state = "committed";
           entries.delete(key);
