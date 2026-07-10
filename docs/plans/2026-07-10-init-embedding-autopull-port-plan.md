@@ -13,7 +13,7 @@
 - 不得引入 `_classify_init_llm_failure` 或 popup/setup 的 `llm_rate_limited` / `llm_auth_failed` / `llm_unavailable` 错误码映射(结构已被 main `describe_llm_failure` 取代;语义缺口在 Task 0 于 LLM 层补齐)。
 - 自动拉取四重边界:provider=ollama、诊断为 `DIAG_MODEL_MISSING`/`DIAG_MODEL_BROKEN`、端点过 `is_loopback`(`runtime/ollama_supervisor.py:79`,含 `127.0.0.1:11435`)、磁盘守卫 `ollama_embedding_disk_space_error()` 为空;任一不满足返回 False。非 loopback(远端 / Docker `ollama` 主机名)绝不自动拉,保持 Docker seeder 的显式拉取策略不被旁路。
 - 复用 `_embedding_repair_lock` / `_embedding_repair_state` / `_run_embedding_repair`,不新建锁或状态容器。
-- `_maybe_autostart_embedding_pull` 永不抛出;任务调度失败必须回滚 running 状态并 `coro.close()`,不留僵尸 running。
+- `_maybe_autostart_embedding_pull` 永不抛出;任务调度失败必须回滚 running 状态并 `coro.close()`,不留僵尸 running。回滚用 `embedding_progress.mark_pull_done(False, error)`(`runtime/embedding_progress.py:90`),**绝不用 `reset()`**(强置 `_ollama_phase="ready"` 会伪造 daemon 状态;`reset()` 仅测试隔离用)。
 - `pyproject.toml`、`extension/manifest.json`、`extension/package.json`、`extension/package-lock.json`、`src/openbiliclaw/__init__.py` 与 origin/main 逐字节一致(零版本号漂移)。
 - popup 只消费 init-status 既有字段,后端不新增 API 字段。
 
@@ -48,8 +48,8 @@
 - [ ] 在 `tests/test_api_app.py` 加 autouse yield fixture:每用例前后各调一次 `embedding_progress.reset()`,teardown 侧先等/取消未决拉取任务再 reset。
 - [ ] 写失败测试:embedding 硬前置 + 诊断 `model_missing` + loopback 端点时 `POST /api/init` 返回 409、detail 非空、拉取已启动(mock `diagnose_ollama_embedding` 与 `_run_embedding_repair`)。
 - [ ] 跑 `.venv/bin/python -m pytest tests/test_api_app.py -k autostart -q` 确认 FAIL。
-- [ ] 移植 `_maybe_autostart_embedding_pull`(定位:`_run_embedding_repair` 定义之后、`start_embedding_repair` 端点之前;基线来自分支 diff 的同名函数 hunk)+ `start_guided_init` 的 `embedding_not_ready` 分支改造(409 加 detail)+ 软自愈调用;叠加三处修正:(a) `is_loopback(base_url)` False → return False;(b) 锁内诊断通过后、置 running 前,`ollama_embedding_disk_space_error(model)` 非空 → return False;(c) 调度包 try,失败回滚 `_embedding_repair_state`(running=False, error 记录)与 embedding_progress、`coro.close()`、return False。
-- [ ] 重跑确认 PASS,补齐边界用例:`model_broken` 触发 / `not_running` 不触发 / 非 ollama provider 不触发 / 远端 URL 不触发 / `http://ollama:11434` 不触发 / `http://127.0.0.1:11435` 允许 / 磁盘不足不触发 / 已有拉取在跑返回 True 不重复 / 诊断抛异常 409 仍返回手动文案 / 调度失败状态回滚 / auto-pull 与手动 `/api/embedding/repair` 并发只有一次拉取(竞态须用 auto vs 手动组合,两个并发 `/api/init` 会被 InitCoordinator 拦截测不到修复锁)。
+- [ ] 移植 `_maybe_autostart_embedding_pull`(定位:`_run_embedding_repair` 定义之后、`start_embedding_repair` 端点之前;基线来自分支 diff 的同名函数 hunk)+ `start_guided_init` 的 `embedding_not_ready` 分支改造(409 加 detail)+ 软自愈调用;叠加三处修正:(a) `is_loopback(base_url)` False → return False;(b) 锁内诊断通过后、置 running 前,`ollama_embedding_disk_space_error(model)` 非空 → return False;(c) 调度包 try,失败回滚 `_embedding_repair_state`(running=False, error 记录)+ `embedding_progress.mark_pull_done(False, error)`(不用 reset,保留 ollama_phase)、`coro.close()`、return False。
+- [ ] 重跑确认 PASS,补齐边界用例:`model_broken` 触发 / `not_running` 不触发 / 非 ollama provider 不触发 / 远端 URL 不触发 / `http://ollama:11434` 不触发 / `http://127.0.0.1:11435` 允许 / 磁盘不足不触发 / 已有拉取在跑返回 True 不重复 / 诊断抛异常 409 仍返回手动文案 / 调度失败拉取态回滚且 `ollama_phase` 未被改写 / auto-pull 与手动 `/api/embedding/repair` 并发只有一次拉取(竞态须用 auto vs 手动组合,两个并发 `/api/init` 会被 InitCoordinator 拦截测不到修复锁)。
 - [ ] `.venv/bin/python -m pytest tests/test_api_app.py tests/test_embedding_progress.py -q`,然后**全量** `.venv/bin/python -m pytest -q`。
 - [ ] `.venv/bin/ruff check src/ tests/ && .venv/bin/ruff format --check src/ tests/ && .venv/bin/mypy src/`。
 
@@ -81,20 +81,20 @@
 
 ### Task 3: 文档
 
-**Files:** 改 `docs/changelog.md`、`docs/modules/init.md`、`docs/modules/runtime.md`、`docs/modules/extension.md`。
+**Files:** 改 `docs/changelog.md`、`docs/modules/init.md`、`docs/modules/llm.md`、`docs/modules/runtime.md`、`docs/modules/extension.md`。
 
-**Interfaces:** Consumes: Task 0/1/2 定稿行为。Produces: v0.3.161 块下 bullet(init 缺模型自动拉取含 loopback/磁盘边界 + popup 进度对齐 + describe_llm_failure 补 auth/quota;注明源自遗留分支 `db726daa`、LLM 分类结构因 `bc2dc983` 取代未移植、四表面契约豁免:CLI init 进度走日志、移动 Web 无 init 面板);`init.md` 的 `/api/init`、`/api/embedding/repair` 行与 `_init_wrapper` 段(版本标注 v0.3.162+,不含分类器叙述);`runtime.md` 的 `embedding_progress` 节补 `reset()`;`extension.md` 补 popup init checklist 进度/修复行为。
+**Interfaces:** Consumes: Task 0/1/2 定稿行为。Produces: v0.3.161 块下 bullet(init 缺模型自动拉取含 loopback/磁盘边界 + popup 进度对齐 + describe_llm_failure 补 auth/quota;注明源自遗留分支 `db726daa`、LLM 分类结构因 `bc2dc983` 取代未移植、四表面契约豁免:CLI init 进度走日志、移动 Web 无 init 面板);`init.md` 的 `/api/init`、`/api/embedding/repair` 行与 `_init_wrapper` 段(版本标注 v0.3.162+,不含分类器叙述);`llm.md` 补 `describe_llm_failure` auth/quota 桶;`runtime.md` 的 `embedding_progress` 节补 `reset()`(注明仅测试用,生产回滚走 `mark_pull_done`);`extension.md` 补 popup init checklist 进度/修复行为。
 
 **Steps:**
 
 - [ ] 写 changelog bullet(≤6 行,对照分支版 changelog 但剔除 LLM 分类段、版本号改说法)。
-- [ ] 更新 `docs/modules/init.md` 两处表行 + `_init_wrapper` 段;`runtime.md` + `extension.md` 对应节。
+- [ ] 更新 `docs/modules/init.md` 两处表行 + `_init_wrapper` 段;`llm.md` + `runtime.md` + `extension.md` 对应节。
 - [ ] 自查:新增文档内容中 `git grep -nE '_classify_init_llm_failure|llm_rate_limited|llm_auth_failed|llm_unavailable' -- docs/modules/ docs/changelog.md` 零新增命中(历史条目除外)。
 
 **Acceptance:**
 
 - CLAUDE.md pre-merge checklist 逐项通过(架构图/CLI/config/installer/README 均不触发,在 PR 描述声明)。
-- 复现:`git diff origin/main --stat -- docs/` 仅含上述四文件(spec/plan 对在 main 上单独提交,不在本分支)。
+- 复现:`git diff origin/main --stat -- docs/` 仅含上述五文件(spec/plan 对在 main 上单独提交,不在本分支)。
 
 ## Verification after merge
 
