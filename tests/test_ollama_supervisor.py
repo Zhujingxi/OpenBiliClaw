@@ -568,3 +568,192 @@ def test_default_path_keep_alive_respects_user_setting(monkeypatch: pytest.Monke
 
     assert sup._ollama_start_serve_background() is True
     assert calls[0]["env"]["OLLAMA_KEEP_ALIVE"] == "0"
+
+
+# --- Task 2: watchdog with backoff (fake clock/probe — no real sleeps) ---
+
+
+def _reset_watchdog_state(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Zero the watchdog counters and capture backoff sleeps."""
+    from openbiliclaw.runtime import ollama_supervisor as sup
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(sup, "_watchdog_failures", 0)
+    monkeypatch.setattr(sup, "_watchdog_gave_up", False)
+    monkeypatch.setattr(sup, "_restart_in_progress", False)
+    monkeypatch.setattr(sup, "_watchdog_sleep", sleeps.append)
+    return sleeps
+
+
+def test_watchdog_healthy_probe_no_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+    """(a) healthy probe → no restart, failure counter stays 0."""
+    from openbiliclaw.runtime import ollama_supervisor as sup
+
+    _reset_watchdog_state(monkeypatch)
+    monkeypatch.setattr(
+        sup, "_managed_daemon", sup._ManagedDaemon(None, "http://127.0.0.1:11435", "/tmp/m")
+    )
+    monkeypatch.setattr(sup, "_watchdog_probe", lambda url: True)
+    restarts: list[str] = []
+    monkeypatch.setattr(sup, "restart_managed_ollama", lambda: restarts.append("r") or (True, ""))
+
+    sup._watchdog_tick()
+    assert restarts == []
+    assert sup._watchdog_failures == 0
+
+
+def test_watchdog_dead_daemon_restarts_with_recorded_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(b) owned proc exited + probe dead → restart routing invoked once with the spec."""
+    from openbiliclaw.runtime import ollama_supervisor as sup
+
+    class _Dead:
+        pid = 7
+
+        def poll(self) -> int:
+            return 1  # exited
+
+    _reset_watchdog_state(monkeypatch)
+    monkeypatch.setattr(
+        sup,
+        "_managed_daemon",
+        sup._ManagedDaemon(_Dead(), "http://127.0.0.1:11435", "/tmp/priv"),
+    )
+    monkeypatch.setattr(sup, "_watchdog_probe", lambda url: False)
+    monkeypatch.setattr(sup, "_ollama_is_running", lambda *a, **k: False)
+    started: list[tuple[str, str]] = []
+
+    def _fake_start_at(models_dir: str, host: str) -> bool:
+        started.append((models_dir, host))
+        return True
+
+    monkeypatch.setattr(sup, "start_managed_ollama_at", _fake_start_at)
+
+    sup._watchdog_tick()
+    assert started == [("/tmp/priv", "http://127.0.0.1:11435")]
+    assert sup._watchdog_failures == 0
+
+
+def test_watchdog_backoff_sequence_and_give_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    """(c) restart failures back off 5,10,20,40,80 then give up with phase down."""
+    from openbiliclaw.runtime import embedding_progress
+    from openbiliclaw.runtime import ollama_supervisor as sup
+
+    sleeps = _reset_watchdog_state(monkeypatch)
+    monkeypatch.setattr(
+        sup, "_managed_daemon", sup._ManagedDaemon(None, "http://127.0.0.1:11435", "/tmp/m")
+    )
+    monkeypatch.setattr(sup, "_watchdog_probe", lambda url: False)
+    restarts: list[str] = []
+    monkeypatch.setattr(
+        sup,
+        "restart_managed_ollama",
+        lambda: restarts.append("r") or (False, "start_failed"),
+    )
+    phases: list[str] = []
+    monkeypatch.setattr(embedding_progress, "report_ollama_phase", phases.append)
+
+    for _ in range(6):
+        sup._watchdog_tick()
+
+    assert sleeps == [5.0, 10.0, 20.0, 40.0, 80.0]
+    assert len(restarts) == 5  # 6th tick attempts nothing — gave up
+    assert sup._watchdog_gave_up is True
+    assert "down" in phases
+
+
+def test_watchdog_healthy_probe_resets_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    """(d) a healthy probe after failures resets the backoff counter."""
+    from openbiliclaw.runtime import ollama_supervisor as sup
+
+    _reset_watchdog_state(monkeypatch)
+    monkeypatch.setattr(sup, "_watchdog_failures", 3)
+    monkeypatch.setattr(
+        sup, "_managed_daemon", sup._ManagedDaemon(None, "http://127.0.0.1:11435", "/tmp/m")
+    )
+    monkeypatch.setattr(sup, "_watchdog_probe", lambda url: True)
+
+    sup._watchdog_tick()
+    assert sup._watchdog_failures == 0
+
+
+def test_watchdog_start_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """(e) start_ollama_watchdog spawns exactly one daemon thread."""
+    import threading
+
+    from openbiliclaw.runtime import ollama_supervisor as sup
+
+    sup.start_ollama_watchdog()
+    first = sup._watchdog_thread
+    sup.start_ollama_watchdog()
+    assert sup._watchdog_thread is first
+    alive = [t for t in threading.enumerate() if t.name == "obc-ollama-watchdog" and t.is_alive()]
+    assert len(alive) == 1
+    assert alive[0].daemon is True
+
+
+def test_reset_watchdog_backoff_reenables_after_give_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(f) reset_watchdog_backoff() re-enables attempts after give-up."""
+    from openbiliclaw.runtime import ollama_supervisor as sup
+
+    _reset_watchdog_state(monkeypatch)
+    monkeypatch.setattr(sup, "_watchdog_failures", 5)
+    monkeypatch.setattr(sup, "_watchdog_gave_up", True)
+    monkeypatch.setattr(
+        sup, "_managed_daemon", sup._ManagedDaemon(None, "http://127.0.0.1:11435", "/tmp/m")
+    )
+    restarts: list[str] = []
+    monkeypatch.setattr(sup, "restart_managed_ollama", lambda: restarts.append("r") or (True, ""))
+    monkeypatch.setattr(sup, "_watchdog_probe", lambda url: False)
+
+    sup._watchdog_tick()
+    assert restarts == []  # gave up: no attempts
+
+    sup.reset_watchdog_backoff()
+    assert sup._watchdog_gave_up is False
+    assert sup._watchdog_failures == 0
+    sup._watchdog_tick()
+    assert restarts == ["r"]  # attempts re-enabled
+
+
+def test_watchdog_idles_without_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    """(g) no managed record → the loop idles without probing."""
+    from openbiliclaw.runtime import ollama_supervisor as sup
+
+    _reset_watchdog_state(monkeypatch)
+    monkeypatch.setattr(sup, "_managed_daemon", None)
+    probes: list[str] = []
+    monkeypatch.setattr(sup, "_watchdog_probe", lambda url: probes.append(url) or True)
+
+    sup._watchdog_tick()
+    assert probes == []
+
+
+def test_successful_starts_arm_watchdog_and_reset_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both start paths arm the watchdog and clear backoff on success."""
+    from openbiliclaw.runtime import ollama_supervisor as sup
+
+    _reset_watchdog_state(monkeypatch)
+    monkeypatch.setattr(sup, "_watchdog_failures", 4)
+    monkeypatch.setattr(sup, "_watchdog_gave_up", True)
+    armed: list[str] = []
+    monkeypatch.setattr(sup, "start_ollama_watchdog", lambda *a, **k: armed.append("armed"))
+    monkeypatch.setattr(sup, "_managed_daemon", None)
+    health = iter([False, True])
+    monkeypatch.setattr(sup, "_ollama_is_running", lambda *a, **k: next(health))
+    _patch_ollama_binary(monkeypatch)
+
+    assert sup._ollama_start_serve_background() is True
+    assert armed == ["armed"]
+    assert sup._watchdog_failures == 0
+    assert sup._watchdog_gave_up is False
+
+    # Private path, including its adoption branch, also arms.
+    monkeypatch.setattr(sup, "_ollama_is_running", lambda *a, **k: True)
+    assert sup.start_managed_ollama_at("/tmp/m", "127.0.0.1:11435") is True
+    assert armed == ["armed", "armed"]

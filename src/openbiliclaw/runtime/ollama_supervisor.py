@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 import os
+import threading
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -24,6 +26,11 @@ _DEFAULT_OLLAMA_ENDPOINT = "http://localhost:11434"
 _DEFAULT_OLLAMA_KEEP_ALIVE = "24h"
 
 console = Console()
+logger = logging.getLogger(__name__)
+
+# Guards watchdog counters and _managed_daemon transitions shared between the
+# watchdog thread and the start/stop/restart entry points.
+_supervisor_lock = threading.RLock()
 
 
 @dataclass
@@ -244,6 +251,8 @@ def _ollama_start_serve_background() -> bool:
     for _ in range(30):
         if _ollama_is_running():
             embedding_progress.report_ollama_phase("ready")
+            reset_watchdog_backoff()
+            start_ollama_watchdog()
             return True
         time.sleep(0.5)
     embedding_progress.report_ollama_phase("down")
@@ -284,6 +293,8 @@ def start_managed_ollama_at(models_dir: str, host: str) -> bool:
         # after it dies. We still never signal a process we don't own.
         _managed_daemon = _ManagedDaemon(None, base_url, abs_models_dir)
         embedding_progress.report_ollama_phase("ready")
+        reset_watchdog_backoff()
+        start_ollama_watchdog()
         return True
     embedding_progress.report_ollama_phase("starting")
 
@@ -330,6 +341,8 @@ def start_managed_ollama_at(models_dir: str, host: str) -> bool:
     for _ in range(30):
         if _ollama_is_running(base_url):
             embedding_progress.report_ollama_phase("ready")
+            reset_watchdog_backoff()
+            start_ollama_watchdog()
             return True
         time.sleep(0.5)
     embedding_progress.report_ollama_phase("down")
@@ -368,22 +381,31 @@ def restart_managed_ollama() -> tuple[bool, str]:
     recorded endpoint still answers but we hold no owned handle, we return
     ``external_ollama`` (no record) or ``adopted_alive`` (adopted, proc=None).
     """
-    record = _managed_daemon
-    probe_url = record.base_url if record is not None else _DEFAULT_OLLAMA_ENDPOINT
-    if _ollama_is_running(probe_url):
-        if record is None:
-            return (False, "external_ollama")
-        if record.proc is None:
-            return (False, "adopted_alive")
-    if record is not None and not _is_default_ollama_endpoint(record.base_url):
-        models_dir = record.models_dir or ""
-        base_url = record.base_url
+    global _restart_in_progress
+    with _supervisor_lock:
+        if _restart_in_progress:
+            return (False, "restart_in_progress")
+        _restart_in_progress = True
+    try:
+        record = _managed_daemon
+        probe_url = record.base_url if record is not None else _DEFAULT_OLLAMA_ENDPOINT
+        if _ollama_is_running(probe_url):
+            if record is None:
+                return (False, "external_ollama")
+            if record.proc is None:
+                return (False, "adopted_alive")
+        if record is not None and not _is_default_ollama_endpoint(record.base_url):
+            models_dir = record.models_dir or ""
+            base_url = record.base_url
+            stop_managed_ollama()
+            ok = start_managed_ollama_at(models_dir, base_url)
+            return (ok, "" if ok else "start_failed")
         stop_managed_ollama()
-        ok = start_managed_ollama_at(models_dir, base_url)
+        ok = _ollama_start_serve_background()
         return (ok, "" if ok else "start_failed")
-    stop_managed_ollama()
-    ok = _ollama_start_serve_background()
-    return (ok, "" if ok else "start_failed")
+    finally:
+        with _supervisor_lock:
+            _restart_in_progress = False
 
 
 def ensure_managed_ollama(endpoint: str) -> bool:
@@ -402,6 +424,122 @@ def ensure_managed_ollama(endpoint: str) -> bool:
     ):
         return start_managed_ollama_at(record.models_dir or "", record.base_url)
     return _ollama_start_serve_background()
+
+
+# --- Watchdog: restart a crashed managed daemon automatically (invariant 3) ---
+
+# Injectable seams so tests drive iterations synchronously with a fake clock.
+_watchdog_thread: threading.Thread | None = None
+_watchdog_failures = 0
+_watchdog_gave_up = False
+_restart_in_progress = False
+
+_WATCHDOG_BACKOFF_BASE_SECONDS = 5.0
+_WATCHDOG_BACKOFF_CAP_SECONDS = 300.0
+_WATCHDOG_GIVE_UP_AFTER = 5
+
+
+def _watchdog_sleep(seconds: float) -> None:
+    import time
+
+    time.sleep(seconds)
+
+
+def _watchdog_probe(base_url: str) -> bool:
+    return _ollama_is_running(base_url)
+
+
+def reset_watchdog_backoff() -> None:
+    """Clear watchdog failure state; called on any successful start / manual repair."""
+    global _watchdog_failures, _watchdog_gave_up
+    with _supervisor_lock:
+        _watchdog_failures = 0
+        _watchdog_gave_up = False
+
+
+def _watchdog_tick() -> None:
+    """One watchdog iteration: probe the recorded daemon, restart it if it died.
+
+    Never signals a process we did not start (restart routing enforces that);
+    consecutive restart failures back off 5s → 300s and give up after 5 until
+    :func:`reset_watchdog_backoff` (manual repair success) or process restart.
+    """
+    global _watchdog_failures, _watchdog_gave_up, _managed_daemon
+    with _supervisor_lock:
+        record = _managed_daemon
+        if record is None or _watchdog_gave_up or _restart_in_progress:
+            return
+    if _watchdog_probe(record.base_url):
+        with _supervisor_lock:
+            _watchdog_failures = 0
+        return
+    proc = record.proc
+    if proc is not None and proc.poll() is None:
+        # Our process is alive but one probe failed — likely transient load;
+        # do not restart-kill a living daemon on a single missed probe.
+        return
+    ok, reason = restart_managed_ollama()
+    if ok:
+        reset_watchdog_backoff()
+        logger.warning("watchdog restarted managed ollama at %s", record.base_url)
+        return
+    if reason in {"external_ollama", "adopted_alive", "restart_in_progress"}:
+        return  # daemon answering again / someone else handling it — nothing to heal
+    with _supervisor_lock:
+        _watchdog_failures += 1
+        failures = _watchdog_failures
+        if _managed_daemon is None:
+            # A failed restart may have cleared the record; keep the spec so
+            # the next attempt still knows (host, models_dir).
+            _managed_daemon = _ManagedDaemon(None, record.base_url, record.models_dir)
+    backoff = min(
+        _WATCHDOG_BACKOFF_BASE_SECONDS * (2 ** (failures - 1)),
+        _WATCHDOG_BACKOFF_CAP_SECONDS,
+    )
+    logger.warning(
+        "watchdog restart of %s failed (%s), attempt %d/%d, backing off %.0fs",
+        record.base_url,
+        reason,
+        failures,
+        _WATCHDOG_GIVE_UP_AFTER,
+        backoff,
+    )
+    _watchdog_sleep(backoff)
+    if failures >= _WATCHDOG_GIVE_UP_AFTER:
+        with _supervisor_lock:
+            _watchdog_gave_up = True
+        embedding_progress.report_ollama_phase("down")
+        logger.error(
+            "watchdog giving up on %s after %d consecutive restart failures; "
+            "use the embedding repair action or restart the app to retry",
+            record.base_url,
+            failures,
+        )
+
+
+def start_ollama_watchdog(interval_seconds: float = 30.0) -> None:
+    """Start the managed-Ollama watchdog thread (idempotent, daemon thread)."""
+    global _watchdog_thread
+    with _supervisor_lock:
+        if _watchdog_thread is not None and _watchdog_thread.is_alive():
+            return
+
+        def _loop() -> None:
+            import time
+
+            while True:
+                # Real sleep on purpose: tests drive iterations by calling
+                # _watchdog_tick() directly; patching the _watchdog_sleep seam
+                # must not turn this loop into a hot spin.
+                time.sleep(interval_seconds)
+                try:
+                    _watchdog_tick()
+                except Exception as exc:  # noqa: BLE001 — the watchdog must survive anything
+                    logger.warning("ollama watchdog tick failed: %s", exc)
+
+        thread = threading.Thread(target=_loop, name="obc-ollama-watchdog", daemon=True)
+        _watchdog_thread = thread
+        thread.start()
 
 
 def stop_managed_ollama() -> bool:
