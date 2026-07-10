@@ -6,17 +6,21 @@ import assert from "node:assert/strict";
 const html = readFileSync(resolve("popup", "popup.html"), "utf8");
 const js = readFileSync(resolve("popup", "popup.js"), "utf8");
 
-test("recommendation header has no preference correction entry", () => {
-  const header = html.slice(
-    html.indexOf('class="recommendation-header-intro"'),
-    html.indexOf('id="refreshRecommendationsButton"'),
-  );
+test("recommendation card has no preference correction entry", () => {
+  const cardStart = html.indexOf('<div class="recommendation-header-card">');
+  const cardEnd = html.indexOf('<div id="embeddingBanner"', cardStart);
 
-  assert.doesNotMatch(header, /推荐不准？/);
-  assert.doesNotMatch(header, /编辑画像/);
-  assert.doesNotMatch(header, /直接告诉阿B/);
-  assert.doesNotMatch(header, /editProfileFromRecommendations/);
-  assert.doesNotMatch(header, /chatFromRecommendations/);
+  assert.notEqual(cardStart, -1, "recommendation card boundary should exist");
+  assert.notEqual(cardEnd, -1, "embedding banner boundary should exist");
+  assert.ok(cardEnd > cardStart, "recommendation card boundary should precede embedding banner");
+
+  const card = html.slice(cardStart, cardEnd);
+
+  assert.doesNotMatch(card, /推荐不准？/);
+  assert.doesNotMatch(card, /编辑画像/);
+  assert.doesNotMatch(card, /直接告诉阿B/);
+  assert.doesNotMatch(card, /editProfileFromRecommendations/);
+  assert.doesNotMatch(card, /chatFromRecommendations/);
   assert.doesNotMatch(html, /\.preference-correction-callout/);
 });
 
