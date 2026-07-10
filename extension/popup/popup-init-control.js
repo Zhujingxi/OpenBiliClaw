@@ -83,6 +83,58 @@ export function describeEmbeddingHint(prereq) {
     : "本地 Ollama + bge-m3 没就绪也能初始化，但语义检索会弱一些。";
 }
 
+// Live bge-m3 pull progress from init-status prerequisites. Returns
+// {active, pct, label}; pct remains between 1 and 99 while a repair is active.
+export function embeddingPullProgressView(prereq) {
+  const p = prereq || {};
+  const active =
+    Boolean(p.embedding_repair_running) || p.embedding_check === "repairing";
+  const completed = Number(p.embedding_repair_completed || 0);
+  const total = Number(p.embedding_repair_total || 0);
+  const pct =
+    total > 0
+      ? Math.max(1, Math.min(99, Math.round((completed * 100) / total)))
+      : active
+        ? 1
+        : 0;
+  const phase = p.ollama_phase === "starting" ? "Ollama 启动中…" : "";
+  const status = String(p.embedding_pull_status || "").trim();
+  const label =
+    [phase, status].filter(Boolean).join(" ") ||
+    (active ? "正在下载向量模型…" : "");
+  return { active, pct, label };
+}
+
+// Select the repair action exposed beside an unavailable embedding model.
+export function embeddingRepairAction(prereq) {
+  const p = prereq || {};
+  if (p.embedding_ready) {
+    return { repairable: false, label: "" };
+  }
+  const check = String(p.embedding_check || "");
+  if (check === "model_path_encoding") {
+    return { repairable: true, label: "迁移模型目录并修复" };
+  }
+  if (check === "model_missing" || check === "model_broken") {
+    return { repairable: true, label: "自动下载向量模型" };
+  }
+  if (["disk_full", "network", "model_oom", "provider_error"].includes(check)) {
+    return { repairable: true, label: "重新检测" };
+  }
+  return { repairable: false, label: "" };
+}
+
+// Only successful starts (or an already-running single-flight repair) should
+// enter the long init-status polling loop.
+export function embeddingRepairStartAccepted(result) {
+  const status = Number((result && result.status) || 0);
+  return (
+    status === 200 ||
+    status === 202 ||
+    (status === 409 && result && result.error === "already_running")
+  );
+}
+
 // Pre-init checklist rows. ``hard`` rows must be satisfied before init can
 // start; soft rows (embedding) only warn. Each row carries a fix-it hint.
 // ``selected`` is the current source-checkbox selection: B 站登录 is a hard
@@ -121,6 +173,8 @@ export function buildInitChecklist(status, selected = null) {
       ok: Boolean(prereq.embedding_ready),
       hard: Boolean(prereq.embedding_required),
       hint: describeEmbeddingHint(prereq),
+      pull: embeddingPullProgressView(prereq),
+      repair: embeddingRepairAction(prereq),
     },
     {
       key: "platforms",
