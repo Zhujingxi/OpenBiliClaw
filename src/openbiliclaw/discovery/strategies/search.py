@@ -34,6 +34,7 @@ from openbiliclaw.discovery.strategies._utils import (
 )
 from openbiliclaw.llm.prompts import build_search_queries_prompt
 from openbiliclaw.llm.task_options import without_core_memory_kwargs
+from openbiliclaw.published_time import normalize_published_time
 
 if TYPE_CHECKING:
     from openbiliclaw.llm.embedding import SupportsEmbeddingService
@@ -603,6 +604,7 @@ class SearchStrategy(DiscoveryStrategy):
             interest_anchors=interest_anchors,
         )
         pre_score = round(0.1 + anchor_bonus, 4)
+        published = normalize_published_time(item.get("pubdate") or item.get("publish_time"))
         return DiscoveredContent(
             bvid=bvid,
             title=title,
@@ -626,6 +628,8 @@ class SearchStrategy(DiscoveryStrategy):
             ),
             source_strategy=self.name,
             relevance_score=min(1.0, pre_score),
+            published_at=published.published_at,
+            published_label=published.published_label,
         )
 
     @staticmethod

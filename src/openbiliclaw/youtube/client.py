@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 from urllib import request as urllib_request
 
 from openbiliclaw.discovery.engine import DiscoveredContent
+from openbiliclaw.published_time import normalize_published_time
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -546,6 +547,13 @@ def normalize_yt_video(
 
     # Description snippet
     description = _extract_text(raw.get("descriptionSnippet") or raw.get("description") or "")[:300]
+    published = normalize_published_time(
+        raw.get("timestamp")
+        or raw.get("release_timestamp")
+        or raw.get("upload_date")
+        or raw.get("publishedAt"),
+        label=_extract_text(raw.get("publishedTimeText") or ""),
+    )
 
     return DiscoveredContent(
         content_id=video_id,
@@ -561,6 +569,8 @@ def normalize_yt_video(
         comment_count=comment_count,
         description=description,
         source_strategy=source_strategy,
+        published_at=published.published_at,
+        published_label=published.published_label,
     )
 
 

@@ -174,6 +174,7 @@ def test_related_chain_map_related_item_maps_stat_metrics() -> None:
             "bvid": "BV1metrics",
             "title": "指标相关视频",
             "owner": {"name": "UP", "mid": 1},
+            "pubdate": 1783492200,
             "stat": {
                 "view": 1000,
                 "like": 100,
@@ -193,6 +194,27 @@ def test_related_chain_map_related_item_maps_stat_metrics() -> None:
     assert content.danmaku_count == 80
     assert content.comment_count == 70
     assert content.share_count == 60
+    assert content.published_at == "2026-07-08T06:30:00Z"
+
+
+def test_related_chain_map_related_item_keeps_candidate_without_publication() -> None:
+    from openbiliclaw.discovery.strategies.strategies import RelatedChainStrategy
+
+    strategy = RelatedChainStrategy(
+        bilibili_client=FakeRelatedClient({}),
+        llm_service=FakeLLMService([]),
+        memory_manager=FakeMemoryManager([]),
+        llm_evaluation=False,
+    )
+
+    content = strategy._map_related_item(
+        {"bvid": "BV1no_time", "title": "没有发布时间"},
+        seed_topic_key="seed",
+    )
+
+    assert content is not None
+    assert content.published_at == ""
+    assert content.published_label == ""
 
 
 @dataclass

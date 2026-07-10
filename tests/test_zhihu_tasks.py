@@ -82,6 +82,8 @@ def test_zhihu_discovery_items_to_contents_maps_search_candidates() -> None:
                 "author": "作者 A",
                 "summary": "回答摘要",
                 "voteup": 88,
+                "published_at": 1783492200,
+                "published_label": "3 天前",
             },
             {
                 "scope": "zhihu_search",
@@ -110,6 +112,29 @@ def test_zhihu_discovery_items_to_contents_maps_search_candidates() -> None:
     assert first.like_count == 88
     assert first.score_threshold == 0.60
     assert first.source_keyword_id == 42
+    assert first.published_at == "2026-07-08T06:30:00Z"
+    assert first.published_label == "3 天前"
+
+
+def test_zhihu_discovery_items_to_contents_ignores_interaction_time_for_publication() -> None:
+    from openbiliclaw.sources.zhihu_tasks import zhihu_discovery_items_to_contents
+
+    contents = zhihu_discovery_items_to_contents(
+        [
+            {
+                "scope": "zhihu_hot",
+                "title": "没有发布时间的问题",
+                "url": "https://www.zhihu.com/question/99",
+                "content_type": "question",
+                "content_id": "99",
+                "interaction_time": 1783492200,
+            }
+        ]
+    )
+
+    assert len(contents) == 1
+    assert contents[0].published_at == ""
+    assert contents[0].published_label == ""
 
 
 def test_zhihu_discovery_items_to_contents_maps_non_search_sources() -> None:

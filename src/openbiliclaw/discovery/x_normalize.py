@@ -29,6 +29,7 @@ import re
 from typing import Any
 
 from openbiliclaw.discovery.engine import DiscoveredContent
+from openbiliclaw.published_time import normalize_published_time
 
 # Card titles read better when short; the full text always lives in body_text.
 _TITLE_MAX_LEN = 140
@@ -152,6 +153,10 @@ def normalize_tweet(
 
     cover_url = _first_media_url(raw.get("media"))
     tags = _extract_hashtags(text)
+    published = normalize_published_time(
+        raw.get("createdAtISO") or raw.get("createdAt"),
+        label=raw.get("createdAtLocal"),
+    )
 
     return DiscoveredContent(
         title=title,
@@ -173,4 +178,6 @@ def normalize_tweet(
         bookmark_count=bookmark_count,
         tags=tags,
         description=body_text,
+        published_at=published.published_at,
+        published_label=published.published_label,
     )
