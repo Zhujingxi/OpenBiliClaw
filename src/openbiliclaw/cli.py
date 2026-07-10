@@ -5790,6 +5790,38 @@ async def run_guided_init(
         if coordinator is not None and run_id is not None and task_id:
             coordinator.register_enqueued_task(run_id, task_id)
 
+    # Stage-1 per-source progress: stage 1 serially fetches/collects each
+    # selected source (single platform can block up to ~300s), so surface which
+    # source is in flight and how many are done — otherwise the GUI bar sits at
+    # 13% for minutes (init-progress spec Phase 1). done counts sources that
+    # finished; total is the count of selected sources (B站 is the first).
+    _stage1_source_total = sum(
+        (
+            include_bili,
+            include_xhs,
+            include_dy,
+            include_yt,
+            include_x,
+            include_zhihu,
+            include_reddit,
+        )
+    )
+    _stage1_source_done = 0
+
+    async def _stage1_begin_source(label: str) -> None:
+        if coordinator is not None and run_id is not None:
+            await coordinator.stage_progress(
+                run_id,
+                1,
+                done=_stage1_source_done,
+                total=_stage1_source_total,
+                note=f"正在采集 {label}",
+            )
+
+    def _stage1_finish_source() -> None:
+        nonlocal _stage1_source_done
+        _stage1_source_done += 1
+
     async def _enqueue_register_kick(
         enqueue_fn: Callable[..., str | None], source: str
     ) -> str | None:
@@ -5828,6 +5860,7 @@ async def run_guided_init(
     favorites_data: list[dict[str, Any]] = []
     following_data: list[dict[str, Any]] = []
     if include_bili:
+        await _stage1_begin_source("B 站")
         history, favorites_data, following_data = await _fetch_bilibili_init_data(
             client,
             history_limit=history_limit,
@@ -5841,6 +5874,7 @@ async def run_guided_init(
             f" / 收藏 [green]{len(favorites_data)}[/green] 个"
             f" / 关注 [green]{len(following_data)}[/green] 人"
         )
+        _stage1_finish_source()
     else:
         console.print("  [dim]未选择 B 站来源,跳过 B 站历史 / 收藏 / 关注拉取。[/dim]")
 
@@ -5848,9 +5882,13 @@ async def run_guided_init(
     # run them in a worker thread (Database is check_same_thread=False) so
     # the API event loop isn't frozen for the collect window. CLI output /
     # ordering is unchanged (it's sequential here regardless).
+    if include_xhs:
+        await _stage1_begin_source("小红书")
     xhs_events, xhs_scope_counts, xhs_status = await asyncio.to_thread(
         _collect_xhs_bootstrap_events, xhs_task_id
     )
+    if include_xhs:
+        _stage1_finish_source()
     if xhs_status == "ok":
         console.print(
             "  小红书 "
@@ -5881,9 +5919,13 @@ async def run_guided_init(
             "  [dim]已请求扩展拉抖音发布 / 收藏 / 点赞 / 关注"
             "(开始抢一次浏览器焦点,~60-90 秒)。[/dim]"
         )
+    if include_dy:
+        await _stage1_begin_source("抖音")
     dy_events, dy_scope_counts, dy_status = await asyncio.to_thread(
         _collect_dy_bootstrap_events, dy_task_id
     )
+    if include_dy:
+        _stage1_finish_source()
     if dy_status == "ok":
         console.print(
             "  抖音 "
@@ -5916,9 +5958,13 @@ async def run_guided_init(
             "  [dim]已请求扩展拉 YouTube 观看历史 / 订阅 / 点赞"
             "(开始抢一次浏览器焦点,~30-90 秒)。[/dim]"
         )
+    if include_yt:
+        await _stage1_begin_source("YouTube")
     yt_events, yt_scope_counts, yt_status = await asyncio.to_thread(
         _collect_yt_bootstrap_events, yt_task_id
     )
+    if include_yt:
+        _stage1_finish_source()
     if yt_status == "ok":
         console.print(
             "  YouTube "
@@ -5949,9 +5995,13 @@ async def run_guided_init(
         console.print(
             "  [dim]已请求扩展拉知乎浏览 / 收藏 / 点赞(使用当前浏览器登录态,~30-90 秒)。[/dim]"
         )
+    if include_zhihu:
+        await _stage1_begin_source("知乎")
     zhihu_events, zhihu_scope_counts, zhihu_status = await asyncio.to_thread(
         _collect_zhihu_bootstrap_events, zhihu_task_id
     )
+    if include_zhihu:
+        _stage1_finish_source()
     if zhihu_status == "ok":
         zhihu_activity_favorites = int(zhihu_scope_counts.get("zhihu_activity_favorite", 0))
         zhihu_favorites = (
@@ -5983,10 +6033,12 @@ async def run_guided_init(
     x_likes_data: list[dict[str, Any]] = []
     x_bookmarks_data: list[dict[str, Any]] = []
     if include_x:
+        await _stage1_begin_source("X")
         x_likes_data, x_bookmarks_data = await _fetch_x_init_data(
             likes_limit=_INIT_X_LIKES_LIMIT,
             bookmarks_limit=_INIT_X_BOOKMARKS_LIMIT,
         )
+        _stage1_finish_source()
         if x_likes_data or x_bookmarks_data:
             console.print(
                 f"  X 点赞 [green]{len(x_likes_data)}[/green] 条"
@@ -6001,9 +6053,13 @@ async def run_guided_init(
         console.print(
             "  [dim]已请求扩展拉 Reddit 收藏 / 点赞 / 订阅(使用当前浏览器登录态,~30-90 秒)。[/dim]"
         )
+    if include_reddit:
+        await _stage1_begin_source("Reddit")
     reddit_events, reddit_scope_counts, reddit_status = await asyncio.to_thread(
         _collect_reddit_bootstrap_events, reddit_task_id
     )
+    if include_reddit:
+        _stage1_finish_source()
     if reddit_status == "ok":
         console.print(
             "  Reddit "
@@ -6131,12 +6187,26 @@ async def run_guided_init(
     await _stage_started(2)
     _print_section_title("2/4 分析偏好")
     console.print(f"  总信号量: [green]{len(events)}[/green] 条事件")
+
+    # Per-chunk progress so stage 2 (a multi-minute chunked LLM batch) advances
+    # instead of sitting static (init-progress spec Phase 1). API path maps each
+    # chunk onto coordinator.stage_progress; CLI path (no coordinator) prints an
+    # equivalent line alongside the existing eta countdown (spec Phase 4).
+    async def _stage2_progress(done: int, total: int) -> None:
+        if coordinator is not None and run_id is not None:
+            await coordinator.stage_progress(
+                run_id, 2, done=done, total=total, note=f"第 {done}/{total} 批"
+            )
+        else:
+            console.print(f"  [dim]分析偏好：第 {done}/{total} 批完成[/dim]")
+
     # Chunk the event list so bootstrap does bounded batch processing
     # instead of serialising one max-thinking call over hundreds of events.
     await _run_with_progress(
         soul_engine.analyze_events(
             events,
             event_chunk_size=DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
+            progress_callback=_stage2_progress,
         ),
         label="分析偏好（分片批处理）",
         eta_seconds=180,

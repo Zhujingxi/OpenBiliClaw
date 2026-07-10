@@ -388,3 +388,152 @@ def test_init_status_endpoint_surfaces_last_activity(tmp_path) -> None:
         body = client.get("/api/init-status").json()
     assert "last_activity" in body
     assert isinstance(body["last_activity"], str)
+
+
+# ── init-progress-visibility Phase 1: run_guided_init producer wiring ─────────
+
+
+class _RecordingCoordinator:
+    """Records the progress signals run_guided_init emits (no DB needed)."""
+
+    def __init__(self) -> None:
+        self.stage_progress_calls: list[dict] = []
+        self.started_stages: list[int] = []
+        self.done_stages: list[int] = []
+
+    async def stage_started(self, run_id: str, n: int) -> None:
+        self.started_stages.append(n)
+
+    async def stage_done(self, run_id: str, n: int, *, status: str = "ok", reason=None) -> None:
+        self.done_stages.append(n)
+
+    async def stage_progress(
+        self, run_id: str, stage: int, *, done: int, total: int, note=None
+    ) -> None:
+        self.stage_progress_calls.append(
+            {"stage": stage, "done": done, "total": total, "note": note}
+        )
+
+    def register_enqueued_task(self, run_id: str, task_id: str) -> None:
+        pass
+
+
+class _StubEngine:
+    def __init__(self, chunk_reports: int = 3) -> None:
+        self.chunk_reports = chunk_reports
+        self.received_callback = None
+
+    async def analyze_events(self, events, *, event_chunk_size=0, progress_callback=None):
+        self.received_callback = progress_callback
+        if progress_callback is not None:
+            for i in range(1, self.chunk_reports + 1):
+                await progress_callback(i, self.chunk_reports)
+
+    async def build_initial_profile(self, history):
+        return object()
+
+
+class _StubMemory:
+    async def propagate_event(self, event) -> None:
+        pass
+
+
+def _patch_run_guided_init_collectors(monkeypatch, engine) -> None:
+    import openbiliclaw.cli as cli
+
+    async def _fetch_bili(client, *, history_limit, favorite_limit, follow_limit):
+        return ([{"title": "hist-1"}], [], [])
+
+    async def _rwp(coro, **kwargs):
+        return await coro
+
+    async def _discover_backfill(profile, *, target_pool_count, label_suffix=""):
+        return 0
+
+    monkeypatch.setattr(cli, "_fetch_bilibili_init_data", _fetch_bili)
+    monkeypatch.setattr(
+        cli, "_history_item_to_event", lambda item: {"event_type": "view", "title": "hist-1"}
+    )
+    monkeypatch.setattr(cli, "_collect_xhs_bootstrap_events", lambda tid: ([], {}, "timeout"))
+    monkeypatch.setattr(cli, "_collect_dy_bootstrap_events", lambda tid: ([], {}, "timeout"))
+    monkeypatch.setattr(cli, "_collect_yt_bootstrap_events", lambda tid: ([], {}, "timeout"))
+    monkeypatch.setattr(cli, "_collect_zhihu_bootstrap_events", lambda tid: ([], {}, "timeout"))
+    monkeypatch.setattr(cli, "_collect_reddit_bootstrap_events", lambda tid: ([], {}, "timeout"))
+    monkeypatch.setattr(cli, "_enqueue_reddit_bootstrap_task", lambda kick=True: "task-r")
+    monkeypatch.setattr(cli, "_kick_task_dispatcher", lambda source: None)
+    monkeypatch.setattr(cli, "_build_draft_profile_for_discover", lambda memory: object())
+    monkeypatch.setattr(cli, "_run_with_progress", _rwp)
+    monkeypatch.setattr(cli, "_print_section_title", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_maybe_update_init_source_shares", lambda *a, **k: None)
+    return _discover_backfill
+
+
+async def test_run_guided_init_emits_stage_progress_for_sources_and_chunks(monkeypatch) -> None:
+    import openbiliclaw.cli as cli
+
+    engine = _StubEngine(chunk_reports=3)
+    discover_backfill = _patch_run_guided_init_collectors(monkeypatch, engine)
+    coord = _RecordingCoordinator()
+
+    await cli.run_guided_init(
+        client=object(),
+        memory=_StubMemory(),
+        soul_engine=engine,
+        favorite_limit=0,
+        follow_limit=0,
+        include_bili=True,
+        include_xhs=False,
+        include_dy=False,
+        include_yt=False,
+        include_x=False,
+        include_zhihu=False,
+        include_reddit=True,
+        target_pool_count=0,
+        discover_backfill=discover_backfill,
+        coordinator=coord,
+        run_id="run-1",
+    )
+
+    stage1 = [c for c in coord.stage_progress_calls if c["stage"] == 1]
+    # Two selected sources: B站 then Reddit — note switches, done increments 0→1.
+    assert [(c["done"], c["total"], c["note"]) for c in stage1] == [
+        (0, 2, "正在采集 B 站"),
+        (1, 2, "正在采集 Reddit"),
+    ]
+
+    stage2 = [c for c in coord.stage_progress_calls if c["stage"] == 2]
+    assert [(c["done"], c["total"]) for c in stage2] == [(1, 3), (2, 3), (3, 3)]
+    assert stage2[-1]["note"] == "第 3/3 批"
+
+    # Stages all completed (Task 1 clears any progress residue on stage_done).
+    assert coord.done_stages == [1, 2, 3, 4]
+
+
+async def test_run_guided_init_cli_path_uses_console_progress_callback(monkeypatch) -> None:
+    import openbiliclaw.cli as cli
+
+    engine = _StubEngine(chunk_reports=2)
+    discover_backfill = _patch_run_guided_init_collectors(monkeypatch, engine)
+
+    # No coordinator (CLI path): analyze_events must still receive a callback,
+    # and invoking it must not raise (it prints instead of hitting a coordinator).
+    await cli.run_guided_init(
+        client=object(),
+        memory=_StubMemory(),
+        soul_engine=engine,
+        favorite_limit=0,
+        follow_limit=0,
+        include_bili=True,
+        include_xhs=False,
+        include_dy=False,
+        include_yt=False,
+        include_x=False,
+        include_zhihu=False,
+        include_reddit=False,
+        target_pool_count=0,
+        discover_backfill=discover_backfill,
+        coordinator=None,
+        run_id=None,
+    )
+    assert engine.received_callback is not None
+    await engine.received_callback(1, 2)  # prints without error
