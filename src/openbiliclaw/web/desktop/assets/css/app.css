@@ -453,6 +453,10 @@
     .thumb::before { content: ""; position: absolute; inset: 18% 22%; border: 1px solid color-mix(in oklab, var(--surface), transparent 25%); border-radius: var(--radius-lg); }
     .thumb::after { content: ""; position: absolute; width: 38px; height: 38px; left: 50%; top: 50%; translate: -50% -50%; border-radius: var(--radius-pill); background: var(--surface); clip-path: polygon(36% 25%, 76% 50%, 36% 75%); }
     .delight .thumb::before { inset: 0; border: 0; border-radius: inherit; background: linear-gradient(135deg, color-mix(in oklab, var(--accent), var(--surface) 46%), var(--fg)); }
+    .delight .thumb.is-text-media { display: flex; align-items: flex-start; padding: var(--space-5); background: linear-gradient(135deg, color-mix(in oklab, var(--accent), var(--surface) 58%), color-mix(in oklab, var(--fg), var(--surface-warm) 76%)); cursor: pointer; }
+    .delight .thumb.is-text-media[data-platform="zhihu"] { background: linear-gradient(135deg, color-mix(in oklab, var(--platform-zhihu), var(--surface) 58%), color-mix(in oklab, var(--fg), var(--surface-warm) 82%)); }
+    .delight .thumb.is-text-media::before { inset: 0; border: 0; border-radius: inherit; background: color-mix(in oklab, var(--surface), transparent 28%); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+    .delight-text-media-copy { position: relative; z-index: 1; margin: 0; padding-right: 70px; color: var(--fg-2); font-size: var(--text-sm); line-height: 1.65; font-weight: 600; text-align: left; white-space: pre-wrap; word-break: break-word; display: -webkit-box; -webkit-line-clamp: 7; -webkit-box-orient: vertical; overflow: hidden; }
     .thumb.has-image::before { display: none; }
     .thumb.has-image::after { background: color-mix(in oklab, var(--surface), transparent 4%); box-shadow: 0 0 0 1px color-mix(in oklab, var(--fg), transparent 88%); }
     .delight-copy { min-width: 0; align-self: start; }

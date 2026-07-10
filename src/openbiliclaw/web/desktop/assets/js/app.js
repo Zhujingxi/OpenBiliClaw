@@ -5006,24 +5006,59 @@
       };
     }
 
+    function renderDelightTextMedia(thumb, delight) {
+      if (!thumb || !delight) return;
+      const bodyText = String(delight.body_text || "").trim();
+      if (!bodyText) return;
+      thumb.replaceChildren();
+      thumb.classList.remove("has-image");
+      thumb.classList.add("is-text-media");
+      thumb.dataset.platform = String(delight.source_platform || "bilibili").toLowerCase();
+      const text = document.createElement("p");
+      text.className = "delight-text-media-copy";
+      text.textContent = bodyText;
+      const badge = document.createElement("span");
+      badge.className = "platform";
+      badge.textContent = platformName(delight.source_platform);
+      thumb.append(text, badge);
+    }
+
+    function renderDelightFallbackMedia(thumb, delight) {
+      const bodyText = String(delight?.body_text || "").trim();
+      if (bodyText) {
+        renderDelightTextMedia(thumb, delight);
+        return;
+      }
+      thumb.replaceChildren();
+      thumb.classList.remove("has-image", "is-text-media");
+      delete thumb.dataset.platform;
+      if (!delight) return;
+      const badge = document.createElement("span");
+      badge.className = "platform";
+      badge.textContent = platformName(delight.source_platform);
+      thumb.append(badge);
+    }
+
     function renderDelightCover(delight) {
       const thumb = syncDelightThumbLink(delight);
       if (!thumb) return;
       const url = imageProxyUrl(delight?.cover_url);
       thumb.replaceChildren();
+      thumb.classList.remove("has-image", "is-text-media");
+      delete thumb.dataset.platform;
       thumb.classList.toggle("has-image", Boolean(url));
       // 设置 banner 背景图（模糊用）
       const banner = $("#delightBanner");
       if (banner) banner.style.setProperty("--cover-url", url ? `url("${url}")` : "none");
       if (!delight) return;
-      // 平台徽章不依赖封面 —— 无封面(文本类内容/封面缺失)时用户仍需知道来源平台
+      if (!url) {
+        renderDelightFallbackMedia(thumb, delight);
+        return;
+      }
+      // 平台徽章不依赖封面 —— 图片正常加载时也始终标明内容来源。
       const badge = document.createElement("span");
       badge.className = "platform";
       badge.textContent = platformName(delight.source_platform);
-      if (!url) {
-        thumb.append(badge);
-        return;
-      }
       const image = document.createElement("img");
       if (isCrossOriginBase()) image.crossOrigin = "anonymous";
       image.alt = "";
@@ -5033,8 +5068,9 @@
       image.referrerPolicy = "no-referrer";
       image.src = url;
       image.addEventListener("error", () => {
-        image.remove();
-        thumb.classList.remove("has-image");
+        if (!image.isConnected || image.parentElement !== thumb) return;
+        renderDelightFallbackMedia(thumb, delight);
+        if (banner) banner.style.setProperty("--cover-url", "none");
       });
       thumb.append(image);
       thumb.append(badge);

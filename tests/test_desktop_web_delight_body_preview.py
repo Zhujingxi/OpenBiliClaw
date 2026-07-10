@@ -37,3 +37,21 @@ def test_delight_excerpt_css_clamps_five_lines_until_expanded() -> None:
     assert "-webkit-line-clamp: 5" in APP_CSS
     assert ".delight-excerpt.is-expanded .delight-excerpt-text" in APP_CSS
     assert "-webkit-line-clamp: unset" in APP_CSS
+
+
+def test_missing_or_failed_delight_cover_uses_text_media_fallback() -> None:
+    render_cover = _function_body("renderDelightCover")
+    render_text = _function_body("renderDelightTextMedia")
+    render_fallback = _function_body("renderDelightFallbackMedia")
+    assert "renderDelightFallbackMedia(thumb, delight)" in render_cover
+    assert 'image.addEventListener("error"' in render_cover
+    assert "image.parentElement !== thumb" in render_cover
+    assert "renderDelightTextMedia(thumb, delight)" in render_fallback
+    assert 'String(delight?.body_text || "").trim()' in render_fallback
+    assert 'text.className = "delight-text-media-copy"' in render_text
+    assert "text.textContent = bodyText" in render_text
+    assert 'thumb.classList.add("is-text-media")' in render_text
+    assert "thumb.dataset.platform" in render_text
+    assert ".delight .thumb.is-text-media" in APP_CSS
+    assert ".delight-text-media-copy" in APP_CSS
+    assert '.delight .thumb.is-text-media[data-platform="zhihu"]' in APP_CSS
