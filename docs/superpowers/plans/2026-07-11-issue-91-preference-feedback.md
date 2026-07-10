@@ -1,5 +1,10 @@
 # Issue #91 Preference Feedback Repair Implementation Plan
 
+> **2026-07-11 用户决策更新：** Tasks 3-6 中新增推荐区“推荐不准？ / 编辑画像 /
+> 直接告诉阿B”入口的步骤已由
+> `2026-07-11-remove-recommendation-correction-entry.md` 取代。最终实现不在桌面、移动或
+> 插件推荐区保留任何纠偏引导入口；原有画像页和对话页功能保持不变。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make recommendation feedback affect both topic axes, preserve the real source platform, and give users clear, consistent preference-correction actions across desktop, mobile, and extension surfaces.
