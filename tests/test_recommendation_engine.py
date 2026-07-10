@@ -6,6 +6,8 @@ import asyncio
 import json
 import logging
 import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -239,6 +241,102 @@ def test_select_diversified_batch_keeps_one_accessible_entry_when_available() ->
         }
         for item in batch
     )
+
+
+@pytest.mark.asyncio
+async def test_select_diversified_batch_async_matches_sync_output() -> None:
+    candidates = [
+        DiscoveredContent(
+            bvid=f"BV{i}",
+            title=f"candidate-{i}",
+            topic_group=f"topic-{i % 3}",
+            style_key="tutorial" if i % 2 else "deep_dive",
+            relevance_score=1.0 - i / 20,
+        )
+        for i in range(8)
+    ]
+    embeddings = {
+        item.bvid: [float(index % 3 == axis) for axis in range(3)]
+        for index, item in enumerate(candidates)
+    }
+
+    expected = RecommendationEngine._select_diversified_batch(
+        candidates,
+        limit=5,
+        embeddings=embeddings,
+    )
+    actual = await RecommendationEngine._select_diversified_batch_async(
+        candidates,
+        limit=5,
+        embeddings=embeddings,
+    )
+
+    assert [item.bvid for item in actual] == [item.bvid for item in expected]
+
+
+@pytest.mark.asyncio
+async def test_select_diversified_batch_async_keeps_event_loop_responsive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    main_thread = threading.get_ident()
+    worker_threads: list[int] = []
+    heartbeat_ran = asyncio.Event()
+
+    def blocking_selector(
+        cls: type[RecommendationEngine],
+        candidates: list[DiscoveredContent],
+        **kwargs: object,
+    ) -> list[DiscoveredContent]:
+        del cls, kwargs
+        worker_threads.append(threading.get_ident())
+        time.sleep(0.08)
+        return candidates[:1]
+
+    monkeypatch.setattr(
+        RecommendationEngine,
+        "_select_diversified_batch",
+        classmethod(blocking_selector),
+    )
+
+    async def heartbeat() -> None:
+        await asyncio.sleep(0.01)
+        heartbeat_ran.set()
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+    result = await RecommendationEngine._select_diversified_batch_async(
+        [DiscoveredContent(bvid="BV1", title="one")],
+        limit=1,
+    )
+    await heartbeat_task
+
+    assert heartbeat_ran.is_set()
+    assert [item.bvid for item in result] == ["BV1"]
+    assert worker_threads and worker_threads[0] != main_thread
+
+
+@pytest.mark.asyncio
+async def test_supergroup_canonical_map_async_matches_sync_output() -> None:
+    embeddings = {
+        "动漫": [1.0, 0.0],
+        "动漫文化": [0.99, 0.01],
+        "科技": [0.0, 1.0],
+    }
+    kwargs = {
+        "strict": 0.90,
+        "loose": 0.80,
+        "prefix_len": 2,
+    }
+
+    expected = RecommendationEngine._build_supergroup_canonical_map(
+        embeddings,
+        **kwargs,
+    )
+    actual = await RecommendationEngine._build_supergroup_canonical_map_async(
+        embeddings,
+        **kwargs,
+    )
+
+    assert actual == expected == {"动漫文化": "动漫"}
 
 
 def test_select_diversified_batch_caps_newly_confirmed_amplification_direction() -> None:

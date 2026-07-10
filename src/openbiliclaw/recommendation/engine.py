@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -393,11 +394,9 @@ class RecommendationEngine:
         # the hot path. The elapsed/coverage log below makes regressions
         # in cache warming visible — sustained "elapsed > 500ms" or
         # "coverage < 100%" means warm hooks are missing items.
-        import time as _time
-
-        _embed_t0 = _time.monotonic()
+        _embed_t0 = time.monotonic()
         embeddings = await self._fetch_candidate_embeddings(candidates)
-        _embed_elapsed_ms = (_time.monotonic() - _embed_t0) * 1000.0
+        _embed_elapsed_ms = (time.monotonic() - _embed_t0) * 1000.0
         if candidates:
             logger.info(
                 "MMR embedding fetch: coverage=%d/%d elapsed=%.0fms",
@@ -406,7 +405,7 @@ class RecommendationEngine:
                 _embed_elapsed_ms,
             )
 
-        ranked = self._select_diversified_batch(
+        ranked = await self._select_diversified_batch_async(
             candidates,
             limit=limit,
             score_override=score_override,
@@ -522,6 +521,77 @@ class RecommendationEngine:
     _SUPERGROUP_STRICT_THRESHOLD = 0.90
     _SUPERGROUP_LOOSE_THRESHOLD = 0.80
     _SUPERGROUP_PREFIX_LEN = 2
+
+    @staticmethod
+    def _build_supergroup_canonical_map(
+        embeddings: dict[str, list[float]],
+        *,
+        strict: float,
+        loose: float,
+        prefix_len: int,
+    ) -> dict[str, str]:
+        """Build a deterministic union-find map from topic embeddings."""
+        from openbiliclaw.llm.embedding import cosine_similarity
+
+        labels = list(embeddings.keys())
+        parent: dict[str, str] = {label: label for label in labels}
+
+        def find(x: str) -> str:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: str, b: str) -> None:
+            ra, rb = find(a), find(b)
+            if ra == rb:
+                return
+            if rb < ra:
+                ra, rb = rb, ra
+            parent[rb] = ra
+
+        for index, first in enumerate(labels):
+            for second in labels[index + 1 :]:
+                similarity = cosine_similarity(embeddings[first], embeddings[second])
+                shared_prefix = (
+                    first[:prefix_len] == second[:prefix_len]
+                    and len(first) >= prefix_len
+                )
+                if similarity >= strict or (shared_prefix and similarity >= loose):
+                    union(first, second)
+
+        return {
+            label: canonical
+            for label in labels
+            if (canonical := find(label)) != label
+        }
+
+    @classmethod
+    async def _build_supergroup_canonical_map_async(
+        cls,
+        embeddings: dict[str, list[float]],
+        *,
+        strict: float,
+        loose: float,
+        prefix_len: int,
+    ) -> dict[str, str]:
+        """Build the CPU-heavy pairwise map without blocking the event loop."""
+        started = time.monotonic()
+        result = await asyncio.to_thread(
+            cls._build_supergroup_canonical_map,
+            embeddings,
+            strict=strict,
+            loose=loose,
+            prefix_len=prefix_len,
+        )
+        elapsed = time.monotonic() - started
+        if elapsed > 0.05:
+            logger.warning(
+                "Topic supergroup CPU build took %.0fms in worker thread (%d labels)",
+                elapsed * 1000.0,
+                len(embeddings),
+            )
+        return result
 
     async def _merge_topic_supergroups(
         self,
@@ -643,8 +713,6 @@ class RecommendationEngine:
             self._supergroup_canonical_map = {}
             return len(groups)
 
-        from openbiliclaw.llm.embedding import cosine_similarity
-
         embedding_service = self._embedding_service
 
         async def _embed_with_titles(label: str, titles: list[str]) -> tuple[str, list[float]]:
@@ -660,39 +728,13 @@ class RecommendationEngine:
             self._supergroup_canonical_map = {}
             return len(embeddings)
 
-        # Union-find on the embeddings to derive canonical labels
         labels = list(embeddings.keys())
-        parent: dict[str, str] = {label: label for label in labels}
-
-        def find(x: str) -> str:
-            while parent[x] != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
-
-        def union(a: str, b: str) -> None:
-            ra, rb = find(a), find(b)
-            if ra == rb:
-                return
-            if rb < ra:
-                ra, rb = rb, ra
-            parent[rb] = ra
-
-        strict = self._SUPERGROUP_STRICT_THRESHOLD
-        loose = self._SUPERGROUP_LOOSE_THRESHOLD
-        prefix_len = self._SUPERGROUP_PREFIX_LEN
-        for i, ga in enumerate(labels):
-            for gb in labels[i + 1 :]:
-                sim = cosine_similarity(embeddings[ga], embeddings[gb])
-                shared_prefix = ga[:prefix_len] == gb[:prefix_len] and len(ga) >= prefix_len
-                if sim >= strict or (shared_prefix and sim >= loose):
-                    union(ga, gb)
-
-        new_map: dict[str, str] = {}
-        for label in labels:
-            canonical = find(label)
-            if canonical != label:
-                new_map[label] = canonical
+        new_map = await self._build_supergroup_canonical_map_async(
+            embeddings,
+            strict=self._SUPERGROUP_STRICT_THRESHOLD,
+            loose=self._SUPERGROUP_LOOSE_THRESHOLD,
+            prefix_len=self._SUPERGROUP_PREFIX_LEN,
+        )
         self._supergroup_canonical_map = new_map
 
         if new_map:
@@ -1887,6 +1929,40 @@ class RecommendationEngine:
 
         results = await asyncio.gather(*(_warm(c) for c in items))
         return sum(1 for ok in results if ok)
+
+    @classmethod
+    async def _select_diversified_batch_async(
+        cls,
+        candidates: list[DiscoveredContent],
+        *,
+        limit: int,
+        score_override: dict[str, float] | None = None,
+        embeddings: dict[str, list[float]] | None = None,
+        amplification_guard: set[str] | frozenset[str] | None = None,
+        mmr_alpha: float = 0.5,
+        mmr_beta: float = 0.5,
+    ) -> list[DiscoveredContent]:
+        """Run CPU-heavy ranking in a worker thread to preserve responsiveness."""
+        started = time.monotonic()
+        result = await asyncio.to_thread(
+            cls._select_diversified_batch,
+            candidates,
+            limit=limit,
+            score_override=score_override,
+            embeddings=embeddings,
+            amplification_guard=amplification_guard,
+            mmr_alpha=mmr_alpha,
+            mmr_beta=mmr_beta,
+        )
+        elapsed = time.monotonic() - started
+        if elapsed > 0.05:
+            logger.warning(
+                "Recommendation diversity CPU selection took %.0fms in worker thread "
+                "(%d candidates)",
+                elapsed * 1000.0,
+                len(candidates),
+            )
+        return result
 
     @classmethod
     def _select_diversified_batch(
