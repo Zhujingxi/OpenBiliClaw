@@ -95,16 +95,27 @@ _LLM_MODERATION_MARKERS = (
     "10013",
 )
 
+_LLM_AUTH_MARKERS = ("authentication", "unauthorized", "invalid api key", "401")
+_LLM_QUOTA_MARKERS = (
+    "rate limit",
+    "insufficient_quota",
+    "insufficient quota",
+    "quota",
+    "exhausted",
+    "429",
+)
+
 
 def describe_llm_failure(exc: BaseException) -> str | None:
     """Translate an LLM exception chain into a short, human-readable Chinese
     reason suitable for page-side display during guided init.
 
     Walks the ``__cause__`` / ``__context__`` chain (cycle-safe) and returns a
-    one-line explanation the user can act on — a content-moderation refusal, an
-    exhausted provider/fallback chain, rate limiting, a timeout, or an empty
-    response. Returns ``None`` when the chain carries no recognizable LLM
-    signal, so callers can fall back to their own generic message.
+    one-line explanation the user can act on — a content-moderation refusal,
+    authentication failure, exhausted provider/fallback chain, rate limiting,
+    a timeout, or an empty response. Returns ``None`` when the chain carries no
+    recognizable LLM signal, so callers can fall back to their own generic
+    message.
 
     Ordering is by specificity: a moderation refusal is the most actionable
     (switch models), so it wins over the coarser transient buckets.
@@ -114,13 +125,18 @@ def describe_llm_failure(exc: BaseException) -> str | None:
 
     seen: set[int] = set()
     current: BaseException | None = exc
-    moderation = rate_limited = timed_out = no_provider = empty_response = False
+    moderation = auth_failed = rate_limited = False
+    timed_out = no_provider = empty_response = False
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         message = str(current).lower()
         if any(marker.lower() in message for marker in _LLM_MODERATION_MARKERS):
             moderation = True
-        if isinstance(current, LLMRateLimitError) or "rate limit" in message:
+        if any(marker in message for marker in _LLM_AUTH_MARKERS):
+            auth_failed = True
+        if isinstance(current, LLMRateLimitError) or any(
+            marker in message for marker in _LLM_QUOTA_MARKERS
+        ):
             rate_limited = True
         if isinstance(current, LLMTimeoutError) or "timed out" in message:
             timed_out = True
@@ -134,11 +150,18 @@ def describe_llm_failure(exc: BaseException) -> str | None:
 
     if moderation:
         return (
-            "AI 服务上游因内容合规策略拒绝了本次请求；"
-            "可更换一个不带内容审查的模型 / 服务商后重试。"
+            "AI 服务上游因内容合规策略拒绝了本次请求；可更换一个不带内容审查的模型 / 服务商后重试。"
+        )
+    if auth_failed:
+        return (
+            "AI 服务鉴权失败（HTTP 401），API key 可能填错或已失效。"
+            "请到设置页检查 LLM provider 的 API key 后重试。"
         )
     if rate_limited:
-        return "AI 服务触发了限流（rate limit）；稍等片刻再重试即可。"
+        return (
+            "AI 服务额度用尽或被限流（HTTP 429）。请检查 LLM provider 的余额 / 套餐，"
+            "或在设置里配置一个备选 provider 兜底后重试。"
+        )
     if timed_out:
         return "AI 服务响应超时；请检查网络连通性或稍后重试。"
     if no_provider:
