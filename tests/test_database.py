@@ -171,6 +171,8 @@ def test_get_recommendations_rows_carry_card_metadata_columns(tmp_path: Path) ->
         cover_url="https://example.com/cover.jpg",
         source_platform="bilibili",
         content_type="video",
+        published_at="2026-07-08T06:30:00Z",
+        published_label="3 天前",
         relevance_score=0.9,
     )
     db.insert_recommendation("BV1meta", confidence=0.9, expression="试试", topic="测试")
@@ -186,3 +188,46 @@ def test_get_recommendations_rows_carry_card_metadata_columns(tmp_path: Path) ->
     assert row["favorite_count"] == 321
     assert row["comment_count"] == 654
     assert row["up_mid"] == 12345
+    assert row["published_at"] == "2026-07-08T06:30:00Z"
+    assert row["published_label"] == "3 天前"
+
+
+def test_content_cache_empty_rediscovery_does_not_erase_publication_time(
+    tmp_path: Path,
+) -> None:
+    db = _db(tmp_path)
+    db.cache_content("BV1TIME", title="A", published_at="2026-07-08T06:30:00Z")
+    db.cache_content("BV1TIME", title="A", published_at="")
+
+    row = db.conn.execute(
+        "SELECT published_at, published_label FROM content_cache WHERE bvid='BV1TIME'"
+    ).fetchone()
+
+    assert row["published_at"] == "2026-07-08T06:30:00Z"
+
+
+def test_legacy_content_tables_gain_publication_columns(tmp_path: Path) -> None:
+    db_path = tmp_path / "init.db"
+    db = Database(db_path)
+    db.initialize()
+    for table_name in ("content_cache", "discovery_candidates"):
+        existing = {
+            str(row["name"])
+            for row in db.conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        for column_name in ("published_at", "published_label"):
+            if column_name in existing:
+                db.conn.execute(f"ALTER TABLE {table_name} DROP COLUMN {column_name}")
+    db.conn.commit()
+    db.close()
+
+    migrated = Database(db_path)
+    migrated.initialize()
+
+    for table_name in ("content_cache", "discovery_candidates"):
+        columns = {
+            str(row["name"])
+            for row in migrated.conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        assert {"published_at", "published_label"} <= columns
+    migrated.close()

@@ -2572,6 +2572,8 @@ class RecommendationEngine:
                 up_mid=int(row.get("up_mid", 0) or 0),
                 duration=int(row.get("duration", 0) or 0),
                 description=str(row.get("description", "")),
+                published_at=str(row.get("published_at", "") or ""),
+                published_label=str(row.get("published_label", "") or ""),
                 cover_url=str(row.get("cover_url", "")),
                 view_count=int(row.get("view_count", 0) or 0),
                 like_count=int(row.get("like_count", 0) or 0),

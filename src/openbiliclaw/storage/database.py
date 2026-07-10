@@ -30,6 +30,7 @@ from openbiliclaw.discovery.inspiration import (
     _normalize_match_text,
     derive_inspiration_axis_id,
 )
+from openbiliclaw.published_time import normalize_published_time
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -548,6 +549,8 @@ CREATE TABLE IF NOT EXISTS content_cache (
     style_key   TEXT DEFAULT '',
     franchise_key TEXT DEFAULT '',  -- LLM IP/series; see _ensure_content_cache_topic_columns
     description TEXT,
+    published_at TEXT NOT NULL DEFAULT '',
+    published_label TEXT NOT NULL DEFAULT '',
     cover_url   TEXT,
     view_count  INTEGER DEFAULT 0,
     like_count  INTEGER DEFAULT 0,
@@ -600,6 +603,8 @@ CREATE TABLE IF NOT EXISTS discovery_candidates (
     up_name               TEXT NOT NULL DEFAULT '',
     up_mid                INTEGER NOT NULL DEFAULT 0,
     description           TEXT NOT NULL DEFAULT '',
+    published_at          TEXT NOT NULL DEFAULT '',
+    published_label       TEXT NOT NULL DEFAULT '',
     cover_url             TEXT NOT NULL DEFAULT '',
     duration              INTEGER NOT NULL DEFAULT 0,
     view_count            INTEGER NOT NULL DEFAULT 0,
@@ -1579,6 +1584,10 @@ class Database:
         """
         import json
 
+        published = normalize_published_time(
+            kwargs.get("published_at"),
+            label=kwargs.get("published_label"),
+        )
         self._execute_write(
             """
             INSERT INTO content_cache (
@@ -1593,6 +1602,8 @@ class Database:
                 style_key,
                 franchise_key,
                 description,
+                published_at,
+                published_label,
                 cover_url,
                 view_count,
                 like_count,
@@ -1620,7 +1631,8 @@ class Database:
                 source_keyword_id
             )
             VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(bvid) DO UPDATE SET
@@ -1655,6 +1667,16 @@ class Database:
                     ''
                 ),
                 description = excluded.description,
+                published_at = COALESCE(
+                    NULLIF(excluded.published_at, ''),
+                    content_cache.published_at,
+                    ''
+                ),
+                published_label = COALESCE(
+                    NULLIF(excluded.published_label, ''),
+                    content_cache.published_label,
+                    ''
+                ),
                 cover_url = COALESCE(
                     NULLIF(excluded.cover_url, ''),
                     content_cache.cover_url,
@@ -1754,6 +1776,8 @@ class Database:
                 _normalize_style_key_for_storage(kwargs.get("style_key", "")),
                 kwargs.get("franchise_key", ""),
                 kwargs.get("description", ""),
+                published.published_at,
+                published.published_label,
                 kwargs.get("cover_url", ""),
                 kwargs.get("view_count", 0),
                 kwargs.get("like_count", 0),
@@ -1846,6 +1870,10 @@ class Database:
                 self._candidate_value(candidate, "raw_payload", {}),
                 default={},
             )
+            published = normalize_published_time(
+                self._candidate_value(candidate, "published_at", ""),
+                label=self._candidate_value(candidate, "published_label", ""),
+            )
             score_threshold = float(self._candidate_value(candidate, "score_threshold", 0.0) or 0.0)
             cursor = self._execute_write(
                 """
@@ -1865,6 +1893,8 @@ class Database:
                     up_name,
                     up_mid,
                     description,
+                    published_at,
+                    published_label,
                     cover_url,
                     duration,
                     view_count,
@@ -1885,7 +1915,7 @@ class Database:
                 )
                 VALUES (
                     ?, 'pending_eval', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -1903,6 +1933,8 @@ class Database:
                     str(self._candidate_value(candidate, "up_name", "") or ""),
                     int(self._candidate_value(candidate, "up_mid", 0) or 0),
                     str(self._candidate_value(candidate, "description", "") or ""),
+                    published.published_at,
+                    published.published_label,
                     str(self._candidate_value(candidate, "cover_url", "") or ""),
                     int(self._candidate_value(candidate, "duration", 0) or 0),
                     int(self._candidate_value(candidate, "view_count", 0) or 0),
@@ -1932,10 +1964,12 @@ class Database:
             self._execute_write(
                 """
                 UPDATE discovery_candidates
-                SET last_seen_at = CURRENT_TIMESTAMP
+                SET last_seen_at = CURRENT_TIMESTAMP,
+                    published_at = COALESCE(NULLIF(?, ''), published_at, ''),
+                    published_label = COALESCE(NULLIF(?, ''), published_label, '')
                 WHERE candidate_key = ?
                 """,
-                (candidate_key,),
+                (published.published_at, published.published_label, candidate_key),
             )
         if max_pending_per_source is not None:
             max_pending = max(0, int(max_pending_per_source))
@@ -4450,6 +4484,8 @@ class Database:
                 COALESCE(c.source_platform, '') AS source_platform,
                 COALESCE(c.content_type, 'video') AS content_type,
                 COALESCE(c.body_text, '') AS body_text,
+                COALESCE(c.published_at, '') AS published_at,
+                COALESCE(c.published_label, '') AS published_label,
                 COALESCE(c.franchise_key, '') AS franchise_key,
                 COALESCE(c.duration, 0) AS duration,
                 COALESCE(c.view_count, 0) AS view_count,
@@ -4796,6 +4832,8 @@ class Database:
             "reply_count": "INTEGER DEFAULT 0",
             "retweet_count": "INTEGER DEFAULT 0",
             "bookmark_count": "INTEGER DEFAULT 0",
+            "published_at": "TEXT NOT NULL DEFAULT ''",
+            "published_label": "TEXT NOT NULL DEFAULT ''",
             # P1.8 yield provenance: the discovery_keywords.id that produced this
             # row (NULL for legacy / non-search / flag-off). Nullable, additive.
             "source_keyword_id": "INTEGER",
@@ -4829,6 +4867,8 @@ class Database:
             "reply_count": "INTEGER NOT NULL DEFAULT 0",
             "retweet_count": "INTEGER NOT NULL DEFAULT 0",
             "bookmark_count": "INTEGER NOT NULL DEFAULT 0",
+            "published_at": "TEXT NOT NULL DEFAULT ''",
+            "published_label": "TEXT NOT NULL DEFAULT ''",
             # P1.8 yield provenance: nullable, additive (existing rows stay NULL).
             "source_keyword_id": "INTEGER",
         }
