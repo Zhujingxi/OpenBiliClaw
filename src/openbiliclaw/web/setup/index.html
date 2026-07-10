@@ -84,6 +84,9 @@
     .progress-track { height: 8px; border-radius: 999px; background: #10131a; overflow: hidden; }
     .progress-fill { height: 100%; width: 0; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .3s ease; }
     .progress-label { margin: 9px 0 0; color: var(--muted); font-size: 13px; }
+    /* Liveness line (init-progress Phase 2): quiet while fresh, amber after
+       >90s without backend activity. */
+    .progress-label.stall-hint.stale { color: #d97706; }
     .adv { margin-top: 14px; }
     .adv summary { cursor: pointer; color: var(--muted); font-size: 13px; user-select: none; }
     .ext-steps { counter-reset: s; padding-left: 0; list-style: none; margin: 16px 0; }
@@ -189,6 +192,7 @@
         <div id="initProgress" class="progress" hidden>
           <div class="progress-track"><div class="progress-fill" id="initProgressBar"></div></div>
           <p class="progress-label" id="initProgressLabel">等待开始</p>
+          <p class="progress-label stall-hint" id="initStallHint" hidden></p>
         </div>
         <div class="msg" id="initReason"></div>
         <div class="msg" id="initEscape">后台会继续补齐首轮内容池，你可以<a href="/web">先进入应用 →</a>，首池就绪后推荐会自动出现。</div>
@@ -599,6 +603,8 @@
       $("#initProgress").hidden = false;
       $("#initProgressBar").style.width = "95%";
       $("#initProgressLabel").textContent = "画像已生成，正在整理首轮内容池…";
+      $("#initStallHint").hidden = true;
+      $("#initStallHint").classList.remove("stale");
       $("#startInit").disabled = true;
       $("#startInit").textContent = "整理首轮内容…";
       setInitReason("等第一批内容入池可刷后，初始化才会完成。", "info");
@@ -622,26 +628,126 @@
       return base || failedStage?.reason || "请稍后重试";
     }
 
-    function progressView(status) {
+    // ── Intra-stage progress + liveness (init-progress-visibility Phase 2) ──
+    // MIRROR of the reference implementation in
+    // extension/popup/popup-init-control.js (and desktop web app.js) — the
+    // three GUI surfaces share no module system, so keep the formulas in
+    // lock-step when editing any copy.
+    const STAGE_FRACTION_CAP = 0.95;
+    const STAGE_FRACTION_FALLBACK = 0.5;
+    // Calibration: backend heartbeat 30s × 3 missed beats (api/app.py
+    // _INIT_HEARTBEAT_INTERVAL_SECONDS) — change them in lock-step.
+    const INIT_STALL_THRESHOLD_SECONDS = 90;
+    const INIT_EXPECTATION_HINT = "整个过程通常需要 2–5 分钟，期间可离开此页面，进度会保留。";
+
+    const _runViewState = new Map();
+
+    function _viewState(runId) {
+      let st = _runViewState.get(runId);
+      if (!st) {
+        st = { stageStartMs: new Map(), maxPct: 0, lastMark: null, lastChangeMs: 0 };
+        _runViewState.set(runId, st);
+        if (_runViewState.size > 8) {
+          const oldest = _runViewState.keys().next().value;
+          if (oldest !== runId) _runViewState.delete(oldest);
+        }
+      }
+      return st;
+    }
+
+    function _runningStageFraction(stage, st, nowMs) {
+      const prog = stage?.progress;
+      const progTotal = prog ? Number(prog.total || 0) : 0;
+      if (progTotal > 0) {
+        const done = Math.max(0, Math.min(Number(prog.done || 0), progTotal));
+        return Math.min(STAGE_FRACTION_CAP, done / progTotal);
+      }
+      const eta = Number(stage?.eta_seconds || 0);
+      if (eta > 0 && st) {
+        let startMs = st.stageStartMs.get(stage.n);
+        if (startMs === undefined) {
+          startMs = nowMs;
+          st.stageStartMs.set(stage.n, startMs);
+        }
+        const elapsed = Math.max(0, (nowMs - startMs) / 1000);
+        return Math.min(STAGE_FRACTION_CAP, 1 - Math.exp(-elapsed / eta));
+      }
+      return STAGE_FRACTION_FALLBACK;
+    }
+
+    // "本阶段通常约 X 分钟" for a stage carrying eta_seconds ("" otherwise);
+    // X rounds UP to the nearest half minute.
+    function stageEtaText(stage) {
+      const eta = Number(stage?.eta_seconds || 0);
+      if (eta <= 0) return "";
+      const halfMinutes = Math.ceil(eta / 30) / 2;
+      return `本阶段通常约 ${halfMinutes} 分钟`;
+    }
+
+    // Liveness indicator driven by last_activity (bumped by every backend
+    // write incl. the 30s heartbeat). Staleness is measured from the CLIENT
+    // time the (sequence, last_activity) marker last changed — clock-skew
+    // immune. Old backends without the field get no stall detection.
+    function stalenessView(status, nowMs = Date.now()) {
+      if (!status?.running) return { fresh: true, staleSeconds: 0, text: "" };
+      const runId = status.run_id ? String(status.run_id) : "";
+      if (!runId || !status.last_activity) {
+        return { fresh: true, staleSeconds: 0, text: "● 进行中" };
+      }
+      const st = _viewState(runId);
+      const mark = `${status.sequence ?? ""}|${status.last_activity}`;
+      if (st.lastMark !== mark) {
+        st.lastMark = mark;
+        st.lastChangeMs = nowMs;
+      }
+      const staleSeconds = Math.max(0, Math.round((nowMs - st.lastChangeMs) / 1000));
+      if (staleSeconds > INIT_STALL_THRESHOLD_SECONDS) {
+        const minutes = Math.max(1, Math.round(staleSeconds / 60));
+        return {
+          fresh: false,
+          staleSeconds,
+          text: `后台已 ${minutes} 分钟没有新进展，可能是 AI 服务响应缓慢——可以继续等待，或取消后重试。`,
+        };
+      }
+      return { fresh: true, staleSeconds, text: "● 进行中" };
+    }
+
+    function progressView(status, nowMs = Date.now()) {
       const pull = embeddingPullProgressView(status);
       if (pull.active && !status?.running) {
-        return { pct: pull.pct, failed: null, label: pull.label };
+        return { pct: pull.pct, failed: null, label: pull.label, etaText: "" };
       }
       const total = status?.total_stages || 4;
       const stages = Array.isArray(status?.stages) ? status.stages : [];
       const done = stages.filter((s) => s.status === "ok").length;
       const failed = stages.find((s) => s.status === "failed" || s.status === "cancelled");
       const running = Boolean(status?.running);
+      const runId = status?.run_id ? String(status.run_id) : "";
+      const st = runId ? _viewState(runId) : null;
       const current = status?.current_stage || 0;
       const currentStage = stages.find((s) => s.n === current);
-      const pct = Math.max(0, Math.min(100, Math.round(((done + (running ? 0.5 : 0)) / total) * 100)));
+      let stageLabel = currentStage ? `${currentStage.n}/${total} ${currentStage.label}` : "";
+      const note = currentStage?.progress?.note;
+      if (stageLabel && note) stageLabel += ` · ${note}`;
+      const runningStages = stages.filter((s) => s.status === "running");
+      const inFlight = runningStages.length
+        ? runningStages.reduce((sum, s) => sum + _runningStageFraction(s, st, nowMs), 0) /
+          runningStages.length
+        : 0;
+      let pct = Math.max(0, Math.min(100, Math.round(((done + (running ? inFlight : 0)) / total) * 100)));
+      if (running) pct = Math.max(pct, 1);
+      if (st) {
+        st.maxPct = Math.max(st.maxPct, pct);
+        pct = st.maxPct;
+      }
       return {
-        pct: running ? Math.max(pct, 1) : pct,
+        pct,
         failed,
+        etaText: running ? stageEtaText(currentStage) : "",
         label: failed
           ? `初始化未完成：${initFailureText(status, failed)}`
           : running
-            ? `${currentStage ? `${currentStage.n}/${total} ${currentStage.label}` : "正在初始化"}（${Math.max(pct, 1)}%）`
+            ? `${stageLabel || "正在初始化"}（${pct}%）`
             : "初始化完成",
       };
     }
@@ -663,6 +769,18 @@
       const view = progressView(status);
       $("#initProgressBar").style.width = `${view.pct}%`;
       $("#initProgressLabel").textContent = view.label;
+      // Liveness line: "● 进行中 (+ typical stage duration)" while the backend
+      // keeps writing; amber stall copy after >90s of silence.
+      const staleness = stalenessView(status);
+      const stallText = status?.running
+        ? staleness.fresh
+          ? [staleness.text, view.etaText].filter(Boolean).join(" · ")
+          : staleness.text
+        : "";
+      const stallHint = $("#initStallHint");
+      stallHint.textContent = stallText;
+      stallHint.classList.toggle("stale", Boolean(status?.running) && !staleness.fresh);
+      stallHint.hidden = !stallText;
       $("#startInit").disabled = Boolean(status?.running);
       $("#startInit").textContent = status?.running ? "初始化进行中…" : view.failed ? "重试初始化" : "开始初始化";
     }
@@ -672,9 +790,13 @@
       renderInitSources();
       $("#initEscape").className = "msg";
       $("#initSources").style.display = "";
-      $("#initChecklist").innerHTML = '<li class="init-hint-row">点「开始初始化」会先检查 AI 服务 / 向量模型，以及所选平台的登录状态，通过才开始。</li>';
+      $("#initChecklist").innerHTML =
+        '<li class="init-hint-row">点「开始初始化」会先检查 AI 服务 / 向量模型，以及所选平台的登录状态，通过才开始。</li>' +
+        `<li class="init-hint-row">${INIT_EXPECTATION_HINT}</li>`;
       $("#initProgress").hidden = true;
       $("#initProgressBar").style.width = "0";
+      $("#initStallHint").hidden = true;
+      $("#initStallHint").classList.remove("stale");
       $("#startInit").disabled = false;
       $("#startInit").textContent = "开始初始化";
       setInitReason("");

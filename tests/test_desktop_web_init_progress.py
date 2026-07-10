@@ -69,3 +69,45 @@ def test_desktop_keeps_existing_override_states() -> None:
     assert "整理首轮内容池" in app_js
     # Embedding pull borrows the progress bar while idle.
     assert "embeddingPull.pct" in app_js
+
+
+# ── Setup wizard mirror (single-file inline JS, no test infra of its own) ────
+
+SETUP_HTML = Path("src/openbiliclaw/web/setup/index.html")
+
+
+def _setup_html() -> str:
+    return SETUP_HTML.read_text(encoding="utf-8")
+
+
+def test_setup_wizard_mirrors_progress_fraction_and_clamp() -> None:
+    html = _setup_html()
+    assert "STAGE_FRACTION_CAP" in html
+    assert "Math.exp(-elapsed / eta)" in html
+    assert "STAGE_FRACTION_FALLBACK" in html
+    assert "eta_seconds" in html
+    assert "progress?.note" in html
+    assert "maxPct" in html
+    assert "Math.max(st.maxPct, pct)" in html
+
+
+def test_setup_wizard_surfaces_stall_and_expectation_copy() -> None:
+    html = _setup_html()
+    assert "INIT_STALL_THRESHOLD_SECONDS = 90" in html
+    assert "stalenessView" in html
+    assert "last_activity" in html
+    assert "没有新进展" in html
+    assert "可以继续等待，或取消后重试" in html
+    assert "● 进行中" in html
+    assert "整个过程通常需要 2–5 分钟" in html
+    assert "本阶段通常约" in html
+    assert "initStallHint" in html
+
+
+def test_setup_wizard_keeps_first_pool_and_embedding_overrides() -> None:
+    html = _setup_html()
+    # First-pool wait pins 95%.
+    assert '"95%"' in html
+    assert "整理首轮内容池" in html
+    # Embedding pull borrows the progress bar while idle.
+    assert "pull.active && !status?.running" in html
