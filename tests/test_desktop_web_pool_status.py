@@ -199,16 +199,15 @@ def test_desktop_positive_feedback_keeps_recommendation_card_visible() -> None:
     end = app_js.index("\n    function finishRecommendationFeedback", start)
     body = app_js[start:end]
     assert "pendingActions.schedule(key" in body
-    assert 'undo.dataset.feedbackUndo = key;' in body
-    assert 'item.feedback_type = feedbackType;' in body
+    assert "undo.dataset.feedbackUndo = key;" in body
+    assert "item.feedback_type = feedbackType;" in body
     assert "renderAll()" not in body
     assert "removeRecommendationCard" not in body
     assert 'committed: "已记录喜欢，推荐会继续保留在当前列表。"' in body
     assert "function feedbackActionKey(item)" in app_js
     assert "`recommendation:${platform}:${contentId}`" in app_js
     assert (
-        'window.addEventListener("pagehide", () => { void pendingActions.flushAll(); });'
-        in app_js
+        'window.addEventListener("pagehide", () => { void pendingActions.flushAll(); });' in app_js
     )
 
 

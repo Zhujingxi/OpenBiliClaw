@@ -554,17 +554,12 @@ class RecommendationEngine:
             for second in labels[index + 1 :]:
                 similarity = cosine_similarity(embeddings[first], embeddings[second])
                 shared_prefix = (
-                    first[:prefix_len] == second[:prefix_len]
-                    and len(first) >= prefix_len
+                    first[:prefix_len] == second[:prefix_len] and len(first) >= prefix_len
                 )
                 if similarity >= strict or (shared_prefix and similarity >= loose):
                     union(first, second)
 
-        return {
-            label: canonical
-            for label in labels
-            if (canonical := find(label)) != label
-        }
+        return {label: canonical for label in labels if (canonical := find(label)) != label}
 
     @classmethod
     async def _build_supergroup_canonical_map_async(

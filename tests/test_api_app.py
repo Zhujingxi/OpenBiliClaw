@@ -10211,9 +10211,7 @@ def test_init_crash_detail_rewrites_llm_failure_to_advice() -> None:
 
     try:
         try:
-            raise RuntimeError(
-                "Error code: 500 - 根据相关法律法规，我们无法提供关于以下内容的答案"
-            )
+            raise RuntimeError("Error code: 500 - 根据相关法律法规，我们无法提供关于以下内容的答案")
         except RuntimeError as upstream:
             raise LLMProviderError("openai_compatible request failed") from upstream
     except LLMProviderError as exc:
@@ -11989,6 +11987,8 @@ class TestKeywordGenerationModeWrite:
         assert response.status_code == 200, response.text
         assert cfg.discovery.inspiration_search_enabled is False
         assert cfg.discovery.inspiration_replace_merged_keywords is False
+
+
 # ---------------------------------------------------------------------------
 # Probe defer ("暂时忽略") — button + chat routing
 # ---------------------------------------------------------------------------

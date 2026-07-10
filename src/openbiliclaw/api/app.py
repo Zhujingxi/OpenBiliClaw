@@ -16,7 +16,7 @@ import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 from urllib.parse import quote, urlparse
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -4296,7 +4296,7 @@ def create_app(
 
     @app.post("/api/recommendations/reshuffle", response_model=RecommendationReshuffleResponse)
     async def reshuffle_recommendations(
-        payload: RecommendationReshuffleIn | None = Body(default=None),
+        payload: Annotated[RecommendationReshuffleIn | None, Body()] = None,
     ) -> RecommendationReshuffleResponse:
         if ctx.recommendation_engine is None or ctx.soul_engine is None:
             return RecommendationReshuffleResponse(items=[])
