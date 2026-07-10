@@ -900,7 +900,11 @@ class TestMobileWebViewModels:
 
         assert "export async function respondToProbe(domain, responseType, options = {})" in api_js
         assert 'surface: "profile"' in profile_js
-        assert 'payload.surface = "profile"' in desktop_js
+        assert "if (!isAvoidance && surface) payload.surface = surface;" in desktop_js
+        assert (
+            'submitProbeResponse(type, domain, response, { surface: "profile", keepalive })'
+            in desktop_js
+        )
         assert 'respondToProbe(domain, action, { surface: "profile" })' in profile_js
 
     def test_profile_edit_interest_specifics_are_editable_in_web_surfaces(self) -> None:
