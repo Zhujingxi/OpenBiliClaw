@@ -5,6 +5,7 @@
  */
 
 import type { ActionHint, PageType, PlatformAdapter } from "../types.js";
+import { queryParam } from "./search-query.ts";
 
 const BV_PATTERN = /(BV[0-9A-Za-z]{10})/;
 
@@ -64,9 +65,11 @@ export const bilibiliAdapter: PlatformAdapter = {
   sourcePlatform: "bilibili",
   detectPageType: detectBilibiliPageType,
   extractContentId: extractBvid,
+  extractSearchQuery: (url) => queryParam(url, "keyword"),
   cardSelector: CARD_SELECTOR,
   searchInputSelector: SEARCH_INPUT_SELECTOR,
   videoSelector: "video",
+  dwellPageTypes: ["video"],
   inferActionType: inferBilibiliActionType,
   buildEventMetadata(url: string): Record<string, unknown> {
     return { bvid: extractBvid(url) };

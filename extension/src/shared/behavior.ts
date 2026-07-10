@@ -42,6 +42,14 @@ function elementClassName(element: Element): string {
   return typeof value === "string" ? value : (element.getAttribute("class") ?? "");
 }
 
+function readPressedState(element: Element): boolean | null {
+  const raw = element.getAttribute("aria-pressed");
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  // Absent or any other value ("mixed", etc.) → unknown; fail open.
+  return null;
+}
+
 export function buildActionHintFromClickTarget(target: Element): ActionHint {
   const actionElement =
     target.closest(PRIMARY_ACTION_TARGET_SELECTOR) ??
@@ -52,6 +60,7 @@ export function buildActionHintFromClickTarget(target: Element): ActionHint {
     ariaLabel:
       actionElement.getAttribute("aria-label") ?? actionElement.getAttribute("title"),
     className: elementClassName(actionElement),
+    pressed: readPressedState(actionElement),
   };
 }
 

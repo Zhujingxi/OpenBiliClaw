@@ -21,6 +21,14 @@ export interface ActionHint {
   text: string | null;
   ariaLabel: string | null;
   className: string;
+  /**
+   * `aria-pressed` state of the attributed control:
+   * `true` / `false` for the two explicit states, `null` when the
+   * attribute is absent or carries any other value (fail open).
+   * A pressed like/favorite/follow control means the click withdraws
+   * the action (a retraction).
+   */
+  pressed: boolean | null;
 }
 
 /**
@@ -35,6 +43,15 @@ export interface PlatformAdapter {
   /** Identifier stored on every event, e.g. "bilibili" | "xiaohongshu". */
   readonly sourcePlatform: string;
 
+  /**
+   * Where this platform's authoritative strong signals come from.
+   * `"dom"` (default) — the DOM click path is the source of truth, so a
+   * pressed-control click emits a retraction. `"tap"` — a MAIN-world
+   * network tap (X's GraphQL tap) emits the authoritative retraction, so
+   * the DOM path only suppresses the positive event to avoid a duplicate.
+   */
+  readonly strongSignalSource?: "dom" | "tap";
+
   /** Classify the current URL into a coarse page type for context. */
   detectPageType(url: string): PageType;
 
@@ -44,6 +61,15 @@ export interface PlatformAdapter {
    * URL doesn't point at a single piece of content.
    */
   extractContentId(url: string): string | null;
+
+  /**
+   * Pull the search query from a result-page URL, following this
+   * adapter's own `detectPageType` search patterns (query param or path
+   * segment). Returns null for query-less search pages (e.g. X `/explore`)
+   * so the kernel emits nothing. Covers Enter, search-button clicks, and
+   * suggestion clicks — the result URL is the ground truth.
+   */
+  extractSearchQuery?(url: string): string | null;
 
   /**
    * CSS selector for clickable content cards in the feed. Used by
@@ -63,6 +89,13 @@ export interface PlatformAdapter {
    * have a single play/pause-able player worth tracking.
    */
   readonly videoSelector: string | null;
+
+  /**
+   * PageTypes whose dwell is worth measuring. Video platforms use
+   * `["video"]` (play-state gated); content platforms opt their reading
+   * pages in (visibility gated). Defaults to `["video"]` when omitted.
+   */
+  readonly dwellPageTypes?: string[];
 
   /** Map a clicked element's text/aria/className hint to a strong-signal action type. */
   inferActionType(hint: ActionHint): string | null;

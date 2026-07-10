@@ -31,6 +31,19 @@
 
 ## 公开 API
 
+### 事件回看（跨源去重用）
+
+```python
+urls = db.recent_event_urls(
+    ["view", "favorite"],
+    within_hours=48,
+    exclude_source="account_sync",  # 跳过 metadata.source 等于该值的行
+    limit=2000,
+)
+```
+
+`recent_event_urls()` 是 `query_events()` 的薄封装，返回窗口内指定类型事件的非空 `url` 集合；`exclude_source` 逐行解析 `metadata` JSON 过滤来源。`AccountSyncService` 用它做扩展 ↔ 账号拉取的跨源去重（键提取——bvid / mid / tweet ID——在调用方完成，helper 保持通用）。
+
 ### Discovery Candidates
 
 ```python

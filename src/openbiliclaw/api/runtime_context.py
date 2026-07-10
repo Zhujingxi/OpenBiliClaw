@@ -130,6 +130,27 @@ def _build_yt_scraper_client() -> Any:
     return YtScraperClient()
 
 
+def _build_account_sync_x_client(config: Any) -> Any | None:
+    """Build an ``XClient`` for scheduled X sync when a cookie resolves.
+
+    Reuses ``resolve_x_cookie`` exactly as init/discovery do; returns ``None``
+    when no cookie is available so account_sync's X path stays fully inert.
+    """
+    try:
+        from openbiliclaw.sources.x_auth import resolve_x_cookie
+        from openbiliclaw.sources.x_client import XClient
+
+        twitter_cfg = getattr(getattr(config, "sources", None), "twitter", None)
+        cookie_env = str(getattr(twitter_cfg, "cookie_env", "OPENBILICLAW_X_COOKIE"))
+        cookie = resolve_x_cookie(data_dir=config.data_path, cookie_env=cookie_env)
+        if not cookie:
+            return None
+        return XClient(cookie=cookie)
+    except Exception:
+        logger.debug("account_sync: X client construction skipped", exc_info=True)
+        return None
+
+
 def build_youtube_discovery_producer(
     *,
     config: Any,
@@ -855,6 +876,8 @@ class RuntimeContext:
             soul_engine=new_soul_engine,
             sync_interval_hours=new_config.scheduler.account_sync_interval_hours,
             llm_work_allowed=self.background_llm_work_allowed,
+            database=self.database,
+            x_client=_build_account_sync_x_client(new_config),
         )
 
         # 10. Dialogue (with source management tools)

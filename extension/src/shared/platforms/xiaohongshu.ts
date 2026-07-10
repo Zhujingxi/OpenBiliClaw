@@ -5,6 +5,7 @@
  */
 
 import type { ActionHint, PageType, PlatformAdapter } from "../types.js";
+import { queryParam } from "./search-query.ts";
 
 // 24-char hex note ids (e.g. "69dea966000000001a0280ad").
 const NOTE_ID_PATTERN = /\/(?:explore|discovery\/item|search_result)\/([0-9a-f]{24})/i;
@@ -57,9 +58,11 @@ export const xiaohongshuAdapter: PlatformAdapter = {
   sourcePlatform: "xiaohongshu",
   detectPageType: detectXiaohongshuPageType,
   extractContentId: extractNoteId,
+  extractSearchQuery: (url) => queryParam(url, "keyword"),
   cardSelector: CARD_SELECTOR,
   searchInputSelector: SEARCH_INPUT_SELECTOR,
   videoSelector: null,
+  dwellPageTypes: ["note"],
   inferActionType: inferXiaohongshuActionType,
   buildEventMetadata(url: string): Record<string, unknown> {
     return { note_id: extractNoteId(url) };

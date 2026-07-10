@@ -971,12 +971,19 @@ class SoulEngine:
         """Feedback batch implementation guarded by ``_feedback_batch_lock``."""
         state = self._memory.load_feedback_state()
         last_processed_id = self._to_int(state.get("last_processed_feedback_event_id", 0))
-        feedback_events = [
+        all_feedback_events = [
             self._deserialize_event(event)
             for event in self._memory.query_events_since(
                 after_event_id=last_processed_id,
                 event_types=["feedback"],
             )
+        ]
+        # Retractions (X unlike/unbookmark) are neutralizations, not
+        # preference-learning input — exclude them from BOTH the threshold
+        # count and the LLM analysis batch. They still advance the cursor
+        # below so they aren't rescanned every cycle.
+        feedback_events = [
+            event for event in all_feedback_events if not self._is_retraction_feedback(event)
         ]
         feedback_count = len(feedback_events)
         if feedback_count < self._feedback_batch_threshold:
@@ -1051,9 +1058,15 @@ class SoulEngine:
             source="feedback",
         )
 
+        # Advance past everything scanned (retractions included) so excluded
+        # rows aren't rescanned each cycle.
+        last_scanned_id = max(
+            (self._to_int(event.get("id", 0)) for event in all_feedback_events),
+            default=0,
+        )
         self._memory.save_feedback_state(
             {
-                "last_processed_feedback_event_id": self._to_int(feedback_events[-1].get("id", 0)),
+                "last_processed_feedback_event_id": last_scanned_id,
                 "last_feedback_reanalyzed_at": datetime.now().isoformat(),
             }
         )
@@ -1585,6 +1598,14 @@ class SoulEngine:
         ]
         dislikes = self._as_str_list(preference.get("disliked_topics", []))
         return self._build_topic_context_line([*interests[:2], *dislikes[:1]])
+
+    @staticmethod
+    def _is_retraction_feedback(event: dict[str, Any]) -> bool:
+        """True when a deserialized feedback event is an X retraction."""
+        metadata = event.get("metadata")
+        if not isinstance(metadata, dict):
+            return False
+        return str(metadata.get("feedback_type") or "").strip().lower() == "retraction"
 
     @staticmethod
     def _deserialize_event(event: dict[str, Any]) -> dict[str, Any]:

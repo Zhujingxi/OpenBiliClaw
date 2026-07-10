@@ -93,6 +93,25 @@ test("classifyXResponseUrl handles the REST follow path", () => {
   );
 });
 
+test("classifyXResponseUrl maps un-action ops to retraction", () => {
+  assert.equal(
+    classifyXResponseUrl("https://x.com/i/api/graphql/abc/UnfavoriteTweet"),
+    "retraction",
+  );
+  assert.equal(
+    classifyXResponseUrl("https://x.com/i/api/graphql/abc/DeleteBookmark"),
+    "retraction",
+  );
+  assert.equal(
+    classifyXResponseUrl("https://x.com/i/api/graphql/abc/DeleteRetweet"),
+    "retraction",
+  );
+});
+
+test("classifyXResponseUrl does NOT map DeleteTweet (own-tweet delete is not preference)", () => {
+  assert.equal(classifyXResponseUrl("https://x.com/i/api/graphql/abc/DeleteTweet"), null);
+});
+
 test("classifyXResponseUrl ignores discovery timelines (not engagement)", () => {
   assert.equal(classifyXResponseUrl("https://x.com/i/api/graphql/q/HomeTimeline"), null);
   assert.equal(classifyXResponseUrl("https://x.com/i/api/graphql/q/SearchTimeline"), null);
@@ -151,6 +170,39 @@ test("parseXMutation: TweetDetail → view with focalTweetId from the URL", () =
   const out = parseXMutation(loadFixture("tweet_detail.json"));
   assert.equal(out?.type, "view");
   assert.equal(out?.tweet_id, "1790000000000000006");
+});
+
+test("parseXMutation: UnfavoriteTweet → retraction with retracted_action=like", () => {
+  const out = parseXMutation({
+    url: "https://x.com/i/api/graphql/q/UnfavoriteTweet",
+    requestBody: JSON.stringify({ variables: { tweet_id: "1790000000000000010" } }),
+    responseBody: '{"data":{"unfavorite_tweet":"Done"}}',
+  });
+  assert.equal(out?.type, "retraction");
+  assert.equal(out?.tweet_id, "1790000000000000010");
+  assert.equal(out?.retracted_action, "like");
+});
+
+test("parseXMutation: DeleteBookmark → retraction with retracted_action=favorite", () => {
+  const out = parseXMutation({
+    url: "https://x.com/i/api/graphql/q/DeleteBookmark",
+    requestBody: JSON.stringify({ variables: { tweet_id: "1790000000000000011" } }),
+    responseBody: '{"data":{"tweet_bookmark_delete":"Done"}}',
+  });
+  assert.equal(out?.type, "retraction");
+  assert.equal(out?.tweet_id, "1790000000000000011");
+  assert.equal(out?.retracted_action, "favorite");
+});
+
+test("parseXMutation: DeleteRetweet → retraction with retracted_action=share", () => {
+  const out = parseXMutation({
+    url: "https://x.com/i/api/graphql/q/DeleteRetweet",
+    requestBody: JSON.stringify({ variables: { source_tweet_id: "1790000000000000012" } }),
+    responseBody: '{"data":{"unretweet":{"source_tweet_results":{}}}}',
+  });
+  assert.equal(out?.type, "retraction");
+  assert.equal(out?.tweet_id, "1790000000000000012");
+  assert.equal(out?.retracted_action, "share");
 });
 
 test("parseXMutation: returns null for an unrelated URL", () => {

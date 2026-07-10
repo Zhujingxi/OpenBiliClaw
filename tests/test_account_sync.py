@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -356,7 +356,9 @@ async def test_account_sync_auto_bootstrap_attempts_only_once_after_failure() ->
     assert second_result["synced"] is True
     assert len(soul.calls) == 2
     assert soul.bootstrap_calls == [[]]
-    assert soul.ready_checks == 1
+    # Phase 3: readiness is probed once per sync now (routing pipeline vs legacy),
+    # but the bootstrap itself is still attempted at most once (bootstrap_calls).
+    assert soul.ready_checks == 2
 
 
 @pytest.mark.asyncio
@@ -628,3 +630,1004 @@ async def test_account_sync_run_forever_logs_warning_when_rate_limited(caplog) -
     assert "rate-limited/cooling down" in caplog.text
     assert "Unexpected error in account sync loop" not in caplog.text
     assert not any(record.levelno >= logging.ERROR for record in caplog.records)
+
+
+# --- Task 2: cross-source dedup against extension-observed events -----------
+
+
+class _RecordingDedupDatabase:
+    """Stub DB exposing ``recent_event_urls`` with recorded call kwargs.
+
+    ``urls_by_type`` are treated as extension-observed URLs (source != the
+    excluded one). ``account_sync_urls_by_type`` are only returned when the
+    caller does NOT exclude ``account_sync`` — modeling the self-suppression
+    guard where account_sync's own prior rows must never suppress.
+    """
+
+    def __init__(
+        self,
+        urls_by_type: dict[str, set[str]] | None = None,
+        *,
+        account_sync_urls_by_type: dict[str, set[str]] | None = None,
+    ) -> None:
+        self.urls_by_type = urls_by_type or {}
+        self.account_sync_urls_by_type = account_sync_urls_by_type or {}
+        self.calls: list[dict[str, Any]] = []
+
+    def recent_event_urls(
+        self,
+        event_types: list[str],
+        *,
+        within_hours: int,
+        exclude_source: str | None = None,
+        limit: int = 2000,
+    ) -> set[str]:
+        self.calls.append(
+            {
+                "event_types": list(event_types),
+                "within_hours": within_hours,
+                "exclude_source": exclude_source,
+                "limit": limit,
+            }
+        )
+        result: set[str] = set()
+        for event_type in event_types:
+            result |= set(self.urls_by_type.get(event_type, set()))
+            if exclude_source != "account_sync":
+                result |= set(self.account_sync_urls_by_type.get(event_type, set()))
+        return result
+
+
+@pytest.mark.asyncio
+async def test_account_sync_dedups_history_already_seen_by_extension() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    soul = _FakeSoulEngine()
+    database = _RecordingDedupDatabase({"view": {"https://www.bilibili.com/video/BVX"}})
+    client = _FakeClient(
+        history_items=[
+            _history_item("BVX", 200, "already seen by extension"),
+            _history_item("BVY", 201, "new to backend"),
+        ],
+        favorites=[],
+        following=[],
+    )
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=client,
+        soul_engine=soul,
+        database=database,
+    )
+
+    result = await service.sync_now()
+
+    assert result["new_event_count"] == 1
+    assert [event["metadata"]["bvid"] for event in memory.events] == ["BVY"]
+    # Watermark advances over BVX even though it was deduped (no cursor stall).
+    assert memory.state["last_history_view_at"] == 201
+    assert any(call["within_hours"] == 48 for call in database.calls)
+
+
+@pytest.mark.asyncio
+async def test_account_sync_dedup_passes_exclude_source_account_sync() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    database = _RecordingDedupDatabase()
+    client = _FakeClient(
+        history_items=[_history_item("BVA", 100)],
+        favorites=[_favorite_folder_with_items(1, "BVB")],
+        following=[FollowingUser(mid=5, uname="UP")],
+    )
+    service = AccountSyncService(
+        memory_manager=_FakeMemoryManager(),
+        bilibili_client=client,
+        soul_engine=_FakeSoulEngine(),
+        database=database,
+    )
+
+    await service.sync_now()
+
+    assert database.calls
+    assert all(call["exclude_source"] == "account_sync" for call in database.calls)
+
+
+@pytest.mark.asyncio
+async def test_account_sync_self_suppression_guard_keeps_history_rewatch() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    # A prior account_sync-emitted view for BVZ exists in the window, but it
+    # must NOT suppress a re-watch that the history API surfaces again.
+    database = _RecordingDedupDatabase(
+        account_sync_urls_by_type={"view": {"https://www.bilibili.com/video/BVZ"}}
+    )
+    client = _FakeClient(
+        history_items=[_history_item("BVZ", 300, "re-watch seen via history only")],
+        favorites=[],
+        following=[],
+    )
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=client,
+        soul_engine=_FakeSoulEngine(),
+        database=database,
+    )
+
+    result = await service.sync_now()
+
+    assert result["new_event_count"] == 1
+    assert [event["metadata"]["bvid"] for event in memory.events] == ["BVZ"]
+
+
+@pytest.mark.asyncio
+async def test_account_sync_dedups_favorite_already_seen_by_extension() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    database = _RecordingDedupDatabase({"favorite": {"https://www.bilibili.com/video/BVFOLD"}})
+    client = _FakeClient(
+        history_items=[],
+        favorites=[_favorite_folder_with_items(1, "BVFOLD", "BVFNEW")],
+        following=[],
+    )
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=client,
+        soul_engine=_FakeSoulEngine(),
+        database=database,
+    )
+
+    result = await service.sync_now()
+
+    assert result["new_event_count"] == 1
+    assert [event["metadata"]["bvid"] for event in memory.events] == ["BVFNEW"]
+
+
+@pytest.mark.asyncio
+async def test_account_sync_dedups_follow_already_seen_by_extension() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    database = _RecordingDedupDatabase({"follow": {"https://space.bilibili.com/123"}})
+    client = _FakeClient(
+        history_items=[],
+        favorites=[],
+        following=[FollowingUser(mid=123, uname="老UP"), FollowingUser(mid=456, uname="新UP")],
+    )
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=client,
+        soul_engine=_FakeSoulEngine(),
+        database=database,
+    )
+
+    result = await service.sync_now()
+
+    assert result["new_event_count"] == 1
+    assert [event["metadata"]["up_mid"] for event in memory.events] == [456]
+
+
+@pytest.mark.asyncio
+async def test_account_sync_dedup_preserves_rewatch_outside_window(tmp_path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+    from openbiliclaw.storage.database import Database
+
+    db = Database(tmp_path / "dedup.db")
+    db.initialize()
+    old_url = "https://www.bilibili.com/video/BVREWATCH"
+    row_id = db.insert_event(
+        "view", url=old_url, title="old view", context="", metadata={"source": "extension"}
+    )
+    created = (datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=72)).isoformat(sep=" ")
+    db.conn.execute("UPDATE events SET created_at = ? WHERE id = ?", (created, row_id))
+    db.conn.commit()
+
+    memory = _FakeMemoryManager()
+    client = _FakeClient(
+        history_items=[_history_item("BVREWATCH", 400, "re-watch after window")],
+        favorites=[],
+        following=[],
+    )
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=client,
+        soul_engine=_FakeSoulEngine(),
+        database=db,
+    )
+
+    result = await service.sync_now()
+
+    # 72h old > 48h window → not suppressed.
+    assert result["new_event_count"] == 1
+    assert [event["metadata"]["bvid"] for event in memory.events] == ["BVREWATCH"]
+
+
+@pytest.mark.asyncio
+async def test_account_sync_logs_dedup_counts(caplog) -> None:
+    import logging
+
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    database = _RecordingDedupDatabase({"view": {"https://www.bilibili.com/video/BVDROP"}})
+    client = _FakeClient(
+        history_items=[_history_item("BVDROP", 100), _history_item("BVKEEP", 101)],
+        favorites=[],
+        following=[],
+    )
+    service = AccountSyncService(
+        memory_manager=_FakeMemoryManager(),
+        bilibili_client=client,
+        soul_engine=_FakeSoulEngine(),
+        database=database,
+    )
+
+    with caplog.at_level(logging.INFO):
+        await service.sync_now()
+
+    assert "deduped" in caplog.text
+
+
+# --- Task 3: unify account_sync into the profile pipeline when ready --------
+
+
+class _PipelineSpy:
+    def __init__(self, *, raise_on_ingest: bool = False) -> None:
+        self.batches: list[list[Any]] = []
+        self.raise_on_ingest = raise_on_ingest
+
+    async def ingest_batch(self, signals: list[Any]) -> None:
+        self.batches.append(list(signals))
+        if self.raise_on_ingest:
+            raise RuntimeError("ingest boom")
+
+
+class _ReadyPipelineEngine:
+    """Profile ready + pipeline present."""
+
+    def __init__(self, pipeline: Any) -> None:
+        self.pipeline = pipeline
+        self.analyze_calls: list[list[dict[str, Any]]] = []
+        self.bootstrap_calls: list[list[dict[str, Any]]] = []
+
+    def is_profile_ready(self) -> bool:
+        return True
+
+    async def analyze_events(self, events: list[dict[str, Any]]) -> None:
+        self.analyze_calls.append(events)
+
+    async def build_initial_profile(self, history: list[dict[str, Any]]) -> object:
+        self.bootstrap_calls.append(history)
+        return object()
+
+
+class _NoReadinessEngine:
+    """No ``is_profile_ready`` attribute → treated as not ready (legacy path)."""
+
+    def __init__(self) -> None:
+        self.pipeline = _PipelineSpy()
+        self.analyze_calls: list[list[dict[str, Any]]] = []
+
+    async def analyze_events(self, events: list[dict[str, Any]]) -> None:
+        self.analyze_calls.append(events)
+
+
+class _ReadinessRaisesEngine:
+    def __init__(self) -> None:
+        self.pipeline = _PipelineSpy()
+        self.analyze_calls: list[list[dict[str, Any]]] = []
+        self.bootstrap_calls: list[list[dict[str, Any]]] = []
+
+    def is_profile_ready(self) -> bool:
+        raise RuntimeError("readiness boom")
+
+    async def analyze_events(self, events: list[dict[str, Any]]) -> None:
+        self.analyze_calls.append(events)
+
+    async def build_initial_profile(self, history: list[dict[str, Any]]) -> object:
+        self.bootstrap_calls.append(history)
+        return object()
+
+
+def _history_client() -> _FakeClient:
+    return _FakeClient(
+        history_items=[_history_item("BVP1", 100), _history_item("BVP2", 101)],
+        favorites=[],
+        following=[],
+    )
+
+
+@pytest.mark.asyncio
+async def test_account_sync_ready_profile_uses_pipeline_only() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    pipeline = _PipelineSpy()
+    soul = _ReadyPipelineEngine(pipeline)
+    service = AccountSyncService(
+        memory_manager=memory, bilibili_client=_history_client(), soul_engine=soul
+    )
+
+    result = await service.sync_now()
+
+    assert result["new_event_count"] == 2
+    # Pipeline received one signal per event; analyze_events NOT called.
+    assert len(pipeline.batches) == 1
+    assert len(pipeline.batches[0]) == 2
+    assert soul.analyze_calls == []
+    assert soul.bootstrap_calls == []
+    # propagate_event persistence still happened first.
+    assert len(memory.events) == 2
+
+
+@pytest.mark.asyncio
+async def test_account_sync_ready_but_pipeline_missing_falls_back(caplog) -> None:
+    import logging
+
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    soul = _ReadyPipelineEngine(pipeline=None)
+    service = AccountSyncService(
+        memory_manager=memory, bilibili_client=_history_client(), soul_engine=soul
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await service.sync_now()
+
+    assert len(soul.analyze_calls) == 1
+    assert soul.bootstrap_calls == []  # profile exists → no bootstrap
+    assert len(memory.events) == 2
+    assert any(record.levelno >= logging.WARNING for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_account_sync_ready_pipeline_raises_falls_back(caplog) -> None:
+    import logging
+
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    pipeline = _PipelineSpy(raise_on_ingest=True)
+    soul = _ReadyPipelineEngine(pipeline)
+    service = AccountSyncService(
+        memory_manager=memory, bilibili_client=_history_client(), soul_engine=soul
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = await service.sync_now()
+
+    assert result["new_event_count"] == 2  # sync did not crash
+    assert len(pipeline.batches) == 1  # attempted
+    assert len(soul.analyze_calls) == 1  # fell back
+    assert soul.bootstrap_calls == []
+    assert any(record.levelno >= logging.WARNING for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_account_sync_not_ready_uses_legacy_path_with_bootstrap() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    soul = _BootstrapSoulEngine(ready=False)
+    service = AccountSyncService(
+        memory_manager=memory, bilibili_client=_history_client(), soul_engine=soul
+    )
+
+    await service.sync_now()
+
+    assert len(soul.calls) == 1  # analyze_events legacy path
+    assert soul.bootstrap_calls == [[]]  # bootstrap attempted
+    assert len(memory.events) == 2
+
+
+@pytest.mark.asyncio
+async def test_account_sync_missing_readiness_is_treated_as_not_ready() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    soul = _NoReadinessEngine()
+    service = AccountSyncService(
+        memory_manager=memory, bilibili_client=_history_client(), soul_engine=soul
+    )
+
+    await service.sync_now()
+
+    # Legacy analyze_events path; pipeline never engaged.
+    assert len(soul.analyze_calls) == 1
+    assert soul.pipeline.batches == []
+    assert len(memory.events) == 2
+
+
+@pytest.mark.asyncio
+async def test_account_sync_readiness_raising_is_treated_as_not_ready() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    soul = _ReadinessRaisesEngine()
+    service = AccountSyncService(
+        memory_manager=memory, bilibili_client=_history_client(), soul_engine=soul
+    )
+
+    await service.sync_now()
+
+    assert len(soul.analyze_calls) == 1  # conservative legacy path
+    assert soul.pipeline.batches == []
+    assert len(memory.events) == 2
+
+
+# --- Task 4: surface sync failures (logging + error kind) -------------------
+
+
+@dataclass
+class _KindClient:
+    """Client whose stages raise configurable exceptions for error-kind tests."""
+
+    history_exc: Exception | None = None
+    favorites_exc: Exception | None = None
+    following_exc: Exception | None = None
+    history_items: list[dict[str, Any]] | None = None
+
+    async def get_user_history(self, max_items: int = 100) -> list[dict[str, Any]]:
+        if self.history_exc is not None:
+            raise self.history_exc
+        return (self.history_items or [])[:max_items]
+
+    async def get_all_favorites(
+        self,
+        *,
+        max_folders: int = 10,
+        max_items_per_folder: int = 50,
+        max_total_items: int | None = None,
+    ) -> list[FavoriteFolderWithItems]:
+        if self.favorites_exc is not None:
+            raise self.favorites_exc
+        return []
+
+    async def get_following(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> list[FollowingUser]:
+        if self.following_exc is not None:
+            raise self.following_exc
+        return []
+
+
+@pytest.mark.asyncio
+async def test_account_sync_logs_warning_on_stage_failure(caplog) -> None:
+    import logging
+
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    service = AccountSyncService(
+        memory_manager=_FakeMemoryManager(),
+        bilibili_client=_KindClient(history_exc=RuntimeError("history boom")),
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await service.sync_now()
+
+    assert any(record.levelno >= logging.WARNING for record in caplog.records)
+    assert "history" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_account_sync_records_auth_expired_kind() -> None:
+    from openbiliclaw.bilibili.api import BilibiliAuthExpiredError
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_KindClient(history_exc=BilibiliAuthExpiredError("logged out")),
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    await service.sync_now()
+
+    assert memory.state["last_sync_error_kind"] == "auth_expired"
+
+
+@pytest.mark.asyncio
+async def test_account_sync_records_generic_error_kind() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_KindClient(history_exc=RuntimeError("boom")),
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    await service.sync_now()
+
+    assert memory.state["last_sync_error_kind"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_account_sync_auth_expired_kind_wins_over_generic() -> None:
+    from openbiliclaw.bilibili.api import BilibiliAuthExpiredError
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_KindClient(
+            favorites_exc=RuntimeError("generic favorites boom"),
+            following_exc=BilibiliAuthExpiredError("logged out"),
+        ),
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    await service.sync_now()
+
+    assert memory.state["last_sync_error_kind"] == "auth_expired"
+
+
+@pytest.mark.asyncio
+async def test_account_sync_clean_sync_clears_error_kind() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager({**_FakeMemoryManager().state, "last_sync_error_kind": "error"})
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_KindClient(history_items=[_history_item("BVOK", 100)]),
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    await service.sync_now()
+
+    assert memory.state["last_sync_error_kind"] == ""
+
+
+@pytest.mark.asyncio
+async def test_account_sync_runtime_status_exposes_error_kind() -> None:
+    from openbiliclaw.bilibili.api import BilibiliAuthExpiredError
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_KindClient(history_exc=BilibiliAuthExpiredError("logged out")),
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    await service.sync_now()
+    status = service.get_runtime_status()
+
+    assert status["last_account_sync_error_kind"] == "auth_expired"
+
+
+# --- Task 5: X (Twitter) scheduled incremental sync -------------------------
+
+
+class _FakeXClient:
+    def __init__(
+        self,
+        *,
+        likes: list[dict[str, Any]] | None = None,
+        bookmarks: list[dict[str, Any]] | None = None,
+        likes_exc: Exception | None = None,
+        bookmarks_exc: Exception | None = None,
+    ) -> None:
+        self._likes = likes or []
+        self._bookmarks = bookmarks or []
+        self.likes_exc = likes_exc
+        self.bookmarks_exc = bookmarks_exc
+        self.likes_calls = 0
+        self.bookmarks_calls = 0
+
+    async def likes(self, *, limit: int) -> list[dict[str, Any]]:
+        self.likes_calls += 1
+        if self.likes_exc is not None:
+            raise self.likes_exc
+        return self._likes[:limit]
+
+    async def bookmarks(self, *, limit: int) -> list[dict[str, Any]]:
+        self.bookmarks_calls += 1
+        if self.bookmarks_exc is not None:
+            raise self.bookmarks_exc
+        return self._bookmarks[:limit]
+
+
+def _tweet(tid: str, *, text: str = "hello world", screen: str = "alice") -> dict[str, Any]:
+    return {"id": tid, "text": text, "author": {"screenName": screen, "name": screen}}
+
+
+def _empty_bili_client() -> _FakeClient:
+    return _FakeClient(history_items=[], favorites=[], following=[])
+
+
+@pytest.mark.asyncio
+async def test_x_none_client_emits_no_x_events() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_FakeClient(
+            history_items=[_history_item("BVONLY", 100)], favorites=[], following=[]
+        ),
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    result = await service.sync_now()
+
+    assert result["new_event_count"] == 1
+    assert {e["event_type"] for e in memory.events} == {"view"}
+
+
+@pytest.mark.asyncio
+async def test_x_first_sync_seeds_from_persisted_events(tmp_path) -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+    from openbiliclaw.storage.database import Database
+
+    db = Database(tmp_path / "x.db")
+    db.initialize()
+    # init already persisted this like (x.com/<handle>/status/<id> form).
+    db.insert_event(
+        "like",
+        url="https://x.com/alice/status/100",
+        title="seeded",
+        context="",
+        metadata={"tweet_id": "100"},
+    )
+
+    memory = _FakeMemoryManager()
+    x_client = _FakeXClient(likes=[_tweet("100"), _tweet("200")])
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_empty_bili_client(),
+        soul_engine=_FakeSoulEngine(),
+        database=db,
+        x_client=x_client,
+    )
+
+    result = await service.sync_now()
+
+    # 100 was seeded from the events table → not re-emitted; 200 is post-init.
+    assert result["new_event_count"] == 1
+    like_events = [e for e in memory.events if e["event_type"] == "like"]
+    assert len(like_events) == 1
+    assert like_events[0]["metadata"]["tweet_id"] == "200"
+    assert like_events[0]["metadata"]["source_platform"] == "twitter"
+    assert like_events[0]["metadata"]["source"] == "account_sync"
+    saved = set(memory.state["x_like_ids"])
+    assert {"100", "200"} <= saved
+
+
+@pytest.mark.asyncio
+async def test_x_second_sync_emits_one_new_like_and_feeds_pipeline() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    base_state = _FakeMemoryManager().state
+    memory = _FakeMemoryManager({**base_state, "x_like_ids": ["100"], "x_bookmark_ids": []})
+    pipeline = _PipelineSpy()
+    soul = _ReadyPipelineEngine(pipeline)
+    x_client = _FakeXClient(likes=[_tweet("100"), _tweet("101")])
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_empty_bili_client(),
+        soul_engine=soul,
+        x_client=x_client,
+    )
+
+    result = await service.sync_now()
+
+    assert result["new_event_count"] == 1
+    like_events = [e for e in memory.events if e["event_type"] == "like"]
+    assert len(like_events) == 1
+    assert like_events[0]["metadata"]["tweet_id"] == "101"
+    assert like_events[0]["metadata"]["source_platform"] == "twitter"
+    # Fed through the Task 3 pipeline branch.
+    assert len(pipeline.batches) == 1
+    assert len(pipeline.batches[0]) == 1
+
+
+@pytest.mark.asyncio
+async def test_x_bookmarks_map_to_favorite_event() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    base_state = _FakeMemoryManager().state
+    memory = _FakeMemoryManager({**base_state, "x_bookmark_ids": ["seed"]})
+    x_client = _FakeXClient(bookmarks=[_tweet("300")])
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_empty_bili_client(),
+        soul_engine=_FakeSoulEngine(),
+        x_client=x_client,
+    )
+
+    await service.sync_now()
+
+    fav_events = [e for e in memory.events if e["event_type"] == "favorite"]
+    assert len(fav_events) == 1
+    assert fav_events[0]["metadata"]["tweet_id"] == "300"
+    assert fav_events[0]["metadata"]["source_platform"] == "twitter"
+
+
+@pytest.mark.asyncio
+async def test_x_id_set_capped_at_2000() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    base_state = _FakeMemoryManager().state
+    existing = [str(i) for i in range(2001)]
+    memory = _FakeMemoryManager({**base_state, "x_like_ids": existing, "x_bookmark_ids": ["x"]})
+    x_client = _FakeXClient(likes=[])
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_empty_bili_client(),
+        soul_engine=_FakeSoulEngine(),
+        x_client=x_client,
+    )
+
+    await service.sync_now()
+
+    assert len(memory.state["x_like_ids"]) == 2000
+
+
+@pytest.mark.asyncio
+async def test_x_fetch_error_records_error_and_preserves_bilibili(caplog) -> None:
+    import logging
+
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    base_state = _FakeMemoryManager().state
+    memory = _FakeMemoryManager({**base_state, "x_like_ids": ["seed"], "x_bookmark_ids": ["seed"]})
+    x_client = _FakeXClient(likes_exc=RuntimeError("x boom"))
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_FakeClient(
+            history_items=[_history_item("BVSAFE", 100)], favorites=[], following=[]
+        ),
+        soul_engine=_FakeSoulEngine(),
+        x_client=x_client,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = await service.sync_now()
+
+    # Bilibili view still flows despite the X failure.
+    assert any(e["event_type"] == "view" for e in memory.events)
+    assert result["new_event_count"] >= 1
+    assert "x boom" in str(memory.state["last_sync_error"])
+    assert memory.state["last_sync_error_kind"] == "error"
+    assert "x likes" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_x_cross_source_dedup_keys_on_tweet_id(tmp_path) -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+    from openbiliclaw.storage.database import Database
+
+    db = Database(tmp_path / "xdedup.db")
+    db.initialize()
+    # Extension reported the like at the /i/status/<id> form.
+    db.insert_event(
+        "like",
+        url="https://x.com/i/status/123",
+        title="ext like",
+        context="",
+        metadata={"source": "extension"},
+    )
+
+    base_state = _FakeMemoryManager().state
+    # Non-empty state disables seeding so only Task 2 dedup can suppress.
+    memory = _FakeMemoryManager({**base_state, "x_like_ids": ["999"], "x_bookmark_ids": ["999"]})
+    # account_sync fetches the same tweet under the /<handle>/status/<id> form.
+    x_client = _FakeXClient(likes=[_tweet("123", screen="someuser")])
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_empty_bili_client(),
+        soul_engine=_FakeSoulEngine(),
+        database=db,
+        x_client=x_client,
+    )
+
+    result = await service.sync_now()
+
+    # tweet 123 already observed by the extension → suppressed by cross-source dedup.
+    assert result["new_event_count"] == 0
+    assert memory.events == []
+
+
+# --- Task 6: favorites budget + following pagination ------------------------
+
+
+@dataclass
+class _PaginatedClient:
+    """Stub that paginates ``get_following`` and records fetch call args."""
+
+    following_pages: list[list[FollowingUser]] = field(default_factory=list)
+    favorites: list[FavoriteFolderWithItems] = field(default_factory=list)
+    fail_following_page: int | None = None
+    following_page_exc: Exception | None = None
+    favorites_call_kwargs: dict[str, Any] | None = None
+    following_calls: list[tuple[int, int]] = field(default_factory=list)
+
+    async def get_user_history(self, max_items: int = 100) -> list[dict[str, Any]]:
+        return []
+
+    async def get_all_favorites(
+        self,
+        *,
+        max_folders: int = 10,
+        max_items_per_folder: int = 50,
+        max_total_items: int | None = None,
+    ) -> list[FavoriteFolderWithItems]:
+        self.favorites_call_kwargs = {
+            "max_folders": max_folders,
+            "max_items_per_folder": max_items_per_folder,
+            "max_total_items": max_total_items,
+        }
+        return list(self.favorites)
+
+    async def get_following(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> list[FollowingUser]:
+        self.following_calls.append((page, page_size))
+        if self.fail_following_page is not None and page == self.fail_following_page:
+            raise self.following_page_exc or RuntimeError("following page boom")
+        idx = page - 1
+        if 0 <= idx < len(self.following_pages):
+            return list(self.following_pages[idx])
+        return []
+
+
+def _following_page(mids: range | list[int]) -> list[FollowingUser]:
+    return [FollowingUser(mid=mid, uname=f"up-{mid}") for mid in mids]
+
+
+@pytest.mark.asyncio
+async def test_account_sync_favorites_budget_passes_max_total_items() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    client = _PaginatedClient()
+    service = AccountSyncService(
+        memory_manager=_FakeMemoryManager(),
+        bilibili_client=client,
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    await service.sync_now()
+
+    assert client.favorites_call_kwargs == {
+        "max_folders": 200,
+        "max_items_per_folder": 50,
+        "max_total_items": 500,
+    }
+
+
+@pytest.mark.asyncio
+async def test_account_sync_following_paginates_until_short_page() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    client = _PaginatedClient(
+        following_pages=[
+            _following_page(range(1, 101)),  # full page (100)
+            _following_page(range(101, 201)),  # full page (100)
+            _following_page(range(201, 231)),  # short page (30) -> stop
+        ],
+    )
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=client,
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    result = await service.sync_now()
+
+    assert client.following_calls == [(1, 100), (2, 100), (3, 100)]
+    follow_events = [e for e in memory.events if e["event_type"] == "follow"]
+    assert len(follow_events) == 230
+    assert result["new_event_count"] == 230
+
+
+@pytest.mark.asyncio
+async def test_account_sync_following_stops_at_max_pages() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    client = _PaginatedClient(
+        following_pages=[_following_page(range(i * 100 + 1, i * 100 + 101)) for i in range(8)],
+    )
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=client,
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    await service.sync_now()
+
+    assert [page for page, _ in client.following_calls] == [1, 2, 3, 4, 5]
+    follow_events = [e for e in memory.events if e["event_type"] == "follow"]
+    assert len(follow_events) == 500
+
+
+@pytest.mark.asyncio
+async def test_account_sync_following_single_short_page_makes_one_call() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    client = _PaginatedClient(following_pages=[_following_page([1, 2, 3])])
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=client,
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    await service.sync_now()
+
+    assert client.following_calls == [(1, 100)]
+    follow_events = [e for e in memory.events if e["event_type"] == "follow"]
+    assert len(follow_events) == 3
+
+
+@pytest.mark.asyncio
+async def test_account_sync_following_dedups_across_paginated_union() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    # State already saw mids 1..100 (a prior page-1). New sync pulls two pages;
+    # only the genuinely-new mids (101..130) become follow events.
+    base_state = _FakeMemoryManager().state
+    memory = _FakeMemoryManager(
+        {**base_state, "following_mids": [str(mid) for mid in range(1, 101)]}
+    )
+    client = _PaginatedClient(
+        following_pages=[
+            _following_page(range(1, 101)),  # all already seen
+            _following_page(range(101, 131)),  # short page, all new
+        ],
+    )
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=client,
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    await service.sync_now()
+
+    assert client.following_calls == [(1, 100), (2, 100)]
+    follow_mids = {e["metadata"]["up_mid"] for e in memory.events if e["event_type"] == "follow"}
+    assert follow_mids == set(range(101, 131))
+
+
+@pytest.mark.asyncio
+async def test_account_sync_following_partial_page_failure_still_imports() -> None:
+    from openbiliclaw.bilibili.api import BilibiliAuthExpiredError
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager()
+    client = _PaginatedClient(
+        following_pages=[
+            _following_page(range(1, 101)),  # full page -> continue
+            [],  # unused; page 2 raises before returning
+        ],
+        fail_following_page=2,
+        following_page_exc=BilibiliAuthExpiredError("logged out"),
+    )
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=client,
+        soul_engine=_FakeSoulEngine(),
+    )
+
+    result = await service.sync_now()
+
+    # Page 1's follows are still imported despite page 2 failing.
+    follow_events = [e for e in memory.events if e["event_type"] == "follow"]
+    assert len(follow_events) == 100
+    assert result["new_event_count"] == 100
+    # The error is recorded, auth-expired precedence intact, timestamp stamped.
+    assert memory.state["last_sync_error_kind"] == "auth_expired"
+    assert "logged out" in str(memory.state["last_sync_error"])
+    assert memory.state["last_account_sync_at"]

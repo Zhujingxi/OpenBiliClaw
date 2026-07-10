@@ -3,6 +3,7 @@
  */
 
 import type { ActionHint, PageType, PlatformAdapter } from "../types.js";
+import { queryParam } from "./search-query.ts";
 
 const WATCH_ID_PATTERN = /[?&]v=([A-Za-z0-9_-]{6,})/;
 const SHORTS_ID_PATTERN = /\/shorts\/([A-Za-z0-9_-]{6,})/;
@@ -69,9 +70,11 @@ export const youtubeAdapter: PlatformAdapter = {
   sourcePlatform: "youtube",
   detectPageType: detectYoutubePageType,
   extractContentId: extractYoutubeVideoId,
+  extractSearchQuery: (url) => queryParam(url, "search_query"),
   cardSelector: CARD_SELECTOR,
   searchInputSelector: SEARCH_INPUT_SELECTOR,
   videoSelector: "video",
+  dwellPageTypes: ["video"],
   inferActionType: inferYoutubeActionType,
   buildEventMetadata(url: string): Record<string, unknown> {
     return { video_id: extractYoutubeVideoId(url) };

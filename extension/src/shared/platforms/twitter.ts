@@ -10,6 +10,7 @@
  */
 
 import type { ActionHint, PageType, PlatformAdapter } from "../types.js";
+import { queryParam } from "./search-query.ts";
 
 // Numeric tweet ids in /status/<id> URLs (15-20 digits in practice).
 const STATUS_ID_PATTERN = /\/status\/(\d+)/;
@@ -87,11 +88,17 @@ export function inferTwitterActionType(hint: ActionHint): string | null {
 
 export const twitterAdapter: PlatformAdapter = {
   sourcePlatform: "twitter",
+  // The MAIN-world GraphQL tap emits the authoritative like/unlike signals;
+  // the DOM click path must only suppress pressed-control clicks, never
+  // double-emit a retraction.
+  strongSignalSource: "tap",
   detectPageType: detectTwitterPageType,
   extractContentId: extractTweetId,
+  extractSearchQuery: (url) => queryParam(url, "q"),
   cardSelector: CARD_SELECTOR,
   searchInputSelector: SEARCH_INPUT_SELECTOR,
   videoSelector: null,
+  dwellPageTypes: ["status"],
   inferActionType: inferTwitterActionType,
   buildEventMetadata(url: string): Record<string, unknown> {
     return { tweet_id: extractTweetId(url) };

@@ -1461,6 +1461,59 @@ class Database:
         cursor = self.conn.execute(sql, params)
         return [dict(row) for row in cursor.fetchall()]
 
+    def recent_event_urls(
+        self,
+        event_types: list[str],
+        *,
+        within_hours: int,
+        exclude_source: str | None = None,
+        limit: int = 2000,
+    ) -> set[str]:
+        """Return the non-empty ``url`` values of recent events of the given types.
+
+        Thin wrapper over :meth:`query_events` used by account_sync's
+        cross-source dedup: events observed by the browser extension are
+        looked up here so a second (history/favorites/following/X) pull of
+        the same observation is not re-emitted.
+
+        ``exclude_source`` drops rows whose ``metadata.source`` equals the
+        given value (JSON parsed per row). account_sync always passes
+        ``exclude_source="account_sync"`` so its own prior rows never
+        suppress a genuine re-observation seen only via the pulled API.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        start_time = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=within_hours)
+        rows = self.query_events(
+            event_types=event_types,
+            start_time=start_time,
+            limit=limit,
+        )
+        urls: set[str] = set()
+        for row in rows:
+            url = str(row.get("url", "") or "").strip()
+            if not url:
+                continue
+            if exclude_source is not None and self._event_source(row) == exclude_source:
+                continue
+            urls.add(url)
+        return urls
+
+    @staticmethod
+    def _event_source(row: dict[str, Any]) -> str:
+        """Extract ``metadata.source`` from a raw event row (JSON string or dict)."""
+        metadata_raw = row.get("metadata")
+        if isinstance(metadata_raw, dict):
+            return str(metadata_raw.get("source", "") or "")
+        if isinstance(metadata_raw, str) and metadata_raw:
+            try:
+                parsed = json.loads(metadata_raw)
+            except (ValueError, TypeError):
+                return ""
+            if isinstance(parsed, dict):
+                return str(parsed.get("source", "") or "")
+        return ""
+
     def count_events_by_type(
         self,
         *,

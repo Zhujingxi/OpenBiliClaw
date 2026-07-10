@@ -14,6 +14,7 @@ from openbiliclaw.sources.event_format import (
     SOURCE_BILIBILI,
     SOURCE_XIAOHONGSHU,
     build_event,
+    default_signal_strength_for_event,
     format_event_context,
 )
 from openbiliclaw.sources.xhs_tasks import xhs_bootstrap_notes_to_events
@@ -402,6 +403,32 @@ def test_feedback_event_uses_natural_language_context() -> None:
     assert "封面太花哨" in event["context"]
     assert event["metadata"]["feedback_type"] == "dislike"
     assert event["metadata"]["source_platform"] == SOURCE_BILIBILI
+
+
+def test_default_signal_strength_search_is_explicit_intent() -> None:
+    """Search is weighted 0.5 (explicit-intent), above passive view (0.35)."""
+    assert default_signal_strength_for_event("search", {}) == 0.5
+    assert default_signal_strength_for_event("view", {}) == 0.35
+    assert default_signal_strength_for_event("favorite", {}) == 1.0
+
+
+def test_default_signal_strength_retraction_is_low() -> None:
+    """A retraction is weak evidence — 0.2 — even when metadata was stripped
+    of the extension-supplied signal_strength (server-built / re-ingested)."""
+    assert default_signal_strength_for_event("feedback", {"feedback_type": "retraction"}) == 0.2
+    # Plain feedback default is unchanged.
+    assert default_signal_strength_for_event("feedback", {"feedback_type": "dislike"}) == 1.0
+    assert default_signal_strength_for_event("feedback", {}) == 0.5
+
+
+def test_build_event_retraction_keeps_low_signal_strength() -> None:
+    event = build_event(
+        event_type="feedback",
+        source_platform="twitter",
+        title="a withdrawn like",
+        metadata={"feedback_type": "retraction", "retracted_action": "like"},
+    )
+    assert event["metadata"]["signal_strength"] == 0.2
 
 
 def test_twitter_label_and_context_render() -> None:

@@ -3739,6 +3739,7 @@ class TestBackendAPI:
             "manual_refresh_message": "",
             "last_account_sync_at": "2026-03-14T18:00:00+00:00",
             "last_account_sync_error": "",
+            "last_account_sync_error_kind": "",
             "auto_update_enabled": False,
             # The shared fixture points OPENBILICLAW_PROJECT_ROOT at a tmp dir
             # without .git, so the real AutoUpdateService reports unsupported.
@@ -3750,6 +3751,40 @@ class TestBackendAPI:
             "backend_update_state": "disabled",
             "backend_update_reason": "none",
         }
+
+    def test_runtime_status_endpoint_surfaces_account_sync_error_kind(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeRuntimeController:
+            def get_runtime_status(self) -> dict[str, object]:
+                return {
+                    "initialized": True,
+                    "recommendation_count": 0,
+                    "pending_signal_events": 0,
+                    "unread_count": 0,
+                }
+
+        class FakeAccountSyncService:
+            def get_runtime_status(self) -> dict[str, object]:
+                return {
+                    "last_account_sync_at": "2026-03-14T18:00:00+00:00",
+                    "last_account_sync_error": "logged out",
+                    "last_account_sync_error_kind": "auth_expired",
+                }
+
+        app = create_app(
+            memory_manager=object(),
+            database=object(),
+            soul_engine=object(),
+            runtime_controller=FakeRuntimeController(),
+            account_sync_service=FakeAccountSyncService(),
+        )
+        client = TestClient(app)
+
+        response = client.get("/api/runtime-status")
+
+        assert response.status_code == 200
+        assert response.json()["last_account_sync_error_kind"] == "auth_expired"
 
     def test_runtime_status_endpoint_includes_backend_update_summary(self) -> None:
         from fastapi.testclient import TestClient

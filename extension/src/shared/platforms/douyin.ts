@@ -7,6 +7,7 @@
  */
 
 import type { ActionHint, PageType, PlatformAdapter } from "../types.js";
+import { queryParam, searchPathSegment } from "./search-query.ts";
 
 const AWEME_ID_PATTERN = /\/video\/(\d{8,})/;
 
@@ -62,9 +63,11 @@ export const douyinAdapter: PlatformAdapter = {
   sourcePlatform: "douyin",
   detectPageType: detectDouyinPageType,
   extractContentId: extractAwemeId,
+  extractSearchQuery: (url) => searchPathSegment(url) ?? queryParam(url, "keyword"),
   cardSelector: CARD_SELECTOR,
   searchInputSelector: SEARCH_INPUT_SELECTOR,
   videoSelector: "video",
+  dwellPageTypes: ["video"],
   inferActionType: inferDouyinActionType,
   buildEventMetadata(url: string): Record<string, unknown> {
     return { aweme_id: extractAwemeId(url) };

@@ -9,7 +9,19 @@
  */
 
 import { computeActionBadge, flushResponseReportsUninitialized } from "./badge.js";
-import { enqueueBufferedEvent, shouldFlushImmediately } from "./buffer.js";
+import {
+  BUFFER_MAX_SIZE,
+  bufferReady,
+  drainParkedEvents,
+  enqueueEvent,
+  getBufferLength,
+  parkEvents,
+  persistBuffer,
+  prependBufferedEvents,
+  requeueEvents,
+  shouldFlushImmediately,
+  takeBufferedEvents,
+} from "./buffer.js";
 import {
   startXhsTaskPolling,
   handleXhsTaskAlarm,
@@ -84,9 +96,10 @@ import {
 } from "../shared/auth.ts";
 import type { BehaviorEvent } from "../shared/types.js";
 
-let eventBuffer: BehaviorEvent[] = [];
+// The event buffer + its chrome.storage.local persistence live in ./buffer.ts
+// so they survive MV3 service-worker recycling. BUFFER_MAX_SIZE is imported
+// from there; flush cadence stays here.
 const BUFFER_FLUSH_INTERVAL = 30_000;
-const BUFFER_MAX_SIZE = 50;
 const FLUSH_ALARM_NAME = "openbiliclaw-flush-events";
 const E2E_CAPTURE_SETTLE_MS = 1_000;
 // v0.3.22+: health probe before WS prevents extension-only installs
@@ -453,10 +466,11 @@ function scheduleWsReconnect(): void {
 // ---------------------------------------------------------------------------
 
 async function flushEvents(): Promise<void> {
-  if (eventBuffer.length === 0) return;
+  await bufferReady();
+  if (getBufferLength() === 0) return;
 
-  const events = [...eventBuffer];
-  eventBuffer = [];
+  const events = takeBufferedEvents();
+  await persistBuffer();
 
   try {
     const response = await authenticatedFetch(await apiUrl("/events"), {
@@ -467,27 +481,43 @@ async function flushEvents(): Promise<void> {
 
     if (!response.ok) {
       console.warn("[OpenBiliClaw] Backend returned", response.status);
-      eventBuffer.unshift(...events);
+      requeueEvents(events);
+      await persistBuffer();
       return;
     }
+    let uninitialized = false;
     try {
       // Pre-init the backend consumes-and-drops events (200 + rejected:
-      // not_initialized). Don't re-buffer — init refetches history wholesale —
-      // but surface the state on the toolbar badge instead of staying silent.
-      if (flushResponseReportsUninitialized(await response.json())) {
-        if (!backendUninitialized) {
-          backendUninitialized = true;
-          renderActionBadge();
-        }
-        console.debug("[OpenBiliClaw] Events dropped: backend not initialized yet");
-      }
+      // not_initialized). Instead of dropping browsing-behavior events
+      // (dwell/click/scroll) that init can never refetch, park them and drain
+      // once the backend reports initialized.
+      uninitialized = flushResponseReportsUninitialized(await response.json());
     } catch {
       // Non-JSON response — nothing to inspect.
+    }
+    if (uninitialized) {
+      if (!backendUninitialized) {
+        backendUninitialized = true;
+        renderActionBadge();
+      }
+      await parkEvents(events);
+      await persistBuffer();
+      console.debug("[OpenBiliClaw] Events parked: backend not initialized yet");
+    } else {
+      // Successful delivery: drain any previously-parked events into the front
+      // of the buffer (oldest-first) for the next cycle, then rewrite the
+      // mirror from the post-flush state.
+      const parked = await drainParkedEvents();
+      if (parked.length > 0) {
+        prependBufferedEvents(parked);
+      }
+      await persistBuffer();
     }
     await checkPendingNotification();
   } catch {
     console.warn("[OpenBiliClaw] Backend not available, buffering events");
-    eventBuffer.unshift(...events);
+    requeueEvents(events);
+    await persistBuffer();
   }
 }
 
@@ -671,11 +701,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message.action !== "BEHAVIOR_EVENT") return;
 
-  eventBuffer = enqueueBufferedEvent(eventBuffer, message.data as BehaviorEvent, BUFFER_MAX_SIZE);
-
-  if (eventBuffer.length >= BUFFER_MAX_SIZE || shouldFlushImmediately(message.data as BehaviorEvent)) {
-    void flushEvents();
-  }
+  const event = message.data as BehaviorEvent;
+  // enqueueEvent awaits the storage mirror before resolving, so a strong signal
+  // is on disk before the network flush starts — even if the SW dies mid-flush.
+  void (async () => {
+    const length = await enqueueEvent(event);
+    if (length >= BUFFER_MAX_SIZE || shouldFlushImmediately(event)) {
+      await flushEvents();
+    }
+  })();
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -689,11 +723,14 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     return;
   }
   if (alarm.name === FLUSH_ALARM_NAME) {
-    if (eventBuffer.length > 0) {
-      void flushEvents();
-      return;
-    }
-    void checkPendingNotification();
+    void (async () => {
+      await bufferReady();
+      if (getBufferLength() > 0) {
+        await flushEvents();
+        return;
+      }
+      await checkPendingNotification();
+    })();
   }
 });
 
@@ -723,6 +760,9 @@ chrome.notifications.onClicked.addListener((notificationId) => {
   void chrome.notifications.clear(notificationId);
 });
 
+// Kick off the restore gate at SW start so events persisted before a recycle
+// are back in the buffer for the next alarm flush, even without a fresh event.
+void bufferReady();
 ensureFlushAlarm();
 void (async () => { await ensureSession(); await connectRuntimeStream(); })();
 startPlatformTaskPolling();
