@@ -7,16 +7,33 @@ APP_JS = Path("src/openbiliclaw/web/desktop/assets/js/app.js")
 APP_CSS = Path("src/openbiliclaw/web/desktop/assets/css/app.css")
 
 
-def test_message_card_renders_defer_button_between_confirm_and_reject() -> None:
-    app_js = APP_JS.read_text(encoding="utf-8")
-    # Icon button in the message-card renderer, gray is-neutral styling.
-    assert 'data-probe="defer"' in app_js
-    assert 'class="feedback-icon-btn is-neutral"' in app_js
-    # Order: confirm ... defer ... reject within the card feedback icons.
-    confirm = app_js.index('data-probe="confirm"')
-    defer = app_js.index('data-probe="defer"')
-    reject = app_js.index('data-probe="reject"')
-    assert confirm < defer < reject
+def _function_body(js: str, name: str) -> str:
+    match = re.search(rf"function {name}\([^)]*\) \{{(?P<body>.*?)\n    \}}", js, flags=re.S)
+    assert match is not None, f"{name} function not found"
+    return match.group("body")
+
+
+def test_desktop_probe_actions_use_visible_semantic_copy() -> None:
+    js = APP_JS.read_text(encoding="utf-8")
+    render_body = _function_body(js, "renderMessages")
+    probe_branch = render_body[
+        render_body.index("const isAvoidance") : render_body.index("if (resolvedResult)")
+    ]
+
+    for label in (
+        "确认喜欢",
+        "暂时搁置",
+        "确认不喜欢",
+        "多聊聊",
+        "确认避雷",
+        "搁置避雷",
+        "不是雷点",
+    ):
+        assert label in js
+    assert 'data-probe="confirm"' in render_body
+    assert 'data-probe="defer"' in render_body
+    assert 'data-probe="reject"' in render_body
+    assert "feedback-icon-btn" not in probe_branch
 
 
 def test_profile_speculation_row_has_defer_button() -> None:

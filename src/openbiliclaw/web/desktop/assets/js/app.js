@@ -1399,6 +1399,15 @@
       window.setTimeout(() => input?.focus(), 100);
     }
 
+    async function openProfileCorrection() {
+      openProfilePage();
+      await enterProfileEdit();
+    }
+
+    function openChatCorrection() {
+      openChatPage();
+    }
+
     function openSettingsPage(panel = "models") {
       closeMobileMenu();
       document.querySelectorAll(".drawer.is-open, .overlay.is-open").forEach((drawer) => closePanel(drawer.id));
@@ -2711,6 +2720,7 @@
     function speculativeHtml(items, options = {}) {
       const isAvoidance = options.kind === "avoidance";
       const probeType = isAvoidance ? "avoidance.probe" : "interest.probe";
+      const actionCopy = probeActionCopy(probeType);
       const list = asArray(items).filter((item) => {
         if (typeof item !== "object") return !state.handledProbeKeys.has(probeKey(probeType, item));
         const domain = item.domain || item.name || item.title;
@@ -2743,7 +2753,7 @@
           ${item.reason ? `<p class="video-meta">${escapeHtml(item.reason)}</p>` : ""}
           ${specifics.length ? `<div class="spec-specifics">${specifics.map((s) => `<span class="spec-specific-chip">${escapeHtml(s.name)}${s.count > 0 ? `<span class="spec-specific-count">${s.count}</span>` : ""}</span>`).join("")}</div>` : ""}
           <p class="spec-help">${isAvoidance ? `置信度表示阿B认为你会避开这个方向的把握；确认次数来自后端累计的避雷确认信号，达到 ${threshold} 次后会进入更稳定的避雷画像。` : `置信度表示阿B认为你会喜欢这个方向的把握；确认次数来自后端累计的正向确认信号（包括但不限于这里的“喜欢”），达到 ${threshold} 次后会进入更稳定的兴趣画像。`}</p>
-          ${status === "active" && domain ? `<div class="spec-actions"><button class="probe-btn is-confirm" type="button" data-spec-response="confirm" data-spec-type="${isAvoidance ? "avoidance.probe" : "interest.probe"}">${isAvoidance ? "确实不喜欢" : "喜欢"}</button><button class="probe-btn is-neutral" type="button" data-spec-response="defer" data-spec-type="${isAvoidance ? "avoidance.probe" : "interest.probe"}">暂时忽略</button><button class="probe-btn is-reject" type="button" data-spec-response="reject" data-spec-type="${isAvoidance ? "avoidance.probe" : "interest.probe"}">${isAvoidance ? "不是" : "不喜欢"}</button></div>` : ""}
+          ${status === "active" && domain ? `<div class="spec-actions"><button class="probe-btn is-confirm" type="button" data-spec-response="confirm" data-spec-type="${probeType}">${actionCopy.confirm}</button><button class="probe-btn is-neutral" type="button" data-spec-response="defer" data-spec-type="${probeType}">${actionCopy.defer}</button><button class="probe-btn is-reject" type="button" data-spec-response="reject" data-spec-type="${probeType}">${actionCopy.reject}</button></div>` : ""}
         </div>`;
       }).join("")}</div>`;
     }
@@ -3224,6 +3234,25 @@
       return messageType({ type }) === "avoidance.probe";
     }
 
+    const PROBE_ACTION_COPY = Object.freeze({
+      interest: Object.freeze({
+        confirm: "确认喜欢",
+        defer: "暂时搁置",
+        reject: "确认不喜欢",
+        chat: "多聊聊",
+      }),
+      avoidance: Object.freeze({
+        confirm: "确认避雷",
+        defer: "搁置避雷",
+        reject: "不是雷点",
+        chat: "多聊聊",
+      }),
+    });
+
+    function probeActionCopy(type) {
+      return PROBE_ACTION_COPY[isAvoidanceProbe(type) ? "avoidance" : "interest"];
+    }
+
     function isChallengeProbe(item) {
       const mode = String(item?.probe_mode || "").toLowerCase();
       return Boolean(item?.challenge) || mode === "lateral" || mode === "bridge" || mode === "wildcard";
@@ -3383,14 +3412,17 @@
           el.classList.add(isAvoidance ? "is-avoidance-probe" : isChallenge ? "is-challenge-probe" : "is-interest-probe");
           const eyebrow = isAvoidance ? "避雷确认" : isChallenge ? "挑战探针" : "兴趣确认";
           const actionsLabel = isAvoidance ? "确认或排除这个避雷方向" : isChallenge ? "确认或排除这个挑战方向" : "确认或排除这个兴趣";
-          const confirmLabel = isAvoidance ? "确实不喜欢" : "喜欢";
-          const rejectLabel = isAvoidance ? "不是" : "不喜欢";
           const kindCopy = isAvoidance
             ? "想少看这类，就确认这是雷点；如果阿B猜错了，点不是。"
             : isChallenge
               ? "这是挑战方向，会把口味往侧边推一点；想继续试探就点喜欢，不准就点不喜欢。"
             : "想继续探索这个方向，就点喜欢；不准就点不喜欢。";
-          el.innerHTML = `<p class="eyebrow">${eyebrow}</p><div class="message-note probe-kind-copy">${escapeHtml(kindCopy)}</div><h3>${escapeHtml(msg.domain)}</h3><p class="video-meta">${escapeHtml(msg.reason)}</p><div class="profile-chip-row">${asArray(msg.specifics).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join("")}</div><div class="message-card-actions"><div class="card-feedback-icons" aria-label="${actionsLabel}"><button class="feedback-icon-btn" data-probe="confirm" type="button" aria-label="${confirmLabel}" title="${confirmLabel}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg></button><span class="feedback-separator" aria-hidden="true">/</span><button class="feedback-icon-btn is-neutral" data-probe="defer" type="button" aria-label="暂时忽略" title="暂时忽略"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="8" y1="12" x2="16" y2="12"/></svg></button><span class="feedback-separator" aria-hidden="true">/</span><button class="feedback-icon-btn" data-probe="reject" type="button" aria-label="${rejectLabel}" title="${rejectLabel}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg></button></div><div class="message-primary-actions"><button class="small-btn" data-probe="chat">多聊聊</button></div></div>`;
+          const actionCopy = probeActionCopy(messageType(msg));
+          const actionButtons = `
+            <button class="probe-btn is-confirm" data-probe="confirm" type="button">${actionCopy.confirm}</button>
+            <button class="probe-btn is-neutral" data-probe="defer" type="button">${actionCopy.defer}</button>
+            <button class="probe-btn is-reject" data-probe="reject" type="button">${actionCopy.reject}</button>`;
+          el.innerHTML = `<p class="eyebrow">${eyebrow}</p><div class="message-note probe-kind-copy">${escapeHtml(kindCopy)}</div><h3>${escapeHtml(msg.domain)}</h3><p class="video-meta">${escapeHtml(msg.reason)}</p><div class="profile-chip-row">${asArray(msg.specifics).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join("")}</div><div class="message-card-actions"><div class="card-feedback-icons" aria-label="${actionsLabel}">${actionButtons}</div><div class="message-primary-actions"><button class="small-btn" data-probe="chat">${actionCopy.chat}</button></div></div>`;
           if (resolvedResult) {
             el.classList.add("is-resolved");
             const resolvedActions = el.querySelector(".message-card-actions");
@@ -6158,11 +6190,13 @@
       }
     });
     safeBind("#profileBtn", "click", openProfilePage);
+    safeBind("#editProfileFromRecommendations", "click", openProfileCorrection);
     safeBind("#homeBtn", "click", openHomePage);
     safeBind("#watchLaterBtn", "click", openWatchLaterPage);
     safeBind("#favoritesBtn", "click", openFavoritesPage);
     safeBind("#profileMemoryMoreBtn", "click", loadMoreProfileMemory);
     safeBind("#chatBtn", "click", openChatPage);
+    safeBind("#chatFromRecommendations", "click", openChatCorrection);
     safeBind("#messagesBtn", "click", () => {
       closeSideDrawer();
       hydrateInboxFromSpeculations(state.profile?.speculative_interests);
