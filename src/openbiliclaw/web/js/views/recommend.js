@@ -24,7 +24,6 @@ import {
   removeFromFavorite,
   favoriteStatus,
 } from "../api.js";
-import { navigateToTab } from "../app.js";
 import { state, patchState } from "../state.js";
 import {
   getCoverImageAttrs,
@@ -53,7 +52,6 @@ import {
   shouldAutoAppendRecommendations,
 } from "../view-models.js";
 import { openContentUrl } from "../app-launch.js";
-import { enterProfileEditMode } from "./profile.js";
 
 let $root = null;
 let loaded = false;
@@ -69,9 +67,6 @@ const COVER_PRELOAD_WAIT_TIMEOUT_MS = 3000;
 const AUTO_APPEND_ROOT_MARGIN = "700px 0px 1400px 0px";
 const SCROLL_PREHEAT_LOOKAHEAD = 16;
 const SCROLL_PREHEAT_ROOT_MARGIN = "0px 0px 2400px 0px";
-// Bound the observer to the mobile quick-read budget so failed history loads
-// cannot leave a page-lifetime DOM watcher behind.
-const CHAT_INPUT_FOCUS_TIMEOUT_MS = 5000;
 const warmedCoverUrls = new Set();
 const decodedCoverUrls = new Set();
 const warmingImages = new Map();
@@ -168,46 +163,6 @@ function renderInto(container, fn) {
 }
 
 // ── Recommendation Header ───────────────────────────────────
-export function focusChatInputWhenReady({ timeoutMs = CHAT_INPUT_FOCUS_TIMEOUT_MS } = {}) {
-  let active = true;
-  let timeoutId = null;
-  let frameId = null;
-  let observer = null;
-  function cleanup() {
-    if (!active) return;
-    active = false;
-    observer?.disconnect();
-    if (timeoutId !== null) {
-      clearTimeout(timeoutId);
-      timeoutId = null;
-    }
-    if (frameId !== null) {
-      cancelAnimationFrame(frameId);
-      frameId = null;
-    }
-  }
-  function scheduleFocus() {
-    if (frameId !== null) return true;
-    if (!document.getElementById("chat-input")) return false;
-    frameId = requestAnimationFrame(() => {
-      frameId = null;
-      if (!active) return;
-      document.getElementById("chat-input")?.focus();
-      cleanup();
-    });
-    return true;
-  }
-
-  if (!scheduleFocus()) {
-    observer = new MutationObserver(() => {
-      if (active) scheduleFocus();
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
-  }
-  timeoutId = setTimeout(cleanup, timeoutMs);
-  return cleanup;
-}
-
 function renderRecommendationHeader() {
   const headerState = getMobileRecommendationHeaderState({
     runtimeStatus: state.runtimeStatus,
@@ -235,27 +190,6 @@ function renderRecommendationHeader() {
   refreshBtn.addEventListener("click", handleReshuffle);
   top.appendChild(refreshBtn);
   header.appendChild(top);
-
-  const correction = document.createElement("p");
-  correction.className = "preference-correction-callout";
-  correction.innerHTML = `推荐不准？
-    <button type="button" data-correction-target="profile">编辑画像</button>
-    <span aria-hidden="true">，或</span>
-    <button type="button" data-correction-target="chat">直接告诉阿B</button>`;
-  correction.addEventListener("click", async (event) => {
-    const button = event.target.closest("[data-correction-target]");
-    if (!button) return;
-    const target = button.dataset.correctionTarget;
-    if (target === "profile") {
-      navigateToTab("profile");
-      await enterProfileEditMode();
-    }
-    if (target === "chat") {
-      navigateToTab("chat");
-      focusChatInputWhenReady();
-    }
-  });
-  header.appendChild(correction);
 
   if (headerState.poolChips.length > 0) {
     const grid = document.createElement("div");

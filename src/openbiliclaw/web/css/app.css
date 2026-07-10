@@ -336,32 +336,6 @@ body {
   min-width: 0;
 }
 
-.preference-correction-callout {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
-  margin-top: 8px;
-  color: var(--text-muted);
-  font-size: 11px;
-  line-height: 1.4;
-}
-
-.preference-correction-callout button {
-  min-height: 30px;
-  padding: 0 3px;
-  color: var(--brand-strong);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  cursor: pointer;
-}
-
-.preference-correction-callout button:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-  border-radius: 4px;
-}
-
 .recommend-kicker {
   display: inline-flex;
   align-items: center;

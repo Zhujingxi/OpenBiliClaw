@@ -539,10 +539,6 @@ async function enterEdit() {
   render();
 }
 
-export async function enterProfileEditMode() {
-  await enterEdit();
-}
-
 function exitEdit() {
   editing = false;
   editState = null;
