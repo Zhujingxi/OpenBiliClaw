@@ -431,16 +431,33 @@ PY
     echo "Checkout:    $INSTALL_DIR"
     if [ -n "$REUSE_FROM" ]; then
         echo "Reused from: $REUSE_FROM"
-        echo "             ⓘ Reused API keys / B站 cookie are NOT validated."
-        echo "               B站 cookies expire within weeks; if the previous"
-        echo "               install's cookie is stale, init will silently"
-        echo "               return 0 history items and the soul profile will"
-        echo "               be hollow. Agents: surface this reuse to the user"
-        echo "               (HARD RULE 4 in docs/agent-install.md) before"
-        echo "               proceeding — do not skip the cookie question just"
-        echo "               because the file already exists."
-        echo "               To skip auto-reuse and supply fresh credentials:"
-        echo "               REUSE_FROM= curl -fsSL ... | bash"
+        case "$missing" in
+            *"bilibili.cookie (stale"*)
+                # The backend's live probe REJECTED the reused cookie — this
+                # is a confirmed-stale state, not the generic "not validated"
+                # disclaimer below (init-progress spec Phase 3).
+                echo "             ✗ 复用的 B站 Cookie 已失效（后端实测校验未通过）。"
+                echo "               请在浏览器重新登录 bilibili.com，安装/打开扩展让它自动"
+                echo "               同步新 Cookie；或按下方 manual fallback 步骤用"
+                echo "               --bilibili-cookie 手动更新后重跑 bootstrap。"
+                echo "               Agents: the reused cookie FAILED live validation —"
+                echo "               ask the user to re-login before running init."
+                ;;
+            *)
+                # Backend not up / probe indeterminate: keep the generic
+                # can't-validate disclaimer.
+                echo "             ⓘ Reused API keys / B站 cookie are NOT validated."
+                echo "               B站 cookies expire within weeks; if the previous"
+                echo "               install's cookie is stale, init will silently"
+                echo "               return 0 history items and the soul profile will"
+                echo "               be hollow. Agents: surface this reuse to the user"
+                echo "               (HARD RULE 4 in docs/agent-install.md) before"
+                echo "               proceeding — do not skip the cookie question just"
+                echo "               because the file already exists."
+                echo "               To skip auto-reuse and supply fresh credentials:"
+                echo "               REUSE_FROM= curl -fsSL ... | bash"
+                ;;
+        esac
     fi
     echo "Health URL:  $health_url"
     if [ -n "$missing" ]; then

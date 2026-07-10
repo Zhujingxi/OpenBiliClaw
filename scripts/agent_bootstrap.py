@@ -2726,6 +2726,93 @@ def detect_docker_missing_secrets(_project_dir: Path) -> dict[str, Any]:
 # Health check
 
 
+# ── Reused-cookie live validation (init-progress spec Phase 3) ──────────────
+# ``--reuse-from`` copies the old install's Bilibili cookie by file existence
+# only. B站 cookies expire within weeks; a stale one used to surface only when
+# init later failed with empty_history. Once the backend is healthy, its
+# /api/init-status prerequisites already run a REAL validate_cookie probe
+# (runtime/init_prereqs.py) — consume that instead of adding a second
+# validation path.
+
+STALE_COOKIE_MISSING_ENTRY = "bilibili.cookie (stale — reused cookie failed live validation)"
+
+
+def _init_status_url(host: str, port: int) -> str:
+    return _health_url(host, port).replace("/api/health", "/api/init-status")
+
+
+def fetch_init_status(host: str, port: int, timeout: float = 30.0) -> dict[str, Any] | None:
+    """GET /api/init-status; None when unreachable / malformed (indeterminate).
+
+    The timeout is generous because the endpoint runs live provider probes
+    (chat + bilibili + embedding) on a not-yet-initialized backend.
+    """
+    try:
+        with urllib.request.urlopen(_init_status_url(host, port), timeout=timeout) as resp:  # noqa: S310
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _reused_cookie_stale(init_status: dict[str, Any] | None) -> bool | None:
+    """True/False from the live probe; None when indeterminate.
+
+    Only an explicit ``failed`` counts as stale — ``checking`` / a missing
+    field / an unreachable endpoint must NOT downgrade the install (never
+    claim a staleness we didn't observe; the generic install.sh disclaimer
+    covers the couldn't-validate case).
+    """
+    if not isinstance(init_status, dict):
+        return None
+    prereq = init_status.get("prerequisites")
+    if not isinstance(prereq, dict):
+        return None
+    check = str(prereq.get("bilibili_check", "") or "")
+    if check == "ok":
+        return False
+    if check == "failed":
+        return True
+    return None
+
+
+def apply_reused_cookie_validation(
+    final_status: dict[str, Any],
+    *,
+    reuse_summary: dict[str, Any] | None,
+    init_status: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Fold the live cookie probe into the final status summary.
+
+    When THIS run reused a Bilibili cookie and the backend's live probe says
+    it's dead, append a self-describing ``missing`` entry and flag the status
+    so ``backend_healthy_label`` downgrades to ``needs_secrets`` instead of
+    reporting ``complete`` for an install whose init can only fail.
+    """
+    reused = reuse_summary.get("reused") if isinstance(reuse_summary, dict) else None
+    cookie_reused = any(
+        item in ("bilibili.cookie", "data/bilibili_cookie.json") for item in (reused or [])
+    )
+    if not cookie_reused:
+        return final_status
+    if _reused_cookie_stale(init_status) is not True:
+        return final_status
+    updated = dict(final_status)
+    missing = list(updated.get("missing") or [])
+    if STALE_COOKIE_MISSING_ENTRY not in missing:
+        missing.append(STALE_COOKIE_MISSING_ENTRY)
+    updated["missing"] = missing
+    updated["reused_cookie_stale"] = True
+    return updated
+
+
+def backend_healthy_label(final_status: dict[str, Any]) -> str:
+    """Status label for the backend-healthy summary block."""
+    if final_status.get("reused_cookie_stale"):
+        return "needs_secrets"
+    return "complete" if not final_status.get("missing") else "running_with_missing_secrets"
+
+
 def wait_for_health(host: str, port: int, timeout: float = HEALTH_TIMEOUT_SECONDS) -> bool:
     """Poll /api/health until it returns 200 or timeout expires."""
 
@@ -2786,6 +2873,7 @@ def run(args: argparse.Namespace) -> int:
         emit(BootstrapResult("error", str(exc), {"step": "config"}))
         return 2
 
+    reuse_summary: dict[str, Any] | None = None
     if args.reuse_from:
         try:
             reuse_summary = reuse_config_secrets(project_dir, Path(args.reuse_from))
@@ -3073,6 +3161,22 @@ def run(args: argparse.Namespace) -> int:
             status_detector = detect_docker_missing_secrets
 
         final_status = status_detector(project_dir)
+        # Live-validate a reused cookie against the backend's real probe
+        # (init-progress spec Phase 3): a stale cookie must surface NOW as
+        # needs_secrets, not 30s into init as empty_history.
+        if reuse_summary is not None:
+            final_status = apply_reused_cookie_validation(
+                final_status,
+                reuse_summary=reuse_summary,
+                init_status=fetch_init_status(args.host, args.port),
+            )
+            if final_status.get("reused_cookie_stale"):
+                emit(BootstrapResult("needs_secrets", "reused_cookie_stale", final_status))
+                info(
+                    "The Bilibili cookie reused from the previous install failed live "
+                    "validation (expired/invalid). Log in to bilibili.com again and let "
+                    "the browser extension sync a fresh cookie, or pass --bilibili-cookie."
+                )
         if args.wait_for_extension_cookie and final_status["missing"] == ["bilibili.cookie"]:
             emit(
                 BootstrapResult(
@@ -3101,7 +3205,7 @@ def run(args: argparse.Namespace) -> int:
             args,
             embedding_touched=embedding_touched,
         )
-        label = "complete" if not final_status["missing"] else "running_with_missing_secrets"
+        label = backend_healthy_label(final_status)
         if not final_status["missing"] and init_decisions["missing"] and not args.skip_init:
             label = "needs_decisions"
         health_details = {

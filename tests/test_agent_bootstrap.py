@@ -1380,3 +1380,97 @@ def test_parser_rejects_conflicting_youtube_flags(tmp_path: Path) -> None:
 
     with pytest.raises(SystemExit):
         parser.parse_args(["--project-dir", str(tmp_path), "--yes-youtube", "--no-youtube"])
+
+
+# ── Reused-cookie live validation (init-progress spec Phase 3) ──────────────
+
+
+def _final_status(missing: list[str] | None = None) -> dict:
+    return {
+        "provider": "deepseek",
+        "missing": list(missing or []),
+        "has_cookie_inline": True,
+        "has_cookie_file": True,
+    }
+
+
+def _reuse_summary(reused: list[str]) -> dict:
+    return {"reused": reused, "skipped": [], "source": "/old/install"}
+
+
+def _init_status(bilibili_check: str) -> dict:
+    return {"prerequisites": {"bilibili_check": bilibili_check}}
+
+
+def test_reused_cookie_stale_downgrades_to_needs_secrets() -> None:
+    validated = bootstrap.apply_reused_cookie_validation(
+        _final_status(),
+        reuse_summary=_reuse_summary(["bilibili.cookie", "data/bilibili_cookie.json"]),
+        init_status=_init_status("failed"),
+    )
+    assert validated["reused_cookie_stale"] is True
+    assert bootstrap.STALE_COOKIE_MISSING_ENTRY in validated["missing"]
+    assert (
+        bootstrap.STALE_COOKIE_MISSING_ENTRY
+        == "bilibili.cookie (stale — reused cookie failed live validation)"
+    )
+    label = bootstrap.backend_healthy_label(validated)
+    assert label == "needs_secrets"
+    assert label != "complete"
+
+
+def test_reused_cookie_valid_keeps_complete() -> None:
+    validated = bootstrap.apply_reused_cookie_validation(
+        _final_status(),
+        reuse_summary=_reuse_summary(["bilibili.cookie"]),
+        init_status=_init_status("ok"),
+    )
+    assert "reused_cookie_stale" not in validated
+    assert validated["missing"] == []
+    assert bootstrap.backend_healthy_label(validated) == "complete"
+
+
+def test_reused_cookie_unverifiable_probe_does_not_downgrade() -> None:
+    # Backend unreachable / malformed payload / still "checking" → the
+    # install.sh disclaimer branch stays; never claim staleness we didn't see.
+    for payload in (None, {}, {"prerequisites": {}}, _init_status("checking")):
+        validated = bootstrap.apply_reused_cookie_validation(
+            _final_status(),
+            reuse_summary=_reuse_summary(["data/bilibili_cookie.json"]),
+            init_status=payload,
+        )
+        assert "reused_cookie_stale" not in validated
+        assert bootstrap.backend_healthy_label(validated) == "complete"
+
+
+def test_cookie_not_reused_skips_live_validation_fold() -> None:
+    # This run reused only LLM keys — a failed bilibili probe must not be
+    # attributed to a "reused stale cookie" (it was never reused).
+    validated = bootstrap.apply_reused_cookie_validation(
+        _final_status(),
+        reuse_summary=_reuse_summary(["llm.deepseek.api_key"]),
+        init_status=_init_status("failed"),
+    )
+    assert "reused_cookie_stale" not in validated
+    assert bootstrap.backend_healthy_label(validated) == "complete"
+
+
+def test_backend_healthy_label_still_reports_plain_missing_secrets() -> None:
+    assert (
+        bootstrap.backend_healthy_label(_final_status(["bilibili.cookie"]))
+        == "running_with_missing_secrets"
+    )
+
+
+def test_stale_entry_is_not_duplicated_on_refold() -> None:
+    once = bootstrap.apply_reused_cookie_validation(
+        _final_status(),
+        reuse_summary=_reuse_summary(["bilibili.cookie"]),
+        init_status=_init_status("failed"),
+    )
+    twice = bootstrap.apply_reused_cookie_validation(
+        once,
+        reuse_summary=_reuse_summary(["bilibili.cookie"]),
+        init_status=_init_status("failed"),
+    )
+    assert twice["missing"].count(bootstrap.STALE_COOKIE_MISSING_ENTRY) == 1

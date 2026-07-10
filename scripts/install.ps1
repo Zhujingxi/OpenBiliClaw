@@ -454,16 +454,27 @@ print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
     Write-Host "Checkout:    $InstallDir"
     if ($ReuseFrom) {
         Write-Host "Reused from: $ReuseFrom"
-        Write-Host '             [i] Reused API keys / B站 cookie are NOT validated.'
-        Write-Host '                 B站 cookies expire within weeks; if the previous'
-        Write-Host '                 install''s cookie is stale, init will silently'
-        Write-Host '                 return 0 history items and the soul profile will'
-        Write-Host '                 be hollow. Agents: surface this reuse to the user'
-        Write-Host '                 (HARD RULE 4 in docs/agent-install.md) before'
-        Write-Host '                 proceeding - do not skip the cookie question just'
-        Write-Host '                 because the file already exists.'
-        Write-Host '                 To skip auto-reuse and supply fresh credentials:'
-        Write-Host '                 install.ps1 -ReuseFrom ""'
+        if ($missing -like '*bilibili.cookie (stale*') {
+            # The backend's live probe REJECTED the reused cookie — confirmed
+            # stale, not the generic "not validated" disclaimer below
+            # (init-progress spec Phase 3).
+            Write-Host '             [x] 复用的 B站 Cookie 已失效（后端实测校验未通过）。' -ForegroundColor Yellow
+            Write-Host '                 请在浏览器重新登录 bilibili.com，安装/打开扩展让它自动'
+            Write-Host '                 同步新 Cookie；或用 --bilibili-cookie 手动更新后重跑 bootstrap。'
+            Write-Host '                 Agents: the reused cookie FAILED live validation -'
+            Write-Host '                 ask the user to re-login before running init.'
+        } else {
+            Write-Host '             [i] Reused API keys / B站 cookie are NOT validated.'
+            Write-Host '                 B站 cookies expire within weeks; if the previous'
+            Write-Host '                 install''s cookie is stale, init will silently'
+            Write-Host '                 return 0 history items and the soul profile will'
+            Write-Host '                 be hollow. Agents: surface this reuse to the user'
+            Write-Host '                 (HARD RULE 4 in docs/agent-install.md) before'
+            Write-Host '                 proceeding - do not skip the cookie question just'
+            Write-Host '                 because the file already exists.'
+            Write-Host '                 To skip auto-reuse and supply fresh credentials:'
+            Write-Host '                 install.ps1 -ReuseFrom ""'
+        }
     }
     Write-Host "Health URL:  $healthUrl"
     if ($missing) { Write-Host "Missing:     $missing" }
