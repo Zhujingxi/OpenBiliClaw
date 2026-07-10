@@ -193,6 +193,8 @@ const elements = {
   initStartReason: document.getElementById("initStartReason"),
   list: document.getElementById("recommendationList"),
   refreshRecommendationsButton: document.getElementById("refreshRecommendationsButton"),
+  editProfileFromRecommendations: document.getElementById("editProfileFromRecommendations"),
+  chatFromRecommendations: document.getElementById("chatFromRecommendations"),
   poolStatus: document.getElementById("poolStatus"),
   poolAvailable: document.getElementById("poolAvailable"),
   poolReplenished: document.getElementById("poolReplenished"),
@@ -1387,6 +1389,39 @@ function isAvoidanceProbeType(type) {
   return normalizeProbeType(type) === "avoidance.probe";
 }
 
+function probeActionDescriptors(type) {
+  return isAvoidanceProbeType(type)
+    ? [
+        { action: "confirm", label: "确认避雷", className: "is-confirm" },
+        { action: "defer", label: "搁置避雷", className: "is-neutral" },
+        { action: "reject", label: "不是雷点", className: "is-reject" },
+        { action: "chat", label: "多聊聊", className: "is-chat" },
+      ]
+    : [
+        { action: "confirm", label: "确认喜欢", className: "is-confirm" },
+        { action: "defer", label: "暂时搁置", className: "is-neutral" },
+        { action: "reject", label: "确认不喜欢", className: "is-reject" },
+        { action: "chat", label: "多聊聊", className: "is-chat" },
+      ];
+}
+
+function probeResponseMessage(type, responseType, domain) {
+  const isAvoidance = isAvoidanceProbeType(type);
+  if (responseType === "defer") {
+    return isAvoidance
+      ? `好，「${domain}」先搁置，过阵子再确认是不是雷点。`
+      : `好，「${domain}」先搁置，过阵子再问。`;
+  }
+  if (responseType === "confirm") {
+    return isAvoidance
+      ? `好，「${domain}」会作为避雷方向处理。`
+      : `好，「${domain}」记住了。`;
+  }
+  return isAvoidance
+    ? `好，「${domain}」不记成避雷。`
+    : `好，「${domain}」会作为不喜欢处理。`;
+}
+
 function isChallengeProbe(probe) {
   const mode = String(probe?.probe_mode || "").toLowerCase();
   return Boolean(probe?.challenge) || mode === "lateral" || mode === "bridge" || mode === "wildcard";
@@ -1842,22 +1877,21 @@ function renderSpeculativeInterests(container, items, { kind = "interest" } = {}
     if ((item.status || "active") === "active" && item.domain) {
       const actions = document.createElement("div");
       actions.className = "spec-actions";
-
-      const confirmBtn = document.createElement("button");
-      confirmBtn.className = "probe-btn is-confirm";
-      confirmBtn.textContent = isAvoidance ? "确实不喜欢" : "喜欢";
-      confirmBtn.addEventListener("click", () =>
-        handleSpecResponse(item.domain, "confirm", row, isAvoidance ? "avoidance.probe" : "interest.probe"),
-      );
-
-      const rejectBtn = document.createElement("button");
-      rejectBtn.className = "probe-btn is-reject";
-      rejectBtn.textContent = isAvoidance ? "不是" : "不喜欢";
-      rejectBtn.addEventListener("click", () =>
-        handleSpecResponse(item.domain, "reject", row, isAvoidance ? "avoidance.probe" : "interest.probe"),
-      );
-
-      actions.append(confirmBtn, rejectBtn);
+      for (const { action: responseType, label, className } of probeActionDescriptors(
+        probeType,
+      ).filter(({ action }) => action !== "chat")) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `probe-btn ${className}`;
+        button.textContent = label;
+        button.setAttribute("aria-label", label);
+        button.title = label;
+        button.dataset.responseType = responseType;
+        button.addEventListener("click", () =>
+          handleSpecResponse(item.domain, responseType, row, probeType),
+        );
+        actions.append(button);
+      }
       row.append(actions);
     }
 
@@ -1890,9 +1924,7 @@ async function handleSpecResponse(domain, responseType, rowEl, type = "interest.
       rowEl.replaceChildren();
       const msg = document.createElement("p");
       msg.className = "spec-result";
-      msg.textContent = isAvoidance
-        ? (responseType === "confirm" ? `好，「${domain}」会作为避雷方向处理。` : `好，「${domain}」不记成避雷。`)
-        : (responseType === "confirm" ? `好，「${domain}」记住了。` : `好，「${domain}」先不看了。`);
+      msg.textContent = probeResponseMessage(type, responseType, domain);
       rowEl.append(msg);
       setTimeout(() => rowEl.remove(), 2500);
     }
@@ -1963,23 +1995,16 @@ function renderProbeCard() {
 
   const actions = document.createElement("div");
   actions.className = "probe-actions";
-
-  const confirmBtn = document.createElement("button");
-  confirmBtn.className = "probe-btn is-confirm";
-  confirmBtn.textContent = "\u559C\u6B22";
-  confirmBtn.addEventListener("click", () => handleProbeResponse("confirm"));
-
-  const rejectBtn = document.createElement("button");
-  rejectBtn.className = "probe-btn is-reject";
-  rejectBtn.textContent = "\u4E0D\u559C\u6B22";
-  rejectBtn.addEventListener("click", () => handleProbeResponse("reject"));
-
-  const chatBtn = document.createElement("button");
-  chatBtn.className = "probe-btn is-chat";
-  chatBtn.textContent = "\u591a\u804a\u804a";
-  chatBtn.addEventListener("click", () => handleProbeResponse("chat"));
-
-  actions.append(confirmBtn, rejectBtn, chatBtn);
+  for (const descriptor of probeActionDescriptors("interest.probe")) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `probe-btn ${descriptor.className}`;
+    button.textContent = descriptor.label;
+    button.setAttribute("aria-label", descriptor.label);
+    button.title = descriptor.label;
+    button.addEventListener("click", () => handleProbeResponse(descriptor.action));
+    actions.append(button);
+  }
   card.append(actions);
 
   // Insert at the top of the speculative interests container
@@ -2018,9 +2043,7 @@ async function handleProbeResponse(responseType) {
       probeCard.replaceChildren();
       const msg = document.createElement("p");
       msg.className = "probe-result";
-      msg.textContent = responseType === "confirm"
-        ? `\u597D\uFF0C\u300C${domain}\u300D\u8BB0\u4F4F\u4E86\u3002`
-        : `\u597D\uFF0C\u300C${domain}\u300D\u5148\u4E0D\u770B\u4E86\u3002`;
+      msg.textContent = probeResponseMessage("interest.probe", responseType, domain);
       probeCard.append(msg);
       setTimeout(() => probeCard.remove(), 3000);
     }
@@ -2324,7 +2347,7 @@ function onMessageActionClick(event) {
     dismissMessage(domain, type);
   } else if (action === "chat") {
     expandInlineChat(card, domain, type);
-  } else if (action === "confirm" || action === "reject") {
+  } else if (action === "confirm" || action === "defer" || action === "reject") {
     // Guard against a double-click firing the API twice before the card is
     // replaced with its success state; clear on settle so an error path (card
     // kept) can be retried (success replaces the card, so it's moot there).
@@ -2432,29 +2455,17 @@ function buildMessageCard(probe) {
 
   const actions = document.createElement("div");
   actions.className = "message-actions";
-
-  const confirmBtn = document.createElement("button");
-  confirmBtn.className = "probe-btn is-confirm";
-  confirmBtn.textContent = isAvoidance ? "确实不喜欢" : "\u559C\u6B22";
-  confirmBtn.dataset.msgAction = "confirm";
-
-  const rejectBtn = document.createElement("button");
-  rejectBtn.className = "probe-btn is-reject";
-  rejectBtn.textContent = isAvoidance ? "不是" : "\u4E0D\u559C\u6B22";
-  rejectBtn.dataset.msgAction = "reject";
-
-  const chatBtn = document.createElement("button");
-  chatBtn.className = "probe-btn is-chat";
-  chatBtn.textContent = "\u591A\u804A\u804A";
-  chatBtn.dataset.msgAction = "chat";
-
-  if (probe.chat_status === "pending") {
-    confirmBtn.disabled = true;
-    rejectBtn.disabled = true;
-    chatBtn.disabled = true;
+  for (const descriptor of probeActionDescriptors(type)) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `probe-btn ${descriptor.className}`;
+    button.textContent = descriptor.label;
+    button.setAttribute("aria-label", descriptor.label);
+    button.title = descriptor.label;
+    button.dataset.msgAction = descriptor.action;
+    button.disabled = probe.chat_status === "pending";
+    actions.append(button);
   }
-
-  actions.append(confirmBtn, rejectBtn, chatBtn);
   item.append(actions);
   return item;
 }
@@ -2904,9 +2915,7 @@ async function handleMessageResponse(domain, responseType, type = "interest.prob
       item.replaceChildren();
       const msg = document.createElement("p");
       msg.className = "message-result";
-      msg.textContent = isAvoidance
-        ? (responseType === "confirm" ? `好，「${domain}」会作为避雷方向处理。` : `好，「${domain}」不记成避雷。`)
-        : (responseType === "confirm" ? `\u597D\uFF0C\u300C${domain}\u300D\u8BB0\u4F4F\u4E86\u3002` : `\u597D\uFF0C\u300C${domain}\u300D\u5148\u4E0D\u770B\u4E86\u3002`);
+      msg.textContent = probeResponseMessage(type, responseType, domain);
       item.append(msg);
       setTimeout(() => {
         item.remove();
@@ -5784,6 +5793,21 @@ function bindTabs() {
   }
 }
 
+function bindPreferenceCorrectionActions() {
+  elements.editProfileFromRecommendations?.addEventListener("click", () => {
+    setActiveTab("profile");
+    void enterProfileEditMode();
+  });
+  elements.chatFromRecommendations?.addEventListener("click", () => {
+    setActiveTab("chat");
+    requestAnimationFrame(() => {
+      if (elements.chatInput instanceof HTMLTextAreaElement) {
+        elements.chatInput.focus();
+      }
+    });
+  });
+}
+
 function bindProfileHistoryLoading() {
   if (elements.content instanceof HTMLElement) {
     elements.content.addEventListener("scroll", () => {
@@ -7372,6 +7396,7 @@ async function initializePopup() {
   const requestedTab = params.get("tab");
   state.delightHighlightBvid = params.get("delight")?.trim() || "";
   bindTabs();
+  bindPreferenceCorrectionActions();
   bindProfileHistoryLoading();
   initRecommendationAutoLoadIntent();
   bindRefreshButton();
