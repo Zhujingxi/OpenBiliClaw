@@ -359,6 +359,9 @@ async def test_flag_on_planner_to_fetch_to_yield_end_to_end(db: Database) -> Non
     # The strategy searched exactly the claimed words (NO internal LLM gen).
     assert bili_client.calls == ["露营 装备 盘点", "和田玉 鉴别 入门"]
     assert all(r.source_keyword_id in bili_ids.values() for r in bili_results)
+    for result in bili_results:
+        result.relevance_score = 0.9
+        result.relevance_reason = "test-evaluated keyword match"
     cached_bili = engine.cache_evaluated_results(bili_results)
     coordinator.mark_used(bili_claimed)
     assert cached_bili == len(bili_results) >= 1
@@ -383,6 +386,9 @@ async def test_flag_on_planner_to_fetch_to_yield_end_to_end(db: Database) -> Non
     dy_results = await dy_strategy.discover(profile, limit=20)
     assert dy_client.calls == ["露营 整活"]
     assert all(r.source_keyword_id == dy_ids["露营 整活"] for r in dy_results)
+    for result in dy_results:
+        result.relevance_score = 0.9
+        result.relevance_reason = "test-evaluated keyword match"
     cached_dy = engine.cache_evaluated_results(dy_results)
     coordinator.mark_used(dy_claimed)
     assert cached_dy >= 1

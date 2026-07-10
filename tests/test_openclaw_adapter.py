@@ -674,6 +674,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     created_memories: list[object] = []
     registered_strategies: list[str] = []
     created_strategy_kwargs: list[dict[str, object]] = []
+    producer_kwargs: list[dict[str, object]] = []
 
     class FakeDatabase:
         def __init__(self, path: str) -> None:
@@ -760,6 +761,10 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
         def __init__(self, **kwargs) -> None:
             self.kwargs = kwargs
 
+    class FakeCandidatePipeline:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
     class FakeAccountSyncService:
         def __init__(self, **kwargs) -> None:
             self.kwargs = kwargs
@@ -775,9 +780,10 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
         bilibili=SimpleNamespace(cookie="raw-cookie", proxy=""),
         sources=SimpleNamespace(
             xiaohongshu=SimpleNamespace(enabled=False),
-            douyin=SimpleNamespace(enabled=False),
-            youtube=SimpleNamespace(enabled=False),
+            douyin=SimpleNamespace(enabled=True, mode="direct"),
+            youtube=SimpleNamespace(enabled=True),
         ),
+        discovery=SimpleNamespace(admission_min_score=0.60),
         scheduler=SimpleNamespace(
             enabled=True,
             pause_on_extension_disconnect=False,
@@ -822,6 +828,24 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     monkeypatch.setattr(bootstrap_module, "ExploreStrategy", FakeStrategy)
     monkeypatch.setattr(bootstrap_module, "ContinuousRefreshController", FakeRuntimeController)
     monkeypatch.setattr(bootstrap_module, "AccountSyncService", FakeAccountSyncService)
+    monkeypatch.setattr(
+        bootstrap_module,
+        "DiscoveryCandidatePipeline",
+        FakeCandidatePipeline,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        bootstrap_module,
+        "build_youtube_discovery_producer",
+        lambda **kwargs: producer_kwargs.append(kwargs) or SimpleNamespace(kind="youtube"),
+    )
+    import openbiliclaw.runtime.douyin_producer as douyin_producer_module
+
+    monkeypatch.setattr(
+        douyin_producer_module,
+        "build_douyin_discovery_producer",
+        lambda **kwargs: producer_kwargs.append(kwargs) or SimpleNamespace(kind="douyin"),
+    )
 
     services = build_openclaw_adapter_services()
 
@@ -860,11 +884,20 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     ]
     assert services.runtime_controller.kwargs["pool_source_shares"] == {
         "bilibili": 8,
+        "douyin": 2,
+        "youtube": 1,
     }
     assert services.runtime_controller.kwargs["scheduler_config"] is fake_config.scheduler
     assert "presence" in services.runtime_controller.kwargs
     assert "youtube_producer" in services.runtime_controller.kwargs
-    assert services.runtime_controller.kwargs["youtube_producer"] is None
+    pipeline = services.runtime_controller.kwargs["discovery_candidate_pipeline"]
+    assert isinstance(pipeline, FakeCandidatePipeline)
+    assert pipeline.kwargs["database"] is created_databases[0]
+    assert pipeline.kwargs["discovery_engine"] is services.discovery_engine
+    assert pipeline.kwargs["admission_min_score"] == 0.60
+    assert len(producer_kwargs) == 2
+    assert all(kwargs["candidate_pipeline"] is pipeline for kwargs in producer_kwargs)
+    assert services.runtime_controller.kwargs["youtube_producer"].kind == "youtube"
     assert services.runtime_controller.kwargs["check_interval_seconds"] == 77
     assert services.runtime_controller.kwargs["signal_event_threshold"] == 9
     assert services.runtime_controller.kwargs["trending_refresh_hours"] == 5

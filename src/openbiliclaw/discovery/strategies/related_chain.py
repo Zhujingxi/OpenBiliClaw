@@ -241,8 +241,7 @@ class RelatedChainStrategy(DiscoveryStrategy):
                 scores,
                 strict=True,
             ):
-                bonus = self._seed_bonus(seed_index) + self._depth_bonus(depth)
-                content.relevance_score = min(1.0, round(score + bonus, 4))
+                content.relevance_score = min(1.0, round(score, 4))
                 if content.relevance_score < self.score_threshold:
                     continue
                 results.append(content)
@@ -530,11 +529,3 @@ class RelatedChainStrategy(DiscoveryStrategy):
         if parts:
             return re.sub(r"\s+", "", parts[0]).lower()[:8]
         return ""
-
-    @staticmethod
-    def _seed_bonus(seed_index: int) -> float:
-        return max(0.0, 0.03 - seed_index * 0.01)
-
-    @staticmethod
-    def _depth_bonus(depth: int) -> float:
-        return max(0.0, 0.02 - max(0, depth - 1) * 0.01)

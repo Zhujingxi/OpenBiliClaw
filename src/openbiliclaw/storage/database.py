@@ -19,6 +19,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, urlparse
 
+from openbiliclaw.discovery.admission import (
+    DEFAULT_ADMISSION_MIN_SCORE,
+    EXPLORE_ADMISSION_MIN_SCORE,
+    EXPLORE_STRATEGY,
+    effective_admission_threshold,
+)
 from openbiliclaw.discovery.inspiration import (
     AxisRow,
     _normalize_match_text,
@@ -441,7 +447,7 @@ _DELIGHT_DYNAMIC_TOP_FRACTION = 0.10
 _DELIGHT_DYNAMIC_MIN_SAMPLE_SIZE = 150
 _DELIGHT_DYNAMIC_MIN_STDDEV = 0.08
 _DELIGHT_SCORE_SYNC_EPSILON = 0.000001
-_DEFAULT_ADMISSION_MIN_SCORE = 0.60
+_DEFAULT_ADMISSION_MIN_SCORE = DEFAULT_ADMISSION_MIN_SCORE
 
 
 # Rows claimed by the surprise (delight) channel: already delivered as a
@@ -862,6 +868,37 @@ class Database:
 
     def _pool_admission_min_score(self) -> float:
         return _normalize_admission_min_score(self._admission_min_score)
+
+    def pool_admission_threshold(
+        self,
+        source_strategy: object,
+        requested_threshold: object | None = None,
+    ) -> float:
+        """Return the shared effective admission floor for one source."""
+        return effective_admission_threshold(
+            source_strategy,
+            self._pool_admission_min_score(),
+            requested_threshold,
+        )
+
+    def _pool_admission_sql(
+        self,
+        *,
+        score_expr: str = "COALESCE(relevance_score, 0.0)",
+        source_expr: str = "source",
+    ) -> tuple[str, tuple[Any, ...]]:
+        """Return a SQL predicate and params for the shared admission policy."""
+        predicate = f"""
+            {score_expr} >= CASE
+                WHEN LOWER(TRIM(COALESCE({source_expr}, ''))) = ? THEN ?
+                ELSE ?
+            END
+        """
+        return predicate, (
+            EXPLORE_STRATEGY,
+            EXPLORE_ADMISSION_MIN_SCORE,
+            self._pool_admission_min_score(),
+        )
 
     def open_connection(self) -> sqlite3.Connection:
         """Open a short-lived connection to the initialized database.
@@ -1667,7 +1704,10 @@ class Database:
                                 WHEN excluded.relevance_score > 0 THEN excluded.relevance_score
                                 ELSE COALESCE(content_cache.relevance_score, 0)
                             END
-                         ) >= ?
+                         ) >= CASE
+                            WHEN LOWER(TRIM(COALESCE(excluded.source, ''))) = ? THEN ?
+                            ELSE ?
+                         END
                     THEN 'fresh'
                     ELSE content_cache.pool_status
                 END,
@@ -1721,7 +1761,7 @@ class Database:
                 kwargs.get("reply_count", 0),
                 kwargs.get("retweet_count", 0),
                 kwargs.get("bookmark_count", 0),
-                kwargs.get("relevance_score", self._pool_admission_min_score()),
+                kwargs.get("relevance_score", 0.0),
                 kwargs.get("relevance_reason", ""),
                 kwargs.get("pool_expression", ""),
                 kwargs.get("pool_topic_label", ""),
@@ -1734,6 +1774,8 @@ class Database:
                 kwargs.get("body_text", ""),
                 kwargs.get("content_type", "video") or "video",
                 self._coerce_source_keyword_id(kwargs.get("source_keyword_id")),
+                EXPLORE_STRATEGY,
+                EXPLORE_ADMISSION_MIN_SCORE,
                 self._pool_admission_min_score(),
             ),
         )
@@ -2389,12 +2431,15 @@ class Database:
 
     def get_unrecommended_content(self, limit: int = 100) -> list[dict[str, Any]]:
         """Get cached content that has not been recommended yet."""
-        min_score = self._pool_admission_min_score()
+        admission_sql, admission_params = self._pool_admission_sql(
+            score_expr="COALESCE(c.relevance_score, 0.0)",
+            source_expr="c.source",
+        )
         cursor = self.conn.execute(
-            """
+            f"""
             SELECT c.*
             FROM content_cache AS c
-            WHERE COALESCE(c.relevance_score, 0.0) >= ?
+            WHERE {admission_sql}
               AND NOT EXISTS (
                 SELECT 1
                 FROM recommendations AS r
@@ -2408,7 +2453,7 @@ class Database:
                 c.bvid ASC
             LIMIT ?
             """,
-            (min_score, max(limit * 5, 50)),
+            (*admission_params, max(limit * 5, 50)),
         )
         rows = [dict(row) for row in cursor.fetchall()]
         rows = self._exclude_viewed_rows(
@@ -2420,37 +2465,43 @@ class Database:
 
     def suppress_low_score_pool_items(self, min_score: float | None = None) -> int:
         """Suppress cached pool rows below the unified admission floor."""
-        threshold = (
-            self._pool_admission_min_score()
-            if min_score is None
-            else _normalize_admission_min_score(min_score)
-        )
+        if min_score is None:
+            admission_sql, admission_params = self._pool_admission_sql()
+        else:
+            admission_sql = "COALESCE(relevance_score, 0.0) >= ?"
+            admission_params = (_normalize_admission_min_score(min_score),)
         cursor = self._execute_write(
-            """
+            f"""
             UPDATE content_cache
             SET pool_status = 'suppressed'
-            WHERE COALESCE(relevance_score, 0.0) < ?
+            WHERE NOT ({admission_sql})
               AND COALESCE(pool_status, 'fresh') IN ('fresh', 'shown', 'suppressed')
             """,
-            (threshold,),
+            admission_params,
         )
         return int(cursor.rowcount or 0)
 
     def suppress_low_confidence_recommendations(self, min_score: float | None = None) -> int:
         """Mark old low-confidence recommendation rows as suppressed."""
-        threshold = (
-            self._pool_admission_min_score()
-            if min_score is None
-            else _normalize_admission_min_score(min_score)
-        )
+        if min_score is None:
+            admission_sql, admission_params = self._pool_admission_sql(
+                score_expr="COALESCE(recommendations.confidence, 0.0)",
+                source_expr=(
+                    "(SELECT source FROM content_cache "
+                    "WHERE content_cache.bvid = recommendations.bvid LIMIT 1)"
+                ),
+            )
+        else:
+            admission_sql = "COALESCE(recommendations.confidence, 0.0) >= ?"
+            admission_params = (_normalize_admission_min_score(min_score),)
         cursor = self._execute_write(
-            """
+            f"""
             UPDATE recommendations
             SET feedback_type = 'suppressed_low_score'
-            WHERE COALESCE(confidence, 0.0) < ?
+            WHERE NOT ({admission_sql})
               AND COALESCE(feedback_type, '') = ''
             """,
-            (threshold,),
+            admission_params,
         )
         return int(cursor.rowcount or 0)
 
@@ -2493,7 +2544,7 @@ class Database:
         # Over-fetch widely so the per-group filter still leaves headroom
         # for the downstream balance pass.
         fetch_limit = max(limit * 8, 80)
-        min_score = self._pool_admission_min_score()
+        admission_sql, admission_params = self._pool_admission_sql()
         guard_sql = _xhs_self_author_guard_sql()
         guard_params = _xhs_self_author_guard_params(xhs_self_nickname)
         delight_threshold = self.dynamic_delight_threshold(
@@ -2506,7 +2557,7 @@ class Database:
                 FROM content_cache
                 WHERE COALESCE(pool_status, 'fresh') = 'fresh'
                   AND COALESCE(feedback_type, '') != 'dislike'
-                  AND COALESCE(relevance_score, 0.0) >= ?
+                  AND {admission_sql}
                   AND COALESCE(pool_expression, '') != ''
                   AND COALESCE(pool_topic_label, '') != ''
                   AND COALESCE(style_key, '') != ''
@@ -2531,7 +2582,7 @@ class Database:
                 LIMIT ?
             """
             params: tuple[Any, ...] = (
-                min_score,
+                *admission_params,
                 *guard_params,
                 delight_threshold,
                 fetch_limit,
@@ -2553,7 +2604,7 @@ class Database:
                     FROM content_cache
                     WHERE COALESCE(pool_status, 'fresh') = 'fresh'
                       AND COALESCE(feedback_type, '') != 'dislike'
-                      AND COALESCE(relevance_score, 0.0) >= ?
+                      AND {admission_sql}
                       AND COALESCE(pool_expression, '') != ''
                       AND COALESCE(pool_topic_label, '') != ''
                       AND COALESCE(style_key, '') != ''
@@ -2581,7 +2632,7 @@ class Database:
                 LIMIT ?
             """
             params = (
-                min_score,
+                *admission_params,
                 *guard_params,
                 delight_threshold,
                 max_per_topic_group,
@@ -2607,7 +2658,7 @@ class Database:
         and not already recommended. Returns the fragment (no leading
         ``WHERE``, references the ``content_cache`` table) and its bind params.
         """
-        min_score = self._pool_admission_min_score()
+        admission_sql, admission_params = self._pool_admission_sql()
         guard_sql = _xhs_self_author_guard_sql()
         guard_params = _xhs_self_author_guard_params(xhs_self_nickname)
         delight_threshold = self.dynamic_delight_threshold(
@@ -2617,7 +2668,7 @@ class Database:
         clause = f"""
             COALESCE(pool_status, 'fresh') = 'fresh'
               AND COALESCE(feedback_type, '') != 'dislike'
-              AND COALESCE(relevance_score, 0.0) >= ?
+              AND {admission_sql}
               AND COALESCE(pool_expression, '') != ''
               AND COALESCE(pool_topic_label, '') != ''
               AND COALESCE(style_key, '') != ''
@@ -2634,7 +2685,7 @@ class Database:
                 WHERE r.bvid = content_cache.bvid
               )
         """
-        return clause, (min_score, *guard_params, delight_threshold)
+        return clause, (*admission_params, *guard_params, delight_threshold)
 
     def get_pool_candidates_for_platform(
         self,
@@ -2747,7 +2798,7 @@ class Database:
         would refuse to load.
         """
         self._ensure_fresh_read()
-        min_score = self._pool_admission_min_score()
+        admission_sql, admission_params = self._pool_admission_sql()
         guard_sql = _xhs_self_author_guard_sql()
         guard_params = _xhs_self_author_guard_params(xhs_self_nickname)
         delight_threshold = self.dynamic_delight_threshold(
@@ -2770,7 +2821,7 @@ class Database:
                     FROM content_cache
                     WHERE COALESCE(pool_status, 'fresh') = 'fresh'
                       AND COALESCE(feedback_type, '') != 'dislike'
-                      AND COALESCE(relevance_score, 0.0) >= ?
+                      AND {admission_sql}
                       AND COALESCE(pool_expression, '') != ''
                       AND COALESCE(pool_topic_label, '') != ''
                       AND COALESCE(style_key, '') != ''
@@ -2791,7 +2842,7 @@ class Database:
                 FROM ranked
                 WHERE group_rank <= ?
                 """,
-                (min_score, *guard_params, delight_threshold, max_per_topic_group),
+                (*admission_params, *guard_params, delight_threshold, max_per_topic_group),
             )
         else:
             cursor = self.conn.execute(
@@ -2800,7 +2851,7 @@ class Database:
                 FROM content_cache
                 WHERE COALESCE(pool_status, 'fresh') = 'fresh'
                   AND COALESCE(feedback_type, '') != 'dislike'
-                  AND COALESCE(relevance_score, 0.0) >= ?
+                  AND {admission_sql}
                   AND COALESCE(pool_expression, '') != ''
                   AND COALESCE(pool_topic_label, '') != ''
                   AND COALESCE(style_key, '') != ''
@@ -2817,7 +2868,7 @@ class Database:
                     WHERE r.bvid = content_cache.bvid
                   )
                 """,
-                (min_score, *guard_params, delight_threshold),
+                (*admission_params, *guard_params, delight_threshold),
             )
         viewed_content_keys = self.get_recent_viewed_content_keys()
         rows: list[dict[str, Any]] = []
@@ -2853,9 +2904,9 @@ class Database:
     def _load_pool_raw_material_rows(self) -> list[dict[str, Any]]:
         """Load raw fresh material rows governed by the raw ceiling."""
         self._ensure_fresh_read()
-        min_score = self._pool_admission_min_score()
+        admission_sql, admission_params = self._pool_admission_sql()
         cursor = self.conn.execute(
-            """
+            f"""
             SELECT
                 bvid,
                 source,
@@ -2870,12 +2921,12 @@ class Database:
             FROM content_cache
             WHERE COALESCE(pool_status, 'fresh') = 'fresh'
               AND COALESCE(feedback_type, '') != 'dislike'
-              AND COALESCE(relevance_score, 0.0) >= ?
+              AND {admission_sql}
               AND NOT EXISTS (
                 SELECT 1 FROM recommendations AS r WHERE r.bvid = content_cache.bvid
               )
             """,
-            (min_score,),
+            admission_params,
         )
         viewed_content_keys = self.get_recent_viewed_content_keys()
         rows: list[dict[str, Any]] = []
@@ -2925,7 +2976,7 @@ class Database:
         recently viewed rows are unavailable, but they are not pending.
         """
         self._ensure_fresh_read()
-        min_score = self._pool_admission_min_score()
+        admission_sql, admission_params = self._pool_admission_sql()
         guard_sql = _xhs_self_author_guard_sql()
         guard_params = _xhs_self_author_guard_params(xhs_self_nickname)
         raw_cursor = self.conn.execute(
@@ -2934,7 +2985,7 @@ class Database:
             FROM content_cache
             WHERE COALESCE(pool_status, 'fresh') = 'fresh'
               AND COALESCE(feedback_type, '') != 'dislike'
-              AND COALESCE(relevance_score, 0.0) >= ?
+              AND {admission_sql}
               {guard_sql}
               AND NOT EXISTS (
                 SELECT 1
@@ -2942,7 +2993,7 @@ class Database:
                 WHERE r.bvid = content_cache.bvid
               )
             """,
-            (min_score, *guard_params),
+            (*admission_params, *guard_params),
         )
         raw_count = int(raw_cursor.fetchone()["count"])
         pending_cursor = self.conn.execute(
@@ -2960,7 +3011,7 @@ class Database:
             FROM content_cache
             WHERE COALESCE(pool_status, 'fresh') = 'fresh'
               AND COALESCE(feedback_type, '') != 'dislike'
-              AND COALESCE(relevance_score, 0.0) >= ?
+              AND {admission_sql}
               {guard_sql}
               AND NOT EXISTS (
                 SELECT 1
@@ -2968,7 +3019,7 @@ class Database:
                 WHERE r.bvid = content_cache.bvid
               )
             """,
-            (min_score, *guard_params),
+            (*admission_params, *guard_params),
         )
         viewed_content_keys = self.get_recent_viewed_content_keys()
         pending_count = 0
@@ -3006,21 +3057,21 @@ class Database:
 
     def count_pool_candidates_by_source(self) -> dict[str, int]:
         """Return fresh pool counts grouped by discovery source family."""
-        min_score = self._pool_admission_min_score()
+        admission_sql, admission_params = self._pool_admission_sql()
         cursor = self.conn.execute(
-            """
+            f"""
             SELECT bvid, source, source_platform, content_url
             FROM content_cache
             WHERE COALESCE(pool_status, 'fresh') = 'fresh'
               AND COALESCE(feedback_type, '') != 'dislike'
-              AND COALESCE(relevance_score, 0.0) >= ?
+              AND {admission_sql}
               AND NOT EXISTS (
                 SELECT 1
                 FROM recommendations AS r
                 WHERE r.bvid = content_cache.bvid
               )
             """,
-            (min_score,),
+            admission_params,
         )
         viewed_content_keys = self.get_recent_viewed_content_keys()
         counts: dict[str, int] = defaultdict(int)
@@ -3041,14 +3092,14 @@ class Database:
 
     def get_pool_distribution_counts(self) -> dict[str, dict[str, int]]:
         """Return fresh pool counts grouped by topic, style, and franchise."""
-        min_score = self._pool_admission_min_score()
+        admission_sql, admission_params = self._pool_admission_sql()
         cursor = self.conn.execute(
-            """
+            f"""
             SELECT bvid, topic_group, style_key, franchise_key, source, source_platform, content_url
             FROM content_cache
             WHERE COALESCE(pool_status, 'fresh') = 'fresh'
               AND COALESCE(feedback_type, '') != 'dislike'
-              AND COALESCE(relevance_score, 0.0) >= ?
+              AND {admission_sql}
               AND COALESCE(pool_expression, '') != ''
               AND COALESCE(pool_topic_label, '') != ''
               AND NOT EXISTS (
@@ -3057,7 +3108,7 @@ class Database:
                 WHERE r.bvid = content_cache.bvid
               )
             """,
-            (min_score,),
+            admission_params,
         )
         viewed_content_keys = self.get_recent_viewed_content_keys()
         counts: dict[str, dict[str, int]] = {
@@ -3091,22 +3142,22 @@ class Database:
         (a topic piled up on B站 may be absent on 小红书). Returns ``{}`` on error.
         """
         try:
-            min_score = self._pool_admission_min_score()
+            admission_sql, admission_params = self._pool_admission_sql()
             cursor = self.conn.execute(
-                """
+                f"""
                 SELECT bvid, topic_group, style_key, franchise_key,
                        source, source_platform, content_url
                 FROM content_cache
                 WHERE COALESCE(pool_status, 'fresh') = 'fresh'
                   AND COALESCE(feedback_type, '') != 'dislike'
-                  AND COALESCE(relevance_score, 0.0) >= ?
+                  AND {admission_sql}
                   AND COALESCE(pool_expression, '') != ''
                   AND COALESCE(pool_topic_label, '') != ''
                   AND NOT EXISTS (
                     SELECT 1 FROM recommendations AS r WHERE r.bvid = content_cache.bvid
                   )
                 """,
-                (min_score,),
+                admission_params,
             )
             viewed_content_keys = self.get_recent_viewed_content_keys()
         except Exception:
@@ -3142,16 +3193,16 @@ class Database:
         avoid set). Returns ``{}`` on error.
         """
         try:
-            min_score = self._pool_admission_min_score()
+            admission_sql, admission_params = self._pool_admission_sql()
             cursor = self.conn.execute(
-                """
+                f"""
                 SELECT topic_group, source, source_platform, content_url
                 FROM content_cache
                 WHERE COALESCE(feedback_type, '') != 'dislike'
-                  AND COALESCE(relevance_score, 0.0) >= ?
+                  AND {admission_sql}
                   AND COALESCE(topic_group, '') != ''
                 """,
-                (min_score,),
+                admission_params,
             )
         except Exception:
             logger.debug("get_admitted_topic_counts_by_platform query failed", exc_info=True)
@@ -3214,19 +3265,19 @@ class Database:
         is excluded — most generic content has no IP signal and the
         quota is only meaningful for series / IP / UP-driven groups.
         """
-        min_score = self._pool_admission_min_score()
+        admission_sql, admission_params = self._pool_admission_sql()
         cursor = self.conn.execute(
-            """
+            f"""
             SELECT LOWER(TRIM(franchise_key)) AS fk, COUNT(*) AS n
             FROM content_cache
             WHERE COALESCE(pool_status, 'fresh') = 'fresh'
               AND COALESCE(feedback_type, '') != 'dislike'
-              AND COALESCE(relevance_score, 0.0) >= ?
+              AND {admission_sql}
               AND franchise_key IS NOT NULL
               AND TRIM(franchise_key) != ''
             GROUP BY LOWER(TRIM(franchise_key))
             """,
-            (min_score,),
+            admission_params,
         )
         return {str(row["fk"]): int(row["n"]) for row in cursor.fetchall() if row["fk"]}
 
@@ -3237,16 +3288,16 @@ class Database:
         before the popup hits ``serve()``. Cheap GROUP BY on a small
         column with no JOIN.
         """
-        min_score = self._pool_admission_min_score()
+        admission_sql, admission_params = self._pool_admission_sql()
         cursor = self.conn.execute(
-            """
+            f"""
             SELECT DISTINCT topic_group
             FROM content_cache
             WHERE COALESCE(pool_status, 'fresh') = 'fresh'
-              AND COALESCE(relevance_score, 0.0) >= ?
+              AND {admission_sql}
               AND COALESCE(topic_group, '') != ''
             """,
-            (min_score,),
+            admission_params,
         )
         return [str(row[0]) for row in cursor.fetchall() if row and row[0]]
 
@@ -3265,13 +3316,13 @@ class Database:
         single one-off item doesn't block exploration of an actually-
         empty area. Result is sorted by group size DESC.
         """
-        min_score = self._pool_admission_min_score()
+        admission_sql, admission_params = self._pool_admission_sql()
         cursor = self.conn.execute(
-            """
+            f"""
             SELECT topic_group, COUNT(*) AS n
             FROM content_cache
             WHERE COALESCE(pool_status, 'fresh') = 'fresh'
-              AND COALESCE(relevance_score, 0.0) >= ?
+              AND {admission_sql}
               AND COALESCE(topic_group, '') != ''
               AND NOT EXISTS (
                 SELECT 1 FROM recommendations AS r WHERE r.bvid = content_cache.bvid
@@ -3281,7 +3332,7 @@ class Database:
             ORDER BY n DESC, topic_group ASC
             LIMIT ?
             """,
-            (min_score, max(1, int(min_count)), max(1, int(limit))),
+            (*admission_params, max(1, int(min_count)), max(1, int(limit))),
         )
         return [str(row["topic_group"]) for row in cursor.fetchall()]
 
@@ -3306,18 +3357,18 @@ class Database:
         Sample titles are picked top-by-``relevance_score`` within each
         group, so the input is reasonably stable while the pool is steady.
         """
-        min_score = self._pool_admission_min_score()
+        admission_sql, admission_params = self._pool_admission_sql()
         cursor = self.conn.execute(
-            """
+            f"""
             SELECT topic_group, title, relevance_score
             FROM content_cache
             WHERE COALESCE(pool_status, 'fresh') = 'fresh'
-              AND COALESCE(relevance_score, 0.0) >= ?
+              AND {admission_sql}
               AND COALESCE(topic_group, '') != ''
               AND COALESCE(title, '') != ''
             ORDER BY topic_group, relevance_score DESC, bvid
             """,
-            (min_score,),
+            admission_params,
         )
         by_group: dict[str, list[str]] = defaultdict(list)
         group_max_score: dict[str, float] = {}
@@ -3343,17 +3394,17 @@ class Database:
 
     def trim_explore_cluster_overflow(self, *, max_per_cluster: int = 3) -> int:
         """Suppress excess fresh explore items from high-risk topic clusters."""
-        min_score = self._pool_admission_min_score()
+        admission_sql, admission_params = self._pool_admission_sql()
         cursor = self.conn.execute(
-            """
+            f"""
             SELECT bvid, title, topic_key, relevance_score, last_scored_at
             FROM content_cache
             WHERE COALESCE(pool_status, 'fresh') = 'fresh'
               AND COALESCE(feedback_type, '') != 'dislike'
-              AND COALESCE(relevance_score, 0.0) >= ?
+              AND {admission_sql}
               AND COALESCE(source, '') = 'explore'
             """,
-            (min_score,),
+            admission_params,
         )
         rows = [dict(row) for row in cursor.fetchall()]
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -3416,20 +3467,20 @@ class Database:
         if max_per_group <= 0:
             return 0
 
-        min_score = self._pool_admission_min_score()
+        admission_sql, admission_params = self._pool_admission_sql()
         cursor = self.conn.execute(
-            """
+            f"""
             SELECT bvid, topic_group, relevance_score, last_scored_at
             FROM content_cache
             WHERE COALESCE(pool_status, 'fresh') = 'fresh'
               AND COALESCE(feedback_type, '') != 'dislike'
-              AND COALESCE(relevance_score, 0.0) >= ?
+              AND {admission_sql}
               AND COALESCE(topic_group, '') != ''
               AND NOT EXISTS (
                 SELECT 1 FROM recommendations AS r WHERE r.bvid = content_cache.bvid
               )
             """,
-            (min_score,),
+            admission_params,
         )
         rows = [dict(row) for row in cursor.fetchall()]
         if not rows:
@@ -3711,14 +3762,14 @@ class Database:
         if not deficits:
             return 0
 
-        min_score = self._pool_admission_min_score()
+        admission_sql, admission_params = self._pool_admission_sql()
         cursor = self.conn.execute(
-            """
+            f"""
             SELECT bvid, source, source_platform, content_url, relevance_score, last_scored_at
             FROM content_cache
             WHERE COALESCE(pool_status, 'fresh') = 'suppressed'
               AND COALESCE(feedback_type, '') != 'dislike'
-              AND COALESCE(relevance_score, 0.0) >= ?
+              AND {admission_sql}
               AND NOT EXISTS (
                 SELECT 1 FROM recommendations AS r WHERE r.bvid = content_cache.bvid
               )
@@ -3728,7 +3779,7 @@ class Database:
                 last_scored_at DESC,
                 bvid ASC
             """,
-            (min_score,),
+            admission_params,
         )
         viewed_content_keys = self.get_recent_viewed_content_keys()
         selected_bvids: list[str] = []
@@ -4095,7 +4146,7 @@ class Database:
         unclassified items (e.g. raw XHS notes) from getting an expression
         and leaking through the serve gate without proper relevance scoring.
         """
-        min_score = self._pool_admission_min_score()
+        admission_sql, admission_params = self._pool_admission_sql()
         guard_sql = _xhs_self_author_guard_sql()
         guard_params = _xhs_self_author_guard_params(xhs_self_nickname)
         cursor = self.conn.execute(
@@ -4104,7 +4155,7 @@ class Database:
             FROM content_cache
             WHERE COALESCE(pool_status, 'fresh') = 'fresh'
               AND COALESCE(feedback_type, '') != 'dislike'
-              AND COALESCE(relevance_score, 0.0) >= ?
+              AND {admission_sql}
               AND COALESCE(style_key, '') != ''
               AND COALESCE(topic_group, '') != ''
               AND (
@@ -4125,7 +4176,7 @@ class Database:
                 bvid ASC
             LIMIT ?
             """,
-            (min_score, *guard_params, limit),
+            (*admission_params, *guard_params, limit),
         )
         rows = [dict(row) for row in cursor.fetchall()]
         rows = self._exclude_viewed_rows(
@@ -4376,7 +4427,10 @@ class Database:
         otherwise five 原神 / 提瓦特 items can land in one popup view.
         """
         self._ensure_fresh_read()
-        min_score = self._pool_admission_min_score()
+        admission_sql, admission_params = self._pool_admission_sql(
+            score_expr="COALESCE(r.confidence, 0.0)",
+            source_expr="c.source",
+        )
         processed_clause = (
             "AND (r.feedback_type IS NULL OR r.feedback_type = '')" if exclude_processed else ""
         )
@@ -4409,12 +4463,12 @@ class Database:
                 COALESCE(c.source_platform, '') != 'xiaohongshu'
                 OR COALESCE(c.content_url, '') LIKE '%xsec_token=%'
             )
-            AND COALESCE(r.confidence, 0.0) >= ?
+            AND {admission_sql}
             {processed_clause}
             ORDER BY created_at DESC, id DESC
             LIMIT ?
             """,
-            (min_score, limit),
+            (*admission_params, limit),
         )
         return [dict(row) for row in cursor.fetchall()]
 
@@ -4640,6 +4694,7 @@ class Database:
             "recommended_at": "TIMESTAMP",
             "feedback_type": "TEXT",
             "feedback_at": "TIMESTAMP",
+            "source": "TEXT",
         }
         for column_name, column_type in required_columns.items():
             if column_name in existing_columns:
@@ -7745,13 +7800,13 @@ class Database:
             if include_liked
             else "COALESCE(feedback_type, '') = ''"
         )
-        min_score = self._pool_admission_min_score()
+        admission_sql, admission_params = self._pool_admission_sql()
         cursor = self.conn.execute(
             f"""
             SELECT *
             FROM content_cache
             WHERE COALESCE(delight_score, 0.0) >= ?
-              AND COALESCE(relevance_score, 0.0) >= ?
+              AND {admission_sql}
               AND COALESCE(delight_notified, 0) = 0
               AND COALESCE(delight_reason, '') != ''
               AND COALESCE(delight_hook, '') != ''
@@ -7760,7 +7815,7 @@ class Database:
             ORDER BY delight_score DESC, relevance_score DESC, discovered_at DESC
             LIMIT ?
             """,
-            (min_delight_score, min_score, max(1, int(limit))),
+            (min_delight_score, *admission_params, max(1, int(limit))),
         )
         return [dict(row) for row in cursor.fetchall()]
 
@@ -7802,20 +7857,20 @@ class Database:
         min_delight_score: float = 0.85,
     ) -> int:
         """Return the number of un-notified delight candidates."""
-        min_score = self._pool_admission_min_score()
+        admission_sql, admission_params = self._pool_admission_sql()
         cursor = self.conn.execute(
-            """
+            f"""
             SELECT COUNT(*) AS count
             FROM content_cache
             WHERE COALESCE(delight_score, 0.0) >= ?
-              AND COALESCE(relevance_score, 0.0) >= ?
+              AND {admission_sql}
               AND COALESCE(delight_notified, 0) = 0
               AND COALESCE(delight_reason, '') != ''
               AND COALESCE(delight_hook, '') != ''
               AND COALESCE(feedback_type, '') = ''
               AND COALESCE(pool_status, 'fresh') IN ('fresh', 'shown', 'suppressed')
             """,
-            (min_delight_score, min_score),
+            (min_delight_score, *admission_params),
         )
         row = cursor.fetchone()
         return int(row["count"]) if row is not None else 0

@@ -6,6 +6,9 @@ import {
   describeInitFailure,
   describeInitReason,
   describeInitStartError,
+  embeddingPullProgressView,
+  embeddingRepairAction,
+  embeddingRepairStartAccepted,
   getEnabledPlatforms,
   hardPrereqsSatisfied,
   initProgressView,
@@ -54,6 +57,73 @@ test("checklist marks hard prereqs and surfaces hints when missing", () => {
   assert.ok(bili?.hint.length > 0);
   assert.equal(llm?.hard, true);
   assert.equal(llm?.ok, false);
+});
+
+test("embeddingPullProgressView reports live bge-m3 pull percent + label", () => {
+  const idle = embeddingPullProgressView({ embedding_ready: true });
+  assert.equal(idle.active, false);
+  assert.equal(idle.pct, 0);
+
+  const pulling = embeddingPullProgressView({
+    embedding_repair_running: true,
+    embedding_repair_completed: 50,
+    embedding_repair_total: 200,
+    embedding_pull_status: "downloading",
+  });
+  assert.equal(pulling.active, true);
+  assert.equal(pulling.pct, 25);
+  assert.ok(pulling.label.includes("downloading"));
+
+  const starting = embeddingPullProgressView({
+    embedding_repair_running: true,
+    ollama_phase: "starting",
+  });
+  assert.equal(starting.pct, 1); // no totals yet → 1% floor while active
+  assert.ok(starting.label.includes("Ollama"));
+});
+
+test("embeddingRepairAction picks the right button per embedding_check", () => {
+  assert.deepEqual(embeddingRepairAction({ embedding_ready: true }), {
+    repairable: false,
+    label: "",
+  });
+  assert.equal(
+    embeddingRepairAction({ embedding_check: "model_missing" }).label,
+    "自动下载向量模型",
+  );
+  assert.equal(
+    embeddingRepairAction({ embedding_check: "model_path_encoding" }).label,
+    "迁移模型目录并修复",
+  );
+  assert.equal(embeddingRepairAction({ embedding_check: "disk_full" }).label, "重新检测");
+  assert.equal(embeddingRepairAction({ embedding_check: "not_running" }).repairable, false);
+  assert.equal(embeddingRepairStartAccepted({ status: 202 }), true);
+  assert.equal(
+    embeddingRepairStartAccepted({ status: 409, error: "already_running" }),
+    true,
+  );
+  assert.equal(embeddingRepairStartAccepted({ status: 0 }), false);
+  assert.equal(embeddingRepairStartAccepted({ status: 404 }), false);
+  assert.equal(embeddingRepairStartAccepted({ status: 500 }), false);
+});
+
+test("embedding checklist row carries pull progress + repair action", () => {
+  const rows = buildInitChecklist(
+    statusWith({
+      prerequisites: {
+        embedding_ready: false,
+        embedding_required: true,
+        embedding_check: "model_missing",
+        embedding_repair_running: true,
+        embedding_repair_completed: 10,
+        embedding_repair_total: 100,
+      },
+    }),
+  );
+  const emb = rows.find((r) => r.key === "embedding");
+  assert.equal(emb?.pull.active, true);
+  assert.equal(emb?.pull.pct, 10);
+  assert.equal(emb?.repair.repairable, true);
 });
 
 test("hardPrereqsSatisfied is false until both bilibili and llm are ready", () => {

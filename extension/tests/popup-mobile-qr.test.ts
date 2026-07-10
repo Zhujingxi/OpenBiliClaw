@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import test from "node:test";
 
 import {
@@ -38,4 +40,16 @@ test("mobile web QR SVG is generated locally without embedding a remote service 
   assert.match(svg, /viewBox="0 0 45 45"/);
   assert.match(svg, /<path d="M/);
   assert.doesNotMatch(svg, /api\.qrserver|chart\.googleapis|192\.168\.1\.100/);
+});
+
+test("mobile QR LAN-IP lookup uses the lightweight QR endpoint", () => {
+  const popupSource = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const renderSource =
+    popupSource.match(
+      /async function renderMobileQrPanel\(\) \{[\s\S]*?\n\}\n\nasync function openMobileQrPanel/,
+    )?.[0] ?? "";
+
+  assert.ok(renderSource, "popup.js must keep renderMobileQrPanel");
+  assert.match(renderSource, /\/api\/qr-info/);
+  assert.doesNotMatch(renderSource, /\/api\/health/);
 });

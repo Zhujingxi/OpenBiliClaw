@@ -37,6 +37,30 @@ def test_pull_progress_snapshot_is_thread_safe() -> None:
     assert done["error"] == ""
 
 
+def test_reset_clears_pull_and_ollama_phase_state() -> None:
+    from openbiliclaw.runtime import embedding_progress
+
+    embedding_progress.mark_pull_running("bge-m3")
+    embedding_progress.report_pull("downloading", 12, 34)
+    embedding_progress.report_ollama_phase("down")
+
+    embedding_progress.reset()
+
+    assert embedding_progress.snapshot() == {
+        "running": False,
+        "model": "",
+        "status": "",
+        "completed": 0,
+        "total": 0,
+        "done": False,
+        "ok": False,
+        "error": "",
+        "started_monotonic": 0.0,
+        "status_text": "",
+    }
+    assert embedding_progress.ollama_phase() == "ready"
+
+
 def test_ollama_phase_transitions_are_process_global() -> None:
     from openbiliclaw.runtime import embedding_progress
 

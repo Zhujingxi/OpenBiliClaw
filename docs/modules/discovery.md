@@ -20,6 +20,7 @@
 
 - **ContentDiscoveryEngine** — 发现策略编排器，负责注册、运行、去重、批量评估和缓存收口；也提供只拉原始候选的 `produce_candidates()`
 - **DiscoveryCandidatePipeline** — 统一候选待评估池的生产 / 入队 / 混源 batch 评估 / 入推荐池 admission 编排器
+- **admission.effective_admission_threshold()** — 评估、缓存收口和数据库展示出口共享的纯准入策略；精确 `explore=0.58` 是唯一低于全局门槛的例外
 - **DiscoveryCandidateWrite / discovery_candidates** — 原始候选的持久化队列结构，所有来源先落到 `pending_eval`，再由统一 evaluator claim
 - **DiscoveredContent** — 统一的候选内容数据结构
 - **multimodal.py** — 可选封面图评估的图片准备模块：复用后端封面磁盘缓存与图片白名单抓取边界，压缩为 JPEG data URL 后交给支持图像输入的 evaluator
@@ -116,7 +117,7 @@
 
    进入批量 LLM 评估前，`evaluate_content_batch()` 会读取 `Database.get_recent_viewed_content_keys()`，用 `source_platform:content_id` 判断最近看过的 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit 候选；命中项直接记为 0 分并从 prompt 中剔除，避免为已看内容消耗 discovery token。老 BVID 也保留 raw key 兼容旧数据。
 
-   evaluator 的候选输入不再只依赖标题：各来源会尽量映射 `view_count`、`like_count`、`favorite_count` / `collect_count`、`comment_count` / `reply_count`、`share_count`、`danmaku_count`、`retweet_count`、`bookmark_count`、`tags`、`body_text` 等字段。对知乎 / X 这类 text-first 来源，如果 `description` 与 `body_text` 是同一段文本或只是正文前缀，prompt 里会省略重复的 `description`，保留 `body_text` 作为内容正文，避免同一长文本在 evaluator 输入里发送两遍。prompt 明确把互动指标当辅助信号，不能用高热度替代内容与画像的真实匹配，也不能因为低热度惩罚小众但高度匹配的内容。
+   evaluator 的候选输入不再只依赖标题：各来源会尽量映射 `view_count`、`like_count`、`favorite_count` / `collect_count`、`comment_count` / `reply_count`、`share_count`、`danmaku_count`、`retweet_count`、`bookmark_count`、`tags`、`body_text` 等字段。对知乎 / X 这类 text-first 来源，如果 `description` 与 `body_text` 是同一段文本或只是正文前缀，prompt 里会省略重复的 `description`，保留 `body_text` 作为内容正文，避免同一长文本在 evaluator 输入里发送两遍。prompt 明确把互动指标当辅助信号，不能用高热度替代内容与画像的真实匹配，也不能因为低热度惩罚小众但高度匹配的内容。除 `explore` 外，`search` / `trending` / `hot` / `feed` / `related_chain` / `channel` / `creator` 等发现路径和平台都只提供上下文，不能设置基础分、自动加分、降低门槛或替明显不匹配的候选事后编造画像关联；单条 fallback evaluator 与混源 batch evaluator 使用同一规则。`explore` 仍可容纳主题陌生的候选，但也必须有具体可信的吸引点，不能仅凭抽象心理需求获得高分。
 
    `evaluate_content_batch()` 的进程内评分缓存按“候选身份 + full eval profile digest + negative_examples digest + evaluator cache version”命中，不再使用 Python `id(profile)` 或全局最新事件水位作为 key。这样同一画像内容在 profile 对象重建后仍能复用精确评分；普通非负向事件推进 event id 时不会冲掉缓存，但近期负样本内容发生变化仍会强制重新评估。LLM prompt 侧，batch evaluator 会把完整结构化画像拆成 `<profile_core>` / `<profile_life_context>` / `<profile_interests>` / `<profile_style_context>` / `<profile_recent_context>` 五层，并用 `PromptLayerRenderCache` 按层 digest 复用渲染后的 JSON block；近期觉察变化只会更新后置 recent 层，画像核心和兴趣层保持 byte-stable 前缀。批量 eval、单条 fallback eval 和搜索 / 排行 / 跨域 / 多平台关键词生成调用 `LLMService` 时，会在服务支持的情况下关闭额外 core memory 注入，因为这些 prompt 已经携带完整结构化画像；这能稳定 provider-side prompt-cache 前缀，同时不减少 evaluator 或 query generator 可见的画像信号。
 
@@ -124,12 +125,12 @@
 
    当 `[discovery].multimodal_evaluation_enabled=true` 且当前 evaluation 路由支持图像输入时，带 `cover_url` 的候选会额外准备封面图：`discovery.multimodal.prepare_cover_image_inputs()` 走 `runtime.image_cache.get_or_fetch_cover_bytes()`，先查本地 `data/image-cache/`，命中则直接复用缓存图，未命中才按同一 SSRF / 白名单 / redirect / 大小限制边界抓取并写回缓存。小红书 token 图因此优先使用预取或 UI 代理已经落盘的副本，不依赖评估时原 CDN token 仍有效；随后再按 `multimodal_image_max_px` 与 `multimodal_image_quality` 压成 JPEG data URL。准备成功的候选会在 `content_batch` 里带 `cover_image_ref="cover:<content_id>"`，LLM user message 中每张图前也会插入同样的 `cover:<content_id>` 文字锚点，prompt 明确要求模型用这个锚点把图片和候选绑定；没有 `cover_image_ref` 的候选只按文本字段判断。该 batch 会使用更小的 `multimodal_batch_size`；如果模型不支持图像或图片准备失败，自动退回文本 + 互动指标评估。
 
-   评估结果会回写到 `discovery_candidates`：通过阈值前先标为 `evaluated`，低分会变成 `rejected_low_score`，全局 franchise 入池配额命中时会变成 `rejected_franchise_quota`。候选行自己的 `score_threshold` 优先，其次使用 raw payload 中显式携带的 `score_threshold`，最后回落到 `[discovery].admission_min_score`（默认 `0.60`）。`raw_payload.admission_policy="observed"` 只表示来源是用户观察 / 插件采集，不再降低 admission 阈值；B 站扩展搜索、小红书 observed、抖音 / YouTube / X 等任意来源都必须经过同一 evaluator 分数门。探索类 strategy 可以用略低阈值鼓励新方向，但不是平台特权；低分 observed 内容仍保留在 `discovery_candidates` 里作为学习 / 诊断信号，但不会写入 `content_cache` 的正式可推荐池。
+   评估结果会回写到 `discovery_candidates`：通过阈值前先标为 `evaluated`，低分会变成 `rejected_low_score`，全局 franchise 入池配额命中时会变成 `rejected_franchise_quota`。准入阈值由 `discovery.admission.effective_admission_threshold()` 统一计算：候选行或 raw payload 的 `score_threshold` 只能抬高门槛；所有非 `explore` 来源至少使用 `[discovery].admission_min_score`（默认 `0.60`）；只有精确的 `source_strategy="explore"` 使用现有 `0.58` 例外，`explore-*` 等近似字符串不享受特权。`raw_payload.admission_policy="observed"` 只表示来源是用户观察 / 插件采集，不再降低 admission 阈值；B 站扩展搜索、小红书 observed、抖音 / YouTube / X 等任意来源都必须经过同一 evaluator 分数门。低分 observed 内容仍保留在 `discovery_candidates` 里作为学习 / 诊断信号，但不会写入 `content_cache` 的正式可推荐池。
 
    provider / LLM batch 级 transient 异常、空 scores、短 scores 或长 scores 都会释放回 `pending_eval` 后续重试，不消耗单条候选的 `eval_attempts`，避免一次短暂 provider outage 把整批内容永久打成 `failed_eval`；同时会递增独立的 `batch_eval_attempts`，高阈值熔断后才进入 `failed_eval`，避免永久坏 provider 无限 churn。batch prompt 明确要求不要因为平台不同而随意抬高或压低分数，只能按内容与用户画像匹配度打分。
 
 5. **按相关性、供给层级和池子上限入推荐池**
-   通过阈值的候选会先调用 `ContentDiscoveryEngine.normalize_evaluated_results()` 复用 discovery 旧路径的 topic_group / topic_key embedding normalization，再交给 `cache_evaluated_results()` 复用既有 `_cache_results()` 入库逻辑，写入正式推荐池 `content_cache`。写入前会检查 `count_pool_candidates()`；如果 `pool_available_count >= pool_target_count`，pipeline 直接停止 drain，runtime 也不会继续 discovery。因此“推荐池到了上限就不 discovery”的边界仍以正式可换池为准。成功 admission 的 item 会保存在 pipeline 的 `last_admitted_items` 中，供 runtime 更新 `recent_pool_topics`。
+   通过阈值的候选会先调用 `ContentDiscoveryEngine.normalize_evaluated_results()` 复用 discovery 旧路径的 topic_group / topic_key embedding normalization，再交给 `cache_evaluated_results()` 复用既有 `_cache_results()` 入库逻辑，写入正式推荐池 `content_cache`。`_cache_results()` 在真正写库前会再次调用同一 admission policy，任何兼容 / 手动调用即使绕过候选队列，也不能把未评估、缺分或低分内容写入正式池；`Database.cache_content()` 的缺省分数为 `0.0`，不再凭空赋予 `0.60`。数据库的普通取池、缓存回填、平台补位、文案预计算、池配额统计、历史推荐和 delight 出口同样使用来源感知的准入条件，所以 `explore=0.58` 能真实展示，而任意非 `explore=0.58` 仍被拒绝。写入前会检查 `count_pool_candidates()`；如果 `pool_available_count >= pool_target_count`，pipeline 直接停止 drain，runtime 也不会继续 discovery。因此“推荐池到了上限就不 discovery”的边界仍以正式可换池为准。成功 admission 的 item 会保存在 pipeline 的 `last_admitted_items` 中，供 runtime 更新 `recent_pool_topics`。
 
    如果评估后 admission 途中正式池达到上限，剩余通过阈值的候选会保留在 `evaluated`，下一次池子掉回目标以下时先重试入池，再领取新的 `pending_eval` 批次，避免高分候选被卡在待评估池里。
 
@@ -139,7 +140,7 @@
 
    引擎缓存收口仍会按跨源内容身份去重：B 站内容使用 `bvid`，YouTube / 小红书 / 抖音等多源内容使用 `source_platform + content_id`，缺失时再退到 URL / 标题。这样同一个视频被多个策略同时找到时，会保留可入池的一条版本，同时不会把多个非 B 站候选因为空 `bvid` 误合并。
 
-   直接调用 `ContentDiscoveryEngine.discover()` 的 CLI / 测试 / fallback 路径仍保留旧的 inline 评估、排序、压缩和缓存能力；daemon runtime 的正常路径则优先走待评估池。
+   直接调用 `ContentDiscoveryEngine.discover()` 的 CLI / 测试 / fallback 路径仍保留 inline 评估、排序、压缩和缓存能力，并受缓存写入防线保护；API runtime 与 OpenClaw 兼容 runtime 都会构造同一个 `DiscoveryCandidatePipeline` 实例交给 refresh controller、抖音 producer 和 YouTube producer，正常后台补池统一走待评估池。
 
 6. **按相关性和供给层级排序**
    进入 `content_cache` 前后，引擎仍会复用 `_merge_and_rank()` / `_compress_topic_repeats()` 的排序与压缩口径。当前排序不是只看分数，而是先看候选层级，再看内容质量信号：

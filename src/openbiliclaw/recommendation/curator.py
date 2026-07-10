@@ -359,13 +359,13 @@ class PoolCurator:
     def _serendipity_bonus(source_strategy: str) -> float:
         """Bonus for content that brings surprise/novelty.
 
-        explore gets full bonus (cross-domain discovery),
-        trending gets partial bonus (popular but potentially new topics).
+        ``explore`` is the sole discovery context allowed a scoring
+        privilege (cross-domain discovery). Every other strategy —
+        including ``trending`` — is source context only and must not
+        earn a rec-score bonus.
         """
         if source_strategy == "explore":
             return 1.0
-        if source_strategy == "trending":
-            return 0.5
         return 0.0
 
     @staticmethod

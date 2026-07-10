@@ -483,3 +483,58 @@ async def test_related_chain_uses_bounded_evaluation_concurrency_within_batch() 
     # Batch evaluation sends 1 LLM call per batch (not per item)
     assert strategy.llm_service.max_active_calls >= 1
     assert [item.bvid for item in results] == ["BV1A", "BV1B", "BV1C"]
+
+
+async def test_related_chain_does_not_add_seed_or_depth_bonus_to_llm_score() -> None:
+    """issue #90: related_chain is source context only — no post-hoc score bonus.
+
+    The first seed at depth 1 used to earn +0.05, which pushed an LLM score of
+    0.55 over the 0.60 admission gate.
+    """
+
+    from openbiliclaw.discovery.strategies.strategies import RelatedChainStrategy
+
+    memory = FakeMemoryManager(events=[_event("BV1SEED", title="正常视频")])
+    client = FakeRelatedClient(
+        related_by_bvid={
+            "BV1SEED": [
+                {"bvid": "BV1BORDER", "title": "擦边内容", "owner": {"name": "UP1", "mid": 1}},
+            ]
+        }
+    )
+    strategy = RelatedChainStrategy(
+        bilibili_client=client,
+        llm_service=FakeLLMService(['{"score": 0.55, "reason": "只是沾边。"}']),
+        memory_manager=memory,
+        score_threshold=0.60,
+        max_depth=1,
+    )
+
+    results = await strategy.discover(_build_profile(), limit=20)
+
+    assert results == []
+
+
+async def test_related_chain_preserves_raw_llm_score_on_admitted_content() -> None:
+    from openbiliclaw.discovery.strategies.strategies import RelatedChainStrategy
+
+    memory = FakeMemoryManager(events=[_event("BV1SEED", title="正常视频")])
+    client = FakeRelatedClient(
+        related_by_bvid={
+            "BV1SEED": [
+                {"bvid": "BV1GOOD", "title": "高分内容", "owner": {"name": "UP1", "mid": 1}},
+            ]
+        }
+    )
+    strategy = RelatedChainStrategy(
+        bilibili_client=client,
+        llm_service=FakeLLMService(['{"score": 0.72, "reason": "主题贴近。"}']),
+        memory_manager=memory,
+        score_threshold=0.60,
+        max_depth=1,
+    )
+
+    results = await strategy.discover(_build_profile(), limit=20)
+
+    assert [item.bvid for item in results] == ["BV1GOOD"]
+    assert results[0].relevance_score == 0.72

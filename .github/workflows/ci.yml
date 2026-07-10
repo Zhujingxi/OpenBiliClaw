@@ -19,6 +19,11 @@ jobs:
         with:
           python-version: "3.11"
 
+      # stdlib-only, runs before dependency install for fast fail on
+      # inconsistent version fields (see scripts/release.py VERSION_FILES)
+      - name: Check release version consistency
+        run: python scripts/release.py --check
+
       - name: Install dependencies
         # Include the optional `x` extra (twitter-cli) so the X-source test
         # suite (tests/test_x_client.py etc.) can construct real tweet objects

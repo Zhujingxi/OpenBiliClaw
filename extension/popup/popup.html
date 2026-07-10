@@ -3048,6 +3048,48 @@
       font-weight: 400;
     }
 
+    .init-checklist li .init-repair-btn {
+      margin: 6px 0 0 24px;
+      padding: 5px 12px;
+      border: 1px solid var(--border, #d8d8e0);
+      border-radius: 10px;
+      background: var(--surface, #fff);
+      color: var(--text-primary, #1a1a2e);
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .init-checklist li .init-repair-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .init-checklist li .init-embed-pull {
+      margin: 6px 0 0 24px;
+    }
+
+    .init-checklist li .init-embed-pull-bar {
+      height: 6px;
+      border-radius: 999px;
+      background: rgba(120, 120, 140, 0.2);
+      overflow: hidden;
+    }
+
+    .init-checklist li .init-embed-pull-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(135deg, #fb7299, #5aa9ff);
+      transition: width 0.4s ease;
+    }
+
+    .init-checklist li .init-embed-pull-label {
+      margin: 4px 0 0;
+      font-size: 11px;
+      line-height: 1.6;
+      color: var(--text-secondary);
+    }
+
     .init-start-btn {
       width: 100%;
       padding: 10px 14px;

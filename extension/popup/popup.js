@@ -43,6 +43,7 @@ import {
   describeInitFailure,
   describeInitReason,
   describeInitStartError,
+  embeddingRepairStartAccepted,
   initProgressView,
   INIT_SOURCE_OPTIONS,
   INIT_SOURCE_LOGIN_HINT,
@@ -837,7 +838,85 @@ function _renderInitChecklist(status, selected = null) {
       hint.textContent = row.hint;
       li.append(hint);
     }
+    if (row.key === "embedding" && !row.ok) {
+      const pull = row.pull || {};
+      const repair = row.repair || {};
+      if (pull.active) {
+        const wrap = document.createElement("div");
+        wrap.className = "init-embed-pull";
+        const bar = document.createElement("div");
+        bar.className = "init-embed-pull-bar";
+        const fill = document.createElement("div");
+        fill.className = "init-embed-pull-fill";
+        fill.style.width = `${Math.max(1, Math.min(99, Number(pull.pct) || 1))}%`;
+        bar.append(fill);
+        wrap.append(bar);
+        if (pull.label) {
+          const label = document.createElement("p");
+          label.className = "init-embed-pull-label";
+          label.textContent = pull.label;
+          wrap.append(label);
+        }
+        li.append(wrap);
+      } else if (repair.repairable) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "init-repair-btn";
+        btn.textContent = repair.label || "修复向量模型";
+        btn.addEventListener("click", () =>
+          void _handleChecklistEmbeddingRepair(btn, selected),
+        );
+        li.append(btn);
+      }
+    }
     elements.initChecklist.append(li);
+  }
+}
+
+// Start server-side embedding repair and keep the checklist synchronized with
+// the existing init-status progress fields until repair settles.
+async function _handleChecklistEmbeddingRepair(btn, selected = null) {
+  if (!(btn instanceof HTMLButtonElement)) return;
+  btn.disabled = true;
+  btn.textContent = "修复中…";
+  try {
+    const kicked = await startEmbeddingRepair();
+    if (!embeddingRepairStartAccepted(kicked)) {
+      btn.disabled = false;
+      btn.textContent = "重试";
+      const detail =
+        kicked && kicked.status === 403
+          ? "只能在本机操作向量模型修复。"
+          : kicked && kicked.status === 404
+            ? "当前后端版本不支持向量模型修复，请先升级后端。"
+            : kicked && kicked.detail
+              ? kicked.detail
+              : "向量模型修复未能开始，请稍后重试。";
+      setHint(detail, "error");
+      return;
+    }
+  } catch {
+    btn.disabled = false;
+    btn.textContent = "重试";
+    setHint("向量模型修复请求失败，请稍后重试。", "error");
+    return;
+  }
+  for (let i = 0; i < EMBEDDING_REPAIR_POLL_LIMIT; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, EMBEDDING_REPAIR_POLL_MS));
+    let status;
+    try {
+      status = await fetchInitStatus();
+    } catch {
+      continue;
+    }
+    if (!status) continue;
+    _renderInitChecklist(status, selected);
+    const prereq = status.prerequisites || {};
+    if (prereq.embedding_ready) return;
+    const stillPulling =
+      Boolean(prereq.embedding_repair_running) ||
+      prereq.embedding_check === "repairing";
+    if (!stillPulling && i > 1) return;
   }
 }
 
@@ -2123,14 +2202,14 @@ function bindStarButton() {
 async function renderMobileQrPanel() {
   const endpoint = await getBackendEndpointConfig();
 
-  // When the configured host is loopback, try to get the server's
-  // detected LAN IP from the health endpoint so the QR code shows
-  // an address that mobile devices can actually reach.
+  // When the configured host is loopback, ask the lightweight QR endpoint
+  // for the server's detected LAN IP. Unlike the full readiness endpoint,
+  // this endpoint does not wait for embedding readiness before the QR code can be rendered.
   let effectiveEndpoint = endpoint;
   if (isLoopbackMobileHost(endpoint.host)) {
     try {
       const base = `http://${endpoint.host}:${endpoint.port}`;
-      const resp = await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(2000) });
+      const resp = await fetch(`${base}/api/qr-info`, { signal: AbortSignal.timeout(2000) });
       if (resp.ok) {
         const data = await resp.json();
         if (data.lan_ip && !isLoopbackMobileHost(data.lan_ip)) {
@@ -2138,7 +2217,7 @@ async function renderMobileQrPanel() {
         }
       }
     } catch {
-      // Health fetch failed — fall through with original endpoint.
+      // QR-info fetch failed — fall through with original endpoint.
     }
   }
 
