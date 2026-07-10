@@ -4985,6 +4985,7 @@
         title: derivedTitle && derivedTitle !== "未命名内容"
           ? derivedTitle
           : "发现了一条你可能会意外喜欢的内容",
+        body_text: delightBody,
         reason: decodeHtmlEntities(item.delight_reason ?? item.reason ?? item.delight_hook ?? item.message ?? "这条来自后端高惊喜分候选。"),
         cover_url: normalizeImageUrl(item.cover_url ?? item.cover ?? item.pic ?? item.thumbnail_url ?? item.thumbnail ?? item.image_url),
         content_url: String(item.content_url ?? ""),
@@ -5005,24 +5006,59 @@
       };
     }
 
+    function renderDelightTextMedia(thumb, delight) {
+      if (!thumb || !delight) return;
+      const bodyText = String(delight.body_text || "").trim();
+      if (!bodyText) return;
+      thumb.replaceChildren();
+      thumb.classList.remove("has-image");
+      thumb.classList.add("is-text-media");
+      thumb.dataset.platform = String(delight.source_platform || "bilibili").toLowerCase();
+      const text = document.createElement("p");
+      text.className = "delight-text-media-copy";
+      text.textContent = bodyText;
+      const badge = document.createElement("span");
+      badge.className = "platform";
+      badge.textContent = platformName(delight.source_platform);
+      thumb.append(text, badge);
+    }
+
+    function renderDelightFallbackMedia(thumb, delight) {
+      const bodyText = String(delight?.body_text || "").trim();
+      if (bodyText) {
+        renderDelightTextMedia(thumb, delight);
+        return;
+      }
+      thumb.replaceChildren();
+      thumb.classList.remove("has-image", "is-text-media");
+      delete thumb.dataset.platform;
+      if (!delight) return;
+      const badge = document.createElement("span");
+      badge.className = "platform";
+      badge.textContent = platformName(delight.source_platform);
+      thumb.append(badge);
+    }
+
     function renderDelightCover(delight) {
       const thumb = syncDelightThumbLink(delight);
       if (!thumb) return;
       const url = imageProxyUrl(delight?.cover_url);
       thumb.replaceChildren();
+      thumb.classList.remove("has-image", "is-text-media");
+      delete thumb.dataset.platform;
       thumb.classList.toggle("has-image", Boolean(url));
       // 设置 banner 背景图（模糊用）
       const banner = $("#delightBanner");
       if (banner) banner.style.setProperty("--cover-url", url ? `url("${url}")` : "none");
       if (!delight) return;
-      // 平台徽章不依赖封面 —— 无封面(文本类内容/封面缺失)时用户仍需知道来源平台
+      if (!url) {
+        renderDelightFallbackMedia(thumb, delight);
+        return;
+      }
+      // 平台徽章不依赖封面 —— 图片正常加载时也始终标明内容来源。
       const badge = document.createElement("span");
       badge.className = "platform";
       badge.textContent = platformName(delight.source_platform);
-      if (!url) {
-        thumb.append(badge);
-        return;
-      }
       const image = document.createElement("img");
       if (isCrossOriginBase()) image.crossOrigin = "anonymous";
       image.alt = "";
@@ -5032,11 +5068,41 @@
       image.referrerPolicy = "no-referrer";
       image.src = url;
       image.addEventListener("error", () => {
-        image.remove();
-        thumb.classList.remove("has-image");
+        if (!image.isConnected || image.parentElement !== thumb) return;
+        renderDelightFallbackMedia(thumb, delight);
+        if (banner) banner.style.setProperty("--cover-url", "none");
       });
       thumb.append(image);
       thumb.append(badge);
+    }
+
+    function resetDelightExcerpt() {
+      const wrapper = $("#delightExcerpt");
+      const excerpt = $("#delightExcerptText");
+      const toggle = $("#delightExcerptToggle");
+      if (!wrapper || !excerpt || !toggle) return;
+      wrapper.classList.remove("is-expanded");
+      wrapper.hidden = true;
+      excerpt.textContent = "";
+      toggle.hidden = true;
+      toggle.textContent = "展开正文";
+      toggle.setAttribute("aria-expanded", "false");
+    }
+
+    function syncDelightExcerpt(delight) {
+      resetDelightExcerpt();
+      const wrapper = $("#delightExcerpt");
+      const excerpt = $("#delightExcerptText");
+      const toggle = $("#delightExcerptToggle");
+      const bodyText = String(delight?.body_text || "").trim();
+      if (!wrapper || !excerpt || !toggle || !bodyText) return;
+      excerpt.textContent = bodyText;
+      wrapper.hidden = false;
+      requestAnimationFrame(() => {
+        const overflows = excerpt.scrollHeight > excerpt.clientHeight + 1;
+        toggle.hidden = !overflows;
+        toggle.setAttribute("aria-expanded", "false");
+      });
     }
 
     function _startDelightAutoAdvance() {
@@ -5063,6 +5129,7 @@
         closeDelightComposer();
         renderDelightCover(null);
         renderDelightTurns(null);
+        resetDelightExcerpt();
         $("#delightTitle").textContent = "暂无惊喜队列";
         $("#delightReason").textContent = "后端产生新的高惊喜候选后会通过实时流出现在这里。";
         if ($("#delightStats")) $("#delightStats").hidden = true;
@@ -5089,6 +5156,7 @@
         renderDelightCover(state.delight);
         renderDelightTurns(state.delight);
         $("#delightTitle").textContent = state.delight.title;
+        syncDelightExcerpt(state.delight);
         const delightStatsEl = $("#delightStats");
         if (delightStatsEl) {
           const delightStats = recommendationStats(state.delight);
@@ -6320,6 +6388,15 @@
       // 「去看看」是纯按钮（不像封面 <a> 能原生导航），必须由 JS 打开内容。
       await respondDelight(state.delight, response, null, response === "view");
     }));
+    $("#delightExcerptToggle")?.addEventListener("click", () => {
+      const wrapper = $("#delightExcerpt");
+      const toggle = $("#delightExcerptToggle");
+      if (!wrapper || !toggle) return;
+      const expanded = wrapper.classList.toggle("is-expanded");
+      toggle.textContent = expanded ? "收起正文" : "展开正文";
+      toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+      scheduleActivityRailHeightSync();
+    });
 
     restoreBackendEndpoint();
     restoreFrontendSettings();
