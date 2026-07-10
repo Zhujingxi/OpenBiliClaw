@@ -2638,10 +2638,10 @@ def create_app(
                     return JSONResponse({"ok": True, "already_ok": True, "model": model})
                 if code == DIAG_NOT_RUNNING:
                     from openbiliclaw.runtime.ollama_supervisor import (
-                        _is_default_ollama_endpoint,
-                        _ollama_start_serve_background,
                         effective_ollama_endpoint,
+                        ensure_managed_ollama,
                         is_loopback,
+                        may_manage_ollama_endpoint,
                         ollama_required,
                     )
 
@@ -2651,7 +2651,7 @@ def create_app(
                         bool(getattr(getattr(cfg, "autostart", None), "manage_ollama", False))
                         and ollama_required(cfg)
                         and is_loopback(endpoint)
-                        and _is_default_ollama_endpoint(endpoint)
+                        and may_manage_ollama_endpoint(endpoint)
                     )
                     if not may_manage:
                         return JSONResponse(
@@ -2666,7 +2666,7 @@ def create_app(
                             },
                             status_code=409,
                         )
-                    if not _ollama_start_serve_background():
+                    if not ensure_managed_ollama(endpoint):
                         return JSONResponse(
                             {"error": "not_running", "detail": detail},
                             status_code=409,
@@ -2726,9 +2726,9 @@ def create_app(
                 if code == DIAG_ERROR:
                     if not provider_error_restarted:
                         from openbiliclaw.runtime.ollama_supervisor import (
-                            _is_default_ollama_endpoint,
                             effective_ollama_endpoint,
                             is_loopback,
+                            may_manage_ollama_endpoint,
                             ollama_required,
                             restart_managed_ollama,
                         )
@@ -2739,7 +2739,7 @@ def create_app(
                             bool(getattr(getattr(cfg, "autostart", None), "manage_ollama", False))
                             and ollama_required(cfg)
                             and is_loopback(endpoint)
-                            and _is_default_ollama_endpoint(endpoint)
+                            and may_manage_ollama_endpoint(endpoint)
                         )
                         provider_error_restarted = True
                         if may_manage and actions < _max_embedding_repair_actions:

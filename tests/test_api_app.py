@@ -11731,6 +11731,150 @@ class TestEmbeddingDiagnosisAndRepair:
         assert resp.json()["error"] == "provider_error"
         assert restart_calls == []
 
+    def test_repair_not_running_starts_recorded_private_daemon(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(a) A recorded private daemon (11435) is repaired, not 409'd."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.runtime import ollama_supervisor as sup
+
+        monkeypatch.setattr(
+            sup,
+            "_managed_daemon",
+            sup._ManagedDaemon(None, "http://127.0.0.1:11435", "/tmp/private-models"),
+        )
+        diagnoses = iter(
+            [
+                ("not_running", "Ollama 服务无法连接"),
+                ("model_missing", "缺 bge-m3"),
+            ]
+        )
+        private_starts: list[tuple[str, str]] = []
+        pulled: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return next(diagnoses)
+
+        def fake_start_at(models_dir: str, host: str) -> bool:
+            private_starts.append((models_dir, host))
+            return True
+
+        async def fake_pull(base_url: str, model: str, *, on_progress=None, **_kw: object):
+            pulled.append(model)
+            if on_progress is not None:
+                on_progress("success", 0, 0)
+            return (True, "")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(sup, "start_managed_ollama_at", fake_start_at)
+        monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", fake_pull)
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        cfg = app.state.runtime_context.config
+        cfg.llm.embedding.base_url = "http://127.0.0.1:11435/v1"
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 202
+        assert private_starts == [("/tmp/private-models", "http://127.0.0.1:11435")]
+
+    def test_repair_provider_error_restarts_recorded_private_daemon(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(b) DIAG_ERROR on the private daemon goes through spec-aware restart."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.runtime import ollama_supervisor as sup
+
+        monkeypatch.setattr(
+            sup,
+            "_managed_daemon",
+            sup._ManagedDaemon(None, "http://127.0.0.1:11435", "/tmp/private-models"),
+        )
+        restart_calls: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("error", "Ollama 响应异常（GET /api/tags -> 500）：server busy")
+
+        def fake_restart() -> tuple[bool, str]:
+            restart_calls.append("restart")
+            return (False, "start_failed")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(sup, "restart_managed_ollama", fake_restart)
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        cfg = app.state.runtime_context.config
+        cfg.llm.embedding.base_url = "http://127.0.0.1:11435/v1"
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "provider_error"
+        assert restart_calls == ["restart"]
+
+    def test_repair_not_running_still_409s_without_record_on_custom_endpoint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(c) No record + non-default endpoint keeps today's 409 (invariant 6)."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.runtime import ollama_supervisor as sup
+
+        monkeypatch.setattr(sup, "_managed_daemon", None)
+        start_calls: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("not_running", "Ollama 服务无法连接")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(sup, "start_managed_ollama_at", lambda d, h: start_calls.append("s"))
+        monkeypatch.setattr(sup, "_ollama_start_serve_background", lambda: start_calls.append("s"))
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        cfg = app.state.runtime_context.config
+        cfg.llm.embedding.base_url = "http://127.0.0.1:11435/v1"
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "not_running"
+        assert start_calls == []
+
+    def test_repair_manage_ollama_false_409s_even_with_private_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(d) manage_ollama=False disables management even for a recorded daemon."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.runtime import ollama_supervisor as sup
+
+        monkeypatch.setattr(
+            sup,
+            "_managed_daemon",
+            sup._ManagedDaemon(None, "http://127.0.0.1:11435", "/tmp/private-models"),
+        )
+        start_calls: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("not_running", "Ollama 服务无法连接")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(sup, "start_managed_ollama_at", lambda d, h: start_calls.append("s"))
+        monkeypatch.setattr(sup, "_ollama_start_serve_background", lambda: start_calls.append("s"))
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        cfg = app.state.runtime_context.config
+        cfg.autostart.manage_ollama = False
+        cfg.llm.embedding.base_url = "http://127.0.0.1:11435/v1"
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "not_running"
+        assert start_calls == []
+
     def test_repair_loop_is_bounded_when_remediation_does_not_change_diagnosis(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
