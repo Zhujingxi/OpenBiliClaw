@@ -29,10 +29,25 @@ _TOTAL_STAGES = 4
 _STAGE_LABELS = {1: "拉取数据", 2: "分析偏好", 3: "生成画像", 4: "发现内容池"}
 _ACTIVE = ("starting", "running")
 
+# Typical per-stage duration surfaced to the GUI so the progress bar can render
+# an elapsed-based fraction inside a stage (instead of a static half-tick) and
+# show "本阶段通常约 X 分钟". Calibration provenance: stages 2/3 migrated from
+# the live CLI eta constants (``cli.py`` _run_with_progress calls: 180s analyze,
+# 70s profile); stages 1/4 are typical observed values for the fetch and
+# discovery-backfill phases. These are display-only hints — reopen calibration
+# after any LLM provider / model swap (CLAUDE.md pitfall rule 3).
+_STAGE_ETAS = {1: 90, 2: 180, 3: 70, 4: 120}
+
 
 def _initial_stages() -> list[dict[str, Any]]:
     return [
-        {"n": n, "label": _STAGE_LABELS[n], "status": "pending", "reason": None}
+        {
+            "n": n,
+            "label": _STAGE_LABELS[n],
+            "status": "pending",
+            "reason": None,
+            "eta_seconds": _STAGE_ETAS[n],
+        }
         for n in range(1, _TOTAL_STAGES + 1)
     ]
 
@@ -133,6 +148,7 @@ class InitCoordinator:
         error_reason: str | None = None,
         error_detail: str | None = None,
         finished: bool = False,
+        stage_progress: dict[str, Any] | None = None,
         event_type: str | None = None,
         event_extra: dict[str, Any] | None = None,
     ) -> int:
@@ -148,6 +164,17 @@ class InitCoordinator:
                     if s["n"] == stage:
                         s["status"] = stage_status
                         s["reason"] = stage_reason
+                        # A stage leaving "running" (ok / warning / failed) has
+                        # no live sub-progress anymore — drop it so the GUI
+                        # doesn't render a stale "第 3/8 批" on a done stage.
+                        if stage_status != "running":
+                            s.pop("progress", None)
+            # A pure sub-progress write attaches the {done,total,note} payload
+            # to the (still-running) stage without touching its status.
+            if stage is not None and stage_progress is not None:
+                for s in stages:
+                    if s["n"] == stage:
+                        s["progress"] = stage_progress
             # On a terminal failure/cancel, downgrade any still-"running" or
             # "pending" stage so status consumers (and the extension checklist,
             # which keys off stage status) don't show a non-terminal timeline
@@ -156,6 +183,7 @@ class InitCoordinator:
                 for s in stages:
                     if s["status"] in ("running", "pending"):
                         s["status"] = status
+                        s.pop("progress", None)
                         if s.get("reason") is None:
                             s["reason"] = error_reason
             self._seq += 1
@@ -214,6 +242,37 @@ class InitCoordinator:
             event_type="init_progress",
         )
 
+    async def stage_progress(
+        self, run_id: str, stage: int, *, done: int, total: int, note: str | None = None
+    ) -> None:
+        """Report fine-grained progress within a running stage (spec Phase 0).
+
+        ``done`` is clamped to ``0 ≤ done ≤ total``; a non-positive ``total`` is
+        ignored (no write, no event) so a producer that hasn't sized its work
+        yet can't stamp a meaningless 0/0. Publishes ``init_progress`` carrying
+        the payload so SSE-driven pages advance without waiting for the poll.
+        """
+        if total <= 0:
+            return
+        clamped = max(0, min(int(done), int(total)))
+        payload = {"done": clamped, "total": int(total), "note": note}
+        await self._write(
+            run_id,
+            stage=stage,
+            stage_progress=payload,
+            event_type="init_progress",
+            event_extra={"progress": payload},
+        )
+
+    async def touch(self, run_id: str) -> None:
+        """Liveness heartbeat: bump ``sequence`` + ``updated_at`` only.
+
+        Invariant 5 — does NOT publish an event; front-end 3s polling reads the
+        refreshed ``last_activity`` so a single multi-minute LLM call still
+        looks alive without flooding SSE with content-free frames.
+        """
+        await self._write(run_id)
+
     async def complete(self, run_id: str, *, partial_success: bool = False) -> None:
         await self._write(
             run_id,
@@ -263,6 +322,7 @@ class InitCoordinator:
                 "status": "idle",
                 "reason": "none",
                 "detail": "",
+                "last_activity": "",
             }
         stages = json.loads(run["stages_json"]) if run.get("stages_json") else _initial_stages()
         return {
@@ -276,6 +336,9 @@ class InitCoordinator:
             "status": run["status"],
             "reason": run["error_reason"] or "none",
             "detail": str(run.get("error_detail") or ""),
+            # Wall-clock of the last status write (any stage/progress/heartbeat).
+            # The GUI derives a stall indicator from now - last_activity.
+            "last_activity": str(run.get("updated_at") or ""),
         }
 
 

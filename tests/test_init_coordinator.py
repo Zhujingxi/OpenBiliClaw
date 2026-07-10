@@ -169,6 +169,107 @@ def test_get_status_idle_when_empty(tmp_path: Path) -> None:
     assert status["running"] is False
     assert status["status"] == "idle"
     assert status["current_stage"] == 0
+    # last_activity is "" when there is no run row (backward-compatible add).
+    assert status["last_activity"] == ""
+
+
+# ── init-progress-visibility Phase 0: sub-progress / heartbeat / eta ─────────
+
+
+def test_initial_stages_carry_eta_seconds(tmp_path: Path) -> None:
+    from openbiliclaw.runtime.init_coordinator import _STAGE_ETAS
+
+    coord, db, _ = _coord(tmp_path)
+    coord.try_start("run-1")
+    stages = coord.get_status()["stages"]
+    assert {s["n"]: s["eta_seconds"] for s in stages} == _STAGE_ETAS
+    assert _STAGE_ETAS == {1: 90, 2: 180, 3: 70, 4: 120}
+
+
+async def test_stage_progress_persists_and_emits(tmp_path: Path) -> None:
+    coord, _, hub = _coord(tmp_path)
+    coord.try_start("run-1")
+    await coord.mark_running("run-1")
+    await coord.stage_started("run-1", 2)
+    await coord.stage_progress("run-1", 2, done=1, total=8, note="第 1/8 批")
+
+    stages = {s["n"]: s for s in coord.get_status()["stages"]}
+    assert stages[2]["progress"] == {"done": 1, "total": 8, "note": "第 1/8 批"}
+    # An init_progress event was published carrying the progress payload.
+    prog_events = [e for e in hub.events if e.get("type") == "init_progress"]
+    assert prog_events[-1]["progress"] == {"done": 1, "total": 8, "note": "第 1/8 批"}
+
+
+async def test_stage_progress_clamps_done_into_range(tmp_path: Path) -> None:
+    coord, _, _ = _coord(tmp_path)
+    coord.try_start("run-1")
+    await coord.stage_started("run-1", 2)
+    await coord.stage_progress("run-1", 2, done=99, total=8)
+    stages = {s["n"]: s for s in coord.get_status()["stages"]}
+    assert stages[2]["progress"]["done"] == 8
+    await coord.stage_progress("run-1", 2, done=-5, total=8)
+    stages = {s["n"]: s for s in coord.get_status()["stages"]}
+    assert stages[2]["progress"]["done"] == 0
+
+
+async def test_stage_progress_ignores_nonpositive_total(tmp_path: Path) -> None:
+    coord, db, hub = _coord(tmp_path)
+    coord.try_start("run-1")
+    await coord.stage_started("run-1", 2)
+    seq_before = db.get_latest_init_run()["sequence"]
+    events_before = len(hub.events)
+    await coord.stage_progress("run-1", 2, done=1, total=0)
+    # total <= 0 is a no-op: no write, no sequence bump, no event.
+    assert db.get_latest_init_run()["sequence"] == seq_before
+    assert len(hub.events) == events_before
+    stages = {s["n"]: s for s in coord.get_status()["stages"]}
+    assert stages[2].get("progress") in (None, {})
+
+
+async def test_stage_done_clears_progress(tmp_path: Path) -> None:
+    coord, _, _ = _coord(tmp_path)
+    coord.try_start("run-1")
+    await coord.stage_started("run-1", 2)
+    await coord.stage_progress("run-1", 2, done=3, total=8)
+    await coord.stage_done("run-1", 2)
+    stages = {s["n"]: s for s in coord.get_status()["stages"]}
+    assert stages[2]["status"] == "ok"
+    assert stages[2].get("progress") is None
+
+
+async def test_touch_bumps_sequence_without_publishing_event(tmp_path: Path) -> None:
+    coord, db, hub = _coord(tmp_path)
+    coord.try_start("run-1")
+    await coord.mark_running("run-1")
+    seq_before = db.get_latest_init_run()["sequence"]
+    events_before = len(hub.events)
+    await coord.touch("run-1")
+    assert db.get_latest_init_run()["sequence"] == seq_before + 1
+    # Invariant 5: touch must NOT publish an init_progress (or any) event.
+    assert len(hub.events) == events_before
+
+
+async def test_get_status_exposes_last_activity(tmp_path: Path) -> None:
+    coord, _, _ = _coord(tmp_path)
+    coord.try_start("run-1")
+    await coord.mark_running("run-1")
+    assert coord.get_status()["last_activity"] != ""
+
+
+async def test_interleaved_stage_progress_and_touch_sequence_monotonic(tmp_path: Path) -> None:
+    coord, db, _ = _coord(tmp_path)
+    coord.try_start("run-1")  # sequence starts at 0
+    await coord.stage_started("run-1", 2)  # sequence -> 1
+
+    async def _op(i: int) -> None:
+        if i % 2 == 0:
+            await coord.touch("run-1")
+        else:
+            await coord.stage_progress("run-1", 2, done=i, total=100)
+
+    await asyncio.gather(*(_op(i) for i in range(100)))
+    # stage_started (1) + 100 writes == exactly 101, strictly serialized.
+    assert db.get_latest_init_run()["sequence"] == 101
 
 
 # ── A3: RuntimeContext wiring ──────────────────────────────────────────────
