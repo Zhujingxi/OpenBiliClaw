@@ -20,8 +20,9 @@
 | 6.2 朋友式推荐表达 | ✅ | 用 LLM 生成朋友式推荐理由和个性化 topic，并在 CLI 中真实展示 |
 | 6.3 推荐持久化 | ✅ | 推荐记录已补齐展示状态、结构化反馈字段和反馈更新时间 |
 | 候选排序统一 | ✅ | freshly discovered 与 cache backfill 现在共享同一套 tier / relevance / recency 排序口径 |
-| 9.1 反馈处理 | ✅ | CLI、本地 API、插件 popup 与移动 Web 已统一写回推荐反馈与 `feedback` 事件；推荐点击会携带 `content_id / content_url / source_platform`，跨源内容不会被记成 B 站点击 |
+| 9.1 反馈处理 | ✅ | CLI、本地 API、插件 popup 与移动 Web 已统一写回推荐反馈与 `feedback` 事件；推荐点击会携带 `content_id / content_url / source_platform`，跨源内容不会被记成 B 站点击；推荐反馈事件同样保留候选真实 `source_platform`，旧记录缺来源时兼容回退 `bilibili` |
 | 9.2 画像更新 | ✅ | 反馈累计到阈值后会自动触发偏好层重分析与画像重建 |
+| Issue #91 卡片反馈双轴匹配 | ✅ | 卡片 like/dislike 会在 Pool Curator 中同时匹配候选的细粒度 `topic_key` 与粗粒度 `topic_group`；任一轴命中即施加一次软调整，两轴同时命中不会重复加权 |
 | 体验优化：画像驱动“老B友”语气 | ✅ | 推荐文案不再固定套模板，而是根据画像 tone profile 调整信息密度、温度、梗感与直给程度；`style_key` 只影响内容切入角度，不再改写用户语气 |
 | M106 候选池即时换一批 | ✅ | `content_cache` 现已作为 discovery pool 使用，popup 可秒级从池子里换一批新推荐 |
 | M107 候选池容量与状态展示 | ✅ | runtime 会按 `pool_target_count` 持续补货，popup 会展示可换数量、最近补货数量和补货方向。`pool_target_count` 表示前端真实可换目标：`count_pool_candidates()` 达标后 refresh（含 force_refresh）返回 `pool_at_cap`，raw 素材库存允许高于目标并由独立 raw ceiling 控制 |
@@ -35,8 +36,8 @@
 | M124 generate 路径丰富度修正 | ✅ | `generate_recommendations()` 现在也会先对缓存候选做来源均衡，再分阶段放宽 `topic/style/source` 约束，避免高分 `related_chain` 长时间吃掉整批名额 |
 | M125 pool 预生成推荐文案 | ✅ | discovery pool 现在会异步批量预生成 `expression/topic_label`，`reshuffle/append` 只消费预生成结果，缺失时返回空而不是写统一兜底 |
 | M126 源无关内容分类 | ✅ | `classify_pool_backlog()` 在 `precompute_pool_copy` 前为 legacy / recovery 未分类内容补上 `style_key` / `topic_group` / `relevance_score`，并在批量评估 prompt 中带上近期 `negative_examples`。正常来源 ingest 已改为先走 `discovery_candidates` 统一评估，推荐层不再承担外站原始候选的首评估。COALESCE 保护已分类字段不被重复入库覆盖。`_diversity_tokens` 不再 fallback `source_strategy`——推荐层只看内容特征，来源完全透明 |
-| M127 兴趣探针用户确认 | ✅ | WebSocket 推送 `interest.probe` → Chrome 通知 → popup 卡片（是 / 不是 / 多聊聊）→ `POST /api/interest-probes/respond` → speculator confirm/reject/chat。4h 去重冷却。推送从 `_run_refresh_plan` 移到 `run_forever` 主循环 |
-| M127b 避雷探针用户确认 | ✅ | WebSocket 推送 `avoidance.probe` → popup / Web / OpenClaw 卡片（确实不喜欢 / 不是 / 多聊聊）→ `POST /api/avoidance-probes/respond`；确认后写入 `disliked_topics` 并清理候选池，未确认时不参与过滤 |
+| M127 兴趣探针用户确认 | ✅ | WebSocket 推送 `interest.probe` → Chrome 通知 → popup 卡片（确认喜欢 / 暂时搁置 / 确认不喜欢 / 多聊聊）→ `POST /api/interest-probes/respond` → speculator confirm/defer/reject/chat。4h 去重冷却。推送从 `_run_refresh_plan` 移到 `run_forever` 主循环 |
+| M127b 避雷探针用户确认 | ✅ | WebSocket 推送 `avoidance.probe` → popup / Web / OpenClaw 卡片（确认避雷 / 搁置避雷 / 不是雷点 / 多聊聊）→ `POST /api/avoidance-probes/respond`；确认后写入 `disliked_topics` 并清理候选池，未确认时不参与过滤 |
 | M128 CLI delight + probe | ✅ | `openbiliclaw delight` 手动查看惊喜推荐候选；`openbiliclaw probe` 手动列出猜测方向并交互确认/拒绝 |
 | M129 惊喜候选自动预热与回填 | ✅ | delight 运行时统一使用动态阈值：默认底线 `0.75`，保守用户底线 `0.80`，正式候选池至少有 150 条已打 `delight_score` 且分布足够分散（总体标准差 ≥ `0.08`）时，才按 delight 分数池内 Top 10% 边界抬高阈值；`precompute_delight_scores()` 直接复用 Evo 写入的 `relevance_score` 生成 `delight_score`，并优先复用面向用户的 `pool_expression` 作为 `delight_reason`（缺失时 fallback 到 `relevance_reason/topic`），不再额外调用单独的 Delight LLM 评分或文案任务；后台启动会自动补齐高分但缺 `reason/hook` 的候选，`suppressed` 高分库存也允许作为惊喜推荐入口 |
 | 惊喜推荐反馈保留 | ✅ | `POST /api/delight/respond` 中 `like / chat` 记录正向学习信号并保留候选；`view` 当场保留卡片但标记已读（对齐推荐池 `shown` 语义，下次重灌不再出现）；`dislike / dismiss` 消费候选并驱动三端立即移除。`pending-batch` 重灌以 `include_liked=True` 保留已喜欢候选并下发 `state="liked"`，喜欢过的卡片在 popup 重开后不再静默消失 |
@@ -291,6 +292,8 @@ Content-Type: application/json
 - `feedback_at`
 
 推荐反馈会同时写入事件层，供后续偏好和洞察分析消费。
+事件沿用推荐候选的真实 `source_platform`；旧推荐记录没有来源字段时兼容回退为
+`bilibili`，避免把知乎等跨源反馈误记成 B 站行为。
 
 桌面 Web 的 `like / dislike / dismiss` 使用 10 秒客户端提交屏障：卡片状态立即变化，撤销期间后端还没有写入；倒计时结束或页面离开时才调用 `/api/feedback`，失败则回滚卡片状态。`comment` 必须携带文本并可能产生直接学习语义，因此不进入这条延迟提交路径。
 
@@ -343,9 +346,13 @@ from openbiliclaw.recommendation.curator import PoolCurator
 
 **FeedbackSignals**：追踪用户反馈信号，包含以下字段：
 - `disliked_up_mids` — 被 dislike 的 UP 主 mid 集合
-- `disliked_topic_keys` — 被 dislike 的话题键集合
+- `disliked_topic_keys` — 被 dislike 的话题键集合；每条反馈同时收集候选的
+  `topic_key` 与 `topic_group`
 - `disliked_franchises` — 被 dislike 内容所属 franchise / IP 集合，用于同 IP 软降权
-- `liked_topic_keys` — 被 like 的话题键集合
+- `liked_topic_keys` — 被 like 的话题键集合；同样同时收集 `topic_key` 与 `topic_group`
+
+候选评分会在细粒度 `topic_key` 和粗粒度 `topic_group` 两个轴上匹配这些反馈集合。
+任一轴命中就施加一次对应的 like/dislike 软调整；两个轴同时命中仍只调整一次。
 
 **ScoringContext**：评分时的上下文快照，包含：
 - `recent_topic_keys` — 近期已推荐话题键列表
