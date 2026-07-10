@@ -18,9 +18,7 @@ def test_desktop_recommendation_header_has_no_correction_entry() -> None:
 
 def test_desktop_has_no_recommendation_correction_helpers_or_styles() -> None:
     js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
-    css = (ROOT / "src/openbiliclaw/web/desktop/assets/css/app.css").read_text(
-        encoding="utf-8"
-    )
+    css = (ROOT / "src/openbiliclaw/web/desktop/assets/css/app.css").read_text(encoding="utf-8")
 
     for marker in (
         "openProfileCorrection",
