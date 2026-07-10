@@ -23,6 +23,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import secrets
 import time
 from typing import TYPE_CHECKING
 
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
 
 COOKIE_NAME = "obc_session"
 CSRF_HEADER = "x-obc-auth"
+EXTENSION_ACCESS_KEY_PREFIX = "obc_ext_"
 
 _SCRYPT_N = 2**14
 _SCRYPT_R = 8
@@ -105,6 +107,66 @@ def verify_password(plain: str, stored: str) -> bool:
     except (ValueError, MemoryError):
         return False
     return hmac.compare_digest(actual, expected)
+
+
+# ── extension device access keys ────────────────────────────────────────────
+
+
+def generate_extension_access_key() -> tuple[str, str, str]:
+    """Create an extension access key and its digest-only configuration record."""
+    key_id = secrets.token_hex(6)
+    secret = secrets.token_urlsafe(32)
+    full_key = f"{EXTENSION_ACCESS_KEY_PREFIX}{key_id}.{secret}"
+    digest = hashlib.sha256(secret.encode("utf-8")).hexdigest()
+    return key_id, full_key, f"{key_id}:{digest}"
+
+
+def parse_extension_access_key(value: str) -> tuple[str, str] | None:
+    """Parse a well-formed extension access key into its ID and secret."""
+    if not value.startswith(EXTENSION_ACCESS_KEY_PREFIX):
+        return None
+    body = value.removeprefix(EXTENSION_ACCESS_KEY_PREFIX)
+    if body.count(".") != 1:
+        return None
+    key_id, secret = body.split(".")
+    if len(key_id) != 12 or any(char not in "0123456789abcdef" for char in key_id):
+        return None
+    if not secret:
+        return None
+    return key_id, secret
+
+
+def _parse_extension_access_record(value: str) -> tuple[str, str] | None:
+    if value.count(":") != 1:
+        return None
+    key_id, digest = value.split(":")
+    if len(key_id) != 12 or any(char not in "0123456789abcdef" for char in key_id):
+        return None
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        return None
+    return key_id, digest
+
+
+def verify_extension_access_key(value: str, records: Iterable[str]) -> bool:
+    """Verify a device access key against digest-only configuration records."""
+    parsed = parse_extension_access_key(value)
+    if parsed is None:
+        return False
+    key_id, secret = parsed
+    actual_digest = hashlib.sha256(secret.encode("utf-8")).hexdigest()
+    for record in records:
+        parsed_record = _parse_extension_access_record(record)
+        if parsed_record is None:
+            continue
+        record_id, expected_digest = parsed_record
+        if record_id == key_id and hmac.compare_digest(actual_digest, expected_digest):
+            return True
+    return False
+
+
+def extension_access_key_ids(records: Iterable[str]) -> list[str]:
+    """Return IDs from valid extension access-key records in input order."""
+    return [parsed[0] for record in records if (parsed := _parse_extension_access_record(record))]
 
 
 # ── password fingerprint (stable across restarts; §4.7 v7) ──────────────────
@@ -195,6 +257,7 @@ def verify_token(
 # ── IP / proxy handling (§4.1, §6) ──────────────────────────────────────────
 
 _LOOPBACK = frozenset({"127.0.0.1", "::1"})
+_TRUSTED_LOCAL_IPS = _LOOPBACK
 _FORWARD_HEADERS = ("x-forwarded-for", "x-real-ip", "forwarded")
 
 
@@ -293,7 +356,7 @@ def resolve_client_ip(
 
 
 def is_trusted_local(client_ip: str | None, trustworthy_local: bool) -> bool:
-    return trustworthy_local and client_ip is not None and client_ip in _LOOPBACK
+    return trustworthy_local and client_ip is not None and client_ip in _TRUSTED_LOCAL_IPS
 
 
 # ── origin / scheme normalization (§4.9) ────────────────────────────────────
@@ -409,6 +472,17 @@ def origin_allowed_for_bearer(origin: str | None, allowed: Iterable[str]) -> boo
         return False
     target = origin_string(parsed)
     return any(origin_string(parse_origin(entry)) == target for entry in allowed)
+
+
+_EXT_SCHEMES = ("chrome-extension://", "moz-extension://")
+
+
+def is_extension_origin(origin: str | None) -> bool:
+    """True if *origin* carries a browser-extension scheme."""
+    if not origin:
+        return False
+    normalized = origin.lower()
+    return normalized.startswith(_EXT_SCHEMES[0]) or normalized.startswith(_EXT_SCHEMES[1])
 
 
 def header_present(headers: Mapping[str, str], names: Iterable[str] = _FORWARD_HEADERS) -> bool:

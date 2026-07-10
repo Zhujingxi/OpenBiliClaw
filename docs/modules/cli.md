@@ -28,6 +28,11 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `browser content <url>` | 获取页面文本内容 | ✅ |
 | `start` | 启动本地 API 服务 | ✅ |
 | `set-password` | 设置 / 修改局域网访问密码（`--disable` 关闭门禁 / `--logout-all` / `--rotate-secret`） | ✅ |
+| `ext-key generate` | 生成并保存一个扩展设备访问密钥（明文只显示一次） | ✅ |
+| `ext-key enable` | 开启远程扩展设备认证（默认关闭） | ✅ |
+| `ext-key disable` | 关闭新会话交换但保留密钥摘要 | ✅ |
+| `ext-key list` | 仅列出设备 key ID 和开关状态 | ✅ |
+| `ext-key revoke <key-id>` | 撤销设备密钥并立即失效所有现有会话 | ✅ |
 | `autostart status` | 查看开机自启动配置、系统注册和平台支持状态 | ✅ |
 | `autostart enable` | 注册当前用户登录自启动并写入 `[autostart].enabled=true` | ✅ |
 | `autostart disable` | 移除当前用户登录自启动并写入 `[autostart].enabled=false` | ✅ |
@@ -327,6 +332,39 @@ $ openbiliclaw set-password --rotate-secret
 - `--rotate-secret`：轮换 `session_secret` 并撤销所有登录态；新密钥需重启后端进程才完全生效。
 
 > 改密码（无论走本命令、`init`、直接改 TOML、env、还是 `PUT /api/config`）都会在下次启动 / 重载时按密码指纹变化自动撤销旧登录态。永不过期（`session_ttl_hours=0`，「记住登录」）的会话不会因重启被误撤销。
+
+### `openbiliclaw ext-key`
+
+管理跨设备浏览器扩展的设备访问密钥。配置只保存密钥摘要；完整密钥只在生成时显示一次，由用户填入目标扩展的设置页。该能力默认关闭。
+
+```bash
+# 生成密钥（完整密钥只显示一次，总开关仍关闭）
+$ openbiliclaw ext-key generate
+设备访问密钥已生成
+  Key ID: a1b2c3d4e5f6
+  obc_ext_a1b2c3d4e5f6.<secret>
+
+# 至少有一个密钥后显式开启
+$ openbiliclaw ext-key enable
+
+# 暂停签发新短会话，保留密钥摘要
+$ openbiliclaw ext-key disable
+
+# 只查看 key ID，不打印摘要或 secret
+$ openbiliclaw ext-key list
+
+# 撤销设备；同时使全部 Web / 扩展会话立即失效
+$ openbiliclaw ext-key revoke a1b2c3d4e5f6
+```
+
+子命令：
+
+- `generate`：生成 256-bit 随机 secret，配置只写 `key_id:sha256(secret)`；不会自动开启总开关。
+- `enable` / `disable`：控制 `/api/auth/extension-token` 是否签发新短会话，密钥摘要保留。
+- `list`：只显示 key ID。
+- `revoke <key-id>`：删除一个摘要并提升 `auth_epoch`。若运行库不可写，配置会回滚且命令失败。
+
+所有写命令在 auth 配置受环境变量或 `config.local.toml` 覆盖时拒绝执行，避免显示成功但重启后失效。
 
 ### `openbiliclaw autostart`
 

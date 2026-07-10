@@ -1059,6 +1059,7 @@ def create_app(
         make_auth_middleware,
         reconcile_password_fingerprint,
         register_auth_routes,
+        websocket_session_token,
     )
     from openbiliclaw.config import ApiAuthConfig as _ApiAuthConfig
 
@@ -3183,7 +3184,7 @@ def create_app(
         _ws_token = (
             None
             if (_ws_is_local or not _ws_gate.auth.enabled)
-            else _ws_gate.pick_token(websocket)[1]
+            else websocket_session_token(_ws_gate, websocket)
         )
 
         def _ws_revoked() -> bool:

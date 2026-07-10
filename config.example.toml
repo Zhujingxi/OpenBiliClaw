@@ -38,6 +38,13 @@ trusted_proxies = []
 # 默认空 = 只允许同源 Cookie 登录，绝不向 JS 返回 token。
 allowed_bearer_origins = []
 
+# 扩展设备访问默认关闭。启用后仅接受下方已配置设备密钥签发的访问令牌。
+extension_access_enabled = false
+# 扩展设备密钥摘要记录（<12 位 key ID>:<SHA-256 digest>）；不要填入完整密钥。
+extension_access_keys = []
+# 扩展设备访问令牌有效期（小时），允许范围 1..168，默认 24。
+extension_token_ttl_hours = 24
+
 [llm]
 # Default LLM provider: "deepseek" | "openai" | "claude" | "gemini" | "ollama" | "openrouter" | "openai_compatible"
 # 这里选择的 provider 决定了运行时会检查哪一组敏感字段。

@@ -7,7 +7,9 @@ test("settings page exposes advanced config fields from backend schema", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
   const expectedIds = [
+    "cfgBackendScheme",
     "cfgBackendPort",
+    "cfgExtDeviceKey",
     "cfgDataDir",
     "cfgLlmFallbackProvider",
     "cfgEmbeddingFallbackProvider",
@@ -109,6 +111,8 @@ test("settings page exposes advanced config fields from backend schema", () => {
     assert.match(popupHtml, new RegExp(`id="${id}"`), `${id} should exist`);
     assert.match(popupJs, new RegExp(`"${id}"`), `${id} should be wired in popup.js`);
   }
+  assert.doesNotMatch(popupHtml, /cfgExtLoginPassword|扩展登录密码/);
+  assert.doesNotMatch(popupJs, /obc_auth_password|obc_auth_token/);
   assert.doesNotMatch(popupHtml, /id="cfgDiscoveryCron"/);
   assert.doesNotMatch(popupJs, /discovery_cron:\s*getVal\("cfgDiscoveryCron"\)/);
   assert.match(

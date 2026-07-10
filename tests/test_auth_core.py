@@ -5,6 +5,38 @@ from __future__ import annotations
 from openbiliclaw import auth_core as ac
 
 
+def test_extension_access_key_generation_stores_only_digest() -> None:
+    key_id, full_key, record = ac.generate_extension_access_key()
+
+    assert full_key.startswith(f"obc_ext_{key_id}.")
+    assert full_key not in record
+    assert record.startswith(f"{key_id}:")
+    assert ac.verify_extension_access_key(full_key, [record]) is True
+    assert ac.extension_access_key_ids([record]) == [key_id]
+
+
+def test_extension_access_key_rejects_malformed_unknown_and_wrong_secret() -> None:
+    key_id, full_key, record = ac.generate_extension_access_key()
+
+    assert ac.parse_extension_access_key("not-a-key") is None
+    assert ac.verify_extension_access_key("not-a-key", [record]) is False
+    assert ac.verify_extension_access_key(full_key.replace(key_id, "f" * 12), [record]) is False
+    assert ac.verify_extension_access_key(full_key + "x", [record]) is False
+
+
+def test_extension_origins_recognize_mixed_case_schemes() -> None:
+    extension_id = "abcdefghijklmnop"
+    for origin in (
+        f"Chrome-Extension://{extension_id}",
+        f"mOz-ExTeNsIoN://{extension_id}",
+    ):
+        assert ac.is_extension_origin(origin) is True
+
+
+def test_trusted_local_ips_are_loopback_only() -> None:
+    assert {"127.0.0.1", "::1"} == ac._TRUSTED_LOCAL_IPS
+
+
 def test_password_hash_roundtrip_and_salting() -> None:
     h1 = ac.hash_password("hunter2")
     h2 = ac.hash_password("hunter2")

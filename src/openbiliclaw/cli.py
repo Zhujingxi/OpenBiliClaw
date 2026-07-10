@@ -74,10 +74,12 @@ auth_app = typer.Typer(help="B 站认证命令")
 login_app = typer.Typer(help="账号登录命令")
 browser_app = typer.Typer(help="agent-browser 浏览器命令")
 autostart_app = typer.Typer(help="开机自启动命令")
+ext_key_app = typer.Typer(help="浏览器扩展密钥管理命令")
 app.add_typer(auth_app, name="auth")
 app.add_typer(login_app, name="login")
 app.add_typer(browser_app, name="browser")
 app.add_typer(autostart_app, name="autostart")
+app.add_typer(ext_key_app, name="ext-key")
 console = Console()
 _APP_CONTEXT: dict[str, Any] = {}
 _DISCOVER_STRATEGIES_OPTION = typer.Option(
@@ -4689,6 +4691,164 @@ def set_password(
         "已设置访问密码",
         "已立即失效所有现有登录态。请重启后端 (openbiliclaw start) 使新密码生效"
         "（运行中的进程仍持旧配置，重启前请勿依赖新密码已启用）。",
+    )
+
+
+# ── ext-key: 浏览器扩展密钥管理 ────────────────────────────────────────
+
+
+_EXT_KEY_AUTH_FIELDS = frozenset({"extension_access_enabled", "extension_access_keys"})
+
+
+def _ensure_ext_key_config_writable() -> None:
+    """Refuse writes that would be hidden by a higher-priority auth layer."""
+    from openbiliclaw.config import API_AUTH_ENV_VARS, config_local_auth_keys
+
+    managed = [name for name in API_AUTH_ENV_VARS if (os.environ.get(name) or "").strip()]
+    if managed:
+        _print_status_panel(
+            "error",
+            "检测到环境变量覆盖，设备密钥配置不会可靠生效",
+            f"已设置 {', '.join(managed)}；请先移除环境变量覆盖，再管理设备密钥。",
+        )
+        raise typer.Exit(code=1)
+    shadowed = sorted(config_local_auth_keys() & _EXT_KEY_AUTH_FIELDS)
+    if shadowed:
+        _print_status_panel(
+            "error",
+            "config.local.toml 正在覆盖设备密钥配置",
+            f"被覆盖字段：{', '.join(shadowed)}；请直接修改 config.local.toml。",
+        )
+        raise typer.Exit(code=1)
+
+
+@ext_key_app.command("generate")
+def ext_key_generate() -> None:
+    """生成并保存一个扩展设备访问密钥（明文只显示一次）。"""
+    from openbiliclaw.auth_core import generate_extension_access_key
+    from openbiliclaw.config import load_config, save_config
+
+    _ensure_ext_key_config_writable()
+    cfg = load_config()
+    key_id, full_key, record = generate_extension_access_key()
+    cfg.api.auth.extension_access_keys.append(record)
+    save_config(cfg)
+    _print_status_panel(
+        "success",
+        "设备访问密钥已生成",
+        f"Key ID: {key_id}\n设备访问密钥（仅显示一次）:\n{full_key}\n\n"
+        "总开关保持关闭；确认保存密钥后执行 `openbiliclaw ext-key enable`。",
+    )
+
+
+@ext_key_app.command("list")
+def ext_key_list() -> None:
+    """显示设备访问开关和已保存的 key ID。"""
+    from openbiliclaw.auth_core import extension_access_key_ids
+    from openbiliclaw.config import load_config
+
+    cfg = load_config()
+    auth = cfg.api.auth
+    key_ids = extension_access_key_ids(auth.extension_access_keys)
+    rows: list[tuple[str, str]] = [
+        ("设备访问", "开启" if auth.extension_access_enabled else "关闭"),
+        ("密钥数量", str(len(key_ids))),
+    ]
+    rows.extend((f"Key [{index}]", key_id) for index, key_id in enumerate(key_ids, start=1))
+    _print_key_value_table("扩展设备访问密钥", rows)
+
+
+@ext_key_app.command("enable")
+def ext_key_enable() -> None:
+    """开启扩展设备访问（至少需要一个有效密钥）。"""
+    from openbiliclaw.auth_core import extension_access_key_ids
+    from openbiliclaw.config import load_config, save_config
+
+    _ensure_ext_key_config_writable()
+    cfg = load_config()
+    if cfg.api.auth.extension_access_enabled:
+        _print_status_panel("info", "已开启", "扩展设备访问已是开启状态。")
+        return
+    if not extension_access_key_ids(cfg.api.auth.extension_access_keys):
+        _print_status_panel(
+            "error",
+            "没有可用的设备密钥",
+            "请先执行 `openbiliclaw ext-key generate`。",
+        )
+        raise typer.Exit(code=1)
+    cfg.api.auth.extension_access_enabled = True
+    save_config(cfg)
+    _print_status_panel("success", "已开启", "扩展设备访问已开启；重启后端后可配对。")
+
+
+@ext_key_app.command("disable")
+def ext_key_disable() -> None:
+    """关闭扩展设备 token 交换，保留已保存密钥。"""
+    from openbiliclaw.config import load_config, save_config
+
+    _ensure_ext_key_config_writable()
+    cfg = load_config()
+    if not cfg.api.auth.extension_access_enabled:
+        _print_status_panel("info", "已关闭", "扩展设备访问已是关闭状态。")
+        return
+    cfg.api.auth.extension_access_enabled = False
+    save_config(cfg)
+    _print_status_panel("success", "已关闭", "新的设备会话交换已关闭；密钥记录仍保留。")
+
+
+@ext_key_app.command("revoke")
+def ext_key_revoke(
+    key_id: str = typer.Argument(..., help="要撤销的 12 位 key ID"),
+) -> None:
+    """撤销一个设备密钥，并立即失效所有现有登录会话。"""
+    from openbiliclaw.auth_core import extension_access_key_ids
+    from openbiliclaw.config import load_config_with_diagnostics, save_config
+
+    _ensure_ext_key_config_writable()
+    cfg, diagnostics = load_config_with_diagnostics()
+    valid_ids = extension_access_key_ids(cfg.api.auth.extension_access_keys)
+    if key_id not in valid_ids:
+        _print_status_panel("error", "未找到设备密钥", f"没有 key ID `{key_id}`。")
+        raise typer.Exit(code=1)
+
+    config_path = diagnostics.config_path
+    if config_path is None:
+        _print_status_panel("error", "无法定位配置文件", "未修改任何设备密钥。")
+        raise typer.Exit(code=1)
+    previous = config_path.read_bytes() if config_path.exists() else None
+    cfg.api.auth.extension_access_keys = [
+        record
+        for record in cfg.api.auth.extension_access_keys
+        if not record.startswith(f"{key_id}:")
+    ]
+    try:
+        save_config(cfg)
+    except Exception as exc:
+        _print_status_panel("error", "保存设备密钥失败", str(exc))
+        raise typer.Exit(code=1) from exc
+
+    if not _bump_auth_epoch(cfg):
+        try:
+            if previous is None:
+                config_path.unlink(missing_ok=True)
+            else:
+                config_path.write_bytes(previous)
+        except OSError as exc:
+            _print_status_panel(
+                "error", "撤销失败且配置回滚失败", f"请立即检查 {config_path}: {exc}"
+            )
+            raise typer.Exit(code=1) from exc
+        _print_status_panel(
+            "error",
+            "未能撤销设备密钥",
+            "运行库不可写，配置已回滚；现有会话和设备密钥均保持有效。",
+        )
+        raise typer.Exit(code=1)
+
+    _print_status_panel(
+        "success",
+        "设备密钥已撤销",
+        f"Key ID {key_id} 已删除；所有 Web 与扩展会话已立即失效。重启后端以重载密钥列表。",
     )
 
 

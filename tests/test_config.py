@@ -93,6 +93,9 @@ class TestConfigDefaults:
         assert isinstance(config.autostart, AutostartConfig)
         assert config.autostart.enabled is False
         assert config.autostart.manage_ollama is True
+        assert config.api.auth.extension_access_enabled is False
+        assert config.api.auth.extension_access_keys == []
+        assert config.api.auth.extension_token_ttl_hours == 24
 
     def test_config_defaults_pool_target_count_to_300(self) -> None:
         config = Config()
@@ -1781,6 +1784,53 @@ def test_save_config_does_not_bake_in_config_local_auth_overrides(
     reloaded = load_config()
     assert reloaded.api.auth.trust_loopback is True
     assert reloaded.api.auth.session_ttl_hours == 5
+
+
+def test_extension_access_config_round_trips_and_preserves_local_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    base = tmp_path / "config.toml"
+    base_record = "base:" + "a" * 64
+    local_records = ["local-a:" + "b" * 64, "local-b:" + "c" * 64]
+    base.write_text(
+        "[api.auth]\n"
+        "extension_access_enabled = false\n"
+        f'extension_access_keys = ["{base_record}"]\n'
+        "extension_token_ttl_hours = 12\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "config.local.toml").write_text(
+        "[api.auth]\n"
+        "extension_access_enabled = true\n"
+        f'extension_access_keys = ["{local_records[0]}", "{local_records[1]}"]\n'
+        "extension_token_ttl_hours = 48\n",
+        encoding="utf-8",
+    )
+
+    merged = load_config()
+    assert merged.api.auth.extension_access_enabled is True
+    assert merged.api.auth.extension_access_keys == local_records
+    assert merged.api.auth.extension_token_ttl_hours == 48
+
+    save_config(merged)
+    rendered = base.read_text(encoding="utf-8")
+    assert "extension_access_enabled = false" in rendered
+    assert f'extension_access_keys = ["{base_record}"]' in rendered
+    assert "extension_token_ttl_hours = 12" in rendered
+
+    (tmp_path / "config.local.toml").unlink()
+    reloaded = load_config()
+    assert reloaded.api.auth.extension_access_enabled is False
+    assert reloaded.api.auth.extension_access_keys == [base_record]
+    assert reloaded.api.auth.extension_token_ttl_hours == 12
+
+
+@pytest.mark.parametrize("value", [0, 169, "not-a-number"])
+def test_extension_access_token_ttl_normalizes_invalid_values_to_default(value: object) -> None:
+    config = _build_config({"api": {"auth": {"extension_token_ttl_hours": value}}})
+
+    assert config.api.auth.extension_token_ttl_hours == 24
 
 
 def test_save_config_does_not_bake_in_config_local_password(

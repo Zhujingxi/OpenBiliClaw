@@ -10,6 +10,7 @@ See ``docs/plans/2026-05-30-web-password-auth-design.md``.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import secrets
@@ -149,11 +150,7 @@ class AuthGate:
 
     def _origin_safe_for_local(self, request: HTTPConnection) -> bool:
         origin = request.headers.get("origin")
-        # A real browser extension (the primary local client) is trusted by its
-        # origin scheme alone — a web page can't forge a chrome-extension origin.
-        if origin and (
-            origin.startswith("chrome-extension://") or origin.startswith("moz-extension://")
-        ):
+        if auth_core.is_extension_origin(origin):
             return True
         # NOTE: allowed_bearer_origins are deliberately NOT treated as
         # trusted-local. They are the cross-origin case that authenticates via a
@@ -197,19 +194,34 @@ class AuthGate:
             trusted_proxies=self.auth.trusted_proxies,
         )
 
+    def _extract_bearer(self, request: HTTPConnection) -> str | None:
+        authz = request.headers.get("authorization", "")
+        if authz.lower().startswith("bearer "):
+            return authz[7:].strip() or None
+        return None
+
     def pick_token(self, request: HTTPConnection) -> tuple[bool, str | None]:
-        """Return ``(used_cookie, token)``. Bearer/query only for allowed origins."""
+        """Return ``(used_cookie, token)``.
+
+        Extension origins can use an explicit Bearer session. Non-extension
+        origins use cookie-first then the bearer-origin allow-list. Query
+        tokens are deliberately excluded; their narrow transports handle them
+        explicitly at their call sites.
+        """
+        origin = request.headers.get("origin", "")
+        bearer = self._extract_bearer(request)
+        if auth_core.is_extension_origin(origin) or (not origin and bearer):
+            # Chrome extension fetches do not consistently send Origin on GET,
+            # even when they send Authorization. Ordinary browser pages cannot
+            # create this shape: adding Authorization triggers CORS and Origin.
+            # Non-browser Bearer clients are valid here as well.
+            return False, bearer
+        # Non-extension path: cookie first, then allowed_bearer_origins
         cookie = request.cookies.get(COOKIE_NAME)
         if cookie:
             return True, cookie
-        origin = request.headers.get("origin")
         if auth_core.origin_allowed_for_bearer(origin, self.auth.allowed_bearer_origins):
-            authz = request.headers.get("authorization", "")
-            if authz.lower().startswith("bearer "):
-                return False, authz[7:].strip() or None
-            qp = request.query_params.get("token")
-            if qp:
-                return False, qp
+            return False, self._extract_bearer(request)
         return False, None
 
     def current_epoch(self) -> int:
@@ -277,7 +289,9 @@ def _is_public(request: Request) -> bool:
         return True  # static SPA shells, "/", favicon, etc.
     if path in ("/api/health", "/api/qr-info"):
         return True
-    if path in ("/api/auth/status", "/api/auth/login"):
+    if path == "/api/ping":
+        return True  # pure liveness probe, no sensitive data
+    if path in ("/api/auth/status", "/api/auth/login", "/api/auth/extension-token"):
         return True
     if path == "/api/autostart-status":
         return True
@@ -314,6 +328,13 @@ def make_auth_middleware(get_gate: GateGetter) -> Any:
             return await call_next(request)
 
         used_cookie, token = gate.pick_token(request)
+        # Fallback: <img src> cannot carry cookies (cross-origin) or custom
+        # headers.  Accept a query-param token ONLY on the image-proxy path.
+        # This is intentionally NOT a general-purpose auth mechanism — every
+        # other endpoint still requires cookie / bearer / extension origin.
+        # The token must still pass full validation (signature + epoch + expiry).
+        if not token and request.url.path == "/api/image-proxy":
+            token = request.query_params.get("token") or None
         try:
             valid = gate.token_valid(token)
         except Exception:  # DB unavailable -> fail closed
@@ -329,10 +350,32 @@ def make_auth_middleware(get_gate: GateGetter) -> Any:
             and (is_unsafe or _is_mutating_get(request.url.path))
             and not gate.csrf_ok(request, require_origin=is_unsafe)
         ):
-            return _forbidden_csrf()
+            # Skip CSRF when the request also carries a valid bearer token.
+            # Query tokens are only accepted by the image proxy, which never
+            # reaches this mutating-request path.
+            extra = gate._extract_bearer(request)
+            has_valid_extra_token = False
+            if extra:
+                with contextlib.suppress(Exception):
+                    has_valid_extra_token = gate.token_valid(extra)
+            if not has_valid_extra_token:
+                return _forbidden_csrf()
         return await call_next(request)
 
     return auth_guard
+
+
+def websocket_session_token(gate: AuthGate, websocket: Any) -> str | None:
+    """Return the permitted session token for a WebSocket handshake or lifecycle check."""
+    _used_cookie, token = gate.pick_token(websocket)
+    if token:
+        return token
+    origin = websocket.headers.get("origin")
+    if auth_core.is_extension_origin(origin) or auth_core.origin_allowed_for_bearer(
+        origin, gate.auth.allowed_bearer_origins
+    ):
+        return websocket.query_params.get("token") or None
+    return None
 
 
 def authorize_websocket(gate: AuthGate, websocket: Any) -> bool:
@@ -342,19 +385,33 @@ def authorize_websocket(gate: AuthGate, websocket: Any) -> bool:
     same-origin (CSWSH) check, since browsers can't set custom headers on a
     WebSocket handshake. WebSocket exposes the same ``client`` / ``headers`` /
     ``cookies`` / ``query_params`` / ``url`` attributes the gate reads.
+
+    Header bearer tokens follow :meth:`AuthGate.pick_token`. Browser WebSocket
+    handshakes cannot set that header, so their query token is accepted only
+    from an extension Origin or an explicitly allowed bearer Origin.
     """
     if not gate.auth.enabled:
         return True
     if gate.is_trusted_local(websocket):
         return True
-    # CSWSH defense: Origin must be same-origin or an allow-listed bearer origin.
+    token = websocket_session_token(gate, websocket)
+    try:
+        if token and gate.token_valid(token):
+            return True
+    except Exception:
+        logger.warning(
+            "auth: websocket token validation failed; falling back to origin check", exc_info=True
+        )
     origin = websocket.headers.get("origin")
+    if auth_core.is_extension_origin(origin):
+        return False
+    # No query token is allowed for ordinary Web origins. Cookie sessions keep
+    # the existing same-origin / allow-list CSWSH check below.
     parsed = auth_core.parse_origin(origin)
     same = auth_core.same_origin(parsed, gate.effective(websocket))
     allowed_bearer = auth_core.origin_allowed_for_bearer(origin, gate.auth.allowed_bearer_origins)
     if not (same or allowed_bearer):
         return False
-    _used_cookie, token = gate.pick_token(websocket)
     try:
         return gate.token_valid(token)
     except Exception:
@@ -421,11 +478,47 @@ def register_auth_routes(app: FastAPI, get_gate: GateGetter) -> None:
             }
         )
 
+    @app.post("/api/auth/extension-token")
+    async def exchange_extension_token(request: Request) -> JSONResponse:
+        gate: AuthGate = get_gate()
+        if not gate.auth.enabled:
+            return JSONResponse({"error": "auth_disabled"}, status_code=400)
+        if not gate.auth.extension_access_enabled:
+            return JSONResponse({"error": "extension_access_disabled"}, status_code=403)
+
+        client_ip, _local = gate.resolve_client(request)
+        rate_key = client_ip or (request.client.host if request.client else "unknown")
+        if gate.rate.is_locked(rate_key):
+            return JSONResponse({"error": "locked"}, status_code=429)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        key = str(body.get("key", "")) if isinstance(body, dict) else ""
+        if not auth_core.verify_extension_access_key(key, gate.auth.extension_access_keys):
+            gate.rate.record_failure(rate_key)
+            return JSONResponse({"error": "invalid_device_key"}, status_code=401)
+
+        try:
+            token = auth_core.sign_token(
+                gate.auth.session_secret,
+                epoch=gate.current_epoch(),
+                ttl_hours=gate.auth.extension_token_ttl_hours,
+            )
+        except Exception:
+            return JSONResponse({"error": "unavailable"}, status_code=503)
+        gate.rate.reset(rate_key)
+        return JSONResponse(
+            {"ok": True, "token": token, "expires_at": auth_core.token_expires_at(token)}
+        )
+
     @app.post("/api/auth/login")
     async def auth_login(request: Request) -> JSONResponse:
         gate: AuthGate = get_gate()
         if not gate.auth.enabled:
             return JSONResponse({"ok": False, "error": "auth_disabled"}, status_code=400)
+        if auth_core.is_extension_origin(request.headers.get("origin")):
+            return JSONResponse({"ok": False, "error": "origin_forbidden"}, status_code=403)
         client_ip, _local = gate.resolve_client(request)
         rate_key = client_ip or (request.client.host if request.client else "unknown")
         if gate.rate.is_locked(rate_key):
@@ -447,22 +540,23 @@ def register_auth_routes(app: FastAPI, get_gate: GateGetter) -> None:
         except Exception:
             return JSONResponse({"ok": False, "error": "unavailable"}, status_code=503)
         ttl = gate.auth.session_ttl_hours
-        origin = request.headers.get("origin")
+        origin = request.headers.get("origin", "")
+
+        # Same-origin Web login uses a cookie; allowed cross-origin Web origins
+        # receive a finite bearer token.
         req_origin = auth_core.parse_origin(origin)
         eff = gate.effective(request)
-        # Server decides the mode by Origin; the client cannot ask for a token.
         is_same = req_origin is None or auth_core.same_origin(req_origin, eff)
+        token = auth_core.sign_token(gate.auth.session_secret, epoch=epoch, ttl_hours=ttl)
         if is_same:
-            token = auth_core.sign_token(gate.auth.session_secret, epoch=epoch, ttl_hours=ttl)
             resp = JSONResponse({"ok": True})
             _set_session_cookie(resp, token, ttl_hours=ttl, secure=_is_secure(gate, request))
             return resp
-        # cross-origin → bearer mode (allow-listed + finite TTL only)
+        # Cross-origin: require explicit allow-list + finite TTL
         if not auth_core.origin_allowed_for_bearer(origin, gate.auth.allowed_bearer_origins):
             return JSONResponse({"ok": False, "error": "origin_forbidden"}, status_code=403)
         if ttl <= 0:
             return JSONResponse({"ok": False, "error": "bearer_requires_ttl"}, status_code=400)
-        token = auth_core.sign_token(gate.auth.session_secret, epoch=epoch, ttl_hours=ttl)
         return JSONResponse(
             {"ok": True, "token": token, "expires_at": auth_core.token_expires_at(token)}
         )

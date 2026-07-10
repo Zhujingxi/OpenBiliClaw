@@ -41,6 +41,11 @@
 - **搜索预览噪声过滤**：inspiration seed 抽取会过滤 Markdown 表格分隔符、纯标点和短残句，避免 `| --- | --- |`、`故事是` 这类搜索预览噪声进入关键词池。
 - **灵感、轴库与横向扩展持久化**：SQLite 初始化新增 `discovery_inspiration_probe_cache`、`discovery_inspiration_expansion_cache` 与 `discovery_inspiration_axis`，并提供 probe / expansion yield DAO 以及 `upsert_inspiration_axes()` / `list_inspiration_axes()`；同一灵感、扩展或轴可刷新证据字段，但不会清零反馈计数。
 - **关键词溯源元数据与 yield 回填**：`discovery_keywords` 增加 `aspect_id`、`inspiration_id`、`expansion_id`、`angle_id`、`source_interest`、`generation_reason` 等可选字段；`insert_pending_keywords()` 支持 `metadata_by_keyword`，但去重键仍保持原来的 `(platform, keyword, profile_kw_digest, keyword_kind)`。`increment_keyword_yield()` 成功记录新内容 yield 后，会把计数回填到对应 inspiration / expansion，重复 content 不会 double-count。
+- **跨设备扩展认证与密钥管理（PR #99）**：远程扩展访问默认关闭；CLI 生成高熵设备密钥，配置仅保存 SHA-256 摘要，扩展用其换取最长 168 小时的短会话。
+- **最小凭证暴露面**：普通 HTTP 统一使用 `Authorization: Bearer`，仅 WebSocket 与图片代理因浏览器接口限制携带短会话 query；长期设备密钥不进入普通请求、URL 或日志。
+- **设备生命周期 CLI**：`ext-key generate/enable/disable/list/revoke` 管理密钥；撤销会提升 `auth_epoch` 立即失效全部现有会话，运行库失败时配置自动回滚。
+- **最小远程 host 权限**：扩展保存 LAN / 远程 endpoint 前请求 `scheme://host/*` 可选权限；权限 API 无法跨浏览器限定端口，实际请求仍固定到配置端口。公网地址强制 HTTPS，WebSocket 自动使用 WSS。
+- **兼容升级**：清理 PR 早期的密码缓存与裸 token 存储，不采用 Extension ID / RSA manifest key 或 Docker 网关可信绕过。
 
 ## v0.3.160 / extension v0.3.160 / desktop v0.3.160：把 bge-m3 打进交付物,消灭装机时的模型下载（2026-07-07）
 

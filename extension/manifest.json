@@ -25,6 +25,10 @@
         "http://127.0.0.1/*",
         "http://localhost/*"
     ],
+    "optional_host_permissions": [
+        "http://*/*",
+        "https://*/*"
+    ],
     "background": {
         "service_worker": "dist/background/service-worker.js"
     },

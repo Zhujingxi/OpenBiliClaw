@@ -19,6 +19,7 @@
 import type { YtBootstrapItem, YtScope, YtScopeResult } from "../content/yt/task-executor.js";
 import { YT_SCOPE_URLS } from "../content/yt/task-executor.js";
 import { apiUrl } from "../shared/backend-endpoint.ts";
+import { authenticatedFetch } from "../shared/auth.ts";
 
 // Cross-source mutex — same field as xhs/dy dispatchers so all three
 // cooperate on a single long-running task slot.
@@ -141,7 +142,7 @@ let progress: TaskProgress | null = null;
 
 async function fetchNextTask(): Promise<YtTask | null> {
   try {
-    const resp = await fetch(await apiUrl("/sources/yt/next-task"));
+    const resp = await authenticatedFetch(await apiUrl("/sources/yt/next-task"));
     if (resp.status === 204) return null;
     if (!resp.ok) return null;
     const payload: unknown = await resp.json();
@@ -153,7 +154,7 @@ async function fetchNextTask(): Promise<YtTask | null> {
 
 async function postTaskResult(result: YtTaskPayload): Promise<void> {
   try {
-    await fetch(await apiUrl("/sources/yt/task-result"), {
+    await authenticatedFetch(await apiUrl("/sources/yt/task-result"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(result),
