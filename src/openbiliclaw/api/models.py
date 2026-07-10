@@ -45,6 +45,19 @@ class HealthResponse(BaseModel):
     embedding_ready: bool | None = None
 
 
+class InitStageProgressOut(BaseModel):
+    """Fine-grained progress inside a running stage (init-progress spec).
+
+    Additive/optional: only present while a stage exposes sub-progress (e.g.
+    stage 2 chunked preference analysis). Absent on stages with no natural
+    progress points or on a status produced by an older backend.
+    """
+
+    done: int = 0
+    total: int = 0
+    note: str | None = None
+
+
 class InitStageOut(BaseModel):
     """One stage of guided init (gui-init spec API shape)."""
 
@@ -52,6 +65,10 @@ class InitStageOut(BaseModel):
     label: str
     status: str  # pending | running | ok | warning | failed
     reason: str | None = None
+    # Optional (backward-compatible): intra-stage sub-progress + typical
+    # duration hint. Old stages_json rows lack these; both default to None.
+    progress: InitStageProgressOut | None = None
+    eta_seconds: int | None = None
 
 
 class InitPrerequisitesOut(BaseModel):
@@ -97,6 +114,10 @@ class InitStatusOut(BaseModel):
     prerequisites: InitPrerequisitesOut = Field(default_factory=InitPrerequisitesOut)
     reason: str = "none"
     detail: str = ""
+    # Wall-clock (server tz) of the most recent status write for the current
+    # run — advanced by every stage/progress/heartbeat write. "" when idle.
+    # The GUI derives a "still working / stalled" indicator from now minus this.
+    last_activity: str = ""
 
 
 class RecommendationOut(BaseModel):

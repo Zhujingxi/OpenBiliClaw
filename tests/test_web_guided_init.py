@@ -280,3 +280,111 @@ def test_web_surfaces_offer_embedding_repair_and_progress() -> None:
     assert "handleEmbeddingRepairClick" in app_js
     assert ".init-repair-btn" in setup_html
     assert ".init-repair-btn" in app_css
+
+
+# ── init-progress-visibility Phase 0: API models + heartbeat task ────────────
+
+
+def _progress_coord(tmp_path):
+    from types import SimpleNamespace
+
+    from openbiliclaw.runtime.init_coordinator import InitCoordinator
+    from openbiliclaw.storage.database import Database
+
+    db = Database(tmp_path / "hb.db")
+    db.initialize()
+    ctx = SimpleNamespace(database=db, event_hub=None, runtime_controller=None)
+    return InitCoordinator(ctx), db
+
+
+def test_init_stage_out_accepts_and_omits_progress_fields() -> None:
+    """InitStageOut stays backward-compatible: old stage dicts (no progress /
+    eta_seconds) parse, and new ones nest InitStageProgressOut."""
+    from openbiliclaw.api.models import InitStageOut, InitStageProgressOut
+
+    legacy = InitStageOut(n=2, label="分析偏好", status="pending", reason=None)
+    assert legacy.progress is None
+    assert legacy.eta_seconds is None
+
+    rich = InitStageOut(
+        n=2,
+        label="分析偏好",
+        status="running",
+        reason=None,
+        progress={"done": 3, "total": 8, "note": "第 3/8 批"},
+        eta_seconds=180,
+    )
+    assert isinstance(rich.progress, InitStageProgressOut)
+    assert rich.progress.done == 3 and rich.progress.total == 8
+    assert rich.eta_seconds == 180
+
+
+def test_init_status_out_has_last_activity_default() -> None:
+    from openbiliclaw.api.models import InitStatusOut
+
+    assert InitStatusOut().last_activity == ""
+
+
+def test_heartbeat_interval_bounds_last_activity_freshness() -> None:
+    """Goal metric 1 fallback: the heartbeat period must be ≤30s so that a
+    65s hung stage still lands ≥2 touches (last_activity stays ≤30s fresh)."""
+    from openbiliclaw.api.app import _INIT_HEARTBEAT_INTERVAL_SECONDS
+
+    assert _INIT_HEARTBEAT_INTERVAL_SECONDS <= 30
+
+
+async def test_heartbeat_task_keeps_touching_until_cancelled(tmp_path) -> None:
+    import asyncio
+    from contextlib import suppress
+
+    from openbiliclaw.api.app import _run_init_heartbeat
+
+    coord, db = _progress_coord(tmp_path)
+    coord.try_start("run-1")
+    await coord.mark_running("run-1")
+    seq_before = db.get_latest_init_run()["sequence"]
+
+    task = asyncio.create_task(_run_init_heartbeat(coord, "run-1", interval=0.01))
+    await asyncio.sleep(0.06)
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+    seq_after = db.get_latest_init_run()["sequence"]
+    # At least two heartbeat touches landed while the task ran.
+    assert seq_after - seq_before >= 2
+    assert coord.get_status()["last_activity"] != ""
+
+
+async def test_heartbeat_swallows_touch_errors(tmp_path) -> None:
+    import asyncio
+    from contextlib import suppress
+
+    from openbiliclaw.api.app import _run_init_heartbeat
+
+    class _BoomCoord:
+        async def touch(self, run_id: str) -> None:
+            raise RuntimeError("db gone")
+
+    # A failing touch must not kill the heartbeat loop (it just logs WARNING).
+    task = asyncio.create_task(_run_init_heartbeat(_BoomCoord(), "run-1", interval=0.01))
+    await asyncio.sleep(0.03)
+    assert not task.done()
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
+def test_init_status_endpoint_surfaces_last_activity(tmp_path) -> None:
+    from fastapi.testclient import TestClient
+
+    from openbiliclaw.api.app import create_app
+    from openbiliclaw.storage.database import Database
+
+    db = Database(tmp_path / "e1.db")
+    db.initialize()
+    app = create_app(memory_manager=object(), database=db, soul_engine=object())
+    with TestClient(app) as client:
+        body = client.get("/api/init-status").json()
+    assert "last_activity" in body
+    assert isinstance(body["last_activity"], str)

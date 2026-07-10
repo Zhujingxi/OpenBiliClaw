@@ -164,6 +164,28 @@ logger = logging.getLogger(__name__)
 _CONFIG_SAVE_LOCK = asyncio.Lock()
 _fire_and_forget_tasks: set[asyncio.Task[None]] = set()
 
+# Guided-init liveness heartbeat period (init-progress spec Phase 0). A stage-2
+# LLM call can block for minutes with no status write of its own, so a periodic
+# coordinator.touch() keeps ``last_activity`` fresh. Kept ≤30s so any hang under
+# ~65s still lands ≥2 touches — the GUI stall indicator (90s = 3× this) then
+# only fires when work has genuinely stopped. Changing this MUST re-tune the
+# front-end 90s stall threshold in lock-step.
+_INIT_HEARTBEAT_INTERVAL_SECONDS = 30.0
+
+
+async def _run_init_heartbeat(
+    coordinator: Any, run_id: str, *, interval: float = _INIT_HEARTBEAT_INTERVAL_SECONDS
+) -> None:
+    """Periodically bump init_runs.updated_at so ``last_activity`` stays fresh
+    during long, silent stages. ``touch()`` publishes no SSE event (invariant
+    5). A touch failure must not kill init, so it's swallowed at WARNING."""
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await coordinator.touch(run_id)
+        except Exception:
+            logger.warning("init heartbeat touch failed for run %s", run_id, exc_info=True)
+
 # /api/health embedding readiness: cache the live-probe result for this many
 # seconds so Docker healthchecks and popup re-polls don't hit the embedding
 # provider on every call. Kept short so a freshly-fixed provider (e.g. right
@@ -2194,6 +2216,7 @@ def create_app(
             ),
             reason=reason,
             detail=detail,
+            last_activity=str(run.get("last_activity") or ""),
         )
 
     def _init_runtime_supported() -> tuple[bool, str]:
@@ -2298,8 +2321,13 @@ def create_app(
                 )
             )
 
+        heartbeat_task: asyncio.Task[None] | None = None
         try:
             await coord.mark_running(run_id)
+            # Liveness heartbeat: even if a single stage-2 LLM call blocks for
+            # minutes, last_activity stays ≤30s fresh so the GUI never falsely
+            # reads "stalled" (init-progress spec Phase 0). Torn down in finally.
+            heartbeat_task = asyncio.create_task(_run_init_heartbeat(coord, run_id))
             enabled = set(ctx.init_prereqs.enabled_platforms())
             effective = _select_init_platforms(enabled, selected_sources)
             result = await run_guided_init(
@@ -2336,6 +2364,10 @@ def create_app(
             with suppress(Exception):
                 await coord.fail(run_id, "internal_error", detail=_init_crash_detail(exc))
         finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                with suppress(BaseException):
+                    await heartbeat_task
             if not bool(getattr(ctx, "degraded", False)):
                 with suppress(Exception):
                     await ctx.restart_background_tasks(app)
