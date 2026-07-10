@@ -10,6 +10,41 @@ from textwrap import dedent
 import pytest
 
 _NODE = shutil.which("node")
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_mobile_probe_action_copy_is_canonical() -> None:
+    view_models = (
+        ROOT / "src/openbiliclaw/web/js/view-models.js"
+    ).read_text(encoding="utf-8")
+
+    assert 'label: "确认喜欢", action: "confirm"' in view_models
+    assert 'label: "暂时搁置", action: "defer"' in view_models
+    assert 'label: "确认不喜欢", action: "reject"' in view_models
+    assert 'label: "确认避雷", action: "confirm"' in view_models
+    assert 'label: "搁置避雷", action: "defer"' in view_models
+    assert 'label: "不是雷点", action: "reject"' in view_models
+
+
+def test_mobile_profile_uses_probe_action_descriptors() -> None:
+    profile_js = (
+        ROOT / "src/openbiliclaw/web/js/views/profile.js"
+    ).read_text(encoding="utf-8")
+    assert "getProbeMessageActions" in profile_js
+    assert "getAvoidanceProbeMessageActions" in profile_js
+    assert 'data-action="${action.action}"' in profile_js
+    assert "const action = e.target.dataset.action" in profile_js
+    assert 'data-action="confirm">\\u2713</button>' not in profile_js
+    assert 'data-action="reject">\\u2717</button>' not in profile_js
+    assert profile_js.count(
+        'const buttons = [...row.querySelectorAll(".spec-btn")];'
+    ) == 2
+    assert profile_js.count(
+        "for (const actionButton of buttons) actionButton.disabled = true;"
+    ) == 2
+    assert profile_js.count(
+        "for (const actionButton of buttons) actionButton.disabled = false;"
+    ) == 2
 
 
 def _run_js(script: str) -> subprocess.CompletedProcess[str]:
@@ -656,18 +691,18 @@ class TestMobileWebViewModels:
             assert.deepEqual(
               getProbeMessageActions().map((item) => [item.label, item.action]),
               [
-                ["喜欢", "confirm"],
-                ["暂时忽略", "defer"],
-                ["不喜欢", "reject"],
+                ["确认喜欢", "confirm"],
+                ["暂时搁置", "defer"],
+                ["确认不喜欢", "reject"],
                 ["多聊聊", "chat"],
               ],
             );
             assert.deepEqual(
               getAvoidanceProbeMessageActions().map((item) => [item.label, item.action]),
               [
-                ["确实不喜欢", "confirm"],
-                ["暂时忽略", "defer"],
-                ["不是", "reject"],
+                ["确认避雷", "confirm"],
+                ["搁置避雷", "defer"],
+                ["不是雷点", "reject"],
                 ["多聊聊", "chat"],
               ],
             );
@@ -948,7 +983,7 @@ class TestMobileWebViewModels:
         assert 'type === "avoidance.probe"' in chat_js
         assert '"avoidance_probe"' in chat_js
         assert "getAvoidanceProbeMessageActions" in chat_js
-        assert "确实不喜欢" in view_models_js
+        assert "确认避雷" in view_models_js
 
         assert "speculative_avoidances" in profile_js
         assert "renderSpecAvoidances" in profile_js
@@ -973,7 +1008,7 @@ class TestMobileWebViewModels:
 
         assert "avoidanceProbeRespond" in source
         assert "avoidance.probe" in source
-        assert "确实不喜欢" in source
+        assert "确认避雷" in source
 
     def test_profile_display_helpers_preserve_plugin_semantics(self) -> None:
         _assert_js(

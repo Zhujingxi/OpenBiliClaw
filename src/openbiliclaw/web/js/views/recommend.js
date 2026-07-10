@@ -24,6 +24,7 @@ import {
   removeFromFavorite,
   favoriteStatus,
 } from "../api.js";
+import { navigateToTab } from "../app.js";
 import { state, patchState } from "../state.js";
 import {
   getCoverImageAttrs,
@@ -52,6 +53,7 @@ import {
   shouldAutoAppendRecommendations,
 } from "../view-models.js";
 import { openContentUrl } from "../app-launch.js";
+import { enterProfileEditMode } from "./profile.js";
 
 let $root = null;
 let loaded = false;
@@ -190,6 +192,27 @@ function renderRecommendationHeader() {
   refreshBtn.addEventListener("click", handleReshuffle);
   top.appendChild(refreshBtn);
   header.appendChild(top);
+
+  const correction = document.createElement("p");
+  correction.className = "preference-correction-callout";
+  correction.innerHTML = `推荐不准？
+    <button type="button" data-correction-target="profile">编辑画像</button>
+    <span aria-hidden="true">，或</span>
+    <button type="button" data-correction-target="chat">直接告诉阿B</button>`;
+  correction.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-correction-target]");
+    if (!button) return;
+    const target = button.dataset.correctionTarget;
+    if (target === "profile") {
+      navigateToTab("profile");
+      await enterProfileEditMode();
+    }
+    if (target === "chat") {
+      navigateToTab("chat");
+      requestAnimationFrame(() => document.getElementById("chat-input")?.focus());
+    }
+  });
+  header.appendChild(correction);
 
   if (headerState.poolChips.length > 0) {
     const grid = document.createElement("div");
