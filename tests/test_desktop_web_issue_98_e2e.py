@@ -40,6 +40,9 @@ class Issue98Stub:
         self.feedback_received = threading.Event()
         self.feedback_delay_seconds = 0.0
         self.feedback_status = 200
+        self.probe_posts: list[dict[str, Any]] = []
+        self.probe_received = threading.Event()
+        self.probe_status = 200
 
 
 def _json_response(
@@ -118,8 +121,22 @@ def issue_98_server() -> tuple[str, Issue98Stub]:
                         "core_traits": [],
                         "likes": [],
                         "dislikes": [],
-                        "speculative_interests": [],
-                        "speculative_avoidances": [],
+                        "speculative_interests": [
+                            {
+                                "domain": "系统设计",
+                                "reason": "你常看复杂系统的拆解。",
+                                "status": "active",
+                                "confidence": 0.8,
+                            }
+                        ],
+                        "speculative_avoidances": [
+                            {
+                                "domain": "标题党",
+                                "reason": "你会快速退出夸张标题内容。",
+                                "status": "active",
+                                "confidence": 0.7,
+                            }
+                        ],
                     },
                 )
             if path == "/api/config":
@@ -163,6 +180,19 @@ def issue_98_server() -> tuple[str, Issue98Stub]:
                     self,
                     {"ok": state.feedback_status < 400},
                     state.feedback_status,
+                )
+            if path in {"/api/interest-probes/respond", "/api/avoidance-probes/respond"}:
+                state.probe_posts.append({"path": path, **payload})
+                state.probe_received.set()
+                return _json_response(
+                    self,
+                    {
+                        "ok": state.probe_status < 400,
+                        "action": (
+                            "confirmed" if payload.get("response") == "confirm" else "deferred"
+                        ),
+                    },
+                    state.probe_status,
                 )
             return _json_response(self, {"ok": True})
 
@@ -296,4 +326,51 @@ def test_recommendation_feedback_failure_rolls_back_current_card(
     expect(like).to_be_enabled(timeout=3000)
     expect(like).not_to_have_class("is-active")
     expect(first.locator(".status-line")).to_have_text("")
+    expect(chromium_page.locator("#toast")).to_contain_text("已恢复")
+
+
+def test_interest_and_avoidance_probe_actions_are_immediate_and_undoable(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = issue_98_server
+    chromium_page.goto(f"{base_url}/web/")
+
+    chromium_page.locator("#messagesBtn").click()
+    drawer = chromium_page.locator("#messagesDrawer")
+    expect(drawer).to_be_visible()
+    interest = drawer.locator(".message-item.is-interest-probe")
+    expect(interest).to_have_count(1)
+    interest.locator('[data-probe="confirm"]').click()
+    expect(interest).to_contain_text("撤销")
+    assert stub.probe_posts == []
+    interest.locator("[data-probe-undo]").click()
+    expect(interest.locator('[data-probe="confirm"]')).to_be_visible()
+    chromium_page.wait_for_timeout(500)
+    assert stub.probe_posts == []
+
+    drawer.locator('[data-close="messagesDrawer"]').first.click()
+    chromium_page.evaluate("() => document.querySelector('#profileBtn').click()")
+    profile = chromium_page.locator("#profilePage")
+    expect(profile).to_be_visible()
+    avoidance = profile.locator('[data-spec-domain="标题党"]')
+    avoidance.locator('[data-spec-response="confirm"]').click()
+    expect(avoidance).to_contain_text("撤销")
+    assert stub.probe_received.wait(timeout=2)
+    assert stub.probe_posts == [
+        {
+            "path": "/api/avoidance-probes/respond",
+            "domain": "标题党",
+            "response": "confirm",
+            "message": "",
+        }
+    ]
+    expect(avoidance).to_contain_text("作为避雷方向")
+
+    stub.probe_status = 500
+    stub.probe_received.clear()
+    interest_row = profile.locator('[data-spec-domain="系统设计"]')
+    interest_row.locator('[data-spec-response="reject"]').click()
+    assert stub.probe_received.wait(timeout=2)
+    expect(interest_row.locator('[data-spec-response="reject"]')).to_be_visible()
     expect(chromium_page.locator("#toast")).to_contain_text("已恢复")

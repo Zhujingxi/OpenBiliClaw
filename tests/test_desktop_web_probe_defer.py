@@ -34,7 +34,7 @@ def test_defer_copy_is_honest_not_permanent() -> None:
     # Deferred copy promises the probe may return; never "已忽略"-as-permanent.
     assert "过阵子可能再提" in app_js
     # Exhaustion copy keys off the API's defer_exhausted action.
-    assert 'apiResp?.action === "defer_exhausted"' in app_js
+    assert 'apiResponse?.action === "defer_exhausted"' in app_js
     assert "之后先不提" in app_js
 
 
@@ -59,3 +59,25 @@ def test_defer_button_css_present() -> None:
     app_css = APP_CSS.read_text(encoding="utf-8")
     assert ".feedback-icon-btn.is-neutral" in app_css
     assert ".spec-actions .probe-btn.is-neutral" in app_css
+
+
+def test_probe_surfaces_share_undoable_pending_action_key() -> None:
+    app_js = APP_JS.read_text(encoding="utf-8")
+    assert "function probePendingKey(type, domain)" in app_js
+    assert "`probe:${messageType({ type })}:${normalizedDomain}`" in app_js
+
+    message_start = app_js.index("function respondProbe(msg, response, el)")
+    message_end = app_js.index("\n    function bindSpeculativeRowActions", message_start)
+    message_body = app_js[message_start:message_end]
+    assert "pendingActions.schedule(pendingKey" in message_body
+    assert "data-probe-undo" in message_body
+    assert 'if (response === "chat")' in message_body
+    assert "renderMessages()" not in message_body
+
+    profile_start = app_js.index("function respondSpeculativeInterest(button)")
+    profile_end = app_js.index("\n    function createClientTurnId", profile_start)
+    profile_body = app_js[profile_start:profile_end]
+    assert "pendingActions.schedule(pendingKey" in profile_body
+    assert "data-probe-undo" in profile_body
+    assert 'surface: "profile"' in profile_body
+    assert "renderProfileDetails()" not in profile_body

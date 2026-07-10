@@ -3336,6 +3336,12 @@
       return Boolean(document.querySelector("#messageList .message-item.is-resolving, #messageList .message-item.is-resolved, #messageList .message-item.is-dismissing"));
     }
 
+    function bindMessageProbeActions(msg, el) {
+      el.querySelectorAll("[data-probe]").forEach((button) => {
+        button.addEventListener("click", () => respondProbe(msg, button.dataset.probe, el));
+      });
+    }
+
     function renderMessages() {
       const list = $("#messageList");
       if (state.messageListDomLocked || isMessageListLocked()) {
@@ -3390,7 +3396,7 @@
             const resolvedActions = el.querySelector(".message-card-actions");
             if (resolvedActions) resolvedActions.outerHTML = `<div class="message-note is-success">${escapeHtml(resolvedResult)}</div>`;
           } else {
-            el.querySelectorAll("[data-probe]").forEach((btn) => btn.addEventListener("click", () => respondProbe(msg, btn.dataset.probe, el)));
+            bindMessageProbeActions(msg, el);
           }
         }
         return el;
@@ -3538,7 +3544,49 @@
       window.setTimeout(() => input?.focus(), 40);
     }
 
-    async function respondProbe(msg, response, el) {
+    function probePendingKey(type, domain) {
+      const normalizedDomain = String(domain || "").trim().toLowerCase();
+      return normalizedDomain ? `probe:${messageType({ type })}:${normalizedDomain}` : "";
+    }
+
+    function submitProbeResponse(type, domain, response, { surface = "", keepalive = false } = {}) {
+      const isAvoidance = isAvoidanceProbe(type);
+      const endpoint = isAvoidance ? ENDPOINTS.avoidanceProbeRespond : ENDPOINTS.interestProbeRespond;
+      const payload = { domain, response, message: "" };
+      if (!isAvoidance && surface) payload.surface = surface;
+      return requestJsonStrict(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        keepalive
+      }).then((apiResponse) => {
+        if (apiResponse?.ok === false) throw new Error("后端未接受这次探针反馈");
+        return apiResponse;
+      });
+    }
+
+    function messageProbeResult(type, response, apiResponse = null) {
+      const isAvoidance = isAvoidanceProbe(type);
+      const deferExhausted = apiResponse?.action === "defer_exhausted";
+      const deferResult = deferExhausted ? "已多次搁置，之后先不提这个方向了。" : "已搁置，过阵子可能再提。";
+      return isAvoidance
+        ? response === "confirm" ? "已确认避雷方向，后续会减少类似内容。"
+          : response === "defer" ? deferResult
+          : "已搁置，暂时不作为避雷方向。"
+        : response === "confirm" ? "已确认，后续推荐会提高权重。"
+          : response === "defer" ? deferResult
+          : "已搁置，后续会少试探这个方向。";
+    }
+
+    function probeToast(type, response, apiResponse = null) {
+      const isAvoidance = isAvoidanceProbe(type);
+      const deferToast = apiResponse?.action === "defer_exhausted" ? "好，之后先不提了" : "已暂时搁置，过阵子可能再提";
+      return isAvoidance
+        ? response === "confirm" ? "已确认这个避雷方向" : response === "defer" ? deferToast : "已搁置这个避雷方向"
+        : response === "confirm" ? "已确认这个兴趣方向" : response === "defer" ? deferToast : "已搁置这个兴趣方向";
+    }
+
+    function respondProbe(msg, response, el) {
       if (!el) return;
       const actions = el.querySelector(".message-card-actions");
       if (response === "chat") {
@@ -3546,127 +3594,158 @@
         showToast("已在这条消息里打开聊天输入");
         return;
       }
-      const key = messageKey(msg);
-      state.messageListDomLocked = true;
-      if (!state.messageListSnapshot && isMessagesDrawerOpen()) state.messageListSnapshot = getRenderableMessages();
-      el.style.minHeight = `${el.getBoundingClientRect().height}px`;
-      el.classList.add("is-resolving");
-      state.resolvingMessageKeys.add(key);
-      actions?.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+      if (!actions) return;
+      const stateKey = messageKey(msg);
       const probeType = messageType(msg);
       const domain = msg.domain || "";
       const handledKey = probeKey(probeType, domain);
-      if (handledKey) state.handledProbeKeys.add(handledKey);
-      try {
-        const isAvoidance = probeType === "avoidance.probe";
-        const endpoint = isAvoidance ? ENDPOINTS.avoidanceProbeRespond : ENDPOINTS.interestProbeRespond;
-        const apiResp = await requestJson(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: msg.domain, response, message: "" }) });
-        if (apiResp && apiResp.ok === false) {
-          state.resolvingMessageKeys.delete(key);
-          state.messages = state.messages.filter((item) => messageKey(item) !== key);
-          if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((item) => messageKey(item) !== key);
-          state.messageListDomLocked = false;
-          renderMessages();
-          void refreshProfile();
-          return;
-        }
-        const deferExhausted = apiResp?.action === "defer_exhausted";
-        const deferResult = deferExhausted ? "已多次搁置，之后先不提这个方向了。" : "已搁置，过阵子可能再提。";
-        const result = isAvoidance
-          ? response === "confirm" ? "已确认避雷方向，后续会减少类似内容。"
-            : response === "defer" ? deferResult
-            : "已搁置，暂时不作为避雷方向。"
-          : response === "confirm" ? "已确认，后续推荐会提高权重。"
-            : response === "defer" ? deferResult
-            : "已搁置，后续会少试探这个方向。";
-        state.resolvedMessageResults.set(key, result);
-        el.classList.remove("is-resolving");
-        el.classList.add("is-resolved");
-        if (actions) {
+      const pendingKey = probePendingKey(probeType, domain);
+      const snapshot = {
+        actionsHtml: actions.innerHTML,
+        actionsClass: actions.className,
+        minHeight: el.style.minHeight
+      };
+      let apiResponse = null;
+      const scheduled = pendingActions.schedule(pendingKey, {
+        commit: ({ keepalive }) => {
+          if (el.isConnected && !keepalive) {
+            el.classList.remove("is-feedback-pending");
+            el.classList.add("is-feedback-saving");
+            actions.innerHTML = '<div class="message-action-result">正在保存反馈…</div>';
+          }
+          return submitProbeResponse(probeType, domain, response, { keepalive }).then((result) => {
+            apiResponse = result;
+            return result;
+          });
+        },
+        rollback: ({ reason }) => {
+          if (handledKey) state.handledProbeKeys.delete(handledKey);
+          state.resolvingMessageKeys.delete(stateKey);
+          state.messageListDomLocked = state.resolvingMessageKeys.size > 0;
+          state.resolvedMessageResults.delete(stateKey);
+          el.classList.remove("is-feedback-pending", "is-feedback-saving", "is-feedback-committed");
+          el.style.minHeight = snapshot.minHeight;
+          actions.className = snapshot.actionsClass;
+          actions.innerHTML = snapshot.actionsHtml;
+          bindMessageProbeActions(msg, el);
+          if (reason === "undo") showToast("已撤销探针反馈");
+        },
+        committed: () => {
+          const result = messageProbeResult(probeType, response, apiResponse);
+          state.resolvedMessageResults.set(stateKey, result);
+          state.resolvingMessageKeys.delete(stateKey);
+          state.messageListDomLocked = state.resolvingMessageKeys.size > 0;
+          state.messages = state.messages.filter((item) => messageKey(item) !== stateKey);
+          if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((item) => messageKey(item) !== stateKey);
+          syncMessageCount();
+          if (!el.isConnected) return;
+          el.classList.remove("is-feedback-pending", "is-feedback-saving");
+          el.classList.add("is-feedback-committed");
           actions.classList.add("is-result");
           actions.innerHTML = `<div class="message-action-result" title="${escapeHtml(result)}">${escapeHtml(result)}</div>`;
+          showToast(probeToast(probeType, response, apiResponse));
         }
-        const deferToast = deferExhausted ? "好，之后先不提了" : "已暂时搁置，过阵子可能再提";
-        showToast(isAvoidance
-          ? response === "confirm" ? "已确认这个避雷方向" : response === "defer" ? deferToast : "已搁置这个避雷方向"
-          : response === "confirm" ? "已确认这个兴趣方向" : response === "defer" ? deferToast : "已搁置这个兴趣方向");
-        setTimeout(() => {
-          collapseMessageItem(key, el, () => {
-            state.resolvingMessageKeys.delete(key);
-            state.resolvedMessageResults.delete(key);
-            state.messages = state.messages.filter((item) => messageKey(item) !== key);
-            if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((item) => messageKey(item) !== key);
-            state.messageListDomLocked = false;
-            renderMessages();
-            void refreshProfile();
-          });
-        }, 1800);
-      } catch (error) {
-        state.resolvingMessageKeys.delete(key);
-        state.resolvedMessageResults.delete(key);
-        state.messageListDomLocked = false;
-        el.classList.remove("is-resolving");
-        el.style.minHeight = "";
-        if (handledKey) state.handledProbeKeys.delete(handledKey);
-        actions?.querySelectorAll("button").forEach((button) => { button.disabled = false; });
-        showToast(`确认反馈失败：${error.message || "后端不可用"}`);
+      });
+      if (!scheduled) {
+        showToast("这条探针反馈正在处理中。");
+        return;
       }
+
+      state.messageListDomLocked = true;
+      if (!state.messageListSnapshot && isMessagesDrawerOpen()) state.messageListSnapshot = getRenderableMessages();
+      state.resolvingMessageKeys.add(stateKey);
+      if (handledKey) state.handledProbeKeys.add(handledKey);
+      el.style.minHeight = `${el.getBoundingClientRect().height}px`;
+      el.classList.add("is-feedback-pending");
+      const result = messageProbeResult(probeType, response);
+      actions.classList.add("is-result");
+      actions.innerHTML = `<div class="message-action-result">${escapeHtml(result)} <button class="feedback-undo-btn" data-probe-undo type="button">撤销</button></div>`;
+      actions.querySelector("[data-probe-undo]")?.addEventListener("click", () => { pendingActions.undo(pendingKey); });
     }
 
-    function bindSpeculativeActions() {
-      document.querySelectorAll("[data-spec-response]").forEach((button) => {
+    function bindSpeculativeRowActions(row) {
+      row.querySelectorAll("[data-spec-response]").forEach((button) => {
         button.addEventListener("click", () => respondSpeculativeInterest(button));
       });
     }
 
-    async function respondSpeculativeInterest(button) {
+    function bindSpeculativeActions() {
+      document.querySelectorAll("[data-spec-domain]").forEach(bindSpeculativeRowActions);
+    }
+
+    function profileProbeResult(type, response, domain, apiResponse = null) {
+      const isAvoidance = isAvoidanceProbe(type);
+      const deferExhausted = apiResponse?.action === "defer_exhausted";
+      const deferRow = deferExhausted
+        ? `好，「${domain}」之后先不提了。`
+        : `好，「${domain}」先放一放，过阵子可能再提。`;
+      return isAvoidance
+        ? response === "confirm" ? `好，「${domain}」会作为避雷方向处理。`
+          : response === "defer" ? deferRow
+          : `好，「${domain}」不记成避雷。`
+        : response === "confirm" ? `好，「${domain}」记住了。`
+          : response === "defer" ? deferRow
+          : `好，「${domain}」先不看了。`;
+    }
+
+    function respondSpeculativeInterest(button) {
       const row = button.closest("[data-spec-domain]");
       const domain = row?.dataset.specDomain;
       const response = button.dataset.specResponse;
       if (!domain || !response) return;
-      row.querySelectorAll("[data-spec-response]").forEach((btn) => { btn.disabled = true; });
       const type = button.dataset.specType || "interest.probe";
-      const key = probeKey(type, domain);
-      if (key) state.handledProbeKeys.add(key);
-      try {
-        const isAvoidance = isAvoidanceProbe(type);
-        const endpoint = isAvoidance ? ENDPOINTS.avoidanceProbeRespond : ENDPOINTS.interestProbeRespond;
-        const payload = { domain, response, message: "" };
-        if (!isAvoidance) payload.surface = "profile";
-        const apiResp = await requestJson(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-        if (apiResp && apiResp.ok === false) {
-          row.remove();
-          state.messages = state.messages.filter((msg) => messageKey(msg) !== key);
-          if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((msg) => messageKey(msg) !== key);
-          renderMessages();
-          void refreshProfile();
-          return;
+      const handledKey = probeKey(type, domain);
+      const pendingKey = probePendingKey(type, domain);
+      const actions = row.querySelector(".spec-actions");
+      if (!actions) return;
+      const snapshot = {
+        actionsHtml: actions.innerHTML,
+        actionsClass: actions.className
+      };
+      let apiResponse = null;
+      const scheduled = pendingActions.schedule(pendingKey, {
+        commit: ({ keepalive }) => {
+          if (row.isConnected && !keepalive) {
+            row.classList.remove("is-feedback-pending");
+            row.classList.add("is-feedback-saving");
+            actions.innerHTML = '<p class="spec-result">正在保存反馈…</p>';
+          }
+          return submitProbeResponse(type, domain, response, { surface: "profile", keepalive }).then((result) => {
+            apiResponse = result;
+            return result;
+          });
+        },
+        rollback: ({ reason }) => {
+          if (handledKey) state.handledProbeKeys.delete(handledKey);
+          row.classList.remove("is-feedback-pending", "is-feedback-saving", "is-feedback-committed");
+          actions.className = snapshot.actionsClass;
+          actions.innerHTML = snapshot.actionsHtml;
+          bindSpeculativeRowActions(row);
+          if (reason === "undo") showToast("已撤销探针反馈");
+        },
+        committed: () => {
+          const result = profileProbeResult(type, response, domain, apiResponse);
+          const messageStateKey = probeKey(type, domain);
+          state.messages = state.messages.filter((msg) => messageKey(msg) !== messageStateKey);
+          if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((msg) => messageKey(msg) !== messageStateKey);
+          syncMessageCount();
+          if (!row.isConnected) return;
+          row.classList.remove("is-feedback-pending", "is-feedback-saving");
+          row.classList.add("is-feedback-committed");
+          actions.innerHTML = `<p class="spec-result">${escapeHtml(result)}</p>`;
+          showToast(probeToast(type, response, apiResponse));
         }
-        const deferExhausted = apiResp?.action === "defer_exhausted";
-        const deferRow = deferExhausted
-          ? `好，「${escapeHtml(domain)}」之后先不提了。`
-          : `好，「${escapeHtml(domain)}」先放一放，过阵子可能再提。`;
-        const result = isAvoidance
-          ? (response === "confirm" ? `好，「${escapeHtml(domain)}」会作为避雷方向处理。`
-            : response === "defer" ? deferRow
-            : `好，「${escapeHtml(domain)}」不记成避雷。`)
-          : (response === "confirm" ? `好，「${escapeHtml(domain)}」记住了。`
-            : response === "defer" ? deferRow
-            : `好，「${escapeHtml(domain)}」先不看了。`);
-        row.innerHTML = `<p class="spec-result">${result}</p>`;
-        state.messages = state.messages.filter((msg) => messageKey(msg) !== key);
-        if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((msg) => messageKey(msg) !== key);
-        renderMessages();
-        const deferToast = deferExhausted ? "好，之后先不提了" : "已暂时搁置，过阵子可能再提";
-        showToast(isAvoidance
-          ? response === "confirm" ? "已确认这个避雷方向" : response === "defer" ? deferToast : "已排除这个避雷方向"
-          : response === "confirm" ? "已确认这个猜测兴趣" : response === "defer" ? deferToast : "已排除这个猜测兴趣");
-        setTimeout(() => { void refreshProfile(); }, 1200);
-      } catch (error) {
-        if (key) state.handledProbeKeys.delete(key);
-        row.querySelectorAll("[data-spec-response]").forEach((btn) => { btn.disabled = false; });
-        showToast(`确认反馈失败：${error.message || "后端不可用"}`);
+      });
+      if (!scheduled) {
+        showToast("这条探针反馈正在处理中。");
+        return;
       }
+
+      if (handledKey) state.handledProbeKeys.add(handledKey);
+      row.classList.add("is-feedback-pending");
+      const result = profileProbeResult(type, response, domain);
+      actions.innerHTML = `<p class="spec-result">${escapeHtml(result)} <button class="feedback-undo-btn" data-probe-undo type="button">撤销</button></p>`;
+      actions.querySelector("[data-probe-undo]")?.addEventListener("click", () => { pendingActions.undo(pendingKey); });
     }
 
     function createClientTurnId(prefix = "webui") {
