@@ -148,7 +148,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 
 - **核心评估**：这个内容是否匹配这个用户的深层兴趣和当前状态？
 - **可选辅助指标**：播放量/点赞/弹幕质量等——由用户画像决定是否参考（有些用户在意质量指标，有些人不在意）
-- **统一待评估池**：不同来源先产出 raw candidates 并进入 `discovery_candidates`，再由统一 evaluator 混合 batch 评估；refresh plan 发现新 raw 后会即时触发一次 drain，独立 candidate eval loop 也会周期性处理已有 pending raw，避免评估被来源补货计划是否为空卡住。来源只影响取数方式、配额和 prompt 上下文，不单独决定一套喜好判断流程。评估输入包含正文 / 标签 / 互动指标；开启 `[discovery].multimodal_evaluation_enabled` 且模型支持图像时，还会优先从运行时图片缓存读取封面，未命中才白名单抓取，并把压缩后的封面图送入同一评估器。
+- **统一待评估池与准入**：不同来源先产出 raw candidates 并进入 `discovery_candidates`，API / OpenClaw runtime 再由同一个候选 pipeline 混合 batch 评估；refresh plan 发现新 raw 后会即时触发一次 drain，独立 candidate eval loop 也会周期性处理已有 pending raw，避免评估被来源补货计划是否为空卡住。来源只影响取数方式、配额和 prompt 上下文，不单独决定一套喜好判断流程。`discovery.admission` 的同一策略同时约束 candidate、cache write 与 serve：所有非 `explore` 至少使用全局门槛，只有精确 `explore` 可使用 `0.58`。评估输入包含正文 / 标签 / 互动指标；开启 `[discovery].multimodal_evaluation_enabled` 且模型支持图像时，还会优先从运行时图片缓存读取封面，未命中才白名单抓取，并把压缩后的封面图送入同一评估器。
 
 ---
 
@@ -275,7 +275,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │     PoolCurator + 双轴 fatigue + per-group 窗口 + 新兴趣放大保护 │ │
 │  │     request_replenishment + 定时/手动补货 + B/XHS/DY/YT/X/Zhihu/Reddit=5/1/1/1/1/1/1 │ │
-│  │     DiscoveryCandidatePipeline: raw candidates -> periodic/refresh eval -> pool │ │
+│  │     Shared CandidatePipeline: raw -> eval -> admission -> cache guard -> serve │ │
 │  │     LLM gate: scheduler + extension presence          │   │
 │  │     Soul taxonomy: CATEGORY_VOCAB + category migration + homonym-aware consolidation │ │
 │  │     Autostart: user login item + Ollama preflight/self-heal + Ollama.app runtime 校验 │ │

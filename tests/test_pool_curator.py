@@ -417,6 +417,7 @@ def test_needs_replenishment_false_when_pool_full() -> None:
             pool_topic_label="y",
             style_key="tutorial",
             topic_group=f"分组{i}",
+            relevance_score=0.90,
         )
     curator = PoolCurator(db)
     assert curator.needs_replenishment() is False
@@ -438,6 +439,7 @@ def test_evict_stale_pool_items_marks_old_items() -> None:
         pool_topic_label="y",
         style_key="tutorial",
         topic_group="测试分组",
+        relevance_score=0.90,
     )
     # Backdate the discovered_at to 20 days ago
     db.conn.execute(
@@ -453,6 +455,7 @@ def test_evict_stale_pool_items_marks_old_items() -> None:
         pool_topic_label="y",
         style_key="tutorial",
         topic_group="测试分组",
+        relevance_score=0.90,
     )
     evicted = db.evict_stale_pool_items(max_age_days=14)
     assert evicted == 1
@@ -475,3 +478,14 @@ def test_evict_stale_pool_items_ignores_recommended() -> None:
     db.insert_recommendation("BV_OLD_REC", confidence=0.9)
     evicted = db.evict_stale_pool_items(max_age_days=14)
     assert evicted == 0
+
+
+# ---------------------------------------------------------------------------
+# issue #90: explore is the only strategy with a rec-score privilege
+# ---------------------------------------------------------------------------
+
+
+def test_serendipity_bonus_only_rewards_explore() -> None:
+    assert PoolCurator._serendipity_bonus("explore") == 1.0
+    for strategy in ("trending", "hot", "feed", "search", "related_chain", "channel", "creator"):
+        assert PoolCurator._serendipity_bonus(strategy) == 0.0, strategy

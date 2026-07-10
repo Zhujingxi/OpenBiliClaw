@@ -1636,3 +1636,54 @@ async def test_drain_requeues_stale_evaluating_claims(
     assert result["evaluated"] == 1
     assert engine.batch_lengths == [1]
     assert db.count_discovery_candidates_by_status().get("evaluating", 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# issue #90: only explore may sit below the global admission gate
+# ---------------------------------------------------------------------------
+
+
+def _threshold_pipeline() -> DiscoveryCandidatePipeline:
+    return DiscoveryCandidatePipeline(
+        database=object(),  # type: ignore[arg-type]
+        discovery_engine=object(),  # type: ignore[arg-type]
+        admission_min_score=0.60,
+    )
+
+
+@pytest.mark.parametrize("strategy", ["trending", "hot", "feed", "search", "related_chain"])
+def test_non_explore_candidate_cannot_lower_admission_threshold(strategy: str) -> None:
+    pipeline = _threshold_pipeline()
+
+    row_threshold = pipeline._threshold_for({"source_strategy": strategy, "score_threshold": 0.20})
+    payload_threshold = pipeline._threshold_for(
+        {"source_strategy": strategy, "raw_payload": json.dumps({"score_threshold": 0.25})}
+    )
+
+    assert row_threshold == 0.60
+    assert payload_threshold == 0.60
+
+
+@pytest.mark.parametrize("strategy", ["trending", "search"])
+def test_non_explore_candidate_may_still_raise_its_own_threshold(strategy: str) -> None:
+    pipeline = _threshold_pipeline()
+    assert pipeline._threshold_for({"source_strategy": strategy, "score_threshold": 0.80}) == 0.80
+
+
+def test_explore_candidate_keeps_only_the_explicit_relaxed_threshold() -> None:
+    pipeline = _threshold_pipeline()
+    assert pipeline._threshold_for({"source_strategy": "explore", "score_threshold": 0.55}) == 0.58
+    assert pipeline._threshold_for({"source_strategy": "explore", "score_threshold": 0.58}) == 0.58
+
+
+def test_explore_prefix_does_not_receive_relaxed_threshold() -> None:
+    pipeline = _threshold_pipeline()
+    assert (
+        pipeline._threshold_for({"source_strategy": "explore-backfill", "score_threshold": 0.58})
+        == 0.60
+    )
+
+
+def test_candidate_without_threshold_falls_back_to_admission_min() -> None:
+    pipeline = _threshold_pipeline()
+    assert pipeline._threshold_for({"source_strategy": "trending"}) == 0.60

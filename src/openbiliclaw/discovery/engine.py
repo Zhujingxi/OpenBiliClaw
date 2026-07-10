@@ -18,6 +18,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
+from openbiliclaw.discovery.admission import effective_admission_threshold
 from openbiliclaw.discovery.strategies._utils import build_profile_summary
 from openbiliclaw.discovery.style_keys import VALID_STYLE_KEYS, normalize_style_key
 from openbiliclaw.llm.json_utils import extract_llm_json_list, parse_llm_json_tolerant
@@ -2738,6 +2739,20 @@ class ContentDiscoveryEngine:
             return "franchise_quota"
         return ""
 
+    def _admission_threshold_for_item(self, item: DiscoveredContent) -> float:
+        database_threshold = getattr(self._database, "pool_admission_threshold", None)
+        if callable(database_threshold):
+            return float(
+                database_threshold(
+                    item.source_strategy,
+                    item.score_threshold or None,
+                )
+            )
+        return effective_admission_threshold(
+            item.source_strategy,
+            requested_threshold=item.score_threshold or None,
+        )
+
     def _cache_results(self, results: list[DiscoveredContent]) -> None:
         if self._database is None or not results:
             return
@@ -2760,6 +2775,7 @@ class ContentDiscoveryEngine:
         persisted: list[DiscoveredContent] = []
         skipped_franchise: dict[str, int] = {}
         skipped_viewed = 0
+        skipped_low_score = 0
         round_franchise_counts: dict[str, int] = {}
         viewed_content_keys = self._recent_viewed_content_keys()
         for item in results:
@@ -2767,6 +2783,9 @@ class ContentDiscoveryEngine:
                 viewed_content_keys
             ):
                 skipped_viewed += 1
+                continue
+            if float(item.relevance_score or 0.0) < self._admission_threshold_for_item(item):
+                skipped_low_score += 1
                 continue
             franchise_key = (item.franchise_key or "").strip().lower()
             if franchise_key and _POOL_FRANCHISE_QUOTA > 0:
@@ -2797,6 +2816,12 @@ class ContentDiscoveryEngine:
             logger.info(
                 "pool cache skipped %d recently viewed item(s) before writing content_cache",
                 skipped_viewed,
+            )
+
+        if skipped_low_score:
+            logger.info(
+                "pool cache skipped %d item(s) below effective admission threshold",
+                skipped_low_score,
             )
 
         if skipped_franchise:

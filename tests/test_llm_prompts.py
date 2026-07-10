@@ -522,6 +522,37 @@ def test_batch_content_evaluation_prompt_orders_profile_before_source_and_batch(
     assert user_prompt.index("<source_context>") < user_prompt.index("<content_batch>")
 
 
+def test_content_evaluation_prompts_only_allow_explore_scoring_exception() -> None:
+    single_system = build_content_evaluation_prompt(
+        profile_summary={"interests": ["音乐", "生活方式"]},
+        content_summary={"title": "匿名热门游戏视频"},
+        source_context="trending",
+        source_platform="youtube",
+    )[0]["content"]
+    batch_system = build_batch_content_evaluation_prompt(
+        profile_summary={"interests": ["音乐", "生活方式"]},
+        content_items=[
+            {
+                "content_id": "yt-gaming",
+                "title": "匿名热门游戏视频",
+                "source_strategy": "yt_trending",
+            }
+        ],
+        source_context="mixed",
+        source_platform="mixed",
+    )[0]["content"]
+
+    for system in (single_system, batch_system):
+        assert "除 explore 外，发现路径和平台只提供上下文，不得影响评分标准" in system
+        assert "不得因为内容热门、来自推荐流、命中搜索词、沿相关推荐获得" in system
+        assert "明显不匹配画像的内容必须允许低于 admission 门槛" in system
+        assert "只有 explore 允许主题陌生" in system
+        assert "trending 基础分 >= 0.6" not in system
+        assert "trending 来源的内容已经过大众验证" not in system
+        assert "search 要求高度匹配" not in system
+        assert "related_chain 允许适度偏移" not in system
+
+
 def test_batch_content_evaluation_prompt_allows_per_item_platforms() -> None:
     messages = build_batch_content_evaluation_prompt(
         profile_summary={"interests": ["systems"]},

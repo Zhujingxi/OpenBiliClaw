@@ -586,10 +586,11 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 │      Skills · Dialogue · Runtime scheduling      │
 ├─────────┬──────────┬───────────┬───────────────┤
 │  Soul   │  Memory  │ Discovery │ Recommendation │
-│ Engine  │  System  │  Engine   │     Engine     │
+│ Engine  │  System  │Discovery +│     Engine     │
+│         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
 │   LLM adapters · Source adapters (SourceAdapter) │
-│   Local SQLite (events · pool · recs · chat)     │
+│   Unified admission · SQLite (events · pool · recs)│
 └────────────────────────────────────────────────┘
 ```
 

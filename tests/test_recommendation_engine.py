@@ -143,6 +143,7 @@ def _seed_visible(db: Database, bvid: str, **kwargs: Any) -> None:
     kwargs.setdefault("pool_topic_label", "测试主题")
     kwargs.setdefault("style_key", "tutorial")
     kwargs.setdefault("topic_group", "测试分组")
+    kwargs.setdefault("relevance_score", 0.9)
     db.cache_content(bvid, **kwargs)
 
 

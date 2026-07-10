@@ -330,6 +330,8 @@ from openbiliclaw.recommendation.curator import PoolCurator
 | `source_monotony` | 0.15 |
 | `serendipity` | 0.20 |
 
+`serendipity` 加分只对 `explore` 来源发放（满额 1.0）。其余任何 strategy —— 包括 `trending` —— 一律为 0.0：来源只是上下文，不能凭发现路径白拿 rec_score（issue #90）。
+
 #### 关键数据结构
 
 **FeedbackSignals**：追踪用户反馈信号，包含以下字段：

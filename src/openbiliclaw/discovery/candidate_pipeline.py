@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from openbiliclaw.discovery.admission import effective_admission_threshold
 from openbiliclaw.discovery.candidate_pool import (
     REJECTED_CACHE_ADMISSION,
     REJECTED_FRANCHISE_QUOTA,
@@ -696,9 +697,16 @@ class DiscoveryCandidatePipeline:
         candidate_threshold = self._coerce_threshold(row.get("score_threshold"))
         if candidate_threshold is None:
             candidate_threshold = self._coerce_threshold(payload.get("score_threshold"))
-        if candidate_threshold is not None:
-            return candidate_threshold
-        return self._normalized_admission_min_score()
+        return effective_admission_threshold(
+            self._strategy_for(row, payload),
+            self._normalized_admission_min_score(),
+            candidate_threshold,
+        )
+
+    @staticmethod
+    def _strategy_for(row: dict[str, Any], payload: dict[str, Any]) -> str:
+        strategy = row.get("source_strategy") or payload.get("source_strategy") or ""
+        return str(strategy).strip().lower()
 
     def _max_pending_per_source(self) -> int | None:
         return discovery_candidate_pending_cap(int(self.pool_target_count))

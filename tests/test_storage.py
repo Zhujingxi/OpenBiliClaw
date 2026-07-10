@@ -93,6 +93,7 @@ class TestDatabase:
             assert row is not None
             assert row["title"] == "Test Video"
             assert row["up_name"] == "TestUP"
+            assert row["relevance_score"] == 0.0
 
             db.close()
 
@@ -1689,6 +1690,21 @@ class TestDatabase:
             items = db.get_pool_candidates(limit=10)
 
             assert [item["bvid"] for item in items] == ["BV1HIGH"]
+            assert db.count_pool_candidates() == 1
+
+            db.close()
+
+    def test_pool_serving_allows_only_exact_explore_relaxed_floor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            _seed_visible(db, "BVEXP", source="explore", relevance_score=0.58)
+            _seed_visible(db, "BVTREND", source="trending", relevance_score=0.58)
+            _seed_visible(db, "BVLOOKALIKE", source="explore-backfill", relevance_score=0.58)
+
+            assert [row["bvid"] for row in db.get_pool_candidates(limit=10)] == ["BVEXP"]
+            assert [row["bvid"] for row in db.get_unrecommended_content(limit=10)] == ["BVEXP"]
             assert db.count_pool_candidates() == 1
 
             db.close()

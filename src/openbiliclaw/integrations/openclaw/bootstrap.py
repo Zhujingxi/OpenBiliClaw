@@ -10,6 +10,7 @@ from openbiliclaw.bilibili.api import BilibiliAPIClient
 from openbiliclaw.bilibili.auth import resolve_runtime_cookie
 from openbiliclaw.config import Config, load_config
 from openbiliclaw.config import llm_concurrency_from_config as _llm_concurrency_from_config
+from openbiliclaw.discovery.candidate_pipeline import DiscoveryCandidatePipeline
 from openbiliclaw.discovery.engine import ContentDiscoveryEngine
 from openbiliclaw.discovery.strategies.strategies import (
     ExploreStrategy,
@@ -186,6 +187,21 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
     discovery_engine.register_strategy(related_strategy)
     discovery_engine.register_strategy(explore_strategy)
 
+    discovery_cfg = getattr(config, "discovery", None)
+    admission_min_score = float(getattr(discovery_cfg, "admission_min_score", 0.60) or 0.60)
+    set_admission_min_score = getattr(database, "set_admission_min_score", None)
+    if callable(set_admission_min_score):
+        set_admission_min_score(admission_min_score)
+    candidate_pipeline = DiscoveryCandidatePipeline(
+        database=database,
+        discovery_engine=discovery_engine,
+        pool_target_count=config.scheduler.pool_target_count,
+        admission_min_score=admission_min_score,
+        min_eval_batch_size=8,
+        max_eval_wait_seconds=120,
+        candidate_fetch_oversample=4,
+    )
+
     from openbiliclaw.runtime.douyin_producer import build_douyin_discovery_producer
 
     presence = PresenceTracker()
@@ -194,6 +210,7 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         database=database,
         soul_engine=soul_engine,
         discovery_engine=discovery_engine,
+        candidate_pipeline=candidate_pipeline,
     )
     youtube_producer = build_youtube_discovery_producer(
         config=config,
@@ -203,6 +220,7 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         llm_service=llm_service,
         memory=cast("Any", memory_manager),
         concurrency=concurrency,
+        candidate_pipeline=candidate_pipeline,
     )
     runtime_controller = ContinuousRefreshController(
         memory_manager=memory_manager,
@@ -210,6 +228,7 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         soul_engine=soul_engine,
         discovery_engine=discovery_engine,
         recommendation_engine=recommendation_engine,
+        discovery_candidate_pipeline=candidate_pipeline,
         pool_target_count=config.scheduler.pool_target_count,
         pool_source_shares=effective_pool_source_shares(config),
         signal_event_threshold=int(getattr(config.scheduler, "signal_event_threshold", 6)),

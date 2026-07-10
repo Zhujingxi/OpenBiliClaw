@@ -844,3 +844,19 @@ def test_get_pool_candidates_default_min_relevance_is_055(tmp_path: Path) -> Non
     bvids = {r["bvid"] for r in rows}
     assert "BV1OVER" in bvids
     assert "BV1HALF" not in bvids
+
+
+def test_delight_serving_uses_exact_explore_relaxed_admission_floor(tmp_path: Path) -> None:
+    database = _make_database(tmp_path)
+    for bvid, source in (("BVEXP", "explore"), ("BVTREND", "trending")):
+        database.cache_content(bvid, title=bvid, source=source, relevance_score=0.58)
+        database.update_delight_score(
+            bvid,
+            delight_score=0.90,
+            delight_reason="值得看看",
+            delight_hook="新方向",
+        )
+
+    assert [
+        row["bvid"] for row in database.get_delight_candidates(min_delight_score=0.75, limit=10)
+    ] == ["BVEXP"]
