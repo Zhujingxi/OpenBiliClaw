@@ -8,6 +8,7 @@
 
 后端源码走 `backend-v0.3.161`，浏览器插件走 `extension-v0.3.161`，桌面安装包走 `desktop-v0.3.161`。
 
+- **guided init 向量模型自愈与 popup 进度对齐**：从遗留分支 `db726daa` 手工移植仍有效能力；仅当本机 loopback Ollama 诊断为 `model_missing` / `model_broken` 且磁盘空间充足时，`POST /api/init` 才会单飞自动拉取并在 409 detail 返回实时进度；popup init checklist 现在显示进度条与修复按钮。`describe_llm_failure` 同步补齐 auth/401 与 quota/429 可操作说明；`bc2dc983` 已用 LLM 层翻译取代遗留分支的 reason-code 分类结构，因此后者未移植。四表面契约：popup 与已有 desktop Web `/setup/` 覆盖图形进度，CLI init 沿用日志输出，移动 Web 无 init 面板，后两者不适用。
 - chore(dev): scripts/release.py 版本一致性检查/升版工具 + release/writing-specs 项目技能 + CLAUDE.md 防坑规则（自提交史提炼）
 - ci: PR/main CI 新增 `scripts/release.py --check` 版本一致性强制拦截（stdlib-only，装依赖前秒级 fail-fast）
 - **Responses API 无状态兼容修复（issue #95）**：`api_flavor="responses"` 此前未在请求体顶层显式发送 `store`，导致由 ChatGPT/Codex Responses 端点驱动的兼容网关拒绝请求；现在官方 OpenAI 与 OpenAI-compatible provider 的每个 Responses 请求都固定发送 `store=false`，保持无状态且不改变 Chat Completions、配置或既有重试行为。新增 provider 回归断言，锁定该请求字段。
