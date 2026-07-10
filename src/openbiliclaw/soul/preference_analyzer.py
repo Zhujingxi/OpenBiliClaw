@@ -20,7 +20,11 @@ from openbiliclaw.soul.event_filters import filter_events_by_satisfaction
 from openbiliclaw.soul.taxonomy import SupportsEmbed, resolve_category
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Awaitable, Callable, Iterable
+
+    # Observer invoked once per completed chunk with (done, total). Purely
+    # observational — see _emit_progress: its failures never abort analysis.
+    ProgressCallback = Callable[[int, int], Awaitable[None]]
 
 logger = logging.getLogger(__name__)
 
@@ -114,12 +118,30 @@ class PreferenceAnalyzer:
                 "PreferenceAnalyzer requires a service with complete_structured_task()."
             )
 
+    @staticmethod
+    async def _emit_progress(
+        callback: ProgressCallback | None, done: int, total: int
+    ) -> None:
+        """Fire a progress observer, swallowing any error at WARNING.
+
+        The observer only watches chunk completion — it must never abort the
+        analysis (init-progress spec invariant 4 / pitfall "will this failure
+        be swallowed").
+        """
+        if callback is None:
+            return
+        try:
+            await callback(done, total)
+        except Exception:
+            logger.warning("preference progress_callback raised; ignoring", exc_info=True)
+
     async def analyze_events(
         self,
         *,
         events: list[dict[str, object]],
         existing_preference: dict[str, object],
         event_chunk_size: int = 0,
+        progress_callback: ProgressCallback | None = None,
     ) -> dict[str, object]:
         """Run structured extraction and merge the result with existing preference state.
 
@@ -139,6 +161,7 @@ class PreferenceAnalyzer:
                 events=events,
                 existing_preference=existing_preference,
                 chunk_size=event_chunk_size,
+                progress_callback=progress_callback,
             )
 
         whole_batch_prompt = build_preference_analysis_prompt(
@@ -160,11 +183,15 @@ class PreferenceAnalyzer:
                 events=events,
                 existing_preference=existing_preference,
                 chunk_size=initial_chunk_size,
+                progress_callback=progress_callback,
             )
-        return await self._analyze_events_single(
+        result = await self._analyze_events_single(
             events=events,
             existing_preference=existing_preference,
         )
+        # Un-chunked path has a single natural completion point.
+        await self._emit_progress(progress_callback, 1, 1)
+        return result
 
     def _maybe_filter_events(
         self,
@@ -373,6 +400,7 @@ class PreferenceAnalyzer:
         events: list[dict[str, object]],
         existing_preference: dict[str, object],
         chunk_size: int,
+        progress_callback: ProgressCallback | None = None,
     ) -> dict[str, object]:
         """Split events into bounded concurrent chunk batches, then fold."""
         import asyncio as _asyncio
@@ -507,11 +535,27 @@ class PreferenceAnalyzer:
                     return []
                 return await _split_or_compact_chunk(chunk)
 
+        # Each top-level chunk completing is a natural progress point. A shared
+        # counter (bumped between the resilient run and the callback await, with
+        # no interleaving await) yields a strictly increasing done 1..N even
+        # under concurrent gather.
+        total_chunks = len(chunks)
+        done_chunks = 0
+
+        async def _run_and_report(
+            chunk: list[dict[str, object]],
+        ) -> list[tuple[dict[str, object], dict[str, object]]]:
+            nonlocal done_chunks
+            result = await _run_chunk_resilient(chunk)
+            done_chunks += 1
+            await self._emit_progress(progress_callback, done_chunks, total_chunks)
+            return result
+
         outcome_groups: list[list[tuple[dict[str, object], dict[str, object]]]] = []
         for batch_start in range(0, len(chunks), MAX_CONCURRENT_PREFERENCE_CHUNKS):
             batch = chunks[batch_start : batch_start + MAX_CONCURRENT_PREFERENCE_CHUNKS]
             outcome_groups.extend(
-                await _asyncio.gather(*(_run_chunk_resilient(chunk) for chunk in batch))
+                await _asyncio.gather(*(_run_and_report(chunk) for chunk in batch))
             )
         outcomes = [item for group in outcome_groups for item in group]
 

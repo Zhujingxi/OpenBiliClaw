@@ -1389,3 +1389,107 @@ def test_normalize_style_clean_payload_logs_no_warning(
             }
         )
     assert [rec for rec in caplog.records if rec.levelname == "WARNING"] == []
+
+
+# ── init-progress-visibility Phase 1: analyze_events progress_callback ────────
+
+
+@pytest.mark.asyncio
+async def test_chunked_analysis_reports_progress_per_chunk() -> None:
+    from openbiliclaw.soul.preference_analyzer import PreferenceAnalyzer
+
+    service = FakeStructuredService(
+        LLMResponse(content='{"interests": []}', provider="openai")
+    )
+    analyzer = PreferenceAnalyzer(service)
+    calls: list[tuple[int, int]] = []
+
+    async def _cb(done: int, total: int) -> None:
+        calls.append((done, total))
+
+    await analyzer.analyze_events(
+        events=[{"event_type": "view", "title": f"t{i}"} for i in range(8)],
+        existing_preference={},
+        event_chunk_size=1,
+        progress_callback=_cb,
+    )
+
+    # Exactly one report per chunk, done strictly increasing 1..8 against total 8.
+    assert calls == [(i, 8) for i in range(1, 9)]
+
+
+@pytest.mark.asyncio
+async def test_single_path_reports_one_progress_tick() -> None:
+    from openbiliclaw.soul.preference_analyzer import PreferenceAnalyzer
+
+    service = FakeStructuredService(
+        LLMResponse(content='{"interests": []}', provider="openai")
+    )
+    analyzer = PreferenceAnalyzer(service)
+    calls: list[tuple[int, int]] = []
+
+    async def _cb(done: int, total: int) -> None:
+        calls.append((done, total))
+
+    await analyzer.analyze_events(
+        events=[{"event_type": "view", "title": "solo"}],
+        existing_preference={},
+        progress_callback=_cb,
+    )
+
+    # Un-chunked path fires a single (1, 1) completion tick (locked semantics).
+    assert calls == [(1, 1)]
+
+
+@pytest.mark.asyncio
+async def test_progress_callback_error_does_not_break_analysis() -> None:
+    from openbiliclaw.soul.preference_analyzer import PreferenceAnalyzer
+
+    service = FakeStructuredService(
+        LLMResponse(content='{"interests": []}', provider="openai")
+    )
+    analyzer = PreferenceAnalyzer(service)
+
+    async def _boom(done: int, total: int) -> None:
+        raise RuntimeError("observer down")
+
+    # Callback failure is swallowed (WARNING) — analysis still returns a result.
+    result = await analyzer.analyze_events(
+        events=[{"event_type": "view", "title": f"t{i}"} for i in range(3)],
+        existing_preference={},
+        event_chunk_size=1,
+        progress_callback=_boom,
+    )
+    assert isinstance(result, dict)
+
+
+@pytest.mark.asyncio
+async def test_engine_analyze_events_forwards_progress_callback() -> None:
+    """SoulEngine.analyze_events threads the callback down to the analyzer."""
+    from unittest.mock import AsyncMock
+
+    from openbiliclaw.soul.engine import SoulEngine
+
+    engine = SoulEngine.__new__(SoulEngine)
+    engine._preference_analyzer = AsyncMock()  # type: ignore[attr-defined]
+    engine._preference_analyzer.analyze_events = AsyncMock(return_value={})
+    engine._init_cognition_context = {}  # type: ignore[attr-defined]
+
+    class _Layer:
+        data: dict[str, object] = {}
+
+        def save(self) -> None:
+            pass
+
+    class _Mem:
+        def get_layer(self, name: str) -> _Layer:
+            return _Layer()
+
+    engine._memory = _Mem()  # type: ignore[attr-defined]
+
+    async def _cb(done: int, total: int) -> None:
+        pass
+
+    await engine.analyze_events([{"event_type": "view", "title": "x"}], progress_callback=_cb)
+    kwargs = engine._preference_analyzer.analyze_events.await_args.kwargs
+    assert kwargs["progress_callback"] is _cb

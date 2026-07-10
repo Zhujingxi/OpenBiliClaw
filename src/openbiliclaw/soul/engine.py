@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     from openbiliclaw.llm.service import ModuleOverride, SupportsComplete
     from openbiliclaw.memory.manager import MemoryManager
@@ -268,6 +268,7 @@ class SoulEngine:
         events: list[dict[str, Any]],
         *,
         event_chunk_size: int = 0,
+        progress_callback: Callable[[int, int], Awaitable[None]] | None = None,
     ) -> None:
         """Analyze new behavioral events and update all memory layers.
 
@@ -295,6 +296,7 @@ class SoulEngine:
             events=events,
             existing_preference=preference_layer.data,
             event_chunk_size=event_chunk_size,
+            progress_callback=progress_callback,
         )
         init_cognition = updated_preference.pop(INIT_COGNITION_CONTEXT_KEY, None)
         self._init_cognition_context = init_cognition if isinstance(init_cognition, dict) else {}
