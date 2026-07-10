@@ -69,7 +69,8 @@ output/
 # session memory + project plans (Claude Code). Per-developer, never
 # part of the project source.
 .cc-connect/
-.claude/
+.claude/*
+!.claude/skills/
 
 # Local dev caches
 .deps/
