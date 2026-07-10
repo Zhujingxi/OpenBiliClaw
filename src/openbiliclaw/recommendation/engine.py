@@ -309,7 +309,9 @@ class RecommendationEngine:
             self._last_served_bvids = frozenset()
             return []
 
-        candidates = self._load_pool_candidates(limit=max(limit * multiplier, 40))
+        candidates = self._load_pool_candidates(
+            limit=max(limit * multiplier, 40) + len(excluded_bvids)
+        )
         loaded_count = len(candidates)
         candidates = self._apply_platform_floor(candidates)
         if excluded_bvids:
@@ -1577,13 +1579,22 @@ class RecommendationEngine:
         self,
         *,
         profile: SoulProfile,
+        excluded_bvids: list[str] | None = None,
         limit: int = 5,
     ) -> list[Recommendation]:
         """Instantly pick a new batch from the discovery pool.
 
         Delegates to :meth:`serve` with ``expression_mode="precomputed"``.
         """
-        return await self.serve(profile, limit=limit, expression_mode="precomputed")
+        excluded = frozenset(
+            bvid.strip() for bvid in (excluded_bvids or []) if bvid and bvid.strip()
+        )
+        return await self.serve(
+            profile,
+            limit=limit,
+            excluded_bvids=excluded,
+            expression_mode="precomputed",
+        )
 
     async def append_recommendations(
         self,

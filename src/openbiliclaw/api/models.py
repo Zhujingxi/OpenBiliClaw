@@ -145,6 +145,12 @@ class RecommendationReshuffleResponse(BaseModel):
     items: list[RecommendationOut]
 
 
+class RecommendationReshuffleIn(BaseModel):
+    """Optional visible-card exclusions for a reshuffle request."""
+
+    excluded_bvids: list[str] = Field(default_factory=list)
+
+
 class RecommendationAppendIn(BaseModel):
     """Request payload for appending another recommendation page."""
 

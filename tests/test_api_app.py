@@ -4423,9 +4423,11 @@ class TestBackendAPI:
                 self,
                 *,
                 profile: object,
+                excluded_bvids: list[str],
                 limit: int = 10,
             ) -> list[object]:
                 assert profile == {"profile": "ok"}
+                assert excluded_bvids == []
                 assert limit == 10
                 self.runtime.pool_available_count = 0
                 from openbiliclaw.discovery.engine import DiscoveredContent
@@ -4672,8 +4674,13 @@ class TestBackendAPI:
                 self.calls = 0
 
             async def reshuffle_recommendations(
-                self, *, profile: object, limit: int = 10
+                self,
+                *,
+                profile: object,
+                excluded_bvids: list[str],
+                limit: int = 10,
             ) -> list[object]:
+                assert excluded_bvids == []
                 self.calls += 1
                 raise AssertionError("empty pool should not call reshuffle")
 
@@ -12177,3 +12184,59 @@ def test_interest_pending_excludes_deferred_probes(tmp_path) -> None:
     domains = {i["domain"] for i in items}
     assert "仍活跃" in domains
     assert "已搁置" not in domains
+
+
+def test_reshuffle_endpoint_forwards_visible_card_exclusions() -> None:
+    from fastapi.testclient import TestClient
+
+    class FakeRuntimeController:
+        pool_available_count = 3
+        event_hub = None
+
+        def get_runtime_status(self) -> dict[str, object]:
+            return {
+                "initialized": True,
+                "pool_available_count": self.pool_available_count,
+                "pool_pending_count": 0,
+            }
+
+    class FakeSoulEngine:
+        async def get_profile(self) -> dict[str, object]:
+            return {"profile": "ok"}
+
+    class FakeRecommendationEngine:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, list[str] | None, int]] = []
+
+        async def reshuffle_recommendations(
+            self,
+            *,
+            profile: object,
+            limit: int = 10,
+            excluded_bvids: list[str] | None = None,
+        ) -> list[object]:
+            self.calls.append((profile, excluded_bvids, limit))
+            return []
+
+    engine = FakeRecommendationEngine()
+    app = create_app(
+        memory_manager=object(),
+        database=object(),
+        soul_engine=FakeSoulEngine(),
+        recommendation_engine=engine,
+        runtime_controller=FakeRuntimeController(),
+    )
+    client = TestClient(app)
+
+    no_body = client.post("/api/recommendations/reshuffle")
+    with_exclusions = client.post(
+        "/api/recommendations/reshuffle",
+        json={"excluded_bvids": ["BV1VISIBLE", " BV2VISIBLE ", ""]},
+    )
+
+    assert no_body.status_code == 200
+    assert with_exclusions.status_code == 200
+    assert engine.calls == [
+        ({"profile": "ok"}, [], 10),
+        ({"profile": "ok"}, ["BV1VISIBLE", "BV2VISIBLE"], 10),
+    ]

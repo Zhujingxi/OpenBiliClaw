@@ -4165,41 +4165,40 @@
       }
     }
 
-    async function dismissVisibleRecommendationsBeforeReshuffle() {
-      const visibleItems = filteredVideos().filter((item) => item?.id != null);
-      if (!visibleItems.length) return { total: 0, ok: 0, failed: 0 };
-      showToast(`正在忽略当前显示的 ${visibleItems.length} 张推荐…`);
-      const results = await Promise.allSettled(visibleItems.map((item) => submitFeedback(item, "dismiss")));
-      const dismissedKeys = new Set();
-      results.forEach((result, index) => {
-        if (result.status === "fulfilled") dismissedKeys.add(recommendationKey(visibleItems[index]));
+    function dismissVisibleRecommendationsBeforeReshuffle(visibleItems) {
+      const submissions = visibleItems.map((item) => submitFeedback(item, "dismiss"));
+      void Promise.allSettled(submissions).then((results) => {
+        const failed = results.filter((result) => result.status === "rejected").length;
+        if (failed) showToast(`${failed} 张忽略提交失败（不影响当前列表）`);
       });
-      if (dismissedKeys.size) {
-        state.videos = state.videos.filter((item) => !dismissedKeys.has(recommendationKey(item)));
-      }
-      return { total: visibleItems.length, ok: dismissedKeys.size, failed: visibleItems.length - dismissedKeys.size };
     }
 
     async function reshuffle() {
       const reshuffleButton = $("#reshuffleBtn");
       const dismissToggle = $("#dismissOnReshuffleToggle");
+      const visibleForExclusion = filteredVideos().filter((item) => item?.id != null);
+      const visibleKeys = new Set(visibleForExclusion.map((item) => recommendationKey(item)));
       if (reshuffleButton) reshuffleButton.disabled = true;
       if (dismissToggle) dismissToggle.disabled = true;
       try {
-        const dismissResult = state.dismissOnReshuffle ? await dismissVisibleRecommendationsBeforeReshuffle() : null;
-        const payload = await requestJson(ENDPOINTS.reshuffle, { method: "POST" });
-        if (payload?.items?.length) {
-          state.videos = normalizeRecommendationList(payload.items);
+        const excludedBvids = visibleForExclusion.map((item) => item.bvid).filter(Boolean);
+        const payload = await requestJson(ENDPOINTS.reshuffle, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ excluded_bvids: excludedBvids })
+        });
+        const fresh = payload?.items?.length
+          ? normalizeRecommendationList(payload.items).filter((item) => !visibleKeys.has(recommendationKey(item)))
+          : [];
+        if (fresh.length) {
+          state.videos = fresh;
           renderAll();
-          if (dismissResult?.ok) {
-            const failedText = dismissResult.failed ? `，${dismissResult.failed} 张忽略失败` : "";
-            showToast(`已忽略 ${dismissResult.ok} 张当前推荐并换一批${failedText}`);
-          } else {
-            showToast("已换一批推荐");
+          if (state.dismissOnReshuffle && visibleForExclusion.length) {
+            dismissVisibleRecommendationsBeforeReshuffle(visibleForExclusion);
           }
+          showToast("已换一批推荐");
         } else {
-          renderAll();
-          showToast("换一批失败：请检查后端连接");
+          showToast("暂时没有更多新推荐了");
         }
       } finally {
         if (reshuffleButton) reshuffleButton.disabled = false;

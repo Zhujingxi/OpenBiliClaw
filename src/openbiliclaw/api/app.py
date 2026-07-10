@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import quote, urlparse
 
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
@@ -99,6 +99,7 @@ from openbiliclaw.api.models import (
     RecommendationListResponse,
     RecommendationOut,
     RecommendationRefreshResponse,
+    RecommendationReshuffleIn,
     RecommendationReshuffleResponse,
     RedditCookieIn,
     RedditCookieResponse,
@@ -4294,7 +4295,9 @@ def create_app(
         task.add_done_callback(_fire_and_forget_tasks.discard)
 
     @app.post("/api/recommendations/reshuffle", response_model=RecommendationReshuffleResponse)
-    async def reshuffle_recommendations() -> RecommendationReshuffleResponse:
+    async def reshuffle_recommendations(
+        payload: RecommendationReshuffleIn | None = Body(default=None),
+    ) -> RecommendationReshuffleResponse:
         if ctx.recommendation_engine is None or ctx.soul_engine is None:
             return RecommendationReshuffleResponse(items=[])
         if _pool_available_count() == 0:
@@ -4304,7 +4307,18 @@ def create_app(
             profile = await ctx.soul_engine.get_profile()
         except Exception:
             return RecommendationReshuffleResponse(items=[])
-        items = await ctx.recommendation_engine.reshuffle_recommendations(profile=profile, limit=10)
+        excluded_bvids = list(
+            dict.fromkeys(
+                bvid.strip()
+                for bvid in (payload.excluded_bvids if payload is not None else [])
+                if bvid and bvid.strip()
+            )
+        )
+        items = await ctx.recommendation_engine.reshuffle_recommendations(
+            profile=profile,
+            excluded_bvids=excluded_bvids,
+            limit=10,
+        )
         await _publish_pool_status_snapshot()
         await _trigger_replenishment_if_needed()
         return RecommendationReshuffleResponse(items=_serialize_recommendation_items(items))

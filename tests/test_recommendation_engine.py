@@ -3477,3 +3477,87 @@ def test_list_servable_pool_platforms_returns_distinct_tokens() -> None:
         )
 
         assert db.list_servable_pool_platforms() == ["bilibili", "zhihu"]
+
+
+@pytest.mark.asyncio
+async def test_reshuffle_exclusions_refill_beyond_the_old_candidate_window() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        for index in range(60):
+            _seed_visible(
+                db,
+                f"BV{index:04d}",
+                title=f"候选 {index}",
+                up_name=f"UP {index}",
+                source="search",
+                relevance_score=1.0 - index / 1000,
+                relevance_reason=f"候选 {index} 的理由。",
+                pool_expression=f"候选 {index} 的预生成文案。",
+                pool_topic_label=f"主题 {index}",
+                topic_group=f"主题组 {index}",
+            )
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+        excluded = frozenset(f"BV{index:04d}" for index in range(40))
+
+        recommendations = await engine.serve(
+            _build_profile(),
+            limit=10,
+            excluded_bvids=excluded,
+            expression_mode="precomputed",
+        )
+
+        assert len(recommendations) == 10
+        assert not ({item.content.bvid for item in recommendations} & excluded)
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_serve_final_exclusion_blocks_platform_floor_reintroduction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+        allowed = DiscoveredContent(
+            bvid="BV1ALLOWED",
+            title="允许候选",
+            up_name="UP A",
+            source_strategy="search",
+            relevance_score=0.8,
+            relevance_reason="允许候选理由。",
+            pool_expression="允许候选文案。",
+            pool_topic_label="允许主题",
+        )
+        blocked = DiscoveredContent(
+            bvid="BV1BLOCKED",
+            title="应排除候选",
+            up_name="UP B",
+            source_strategy="search",
+            relevance_score=0.9,
+            relevance_reason="应排除候选理由。",
+            pool_expression="应排除候选文案。",
+            pool_topic_label="排除主题",
+        )
+        monkeypatch.setattr(
+            engine,
+            "_pool_readiness_counts",
+            lambda: {"available": 2, "raw": 2, "pending": 0},
+        )
+        monkeypatch.setattr(engine, "_load_pool_candidates", lambda *, limit: [allowed])
+        monkeypatch.setattr(
+            engine,
+            "_apply_platform_floor",
+            lambda candidates: [blocked, *candidates],
+        )
+
+        recommendations = await engine.serve(
+            _build_profile(),
+            limit=1,
+            excluded_bvids=frozenset({"BV1BLOCKED"}),
+            expression_mode="precomputed",
+        )
+
+        assert [item.content.bvid for item in recommendations] == ["BV1ALLOWED"]
+        db.close()

@@ -311,3 +311,18 @@ def test_desktop_append_more_renders_before_cover_decode() -> None:
     assert render_index < warm_index
     assert "await warmCoverImages(freshItems" not in body
     assert "void warmCoverImages(freshItems" in body
+
+
+def test_desktop_reshuffle_swaps_before_background_dismiss() -> None:
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+    start = app_js.index("async function reshuffle()")
+    end = app_js.index("\n    async function appendMore()", start)
+    body = app_js[start:end]
+
+    assert "visibleForExclusion" in body
+    assert "excluded_bvids" in body
+    assert "state.dismissOnReshuffle" in body
+    assert "await dismissVisibleRecommendationsBeforeReshuffle" not in body
+    swap_index = body.index("state.videos = fresh;")
+    dismiss_index = body.index("dismissVisibleRecommendationsBeforeReshuffle(")
+    assert swap_index < dismiss_index
