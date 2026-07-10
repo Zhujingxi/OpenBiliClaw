@@ -69,6 +69,9 @@ const COVER_PRELOAD_WAIT_TIMEOUT_MS = 3000;
 const AUTO_APPEND_ROOT_MARGIN = "700px 0px 1400px 0px";
 const SCROLL_PREHEAT_LOOKAHEAD = 16;
 const SCROLL_PREHEAT_ROOT_MARGIN = "0px 0px 2400px 0px";
+// Bound the observer to the mobile quick-read budget so failed history loads
+// cannot leave a page-lifetime DOM watcher behind.
+const CHAT_INPUT_FOCUS_TIMEOUT_MS = 5000;
 const warmedCoverUrls = new Set();
 const decodedCoverUrls = new Set();
 const warmingImages = new Map();
@@ -165,6 +168,37 @@ function renderInto(container, fn) {
 }
 
 // ── Recommendation Header ───────────────────────────────────
+export function focusChatInputWhenReady({ timeoutMs = CHAT_INPUT_FOCUS_TIMEOUT_MS } = {}) {
+  const focusInput = () => {
+    const input = document.getElementById("chat-input");
+    if (!input) return false;
+    input.focus();
+    return true;
+  };
+
+  if (focusInput()) return () => {};
+
+  let active = true;
+  let timeoutId = null;
+  const observer = new MutationObserver(() => {
+    if (!active || !focusInput()) return;
+    cleanup();
+  });
+  function cleanup() {
+    if (!active) return;
+    active = false;
+    observer.disconnect();
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
+  }
+
+  observer.observe(document.body, { childList: true, subtree: true });
+  timeoutId = setTimeout(cleanup, timeoutMs);
+  return cleanup;
+}
+
 function renderRecommendationHeader() {
   const headerState = getMobileRecommendationHeaderState({
     runtimeStatus: state.runtimeStatus,
@@ -209,7 +243,7 @@ function renderRecommendationHeader() {
     }
     if (target === "chat") {
       navigateToTab("chat");
-      requestAnimationFrame(() => document.getElementById("chat-input")?.focus());
+      focusChatInputWhenReady();
     }
   });
   header.appendChild(correction);
