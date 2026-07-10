@@ -285,4 +285,3 @@ cd extension && npm test && npm run typecheck && npm run build
 - 三端推荐区都能就地进入画像编辑或自由文本聊天。
 - 卡片反馈仍保持乐观 UI、10 秒撤销和后台学习，不新增请求内 LLM 延迟。
 - 定向测试、Ruff、MyPy、完整 Python 测试、插件测试/typecheck/build 全部通过。
-
