@@ -202,6 +202,7 @@ def test_keyword_inspiration_preview_threads_persist_axes(
     monkeypatch.setattr(cli_module, "_build_registry", lambda: object(), raising=False)
     monkeypatch.setattr(cli_module, "_build_usage_recorder", lambda: None, raising=False)
     monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine(), raising=False)
+    monkeypatch.setattr(cli_module, "_build_bilibili_client", lambda: object(), raising=False)
     monkeypatch.setattr(
         "openbiliclaw.llm.service.LLMService",
         FakeLLMService,
@@ -299,6 +300,7 @@ def test_keyword_inspiration_preview_one_shot_overrides_apply_on_derived_params(
     monkeypatch.setattr(cli_module, "_build_registry", lambda: object(), raising=False)
     monkeypatch.setattr(cli_module, "_build_usage_recorder", lambda: None, raising=False)
     monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine(), raising=False)
+    monkeypatch.setattr(cli_module, "_build_bilibili_client", lambda: object(), raising=False)
     monkeypatch.setattr("openbiliclaw.llm.service.LLMService", FakeLLMService, raising=False)
     monkeypatch.setattr(
         "openbiliclaw.llm.service.module_overrides_from_config",
