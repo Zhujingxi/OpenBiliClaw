@@ -45,8 +45,10 @@ import {
   describeInitStartError,
   embeddingRepairStartAccepted,
   initProgressView,
+  INIT_EXPECTATION_HINT,
   INIT_SOURCE_OPTIONS,
   INIT_SOURCE_LOGIN_HINT,
+  stalenessView,
 } from "./popup-init-control.js";
 import {
   getBackendBaseUrl,
@@ -189,6 +191,7 @@ const elements = {
   initProgress: document.getElementById("initProgress"),
   initProgressBar: document.getElementById("initProgressBar"),
   initProgressLabel: document.getElementById("initProgressLabel"),
+  initStallHint: document.getElementById("initStallHint"),
   initStartBtn: document.getElementById("initStartBtn"),
   initStartReason: document.getElementById("initStartReason"),
   list: document.getElementById("recommendationList"),
@@ -982,9 +985,19 @@ function renderInitPanelIdle() {
     li.className = "init-hint-row";
     li.textContent = "点「开始初始化」会先检查 AI 服务 / 向量模型，以及所选平台的登录状态，通过才开始。";
     elements.initChecklist.append(li);
+    // Expectation management (init-progress Phase 2): tell the user upfront
+    // how long the whole run typically takes.
+    const expectation = document.createElement("li");
+    expectation.className = "init-hint-row";
+    expectation.textContent = INIT_EXPECTATION_HINT;
+    elements.initChecklist.append(expectation);
   }
   if (elements.initProgress instanceof HTMLElement) {
     elements.initProgress.hidden = true;
+  }
+  if (elements.initStallHint instanceof HTMLElement) {
+    elements.initStallHint.hidden = true;
+    elements.initStallHint.classList.remove("stale");
   }
   _setInitStartButton("开始初始化", true);
   _setInitReason("");
@@ -1014,6 +1027,22 @@ function renderInitProgress(status) {
         : progress.active
           ? `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`
           : "初始化完成！";
+    }
+  }
+  // Liveness line under the bar: "● 进行中 (+ typical stage duration)" while
+  // the backend keeps writing; amber stall copy after >90s of silence.
+  if (elements.initStallHint instanceof HTMLElement) {
+    if (progress.active) {
+      const staleness = stalenessView(status);
+      const text = staleness.fresh
+        ? [staleness.text, progress.etaText].filter(Boolean).join(" · ")
+        : staleness.text;
+      elements.initStallHint.textContent = text;
+      elements.initStallHint.classList.toggle("stale", !staleness.fresh);
+      elements.initStallHint.hidden = !text;
+    } else {
+      elements.initStallHint.hidden = true;
+      elements.initStallHint.classList.remove("stale");
     }
   }
   if (progress.active) {

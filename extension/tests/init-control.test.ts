@@ -487,3 +487,215 @@ test("embedding row becomes a hard prereq when the backend requires it", () => {
   assert.equal(softRow?.hard, false);
   assert.equal(softRow?.label, "向量模型可用（推荐，非必须）");
 });
+
+// ── init-progress-visibility Phase 2: intra-stage fraction / clamp / staleness ──
+
+import {
+  INIT_EXPECTATION_HINT,
+  INIT_STALL_THRESHOLD_SECONDS,
+  resetInitProgressViewState,
+  stageEtaText,
+  stalenessView,
+} from "../popup/popup-init-control.js";
+
+function runningStage2Status(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return statusWith({
+    running: true,
+    run_id: (overrides.run_id as string) || "run-frac",
+    current_stage: 2,
+    stages: [
+      { n: 1, label: "拉取数据", status: "ok", reason: null },
+      { n: 2, label: "分析偏好", status: "running", reason: null },
+      { n: 3, label: "生成画像", status: "pending", reason: null },
+      { n: 4, label: "发现内容池", status: "pending", reason: null },
+    ],
+    ...overrides,
+  });
+}
+
+function stage2With(progress: unknown, eta: number | null, runId: string) {
+  return runningStage2Status({
+    run_id: runId,
+    stages: [
+      { n: 1, label: "拉取数据", status: "ok", reason: null, eta_seconds: 90 },
+      { n: 2, label: "分析偏好", status: "running", reason: null, progress, eta_seconds: eta },
+      { n: 3, label: "生成画像", status: "pending", reason: null, eta_seconds: 70 },
+      { n: 4, label: "发现内容池", status: "pending", reason: null, eta_seconds: 120 },
+    ],
+  });
+}
+
+test("pct advances per completed chunk when stage progress is present", () => {
+  resetInitProgressViewState();
+  const t = 1_000_000;
+  const pcts = [0, 2, 4, 8].map(
+    (done) =>
+      initProgressView(stage2With({ done, total: 8, note: `第 ${done}/8 批` }, 180, "run-chunks"), t)
+        .pct,
+  );
+  // done/total fraction: 0/8→25, 2/8→31, 4/8→38, 8/8 capped 0.95→49.
+  assert.deepEqual(pcts, [25, 31, 38, 49]);
+});
+
+test("running stage label appends the sub-progress note", () => {
+  resetInitProgressViewState();
+  const view = initProgressView(
+    stage2With({ done: 3, total: 8, note: "第 3/8 批" }, 180, "run-note"),
+    5_000,
+  );
+  assert.equal(view.stageLabel, "2/4 分析偏好 · 第 3/8 批");
+});
+
+test("eta-based pseudo progress advances with elapsed time and caps at 0.95", () => {
+  resetInitProgressViewState();
+  const t0 = 2_000_000;
+  const status = () => stage2With(null, 180, "run-eta");
+  const first = initProgressView(status(), t0);
+  assert.equal(first.pct, 25); // elapsed 0 → fraction 0
+  const later = initProgressView(status(), t0 + 180_000); // one eta → 1-1/e ≈ .63
+  assert.ok(later.pct >= 40 && later.pct <= 41, `got ${later.pct}`);
+  const capped = initProgressView(status(), t0 + 3_600_000);
+  assert.equal(capped.pct, 49); // (1 + 0.95) / 4 → never claims the stage done
+});
+
+test("legacy status without new fields keeps the historic static ticks", () => {
+  resetInitProgressViewState();
+  // No run_id, no progress, no eta_seconds → the old 0.5 half-step (38%).
+  const legacy = statusWith({
+    running: true,
+    current_stage: 2,
+    stages: [
+      { n: 1, label: "拉取数据", status: "ok", reason: null },
+      { n: 2, label: "分析偏好", status: "running", reason: null },
+      { n: 3, label: "生成画像", status: "pending", reason: null },
+      { n: 4, label: "发现内容池", status: "pending", reason: null },
+    ],
+  });
+  assert.equal(initProgressView(legacy).pct, 38);
+});
+
+test("pct is monotonic per run_id even when statuses regress out of order", () => {
+  resetInitProgressViewState();
+  const t = 3_000_000;
+  const high = initProgressView(
+    stage2With({ done: 6, total: 8, note: null }, 180, "run-clamp"),
+    t,
+  ).pct;
+  assert.ok(high >= 43);
+  // A stale poll result arrives late with less progress → clamp holds.
+  const regressed = initProgressView(
+    stage2With({ done: 1, total: 8, note: null }, 180, "run-clamp"),
+    t + 1000,
+  ).pct;
+  assert.equal(regressed, high);
+  // A different run starts fresh (no clamp bleed across runs).
+  resetInitProgressViewState();
+  const fresh = initProgressView(
+    stage2With({ done: 1, total: 8, note: null }, 180, "run-clamp-2"),
+    t + 2000,
+  ).pct;
+  assert.ok(fresh < high);
+});
+
+test("20-step simulated status sequence is non-decreasing and ends at 100", () => {
+  resetInitProgressViewState();
+  const runId = "run-sim";
+  const t0 = 9_000_000;
+  const mk = (stages: unknown[], extra: Record<string, unknown> = {}) =>
+    statusWith({ running: true, run_id: runId, stages, ...extra });
+  const S = (n: number, label: string, status: string, progress: unknown = null, eta: number | null = null) => {
+    const s: Record<string, unknown> = { n, label, status, reason: null };
+    if (progress) s.progress = progress;
+    if (eta !== null) s.eta_seconds = eta;
+    return s;
+  };
+  const L = ["拉取数据", "分析偏好", "生成画像", "发现内容池"];
+  const seq: Array<Record<string, unknown>> = [
+    // stage 1 running, per-source progress
+    mk([S(1, L[0], "running", { done: 0, total: 2, note: "正在采集 B 站" }, 90), S(2, L[1], "pending"), S(3, L[2], "pending"), S(4, L[3], "pending")], { current_stage: 1 }),
+    mk([S(1, L[0], "running", { done: 1, total: 2, note: "正在采集 Reddit" }, 90), S(2, L[1], "pending"), S(3, L[2], "pending"), S(4, L[3], "pending")], { current_stage: 1 }),
+    // stale out-of-order frame (regressed to done 0)
+    mk([S(1, L[0], "running", { done: 0, total: 2 }, 90), S(2, L[1], "pending"), S(3, L[2], "pending"), S(4, L[3], "pending")], { current_stage: 1 }),
+    // stage 1 done, stage 2 running with chunk progress 0..8 (one frame missing fields)
+    mk([S(1, L[0], "ok"), S(2, L[1], "running", { done: 0, total: 8, note: "第 0/8 批" }, 180), S(3, L[2], "pending"), S(4, L[3], "pending")], { current_stage: 2 }),
+    mk([S(1, L[0], "ok"), S(2, L[1], "running", { done: 1, total: 8, note: "第 1/8 批" }, 180), S(3, L[2], "pending"), S(4, L[3], "pending")], { current_stage: 2 }),
+    mk([S(1, L[0], "ok"), S(2, L[1], "running"), S(3, L[2], "pending"), S(4, L[3], "pending")], { current_stage: 2 }), // legacy-shaped frame, no new fields
+    mk([S(1, L[0], "ok"), S(2, L[1], "running", { done: 3, total: 8, note: "第 3/8 批" }, 180), S(3, L[2], "pending"), S(4, L[3], "pending")], { current_stage: 2 }),
+    mk([S(1, L[0], "ok"), S(2, L[1], "running", { done: 2, total: 8 }, 180), S(3, L[2], "pending"), S(4, L[3], "pending")], { current_stage: 2 }), // out-of-order regress
+    mk([S(1, L[0], "ok"), S(2, L[1], "running", { done: 5, total: 8, note: "第 5/8 批" }, 180), S(3, L[2], "pending"), S(4, L[3], "pending")], { current_stage: 2 }),
+    mk([S(1, L[0], "ok"), S(2, L[1], "running", { done: 6, total: 8 }, 180), S(3, L[2], "pending"), S(4, L[3], "pending")], { current_stage: 2 }),
+    mk([S(1, L[0], "ok"), S(2, L[1], "running", { done: 7, total: 8 }, 180), S(3, L[2], "pending"), S(4, L[3], "pending")], { current_stage: 2 }),
+    mk([S(1, L[0], "ok"), S(2, L[1], "running", { done: 8, total: 8, note: "第 8/8 批" }, 180), S(3, L[2], "pending"), S(4, L[3], "pending")], { current_stage: 2 }),
+    // stages 3+4 run in parallel (eta pseudo progress, then one gets progress)
+    mk([S(1, L[0], "ok"), S(2, L[1], "ok"), S(3, L[2], "running", null, 70), S(4, L[3], "running", null, 120)], { current_stage: 3 }),
+    mk([S(1, L[0], "ok"), S(2, L[1], "ok"), S(3, L[2], "running", null, 70), S(4, L[3], "running", null, 120)], { current_stage: 3 }),
+    mk([S(1, L[0], "ok"), S(2, L[1], "ok"), S(3, L[2], "running", null, 70), S(4, L[3], "running", null, 120)], { current_stage: 3 }),
+    // profile lands, discovery still running
+    mk([S(1, L[0], "ok"), S(2, L[1], "ok"), S(3, L[2], "ok"), S(4, L[3], "running", null, 120)], { current_stage: 4 }),
+    mk([S(1, L[0], "ok"), S(2, L[1], "ok"), S(3, L[2], "ok"), S(4, L[3], "running", null, 120)], { current_stage: 4 }),
+    mk([S(1, L[0], "ok"), S(2, L[1], "ok"), S(3, L[2], "ok"), S(4, L[3], "running", null, 120)], { current_stage: 4 }),
+    mk([S(1, L[0], "ok"), S(2, L[1], "ok"), S(3, L[2], "ok"), S(4, L[3], "running", null, 120)], { current_stage: 4 }),
+    // terminal frame
+    statusWith({
+      running: false,
+      initialized: true,
+      run_id: runId,
+      current_stage: 4,
+      stages: [S(1, L[0], "ok"), S(2, L[1], "ok"), S(3, L[2], "ok"), S(4, L[3], "ok")],
+    }),
+  ];
+  assert.equal(seq.length, 20);
+  let prev = -1;
+  seq.forEach((status, i) => {
+    const pct = initProgressView(status, t0 + i * 10_000).pct;
+    assert.ok(pct >= prev, `step ${i}: pct ${pct} regressed below ${prev}`);
+    prev = pct;
+  });
+  assert.equal(prev, 100);
+});
+
+test("stalenessView flips to the stall copy after 90s without backend activity", () => {
+  resetInitProgressViewState();
+  const t0 = 5_000_000;
+  const status = (activity: string, sequence: number) =>
+    runningStage2Status({ run_id: "run-stale", last_activity: activity, sequence });
+  const fresh = stalenessView(status("2026-07-10 08:00:00", 7), t0);
+  assert.equal(fresh.fresh, true);
+  assert.ok(fresh.text.includes("进行中"));
+  // Same activity marker 91s later → stalled, amber copy.
+  const stalled = stalenessView(status("2026-07-10 08:00:00", 7), t0 + 91_000);
+  assert.equal(stalled.fresh, false);
+  assert.ok(stalled.staleSeconds > INIT_STALL_THRESHOLD_SECONDS);
+  assert.ok(stalled.text.includes("没有新进展"));
+  assert.ok(stalled.text.includes("取消"));
+  // Backend writes again (heartbeat) → fresh again.
+  const revived = stalenessView(status("2026-07-10 08:01:35", 8), t0 + 95_000);
+  assert.equal(revived.fresh, true);
+});
+
+test("stalenessView stays fresh on old backends without last_activity", () => {
+  resetInitProgressViewState();
+  const status = runningStage2Status({ run_id: "run-old" });
+  delete (status as Record<string, unknown>).last_activity;
+  const t0 = 6_000_000;
+  stalenessView(status, t0);
+  const later = stalenessView(status, t0 + 600_000);
+  assert.equal(later.fresh, true); // no heartbeat signal → never claim a stall
+});
+
+test("stalenessView is inert for non-running statuses", () => {
+  resetInitProgressViewState();
+  const idle = stalenessView(statusWith(), 1_000);
+  assert.equal(idle.fresh, true);
+  assert.equal(idle.text, "");
+});
+
+test("stageEtaText rounds up to half minutes and expectation copy exists", () => {
+  assert.equal(stageEtaText({ eta_seconds: 180 }), "本阶段通常约 3 分钟");
+  assert.equal(stageEtaText({ eta_seconds: 70 }), "本阶段通常约 1.5 分钟");
+  assert.equal(stageEtaText({ eta_seconds: 120 }), "本阶段通常约 2 分钟");
+  assert.equal(stageEtaText({}), "");
+  assert.equal(stageEtaText(null), "");
+  assert.ok(INIT_EXPECTATION_HINT.includes("2–5 分钟"));
+  assert.ok(INIT_EXPECTATION_HINT.includes("进度会保留"));
+});

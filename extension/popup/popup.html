@@ -3121,6 +3121,20 @@
       text-align: center;
     }
 
+    /* Liveness / expectation line under the progress bar (init-progress
+       Phase 2): quiet while fresh, amber once >90s without backend activity. */
+    .init-stall-hint {
+      margin-top: 6px;
+      font-size: 11px;
+      line-height: 1.6;
+      color: var(--text-secondary);
+      text-align: center;
+    }
+
+    .init-stall-hint.stale {
+      color: #b45309;
+    }
+
     .init-sources {
       display: flex;
       flex-direction: column;
@@ -4633,6 +4647,7 @@
               </div>
               <p id="initProgressLabel" class="init-progress-label"></p>
             </div>
+            <p id="initStallHint" class="init-stall-hint" hidden></p>
             <button id="initStartBtn" type="button" class="init-start-btn">开始初始化</button>
             <p id="initStartReason" class="init-start-reason" hidden></p>
           </div>

@@ -270,30 +270,166 @@ function stageList(status) {
   return status && Array.isArray(status.stages) ? status.stages : [];
 }
 
+// ── Intra-stage progress + liveness (init-progress-visibility Phase 2) ──────
+//
+// REFERENCE IMPLEMENTATION for the three GUI surfaces: desktop web
+// (web/desktop/assets/js/app.js) and the setup wizard (web/setup/index.html)
+// mirror these pure functions. The three surfaces share no module system, so
+// this duplication is the sanctioned exception to the four-surface contract —
+// keep the formulas in lock-step when editing any copy.
+
+// A running stage's fraction never claims completion: real sub-progress and
+// the elapsed/eta pseudo-progress both cap here so the bar can't hit the next
+// stage tick before the backend confirms it.
+const STAGE_FRACTION_CAP = 0.95;
+// Legacy half-step for statuses without progress/eta fields (old backends):
+// preserves the historic 13/38/63/88 ticks exactly.
+const STAGE_FRACTION_FALLBACK = 0.5;
+// Stall threshold. Calibration: backend heartbeat period 30s × 3 missed beats
+// (api/app.py _INIT_HEARTBEAT_INTERVAL_SECONDS) — change them in lock-step.
+export const INIT_STALL_THRESHOLD_SECONDS = 90;
+// Expectation copy shared by the idle checklist and the start-button area.
+export const INIT_EXPECTATION_HINT =
+  "整个过程通常需要 2–5 分钟，期间可离开此页面，进度会保留。";
+
+// Per-run client view state: elapsed-based pseudo-progress anchors (first
+// client observation of each running stage) + the monotonic pct clamp + the
+// staleness change marker. Keyed by run_id; bounded so long sessions can't
+// accumulate stale runs.
+const _runViewState = new Map();
+
+function _viewState(runId) {
+  let st = _runViewState.get(runId);
+  if (!st) {
+    st = { stageStartMs: new Map(), maxPct: 0, lastMark: null, lastChangeMs: 0 };
+    _runViewState.set(runId, st);
+    if (_runViewState.size > 8) {
+      const oldest = _runViewState.keys().next().value;
+      if (oldest !== runId) {
+        _runViewState.delete(oldest);
+      }
+    }
+  }
+  return st;
+}
+
+// Test hook / logout reset: forget all per-run view state.
+export function resetInitProgressViewState() {
+  _runViewState.clear();
+}
+
+// Fraction of a RUNNING stage: real sub-progress (done/total) when the backend
+// exposes it; otherwise an elapsed/eta pseudo-progress (1 - e^-t/eta) anchored
+// at the first client observation of the stage running; otherwise the legacy
+// half-step. ``st`` is null when the status carries no run_id (legacy) — then
+// only the stateless paths apply.
+function _runningStageFraction(stage, st, nowMs) {
+  const prog = stage && stage.progress;
+  const progTotal = prog ? Number(prog.total || 0) : 0;
+  if (progTotal > 0) {
+    const done = Math.max(0, Math.min(Number(prog.done || 0), progTotal));
+    return Math.min(STAGE_FRACTION_CAP, done / progTotal);
+  }
+  const eta = Number((stage && stage.eta_seconds) || 0);
+  if (eta > 0 && st) {
+    let startMs = st.stageStartMs.get(stage.n);
+    if (startMs === undefined) {
+      startMs = nowMs;
+      st.stageStartMs.set(stage.n, startMs);
+    }
+    const elapsed = Math.max(0, (nowMs - startMs) / 1000);
+    return Math.min(STAGE_FRACTION_CAP, 1 - Math.exp(-elapsed / eta));
+  }
+  return STAGE_FRACTION_FALLBACK;
+}
+
+// "本阶段通常约 X 分钟" for a stage carrying eta_seconds ("" otherwise).
+// X rounds UP to the nearest half minute so the copy never under-promises.
+export function stageEtaText(stage) {
+  const eta = Number((stage && stage.eta_seconds) || 0);
+  if (eta <= 0) {
+    return "";
+  }
+  const halfMinutes = Math.ceil(eta / 30) / 2;
+  return `本阶段通常约 ${halfMinutes} 分钟`;
+}
+
+// Liveness indicator for an in-flight run, driven by ``last_activity`` (the
+// backend bumps it on every status write incl. the 30s heartbeat). Staleness
+// is measured from the CLIENT time the (sequence, last_activity) marker last
+// changed — immune to client/server clock skew. Old backends without
+// last_activity get no stall detection (they also have no heartbeat, so a
+// silent-but-healthy stage 2 would false-alarm).
+export function stalenessView(status, nowMs = Date.now()) {
+  if (!status || !status.running) {
+    return { fresh: true, staleSeconds: 0, text: "" };
+  }
+  const runId = status.run_id ? String(status.run_id) : "";
+  if (!runId || !status.last_activity) {
+    return { fresh: true, staleSeconds: 0, text: "● 进行中" };
+  }
+  const st = _viewState(runId);
+  const mark = `${status.sequence ?? ""}|${status.last_activity}`;
+  if (st.lastMark !== mark) {
+    st.lastMark = mark;
+    st.lastChangeMs = nowMs;
+  }
+  const staleSeconds = Math.max(0, Math.round((nowMs - st.lastChangeMs) / 1000));
+  if (staleSeconds > INIT_STALL_THRESHOLD_SECONDS) {
+    const minutes = Math.max(1, Math.round(staleSeconds / 60));
+    return {
+      fresh: false,
+      staleSeconds,
+      text: `后台已 ${minutes} 分钟没有新进展，可能是 AI 服务响应缓慢——可以继续等待，或取消后重试。`,
+    };
+  }
+  return { fresh: true, staleSeconds, text: "● 进行中" };
+}
+
 // Progress view for the in-flight init: percentage, current stage label, and
-// terminal flags. ``pct`` counts completed stages plus a half-step for the
-// stage currently running, so the bar advances mid-stage instead of jumping.
-export function initProgressView(status) {
+// terminal flags. ``pct`` counts completed stages plus the running stage's
+// fraction — real sub-progress when available, elapsed/eta pseudo-progress
+// otherwise, legacy half-step for old backends. Rendered pct is monotonic per
+// run_id (stale/regressed polls can't move the bar backwards).
+export function initProgressView(status, nowMs = Date.now()) {
   const total = (status && status.total_stages) || STAGE_TOTAL_FALLBACK;
   const stages = stageList(status);
   const doneCount = stages.filter((s) => s.status === "ok").length;
   const running = Boolean(status && status.running);
+  const runId = status && status.run_id ? String(status.run_id) : "";
+  const st = runId ? _viewState(runId) : null;
   const failedStage = stages.find((s) => s.status === "failed" || s.status === "cancelled");
   const current = (status && status.current_stage) || 0;
   const currentStage = stages.find((s) => s.n === current);
-  const stageLabel = currentStage
+  let stageLabel = currentStage
     ? `${currentStage.n}/${total} ${currentStage.label}`
     : "";
-  const inFlight = stages.some((s) => s.status === "running") ? 0.5 : 0;
+  const note = currentStage && currentStage.progress && currentStage.progress.note;
+  if (stageLabel && note) {
+    stageLabel += ` · ${note}`;
+  }
+  const runningStages = stages.filter((s) => s.status === "running");
+  const inFlight = runningStages.length
+    ? runningStages.reduce((sum, s) => sum + _runningStageFraction(s, st, nowMs), 0) /
+      runningStages.length
+    : 0;
   const rawPct = ((doneCount + (running ? inFlight : 0)) / total) * 100;
-  const pct = Math.max(0, Math.min(100, Math.round(rawPct)));
+  let pct = Math.max(0, Math.min(100, Math.round(rawPct)));
+  if (running) {
+    pct = Math.max(pct, 1);
+  }
+  if (st) {
+    st.maxPct = Math.max(st.maxPct, pct);
+    pct = st.maxPct;
+  }
   return {
     active: running,
     total,
     doneCount,
     current,
     stageLabel,
-    pct: running ? Math.max(pct, 1) : pct,
+    etaText: running ? stageEtaText(currentStage) : "",
+    pct,
     failed: Boolean(failedStage),
     failedReason: failedStage ? failedStage.reason || "" : "",
     partial: Boolean(status && status.partial_success),
