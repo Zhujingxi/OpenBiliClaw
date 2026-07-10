@@ -34,7 +34,7 @@
 | M123 上游来源配额补货 | ✅ | discovery pool 低于目标值时，runtime 会按前端可换口径计算来源缺口，并用 raw-material headroom 限制请求量，减少推荐层长期面对“explore 过满、trending 过少”的偏池子 |
 | M124 generate 路径丰富度修正 | ✅ | `generate_recommendations()` 现在也会先对缓存候选做来源均衡，再分阶段放宽 `topic/style/source` 约束，避免高分 `related_chain` 长时间吃掉整批名额 |
 | M125 pool 预生成推荐文案 | ✅ | discovery pool 现在会异步批量预生成 `expression/topic_label`，`reshuffle/append` 只消费预生成结果，缺失时返回空而不是写统一兜底 |
-| M126 源无关内容分类 | ✅ | `classify_pool_backlog()` 在 `precompute_pool_copy` 前为 legacy / recovery 未分类内容补上 `style_key` / `topic_group` / `relevance_score`，并在批量评估 prompt 中带上近期 `negative_examples`。正常来源 ingest 已改为先走 `discovery_candidates` 统一评估，推荐层不再承担外站原始候选的首评估。COALESCE 保护已分类字段不被重复入库覆盖。`_diversity_tokens` 不再 fallback `source_strategy`——推荐层只看内容特征，来源完全透明 |
+| M126 源无关内容分类 | ✅ | `classify_pool_backlog()` 在 `precompute_pool_copy` 前为 legacy / recovery 未分类内容补上 `style_key` / `topic_group` / `relevance_score`，并在批量评估 prompt 中带上近期 `negative_examples`。正常来源 ingest 已改为先走 `discovery_candidates` 统一评估，推荐层不再承担外站原始候选的首评估。COALESCE 保护已分类字段不被重复入库覆盖。`_diversity_tokens` 不再 fallback `source_strategy`——推荐层只看内容特征，来源完全透明。v0.3.162+：`_rows_to_discovered` 回读全部互动字段与 `author_name`，backlog 重写不再把 favorite/comment 等七个计数清零（往返保真有回归测试）。 |
 | M127 兴趣探针用户确认 | ✅ | WebSocket 推送 `interest.probe` → Chrome 通知 → popup 卡片（是 / 不是 / 多聊聊）→ `POST /api/interest-probes/respond` → speculator confirm/reject/chat。4h 去重冷却。推送从 `_run_refresh_plan` 移到 `run_forever` 主循环 |
 | M127b 避雷探针用户确认 | ✅ | WebSocket 推送 `avoidance.probe` → popup / Web / OpenClaw 卡片（确实不喜欢 / 不是 / 多聊聊）→ `POST /api/avoidance-probes/respond`；确认后写入 `disliked_topics` 并清理候选池，未确认时不参与过滤 |
 | M128 CLI delight + probe | ✅ | `openbiliclaw delight` 手动查看惊喜推荐候选；`openbiliclaw probe` 手动列出猜测方向并交互确认/拒绝 |

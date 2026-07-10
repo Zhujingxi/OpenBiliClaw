@@ -3660,3 +3660,45 @@ async def test_serve_final_exclusion_blocks_platform_floor_reintroduction(
 
         assert [item.content.bvid for item in recommendations] == ["BV1ALLOWED"]
         db.close()
+
+
+def test_rows_to_discovered_round_trips_all_engagement_stats() -> None:
+    """池子整理(classify_pool_backlog)经 row → dataclass → cache_content 重写行;
+    mapper 漏读任何互动字段都会把该字段清零(与封面被空值抹掉同族缺陷)。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+        stats = {
+            "view_count": 14000,
+            "like_count": 673,
+            "favorite_count": 1283,
+            "collect_count": 1283,
+            "comment_count": 65,
+            "share_count": 7,
+            "danmaku_count": 21,
+            "reply_count": 3,
+            "retweet_count": 2,
+            "bookmark_count": 9,
+        }
+        db.cache_content(
+            "BV1stats",
+            title="互动数据齐全的视频",
+            author_name="Rayman小何",
+            cover_url="//i2.hdslb.com/bfs/archive/x.jpg",
+            source="search",
+            relevance_score=0.9,
+            **stats,
+        )
+        row = dict(
+            db.conn.execute("SELECT * FROM content_cache WHERE bvid = ?", ("BV1stats",)).fetchone()
+        )
+
+        (item,) = engine._rows_to_discovered([row])
+        kwargs = item.to_cache_kwargs()
+
+        for field_name, expected in stats.items():
+            assert kwargs[field_name] == expected, field_name
+        assert kwargs["author_name"] == "Rayman小何"
+        db.close()
