@@ -32,7 +32,9 @@ const source = fs.readFileSync({json.dumps(str(source_path))}, "utf8");
 let chatInput = null;
 let focusCount = 0;
 let nextTimerId = 1;
+let nextFrameId = 1;
 const timers = new Map();
+const frames = new Map();
 const observers = [];
 
 const setTimer = (callback) => {{
@@ -41,6 +43,18 @@ const setTimer = (callback) => {{
   return id;
 }};
 const clearTimer = (id) => timers.delete(id);
+const requestFrame = (callback) => {{
+  const id = nextFrameId++;
+  frames.set(id, callback);
+  return id;
+}};
+const cancelFrame = (id) => frames.delete(id);
+const fireFrame = (id) => {{
+  const callback = frames.get(id);
+  assert.equal(typeof callback, "function");
+  frames.delete(id);
+  callback(16);
+}};
 
 class FakeMutationObserver {{
   constructor(callback) {{
@@ -76,6 +90,8 @@ const context = vm.createContext({{
   MutationObserver: FakeMutationObserver,
   setTimeout: setTimer,
   clearTimeout: clearTimer,
+  requestAnimationFrame: requestFrame,
+  cancelAnimationFrame: cancelFrame,
 }});
 const module = new vm.SourceTextModule(source, {{
   context,
@@ -124,28 +140,63 @@ assert.equal(timers.size, 1);
 
 resolveHistory();
 await rendered;
+assert.equal(focusCount, 0);
+assert.equal(frames.size, 1);
+fireFrame(frames.keys().next().value);
 assert.equal(focusCount, 1);
 assert.equal(observers[0].active, false);
 assert.equal(observers[0].disconnectCount, 1);
 assert.equal(timers.size, 0);
+assert.equal(frames.size, 0);
 observers[0].callback([], observers[0]);
 assert.equal(focusCount, 1);
 stopWaiting();
 assert.equal(observers[0].disconnectCount, 1);
+
+const observerCount = observers.length;
+const stopPresentWait = focusChatInputWhenReady({{ timeoutMs: 1000 }});
+assert.equal(focusCount, 1);
+assert.equal(observers.length, observerCount);
+assert.equal(timers.size, 1);
+assert.equal(frames.size, 1);
+fireFrame(frames.keys().next().value);
+assert.equal(focusCount, 2);
+assert.equal(timers.size, 0);
+assert.equal(frames.size, 0);
+stopPresentWait();
 
 chatInput = null;
 const stopTimeoutWait = focusChatInputWhenReady({{ timeoutMs: 1000 }});
 const timeoutObserver = observers.at(-1);
 assert.equal(timeoutObserver.active, true);
 assert.equal(timers.size, 1);
+assert.equal(frames.size, 0);
 const [timerId, timeoutCallback] = timers.entries().next().value;
 timers.delete(timerId);
 timeoutCallback();
 assert.equal(timeoutObserver.active, false);
 assert.equal(timeoutObserver.disconnectCount, 1);
 assert.equal(timers.size, 0);
+assert.equal(frames.size, 0);
 stopTimeoutWait();
 assert.equal(timeoutObserver.disconnectCount, 1);
+
+const stopScheduledWait = focusChatInputWhenReady({{ timeoutMs: 1000 }});
+const scheduledObserver = observers.at(-1);
+chatInput = {{ focus() {{ focusCount += 1; }} }};
+scheduledObserver.callback([], scheduledObserver);
+assert.equal(focusCount, 2);
+assert.equal(frames.size, 1);
+const [scheduledTimerId, scheduledTimeoutCallback] = timers.entries().next().value;
+timers.delete(scheduledTimerId);
+scheduledTimeoutCallback();
+assert.equal(scheduledObserver.active, false);
+assert.equal(scheduledObserver.disconnectCount, 1);
+assert.equal(timers.size, 0);
+assert.equal(frames.size, 0);
+assert.equal(focusCount, 2);
+stopScheduledWait();
+assert.equal(scheduledObserver.disconnectCount, 1);
 """
     subprocess.run(
         [NODE, "--no-warnings", "--experimental-vm-modules", "--input-type=module", "-e", script],

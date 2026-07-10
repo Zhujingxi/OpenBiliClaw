@@ -169,32 +169,41 @@ function renderInto(container, fn) {
 
 // ── Recommendation Header ───────────────────────────────────
 export function focusChatInputWhenReady({ timeoutMs = CHAT_INPUT_FOCUS_TIMEOUT_MS } = {}) {
-  const focusInput = () => {
-    const input = document.getElementById("chat-input");
-    if (!input) return false;
-    input.focus();
-    return true;
-  };
-
-  if (focusInput()) return () => {};
-
   let active = true;
   let timeoutId = null;
-  const observer = new MutationObserver(() => {
-    if (!active || !focusInput()) return;
-    cleanup();
-  });
+  let frameId = null;
+  let observer = null;
   function cleanup() {
     if (!active) return;
     active = false;
-    observer.disconnect();
+    observer?.disconnect();
     if (timeoutId !== null) {
       clearTimeout(timeoutId);
       timeoutId = null;
     }
+    if (frameId !== null) {
+      cancelAnimationFrame(frameId);
+      frameId = null;
+    }
+  }
+  function scheduleFocus() {
+    if (frameId !== null) return true;
+    if (!document.getElementById("chat-input")) return false;
+    frameId = requestAnimationFrame(() => {
+      frameId = null;
+      if (!active) return;
+      document.getElementById("chat-input")?.focus();
+      cleanup();
+    });
+    return true;
   }
 
-  observer.observe(document.body, { childList: true, subtree: true });
+  if (!scheduleFocus()) {
+    observer = new MutationObserver(() => {
+      if (active) scheduleFocus();
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
   timeoutId = setTimeout(cleanup, timeoutMs);
   return cleanup;
 }
