@@ -6,22 +6,22 @@ import assert from "node:assert/strict";
 const html = readFileSync(resolve("popup", "popup.html"), "utf8");
 const js = readFileSync(resolve("popup", "popup.js"), "utf8");
 
-test("recommendation header exposes preference correction controls", () => {
-  assert.match(html, /推荐不准？/);
-  assert.match(html, /id="editProfileFromRecommendations"/);
-  assert.match(html, /id="chatFromRecommendations"/);
+test("recommendation header has no preference correction entry", () => {
+  const header = html.slice(
+    html.indexOf('class="recommendation-header-intro"'),
+    html.indexOf('id="refreshRecommendationsButton"'),
+  );
+
+  assert.doesNotMatch(header, /推荐不准？/);
+  assert.doesNotMatch(header, /编辑画像/);
+  assert.doesNotMatch(header, /直接告诉阿B/);
+  assert.doesNotMatch(header, /editProfileFromRecommendations/);
+  assert.doesNotMatch(header, /chatFromRecommendations/);
+  assert.doesNotMatch(html, /\.preference-correction-callout/);
 });
 
-test("correction controls reuse profile edit and chat tabs", () => {
-  assert.match(js, /setActiveTab\("profile"\)/);
-  assert.match(js, /void enterProfileEditMode\(\)/);
-  assert.match(js, /setActiveTab\("chat"\)/);
-  assert.match(js, /requestAnimationFrame/);
-  assert.match(js, /elements\.chatInput\.focus\(\)/);
-});
-
-test("correction controls wrap and preserve visible keyboard focus", () => {
-  assert.match(html, /\.preference-correction-callout\s*\{[\s\S]*flex-wrap:\s*wrap/);
-  assert.match(html, /\.preference-correction-callout button:focus-visible/);
-  assert.match(html, /outline:/);
+test("popup bootstrap has no recommendation correction binding", () => {
+  assert.doesNotMatch(js, /bindPreferenceCorrectionActions/);
+  assert.doesNotMatch(js, /editProfileFromRecommendations/);
+  assert.doesNotMatch(js, /chatFromRecommendations/);
 });

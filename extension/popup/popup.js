@@ -193,8 +193,6 @@ const elements = {
   initStartReason: document.getElementById("initStartReason"),
   list: document.getElementById("recommendationList"),
   refreshRecommendationsButton: document.getElementById("refreshRecommendationsButton"),
-  editProfileFromRecommendations: document.getElementById("editProfileFromRecommendations"),
-  chatFromRecommendations: document.getElementById("chatFromRecommendations"),
   poolStatus: document.getElementById("poolStatus"),
   poolAvailable: document.getElementById("poolAvailable"),
   poolReplenished: document.getElementById("poolReplenished"),
@@ -5793,21 +5791,6 @@ function bindTabs() {
   }
 }
 
-function bindPreferenceCorrectionActions() {
-  elements.editProfileFromRecommendations?.addEventListener("click", () => {
-    setActiveTab("profile");
-    void enterProfileEditMode();
-  });
-  elements.chatFromRecommendations?.addEventListener("click", () => {
-    setActiveTab("chat");
-    requestAnimationFrame(() => {
-      if (elements.chatInput instanceof HTMLTextAreaElement) {
-        elements.chatInput.focus();
-      }
-    });
-  });
-}
-
 function bindProfileHistoryLoading() {
   if (elements.content instanceof HTMLElement) {
     elements.content.addEventListener("scroll", () => {
@@ -7396,7 +7379,6 @@ async function initializePopup() {
   const requestedTab = params.get("tab");
   state.delightHighlightBvid = params.get("delight")?.trim() || "";
   bindTabs();
-  bindPreferenceCorrectionActions();
   bindProfileHistoryLoading();
   initRecommendationAutoLoadIntent();
   bindRefreshButton();
