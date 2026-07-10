@@ -14,9 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_mobile_probe_action_copy_is_canonical() -> None:
-    view_models = (
-        ROOT / "src/openbiliclaw/web/js/view-models.js"
-    ).read_text(encoding="utf-8")
+    view_models = (ROOT / "src/openbiliclaw/web/js/view-models.js").read_text(encoding="utf-8")
 
     assert 'label: "确认喜欢", action: "confirm"' in view_models
     assert 'label: "暂时搁置", action: "defer"' in view_models
@@ -27,24 +25,20 @@ def test_mobile_probe_action_copy_is_canonical() -> None:
 
 
 def test_mobile_profile_uses_probe_action_descriptors() -> None:
-    profile_js = (
-        ROOT / "src/openbiliclaw/web/js/views/profile.js"
-    ).read_text(encoding="utf-8")
+    profile_js = (ROOT / "src/openbiliclaw/web/js/views/profile.js").read_text(encoding="utf-8")
     assert "getProbeMessageActions" in profile_js
     assert "getAvoidanceProbeMessageActions" in profile_js
     assert 'data-action="${action.action}"' in profile_js
     assert "const action = e.target.dataset.action" in profile_js
     assert 'data-action="confirm">\\u2713</button>' not in profile_js
     assert 'data-action="reject">\\u2717</button>' not in profile_js
-    assert profile_js.count(
-        'const buttons = [...row.querySelectorAll(".spec-btn")];'
-    ) == 2
-    assert profile_js.count(
-        "for (const actionButton of buttons) actionButton.disabled = true;"
-    ) == 2
-    assert profile_js.count(
-        "for (const actionButton of buttons) actionButton.disabled = false;"
-    ) == 2
+    assert profile_js.count('const buttons = [...row.querySelectorAll(".spec-btn")];') == 2
+    assert (
+        profile_js.count("for (const actionButton of buttons) actionButton.disabled = true;") == 2
+    )
+    assert (
+        profile_js.count("for (const actionButton of buttons) actionButton.disabled = false;") == 2
+    )
 
 
 def _run_js(script: str) -> subprocess.CompletedProcess[str]:

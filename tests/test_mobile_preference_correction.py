@@ -10,9 +10,7 @@ NODE = shutil.which("node")
 
 
 def test_mobile_recommendation_header_exposes_correction_actions() -> None:
-    js = (
-        ROOT / "src/openbiliclaw/web/js/views/recommend.js"
-    ).read_text(encoding="utf-8")
+    js = (ROOT / "src/openbiliclaw/web/js/views/recommend.js").read_text(encoding="utf-8")
     assert "推荐不准？" in js
     assert 'data-correction-target="profile"' in js
     assert 'data-correction-target="chat"' in js
