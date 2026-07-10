@@ -203,6 +203,26 @@ question silently.** Specifically for `bilibili.cookie`:
   items — leading to a hollow soul profile and the "为什么我的画像
   里没东西" support ticket.
 
+**Live validation (v0.3.162+)**: once the backend passes its health
+check, bootstrap consumes the backend's own live cookie probe
+(`GET /api/init-status` → `prerequisites.bilibili_check`) for any run
+that reused a cookie:
+
+- Probe says **failed** → the status block reports
+  `bilibili.cookie (stale — reused cookie failed live validation)`
+  under `Missing:`, the final `Status:` is downgraded from `complete`
+  to `needs_secrets`, and auto-init is **not** run (it could only fail
+  with `empty_history`). `install.sh` / `install.ps1` print an explicit
+  "cookie 已失效，请重新登录后由扩展同步" block instead of the generic
+  disclaimer. When you see this state, go straight to the re-login
+  options below (default A) — the cookie is confirmed dead, do not
+  offer "先用旧的" (option B).
+- Probe says **ok** → the reused cookie is confirmed live; you may
+  soften the confirmation below, but still surface the reuse.
+- Probe unreachable / indeterminate (backend not healthy, `checking`)
+  → no downgrade; the generic "NOT validated" disclaimer applies and
+  the full contract below is mandatory.
+
 **Concrete contract for reused cookies**:
 
 > When you see `bilibili.cookie` in the reused set, render this to
