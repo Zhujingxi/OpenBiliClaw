@@ -1449,8 +1449,15 @@ class TestBackendAPI:
         # YouTube needs no login -> always no_auth.
         assert body["youtube"]["state"] == "no_auth"
         assert body["youtube"]["logged_in"] is True
-        assert body["zhihu"]["state"] in {"unverified", "ready", "missing"}
-        assert body["reddit"]["state"] in {"unverified", "missing", "login_required", "ready"}
+        assert body["zhihu"]["state"] in {"unverified", "ready", "missing", "stale"}
+        assert body["reddit"]["state"] in {
+            "unverified",
+            "missing",
+            "login_required",
+            "ready",
+            "stale",
+            "error",
+        }
 
     def test_sources_credentials_returns_current_local_credentials(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1488,6 +1495,7 @@ class TestBackendAPI:
         assert body["twitter"]["value"] == "auth_token=x; ct0=csrf;"
         assert body["xiaohongshu"]["label"] == "xsec_token"
         assert body["xiaohongshu"]["value"] == "xhs-token"
+        assert "不代表账号登录" in body["xiaohongshu"]["detail"]
         assert body["youtube"]["available"] is False
         assert body["zhihu"]["available"] is False
 
@@ -1519,6 +1527,21 @@ class TestBackendAPI:
         assert item["logged_in"] is True
         assert "已登录小红书" in item["detail"]
 
+    def test_sources_status_xhs_without_login_signal_is_unverified(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/sources/status").json()["xiaohongshu"]
+        assert item["state"] == "unverified"
+        assert item["logged_in"] is False
+        assert "尚未收到" in item["detail"]
+
     def test_sources_status_xhs_logged_out_state_wins_over_fresh_tokens(
         self, tmp_path: Path
     ) -> None:
@@ -1548,7 +1571,7 @@ class TestBackendAPI:
         assert item["logged_in"] is False
         assert "未检测到小红书登录" in item["detail"]
 
-    def test_sources_status_xhs_stale_login_state_missing_even_with_fresh_tokens(
+    def test_sources_status_xhs_stale_login_state_needs_refresh_even_with_fresh_tokens(
         self, tmp_path: Path
     ) -> None:
         from fastapi.testclient import TestClient
@@ -1573,8 +1596,34 @@ class TestBackendAPI:
         client = TestClient(app)
 
         item = client.get("/api/sources/status").json()["xiaohongshu"]
-        assert item["state"] == "missing"
+        assert item["state"] == "stale"
         assert item["logged_in"] is False
+        assert "刷新" in item["detail"]
+
+    def test_sources_status_douyin_cookie_is_unverified_not_logged_in(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.sources.douyin_auth import DouyinCookieManager
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config()
+        cfg.sources.douyin.enabled = True
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+        DouyinCookieManager(cfg.data_path).set_cookie("sessionid=dy", source="test")
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/sources/status").json()["douyin"]
+        assert item["state"] == "unverified"
+        assert item["logged_in"] is False
+        assert "实际任务" in item["detail"]
 
     def test_xhs_login_state_endpoint_persists_state(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient
@@ -1746,13 +1795,13 @@ class TestBackendAPI:
     @pytest.mark.parametrize(
         ("stored_logged_in", "age_hours", "task_case", "expected_state", "expected_logged_in"),
         [
-            (False, 0.1, "completed", "ready", True),
-            (True, 73.0, "login_required", "missing", False),
-            (False, 0.1, "failed", "partial", False),
-            (True, 73.0, "pending", "unverified", False),
+            (False, 0.1, "completed", "missing", False),
+            (True, 73.0, "login_required", "stale", False),
+            (False, 0.1, "failed", "missing", False),
+            (True, 73.0, "pending", "stale", False),
         ],
     )
-    def test_sources_status_zhihu_logged_out_or_stale_falls_back_to_task_history(
+    def test_sources_status_zhihu_explicit_login_signal_wins_over_task_history(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
@@ -4087,6 +4136,16 @@ class TestBackendAPI:
 
         with client.websocket_connect("/api/runtime-stream?client=background") as websocket:
             assert websocket.receive_json() == {
+                "type": "xhs_login_state_sync_requested",
+                "reason": "runtime_connected",
+                "source": "runtime-stream",
+            }
+            assert websocket.receive_json() == {
+                "type": "zhihu_login_state_sync_requested",
+                "reason": "runtime_connected",
+                "source": "runtime-stream",
+            }
+            assert websocket.receive_json() == {
                 "type": "bilibili_cookie_sync_requested",
                 "reason": "missing_cookie",
                 "source": "runtime-stream",
@@ -4121,6 +4180,16 @@ class TestBackendAPI:
         client = TestClient(app)
 
         with client.websocket_connect("/api/runtime-stream?client=background") as websocket:
+            assert websocket.receive_json() == {
+                "type": "xhs_login_state_sync_requested",
+                "reason": "runtime_connected",
+                "source": "runtime-stream",
+            }
+            assert websocket.receive_json() == {
+                "type": "zhihu_login_state_sync_requested",
+                "reason": "runtime_connected",
+                "source": "runtime-stream",
+            }
             assert websocket.receive_json() == {
                 "type": "reddit_cookie_sync_requested",
                 "reason": "missing_cookie",

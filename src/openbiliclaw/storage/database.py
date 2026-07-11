@@ -7325,6 +7325,50 @@ class Database:
         except (TypeError, ValueError) as exc:
             raise ValueError(f"corrupt auth_epoch value: {row[0]!r}") from exc
 
+    def _set_browser_login_state(
+        self,
+        *,
+        state_key: str,
+        timestamp_key: str,
+        logged_in: bool,
+        when_iso: str,
+    ) -> None:
+        """Persist a browser heartbeat on an isolated FastAPI-safe connection."""
+        conn = self.open_connection()
+        try:
+            conn.executemany(
+                "INSERT OR REPLACE INTO auth_state (key, value) VALUES (?, ?)",
+                [
+                    (state_key, "1" if logged_in else "0"),
+                    (timestamp_key, when_iso),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _get_browser_login_state(
+        self,
+        *,
+        state_key: str,
+        timestamp_key: str,
+    ) -> tuple[bool, str]:
+        """Read a browser heartbeat without sharing the process connection."""
+        conn = self.open_connection()
+        try:
+            rows = conn.execute(
+                "SELECT key, value FROM auth_state WHERE key IN (?, ?)",
+                (state_key, timestamp_key),
+            ).fetchall()
+        finally:
+            conn.close()
+        values = {str(row["key"]): str(row["value"]) for row in rows}
+        state = values.get(state_key)
+        when_iso = values.get(timestamp_key, "").strip()
+        if state not in {"0", "1"} or not when_iso:
+            return False, ""
+        return state == "1", when_iso
+
     def set_xhs_login_state(self, logged_in: bool, when_iso: str | None = None) -> None:
         """Persist the latest browser-observed xhs login state.
 
@@ -7337,27 +7381,19 @@ class Database:
             from datetime import UTC, datetime
 
             when_iso = datetime.now(UTC).isoformat()
-        self._execute_many_write(
-            "INSERT OR REPLACE INTO auth_state (key, value) VALUES (?, ?)",
-            [
-                ("xhs_login_state", "1" if logged_in else "0"),
-                ("xhs_login_state_at", str(when_iso)),
-            ],
+        self._set_browser_login_state(
+            state_key="xhs_login_state",
+            timestamp_key="xhs_login_state_at",
+            logged_in=logged_in,
+            when_iso=str(when_iso),
         )
 
     def get_xhs_login_state(self) -> tuple[bool, str]:
         """Return ``(logged_in, iso_timestamp)`` for xhs, or ``(False, "")``."""
-        self._ensure_fresh_read()
-        rows = self.conn.execute(
-            "SELECT key, value FROM auth_state WHERE key IN (?, ?)",
-            ("xhs_login_state", "xhs_login_state_at"),
-        ).fetchall()
-        values = {str(row["key"]): str(row["value"]) for row in rows}
-        state = values.get("xhs_login_state")
-        when_iso = values.get("xhs_login_state_at", "").strip()
-        if state not in {"0", "1"} or not when_iso:
-            return False, ""
-        return state == "1", when_iso
+        return self._get_browser_login_state(
+            state_key="xhs_login_state",
+            timestamp_key="xhs_login_state_at",
+        )
 
     def set_zhihu_login_state(self, logged_in: bool, when_iso: str | None = None) -> None:
         """Persist the latest browser-observed Zhihu login state.
@@ -7371,27 +7407,19 @@ class Database:
             from datetime import UTC, datetime
 
             when_iso = datetime.now(UTC).isoformat()
-        self._execute_many_write(
-            "INSERT OR REPLACE INTO auth_state (key, value) VALUES (?, ?)",
-            [
-                ("zhihu_login_state", "1" if logged_in else "0"),
-                ("zhihu_login_state_at", str(when_iso)),
-            ],
+        self._set_browser_login_state(
+            state_key="zhihu_login_state",
+            timestamp_key="zhihu_login_state_at",
+            logged_in=logged_in,
+            when_iso=str(when_iso),
         )
 
     def get_zhihu_login_state(self) -> tuple[bool, str]:
         """Return ``(logged_in, iso_timestamp)`` for Zhihu, or ``(False, "")``."""
-        self._ensure_fresh_read()
-        rows = self.conn.execute(
-            "SELECT key, value FROM auth_state WHERE key IN (?, ?)",
-            ("zhihu_login_state", "zhihu_login_state_at"),
-        ).fetchall()
-        values = {str(row["key"]): str(row["value"]) for row in rows}
-        state = values.get("zhihu_login_state")
-        when_iso = values.get("zhihu_login_state_at", "").strip()
-        if state not in {"0", "1"} or not when_iso:
-            return False, ""
-        return state == "1", when_iso
+        return self._get_browser_login_state(
+            state_key="zhihu_login_state",
+            timestamp_key="zhihu_login_state_at",
+        )
 
     def bump_auth_epoch(self) -> int:
         """Atomically increment and return the revocation epoch.

@@ -4765,14 +4765,17 @@
     };
     const SOURCE_ACCESS_STATE = {
       ok: { tone: "ready", label: "接入可用" },
-      ready: { tone: "ready", label: "接入可用" },
+      ready: { tone: "ready", label: "凭据已就绪" },
       no_auth: { tone: "public", label: "无需登录" },
       unverified: { tone: "pending", label: "状态待验证" },
       missing: { tone: "warning", label: "需要登录" },
+      login_required: { tone: "warning", label: "需要登录" },
       missing_cookie: { tone: "warning", label: "缺少 Cookie" },
       rate_limited: { tone: "warning", label: "频率受限" },
       partial: { tone: "warning", label: "部分可用" },
       stale: { tone: "warning", label: "需要刷新" },
+      error: { tone: "danger", label: "检查失败" },
+      expired: { tone: "danger", label: "凭据失效" },
       expired_cookie: { tone: "danger", label: "Cookie 失效" },
       blocked: { tone: "danger", label: "接入受阻" }
     };
@@ -4854,9 +4857,13 @@
         }
         row.dataset.available = item.available ? "true" : "false";
         if (summary) {
-          summary.textContent = item.available
-            ? `${item.label || "Cookie"} 已保存，展开查看`
-            : item.detail || "当前没有可展示 Cookie";
+          if (key === "xiaohongshu" && item.available) {
+            summary.textContent = "xsec_token 内容令牌已保存（不代表账号登录），展开查看";
+          } else {
+            summary.textContent = item.available
+              ? `${item.label || "Cookie"} 已保存，展开查看`
+              : item.detail || "当前没有可展示 Cookie";
+          }
         }
         if (value) {
           value.value = item.value || item.detail || "当前没有可展示 Cookie / 登录凭据。";
