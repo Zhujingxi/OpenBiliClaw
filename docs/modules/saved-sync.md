@@ -17,7 +17,7 @@
 | 批量逐项执行 | ✅ | `run_sync_task()` 只读取该 task ID 仍存在的 membership，按平台分组、平台内串行执行，并以 `execution_id` 原子 claim / 完成每一项；同一任务的并发 runner 不会重复调用 adapter，平台组之间仍可并行。执行中每 30 秒 owner-fenced heartbeat；240 秒是调用方响应 deadline，不假定能强制终止不遵守 cancellation 的底层 I/O。 |
 | 可恢复任务查询 | ✅ | `get_sync_task()` 只从 `native_save_states` 与 membership/item join 重建结果，进程内不保存易丢失的任务结果。 |
 | 安全失败归一化 | ✅ | 未注册 / 不支持的路由写为 `unsupported`；malformed target / result 写固定 `failed/invalid_adapter_result`；adapter 异常写 `failed/adapter_exception`。凡 adapter 因 item heartbeat 异常、响应 deadline 或调用方取消而进入 detached 状态，tracked watchdog 都会切换到 10ms–1s 有界退避的 owner-fenced heartbeat，直到真实终止后归一化 late terminal / malformed 结果，避免 detached 期间的后续心跳异常开放重叠重试。 |
-| B 站原生 adapter | ✅ | favorite 精确复用或创建 `OpenBiliClaw` 收藏夹；watch-later 写 B 站稍后再看。任意 endpoint 的 `-101` → `login_required`；只有 favorite 的 `11201` → `already_synced`；watch-later 的 `90003` 表示视频不可用，固定归一化为 `failed/bilibili_video_unavailable`，绝不伪装成幂等成功；application/HTTP 风控码 → `rate_limited`。 |
+| B 站原生 adapter | ✅ | favorite 精确复用或创建 `OpenBiliClaw` 收藏夹；watch-later 写 B 站稍后再看。任意 endpoint 的 `-101` → `login_required`；只有最终 favorite resource-deal POST 的 `11201` 会由 client 标记为 dedicated duplicate，且 adapter 仍要求 resolved action 为 favorite 才映射 `already_synced`；folder/resolver 的同码与非 favorite route 的该异常均为 `failed`；watch-later 的 `90003` 固定为 `failed/bilibili_video_unavailable`。 |
 
 ## 公开 API
 
@@ -51,8 +51,8 @@ adapter = BilibiliNativeSaveAdapter(client)
 - `favorite` 的真实目标是 `B站 OpenBiliClaw 收藏夹`，按 exact title 复用后调用 B 站收藏 resource endpoint。
 - `watch_later` 的真实目标是 `B站稍后再看`，不经过 favorite fallback。
 - `SESSDATA` 与 `bili_jct` 缺任一项都会在任何视频 lookup / POST 前返回 `login_required`；Cookie、CSRF、服务端 message/body 不会进入 `NativeSaveResult`。
-- BV → aid 使用 application-code-aware GET，aid 必须是非 bool 的正整数才允许写 POST。HTTP 412/429 分别保留为安全数值 code `-412/-429` 并归一化为 `rate_limited`。
-- 同一 client/title 的收藏夹 ensure 由实例内 async lock 串行；锁内重新查询 exact title，因此同进程并发保存只创建一次。锁不在进程全局共享，避免跨 event loop 污染。
+- BV → aid 使用 application-code-aware GET，aid 必须是非 bool 的正整数才允许写 POST。GET/POST 共用脱敏 transport mapping；HTTP 412/429 分别保留为安全数值 code `-412/-429`（保留异常 cause）并归一化为 `rate_limited`。
+- 同一个 client 实例内、同一 title 的收藏夹 ensure 由实例内 async lock 串行；锁内重新查询 exact title，因此仅保证该实例内的竞争调用创建一次。不同 client（即使代表同一账号）、不同进程或不同 event loop 之间不协调。
 - 本 adapter 目前只是可注册能力；Task 7 才会在 `RuntimeContext` 中绑定真实 client 并通过平台中立 API 暴露。不要把本提交解读为 UI 已开启账号写入。
 
 ### Local-first service

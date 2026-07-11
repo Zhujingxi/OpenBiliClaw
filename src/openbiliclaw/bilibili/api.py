@@ -33,6 +33,10 @@ class BilibiliAuthExpiredError(BilibiliAPIError):
     """Raised when Bilibili reports the current Cookie is logged out."""
 
 
+class BilibiliFavoriteDuplicateError(BilibiliAPIError):
+    """Raised only when the favorite resource-deal endpoint reports a duplicate."""
+
+
 def _json_object(value: Any) -> dict[str, Any]:
     """Coerce a JSON value into an object for strict typing.
 
@@ -336,6 +340,23 @@ class BilibiliAPIClient:
         cls._search_cooldown_level = 0
         cls._search_voucher_block_streak = 0
 
+    @staticmethod
+    def _sanitized_http_error(
+        method: str,
+        path: str,
+        exc: httpx.HTTPError,
+    ) -> BilibiliAPIError:
+        """Map transport failures without exposing request or response payloads."""
+        if isinstance(exc, httpx.HTTPStatusError):
+            status_code = exc.response.status_code
+            if status_code in {412, 429}:
+                code = -status_code
+                return BilibiliAPIError(
+                    f"Bilibili API {method} rate limited on {path} (code {code})",
+                    code=code,
+                )
+        return BilibiliAPIError(f"Bilibili API {method} failed on {path}")
+
     async def _get_json(
         self,
         path: str,
@@ -353,7 +374,7 @@ class BilibiliAPIClient:
             )
             resp.raise_for_status()
         except httpx.HTTPError as exc:
-            raise BilibiliAPIError(str(exc)) from exc
+            raise self._sanitized_http_error("GET", path, exc) from exc
 
         payload = _json_object(resp.json())
         code = int(payload.get("code", 0))
@@ -393,17 +414,8 @@ class BilibiliAPIClient:
         try:
             resp = await self._client.post(f"{self._BASE_URL}{path}", data=data)
             resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            status_code = exc.response.status_code
-            if status_code in {412, 429}:
-                code = -status_code
-                raise BilibiliAPIError(
-                    f"Bilibili API POST rate limited on {path} (code {code})",
-                    code=code,
-                ) from exc
-            raise BilibiliAPIError(f"Bilibili API POST failed on {path}") from exc
         except httpx.HTTPError as exc:
-            raise BilibiliAPIError(f"Bilibili API POST failed on {path}") from exc
+            raise self._sanitized_http_error("POST", path, exc) from exc
 
         try:
             payload = resp.json()
@@ -806,16 +818,24 @@ class BilibiliAPIClient:
         """Add a Bilibili video to an existing favorite folder."""
         csrf = self._csrf_token()
         aid = await self._resolve_aid(bvid)
-        await self._post_json(
-            "/x/v3/fav/resource/deal",
-            data={
-                "rid": aid,
-                "type": 2,
-                "add_media_ids": str(media_id),
-                "del_media_ids": "",
-                "csrf": csrf,
-            },
-        )
+        try:
+            await self._post_json(
+                "/x/v3/fav/resource/deal",
+                data={
+                    "rid": aid,
+                    "type": 2,
+                    "add_media_ids": str(media_id),
+                    "del_media_ids": "",
+                    "csrf": csrf,
+                },
+            )
+        except BilibiliAPIError as exc:
+            if exc.code == 11201:
+                raise BilibiliFavoriteDuplicateError(
+                    "Bilibili favorite already contains this video (code 11201)",
+                    code=11201,
+                ) from exc
+            raise
 
     async def add_video_to_watch_later(self, bvid: str) -> None:
         """Add a Bilibili video to the authenticated account's watch-later list."""

@@ -36,7 +36,7 @@
 
 ### Native-save 平台集成边界
 
-`src/openbiliclaw/saved_sync/router.py` 的 `NativeSaveAdapter` 是收藏/稍后再看平台写入协议，和本页下方的 OpenClaw integration adapter 不是同一层。首个实现 `BilibiliNativeSaveAdapter` 只消费既有 `BilibiliAPIClient`：favorite 写 exact-title `OpenBiliClaw` 收藏夹，watch-later 写 B 站稍后再看；只有 favorite `11201` 视为重复成功，watch-later `90003` 视为视频不可用失败；登录失效与 HTTP/application 限流分别输出稳定状态，不透传 Cookie、CSRF 或 response body。
+`src/openbiliclaw/saved_sync/router.py` 的 `NativeSaveAdapter` 是收藏/稍后再看平台写入协议，和本页下方的 OpenClaw integration adapter 不是同一层。首个实现 `BilibiliNativeSaveAdapter` 只消费既有 `BilibiliAPIClient`：favorite 写 exact-title `OpenBiliClaw` 收藏夹，watch-later 写 B 站稍后再看；只有 resource-deal POST 产生的 dedicated favorite duplicate 异常视为重复成功，generic `11201` 保持失败，watch-later `90003` 视为视频不可用失败；登录失效与 GET/POST HTTP/application 限流分别输出稳定状态，不透传 Cookie、CSRF 或 response body。
 
 平台 adapter 不拥有本地 membership、任务调度、重试或 HTTP 路由。`SavedSyncService` 保持 local-first 顺序并持久化结果，后续 Task 7 才负责 runtime 注入与平台中立 API wiring。真实 B 站写入 E2E 属于账号状态变更，必须等待明确授权或测试账号。
 

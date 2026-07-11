@@ -173,9 +173,10 @@ BILI_EXTENSION_E2E=1 .venv/bin/pytest tests/test_bili_extension_browser_e2e.py -
 | `FollowingUser` | 关注用户（mid, uname, sign） |
 | `CommentInfo` | 评论（mid, uname, message, like_count） |
 | `AuthStatus` | 认证状态（has_cookie, authenticated, username 等；`network_error=True` 表示校验死在传输层——代理 / 风控 / 超时——而非 Cookie 失效） |
-| `BilibiliAuthExpiredError` | `/nav` 返回 `-101` 时的专项异常，仍继承 `BilibiliAPIError` |
+| `BilibiliAuthExpiredError` | 任意 `_get_json()` endpoint 返回 `-101` 时的专项异常，仍继承 `BilibiliAPIError` |
+| `BilibiliFavoriteDuplicateError` | 仅最终 `/x/v3/fav/resource/deal` POST 返回 `11201` 时产生的安全 operation-tagged 异常；folder/resolver 同码不会变成 duplicate success。 |
 
-`BilibiliAPIError.code` 保存可供 adapter 判定的数值 application code。认证 POST 在网络前通过 `SimpleCookie` 同时校验 `SESSDATA` 与 `bili_jct`；缺失时抛 `BilibiliAuthExpiredError(code=-101)`。POST 的 HTTP/application 错误只暴露 endpoint 与 code，不复制 B 站 response message/body，也不输出 Cookie 或 CSRF；HTTP 412/429 分别转换成 `-412/-429`。`-101` 在所有 `_get_json()` 路径统一使用固定脱敏异常/日志，不再只特判 `/nav`。
+`BilibiliAPIError.code` 保存可供 adapter 判定的数值 application code。认证 POST 在网络前通过 `SimpleCookie` 同时校验 `SESSDATA` 与 `bili_jct`；缺失时抛 `BilibiliAuthExpiredError(code=-101)`。GET/POST 共用脱敏 HTTP mapping，只暴露 method、endpoint 与安全 code，不复制 request/response body/message，也不输出 Cookie 或 CSRF；HTTP 412/429 分别转换成 `-412/-429` 并保留原始 HTTP exception 作为 cause。`-101` 在所有 `_get_json()` 路径统一使用固定脱敏异常/日志，不再只特判 `/nav`。
 
 ## 配置项
 
@@ -202,5 +203,5 @@ headed = false     # 调试时设为 true
 9. **Cookie 过期显式化**：所有 `_get_json()` endpoint 的 `-101` 都与普通业务错误分开处理，日志和异常文本使用固定 session expired / re-auth 提示，不复制远端 message/body；上层仍可按 `BilibiliAPIError` 统一兜底
 10. **进程级 search 冷却（分级）**：`BilibiliAPIClient.search()` 把 412 与 `v_voucher` 拆开处理——412 即时硬冷却（base 600s）；`v_voucher` 走 `_record_voucher_block()` 阈值化，连续 `_SEARCH_VOUCHER_BLOCK_THRESHOLD`（默认 3）个关键词耗尽才设共享 cooldown（base 180s），单个被风控的关键词不再让整轮 search + explore 归零十几分钟，`_reset_search_cooldown_backoff()` 在任一成功时清零 streak 与升级档位。dedicated search clients 和主 runtime client 仍通过 `search_cooldown_remaining()` 共享同一状态
 11. **扩展兜底只做冷却时补位**：B 站 API 搜索仍是主路径；后端搜索任务只在服务端搜索冷却且浏览器 presence 在线时触发，避免常驻打开搜索页或把插件变成主 crawler。扩展侧只抓用户真实会话中可见的渲染结果，不在 isolated world 里伪造签名请求；background 对 `BILI_TASK_EXECUTE` 做短重试以吸收 content script 注入时序抖动；回传结果也不直接入正式池，而是进入统一候选待评估池，继续复用跨源评估、去重和 admission 规则。
-12. **账号写入 fail closed**：收藏/稍后再看在视频信息 lookup 前先验证 `SESSDATA + bili_jct`；BV → aid 通过 `_get_json()` 解析 application code，只有非 bool 的正整数 aid 才允许发写 POST。favorite 的 `11201` 才是 `already_synced`；watch-later 的 `90003` 是视频不可用并固定返回 failed。所有持久化/上层结果使用脱敏文案。
-13. **收藏夹并发单飞**：每个 `BilibiliAPIClient` 按 exact title 持有实例内 `asyncio.Lock`；进入锁后重新查询再决定创建，避免同一账号同进程并发任务重复创建 `OpenBiliClaw`。不使用 process-global lock，避免不同 event loop/client 相互绑定。
+12. **账号写入 fail closed**：收藏/稍后再看在视频信息 lookup 前先验证 `SESSDATA + bili_jct`；BV → aid 通过 `_get_json()` 解析 application code，只有非 bool 的正整数 aid 才允许发写 POST。只有最终 favorite resource-deal POST 的 `11201` 会被 client 包装成 `BilibiliFavoriteDuplicateError`，adapter 还要求 resolved action 为 favorite 才映射 `already_synced`；folder/resolver 的 generic `11201` 及非 favorite route 的 duplicate 异常保持 failed。watch-later 的 `90003` 是视频不可用并固定返回 failed。
+13. **收藏夹并发单飞范围**：每个 `BilibiliAPIClient` 按 exact title 持有实例内 `asyncio.Lock`；进入锁后重新查询再决定创建，只避免同一个 client 实例内的并发调用重复创建 `OpenBiliClaw`。不同 client（即使使用同一账号）、不同进程或 event loop 之间没有协调；不宣称 account/process 级全局单飞。

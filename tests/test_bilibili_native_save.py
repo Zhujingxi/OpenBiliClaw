@@ -10,8 +10,8 @@ from openbiliclaw.bilibili.api import (
     BilibiliAPIClient,
     BilibiliAPIError,
     BilibiliAuthExpiredError,
+    BilibiliFavoriteDuplicateError,
     FavoriteFolder,
-    VideoInfo,
 )
 
 
@@ -52,6 +52,27 @@ async def test_add_video_to_favorite_posts_resource_shape() -> None:
         },
     )
     resolve.assert_awaited_once_with("BV1")
+
+
+async def test_resource_deal_duplicate_is_operation_tagged_and_sanitized() -> None:
+    client = _authenticated_client()
+    client._resolve_aid = AsyncMock(return_value=42)
+    client._post_json = AsyncMock(
+        side_effect=BilibiliAPIError(
+            "Cookie=secret; private resource response",
+            code=11201,
+        )
+    )
+
+    with pytest.raises(BilibiliAPIError) as captured:
+        await client.add_video_to_favorite("BV1", 7)
+
+    assert isinstance(captured.value, BilibiliFavoriteDuplicateError)
+    assert captured.value.code == 11201
+    assert str(captured.value) == "Bilibili favorite already contains this video (code 11201)"
+    assert isinstance(captured.value.__cause__, BilibiliAPIError)
+    assert "secret" not in str(captured.value)
+    assert "private resource response" not in str(captured.value)
 
 
 async def test_resolve_aid_uses_application_aware_view_endpoint() -> None:
@@ -199,15 +220,15 @@ async def test_ensure_favorite_folder_rejects_invalid_created_id(
 )
 async def test_native_save_rejects_incomplete_auth_before_lookup(cookie: str) -> None:
     client = BilibiliAPIClient(cookie=cookie)
-    lookup = AsyncMock(return_value=VideoInfo(bvid="BV1", aid=42))
+    resolve = AsyncMock(return_value=42)
     post = AsyncMock(return_value={})
-    client.get_video_info = lookup
+    client._resolve_aid = resolve
     client._post_json = post
 
     with pytest.raises(BilibiliAuthExpiredError, match="login required"):
         await client.add_video_to_watch_later("BV1")
 
-    lookup.assert_not_awaited()
+    resolve.assert_not_awaited()
     post.assert_not_awaited()
 
 
@@ -267,6 +288,38 @@ async def test_post_json_preserves_http_rate_limit_status_as_safe_code(
 
     assert captured.value.code == application_code
     assert str(application_code) in str(captured.value)
+    assert isinstance(captured.value.__cause__, httpx.HTTPStatusError)
+    assert "secret" not in str(captured.value.__cause__)
+    assert "secret" not in str(captured.value)
+    assert "private response body" not in str(captured.value)
+
+
+@pytest.mark.parametrize(("status_code", "application_code"), [(412, -412), (429, -429)])
+async def test_get_json_preserves_http_rate_limit_status_as_safe_code(
+    status_code: int,
+    application_code: int,
+) -> None:
+    def blocked(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code,
+            request=request,
+            text="Cookie=secret; csrf=secret; private response body",
+        )
+
+    client = _authenticated_client()
+    old_http = client._client
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(blocked))
+    await old_http.aclose()
+    try:
+        with pytest.raises(BilibiliAPIError) as captured:
+            await client._get_json("/x/web-interface/view", params={"bvid": "BV1"})
+    finally:
+        await client.close()
+
+    assert captured.value.code == application_code
+    assert str(application_code) in str(captured.value)
+    assert isinstance(captured.value.__cause__, httpx.HTTPStatusError)
+    assert "secret" not in str(captured.value.__cause__)
     assert "secret" not in str(captured.value)
     assert "private response body" not in str(captured.value)
 

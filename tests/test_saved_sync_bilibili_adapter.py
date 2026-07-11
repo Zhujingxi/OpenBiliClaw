@@ -4,11 +4,14 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from openbiliclaw.bilibili.api import (
+    BilibiliAPIClient,
     BilibiliAPIError,
     BilibiliAuthExpiredError,
+    BilibiliFavoriteDuplicateError,
     FavoriteFolder,
 )
 from openbiliclaw.saved_sync.adapters.bilibili import BilibiliNativeSaveAdapter
@@ -113,17 +116,71 @@ async def test_generic_api_minus_101_defensively_maps_to_login_required() -> Non
 
 
 async def test_favorite_duplicate_code_maps_to_already_synced() -> None:
-    client = _client()
-    client.add_video_to_favorite.side_effect = BilibiliAPIError("private response", code=11201)
-
-    result = await BilibiliNativeSaveAdapter(client).save(
-        SavedItemInput("bilibili", "BV1"),
-        _route("favorite"),
+    client = BilibiliAPIClient(cookie="SESSDATA=s; bili_jct=csrf; DedeUserID=1")
+    client.ensure_favorite_folder = AsyncMock(
+        return_value=FavoriteFolder(media_id=7, title="OpenBiliClaw")
     )
+    client._resolve_aid = AsyncMock(return_value=42)
+    client._post_json = AsyncMock(side_effect=BilibiliAPIError("private response", code=11201))
+    try:
+        result = await BilibiliNativeSaveAdapter(client).save(
+            SavedItemInput("bilibili", "BV1"),
+            _route("favorite"),
+        )
+    finally:
+        await client.close()
 
     assert result.status == "already_synced"
     assert result.error_code == "bilibili_11201"
     assert "private" not in result.error_message
+
+
+@pytest.mark.parametrize("boundary", ["folder", "resolver"])
+async def test_generic_11201_outside_resource_deal_is_failed(boundary: str) -> None:
+    client = BilibiliAPIClient(cookie="SESSDATA=s; bili_jct=csrf; DedeUserID=1")
+    post = AsyncMock(return_value={})
+    client._post_json = post
+    if boundary == "folder":
+        client.get_favorite_folders = AsyncMock(
+            side_effect=BilibiliAPIError("private folder response", code=11201)
+        )
+    else:
+        client.ensure_favorite_folder = AsyncMock(
+            return_value=FavoriteFolder(media_id=7, title="OpenBiliClaw")
+        )
+        client._get_json = AsyncMock(
+            side_effect=BilibiliAPIError("private resolver response", code=11201)
+        )
+
+    try:
+        result = await BilibiliNativeSaveAdapter(client).save(
+            SavedItemInput("bilibili", "BV1"),
+            _route("favorite"),
+        )
+    finally:
+        await client.close()
+
+    assert result.status == "failed"
+    assert result.error_code == "bilibili_11201"
+    assert result.error_message == "Bilibili native save failed (code 11201)"
+    post.assert_not_awaited()
+
+
+async def test_duplicate_exception_on_non_favorite_route_is_failed() -> None:
+    client = _client()
+    client.add_video_to_watch_later.side_effect = BilibiliFavoriteDuplicateError(
+        "Bilibili favorite already contains this video (code 11201)",
+        code=11201,
+    )
+
+    result = await BilibiliNativeSaveAdapter(client).save(
+        SavedItemInput("bilibili", "BV1"),
+        _route("watch_later"),
+    )
+
+    assert result.status == "failed"
+    assert result.error_code == "bilibili_11201"
+    assert result.error_message == "Bilibili native save failed (code 11201)"
 
 
 async def test_watch_later_deleted_video_code_maps_to_sanitized_failure() -> None:
@@ -156,6 +213,41 @@ async def test_rate_control_codes_map_to_rate_limited(code: int) -> None:
     assert result.error_code == f"bilibili_{code}"
     assert str(code) in result.error_message
     assert "private" not in result.error_message
+
+
+@pytest.mark.parametrize(
+    ("action", "status_code", "application_code"),
+    [("watch_later", 412, -412), ("favorite", 429, -429)],
+)
+async def test_get_http_rate_limit_maps_to_adapter_rate_limited(
+    action: str,
+    status_code: int,
+    application_code: int,
+) -> None:
+    def blocked(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        return httpx.Response(
+            status_code,
+            request=request,
+            text="Cookie=secret; csrf=secret; private response body",
+        )
+
+    client = BilibiliAPIClient(cookie="SESSDATA=s; bili_jct=csrf; DedeUserID=1")
+    old_http = client._client
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(blocked))
+    await old_http.aclose()
+    try:
+        result = await BilibiliNativeSaveAdapter(client).save(
+            SavedItemInput("bilibili", "BV1"),
+            _route(action),
+        )
+    finally:
+        await client.close()
+
+    assert result.status == "rate_limited"
+    assert result.error_code == f"bilibili_{application_code}"
+    assert "secret" not in result.error_message
+    assert "private response body" not in result.error_message
 
 
 async def test_other_api_failure_is_sanitized() -> None:

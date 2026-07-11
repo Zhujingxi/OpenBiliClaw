@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar
 
-from ...bilibili.api import BilibiliAPIError, BilibiliAuthExpiredError
+from ...bilibili.api import (
+    BilibiliAPIError,
+    BilibiliAuthExpiredError,
+    BilibiliFavoriteDuplicateError,
+)
 from ..models import (
     NativeSaveAction,
     NativeSaveCapability,
@@ -18,7 +22,6 @@ if TYPE_CHECKING:
 class BilibiliNativeSaveAdapter:
     """Write Bilibili saved items to the authenticated user's account."""
 
-    _FAVORITE_DUPLICATE_CODES: ClassVar[frozenset[int]] = frozenset({11201})
     _RATE_LIMIT_CODES: ClassVar[frozenset[int]] = frozenset({-352, -412, -429, -509})
     _CAPABILITY: ClassVar[NativeSaveCapability] = NativeSaveCapability(
         platform="bilibili",
@@ -48,6 +51,11 @@ class BilibiliNativeSaveAdapter:
                 await self._client.add_video_to_watch_later(item.content_id)
         except BilibiliAuthExpiredError as exc:
             return self._failure_result(item, route, "login_required", exc.code)
+        except BilibiliFavoriteDuplicateError as exc:
+            status: NativeSaveStatus = (
+                "already_synced" if route.resolved_action == "favorite" else "failed"
+            )
+            return self._failure_result(item, route, status, exc.code)
         except BilibiliAPIError as exc:
             if exc.code == -101:
                 return self._failure_result(item, route, "login_required", exc.code)
@@ -60,12 +68,7 @@ class BilibiliNativeSaveAdapter:
                     error_code="bilibili_video_unavailable",
                     error_message="Bilibili video is unavailable for watch later",
                 )
-            if route.resolved_action == "favorite" and exc.code in self._FAVORITE_DUPLICATE_CODES:
-                status: NativeSaveStatus = "already_synced"
-            elif exc.code in self._RATE_LIMIT_CODES:
-                status = "rate_limited"
-            else:
-                status = "failed"
+            status = "rate_limited" if exc.code in self._RATE_LIMIT_CODES else "failed"
             return self._failure_result(item, route, status, exc.code)
         except Exception:
             return NativeSaveResult(
