@@ -20,11 +20,11 @@
 2. **已取得 token 的非浏览器 Bearer**：CLI/curl 不带 `Origin`、只带 `Authorization: Bearer <token>` 时有效。
 3. **允许来源的跨源 Bearer**：浏览器跨源登录只有 `Origin` 已在 `allowed_bearer_origins` 中且 TTL 有限时才返回 token；后续请求同时带该 `Origin` 与 `Authorization: Bearer <token>`。
 
-把相应参数放入 Bash 数组；可信 loopback 保持空数组：
+先启动一个**专用 Bash 会话**：`bash --noprofile --norc`。下面所有 Bash 代码块必须按顺序粘贴到该专用会话，不能散落到日常交互 shell；最后一个代码块会立即清理 cookie jar、header 和 trap。可信 loopback 的 header 数组保持为空：
 
 ```bash
 set -Eeuo pipefail
-command -v bash >/dev/null
+[[ -n "${BASH_VERSION:-}" ]]
 command -v curl >/dev/null
 command -v jq >/dev/null
 
@@ -33,6 +33,30 @@ OBC_HEADERS=()
 OBC_COOKIE_JAR=''
 OBC_ORIGINAL_AUTO=''
 OBC_RESTORE_DONE=0
+OBC_CONFIG_TOUCHED=0
+
+cleanup_native_save_e2e() {
+  local status=$? cleanup_status=0
+  trap - EXIT INT TERM
+  set +e
+  if [[ "${OBC_CONFIG_TOUCHED:-0}" == 1 && -n "${OBC_ORIGINAL_AUTO:-}" && \
+        "${OBC_RESTORE_DONE:-0}" != 1 ]]; then
+    if ! declare -F set_auto_sync >/dev/null || ! set_auto_sync "$OBC_ORIGINAL_AUTO"; then
+      echo '警告：自动同步配置恢复失败，当前值可能仍被测试修改；请立即手动检查。' >&2
+      cleanup_status=1
+    fi
+  fi
+  if [[ -n "${OBC_COOKIE_JAR:-}" ]]; then
+    rm -f -- "$OBC_COOKIE_JAR" || cleanup_status=1
+    OBC_COOKIE_JAR=''
+  fi
+  OBC_HEADERS=()
+  if (( status == 0 && cleanup_status != 0 )); then status=$cleanup_status; fi
+  exit "$status"
+}
+trap cleanup_native_save_e2e EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # 同源 Cookie 示例：
 # OBC_COOKIE_JAR="$(mktemp)"
@@ -68,14 +92,19 @@ api() {
 ```bash
 set_auto_sync() {
   local expected="$1" response effective
-  response="$(api -X PUT "$OBC_BASE/api/config" \
+  OBC_CONFIG_TOUCHED=1
+  if ! response="$(api -X PUT "$OBC_BASE/api/config" \
     -H 'Content-Type: application/json' \
-    -d "{\"saved_sync\":{\"auto_sync_enabled\":$expected},\"suppress_background_llm_work\":true}")"
+    -d "{\"saved_sync\":{\"auto_sync_enabled\":$expected},\"suppress_background_llm_work\":true}")"; then
+    return 1
+  fi
   jq -e --argjson expected "$expected" '
     .ok == true and .reloaded == true and .rollback_applied == false and
     .config.saved_sync.auto_sync_enabled == $expected
   ' <<<"$response" >/dev/null
-  effective="$(api "$OBC_BASE/api/config" | jq -r '.saved_sync.auto_sync_enabled')"
+  if ! effective="$(api "$OBC_BASE/api/config" | jq -r '.saved_sync.auto_sync_enabled')"; then
+    return 1
+  fi
   test "$effective" = "$expected"
 }
 
@@ -83,7 +112,10 @@ wait_saved_task() {
   local task_id="$1" deadline=$((SECONDS + 360)) snapshot
   test -n "$task_id"
   while (( SECONDS < deadline )); do
-    snapshot="$(api "$OBC_BASE/api/saved-sync/tasks/$task_id")"
+    if ! snapshot="$(api "$OBC_BASE/api/saved-sync/tasks/$task_id")"; then
+      echo "saved-sync task poll failed: $task_id" >&2
+      return 1
+    fi
     if jq -e '
       (.items | length) > 0 and
       ([.items[].status] | all(. != "pending" and . != "syncing"))
@@ -97,23 +129,6 @@ wait_saved_task() {
   echo "saved-sync task timed out: $task_id" >&2
   return 1
 }
-
-cleanup_native_save_e2e() {
-  local status=$? cleanup_status=0
-  trap - EXIT INT TERM
-  set +e
-  if [[ -n "${OBC_ORIGINAL_AUTO:-}" && "${OBC_RESTORE_DONE:-0}" != 1 ]]; then
-    set_auto_sync "$OBC_ORIGINAL_AUTO" || cleanup_status=1
-  fi
-  if [[ -n "${OBC_COOKIE_JAR:-}" ]]; then
-    rm -f -- "$OBC_COOKIE_JAR" || cleanup_status=1
-  fi
-  if (( status == 0 && cleanup_status != 0 )); then status=$cleanup_status; fi
-  exit "$status"
-}
-trap cleanup_native_save_e2e EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
 
 OBC_ORIGINAL_AUTO="$(api "$OBC_BASE/api/config" | jq -r '.saved_sync.auto_sync_enabled')"
 [[ "$OBC_ORIGINAL_AUTO" == true || "$OBC_ORIGINAL_AUTO" == false ]]
@@ -205,6 +220,12 @@ done
 
 set_auto_sync "$OBC_ORIGINAL_AUTO"
 OBC_RESTORE_DONE=1
+if [[ -n "$OBC_COOKIE_JAR" ]]; then
+  rm -f -- "$OBC_COOKIE_JAR"
+  OBC_COOKIE_JAR=''
+fi
+OBC_HEADERS=()
+trap - EXIT INT TERM
 ```
 
-`set -Eeuo pipefail` 保证任一 curl / jq / 状态断言失败立即停止。INT / TERM 会先转换成非零退出，再由唯一 EXIT cleanup 恢复原始自动同步值并删除 cookie jar；只有恢复成功后才把 `OBC_RESTORE_DONE` 置为 1。不要用重复 `/sync` 代替真实平台幂等测试。
+`set -Eeuo pipefail` 保证普通 curl / jq / 状态断言失败立即停止；task poll 的 curl 失败也会显式返回失败，不静默重试。INT / TERM 会先转换成非零退出，再由唯一 EXIT cleanup 恢复已实际触碰的自动同步值并删除 cookie jar；恢复失败会输出高可见警告并保持非零退出。正常完成会立即删除 jar、清空 header 和 trap，无需等待专用 shell 退出。不要用重复 `/sync` 代替真实平台幂等测试。

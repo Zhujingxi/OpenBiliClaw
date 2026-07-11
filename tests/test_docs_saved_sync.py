@@ -24,5 +24,10 @@ def test_saved_sync_docs_name_default_and_routes() -> None:
     assert "trap cleanup_native_save_e2e EXIT" in e2e_doc
     assert "trap 'exit 130' INT" in e2e_doc
     assert "OBC_RESTORE_DONE=1" in e2e_doc
+    assert "bash --noprofile --norc" in e2e_doc
+    assert "OBC_CONFIG_TOUCHED=1" in e2e_doc
+    assert "自动同步配置恢复失败" in e2e_doc
+    assert "OBC_HEADERS=()" in e2e_doc
+    assert "trap - EXIT INT TERM" in e2e_doc
     assert "(.items | length) > 0" in e2e_doc
     assert "非浏览器 Bearer" in e2e_doc
