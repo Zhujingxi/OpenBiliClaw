@@ -56,28 +56,8 @@ def classify_llm_unavailability(exc: BaseException) -> str | None:
     limit" fallback wraps a rate-limit cause and should read as backoff, not a
     missing provider.
     """
-    # Lazily imported to avoid a circular import (service imports this module).
-    from openbiliclaw.llm.service import LLMProviderExecutionError
-
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    rate_limited = False
-    no_provider = False
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        message = str(current).lower()
-        if isinstance(current, LLMRateLimitError) or "rate limit" in message:
-            rate_limited = True
-        if isinstance(current, LLMFallbackError | LLMProviderExecutionError) and (
-            "no provider was available" in message
-        ):
-            no_provider = True
-        current = current.__cause__ or current.__context__
-    if rate_limited:
-        return "rate_limited"
-    if no_provider:
-        return "no_provider"
-    return None
+    kind = classify_llm_failure_kind(exc)
+    return kind if kind in {"rate_limited", "no_provider"} else None
 
 
 # Substrings that mark an upstream content-moderation / compliance refusal.
@@ -104,6 +84,63 @@ _LLM_QUOTA_MARKERS = (
     "exhausted",
     "429",
 )
+
+_LLM_TIMEOUT_MARKERS = ("timeout", "timed out", "deadline exceeded")
+_LLM_INVALID_RESPONSE_MARKERS = (
+    "empty response",
+    "empty completion",
+    "invalid response",
+    "expected scored json",
+)
+
+
+def classify_llm_failure_kind(exc: BaseException) -> str | None:
+    """Return a machine-readable LLM failure kind from an exception chain.
+
+    The chain walk is cycle-safe. Specific provider throttling and missing
+    provider states win over coarser timeout/response classifications.
+    """
+
+    # Lazily imported to avoid a circular import (service imports this module).
+    from openbiliclaw.llm.service import LLMProviderExecutionError
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    rate_limited = no_provider = auth_failed = False
+    timed_out = invalid_response = False
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = str(current).lower()
+        if isinstance(current, LLMRateLimitError) or any(
+            marker in message for marker in _LLM_QUOTA_MARKERS
+        ):
+            rate_limited = True
+        if isinstance(current, LLMFallbackError | LLMProviderExecutionError) and (
+            "no provider was available" in message
+        ):
+            no_provider = True
+        if any(marker in message for marker in _LLM_AUTH_MARKERS):
+            auth_failed = True
+        if isinstance(current, (LLMTimeoutError, TimeoutError)) or any(
+            marker in message for marker in _LLM_TIMEOUT_MARKERS
+        ):
+            timed_out = True
+        if isinstance(current, LLMResponseError) or any(
+            marker in message for marker in _LLM_INVALID_RESPONSE_MARKERS
+        ):
+            invalid_response = True
+        current = current.__cause__ or current.__context__
+    if rate_limited:
+        return "rate_limited"
+    if no_provider:
+        return "no_provider"
+    if auth_failed:
+        return "auth_failed"
+    if timed_out:
+        return "timeout"
+    if invalid_response:
+        return "invalid_response"
+    return None
 
 
 def describe_llm_failure(exc: BaseException) -> str | None:

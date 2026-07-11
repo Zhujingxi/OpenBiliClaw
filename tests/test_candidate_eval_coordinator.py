@@ -2,16 +2,26 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from openbiliclaw.discovery.candidate_pipeline import CandidateEvalClaim, CandidateEvalOutcome
+from openbiliclaw.discovery.candidate_pipeline import (
+    CandidateEvalClaim,
+    CandidateEvalOutcome,
+    DiscoveryCandidatePipeline,
+)
+from openbiliclaw.discovery.candidate_pool import DiscoveryCandidateWrite
+from openbiliclaw.llm.base import LLMFallbackError, LLMRateLimitError
 from openbiliclaw.runtime.candidate_eval import (
     CandidateEvalCoordinator,
     CandidateEvalSnapshot,
     effective_candidate_eval_workers,
 )
+from openbiliclaw.storage.database import Database
+
+if TYPE_CHECKING:
+    from openbiliclaw.discovery.engine import DiscoveredContent
 
 
 @dataclass
@@ -91,6 +101,11 @@ class _FakeStagedPipeline:
                     "stale": 0,
                 }
             )
+
+    def fail(self, index: int, error: BaseException) -> None:
+        batch = self.started[index]
+        if not batch.future.done():
+            batch.future.set_exception(error)
 
 
 def _coordinator(
@@ -173,3 +188,197 @@ async def test_notify_at_idle_boundary_is_not_lost() -> None:
     await pipeline.wait_for_started(1)
     await coordinator.stop()
     await task
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_uses_provider_retry_after() -> None:
+    now = [100.0]
+    pipeline = _FakeStagedPipeline(candidate_count=30)
+    coordinator = CandidateEvalCoordinator(
+        pipeline=pipeline,  # type: ignore[arg-type]
+        snapshot_provider=lambda: CandidateEvalSnapshot(
+            available=pipeline.available,
+            target=600,
+            pending_eval=pipeline.pending_eval,
+            evaluating=pipeline.in_flight * 30,
+            evaluated=0,
+        ),
+        profile_provider=lambda: object(),
+        worker_count=1,
+        batch_size=30,
+        safety_wake_seconds=0.01,
+        time_fn=lambda: now[0],
+    )
+    task = asyncio.create_task(coordinator.run_forever())
+    await pipeline.wait_for_started(1)
+    error = LLMRateLimitError("rate limited")
+    error.retry_after = 45  # type: ignore[attr-defined]
+    pipeline.fail(0, error)
+    async with asyncio.timeout(2):
+        while coordinator.state != "backoff":
+            await asyncio.sleep(0)
+
+    assert coordinator.status_payload()["candidate_eval_backoff_until"] == 145.0
+    assert pipeline.pending_eval == 30
+    await coordinator.stop()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_no_provider_pauses_until_config_notification() -> None:
+    pipeline = _FakeStagedPipeline(candidate_count=30)
+    coordinator = _coordinator(pipeline, worker_count=1)
+    task = asyncio.create_task(coordinator.run_forever())
+    await pipeline.wait_for_started(1)
+    pipeline.fail(0, LLMFallbackError("No provider was available to process the request."))
+    async with asyncio.timeout(2):
+        while coordinator.state != "paused":
+            await asyncio.sleep(0)
+
+    coordinator.notify("candidate_enqueued:test")
+    await asyncio.sleep(0.08)
+    assert len(pipeline.started) == 1
+    coordinator.notify("config_reloaded")
+    await pipeline.wait_for_started(2)
+
+    await coordinator.stop()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_three_zero_cache_batches_trigger_supply_and_backoff() -> None:
+    pipeline = _FakeStagedPipeline(candidate_count=120)
+    supply_reasons: list[str] = []
+
+    async def request_supply(reason: str) -> None:
+        supply_reasons.append(reason)
+
+    coordinator = CandidateEvalCoordinator(
+        pipeline=pipeline,  # type: ignore[arg-type]
+        snapshot_provider=lambda: CandidateEvalSnapshot(
+            available=pipeline.available,
+            target=600,
+            pending_eval=pipeline.pending_eval,
+            evaluating=pipeline.in_flight * 30,
+            evaluated=0,
+        ),
+        profile_provider=lambda: object(),
+        worker_count=1,
+        batch_size=30,
+        supply_callback=request_supply,
+        safety_wake_seconds=0.01,
+    )
+    task = asyncio.create_task(coordinator.run_forever())
+    for index in range(3):
+        await pipeline.wait_for_started(index + 1)
+        pipeline.finish(index, cached=0)
+    async with asyncio.timeout(2):
+        while coordinator.state != "backoff" or not supply_reasons:
+            await asyncio.sleep(0)
+
+    assert supply_reasons == ["candidate_eval_no_progress"]
+    await coordinator.stop()
+    await task
+
+
+class _SqliteSoakEngine:
+    def __init__(self, database: Database) -> None:
+        self.database = database
+        self.delays = iter((0.03, 0.005, 0.015, 0.001, 0.02))
+
+    async def evaluate_content_batch(
+        self,
+        items: list[DiscoveredContent],
+        profile: object,
+        **kwargs: object,
+    ) -> list[float]:
+        await asyncio.sleep(next(self.delays, 0.001))
+        for item in items:
+            item.relevance_score = 0.9
+            item.relevance_reason = "fit"
+            item.topic_group = f"tech-{item.content_id}"
+            item.style_key = "deep_dive"
+            item.pool_expression = "推荐文案"
+            item.pool_topic_label = "推荐主题"
+        return [0.9] * len(items)
+
+    def cache_evaluated_results(self, items: list[DiscoveredContent]) -> int:
+        for item in items:
+            self.database.cache_content(
+                item.bvid,
+                content_id=item.content_id,
+                title=item.title,
+                source=item.source_strategy,
+                source_platform=item.source_platform,
+                relevance_score=item.relevance_score,
+                relevance_reason=item.relevance_reason,
+                topic_group=item.topic_group,
+                style_key=item.style_key,
+                pool_expression=item.pool_expression,
+                pool_topic_label=item.pool_topic_label,
+            )
+        return len(items)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_random_completion_soak(tmp_path: Any) -> None:
+    db = Database(tmp_path / "soak.db")
+    db.initialize()
+    db.enqueue_discovery_candidates(
+        [
+            DiscoveryCandidateWrite(
+                candidate_key=f"bilibili:BVSOAK{i:03d}",
+                source_platform="bilibili",
+                source_strategy="search",
+                bvid=f"BVSOAK{i:03d}",
+                content_id=f"BVSOAK{i:03d}",
+                title=f"Soak {i}",
+            )
+            for i in range(150)
+        ]
+    )
+    pipeline = DiscoveryCandidatePipeline(
+        database=db,
+        discovery_engine=_SqliteSoakEngine(db),  # type: ignore[arg-type]
+        pool_target_count=60,
+    )
+
+    def snapshot() -> CandidateEvalSnapshot:
+        readiness = db.count_pool_readiness()
+        counts = db.count_discovery_candidates_by_status()
+        return CandidateEvalSnapshot(
+            available=readiness["available"],
+            target=60,
+            pending_eval=readiness["pending_eval"],
+            evaluating=counts.get("evaluating", 0),
+            evaluated=readiness["evaluated_pending"],
+        )
+
+    coordinator = CandidateEvalCoordinator(
+        pipeline=pipeline,
+        snapshot_provider=snapshot,
+        profile_provider=lambda: object(),
+        worker_count=3,
+        batch_size=30,
+        safety_wake_seconds=0.01,
+    )
+    task = asyncio.create_task(coordinator.run_forever())
+    coordinator.notify("soak")
+    async with asyncio.timeout(5):
+        while snapshot().available < 60:
+            await asyncio.sleep(0.005)
+    await coordinator.stop()
+    await task
+
+    counts = db.count_discovery_candidates_by_status()
+    assert snapshot().available == 60
+    assert counts.get("evaluating", 0) == 0
+    assert (
+        db.conn.execute("SELECT COUNT(DISTINCT content_id) FROM content_cache").fetchone()[0] == 60
+    )
+    assert (
+        db.conn.execute(
+            "SELECT COUNT(*) FROM discovery_candidates WHERE claim_token IS NOT NULL"
+        ).fetchone()[0]
+        == 0
+    )

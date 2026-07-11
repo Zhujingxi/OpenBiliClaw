@@ -15,6 +15,7 @@ from openbiliclaw.llm.base import (
     LLMResponse,
     LLMResponseError,
     LLMTimeoutError,
+    classify_llm_failure_kind,
     classify_llm_unavailability,
     describe_llm_failure,
 )
@@ -165,6 +166,29 @@ def test_classify_llm_unavailability_rate_limit_wins_over_no_provider() -> None:
         except LLMFallbackError as np_err:
             raise LLMRateLimitError("rate limit hit") from np_err
     assert classify_llm_unavailability(exc_info.value) == "rate_limited"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (LLMProviderError("HTTP 401 unauthorized: invalid api key"), "auth_failed"),
+        (LLMTimeoutError("request timed out"), "timeout"),
+        (LLMResponseError("empty completion"), "invalid_response"),
+        (ValueError("unrelated local failure"), None),
+    ],
+)
+def test_classify_llm_failure_kind(error: BaseException, expected: str | None) -> None:
+    assert classify_llm_failure_kind(error) == expected
+
+
+def test_classify_llm_failure_kind_walks_wrapped_chain() -> None:
+    try:
+        try:
+            raise LLMTimeoutError("provider timeout")
+        except LLMTimeoutError as inner:
+            raise LLMFallbackError("all providers failed") from inner
+    except LLMFallbackError as wrapped:
+        assert classify_llm_failure_kind(wrapped) == "timeout"
 
 
 def test_describe_llm_failure_content_moderation_500() -> None:

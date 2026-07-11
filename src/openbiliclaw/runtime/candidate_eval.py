@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from openbiliclaw.llm.base import classify_llm_unavailability
+from openbiliclaw.llm.base import classify_llm_failure_kind
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +228,7 @@ class CandidateEvalCoordinator:
 
     def _record_failure(self, exc: BaseException) -> None:
         self.last_error = str(exc)
-        kind = classify_llm_unavailability(exc)
+        kind = classify_llm_failure_kind(exc)
         now = self.time_fn()
         if kind == "rate_limited":
             # 15s matches the scheduler's minimum useful retry cadence. Recalibrate
@@ -239,7 +239,7 @@ class CandidateEvalCoordinator:
             self._rate_limit_streak += 1
             self._backoff_until = now + max(delay, self._retry_after_seconds(exc))
             return
-        if kind == "no_provider":
+        if kind in {"no_provider", "auth_failed"}:
             self._paused = True
             return
         delay = _TRANSIENT_BACKOFF_SECONDS[
