@@ -1067,9 +1067,10 @@ def create_app(
 
     # Mirror the overseas-outbound proxy into the process-level source of truth
     # before any LLM/updater client is built. CN-direct clients never read it.
+    # getattr-guarded so a partial config object never hard-crashes app boot.
     from openbiliclaw.network import set_outbound_proxy
 
-    set_outbound_proxy(config.network.proxy)
+    set_outbound_proxy(getattr(getattr(config, "network", None), "proxy", "") or "")
 
     # Auto-generate the session signing secret on first enable so login state
     # survives restarts (see docs/plans/2026-05-30-web-password-auth-design.md).
