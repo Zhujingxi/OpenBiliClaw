@@ -294,6 +294,107 @@ def _seed_visible_pool_row(db: Database, bvid: str) -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_staged_claim_evaluate_complete_matches_legacy_drain(tmp_path: Path) -> None:
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    db.enqueue_discovery_candidates(
+        [
+            DiscoveryCandidateWrite(
+                candidate_key=f"bilibili:BVSTAGE{i}",
+                source_platform="bilibili",
+                source_strategy="search",
+                content_id=f"BVSTAGE{i}",
+                title=f"Stage {i}",
+            )
+            for i in range(3)
+        ]
+    )
+    llm = _ScoringLLM(
+        [
+            {
+                "content_id": f"BVSTAGE{i}",
+                "score": 0.9,
+                "reason": "fit",
+                "topic_group": "tech",
+                "style_key": "deep_dive",
+            }
+            for i in range(3)
+        ]
+    )
+    pipeline = DiscoveryCandidatePipeline(
+        database=db,
+        discovery_engine=ContentDiscoveryEngine(llm_service=llm, database=db),
+        pool_target_count=30,
+    )
+
+    claim = pipeline.claim_batch(limit=3)
+    assert claim is not None
+    assert claim.token
+    assert len(claim.rows) == 3
+    outcome = await pipeline.evaluate_claim(claim, _build_profile())
+    result = await pipeline.complete_claim(outcome)
+
+    assert result == {"evaluated": 3, "cached": 3, "rejected": 0, "stale": 0}
+    assert db.count_discovery_candidates_by_status()["cached"] == 3
+
+
+@pytest.mark.asyncio
+async def test_complete_claim_admits_only_ids_persisted_by_its_token(tmp_path: Path) -> None:
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    db.enqueue_discovery_candidates(
+        [
+            DiscoveryCandidateWrite(
+                candidate_key=f"bilibili:BVRACE{i}",
+                source_platform="bilibili",
+                source_strategy="search",
+                content_id=f"BVRACE{i}",
+                title=f"Race {i}",
+            )
+            for i in range(2)
+        ]
+    )
+    llm = _ScoringLLM(
+        [
+            {
+                "content_id": f"BVRACE{i}",
+                "score": 0.9,
+                "reason": "fit",
+                "topic_group": "tech",
+                "style_key": "deep_dive",
+            }
+            for i in range(2)
+        ]
+    )
+    pipeline = DiscoveryCandidatePipeline(
+        database=db,
+        discovery_engine=ContentDiscoveryEngine(llm_service=llm, database=db),
+        pool_target_count=30,
+    )
+
+    claim = pipeline.claim_batch(limit=2)
+    assert claim is not None
+    outcome = await pipeline.evaluate_claim(claim, _build_profile())
+    assert (
+        db.reset_claimed_discovery_candidates_to_pending(
+            [int(claim.rows[0]["id"])],
+            claim_token=claim.token,
+            reason="race",
+            max_attempts=5,
+            max_batch_attempts=50,
+            increment_attempts=False,
+        )
+        == 1
+    )
+    result = await pipeline.complete_claim(outcome)
+
+    assert result == {"evaluated": 1, "cached": 1, "rejected": 0, "stale": 1}
+    counts = db.count_discovery_candidates_by_status()
+    assert counts["cached"] == 1
+    assert counts["pending_eval"] == 1
+
+
 def test_candidate_roundtrip_preserves_publication_time(tmp_path: Path) -> None:
     db = Database(tmp_path / "test.db")
     db.initialize()

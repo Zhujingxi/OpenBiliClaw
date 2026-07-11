@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import logging
+import secrets
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -53,6 +54,24 @@ def _default_score_thresholds() -> dict[str, float]:
         "backfill": 0.60,
         "default": 0.60,
     }
+
+
+@dataclass(frozen=True)
+class CandidateEvalClaim:
+    """One token-owned batch claimed for LLM evaluation."""
+
+    token: str
+    rows: tuple[dict[str, Any], ...]
+    items: tuple[DiscoveredContent, ...]
+
+
+@dataclass(frozen=True)
+class CandidateEvalOutcome:
+    """LLM-only output awaiting serialized persistence and admission."""
+
+    claim: CandidateEvalClaim
+    scores: tuple[float, ...]
+    elapsed_seconds: float
 
 
 @dataclass
@@ -348,6 +367,129 @@ class DiscoveryCandidatePipeline:
         async with self._drain_lock:
             return await self._drain_pending_locked(profile=profile, batch_size=batch_size)
 
+    def claim_batch(self, *, limit: int) -> CandidateEvalClaim | None:
+        """Claim one token-owned batch without performing LLM work."""
+
+        claim_limit = max(0, int(limit))
+        if claim_limit <= 0:
+            return None
+        token = secrets.token_hex(16)
+        claim_fn = self.database.claim_discovery_candidates_for_eval
+        try:
+            rows = list(claim_fn(limit=claim_limit, claim_token=token))
+        except TypeError:
+            rows = list(claim_fn(limit=claim_limit))
+        if not rows:
+            return None
+        stored_tokens = {str(row.get("claim_token") or "") for row in rows}
+        stored_tokens.discard("")
+        if len(stored_tokens) == 1:
+            token = stored_tokens.pop()
+        items = tuple(row_to_discovered_content(row) for row in rows)
+        return CandidateEvalClaim(token=token, rows=tuple(rows), items=items)
+
+    async def evaluate_claim(self, claim: CandidateEvalClaim, profile: Any) -> CandidateEvalOutcome:
+        """Run only the LLM evaluation stage; this method performs no writes."""
+
+        started = self.time_fn()
+        scores = await self.discovery_engine.evaluate_content_batch(
+            list(claim.items),
+            profile,
+            source_context="mixed",
+            batch_size=len(claim.items),
+        )
+        if len(scores) != len(claim.items):
+            raise ValueError(
+                f"evaluation returned {len(scores)} scores for {len(claim.items)} candidates"
+            )
+        return CandidateEvalOutcome(
+            claim=claim,
+            scores=tuple(float(score) for score in scores),
+            elapsed_seconds=max(0.0, self.time_fn() - started),
+        )
+
+    async def complete_claim(self, outcome: CandidateEvalOutcome) -> dict[str, int]:
+        """Persist and admit one completed claim while honoring token ownership."""
+
+        claim = outcome.claim
+        rows = list(claim.rows)
+        items = list(claim.items)
+        scores = list(outcome.scores)
+        await self._normalize_evaluated_items(items)
+        recently_viewed = self._recent_viewed_content_keys()
+        updated_ids = self._persist_evaluations(
+            rows,
+            items,
+            scores,
+            recently_viewed=recently_viewed,
+            claim_token=claim.token,
+        )
+
+        accepted: list[tuple[dict[str, Any], DiscoveredContent]] = []
+        rejected = 0
+        for row, item, score in zip(rows, items, scores, strict=True):
+            candidate_id = int(row["id"])
+            if candidate_id not in updated_ids:
+                continue
+            final_score = float(item.relevance_score or score or 0.0)
+            if self._is_recently_viewed(item, recently_viewed):
+                rejected += 1
+                continue
+            if final_score < self._threshold_for(row):
+                rejected += 1
+                continue
+            accepted.append((row, item))
+
+        admitted_items: list[DiscoveredContent] = []
+        cached, admission_rejected = self._admit_until_full(
+            accepted,
+            recently_viewed=recently_viewed,
+            admitted_items=admitted_items,
+        )
+        self.last_admitted_items = list(admitted_items)
+        return {
+            "evaluated": len(updated_ids),
+            "cached": cached,
+            "rejected": rejected + admission_rejected,
+            "stale": len(rows) - len(updated_ids),
+        }
+
+    def release_claim(
+        self,
+        claim: CandidateEvalClaim,
+        *,
+        reason: str,
+        increment_attempts: bool = False,
+    ) -> int:
+        """Release only rows still owned by this claim token."""
+
+        ids = [int(row["id"]) for row in claim.rows if int(row.get("id") or 0) > 0]
+        if not ids:
+            return 0
+        reset_claimed = getattr(
+            self.database,
+            "reset_claimed_discovery_candidates_to_pending",
+            None,
+        )
+        if callable(reset_claimed):
+            return int(
+                reset_claimed(
+                    ids,
+                    claim_token=claim.token,
+                    reason=reason,
+                    max_attempts=self.max_eval_attempts,
+                    max_batch_attempts=self.max_batch_eval_attempts,
+                    increment_attempts=increment_attempts,
+                )
+                or 0
+            )
+        self._release_eval_claims(
+            list(claim.rows),
+            reason=reason,
+            increment_attempts=increment_attempts,
+        )
+        return len(ids)
+
     async def _drain_pending_locked(
         self,
         *,
@@ -398,23 +540,18 @@ class DiscoveryCandidatePipeline:
                 "waiting": waiting_pending,
             }
 
-        rows = self.database.claim_discovery_candidates_for_eval(limit=claim_limit)
-        if not rows:
+        claim = self.claim_batch(limit=claim_limit)
+        if claim is None:
             self._first_pending_eval_seen_at = None
             self.last_admitted_items = list(admitted_items)
             return {"evaluated": 0, "cached": retry_cached, "rejected": retry_rejected}
 
-        items = [row_to_discovered_content(row) for row in rows]
         try:
-            scores = await self.discovery_engine.evaluate_content_batch(
-                items,
-                profile,
-                source_context="mixed",
-                batch_size=batch_size,
-            )
+            outcome = await self.evaluate_claim(claim, profile)
+            result = await self.complete_claim(outcome)
         except asyncio.CancelledError:
             logger.info("discovery candidate batch evaluation cancelled; releasing claims")
-            self._release_eval_claims(rows, reason="evaluation cancelled", increment_attempts=False)
+            self.release_claim(claim, reason="evaluation cancelled", increment_attempts=False)
             self.last_admitted_items = list(admitted_items)
             raise
         except Exception as exc:
@@ -429,75 +566,25 @@ class DiscoveryCandidatePipeline:
                     "discovery candidate batch evaluation deferred (%s) for %d "
                     "candidate(s); releasing claims to retry on the next tick: %s",
                     kind,
-                    len(rows),
+                    len(claim.rows),
                     exc,
                 )
             else:
                 logger.exception("discovery candidate batch evaluation failed")
-            self._release_eval_claims(rows, reason=str(exc), increment_attempts=False)
+            self.release_claim(claim, reason=str(exc), increment_attempts=False)
             self.last_admitted_items = list(admitted_items)
             return {
                 "evaluated": 0,
                 "cached": retry_cached,
                 "rejected": retry_rejected,
-                "failed": len(rows),
+                "failed": len(claim.rows),
             }
-
-        if len(scores) != len(items):
-            reason = f"evaluation returned {len(scores)} scores for {len(items)} candidates"
-            logger.warning("discovery candidate batch evaluation incomplete: %s", reason)
-            self._release_eval_claims(rows, reason=reason, increment_attempts=False)
-            self.last_admitted_items = list(admitted_items)
-            return {
-                "evaluated": 0,
-                "cached": retry_cached,
-                "rejected": retry_rejected,
-                "failed": len(rows),
-            }
-
-        try:
-            await self._normalize_evaluated_items(items)
-            accepted: list[tuple[dict[str, Any], DiscoveredContent]] = []
-            rejected = 0
-            for row, item, score in zip(rows, items, scores, strict=True):
-                final_score = float(item.relevance_score or score or 0.0)
-                if self._is_recently_viewed(item, recently_viewed):
-                    rejected += 1
-                    continue
-                if final_score < self._threshold_for(row):
-                    rejected += 1
-                    continue
-                accepted.append((row, item))
-            self._persist_evaluations(rows, items, scores, recently_viewed=recently_viewed)
-        except asyncio.CancelledError:
-            logger.info("discovery candidate post-evaluation cancelled; releasing claims")
-            self._release_eval_claims(
-                rows,
-                reason="post-evaluation cancelled",
-                increment_attempts=False,
-            )
-            self.last_admitted_items = list(admitted_items)
-            raise
-        except Exception as exc:
-            logger.exception("discovery candidate post-evaluation processing failed")
-            self._release_eval_claims(rows, reason=str(exc), increment_attempts=False)
-            self.last_admitted_items = list(admitted_items)
-            return {
-                "evaluated": 0,
-                "cached": retry_cached,
-                "rejected": retry_rejected,
-                "failed": len(rows),
-            }
-        cached, admission_rejected = self._admit_until_full(
-            accepted,
-            recently_viewed=recently_viewed,
-            admitted_items=admitted_items,
-        )
-        self.last_admitted_items = list(admitted_items)
+        completed_items = list(self.last_admitted_items)
+        self.last_admitted_items = [*admitted_items, *completed_items]
         return {
-            "evaluated": len(rows),
-            "cached": retry_cached + cached,
-            "rejected": retry_rejected + rejected + admission_rejected,
+            "evaluated": result["evaluated"],
+            "cached": retry_cached + result["cached"],
+            "rejected": retry_rejected + result["rejected"],
         }
 
     def _effective_eval_batch_concurrency(self) -> int:
@@ -594,7 +681,8 @@ class DiscoveryCandidatePipeline:
         scores: list[float],
         *,
         recently_viewed: set[str],
-    ) -> None:
+        claim_token: str | None = None,
+    ) -> set[int]:
         evaluations: list[dict[str, Any]] = []
         for row, item, score in zip(rows, items, scores, strict=True):
             final_score = float(item.relevance_score or score or 0.0)
@@ -621,7 +709,17 @@ class DiscoveryCandidatePipeline:
                     "eval_error": eval_error,
                 }
             )
-        self.database.update_discovery_candidate_evaluations(evaluations)
+        persist_claimed = getattr(
+            self.database,
+            "persist_claimed_discovery_candidate_evaluations",
+            None,
+        )
+        if claim_token is not None and callable(persist_claimed):
+            return set(persist_claimed(evaluations, claim_token=claim_token))
+        updated = int(self.database.update_discovery_candidate_evaluations(evaluations) or 0)
+        if updated == len(evaluations):
+            return {int(evaluation["candidate_id"]) for evaluation in evaluations}
+        return set()
 
     def _admit_until_full(
         self,
