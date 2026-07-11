@@ -6,7 +6,7 @@
 ## 提交入口
 
 - Chrome Web Store item: <https://chromewebstore.google.com/detail/openbiliclaw/cdfjfkdjjhdaccbldipkjhpibnfbiamg>
-- Developer Dashboard: `Store listing`
+- Developer Dashboard: <https://chrome.google.com/webstore/devconsole/> -> `Store listing`
 - 项目主页 / Website URL: <https://whiteguo233.github.io/OpenBiliClaw/>
 - 支持 / GitHub 项目页: <https://github.com/whiteguo233/OpenBiliClaw>
 - 隐私政策: <https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/privacy.md>
