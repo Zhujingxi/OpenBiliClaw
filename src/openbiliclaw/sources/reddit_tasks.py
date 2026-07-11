@@ -939,6 +939,27 @@ def _rdt_saved_credential_state() -> tuple[str, str]:
     return "present", "rdt credential 就绪。"
 
 
+def local_reddit_credential_status() -> RedditCommandStatus:
+    """Return the saved rdt credential state without running a command.
+
+    The settings page calls this helper so merely opening or refreshing it
+    never invokes rdt and never sends a request to Reddit.
+    """
+
+    state, message = _rdt_saved_credential_state()
+    if state == "present":
+        return RedditCommandStatus(
+            "rdt",
+            "ready",
+            "Reddit 本地凭据已就绪（未实时访问 Reddit 验证）。",
+        )
+    if state == "expired":
+        return RedditCommandStatus("rdt", "stale", message)
+    if state == "missing":
+        return RedditCommandStatus("rdt", "login_required", message)
+    return RedditCommandStatus("rdt", "error", message)
+
+
 def _rdt_credential_file() -> Path:
     try:
         constants = importlib.import_module("rdt_cli.constants")

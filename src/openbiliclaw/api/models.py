@@ -468,15 +468,17 @@ class SourceStatusItem(BaseModel):
     - ``ok``         — credential present AND live-validated (X only, from the
       health store).
     - ``ready``      — credential present and structurally valid, but not
-      live-validated (B站 cookie with login fields, 抖音 cookie present, 小红书
-      browser login state recently synced).
+      live-validated (B站 cookie with login fields, or a fresh browser login
+      state recently synced).
     - ``partial``    — credential present but structurally incomplete, likely
       broken (B站 cookie missing some of the core login fields).
     - ``stale``      — credential synced before but not recently, likely
       expired.
     - ``missing``    — source enabled but no usable credential.
-    - ``unverified`` — plugin-backed source is enabled but local task history
-      does not prove a recent successful or failed login-state run yet.
+    - ``unverified`` — a credential or source is configured, but local state
+      does not prove that it currently works.
+    - ``login_required`` / ``error`` — a local command credential is missing,
+      or its saved credential file is invalid.
     - ``expired`` / ``rate_limited`` / ``blocked`` — X live-health states.
     - ``no_auth``    — source needs no login (YouTube, public).
 

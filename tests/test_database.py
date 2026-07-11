@@ -6,6 +6,7 @@ See docs/specs/gui-init.md §5a and docs/plans/2026-06-07-gui-init-implementatio
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 import pytest
@@ -151,6 +152,26 @@ def test_zhihu_login_state_roundtrips_through_auth_state(tmp_path: Path) -> None
         ]
         == "0"
     )
+
+
+def test_login_state_writes_are_safe_across_concurrent_fastapi_threads(tmp_path: Path) -> None:
+    """XHS and Zhihu heartbeats arrive together on runtime-stream connect."""
+    db = _db(tmp_path)
+
+    def write_login_state(index: int) -> None:
+        logged_in = index % 2 == 0
+        if index % 2 == 0:
+            db.set_xhs_login_state(logged_in)
+        else:
+            db.set_zhihu_login_state(logged_in)
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        futures = [executor.submit(write_login_state, index) for index in range(200)]
+        for future in futures:
+            future.result()
+
+    assert db.get_xhs_login_state()[1]
+    assert db.get_zhihu_login_state()[1]
 
 
 def test_get_recommendations_rows_carry_card_metadata_columns(tmp_path: Path) -> None:
