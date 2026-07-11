@@ -704,6 +704,21 @@
       return String(value);
     }
 
+    function formatPublishedTime(item, now = Date.now()) {
+      const parsed = Date.parse(String(item?.published_at || ""));
+      if (Number.isFinite(parsed)) {
+        const diff = now - parsed;
+        if (diff >= -300_000 && diff < 60_000) return "刚刚";
+        if (diff >= 0 && diff < 86_400_000) return `${Math.max(1, Math.floor(diff / 3_600_000))} 小时前`;
+        if (diff >= 0 && diff < 604_800_000) return `${Math.floor(diff / 86_400_000)} 天前`;
+        const date = new Date(parsed);
+        const current = new Date(now);
+        if (date.getFullYear() === current.getFullYear()) return `${date.getMonth() + 1}月${date.getDate()}日`;
+        return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+      }
+      return String(item?.published_label || "").replace(/\s+/g, " ").trim().slice(0, 64);
+    }
+
     // Legacy content_cache rows persisted before issue #79 still carry raw
     // `answer_<id>` / `zhihu_<id>` titles. Derive something readable from the
     // body text (first sentence), else a generic label, so the card header is
@@ -744,6 +759,8 @@
         favorite_count: Number(item?.favorite_count ?? 0) || 0,
         comment_count: Number(item?.comment_count ?? 0) || 0,
         up_mid: Number(item?.up_mid ?? 0) || 0,
+        published_at: String(item?.published_at ?? "").trim(),
+        published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
         presented: Boolean(item?.presented),
         feedback_type: String(item?.feedback_type ?? item?.feedback ?? ""),
         pool_status: String(item?.pool_status ?? item?.status ?? ""),
@@ -1963,6 +1980,7 @@
     function recommendationMetaHtml(item) {
       const up = String(item.up || "").trim();
       const topic = String(item.topic || "").trim();
+      const published = formatPublishedTime(item);
       const parts = [];
       if (up) {
         const upHtml = item.platform === "bilibili" && item.up_mid > 0
@@ -1971,6 +1989,13 @@
         parts.push(upHtml);
       }
       if (topic) parts.push(escapeHtml(topic));
+      if (published) {
+        const exactTitle = Number.isFinite(Date.parse(item.published_at))
+          ? new Date(item.published_at).toLocaleString()
+          : "";
+        const title = exactTitle ? ` title="${escapeHtml(exactTitle)}"` : "";
+        parts.push(`<span class="published-time"${title}>${escapeHtml(published)}</span>`);
+      }
       return parts.join(" · ");
     }
 
@@ -4995,6 +5020,8 @@
         chat_draft: String(item.chat_draft ?? ""),
         state: serverState,
         response_message: String(item.response_message ?? "") || fallbackMessage,
+        published_at: String(item?.published_at ?? "").trim(),
+        published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
         // Engagement stats so the delight card shows the same ▶/👍/💬 row as the
         // grid (v0.3.159+; 0 = not fetched → recommendationStats renders nothing).
         view_count: Number(item?.view_count ?? 0) || 0,
@@ -5133,6 +5160,7 @@
         $("#delightTitle").textContent = "暂无惊喜队列";
         $("#delightReason").textContent = "后端产生新的高惊喜候选后会通过实时流出现在这里。";
         if ($("#delightStats")) $("#delightStats").hidden = true;
+        if ($("#delightPublished")) $("#delightPublished").hidden = true;
         if ($("#delightStatus")) $("#delightStatus").textContent = "";
         if ($("#delightCount")) $("#delightCount").textContent = "0/0";
         controls.forEach((btn) => { btn.disabled = true; });
@@ -5162,6 +5190,15 @@
           const delightStats = recommendationStats(state.delight);
           delightStatsEl.textContent = delightStats;
           delightStatsEl.hidden = !delightStats;
+        }
+        const delightPublishedEl = $("#delightPublished");
+        if (delightPublishedEl) {
+          const published = formatPublishedTime(state.delight);
+          delightPublishedEl.textContent = published;
+          delightPublishedEl.title = Number.isFinite(Date.parse(state.delight.published_at))
+            ? new Date(state.delight.published_at).toLocaleString()
+            : "";
+          delightPublishedEl.hidden = !published;
         }
         $("#delightReason").textContent = state.delight.reason;
         if ($("#delightStatus")) $("#delightStatus").textContent = state.delight.response_message || "";

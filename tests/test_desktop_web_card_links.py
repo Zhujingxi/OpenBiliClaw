@@ -32,9 +32,12 @@ def test_recommendation_click_tracking_uses_click_and_auxclick_without_window_op
     assert "window.open" not in open_body
     assert "preventDefault" not in open_body
     assert "trackRecommendationClick(item);" in open_body
-    assert 'addEventListener("click", () => openRecommendation(item, card))' in app_js
-    assert 'addEventListener("auxclick", (event)' in app_js
-    assert "event.button === 1" in app_js
+    assert 'cover.addEventListener("click", () => openRecommendation(item, card));' in app_js
+    assert re.search(
+        r'cover\.addEventListener\("auxclick", \(event\) => \{\s*'
+        r'if \(event\.button === 1\) openRecommendation\(item, card\);',
+        app_js,
+    )
 
 
 def test_saved_message_and_delight_content_opens_use_anchor_semantics() -> None:
