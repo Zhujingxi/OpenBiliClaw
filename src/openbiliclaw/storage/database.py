@@ -5045,6 +5045,7 @@ class Database:
                 )
 
             member_bvids = [str(member["bvid"]) for member in members]
+            self._redirect_legacy_saved_identity(member_bvids, item_key)
             placeholders = ", ".join("?" for _ in member_bvids)
             self.conn.execute(
                 f"""
@@ -5061,6 +5062,24 @@ class Database:
                     f"DELETE FROM content_cache WHERE bvid IN ({removed_placeholders})",
                     removed_bvids,
                 )
+
+    def _redirect_legacy_saved_identity(self, storage_keys: list[str], item_key: str) -> None:
+        """Preserve legacy saved-list identity before duplicate cache rows are removed."""
+        if not storage_keys:
+            return
+        placeholders = ", ".join("?" for _ in storage_keys)
+        for table_name in ("watch_later", "favorites"):
+            exists = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table_name,),
+            ).fetchone()
+            if exists is None:
+                continue
+            self._ensure_legacy_saved_item_key_column(table_name)
+            self.conn.execute(
+                f"UPDATE {table_name} SET item_key = ? WHERE bvid IN ({placeholders})",
+                [item_key, *storage_keys],
+            )
 
     def _ensure_discovery_candidate_columns(self) -> None:
         """Backfill discovery-candidate lifecycle columns for existing databases."""
@@ -7481,6 +7500,16 @@ class Database:
         if table_name not in {"watch_later", "favorites"}:
             raise ValueError(f"unsupported legacy saved table: {table_name}")
         platform_sql, content_id_sql, item_key_sql = self._legacy_saved_identity_sql()
+        cache_join_sql = """
+            c.bvid = COALESCE(
+                (SELECT exact.bvid FROM content_cache AS exact WHERE exact.bvid = legacy.bvid),
+                (
+                    SELECT linked.bvid
+                    FROM content_cache AS linked
+                    WHERE linked.item_key = NULLIF(TRIM(legacy.item_key), '')
+                )
+            )
+        """
 
         self.conn.execute(
             f"""
@@ -7500,7 +7529,7 @@ class Database:
                 legacy.added_at,
                 legacy.added_at
             FROM {table_name} AS legacy
-            LEFT JOIN content_cache AS c ON c.bvid = legacy.bvid
+            LEFT JOIN content_cache AS c ON {cache_join_sql}
             """
         )
         self.conn.execute(
@@ -7508,7 +7537,7 @@ class Database:
             INSERT OR IGNORE INTO saved_memberships (list_kind, item_key, note, added_at)
             SELECT ?, {item_key_sql}, COALESCE(legacy.note, ''), legacy.added_at
             FROM {table_name} AS legacy
-            LEFT JOIN content_cache AS c ON c.bvid = legacy.bvid
+            LEFT JOIN content_cache AS c ON {cache_join_sql}
             """,
             (list_kind,),
         )

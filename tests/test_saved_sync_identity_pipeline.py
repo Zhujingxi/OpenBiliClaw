@@ -192,6 +192,26 @@ def test_legacy_duplicate_item_keys_consolidate_without_losing_recommendations(
     database = Database(path)
     database.initialize()
     database.conn.execute("DROP INDEX idx_content_cache_item_key")
+    database.conn.executescript(
+        """
+        DROP TABLE native_save_states;
+        DROP TABLE saved_memberships;
+        DROP TABLE saved_items;
+        DROP TABLE saved_sync_migrations;
+        DROP TABLE watch_later;
+        DROP TABLE favorites;
+        CREATE TABLE watch_later (
+            bvid TEXT PRIMARY KEY,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            note TEXT DEFAULT ''
+        );
+        CREATE TABLE favorites (
+            bvid TEXT PRIMARY KEY,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            note TEXT DEFAULT ''
+        );
+        """
+    )
     database.conn.executemany(
         """
         INSERT INTO content_cache (
@@ -208,6 +228,12 @@ def test_legacy_duplicate_item_keys_consolidate_without_losing_recommendations(
         INSERT INTO recommendations (bvid, item_key, expression, confidence)
         VALUES ('legacy-123', '', 'legacy rec', 0.9)
         """
+    )
+    database.conn.execute(
+        "INSERT INTO watch_later (bvid, note) VALUES ('legacy-123', 'watch note')"
+    )
+    database.conn.execute(
+        "INSERT INTO favorites (bvid, note) VALUES ('legacy-123', 'favorite note')"
     )
     database.conn.commit()
     database.close()
@@ -235,6 +261,22 @@ def test_legacy_duplicate_item_keys_consolidate_without_losing_recommendations(
     ).fetchone()
     assert recommendation is not None
     assert tuple(recommendation) == ("twitter:123", "twitter:123")
+    watch = migrated.get_saved_membership("watch_later", "twitter:123")
+    favorite = migrated.get_saved_membership("favorite", "twitter:123")
+    assert watch is not None
+    assert watch["note"] == "watch note"
+    assert favorite is not None
+    assert favorite["note"] == "favorite note"
+    assert migrated.get_saved_membership("watch_later", "bilibili:legacy-123") is None
+    assert migrated.get_saved_membership("favorite", "bilibili:legacy-123") is None
+    assert migrated.count_watch_later() == 1
+    assert migrated.count_favorites() == 1
+    for legacy_table in ("watch_later", "favorites"):
+        legacy = migrated.conn.execute(
+            f"SELECT item_key FROM {legacy_table} WHERE bvid = 'legacy-123'"
+        ).fetchone()
+        assert legacy is not None
+        assert legacy["item_key"] == "twitter:123"
 
 
 def test_ambiguous_legacy_raw_recommendation_does_not_cross_link(db: Database) -> None:
