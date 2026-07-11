@@ -59,6 +59,9 @@ def test_health_endpoint_treats_loopback_ollama_timeout_as_cold_load(
     app = create_app(
         memory_manager=object(), database=object(), soul_engine=EmbeddingSoulEngine()
     )
+    from openbiliclaw.config import Config
+
+    app.state.runtime_context.config = Config()
     app.state.runtime_context.config.llm.embedding.provider = "ollama"
     app.state.runtime_context.config.llm.embedding.base_url = (
         "http://127.0.0.1:11434/v1"
@@ -71,13 +74,23 @@ def test_health_endpoint_treats_loopback_ollama_timeout_as_cold_load(
     assert response.json()["embedding_ready"] is True
 ```
 
-- [ ] **Step 2: Add the remote-Ollama timeout guard test**
+- [ ] **Step 2: Add remote-Ollama and non-Ollama timeout guard coverage**
 
 Add beside the local timeout test:
 
 ```python
-def test_health_endpoint_keeps_remote_ollama_timeout_not_ready(
-    self, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("provider", "base_url"),
+    [
+        ("ollama", "http://ollama:11434/v1"),
+        ("openai", "https://api.openai.com/v1"),
+    ],
+)
+def test_health_endpoint_keeps_nonlocal_timeout_not_ready(
+    self,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    base_url: str,
 ) -> None:
     import asyncio
 
@@ -99,8 +112,11 @@ def test_health_endpoint_keeps_remote_ollama_timeout_not_ready(
     app = create_app(
         memory_manager=object(), database=object(), soul_engine=EmbeddingSoulEngine()
     )
-    app.state.runtime_context.config.llm.embedding.provider = "ollama"
-    app.state.runtime_context.config.llm.embedding.base_url = "http://ollama:11434/v1"
+    from openbiliclaw.config import Config
+
+    app.state.runtime_context.config = Config()
+    app.state.runtime_context.config.llm.embedding.provider = provider
+    app.state.runtime_context.config.llm.embedding.base_url = base_url
     client = TestClient(app)
 
     response = client.get("/api/health")
@@ -127,7 +143,7 @@ def test_init_status_keeps_cached_loopback_ollama_timeout_strict(
     monkeypatch.setattr(appmod, "_EMBEDDING_PROBE_TIMEOUT_SECONDS", 0.01)
 
     async def fake_diagnose(base_url: str, model: str) -> tuple[str, str]:
-        return od.DIAG_PROVIDER_ERROR, "cold loading"
+        return od.DIAG_ERROR, "cold loading"
 
     monkeypatch.setattr(od, "diagnose_ollama_embedding", fake_diagnose)
 
@@ -168,7 +184,7 @@ def test_init_status_keeps_cached_loopback_ollama_timeout_strict(
 Add beside the init-status test:
 
 ```python
-def test_init_post_rejects_cached_loopback_ollama_timeout(
+def test_init_post_rejects_loopback_ollama_timeout(
     self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import asyncio
@@ -181,7 +197,7 @@ def test_init_post_rejects_cached_loopback_ollama_timeout(
     monkeypatch.setattr(appmod, "_EMBEDDING_PROBE_TIMEOUT_SECONDS", 0.01)
 
     async def fake_diagnose(base_url: str, model: str) -> tuple[str, str]:
-        return od.DIAG_PROVIDER_ERROR, "cold loading"
+        return od.DIAG_ERROR, "cold loading"
 
     monkeypatch.setattr(od, "diagnose_ollama_embedding", fake_diagnose)
 
@@ -213,7 +229,7 @@ Run:
 
 ```bash
 pytest tests/test_api_app.py \
-  -k "loopback_ollama_timeout or remote_ollama_timeout" -vv
+  -k "loopback_ollama_timeout or nonlocal_timeout" -vv
 ```
 
 Expected: the local health test and shared health/init test FAIL because current timeout handling always caches `False`; the strict assertions remain green.
@@ -344,7 +360,7 @@ Run:
 
 ```bash
 pytest tests/test_api_app.py \
-  -k "embedding_ready or embedding_not_ready or loopback_ollama_timeout or remote_ollama_timeout" -vv
+  -k "embedding_ready or embedding_not_ready or loopback_ollama_timeout or nonlocal_timeout" -vv
 ```
 
 Expected: all selected tests PASS; the shared-cache test reports one provider call.
