@@ -145,6 +145,15 @@
     let activityPageRefreshTimer = null;
     let activityPageRefreshInFlight = false;
     let activityPageRefreshPending = false;
+    const DESKTOP_RECOVERY_DELAYS_MS = [1000, 2000, 4000, 8000];
+    let desktopRecommendationLoadState = "idle";
+    let desktopRuntimeLoadState = "idle";
+    let desktopRecommendationRecoveryAttempt = 0;
+    let desktopRuntimeRecoveryAttempt = 0;
+    let desktopRecommendationRecoveryTimer = null;
+    let desktopRuntimeRecoveryTimer = null;
+    let desktopRecommendationRecoveryInFlight = false;
+    let desktopRuntimeRecoveryInFlight = false;
 
     function debounceAsync(fn, delayMs = 1000) {
       let timer = null;
@@ -192,6 +201,173 @@
         backendHydrationTimer = null;
         void runBackendHydration();
       }, 1000);
+    }
+
+    function settleResource(promise) {
+      return promise.then(
+        (value) => ({ ok: true, value }),
+        (error) => ({ ok: false, error })
+      );
+    }
+
+    async function readRecommendationSnapshot() {
+      const payload = await requestJsonStrict(ENDPOINTS.recommendations, { timeoutMs: 15000 });
+      return Array.isArray(payload) ? payload : asArray(payload?.items);
+    }
+
+    async function readRuntimeStatusSnapshot() {
+      const payload = await requestJsonStrict(ENDPOINTS.runtimeStatus, { timeoutMs: 15000 });
+      return payload?.status || payload;
+    }
+
+    function clearDesktopRecommendationRecovery(nextState) {
+      if (desktopRecommendationRecoveryTimer !== null) {
+        window.clearTimeout(desktopRecommendationRecoveryTimer);
+        desktopRecommendationRecoveryTimer = null;
+      }
+      desktopRecommendationRecoveryAttempt = 0;
+      desktopRecommendationLoadState = nextState;
+    }
+
+    function clearDesktopRuntimeRecovery(nextState = "ready") {
+      if (desktopRuntimeRecoveryTimer !== null) {
+        window.clearTimeout(desktopRuntimeRecoveryTimer);
+        desktopRuntimeRecoveryTimer = null;
+      }
+      desktopRuntimeRecoveryAttempt = 0;
+      desktopRuntimeLoadState = nextState;
+      const poolAvailable = $("#poolAvailable");
+      if (poolAvailable) {
+        poolAvailable.onclick = null;
+        poolAvailable.removeAttribute("role");
+        poolAvailable.removeAttribute("tabindex");
+      }
+    }
+
+    function applyDesktopRecommendationSnapshot(items, { replace = false } = {}) {
+      const normalized = normalizeRecommendationList(items);
+      if (normalized.length > 0) {
+        desktopRecommendationLoadState = "ready";
+      } else {
+        desktopRecommendationLoadState = "empty-success";
+      }
+      clearDesktopRecommendationRecovery(desktopRecommendationLoadState);
+      if (!replace && state.videos.length > 0) return;
+      state.videos = normalized;
+    }
+
+    function applyDesktopRuntimeSnapshot(payload) {
+      if (!payload) throw new Error("runtime status unavailable");
+      clearDesktopRuntimeRecovery();
+      applyRuntimeStatus(payload);
+    }
+
+    function renderDesktopRuntimeFailure() {
+      if (desktopRuntimeLoadState !== "failed" && desktopRuntimeLoadState !== "failed-exhausted") return;
+      const exhausted = desktopRuntimeLoadState === "failed-exhausted";
+      if (!state.runtimeStatus) {
+        $("#metricPool").textContent = "—";
+        $("#poolAvailable").textContent = exhausted ? "同步失败，点击重试" : "同步失败，正在重试";
+        $("#runtimeSummary").textContent = "库存状态读取失败；这不代表候选池真的为空。";
+      }
+      $("#poolRefreshState").textContent = exhausted ? "等待重试" : "状态重试中";
+      if (exhausted) {
+        const poolAvailable = $("#poolAvailable");
+        poolAvailable.setAttribute("role", "button");
+        poolAvailable.setAttribute("tabindex", "0");
+        poolAvailable.onclick = restartDesktopFailedRecoveries;
+      }
+    }
+
+    function scheduleDesktopRecommendationRecovery() {
+      if (state.videos.length > 0) {
+        clearDesktopRecommendationRecovery("ready");
+        return;
+      }
+      if (desktopRecommendationLoadState !== "failed") return;
+      if (desktopRecommendationRecoveryInFlight || desktopRecommendationRecoveryTimer !== null) return;
+      if (desktopRecommendationRecoveryAttempt >= DESKTOP_RECOVERY_DELAYS_MS.length) {
+        desktopRecommendationLoadState = "failed-exhausted";
+        renderVideos();
+        return;
+      }
+      const delayMs = DESKTOP_RECOVERY_DELAYS_MS[desktopRecommendationRecoveryAttempt];
+      desktopRecommendationRecoveryTimer = window.setTimeout(() => {
+        desktopRecommendationRecoveryTimer = null;
+        desktopRecommendationRecoveryAttempt += 1;
+        void runDesktopRecommendationRecovery();
+      }, delayMs);
+    }
+
+    async function runDesktopRecommendationRecovery() {
+      if (state.videos.length > 0) {
+        clearDesktopRecommendationRecovery("ready");
+        return;
+      }
+      if (desktopRecommendationLoadState !== "failed" || desktopRecommendationRecoveryInFlight) return;
+      desktopRecommendationRecoveryInFlight = true;
+      try {
+        applyDesktopRecommendationSnapshot(await readRecommendationSnapshot());
+      } catch {
+        desktopRecommendationLoadState = "failed";
+      } finally {
+        desktopRecommendationRecoveryInFlight = false;
+        renderVideos();
+        scheduleDesktopRecommendationRecovery();
+      }
+    }
+
+    function scheduleDesktopRuntimeRecovery() {
+      if (desktopRuntimeLoadState !== "failed") return;
+      if (desktopRuntimeRecoveryInFlight || desktopRuntimeRecoveryTimer !== null) return;
+      if (desktopRuntimeRecoveryAttempt >= DESKTOP_RECOVERY_DELAYS_MS.length) {
+        desktopRuntimeLoadState = "failed-exhausted";
+        renderDesktopRuntimeFailure();
+        return;
+      }
+      const delayMs = DESKTOP_RECOVERY_DELAYS_MS[desktopRuntimeRecoveryAttempt];
+      desktopRuntimeRecoveryTimer = window.setTimeout(() => {
+        desktopRuntimeRecoveryTimer = null;
+        desktopRuntimeRecoveryAttempt += 1;
+        void runDesktopRuntimeRecovery();
+      }, delayMs);
+    }
+
+    async function runDesktopRuntimeRecovery() {
+      if (desktopRuntimeLoadState !== "failed" || desktopRuntimeRecoveryInFlight) return;
+      desktopRuntimeRecoveryInFlight = true;
+      try {
+        applyDesktopRuntimeSnapshot(await readRuntimeStatusSnapshot());
+      } catch {
+        if (desktopRuntimeLoadState === "ready") return;
+        desktopRuntimeLoadState = "failed";
+      } finally {
+        desktopRuntimeRecoveryInFlight = false;
+        scheduleDesktopRuntimeRecovery();
+        renderDesktopRuntimeFailure();
+      }
+    }
+
+    function restartDesktopFailedRecoveries() {
+      if (
+        state.videos.length === 0 &&
+        (desktopRecommendationLoadState === "failed" || desktopRecommendationLoadState === "failed-exhausted")
+      ) {
+        if (desktopRecommendationRecoveryTimer !== null) window.clearTimeout(desktopRecommendationRecoveryTimer);
+        desktopRecommendationRecoveryTimer = null;
+        desktopRecommendationRecoveryAttempt = 0;
+        desktopRecommendationLoadState = "failed";
+        scheduleDesktopRecommendationRecovery();
+      }
+      if (desktopRuntimeLoadState === "failed" || desktopRuntimeLoadState === "failed-exhausted") {
+        if (desktopRuntimeRecoveryTimer !== null) window.clearTimeout(desktopRuntimeRecoveryTimer);
+        desktopRuntimeRecoveryTimer = null;
+        desktopRuntimeRecoveryAttempt = 0;
+        desktopRuntimeLoadState = "failed";
+        scheduleDesktopRuntimeRecovery();
+      }
+      renderVideos();
+      renderDesktopRuntimeFailure();
     }
 
     async function runActivityPageRefresh() {
@@ -2046,8 +2222,16 @@
           ? `没有找到包含“${escapeHtml(state.query.trim())}”的推荐。`
           : state.videos.length
             ? "当前筛选下没有推荐。"
-            : "当前列表里的推荐都已处理，可以加载更多推荐或等待后端补货。";
-        grid.innerHTML = `<div class="empty-state">${message}</div>`;
+            : desktopRecommendationLoadState === "failed"
+              ? "推荐加载失败，正在重试；这不代表候选池真的为空。"
+              : desktopRecommendationLoadState === "failed-exhausted"
+                ? "推荐加载失败，点一下重新加载。"
+                : "当前列表里的推荐都已处理，可以加载更多推荐或等待后端补货。";
+        const retry = desktopRecommendationLoadState === "failed-exhausted"
+          ? '<button class="small-btn" id="retryEmptyRecommendations" type="button">重新加载</button>'
+          : "";
+        grid.innerHTML = `<div class="empty-state">${message}${retry}</div>`;
+        $("#retryEmptyRecommendations")?.addEventListener("click", restartDesktopFailedRecoveries);
         return;
       }
       grid.replaceChildren(...items.map((item) => {
@@ -5441,6 +5625,9 @@
 
     function handleRuntimeEvent(event) {
       if (!event?.type) return;
+      if (event.type === "refresh.pool_updated" && typeof event.pool_available_count === "number") {
+        clearDesktopRuntimeRecovery();
+      }
       applyRuntimeStatus({ ...event, live_summary: event.message || event.live_summary || event.type });
       // refresh.pool_updated / recommendation.reshuffled are pool-status signals, not
       // list-replacement signals: hydrating here would wipe locally appended cards
@@ -5460,6 +5647,21 @@
       }
       if (event.type === "refresh.pool_updated" && Boolean(state.initStatus?.initialized)) {
         void refreshInitStatus({ schedule: false });
+      }
+      if (
+        event.type === "refresh.pool_updated" &&
+        state.videos.length === 0 &&
+        desktopRecommendationLoadState === "failed-exhausted"
+      ) {
+        desktopRecommendationRecoveryAttempt = 0;
+        desktopRecommendationLoadState = "failed";
+      }
+      if (
+        event.type === "refresh.pool_updated" &&
+        state.videos.length === 0 &&
+        desktopRecommendationLoadState === "failed"
+      ) {
+        scheduleDesktopRecommendationRecovery();
       }
       if (event.type === "activity.added") scheduleActivityPageRefresh();
       if (
@@ -5524,6 +5726,7 @@
         state.runtimeSocket = socket;
         socket.addEventListener("open", () => {
           $("#statusLabel").textContent = "实时连接中";
+          restartDesktopFailedRecoveries();
           // The page may load before the backend binds (frozen-entry launch
           // race): the boot hydrate then swallows every failure into nulls and
           // nothing else ever re-fetches — an uninitialized backend emits no
@@ -5559,10 +5762,10 @@
     }
 
     async function hydrateFromBackend() {
-      const [health, recs, runtime, activity, profile, delights, notification, chatTurns, delightChatTurns, config, initStatus] = await Promise.all([
+      const [health, recommendationResult, runtimeResult, activity, profile, delights, notification, chatTurns, delightChatTurns, config, initStatus] = await Promise.all([
         requestJson(ENDPOINTS.health),
-        requestJson(ENDPOINTS.recommendations),
-        requestJson(ENDPOINTS.runtimeStatus),
+        settleResource(readRecommendationSnapshot()),
+        settleResource(readRuntimeStatusSnapshot()),
         requestJson(`${ENDPOINTS.activityFeed}?limit=5`),
         requestJson(ENDPOINTS.profile),
         requestJson(ENDPOINTS.delightBatch),
@@ -5574,8 +5777,14 @@
       ]);
       if (health) $("#statusLabel").textContent = "已连接本地后端";
       if (initStatus) state.initStatus = initStatus;
-      const recommendationItems = Array.isArray(recs) ? recs : asArray(recs?.items);
-      state.videos = normalizeRecommendationList(recommendationItems);
+      if (recommendationResult.ok) {
+        applyDesktopRecommendationSnapshot(recommendationResult.value, { replace: true });
+      } else if (state.videos.length > 0) {
+        clearDesktopRecommendationRecovery("ready");
+      } else {
+        desktopRecommendationLoadState = "failed";
+        scheduleDesktopRecommendationRecovery();
+      }
       if (activity) {
         state.activity = activity;
         state.activityItems = asArray(activity.items);
@@ -5595,12 +5804,23 @@
           { role: "agent", text: turn.reply || turn.assistant_message || turn.status || "等待后端回复中。" }
         ]).filter((item) => item.text);
       }
-      // requestJson resolves null on failure (it never rejects), so the
-      // fallback to the Promise.all snapshot must be `||`, not `.catch()` —
-      // otherwise a failed re-fetch discards the runtime status we already
-      // have and the init-onboarding gate loses its initialized=false signal.
-      const effectiveRuntime = (await requestJson(ENDPOINTS.runtimeStatus)) || runtime;
-      applyRuntimeStatus(effectiveRuntime?.status || effectiveRuntime);
+      // Re-read after recommendations: GET /api/recommendations may consume the
+      // pool, so the later snapshot is preferred. Keep the settled first read
+      // as fallback and never turn a late timeout into a fake zero inventory.
+      let effectiveRuntime = runtimeResult.ok ? runtimeResult.value : null;
+      try {
+        effectiveRuntime = await readRuntimeStatusSnapshot();
+      } catch {
+        // Keep the first settled snapshot, or a runtime-stream recovery that
+        // may have completed while this slower HTTP read was in flight.
+      }
+      if (effectiveRuntime) {
+        applyDesktopRuntimeSnapshot(effectiveRuntime);
+      } else if (desktopRuntimeLoadState !== "ready") {
+        desktopRuntimeLoadState = "failed";
+        scheduleDesktopRuntimeRecovery();
+        renderDesktopRuntimeFailure();
+      }
       applyDelights(delights);
       const delightChatItems = Array.isArray(delightChatTurns) ? delightChatTurns : asArray(delightChatTurns?.items);
       for (const turn of delightChatItems.filter(Boolean)) applyTurnToDelight({ ...turn, scope: turn.scope || "delight" });

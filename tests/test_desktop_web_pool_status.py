@@ -27,9 +27,9 @@ def test_desktop_backend_hydration_clears_empty_recommendations() -> None:
     )
     assert hydrate is not None, "desktop hydrateFromBackend not found"
     body = hydrate.group("body")
-    assert "const recommendationItems = Array.isArray(recs) ? recs : asArray(recs?.items);" in body
-    assert "state.videos = normalizeRecommendationList(recommendationItems);" in body
-    assert "if (recommendationItems.length) state.videos" not in body
+    assert "settleResource(readRecommendationSnapshot())" in body
+    assert "applyDesktopRecommendationSnapshot(recommendationResult.value, { replace: true });" in body
+    assert 'desktopRecommendationLoadState = "empty-success"' in app_js
 
 
 def test_desktop_pool_status_shows_available_count() -> None:
@@ -55,11 +55,9 @@ def test_desktop_hydration_refetches_runtime_after_recommendation_bootstrap() ->
     )
     assert hydrate is not None, "desktop hydrateFromBackend not found"
     body = hydrate.group("body")
-    # requestJson resolves null on failure (never rejects), so the fallback to
-    # the Promise.all snapshot must be `||`, not a dead `.catch()`.
-    assert "(await requestJson(ENDPOINTS.runtimeStatus)) || runtime" in body
-    assert "requestJson(ENDPOINTS.runtimeStatus).catch(" not in body
-    assert "applyRuntimeStatus(effectiveRuntime?.status || effectiveRuntime);" in body
+    assert "let effectiveRuntime = runtimeResult.ok ? runtimeResult.value : null;" in body
+    assert "effectiveRuntime = await readRuntimeStatusSnapshot();" in body
+    assert "applyDesktopRuntimeSnapshot(effectiveRuntime);" in body
 
 
 def test_desktop_pool_status_labels_pending_signals_as_discovery_context() -> None:
@@ -257,6 +255,25 @@ def test_desktop_pool_update_does_not_replace_recommendation_list() -> None:
     assert "recommendation.reshuffled" not in trigger
     assert "config_reloaded" in trigger
     assert "init_completed" not in trigger
+
+
+def test_desktop_failed_recommendation_read_schedules_empty_only_recovery() -> None:
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    assert "readRecommendationSnapshot" in app_js
+    assert "scheduleDesktopRecommendationRecovery" in app_js
+    assert "if (state.videos.length > 0)" in app_js
+    assert 'desktopRecommendationLoadState = "failed"' in app_js
+    assert 'desktopRecommendationLoadState = "empty-success"' in app_js
+
+
+def test_desktop_runtime_failure_recovers_independently() -> None:
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    assert "scheduleDesktopRuntimeRecovery" in app_js
+    assert "[1000, 2000, 4000, 8000]" in app_js
+    assert 'desktopRuntimeLoadState = "failed"' in app_js
+    assert 'if (desktopRuntimeLoadState === "ready") return;' in app_js
 
 
 def test_desktop_web_shows_github_star_cta() -> None:
