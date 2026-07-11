@@ -114,13 +114,18 @@ export async function requestJson(
 ) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     let response;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    timeout.unref?.();
     try {
       response = await fetchImpl(url, {
         ...options,
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        signal: controller.signal,
       });
     } catch (error) {
       throw new Error(`${operation} request failed: ${error?.message ?? String(error)}`);
+    } finally {
+      clearTimeout(timeout);
     }
 
     const text = await response.text();
