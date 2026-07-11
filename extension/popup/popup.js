@@ -6470,6 +6470,7 @@ function bindSettings() {
     ready: "#2ecc71",
     syncing: "#9aa0a6",
     no_auth: "#9aa0a6",
+    unverified: "#9aa0a6",
     missing: "#e0a800",
     missing_cookie: "#e0a800",
     login_required: "#e0a800",
@@ -6481,7 +6482,21 @@ function bindSettings() {
     blocked: "#e74c3c",
   };
   const SOURCE_STATUS_LABEL = {
+    ok: "接入可用",
+    ready: "凭据已就绪",
     syncing: "接入中",
+    no_auth: "无需登录",
+    unverified: "状态待验证",
+    missing: "需要登录",
+    missing_cookie: "缺少 Cookie",
+    login_required: "需要登录",
+    rate_limited: "频率受限",
+    partial: "部分可用",
+    stale: "需要刷新",
+    error: "检查失败",
+    expired: "凭据失效",
+    expired_cookie: "Cookie 失效",
+    blocked: "接入受阻",
   };
   const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
 

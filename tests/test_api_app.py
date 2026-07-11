@@ -1495,6 +1495,7 @@ class TestBackendAPI:
         assert body["twitter"]["value"] == "auth_token=x; ct0=csrf;"
         assert body["xiaohongshu"]["label"] == "xsec_token"
         assert body["xiaohongshu"]["value"] == "xhs-token"
+        assert "不代表账号登录" in body["xiaohongshu"]["detail"]
         assert body["youtube"]["available"] is False
         assert body["zhihu"]["available"] is False
 

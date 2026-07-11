@@ -655,3 +655,12 @@ test("settings page wires the keyword generation mode selector (matches desktop 
     "keyword_generation_mode must be written after the discovery spread",
   );
 });
+
+test("settings source status labels distinguish local readiness", () => {
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  assert.match(popupJs, /ready: "凭据已就绪"/);
+  assert.match(popupJs, /unverified: "状态待验证"/);
+  assert.match(popupJs, /login_required: "需要登录"/);
+  assert.match(popupJs, /error: "检查失败"/);
+});

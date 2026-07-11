@@ -8162,7 +8162,7 @@ def create_app(
             xiaohongshu=item(
                 "xsec_token",
                 xhs_token,
-                "小红书不保存整站 Cookie；这里展示最近同步内容 URL 中的 xsec_token。",
+                "小红书不保存整站 Cookie；xsec_token 只是内容访问令牌，不代表账号登录。",
             ),
             douyin=item("Cookie", dy_cookie, "抖音当前 resolved Cookie。"),
             youtube=SourceCredentialItem(
