@@ -129,3 +129,37 @@ of the former Task 8 UI-pending boundary.
 ## Commit
 
 `feat: add saved item sync controls` — the commit containing this report.
+
+## Review Repair
+
+The follow-up review added 13 focused regression cases before changing production code. Their RED
+states covered canonical cross-platform identity, rejection of namespaced legacy IDs, strict bounded
+desktop requests, durable task tracking, retained refresh state, per-item mutation versioning,
+semantic focus restoration, modal keyboard behavior, and all-queue failure retention.
+
+The repaired implementation now preserves the canonical five saved-item fields on recommendation
+and delight rows for Bilibili, YouTube, X, Zhihu, and URL-only fallbacks; uses backend-issued
+`item_key` values for state and caches; and never promotes a namespaced row ID or unknown text item
+into a video identity. Desktop calls use the strict request boundary with bounded timeouts. All
+surfaces retain their last successful list on refresh failures, expose retry, resume nonterminal
+tasks after visibility changes without inventing a terminal summary, isolate writes by
+`list_kind:item_key`, and discard stale hydration. Mobile cards and settings dialogs now preserve
+keyboard focus, expose modal semantics and Escape handling, and keep coarse-pointer targets at least
+44 by 44 pixels. Desktop delight save controls also announce loading, success, and failure.
+
+Fresh review verification:
+
+```bash
+cd extension && npm test
+PYTHONPATH=src .venv/bin/pytest -q \
+  tests/test_saved_sync_api.py \
+  tests/test_saved_sync_storage.py \
+  tests/test_saved_sync_service.py \
+  tests/test_saved_sync_frontend_contract.py
+cd extension && npm run typecheck && npm run build
+```
+
+Results: extension `694 passed, 0 failed`; Python `126 passed`; TypeScript typecheck passed; and the
+Chrome/Edge production bundle built successfully. The one timing-sensitive Bilibili dispatcher case
+that transiently failed during the first full run passed both in isolation (`8/8`) and in the fresh
+full rerun. No Task 9 real integration E2E or account mutation was performed.

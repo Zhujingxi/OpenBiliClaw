@@ -2,6 +2,61 @@ function normalizeBvid(bvid) {
   return String(bvid || "").trim();
 }
 
+function inferSavedPlatform(value, contentUrl) {
+  const explicit = String(value || "").trim().toLowerCase();
+  if (explicit) return explicit;
+  try {
+    const host = new URL(String(contentUrl || "").trim()).hostname.toLowerCase();
+    if (host === "youtu.be" || host.endsWith(".youtube.com")) return "youtube";
+    if (host === "x.com" || host.endsWith(".x.com") || host.endsWith(".twitter.com")) return "twitter";
+    if (host.endsWith(".zhihu.com")) return "zhihu";
+    if (host.endsWith(".bilibili.com") || host === "b23.tv") return "bilibili";
+    return "web";
+  } catch {
+    return "bilibili";
+  }
+}
+
+/** Preserve server-issued canonical identity without parsing namespaced keys into content IDs. */
+export function normalizeCanonicalSavedItem(item = {}) {
+  const sourcePlatform = inferSavedPlatform(item.source_platform || item.platform, item.content_url);
+  const legacyId = String(item.bvid || "").trim();
+  const contentId = String(item.content_id || (legacyId && !legacyId.includes(":") ? legacyId : "")).trim();
+  const contentUrl = String(item.content_url || item.url || "").trim();
+  const explicitType = String(item.content_type || "").trim();
+  const contentType = explicitType || (sourcePlatform === "bilibili" && contentId ? "video" : "");
+  return {
+    item_key: String(item.item_key || (contentId ? `${sourcePlatform}:${contentId}` : "")).trim(),
+    source_platform: sourcePlatform,
+    content_id: contentId,
+    content_url: contentUrl,
+    content_type: contentType,
+  };
+}
+
+export function partitionSavedQueueResults(queue, results) {
+  const rows = Array.isArray(queue) ? queue : [];
+  const outcomes = Array.isArray(results) ? results : [];
+  const saved = [];
+  const savedIndexes = new Set();
+  outcomes.forEach((result, index) => {
+    if (result?.status !== "fulfilled" || result.value?.saved === false || !rows[index]) return;
+    savedIndexes.add(index);
+    saved.push({
+      index,
+      item: rows[index],
+      itemKey: String(result.value?.item_key || rows[index]?.item_key || "").trim(),
+      value: result.value,
+    });
+  });
+  return {
+    saved,
+    remaining: rows.filter((_, index) => !savedIndexes.has(index)),
+    savedCount: saved.length,
+    failedCount: rows.length - saved.length,
+  };
+}
+
 const SAVED_SYNC_STATUSES = new Set([
   "pending",
   "syncing",
@@ -20,7 +75,7 @@ const SYNC_PRESENTATIONS = {
   synced: { label: "已同步", tone: "success", retryable: false },
   already_synced: { label: "已同步", tone: "success", retryable: false },
   login_required: { label: "需要登录", tone: "warning", retryable: true },
-  unsupported: { label: "同步失败", tone: "error", retryable: false },
+  unsupported: { label: "同步失败", tone: "error", retryable: true },
   rate_limited: { label: "同步失败", tone: "error", retryable: true },
   extension_required: { label: "需要连接插件", tone: "warning", retryable: true },
   failed: { label: "同步失败", tone: "error", retryable: true },
@@ -73,6 +128,124 @@ export function summarizeSavedSyncResults(items) {
   return Array.from(groups, ([platform, result]) => (
     `${PLATFORM_LABELS[platform] || platform} ${result.success}/${result.total}`
   )).join(" · ");
+}
+
+export function createRetainedSavedListState() {
+  let value = { items: [], total: 0, loaded: false, error: "" };
+  return {
+    commit(payload = {}) {
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      value = { items, total: Number(payload.total) || 0, loaded: true, error: "" };
+    },
+    fail(reason) {
+      value = { ...value, error: String(reason?.message || reason || "保存列表加载失败。").trim() };
+    },
+    snapshot() { return { ...value, items: [...value.items] }; },
+  };
+}
+
+export function captureSavedFocus(root, activeElement = globalThis.document?.activeElement) {
+  const card = activeElement?.closest?.("[data-item-key]");
+  const itemKey = String(card?.dataset?.itemKey || "").trim();
+  const action = String(activeElement?.dataset?.savedAction || "").trim();
+  return root && itemKey && action ? { itemKey, action } : null;
+}
+
+export function restoreSavedFocus(root, token) {
+  if (!root || !token?.itemKey || !token?.action) return false;
+  for (const card of root.querySelectorAll?.("[data-item-key]") || []) {
+    if (card.dataset?.itemKey !== token.itemKey) continue;
+    for (const action of card.querySelectorAll?.("[data-saved-action]") || []) {
+      if (action.dataset?.savedAction !== token.action) continue;
+      action.focus?.();
+      return true;
+    }
+  }
+  return false;
+}
+
+export function createSavedSyncTaskTracker(options = {}) {
+  const poll = options.poll;
+  const now = options.now || Date.now;
+  const isVisible = options.isVisible || (() => typeof document === "undefined" || !document.hidden);
+  const schedule = options.schedule || ((run, delay) => setTimeout(run, delay));
+  const cancel = options.cancel || clearTimeout;
+  const foregroundHorizonMs = Number(options.foregroundHorizonMs ?? 20_000);
+  const visibleDelayMs = Number(options.visibleDelayMs ?? 750);
+  const hiddenDelayMs = Number(options.hiddenDelayMs ?? 5_000);
+  const active = new Map();
+  const terminal = (task) => {
+    const rows = Array.isArray(task?.items) ? task.items : [];
+    return rows.every((item) => SAVED_SYNC_STATUSES.has(item?.status)
+      && !["pending", "syncing"].includes(item.status));
+  };
+  const queue = (entry, delay = null) => {
+    if (!active.has(entry.taskId)) return;
+    entry.timer = schedule(
+      () => tick(entry),
+      delay ?? (isVisible() ? visibleDelayMs : hiddenDelayMs),
+    );
+  };
+  const tick = async (entry) => {
+    if (!active.has(entry.taskId) || entry.polling) return;
+    entry.polling = true;
+    try {
+      const next = await poll(entry.taskId);
+      if (next && typeof next === "object") entry.task = sanitizeSavedSyncTask(next);
+      if (terminal(entry.task)) {
+        active.delete(entry.taskId);
+        entry.callbacks.onTerminal?.(entry.task);
+        return;
+      }
+      entry.callbacks.onProgress?.(entry.task);
+      if (!entry.backgroundAnnounced && now() - entry.startedAt >= foregroundHorizonMs) {
+        entry.backgroundAnnounced = true;
+        entry.callbacks.onBackground?.(entry.task);
+      }
+    } catch (error) {
+      entry.callbacks.onPollError?.(error, entry.task);
+    } finally {
+      entry.polling = false;
+    }
+    queue(entry);
+  };
+  return {
+    has(taskId) { return active.has(safeSyncText(taskId, 64)); },
+    track(initial, callbacks = {}) {
+      const task = sanitizeSavedSyncTask(initial);
+      const taskId = task.task_id;
+      if (!taskId) return null;
+      if (terminal(task)) { callbacks.onTerminal?.(task); return taskId; }
+      const existing = active.get(taskId);
+      if (existing) {
+        existing.task = task;
+        existing.callbacks = { ...existing.callbacks, ...callbacks };
+        return taskId;
+      }
+      const entry = {
+        taskId, task, callbacks, startedAt: now(), backgroundAnnounced: false,
+        polling: false, timer: null,
+      };
+      active.set(taskId, entry);
+      callbacks.onProgress?.(task);
+      queue(entry);
+      return taskId;
+    },
+    resume(taskId) {
+      const entry = active.get(safeSyncText(taskId, 64));
+      if (!entry || entry.polling) return false;
+      if (entry.timer != null) cancel(entry.timer);
+      queue(entry, 0);
+      return true;
+    },
+    stop(taskId) {
+      const entry = active.get(safeSyncText(taskId, 64));
+      if (!entry) return false;
+      if (entry.timer != null) cancel(entry.timer);
+      active.delete(entry.taskId);
+      return true;
+    },
+  };
 }
 
 function mergeLabels(baseLabels, overrideLabels) {

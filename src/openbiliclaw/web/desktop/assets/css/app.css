@@ -1079,8 +1079,8 @@
   background: color-mix(in oklab, var(--surface), var(--accent) 8%);
 }
 .saved-page .saved-empty { padding: 64px 24px; text-align: center; color: var(--fg-2); }
-@media (max-width: 820px) {
-  .saved-page .small-btn, .saved-page .pill-btn { min-height: 44px; }
+@media (max-width: 820px), (pointer: coarse) {
+  .saved-page .small-btn, .saved-page .pill-btn, .saved-load-retry { min-width: 44px; min-height: 44px; }
 }
 
 /* ── Save toggles in the feedback row (稍后再看 = 时钟 / 收藏 = 星星) ──

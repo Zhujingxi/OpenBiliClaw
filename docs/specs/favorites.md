@@ -69,6 +69,7 @@ CREATE INDEX IF NOT EXISTS idx_favorites_added
 - **防重复提交**：请求期间禁用当前动作按钮；状态 / 错误通过 `aria-live` 或 `role=alert` 发布
 - **canonical 状态**：卡片用 `GET /api/saved/favorite/status?item_key=...` 水合；平台路由完全留在后端
 - **手动同步**：列表显示真实 target 和五档状态，提供单项重试及「同步未同步内容（N）」批量确认；结果按平台显示成功/总数
+- **durable UI**：task 非终态时持续后台轮询并支持 visibility resume，超过前台窗口显示「仍在后台同步」而不是提前汇总；列表刷新失败保留最后成功快照和总数，提供内联重试并按 `item_key/action` 恢复焦点
 - **本地删除**：只调用 `/api/saved/favorite/remove`，不反向取消平台记录
 
 ### 4.2 各 Surface 实现

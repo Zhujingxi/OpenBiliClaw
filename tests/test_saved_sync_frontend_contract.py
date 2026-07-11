@@ -79,3 +79,39 @@ def test_saved_sync_css_preserves_focus_motion_and_mobile_touch_safety() -> None
         assert ":focus-visible" in css
         assert "prefers-reduced-motion" in css
         assert "44px" in css
+
+
+def test_saved_sync_review_repairs_are_wired_to_all_surfaces() -> None:
+    popup = _read("extension/popup/popup.js")
+    popup_runtime = _read("extension/popup/popup-saved-sync.js")
+    mobile_app = _read("src/openbiliclaw/web/js/app.js")
+    mobile_saved = _read("src/openbiliclaw/web/js/views/saved.js")
+    mobile_recommend = _read("src/openbiliclaw/web/js/views/recommend.js")
+    desktop_html = _read("src/openbiliclaw/web/desktop/index.html")
+    desktop = _read("src/openbiliclaw/web/desktop/assets/js/app.js")
+    desktop_core = _read("src/openbiliclaw/web/desktop/assets/js/saved-sync-core.js")
+
+    assert "partitionSavedQueueResults" in popup
+    assert "createSavedSyncTaskTracker" in popup_runtime
+    assert "createRetainedSavedListState" in popup_runtime
+    assert "仍在后台同步" in popup
+    assert "for (let attempt = 0; task.task_id" not in popup
+
+    assert "createDurableTaskTracker" in mobile_saved
+    assert "createRetainedSavedListState" in mobile_saved
+    assert "createSavedMutationRegistry" in mobile_recommend
+    assert 'setAttribute("role", "dialog")' in mobile_app
+    assert 'setAttribute("aria-modal", "true")' in mobile_app
+    assert "createDialogFocusController" in mobile_app
+    assert "mobile-settings-retry" in mobile_app
+    assert "configLoaded" in mobile_app
+
+    assert "saved-sync-core.js" in desktop_html
+    assert "createStrictSavedApi(requestJsonStrict)" in desktop
+    assert "createDurableTaskTracker" in desktop
+    assert "createRetainedSavedListState" in desktop
+    assert "desktopSavedMutations" in desktop
+    assert "_delightStatusCache.set(savedItem.item_key" in desktop
+    assert "仍在后台同步" in desktop
+    assert "for (let attempt = 0; task.task_id" not in desktop
+    assert "timeoutMs" in desktop_core

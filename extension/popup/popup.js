@@ -68,7 +68,13 @@ import {
 } from "./popup-qr.js";
 import {
   createSavedToggleRegistry,
+  captureSavedFocus,
+  createRetainedSavedListState,
+  createSavedSyncTaskTracker,
   getSavedSyncPresentation,
+  normalizeCanonicalSavedItem,
+  partitionSavedQueueResults,
+  restoreSavedFocus,
   sanitizeSavedSyncTask,
   summarizeSavedSyncResults,
 } from "./popup-saved-sync.js";
@@ -559,15 +565,9 @@ function setActiveTab(tabName) {
 
 function normalizePopupSavedItem(itemOrBvid) {
   const item = typeof itemOrBvid === "object" && itemOrBvid ? itemOrBvid : { bvid: itemOrBvid };
-  const sourcePlatform = String(item.source_platform || "bilibili").trim();
-  const contentId = String(item.content_id || item.bvid || item.id || "").trim();
   return {
     ...item,
-    item_key: String(item.item_key || `${sourcePlatform}:${contentId}`).trim(),
-    source_platform: sourcePlatform,
-    content_id: contentId,
-    content_url: String(item.content_url || "").trim(),
-    content_type: String(item.content_type || "video").trim(),
+    ...normalizeCanonicalSavedItem(item),
   };
 }
 
@@ -623,10 +623,19 @@ function bindFavoriteToggle(button, itemOrBvid, labels = {}) {
 }
 
 // ── Platform-neutral saved views ─────────────────────────────────
-const SAVED_SYNC_TERMINAL = new Set([
-  "synced", "already_synced", "login_required", "unsupported",
-  "rate_limited", "extension_required", "failed",
-]);
+const savedListStates = {
+  watch_later: createRetainedSavedListState(),
+  favorite: createRetainedSavedListState(),
+};
+const activeSavedTaskIds = new Set();
+const savedSyncTracker = createSavedSyncTaskTracker({
+  poll: (taskId) => pollSavedSyncTask(taskId),
+});
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    for (const taskId of activeSavedTaskIds) savedSyncTracker.resume(taskId);
+  }
+});
 
 function syncEligible(item) {
   return !["synced", "already_synced", "syncing"].includes(item?.sync_status);
@@ -637,18 +646,6 @@ function savedSyncDetail(item) {
     return "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。";
   }
   return item?.error_message || item?.resolved_target || "平台目标将在同步时确认";
-}
-
-async function awaitSavedSyncTask(initial) {
-  let task = sanitizeSavedSyncTask(initial);
-  for (let attempt = 0; task.task_id && attempt < 40; attempt += 1) {
-    if (task.items.every((item) => SAVED_SYNC_TERMINAL.has(item.status))) {
-      break;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    task = sanitizeSavedSyncTask(await pollSavedSyncTask(task.task_id));
-  }
-  return task;
 }
 
 async function runSavedSync(listKind, items, button, status, reload, confirmBatch = false) {
@@ -671,10 +668,28 @@ async function runSavedSync(listKind, items, button, status, reload, confirmBatc
     status.textContent = `正在同步 ${selected.length} 项…`;
   }
   try {
-    const task = await awaitSavedSyncTask(
+    const task = sanitizeSavedSyncTask(
       await syncSavedItems(listKind, selected.map((item) => item.item_key)),
     );
-    if (status) status.textContent = summarizeSavedSyncResults(task.items) || "同步任务已提交";
+    if (!task.task_id) throw new Error("同步任务缺少 task_id，请重试。");
+    activeSavedTaskIds.add(task.task_id);
+    savedSyncTracker.track(task, {
+      onProgress: () => {
+        if (status) status.textContent = `正在同步 ${selected.length} 项…`;
+      },
+      onBackground: () => {
+        if (status) status.textContent = "仍在后台同步；可切换页面，返回后会继续更新。";
+      },
+      onPollError: () => {
+        if (status) status.textContent = "仍在后台同步；连接恢复后会继续查询。";
+      },
+      onTerminal: (terminalTask) => {
+        activeSavedTaskIds.delete(task.task_id);
+        if (status) status.textContent = summarizeSavedSyncResults(terminalTask.items) || "同步已完成";
+        void reload();
+      },
+    });
+    if (status) status.textContent = `同步任务已提交 · ${selected.length} 项`;
   } catch (error) {
     if (status) {
       status.role = "alert";
@@ -688,22 +703,44 @@ async function runSavedSync(listKind, items, button, status, reload, confirmBatc
 
 async function loadSavedList(listKind, { list, empty, syncAll, status, toggles }) {
   if (!(list instanceof HTMLElement)) return;
-  let data = null;
+  const focusToken = captureSavedFocus(list);
+  const retained = savedListStates[listKind];
+  const hadLoadError = Boolean(retained.snapshot().error);
   try {
-    data = await fetchSavedItems(listKind, 100, 0);
+    const data = await fetchSavedItems(listKind, 100, 0);
+    retained.commit({
+      items: Array.isArray(data?.items) ? data.items.map(normalizePopupSavedItem) : [],
+      total: data?.total,
+    });
+    if (status && hadLoadError) {
+      status.removeAttribute("role");
+      status.replaceChildren();
+    }
   } catch (error) {
+    retained.fail(error);
     if (status) {
       status.role = "alert";
-      status.textContent = error?.message || "保存列表加载失败。";
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "saved-load-retry";
+      retry.textContent = "重试加载";
+      retry.addEventListener("click", () => {
+        void loadSavedList(listKind, { list, empty, syncAll, status, toggles });
+      });
+      status.replaceChildren(
+        document.createTextNode(`${retained.snapshot().error} `),
+        retry,
+      );
     }
   }
-  const items = Array.isArray(data?.items) ? data.items.map(normalizePopupSavedItem) : [];
+  const { items } = retained.snapshot();
   list.replaceChildren();
   if (empty instanceof HTMLElement) empty.hidden = items.length > 0;
   for (const item of items) {
     toggles.setSaved(item.item_key, true);
     list.appendChild(buildSavedCard(listKind, item, { list, empty, toggles }));
   }
+  restoreSavedFocus(list, focusToken);
   const pendingCount = items.filter(syncEligible).length;
   if (syncAll instanceof HTMLButtonElement) {
     syncAll.textContent = `同步未同步内容（${pendingCount}）`;
@@ -767,6 +804,7 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
   const body = document.createElement("button");
   body.type = "button";
   body.className = "saved-card-open";
+  body.dataset.savedAction = "open";
   const media = buildSavedCardMedia(item);
   const copy = document.createElement("span");
   copy.className = "saved-card-copy";
@@ -798,6 +836,7 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "saved-card-remove";
+  remove.dataset.savedAction = "remove";
   remove.textContent = "移除";
   remove.title = listKind === "watch_later" ? "移出本地稍后再看" : "从本地收藏移除";
   bindSavedCardRemove(card, remove, {
@@ -815,6 +854,7 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
     const sync = document.createElement("button");
     sync.type = "button";
     sync.className = "saved-card-sync";
+    sync.dataset.savedAction = "sync";
     sync.textContent = presentation.retryable ? "重试同步" : "同步";
     sync.addEventListener("click", () => runSavedSync(
       listKind,
@@ -5061,23 +5101,20 @@ function renderDelightSlot() {
         const results = await Promise.allSettled(
           snapshot.map((item) => saveItem("watch_later", item)),
         );
-        const savedKeys = new Set();
+        const partition = partitionSavedQueueResults(snapshot, results);
         let syncing = 0;
-        results.forEach((result, index) => {
-          if (result.status !== "fulfilled" || result.value?.saved === false) return;
-          const item = snapshot[index];
-          savedKeys.add(item.item_key);
-          watchLaterToggles.setSaved(item.item_key, true);
-          if (result.value?.sync_task_id && ["pending", "syncing"].includes(result.value?.sync_status)) {
+        partition.saved.forEach(({ item, itemKey, value }) => {
+          if (itemKey) {
+            watchLaterToggles.setSaved(itemKey, true);
+          }
+          if (value?.sync_task_id && ["pending", "syncing"].includes(value?.sync_status)) {
             syncing += 1;
           }
           rememberDismissedDelight(item.bvid || item.content_id);
         });
-        const saved = savedKeys.size;
-        const failed = snapshot.length - saved;
-        state.activeDelights = state.activeDelights.filter(
-          (item) => !savedKeys.has(normalizePopupSavedItem(item).item_key),
-        );
+        const saved = partition.savedCount;
+        const failed = partition.failedCount;
+        state.activeDelights = partition.remaining;
         syncDelightHead();
         setHint(`本地保存 ${saved} · 同步中 ${syncing} · 失败 ${failed}`, failed ? "warning" : "success");
         renderDelightSlot();

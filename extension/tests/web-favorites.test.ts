@@ -41,7 +41,7 @@ test("mobile recommend delight tray has a favorite star action", () => {
   );
 
   assert.match(recommendJs, /action:\s*"favorite"/);
-  assert.match(recommendJs, /saveItem\("favorite", savedItem\)/);
+  assert.match(recommendJs, /toggleSavedLocally\("favorite", savedItem\)/);
 });
 
 test("mobile recommend cards have a favorite star toggle", () => {
@@ -50,8 +50,8 @@ test("mobile recommend cards have a favorite star toggle", () => {
     "utf8",
   );
 
-  assert.match(recommendJs, /saveItem\("favorite", savedItem\)/);
-  assert.match(recommendJs, /savedItemStatus\("favorite", savedItem\.item_key\)/);
+  assert.match(recommendJs, /toggleSavedLocally\("favorite", savedItem\)/);
+  assert.match(recommendJs, /hydrateSavedLocally\("favorite", savedItem/);
 });
 
 test("desktop web exposes favorites page, badge, and delight star", () => {

@@ -4593,10 +4593,11 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    @media (max-width: 520px) {
+    @media (max-width: 520px), (pointer: coarse) {
       .saved-card-sync,
       .saved-card-remove,
-      .saved-sync-toolbar button { min-height: 44px; }
+      .saved-sync-toolbar button,
+      .saved-load-retry { min-width: 44px; min-height: 44px; }
     }
 
   </style>

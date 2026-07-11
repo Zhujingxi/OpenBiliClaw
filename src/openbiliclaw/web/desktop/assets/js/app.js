@@ -722,19 +722,22 @@
     }
 
     function normalizeRecommendation(item) {
-      const contentId = String(item?.content_id ?? item?.bvid ?? "");
-      const contentType = String(item?.content_type ?? "video").trim().toLowerCase() || "video";
+      const canonical = window.OpenBiliClawSavedSync.normalizeSavedItem(item);
+      const contentId = canonical.content_id;
+      const contentType = canonical.content_type.toLowerCase();
       const bodyText = decodeHtmlEntities(item?.body_text ?? "");
       return {
         id: Number(item?.id ?? Date.now()),
         bvid: String(item?.bvid ?? contentId),
+        item_key: canonical.item_key,
         content_id: contentId,
         title: displayRecommendationTitle(decodeHtmlEntities(item?.title ?? ""), bodyText, contentType) || "未命名内容",
         up: decodeHtmlEntities(item?.up_name ?? item?.up ?? "未知创作者"),
         cover_url: normalizeImageUrl(item?.cover_url ?? item?.cover ?? item?.pic ?? item?.thumbnail_url ?? item?.thumbnail ?? item?.image_url),
-        content_url: String(item?.content_url ?? ""),
+        content_url: canonical.content_url,
         topic: decodeHtmlEntities(item?.topic_label ?? item?.topic ?? "未归类"),
-        platform: normalizeSourcePlatform(item),
+        platform: canonical.source_platform,
+        source_platform: canonical.source_platform,
         content_type: contentType,
         body_text: bodyText,
         duration: Number(item?.duration ?? 0) || 0,
@@ -1418,69 +1421,63 @@
     const SAVED_SYNC_PRESENTATION = {
       pending: ["待同步", "neutral", false], syncing: ["同步中", "info", false],
       synced: ["已同步", "success", false], already_synced: ["已同步", "success", false],
-      login_required: ["需要登录", "warning", true], unsupported: ["同步失败", "error", false],
+      login_required: ["需要登录", "warning", true], unsupported: ["同步失败", "error", true],
       rate_limited: ["同步失败", "error", true], extension_required: ["需要连接插件", "warning", true],
       failed: ["同步失败", "error", true]
     };
-    const SAVED_SYNC_TERMINAL = new Set(["synced", "already_synced", "login_required", "unsupported", "rate_limited", "extension_required", "failed"]);
-
     function safeSavedText(value, maxLength = 240) {
       return String(value || "").replace(/[\p{C}\p{Zl}\p{Zp}]/gu, "").trim().slice(0, maxLength);
     }
 
     function desktopSavedItem(itemOrBvid = {}) {
       const item = typeof itemOrBvid === "object" && itemOrBvid ? itemOrBvid : { bvid: itemOrBvid };
-      const sourcePlatform = safeSavedText(item.source_platform || "bilibili", 64);
-      const contentId = safeSavedText(item.content_id || item.bvid || item.id, 2048);
+      const canonical = window.OpenBiliClawSavedSync.normalizeSavedItem(item);
       return {
         ...item,
-        item_key: safeSavedText(item.item_key || `${sourcePlatform}:${contentId}`, 2048),
-        source_platform: sourcePlatform,
-        content_id: contentId,
-        content_url: safeSavedText(item.content_url, 2048),
-        content_type: safeSavedText(item.content_type || "video", 128),
-        title: safeSavedText(item.title || contentId),
+        item_key: safeSavedText(canonical.item_key, 2048),
+        source_platform: safeSavedText(canonical.source_platform, 64),
+        content_id: safeSavedText(canonical.content_id, 2048),
+        content_url: safeSavedText(canonical.content_url, 2048),
+        content_type: safeSavedText(canonical.content_type, 128),
+        title: safeSavedText(item.title || canonical.content_id),
         author_name: safeSavedText(item.author_name || item.up_name),
         cover_url: safeSavedText(item.cover_url, 2048),
-        sync_status: SAVED_SYNC_PRESENTATION[item.sync_status] ? item.sync_status : "pending",
+        sync_status: SAVED_SYNC_PRESENTATION[item.sync_status] ? item.sync_status : "failed",
         resolved_target: safeSavedText(item.resolved_target),
         error_message: safeSavedText(item.error_message)
       };
     }
 
-    function savedPath(listKind) { return `/saved/${listKind}`; }
+    const desktopSavedApi = window.OpenBiliClawSavedSync.createStrictSavedApi(requestJsonStrict);
+    const desktopSavedMutations = window.OpenBiliClawSavedSync.createSavedMutationRegistry();
+    const desktopSavedListStates = {
+      watch_later: window.OpenBiliClawSavedSync.createRetainedSavedListState(),
+      favorite: window.OpenBiliClawSavedSync.createRetainedSavedListState()
+    };
+    const desktopSyncingKeys = { watch_later: new Set(), favorite: new Set() };
+    const desktopSavedTaskIds = new Set();
+    const desktopSavedTaskTracker = window.OpenBiliClawSavedSync.createDurableTaskTracker({
+      poll: (taskId) => desktopSavedApi.pollTask(taskId),
+      isVisible: () => !document.hidden
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) for (const taskId of desktopSavedTaskIds) desktopSavedTaskTracker.resume(taskId);
+    });
     function saveDesktopItem(listKind, item) {
-      const normalized = desktopSavedItem(item);
-      return requestJson(savedPath(listKind), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
-        source_platform: normalized.source_platform, content_id: normalized.content_id,
-        content_url: normalized.content_url, content_type: normalized.content_type,
-        title: normalized.title, author_name: normalized.author_name,
-        cover_url: normalized.cover_url, note: safeSavedText(normalized.note)
-      }) });
+      return desktopSavedApi.save(listKind, desktopSavedItem(item));
     }
     function removeDesktopSavedItem(listKind, itemKey) {
-      return requestJson(`${savedPath(listKind)}/remove`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ item_key: itemKey }) });
+      return desktopSavedApi.remove(listKind, itemKey);
     }
     function savedStatus(listKind, itemOrBvid) {
       const itemKey = desktopSavedItem(itemOrBvid).item_key;
-      return requestJson(`${savedPath(listKind)}/status?item_key=${encodeURIComponent(itemKey)}`);
+      return desktopSavedApi.status(listKind, itemKey);
     }
     function watchLaterStatus(itemOrBvid) { return savedStatus("watch_later", itemOrBvid); }
     function favoriteStatus(itemOrBvid) { return savedStatus("favorite", itemOrBvid); }
-    function fetchDesktopSaved(listKind) { return requestJson(`${savedPath(listKind)}?limit=100&offset=0`); }
+    function fetchDesktopSaved(listKind) { return desktopSavedApi.list(listKind); }
     function syncDesktopSaved(listKind, itemKeys) {
-      return requestJson(`${savedPath(listKind)}/sync`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ item_keys: itemKeys }) });
-    }
-
-    async function awaitDesktopSavedTask(initial) {
-      let task = initial || { task_id: "", items: [] };
-      for (let attempt = 0; task.task_id && attempt < 40; attempt += 1) {
-        const rows = Array.isArray(task.items) ? task.items : [];
-        if (rows.every((item) => SAVED_SYNC_TERMINAL.has(item.status))) break;
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        task = await requestJson(`/saved-sync/tasks/${encodeURIComponent(safeSavedText(task.task_id, 64))}`);
-      }
-      return { items: (Array.isArray(task.items) ? task.items : []).slice(0, 500).map((item) => ({ item_key: safeSavedText(item.item_key, 2048), status: SAVED_SYNC_PRESENTATION[item.status] ? item.status : "failed" })) };
+      return desktopSavedApi.sync(listKind, itemKeys);
     }
 
     function summarizeDesktopSavedTask(items) {
@@ -1514,6 +1511,7 @@
       const grid = document.getElementById(listId);
       const empty = document.getElementById(emptyId);
       if (!grid) return;
+      const focusToken = window.OpenBiliClawSavedSync.captureSavedFocus(grid);
       const rows = Array.isArray(items) ? items : [];
       if (!rows.length) {
         grid.replaceChildren();
@@ -1523,8 +1521,10 @@
       if (empty) empty.setAttribute("hidden", "");
       grid.replaceChildren(...rows.map((item) => {
         item = desktopSavedItem(item);
+        if (desktopSyncingKeys[listKind].has(item.item_key)) item.sync_status = "syncing";
         const card = document.createElement("article");
         card.className = "video-card saved-card";
+        card.dataset.itemKey = item.item_key;
         const url = contentUrl(item);
         const coverContent = `
             ${coverImg(item)}
@@ -1540,8 +1540,8 @@
             <p class="saved-sync-line"><span class="saved-sync-chip" data-tone="${escapeHtml(SAVED_SYNC_PRESENTATION[item.sync_status][1])}">${escapeHtml(SAVED_SYNC_PRESENTATION[item.sync_status][0])}</span><span>${escapeHtml(item.sync_status === "extension_required" ? "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。" : item.error_message || item.resolved_target || "平台目标将在同步时确认")}</span></p>
           </div>
           <div class="card-actions saved-card-actions">
-            ${savedSyncEligible(item) ? `<button class="small-btn saved-sync-one" type="button">${SAVED_SYNC_PRESENTATION[item.sync_status][2] ? "重试同步" : "同步"}</button>` : ""}
-            <button class="small-btn saved-remove" type="button" title="只从 OpenBiliClaw 本地移除">移除</button>
+            ${savedSyncEligible(item) && !desktopSyncingKeys[listKind].has(item.item_key) ? `<button class="small-btn saved-sync-one" data-saved-action="sync" type="button">${SAVED_SYNC_PRESENTATION[item.sync_status][2] ? "重试同步" : "同步"}</button>` : ""}
+            <button class="small-btn saved-remove" data-saved-action="remove" type="button" title="只从 OpenBiliClaw 本地移除">移除</button>
           </div>`;
         const cover = card.querySelector(".cover");
         cover.addEventListener("click", () => {
@@ -1567,6 +1567,7 @@
         });
         return card;
       }));
+      window.OpenBiliClawSavedSync.restoreSavedFocus(grid, focusToken);
     }
 
     async function runDesktopSavedSync(listKind, selected, activeButton, reload, confirmBatch = false) {
@@ -1577,10 +1578,26 @@
       const status = document.getElementById(listKind === "watch_later" ? "watchLaterSyncStatus" : "favoritesSyncStatus");
       if (activeButton) { activeButton.disabled = true; activeButton.textContent = "同步中…"; }
       if (status) { status.removeAttribute("role"); status.textContent = `正在同步 ${eligible.length} 项…`; }
+      for (const item of eligible) desktopSyncingKeys[listKind].add(item.item_key);
       try {
-        const task = await awaitDesktopSavedTask(await syncDesktopSaved(listKind, eligible.map((item) => item.item_key)));
-        if (status) status.textContent = summarizeDesktopSavedTask(task.items) || "同步任务已提交";
+        const task = await syncDesktopSaved(listKind, eligible.map((item) => item.item_key));
+        const taskId = safeSavedText(task?.task_id, 64);
+        if (!taskId) throw new Error("同步任务缺少 task_id，请重试。");
+        desktopSavedTaskIds.add(taskId);
+        desktopSavedTaskTracker.track(task, {
+          onProgress: () => { if (status) status.textContent = `正在同步 ${eligible.length} 项…`; },
+          onBackground: () => { if (status) status.textContent = "仍在后台同步；可切换页面，返回后会继续更新。"; },
+          onPollError: () => { if (status) status.textContent = "仍在后台同步；连接恢复后会继续查询。"; },
+          onTerminal: (terminalTask) => {
+            desktopSavedTaskIds.delete(taskId);
+            for (const item of eligible) desktopSyncingKeys[listKind].delete(item.item_key);
+            if (status) status.textContent = summarizeDesktopSavedTask(terminalTask.items) || "同步已完成";
+            void reload();
+          }
+        });
+        if (status) status.textContent = `同步任务已提交 · ${eligible.length} 项`;
       } catch (error) {
+        for (const item of eligible) desktopSyncingKeys[listKind].delete(item.item_key);
         if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "同步失败，请重试。"; }
       } finally { if (activeButton) activeButton.disabled = false; await reload(); }
     }
@@ -1589,34 +1606,56 @@
       const id = listKind === "watch_later" ? "watchLaterSyncAll" : "favoritesSyncAll";
       const button = document.getElementById(id);
       if (!button) return;
-      const count = items.filter(savedSyncEligible).length;
+      const count = items.filter((item) => savedSyncEligible(item) && !desktopSyncingKeys[listKind].has(item.item_key)).length;
       button.textContent = `同步未同步内容（${count}）`;
       button.disabled = count === 0;
       button.onclick = () => runDesktopSavedSync(listKind, items, button, reload, true);
     }
 
+    function showDesktopSavedLoadError(status, state, reload) {
+      if (!status) return;
+      status.setAttribute("role", "alert");
+      status.dataset.loadError = "true";
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "small-btn saved-load-retry";
+      retry.textContent = "重试加载";
+      retry.addEventListener("click", () => { void reload(); });
+      status.replaceChildren(document.createTextNode(`${state.snapshot().error} `), retry);
+    }
+
     async function refreshWatchLater() {
-      const data = await fetchDesktopSaved("watch_later").catch((error) => {
+      const retained = desktopSavedListStates.watch_later;
+      try {
+        const data = await fetchDesktopSaved("watch_later");
+        retained.commit({ items: (data?.items || []).map(desktopSavedItem), total: data?.total });
         const status = document.getElementById("watchLaterSyncStatus");
-        if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "稍后再看加载失败。"; }
-        return null;
-      });
-      const items = (data?.items || []).map(desktopSavedItem);
+        if (status?.dataset.loadError === "true") { status.replaceChildren(); status.removeAttribute("role"); delete status.dataset.loadError; }
+      } catch (error) {
+        retained.fail(error);
+        showDesktopSavedLoadError(document.getElementById("watchLaterSyncStatus"), retained, refreshWatchLater);
+      }
+      const { items, total } = retained.snapshot();
       renderSavedList("watch_later", "watchLaterList", "watchLaterEmpty", items, refreshWatchLater);
       bindDesktopSavedBatch("watch_later", items, refreshWatchLater);
-      updateSavedBadge("watchLaterCountBadge", data?.total);
+      updateSavedBadge("watchLaterCountBadge", total);
     }
 
     async function refreshFavorites() {
-      const data = await fetchDesktopSaved("favorite").catch((error) => {
+      const retained = desktopSavedListStates.favorite;
+      try {
+        const data = await fetchDesktopSaved("favorite");
+        retained.commit({ items: (data?.items || []).map(desktopSavedItem), total: data?.total });
         const status = document.getElementById("favoritesSyncStatus");
-        if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "收藏列表加载失败。"; }
-        return null;
-      });
-      const items = (data?.items || []).map(desktopSavedItem);
+        if (status?.dataset.loadError === "true") { status.replaceChildren(); status.removeAttribute("role"); delete status.dataset.loadError; }
+      } catch (error) {
+        retained.fail(error);
+        showDesktopSavedLoadError(document.getElementById("favoritesSyncStatus"), retained, refreshFavorites);
+      }
+      const { items, total } = retained.snapshot();
       renderSavedList("favorite", "favoritesList", "favoritesEmpty", items, refreshFavorites);
       bindDesktopSavedBatch("favorite", items, refreshFavorites);
-      updateSavedBadge("favoritesCountBadge", data?.total);
+      updateSavedBadge("favoritesCountBadge", total);
     }
 
     // Re-sync the pressed state + count badge for all visible ☆/♥ toggles.
@@ -2219,22 +2258,22 @@
         // Lazy-load watch-later state
         const wlBtn = card.querySelector('[data-action="watch-later"]');
         if (wlBtn) {
-          watchLaterStatus(item).then((res) => {
-            if (res && res.saved) {
-              wlBtn.setAttribute("aria-pressed", "true");
-              wlBtn.title = "\u53D6\u6D88\u7A0D\u540E\u518D\u770B";
-            }
-          }).catch(() => {});
+          const savedItem = desktopSavedItem(item);
+          void desktopSavedMutations.hydrate("watch_later", savedItem.item_key, () => watchLaterStatus(savedItem)).then(() => {
+            const saved = desktopSavedMutations.isSaved("watch_later", savedItem.item_key);
+            wlBtn.setAttribute("aria-pressed", saved ? "true" : "false");
+            wlBtn.title = saved ? "\u53D6\u6D88\u7A0D\u540E\u518D\u770B" : "\u7A0D\u540E\u518D\u770B";
+          });
         }
         // Lazy-load favorite state
         const favBtn = card.querySelector('[data-action="favorite"]');
         if (favBtn) {
-          favoriteStatus(item).then((res) => {
-            if (res && res.saved) {
-              favBtn.setAttribute("aria-pressed", "true");
-              favBtn.title = "\u53D6\u6D88\u6536\u85CF";
-            }
-          }).catch(() => {});
+          const savedItem = desktopSavedItem(item);
+          void desktopSavedMutations.hydrate("favorite", savedItem.item_key, () => favoriteStatus(savedItem)).then(() => {
+            const saved = desktopSavedMutations.isSaved("favorite", savedItem.item_key);
+            favBtn.setAttribute("aria-pressed", saved ? "true" : "false");
+            favBtn.title = saved ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF";
+          });
         }
         return card;
       }));
@@ -2502,20 +2541,19 @@
       if (action === "cancel-comment") { closeCardComposer(card); return; }
       if (action === "watch-later") {
         const btn = card.querySelector('[data-action="watch-later"]');
-        if (!btn || btn.disabled) return;
+        const savedItem = desktopSavedItem(item);
+        if (!btn || btn.disabled || desktopSavedMutations.isBusy("watch_later", savedItem.item_key)) return;
         btn.disabled = true;
-        const wasSaved = btn.getAttribute("aria-pressed") === "true";
+        const wasSaved = desktopSavedMutations.isSaved("watch_later", savedItem.item_key);
         btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
         btn.title = wasSaved ? "\u7A0D\u540E\u518D\u770B" : "\u53D6\u6D88\u6536\u85CF";
+        if (status) { status.removeAttribute("role"); status.textContent = wasSaved ? "正在从本地稍后再看移除…" : "正在保存到本地稍后再看…"; }
         try {
-          const savedItem = desktopSavedItem(item);
-          if (wasSaved) {
-            await removeDesktopSavedItem("watch_later", savedItem.item_key);
-            if (status) status.textContent = "已从 OpenBiliClaw 本地稍后再看移除；不会删除平台记录。";
-          } else {
-            const result = await saveDesktopItem("watch_later", savedItem);
-            if (status) status.textContent = result?.sync_task_id ? "本地已保存，正在同步。" : "已保存，待同步。";
-          }
+          await desktopSavedMutations.toggle("watch_later", savedItem.item_key, {
+            add: () => saveDesktopItem("watch_later", savedItem),
+            remove: () => removeDesktopSavedItem("watch_later", savedItem.item_key)
+          });
+          if (status) status.textContent = wasSaved ? "已从 OpenBiliClaw 本地稍后再看移除；不会删除平台记录。" : "已保存到本地，平台同步状态可在稍后页查看。";
         } catch (error) {
           btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
           btn.title = wasSaved ? "\u53D6\u6D88\u7A0D\u540E\u518D\u770B" : "\u7A0D\u540E\u518D\u770B";
@@ -2527,20 +2565,19 @@
       }
       if (action === "favorite") {
         const btn = card.querySelector('[data-action="favorite"]');
-        if (!btn || btn.disabled) return;
+        const savedItem = desktopSavedItem(item);
+        if (!btn || btn.disabled || desktopSavedMutations.isBusy("favorite", savedItem.item_key)) return;
         btn.disabled = true;
-        const wasSaved = btn.getAttribute("aria-pressed") === "true";
+        const wasSaved = desktopSavedMutations.isSaved("favorite", savedItem.item_key);
         btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
         btn.title = wasSaved ? "\u6536\u85CF" : "\u53D6\u6D88\u6536\u85CF";
+        if (status) { status.removeAttribute("role"); status.textContent = wasSaved ? "正在从本地收藏移除…" : "正在保存到本地收藏…"; }
         try {
-          const savedItem = desktopSavedItem(item);
-          if (wasSaved) {
-            await removeDesktopSavedItem("favorite", savedItem.item_key);
-            if (status) status.textContent = "已从 OpenBiliClaw 本地收藏移除；不会删除平台记录。";
-          } else {
-            const result = await saveDesktopItem("favorite", savedItem);
-            if (status) status.textContent = result?.sync_task_id ? "本地已保存，正在同步。" : "已保存，待同步。";
-          }
+          await desktopSavedMutations.toggle("favorite", savedItem.item_key, {
+            add: () => saveDesktopItem("favorite", savedItem),
+            remove: () => removeDesktopSavedItem("favorite", savedItem.item_key)
+          });
+          if (status) status.textContent = wasSaved ? "已从 OpenBiliClaw 本地收藏移除；不会删除平台记录。" : "已保存到本地，平台同步状态可在收藏页查看。";
         } catch (error) {
           btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
           btn.title = wasSaved ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF";
@@ -4059,21 +4096,23 @@
       if (response === "cancel-comment") { closeDelightComposer(); return; }
       if (response === "watch-later") {
         const btn = document.querySelector('[data-delight="watch-later"]');
-        if (!btn || btn.disabled) return;
+        const savedItem = desktopSavedItem(delight);
+        if (!btn || btn.disabled || desktopSavedMutations.isBusy("watch_later", savedItem.item_key)) return;
         btn.disabled = true;
-        const wasSaved = btn.getAttribute("aria-pressed") === "true";
+        const wasSaved = desktopSavedMutations.isSaved("watch_later", savedItem.item_key);
         btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
-        if (delight.bvid) _delightStatusCache.set(delight.bvid, { ...(_delightStatusCache.get(delight.bvid) || {}), watchLater: !wasSaved });
+        _delightStatusCache.set(savedItem.item_key, { ...(_delightStatusCache.get(savedItem.item_key) || {}), watchLater: !wasSaved });
+        if ($("#delightStatus")) { $("#delightStatus").removeAttribute("role"); $("#delightStatus").textContent = wasSaved ? "正在从本地稍后再看移除…" : "正在保存到本地稍后再看…"; }
         try {
-          const savedItem = desktopSavedItem(delight);
-          if (wasSaved) {
-            await removeDesktopSavedItem("watch_later", savedItem.item_key);
-          } else {
-            await saveDesktopItem("watch_later", savedItem);
-          }
-        } catch {
+          await desktopSavedMutations.toggle("watch_later", savedItem.item_key, {
+            add: () => saveDesktopItem("watch_later", savedItem),
+            remove: () => removeDesktopSavedItem("watch_later", savedItem.item_key)
+          });
+          if ($("#delightStatus")) $("#delightStatus").textContent = wasSaved ? "已从本地稍后再看移除；平台记录不变。" : "已保存到本地，平台同步状态可在稍后页查看。";
+        } catch (error) {
           btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
-          if (delight.bvid) _delightStatusCache.set(delight.bvid, { ...(_delightStatusCache.get(delight.bvid) || {}), watchLater: wasSaved });
+          _delightStatusCache.set(savedItem.item_key, { ...(_delightStatusCache.get(savedItem.item_key) || {}), watchLater: wasSaved });
+          if ($("#delightStatus")) { $("#delightStatus").setAttribute("role", "alert"); $("#delightStatus").textContent = error?.message || "本地稍后再看操作失败，请重试。"; }
         } finally {
           btn.disabled = false;
         }
@@ -4081,21 +4120,23 @@
       }
       if (response === "favorite") {
         const btn = document.querySelector('[data-delight="favorite"]');
-        if (!btn || btn.disabled) return;
+        const savedItem = desktopSavedItem(delight);
+        if (!btn || btn.disabled || desktopSavedMutations.isBusy("favorite", savedItem.item_key)) return;
         btn.disabled = true;
-        const wasSaved = btn.getAttribute("aria-pressed") === "true";
+        const wasSaved = desktopSavedMutations.isSaved("favorite", savedItem.item_key);
         btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
-        if (delight.bvid) _delightStatusCache.set(delight.bvid, { ...(_delightStatusCache.get(delight.bvid) || {}), favorite: !wasSaved });
+        _delightStatusCache.set(savedItem.item_key, { ...(_delightStatusCache.get(savedItem.item_key) || {}), favorite: !wasSaved });
+        if ($("#delightStatus")) { $("#delightStatus").removeAttribute("role"); $("#delightStatus").textContent = wasSaved ? "正在从本地收藏移除…" : "正在保存到本地收藏…"; }
         try {
-          const savedItem = desktopSavedItem(delight);
-          if (wasSaved) {
-            await removeDesktopSavedItem("favorite", savedItem.item_key);
-          } else {
-            await saveDesktopItem("favorite", savedItem);
-          }
-        } catch {
+          await desktopSavedMutations.toggle("favorite", savedItem.item_key, {
+            add: () => saveDesktopItem("favorite", savedItem),
+            remove: () => removeDesktopSavedItem("favorite", savedItem.item_key)
+          });
+          if ($("#delightStatus")) $("#delightStatus").textContent = wasSaved ? "已从本地收藏移除；平台记录不变。" : "已保存到本地，平台同步状态可在收藏页查看。";
+        } catch (error) {
           btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
-          if (delight.bvid) _delightStatusCache.set(delight.bvid, { ...(_delightStatusCache.get(delight.bvid) || {}), favorite: wasSaved });
+          _delightStatusCache.set(savedItem.item_key, { ...(_delightStatusCache.get(savedItem.item_key) || {}), favorite: wasSaved });
+          if ($("#delightStatus")) { $("#delightStatus").setAttribute("role", "alert"); $("#delightStatus").textContent = error?.message || "本地收藏操作失败，请重试。"; }
         } finally {
           btn.disabled = false;
         }
@@ -5088,6 +5129,7 @@
 
     function normalizeDelight(item) {
       if (!item) return null;
+      const canonical = window.OpenBiliClawSavedSync.normalizeSavedItem(item);
       // 后端 pending-batch 对喜欢过的候选下发 state="liked"，重灌后恢复
       // 「已喜欢」文案，让用户看出这条已经表过态。
       const serverState = String(item.state ?? "");
@@ -5097,20 +5139,23 @@
       // title through the ID fallback (derive from body / placeholder), but
       // keep the friendly delight default when there is genuinely no title.
       const delightBody = decodeHtmlEntities(item.body_text ?? "");
-      const delightCt = String(item.content_type ?? "").trim().toLowerCase();
+      const delightCt = canonical.content_type.toLowerCase();
       const derivedTitle = displayRecommendationTitle(
         decodeHtmlEntities(item.title ?? ""), delightBody, delightCt);
       return {
         type: "delight",
         bvid: String(item.bvid ?? item.content_id ?? ""),
+        item_key: canonical.item_key,
+        content_id: canonical.content_id,
+        content_type: canonical.content_type,
         title: derivedTitle && derivedTitle !== "未命名内容"
           ? derivedTitle
           : "发现了一条你可能会意外喜欢的内容",
         body_text: delightBody,
         reason: decodeHtmlEntities(item.delight_reason ?? item.reason ?? item.delight_hook ?? item.message ?? "这条来自后端高惊喜分候选。"),
         cover_url: normalizeImageUrl(item.cover_url ?? item.cover ?? item.pic ?? item.thumbnail_url ?? item.thumbnail ?? item.image_url),
-        content_url: String(item.content_url ?? ""),
-        source_platform: String(item.source_platform ?? item.platform ?? "bilibili"),
+        content_url: canonical.content_url,
+        source_platform: canonical.source_platform,
         chat_turn_id: String(item.chat_turn_id ?? ""),
         chat_reply: String(item.chat_reply ?? item.reply ?? ""),
         chat_draft: String(item.chat_draft ?? ""),
@@ -5332,9 +5377,9 @@
       }
       if ($("#delightCount")) $("#delightCount").textContent = `${state.delightIndex + 1}/${state.delights.length}`;
       // Sync ☆ / ♥ pressed state for the current delight.
-      const delightBvid = state.delight.bvid;
-      if (delightBvid && _delightStatusCache.has(delightBvid)) {
-        _syncDelightStatusButtons(delightBvid);
+      const delightKey = desktopSavedItem(state.delight).item_key;
+      if (delightKey && _delightStatusCache.has(delightKey)) {
+        _syncDelightStatusButtons(delightKey);
       } else {
         const wlBtn = document.querySelector('[data-delight="watch-later"]');
         if (wlBtn) wlBtn.setAttribute("aria-pressed", "false");
@@ -5454,24 +5499,26 @@
       _initDelightVisibilityObserver();
       // 批量预取 delight 队列中所有项的稍后再看/收藏状态
       (async () => {
-        const delightItems = state.delights.filter((d) => String(d.bvid || d.content_id || ""));
+        const delightItems = state.delights.map(desktopSavedItem).filter((item) => item.item_key);
         if (!delightItems.length) return;
-        const results = await Promise.allSettled(delightItems.map((item) => watchLaterStatus(item).then((r) => ({ bvid: item.bvid, watchLater: r?.saved ?? false, favorite: false }))));
-        const favResults = await Promise.allSettled(delightItems.map((item) => favoriteStatus(item).then((r) => ({ bvid: item.bvid, saved: r?.saved ?? false }))));
-        const favMap = new Map(favResults.filter((r) => r.status === "fulfilled").map((r) => [r.value.bvid, r.value.saved]));
-        for (const result of results) {
-          if (result.status !== "fulfilled") continue;
-          const { bvid, watchLater } = result.value;
-          _delightStatusCache.set(bvid, { watchLater, favorite: favMap.get(bvid) ?? false });
+        await Promise.allSettled(delightItems.flatMap((item) => [
+          desktopSavedMutations.hydrate("watch_later", item.item_key, () => watchLaterStatus(item)),
+          desktopSavedMutations.hydrate("favorite", item.item_key, () => favoriteStatus(item))
+        ]));
+        for (const item of delightItems) {
+          _delightStatusCache.set(item.item_key, {
+            watchLater: desktopSavedMutations.isSaved("watch_later", item.item_key),
+            favorite: desktopSavedMutations.isSaved("favorite", item.item_key)
+          });
         }
         // 如果当前显示的 delight 缓存已就绪，立即刷新按钮状态
-        const currentBvid = String(state.delight?.bvid || "");
-        if (currentBvid && _delightStatusCache.has(currentBvid)) _syncDelightStatusButtons(currentBvid);
+        const currentKey = state.delight ? desktopSavedItem(state.delight).item_key : "";
+        if (currentKey && _delightStatusCache.has(currentKey)) _syncDelightStatusButtons(currentKey);
       })();
     }
 
-    function _syncDelightStatusButtons(bvid) {
-      const cached = _delightStatusCache.get(bvid);
+    function _syncDelightStatusButtons(itemKey) {
+      const cached = _delightStatusCache.get(itemKey);
       if (!cached) return;
       const wlBtn = document.querySelector('[data-delight="watch-later"]');
       if (wlBtn) wlBtn.setAttribute("aria-pressed", cached.watchLater ? "true" : "false");

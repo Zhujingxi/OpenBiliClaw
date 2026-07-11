@@ -319,11 +319,18 @@ function savedListPath(listKind) {
 }
 
 export function normalizeSavedItemInput(item = {}) {
+  const sourcePlatform = String(item.source_platform || item.platform || "bilibili").trim();
+  const legacyId = String(item.bvid || "").trim();
+  const contentId = String(
+    item.content_id || (legacyId && !legacyId.includes(":") ? legacyId : ""),
+  ).trim();
   return {
-    source_platform: String(item.source_platform || item.platform || "bilibili").trim(),
-    content_id: String(item.content_id || item.bvid || item.id || "").trim(),
+    source_platform: sourcePlatform,
+    content_id: contentId,
     content_url: String(item.content_url || item.url || "").trim(),
-    content_type: String(item.content_type || "video").trim(),
+    content_type: String(
+      item.content_type || (sourcePlatform === "bilibili" && contentId ? "video" : ""),
+    ).trim(),
     title: String(item.title || "").trim(),
     author_name: String(item.author_name || item.up_name || item.author || "").trim(),
     cover_url: String(item.cover_url || "").trim(),

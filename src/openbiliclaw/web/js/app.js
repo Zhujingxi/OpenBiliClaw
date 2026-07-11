@@ -17,6 +17,7 @@ import { initRecommendView, onStreamEvent as recStreamEvent } from "./views/reco
 import { initProfileView, onStreamEvent as profileStreamEvent } from "./views/profile.js";
 import { initChatView, onStreamEvent as chatStreamEvent, toggleMessages, loadNotifications } from "./views/chat.js";
 import { initWatchLaterView, initFavoritesView } from "./views/saved.js";
+import { createDialogFocusController } from "./saved-sync-runtime.js";
 
 // ── DOM refs ─────────────────────────────────────────────────
 const $app = document.getElementById("app");
@@ -70,7 +71,7 @@ function renderStatusBar() {
   settings.type = "button";
   settings.setAttribute("aria-label", "打开保存与同步设置");
   settings.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5v.2h-4v-.2a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1-2.8-2.8.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3v-4h.2a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1 2.8-2.8.1.1a1.7 1.7 0 0 0 1.8.3 1.7 1.7 0 0 0 1-1.5V3h4v.2a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1 2.8 2.8-.1.1a1.7 1.7 0 0 0-.3 1.8 1.7 1.7 0 0 0 1.5 1h.2v4h-.2a1.7 1.7 0 0 0-1.4 1z"/></svg>';
-  settings.addEventListener("click", () => { void openMobileSettings(); });
+  settings.addEventListener("click", () => { void openMobileSettings(settings); });
   right.appendChild(settings);
 
   $statusBar.appendChild(title);
@@ -92,12 +93,15 @@ function renderStatusBar() {
   }
 }
 
-async function openMobileSettings() {
+async function openMobileSettings(opener) {
   document.getElementById("mobile-settings-overlay")?.remove();
   const overlay = document.createElement("section");
   overlay.id = "mobile-settings-overlay";
   overlay.className = "mobile-settings-overlay";
   overlay.setAttribute("aria-label", "保存与同步设置");
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.tabIndex = -1;
   const card = document.createElement("div");
   card.className = "mobile-settings-card";
   card.innerHTML = `
@@ -111,23 +115,55 @@ async function openMobileSettings() {
     </label>
     <p class="mobile-settings-hint">默认关闭。收藏和稍后再看始终先保存在本地；关闭时仍可在列表页手动同步。</p>
     <p class="mobile-settings-status" aria-live="polite"></p>
+    <button class="mobile-settings-retry btn btn-outline" type="button" hidden>重试加载</button>
     <div class="mobile-settings-actions"><button class="mobile-settings-save btn btn-brand" type="button">保存设置</button></div>`;
   overlay.append(card);
   document.body.append(overlay);
   const close = card.querySelector(".mobile-settings-close");
   const toggle = card.querySelector("#mobile-saved-auto-sync");
   const save = card.querySelector(".mobile-settings-save");
+  const retry = card.querySelector(".mobile-settings-retry");
   const status = card.querySelector(".mobile-settings-status");
-  close.addEventListener("click", () => overlay.remove());
+  save.disabled = true;
+  toggle.disabled = true;
+  let focusController = null;
+  const closeDialog = () => {
+    focusController?.deactivate();
+    overlay.remove();
+  };
+  focusController = createDialogFocusController({
+    dialog: overlay,
+    opener,
+    onClose: closeDialog,
+  });
+  focusController.activate();
+  close.addEventListener("click", closeDialog);
   let storedValue = false;
-  try {
-    const config = await fetchConfig();
-    storedValue = config.saved_sync?.auto_sync_enabled === true;
-    toggle.checked = storedValue;
-  } catch (error) {
-    status.setAttribute("role", "alert");
-    status.textContent = error?.message || "配置加载失败，请稍后重试。";
-  }
+  let configLoaded = false;
+  const loadConfig = async () => {
+    configLoaded = false;
+    save.disabled = true;
+    toggle.disabled = true;
+    retry.hidden = true;
+    status.removeAttribute("role");
+    status.textContent = "正在加载设置…";
+    try {
+      const config = await fetchConfig();
+      storedValue = config.saved_sync?.auto_sync_enabled === true;
+      toggle.checked = storedValue;
+      configLoaded = true;
+      save.disabled = false;
+      toggle.disabled = false;
+      status.textContent = "设置已加载。";
+    } catch (error) {
+      status.setAttribute("role", "alert");
+      status.textContent = error?.message || "配置加载失败，请稍后重试。";
+      retry.hidden = false;
+    }
+  };
+  retry.addEventListener("click", () => { void loadConfig(); });
+  close.focus();
+  await loadConfig();
   toggle.addEventListener("change", () => {
     if (!toggle.checked || storedValue) return;
     const warning = "开启后，在 OpenBiliClaw 点击收藏或稍后再看会修改对应平台账号中的收藏、书签、Saved、播放列表或稍后观看。";
@@ -137,7 +173,7 @@ async function openMobileSettings() {
     }
   });
   save.addEventListener("click", async () => {
-    if (save.disabled) return;
+    if (save.disabled || !configLoaded) return;
     save.disabled = true;
     save.textContent = "保存中…";
     status.removeAttribute("role");
@@ -154,7 +190,6 @@ async function openMobileSettings() {
       save.textContent = "保存设置";
     }
   });
-  close.focus();
 }
 
 // ── Tab Bar ──────────────────────────────────────────────────

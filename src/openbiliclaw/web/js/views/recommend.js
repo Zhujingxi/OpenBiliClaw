@@ -43,22 +43,21 @@ import {
   buildContentUrl,
   buildRecommendationClickPayload,
   normalizeSourcePlatform,
+  normalizeSavedIdentity,
   getSourceLabel,
   formatRelativeTimestamp,
   getMobileChatSession,
   shouldAutoAppendRecommendations,
 } from "../view-models.js";
 import { openContentUrl } from "../app-launch.js";
+import { createSavedMutationRegistry } from "../saved-sync-runtime.js";
 
 let $root = null;
 let loaded = false;
 let loading = false;
 let feedbackSheet = null; // { itemId, note, submitState }
 const feedbackDone = new Map(); // recId -> "like" | "dislike" | "comment"
-const watchLaterSaved = new Set(); // canonical item keys currently bookmarked
-let watchLaterBusy = false; // mutex for toggle requests
-const favoriteSaved = new Set(); // canonical item keys currently favorited
-let favoriteBusy = false; // mutex for favorite toggle requests
+const savedMutations = createSavedMutationRegistry();
 const COVER_PRELOAD_BATCH_SIZE = 12;
 const COVER_PRELOAD_WAIT_TIMEOUT_MS = 3000;
 const AUTO_APPEND_ROOT_MARGIN = "700px 0px 1400px 0px";
@@ -87,17 +86,8 @@ function esc(s) {
   return el.innerHTML;
 }
 
-function savedIdentity(item = {}) {
-  const sourcePlatform = String(item.source_platform || "bilibili").trim();
-  const contentId = String(item.content_id || item.bvid || item.id || "").trim();
-  return {
-    ...item,
-    item_key: String(item.item_key || `${sourcePlatform}:${contentId}`).trim(),
-    source_platform: sourcePlatform,
-    content_id: contentId,
-    content_url: String(item.content_url || "").trim(),
-    content_type: String(item.content_type || "video").trim(),
-  };
+export function savedIdentity(item = {}) {
+  return normalizeSavedIdentity(item);
 }
 
 function announceSavedAction(message, isError = false) {
@@ -112,6 +102,25 @@ function announceSavedAction(message, isError = false) {
   if (isError) status.setAttribute("role", "alert");
   else status.removeAttribute("role");
   status.textContent = message;
+}
+
+function isSavedLocally(listKind, itemKey) {
+  return savedMutations.isSaved(listKind, itemKey);
+}
+
+function toggleSavedLocally(listKind, item) {
+  return savedMutations.toggle(listKind, item.item_key, {
+    add: () => saveItem(listKind, item),
+    remove: () => removeSavedItem(listKind, item.item_key),
+  });
+}
+
+function hydrateSavedLocally(listKind, item, update) {
+  return savedMutations.hydrate(
+    listKind,
+    item.item_key,
+    () => savedItemStatus(listKind, item.item_key),
+  ).then(() => update(isSavedLocally(listKind, item.item_key)));
 }
 
 // ── Render ────────────────────────────────────────────────────
@@ -479,75 +488,51 @@ function renderDelightTray() {
         btn.textContent = b.label;
       }
       if (b.action === "watch-later") {
-        let busy = false;
         const savedItem = savedIdentity(d);
         btn.title = "稍后再看";
         btn.addEventListener("click", async () => {
-          if (busy) return;
-          busy = true;
+          if (savedMutations.isBusy("watch_later", savedItem.item_key)) return;
           btn.disabled = true;
-          const wasSaved = watchLaterSaved.has(savedItem.item_key);
+          const wasSaved = isSavedLocally("watch_later", savedItem.item_key);
           announceSavedAction(wasSaved ? "正在从本地稍后再看移除…" : "正在保存到本地稍后再看…");
           btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
           try {
-            if (wasSaved) {
-              await removeSavedItem("watch_later", savedItem.item_key);
-              watchLaterSaved.delete(savedItem.item_key);
-            } else {
-              await saveItem("watch_later", savedItem);
-              watchLaterSaved.add(savedItem.item_key);
-            }
+            await toggleSavedLocally("watch_later", savedItem);
             announceSavedAction(wasSaved ? "已从本地稍后再看移除；平台记录不变。" : "已保存到本地，平台同步状态可在稍后页查看。");
           } catch {
             btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
             announceSavedAction("本地稍后再看操作失败，请重试。", true);
           } finally {
-            busy = false;
             btn.disabled = false;
           }
         });
-        if (watchLaterSaved.has(savedItem.item_key)) btn.setAttribute("aria-pressed", "true");
-        savedItemStatus("watch_later", savedItem.item_key).then((res) => {
-          if (res && res.saved) {
-            watchLaterSaved.add(savedItem.item_key);
-            btn.setAttribute("aria-pressed", "true");
-          }
-        }).catch(() => {});
+        if (isSavedLocally("watch_later", savedItem.item_key)) btn.setAttribute("aria-pressed", "true");
+        void hydrateSavedLocally("watch_later", savedItem, (saved) => {
+          btn.setAttribute("aria-pressed", saved ? "true" : "false");
+        });
       } else if (b.action === "favorite") {
-        let busy = false;
         const savedItem = savedIdentity(d);
         btn.title = "收藏";
         btn.addEventListener("click", async () => {
-          if (busy) return;
-          busy = true;
+          if (savedMutations.isBusy("favorite", savedItem.item_key)) return;
           btn.disabled = true;
-          const wasSaved = favoriteSaved.has(savedItem.item_key);
+          const wasSaved = isSavedLocally("favorite", savedItem.item_key);
           announceSavedAction(wasSaved ? "正在从本地收藏移除…" : "正在保存到本地收藏…");
           btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
           try {
-            if (wasSaved) {
-              await removeSavedItem("favorite", savedItem.item_key);
-              favoriteSaved.delete(savedItem.item_key);
-            } else {
-              await saveItem("favorite", savedItem);
-              favoriteSaved.add(savedItem.item_key);
-            }
+            await toggleSavedLocally("favorite", savedItem);
             announceSavedAction(wasSaved ? "已从本地收藏移除；平台记录不变。" : "已保存到本地，平台同步状态可在收藏页查看。");
           } catch {
             btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
             announceSavedAction("本地收藏操作失败，请重试。", true);
           } finally {
-            busy = false;
             btn.disabled = false;
           }
         });
-        if (favoriteSaved.has(savedItem.item_key)) btn.setAttribute("aria-pressed", "true");
-        savedItemStatus("favorite", savedItem.item_key).then((res) => {
-          if (res && res.saved) {
-            favoriteSaved.add(savedItem.item_key);
-            btn.setAttribute("aria-pressed", "true");
-          }
-        }).catch(() => {});
+        if (isSavedLocally("favorite", savedItem.item_key)) btn.setAttribute("aria-pressed", "true");
+        void hydrateSavedLocally("favorite", savedItem, (saved) => {
+          btn.setAttribute("aria-pressed", saved ? "true" : "false");
+        });
       } else {
         btn.addEventListener("click", () => handleDelightAction(d, b.action));
         if (isChatState && (b.action === "like" || b.action === "reject")) {
@@ -1191,33 +1176,25 @@ function renderCard(rawItem, index = 0) {
   );
 
   const savedItem = savedIdentity(item);
-  const savedNow = watchLaterSaved.has(savedItem.item_key);
+  const savedNow = isSavedLocally("watch_later", savedItem.item_key);
   const starBtn = createCoverChip(
     CLOCK_SVG_ICON,
     "watch-later-btn",
     async () => {
-      if (watchLaterBusy) return;
-      watchLaterBusy = true;
+      if (savedMutations.isBusy("watch_later", savedItem.item_key)) return;
       starBtn.disabled = true;
-      const wasSaved = watchLaterSaved.has(savedItem.item_key);
+      const wasSaved = isSavedLocally("watch_later", savedItem.item_key);
       announceSavedAction(wasSaved ? "正在从本地稍后再看移除…" : "正在保存到本地稍后再看…");
       // optimistic toggle
       setChipState(starBtn, !wasSaved, wasSaved ? "☆" : "★");
       try {
-        if (wasSaved) {
-          await removeSavedItem("watch_later", savedItem.item_key);
-          watchLaterSaved.delete(savedItem.item_key);
-        } else {
-          await saveItem("watch_later", savedItem);
-          watchLaterSaved.add(savedItem.item_key);
-        }
+        await toggleSavedLocally("watch_later", savedItem);
         announceSavedAction(wasSaved ? "已从本地稍后再看移除；平台记录不变。" : "已保存到本地，平台同步状态可在稍后页查看。");
       } catch {
         // revert on failure
         setChipState(starBtn, wasSaved, wasSaved ? "★" : "☆");
         announceSavedAction("本地稍后再看操作失败，请重试。", true);
       } finally {
-        watchLaterBusy = false;
         starBtn.disabled = false;
       }
     },
@@ -1225,50 +1202,36 @@ function renderCard(rawItem, index = 0) {
   );
   setChipState(starBtn, savedNow, savedNow ? "★" : "☆");
   // lazy-load real state from backend
-  savedItemStatus("watch_later", savedItem.item_key).then((res) => {
-    if (res && res.saved) {
-      watchLaterSaved.add(savedItem.item_key);
-      setChipState(starBtn, true, "★");
-    }
-  }).catch(() => {});
+  void hydrateSavedLocally("watch_later", savedItem, (saved) => {
+    setChipState(starBtn, saved, saved ? "★" : "☆");
+  });
 
-  const favNow = favoriteSaved.has(savedItem.item_key);
+  const favNow = isSavedLocally("favorite", savedItem.item_key);
   const favBtn = createCoverChip(
     STAR_SVG_ICON,
     "favorite-btn",
     async () => {
-      if (favoriteBusy) return;
-      favoriteBusy = true;
+      if (savedMutations.isBusy("favorite", savedItem.item_key)) return;
       favBtn.disabled = true;
-      const wasSaved = favoriteSaved.has(savedItem.item_key);
+      const wasSaved = isSavedLocally("favorite", savedItem.item_key);
       announceSavedAction(wasSaved ? "正在从本地收藏移除…" : "正在保存到本地收藏…");
       setChipState(favBtn, !wasSaved, wasSaved ? "♡" : "♥");
       try {
-        if (wasSaved) {
-          await removeSavedItem("favorite", savedItem.item_key);
-          favoriteSaved.delete(savedItem.item_key);
-        } else {
-          await saveItem("favorite", savedItem);
-          favoriteSaved.add(savedItem.item_key);
-        }
+        await toggleSavedLocally("favorite", savedItem);
         announceSavedAction(wasSaved ? "已从本地收藏移除；平台记录不变。" : "已保存到本地，平台同步状态可在收藏页查看。");
       } catch {
         setChipState(favBtn, wasSaved, wasSaved ? "♥" : "♡");
         announceSavedAction("本地收藏操作失败，请重试。", true);
       } finally {
-        favoriteBusy = false;
         favBtn.disabled = false;
       }
     },
     { label: "收藏", pressedLabel: "取消收藏" },
   );
   setChipState(favBtn, favNow, favNow ? "♥" : "♡");
-  savedItemStatus("favorite", savedItem.item_key).then((res) => {
-    if (res && res.saved) {
-      favoriteSaved.add(savedItem.item_key);
-      setChipState(favBtn, true, "♥");
-    }
-  }).catch(() => {});
+  void hydrateSavedLocally("favorite", savedItem, (saved) => {
+    setChipState(favBtn, saved, saved ? "♥" : "♡");
+  });
 
   // Save chips overlay the cover top-right — keeps the bottom action bar light
   // (看看 / 喜欢 / 不感兴趣 / 聊一聊) instead of cramming 6 buttons in one row.

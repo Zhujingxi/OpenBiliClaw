@@ -35,8 +35,8 @@ test("mobile recommend delight tray has a watch-later star action", () => {
   const recommendJs = readFileSync(resolve("../src/openbiliclaw/web/js/views/recommend.js"), "utf8");
 
   assert.match(recommendJs, /action:\s*"watch-later"/);
-  assert.match(recommendJs, /saveItem\("watch_later", savedItem\)/);
-  assert.match(recommendJs, /removeSavedItem\("watch_later", savedItem\.item_key\)/);
+  assert.match(recommendJs, /toggleSavedLocally\("watch_later", savedItem\)/);
+  assert.match(recommendJs, /hydrateSavedLocally\("watch_later", savedItem/);
 });
 
 test("desktop web exposes watch-later page, badge, and delight star", () => {
