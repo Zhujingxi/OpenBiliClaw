@@ -124,6 +124,18 @@ export async function checkHealth() {
   } catch { return false; }
 }
 
+export async function fetchConfig() {
+  return requestJson("/config");
+}
+
+export async function updateConfig(data) {
+  return requestJson("/config", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
 // ── Recommendations ─────────────────────────────────────────
 export async function fetchRecommendations() {
   const data = await requestJson("/recommendations", { timeoutMs: DEFAULT_READ_TIMEOUT_MS });
@@ -298,6 +310,55 @@ export async function respondToAvoidanceProbe(domain, responseType, message = ""
 }
 
 // ── Watch-later ──────────────────────────────────────────────────
+
+function savedListPath(listKind) {
+  if (listKind !== "favorite" && listKind !== "watch_later") {
+    throw new TypeError(`Unknown saved list: ${listKind}`);
+  }
+  return `/saved/${listKind}`;
+}
+
+export function normalizeSavedItemInput(item = {}) {
+  return {
+    source_platform: String(item.source_platform || item.platform || "bilibili").trim(),
+    content_id: String(item.content_id || item.bvid || item.id || "").trim(),
+    content_url: String(item.content_url || item.url || "").trim(),
+    content_type: String(item.content_type || "video").trim(),
+    title: String(item.title || "").trim(),
+    author_name: String(item.author_name || item.up_name || item.author || "").trim(),
+    cover_url: String(item.cover_url || "").trim(),
+    note: String(item.note || "").trim(),
+  };
+}
+
+export async function saveItem(listKind, item) {
+  return requestJson(savedListPath(listKind), json(normalizeSavedItemInput(item)));
+}
+
+export async function removeSavedItem(listKind, itemKey) {
+  return requestJson(`${savedListPath(listKind)}/remove`, json({ item_key: String(itemKey || "").trim() }));
+}
+
+export async function fetchSavedItems(listKind, limit = 50, offset = 0) {
+  return requestJson(
+    `${savedListPath(listKind)}?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`,
+  );
+}
+
+export async function savedItemStatus(listKind, itemKey) {
+  const query = new URLSearchParams({ item_key: String(itemKey || "").trim() });
+  return requestJson(`${savedListPath(listKind)}/status?${query}`);
+}
+
+export async function syncSavedItems(listKind, itemKeys = []) {
+  return requestJson(`${savedListPath(listKind)}/sync`, json({
+    item_keys: Array.from(new Set(itemKeys.map((key) => String(key || "").trim()).filter(Boolean))),
+  }));
+}
+
+export async function pollSavedSyncTask(taskId) {
+  return requestJson(`/saved-sync/tasks/${encodeURIComponent(String(taskId || "").trim())}`);
+}
 
 export async function addToWatchLater(bvid) {
   return requestJson("/watch-later", { ...json({ bvid }), method: "POST" });

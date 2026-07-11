@@ -4,7 +4,7 @@
 
 `src/openbiliclaw/saved_sync/` 提供平台无关的收藏 / 稍后再看基础设施。它把本地保存和平台账号写入分成两个阶段：本地 membership 必须先提交成功，之后才允许创建原生同步任务。平台失败只更新逐项同步状态，不回滚本地保存。
 
-当前模块已经实现 canonical identity / typed contracts、capability router、local-first sync service、SQLite DAO 边界、首个生产实现 `BilibiliNativeSaveAdapter`，以及平台中立 HTTP API / runtime 注册。四端 UI 属于后续任务；现有旧端点仍只做本地 B 站兼容保存，不会因本次 wiring 自动修改平台账号。
+当前模块已经实现 canonical identity / typed contracts、capability router、local-first sync service、SQLite DAO 边界、首个生产实现 `BilibiliNativeSaveAdapter`、平台中立 HTTP API / runtime 注册，以及插件 side panel、插件设置、桌面 Web、移动 Web 的保存与同步界面。旧端点仍只做本地 B 站兼容保存，不会因本次 wiring 自动修改平台账号。
 
 ## 已实现功能
 
@@ -19,6 +19,7 @@
 | 安全失败归一化 | ✅ | 未注册 / 不支持的路由写为 `unsupported`；malformed target / result 写固定 `failed/invalid_adapter_result`；adapter 异常写 `failed/adapter_exception`。凡 adapter 因 item heartbeat 异常、响应 deadline 或调用方取消而进入 detached 状态，tracked watchdog 都会切换到 10ms–1s 有界退避的 owner-fenced heartbeat，直到真实终止后归一化 late terminal / malformed 结果，避免 detached 期间的后续心跳异常开放重叠重试。 |
 | B 站原生 adapter | ✅ | favorite 精确复用或创建 `OpenBiliClaw` 收藏夹；watch-later 写 B 站稍后再看。任意 endpoint 的 `-101` → `login_required`；只有最终 favorite resource-deal POST 的 `11201` 会由 client 标记为 dedicated duplicate，且 adapter 仍要求 resolved action 为 favorite 才映射 `already_synced`；folder/resolver 的同码与非 favorite route 的该异常均为 `failed`；watch-later 的 `90003` 固定为 `failed/bilibili_video_unavailable`。 |
 | 平台中立 HTTP API | ✅ | `/api/saved/{list_kind}` 提供 save/list/remove/status/sync，`/api/saved-sync/tasks/{task_id}` 返回 durable 逐项结果；`list_kind`、canonical key、选择和 UUID 均 fail closed。稳定键严格为 `<canonical-platform>:<nonblank-stable-id>`；URL fallback 严格为 `<platform>:url:<24位小写十六进制>`，URL 只接受无凭据、无空白/控制字符且 host/port 有效的 HTTP(S)。缺失 membership 只返回安全的 `failed/not_saved_locally`。 |
+| 四端保存 / 同步 UI | ✅ | 推荐卡只对本地保存做 optimistic update；保存页手动同步不受自动开关影响，显示真实 target、逐项状态、失败重试、批量确认和分平台结果。Task/result 文本先清洗再用 textContent/转义渲染；本地删除只调用 `/remove`。 |
 | Runtime wiring | ✅ | `RuntimeContext` 把当前 `BilibiliAPIClient` 注册到 router/service；只有顶层 sync runner 交给 `BackgroundTaskRegistry`。service 自有的 heartbeat、adapter save 和 watchdog 会由 service 内部强引用到真实 I/O 结束，避免 registry 取消后失去 owner fencing。配置热重载先取消旧 registry task，并在所有新组件构造成功后原子替换 client 与 service。 |
 
 ## 公开 API

@@ -6,6 +6,8 @@
 
 `recommendation/` 包负责把已经发现并评分过的内容，转成真正准备展示给用户的推荐结果。
 
+推荐卡的收藏 / 稍后再看动作在插件 side panel、桌面 Web 与移动 Web 中统一携带 canonical `item_key/source_platform/content_id/content_url/content_type`，调用平台中立 `/api/saved/{list_kind}`。前端只对本地保存做 optimistic update；平台同步状态由保存列表和 durable task polling 展示，失败不撤销本地已保存态。
+
 当前模块包含：
 
 - **RecommendationEngine** — 推荐排序、朋友式表达和推荐历史更新入口

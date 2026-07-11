@@ -1055,7 +1055,15 @@
 .nav-count-badge { margin-left: 2px; min-width: 18px; height: 18px; padding: 0 5px; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; line-height: 1; border-radius: 9px; background: var(--accent); color: var(--badge-on); }
 .saved-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-4, 16px); }
 .saved-page .saved-card { cursor: default; }
-.saved-card-actions { display: flex; justify-content: flex-end; }
+.saved-sync-status { min-height: 20px; margin: 0 0 var(--space-3); color: var(--fg-2); font-size: 12px; }
+.saved-card-actions { display: flex; justify-content: flex-end; gap: var(--space-2); flex-wrap: wrap; }
+.saved-sync-line { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--fg-2); font-size: 11px; }
+.saved-sync-line > :last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.saved-sync-chip { flex: 0 0 auto; border-radius: 999px; padding: 2px 7px; background: var(--surface-2); }
+.saved-sync-chip[data-tone="success"] { color: var(--success); background: color-mix(in oklab, var(--success), transparent 88%); }
+.saved-sync-chip[data-tone="warning"] { color: var(--warning); background: color-mix(in oklab, var(--warning), transparent 88%); }
+.saved-sync-chip[data-tone="error"] { color: var(--danger); background: color-mix(in oklab, var(--danger), transparent 88%); }
+.saved-sync-chip[data-tone="info"] { color: var(--accent); background: color-mix(in oklab, var(--accent), transparent 88%); }
 /* Remove is a secondary action — keep it a quiet ghost button, not the loud
    accent pill that `.video-card .small-btn` defaults to (matches mobile's
    subtle ×). Specificity must beat `.video-card .small-btn`. */
@@ -1071,6 +1079,9 @@
   background: color-mix(in oklab, var(--surface), var(--accent) 8%);
 }
 .saved-page .saved-empty { padding: 64px 24px; text-align: center; color: var(--fg-2); }
+@media (max-width: 820px) {
+  .saved-page .small-btn, .saved-page .pill-btn { min-height: 44px; }
+}
 
 /* ── Save toggles in the feedback row (稍后再看 = 时钟 / 收藏 = 星星) ──
    Same SVG icon family as like/dislike/dismiss, shown inline in the action

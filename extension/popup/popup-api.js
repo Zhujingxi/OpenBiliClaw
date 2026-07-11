@@ -649,6 +649,77 @@ export async function updateRuntimeToggle(name, value) {
 // into a visible, retryable failure.
 const SAVED_MUTATION_TIMEOUT_MS = 10_000;
 
+function savedListPath(listKind) {
+  if (listKind !== "favorite" && listKind !== "watch_later") {
+    throw new TypeError(`Unknown saved list: ${listKind}`);
+  }
+  return `/saved/${listKind}`;
+}
+
+/** Keep platform routing on the backend; clients only normalize identity fields. */
+export function normalizeSavedItemInput(item = {}) {
+  const sourcePlatform = String(item.source_platform || item.platform || "bilibili").trim();
+  const contentId = String(item.content_id || item.bvid || item.id || "").trim();
+  return {
+    source_platform: sourcePlatform,
+    content_id: contentId,
+    content_url: String(item.content_url || item.url || "").trim(),
+    content_type: String(item.content_type || "video").trim(),
+    title: String(item.title || "").trim(),
+    author_name: String(item.author_name || item.up_name || item.author || "").trim(),
+    cover_url: String(item.cover_url || "").trim(),
+    note: String(item.note || "").trim(),
+  };
+}
+
+export async function saveItem(listKind, item) {
+  return requestJson(savedListPath(listKind), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(normalizeSavedItemInput(item)),
+    timeoutMs: SAVED_MUTATION_TIMEOUT_MS,
+  });
+}
+
+export async function removeSavedItem(listKind, itemKey) {
+  return requestJson(`${savedListPath(listKind)}/remove`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ item_key: String(itemKey || "").trim() }),
+    timeoutMs: SAVED_MUTATION_TIMEOUT_MS,
+  });
+}
+
+export async function fetchSavedItems(listKind, limit = 50, offset = 0) {
+  const payload = await requestJson(
+    `${savedListPath(listKind)}?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`,
+  );
+  return {
+    ...payload,
+    items: Array.isArray(payload?.items) ? payload.items.map(normalizeSavedItem) : [],
+  };
+}
+
+export async function savedItemStatus(listKind, itemKey) {
+  const query = new URLSearchParams({ item_key: String(itemKey || "").trim() });
+  return requestJson(`${savedListPath(listKind)}/status?${query}`);
+}
+
+export async function syncSavedItems(listKind, itemKeys = []) {
+  return requestJson(`${savedListPath(listKind)}/sync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      item_keys: Array.from(new Set(itemKeys.map((key) => String(key || "").trim()).filter(Boolean))),
+    }),
+    timeoutMs: SAVED_MUTATION_TIMEOUT_MS,
+  });
+}
+
+export async function pollSavedSyncTask(taskId) {
+  return requestJson(`/saved-sync/tasks/${encodeURIComponent(String(taskId || "").trim())}`);
+}
+
 export async function addToWatchLater(bvid) {
   return requestJson("/watch-later", {
     method: "POST",

@@ -17,12 +17,9 @@ import {
   startChatTurn,
   fetchChatTurn,
   fetchChatTurns,
-  addToWatchLater,
-  removeFromWatchLater,
-  watchLaterStatus,
-  addToFavorite,
-  removeFromFavorite,
-  favoriteStatus,
+  saveItem,
+  removeSavedItem,
+  savedItemStatus,
 } from "../api.js";
 import { state, patchState } from "../state.js";
 import {
@@ -58,9 +55,9 @@ let loaded = false;
 let loading = false;
 let feedbackSheet = null; // { itemId, note, submitState }
 const feedbackDone = new Map(); // recId -> "like" | "dislike" | "comment"
-const watchLaterSaved = new Set(); // bvid strings currently bookmarked
+const watchLaterSaved = new Set(); // canonical item keys currently bookmarked
 let watchLaterBusy = false; // mutex for toggle requests
-const favoriteSaved = new Set(); // bvid strings currently favorited
+const favoriteSaved = new Set(); // canonical item keys currently favorited
 let favoriteBusy = false; // mutex for favorite toggle requests
 const COVER_PRELOAD_BATCH_SIZE = 12;
 const COVER_PRELOAD_WAIT_TIMEOUT_MS = 3000;
@@ -88,6 +85,33 @@ function esc(s) {
   const el = document.createElement("span");
   el.textContent = s;
   return el.innerHTML;
+}
+
+function savedIdentity(item = {}) {
+  const sourcePlatform = String(item.source_platform || "bilibili").trim();
+  const contentId = String(item.content_id || item.bvid || item.id || "").trim();
+  return {
+    ...item,
+    item_key: String(item.item_key || `${sourcePlatform}:${contentId}`).trim(),
+    source_platform: sourcePlatform,
+    content_id: contentId,
+    content_url: String(item.content_url || "").trim(),
+    content_type: String(item.content_type || "video").trim(),
+  };
+}
+
+function announceSavedAction(message, isError = false) {
+  if (!$root) return;
+  let status = $root.querySelector(".saved-action-status");
+  if (!status) {
+    status = document.createElement("p");
+    status.className = "saved-action-status";
+    status.setAttribute("aria-live", "polite");
+    $root.prepend(status);
+  }
+  if (isError) status.setAttribute("role", "alert");
+  else status.removeAttribute("role");
+  status.textContent = message;
 }
 
 // ── Render ────────────────────────────────────────────────────
@@ -456,59 +480,71 @@ function renderDelightTray() {
       }
       if (b.action === "watch-later") {
         let busy = false;
+        const savedItem = savedIdentity(d);
         btn.title = "稍后再看";
         btn.addEventListener("click", async () => {
           if (busy) return;
           busy = true;
-          const wasSaved = watchLaterSaved.has(d.bvid);
+          btn.disabled = true;
+          const wasSaved = watchLaterSaved.has(savedItem.item_key);
+          announceSavedAction(wasSaved ? "正在从本地稍后再看移除…" : "正在保存到本地稍后再看…");
           btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
           try {
             if (wasSaved) {
-              await removeFromWatchLater(d.bvid);
-              watchLaterSaved.delete(d.bvid);
+              await removeSavedItem("watch_later", savedItem.item_key);
+              watchLaterSaved.delete(savedItem.item_key);
             } else {
-              await addToWatchLater(d.bvid);
-              watchLaterSaved.add(d.bvid);
+              await saveItem("watch_later", savedItem);
+              watchLaterSaved.add(savedItem.item_key);
             }
+            announceSavedAction(wasSaved ? "已从本地稍后再看移除；平台记录不变。" : "已保存到本地，平台同步状态可在稍后页查看。");
           } catch {
             btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
+            announceSavedAction("本地稍后再看操作失败，请重试。", true);
           } finally {
             busy = false;
+            btn.disabled = false;
           }
         });
-        if (watchLaterSaved.has(d.bvid)) btn.setAttribute("aria-pressed", "true");
-        watchLaterStatus(d.bvid).then((res) => {
+        if (watchLaterSaved.has(savedItem.item_key)) btn.setAttribute("aria-pressed", "true");
+        savedItemStatus("watch_later", savedItem.item_key).then((res) => {
           if (res && res.saved) {
-            watchLaterSaved.add(d.bvid);
+            watchLaterSaved.add(savedItem.item_key);
             btn.setAttribute("aria-pressed", "true");
           }
         }).catch(() => {});
       } else if (b.action === "favorite") {
         let busy = false;
+        const savedItem = savedIdentity(d);
         btn.title = "收藏";
         btn.addEventListener("click", async () => {
           if (busy) return;
           busy = true;
-          const wasSaved = favoriteSaved.has(d.bvid);
+          btn.disabled = true;
+          const wasSaved = favoriteSaved.has(savedItem.item_key);
+          announceSavedAction(wasSaved ? "正在从本地收藏移除…" : "正在保存到本地收藏…");
           btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
           try {
             if (wasSaved) {
-              await removeFromFavorite(d.bvid);
-              favoriteSaved.delete(d.bvid);
+              await removeSavedItem("favorite", savedItem.item_key);
+              favoriteSaved.delete(savedItem.item_key);
             } else {
-              await addToFavorite(d.bvid);
-              favoriteSaved.add(d.bvid);
+              await saveItem("favorite", savedItem);
+              favoriteSaved.add(savedItem.item_key);
             }
+            announceSavedAction(wasSaved ? "已从本地收藏移除；平台记录不变。" : "已保存到本地，平台同步状态可在收藏页查看。");
           } catch {
             btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
+            announceSavedAction("本地收藏操作失败，请重试。", true);
           } finally {
             busy = false;
+            btn.disabled = false;
           }
         });
-        if (favoriteSaved.has(d.bvid)) btn.setAttribute("aria-pressed", "true");
-        favoriteStatus(d.bvid).then((res) => {
+        if (favoriteSaved.has(savedItem.item_key)) btn.setAttribute("aria-pressed", "true");
+        savedItemStatus("favorite", savedItem.item_key).then((res) => {
           if (res && res.saved) {
-            favoriteSaved.add(d.bvid);
+            favoriteSaved.add(savedItem.item_key);
             btn.setAttribute("aria-pressed", "true");
           }
         }).catch(() => {});
@@ -1154,71 +1190,82 @@ function renderCard(rawItem, index = 0) {
     { ariaLabel: "聊一聊", iconHtml: MESSAGE_SVG_ICON },
   );
 
-  const savedNow = watchLaterSaved.has(item.bvid);
+  const savedItem = savedIdentity(item);
+  const savedNow = watchLaterSaved.has(savedItem.item_key);
   const starBtn = createCoverChip(
     CLOCK_SVG_ICON,
     "watch-later-btn",
     async () => {
       if (watchLaterBusy) return;
       watchLaterBusy = true;
-      const wasSaved = watchLaterSaved.has(item.bvid);
+      starBtn.disabled = true;
+      const wasSaved = watchLaterSaved.has(savedItem.item_key);
+      announceSavedAction(wasSaved ? "正在从本地稍后再看移除…" : "正在保存到本地稍后再看…");
       // optimistic toggle
       setChipState(starBtn, !wasSaved, wasSaved ? "☆" : "★");
       try {
         if (wasSaved) {
-          await removeFromWatchLater(item.bvid);
-          watchLaterSaved.delete(item.bvid);
+          await removeSavedItem("watch_later", savedItem.item_key);
+          watchLaterSaved.delete(savedItem.item_key);
         } else {
-          await addToWatchLater(item.bvid);
-          watchLaterSaved.add(item.bvid);
+          await saveItem("watch_later", savedItem);
+          watchLaterSaved.add(savedItem.item_key);
         }
+        announceSavedAction(wasSaved ? "已从本地稍后再看移除；平台记录不变。" : "已保存到本地，平台同步状态可在稍后页查看。");
       } catch {
         // revert on failure
         setChipState(starBtn, wasSaved, wasSaved ? "★" : "☆");
+        announceSavedAction("本地稍后再看操作失败，请重试。", true);
       } finally {
         watchLaterBusy = false;
+        starBtn.disabled = false;
       }
     },
     { label: "稍后再看", pressedLabel: "取消稍后再看" },
   );
   setChipState(starBtn, savedNow, savedNow ? "★" : "☆");
   // lazy-load real state from backend
-  watchLaterStatus(item.bvid).then((res) => {
+  savedItemStatus("watch_later", savedItem.item_key).then((res) => {
     if (res && res.saved) {
-      watchLaterSaved.add(item.bvid);
+      watchLaterSaved.add(savedItem.item_key);
       setChipState(starBtn, true, "★");
     }
   }).catch(() => {});
 
-  const favNow = favoriteSaved.has(item.bvid);
+  const favNow = favoriteSaved.has(savedItem.item_key);
   const favBtn = createCoverChip(
     STAR_SVG_ICON,
     "favorite-btn",
     async () => {
       if (favoriteBusy) return;
       favoriteBusy = true;
-      const wasSaved = favoriteSaved.has(item.bvid);
+      favBtn.disabled = true;
+      const wasSaved = favoriteSaved.has(savedItem.item_key);
+      announceSavedAction(wasSaved ? "正在从本地收藏移除…" : "正在保存到本地收藏…");
       setChipState(favBtn, !wasSaved, wasSaved ? "♡" : "♥");
       try {
         if (wasSaved) {
-          await removeFromFavorite(item.bvid);
-          favoriteSaved.delete(item.bvid);
+          await removeSavedItem("favorite", savedItem.item_key);
+          favoriteSaved.delete(savedItem.item_key);
         } else {
-          await addToFavorite(item.bvid);
-          favoriteSaved.add(item.bvid);
+          await saveItem("favorite", savedItem);
+          favoriteSaved.add(savedItem.item_key);
         }
+        announceSavedAction(wasSaved ? "已从本地收藏移除；平台记录不变。" : "已保存到本地，平台同步状态可在收藏页查看。");
       } catch {
         setChipState(favBtn, wasSaved, wasSaved ? "♥" : "♡");
+        announceSavedAction("本地收藏操作失败，请重试。", true);
       } finally {
         favoriteBusy = false;
+        favBtn.disabled = false;
       }
     },
     { label: "收藏", pressedLabel: "取消收藏" },
   );
   setChipState(favBtn, favNow, favNow ? "♥" : "♡");
-  favoriteStatus(item.bvid).then((res) => {
+  savedItemStatus("favorite", savedItem.item_key).then((res) => {
     if (res && res.saved) {
-      favoriteSaved.add(item.bvid);
+      favoriteSaved.add(savedItem.item_key);
       setChipState(favBtn, true, "♥");
     }
   }).catch(() => {});

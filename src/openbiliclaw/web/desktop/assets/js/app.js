@@ -1415,13 +1415,87 @@
     // ── Saved pages: 稍后再看 (watch-later) & 收藏 (favorites) ──────
     // The two are independent backend collections sharing one list UI.
 
-    function watchLaterStatus(bvid) {
-      return requestJson(`${ENDPOINTS.watchLater}/${encodeURIComponent(bvid)}`);
+    const SAVED_SYNC_PRESENTATION = {
+      pending: ["待同步", "neutral", false], syncing: ["同步中", "info", false],
+      synced: ["已同步", "success", false], already_synced: ["已同步", "success", false],
+      login_required: ["需要登录", "warning", true], unsupported: ["同步失败", "error", false],
+      rate_limited: ["同步失败", "error", true], extension_required: ["需要连接插件", "warning", true],
+      failed: ["同步失败", "error", true]
+    };
+    const SAVED_SYNC_TERMINAL = new Set(["synced", "already_synced", "login_required", "unsupported", "rate_limited", "extension_required", "failed"]);
+
+    function safeSavedText(value, maxLength = 240) {
+      return String(value || "").replace(/[\p{C}\p{Zl}\p{Zp}]/gu, "").trim().slice(0, maxLength);
     }
 
-    function favoriteStatus(bvid) {
-      return requestJson(`${ENDPOINTS.favorites}/${encodeURIComponent(bvid)}`);
+    function desktopSavedItem(itemOrBvid = {}) {
+      const item = typeof itemOrBvid === "object" && itemOrBvid ? itemOrBvid : { bvid: itemOrBvid };
+      const sourcePlatform = safeSavedText(item.source_platform || "bilibili", 64);
+      const contentId = safeSavedText(item.content_id || item.bvid || item.id, 2048);
+      return {
+        ...item,
+        item_key: safeSavedText(item.item_key || `${sourcePlatform}:${contentId}`, 2048),
+        source_platform: sourcePlatform,
+        content_id: contentId,
+        content_url: safeSavedText(item.content_url, 2048),
+        content_type: safeSavedText(item.content_type || "video", 128),
+        title: safeSavedText(item.title || contentId),
+        author_name: safeSavedText(item.author_name || item.up_name),
+        cover_url: safeSavedText(item.cover_url, 2048),
+        sync_status: SAVED_SYNC_PRESENTATION[item.sync_status] ? item.sync_status : "pending",
+        resolved_target: safeSavedText(item.resolved_target),
+        error_message: safeSavedText(item.error_message)
+      };
     }
+
+    function savedPath(listKind) { return `/saved/${listKind}`; }
+    function saveDesktopItem(listKind, item) {
+      const normalized = desktopSavedItem(item);
+      return requestJson(savedPath(listKind), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+        source_platform: normalized.source_platform, content_id: normalized.content_id,
+        content_url: normalized.content_url, content_type: normalized.content_type,
+        title: normalized.title, author_name: normalized.author_name,
+        cover_url: normalized.cover_url, note: safeSavedText(normalized.note)
+      }) });
+    }
+    function removeDesktopSavedItem(listKind, itemKey) {
+      return requestJson(`${savedPath(listKind)}/remove`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ item_key: itemKey }) });
+    }
+    function savedStatus(listKind, itemOrBvid) {
+      const itemKey = desktopSavedItem(itemOrBvid).item_key;
+      return requestJson(`${savedPath(listKind)}/status?item_key=${encodeURIComponent(itemKey)}`);
+    }
+    function watchLaterStatus(itemOrBvid) { return savedStatus("watch_later", itemOrBvid); }
+    function favoriteStatus(itemOrBvid) { return savedStatus("favorite", itemOrBvid); }
+    function fetchDesktopSaved(listKind) { return requestJson(`${savedPath(listKind)}?limit=100&offset=0`); }
+    function syncDesktopSaved(listKind, itemKeys) {
+      return requestJson(`${savedPath(listKind)}/sync`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ item_keys: itemKeys }) });
+    }
+
+    async function awaitDesktopSavedTask(initial) {
+      let task = initial || { task_id: "", items: [] };
+      for (let attempt = 0; task.task_id && attempt < 40; attempt += 1) {
+        const rows = Array.isArray(task.items) ? task.items : [];
+        if (rows.every((item) => SAVED_SYNC_TERMINAL.has(item.status))) break;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        task = await requestJson(`/saved-sync/tasks/${encodeURIComponent(safeSavedText(task.task_id, 64))}`);
+      }
+      return { items: (Array.isArray(task.items) ? task.items : []).slice(0, 500).map((item) => ({ item_key: safeSavedText(item.item_key, 2048), status: SAVED_SYNC_PRESENTATION[item.status] ? item.status : "failed" })) };
+    }
+
+    function summarizeDesktopSavedTask(items) {
+      const groups = new Map();
+      for (const item of items) {
+        const slug = item.item_key.split(":", 1)[0] || "unknown";
+        const group = groups.get(slug) || [0, 0];
+        group[1] += 1;
+        if (["synced", "already_synced"].includes(item.status)) group[0] += 1;
+        groups.set(slug, group);
+      }
+      return Array.from(groups, ([slug, [success, total]]) => `${platformName(slug)} ${success}/${total}`).join(" · ");
+    }
+
+    function savedSyncEligible(item) { return !["synced", "already_synced", "syncing"].includes(item.sync_status); }
 
     function updateSavedBadge(badgeId, total) {
       const badge = document.getElementById(badgeId);
@@ -1436,7 +1510,7 @@
       }
     }
 
-    function renderSavedList(listId, emptyId, items, onRemove) {
+    function renderSavedList(listKind, listId, emptyId, items, reload) {
       const grid = document.getElementById(listId);
       const empty = document.getElementById(emptyId);
       if (!grid) return;
@@ -1448,6 +1522,7 @@
       }
       if (empty) empty.setAttribute("hidden", "");
       grid.replaceChildren(...rows.map((item) => {
+        item = desktopSavedItem(item);
         const card = document.createElement("article");
         card.className = "video-card saved-card";
         const url = contentUrl(item);
@@ -1460,11 +1535,13 @@
             ? `<a class="cover" data-platform="${escapeHtml(item.source_platform || item.platform || "bilibili")}" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" aria-label="打开 ${escapeHtml(item.title || item.bvid)}">${coverContent}</a>`
             : `<button class="cover" data-platform="${escapeHtml(item.source_platform || item.platform || "bilibili")}" type="button" aria-label="打开 ${escapeHtml(item.title || item.bvid)}">${coverContent}</button>`}
           <div>
-            <p class="video-title">${escapeHtml(item.title || item.bvid)}</p>
-            <p class="video-meta">${escapeHtml(item.up_name || "")}</p>
+            <p class="video-title">${escapeHtml(item.title || item.content_id)}</p>
+            <p class="video-meta">${escapeHtml(item.author_name || "")}</p>
+            <p class="saved-sync-line"><span class="saved-sync-chip" data-tone="${escapeHtml(SAVED_SYNC_PRESENTATION[item.sync_status][1])}">${escapeHtml(SAVED_SYNC_PRESENTATION[item.sync_status][0])}</span><span>${escapeHtml(item.sync_status === "extension_required" ? "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。" : item.error_message || item.resolved_target || "平台目标将在同步时确认")}</span></p>
           </div>
           <div class="card-actions saved-card-actions">
-            <button class="small-btn saved-remove" type="button">移除</button>
+            ${savedSyncEligible(item) ? `<button class="small-btn saved-sync-one" type="button">${SAVED_SYNC_PRESENTATION[item.sync_status][2] ? "重试同步" : "同步"}</button>` : ""}
+            <button class="small-btn saved-remove" type="button" title="只从 OpenBiliClaw 本地移除">移除</button>
           </div>`;
         const cover = card.querySelector(".cover");
         cover.addEventListener("click", () => {
@@ -1473,49 +1550,84 @@
         cover.addEventListener("auxclick", (event) => {
           if (url && event.button === 1) trackRecommendationClick(item);
         });
+        card.querySelector(".saved-sync-one")?.addEventListener("click", (e) => {
+          void runDesktopSavedSync(listKind, [item], e.currentTarget, reload);
+        });
         card.querySelector(".saved-remove").addEventListener("click", async (e) => {
           const btn = e.currentTarget;
           btn.disabled = true;
           try {
-            await onRemove(item.bvid);
-            card.remove();
-          } catch {
+            await removeDesktopSavedItem(listKind, item.item_key);
+            await reload();
+          } catch (error) {
             btn.disabled = false;
+            const status = document.getElementById(listKind === "watch_later" ? "watchLaterSyncStatus" : "favoritesSyncStatus");
+            if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "本地移除失败，请重试。"; }
           }
         });
         return card;
       }));
     }
 
+    async function runDesktopSavedSync(listKind, selected, activeButton, reload, confirmBatch = false) {
+      const eligible = selected.filter(savedSyncEligible);
+      if (!eligible.length || activeButton?.disabled) return;
+      const platforms = Array.from(new Set(eligible.map((item) => platformName(item.source_platform))));
+      if (confirmBatch && !window.confirm(`将同步 ${eligible.length} 项到 ${platforms.join("、")}，继续吗？`)) return;
+      const status = document.getElementById(listKind === "watch_later" ? "watchLaterSyncStatus" : "favoritesSyncStatus");
+      if (activeButton) { activeButton.disabled = true; activeButton.textContent = "同步中…"; }
+      if (status) { status.removeAttribute("role"); status.textContent = `正在同步 ${eligible.length} 项…`; }
+      try {
+        const task = await awaitDesktopSavedTask(await syncDesktopSaved(listKind, eligible.map((item) => item.item_key)));
+        if (status) status.textContent = summarizeDesktopSavedTask(task.items) || "同步任务已提交";
+      } catch (error) {
+        if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "同步失败，请重试。"; }
+      } finally { if (activeButton) activeButton.disabled = false; await reload(); }
+    }
+
+    function bindDesktopSavedBatch(listKind, items, reload) {
+      const id = listKind === "watch_later" ? "watchLaterSyncAll" : "favoritesSyncAll";
+      const button = document.getElementById(id);
+      if (!button) return;
+      const count = items.filter(savedSyncEligible).length;
+      button.textContent = `同步未同步内容（${count}）`;
+      button.disabled = count === 0;
+      button.onclick = () => runDesktopSavedSync(listKind, items, button, reload, true);
+    }
+
     async function refreshWatchLater() {
-      const data = await requestJson(`${ENDPOINTS.watchLater}?limit=100&offset=0`).catch(() => null);
-      renderSavedList("watchLaterList", "watchLaterEmpty", data?.items, async (bvid) => {
-        await requestJson(`${ENDPOINTS.watchLater}/${encodeURIComponent(bvid)}`, { method: "DELETE" });
-        await refreshWatchLater();
-        syncWatchLaterButtons();
+      const data = await fetchDesktopSaved("watch_later").catch((error) => {
+        const status = document.getElementById("watchLaterSyncStatus");
+        if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "稍后再看加载失败。"; }
+        return null;
       });
+      const items = (data?.items || []).map(desktopSavedItem);
+      renderSavedList("watch_later", "watchLaterList", "watchLaterEmpty", items, refreshWatchLater);
+      bindDesktopSavedBatch("watch_later", items, refreshWatchLater);
       updateSavedBadge("watchLaterCountBadge", data?.total);
     }
 
     async function refreshFavorites() {
-      const data = await requestJson(`${ENDPOINTS.favorites}?limit=100&offset=0`).catch(() => null);
-      renderSavedList("favoritesList", "favoritesEmpty", data?.items, async (bvid) => {
-        await requestJson(`${ENDPOINTS.favorites}/${encodeURIComponent(bvid)}`, { method: "DELETE" });
-        await refreshFavorites();
-        syncFavoriteButtons();
+      const data = await fetchDesktopSaved("favorite").catch((error) => {
+        const status = document.getElementById("favoritesSyncStatus");
+        if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "收藏列表加载失败。"; }
+        return null;
       });
+      const items = (data?.items || []).map(desktopSavedItem);
+      renderSavedList("favorite", "favoritesList", "favoritesEmpty", items, refreshFavorites);
+      bindDesktopSavedBatch("favorite", items, refreshFavorites);
       updateSavedBadge("favoritesCountBadge", data?.total);
     }
 
     // Re-sync the pressed state + count badge for all visible ☆/♥ toggles.
     function syncWatchLaterButtons() {
-      requestJson(`${ENDPOINTS.watchLater}?limit=200&offset=0`).then((data) => {
-        const saved = new Set((data?.items || []).map((it) => it.bvid));
+      fetchDesktopSaved("watch_later").then((data) => {
+        const saved = new Set((data?.items || []).map((it) => desktopSavedItem(it).item_key));
         document.querySelectorAll('.video-card [data-action="watch-later"]').forEach((btn) => {
           const card = btn.closest(".video-card");
-          const bvid = card?.dataset?.bvid;
-          if (!bvid) return;
-          const on = saved.has(bvid);
+          const item = state.videos.find((row) => String(row.bvid || row.content_id) === card?.dataset?.bvid);
+          if (!item) return;
+          const on = saved.has(desktopSavedItem(item).item_key);
           btn.setAttribute("aria-pressed", on ? "true" : "false");
         });
         updateSavedBadge("watchLaterCountBadge", data?.total);
@@ -1523,13 +1635,13 @@
     }
 
     function syncFavoriteButtons() {
-      requestJson(`${ENDPOINTS.favorites}?limit=200&offset=0`).then((data) => {
-        const saved = new Set((data?.items || []).map((it) => it.bvid));
+      fetchDesktopSaved("favorite").then((data) => {
+        const saved = new Set((data?.items || []).map((it) => desktopSavedItem(it).item_key));
         document.querySelectorAll('.video-card [data-action="favorite"]').forEach((btn) => {
           const card = btn.closest(".video-card");
-          const bvid = card?.dataset?.bvid;
-          if (!bvid) return;
-          const on = saved.has(bvid);
+          const item = state.videos.find((row) => String(row.bvid || row.content_id) === card?.dataset?.bvid);
+          if (!item) return;
+          const on = saved.has(desktopSavedItem(item).item_key);
           btn.setAttribute("aria-pressed", on ? "true" : "false");
         });
         updateSavedBadge("favoritesCountBadge", data?.total);
@@ -2078,7 +2190,7 @@
             <button class="small-btn composer-cancel" data-action="cancel-comment" type="button" aria-label="返回" title="返回">‹</button>
             <button class="small-btn chat-action" data-action="comment" type="button">聊一聊</button>
           </div>
-          <p class="status-line"></p>`;
+          <p class="status-line" aria-live="polite"></p>`;
         const reason = card.querySelector(".reason");
         const toggleReason = () => {
           const expanded = reason.classList.toggle("is-expanded");
@@ -2107,8 +2219,7 @@
         // Lazy-load watch-later state
         const wlBtn = card.querySelector('[data-action="watch-later"]');
         if (wlBtn) {
-          const bvid = item.bvid || item.id;
-          watchLaterStatus(bvid).then((res) => {
+          watchLaterStatus(item).then((res) => {
             if (res && res.saved) {
               wlBtn.setAttribute("aria-pressed", "true");
               wlBtn.title = "\u53D6\u6D88\u7A0D\u540E\u518D\u770B";
@@ -2118,8 +2229,7 @@
         // Lazy-load favorite state
         const favBtn = card.querySelector('[data-action="favorite"]');
         if (favBtn) {
-          const bvid = item.bvid || item.id;
-          favoriteStatus(bvid).then((res) => {
+          favoriteStatus(item).then((res) => {
             if (res && res.saved) {
               favBtn.setAttribute("aria-pressed", "true");
               favBtn.title = "\u53D6\u6D88\u6536\u85CF";
@@ -2398,15 +2508,18 @@
         btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
         btn.title = wasSaved ? "\u7A0D\u540E\u518D\u770B" : "\u53D6\u6D88\u6536\u85CF";
         try {
-          const bvid = item.bvid || item.id;
+          const savedItem = desktopSavedItem(item);
           if (wasSaved) {
-            await requestJson(`${ENDPOINTS.watchLater}/${encodeURIComponent(bvid)}`, { method: "DELETE" });
+            await removeDesktopSavedItem("watch_later", savedItem.item_key);
+            if (status) status.textContent = "已从 OpenBiliClaw 本地稍后再看移除；不会删除平台记录。";
           } else {
-            await requestJson(ENDPOINTS.watchLater, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bvid }) });
+            const result = await saveDesktopItem("watch_later", savedItem);
+            if (status) status.textContent = result?.sync_task_id ? "本地已保存，正在同步。" : "已保存，待同步。";
           }
-        } catch {
+        } catch (error) {
           btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
           btn.title = wasSaved ? "\u53D6\u6D88\u7A0D\u540E\u518D\u770B" : "\u7A0D\u540E\u518D\u770B";
+          if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "本地保存失败，请重试。"; }
         } finally {
           btn.disabled = false;
         }
@@ -2420,15 +2533,18 @@
         btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
         btn.title = wasSaved ? "\u6536\u85CF" : "\u53D6\u6D88\u6536\u85CF";
         try {
-          const bvid = item.bvid || item.id;
+          const savedItem = desktopSavedItem(item);
           if (wasSaved) {
-            await requestJson(`${ENDPOINTS.favorites}/${encodeURIComponent(bvid)}`, { method: "DELETE" });
+            await removeDesktopSavedItem("favorite", savedItem.item_key);
+            if (status) status.textContent = "已从 OpenBiliClaw 本地收藏移除；不会删除平台记录。";
           } else {
-            await requestJson(ENDPOINTS.favorites, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bvid }) });
+            const result = await saveDesktopItem("favorite", savedItem);
+            if (status) status.textContent = result?.sync_task_id ? "本地已保存，正在同步。" : "已保存，待同步。";
           }
-        } catch {
+        } catch (error) {
           btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
           btn.title = wasSaved ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF";
+          if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "本地保存失败，请重试。"; }
         } finally {
           btn.disabled = false;
         }
@@ -3949,10 +4065,11 @@
         btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
         if (delight.bvid) _delightStatusCache.set(delight.bvid, { ...(_delightStatusCache.get(delight.bvid) || {}), watchLater: !wasSaved });
         try {
+          const savedItem = desktopSavedItem(delight);
           if (wasSaved) {
-            await requestJson(`${ENDPOINTS.watchLater}/${encodeURIComponent(delight.bvid)}`, { method: "DELETE" });
+            await removeDesktopSavedItem("watch_later", savedItem.item_key);
           } else {
-            await requestJson(ENDPOINTS.watchLater, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bvid: delight.bvid }) });
+            await saveDesktopItem("watch_later", savedItem);
           }
         } catch {
           btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
@@ -3970,10 +4087,11 @@
         btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
         if (delight.bvid) _delightStatusCache.set(delight.bvid, { ...(_delightStatusCache.get(delight.bvid) || {}), favorite: !wasSaved });
         try {
+          const savedItem = desktopSavedItem(delight);
           if (wasSaved) {
-            await requestJson(`${ENDPOINTS.favorites}/${encodeURIComponent(delight.bvid)}`, { method: "DELETE" });
+            await removeDesktopSavedItem("favorite", savedItem.item_key);
           } else {
-            await requestJson(ENDPOINTS.favorites, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bvid: delight.bvid }) });
+            await saveDesktopItem("favorite", savedItem);
           }
         } catch {
           btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
@@ -4838,6 +4956,9 @@
       setSelect("language", config.language || "zh");
       setInput("dataDir", config.data_dir);
       setInput("storageDbPath", config.storage?.db_path);
+      const savedAutoSync = $("#savedAutoSync");
+      if (savedAutoSync) savedAutoSync.checked = config.saved_sync?.auto_sync_enabled === true;
+      if ($("#savedAutoSyncText")) $("#savedAutoSyncText").textContent = savedAutoSync?.checked ? "开启" : "关闭";
 
       const llm = config.llm || {};
       const provider = llm.default_provider || llm.provider;
@@ -5333,10 +5454,10 @@
       _initDelightVisibilityObserver();
       // 批量预取 delight 队列中所有项的稍后再看/收藏状态
       (async () => {
-        const bvids = state.delights.map((d) => String(d.bvid || "")).filter(Boolean);
-        if (!bvids.length) return;
-        const results = await Promise.allSettled(bvids.map((bvid) => watchLaterStatus(bvid).then((r) => ({ bvid, watchLater: r?.saved ?? false, favorite: false }))));
-        const favResults = await Promise.allSettled(bvids.map((bvid) => favoriteStatus(bvid).then((r) => ({ bvid, saved: r?.saved ?? false }))));
+        const delightItems = state.delights.filter((d) => String(d.bvid || d.content_id || ""));
+        if (!delightItems.length) return;
+        const results = await Promise.allSettled(delightItems.map((item) => watchLaterStatus(item).then((r) => ({ bvid: item.bvid, watchLater: r?.saved ?? false, favorite: false }))));
+        const favResults = await Promise.allSettled(delightItems.map((item) => favoriteStatus(item).then((r) => ({ bvid: item.bvid, saved: r?.saved ?? false }))));
         const favMap = new Map(favResults.filter((r) => r.status === "fulfilled").map((r) => [r.value.bvid, r.value.saved]));
         for (const result of results) {
           if (result.status !== "fulfilled") continue;
@@ -5746,6 +5867,7 @@
           multimodal_image_quality: getIntInput("multimodalImageQuality", 72),
           multimodal_image_timeout_seconds: getIntInput("multimodalImageTimeout", 6)
         },
+        saved_sync: { auto_sync_enabled: Boolean($("#savedAutoSync")?.checked) },
         storage: { db_path: getInput("storageDbPath") },
         logging: {
           level: getInput("logLevel") || "INFO",
@@ -6316,6 +6438,19 @@
     safeBind("#probeLlm", "click", () => { void runLlmConfigProbe(); });
     safeBind("#probeLlmFallback", "click", () => { void runLlmFallbackConfigProbe(); });
     safeBind("#probeEmbedding", "click", () => { void runEmbeddingConfigProbe(); });
+    safeBind("#savedAutoSync", "change", (event) => {
+      const toggle = event.currentTarget;
+      if (toggle.checked && state.config?.saved_sync?.auto_sync_enabled !== true) {
+        const warning = "开启后，在 OpenBiliClaw 点击收藏或稍后再看会修改对应平台账号中的收藏、书签、Saved、播放列表或稍后观看。";
+        if (!window.confirm(warning)) {
+          toggle.checked = false;
+          if ($("#savedAutoSyncStatus")) $("#savedAutoSyncStatus").textContent = "已取消，自动同步仍为关闭。";
+        } else if ($("#savedAutoSyncStatus")) {
+          $("#savedAutoSyncStatus").textContent = "已确认；保存配置后开启。";
+        }
+      }
+      if ($("#savedAutoSyncText")) $("#savedAutoSyncText").textContent = toggle.checked ? "开启" : "关闭";
+    });
     lanAuthControl = initLanAuthControl();
     bootAutostartControl = initBootAutostartControl();
     Object.values(SOURCE_ENABLE_SELECT_IDS).forEach((id) => {
@@ -6345,6 +6480,7 @@
         submitBtn.disabled = true;
         submitBtn.textContent = "保存中…";
       }
+      $("#configStatus")?.removeAttribute("role");
       const endpoint = persistBackendEndpoint();
       const frontend = persistFrontendSettings();
       if ($("#configStatus")) $("#configStatus").value = `正在保存到 ${endpoint.host}:${endpoint.port}，惊喜队列加载 ${frontend.delightQueueLimit} 条，主题${THEME_LABELS[frontend.themeMode]}，换一批忽略当前${frontend.dismissOnReshuffle ? "已开启" : "已关闭"}，滚动自动加载${frontend.autoLoadOnScroll ? "已开启" : "已关闭"}，后端热重载可能需要几秒。`;
@@ -6365,7 +6501,7 @@
         void refreshUpdateStatus();
       } catch (error) {
         const message = configErrorMessage(error.details) || error.message || "未知错误";
-        if ($("#configStatus")) $("#configStatus").value = `保存失败：\n${message}`;
+        if ($("#configStatus")) { $("#configStatus").setAttribute("role", "alert"); $("#configStatus").value = `保存失败：\n${message}`; }
         showToast("保存失败：请查看配置状态");
       } finally {
         if (submitBtn) {

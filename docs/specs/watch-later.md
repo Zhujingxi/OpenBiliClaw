@@ -4,7 +4,9 @@
 
 本地书签功能，让用户在任意推荐 surface 上通过时钟按钮标记视频"稍后再看"，跨 surface 同步状态。
 
-数据存储在本地 SQLite，不影响 soul profile 也不影响推荐评分。
+数据先存储在本地 SQLite，不影响 soul profile 或推荐评分。用户手动同步，或明确开启默认关闭的自动同步后，才会写入来源平台原生稍后观看；平台没有该能力时由后端 capability router 退化到收藏目标。平台失败不回滚本地记录。
+
+> 下文 legacy `watch_later` 表与 `/api/watch-later` 只描述 B 站兼容入口。新图形界面统一使用 canonical `saved_items/saved_memberships/native_save_states` 与 `/api/saved/watch_later*`。
 
 ## 2. 数据层
 
@@ -57,8 +59,10 @@ CREATE INDEX IF NOT EXISTS idx_watch_later_added
 
 - **稍后再看按钮**：时钟 SVG，点击 toggle；选中态通过 `aria-pressed=true` 与 accent 色表达
 - **乐观 UI**：点击后立即切换图标，请求失败时回退
-- **防抖**：同一 bvid 的并发请求用 busy flag 互斥
-- **懒加载状态**：卡片渲染后异步查询 `GET /api/watch-later/{bvid}` 同步时钟状态
+- **防重复提交**：请求期间禁用当前动作按钮；状态 / 错误通过 `aria-live` 或 `role=alert` 发布
+- **canonical 状态**：卡片用 `GET /api/saved/watch_later/status?item_key=...` 水合；平台 fallback 完全留在后端
+- **手动同步**：列表显示真实 target 和五档状态，提供单项重试及「同步未同步内容（N）」批量确认；结果按平台显示成功/总数
+- **本地删除**：只调用 `/api/saved/watch_later/remove`，不反向取消平台记录
 
 ### 4.2 各 Surface 实现
 
@@ -75,7 +79,7 @@ CREATE INDEX IF NOT EXISTS idx_watch_later_added
 | Note 编辑 UI | 数据层已支持，UI 推迟 |
 | 搜索/筛选 | 列表量级小，不需要 |
 | "已看"归档 | 增加概念复杂度 |
-| 与 B 站原生"稍后再看"同步 | scope 太大 |
+| 删除本地时自动删除平台记录 | 避免意外的外部账号删除操作 |
 
 ## 6. 浏览页（已实现）
 
@@ -83,8 +87,8 @@ CREATE INDEX IF NOT EXISTS idx_watch_later_added
 
 | Surface | 列表入口 | 列表 API |
 |---------|----------|----------|
-| 插件 popup | tab bar「稍后」页（`viewWatchLater` + `watchLaterList`） | `fetchWatchLater()` + `loadWatchLater()` |
-| 移动端 Web | 底部导航「稍后」tab（`initWatchLaterView`） | `fetchWatchLater()` |
-| 桌面端 Web | 侧边栏「稍后再看」(`watchLaterBtn` + `watchLaterPage` + `watchLaterCountBadge`) | `refreshWatchLater()` + `syncWatchLaterButtons()` |
+| 插件 popup | tab bar「稍后」页（`viewWatchLater` + `watchLaterList`） | `saveItem/fetchSavedItems/syncSavedItems("watch_later")` |
+| 移动端 Web | 底部导航「稍后」tab（`initWatchLaterView`） | platform-neutral saved helpers |
+| 桌面端 Web | 侧边栏「稍后再看」(`watchLaterBtn` + `watchLaterPage`) | `/api/saved/watch_later*` |
 
 列表项支持点击打开、单条移除；插件 popup 列表项会展示固定 16:9 头图缩略图，并复用 `/api/image-proxy` 加载封面。桌面端导航项带数量徽章。GET `/api/watch-later` 现已对 `limit/offset` 做 422 校验。

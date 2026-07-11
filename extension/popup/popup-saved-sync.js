@@ -2,6 +2,79 @@ function normalizeBvid(bvid) {
   return String(bvid || "").trim();
 }
 
+const SAVED_SYNC_STATUSES = new Set([
+  "pending",
+  "syncing",
+  "synced",
+  "already_synced",
+  "login_required",
+  "unsupported",
+  "rate_limited",
+  "extension_required",
+  "failed",
+]);
+
+const SYNC_PRESENTATIONS = {
+  pending: { label: "待同步", tone: "neutral", retryable: false },
+  syncing: { label: "同步中", tone: "info", retryable: false },
+  synced: { label: "已同步", tone: "success", retryable: false },
+  already_synced: { label: "已同步", tone: "success", retryable: false },
+  login_required: { label: "需要登录", tone: "warning", retryable: true },
+  unsupported: { label: "同步失败", tone: "error", retryable: false },
+  rate_limited: { label: "同步失败", tone: "error", retryable: true },
+  extension_required: { label: "需要连接插件", tone: "warning", retryable: true },
+  failed: { label: "同步失败", tone: "error", retryable: true },
+};
+
+const PLATFORM_LABELS = {
+  bilibili: "B站",
+  youtube: "YouTube",
+  twitter: "X",
+  xiaohongshu: "小红书",
+  douyin: "抖音",
+  zhihu: "知乎",
+  reddit: "Reddit",
+};
+
+function safeSyncText(value, maxLength = 240) {
+  return String(value || "").replace(/[\p{C}\p{Zl}\p{Zp}]/gu, "").trim().slice(0, maxLength);
+}
+
+export function getSavedSyncPresentation(status) {
+  return { ...(SYNC_PRESENTATIONS[status] || SYNC_PRESENTATIONS.failed) };
+}
+
+export function sanitizeSavedSyncTask(payload) {
+  const rows = Array.isArray(payload?.items) ? payload.items : [];
+  return {
+    task_id: safeSyncText(payload?.task_id, 64),
+    items: rows.slice(0, 500).map((item) => ({
+      item_key: safeSyncText(item?.item_key, 2048),
+      status: SAVED_SYNC_STATUSES.has(item?.status) ? item.status : "failed",
+      resolved_action: item?.resolved_action === "watch_later" ? "watch_later" : "favorite",
+      resolved_target: safeSyncText(item?.resolved_target),
+      error_code: safeSyncText(item?.error_code, 96),
+      error_message: safeSyncText(item?.error_message),
+    })),
+  };
+}
+
+export function summarizeSavedSyncResults(items) {
+  const groups = new Map();
+  for (const item of Array.isArray(items) ? items : []) {
+    const platform = safeSyncText(item?.item_key, 2048).split(":", 1)[0] || "unknown";
+    const group = groups.get(platform) || { success: 0, total: 0 };
+    group.total += 1;
+    if (item?.status === "synced" || item?.status === "already_synced") {
+      group.success += 1;
+    }
+    groups.set(platform, group);
+  }
+  return Array.from(groups, ([platform, result]) => (
+    `${PLATFORM_LABELS[platform] || platform} ${result.success}/${result.total}`
+  )).join(" · ");
+}
+
 function mergeLabels(baseLabels, overrideLabels) {
   return {
     checkedTitle: "取消保存",
@@ -61,6 +134,7 @@ export function createSavedToggleRegistry({ labels = {}, onChange = null } = {})
         entries.delete(entry);
         continue;
       }
+      if ("disabled" in entry.button) entry.button.disabled = busyBvids.has(bvid);
       applyButtonState(entry.button, saved, entry.labels);
     }
     if (entries.size === 0) {
@@ -168,6 +242,7 @@ export function createSavedToggleRegistry({ labels = {}, onChange = null } = {})
       throw error;
     } finally {
       busyBvids.delete(key);
+      syncButtons(key);
     }
   }
 

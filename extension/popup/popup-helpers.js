@@ -306,7 +306,7 @@ export function normalizeSavedItem(item) {
     ...item,
     bvid,
     title: normalizeText(item?.title) || bvid,
-    up_name: normalizeText(item?.up_name),
+    up_name: normalizeText(item?.up_name || item?.author_name),
     cover_url: normalizeCoverUrl(item?.cover_url),
     content_url: normalizeText(item?.content_url),
     source_platform: normalizeSourcePlatform(item?.source_platform, item?.content_url) || "bilibili",

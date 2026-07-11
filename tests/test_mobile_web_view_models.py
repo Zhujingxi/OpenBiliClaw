@@ -1083,3 +1083,52 @@ class TestMobileWebViewModels:
             assert.equal(getSourceLabel("unknown"), "unknown");
         """)
         )
+
+    def test_saved_sync_view_model_sanitizes_status_and_extension_copy(self) -> None:
+        _assert_js(
+            dedent("""
+            import assert from "node:assert/strict";
+            globalThis.location = { protocol: "http:", host: "127.0.0.1:8420" };
+            const {
+              getSavedSyncViewModel,
+              normalizeSavedListItem,
+            } = await import("./src/openbiliclaw/web/js/views/saved.js");
+
+            const normalized = normalizeSavedListItem({
+              item_key: "youtube:abc\\u0000",
+              source_platform: "youtube",
+              content_id: "abc",
+              sync_status: "unexpected-status",
+              error_message: "unsafe\\u2028message",
+            });
+            assert.equal(normalized.item_key, "youtube:abc");
+            assert.equal(normalized.sync_status, "failed");
+            assert.equal(normalized.error_message, "unsafemessage");
+
+            assert.deepEqual(
+              getSavedSyncViewModel({
+                item_key: "youtube:abc",
+                source_platform: "youtube",
+                content_id: "abc",
+                sync_status: "extension_required",
+              }),
+              {
+                item_key: "youtube:abc",
+                source_platform: "youtube",
+                content_id: "abc",
+                content_url: "",
+                content_type: "video",
+                title: "abc",
+                author_name: "",
+                cover_url: "",
+                sync_status: "extension_required",
+                resolved_target: "",
+                error_message: "",
+                label: "需要连接插件",
+                tone: "warning",
+                retryable: true,
+                detail: "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。",
+              },
+            );
+        """)
+        )

@@ -163,7 +163,7 @@
                 </button>
               </div>
             </div>
-            <p class="status-line" id="delightStatus"></p>
+            <p class="status-line" id="delightStatus" aria-live="polite"></p>
           </div>
         </section>
 
@@ -208,7 +208,9 @@
             <h2>稍后再看</h2>
             <p class="video-meta">你加入稍后再看的内容会在这里排队，看完随手移除即可。</p>
           </div>
+          <button class="pill-btn" id="watchLaterSyncAll" type="button" disabled>同步未同步内容（0）</button>
         </div>
+        <p class="saved-sync-status" id="watchLaterSyncStatus" aria-live="polite"></p>
         <div class="saved-grid" id="watchLaterList"></div>
         <div class="saved-empty" id="watchLaterEmpty" hidden>还没有稍后再看的内容，去推荐里点时钟图标加入吧。</div>
       </section>
@@ -220,7 +222,9 @@
             <h2>我的收藏</h2>
             <p class="video-meta">点 ★ 收藏的内容会长期留在这里，和稍后再看互相独立。</p>
           </div>
+          <button class="pill-btn" id="favoritesSyncAll" type="button" disabled>同步未同步内容（0）</button>
         </div>
+        <p class="saved-sync-status" id="favoritesSyncStatus" aria-live="polite"></p>
         <div class="saved-grid" id="favoritesList"></div>
         <div class="saved-empty" id="favoritesEmpty" hidden>还没有收藏的内容，去推荐里点星标收藏吧。</div>
       </section>
@@ -586,6 +590,17 @@
           <label class="settings-field"><span>语言</span><select id="language"><option value="zh">中文</option><option value="en">English</option></select></label>
           <label class="settings-field"><span>数据目录</span><input id="dataDir" placeholder="data"></label>
           <label class="settings-field full"><span>SQLite 数据库路径</span><input id="storageDbPath" placeholder="data/openbiliclaw.db"></label>
+          <p class="settings-section-title">保存与平台同步</p>
+          <label class="settings-field full settings-switch-field">
+            <span>保存时自动同步到对应平台</span>
+            <span class="settings-switch-copy">默认关闭。收藏和稍后再看始终先保存在本地；关闭时仍可在列表页手动同步。</span>
+            <span class="reshuffle-toggle settings-toggle-inline">
+              <input id="savedAutoSync" type="checkbox">
+              <span class="reshuffle-switch" aria-hidden="true"></span>
+              <span id="savedAutoSyncText">关闭</span>
+            </span>
+          </label>
+          <p class="settings-note-inline" id="savedAutoSyncStatus" aria-live="polite"></p>
           <p class="settings-section-title">本机访问与启动</p>
           <label class="settings-field"><span>局域网访问密码</span><input id="authEnabled" type="checkbox"></label>
           <label class="settings-field" id="authPasswordField" hidden><span>访问密码</span><input id="authPassword" type="password" autocomplete="new-password" placeholder="设置局域网 / 远程访问密码"></label>
@@ -643,7 +658,7 @@
           <label class="settings-field"><span>非托管日志截断 MB</span><input id="logUnmanagedTruncate" inputmode="numeric" placeholder="200"></label>
         </div>
 
-        <label class="settings-field full"><span>配置状态</span><textarea id="configStatus" rows="3" readonly="">可连接 FastAPI：/api/health、/api/config、/api/runtime-status。保存后调用 PUT /api/config，并热重载运行时。</textarea></label>
+        <label class="settings-field full"><span>配置状态</span><textarea id="configStatus" rows="3" readonly="" aria-live="polite">可连接 FastAPI：/api/health、/api/config、/api/runtime-status。保存后调用 PUT /api/config，并热重载运行时。</textarea></label>
         <div class="drawer-actions" style="grid-column: 1 / -1"><button class="pill-btn primary" type="submit">保存配置</button></div>
       </form>
       </section>

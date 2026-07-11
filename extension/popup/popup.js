@@ -66,7 +66,12 @@ import {
   getMobileQrViewState,
   isLoopbackMobileHost,
 } from "./popup-qr.js";
-import { createSavedToggleRegistry } from "./popup-saved-sync.js";
+import {
+  createSavedToggleRegistry,
+  getSavedSyncPresentation,
+  sanitizeSavedSyncTask,
+  summarizeSavedSyncResults,
+} from "./popup-saved-sync.js";
 import {
   installEmbeddingBannerAutoRefresh,
   shouldShowEmbeddingBanner,
@@ -108,14 +113,12 @@ import {
   submitFeedback,
   submitInsightFeedback,
   updateConfig,
-  addToWatchLater,
-  removeFromWatchLater,
-  watchLaterStatus,
-  fetchWatchLater,
-  addToFavorite,
-  removeFromFavorite,
-  favoriteStatus,
-  fetchFavorites,
+  fetchSavedItems,
+  pollSavedSyncTask,
+  removeSavedItem,
+  saveItem,
+  savedItemStatus,
+  syncSavedItems,
 } from "./popup-api.js";
 
 const state = {
@@ -213,6 +216,10 @@ const elements = {
   watchLaterEmpty: document.getElementById("watchLaterEmpty"),
   favoritesList: document.getElementById("favoritesList"),
   favoritesEmpty: document.getElementById("favoritesEmpty"),
+  watchLaterSyncAll: document.getElementById("watchLaterSyncAll"),
+  watchLaterSyncStatus: document.getElementById("watchLaterSyncStatus"),
+  favoritesSyncAll: document.getElementById("favoritesSyncAll"),
+  favoritesSyncStatus: document.getElementById("favoritesSyncStatus"),
   profileEmpty: document.getElementById("profileEmpty"),
   profileEmptyTitle: document.getElementById("profileEmptyTitle"),
   profileEmptyText: document.getElementById("profileEmptyText"),
@@ -550,54 +557,173 @@ function setActiveTab(tabName) {
   }
 }
 
-async function toggleWatchLaterSaved(bvid) {
-  return watchLaterToggles.toggle(bvid, {
-    add: addToWatchLater,
-    remove: removeFromWatchLater,
+function normalizePopupSavedItem(itemOrBvid) {
+  const item = typeof itemOrBvid === "object" && itemOrBvid ? itemOrBvid : { bvid: itemOrBvid };
+  const sourcePlatform = String(item.source_platform || "bilibili").trim();
+  const contentId = String(item.content_id || item.bvid || item.id || "").trim();
+  return {
+    ...item,
+    item_key: String(item.item_key || `${sourcePlatform}:${contentId}`).trim(),
+    source_platform: sourcePlatform,
+    content_id: contentId,
+    content_url: String(item.content_url || "").trim(),
+    content_type: String(item.content_type || "video").trim(),
+  };
+}
+
+async function toggleWatchLaterSaved(itemOrBvid) {
+  const item = normalizePopupSavedItem(itemOrBvid);
+  return watchLaterToggles.toggle(item.item_key, {
+    add: () => saveItem("watch_later", item),
+    remove: () => removeSavedItem("watch_later", item.item_key),
   });
 }
 
-async function toggleFavoriteSaved(bvid) {
-  return favoriteToggles.toggle(bvid, {
-    add: addToFavorite,
-    remove: removeFromFavorite,
+async function toggleFavoriteSaved(itemOrBvid) {
+  const item = normalizePopupSavedItem(itemOrBvid);
+  return favoriteToggles.toggle(item.item_key, {
+    add: () => saveItem("favorite", item),
+    remove: () => removeSavedItem("favorite", item.item_key),
   });
 }
 
-function bindWatchLaterToggle(button, bvid, labels = {}) {
-  watchLaterToggles.registerButton(bvid, button, labels);
-  void watchLaterToggles.hydrateStatus(bvid, watchLaterStatus);
+async function toggleSavedWithFeedback(label, itemOrBvid, registry, toggle) {
+  const item = normalizePopupSavedItem(itemOrBvid);
+  setHint(`正在更新${label}…`, "info");
+  try {
+    await toggle(item);
+    setHint(
+      registry.isSaved(item.item_key) ? `已保存到${label}` : `已从${label}移除`,
+      "success",
+    );
+  } catch {
+    // The registry has already restored the previous optimistic state.
+    setHint(`${label}更新失败，请确认本地后端正在运行后重试。`, "error");
+  }
+}
+
+function bindWatchLaterToggle(button, itemOrBvid, labels = {}) {
+  const item = normalizePopupSavedItem(itemOrBvid);
+  watchLaterToggles.registerButton(item.item_key, button, labels);
+  void watchLaterToggles.hydrateStatus(
+    item.item_key,
+    (itemKey) => savedItemStatus("watch_later", itemKey),
+  );
   return button;
 }
 
-function bindFavoriteToggle(button, bvid, labels = {}) {
-  favoriteToggles.registerButton(bvid, button, labels);
-  void favoriteToggles.hydrateStatus(bvid, favoriteStatus);
+function bindFavoriteToggle(button, itemOrBvid, labels = {}) {
+  const item = normalizePopupSavedItem(itemOrBvid);
+  favoriteToggles.registerButton(item.item_key, button, labels);
+  void favoriteToggles.hydrateStatus(
+    item.item_key,
+    (itemKey) => savedItemStatus("favorite", itemKey),
+  );
   return button;
 }
 
-// ── Watch-later view (稍后再看) ──────────────────────────────────
-async function loadWatchLater() {
-  const list = elements.watchLaterList;
-  const empty = elements.watchLaterEmpty;
+// ── Platform-neutral saved views ─────────────────────────────────
+const SAVED_SYNC_TERMINAL = new Set([
+  "synced", "already_synced", "login_required", "unsupported",
+  "rate_limited", "extension_required", "failed",
+]);
+
+function syncEligible(item) {
+  return !["synced", "already_synced", "syncing"].includes(item?.sync_status);
+}
+
+function savedSyncDetail(item) {
+  if (item?.sync_status === "extension_required") {
+    return "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。";
+  }
+  return item?.error_message || item?.resolved_target || "平台目标将在同步时确认";
+}
+
+async function awaitSavedSyncTask(initial) {
+  let task = sanitizeSavedSyncTask(initial);
+  for (let attempt = 0; task.task_id && attempt < 40; attempt += 1) {
+    if (task.items.every((item) => SAVED_SYNC_TERMINAL.has(item.status))) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    task = sanitizeSavedSyncTask(await pollSavedSyncTask(task.task_id));
+  }
+  return task;
+}
+
+async function runSavedSync(listKind, items, button, status, reload, confirmBatch = false) {
+  if (button?.disabled) return;
+  const selected = (Array.isArray(items) ? items : []).filter(syncEligible);
+  if (!selected.length) return;
+  const platforms = Array.from(new Set(selected.map((item) => (
+    platformDisplayName(item.source_platform || item.item_key?.split(":", 1)[0])
+  ))));
+  if (confirmBatch && !window.confirm(
+    `将同步 ${selected.length} 项到 ${platforms.join("、")}，继续吗？`,
+  )) return;
+
+  if (button) {
+    button.disabled = true;
+    button.textContent = "同步中…";
+  }
+  if (status) {
+    status.removeAttribute("role");
+    status.textContent = `正在同步 ${selected.length} 项…`;
+  }
+  try {
+    const task = await awaitSavedSyncTask(
+      await syncSavedItems(listKind, selected.map((item) => item.item_key)),
+    );
+    if (status) status.textContent = summarizeSavedSyncResults(task.items) || "同步任务已提交";
+  } catch (error) {
+    if (status) {
+      status.role = "alert";
+      status.textContent = error?.message || "同步失败，请稍后重试。";
+    }
+  } finally {
+    if (button) button.disabled = false;
+    await reload();
+  }
+}
+
+async function loadSavedList(listKind, { list, empty, syncAll, status, toggles }) {
   if (!(list instanceof HTMLElement)) return;
   let data = null;
   try {
-    data = await fetchWatchLater(100, 0);
-  } catch {
-    data = null;
+    data = await fetchSavedItems(listKind, 100, 0);
+  } catch (error) {
+    if (status) {
+      status.role = "alert";
+      status.textContent = error?.message || "保存列表加载失败。";
+    }
   }
-  const items = Array.isArray(data?.items) ? data.items : [];
+  const items = Array.isArray(data?.items) ? data.items.map(normalizePopupSavedItem) : [];
   list.replaceChildren();
-  if (!items.length) {
-    if (empty instanceof HTMLElement) empty.hidden = false;
-    return;
-  }
-  if (empty instanceof HTMLElement) empty.hidden = true;
+  if (empty instanceof HTMLElement) empty.hidden = items.length > 0;
   for (const item of items) {
-    watchLaterToggles.setSaved(item.bvid, true);
-    list.appendChild(buildWatchLaterCard(item));
+    toggles.setSaved(item.item_key, true);
+    list.appendChild(buildSavedCard(listKind, item, { list, empty, toggles }));
   }
+  const pendingCount = items.filter(syncEligible).length;
+  if (syncAll instanceof HTMLButtonElement) {
+    syncAll.textContent = `同步未同步内容（${pendingCount}）`;
+    syncAll.disabled = pendingCount === 0;
+    syncAll.onclick = () => runSavedSync(
+      listKind, items, syncAll, status,
+      () => loadSavedList(listKind, { list, empty, syncAll, status, toggles }),
+      true,
+    );
+  }
+}
+
+async function loadWatchLater() {
+  return loadSavedList("watch_later", {
+    list: elements.watchLaterList,
+    empty: elements.watchLaterEmpty,
+    syncAll: elements.watchLaterSyncAll,
+    status: elements.watchLaterSyncStatus,
+    toggles: watchLaterToggles,
+  });
 }
 
 // Optimistic saved-card removal shared by the watch-later and favorites
@@ -607,7 +733,7 @@ async function loadWatchLater() {
 // whenever the DELETE queued behind slow same-origin requests (covers via
 // image-proxy compete for Chrome's 6-connection limit) or failed, clicking
 // looked like it did nothing.
-function bindSavedCardRemove(card, remove, { bvid, requestRemove, toggles, list, empty }) {
+function bindSavedCardRemove(card, remove, { itemKey, requestRemove, toggles, list, empty, onRemoved }) {
   remove.addEventListener("click", async () => {
     if (remove.disabled) return;
     remove.disabled = true;
@@ -617,10 +743,11 @@ function bindSavedCardRemove(card, remove, { bvid, requestRemove, toggles, list,
       empty.hidden = false;
     }
     try {
-      await requestRemove(bvid);
-      toggles.setSaved(bvid, false);
+      await requestRemove(itemKey);
+      toggles.setSaved(itemKey, false);
+      if (typeof onRemoved === "function") await onRemoved();
     } catch (error) {
-      console.error("saved-card remove failed:", bvid, error);
+      console.error("saved-card remove failed:", itemKey, error);
       if (list instanceof HTMLElement) {
         list.insertBefore(card, anchor?.parentElement === list ? anchor : null);
       }
@@ -632,10 +759,10 @@ function bindSavedCardRemove(card, remove, { bvid, requestRemove, toggles, list,
   });
 }
 
-function buildWatchLaterCard(item) {
+function buildSavedCard(listKind, item, { list, empty, toggles }) {
   const card = document.createElement("article");
   card.className = "saved-card";
-  card.dataset.bvid = item.bvid;
+  card.dataset.itemKey = item.item_key;
 
   const body = document.createElement("button");
   body.type = "button";
@@ -645,11 +772,22 @@ function buildWatchLaterCard(item) {
   copy.className = "saved-card-copy";
   const title = document.createElement("p");
   title.className = "saved-card-title";
-  title.textContent = item.title || item.bvid;
+  title.textContent = item.title || item.content_id;
   const up = document.createElement("p");
   up.className = "saved-card-up";
-  up.textContent = item.up_name || "";
-  copy.append(title, up);
+  up.textContent = item.author_name || item.up_name || "";
+  const syncLine = document.createElement("span");
+  syncLine.className = "saved-sync-line";
+  const presentation = getSavedSyncPresentation(item.sync_status);
+  const chip = document.createElement("span");
+  chip.className = "saved-sync-chip";
+  chip.dataset.tone = presentation.tone;
+  chip.textContent = presentation.label;
+  const target = document.createElement("span");
+  target.className = "saved-sync-target";
+  target.textContent = savedSyncDetail(item);
+  syncLine.append(chip, target);
+  copy.append(title, up, syncLine);
   body.append(copy);
   body.prepend(media);
   body.addEventListener("click", () => {
@@ -661,16 +799,34 @@ function buildWatchLaterCard(item) {
   remove.type = "button";
   remove.className = "saved-card-remove";
   remove.textContent = "移除";
-  remove.title = "移出稍后再看";
+  remove.title = listKind === "watch_later" ? "移出本地稍后再看" : "从本地收藏移除";
   bindSavedCardRemove(card, remove, {
-    bvid: item.bvid,
-    requestRemove: removeFromWatchLater,
-    toggles: watchLaterToggles,
-    list: elements.watchLaterList,
-    empty: elements.watchLaterEmpty,
+    itemKey: item.item_key,
+    requestRemove: (itemKey) => removeSavedItem(listKind, itemKey),
+    toggles,
+    list,
+    empty,
+    onRemoved: listKind === "watch_later" ? loadWatchLater : loadFavorites,
   });
 
-  card.append(body, remove);
+  const actions = document.createElement("span");
+  actions.className = "saved-card-actions";
+  if (syncEligible(item)) {
+    const sync = document.createElement("button");
+    sync.type = "button";
+    sync.className = "saved-card-sync";
+    sync.textContent = presentation.retryable ? "重试同步" : "同步";
+    sync.addEventListener("click", () => runSavedSync(
+      listKind,
+      [item],
+      sync,
+      listKind === "watch_later" ? elements.watchLaterSyncStatus : elements.favoritesSyncStatus,
+      listKind === "watch_later" ? loadWatchLater : loadFavorites,
+    ));
+    actions.append(sync);
+  }
+  actions.append(remove);
+  card.append(body, actions);
   return card;
 }
 
@@ -689,70 +845,14 @@ function buildSavedCardMedia(item) {
   return media;
 }
 
-// ── Favorites view (收藏夹) ─────────────────────────────────────
 async function loadFavorites() {
-  const list = elements.favoritesList;
-  const empty = elements.favoritesEmpty;
-  if (!(list instanceof HTMLElement)) return;
-  let data = null;
-  try {
-    data = await fetchFavorites(100, 0);
-  } catch {
-    data = null;
-  }
-  const items = Array.isArray(data?.items) ? data.items : [];
-  list.replaceChildren();
-  if (!items.length) {
-    if (empty instanceof HTMLElement) empty.hidden = false;
-    return;
-  }
-  if (empty instanceof HTMLElement) empty.hidden = true;
-  for (const item of items) {
-    favoriteToggles.setSaved(item.bvid, true);
-    list.appendChild(buildFavoriteCard(item));
-  }
-}
-
-function buildFavoriteCard(item) {
-  const card = document.createElement("article");
-  card.className = "saved-card";
-  card.dataset.bvid = item.bvid;
-
-  const body = document.createElement("button");
-  body.type = "button";
-  body.className = "saved-card-open";
-  const media = buildSavedCardMedia(item);
-  const copy = document.createElement("span");
-  copy.className = "saved-card-copy";
-  const title = document.createElement("p");
-  title.className = "saved-card-title";
-  title.textContent = item.title || item.bvid;
-  const up = document.createElement("p");
-  up.className = "saved-card-up";
-  up.textContent = item.up_name || "";
-  copy.append(title, up);
-  body.append(copy);
-  body.prepend(media);
-  body.addEventListener("click", () => {
-    const url = buildContentUrl(item);
-    if (url) window.open(url, "_blank");
-  });
-
-  const remove = document.createElement("button");
-  remove.type = "button";
-  remove.className = "saved-card-remove";
-  remove.textContent = "移除";
-  remove.title = "取消收藏";
-  bindSavedCardRemove(card, remove, {
-    bvid: item.bvid,
-    requestRemove: removeFromFavorite,
-    toggles: favoriteToggles,
+  return loadSavedList("favorite", {
     list: elements.favoritesList,
     empty: elements.favoritesEmpty,
+    syncAll: elements.favoritesSyncAll,
+    status: elements.favoritesSyncStatus,
+    toggles: favoriteToggles,
   });
-
-  card.append(body, remove);
-  return card;
 }
 
 function showRecommendationEmptyState(title, message) {
@@ -4788,28 +4888,20 @@ function renderDelightSlot() {
     // \u7A0D\u540E\u518D\u770B = \u65F6\u949F\u56FE\u6807\uFF08\u72B6\u6001\u8D70 aria-pressed + CSS\uFF0C\u4E0D\u505A\u5B57\u5F62\u66FF\u6362\uFF09
     const delightWatchLaterButton = (() => {
       const btn = createActionButton("", "action-button action-secondary delight-banner-action delight-save-toggle watch-later-btn", async () => {
-        try {
-          await toggleWatchLaterSaved(delight.bvid);
-        } catch {
-          // Registry already rolled back the optimistic state.
-        }
+        await toggleSavedWithFeedback("稍后再看", delight, watchLaterToggles, toggleWatchLaterSaved);
       });
       btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg>';
-      bindWatchLaterToggle(btn, delight.bvid);
+      bindWatchLaterToggle(btn, delight);
       return btn;
     })();
 
     // \u6536\u85CF = \u661F\u661F\u56FE\u6807\uFF0C\u4E0E\u7A0D\u540E\u518D\u770B\u76F8\u4E92\u72EC\u7ACB
     const delightFavoriteButton = (() => {
       const btn = createActionButton("", "action-button action-secondary delight-banner-action delight-save-toggle favorite-btn", async () => {
-        try {
-          await toggleFavoriteSaved(delight.bvid);
-        } catch {
-          // Registry already rolled back the optimistic state.
-        }
+        await toggleSavedWithFeedback("收藏", delight, favoriteToggles, toggleFavoriteSaved);
       });
       btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg>';
-      bindFavoriteToggle(btn, delight.bvid);
+      bindFavoriteToggle(btn, delight);
       return btn;
     })();
 
@@ -4960,11 +5052,34 @@ function renderDelightSlot() {
       dismissAll.type = "button";
       dismissAll.className = "delight-banner-dismiss-all";
       dismissAll.textContent = `全部稍后看 (${queueLength})`;
-      dismissAll.addEventListener("click", (event) => {
+      dismissAll.addEventListener("click", async (event) => {
         event.stopPropagation();
-        for (const d of state.activeDelights) rememberDismissedDelight(d.bvid);
-        clearDelightQueue();
-        setHint("都收起来了，需要时去邮箱里翻。", "info");
+        if (dismissAll.disabled) return;
+        dismissAll.disabled = true;
+        dismissAll.textContent = "本地保存中…";
+        const snapshot = state.activeDelights.map((item) => normalizePopupSavedItem(item));
+        const results = await Promise.allSettled(
+          snapshot.map((item) => saveItem("watch_later", item)),
+        );
+        const savedKeys = new Set();
+        let syncing = 0;
+        results.forEach((result, index) => {
+          if (result.status !== "fulfilled" || result.value?.saved === false) return;
+          const item = snapshot[index];
+          savedKeys.add(item.item_key);
+          watchLaterToggles.setSaved(item.item_key, true);
+          if (result.value?.sync_task_id && ["pending", "syncing"].includes(result.value?.sync_status)) {
+            syncing += 1;
+          }
+          rememberDismissedDelight(item.bvid || item.content_id);
+        });
+        const saved = savedKeys.size;
+        const failed = snapshot.length - saved;
+        state.activeDelights = state.activeDelights.filter(
+          (item) => !savedKeys.has(normalizePopupSavedItem(item).item_key),
+        );
+        syncDelightHead();
+        setHint(`本地保存 ${saved} · 同步中 ${syncing} · 失败 ${failed}`, failed ? "warning" : "success");
         renderDelightSlot();
       });
       body.append(dismissAll);
@@ -5250,28 +5365,20 @@ function renderRecommendations(items, { append = false } = {}) {
       }),
       (() => {
         const btn = createActionButton("", "action-button action-secondary", async () => {
-          try {
-            await toggleWatchLaterSaved(item.bvid);
-          } catch {
-            // Registry already rolled back the optimistic state.
-          }
+          await toggleSavedWithFeedback("稍后再看", item, watchLaterToggles, toggleWatchLaterSaved);
         });
         btn.innerHTML = WATCH_LATER_ICON_SVG;
         btn.classList.add("saved-toggle", "watch-later-btn");
-        bindWatchLaterToggle(btn, item.bvid);
+        bindWatchLaterToggle(btn, item);
         return btn;
       })(),
       (() => {
         const btn = createActionButton("", "action-button action-secondary", async () => {
-          try {
-            await toggleFavoriteSaved(item.bvid);
-          } catch {
-            // Registry already rolled back the optimistic state.
-          }
+          await toggleSavedWithFeedback("收藏", item, favoriteToggles, toggleFavoriteSaved);
         });
         btn.innerHTML = FAVORITE_ICON_SVG;
         btn.classList.add("saved-toggle", "favorite-btn");
-        bindFavoriteToggle(btn, item.bvid);
+        bindFavoriteToggle(btn, item);
         return btn;
       })(),
       createActionButton("少来点", "action-button action-secondary", async () => {
@@ -6634,6 +6741,11 @@ function bindSettings() {
     if (lang) lang.value = cfg.language || "zh";
     setVal("cfgDataDir", cfg.data_dir);
     setVal("cfgStorageDbPath", cfg.storage?.db_path);
+    const savedAutoSync = document.getElementById("cfgSavedAutoSync");
+    if (savedAutoSync instanceof HTMLInputElement) {
+      savedAutoSync.checked = cfg.saved_sync?.auto_sync_enabled === true;
+      savedAutoSync.dataset.confirmed = savedAutoSync.checked ? "true" : "false";
+    }
 
     // Scheduler
     const schedEnabled = document.getElementById("cfgSchedulerEnabled");
@@ -6893,6 +7005,9 @@ function bindSettings() {
         auto_update_enabled: checked("cfgAutoUpdate"),
         auto_update_check_interval_hours: getInt("cfgAutoUpdateInterval", 6),
       },
+      saved_sync: {
+        auto_sync_enabled: checked("cfgSavedAutoSync"),
+      },
       storage: {
         db_path: getVal("cfgStorageDbPath"),
       },
@@ -7039,6 +7154,23 @@ function bindSettings() {
         await loadBackendUpdateStatus();
         backendApplyBtn.disabled = false;
       }
+    });
+  }
+
+  const savedAutoSync = document.getElementById("cfgSavedAutoSync");
+  const savedAutoSyncStatus = document.getElementById("cfgSavedAutoSyncStatus");
+  if (savedAutoSync instanceof HTMLInputElement) {
+    savedAutoSync.addEventListener("change", () => {
+      if (!savedAutoSync.checked || savedAutoSync.dataset.confirmed === "true") return;
+      const warning = "开启后，在 OpenBiliClaw 点击收藏或稍后再看会修改对应平台账号中的收藏、书签、Saved、播放列表或稍后观看。";
+      if (!window.confirm(warning)) {
+        savedAutoSync.checked = false;
+        savedAutoSync.dataset.confirmed = "false";
+        if (savedAutoSyncStatus) savedAutoSyncStatus.textContent = "已取消，自动同步仍为关闭。";
+        return;
+      }
+      savedAutoSync.dataset.confirmed = "true";
+      if (savedAutoSyncStatus) savedAutoSyncStatus.textContent = "已确认；保存配置后开启。";
     });
   }
 

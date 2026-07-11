@@ -129,8 +129,8 @@ test("popup saved surfaces round-trip through api clients and are wired in the U
     assert.match(popupHtml, /id="favoritesList"/);
     assert.match(popupJs, /function loadWatchLater/);
     assert.match(popupJs, /function loadFavorites/);
-    assert.match(popupJs, /toggleWatchLaterSaved\(item\.bvid\)/);
-    assert.match(popupJs, /toggleFavoriteSaved\(item\.bvid\)/);
+    assert.match(popupJs, /toggleSavedWithFeedback\("稍后再看", item/);
+    assert.match(popupJs, /toggleSavedWithFeedback\("收藏", item/);
     // Saved-card removal must stay optimistic (remove first, restore + 重试 on
     // failure) — the old await-then-remove flow read as "clicking does nothing"
     // whenever the DELETE was slow or failed.

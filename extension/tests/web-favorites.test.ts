@@ -41,7 +41,7 @@ test("mobile recommend delight tray has a favorite star action", () => {
   );
 
   assert.match(recommendJs, /action:\s*"favorite"/);
-  assert.match(recommendJs, /addToFavorite\(d\.bvid\)/);
+  assert.match(recommendJs, /saveItem\("favorite", savedItem\)/);
 });
 
 test("mobile recommend cards have a favorite star toggle", () => {
@@ -50,8 +50,8 @@ test("mobile recommend cards have a favorite star toggle", () => {
     "utf8",
   );
 
-  assert.match(recommendJs, /addToFavorite\(item\.bvid\)/);
-  assert.match(recommendJs, /favoriteStatus\(item\.bvid\)/);
+  assert.match(recommendJs, /saveItem\("favorite", savedItem\)/);
+  assert.match(recommendJs, /savedItemStatus\("favorite", savedItem\.item_key\)/);
 });
 
 test("desktop web exposes favorites page, badge, and delight star", () => {
@@ -83,15 +83,15 @@ test("extension popup has a favorites tab, list, and delight star", () => {
   assert.match(popupHtml, /id="viewFavorites"/);
   assert.match(popupHtml, /id="favoritesList"/);
   assert.match(popupJs, /delightFavoriteButton/);
-  assert.match(popupJs, /toggleFavoriteSaved\(delight\.bvid\)/);
-  assert.match(popupJs, /bindFavoriteToggle\(btn,\s*delight\.bvid\)/);
+  assert.match(popupJs, /toggleSavedWithFeedback\("收藏", delight/);
+  assert.match(popupJs, /bindFavoriteToggle\(btn, delight\)/);
   assert.match(popupJs, /function loadFavorites/);
 });
 
 test("extension popup recommendation cards have a favorite star toggle", () => {
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
 
-  assert.match(popupJs, /toggleFavoriteSaved\(item\.bvid\)/);
-  assert.match(popupJs, /bindFavoriteToggle\(btn,\s*item\.bvid/);
+  assert.match(popupJs, /toggleSavedWithFeedback\("收藏", item/);
+  assert.match(popupJs, /bindFavoriteToggle\(btn, item\)/);
   assert.match(popupJs, /classList\.add\("saved-toggle",\s*"favorite-btn"\)/);
 });

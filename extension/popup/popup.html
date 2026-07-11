@@ -4534,6 +4534,70 @@
       background: var(--brand-soft, rgba(200,85,61,0.1));
       color: var(--brand, #c8553d);
     }
+    .saved-sync-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+    .saved-sync-status {
+      min-height: 1.4em;
+      color: var(--text-muted, #777);
+      font-size: 11px;
+    }
+    .saved-card-actions {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .saved-card-sync,
+    .saved-card-remove {
+      min-height: 36px;
+      border: 0;
+      border-radius: 8px;
+      padding: 6px 8px;
+      cursor: pointer;
+      color: var(--text-muted, #777);
+      background: transparent;
+    }
+    .saved-card-sync { color: var(--brand, #c8553d); }
+    .saved-card-sync:focus-visible,
+    .saved-card-remove:focus-visible,
+    .saved-sync-toolbar button:focus-visible {
+      outline: 2px solid var(--brand, #c8553d);
+      outline-offset: 2px;
+    }
+    .saved-sync-line {
+      display: flex;
+      gap: 5px;
+      align-items: center;
+      margin-top: 5px;
+      min-width: 0;
+      font-size: 10px;
+    }
+    .saved-sync-chip {
+      flex: 0 0 auto;
+      border-radius: 999px;
+      padding: 2px 6px;
+      background: rgba(120, 128, 145, 0.12);
+    }
+    .saved-sync-chip[data-tone="success"] { color: #1a7a4a; background: var(--lime-soft); }
+    .saved-sync-chip[data-tone="warning"] { color: #8a6520; background: var(--warning-soft); }
+    .saved-sync-chip[data-tone="error"] { color: #c0404e; background: rgba(239, 122, 134, 0.15); }
+    .saved-sync-chip[data-tone="info"] { color: var(--brand, #c8553d); background: var(--brand-soft); }
+    .saved-sync-target {
+      overflow: hidden;
+      color: var(--text-muted, #777);
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    @media (max-width: 520px) {
+      .saved-card-sync,
+      .saved-card-remove,
+      .saved-sync-toolbar button { min-height: 44px; }
+    }
 
   </style>
 </head>
@@ -4663,6 +4727,10 @@
           <p class="view-kicker">Watch later</p>
           <h2>稍后再看</h2>
           <p class="view-subtitle">点时钟图标加入临时队列，看完可以随手移除。</p>
+          <div class="saved-sync-toolbar">
+            <button id="watchLaterSyncAll" class="action-button action-secondary" type="button" disabled>同步未同步内容（0）</button>
+            <span id="watchLaterSyncStatus" class="saved-sync-status" aria-live="polite"></span>
+          </div>
         </div>
         <div id="watchLaterEmpty" class="empty-state" hidden>
           <h3>还没有稍后再看的内容</h3>
@@ -4676,6 +4744,10 @@
           <p class="view-kicker">Favorites</p>
           <h2>我的收藏</h2>
           <p class="view-subtitle">点星标收藏的内容会长期留在这里，和稍后再看互相独立。</p>
+          <div class="saved-sync-toolbar">
+            <button id="favoritesSyncAll" class="action-button action-secondary" type="button" disabled>同步未同步内容（0）</button>
+            <span id="favoritesSyncStatus" class="saved-sync-status" aria-live="polite"></span>
+          </div>
         </div>
         <div id="favoritesEmpty" class="empty-state" hidden>
           <h3>还没有收藏</h3>
@@ -5561,6 +5633,15 @@
           </div>
           <p class="settings-hint" id="cfgAutostartHint">读取开机自启动状态中…</p>
           <p class="settings-note">只影响下次登录拉起后端，不启停当前进程；本机 Ollama 配置可能随启动预检一起拉起。若依赖 shell 环境变量，建议先写入 config.toml。</p>
+        </div>
+        <div class="settings-field" id="savedSyncControlField">
+          <label>保存与平台同步</label>
+          <div class="settings-field-row">
+            <input id="cfgSavedAutoSync" type="checkbox">
+            <label for="cfgSavedAutoSync">保存时自动同步到对应平台</label>
+          </div>
+          <p class="settings-hint">默认关闭。收藏和稍后再看始终先保存在本地；关闭时仍可在列表页手动同步。</p>
+          <p id="cfgSavedAutoSyncStatus" class="settings-probe-status" aria-live="polite"></p>
         </div>
         <div class="settings-field">
           <label for="cfgLanguage">语言</label>
