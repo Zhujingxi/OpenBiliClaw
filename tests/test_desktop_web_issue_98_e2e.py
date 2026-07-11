@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from playwright.sync_api import Page, expect, sync_playwright
+
+playwright_api = pytest.importorskip("playwright.sync_api")
+Page = playwright_api.Page
+expect = playwright_api.expect
+sync_playwright = playwright_api.sync_playwright
 
 pytestmark = pytest.mark.integration
 

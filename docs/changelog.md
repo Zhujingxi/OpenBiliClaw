@@ -13,6 +13,7 @@
 - **七平台发布时间贯通所有推荐表面**：Bilibili、小红书、抖音、YouTube、X、知乎和 Reddit 的可靠发布时间进入候选池、缓存、普通推荐与惊喜推荐，并在桌面、移动端、插件和 CLI 使用统一的本地相对时间展示；知乎惊喜卡同时补齐正文预览和无封面文字卡。
 - **托管 Ollama 与引导初始化更能自愈**：with-embedding 私有 Ollama 记录并复用实际端口/模型目录，崩溃后按 5 秒至 300 秒退避自动拉起；缺失或损坏的向量模型可在引导初始化中自动修复并显示进度。
 - **推荐准入与 API 兼容边界收紧**：除 `explore` 外所有来源统一执行全局 admission 下限，缓存与展示出口 fail closed；OpenAI Responses 请求固定发送 `store=false`，避免兼容网关拒绝无状态调用。
+- **默认 CI 不再被可选浏览器依赖阻断**：issue #98 的真实浏览器 E2E 改为与既有引导 E2E 相同的 `pytest.importorskip` 收集契约；普通 `[dev,x]` 测试环境未安装 Playwright 时跳过 integration 模块，安装 `[browser]` 后仍执行完整浏览器用例。
 
 ## v0.3.161 / extension v0.3.161 / desktop v0.3.161：Keyword inspiration 轴库 + 搜索词生成模式选择器（2026-07-09）
 
