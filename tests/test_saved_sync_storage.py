@@ -145,6 +145,37 @@ def test_native_save_state_controls_eligibility_and_task_lookup(db: Database) ->
     assert states[0]["title"] == ""
 
 
+@pytest.mark.parametrize(
+    ("list_kind", "add_method_name"),
+    [("watch_later", "add_to_watch_later"), ("favorite", "add_to_favorites")],
+)
+def test_legacy_duplicate_save_preserves_terminal_native_state(
+    db: Database,
+    list_kind: str,
+    add_method_name: str,
+) -> None:
+    add_method = getattr(db, add_method_name)
+    add_method("BV1LEGACYDUP")
+    db.upsert_native_save_state(
+        list_kind,
+        "bilibili:BV1LEGACYDUP",
+        requested_action=list_kind,
+        resolved_action=list_kind,
+        resolved_target="persisted target",
+        status="already_synced",
+        task_id="persisted-task",
+    )
+
+    add_method("BV1LEGACYDUP", "updated")
+
+    row = db.get_saved_membership(list_kind, "bilibili:BV1LEGACYDUP")
+    assert row is not None
+    assert row["note"] == "updated"
+    assert row["sync_status"] == "already_synced"
+    assert row["sync_task_id"] == "persisted-task"
+    assert row["resolved_target"] == "persisted target"
+
+
 def test_saved_membership_methods_reject_invalid_list_kind(db: Database) -> None:
     item = SavedItemInput("bilibili", "BV1INVALID")
 

@@ -7453,6 +7453,7 @@ class Database:
                 resolved_target    TEXT NOT NULL DEFAULT '',
                 status             TEXT NOT NULL DEFAULT 'pending',
                 task_id            TEXT NOT NULL DEFAULT '',
+                execution_id       TEXT NOT NULL DEFAULT '',
                 last_error_code    TEXT NOT NULL DEFAULT '',
                 last_error_message TEXT NOT NULL DEFAULT '',
                 last_attempt_at    TIMESTAMP,
@@ -7466,6 +7467,15 @@ class Database:
                 applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        native_state_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(native_save_states)").fetchall()
+        }
+        if "execution_id" not in native_state_columns:
+            self.conn.execute(
+                "ALTER TABLE native_save_states "
+                "ADD COLUMN execution_id TEXT NOT NULL DEFAULT ''"
+            )
         self.conn.execute("BEGIN IMMEDIATE")
         try:
             migrated = self.conn.execute(
@@ -7824,6 +7834,7 @@ class Database:
         resolved_target: str = "",
         status: str = "pending",
         task_id: str = "",
+        execution_id: str = "",
         last_error_code: str = "",
         last_error_message: str = "",
     ) -> None:
@@ -7845,11 +7856,11 @@ class Database:
                 """
                 INSERT INTO native_save_states (
                     list_kind, item_key, requested_action, resolved_action, resolved_target,
-                    status, task_id, last_error_code, last_error_message,
+                    status, task_id, execution_id, last_error_code, last_error_message,
                     last_attempt_at, synced_at
                 )
                 VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     CASE WHEN ? = 'pending' THEN NULL ELSE CURRENT_TIMESTAMP END,
                     CASE WHEN ? IN ('synced', 'already_synced')
                         THEN CURRENT_TIMESTAMP ELSE NULL END
@@ -7860,6 +7871,7 @@ class Database:
                     resolved_target = excluded.resolved_target,
                     status = excluded.status,
                     task_id = excluded.task_id,
+                    execution_id = excluded.execution_id,
                     last_error_code = excluded.last_error_code,
                     last_error_message = excluded.last_error_message,
                     last_attempt_at = CASE
@@ -7880,6 +7892,7 @@ class Database:
                     resolved_target,
                     status,
                     task_id,
+                    execution_id,
                     last_error_code,
                     last_error_message,
                     status,
@@ -7892,6 +7905,197 @@ class Database:
             raise
         finally:
             conn.close()
+
+    def claim_native_sync_task(
+        self,
+        list_kind: str,
+        item_keys: Sequence[str] | None,
+        task_id: str,
+    ) -> list[str]:
+        """Atomically assign eligible memberships to one durable pending task.
+
+        A pending row with a non-empty task owner is deliberately ineligible so
+        duplicate/manual task creation cannot steal it and invalidate polling for
+        the original task ID.
+        """
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_task_id = task_id.strip()
+        if not normalized_task_id:
+            raise ValueError("task_id must not be empty")
+        cleaned_keys = list(dict.fromkeys(key.strip() for key in item_keys or () if key.strip()))
+        params: list[Any] = [normalized_kind]
+        item_filter = ""
+        if cleaned_keys:
+            placeholders = ", ".join("?" for _ in cleaned_keys)
+            item_filter = f" AND m.item_key IN ({placeholders})"
+            params.extend(cleaned_keys)
+
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """
+                SELECT m.item_key
+                FROM saved_memberships AS m
+                LEFT JOIN native_save_states AS n
+                  ON n.list_kind = m.list_kind AND n.item_key = m.item_key
+                WHERE m.list_kind = ?
+                  AND (
+                      n.status IS NULL
+                      OR (n.status = 'pending' AND n.task_id = '')
+                      OR n.status IN (
+                          'login_required', 'rate_limited',
+                          'extension_required', 'failed'
+                      )
+                  )
+                """
+                + item_filter
+                + " ORDER BY m.added_at DESC, m.item_key ASC",
+                params,
+            ).fetchall()
+            claimed_keys = [str(row["item_key"]) for row in rows]
+            for item_key in claimed_keys:
+                conn.execute(
+                    """
+                    INSERT INTO native_save_states (
+                        list_kind, item_key, requested_action, status, task_id,
+                        execution_id, resolved_action, resolved_target,
+                        last_error_code, last_error_message, last_attempt_at
+                    )
+                    VALUES (?, ?, ?, 'pending', ?, '', '', '', '', '', NULL)
+                    ON CONFLICT(list_kind, item_key) DO UPDATE SET
+                        requested_action = excluded.requested_action,
+                        status = 'pending',
+                        task_id = excluded.task_id,
+                        execution_id = '',
+                        resolved_action = '',
+                        resolved_target = '',
+                        last_error_code = '',
+                        last_error_message = ''
+                    """,
+                    (normalized_kind, item_key, normalized_kind, normalized_task_id),
+                )
+            conn.commit()
+            return claimed_keys
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def claim_native_save_item(
+        self,
+        list_kind: str,
+        item_key: str,
+        task_id: str,
+        execution_id: str,
+    ) -> bool:
+        """Atomically claim one pending task item for adapter execution."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        cursor = self._execute_write(
+            """
+            UPDATE native_save_states
+            SET status = 'syncing', execution_id = ?, last_attempt_at = CURRENT_TIMESTAMP
+            WHERE list_kind = ? AND item_key = ? AND task_id = ?
+              AND status = 'pending' AND execution_id = ''
+            """,
+            (execution_id, normalized_kind, item_key.strip(), task_id.strip()),
+        )
+        return int(cursor.rowcount or 0) > 0
+
+    def update_native_save_claim_route(
+        self,
+        list_kind: str,
+        item_key: str,
+        task_id: str,
+        execution_id: str,
+        resolved_action: str,
+        resolved_target: str,
+    ) -> bool:
+        """Persist the router-owned destination for a live execution claim."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        cursor = self._execute_write(
+            """
+            UPDATE native_save_states
+            SET resolved_action = ?, resolved_target = ?
+            WHERE list_kind = ? AND item_key = ? AND task_id = ?
+              AND status = 'syncing' AND execution_id = ?
+            """,
+            (
+                resolved_action,
+                resolved_target,
+                normalized_kind,
+                item_key.strip(),
+                task_id.strip(),
+                execution_id,
+            ),
+        )
+        return int(cursor.rowcount or 0) > 0
+
+    def complete_native_save_claim(
+        self,
+        list_kind: str,
+        item_key: str,
+        task_id: str,
+        execution_id: str,
+        *,
+        requested_action: str,
+        resolved_action: str,
+        resolved_target: str,
+        status: str,
+        last_error_code: str = "",
+        last_error_message: str = "",
+    ) -> bool:
+        """Complete one item only when the caller still owns its execution claim."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        cursor = self._execute_write(
+            """
+            UPDATE native_save_states
+            SET requested_action = ?, resolved_action = ?, resolved_target = ?,
+                status = ?, execution_id = '', last_error_code = ?,
+                last_error_message = ?,
+                synced_at = CASE WHEN ? IN ('synced', 'already_synced')
+                    THEN CURRENT_TIMESTAMP ELSE synced_at END
+            WHERE list_kind = ? AND item_key = ? AND task_id = ?
+              AND status = 'syncing' AND execution_id = ?
+            """,
+            (
+                requested_action,
+                resolved_action,
+                resolved_target,
+                status,
+                last_error_code,
+                last_error_message,
+                status,
+                normalized_kind,
+                item_key.strip(),
+                task_id.strip(),
+                execution_id,
+            ),
+        )
+        return int(cursor.rowcount or 0) > 0
+
+    def reconcile_stale_native_save_claims(
+        self,
+        task_id: str,
+        *,
+        stale_after_seconds: int = 300,
+    ) -> int:
+        """Turn abandoned syncing leases into explicit retryable failures."""
+        age = max(0, int(stale_after_seconds))
+        cursor = self._execute_write(
+            """
+            UPDATE native_save_states
+            SET status = 'failed', execution_id = '',
+                last_error_code = 'interrupted',
+                last_error_message = 'Native save was interrupted'
+            WHERE task_id = ? AND status = 'syncing'
+              AND last_attempt_at IS NOT NULL
+              AND last_attempt_at <= datetime('now', ?)
+            """,
+            (task_id.strip(), f"-{age} seconds"),
+        )
+        return int(cursor.rowcount or 0)
 
     def list_native_sync_eligible(
         self,
@@ -7948,6 +8152,7 @@ class Database:
                 n.resolved_target,
                 n.status,
                 n.task_id,
+                n.execution_id,
                 n.last_error_code,
                 n.last_error_message,
                 n.last_attempt_at,
