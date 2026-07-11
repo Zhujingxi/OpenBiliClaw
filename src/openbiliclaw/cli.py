@@ -9875,6 +9875,7 @@ def config_show() -> None:
             ),
         ),
         ("开机自启动", _format_autostart_config_status(cfg)),
+        ("收藏自动同步", "开启" if cfg.saved_sync.auto_sync_enabled else "关闭"),
         ("数据目录", str(cfg.data_path)),
     ]
     if diagnostics.config_path:

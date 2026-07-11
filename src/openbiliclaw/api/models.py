@@ -1290,6 +1290,14 @@ class AutostartConfigOut(BaseModel):
     manage_ollama: bool = True
 
 
+class SavedSyncConfigOut(BaseModel):
+    auto_sync_enabled: bool = False
+
+
+class SavedSyncConfigUpdateIn(BaseModel):
+    auto_sync_enabled: StrictBool | None = None
+
+
 class AutostartStatusOut(BaseModel):
     supported: bool
     enabled: bool
@@ -1326,6 +1334,7 @@ class ConfigResponse(BaseModel):
     scheduler: SchedulerConfigOut = Field(default_factory=SchedulerConfigOut)
     discovery: DiscoveryConfigOut = Field(default_factory=DiscoveryConfigOut)
     autostart: AutostartConfigOut = Field(default_factory=AutostartConfigOut)
+    saved_sync: SavedSyncConfigOut = Field(default_factory=SavedSyncConfigOut)
     storage: StorageConfigOut = Field(default_factory=StorageConfigOut)
     logging: LoggingConfigOut = Field(default_factory=LoggingConfigOut)
     issues: list[ConfigIssueOut] = Field(default_factory=list)
@@ -1343,6 +1352,7 @@ class ConfigUpdateIn(BaseModel):
     sources: dict[str, object] | None = None
     scheduler: dict[str, object] | None = None
     discovery: dict[str, object] | None = None
+    saved_sync: SavedSyncConfigUpdateIn | None = None
     storage: dict[str, object] | None = None
     logging: dict[str, object] | None = None
 

@@ -453,6 +453,31 @@ def test_config_show_displays_runtime_pause_fields(
     assert "开启（宽限 45s）" in result.stdout
 
 
+def test_config_show_displays_saved_auto_sync_status(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    cfg = config_module.Config()
+
+    class FakeRegistry:
+        default_provider = "openai"
+        available_providers = ["openai"]
+
+    monkeypatch.setattr(
+        config_module,
+        "load_config_with_diagnostics",
+        lambda: (cfg, config_module.ConfigDiagnostics()),
+        raising=False,
+    )
+    monkeypatch.setattr(cli_module, "_build_registry", lambda: FakeRegistry())
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["config-show"])
+
+    assert result.exit_code == 0
+    assert "收藏自动同步" in result.stdout
+    assert "关闭" in result.stdout
+
+
 def test_health_check_reports_provider_statuses(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner
 ) -> None:

@@ -665,6 +665,13 @@ class StorageConfig:
 
 
 @dataclass
+class SavedSyncConfig:
+    """External platform save synchronization."""
+
+    auto_sync_enabled: bool = False
+
+
+@dataclass
 class LoggingConfig:
     """Logging configuration."""
 
@@ -779,6 +786,7 @@ class Config:
     # knobs (P1). Distinct from `[llm.discovery]` (per-module provider override).
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
     autostart: AutostartConfig = field(default_factory=AutostartConfig)
+    saved_sync: SavedSyncConfig = field(default_factory=SavedSyncConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     # Top-level `[soul]` is distinct from `[llm.soul]` (per-module
@@ -935,6 +943,9 @@ def _build_config(raw: dict[str, Any]) -> Config:
     autostart_raw = raw.get("autostart", {})
     if not isinstance(autostart_raw, dict):
         autostart_raw = {}
+    saved_sync_raw = raw.get("saved_sync", {})
+    if not isinstance(saved_sync_raw, dict):
+        saved_sync_raw = {}
     store_raw = raw.get("storage", {})
     logging_raw = raw.get("logging", {})
 
@@ -1210,6 +1221,11 @@ def _build_config(raw: dict[str, Any]) -> Config:
         autostart=AutostartConfig(
             enabled=_coerce_bool(autostart_raw.get("enabled"), default=False),
             manage_ollama=_coerce_bool(autostart_raw.get("manage_ollama"), default=True),
+        ),
+        saved_sync=SavedSyncConfig(
+            auto_sync_enabled=_coerce_bool(
+                saved_sync_raw.get("auto_sync_enabled"), default=False
+            ),
         ),
         storage=StorageConfig(**store_raw),
         logging=LoggingConfig(**logging_raw),
@@ -2554,6 +2570,9 @@ def _render_config_toml(
                 on_disk_autostart,
                 autostart_authoritative=autostart_authoritative,
             ),
+            "",
+            "[saved_sync]",
+            f"auto_sync_enabled = {_toml_bool(config.saved_sync.auto_sync_enabled)}",
             "",
             "[storage]",
             f"db_path = {_toml_string(config.storage.db_path)}",

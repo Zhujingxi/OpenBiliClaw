@@ -1,5 +1,6 @@
 """Tests for configuration management."""
 
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -96,6 +97,24 @@ class TestConfigDefaults:
         assert config.api.auth.extension_access_enabled is False
         assert config.api.auth.extension_access_keys == []
         assert config.api.auth.extension_token_ttl_hours == 24
+
+    def test_saved_sync_defaults_off_and_round_trips(self, tmp_path: Path) -> None:
+        config = Config()
+        assert config.saved_sync.auto_sync_enabled is False
+
+        config.saved_sync.auto_sync_enabled = True
+        config_path = tmp_path / "config.toml"
+        save_config(config, config_path)
+
+        assert load_config(config_path).saved_sync.auto_sync_enabled is True
+
+    def test_example_config_disables_saved_auto_sync(self) -> None:
+        example_path = Path(__file__).parents[1] / "config.example.toml"
+
+        with example_path.open("rb") as handle:
+            example = tomllib.load(handle)
+
+        assert example["saved_sync"] == {"auto_sync_enabled": False}
 
     def test_config_defaults_pool_target_count_to_300(self) -> None:
         config = Config()

@@ -515,6 +515,10 @@ enabled = false
 # 已运行。仅管理本机 localhost:11434，远端 Ollama 不会被拉起。
 manage_ollama = true
 
+[saved_sync]
+# 同步外部平台收藏的总开关；默认关闭，需由用户明确开启。
+auto_sync_enabled = false
+
 [storage]
 # SQLite database path
 db_path = "data/openbiliclaw.db"

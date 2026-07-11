@@ -105,6 +105,7 @@ from openbiliclaw.api.models import (
     RedditCookieResponse,
     RedditSourceConfigOut,
     RuntimeStatusResponse,
+    SavedSyncConfigOut,
     SchedulerConfigOut,
     SourceCredentialItem,
     SourcesBrowserConfigOut,
@@ -9173,6 +9174,9 @@ def create_app(
                 enabled=cfg.autostart.enabled,
                 manage_ollama=cfg.autostart.manage_ollama,
             ),
+            saved_sync=SavedSyncConfigOut(
+                auto_sync_enabled=cfg.saved_sync.auto_sync_enabled,
+            ),
             storage=StorageConfigOut(db_path=cfg.storage.db_path),
             logging=LoggingConfigOut(
                 level=cfg.logging.level,
@@ -9982,6 +9986,12 @@ def create_app(
                     enabled, replace = _mode_to_flags(cast("str", raw_mode))
                     cfg.discovery.inspiration_search_enabled = enabled
                     cfg.discovery.inspiration_replace_merged_keywords = replace
+
+        # Apply saved-sync updates
+        if "saved_sync" in update:
+            saved_sync_data = update["saved_sync"]
+            if "auto_sync_enabled" in saved_sync_data:
+                cfg.saved_sync.auto_sync_enabled = saved_sync_data["auto_sync_enabled"]
 
         # Apply storage updates
         if "storage" in update:
