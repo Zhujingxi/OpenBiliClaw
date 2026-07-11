@@ -33,6 +33,25 @@ def test_normalize_published_time_rejects_oversized_integer_without_raising() ->
     )
 
 
+def test_normalize_published_time_rejects_non_finite_numbers() -> None:
+    for value in (float("nan"), float("inf"), float("-inf")):
+        assert normalize_published_time(value, label="保留标签", now=NOW) == PublishedTime(
+            "", "保留标签"
+        )
+
+
+def test_normalize_published_time_rejects_dates_before_unix_epoch() -> None:
+    assert normalize_published_time("1969-12-31T23:59:59Z", now=NOW) == PublishedTime()
+
+
+def test_normalize_published_time_accepts_only_through_366_day_future_boundary() -> None:
+    boundary = NOW + timedelta(days=366)
+    assert normalize_published_time(boundary, now=NOW).published_at == boundary.isoformat().replace(
+        "+00:00", "Z"
+    )
+    assert normalize_published_time(boundary + timedelta(seconds=1), now=NOW) == PublishedTime()
+
+
 def test_normalize_published_time_keeps_safe_relative_label_only() -> None:
     assert normalize_published_time(label="  3   小时前  ") == PublishedTime("", "3 小时前")
     assert normalize_published_label("x" * 80) == "x" * 64

@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from openbiliclaw.discovery.candidate_pool import discovered_content_to_candidate_write
+from openbiliclaw.discovery.engine import DiscoveredContent
 from openbiliclaw.storage.database import Database
 
 if TYPE_CHECKING:
@@ -192,24 +194,50 @@ def test_get_recommendations_rows_carry_card_metadata_columns(tmp_path: Path) ->
     assert row["published_label"] == "3 天前"
 
 
-def test_content_cache_empty_rediscovery_does_not_erase_publication_time(
+@pytest.mark.parametrize(
+    ("incoming_at", "incoming_label", "expected_at", "expected_label"),
+    [
+        ("", "更新后的相对时间", "2026-07-08T06:30:00Z", "更新后的相对时间"),
+        ("2026-07-09T06:30:00Z", "", "2026-07-09T06:30:00Z", "旧标签"),
+    ],
+)
+def test_content_cache_rediscovery_preserves_each_empty_publication_field_independently(
     tmp_path: Path,
+    incoming_at: str,
+    incoming_label: str,
+    expected_at: str,
+    expected_label: str,
 ) -> None:
     db = _db(tmp_path)
-    db.cache_content("BV1TIME", title="A", published_at="2026-07-08T06:30:00Z")
-    db.cache_content("BV1TIME", title="A", published_at="")
+    db.cache_content(
+        "BV1TIME",
+        title="A",
+        published_at="2026-07-08T06:30:00Z",
+        published_label="旧标签",
+    )
+    db.cache_content(
+        "BV1TIME",
+        title="A",
+        published_at=incoming_at,
+        published_label=incoming_label,
+    )
 
     row = db.conn.execute(
         "SELECT published_at, published_label FROM content_cache WHERE bvid='BV1TIME'"
     ).fetchone()
 
-    assert row["published_at"] == "2026-07-08T06:30:00Z"
+    assert row["published_at"] == expected_at
+    assert row["published_label"] == expected_label
 
 
 def test_legacy_content_tables_gain_publication_columns(tmp_path: Path) -> None:
     db_path = tmp_path / "init.db"
     db = Database(db_path)
     db.initialize()
+    db.cache_content("BV1LEGACY", title="legacy content")
+    candidate = DiscoveredContent(bvid="BV1LEGACY-CANDIDATE", title="legacy candidate")
+    candidate_write = discovered_content_to_candidate_write(candidate)
+    db.enqueue_discovery_candidates([candidate_write])
     for table_name in ("content_cache", "discovery_candidates"):
         existing = {
             str(row["name"])
@@ -226,8 +254,29 @@ def test_legacy_content_tables_gain_publication_columns(tmp_path: Path) -> None:
 
     for table_name in ("content_cache", "discovery_candidates"):
         columns = {
-            str(row["name"])
+            str(row["name"]): row
             for row in migrated.conn.execute(f"PRAGMA table_info({table_name})").fetchall()
         }
-        assert {"published_at", "published_label"} <= columns
+        for column_name in ("published_at", "published_label"):
+            assert columns[column_name]["notnull"] == 1
+            assert columns[column_name]["dflt_value"] == "''"
+    content = migrated.conn.execute(
+        "SELECT title, published_at, published_label FROM content_cache WHERE bvid = ?",
+        ("BV1LEGACY",),
+    ).fetchone()
+    assert dict(content) == {
+        "title": "legacy content",
+        "published_at": "",
+        "published_label": "",
+    }
+    candidate_row = migrated.conn.execute(
+        "SELECT title, published_at, published_label "
+        "FROM discovery_candidates WHERE candidate_key = ?",
+        (candidate_write.candidate_key,),
+    ).fetchone()
+    assert dict(candidate_row) == {
+        "title": "legacy candidate",
+        "published_at": "",
+        "published_label": "",
+    }
     migrated.close()
