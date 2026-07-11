@@ -108,6 +108,23 @@ def candidate_amplification_keys(item: DiscoveredContent) -> set[str]:
     return {key for key in keys if key}
 
 
+def candidate_feedback_topics(item: DiscoveredContent) -> frozenset[str]:
+    """Return normalized fine/coarse topic aliases used by feedback scoring."""
+    values = (
+        normalize_amplification_key(str(getattr(item, "topic_key", "") or "")),
+        normalize_amplification_key(str(getattr(item, "topic_group", "") or "")),
+    )
+    return frozenset(value for value in values if value)
+
+
+def _feedback_row_topics(row: dict[str, object]) -> frozenset[str]:
+    values = (
+        normalize_amplification_key(str(row.get("topic_key", "") or "")),
+        normalize_amplification_key(str(row.get("topic_group", "") or "")),
+    )
+    return frozenset(value for value in values if value)
+
+
 # ---------------------------------------------------------------------------
 # PoolCurator
 # ---------------------------------------------------------------------------
@@ -175,20 +192,17 @@ class PoolCurator:
         disliked_franchises: set[str] = set()
         for row in feedback_rows:
             ftype = str(row.get("feedback_type", "")).strip()
+            topics = _feedback_row_topics(row)
             if ftype == "dislike":
                 up_mid = row.get("up_mid")
                 if isinstance(up_mid, int) and up_mid > 0:
                     disliked_ups.add(up_mid)
-                topic = str(row.get("topic_key", "")).strip()
-                if topic:
-                    disliked_topics.add(topic)
+                disliked_topics.update(topics)
                 franchise = str(row.get("franchise_key", "")).strip()
                 if franchise:
                     disliked_franchises.add(franchise)
             elif ftype in ("like", "save"):
-                topic = str(row.get("topic_key", "")).strip()
-                if topic:
-                    liked_topics.add(topic)
+                liked_topics.update(topics)
 
         normalized_amplification_keys = frozenset(
             key
@@ -389,10 +403,10 @@ class PoolCurator:
         adj = 0.0
         if item.up_mid and item.up_mid in feedback.disliked_up_mids:
             adj -= _FEEDBACK_DISLIKE_UP_PENALTY
-        topic = (item.topic_group or item.topic_key).strip()
-        if topic and topic in feedback.disliked_topic_keys:
+        candidate_topics = candidate_feedback_topics(item)
+        if candidate_topics & feedback.disliked_topic_keys:
             adj -= _FEEDBACK_DISLIKE_TOPIC_PENALTY
-        if topic and topic in feedback.liked_topic_keys:
+        if candidate_topics & feedback.liked_topic_keys:
             adj += _FEEDBACK_LIKE_TOPIC_BONUS
         item_franchise = (getattr(item, "franchise_key", "") or "").strip()
         if item_franchise and item_franchise in feedback.disliked_franchises:
@@ -479,26 +493,41 @@ class PoolCurator:
             score = base + fresh - fatigue - monotony + bonus
 
             # Embedding-based feedback adjustment
-            if embedding_service is not None and topic_label:
-                topic_vec = await embedding_service.embed(topic_label)
+            candidate_topics = candidate_feedback_topics(item)
+            candidate_topic_vecs = []
+            if embedding_service is not None:
+                for candidate_topic in candidate_topics:
+                    vector = await embedding_service.embed(candidate_topic)
+                    if vector:
+                        candidate_topic_vecs.append(vector)
+
+            if embedding_service is not None:
                 adj = 0.0
                 if item.up_mid and item.up_mid in context.feedback.disliked_up_mids:
                     adj -= _FEEDBACK_DISLIKE_UP_PENALTY
-                if topic_vec:
-                    for dv in _disliked_vecs.values():
-                        if (
-                            cosine_similarity(topic_vec, dv)
-                            >= embedding_service.similarity_threshold
-                        ):
-                            adj -= _FEEDBACK_DISLIKE_TOPIC_PENALTY
-                            break
-                    for lv in _liked_vecs.values():
-                        if (
-                            cosine_similarity(topic_vec, lv)
-                            >= embedding_service.similarity_threshold
-                        ):
-                            adj += _FEEDBACK_LIKE_TOPIC_BONUS
-                            break
+                disliked_topic_match = bool(
+                    candidate_topics & context.feedback.disliked_topic_keys
+                ) or any(
+                    cosine_similarity(topic_vec, disliked_vec)
+                    >= embedding_service.similarity_threshold
+                    for topic_vec in candidate_topic_vecs
+                    for disliked_vec in _disliked_vecs.values()
+                )
+                if disliked_topic_match:
+                    adj -= _FEEDBACK_DISLIKE_TOPIC_PENALTY
+                liked_topic_match = bool(
+                    candidate_topics & context.feedback.liked_topic_keys
+                ) or any(
+                    cosine_similarity(topic_vec, liked_vec)
+                    >= embedding_service.similarity_threshold
+                    for topic_vec in candidate_topic_vecs
+                    for liked_vec in _liked_vecs.values()
+                )
+                if liked_topic_match:
+                    adj += _FEEDBACK_LIKE_TOPIC_BONUS
+                item_franchise = (getattr(item, "franchise_key", "") or "").strip()
+                if item_franchise and item_franchise in context.feedback.disliked_franchises:
+                    adj -= _FEEDBACK_DISLIKE_FRANCHISE_PENALTY
                 score += adj
             else:
                 score += self._feedback_adjustment(item, context.feedback)

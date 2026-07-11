@@ -3419,3 +3419,23 @@ class TestDatabaseMaintenance:
         row = repaired.execute("SELECT title FROM events").fetchone()
         repaired.close()
         assert row == ("恢复成功",)
+
+
+def test_feedback_signals_return_topic_key_and_group() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        db.cache_content(
+            "BV_TOPIC",
+            title="动画叙事拆解",
+            source="search",
+            topic_key="动漫解说",
+            topic_group="动漫",
+        )
+        recommendation_id = db.insert_recommendation("BV_TOPIC", confidence=0.9)
+        db.update_recommendation_feedback(recommendation_id, feedback_type="dislike")
+
+        rows = db.get_feedback_signals()
+
+        assert rows[0]["topic_key"] == "动漫解说"
+        assert rows[0]["topic_group"] == "动漫"

@@ -52,6 +52,7 @@
 | SoulEngine.update_from_feedback() | ✅ | feedback 事件落库，并校准匹配的洞察假设——确认→`validated=True`+置信度抬到 ≥0.75；推翻→`validated=False`+压到 ≤0.35（软作废：不删除、靠 delight 置信度加权降权）。**已接线**到 `POST /api/insights/feedback`（插件 + web/桌面三端洞察卡片「准/不准」按钮驱动），返回 `{matched, validated, confidence}`；此前实现但无生产调用方。命中后经 `_sync_insight_to_soul_snapshot` **同步把校准写回 soul 层 `active_insights` 快照**（`get_profile` / profile-summary / delight 读的是该快照，不是 insight 层），否则校准要等下一次 12h 认知 sync 才对 UI / 推荐生效 |
 | SoulEngine.process_feedback_batch_if_needed() | ✅ | 达到反馈阈值后重分析偏好，并在变化明显时重建画像；批处理入口带 single-flight 锁，已有任务在跑时直接返回 `feedback_batch_in_progress`，避免多个 `/api/feedback` 后台任务用同一旧游标重复分析未处理反馈；传给 LLM 前会瘦身 feedback 事件，只保留标题、上下文和偏好相关 metadata；若本批新增 `disliked_topics`，会按新旧差集调度 `purge_pool_for_new_dislikes` 后台清理 fresh 候选池，保持普通推荐卡片 `dislike` 学到长期避雷项后的清池行为与手动编辑 / 避雷探针一致 |
 | SoulEngine.record_immediate_feedback_cognition() | ✅ | 单条 `dislike/comment` 可即时写入结构化 cognition card，供插件画像页展示；评论类更新会带上对应内容标题，并以中性直接反馈记录，不预设正负向 |
+| 卡片反馈纠偏边界 | ✅ | 卡片 like/dislike 是可撤销的软信号并由后台批处理学习；需要确定性修正时，用户仍可主动前往原有画像页写入持久 override，或在原有对话页用自由文本说明偏好；推荐区不新增纠偏引导入口。单次 dislike 不会直接永久屏蔽主题 |
 | DialogueInsightAnalyzer | ✅ | 从聊天轮次提取 `goal/value/interest/dislike/state` 候选信号 |
 | SoulEngine.learn_from_dialogue() | ✅ | 聊天落 `dialogue` 事件、累计 insight candidate；单条 `interest/value/goal/dislike` 聊天信号到中高置信度时会先写入轻量 cognition update，高置信度或重复出现达阈值后再驱动偏好/画像更新 |
 | 兴趣探针聊天情绪判断 | ✅ | `/api/interest-probes/respond` 的 chat 分支会先让对话引擎回复，再用非 JSON 的单词分类 LLM 调用判断 `strong_positive / weak_positive / neutral_deferred / neutral / negative`（系统提示是 `llm/prompts.py:build_probe_sentiment_prompt` 的静态常量，走 prompt 缓存），失败时回退关键词；强正向直接确认，弱正向进入短期探索 buffer，`neutral_deferred`（用户主动说「先放着」「稍后再看」）走 defer 搁置状态机，`neutral`（态度模糊，如「再看看」）不改状态，避免一句“有点意思”立刻写成长期兴趣 |
@@ -449,6 +450,10 @@ active 池会做两层多样性保护：词面 / specifics 的 novelty guard 阻
 ### 3. 推荐反馈路径：分成“即时记住”和“批量学习”两档
 
 推荐反馈是当前画像更新里最细的一条链。它不是每点一次 `like/dislike` 都立刻重建画像，而是分成两层处理。
+
+卡片 like/dislike 属于可撤销的软信号，并由后台批处理学习。单次 dislike 不会直接把某个
+主题永久写成硬屏蔽；需要确定性修正时，用户仍可主动前往原有画像页写入持久 override，
+或在原有对话页用自由文本说明偏好。本 Issue 不在推荐区新增纠偏引导入口。
 
 #### 第一层：即时认知更新，不重建画像
 

@@ -4431,7 +4431,7 @@ class Database:
         cursor = self.conn.execute(
             """
             SELECT r.feedback_type, c.up_mid, c.up_name, c.topic_key,
-                   c.source, c.title, c.franchise_key
+                   c.topic_group, c.source, c.title, c.franchise_key
             FROM recommendations AS r
             JOIN content_cache AS c ON c.bvid = COALESCE(
                 (SELECT bvid FROM content_cache WHERE bvid = r.bvid),

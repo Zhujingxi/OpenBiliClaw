@@ -19,6 +19,8 @@ import {
   getContextPatternRows,
   getMbtiDisplayState,
   getProfileStyleDisplay,
+  getAvoidanceProbeMessageActions,
+  getProbeMessageActions,
   formatRelativeTimestamp,
 } from "../view-models.js";
 import { state, patchState } from "../state.js";
@@ -324,9 +326,25 @@ function renderExplorationBar(value) {
 }
 
 // ── Speculative Interests ────────────────────────────────────
+function renderProbeActionMarkup(actions, extraClass = "") {
+  return actions
+    .filter((action) => action.action !== "chat")
+    .map((action) => {
+      const classes = [
+        "spec-btn",
+        extraClass,
+        action.primary ? "confirm" : action.action,
+      ].filter(Boolean).join(" ");
+      return `
+        <button type="button" class="${classes}" data-action="${action.action}">${esc(action.label)}</button>`;
+    })
+    .join("");
+}
+
 function renderSpecInterests(interests) {
   return interests.map((si) => {
     const canAct = si.status === "active" || si.status === "pending";
+    const actionMarkup = renderProbeActionMarkup(getProbeMessageActions());
     const progressPct = si.confirmation_threshold > 0
       ? Math.round((si.confirmation_count / si.confirmation_threshold) * 100)
       : 0;
@@ -341,21 +359,21 @@ function renderSpecInterests(interests) {
         </div>
         ${canAct ? `
         <div class="spec-interest-actions">
-          <button class="spec-btn confirm" data-action="confirm">\u2713</button>
-          <button class="spec-btn reject" data-action="reject">\u2717</button>
+          ${actionMarkup}
         </div>` : ""}
       </div>`;
   }).join("");
 }
 
 function bindSpecInterestActions() {
-  for (const btn of $root.querySelectorAll(".spec-interest .spec-btn")) {
+  for (const btn of $root.querySelectorAll(".spec-interest:not(.spec-avoidance) .spec-btn")) {
     btn.addEventListener("click", async (e) => {
       const row = e.target.closest(".spec-interest");
       const domain = row?.dataset.domain;
       const action = e.target.dataset.action;
       if (!domain || !action) return;
-      btn.disabled = true;
+      const buttons = [...row.querySelectorAll(".spec-btn")];
+      for (const actionButton of buttons) actionButton.disabled = true;
       rememberHandledProbe(domain, "interest.probe");
       try {
         await respondToProbe(domain, action, { surface: "profile" });
@@ -371,7 +389,7 @@ function bindSpecInterestActions() {
         render();
       } catch {
         forgetHandledProbe(domain, "interest.probe");
-        btn.disabled = false;
+        for (const actionButton of buttons) actionButton.disabled = false;
       }
     });
   }
@@ -414,6 +432,10 @@ function bindInsightActions() {
 function renderSpecAvoidances(avoidances) {
   return avoidances.map((item) => {
     const canAct = item.status === "active" || item.status === "pending";
+    const actionMarkup = renderProbeActionMarkup(
+      getAvoidanceProbeMessageActions(),
+      "spec-avoidance-btn",
+    );
     const progressPct = item.confirmation_threshold > 0
       ? Math.round((item.confirmation_count / item.confirmation_threshold) * 100)
       : 0;
@@ -429,8 +451,7 @@ function renderSpecAvoidances(avoidances) {
         </div>
         ${canAct ? `
         <div class="spec-interest-actions">
-          <button class="spec-btn spec-avoidance-btn confirm" data-action="confirm">\u2713</button>
-          <button class="spec-btn spec-avoidance-btn reject" data-action="reject">\u2717</button>
+          ${actionMarkup}
         </div>` : ""}
       </div>`;
   }).join("");
@@ -443,7 +464,8 @@ function bindSpecAvoidanceActions() {
       const domain = row?.dataset.domain;
       const action = e.target.dataset.action;
       if (!domain || !action) return;
-      btn.disabled = true;
+      const buttons = [...row.querySelectorAll(".spec-btn")];
+      for (const actionButton of buttons) actionButton.disabled = true;
       rememberHandledProbe(domain, "avoidance.probe");
       try {
         await respondToAvoidanceProbe(domain, action);
@@ -459,7 +481,7 @@ function bindSpecAvoidanceActions() {
         render();
       } catch {
         forgetHandledProbe(domain, "avoidance.probe");
-        btn.disabled = false;
+        for (const actionButton of buttons) actionButton.disabled = false;
       }
     });
   }

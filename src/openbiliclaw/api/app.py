@@ -6306,25 +6306,25 @@ def create_app(
         from openbiliclaw.sources.event_format import (
             SOURCE_BILIBILI,
             build_event,
+            format_event_context,
         )
 
         rec_title = str(recommendation.get("title", ""))
-        # Tailor a natural-language context per feedback type — the
-        # "feedback" verb in the generic table doesn't capture the
-        # like/dislike/comment distinction the LLM cares about.
-        feedback_label = {
-            "like": "点赞了",
-            "dislike": "踩了",
-            "comment": "评论了",
-            "dismiss": "忽略了",
-        }.get(feedback_type, "反馈了")
-        feedback_context = f"在 B 站{feedback_label}《{rec_title}》"
+        source_platform = (
+            str(recommendation.get("source_platform") or SOURCE_BILIBILI).strip().lower()
+            or SOURCE_BILIBILI
+        )
+        feedback_context = format_event_context(
+            event_type=feedback_type,
+            source_platform=source_platform,
+            title=rec_title,
+        )
         if note:
             feedback_context = f"{feedback_context},备注:{note}"
         await ctx.memory_manager.propagate_event(
             build_event(
                 event_type="feedback",
-                source_platform=SOURCE_BILIBILI,
+                source_platform=source_platform,
                 title=rec_title,
                 context=feedback_context,
                 metadata={

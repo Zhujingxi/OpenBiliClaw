@@ -80,3 +80,23 @@ test("edit panel renders scalar (slider) fields committing a 0..1 float", () => 
   // slider commits as a 0..1 float on explicit save (not per-drag)
   assert.match(js, /op: "set", value: Number\(slider\.value\) \/ 100/);
 });
+
+test("profile probe rows expose defer with semantic copy", () => {
+  const js = readFileSync(resolve("popup", "popup.js"), "utf8");
+  assert.match(js, /probeActionDescriptors/);
+  assert.match(js, /responseType, row/);
+  assert.match(js, /"defer"/);
+  assert.match(js, /暂时搁置/);
+  assert.match(js, /搁置避雷/);
+});
+
+test("standalone profile probe card uses all canonical descriptors", () => {
+  const js = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const renderProbeCard = js.slice(
+    js.indexOf("function renderProbeCard"),
+    js.indexOf("async function handleProbeResponse"),
+  );
+  assert.match(renderProbeCard, /probeActionDescriptors\("interest\.probe"\)/);
+  assert.match(renderProbeCard, /handleProbeResponse\(descriptor\.action\)/);
+  assert.match(renderProbeCard, /button\.type = "button"/);
+});

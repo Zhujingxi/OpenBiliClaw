@@ -762,10 +762,10 @@
     .spec-specific-count { display: inline-grid; min-width: 16px; height: 16px; place-items: center; padding: 0 4px; border-radius: var(--radius-pill); background: var(--surface-warm); color: var(--fg-2); }
     .spec-help { margin: 0; color: var(--meta); font-size: var(--text-xs); }
     .spec-actions { display: flex; gap: var(--space-2); margin-top: var(--space-1); }
-    .spec-actions .probe-btn { min-height: 30px; padding: 5px 11px; border: 1px solid var(--border-soft); border-radius: var(--radius-pill); background: var(--bg); color: var(--fg-2); font-size: var(--text-xs); font-weight: 700; }
-    .spec-actions .probe-btn.is-confirm { background: var(--accent); border-color: var(--accent); color: var(--accent-on); }
-    .spec-actions .probe-btn.is-neutral { background: var(--surface-warm); border-color: var(--border-soft); color: var(--meta); }
-    .spec-actions .probe-btn.is-neutral:hover { background: var(--surface); color: var(--muted); }
+    .spec-actions .probe-btn, .message-card-actions .probe-btn { min-height: 30px; padding: 5px 11px; border: 1px solid var(--border-soft); border-radius: var(--radius-pill); background: var(--bg); color: var(--fg-2); font-size: var(--text-xs); font-weight: 700; }
+    .spec-actions .probe-btn.is-confirm, .message-card-actions .probe-btn.is-confirm { background: var(--accent); border-color: var(--accent); color: var(--accent-on); }
+    .spec-actions .probe-btn.is-neutral, .message-card-actions .probe-btn.is-neutral { background: var(--surface-warm); border-color: var(--border-soft); color: var(--meta); }
+    .spec-actions .probe-btn.is-neutral:hover, .message-card-actions .probe-btn.is-neutral:hover { background: var(--surface); color: var(--muted); }
     .spec-result { margin: 0; color: var(--accent); font-size: var(--text-sm); }
     .profile-meter { display: grid; gap: var(--space-1); }
     .profile-style-bars > .profile-meter { padding-inline: var(--space-3); }

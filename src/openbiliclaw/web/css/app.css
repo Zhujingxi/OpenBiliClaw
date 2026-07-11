@@ -1169,7 +1169,8 @@ body {
 /* ── Speculative Interests ────────────────────────────────── */
 .spec-interest {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   gap: 8px;
   padding: 10px 0;
   border-bottom: 1px solid var(--line);
@@ -1194,6 +1195,8 @@ body {
 
 .spec-interest-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 6px;
 }
 
@@ -1203,6 +1206,17 @@ body {
   display: flex; align-items: center; justify-content: center;
   cursor: pointer;
   font-size: 16px;
+}
+
+.spec-interest-actions .spec-btn {
+  width: auto;
+  min-height: 32px;
+  height: auto;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .spec-btn.confirm {
@@ -1215,7 +1229,13 @@ body {
   color: var(--danger);
 }
 
+.spec-btn.defer {
+  background: var(--warning-soft);
+  color: var(--text-secondary);
+}
+
 .spec-btn:active { opacity: 0.6; }
+.spec-btn:disabled { opacity: 0.45; cursor: default; }
 
 /* ── Cognition History ────────────────────────────────────── */
 .cognition-card {

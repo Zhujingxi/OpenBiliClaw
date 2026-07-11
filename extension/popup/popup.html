@@ -2203,6 +2203,7 @@
     }
     .speculative-item .spec-actions {
       display: flex;
+      flex-wrap: wrap;
       gap: 6px;
       margin-top: 4px;
     }
@@ -2283,6 +2284,7 @@
 
     .probe-actions {
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
     }
 
@@ -2297,6 +2299,11 @@
       transition: all 0.15s ease;
     }
 
+    .probe-btn:focus-visible {
+      outline: none;
+      box-shadow: var(--focus-ring);
+    }
+
     .probe-btn.is-confirm {
       background: rgba(63, 185, 80, 0.15);
       color: #1a7f37;
@@ -2304,6 +2311,15 @@
     }
     .probe-btn.is-confirm:hover {
       background: rgba(63, 185, 80, 0.25);
+    }
+
+    .probe-btn.is-neutral {
+      background: var(--warning-soft);
+      color: #9a6420;
+      border-color: rgba(235, 190, 140, 0.45);
+    }
+    .probe-btn.is-neutral:hover {
+      background: rgba(255, 189, 110, 0.3);
     }
 
     .probe-btn.is-reject {
@@ -4002,6 +4018,7 @@
 
     .message-actions {
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
     }
 
