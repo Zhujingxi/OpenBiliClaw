@@ -7721,7 +7721,7 @@ def create_app(
             except Exception:  # pragma: no cover - defensive
                 xhs_stored_logged_in, xhs_login_at = False, ""
         xhs_login_fresh = False
-        if xhs_stored_logged_in and xhs_login_at:
+        if xhs_login_at:
             try:
                 from datetime import UTC, datetime, timedelta
 
@@ -7735,13 +7735,25 @@ def create_app(
                 )
             except Exception:  # pragma: no cover - defensive
                 xhs_login_fresh = False
-        if xhs_stored_logged_in and xhs_login_fresh:
+        if not xhs_login_at:
+            xiaohongshu = SourceStatusItem(
+                enabled=xhs_enabled,
+                state="unverified",
+                detail="尚未收到小红书浏览器登录态；插件连接后会在本地同步。",
+            )
+        elif xhs_stored_logged_in and xhs_login_fresh:
             token_hint = f"内容令牌 {xhs_tokens} 条。" if xhs_tokens else ""
             xiaohongshu = SourceStatusItem(
                 enabled=xhs_enabled,
                 state="ready",
                 detail=f"已登录小红书。{token_hint}",
                 logged_in=True,
+            )
+        elif xhs_stored_logged_in:
+            xiaohongshu = SourceStatusItem(
+                enabled=xhs_enabled,
+                state="stale",
+                detail="小红书登录态已过期，请连接插件刷新本地状态。",
             )
         else:
             xiaohongshu = SourceStatusItem(
@@ -7764,7 +7776,10 @@ def create_app(
             dy_cookie = ""
         if dy_cookie.strip():
             douyin = SourceStatusItem(
-                enabled=dy_enabled, state="ready", detail="Cookie 就绪。", logged_in=True
+                enabled=dy_enabled,
+                state="unverified",
+                detail="Cookie 已同步，需在实际任务中验证。",
+                logged_in=False,
             )
         else:
             douyin = SourceStatusItem(
@@ -7832,7 +7847,7 @@ def create_app(
             except Exception:  # pragma: no cover - defensive
                 zhihu_stored_logged_in, zhihu_login_at = False, ""
         zhihu_login_fresh = False
-        if zhihu_stored_logged_in and zhihu_login_at:
+        if zhihu_login_at:
             try:
                 from datetime import UTC, datetime, timedelta
 
@@ -7846,13 +7861,28 @@ def create_app(
                 ) <= timedelta(hours=_zhihu_login_fresh_hours)
             except Exception:  # pragma: no cover - defensive
                 zhihu_login_fresh = False
-        if zhihu_stored_logged_in and zhihu_login_fresh:
-            zhihu = SourceStatusItem(
-                enabled=zh_enabled,
-                state="ready",
-                detail="已登录知乎。",
-                logged_in=True,
-            )
+        if zhihu_login_at:
+            if zhihu_stored_logged_in and zhihu_login_fresh:
+                zhihu = SourceStatusItem(
+                    enabled=zh_enabled,
+                    state="ready",
+                    detail="已登录知乎。",
+                    logged_in=True,
+                )
+            elif zhihu_stored_logged_in:
+                zhihu = SourceStatusItem(
+                    enabled=zh_enabled,
+                    state="stale",
+                    detail="知乎登录态已过期，请连接插件刷新本地状态。",
+                    logged_in=False,
+                )
+            else:
+                zhihu = SourceStatusItem(
+                    enabled=zh_enabled,
+                    state="missing",
+                    detail="浏览器最近同步的状态为未登录知乎。",
+                    logged_in=False,
+                )
         elif hasattr(ctx.database, "conn"):
             try:
                 row = ctx.database.conn.execute(
@@ -7996,11 +8026,11 @@ def create_app(
                                     ),
                                     logged_in=False,
                                 )
-        else:
+        elif rd_backend == "rdt":
             try:
-                from openbiliclaw.sources.reddit_tasks import probe_reddit_command_backend
+                from openbiliclaw.sources.reddit_tasks import local_reddit_credential_status
 
-                rd_status = probe_reddit_command_backend(rd_backend)
+                rd_status = local_reddit_credential_status()
                 reddit = SourceStatusItem(
                     enabled=rd_enabled,
                     state=rd_status.state,
@@ -8014,6 +8044,15 @@ def create_app(
                     detail="Reddit 命令后端状态不可用，请检查 opencli / rdt 安装。",
                     logged_in=False,
                 )
+        else:
+            reddit = SourceStatusItem(
+                enabled=rd_enabled,
+                state="unverified",
+                detail=(
+                    f"Reddit {rd_backend} 后端已配置；状态页不执行命令探测，请通过显式任务验证。"
+                ),
+                logged_in=False,
+            )
 
         return SourcesStatusResponse(
             bilibili=bilibili,
