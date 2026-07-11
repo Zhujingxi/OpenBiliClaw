@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -95,33 +96,53 @@ async def test_expired_auth_maps_to_login_required(action: str) -> None:
     assert "private" not in result.error_message
 
 
-@pytest.mark.parametrize(
-    ("action", "code"),
-    [("watch_later", 90003), ("favorite", 11201)],
-)
-async def test_duplicate_application_codes_map_to_already_synced(
-    action: str,
-    code: int,
-) -> None:
+async def test_generic_api_minus_101_defensively_maps_to_login_required() -> None:
     client = _client()
-    if action == "favorite":
-        client.add_video_to_favorite.side_effect = BilibiliAPIError("private response", code=code)
-    else:
-        client.add_video_to_watch_later.side_effect = BilibiliAPIError(
-            "private response", code=code
-        )
+    client.add_video_to_watch_later.side_effect = BilibiliAPIError(
+        "Cookie=secret; private response", code=-101
+    )
 
     result = await BilibiliNativeSaveAdapter(client).save(
         SavedItemInput("bilibili", "BV1"),
-        _route(action),
+        _route("watch_later"),
+    )
+
+    assert result.status == "login_required"
+    assert result.error_code == "bilibili_-101"
+    assert result.error_message == "Bilibili login required"
+
+
+async def test_favorite_duplicate_code_maps_to_already_synced() -> None:
+    client = _client()
+    client.add_video_to_favorite.side_effect = BilibiliAPIError("private response", code=11201)
+
+    result = await BilibiliNativeSaveAdapter(client).save(
+        SavedItemInput("bilibili", "BV1"),
+        _route("favorite"),
     )
 
     assert result.status == "already_synced"
-    assert result.error_code == f"bilibili_{code}"
+    assert result.error_code == "bilibili_11201"
     assert "private" not in result.error_message
 
 
-@pytest.mark.parametrize("code", [-352, -412, -509])
+async def test_watch_later_deleted_video_code_maps_to_sanitized_failure() -> None:
+    client = _client()
+    client.add_video_to_watch_later.side_effect = BilibiliAPIError(
+        "Cookie=secret; private deleted-video response", code=90003
+    )
+
+    result = await BilibiliNativeSaveAdapter(client).save(
+        SavedItemInput("bilibili", "BV1"),
+        _route("watch_later"),
+    )
+
+    assert result.status == "failed"
+    assert result.error_code == "bilibili_video_unavailable"
+    assert result.error_message == "Bilibili video is unavailable for watch later"
+
+
+@pytest.mark.parametrize("code", [-352, -412, -429, -509])
 async def test_rate_control_codes_map_to_rate_limited(code: int) -> None:
     client = _client()
     client.add_video_to_watch_later.side_effect = BilibiliAPIError("private response", code=code)
@@ -167,3 +188,14 @@ async def test_unexpected_client_failure_is_sanitized() -> None:
     assert result.status == "failed"
     assert result.error_code == "bilibili_native_save_failed"
     assert result.error_message == "Bilibili native save failed"
+
+
+async def test_adapter_propagates_cancellation() -> None:
+    client = _client()
+    client.add_video_to_watch_later.side_effect = asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await BilibiliNativeSaveAdapter(client).save(
+            SavedItemInput("bilibili", "BV1"),
+            _route("watch_later"),
+        )

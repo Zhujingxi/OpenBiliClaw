@@ -35,7 +35,7 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 - `NativeSaveRouter` 根据 adapter capability 确定 favorite / watch-later 路由；watch-later 仅在平台不支持原生动作且支持 favorite 时回退
 - `SavedSyncService` 在任何平台 I/O 前提交本地 membership，再通过持久化 task ID 执行逐项同步；自动 / 手动触发共用同一路径
 - 同平台逐项串行、不同平台组可并行；未注册能力写 `unsupported`，adapter 异常写安全的 `failed`，均不回滚本地保存或自动重试
-- `BilibiliNativeSaveAdapter` 是首个生产 adapter：favorite 精确复用/创建 `OpenBiliClaw`，watch-later 写 B 站稍后再看；`BilibiliAPIClient` 在任何请求前校验 `SESSDATA + bili_jct`，错误只携带安全数值 code
+- `BilibiliNativeSaveAdapter` 是首个生产 adapter：favorite 精确复用/创建 `OpenBiliClaw`（同 client/title 实例锁内重查，避免并发重复创建），watch-later 写 B 站稍后再看；BV → aid 先走 application-aware GET 并要求非 bool 正整数，`BilibiliAPIClient` 在任何请求前校验 `SESSDATA + bili_jct`；错误按 action/code 归一化且只携带安全数值或固定错误码
 - API / runtime / 四端 UI wiring 留给后续任务，因此当前 UI 尚不会调用该账号写入能力
 
 ### User Soul Engine (`soul/`)

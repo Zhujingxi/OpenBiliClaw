@@ -232,6 +232,7 @@ class BilibiliAPIClient:
         self._last_request_at = 0.0
         self._cached_wbi_keys: tuple[str, str] | None = None
         self._wbi_keys_fetched_at: float = 0.0
+        self._favorite_folder_locks: dict[str, asyncio.Lock] = {}
         self._client = httpx.AsyncClient(
             headers={
                 "User-Agent": (
@@ -356,16 +357,16 @@ class BilibiliAPIClient:
 
         payload = _json_object(resp.json())
         code = int(payload.get("code", 0))
+        if code == -101:
+            detail = (
+                f"Bilibili session expired on {path} (-101). "
+                "Please re-authenticate in the browser or keep the extension "
+                "online to sync a fresh Cookie."
+            )
+            logger.warning("%s", detail)
+            raise BilibiliAuthExpiredError(detail, code=code)
         if code != 0:
             message = str(payload.get("message", "Bilibili API request failed"))
-            if path == "/x/web-interface/nav" and code == -101:
-                detail = (
-                    f"Bilibili session expired on {path} (-101): {message}. "
-                    "Please re-authenticate in the browser or keep the extension "
-                    "online to sync a fresh Cookie."
-                )
-                logger.warning("%s", detail)
-                raise BilibiliAuthExpiredError(detail, code=code)
             raise BilibiliAPIError(message, code=code)
         return _json_object(payload.get("data", {}))
 
@@ -392,6 +393,15 @@ class BilibiliAPIClient:
         try:
             resp = await self._client.post(f"{self._BASE_URL}{path}", data=data)
             resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            if status_code in {412, 429}:
+                code = -status_code
+                raise BilibiliAPIError(
+                    f"Bilibili API POST rate limited on {path} (code {code})",
+                    code=code,
+                ) from exc
+            raise BilibiliAPIError(f"Bilibili API POST failed on {path}") from exc
         except httpx.HTTPError as exc:
             raise BilibiliAPIError(f"Bilibili API POST failed on {path}") from exc
 
@@ -764,40 +774,42 @@ class BilibiliAPIClient:
     async def ensure_favorite_folder(self, title: str) -> FavoriteFolder:
         """Return an exact-title favorite folder, creating it when absent."""
         csrf = self._csrf_token()
-        for folder in await self.get_favorite_folders():
-            if folder.title == title:
-                if folder.media_id <= 0:
-                    raise BilibiliAPIError("Bilibili returned an invalid favorite folder id")
-                return folder
+        lock = self._favorite_folder_locks.setdefault(title, asyncio.Lock())
+        async with lock:
+            for folder in await self.get_favorite_folders():
+                if folder.title == title:
+                    if folder.media_id <= 0:
+                        raise BilibiliAPIError("Bilibili returned an invalid favorite folder id")
+                    return folder
 
-        data = await self._post_json(
-            "/x/v3/fav/folder/add",
-            data={
-                "title": title,
-                "intro": "",
-                "privacy": 0,
-                "csrf": csrf,
-            },
-        )
-        raw_media_id = data.get("id")
-        try:
-            if isinstance(raw_media_id, bool) or not isinstance(raw_media_id, (int, str)):
-                raise ValueError
-            media_id = int(raw_media_id)
-        except (TypeError, ValueError) as exc:
-            raise BilibiliAPIError("Bilibili returned an invalid favorite folder id") from exc
-        if media_id <= 0:
-            raise BilibiliAPIError("Bilibili returned an invalid favorite folder id")
-        return FavoriteFolder(media_id=media_id, title=title)
+            data = await self._post_json(
+                "/x/v3/fav/folder/add",
+                data={
+                    "title": title,
+                    "intro": "",
+                    "privacy": 0,
+                    "csrf": csrf,
+                },
+            )
+            raw_media_id = data.get("id")
+            try:
+                if isinstance(raw_media_id, bool) or not isinstance(raw_media_id, (int, str)):
+                    raise ValueError
+                media_id = int(raw_media_id)
+            except (TypeError, ValueError) as exc:
+                raise BilibiliAPIError("Bilibili returned an invalid favorite folder id") from exc
+            if media_id <= 0:
+                raise BilibiliAPIError("Bilibili returned an invalid favorite folder id")
+            return FavoriteFolder(media_id=media_id, title=title)
 
     async def add_video_to_favorite(self, bvid: str, media_id: int) -> None:
         """Add a Bilibili video to an existing favorite folder."""
         csrf = self._csrf_token()
-        info = await self.get_video_info(bvid)
+        aid = await self._resolve_aid(bvid)
         await self._post_json(
             "/x/v3/fav/resource/deal",
             data={
-                "rid": info.aid,
+                "rid": aid,
                 "type": 2,
                 "add_media_ids": str(media_id),
                 "del_media_ids": "",
@@ -808,11 +820,19 @@ class BilibiliAPIClient:
     async def add_video_to_watch_later(self, bvid: str) -> None:
         """Add a Bilibili video to the authenticated account's watch-later list."""
         csrf = self._csrf_token()
-        info = await self.get_video_info(bvid)
+        aid = await self._resolve_aid(bvid)
         await self._post_json(
             "/x/v2/history/toview/add",
-            data={"aid": info.aid, "csrf": csrf},
+            data={"aid": aid, "csrf": csrf},
         )
+
+    async def _resolve_aid(self, bvid: str) -> int:
+        """Resolve a BV ID through the application-code-aware view endpoint."""
+        data = await self._get_json("/x/web-interface/view", params={"bvid": bvid})
+        aid = data.get("aid")
+        if isinstance(aid, bool) or not isinstance(aid, int) or aid <= 0:
+            raise BilibiliAPIError("Bilibili returned an invalid video aid")
+        return aid
 
     async def get_all_favorites(
         self,

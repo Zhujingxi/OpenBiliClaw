@@ -18,8 +18,8 @@ if TYPE_CHECKING:
 class BilibiliNativeSaveAdapter:
     """Write Bilibili saved items to the authenticated user's account."""
 
-    _DUPLICATE_CODES: ClassVar[frozenset[int]] = frozenset({90003, 11201})
-    _RATE_LIMIT_CODES: ClassVar[frozenset[int]] = frozenset({-352, -412, -509})
+    _FAVORITE_DUPLICATE_CODES: ClassVar[frozenset[int]] = frozenset({11201})
+    _RATE_LIMIT_CODES: ClassVar[frozenset[int]] = frozenset({-352, -412, -429, -509})
     _CAPABILITY: ClassVar[NativeSaveCapability] = NativeSaveCapability(
         platform="bilibili",
         supports_favorite=True,
@@ -49,7 +49,18 @@ class BilibiliNativeSaveAdapter:
         except BilibiliAuthExpiredError as exc:
             return self._failure_result(item, route, "login_required", exc.code)
         except BilibiliAPIError as exc:
-            if exc.code in self._DUPLICATE_CODES:
+            if exc.code == -101:
+                return self._failure_result(item, route, "login_required", exc.code)
+            if route.resolved_action == "watch_later" and exc.code == 90003:
+                return NativeSaveResult(
+                    item_key=item.item_key,
+                    status="failed",
+                    resolved_action=route.resolved_action,
+                    resolved_target=route.resolved_target,
+                    error_code="bilibili_video_unavailable",
+                    error_message="Bilibili video is unavailable for watch later",
+                )
+            if route.resolved_action == "favorite" and exc.code in self._FAVORITE_DUPLICATE_CODES:
                 status: NativeSaveStatus = "already_synced"
             elif exc.code in self._RATE_LIMIT_CODES:
                 status = "rate_limited"
