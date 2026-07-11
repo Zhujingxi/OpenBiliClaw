@@ -17,7 +17,7 @@
 | SQLite schema 初始化 | ✅ | `Database.initialize()` 自动创建核心表和索引，支持旧库增量补列 / 补索引。 |
 | 推荐池 readiness 计数 | ✅ | `count_pool_readiness()` 返回 `available/raw/pending/pending_eval/evaluated_pending`，供 runtime status 和补货判断使用。 |
 | 来源 raw material 统计 | ✅ | `count_pool_raw_material_by_source()` 合并 `content_cache` raw rows 和 `discovery_candidates` 待评估候选，供 raw ceiling headroom 使用。 |
-| discovery 待评估池 | ✅ | 新增 `discovery_candidates` 表，支持 mixed-source enqueue / claim / evaluation update / cached mark / rejection status，并持久化 `score_threshold`、`eval_attempts` 与 batch 级 `batch_eval_attempts`。 |
+| discovery 待评估池 | ✅ | `discovery_candidates` 支持 mixed-source enqueue / claim / evaluation / admission，并持久化 `claim_token`、`score_threshold`、`eval_attempts` 与 batch 级 `batch_eval_attempts`；stale-sensitive 完成和释放都匹配 `id + status + claim_token`。 |
 | discovery 历史候选查询 | ✅ | `get_existing_discovery_candidate_keys()` 与 `get_existing_content_cache_ids()` 支持 pipeline 在 enqueue 前过滤历史候选和已缓存内容，避免重复 raw 占住 Evo 前供给窗口。 |
 | discovery 状态恢复 | ✅ | 启动初始化会释放过期 `evaluating` 行；terminal 状态有 status guard，避免 stale update 改写 cached / rejected 结果。 |
 | discovery keyword store | ✅ | `discovery_keywords` 用 `keyword_kind` 区分常规 search 词与 explore 词；默认 `regular`，`explore` 词只供 `ExploreStrategy` 专用 claim，不会被普通 B 站 search 消费。 |
@@ -51,8 +51,8 @@ count = db.enqueue_discovery_candidates(
     max_pending_per_source=420,
 )
 
-rows = db.claim_discovery_candidates_for_eval(limit=30)
-updated = db.update_discovery_candidate_evaluations(
+rows = db.claim_discovery_candidates_for_eval(limit=30, claim_token="batch-a")
+updated_ids = db.persist_claimed_discovery_candidate_evaluations(
     [
         {
             "candidate_id": rows[0]["id"],
@@ -60,13 +60,16 @@ updated = db.update_discovery_candidate_evaluations(
             "relevance_score": 0.82,
             "relevance_reason": "匹配用户最近的深度解释偏好。",
         }
-    ]
+    ],
+    claim_token="batch-a",
 )
 ready = db.get_evaluated_discovery_candidates_for_admission(limit=30)
 if ready:
     db.mark_discovery_candidate_cached(ready[0]["id"])
 
-db.reset_discovery_candidates_to_pending([rows[0]["id"]], reason="temporary LLM outage")
+db.reset_claimed_discovery_candidates_to_pending(
+    [rows[0]["id"]], claim_token="batch-a", reason="temporary LLM outage"
+)
 db.reset_stale_discovery_candidate_evaluations(max_age_minutes=30)
 known_candidate_keys = db.get_existing_discovery_candidate_keys(["youtube:abc123"])
 known_content_ids = db.get_existing_content_cache_ids(["BV1xx411c7mD"])
@@ -75,8 +78,8 @@ known_content_ids = db.get_existing_content_cache_ids(["BV1xx411c7mD"])
 行为说明：
 
 - `enqueue_discovery_candidates()` 用 `candidate_key` 去重；重复发现只刷新 `last_seen_at`。传入 `max_pending_per_source` 时，会按来源用总行数判断 cap、删除时保护 `evaluating` 行，并优先删除 terminal rows，避免长期满池时 candidate table 无界增长。
-- `claim_discovery_candidates_for_eval(limit=...)` 只领取 `pending_eval`，并按 `source_platform` round-robin 选取 mixed-source batch；运行中不会回收其他 in-flight evaluator 的 claim。
-- `update_discovery_candidate_evaluations()` 将 evaluator 输出回写到候选行，常用状态为 `evaluated`；只更新仍处于 `evaluating` 的行。
+- `claim_discovery_candidates_for_eval(limit=..., claim_token=...)` 原子领取 `pending_eval`，按来源 round-robin 混合取样，并把同一 token 写到整批；不传 token 时自动生成，兼容单次 CLI drain。
+- `persist_claimed_discovery_candidate_evaluations(..., claim_token=...)` 返回实际更新的 ID 集合，只接受仍为 `evaluating` 且 token 匹配的行；完成后清空 token / claimed_at。`reset_claimed_discovery_candidates_to_pending()` 使用相同所有权条件，因此旧 worker 不能覆盖或释放重新领取的行。
 - `get_evaluated_discovery_candidates_for_admission(limit=...)` 读取已完成评估但尚未写入 `content_cache` 的行，供池子从满池降回目标以下后重试 admission。
 - `reset_discovery_candidates_to_pending([...], reason=..., max_attempts=5, max_batch_attempts=50, increment_attempts=True)` 释放 evaluator failure 中被 claim 的行；`increment_attempts=True` 时连续失败达到上限后进入 `failed_eval`。pipeline 对 batch 级 LLM/provider transient 会传 `increment_attempts=False`，不消耗单条候选预算，但会递增 `batch_eval_attempts`；达到较高 `max_batch_attempts` 后进入 `failed_eval`，避免永久坏 provider 让同一批候选无限 churn。
 - `reset_stale_discovery_candidate_evaluations(max_age_minutes=...)` 将崩溃遗留的旧 `evaluating` 行释放回 `pending_eval`。

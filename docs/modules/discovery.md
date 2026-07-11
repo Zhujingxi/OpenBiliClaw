@@ -112,8 +112,8 @@
 
    这一步的作用，是把不同来源的原始线索先汇入同一个 `pending_eval` 队列；从这里往后，来源差异只作为 prompt 上下文和配额统计信号存在，不再决定一套单独评估流程。
 
-4. **混源 batch 评估**
-   `DiscoveryCandidatePipeline.drain_pending()` 会从 `discovery_candidates` claim 一批 `pending_eval` 行，并按来源 round-robin 混合取样，避免单个平台把整批 evaluator 占满。runtime 有两类入口会触发它：refresh plan 发现新 raw 后即时 drain，以及独立 `_loop_candidate_eval()` 周期性 drain 已存在的 pending raw；两者共用 controller drain lock 和 pipeline lock，所以不会并发评估同一批行。文本 eval batch 默认 45，单次 drain 默认最多 claim 两个 LLM batch（90 条，仍受 evaluator hard cap 约束）；`evaluate_content_batch()` 内部也默认只开 2 个 batch worker，外层 `DiscoveryConcurrencyController.run_llm()` 继续作为全局 LLM 并发总闸。多模态封面评估仍使用独立的小 batch。这里就是 agent 判断“结合画像看用户喜不喜欢”的环节：pipeline 把候选转回 `DiscoveredContent`，调用 `ContentDiscoveryEngine.evaluate_content_batch()`，把画像摘要、候选字段、`source_platform`、`source_strategy`、`source_context`、`content_url`、`author_name` 和近期负样本一起交给 LLM 评分。
+4. **混源连续评估**
+   `DiscoveryCandidatePipeline` 提供 `claim_batch → evaluate_claim → complete_claim / release_claim` 四阶段 API。`CandidateEvalCoordinator` 是 runtime 唯一 claim owner，按来源 round-robin 领取混源 batch；默认期望 3 个 worker、每个最多 30 条，worker 只跑 LLM，完成落库与 admission 在协调器主任务中串行执行。任一 worker 完成就立即补上下一批，backlog 存在时不再固定等待；全局最多 90 条在途。每批携带唯一 `claim_token`，完成和释放必须同时匹配 `id + evaluating + token`，因此热重载或超时后的旧 worker 无法覆盖重新领取的行。有效 worker 为 `min([discovery].candidate_eval_concurrency, max(1, [llm].concurrency-1))`；候选入队 / 库存消费走 event + generation 唤醒，60 秒只作为安全 backstop。这里就是 agent 判断“结合画像看用户喜不喜欢”的环节；平台请求间隔、raw ceiling、来源配比和 admission 阈值均未改变。
 
    进入批量 LLM 评估前，`evaluate_content_batch()` 会读取 `Database.get_recent_viewed_content_keys()`，用 `source_platform:content_id` 判断最近看过的 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit 候选；命中项直接记为 0 分并从 prompt 中剔除，避免为已看内容消耗 discovery token。老 BVID 也保留 raw key 兼容旧数据。
 
@@ -136,7 +136,7 @@
 
    候选队列表本身按来源保留上限，默认上限为 `max(pool_target_count*2, pool_target_count+120, 600)`；入队时会把 `evaluating` 行纳入 cap 计数，但删除时保护 in-flight 行，并优先清理 terminal rows。这样正式池长期满时仍不继续消耗 discovery / LLM，同时不会让外部 observed / producer 队列无限增长，即使 `pool_target_count <= 0` 也保留 600 条的兜底上限。
 
-   `evaluating` claim 的崩溃回收（v0.3.155+）：评估器活在进程内，重启后残留的 `evaluating` 行必然是孤儿——它们计入补货 target（表现为 `target_reached`）却永远不会被 drain（只 claim `pending_eval`）、也不被 cap 清理（保护 in-flight），会让池子永久饿死。三层回收：`Database.initialize()` 打开库时回收 ≥30 分钟的旧 claim（既有行为）；进程内**首个** `DiscoveryCandidatePipeline` 构造时全量回收所有 `evaluating`（含 `claimed_at` 为 NULL 的行；config reload 重建不重扫，避免误伤上一实例在飞的 batch）；每次 `drain_pending` tick 先回收超过 30 分钟的 stale claim（治评估任务中途死亡）。
+   `evaluating` claim 的崩溃回收：`Database.initialize()` 回收旧租约，进程首个 pipeline 回收重启孤儿；正常热重载则由父 `refresh_loop` 等待 coordinator 取消 worker 并按 token 归还未完成行，再构造新 runtime。stale sweep 同时清空 `claim_token`，终态提交也清空 token / claimed_at。
 
    引擎缓存收口仍会按跨源内容身份去重：B 站内容使用 `bvid`，YouTube / 小红书 / 抖音等多源内容使用 `source_platform + content_id`，缺失时再退到 URL / 标题。这样同一个视频被多个策略同时找到时，会保留可入池的一条版本，同时不会把多个非 B 站候选因为空 `bvid` 误合并。
 

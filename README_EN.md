@@ -591,7 +591,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
 │   LLM adapters · Source adapters (SourceAdapter) │
-│ Duration/engagement/published → pool → cache → API/UI │
+│ Pool → token claim → 3×LLM workers → serial admit → UI │
 │   Unified admission · SQLite (events · pool · recs)│
 └────────────────────────────────────────────────┘
 ```
@@ -618,7 +618,7 @@ Remote extension access uses explicit, default-off device authentication: `ext-k
 What happens after discovery:
 
 - **Safe fetching** — the backend never logs in for you and never crawls content you can't see; every platform reuses the sessions already in your browser, and first-run profile signals are pulled only after you click "Start initialization".
-- **Unified evaluation** — raw candidates from all sources land in one shared eval pool, scored in batches against your Soul profile, content text, and recent negative feedback; the "will you like it?" judgment never lives inside platform-specific logic.
+- **Continuous unified evaluation** — raw candidates share one eval pool; three LLM workers refill open slots immediately, while tokenized claims and serial admission keep out-of-order completion and hot reload safe, stopping at the inventory target.
 - **Diversity selection** — platform quotas → topic dedup → style balancing → cross-platform interleaving → count caps; only Bilibili is enabled out of the box, other platforms are switched on in settings.
 
 > Per-platform task pipelines, pool accounting, and fallback strategies are documented in the [Discovery Engine docs](docs/modules/discovery.md).

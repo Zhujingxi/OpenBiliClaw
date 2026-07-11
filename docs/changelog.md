@@ -8,6 +8,7 @@
 
 后端源码走 `backend-v0.3.163`，浏览器插件走 `extension-v0.3.163`，桌面安装包走 `desktop-v0.3.163`。
 
+- **候选评估改为连续补位 worker pool**：runtime 默认期望 3 个、每批最多 30 条的 LLM worker，任一槽位完成即补下一批；通过 batch claim token 与串行 SQLite commit/admission 防止热重载和乱序完成覆盖新 claim，达到库存目标立即停止。限流、无 provider 和连续零入池均有有界退避，60 秒轮询只保留为安全唤醒；新增 `[discovery].candidate_eval_concurrency`（1..8），插件与桌面设置页可配置，并为交互请求保留一个全局 LLM 槽位。平台抓取节奏、raw ceiling、来源配比和准入阈值保持不变。
 - **PC / Web 配置页登录状态改为纯本地、诚实同步**：`GET /api/sources/status` 不再为 Reddit 执行命令探测或访问平台；Reddit 只检查本地 credential，抖音有 Cookie 时显示「状态待验证」，小红书 / 知乎以插件读取真实登录 Cookie 后上报的布尔心跳为准。插件连接本地 runtime stream 时立即刷新 XHS `web_session` 与知乎 `z_c0`，两端配置页统一状态文案，`xsec_token` 明确仅是内容令牌；并发心跳改用短生命周期 SQLite 连接，避免共享连接偶发 HTTP 500。整个状态刷新链路只访问本机后端，不增加平台请求或封控风险。
 - **Web 推荐库存可从瞬时失败中自动恢复**：桌面 Web 与移动 Web 不再把推荐或 runtime 状态超时折叠成真实零库存；两类读取独立按 1/2/4/8 秒有界重试，库存事件只唤醒仍为空且上次读取失败的页面，不覆盖已显示或滚动追加的卡片。
 - **本地 embedding 冷加载不再误报停服**：readiness probe 区分缓存成功、明确失败与超时；普通 health 只容忍 loopback Ollama 冷加载超时，引导初始化仍严格等待真实向量成功，远端超时、404/500 与空向量继续报告未就绪。

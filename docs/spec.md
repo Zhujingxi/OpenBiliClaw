@@ -149,7 +149,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 
 - **核心评估**：这个内容是否匹配这个用户的深层兴趣和当前状态？
 - **可选辅助指标**：播放量/点赞/弹幕质量等——由用户画像决定是否参考（有些用户在意质量指标，有些人不在意）
-- **统一待评估池与准入**：不同来源先产出 raw candidates 并进入 `discovery_candidates`，API / OpenClaw runtime 再由同一个候选 pipeline 混合 batch 评估；refresh plan 发现新 raw 后会即时触发一次 drain，独立 candidate eval loop 也会周期性处理已有 pending raw，避免评估被来源补货计划是否为空卡住。来源只影响取数方式、配额和 prompt 上下文，不单独决定一套喜好判断流程。`discovery.admission` 的同一策略同时约束 candidate、cache write 与 serve：所有非 `explore` 至少使用全局门槛，只有精确 `explore` 可使用 `0.58`。评估输入包含正文 / 标签 / 互动指标；开启 `[discovery].multimodal_evaluation_enabled` 且模型支持图像时，还会优先从运行时图片缓存读取封面，未命中才白名单抓取，并把压缩后的封面图送入同一评估器。
+- **统一待评估池与准入**：不同来源 raw candidates 进入 `discovery_candidates` 后，由唯一 `CandidateEvalCoordinator` tokenized claim；默认期望 3 个 30 条 LLM worker 并行，任一完成即补位，SQLite 完成提交与 admission 串行。完成 / 释放必须匹配 `id + evaluating + claim_token`；达到库存目标停止新 claim，入队 / 消费事件立即唤醒，60 秒只作安全 backstop。来源只影响取数方式、配额和 prompt 上下文；平台节流、raw ceiling 与准入阈值不变。`discovery.admission` 继续同时约束 candidate、cache write 与 serve，只有精确 `explore` 可使用 `0.58`。
 
 ---
 
@@ -281,7 +281,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │     PoolCurator + 双轴 fatigue + per-group 窗口 + 新兴趣放大保护 │ │
 │  │     request_replenishment + 定时/手动补货 + B/XHS/DY/YT/X/Zhihu/Reddit=5/1/1/1/1/1/1 │ │
-│  │     Shared CandidatePipeline: raw -> eval -> admission -> cache guard -> serve │ │
+│  │ CandidateEvalCoordinator: raw -> token claim -> 3 LLM workers -> serial commit -> serve │ │
 │  │     内容元数据：时长/互动/发布时间 -> candidates -> content_cache -> API -> 四端 │ │
 │  │     Query inspiration cache: search preview -> inspiration/expansion -> keyword provenance │ │
 │  │     InspirationKeywordPipeline: axis library learning loop (yield backfill/lifecycle) + breadth config │ │
