@@ -12,6 +12,19 @@ import {
 const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
 const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
 
+function functionSource(name: string): string {
+  const start = popupJs.indexOf(`function ${name}(`);
+  assert.ok(start >= 0, `${name} function not found`);
+  const openingBrace = popupJs.indexOf("{", start);
+  let depth = 0;
+  for (let index = openingBrace; index < popupJs.length; index += 1) {
+    if (popupJs[index] === "{") depth += 1;
+    if (popupJs[index] === "}") depth -= 1;
+    if (depth === 0) return popupJs.slice(start, index + 1);
+  }
+  throw new Error(`${name} closing brace not found`);
+}
+
 test("popup publication time prefers exact time and falls back to label", () => {
   const now = new Date(2026, 6, 11, 12, 0, 0, 0).getTime();
   const iso = (offset: number) => new Date(now + offset).toISOString();
@@ -77,6 +90,20 @@ test("recommendation and delight renderers append optional publication metadata"
   assert.match(appendPublishedTime, /if \(!text\) return;/);
   assert.match(appendPublishedTime, /textContent = text/);
   assert.match(appendPublishedTime, /className = "recommendation-published-time"/);
+});
+
+test("visible pending delight banner appends publication time to its metadata line", () => {
+  const renderDelightSlot = functionSource("renderDelightSlot");
+  const renderMessagesList = functionSource("renderMessagesList");
+
+  assert.match(renderMessagesList, /if \(type === "delight"\) continue/);
+  assert.match(renderDelightSlot, /const kickerLine = document\.createElement\("span"\)/);
+  assert.match(
+    renderDelightSlot,
+    /kickerLine\.append\(platformChip\);\s*appendPublishedTime\(kickerLine, delight\);/,
+  );
+  assert.match(renderDelightSlot, /textCol\.append\(kickerLine, titleText\)/);
+  assert.match(renderDelightSlot, /elements\.delightSlot\.replaceChildren\(banner\)/);
 });
 
 test("popup publication metadata uses the muted token", () => {

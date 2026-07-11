@@ -4612,6 +4612,7 @@ function renderDelightSlot() {
   platformChip.className = "delight-banner-platform";
   platformChip.textContent = platformDisplayName(delight.source_platform || "bilibili");
   kickerLine.append(platformChip);
+  appendPublishedTime(kickerLine, delight);
   if (queueLength > 1) {
     const prevBtn = document.createElement("button");
     prevBtn.type = "button";
