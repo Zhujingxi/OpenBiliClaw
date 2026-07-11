@@ -14,6 +14,7 @@
 - **托管 Ollama 与引导初始化更能自愈**：with-embedding 私有 Ollama 记录并复用实际端口/模型目录，崩溃后按 5 秒至 300 秒退避自动拉起；缺失或损坏的向量模型可在引导初始化中自动修复并显示进度。
 - **推荐准入与 API 兼容边界收紧**：除 `explore` 外所有来源统一执行全局 admission 下限，缓存与展示出口 fail closed；OpenAI Responses 请求固定发送 `store=false`，避免兼容网关拒绝无状态调用。
 - **默认 CI 不再被可选浏览器依赖阻断**：issue #98 的真实浏览器 E2E 改为与既有引导 E2E 相同的 `pytest.importorskip` 收集契约；普通 `[dev,x]` 测试环境未安装 Playwright 时跳过 integration 模块，安装 `[browser]` 后仍执行完整浏览器用例。
+- **Web 空库存假象自动恢复**：移动 Web `/m` 与桌面 Web `/web` 不再把推荐或 `runtime-status` 超时折叠成真实零库存；两类读取独立按 1/2/4/8 秒最多重试四次，成功空数组才进入真实空态。库存实时事件只会唤醒仍为空且上次读取失败的推荐页，已显示或滚动追加的卡片不会被后台刷新覆盖。
 
 ## v0.3.161 / extension v0.3.161 / desktop v0.3.161：Keyword inspiration 轴库 + 搜索词生成模式选择器（2026-07-09）
 
