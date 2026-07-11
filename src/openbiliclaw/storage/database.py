@@ -60,6 +60,8 @@ logger = logging.getLogger(__name__)
 # pragmatic middle ground.
 _LOCK_RETRY_ATTEMPTS = 8
 _LOCK_RETRY_SLEEP_SECONDS = 0.02
+_NATIVE_INTERNAL_RUNNER_PREFIX = "__openbiliclaw_"
+_LEGACY_NATIVE_SAVE_RUNNER_ID = f"{_NATIVE_INTERNAL_RUNNER_PREFIX}legacy_runner__"
 _BVID_PATTERN = re.compile(r"(BV[0-9A-Za-z]+)")
 _LOCAL_EVIDENCE_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 _VIEW_CONTENT_ID_METADATA_KEYS = (
@@ -4970,7 +4972,6 @@ class Database:
             WHERE r.item_key = ''
             """
         )
-
     @staticmethod
     def _content_identity_metadata_missing(value: object) -> bool:
         if value is None:
@@ -7516,6 +7517,17 @@ class Database:
               AND task_heartbeat_at IS NULL
             """
         )
+        self.conn.execute(
+            """
+            UPDATE native_save_states
+            SET task_runner_id = ?
+            WHERE status IN ('pending', 'syncing')
+              AND task_id != '' AND task_started_at IS NOT NULL
+              AND task_runner_id = ''
+              AND task_heartbeat_at IS NOT NULL
+            """,
+            (_LEGACY_NATIVE_SAVE_RUNNER_ID,),
+        )
         self.conn.commit()
         self.conn.execute("BEGIN IMMEDIATE")
         try:
@@ -7681,6 +7693,8 @@ class Database:
         runner_id = value.strip()
         if not runner_id:
             raise ValueError("runner_id must not be blank")
+        if runner_id.startswith(_NATIVE_INTERNAL_RUNNER_PREFIX):
+            raise ValueError("runner_id uses a reserved internal prefix")
         return runner_id
 
     def _bilibili_saved_item_input(self, bvid: str) -> SavedItemInput:

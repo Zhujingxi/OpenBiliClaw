@@ -156,6 +156,48 @@ def test_eligible_view_excludes_pending_rows_owned_by_a_task(db: Database) -> No
     assert db.list_native_sync_eligible("favorite", [item.item_key]) == []
 
 
+def test_live_legacy_runner_migration_is_reserved_until_task_lease_stales(
+    db: Database,
+) -> None:
+    item = SavedItemInput("bilibili", "BV1LEGACYRUNNER")
+    db.upsert_saved_membership("favorite", item)
+    db.ensure_native_save_state("favorite", item.item_key, "favorite")
+    assert db.claim_native_sync_task("favorite", [item.item_key], "legacy-live-task") == [
+        item.item_key
+    ]
+    db.conn.execute(
+        """
+        UPDATE native_save_states
+        SET task_started_at = CURRENT_TIMESTAMP,
+            task_heartbeat_at = CURRENT_TIMESTAMP,
+            task_runner_id = ''
+        WHERE task_id = 'legacy-live-task'
+        """
+    )
+    db.conn.commit()
+
+    db._ensure_saved_sync_tables()
+
+    row = db.list_native_save_states_by_task("legacy-live-task")[0]
+    legacy_runner = str(row["task_runner_id"])
+    assert legacy_runner.startswith("__openbiliclaw_")
+    assert db.claim_native_sync_task_runner("legacy-live-task", "new-runner") is False
+    with pytest.raises(ValueError, match="reserved"):
+        db.claim_native_sync_task_runner("legacy-live-task", legacy_runner)
+
+    db.conn.execute(
+        """
+        UPDATE native_save_states
+        SET task_heartbeat_at = datetime('now', '-10 minutes')
+        WHERE task_id = 'legacy-live-task'
+        """
+    )
+    db.conn.commit()
+    assert db.claim_native_sync_task_runner("legacy-live-task", "new-runner") is True
+    reclaimed = db.list_native_save_states_by_task("legacy-live-task")[0]
+    assert reclaimed["task_runner_id"] == "new-runner"
+
+
 def test_generic_native_state_upsert_cannot_establish_active_task_ownership(
     db: Database,
 ) -> None:

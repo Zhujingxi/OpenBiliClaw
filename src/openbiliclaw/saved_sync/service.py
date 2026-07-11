@@ -52,6 +52,10 @@ class _NativeSaveTaskRunnerOwnershipLostError(RuntimeError):
     """The batch heartbeat no longer owns any active rows."""
 
 
+class _NativeSaveItemHeartbeatError(RuntimeError):
+    """The item heartbeat failed while adapter I/O was still live."""
+
+
 class SavedSyncService:
     """Persist local membership first, then coordinate optional native saves."""
 
@@ -348,6 +352,8 @@ class SavedSyncService:
             )
         except _NativeSaveDetachedCancellationError:
             raise
+        except _NativeSaveItemHeartbeatError:
+            raise
         except asyncio.CancelledError:
             self._persist_result(
                 list_kind,
@@ -475,10 +481,57 @@ class SavedSyncService:
             raise _NativeSaveAttemptDetachedError
         if heartbeat in done:
             save_task.cancel()
-            await asyncio.gather(heartbeat, save_task, return_exceptions=True)
-            if not heartbeat.cancelled():
-                heartbeat.exception()
-            raise _NativeSaveClaimLostError
+            await asyncio.gather(heartbeat, return_exceptions=True)
+            heartbeat_failure = NativeSaveResult(
+                item_key=item_key,
+                status="failed",
+                resolved_action=resolved_action,
+                resolved_target=resolved_target,
+                error_code="item_heartbeat_failed",
+                error_message="Native save item heartbeat failed",
+            )
+            await asyncio.sleep(0)
+            if save_task.done():
+                final_result = heartbeat_failure
+                if not save_task.cancelled():
+                    try:
+                        adapter_result = save_task.result()
+                    except BaseException:
+                        pass
+                    else:
+                        final_result = self._normalize_adapter_result(
+                            item_key,
+                            adapter_result,
+                            resolved_action=resolved_action,
+                            resolved_target=resolved_target,
+                        )
+                self._persist_result(
+                    list_kind,
+                    final_result,
+                    task_id=task_id,
+                    execution_id=execution_id,
+                    requested_action=requested_action,
+                )
+            else:
+                retrying_heartbeat = asyncio.create_task(
+                    self._heartbeat_claim_with_retry(
+                        list_kind,
+                        item_key,
+                        task_id,
+                        execution_id,
+                    )
+                )
+                self._detach_live_attempt(
+                    retrying_heartbeat,
+                    save_task,
+                    list_kind=list_kind,
+                    item_key=item_key,
+                    task_id=task_id,
+                    execution_id=execution_id,
+                    requested_action=requested_action,
+                    result=heartbeat_failure,
+                )
+            raise _NativeSaveItemHeartbeatError("Native save item heartbeat failed") from None
         heartbeat.cancel()
         await asyncio.gather(heartbeat, return_exceptions=True)
         return await save_task
@@ -617,6 +670,30 @@ class SavedSyncService:
                 execution_id,
             ):
                 return
+
+    async def _heartbeat_claim_with_retry(
+        self,
+        list_kind: SavedListKind,
+        item_key: str,
+        task_id: str,
+        execution_id: str,
+    ) -> None:
+        delay = self._claim_heartbeat_interval_seconds
+        while True:
+            await asyncio.sleep(delay)
+            try:
+                alive = self._database.heartbeat_native_save_claim(
+                    list_kind,
+                    item_key,
+                    task_id,
+                    execution_id,
+                )
+            except Exception:
+                delay = min(max(delay * 2.0, 0.01), 1.0)
+                continue
+            if not alive:
+                return
+            delay = self._claim_heartbeat_interval_seconds
 
     async def _heartbeat_sync_task(self, task_id: str, runner_id: str) -> None:
         while True:
