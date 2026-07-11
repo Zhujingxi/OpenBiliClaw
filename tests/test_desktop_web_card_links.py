@@ -35,7 +35,7 @@ def test_recommendation_click_tracking_uses_click_and_auxclick_without_window_op
     assert 'cover.addEventListener("click", () => openRecommendation(item, card));' in app_js
     assert re.search(
         r'cover\.addEventListener\("auxclick", \(event\) => \{\s*'
-        r'if \(event\.button === 1\) openRecommendation\(item, card\);',
+        r"if \(event\.button === 1\) openRecommendation\(item, card\);",
         app_js,
     )
 
@@ -66,9 +66,7 @@ def test_delight_view_button_actually_opens_the_content() -> None:
     app_js = APP_JS.read_text(encoding="utf-8")
 
     # respondDelight takes an openUrl flag and opens in the view branch.
-    assert (
-        "async function respondDelight(delight, response, el = null, openUrl = false)" in app_js
-    )
+    assert "async function respondDelight(delight, response, el = null, openUrl = false)" in app_js
     view_match = re.search(
         r'if \(response === "view"\) \{(?P<body>.*?)\n        return;\n      \}',
         app_js,

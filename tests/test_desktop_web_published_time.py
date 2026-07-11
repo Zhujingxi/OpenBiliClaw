@@ -45,7 +45,9 @@ def test_normalize_delight_carries_publication_fields() -> None:
 
 def test_format_published_time_executes_all_exact_and_fallback_boundaries() -> None:
     formatter = _function_source("formatPublishedTime")
-    node_script = formatter + r"""
+    node_script = (
+        formatter
+        + r"""
 const now = new Date(2026, 6, 11, 12, 0, 0, 0).getTime();
 const iso = (offset) => new Date(now + offset).toISOString();
 const cases = [
@@ -72,6 +74,7 @@ if (failures.length) {
   process.exit(1);
 }
 """
+    )
 
     result = subprocess.run(
         ["node", "-e", node_script],
@@ -88,7 +91,7 @@ def test_grid_renders_escaped_publication_time_and_exact_title() -> None:
     meta = _function_source("recommendationMetaHtml")
 
     assert "const published = formatPublishedTime(item);" in meta
-    assert 'new Date(item.published_at).toLocaleString()' in meta
+    assert "new Date(item.published_at).toLocaleString()" in meta
     assert 'class="published-time"' in meta
     assert "escapeHtml(published)" in meta
 
@@ -98,7 +101,7 @@ def test_set_active_delight_renders_publication_text_title_and_visibility() -> N
 
     assert "const published = formatPublishedTime(state.delight);" in set_active
     assert "delightPublishedEl.textContent = published;" in set_active
-    assert 'new Date(state.delight.published_at).toLocaleString()' in set_active
+    assert "new Date(state.delight.published_at).toLocaleString()" in set_active
     assert "delightPublishedEl.hidden = !published;" in set_active
     assert 'id="delightPublished"' in INDEX_HTML
     assert ".published-time" in APP_CSS

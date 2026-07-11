@@ -2519,6 +2519,8 @@ def test_collect_issues_allows_empty_and_configured_llm_fallback() -> None:
     config.llm.deepseek.api_key = "sk-fallback"
 
     assert _llm_fallback_issues(config) == []
+
+
 # ── Phase 2 Task 4: inspiration config collapse (13 → 4) ────────────────
 
 
