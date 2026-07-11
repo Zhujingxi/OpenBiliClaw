@@ -15,12 +15,14 @@ from openbiliclaw.config import (
     DiscoveryConfig,
     LLMConfig,
     LLMProviderConfig,
+    NetworkConfig,
     SchedulerConfig,
     SoulConfig,
     SoulPreferenceConfig,
     _build_config,
     load_config,
     load_config_with_diagnostics,
+    normalize_outbound_proxy,
     save_config,
     validate_runtime_config,
 )
@@ -2670,3 +2672,90 @@ inspiration_breadth = "low"
             "inspiration_search_enabled",
         ]
         assert 'inspiration_breadth = "high"' in inspiration_lines
+
+
+class TestNetworkProxyConfig:
+    """`[network].proxy` — the overseas-outbound proxy for LLM/YouTube/updater.
+
+    Spec: docs/plans/2026-07-11-network-proxy-config-spec.md. CN-direct clients
+    (bilibili/douyin/ollama) never consume this — that isolation is guarded in
+    tests/test_network_proxy_isolation.py.
+    """
+
+    def test_default_network_proxy_is_empty(self) -> None:
+        config = Config()
+        assert isinstance(config.network, NetworkConfig)
+        assert config.network.proxy == ""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("http://127.0.0.1:7890", "http://127.0.0.1:7890"),
+            ("https://proxy.example.com:443", "https://proxy.example.com:443"),
+            ("socks5://127.0.0.1:1080", "socks5://127.0.0.1:1080"),
+            ("socks5h://127.0.0.1:1080", "socks5h://127.0.0.1:1080"),
+            ("  socks5://127.0.0.1:1080  ", "socks5://127.0.0.1:1080"),
+            ("SOCKS5://127.0.0.1:1080", "socks5://127.0.0.1:1080"),
+            ("HTTP://Proxy.Example.com:8080", "http://Proxy.Example.com:8080"),
+            ("socks5://user:pass@127.0.0.1:1080", "socks5://user:pass@127.0.0.1:1080"),
+            ("", ""),
+            ("   ", ""),
+        ],
+    )
+    def test_normalize_outbound_proxy_accepts_and_normalizes(
+        self, raw: str, expected: str
+    ) -> None:
+        assert normalize_outbound_proxy(raw) == expected
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "ftp://127.0.0.1:1080",
+            "socks4://127.0.0.1:1080",
+            "http://",
+            "socks5://",
+            "not-a-url",
+            "127.0.0.1:1080",
+        ],
+    )
+    def test_normalize_outbound_proxy_rejects_bad_values(self, bad: str) -> None:
+        with pytest.raises(ValueError):
+            normalize_outbound_proxy(bad)
+
+    def test_network_proxy_round_trips_through_toml(self, tmp_path: Path) -> None:
+        config = Config()
+        config.network.proxy = "socks5://127.0.0.1:1080"
+
+        target = tmp_path / "config.toml"
+        save_config(config, target)
+        rendered = target.read_text(encoding="utf-8")
+        loaded = load_config(target)
+
+        assert "[network]" in rendered
+        assert 'proxy = "socks5://127.0.0.1:1080"' in rendered
+        assert loaded.network.proxy == "socks5://127.0.0.1:1080"
+
+    def test_network_section_appears_in_rendered_toml(self) -> None:
+        rendered = config_module._render_config_toml(Config())
+        assert "[network]" in rendered
+
+    def test_build_config_normalizes_network_proxy(self) -> None:
+        config = _build_config({"network": {"proxy": "SOCKS5://127.0.0.1:1080"}})
+        assert config.network.proxy == "socks5://127.0.0.1:1080"
+
+    def test_build_config_drops_invalid_network_proxy_with_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING"):
+            config = _build_config({"network": {"proxy": "ftp://127.0.0.1:1"}})
+        assert config.network.proxy == ""
+        assert any("network" in record.message.lower() for record in caplog.records)
+
+    def test_env_override_sets_network_proxy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_path = tmp_path / "config.toml"
+        config_path.write_text("[general]\nlanguage = \"zh\"\n", encoding="utf-8")
+        monkeypatch.setenv("OPENBILICLAW_NETWORK_PROXY", "socks5://127.0.0.1:1080")
+        config = load_config(config_path)
+        assert config.network.proxy == "socks5://127.0.0.1:1080"
