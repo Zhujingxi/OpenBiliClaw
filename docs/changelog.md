@@ -4,6 +4,16 @@
 
 ---
 
+## v0.3.162 / extension v0.3.162 / desktop v0.3.162：跨设备扩展认证、反馈提速、发布时间贯通与 Ollama 自愈（2026-07-11）
+
+后端源码走 `backend-v0.3.162`，浏览器插件走 `extension-v0.3.162`，桌面安装包走 `desktop-v0.3.162`。
+
+- **跨设备扩展访问可控开放**：新增默认关闭的设备密钥认证与 `ext-key generate/enable/disable/list/revoke` CLI；配置只保存密钥摘要，扩展换取短会话后使用 Bearer 访问，远程主机强制 HTTPS/WSS，并在保存 endpoint 前请求最小 host 权限。
+- **推荐反馈即时响应且可真实撤销**：桌面推荐卡和兴趣/避雷探针先本地更新，保留 10 秒撤销窗口；换一批先展示新内容、再后台结清旧卡，MMR 与聚类移出 asyncio 事件循环，减少卡顿和旧卡回流。
+- **七平台发布时间贯通所有推荐表面**：Bilibili、小红书、抖音、YouTube、X、知乎和 Reddit 的可靠发布时间进入候选池、缓存、普通推荐与惊喜推荐，并在桌面、移动端、插件和 CLI 使用统一的本地相对时间展示；知乎惊喜卡同时补齐正文预览和无封面文字卡。
+- **托管 Ollama 与引导初始化更能自愈**：with-embedding 私有 Ollama 记录并复用实际端口/模型目录，崩溃后按 5 秒至 300 秒退避自动拉起；缺失或损坏的向量模型可在引导初始化中自动修复并显示进度。
+- **推荐准入与 API 兼容边界收紧**：除 `explore` 外所有来源统一执行全局 admission 下限，缓存与展示出口 fail closed；OpenAI Responses 请求固定发送 `store=false`，避免兼容网关拒绝无状态调用。
+
 ## v0.3.161 / extension v0.3.161 / desktop v0.3.161：Keyword inspiration 轴库 + 搜索词生成模式选择器（2026-07-09）
 
 后端源码走 `backend-v0.3.161`，浏览器插件走 `extension-v0.3.161`，桌面安装包走 `desktop-v0.3.161`。

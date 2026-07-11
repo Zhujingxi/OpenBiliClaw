@@ -189,12 +189,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.161 (2026-07-09)**
+📌 Latest: **v0.3.162 (2026-07-11)**
 
-- **Instant, undoable feedback** — Desktop recommendation cards and interest/avoidance probes respond immediately with a real 10-second undo window; reshuffle displays the new batch before recording old-card dismissals in the background.
-- **Keyword generation mode in settings** — choose Classic, Hybrid, or Inspiration directly from the config UI to enable search-backed keyword inspiration.
-- **Keyword inspiration axis library** — keyword generation now reuses secondary interests, real search evidence, platform supply advantages, and historical yield for more specific platform-native queries.
-- **Diagnosable inspiration flow** — new dry-run and report surfaces show selected interests, grounding evidence, keyword provenance, and cohort performance.
+- **Cross-device extension access** — opt-in device-key authentication lets remote browser extensions connect safely to a home or LAN backend, with immediate session revocation.
+- **Instant, undoable feedback** — recommendation cards and interest/avoidance probes respond immediately with a real 10-second undo window; reshuffle shows the new batch before settling old cards in the background.
+- **Publication time across seven platforms** — Bilibili, Xiaohongshu, Douyin, YouTube, X, Zhihu, and Reddit publication times now flow through recommendations and render consistently as local relative dates on every surface.
+- **Stronger Ollama self-healing** — the private with-embedding Ollama restarts with bounded backoff, while missing or broken embedding models can be repaired from guided init with visible progress.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
