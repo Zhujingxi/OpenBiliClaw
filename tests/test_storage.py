@@ -36,6 +36,121 @@ class TestDatabase:
             assert db.conn is not None
             db.close()
 
+    def test_claim_token_prevents_stale_evaluation_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            db.enqueue_discovery_candidates(
+                [
+                    DiscoveryCandidateWrite(
+                        candidate_key=f"bilibili:BV{i}",
+                        source_platform="bilibili",
+                        source_strategy="search",
+                        content_id=f"BV{i}",
+                        title=f"Candidate {i}",
+                    )
+                    for i in range(2)
+                ]
+            )
+
+            original = db.claim_discovery_candidates_for_eval(limit=2, claim_token="claim-a")
+            assert {row["claim_token"] for row in original} == {"claim-a"}
+            ids = [int(row["id"]) for row in original]
+            assert (
+                db.reset_claimed_discovery_candidates_to_pending(
+                    ids,
+                    claim_token="claim-a",
+                    reason="reload",
+                    max_attempts=5,
+                    max_batch_attempts=50,
+                    increment_attempts=False,
+                )
+                == 2
+            )
+
+            replacement = db.claim_discovery_candidates_for_eval(limit=2, claim_token="claim-b")
+            updated = db.persist_claimed_discovery_candidate_evaluations(
+                [
+                    {
+                        "candidate_id": row["id"],
+                        "status": "evaluated",
+                        "relevance_score": 0.9,
+                    }
+                    for row in original
+                ],
+                claim_token="claim-a",
+            )
+
+            assert updated == set()
+            assert {row["claim_token"] for row in replacement} == {"claim-b"}
+            assert (
+                db.reset_claimed_discovery_candidates_to_pending(
+                    ids,
+                    claim_token="claim-a",
+                    reason="stale release",
+                    max_attempts=5,
+                    max_batch_attempts=50,
+                    increment_attempts=False,
+                )
+                == 0
+            )
+
+            db.close()
+
+    def test_tokenized_completion_and_stale_reset_clear_claim_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            db.enqueue_discovery_candidates(
+                [
+                    DiscoveryCandidateWrite(
+                        candidate_key="bilibili:BVTOKEN",
+                        source_platform="bilibili",
+                        source_strategy="search",
+                        content_id="BVTOKEN",
+                        title="Token",
+                    )
+                ]
+            )
+            row = db.claim_discovery_candidates_for_eval(limit=1, claim_token="claim-a")[0]
+            updated = db.persist_claimed_discovery_candidate_evaluations(
+                [
+                    {
+                        "candidate_id": row["id"],
+                        "status": "evaluated",
+                        "relevance_score": 0.9,
+                    }
+                ],
+                claim_token="claim-a",
+            )
+            stored = db.conn.execute(
+                "SELECT status, claim_token, claimed_at FROM discovery_candidates"
+            ).fetchone()
+
+            assert updated == {int(row["id"])}
+            assert dict(stored) == {
+                "status": "evaluated",
+                "claim_token": None,
+                "claimed_at": None,
+            }
+
+            db.conn.execute(
+                "UPDATE discovery_candidates SET status='evaluating', "
+                "claim_token='orphan', claimed_at=NULL"
+            )
+            db.conn.commit()
+            assert db.reset_stale_discovery_candidate_evaluations(max_age_minutes=30) == 1
+            reset = db.conn.execute(
+                "SELECT status, claim_token, claimed_at FROM discovery_candidates"
+            ).fetchone()
+            assert dict(reset) == {
+                "status": "pending_eval",
+                "claim_token": None,
+                "claimed_at": None,
+            }
+
+            db.close()
+
     def test_initialize_creates_recommendation_read_indexes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(Path(tmpdir) / "test.db")

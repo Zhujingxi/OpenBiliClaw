@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import re
+import secrets
 import sqlite3
 import statistics
 import time
@@ -636,6 +637,7 @@ CREATE TABLE IF NOT EXISTS discovery_candidates (
     created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_seen_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     claimed_at            TIMESTAMP,
+    claim_token           TEXT,
     evaluated_at          TIMESTAMP,
     cached_at             TIMESTAMP
 );
@@ -2065,6 +2067,7 @@ class Database:
                 UPDATE discovery_candidates
                 SET status = 'pending_eval',
                     claimed_at = NULL,
+                    claim_token = NULL,
                     eval_error = 'orphaned evaluating claim reset'
                 WHERE status = 'evaluating'
                 """
@@ -2075,6 +2078,7 @@ class Database:
             UPDATE discovery_candidates
             SET status = 'pending_eval',
                 claimed_at = NULL,
+                claim_token = NULL,
                 eval_error = 'stale evaluating claim reset'
             WHERE status = 'evaluating'
               AND (claimed_at IS NULL OR claimed_at < datetime('now', ?))
@@ -2083,7 +2087,12 @@ class Database:
         )
         return int(cursor.rowcount)
 
-    def claim_discovery_candidates_for_eval(self, *, limit: int) -> list[dict[str, Any]]:
+    def claim_discovery_candidates_for_eval(
+        self,
+        *,
+        limit: int,
+        claim_token: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Claim a mixed-source batch of pending candidates for evaluation."""
 
         claim_limit = max(0, int(limit))
@@ -2131,31 +2140,33 @@ class Database:
 
         ids = [int(row["id"]) for row in selected]
         placeholders = ", ".join("?" for _ in ids)
+        token = str(claim_token or secrets.token_hex(16))
         self._execute_write(
             f"""
             UPDATE discovery_candidates
             SET status = 'evaluating',
                 claimed_at = CURRENT_TIMESTAMP,
+                claim_token = ?,
                 eval_error = ''
             WHERE id IN ({placeholders})
               AND status = 'pending_eval'
             """,
-            ids,
+            (token, *ids),
         )
         claimed_rows = self.conn.execute(
             f"""
-            SELECT id
+            SELECT *
             FROM discovery_candidates
             WHERE id IN ({placeholders})
               AND status = 'evaluating'
+              AND claim_token = ?
             """,
-            ids,
+            (*ids, token),
         ).fetchall()
-        claimed_ids = {int(row["id"]) for row in claimed_rows}
-        claimed = [row for row in selected if int(row["id"]) in claimed_ids]
-        for row in claimed:
-            row["status"] = "evaluating"
-        return claimed
+        claimed_by_id = {int(row["id"]): dict(row) for row in claimed_rows}
+        return [
+            claimed_by_id[candidate_id] for candidate_id in ids if candidate_id in claimed_by_id
+        ]
 
     def get_evaluated_discovery_candidates_for_admission(
         self,
@@ -2206,7 +2217,9 @@ class Database:
                     eval_error = ?,
                     eval_attempts = 0,
                     batch_eval_attempts = 0,
-                    evaluated_at = CURRENT_TIMESTAMP
+                    evaluated_at = CURRENT_TIMESTAMP,
+                    claimed_at = NULL,
+                    claim_token = NULL
                 WHERE id = ?
                   AND status = 'evaluating'
                 """,
@@ -2227,6 +2240,142 @@ class Database:
             if cursor.rowcount > 0:
                 updated += 1
         return updated
+
+    def persist_claimed_discovery_candidate_evaluations(
+        self,
+        evaluations: Sequence[Mapping[str, Any]],
+        *,
+        claim_token: str,
+    ) -> set[int]:
+        """Persist outputs only while the caller still owns the claim token."""
+
+        updated_ids: set[int] = set()
+        token = str(claim_token)
+        for evaluation in evaluations:
+            candidate_id = int(evaluation.get("candidate_id") or evaluation.get("id") or 0)
+            if candidate_id <= 0:
+                continue
+            cursor = self._execute_write(
+                """
+                UPDATE discovery_candidates
+                SET status = ?,
+                    topic_key = ?,
+                    topic_group = ?,
+                    style_key = ?,
+                    franchise_key = ?,
+                    relevance_score = ?,
+                    relevance_reason = ?,
+                    pool_expression = ?,
+                    pool_topic_label = ?,
+                    eval_error = ?,
+                    eval_attempts = 0,
+                    batch_eval_attempts = 0,
+                    evaluated_at = CURRENT_TIMESTAMP,
+                    claimed_at = NULL,
+                    claim_token = NULL
+                WHERE id = ?
+                  AND status = 'evaluating'
+                  AND claim_token = ?
+                """,
+                (
+                    str(evaluation.get("status") or "evaluated"),
+                    str(evaluation.get("topic_key") or ""),
+                    str(evaluation.get("topic_group") or ""),
+                    _normalize_style_key_for_storage(evaluation.get("style_key")),
+                    str(evaluation.get("franchise_key") or ""),
+                    float(evaluation.get("relevance_score") or evaluation.get("score") or 0.0),
+                    str(evaluation.get("relevance_reason") or evaluation.get("reason") or ""),
+                    str(evaluation.get("pool_expression") or ""),
+                    str(evaluation.get("pool_topic_label") or ""),
+                    str(evaluation.get("eval_error") or ""),
+                    candidate_id,
+                    token,
+                ),
+            )
+            if cursor.rowcount > 0:
+                updated_ids.add(candidate_id)
+        return updated_ids
+
+    def reset_claimed_discovery_candidates_to_pending(
+        self,
+        candidate_ids: Sequence[int],
+        *,
+        claim_token: str,
+        reason: str = "",
+        max_attempts: int = 5,
+        max_batch_attempts: int = 50,
+        increment_attempts: bool = True,
+    ) -> int:
+        """Release candidates only while the caller still owns their claim."""
+
+        ids = [int(candidate_id) for candidate_id in candidate_ids if int(candidate_id) > 0]
+        if not ids:
+            return 0
+        placeholders = ", ".join("?" for _ in ids)
+        token = str(claim_token)
+        if not increment_attempts:
+            batch_attempts_limit = max(1, int(max_batch_attempts))
+            cursor = self._execute_write(
+                f"""
+                UPDATE discovery_candidates
+                SET batch_eval_attempts = batch_eval_attempts + 1,
+                    status = CASE
+                        WHEN batch_eval_attempts + 1 >= ? THEN 'failed_eval'
+                        ELSE 'pending_eval'
+                    END,
+                    claimed_at = NULL,
+                    claim_token = NULL,
+                    eval_error = ?,
+                    evaluated_at = CASE
+                        WHEN batch_eval_attempts + 1 >= ? THEN CURRENT_TIMESTAMP
+                        ELSE evaluated_at
+                    END,
+                    last_seen_at = CASE
+                        WHEN batch_eval_attempts + 1 >= ? THEN last_seen_at
+                        ELSE CURRENT_TIMESTAMP
+                    END
+                WHERE id IN ({placeholders})
+                  AND status = 'evaluating'
+                  AND claim_token = ?
+                """,
+                (
+                    batch_attempts_limit,
+                    str(reason),
+                    batch_attempts_limit,
+                    batch_attempts_limit,
+                    *ids,
+                    token,
+                ),
+            )
+            return int(cursor.rowcount)
+
+        attempts_limit = max(1, int(max_attempts))
+        cursor = self._execute_write(
+            f"""
+            UPDATE discovery_candidates
+            SET eval_attempts = eval_attempts + 1,
+                status = CASE
+                    WHEN eval_attempts + 1 >= ? THEN 'failed_eval'
+                    ELSE 'pending_eval'
+                END,
+                claimed_at = NULL,
+                claim_token = NULL,
+                eval_error = ?,
+                evaluated_at = CASE
+                    WHEN eval_attempts + 1 >= ? THEN CURRENT_TIMESTAMP
+                    ELSE evaluated_at
+                END,
+                last_seen_at = CASE
+                    WHEN eval_attempts + 1 >= ? THEN last_seen_at
+                    ELSE CURRENT_TIMESTAMP
+                END
+            WHERE id IN ({placeholders})
+              AND status = 'evaluating'
+              AND claim_token = ?
+            """,
+            (attempts_limit, str(reason), attempts_limit, attempts_limit, *ids, token),
+        )
+        return int(cursor.rowcount)
 
     def reset_discovery_candidates_to_pending(
         self,
@@ -2254,6 +2403,7 @@ class Database:
                         ELSE 'pending_eval'
                     END,
                     claimed_at = NULL,
+                    claim_token = NULL,
                     eval_error = ?,
                     evaluated_at = CASE
                         WHEN batch_eval_attempts + 1 >= ? THEN CURRENT_TIMESTAMP
@@ -2286,6 +2436,7 @@ class Database:
                     ELSE 'pending_eval'
                 END,
                 claimed_at = NULL,
+                claim_token = NULL,
                 eval_error = ?,
                 evaluated_at = CASE
                     WHEN eval_attempts + 1 >= ? THEN CURRENT_TIMESTAMP
@@ -2313,6 +2464,8 @@ class Database:
                 eval_error = '',
                 eval_attempts = 0,
                 batch_eval_attempts = 0
+                , claimed_at = NULL
+                , claim_token = NULL
             WHERE id = ?
               AND status IN ('evaluating', 'evaluated')
             """,
@@ -2333,7 +2486,9 @@ class Database:
             UPDATE discovery_candidates
             SET status = ?,
                 eval_error = ?,
-                evaluated_at = COALESCE(evaluated_at, CURRENT_TIMESTAMP)
+                evaluated_at = COALESCE(evaluated_at, CURRENT_TIMESTAMP),
+                claimed_at = NULL,
+                claim_token = NULL
             WHERE id = ?
               AND status IN ('evaluating', 'evaluated')
             """,
@@ -4858,6 +5013,7 @@ class Database:
             "score_threshold": "REAL NOT NULL DEFAULT 0.0",
             "eval_attempts": "INTEGER NOT NULL DEFAULT 0",
             "batch_eval_attempts": "INTEGER NOT NULL DEFAULT 0",
+            "claim_token": "TEXT",
             "body_text": "TEXT NOT NULL DEFAULT ''",
             "favorite_count": "INTEGER NOT NULL DEFAULT 0",
             "collect_count": "INTEGER NOT NULL DEFAULT 0",
