@@ -165,24 +165,18 @@ logger = logging.getLogger(__name__)
 _CONFIG_SAVE_LOCK = asyncio.Lock()
 _fire_and_forget_tasks: set[asyncio.Task[None]] = set()
 
-# /api/health embedding readiness: cache the live-probe result for this many
-# seconds so Docker healthchecks and popup re-polls don't hit the embedding
-# provider on every call. Kept short so a freshly-fixed provider (e.g. right
-# after `ollama pull bge-m3`) clears the popup's "semantic dedup off" banner
-# quickly. The probe itself is capped by a separate timeout so a hung/retrying
-# provider can never stall /api/health. The timeout is generous enough to
-# absorb an Ollama cold model-load (bge-m3 unloads after keep_alive idle; the
-# first embed re-loads it — measured ~3s), and a timeout is treated as
-# "loading, optimistically ready", NOT a hard failure — otherwise the banner
-# would flash on every popup-open-after-idle. A genuinely-missing model 404s
-# *fast*, so it still resolves to not-ready well within the cap.
+# /api/health embedding readiness: cache the raw live-probe outcome so Docker
+# healthchecks and popup re-polls don't hit the embedding provider on every
+# call. Success caches for 30s; failure/timeout for 8s so a freshly-fixed or
+# just-finished cold load greens quickly. The probe itself is capped at 15s,
+# but local bge-m3 cold loads were observed at 16-29s on 2026-07-11. Ordinary
+# health therefore treats only a loopback-Ollama timeout as cold-loading and
+# optimistically available; guided init remains strict until a real vector
+# succeeds. Explicit False/errors still fail everywhere.
 _EMBEDDING_READY_TTL_SECONDS = 30.0
-# Strict readiness (gui-init): a failure/timeout caches briefly so a service
-# that finished a cold model load greens within seconds; the probe timeout is
-# generous enough for a cold Ollama load but still fails (does not optimistically
-# pass) if the embedding service never answers.
 _EMBEDDING_FAIL_TTL_SECONDS = 8.0
 _EMBEDDING_PROBE_TIMEOUT_SECONDS = 15.0
+_EmbeddingProbeOutcome = Literal["ready", "failed", "timed_out"]
 _LAN_IP_TTL_SECONDS = 30.0
 _AUTO_REPLENISH_DEBOUNCE_SECONDS = 30.0
 _FEEDBACK_BATCH_DEBOUNCE_SECONDS = 5.0
@@ -1859,7 +1853,7 @@ def create_app(
 
     # Embedding readiness is probed live (see _health_embedding_ready) and the
     # result cached here so frequent /api/health polls share one provider call.
-    _embedding_ready_value = False
+    _embedding_probe_outcome: _EmbeddingProbeOutcome = "failed"
     _embedding_ready_checked_at = float("-inf")
     _embedding_ready_lock = asyncio.Lock()
     # Classified not-ready cause (v0.3.155+), cached on the same cadence so
@@ -1884,6 +1878,23 @@ def create_app(
         base_url = str(getattr(emb, "base_url", "") or "").strip() or "http://localhost:11434/v1"
         model = str(getattr(emb, "model", "") or "").strip() or "bge-m3"
         return base_url, model
+
+    def _embedding_probe_ttl(outcome: _EmbeddingProbeOutcome) -> float:
+        return _EMBEDDING_READY_TTL_SECONDS if outcome == "ready" else _EMBEDDING_FAIL_TTL_SECONDS
+
+    def _embedding_probe_result(outcome: _EmbeddingProbeOutcome, *, strict: bool) -> bool:
+        if outcome == "ready":
+            return True
+        if outcome != "timed_out" or strict:
+            return False
+        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
+        provider = str(getattr(emb, "provider", "") or "").strip().lower()
+        if provider != "ollama":
+            return False
+        from openbiliclaw.runtime.ollama_supervisor import is_loopback
+
+        base_url, _ = _embedding_ollama_target()
+        return is_loopback(base_url)
 
     async def _diagnose_embedding(ready: bool) -> tuple[str, str]:
         """Classify why embedding is not ready (``("ok", "")`` when it is).
@@ -1963,8 +1974,8 @@ def create_app(
             _embedding_diag_checked_at = time.monotonic()
             return diag
 
-    async def _health_embedding_ready() -> bool:
-        """Whether the embedding service can *currently* produce a vector.
+    async def _health_embedding_ready(*, strict: bool = False) -> bool:
+        """Interpret the cached live embedding probe for health or strict init.
 
         This is a live signal, not a build-time one. A service object that
         was constructed at startup but whose provider now 404s (``bge-m3``
@@ -1978,9 +1989,10 @@ def create_app(
           - service without a ``probe()`` (legacy/stub) -> build-only ``True``;
           - otherwise a cache-bypassing ``probe()``, result cached for
             ``_EMBEDDING_READY_TTL_SECONDS`` and single-flighted so concurrent
-            polls share one provider round-trip.
+            polls share one provider round-trip. A loopback-Ollama timeout is
+            optimistic only when ``strict`` is false; init always passes true.
         """
-        nonlocal _embedding_ready_value, _embedding_ready_checked_at
+        nonlocal _embedding_probe_outcome, _embedding_ready_checked_at
 
         soul_engine = getattr(ctx, "soul_engine", None)
         service = getattr(soul_engine, "_embedding_service", None)
@@ -1991,39 +2003,32 @@ def create_app(
             # Legacy service without a live probe — "built" is the best signal.
             return True
 
-        _embedding_ttl = (
-            _EMBEDDING_READY_TTL_SECONDS if _embedding_ready_value else _EMBEDDING_FAIL_TTL_SECONDS
-        )
+        _embedding_ttl = _embedding_probe_ttl(_embedding_probe_outcome)
         if time.monotonic() - _embedding_ready_checked_at < _embedding_ttl:
-            return _embedding_ready_value
+            return _embedding_probe_result(_embedding_probe_outcome, strict=strict)
 
         async with _embedding_ready_lock:
             # Another request may have refreshed the cache while we waited.
-            _embedding_ttl = (
-                _EMBEDDING_READY_TTL_SECONDS
-                if _embedding_ready_value
-                else _EMBEDDING_FAIL_TTL_SECONDS
-            )
+            _embedding_ttl = _embedding_probe_ttl(_embedding_probe_outcome)
             if time.monotonic() - _embedding_ready_checked_at < _embedding_ttl:
-                return _embedding_ready_value
+                return _embedding_probe_result(_embedding_probe_outcome, strict=strict)
             try:
                 ready = bool(
                     await asyncio.wait_for(probe(), timeout=_EMBEDDING_PROBE_TIMEOUT_SECONDS)
                 )
+                outcome: _EmbeddingProbeOutcome = "ready" if ready else "failed"
             except TimeoutError:
-                # Strict (gui-init): a prereq is "ok" only on a confirmed real
-                # embedding round-trip. A timeout (even a cold model load) within
-                # the generous window means we could NOT confirm it works → report
-                # not-ready, and the short fail-TTL re-probes soon so it greens
-                # quickly once the load finishes.
-                logger.debug("Embedding readiness probe timed out; reporting not ready")
-                ready = False
+                logger.debug(
+                    "Embedding readiness probe timed out; ordinary loopback-Ollama health "
+                    "treats this as cold-loading while init remains strict"
+                )
+                outcome = "timed_out"
             except Exception:
                 logger.debug("Embedding readiness probe errored", exc_info=True)
-                ready = False
-            _embedding_ready_value = ready
+                outcome = "failed"
+            _embedding_probe_outcome = outcome
             _embedding_ready_checked_at = time.monotonic()
-            return ready
+            return _embedding_probe_result(outcome, strict=strict)
 
     def _embedding_required_for_init() -> bool:
         """Whether guided init must wait for a configured embedding provider."""
@@ -2103,7 +2108,7 @@ def create_app(
             # the same TTL-cached probe /api/health already exercises.
             bili = prereqs.peek_bilibili()
             chat = prereqs.peek_chat()
-            embedding = await _health_embedding_ready()
+            embedding = await _health_embedding_ready(strict=True)
         else:
             # Probe the three services concurrently — each is a real (now
             # strict) request with a generous cold-load timeout, so running
@@ -2113,7 +2118,7 @@ def create_app(
             bili, chat, embedding = await asyncio.gather(
                 prereqs.bilibili_check(),
                 prereqs.chat_ready(),
-                _health_embedding_ready(),
+                _health_embedding_ready(strict=True),
             )
         platforms = prereqs.enabled_platforms()
         trusted = _get_auth_gate().is_trusted_local(request)
@@ -2411,7 +2416,7 @@ def create_app(
         if not chat:
             coord.reset_to_idle(run_id, reason="llm_not_ready")
             return JSONResponse({"error": "llm_not_ready"}, status_code=409)
-        if _embedding_required_for_init() and not await _health_embedding_ready():
+        if _embedding_required_for_init() and not await _health_embedding_ready(strict=True):
             pulling = await _maybe_autostart_embedding_pull()
             coord.reset_to_idle(run_id, reason="embedding_not_ready")
             detail = (
