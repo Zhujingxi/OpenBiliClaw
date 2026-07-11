@@ -933,6 +933,24 @@ def main(log_level: str | None = typer.Option(None, "--log-level")) -> None:
     _APP_CONTEXT["log_level"] = log_level
     _bootstrap_container_runtime()
     _initialize_logging(log_level_override=log_level)
+    _sync_outbound_proxy()
+
+
+def _sync_outbound_proxy() -> None:
+    """Mirror [network].proxy into the process-level source of truth for CLI.
+
+    Runs once per CLI invocation so any command that builds an LLM registry or
+    the updater routes overseas traffic through the configured proxy. Guarded
+    so a missing/broken config never blocks a command from starting.
+    """
+    import contextlib
+
+    from openbiliclaw.config import load_config
+    from openbiliclaw.network import set_outbound_proxy
+
+    # Config resolution must never block a command from starting.
+    with contextlib.suppress(Exception):
+        set_outbound_proxy(load_config().network.proxy)
 
 
 def _print_config_guidance(messages: list[str]) -> None:
