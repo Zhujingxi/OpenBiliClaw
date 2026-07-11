@@ -112,7 +112,7 @@ class TestMobileWebViewModels:
               "getReadyRecommendationHint",
               "getRecommendationCoverPreloadUrls", "getRecommendationImageLoadingAttrs",
               "shouldAutoAppendRecommendations",
-              "formatRelativeTimestamp", "formatPublishedTime",
+              "formatRelativeTimestamp", "formatPublishedTime", "getPublishedTimeDisplay",
               "normalizeSourcePlatform", "getSourceLabel",
               "normalizeCoverUrl", "getCoverImageAttrs",
               "normalizePoolStatus", "normalizeMbtiDimensions", "normalizeChatTurn",
@@ -170,6 +170,36 @@ class TestMobileWebViewModels:
             for (const [item, expected] of cases) {
               assert.equal(formatPublishedTime(item, now), expected);
             }
+        """)
+        )
+
+    def test_publication_display_exposes_tooltip_only_for_valid_exact_time(self) -> None:
+        _assert_js(
+            dedent("""
+            import assert from "node:assert/strict";
+            import { getPublishedTimeDisplay } from "./src/openbiliclaw/web/js/view-models.js";
+
+            const now = new Date(2026, 6, 11, 12, 0, 0, 0).getTime();
+            const exactAt = new Date(now - 10_800_000).toISOString();
+            assert.deepEqual(getPublishedTimeDisplay({
+              published_at: exactAt,
+              published_label: "fallback",
+            }, now), {
+              text: "3 小时前",
+              title: new Date(exactAt).toLocaleString(),
+            });
+            assert.deepEqual(getPublishedTimeDisplay({ published_label: "3 天前" }, now), {
+              text: "3 天前",
+              title: "",
+            });
+            assert.deepEqual(getPublishedTimeDisplay({
+              published_at: "not-a-date",
+              published_label: "来源时间",
+            }, now), {
+              text: "来源时间",
+              title: "",
+            });
+            assert.equal(getPublishedTimeDisplay({}, now), null);
         """)
         )
 

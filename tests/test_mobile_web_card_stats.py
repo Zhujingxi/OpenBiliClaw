@@ -15,6 +15,24 @@ VIEW_MODELS_JS = ROOT / "src/openbiliclaw/web/js/view-models.js"
 APP_CSS = ROOT / "src/openbiliclaw/web/css/app.css"
 
 
+def _function_source(name: str) -> str:
+    js = RECOMMEND_JS.read_text()
+    marker = f"function {name}("
+    start = js.find(marker)
+    assert start >= 0, f"{name} function not found"
+    opening_brace = js.find("{", start)
+    assert opening_brace >= 0, f"{name} opening brace not found"
+    depth = 0
+    for index in range(opening_brace, len(js)):
+        if js[index] == "{":
+            depth += 1
+        elif js[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return js[start : index + 1]
+    raise AssertionError(f"{name} closing brace not found")
+
+
 def test_view_models_exposes_stats_formatter() -> None:
     """view-models.js owns the shared formatter + stats builder."""
 
@@ -85,9 +103,9 @@ def test_recommendation_publication_time_is_rendered_only_when_non_empty() -> No
 
     js = RECOMMEND_JS.read_text()
 
-    assert "const published = formatPublishedTime(item);" in js
-    assert "const publishedHtml = published" in js
-    assert '<span class="card-published-time">' in js
+    render_card = _function_source("renderCard")
+
+    assert "const publishedHtml = publishedTimeHtml(item);" in render_card
     assert "${publishedHtml}" in js
 
 
@@ -96,10 +114,21 @@ def test_delight_publication_time_is_rendered_only_when_non_empty() -> None:
 
     js = RECOMMEND_JS.read_text()
 
-    assert "const published = formatPublishedTime(d);" in js
-    assert "const publishedHtml = published" in js
-    assert '<span class="card-published-time">' in js
+    render_delight = _function_source("renderDelightTray")
+
+    assert "const publishedHtml = publishedTimeHtml(d);" in render_delight
     assert js.count("${publishedHtml}") >= 3
+
+
+def test_publication_html_escapes_text_and_exact_tooltip() -> None:
+    helper = _function_source("publishedTimeHtml")
+
+    assert "const display = getPublishedTimeDisplay(item);" in helper
+    assert 'if (!display) return "";' in helper
+    assert "esc(display.text)" in helper
+    assert "esc(display.title)" in helper
+    assert 'title="${esc(display.title)}"' in helper
+    assert '<span class="card-published-time"' in helper
 
 
 def test_publication_time_css_is_muted() -> None:

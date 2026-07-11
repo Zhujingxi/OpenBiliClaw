@@ -353,6 +353,16 @@ export function formatPublishedTime(item, now = Date.now()) {
   return String(item?.published_label || "").replace(/\s+/g, " ").trim().slice(0, 64);
 }
 
+export function getPublishedTimeDisplay(item, now = Date.now()) {
+  const text = formatPublishedTime(item, now);
+  if (!text) return null;
+  const parsed = Date.parse(String(item?.published_at || ""));
+  return {
+    text,
+    title: Number.isFinite(parsed) ? new Date(parsed).toLocaleString() : "",
+  };
+}
+
 // ── Engagement stats ─────────────────────────────────────────
 // Condense a raw count into Chinese-style 万/亿 units. Empty string for
 // non-positive values so callers render nothing.

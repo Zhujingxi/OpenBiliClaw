@@ -48,7 +48,7 @@ import {
   normalizeSourcePlatform,
   getSourceLabel,
   formatRelativeTimestamp,
-  formatPublishedTime,
+  getPublishedTimeDisplay,
   getMobileChatSession,
   shouldAutoAppendRecommendations,
 } from "../view-models.js";
@@ -89,6 +89,13 @@ function esc(s) {
   const el = document.createElement("span");
   el.textContent = s;
   return el.innerHTML;
+}
+
+export function publishedTimeHtml(item) {
+  const display = getPublishedTimeDisplay(item);
+  if (!display) return "";
+  const title = display.title ? ` title="${esc(display.title)}"` : "";
+  return `<span class="card-published-time"${title}>${esc(display.text)}</span>`;
 }
 
 // ── Render ────────────────────────────────────────────────────
@@ -391,10 +398,7 @@ function renderDelightTray() {
     : `<span class="delight-thumb is-fallback">\u2728</span>`;
   const reasonText = d.delight_reason || d.delight_hook || "";
   const statsText = recommendationStats(d);
-  const published = formatPublishedTime(d);
-  const publishedHtml = published
-    ? `<span class="card-published-time">${esc(published)}</span>`
-    : "";
+  const publishedHtml = publishedTimeHtml(d);
 
   tray.innerHTML = `
     ${delights.length > 1 ? `
@@ -1056,10 +1060,7 @@ function renderCard(rawItem, index = 0) {
   const url = buildContentUrl(item);
   const cardMedia = getRecommendationCardKind(item);
   const imageAttrs = getRecommendationImageLoadingAttrs(index);
-  const published = formatPublishedTime(item);
-  const publishedHtml = published
-    ? `<span class="card-published-time">${esc(published)}</span>`
-    : "";
+  const publishedHtml = publishedTimeHtml(item);
 
   let coverHtml;
   if (cardMedia.kind === "text") {
