@@ -112,13 +112,63 @@ class TestMobileWebViewModels:
               "getReadyRecommendationHint",
               "getRecommendationCoverPreloadUrls", "getRecommendationImageLoadingAttrs",
               "shouldAutoAppendRecommendations",
-              "formatRelativeTimestamp",
+              "formatRelativeTimestamp", "formatPublishedTime",
               "normalizeSourcePlatform", "getSourceLabel",
               "normalizeCoverUrl", "getCoverImageAttrs",
               "normalizePoolStatus", "normalizeMbtiDimensions", "normalizeChatTurn",
             ];
             for (const name of required) {
                 assert.equal(typeof vm[name], "function", `missing export: ${name}`);
+            }
+        """)
+        )
+
+    def test_publication_time_prefers_exact_time_and_falls_back_safely(self) -> None:
+        _assert_js(
+            dedent("""
+            import assert from "node:assert/strict";
+            import {
+              formatPublishedTime,
+              normalizeDelightCandidate,
+              normalizeRecommendation,
+            } from "./src/openbiliclaw/web/js/view-models.js";
+
+            const now = new Date(2026, 6, 11, 12, 0, 0, 0).getTime();
+            const iso = (offset) => new Date(now + offset).toISOString();
+            const exact = normalizeRecommendation({
+              id: 1,
+              bvid: "BV1",
+              published_at: iso(-10_800_000),
+              published_label: "fallback",
+            });
+            const delight = normalizeDelightCandidate({
+              bvid: "BV2",
+              published_at: "",
+              published_label: "  3   days ago\\n",
+            });
+
+            assert.equal(exact.published_at, iso(-10_800_000));
+            assert.equal(exact.published_label, "fallback");
+            assert.equal(delight.published_label, "3 days ago");
+
+            const cases = [
+              [exact, "3 小时前"],
+              [{ published_label: "  3   天前\\n" }, "3 天前"],
+              [{}, ""],
+              [{ published_at: "not-a-date", published_label: "来源时间" }, "来源时间"],
+              [{ published_at: iso(-59_999) }, "刚刚"],
+              [{ published_at: iso(-60_000) }, "1 小时前"],
+              [{ published_at: iso(-86_399_999) }, "23 小时前"],
+              [{ published_at: iso(-86_400_000) }, "1 天前"],
+              [{ published_at: iso(-604_799_999) }, "6 天前"],
+              [{ published_at: iso(-604_800_000) }, "7月4日"],
+              [{ published_at: new Date(2026, 0, 2, 12).toISOString() }, "1月2日"],
+              [{ published_at: new Date(2025, 10, 9, 12).toISOString() }, "2025-11-09"],
+              [{ published_at: iso(300_000) }, "刚刚"],
+              [{ published_at: iso(300_001) }, "7月11日"],
+            ];
+            for (const [item, expected] of cases) {
+              assert.equal(formatPublishedTime(item, now), expected);
             }
         """)
         )

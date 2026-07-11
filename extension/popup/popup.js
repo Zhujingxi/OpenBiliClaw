@@ -8,6 +8,7 @@ import {
   buildRecommendationClickPayload,
   buildVideoUrl,
   formatRelativeTimestamp,
+  formatPublishedTime,
   getCommentSubmitUiState,
   getCognitionHistoryUiState,
   getConnectionBadgeState,
@@ -2496,6 +2497,18 @@ function appendRecommendationStats(parent, item) {
   parent.append(stats);
 }
 
+function appendPublishedTime(parent, item) {
+  const text = formatPublishedTime(item);
+  if (!text) return;
+  const time = document.createElement("span");
+  time.className = "recommendation-published-time";
+  time.textContent = text;
+  if (item.published_at && Number.isFinite(Date.parse(item.published_at))) {
+    time.title = new Date(item.published_at).toLocaleString();
+  }
+  parent.append(time);
+}
+
 // ── Delight (surprise recommendation) card ─────────────────────
 
 function buildDelightCard(delight) {
@@ -2552,6 +2565,7 @@ function buildDelightCard(delight) {
   title.className = "message-delight-title";
   title.textContent = delight.title || "";
   textCol.append(title);
+  appendPublishedTime(textCol, delight);
 
   top.append(textCol);
   item.append(top);
@@ -5182,6 +5196,7 @@ function renderRecommendations(items, { append = false } = {}) {
     const metaLine = document.createElement("p");
     metaLine.className = "recommendation-meta-line";
     metaLine.textContent = `这位 UP：${item.up_name}`;
+    appendPublishedTime(metaLine, item);
 
     content.append(top, copyBlock, metaLine);
     appendRecommendationStats(content, item);

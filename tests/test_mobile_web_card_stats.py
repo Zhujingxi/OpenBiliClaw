@@ -78,3 +78,34 @@ def test_card_stats_css_is_muted() -> None:
 
     assert ".card-stats {" in css
     assert "var(--text-muted)" in css
+
+
+def test_recommendation_publication_time_is_rendered_only_when_non_empty() -> None:
+    """Recommendation metadata uses the shared publication formatter."""
+
+    js = RECOMMEND_JS.read_text()
+
+    assert "const published = formatPublishedTime(item);" in js
+    assert "const publishedHtml = published" in js
+    assert '<span class="card-published-time">' in js
+    assert "${publishedHtml}" in js
+
+
+def test_delight_publication_time_is_rendered_only_when_non_empty() -> None:
+    """Delight metadata follows the same optional publication contract."""
+
+    js = RECOMMEND_JS.read_text()
+
+    assert "const published = formatPublishedTime(d);" in js
+    assert "const publishedHtml = published" in js
+    assert '<span class="card-published-time">' in js
+    assert js.count("${publishedHtml}") >= 3
+
+
+def test_publication_time_css_is_muted() -> None:
+    """Publication time remains secondary metadata."""
+
+    css = APP_CSS.read_text()
+
+    assert ".card-published-time {" in css
+    assert "var(--text-muted)" in css

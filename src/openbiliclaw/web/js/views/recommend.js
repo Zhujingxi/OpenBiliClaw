@@ -48,6 +48,7 @@ import {
   normalizeSourcePlatform,
   getSourceLabel,
   formatRelativeTimestamp,
+  formatPublishedTime,
   getMobileChatSession,
   shouldAutoAppendRecommendations,
 } from "../view-models.js";
@@ -390,6 +391,10 @@ function renderDelightTray() {
     : `<span class="delight-thumb is-fallback">\u2728</span>`;
   const reasonText = d.delight_reason || d.delight_hook || "";
   const statsText = recommendationStats(d);
+  const published = formatPublishedTime(d);
+  const publishedHtml = published
+    ? `<span class="card-published-time">${esc(published)}</span>`
+    : "";
 
   tray.innerHTML = `
     ${delights.length > 1 ? `
@@ -415,6 +420,7 @@ function renderDelightTray() {
             <div class="delight-meta">
               <span class="card-source" data-source="${d.source_platform}">${esc(getSourceLabel(d.source_platform))}</span>
               ${uiState.score_label ? `<span>${esc(uiState.score_label)}</span>` : ""}
+              ${publishedHtml}
             </div>
           </div>
         ` : `
@@ -422,6 +428,7 @@ function renderDelightTray() {
           <div class="delight-meta">
             <span class="card-source" data-source="${d.source_platform}">${esc(getSourceLabel(d.source_platform))}</span>
             ${uiState.score_label ? `<span>${esc(uiState.score_label)}</span>` : ""}
+            ${publishedHtml}
           </div>
         `}
       </div>
@@ -1049,6 +1056,10 @@ function renderCard(rawItem, index = 0) {
   const url = buildContentUrl(item);
   const cardMedia = getRecommendationCardKind(item);
   const imageAttrs = getRecommendationImageLoadingAttrs(index);
+  const published = formatPublishedTime(item);
+  const publishedHtml = published
+    ? `<span class="card-published-time">${esc(published)}</span>`
+    : "";
 
   let coverHtml;
   if (cardMedia.kind === "text") {
@@ -1070,6 +1081,7 @@ function renderCard(rawItem, index = 0) {
         <span class="card-source" data-source="${item.source_platform}">${esc(getSourceLabel(item.source_platform))}</span>
         ${item.up_name ? `<span>${esc(item.up_name)}</span>` : ""}
         ${item.topic_label ? `<span style="color:var(--text-muted)">${esc(item.topic_label)}</span>` : ""}
+        ${publishedHtml}
       </div>
       ${recommendationStats(item) ? `<div class="card-stats">${esc(recommendationStats(item))}</div>` : ""}
       ${item.expression ? `<div class="card-expression">${esc(item.expression)}</div>` : ""}
