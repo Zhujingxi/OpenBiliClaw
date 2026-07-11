@@ -259,6 +259,7 @@ test("probe performs only OAuth and one redacted v1.1 GET", async () => {
 
 test("probe schema failure stops before status, cancellation, or writes", async () => {
   const calls: Array<{ url: string; method: string; body: string }> = [];
+  const logs: string[] = [];
 
   await assert.rejects(
     runMetadataCommand({
@@ -274,12 +275,29 @@ test("probe schema failure stops before status, cancellation, or writes", async 
         jsonResponse({ kind: "chromewebstore#item", id: "item-id", uploadState: "SUCCESS" }),
       ]),
       readFileImpl,
-      log: () => {},
+      log: (line: string) => logs.push(line),
     }),
     /writable listing metadata/,
   );
 
   assert.deepEqual(calls.map(({ method }) => method), ["POST", "GET"]);
+  assert.deepEqual(JSON.parse(logs[0]), {
+    operation: "probe",
+    probe: {
+      fieldNames: ["id", "kind", "uploadState"],
+      summary: {
+        present: false,
+        length: 0,
+        sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      },
+      description: {
+        present: false,
+        length: 0,
+        sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      },
+      assetFieldNames: [],
+    },
+  });
 });
 
 test("apply refuses to cancel a pending review without explicit replacement", async () => {

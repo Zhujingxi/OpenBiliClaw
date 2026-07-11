@@ -14,7 +14,7 @@
 - **偏好反馈跨主题轴生效且操作更明确**：推荐反馈同时匹配细粒度与粗粒度 topic，并保留真实平台来源；桌面、移动和插件端统一兴趣 / 避雷 / 稍后反馈语义，移除会误导用户的推荐纠正入口，同时保持延迟聊天输入聚焦和 embedding fallback 稳定。
 - **Chrome Web Store 待审版本可显式替换**：商店发布 workflow 新增默认关闭的 `replace_pending`；仅当上传返回官方 `NOT_UPDATEABLE` 时调用 `cancelSubmission` 撤回旧审核，再重试同一新版上传并提交审核，避免上一版长时间待审阻断紧随其后的修复版。
 - **Chrome Web Store 商店页文案与截图已刷新**：短描述和详细描述改为七平台、本地后端、数据默认留在本机的准确定位，移除“至少先登录 B 站”和只列四个平台的过期引导；新增五张 1280×800「品牌首图 + 当前真实界面」素材，依次展示七平台、插件 / PC / 手机三端、跨平台推荐、可纠正画像和诚实登录状态。截图由只允许 loopback 请求的固定脱敏演示服务生成，不读取真实配置、数据库、Cookie 或账号信息，并用 pytest 锁定文件顺序、尺寸和平台覆盖。
-- **Chrome Web Store listing metadata API 安全自动化**：新增独立 `Update Chrome Web Store Listing` workflow、`chrome-webstore-metadata.mjs` CLI 和 15 项 Node 回归测试。默认只读探测 v1.1 draft，仅输出字段名、长度与 SHA-256；只有 response 实际暴露 `summary` / `description` 和 listing identity 后，显式 apply 才会撤审、allowlist 写入、精确回读并通过 v2 重新提审。Google 官方 v1.1 `Item` resource 未承诺详情页文案字段且 API 将于 2026-10-15 停止支持，因此 schema 不匹配会在撤审 / 写入前安全停止；截图没有公开写接口，仍禁止猜测 Dashboard 私有端点、读取浏览器 Cookie 或声称仓库 PNG 已经上线。测试侧同时移除 B站 content-script retry 用例对“300ms 等待前重试一定尚未触发”的负载敏感假设，不改生产重试行为。
+- **Chrome Web Store listing metadata API 安全自动化**：新增独立 `Update Chrome Web Store Listing` workflow、`chrome-webstore-metadata.mjs` CLI 和 15 项 Node 回归测试。默认只读探测 v1.1 draft，即使 schema 不支持写入也会先输出字段名、长度与 SHA-256；只有 response 实际暴露 `summary` / `description` 和 listing identity 后，显式 apply 才会撤审、allowlist 写入、精确回读并通过 v2 重新提审。Google 官方 v1.1 `Item` resource 未承诺详情页文案字段且 API 将于 2026-10-15 停止支持，因此 schema 不匹配会在撤审 / 写入前安全停止；截图没有公开写接口，仍禁止猜测 Dashboard 私有端点、读取浏览器 Cookie 或声称仓库 PNG 已经上线。测试侧同时移除 B站 content-script retry 用例对“300ms 等待前重试一定尚未触发”的负载敏感假设，不改生产重试行为。
 
 ## v0.3.162 / extension v0.3.162 / desktop v0.3.162：跨设备扩展认证、反馈提速、发布时间贯通与 Ollama 自愈（2026-07-11）
 

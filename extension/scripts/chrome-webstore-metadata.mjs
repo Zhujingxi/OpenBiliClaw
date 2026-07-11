@@ -258,15 +258,13 @@ export function findReviewState(status) {
   return typeof state === "string" ? state : "";
 }
 
-function probeSupportsSafeMetadataUpdate(draft, canonical) {
-  const probe = summarizeDraft(draft);
+function requireSafeMetadataUpdate(draft, canonical, probe) {
   if (!probe.summary.present || !probe.description.present) {
     throw new Error(
       "The v1.1 probe does not expose writable listing metadata; stopped before cancellation or writes",
     );
   }
   buildMetadataPayload(draft, canonical);
-  return probe;
 }
 
 export async function runMetadataCommand({
@@ -281,8 +279,9 @@ export async function runMetadataCommand({
   const credentials = credentialsFromEnv(env);
   const accessToken = await getAccessToken(credentials, fetchImpl);
   const draft = await getDraft(credentials, accessToken, fetchImpl);
-  const probe = probeSupportsSafeMetadataUpdate(draft, canonical);
+  const probe = summarizeDraft(draft);
   log(JSON.stringify({ operation: "probe", probe }));
+  requireSafeMetadataUpdate(draft, canonical, probe);
 
   if (options.mode === "probe") {
     return { operation: "probe", probe };
