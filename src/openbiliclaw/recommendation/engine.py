@@ -21,6 +21,7 @@ from openbiliclaw.llm.json_utils import extract_llm_json_list, extract_llm_json_
 from openbiliclaw.llm.prompt_cache import PromptLayerRenderCache, profile_prompt_layers
 from openbiliclaw.llm.service import is_llm_rate_limit_error
 from openbiliclaw.llm.task_options import without_core_memory_kwargs
+from openbiliclaw.saved_sync.identity import content_storage_key
 from openbiliclaw.soul.tone import ToneProfile, build_tone_profile
 
 if TYPE_CHECKING:
@@ -458,6 +459,7 @@ class RecommendationEngine:
             [
                 {
                     "bvid": rec.content.bvid,
+                    "item_key": rec.content.item_key,
                     "expression": rec.expression,
                     "topic": rec.topic_label,
                     "confidence": rec.confidence,
@@ -1125,7 +1127,11 @@ class RecommendationEngine:
                     item.topic_key = item.topic_group
                 try:
                     self._database.cache_content(
-                        item.bvid,
+                        content_storage_key(
+                            item.source_platform,
+                            item.content_id or item.bvid,
+                            item.content_url,
+                        ),
                         **item.to_cache_kwargs(),
                     )
                     classified += 1

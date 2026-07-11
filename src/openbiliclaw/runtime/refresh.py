@@ -925,6 +925,8 @@ class ContinuousRefreshController:
             return None
         return {
             "bvid": str(candidate.get("bvid", "")),
+            "item_key": str(candidate.get("item_key", "")),
+            "content_id": str(candidate.get("content_id", "") or candidate.get("bvid", "")),
             "title": str(candidate.get("title", "")),
             "delight_reason": str(candidate.get("delight_reason", "")),
             "delight_score": float(candidate.get("delight_score", 0.0) or 0.0),
@@ -932,6 +934,8 @@ class ContinuousRefreshController:
             "cover_url": str(candidate.get("cover_url", "")),
             "content_url": str(candidate.get("content_url", "")),
             "source_platform": str(candidate.get("source_platform", "") or "bilibili"),
+            "content_type": str(candidate.get("content_type", "") or "video"),
+            "body_text": str(candidate.get("body_text", "") or ""),
             "view_count": int(candidate.get("view_count", 0) or 0),
             "like_count": int(candidate.get("like_count", 0) or 0),
             "comment_count": int(candidate.get("comment_count", 0) or 0),
@@ -2346,6 +2350,8 @@ class ContinuousRefreshController:
                 "phase": "ready",
                 "message": "发现了一条你可能会意外喜欢的内容",
                 "bvid": candidate.get("bvid", ""),
+                "item_key": candidate.get("item_key", ""),
+                "content_id": candidate.get("content_id", "") or candidate.get("bvid", ""),
                 "title": candidate.get("title", ""),
                 "delight_reason": candidate.get("delight_reason", ""),
                 "delight_score": candidate.get("delight_score", 0.0),
@@ -2353,6 +2359,8 @@ class ContinuousRefreshController:
                 "cover_url": candidate.get("cover_url", ""),
                 "content_url": candidate.get("content_url", ""),
                 "source_platform": candidate.get("source_platform", "bilibili"),
+                "content_type": candidate.get("content_type", "video"),
+                "body_text": candidate.get("body_text", ""),
                 # Engagement stats so a live-pushed delight card shows the same
                 # ▶/👍/💬 row as the pending-batch path (0 = not fetched). Passed
                 # through as-is like the other row fields; the client coerces.

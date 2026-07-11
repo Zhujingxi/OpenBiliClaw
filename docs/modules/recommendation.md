@@ -16,7 +16,7 @@
 
 | 任务 | 状态 | 说明 |
 |------|------|------|
-| 6.1 推荐排序 | ✅ | 从 `content_cache` 选未推荐内容、按分数排序、写入推荐历史 |
+| 6.1 推荐排序 | ✅ | 从 `content_cache` 选未推荐内容、按分数排序、以 canonical `item_key` 写入推荐历史 |
 | 6.2 朋友式推荐表达 | ✅ | 用 LLM 生成朋友式推荐理由和个性化 topic，并在 CLI 中真实展示 |
 | 6.3 推荐持久化 | ✅ | 推荐记录已补齐展示状态、结构化反馈字段和反馈更新时间 |
 | 候选排序统一 | ✅ | freshly discovered 与 cache backfill 现在共享同一套 tier / relevance / recency 排序口径 |
@@ -170,10 +170,12 @@ items = await engine.append_recommendations(
 - 若 API 看到 `pool_available_count=0`，会立即返回 `items=[]` 并按 30 秒 debounce 触发一次后台补货；不会读取画像或进入推荐引擎
 - 若 `excluded_bvids` 或最近已看过滤把候选清空，引擎直接返回空数组，不执行 curator、MMR embedding 或推荐历史写入
 - 仍然走 discovery pool 快路径，不等待新一轮 discover 完成
-- 从 pool row 还原 `DiscoveredContent` 时会保留 `content_type/body_text/content_id/content_url/source_platform`；X tweet / thread 在 append 续页里也必须继续按文字卡渲染
+- 从 pool row 还原 `DiscoveredContent` 时会保留 `item_key/content_type/body_text/content_id/content_url/source_platform`；X tweet / thread 在 append 续页里也必须继续按文字卡渲染
 - 同样复用 `topic_key + style_key + source` 的多样性选择逻辑，并只读取 pool 内已预生成好的推荐文案
 - 追加命中的内容也会立即写入 `recommendations` 表，并把对应池子项标记为 `shown`
 - API 层在 `append` 返回后会发布最新 `refresh.pool_updated` 池子快照，便于其它 surface 更新“还剩几条可换”；正在浏览的列表保持原样，只有用户继续滚动或主动换一批才消费更多候选
+
+推荐历史、换一批、续页以及 delight 输出共享五字段身份契约：`item_key`、raw `content_id`、`source_platform`、authoritative `content_url`、`content_type`。兼容字段 `bvid` 对 B 站继续暴露 raw BV ID；跨平台关联优先使用 `item_key`，不再用裸 `content_id` 做新记录 join。
 
 ### RecommendationEngine.precompute_pool_copy
 

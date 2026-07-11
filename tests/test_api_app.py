@@ -4504,6 +4504,7 @@ class TestBackendAPI:
                 {
                     "id": 11,
                     "bvid": "BV1NEW",
+                    "item_key": "bilibili:BV1NEW",
                     "title": "新的一批",
                     "up_name": "UPA",
                     "cover_url": "https://i0.hdslb.com/bfs/archive/new-cover.jpg",
@@ -4527,6 +4528,7 @@ class TestBackendAPI:
                 {
                     "id": 12,
                     "bvid": "BV1PLAIN",
+                    "item_key": "bilibili:BV1PLAIN",
                     "title": "朴素对象",
                     "up_name": "UPB",
                     "cover_url": "https://i0.hdslb.com/bfs/archive/plain-cover.jpg",
@@ -4640,6 +4642,7 @@ class TestBackendAPI:
                 {
                     "id": 22,
                     "bvid": "BV1NEXT",
+                    "item_key": "bilibili:BV1NEXT",
                     "title": "下一批 1",
                     "up_name": "UPB",
                     "cover_url": "https://i0.hdslb.com/bfs/archive/next-cover.jpg",

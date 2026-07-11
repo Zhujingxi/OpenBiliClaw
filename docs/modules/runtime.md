@@ -193,7 +193,7 @@ embedding_progress.reset()
 
 主动探针仲裁规则：
 
-- 每轮 proactive push 最多发布一条 probe；惊喜推荐仍走独立 `delight.candidate` 逻辑。
+- 每轮 proactive push 最多发布一条 probe；惊喜推荐仍走独立 `delight.candidate` 逻辑。单条 pending、批量 rehydrate 与 runtime 事件统一透传 canonical `item_key`、raw `content_id`、`source_platform`、`content_url`、`content_type`。
 - 正向和负向都有候选时，根据上一次成功投递的 `last_probe_kind` 反向优先，形成 `interest -> avoidance -> interest` 的轮转。
 - 发布失败（例如没有订阅者）时不写 `last_probe_kind`，也不消耗 `probed_domains` / `probed_avoidance_domains`。
 - runtime 只会投递 `status="active"` 的正向/负向探针；已经确认、拒绝或过期的旧候选即使仍残留在某次内存快照中，也不会再次进入 `interest.probe` / `avoidance.probe` 事件流。

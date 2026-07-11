@@ -152,6 +152,7 @@ from openbiliclaw.runtime.keyword_fetch import (
     mark_keyword_terminal_from_xhs_task,
     source_keyword_id_from_xhs_task,
 )
+from openbiliclaw.saved_sync.identity import make_item_key
 from openbiliclaw.soul.dislike_writeback import (
     apply_new_dislikes,
     topics_for_confirmed_avoidance,
@@ -3186,10 +3187,22 @@ def create_app(
         return {"ok": True}
 
     def _serialize_recommendation_items(items: list[Any]) -> list[RecommendationOut]:
+        def item_key_for(content: Any) -> str:
+            explicit = str(getattr(content, "item_key", "") or "").strip()
+            if explicit:
+                return explicit
+            bvid = str(getattr(content, "bvid", "") or "")
+            return make_item_key(
+                str(getattr(content, "source_platform", "") or "bilibili"),
+                str(getattr(content, "content_id", "") or bvid),
+                str(getattr(content, "content_url", "") or ""),
+            )
+
         return [
             RecommendationOut(
                 id=int(item.recommendation_id),
                 bvid=str(item.content.bvid),
+                item_key=item_key_for(item.content),
                 title=str(item.content.title),
                 up_name=str(item.content.up_name),
                 cover_url=str(item.content.cover_url),
@@ -3986,6 +3999,7 @@ def create_app(
                 RecommendationOut(
                     id=int(row["id"]),
                     bvid=str(row.get("bvid", "")),
+                    item_key=str(row.get("item_key", "")),
                     title=str(row.get("title", "")),
                     up_name=str(row.get("up_name", "")),
                     cover_url=str(row.get("cover_url", "")),
@@ -4048,11 +4062,14 @@ def create_app(
             items=[
                 WatchLaterItem(
                     bvid=str(row.get("bvid", "")),
+                    item_key=str(row.get("item_key", "")),
+                    content_id=str(row.get("content_id", "") or row.get("bvid", "")),
                     title=str(row.get("title", "")),
                     up_name=str(row.get("up_name", "")),
                     cover_url=str(row.get("cover_url", "")),
                     content_url=str(row.get("content_url", "")),
                     source_platform=str(row.get("source_platform", "") or "bilibili"),
+                    content_type=str(row.get("content_type", "") or "video"),
                     added_at=str(row.get("added_at", "")),
                 )
                 for row in rows
@@ -4096,11 +4113,14 @@ def create_app(
             items=[
                 FavoriteItem(
                     bvid=str(row.get("bvid", "")),
+                    item_key=str(row.get("item_key", "")),
+                    content_id=str(row.get("content_id", "") or row.get("bvid", "")),
                     title=str(row.get("title", "")),
                     up_name=str(row.get("up_name", "")),
                     cover_url=str(row.get("cover_url", "")),
                     content_url=str(row.get("content_url", "")),
                     source_platform=str(row.get("source_platform", "") or "bilibili"),
+                    content_type=str(row.get("content_type", "") or "video"),
                     added_at=str(row.get("added_at", "")),
                 )
                 for row in rows
@@ -4628,6 +4648,8 @@ def create_app(
                 "phase": "ready",
                 "message": "发现了一条你可能会意外喜欢的内容",
                 "bvid": str(row.get("bvid", "")),
+                "item_key": str(row.get("item_key", "")),
+                "content_id": str(row.get("content_id", "") or row.get("bvid", "")),
                 "title": str(row.get("title", "")),
                 "delight_reason": str(row.get("delight_reason", "")),
                 "delight_score": float(row.get("delight_score", 0.0) or 0.0),
@@ -4714,6 +4736,8 @@ def create_app(
         items = [
             {
                 "bvid": str(row.get("bvid", "")),
+                "item_key": str(row.get("item_key", "")),
+                "content_id": str(row.get("content_id", "") or row.get("bvid", "")),
                 "title": str(row.get("title", "")),
                 "delight_reason": str(row.get("delight_reason", "")),
                 "delight_score": float(row.get("delight_score", 0.0) or 0.0),

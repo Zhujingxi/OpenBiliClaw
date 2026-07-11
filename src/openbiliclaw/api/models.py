@@ -104,6 +104,7 @@ class RecommendationOut(BaseModel):
 
     id: int
     bvid: str
+    item_key: str = ""
     title: str = ""
     up_name: str = ""
     cover_url: str = ""
@@ -252,6 +253,8 @@ class PendingDelightOut(BaseModel):
     """One proactive delight recommendation."""
 
     bvid: str
+    item_key: str = ""
+    content_id: str = ""
     title: str = ""
     delight_reason: str = ""
     delight_score: float = 0.0
@@ -259,6 +262,8 @@ class PendingDelightOut(BaseModel):
     cover_url: str = ""
     content_url: str = ""
     source_platform: str = ""
+    content_type: str = "video"
+    body_text: str = ""
     # Engagement stats (from content_cache), so the delight card can show the
     # same ▶ / 👍 / 💬 metadata row as the recommendation grid. 0 = unknown /
     # not fetched (platforms that don't populate a metric render nothing).
@@ -885,11 +890,14 @@ class WatchLaterItem(BaseModel):
     """One item in the watch-later list."""
 
     bvid: str
+    item_key: str = ""
+    content_id: str = ""
     title: str = ""
     up_name: str = ""
     cover_url: str = ""
     content_url: str = ""
     source_platform: str = ""
+    content_type: str = "video"
     added_at: str = ""
 
 
@@ -918,11 +926,14 @@ class FavoriteItem(BaseModel):
     """One item in the favorites list."""
 
     bvid: str
+    item_key: str = ""
+    content_id: str = ""
     title: str = ""
     up_name: str = ""
     cover_url: str = ""
     content_url: str = ""
     source_platform: str = ""
+    content_type: str = "video"
     added_at: str = ""
 
 

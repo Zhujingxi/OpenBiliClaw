@@ -591,7 +591,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
 │   LLM adapters · Source adapters (SourceAdapter) │
-│   Unified admission · SQLite (events · pool · recs)│
+│ Canonical ID · SQLite (events · pool · recs · saved)│
 └────────────────────────────────────────────────┘
 ```
 

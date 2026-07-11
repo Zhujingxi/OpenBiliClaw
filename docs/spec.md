@@ -353,7 +353,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  └───────────┘ └─────────────┘ └────────────┘ └─────────┘  │
 │  SQLite: events(inferred_satisfaction) / discovery_candidates     │
 │          discovery_keywords(+cohort gate) / discovery_inspiration_*│
-│          content_cache / recommendations / chat_turns / avoidance_state │
+│          content_cache(item_key) / recommendations(item_key) / chat_turns / avoidance_state │
 └──────────────────────────────────────────────────────────────┘
 ```
 

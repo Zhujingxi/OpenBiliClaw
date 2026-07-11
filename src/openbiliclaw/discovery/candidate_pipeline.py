@@ -727,13 +727,19 @@ class DiscoveryCandidatePipeline:
 
         candidate_keys = [write.candidate_key for write in writes if write.candidate_key]
         known_candidate_keys = self._existing_candidate_keys(candidate_keys)
-        content_ids = [
-            value
-            for write in writes
-            for value in (write.bvid, write.content_id)
-            if str(value or "").strip()
-        ]
-        known_cache_ids = self._existing_content_cache_ids(content_ids)
+        canonical_cache_lookup = callable(
+            getattr(self.database, "get_existing_content_cache_item_keys", None)
+        )
+        known_cache_keys = self._existing_content_cache_item_keys(candidate_keys)
+        known_cache_ids: set[str] = set()
+        if not canonical_cache_lookup:
+            content_ids = [
+                value
+                for write in writes
+                for value in (write.bvid, write.content_id)
+                if str(value or "").strip()
+            ]
+            known_cache_ids = self._existing_content_cache_ids(content_ids)
 
         seen: set[str] = set()
         kept: list[DiscoveryCandidateWrite] = []
@@ -753,7 +759,9 @@ class DiscoveryCandidatePipeline:
                 for value in (write.bvid, write.content_id)
                 if str(value or "").strip()
             }
-            if identifiers & known_cache_ids:
+            if key in known_cache_keys or (
+                not canonical_cache_lookup and identifiers & known_cache_ids
+            ):
                 diagnostics["known_cache"] += 1
                 continue
             kept.append(write)
@@ -778,6 +786,16 @@ class DiscoveryCandidatePipeline:
             return {str(key) for key in getter(content_ids)}
         except Exception:
             logger.debug("existing content-cache id lookup failed", exc_info=True)
+            return set()
+
+    def _existing_content_cache_item_keys(self, item_keys: list[str]) -> set[str]:
+        getter = getattr(self.database, "get_existing_content_cache_item_keys", None)
+        if not callable(getter) or not item_keys:
+            return set()
+        try:
+            return {str(key) for key in getter(item_keys)}
+        except Exception:
+            logger.debug("existing content-cache item-key lookup failed", exc_info=True)
             return set()
 
     def _eval_supply_counts(self) -> tuple[int, int]:

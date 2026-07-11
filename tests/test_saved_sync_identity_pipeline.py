@@ -1,0 +1,185 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
+
+import pytest
+from fastapi.testclient import TestClient
+
+from openbiliclaw.api.app import create_app
+from openbiliclaw.config import Config, save_config
+from openbiliclaw.discovery.candidate_pipeline import DiscoveryCandidatePipeline
+from openbiliclaw.discovery.engine import DiscoveredContent
+from openbiliclaw.storage.database import Database
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+@pytest.fixture
+def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Database:
+    project_root = tmp_path / "runtime"
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(project_root))
+    config = Config()
+    config.scheduler.enabled = False
+    config.llm.default_provider = "ollama"
+    config.llm.ollama.model = "llama3"
+    save_config(config, project_root / "config.toml")
+    database = Database(tmp_path / "identity-pipeline.db")
+    database.initialize()
+    return database
+
+
+def test_same_raw_content_id_survives_two_platform_recommendation_outputs(
+    db: Database,
+) -> None:
+    rows = [
+        DiscoveredContent(content_id="123", source_platform="twitter", title="x"),
+        DiscoveredContent(content_id="123", source_platform="douyin", title="dy"),
+    ]
+    for item in rows:
+        db.cache_content(item.item_key, **item.to_cache_kwargs())
+    cached = db.conn.execute(
+        "SELECT item_key, source_platform, content_id FROM content_cache "
+        "WHERE content_id='123' ORDER BY item_key"
+    ).fetchall()
+    assert [tuple(row) for row in cached] == [
+        ("douyin:123", "douyin", "123"),
+        ("twitter:123", "twitter", "123"),
+    ]
+
+
+def test_recommendation_rows_preserve_canonical_identity(db: Database) -> None:
+    item = DiscoveredContent(
+        content_id="123",
+        source_platform="twitter",
+        content_url="https://x.com/u/status/123",
+        content_type="tweet",
+        title="x",
+    )
+    db.cache_content(item.item_key, **item.to_cache_kwargs())
+
+    [recommendation_id] = db.batch_insert_recommendations(
+        [
+            {
+                "bvid": item.item_key,
+                "item_key": item.item_key,
+                "expression": "给你看条推文",
+                "topic": "X",
+                "confidence": 0.9,
+            }
+        ]
+    )
+
+    row = db.conn.execute(
+        "SELECT item_key FROM recommendations WHERE id = ?",
+        (recommendation_id,),
+    ).fetchone()
+    assert row is not None
+    assert row["item_key"] == "twitter:123"
+
+    [output] = db.get_recommendations()
+    assert output["item_key"] == "twitter:123"
+    assert output["content_id"] == "123"
+    assert output["source_platform"] == "twitter"
+    assert output["content_url"] == "https://x.com/u/status/123"
+    assert output["content_type"] == "tweet"
+
+
+def test_recommendation_api_preserves_canonical_identity(db: Database) -> None:
+    item = DiscoveredContent(
+        content_id="123",
+        source_platform="twitter",
+        content_url="https://x.com/u/status/123",
+        content_type="tweet",
+        title="x",
+    )
+    db.cache_content(item.item_key, **item.to_cache_kwargs())
+    db.insert_recommendation(
+        item.item_key,
+        item_key=item.item_key,
+        confidence=0.9,
+        expression="给你看条推文",
+    )
+    app = create_app(
+        memory_manager=SimpleNamespace(
+            load_discovery_runtime_state=lambda: {},
+            load_cognition_updates=lambda: [],
+        ),
+        database=db,
+        soul_engine=SimpleNamespace(get_profile=lambda: None),
+    )
+
+    response = TestClient(app).get("/api/recommendations")
+
+    assert response.status_code == 200
+    payload = response.json()["items"][0]
+    assert payload["item_key"] == "twitter:123"
+    assert payload["content_id"] == "123"
+    assert payload["source_platform"] == "twitter"
+    assert payload["content_url"] == "https://x.com/u/status/123"
+    assert payload["content_type"] == "tweet"
+
+
+def test_non_bilibili_storage_key_never_becomes_a_bilibili_url() -> None:
+    item = DiscoveredContent(
+        bvid="twitter:123",
+        content_id="123",
+        source_platform="twitter",
+        content_type="tweet",
+    )
+
+    assert item.item_key == "twitter:123"
+    assert item.content_url == ""
+
+
+def test_pending_delight_api_preserves_canonical_identity(db: Database) -> None:
+    runtime = SimpleNamespace(
+        get_pending_delight=lambda: {
+            "bvid": "twitter:123",
+            "item_key": "twitter:123",
+            "content_id": "123",
+            "source_platform": "twitter",
+            "content_url": "https://x.com/u/status/123",
+            "content_type": "tweet",
+        }
+    )
+    app = create_app(
+        memory_manager=SimpleNamespace(
+            load_discovery_runtime_state=lambda: {},
+            load_cognition_updates=lambda: [],
+        ),
+        database=db,
+        soul_engine=SimpleNamespace(get_profile=lambda: None),
+        runtime_controller=runtime,
+    )
+
+    response = TestClient(app).get("/api/delight/pending")
+
+    assert response.status_code == 200
+    payload = response.json()["item"]
+    assert payload["item_key"] == "twitter:123"
+    assert payload["content_id"] == "123"
+    assert payload["source_platform"] == "twitter"
+    assert payload["content_url"] == "https://x.com/u/status/123"
+    assert payload["content_type"] == "tweet"
+
+
+def test_candidate_filter_does_not_cross_platform_dedupe_raw_ids(db: Database) -> None:
+    twitter = DiscoveredContent(content_id="123", source_platform="twitter", title="x")
+    db.cache_content(twitter.item_key, **twitter.to_cache_kwargs())
+    pipeline = DiscoveryCandidatePipeline(
+        database=db,
+        discovery_engine=object(),  # type: ignore[arg-type]
+        pool_target_count=30,
+    )
+
+    enqueued = pipeline.enqueue_candidates(
+        [DiscoveredContent(content_id="123", source_platform="douyin", title="dy")]
+    )
+
+    assert enqueued == 1
+    row = db.conn.execute(
+        "SELECT candidate_key FROM discovery_candidates WHERE candidate_key = 'douyin:123'"
+    ).fetchone()
+    assert row is not None

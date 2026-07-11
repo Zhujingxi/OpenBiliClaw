@@ -30,6 +30,7 @@ from openbiliclaw.discovery.inspiration import (
     _normalize_match_text,
     derive_inspiration_axis_id,
 )
+from openbiliclaw.saved_sync.identity import canonical_source_platform, make_item_key
 from openbiliclaw.saved_sync.models import SavedItemInput, SavedListKind
 
 if TYPE_CHECKING:
@@ -540,6 +541,7 @@ CREATE TABLE IF NOT EXISTS events (
 -- Content cache (discovered/evaluated content)
 CREATE TABLE IF NOT EXISTS content_cache (
     bvid        TEXT PRIMARY KEY,
+    item_key    TEXT NOT NULL DEFAULT '',
     title       TEXT,
     up_name     TEXT,
     up_mid      INTEGER,
@@ -646,6 +648,7 @@ CREATE INDEX IF NOT EXISTS idx_discovery_candidates_content_id
 CREATE TABLE IF NOT EXISTS recommendations (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     bvid        TEXT NOT NULL,
+    item_key    TEXT NOT NULL DEFAULT '',
     expression  TEXT,                -- Friend-style recommendation text
     topic       TEXT,                -- Personal topic label
     confidence  REAL DEFAULT 0.0,
@@ -837,6 +840,7 @@ class Database:
         self._ensure_content_cache_pool_copy_columns()
         self._ensure_content_cache_delight_columns()
         self._ensure_content_cache_multisource_columns()
+        self._ensure_content_identity_columns()
         self._ensure_recommendation_read_indexes()
         self._ensure_source_recipes_table()
         self._ensure_xhs_observed_urls_table()
@@ -1582,10 +1586,26 @@ class Database:
         """
         import json
 
+        source_platform = str(kwargs.get("source_platform", "bilibili") or "").strip()
+        raw_content_id = str(kwargs.get("content_id", bvid) or "").strip()
+        identity_content_id = raw_content_id if source_platform else bvid.strip()
+        item_key = str(kwargs.get("item_key", "") or "").strip() or make_item_key(
+            source_platform or "bilibili",
+            identity_content_id,
+            str(kwargs.get("content_url", "") or ""),
+        )
+        existing_identity_row = self.conn.execute(
+            "SELECT bvid FROM content_cache WHERE item_key = ?",
+            (item_key,),
+        ).fetchone()
+        if existing_identity_row is not None:
+            bvid = str(existing_identity_row["bvid"])
+
         self._execute_write(
             """
             INSERT INTO content_cache (
                 bvid,
+                item_key,
                 title,
                 up_name,
                 up_mid,
@@ -1623,7 +1643,7 @@ class Database:
                 source_keyword_id
             )
             VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(bvid) DO UPDATE SET
@@ -1719,6 +1739,7 @@ class Database:
                     ELSE content_cache.pool_status
                 END,
                 source = excluded.source,
+                item_key = excluded.item_key,
                 content_id = excluded.content_id,
                 content_url = excluded.content_url,
                 source_platform = excluded.source_platform,
@@ -1747,6 +1768,7 @@ class Database:
             """,
             (
                 bvid,
+                item_key,
                 kwargs.get("title", ""),
                 kwargs.get("up_name", ""),
                 kwargs.get("up_mid", 0),
@@ -2370,6 +2392,22 @@ class Database:
                     existing.add(bvid)
                 if content_id:
                     existing.add(content_id)
+        return existing
+
+    def get_existing_content_cache_item_keys(self, item_keys: Sequence[str]) -> set[str]:
+        """Return canonical identities already present in the evaluated content cache."""
+        clean = _unique_clean_strings(item_keys)
+        if not clean:
+            return set()
+        self._ensure_fresh_read()
+        existing: set[str] = set()
+        for chunk in _chunks(clean, 900):
+            placeholders = ", ".join("?" for _ in chunk)
+            cursor = self.conn.execute(
+                f"SELECT item_key FROM content_cache WHERE item_key IN ({placeholders})",
+                chunk,
+            )
+            existing.update(str(row["item_key"]) for row in cursor.fetchall())
         return existing
 
     def count_discovery_candidates_by_source_status(self) -> dict[str, dict[str, int]]:
@@ -4242,6 +4280,7 @@ class Database:
         self,
         bvid: str,
         *,
+        item_key: str = "",
         confidence: float,
         expression: str = "",
         topic: str = "",
@@ -4250,12 +4289,38 @@ class Database:
         """Insert a recommendation history record."""
         cursor = self._execute_write(
             """
-            INSERT INTO recommendations (bvid, expression, topic, confidence, presented)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO recommendations
+                (bvid, item_key, expression, topic, confidence, presented)
+            VALUES (
+                ?,
+                COALESCE(
+                    NULLIF(?, ''),
+                    (SELECT item_key FROM content_cache WHERE bvid = ?),
+                    ?
+                ),
+                ?, ?, ?, ?
+            )
             """,
-            (bvid, expression, topic, confidence, presented),
+            (
+                bvid,
+                item_key.strip(),
+                bvid,
+                self._fallback_recommendation_item_key(bvid),
+                expression,
+                topic,
+                confidence,
+                presented,
+            ),
         )
         return cursor.lastrowid or 0
+
+    @staticmethod
+    def _fallback_recommendation_item_key(bvid: str) -> str:
+        """Build a canonical fallback when no cache identity row is available."""
+        storage_key = bvid.strip()
+        if ":" in storage_key:
+            return storage_key
+        return make_item_key("bilibili", storage_key)
 
     def batch_insert_recommendations(
         self,
@@ -4301,11 +4366,24 @@ class Database:
                         cursor.execute(
                             """
                             INSERT INTO recommendations
-                                (bvid, expression, topic, confidence, presented)
-                            VALUES (?, ?, ?, ?, ?)
+                                (bvid, item_key, expression, topic, confidence, presented)
+                            VALUES (
+                                ?,
+                                COALESCE(
+                                    NULLIF(?, ''),
+                                    (SELECT item_key FROM content_cache WHERE bvid = ?),
+                                    ?
+                                ),
+                                ?, ?, ?, ?
+                            )
                             """,
                             (
                                 str(item.get("bvid", "")),
+                                str(item.get("item_key", "")).strip(),
+                                str(item.get("bvid", "")),
+                                self._fallback_recommendation_item_key(
+                                    str(item.get("bvid", ""))
+                                ),
                                 str(item.get("expression", "")),
                                 str(item.get("topic", "")),
                                 float(item.get("confidence", 0.0) or 0.0),
@@ -4446,6 +4524,7 @@ class Database:
             SELECT
                 r.*,
                 COALESCE(c.title, '') AS title,
+                COALESCE(NULLIF(r.item_key, ''), c.item_key, '') AS item_key,
                 COALESCE(c.up_name, '') AS up_name,
                 COALESCE(c.cover_url, '') AS cover_url,
                 COALESCE(c.content_id, r.bvid) AS content_id,
@@ -4462,9 +4541,10 @@ class Database:
                 COALESCE(c.comment_count, 0) AS comment_count,
                 COALESCE(c.up_mid, 0) AS up_mid
             FROM recommendations AS r
-            LEFT JOIN content_cache AS c ON c.bvid = COALESCE(
-                (SELECT bvid FROM content_cache WHERE bvid = r.bvid),
-                (SELECT bvid FROM content_cache WHERE content_id = r.bvid LIMIT 1)
+            LEFT JOIN content_cache AS c ON c.item_key = COALESCE(
+                NULLIF(r.item_key, ''),
+                (SELECT item_key FROM content_cache WHERE bvid = r.bvid),
+                (SELECT item_key FROM content_cache WHERE content_id = r.bvid LIMIT 1)
             )
             WHERE (
                 COALESCE(c.source_platform, '') != 'xiaohongshu'
@@ -4812,6 +4892,60 @@ class Database:
         if added:
             self.conn.execute("UPDATE content_cache SET content_id = bvid WHERE content_id = ''")
 
+    def _ensure_content_identity_columns(self) -> None:
+        """Backfill canonical identity columns for cache and recommendation rows."""
+        cache_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(content_cache)").fetchall()
+        }
+        if "item_key" not in cache_columns:
+            self.conn.execute(
+                "ALTER TABLE content_cache ADD COLUMN item_key TEXT NOT NULL DEFAULT ''"
+            )
+
+        cache_rows = self.conn.execute(
+            """
+            SELECT bvid, item_key, source_platform, content_id, content_url
+            FROM content_cache
+            WHERE item_key = ''
+            """
+        ).fetchall()
+        for row in cache_rows:
+            storage_key = str(row["bvid"] or "").strip()
+            source_platform = str(row["source_platform"] or "").strip()
+            platform = canonical_source_platform(source_platform or "bilibili")
+            content_id = str(row["content_id"] or "").strip()
+            if not source_platform:
+                content_id = storage_key
+            item_key = make_item_key(
+                platform,
+                content_id or storage_key,
+                str(row["content_url"] or ""),
+            )
+            self.conn.execute(
+                "UPDATE content_cache SET item_key = ? WHERE bvid = ?",
+                (item_key, storage_key),
+            )
+
+        recommendation_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(recommendations)").fetchall()
+        }
+        if "item_key" not in recommendation_columns:
+            self.conn.execute(
+                "ALTER TABLE recommendations ADD COLUMN item_key TEXT NOT NULL DEFAULT ''"
+            )
+        self.conn.execute(
+            """
+            UPDATE recommendations AS r
+            SET item_key = COALESCE(
+                (SELECT c.item_key FROM content_cache AS c WHERE c.bvid = r.bvid),
+                ''
+            )
+            WHERE r.item_key = ''
+            """
+        )
+
     def _ensure_discovery_candidate_columns(self) -> None:
         """Backfill discovery-candidate lifecycle columns for existing databases."""
 
@@ -4869,6 +5003,10 @@ class Database:
                 ON recommendations (created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_content_cache_content_id
                 ON content_cache (content_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_content_cache_item_key
+                ON content_cache (item_key);
+            CREATE INDEX IF NOT EXISTS idx_recommendations_item_key
+                ON recommendations (item_key);
         """)
 
     def _ensure_source_recipes_table(self) -> None:
@@ -7104,6 +7242,8 @@ class Database:
         return [
             {
                 "bvid": row["content_id"],
+                "item_key": row["item_key"],
+                "content_id": row["content_id"],
                 "added_at": row["added_at"],
                 "note": row["note"],
                 "title": row["title"],
@@ -7111,6 +7251,7 @@ class Database:
                 "cover_url": row["cover_url"],
                 "content_url": row["content_url"],
                 "source_platform": row["source_platform"],
+                "content_type": row["content_type"],
             }
             for row in self.list_saved_memberships("watch_later", limit, offset)
         ]
@@ -8078,6 +8219,8 @@ class Database:
         return [
             {
                 "bvid": row["content_id"],
+                "item_key": row["item_key"],
+                "content_id": row["content_id"],
                 "added_at": row["added_at"],
                 "note": row["note"],
                 "title": row["title"],
@@ -8085,6 +8228,7 @@ class Database:
                 "cover_url": row["cover_url"],
                 "content_url": row["content_url"],
                 "source_platform": row["source_platform"],
+                "content_type": row["content_type"],
             }
             for row in self.list_saved_memberships("favorite", limit, offset)
         ]

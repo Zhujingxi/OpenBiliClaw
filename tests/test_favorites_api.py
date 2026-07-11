@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from openbiliclaw.api.app import create_app
+from openbiliclaw.saved_sync.models import SavedItemInput
 from openbiliclaw.storage.database import Database
 
 if TYPE_CHECKING:
@@ -75,11 +76,14 @@ def test_favorites_endpoints_round_trip_with_metadata(
         "items": [
             {
                 "bvid": "BV1FAV",
+                "item_key": "bilibili:BV1FAV",
+                "content_id": "BV1FAV",
                 "title": "收藏测试视频",
                 "up_name": "测试 UP",
                 "cover_url": "https://i0.hdslb.com/bfs/archive/fav.jpg",
                 "content_url": "https://www.bilibili.com/video/BV1FAV",
                 "source_platform": "bilibili",
+                "content_type": "video",
                 "added_at": list_response.json()["items"][0]["added_at"],
             }
         ],
@@ -122,6 +126,29 @@ def test_favorites_list_rejects_invalid_pagination(
 
     assert client.get("/api/favorites?limit=0").status_code == 422
     assert client.get("/api/favorites?offset=-1").status_code == 422
+
+
+def test_favorites_list_preserves_non_bilibili_identity(
+    favorites_client: tuple[TestClient, Database],
+) -> None:
+    client, db = favorites_client
+    db.upsert_saved_membership(
+        "favorite",
+        SavedItemInput(
+            source_platform="twitter",
+            content_id="123",
+            content_url="https://x.com/u/status/123",
+            content_type="tweet",
+            title="一条推文",
+        ),
+    )
+
+    payload = client.get("/api/favorites").json()["items"][0]
+    assert payload["item_key"] == "twitter:123"
+    assert payload["content_id"] == "123"
+    assert payload["source_platform"] == "twitter"
+    assert payload["content_url"] == "https://x.com/u/status/123"
+    assert payload["content_type"] == "tweet"
 
 
 def test_favorites_and_watch_later_are_independent(

@@ -935,7 +935,7 @@ def test_cache_results_skips_recently_viewed_non_bilibili_items() -> None:
         ]
     )
 
-    assert database.cached_bvids == ["note-fresh"]
+    assert database.cached_bvids == ["xiaohongshu:note-fresh"]
 
 
 def test_cache_results_rechecks_admission_before_writing() -> None:
@@ -2031,8 +2031,8 @@ async def test_discovery_engine_cache_results_preserves_multi_source_fields() ->
 
         row = db.conn.execute(
             "SELECT source, source_platform, content_id, content_url "
-            "FROM content_cache WHERE bvid=?",
-            ("6613e9ac000000001a015e65",),
+            "FROM content_cache WHERE item_key=?",
+            ("xiaohongshu:6613e9ac000000001a015e65",),
         ).fetchone()
         assert row is not None
         assert row["source_platform"] == "xiaohongshu"
