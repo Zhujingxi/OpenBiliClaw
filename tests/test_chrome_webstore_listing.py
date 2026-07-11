@@ -2,7 +2,6 @@ from pathlib import Path
 
 from PIL import Image
 
-
 ROOT = Path(__file__).resolve().parents[1]
 LISTING = ROOT / "docs/chrome-webstore-listing.md"
 ASSET_DIR = ROOT / "docs/images/chrome-web-store"
@@ -29,3 +28,9 @@ def test_store_listing_assets_have_stable_order_and_dimensions() -> None:
         with Image.open(ASSET_DIR / name) as image:
             assert image.size == (1280, 800)
             assert image.mode in {"RGB", "RGBA"}
+
+
+def test_listing_document_declares_dashboard_upload_order() -> None:
+    text = LISTING.read_text(encoding="utf-8")
+    offsets = [text.index(name) for name in EXPECTED]
+    assert offsets == sorted(offsets)
