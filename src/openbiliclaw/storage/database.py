@@ -7467,6 +7467,7 @@ class Database:
                 task_claimed_at    TIMESTAMP,
                 task_started_at    TIMESTAMP,
                 task_heartbeat_at  TIMESTAMP,
+                task_runner_id     TEXT NOT NULL DEFAULT '',
                 last_error_code    TEXT NOT NULL DEFAULT '',
                 last_error_message TEXT NOT NULL DEFAULT '',
                 last_attempt_at    TIMESTAMP,
@@ -7488,6 +7489,11 @@ class Database:
             self.conn.execute(
                 "ALTER TABLE native_save_states "
                 "ADD COLUMN execution_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "task_runner_id" not in native_state_columns:
+            self.conn.execute(
+                "ALTER TABLE native_save_states "
+                "ADD COLUMN task_runner_id TEXT NOT NULL DEFAULT ''"
             )
         for column_name in ("task_claimed_at", "task_started_at", "task_heartbeat_at"):
             if column_name not in native_state_columns:
@@ -7669,6 +7675,13 @@ class Database:
         if not execution_id:
             raise ValueError("execution_id must not be blank")
         return execution_id
+
+    @staticmethod
+    def _native_runner_id(value: str) -> str:
+        runner_id = value.strip()
+        if not runner_id:
+            raise ValueError("runner_id must not be blank")
+        return runner_id
 
     def _bilibili_saved_item_input(self, bvid: str) -> SavedItemInput:
         """Build a Bilibili compatibility input with any cached metadata snapshot."""
@@ -8021,7 +8034,7 @@ class Database:
                 SELECT requested_action, resolved_action, resolved_target, status,
                        task_id, execution_id, last_error_code, last_error_message,
                        last_attempt_at, synced_at, task_claimed_at, task_started_at,
-                       task_heartbeat_at
+                       task_heartbeat_at, task_runner_id
                 FROM native_save_states
                 WHERE list_kind = ? AND item_key = ?
                 """,
@@ -8108,7 +8121,8 @@ class Database:
                         last_error_message = '',
                         task_claimed_at = CURRENT_TIMESTAMP,
                         task_started_at = NULL,
-                        task_heartbeat_at = NULL
+                        task_heartbeat_at = NULL,
+                        task_runner_id = ''
                     """,
                     (normalized_kind, item_key, normalized_kind, normalized_task_id),
                 )
@@ -8127,7 +8141,7 @@ class Database:
             """
             UPDATE native_save_states
             SET task_id = '', execution_id = '', task_claimed_at = NULL,
-                task_started_at = NULL, task_heartbeat_at = NULL
+                task_started_at = NULL, task_heartbeat_at = NULL, task_runner_id = ''
             WHERE task_id = ? AND status = 'pending' AND execution_id = ''
             """,
             (normalized_task_id,),
@@ -8160,7 +8174,7 @@ class Database:
             """
             UPDATE native_save_states
             SET task_id = '', execution_id = '', task_claimed_at = NULL,
-                task_started_at = NULL, task_heartbeat_at = NULL
+                task_started_at = NULL, task_heartbeat_at = NULL, task_runner_id = ''
             WHERE list_kind = ? AND status = 'pending' AND task_id != ''
             """
             + item_filter
@@ -8192,7 +8206,7 @@ class Database:
             """
             UPDATE native_save_states
             SET task_id = '', execution_id = '', task_claimed_at = NULL,
-                task_started_at = NULL, task_heartbeat_at = NULL
+                task_started_at = NULL, task_heartbeat_at = NULL, task_runner_id = ''
             WHERE task_id = ? AND status = 'pending'
               AND (
                   (task_started_at IS NULL AND task_claimed_at IS NOT NULL
@@ -8207,45 +8221,93 @@ class Database:
         )
         return int(cursor.rowcount or 0)
 
-    def mark_native_sync_task_started(self, task_id: str) -> int:
-        """Fence pending-task reclamation once a durable runner starts."""
+    def claim_native_sync_task_runner(
+        self,
+        task_id: str,
+        runner_id: str,
+        *,
+        stale_after_seconds: int = 300,
+    ) -> bool:
+        """Atomically acquire the single batch-runner lease for a task."""
         normalized_task_id = self._native_task_id(task_id)
-        cursor = self._execute_write(
-            """
-            UPDATE native_save_states
-            SET task_started_at = COALESCE(task_started_at, CURRENT_TIMESTAMP),
-                task_heartbeat_at = CURRENT_TIMESTAMP
-            WHERE task_id = ? AND status IN ('pending', 'syncing')
-            """,
-            (normalized_task_id,),
-        )
-        return int(cursor.rowcount or 0)
+        normalized_runner_id = self._native_runner_id(runner_id)
+        age = max(0, int(stale_after_seconds))
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            active = conn.execute(
+                """
+                SELECT 1
+                FROM native_save_states
+                WHERE task_id = ? AND status IN ('pending', 'syncing')
+                LIMIT 1
+                """,
+                (normalized_task_id,),
+            ).fetchone()
+            if active is None:
+                conn.commit()
+                return True
+            conflicting = conn.execute(
+                """
+                SELECT 1
+                FROM native_save_states
+                WHERE task_id = ? AND status IN ('pending', 'syncing')
+                  AND task_runner_id NOT IN ('', ?)
+                  AND task_heartbeat_at IS NOT NULL
+                  AND task_heartbeat_at > datetime('now', ?)
+                LIMIT 1
+                """,
+                (normalized_task_id, normalized_runner_id, f"-{age} seconds"),
+            ).fetchone()
+            if conflicting is not None:
+                conn.commit()
+                return False
+            conn.execute(
+                """
+                UPDATE native_save_states
+                SET task_runner_id = ?,
+                    task_started_at = COALESCE(task_started_at, CURRENT_TIMESTAMP),
+                    task_heartbeat_at = CURRENT_TIMESTAMP
+                WHERE task_id = ? AND status IN ('pending', 'syncing')
+                """,
+                (normalized_runner_id, normalized_task_id),
+            )
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
-    def heartbeat_native_sync_task(self, task_id: str) -> int:
+    def heartbeat_native_sync_task(self, task_id: str, runner_id: str) -> int:
         """Refresh the task lease protecting all remaining batch rows."""
         normalized_task_id = self._native_task_id(task_id)
+        normalized_runner_id = self._native_runner_id(runner_id)
         cursor = self._execute_write(
             """
             UPDATE native_save_states
             SET task_heartbeat_at = CURRENT_TIMESTAMP
-            WHERE task_id = ? AND task_started_at IS NOT NULL
+            WHERE task_id = ? AND task_runner_id = ? AND task_started_at IS NOT NULL
               AND status IN ('pending', 'syncing')
             """,
-            (normalized_task_id,),
+            (normalized_task_id, normalized_runner_id),
         )
         return int(cursor.rowcount or 0)
 
-    def release_pending_native_sync_task(self, task_id: str) -> int:
+    def release_pending_native_sync_task(self, task_id: str, runner_id: str) -> int:
         """Release unclaimed pending rows when a runner exits normally or by cancellation."""
         normalized_task_id = self._native_task_id(task_id)
+        normalized_runner_id = self._native_runner_id(runner_id)
         cursor = self._execute_write(
             """
             UPDATE native_save_states
             SET task_id = '', execution_id = '', task_claimed_at = NULL,
-                task_started_at = NULL, task_heartbeat_at = NULL
-            WHERE task_id = ? AND status = 'pending' AND execution_id = ''
+                task_started_at = NULL, task_heartbeat_at = NULL, task_runner_id = ''
+            WHERE task_id = ? AND task_runner_id = ?
+              AND status = 'pending' AND execution_id = ''
             """,
-            (normalized_task_id,),
+            (normalized_task_id, normalized_runner_id),
         )
         return int(cursor.rowcount or 0)
 
@@ -8254,17 +8316,19 @@ class Database:
         list_kind: str,
         item_key: str,
         task_id: str,
+        runner_id: str,
         execution_id: str,
     ) -> bool:
         """Atomically claim one pending task item for adapter execution."""
         normalized_kind = self._saved_list_kind(list_kind)
         normalized_task_id = self._native_task_id(task_id)
+        normalized_runner_id = self._native_runner_id(runner_id)
         normalized_execution_id = self._native_execution_id(execution_id)
         cursor = self._execute_write(
             """
             UPDATE native_save_states
             SET status = 'syncing', execution_id = ?, last_attempt_at = CURRENT_TIMESTAMP
-            WHERE list_kind = ? AND item_key = ? AND task_id = ?
+            WHERE list_kind = ? AND item_key = ? AND task_id = ? AND task_runner_id = ?
               AND status = 'pending' AND execution_id = ''
             """,
             (
@@ -8272,6 +8336,7 @@ class Database:
                 normalized_kind,
                 item_key.strip(),
                 normalized_task_id,
+                normalized_runner_id,
             ),
         )
         return int(cursor.rowcount or 0) > 0
@@ -8353,7 +8418,7 @@ class Database:
             """
             UPDATE native_save_states
             SET requested_action = ?, resolved_action = ?, resolved_target = ?,
-                status = ?, execution_id = '', last_error_code = ?,
+                status = ?, execution_id = '', task_runner_id = '', last_error_code = ?,
                 last_error_message = ?,
                 synced_at = CASE WHEN ? IN ('synced', 'already_synced')
                     THEN CURRENT_TIMESTAMP ELSE synced_at END
@@ -8389,6 +8454,7 @@ class Database:
             """
             UPDATE native_save_states
             SET status = 'failed', execution_id = '',
+                task_runner_id = '',
                 last_error_code = 'interrupted',
                 last_error_message = 'Native save was interrupted'
             WHERE task_id = ? AND status = 'syncing'
@@ -8424,6 +8490,7 @@ class Database:
             """
             UPDATE native_save_states
             SET status = 'failed', execution_id = '',
+                task_runner_id = '',
                 last_error_code = 'interrupted',
                 last_error_message = 'Native save was interrupted'
             WHERE list_kind = ? AND status = 'syncing'
@@ -8498,6 +8565,7 @@ class Database:
                 n.task_claimed_at,
                 n.task_started_at,
                 n.task_heartbeat_at,
+                n.task_runner_id,
                 n.last_error_code,
                 n.last_error_message,
                 n.last_attempt_at,

@@ -48,6 +48,10 @@ class _NativeSaveDetachedCancellationError(asyncio.CancelledError):
     """Cancellation propagated after handing the live lease to a watchdog."""
 
 
+class _NativeSaveTaskRunnerOwnershipLostError(RuntimeError):
+    """The batch heartbeat no longer owns any active rows."""
+
+
 class SavedSyncService:
     """Persist local membership first, then coordinate optional native saves."""
 
@@ -179,23 +183,46 @@ class SavedSyncService:
         entry.users += 1
         try:
             async with entry.lock:
-                self._database.mark_native_sync_task_started(task_id)
+                runner_id = str(uuid.uuid4())
+                if not self._database.claim_native_sync_task_runner(task_id, runner_id):
+                    return self.get_sync_task(task_id)
                 self._database.reconcile_stale_native_save_claims(task_id)
-                task_heartbeat = asyncio.create_task(self._heartbeat_sync_task(task_id))
-                try:
-                    rows = self._database.list_native_save_states_by_task(task_id)
-                    grouped_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
-                    for row in rows:
-                        grouped_rows[str(row["source_platform"])].append(row)
-
-                    await asyncio.gather(
-                        *(self._run_platform_group(group) for group in grouped_rows.values())
+                task_heartbeat = asyncio.create_task(
+                    self._heartbeat_sync_task(task_id, runner_id)
+                )
+                work: asyncio.Future[list[None]] = asyncio.gather(
+                    *(
+                        self._run_platform_group(group, runner_id)
+                        for group in self._group_task_rows(task_id)
                     )
+                )
+                waiters: set[asyncio.Future[Any]] = {work, task_heartbeat}
+                try:
+                    done, _ = await asyncio.wait(
+                        waiters,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if task_heartbeat in done:
+                        try:
+                            await task_heartbeat
+                        except _NativeSaveTaskRunnerOwnershipLostError:
+                            if work in done:
+                                await work
+                                return self.get_sync_task(task_id)
+                        except Exception:
+                            pass
+                        work.cancel()
+                        await asyncio.gather(work, return_exceptions=True)
+                        raise RuntimeError("Native save task heartbeat failed") from None
+                    await work
                     return self.get_sync_task(task_id)
                 finally:
+                    if not work.done():
+                        work.cancel()
+                    await asyncio.gather(work, return_exceptions=True)
                     task_heartbeat.cancel()
                     await asyncio.gather(task_heartbeat, return_exceptions=True)
-                    self._database.release_pending_native_sync_task(task_id)
+                    self._database.release_pending_native_sync_task(task_id, runner_id)
         finally:
             entry.users -= 1
             if entry.users == 0 and self._task_run_locks.get(task_id) is entry:
@@ -210,13 +237,24 @@ class SavedSyncService:
         items = tuple(self._result_from_row(row) for row in rows)
         return SavedSyncBatchResult(task_id=task_id, items=items)
 
-    async def _run_platform_group(self, rows: list[dict[str, Any]]) -> None:
+    def _group_task_rows(self, task_id: str) -> tuple[list[dict[str, Any]], ...]:
+        rows = self._database.list_native_save_states_by_task(task_id)
+        grouped_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            grouped_rows[str(row["source_platform"])].append(row)
+        return tuple(grouped_rows.values())
+
+    async def _run_platform_group(
+        self,
+        rows: list[dict[str, Any]],
+        runner_id: str,
+    ) -> None:
         for row in rows:
             if str(row["status"]) not in _ACTIVE_STATUSES:
                 continue
-            await self._run_item(row)
+            await self._run_item(row, runner_id)
 
-    async def _run_item(self, row: dict[str, Any]) -> None:
+    async def _run_item(self, row: dict[str, Any], runner_id: str) -> None:
         item = self._item_from_row(row)
         list_kind = cast("SavedListKind", str(row["list_kind"]))
         requested_action = cast("NativeSaveAction", str(row["requested_action"]))
@@ -226,6 +264,7 @@ class SavedSyncService:
             list_kind,
             item.item_key,
             task_id,
+            runner_id,
             execution_id,
         ):
             return
@@ -579,11 +618,11 @@ class SavedSyncService:
             ):
                 return
 
-    async def _heartbeat_sync_task(self, task_id: str) -> None:
+    async def _heartbeat_sync_task(self, task_id: str, runner_id: str) -> None:
         while True:
             await asyncio.sleep(self._task_heartbeat_interval_seconds)
-            if self._database.heartbeat_native_sync_task(task_id) == 0:
-                return
+            if self._database.heartbeat_native_sync_task(task_id, runner_id) == 0:
+                raise _NativeSaveTaskRunnerOwnershipLostError
 
     def _persist_result(
         self,

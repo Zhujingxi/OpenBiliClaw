@@ -12,6 +12,7 @@ from openbiliclaw.saved_sync.models import (
     NativeSaveRoute,
     NativeSaveStatus,
     SavedItemInput,
+    SavedSyncBatchResult,
 )
 from openbiliclaw.saved_sync.router import NativeSaveRouter
 from openbiliclaw.saved_sync.service import SavedSyncService
@@ -503,7 +504,7 @@ async def test_concurrent_services_execute_claimed_item_once(db: Database) -> No
     first_result, second_result = await asyncio.gather(first_runner, second_runner)
     assert adapter.calls == [item.item_key]
     assert first_result.items[0].status == "synced"
-    assert second_result.items[0].status in {"syncing", "synced"}
+    assert second_result.items[0].status in {"pending", "syncing", "synced"}
     assert second_service.get_sync_task(task.task_id).items[0].status == "synced"
 
 
@@ -512,7 +513,7 @@ def test_polling_releases_stale_started_but_unclaimed_pending_rows(db: Database)
     item = SavedItemInput("bilibili", "BV1STARTEDCRASH")
     service.save_local("favorite", item)
     abandoned = service.create_sync_task("favorite", [item.item_key], "manual_single")
-    assert db.mark_native_sync_task_started(abandoned.task_id) == 1
+    assert db.claim_native_sync_task_runner(abandoned.task_id, "crashed-poll-runner")
     db.conn.execute(
         """
         UPDATE native_save_states
@@ -541,7 +542,7 @@ def test_manual_creation_recovers_stale_started_pending_row_without_old_runner(
     item = SavedItemInput("bilibili", "BV1STARTEDMANUAL")
     service.save_local("favorite", item)
     abandoned = service.create_sync_task("favorite", [item.item_key], "manual_single")
-    assert db.mark_native_sync_task_started(abandoned.task_id) == 1
+    assert db.claim_native_sync_task_runner(abandoned.task_id, "crashed-manual-runner")
     db.conn.execute(
         """
         UPDATE native_save_states
@@ -609,6 +610,94 @@ async def test_active_task_heartbeat_protects_later_sequential_pending_row(
     gate.set()
     await runner
     assert adapter.calls == [first.item_key, second.item_key]
+
+
+async def test_cross_service_second_runner_cannot_execute_or_release_owner_pending(
+    db: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = asyncio.Event()
+    adapter = FakeAdapter(NativeSaveCapability("bilibili", True, True, True), gate=gate)
+    second_db = Database(db._db_path)
+    second_db.initialize()
+    owner_service = SavedSyncService(db, NativeSaveRouter([adapter]))
+    second_service = SavedSyncService(second_db, NativeSaveRouter([adapter]))
+    items = [SavedItemInput("bilibili", f"BV1RUNNER{suffix}") for suffix in "ABC"]
+    for item in items:
+        owner_service.save_local("favorite", item)
+    task = owner_service.create_sync_task(
+        "favorite", [item.item_key for item in items], "manual_batch"
+    )
+    owner_runner = asyncio.create_task(owner_service.run_sync_task(task.task_id))
+    for _ in range(100):
+        if adapter.calls:
+            break
+        await asyncio.sleep(0)
+    assert adapter.calls == [items[0].item_key]
+
+    non_owner_result = await asyncio.wait_for(
+        second_service.run_sync_task(task.task_id), timeout=0.2
+    )
+    assert {result.status for result in non_owner_result.items} <= {"pending", "syncing"}
+    assert adapter.calls == [items[0].item_key]
+
+    def cancel_non_owner_poll(task_id: str) -> SavedSyncBatchResult:
+        del task_id
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(second_service, "get_sync_task", cancel_non_owner_poll)
+    with pytest.raises(asyncio.CancelledError):
+        await second_service.run_sync_task(task.task_id)
+    third_state = second_db.get_saved_membership("favorite", items[2].item_key)
+    assert third_state is not None
+    assert third_state["sync_task_id"] == task.task_id
+
+    owner_runner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner_runner
+    for item in items[1:]:
+        state = db.get_saved_membership("favorite", item.item_key)
+        assert state is not None
+        assert state["sync_status"] == "pending"
+        assert state["sync_task_id"] == ""
+
+
+async def test_task_heartbeat_failure_cancels_work_and_releases_pending(
+    db: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = asyncio.Event()
+    adapter = FakeAdapter(NativeSaveCapability("bilibili", True, True, True), gate=gate)
+    service = SavedSyncService(
+        db,
+        NativeSaveRouter([adapter]),
+        task_heartbeat_interval_seconds=0.005,
+    )
+    first = SavedItemInput("bilibili", "BV1HEARTFAILA")
+    second = SavedItemInput("bilibili", "BV1HEARTFAILB")
+    service.save_local("favorite", first)
+    service.save_local("favorite", second)
+    task = service.create_sync_task(
+        "favorite", [first.item_key, second.item_key], "manual_batch"
+    )
+
+    def fail_heartbeat(*args: object, **kwargs: object) -> int:
+        del args, kwargs
+        raise RuntimeError("private heartbeat storage failure")
+
+    monkeypatch.setattr(db, "heartbeat_native_sync_task", fail_heartbeat)
+    runner = asyncio.create_task(service.run_sync_task(task.task_id))
+
+    with pytest.raises(RuntimeError, match="task heartbeat failed") as exc_info:
+        await asyncio.wait_for(runner, timeout=0.5)
+    assert "private" not in str(exc_info.value)
+    assert adapter.calls == [first.item_key]
+    first_state = db.get_saved_membership("favorite", first.item_key)
+    second_state = db.get_saved_membership("favorite", second.item_key)
+    assert first_state is not None and first_state["sync_status"] == "failed"
+    assert second_state is not None and second_state["sync_task_id"] == ""
+    retry = service.create_sync_task("favorite", [second.item_key], "manual_single")
+    assert [result.item_key for result in retry.items] == [second.item_key]
 
 
 async def test_partial_batch_cancellation_releases_later_pending_ownership(
@@ -886,7 +975,10 @@ def test_polling_reconciles_stale_syncing_claim(db: Database) -> None:
     item = SavedItemInput("bilibili", "BV1STALEPOLL")
     service.save_local("favorite", item)
     task = service.create_sync_task("favorite", [item.item_key], "manual_single")
-    assert db.claim_native_save_item("favorite", item.item_key, task.task_id, "dead-poller")
+    assert db.claim_native_sync_task_runner(task.task_id, "dead-poll-runner")
+    assert db.claim_native_save_item(
+        "favorite", item.item_key, task.task_id, "dead-poll-runner", "dead-poller"
+    )
     db.conn.execute(
         """
         UPDATE native_save_states
@@ -908,8 +1000,13 @@ def test_manual_task_creation_recovers_stale_syncing_claim(db: Database) -> None
     item = SavedItemInput("bilibili", "BV1STALERETRY")
     service.save_local("favorite", item)
     abandoned = service.create_sync_task("favorite", [item.item_key], "manual_single")
+    assert db.claim_native_sync_task_runner(abandoned.task_id, "dead-retry-runner")
     assert db.claim_native_save_item(
-        "favorite", item.item_key, abandoned.task_id, "dead-retry-owner"
+        "favorite",
+        item.item_key,
+        abandoned.task_id,
+        "dead-retry-runner",
+        "dead-retry-owner",
     )
     db.conn.execute(
         """

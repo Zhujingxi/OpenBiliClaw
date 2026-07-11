@@ -198,15 +198,21 @@ def test_native_task_dao_boundaries_reject_blank_task_ids(db: Database) -> None:
     with pytest.raises(ValueError, match="task_id"):
         db.release_native_sync_task("\t")
     with pytest.raises(ValueError, match="task_id"):
-        db.mark_native_sync_task_started("  ")
+        db.claim_native_sync_task_runner("  ", "runner")
     with pytest.raises(ValueError, match="task_id"):
-        db.heartbeat_native_sync_task(" ")
+        db.heartbeat_native_sync_task(" ", "runner")
     with pytest.raises(ValueError, match="task_id"):
-        db.release_pending_native_sync_task("")
+        db.release_pending_native_sync_task("", "runner")
     with pytest.raises(ValueError, match="task_id"):
         db.release_stale_pending_native_sync_task("\t")
     with pytest.raises(ValueError, match="task_id"):
-        db.claim_native_save_item("favorite", item.item_key, "", "execution")
+        db.claim_native_save_item("favorite", item.item_key, "", "runner", "execution")
+    with pytest.raises(ValueError, match="runner_id"):
+        db.claim_native_sync_task_runner("valid-task", " ")
+    with pytest.raises(ValueError, match="runner_id"):
+        db.heartbeat_native_sync_task("valid-task", "")
+    with pytest.raises(ValueError, match="runner_id"):
+        db.release_pending_native_sync_task("valid-task", "\t")
 
 
 @pytest.mark.parametrize("invalid_status", ["syncing", "bogus", " pending ", "", "SYNCED"])
@@ -262,8 +268,13 @@ def test_completion_rejects_nonterminal_status_without_releasing_owner(
     assert db.claim_native_sync_task("favorite", [item.item_key], "completion-task") == [
         item.item_key
     ]
+    assert db.claim_native_sync_task_runner("completion-task", "completion-runner")
     assert db.claim_native_save_item(
-        "favorite", item.item_key, "completion-task", "completion-owner"
+        "favorite",
+        item.item_key,
+        "completion-task",
+        "completion-runner",
+        "completion-owner",
     )
 
     with pytest.raises(ValueError, match="terminal status"):
@@ -301,8 +312,13 @@ def test_execution_heartbeat_is_fenced_by_owner_token(db: Database) -> None:
     assert db.claim_native_sync_task("favorite", [item.item_key], "heartbeat-task") == [
         item.item_key
     ]
+    assert db.claim_native_sync_task_runner("heartbeat-task", "heartbeat-runner")
     assert db.claim_native_save_item(
-        "favorite", item.item_key, "heartbeat-task", "live-owner"
+        "favorite",
+        item.item_key,
+        "heartbeat-task",
+        "heartbeat-runner",
+        "live-owner",
     )
 
     assert (
