@@ -145,6 +145,17 @@ def test_native_save_state_controls_eligibility_and_task_lookup(db: Database) ->
     assert states[0]["title"] == ""
 
 
+def test_eligible_view_excludes_pending_rows_owned_by_a_task(db: Database) -> None:
+    item = SavedItemInput("bilibili", "BV1OWNEDVIEW")
+    db.upsert_saved_membership("favorite", item)
+    db.ensure_native_save_state("favorite", item.item_key, "favorite")
+    assert db.claim_native_sync_task("favorite", [item.item_key], "owned-view-task") == [
+        item.item_key
+    ]
+
+    assert db.list_native_sync_eligible("favorite", [item.item_key]) == []
+
+
 def test_generic_native_state_upsert_cannot_establish_active_task_ownership(
     db: Database,
 ) -> None:
@@ -188,6 +199,12 @@ def test_native_task_dao_boundaries_reject_blank_task_ids(db: Database) -> None:
         db.release_native_sync_task("\t")
     with pytest.raises(ValueError, match="task_id"):
         db.mark_native_sync_task_started("  ")
+    with pytest.raises(ValueError, match="task_id"):
+        db.heartbeat_native_sync_task(" ")
+    with pytest.raises(ValueError, match="task_id"):
+        db.release_pending_native_sync_task("")
+    with pytest.raises(ValueError, match="task_id"):
+        db.release_stale_pending_native_sync_task("\t")
     with pytest.raises(ValueError, match="task_id"):
         db.claim_native_save_item("favorite", item.item_key, "", "execution")
 

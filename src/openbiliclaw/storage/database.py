@@ -7466,6 +7466,7 @@ class Database:
                 execution_id       TEXT NOT NULL DEFAULT '',
                 task_claimed_at    TIMESTAMP,
                 task_started_at    TIMESTAMP,
+                task_heartbeat_at  TIMESTAMP,
                 last_error_code    TEXT NOT NULL DEFAULT '',
                 last_error_message TEXT NOT NULL DEFAULT '',
                 last_attempt_at    TIMESTAMP,
@@ -7488,7 +7489,7 @@ class Database:
                 "ALTER TABLE native_save_states "
                 "ADD COLUMN execution_id TEXT NOT NULL DEFAULT ''"
             )
-        for column_name in ("task_claimed_at", "task_started_at"):
+        for column_name in ("task_claimed_at", "task_started_at", "task_heartbeat_at"):
             if column_name not in native_state_columns:
                 self.conn.execute(
                     f"ALTER TABLE native_save_states ADD COLUMN {column_name} TIMESTAMP"
@@ -7498,6 +7499,15 @@ class Database:
             UPDATE native_save_states
             SET task_claimed_at = CURRENT_TIMESTAMP
             WHERE status = 'pending' AND task_id != '' AND task_claimed_at IS NULL
+            """
+        )
+        self.conn.execute(
+            """
+            UPDATE native_save_states
+            SET task_heartbeat_at = CURRENT_TIMESTAMP
+            WHERE status IN ('pending', 'syncing')
+              AND task_id != '' AND task_started_at IS NOT NULL
+              AND task_heartbeat_at IS NULL
             """
         )
         self.conn.commit()
@@ -8010,7 +8020,8 @@ class Database:
                 """
                 SELECT requested_action, resolved_action, resolved_target, status,
                        task_id, execution_id, last_error_code, last_error_message,
-                       last_attempt_at, synced_at, task_claimed_at, task_started_at
+                       last_attempt_at, synced_at, task_claimed_at, task_started_at,
+                       task_heartbeat_at
                 FROM native_save_states
                 WHERE list_kind = ? AND item_key = ?
                 """,
@@ -8096,7 +8107,8 @@ class Database:
                         last_error_code = '',
                         last_error_message = '',
                         task_claimed_at = CURRENT_TIMESTAMP,
-                        task_started_at = NULL
+                        task_started_at = NULL,
+                        task_heartbeat_at = NULL
                     """,
                     (normalized_kind, item_key, normalized_kind, normalized_task_id),
                 )
@@ -8115,32 +8127,83 @@ class Database:
             """
             UPDATE native_save_states
             SET task_id = '', execution_id = '', task_claimed_at = NULL,
-                task_started_at = NULL
+                task_started_at = NULL, task_heartbeat_at = NULL
             WHERE task_id = ? AND status = 'pending' AND execution_id = ''
             """,
             (normalized_task_id,),
         )
         return int(cursor.rowcount or 0)
 
-    def release_stale_unstarted_native_sync_tasks(
+    def release_stale_pending_native_sync_tasks(
         self,
         list_kind: str,
+        item_keys: Sequence[str] | None = None,
         *,
         stale_after_seconds: int = 300,
     ) -> int:
-        """Release old pending task owners only when no runner ever started."""
+        """Release pending owners whose task never started or lost its heartbeat."""
         normalized_kind = self._saved_list_kind(list_kind)
+        raw_keys = list(item_keys or ())
+        cleaned_keys = list(dict.fromkeys(key.strip() for key in raw_keys if key.strip()))
+        if raw_keys and not cleaned_keys:
+            raise ValueError("item_keys must contain at least one non-blank key")
+        item_filter = ""
+        params: list[Any] = [normalized_kind]
+        if cleaned_keys:
+            placeholders = ", ".join("?" for _ in cleaned_keys)
+            item_filter = f" AND item_key IN ({placeholders})"
+            params.extend(cleaned_keys)
         age = max(0, int(stale_after_seconds))
+        cutoff = f"-{age} seconds"
+        params.extend((cutoff, cutoff))
         cursor = self._execute_write(
             """
             UPDATE native_save_states
             SET task_id = '', execution_id = '', task_claimed_at = NULL,
-                task_started_at = NULL
+                task_started_at = NULL, task_heartbeat_at = NULL
             WHERE list_kind = ? AND status = 'pending' AND task_id != ''
-              AND task_started_at IS NULL AND task_claimed_at IS NOT NULL
-              AND task_claimed_at <= datetime('now', ?)
+            """
+            + item_filter
+            + """
+              AND (
+                  (task_started_at IS NULL AND task_claimed_at IS NOT NULL
+                   AND task_claimed_at <= datetime('now', ?))
+                  OR
+                  (task_started_at IS NOT NULL
+                   AND (task_heartbeat_at IS NULL
+                        OR task_heartbeat_at <= datetime('now', ?)))
+              )
             """,
-            (normalized_kind, f"-{age} seconds"),
+            params,
+        )
+        return int(cursor.rowcount or 0)
+
+    def release_stale_pending_native_sync_task(
+        self,
+        task_id: str,
+        *,
+        stale_after_seconds: int = 300,
+    ) -> int:
+        """Release stale pending rows while polling one known task."""
+        normalized_task_id = self._native_task_id(task_id)
+        age = max(0, int(stale_after_seconds))
+        cutoff = f"-{age} seconds"
+        cursor = self._execute_write(
+            """
+            UPDATE native_save_states
+            SET task_id = '', execution_id = '', task_claimed_at = NULL,
+                task_started_at = NULL, task_heartbeat_at = NULL
+            WHERE task_id = ? AND status = 'pending'
+              AND (
+                  (task_started_at IS NULL AND task_claimed_at IS NOT NULL
+                   AND task_claimed_at <= datetime('now', ?))
+                  OR
+                  (task_started_at IS NOT NULL
+                   AND (task_heartbeat_at IS NULL
+                        OR task_heartbeat_at <= datetime('now', ?)))
+              )
+            """,
+            (normalized_task_id, cutoff, cutoff),
         )
         return int(cursor.rowcount or 0)
 
@@ -8150,8 +8213,37 @@ class Database:
         cursor = self._execute_write(
             """
             UPDATE native_save_states
-            SET task_started_at = COALESCE(task_started_at, CURRENT_TIMESTAMP)
+            SET task_started_at = COALESCE(task_started_at, CURRENT_TIMESTAMP),
+                task_heartbeat_at = CURRENT_TIMESTAMP
             WHERE task_id = ? AND status IN ('pending', 'syncing')
+            """,
+            (normalized_task_id,),
+        )
+        return int(cursor.rowcount or 0)
+
+    def heartbeat_native_sync_task(self, task_id: str) -> int:
+        """Refresh the task lease protecting all remaining batch rows."""
+        normalized_task_id = self._native_task_id(task_id)
+        cursor = self._execute_write(
+            """
+            UPDATE native_save_states
+            SET task_heartbeat_at = CURRENT_TIMESTAMP
+            WHERE task_id = ? AND task_started_at IS NOT NULL
+              AND status IN ('pending', 'syncing')
+            """,
+            (normalized_task_id,),
+        )
+        return int(cursor.rowcount or 0)
+
+    def release_pending_native_sync_task(self, task_id: str) -> int:
+        """Release unclaimed pending rows when a runner exits normally or by cancellation."""
+        normalized_task_id = self._native_task_id(task_id)
+        cursor = self._execute_write(
+            """
+            UPDATE native_save_states
+            SET task_id = '', execution_id = '', task_claimed_at = NULL,
+                task_started_at = NULL, task_heartbeat_at = NULL
+            WHERE task_id = ? AND status = 'pending' AND execution_id = ''
             """,
             (normalized_task_id,),
         )
@@ -8366,8 +8458,9 @@ class Database:
             WHERE m.list_kind = ?
               AND (
                   n.status IS NULL
+                  OR (n.status = 'pending' AND n.task_id = '')
                   OR n.status IN (
-                      'pending', 'login_required', 'rate_limited',
+                      'login_required', 'rate_limited',
                       'extension_required', 'failed'
                   )
               )
@@ -8404,6 +8497,7 @@ class Database:
                 n.execution_id,
                 n.task_claimed_at,
                 n.task_started_at,
+                n.task_heartbeat_at,
                 n.last_error_code,
                 n.last_error_message,
                 n.last_attempt_at,

@@ -58,6 +58,7 @@ class SavedSyncService:
         task_starter: TaskStarter | None = None,
         *,
         claim_heartbeat_interval_seconds: float = 30.0,
+        task_heartbeat_interval_seconds: float = 30.0,
         adapter_timeout_seconds: float = 240.0,
     ) -> None:
         self._database = database
@@ -66,6 +67,10 @@ class SavedSyncService:
         self._claim_heartbeat_interval_seconds = max(
             0.001,
             float(claim_heartbeat_interval_seconds),
+        )
+        self._task_heartbeat_interval_seconds = max(
+            0.001,
+            float(task_heartbeat_interval_seconds),
         )
         self._adapter_timeout_seconds = min(
             _MAX_ADAPTER_TIMEOUT_SECONDS,
@@ -132,7 +137,7 @@ class SavedSyncService:
                 raise ValueError("item_keys must contain at least one non-blank key")
         else:
             selected_keys = None
-        self._database.release_stale_unstarted_native_sync_tasks(list_kind)
+        self._database.release_stale_pending_native_sync_tasks(list_kind, selected_keys)
         self._database.reconcile_stale_native_save_claims_for_list(
             list_kind,
             selected_keys,
@@ -176,15 +181,21 @@ class SavedSyncService:
             async with entry.lock:
                 self._database.mark_native_sync_task_started(task_id)
                 self._database.reconcile_stale_native_save_claims(task_id)
-                rows = self._database.list_native_save_states_by_task(task_id)
-                grouped_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
-                for row in rows:
-                    grouped_rows[str(row["source_platform"])].append(row)
+                task_heartbeat = asyncio.create_task(self._heartbeat_sync_task(task_id))
+                try:
+                    rows = self._database.list_native_save_states_by_task(task_id)
+                    grouped_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+                    for row in rows:
+                        grouped_rows[str(row["source_platform"])].append(row)
 
-                await asyncio.gather(
-                    *(self._run_platform_group(group) for group in grouped_rows.values())
-                )
-                return self.get_sync_task(task_id)
+                    await asyncio.gather(
+                        *(self._run_platform_group(group) for group in grouped_rows.values())
+                    )
+                    return self.get_sync_task(task_id)
+                finally:
+                    task_heartbeat.cancel()
+                    await asyncio.gather(task_heartbeat, return_exceptions=True)
+                    self._database.release_pending_native_sync_task(task_id)
         finally:
             entry.users -= 1
             if entry.users == 0 and self._task_run_locks.get(task_id) is entry:
@@ -193,6 +204,7 @@ class SavedSyncService:
     def get_sync_task(self, task_id: str) -> SavedSyncBatchResult:
         """Reconstruct a batch entirely from persisted native-save states."""
         task_id = self._validated_task_id(task_id)
+        self._database.release_stale_pending_native_sync_task(task_id)
         self._database.reconcile_stale_native_save_claims(task_id)
         rows = self._database.list_native_save_states_by_task(task_id)
         items = tuple(self._result_from_row(row) for row in rows)
@@ -565,6 +577,12 @@ class SavedSyncService:
                 task_id,
                 execution_id,
             ):
+                return
+
+    async def _heartbeat_sync_task(self, task_id: str) -> None:
+        while True:
+            await asyncio.sleep(self._task_heartbeat_interval_seconds)
+            if self._database.heartbeat_native_sync_task(task_id) == 0:
                 return
 
     def _persist_result(
