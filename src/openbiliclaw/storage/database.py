@@ -7076,7 +7076,10 @@ class Database:
 
     def remove_from_watch_later(self, bvid: str) -> bool:
         """Remove a bookmark. Returns True if a row was deleted."""
-        return self.remove_saved_membership("watch_later", f"bilibili:{bvid.strip()}")
+        item_key = self._resolve_legacy_saved_item_key("watch_later", bvid)
+        if item_key is None:
+            return False
+        return self.remove_saved_membership("watch_later", item_key)
 
     def is_in_watch_later(self, bvid: str) -> bool:
         """Check whether a video is bookmarked."""
@@ -7188,29 +7191,8 @@ class Database:
         """Copy one trusted legacy saved table into normalized storage."""
         if table_name not in {"watch_later", "favorites"}:
             raise ValueError(f"unsupported legacy saved table: {table_name}")
-        complete_identity_sql = """
-            NULLIF(TRIM(c.source_platform), '') IS NOT NULL
-            AND NULLIF(TRIM(c.content_id), '') IS NOT NULL
-        """
-        platform_sql = f"""
-            CASE WHEN {complete_identity_sql} THEN
-                CASE LOWER(TRIM(c.source_platform))
-                    WHEN 'bili' THEN 'bilibili'
-                    WHEN 'xhs' THEN 'xiaohongshu'
-                    WHEN 'dy' THEN 'douyin'
-                    WHEN 'yt' THEN 'youtube'
-                    WHEN 'x' THEN 'twitter'
-                    WHEN 'zh' THEN 'zhihu'
-                    WHEN 'rd' THEN 'reddit'
-                    ELSE LOWER(TRIM(c.source_platform))
-                END
-            ELSE 'bilibili'
-            END
-        """
-        content_id_sql = (
-            f"CASE WHEN {complete_identity_sql} THEN TRIM(c.content_id) ELSE legacy.bvid END"
-        )
-        item_key_sql = f"({platform_sql}) || ':' || ({content_id_sql})"
+        platform_sql, content_id_sql, item_key_sql = self._legacy_saved_identity_sql()
+
         self.conn.execute(
             f"""
             INSERT OR IGNORE INTO saved_items (
@@ -7243,6 +7225,34 @@ class Database:
         )
 
     @staticmethod
+    def _legacy_saved_identity_sql() -> tuple[str, str, str]:
+        """Return shared SQL expressions for canonicalizing one joined legacy saved row."""
+        complete_identity_sql = """
+            NULLIF(TRIM(c.source_platform), '') IS NOT NULL
+            AND NULLIF(TRIM(c.content_id), '') IS NOT NULL
+        """
+        platform_sql = f"""
+            CASE WHEN {complete_identity_sql} THEN
+                CASE LOWER(TRIM(c.source_platform))
+                    WHEN 'bili' THEN 'bilibili'
+                    WHEN 'xhs' THEN 'xiaohongshu'
+                    WHEN 'dy' THEN 'douyin'
+                    WHEN 'yt' THEN 'youtube'
+                    WHEN 'x' THEN 'twitter'
+                    WHEN 'zh' THEN 'zhihu'
+                    WHEN 'rd' THEN 'reddit'
+                    ELSE LOWER(TRIM(c.source_platform))
+                END
+            ELSE 'bilibili'
+            END
+        """
+        content_id_sql = (
+            f"CASE WHEN {complete_identity_sql} THEN TRIM(c.content_id) ELSE legacy.bvid END"
+        )
+        item_key_sql = f"({platform_sql}) || ':' || ({content_id_sql})"
+        return platform_sql, content_id_sql, item_key_sql
+
+    @staticmethod
     def _saved_list_kind(value: str) -> SavedListKind:
         list_kind = value.strip()
         if list_kind not in {"favorite", "watch_later"}:
@@ -7271,6 +7281,31 @@ class Database:
             author_name=str(row["author_name"] or row["up_name"] or ""),
             cover_url=str(row["cover_url"] or ""),
         )
+
+    def _resolve_legacy_saved_item_key(self, list_kind: str, content_id: str) -> str | None:
+        """Resolve a legacy raw-ID removal to one unambiguous normalized membership."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_content_id = content_id.strip()
+        bilibili_key = f"bilibili:{normalized_content_id}"
+        self._ensure_fresh_read()
+        rows = self.conn.execute(
+            """
+            SELECT m.item_key
+            FROM saved_memberships AS m
+            JOIN saved_items AS i ON i.item_key = m.item_key
+            WHERE m.list_kind = ?
+              AND (m.item_key = ? OR i.content_id = ?)
+            ORDER BY CASE WHEN m.item_key = ? THEN 0 ELSE 1 END, m.item_key
+            """,
+            (normalized_kind, bilibili_key, normalized_content_id, bilibili_key),
+        ).fetchall()
+        if rows and str(rows[0]["item_key"]) == bilibili_key:
+            return bilibili_key
+        if len(rows) == 1:
+            return str(rows[0]["item_key"])
+        if len(rows) > 1:
+            return None
+        return bilibili_key
 
     @staticmethod
     def _saved_membership_select() -> str:
@@ -7366,7 +7401,7 @@ class Database:
         return row
 
     def remove_saved_membership(self, list_kind: str, item_key: str) -> bool:
-        """Remove a normalized membership and its Bilibili compatibility row, if any."""
+        """Remove a normalized membership and any matching legacy compatibility row."""
         normalized_kind = self._saved_list_kind(list_kind)
         normalized_key = item_key.strip()
         legacy_table = "favorites" if normalized_kind == "favorite" else "watch_later"
@@ -7383,12 +7418,24 @@ class Database:
                 (normalized_kind, normalized_key),
             )
             removed = int(cursor.rowcount or 0) > 0
-            if legacy_bvid is not None:
-                legacy_cursor = conn.execute(
-                    f"DELETE FROM {legacy_table} WHERE bvid = ?",
-                    (legacy_bvid,),
+            _, _, legacy_item_key_sql = self._legacy_saved_identity_sql()
+            direct_bilibili_clause = "legacy.bvid = ? OR" if legacy_bvid is not None else ""
+            legacy_params = (
+                (legacy_bvid, normalized_key) if legacy_bvid is not None else (normalized_key,)
+            )
+            legacy_cursor = conn.execute(
+                f"""
+                DELETE FROM {legacy_table}
+                WHERE bvid IN (
+                    SELECT legacy.bvid
+                    FROM {legacy_table} AS legacy
+                    LEFT JOIN content_cache AS c ON c.bvid = legacy.bvid
+                    WHERE {direct_bilibili_clause} ({legacy_item_key_sql}) = ?
                 )
-                removed = removed or int(legacy_cursor.rowcount or 0) > 0
+                """,
+                legacy_params,
+            )
+            removed = removed or int(legacy_cursor.rowcount or 0) > 0
             conn.commit()
         except Exception:
             conn.rollback()
@@ -7438,49 +7485,69 @@ class Database:
     ) -> None:
         """Persist the latest native-save routing and execution state for one item."""
         normalized_kind = self._saved_list_kind(list_kind)
-        self._execute_write(
-            """
-            INSERT INTO native_save_states (
-                list_kind, item_key, requested_action, resolved_action, resolved_target,
-                status, task_id, last_error_code, last_error_message,
-                last_attempt_at, synced_at
+        normalized_key = item_key.strip()
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            membership = conn.execute(
+                "SELECT 1 FROM saved_memberships WHERE list_kind = ? AND item_key = ?",
+                (normalized_kind, normalized_key),
+            ).fetchone()
+            if membership is None:
+                raise ValueError(
+                    f"saved membership does not exist: {normalized_kind}/{normalized_key}"
+                )
+            conn.execute(
+                """
+                INSERT INTO native_save_states (
+                    list_kind, item_key, requested_action, resolved_action, resolved_target,
+                    status, task_id, last_error_code, last_error_message,
+                    last_attempt_at, synced_at
+                )
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    CASE WHEN ? = 'pending' THEN NULL ELSE CURRENT_TIMESTAMP END,
+                    CASE WHEN ? IN ('synced', 'already_synced')
+                        THEN CURRENT_TIMESTAMP ELSE NULL END
+                )
+                ON CONFLICT(list_kind, item_key) DO UPDATE SET
+                    requested_action = excluded.requested_action,
+                    resolved_action = excluded.resolved_action,
+                    resolved_target = excluded.resolved_target,
+                    status = excluded.status,
+                    task_id = excluded.task_id,
+                    last_error_code = excluded.last_error_code,
+                    last_error_message = excluded.last_error_message,
+                    last_attempt_at = CASE
+                        WHEN excluded.status = 'pending' THEN native_save_states.last_attempt_at
+                        ELSE CURRENT_TIMESTAMP
+                    END,
+                    synced_at = CASE
+                        WHEN excluded.status IN ('synced', 'already_synced')
+                            THEN CURRENT_TIMESTAMP
+                        ELSE native_save_states.synced_at
+                    END
+                """,
+                (
+                    normalized_kind,
+                    normalized_key,
+                    requested_action,
+                    resolved_action,
+                    resolved_target,
+                    status,
+                    task_id,
+                    last_error_code,
+                    last_error_message,
+                    status,
+                    status,
+                ),
             )
-            VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                CASE WHEN ? = 'pending' THEN NULL ELSE CURRENT_TIMESTAMP END,
-                CASE WHEN ? IN ('synced', 'already_synced') THEN CURRENT_TIMESTAMP ELSE NULL END
-            )
-            ON CONFLICT(list_kind, item_key) DO UPDATE SET
-                requested_action = excluded.requested_action,
-                resolved_action = excluded.resolved_action,
-                resolved_target = excluded.resolved_target,
-                status = excluded.status,
-                task_id = excluded.task_id,
-                last_error_code = excluded.last_error_code,
-                last_error_message = excluded.last_error_message,
-                last_attempt_at = CASE
-                    WHEN excluded.status = 'pending' THEN native_save_states.last_attempt_at
-                    ELSE CURRENT_TIMESTAMP
-                END,
-                synced_at = CASE
-                    WHEN excluded.status IN ('synced', 'already_synced') THEN CURRENT_TIMESTAMP
-                    ELSE native_save_states.synced_at
-                END
-            """,
-            (
-                normalized_kind,
-                item_key.strip(),
-                requested_action,
-                resolved_action,
-                resolved_target,
-                status,
-                task_id,
-                last_error_code,
-                last_error_message,
-                status,
-                status,
-            ),
-        )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def list_native_sync_eligible(
         self,
@@ -7929,7 +7996,10 @@ class Database:
 
     def remove_from_favorites(self, bvid: str) -> bool:
         """Remove a favorite. Returns True if a row was deleted."""
-        return self.remove_saved_membership("favorite", f"bilibili:{bvid.strip()}")
+        item_key = self._resolve_legacy_saved_item_key("favorite", bvid)
+        if item_key is None:
+            return False
+        return self.remove_saved_membership("favorite", item_key)
 
     def is_in_favorites(self, bvid: str) -> bool:
         """Check whether a video is favorited."""

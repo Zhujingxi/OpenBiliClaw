@@ -167,3 +167,94 @@ def test_generic_bilibili_removal_also_deletes_legacy_row(db: Database) -> None:
     assert (
         db.conn.execute("SELECT 1 FROM favorites WHERE bvid = ?", ("BV1REMOVE",)).fetchone() is None
     )
+
+
+@pytest.mark.parametrize(
+    ("list_kind", "legacy_table", "remove_method_name"),
+    [
+        ("watch_later", "watch_later", "remove_from_watch_later"),
+        ("favorite", "favorites", "remove_from_favorites"),
+    ],
+)
+def test_legacy_remove_wrapper_resolves_migrated_non_bilibili_identity(
+    tmp_path: Path,
+    list_kind: str,
+    legacy_table: str,
+    remove_method_name: str,
+) -> None:
+    database = Database(tmp_path / f"legacy-remove-{legacy_table}.db")
+    database.initialize()
+    database.conn.execute("DELETE FROM saved_sync_migrations")
+    database.cache_content(
+        "legacy-storage-key",
+        source_platform="youtube",
+        content_id="video-123",
+        content_url="https://www.youtube.com/watch?v=video-123",
+    )
+    database.conn.execute(
+        f"INSERT INTO {legacy_table} (bvid, note) VALUES (?, ?)",
+        ("legacy-storage-key", "legacy note"),
+    )
+    database.conn.commit()
+    database._ensure_saved_sync_tables()
+
+    remove_method = getattr(database, remove_method_name)
+    assert remove_method("video-123") is True
+    assert database.get_saved_membership(list_kind, "youtube:video-123") is None
+    assert (
+        database.conn.execute(
+            f"SELECT 1 FROM {legacy_table} WHERE bvid = ?", ("legacy-storage-key",)
+        ).fetchone()
+        is None
+    )
+
+
+def test_native_save_state_rejects_item_without_local_membership(db: Database) -> None:
+    with pytest.raises(ValueError, match="saved membership does not exist"):
+        db.upsert_native_save_state(
+            "favorite",
+            "youtube:not-saved",
+            requested_action="favorite",
+            status="pending",
+            task_id="orphan-task",
+        )
+
+    assert db.list_native_save_states_by_task("orphan-task") == []
+    assert (
+        db.conn.execute(
+            "SELECT 1 FROM native_save_states WHERE list_kind = ? AND item_key = ?",
+            ("favorite", "youtube:not-saved"),
+        ).fetchone()
+        is None
+    )
+
+
+def test_legacy_remove_wrapper_fails_closed_for_ambiguous_cross_platform_id(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "legacy-remove-ambiguous.db")
+    database.initialize()
+    database.conn.execute("DELETE FROM saved_sync_migrations")
+    database.cache_content(
+        "video-123",
+        source_platform="youtube",
+        content_id="video-123",
+    )
+    database.cache_content(
+        "legacy-douyin-key",
+        source_platform="douyin",
+        content_id="video-123",
+    )
+    database.conn.executemany(
+        "INSERT INTO watch_later (bvid) VALUES (?)",
+        [("video-123",), ("legacy-douyin-key",)],
+    )
+    database.conn.commit()
+    database._ensure_saved_sync_tables()
+
+    assert database.remove_from_watch_later("video-123") is False
+    assert database.get_saved_membership("watch_later", "youtube:video-123") is not None
+    assert database.get_saved_membership("watch_later", "douyin:video-123") is not None
+    legacy_count = database.conn.execute("SELECT COUNT(*) FROM watch_later").fetchone()
+    assert legacy_count is not None
+    assert int(legacy_count[0]) == 2

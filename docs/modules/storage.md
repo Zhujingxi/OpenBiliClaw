@@ -4,17 +4,19 @@
 
 `src/openbiliclaw/storage/` 负责本地 SQLite 数据库、schema 初始化、候选池计数和高频读写路径。它不理解 runtime state 或用户画像，只提供确定性的持久化 API。
 
-本模块当前承担三类边界：
+本模块当前承担四类边界：
 
 - 行为、推荐、候选池、聊天和鉴权状态的 SQLite 表结构管理。
 - 推荐池 `content_cache` 的可换 / raw / pending 计数口径。
 - discovery 待评估池 `discovery_candidates` 的生命周期管理。
+- 跨平台收藏 / 稍后再看的 canonical 本地 membership、元数据快照和 native sync 状态持久化。
 
 ## 已实现功能
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
 | SQLite schema 初始化 | ✅ | `Database.initialize()` 自动创建核心表和索引，支持旧库增量补列 / 补索引。 |
+| 规范化保存存储 | ✅ | `saved_items` 以 `source_platform:content_id` canonical key 保存跨平台元数据快照，`saved_memberships` 独立表达收藏 / 稍后看归属，`native_save_states` 持久化逐项同步状态；旧 `watch_later` / `favorites` 由带 marker 的单次事务迁移导入并继续兼容。 |
 | 推荐池 readiness 计数 | ✅ | `count_pool_readiness()` 返回 `available/raw/pending/pending_eval/evaluated_pending`，供 runtime status 和补货判断使用。 |
 | 来源 raw material 统计 | ✅ | `count_pool_raw_material_by_source()` 合并 `content_cache` raw rows 和 `discovery_candidates` 待评估候选，供 raw ceiling headroom 使用。 |
 | discovery 待评估池 | ✅ | 新增 `discovery_candidates` 表，支持 mixed-source enqueue / claim / evaluation update / cached mark / rejection status，并持久化 `score_threshold`、`eval_attempts` 与 batch 级 `batch_eval_attempts`。 |
@@ -31,6 +33,42 @@
 | 封面粘性保护 | ✅ | `cache_content()` upsert 对 `cover_url` 用 `COALESCE(NULLIF(excluded,''), 现值)`——带空封面的重摄入（如互动数据刷新、事件驱动 related-chain）不再抹掉已有好封面，与 `author_name` / `body_text` 同一保护策略（v0.3.162+）。 |
 
 ## 公开 API
+
+### Saved Memberships And Native State
+
+```python
+from openbiliclaw.saved_sync.models import SavedItemInput
+
+item = SavedItemInput(
+    source_platform="youtube",
+    content_id="video-123",
+    content_url="https://www.youtube.com/watch?v=video-123",
+    title="Example",
+)
+membership = db.upsert_saved_membership("favorite", item, note="稍后整理")
+current = db.get_saved_membership("favorite", item.item_key)
+rows = db.list_saved_memberships("favorite", limit=50, offset=0)
+
+db.upsert_native_save_state(
+    "favorite",
+    item.item_key,
+    requested_action="favorite",
+    status="pending",
+    task_id="task-id",
+)
+eligible = db.list_native_sync_eligible("favorite")
+task_rows = db.list_native_save_states_by_task("task-id")
+removed = db.remove_saved_membership("favorite", item.item_key)
+```
+
+存储契约：
+
+- `saved_items.item_key` 是平台 canonical identity；不同平台可安全复用相同裸 `content_id`。
+- `saved_memberships` 以 `(list_kind, item_key)` 为主键，同一内容可同时属于 `favorite` 与 `watch_later`。无 `native_save_states` 行时，membership 查询返回 `sync_status="pending"`。
+- `native_save_states` 以同一联合键引用 membership；状态 upsert 在启用外键的 `BEGIN IMMEDIATE` 事务内先验证本地 membership，未本地保存的 key 会抛出 `ValueError`，不会留下 orphan state。
+- 初始化只在 `saved_sync_migrations` 缺少 `legacy_saved_tables_v1` 时迁移旧表。迁移用 `content_cache` 恢复平台、内容 ID 与元数据；身份字段不完整时按兼容语义回落 `bilibili:<legacy bvid>`。marker 在两个列表都复制成功后写入，避免已删除的 normalized membership 下次启动复活。
+- 旧 `add/remove/list/count/status` Bilibili wrappers 继续维护兼容表，但用户可见读取以 normalized membership 为准。移除 wrapper 会优先匹配 Bilibili key，否则只在裸 `content_id` 唯一对应一个 normalized membership 时解析跨平台 key，并同步删除迁移来源行；多个非 Bilibili 平台共享该裸 ID 时返回 `False`、不删除任何一侧。
+- 本节只描述本地存储基础；平台 adapter、新的 platform-neutral HTTP API 与三端同步 UI 尚未在此阶段宣称完成。
 
 ### Discovery Candidates
 
