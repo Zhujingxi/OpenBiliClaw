@@ -52,6 +52,8 @@ export interface XhsNoteMetadata {
   like_count?: number;
   collect_count?: number;
   comment_count?: number;
+  published_at?: string | number;
+  published_label?: string;
 }
 
 /**

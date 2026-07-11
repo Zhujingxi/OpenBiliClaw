@@ -43,6 +43,8 @@ export interface DouyinBootstrapItem {
   collect_count?: number;
   comment_count?: number;
   share_count?: number;
+  published_at?: string | number;
+  published_label?: string;
 }
 
 export interface DouyinSearchItem {
@@ -61,6 +63,8 @@ export interface DouyinSearchItem {
   collect_count?: number;
   comment_count?: number;
   share_count?: number;
+  published_at?: string | number;
+  published_label?: string;
 }
 
 /**
@@ -171,6 +175,7 @@ export function parseAwemeListResponse(
     if (!raw || typeof raw !== "object") continue;
     const aweme = raw as {
       aweme_id?: unknown;
+      create_time?: unknown;
       desc?: unknown;
       preview_title?: unknown;
       author?: unknown;
@@ -182,6 +187,7 @@ export function parseAwemeListResponse(
     if (!awemeId && !title) continue;
     const author = pickAuthor(aweme.author);
     const coverUrl = pickFirstUrl(aweme.video?.cover);
+    const publishedAt = pickNumber(aweme.create_time);
     items.push({
       scope,
       aweme_id: awemeId,
@@ -192,6 +198,7 @@ export function parseAwemeListResponse(
       author_sec_uid: author.sec_uid,
       cover_url: coverUrl,
       ...pickAwemeMetrics(aweme.statistics),
+      ...(publishedAt !== undefined ? { published_at: publishedAt } : {}),
     });
   }
   return items;
@@ -252,6 +259,7 @@ function normalizeSearchAweme(
   if (!raw || typeof raw !== "object") return null;
   const aweme = raw as {
     aweme_id?: unknown;
+    create_time?: unknown;
     desc?: unknown;
     preview_title?: unknown;
     share_info?: { share_title?: unknown; share_desc?: unknown };
@@ -267,6 +275,7 @@ function normalizeSearchAweme(
     pickString(aweme.share_info?.share_desc);
   if (!awemeId && !title) return null;
   const author = pickAuthor(aweme.author);
+  const publishedAt = pickNumber(aweme.create_time);
   const item: DouyinSearchItem = {
     scope,
     aweme_id: awemeId,
@@ -279,6 +288,7 @@ function normalizeSearchAweme(
       pickFirstUrl(aweme.video?.origin_cover) ||
       pickFirstUrl(aweme.video?.animated_cover),
     ...pickAwemeMetrics(aweme.statistics),
+    ...(publishedAt !== undefined ? { published_at: publishedAt } : {}),
   };
   if (scope === "dy_hot") {
     item.hot_word = meta.word ?? "";

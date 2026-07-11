@@ -77,6 +77,9 @@ def plugin_search_item_to_aweme(item: dict[str, Any]) -> dict[str, object] | Non
         "desc": title,
         "author": {"nickname": author, "sec_uid": author_sec_uid},
     }
+    published_time = item.get("published_at") or item.get("create_time")
+    if published_time not in (None, ""):
+        aweme["create_time"] = published_time
     if cover_url:
         aweme["video"] = {"cover": {"url_list": [cover_url]}}
     else:

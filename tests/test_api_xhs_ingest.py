@@ -297,6 +297,8 @@ class TestXhsObservedUrls:
                         "like_count": 100,
                         "collect_count": 90,
                         "comment_count": 80,
+                        "published_at": 1783492200,
+                        "published_label": "3小时前",
                     }
                 ],
                 "page_type": "search",
@@ -309,7 +311,8 @@ class TestXhsObservedUrls:
 
         row = db.conn.execute(
             "SELECT source_strategy, source_platform, content_id, content_url, title, up_name, "
-            "view_count, like_count, collect_count, comment_count "
+            "view_count, like_count, collect_count, comment_count, published_at, "
+            "published_label "
             "FROM discovery_candidates WHERE content_id=?",
             ("note-xyz-001",),
         ).fetchone()
@@ -320,6 +323,8 @@ class TestXhsObservedUrls:
         assert row["like_count"] == 100
         assert row["collect_count"] == 90
         assert row["comment_count"] == 80
+        assert row["published_at"] == "2026-07-08T06:30:00Z"
+        assert row["published_label"] == "3小时前"
 
     def test_notes_ingest_drains_through_pipeline_into_content_cache(
         self,
@@ -1150,6 +1155,8 @@ class TestXhsTaskResults:
                         "like_count": 101,
                         "collect_count": 91,
                         "comment_count": 81,
+                        "published_at": 1783492200,
+                        "published_label": "3小时前",
                     }
                 ],
             },
@@ -1178,7 +1185,7 @@ class TestXhsTaskResults:
 
         candidate_row = db.conn.execute(
             "SELECT title, source_strategy, source_platform, like_count, collect_count, "
-            "comment_count FROM discovery_candidates "
+            "comment_count, published_at, published_label FROM discovery_candidates "
             "WHERE content_id=?",
             ("note-task-001",),
         ).fetchone()
@@ -1189,6 +1196,8 @@ class TestXhsTaskResults:
         assert candidate_row["like_count"] == 101
         assert candidate_row["collect_count"] == 91
         assert candidate_row["comment_count"] == 81
+        assert candidate_row["published_at"] == "2026-07-08T06:30:00Z"
+        assert candidate_row["published_label"] == "3小时前"
 
     def test_xhs_bootstrap_skips_notes_already_seen_in_previous_task(
         self,

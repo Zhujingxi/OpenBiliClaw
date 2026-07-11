@@ -86,6 +86,7 @@ test("parseAwemeListResponse extracts aweme_id, desc, author, cover for dy_post"
       aweme_list: [
         {
           aweme_id: "111",
+          create_time: 1783492200,
           desc: "demo description",
           author: { nickname: "u", sec_uid: "s" },
           video: { cover: { url_list: ["https://c1", "https://c2"] } },
@@ -103,6 +104,7 @@ test("parseAwemeListResponse extracts aweme_id, desc, author, cover for dy_post"
   assert.equal(items[0]!.author_sec_uid, "s");
   assert.equal(items[0]!.cover_url, "https://c1");
   assert.equal(items[0]!.url, "https://www.douyin.com/video/111");
+  assert.equal(items[0]!.published_at, 1783492200);
 });
 
 test("parseAwemeListResponse falls back to preview_title when desc is empty", () => {
@@ -184,6 +186,7 @@ test("parseSearchAwemeResponse extracts aweme_info rows from general search", ()
       {
         aweme_info: {
           aweme_id: "search-1",
+          create_time: 1783492200,
           desc: "搜索结果 1",
           author: { nickname: "作者", sec_uid: "MS4wAuthor" },
           video: { cover: { url_list: ["https://cover"] } },
@@ -199,6 +202,7 @@ test("parseSearchAwemeResponse extracts aweme_info rows from general search", ()
   assert.equal(items[0]!.author, "作者");
   assert.equal(items[0]!.author_sec_uid, "MS4wAuthor");
   assert.equal(items[0]!.cover_url, "https://cover");
+  assert.equal(items[0]!.published_at, 1783492200);
 });
 
 test("parseSearchAwemeResponse accepts aweme_list from video search endpoint", () => {
