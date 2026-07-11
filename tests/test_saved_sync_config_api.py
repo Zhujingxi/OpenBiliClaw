@@ -2,16 +2,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from openbiliclaw.api.app import create_app
+from openbiliclaw.api.models import ConfigUpdateIn
 from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig, load_config, save_config
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
-
 
 def _make_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> TestClient:
     config = Config(
@@ -62,3 +62,61 @@ def test_config_api_rejects_non_boolean_saved_auto_sync(
 
     assert response.status_code == 422
     assert load_config(tmp_path / "config.toml").saved_sync.auto_sync_enabled is False
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"saved_sync": None},
+        {"saved_sync": {"auto_sync_enabled": None}},
+    ],
+    ids=["null-section", "null-field"],
+)
+def test_config_update_model_rejects_explicit_saved_sync_nulls(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        ConfigUpdateIn.model_validate(payload)
+
+
+def test_config_update_model_allows_omitted_saved_sync() -> None:
+    payload = ConfigUpdateIn.model_validate({"language": "en"})
+
+    assert payload.saved_sync is None
+    assert "saved_sync" not in payload.model_fields_set
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"saved_sync": None},
+        {"saved_sync": {"auto_sync_enabled": None}},
+    ],
+    ids=["null-section", "null-field"],
+)
+def test_config_api_rejects_explicit_saved_sync_nulls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    payload: dict[str, object],
+) -> None:
+    client = _make_client(monkeypatch, tmp_path)
+
+    response = client.put("/api/config", json=payload)
+
+    assert response.status_code == 422
+    assert load_config(tmp_path / "config.toml").saved_sync.auto_sync_enabled is False
+
+
+def test_config_api_allows_omitted_saved_sync(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    client = _make_client(monkeypatch, tmp_path)
+
+    response = client.put("/api/config", json={"language": "en"})
+
+    assert response.status_code == 200
+    assert response.json()["config"]["saved_sync"] == {"auto_sync_enabled": False}
+    loaded = load_config(tmp_path / "config.toml")
+    assert loaded.language == "en"
+    assert loaded.saved_sync.auto_sync_enabled is False

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, StrictBool
+from pydantic import BaseModel, Field, StrictBool, field_validator
 
 
 class BehaviorEventIn(BaseModel):
@@ -1297,6 +1297,13 @@ class SavedSyncConfigOut(BaseModel):
 class SavedSyncConfigUpdateIn(BaseModel):
     auto_sync_enabled: StrictBool | None = None
 
+    @field_validator("auto_sync_enabled", mode="before")
+    @classmethod
+    def reject_explicit_null_auto_sync(cls, value: object) -> object:
+        if value is None:
+            raise ValueError("saved_sync.auto_sync_enabled must be a boolean")
+        return value
+
 
 class AutostartStatusOut(BaseModel):
     supported: bool
@@ -1355,6 +1362,13 @@ class ConfigUpdateIn(BaseModel):
     saved_sync: SavedSyncConfigUpdateIn | None = None
     storage: dict[str, object] | None = None
     logging: dict[str, object] | None = None
+
+    @field_validator("saved_sync", mode="before")
+    @classmethod
+    def reject_explicit_null_saved_sync(cls, value: object) -> object:
+        if value is None:
+            raise ValueError("saved_sync must be an object")
+        return value
 
 
 class ConfigServiceProbeIn(BaseModel):
