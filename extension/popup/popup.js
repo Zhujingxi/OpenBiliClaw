@@ -680,7 +680,7 @@ async function runSavedSync(listKind, items, button, status, reload, confirmBatc
   if (button) {
     const focusRoot = button.closest?.(".view") || button.parentElement;
     savedPendingFocus[listKind] = captureSavedFocus(focusRoot, button)
-      || { itemKey: "__list__", action: "sync-all", index: 0 };
+      || { kind: "list", action: "sync-all" };
     button.disabled = true;
     button.textContent = "同步中…";
   }
@@ -761,7 +761,8 @@ async function loadSavedList(listKind, { list, empty, syncAll, status, toggles }
       retry.className = "saved-load-retry";
       retry.dataset.savedListAction = "retry";
       retry.textContent = "重试加载";
-      retry.addEventListener("click", () => {
+      retry.addEventListener("click", (event) => {
+        savedPendingFocus[listKind] = captureSavedFocus(focusRoot, event.currentTarget);
         void loadSavedList(listKind, { list, empty, syncAll, status, toggles });
       });
       status.replaceChildren(

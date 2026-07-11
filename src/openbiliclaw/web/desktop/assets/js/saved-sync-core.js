@@ -177,6 +177,8 @@
   }
 
   function captureSavedFocus(root, activeElement = global.document?.activeElement) {
+    const listAction = text(activeElement?.dataset?.savedListAction);
+    if (root && listAction) return { kind: "list", action: listAction };
     const card = activeElement?.closest?.("[data-item-key]");
     const itemKey = text(card?.dataset?.itemKey);
     const action = text(activeElement?.dataset?.savedAction);
@@ -186,7 +188,7 @@
   }
 
   function restoreSavedFocus(root, token) {
-    if (!root || !token?.itemKey || !token?.action) return false;
+    if (!root || !token?.action) return false;
     const cards = Array.from(root.querySelectorAll?.("[data-item-key]") || []);
     const focusAction = (card) => {
       const actions = Array.from(card?.querySelectorAll?.("[data-saved-action]") || []);
@@ -195,6 +197,17 @@
       action?.focus?.();
       return Boolean(action);
     };
+    if (token.kind === "list" || token.itemKey === "__list__") {
+      const sameListAction = root.querySelector?.(
+        `[data-saved-list-action="${token.action}"]`,
+      );
+      if (sameListAction) { sameListAction.focus?.(); return true; }
+      if (focusAction(cards[0])) return true;
+      const heading = root.querySelector?.("[data-saved-heading]");
+      if (heading) { heading.focus?.(); return true; }
+      return false;
+    }
+    if (!token.itemKey) return false;
     let sameIndex = -1;
     for (let cardIndex = 0; cardIndex < cards.length; cardIndex += 1) {
       const card = cards[cardIndex];

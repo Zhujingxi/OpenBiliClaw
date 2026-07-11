@@ -24,6 +24,8 @@ import {
   syncSavedItems as syncPopupSavedItems,
   updateConfig as updatePopupConfig,
 } from "../popup/popup-api.js";
+import { __resetBackendEndpointForTests } from "../popup/popup-backend-config.js";
+import { __resetPopupDeviceAuthForTests } from "../popup/popup-device-auth.js";
 import {
   createDurableTaskTracker as createMobileTaskTracker,
   createRetainedSavedListState,
@@ -442,6 +444,85 @@ function installAbortAwareNeverFetch(safetyMs = 80) {
   };
 }
 
+function installPopupAuthStorage(initial: Record<string, unknown>) {
+  const values = { ...initial };
+  const originalChrome = (globalThis as any).chrome;
+  (globalThis as any).chrome = { storage: { local: {
+    get(keys: string | string[], callback: (items: Record<string, unknown>) => void) {
+      const selected = Array.isArray(keys) ? keys : [keys];
+      callback(Object.fromEntries(selected.filter((key) => key in values).map((key) => [key, values[key]])));
+    },
+    set(items: Record<string, unknown>, callback: () => void) {
+      Object.assign(values, items);
+      callback();
+    },
+    remove(keys: string | string[], callback: () => void) {
+      for (const key of Array.isArray(keys) ? keys : [keys]) delete values[key];
+      callback();
+    },
+  } } };
+  __resetPopupDeviceAuthForTests();
+  __resetBackendEndpointForTests();
+  return {
+    restore() {
+      (globalThis as any).chrome = originalChrome;
+      __resetPopupDeviceAuthForTests();
+      __resetBackendEndpointForTests();
+    },
+  };
+}
+
+function neverSettlingAuthFetch(authSignals: AbortSignal[], protectedStatus = 200) {
+  return (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    if (!String(input).endsWith("/auth/extension-token")) {
+      return new Response("{}", { status: protectedStatus });
+    }
+    if (init.signal) authSignals.push(init.signal);
+    return new Promise<Response>((_resolve, reject) => {
+      const safety = setTimeout(() => reject(Object.assign(new Error("auth safety timeout"), {
+        name: "SafetyError",
+      })), 80);
+      init.signal?.addEventListener("abort", () => {
+        clearTimeout(safety);
+        reject(init.signal?.reason || new DOMException("Aborted", "AbortError"));
+      }, { once: true });
+    });
+  }) as typeof fetch;
+}
+
+test("popup saved deadline aborts a never-settling initial session exchange", async () => {
+  const storage = installPopupAuthStorage({ obc_extension_device_key: "fresh-device-key" });
+  const originalFetch = globalThis.fetch;
+  const authSignals: AbortSignal[] = [];
+  globalThis.fetch = neverSettlingAuthFetch(authSignals);
+  try {
+    await assert.rejects(fetchPopupSavedItems("favorite", 10, 0, 5), { name: "AbortError" });
+    assert.equal(authSignals.length, 1);
+    assert.equal(authSignals[0].aborted, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    storage.restore();
+  }
+});
+
+test("popup saved deadline aborts a never-settling forced refresh after 401", async () => {
+  const storage = installPopupAuthStorage({
+    obc_extension_device_key: "refresh-device-key",
+    obc_auth_session: { token: "expired-by-server", expires_at: 2_000_000_000 },
+  });
+  const originalFetch = globalThis.fetch;
+  const authSignals: AbortSignal[] = [];
+  globalThis.fetch = neverSettlingAuthFetch(authSignals, 401);
+  try {
+    await assert.rejects(fetchPopupSavedItems("watch_later", 10, 0, 5), { name: "AbortError" });
+    assert.equal(authSignals.length, 1);
+    assert.equal(authSignals[0].aborted, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    storage.restore();
+  }
+});
+
 test("extension saved and config requests abort a never-resolving fetch within their supplied bound", async () => {
   const never = installAbortAwareNeverFetch();
   try {
@@ -622,6 +703,45 @@ test("focus restoration follows adjacent card, batch action, then heading across
     assert.equal(restore(fallbackRoot([], null, heading), { itemKey: "removed", action: "remove", index: 0 }), true, label);
     assert.equal(focused.at(-1), "heading", label);
   }
+});
+
+test("list-level batch and retry focus tokens round-trip before card fallback on all runtimes", async () => {
+  const popup = await import("../popup/popup-saved-sync.js");
+  const mobile = await import("../../src/openbiliclaw/web/js/saved-sync-runtime.js");
+  const desktop = (globalThis as any).OpenBiliClawSavedSync;
+  for (const [capture, restore] of [
+    [popup.captureSavedFocus, popup.restoreSavedFocus],
+    [mobile.captureSavedFocus, mobile.restoreSavedFocus],
+    [desktop.captureSavedFocus, desktop.restoreSavedFocus],
+  ]) {
+    for (const actionName of ["sync-all", "retry"]) {
+      const focused: string[] = [];
+      const listAction = {
+        dataset: { savedListAction: actionName },
+        closest() { return null; },
+        focus() { focused.push(`list:${actionName}`); },
+      };
+      const card = actionCard("first-card", "remove", focused);
+      const root = fallbackRoot([card], listAction);
+      const token = capture(root, listAction);
+      assert.deepEqual(token, { kind: "list", action: actionName });
+      assert.equal(restore(root, token), true);
+      assert.deepEqual(focused, [`list:${actionName}`]);
+    }
+  }
+});
+
+test("retry and batch handlers capture list focus before work on all three surfaces", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const popup = await readFile(new URL("../popup/popup.js", import.meta.url), "utf8");
+  const mobile = await readFile(new URL("../../src/openbiliclaw/web/js/views/saved.js", import.meta.url), "utf8");
+  const desktop = await readFile(new URL("../../src/openbiliclaw/web/desktop/assets/js/app.js", import.meta.url), "utf8");
+  assert.match(popup, /retry\.addEventListener\("click", \(event\) => \{[\s\S]*?captureSavedFocus[\s\S]*?loadSavedList/);
+  assert.match(mobile, /saved-load-retry[\s\S]*?addEventListener\("click", \(event\) => \{[\s\S]*?captureSavedFocus[\s\S]*?load\(\)/);
+  assert.match(desktop, /retry\.addEventListener\("click", \(event\) => \{[\s\S]*?captureSavedFocus[\s\S]*?reload\(\)/);
+  assert.match(popup, /async function runSavedSync[\s\S]*?captureSavedFocus\(focusRoot, button\)[\s\S]*?button\.disabled = true/);
+  assert.match(mobile, /saved-sync-all[\s\S]*?addEventListener\("click", \(event\) => \{[\s\S]*?captureSavedFocus\(\$root, event\.currentTarget\)[\s\S]*?runSync/);
+  assert.match(desktop, /async function runDesktopSavedSync[\s\S]*?captureSavedFocus\(focusRoot, activeButton\)[\s\S]*?activeButton\.disabled = true/);
 });
 
 test("Task 8 save and sync controls reserve coarse-pointer size without label shift", async () => {

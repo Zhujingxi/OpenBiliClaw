@@ -62,7 +62,7 @@ CREATE INDEX IF NOT EXISTS idx_watch_later_added
 - **防重复提交**：请求期间禁用当前动作按钮；状态 / 错误通过 `aria-live` 或 `role=alert` 发布
 - **canonical 状态**：卡片用 `GET /api/saved/watch_later/status?item_key=...` 水合；平台 fallback 完全留在后端
 - **手动同步**：列表显示真实 target 和五档状态，提供单项重试及「同步未同步内容（N）」批量确认；结果按平台显示成功/总数
-- **durable UI**：saved/config 请求使用有界 timeout；task 非终态时持续后台轮询并支持 visibility resume，列表重开后从 `sync_task_id` 去重恢复并以 item ownership 排除重复同步。刷新失败保留最后成功快照和总数；焦点在原控件消失后依次回退到相邻卡片、列表动作和标题
+- **durable UI**：saved/config 请求使用有界 timeout，插件同一 deadline 覆盖设备会话交换、401 强制换票与受保护请求；task 非终态时持续后台轮询并支持 visibility resume，列表重开后从 `sync_task_id` 去重恢复并以 item ownership 排除重复同步。刷新失败保留最后成功快照和总数；批量同步 / 重试先捕获列表级焦点并优先还原同一动作，卡片动作消失时再依次回退到相邻卡片、列表动作和标题
 - **本地删除**：只调用 `/api/saved/watch_later/remove`，不反向取消平台记录
 
 ### 4.2 各 Surface 实现

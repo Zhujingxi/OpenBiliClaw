@@ -60,29 +60,42 @@ function withTimeout(signal, timeoutMs) {
   };
 }
 
+function awaitWithAbort(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason || abortError());
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason || abortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(promise).then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", onAbort);
+    });
+  });
+}
+
 export async function requestJson(path, options = {}) {
-  const backendUrl = await getBackendBaseUrl();
   const { timeoutMs, signal, ...fetchOptions } = options;
-  // Storage/session refresh is outside the request timeout budget.
-  const sessionToken = await ensurePopupSession();
   const timeout = withTimeout(signal, timeoutMs);
-  const requestOptions = { ...fetchOptions };
-  if (timeout.signal) {
-    requestOptions.signal = timeout.signal;
-  }
-  const url = `${backendUrl}${path}`;
   try {
-    const response = await popupAuthenticatedFetch(
-      url,
+    const fetchImpl = globalThis.fetch.bind(globalThis);
+    const backendUrl = await awaitWithAbort(getBackendBaseUrl(), timeout.signal);
+    const sessionToken = await awaitWithAbort(ensurePopupSession({
+      fetchImpl,
+      signal: timeout.signal,
+    }), timeout.signal);
+    const requestOptions = { ...fetchOptions };
+    if (timeout.signal) requestOptions.signal = timeout.signal;
+    const response = await awaitWithAbort(popupAuthenticatedFetch(
+      `${backendUrl}${path}`,
       requestOptions,
-      globalThis.fetch.bind(globalThis),
-      { sessionToken },
-    );
+      fetchImpl,
+      { sessionToken, signal: timeout.signal },
+    ), timeout.signal);
     if (!response.ok) {
       let details = null;
       try {
-        details = await response.json();
-      } catch {
+        details = await awaitWithAbort(response.json(), timeout.signal);
+      } catch (error) {
+        if (timeout.signal?.aborted) throw error;
         details = null;
       }
       const error = new Error(`${path} request failed: ${response.status}`);
@@ -90,7 +103,7 @@ export async function requestJson(path, options = {}) {
       error.details = details;
       throw error;
     }
-    return response.json();
+    return await awaitWithAbort(response.json(), timeout.signal);
   } finally {
     timeout.cleanup();
   }

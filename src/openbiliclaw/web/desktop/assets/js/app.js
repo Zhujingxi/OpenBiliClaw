@@ -1613,7 +1613,7 @@
       if (activeButton) {
         const focusRoot = activeButton.closest(".saved-page") || activeButton.parentElement;
         desktopSavedPendingFocus[listKind] = window.OpenBiliClawSavedSync.captureSavedFocus(focusRoot, activeButton)
-          || { itemKey: "__list__", action: "sync-all", index: 0 };
+          || { kind: "list", action: "sync-all" };
         activeButton.disabled = true;
         activeButton.textContent = "同步中…";
       }
@@ -1651,7 +1651,7 @@
       button.onclick = () => runDesktopSavedSync(listKind, items, button, reload, true);
     }
 
-    function showDesktopSavedLoadError(status, state, reload) {
+    function showDesktopSavedLoadError(listKind, status, state, reload) {
       if (!status) return;
       status.setAttribute("role", "alert");
       status.dataset.loadError = "true";
@@ -1660,7 +1660,14 @@
       retry.className = "small-btn saved-load-retry";
       retry.dataset.savedListAction = "retry";
       retry.textContent = "重试加载";
-      retry.addEventListener("click", () => { void reload(); });
+      retry.addEventListener("click", (event) => {
+        const focusRoot = status.closest(".saved-page") || status.parentElement;
+        desktopSavedPendingFocus[listKind] = window.OpenBiliClawSavedSync.captureSavedFocus(
+          focusRoot,
+          event.currentTarget,
+        ) || { kind: "list", action: "retry" };
+        void reload();
+      });
       status.replaceChildren(document.createTextNode(`${state.snapshot().error} `), retry);
     }
 
@@ -1696,7 +1703,7 @@
         if (status?.dataset.loadError === "true") { status.replaceChildren(); status.removeAttribute("role"); delete status.dataset.loadError; }
       } catch (error) {
         retained.fail(error);
-        showDesktopSavedLoadError(document.getElementById("watchLaterSyncStatus"), retained, refreshWatchLater);
+        showDesktopSavedLoadError("watch_later", document.getElementById("watchLaterSyncStatus"), retained, refreshWatchLater);
       }
       const { items, total } = retained.snapshot();
       renderSavedList("watch_later", "watchLaterList", "watchLaterEmpty", items, refreshWatchLater);
@@ -1717,7 +1724,7 @@
         if (status?.dataset.loadError === "true") { status.replaceChildren(); status.removeAttribute("role"); delete status.dataset.loadError; }
       } catch (error) {
         retained.fail(error);
-        showDesktopSavedLoadError(document.getElementById("favoritesSyncStatus"), retained, refreshFavorites);
+        showDesktopSavedLoadError("favorite", document.getElementById("favoritesSyncStatus"), retained, refreshFavorites);
       }
       const { items, total } = retained.snapshot();
       renderSavedList("favorite", "favoritesList", "favoritesEmpty", items, refreshFavorites);

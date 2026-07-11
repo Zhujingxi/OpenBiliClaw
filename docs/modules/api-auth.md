@@ -33,7 +33,7 @@
 | 扩展 origin 独立路径 | ✅ | `is_extension_origin()` 识别 `chrome-extension://` / `moz-extension://`，`pick_token()` 和登录端点对扩展 origin 走独立分支，不依赖 `allowed_bearer_origins`。 |
 | 设备密钥摘要 | ✅ | `extension_access_keys` 只保存 `key_id:sha256(secret)`；完整高熵密钥只由 CLI 显示一次。总开关 `extension_access_enabled=false` 默认关闭。 |
 | 短会话交换 | ✅ | 限流的 `POST /api/auth/extension-token` 验证设备密钥后签发 `1..168h` 会话；错误不泄露 key ID 是否存在。 |
-| 传输边界 | ✅ | 普通扩展 HTTP 使用 `Authorization: Bearer`，URL 不含 token；仅 WebSocket 和图片代理允许扩展 Origin 携带短会话 query token。 |
+| 传输边界 | ✅ | 普通扩展 HTTP 使用 `Authorization: Bearer`，URL 不含 token；仅 WebSocket 和图片代理允许扩展 Origin 携带短会话 query token。popup saved/config 请求的单个 Abort deadline 覆盖初次短会话交换、401 强制换票与受保护请求，认证 fetch 接收同一 AbortSignal。 |
 | 撤销 | ✅ | `ext-key revoke <key-id>` 删除摘要并 bump 全局 `auth_epoch`，所有 Web / 扩展会话立即失效；失败时回滚配置。 |
 | 远程 endpoint 权限 | ✅ | 扩展按 `scheme://host/*` 请求跨浏览器可用的最小 host 权限；权限 API 不能可移植地限定端口，实际请求仍固定配置端口。公网 host 强制 HTTPS，HTTPS 自动派生 WSS。 |
 

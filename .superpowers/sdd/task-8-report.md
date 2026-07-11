@@ -208,3 +208,39 @@ Final results: extension `702 passed, 0 failed` on repeated clean full runs; Pyt
 TypeScript typecheck and the Chrome/Edge production build passed. Every modified JavaScript file
 passed `node --check`; the Python contract file passed Ruff format/check; and `git diff --check` was
 clean. No Task 9 real integration E2E, signed-in browser automation, or account mutation was run.
+
+## Final Review Repair
+
+The final review began with four failing focused groups out of 25. Two 5ms regressions proved that
+the popup request timeout started after authentication: a never-settling fresh device-session
+exchange escaped the deadline, while a 401-triggered forced refresh returned the stale response
+instead of aborting. The other failures proved that list-level sync-all / retry controls produced no
+focus token and that retry handlers reloaded before preserving their opener.
+
+The popup request boundary now starts one shared Abort deadline before backend-address resolution and
+uses it for the initial device-session exchange, protected request, 401 forced exchange, replay, and
+response parsing. Authentication fetches receive that same signal, and the request wrapper rejects on
+deadline even while an awaited authentication promise is pending. Extension, mobile Web, and desktop
+Web focus helpers now distinguish list-action tokens from item-action tokens. Batch-sync and retry
+handlers capture the actual control before work begins; after rerender, restoration tries the same
+list action before card actions and the heading. The focused tests exercise direct batch / retry token
+round trips and both handler paths on all three runtimes.
+
+Fresh final verification commands:
+
+```bash
+cd extension && npm test
+PYTHONPATH=src .venv/bin/pytest -q \
+  tests/test_saved_sync_api.py \
+  tests/test_saved_sync_storage.py \
+  tests/test_saved_sync_service.py \
+  tests/test_saved_sync_frontend_contract.py
+cd extension && npm run typecheck && npm run build
+```
+
+Final results: extension `706 passed, 0 failed`; Python `127 passed`; TypeScript typecheck and the
+Chrome/Edge production build passed. Focused popup API / device-auth / saved-sync review coverage was
+`62 passed, 0 failed`, including both real AbortSignal authentication cases. Every modified
+JavaScript file passed `node --check`; the Python contract file remained Ruff-clean; and
+`git diff --check` was clean. No Task 9 real integration E2E, signed-in browser automation, or
+account mutation was run.

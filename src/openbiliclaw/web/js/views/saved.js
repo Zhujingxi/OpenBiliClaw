@@ -152,12 +152,17 @@ function createSavedView(cfg) {
         <div class="saved-body">${bodyHtml}</div>
       </div>`;
     $root.querySelector(".saved-sync-all")?.addEventListener("click", (event) => {
-      pendingFocus = { itemKey: "__list__", action: "sync-all", index: 0 };
+      pendingFocus = captureSavedFocus($root, event.currentTarget)
+        || { kind: "list", action: "sync-all" };
       void runSync(items.filter((item) => (
         eligible(item) && !syncingKeys.has(item.item_key) && !taskCoordinator.owns(item.item_key)
       )), event.currentTarget, true);
     });
-    $root.querySelector(".saved-load-retry")?.addEventListener("click", () => { void load(); });
+    $root.querySelector(".saved-load-retry")?.addEventListener("click", (event) => {
+      pendingFocus = captureSavedFocus($root, event.currentTarget)
+        || { kind: "list", action: "retry" };
+      void load();
+    });
   }
 
   async function runSync(selected, activeButton, confirmBatch = false) {
