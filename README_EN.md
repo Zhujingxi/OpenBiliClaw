@@ -590,7 +590,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 │ Engine  │  System  │Discovery +│     Engine     │
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
-│   LLM / source adapters · Save capability router │
+│ LLM / source adapters · Save router · Bilibili native-save adapter │
 │ Canonical ID · Local-first sync · SQLite (events · pool · recs · saved)│
 └────────────────────────────────────────────────┘
 ```

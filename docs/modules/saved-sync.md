@@ -4,7 +4,7 @@
 
 `src/openbiliclaw/saved_sync/` 提供平台无关的收藏 / 稍后再看基础设施。它把本地保存和平台账号写入分成两个阶段：本地 membership 必须先提交成功，之后才允许创建原生同步任务。平台失败只更新逐项同步状态，不回滚本地保存。
 
-当前模块已经实现 canonical identity / typed contracts、capability router、local-first sync service 与 SQLite DAO 边界。生产平台 adapter、HTTP API 和四端 UI 属于后续任务，当前提交不会对任何真实平台账号执行写操作。
+当前模块已经实现 canonical identity / typed contracts、capability router、local-first sync service、SQLite DAO 边界，以及首个生产实现 `BilibiliNativeSaveAdapter`。平台中立 HTTP API、runtime 注册和四端 UI 属于后续任务，因此当前用户界面仍不会触发真实平台账号写入。
 
 ## 已实现功能
 
@@ -17,6 +17,7 @@
 | 批量逐项执行 | ✅ | `run_sync_task()` 只读取该 task ID 仍存在的 membership，按平台分组、平台内串行执行，并以 `execution_id` 原子 claim / 完成每一项；同一任务的并发 runner 不会重复调用 adapter，平台组之间仍可并行。执行中每 30 秒 owner-fenced heartbeat；240 秒是调用方响应 deadline，不假定能强制终止不遵守 cancellation 的底层 I/O。 |
 | 可恢复任务查询 | ✅ | `get_sync_task()` 只从 `native_save_states` 与 membership/item join 重建结果，进程内不保存易丢失的任务结果。 |
 | 安全失败归一化 | ✅ | 未注册 / 不支持的路由写为 `unsupported`；malformed target / result 写固定 `failed/invalid_adapter_result`；adapter 异常写 `failed/adapter_exception`。凡 adapter 因 item heartbeat 异常、响应 deadline 或调用方取消而进入 detached 状态，tracked watchdog 都会切换到 10ms–1s 有界退避的 owner-fenced heartbeat，直到真实终止后归一化 late terminal / malformed 结果，避免 detached 期间的后续心跳异常开放重叠重试。 |
+| B 站原生 adapter | ✅ | favorite 精确复用或创建 `OpenBiliClaw` 收藏夹；watch-later 写 B 站稍后再看。`-101`、重复保存码、风控码分别归一化为 `login_required`、`already_synced`、`rate_limited`，其它错误只返回脱敏的 `failed`。 |
 
 ## 公开 API
 
@@ -36,6 +37,21 @@ adapter, route = router.route("reddit", "watch_later")
 - `async save(item, route) -> NativeSaveResult`
 
 Router 不读取配置或存储。未注册平台、缺失 favorite 能力，或既无 watch-later 也无 favorite fallback 时抛出带 `unsupported` 的 `ValueError`；service 会把它转换为逐项 `unsupported` 结果。
+
+### B 站 adapter
+
+```python
+from openbiliclaw.bilibili import BilibiliAPIClient
+from openbiliclaw.saved_sync.adapters import BilibiliNativeSaveAdapter
+
+client = BilibiliAPIClient(cookie="SESSDATA=...; bili_jct=...")
+adapter = BilibiliNativeSaveAdapter(client)
+```
+
+- `favorite` 的真实目标是 `B站 OpenBiliClaw 收藏夹`，按 exact title 复用后调用 B 站收藏 resource endpoint。
+- `watch_later` 的真实目标是 `B站稍后再看`，不经过 favorite fallback。
+- `SESSDATA` 与 `bili_jct` 缺任一项都会在任何视频 lookup / POST 前返回 `login_required`；Cookie、CSRF、服务端 message/body 不会进入 `NativeSaveResult`。
+- 本 adapter 目前只是可注册能力；Task 7 才会在 `RuntimeContext` 中绑定真实 client 并通过平台中立 API 暴露。不要把本提交解读为 UI 已开启账号写入。
 
 ### Local-first service
 
@@ -63,9 +79,10 @@ SavedItemInput
   -> Database.claim_native_save_item(execution_id)      # atomic item ownership
   -> NativeSaveRouter.route()
   -> Database.update_native_save_claim_route()           # owner fence
-  -> NativeSaveAdapter.save() + owner heartbeat/deadline
+  -> BilibiliNativeSaveAdapter.save()                     # first production adapter
+  -> BilibiliAPIClient authenticated POST + owner heartbeat/deadline
   -> Database.complete_native_save_claim(item result)   # owner-checked terminal write
   -> SavedSyncService.get_sync_task()
 ```
 
-删除本地 membership 仍只由 storage/API 层负责，不会反向删除平台账号内容。当前 `saved_sync/adapters/` 只导出 protocol；第一个生产 adapter 将在后续 Bilibili 任务中接入。
+删除本地 membership 仍只由 storage/API 层负责，不会反向删除平台账号内容。B 站 adapter 不读取配置、不注册 runtime，也不自行重试；平台中立 service 继续拥有任务、route 与持久化状态。

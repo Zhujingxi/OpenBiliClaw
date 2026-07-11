@@ -30,8 +30,15 @@
 | integration 异常边界 | ✅ | 新增 initialization / validation / operation 三类 adapter 异常 |
 | adapter 单元测试 | ✅ | 覆盖 DTO 校验、operation 调用、bootstrap 共享依赖 |
 | skill 单元测试 | ✅ | 覆盖 skill 名称、handler 映射与错误返回结构 |
+| Native-save platform adapter contract | ✅ | `saved_sync` 已有首个 B 站实现：capability 声明 favorite / watch-later / named collection，目标和错误状态由后端 adapter 统一归一化，API/UI 不写平台条件分支。runtime 注册与外部 HTTP 暴露仍在后续任务。 |
 
 ## 公开 API
+
+### Native-save 平台集成边界
+
+`src/openbiliclaw/saved_sync/router.py` 的 `NativeSaveAdapter` 是收藏/稍后再看平台写入协议，和本页下方的 OpenClaw integration adapter 不是同一层。首个实现 `BilibiliNativeSaveAdapter` 只消费既有 `BilibiliAPIClient`：favorite 写 exact-title `OpenBiliClaw` 收藏夹，watch-later 写 B 站稍后再看；成功/重复/登录失效/限流/其它失败分别输出稳定状态，不透传 Cookie、CSRF 或 response body。
+
+平台 adapter 不拥有本地 membership、任务调度、重试或 HTTP 路由。`SavedSyncService` 保持 local-first 顺序并持久化结果，后续 Task 7 才负责 runtime 注入与平台中立 API wiring。真实 B 站写入 E2E 属于账号状态变更，必须等待明确授权或测试账号。
 
 ### 构建 adapter
 
