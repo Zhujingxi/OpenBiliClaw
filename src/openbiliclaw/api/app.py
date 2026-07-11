@@ -3200,6 +3200,8 @@ def create_app(
                 content_id=str(getattr(item.content, "content_id", "") or item.content.bvid),
                 content_url=str(getattr(item.content, "content_url", "") or ""),
                 source_platform=str(getattr(item.content, "source_platform", "") or "bilibili"),
+                published_at=str(getattr(item.content, "published_at", "") or ""),
+                published_label=str(getattr(item.content, "published_label", "") or ""),
                 content_type=str(getattr(item.content, "content_type", "") or "video"),
                 body_text=str(getattr(item.content, "body_text", "") or ""),
                 duration=int(getattr(item.content, "duration", 0) or 0),
@@ -3996,6 +3998,8 @@ def create_app(
                     content_id=str(row.get("content_id", "") or row.get("bvid", "")),
                     content_url=str(row.get("content_url", "") or ""),
                     source_platform=str(row.get("source_platform", "") or "bilibili"),
+                    published_at=str(row.get("published_at", "") or ""),
+                    published_label=str(row.get("published_label", "") or ""),
                     content_type=str(row.get("content_type", "") or "video"),
                     body_text=str(row.get("body_text", "") or ""),
                     duration=int(row.get("duration", 0) or 0),
@@ -4635,6 +4639,8 @@ def create_app(
                 "cover_url": str(row.get("cover_url", "")),
                 "content_url": str(row.get("content_url", "")),
                 "source_platform": str(row.get("source_platform", "bilibili")),
+                "published_at": str(row.get("published_at", "") or ""),
+                "published_label": str(row.get("published_label", "") or ""),
                 # body_text / content_type let the desktop delight card derive a
                 # readable title for legacy rows still holding answer_<id> (#79).
                 "content_type": str(row.get("content_type", "") or ""),
@@ -4721,6 +4727,8 @@ def create_app(
                 "cover_url": str(row.get("cover_url", "")),
                 "content_url": str(row.get("content_url", "")),
                 "source_platform": str(row.get("source_platform", "bilibili")),
+                "published_at": str(row.get("published_at", "") or ""),
+                "published_label": str(row.get("published_label", "") or ""),
                 # body_text / content_type let the desktop delight card derive a
                 # readable title for legacy rows still holding answer_<id> (#79).
                 "content_type": str(row.get("content_type", "") or ""),

@@ -115,6 +115,8 @@ class RecommendationOut(BaseModel):
     content_id: str = ""
     content_url: str = ""
     source_platform: str = ""
+    published_at: str = ""
+    published_label: str = ""
     # Text-first sources (X tweet/thread): the popup renders a no-cover
     # text card from body_text/title when content_type is tweet/thread or
     # cover_url is empty.
@@ -259,6 +261,8 @@ class PendingDelightOut(BaseModel):
     cover_url: str = ""
     content_url: str = ""
     source_platform: str = ""
+    published_at: str = ""
+    published_label: str = ""
     # Engagement stats (from content_cache), so the delight card can show the
     # same ▶ / 👍 / 💬 metadata row as the recommendation grid. 0 = unknown /
     # not fetched (platforms that don't populate a metric render nothing).
