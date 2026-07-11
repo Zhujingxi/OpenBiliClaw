@@ -237,6 +237,7 @@ test("extractNoteMetadataFromAnchor reads visible metric chips", () => {
     collect_count: 1_234,
     comment_count: 3_000,
   });
+  assert.equal("published_at" in meta!, false);
 });
 
 test("dedupeObservedUrls removes previously reported URLs", () => {

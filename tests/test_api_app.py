@@ -19,6 +19,11 @@ from openbiliclaw import __version__
 from openbiliclaw.api.app import create_app
 
 
+def assert_publication(payload: dict[str, object]) -> None:
+    assert payload["published_at"] == "2026-07-08T06:30:00Z"
+    assert payload["published_label"] == "3 days ago"
+
+
 def _wait_for_presence_count(ctx: object, expected: int) -> None:
     deadline = time.monotonic() + 1.0
     while time.monotonic() < deadline:
@@ -93,6 +98,17 @@ def _isolate_runtime_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
 
 class TestBackendAPI:
     """Route-level tests for the plugin backend API."""
+
+    def test_recommendation_and_delight_models_default_publication_fields(self) -> None:
+        from openbiliclaw.api.models import PendingDelightOut, RecommendationOut
+
+        recommendation = RecommendationOut(id=1, bvid="BV1").model_dump()
+        delight = PendingDelightOut(bvid="BV1").model_dump()
+
+        assert recommendation["published_at"] == ""
+        assert recommendation["published_label"] == ""
+        assert delight["published_at"] == ""
+        assert delight["published_label"] == ""
 
     def test_feedback_api_persists_strong_card_feedback_signal_strength(
         self,
@@ -3564,6 +3580,8 @@ class TestBackendAPI:
                         "like_count": 3400,
                         "danmaku_count": 890,
                         "up_mid": 112233,
+                        "published_at": "2026-07-08T06:30:00Z",
+                        "published_label": "3 days ago",
                     }
                 ]
 
@@ -3583,6 +3601,7 @@ class TestBackendAPI:
         assert data["items"][0]["like_count"] == 3400
         assert data["items"][0]["danmaku_count"] == 890
         assert data["items"][0]["up_mid"] == 112233
+        assert_publication(data["items"][0])
 
     def test_recommendations_endpoint_caps_same_franchise(self) -> None:
         """End-to-end: when the DB returns 5 同 IP rows in the
@@ -4464,6 +4483,8 @@ class TestBackendAPI:
                             like_count=3400,
                             danmaku_count=890,
                             up_mid=987654321,
+                            published_at="2026-07-08T06:30:00Z",
+                            published_label="3 days ago",
                         ),
                         recommendation_id=11,
                         expression="先给你捞一条新的。",
@@ -4523,6 +4544,8 @@ class TestBackendAPI:
                     "favorite_count": 0,
                     "comment_count": 0,
                     "up_mid": 987654321,
+                    "published_at": "2026-07-08T06:30:00Z",
+                    "published_label": "3 days ago",
                 },
                 {
                     "id": 12,
@@ -4546,9 +4569,12 @@ class TestBackendAPI:
                     "favorite_count": 0,
                     "comment_count": 0,
                     "up_mid": 0,
+                    "published_at": "",
+                    "published_label": "",
                 },
             ]
         }
+        assert_publication(response.json()["items"][0])
         assert hub.events[-1]["type"] == "refresh.pool_updated"
         assert hub.events[-1]["message"] == "推荐池已同步"
         assert hub.events[-1]["pool_available_count"] == 0
@@ -4659,6 +4685,8 @@ class TestBackendAPI:
                     "favorite_count": 0,
                     "comment_count": 0,
                     "up_mid": 0,
+                    "published_at": "",
+                    "published_label": "",
                 }
             ]
         }
@@ -8026,6 +8054,73 @@ class TestBackendAPI:
         ]
         assert database.calls and database.calls[0]["include_liked"] is True
 
+    def test_delight_pending_surfaces_publication_fields(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeRuntimeController:
+            def get_pending_delight(self) -> dict[str, object]:
+                return {
+                    "bvid": "BV1DELIGHT",
+                    "title": "惊喜候选",
+                    "published_at": "2026-07-08T06:30:00Z",
+                    "published_label": "3 days ago",
+                }
+
+        app = create_app(
+            memory_manager=object(),
+            database=object(),
+            soul_engine=object(),
+            runtime_controller=FakeRuntimeController(),
+        )
+        client = TestClient(app)
+
+        response = client.get("/api/delight/pending")
+
+        assert response.status_code == 200
+        assert_publication(response.json()["item"])
+
+    def test_delight_manual_trigger_publishes_publication_fields(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeDatabase:
+            def get_delight_candidates(
+                self,
+                *,
+                min_delight_score: float,
+                limit: int,
+            ) -> list[dict[str, object]]:
+                return [
+                    {
+                        "bvid": "BV1DELIGHT",
+                        "title": "惊喜候选",
+                        "delight_score": 0.95,
+                        "published_at": "2026-07-08T06:30:00Z",
+                        "published_label": "3 days ago",
+                    }
+                ]
+
+        class FakeEventHub:
+            def __init__(self) -> None:
+                self.events: list[dict[str, object]] = []
+
+            async def publish(self, event: dict[str, object]) -> bool:
+                self.events.append(event)
+                return True
+
+        event_hub = FakeEventHub()
+        app = create_app(
+            memory_manager=object(),
+            database=FakeDatabase(),
+            soul_engine=object(),
+            runtime_event_hub=event_hub,
+        )
+        client = TestClient(app)
+
+        response = client.post("/api/delight/trigger", json={"count": 1})
+
+        assert response.status_code == 200
+        assert_publication(event_hub.events[0])
+
     def test_delight_pending_batch_surfaces_body_text_and_content_type(self) -> None:
         """The delight card derives a readable title for legacy answer_<id> rows
         from body_text/content_type (issue #79), so the batch payload must carry
@@ -8088,6 +8183,8 @@ class TestBackendAPI:
                         "comment_count": 880,
                         "danmaku_count": 150,
                         "favorite_count": 12,
+                        "published_at": "2026-07-08T06:30:00Z",
+                        "published_label": "3 days ago",
                         "feedback_type": "",
                     },
                 ]
@@ -8101,6 +8198,7 @@ class TestBackendAPI:
         assert item["comment_count"] == 880
         assert item["danmaku_count"] == 150
         assert item["favorite_count"] == 12
+        assert_publication(item)
 
     def test_delight_pending_batch_maps_xhs_collect_to_favorite(self) -> None:
         """Xiaohongshu stores 收藏 in collect_count, but the card's ⭐ renders

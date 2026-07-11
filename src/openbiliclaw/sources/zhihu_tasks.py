@@ -15,6 +15,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from openbiliclaw.published_time import normalize_published_time
+
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
@@ -234,6 +236,10 @@ def zhihu_discovery_items_to_contents(
         source_keyword_id = _optional_int(item.get("source_keyword_id"))
         if scope == "zhihu_search" and source_keyword_id is None and keyword:
             source_keyword_id = keyword_ids.get(keyword)
+        published = normalize_published_time(
+            item.get("published_at") or item.get("created_time"),
+            label=item.get("published_label"),
+        )
 
         contents.append(
             DiscoveredContent(
@@ -254,6 +260,8 @@ def zhihu_discovery_items_to_contents(
                 comment_count=_safe_int(item.get("comment_count")),
                 score_threshold=ZHIHU_DISCOVERY_SCORE_THRESHOLD,
                 source_keyword_id=source_keyword_id,
+                published_at=published.published_at,
+                published_label=published.published_label,
             )
         )
     return contents

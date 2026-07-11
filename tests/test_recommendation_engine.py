@@ -3687,6 +3687,8 @@ def test_rows_to_discovered_round_trips_all_engagement_stats() -> None:
             title="互动数据齐全的视频",
             author_name="Rayman小何",
             cover_url="//i2.hdslb.com/bfs/archive/x.jpg",
+            published_at="2026-07-08T06:30:00Z",
+            published_label="3 天前",
             source="search",
             relevance_score=0.9,
             **stats,
@@ -3701,4 +3703,6 @@ def test_rows_to_discovered_round_trips_all_engagement_stats() -> None:
         for field_name, expected in stats.items():
             assert kwargs[field_name] == expected, field_name
         assert kwargs["author_name"] == "Rayman小何"
+        assert kwargs["published_at"] == "2026-07-08T06:30:00Z"
+        assert kwargs["published_label"] == "3 天前"
         db.close()

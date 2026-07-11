@@ -48,6 +48,7 @@ import {
   normalizeSourcePlatform,
   getSourceLabel,
   formatRelativeTimestamp,
+  getPublishedTimeDisplay,
   getMobileChatSession,
   shouldAutoAppendRecommendations,
 } from "../view-models.js";
@@ -88,6 +89,13 @@ function esc(s) {
   const el = document.createElement("span");
   el.textContent = s;
   return el.innerHTML;
+}
+
+export function publishedTimeHtml(item) {
+  const display = getPublishedTimeDisplay(item);
+  if (!display) return "";
+  const title = display.title ? ` title="${esc(display.title)}"` : "";
+  return `<span class="card-published-time"${title}>${esc(display.text)}</span>`;
 }
 
 // ── Render ────────────────────────────────────────────────────
@@ -390,6 +398,7 @@ function renderDelightTray() {
     : `<span class="delight-thumb is-fallback">\u2728</span>`;
   const reasonText = d.delight_reason || d.delight_hook || "";
   const statsText = recommendationStats(d);
+  const publishedHtml = publishedTimeHtml(d);
 
   tray.innerHTML = `
     ${delights.length > 1 ? `
@@ -415,6 +424,7 @@ function renderDelightTray() {
             <div class="delight-meta">
               <span class="card-source" data-source="${d.source_platform}">${esc(getSourceLabel(d.source_platform))}</span>
               ${uiState.score_label ? `<span>${esc(uiState.score_label)}</span>` : ""}
+              ${publishedHtml}
             </div>
           </div>
         ` : `
@@ -422,6 +432,7 @@ function renderDelightTray() {
           <div class="delight-meta">
             <span class="card-source" data-source="${d.source_platform}">${esc(getSourceLabel(d.source_platform))}</span>
             ${uiState.score_label ? `<span>${esc(uiState.score_label)}</span>` : ""}
+            ${publishedHtml}
           </div>
         `}
       </div>
@@ -1049,6 +1060,7 @@ function renderCard(rawItem, index = 0) {
   const url = buildContentUrl(item);
   const cardMedia = getRecommendationCardKind(item);
   const imageAttrs = getRecommendationImageLoadingAttrs(index);
+  const publishedHtml = publishedTimeHtml(item);
 
   let coverHtml;
   if (cardMedia.kind === "text") {
@@ -1070,6 +1082,7 @@ function renderCard(rawItem, index = 0) {
         <span class="card-source" data-source="${item.source_platform}">${esc(getSourceLabel(item.source_platform))}</span>
         ${item.up_name ? `<span>${esc(item.up_name)}</span>` : ""}
         ${item.topic_label ? `<span style="color:var(--text-muted)">${esc(item.topic_label)}</span>` : ""}
+        ${publishedHtml}
       </div>
       ${recommendationStats(item) ? `<div class="card-stats">${esc(recommendationStats(item))}</div>` : ""}
       ${item.expression ? `<div class="card-expression">${esc(item.expression)}</div>` : ""}

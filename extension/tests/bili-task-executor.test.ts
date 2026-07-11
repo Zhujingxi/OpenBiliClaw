@@ -57,7 +57,13 @@ class FakeDocument {
   }
 }
 
-function card(video: Partial<BiliSearchVideo> & { href: string; title: string }): FakeElement {
+function card(
+  video: Partial<BiliSearchVideo> & {
+    href: string;
+    title: string;
+    published_label?: string;
+  },
+): FakeElement {
   const title = new FakeElement({ textContent: video.title, href: video.href });
   const img = new FakeElement({ src: video.cover_url });
   const up = new FakeElement({ textContent: video.up_name });
@@ -69,6 +75,9 @@ function card(video: Partial<BiliSearchVideo> & { href: string; title: string })
       "img": [img],
       ".bili-video-card__info--author, .up-name, [title='up主']": [up],
       ".bili-video-card__stats--item, .so-icon.watch-num, .play-text": [stats],
+      ".bili-video-card__info--date, .so-icon.time, .pubdate": video.published_label
+        ? [new FakeElement({ textContent: video.published_label })]
+        : [],
     },
   });
 }
@@ -96,6 +105,7 @@ test("extractBiliSearchVideos reads rendered search cards with dedupe and cap", 
       up_name: "机械工厂",
       cover_url: "https://i0.hdslb.com/bfs/archive/demo.jpg",
       view_count: "1.2万",
+      published_label: "3小时前",
     }),
     card({
       href: "https://www.bilibili.com/video/BV1ii4y1G7w8",
@@ -121,6 +131,7 @@ test("extractBiliSearchVideos reads rendered search cards with dedupe and cap", 
       url: "https://www.bilibili.com/video/BV1ii4y1G7w8",
       cover_url: "https://i0.hdslb.com/bfs/archive/demo.jpg",
       view_count: 12_000,
+      published_label: "3小时前",
     },
   ]);
 });
@@ -141,6 +152,7 @@ test("extractBiliSearchVideos ignores lazy-load data: URI placeholder covers", (
   assert.equal(videos.length, 1);
   // 占位图不算封面 —— 宁可留空,让后端后续摄入补真图
   assert.equal("cover_url" in videos[0], false);
+  assert.equal("published_label" in videos[0], false);
   assert.equal(videos[0].view_count, 12_000);
 });
 

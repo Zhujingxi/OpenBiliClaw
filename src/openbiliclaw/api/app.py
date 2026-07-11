@@ -3200,6 +3200,8 @@ def create_app(
                 content_id=str(getattr(item.content, "content_id", "") or item.content.bvid),
                 content_url=str(getattr(item.content, "content_url", "") or ""),
                 source_platform=str(getattr(item.content, "source_platform", "") or "bilibili"),
+                published_at=str(getattr(item.content, "published_at", "") or ""),
+                published_label=str(getattr(item.content, "published_label", "") or ""),
                 content_type=str(getattr(item.content, "content_type", "") or "video"),
                 body_text=str(getattr(item.content, "body_text", "") or ""),
                 duration=int(getattr(item.content, "duration", 0) or 0),
@@ -3996,6 +3998,8 @@ def create_app(
                     content_id=str(row.get("content_id", "") or row.get("bvid", "")),
                     content_url=str(row.get("content_url", "") or ""),
                     source_platform=str(row.get("source_platform", "") or "bilibili"),
+                    published_at=str(row.get("published_at", "") or ""),
+                    published_label=str(row.get("published_label", "") or ""),
                     content_type=str(row.get("content_type", "") or "video"),
                     body_text=str(row.get("body_text", "") or ""),
                     duration=int(row.get("duration", 0) or 0),
@@ -4635,6 +4639,8 @@ def create_app(
                 "cover_url": str(row.get("cover_url", "")),
                 "content_url": str(row.get("content_url", "")),
                 "source_platform": str(row.get("source_platform", "bilibili")),
+                "published_at": str(row.get("published_at", "") or ""),
+                "published_label": str(row.get("published_label", "") or ""),
                 # body_text / content_type let the desktop delight card derive a
                 # readable title for legacy rows still holding answer_<id> (#79).
                 "content_type": str(row.get("content_type", "") or ""),
@@ -4721,6 +4727,8 @@ def create_app(
                 "cover_url": str(row.get("cover_url", "")),
                 "content_url": str(row.get("content_url", "")),
                 "source_platform": str(row.get("source_platform", "bilibili")),
+                "published_at": str(row.get("published_at", "") or ""),
+                "published_label": str(row.get("published_label", "") or ""),
                 # body_text / content_type let the desktop delight card derive a
                 # readable title for legacy rows still holding answer_<id> (#79).
                 "content_type": str(row.get("content_type", "") or ""),
@@ -6633,6 +6641,7 @@ def create_app(
 
         from openbiliclaw.discovery.candidate_pool import discovered_content_to_candidate_write
         from openbiliclaw.discovery.engine import DiscoveredContent
+        from openbiliclaw.published_time import normalize_published_time
 
         enqueue = getattr(database, "enqueue_discovery_candidates", None)
         if not callable(enqueue):
@@ -6656,6 +6665,10 @@ def create_app(
                 [str(item).strip() for item in tags_raw if str(item).strip()]
                 if isinstance(tags_raw, list)
                 else []
+            )
+            published = normalize_published_time(
+                video.get("published_at") or video.get("pubdate"),
+                label=video.get("published_label"),
             )
             item = DiscoveredContent(
                 bvid=bvid,
@@ -6685,6 +6698,8 @@ def create_app(
                 author_name=up_name,
                 score_threshold=0.60,
                 source_keyword_id=source_keyword_id,
+                published_at=published.published_at,
+                published_label=published.published_label,
             )
             writes.append(
                 discovered_content_to_candidate_write(
@@ -7014,6 +7029,7 @@ def create_app(
 
         from openbiliclaw.discovery.candidate_pool import discovered_content_to_candidate_write
         from openbiliclaw.discovery.engine import DiscoveredContent
+        from openbiliclaw.published_time import normalize_published_time
 
         enqueue = getattr(database, "enqueue_discovery_candidates", None)
         if not callable(enqueue):
@@ -7044,6 +7060,10 @@ def create_app(
             author = str(note.get("author", "") or "").strip()
             cover_url = str(note.get("cover_url", "") or "").strip()
             best_url = _pick_best_xhs_url(database, note_id, url)
+            published = normalize_published_time(
+                note.get("published_at") or note.get("pubdate"),
+                label=note.get("published_label"),
+            )
 
             item = DiscoveredContent(
                 bvid=note_id,
@@ -7069,6 +7089,8 @@ def create_app(
                 source_platform="xiaohongshu",
                 author_name=author,
                 source_keyword_id=source_keyword_id,
+                published_at=published.published_at,
+                published_label=published.published_label,
             )
             writes.append(
                 discovered_content_to_candidate_write(
@@ -7384,7 +7406,7 @@ def create_app(
 
         if status in {"partial", "ok"} or (status == "empty" and task_type == "bootstrap_profile"):
             is_final = status == "ok" or (status == "empty" and task_type == "bootstrap_profile")
-            added_notes = _xhs_task_queue.merge_result(
+            added_notes, enriched_notes = _xhs_task_queue.merge_result_with_enrichment(
                 task_id,
                 urls=urls,
                 notes=notes if notes else None,
@@ -7427,7 +7449,8 @@ def create_app(
             if valid_urls and not _init_busy:
                 ctx.database.save_xhs_observed_urls(valid_urls, "task")
                 _backfill_xhs_tokens(ctx.database, valid_urls)
-            if added_notes and not _init_busy:
+            candidate_notes = [*added_notes, *enriched_notes]
+            if candidate_notes and not _init_busy:
                 # P1.8: a planner-driven xhs *search* task carries its
                 # ``source_keyword_id`` on the payload → thread it onto the
                 # ingested candidates so admission backfills the keyword's yield.
@@ -7439,7 +7462,7 @@ def create_app(
                 )
                 enqueued = _cache_xhs_notes(
                     ctx.database,
-                    added_notes,
+                    candidate_notes,
                     "task",
                     self_info_now,
                     source_keyword_id=task_source_keyword_id,

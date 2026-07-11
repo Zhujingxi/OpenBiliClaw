@@ -297,6 +297,8 @@ class TestXhsObservedUrls:
                         "like_count": 100,
                         "collect_count": 90,
                         "comment_count": 80,
+                        "published_at": 1783492200,
+                        "published_label": "3小时前",
                     }
                 ],
                 "page_type": "search",
@@ -309,7 +311,8 @@ class TestXhsObservedUrls:
 
         row = db.conn.execute(
             "SELECT source_strategy, source_platform, content_id, content_url, title, up_name, "
-            "view_count, like_count, collect_count, comment_count "
+            "view_count, like_count, collect_count, comment_count, published_at, "
+            "published_label "
             "FROM discovery_candidates WHERE content_id=?",
             ("note-xyz-001",),
         ).fetchone()
@@ -320,6 +323,8 @@ class TestXhsObservedUrls:
         assert row["like_count"] == 100
         assert row["collect_count"] == 90
         assert row["comment_count"] == 80
+        assert row["published_at"] == "2026-07-08T06:30:00Z"
+        assert row["published_label"] == "3小时前"
 
     def test_notes_ingest_drains_through_pipeline_into_content_cache(
         self,
@@ -1009,6 +1014,7 @@ class TestXhsTaskResults:
         assert [note["note_id"] for note in partial_result["notes"]] == ["saved-partial"]
         assert len(memory.events) == 1
         assert memory.events[0]["event_type"] == "favorite"
+        assert len(memory.profile_signals) == 1
 
         final = app_client.post(
             "/api/sources/xhs/task-result",
@@ -1022,6 +1028,8 @@ class TestXhsTaskResults:
                         "title": "partial saved",
                         "url": saved_url,
                         "note_id": "saved-partial",
+                        "published_at": 1783492200000,
+                        "published_label": "3小时前",
                     },
                     {
                         "scope": "liked",
@@ -1038,6 +1046,7 @@ class TestXhsTaskResults:
         assert final.status_code == 200
         assert len(memory.events) == 2
         assert memory.events[1]["event_type"] == "like"
+        assert len(memory.profile_signals) == 2
         row = db.conn.execute(
             "SELECT status, result_json, completed_at FROM xhs_tasks WHERE id=?",
             (task["id"],),
@@ -1050,7 +1059,16 @@ class TestXhsTaskResults:
             "saved-partial",
             "liked-final",
         ]
+        assert result["notes"][0]["published_at"] == 1783492200000
+        assert result["notes"][0]["published_label"] == "3小时前"
         assert result["scope_counts"] == {"saved": 1, "liked": 1, "xhs_history": 0}
+        candidate = db.conn.execute(
+            "SELECT published_at, published_label FROM discovery_candidates WHERE content_id=?",
+            ("saved-partial",),
+        ).fetchone()
+        assert candidate is not None
+        assert candidate["published_at"] == "2026-07-08T06:30:00Z"
+        assert candidate["published_label"] == "3小时前"
 
     def test_xhs_bootstrap_empty_result_preserves_scope_counts(
         self,
@@ -1150,6 +1168,8 @@ class TestXhsTaskResults:
                         "like_count": 101,
                         "collect_count": 91,
                         "comment_count": 81,
+                        "published_at": 1783492200,
+                        "published_label": "3小时前",
                     }
                 ],
             },
@@ -1178,7 +1198,7 @@ class TestXhsTaskResults:
 
         candidate_row = db.conn.execute(
             "SELECT title, source_strategy, source_platform, like_count, collect_count, "
-            "comment_count FROM discovery_candidates "
+            "comment_count, published_at, published_label FROM discovery_candidates "
             "WHERE content_id=?",
             ("note-task-001",),
         ).fetchone()
@@ -1189,6 +1209,8 @@ class TestXhsTaskResults:
         assert candidate_row["like_count"] == 101
         assert candidate_row["collect_count"] == 91
         assert candidate_row["comment_count"] == 81
+        assert candidate_row["published_at"] == "2026-07-08T06:30:00Z"
+        assert candidate_row["published_label"] == "3小时前"
 
     def test_xhs_bootstrap_skips_notes_already_seen_in_previous_task(
         self,

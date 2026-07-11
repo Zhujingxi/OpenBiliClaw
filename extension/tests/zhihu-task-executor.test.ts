@@ -17,7 +17,7 @@ test("normalizeZhihuReadHistory maps read_history payload items", () => {
   const item = normalizeZhihuReadHistory({
     data: {
       header: { title: "浏览了回答" },
-      content: { author_name: "作者", summary: "摘要" },
+      content: { author_name: "作者", summary: "摘要", created_time: 1783492200 },
       action: { url: "https://www.zhihu.com/question/1/answer/2" },
       extra: {
         content_token: "2",
@@ -38,6 +38,7 @@ test("normalizeZhihuReadHistory maps read_history payload items", () => {
     summary: "摘要",
     url: "https://www.zhihu.com/question/1/answer/2",
     interaction_time: "1710000000",
+    published_at: 1783492200,
   });
 });
 
@@ -51,6 +52,7 @@ test("normalizeZhihuActivity maps liked answers", () => {
       question: { id: "1", title: "问题标题" },
       author: { name: "作者" },
       voteup_count: 88,
+      created_time: 1783492200,
     },
   });
 
@@ -58,6 +60,8 @@ test("normalizeZhihuActivity maps liked answers", () => {
   assert.equal(item?.interaction_action, "赞同了回答");
   assert.equal(item?.title, "问题标题");
   assert.equal(item?.url, "https://www.zhihu.com/question/1/answer/2");
+  assert.equal(item?.published_at, 1783492200);
+  assert.notEqual(item?.published_at, item?.interaction_time);
 });
 
 test("normalizeZhihuCollectionItem maps collection content", () => {
@@ -70,6 +74,7 @@ test("normalizeZhihuCollectionItem maps collection content", () => {
         url: "https://zhuanlan.zhihu.com/p/9",
         author: { name: "作者" },
         excerpt: "摘要",
+        created_time: 1783492200,
       },
     },
     { id: "c1", name: "默认收藏" },
@@ -80,6 +85,7 @@ test("normalizeZhihuCollectionItem maps collection content", () => {
   assert.equal(item?.content_id, "9");
   assert.equal(item?.collection_id, "c1");
   assert.equal(item?.collection_name, "默认收藏");
+  assert.equal(item?.published_at, 1783492200);
 });
 
 test("normalizeZhihuSearchResult maps search answers", () => {
@@ -91,6 +97,7 @@ test("normalizeZhihuSearchResult maps search answers", () => {
         id: "2",
         excerpt: "<em>回答</em>摘要",
         voteup_count: 88,
+        created_time: 1783492200,
         question: { id: "1", title: "问题标题" },
         author: { name: "作者" },
       },
@@ -107,6 +114,7 @@ test("normalizeZhihuSearchResult maps search answers", () => {
   assert.equal(item?.summary, "回答摘要");
   assert.equal(item?.voteup, 88);
   assert.equal(item?.url, "https://www.zhihu.com/question/1/answer/2");
+  assert.equal(item?.published_at, 1783492200);
 });
 
 test("normalizeZhihuSearchResult derives title from excerpt when question title is missing", () => {

@@ -18,6 +18,7 @@ def test_normalize_aweme_item_maps_core_fields() -> None:
         "aweme_id": "7123456789012345678",
         "desc": "一个测试视频",
         "author": {"nickname": "作者A", "sec_uid": "sec-1"},
+        "create_time": 1783492200,
         "video": {"cover": {"url_list": ["https://cover.example/a.jpg"]}, "duration": 12345},
         "statistics": {
             "digg_count": 88,
@@ -46,6 +47,7 @@ def test_normalize_aweme_item_maps_core_fields() -> None:
     assert content.collect_count == 77
     assert content.comment_count == 66
     assert content.share_count == 55
+    assert content.published_at == "2026-07-08T06:30:00Z"
 
 
 def test_normalize_aweme_item_returns_none_without_aweme_id() -> None:
@@ -69,6 +71,8 @@ def test_normalize_aweme_item_uses_fallback_fields() -> None:
     assert content.like_count == 3
     assert content.view_count == 11
     assert content.collect_count == 5
+    assert content.published_at == ""
+    assert content.published_label == ""
 
 
 def test_parse_cookie_header_trims_pairs() -> None:

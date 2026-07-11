@@ -11,6 +11,8 @@ from openbiliclaw.discovery.candidate_pool import (
     REJECTED_FRANCHISE_QUOTA,
     REJECTED_LOW_SCORE,
     DiscoveryCandidateWrite,
+    discovered_content_to_candidate_write,
+    row_to_discovered_content,
 )
 from openbiliclaw.discovery.engine import ContentDiscoveryEngine, DiscoveredContent
 from openbiliclaw.storage.database import Database
@@ -290,6 +292,70 @@ def _seed_visible_pool_row(db: Database, bvid: str) -> None:
         style_key="deep_dive",
         topic_group="技术",
     )
+
+
+def test_candidate_roundtrip_preserves_publication_time(tmp_path: Path) -> None:
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    item = DiscoveredContent(
+        bvid="BV1TIME",
+        title="时间测试",
+        published_at="2026-07-08T06:30:00Z",
+        published_label="3 天前",
+    )
+
+    db.enqueue_discovery_candidates([discovered_content_to_candidate_write(item)])
+    row = db.claim_discovery_candidates_for_eval(limit=1)[0]
+    restored = row_to_discovered_content(row)
+
+    assert restored.published_at == "2026-07-08T06:30:00Z"
+    assert restored.published_label == "3 天前"
+    db.close()
+
+
+@pytest.mark.parametrize(
+    ("incoming_at", "incoming_label", "expected_at", "expected_label"),
+    [
+        ("", "更新后的相对时间", "2026-07-08T06:30:00Z", "更新后的相对时间"),
+        ("2026-07-09T06:30:00Z", "", "2026-07-09T06:30:00Z", "旧标签"),
+    ],
+)
+def test_candidate_rediscovery_preserves_each_empty_publication_field_independently(
+    tmp_path: Path,
+    incoming_at: str,
+    incoming_label: str,
+    expected_at: str,
+    expected_label: str,
+) -> None:
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    first = discovered_content_to_candidate_write(
+        DiscoveredContent(
+            bvid="BV1TIME",
+            title="A",
+            published_at="2026-07-08T06:30:00Z",
+            published_label="旧标签",
+        )
+    )
+    second = discovered_content_to_candidate_write(
+        DiscoveredContent(
+            bvid="BV1TIME",
+            title="A",
+            published_at=incoming_at,
+            published_label=incoming_label,
+        )
+    )
+
+    db.enqueue_discovery_candidates([first])
+    db.enqueue_discovery_candidates([second])
+    row = db.conn.execute(
+        "SELECT published_at, published_label FROM discovery_candidates WHERE candidate_key = ?",
+        (first.candidate_key,),
+    ).fetchone()
+
+    assert row["published_at"] == expected_at
+    assert row["published_label"] == expected_label
+    db.close()
 
 
 def test_pipeline_pool_count_uses_dynamic_xhs_self_nickname() -> None:

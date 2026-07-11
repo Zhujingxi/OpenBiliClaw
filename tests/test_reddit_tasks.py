@@ -102,7 +102,7 @@ def test_parse_reddit_command_output_flattens_rdt_read_payload() -> None:
     assert items[1]["body"] == "Detailed comment"
 
 
-def test_reddit_items_to_contents_sets_platform_strategy_and_text_fields() -> None:
+def test_reddit_items_to_contents_maps_platform_strategy_and_text_fields() -> None:
     contents = reddit_items_to_contents(
         [
             {
@@ -114,6 +114,8 @@ def test_reddit_items_to_contents_sets_platform_strategy_and_text_fields() -> No
                 "score": "42",
                 "num_comments": "7",
                 "selftext": "A practical write-up.",
+                "created_utc": 1783492200,
+                "published_label": "3 days ago",
             }
         ],
         strategy="reddit-search",
@@ -134,6 +136,25 @@ def test_reddit_items_to_contents_sets_platform_strategy_and_text_fields() -> No
     assert item.body_text == "A practical write-up."
     assert item.score_threshold == 0.6
     assert item.source_keyword_id == 12
+    assert item.published_at == "2026-07-08T06:30:00Z"
+    assert item.published_label == "3 days ago"
+
+
+def test_reddit_items_to_contents_keeps_candidate_without_publication() -> None:
+    contents = reddit_items_to_contents(
+        [
+            {
+                "id": "no-time",
+                "title": "An undated post",
+                "url": "https://www.reddit.com/r/test/comments/no_time/undated/",
+            }
+        ],
+        strategy="reddit-hot",
+    )
+
+    assert len(contents) == 1
+    assert contents[0].published_at == ""
+    assert contents[0].published_label == ""
 
 
 def test_reddit_items_to_events_marks_discovered_rows_as_fetch_only_views() -> None:

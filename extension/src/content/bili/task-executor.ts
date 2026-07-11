@@ -15,6 +15,7 @@ const UP_SELECTOR = ".bili-video-card__info--author, .up-name, [title='up主']";
 const STATS_SELECTOR = ".bili-video-card__stats--item, .so-icon.watch-num, .play-text";
 const DESC_SELECTOR = ".bili-video-card__info--desc, .des, .description";
 const DURATION_SELECTOR = ".bili-video-card__stats__duration, .duration, .so-imgTag_rb";
+const PUBLISHED_SELECTOR = ".bili-video-card__info--date, .so-icon.time, .pubdate";
 
 export interface BiliSearchVideo {
   bvid?: string;
@@ -26,6 +27,8 @@ export interface BiliSearchVideo {
   view_count?: number;
   like_count?: number;
   description?: string;
+  published_at?: string | number;
+  published_label?: string;
 }
 
 export interface BiliTaskExecuteMessage {
@@ -175,6 +178,7 @@ export function extractBiliSearchVideos(
       .find((text) => normalizeCountText(text) > 0) ?? "";
     const durationText = textFrom(first(card, DURATION_SELECTOR));
     const duration = parseDurationSeconds(durationText);
+    const publishedLabel = textFrom(first(card, PUBLISHED_SELECTOR));
 
     const video: BiliSearchVideo = {
       ...(bvid ? { bvid } : {}),
@@ -185,6 +189,7 @@ export function extractBiliSearchVideos(
       ...(duration > 0 ? { duration } : {}),
       ...(normalizeCountText(statsText) > 0 ? { view_count: normalizeCountText(statsText) } : {}),
       ...(textFrom(first(card, DESC_SELECTOR)) ? { description: textFrom(first(card, DESC_SELECTOR)) } : {}),
+      ...(publishedLabel ? { published_label: publishedLabel } : {}),
     };
     videos.push(video);
   }

@@ -21,6 +21,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from openbiliclaw.published_time import format_published_time
 from openbiliclaw.runtime.ollama_supervisor import (
     _is_default_ollama_endpoint,
     _ollama_is_running,
@@ -413,10 +414,16 @@ async def _run_with_progress(
 
 def _print_recommendation_card(item: Any, index: int) -> None:
     """Render one recommendation in a card-like format."""
+    published = format_published_time(
+        getattr(item.content, "published_at", ""),
+        getattr(item.content, "published_label", ""),
+    )
     rows = [
         ("标题", item.content.title or "（暂无）"),
         ("UP 主", item.content.up_name or "（未知）"),
     ]
+    if published:
+        rows.append(("发布时间", published))
     if item.topic_label:
         rows.append(("话题标签", item.topic_label))
     rows.extend(
