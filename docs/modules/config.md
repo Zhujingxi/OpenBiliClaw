@@ -331,6 +331,20 @@ model    = "deepseek-v4-flash"
 > 如果 `bilibili.cookie` 留空，CLI 命令和本地 API 服务会自动回退到 `auth login` 保存的 `data/bilibili_cookie.json`。
 > 只有在你想显式覆盖本地登录态时，才需要把 cookie 直接写进 `config.toml`。
 
+### `[network]` (v0.3.164+)
+
+海外出口代理。仅作用于**海外客户端**：OpenAI / Claude / Gemini / DeepSeek / OpenRouter / openai_compatible 的 chat + embedding SDK、YouTube（yt-dlp）、GitHub 自动更新、Codex OAuth 令牌刷新。
+
+| 键 | 类型 | 默认值 | 说明 |
+|----|------|--------|------|
+| `proxy` | string | `""` | 海外出口代理 URL。留空 = 不设代理（沿用进程 `HTTP(S)_PROXY` 环境变量现状，不影响 Docker 代理探测）。支持 `http://` / `https://` / `socks5://` / `socks5h://`，如 `"socks5://127.0.0.1:1080"` |
+
+> 与 `[bilibili].proxy` 的区别：`[network].proxy` 是「海外出口」，`[bilibili].proxy` 是「B站专用」，两者语义相反、互不影响。
+>
+> **国内直连隔离**：B站 / 抖音 / Ollama / 国内 CDN 图片缓存等所有 `trust_env=False` 客户端**永远不使用**此代理（继承代理曾触发 B站 风控，`df626f3f`）。该隔离由 `tests/test_network_proxy_isolation.py` 守卫测试钉死。
+>
+> 保存时白名单校验协议与主机；非法值经 `PUT /api/config` 返回 400，不落盘；`config.toml` 手改成非法值时加载会 WARNING 并按空值处理。桌面 Web「设置-通用」提供输入框和「测试代理」连通性探测；扩展 popup 无设置面板，CLI 用 `config-show` / 直接编辑 `config.toml`。
+
 ### `[sources.browser]`
 
 通用 Web / 自定义网页源使用的浏览器配置。与 `bilibili.browser` 独立 —— 后者控制 B 站登录 / 扫码用的 agent-browser CLI。

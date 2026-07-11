@@ -261,6 +261,15 @@ executable = ""
 # Use headed mode for debugging
 headed = false
 
+# ── 海外出口代理（仅作用于海外客户端）──
+# 作用范围：OpenAI / Claude / Gemini / DeepSeek / OpenRouter / openai_compatible
+# 的 chat + embedding、YouTube(yt-dlp)、GitHub 自动更新、Codex OAuth。
+# B站 / 抖音 / Ollama 等国内直连请求始终直连,不受此项影响。
+# 留空 = 不设代理(沿用进程 HTTP(S)_PROXY 环境变量现状)。
+# 支持 http:// | https:// | socks5:// | socks5h://,例如 "socks5://127.0.0.1:1080"。
+[network]
+proxy = ""
+
 # ── 通用 Web / 自定义网页源的浏览器配置 ──
 # 与 [bilibili.browser] 独立：Bilibili 走 agent-browser CLI，
 # 小红书 / 抖音当前走 Chrome 插件任务，不依赖这里。

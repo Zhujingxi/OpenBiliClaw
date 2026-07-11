@@ -9900,6 +9900,7 @@ def config_show() -> None:
             ),
         ),
         ("开机自启动", _format_autostart_config_status(cfg)),
+        ("海外出口代理", cfg.network.proxy or "未设置（海外请求走进程 env / 直连）"),
         ("数据目录", str(cfg.data_path)),
     ]
     if diagnostics.config_path:
