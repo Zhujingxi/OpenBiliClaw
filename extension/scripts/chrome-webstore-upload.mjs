@@ -3,6 +3,8 @@
 import { readFile, stat } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 
+import { uploadWithPendingReplacement } from "./chrome-webstore-pending.mjs";
+
 const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const CWS_API_BASE = "https://chromewebstore.googleapis.com";
 const CWS_SCOPE = "https://www.googleapis.com/auth/chromewebstore";
@@ -23,6 +25,7 @@ Options:
   --publish                     Submit the uploaded package for review.
   --staged                      Publish as staged after approval.
   --skip-review                 Ask Chrome Web Store to skip review when eligible.
+  --replace-pending             Cancel an in-review submission and retry this upload once.
   --deploy-percentage <0-100>   Initial rollout percentage for publish.
   --poll-interval-seconds <n>   Upload-status polling interval. Default: 5.
   --wait-timeout-seconds <n>    Upload processing timeout. Default: 120.
@@ -36,6 +39,7 @@ function parseArgs(argv) {
     publish: false,
     staged: false,
     skipReview: false,
+    replacePending: false,
     deployPercentage: null,
     pollIntervalSeconds: 5,
     waitTimeoutSeconds: 120,
@@ -62,6 +66,10 @@ function parseArgs(argv) {
     }
     if (arg === "--skip-review") {
       options.skipReview = true;
+      continue;
+    }
+    if (arg === "--replace-pending") {
+      options.replacePending = true;
       continue;
     }
     if (arg === "--deploy-percentage") {
@@ -125,7 +133,16 @@ async function requestJson(url, options) {
   }
   if (!response.ok) {
     const details = JSON.stringify(payload, null, 2);
-    throw new Error(`HTTP ${response.status} ${response.statusText} from ${url}\n${details}`);
+    const error = new Error(
+      `HTTP ${response.status} ${response.statusText} from ${url}\n${details}`,
+    );
+    const errorInfo = Array.isArray(payload?.error?.details)
+      ? payload.error.details.find((detail) => typeof detail?.reason === "string")
+      : null;
+    if (errorInfo) {
+      error.chromeWebStoreReason = errorInfo.reason;
+    }
+    throw error;
   }
   return payload;
 }
@@ -179,6 +196,21 @@ async function fetchStatus({ accessToken, publisherId, extensionId }) {
   return await requestJson(statusUrl, {
     method: "GET",
     headers: { Authorization: `Bearer ${accessToken}` },
+  });
+}
+
+async function cancelSubmission({ accessToken, publisherId, extensionId }) {
+  const cancelUrl = `${CWS_API_BASE}/v2/${itemName({
+    publisherId,
+    extensionId,
+  })}:cancelSubmission`;
+  return await requestJson(cancelUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: "{}",
   });
 }
 
@@ -252,11 +284,21 @@ async function main() {
 
   console.log(`Uploading ${basename(archivePath)} to Chrome Web Store item ${credentials.extensionId}...`);
   const accessToken = await getAccessToken(credentials);
-  const upload = await uploadArchive({
-    archivePath,
-    accessToken,
-    publisherId: credentials.publisherId,
-    extensionId: credentials.extensionId,
+  const upload = await uploadWithPendingReplacement({
+    replacePending: options.replacePending,
+    upload: () =>
+      uploadArchive({
+        archivePath,
+        accessToken,
+        publisherId: credentials.publisherId,
+        extensionId: credentials.extensionId,
+      }),
+    cancelSubmission: () =>
+      cancelSubmission({
+        accessToken,
+        publisherId: credentials.publisherId,
+        extensionId: credentials.extensionId,
+      }),
   });
   console.log(`Upload response: ${JSON.stringify(upload, null, 2)}`);
 

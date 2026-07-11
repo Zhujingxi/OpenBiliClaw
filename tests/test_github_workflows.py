@@ -23,3 +23,12 @@ def test_issue_98_e2e_treats_playwright_as_an_optional_test_dependency() -> None
 
     assert 'pytest.importorskip("playwright.sync_api")' in source
     assert "from playwright.sync_api import" not in source
+
+
+def test_chrome_webstore_publish_can_explicitly_replace_a_pending_review() -> None:
+    """A newer release can replace an older package that is still in review."""
+    workflow = Path(".github/workflows/publish-chrome-webstore.yml").read_text(encoding="utf-8")
+
+    assert "replace_pending:" in workflow
+    assert "SHOULD_REPLACE_PENDING: ${{ inputs.replace_pending }}" in workflow
+    assert "args+=(--replace-pending)" in workflow
