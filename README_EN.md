@@ -189,12 +189,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.162 (2026-07-11)**
+📌 Latest: **v0.3.163 (2026-07-11)**
 
-- **Cross-device extension access** — opt-in device-key authentication lets remote browser extensions connect safely to a home or LAN backend, with immediate session revocation.
-- **Instant, undoable feedback** — recommendation cards and interest/avoidance probes respond immediately with a real 10-second undo window; reshuffle shows the new batch before settling old cards in the background.
-- **Publication time across seven platforms** — Bilibili, Xiaohongshu, Douyin, YouTube, X, Zhihu, and Reddit publication times now flow through recommendations and render consistently as local relative dates on every surface.
-- **Stronger Ollama self-healing** — the private with-embedding Ollama restarts with bounded backoff, while missing or broken embedding models can be repaired from guided init with visible progress.
+- **Truthful login status** — PC and Web settings now use only local credentials and extension heartbeats, distinguishing signed-in, unverified, and content-token states without probing platforms.
+- **Automatic Web inventory recovery** — bounded retries recover transient recommendation or runtime-status timeouts without replacing cards already being viewed or appended.
+- **Cold embedding loads are no longer outages** — local Ollama model warm-up timeouts are separated from real failures while guided init still requires a valid embedding.
+- **More accurate preference feedback** — interest and avoidance feedback now applies across fine and broad topics, preserves the real source platform, and uses consistent actions on all three surfaces.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
