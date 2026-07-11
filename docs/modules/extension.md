@@ -490,7 +490,7 @@ npm run build
 - 用户下载入口：`openbiliclaw-v*` 聚合 Latest Release；维护者需要核对构建日志时再看对应 `extension-v*` release
 - Chrome / Edge / Brave 打包脚本会先删除同名旧 zip，再重新压缩 `manifest.json`、`dist/`、`icons/`、`popup/`，避免重复打包带入残留文件
 - `extension-v*` GitHub Actions release workflow 会同时运行 Chrome / Firefox 两条打包脚本；仅当 `FIREFOX_SIGNING_ENABLED` 未关闭且 `AMO_JWT_ISSUER` / `AMO_JWT_SECRET` 可用时，才执行 `npm run sign:firefox:only` 生成 signed XPI。发布尾部调用 `.github/scripts/sync-aggregate-release.sh`，把实际存在的插件 zip / xpi 同步到当前 `openbiliclaw-v*` 聚合 Latest Release，并把该聚合页重新标记为 GitHub Latest。Firefox 140+ 也可本地构建 / 临时加载：`npm run build:firefox` 生成 `dist-firefox/`，`npm run package:firefox` 生成未签名 `openbiliclaw-extension-vX.Y.Z-firefox.zip`；配置 AMO 凭据后，`npm run sign:firefox:only` 会把当前 `dist-firefox/` 提交 AMO unlisted 签名并输出可直接安装的 `openbiliclaw-extension-vX.Y.Z-firefox.xpi`
-- v0.3.62 起，Chrome / Firefox 发布包移除 `http://*/*` 宽泛主机权限，只保留四个受支持内容平台和 `127.0.0.1` / `localhost` 本机后端权限，避免 Chrome Web Store 把插件标为“所有网站权限”。
+- v0.3.62 起，Chrome / Firefox 发布包移除默认授予的 `http://*/*` 宽泛主机权限；当前固定权限覆盖 B站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit 和 `127.0.0.1` / `localhost` 本机后端。局域网或远程后端通过 `optional_host_permissions` 在用户显式保存地址时请求对应 `scheme://host/*`，实际请求仍固定到配置端口。
 - v0.3.64 起，Chrome / Firefox 发布包不再声明 `tabs` permission；后台任务仍可使用 `chrome.tabs.create/update/remove/onUpdated/sendMessage` 打开、导航和清理受支持平台任务页，发布包仅保留实际需要的最小 permission 集合。
 - 插件更新不走后端自动更新 API：商店安装版本由 Chrome / Edge / Firefox 原生更新；GitHub Release 下载的 Chrome zip / Firefox signed XPI / Firefox 临时 zip、开发者模式加载和临时加载用户按 release 页面下载新版并重新加载。
 
@@ -501,7 +501,7 @@ Chrome Web Store 上传自动化走官方 API v2，不使用第三方上传 acti
 - GitHub Actions：手动运行 `Publish Chrome Web Store Package` workflow；默认只上传 zip，不提交审核，勾选 `publish` 才调用 Chrome Web Store `publish` API。若上一版仍在审核且必须用新版替换，可显式勾选 `replace_pending`；脚本仅在上传返回官方 `NOT_UPDATEABLE` 时调用 `cancelSubmission` 撤回旧审核并重试一次，默认关闭且不会吞掉其它上传错误。
 - 需要在本地环境变量或 GitHub Secrets 设置：`CHROME_WEBSTORE_CLIENT_ID`、`CHROME_WEBSTORE_CLIENT_SECRET`、`CHROME_WEBSTORE_REFRESH_TOKEN`、`CHROME_WEBSTORE_PUBLISHER_ID`、`CHROME_WEBSTORE_EXTENSION_ID`。
 - `CHROME_WEBSTORE_REFRESH_TOKEN` 必须由拥有该 Chrome Web Store item 管理权限的 Google 账号生成，OAuth scope 为 `https://www.googleapis.com/auth/chromewebstore`。
-- Chrome Web Store 详情页文案维护在 `docs/chrome-webstore-listing.md`；提交新版本、改安装路径或改项目入口时，将其中 `Detailed Description` 纯文本块复制到 Developer Dashboard 的商店详情页，避免公开页只展示无引导的短概述。
+- Chrome Web Store 详情页文案与五张 1280×800 截图的上传顺序维护在 `docs/chrome-webstore-listing.md`。`scripts/chrome_webstore_demo.py` 提供不读取真实配置 / 数据库的固定演示 API，`scripts/capture_chrome_webstore_ui.py` 只允许 loopback 请求并实拍当前桌面 Web、移动 Web 和 unpacked 插件 UI，`scripts/build_chrome_webstore_assets.py` 再生成 `docs/images/chrome-web-store/01-*.png` 至 `05-*.png`；提交前运行 `tests/test_chrome_webstore_listing.py` 锁定七平台文案、文件顺序和 1280×800 尺寸。商店 API v2 只负责包上传 / 提审，详情文案和截图仍需在 Developer Dashboard 替换。
 - Chrome Web Store 隐私权政策网址可填写 `https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/privacy.md`；该文档说明插件单一用途、权限理由、数据类型、本地后端数据流和无远程代码声明。
 
 后端源码更新仍只通过 `backend-v*` tag 标记，桌面安装包仍由 `desktop-v*` workflow 构建；两者都会同步到 `openbiliclaw-v*` 聚合 Release，避免 GitHub Releases 首页只露出某一个通道。
