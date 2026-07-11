@@ -343,7 +343,7 @@ model    = "deepseek-v4-flash"
 >
 > **国内直连隔离**：B站 / 抖音 / Ollama / 国内 CDN 图片缓存等所有 `trust_env=False` 客户端**永远不使用**此代理（继承代理曾触发 B站 风控，`df626f3f`）。该隔离由 `tests/test_network_proxy_isolation.py` 守卫测试钉死。
 >
-> 保存时白名单校验协议与主机；非法值经 `PUT /api/config` 返回 400，不落盘；`config.toml` 手改成非法值时加载会 WARNING 并按空值处理。桌面 Web「设置-通用」提供输入框和「测试代理」连通性探测；扩展 popup 无设置面板，CLI 用 `config-show` / 直接编辑 `config.toml`。
+> 保存时白名单校验协议与主机；非法值经 `PUT /api/config` 返回 400，不落盘；`config.toml` 手改成非法值时加载会 WARNING 并按空值处理。桌面 Web「设置-通用」与扩展 popup「后端设置-通用」都提供输入框和「测试代理」连通性探测；CLI 用 `config-show` / 直接编辑 `config.toml`；移动 Web 无设置页。
 
 ### `[sources.browser]`
 

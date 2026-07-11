@@ -486,6 +486,24 @@ test("settings page exposes and wires LLM and embedding probe buttons", () => {
   assert.match(popupJs, /function renderProbeResult/);
 });
 
+test("settings general tab exposes and wires the network proxy field (aligned with desktop web)", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  // Field + probe control + copy stating CN requests stay direct.
+  assert.match(popupHtml, /id="cfgNetworkProxy"/);
+  assert.match(popupHtml, /id="cfgProbeNetworkProxy"/);
+  assert.match(popupHtml, /id="cfgProbeNetworkProxyStatus"/);
+  assert.match(popupHtml, /海外/);
+  assert.match(popupHtml, /国内请求始终直连/);
+
+  // Restore from config.network.proxy, collect into payload.network, probe wired.
+  assert.match(popupJs, /setVal\("cfgNetworkProxy", cfg\.network\?\.proxy \|\| ""\)/);
+  assert.match(popupJs, /network:\s*\{\s*proxy: getVal\("cfgNetworkProxy"\),/);
+  assert.match(popupJs, /probeConfigService\("network_proxy", \{ network: \{ proxy \} \}\)/);
+  assert.match(popupJs, /function runNetworkProxyConfigProbe/);
+});
+
 test("settings page guards against a same-name LLM fallback (aligned with desktop web)", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
