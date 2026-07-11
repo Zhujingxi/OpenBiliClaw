@@ -83,8 +83,12 @@ test("runtime stream refresh handlers coalesce expensive frontend reloads", () =
   assert.notEqual(poolUpdatedBlock, "", "mobile recommend stream handler should handle pool updates");
   assert.match(poolUpdatedBlock, /mergeRuntimeStatusEvent/);
   assert.match(poolUpdatedBlock, /rerenderRuntimeDependentChrome\(\);/);
+  assert.match(poolUpdatedBlock, /state\.recommendations\.length === 0/);
+  assert.match(poolUpdatedBlock, /recommendationLoadState === "failed"/);
+  assert.match(poolUpdatedBlock, /recommendationLoadState === "failed-exhausted"/);
+  assert.match(poolUpdatedBlock, /scheduleRecommendationRecovery\(\);/);
   assert.doesNotMatch(poolUpdatedBlock, /scheduleRecommendationItemsRefresh/);
-  assert.doesNotMatch(poolUpdatedBlock, /fetchRecommendations|loadData/);
+  assert.doesNotMatch(poolUpdatedBlock, /fetchRecommendations|loadData|patchState\(\{ recommendations:/);
   assert.doesNotMatch(poolUpdatedBlock, /loadData\(/);
 
   assert.match(mobileProfileJs, /function scheduleProfileRefresh/);
