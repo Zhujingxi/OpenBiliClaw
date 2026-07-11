@@ -9219,6 +9219,7 @@ def create_app(
                 planner_poll_seconds=cfg.discovery.planner_poll_seconds,
                 plan_ttl_hours=cfg.discovery.plan_ttl_hours,
                 admission_min_score=cfg.discovery.admission_min_score,
+                candidate_eval_concurrency=cfg.discovery.candidate_eval_concurrency,
                 multimodal_evaluation_enabled=cfg.discovery.multimodal_evaluation_enabled,
                 multimodal_batch_size=cfg.discovery.multimodal_batch_size,
                 multimodal_image_max_px=cfg.discovery.multimodal_image_max_px,
@@ -9560,6 +9561,7 @@ def create_app(
         """
         from openbiliclaw.config import (
             _DEFAULT_ADMISSION_MIN_SCORE,
+            _DEFAULT_CANDIDATE_EVAL_CONCURRENCY,
             _DEFAULT_DELIGHT_QUEUE_LIMIT,
             _DEFAULT_DISCOVERY_LIMIT,
             _DEFAULT_EXPLORE_REFRESH_HOURS,
@@ -9979,6 +9981,11 @@ def create_app(
             ddata = update["discovery"]
             if isinstance(ddata, dict):
                 discovery_int_limits = {
+                    "candidate_eval_concurrency": (
+                        _DEFAULT_CANDIDATE_EVAL_CONCURRENCY,
+                        1,
+                        8,
+                    ),
                     "multimodal_batch_size": (
                         _DEFAULT_MULTIMODAL_BATCH_SIZE,
                         1,

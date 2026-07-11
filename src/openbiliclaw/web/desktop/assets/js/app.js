@@ -5095,6 +5095,7 @@
 
       const discovery = config.discovery || {};
       setSelect("keywordGenerationMode", discovery.keyword_generation_mode || "legacy");
+      setInput("candidateEvalConcurrency", discovery.candidate_eval_concurrency);
       setSelect("multimodalEvaluationEnabled", discovery.multimodal_evaluation_enabled ? "on" : "off");
       setInput("multimodalBatchSize", discovery.multimodal_batch_size);
       setInput("multimodalImageMaxPx", discovery.multimodal_image_max_px);
@@ -6073,6 +6074,7 @@
         discovery: {
           ...(state.config?.discovery || {}),
           keyword_generation_mode: $("#keywordGenerationMode").value,
+          candidate_eval_concurrency: getIntInput("candidateEvalConcurrency", 3),
           multimodal_evaluation_enabled: $("#multimodalEvaluationEnabled").value === "on",
           multimodal_batch_size: getIntInput("multimodalBatchSize", 8),
           multimodal_image_max_px: getIntInput("multimodalImageMaxPx", 384),

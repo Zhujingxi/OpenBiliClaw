@@ -2092,6 +2092,7 @@ class TestDiscoveryConfig:
         )
         assert config.discovery.inspiration_breadth == "high"
         assert config.discovery.multimodal_evaluation_enabled is False
+        assert config.discovery.candidate_eval_concurrency == 3
         assert config.discovery.multimodal_batch_size == 8
         assert config.discovery.multimodal_image_max_px == 384
         assert config.discovery.multimodal_image_quality == 72
@@ -2152,6 +2153,7 @@ inspiration_replace_merged_keywords = true
 inspiration_search_backends = ["platform_sources", "exa", "you"]
 inspiration_breadth = "high"
 multimodal_evaluation_enabled = true
+candidate_eval_concurrency = 5
 multimodal_batch_size = 4
 multimodal_image_max_px = 512
 multimodal_image_quality = 80
@@ -2178,6 +2180,7 @@ multimodal_image_timeout_seconds = 10
         assert config.discovery.inspiration_search_backends == ("platform_sources", "exa", "you")
         assert config.discovery.inspiration_breadth == "high"
         assert config.discovery.multimodal_evaluation_enabled is True
+        assert config.discovery.candidate_eval_concurrency == 5
         assert config.discovery.multimodal_batch_size == 4
         assert config.discovery.multimodal_image_max_px == 512
         assert config.discovery.multimodal_image_quality == 80
@@ -2211,6 +2214,8 @@ multimodal_image_timeout_seconds = 10
             ("claim_lease_minutes", "0", 10),
             ("planner_poll_seconds", '"nope"', 120),
             ("plan_ttl_hours", "0", 12),
+            ("candidate_eval_concurrency", "0", 3),
+            ("candidate_eval_concurrency", "9", 3),
             ("multimodal_batch_size", "0", 8),
             ("multimodal_batch_size", "13", 8),
             ("multimodal_image_max_px", "127", 384),

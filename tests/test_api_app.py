@@ -9444,6 +9444,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "git@github.com:example/OpenBiliClaw.git",
         ]
         cfg.discovery.multimodal_evaluation_enabled = True
+        cfg.discovery.candidate_eval_concurrency = 5
         cfg.discovery.multimodal_batch_size = 4
         cfg.discovery.multimodal_image_max_px = 512
         cfg.discovery.multimodal_image_quality = 80
@@ -9521,6 +9522,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "git@github.com:example/OpenBiliClaw.git",
         ]
         assert data["discovery"]["multimodal_evaluation_enabled"] is True
+        assert data["discovery"]["candidate_eval_concurrency"] == 5
         assert data["discovery"]["multimodal_batch_size"] == 4
         assert data["discovery"]["multimodal_image_max_px"] == 512
         assert data["discovery"]["multimodal_image_quality"] == 80
@@ -9595,6 +9597,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "/api/config",
             json={
                 "discovery": {
+                    "candidate_eval_concurrency": 5,
                     "multimodal_evaluation_enabled": "true",
                     "multimodal_batch_size": 4,
                     "multimodal_image_max_px": 512,
@@ -9605,12 +9608,14 @@ class TestEmbeddingAndCompatProviderE2E:
         )
 
         assert response.status_code == 200
+        assert cfg.discovery.candidate_eval_concurrency == 5
         assert cfg.discovery.multimodal_evaluation_enabled is True
         assert cfg.discovery.multimodal_batch_size == 4
         assert cfg.discovery.multimodal_image_max_px == 512
         assert cfg.discovery.multimodal_image_quality == 80
         assert cfg.discovery.multimodal_image_timeout_seconds == 10
         discovery = response.json()["config"]["discovery"]
+        assert discovery["candidate_eval_concurrency"] == 5
         assert discovery["multimodal_evaluation_enabled"] is True
         assert discovery["multimodal_batch_size"] == 4
         assert discovery["multimodal_image_max_px"] == 512

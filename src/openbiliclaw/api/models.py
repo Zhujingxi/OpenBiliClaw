@@ -183,6 +183,15 @@ class RuntimeStatusResponse(BaseModel):
     pool_pending_eval_count: int = 0
     pool_evaluated_pending_count: int = 0
     pool_target_count: int = 0
+    candidate_eval_state: str = "idle"
+    candidate_eval_workers: int = 0
+    candidate_eval_in_flight: int = 0
+    candidate_eval_pending: int = 0
+    candidate_eval_backoff_until: float = 0.0
+    candidate_eval_last_error: str = ""
+    candidate_eval_last_batch_seconds: float = 0.0
+    candidate_eval_last_cached: int = 0
+    candidate_eval_last_rejected: int = 0
     last_discovered_count: int = 0
     last_replenished_count: int = 0
     recent_pool_topics: list[str] = Field(default_factory=list)
@@ -1219,6 +1228,7 @@ class DiscoveryConfigOut(BaseModel):
     planner_poll_seconds: int = 120
     plan_ttl_hours: int = 12
     admission_min_score: float = 0.60
+    candidate_eval_concurrency: int = 3
     multimodal_evaluation_enabled: bool = False
     multimodal_batch_size: int = 8
     multimodal_image_max_px: int = 384

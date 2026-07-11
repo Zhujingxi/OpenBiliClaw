@@ -550,6 +550,7 @@
           <p class="settings-note-inline">经典：仅用合并关键词生成器；混合：在经典基础上再叠加 search-backed 灵感轴链路（最丰富，但同时跑两套，混合最贵）；灵感：完全用灵感轴链路替代经典。</p>
           <p class="settings-section-title">评估输入</p>
           <div class="inline-row">
+            <label class="settings-field"><span>候选评估并发</span><input id="candidateEvalConcurrency" inputmode="numeric" placeholder="3" min="1" max="8"></label>
             <label class="settings-field"><span>封面图评估</span><select id="multimodalEvaluationEnabled"><option value="off">关闭</option><option value="on">开启</option></select></label>
             <label class="settings-field"><span>图文批量大小</span><input id="multimodalBatchSize" inputmode="numeric" placeholder="8" min="1" max="12"></label>
             <label class="settings-field"><span>封面最大边</span><input id="multimodalImageMaxPx" inputmode="numeric" placeholder="384" min="128" max="768"></label>

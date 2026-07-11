@@ -102,6 +102,7 @@ _DEFAULT_INSPIRATION_SEARCH_BACKENDS: tuple[str, ...] = (
     "you",
 )
 _DEFAULT_ADMISSION_MIN_SCORE = 0.60
+_DEFAULT_CANDIDATE_EVAL_CONCURRENCY = 3
 _DEFAULT_MULTIMODAL_BATCH_SIZE = 8
 _DEFAULT_MULTIMODAL_IMAGE_MAX_PX = 384
 _DEFAULT_MULTIMODAL_IMAGE_QUALITY = 72
@@ -486,6 +487,9 @@ class DiscoveryConfig:
     # Unified recommendation-pool admission floor. Source/provenance metadata
     # must never bypass this; explicit strategy thresholds live on candidates.
     admission_min_score: float = _DEFAULT_ADMISSION_MIN_SCORE
+    # Desired candidate-evaluation workers. Runtime reserves one global LLM
+    # slot, so the effective count may be lower than this configured value.
+    candidate_eval_concurrency: int = _DEFAULT_CANDIDATE_EVAL_CONCURRENCY
     # Optional cover-image evaluation. Kept off by default because it changes
     # LLM cost/latency and requires a vision-capable evaluation model.
     multimodal_evaluation_enabled: bool = False
@@ -1293,6 +1297,12 @@ def _build_discovery(discovery_raw: dict[str, Any]) -> DiscoveryConfig:
         admission_min_score=_normalize_probability(
             discovery_raw.get("admission_min_score"),
             default=_DEFAULT_ADMISSION_MIN_SCORE,
+        ),
+        candidate_eval_concurrency=_normalize_scheduler_int(
+            discovery_raw.get("candidate_eval_concurrency"),
+            default=_DEFAULT_CANDIDATE_EVAL_CONCURRENCY,
+            min_value=1,
+            max_value=8,
         ),
         multimodal_evaluation_enabled=_coerce_bool(
             discovery_raw.get("multimodal_evaluation_enabled"),
@@ -2534,6 +2544,7 @@ def _render_config_toml(
             f"planner_poll_seconds = {config.discovery.planner_poll_seconds}",
             f"plan_ttl_hours = {config.discovery.plan_ttl_hours}",
             f"admission_min_score = {config.discovery.admission_min_score:g}",
+            f"candidate_eval_concurrency = {config.discovery.candidate_eval_concurrency}",
             "inspiration_search_enabled = "
             f"{_toml_bool(config.discovery.inspiration_search_enabled)}",
             "inspiration_search_backends = "

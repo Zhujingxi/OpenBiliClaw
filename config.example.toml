@@ -497,6 +497,9 @@ inspiration_replace_merged_keywords = false
 # max_expansions_per_seed / max_keywords_per_platform）已移除，写了也会被忽略
 # 并在启动提示中给出迁移说明。
 inspiration_breadth = "high"
+# 候选评估期望并发，合法范围 1..8。运行时会为聊天等交互保留一个全局 LLM
+# 槽位，因此有效并发为 min(本值, max(1, llm.concurrency - 1))。
+candidate_eval_concurrency = 3
 # 可选封面图评估。默认关闭；开启后 discovery evaluator 会在模型支持图像输入时
 # 把已压缩的候选封面一并送入评估器，模型不支持时自动退回纯文本评估。
 multimodal_evaluation_enabled = false
