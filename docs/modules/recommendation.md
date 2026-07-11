@@ -175,7 +175,7 @@ items = await engine.append_recommendations(
 - 追加命中的内容也会立即写入 `recommendations` 表，并把对应池子项标记为 `shown`
 - API 层在 `append` 返回后会发布最新 `refresh.pool_updated` 池子快照，便于其它 surface 更新“还剩几条可换”；正在浏览的列表保持原样，只有用户继续滚动或主动换一批才消费更多候选
 
-推荐历史、换一批、续页以及 delight 输出共享五字段身份契约：`item_key`、raw `content_id`、`source_platform`、authoritative `content_url`、`content_type`。兼容字段 `bvid` 对 B 站继续暴露 raw BV ID；跨平台关联优先使用 `item_key`，不再用裸 `content_id` 做新记录 join。
+推荐历史、换一批、续页以及 delight 输出共享五字段身份契约：`item_key`、raw `content_id`、`source_platform`、authoritative `content_url`、`content_type`。兼容字段 `bvid` 对 B 站继续暴露 raw BV ID；跨平台关联优先使用 `item_key`。旧 recommendation 只有在 exact storage key 未命中且 raw `content_id` 在 cache 中唯一时才允许 fallback，避免不同平台同裸 ID 被任意串联。
 
 ### RecommendationEngine.precompute_pool_copy
 

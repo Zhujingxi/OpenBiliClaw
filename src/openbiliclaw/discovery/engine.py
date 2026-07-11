@@ -44,10 +44,38 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
+_BILIBILI_CONTENT_ID_PATTERN = re.compile(r"^BV[0-9A-Za-z]+$")
+_CANONICAL_STORAGE_KEY_PLATFORMS = frozenset(
+    {
+        "bilibili",
+        "xiaohongshu",
+        "douyin",
+        "youtube",
+        "twitter",
+        "zhihu",
+        "reddit",
+        "web",
+    }
+)
 _EVALUATE_BATCH_HARD_CAP_DEFAULT: int = 90
 _DEFAULT_EVAL_BATCH_SIZE: int = 45
 _DEFAULT_EVAL_BATCH_CONCURRENCY: int = 2
 _LLM_EVAL_OVERSAMPLE_FACTOR: int = 2
+
+
+def _namespaced_storage_identity(value: str) -> tuple[str, str] | None:
+    raw_platform, separator, raw_content_id = value.strip().partition(":")
+    platform = canonical_source_platform(raw_platform)
+    if (
+        not separator
+        or platform != raw_platform.strip().lower()
+        or platform not in _CANONICAL_STORAGE_KEY_PLATFORMS
+        or not raw_content_id.strip()
+    ):
+        return None
+    return platform, raw_content_id.strip()
+
+
 _LLM_EVAL_MIN_WINDOW: int = 6
 _RAW_CANDIDATE_MODE: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "openbiliclaw_discovery_raw_candidate_mode",
@@ -477,18 +505,27 @@ class DiscoveredContent:
     source_keyword_id: int | None = None
 
     def __post_init__(self) -> None:
+        storage_identity = _namespaced_storage_identity(self.bvid) if self.bvid else None
         if not self.content_id and self.bvid:
-            self.content_id = self.bvid
+            if storage_identity is not None and (
+                not self.source_platform
+                or canonical_source_platform(self.source_platform) == storage_identity[0]
+            ):
+                self.content_id = storage_identity[1]
+            else:
+                self.content_id = self.bvid
         if not self.source_platform and self.bvid:
-            self.source_platform = "bilibili"
+            self.source_platform = (
+                storage_identity[0] if storage_identity is not None else "bilibili"
+            )
         if not self.author_name and self.up_name:
             self.author_name = self.up_name
         if (
             not self.content_url
-            and self.bvid
             and canonical_source_platform(self.source_platform) == "bilibili"
+            and _BILIBILI_CONTENT_ID_PATTERN.fullmatch(self.content_id.strip()) is not None
         ):
-            self.content_url = f"https://www.bilibili.com/video/{self.content_id or self.bvid}"
+            self.content_url = f"https://www.bilibili.com/video/{self.content_id.strip()}"
         if self.source_platform and (self.content_id or self.content_url):
             self.item_key = make_item_key(
                 self.source_platform,

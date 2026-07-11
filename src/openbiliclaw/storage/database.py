@@ -30,7 +30,11 @@ from openbiliclaw.discovery.inspiration import (
     _normalize_match_text,
     derive_inspiration_axis_id,
 )
-from openbiliclaw.saved_sync.identity import canonical_source_platform, make_item_key
+from openbiliclaw.saved_sync.identity import (
+    canonical_source_platform,
+    content_storage_key,
+    make_item_key,
+)
 from openbiliclaw.saved_sync.models import SavedItemInput, SavedListKind
 
 if TYPE_CHECKING:
@@ -4522,9 +4526,20 @@ class Database:
         cursor = self.conn.execute(
             f"""
             SELECT
-                r.*,
-                COALESCE(c.title, '') AS title,
+                r.id,
+                r.bvid,
                 COALESCE(NULLIF(r.item_key, ''), c.item_key, '') AS item_key,
+                r.expression,
+                r.topic,
+                r.confidence,
+                r.presented,
+                r.feedback,
+                r.feedback_type,
+                r.feedback_note,
+                r.created_at,
+                r.presented_at,
+                r.feedback_at,
+                COALESCE(c.title, '') AS title,
                 COALESCE(c.up_name, '') AS up_name,
                 COALESCE(c.cover_url, '') AS cover_url,
                 COALESCE(c.content_id, r.bvid) AS content_id,
@@ -4544,7 +4559,11 @@ class Database:
             LEFT JOIN content_cache AS c ON c.item_key = COALESCE(
                 NULLIF(r.item_key, ''),
                 (SELECT item_key FROM content_cache WHERE bvid = r.bvid),
-                (SELECT item_key FROM content_cache WHERE content_id = r.bvid LIMIT 1)
+                (
+                    SELECT CASE WHEN COUNT(*) = 1 THEN MIN(item_key) END
+                    FROM content_cache
+                    WHERE content_id = r.bvid
+                )
             )
             WHERE (
                 COALESCE(c.source_platform, '') != 'xiaohongshu'
@@ -4552,7 +4571,7 @@ class Database:
             )
             AND {admission_sql}
             {processed_clause}
-            ORDER BY created_at DESC, id DESC
+            ORDER BY r.created_at DESC, r.id DESC
             LIMIT ?
             """,
             (*admission_params, limit),
@@ -4935,6 +4954,7 @@ class Database:
             self.conn.execute(
                 "ALTER TABLE recommendations ADD COLUMN item_key TEXT NOT NULL DEFAULT ''"
             )
+        self._consolidate_content_identity_duplicates()
         self.conn.execute(
             """
             UPDATE recommendations AS r
@@ -4945,6 +4965,102 @@ class Database:
             WHERE r.item_key = ''
             """
         )
+
+    @staticmethod
+    def _content_identity_metadata_missing(value: object) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return value.strip() in {"", "[]", "{}"}
+        if isinstance(value, (int, float)):
+            return value == 0
+        return False
+
+    def _consolidate_content_identity_duplicates(self) -> None:
+        """Merge legacy cache rows that normalize to one canonical identity."""
+        duplicate_keys = self.conn.execute(
+            """
+            SELECT item_key
+            FROM content_cache
+            WHERE item_key != ''
+            GROUP BY item_key
+            HAVING COUNT(*) > 1
+            ORDER BY item_key
+            """
+        ).fetchall()
+        if not duplicate_keys:
+            return
+
+        columns = [
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(content_cache)").fetchall()
+        ]
+        merge_columns = [column for column in columns if column not in {"bvid", "item_key"}]
+        for duplicate in duplicate_keys:
+            item_key = str(duplicate["item_key"])
+            members = [
+                dict(row)
+                for row in self.conn.execute(
+                    "SELECT * FROM content_cache WHERE item_key = ? ORDER BY bvid",
+                    (item_key,),
+                ).fetchall()
+            ]
+            canonical_members: list[dict[str, Any]] = []
+            for member in members:
+                if str(member["bvid"]) == item_key:
+                    canonical_members.append(member)
+                    continue
+                platform = canonical_source_platform(
+                    str(member.get("source_platform") or "bilibili")
+                )
+                content_id = str(member.get("content_id") or member.get("bvid") or "")
+                try:
+                    expected_storage_key = content_storage_key(
+                        platform,
+                        content_id,
+                        str(member.get("content_url") or ""),
+                    )
+                except ValueError:
+                    continue
+                if str(member["bvid"]) == expected_storage_key:
+                    canonical_members.append(member)
+            keeper = min(canonical_members or members, key=lambda row: str(row["bvid"]))
+            keeper_bvid = str(keeper["bvid"])
+            merged = dict(keeper)
+            for member in members:
+                for column in merge_columns:
+                    if self._content_identity_metadata_missing(
+                        merged.get(column)
+                    ) and not self._content_identity_metadata_missing(member.get(column)):
+                        merged[column] = member[column]
+
+            changed_columns = [
+                column for column in merge_columns if merged.get(column) != keeper.get(column)
+            ]
+            if changed_columns:
+                assignments = ", ".join(f"{column} = ?" for column in changed_columns)
+                self.conn.execute(
+                    f"UPDATE content_cache SET {assignments} WHERE bvid = ?",
+                    [*(merged[column] for column in changed_columns), keeper_bvid],
+                )
+
+            member_bvids = [str(member["bvid"]) for member in members]
+            placeholders = ", ".join("?" for _ in member_bvids)
+            self.conn.execute(
+                f"""
+                UPDATE recommendations
+                SET bvid = ?, item_key = ?
+                WHERE bvid IN ({placeholders}) OR item_key = ?
+                """,
+                [keeper_bvid, item_key, *member_bvids, item_key],
+            )
+            removed_bvids = [bvid for bvid in member_bvids if bvid != keeper_bvid]
+            if removed_bvids:
+                removed_placeholders = ", ".join("?" for _ in removed_bvids)
+                self.conn.execute(
+                    f"DELETE FROM content_cache WHERE bvid IN ({removed_placeholders})",
+                    removed_bvids,
+                )
 
     def _ensure_discovery_candidate_columns(self) -> None:
         """Backfill discovery-candidate lifecycle columns for existing databases."""

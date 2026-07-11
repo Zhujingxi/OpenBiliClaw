@@ -183,3 +183,126 @@ def test_candidate_filter_does_not_cross_platform_dedupe_raw_ids(db: Database) -
         "SELECT candidate_key FROM discovery_candidates WHERE candidate_key = 'douyin:123'"
     ).fetchone()
     assert row is not None
+
+
+def test_legacy_duplicate_item_keys_consolidate_without_losing_recommendations(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "duplicate-identity.db"
+    database = Database(path)
+    database.initialize()
+    database.conn.execute("DROP INDEX idx_content_cache_item_key")
+    database.conn.executemany(
+        """
+        INSERT INTO content_cache (
+            bvid, item_key, title, source_platform, content_id, content_url, content_type
+        ) VALUES (?, '', ?, 'twitter', '123', ?, 'tweet')
+        """,
+        [
+            ("legacy-123", "legacy title", ""),
+            ("twitter:123", "", "https://x.com/u/status/123"),
+        ],
+    )
+    database.conn.execute(
+        """
+        INSERT INTO recommendations (bvid, item_key, expression, confidence)
+        VALUES ('legacy-123', '', 'legacy rec', 0.9)
+        """
+    )
+    database.conn.commit()
+    database.close()
+
+    migrated = Database(path)
+    migrated.initialize()
+
+    cached = migrated.conn.execute(
+        """
+        SELECT bvid, item_key, title, content_url
+        FROM content_cache
+        WHERE item_key = 'twitter:123'
+        """
+    ).fetchall()
+    assert [tuple(row) for row in cached] == [
+        (
+            "twitter:123",
+            "twitter:123",
+            "legacy title",
+            "https://x.com/u/status/123",
+        )
+    ]
+    recommendation = migrated.conn.execute(
+        "SELECT bvid, item_key FROM recommendations WHERE expression = 'legacy rec'"
+    ).fetchone()
+    assert recommendation is not None
+    assert tuple(recommendation) == ("twitter:123", "twitter:123")
+
+
+def test_ambiguous_legacy_raw_recommendation_does_not_cross_link(db: Database) -> None:
+    for platform in ("twitter", "douyin"):
+        item = DiscoveredContent(
+            content_id="123",
+            source_platform=platform,
+            content_url=f"https://example.com/{platform}/123",
+            content_type="tweet" if platform == "twitter" else "video",
+            relevance_score=0.9,
+        )
+        db.cache_content(item.item_key, **item.to_cache_kwargs())
+    db.conn.execute(
+        """
+        INSERT INTO recommendations (bvid, item_key, expression, confidence)
+        VALUES ('123', '', 'ambiguous', 0.9)
+        """
+    )
+    db.conn.commit()
+
+    [row] = db.get_recommendations()
+
+    assert row["item_key"] == ""
+    assert row["content_id"] == "123"
+    assert row["source_platform"] == ""
+    assert row["content_url"] == ""
+    assert row["content_type"] == "video"
+
+
+def test_unambiguous_legacy_raw_recommendation_resolves_full_identity(db: Database) -> None:
+    item = DiscoveredContent(
+        content_id="123",
+        source_platform="twitter",
+        content_url="https://x.com/u/status/123",
+        content_type="tweet",
+        relevance_score=0.9,
+    )
+    db.cache_content(item.item_key, **item.to_cache_kwargs())
+    db.conn.execute(
+        """
+        INSERT INTO recommendations (bvid, item_key, expression, confidence)
+        VALUES ('123', '', 'unambiguous', 0.9)
+        """
+    )
+    db.conn.commit()
+
+    [row] = db.get_recommendations()
+
+    assert row["item_key"] == "twitter:123"
+    assert row["content_id"] == "123"
+    assert row["source_platform"] == "twitter"
+    assert row["content_url"] == "https://x.com/u/status/123"
+    assert row["content_type"] == "tweet"
+
+
+def test_namespaced_storage_key_infers_non_bilibili_identity_without_url() -> None:
+    item = DiscoveredContent(bvid="twitter:123")
+
+    assert item.source_platform == "twitter"
+    assert item.content_id == "123"
+    assert item.item_key == "twitter:123"
+    assert item.content_url == ""
+
+
+def test_raw_bilibili_id_keeps_legacy_identity_and_url() -> None:
+    item = DiscoveredContent(bvid="BV1abc123")
+
+    assert item.source_platform == "bilibili"
+    assert item.content_id == "BV1abc123"
+    assert item.item_key == "bilibili:BV1abc123"
+    assert item.content_url == "https://www.bilibili.com/video/BV1abc123"
