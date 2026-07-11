@@ -8,7 +8,7 @@
 - Chrome Web Store item: <https://chromewebstore.google.com/detail/openbiliclaw/cdfjfkdjjhdaccbldipkjhpibnfbiamg>
 - Developer Dashboard: <https://chrome.google.com/webstore/devconsole/> -> `Store listing`
 - 项目主页 / Website URL: <https://whiteguo233.github.io/OpenBiliClaw/>
-- 支持 / GitHub 项目页: <https://github.com/whiteguo233/OpenBiliClaw>
+- 支持 / Support URL: <https://github.com/whiteguo233/OpenBiliClaw/issues>
 - 隐私政策: <https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/privacy.md>
 
 ## Short Description
@@ -92,6 +92,21 @@ PYTHONPATH=src .venv/bin/python scripts/capture_chrome_webstore_ui.py \
 
 捕获脚本只连接临时 `127.0.0.1` 脱敏演示服务，并拦截所有非本机请求；不得用真实 `config.toml`、数据库、Cookie、账号名或画像文本生成商店素材。
 
+## Metadata API bridge
+
+`.github/workflows/update-chrome-webstore-listing.yml` 是独立的手动文案维护入口，默认 `mode=probe`，只交换短期 OAuth access token 并读取 v1.1 draft；它只输出字段名、文案长度和 SHA-256，不输出 token、secret 或 draft 原文。只有 probe 同时发现 `summary` / `description` 和足够的 listing identity 字段后，`mode=apply` 才可能继续；若当前 submission 正在审核，还必须显式启用 `replace_pending`，写入后必须精确回读一致，最后才允许 `publish`。
+
+Chrome Web Store API v1.1 已弃用，官方只支持到 2026-10-15；而且其公开 `Item` resource 没有承诺商店文案字段，因此 probe 返回“不支持 writable listing metadata”是安全的预期停止结果，不得为绕过它而猜测 Dashboard 私有接口。该 bridge 不构建或上传 ZIP、不移动 release tag，也不上传截图；五张 PNG 仍需在 Developer Dashboard 手动替换。
+
+本地只读探测命令（凭据必须来自环境变量）：
+
+```bash
+cd extension
+npm run webstore:metadata -- \
+  --listing ../docs/chrome-webstore-listing.md \
+  --mode probe
+```
+
 ## 提交前检查
 
 - `Short description` 与 `Detailed description` 已粘贴，七个平台名称完整。
@@ -100,3 +115,4 @@ PYTHONPATH=src .venv/bin/python scripts/capture_chrome_webstore_ui.py \
 - `Support URL` 使用 GitHub Issues：`https://github.com/whiteguo233/OpenBiliClaw/issues`。
 - `Privacy policy URL` 使用 `docs/privacy.md` 的 GitHub 链接。
 - 后端默认端口、插件权限、安装方式或支持平台变化时，本文件和截图必须同步更新。
+- Metadata workflow 的 probe 必须先成功，apply 才可撤审、写文案和重新提审；probe 失败时不得继续。

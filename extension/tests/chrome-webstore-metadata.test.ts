@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -41,6 +42,18 @@ test("parses canonical copy and validates local-data claims", () => {
   assert.equal(listing.homepageUrl, "https://whiteguo233.github.io/OpenBiliClaw/");
   assert.equal(listing.supportUrl, "https://github.com/whiteguo233/OpenBiliClaw/issues");
   assert.doesNotThrow(() => validateListingMetadata(listing));
+});
+
+test("the repository listing document is valid canonical input", async () => {
+  const source = await readFile(
+    new URL("../../docs/chrome-webstore-listing.md", import.meta.url),
+    "utf8",
+  );
+  const listing = parseListingMarkdown(source);
+
+  assert.doesNotThrow(() => validateListingMetadata(listing));
+  assert.equal(listing.homepageUrl, "https://whiteguo233.github.io/OpenBiliClaw/");
+  assert.equal(listing.supportUrl, "https://github.com/whiteguo233/OpenBiliClaw/issues");
 });
 
 test("rejects empty, overlong, or misleading canonical copy", () => {

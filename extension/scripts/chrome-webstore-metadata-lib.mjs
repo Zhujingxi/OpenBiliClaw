@@ -9,13 +9,18 @@ const PRESERVED_FIELDS = [
 ];
 
 function fencedBlock(markdown, heading) {
-  const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = markdown.match(
-    new RegExp(
-      "^## " + escaped + "\\s*\\n+```(?:text)?\\s*\\n([\\s\\S]*?)\\n```",
-      "m",
-    ),
+  const marker = `## ${heading}`;
+  const headingStart = markdown.indexOf(marker);
+  if (headingStart < 0) {
+    throw new Error(`Missing ${heading} heading`);
+  }
+  const sectionStart = headingStart + marker.length;
+  const nextHeading = markdown.indexOf("\n## ", sectionStart);
+  const section = markdown.slice(
+    sectionStart,
+    nextHeading >= 0 ? nextHeading : markdown.length,
   );
+  const match = section.match(/```(?:text)?\s*\n([\s\S]*?)\n```/);
   if (!match) {
     throw new Error(`Missing ${heading} fenced block`);
   }
