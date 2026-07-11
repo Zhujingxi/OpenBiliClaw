@@ -19,6 +19,13 @@ class UnsupportedNativeSaveError(ValueError):
     """Raised when no registered capability can satisfy a save intent."""
 
 
+class InvalidNativeSaveAdapterResultError(ValueError):
+    """Raised when an adapter returns an unsafe runtime routing value."""
+
+
+_MAX_TARGET_LABEL_LENGTH = 256
+
+
 class NativeSaveAdapter(Protocol):
     """Platform adapter used by the native-save router and sync service."""
 
@@ -79,8 +86,27 @@ class NativeSaveRouter:
                 f"unsupported native save action: {requested_action}"
             )
 
+        target = adapter.target_label(resolved_action)
+        try:
+            normalized_target = target.strip() if isinstance(target, str) else ""
+            valid_target = (
+                isinstance(normalized_target, str)
+                and bool(normalized_target)
+                and len(normalized_target) <= _MAX_TARGET_LABEL_LENGTH
+                and not any(
+                    ord(character) < 32 or ord(character) == 127 for character in target
+                )
+            )
+        except Exception:
+            valid_target = False
+            normalized_target = ""
+        if not valid_target:
+            raise InvalidNativeSaveAdapterResultError(
+                "native save adapter returned an invalid target label"
+            )
+
         return adapter, NativeSaveRoute(
             requested_action=requested_action,
             resolved_action=resolved_action,
-            resolved_target=adapter.target_label(resolved_action),
+            resolved_target=normalized_target,
         )

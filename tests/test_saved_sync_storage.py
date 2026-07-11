@@ -192,6 +192,80 @@ def test_native_task_dao_boundaries_reject_blank_task_ids(db: Database) -> None:
         db.claim_native_save_item("favorite", item.item_key, "", "execution")
 
 
+@pytest.mark.parametrize("invalid_status", ["syncing", "bogus", " pending ", "", "SYNCED"])
+def test_generic_native_state_upsert_rejects_invalid_or_active_statuses(
+    db: Database,
+    invalid_status: str,
+) -> None:
+    item = SavedItemInput("bilibili", f"BV1STATUS{len(invalid_status)}{invalid_status[:1]}")
+    db.upsert_saved_membership("favorite", item)
+
+    with pytest.raises(ValueError, match="status|atomic claim"):
+        db.upsert_native_save_state(
+            "favorite",
+            item.item_key,
+            requested_action="favorite",
+            status=invalid_status,
+        )
+
+
+def test_generic_pending_snapshot_cannot_downgrade_terminal_state(db: Database) -> None:
+    item = SavedItemInput("bilibili", "BV1TERMINALDOWNGRADE")
+    db.upsert_saved_membership("favorite", item)
+    db.upsert_native_save_state(
+        "favorite",
+        item.item_key,
+        requested_action="favorite",
+        resolved_action="favorite",
+        resolved_target="target",
+        status="synced",
+        task_id="terminal-task",
+    )
+
+    with pytest.raises(ValueError, match="transition"):
+        db.upsert_native_save_state(
+            "favorite",
+            item.item_key,
+            requested_action="favorite",
+            status="pending",
+        )
+
+    row = db.list_native_save_states_by_task("terminal-task")[0]
+    assert row["status"] == "synced"
+
+
+@pytest.mark.parametrize("invalid_completion", ["pending", "syncing", "unknown", " synced "])
+def test_completion_rejects_nonterminal_status_without_releasing_owner(
+    db: Database,
+    invalid_completion: str,
+) -> None:
+    item = SavedItemInput("bilibili", f"BV1COMPLETE{len(invalid_completion)}")
+    db.upsert_saved_membership("favorite", item)
+    db.ensure_native_save_state("favorite", item.item_key, "favorite")
+    assert db.claim_native_sync_task("favorite", [item.item_key], "completion-task") == [
+        item.item_key
+    ]
+    assert db.claim_native_save_item(
+        "favorite", item.item_key, "completion-task", "completion-owner"
+    )
+
+    with pytest.raises(ValueError, match="terminal status"):
+        db.complete_native_save_claim(
+            "favorite",
+            item.item_key,
+            "completion-task",
+            "completion-owner",
+            requested_action="favorite",
+            resolved_action="favorite",
+            resolved_target="target",
+            status=invalid_completion,
+        )
+
+    row = db.list_native_save_states_by_task("completion-task")[0]
+    assert row["status"] == "syncing"
+    assert row["execution_id"] == "completion-owner"
+
+
 def test_atomic_task_claim_rejects_nonempty_all_blank_selection(db: Database) -> None:
     item = SavedItemInput("bilibili", "BV1DAOFILTER")
     db.upsert_saved_membership("favorite", item)

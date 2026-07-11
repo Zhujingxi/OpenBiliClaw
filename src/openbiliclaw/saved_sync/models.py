@@ -19,6 +19,21 @@ NativeSaveStatus = Literal[
     "failed",
 ]
 
+NATIVE_SAVE_TERMINAL_STATUSES: frozenset[NativeSaveStatus] = frozenset(
+    {
+        "synced",
+        "already_synced",
+        "login_required",
+        "unsupported",
+        "rate_limited",
+        "extension_required",
+        "failed",
+    }
+)
+NATIVE_SAVE_STATUSES: frozenset[NativeSaveStatus] = frozenset(
+    {"pending", "syncing", *NATIVE_SAVE_TERMINAL_STATUSES}
+)
+
 
 @dataclass(frozen=True, slots=True)
 class SavedItemInput:

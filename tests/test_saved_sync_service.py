@@ -112,6 +112,30 @@ class MalformedCancellationSuppressingAdapter(CancellationSuppressingAdapter):
         return cast("NativeSaveResult", {"private_response": "must not leak"})
 
 
+class InvalidTargetAdapter(FakeAdapter):
+    def __init__(self, target: object) -> None:
+        super().__init__(NativeSaveCapability("bilibili", True, True, True))
+        self.target = target
+
+    def target_label(self, action: NativeSaveAction) -> str:
+        del action
+        return cast("str", self.target)
+
+
+class ImmediateCancellationSuccessAdapter(FakeAdapter):
+    async def save(self, item: SavedItemInput, route: NativeSaveRoute) -> NativeSaveResult:
+        self.calls.append(item.item_key)
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return NativeSaveResult(
+                item_key=item.item_key,
+                status="synced",
+                resolved_action=route.resolved_action,
+                resolved_target=route.resolved_target,
+            )
+
+
 def test_local_save_without_auto_sync_never_invokes_adapter(db: Database) -> None:
     adapter = FakeAdapter(NativeSaveCapability("bilibili", True, True, True))
     service = SavedSyncService(db, NativeSaveRouter([adapter]))
@@ -812,6 +836,52 @@ async def test_target_resolution_exception_is_sanitized_per_item(db: Database) -
     assert result.items[0].status == "failed"
     assert result.items[0].error_code == "adapter_exception"
     assert "private" not in result.items[0].error_message
+
+
+@pytest.mark.parametrize("invalid_target", [None, 123, "", "   ", "x" * 300])
+async def test_invalid_target_label_is_sanitized_and_releases_item_owner(
+    db: Database,
+    invalid_target: object,
+) -> None:
+    adapter = InvalidTargetAdapter(invalid_target)
+    service = SavedSyncService(db, NativeSaveRouter([adapter]))
+    item = SavedItemInput("bilibili", f"BV1TARGET{len(str(invalid_target))}")
+    service.save_local("favorite", item)
+    task = service.create_sync_task("favorite", [item.item_key], "manual_single")
+
+    result = await service.run_sync_task(task.task_id)
+
+    assert adapter.calls == []
+    assert result.items[0].status == "failed"
+    assert result.items[0].error_code == "invalid_adapter_result"
+    assert "300" not in result.items[0].error_message
+    row = db.list_native_save_states_by_task(task.task_id)[0]
+    assert row["status"] == "failed"
+    assert row["execution_id"] == ""
+
+
+async def test_immediate_cancellation_suppression_persists_late_success(db: Database) -> None:
+    adapter = ImmediateCancellationSuccessAdapter(
+        NativeSaveCapability("bilibili", True, True, True)
+    )
+    service = SavedSyncService(db, NativeSaveRouter([adapter]))
+    item = SavedItemInput("bilibili", "BV1CANCELSUCCESS")
+    service.save_local("favorite", item)
+    task = service.create_sync_task("favorite", [item.item_key], "manual_single")
+
+    runner = asyncio.create_task(service.run_sync_task(task.task_id))
+    for _ in range(100):
+        if adapter.calls:
+            break
+        await asyncio.sleep(0)
+    runner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await runner
+
+    persisted = service.get_sync_task(task.task_id)
+    assert persisted.items[0].status == "synced"
+    assert persisted.items[0].error_code == ""
+    assert adapter.calls == [item.item_key]
 
 
 async def test_unregistered_platform_is_persisted_as_unsupported(db: Database) -> None:

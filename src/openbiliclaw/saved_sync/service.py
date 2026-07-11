@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from .models import (
+    NATIVE_SAVE_TERMINAL_STATUSES,
     NativeSaveAction,
     NativeSaveResult,
     NativeSaveStatus,
@@ -16,7 +17,7 @@ from .models import (
     SavedMembershipResult,
     SavedSyncBatchResult,
 )
-from .router import UnsupportedNativeSaveError
+from .router import InvalidNativeSaveAdapterResultError, UnsupportedNativeSaveError
 
 if TYPE_CHECKING:
     from openbiliclaw.storage.database import Database
@@ -27,17 +28,6 @@ TaskStarter = Callable[[str, Coroutine[Any, Any, Any]], asyncio.Task[Any]]
 
 _ACTIVE_STATUSES = frozenset({"pending"})
 _MAX_ADAPTER_TIMEOUT_SECONDS = 240.0
-_TERMINAL_ADAPTER_STATUSES = frozenset(
-    {
-        "synced",
-        "already_synced",
-        "login_required",
-        "unsupported",
-        "rate_limited",
-        "extension_required",
-        "failed",
-    }
-)
 
 
 @dataclass(slots=True)
@@ -229,6 +219,22 @@ class SavedSyncService:
             return
         try:
             adapter, route = self._router.route(item.platform, requested_action)
+        except InvalidNativeSaveAdapterResultError:
+            self._persist_result(
+                list_kind,
+                NativeSaveResult(
+                    item_key=item.item_key,
+                    status="failed",
+                    resolved_action=requested_action,
+                    resolved_target="",
+                    error_code="invalid_adapter_result",
+                    error_message="Native save adapter returned an invalid target",
+                ),
+                task_id=task_id,
+                execution_id=execution_id,
+                requested_action=requested_action,
+            )
+            return
         except UnsupportedNativeSaveError:
             self._persist_result(
                 list_kind,
@@ -364,9 +370,22 @@ class SavedSyncService:
             if save_task.done():
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, save_task, return_exceptions=True)
+                final_result = interrupted
+                if not save_task.cancelled():
+                    try:
+                        adapter_result = save_task.result()
+                    except BaseException:
+                        pass
+                    else:
+                        final_result = self._normalize_adapter_result(
+                            item_key,
+                            adapter_result,
+                            resolved_action=resolved_action,
+                            resolved_target=resolved_target,
+                        )
                 self._persist_result(
                     list_kind,
-                    interrupted,
+                    final_result,
                     task_id=task_id,
                     execution_id=execution_id,
                     requested_action=requested_action,
@@ -502,7 +521,7 @@ class SavedSyncService:
         try:
             if (
                 not isinstance(adapter_result.status, str)
-                or adapter_result.status not in _TERMINAL_ADAPTER_STATUSES
+                or adapter_result.status not in NATIVE_SAVE_TERMINAL_STATUSES
             ):
                 return invalid_result
             error_code = (

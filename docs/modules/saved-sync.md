@@ -11,12 +11,12 @@
 | 功能 | 状态 | 说明 |
 |------|------|------|
 | Canonical 保存身份 | ✅ | `SavedItemInput.item_key` 使用规范化的 `source_platform:content_id`；B 站 legacy storage key 兼容由 identity / storage 层处理。 |
-| Capability router | ✅ | `NativeSaveRouter` 按 canonical 平台注册 adapter；`favorite` 只路由到 native favorite，`watch_later` 优先 native watch-later，不支持时仅在 favorite 可用时回退。 |
+| Capability router | ✅ | `NativeSaveRouter` 按 canonical 平台注册 adapter；`favorite` 只路由到 native favorite，`watch_later` 优先 native watch-later，不支持时仅在 favorite 可用时回退。adapter 的 `target_label()` 运行时返回必须是去空白后 1–256 字符且无控制字符的字符串，否则逐项安全失败且不会写 route / 调用平台。 |
 | Local-first 保存 | ✅ | `SavedSyncService.save_local()` 先提交 membership；自动同步关闭时只落 `pending` native state，不调用 adapter。 |
 | 持久化同步任务 | ✅ | 自动 / 手动触发统一经 `create_sync_task()` 生成一个 UUID，并在单个 `BEGIN IMMEDIATE` 事务中 claim 所有 eligible 项；已有 owner 的 `pending/syncing` 行不会被重复任务窃取。`task_starter` 登记失败会立即释放 owner；超过 5 分钟仍无 `task_started_at` 的任务可在下一次创建时安全回收。 |
 | 批量逐项执行 | ✅ | `run_sync_task()` 只读取该 task ID 仍存在的 membership，按平台分组、平台内串行执行，并以 `execution_id` 原子 claim / 完成每一项；同一任务的并发 runner 不会重复调用 adapter，平台组之间仍可并行。执行中每 30 秒 owner-fenced heartbeat；240 秒是调用方响应 deadline，不假定能强制终止不遵守 cancellation 的底层 I/O。 |
 | 可恢复任务查询 | ✅ | `get_sync_task()` 只从 `native_save_states` 与 membership/item join 重建结果，进程内不保存易丢失的任务结果。 |
-| 安全失败归一化 | ✅ | 未注册 / 不支持的路由写为 `unsupported`；adapter 调用或 target resolution 异常写为 `failed/adapter_exception`；取消与陈旧 lease 写为可手动重试的 `failed/interrupted`。超过 response deadline 后仍等待底层 coroutine 真实结束：若它最终返回 terminal 结果则照常持久化，若取消 / 异常结束才写预备的 timeout / interrupted。adapter 返回 `pending/syncing` 会被拒绝为 `failed/invalid_adapter_result`。 |
+| 安全失败归一化 | ✅ | 未注册 / 不支持的路由写为 `unsupported`；target label 或 adapter result 类型 / 非终态不合法时写固定 `failed/invalid_adapter_result`；adapter 调用或 target resolution 抛异常写 `failed/adapter_exception`；取消与陈旧 lease 写为可手动重试的 `failed/interrupted`。response deadline / cancellation 后仍检查底层 coroutine 的真实终值：若它同步吞掉 cancellation 并返回 `synced/already_synced` 等合法 terminal 结果，会优先持久化成功，避免误重试。 |
 
 ## 公开 API
 

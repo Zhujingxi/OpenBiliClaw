@@ -35,7 +35,12 @@ from openbiliclaw.saved_sync.identity import (
     content_storage_key,
     make_item_key,
 )
-from openbiliclaw.saved_sync.models import SavedItemInput, SavedListKind
+from openbiliclaw.saved_sync.models import (
+    NATIVE_SAVE_STATUSES,
+    NATIVE_SAVE_TERMINAL_STATUSES,
+    SavedItemInput,
+    SavedListKind,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -7451,7 +7456,12 @@ class Database:
                 requested_action   TEXT NOT NULL,
                 resolved_action    TEXT NOT NULL DEFAULT '',
                 resolved_target    TEXT NOT NULL DEFAULT '',
-                status             TEXT NOT NULL DEFAULT 'pending',
+                status             TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN (
+                        'pending', 'syncing', 'synced', 'already_synced',
+                        'login_required', 'unsupported', 'rate_limited',
+                        'extension_required', 'failed'
+                    )),
                 task_id            TEXT NOT NULL DEFAULT '',
                 execution_id       TEXT NOT NULL DEFAULT '',
                 task_claimed_at    TIMESTAMP,
@@ -7871,6 +7881,8 @@ class Database:
         normalized_kind = self._saved_list_kind(list_kind)
         normalized_key = item_key.strip()
         normalized_task_id = task_id.strip()
+        if not isinstance(status, str) or status not in NATIVE_SAVE_STATUSES:
+            raise ValueError("invalid native save status")
         if task_id and not normalized_task_id:
             raise ValueError("task_id must not be blank")
         conn = self.open_connection()
@@ -7902,6 +7914,12 @@ class Database:
                 and str(current["task_id"])
             ):
                 raise ValueError("active task ownership must use the atomic claim APIs")
+            if (
+                current is not None
+                and status == "pending"
+                and str(current["status"]) != "pending"
+            ):
+                raise ValueError("invalid native save status transition to pending")
             conn.execute(
                 """
                 INSERT INTO native_save_states (
@@ -8234,6 +8252,8 @@ class Database:
         last_error_message: str = "",
     ) -> bool:
         """Complete one item only when the caller still owns its execution claim."""
+        if not isinstance(status, str) or status not in NATIVE_SAVE_TERMINAL_STATUSES:
+            raise ValueError("completion requires a terminal status")
         normalized_kind = self._saved_list_kind(list_kind)
         normalized_task_id = self._native_task_id(task_id)
         normalized_execution_id = self._native_execution_id(execution_id)
