@@ -98,12 +98,12 @@ def test_favorites_list_paginates_newest_first(
     db.add_to_favorites("BV1FAV")
     db.add_to_favorites("BV2FAV")
     db.conn.execute(
-        "UPDATE favorites SET added_at = ? WHERE bvid = ?",
-        ("2026-05-28 09:00:00", "BV1FAV"),
+        "UPDATE saved_memberships SET added_at = ? WHERE list_kind = ? AND item_key = ?",
+        ("2026-05-28 09:00:00", "favorite", "bilibili:BV1FAV"),
     )
     db.conn.execute(
-        "UPDATE favorites SET added_at = ? WHERE bvid = ?",
-        ("2026-05-28 09:01:00", "BV2FAV"),
+        "UPDATE saved_memberships SET added_at = ? WHERE list_kind = ? AND item_key = ?",
+        ("2026-05-28 09:01:00", "favorite", "bilibili:BV2FAV"),
     )
     db.conn.commit()
 

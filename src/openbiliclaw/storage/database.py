@@ -30,6 +30,7 @@ from openbiliclaw.discovery.inspiration import (
     _normalize_match_text,
     derive_inspiration_axis_id,
 )
+from openbiliclaw.saved_sync.models import SavedItemInput, SavedListKind
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -846,6 +847,7 @@ class Database:
         self._ensure_watch_later_table()
         self._ensure_discovery_keywords_table()
         self._ensure_favorites_table()
+        self._ensure_saved_sync_tables()
         self._ensure_auth_state_table()
         self._ensure_init_runs_table()
         self.reset_stale_discovery_candidate_evaluations()
@@ -912,6 +914,7 @@ class Database:
             raise RuntimeError("Database not initialized. Call initialize() first.")
         conn = sqlite3.connect(str(self._db_path), timeout=30.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA busy_timeout = 30000")
         return conn
 
@@ -7057,6 +7060,8 @@ class Database:
 
     def add_to_watch_later(self, bvid: str, note: str = "") -> bool:
         """Bookmark a video. Returns True if newly inserted, False if updated."""
+        item = self._bilibili_saved_item_input(bvid)
+        self.upsert_saved_membership("watch_later", item, note)
         self._execute_write(
             """
             INSERT INTO watch_later (bvid, note)
@@ -7071,46 +7076,35 @@ class Database:
 
     def remove_from_watch_later(self, bvid: str) -> bool:
         """Remove a bookmark. Returns True if a row was deleted."""
-        self._execute_write(
-            "DELETE FROM watch_later WHERE bvid = ?",
-            (bvid.strip(),),
-        )
-        return self.conn.total_changes > 0
+        return self.remove_saved_membership("watch_later", f"bilibili:{bvid.strip()}")
 
     def is_in_watch_later(self, bvid: str) -> bool:
         """Check whether a video is bookmarked."""
-        row = self.conn.execute(
-            "SELECT 1 FROM watch_later WHERE bvid = ?",
-            (bvid.strip(),),
-        ).fetchone()
-        return row is not None
+        return self.get_saved_membership("watch_later", f"bilibili:{bvid.strip()}") is not None
 
     def count_watch_later(self) -> int:
         """Return total number of bookmarked videos."""
-        row = self.conn.execute("SELECT COUNT(*) FROM watch_later").fetchone()
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM saved_memberships WHERE list_kind = ?",
+            ("watch_later",),
+        ).fetchone()
         return int(row[0]) if row else 0
 
     def list_watch_later(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         """Return bookmarked videos with content_cache metadata, newest first."""
-        cursor = self.conn.execute(
-            """
-            SELECT
-                w.bvid,
-                w.added_at,
-                w.note,
-                COALESCE(c.title, '') AS title,
-                COALESCE(c.up_name, '') AS up_name,
-                COALESCE(c.cover_url, '') AS cover_url,
-                COALESCE(c.content_url, '') AS content_url,
-                COALESCE(c.source_platform, '') AS source_platform
-            FROM watch_later AS w
-            LEFT JOIN content_cache AS c ON c.bvid = w.bvid
-            ORDER BY w.added_at DESC
-            LIMIT ? OFFSET ?
-            """,
-            (limit, offset),
-        )
-        return [dict(row) for row in cursor.fetchall()]
+        return [
+            {
+                "bvid": row["content_id"],
+                "added_at": row["added_at"],
+                "note": row["note"],
+                "title": row["title"],
+                "up_name": row["author_name"],
+                "cover_url": row["cover_url"],
+                "content_url": row["content_url"],
+                "source_platform": row["source_platform"],
+            }
+            for row in self.list_saved_memberships("watch_later", limit, offset)
+        ]
 
     def _ensure_favorites_table(self) -> None:
         """Create the favorites (收藏夹) table for existing databases.
@@ -7128,6 +7122,435 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_favorites_added
                 ON favorites(added_at DESC);
         """)
+
+    def _ensure_saved_sync_tables(self) -> None:
+        """Create normalized saved-content tables and import legacy saved rows once."""
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS saved_items (
+                item_key        TEXT PRIMARY KEY,
+                source_platform TEXT NOT NULL,
+                content_id      TEXT NOT NULL,
+                content_url     TEXT NOT NULL DEFAULT '',
+                content_type    TEXT NOT NULL DEFAULT 'video',
+                title           TEXT NOT NULL DEFAULT '',
+                author_name     TEXT NOT NULL DEFAULT '',
+                cover_url       TEXT NOT NULL DEFAULT '',
+                created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS saved_memberships (
+                list_kind TEXT NOT NULL CHECK (list_kind IN ('favorite', 'watch_later')),
+                item_key  TEXT NOT NULL REFERENCES saved_items(item_key) ON DELETE CASCADE,
+                note      TEXT NOT NULL DEFAULT '',
+                added_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (list_kind, item_key)
+            );
+            CREATE TABLE IF NOT EXISTS native_save_states (
+                list_kind          TEXT NOT NULL,
+                item_key           TEXT NOT NULL,
+                requested_action   TEXT NOT NULL,
+                resolved_action    TEXT NOT NULL DEFAULT '',
+                resolved_target    TEXT NOT NULL DEFAULT '',
+                status             TEXT NOT NULL DEFAULT 'pending',
+                task_id            TEXT NOT NULL DEFAULT '',
+                last_error_code    TEXT NOT NULL DEFAULT '',
+                last_error_message TEXT NOT NULL DEFAULT '',
+                last_attempt_at    TIMESTAMP,
+                synced_at          TIMESTAMP,
+                PRIMARY KEY (list_kind, item_key),
+                FOREIGN KEY (list_kind, item_key)
+                    REFERENCES saved_memberships(list_kind, item_key) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS saved_sync_migrations (
+                name       TEXT PRIMARY KEY,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            migrated = self.conn.execute(
+                "SELECT 1 FROM saved_sync_migrations WHERE name = ?",
+                ("legacy_saved_tables_v1",),
+            ).fetchone()
+            if migrated is None:
+                self._migrate_legacy_saved_list("watch_later", "watch_later")
+                self._migrate_legacy_saved_list("favorites", "favorite")
+                self.conn.execute(
+                    "INSERT INTO saved_sync_migrations (name) VALUES (?)",
+                    ("legacy_saved_tables_v1",),
+                )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def _migrate_legacy_saved_list(self, table_name: str, list_kind: SavedListKind) -> None:
+        """Copy one trusted legacy saved table into normalized storage."""
+        if table_name not in {"watch_later", "favorites"}:
+            raise ValueError(f"unsupported legacy saved table: {table_name}")
+        complete_identity_sql = """
+            NULLIF(TRIM(c.source_platform), '') IS NOT NULL
+            AND NULLIF(TRIM(c.content_id), '') IS NOT NULL
+        """
+        platform_sql = f"""
+            CASE WHEN {complete_identity_sql} THEN
+                CASE LOWER(TRIM(c.source_platform))
+                    WHEN 'bili' THEN 'bilibili'
+                    WHEN 'xhs' THEN 'xiaohongshu'
+                    WHEN 'dy' THEN 'douyin'
+                    WHEN 'yt' THEN 'youtube'
+                    WHEN 'x' THEN 'twitter'
+                    WHEN 'zh' THEN 'zhihu'
+                    WHEN 'rd' THEN 'reddit'
+                    ELSE LOWER(TRIM(c.source_platform))
+                END
+            ELSE 'bilibili'
+            END
+        """
+        content_id_sql = (
+            f"CASE WHEN {complete_identity_sql} THEN TRIM(c.content_id) ELSE legacy.bvid END"
+        )
+        item_key_sql = f"({platform_sql}) || ':' || ({content_id_sql})"
+        self.conn.execute(
+            f"""
+            INSERT OR IGNORE INTO saved_items (
+                item_key, source_platform, content_id, content_url, content_type,
+                title, author_name, cover_url, created_at, updated_at
+            )
+            SELECT
+                {item_key_sql},
+                {platform_sql},
+                {content_id_sql},
+                COALESCE(c.content_url, ''),
+                COALESCE(NULLIF(c.content_type, ''), 'video'),
+                COALESCE(c.title, ''),
+                COALESCE(NULLIF(c.author_name, ''), c.up_name, ''),
+                COALESCE(c.cover_url, ''),
+                legacy.added_at,
+                legacy.added_at
+            FROM {table_name} AS legacy
+            LEFT JOIN content_cache AS c ON c.bvid = legacy.bvid
+            """
+        )
+        self.conn.execute(
+            f"""
+            INSERT OR IGNORE INTO saved_memberships (list_kind, item_key, note, added_at)
+            SELECT ?, {item_key_sql}, COALESCE(legacy.note, ''), legacy.added_at
+            FROM {table_name} AS legacy
+            LEFT JOIN content_cache AS c ON c.bvid = legacy.bvid
+            """,
+            (list_kind,),
+        )
+
+    @staticmethod
+    def _saved_list_kind(value: str) -> SavedListKind:
+        list_kind = value.strip()
+        if list_kind not in {"favorite", "watch_later"}:
+            raise ValueError("list_kind must be 'favorite' or 'watch_later'")
+        return cast("SavedListKind", list_kind)
+
+    def _bilibili_saved_item_input(self, bvid: str) -> SavedItemInput:
+        """Build a Bilibili compatibility input with any cached metadata snapshot."""
+        content_id = bvid.strip()
+        row = self.conn.execute(
+            """
+            SELECT title, up_name, author_name, cover_url, content_url, content_type
+            FROM content_cache
+            WHERE bvid = ?
+            """,
+            (content_id,),
+        ).fetchone()
+        if row is None:
+            return SavedItemInput(source_platform="bilibili", content_id=content_id)
+        return SavedItemInput(
+            source_platform="bilibili",
+            content_id=content_id,
+            content_url=str(row["content_url"] or ""),
+            content_type=str(row["content_type"] or "video"),
+            title=str(row["title"] or ""),
+            author_name=str(row["author_name"] or row["up_name"] or ""),
+            cover_url=str(row["cover_url"] or ""),
+        )
+
+    @staticmethod
+    def _saved_membership_select() -> str:
+        return """
+            SELECT
+                m.list_kind,
+                i.item_key,
+                i.source_platform,
+                i.content_id,
+                i.content_url,
+                i.content_type,
+                i.title,
+                i.author_name,
+                i.cover_url,
+                i.created_at,
+                i.updated_at,
+                m.note,
+                m.added_at,
+                COALESCE(n.requested_action, '') AS requested_action,
+                COALESCE(n.resolved_action, '') AS resolved_action,
+                COALESCE(n.resolved_target, '') AS resolved_target,
+                COALESCE(n.status, 'pending') AS sync_status,
+                COALESCE(n.task_id, '') AS sync_task_id,
+                COALESCE(n.last_error_code, '') AS last_error_code,
+                COALESCE(n.last_error_message, '') AS last_error_message,
+                n.last_attempt_at,
+                n.synced_at
+            FROM saved_memberships AS m
+            JOIN saved_items AS i ON i.item_key = m.item_key
+            LEFT JOIN native_save_states AS n
+                ON n.list_kind = m.list_kind AND n.item_key = m.item_key
+        """
+
+    def upsert_saved_membership(
+        self,
+        list_kind: str,
+        item: SavedItemInput,
+        note: str = "",
+    ) -> dict[str, Any]:
+        """Atomically upsert an item snapshot and its local list membership."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        item_key = item.item_key
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT INTO saved_items (
+                    item_key, source_platform, content_id, content_url, content_type,
+                    title, author_name, cover_url
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(item_key) DO UPDATE SET
+                    source_platform = excluded.source_platform,
+                    content_id = excluded.content_id,
+                    content_url = excluded.content_url,
+                    content_type = excluded.content_type,
+                    title = excluded.title,
+                    author_name = excluded.author_name,
+                    cover_url = excluded.cover_url,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    item_key,
+                    item.platform,
+                    item.content_id.strip(),
+                    item.content_url.strip(),
+                    item.content_type.strip() or "video",
+                    item.title.strip(),
+                    item.author_name.strip(),
+                    item.cover_url.strip(),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO saved_memberships (list_kind, item_key, note)
+                VALUES (?, ?, ?)
+                ON CONFLICT(list_kind, item_key) DO UPDATE SET
+                    note = excluded.note,
+                    added_at = CURRENT_TIMESTAMP
+                """,
+                (normalized_kind, item_key, note),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        row = self.get_saved_membership(normalized_kind, item_key)
+        if row is None:  # pragma: no cover - transaction succeeded but row vanished externally
+            raise RuntimeError("saved membership disappeared after upsert")
+        return row
+
+    def remove_saved_membership(self, list_kind: str, item_key: str) -> bool:
+        """Remove a normalized membership and its Bilibili compatibility row, if any."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_key = item_key.strip()
+        legacy_table = "favorites" if normalized_kind == "favorite" else "watch_later"
+        legacy_bvid = (
+            normalized_key.removeprefix("bilibili:")
+            if normalized_key.startswith("bilibili:")
+            else None
+        )
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                "DELETE FROM saved_memberships WHERE list_kind = ? AND item_key = ?",
+                (normalized_kind, normalized_key),
+            )
+            removed = int(cursor.rowcount or 0) > 0
+            if legacy_bvid is not None:
+                legacy_cursor = conn.execute(
+                    f"DELETE FROM {legacy_table} WHERE bvid = ?",
+                    (legacy_bvid,),
+                )
+                removed = removed or int(legacy_cursor.rowcount or 0) > 0
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        self._ensure_fresh_read()
+        return removed
+
+    def get_saved_membership(self, list_kind: str, item_key: str) -> dict[str, Any] | None:
+        """Return one normalized membership with its current native-sync state."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        self._ensure_fresh_read()
+        row = self.conn.execute(
+            self._saved_membership_select() + " WHERE m.list_kind = ? AND m.item_key = ?",
+            (normalized_kind, item_key.strip()),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_saved_memberships(
+        self,
+        list_kind: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """List normalized memberships newest first with native-sync state."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        self._ensure_fresh_read()
+        rows = self.conn.execute(
+            self._saved_membership_select()
+            + " WHERE m.list_kind = ? ORDER BY m.added_at DESC, m.item_key ASC LIMIT ? OFFSET ?",
+            (normalized_kind, limit, offset),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def upsert_native_save_state(
+        self,
+        list_kind: str,
+        item_key: str,
+        requested_action: str,
+        resolved_action: str = "",
+        resolved_target: str = "",
+        status: str = "pending",
+        task_id: str = "",
+        last_error_code: str = "",
+        last_error_message: str = "",
+    ) -> None:
+        """Persist the latest native-save routing and execution state for one item."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        self._execute_write(
+            """
+            INSERT INTO native_save_states (
+                list_kind, item_key, requested_action, resolved_action, resolved_target,
+                status, task_id, last_error_code, last_error_message,
+                last_attempt_at, synced_at
+            )
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                CASE WHEN ? = 'pending' THEN NULL ELSE CURRENT_TIMESTAMP END,
+                CASE WHEN ? IN ('synced', 'already_synced') THEN CURRENT_TIMESTAMP ELSE NULL END
+            )
+            ON CONFLICT(list_kind, item_key) DO UPDATE SET
+                requested_action = excluded.requested_action,
+                resolved_action = excluded.resolved_action,
+                resolved_target = excluded.resolved_target,
+                status = excluded.status,
+                task_id = excluded.task_id,
+                last_error_code = excluded.last_error_code,
+                last_error_message = excluded.last_error_message,
+                last_attempt_at = CASE
+                    WHEN excluded.status = 'pending' THEN native_save_states.last_attempt_at
+                    ELSE CURRENT_TIMESTAMP
+                END,
+                synced_at = CASE
+                    WHEN excluded.status IN ('synced', 'already_synced') THEN CURRENT_TIMESTAMP
+                    ELSE native_save_states.synced_at
+                END
+            """,
+            (
+                normalized_kind,
+                item_key.strip(),
+                requested_action,
+                resolved_action,
+                resolved_target,
+                status,
+                task_id,
+                last_error_code,
+                last_error_message,
+                status,
+                status,
+            ),
+        )
+
+    def list_native_sync_eligible(
+        self,
+        list_kind: str,
+        item_keys: Sequence[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """List memberships eligible for an initial sync or a manual retry."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        params: list[Any] = [normalized_kind]
+        item_filter = ""
+        if item_keys:
+            cleaned_keys = [item_key.strip() for item_key in item_keys]
+            placeholders = ", ".join("?" for _ in cleaned_keys)
+            item_filter = f" AND m.item_key IN ({placeholders})"
+            params.extend(cleaned_keys)
+        self._ensure_fresh_read()
+        rows = self.conn.execute(
+            self._saved_membership_select()
+            + """
+            WHERE m.list_kind = ?
+              AND (
+                  n.status IS NULL
+                  OR n.status IN (
+                      'pending', 'login_required', 'rate_limited',
+                      'extension_required', 'failed'
+                  )
+              )
+            """
+            + item_filter
+            + " ORDER BY m.added_at DESC, m.item_key ASC",
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_native_save_states_by_task(self, task_id: str) -> list[dict[str, Any]]:
+        """Return all persisted item results for a native-save task."""
+        self._ensure_fresh_read()
+        rows = self.conn.execute(
+            """
+            SELECT
+                n.list_kind,
+                n.item_key,
+                i.source_platform,
+                i.content_id,
+                i.content_url,
+                i.content_type,
+                i.title,
+                i.author_name,
+                i.cover_url,
+                m.note,
+                m.added_at,
+                n.requested_action,
+                n.resolved_action,
+                n.resolved_target,
+                n.status,
+                n.task_id,
+                n.last_error_code,
+                n.last_error_message,
+                n.last_attempt_at,
+                n.synced_at
+            FROM native_save_states AS n
+            JOIN saved_memberships AS m
+                ON m.list_kind = n.list_kind AND m.item_key = n.item_key
+            JOIN saved_items AS i ON i.item_key = n.item_key
+            WHERE n.task_id = ?
+            ORDER BY m.added_at DESC, n.item_key ASC
+            """,
+            (task_id.strip(),),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     # ── Auth state (password gate revocation epoch) ──────────────
 
@@ -7490,6 +7913,8 @@ class Database:
 
     def add_to_favorites(self, bvid: str, note: str = "") -> bool:
         """Save a video to favorites. Returns True if newly inserted."""
+        item = self._bilibili_saved_item_input(bvid)
+        self.upsert_saved_membership("favorite", item, note)
         self._execute_write(
             """
             INSERT INTO favorites (bvid, note)
@@ -7504,46 +7929,35 @@ class Database:
 
     def remove_from_favorites(self, bvid: str) -> bool:
         """Remove a favorite. Returns True if a row was deleted."""
-        self._execute_write(
-            "DELETE FROM favorites WHERE bvid = ?",
-            (bvid.strip(),),
-        )
-        return self.conn.total_changes > 0
+        return self.remove_saved_membership("favorite", f"bilibili:{bvid.strip()}")
 
     def is_in_favorites(self, bvid: str) -> bool:
         """Check whether a video is favorited."""
-        row = self.conn.execute(
-            "SELECT 1 FROM favorites WHERE bvid = ?",
-            (bvid.strip(),),
-        ).fetchone()
-        return row is not None
+        return self.get_saved_membership("favorite", f"bilibili:{bvid.strip()}") is not None
 
     def count_favorites(self) -> int:
         """Return total number of favorited videos."""
-        row = self.conn.execute("SELECT COUNT(*) FROM favorites").fetchone()
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM saved_memberships WHERE list_kind = ?",
+            ("favorite",),
+        ).fetchone()
         return int(row[0]) if row else 0
 
     def list_favorites(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         """Return favorited videos with content_cache metadata, newest first."""
-        cursor = self.conn.execute(
-            """
-            SELECT
-                f.bvid,
-                f.added_at,
-                f.note,
-                COALESCE(c.title, '') AS title,
-                COALESCE(c.up_name, '') AS up_name,
-                COALESCE(c.cover_url, '') AS cover_url,
-                COALESCE(c.content_url, '') AS content_url,
-                COALESCE(c.source_platform, '') AS source_platform
-            FROM favorites AS f
-            LEFT JOIN content_cache AS c ON c.bvid = f.bvid
-            ORDER BY f.added_at DESC
-            LIMIT ? OFFSET ?
-            """,
-            (limit, offset),
-        )
-        return [dict(row) for row in cursor.fetchall()]
+        return [
+            {
+                "bvid": row["content_id"],
+                "added_at": row["added_at"],
+                "note": row["note"],
+                "title": row["title"],
+                "up_name": row["author_name"],
+                "cover_url": row["cover_url"],
+                "content_url": row["content_url"],
+                "source_platform": row["source_platform"],
+            }
+            for row in self.list_saved_memberships("favorite", limit, offset)
+        ]
 
     def iter_cover_lifecycle(self) -> list[tuple[str, str, bool]]:
         """Return ``(cover_url, pool_status, is_saved)`` for every cached-cover candidate.

@@ -98,12 +98,12 @@ def test_watch_later_list_paginates_newest_first(
     db.add_to_watch_later("BV1WATCH")
     db.add_to_watch_later("BV2WATCH")
     db.conn.execute(
-        "UPDATE watch_later SET added_at = ? WHERE bvid = ?",
-        ("2026-05-28 09:00:00", "BV1WATCH"),
+        "UPDATE saved_memberships SET added_at = ? WHERE list_kind = ? AND item_key = ?",
+        ("2026-05-28 09:00:00", "watch_later", "bilibili:BV1WATCH"),
     )
     db.conn.execute(
-        "UPDATE watch_later SET added_at = ? WHERE bvid = ?",
-        ("2026-05-28 09:01:00", "BV2WATCH"),
+        "UPDATE saved_memberships SET added_at = ? WHERE list_kind = ? AND item_key = ?",
+        ("2026-05-28 09:01:00", "watch_later", "bilibili:BV2WATCH"),
     )
     db.conn.commit()
 
