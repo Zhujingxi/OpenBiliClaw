@@ -295,9 +295,10 @@ class CandidateEvalCoordinator:
     def _request_supply(self, reason: str) -> None:
         if self.supply_callback is None or self._supply_task is not None:
             return
+        callback = self.supply_callback
 
         async def run() -> Any:
-            result = self.supply_callback(reason)
+            result = callback(reason)
             if inspect.isawaitable(result):
                 return await result
             return result

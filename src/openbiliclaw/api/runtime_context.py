@@ -876,7 +876,7 @@ class RuntimeContext:
         new_candidate_eval_coordinator = CandidateEvalCoordinator(
             pipeline=new_candidate_pipeline,
             snapshot_provider=_candidate_eval_snapshot,
-            profile_provider=new_soul_engine.get_profile,
+            profile_provider=cast("Any", getattr(new_soul_engine, "get_profile", lambda: None)),
             worker_count=candidate_eval_workers,
             batch_size=30,
             supply_callback=_request_candidate_supply,

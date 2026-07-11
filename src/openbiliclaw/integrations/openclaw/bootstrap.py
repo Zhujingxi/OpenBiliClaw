@@ -268,11 +268,7 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
     candidate_eval_coordinator = CandidateEvalCoordinator(
         pipeline=candidate_pipeline,
         snapshot_provider=_candidate_eval_snapshot,
-        profile_provider=(
-            soul_engine.get_profile
-            if callable(getattr(soul_engine, "get_profile", None))
-            else lambda: None
-        ),
+        profile_provider=cast("Any", getattr(soul_engine, "get_profile", lambda: None)),
         worker_count=effective_candidate_eval_workers(
             int(getattr(discovery_cfg, "candidate_eval_concurrency", 3)),
             llm_concurrency,

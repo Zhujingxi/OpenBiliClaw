@@ -4221,7 +4221,7 @@ def create_app(
             notify(f"candidate_enqueued:{source}")
             return
 
-        async def legacy_drain() -> None:
+        async def _drain_discovery_candidates_once() -> None:
             drain = getattr(ctx.runtime_controller, "drain_discovery_candidates_once", None)
             if not callable(drain):
                 return
@@ -4230,7 +4230,7 @@ def create_app(
             except Exception:
                 logger.exception("Background discovery candidate drain failed")
 
-        asyncio.create_task(legacy_drain())
+        asyncio.create_task(_drain_discovery_candidates_once())
 
     def _pool_available_count() -> int | None:
         """Return the best available servable-pool count for hot-path guards."""
