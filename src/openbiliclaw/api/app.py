@@ -9564,15 +9564,97 @@ def create_app(
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
 
+    async def _probe_network_proxy(proxy_raw: str) -> ConfigServiceProbeResponse:
+        """Probe the submitted overseas-outbound proxy without saving config.
+
+        Fetches a tiny always-204 endpoint through the candidate proxy with an
+        explicit ``trust_env=False`` (so the probe reflects THIS proxy, not the
+        process env). Classifies failures so the UI can tell "proxy unreachable"
+        from "upstream rejected" from "timeout" (pitfall rule 7 / invariant 4).
+        """
+        import httpx
+
+        from openbiliclaw.config import normalize_outbound_proxy
+
+        # Reject a malformed value with 400 before spending a network round-trip.
+        proxy = normalize_outbound_proxy(proxy_raw)
+        if not proxy:
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind="network_proxy",
+                error="empty",
+                message="未填写代理地址。",
+            )
+        started = time.perf_counter()
+        try:
+            async with httpx.AsyncClient(
+                proxy=proxy, trust_env=False, timeout=5.0
+            ) as client:
+                resp = await client.get("https://www.gstatic.com/generate_204")
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            if resp.status_code in (200, 204):
+                return ConfigServiceProbeResponse(
+                    ok=True,
+                    kind="network_proxy",
+                    message="代理连通正常。",
+                    latency_ms=latency_ms,
+                )
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind="network_proxy",
+                error="unexpected_status",
+                message=f"探测返回 HTTP {resp.status_code}。",
+                latency_ms=latency_ms,
+            )
+        except httpx.ProxyError:
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind="network_proxy",
+                error="proxy_rejected",
+                message="代理拒绝了连接，请检查代理认证 / 协议是否正确。",
+            )
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind="network_proxy",
+                error="proxy_unreachable",
+                message="无法连接到代理，请检查地址 / 端口是否正确且代理在运行。",
+            )
+        except (httpx.TimeoutException, TimeoutError):
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind="network_proxy",
+                error="timeout",
+                message="经代理访问超时（5 秒），请检查代理线路。",
+            )
+        except Exception as exc:  # noqa: BLE001 — surface a safe, classified failure
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind="network_proxy",
+                error="failed",
+                message=f"代理探测失败:{type(exc).__name__}。",
+            )
+
     @app.post("/api/config/probe-service", response_model=ConfigServiceProbeResponse)
     async def probe_config_service(payload: ConfigServiceProbeIn) -> ConfigServiceProbeResponse:
-        """Probe submitted LLM / embedding settings without saving config.toml."""
+        """Probe submitted LLM / embedding / proxy settings without saving config.toml."""
         from copy import deepcopy
 
-        from openbiliclaw.config import load_config
+        from openbiliclaw.config import load_config, normalize_outbound_proxy
+
+        update = payload.config if isinstance(payload.config, dict) else {}
+        if payload.kind == "network_proxy":
+            network_data = update.get("network")
+            proxy_raw = ""
+            if isinstance(network_data, dict):
+                proxy_raw = str(network_data.get("proxy", ""))
+            try:
+                normalize_outbound_proxy(proxy_raw)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await _probe_network_proxy(proxy_raw)
 
         cfg = deepcopy(load_config())
-        update = payload.config if isinstance(payload.config, dict) else {}
         llm_data = update.get("llm")
         if isinstance(llm_data, dict):
             _apply_llm_update(cfg, llm_data)
