@@ -280,7 +280,9 @@ No changes to `applyProfileEdit`'s state semantics (invariant 8).
 
 - `docs/modules/runtime.md` — desktop web UI: card anchors + metadata row, dark mode,
   auto-load behavior and its pool guard, new frontend settings keys
-- `docs/modules/extension.md` — note the additive `RecommendationOut` fields (popup unaffected)
+- `docs/modules/extension.md` — note that this 2026-07-05 plan's additive duration/engagement
+  fields left popup behavior unaffected; the 2026-07-11 publication-time follow-up now
+  consumes `published_at` / `published_label` in popup recommendation and delight cards
 - `docs/changelog.md` — bullet under the current version block
 - Issue #75 — triage reply (adopted / conditional / deferred with reasons); draft in Phase 8,
   post only after maintainer approval
