@@ -5160,7 +5160,12 @@
         $("#delightTitle").textContent = "暂无惊喜队列";
         $("#delightReason").textContent = "后端产生新的高惊喜候选后会通过实时流出现在这里。";
         if ($("#delightStats")) $("#delightStats").hidden = true;
-        if ($("#delightPublished")) $("#delightPublished").hidden = true;
+        const delightPublishedEl = $("#delightPublished");
+        if (delightPublishedEl) {
+          delightPublishedEl.textContent = "";
+          delightPublishedEl.removeAttribute("title");
+          delightPublishedEl.hidden = true;
+        }
         if ($("#delightStatus")) $("#delightStatus").textContent = "";
         if ($("#delightCount")) $("#delightCount").textContent = "0/0";
         controls.forEach((btn) => { btn.disabled = true; });
