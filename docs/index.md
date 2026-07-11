@@ -48,7 +48,7 @@
 | 内容发现引擎 | [modules/discovery.md](modules/discovery.md) | `src/openbiliclaw/discovery/` | ✅ v0.3.x 多源 + 统一待评估池 + 跨源跨轮 topic 配额 |
 | 推荐引擎 | [modules/recommendation.md](modules/recommendation.md) | `src/openbiliclaw/recommendation/` | ✅ v0.3.x 双轴 fatigue + per-group 候选窗口 + reshuffle 0.6s |
 | 存储层 | [modules/storage.md](modules/storage.md) | `src/openbiliclaw/storage/` | ✅ SQLite schema + discovery_candidates 待评估池 + pool readiness 计数 |
-| 原生保存同步 | [modules/saved-sync.md](modules/saved-sync.md) | `src/openbiliclaw/saved_sync/` | 🚧 canonical API + runtime + B 站 adapter 已完成；四端 UI 待接入 |
+| 原生保存同步 | [modules/saved-sync.md](modules/saved-sync.md) | `src/openbiliclaw/saved_sync/` | ✅ canonical API + runtime + B 站 adapter + 插件 / 桌面 / 移动三个图形化保存界面已完成；CLI 可见配置 |
 | 灵魂管线架构 | [modules/soul-pipeline-architecture.md](modules/soul-pipeline-architecture.md) | `src/openbiliclaw/soul/` | ✅ 完成 |
 | 浏览器插件 | [modules/extension.md](modules/extension.md) | `extension/` | ✅ 支持 B 站 + 小红书 + 抖音 + YouTube + X + 知乎 + Reddit 任务桥、跨平台行为采集、扩展驱动 E2E 捕捉自检、Cookie 同步、自启动开关和降级配置修复 |
 | CLI 命令参考 | [modules/cli.md](modules/cli.md) | `src/openbiliclaw/cli.py` | ✅ 持续更新 (含 `autostart` / `setup-embedding` / `discover-douyin` / `fetch-youtube` / `fetch-reddit` / `discover-reddit*`) |
@@ -56,6 +56,7 @@
 | 局域网密码门禁 | [modules/api-auth.md](modules/api-auth.md) | `src/openbiliclaw/auth_core.py` + `src/openbiliclaw/api/auth.py` | ✅ 可选 `[api.auth]` 密码门禁 + `/api/auth/*` + `set-password` |
 | 集成适配层 | [modules/integrations.md](modules/integrations.md) | `src/openbiliclaw/integrations/` | ✅ OpenClaw adapter 已接入 |
 | 运行时服务 | [modules/runtime.md](modules/runtime.md) | `src/openbiliclaw/runtime/` | ✅ refresh / candidate pipeline / presence gate / autostart / Ollama preflight / degraded boot / runtime-stream / 扩展 E2E 控制事件 / backend tag auto-update |
+| 原生保存授权 E2E | [native-save-e2e.md](native-save-e2e.md) | 手动验证 runbook | ⚠️ 仅在明确授权命名 BV 号 / 测试账号后执行平台写入 |
 | 引导初始化 | [modules/init.md](modules/init.md) | `src/openbiliclaw/cli.py`（`run_guided_init`）+ `runtime/init_coordinator.py` + `runtime/init_prereqs.py` | ✅ v0.3.102 共享流水线 + `InitCoordinator` 状态机 + `/api/init*` + 写者门控 + 插件推荐 tab CTA |
 
 ## 开发指南

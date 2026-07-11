@@ -43,7 +43,7 @@
 | 用户意图 | Bilibili resolved action | 真实目标 |
 |---|---|---|
 | `favorite` | `favorite` | `B站 OpenBiliClaw 收藏夹`（按名称精确复用，不存在时创建） |
-| `watch_later` | `watch_later` | `B站稍后观看` |
+| `watch_later` | `watch_later` | `B站稍后再看` |
 
 这张表只描述已经实现并注册的 Bilibili adapter。YouTube、小红书、抖音、X、知乎和
 Reddit 当前可以使用平台中立的本地 membership / 状态 / UI，但平台账号写入 adapter 仍是
