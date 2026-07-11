@@ -795,18 +795,22 @@ async def test_partial_batch_cancellation_releases_later_pending_ownership(
         if adapter.calls:
             break
         await asyncio.sleep(0)
-    assert adapter.calls == [first.item_key]
+    assert len(adapter.calls) == 1
+    active_key = adapter.calls[0]
+    pending_key = next(
+        item.item_key for item in (first, second) if item.item_key != active_key
+    )
     runner.cancel()
     with pytest.raises(asyncio.CancelledError):
         await runner
 
-    first_state = db.get_saved_membership("favorite", first.item_key)
-    second_state = db.get_saved_membership("favorite", second.item_key)
-    assert first_state is not None and first_state["sync_status"] == "failed"
-    assert second_state is not None and second_state["sync_status"] == "pending"
-    assert second_state["sync_task_id"] == ""
-    retry = service.create_sync_task("favorite", [second.item_key], "manual_single")
-    assert [result.item_key for result in retry.items] == [second.item_key]
+    active_state = db.get_saved_membership("favorite", active_key)
+    pending_state = db.get_saved_membership("favorite", pending_key)
+    assert active_state is not None and active_state["sync_status"] == "failed"
+    assert pending_state is not None and pending_state["sync_status"] == "pending"
+    assert pending_state["sync_task_id"] == ""
+    retry = service.create_sync_task("favorite", [pending_key], "manual_single")
+    assert [result.item_key for result in retry.items] == [pending_key]
 
 
 async def test_live_aged_claim_heartbeat_prevents_cross_service_reexecution(
@@ -926,6 +930,86 @@ async def test_adapter_deadline_keeps_lease_until_cancellation_suppressing_call_
         if not service._detached_attempts:
             break
         await asyncio.sleep(0)
+    assert service._detached_attempts == set()
+
+
+async def test_detached_timeout_restarts_heartbeat_after_later_failure(
+    db: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = asyncio.Event()
+    adapter = CancellationSuppressingAdapter(release)
+    second_db = Database(db._db_path)
+    second_db.initialize()
+    service = SavedSyncService(
+        db,
+        NativeSaveRouter([adapter]),
+        claim_heartbeat_interval_seconds=0.005,
+        adapter_timeout_seconds=0.02,
+    )
+    second_service = SavedSyncService(second_db, NativeSaveRouter([adapter]))
+    item = SavedItemInput("bilibili", "BV1DETACHEDHEARTFAIL")
+    service.save_local("favorite", item)
+    task = service.create_sync_task("favorite", [item.item_key], "manual_single")
+    original_heartbeat = db.heartbeat_native_save_claim
+    fail_next_heartbeat = False
+    heartbeat_failures = 0
+
+    def fail_after_detach(*args: object, **kwargs: object) -> bool:
+        nonlocal fail_next_heartbeat, heartbeat_failures
+        if fail_next_heartbeat:
+            fail_next_heartbeat = False
+            heartbeat_failures += 1
+            raise RuntimeError("private detached heartbeat failure")
+        return original_heartbeat(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(db, "heartbeat_native_save_claim", fail_after_detach)
+
+    initial = await service.run_sync_task(task.task_id)
+    assert initial.items[0].status == "syncing"
+    assert len(service._detached_attempts) == 1
+    await adapter.cancel_seen.wait()
+
+    fail_next_heartbeat = True
+    for _ in range(100):
+        if heartbeat_failures:
+            break
+        await asyncio.sleep(0.01)
+    assert heartbeat_failures == 1
+
+    db.conn.execute(
+        """
+        UPDATE native_save_states
+        SET last_attempt_at = datetime('now', '-10 minutes')
+        WHERE list_kind = 'favorite' AND item_key = ?
+        """,
+        (item.item_key,),
+    )
+    db.conn.commit()
+    for _ in range(100):
+        refreshed = db.conn.execute(
+            """
+            SELECT last_attempt_at > datetime('now', '-1 minute')
+            FROM native_save_states
+            WHERE list_kind = 'favorite' AND item_key = ?
+            """,
+            (item.item_key,),
+        ).fetchone()
+        if refreshed is not None and int(refreshed[0]) == 1:
+            break
+        await asyncio.sleep(0.01)
+
+    duplicate = second_service.create_sync_task("favorite", [item.item_key], "manual_single")
+    assert duplicate.items == ()
+    assert adapter.calls == [item.item_key]
+
+    release.set()
+    for _ in range(100):
+        persisted = service.get_sync_task(task.task_id)
+        if persisted.items and persisted.items[0].status == "synced":
+            break
+        await asyncio.sleep(0.01)
+    assert persisted.items[0].status == "synced"
     assert service._detached_attempts == set()
 
 

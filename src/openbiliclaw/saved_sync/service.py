@@ -513,16 +513,8 @@ class SavedSyncService:
                     requested_action=requested_action,
                 )
             else:
-                retrying_heartbeat = asyncio.create_task(
-                    self._heartbeat_claim_with_retry(
-                        list_kind,
-                        item_key,
-                        task_id,
-                        execution_id,
-                    )
-                )
                 self._detach_live_attempt(
-                    retrying_heartbeat,
+                    heartbeat,
                     save_task,
                     list_kind=list_kind,
                     item_key=item_key,
@@ -575,7 +567,16 @@ class SavedSyncService:
         requested_action: NativeSaveAction,
         result: NativeSaveResult,
     ) -> None:
-        del item_key
+        retrying_heartbeat = asyncio.create_task(
+            self._heartbeat_claim_with_retry(
+                list_kind,
+                item_key,
+                task_id,
+                execution_id,
+            )
+        )
+        heartbeat.cancel()
+        await asyncio.gather(heartbeat, return_exceptions=True)
         final_result = result
         try:
             adapter_result = await save_task
@@ -589,8 +590,8 @@ class SavedSyncService:
                 resolved_target=result.resolved_target,
             )
         finally:
-            heartbeat.cancel()
-            await asyncio.gather(heartbeat, save_task, return_exceptions=True)
+            retrying_heartbeat.cancel()
+            await asyncio.gather(retrying_heartbeat, save_task, return_exceptions=True)
         self._persist_result(
             list_kind,
             final_result,

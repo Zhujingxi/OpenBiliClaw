@@ -16,7 +16,7 @@
 | 持久化同步任务 | ✅ | 自动 / 手动触发统一经 `create_sync_task()` 生成一个 UUID，并在单个 `BEGIN IMMEDIATE` 事务中 claim 所有 eligible 项；执行前另以唯一 `task_runner_id` 原子领取 batch runner。第二个 service 不能执行 item、刷新 heartbeat 或释放 live runner 的 pending。runner 正常 / 取消退出立即释放余项，崩溃后超过 5 分钟由轮询或下一次创建回收。 |
 | 批量逐项执行 | ✅ | `run_sync_task()` 只读取该 task ID 仍存在的 membership，按平台分组、平台内串行执行，并以 `execution_id` 原子 claim / 完成每一项；同一任务的并发 runner 不会重复调用 adapter，平台组之间仍可并行。执行中每 30 秒 owner-fenced heartbeat；240 秒是调用方响应 deadline，不假定能强制终止不遵守 cancellation 的底层 I/O。 |
 | 可恢复任务查询 | ✅ | `get_sync_task()` 只从 `native_save_states` 与 membership/item join 重建结果，进程内不保存易丢失的任务结果。 |
-| 安全失败归一化 | ✅ | 未注册 / 不支持的路由写为 `unsupported`；malformed target / result 写固定 `failed/invalid_adapter_result`；adapter 异常写 `failed/adapter_exception`。item heartbeat 抛错时 runner 立即返回固定错误并请求取消；若 adapter 吞取消，tracked watchdog 以 10ms–1s 有界退避重试 owner-fenced heartbeat，直到真实终止后归一化 late terminal / malformed 结果，避免短暂心跳故障开放重叠重试。 |
+| 安全失败归一化 | ✅ | 未注册 / 不支持的路由写为 `unsupported`；malformed target / result 写固定 `failed/invalid_adapter_result`；adapter 异常写 `failed/adapter_exception`。凡 adapter 因 item heartbeat 异常、响应 deadline 或调用方取消而进入 detached 状态，tracked watchdog 都会切换到 10ms–1s 有界退避的 owner-fenced heartbeat，直到真实终止后归一化 late terminal / malformed 结果，避免 detached 期间的后续心跳异常开放重叠重试。 |
 
 ## 公开 API
 
@@ -49,7 +49,7 @@ persisted = service.get_sync_task(created.task_id)
 
 - `save_local(list_kind, item, note="", auto_sync=False)`：先写本地；首次关闭自动同步时返回 `pending` 且 `sync_task_id=""`。重复保存只更新 membership / 内容快照，不会把既有 terminal 或 active native state 降级或改写 owner。
 - `create_sync_task(list_kind, item_keys, trigger)`：真正的空 `item_keys` 表示该列表全部 eligible 项；非空但全部为空白的选择会 fail closed。terminal success 和已有 task owner 的 active 项不会重新入队。若注入的 `task_starter(name, coro)` 登记失败，刚 claim 的 pending owner 会先原子释放再重新抛错；旧的未启动 owner 在 5 分钟保护窗后由后续创建回收。
-- `run_sync_task(task_id)`：先原子领取唯一 runner token；领取失败只返回 durable snapshot。task heartbeat 与 work 使用 `FIRST_COMPLETED` 监控，task heartbeat 失败立即取消 work并 owner-fenced 释放余项。item heartbeat 自身抛错也中止 platform group并返回固定 `Native save item heartbeat failed`；若底层 adapter 仍存活，独立 watchdog 持续重试 execution heartbeat并在 late 结果落库后自清理。进程崩溃才由 poll / 下一次创建按 5 分钟 lease 回收。
+- `run_sync_task(task_id)`：先原子领取唯一 runner token；领取失败只返回 durable snapshot。task heartbeat 与 work 使用 `FIRST_COMPLETED` 监控，task heartbeat 失败立即取消 work并 owner-fenced 释放余项。adapter 在 item heartbeat 异常、响应 deadline 或调用方取消后仍存活时，独立 watchdog 统一持续重试 execution heartbeat，并在 late 结果落库后自清理。进程崩溃才由 poll / 下一次创建按 5 分钟 lease 回收。
 - `get_sync_task(task_id)`：非空未知 task 返回同一 ID 和空 items；已有 task 返回持久化逐项结果。空白 `task_id` 在 service 与 DAO 两层都 fail closed，既不会聚合未领取 pending 行，也不会触发 adapter。
 
 ## 数据流与边界
