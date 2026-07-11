@@ -133,12 +133,13 @@ def test_init_onboarding_gate_trusts_init_status_when_runtime_status_is_unavaila
 
 
 def test_hydrate_runtime_status_fallback_is_not_dead_catch() -> None:
-    """requestJson resolves null instead of rejecting, so the hydrate fallback
-    to the Promise.all runtime snapshot must be `||`, never `.catch()`."""
+    """Strict runtime reads keep the first settled snapshot as fallback."""
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
 
-    assert "(await requestJson(ENDPOINTS.runtimeStatus)) || runtime" in app_js
-    assert "requestJson(ENDPOINTS.runtimeStatus).catch(" not in app_js
+    assert "settleResource(readRuntimeStatusSnapshot())" in app_js
+    assert "let effectiveRuntime = runtimeResult.ok ? runtimeResult.value : null;" in app_js
+    assert "effectiveRuntime = await readRuntimeStatusSnapshot();" in app_js
+    assert "applyDesktopRuntimeSnapshot(effectiveRuntime);" in app_js
 
 
 def test_bili_checklist_label_reflects_probe_result_and_surfaces_detail() -> None:

@@ -28,7 +28,9 @@ def test_desktop_backend_hydration_clears_empty_recommendations() -> None:
     assert hydrate is not None, "desktop hydrateFromBackend not found"
     body = hydrate.group("body")
     assert "settleResource(readRecommendationSnapshot())" in body
-    assert "applyDesktopRecommendationSnapshot(recommendationResult.value, { replace: true });" in body
+    assert (
+        "applyDesktopRecommendationSnapshot(recommendationResult.value, { replace: true });" in body
+    )
     assert 'desktopRecommendationLoadState = "empty-success"' in app_js
 
 
