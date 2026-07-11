@@ -230,7 +230,9 @@ def chromium_page() -> Page:
         page = browser.new_page(viewport={"width": 1440, "height": 1000})
         page.add_init_script(
             """
-            window.__OBC_TEST_UNDO_WINDOW_MS = 400;
+            // Keep the test fast while leaving enough time for Playwright to
+            // wait out the card hover/layout transition before clicking undo.
+            window.__OBC_TEST_UNDO_WINDOW_MS = 1200;
             window.WebSocket = class FakeWebSocket {
               static OPEN = 1;
               constructor() {
@@ -331,6 +333,38 @@ def test_recommendation_feedback_failure_rolls_back_current_card(
     expect(like).not_to_have_class("is-active")
     expect(first.locator(".status-line")).to_have_text("")
     expect(chromium_page.locator("#toast")).to_contain_text("已恢复")
+
+
+def test_recommendations_and_runtime_recover_without_leaving_init_gate(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, _ = issue_98_server
+    request_counts = {"recommendations": 0, "runtime": 0}
+
+    def fail_first_recommendation(route: Any) -> None:
+        request_counts["recommendations"] += 1
+        if request_counts["recommendations"] == 1:
+            route.abort("failed")
+            return
+        route.continue_()
+
+    def fail_initial_runtime_reads(route: Any) -> None:
+        request_counts["runtime"] += 1
+        if request_counts["runtime"] <= 2:
+            route.abort("failed")
+            return
+        route.continue_()
+
+    chromium_page.route("**/api/recommendations", fail_first_recommendation)
+    chromium_page.route("**/api/runtime-status", fail_initial_runtime_reads)
+    chromium_page.goto(f"{base_url}/web/")
+
+    expect(chromium_page.locator("#videoGrid .video-card")).to_have_count(3, timeout=5000)
+    expect(chromium_page.locator("#videoGrid .init-onboarding")).to_have_count(0)
+    expect(chromium_page.locator("#poolAvailable")).to_contain_text("30")
+    assert request_counts["recommendations"] >= 2
+    assert request_counts["runtime"] >= 3
 
 
 def test_interest_and_avoidance_probe_actions_are_immediate_and_undoable(

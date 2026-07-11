@@ -355,7 +355,15 @@
       desktopRuntimeRecoveryInFlight = true;
       const requestGeneration = desktopRuntimeGeneration;
       try {
-        applyDesktopRuntimeSnapshot(await readRuntimeStatusSnapshot(), requestGeneration);
+        const applied = applyDesktopRuntimeSnapshot(
+          await readRuntimeStatusSnapshot(),
+          requestGeneration
+        );
+        // Initial recommendation and runtime reads recover independently. If
+        // recommendations recover first, the guided-init gate remains in the
+        // grid until the runtime snapshot proves the first pool is ready.
+        // Refresh only that gate; do not rebuild healthy, interactive cards.
+        if (applied && grid.querySelector(".init-onboarding")) renderVideos();
       } catch {
         if (requestGeneration !== desktopRuntimeGeneration) return;
         desktopRuntimeLoadState = "failed";
