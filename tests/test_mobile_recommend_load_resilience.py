@@ -53,6 +53,13 @@ def test_mobile_late_runtime_timeout_does_not_override_stream_recovery() -> None
     assert 'if (runtimeStatusLoadState !== "ready")' in recommend_js
 
 
+def test_mobile_healthy_stream_reconnect_does_not_rebuild_cards() -> None:
+    recommend_js = Path("src/openbiliclaw/web/js/views/recommend.js").read_text()
+
+    assert "if (recommendationRestarted) render();" in recommend_js
+    assert "else if (runtimeRestarted) rerenderRuntimeDependentChrome();" in recommend_js
+
+
 def test_mobile_badge_load_does_not_fetch_delights_eagerly() -> None:
     chat_js = Path("src/openbiliclaw/web/js/views/chat.js").read_text()
 

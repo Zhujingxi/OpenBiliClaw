@@ -276,6 +276,13 @@ def test_desktop_runtime_failure_recovers_independently() -> None:
     assert 'if (desktopRuntimeLoadState === "ready") return;' in app_js
 
 
+def test_desktop_healthy_stream_reconnect_does_not_rebuild_cards() -> None:
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    assert "if (recommendationRestarted) renderVideos();" in app_js
+    assert "if (runtimeRestarted) renderDesktopRuntimeFailure();" in app_js
+
+
 def test_desktop_web_shows_github_star_cta() -> None:
     """Desktop web should ask happy users for a GitHub Star in the top bar."""
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")

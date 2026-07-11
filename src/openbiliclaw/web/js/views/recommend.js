@@ -1712,6 +1712,8 @@ async function runRuntimeStatusRecovery() {
 }
 
 function restartFailedRecoveries() {
+  let recommendationRestarted = false;
+  let runtimeRestarted = false;
   if (
     state.recommendations.length === 0 &&
     (recommendationLoadState === "failed" || recommendationLoadState === "failed-exhausted")
@@ -1721,6 +1723,7 @@ function restartFailedRecoveries() {
     recommendationRecoveryAttempt = 0;
     recommendationLoadState = "failed";
     scheduleRecommendationRecovery();
+    recommendationRestarted = true;
   }
   if (runtimeStatusLoadState === "failed" || runtimeStatusLoadState === "failed-exhausted") {
     if (runtimeStatusRecoveryTimer !== null) clearTimeout(runtimeStatusRecoveryTimer);
@@ -1728,8 +1731,10 @@ function restartFailedRecoveries() {
     runtimeStatusRecoveryAttempt = 0;
     runtimeStatusLoadState = "failed";
     scheduleRuntimeStatusRecovery();
+    runtimeRestarted = true;
   }
-  render();
+  if (recommendationRestarted) render();
+  else if (runtimeRestarted) rerenderRuntimeDependentChrome();
 }
 
 async function loadData() {

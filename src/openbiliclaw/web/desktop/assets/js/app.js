@@ -349,6 +349,8 @@
     }
 
     function restartDesktopFailedRecoveries() {
+      let recommendationRestarted = false;
+      let runtimeRestarted = false;
       if (
         state.videos.length === 0 &&
         (desktopRecommendationLoadState === "failed" || desktopRecommendationLoadState === "failed-exhausted")
@@ -358,6 +360,7 @@
         desktopRecommendationRecoveryAttempt = 0;
         desktopRecommendationLoadState = "failed";
         scheduleDesktopRecommendationRecovery();
+        recommendationRestarted = true;
       }
       if (desktopRuntimeLoadState === "failed" || desktopRuntimeLoadState === "failed-exhausted") {
         if (desktopRuntimeRecoveryTimer !== null) window.clearTimeout(desktopRuntimeRecoveryTimer);
@@ -365,9 +368,10 @@
         desktopRuntimeRecoveryAttempt = 0;
         desktopRuntimeLoadState = "failed";
         scheduleDesktopRuntimeRecovery();
+        runtimeRestarted = true;
       }
-      renderVideos();
-      renderDesktopRuntimeFailure();
+      if (recommendationRestarted) renderVideos();
+      if (runtimeRestarted) renderDesktopRuntimeFailure();
     }
 
     async function runActivityPageRefresh() {
