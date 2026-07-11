@@ -2076,7 +2076,7 @@ class TestBackendAPI:
 
         assert service.calls == 1
 
-    def test_health_endpoint_strict_when_probe_times_out(
+    def test_health_endpoint_treats_loopback_ollama_timeout_as_cold_load(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import asyncio
@@ -2085,15 +2085,11 @@ class TestBackendAPI:
 
         import openbiliclaw.api.app as appmod
 
-        # gui-init: readiness is now STRICT — a probe that doesn't answer within
-        # the (generous, cold-load-tolerant) window can't be confirmed working,
-        # so it reports not-ready instead of optimistically green. The short
-        # fail-TTL re-probes soon so it greens once the load actually finishes.
-        monkeypatch.setattr(appmod, "_EMBEDDING_PROBE_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr(appmod, "_EMBEDDING_PROBE_TIMEOUT_SECONDS", 0.01)
 
         class _SlowProbeService:
             async def probe(self) -> bool:
-                await asyncio.sleep(0.5)  # exceeds the cap → times out
+                await asyncio.sleep(0.2)
                 return True
 
         class EmbeddingSoulEngine:
@@ -2103,6 +2099,56 @@ class TestBackendAPI:
         app = create_app(
             memory_manager=object(), database=object(), soul_engine=EmbeddingSoulEngine()
         )
+        from openbiliclaw.config import Config
+
+        app.state.runtime_context.config = Config()
+        app.state.runtime_context.config.llm.embedding.provider = "ollama"
+        app.state.runtime_context.config.llm.embedding.base_url = "http://127.0.0.1:11434/v1"
+        client = TestClient(app)
+
+        response = client.get("/api/health")
+
+        assert response.status_code == 200
+        assert response.json()["embedding_ready"] is True
+
+    @pytest.mark.parametrize(
+        ("provider", "base_url"),
+        [
+            ("ollama", "http://ollama:11434/v1"),
+            ("openai", "https://api.openai.com/v1"),
+        ],
+    )
+    def test_health_endpoint_keeps_nonlocal_timeout_not_ready(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        provider: str,
+        base_url: str,
+    ) -> None:
+        import asyncio
+
+        from fastapi.testclient import TestClient
+
+        import openbiliclaw.api.app as appmod
+
+        monkeypatch.setattr(appmod, "_EMBEDDING_PROBE_TIMEOUT_SECONDS", 0.01)
+
+        class _SlowProbeService:
+            async def probe(self) -> bool:
+                await asyncio.sleep(0.2)
+                return True
+
+        class EmbeddingSoulEngine:
+            def __init__(self) -> None:
+                self._embedding_service = _SlowProbeService()
+
+        app = create_app(
+            memory_manager=object(), database=object(), soul_engine=EmbeddingSoulEngine()
+        )
+        from openbiliclaw.config import Config
+
+        app.state.runtime_context.config = Config()
+        app.state.runtime_context.config.llm.embedding.provider = provider
+        app.state.runtime_context.config.llm.embedding.base_url = base_url
         client = TestClient(app)
 
         response = client.get("/api/health")
@@ -10592,6 +10638,44 @@ class TestGuidedInitEndpoints:
         assert latest["error_reason"] == "embedding_not_ready"
         assert app.state.runtime_context.init_coordinator.init_active() is False
 
+    def test_init_post_rejects_loopback_ollama_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import asyncio
+
+        from fastapi.testclient import TestClient
+
+        import openbiliclaw.api.app as appmod
+        from openbiliclaw.llm import ollama_diagnostics as od
+
+        monkeypatch.setattr(appmod, "_EMBEDDING_PROBE_TIMEOUT_SECONDS", 0.01)
+
+        async def fake_diagnose(base_url: str, model: str) -> tuple[str, str]:
+            return od.DIAG_ERROR, "cold loading"
+
+        monkeypatch.setattr(od, "diagnose_ollama_embedding", fake_diagnose)
+
+        class _SlowProbeService:
+            async def probe(self) -> bool:
+                await asyncio.sleep(0.2)
+                return True
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["xiaohongshu"])
+        app, db = self._make_app(
+            tmp_path,
+            prereqs=prereqs,
+            embedding_provider="ollama",
+        )
+        app.state.runtime_context.soul_engine._embedding_service = _SlowProbeService()
+        app.state.runtime_context.config.autostart.manage_ollama = False
+
+        with TestClient(app) as client:
+            response = client.post("/api/init", json={"sources": ["xiaohongshu"]})
+
+        assert response.status_code == 409
+        assert response.json()["error"] == "embedding_not_ready"
+        assert db.get_latest_init_run()["status"] == "idle"
+
     def test_init_skips_bilibili_login_check_when_deselected(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -11091,6 +11175,52 @@ class TestGuidedInitEndpoints:
         assert body["reason"] == "embedding_not_ready"
         assert body["prerequisites"]["embedding_ready"] is False
         assert body["prerequisites"]["embedding_required"] is True
+
+    def test_init_status_keeps_cached_loopback_ollama_timeout_strict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import asyncio
+
+        from fastapi.testclient import TestClient
+
+        import openbiliclaw.api.app as appmod
+        from openbiliclaw.llm import ollama_diagnostics as od
+
+        monkeypatch.setattr(appmod, "_EMBEDDING_PROBE_TIMEOUT_SECONDS", 0.01)
+
+        async def fake_diagnose(base_url: str, model: str) -> tuple[str, str]:
+            return od.DIAG_ERROR, "cold loading"
+
+        monkeypatch.setattr(od, "diagnose_ollama_embedding", fake_diagnose)
+
+        class _SlowProbeService:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def probe(self) -> bool:
+                self.calls += 1
+                await asyncio.sleep(0.2)
+                return True
+
+        service = _SlowProbeService()
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["xiaohongshu"])
+        app, _ = self._make_app(
+            tmp_path,
+            prereqs=prereqs,
+            embedding_provider="ollama",
+        )
+        app.state.runtime_context.soul_engine._embedding_service = service
+        app.state.runtime_context.config.llm.embedding.base_url = "http://127.0.0.1:11434/v1"
+
+        with TestClient(app) as client:
+            health = client.get("/api/health").json()
+            status = client.get("/api/init-status").json()
+
+        assert health["embedding_ready"] is True
+        assert status["prerequisites"]["embedding_ready"] is False
+        assert status["can_start"] is False
+        assert status["reason"] == "embedding_not_ready"
+        assert service.calls == 1
 
     def test_init_status_disabled_embedding_does_not_gate_can_start(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient
