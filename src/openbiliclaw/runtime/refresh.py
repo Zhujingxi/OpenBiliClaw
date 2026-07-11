@@ -284,6 +284,7 @@ class ContinuousRefreshController:
     recommendation_engine: SupportsRecommendationEngine
     event_hub: Any | None = None
     discovery_candidate_pipeline: Any | None = None
+    candidate_eval_coordinator: Any | None = None
     bilibili_producer: Any | None = None
     xhs_producer: Any | None = None
     douyin_producer: Any | None = None
@@ -509,7 +510,7 @@ class ContinuousRefreshController:
                 min_delight_score=self._dynamic_delight_threshold(),
             )
         pool_counts = self._pool_readiness_counts()
-        return {
+        payload: dict[str, object] = {
             "initialized": self._is_initialized(),
             "recommendation_count": self.database.count_recommendations(),
             "pending_signal_events": self._pending_signal_events_count(state),
@@ -526,6 +527,11 @@ class ContinuousRefreshController:
             "pending_delight_count": pending_delight_count,
             "last_delight_notification_at": str(state.get("last_delight_notification_at", "")),
         }
+        status_payload = getattr(self.candidate_eval_coordinator, "status_payload", None)
+        if callable(status_payload):
+            with suppress(Exception):
+                payload.update(status_payload())
+        return payload
 
     async def refresh_if_needed(self) -> dict[str, object]:
         """Refresh discovery candidates when thresholds are met.
@@ -1080,7 +1086,7 @@ class ContinuousRefreshController:
 
             ┌─ _loop_refresh()           60s   LLM-heavy, may take minutes
             ├─ _loop_pool_precompute()   60s   v0.3.60+ — drain pool_expression
-            ├─ _loop_candidate_eval()    60s   drain pending raw candidates
+            ├─ candidate_eval             event continuous candidate evaluator
             ├─ _loop_soul_pipeline()     60s   profile updates, speculator
             ├─ _loop_bilibili_producer() 60s   Bili extension search fallback under cooldown
             ├─ _loop_xhs_producer()      60s   xhs keyword generation
@@ -1108,10 +1114,15 @@ class ContinuousRefreshController:
             if callable(bind_soul):
                 with suppress(Exception):
                     bind_soul(self.soul_engine)
+        candidate_eval_loop = (
+            self.candidate_eval_coordinator.run_forever()
+            if self.candidate_eval_coordinator is not None
+            else self._loop_candidate_eval()
+        )
         tasks = [
             asyncio.create_task(self._loop_refresh()),
             asyncio.create_task(self._loop_pool_precompute()),
-            asyncio.create_task(self._loop_candidate_eval()),
+            asyncio.create_task(candidate_eval_loop, name="candidate_eval"),
             asyncio.create_task(self._loop_soul_pipeline()),
             asyncio.create_task(self._loop_bilibili_producer()),
             asyncio.create_task(self._loop_xhs_producer()),
@@ -1811,6 +1822,10 @@ class ContinuousRefreshController:
     ) -> dict[str, int]:
         """Drain one pending discovery-candidate batch through the shared evaluator."""
 
+        notify = getattr(self.candidate_eval_coordinator, "notify", None)
+        if callable(notify):
+            notify(reason)
+            return {"evaluated": 0, "cached": 0, "rejected": 0}
         return await self._drain_discovery_candidates_and_precompute(
             reason=reason,
             batch_size=batch_size,
@@ -2309,13 +2324,20 @@ class ContinuousRefreshController:
         if current == self._last_published_pool_count:
             return
         self._last_published_pool_count = current
-        await self._publish_event(
-            {
-                "type": "pool_status",
-                **self._pool_count_payload(pool_counts),
-                "pool_target_count": int(self.pool_target_count),
-            }
-        )
+        payload: dict[str, object] = {
+            "type": "pool_status",
+            **self._pool_count_payload(pool_counts),
+            "pool_target_count": int(self.pool_target_count),
+        }
+        status_payload = getattr(self.candidate_eval_coordinator, "status_payload", None)
+        if callable(status_payload):
+            with suppress(Exception):
+                payload.update(status_payload())
+        await self._publish_event(payload)
+        if current < int(self.pool_target_count):
+            notify = getattr(self.candidate_eval_coordinator, "notify", None)
+            if callable(notify):
+                notify("inventory_consumed")
 
     def _safe_count_delight_candidates(self) -> int:
         """Best-effort count of pending delight candidates (returns 0 on any

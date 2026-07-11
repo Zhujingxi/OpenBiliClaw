@@ -3671,6 +3671,48 @@ async def test_run_forever_drives_pipeline_tick_and_refresh() -> None:
     )
 
 
+async def test_run_forever_starts_one_candidate_eval_coordinator() -> None:
+    class _Coordinator:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.stopped = asyncio.Event()
+            self.run_calls = 0
+
+        async def run_forever(self) -> None:
+            self.run_calls += 1
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.stopped.set()
+
+        def status_payload(self) -> dict[str, object]:
+            return {
+                "candidate_eval_state": "running",
+                "candidate_eval_workers": 3,
+            }
+
+    coordinator = _Coordinator()
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase(events=[]),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        candidate_eval_coordinator=coordinator,
+        check_interval_seconds=3600,
+    )
+    task = asyncio.create_task(controller.run_forever())
+    await asyncio.wait_for(coordinator.started.wait(), timeout=0.5)
+
+    assert coordinator.run_calls == 1
+    assert controller.get_runtime_status()["candidate_eval_state"] == "running"
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(coordinator.stopped.wait(), timeout=0.5)
+
+
 async def test_run_forever_continues_when_pipeline_tick_raises() -> None:
     """A failing pipeline.tick() must not break the refresh loop."""
     broken = _BrokenPipeline()

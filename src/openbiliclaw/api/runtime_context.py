@@ -848,6 +848,51 @@ class RuntimeContext:
             task_registry=self.task_registry,
         )
 
+        from openbiliclaw.runtime.candidate_eval import (
+            CandidateEvalCoordinator,
+            CandidateEvalSnapshot,
+            effective_candidate_eval_workers,
+        )
+
+        def _candidate_eval_snapshot() -> CandidateEvalSnapshot:
+            readiness = new_runtime_controller._pool_readiness_counts()  # noqa: SLF001
+            status_counts = self.database.count_discovery_candidates_by_status()
+            return CandidateEvalSnapshot(
+                available=int(readiness.get("available", 0)),
+                target=int(new_config.scheduler.pool_target_count),
+                pending_eval=int(status_counts.get("pending_eval", 0)),
+                evaluating=int(status_counts.get("evaluating", 0)),
+                evaluated=int(status_counts.get("evaluated", 0)),
+            )
+
+        async def _request_candidate_supply(reason: str) -> dict[str, object]:
+            await new_runtime_controller.request_replenishment(reason=reason)
+            return await new_runtime_controller.refresh_if_needed()
+
+        candidate_eval_workers = effective_candidate_eval_workers(
+            int(getattr(discovery_cfg, "candidate_eval_concurrency", 3)),
+            llm_concurrency,
+        )
+        new_candidate_eval_coordinator = CandidateEvalCoordinator(
+            pipeline=new_candidate_pipeline,
+            snapshot_provider=_candidate_eval_snapshot,
+            profile_provider=new_soul_engine.get_profile,
+            worker_count=candidate_eval_workers,
+            batch_size=30,
+            supply_callback=_request_candidate_supply,
+            work_allowed=lambda: (
+                new_runtime_controller._is_initialized()  # noqa: SLF001
+                and new_runtime_controller._llm_work_allowed()  # noqa: SLF001
+            ),
+            safety_wake_seconds=float(
+                getattr(new_config.scheduler, "refresh_check_interval_seconds", 60)
+            ),
+        )
+        new_runtime_controller.candidate_eval_coordinator = new_candidate_eval_coordinator
+        new_candidate_pipeline.on_candidates_enqueued = lambda _count: (
+            new_candidate_eval_coordinator.notify("candidate_enqueued:pipeline")
+        )
+
         # 9. Account sync
         new_account_sync = AccountSyncService(
             memory_manager=self.memory_manager,

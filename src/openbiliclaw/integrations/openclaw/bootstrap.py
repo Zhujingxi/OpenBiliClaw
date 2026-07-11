@@ -24,6 +24,11 @@ from openbiliclaw.llm.usage_recorder import UsageRecorder
 from openbiliclaw.memory.manager import MemoryManager
 from openbiliclaw.recommendation.engine import RecommendationEngine
 from openbiliclaw.runtime.account_sync import AccountSyncService
+from openbiliclaw.runtime.candidate_eval import (
+    CandidateEvalCoordinator,
+    CandidateEvalSnapshot,
+    effective_candidate_eval_workers,
+)
 from openbiliclaw.runtime.presence import PresenceTracker
 from openbiliclaw.runtime.refresh import ContinuousRefreshController
 from openbiliclaw.runtime.source_policy import effective_pool_source_shares
@@ -243,6 +248,46 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         youtube_producer=youtube_producer,
         scheduler_config=config.scheduler,
         presence=presence,
+    )
+
+    def _candidate_eval_snapshot() -> CandidateEvalSnapshot:
+        readiness = runtime_controller._pool_readiness_counts()  # noqa: SLF001
+        status_counts = database.count_discovery_candidates_by_status()
+        return CandidateEvalSnapshot(
+            available=int(readiness.get("available", 0)),
+            target=int(config.scheduler.pool_target_count),
+            pending_eval=int(status_counts.get("pending_eval", 0)),
+            evaluating=int(status_counts.get("evaluating", 0)),
+            evaluated=int(status_counts.get("evaluated", 0)),
+        )
+
+    async def _request_candidate_supply(reason: str) -> dict[str, object]:
+        await runtime_controller.request_replenishment(reason=reason)
+        return await runtime_controller.refresh_if_needed()
+
+    candidate_eval_coordinator = CandidateEvalCoordinator(
+        pipeline=candidate_pipeline,
+        snapshot_provider=_candidate_eval_snapshot,
+        profile_provider=(
+            soul_engine.get_profile
+            if callable(getattr(soul_engine, "get_profile", None))
+            else lambda: None
+        ),
+        worker_count=effective_candidate_eval_workers(
+            int(getattr(discovery_cfg, "candidate_eval_concurrency", 3)),
+            llm_concurrency,
+        ),
+        batch_size=30,
+        supply_callback=_request_candidate_supply,
+        work_allowed=lambda: bool(
+            getattr(runtime_controller, "_is_initialized", lambda: True)()
+            and getattr(runtime_controller, "_llm_work_allowed", lambda: True)()
+        ),
+        safety_wake_seconds=float(getattr(config.scheduler, "refresh_check_interval_seconds", 60)),
+    )
+    runtime_controller.candidate_eval_coordinator = candidate_eval_coordinator
+    candidate_pipeline.on_candidates_enqueued = lambda _count: candidate_eval_coordinator.notify(
+        "candidate_enqueued:pipeline"
     )
     account_sync_service = AccountSyncService(
         memory_manager=memory_manager,

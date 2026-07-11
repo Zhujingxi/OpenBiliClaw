@@ -93,6 +93,7 @@ class DiscoveryCandidatePipeline:
     max_supply_fill_attempts: int = 3
     max_supply_fill_seconds: float = 240.0
     eval_batch_concurrency: int = 2
+    on_candidates_enqueued: Callable[[int], None] | None = None
     time_fn: Callable[[], float] = field(default=time.monotonic, repr=False)
     _drain_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock,
@@ -169,11 +170,15 @@ class DiscoveryCandidatePipeline:
         enqueue = self.database.enqueue_discovery_candidates
         cap = self._max_pending_per_source()
         if cap is None:
-            return int(enqueue(writes))
-        try:
-            return int(enqueue(writes, max_pending_per_source=cap))
-        except TypeError:
-            return int(enqueue(writes))
+            inserted = int(enqueue(writes))
+        else:
+            try:
+                inserted = int(enqueue(writes, max_pending_per_source=cap))
+            except TypeError:
+                inserted = int(enqueue(writes))
+        if inserted > 0 and self.on_candidates_enqueued is not None:
+            self.on_candidates_enqueued(inserted)
+        return inserted
 
     async def ensure_pending_supply(
         self,
@@ -605,6 +610,18 @@ class DiscoveryCandidatePipeline:
         """Return whether the visible recommendation pool is at target."""
 
         return self._pool_full()
+
+    def admit_evaluated(self, *, limit: int) -> dict[str, int]:
+        """Admit previously evaluated rows before spending another LLM call."""
+
+        admitted_items: list[DiscoveredContent] = []
+        cached, rejected = self._admit_evaluated_candidates(
+            limit=max(0, int(limit)),
+            recently_viewed=self._recent_viewed_content_keys(),
+            admitted_items=admitted_items,
+        )
+        self.last_admitted_items = admitted_items
+        return {"cached": cached, "rejected": rejected}
 
     def _admit_evaluated_candidates(
         self,

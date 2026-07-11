@@ -49,6 +49,7 @@ class CandidateEvalCoordinator:
         worker_count: int = 3,
         batch_size: int = 30,
         supply_callback: Any | None = None,
+        work_allowed: Any | None = None,
         safety_wake_seconds: float = 60.0,
         time_fn: Any = time.monotonic,
     ) -> None:
@@ -58,6 +59,7 @@ class CandidateEvalCoordinator:
         self.worker_count = max(1, min(8, int(worker_count)))
         self.batch_size = max(1, min(30, int(batch_size)))
         self.supply_callback = supply_callback
+        self.work_allowed = work_allowed
         self.safety_wake_seconds = max(0.01, float(safety_wake_seconds))
         self.time_fn = time_fn
 
@@ -107,6 +109,10 @@ class CandidateEvalCoordinator:
                     break
 
                 await self._settle_supply_task()
+                if self.work_allowed is not None and not bool(self.work_allowed()):
+                    self.state = "paused"
+                    await self._wait_for_activity(self.safety_wake_seconds)
+                    continue
                 now = self.time_fn()
                 if self._paused:
                     self.state = "paused"
@@ -124,6 +130,7 @@ class CandidateEvalCoordinator:
                 if snapshot.available >= snapshot.target:
                     self.state = "idle"
                 else:
+                    self._admit_evaluated(snapshot)
                     self._fill_open_slots()
                     snapshot = self._snapshot()
                     if not self._workers and snapshot.pending_eval <= 0:
@@ -186,10 +193,26 @@ class CandidateEvalCoordinator:
             if claim is None:
                 return
             task = asyncio.create_task(
-                self.pipeline.evaluate_claim(claim, self.profile_provider()),
+                self._evaluate_worker(claim),
                 name=f"candidate_eval:{claim.token[:8]}",
             )
             self._workers[task] = claim
+
+    async def _evaluate_worker(self, claim: Any) -> Any:
+        profile = self.profile_provider()
+        if inspect.isawaitable(profile):
+            profile = await profile
+        return await self.pipeline.evaluate_claim(claim, profile)
+
+    def _admit_evaluated(self, snapshot: CandidateEvalSnapshot) -> None:
+        if snapshot.evaluated <= 0 or snapshot.available >= snapshot.target:
+            return
+        admit = getattr(self.pipeline, "admit_evaluated", None)
+        if not callable(admit):
+            return
+        result = admit(limit=min(self.batch_size, snapshot.target - snapshot.available))
+        self.last_cached = int(result.get("cached", 0))
+        self.last_rejected = int(result.get("rejected", 0))
 
     async def _commit_finished_workers(self) -> None:
         done = [task for task in self._workers if task.done()]

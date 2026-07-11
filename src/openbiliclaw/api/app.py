@@ -4212,16 +4212,25 @@ def create_app(
         except Exception:
             logger.exception("Background pool classification failed")
 
-    async def _drain_discovery_candidates_once() -> None:
-        """Best-effort drain for newly enqueued source candidates."""
+    def _notify_discovery_candidates_enqueued(source: str) -> None:
+        """Wake continuous evaluation after the enqueue transaction commits."""
 
-        drain = getattr(ctx.runtime_controller, "drain_discovery_candidates_once", None)
-        if not callable(drain):
+        coordinator = getattr(ctx.runtime_controller, "candidate_eval_coordinator", None)
+        notify = getattr(coordinator, "notify", None)
+        if callable(notify):
+            notify(f"candidate_enqueued:{source}")
             return
-        try:
-            await drain(batch_size=30)
-        except Exception:
-            logger.exception("Background discovery candidate drain failed")
+
+        async def legacy_drain() -> None:
+            drain = getattr(ctx.runtime_controller, "drain_discovery_candidates_once", None)
+            if not callable(drain):
+                return
+            try:
+                await drain(batch_size=30)
+            except Exception:
+                logger.exception("Background discovery candidate drain failed")
+
+        asyncio.create_task(legacy_drain())
 
     def _pool_available_count() -> int | None:
         """Return the best available servable-pool count for hot-path guards."""
@@ -7198,7 +7207,7 @@ def create_app(
                 self_info=self_info_for_filter or None,
             )
             if enqueued:
-                asyncio.create_task(_drain_discovery_candidates_once())
+                _notify_discovery_candidates_enqueued("xiaohongshu")
 
         return {
             "ok": True,
@@ -7342,7 +7351,7 @@ def create_app(
                     source_keyword_id=source_keyword_id,
                 )
                 if enqueued:
-                    asyncio.create_task(_drain_discovery_candidates_once())
+                    _notify_discovery_candidates_enqueued("bilibili")
             return {"ok": True, "enqueued": enqueued}
 
         _bili_task_queue.fail(task_id, error=str(payload.get("error", "") or ""), debug=debug)
@@ -7490,7 +7499,7 @@ def create_app(
                     source_keyword_id=task_source_keyword_id,
                 )
                 if enqueued:
-                    asyncio.create_task(_drain_discovery_candidates_once())
+                    _notify_discovery_candidates_enqueued("xiaohongshu")
             if task_type == "bootstrap_profile" and added_notes and not _skip_profile:
                 fresh_notes, note_keys_by_index = _filter_new_source_bootstrap_items(
                     "xhs",
