@@ -4,7 +4,7 @@
 
 `src/openbiliclaw/saved_sync/` 提供平台无关的收藏 / 稍后再看基础设施。它把本地保存和平台账号写入分成两个阶段：本地 membership 必须先提交成功，之后才允许创建原生同步任务。平台失败只更新逐项同步状态，不回滚本地保存。
 
-当前模块已经实现 canonical identity / typed contracts、capability router、local-first sync service、SQLite DAO 边界，以及首个生产实现 `BilibiliNativeSaveAdapter`。平台中立 HTTP API、runtime 注册和四端 UI 属于后续任务，因此当前用户界面仍不会触发真实平台账号写入。
+当前模块已经实现 canonical identity / typed contracts、capability router、local-first sync service、SQLite DAO 边界、首个生产实现 `BilibiliNativeSaveAdapter`，以及平台中立 HTTP API / runtime 注册。四端 UI 属于后续任务；现有旧端点仍只做本地 B 站兼容保存，不会因本次 wiring 自动修改平台账号。
 
 ## 已实现功能
 
@@ -18,6 +18,8 @@
 | 可恢复任务查询 | ✅ | `get_sync_task()` 只从 `native_save_states` 与 membership/item join 重建结果，进程内不保存易丢失的任务结果。 |
 | 安全失败归一化 | ✅ | 未注册 / 不支持的路由写为 `unsupported`；malformed target / result 写固定 `failed/invalid_adapter_result`；adapter 异常写 `failed/adapter_exception`。凡 adapter 因 item heartbeat 异常、响应 deadline 或调用方取消而进入 detached 状态，tracked watchdog 都会切换到 10ms–1s 有界退避的 owner-fenced heartbeat，直到真实终止后归一化 late terminal / malformed 结果，避免 detached 期间的后续心跳异常开放重叠重试。 |
 | B 站原生 adapter | ✅ | favorite 精确复用或创建 `OpenBiliClaw` 收藏夹；watch-later 写 B 站稍后再看。任意 endpoint 的 `-101` → `login_required`；只有最终 favorite resource-deal POST 的 `11201` 会由 client 标记为 dedicated duplicate，且 adapter 仍要求 resolved action 为 favorite 才映射 `already_synced`；folder/resolver 的同码与非 favorite route 的该异常均为 `failed`；watch-later 的 `90003` 固定为 `failed/bilibili_video_unavailable`。 |
+| 平台中立 HTTP API | ✅ | `/api/saved/{list_kind}` 提供 save/list/remove/status/sync，`/api/saved-sync/tasks/{task_id}` 返回 durable 逐项结果；`list_kind`、canonical key、选择和 UUID 均 fail closed。缺失 membership 只返回安全的 `failed/not_saved_locally`，不会成为任意 URL/ID 的平台写入代理。 |
+| Runtime wiring | ✅ | `RuntimeContext` 把当前 `BilibiliAPIClient` 注册到新 router/service，并把自动/手动 sync coroutine 交给 `BackgroundTaskRegistry`；配置热重载在所有新组件构造成功后原子替换 client 与 service。 |
 
 ## 公开 API
 
@@ -53,7 +55,20 @@ adapter = BilibiliNativeSaveAdapter(client)
 - `SESSDATA` 与 `bili_jct` 缺任一项都会在任何视频 lookup / POST 前返回 `login_required`；Cookie、CSRF、服务端 message/body 不会进入 `NativeSaveResult`。
 - BV → aid 使用 application-code-aware GET，aid 必须是非 bool 的正整数才允许写 POST。GET/POST 共用脱敏 transport mapping；HTTP 412/429 分别保留为安全数值 code `-412/-429`（保留异常 cause）并归一化为 `rate_limited`。
 - 同一个 client 实例内、同一 title 的收藏夹 ensure 由实例内 async lock 串行；锁内重新查询 exact title，因此仅保证该实例内的竞争调用创建一次。不同 client（即使代表同一账号）、不同进程或不同 event loop 之间不协调。
-- 本 adapter 目前只是可注册能力；Task 7 才会在 `RuntimeContext` 中绑定真实 client 并通过平台中立 API 暴露。不要把本提交解读为 UI 已开启账号写入。
+- `RuntimeContext` 已把本 adapter 绑定到当前 B 站 client。只有开启默认关闭的自动同步，或显式调用手动 `/sync`，才会执行账号写入；旧 `/api/watch-later`、`/api/favorites` POST 固定 `auto_sync=False`。
+
+### 平台中立 HTTP API
+
+| 方法 | 路径 | 语义 |
+|------|------|------|
+| `POST` | `/api/saved/{favorite|watch_later}` | 严格 canonical identity 本地 upsert；按运行时 `saved_sync.auto_sync_enabled` 决定是否只创建后台任务，响应不等待平台 I/O。 |
+| `GET` | `/api/saved/{favorite|watch_later}` | 分页返回 metadata snapshot、membership 和最新 native state。 |
+| `POST` | `/api/saved/{favorite|watch_later}/remove` | 用 exact `item_key` 只删本地 membership，不反向取消平台保存。 |
+| `GET` | `/api/saved/{favorite|watch_later}/status?item_key=...` | 查询单项本地 / 同步状态。 |
+| `POST` | `/api/saved/{favorite|watch_later}/sync` | 手动同步；`item_keys=[]` 表示全部 eligible，且始终无视自动同步开关。 |
+| `GET` | `/api/saved-sync/tasks/{uuid}` | 轮询持久化逐项状态；`login_required` / `rate_limited` / `failed` 不包装成泛化成功。 |
+
+所有 `/api/*` 路径继续受现有 API auth middleware 保护。旧 `/api/watch-later` 与 `/api/favorites` 保留 B 站 `bvid` 契约，响应只新增 identity / sync 字段；POST 通过 service 本地保存但永不自动同步。
 
 ### Local-first service
 
@@ -74,6 +89,7 @@ persisted = service.get_sync_task(created.task_id)
 
 ```text
 SavedItemInput
+  -> POST /api/saved/{list_kind}  # strict identity; local response first
   -> Database.upsert_saved_membership()  # 本地事务先提交
   -> Database.claim_native_sync_task(pending, task_id)  # atomic batch ownership
   -> injected task_starter
@@ -85,6 +101,7 @@ SavedItemInput
   -> BilibiliAPIClient authenticated POST + owner heartbeat/deadline
   -> Database.complete_native_save_claim(item result)   # owner-checked terminal write
   -> SavedSyncService.get_sync_task()
+  -> GET /api/saved-sync/tasks/{task_id} # truthful per-item polling
 ```
 
-删除本地 membership 仍只由 storage/API 层负责，不会反向删除平台账号内容。B 站 adapter 不读取配置、不注册 runtime，也不自行重试；平台中立 service 继续拥有任务、route 与持久化状态。
+删除本地 membership 仍只由 storage/API 层负责，不会反向删除平台账号内容。B 站 adapter 不读取配置、HTTP request 或全局 runtime，也不自行重试；平台中立 service 继续拥有任务、route 与持久化状态，API route 只在保存请求当下读取当前热重载配置。

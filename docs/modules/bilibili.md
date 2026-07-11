@@ -23,7 +23,7 @@
 | 搜索风控冷却（分级） | ✅ | 412（显式 IP 封禁）即时进入硬冷却（base 600s）；`v_voucher`（多为 WBI key churn / 轻限流）改为**阈值化软冷却**——单个关键词耗尽重试只记一次 streak、不触发冷却（整轮其余关键词 + 共用此冷却的 explore 继续出货），但会打开短期 `search_dom_fallback_remaining()` 信号让扩展可补一轮真实搜索页；连续 `_SEARCH_VOUCHER_BLOCK_THRESHOLD`（默认 3）个关键词级耗尽才启用进程级 cooldown（base 缩到 180s）；一旦怀疑风暴（streak>0）后续关键词只做单次快探测、不再每词 ~21s 硬抗，任一成功即清零 streak。所有 BilibiliAPIClient 实例共享冷却和 DOM fallback 状态 |
 | 扩展搜索兜底任务桥 | ✅ | `BilibiliExtensionSearchProducer` 在 `search_cooldown_remaining()>0` 或 `search_dom_fallback_remaining()>0`、扩展 presence 在线、B 站池子低于 quota 时入队 `bili_tasks(type="search")`；扩展后台打开 `search.bilibili.com/all?keyword=...`，content script 抓渲染后的搜索卡片并 POST `/api/sources/bili/task-result`，后端写入 `discovery_candidates`，后续仍由统一 evaluator 判断是否入池 |
 | 账户侧同步来源 | ✅ | 已支持 history / favorites / following 三类长期信号，供后台低频同步使用；favorites 会按收藏夹分页补齐到预算上限；同步事件会带 `metadata.signal_strength` 供偏好分析区分证据强弱 |
-| 原生收藏 / 稍后再看写入 | ✅ | `BilibiliAPIClient` 新增认证 form POST、exact-title 收藏夹复用/创建、视频收藏和稍后再看写入；`BilibiliNativeSaveAdapter` 将 B 站 application code 归一化为 saved-sync 状态。当前尚未接入 HTTP/runtime/UI。 |
+| 原生收藏 / 稍后再看写入 | ✅ | `BilibiliAPIClient` 新增认证 form POST、exact-title 收藏夹复用/创建、视频收藏和稍后再看写入；`BilibiliNativeSaveAdapter` 将 B 站 application code 归一化为 saved-sync 状态，并已由 `RuntimeContext` 注册到平台中立 `/api/saved/*`。UI 仍属后续任务；默认关闭自动同步，旧 B 站保存端点仍只写本地。 |
 | 3.3 agent-browser 集成 | ✅ | navigate / get_page_content + CLI browser 命令 |
 
 ## 公开 API

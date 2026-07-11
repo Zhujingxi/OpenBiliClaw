@@ -18,6 +18,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 from urllib.parse import quote, urlparse
+from uuid import UUID
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -105,7 +106,15 @@ from openbiliclaw.api.models import (
     RedditCookieResponse,
     RedditSourceConfigOut,
     RuntimeStatusResponse,
+    SavedItemIn,
+    SavedItemKeyIn,
+    SavedItemStateResponse,
+    SavedListItem,
+    SavedListResponse,
+    SavedSyncBatchResponse,
     SavedSyncConfigOut,
+    SavedSyncItemResponse,
+    SavedSyncRequest,
     SchedulerConfigOut,
     SourceCredentialItem,
     SourcesBrowserConfigOut,
@@ -134,6 +143,7 @@ from openbiliclaw.api.models import (
     ZhihuLoginStateIn,
     ZhihuLoginStateResponse,
     ZhihuSourceConfigOut,
+    validate_saved_item_key,
 )
 from openbiliclaw.runtime import embedding_progress
 from openbiliclaw.runtime.feedback_scheduler import FeedbackBatchScheduler
@@ -154,6 +164,15 @@ from openbiliclaw.runtime.keyword_fetch import (
     source_keyword_id_from_xhs_task,
 )
 from openbiliclaw.saved_sync.identity import make_item_key
+from openbiliclaw.saved_sync.models import (
+    NATIVE_SAVE_STATUSES,
+    NativeSaveAction,
+    NativeSaveResult,
+    NativeSaveStatus,
+    SavedItemInput,
+    SavedListKind,
+    SavedSyncBatchResult,
+)
 from openbiliclaw.soul.dislike_writeback import (
     apply_new_dislikes,
     topics_for_confirmed_avoidance,
@@ -4027,12 +4046,276 @@ def create_app(
             ]
         )
 
-    # ── Watch-later (稍后再看) ────────────────────────────────────
+    # ── Platform-neutral saved memberships and native sync ─────────
+
+    def _saved_service() -> Any:
+        service = getattr(ctx, "saved_sync_service", None)
+        if service is None:
+            raise HTTPException(status_code=503, detail="saved sync service unavailable")
+        return service
+
+    def _saved_count(list_kind: SavedListKind) -> int:
+        if list_kind == "favorite":
+            return int(ctx.database.count_favorites())
+        return int(ctx.database.count_watch_later())
+
+    def _safe_native_status(value: object) -> NativeSaveStatus:
+        if isinstance(value, str) and value in NATIVE_SAVE_STATUSES:
+            return cast("NativeSaveStatus", value)
+        return "failed"
+
+    def _safe_result_text(value: object, *, limit: int = 512) -> str:
+        if not isinstance(value, str):
+            return ""
+        return "".join(
+            character
+            for character in value[:limit]
+            if ord(character) >= 32 and ord(character) != 127
+        )
+
+    def _saved_state_response(
+        list_kind: SavedListKind,
+        item_key: str,
+    ) -> SavedItemStateResponse:
+        row = ctx.database.get_saved_membership(list_kind, item_key)
+        if row is None:
+            return SavedItemStateResponse(saved=False, item_key=item_key)
+        return SavedItemStateResponse(
+            saved=True,
+            item_key=item_key,
+            sync_status=_safe_native_status(row.get("sync_status")),
+            sync_task_id=str(row.get("sync_task_id", "")),
+            resolved_action=str(row.get("resolved_action", "")),
+            resolved_target=str(row.get("resolved_target", "")),
+            error_code=_safe_result_text(row.get("last_error_code", ""), limit=128),
+            error_message=_safe_result_text(row.get("last_error_message", "")),
+        )
+
+    def _saved_list_item(row: dict[str, Any]) -> SavedListItem:
+        return SavedListItem(
+            item_key=str(row.get("item_key", "")),
+            source_platform=str(row.get("source_platform", "")),
+            content_id=str(row.get("content_id", "")),
+            content_url=str(row.get("content_url", "")),
+            content_type=str(row.get("content_type", "") or "video"),
+            title=str(row.get("title", "")),
+            author_name=str(row.get("author_name", "")),
+            cover_url=str(row.get("cover_url", "")),
+            note=str(row.get("note", "")),
+            added_at=str(row.get("added_at", "")),
+            sync_status=_safe_native_status(row.get("sync_status")),
+            sync_task_id=str(row.get("sync_task_id", "")),
+            requested_action=str(row.get("requested_action", "")),
+            resolved_action=str(row.get("resolved_action", "")),
+            resolved_target=str(row.get("resolved_target", "")),
+            error_code=_safe_result_text(row.get("last_error_code", ""), limit=128),
+            error_message=_safe_result_text(row.get("last_error_message", "")),
+        )
+
+    def _sync_item_response(result: NativeSaveResult) -> SavedSyncItemResponse:
+        return SavedSyncItemResponse(
+            item_key=result.item_key,
+            status=_safe_native_status(result.status),
+            resolved_action=result.resolved_action,
+            resolved_target=_safe_result_text(result.resolved_target, limit=256),
+            error_code=_safe_result_text(result.error_code, limit=128),
+            error_message=_safe_result_text(result.error_message),
+        )
+
+    def _sync_batch_response(result: SavedSyncBatchResult) -> SavedSyncBatchResponse:
+        return SavedSyncBatchResponse(
+            task_id=result.task_id,
+            items=[_sync_item_response(item) for item in result.items],
+        )
+
+    @app.post("/api/saved/{list_kind}", response_model=SavedItemStateResponse)
+    async def saved_add(
+        list_kind: SavedListKind,
+        payload: SavedItemIn,
+    ) -> SavedItemStateResponse:
+        item = SavedItemInput(
+            source_platform=payload.source_platform,
+            content_id=payload.content_id,
+            content_url=payload.content_url,
+            content_type=payload.content_type,
+            title=payload.title,
+            author_name=payload.author_name,
+            cover_url=payload.cover_url,
+        )
+        saved_sync = getattr(getattr(ctx, "config", None), "saved_sync", None)
+        auto_sync = bool(getattr(saved_sync, "auto_sync_enabled", False))
+        try:
+            result = _saved_service().save_local(
+                list_kind,
+                item,
+                note=payload.note,
+                auto_sync=auto_sync,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="invalid saved item") from exc
+        if result.sync_status == "pending" and result.sync_task_id:
+            return SavedItemStateResponse(
+                saved=result.saved,
+                item_key=result.item_key,
+                sync_status="pending",
+                sync_task_id=result.sync_task_id,
+            )
+        state = _saved_state_response(list_kind, result.item_key)
+        return state.model_copy(
+            update={
+                "saved": result.saved,
+                "sync_status": result.sync_status,
+                "sync_task_id": result.sync_task_id,
+            }
+        )
+
+    @app.post("/api/saved/{list_kind}/remove", response_model=SavedItemStateResponse)
+    async def saved_remove(
+        list_kind: SavedListKind,
+        payload: SavedItemKeyIn,
+    ) -> SavedItemStateResponse:
+        ctx.database.remove_saved_membership(list_kind, payload.item_key)
+        return _saved_state_response(list_kind, payload.item_key)
+
+    @app.get("/api/saved/{list_kind}/status", response_model=SavedItemStateResponse)
+    async def saved_status(
+        list_kind: SavedListKind,
+        item_key: str = Query(...),
+    ) -> SavedItemStateResponse:
+        try:
+            normalized_key = validate_saved_item_key(item_key)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="invalid item_key") from exc
+        return _saved_state_response(list_kind, normalized_key)
+
+    @app.get("/api/saved/{list_kind}", response_model=SavedListResponse)
+    async def saved_list(
+        list_kind: SavedListKind,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+    ) -> SavedListResponse:
+        rows = ctx.database.list_saved_memberships(list_kind, limit=limit, offset=offset)
+        return SavedListResponse(
+            items=[_saved_list_item(row) for row in rows],
+            total=_saved_count(list_kind),
+        )
+
+    @app.post("/api/saved/{list_kind}/sync", response_model=SavedSyncBatchResponse)
+    async def saved_sync(
+        list_kind: SavedListKind,
+        payload: SavedSyncRequest,
+    ) -> SavedSyncBatchResponse:
+        selected = payload.item_keys
+        missing = {
+            item_key
+            for item_key in selected
+            if ctx.database.get_saved_membership(list_kind, item_key) is None
+        }
+        eligible_selection = [item_key for item_key in selected if item_key not in missing]
+        if selected and not eligible_selection:
+            created = SavedSyncBatchResult(task_id="", items=())
+        else:
+            trigger = "manual_single" if len(selected) == 1 else "manual_batch"
+            try:
+                created = _saved_service().create_sync_task(
+                    list_kind,
+                    eligible_selection,
+                    trigger,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="invalid sync selection") from exc
+
+        created_by_key = {item.item_key: item for item in created.items}
+        if not selected:
+            items = list(created.items)
+        else:
+            items = []
+            for item_key in selected:
+                if item_key in missing:
+                    items.append(
+                        NativeSaveResult(
+                            item_key=item_key,
+                            status="failed",
+                            resolved_action=list_kind,
+                            resolved_target="",
+                            error_code="not_saved_locally",
+                            error_message="Item is not saved locally",
+                        )
+                    )
+                    continue
+                created_item = created_by_key.get(item_key)
+                if created_item is not None:
+                    items.append(created_item)
+                    continue
+                row = ctx.database.get_saved_membership(list_kind, item_key)
+                if row is None:  # pragma: no cover - membership deleted after validation
+                    items.append(
+                        NativeSaveResult(
+                            item_key=item_key,
+                            status="failed",
+                            resolved_action=list_kind,
+                            resolved_target="",
+                            error_code="not_saved_locally",
+                            error_message="Item is not saved locally",
+                        )
+                    )
+                    continue
+                items.append(
+                    NativeSaveResult(
+                        item_key=item_key,
+                        status=_safe_native_status(row.get("sync_status")),
+                        resolved_action=cast(
+                            "NativeSaveAction",
+                            str(row.get("resolved_action", "")) or list_kind,
+                        ),
+                        resolved_target=str(row.get("resolved_target", "")),
+                        error_code=_safe_result_text(
+                            row.get("last_error_code", ""),
+                            limit=128,
+                        ),
+                        error_message=_safe_result_text(row.get("last_error_message", "")),
+                    )
+                )
+        return _sync_batch_response(
+            SavedSyncBatchResult(task_id=created.task_id, items=tuple(items))
+        )
+
+    @app.get("/api/saved-sync/tasks/{task_id}", response_model=SavedSyncBatchResponse)
+    async def saved_sync_task(task_id: UUID) -> SavedSyncBatchResponse:
+        try:
+            result = _saved_service().get_sync_task(str(task_id))
+        except ValueError as exc:  # pragma: no cover - UUID path validation protects this
+            raise HTTPException(status_code=422, detail="invalid task_id") from exc
+        if not result.items:
+            raise HTTPException(status_code=404, detail="saved sync task not found")
+        return _sync_batch_response(result)
+
+    # ── Legacy Bilibili watch-later (稍后再看) ─────────────────────
+
+    def _legacy_saved_state(
+        list_kind: SavedListKind,
+        bvid: str,
+    ) -> tuple[bool, str, NativeSaveStatus | None, str]:
+        normalized_bvid = bvid.strip()
+        if not normalized_bvid:
+            raise HTTPException(status_code=422, detail="bvid is required")
+        item_key = make_item_key("bilibili", normalized_bvid)
+        row = ctx.database.get_saved_membership(list_kind, item_key)
+        return (
+            row is not None,
+            item_key,
+            _safe_native_status(row.get("sync_status")) if row is not None else None,
+            str(row.get("sync_task_id", "")) if row is not None else "",
+        )
 
     def _watch_later_state(bvid: str) -> WatchLaterStateResponse:
+        saved, item_key, sync_status, sync_task_id = _legacy_saved_state("watch_later", bvid)
         return WatchLaterStateResponse(
-            saved=ctx.database.is_in_watch_later(bvid),
+            saved=saved,
             total=ctx.database.count_watch_later(),
+            item_key=item_key,
+            sync_status=sync_status,
+            sync_task_id=sync_task_id,
         )
 
     @app.post("/api/watch-later", response_model=WatchLaterStateResponse)
@@ -4040,6 +4323,13 @@ def create_app(
         bvid = payload.bvid.strip()
         if not bvid:
             raise HTTPException(status_code=422, detail="bvid is required")
+        _saved_service().save_local(
+            "watch_later",
+            SavedItemInput("bilibili", bvid),
+            note=payload.note.strip(),
+            auto_sync=False,
+        )
+        # Keep the compatibility table and cached metadata snapshot aligned.
         ctx.database.add_to_watch_later(bvid, note=payload.note.strip())
         return _watch_later_state(bvid)
 
@@ -4058,20 +4348,26 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
     ) -> WatchLaterListResponse:
-        rows = ctx.database.list_watch_later(limit=limit, offset=offset)
+        rows = ctx.database.list_saved_memberships("watch_later", limit=limit, offset=offset)
         return WatchLaterListResponse(
             items=[
                 WatchLaterItem(
-                    bvid=str(row.get("bvid", "")),
+                    bvid=str(row.get("content_id", "")),
                     item_key=str(row.get("item_key", "")),
                     content_id=str(row.get("content_id", "") or row.get("bvid", "")),
                     title=str(row.get("title", "")),
-                    up_name=str(row.get("up_name", "")),
+                    up_name=str(row.get("author_name", "")),
                     cover_url=str(row.get("cover_url", "")),
                     content_url=str(row.get("content_url", "")),
                     source_platform=str(row.get("source_platform", "") or "bilibili"),
                     content_type=str(row.get("content_type", "") or "video"),
                     added_at=str(row.get("added_at", "")),
+                    sync_status=_safe_native_status(row.get("sync_status")),
+                    sync_task_id=str(row.get("sync_task_id", "")),
+                    resolved_action=str(row.get("resolved_action", "")),
+                    resolved_target=str(row.get("resolved_target", "")),
+                    error_code=_safe_result_text(row.get("last_error_code", ""), limit=128),
+                    error_message=_safe_result_text(row.get("last_error_message", "")),
                 )
                 for row in rows
             ],
@@ -4081,9 +4377,13 @@ def create_app(
     # ── Favorites (收藏夹) ────────────────────────────────────────
 
     def _favorite_state(bvid: str) -> FavoriteStateResponse:
+        saved, item_key, sync_status, sync_task_id = _legacy_saved_state("favorite", bvid)
         return FavoriteStateResponse(
-            saved=ctx.database.is_in_favorites(bvid),
+            saved=saved,
             total=ctx.database.count_favorites(),
+            item_key=item_key,
+            sync_status=sync_status,
+            sync_task_id=sync_task_id,
         )
 
     @app.post("/api/favorites", response_model=FavoriteStateResponse)
@@ -4091,6 +4391,13 @@ def create_app(
         bvid = payload.bvid.strip()
         if not bvid:
             raise HTTPException(status_code=422, detail="bvid is required")
+        _saved_service().save_local(
+            "favorite",
+            SavedItemInput("bilibili", bvid),
+            note=payload.note.strip(),
+            auto_sync=False,
+        )
+        # Keep the compatibility table and cached metadata snapshot aligned.
         ctx.database.add_to_favorites(bvid, note=payload.note.strip())
         return _favorite_state(bvid)
 
@@ -4109,20 +4416,26 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
     ) -> FavoriteListResponse:
-        rows = ctx.database.list_favorites(limit=limit, offset=offset)
+        rows = ctx.database.list_saved_memberships("favorite", limit=limit, offset=offset)
         return FavoriteListResponse(
             items=[
                 FavoriteItem(
-                    bvid=str(row.get("bvid", "")),
+                    bvid=str(row.get("content_id", "")),
                     item_key=str(row.get("item_key", "")),
                     content_id=str(row.get("content_id", "") or row.get("bvid", "")),
                     title=str(row.get("title", "")),
-                    up_name=str(row.get("up_name", "")),
+                    up_name=str(row.get("author_name", "")),
                     cover_url=str(row.get("cover_url", "")),
                     content_url=str(row.get("content_url", "")),
                     source_platform=str(row.get("source_platform", "") or "bilibili"),
                     content_type=str(row.get("content_type", "") or "video"),
                     added_at=str(row.get("added_at", "")),
+                    sync_status=_safe_native_status(row.get("sync_status")),
+                    sync_task_id=str(row.get("sync_task_id", "")),
+                    resolved_action=str(row.get("resolved_action", "")),
+                    resolved_target=str(row.get("resolved_target", "")),
+                    error_code=_safe_result_text(row.get("last_error_code", ""), limit=128),
+                    error_message=_safe_result_text(row.get("last_error_message", "")),
                 )
                 for row in rows
             ],

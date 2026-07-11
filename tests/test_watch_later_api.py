@@ -64,11 +64,23 @@ def test_watch_later_endpoints_round_trip_with_metadata(
 ) -> None:
     client, _db = watch_later_client
 
-    assert client.get("/api/watch-later/BV1WATCH").json() == {"saved": False, "total": 0}
+    assert client.get("/api/watch-later/BV1WATCH").json() == {
+        "saved": False,
+        "total": 0,
+        "item_key": "bilibili:BV1WATCH",
+        "sync_status": None,
+        "sync_task_id": "",
+    }
 
     response = client.post("/api/watch-later", json={"bvid": " BV1WATCH "})
     assert response.status_code == 200
-    assert response.json() == {"saved": True, "total": 1}
+    assert response.json() == {
+        "saved": True,
+        "total": 1,
+        "item_key": "bilibili:BV1WATCH",
+        "sync_status": "pending",
+        "sync_task_id": "",
+    }
 
     list_response = client.get("/api/watch-later?limit=20&offset=0")
     assert list_response.status_code == 200
@@ -85,6 +97,12 @@ def test_watch_later_endpoints_round_trip_with_metadata(
                 "source_platform": "bilibili",
                 "content_type": "video",
                 "added_at": list_response.json()["items"][0]["added_at"],
+                "sync_status": "pending",
+                "sync_task_id": "",
+                "resolved_action": "",
+                "resolved_target": "",
+                "error_code": "",
+                "error_message": "",
             }
         ],
         "total": 1,
@@ -92,7 +110,13 @@ def test_watch_later_endpoints_round_trip_with_metadata(
 
     remove_response = client.delete("/api/watch-later/BV1WATCH")
     assert remove_response.status_code == 200
-    assert remove_response.json() == {"saved": False, "total": 0}
+    assert remove_response.json() == {
+        "saved": False,
+        "total": 0,
+        "item_key": "bilibili:BV1WATCH",
+        "sync_status": None,
+        "sync_task_id": "",
+    }
 
 
 def test_watch_later_list_paginates_newest_first(

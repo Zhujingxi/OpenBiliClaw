@@ -300,9 +300,9 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │       -> get_profile()/sync_profile_files 读时叠加（抗画像重建）│ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ SavedSync：本地 membership 先提交 -> 持久化 task -> capability router │
-│  │ -> BilibiliNativeSaveAdapter（收藏夹/稍后再看）-> 逐项 native state │
-│  │ （HTTP / runtime / 四端 UI 尚未接入；账号写入仍需显式触发）       │
+│  │ /api/saved/* -> 本地 membership 先提交 -> 持久化 task -> capability router │
+│  │ -> BilibiliNativeSaveAdapter（收藏夹/稍后再看）-> 逐项 state/task poll │
+│  │ （runtime 已接入；自动同步默认关闭；四端 UI 尚未接入）             │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │              Skill System (可扩展技能)                 │   │

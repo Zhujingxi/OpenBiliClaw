@@ -2,9 +2,27 @@
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, StrictBool, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, field_validator
+
+from openbiliclaw.saved_sync.identity import canonical_source_platform, make_item_key
+
+NativeSaveStatusOut = Literal[
+    "pending",
+    "syncing",
+    "synced",
+    "already_synced",
+    "login_required",
+    "unsupported",
+    "rate_limited",
+    "extension_required",
+    "failed",
+]
+NativeSaveActionOut = Literal["favorite", "watch_later"]
+_SAVED_PLATFORM_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 
 
 class BehaviorEventIn(BaseModel):
@@ -884,6 +902,9 @@ class WatchLaterStateResponse(BaseModel):
 
     saved: bool
     total: int
+    item_key: str = ""
+    sync_status: NativeSaveStatusOut | None = None
+    sync_task_id: str = ""
 
 
 class WatchLaterItem(BaseModel):
@@ -899,6 +920,12 @@ class WatchLaterItem(BaseModel):
     source_platform: str = ""
     content_type: str = "video"
     added_at: str = ""
+    sync_status: NativeSaveStatusOut = "pending"
+    sync_task_id: str = ""
+    resolved_action: str = ""
+    resolved_target: str = ""
+    error_code: str = ""
+    error_message: str = ""
 
 
 class WatchLaterListResponse(BaseModel):
@@ -920,6 +947,9 @@ class FavoriteStateResponse(BaseModel):
 
     saved: bool
     total: int
+    item_key: str = ""
+    sync_status: NativeSaveStatusOut | None = None
+    sync_task_id: str = ""
 
 
 class FavoriteItem(BaseModel):
@@ -935,6 +965,12 @@ class FavoriteItem(BaseModel):
     source_platform: str = ""
     content_type: str = "video"
     added_at: str = ""
+    sync_status: NativeSaveStatusOut = "pending"
+    sync_task_id: str = ""
+    resolved_action: str = ""
+    resolved_target: str = ""
+    error_code: str = ""
+    error_message: str = ""
 
 
 class FavoriteListResponse(BaseModel):
@@ -942,6 +978,187 @@ class FavoriteListResponse(BaseModel):
 
     items: list[FavoriteItem]
     total: int
+
+
+_SavedIdentityString = Annotated[StrictStr, Field(max_length=2048)]
+
+
+def validate_saved_item_key(value: str) -> str:
+    """Validate a canonical item key without guessing or alias resolution."""
+    if not isinstance(value, str):
+        raise ValueError("item_key must be a string")
+    item_key = value.strip()
+    if not item_key or item_key != value or len(item_key) > 2048:
+        raise ValueError("item_key must be a non-blank canonical key")
+    platform, separator, content_identity = item_key.partition(":")
+    if (
+        not separator
+        or not platform
+        or not content_identity
+        or canonical_source_platform(platform) != platform
+        or _SAVED_PLATFORM_RE.fullmatch(platform) is None
+        or any(ord(character) < 32 or ord(character) == 127 for character in item_key)
+    ):
+        raise ValueError("item_key must be a canonical platform:content identity")
+    return item_key
+
+
+class SavedItemIn(BaseModel):
+    """Canonical local-save input for every supported source platform."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_platform: _SavedIdentityString
+    content_id: _SavedIdentityString = ""
+    content_url: _SavedIdentityString = ""
+    content_type: Annotated[StrictStr, Field(min_length=1, max_length=128)] = "video"
+    title: _SavedIdentityString = ""
+    author_name: _SavedIdentityString = ""
+    cover_url: _SavedIdentityString = ""
+    note: _SavedIdentityString = ""
+
+    @field_validator(
+        "source_platform",
+        "content_id",
+        "content_url",
+        "content_type",
+        "title",
+        "author_name",
+        "cover_url",
+        "note",
+    )
+    @classmethod
+    def _strip_safe_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if any(ord(character) < 32 or ord(character) == 127 for character in normalized):
+            raise ValueError("saved item fields must not contain control characters")
+        return normalized
+
+    @field_validator("source_platform")
+    @classmethod
+    def _canonicalize_platform(cls, value: str) -> str:
+        platform = canonical_source_platform(value)
+        if not platform:
+            raise ValueError("source_platform is required")
+        if _SAVED_PLATFORM_RE.fullmatch(platform) is None:
+            raise ValueError("source_platform must be a canonical platform slug")
+        return platform
+
+    @field_validator("content_type")
+    @classmethod
+    def _require_content_type(cls, value: str) -> str:
+        if not value:
+            raise ValueError("content_type is required")
+        return value
+
+    @field_validator("content_url", "cover_url")
+    @classmethod
+    def _validate_optional_http_url(cls, value: str) -> str:
+        if not value:
+            return value
+        parts = urlsplit(value)
+        if parts.scheme not in {"http", "https"} or not parts.netloc:
+            raise ValueError("URL fields must use an absolute HTTP(S) URL")
+        return value
+
+    @field_validator("content_id")
+    @classmethod
+    def _validate_content_id(cls, value: str) -> str:
+        if ":" in value:
+            raise ValueError("content_id must not contain ':'")
+        return value
+
+    def model_post_init(self, __context: object) -> None:
+        del __context
+        validate_saved_item_key(
+            make_item_key(self.source_platform, self.content_id, self.content_url)
+        )
+
+
+class SavedItemKeyIn(BaseModel):
+    """Exact local membership identity used for removal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_key: _SavedIdentityString
+
+    @field_validator("item_key")
+    @classmethod
+    def _validate_item_key(cls, value: str) -> str:
+        return validate_saved_item_key(value)
+
+
+class SavedSyncRequest(BaseModel):
+    """Explicit manual-sync selection; an empty list means all eligible rows."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_keys: Annotated[list[StrictStr], Field(max_length=500)] = Field(default_factory=list)
+
+    @field_validator("item_keys")
+    @classmethod
+    def _validate_item_keys(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(validate_saved_item_key(value) for value in values))
+
+
+class SavedItemStateResponse(BaseModel):
+    """Local membership plus its latest native-sync state."""
+
+    saved: bool
+    item_key: str
+    sync_status: NativeSaveStatusOut | None = None
+    sync_task_id: str = ""
+    resolved_action: str = ""
+    resolved_target: str = ""
+    error_code: str = ""
+    error_message: str = ""
+
+
+class SavedListItem(BaseModel):
+    """One platform-neutral saved membership and sync snapshot."""
+
+    item_key: str
+    source_platform: str
+    content_id: str
+    content_url: str = ""
+    content_type: str = "video"
+    title: str = ""
+    author_name: str = ""
+    cover_url: str = ""
+    note: str = ""
+    added_at: str = ""
+    sync_status: NativeSaveStatusOut = "pending"
+    sync_task_id: str = ""
+    requested_action: str = ""
+    resolved_action: str = ""
+    resolved_target: str = ""
+    error_code: str = ""
+    error_message: str = ""
+
+
+class SavedListResponse(BaseModel):
+    """Paginated platform-neutral saved memberships."""
+
+    items: list[SavedListItem]
+    total: int
+
+
+class SavedSyncItemResponse(BaseModel):
+    """One truthful item result in a native-save task."""
+
+    item_key: str
+    status: NativeSaveStatusOut
+    resolved_action: NativeSaveActionOut
+    resolved_target: str = ""
+    error_code: str = ""
+    error_message: str = ""
+
+
+class SavedSyncBatchResponse(BaseModel):
+    """Durable native-save batch state returned at creation and polling."""
+
+    task_id: str
+    items: list[SavedSyncItemResponse]
 
 
 class RecommendationClickIn(BaseModel):

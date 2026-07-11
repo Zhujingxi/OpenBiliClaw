@@ -64,11 +64,23 @@ def test_favorites_endpoints_round_trip_with_metadata(
 ) -> None:
     client, _db = favorites_client
 
-    assert client.get("/api/favorites/BV1FAV").json() == {"saved": False, "total": 0}
+    assert client.get("/api/favorites/BV1FAV").json() == {
+        "saved": False,
+        "total": 0,
+        "item_key": "bilibili:BV1FAV",
+        "sync_status": None,
+        "sync_task_id": "",
+    }
 
     response = client.post("/api/favorites", json={"bvid": " BV1FAV "})
     assert response.status_code == 200
-    assert response.json() == {"saved": True, "total": 1}
+    assert response.json() == {
+        "saved": True,
+        "total": 1,
+        "item_key": "bilibili:BV1FAV",
+        "sync_status": "pending",
+        "sync_task_id": "",
+    }
 
     list_response = client.get("/api/favorites?limit=20&offset=0")
     assert list_response.status_code == 200
@@ -85,6 +97,12 @@ def test_favorites_endpoints_round_trip_with_metadata(
                 "source_platform": "bilibili",
                 "content_type": "video",
                 "added_at": list_response.json()["items"][0]["added_at"],
+                "sync_status": "pending",
+                "sync_task_id": "",
+                "resolved_action": "",
+                "resolved_target": "",
+                "error_code": "",
+                "error_message": "",
             }
         ],
         "total": 1,
@@ -92,7 +110,13 @@ def test_favorites_endpoints_round_trip_with_metadata(
 
     remove_response = client.delete("/api/favorites/BV1FAV")
     assert remove_response.status_code == 200
-    assert remove_response.json() == {"saved": False, "total": 0}
+    assert remove_response.json() == {
+        "saved": False,
+        "total": 0,
+        "item_key": "bilibili:BV1FAV",
+        "sync_status": None,
+        "sync_task_id": "",
+    }
 
 
 def test_favorites_list_paginates_newest_first(

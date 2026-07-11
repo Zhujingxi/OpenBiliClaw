@@ -8,7 +8,7 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 2. **外部集成层** — OpenClaw adapter / skill wrappers / 本地 API / Codex CLI 凭据导入等对外接入边界
 3. **Agent 核心层** — 自研编排器 + Soul Engine + Discovery Engine + Recommendation Engine + Skill System
 4. **多源适配层（v0.3.0+）** — `SourceAdapter` 协议下的 B 站 / 小红书 / 抖音 / YouTube / X (Twitter) / 知乎 / Reddit / 通用 Web 源
-5. **保存同步编排层（foundation + B 站 adapter）** — canonical saved identity + normalized membership / native state + capability router + local-first `SavedSyncService` + `BilibiliNativeSaveAdapter`；HTTP/runtime/UI wiring 尚未接入
+5. **保存同步编排层（API/runtime + B 站 adapter）** — canonical saved identity + normalized membership / native state + `/api/saved/*` + capability router + local-first `SavedSyncService` + `BilibiliNativeSaveAdapter`；四端 UI 尚未接入
 6. **多层网状记忆存储** — Core / Episodic / Semantic / Working Memory（SQLite + 向量索引 + JSON）
 
 详见 [项目 Spec](spec.md) 中的架构图。模块级可视化图放在 `docs/diagrams/`：
@@ -36,7 +36,8 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 - `SavedSyncService` 在任何平台 I/O 前提交本地 membership，再通过持久化 task ID 执行逐项同步；自动 / 手动触发共用同一路径
 - 同平台逐项串行、不同平台组可并行；未注册能力写 `unsupported`，adapter 异常写安全的 `failed`，均不回滚本地保存或自动重试
 - `BilibiliNativeSaveAdapter` 是首个生产 adapter：favorite 精确复用/创建 `OpenBiliClaw`（仅同一个 client 实例/title 在锁内重查并单飞，不覆盖跨 client/process），watch-later 写 B 站稍后再看；BV → aid 先走 application-aware GET 并要求非 bool 正整数，`BilibiliAPIClient` 在任何请求前校验 `SESSDATA + bili_jct`；GET/POST HTTP 412/429 共用脱敏映射，favorite duplicate 由 resource-deal 专项异常标记而非 adapter action 猜测
-- API / runtime / 四端 UI wiring 留给后续任务，因此当前 UI 尚不会调用该账号写入能力
+- `/api/saved/{list_kind}` 提供严格 canonical save/list/remove/status/sync，`/api/saved-sync/tasks/{uuid}` 轮询逐项结果；缺失 membership 固定返回 `failed/not_saved_locally`，旧 B 站端点只做 local-only 兼容
+- `RuntimeContext` 在 B 站 client 热重载时原子重建 router/service，并把 detached sync 统一交给 `BackgroundTaskRegistry`；四端 UI wiring 留给后续任务
 
 ### User Soul Engine (`soul/`)
 - 行为数据分析和画像构建

@@ -13,7 +13,7 @@ required.
   - ``presence`` — tracks shared extension runtime-stream presence
 
 **Swappable components** (rebuilt on hot-reload):
-  - ``llm_registry``, ``llm_service``, ``bilibili_client``
+  - ``llm_registry``, ``llm_service``, ``bilibili_client``, ``saved_sync_service``
   - ``soul_engine``, ``dialogue``
   - ``discovery_engine``, ``recommendation_engine``
   - ``runtime_controller``, ``account_sync_service``
@@ -275,6 +275,7 @@ class RuntimeContext:
     llm_registry: Any = None
     llm_service: Any = None
     bilibili_client: Any = None
+    saved_sync_service: Any = None
     soul_engine: Any = None
     dialogue: Any = None
     discovery_engine: Any = None
@@ -282,6 +283,19 @@ class RuntimeContext:
     runtime_controller: Any = None
     account_sync_service: Any = None
     auto_update_service: Any = None
+
+    def __post_init__(self) -> None:
+        """Provide local-only saved-list behavior for injected/degraded contexts."""
+        if self.saved_sync_service is not None or self.database is None:
+            return
+        from openbiliclaw.saved_sync.router import NativeSaveRouter
+        from openbiliclaw.saved_sync.service import SavedSyncService
+
+        self.saved_sync_service = SavedSyncService(
+            self.database,
+            NativeSaveRouter(),
+            task_starter=lambda name, coro: self.task_registry.track(name, coro),
+        )
 
     @property
     def init_coordinator(self) -> Any:
@@ -377,6 +391,9 @@ class RuntimeContext:
         from openbiliclaw.runtime.account_sync import AccountSyncService
         from openbiliclaw.runtime.refresh import ContinuousRefreshController
         from openbiliclaw.runtime.updater import AutoUpdateService
+        from openbiliclaw.saved_sync.adapters.bilibili import BilibiliNativeSaveAdapter
+        from openbiliclaw.saved_sync.router import NativeSaveRouter
+        from openbiliclaw.saved_sync.service import SavedSyncService
         from openbiliclaw.soul.dialogue import SocraticDialogue
         from openbiliclaw.soul.engine import SoulEngine
 
@@ -400,6 +417,11 @@ class RuntimeContext:
                 configured_cookie=new_config.bilibili.cookie,
             ),
             proxy=new_config.bilibili.proxy or None,
+        )
+        new_saved_sync_service = SavedSyncService(
+            self.database,
+            NativeSaveRouter([BilibiliNativeSaveAdapter(new_bilibili_client)]),
+            task_starter=lambda name, coro: self.task_registry.track(name, coro),
         )
 
         # 3. Soul engine (reuses stable memory_manager)
@@ -899,6 +921,7 @@ class RuntimeContext:
         self.llm_registry = new_registry
         self.llm_service = new_llm_service
         self.bilibili_client = new_bilibili_client
+        self.saved_sync_service = new_saved_sync_service
         self.soul_engine = new_soul_engine
         self.dialogue = new_dialogue
         self.discovery_engine = new_discovery_engine
@@ -916,7 +939,7 @@ class RuntimeContext:
 
         logger.info(
             "Hot-reload complete — rebuilt %d swappable components",
-            11,
+            12,
         )
 
     async def restart_background_tasks(
