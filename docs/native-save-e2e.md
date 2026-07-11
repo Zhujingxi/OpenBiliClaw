@@ -16,26 +16,49 @@
 
 如本机也启用了密码门禁，请先选择一种准确模式：
 
-1. **同源 Cookie**：用 `/api/auth/login` 获取 cookie jar；随后所有 POST / PUT 请求同时带 `-b/-c <jar>`、`Origin: <与 OBC_BASE 同源>` 和 `X-OBC-Auth: 1`。
-2. **允许来源的 Bearer**：只有 `Origin` 已在 `allowed_bearer_origins` 中且服务端允许限时 token 时可用；每次请求同时带该 `Origin` 与 `Authorization: Bearer <token>`。缺少允许的 Origin 时，服务端不会把 CLI 的 Bearer 当成有效登录。
+1. **同源 Cookie**：用 `/api/auth/login` 的 `{"password":"..."}` 获取 cookie jar；随后所有 POST / PUT 请求同时带 `-b/-c <jar>`、`Origin: <与 OBC_BASE 同源>` 和 `X-OBC-Auth: 1`。
+2. **已取得 token 的非浏览器 Bearer**：CLI/curl 不带 `Origin`、只带 `Authorization: Bearer <token>` 时有效。
+3. **允许来源的跨源 Bearer**：浏览器跨源登录只有 `Origin` 已在 `allowed_bearer_origins` 中且 TTL 有限时才返回 token；后续请求同时带该 `Origin` 与 `Authorization: Bearer <token>`。
 
 把相应参数放入 Bash 数组；可信 loopback 保持空数组：
 
 ```bash
+set -Eeuo pipefail
+command -v bash >/dev/null
+command -v curl >/dev/null
+command -v jq >/dev/null
+
 export OBC_BASE='http://127.0.0.1:8420'
 OBC_HEADERS=()
+OBC_COOKIE_JAR=''
+OBC_ORIGINAL_AUTO=''
+OBC_RESTORE_DONE=0
 
-# 同源 Cookie 示例（登录请求的具体密码字段按当前 /api/auth/login 契约填写）：
+# 同源 Cookie 示例：
 # OBC_COOKIE_JAR="$(mktemp)"
+# read -rsp 'OpenBiliClaw password: ' OBC_PASSWORD; echo
+# LOGIN_RESPONSE="$(curl --noproxy '*' --connect-timeout 5 --max-time 30 -fsS \
+#   -b "$OBC_COOKIE_JAR" -c "$OBC_COOKIE_JAR" \
+#   -H "Origin: $OBC_BASE" -H 'Content-Type: application/json' \
+#   -d "$(jq -nc --arg password "$OBC_PASSWORD" '{password:$password}')" \
+#   "$OBC_BASE/api/auth/login")"
+# unset OBC_PASSWORD
+# jq -e '.ok == true' <<<"$LOGIN_RESPONSE" >/dev/null
 # OBC_HEADERS=(-b "$OBC_COOKIE_JAR" -c "$OBC_COOKIE_JAR" \
 #   -H "Origin: $OBC_BASE" -H 'X-OBC-Auth: 1')
 
-# 允许来源 Bearer 示例：
+# 已取得 token 的非浏览器 Bearer：
+# OBC_HEADERS=(-H "Authorization: Bearer $OBC_TOKEN")
+
+# 允许来源的跨源 Bearer：
 # OBC_ALLOWED_ORIGIN='https://已列入-allowed_bearer_origins.example'
 # OBC_HEADERS=(-H "Origin: $OBC_ALLOWED_ORIGIN" \
 #   -H "Authorization: Bearer $OBC_TOKEN")
 
-api() { curl -fsS "${OBC_HEADERS[@]}" "$@"; }
+api() {
+  curl --noproxy '*' --connect-timeout 5 --max-time 30 -fsS \
+    "${OBC_HEADERS[@]}" "$@"
+}
 ```
 
 ## 受保护的配置切换与终态轮询
@@ -61,7 +84,10 @@ wait_saved_task() {
   test -n "$task_id"
   while (( SECONDS < deadline )); do
     snapshot="$(api "$OBC_BASE/api/saved-sync/tasks/$task_id")"
-    if jq -e '[.items[].status] | all(. != "pending" and . != "syncing")' \
+    if jq -e '
+      (.items | length) > 0 and
+      ([.items[].status] | all(. != "pending" and . != "syncing"))
+    ' \
       <<<"$snapshot" >/dev/null; then
       printf '%s\n' "$snapshot"
       return 0
@@ -72,10 +98,25 @@ wait_saved_task() {
   return 1
 }
 
+cleanup_native_save_e2e() {
+  local status=$? cleanup_status=0
+  trap - EXIT INT TERM
+  set +e
+  if [[ -n "${OBC_ORIGINAL_AUTO:-}" && "${OBC_RESTORE_DONE:-0}" != 1 ]]; then
+    set_auto_sync "$OBC_ORIGINAL_AUTO" || cleanup_status=1
+  fi
+  if [[ -n "${OBC_COOKIE_JAR:-}" ]]; then
+    rm -f -- "$OBC_COOKIE_JAR" || cleanup_status=1
+  fi
+  if (( status == 0 && cleanup_status != 0 )); then status=$cleanup_status; fi
+  exit "$status"
+}
+trap cleanup_native_save_e2e EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 OBC_ORIGINAL_AUTO="$(api "$OBC_BASE/api/config" | jq -r '.saved_sync.auto_sync_enabled')"
-test "$OBC_ORIGINAL_AUTO" = true -o "$OBC_ORIGINAL_AUTO" = false
-restore_auto_sync() { set_auto_sync "$OBC_ORIGINAL_AUTO"; }
-trap restore_auto_sync EXIT INT TERM
+[[ "$OBC_ORIGINAL_AUTO" == true || "$OBC_ORIGINAL_AUTO" == false ]]
 ```
 
 ## 明确授权后的写入步骤
@@ -86,6 +127,17 @@ trap restore_auto_sync EXIT INT TERM
 export OBC_FAVORITE_BVID='<AUTHORIZED_FAVORITE_BVID>'
 export OBC_WATCH_LATER_BVID='<AUTHORIZED_WATCH_LATER_BVID>'
 export OBC_AUTO_BVID='<AUTHORIZED_AUTO_SYNC_BVID>'
+
+for name in OBC_FAVORITE_BVID OBC_WATCH_LATER_BVID OBC_AUTO_BVID; do
+  value="${!name}"
+  [[ "$value" =~ ^BV[0-9A-Za-z]{10}$ ]] || {
+    echo "invalid $name: expected a 12-character BV id" >&2
+    exit 2
+  }
+done
+[[ "$OBC_FAVORITE_BVID" != "$OBC_WATCH_LATER_BVID" ]]
+[[ "$OBC_FAVORITE_BVID" != "$OBC_AUTO_BVID" ]]
+[[ "$OBC_WATCH_LATER_BVID" != "$OBC_AUTO_BVID" ]]
 ```
 
 先关闭自动同步并再次确认，创建两条仅本地 membership：
@@ -152,7 +204,7 @@ for spec in \
 done
 
 set_auto_sync "$OBC_ORIGINAL_AUTO"
-trap - EXIT INT TERM
+OBC_RESTORE_DONE=1
 ```
 
-任何一步失败都应停止，保留本地 task JSON 供排查，并执行 trap 恢复原始自动同步值。不要用重复 `/sync` 代替真实平台幂等测试。
+`set -Eeuo pipefail` 保证任一 curl / jq / 状态断言失败立即停止。INT / TERM 会先转换成非零退出，再由唯一 EXIT cleanup 恢复原始自动同步值并删除 cookie jar；只有恢复成功后才把 `OBC_RESTORE_DONE` 置为 1。不要用重复 `/sync` 代替真实平台幂等测试。

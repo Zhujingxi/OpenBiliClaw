@@ -7,6 +7,7 @@ def test_saved_sync_docs_name_default_and_routes() -> None:
     saved_sync_doc = Path("docs/modules/saved-sync.md").read_text()
     architecture_doc = Path("docs/architecture.md").read_text()
     docs_index = Path("docs/index.md").read_text()
+    e2e_doc = Path("docs/native-save-e2e.md").read_text()
 
     assert "[saved_sync]" in config_doc
     assert "auto_sync_enabled = false" in config_doc
@@ -18,3 +19,10 @@ def test_saved_sync_docs_name_default_and_routes() -> None:
     assert "三个图形化保存界面 + CLI 配置可见" in saved_sync_doc
     assert "三个图形化保存界面 + CLI 配置可见" in architecture_doc
     assert "native-save-e2e.md" in docs_index
+    assert "set -Eeuo pipefail" in e2e_doc
+    assert "--noproxy '*' --connect-timeout 5 --max-time 30" in e2e_doc
+    assert "trap cleanup_native_save_e2e EXIT" in e2e_doc
+    assert "trap 'exit 130' INT" in e2e_doc
+    assert "OBC_RESTORE_DONE=1" in e2e_doc
+    assert "(.items | length) > 0" in e2e_doc
+    assert "非浏览器 Bearer" in e2e_doc
