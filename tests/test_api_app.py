@@ -4135,6 +4135,16 @@ class TestBackendAPI:
 
         with client.websocket_connect("/api/runtime-stream?client=background") as websocket:
             assert websocket.receive_json() == {
+                "type": "xhs_login_state_sync_requested",
+                "reason": "runtime_connected",
+                "source": "runtime-stream",
+            }
+            assert websocket.receive_json() == {
+                "type": "zhihu_login_state_sync_requested",
+                "reason": "runtime_connected",
+                "source": "runtime-stream",
+            }
+            assert websocket.receive_json() == {
                 "type": "bilibili_cookie_sync_requested",
                 "reason": "missing_cookie",
                 "source": "runtime-stream",
@@ -4169,6 +4179,16 @@ class TestBackendAPI:
         client = TestClient(app)
 
         with client.websocket_connect("/api/runtime-stream?client=background") as websocket:
+            assert websocket.receive_json() == {
+                "type": "xhs_login_state_sync_requested",
+                "reason": "runtime_connected",
+                "source": "runtime-stream",
+            }
+            assert websocket.receive_json() == {
+                "type": "zhihu_login_state_sync_requested",
+                "reason": "runtime_connected",
+                "source": "runtime-stream",
+            }
             assert websocket.receive_json() == {
                 "type": "reddit_cookie_sync_requested",
                 "reason": "missing_cookie",

@@ -3311,6 +3311,23 @@ def create_app(
                 from openbiliclaw.sources.douyin_auth import resolve_douyin_cookie
 
                 runtime_config = getattr(ctx, "config", None) or config
+                # Browser-only sources persist just a boolean login heartbeat.
+                # Ask once per runtime connection so settings immediately
+                # reflects the current browser, without contacting a platform.
+                await websocket.send_json(
+                    {
+                        "type": "xhs_login_state_sync_requested",
+                        "reason": "runtime_connected",
+                        "source": "runtime-stream",
+                    }
+                )
+                await websocket.send_json(
+                    {
+                        "type": "zhihu_login_state_sync_requested",
+                        "reason": "runtime_connected",
+                        "source": "runtime-stream",
+                    }
+                )
                 with suppress(Exception):
                     cookie = resolve_runtime_cookie(
                         data_dir=runtime_config.data_path,
