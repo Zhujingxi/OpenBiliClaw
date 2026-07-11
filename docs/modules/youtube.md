@@ -19,9 +19,9 @@ YouTube 模块负责把用户在 YouTube 上的长期兴趣信号接入 OpenBili
 | 单源 smoke | ✅ | `fetch-youtube` 独立验证扩展、登录态和后端任务桥，不隐式重建画像 |
 | Takeout 导入 | ✅ | `import-youtube` 支持 Google Takeout `.zip` 或目录，JSON / HTML watch history、subscriptions CSV、liked videos CSV |
 | 统一事件转换 | ✅ | `yt_history -> view`、`yt_subscriptions -> follow`、`yt_likes -> like`，全部携带 `metadata.source_platform="youtube"` |
-| `yt_search` discovery | ✅ | LLM 从真实画像生成 YouTube 搜索关键词，`scrapetube` 拉搜索结果，再进入 LLM 相关性打分 |
-| `yt_trending` discovery | ✅ | 优先通过 YouTube InnerTube browse API 拉 trending feed；当前 `FEtrending` 返回 400 时会降级抓取 YouTube 公开 topic 页（gaming / sports / news / podcasts / live）的 `ytInitialData` 视频，再进入 LLM 过滤 |
-| `yt_channel` discovery | ✅ | 从 DB 读取 `event_type=follow` 且 `metadata.source_platform="youtube"` 的订阅频道，优先 `scrapetube`，频道 handle URL 走 `yt-dlp` fallback 拉最新视频 |
+| `yt_search` discovery | ✅ | LLM 从真实画像生成 YouTube 搜索关键词，`scrapetube` 拉搜索结果（失败或 0 条时 fallback 到 `yt-dlp` 的 `ytsearchN:` 匿名搜索），再进入 LLM 相关性打分 |
+| `yt_trending` discovery | ✅ | 优先通过 YouTube InnerTube browse API 拉 trending feed；当前 `FEtrending` 返回 400 时会降级抓取 YouTube 公开 topic 页（gaming / sports / news / podcasts / live）的 `ytInitialData` 视频，再进入 LLM 过滤。刻意不加 `yt-dlp` 层：`/feed/trending` 已被 YouTube 下线（2026-07 实测重定向首页），yt-dlp flat 解析对 shelf 型 topic 页拿不到条目 |
+| `yt_channel` discovery | ✅ | 从 DB 读取 `event_type=follow` 且 `metadata.source_platform="youtube"` 的订阅频道，优先 `scrapetube`（失败或 0 条时 fallback），频道 handle URL 走 `yt-dlp` fallback 拉最新视频 |
 | 后台 discovery producer | ✅ | `YoutubeDiscoveryProducer` 独立调度 `yt_search` / `yt_trending` / `yt_channel`，按 `min_interval_minutes` 与每日执行 ledger 控制频率和预算；注入 `DiscoveryCandidatePipeline` 后只入待评估池并触发统一 batch 评估 / 入池 |
 | 推荐点击回写 | ✅ | YouTube 推荐卡片打开时会把 `content_id / content_url / source_platform` 传给 `/api/recommendation-click`，事件和强画像信号保留 YouTube URL，不再退化成 B 站链接 |
 

@@ -8,6 +8,7 @@
  * from the runtime-stream, not HTTP polling.
  */
 
+import { computeActionBadge, flushResponseReportsUninitialized } from "./badge.js";
 import { enqueueBufferedEvent, shouldFlushImmediately } from "./buffer.js";
 import {
   startXhsTaskPolling,
@@ -76,6 +77,11 @@ import { handleE2ERuntimeEvent } from "./e2e-runner.ts";
 // the import when test files load these dispatchers directly. esbuild
 // bundles either extension, so production builds are unaffected.
 import { apiUrl, onBackendEndpointChange, wsUrl } from "../shared/backend-endpoint.ts";
+import {
+  authenticatedFetch,
+  clearSession,
+  ensureSession,
+} from "../shared/auth.ts";
 import type { BehaviorEvent } from "../shared/types.js";
 
 let eventBuffer: BehaviorEvent[] = [];
@@ -106,7 +112,7 @@ type PendingCognitionUpdate = import("./notifications.js").PendingCognitionUpdat
 
 async function acknowledgeNotificationSent(bvid: string): Promise<void> {
   if (!bvid) return;
-  await fetch(await apiUrl("/notifications/sent"), {
+  await authenticatedFetch(await apiUrl("/notifications/sent"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ bvid }),
@@ -114,7 +120,9 @@ async function acknowledgeNotificationSent(bvid: string): Promise<void> {
 }
 
 async function fetchPendingNotification(): Promise<PendingNotification | null> {
-  const response = await fetch(await apiUrl("/notifications/pending"), { method: "GET" });
+  const response = await authenticatedFetch(await apiUrl("/notifications/pending"), {
+    method: "GET",
+  });
   if (!response.ok) {
     throw new Error(`pending notifications failed: ${response.status}`);
   }
@@ -123,7 +131,9 @@ async function fetchPendingNotification(): Promise<PendingNotification | null> {
 }
 
 async function fetchPendingCognitionUpdate(): Promise<PendingCognitionUpdate | null> {
-  const response = await fetch(await apiUrl("/cognition-updates/pending"), { method: "GET" });
+  const response = await authenticatedFetch(await apiUrl("/cognition-updates/pending"), {
+    method: "GET",
+  });
   if (!response.ok) {
     throw new Error(`pending cognition updates failed: ${response.status}`);
   }
@@ -133,7 +143,7 @@ async function fetchPendingCognitionUpdate(): Promise<PendingCognitionUpdate | n
 
 async function acknowledgeCognitionUpdateSeen(id: string): Promise<void> {
   if (!id) return;
-  await fetch(await apiUrl("/cognition-updates/seen"), {
+  await authenticatedFetch(await apiUrl("/cognition-updates/seen"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id }),
@@ -146,7 +156,7 @@ async function acknowledgeCognitionUpdateSeen(id: string): Promise<void> {
 
 async function acknowledgeDelightSent(bvid: string): Promise<void> {
   if (!bvid) return;
-  await fetch(await apiUrl("/delight/sent"), {
+  await authenticatedFetch(await apiUrl("/delight/sent"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ bvid }),
@@ -211,6 +221,17 @@ async function handleRuntimeEvent(event: Record<string, unknown>): Promise<void>
   }
 
   const eventType = String(event.type ?? "");
+
+  // Guided init finished (started from any surface) → the uninitialized
+  // toolbar badge must clear without waiting for the next WS reconnect.
+  // refresh.pool_updated implies an initialized backend too.
+  if (
+    backendUninitialized &&
+    (eventType === "init_completed" || eventType === "refresh.pool_updated")
+  ) {
+    backendUninitialized = false;
+    renderActionBadge();
+  }
 
   // Task-kick events: the backend broadcasts these from
   // /api/sources/{xhs,dy}/kick when the CLI enqueues a bootstrap
@@ -323,19 +344,47 @@ async function isBackendAlive(): Promise<boolean> {
   }
 }
 
-function setBackendBadge(reachable: boolean): void {
+let backendReachable: boolean | null = null;
+let backendUninitialized = false;
+
+function renderActionBadge(): void {
   // Subtle "!" badge so a fresh-install user (or anyone whose daemon
   // crashed) sees the toolbar icon flag the issue without opening the
-  // popup. The popup itself still shows the "openbiliclaw start" hint.
+  // popup. Gray = backend unreachable; orange = reachable but guided init
+  // never completed — previously that state cleared the badge and was
+  // visually identical to a healthy backend, so fresh installs got zero
+  // proactive signal to initialize.
   try {
-    if (reachable) {
-      void chrome.action.setBadgeText({ text: "" });
-    } else {
-      void chrome.action.setBadgeText({ text: "!" });
-      void chrome.action.setBadgeBackgroundColor({ color: "#9CA3AF" });
-    }
+    const view = computeActionBadge(backendReachable, backendUninitialized);
+    void chrome.action.setBadgeText({ text: view.text });
+    if (view.color) void chrome.action.setBadgeBackgroundColor({ color: view.color });
+    void chrome.action.setTitle({ title: view.title });
   } catch {
     // chrome.action is missing in some contexts (e.g. tests) — best-effort.
+  }
+}
+
+function setBackendBadge(reachable: boolean): void {
+  backendReachable = reachable;
+  // A down backend's init state is unknown; drop the stale flag so the
+  // gray unreachable badge (and its hint) wins.
+  if (!reachable) backendUninitialized = false;
+  renderActionBadge();
+}
+
+async function refreshInitBadge(): Promise<void> {
+  // /api/runtime-status carries `initialized` without running any billable
+  // prereq probes (unlike an uninitialized /api/init-status read), so it is
+  // the right cheap source for the toolbar signal. Best-effort: on any
+  // failure keep the last known state.
+  try {
+    const response = await authenticatedFetch(await apiUrl("/runtime-status"), { method: "GET" });
+    if (!response.ok) return;
+    const payload = (await response.json()) as Record<string, unknown>;
+    backendUninitialized = payload.initialized === false;
+    renderActionBadge();
+  } catch {
+    // Keep the last rendered state.
   }
 }
 
@@ -351,7 +400,7 @@ async function connectRuntimeStream(): Promise<void> {
     }
 
     try {
-      const url = await wsUrl("/runtime-stream?client=background");
+      const url = await wsUrl("/runtime-stream?client=background", await ensureSession());
       runtimeSocket = new WebSocket(url);
     } catch {
       setBackendBadge(false);
@@ -361,6 +410,7 @@ async function connectRuntimeStream(): Promise<void> {
 
     runtimeSocket.onopen = () => {
       setBackendBadge(true);
+      void refreshInitBadge();
     };
 
     runtimeSocket.onmessage = (msg) => {
@@ -409,7 +459,7 @@ async function flushEvents(): Promise<void> {
   eventBuffer = [];
 
   try {
-    const response = await fetch(await apiUrl("/events"), {
+    const response = await authenticatedFetch(await apiUrl("/events"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ events }),
@@ -419,6 +469,20 @@ async function flushEvents(): Promise<void> {
       console.warn("[OpenBiliClaw] Backend returned", response.status);
       eventBuffer.unshift(...events);
       return;
+    }
+    try {
+      // Pre-init the backend consumes-and-drops events (200 + rejected:
+      // not_initialized). Don't re-buffer — init refetches history wholesale —
+      // but surface the state on the toolbar badge instead of staying silent.
+      if (flushResponseReportsUninitialized(await response.json())) {
+        if (!backendUninitialized) {
+          backendUninitialized = true;
+          renderActionBadge();
+        }
+        console.debug("[OpenBiliClaw] Events dropped: backend not initialized yet");
+      }
+    } catch {
+      // Non-JSON response — nothing to inspect.
     }
     await checkPendingNotification();
   } catch {
@@ -448,14 +512,14 @@ function startPlatformTaskPolling(): void {
 
 chrome.runtime.onInstalled.addListener(() => {
   ensureFlushAlarm();
-  void connectRuntimeStream();
+  void (async () => { await ensureSession(); await connectRuntimeStream(); })();
   startPlatformTaskPolling();
   startCookieSync();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   ensureFlushAlarm();
-  void connectRuntimeStream();
+  void (async () => { await ensureSession(); await connectRuntimeStream(); })();
   startPlatformTaskPolling();
   startCookieSync();
 });
@@ -469,7 +533,7 @@ chrome.action.onClicked.addListener((tab) => {
 
 async function postXhsObservedUrls(payload: Record<string, unknown>): Promise<void> {
   try {
-    await fetch(await apiUrl("/sources/xhs/observed-urls"), {
+    await authenticatedFetch(await apiUrl("/sources/xhs/observed-urls"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -484,7 +548,7 @@ async function postXhsTokens(
 ): Promise<void> {
   if (!payload?.pairs || payload.pairs.length === 0) return;
   try {
-    await fetch(await apiUrl("/sources/xhs/tokens"), {
+    await authenticatedFetch(await apiUrl("/sources/xhs/tokens"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -660,7 +724,7 @@ chrome.notifications.onClicked.addListener((notificationId) => {
 });
 
 ensureFlushAlarm();
-void connectRuntimeStream();
+void (async () => { await ensureSession(); await connectRuntimeStream(); })();
 startPlatformTaskPolling();
 startCookieSync();
 
@@ -680,7 +744,7 @@ onBackendEndpointChange(() => {
     clearTimeout(wsReconnectTimer);
     wsReconnectTimer = null;
   }
-  void connectRuntimeStream();
+  void clearSession().then(() => connectRuntimeStream());
 });
 
 console.log("[OpenBiliClaw] Service worker initialized");

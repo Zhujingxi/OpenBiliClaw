@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from openbiliclaw.discovery.engine import DiscoveredContent
+from openbiliclaw.published_time import normalize_published_time
 from openbiliclaw.sources.event_format import SOURCE_REDDIT, build_event
 
 if TYPE_CHECKING:
@@ -215,6 +216,10 @@ def reddit_items_to_contents(
             source_keyword_id = keyword_ids.get(keyword)
         if source_keyword_id is None:
             source_keyword_id = fallback_keyword_id
+        published = normalize_published_time(
+            item.get("published_at") or item.get("created_utc"),
+            label=item.get("published_label"),
+        )
 
         contents.append(
             DiscoveredContent(
@@ -236,6 +241,8 @@ def reddit_items_to_contents(
                 tags=tags,
                 score_threshold=REDDIT_DISCOVERY_SCORE_THRESHOLD,
                 source_keyword_id=source_keyword_id,
+                published_at=published.published_at,
+                published_label=published.published_label,
             )
         )
     return contents
@@ -458,7 +465,9 @@ class RedditTaskQueue:
         count_today = self._budgeted_count_today(task_type) if daily_budget > 0 else 0
         if daily_budget > 0 and count_today >= daily_budget:
             logger.info(
-                "reddit task budget exhausted: type=%s, count=%d, budget=%d",
+                "reddit task budget exhausted: type=%s used_today=%d budget=%d "
+                "(per-day UTC cap from config [sources.reddit] daily_*_budget; "
+                "0 = unlimited)",
                 task_type,
                 count_today,
                 daily_budget,

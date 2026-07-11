@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
@@ -77,6 +78,16 @@ def test_sync_profile_files_applies_overlay_on_dict_input(tmp_path: Path) -> Non
 
     md = (tmp_path / "memory" / "soul_profile.md").read_text(encoding="utf-8")
     assert "覆盖文案" in md
+
+
+def test_propagate_event_documents_event_only_contract() -> None:
+    doc = inspect.getdoc(MemoryManager.propagate_event) or ""
+    source = inspect.getsource(MemoryManager.propagate_event)
+
+    assert "only persists" in doc
+    assert "ProfileUpdatePipeline" in doc
+    assert "upward" not in doc
+    assert "TODO" not in source
 
 
 @pytest.mark.asyncio

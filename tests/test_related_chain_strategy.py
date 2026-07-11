@@ -174,6 +174,7 @@ def test_related_chain_map_related_item_maps_stat_metrics() -> None:
             "bvid": "BV1metrics",
             "title": "指标相关视频",
             "owner": {"name": "UP", "mid": 1},
+            "pubdate": 1783492200,
             "stat": {
                 "view": 1000,
                 "like": 100,
@@ -193,6 +194,27 @@ def test_related_chain_map_related_item_maps_stat_metrics() -> None:
     assert content.danmaku_count == 80
     assert content.comment_count == 70
     assert content.share_count == 60
+    assert content.published_at == "2026-07-08T06:30:00Z"
+
+
+def test_related_chain_map_related_item_keeps_candidate_without_publication() -> None:
+    from openbiliclaw.discovery.strategies.strategies import RelatedChainStrategy
+
+    strategy = RelatedChainStrategy(
+        bilibili_client=FakeRelatedClient({}),
+        llm_service=FakeLLMService([]),
+        memory_manager=FakeMemoryManager([]),
+        llm_evaluation=False,
+    )
+
+    content = strategy._map_related_item(
+        {"bvid": "BV1no_time", "title": "没有发布时间"},
+        seed_topic_key="seed",
+    )
+
+    assert content is not None
+    assert content.published_at == ""
+    assert content.published_label == ""
 
 
 @dataclass
@@ -483,3 +505,58 @@ async def test_related_chain_uses_bounded_evaluation_concurrency_within_batch() 
     # Batch evaluation sends 1 LLM call per batch (not per item)
     assert strategy.llm_service.max_active_calls >= 1
     assert [item.bvid for item in results] == ["BV1A", "BV1B", "BV1C"]
+
+
+async def test_related_chain_does_not_add_seed_or_depth_bonus_to_llm_score() -> None:
+    """issue #90: related_chain is source context only — no post-hoc score bonus.
+
+    The first seed at depth 1 used to earn +0.05, which pushed an LLM score of
+    0.55 over the 0.60 admission gate.
+    """
+
+    from openbiliclaw.discovery.strategies.strategies import RelatedChainStrategy
+
+    memory = FakeMemoryManager(events=[_event("BV1SEED", title="正常视频")])
+    client = FakeRelatedClient(
+        related_by_bvid={
+            "BV1SEED": [
+                {"bvid": "BV1BORDER", "title": "擦边内容", "owner": {"name": "UP1", "mid": 1}},
+            ]
+        }
+    )
+    strategy = RelatedChainStrategy(
+        bilibili_client=client,
+        llm_service=FakeLLMService(['{"score": 0.55, "reason": "只是沾边。"}']),
+        memory_manager=memory,
+        score_threshold=0.60,
+        max_depth=1,
+    )
+
+    results = await strategy.discover(_build_profile(), limit=20)
+
+    assert results == []
+
+
+async def test_related_chain_preserves_raw_llm_score_on_admitted_content() -> None:
+    from openbiliclaw.discovery.strategies.strategies import RelatedChainStrategy
+
+    memory = FakeMemoryManager(events=[_event("BV1SEED", title="正常视频")])
+    client = FakeRelatedClient(
+        related_by_bvid={
+            "BV1SEED": [
+                {"bvid": "BV1GOOD", "title": "高分内容", "owner": {"name": "UP1", "mid": 1}},
+            ]
+        }
+    )
+    strategy = RelatedChainStrategy(
+        bilibili_client=client,
+        llm_service=FakeLLMService(['{"score": 0.72, "reason": "主题贴近。"}']),
+        memory_manager=memory,
+        score_threshold=0.60,
+        max_depth=1,
+    )
+
+    results = await strategy.discover(_build_profile(), limit=20)
+
+    assert [item.bvid for item in results] == ["BV1GOOD"]
+    assert results[0].relevance_score == 0.72

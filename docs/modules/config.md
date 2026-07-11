@@ -33,11 +33,11 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 | `host` | string | `"0.0.0.0"` | 后端 API 监听地址。默认绑定所有网卡，方便同局域网手机访问 `/m/`；如只允许本机访问可改为 `"127.0.0.1"` |
 | `port` | int | `8420` | 后端 API 监听端口 |
 
-`openbiliclaw start` 和桌面安装包入口默认读取这里的 host / port；显式设置 `OPENBILICLAW_HOST` / `OPENBILICLAW_PORT` 时环境变量优先。浏览器插件的手机二维码入口会在后端地址仍是 loopback 时读取 `/api/health.lan_ip`，用局域网 IP 生成 `/m/` 二维码；但后端仍需要绑定 `0.0.0.0`，手机才能连上。
+`openbiliclaw start` 和桌面安装包入口默认读取这里的 host / port；显式设置 `OPENBILICLAW_HOST` / `OPENBILICLAW_PORT` 时环境变量优先。浏览器插件的手机二维码入口会在后端地址仍是 loopback 时调用轻量端点 `GET /api/qr-info`（不触发 embedding readiness probe）并读取响应中的 `lan_ip` 字段，用局域网 IP 生成 `/m/` 二维码；但后端仍需要绑定 `0.0.0.0`，手机才能连上。
 
 ### `[api.auth]`
 
-局域网 / 远程访问的**可选密码门禁**（`ApiAuthConfig`）。仅当 `enabled=true` 且请求非可信本机时生效；本机（loopback 且无转发头）默认免登录，浏览器插件不受影响。详见 [`docs/modules/api-auth.md`](api-auth.md) 与设计文档 [`docs/plans/2026-05-30-web-password-auth-design.md`](../plans/2026-05-30-web-password-auth-design.md)。
+局域网 / 远程访问的**可选密码门禁**（`ApiAuthConfig`）。仅当 `enabled=true` 且请求非可信本机时生效；本机（loopback 且无转发头）默认免登录。远程浏览器扩展必须另行启用设备密钥认证。详见 [`docs/modules/api-auth.md`](api-auth.md)。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
@@ -48,6 +48,9 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 | `trust_loopback` | bool | `true` | 本机请求是否免登录（扩展 / CLI 依赖此项）。设 `false` 连本机也要登录。带代理转发头（`X-Forwarded-For` 等）的请求不算本机 |
 | `trusted_proxies` | list[string] | `[]` | 受信任的同机 / 前置反向代理 IP；仅当直接对端命中此列表，才采信 `X-Forwarded-For`（从右向左）解析真实客户端 IP。**仅 TOML**（env 不支持列表）。同机反代必须配置，否则远程会被误判为本机 |
 | `allowed_bearer_origins` | list[string] | `[]` | 允许「跨源 Bearer 登录」的 Origin 白名单。默认空 = 只允许同源 Cookie 登录，绝不向 JS 返回 token。**仅 TOML** |
+| `extension_access_enabled` | bool | `false` | 远程扩展设备认证总开关；默认关闭。至少生成一个设备密钥后才能用 `ext-key enable` 开启 |
+| `extension_access_keys` | list[string] | `[]` | `<12位 key ID>:<SHA-256 digest>` 记录，仅存高熵设备 secret 的摘要。使用 CLI 管理，不要写入明文密钥；不会由 `GET /api/config` 返回 |
+| `extension_token_ttl_hours` | int | `24` | 扩展短会话有效期，范围 `1..168` 小时；长期设备密钥仅用于换取短会话 |
 
 > **环境变量覆盖（显式读取）**：`OPENBILICLAW_API_AUTH_ENABLED` / `_PASSWORD`（明文，启动时即 hash）/ `_PASSWORD_HASH` / `_SESSION_SECRET` / `_SESSION_TTL_HOURS` / `_TRUST_LOOPBACK`。`trusted_proxies` 与 `allowed_bearer_origins` 是列表，**只支持 TOML**，没有 env 覆盖。
 >
@@ -72,8 +75,9 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 |----|------|--------|------|
 | `default_provider` | string | `"deepseek"` | 默认 Provider：`deepseek` / `openai` / `claude` / `gemini` / `ollama` / `openrouter` / `openai_compatible` |
 | `concurrency` | int | `3` | 全局 LLM 请求并发上限。所有 `LLMService` 调用共享这个优先级队列；可在插件 / 桌面 Web 设置页「模型」tab 调整，合法范围为 `1..16` |
-| `fallback_enabled` | bool | `false` | 旧兼容开关；当前实际 fallback 只在 `fallback_provider` 非空时发生 |
-| `fallback_provider` | string | `""` | 第二个备选 Provider。留空 = 不 fallback；非空时只按 `default_provider → fallback_provider` 尝试，不再自动遍历其它 provider |
+| `fallback_provider` | string | `""` | 第二个备选 Provider。留空 = 不 fallback；非空时只按 `default_provider → fallback_provider` 尝试，不再自动遍历其它 provider。（v0.3.156+ 移除了从未被读取的 `fallback_enabled` 布尔开关：非空 provider 即启用；存量 config.toml 里的旧 key 会被忽略） |
+
+> **`fallback_provider` 保存校验（v0.3.155+）：** 非空时 `_collect_config_issues` 会按 blocking 级拦下所有「永远不会生效」的死状态——未知 provider 名（含浏览器网页翻译写坏的值，提示关闭网页翻译重选）、与 `default_provider` 同名（同名备选永远不会触发）、以及凭据不足以完成注册：`openai` / `claude` / `gemini` / `deepseek` / `openrouter` / `openai_compatible` 缺 `api_key`（gemini 可用 `GOOGLE_API_KEY` / `GEMINI_API_KEY` 环境变量豁免，openai 在 `auth_mode = "codex_oauth"` 时豁免）、`openai_compatible` 额外缺 `base_url`、`ollama` 的 `[llm.ollama]` 既无 `model` 也无 `base_url`。校验独立于默认 provider 检查——默认 provider 本身写坏也不会遮蔽备选问题；`PUT /api/config` 遇到 blocking issue 返回 400 且不写盘。绕过保存校验（环境变量覆盖 / 手改 config.toml）时，`build_llm_registry` 仍会对死状态按具体原因打一次 WARNING 兜底。
 
 ### `[llm.openai]`
 
@@ -83,6 +87,7 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 | `model` | string | `"gpt-5-nano"` | 模型名称（按 `base_url` 后端实际部署的模型填，例如 vLLM 上是 `meta-llama/Llama-3.1-70B-Instruct`） |
 | `base_url` | string | `""` | 留空使用 OpenAI 官方 `https://api.openai.com/v1`；指向任何 OpenAI 兼容服务的 `/v1` 端点：Azure OpenAI / vLLM / LMStudio / OneAPI / Cloudflare AI Gateway / 自建 LLM 网关 |
 | `auth_mode` | string | `""` | 认证模式：`""` / `"api_key"` 使用 `api_key`；`"codex_oauth"` 使用 `openbiliclaw login codex` 导入的 Codex CLI ChatGPT OAuth 凭据 |
+| `api_flavor` | string | `""` | API 端点协议（issue #72）：`""` / `"chat_completions"` 走 `/v1/chat/completions`（默认）；`"responses"` 走 `/v1/responses`——部分第三方网关的 GPT 模型只开放这个端点。非法值会被 `_collect_config_issues` 以 blocking 级拦下 |
 
 > **「openai」是协议家族，不是厂商。** v0.3.5 起 `init` 向导会显式说明这一点。任何兼容 `POST /v1/chat/completions` 的服务都填到这一段，区别只在 `base_url`。
 > 例如：
@@ -98,6 +103,7 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 |----|------|--------|------|
 | `api_key` | string | `""` | Anthropic API Key（default_provider=claude 时必填） |
 | `model` | string | `"claude-sonnet-4-6"` | 模型名称 |
+| `base_url` | string | `""` | 留空 = Anthropic 官方 `https://api.anthropic.com`；使用第三方中转 / 网关时填其地址（需实现 Anthropic 协议 `/v1/messages`，issue #72） |
 
 ### `[llm.gemini]`
 
@@ -150,6 +156,7 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 | `api_key` | string | `""` | 上游服务的 API Key（default_provider=openai_compatible 时必填） |
 | `model` | string | `""` | 上游服务的模型名（如 `llama-3.1-70b-versatile`、`Qwen/Qwen2.5-72B-Instruct-Turbo`、Azure 部署名等） |
 | `base_url` | string | `""` | **必填**。上游服务的 OpenAI 协议端点（缺失时 `_collect_config_issues` 会报 `llm.openai_compatible.base_url`，registry 拒绝注册） |
+| `api_flavor` | string | `""` | API 端点协议（issue #72）：`""` / `"chat_completions"` 走 `/v1/chat/completions`（默认）；`"responses"` 走 `/v1/responses`——部分第三方网关的 GPT 模型只开放这个端点 |
 
 常见示例：
 
@@ -218,11 +225,12 @@ Content-Type: application/json
 }
 ```
 
-`kind` 可为 `"llm"` 或 `"embedding"`。后端会先读取当前 `load_config()`，再把请求里的 `config.llm` 按 `PUT /api/config` 的同一套规则合并到内存副本上，然后：
+`kind` 可为 `"llm"`、`"llm_fallback"` 或 `"embedding"`。后端会先读取当前 `load_config()`，再把请求里的 `config.llm` 按 `PUT /api/config` 的同一套规则合并到内存副本上，然后：
 
 | kind | 行为 | 成功条件 |
 |------|------|----------|
 | `llm` | 构建临时 `LLMRegistry`，对当前 `default_provider` 发送一条 `max_tokens=4096` 的最小 chat completion 请求 | provider 已注册、chat-capable，并返回非空最终 `content`；只返回 reasoning / thinking 时会显示明确失败诊断 |
+| `llm_fallback` | （v0.3.155+）同 `llm`，但目标是 `[llm].fallback_provider` 这一个精确 provider（不走 fallback 链）。备选未配置或与 `default_provider` 同名时以 `ok=false` + 明确说明拒绝，不是 500 | fallback provider 非空、与默认不同名、已注册且 chat-capable，并返回非空最终 `content` |
 | `embedding` | 构建临时 `EmbeddingService`，调用 `EmbeddingService.probe()` 绕过缓存真实取一次向量 | provider 已配置，并返回非空向量 |
 
 响应统一为：
@@ -291,7 +299,7 @@ CPU 即可跑（~100-200ms/次），跨 Mac / Win / Linux 一致。
 
 运行时路由（v0.3.75+）：
 
-- `LLMService` 不再用 caller 第一段朴素判断模块，而是内置 caller bucket。例：`soul.*` → soul，`discovery.search/explore/trending/related.*`、`yt_search.*`、`sources.xhs.*` → discovery，`recommendation.evaluate_batch`、`discovery.evaluate*`、`eval.*` → evaluation，其他 `recommendation.*` → recommendation。
+- `LLMService` 不再用 caller 第一段朴素判断模块，而是内置 caller bucket。例：`soul.*` → soul，`discovery.keyword*`、`discovery.search/explore/trending/related.*`、`yt_search.*`、`sources.xhs.*` → discovery，`recommendation.evaluate_batch`、`discovery.evaluate*`、`eval.*` → evaluation，其他 `recommendation.*` → recommendation。
 - `provider` 非空时走 `LLMRegistry.complete_provider(provider, ...)` 精确调用该 provider，不走 fallback 链；该 provider 被 rate-limit 或返回错误时会直接报错，避免用户指定贵模型给画像却被静默改用默认便宜模型。
 - `model` 非空时作为单次调用的 `model=` 参数传给 provider，不会修改 provider 实例的默认模型；`provider` 留空但 `model` 非空时，使用当前 default provider + 该 per-call model。
 - `provider` 拼错或目标 provider 不是 chat-capable（例如 embedding-only Ollama）时，不会让保存配置失败；运行时会按模块 + provider 只 INFO 一次，然后降级到默认 provider 链。
@@ -326,6 +334,7 @@ model    = "deepseek-v4-flash"
 |----|------|--------|------|
 | `auth_method` | string | `"cookie"` | 认证方式：`cookie` / `qrcode` / `none` |
 | `cookie` | string | `""` | 浏览器 Cookie（推荐通过 `auth login` 命令设置） |
+| `proxy` | string | `""` | B站 请求专用代理（v0.3.153+）。留空 = 恒直连：客户端忽略环境变量与系统代理（代理出口 IP 常触发 B站 风控，导致已登录仍显示"未登录"）。仅当网络无法直连 B站 时才填，如 `"http://127.0.0.1:7890"` |
 
 ### `[bilibili.browser]`
 
@@ -363,6 +372,8 @@ model    = "deepseek-v4-flash"
 > 4. 在 `config.toml` 里填 `cdp_url = "http://localhost:9222"`
 >
 > `127.0.0.1` 与 `localhost` 并非总是等价：macOS 上 Chrome 常只绑定 IPv6 `::1:9222`，而 Python urllib 默认走 IPv4。用 `localhost` 最稳妥（`getaddrinfo` 会同时尝试两边）。
+
+> **关于 `daily_*_budget`：** 这些字段是**每 UTC 日、按任务类型的入队次数上限**，不是启用 / 关闭该来源的开关（来源开关是各段的 `enabled`）。`0`（或留空）表示不设每日上限，补池只受平台缺口 / `discovery_limit` / producer 节流控制。填 `1` 只会把该任务类型限制到每天 1 次——配置加载时对落在 1–4 的可疑值会打印一次 WARN 提示。
 
 ### `[sources.bilibili]`
 
@@ -449,7 +460,7 @@ X 源健康状态（`ok` / `missing_cookie` / `expired_cookie` / `rate_limited` 
 
 ### `[sources.reddit]`
 
-Reddit 来源配置。Reddit 日常 discovery 默认走随 OpenBiliClaw 安装的 `rdt-cli` 登录态命令后端；已连接浏览器插件会把 `reddit_session` 自动同步到 `~/.config/rdt-cli/credential.json`，插件不可用时才需要手动运行 `rdt login`。后端会拉取 `search` / `hot` / `subreddit` / `related` 候选后转换为 `source_platform="reddit"` 的 `DiscoveredContent` 并只写入统一待评估候选池；LLM 评估和入正式推荐池由后台 `DiscoveryCandidatePipeline` 统一处理。初始化阶段仍可入队 `reddit_tasks(type="bootstrap_events")`，插件在已登录 `reddit.com` 会话里读取 saved / upvoted / subscribed subreddit 并转换为 `favorite` / `like` / `follow` 画像信号。`extension` 可显式作为浏览器登录态 discovery 后端；默认 `rdt` / `opencli` 命令后端不可用或未登录时也会自动 fallback 到插件任务。
+Reddit 来源配置。Reddit 日常 discovery 默认走随 OpenBiliClaw 安装的 `rdt-cli` 登录态命令后端；已连接浏览器插件会把 `reddit_session` 自动同步到 `~/.config/rdt-cli/credential.json`，插件不可用时才需要手动运行 `rdt login`。Cookie 不写进 `config.toml`：桌面 Web 设置页的 Reddit Cookie 覆盖输入框可手动粘贴（`PUT /api/config` 的 `sources.reddit.cookie` 为 API-only 字段，非 `config.toml` 键），非空新值路由到 rdt-cli credential store，与插件自动同步同一存储；粘贴内容缺少 `reddit_session` 时保存以 400 `missing_reddit_session` 显式拒绝，不静默丢弃。后端会拉取 `search` / `hot` / `subreddit` / `related` 候选后转换为 `source_platform="reddit"` 的 `DiscoveredContent` 并只写入统一待评估候选池；LLM 评估和入正式推荐池由后台 `DiscoveryCandidatePipeline` 统一处理。初始化阶段仍可入队 `reddit_tasks(type="bootstrap_events")`，插件在已登录 `reddit.com` 会话里读取 saved / upvoted / subscribed subreddit 并转换为 `favorite` / `like` / `follow` 画像信号。`extension` 可显式作为浏览器登录态 discovery 后端；默认 `rdt` / `opencli` 命令后端不可用或未登录时也会自动 fallback 到插件任务。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
@@ -501,7 +512,7 @@ Reddit 来源配置。Reddit 日常 discovery 默认走随 OpenBiliClaw 安装�
 | `auto_update_enabled` | bool | `false` | 是否启用后端自动检查并应用新版本；默认关闭，只影响后端源码，不更新浏览器插件 |
 | `auto_update_check_interval_hours` | int | `6` | 后端自动更新检查间隔（小时）；手动检查不受该间隔限制 |
 | `auto_update_allow_prerelease` | bool | `false` | 是否允许 `backend-vX.Y.Z-rc/beta/dev` 预发布 tag 被后端自动更新选择；默认忽略 |
-| `auto_update_allowed_remotes` | list[str] | OpenBiliClaw GitHub HTTPS / SSH | 允许自动更新快进的 `origin` 精确 allowlist；unknown remote 或带 userinfo/credential 的 URL 都会以 `untrusted_remote` 拒绝 |
+| `auto_update_allowed_remotes` | list[str] | OpenBiliClaw GitHub HTTPS / SSH | 允许自动更新快进的 `origin` allowlist；按规范化形式比较（`.git` 后缀可选、HTTPS/SSH 拼法等价、大小写不敏感），带 userinfo/credential 的 URL 或未匹配的 remote 以 `untrusted_remote` 拒绝并写日志（含实际 remote 地址）；走 GitHub 镜像克隆的安装把镜像 URL 加入此列表即可 |
 
 > 运行时护栏：
 > 即使 `pool_target_count` 设得较高，单次 refresh 里的 discover wave 也由 `discovery_limit` 控制（默认 `30`，最大 `60`），避免一次性把全部缺口都打满。
@@ -545,6 +556,10 @@ Reddit 来源配置。Reddit 日常 discovery 默认走随 OpenBiliClaw 安装�
 | `planner_poll_seconds` | int | `120` | 关键词规划器轮询间隔（秒）；空闲轮询近似零成本。小于 `1` 时回退默认值 |
 | `plan_ttl_hours` | int | `12` | 兜底失效（小时）：即便画像 `profile_kw_digest` 未变，`pending` 关键词超过这个时长也会过期；同画像、同平台需求块、同池子避让提示的 merged keyword 生成结果也按这个 TTL 在进程内复用。小于 `1` 时回退默认值 |
 | `admission_min_score` | float | `0.60` | 普通推荐池统一入池最低分。候选行 / raw payload 显式 `score_threshold` 可作为策略阈值覆盖；来源标签如 `admission_policy="observed"` 不能绕过该分数门。探索类策略可略低于该值，但平台 / 插件来源不能获得特权。必须在 `(0, 1]` 内，非法值回退默认值 |
+| `inspiration_search_enabled` | bool | `false` | 是否启用 query inspiration 脑暴阶段。开启后 `KeywordPlanner` 会通过本机 mcporter 搜索 provider 链获取搜索预览，再让 `discovery.keyword_inspiration` LLM caller 做 Profile Curator / Detail Expander，最终把带 `aspect_id/inspiration_id/expansion_id` 元数据的关键词写入 `discovery_keywords` |
+| `inspiration_search_backends` | list[str] | `["local_cache", "platform_sources", "exa", "you"]` | query inspiration 搜索后端顺序。`local_cache` 会先从本地 `content_cache` 抽取相关标题 / URL / 摘要作为 evidence，本地命中不消耗外部 grounding 预算；证据不足时才 fallback。`platform_sources` 会从用户已启用且当前可同步/可注入 bridge 的平台源里抽样做 inspiration-only grounding（B站 / YouTube / X / Reddit；抖音 direct client；小红书 / 知乎 bridge 可用时），只把标题 / URL / 摘要作为灵感证据，不写候选池；`exa` 调用 `mcporter call exa.web_search_exa`；`you` 调用 `mcporter call you.you-search`（You.com Free MCP profile）。某个后端报错 / 限流 / 返回空结果时会继续尝试后面的后端。远端 MCP server 需要先写入本机 `config/mcporter.json` |
+| `inspiration_replace_merged_keywords` | bool | `false` | 实验性替换模式。仅在 `inspiration_search_enabled=true` 且 inspiration provider 可用时生效：due 平台跳过旧 `discovery.keyword_planner` merged call，只通过 search-backed inspiration flow 产词；当 B 站 explore 到期且有补货空间时，也会用同一轮共享 brainstorm / grounding stage 写入 `keyword_kind="explore"` 的探索词池。开 replace 前应先用 `keyword-inspiration-report` 跑 cohort 门禁，避免无质量数据直接替换 |
+| `inspiration_breadth` | str | `"high"` | 探索广度档位（Phase 2 config 收敛，13→4）：`low` / `medium` / `high`。旧的 10 个 `inspiration_*` 细粒度旋钮已删除，其派生成内部常量的有效值由本档位决定（见下表）。**默认 `high`（更宽的素材/轴/关键词产量）**；`medium` 逐项等于旧的 `_DEFAULT_INSPIRATION_*` 默认值，需与收敛前行为逐项对齐时显式设 `medium`。注意 `high` 会把每轮真实 probe 搜索与 LLM 用量放大（daemon 常驻），成本敏感可设 `medium`/`low`。非法档位（非 `low`/`medium`/`high`）→ 配置错误（`ConfigError`），未设置回退 `high` |
 | `multimodal_evaluation_enabled` | bool | `false` | 是否在 discovery batch evaluator 中加入候选封面图。默认关闭；开启后仅当当前 evaluation 路由支持图像输入且候选有 `cover_url` 时使用，否则自动退回纯文本评估 |
 | `multimodal_batch_size` | int | `8` | 图文评估 batch 上限。合法范围 `1..12`，超范围回退默认值；纯文本评估仍使用调用方原 batch size |
 | `multimodal_image_max_px` | int | `384` | 送入评估器前封面图压缩后的最大边。合法范围 `128..768`，超范围回退默认值 |
@@ -558,6 +573,41 @@ Reddit 来源配置。Reddit 日常 discovery 默认走随 OpenBiliClaw 安装�
 > **环境变量覆盖**：本段字段名都是多词键（如 `kw_cache_high`），与 `[scheduler]` 多词字段一样，**不被** 通用 `OPENBILICLAW_SECTION_KEY` 覆盖机制支持——`OPENBILICLAW_DISCOVERY_GEN_BATCH` 会被按 `_` 拆成 `discovery.gen.batch` 而落不到字段上（静默保持默认，不报错）。需要覆盖请直接改 `config.toml`。
 >
 > 非法 / 缺失 / 超范围的数值字段都会回退到上表默认值（与 `[scheduler]` 数值字段同一套 `_normalize_scheduler_int` 规范化）；`discovery` 写成非表（标量）时整段回退默认。
+
+#### `inspiration_breadth` 档位派生表（Phase 2）
+
+`inspiration_breadth` 一个键派生出下列 9 个内部常量（Task 4 删掉的 10 个旧旋钮里，`inspiration_max_expansions_per_seed` 因 Phase-1 死代码清扫后已无消费者，直接删除、不入派生表）。**发布默认档位为 `high`**；`medium` 列逐项等于旧 `_DEFAULT_INSPIRATION_*` 默认值（表驱动断言强制），需与收敛前行为逐项对齐时显式设 `medium`。注意 planner 内部另有 `selected_interests ≤ 4` 的调用预算 cap，`interest_sample_size` 派生 6 / 8 后有效值仍是 4。
+
+| 内部常量（原 key） | low | medium（=旧默认） | high |
+|---|---|---|---|
+| `aspect_window_size` | 16 | **32** | 48 |
+| `interest_sample_size` | 3 | **6** | 8 |
+| `max_probe_searches_per_stage` | 6 | **12** | 20 |
+| `platforms_per_probe` | 1 | **2** | 3 |
+| `riskcontrolled_probe_budget` | 2 | **4** | 8 |
+| `search_pages_per_probe` | 1 | **1** | 2 |
+| `search_results_per_query` | 3 | **5** | 8 |
+| `max_seeds_per_aspect` | 2 | **3** | 5 |
+| `max_keywords_per_platform` | 8 | **12** | 16 |
+
+> **已移除的 10 个键（无兼容 shim，写了也会被忽略）**：`inspiration_aspect_window_size`、`inspiration_interest_sample_size`、`inspiration_max_probe_searches_per_stage`、`inspiration_platforms_per_probe`、`inspiration_riskcontrolled_probe_budget`、`inspiration_search_pages_per_probe`、`inspiration_search_results_per_query`、`inspiration_max_seeds_per_aspect`、`inspiration_max_expansions_per_seed`、`inspiration_max_keywords_per_platform`。`load_config_with_diagnostics()` 会在构建 discovery 段之前扫描 raw `[discovery]`，命中任一移除键就往 `diagnostics.issues` 追加一条"`inspiration_xxx` 已移除，值被忽略，请改用 `inspiration_breadth`"提示（CLI 的"配置提示"面板自然渲染），**不 fail-fast**——值被忽略、其余配置照常加载。
+
+#### `keyword_generation_mode`（搜索词生成模式，UI/API 派生便利层）
+
+配置页（**桌面 Web `/web` 与插件 popup 设置区**）把 `inspiration_search_enabled` / `inspiration_replace_merged_keywords` 两个布尔收成**单一「搜索词生成模式」下拉**（经典 / 混合 / 灵感）。这**不是** `DiscoveryConfig` 新字段——`config.toml` 仍只存这两个布尔（单一真相源）；`keyword_generation_mode` 只是 API 层的派生便利：`DiscoveryConfigOut` 读出它、`PUT /api/config` 把它翻译回两布尔，两端 UI 只见一个下拉。
+
+三档 ↔ 两布尔映射：
+
+| 模式（下拉标签 / option value） | `inspiration_search_enabled` | `inspiration_replace_merged_keywords` | 语义 |
+|---|---|---|---|
+| 经典 / `legacy` | `false` | `false` | 只用合并关键词生成器 |
+| 混合 / `hybrid` | `true` | `false` | 经典 + 叠加 search-backed 灵感轴链路（同时跑两套，**混合最贵**） |
+| 灵感 / `inspiration` | `true` | `true` | 完全用灵感轴链路替代经典 |
+
+- **读容忍**：`_derive_keyword_generation_mode(enabled, replace)` 在 `enabled=false` 时一律返回 `legacy`（无论 `replace` 取何值），避免过时的 `replace` 残留干扰显示。
+- **写规范化（canonical）**：`PUT /api/config` 收到 `discovery.keyword_generation_mode` 时，每档都**显式写两个布尔**（legacy→`{false,false}`、hybrid→`{true,false}`、inspiration→`{true,true}`），不留 `replace` 残留旧值；`keyword_generation_mode` 本身**从不写入 `config.toml`**（config load 忽略未知 discovery 键，handler 也从不 setattr 它）。
+- **非法值 → 422**：`ConfigUpdateIn.discovery` 是裸 dict，Pydantic 不校验嵌套 Literal，故 handler 手动校验，非 `legacy`/`hybrid`/`inspiration` 抛 `HTTPException(422)`。
+- **mode 赢冲突**：同一 discovery 更新里若 mode 与显式 `inspiration_*` 布尔同时出现，**mode 赢**——mode 应用块在 discovery 段最后执行，且两个原始布尔本就不在该 handler 的显式白名单里。
 
 ### `[storage]`
 

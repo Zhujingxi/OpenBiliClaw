@@ -131,6 +131,7 @@ class InitCoordinator:
         stage_reason: str | None = None,
         partial_success: bool | None = None,
         error_reason: str | None = None,
+        error_detail: str | None = None,
         finished: bool = False,
         event_type: str | None = None,
         event_extra: dict[str, Any] | None = None,
@@ -170,6 +171,8 @@ class InitCoordinator:
                 fields["partial_success"] = 1 if partial_success else 0
             if error_reason is not None:
                 fields["error_reason"] = error_reason
+            if error_detail is not None:
+                fields["error_detail"] = error_detail
             if finished:
                 fields["finished_at"] = _utcnow_iso()
             self._db.update_init_run(run_id, **fields)
@@ -221,11 +224,15 @@ class InitCoordinator:
             event_extra={"partial_success": partial_success},
         )
 
-    async def fail(self, run_id: str, reason: str) -> None:
+    async def fail(self, run_id: str, reason: str, detail: str | None = None) -> None:
+        """Terminal failure. ``detail`` carries the human-readable specifics
+        (GuidedInitError message / exception summary) so status consumers can
+        show WHY instead of only the generic reason code."""
         await self._write(
             run_id,
             status="failed",
             error_reason=reason,
+            error_detail=(detail or "").strip() or None,
             finished=True,
             event_type="init_failed",
             event_extra={"reason": reason},
@@ -255,6 +262,7 @@ class InitCoordinator:
                 "partial_success": False,
                 "status": "idle",
                 "reason": "none",
+                "detail": "",
             }
         stages = json.loads(run["stages_json"]) if run.get("stages_json") else _initial_stages()
         return {
@@ -267,6 +275,7 @@ class InitCoordinator:
             "partial_success": bool(run["partial_success"]),
             "status": run["status"],
             "reason": run["error_reason"] or "none",
+            "detail": str(run.get("error_detail") or ""),
         }
 
 

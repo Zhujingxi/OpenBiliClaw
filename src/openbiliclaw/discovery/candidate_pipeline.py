@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from openbiliclaw.discovery.admission import effective_admission_threshold
 from openbiliclaw.discovery.candidate_pool import (
     REJECTED_CACHE_ADMISSION,
     REJECTED_FRANCHISE_QUOTA,
@@ -20,6 +21,7 @@ from openbiliclaw.discovery.candidate_pool import (
     discovery_candidate_pending_cap,
     row_to_discovered_content,
 )
+from openbiliclaw.llm.base import classify_llm_unavailability
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -28,6 +30,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _DEFAULT_EVAL_BATCH_SIZE = 45
+# A claim older than this is a dead evaluator (task crashed / cancelled
+# without transitioning the row) — re-queue it. Restart orphans don't wait
+# this long: the first pipeline of the process sweeps them all (see
+# __post_init__).
+_STALE_EVAL_CLAIM_MINUTES = 30
+# Process-level: only the FIRST pipeline built in this process releases all
+# 'evaluating' rows. Config-reload rebuilds skip it so an in-flight batch
+# from the previous pipeline instance isn't needlessly re-queued.
+_orphan_eval_claims_released = False
 
 
 def _default_score_thresholds() -> dict[str, float]:
@@ -79,6 +90,37 @@ class DiscoveryCandidatePipeline:
         init=False,
         repr=False,
     )
+
+    def __post_init__(self) -> None:
+        # The evaluator lives in-process, so any 'evaluating' row found at
+        # process start is orphaned by a crash/restart. Database.initialize()
+        # only resets claims already ≥30 min stale — restart orphans are
+        # typically seconds old, slipped through, and nothing swept later:
+        # they count toward the supply target ("target_reached") but the
+        # drain only claims 'pending_eval' and enforce_pool_cap never deletes
+        # in-flight rows, so the pool starves indefinitely (field log
+        # 2026-07-05: 40 immortal rows, pool_available=0 for good).
+        global _orphan_eval_claims_released
+        if _orphan_eval_claims_released:
+            return
+        _orphan_eval_claims_released = True
+        released = self._release_stale_eval_claims(max_age_minutes=0)
+        if released:
+            logger.warning(
+                "released %s orphaned 'evaluating' claim(s) left by a previous run; "
+                "re-queued as pending_eval",
+                released,
+            )
+
+    def _release_stale_eval_claims(self, *, max_age_minutes: int) -> int:
+        reset = getattr(self.database, "reset_stale_discovery_candidate_evaluations", None)
+        if not callable(reset):
+            return 0
+        try:
+            return int(reset(max_age_minutes=max_age_minutes) or 0)
+        except Exception:
+            logger.debug("stale evaluating claim release failed", exc_info=True)
+            return 0
 
     def enqueue_candidates(
         self,
@@ -314,6 +356,19 @@ class DiscoveryCandidatePipeline:
     ) -> dict[str, int]:
         """Evaluate one pending batch while the shared drain lock is held."""
 
+        # Heal mid-run stalls: an eval task that died without transitioning
+        # its rows leaves 'evaluating' claims no one will ever finish. The
+        # periodic drain tick is the natural sweep point — after the age
+        # threshold they rejoin 'pending_eval' and get claimed below.
+        released = self._release_stale_eval_claims(max_age_minutes=_STALE_EVAL_CLAIM_MINUTES)
+        if released:
+            logger.warning(
+                "released %s stale 'evaluating' claim(s) (older than %s min); "
+                "re-queued as pending_eval",
+                released,
+                _STALE_EVAL_CLAIM_MINUTES,
+            )
+
         self.last_admitted_items = []
         batch_size = self._effective_batch_size(batch_size)
         claim_limit = self._effective_eval_claim_limit(batch_size)
@@ -363,7 +418,22 @@ class DiscoveryCandidatePipeline:
             self.last_admitted_items = list(admitted_items)
             raise
         except Exception as exc:
-            logger.exception("discovery candidate batch evaluation failed")
+            # Expected-transient LLM outages (provider rate-limit cooldown, or
+            # no chat provider configured yet during guided init) are retried on
+            # the next drain tick by design — log one calm line, mirroring
+            # engine.py's "propagating transient failure so callers can retry
+            # later" style, instead of an ERROR+traceback.
+            kind = classify_llm_unavailability(exc)
+            if kind is not None:
+                logger.warning(
+                    "discovery candidate batch evaluation deferred (%s) for %d "
+                    "candidate(s); releasing claims to retry on the next tick: %s",
+                    kind,
+                    len(rows),
+                    exc,
+                )
+            else:
+                logger.exception("discovery candidate batch evaluation failed")
             self._release_eval_claims(rows, reason=str(exc), increment_attempts=False)
             self.last_admitted_items = list(admitted_items)
             return {
@@ -627,9 +697,16 @@ class DiscoveryCandidatePipeline:
         candidate_threshold = self._coerce_threshold(row.get("score_threshold"))
         if candidate_threshold is None:
             candidate_threshold = self._coerce_threshold(payload.get("score_threshold"))
-        if candidate_threshold is not None:
-            return candidate_threshold
-        return self._normalized_admission_min_score()
+        return effective_admission_threshold(
+            self._strategy_for(row, payload),
+            self._normalized_admission_min_score(),
+            candidate_threshold,
+        )
+
+    @staticmethod
+    def _strategy_for(row: dict[str, Any], payload: dict[str, Any]) -> str:
+        strategy = row.get("source_strategy") or payload.get("source_strategy") or ""
+        return str(strategy).strip().lower()
 
     def _max_pending_per_source(self) -> int | None:
         return discovery_candidate_pending_cap(int(self.pool_target_count))

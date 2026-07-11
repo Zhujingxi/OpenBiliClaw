@@ -2,17 +2,48 @@
 
 from __future__ import annotations
 
+import socket
 from typing import TYPE_CHECKING
 
 from openbiliclaw.docker_runtime import (
     bootstrap_runtime_environment,
     bootstrap_runtime_root,
+    can_connect,
     is_running_in_container,
     resolve_optional_proxy_env,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def _closed_local_port() -> int:
+    """Bind then release an ephemeral port so nothing listens on it."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def test_can_connect_returns_false_when_endpoint_is_unreachable() -> None:
+    """A refused/absent endpoint must return False, never raise.
+
+    Regression: the real can_connect used to let ConnectionRefusedError
+    propagate, crashing the Docker runtime bootstrapper before serve-api
+    launched whenever no host proxy listened on port 7897.
+    """
+    assert can_connect("127.0.0.1", _closed_local_port(), timeout=0.5) is False
+
+
+def test_resolve_optional_proxy_env_returns_empty_with_real_can_connect_and_no_proxy() -> None:
+    """End-to-end with the real can_connect: no proxy → no updates, no crash."""
+    updates = resolve_optional_proxy_env(
+        {},
+        proxy_host="127.0.0.1",
+        proxy_port=_closed_local_port(),
+        timeout=0.5,
+    )
+
+    assert updates == {}
 
 
 def test_resolve_optional_proxy_env_skips_when_proxy_already_configured() -> None:
@@ -177,6 +208,63 @@ def test_bootstrap_runtime_environment_skips_proxy_outside_container(tmp_path: P
     assert (runtime_root / "config.toml").exists()
     assert (runtime_root / "data").is_dir()
     assert (runtime_root / "logs").is_dir()
+
+
+def test_bootstrap_runtime_environment_survives_malformed_proxy_port(tmp_path: Path) -> None:
+    """A bad OPENBILICLAW_PROXY_PORT must not crash startup.
+
+    Regression: int() on a malformed value used to raise and propagate
+    through main(), exiting the container before serve-api launched — the
+    same failure mode as an unreachable proxy port. The optional proxy
+    step must degrade to "no proxy" and let runtime setup finish.
+    """
+    runtime_root = tmp_path / "runtime"
+    template = tmp_path / "config.example.toml"
+    template.write_text('[general]\nlanguage = "zh"\n', encoding="utf-8")
+    env = {
+        "OPENBILICLAW_PROJECT_ROOT": str(runtime_root),
+        "OPENBILICLAW_CONFIG_TEMPLATE": str(template),
+        "OPENBILICLAW_PROXY_PORT": "not-a-number",
+    }
+
+    # Reachable proxy would normally inject env, but the port never parses.
+    bootstrap_runtime_environment(
+        env,
+        can_connect=lambda host, port, timeout: True,
+        in_container=lambda _env: True,
+    )
+
+    assert "HTTP_PROXY" not in env
+    # Runtime root setup still completes despite the malformed proxy port.
+    assert (runtime_root / "config.toml").exists()
+    assert (runtime_root / "data").is_dir()
+
+
+def test_bootstrap_runtime_environment_treats_empty_proxy_port_as_default(tmp_path: Path) -> None:
+    """An empty OPENBILICLAW_PROXY_PORT falls back to the default (7897)."""
+    runtime_root = tmp_path / "runtime"
+    template = tmp_path / "config.example.toml"
+    template.write_text('[general]\nlanguage = "zh"\n', encoding="utf-8")
+    env = {
+        "OPENBILICLAW_PROJECT_ROOT": str(runtime_root),
+        "OPENBILICLAW_CONFIG_TEMPLATE": str(template),
+        "OPENBILICLAW_PROXY_PORT": "",
+    }
+
+    seen_ports: list[int] = []
+
+    def _record(host: str, port: int, timeout: float) -> bool:
+        seen_ports.append(port)
+        return False
+
+    bootstrap_runtime_environment(
+        env,
+        can_connect=_record,
+        in_container=lambda _env: True,
+    )
+
+    assert seen_ports == [7897]
+    assert "HTTP_PROXY" not in env
 
 
 def test_is_running_in_container_respects_explicit_env() -> None:

@@ -22,7 +22,7 @@ test("popup header exposes a local mobile web QR entry", () => {
     popupHtml.match(/<div id="mobileQrOverlay"[\s\S]*?<!-- ── Messages overlay ── -->/)?.[0] ?? "";
 
   assert.match(popupMarkup, /id="mobileQrButton"/);
-  assert.match(popupMarkup, /aria-label="显示移动端二维码"/);
+  assert.match(popupMarkup, /aria-label="手机版入口：显示移动端二维码"/);
   assert.match(popupMarkup, /id="mobileQrButton"[\s\S]*id="messagesButton"[\s\S]*id="settingsGear"/);
   assert.match(overlayMarkup, /id="mobileQrCode"/);
   assert.match(overlayMarkup, /id="mobileQrCopy"/);

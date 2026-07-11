@@ -54,6 +54,52 @@ async def test_chat_ready_false_when_no_registry() -> None:
     assert await pr.chat_ready() is False
 
 
+def _ctx_with_fallback(default: Any, fallback: Any, *, fallback_name: str = "claude") -> Any:
+    """Context whose registry carries a chat-capable fallback provider."""
+    ctx = _ctx(provider=default)
+    providers = {"": default, fallback_name: fallback}
+    ctx.llm_registry = SimpleNamespace(
+        get=lambda name="": providers[name],
+        default_provider="openai",
+        fallback_provider=fallback_name,
+        is_chat_capable=lambda name: name == fallback_name,
+    )
+    return ctx
+
+
+async def test_chat_ready_true_via_fallback_when_default_is_down() -> None:
+    """A healthy [llm].fallback_provider serves every runtime chat call, so
+    init must not be blocked just because the primary provider is down."""
+    default, fallback = _Provider(ok=False), _Provider(ok=True)
+    pr = InitPrereqs(_ctx_with_fallback(default, fallback))
+    assert await pr.chat_ready() is True
+    assert default.calls == 1
+    assert fallback.calls == 1
+
+
+async def test_chat_ready_false_when_default_and_fallback_are_both_down() -> None:
+    default, fallback = _Provider(ok=False), _Provider(ok=False)
+    pr = InitPrereqs(_ctx_with_fallback(default, fallback))
+    assert await pr.chat_ready() is False
+    assert fallback.calls == 1
+
+
+async def test_chat_ready_skips_fallback_probe_when_same_as_default() -> None:
+    """A same-name fallback is dead config (the chain drops it) — probing it
+    again would just double the cost of a failing default probe."""
+    default, fallback = _Provider(ok=False), _Provider(ok=True)
+    pr = InitPrereqs(_ctx_with_fallback(default, fallback, fallback_name="openai"))
+    assert await pr.chat_ready() is False
+    assert fallback.calls == 0
+
+
+async def test_chat_ready_skips_fallback_probe_when_default_is_healthy() -> None:
+    default, fallback = _Provider(ok=True), _Provider(ok=True)
+    pr = InitPrereqs(_ctx_with_fallback(default, fallback))
+    assert await pr.chat_ready() is True
+    assert fallback.calls == 0
+
+
 async def test_bilibili_check_failed_without_cookie() -> None:
     pr = InitPrereqs(_ctx(provider=_Provider(ok=True), cookie=""))
     assert await pr.bilibili_check() == "failed"
@@ -90,6 +136,152 @@ async def test_bilibili_check_failed_when_unauthenticated(monkeypatch: Any) -> N
     assert await pr.bilibili_check() == "failed"
 
 
+async def test_bilibili_detail_empty_on_success(monkeypatch: Any) -> None:
+    class _FakeAuth:
+        def __init__(self, **_kw: Any) -> None:
+            pass
+
+        async def validate_cookie(self, _cookie: str) -> Any:
+            return SimpleNamespace(authenticated=True)
+
+    monkeypatch.setattr(init_prereqs, "AuthManager", _FakeAuth)
+    pr = InitPrereqs(_ctx(provider=_Provider(ok=True), cookie="sessdata=abc"))
+    assert await pr.bilibili_check() == "ok"
+    assert pr.peek_bilibili_detail() == ""
+
+
+async def test_bilibili_detail_without_cookie_names_the_cookie() -> None:
+    pr = InitPrereqs(_ctx(provider=_Provider(ok=True), cookie=""))
+    assert await pr.bilibili_check() == "failed"
+    assert "Cookie" in pr.peek_bilibili_detail()
+    assert "代理" not in pr.peek_bilibili_detail()
+
+
+async def test_bilibili_detail_cookie_invalid_has_no_proxy_hint(monkeypatch: Any) -> None:
+    """An expired cookie is a cookie problem — pointing at the proxy would
+    send the user down exactly the wrong rabbit hole."""
+
+    class _FakeAuth:
+        def __init__(self, **_kw: Any) -> None:
+            pass
+
+        async def validate_cookie(self, _cookie: str) -> Any:
+            return SimpleNamespace(
+                authenticated=False,
+                message="当前 Cookie 未登录或已失效。",
+                network_error=False,
+            )
+
+    monkeypatch.setattr(init_prereqs, "AuthManager", _FakeAuth)
+    pr = InitPrereqs(_ctx(provider=_Provider(ok=True), cookie="expired"))
+    assert await pr.bilibili_check() == "failed"
+    assert pr.peek_bilibili_detail() == "当前 Cookie 未登录或已失效。"
+
+
+async def test_bilibili_detail_network_failure_carries_proxy_hint(monkeypatch: Any) -> None:
+    """Transport-class failures (proxy/risk-control/DNS) must tell the user to
+    check their proxy — a valid cookie + proxied probe shows as 'not logged
+    in' otherwise (field report 2026-07)."""
+
+    class _FakeAuth:
+        def __init__(self, **_kw: Any) -> None:
+            pass
+
+        async def validate_cookie(self, _cookie: str) -> Any:
+            return SimpleNamespace(
+                authenticated=False,
+                message="Connection reset by peer",
+                network_error=True,
+            )
+
+    monkeypatch.setattr(init_prereqs, "AuthManager", _FakeAuth)
+    pr = InitPrereqs(_ctx(provider=_Provider(ok=True), cookie="sessdata=abc"))
+    assert await pr.bilibili_check() == "failed"
+    detail = pr.peek_bilibili_detail()
+    assert "Connection reset by peer" in detail
+    assert "代理" in detail
+
+
+async def test_bilibili_detail_timeout_carries_proxy_hint(monkeypatch: Any) -> None:
+    import asyncio
+
+    class _FakeAuth:
+        def __init__(self, **_kw: Any) -> None:
+            pass
+
+        async def validate_cookie(self, _cookie: str) -> Any:
+            await asyncio.sleep(0.2)
+            return SimpleNamespace(authenticated=True)
+
+    monkeypatch.setattr(init_prereqs, "AuthManager", _FakeAuth)
+    monkeypatch.setattr(init_prereqs, "_BILI_PROBE_TIMEOUT", 0.01)
+    pr = InitPrereqs(_ctx(provider=_Provider(ok=True), cookie="sessdata=abc"))
+    assert await pr.bilibili_check() == "failed"
+    detail = pr.peek_bilibili_detail()
+    assert "超时" in detail
+    assert "代理" in detail
+
+
 def test_enabled_platforms_reads_config() -> None:
     pr = InitPrereqs(_ctx(platforms={"bilibili": True, "douyin": True}))
     assert pr.enabled_platforms() == ["bilibili", "douyin"]
+
+
+async def test_bilibili_check_passes_configured_proxy_to_auth_manager(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    class _FakeAuth:
+        def __init__(self, **kw: Any) -> None:
+            captured.update(kw)
+
+        async def validate_cookie(self, _cookie: str) -> Any:
+            return SimpleNamespace(authenticated=True)
+
+    monkeypatch.setattr(init_prereqs, "AuthManager", _FakeAuth)
+    ctx = _ctx(provider=_Provider(ok=True), cookie="sessdata=abc")
+    ctx.config.bilibili.proxy = "http://10.0.0.1:8080"
+    pr = InitPrereqs(ctx)
+    assert await pr.bilibili_check() == "ok"
+    assert captured["proxy"] == "http://10.0.0.1:8080"
+
+
+async def test_bilibili_check_defaults_to_direct_connection(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    class _FakeAuth:
+        def __init__(self, **kw: Any) -> None:
+            captured.update(kw)
+
+        async def validate_cookie(self, _cookie: str) -> Any:
+            return SimpleNamespace(authenticated=True)
+
+    monkeypatch.setattr(init_prereqs, "AuthManager", _FakeAuth)
+    pr = InitPrereqs(_ctx(provider=_Provider(ok=True), cookie="sessdata=abc"))
+    assert await pr.bilibili_check() == "ok"
+    assert captured["proxy"] is None
+
+
+async def test_bilibili_detail_blames_explicit_proxy_when_configured(monkeypatch: Any) -> None:
+    """With an explicit [bilibili].proxy the transport failed on THAT proxy —
+    telling the user "we bypassed your proxy" would be a lie."""
+
+    class _FakeAuth:
+        def __init__(self, **_kw: Any) -> None:
+            pass
+
+        async def validate_cookie(self, _cookie: str) -> Any:
+            return SimpleNamespace(
+                authenticated=False,
+                message="All connection attempts failed",
+                network_error=True,
+            )
+
+    monkeypatch.setattr(init_prereqs, "AuthManager", _FakeAuth)
+    ctx = _ctx(provider=_Provider(ok=True), cookie="sessdata=abc")
+    ctx.config.bilibili.proxy = "http://10.0.0.1:8080"
+    pr = InitPrereqs(ctx)
+    assert await pr.bilibili_check() == "failed"
+    detail = pr.peek_bilibili_detail()
+    assert "[bilibili] proxy" in detail
+    assert "http://10.0.0.1:8080" in detail
+    assert "绕过系统代理" not in detail

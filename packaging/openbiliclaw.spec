@@ -123,6 +123,7 @@ a = Analysis(
         "uvicorn.protocols.http.auto",
         "uvicorn.protocols.websockets",
         "uvicorn.protocols.websockets.auto",
+        "uvicorn.protocols.websockets.websockets_impl",
         "uvicorn.lifespan",
         "uvicorn.lifespan.on",
         "fastapi",
@@ -135,10 +136,12 @@ a = Analysis(
         # --- HTTP / networking ---
         "httpx",
         "httpcore",
+        "socksio",
         "h11",
         "certifi",
         "idna",
         "sniffio",
+        "websockets",
         # --- Pydantic ---
         "pydantic",
         "pydantic_core",

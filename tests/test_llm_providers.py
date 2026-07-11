@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from openbiliclaw.llm.base import (
     LLM_CONNECTIVITY_PROBE_MAX_TOKENS,
@@ -929,6 +936,63 @@ def test_gemini_provider_defaults() -> None:
     assert provider.name == "gemini"
 
 
+def test_cli_import_survives_broken_gemini_sdk_native_deps(tmp_path: Path) -> None:
+    """Issue #80: google-genai installed but raising plain ImportError at load
+    time (e.g. cryptography's native wheel failing to dlopen on Termux/Android)
+    must degrade the Gemini provider instead of crashing CLI startup."""
+    fake_google = tmp_path / "google"
+    fake_genai = fake_google / "genai"
+    fake_genai.mkdir(parents=True)
+    (fake_google / "__init__.py").write_text("", encoding="utf-8")
+    (fake_genai / "__init__.py").write_text(
+        "raise ImportError('dlopen failed: cannot locate symbol \"PyExc_Warning\"')\n",
+        encoding="utf-8",
+    )
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = f"{tmp_path}{os.pathsep}{env.get('PYTHONPATH', '')}"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import openbiliclaw.cli; "
+            "from openbiliclaw.llm.gemini_provider import gemini_sdk_available; "
+            "assert not gemini_sdk_available(); "
+            "print('degraded-ok')",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "degraded-ok" in result.stdout
+
+
+def test_gemini_missing_sdk_error_includes_import_failure_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import openbiliclaw.llm.gemini_provider as gemini_provider_mod
+
+    monkeypatch.setattr(gemini_provider_mod, "genai", None)
+    monkeypatch.setattr(gemini_provider_mod, "types", None)
+    monkeypatch.setattr(
+        gemini_provider_mod,
+        "_SDK_IMPORT_ERROR",
+        'dlopen failed: cannot locate symbol "PyExc_Warning"',
+    )
+
+    # Use the class off the just-patched module object, NOT the top-level
+    # `GeminiProvider` binding: test_gemini_optional_import does a delete+reimport
+    # of this module, which can leave the top-level binding pointing at a
+    # different module object than sys.modules — then __init__ would read a
+    # DIFFERENT module's (unpatched) genai/types and spuriously not raise when
+    # the whole suite runs (green in isolation, red in CI).
+    with pytest.raises(LLMProviderError, match="PyExc_Warning"):
+        gemini_provider_mod.GeminiProvider(api_key="test-key")
+
+
 @pytest.mark.asyncio
 @pytest.mark.skipif(not gemini_sdk_available(), reason="google-genai is not installed")
 async def test_gemini_provider_normalizes_response(
@@ -1141,3 +1205,168 @@ async def test_health_check_returns_false_on_failure(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(provider, "complete", fake_complete)
 
     assert await provider.health_check() is False
+
+
+# --- issue #72: third-party gateway adaptation ---
+
+
+def test_claude_provider_accepts_custom_base_url() -> None:
+    provider = ClaudeProvider(api_key="sk-test", base_url="https://relay.example.com/api")
+    # The Anthropic SDK normalizes the URL with a trailing slash.
+    assert str(provider._client.base_url).rstrip("/") == "https://relay.example.com/api"
+
+
+def test_claude_provider_defaults_to_official_base_url() -> None:
+    provider = ClaudeProvider(api_key="sk-test")
+    assert "api.anthropic.com" in str(provider._client.base_url)
+
+
+def _responses_response(text: str = "ok", *, with_output_text: bool = True) -> SimpleNamespace:
+    response = SimpleNamespace(
+        model="gpt-5-mini",
+        output=[
+            SimpleNamespace(
+                type="message",
+                content=[SimpleNamespace(type="output_text", text=text)],
+            )
+        ],
+        usage=SimpleNamespace(
+            input_tokens=10,
+            output_tokens=5,
+            total_tokens=15,
+            input_tokens_details=SimpleNamespace(cached_tokens=4),
+        ),
+    )
+    if with_output_text:
+        response.output_text = text
+    return response
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_responses_flavor_maps_params_and_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider(
+        api_key="test-key",
+        model="gpt-5-mini",
+        base_url="https://relay.example.com/v1",
+        provider_name="openai_compatible",
+        api_flavor="responses",
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_create(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return _responses_response('{"ok": true}')
+
+    monkeypatch.setattr(provider._client.responses, "create", fake_create)
+
+    response = await provider.complete(
+        [
+            {"role": "system", "content": "be terse"},
+            {"role": "user", "content": "hi"},
+        ],
+        max_tokens=512,
+        json_mode=True,
+    )
+
+    assert captured["instructions"] == "be terse"
+    assert captured["input"] == [{"role": "user", "content": "hi"}]
+    assert captured["max_output_tokens"] == 512
+    assert captured["text"] == {"format": {"type": "json_object"}}
+    assert captured["store"] is False
+    assert "messages" not in captured and "max_tokens" not in captured
+    assert response.content == '{"ok": true}'
+    assert response.provider == "openai_compatible"
+    assert response.usage == {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "cached_input_tokens": 4,
+    }
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_responses_flavor_walks_output_without_output_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider(api_key="test-key", api_flavor="responses")
+
+    async def fake_create(**_: object) -> SimpleNamespace:
+        return _responses_response("fallback-text", with_output_text=False)
+
+    monkeypatch.setattr(provider._client.responses, "create", fake_create)
+
+    response = await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert response.content == "fallback-text"
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_responses_flavor_drops_rejected_temperature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider(api_key="test-key", model="gpt-5.4", api_flavor="responses")
+    calls: list[dict[str, object]] = []
+
+    async def fake_create(**kwargs: object) -> SimpleNamespace:
+        calls.append(dict(kwargs))
+        if "temperature" in kwargs:
+            raise LLMProviderError(
+                "openai request failed: HTTP 400: Unsupported parameter: 'temperature'"
+            )
+        return _responses_response("ok")
+
+    monkeypatch.setattr(provider._client.responses, "create", fake_create)
+
+    response = await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert response.content == "ok"
+    # The rejection first exhausts the generic retry loop (mapped
+    # LLMProviderError is retryable), then the flavor-level fallback
+    # re-sends without temperature — so only the final call drops it.
+    assert "temperature" in calls[0]
+    assert "temperature" not in calls[-1]
+    assert len(calls) >= 2
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_responses_flavor_retries_without_format_on_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider(api_key="test-key", api_flavor="responses")
+    calls: list[dict[str, object]] = []
+
+    async def fake_create(**kwargs: object) -> SimpleNamespace:
+        calls.append(dict(kwargs))
+        if "text" in kwargs:
+            return _responses_response("")
+        return _responses_response('{"ok": true}')
+
+    monkeypatch.setattr(provider._client.responses, "create", fake_create)
+
+    response = await provider.complete([{"role": "user", "content": "hi"}], json_mode=True)
+
+    assert response.content == '{"ok": true}'
+    assert "text" in calls[0]
+    assert "text" not in calls[1]
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_default_flavor_still_uses_chat_completions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider(api_key="test-key")
+
+    async def fake_chat_create(**_: object) -> SimpleNamespace:
+        return _openai_response("chat-path")
+
+    async def fail_responses_create(**_: object) -> SimpleNamespace:
+        raise AssertionError("default flavor must not call /v1/responses")
+
+    monkeypatch.setattr(provider._client.chat.completions, "create", fake_chat_create)
+    monkeypatch.setattr(provider._client.responses, "create", fail_responses_create)
+
+    response = await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert response.content == "chat-path"

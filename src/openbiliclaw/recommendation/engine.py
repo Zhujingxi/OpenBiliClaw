@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -309,8 +310,11 @@ class RecommendationEngine:
             self._last_served_bvids = frozenset()
             return []
 
-        candidates = self._load_pool_candidates(limit=max(limit * multiplier, 40))
+        candidates = self._load_pool_candidates(
+            limit=max(limit * multiplier, 40) + len(excluded_bvids)
+        )
         loaded_count = len(candidates)
+        candidates = self._apply_platform_floor(candidates)
         if excluded_bvids:
             candidates = [c for c in candidates if c.bvid not in excluded_bvids]
         after_exclude_count = len(candidates)
@@ -390,11 +394,9 @@ class RecommendationEngine:
         # the hot path. The elapsed/coverage log below makes regressions
         # in cache warming visible — sustained "elapsed > 500ms" or
         # "coverage < 100%" means warm hooks are missing items.
-        import time as _time
-
-        _embed_t0 = _time.monotonic()
+        _embed_t0 = time.monotonic()
         embeddings = await self._fetch_candidate_embeddings(candidates)
-        _embed_elapsed_ms = (_time.monotonic() - _embed_t0) * 1000.0
+        _embed_elapsed_ms = (time.monotonic() - _embed_t0) * 1000.0
         if candidates:
             logger.info(
                 "MMR embedding fetch: coverage=%d/%d elapsed=%.0fms",
@@ -403,7 +405,7 @@ class RecommendationEngine:
                 _embed_elapsed_ms,
             )
 
-        ranked = self._select_diversified_batch(
+        ranked = await self._select_diversified_batch_async(
             candidates,
             limit=limit,
             score_override=score_override,
@@ -519,6 +521,72 @@ class RecommendationEngine:
     _SUPERGROUP_STRICT_THRESHOLD = 0.90
     _SUPERGROUP_LOOSE_THRESHOLD = 0.80
     _SUPERGROUP_PREFIX_LEN = 2
+
+    @staticmethod
+    def _build_supergroup_canonical_map(
+        embeddings: dict[str, list[float]],
+        *,
+        strict: float,
+        loose: float,
+        prefix_len: int,
+    ) -> dict[str, str]:
+        """Build a deterministic union-find map from topic embeddings."""
+        from openbiliclaw.llm.embedding import cosine_similarity
+
+        labels = list(embeddings.keys())
+        parent: dict[str, str] = {label: label for label in labels}
+
+        def find(x: str) -> str:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: str, b: str) -> None:
+            ra, rb = find(a), find(b)
+            if ra == rb:
+                return
+            if rb < ra:
+                ra, rb = rb, ra
+            parent[rb] = ra
+
+        for index, first in enumerate(labels):
+            for second in labels[index + 1 :]:
+                similarity = cosine_similarity(embeddings[first], embeddings[second])
+                shared_prefix = (
+                    first[:prefix_len] == second[:prefix_len] and len(first) >= prefix_len
+                )
+                if similarity >= strict or (shared_prefix and similarity >= loose):
+                    union(first, second)
+
+        return {label: canonical for label in labels if (canonical := find(label)) != label}
+
+    @classmethod
+    async def _build_supergroup_canonical_map_async(
+        cls,
+        embeddings: dict[str, list[float]],
+        *,
+        strict: float,
+        loose: float,
+        prefix_len: int,
+    ) -> dict[str, str]:
+        """Build the CPU-heavy pairwise map without blocking the event loop."""
+        started = time.monotonic()
+        result = await asyncio.to_thread(
+            cls._build_supergroup_canonical_map,
+            embeddings,
+            strict=strict,
+            loose=loose,
+            prefix_len=prefix_len,
+        )
+        elapsed = time.monotonic() - started
+        if elapsed > 0.05:
+            logger.warning(
+                "Topic supergroup CPU build took %.0fms in worker thread (%d labels)",
+                elapsed * 1000.0,
+                len(embeddings),
+            )
+        return result
 
     async def _merge_topic_supergroups(
         self,
@@ -640,8 +708,6 @@ class RecommendationEngine:
             self._supergroup_canonical_map = {}
             return len(groups)
 
-        from openbiliclaw.llm.embedding import cosine_similarity
-
         embedding_service = self._embedding_service
 
         async def _embed_with_titles(label: str, titles: list[str]) -> tuple[str, list[float]]:
@@ -657,39 +723,13 @@ class RecommendationEngine:
             self._supergroup_canonical_map = {}
             return len(embeddings)
 
-        # Union-find on the embeddings to derive canonical labels
         labels = list(embeddings.keys())
-        parent: dict[str, str] = {label: label for label in labels}
-
-        def find(x: str) -> str:
-            while parent[x] != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
-
-        def union(a: str, b: str) -> None:
-            ra, rb = find(a), find(b)
-            if ra == rb:
-                return
-            if rb < ra:
-                ra, rb = rb, ra
-            parent[rb] = ra
-
-        strict = self._SUPERGROUP_STRICT_THRESHOLD
-        loose = self._SUPERGROUP_LOOSE_THRESHOLD
-        prefix_len = self._SUPERGROUP_PREFIX_LEN
-        for i, ga in enumerate(labels):
-            for gb in labels[i + 1 :]:
-                sim = cosine_similarity(embeddings[ga], embeddings[gb])
-                shared_prefix = ga[:prefix_len] == gb[:prefix_len] and len(ga) >= prefix_len
-                if sim >= strict or (shared_prefix and sim >= loose):
-                    union(ga, gb)
-
-        new_map: dict[str, str] = {}
-        for label in labels:
-            canonical = find(label)
-            if canonical != label:
-                new_map[label] = canonical
+        new_map = await self._build_supergroup_canonical_map_async(
+            embeddings,
+            strict=self._SUPERGROUP_STRICT_THRESHOLD,
+            loose=self._SUPERGROUP_LOOSE_THRESHOLD,
+            prefix_len=self._SUPERGROUP_PREFIX_LEN,
+        )
         self._supergroup_canonical_map = new_map
 
         if new_map:
@@ -1576,13 +1616,22 @@ class RecommendationEngine:
         self,
         *,
         profile: SoulProfile,
+        excluded_bvids: list[str] | None = None,
         limit: int = 5,
     ) -> list[Recommendation]:
         """Instantly pick a new batch from the discovery pool.
 
         Delegates to :meth:`serve` with ``expression_mode="precomputed"``.
         """
-        return await self.serve(profile, limit=limit, expression_mode="precomputed")
+        excluded = frozenset(
+            bvid.strip() for bvid in (excluded_bvids or []) if bvid and bvid.strip()
+        )
+        return await self.serve(
+            profile,
+            limit=limit,
+            excluded_bvids=excluded,
+            expression_mode="precomputed",
+        )
 
     async def append_recommendations(
         self,
@@ -1875,6 +1924,40 @@ class RecommendationEngine:
 
         results = await asyncio.gather(*(_warm(c) for c in items))
         return sum(1 for ok in results if ok)
+
+    @classmethod
+    async def _select_diversified_batch_async(
+        cls,
+        candidates: list[DiscoveredContent],
+        *,
+        limit: int,
+        score_override: dict[str, float] | None = None,
+        embeddings: dict[str, list[float]] | None = None,
+        amplification_guard: set[str] | frozenset[str] | None = None,
+        mmr_alpha: float = 0.5,
+        mmr_beta: float = 0.5,
+    ) -> list[DiscoveredContent]:
+        """Run CPU-heavy ranking in a worker thread to preserve responsiveness."""
+        started = time.monotonic()
+        result = await asyncio.to_thread(
+            cls._select_diversified_batch,
+            candidates,
+            limit=limit,
+            score_override=score_override,
+            embeddings=embeddings,
+            amplification_guard=amplification_guard,
+            mmr_alpha=mmr_alpha,
+            mmr_beta=mmr_beta,
+        )
+        elapsed = time.monotonic() - started
+        if elapsed > 0.05:
+            logger.warning(
+                "Recommendation diversity CPU selection took %.0fms in worker thread "
+                "(%d candidates)",
+                elapsed * 1000.0,
+                len(candidates),
+            )
+        return result
 
     @classmethod
     def _select_diversified_batch(
@@ -2489,9 +2572,20 @@ class RecommendationEngine:
                 up_mid=int(row.get("up_mid", 0) or 0),
                 duration=int(row.get("duration", 0) or 0),
                 description=str(row.get("description", "")),
+                published_at=str(row.get("published_at", "") or ""),
+                published_label=str(row.get("published_label", "") or ""),
                 cover_url=str(row.get("cover_url", "")),
                 view_count=int(row.get("view_count", 0) or 0),
                 like_count=int(row.get("like_count", 0) or 0),
+                favorite_count=int(row.get("favorite_count", 0) or 0),
+                collect_count=int(row.get("collect_count", 0) or 0),
+                comment_count=int(row.get("comment_count", 0) or 0),
+                share_count=int(row.get("share_count", 0) or 0),
+                danmaku_count=int(row.get("danmaku_count", 0) or 0),
+                reply_count=int(row.get("reply_count", 0) or 0),
+                retweet_count=int(row.get("retweet_count", 0) or 0),
+                bookmark_count=int(row.get("bookmark_count", 0) or 0),
+                author_name=str(row.get("author_name", "") or ""),
                 tags=self._parse_tags(row.get("tags", "[]")),
                 topic_key=str(row.get("topic_key", "")),
                 topic_group=str(row.get("topic_group", "")),
@@ -2518,6 +2612,65 @@ class RecommendationEngine:
             limit=limit, xhs_self_nickname=self._xhs_self_nickname()
         )
         return self._rows_to_discovered(rows)
+
+    def _apply_platform_floor(self, candidates: list[DiscoveredContent]) -> list[DiscoveredContent]:
+        """Guarantee every stocked platform is represented in the serve window.
+
+        A single relevance-ordered window can be 100% one platform (e.g. all
+        bilibili early in a session) even while zhihu/xhs/douyin rows sit
+        servable in the pool, leaving those tabs empty for hours. For each
+        servable platform missing from the window, pull up to 5 rows and append
+        them (dedup by bvid). The downstream MMR/diversifier is unchanged — it
+        just can no longer silently drop a stocked platform. Skipped entirely
+        for single-platform pools (common bilibili-only installs).
+        """
+        list_platforms = getattr(self._database, "list_servable_pool_platforms", None)
+        fetch_for_platform = getattr(self._database, "get_pool_candidates_for_platform", None)
+        if not callable(list_platforms) or not callable(fetch_for_platform):
+            return candidates
+        nickname = self._xhs_self_nickname()
+        try:
+            servable_platforms = [
+                str(token).strip().lower()
+                for token in list_platforms(xhs_self_nickname=nickname)
+                if str(token).strip()
+            ]
+        except Exception:
+            logger.debug("platform floor: servable platform lookup failed", exc_info=True)
+            return candidates
+        # Single-platform pools never need a floor — zero behavior change there.
+        if len(servable_platforms) <= 1:
+            return candidates
+
+        present = {self._platform_token(item) for item in candidates}
+        missing = [token for token in servable_platforms if token not in present]
+        if not missing:
+            return candidates
+
+        seen_bvids = {item.bvid for item in candidates if item.bvid}
+        topped_up: list[tuple[str, int]] = []
+        for platform in missing:
+            try:
+                rows = fetch_for_platform(platform, limit=5, xhs_self_nickname=nickname)
+            except Exception:
+                logger.debug("platform floor: fetch failed for %s", platform, exc_info=True)
+                continue
+            added = 0
+            for item in self._rows_to_discovered(rows):
+                if item.bvid and item.bvid in seen_bvids:
+                    continue
+                if item.bvid:
+                    seen_bvids.add(item.bvid)
+                candidates.append(item)
+                added += 1
+            if added:
+                topped_up.append((platform, added))
+        if topped_up:
+            logger.info(
+                "serve platform floor topped up %s",
+                ", ".join(f"{name}+{count}" for name, count in topped_up),
+            )
+        return candidates
 
     def _load_pool_candidates_needing_copy(self, *, limit: int) -> list[DiscoveredContent]:
         rows = self._database.get_pool_candidates_needing_copy(

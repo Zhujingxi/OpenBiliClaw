@@ -43,11 +43,23 @@ import asyncio
 import json
 import logging
 import math
+import re
 import socket
 import time
 import uuid
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
+from openbiliclaw.config import InspirationBreadthParams, derive_inspiration_breadth_params
+from openbiliclaw.discovery.inspiration import (
+    AxisRow,
+    BrainstormBranch,
+    GroundedProbe,
+    MaterializeCandidate,
+    SecondaryInterest,
+    normalize_lens_family,
+)
 from openbiliclaw.discovery.keyword_digest import profile_kw_digest
 from openbiliclaw.discovery.pool_snapshot import (
     build_cold_start_pool_snapshot,
@@ -71,6 +83,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_INSPIRATION_PROVIDER_TIMEOUT_SECONDS = 8.0
+
+
+def _ledger_int(value: object) -> int:
+    try:
+        return int(cast("Any", value))
+    except (TypeError, ValueError):
+        return 0
+
+
 # Canonical long-form platform identifiers. These match the keys the keyword
 # store, pool-source shares, and the merged prompt builder all expect — short
 # codes (xhs/dy/yt/bili) are NOT used here.
@@ -84,6 +106,147 @@ _PLANNER_PLATFORMS: tuple[str, ...] = (
     "reddit",
 )
 _BILIBILI = "bilibili"
+_PLATFORM_QUERY_STYLES: dict[str, dict[str, tuple[str, ...]]] = {
+    "bilibili": {
+        "native_markers": (
+            "B站",
+            "Vlog",
+            "vlog",
+            "解析",
+            "幕后",
+            "盘点",
+            "测评",
+            "实测",
+            "教程",
+            "记录",
+            "解说",
+            "复盘",
+            "流程",
+            "体验",
+            "案例",
+            "争议",
+            "设计",
+        ),
+        "examples": ("日本动画制作进行 幕后解析", "寿喜烧 家庭复刻 教程"),
+        "avoid_markers": ("小红书", "笔记", "种草"),
+    },
+    "xiaohongshu": {
+        "native_markers": (
+            "攻略",
+            "避坑",
+            "种草",
+            "打卡",
+            "清单",
+            "真实体验",
+            "人均",
+            "亲测",
+            "笔记",
+            "同款",
+            "不踩雷",
+            "复刻",
+            "收藏",
+        ),
+        "examples": ("日式寿喜烧 家庭复刻 不踩雷", "上海小店 人均50真实体验"),
+        "avoid_markers": ("B站", "短视频", "热议"),
+    },
+    "douyin": {
+        "native_markers": (
+            "爆款",
+            "同款",
+            "挑战",
+            "实拍",
+            "现场",
+            "速看",
+            "一分钟",
+            "短视频",
+            "探店",
+            "合集",
+            "榜单",
+            "不踩雷",
+            "复刻",
+        ),
+        "examples": ("动画制作幕后 一分钟速看", "上海小店 探店实拍 不踩雷"),
+        "avoid_markers": ("知乎", "小红书笔记"),
+    },
+    "twitter": {
+        "native_markers": (
+            "#",
+            "热议",
+            "讨论",
+            "观点",
+            "争议",
+            "梗",
+            "meme",
+            "trend",
+            "drama",
+            "fandom",
+            "reaction",
+        ),
+        "examples": ("#动画制作 热议", "寿喜烧复刻 讨论"),
+        "avoid_markers": ("小红书", "知乎"),
+    },
+    "zhihu": {
+        "native_markers": (
+            "如何",
+            "为什么",
+            "怎么",
+            "是否",
+            "值得",
+            "区别",
+            "原理",
+            "经验",
+            "评价",
+            "看待",
+            "分析",
+            "原因",
+            "机制",
+            "职业",
+            "入门",
+        ),
+        "examples": ("如何评价日本动画制作进行", "寿喜烧家庭复刻有哪些技巧"),
+        "avoid_markers": ("小红书", "抖音", "#"),
+    },
+    "youtube": {
+        "native_markers": (
+            "review",
+            "guide",
+            "how",
+            "explained",
+            "best",
+            "documentary",
+            "vlog",
+            "behind",
+            "workflow",
+            "production",
+            "recipe",
+            "restaurant",
+            "anime",
+        ),
+        "examples": ("anime production workflow explained", "homemade sukiyaki recipe guide"),
+        "avoid_markers": ("小红书", "知乎", "抖音"),
+    },
+    "reddit": {
+        "native_markers": (
+            "recommendation",
+            "recommendations",
+            "discussion",
+            "tips",
+            "experience",
+            "review",
+            "guide",
+            "how",
+            "vs",
+            "explained",
+            "recipe",
+            "anime",
+            "fandom",
+            "meme",
+            "design",
+        ),
+        "examples": ("sakuga terminology explained", "homemade sukiyaki recipe tips"),
+        "avoid_markers": ("小红书", "知乎", "抖音"),
+    },
+}
 # The planner reclaims in-flight rows that leaked past the claim lease before
 # each generation pass. ``executing`` rows belong to genuinely async (XHS)
 # tasks, so give them a much wider timeout than a plain claim lease.
@@ -123,13 +286,429 @@ _PER_PLATFORM_SUPPLY_TOP = 8
 _MERGED_TOKENS_PER_KEYWORD = 48
 _MERGED_JSON_OVERHEAD_TOKENS = 1024
 _MERGED_MIN_MAX_TOKENS = 4096
+_INSPIRATION_AXIS_KEYWORD_MAX_TOKENS = 8192
+# F2 (Phase 2.1): the single axis+keyword call keeps the 8192 floor for small
+# slot counts and only scales past a comfortable threshold, so high-platform
+# runs (F1 makes each core_concept longer) do not brush the output ceiling.
+# ``max_tokens = min(CEIL, floor + max(0, slots - THRESHOLD) * PER_SLOT)``;
+# slots = len(selected_interests) * len(target_platforms). THRESHOLD=12 is the
+# 3-platform comfort point (production caps interests at 4, so 3×4=12); the
+# 6-platform case (4×6=24) therefore gets real headroom (11264) instead of
+# sitting exactly on the threshold. CEIL stays 16384 — the bounded single retry
+# at the floor is the fallback for a provider/gateway whose real ceiling turns
+# out lower (see report: deepseek-v4-flash's own ceiling is 64K, but the
+# sensenova gateway cap could not be confirmed here).
+_INSPIRATION_AXIS_KEYWORD_MAX_TOKENS_CEIL = 16384
+_PER_SLOT_TOKEN_BUDGET = 256
+_INSPIRATION_AXIS_KEYWORD_SLOT_THRESHOLD = 12
+_INSPIRATION_AXIS_KEYWORD_MAX_INTERESTS = 4
+_INSPIRATION_AXIS_KEYWORD_MAX_AXES_PER_INTEREST = 6
+_INSPIRATION_AXIS_KEYWORD_MAX_EVIDENCE_TOTAL = 24
+_INSPIRATION_AXIS_KEYWORD_MAX_EVIDENCE_PER_INTEREST = 8
+# Spec AC3 requires every interest to cover at least two axes or report a shortfall.
+_INSPIRATION_MIN_AXES_PER_INTEREST = 2
+# Axis yield backfill + lifecycle run at most once per this interval (checked
+# against the table-wide MAX(yield_backfilled_at)). Production stages only —
+# preview never triggers the tick (observation must not mutate the observed).
+_AXIS_BACKFILL_MIN_INTERVAL_HOURS = 6
 
 
 def _as_str_list(value: object) -> list[str]:
     """Coerce a loosely-typed JSON value into a clean ``list[str]``."""
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
     if not isinstance(value, (list, tuple)):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _as_text(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _as_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def _mapping_get(row: object, key: str, default: object = "") -> object:
+    if isinstance(row, Mapping):
+        return row.get(key, default)
+    return getattr(row, key, default)
+
+
+def _inspiration_interest_label(row: object) -> str:
+    for key in ("label", "interest", "interest_label", "name"):
+        value = _as_text(_mapping_get(row, key))
+        if value:
+            return value
+    return ""
+
+
+def _axis_interest_label(axis: object) -> str:
+    return _as_text(_mapping_get(axis, "interest_label")) or _as_text(
+        _mapping_get(axis, "interest")
+    )
+
+
+def _evidence_interest_label(row: object) -> str:
+    return _as_text(_mapping_get(row, "interest")) or _as_text(_mapping_get(row, "interest_label"))
+
+
+def _axis_prompt_row(axis: object) -> dict[str, object]:
+    return {
+        "axis_id": _as_text(_mapping_get(axis, "axis_id")),
+        "interest": _axis_interest_label(axis),
+        "axis_label": _as_text(_mapping_get(axis, "axis_label")),
+        "axis_kind": _as_text(_mapping_get(axis, "axis_kind")) or "other",
+        "example_terms": _as_str_list(_mapping_get(axis, "example_terms")),
+        "evidence_refs": _as_str_list(_mapping_get(axis, "evidence_refs")),
+        "time_sensitive": _as_bool(_mapping_get(axis, "time_sensitive", False)),
+    }
+
+
+def _interest_prompt_row(row: object) -> dict[str, object]:
+    return {
+        "interest_id": _as_text(_mapping_get(row, "interest_id")),
+        "label": _inspiration_interest_label(row),
+        "parent": _as_text(_mapping_get(row, "parent")),
+        "weight": _mapping_get(row, "weight", 0.0),
+    }
+
+
+def _evidence_prompt_row(row: object) -> dict[str, object]:
+    if isinstance(row, Mapping):
+        return {str(key): value for key, value in row.items()}
+    return {
+        "interest": _evidence_interest_label(row),
+        "title": _as_text(_mapping_get(row, "title")),
+        "url": _as_text(_mapping_get(row, "url")),
+        "source": _as_text(_mapping_get(row, "source")),
+    }
+
+
+def _allocation_target_platforms(allocation_targets: Mapping[str, object]) -> set[str]:
+    platforms: set[str] = set()
+    for raw_target in allocation_targets.values():
+        if not isinstance(raw_target, Mapping):
+            continue
+        for platform in _as_str_list(raw_target.get("platforms")):
+            platforms.add(platform)
+    return platforms
+
+
+def _filter_platform_guides(platform_guides: object, target_platforms: set[str]) -> object:
+    if isinstance(platform_guides, Mapping):
+        return {
+            str(platform): value
+            for platform, value in platform_guides.items()
+            if str(platform) in target_platforms
+        }
+    if isinstance(platform_guides, Sequence) and not isinstance(platform_guides, (str, bytes)):
+        guides: dict[str, object] = {}
+        for raw_guide in platform_guides:
+            if not isinstance(raw_guide, Mapping):
+                continue
+            platform = _as_text(raw_guide.get("platform"))
+            if platform in target_platforms:
+                guides[platform] = dict(raw_guide)
+        return guides
+    return {}
+
+
+def _platform_guides_count(platform_guides: object) -> int:
+    if isinstance(platform_guides, Mapping):
+        return len(platform_guides)
+    if isinstance(platform_guides, Sequence) and not isinstance(platform_guides, (str, bytes)):
+        return len(platform_guides)
+    return 0
+
+
+def _cap_inspiration_axis_keyword_inputs(
+    *,
+    platform_guides: object,
+    selected_interests: Sequence[object],
+    existing_axes: Sequence[object],
+    fresh_evidence: Sequence[object],
+    allocation_targets: Mapping[str, object],
+) -> tuple[
+    object,
+    list[dict[str, object]],
+    list[dict[str, object]],
+    list[dict[str, object]],
+    dict[str, int],
+]:
+    selected = [
+        _interest_prompt_row(row)
+        for row in selected_interests[:_INSPIRATION_AXIS_KEYWORD_MAX_INTERESTS]
+    ]
+    telemetry = {
+        "selected_interests_truncated": max(0, len(selected_interests) - len(selected)),
+        "existing_axes_truncated": 0,
+        "fresh_evidence_truncated": 0,
+        "platform_guides_dropped": 0,
+    }
+
+    axes_by_interest: dict[str, int] = {}
+    capped_axes: list[dict[str, object]] = []
+    for axis in existing_axes:
+        interest = _axis_interest_label(axis)
+        count = axes_by_interest.get(interest, 0)
+        if count >= _INSPIRATION_AXIS_KEYWORD_MAX_AXES_PER_INTEREST:
+            telemetry["existing_axes_truncated"] += 1
+            continue
+        axes_by_interest[interest] = count + 1
+        capped_axes.append(_axis_prompt_row(axis))
+
+    evidence_by_interest: dict[str, int] = {}
+    capped_evidence: list[dict[str, object]] = []
+    for row in fresh_evidence:
+        interest = _evidence_interest_label(row)
+        count = evidence_by_interest.get(interest, 0)
+        if (
+            count >= _INSPIRATION_AXIS_KEYWORD_MAX_EVIDENCE_PER_INTEREST
+            or len(capped_evidence) >= _INSPIRATION_AXIS_KEYWORD_MAX_EVIDENCE_TOTAL
+        ):
+            telemetry["fresh_evidence_truncated"] += 1
+            continue
+        evidence_by_interest[interest] = count + 1
+        capped_evidence.append(_evidence_prompt_row(row))
+
+    target_platforms = _allocation_target_platforms(allocation_targets)
+    capped_guides = _filter_platform_guides(platform_guides, target_platforms)
+    telemetry["platform_guides_dropped"] = max(
+        0,
+        _platform_guides_count(platform_guides) - _platform_guides_count(capped_guides),
+    )
+    return capped_guides, selected, capped_axes, capped_evidence, telemetry
+
+
+def _loads_json_object(content: str) -> dict[str, object] | None:
+    try:
+        parsed = json.loads(content.strip())
+    except json.JSONDecodeError:
+        start = content.find("{")
+        end = content.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            parsed = json.loads(content[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+    if isinstance(parsed, dict):
+        return parsed
+    return None
+
+
+def _extract_object_array_prefix(content: str, key: str) -> tuple[list[dict[str, object]], int]:
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*\[', content)
+    if match is None:
+        return [], 0
+    decoder = json.JSONDecoder()
+    index = match.end()
+    result: list[dict[str, object]] = []
+    dropped = 0
+    while index < len(content):
+        while index < len(content) and content[index].isspace():
+            index += 1
+        if index < len(content) and content[index] == ",":
+            index += 1
+            continue
+        if index >= len(content) or content[index] == "]":
+            break
+        try:
+            item, next_index = decoder.raw_decode(content, index)
+        except json.JSONDecodeError:
+            if content[index:].strip():
+                dropped += 1
+            break
+        if isinstance(item, dict):
+            result.append({str(k): v for k, v in item.items()})
+        else:
+            dropped += 1
+        index = next_index
+    return result, dropped
+
+
+def _axis_rows_from_payload(raw_axes: Sequence[object]) -> list[AxisRow]:
+    axes: list[AxisRow] = []
+    for raw_axis in raw_axes:
+        if not isinstance(raw_axis, Mapping):
+            continue
+        interest = _as_text(raw_axis.get("interest")) or _as_text(raw_axis.get("interest_label"))
+        axis_label = _as_text(raw_axis.get("axis_label"))
+        if not interest or not axis_label:
+            continue
+        axes.append(
+            AxisRow(
+                interest_label=interest,
+                axis_label=axis_label,
+                axis_kind=_as_text(raw_axis.get("axis_kind")) or "other",
+                source="llm_axis_keyword",
+                axis_id=_as_text(raw_axis.get("axis_id")),
+                example_terms=tuple(_as_str_list(raw_axis.get("example_terms"))),
+                evidence_refs=tuple(_as_str_list(raw_axis.get("evidence_refs"))),
+                time_sensitive=_as_bool(raw_axis.get("time_sensitive")),
+            )
+        )
+    return axes
+
+
+def _materialize_candidates_from_payload(
+    raw_keywords: Sequence[object],
+) -> list[MaterializeCandidate]:
+    candidates: list[MaterializeCandidate] = []
+    for raw_keyword in raw_keywords:
+        if not isinstance(raw_keyword, Mapping):
+            continue
+        interest = _as_text(raw_keyword.get("interest"))
+        axis_label = _as_text(raw_keyword.get("axis_id_or_label")) or _as_text(
+            raw_keyword.get("axis_label")
+        )
+        platform = _as_text(raw_keyword.get("platform"))
+        core_concept = _as_text(raw_keyword.get("core_concept"))
+        if not interest or not axis_label or not platform or not core_concept:
+            continue
+        candidates.append(
+            MaterializeCandidate(
+                interest=interest,
+                axis_label=axis_label,
+                platform=platform,
+                core_concept=core_concept,
+                decoration=_as_text(raw_keyword.get("decoration")),
+                recency_sensitivity=_as_text(raw_keyword.get("recency_sensitivity")) or "low",
+                origin="llm_axis_keyword",
+            )
+        )
+    return candidates
+
+
+def _legacy_axis_keyword_payload_from_expansions(
+    raw_expansions: Sequence[object],
+    *,
+    selected_interests: Sequence[object],
+    platforms: Sequence[str],
+) -> tuple[list[AxisRow], list[MaterializeCandidate]]:
+    interest_by_id = {
+        _as_text(_mapping_get(item, "interest_id")): _inspiration_interest_label(item)
+        for item in selected_interests
+        if _as_text(_mapping_get(item, "interest_id")) and _inspiration_interest_label(item)
+    }
+    fallback_interest = ""
+    selected_labels = [
+        _inspiration_interest_label(item)
+        for item in selected_interests
+        if _inspiration_interest_label(item)
+    ]
+    if len(selected_labels) == 1:
+        fallback_interest = selected_labels[0]
+
+    axes: list[AxisRow] = []
+    candidates: list[MaterializeCandidate] = []
+    for raw_expansion in raw_expansions:
+        if not isinstance(raw_expansion, Mapping):
+            continue
+        text = _as_text(raw_expansion.get("text"))
+        interest = interest_by_id.get(_as_text(raw_expansion.get("aspect_id")), fallback_interest)
+        if not interest:
+            continue
+        axis_values = _as_str_list(raw_expansion.get("detail_axes")) or [
+            _as_text(raw_expansion.get("relation")) or text or "legacy_axis"
+        ]
+        axis_label = axis_values[0]
+        axes.append(
+            AxisRow(
+                interest_label=interest,
+                axis_label=axis_label,
+                axis_kind=normalize_lens_family(axis_label),
+                source="legacy_axis_keyword_payload",
+                example_terms=(text,) if text else (),
+            )
+        )
+        platform_keywords = raw_expansion.get("platform_keywords")
+        emitted_platforms: set[str] = set()
+        if isinstance(platform_keywords, Mapping):
+            for raw_platform, raw_keywords in platform_keywords.items():
+                platform = _as_text(raw_platform)
+                for keyword in _as_str_list(raw_keywords):
+                    candidates.append(
+                        MaterializeCandidate(
+                            interest=interest,
+                            axis_label=axis_label,
+                            platform=platform,
+                            core_concept=keyword,
+                            decoration="",
+                            recency_sensitivity="low",
+                            origin="legacy_axis_keyword_payload",
+                        )
+                    )
+                    emitted_platforms.add(platform)
+        for keyword in _as_str_list(raw_expansion.get("keywords")):
+            target_platforms = tuple(platforms) if platforms else tuple(emitted_platforms)
+            for platform in target_platforms:
+                if platform in emitted_platforms:
+                    continue
+                candidates.append(
+                    MaterializeCandidate(
+                        interest=interest,
+                        axis_label=axis_label,
+                        platform=platform,
+                        core_concept=keyword,
+                        decoration="",
+                        recency_sensitivity="low",
+                        origin="legacy_axis_keyword_payload",
+                    )
+                )
+    return axes, candidates
+
+
+def _parse_inspiration_axis_keyword_payload(
+    content: str,
+    *,
+    selected_interests: Sequence[object] = (),
+    platforms: Sequence[str] = (),
+) -> tuple[list[AxisRow], list[MaterializeCandidate], dict[str, object]]:
+    telemetry: dict[str, object] = {
+        "parse_salvaged": False,
+        "parse_dropped_count": 0,
+    }
+    if not content.strip():
+        return [], [], telemetry
+
+    payload = _loads_json_object(content)
+    raw_axes: Sequence[object] = []
+    raw_keywords: Sequence[object] = []
+    if payload is not None:
+        axes_value = payload.get("axes")
+        keywords_value = payload.get("keywords")
+        raw_axes = axes_value if isinstance(axes_value, list) else []
+        raw_keywords = keywords_value if isinstance(keywords_value, list) else []
+        expansions_value = payload.get("expansions")
+        if not raw_axes and not raw_keywords and isinstance(expansions_value, list):
+            axes, candidates = _legacy_axis_keyword_payload_from_expansions(
+                expansions_value,
+                selected_interests=selected_interests,
+                platforms=platforms,
+            )
+            return axes, candidates, telemetry
+    else:
+        axes_prefix, axes_dropped = _extract_object_array_prefix(content, "axes")
+        keywords_prefix, keywords_dropped = _extract_object_array_prefix(content, "keywords")
+        raw_axes = axes_prefix
+        raw_keywords = keywords_prefix
+        dropped_count = axes_dropped + keywords_dropped
+        telemetry["parse_salvaged"] = bool(raw_axes or raw_keywords)
+        telemetry["parse_dropped_count"] = dropped_count
+
+    return (
+        _axis_rows_from_payload(raw_axes),
+        _materialize_candidates_from_payload(raw_keywords),
+        telemetry,
+    )
 
 
 class KeywordDeficitSource(Protocol):
@@ -175,12 +754,19 @@ class KeywordPlanner:
         signal_event_threshold: int = 6,
         owner: str | None = None,
         embedding_service: Any | None = None,
+        inspiration_provider: Any | None = None,
+        inspiration_params: InspirationBreadthParams | None = None,
     ) -> None:
         self._llm = llm_service
         self._db = database
         self._config = config
         self._soul_engine = soul_engine
         self._embedding_service = embedding_service
+        self._inspiration_provider = inspiration_provider
+        # Internal config view for the inspiration knobs. When injected (CLI
+        # one-shot overrides, tests) it wins; otherwise the values derive from
+        # the ``inspiration_breadth`` tier at read time.
+        self._inspiration_params_override = inspiration_params
         self._deficit_source: KeywordDeficitSource | None = None
         self._pool_target_count = pool_target_count
         self._signal_event_threshold = signal_event_threshold
@@ -197,11 +783,32 @@ class KeywordPlanner:
         # ``{platform: {"generated": n, "yield": y}}`` snapshot emitted by a
         # generation pass. Empty until the first pass that generates anything.
         self.last_cycle_ledger: dict[str, dict[str, int]] = {}
+        # Phase 2.3 telemetry: True when the last coexist explore round fell back
+        # from rich axis-library generation to the flat ``explore_domains``
+        # queries (rich-gen degraded / empty). Reset each explore attempt.
+        self.last_explore_inspiration_degraded: bool = False
         self._profile_prompt_cache = PromptLayerRenderCache()
         self._generation_cache: dict[
             str,
             tuple[float, dict[str, list[str]], set[str], list[dict[str, object]]],
         ] = {}
+        # Part D: the ①–⑥ inspiration orchestration lives in a dedicated
+        # pipeline. The four compatibility delegates below forward to it. The
+        # ``host`` back-reference covers the planner infra helpers shared with
+        # the merged-keyword path (_history / _insert / _avoid_hints /
+        # _supply_hints / _load_profile). Lazy import avoids an import cycle.
+        from openbiliclaw.runtime.inspiration_pipeline import InspirationKeywordPipeline
+
+        self._inspiration_pipeline: InspirationKeywordPipeline = InspirationKeywordPipeline(
+            host=self,
+            db=database,
+            llm_service=llm_service,
+            inspiration_provider=inspiration_provider,
+            discovery=lambda: self._discovery,
+            inspiration_params=lambda: self._inspiration_params,
+            clock=lambda: datetime.now(UTC),
+            embedding_service=embedding_service,
+        )
 
     # ── wiring ──────────────────────────────────────────────────────────
 
@@ -224,6 +831,14 @@ class KeywordPlanner:
         return self._config.discovery
 
     @property
+    def _inspiration_params(self) -> InspirationBreadthParams:
+        if self._inspiration_params_override is not None:
+            return self._inspiration_params_override
+        return derive_inspiration_breadth_params(
+            getattr(self._discovery, "inspiration_breadth", "medium")
+        )
+
+    @property
     def enabled(self) -> bool:
         return bool(self._discovery.unified_keyword_planner_enabled)
 
@@ -236,6 +851,154 @@ class KeywordPlanner:
             return int(self._pool_target_count)
         scheduler = getattr(self._config, "scheduler", None)
         return int(getattr(scheduler, "pool_target_count", 300))
+
+    # ── inspiration compatibility delegates (Part D) ────────────────────
+    #
+    # The ①–⑥ orchestration physically moved to ``InspirationKeywordPipeline``.
+    # These thin delegates keep the private APIs existing tests / the runtime
+    # controller call directly, with signatures unchanged.
+
+    @property
+    def last_axis_backfill(self) -> dict[str, object]:
+        return self._inspiration_pipeline.last_axis_backfill
+
+    async def plan_inspiration_axis_keywords(
+        self,
+        *,
+        profile_digest: object,
+        platform_guides: object,
+        selected_interests: Sequence[object],
+        existing_axes: Sequence[object],
+        fresh_evidence: Sequence[object],
+        allocation_targets: Mapping[str, object],
+    ) -> tuple[list[AxisRow], list[MaterializeCandidate], dict[str, object]]:
+        return await self._inspiration_pipeline.plan_inspiration_axis_keywords(
+            profile_digest=profile_digest,
+            platform_guides=platform_guides,
+            selected_interests=selected_interests,
+            existing_axes=existing_axes,
+            fresh_evidence=fresh_evidence,
+            allocation_targets=allocation_targets,
+        )
+
+    async def preview_inspiration_keywords(
+        self,
+        platforms: list[str],
+        *,
+        profile: SoulProfile | None = None,
+        query_kind: str = "regular",
+        persist_axes: bool = False,
+    ) -> dict[str, object]:
+        return await self._inspiration_pipeline.preview_inspiration_keywords(
+            platforms,
+            profile=profile,
+            query_kind=query_kind,
+            persist_axes=persist_axes,
+        )
+
+    async def _run_shared_inspiration_stage(
+        self,
+        regular_platforms: list[str],
+        *,
+        explore_platforms: list[str],
+        profile: SoulProfile,
+        digest: str,
+    ) -> tuple[dict[str, int], int]:
+        return await self._inspiration_pipeline._run_shared_inspiration_stage(
+            regular_platforms,
+            explore_platforms=explore_platforms,
+            profile=profile,
+            digest=digest,
+        )
+
+    async def _run_inspiration_stage(
+        self,
+        platforms: list[str],
+        *,
+        profile: SoulProfile,
+        digest: str,
+        query_kind: str = "regular",
+    ) -> dict[str, int]:
+        return await self._inspiration_pipeline._run_inspiration_stage(
+            platforms,
+            profile=profile,
+            digest=digest,
+            query_kind=query_kind,
+        )
+
+    async def _run_explore_inspiration_stage(
+        self,
+        explore_platforms: list[str],
+        *,
+        profile: SoulProfile,
+        digest: str,
+        explore_domains: Sequence[Mapping[str, object]],
+        covered_topic_groups: Sequence[str],
+    ) -> tuple[dict[str, int], dict[str, object]]:
+        return await self._inspiration_pipeline._run_explore_inspiration_stage(
+            explore_platforms,
+            profile=profile,
+            digest=digest,
+            explore_domains=explore_domains,
+            covered_topic_groups=covered_topic_groups,
+        )
+
+    def _selected_inspiration_interests(
+        self,
+        profile: SoulProfile,
+        coverage_snapshot: dict[str, dict[str, object]],
+    ) -> list[SecondaryInterest]:
+        return self._inspiration_pipeline._selected_inspiration_interests(
+            profile, coverage_snapshot
+        )
+
+    @staticmethod
+    def _interest_hint_terms(
+        selected_interests: list[SecondaryInterest],
+        branches: list[BrainstormBranch],
+        grounding_records: list[GroundedProbe],
+    ) -> dict[str, set[str]]:
+        from openbiliclaw.runtime.inspiration_pipeline import InspirationKeywordPipeline
+
+        return InspirationKeywordPipeline._interest_hint_terms(
+            selected_interests, branches, grounding_records
+        )
+
+    @staticmethod
+    def _infer_source_interest_from_keyword(
+        keyword: str,
+        interest_hint_terms: dict[str, set[str]],
+    ) -> str:
+        from openbiliclaw.runtime.inspiration_pipeline import InspirationKeywordPipeline
+
+        return InspirationKeywordPipeline._infer_source_interest_from_keyword(
+            keyword, interest_hint_terms
+        )
+
+    @staticmethod
+    def _build_axis_id_index(
+        axes: Sequence[AxisRow],
+    ) -> tuple[set[str], dict[tuple[str, str], str]]:
+        from openbiliclaw.runtime.inspiration_pipeline import InspirationKeywordPipeline
+
+        return InspirationKeywordPipeline._build_axis_id_index(axes)
+
+    @staticmethod
+    def _resolve_realized_axis_id(
+        *,
+        raw_axis_id: str,
+        source_interest: str,
+        axis_label: str,
+        axis_id_index: tuple[set[str], dict[tuple[str, str], str]],
+    ) -> str:
+        from openbiliclaw.runtime.inspiration_pipeline import InspirationKeywordPipeline
+
+        return InspirationKeywordPipeline._resolve_realized_axis_id(
+            raw_axis_id=raw_axis_id,
+            source_interest=source_interest,
+            axis_label=axis_label,
+            axis_id_index=axis_id_index,
+        )
 
     # ── loop ────────────────────────────────────────────────────────────
 
@@ -405,6 +1168,30 @@ class KeywordPlanner:
                 }
             )
 
+        if self._inspiration_replaces_merged_keywords():
+            explore_request = self._explore_domains_request() if needs else None
+            if explore_request is not None:
+                (
+                    inspiration_only_ledger,
+                    explore_inserted,
+                ) = await self._run_shared_inspiration_stage(
+                    list(needs),
+                    explore_platforms=[_BILIBILI],
+                    profile=profile,
+                    digest=digest,
+                )
+                if explore_inserted > 0:
+                    self._mark_explore_planned()
+            else:
+                inspiration_only_ledger = await self._run_inspiration_stage(
+                    list(needs),
+                    profile=profile,
+                    digest=digest,
+                    query_kind="regular",
+                )
+            self._emit_cycle_ledger(inspiration_only_ledger, digest)
+            return inspiration_only_ledger
+
         generated: dict[str, list[str]] = {}
         present: set[str] = set()
         # ``call_failed`` distinguishes "the merged LLM call raised / returned
@@ -491,6 +1278,7 @@ class KeywordPlanner:
         # platform marked due purely by the B站 catalyst whose cache is already
         # at high (need == 0) was dropped from ``blocks`` above and must NOT
         # receive a fallback insert.
+        inspiration_platforms: list[str] = []
         for platform in needs:
             words = generated.get(platform, [])
             declined = False
@@ -512,6 +1300,7 @@ class KeywordPlanner:
                 ledger[platform] = 0
                 continue
 
+            inspiration_platforms.append(platform)
             inserted = self._insert(platform, words, digest)
             if inserted <= 0:
                 # Sparse profile: generation + fallback produced nothing new
@@ -530,14 +1319,96 @@ class KeywordPlanner:
             ledger[platform] = inserted
 
         if explore_request is not None and explore_domains:
-            explore_queries = self._explore_domain_queries(explore_domains)
-            inserted = self._insert(_BILIBILI, explore_queries, digest, keyword_kind="explore")
-            if inserted > 0:
-                ledger[_BILIBILI] = int(ledger.get(_BILIBILI, 0)) + inserted
-                self._mark_explore_planned()
+            covered = _as_str_list(explore_request.get("covered_topic_groups"))
+            explore_ledger = await self._run_coexist_explore(
+                profile=profile,
+                digest=digest,
+                explore_domains=explore_domains,
+                covered_topic_groups=covered,
+            )
+            for platform, inserted in explore_ledger.items():
+                ledger[platform] = int(ledger.get(platform, 0)) + int(inserted)
+
+        inspiration_ledger = await self._run_inspiration_stage(
+            inspiration_platforms,
+            profile=profile,
+            digest=digest,
+        )
+        for platform, inserted in inspiration_ledger.items():
+            ledger[platform] = int(ledger.get(platform, 0)) + int(inserted)
 
         self._emit_cycle_ledger(ledger, digest)
         return ledger
+
+    async def _run_coexist_explore(
+        self,
+        *,
+        profile: SoulProfile,
+        digest: str,
+        explore_domains: list[dict[str, object]],
+        covered_topic_groups: list[str],
+    ) -> dict[str, int]:
+        """Coexist explore channel (Phase 2.3): rich axis-library generation with
+        a flat-``explore_domains`` fallback.
+
+        When inspiration search is enabled, route the due explore round through
+        the cross-domain axis pipeline (``_run_explore_inspiration_stage``). If it
+        degrades — LLM failure / empty output (``explore_degraded``) or it raises
+        — fall back to the OLD ``_explore_domain_queries`` flatten so the explore
+        pool is never left bare (the merged call already produced these domains,
+        so the fallback has real data). When inspiration is disabled, take the
+        flatten path directly (byte-identical to the pre-2.3 behaviour). Marks the
+        explore plan exactly once, on whichever path actually inserted words.
+        """
+
+        self.last_explore_inspiration_degraded = False
+        ledger: dict[str, int] = {}
+        if not explore_domains:
+            return ledger
+
+        use_rich = (
+            bool(getattr(self._discovery, "inspiration_search_enabled", False))
+            and self._inspiration_provider is not None
+        )
+        if use_rich:
+            try:
+                explore_ledger, report = await self._run_explore_inspiration_stage(
+                    [_BILIBILI],
+                    profile=profile,
+                    digest=digest,
+                    explore_domains=explore_domains,
+                    covered_topic_groups=covered_topic_groups,
+                )
+            except Exception:
+                logger.debug("explore rich generation raised; degrading to flatten", exc_info=True)
+                explore_ledger, report = {}, {"explore_degraded": True}
+            degraded = bool(report.get("explore_degraded")) or not explore_ledger
+            if not degraded:
+                for platform, inserted in explore_ledger.items():
+                    ledger[platform] = int(ledger.get(platform, 0)) + int(inserted)
+                self._mark_explore_planned()
+                return ledger
+            # Rich generation degraded → fall through to the flat fallback so the
+            # explore pool still replenishes (never bare).
+            self.last_explore_inspiration_degraded = True
+
+        explore_queries = self._explore_domain_queries(explore_domains)
+        inserted = self._insert(_BILIBILI, explore_queries, digest, keyword_kind="explore")
+        if inserted > 0:
+            ledger[_BILIBILI] = int(ledger.get(_BILIBILI, 0)) + inserted
+            self._mark_explore_planned()
+        return ledger
+
+    def _inspiration_replaces_merged_keywords(self) -> bool:
+        return (
+            bool(getattr(self._discovery, "inspiration_search_enabled", False))
+            and bool(getattr(self._discovery, "inspiration_replace_merged_keywords", False))
+            and self._inspiration_provider is not None
+        )
+
+    @staticmethod
+    def _match_text(value: object) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip().casefold())
 
     def _generation_cache_key(
         self,
@@ -781,6 +1652,7 @@ class KeywordPlanner:
         digest: str,
         *,
         keyword_kind: str = "regular",
+        metadata_by_keyword: dict[str, dict[str, object]] | None = None,
     ) -> int:
         if not words:
             return 0
@@ -791,6 +1663,7 @@ class KeywordPlanner:
                     words,
                     digest,
                     keyword_kind=keyword_kind,
+                    metadata_by_keyword=metadata_by_keyword,
                 )
             )
         except TypeError:

@@ -268,6 +268,15 @@ class _RecordingCacheDatabase(_RecentViewedDatabase):
     def cache_content(self, bvid: str, **kwargs: object) -> None:
         self.cached_bvids.append(bvid)
 
+    def pool_admission_threshold(
+        self,
+        source_strategy: str,
+        requested_threshold: object | None = None,
+    ) -> float:
+        if source_strategy == "explore":
+            return max(0.58, float(requested_threshold or 0.0))
+        return max(0.60, float(requested_threshold or 0.0))
+
 
 class _RawModeAwareStrategy:
     name = "raw_mode"
@@ -896,8 +905,8 @@ def test_cache_results_skips_recently_viewed_items() -> None:
 
     engine._cache_results(
         [
-            DiscoveredContent(bvid="BV1VIEWED", title="已经看过"),
-            DiscoveredContent(bvid="BV1FRESH", title="新内容"),
+            DiscoveredContent(bvid="BV1VIEWED", title="已经看过", relevance_score=0.90),
+            DiscoveredContent(bvid="BV1FRESH", title="新内容", relevance_score=0.90),
         ]
     )
 
@@ -915,16 +924,44 @@ def test_cache_results_skips_recently_viewed_non_bilibili_items() -> None:
                 content_id="note-seen",
                 source_platform="xiaohongshu",
                 title="已经看过的小红书",
+                relevance_score=0.90,
             ),
             DiscoveredContent(
                 content_id="note-fresh",
                 source_platform="xiaohongshu",
                 title="新小红书",
+                relevance_score=0.90,
             ),
         ]
     )
 
     assert database.cached_bvids == ["note-fresh"]
+
+
+def test_cache_results_rechecks_admission_before_writing() -> None:
+    database = _RecordingCacheDatabase(set())
+    engine = ContentDiscoveryEngine(database=database)  # type: ignore[arg-type]
+
+    engine._cache_results(
+        [
+            DiscoveredContent(
+                bvid="BV1TRENDLOW",
+                title="不匹配的热门内容",
+                source_strategy="trending",
+                relevance_score=0.59,
+                score_threshold=0.20,
+            ),
+            DiscoveredContent(
+                bvid="BV1EXPLORE",
+                title="合格的跨域发现",
+                source_strategy="explore",
+                relevance_score=0.58,
+                score_threshold=0.55,
+            ),
+        ]
+    )
+
+    assert database.cached_bvids == ["BV1EXPLORE"]
 
 
 @pytest.mark.asyncio
@@ -2534,6 +2571,7 @@ def test_count_pool_by_franchise_returns_lowercased_groups(tmp_path: Path) -> No
         source_platform="bilibili",
         source="search",
         franchise_key="张雪机车",
+        relevance_score=0.90,
     )
     db.cache_content(
         bvid="BV1B",
@@ -2542,6 +2580,7 @@ def test_count_pool_by_franchise_returns_lowercased_groups(tmp_path: Path) -> No
         source_platform="bilibili",
         source="search",
         franchise_key="张雪机车",  # exact match
+        relevance_score=0.90,
     )
     db.cache_content(
         bvid="BV1C",
@@ -2550,6 +2589,7 @@ def test_count_pool_by_franchise_returns_lowercased_groups(tmp_path: Path) -> No
         source_platform="bilibili",
         source="search",
         franchise_key="风犬少年的天空",
+        relevance_score=0.90,
     )
     db.cache_content(
         bvid="BV1D",
@@ -2558,6 +2598,7 @@ def test_count_pool_by_franchise_returns_lowercased_groups(tmp_path: Path) -> No
         source_platform="bilibili",
         source="search",
         franchise_key="",
+        relevance_score=0.90,
     )
 
     counts = db.count_pool_by_franchise()

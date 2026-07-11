@@ -276,10 +276,20 @@ class OllamaProvider(OpenAIProvider):
                         exc_info=True,
                     )
 
+        # Ollama puts the actionable part ("model 'bge-m3' not found",
+        # "out of memory", …) in the response body — without it a bare
+        # "500" is undiagnosable from logs (field log 2026-07-05).
+        body_hint = ""
+        if isinstance(last_exc, httpx.HTTPStatusError):
+            try:
+                body_hint = last_exc.response.text[:200]
+            except Exception:
+                body_hint = ""
         logger.warning(
-            "Ollama embedding failed after 2 attempts (model=%s, url=%s)",
+            "Ollama embedding failed after 2 attempts (model=%s, url=%s)%s",
             model,
             url,
+            f" body={body_hint!r}" if body_hint else "",
             exc_info=last_exc,
         )
         return []

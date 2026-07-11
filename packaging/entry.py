@@ -24,13 +24,17 @@ In both packaged layouts the read-only bundle provides the template config +
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
 import threading
+import time
 import tomllib
+import urllib.request
 import webbrowser
 from contextlib import suppress
 from pathlib import Path
@@ -439,6 +443,7 @@ def _packaged_ollama_preflight() -> None:
     try:
         from openbiliclaw.config import load_config
         from openbiliclaw.runtime.ollama_supervisor import (
+            _is_default_ollama_endpoint,
             _ollama_is_running,
             _ollama_start_serve_background,
             effective_ollama_endpoint,
@@ -452,6 +457,8 @@ def _packaged_ollama_preflight() -> None:
         endpoint = effective_ollama_endpoint(cfg)
         if not is_loopback(endpoint) or _ollama_is_running(host=endpoint):
             return
+        if not _is_default_ollama_endpoint(endpoint):
+            return
         if not _ollama_start_serve_background():
             print("[OpenBiliClaw] Ollama 未能自动拉起；embedding 可能降级。")
     except Exception as exc:  # noqa: BLE001 — preflight must never crash startup
@@ -461,9 +468,9 @@ def _packaged_ollama_preflight() -> None:
 def _ensure_embedding_model_async() -> None:
     """Pull the local embedding model in the background if it's missing.
 
-    Honours the "bundle the runtime, fetch the 568MB weights once" approach: a
+    Honours the "bundle the runtime, fetch the 1.1GB weights once" approach: a
     fresh machine reaches embedding-ready on its own without the user running
-    ``setup-embedding``. Runs in a daemon thread so the 568MB download never
+    ``setup-embedding``. Runs in a daemon thread so the 1.1GB download never
     blocks the API; reuses the battle-tested ``cli`` pull helpers (already in the
     bundle). No-op when embedding isn't Ollama or the model is already present.
     """
@@ -472,21 +479,132 @@ def _ensure_embedding_model_async() -> None:
         try:
             from openbiliclaw.config import load_config
 
-            emb = load_config().llm.embedding
+            cfg = load_config()
+            emb = cfg.llm.embedding
             if str(emb.provider).strip().lower() != "ollama":
                 return
             model = str(emb.model).strip() or "bge-m3"
-            from openbiliclaw.cli import _ollama_has_model, _ollama_pull_model
+            base_url = (
+                str(emb.base_url).strip()
+                or str(cfg.llm.ollama.base_url).strip()
+                or "http://localhost:11434/v1"
+            )
+            from openbiliclaw.cli import _ollama_has_model
+            from openbiliclaw.llm.ollama_diagnostics import native_root, pull_ollama_model
+            from openbiliclaw.runtime import embedding_progress
 
-            if _ollama_has_model(model):
+            if _ollama_has_model(model, native_root(base_url)):
                 return
-            print(f"[OpenBiliClaw] 后台拉取本地 embedding 模型 {model}(约 568MB,仅首次)…")
-            if _ollama_pull_model(model):
+            print(f"[OpenBiliClaw] 后台拉取本地 embedding 模型 {model}(约 1.1GB,仅首次)…")
+            embedding_progress.mark_pull_running(model)
+            ok = False
+            error = ""
+            try:
+                ok, error = asyncio.run(
+                    pull_ollama_model(
+                        base_url,
+                        model,
+                        on_progress=embedding_progress.report_pull,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 — background best-effort only
+                error = f"{type(exc).__name__}: {exc}"
+            finally:
+                embedding_progress.mark_pull_done(ok, error)
+            if ok:
                 print(f"[OpenBiliClaw] 本地 embedding 模型 {model} 就绪")
+            elif error:
+                print(f"[OpenBiliClaw] 本地 embedding 模型 {model} 拉取失败: {error}")
         except Exception as exc:  # noqa: BLE001 — background best-effort only
             print(f"[OpenBiliClaw] 模型自动拉取跳过: {exc}")
 
     threading.Thread(target=_worker, name="obc-embed-pull", daemon=True).start()
+
+
+# Dedicated port for the ``with-embedding`` variant's PRIVATE Ollama daemon, so
+# the baked model is served from our own ASCII/user-writable dir independently
+# of any external/official Ollama the user runs on the default 11434.
+_PRIVATE_OLLAMA_PORT = 11435
+
+
+def _set_embedding_field(config_path: Path, field: str, value: str) -> None:
+    """Set a single ``[llm.embedding].<field>`` line, editing only that line so
+    the comment-heavy template survives (mirrors ``_enable_ollama_embedding_default``)."""
+    try:
+        lines = config_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError:
+        return
+    in_block = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_block = stripped == "[llm.embedding]"
+            continue
+        if in_block and re.match(rf"\s*{re.escape(field)}\s*=", line):
+            indent = line[: len(line) - len(line.lstrip())]
+            lines[i] = f'{indent}{field} = "{value}"\n'
+            config_path.write_text("".join(lines), encoding="utf-8")
+            return
+
+
+def _seed_bundled_embedding_model(bundled_resources: Path, config_path: Path) -> bool:
+    """``with-embedding`` variant: seed the baked bge-m3 into an ASCII,
+    user-writable dir and serve it from a PRIVATE Ollama on a dedicated port,
+    BEFORE any other Ollama start.
+
+    Returns True when the private embedding daemon is up (the caller then skips
+    the default preflight + network pull). Returns False — a no-op — for the
+    lean variant (no seed dir), when the user picked a remote embedding
+    provider, or when anything can't complete (=> fall back to the normal
+    preflight + online pull). Never crashes startup.
+    """
+    seed_dir = bundled_resources / "bge-m3-seed"
+    if not seed_dir.is_dir():
+        return False  # lean variant — nothing bundled
+    try:
+        from openbiliclaw.config import load_config
+        from openbiliclaw.runtime.embedding_seed import (
+            effective_embedding_models_dir,
+            seed_embedding_model,
+        )
+        from openbiliclaw.runtime.ollama_supervisor import start_managed_ollama_at
+
+        cfg = load_config()
+        provider = str(cfg.llm.embedding.provider).strip().lower()
+        if provider not in ("", "ollama"):
+            return False  # user chose a remote embedding provider — respect it
+
+        target = effective_embedding_models_dir(
+            user_ollama_models=os.environ.get("OLLAMA_MODELS"),
+            platform=sys.platform,
+            home=Path.home(),
+            programdata=os.environ.get("PROGRAMDATA"),
+        )
+        if target is None:
+            return False
+
+        result = seed_embedding_model(seed_dir, target)
+        if not result.ok:
+            print(f"[OpenBiliClaw] 内置向量模型播种失败,改为在线拉取: {result.detail}")
+            return False
+
+        host = f"127.0.0.1:{_PRIVATE_OLLAMA_PORT}"
+        base_url = f"http://{host}/v1"
+        # Provider + base_url + model all point at the private daemon, which
+        # only serves the bundled bge-m3. Forcing the model guards against a
+        # stale/other embedding model name 404-ing against the private daemon.
+        _enable_ollama_embedding_default(config_path)
+        _set_embedding_field(config_path, "base_url", base_url)
+        _set_embedding_field(config_path, "model", "bge-m3")
+
+        if not start_managed_ollama_at(str(target), host):
+            print("[OpenBiliClaw] 私有 Ollama 未能启动,内置向量模型交回默认流程。")
+            return False
+        print(f"[OpenBiliClaw] 内置向量模型 bge-m3 已就绪(私有 Ollama :{_PRIVATE_OLLAMA_PORT})")
+        return True
+    except Exception as exc:  # noqa: BLE001 — must never crash startup
+        print(f"[OpenBiliClaw] 内置向量模型初始化跳过: {exc}")
+        return False
 
 
 def _redirect_output_to_logfile(project_root: Path) -> Path | None:
@@ -741,6 +859,81 @@ def _run_server_in_tray(server: Any, host: str, port: int, project_root: Path) -
             server_thread.join(timeout=5)
 
 
+_LANDING_HEALTH_TIMEOUT_SECONDS = 30.0
+_LANDING_HEALTH_POLL_SECONDS = 0.5
+
+# Loopback probes must never detour through a system proxy: users with
+# HTTP(S)_PROXY set but no 127.0.0.1 NO_PROXY entry would otherwise have the
+# health wait answered (or hung) by the proxy instead of the local backend.
+_LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _wait_for_backend_ready(
+    base_url: str, timeout_seconds: float = _LANDING_HEALTH_TIMEOUT_SECONDS
+) -> bool:
+    """Poll ``/api/health`` until the backend answers.
+
+    The static ``/setup/`` / ``/web/`` shells cannot self-retry a refused
+    first GET, so the browser must only be pointed at a live server.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        with (
+            suppress(Exception),
+            _LOOPBACK_OPENER.open(f"{base_url}/api/health", timeout=2) as response,  # noqa: S310
+        ):
+            if 200 <= response.status < 300:
+                return True
+        time.sleep(_LANDING_HEALTH_POLL_SECONDS)
+    return False
+
+
+def _fetch_backend_initialized(base_url: str) -> bool | None:
+    """Read ``initialized`` from ``/api/init-status``; ``None`` when unknown.
+
+    An UNinitialized backend answers this read only after running its real
+    prereq probes (LLM / bilibili, gather-bounded by the slowest), which can
+    take well over 5s on a cold start — keep the timeout generous or the
+    /setup/ routing silently degrades to the /web fallback.
+    """
+    try:
+        with _LOOPBACK_OPENER.open(f"{base_url}/api/init-status", timeout=15) as response:  # noqa: S310
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+    value = payload.get("initialized") if isinstance(payload, dict) else None
+    return value if isinstance(value, bool) else None
+
+
+def _decide_landing_path(seeded: bool, repaired: bool, initialized: bool | None) -> str:
+    """Pick the page the launcher opens.
+
+    Fresh or repaired config → setup wizard. A configured relaunch whose init
+    never completed must land on the wizard too — the old config-existence-only
+    rule sent those users to ``/web/`` and relied entirely on the SPA's
+    onboarding gate. Unknown init state (probe failed) keeps the ``/web/``
+    fallback: the SPA gate is the safety net, not a wall.
+    """
+    if seeded or repaired:
+        return "/setup/"
+    if initialized is False:
+        return "/setup/"
+    return "/web/"
+
+
+def _open_landing_page_when_ready(base_url: str, *, seeded: bool, repaired: bool) -> None:
+    """Open the landing page once the backend is reachable (best effort).
+
+    On health timeout the browser still opens — matching the old immediate-open
+    behaviour rather than silently never showing a page.
+    """
+    healthy = _wait_for_backend_ready(base_url)
+    initialized = _fetch_backend_initialized(base_url) if healthy else None
+    landing = _decide_landing_path(seeded, repaired, initialized)
+    with suppress(Exception):
+        webbrowser.open(base_url + landing)
+
+
 def main() -> None:
     project_root, bundled_resources = _resolve_runtime_paths()
     # Windowed (no-console) build: route output to a log file FIRST, before any
@@ -832,30 +1025,45 @@ def main() -> None:
             existing_host = "127.0.0.1" if host == "0.0.0.0" else host  # noqa: S104
             _close_splash()
             print("[OpenBiliClaw] 已有实例在运行;打开 Web 界面,本次不启动新后端。")
+            # The other instance already owns the port, so it is safe to ask it
+            # whether init ever completed and route to the wizard when not.
+            existing_base = f"http://{existing_host}:{port}"
+            landing = _decide_landing_path(False, False, _fetch_backend_initialized(existing_base))
             with suppress(Exception):
-                webbrowser.open(f"http://{existing_host}:{port}/web/")
+                webbrowser.open(existing_base + landing)
             return
     _ = lock_handle  # keep a reference so the lock is held for the process lifetime
 
-    # Packaged entry bypasses ``openbiliclaw start``, so run the same loopback
-    # Ollama preflight here to bring up the (bundled) daemon when needed.
-    _packaged_ollama_preflight()
+    # with-embedding variant: seed the baked bge-m3 and bring up a private
+    # Ollama for it BEFORE any other Ollama start. On success the default
+    # preflight + online pull are superseded (embedding is already ready).
+    if not _seed_bundled_embedding_model(bundled_resources, project_root / "config.toml"):
+        # Packaged entry bypasses ``openbiliclaw start``, so run the same loopback
+        # Ollama preflight here to bring up the (bundled) daemon when needed.
+        _packaged_ollama_preflight()
 
-    # With a bundled ollama, fetch the embedding weights once in the background
-    # so a fresh install becomes embedding-ready without manual setup.
-    if has_bundled_ollama:
-        _ensure_embedding_model_async()
+        # With a bundled ollama, fetch the embedding weights once in the background
+        # so a fresh install becomes embedding-ready without manual setup.
+        if has_bundled_ollama:
+            _ensure_embedding_model_async()
 
     print(f"[OpenBiliClaw] 数据目录: {project_root}")
     print(f"[OpenBiliClaw] 正在启动后端服务 http://{host}:{port} ...")
 
-    # First launch → open the step-by-step setup wizard; afterwards → the app
-    # itself. When bound to all interfaces, loopback is the address a local
-    # browser can actually hit.
-    landing = "/setup/" if seeded or repair_result.repaired else "/web/"
+    # Landing page opens from a background thread only after /api/health
+    # answers: opening before uvicorn binds showed ERR_CONNECTION_REFUSED, and
+    # the static shells cannot retry a refused first GET. The thread also asks
+    # /api/init-status so a configured-but-never-initialized relaunch lands on
+    # the wizard instead of relying on /web's onboarding gate alone. When bound
+    # to all interfaces, loopback is the address a local browser can hit.
     browser_host = "127.0.0.1" if host == "0.0.0.0" else host  # noqa: S104
-    with suppress(Exception):
-        webbrowser.open(f"http://{browser_host}:{port}{landing}")
+    threading.Thread(
+        target=_open_landing_page_when_ready,
+        args=(f"http://{browser_host}:{port}",),
+        kwargs={"seeded": seeded, "repaired": repair_result.repaired},
+        name="obc-open-landing",
+        daemon=True,
+    ).start()
 
     # Start the server
     import uvicorn

@@ -8,6 +8,7 @@ import {
   buildRecommendationClickPayload,
   buildVideoUrl,
   formatRelativeTimestamp,
+  formatPublishedTime,
   getCommentSubmitUiState,
   getCognitionHistoryUiState,
   getConnectionBadgeState,
@@ -28,6 +29,7 @@ import {
   normalizeProbeType,
   normalizeRuntimeStatus,
   normalizeProfileSummary,
+  platformDisplayName,
   probeMessageKey,
   shouldDisplayProbeFromWebSocket,
   shouldHydrateProbe,
@@ -40,8 +42,10 @@ import { createRuntimeStreamClient } from "./popup-stream.js";
 import { createOfflineBackendPoller } from "./popup-connection-poller.js";
 import {
   buildInitChecklist,
+  describeInitFailure,
   describeInitReason,
   describeInitStartError,
+  embeddingRepairStartAccepted,
   initProgressView,
   INIT_SOURCE_OPTIONS,
   INIT_SOURCE_LOGIN_HINT,
@@ -55,6 +59,8 @@ import {
   updateBackendEndpoint,
 } from "./popup-backend-config.js";
 import { initAuthControl } from "./popup-auth-control.js";
+import { initExtLogin } from "./popup-ext-login.js";
+import { clearPopupSession, readPopupSessionToken } from "./popup-device-auth.js";
 import { initAutostartControl } from "./popup-autostart-control.js";
 import {
   createQrSvgMarkup,
@@ -76,6 +82,7 @@ import {
   fetchChatTurn,
   fetchChatTurns,
   fetchConfig,
+  fetchEmbeddingRepairStatus,
   fetchHealth,
   fetchInitStatus,
   fetchPendingDelight,
@@ -87,6 +94,7 @@ import {
   fetchSourcesStatus,
   markDelightSent,
   probeConfigService,
+  startEmbeddingRepair,
   startInit,
   readCachedConfigSnapshot,
   reportRecommendationClick,
@@ -263,7 +271,10 @@ async function setProxyImageSrc(image, coverUrl) {
   const path = buildImageProxyPath(coverUrl);
   if (!path) return false;
   const origin = await getBackendOrigin();
-  image.src = `${origin}${path}`;
+  const token = await readPopupSessionToken();
+  let url = `${origin}${path}`;
+  if (token) url += `&token=${encodeURIComponent(token)}`;
+  image.src = url;
   return true;
 }
 
@@ -275,6 +286,7 @@ async function setProxyImageSrc(image, coverUrl) {
 // cover can't stall the whole batch (the rest keep warming in the background).
 async function preloadCoverImages(items, { timeoutMs = 4000 } = {}) {
   const origin = await getBackendOrigin();
+  const token = await readPopupSessionToken();
   const loaders = (Array.isArray(items) ? items : [])
     .map((item) => {
       const path = item?.cover_url ? buildImageProxyPath(item.cover_url) : null;
@@ -284,7 +296,9 @@ async function preloadCoverImages(items, { timeoutMs = 4000 } = {}) {
         img.decoding = "async";
         img.addEventListener("load", () => resolve(), { once: true });
         img.addEventListener("error", () => resolve(), { once: true });
-        img.src = `${origin}${path}`;
+        let url = `${origin}${path}`;
+        if (token) url += `&token=${encodeURIComponent(token)}`;
+        img.src = url;
       });
     })
     .filter(Boolean);
@@ -826,7 +840,85 @@ function _renderInitChecklist(status, selected = null) {
       hint.textContent = row.hint;
       li.append(hint);
     }
+    if (row.key === "embedding" && !row.ok) {
+      const pull = row.pull || {};
+      const repair = row.repair || {};
+      if (pull.active) {
+        const wrap = document.createElement("div");
+        wrap.className = "init-embed-pull";
+        const bar = document.createElement("div");
+        bar.className = "init-embed-pull-bar";
+        const fill = document.createElement("div");
+        fill.className = "init-embed-pull-fill";
+        fill.style.width = `${Math.max(1, Math.min(99, Number(pull.pct) || 1))}%`;
+        bar.append(fill);
+        wrap.append(bar);
+        if (pull.label) {
+          const label = document.createElement("p");
+          label.className = "init-embed-pull-label";
+          label.textContent = pull.label;
+          wrap.append(label);
+        }
+        li.append(wrap);
+      } else if (repair.repairable) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "init-repair-btn";
+        btn.textContent = repair.label || "修复向量模型";
+        btn.addEventListener("click", () =>
+          void _handleChecklistEmbeddingRepair(btn, selected),
+        );
+        li.append(btn);
+      }
+    }
     elements.initChecklist.append(li);
+  }
+}
+
+// Start server-side embedding repair and keep the checklist synchronized with
+// the existing init-status progress fields until repair settles.
+async function _handleChecklistEmbeddingRepair(btn, selected = null) {
+  if (!(btn instanceof HTMLButtonElement)) return;
+  btn.disabled = true;
+  btn.textContent = "修复中…";
+  try {
+    const kicked = await startEmbeddingRepair();
+    if (!embeddingRepairStartAccepted(kicked)) {
+      btn.disabled = false;
+      btn.textContent = "重试";
+      const detail =
+        kicked && kicked.status === 403
+          ? "只能在本机操作向量模型修复。"
+          : kicked && kicked.status === 404
+            ? "当前后端版本不支持向量模型修复，请先升级后端。"
+            : kicked && kicked.detail
+              ? kicked.detail
+              : "向量模型修复未能开始，请稍后重试。";
+      setHint(detail, "error");
+      return;
+    }
+  } catch {
+    btn.disabled = false;
+    btn.textContent = "重试";
+    setHint("向量模型修复请求失败，请稍后重试。", "error");
+    return;
+  }
+  for (let i = 0; i < EMBEDDING_REPAIR_POLL_LIMIT; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, EMBEDDING_REPAIR_POLL_MS));
+    let status;
+    try {
+      status = await fetchInitStatus();
+    } catch {
+      continue;
+    }
+    if (!status) continue;
+    _renderInitChecklist(status, selected);
+    const prereq = status.prerequisites || {};
+    if (prereq.embedding_ready) return;
+    const stillPulling =
+      Boolean(prereq.embedding_repair_running) ||
+      prereq.embedding_check === "repairing";
+    if (!stillPulling && i > 1) return;
   }
 }
 
@@ -920,7 +1012,7 @@ function renderInitProgress(status) {
     }
     if (elements.initProgressLabel instanceof HTMLElement) {
       elements.initProgressLabel.textContent = progress.failed
-        ? `初始化未完成：${describeInitReason(status && status.reason) || progress.failedReason || "请稍后重试"}`
+        ? `初始化未完成：${describeInitFailure(status, progress)}`
         : progress.active
           ? `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`
           : "初始化完成！";
@@ -1295,6 +1387,39 @@ async function runScheduledActivityFeedRefresh() {
 
 function isAvoidanceProbeType(type) {
   return normalizeProbeType(type) === "avoidance.probe";
+}
+
+function probeActionDescriptors(type) {
+  return isAvoidanceProbeType(type)
+    ? [
+        { action: "confirm", label: "确认避雷", className: "is-confirm" },
+        { action: "defer", label: "搁置避雷", className: "is-neutral" },
+        { action: "reject", label: "不是雷点", className: "is-reject" },
+        { action: "chat", label: "多聊聊", className: "is-chat" },
+      ]
+    : [
+        { action: "confirm", label: "确认喜欢", className: "is-confirm" },
+        { action: "defer", label: "暂时搁置", className: "is-neutral" },
+        { action: "reject", label: "确认不喜欢", className: "is-reject" },
+        { action: "chat", label: "多聊聊", className: "is-chat" },
+      ];
+}
+
+function probeResponseMessage(type, responseType, domain) {
+  const isAvoidance = isAvoidanceProbeType(type);
+  if (responseType === "defer") {
+    return isAvoidance
+      ? `好，「${domain}」先搁置，过阵子再确认是不是雷点。`
+      : `好，「${domain}」先搁置，过阵子再问。`;
+  }
+  if (responseType === "confirm") {
+    return isAvoidance
+      ? `好，「${domain}」会作为避雷方向处理。`
+      : `好，「${domain}」记住了。`;
+  }
+  return isAvoidance
+    ? `好，「${domain}」不记成避雷。`
+    : `好，「${domain}」会作为不喜欢处理。`;
 }
 
 function isChallengeProbe(probe) {
@@ -1752,22 +1877,21 @@ function renderSpeculativeInterests(container, items, { kind = "interest" } = {}
     if ((item.status || "active") === "active" && item.domain) {
       const actions = document.createElement("div");
       actions.className = "spec-actions";
-
-      const confirmBtn = document.createElement("button");
-      confirmBtn.className = "probe-btn is-confirm";
-      confirmBtn.textContent = isAvoidance ? "确实不喜欢" : "喜欢";
-      confirmBtn.addEventListener("click", () =>
-        handleSpecResponse(item.domain, "confirm", row, isAvoidance ? "avoidance.probe" : "interest.probe"),
-      );
-
-      const rejectBtn = document.createElement("button");
-      rejectBtn.className = "probe-btn is-reject";
-      rejectBtn.textContent = isAvoidance ? "不是" : "不喜欢";
-      rejectBtn.addEventListener("click", () =>
-        handleSpecResponse(item.domain, "reject", row, isAvoidance ? "avoidance.probe" : "interest.probe"),
-      );
-
-      actions.append(confirmBtn, rejectBtn);
+      for (const { action: responseType, label, className } of probeActionDescriptors(
+        probeType,
+      ).filter(({ action }) => action !== "chat")) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `probe-btn ${className}`;
+        button.textContent = label;
+        button.setAttribute("aria-label", label);
+        button.title = label;
+        button.dataset.responseType = responseType;
+        button.addEventListener("click", () =>
+          handleSpecResponse(item.domain, responseType, row, probeType),
+        );
+        actions.append(button);
+      }
       row.append(actions);
     }
 
@@ -1800,9 +1924,7 @@ async function handleSpecResponse(domain, responseType, rowEl, type = "interest.
       rowEl.replaceChildren();
       const msg = document.createElement("p");
       msg.className = "spec-result";
-      msg.textContent = isAvoidance
-        ? (responseType === "confirm" ? `好，「${domain}」会作为避雷方向处理。` : `好，「${domain}」不记成避雷。`)
-        : (responseType === "confirm" ? `好，「${domain}」记住了。` : `好，「${domain}」先不看了。`);
+      msg.textContent = probeResponseMessage(type, responseType, domain);
       rowEl.append(msg);
       setTimeout(() => rowEl.remove(), 2500);
     }
@@ -1873,23 +1995,16 @@ function renderProbeCard() {
 
   const actions = document.createElement("div");
   actions.className = "probe-actions";
-
-  const confirmBtn = document.createElement("button");
-  confirmBtn.className = "probe-btn is-confirm";
-  confirmBtn.textContent = "\u559C\u6B22";
-  confirmBtn.addEventListener("click", () => handleProbeResponse("confirm"));
-
-  const rejectBtn = document.createElement("button");
-  rejectBtn.className = "probe-btn is-reject";
-  rejectBtn.textContent = "\u4E0D\u559C\u6B22";
-  rejectBtn.addEventListener("click", () => handleProbeResponse("reject"));
-
-  const chatBtn = document.createElement("button");
-  chatBtn.className = "probe-btn is-chat";
-  chatBtn.textContent = "\u591a\u804a\u804a";
-  chatBtn.addEventListener("click", () => handleProbeResponse("chat"));
-
-  actions.append(confirmBtn, rejectBtn, chatBtn);
+  for (const descriptor of probeActionDescriptors("interest.probe")) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `probe-btn ${descriptor.className}`;
+    button.textContent = descriptor.label;
+    button.setAttribute("aria-label", descriptor.label);
+    button.title = descriptor.label;
+    button.addEventListener("click", () => handleProbeResponse(descriptor.action));
+    actions.append(button);
+  }
   card.append(actions);
 
   // Insert at the top of the speculative interests container
@@ -1928,9 +2043,7 @@ async function handleProbeResponse(responseType) {
       probeCard.replaceChildren();
       const msg = document.createElement("p");
       msg.className = "probe-result";
-      msg.textContent = responseType === "confirm"
-        ? `\u597D\uFF0C\u300C${domain}\u300D\u8BB0\u4F4F\u4E86\u3002`
-        : `\u597D\uFF0C\u300C${domain}\u300D\u5148\u4E0D\u770B\u4E86\u3002`;
+      msg.textContent = probeResponseMessage("interest.probe", responseType, domain);
       probeCard.append(msg);
       setTimeout(() => probeCard.remove(), 3000);
     }
@@ -2112,14 +2225,14 @@ function bindStarButton() {
 async function renderMobileQrPanel() {
   const endpoint = await getBackendEndpointConfig();
 
-  // When the configured host is loopback, try to get the server's
-  // detected LAN IP from the health endpoint so the QR code shows
-  // an address that mobile devices can actually reach.
+  // When the configured host is loopback, ask the lightweight QR endpoint
+  // for the server's detected LAN IP. Unlike the full readiness endpoint,
+  // this endpoint does not wait for embedding readiness before the QR code can be rendered.
   let effectiveEndpoint = endpoint;
   if (isLoopbackMobileHost(endpoint.host)) {
     try {
       const base = `http://${endpoint.host}:${endpoint.port}`;
-      const resp = await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(2000) });
+      const resp = await fetch(`${base}/api/qr-info`, { signal: AbortSignal.timeout(2000) });
       if (resp.ok) {
         const data = await resp.json();
         if (data.lan_ip && !isLoopbackMobileHost(data.lan_ip)) {
@@ -2127,7 +2240,7 @@ async function renderMobileQrPanel() {
         }
       }
     } catch {
-      // Health fetch failed — fall through with original endpoint.
+      // QR-info fetch failed — fall through with original endpoint.
     }
   }
 
@@ -2216,9 +2329,43 @@ function bindMobileQr() {
   }
 }
 
+// Single delegated click handler for every message card's action buttons.
+// Bound once on the (persistent) container so it survives the frequent
+// container.replaceChildren() re-renders that used to orphan per-button
+// listeners and silently drop clicks.
+function onMessageActionClick(event) {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  const btn = target.closest("[data-msg-action]");
+  if (!(btn instanceof HTMLElement) || btn.disabled) return;
+  const card = btn.closest(".message-item");
+  if (!(card instanceof HTMLElement)) return;
+  const domain = card.dataset.domain || "";
+  const type = card.dataset.type || "interest.probe";
+  const action = btn.dataset.msgAction;
+  if (action === "dismiss") {
+    dismissMessage(domain, type);
+  } else if (action === "chat") {
+    expandInlineChat(card, domain, type);
+  } else if (action === "confirm" || action === "defer" || action === "reject") {
+    // Guard against a double-click firing the API twice before the card is
+    // replaced with its success state; clear on settle so an error path (card
+    // kept) can be retried (success replaces the card, so it's moot there).
+    if (card.dataset.responding === "1") return;
+    card.dataset.responding = "1";
+    void handleMessageResponse(domain, action, type).finally(() => {
+      delete card.dataset.responding;
+    });
+  }
+}
+
 function renderMessagesList() {
   const container = elements.messagesList;
   if (!(container instanceof HTMLElement)) return;
+  if (!container.dataset.actionsDelegated) {
+    container.dataset.actionsDelegated = "1";
+    container.addEventListener("click", onMessageActionClick);
+  }
   container.replaceChildren();
 
   if (state.messages.length === 0) {
@@ -2247,11 +2394,16 @@ function buildMessageCard(probe) {
   item.dataset.type = type;
 
   // Dismiss button (×)
+  // Actions are wired via ONE delegated listener on the messages container
+  // (see renderMessagesList) rather than per-button, so a background re-render
+  // \u2014 chat-turn polling, the post-fetch re-render in openMessagesPanel, or
+  // another card's response \u2014 can't orphan the handler and swallow the click
+  // (field report 2026-07-06: "\u8FD9\u4E2A\u6309\u94AE\u6709\u65F6\u5019\u6CA1\u53CD\u5E94").
   const dismiss = document.createElement("button");
   dismiss.className = "message-dismiss";
   dismiss.textContent = "\u00D7";
   dismiss.title = "\u5173\u95ED";
-  dismiss.addEventListener("click", () => dismissMessage(probe.domain, type));
+  dismiss.dataset.msgAction = "dismiss";
   item.append(dismiss);
 
   const eyebrow = document.createElement("div");
@@ -2303,31 +2455,67 @@ function buildMessageCard(probe) {
 
   const actions = document.createElement("div");
   actions.className = "message-actions";
-
-  const confirmBtn = document.createElement("button");
-  confirmBtn.className = "probe-btn is-confirm";
-  confirmBtn.textContent = isAvoidance ? "确实不喜欢" : "\u559C\u6B22";
-  confirmBtn.addEventListener("click", () => handleMessageResponse(probe.domain, "confirm", type));
-
-  const rejectBtn = document.createElement("button");
-  rejectBtn.className = "probe-btn is-reject";
-  rejectBtn.textContent = isAvoidance ? "不是" : "\u4E0D\u559C\u6B22";
-  rejectBtn.addEventListener("click", () => handleMessageResponse(probe.domain, "reject", type));
-
-  const chatBtn = document.createElement("button");
-  chatBtn.className = "probe-btn is-chat";
-  chatBtn.textContent = "\u591A\u804A\u804A";
-  chatBtn.addEventListener("click", () => expandInlineChat(item, probe.domain, type));
-
-  if (probe.chat_status === "pending") {
-    confirmBtn.disabled = true;
-    rejectBtn.disabled = true;
-    chatBtn.disabled = true;
+  for (const descriptor of probeActionDescriptors(type)) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `probe-btn ${descriptor.className}`;
+    button.textContent = descriptor.label;
+    button.setAttribute("aria-label", descriptor.label);
+    button.title = descriptor.label;
+    button.dataset.msgAction = descriptor.action;
+    button.disabled = probe.chat_status === "pending";
+    actions.append(button);
   }
-
-  actions.append(confirmBtn, rejectBtn, chatBtn);
   item.append(actions);
   return item;
+}
+
+// ── Engagement stats ───────────────────────────────────────────
+// Condense a raw count into Chinese-style 万/亿 units. Empty string for
+// non-positive values so callers render nothing.
+function formatCountCn(n) {
+  const value = Math.floor(Number(n) || 0);
+  if (value <= 0) return "";
+  if (value >= 100000000)
+    return `${(Math.floor((value / 100000000) * 10) / 10).toFixed(1).replace(/\.0$/, "")}亿`;
+  if (value >= 10000)
+    return `${(Math.floor((value / 10000) * 10) / 10).toFixed(1).replace(/\.0$/, "")}万`;
+  return String(value);
+}
+
+// Build the "▶ … · 👍 … · 💬 … · ⭐ … · 弹幕 …" stats line. Only counts
+// > 0 appear; when nothing qualifies the result is "" (render nothing).
+function recommendationStats(item) {
+  const segments = [];
+  if (item?.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
+  if (item?.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
+  if (item?.comment_count > 0) segments.push(`💬 ${formatCountCn(item.comment_count)}`);
+  if (item?.favorite_count > 0) segments.push(`⭐ ${formatCountCn(item.favorite_count)}`);
+  if (item?.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
+  return segments.join(" · ");
+}
+
+// Append a muted stats line to `parent` when the item has any positive
+// engagement count. No-op (renders nothing) otherwise.
+function appendRecommendationStats(parent, item) {
+  const text = recommendationStats(item);
+  if (!text) return;
+  const stats = document.createElement("div");
+  stats.className = "recommendation-stats";
+  stats.textContent = text;
+  parent.append(stats);
+}
+
+function appendPublishedTime(parent, item) {
+  const text = formatPublishedTime(item);
+  if (!text) return;
+  const time = document.createElement("span");
+  time.className = "recommendation-published-time";
+  time.textContent = text;
+  if (item.published_at && Number.isFinite(Date.parse(item.published_at))) {
+    time.title = new Date(item.published_at).toLocaleString();
+  }
+  parent.append(time);
 }
 
 // ── Delight (surprise recommendation) card ─────────────────────
@@ -2377,10 +2565,16 @@ function buildDelightCard(delight) {
     textCol.append(hookBadge);
   }
 
+  const platformChip = document.createElement("span");
+  platformChip.className = "message-delight-platform";
+  platformChip.textContent = platformDisplayName(delight.source_platform || "bilibili");
+  textCol.append(platformChip);
+
   const title = document.createElement("div");
   title.className = "message-delight-title";
   title.textContent = delight.title || "";
   textCol.append(title);
+  appendPublishedTime(textCol, delight);
 
   top.append(textCol);
   item.append(top);
@@ -2397,6 +2591,8 @@ function buildDelightCard(delight) {
     reason.textContent = delight.delight_reason;
     item.append(reason);
   }
+
+  appendRecommendationStats(item, delight);
 
   if (delight.chat_status === "pending") {
     item.append(createChatThinkingPlaceholder("阿B 正在品你这句话"));
@@ -2737,9 +2933,7 @@ async function handleMessageResponse(domain, responseType, type = "interest.prob
       item.replaceChildren();
       const msg = document.createElement("p");
       msg.className = "message-result";
-      msg.textContent = isAvoidance
-        ? (responseType === "confirm" ? `好，「${domain}」会作为避雷方向处理。` : `好，「${domain}」不记成避雷。`)
-        : (responseType === "confirm" ? `\u597D\uFF0C\u300C${domain}\u300D\u8BB0\u4F4F\u4E86\u3002` : `\u597D\uFF0C\u300C${domain}\u300D\u5148\u4E0D\u770B\u4E86\u3002`);
+      msg.textContent = probeResponseMessage(type, responseType, domain);
       item.append(msg);
       setTimeout(() => {
         item.remove();
@@ -3059,6 +3253,14 @@ function renderInterestTree(container, domains, fallback) {
   }
 }
 
+// Placeholders the LLM emits when it has no signal. Treated as absent so the
+// panel falls back to its "still observing" copy instead of rendering garbage.
+const UNKNOWNISH_TEXT = new Set(["", "unknown", "none", "n/a", "未知"]);
+
+function isUnknownishText(value) {
+  return UNKNOWNISH_TEXT.has(String(value ?? "").trim().toLowerCase());
+}
+
 function renderStylePreference(container, style) {
   if (!(container instanceof HTMLElement)) {
     return;
@@ -3077,8 +3279,10 @@ function renderStylePreference(container, style) {
     ["时长偏好", durationLabels[style.preferred_duration] || style.preferred_duration],
     ["节奏偏好", paceLabels[style.preferred_pace] || style.preferred_pace],
   ];
+  let hasAny = false;
   for (const [label, value] of textFields) {
-    if (!value) continue;
+    if (isUnknownishText(value)) continue;
+    hasAny = true;
     const row = document.createElement("div");
     row.className = "style-text-row";
     const lbl = document.createElement("span");
@@ -3097,6 +3301,7 @@ function renderStylePreference(container, style) {
   ];
   for (const [label, value] of barFields) {
     if (typeof value !== "number") continue;
+    hasAny = true;
     const row = document.createElement("div");
     row.className = "style-bar-row";
     const lbl = document.createElement("span");
@@ -3113,6 +3318,12 @@ function renderStylePreference(container, style) {
     pct.textContent = `${Math.round(value * 100)}%`;
     row.append(lbl, track, pct);
     container.append(row);
+  }
+  if (!hasAny) {
+    const fb = document.createElement("p");
+    fb.className = "is-fallback";
+    fb.textContent = "内容口味还在摸索中。";
+    container.append(fb);
   }
 }
 
@@ -3136,7 +3347,7 @@ function renderContextMode(container, ctx) {
   ];
   let hasAny = false;
   for (const [label, value] of fields) {
-    if (!value) continue;
+    if (isUnknownishText(value)) continue;
     hasAny = true;
     const row = document.createElement("div");
     row.className = "context-row";
@@ -4404,6 +4615,11 @@ function renderDelightSlot() {
   kicker.className = "delight-banner-kicker";
   kicker.textContent = `✨ ${delight.delight_hook || "惊喜推荐"}`;
   kickerLine.append(kicker);
+  const platformChip = document.createElement("span");
+  platformChip.className = "delight-banner-platform";
+  platformChip.textContent = platformDisplayName(delight.source_platform || "bilibili");
+  kickerLine.append(platformChip);
+  appendPublishedTime(kickerLine, delight);
   if (queueLength > 1) {
     const prevBtn = document.createElement("button");
     prevBtn.type = "button";
@@ -4988,8 +5204,10 @@ function renderRecommendations(items, { append = false } = {}) {
     const metaLine = document.createElement("p");
     metaLine.className = "recommendation-meta-line";
     metaLine.textContent = `这位 UP：${item.up_name}`;
+    appendPublishedTime(metaLine, item);
 
     content.append(top, copyBlock, metaLine);
+    appendRecommendationStats(content, item);
     preview.append(cover, content);
 
     const feedbackStatus = document.createElement("p");
@@ -5772,6 +5990,7 @@ function bindSettings() {
   const toast = document.getElementById("settingsToast");
   const issuesContainer = document.getElementById("settingsIssues");
   const providerSelect = document.getElementById("cfgLlmProvider");
+  const backendSchemeInput = document.getElementById("cfgBackendScheme");
   const backendHostInput = document.getElementById("cfgBackendHost");
   const backendPortInput = document.getElementById("cfgBackendPort");
   const bannerOffline = document.getElementById("cfgBannerOffline");
@@ -5790,6 +6009,13 @@ function bindSettings() {
       hint: document.getElementById("cfgAuthHint"),
     },
     { getBaseUrl: getBackendBaseUrl },
+  );
+
+  const extLogin = initExtLogin(
+    { deviceKey: document.getElementById("cfgExtDeviceKey"),
+      btn: document.getElementById("cfgExtLoginBtn"),
+      status: document.getElementById("cfgExtLoginStatus") },
+    { getBaseUrl: getBackendBaseUrl, onPaired: connectRuntimeStream }
   );
 
   const autostartControl = initAutostartControl(
@@ -5831,6 +6057,9 @@ function bindSettings() {
   async function populateBackendEndpoint() {
     try {
       const endpoint = await getBackendEndpointConfig();
+      if (backendSchemeInput instanceof HTMLSelectElement) {
+        backendSchemeInput.value = endpoint.scheme || "http";
+      }
       if (backendHostInput instanceof HTMLInputElement) {
         backendHostInput.value = endpoint.host || "";
       }
@@ -5859,7 +6088,8 @@ function bindSettings() {
   const BACKEND_UPDATE_REASON_TEXT = {
     dirty_worktree: "代码目录有未提交改动，更新被阻止",
     unsupported_install_mode: "当前安装方式不支持自动更新",
-    untrusted_remote: "git 远端不在允许列表，更新被阻止",
+    docker_install_mode: "Docker 安装通过拉取新镜像升级，无法就地自更新",
+    untrusted_remote: "git 远端不在允许列表，更新被阻止（可在后端日志查看实际远端地址）",
     branch_not_fast_forwardable: "本地代码与发布版本分叉，无法快进更新",
     merge_or_rebase_in_progress: "代码目录正在合并 / 变基，更新暂缓",
     github_rate_limited: "GitHub API 限流，请稍后再试",
@@ -5900,6 +6130,7 @@ function bindSettings() {
     const installMode = String(backend.install_mode || "");
     const isGitInstall = installMode === "git";
     const isFrozenInstall = installMode === "frozen";
+    const isDockerInstall = installMode === "docker";
     const isDesktopInstallerUpdate = String(backend.latest_tag || "").startsWith("desktop-v");
     const applyBtn = document.getElementById("backendUpdateApply");
     if (applyBtn instanceof HTMLButtonElement) {
@@ -5921,6 +6152,24 @@ function bindSettings() {
         showDownload && backend.latest_tag
           ? `https://github.com/whiteguo233/OpenBiliClaw/releases/tag/${encodeURIComponent(String(backend.latest_tag))}`
           : "https://github.com/whiteguo233/OpenBiliClaw/releases";
+    }
+    // Non-git installs never get the apply button; tell the user how their
+    // install actually upgrades instead of leaving the card action-less.
+    const modeHint = document.getElementById("backendUpdateModeHint");
+    if (modeHint instanceof HTMLElement) {
+      let hint = "";
+      if (isDockerInstall) {
+        hint =
+          backend.state === "update_available"
+            ? "Docker 安装：发现新版镜像，在部署目录执行 docker compose pull && docker compose up -d 完成升级。"
+            : "Docker 安装：升级通过拉取新镜像完成（docker compose pull && docker compose up -d）。";
+      } else if (isFrozenInstall) {
+        hint = "桌面安装包：发现新版时点击上方链接下载新安装包完成升级。";
+      } else if (installMode && !isGitInstall) {
+        hint = "当前安装方式不支持自动更新；建议使用 git / AI 安装以获得就地升级能力。";
+      }
+      modeHint.textContent = hint;
+      modeHint.hidden = !hint;
     }
   }
 
@@ -5951,9 +6200,31 @@ function bindSettings() {
     }
   }
 
+  // 主/备选 Provider 同名保护（与桌面 Web 对齐）：同名 fallback 永远不会触发
+  // （registry 静默丢弃），后端保存也会以 blocking issue 拒绝。禁用备选下拉里
+  // 与默认 Provider 同名的选项；旧配置已处于同名状态时只显示警告、不静默改数据。
+  function syncLlmFallbackSameState() {
+    const fallbackSelect = document.getElementById("cfgLlmFallbackProvider");
+    const warning = document.getElementById("cfgLlmFallbackSameWarning");
+    if (!(fallbackSelect instanceof HTMLSelectElement)) return;
+    const mainValue = providerSelect.value;
+    for (const option of fallbackSelect.options) {
+      option.disabled = Boolean(option.value) && option.value === mainValue;
+    }
+    if (warning) {
+      warning.hidden = !fallbackSelect.value || fallbackSelect.value !== mainValue;
+    }
+  }
+
   providerSelect.addEventListener("change", () => {
     showProviderFields(providerSelect.value);
+    syncLlmFallbackSameState();
   });
+
+  const fallbackProviderSelect = document.getElementById("cfgLlmFallbackProvider");
+  if (fallbackProviderSelect instanceof HTMLSelectElement) {
+    fallbackProviderSelect.addEventListener("change", syncLlmFallbackSameState);
+  }
 
   // ── Embedding section: dynamic visibility + placeholder ──
   // Mirrors the backend resolution order in
@@ -6204,6 +6475,7 @@ function bindSettings() {
   const SOURCE_STATUS_DOT = {
     ok: "#2ecc71",
     ready: "#2ecc71",
+    syncing: "#9aa0a6",
     no_auth: "#9aa0a6",
     missing: "#e0a800",
     missing_cookie: "#e0a800",
@@ -6214,6 +6486,9 @@ function bindSettings() {
     error: "#e74c3c",
     expired_cookie: "#e74c3c",
     blocked: "#e74c3c",
+  };
+  const SOURCE_STATUS_LABEL = {
+    syncing: "接入中",
   };
   const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
 
@@ -6237,7 +6512,11 @@ function bindSettings() {
         row.style.opacity = "1";
         continue;
       }
-      if (detail) detail.textContent = (item.enabled ? "" : "(未启用) ") + (item.detail || "");
+      if (detail) {
+        const label = SOURCE_STATUS_LABEL[item.state] || "";
+        const statusDetail = label && item.detail ? `${label}：${item.detail}` : label || item.detail || "";
+        detail.textContent = (item.enabled ? "" : "(未启用) ") + statusDetail;
+      }
       if (dot) dot.style.color = SOURCE_STATUS_DOT[item.state] || "#9aa0a6";
       row.style.opacity = item.enabled ? "1" : "0.6";
     }
@@ -6261,6 +6540,7 @@ function bindSettings() {
     setVal("cfgLlmConcurrency", cfg.llm?.concurrency ?? 3);
     setVal("cfgLlmTimeout", cfg.llm?.timeout ?? 300);
     setVal("cfgLlmFallbackProvider", cfg.llm?.fallback_provider);
+    syncLlmFallbackSameState();
 
     setVal("cfgOpenaiAuthMode", cfg.llm?.openai?.auth_mode || "api_key");
     setVal("cfgOpenaiKey", cfg.llm?.openai?.api_key);
@@ -6394,6 +6674,7 @@ function bindSettings() {
     setVal("cfgTrendingRefreshHours", cfg.scheduler?.trending_refresh_hours);
     setVal("cfgExploreRefreshHours", cfg.scheduler?.explore_refresh_hours);
     setVal("cfgDiscoveryLimit", cfg.scheduler?.discovery_limit);
+    setVal("cfgKeywordGenerationMode", cfg.discovery?.keyword_generation_mode || "legacy");
     const multimodalEvaluation = document.getElementById("cfgMultimodalEvaluationEnabled");
     if (multimodalEvaluation) {
       multimodalEvaluation.checked = cfg.discovery?.multimodal_evaluation_enabled === true;
@@ -6449,7 +6730,8 @@ function bindSettings() {
         default_provider: providerSelect.value,
         concurrency: getInt("cfgLlmConcurrency", 3),
         timeout: getInt("cfgLlmTimeout", 300),
-        fallback_enabled: Boolean(llmFallbackProvider),
+        // 非空 fallback_provider 即启用 fallback；旧的 fallback_enabled 布尔字段已移除
+        // （老后端会忽略未知字段，新后端不再回显它）。
         fallback_provider: llmFallbackProvider,
         openai: {
           auth_mode: getVal("cfgOpenaiAuthMode") || "api_key",
@@ -6582,6 +6864,7 @@ function bindSettings() {
         reddit: {
           enabled: checked("cfgRedditEnabled"),
           backend: getVal("cfgRedditBackend") || "rdt",
+          ...(getVal("cfgRedditCookie") ? { cookie: getVal("cfgRedditCookie") } : {}),
           source_modes: collectRedditSourceModes(),
           daily_search_budget: getInt("cfgRedditDailySearchBudget", 300),
           daily_hot_budget: getInt("cfgRedditDailyHotBudget", 300),
@@ -6593,6 +6876,7 @@ function bindSettings() {
       },
       discovery: {
         ...(state.runtimeConfig?.discovery || {}),
+        keyword_generation_mode: getVal("cfgKeywordGenerationMode"),
         multimodal_evaluation_enabled: checked("cfgMultimodalEvaluationEnabled"),
         multimodal_batch_size: getInt("cfgMultimodalBatchSize", 8),
         multimodal_image_max_px: getInt("cfgMultimodalImageMaxPx", 384),
@@ -6707,6 +6991,31 @@ function bindSettings() {
   if (probeLlmBtn instanceof HTMLButtonElement) {
     probeLlmBtn.addEventListener("click", () => {
       void runLlmConfigProbe(probeLlmBtn, probeLlmStatus);
+    });
+  }
+
+  async function runLlmFallbackConfigProbe(button, statusEl) {
+    if (!button) return;
+    button.disabled = true;
+    renderProbePending(statusEl, "备选 Provider");
+    try {
+      const result = await probeConfigService("llm_fallback", collectForm());
+      renderProbeResult(statusEl, result);
+    } catch (err) {
+      renderProbeResult(statusEl, {
+        ok: false,
+        error: err?.message || "备选 Provider 探测失败",
+      });
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  const probeLlmFallbackBtn = document.getElementById("cfgProbeLlmFallback");
+  const probeLlmFallbackStatus = document.getElementById("cfgProbeLlmFallbackStatus");
+  if (probeLlmFallbackBtn instanceof HTMLButtonElement) {
+    probeLlmFallbackBtn.addEventListener("click", () => {
+      void runLlmFallbackConfigProbe(probeLlmFallbackBtn, probeLlmFallbackStatus);
     });
   }
 
@@ -6852,6 +7161,8 @@ function bindSettings() {
       // updateConfig() PUT targets the new origin.
       let endpointChanged = false;
       let newEndpointLabel = null;
+      const schemeRaw = backendSchemeInput instanceof HTMLSelectElement
+        ? backendSchemeInput.value : "http";
       const hostRaw = backendHostInput instanceof HTMLInputElement
         ? backendHostInput.value.trim() : "";
       const portRaw = backendPortInput instanceof HTMLInputElement
@@ -6866,9 +7177,10 @@ function bindSettings() {
       }
       {
         const previous = await getBackendEndpointConfig();
-        const next = await updateBackendEndpoint(hostRaw, portRaw || "8420");
-        newEndpointLabel = `${next.host}:${next.port}`;
-        endpointChanged = next.host !== previous.host || next.port !== previous.port;
+        const next = await updateBackendEndpoint(schemeRaw, hostRaw, portRaw || "8420");
+        newEndpointLabel = `${next.scheme}://${next.host}:${next.port}`;
+        endpointChanged = next.scheme !== previous.scheme
+          || next.host !== previous.host || next.port !== previous.port;
       }
 
       const data = collectForm();
@@ -6908,6 +7220,7 @@ function bindSettings() {
         // new port these will retry on the fixed liveness cadence and the popup
         // status will flip to offline — exactly the signal the user
         // needs to remember to start the daemon with --port.
+        await clearPopupSession();
         connectRuntimeStream();
         state.online = await checkBackendStatus();
         setStatus(state.online);
@@ -6918,7 +7231,13 @@ function bindSettings() {
         }
       }
     } catch (err) {
-      if (!renderStructuredConfigError(err)) {
+      if (err?.message === "https_required") {
+        showToast("公网后端必须使用 HTTPS。", "error");
+      } else if (err?.message === "backend_permission_denied") {
+        showToast("未授予该后端地址的访问权限，地址未保存。", "error");
+      } else if (err?.message === "invalid_backend_scheme") {
+        showToast("后端协议无效。", "error");
+      } else if (!renderStructuredConfigError(err)) {
         showToast(`保存失败: ${err.message}`, "error");
       }
     } finally {
@@ -6933,8 +7252,40 @@ function bindSettings() {
 // is still disabled.
 const EMBEDDING_BANNER_DISMISS_KEY = "embeddingBannerDismissed";
 
+// Repair polling: a bge-m3 pull is ~568MB, so allow up to 20 minutes. The
+// pull continues server-side even if the panel closes; the banner's
+// auto-refresh clears it once embedding recovers.
+const EMBEDDING_REPAIR_POLL_MS = 1_500;
+const EMBEDDING_REPAIR_POLL_LIMIT = Math.ceil((20 * 60 * 1_000) / EMBEDDING_REPAIR_POLL_MS);
+
+function formatRepairProgress(repair) {
+  if (repair && repair.total > 0) {
+    const pct = Math.min(99, Math.round((repair.completed / repair.total) * 100));
+    return `拉取中 ${pct}%`;
+  }
+  return "拉取中…";
+}
+
+// Wait for the server-side pull to finish, mirroring progress onto the
+// button. Returns the final repair state (or null if the backend vanished).
+async function waitForEmbeddingRepair(enableBtn) {
+  for (let i = 0; i < EMBEDDING_REPAIR_POLL_LIMIT; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, EMBEDDING_REPAIR_POLL_MS));
+    const repair = await fetchEmbeddingRepairStatus();
+    if (!repair) return null;
+    if (repair.done) return repair;
+    if (enableBtn) enableBtn.textContent = formatRepairProgress(repair);
+  }
+  return { done: false, ok: false, error: "拉取超时" };
+}
+
 async function enableLocalOllamaEmbedding(enableBtn) {
-  const original = enableBtn ? enableBtn.textContent : "";
+  const failBtn = (label) => {
+    if (enableBtn) {
+      enableBtn.disabled = false;
+      enableBtn.textContent = label;
+    }
+  };
   if (enableBtn) {
     enableBtn.disabled = true;
     enableBtn.textContent = "启用中…";
@@ -6945,7 +7296,10 @@ async function enableLocalOllamaEmbedding(enableBtn) {
         embedding: {
           provider: "ollama",
           model: "bge-m3",
-          base_url: "http://localhost:11434/v1",
+          // Don't hardcode base_url: Docker deployments use
+          // http://ollama:11434/v1 (sidecar), local deployments use
+          // the default http://localhost:11434/v1.  Omitting it
+          // preserves whatever the backend already has configured.
         },
       },
     });
@@ -6953,26 +7307,70 @@ async function enableLocalOllamaEmbedding(enableBtn) {
     // /api/health probes it live, so embedding_ready only flips true once
     // Ollama actually serves a vector. Don't claim success on a config
     // write alone.
-    const health = await fetchHealth();
+    let health = await fetchHealth();
     const banner = document.getElementById("embeddingBanner");
     if (health && health.embedding_ready) {
       if (banner) banner.hidden = true;
       setHint("已启用本地 Ollama 语义去重，重复内容会少很多。", "success");
-    } else {
-      if (enableBtn) {
-        enableBtn.disabled = false;
-        enableBtn.textContent = "重试";
+      return;
+    }
+    // Not ready → let the backend classify the cause and, when the fix is
+    // "pull the model", do it server-side with real progress (v0.3.155+).
+    const kicked = await startEmbeddingRepair();
+    if (kicked.status === 409 && kicked.error === "not_running") {
+      failBtn("重试");
+      setHint(kicked.detail || "Ollama 没有在运行，请先启动 Ollama（或运行 `ollama serve`）。", "error");
+      return;
+    }
+    if (kicked.status === 409 && kicked.error === "unsupported_provider") {
+      failBtn("重试");
+      setHint(kicked.detail || "一键修复只支持本地 Ollama embedding。", "error");
+      return;
+    }
+    if (kicked.status === 409 && kicked.error !== "already_running" && kicked.detail) {
+      failBtn("重试");
+      setHint(kicked.detail, "error");
+      return;
+    }
+    if (kicked.status === 403) {
+      failBtn("重试");
+      setHint("只能在本机操作 embedding 修复；请在装有后端的电脑上打开扩展。", "error");
+      return;
+    }
+    if (
+      kicked.status === 202 ||
+      kicked.already_ok ||
+      (kicked.status === 409 && kicked.error === "already_running")
+    ) {
+      if (!kicked.already_ok) {
+        setHint("正在拉取 bge-m3（约 568MB）。关闭面板下载也会继续。");
+        const repair = await waitForEmbeddingRepair(enableBtn);
+        if (repair && repair.done && !repair.ok) {
+          failBtn("重试");
+          setHint(`bge-m3 拉取失败：${repair.error || "未知错误"}`, "error");
+          return;
+        }
       }
-      setHint(
-        "配置已写入，但 Ollama 还没就绪。请确认已运行 `ollama serve` 并 `ollama pull bge-m3`。",
-        "error",
-      );
+      // Health TTL is short (3s client / server-side cache expired on
+      // success), so one more read reflects the repaired state.
+      health = await fetchHealth();
+      if (health && health.embedding_ready) {
+        if (banner) banner.hidden = true;
+        setHint("已启用本地 Ollama 语义去重，重复内容会少很多。", "success");
+        return;
+      }
+      failBtn("重试");
+      setHint("模型已就绪但探测还没通过，稍等几秒后重试。", "error");
+      return;
     }
+    // Older backend without /api/embedding/repair (404) or unreachable (0).
+    failBtn("重试");
+    setHint(
+      "配置已写入，但 Ollama 还没就绪。请确认已运行 `ollama serve` 并 `ollama pull bge-m3`。",
+      "error",
+    );
   } catch {
-    if (enableBtn) {
-      enableBtn.disabled = false;
-      enableBtn.textContent = "重试";
-    }
+    failBtn("重试");
     setHint("启用失败，请检查后端连接后重试。", "error");
   }
 }

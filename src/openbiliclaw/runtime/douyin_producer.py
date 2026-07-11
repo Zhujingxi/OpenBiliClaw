@@ -184,15 +184,15 @@ class DouyinDiscoveryProducer:
     def _sources_for_limit(self, requested_limit: int) -> tuple[str, ...]:
         configured = tuple(source for source in self.sources if str(source).strip())
         if requested_limit >= 10:
-            selected = tuple(source for source in ("search", "hot") if source in configured)
-            if selected:
-                return selected
+            prioritized = tuple(source for source in ("search", "hot") if source in configured)
+            if prioritized:
+                return prioritized
             return configured[:1] or ("search",)
 
-        preferred = ("feed",) if requested_limit <= 3 else ("hot", "feed")
-        selected = tuple(source for source in preferred if source in configured)
-        if selected:
-            return selected
+        preferred: tuple[str, ...] = ("feed",) if requested_limit <= 3 else ("hot", "feed")
+        preferred_configured = tuple(source for source in preferred if source in configured)
+        if preferred_configured:
+            return preferred_configured
 
         non_search = tuple(source for source in configured if source != "search")
         if non_search:

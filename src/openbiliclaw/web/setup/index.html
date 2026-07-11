@@ -74,6 +74,7 @@
     .init-missing.init-hard .init-mark { background: rgba(255,107,107,.14); color: var(--err); }
     .init-missing.init-soft .init-mark { background: rgba(244,185,66,.14); color: var(--warn); }
     .init-hint { margin: 7px 0 0 32px; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+    .init-repair-btn { margin: 8px 0 0 32px; font-size: 12.5px; padding: 5px 12px; }
     .init-sources { display: grid; gap: 8px; margin: 16px 0; }
     .init-sources-title { margin: 0 0 2px; font-size: 13px; font-weight: 800; color: var(--text); }
     .init-source-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); font-size: 13px; }
@@ -131,6 +132,15 @@
         <div id="baseWrap" style="display:none">
           <label for="baseUrl">接口地址 Base URL</label>
           <input id="baseUrl" type="text" placeholder="https://your-endpoint/v1">
+          <div class="hint" id="baseHint" style="display:none">用第三方中转/网关时填写(Anthropic 协议 /v1/messages);直连官方请留空。</div>
+        </div>
+
+        <div id="flavorWrap" style="display:none">
+          <label for="apiFlavor">接口协议</label>
+          <select id="apiFlavor">
+            <option value="">chat/completions（默认，绝大多数服务）</option>
+            <option value="responses">responses（部分第三方网关的 GPT 模型只开放这个）</option>
+          </select>
         </div>
 
         <div id="ollamaNote" class="hint" style="display:none; margin-top:14px">
@@ -181,6 +191,7 @@
           <p class="progress-label" id="initProgressLabel">等待开始</p>
         </div>
         <div class="msg" id="initReason"></div>
+        <div class="msg" id="initEscape">后台会继续补齐首轮内容池，你可以<a href="/web">先进入应用 →</a>，首池就绪后推荐会自动出现。</div>
         <div class="row-actions">
           <button class="ghost" id="backInit">← 上一步</button>
           <button class="primary" id="startInit">开始初始化</button>
@@ -239,7 +250,7 @@
       { key: "reddit", label: "Reddit" },
     ];
     const INIT_REASON_TEXT = {
-      unsupported_runtime: "当前运行环境不支持图形化初始化，请改用 CLI 初始化入口。",
+      unsupported_runtime: "Docker / 容器环境不支持在网页里启动初始化。配置和前置检查在这里完成后，请在宿主机运行：docker exec -it openbiliclaw-backend openbiliclaw init",
       already_running: "初始化正在进行中。",
       bilibili_not_logged_in: "还没检测到 B站 登录。",
       llm_not_ready: "AI 服务还没配好或当前不可用。",
@@ -248,6 +259,8 @@
       local_only: "只能在本机发起初始化。",
       no_sources_selected: "至少勾选一个数据来源。",
       internal_error: "初始化过程中出错了，请稍后重试。",
+      interrupted: "上次初始化被打断（后端重启），可重试。",
+      cancelled: "初始化已取消。",
       none: "",
     };
     const INIT_SOURCE_LOGIN_HINT =
@@ -258,6 +271,10 @@
     let step = 0, biliConnected = false, biliPoll = null, initPoll = null, initSocket = null;
     let lastAutoModel = "";
     let initPollInFlight = false, initPollPending = false;
+    // Providers whose api_key is already persisted server-side (GET /api/config
+    // returns it masked). Lets a relaunch save step 0 without re-pasting the
+    // key: PUT /api/config only touches fields present in the payload.
+    const savedKeyProviders = new Set();
 
     function setStep(n) {
       step = n;
@@ -275,8 +292,14 @@
       const p = $("#provider").value;
       const isOllama = p === "ollama";
       const isCompat = p === "openai_compatible";
+      const isClaude = p === "claude";
+      $("#apiKey").placeholder = savedKeyProviders.has(p) ? "已保存，留空则沿用当前 Key" : "粘贴你的 API Key";
       $("#keyWrap").style.display = isOllama ? "none" : "block";
-      $("#baseWrap").style.display = isCompat ? "block" : "none";
+      // Claude 也开放 Base URL（可选，第三方 Anthropic 协议网关，见 issue #72）
+      $("#baseWrap").style.display = (isCompat || isClaude) ? "block" : "none";
+      $("#baseHint").style.display = isClaude ? "block" : "none";
+      // openai_compatible 可切 /v1/responses 协议（issue #72）
+      $("#flavorWrap").style.display = isCompat ? "block" : "none";
       $("#ollamaNote").style.display = isOllama ? "block" : "none";
       const [url, name] = KEY_LINKS[p] || ["", ""];
       $("#keyHint").innerHTML = url ? `还没有 key？去 <a href="${url}" target="_blank" rel="noopener">${name}</a> 免费申请,粘贴回来即可。` : "";
@@ -302,13 +325,16 @@
       const apiKey = $("#apiKey").value.trim();
       const baseUrl = $("#baseUrl").value.trim();
       const model = $("#model").value.trim();
-      if (provider !== "ollama" && !apiKey) { showMsg("#msg0", "请先填入 API Key（本地 Ollama 才可免 key）。", "err"); return; }
+      if (provider !== "ollama" && !apiKey && !savedKeyProviders.has(provider)) { showMsg("#msg0", "请先填入 API Key（本地 Ollama 才可免 key）。", "err"); return; }
       if (provider === "openai_compatible" && !baseUrl) { showMsg("#msg0", "OpenAI 兼容接口需要填 Base URL。", "err"); return; }
       if (!model) { showMsg("#msg0", "请填写模型名。", "err"); return; }
 
       const pcfg = {};
       if (apiKey) pcfg.api_key = apiKey;
-      if (baseUrl) pcfg.base_url = baseUrl;
+      // 只有展示了 Base URL 输入框的 provider 才提交它,避免切换 provider 时
+      // 把上一个 provider 残留的地址写进错误的配置段。
+      if (baseUrl && (provider === "openai_compatible" || provider === "claude")) pcfg.base_url = baseUrl;
+      if (provider === "openai_compatible") pcfg.api_flavor = $("#apiFlavor").value;
       pcfg.model = model;
       const payload = {
         suppress_background_llm_work: true,
@@ -321,6 +347,13 @@
         const r = await fetch("/api/config", {
           method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
         });
+        if (r.status === 401) {
+          // Remote browser + auth enabled: /api/config is session-gated (only
+          // the init endpoints are public). Point at the login path instead of
+          // dead-ending on a bare HTTP 401.
+          showMsg("#msg0", '后端开启了访问密码，当前浏览器还没登录。先打开 <a href="/web">/web</a> 输入访问密码登录，再回到本页重试；或直接在运行后端的电脑上完成设置。', "err");
+          return;
+        }
         if (!r.ok) throw new Error("HTTP " + r.status + " " + (await r.text()).slice(0, 200));
         const label = provider === "ollama" ? "本地 Ollama" : provider;
         $("#doneLlm").textContent = "已连接 · " + label;
@@ -358,6 +391,22 @@
       return (Array.isArray(keys) ? keys : []).map((key) => byKey.get(key) || key);
     }
 
+    function embeddingPhaseHint(prereq) {
+      return prereq?.ollama_phase === "starting" ? "Ollama 启动中…" : "";
+    }
+
+    function embeddingPullProgressView(status) {
+      const prereq = status?.prerequisites || {};
+      const active = Boolean(prereq.embedding_repair_running || prereq.embedding_check === "repairing");
+      const completed = Number(prereq.embedding_repair_completed || 0);
+      const total = Number(prereq.embedding_repair_total || 0);
+      const pct = total > 0
+        ? Math.max(1, Math.min(99, Math.round((completed * 100) / total)))
+        : active ? 1 : 0;
+      const label = String(prereq.embedding_pull_status || prereq.embedding_detail || "").trim() || "正在下载向量模型…";
+      return { active, pct, label };
+    }
+
     function buildInitChecklist(status, selected = null) {
       const prereq = status?.prerequisites || {};
       const enabled = enabledPlatforms(status);
@@ -365,13 +414,27 @@
       // B站 login only blocks when bilibili is among the checked sources.
       const biliSelected = selectedSources ? selectedSources.includes("bilibili") : true;
       const embeddingRequired = Boolean(prereq.embedding_required);
+      const embeddingHint = [
+        embeddingPhaseHint(prereq),
+        String(prereq.embedding_pull_status || prereq.embedding_detail || "").trim(),
+      ].filter(Boolean).join(" ");
+      const embeddingCheck = String(prereq.embedding_check || "");
+      const embeddingAutoRepairable = ["model_missing", "model_broken", "model_path_encoding"].includes(embeddingCheck);
+      const embeddingGuidanceOnly = ["disk_full", "network", "model_oom", "provider_error"].includes(embeddingCheck);
+      // Label must state the ACTUAL probe result — a fixed "已登录" item name
+      // reads as "logged in" the moment the row stops being a red ✗.
+      const biliOk = Boolean(prereq.bilibili_logged_in);
+      const biliState = biliOk ? "B站 已登录" : "B站 登录检测未通过";
+      const biliDetail = String(prereq.bilibili_detail || "").trim();
       return [
         {
           key: "bilibili",
-          label: biliSelected ? "B站 已登录" : "B站 已登录（未勾选 B 站，可跳过）",
-          ok: Boolean(prereq.bilibili_logged_in),
+          label: biliSelected ? biliState : `${biliState}（未勾选 B 站，可跳过）`,
+          ok: biliOk,
           hard: biliSelected,
-          hint: "在浏览器里登录 bilibili.com，扩展会自动把 Cookie 同步给后端；不想接 B 站也可以直接取消勾选。",
+          hint:
+            (biliDetail ? `${biliDetail} ` : "") +
+            "在浏览器里登录 bilibili.com，扩展会自动把 Cookie 同步给后端；不想接 B 站也可以直接取消勾选。",
         },
         {
           key: "llm",
@@ -385,9 +448,22 @@
           label: embeddingRequired ? "向量模型可用" : "向量模型可用（推荐，非必须）",
           ok: Boolean(prereq.embedding_ready),
           hard: embeddingRequired,
-          hint: embeddingRequired
-            ? "本地 Ollama + bge-m3 需要完成一次真实向量请求；模型仍在下载或服务异常时请稍后重试。"
-            : "未配置 embedding 时可以先初始化；推荐去重和语义检索会弱一些。",
+          // Backend classifies the cause (embedding_detail, v0.3.155+):
+          // Ollama 未运行 / 缺模型 / 模型损坏 / 配置无效 / repairing（下载中，
+          // detail 带实时百分比，3s 轮询自动刷新）。Fall back to the generic
+          // copy on older backends.
+          hint:
+            embeddingHint ||
+            (embeddingRequired
+              ? "本地 Ollama + bge-m3 需要完成一次真实向量请求；模型仍在下载或服务异常时请稍后重试。"
+              : "未配置 embedding 时可以先初始化；推荐去重和语义检索会弱一些。"),
+          // One-click server-side `ollama pull` when the missing model is the
+          // only problem (v0.3.155+). Hidden while a repair is running — the
+          // hint line already shows live progress.
+          repairable: embeddingAutoRepairable || embeddingGuidanceOnly,
+          repairLabel: embeddingCheck === "model_path_encoding"
+            ? "迁移模型目录并修复"
+            : embeddingGuidanceOnly ? "重新检测" : "自动下载向量模型",
         },
         {
           key: "platforms",
@@ -452,7 +528,38 @@
           hint.textContent = row.hint;
           li.append(hint);
         }
+        if (!row.ok && row.repairable) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "btn ghost init-repair-btn";
+          btn.setAttribute("data-embedding-repair", "1");
+          btn.textContent = row.repairLabel || "自动下载向量模型";
+          btn.addEventListener("click", () => void startEmbeddingRepairFromChecklist(btn));
+          li.append(btn);
+        }
         root.append(li);
+      }
+    }
+
+    // Kick the server-side `ollama pull` (POST /api/embedding/repair); the
+    // 3s init-status poll then renders live percent on the checklist row
+    // (embedding_check="repairing"). 409 already_running is success-shaped.
+    async function startEmbeddingRepairFromChecklist(btn) {
+      const originalLabel = btn.textContent || "自动下载向量模型";
+      btn.disabled = true;
+      btn.textContent = originalLabel === "重新检测" ? "检测中…" : "启动下载…";
+      try {
+        const r = await fetch("/api/embedding/repair", { method: "POST" });
+        if (!r.ok && r.status !== 409) throw new Error("HTTP " + r.status);
+        const body = await r.json().catch(() => ({}));
+        if (r.status === 409 && body.error && body.error !== "already_running") {
+          throw new Error(body.detail || body.error);
+        }
+        scheduleInitPoll(300);
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = originalLabel;
+        setInitReason(`向量模型下载启动失败：${e.message || e}`);
       }
     }
 
@@ -495,9 +602,31 @@
       $("#startInit").disabled = true;
       $("#startInit").textContent = "整理首轮内容…";
       setInitReason("等第一批内容入池可刷后，初始化才会完成。", "info");
+      // Escape hatch: replenishment can be slow (or stuck) — never park the
+      // user on a disabled button with no way out of the wizard.
+      $("#initEscape").className = "msg show info";
+    }
+
+    // Human text for a failed/cancelled run. ``status.detail`` carries the
+    // backend's stored failure specifics (exception summary / GuidedInitError
+    // message, v0.3.156+) — append it so internal_error is diagnosable from
+    // the UI instead of only the generic "请稍后重试".
+    function initFailureText(status, failedStage) {
+      const base = describeInitReason(status?.reason) || "";
+      const detail = String(status?.detail || "").trim();
+      // Unmapped codes (empty_history / empty_signals / profile_failed …)
+      // carry their authoritative human message in detail — show it alone
+      // instead of "未知初始化状态：code（message）".
+      if (detail && (!base || base.startsWith("未知初始化状态"))) return detail;
+      if (base && detail) return `${base}（${detail}）`;
+      return base || failedStage?.reason || "请稍后重试";
     }
 
     function progressView(status) {
+      const pull = embeddingPullProgressView(status);
+      if (pull.active && !status?.running) {
+        return { pct: pull.pct, failed: null, label: pull.label };
+      }
       const total = status?.total_stages || 4;
       const stages = Array.isArray(status?.stages) ? status.stages : [];
       const done = stages.filter((s) => s.status === "ok").length;
@@ -510,7 +639,7 @@
         pct: running ? Math.max(pct, 1) : pct,
         failed,
         label: failed
-          ? `初始化未完成：${describeInitReason(status?.reason) || failed.reason || "请稍后重试"}`
+          ? `初始化未完成：${initFailureText(status, failed)}`
           : running
             ? `${currentStage ? `${currentStage.n}/${total} ${currentStage.label}` : "正在初始化"}（${Math.max(pct, 1)}%）`
             : "初始化完成",
@@ -519,7 +648,18 @@
 
     function renderInitProgress(status) {
       $("#initSources").style.display = "none";
+      $("#initEscape").className = "msg";
       $("#initProgress").hidden = false;
+      // The transient "正在检查 AI 服务…" row is only meaningful between the
+      // start click and the run launch — once a run is rendering (running or
+      // terminal) it reads as a stuck state, so swap it out (field report
+      // 2026-07-05: a failed run showed the stale checking row above the
+      // failure banner).
+      if ($("#initChecklist").querySelector(".init-checking")) {
+        $("#initChecklist").innerHTML = status?.running
+          ? '<li class="init-hint-row">前置检查已通过，初始化进行中…</li>'
+          : '<li class="init-hint-row">点「开始初始化」会先检查 AI 服务 / 向量模型，以及所选平台的登录状态。</li>';
+      }
       const view = progressView(status);
       $("#initProgressBar").style.width = `${view.pct}%`;
       $("#initProgressLabel").textContent = view.label;
@@ -530,6 +670,7 @@
     function renderInitIdle() {
       clearInitPoll();
       renderInitSources();
+      $("#initEscape").className = "msg";
       $("#initSources").style.display = "";
       $("#initChecklist").innerHTML = '<li class="init-hint-row">点「开始初始化」会先检查 AI 服务 / 向量模型，以及所选平台的登录状态，通过才开始。</li>';
       $("#initProgress").hidden = true;
@@ -583,7 +724,23 @@
           return;
         }
         clearInitPoll();
-        if (status.reason && status.reason !== "none") setInitReason(describeInitReason(status.reason) || status.detail || "初始化未完成。");
+        // Pre-init: keep the checklist fresh, and while a one-click model
+        // download is running keep polling so the row shows live percent
+        // (embedding_check="repairing", detail carries progress).
+        renderInitChecklist(status, readSelectedInitSources());
+        if (status?.prerequisites?.embedding_repair_running) {
+          scheduleInitPoll(INIT_POLL_MS);
+          return;
+        }
+        if (status.reason && status.reason !== "none") {
+          const failedStage = (Array.isArray(status.stages) ? status.stages : [])
+            .find((s) => s.status === "failed" || s.status === "cancelled");
+          setInitReason(
+            failedStage
+              ? initFailureText(status, failedStage)
+              : describeInitReason(status.reason) || status.detail || "初始化未完成。"
+          );
+        }
       } catch {
         scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_POLL_MS);
       } finally {
@@ -718,13 +875,19 @@
       location.href = "/web";
     }
 
-    // If already configured (e.g. opened by mistake on a set-up install), offer the app.
+    // Resume where the user actually is: prefill saved config, then ask
+    // /api/init-status — a reload mid-init must re-attach to the live progress
+    // instead of silently landing on step 0, and an initialized backend goes
+    // straight to done / first-pool waiting.
     (async function guard() {
       try {
         const r = await fetch("/api/config");
         if (r.ok) {
           const data = await r.json();
           const llm = (data.config || data)?.llm || {};
+          for (const [name, cfg] of Object.entries(llm)) {
+            if (cfg && typeof cfg === "object" && String(cfg.api_key || "").trim()) savedKeyProviders.add(name);
+          }
           const prov = llm.default_provider || "";
           const providerCfg = (llm[prov] && typeof llm[prov] === "object") ? llm[prov] : {};
           const hasKey = prov && (prov === "ollama" || providerCfg.api_key);
@@ -738,6 +901,26 @@
         }
       } catch {}
       renderProvider();
+      try {
+        const status = await fetchInitStatus();
+        if (status.running) {
+          setStep(2);
+          renderInitProgress(status);
+          connectInitStream();
+          scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_POLL_MS);
+          return;
+        }
+        if (status.initialized) {
+          if (await firstInitPoolReady()) {
+            setStep(3);
+            return;
+          }
+          setStep(2);
+          renderWaitingForFirstPool();
+          connectInitStream();
+          scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_POLL_MS);
+        }
+      } catch {}
     })();
 
     $("#provider").addEventListener("change", renderProvider);

@@ -2,7 +2,7 @@
 
 ## 概述
 
-`src/openbiliclaw/auth_core.py` + `src/openbiliclaw/api/auth.py` 实现局域网 / 远程访问的**可选密码门禁**。它只对非可信本机的请求生效：本机（loopback 且无代理转发头）、浏览器扩展和 CLI 默认免登录，只有手机 / 其他电脑通过局域网访问 `/m`、`/web` 时才需要密码。
+`src/openbiliclaw/auth_core.py` + `src/openbiliclaw/api/auth.py` 实现局域网 / 远程访问的**可选密码门禁**。可信 loopback 默认免登录；远程 Web 使用密码会话，远程浏览器扩展使用默认关闭的设备密钥认证。
 
 - `auth_core.py`：**纯标准库**实现 —— scrypt 密码哈希、HMAC 无状态签名 token、稳定密码指纹、反向代理 / Origin 解析与归一化。无任何第三方依赖。
 - `api/auth.py`：FastAPI 集成 —— `AuthGate`、HTTP 中间件、`/api/auth/*` 路由、cookie / CSRF 处理、登录失败限流。在 `create_app()` 内于 degraded-mode guard 之后注册（更外层、最先执行）。
@@ -30,16 +30,25 @@
 | env-managed 写保护 | ✅ | `load_config` 给 env 优先级，故 `save_config` 若把内存 Config 整段 `[api.auth]` 写回，会把 env 值烤成陈旧字面量。**保护下沉到 `save_config`**：凡有 `OPENBILICLAW_API_AUTH_*` 在场，被覆盖字段改用磁盘原值渲染、磁盘无值则省略整行——覆盖启动 secret 生成 / `PUT /api/config` / cookie 同步等所有写路径，而非仅 admin / CLI。 |
 | config.local 遮蔽检测 | ✅ | `config.local.toml` 合并盖在 `config.toml` 之上（local 胜），写 `config.toml` 的改动会被它悄悄盖回。`/api/auth/admin` 在 `_save` 后重载有效合并配置校验改动确已生效，被遮蔽则回滚并 `409 shadowed`；CLI `set-password` 写盘前用 `config_local_auth_keys()` 检测并拒绝。 |
 | 撤销判定（指纹漂移） | ✅ | `revoke_and_set_fingerprint` 在事务内 CAS 比对指纹：除 enabled 开关 / 显式改密的 `force_bump` 外，新指纹 ≠ 已存即 bump，堵住「后台 `set-password` 改盘上 hash → admin 无密码热发布却不撤销」窗口；首次写入（无既存指纹）不 bump。 |
+| 扩展 origin 独立路径 | ✅ | `is_extension_origin()` 识别 `chrome-extension://` / `moz-extension://`，`pick_token()` 和登录端点对扩展 origin 走独立分支，不依赖 `allowed_bearer_origins`。 |
+| 设备密钥摘要 | ✅ | `extension_access_keys` 只保存 `key_id:sha256(secret)`；完整高熵密钥只由 CLI 显示一次。总开关 `extension_access_enabled=false` 默认关闭。 |
+| 短会话交换 | ✅ | 限流的 `POST /api/auth/extension-token` 验证设备密钥后签发 `1..168h` 会话；错误不泄露 key ID 是否存在。 |
+| 传输边界 | ✅ | 普通扩展 HTTP 使用 `Authorization: Bearer`，URL 不含 token；仅 WebSocket 和图片代理允许扩展 Origin 携带短会话 query token。 |
+| 撤销 | ✅ | `ext-key revoke <key-id>` 删除摘要并 bump 全局 `auth_epoch`，所有 Web / 扩展会话立即失效；失败时回滚配置。 |
+| 远程 endpoint 权限 | ✅ | 扩展按 `scheme://host/*` 请求跨浏览器可用的最小 host 权限；权限 API 不能可移植地限定端口，实际请求仍固定配置端口。公网 host 强制 HTTPS，HTTPS 自动派生 WSS。 |
+
+真实 LAN 浏览器链路在物理网卡地址上验证；本机没有可用 Docker runtime，因此本次没有把 Docker bridge 作为通过项。容器部署仍必须显式配置 `trusted_proxies`，不会自动信任默认网关。
 
 ## 端点
 
-`/api/auth/{status,login,logout}` 由 `register_auth_routes()` 注册；`/api/auth/admin` 在 `create_app()` 内定义（需 `_CONFIG_SAVE_LOCK` + 配置快照回滚）。门禁挡所有其他 `/api/*`（含 `/api/runtime-stream` WS 与 `/api/image-proxy`）；`/api/health`、`/api/auth/admin` 与静态壳（`/`、`/m`、`/web`、`favicon`）保持公开 —— `admin` 在白名单内由 handler 自行强制可信本机，从而对任何非本机调用方（远程或跨源 loopback）统一返回 `403 local_only`，而非泄露是否带 token 的 `401`。
+`/api/auth/{status,login,logout}` 由 `register_auth_routes()` 注册；`/api/auth/admin` 在 `create_app()` 内定义（需 `_CONFIG_SAVE_LOCK` + 配置快照回滚）。门禁挡所有其他 `/api/*`（含 `/api/runtime-stream` WS 与 `/api/image-proxy`）；`/api/health`、`/api/qr-info`、`/api/auth/admin` 与静态壳（`/`、`/m`、`/web`、`favicon`）保持公开。`/api/qr-info` 只返回手机版二维码需要的 `lan_ip`，不读取画像或探测 embedding，避免扫码入口继承 readiness probe 延迟。`admin` 在白名单内由 handler 自行强制可信本机，从而对任何非本机调用方（远程或跨源 loopback）统一返回 `403 local_only`，而非泄露是否带 token 的 `401`。
 
 | 方法 & 路径 | 鉴权 | 请求 | 响应 |
 |------------|------|------|------|
 | `GET /api/auth/status` | 公开 | — | `{enabled, authenticated, trust_loopback, env_managed, can_manage}`；SPA 启动先调，据此决定是否显示登录页；`can_manage`=调用方为可信本机且非 env 管理（插件据此显示开关） |
 | `POST /api/auth/admin` | **仅可信本机** | `{enabled, password?, session_ttl_hours?}` | 本机（浏览器插件 / 本机 UI / CLI）开关门禁 + 设/改密码，**热生效免重启**。开启需带密码(否则 400)。写入顺序为**先持久化 config.toml（快照可回滚）→ 原子撤销（`revoke_and_set_fingerprint`：bump epoch + 写指纹同一 `BEGIN IMMEDIATE` 事务）→ 再发布到运行期门禁**；任一步失败即回滚并 `503`，绝不留下「新密码已撤销旧会话却未持久化」的半状态，两步之间崩溃由启动指纹 reconcile 自愈。远程会话（即便已登录）→`403 local_only`；任一 `OPENBILICLAW_API_AUTH_*` env 覆盖在场→`409 env_managed`；改动被 `config.local.toml` 遮蔽（写后重载校验失败）→回滚并 `409 shadowed`。供扩展弹窗的「局域网访问密码」开关用 |
-| `POST /api/auth/login` | 公开（限流） | `{password}` | 同源 / 缺 Origin：`200 {ok:true}` + `Set-Cookie`（body 无 token）；允许列表内跨源 Origin 且 `ttl>0`：`200 {ok,token,expires_at}`；其它跨源 `403`；跨源 + `ttl=0` `400`；密码错 `401`；锁定 `429` |
+| `POST /api/auth/login` | 公开（限流） | `{password}` | Web 专用；扩展 Origin 返回 `403 origin_forbidden`。同源设置 HttpOnly cookie，允许列表内跨源可返回限时 Bearer |
+| `POST /api/auth/extension-token` | 公开（限流） | `{key}` | 仅在 auth 与扩展设备访问都开启时，用设备密钥换短会话；关闭 `403`，无效密钥 `401`，锁定 `429` |
 | `POST /api/auth/logout` | 公开·幂等 | — | `{ok:true}` + 清 `obc_session`；仅清本机 cookie、不改服务端状态（让失效 token 也能清 cookie） |
 | `POST /api/auth/logout?all=true` | 需已登录 + CSRF | — | `{ok:true}`；`auth_epoch += 1`，所有设备立即失效 |
 
@@ -53,6 +62,8 @@ from openbiliclaw.auth_core import (
     sign_token, verify_token, token_expires_at,
     resolve_client_ip, is_trusted_local,
     effective_scheme_host, same_origin, origin_allowed_for_bearer,
+    is_extension_origin, generate_extension_access_key,
+    verify_extension_access_key, extension_access_key_ids,
 )
 from openbiliclaw.api.auth import (
     AuthGate, make_auth_middleware, register_auth_routes, authorize_websocket,
@@ -61,6 +72,7 @@ from openbiliclaw.api.auth import (
 ```
 
 - `auth_core` 函数无副作用、不依赖 FastAPI，便于单元测试。
+- `is_extension_origin()` 只识别浏览器 Origin；身份来自设备密钥而非可伪造的 ID。设备密钥生成、摘要验证与 ID 列举均为纯函数。
 - `api/auth.py` 的 `AuthGate` 持有运行期门禁状态（config + DB 句柄），中间件 / 路由都通过它取 token、验签、读写 `auth_epoch`。
 - `ensure_session_secret()` 在首次启用且 `session_secret` 为空时生成并写回 config；`reconcile_password_fingerprint()` 实现「改密即撤销」的指纹比对与按需 bump。
 

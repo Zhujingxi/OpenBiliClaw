@@ -60,8 +60,14 @@ test("runtime stream refresh handlers coalesce expensive frontend reloads", () =
   // ("加载更多") cards. config_reloaded is the broad-reload path; init terminal
   // events go through refreshInitStatus so completion hydrates once after the
   // authoritative init status flips. Mirrors the popup + mobile recommend guards below.
+  // v0.3.156+: the trigger is a guarded block (hydration is skipped while the
+  // user is editing #settingsForm so the rehydrate can't stomp unsaved input),
+  // so match the block form rather than the old single-line call.
   const desktopHydrationTrigger =
-    desktopJs.match(/if \(\[[^\]]*\]\.includes\(event\.type\)\) scheduleBackendHydration\(\);/)?.[0] ?? "";
+    desktopJs.match(
+      /if \(\[[^\]]*\]\.includes\(event\.type\)\) \{[\s\S]*?scheduleBackendHydration\(\);[\s\S]*?\n      \}/,
+    )?.[0] ?? "";
+  assert.match(desktopHydrationTrigger, /settingsForm/, "hydration should skip while editing settings");
   assert.notEqual(desktopHydrationTrigger, "", "desktop should still hydrate on broad-reload events");
   assert.doesNotMatch(desktopHydrationTrigger, /refresh\.pool_updated/);
   assert.doesNotMatch(desktopHydrationTrigger, /recommendation\.reshuffled/);

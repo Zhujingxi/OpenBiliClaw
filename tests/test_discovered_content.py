@@ -5,6 +5,17 @@ from __future__ import annotations
 from openbiliclaw.discovery.engine import DiscoveredContent
 
 
+def test_discovered_content_cache_kwargs_include_publication_time() -> None:
+    item = DiscoveredContent(
+        bvid="BV1TIME",
+        published_at="2026-07-08T06:30:00Z",
+        published_label="3 天前",
+    )
+
+    assert item.to_cache_kwargs()["published_at"] == "2026-07-08T06:30:00Z"
+    assert item.to_cache_kwargs()["published_label"] == "3 天前"
+
+
 class TestDiscoveredContentMultisourceFields:
     """Verify __post_init__ auto-populates multi-source fields from legacy Bilibili fields."""
 

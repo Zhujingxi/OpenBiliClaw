@@ -146,6 +146,23 @@ export function buildImageProxyPath(value) {
   return `/api/image-proxy?url=${encodeURIComponent(src)}`;
 }
 
+const PLATFORM_DISPLAY_NAMES = {
+  bilibili: "B 站",
+  youtube: "YouTube",
+  douyin: "抖音",
+  xiaohongshu: "小红书",
+  xhs: "小红书",
+  twitter: "X",
+  x: "X",
+  zhihu: "知乎",
+  reddit: "Reddit",
+};
+
+export function platformDisplayName(value) {
+  const key = normalizeText(value).toLowerCase();
+  return PLATFORM_DISPLAY_NAMES[key] || normalizeText(value);
+}
+
 export function buildVideoUrl(bvid) {
   return `https://www.bilibili.com/video/${normalizeText(bvid)}`;
 }
@@ -237,7 +254,37 @@ export function normalizeRecommendation(item) {
     source_platform: normalizeSourcePlatform(item?.source_platform, item?.content_url) || "bilibili",
     content_type: normalizeText(item?.content_type) || "video",
     body_text: normalizeText(item?.body_text),
+    published_at: normalizeText(item?.published_at),
+    published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
+    // Engagement counts so the card can render the ▶/👍/💬/⭐ stats row
+    // (favorite_count already folds in Xiaohongshu 收藏 backend-side).
+    view_count: Number(item?.view_count ?? 0) || 0,
+    like_count: Number(item?.like_count ?? 0) || 0,
+    comment_count: Number(item?.comment_count ?? 0) || 0,
+    favorite_count: Number(item?.favorite_count ?? 0) || 0,
+    danmaku_count: Number(item?.danmaku_count ?? 0) || 0,
   };
+}
+
+export function formatPublishedTime(item, now = Date.now()) {
+  const parsed = Date.parse(String(item?.published_at || ""));
+  if (Number.isFinite(parsed)) {
+    const diff = now - parsed;
+    if (diff >= -300_000 && diff < 60_000) return "刚刚";
+    if (diff >= 0 && diff < 86_400_000) {
+      return `${Math.max(1, Math.floor(diff / 3_600_000))} 小时前`;
+    }
+    if (diff >= 0 && diff < 604_800_000) {
+      return `${Math.floor(diff / 86_400_000)} 天前`;
+    }
+    const date = new Date(parsed);
+    const current = new Date(now);
+    if (date.getFullYear() === current.getFullYear()) {
+      return `${date.getMonth() + 1}月${date.getDate()}日`;
+    }
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  }
+  return String(item?.published_label || "").replace(/\s+/g, " ").trim().slice(0, 64);
 }
 
 const TEXT_CARD_CONTENT_TYPES = new Set([
@@ -300,9 +347,16 @@ export function normalizeDelightCandidate(item) {
     cover_url: normalizeCoverUrl(item?.cover_url),
     content_url: normalizeText(item?.content_url) || "",
     source_platform: normalizeSourcePlatform(item?.source_platform, item?.content_url) || "",
+    published_at: normalizeText(item?.published_at),
+    published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
     state: normalizedState,
     response_message: normalizeText(item?.response_message),
     chat_reply: normalizeText(item?.chat_reply),
+    view_count: Number(item?.view_count ?? 0),
+    like_count: Number(item?.like_count ?? 0),
+    comment_count: Number(item?.comment_count ?? 0),
+    favorite_count: Number(item?.favorite_count ?? 0),
+    danmaku_count: Number(item?.danmaku_count ?? 0),
     // Local UI fields preserved across re-normalizations
     turns: Array.isArray(item?.turns) ? item.turns : [],
     composer_open: Boolean(item?.composer_open),
@@ -1105,6 +1159,20 @@ export function getPopupState({ online, items = [], error = null, runtimeStatus 
   }
 
   const normalizedItems = items.map(normalizeRecommendation);
+  if (normalizedItems.length === 0 && runtimeStatus == null) {
+    // Backend online but the runtime snapshot is unavailable: we cannot tell
+    // "never initialized" apart from "initialized with a drained pool plus a
+    // transient /runtime-status failure". Claiming uninitialized here would
+    // flash the init CTA at a healthy backend, so render a transient degraded
+    // state instead — pollers / runtime-stream reclassify on the next pass,
+    // and a genuinely uninitialized backend still gets the toolbar badge from
+    // the service worker's own runtime-status check.
+    return {
+      kind: "error",
+      message: "后端状态暂时没读到，稍后自动重试。",
+      items: [],
+    };
+  }
   const runtime = normalizeRuntimeStatus(runtimeStatus);
   const hasPostInitRuntimeSignals =
     runtime.recommendation_count > 0 ||

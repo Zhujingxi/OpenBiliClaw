@@ -99,7 +99,7 @@ async function startSavedBackend() {
 test("popup saved surfaces round-trip through api clients and are wired in the UI", async () => {
   const { server, port } = await startSavedBackend();
   __resetBackendEndpointForTests();
-  await updateBackendEndpoint("127.0.0.1", port);
+  await updateBackendEndpoint("http", "127.0.0.1", port);
 
   try {
     assert.deepEqual(await watchLaterStatus("BV1E2E"), { saved: false, total: 0 });

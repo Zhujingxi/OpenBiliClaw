@@ -17,29 +17,38 @@ from .base import (
 genai: Any | None
 errors: Any | None
 types: Any | None
+_SDK_IMPORT_ERROR: str | None
 
 try:
     from google import genai as _genai
     from google.genai import errors as _errors
     from google.genai import types as _types
-except ModuleNotFoundError:  # pragma: no cover - exercised via integration behavior
+except ImportError as _exc:  # pragma: no cover - exercised via subprocess regression test
+    # ImportError (not just ModuleNotFoundError): the SDK may be installed yet
+    # fail to load when a native transitive dep breaks — e.g. cryptography's
+    # manylinux wheel can't dlopen under Termux/Android Bionic (issue #80).
+    # Either way the provider must degrade instead of crashing CLI startup.
     genai = None
     errors = None
     types = None
+    _SDK_IMPORT_ERROR = str(_exc)
 else:
     genai = _genai
     errors = _errors
     types = _types
+    _SDK_IMPORT_ERROR = None
 
 
 def gemini_sdk_available() -> bool:
-    """Return whether the optional google-genai dependency is installed."""
+    """Return whether the optional google-genai dependency is installed and loadable."""
     return genai is not None and types is not None
 
 
 def _raise_missing_sdk() -> NoReturn:
+    detail = f" (import failed: {_SDK_IMPORT_ERROR})" if _SDK_IMPORT_ERROR else ""
     raise LLMProviderError(
-        "Gemini provider requires the optional dependency 'google-genai' to be installed."
+        "Gemini provider requires the optional dependency 'google-genai' to be "
+        f"installed and loadable.{detail}"
     )
 
 

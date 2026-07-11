@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 
 class BehaviorEventIn(BaseModel):
@@ -59,8 +59,24 @@ class InitPrerequisitesOut(BaseModel):
 
     bilibili_logged_in: bool = False
     bilibili_check: str = "checking"  # ok | failed | checking
+    bilibili_detail: str = ""  # why the last probe failed ("" when ok)
     llm_ready: bool = False
     embedding_ready: bool = False
+    # Classified cause when embedding_ready is False, so the UI can say
+    # WHY instead of a dead retry (v0.3.155+): ok | disabled | misconfigured |
+    # not_running | model_missing | model_broken | model_path_encoding |
+    # disk_full | network | model_oom | provider_error | error.
+    embedding_check: str = "ok"
+    embedding_detail: str = ""  # human-readable hint ("" when ok/disabled)
+    # Live pull progress while a one-click repair is downloading the model
+    # (embedding_check == "repairing"), so init pages can render a real
+    # progress indicator instead of an opaque wait. total may be 0 while
+    # Ollama resolves the manifest.
+    embedding_repair_running: bool = False
+    embedding_repair_completed: int = 0
+    embedding_repair_total: int = 0
+    ollama_phase: str = "ready"
+    embedding_pull_status: str = ""
     embedding_required: bool = False
     enabled_platforms: list[str] = Field(default_factory=list)
 
@@ -99,11 +115,24 @@ class RecommendationOut(BaseModel):
     content_id: str = ""
     content_url: str = ""
     source_platform: str = ""
+    published_at: str = ""
+    published_label: str = ""
     # Text-first sources (X tweet/thread): the popup renders a no-cover
     # text card from body_text/title when content_type is tweet/thread or
     # cover_url is empty.
     content_type: str = "video"
     body_text: str = ""
+    # Desktop card metadata (additive for issue #75; extension popup ignores unknown keys).
+    duration: int = 0
+    view_count: int = 0
+    like_count: int = 0
+    danmaku_count: int = 0
+    # Cross-platform engagement counts (issue #79): text-first sources like
+    # Zhihu have no view/danmaku but do carry favorites/comments — surface them
+    # so the card stats row is not left with a lone like count.
+    favorite_count: int = 0
+    comment_count: int = 0
+    up_mid: int = 0
 
 
 class RecommendationListResponse(BaseModel):
@@ -116,6 +145,12 @@ class RecommendationReshuffleResponse(BaseModel):
     """Immediate recommendation reshuffle result."""
 
     items: list[RecommendationOut]
+
+
+class RecommendationReshuffleIn(BaseModel):
+    """Optional visible-card exclusions for a reshuffle request."""
+
+    excluded_bvids: list[str] = Field(default_factory=list)
 
 
 class RecommendationAppendIn(BaseModel):
@@ -226,6 +261,16 @@ class PendingDelightOut(BaseModel):
     cover_url: str = ""
     content_url: str = ""
     source_platform: str = ""
+    published_at: str = ""
+    published_label: str = ""
+    # Engagement stats (from content_cache), so the delight card can show the
+    # same ▶ / 👍 / 💬 metadata row as the recommendation grid. 0 = unknown /
+    # not fetched (platforms that don't populate a metric render nothing).
+    view_count: int = 0
+    like_count: int = 0
+    comment_count: int = 0
+    danmaku_count: int = 0
+    favorite_count: int = 0
 
 
 class PendingDelightResponse(BaseModel):
@@ -370,6 +415,34 @@ class RedditCookieResponse(BaseModel):
     error_code: str = ""
 
 
+class XhsLoginStateIn(BaseModel):
+    """Privacy-preserving xhs login state reported by the browser extension."""
+
+    logged_in: StrictBool
+
+
+class XhsLoginStateResponse(BaseModel):
+    """Result of persisting the browser-observed xhs login state."""
+
+    ok: bool = True
+    logged_in: bool
+    updated_at: str = ""
+
+
+class ZhihuLoginStateIn(BaseModel):
+    """Privacy-preserving Zhihu login state reported by the browser extension."""
+
+    logged_in: StrictBool
+
+
+class ZhihuLoginStateResponse(BaseModel):
+    """Result of persisting the browser-observed Zhihu login state."""
+
+    ok: bool = True
+    logged_in: bool
+    updated_at: str = ""
+
+
 class XStatusResponse(BaseModel):
     """Current X (Twitter) source health (spec §7).
 
@@ -396,11 +469,11 @@ class SourceStatusItem(BaseModel):
       health store).
     - ``ready``      — credential present and structurally valid, but not
       live-validated (B站 cookie with login fields, 抖音 cookie present, 小红书
-      access tokens synced within the freshness window).
+      browser login state recently synced).
     - ``partial``    — credential present but structurally incomplete, likely
       broken (B站 cookie missing some of the core login fields).
     - ``stale``      — credential synced before but not recently, likely
-      expired (小红书 tokens older than the freshness window).
+      expired.
     - ``missing``    — source enabled but no usable credential.
     - ``unverified`` — plugin-backed source is enabled but local task history
       does not prove a recent successful or failed login-state run yet.
@@ -424,7 +497,7 @@ class SourcesStatusResponse(BaseModel):
     Backs the unified status chip shown on both the desktop-Web and the
     extension settings pages. Derived entirely from local signals (config
     cookie fields, the X health store, the Douyin cookie file/env, and the
-    recency of token-bearing 小红书 cache rows) — no outbound platform calls.
+    privacy-preserving 小红书 browser login-state flag) — no outbound platform calls.
     """
 
     bilibili: SourceStatusItem = Field(default_factory=SourceStatusItem)
@@ -951,6 +1024,7 @@ class LLMProviderConfigOut(BaseModel):
     model: str = ""
     base_url: str = ""
     auth_mode: str = ""
+    api_flavor: str = ""
     http_referer: str = ""
     x_title: str = ""
     reasoning_effort: str = ""
@@ -977,7 +1051,9 @@ class LLMConfigOut(BaseModel):
     default_provider: str = "deepseek"
     concurrency: int = 3
     timeout: int = 300
-    fallback_enabled: bool = False
+    # Non-empty fallback_provider = chat fallback on (the legacy
+    # fallback_enabled bool was never consulted and is no longer echoed;
+    # old clients still sending it are ignored on PUT).
     fallback_provider: str = ""
     openai: LLMProviderConfigOut = Field(default_factory=LLMProviderConfigOut)
     claude: LLMProviderConfigOut = Field(default_factory=LLMProviderConfigOut)
@@ -1146,6 +1222,10 @@ class DiscoveryConfigOut(BaseModel):
     multimodal_image_max_px: int = 384
     multimodal_image_quality: int = 72
     multimodal_image_timeout_seconds: int = 6
+    # Read-only UI/API-derived enum over the two canonical DiscoveryConfig
+    # booleans (inspiration_search_enabled / inspiration_replace_merged_keywords).
+    # Not a config.toml field — the two booleans stay the single source of truth.
+    keyword_generation_mode: Literal["legacy", "hybrid", "inspiration"] = "legacy"
 
 
 class BackendUpdateStatusOut(BaseModel):
@@ -1261,9 +1341,13 @@ class ConfigUpdateIn(BaseModel):
 
 
 class ConfigServiceProbeIn(BaseModel):
-    """No-write request to probe the submitted LLM or embedding config."""
+    """No-write request to probe the submitted LLM or embedding config.
 
-    kind: Literal["llm", "embedding"]
+    ``llm_fallback`` probes ``[llm].fallback_provider`` (that exact
+    provider, no fallback chain) instead of the default provider.
+    """
+
+    kind: Literal["llm", "embedding", "llm_fallback"]
     config: dict[str, object] = Field(default_factory=dict)
 
 
@@ -1271,7 +1355,7 @@ class ConfigServiceProbeResponse(BaseModel):
     """Result of a user-triggered provider connectivity probe."""
 
     ok: bool
-    kind: Literal["llm", "embedding"]
+    kind: Literal["llm", "embedding", "llm_fallback"]
     provider: str = ""
     model: str = ""
     message: str = ""

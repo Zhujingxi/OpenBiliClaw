@@ -61,7 +61,10 @@ cookie = resolve_runtime_cookie(
 ```python
 from openbiliclaw.bilibili import BilibiliAPIClient, BilibiliAuthExpiredError
 
-client = BilibiliAPIClient(cookie="SESSDATA=abc", min_request_interval=0.2)
+# v0.3.153+：客户端 trust_env=False——恒直连，不继承环境变量 / 系统代理
+# （代理出口 IP 常触发 B站 风控，已登录也会显示"未登录"）。
+# 网络必须走代理时用 proxy= 显式指定（对应 config.toml [bilibili].proxy）。
+client = BilibiliAPIClient(cookie="SESSDATA=abc", min_request_interval=0.2, proxy=None)
 
 # 认证
 try:
@@ -163,7 +166,7 @@ BILI_EXTENSION_E2E=1 .venv/bin/pytest tests/test_bili_extension_browser_e2e.py -
 | `FavoriteFolderWithItems` | 收藏夹 + 内容列表 + truncated 标记 |
 | `FollowingUser` | 关注用户（mid, uname, sign） |
 | `CommentInfo` | 评论（mid, uname, message, like_count） |
-| `AuthStatus` | 认证状态（has_cookie, authenticated, username 等） |
+| `AuthStatus` | 认证状态（has_cookie, authenticated, username 等；`network_error=True` 表示校验死在传输层——代理 / 风控 / 超时——而非 Cookie 失效） |
 | `BilibiliAuthExpiredError` | `/nav` 返回 `-101` 时的专项异常，仍继承 `BilibiliAPIError` |
 
 ## 配置项

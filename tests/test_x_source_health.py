@@ -124,6 +124,53 @@ def test_cooldown_expires_and_becomes_ready(tmp_path: Path) -> None:
     assert store.is_ready()
 
 
+# ── escalating rate-limit cooldown ───────────────────────────────────
+
+
+def _cooldown_minutes_from_now(store: XSourceHealthStore) -> float:
+    cooldown = datetime.fromisoformat(store.get()["cooldown_until"])
+    return (cooldown - datetime.now(UTC)).total_seconds() / 60.0
+
+
+def test_second_consecutive_rate_limit_escalates_to_four_times_base(tmp_path: Path) -> None:
+    store = XSourceHealthStore(_db(tmp_path), rate_limit_cooldown_minutes=30)
+    store.record_error(XRateLimitError("429"), strategy="search")
+    assert _cooldown_minutes_from_now(store) <= 31  # first 429 → base 30 min
+    store.record_error(XRateLimitError("429"), strategy="search")
+    # Second consecutive 429 → 4x base (~2 h). Allow a small clock slack.
+    assert 115 <= _cooldown_minutes_from_now(store) <= 121
+
+
+def test_third_plus_rate_limit_caps_at_twelve_times_base(tmp_path: Path) -> None:
+    store = XSourceHealthStore(_db(tmp_path), rate_limit_cooldown_minutes=30)
+    for _ in range(4):
+        store.record_error(XRateLimitError("429"), strategy="search")
+    # Third and beyond cap at 12x base (~6 h), never higher.
+    assert 355 <= _cooldown_minutes_from_now(store) <= 361
+
+
+def test_success_between_rate_limits_resets_escalation(tmp_path: Path) -> None:
+    store = XSourceHealthStore(_db(tmp_path), rate_limit_cooldown_minutes=30)
+    store.record_error(XRateLimitError("429"), strategy="search")
+    store.record_error(XRateLimitError("429"), strategy="search")
+    store.record_success(strategy="search")
+    # A success clears the ladder; the next 429 is back at the base step.
+    store.record_error(XRateLimitError("429"), strategy="search")
+    assert _cooldown_minutes_from_now(store) <= 31
+
+
+def test_is_ready_honors_escalated_window(tmp_path: Path) -> None:
+    store = XSourceHealthStore(_db(tmp_path), rate_limit_cooldown_minutes=30)
+    store.record_error(XRateLimitError("429"), strategy="search")
+    store.record_error(XRateLimitError("429"), strategy="search")
+    assert not store.is_ready()
+    # Not ready at +1 h (escalated window is ~2 h), ready once it has elapsed.
+    store.set_cooldown_until((datetime.now(UTC) + timedelta(hours=1)).isoformat())
+    assert not store.is_ready()
+    store.set_cooldown_until((datetime.now(UTC) - timedelta(minutes=1)).isoformat())
+    assert store.is_ready()
+
+
 # ── For-You auto-pause ───────────────────────────────────────────────
 
 

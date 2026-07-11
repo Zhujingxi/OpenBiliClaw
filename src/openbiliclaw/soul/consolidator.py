@@ -49,6 +49,7 @@ from openbiliclaw.llm.prompts import build_profile_consolidation_prompt
 if TYPE_CHECKING:
     from openbiliclaw.llm.base import LLMResponse
     from openbiliclaw.memory.manager import MemoryManager
+    from openbiliclaw.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +270,7 @@ class ProfileConsolidator:
         like_target_upper: int = _LIKES_BOUNDARY,
         like_target_soft: int = 450,
         archive_enabled: bool = True,
+        database: Database | None = None,
     ) -> None:
         self._memory = memory
         self._llm_service = llm_service
@@ -281,6 +283,7 @@ class ProfileConsolidator:
         self._like_target_upper = max(1, int(like_target_upper))
         self._like_target_soft = max(1, int(like_target_soft))
         self._archive_enabled = bool(archive_enabled)
+        self._database = database
 
     # -- Public API -----------------------------------------------------------
 
@@ -419,6 +422,7 @@ class ProfileConsolidator:
 
         # ── Stage 3: apply ─────────────────────────────────────────────────
         rename_map: dict[str, str] = {}
+        keyword_interest_rename_map: dict[str, str] = {}
         for op in valid_ops:
             raw_members = op.get("members")
             display_members = raw_members if isinstance(raw_members, list) else []
@@ -434,6 +438,8 @@ class ProfileConsolidator:
             for member in display_members:
                 if isinstance(member, str) and member != canonical:
                     rename_map[member] = canonical
+                    if op["scope"] == "likes":
+                        keyword_interest_rename_map[member] = canonical
             report.merges.append(
                 {
                     "scope": op["scope"],
@@ -460,7 +466,18 @@ class ProfileConsolidator:
             preference_layer.save()
             self._rebuild_profile_tree(preference_layer.data)
             overrides_before = self._remap_overrides(rename_map)
-            self._write_run_record(report, before_snapshot, rename_map, overrides_before)
+            keyword_label_rows = self._preview_keyword_interest_label_migration(
+                keyword_interest_rename_map
+            )
+            self._migrate_keyword_interest_labels(keyword_interest_rename_map)
+            self._write_run_record(
+                report,
+                before_snapshot,
+                rename_map,
+                overrides_before,
+                keyword_interest_rename_map=keyword_interest_rename_map,
+                keyword_interest_label_rows=keyword_label_rows,
+            )
             self._append_changelog(report, current)
 
         # Record judged-distinct pairs so future runs skip them, and
@@ -1034,6 +1051,78 @@ class ProfileConsolidator:
             logger.exception("Failed to remap profile overrides after consolidation")
             return None
 
+    def _preview_keyword_interest_label_migration(
+        self,
+        rename_map: dict[str, str],
+    ) -> list[dict[str, object]]:
+        db = self._database
+        if db is None or not rename_map:
+            return []
+        try:
+            from openbiliclaw.discovery.inspiration import _normalize_match_text
+
+            normalized = {
+                _normalize_match_text(old): str(new).strip()
+                for old, new in rename_map.items()
+                if _normalize_match_text(old) and str(new).strip()
+            }
+            rows = db.conn.execute(
+                """
+                SELECT id, source_interest
+                FROM discovery_keywords
+                WHERE COALESCE(source_interest, '') != ''
+                """
+            ).fetchall()
+            result: list[dict[str, object]] = []
+            for row in rows:
+                old_label = str(row["source_interest"] or "").strip()
+                new_label = normalized.get(_normalize_match_text(old_label), "")
+                if new_label and old_label != new_label:
+                    result.append({"id": int(row["id"]), "old": old_label, "new": new_label})
+            return result
+        except Exception:
+            logger.exception("Failed to preview keyword interest label migration")
+            return []
+
+    def _migrate_keyword_interest_labels(self, rename_map: dict[str, str]) -> int:
+        db = self._database
+        if db is None or not rename_map:
+            return 0
+        migrate = getattr(db, "migrate_keyword_interest_labels", None)
+        if not callable(migrate):
+            return 0
+        try:
+            return int(migrate(rename_map))
+        except Exception:
+            logger.exception("Failed to migrate keyword interest labels after consolidation")
+            return 0
+
+    def _restore_keyword_interest_label_rows(self, rows: object) -> None:
+        db = self._database
+        if db is None or not isinstance(rows, list) or not rows:
+            return
+        updates: list[tuple[str, int]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            old_label = str(row.get("old") or "").strip()
+            try:
+                row_id = int(row.get("id") or 0)
+            except (TypeError, ValueError):
+                row_id = 0
+            if old_label and row_id > 0:
+                updates.append((old_label, row_id))
+        if not updates:
+            return
+        try:
+            db.conn.executemany(
+                "UPDATE discovery_keywords SET source_interest = ? WHERE id = ?",
+                updates,
+            )
+            db.conn.commit()
+        except Exception:
+            logger.exception("Failed to restore keyword interest labels for consolidation revert")
+
     def revert(self, run_id: str) -> bool:
         """Restore the preference store (and overrides) from a run record.
 
@@ -1076,6 +1165,7 @@ class ProfileConsolidator:
                     saver(ProfileOverrides.from_dict(overrides_before))
                 except Exception:
                     logger.exception("Failed to restore profile overrides for %s", run_id)
+        self._restore_keyword_interest_label_rows(record.get("keyword_interest_label_rows"))
 
         # Pin the rolled-back merges as known-distinct so the next run
         # doesn't redo them.
@@ -1152,6 +1242,9 @@ class ProfileConsolidator:
         before_snapshot: dict[str, object],
         rename_map: dict[str, str],
         overrides_before: dict[str, object] | None = None,
+        *,
+        keyword_interest_rename_map: dict[str, str] | None = None,
+        keyword_interest_label_rows: list[dict[str, object]] | None = None,
     ) -> None:
         if self._data_dir is None:
             return
@@ -1166,6 +1259,8 @@ class ProfileConsolidator:
                 "rule_merges": report.rule_merges,
                 "merges": report.merges,
                 "rename_map": rename_map,
+                "keyword_interest_rename_map": keyword_interest_rename_map or {},
+                "keyword_interest_label_rows": keyword_interest_label_rows or [],
                 "rejected_clusters": report.rejected_clusters,
                 "overrides_before": overrides_before,
             }

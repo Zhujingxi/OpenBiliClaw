@@ -1,9 +1,9 @@
 ; Inno Setup script for the OpenBiliClaw Windows installer.
 ;
 ; Compile on Windows (Inno Setup 6):
-;     iscc /DMyAppVersion=0.3.152 packaging\openbiliclaw.iss
+;     iscc /DMyAppVersion=0.3.162 packaging\openbiliclaw.iss
 ; Produces:
-;     dist\release\OpenBiliClaw-windows-0.3.152-Setup.exe
+;     dist\release\OpenBiliClaw-windows-0.3.162-Setup.exe
 ;
 ; Expects the PyInstaller onedir output at dist\OpenBiliClaw\ with a bundled
 ; ollama.exe + lib\ runners already staged inside it. The GitHub Actions
@@ -17,6 +17,13 @@
 
 #ifndef MyAppVersionInfoVersion
   #define MyAppVersionInfoVersion MyAppVersion
+#endif
+
+; Installer filename variant suffix, e.g. iscc /DMyAppVariantSuffix=-with-embedding
+; Lets the lean and with-embedding installers coexist in one Release without
+; clobbering each other. Defaults to empty (lean).
+#ifndef MyAppVariantSuffix
+  #define MyAppVariantSuffix ""
 #endif
 
 #define MyAppName "OpenBiliClaw"
@@ -55,7 +62,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ; Script lives in packaging\; resolve [Files] Source + OutputDir from repo root.
 SourceDir=..
 OutputDir=dist\release
-OutputBaseFilename=OpenBiliClaw-windows-{#MyAppVersion}-Setup
+OutputBaseFilename=OpenBiliClaw-windows-{#MyAppVersion}{#MyAppVariantSuffix}-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

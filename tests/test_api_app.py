@@ -5,13 +5,23 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
 from openbiliclaw import __version__
 from openbiliclaw.api.app import create_app
+
+
+def assert_publication(payload: dict[str, object]) -> None:
+    assert payload["published_at"] == "2026-07-08T06:30:00Z"
+    assert payload["published_label"] == "3 days ago"
 
 
 def _wait_for_presence_count(ctx: object, expected: int) -> None:
@@ -24,13 +34,35 @@ def _wait_for_presence_count(ctx: object, expected: int) -> None:
     assert ctx.presence.snapshot()["active_count"] == expected
 
 
+def _store_xhs_login_state(db: object, *, logged_in: bool, when_iso: str) -> None:
+    db.conn.executemany(
+        "INSERT OR REPLACE INTO auth_state (key, value) VALUES (?, ?)",
+        [
+            ("xhs_login_state", "1" if logged_in else "0"),
+            ("xhs_login_state_at", when_iso),
+        ],
+    )
+    db.conn.commit()
+
+
+def _store_zhihu_login_state(db: object, *, logged_in: bool, when_iso: str) -> None:
+    db.conn.executemany(
+        "INSERT OR REPLACE INTO auth_state (key, value) VALUES (?, ?)",
+        [
+            ("zhihu_login_state", "1" if logged_in else "0"),
+            ("zhihu_login_state_at", when_iso),
+        ],
+    )
+    db.conn.commit()
+
+
 class _ReadySoulEngine:
     def is_profile_ready(self) -> bool:
         return True
 
 
 @pytest.fixture(autouse=True)
-def _isolate_runtime_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def _isolate_runtime_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
     """Keep create_app() route tests independent from the developer machine.
 
     Several API tests intentionally exercise routes with partial fake runtime
@@ -39,7 +71,11 @@ def _isolate_runtime_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     private config.toml with real credentials.
     """
 
+    from openbiliclaw.api import app as api_app
     from openbiliclaw.config import Config, save_config
+    from openbiliclaw.runtime import embedding_progress
+
+    embedding_progress.reset()
 
     project_root = tmp_path / "runtime"
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(project_root))
@@ -47,10 +83,32 @@ def _isolate_runtime_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     cfg.llm.default_provider = "ollama"
     cfg.llm.ollama.model = "llama3"
     save_config(cfg, project_root / "config.toml")
+    yield
+
+    deadline = time.monotonic() + 0.5
+    while any(not task.done() for task in api_app._fire_and_forget_tasks):
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.01)
+    for task in tuple(api_app._fire_and_forget_tasks):
+        if not task.done():
+            task.cancel()
+    embedding_progress.reset()
 
 
 class TestBackendAPI:
     """Route-level tests for the plugin backend API."""
+
+    def test_recommendation_and_delight_models_default_publication_fields(self) -> None:
+        from openbiliclaw.api.models import PendingDelightOut, RecommendationOut
+
+        recommendation = RecommendationOut(id=1, bvid="BV1").model_dump()
+        delight = PendingDelightOut(bvid="BV1").model_dump()
+
+        assert recommendation["published_at"] == ""
+        assert recommendation["published_label"] == ""
+        assert delight["published_at"] == ""
+        assert delight["published_label"] == ""
 
     def test_feedback_api_persists_strong_card_feedback_signal_strength(
         self,
@@ -894,12 +952,13 @@ class TestBackendAPI:
                 self.concurrency = concurrency
 
         class FakeBilibiliClient:
-            def __init__(self, *, cookie: str) -> None:
+            def __init__(self, *, cookie: str, proxy: str | None = None) -> None:
                 self.cookie = cookie
+                self.proxy = proxy
 
         fake_config = SimpleNamespace(
             data_path=Path("/tmp/openbiliclaw-test-data"),
-            bilibili=SimpleNamespace(cookie=""),
+            bilibili=SimpleNamespace(cookie="", proxy=""),
         )
 
         monkeypatch.setattr("openbiliclaw.config.load_config", lambda: fake_config)
@@ -1052,8 +1111,9 @@ class TestBackendAPI:
                 self.concurrency = concurrency
 
         class FakeBilibiliClient:
-            def __init__(self, *, cookie: str) -> None:
+            def __init__(self, *, cookie: str, proxy: str | None = None) -> None:
                 self.cookie = cookie
+                self.proxy = proxy
 
         class FakeSoulEngine:
             def __init__(
@@ -1146,7 +1206,9 @@ class TestBackendAPI:
 
         fake_config = SimpleNamespace(
             data_path=Path("/tmp/openbiliclaw-test-data"),
-            bilibili=SimpleNamespace(cookie="", browser_executable="", browser_headed=False),
+            bilibili=SimpleNamespace(
+                cookie="", proxy="", browser_executable="", browser_headed=False
+            ),
             llm=SimpleNamespace(concurrency=3),
             sources=SimpleNamespace(
                 browser_cdp_url="",
@@ -1320,6 +1382,52 @@ class TestBackendAPI:
         assert response.status_code == 200
         assert response.json() == {"status": "ok", "service": "openbiliclaw-api"}
 
+    def test_qr_info_endpoint_returns_lan_ip_without_embedding_probe(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.api import app as app_module
+
+        class _FailingProbeService:
+            async def probe(self) -> bool:
+                raise AssertionError("/api/qr-info must not probe embedding readiness")
+
+        class EmbeddingSoulEngine:
+            def __init__(self) -> None:
+                self._embedding_service = _FailingProbeService()
+
+        monkeypatch.setattr(app_module, "_detect_lan_ip", lambda: "192.168.1.7")
+
+        app = create_app(
+            memory_manager=object(), database=object(), soul_engine=EmbeddingSoulEngine()
+        )
+        client = TestClient(app)
+
+        response = client.get("/api/qr-info")
+
+        assert response.status_code == 200
+        assert response.json() == {"lan_ip": "192.168.1.7"}
+
+    def test_qr_info_endpoint_stays_available_in_degraded_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.api import app as app_module
+
+        monkeypatch.setattr(app_module, "_detect_lan_ip", lambda: "192.168.1.7")
+
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+        app.state.runtime_context.degraded = True
+        app.state.runtime_context.degraded_reason = "test_degraded"
+        client = TestClient(app)
+
+        response = client.get("/api/qr-info")
+
+        assert response.status_code == 200
+        assert response.json() == {"lan_ip": "192.168.1.7"}
+
     def test_sources_status_returns_every_source(self) -> None:
         """Unified /api/sources/status reports a status item per source."""
         from fastapi.testclient import TestClient
@@ -1387,35 +1495,44 @@ class TestBackendAPI:
         assert masked["bilibili"]["value"] != body["bilibili"]["value"]
         assert "*" in masked["bilibili"]["value"]
 
-    def test_sources_status_xhs_old_tokens_report_stale_not_ready(self, tmp_path: Path) -> None:
-        """小红书 token rows outside the freshness window degrade to ``stale``.
-
-        A bare COUNT(*) used to keep the status green forever once a single
-        token row ever existed, even weeks after the extension stopped syncing
-        and the tokens died (xhs 300031).
-        """
+    def test_sources_status_xhs_recent_login_state_ready_without_tokens(
+        self, tmp_path: Path
+    ) -> None:
+        """A fresh web_session signal is the xhs login gate, not xsec_token rows."""
         from fastapi.testclient import TestClient
 
         from openbiliclaw.storage.database import Database
 
         db = Database(tmp_path / "status.db")
         db.initialize()
-        db.conn.execute(
-            "INSERT INTO content_cache (bvid, source_platform, content_url, discovered_at) "
-            "VALUES ('xhsold', 'xiaohongshu', "
-            "'https://www.xiaohongshu.com/explore/xhsold?xsec_token=dead', "
-            "datetime('now', '-3 days'))"
+        _store_xhs_login_state(
+            db,
+            logged_in=True,
+            when_iso=(datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
         )
-        db.conn.commit()
 
         app = create_app(memory_manager=object(), database=db, soul_engine=object())
         client = TestClient(app)
 
         item = client.get("/api/sources/status").json()["xiaohongshu"]
-        assert item["state"] == "stale"
-        assert item["logged_in"] is False
+        assert item["state"] == "ready"
+        assert item["logged_in"] is True
+        assert "已登录小红书" in item["detail"]
 
-        # A freshly discovered token row flips the status back to ready.
+    def test_sources_status_xhs_logged_out_state_wins_over_fresh_tokens(
+        self, tmp_path: Path
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        _store_xhs_login_state(
+            db,
+            logged_in=False,
+            when_iso=(datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
+        )
         db.conn.execute(
             "INSERT INTO content_cache (bvid, source_platform, content_url) "
             "VALUES ('xhsnew', 'xiaohongshu', "
@@ -1423,34 +1540,32 @@ class TestBackendAPI:
         )
         db.conn.commit()
 
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
         item = client.get("/api/sources/status").json()["xiaohongshu"]
-        assert item["state"] == "ready"
-        assert item["logged_in"] is True
+        assert item["state"] == "missing"
+        assert item["logged_in"] is False
+        assert "未检测到小红书登录" in item["detail"]
 
-    def test_sources_status_xhs_token_backfill_counts_as_fresh(self, tmp_path: Path) -> None:
-        """Token backfill only touches discovery_candidates.last_seen_at.
-
-        ``_backfill_xhs_tokens`` upgrades a candidate's content_url in place
-        without rewriting content_cache.discovered_at, so a recently
-        backfilled candidate must keep the status ``ready`` even when every
-        cache row is old.
-        """
+    def test_sources_status_xhs_stale_login_state_missing_even_with_fresh_tokens(
+        self, tmp_path: Path
+    ) -> None:
         from fastapi.testclient import TestClient
 
         from openbiliclaw.storage.database import Database
 
         db = Database(tmp_path / "status.db")
         db.initialize()
-        db.conn.execute(
-            "INSERT INTO content_cache (bvid, source_platform, content_url, discovered_at) "
-            "VALUES ('xhsold', 'xiaohongshu', "
-            "'https://www.xiaohongshu.com/explore/xhsold?xsec_token=dead', "
-            "datetime('now', '-3 days'))"
+        _store_xhs_login_state(
+            db,
+            logged_in=True,
+            when_iso=(datetime.now(UTC) - timedelta(hours=73)).isoformat(),
         )
         db.conn.execute(
-            "INSERT INTO discovery_candidates (candidate_key, source_platform, content_url) "
-            "VALUES ('xhs:backfilled', 'xiaohongshu', "
-            "'https://www.xiaohongshu.com/explore/backfilled?xsec_token=live')"
+            "INSERT INTO content_cache (bvid, source_platform, content_url) "
+            "VALUES ('xhsnew', 'xiaohongshu', "
+            "'https://www.xiaohongshu.com/explore/xhsnew?xsec_token=live')"
         )
         db.conn.commit()
 
@@ -1458,7 +1573,272 @@ class TestBackendAPI:
         client = TestClient(app)
 
         item = client.get("/api/sources/status").json()["xiaohongshu"]
+        assert item["state"] == "missing"
+        assert item["logged_in"] is False
+
+    def test_xhs_login_state_endpoint_persists_state(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        response = client.post("/api/sources/xhs/login-state", json={"logged_in": True})
+
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        logged_in, updated_at = db.get_xhs_login_state()
+        assert logged_in is True
+        assert updated_at
+
+    def test_xhs_login_state_endpoint_rejects_non_bool(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        response = client.post("/api/sources/xhs/login-state", json={"logged_in": "true"})
+
+        assert response.status_code == 422
+
+    def test_sources_status_reddit_extension_backend_uses_synced_session_without_task(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.sources import reddit_tasks
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config()
+        cfg.sources.reddit.enabled = True
+        cfg.sources.reddit.backend = "extension"
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+        monkeypatch.setattr(
+            reddit_tasks,
+            "_rdt_credential_file",
+            lambda: tmp_path / "rdt" / "credential.json",
+        )
+        sync_result = reddit_tasks.sync_rdt_credential_from_cookie_header(
+            "reddit_session=rs; loid=loid", source="test"
+        )
+        assert sync_result.has_cookie is True
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/sources/status").json()["reddit"]
+        assert item["enabled"] is True
         assert item["state"] == "ready"
+        assert item["logged_in"] is True
+        assert "reddit_session" in item["detail"]
+
+    def test_sources_status_reddit_extension_backend_without_session_keeps_unverified(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.sources import reddit_tasks
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config()
+        cfg.sources.reddit.enabled = True
+        cfg.sources.reddit.backend = "extension"
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+        monkeypatch.setattr(
+            reddit_tasks,
+            "_rdt_credential_file",
+            lambda: tmp_path / "rdt" / "credential.json",
+        )
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/sources/status").json()["reddit"]
+        assert item["enabled"] is True
+        assert item["state"] == "unverified"
+        assert item["logged_in"] is False
+
+    def test_sources_status_reddit_extension_backend_login_required_without_session_missing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.sources import reddit_tasks
+        from openbiliclaw.sources.reddit_tasks import RedditTaskQueue
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config()
+        cfg.sources.reddit.enabled = True
+        cfg.sources.reddit.backend = "extension"
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+        monkeypatch.setattr(
+            reddit_tasks,
+            "_rdt_credential_file",
+            lambda: tmp_path / "rdt" / "credential.json",
+        )
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        queue = RedditTaskQueue(db)
+        task_id = queue.enqueue_with_id("bootstrap_events", {"scopes": ["reddit_saved"]})
+        assert task_id is not None
+        queue.fail(task_id, error="reddit_login_required", debug={"login_required": True})
+
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/sources/status").json()["reddit"]
+        assert item["enabled"] is True
+        assert item["state"] == "missing"
+        assert item["logged_in"] is False
+
+    def test_sources_status_zhihu_recent_login_state_ready_without_tasks(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config()
+        cfg.sources.zhihu.enabled = True
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        _store_zhihu_login_state(
+            db,
+            logged_in=True,
+            when_iso=(datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
+        )
+
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/sources/status").json()["zhihu"]
+        assert item["enabled"] is True
+        assert item["state"] == "ready"
+        assert item["logged_in"] is True
+        assert "已登录知乎" in item["detail"]
+
+    @pytest.mark.parametrize(
+        ("stored_logged_in", "age_hours", "task_case", "expected_state", "expected_logged_in"),
+        [
+            (False, 0.1, "completed", "ready", True),
+            (True, 73.0, "login_required", "missing", False),
+            (False, 0.1, "failed", "partial", False),
+            (True, 73.0, "pending", "unverified", False),
+        ],
+    )
+    def test_sources_status_zhihu_logged_out_or_stale_falls_back_to_task_history(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        stored_logged_in: bool,
+        age_hours: float,
+        task_case: str,
+        expected_state: str,
+        expected_logged_in: bool,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.sources.zhihu_tasks import ZhihuTaskQueue
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config()
+        cfg.sources.zhihu.enabled = True
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        _store_zhihu_login_state(
+            db,
+            logged_in=stored_logged_in,
+            when_iso=(datetime.now(UTC) - timedelta(hours=age_hours)).isoformat(),
+        )
+        queue = ZhihuTaskQueue(db)
+        task_id = queue.enqueue_with_id("bootstrap_events", {"scopes": ["zhihu_read_history"]})
+        assert task_id is not None
+        if task_case == "completed":
+            queue.merge_result(
+                task_id,
+                items=[
+                    {
+                        "scope": "zhihu_read_history",
+                        "title": "知乎阅读",
+                        "url": "https://www.zhihu.com/question/1/answer/2",
+                    }
+                ],
+                scope_counts={"zhihu_read_history": 1},
+                complete=True,
+            )
+        elif task_case == "login_required":
+            queue.fail(task_id, error="zhihu_login_required", debug={"login_required": True})
+        elif task_case == "failed":
+            queue.fail(task_id, error="zhihu_fetch_failed")
+
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/sources/status").json()["zhihu"]
+        assert item["enabled"] is True
+        assert item["state"] == expected_state
+        assert item["logged_in"] is expected_logged_in
+
+    def test_zhihu_login_state_endpoint_persists_state(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        response = client.post("/api/sources/zhihu/login-state", json={"logged_in": True})
+
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        logged_in, updated_at = db.get_zhihu_login_state()
+        assert logged_in is True
+        assert updated_at
+
+    def test_zhihu_login_state_endpoint_rejects_non_bool(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "status.db")
+        db.initialize()
+        app = create_app(memory_manager=object(), database=db, soul_engine=object())
+        client = TestClient(app)
+
+        response = client.post("/api/sources/zhihu/login-state", json={"logged_in": "true"})
+
+        assert response.status_code == 422
 
     def test_sources_status_zhihu_login_required_reports_missing(
         self,
@@ -3195,6 +3575,13 @@ class TestBackendAPI:
                         "topic": "你最近那股想把结构想透的劲头",
                         "presented": 1,
                         "franchise_key": "",  # general-interest content
+                        "duration": 3723,
+                        "view_count": 12000,
+                        "like_count": 3400,
+                        "danmaku_count": 890,
+                        "up_mid": 112233,
+                        "published_at": "2026-07-08T06:30:00Z",
+                        "published_label": "3 days ago",
                     }
                 ]
 
@@ -3209,6 +3596,12 @@ class TestBackendAPI:
         assert data["items"][0]["id"] == 7
         assert data["items"][0]["title"] == "讲透城市与建筑"
         assert data["items"][0]["cover_url"] == "https://i0.hdslb.com/bfs/archive/cover.jpg"
+        assert data["items"][0]["duration"] == 3723
+        assert data["items"][0]["view_count"] == 12000
+        assert data["items"][0]["like_count"] == 3400
+        assert data["items"][0]["danmaku_count"] == 890
+        assert data["items"][0]["up_mid"] == 112233
+        assert_publication(data["items"][0])
 
     def test_recommendations_endpoint_caps_same_franchise(self) -> None:
         """End-to-end: when the DB returns 5 同 IP rows in the
@@ -4068,9 +4461,11 @@ class TestBackendAPI:
                 self,
                 *,
                 profile: object,
+                excluded_bvids: list[str],
                 limit: int = 10,
             ) -> list[object]:
                 assert profile == {"profile": "ok"}
+                assert excluded_bvids == []
                 assert limit == 10
                 self.runtime.pool_available_count = 0
                 from openbiliclaw.discovery.engine import DiscoveredContent
@@ -4083,13 +4478,32 @@ class TestBackendAPI:
                             title="新的一批",
                             up_name="UPA",
                             cover_url="https://i0.hdslb.com/bfs/archive/new-cover.jpg",
+                            duration=3671,
+                            view_count=12500,
+                            like_count=3400,
+                            danmaku_count=890,
+                            up_mid=987654321,
+                            published_at="2026-07-08T06:30:00Z",
+                            published_label="3 days ago",
                         ),
                         recommendation_id=11,
                         expression="先给你捞一条新的。",
                         topic_label="刚补进来的新东西",
                         confidence=0.88,
                         presented=False,
-                    )
+                    ),
+                    SimpleNamespace(
+                        content=SimpleNamespace(
+                            bvid="BV1PLAIN",
+                            title="朴素对象",
+                            up_name="UPB",
+                            cover_url="https://i0.hdslb.com/bfs/archive/plain-cover.jpg",
+                        ),
+                        recommendation_id=12,
+                        expression="没有扩展字段也要稳。",
+                        topic_label="兼容旧对象",
+                        presented=False,
+                    ),
                 ]
 
         hub = FakeEventHub()
@@ -4123,9 +4537,44 @@ class TestBackendAPI:
                     "source_platform": "bilibili",
                     "content_type": "video",
                     "body_text": "",
-                }
+                    "duration": 3671,
+                    "view_count": 12500,
+                    "like_count": 3400,
+                    "danmaku_count": 890,
+                    "favorite_count": 0,
+                    "comment_count": 0,
+                    "up_mid": 987654321,
+                    "published_at": "2026-07-08T06:30:00Z",
+                    "published_label": "3 days ago",
+                },
+                {
+                    "id": 12,
+                    "bvid": "BV1PLAIN",
+                    "title": "朴素对象",
+                    "up_name": "UPB",
+                    "cover_url": "https://i0.hdslb.com/bfs/archive/plain-cover.jpg",
+                    "expression": "没有扩展字段也要稳。",
+                    "topic_label": "兼容旧对象",
+                    "presented": False,
+                    "feedback_type": "",
+                    "content_id": "BV1PLAIN",
+                    "content_url": "",
+                    "source_platform": "bilibili",
+                    "content_type": "video",
+                    "body_text": "",
+                    "duration": 0,
+                    "view_count": 0,
+                    "like_count": 0,
+                    "danmaku_count": 0,
+                    "favorite_count": 0,
+                    "comment_count": 0,
+                    "up_mid": 0,
+                    "published_at": "",
+                    "published_label": "",
+                },
             ]
         }
+        assert_publication(response.json()["items"][0])
         assert hub.events[-1]["type"] == "refresh.pool_updated"
         assert hub.events[-1]["message"] == "推荐池已同步"
         assert hub.events[-1]["pool_available_count"] == 0
@@ -4229,6 +4678,15 @@ class TestBackendAPI:
                     "source_platform": "bilibili",
                     "content_type": "video",
                     "body_text": "",
+                    "duration": 0,
+                    "view_count": 0,
+                    "like_count": 0,
+                    "danmaku_count": 0,
+                    "favorite_count": 0,
+                    "comment_count": 0,
+                    "up_mid": 0,
+                    "published_at": "",
+                    "published_label": "",
                 }
             ]
         }
@@ -4263,8 +4721,13 @@ class TestBackendAPI:
                 self.calls = 0
 
             async def reshuffle_recommendations(
-                self, *, profile: object, limit: int = 10
+                self,
+                *,
+                profile: object,
+                excluded_bvids: list[str],
+                limit: int = 10,
             ) -> list[object]:
+                assert excluded_bvids == []
                 self.calls += 1
                 raise AssertionError("empty pool should not call reshuffle")
 
@@ -4479,6 +4942,87 @@ class TestBackendAPI:
         assert memory.events[0]["event_type"] == "feedback"
         assert memory.events[0]["metadata"]["feedback_type"] == "dismiss"
         assert "忽略了" in str(memory.events[0].get("context", ""))
+
+    def test_feedback_endpoint_preserves_recommendation_source_platform(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeMemoryManager:
+            def __init__(self) -> None:
+                self.events: list[dict[str, object]] = []
+
+            async def propagate_event(self, event: dict[str, object]) -> None:
+                self.events.append(event)
+
+        class FakeDatabase:
+            def get_recommendation_by_id(self, recommendation_id: int) -> dict[str, object]:
+                return {
+                    "id": recommendation_id,
+                    "bvid": "zhihu:answer:42",
+                    "title": "如何理解城市更新",
+                    "source_platform": "zhihu",
+                }
+
+            def update_recommendation_feedback(
+                self,
+                recommendation_id: int,
+                *,
+                feedback_type: str,
+                feedback_note: str = "",
+            ) -> None:
+                return None
+
+        memory = FakeMemoryManager()
+        client = TestClient(create_app(memory_manager=memory, database=FakeDatabase()))
+
+        response = client.post(
+            "/api/feedback",
+            json={
+                "recommendation_id": 7,
+                "feedback_type": "dislike",
+                "note": "这个方向不适合我",
+            },
+        )
+
+        assert response.status_code == 200
+        event = memory.events[0]
+        assert event["metadata"]["source_platform"] == "zhihu"
+        assert "在知乎" in str(event["context"])
+        assert "标记不喜欢" in str(event["context"])
+        assert "备注:这个方向不适合我" in str(event["context"])
+
+    def test_feedback_endpoint_falls_back_to_bilibili_for_legacy_rows(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeMemoryManager:
+            def __init__(self) -> None:
+                self.events: list[dict[str, object]] = []
+
+            async def propagate_event(self, event: dict[str, object]) -> None:
+                self.events.append(event)
+
+        class FakeDatabase:
+            def get_recommendation_by_id(self, recommendation_id: int) -> dict[str, object]:
+                return {"id": recommendation_id, "bvid": "BV1LEGACY", "title": "旧推荐"}
+
+            def update_recommendation_feedback(
+                self,
+                recommendation_id: int,
+                *,
+                feedback_type: str,
+                feedback_note: str = "",
+            ) -> None:
+                return None
+
+        memory = FakeMemoryManager()
+        client = TestClient(create_app(memory_manager=memory, database=FakeDatabase()))
+        response = client.post(
+            "/api/feedback",
+            json={"recommendation_id": 8, "feedback_type": "dismiss", "note": ""},
+        )
+
+        assert response.status_code == 200
+        assert memory.events[0]["metadata"]["source_platform"] == "bilibili"
+        assert "在B 站忽略了" in str(memory.events[0]["context"])
 
     def test_feedback_endpoint_rejects_unknown_feedback_type(self) -> None:
         from fastapi.testclient import TestClient
@@ -6204,6 +6748,7 @@ class TestBackendAPI:
             def __init__(self) -> None:
                 self.confirmed: list[object] = []
                 self.rejected: list[object] = []
+                self.deferred: list[object] = []
 
             def get_active_speculations(self) -> list[object]:
                 return [SimpleNamespace(domain="抽象雕塑")]
@@ -6216,6 +6761,12 @@ class TestBackendAPI:
                 self.rejected.append((_args, _kwargs))
                 return True
 
+            def user_defer_speculation(self, *_args: object, **_kwargs: object) -> object:
+                self.deferred.append((_args, _kwargs))
+                from openbiliclaw.soul.speculator import DeferResult
+
+                return DeferResult(outcome="deferred")
+
         speculator = FakeSpeculator()
         memory = FakeMemoryManager()
         app = create_app(
@@ -6227,12 +6778,14 @@ class TestBackendAPI:
         )
         client = TestClient(app)
 
+        # An ambiguous message with no explicit defer/positive/negative keyword —
+        # LLM fails, keyword finds nothing → defaults to plain neutral.
         response = client.post(
             "/api/interest-probes/respond",
             json={
                 "domain": "抽象雕塑",
                 "response": "chat",
-                "message": "先放着吧",
+                "message": "嗯，我再想想看",
             },
         )
 
@@ -7582,6 +8135,187 @@ class TestBackendAPI:
         ]
         assert database.calls and database.calls[0]["include_liked"] is True
 
+    def test_delight_pending_surfaces_publication_fields(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeRuntimeController:
+            def get_pending_delight(self) -> dict[str, object]:
+                return {
+                    "bvid": "BV1DELIGHT",
+                    "title": "惊喜候选",
+                    "published_at": "2026-07-08T06:30:00Z",
+                    "published_label": "3 days ago",
+                }
+
+        app = create_app(
+            memory_manager=object(),
+            database=object(),
+            soul_engine=object(),
+            runtime_controller=FakeRuntimeController(),
+        )
+        client = TestClient(app)
+
+        response = client.get("/api/delight/pending")
+
+        assert response.status_code == 200
+        assert_publication(response.json()["item"])
+
+    def test_delight_manual_trigger_publishes_publication_fields(self) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeDatabase:
+            def get_delight_candidates(
+                self,
+                *,
+                min_delight_score: float,
+                limit: int,
+            ) -> list[dict[str, object]]:
+                return [
+                    {
+                        "bvid": "BV1DELIGHT",
+                        "title": "惊喜候选",
+                        "delight_score": 0.95,
+                        "published_at": "2026-07-08T06:30:00Z",
+                        "published_label": "3 days ago",
+                    }
+                ]
+
+        class FakeEventHub:
+            def __init__(self) -> None:
+                self.events: list[dict[str, object]] = []
+
+            async def publish(self, event: dict[str, object]) -> bool:
+                self.events.append(event)
+                return True
+
+        event_hub = FakeEventHub()
+        app = create_app(
+            memory_manager=object(),
+            database=FakeDatabase(),
+            soul_engine=object(),
+            runtime_event_hub=event_hub,
+        )
+        client = TestClient(app)
+
+        response = client.post("/api/delight/trigger", json={"count": 1})
+
+        assert response.status_code == 200
+        assert_publication(event_hub.events[0])
+
+    def test_delight_pending_batch_surfaces_body_text_and_content_type(self) -> None:
+        """The delight card derives a readable title for legacy answer_<id> rows
+        from body_text/content_type (issue #79), so the batch payload must carry
+        both fields through — the delight card was the exact
+        <h3 id="delightTitle">answer_<id> the report screenshotted."""
+        from fastapi.testclient import TestClient
+
+        class FakeDatabase:
+            def get_delight_candidates(
+                self,
+                *,
+                min_delight_score: float,
+                limit: int,
+                include_liked: bool = False,
+            ) -> list[dict[str, object]]:
+                return [
+                    {
+                        "bvid": "answer:2001",
+                        "title": "answer_2001",
+                        "delight_reason": "讲透了数据需求",
+                        "delight_score": 0.95,
+                        "delight_hook": "偷偷翻到一条好东西",
+                        "content_type": "answer",
+                        "body_text": "深度学习为什么需要这么多数据？其实关键在于泛化。",
+                        "source_platform": "zhihu",
+                        "feedback_type": "",
+                    },
+                ]
+
+        app = create_app(memory_manager=object(), database=FakeDatabase(), soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/delight/pending-batch").json()["items"][0]
+        assert item["content_type"] == "answer"
+        assert item["body_text"].startswith("深度学习为什么需要这么多数据")
+
+    def test_delight_pending_batch_surfaces_engagement_stats(self) -> None:
+        """The delight card renders the same ▶/👍/💬 row as the grid, so the
+        batch payload must carry the engagement counts from content_cache
+        (field report 2026-07-07: some cards showed stats, the surprise card
+        never did)."""
+        from fastapi.testclient import TestClient
+
+        class FakeDatabase:
+            def get_delight_candidates(
+                self,
+                *,
+                min_delight_score: float,
+                limit: int,
+                include_liked: bool = False,
+            ) -> list[dict[str, object]]:
+                return [
+                    {
+                        "bvid": "BV1stats",
+                        "title": "带统计的候选",
+                        "delight_score": 0.95,
+                        "source_platform": "bilibili",
+                        "view_count": 69000,
+                        "like_count": 3200,
+                        "comment_count": 880,
+                        "danmaku_count": 150,
+                        "favorite_count": 12,
+                        "published_at": "2026-07-08T06:30:00Z",
+                        "published_label": "3 days ago",
+                        "feedback_type": "",
+                    },
+                ]
+
+        app = create_app(memory_manager=object(), database=FakeDatabase(), soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/delight/pending-batch").json()["items"][0]
+        assert item["view_count"] == 69000
+        assert item["like_count"] == 3200
+        assert item["comment_count"] == 880
+        assert item["danmaku_count"] == 150
+        assert item["favorite_count"] == 12
+        assert_publication(item)
+
+    def test_delight_pending_batch_maps_xhs_collect_to_favorite(self) -> None:
+        """Xiaohongshu stores 收藏 in collect_count, but the card's ⭐ renders
+        favorite_count — so favorite_count falls back to collect_count, letting
+        XHS favorites show like every other platform (field report 2026-07-07)."""
+        from fastapi.testclient import TestClient
+
+        class FakeDatabase:
+            def get_delight_candidates(
+                self,
+                *,
+                min_delight_score: float,
+                limit: int,
+                include_liked: bool = False,
+            ) -> list[dict[str, object]]:
+                return [
+                    {
+                        "bvid": "xhsnote1",
+                        "title": "小红书笔记",
+                        "delight_score": 0.9,
+                        "source_platform": "xiaohongshu",
+                        "like_count": 3200,
+                        "comment_count": 880,
+                        "collect_count": 455,  # XHS 收藏 lands here, favorite_count absent
+                        "feedback_type": "",
+                    },
+                ]
+
+        app = create_app(memory_manager=object(), database=FakeDatabase(), soul_engine=object())
+        client = TestClient(app)
+
+        item = client.get("/api/delight/pending-batch").json()["items"][0]
+        assert item["favorite_count"] == 455  # surfaced from collect_count
+        assert item["like_count"] == 3200
+        assert item["comment_count"] == 880
+
     def test_delight_pending_batch_uses_configured_default_limit(self) -> None:
         """Clients that omit ``limit`` should inherit the shared queue setting."""
         from fastapi.testclient import TestClient
@@ -7702,7 +8436,8 @@ class TestBackendAPI:
         cfg = Config(
             llm=LLMConfig(
                 default_provider="gemini",
-                fallback_enabled=True,
+                fallback_provider="openai",
+                openai=LLMProviderConfig(api_key="test-openai-key"),
                 gemini=LLMProviderConfig(api_key="test-gemini-key", model="gemini-2.5-flash"),
                 embedding=EmbeddingConfig(
                     provider="gemini",
@@ -7728,7 +8463,8 @@ class TestBackendAPI:
 
         # LLM provider fields
         assert data["llm"]["default_provider"] == "gemini"
-        assert data["llm"]["fallback_enabled"] is True
+        assert data["llm"]["fallback_provider"] == "openai"
+        assert "fallback_enabled" not in data["llm"]  # removed legacy flag
         assert data["llm"]["gemini"]["api_key"] == "test-gemini-key"
         assert data["llm"]["gemini"]["model"] == "gemini-2.5-flash"
 
@@ -7837,7 +8573,9 @@ class TestBackendAPI:
         assert response.status_code == 200
         data = response.json()
         assert data["ok"] is True
-        assert data["config"]["llm"]["fallback_enabled"] is True
+        # Chat-side "fallback_enabled" from legacy clients is accepted but
+        # ignored and no longer echoed (removed field); embedding keeps its.
+        assert "fallback_enabled" not in data["config"]["llm"]
         assert data["config"]["llm"]["embedding"]["fallback_enabled"] is True
 
         # Verify the embedding was updated on the config object
@@ -8681,6 +9419,57 @@ class TestEmbeddingAndCompatProviderE2E:
         assert data["logging"]["unmanaged_truncate_mb"] == 78
         assert data["logging"]["unmanaged_max_age_days"] == 9
 
+    def test_put_config_reddit_cookie_paste_writes_rdt_credential_store(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Manual Reddit Cookie paste rides PUT /api/config like douyin/x,
+        but lands in rdt-cli's credential store — never in config.toml."""
+        import json as _json
+
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+        from openbiliclaw.sources import reddit_tasks
+
+        credential_file = tmp_path / "rdt" / "credential.json"
+        monkeypatch.setattr(reddit_tasks, "_rdt_credential_file", lambda: credential_file)
+
+        cfg = Config(llm=LLMConfig(openai=LLMProviderConfig(api_key="sk-openai")))
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.put(
+            "/api/config",
+            json={"sources": {"reddit": {"cookie": "reddit_session=abc123; token_v2=tok; loid=x"}}},
+        )
+        assert response.status_code == 200
+
+        stored = _json.loads(credential_file.read_text(encoding="utf-8"))
+        assert stored["cookies"]["reddit_session"] == "abc123"
+        assert stored["source"] == "openbiliclaw:config-update"
+        assert "abc123" not in (tmp_path / "config.toml").read_text(encoding="utf-8")
+
+    def test_put_config_reddit_cookie_without_session_rejected_visibly(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A pasted Cookie missing reddit_session cannot be stored by
+        rdt-cli — the save must fail loudly instead of silently no-oping."""
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+        from openbiliclaw.sources import reddit_tasks
+
+        credential_file = tmp_path / "rdt" / "credential.json"
+        monkeypatch.setattr(reddit_tasks, "_rdt_credential_file", lambda: credential_file)
+
+        cfg = Config(llm=LLMConfig(openai=LLMProviderConfig(api_key="sk-openai")))
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.put(
+            "/api/config",
+            json={"sources": {"reddit": {"cookie": "token_v2=tok; loid=x"}}},
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["error"] == "missing_reddit_session"
+        assert "reddit_session" in detail["message"]
+        assert not credential_file.exists()
+
     def test_put_config_updates_multimodal_discovery_settings(self, monkeypatch, tmp_path) -> None:
         from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
 
@@ -9381,7 +10170,8 @@ def test_probe_chat_sentiment_uses_plain_text_llm_call() -> None:
     method, kwargs = llm.calls[0]
     assert method == "core"
     assert kwargs["caller"] == "api.sentiment"
-    assert kwargs["max_tokens"] == 8
+    # 16 (was 8) so the longest label `neutral_deferred` can't truncate.
+    assert kwargs["max_tokens"] == 16
     assert kwargs["json_mode"] is False
 
 
@@ -9575,15 +10365,58 @@ class _FakeInitPrereqs:
         self._bili = bili
         self._chat = chat
         self._platforms = list(platforms or [])
+        self.bilibili_check_calls = 0
+        self.chat_ready_calls = 0
 
     async def bilibili_check(self) -> str:
+        self.bilibili_check_calls += 1
         return self._bili
 
     async def chat_ready(self) -> bool:
+        self.chat_ready_calls += 1
+        return self._chat
+
+    def peek_bilibili(self) -> str:
+        return self._bili
+
+    def peek_bilibili_detail(self) -> str:
+        return "" if self._bili == "ok" else "检测请求失败（stub 网络错误）。"
+
+    def peek_chat(self) -> bool:
         return self._chat
 
     def enabled_platforms(self) -> list[str]:
         return list(self._platforms)
+
+
+def test_init_crash_detail_summarizes_exception() -> None:
+    """One line, class-prefixed, capped — safe to surface in init-status."""
+    from openbiliclaw.api.app import _init_crash_detail
+
+    assert _init_crash_detail(RuntimeError("boom")) == "RuntimeError: boom"
+    # Multi-line messages collapse to the first line.
+    assert _init_crash_detail(ValueError("first line\nsecond line")) == "ValueError: first line"
+    # Empty message still identifies the exception class.
+    assert _init_crash_detail(KeyError()) == "KeyError"
+    # Length-capped so a huge provider error body can't flood the status.
+    assert len(_init_crash_detail(RuntimeError("x" * 1000))) == 300
+
+
+def test_init_crash_detail_rewrites_llm_failure_to_advice() -> None:
+    """An LLM-shaped crash surfaces actionable advice, not the raw 500 body."""
+    from openbiliclaw.api.app import _init_crash_detail
+    from openbiliclaw.llm.base import LLMProviderError
+
+    try:
+        try:
+            raise RuntimeError("Error code: 500 - 根据相关法律法规，我们无法提供关于以下内容的答案")
+        except RuntimeError as upstream:
+            raise LLMProviderError("openai_compatible request failed") from upstream
+    except LLMProviderError as exc:
+        detail = _init_crash_detail(exc)
+    # Content-moderation advice, not "LLMProviderError: openai_compatible …".
+    assert "内容合规" in detail
+    assert not detail.startswith("LLMProviderError")
 
 
 def test_select_init_platforms_none_selection_uses_all_enabled() -> None:
@@ -9829,6 +10662,66 @@ class TestGuidedInitEndpoints:
             client.get("/api/init-status")
             time.sleep(0.02)
         return captured
+
+    def _drive_until_status(self, client, reason):
+        # Pump init-status until the background wrapper lands the terminal
+        # failure write; returns the final status body.
+        import time
+
+        body = {}
+        for _ in range(100):
+            body = client.get("/api/init-status").json()
+            if body.get("reason") == reason:
+                break
+            time.sleep(0.02)
+        return body
+
+    def test_init_crash_surfaces_exception_detail_in_status(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unexpected pipeline crash must be diagnosable from init-status:
+        reason stays the stable ``internal_error`` code, ``detail`` carries the
+        exception summary (field report 2026-07-05 — the generic 「初始化过程中
+        出错了」 left community users with nothing to report)."""
+        from fastapi.testclient import TestClient
+
+        async def _boom(**kwargs):
+            raise RuntimeError("provider exploded mid-run\nstack noise")
+
+        monkeypatch.setattr("openbiliclaw.cli.run_guided_init", _boom)
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, db = self._make_app(tmp_path, prereqs=prereqs)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={"sources": ["bilibili"]})
+            assert resp.status_code == 202
+            body = self._drive_until_status(client, "internal_error")
+        assert body["reason"] == "internal_error"
+        assert body["detail"] == "RuntimeError: provider exploded mid-run"
+        assert db.get_latest_init_run()["error_detail"] == (
+            "RuntimeError: provider exploded mid-run"
+        )
+
+    def test_init_guided_error_message_lands_in_detail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Typed GuidedInitError failures surface their human message (the API
+        path used to discard it — only the CLI printed it)."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.cli import GuidedInitError
+
+        async def _typed_failure(**kwargs):
+            raise GuidedInitError("empty_signals", "所选数据来源没有拉到任何行为信号。")
+
+        monkeypatch.setattr("openbiliclaw.cli.run_guided_init", _typed_failure)
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={"sources": ["bilibili"]})
+            assert resp.status_code == 202
+            body = self._drive_until_status(client, "empty_signals")
+        assert body["reason"] == "empty_signals"
+        assert body["detail"] == "所选数据来源没有拉到任何行为信号。"
 
     def test_init_honors_source_selection(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -10127,6 +11020,36 @@ class TestGuidedInitEndpoints:
         assert body["can_start"] is False
         assert body["reason"] == "already_initialized"
 
+    def test_init_status_skips_live_probes_when_already_initialized(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        # Steady-state polling of an initialized instance must not fire real
+        # (billable) chat probes or Bilibili round-trips — users spotted the
+        # recurring 5-in/10-out "hi" completions on their provider bill.
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True)
+        app, _ = self._make_app(tmp_path, profile_ready=True, prereqs=prereqs)
+        with TestClient(app) as client:
+            for _ in range(3):
+                resp = client.get("/api/init-status")
+        body = resp.json()
+        assert body["initialized"] is True
+        assert prereqs.chat_ready_calls == 0
+        assert prereqs.bilibili_check_calls == 0
+        # Cached values still surface in the payload.
+        assert body["prerequisites"]["llm_ready"] is True
+        assert body["prerequisites"]["bilibili_logged_in"] is True
+
+    def test_init_status_probes_live_before_initialization(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        # Pre-init the checklist gates the start button, so probes stay real.
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        with TestClient(app) as client:
+            client.get("/api/init-status")
+        assert prereqs.chat_ready_calls == 1
+        assert prereqs.bilibili_check_calls == 1
+
     def test_init_status_bilibili_login_is_informational_not_blocking(self, tmp_path: Path) -> None:
         """v0.3.118+: B站 login no longer hard-gates can_start — whether it
         blocks depends on the client's source selection, which only POST sees.
@@ -10141,6 +11064,9 @@ class TestGuidedInitEndpoints:
         assert body["can_start"] is True
         assert body["reason"] == "bilibili_not_logged_in"
         assert body["prerequisites"]["bilibili_logged_in"] is False
+        # The probe's failure reason rides along so the UI can distinguish
+        # an expired cookie from a proxy-broken probe (field report 2026-07).
+        assert body["prerequisites"]["bilibili_detail"] == "检测请求失败（stub 网络错误）。"
 
     def test_init_status_llm_still_hard_gates_can_start(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient
@@ -10224,3 +11150,1753 @@ class TestGuidedInitEndpoints:
         # serve() (writes recommendation rows + marks pool shown) must NOT run on
         # a half-built pool during init — the side-effecting GET is gated too.
         assert served == []
+
+
+class TestRecommendationsFirstPageTopUp:
+    """GET /api/recommendations thin-history top-up (issue #81 挤牙膏首载).
+
+    A first page of 2-3 unprocessed history rows reads as broken even though
+    the pool has stock — the endpoint now serves from the pool whenever the
+    window is thinner than 10 rows, not only when it is empty. The non-empty
+    case is debounced (side-effecting write on a GET, polled by clients).
+    """
+
+    def _make_app(self, tmp_path: Path, *, history_rows: int):
+        from openbiliclaw.storage.database import Database
+
+        served: list[int] = []
+
+        class _FakeRec:
+            async def serve(self, profile: object, limit: int = 10) -> list[object]:
+                served.append(limit)
+                return []
+
+        class _FakeSoul:
+            def is_profile_ready(self) -> bool:
+                return True
+
+            async def get_profile(self) -> object:
+                return object()
+
+        db = Database(tmp_path / "rec.db")
+        db.initialize()
+        for index in range(history_rows):
+            db.insert_recommendation(
+                f"BVthin{index}", confidence=0.9, expression="看看这个", topic="测试"
+            )
+        # Pretend the pool has servable candidates so the top-up gate opens.
+        db.count_pool_candidates = lambda **_kw: 5  # type: ignore[method-assign]
+        app = create_app(memory_manager=object(), database=db, soul_engine=_FakeSoul())
+        app.state.auth_gate.is_trusted_local = lambda request: True
+        app.state.runtime_context.recommendation_engine = _FakeRec()
+        return app, served
+
+    def test_thin_history_tops_up_from_pool(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        app, served = self._make_app(tmp_path, history_rows=3)
+        with TestClient(app) as client:
+            resp = client.get("/api/recommendations")
+        assert resp.status_code == 200
+        assert served == [10]
+
+    def test_thin_history_topup_is_debounced(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        app, served = self._make_app(tmp_path, history_rows=3)
+        with TestClient(app) as client:
+            client.get("/api/recommendations")
+            client.get("/api/recommendations")
+        # Second GET lands inside the debounce window → no repeated serve().
+        assert served == [10]
+
+    def test_full_first_page_does_not_top_up(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        app, served = self._make_app(tmp_path, history_rows=10)
+        with TestClient(app) as client:
+            resp = client.get("/api/recommendations")
+        assert resp.status_code == 200
+        assert served == []
+
+    def test_empty_history_bootstrap_is_not_debounced(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        # Fresh-install bootstrap keeps its original semantics: while the
+        # history stays empty every GET may retry the bootstrap serve.
+        app, served = self._make_app(tmp_path, history_rows=0)
+        with TestClient(app) as client:
+            client.get("/api/recommendations")
+            client.get("/api/recommendations")
+        assert served == [10, 10]
+
+
+class TestEmbeddingDiagnosisAndRepair:
+    """Classified embedding causes + one-click repair (v0.3.155+).
+
+    Field context (2026-07-05): bge-m3 500-ing for an hour surfaced only as
+    a dead「重试」; a browser-translated provider name ('奥拉玛') silently
+    disabled embedding; remote viewers saw "条件未满足" with an all-green
+    checklist because the reason ladder had no trusted branch.
+    """
+
+    def _make_app(self, tmp_path, *, embedding_provider=None, prereqs=None):
+        from openbiliclaw.config import Config
+        from openbiliclaw.storage.database import Database
+
+        db = Database(tmp_path / "diag.db")
+        db.initialize()
+        soul = SimpleNamespace(is_profile_ready=lambda: False)
+        app = create_app(memory_manager=object(), database=db, soul_engine=soul)
+        app.state.auth_gate.is_trusted_local = lambda request: True
+        if embedding_provider is not None:
+            app.state.runtime_context.config = Config()
+            data_dir = tmp_path / "data"
+            data_dir.mkdir(exist_ok=True)
+            app.state.runtime_context.config.data_dir = str(data_dir)
+            app.state.runtime_context.config.llm.embedding.provider = embedding_provider
+            if embedding_provider == "ollama":
+                # Every real write path (CLI setup, popup banner, settings
+                # page) sets the model together with the provider.
+                app.state.runtime_context.config.llm.embedding.model = "bge-m3"
+        if prereqs is not None:
+            app.state.runtime_context._init_prereqs = prereqs
+        return app, db
+
+    def test_init_status_reason_local_only_when_untrusted(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        # trusted participates in can_start but had no reason branch — remote
+        # viewers got reason="none" and a generic "条件未满足" over an
+        # all-green checklist. All clients already map local_only.
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, embedding_provider="", prereqs=prereqs)
+        app.state.auth_gate.is_trusted_local = lambda request: False
+        with TestClient(app) as client:
+            body = client.get("/api/init-status").json()
+        assert body["can_start"] is False
+        assert body["reason"] == "local_only"
+        assert body["prerequisites"]["llm_ready"] is True
+
+    def test_init_status_classifies_misconfigured_embedding_provider(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        # A browser-translated provider name must surface as misconfigured,
+        # not silently degrade into a generic not-ready.
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, embedding_provider="奥拉玛", prereqs=prereqs)
+        with TestClient(app) as client:
+            body = client.get("/api/init-status").json()
+        prereq = body["prerequisites"]
+        assert prereq["embedding_ready"] is False
+        assert prereq["embedding_check"] == "misconfigured"
+        assert "奥拉玛" in prereq["embedding_detail"]
+
+    def test_init_status_reports_disabled_embedding_quietly(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, embedding_provider="", prereqs=prereqs)
+        with TestClient(app) as client:
+            body = client.get("/api/init-status").json()
+        prereq = body["prerequisites"]
+        assert prereq["embedding_check"] == "disabled"
+        assert prereq["embedding_detail"] == ""
+
+    def test_init_autostarts_pull_when_model_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.llm import ollama_diagnostics as od
+
+        pulled: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str) -> tuple[str, str]:
+            return od.DIAG_MODEL_MISSING, "bge-m3 not found"
+
+        async def fake_pull(base_url: str, model: str, on_progress=None):
+            pulled.append(model)
+            return True, ""
+
+        monkeypatch.setattr(od, "diagnose_ollama_embedding", fake_diagnose)
+        monkeypatch.setattr(od, "pull_ollama_model", fake_pull)
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama", prereqs=prereqs)
+        with TestClient(app) as client:
+            response = client.post("/api/init", json={"sources": ["bilibili"]})
+            deadline = time.monotonic() + 1.0
+            while not pulled and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        assert response.status_code == 409
+        assert response.json()["error"] == "embedding_not_ready"
+        assert "正在下载" in response.json().get("detail", "")
+        assert pulled == ["bge-m3"]
+
+    def test_init_autostarts_pull_when_model_broken(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.llm import ollama_diagnostics as od
+
+        pulled: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str) -> tuple[str, str]:
+            return od.DIAG_MODEL_BROKEN, "bge-m3 load failed"
+
+        async def fake_pull(base_url: str, model: str, on_progress=None):
+            pulled.append(model)
+            return True, ""
+
+        monkeypatch.setattr(od, "diagnose_ollama_embedding", fake_diagnose)
+        monkeypatch.setattr(od, "pull_ollama_model", fake_pull)
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama", prereqs=prereqs)
+
+        with TestClient(app) as client:
+            response = client.post("/api/init", json={"sources": ["bilibili"]})
+            deadline = time.monotonic() + 1.0
+            while not pulled and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        assert response.status_code == 409
+        assert "正在下载" in response.json().get("detail", "")
+        assert pulled == ["bge-m3"]
+
+    def test_init_autostart_skips_not_running_diagnosis(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.llm import ollama_diagnostics as od
+
+        pulled: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str) -> tuple[str, str]:
+            return od.DIAG_NOT_RUNNING, "Ollama is down"
+
+        async def fake_pull(base_url: str, model: str, on_progress=None):
+            pulled.append(model)
+            return True, ""
+
+        monkeypatch.setattr(od, "diagnose_ollama_embedding", fake_diagnose)
+        monkeypatch.setattr(od, "pull_ollama_model", fake_pull)
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama", prereqs=prereqs)
+
+        with TestClient(app) as client:
+            response = client.post("/api/init", json={"sources": ["bilibili"]})
+
+        assert response.status_code == 409
+        assert response.json()["detail"].startswith("向量模型还没就绪")
+        assert pulled == []
+
+    def test_init_autostart_skips_non_ollama_provider(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, embedding_provider="gemini", prereqs=prereqs)
+
+        with TestClient(app) as client:
+            response = client.post("/api/init", json={"sources": ["bilibili"]})
+
+        assert response.status_code == 409
+        assert response.json()["detail"].startswith("向量模型还没就绪")
+
+    @pytest.mark.parametrize(
+        "base_url",
+        ["http://10.0.0.2:11434/v1", "http://ollama:11434/v1"],
+    )
+    def test_init_autostart_skips_non_loopback_endpoints(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        base_url: str,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.llm import ollama_diagnostics as od
+
+        diagnosed: list[str] = []
+
+        async def fake_diagnose(url: str, model: str) -> tuple[str, str]:
+            diagnosed.append(url)
+            return od.DIAG_MODEL_MISSING, "missing"
+
+        monkeypatch.setattr(od, "diagnose_ollama_embedding", fake_diagnose)
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama", prereqs=prereqs)
+        app.state.runtime_context.config.llm.embedding.base_url = base_url
+
+        with TestClient(app) as client:
+            response = client.post("/api/init", json={"sources": ["bilibili"]})
+
+        assert response.status_code == 409
+        assert response.json()["detail"].startswith("向量模型还没就绪")
+        assert diagnosed == []
+
+    def test_init_autostart_allows_private_loopback_port(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.llm import ollama_diagnostics as od
+
+        diagnosed: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str) -> tuple[str, str]:
+            diagnosed.append(base_url)
+            return od.DIAG_MODEL_MISSING, "missing"
+
+        async def fake_pull(base_url: str, model: str, on_progress=None):
+            return True, ""
+
+        monkeypatch.setattr(od, "diagnose_ollama_embedding", fake_diagnose)
+        monkeypatch.setattr(od, "pull_ollama_model", fake_pull)
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama", prereqs=prereqs)
+        app.state.runtime_context.config.llm.embedding.base_url = "http://127.0.0.1:11435/v1"
+
+        with TestClient(app) as client:
+            response = client.post("/api/init", json={"sources": ["bilibili"]})
+
+        assert response.status_code == 409
+        assert "正在下载" in response.json().get("detail", "")
+        assert diagnosed == ["http://127.0.0.1:11435/v1"]
+
+    def test_init_autostart_skips_pull_when_disk_space_is_low(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.llm import ollama_diagnostics as od
+        from openbiliclaw.runtime import embedding_progress
+
+        pulled: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str) -> tuple[str, str]:
+            return od.DIAG_MODEL_MISSING, "missing"
+
+        async def fake_pull(base_url: str, model: str, on_progress=None):
+            pulled.append(model)
+            return True, ""
+
+        monkeypatch.setattr(od, "diagnose_ollama_embedding", fake_diagnose)
+        monkeypatch.setattr(
+            od,
+            "ollama_embedding_disk_space_error",
+            lambda model: (od.DIAG_DISK_FULL, "disk full"),
+        )
+        monkeypatch.setattr(od, "pull_ollama_model", fake_pull)
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama", prereqs=prereqs)
+
+        with TestClient(app) as client:
+            response = client.post("/api/init", json={"sources": ["bilibili"]})
+
+        assert response.status_code == 409
+        assert response.json()["detail"].startswith("向量模型还没就绪")
+        assert pulled == []
+        assert embedding_progress.snapshot()["running"] is False
+
+    def test_init_autostart_reuses_existing_process_pull(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.runtime import embedding_progress
+
+        embedding_progress.mark_pull_running("bge-m3")
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama", prereqs=prereqs)
+
+        with TestClient(app) as client:
+            response = client.post("/api/init", json={"sources": ["bilibili"]})
+
+        assert response.status_code == 409
+        assert "正在下载" in response.json().get("detail", "")
+        assert embedding_progress.snapshot()["running"] is True
+
+    def test_init_autostart_diagnosis_exception_keeps_manual_409(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.llm import ollama_diagnostics as od
+
+        async def fake_diagnose(base_url: str, model: str) -> tuple[str, str]:
+            raise RuntimeError("diagnosis exploded")
+
+        monkeypatch.setattr(od, "diagnose_ollama_embedding", fake_diagnose)
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama", prereqs=prereqs)
+
+        with TestClient(app) as client:
+            response = client.post("/api/init", json={"sources": ["bilibili"]})
+
+        assert response.status_code == 409
+        assert response.json()["detail"].startswith("向量模型还没就绪")
+
+    def test_init_autostart_schedule_failure_rolls_back_without_changing_phase(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.llm import ollama_diagnostics as od
+        from openbiliclaw.runtime import embedding_progress
+
+        class FailingRegistry:
+            def track(self, name: str, coro: object) -> None:
+                raise RuntimeError("scheduler unavailable")
+
+        async def fake_diagnose(base_url: str, model: str) -> tuple[str, str]:
+            return od.DIAG_MODEL_MISSING, "missing"
+
+        monkeypatch.setattr(od, "diagnose_ollama_embedding", fake_diagnose)
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama", prereqs=prereqs)
+        embedding_progress.report_ollama_phase("starting")
+
+        with TestClient(app) as client:
+            context = app.state.runtime_context
+            original_registry = context.task_registry
+            context.task_registry = FailingRegistry()
+            try:
+                response = client.post("/api/init", json={"sources": ["bilibili"]})
+                repair = client.get("/api/embedding/repair").json()
+            finally:
+                context.task_registry = original_registry
+
+        pull = embedding_progress.snapshot()
+        assert response.status_code == 409
+        assert response.json()["detail"].startswith("向量模型还没就绪")
+        assert repair["running"] is False
+        assert "scheduler unavailable" in repair["error"]
+        assert pull["running"] is False
+        assert pull["done"] is True
+        assert "scheduler unavailable" in str(pull["error"])
+        assert embedding_progress.ollama_phase() == "starting"
+
+    def test_init_autostart_and_manual_repair_share_single_flight(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.llm import ollama_diagnostics as od
+
+        pulls: list[str] = []
+        release = False
+
+        async def fake_diagnose(base_url: str, model: str) -> tuple[str, str]:
+            return od.DIAG_MODEL_MISSING, "missing"
+
+        async def slow_pull(base_url: str, model: str, on_progress=None):
+            nonlocal release
+            pulls.append(model)
+            while not release:
+                await asyncio.sleep(0.01)
+            return True, ""
+
+        monkeypatch.setattr(od, "diagnose_ollama_embedding", fake_diagnose)
+        monkeypatch.setattr(od, "pull_ollama_model", slow_pull)
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama", prereqs=prereqs)
+
+        with TestClient(app) as client:
+            auto = client.post("/api/init", json={"sources": ["bilibili"]})
+            deadline = time.monotonic() + 1.0
+            while not pulls and time.monotonic() < deadline:
+                time.sleep(0.01)
+            manual = client.post("/api/embedding/repair")
+            release = True
+            deadline = time.monotonic() + 1.0
+            while not client.get("/api/embedding/repair").json().get("done"):
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+
+        assert auto.status_code == 409
+        assert manual.status_code == 409
+        assert manual.json()["error"] == "already_running"
+        assert pulls == ["bge-m3"]
+
+    def test_repair_rejects_non_local(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        app.state.auth_gate.is_trusted_local = lambda request: False
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "local_only"
+
+    def test_repair_rejects_non_ollama_provider(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        app, _ = self._make_app(tmp_path, embedding_provider="gemini")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "unsupported_provider"
+
+    def test_repair_starts_managed_ollama_then_pulls_missing_model(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        diagnoses = iter(
+            [
+                ("not_running", "Ollama 服务无法连接"),
+                ("model_missing", "缺 bge-m3"),
+            ]
+        )
+        start_calls: list[str] = []
+        pulled: list[str] = []
+        diagnose_calls: list[tuple[str, str]] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            diagnose_calls.append((base_url, model))
+            return next(diagnoses)
+
+        def fake_start() -> bool:
+            start_calls.append("start")
+            return True
+
+        async def fake_pull(base_url: str, model: str, *, on_progress=None, **_kw: object):
+            pulled.append(model)
+            if on_progress is not None:
+                on_progress("success", 0, 0)
+            return (True, "")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor._ollama_start_serve_background",
+            fake_start,
+        )
+        monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", fake_pull)
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+            assert resp.status_code == 202
+            body = resp.json()
+            assert body["diagnosis"] == "model_missing"
+
+            status: dict = {}
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                status = client.get("/api/embedding/repair").json()
+                if status.get("done"):
+                    break
+                time.sleep(0.05)
+
+        assert start_calls == ["start"]
+        assert len(diagnose_calls) == 2
+        assert pulled == ["bge-m3"]
+        assert status.get("ok") is True
+
+    def test_repair_409_when_managed_ollama_start_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        start_calls: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("not_running", "Ollama 服务无法连接")
+
+        def fake_start() -> bool:
+            start_calls.append("start")
+            return False
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor._ollama_start_serve_background",
+            fake_start,
+        )
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body["error"] == "not_running"
+        assert "无法连接" in body["detail"]
+        assert start_calls == ["start"]
+
+    @pytest.mark.parametrize(
+        ("manage_ollama", "embedding_base_url"),
+        [
+            (False, ""),
+            (True, "http://127.0.0.1:11500/v1"),
+            (True, "http://10.0.0.2:11434/v1"),
+        ],
+    )
+    def test_repair_not_running_does_not_start_unmanaged_or_custom_endpoint(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        manage_ollama: bool,
+        embedding_base_url: str,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        start_calls: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("not_running", "Ollama 服务无法连接")
+
+        def fake_start() -> bool:
+            start_calls.append("start")
+            return True
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor._ollama_start_serve_background",
+            fake_start,
+        )
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        cfg = app.state.runtime_context.config
+        cfg.autostart.manage_ollama = manage_ollama
+        cfg.llm.embedding.base_url = embedding_base_url
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "not_running"
+        assert start_calls == []
+
+    @pytest.mark.parametrize(
+        ("diagnosis", "detail"),
+        [
+            ("disk_full", "磁盘空间不足，至少需要 2.0 GB。"),
+            ("network", "无法访问模型下载源 registry，请检查网络。"),
+            ("model_oom", "内存不足以加载模型，重新下载无效。"),
+        ],
+    )
+    def test_repair_terminal_guidance_causes_do_not_start_pull(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        diagnosis: str,
+        detail: str,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        pulled: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return (diagnosis, detail)
+
+        async def fake_pull(base_url: str, model: str, *, on_progress=None, **_kw: object):
+            pulled.append(model)
+            return (True, "")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", fake_pull)
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body["error"] == diagnosis
+        assert body["detail"] == detail
+        assert pulled == []
+
+    def test_repair_disk_precheck_short_circuits_missing_model_pull(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        pulled: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("model_missing", "缺 bge-m3")
+
+        async def fake_pull(base_url: str, model: str, *, on_progress=None, **_kw: object):
+            pulled.append(model)
+            return (True, "")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.ollama_embedding_disk_space_error",
+            lambda *_args, **_kw: ("disk_full", "磁盘空间不足，至少需要 2.0 GB。"),
+        )
+        monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", fake_pull)
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "disk_full"
+        assert pulled == []
+
+    def test_repair_provider_error_restarts_managed_ollama_once_then_409(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        diagnoses = iter(
+            [
+                ("error", "Ollama 响应异常（GET /api/tags -> 500）：server busy"),
+                ("error", "Ollama 响应异常（GET /api/tags -> 500）：server busy"),
+            ]
+        )
+        restart_calls: list[str] = []
+        pulled: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return next(diagnoses)
+
+        def fake_restart() -> tuple[bool, str]:
+            restart_calls.append("restart")
+            return (True, "")
+
+        async def fake_pull(base_url: str, model: str, *, on_progress=None, **_kw: object):
+            pulled.append(model)
+            return (True, "")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor.restart_managed_ollama", fake_restart
+        )
+        monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", fake_pull)
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body["error"] == "provider_error"
+        assert "server busy" in body["detail"]
+        assert "NO_PROXY" in body["detail"]
+        assert restart_calls == ["restart"]
+        assert pulled == []
+
+    def test_repair_provider_error_never_restarts_external_ollama(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        restart_calls: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("error", "Ollama 响应异常（GET /api/tags -> 500）：server busy")
+
+        def fake_restart() -> tuple[bool, str]:
+            restart_calls.append("restart")
+            return (True, "")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor.restart_managed_ollama", fake_restart
+        )
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        cfg = app.state.runtime_context.config
+        cfg.autostart.manage_ollama = False
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "provider_error"
+        assert restart_calls == []
+
+    def test_repair_not_running_starts_recorded_private_daemon(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(a) A recorded private daemon (11435) is repaired, not 409'd."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.runtime import ollama_supervisor as sup
+
+        monkeypatch.setattr(
+            sup,
+            "_managed_daemon",
+            sup._ManagedDaemon(None, "http://127.0.0.1:11435", "/tmp/private-models"),
+        )
+        diagnoses = iter(
+            [
+                ("not_running", "Ollama 服务无法连接"),
+                ("model_missing", "缺 bge-m3"),
+            ]
+        )
+        private_starts: list[tuple[str, str]] = []
+        pulled: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return next(diagnoses)
+
+        def fake_start_at(models_dir: str, host: str) -> bool:
+            private_starts.append((models_dir, host))
+            return True
+
+        async def fake_pull(base_url: str, model: str, *, on_progress=None, **_kw: object):
+            pulled.append(model)
+            if on_progress is not None:
+                on_progress("success", 0, 0)
+            return (True, "")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(sup, "start_managed_ollama_at", fake_start_at)
+        monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", fake_pull)
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        cfg = app.state.runtime_context.config
+        cfg.llm.embedding.base_url = "http://127.0.0.1:11435/v1"
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 202
+        assert private_starts == [("/tmp/private-models", "http://127.0.0.1:11435")]
+
+    def test_repair_provider_error_restarts_recorded_private_daemon(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(b) DIAG_ERROR on the private daemon goes through spec-aware restart."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.runtime import ollama_supervisor as sup
+
+        monkeypatch.setattr(
+            sup,
+            "_managed_daemon",
+            sup._ManagedDaemon(None, "http://127.0.0.1:11435", "/tmp/private-models"),
+        )
+        restart_calls: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("error", "Ollama 响应异常（GET /api/tags -> 500）：server busy")
+
+        def fake_restart() -> tuple[bool, str]:
+            restart_calls.append("restart")
+            return (False, "start_failed")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(sup, "restart_managed_ollama", fake_restart)
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        cfg = app.state.runtime_context.config
+        cfg.llm.embedding.base_url = "http://127.0.0.1:11435/v1"
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "provider_error"
+        assert restart_calls == ["restart"]
+
+    def test_repair_not_running_still_409s_without_record_on_custom_endpoint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(c) No record + non-default endpoint keeps today's 409 (invariant 6)."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.runtime import ollama_supervisor as sup
+
+        monkeypatch.setattr(sup, "_managed_daemon", None)
+        start_calls: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("not_running", "Ollama 服务无法连接")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(sup, "start_managed_ollama_at", lambda d, h: start_calls.append("s"))
+        monkeypatch.setattr(sup, "_ollama_start_serve_background", lambda: start_calls.append("s"))
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        cfg = app.state.runtime_context.config
+        cfg.llm.embedding.base_url = "http://127.0.0.1:11435/v1"
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "not_running"
+        assert start_calls == []
+
+    def test_repair_manage_ollama_false_409s_even_with_private_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(d) manage_ollama=False disables management even for a recorded daemon."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.runtime import ollama_supervisor as sup
+
+        monkeypatch.setattr(
+            sup,
+            "_managed_daemon",
+            sup._ManagedDaemon(None, "http://127.0.0.1:11435", "/tmp/private-models"),
+        )
+        start_calls: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("not_running", "Ollama 服务无法连接")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(sup, "start_managed_ollama_at", lambda d, h: start_calls.append("s"))
+        monkeypatch.setattr(sup, "_ollama_start_serve_background", lambda: start_calls.append("s"))
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        cfg = app.state.runtime_context.config
+        cfg.autostart.manage_ollama = False
+        cfg.llm.embedding.base_url = "http://127.0.0.1:11435/v1"
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "not_running"
+        assert start_calls == []
+
+    def test_repair_loop_is_bounded_when_remediation_does_not_change_diagnosis(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        start_calls: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("not_running", "Ollama 服务无法连接")
+
+        def fake_start() -> bool:
+            start_calls.append("start")
+            return True
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor._ollama_start_serve_background",
+            fake_start,
+        )
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body["error"] == "not_running"
+        assert "自动修复已达到上限" in body["detail"]
+        assert len(start_calls) == 3
+
+    def test_repair_pulls_model_and_reports_done(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("model_missing", "缺 bge-m3")
+
+        async def fake_pull(base_url: str, model: str, *, on_progress=None, **_kw: object):
+            if on_progress is not None:
+                on_progress("downloading", 100, 400)
+                on_progress("success", 0, 0)
+            return (True, "")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", fake_pull)
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+            assert resp.status_code == 202
+            started = resp.json()
+            assert started["started"] is True
+            assert started["model"] == "bge-m3"
+            assert started["diagnosis"] == "model_missing"
+
+            status: dict = {}
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                status = client.get("/api/embedding/repair").json()
+                if status.get("done"):
+                    break
+                time.sleep(0.05)
+        assert status.get("done") is True
+        assert status.get("ok") is True
+        assert status.get("error") == ""
+
+    def test_repair_model_path_encoding_restarts_then_pulls(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        models_dir = tmp_path / "relocated-models"
+        restarted: dict[str, str] = {}
+        pulled: dict[str, str] = {}
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("model_path_encoding", "模型路径含非 ASCII 字符；请设置 OLLAMA_MODELS")
+
+        def fake_restart(path: str) -> tuple[bool, str]:
+            restarted["path"] = path
+            return (True, "")
+
+        async def fake_pull(base_url: str, model: str, *, on_progress=None, **_kw: object):
+            pulled["model"] = model
+            if on_progress is not None:
+                on_progress("success", 0, 0)
+            return (True, "")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", fake_pull)
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor.ollama_models_relocation_candidate",
+            lambda: str(models_dir),
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor.restart_managed_ollama_with_models_dir",
+            fake_restart,
+        )
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+            assert resp.status_code == 202
+            body = resp.json()
+            assert body["diagnosis"] == "model_path_encoding"
+
+            status: dict = {}
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                status = client.get("/api/embedding/repair").json()
+                if status.get("done"):
+                    break
+                time.sleep(0.05)
+
+        assert restarted["path"] == str(models_dir)
+        assert pulled["model"] == "bge-m3"
+        assert status.get("ok") is True
+
+    def test_repair_model_path_encoding_rejects_external_ollama(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("model_path_encoding", "模型路径含非 ASCII 字符")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor.ollama_models_relocation_candidate",
+            lambda: str(tmp_path / "relocated-models"),
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor.restart_managed_ollama_with_models_dir",
+            lambda _path: (False, "external_ollama"),
+        )
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body["error"] == "external_ollama"
+        assert "外部启动的 Ollama" in body["detail"]
+
+    def test_repair_model_path_encoding_requires_manual_fix_when_no_safe_candidate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("model_path_encoding", "模型路径含非 ASCII 字符")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.runtime.ollama_supervisor.ollama_models_relocation_candidate",
+            lambda: None,
+        )
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body["error"] == "manual_fix_required"
+        assert "OLLAMA_MODELS" in body["detail"]
+        assert "重启 Ollama" in body["detail"]
+
+    def test_repair_single_flight_while_running(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("model_missing", "缺 bge-m3")
+
+        release = asyncio.Event()
+
+        async def slow_pull(base_url: str, model: str, *, on_progress=None, **_kw: object):
+            await release.wait()
+            return (True, "")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", slow_pull)
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        with TestClient(app) as client:
+            first = client.post("/api/embedding/repair")
+            assert first.status_code == 202
+            second = client.post("/api/embedding/repair")
+            assert second.status_code == 409
+            assert second.json()["error"] == "already_running"
+            release.set()
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if client.get("/api/embedding/repair").json().get("done"):
+                    break
+                time.sleep(0.05)
+
+    def test_init_status_reports_live_pull_progress_while_repairing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        # While a one-click repair is downloading, init pages must see a
+        # "repairing" classification with live percent — that's how users
+        # know how long to wait (user request 2026-07-05).
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("model_missing", "缺 bge-m3")
+
+        release = asyncio.Event()
+
+        async def slow_pull(base_url: str, model: str, *, on_progress=None, **_kw: object):
+            if on_progress is not None:
+                on_progress("downloading", 200_000_000, 400_000_000)
+            await release.wait()
+            return (True, "")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", slow_pull)
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama", prereqs=prereqs)
+        with TestClient(app) as client:
+            assert client.post("/api/embedding/repair").status_code == 202
+            prereq: dict = {}
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                prereq = client.get("/api/init-status").json()["prerequisites"]
+                if prereq.get("embedding_repair_total"):
+                    break
+                time.sleep(0.05)
+            release.set()
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if client.get("/api/embedding/repair").json().get("done"):
+                    break
+                time.sleep(0.05)
+        assert prereq["embedding_check"] == "repairing"
+        assert "50%" in prereq["embedding_detail"]
+        assert prereq["embedding_repair_running"] is True
+        assert prereq["embedding_repair_completed"] == 200_000_000
+        assert prereq["embedding_repair_total"] == 400_000_000
+
+    def test_init_status_reports_process_global_auto_pull_progress(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.runtime import embedding_progress
+
+        completed = 240 * 1024 * 1024
+        total = 568 * 1024 * 1024
+        embedding_progress.mark_pull_running("bge-m3")
+        embedding_progress.report_pull("downloading", completed, total)
+        embedding_progress.report_ollama_phase("starting")
+        try:
+            prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+            app, _ = self._make_app(tmp_path, embedding_provider="ollama", prereqs=prereqs)
+            with TestClient(app) as client:
+                body = client.get("/api/init-status").json()
+            prereq = body["prerequisites"]
+            assert prereq["embedding_check"] == "repairing"
+            assert prereq["embedding_repair_running"] is True
+            assert prereq["embedding_repair_completed"] == completed
+            assert prereq["embedding_repair_total"] == total
+            assert "42%" in prereq["embedding_pull_status"]
+            assert prereq["embedding_detail"] == prereq["embedding_pull_status"]
+            assert prereq["ollama_phase"] == "starting"
+        finally:
+            embedding_progress.mark_pull_done(True, "")
+            embedding_progress.report_ollama_phase("ready")
+
+
+class TestLlmFallbackConfigValidationAndProbe:
+    """`[llm].fallback_provider` dead-state surfacing (community reports:
+    'fallback 不生效' + '配置页保存有问题').
+
+    - PUT /api/config must reject (400, ok=false) a fallback equal to the
+      default provider — previously the desktop UI silently dropped the
+      fallback panel's api_key/model/base_url in that case and the save
+      "succeeded".
+    - POST /api/config/probe-service kind="llm_fallback" probes the exact
+      fallback provider (no fallback chain) without writing config.toml.
+    """
+
+    def _client(self, monkeypatch, tmp_path, cfg):
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import save_config
+
+        config_path = tmp_path / "config.toml"
+        save_config(cfg, config_path)
+        monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+        monkeypatch.setattr(
+            "openbiliclaw.config.save_config",
+            lambda c, path=None: save_config(c, config_path),
+        )
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+        return TestClient(app), config_path
+
+    def _base_config(self):
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+
+        return Config(
+            llm=LLMConfig(
+                default_provider="openai",
+                openai=LLMProviderConfig(api_key="sk-main", model="gpt-main"),
+                deepseek=LLMProviderConfig(api_key="sk-fallback", model="deepseek-chat"),
+            ),
+        )
+
+    def test_put_config_rejects_same_name_llm_fallback(self, monkeypatch, tmp_path) -> None:
+        cfg = self._base_config()
+        client, config_path = self._client(monkeypatch, tmp_path, cfg)
+        before = config_path.read_bytes()
+
+        response = client.put(
+            "/api/config",
+            json={"llm": {"default_provider": "openai", "fallback_provider": "openai"}},
+        )
+
+        assert response.status_code == 400, response.text
+        data = response.json()
+        assert data["ok"] is False
+        issue_fields = {issue["field"] for issue in data["config"]["issues"]}
+        assert "llm.fallback_provider" in issue_fields
+        # Not persisted.
+        assert config_path.read_bytes() == before
+
+    def test_probe_llm_fallback_probes_exact_fallback_provider(self, monkeypatch, tmp_path) -> None:
+        from openbiliclaw.llm.base import LLMResponse
+
+        calls: list[tuple[str, object]] = []
+
+        class FakeRegistry:
+            available_providers = ["openai", "deepseek"]
+            default_provider = "openai"
+
+            def is_chat_capable(self, name: str) -> bool:
+                return name in ("openai", "deepseek")
+
+            async def complete_provider(self, provider_name, messages, **kwargs):  # noqa: ARG002
+                calls.append((provider_name, kwargs.get("model")))
+                return LLMResponse(
+                    content="OK",
+                    provider=provider_name,
+                    model=str(kwargs.get("model") or ""),
+                )
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.registry.build_llm_registry",
+            lambda probe_cfg: FakeRegistry(),
+        )
+        cfg = self._base_config()
+        client, config_path = self._client(monkeypatch, tmp_path, cfg)
+        before = config_path.read_bytes()
+
+        response = client.post(
+            "/api/config/probe-service",
+            json={
+                "kind": "llm_fallback",
+                "config": {"llm": {"fallback_provider": "deepseek"}},
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is True
+        assert body["kind"] == "llm_fallback"
+        assert body["provider"] == "deepseek"
+        # Exact single-provider probe — never the fallback chain.
+        assert [provider for provider, _model in calls] == ["deepseek"]
+        assert config_path.read_bytes() == before
+
+    def test_probe_llm_fallback_refuses_cleanly_when_unconfigured(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        cfg = self._base_config()
+        client, _config_path = self._client(monkeypatch, tmp_path, cfg)
+
+        response = client.post(
+            "/api/config/probe-service",
+            json={"kind": "llm_fallback", "config": {"llm": {"fallback_provider": ""}}},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is False
+        assert "not configured" in body["error"].lower()
+
+    def test_probe_llm_fallback_refuses_cleanly_for_same_name(self, monkeypatch, tmp_path) -> None:
+        cfg = self._base_config()
+        client, _config_path = self._client(monkeypatch, tmp_path, cfg)
+
+        response = client.post(
+            "/api/config/probe-service",
+            json={"kind": "llm_fallback", "config": {"llm": {"fallback_provider": "openai"}}},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is False
+        assert "same as the default" in body["error"]
+
+
+class TestKeywordGenerationMode:
+    """Backend read-derivation of the UI-facing keyword_generation_mode enum
+    from the two canonical DiscoveryConfig booleans (Task 1)."""
+
+    @pytest.mark.parametrize(
+        ("enabled", "replace", "expected"),
+        [
+            (False, False, "legacy"),
+            (False, True, "legacy"),  # tolerant read: enabled=false → legacy
+            (True, False, "hybrid"),
+            (True, True, "inspiration"),
+        ],
+    )
+    def test_derive_keyword_generation_mode_pure_fn(
+        self, enabled: bool, replace: bool, expected: str
+    ) -> None:
+        from openbiliclaw.api.app import _derive_keyword_generation_mode
+
+        assert _derive_keyword_generation_mode(enabled, replace) == expected
+
+    @pytest.mark.parametrize(
+        ("enabled", "replace", "expected"),
+        [
+            (False, False, "legacy"),
+            (False, True, "legacy"),  # edge: enabled=false & replace=true → legacy
+            (True, False, "hybrid"),
+            (True, True, "inspiration"),
+        ],
+    )
+    def test_get_config_returns_derived_keyword_generation_mode(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        enabled: bool,
+        replace: bool,
+        expected: str,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+
+        cfg = Config()
+        cfg.discovery.inspiration_search_enabled = enabled
+        cfg.discovery.inspiration_replace_merged_keywords = replace
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+        app = create_app()
+        client = TestClient(app)
+
+        response = client.get("/api/config")
+
+        assert response.status_code == 200
+        assert response.json()["discovery"]["keyword_generation_mode"] == expected
+
+
+class TestKeywordGenerationModeWrite:
+    """PUT /api/config translation of keyword_generation_mode → the two
+    canonical DiscoveryConfig booleans (Task 2)."""
+
+    @pytest.mark.parametrize(
+        ("mode", "enabled", "replace"),
+        [
+            ("legacy", False, False),
+            ("hybrid", True, False),
+            ("inspiration", True, True),
+        ],
+    )
+    def test_mode_to_flags_pure_fn(self, mode: str, enabled: bool, replace: bool) -> None:
+        from openbiliclaw.api.app import _mode_to_flags
+
+        assert _mode_to_flags(mode) == (enabled, replace)
+
+    @staticmethod
+    def _valid_config():  # type: ignore[no-untyped-def]
+        # A config that passes LLM validation so PUT actually persists (an
+        # unconfigured default deepseek provider makes the handler return 400).
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+
+        return Config(
+            llm=LLMConfig(
+                default_provider="ollama",
+                ollama=LLMProviderConfig(model="llama3", base_url="http://localhost:11434"),
+            ),
+        )
+
+    @staticmethod
+    def _client(monkeypatch: pytest.MonkeyPatch, tmp_path, cfg):  # type: ignore[no-untyped-def]
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import save_config
+
+        config_path = tmp_path / "config.toml"
+        save_config(cfg, config_path)
+        monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+        monkeypatch.setattr(
+            "openbiliclaw.config.save_config",
+            lambda c, path=None: save_config(c, config_path),
+        )
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+        return TestClient(app), config_path
+
+    @pytest.mark.parametrize(
+        ("mode", "enabled", "replace"),
+        [
+            ("legacy", False, False),
+            ("hybrid", True, False),
+            ("inspiration", True, True),
+        ],
+    )
+    def test_put_config_mode_persists_canonical_booleans(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path, mode: str, enabled: bool, replace: bool
+    ) -> None:
+        cfg = self._valid_config()
+        client, config_path = self._client(monkeypatch, tmp_path, cfg)
+
+        response = client.put("/api/config", json={"discovery": {"keyword_generation_mode": mode}})
+
+        assert response.status_code == 200, response.text
+        # Both canonical booleans set (no stale residue).
+        assert cfg.discovery.inspiration_search_enabled is enabled
+        assert cfg.discovery.inspiration_replace_merged_keywords is replace
+        # config.toml holds the two booleans, NEVER the derived mode key.
+        written = config_path.read_text(encoding="utf-8")
+        assert "keyword_generation_mode" not in written
+        assert f"inspiration_search_enabled = {'true' if enabled else 'false'}" in written
+        assert f"inspiration_replace_merged_keywords = {'true' if replace else 'false'}" in written
+        # Round-trip: the PUT response reflects the derived mode (Task 1 read path).
+        assert response.json()["config"]["discovery"]["keyword_generation_mode"] == mode
+
+    def test_put_config_mode_change_clears_stale_replace(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        cfg = self._valid_config()
+        client, config_path = self._client(monkeypatch, tmp_path, cfg)
+
+        # First set inspiration (both booleans true)...
+        r1 = client.put(
+            "/api/config", json={"discovery": {"keyword_generation_mode": "inspiration"}}
+        )
+        assert r1.status_code == 200
+        assert cfg.discovery.inspiration_search_enabled is True
+        assert cfg.discovery.inspiration_replace_merged_keywords is True
+
+        # ...then legacy: replace MUST go back to false (no stale residue, R1 S2).
+        r2 = client.put("/api/config", json={"discovery": {"keyword_generation_mode": "legacy"}})
+        assert r2.status_code == 200
+        assert cfg.discovery.inspiration_search_enabled is False
+        assert cfg.discovery.inspiration_replace_merged_keywords is False
+        assert r2.json()["config"]["discovery"]["keyword_generation_mode"] == "legacy"
+
+    def test_put_config_illegal_mode_returns_422(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        cfg = self._valid_config()
+        client, _config_path = self._client(monkeypatch, tmp_path, cfg)
+
+        response = client.put(
+            "/api/config", json={"discovery": {"keyword_generation_mode": "garbage"}}
+        )
+
+        assert response.status_code == 422
+
+    def test_put_config_mode_wins_over_explicit_booleans(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        cfg = self._valid_config()
+        client, _config_path = self._client(monkeypatch, tmp_path, cfg)
+
+        # mode=legacy alongside an explicit inspiration_search_enabled=true → mode wins.
+        response = client.put(
+            "/api/config",
+            json={
+                "discovery": {
+                    "keyword_generation_mode": "legacy",
+                    "inspiration_search_enabled": True,
+                    "inspiration_replace_merged_keywords": True,
+                }
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        assert cfg.discovery.inspiration_search_enabled is False
+        assert cfg.discovery.inspiration_replace_merged_keywords is False
+
+
+# ---------------------------------------------------------------------------
+# Probe defer ("暂时忽略") — button + chat routing
+# ---------------------------------------------------------------------------
+
+
+def _make_defer_app(interest_defer=None, avoidance_defer=None, llm_reply="neutral"):
+    """Build a TestClient app whose speculators record defer calls."""
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+
+    from openbiliclaw.soul.speculator import DeferResult
+
+    class FakeLLM:
+        async def complete_with_core_memory(self, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(content=llm_reply)
+
+    class FakeDialogue:
+        async def respond(self, _message: str) -> str:
+            return "好的，我记住了。"
+
+    class FakeInterestSpeculator:
+        def __init__(self) -> None:
+            self.defer_calls: list[str] = []
+
+        def get_active_speculations(self) -> list[object]:
+            return []
+
+        def user_defer_speculation(self, domain: str) -> DeferResult:
+            self.defer_calls.append(domain)
+            return interest_defer or DeferResult(
+                outcome="deferred", deferred_until="2026-07-14T00:00:00", defer_count=1
+            )
+
+    class FakeAvoidanceSpeculator:
+        def __init__(self) -> None:
+            self.defer_calls: list[str] = []
+
+        def get_active_avoidances(self) -> list[object]:
+            return []
+
+        def user_defer_avoidance(self, domain: str) -> DeferResult:
+            self.defer_calls.append(domain)
+            return avoidance_defer or DeferResult(
+                outcome="deferred", deferred_until="2026-07-14T00:00:00", defer_count=1
+            )
+
+    class FakeSoulEngine:
+        def __init__(self, interest, avoidance) -> None:
+            self._speculator = interest
+            self._avoidance_speculator = avoidance
+
+    class FakeMemoryManager:
+        def load_cognition_updates(self) -> list[object]:
+            return []
+
+        def save_cognition_updates(self, _updates: list[object]) -> None:
+            return None
+
+    interest = FakeInterestSpeculator()
+    avoidance = FakeAvoidanceSpeculator()
+    app = create_app(
+        memory_manager=FakeMemoryManager(),
+        database=object(),
+        soul_engine=FakeSoulEngine(interest, avoidance),
+        dialogue=FakeDialogue(),
+        recommendation_engine=SimpleNamespace(_llm=FakeLLM()),
+    )
+    return TestClient(app), interest, avoidance
+
+
+def test_interest_probe_defer_button_returns_deferred() -> None:
+    client, interest, _ = _make_defer_app()
+    resp = client.post(
+        "/api/interest-probes/respond",
+        json={"domain": "桌游", "response": "defer"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["action"] == "deferred"
+    assert body["defer_count"] == 1
+    assert body["deferred_until"] == "2026-07-14T00:00:00"
+    assert interest.defer_calls == ["桌游"]
+
+
+def test_interest_probe_defer_button_exhausted() -> None:
+    from openbiliclaw.soul.speculator import DeferResult
+
+    client, _, _ = _make_defer_app(interest_defer=DeferResult(outcome="exhausted", defer_count=3))
+    resp = client.post(
+        "/api/interest-probes/respond",
+        json={"domain": "桌游", "response": "defer"},
+    )
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["action"] == "defer_exhausted"
+    assert body["defer_count"] == 3
+
+
+def test_interest_probe_defer_not_found() -> None:
+    from openbiliclaw.soul.speculator import DeferResult
+
+    client, _, _ = _make_defer_app(interest_defer=DeferResult(outcome="not_found"))
+    resp = client.post(
+        "/api/interest-probes/respond",
+        json={"domain": "不存在", "response": "defer"},
+    )
+    body = resp.json()
+    assert body["ok"] is False
+
+
+def test_avoidance_probe_defer_button_returns_deferred() -> None:
+    client, _, avoidance = _make_defer_app()
+    resp = client.post(
+        "/api/avoidance-probes/respond",
+        json={"domain": "标题党", "response": "defer"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["action"] == "deferred"
+    assert avoidance.defer_calls == ["标题党"]
+
+
+def test_probe_defer_validation_mentions_defer() -> None:
+    client, _, _ = _make_defer_app()
+    resp = client.post(
+        "/api/interest-probes/respond",
+        json={"domain": "桌游", "response": "bogus"},
+    )
+    assert resp.status_code == 422
+    assert "defer" in resp.json()["detail"]
+
+
+def test_interest_probe_chat_neutral_deferred_calls_defer() -> None:
+    # LLM returns neutral (falls through to keyword); keyword sees 「先放着吧」
+    # → neutral_deferred → defer method invoked.
+    client, interest, _ = _make_defer_app(llm_reply="neutral")
+    resp = client.post(
+        "/api/interest-probes/respond",
+        json={"domain": "桌游", "response": "chat", "message": "先放着吧"},
+    )
+    assert resp.status_code == 200
+    assert interest.defer_calls == ["桌游"]
+
+
+def test_defer_exhausted_not_in_handled_sets() -> None:
+    from openbiliclaw.soul.avoidance_speculator import HANDLED_AVOIDANCE_RESPONSES
+    from openbiliclaw.soul.speculator import HANDLED_PROBE_FEEDBACK_RESPONSES
+
+    for handled in (HANDLED_PROBE_FEEDBACK_RESPONSES, HANDLED_AVOIDANCE_RESPONSES):
+        assert "defer" not in handled
+        assert "defer_exhausted" not in handled
+
+
+def test_interest_pending_excludes_deferred_probes(tmp_path) -> None:
+    """The 刷新不弹回 guarantee: a deferred interest probe must NOT appear in
+    GET /api/interest-probes/pending, while active ones do."""
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+
+    from openbiliclaw.soul.speculator import (
+        SpeculativeInterest,
+        SpeculativeState,
+        save_speculative_state,
+    )
+
+    save_speculative_state(
+        tmp_path,
+        SpeculativeState(
+            active=[
+                SpeculativeInterest(domain="仍活跃", status="active"),
+                SpeculativeInterest(
+                    domain="已搁置",
+                    status="deferred",
+                    deferred_until="2099-01-01T00:00:00",
+                    defer_count=1,
+                ),
+            ]
+        ),
+    )
+
+    class FakeSoulEngine:
+        pass
+
+    app = create_app(soul_engine=FakeSoulEngine(), memory_manager=object(), database=object())
+    app.state.runtime_context.config = SimpleNamespace(data_path=tmp_path)
+    client = TestClient(app)
+
+    items = client.get("/api/interest-probes/pending").json()["items"]
+    domains = {i["domain"] for i in items}
+    assert "仍活跃" in domains
+    assert "已搁置" not in domains
+
+
+def test_reshuffle_endpoint_forwards_visible_card_exclusions() -> None:
+    from fastapi.testclient import TestClient
+
+    class FakeRuntimeController:
+        pool_available_count = 3
+        event_hub = None
+
+        def get_runtime_status(self) -> dict[str, object]:
+            return {
+                "initialized": True,
+                "pool_available_count": self.pool_available_count,
+                "pool_pending_count": 0,
+            }
+
+    class FakeSoulEngine:
+        async def get_profile(self) -> dict[str, object]:
+            return {"profile": "ok"}
+
+    class FakeRecommendationEngine:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, list[str] | None, int]] = []
+
+        async def reshuffle_recommendations(
+            self,
+            *,
+            profile: object,
+            limit: int = 10,
+            excluded_bvids: list[str] | None = None,
+        ) -> list[object]:
+            self.calls.append((profile, excluded_bvids, limit))
+            return []
+
+    engine = FakeRecommendationEngine()
+    app = create_app(
+        memory_manager=object(),
+        database=object(),
+        soul_engine=FakeSoulEngine(),
+        recommendation_engine=engine,
+        runtime_controller=FakeRuntimeController(),
+    )
+    client = TestClient(app)
+
+    no_body = client.post("/api/recommendations/reshuffle")
+    with_exclusions = client.post(
+        "/api/recommendations/reshuffle",
+        json={"excluded_bvids": ["BV1VISIBLE", " BV2VISIBLE ", ""]},
+    )
+
+    assert no_body.status_code == 200
+    assert with_exclusions.status_code == 200
+    assert engine.calls == [
+        ({"profile": "ok"}, [], 10),
+        ({"profile": "ok"}, ["BV1VISIBLE", "BV2VISIBLE"], 10),
+    ]

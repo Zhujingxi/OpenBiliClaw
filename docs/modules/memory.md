@@ -111,6 +111,8 @@
 | 插件聊天回合 | ✅ | SQLite `chat_turns` 持久化 side panel 主聊天、惊喜推荐内聊、兴趣猜测内聊和避雷探针内聊的 pending/completed/failed 状态 |
 | JSON 状态原子更新 | ✅ | `memory/json_state.py` 提供带进程内锁、跨进程文件锁和 `os.replace` 的 `update_json_state()`；`discovery_runtime.json` 的 probe 反馈历史、冷却 map、短期探索 buffer 等运行态通过 mutator 更新并合并旧快照，避免安装包常驻进程/后台任务并发保存时丢掉用户点击反馈 |
 
+> `MemoryManager.propagate_event()` 的职责边界是“落事实”：校验事件类型、补默认信号强度并写入 SQLite。初始化后的画像增量更新由 API/runtime 层显式调用 `signals_from_events()` → `ProfileUpdatePipeline.ingest_batch()`，不会在 memory 层隐式触发偏好、觉察、洞察或 Soul 刷新。
+
 ## 公开 API
 
 ### MemoryManager
@@ -132,6 +134,8 @@ await memory.propagate_event({
     "title": "视频标题",
     "metadata": {"bvid": "BV1xx"},  # 缺失 signal_strength 时会按事件类型补默认值
 })
+# 注意：propagate_event 只持久化事件。需要影响画像时，由调用方在事件落库后
+# 显式把事件转成 ProfileSignal 并送入 ProfileUpdatePipeline。
 
 # 查询事件
 events = memory.query_events(

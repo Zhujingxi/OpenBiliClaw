@@ -12,6 +12,7 @@ import {
   removeFromFavorite,
 } from "../api.js";
 import { getCoverImageAttrs, buildContentUrl } from "../view-models.js";
+import { openContentUrl } from "../app-launch.js";
 
 const PAGE_SIZE = 50;
 
@@ -85,7 +86,7 @@ function createSavedView(cfg) {
       const url = card.dataset.url;
       card.addEventListener("click", (e) => {
         if (e.target.closest(".saved-card-remove")) return;
-        if (url) window.open(url, "_blank");
+        if (url) openContentUrl(url);
       });
       const removeBtn = card.querySelector(".saved-card-remove");
       removeBtn.addEventListener("click", async (e) => {

@@ -820,10 +820,12 @@ class MemoryManager:
     # --- Cross-layer operations ---
 
     async def propagate_event(self, event: dict[str, Any]) -> None:
-        """Propagate a new event upward through the memory layers.
+        """Record a behavioral event in the SQLite event layer.
 
-        This is the main entry point for new behavioral data. The event
-        is stored in the Event layer and may trigger updates in higher layers.
+        This method only persists the event row and enriches missing event
+        metadata. Profile updates are explicit in the API/runtime layer, which
+        converts persisted events into signals for ``ProfileUpdatePipeline``
+        when the caller's contract requires it.
 
         Args:
             event: Behavioral event data.
@@ -853,10 +855,7 @@ class MemoryManager:
             context=event.get("context", ""),
             metadata=metadata,
         )
-        # TODO: Check if preference layer needs updating
-        # TODO: Check if this triggers awareness observations
-        # TODO: Check for significant events that bypass to soul layer
-        logger.debug("Event propagated: %s", event_type)
+        logger.debug("Event persisted: %s", event_type)
 
     def query_events(
         self,

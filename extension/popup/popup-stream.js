@@ -1,13 +1,20 @@
 import { getBackendBaseUrl } from "./popup-backend-config.js";
+import { readPopupSessionToken } from "./popup-device-auth.js";
 
 const DEFAULT_BACKEND_URL = "http://127.0.0.1:8420/api";
 
-export function createRuntimeStreamUrl(backendUrl = DEFAULT_BACKEND_URL) {
+export function createRuntimeStreamUrl(backendUrl = DEFAULT_BACKEND_URL, token = null) {
   const base = backendUrl.replace(/\/$/, "");
+  let wsUrl;
   if (base.startsWith("https://")) {
-    return `${base.replace("https://", "wss://")}/runtime-stream`;
+    wsUrl = `${base.replace("https://", "wss://")}/runtime-stream`;
+  } else {
+    wsUrl = `${base.replace("http://", "ws://")}/runtime-stream`;
   }
-  return `${base.replace("http://", "ws://")}/runtime-stream`;
+  if (token) {
+    wsUrl += `?token=${encodeURIComponent(token)}`;
+  }
+  return wsUrl;
 }
 
 export function createRuntimeStreamClient({
@@ -17,6 +24,7 @@ export function createRuntimeStreamClient({
   // the new origin without a full popup reload.
   backendUrl = null,
   resolveBackendUrl = getBackendBaseUrl,
+  resolveSessionToken = readPopupSessionToken,
   WebSocketImpl = globalThis.WebSocket,
   reconnectDelayMs = 1000,
   onEvent = () => {},
@@ -81,8 +89,9 @@ export function createRuntimeStreamClient({
         scheduleReconnect();
         return;
       }
+      const token = await resolveSessionToken();
       if (stopped) return;
-      attachSocket(new WebSocketImpl(createRuntimeStreamUrl(resolved)));
+      attachSocket(new WebSocketImpl(createRuntimeStreamUrl(resolved, token)));
     })();
   }
 

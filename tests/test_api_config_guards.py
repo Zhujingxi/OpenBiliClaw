@@ -138,11 +138,15 @@ def test_put_config_round_trips_openai_auth_mode(monkeypatch, tmp_path) -> None:
 def test_put_config_round_trips_explicit_fallback_providers(monkeypatch, tmp_path) -> None:
     client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
 
+    # Chat fallback must be a provider that would actually register — v0.3.156+
+    # rejects a dead fallback (claude has a real key in _base_config; a keyless
+    # gemini fallback is now a blocking 400 by design). Embedding fallback keeps
+    # ollama (embedding side has no api_key requirement).
     response = client.put(
         "/api/config",
         json={
             "llm": {
-                "fallback_provider": "gemini",
+                "fallback_provider": "claude",
                 "embedding": {"fallback_provider": "ollama"},
             }
         },
@@ -150,13 +154,13 @@ def test_put_config_round_trips_explicit_fallback_providers(monkeypatch, tmp_pat
 
     assert response.status_code == 200
     loaded = load_config_from_path(config_path)
-    assert loaded.llm.fallback_provider == "gemini"
+    assert loaded.llm.fallback_provider == "claude"
     assert loaded.llm.embedding.fallback_provider == "ollama"
 
     get_response = client.get("/api/config")
     assert get_response.status_code == 200
     body = get_response.json()
-    assert body["llm"]["fallback_provider"] == "gemini"
+    assert body["llm"]["fallback_provider"] == "claude"
     assert body["llm"]["embedding"]["fallback_provider"] == "ollama"
 
 

@@ -34,6 +34,10 @@ class AuthStatus:
     username: str = ""
     user_id: int = 0
     message: str = ""
+    # True when validation failed at the transport layer (proxy, risk
+    # control, timeout, DNS) rather than because the cookie itself is
+    # invalid — callers use this to give network-specific guidance.
+    network_error: bool = False
 
 
 class AuthManager:
@@ -49,10 +53,12 @@ class AuthManager:
         data_dir: Path,
         *,
         api_client_factory: Callable[[str], SupportsNavClient] | None = None,
+        proxy: str | None = None,
     ) -> None:
         self._data_dir = data_dir
         self._cookie_path = data_dir / "bilibili_cookie.json"
         self._cookie: str = ""
+        self._proxy = proxy or None
         self._api_client_factory = api_client_factory or self._default_api_client_factory
 
     @property
@@ -103,9 +109,22 @@ class AuthManager:
                 message="未提供有效的 Cookie。",
             )
 
+        from .api import BilibiliAuthExpiredError
+
         client = self._api_client_factory(normalized_cookie)
         try:
             nav = await client.get_nav_info()
+        except BilibiliAuthExpiredError as exc:
+            # nav answered with -101: the request went through fine, the
+            # cookie itself is expired — must NOT be flagged network_error
+            # or the UI would send the user chasing proxy problems.
+            logger.warning("Cookie validation failed: %s", exc)
+            return AuthStatus(
+                has_cookie=True,
+                authenticated=False,
+                cookie_path=self._cookie_path,
+                message="当前 Cookie 未登录或已失效。",
+            )
         except Exception as exc:
             logger.warning("Cookie validation failed: %s", exc)
             return AuthStatus(
@@ -113,6 +132,7 @@ class AuthManager:
                 authenticated=False,
                 cookie_path=self._cookie_path,
                 message=str(exc),
+                network_error=True,
             )
         finally:
             await client.close()
@@ -159,12 +179,11 @@ class AuthManager:
             self._cookie_path.unlink()
         logger.info("Cookie cleared.")
 
-    @staticmethod
-    def _default_api_client_factory(cookie: str) -> SupportsNavClient:
+    def _default_api_client_factory(self, cookie: str) -> SupportsNavClient:
         """Create the default Bilibili API client."""
         from .api import BilibiliAPIClient
 
-        return BilibiliAPIClient(cookie=cookie)
+        return BilibiliAPIClient(cookie=cookie, proxy=self._proxy)
 
 
 def resolve_runtime_cookie(*, data_dir: Path, configured_cookie: str) -> str:

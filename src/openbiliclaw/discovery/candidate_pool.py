@@ -51,6 +51,8 @@ class DiscoveryCandidateWrite:
     up_name: str = ""
     up_mid: int = 0
     description: str = ""
+    published_at: str = ""
+    published_label: str = ""
     cover_url: str = ""
     duration: int = 0
     view_count: int = 0
@@ -181,6 +183,8 @@ def discovered_content_to_candidate_write(
         up_name=item.up_name or item.author_name,
         up_mid=item.up_mid,
         description=item.description,
+        published_at=item.published_at,
+        published_label=item.published_label,
         cover_url=item.cover_url,
         duration=item.duration,
         view_count=item.view_count,
@@ -259,6 +263,8 @@ def row_to_discovered_content(row: dict[str, Any]) -> DiscoveredContent:
         style_key=str(row.get("style_key") or ""),
         franchise_key=str(row.get("franchise_key") or ""),
         description=str(row.get("description") or ""),
+        published_at=str(row.get("published_at") or ""),
+        published_label=str(row.get("published_label") or ""),
         source_strategy=str(row.get("source_strategy") or ""),
         relevance_score=float(row.get("relevance_score") or 0.0),
         relevance_reason=str(row.get("relevance_reason") or ""),

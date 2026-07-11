@@ -8,7 +8,16 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from openbiliclaw.llm.base import LLMProviderError, LLMRateLimitError, LLMResponse
+from openbiliclaw.llm.base import (
+    LLMFallbackError,
+    LLMProviderError,
+    LLMRateLimitError,
+    LLMResponse,
+    LLMResponseError,
+    LLMTimeoutError,
+    classify_llm_unavailability,
+    describe_llm_failure,
+)
 from openbiliclaw.llm.service import (
     LLMProviderExecutionError,
     LLMResponseContentError,
@@ -112,6 +121,132 @@ def test_is_llm_rate_limit_error_detects_wrapped_provider_backoff() -> None:
         LLMProviderExecutionError("Provider deepseek failed: HTTP 402: Insufficient Balance")
     )
     assert not is_llm_rate_limit_error(ValueError("Expected scored JSON array"))
+
+
+def test_classify_llm_unavailability_rate_limited_through_fallback_chain() -> None:
+    with pytest.raises(LLMFallbackError) as exc_info:
+        try:
+            try:
+                raise RuntimeError("openai RateLimitError: HTTP 429")
+            except RuntimeError as base_err:
+                raise LLMRateLimitError("rate limit; cooling down") from base_err
+        except LLMRateLimitError as rl_err:
+            raise LLMFallbackError(
+                "All providers failed (deepseek, openai). Last error: rate limit"
+            ) from rl_err
+    assert classify_llm_unavailability(exc_info.value) == "rate_limited"
+
+
+def test_classify_llm_unavailability_no_provider_message() -> None:
+    assert (
+        classify_llm_unavailability(
+            LLMFallbackError("No provider was available to process the request.")
+        )
+        == "no_provider"
+    )
+    # Wrapped in the service-layer execution error the way production does.
+    try:
+        try:
+            raise LLMFallbackError("No provider was available to process the request.")
+        except LLMFallbackError as inner:
+            raise LLMProviderExecutionError(str(inner)) from inner
+    except LLMProviderExecutionError as wrapped:
+        assert classify_llm_unavailability(wrapped) == "no_provider"
+
+
+def test_classify_llm_unavailability_returns_none_for_unrelated_error() -> None:
+    assert classify_llm_unavailability(ValueError("Expected scored JSON array")) is None
+
+
+def test_classify_llm_unavailability_rate_limit_wins_over_no_provider() -> None:
+    with pytest.raises(LLMRateLimitError) as exc_info:
+        try:
+            raise LLMFallbackError("No provider was available to process the request.")
+        except LLMFallbackError as np_err:
+            raise LLMRateLimitError("rate limit hit") from np_err
+    assert classify_llm_unavailability(exc_info.value) == "rate_limited"
+
+
+def test_describe_llm_failure_content_moderation_500() -> None:
+    # A Chinese compat gateway returns a compliance refusal *as a 500*; the
+    # cause chain carries the 法律法规 text. Guided init must show "switch model"
+    # advice, not the raw traceback fragment.
+    try:
+        try:
+            raise RuntimeError(
+                "Error code: 500 - 非常抱歉，根据相关法律法规，"
+                "我们无法提供关于以下内容的答案 (code 10013)"
+            )
+        except RuntimeError as upstream:
+            raise LLMProviderError("openai_compatible request failed") from upstream
+    except LLMProviderError as exc:
+        reason = describe_llm_failure(exc)
+    assert reason is not None
+    assert "内容合规" in reason
+
+
+def test_describe_llm_failure_no_provider() -> None:
+    reason = describe_llm_failure(
+        LLMFallbackError("No provider was available to process the request.")
+    )
+    assert reason is not None
+    assert "没有可用的 AI 服务" in reason
+
+
+def test_describe_llm_failure_rate_limit_wins_over_no_provider() -> None:
+    try:
+        try:
+            raise LLMFallbackError("No provider was available to process the request.")
+        except LLMFallbackError as np_err:
+            raise LLMRateLimitError("rate limit hit") from np_err
+    except LLMRateLimitError as exc:
+        reason = describe_llm_failure(exc)
+    assert reason is not None
+    assert "限流" in reason
+
+
+def test_describe_llm_failure_authentication_chain() -> None:
+    try:
+        try:
+            raise RuntimeError("HTTP 401 unauthorized: invalid api key")
+        except RuntimeError as upstream:
+            raise LLMProviderError("authentication failed") from upstream
+    except LLMProviderError as exc:
+        reason = describe_llm_failure(exc)
+    assert reason is not None
+    assert "鉴权失败" in reason
+    assert "API key" in reason
+
+
+def test_describe_llm_failure_insufficient_quota() -> None:
+    reason = describe_llm_failure(LLMProviderError("upstream error: insufficient_quota"))
+    assert reason is not None
+    assert "额度用尽或被限流" in reason
+
+
+def test_describe_llm_failure_http_429() -> None:
+    reason = describe_llm_failure(LLMProviderError("upstream returned HTTP 429"))
+    assert reason is not None
+    assert "额度用尽或被限流" in reason
+
+
+def test_describe_llm_failure_timeout_and_empty_response() -> None:
+    assert "超时" in (describe_llm_failure(LLMTimeoutError("request timed out")) or "")
+    assert "空响应" in (describe_llm_failure(LLMResponseError("empty completion")) or "")
+
+
+def test_describe_llm_failure_returns_none_for_unrelated_error() -> None:
+    # A non-LLM failure (e.g. bad history data) must not be mislabeled as an
+    # LLM outage — callers fall back to their own generic message.
+    assert describe_llm_failure(ValueError("history parse failed")) is None
+
+
+def test_classify_llm_unavailability_is_cycle_safe() -> None:
+    first = ValueError("boom a")
+    second = ValueError("boom b")
+    first.__cause__ = second
+    second.__cause__ = first  # deliberate cycle
+    assert classify_llm_unavailability(first) is None
 
 
 @pytest.mark.asyncio
@@ -278,6 +413,8 @@ def test_resolve_priority_longest_prefix_wins() -> None:
 def test_route_bucket_for_caller_covers_actual_callers() -> None:
     assert LLMService._route_bucket_for_caller("soul.profile_builder") == "soul"
     assert LLMService._route_bucket_for_caller("discovery.search.query") == "discovery"
+    assert LLMService._route_bucket_for_caller("discovery.keyword_planner") == "discovery"
+    assert LLMService._route_bucket_for_caller("discovery.keyword_inspiration") == "discovery"
     assert LLMService._route_bucket_for_caller("discovery.evaluate_batch") == "evaluation"
     assert LLMService._route_bucket_for_caller("recommendation.write_batch") == "recommendation"
     assert (

@@ -6,10 +6,11 @@ SchedulerConfig.enabled is the authoritative gate for background LLM loops.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -17,15 +18,47 @@ from urllib.parse import urlparse
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+logger = logging.getLogger(__name__)
+
+# A per-day task-count cap in this range almost always means the user mistook
+# ``daily_*_budget`` for an on/off toggle (typed ``1`` to "enable" a source,
+# which actually throttles it to one task per day). ``0`` = unlimited.
+_SUSPICIOUS_BUDGET_LOW = 1
+_SUSPICIOUS_BUDGET_HIGH = 4
+# Guards the once-per-process warning so repeated config reloads don't spam.
+_warned_budget_keys: set[str] = set()
+
 # Default config search paths
 _CONFIG_FILENAMES = ["config.toml", "config.local.toml"]
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _PROJECT_ROOT_ENV = "OPENBILICLAW_PROJECT_ROOT"
 _SUPPORTED_AUTH_METHODS = {"cookie", "qrcode", "none"}
 _SUPPORTED_OPENAI_AUTH_MODES = {"", "api_key", "codex_oauth"}
+_SUPPORTED_OPENAI_API_FLAVORS = {"", "chat_completions", "responses"}
+# Keep in sync with llm/registry.py `_EMBEDDING_CAPABLE_PROVIDERS` (config
+# cannot import the registry — cycle). An unknown name silently disables the
+# embedding service, so saves are validated as blocking (field 2026-07-05:
+# browser page-translation rewrote '奥拉玛' into config via value-less
+# <option> elements).
+_SUPPORTED_EMBEDDING_PROVIDERS = {"", "ollama", "openai", "gemini", "openai_compatible"}
+# Keep in sync with llm/registry.py `build_llm_registry` provider_specs
+# (config cannot import the registry — cycle). Used to validate
+# `[llm].fallback_provider`: an unknown name is silently dropped by the
+# chat fallback chain (`base.py:_fallback_order`), so saves are validated
+# as blocking.
+_SUPPORTED_CHAT_PROVIDERS = {
+    "openai",
+    "claude",
+    "gemini",
+    "deepseek",
+    "ollama",
+    "openrouter",
+    "openai_compatible",
+}
 _MIN_POOL_TARGET_COUNT = 1
 _MAX_POOL_TARGET_COUNT = 600
 _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS = 90
+_DEFAULT_EXTENSION_TOKEN_TTL_HOURS = 24
 _DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS = 60
 _DEFAULT_SIGNAL_EVENT_THRESHOLD = 6
 _DEFAULT_TRENDING_REFRESH_HOURS = 3
@@ -49,6 +82,25 @@ _DEFAULT_HISTORY_WINDOW_HOURS = 48
 _DEFAULT_CLAIM_LEASE_MINUTES = 10
 _DEFAULT_PLANNER_POLL_SECONDS = 120
 _DEFAULT_PLAN_TTL_HOURS = 12
+# Phase-2 config collapse: these constants are the ``medium`` breadth tier
+# (the pre-collapse per-knob defaults, item-identical — a table-driven test
+# guards the equality so upgrading is zero behavior drift).
+_DEFAULT_INSPIRATION_ASPECT_WINDOW_SIZE = 32
+_DEFAULT_INSPIRATION_INTEREST_SAMPLE_SIZE = 6
+_DEFAULT_INSPIRATION_MAX_PROBE_SEARCHES_PER_STAGE = 12
+_DEFAULT_INSPIRATION_PLATFORMS_PER_PROBE = 2
+_DEFAULT_INSPIRATION_RISKCONTROLLED_PROBE_BUDGET = 4
+_DEFAULT_INSPIRATION_SEARCH_PAGES_PER_PROBE = 1
+_DEFAULT_INSPIRATION_SEARCH_RESULTS_PER_QUERY = 5
+_DEFAULT_INSPIRATION_MAX_SEEDS_PER_ASPECT = 3
+_DEFAULT_INSPIRATION_MAX_KEYWORDS_PER_PLATFORM = 12
+_DEFAULT_INSPIRATION_BREADTH = "high"
+_DEFAULT_INSPIRATION_SEARCH_BACKENDS: tuple[str, ...] = (
+    "local_cache",
+    "platform_sources",
+    "exa",
+    "you",
+)
 _DEFAULT_ADMISSION_MIN_SCORE = 0.60
 _DEFAULT_MULTIMODAL_BATCH_SIZE = 8
 _DEFAULT_MULTIMODAL_IMAGE_MAX_PX = 384
@@ -109,6 +161,110 @@ class ConfigDiagnostics:
     issues: list[ConfigIssue] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class InspirationBreadthParams:
+    """Effective keyword-inspiration knobs derived from ``inspiration_breadth``.
+
+    Phase-2 config collapse (13 → 4): the ten per-knob ``inspiration_*`` config
+    fields were removed; consumers read this derived view instead. CLI one-shot
+    overrides (``--limit`` / ``--interest-limit``) are applied on a copy of this
+    object and injected via planner construction — never through config fields.
+    """
+
+    aspect_window_size: int
+    interest_sample_size: int
+    max_probe_searches_per_stage: int
+    platforms_per_probe: int
+    riskcontrolled_probe_budget: int
+    search_pages_per_probe: int
+    search_results_per_query: int
+    max_seeds_per_aspect: int
+    max_keywords_per_platform: int
+
+
+_INSPIRATION_BREADTH_TIERS: dict[str, InspirationBreadthParams] = {
+    "low": InspirationBreadthParams(
+        aspect_window_size=16,
+        interest_sample_size=3,
+        max_probe_searches_per_stage=6,
+        platforms_per_probe=1,
+        riskcontrolled_probe_budget=2,
+        search_pages_per_probe=1,
+        search_results_per_query=3,
+        max_seeds_per_aspect=2,
+        max_keywords_per_platform=8,
+    ),
+    "medium": InspirationBreadthParams(
+        aspect_window_size=_DEFAULT_INSPIRATION_ASPECT_WINDOW_SIZE,
+        interest_sample_size=_DEFAULT_INSPIRATION_INTEREST_SAMPLE_SIZE,
+        max_probe_searches_per_stage=_DEFAULT_INSPIRATION_MAX_PROBE_SEARCHES_PER_STAGE,
+        platforms_per_probe=_DEFAULT_INSPIRATION_PLATFORMS_PER_PROBE,
+        riskcontrolled_probe_budget=_DEFAULT_INSPIRATION_RISKCONTROLLED_PROBE_BUDGET,
+        search_pages_per_probe=_DEFAULT_INSPIRATION_SEARCH_PAGES_PER_PROBE,
+        search_results_per_query=_DEFAULT_INSPIRATION_SEARCH_RESULTS_PER_QUERY,
+        max_seeds_per_aspect=_DEFAULT_INSPIRATION_MAX_SEEDS_PER_ASPECT,
+        max_keywords_per_platform=_DEFAULT_INSPIRATION_MAX_KEYWORDS_PER_PLATFORM,
+    ),
+    "high": InspirationBreadthParams(
+        aspect_window_size=48,
+        interest_sample_size=8,
+        max_probe_searches_per_stage=20,
+        platforms_per_probe=3,
+        riskcontrolled_probe_budget=8,
+        search_pages_per_probe=2,
+        search_results_per_query=8,
+        max_seeds_per_aspect=5,
+        max_keywords_per_platform=16,
+    ),
+}
+
+# The ten collapsed ``[discovery]`` keys (hard-removed, no compat shim). A
+# raw-config scan surfaces a removal notice through the diagnostics channel.
+_REMOVED_INSPIRATION_DISCOVERY_KEYS: tuple[str, ...] = (
+    "inspiration_aspect_window_size",
+    "inspiration_interest_sample_size",
+    "inspiration_max_probe_searches_per_stage",
+    "inspiration_platforms_per_probe",
+    "inspiration_riskcontrolled_probe_budget",
+    "inspiration_search_pages_per_probe",
+    "inspiration_search_results_per_query",
+    "inspiration_max_seeds_per_aspect",
+    "inspiration_max_expansions_per_seed",
+    "inspiration_max_keywords_per_platform",
+)
+
+
+def derive_inspiration_breadth_params(breadth: object) -> InspirationBreadthParams:
+    """Return the effective inspiration knobs for a breadth tier.
+
+    Raises :class:`ConfigError` for anything but ``low`` / ``medium`` / ``high``.
+    """
+
+    tier = str(breadth or "").strip().lower()
+    params = _INSPIRATION_BREADTH_TIERS.get(tier)
+    if params is None:
+        raise ConfigError(
+            f"discovery.inspiration_breadth 必须是 low / medium / high，收到 {breadth!r}。"
+        )
+    return params
+
+
+def _removed_discovery_key_issues(raw: dict[str, Any]) -> list[ConfigIssue]:
+    discovery_raw = raw.get("discovery")
+    if not isinstance(discovery_raw, dict):
+        return []
+    return [
+        ConfigIssue(
+            field=f"discovery.{key}",
+            message=(
+                f"`{key}` 已移除，值被忽略，请改用 `inspiration_breadth`（low / medium / high）。"
+            ),
+        )
+        for key in _REMOVED_INSPIRATION_DISCOVERY_KEYS
+        if key in discovery_raw
+    ]
+
+
 @dataclass
 class LLMProviderConfig:
     """Configuration for a single LLM provider."""
@@ -117,6 +273,12 @@ class LLMProviderConfig:
     model: str = ""
     base_url: str = ""
     auth_mode: str = ""
+    # OpenAI-protocol endpoint selector: "" / "chat_completions" →
+    # /v1/chat/completions (default); "responses" → /v1/responses. Some
+    # third-party gateways expose GPT models only via the Responses API
+    # (issue #72). Honored by [llm.openai] and [llm.openai_compatible];
+    # ignored by all other providers.
+    api_flavor: str = ""
     http_referer: str = ""
     x_title: str = ""
     # DeepSeek v4 thinking-mode control. "" disables; "high" / "max" enable
@@ -177,7 +339,9 @@ class LLMConfig:
     default_provider: str = "deepseek"
     concurrency: int = DEFAULT_LLM_CONCURRENCY
     timeout: int = _DEFAULT_LLM_TIMEOUT
-    fallback_enabled: bool = False
+    # Non-empty = chat fallback on. There is no separate enable flag: the
+    # legacy ``fallback_enabled`` bool was never consulted by the fallback
+    # chain and has been removed (stale keys in old config.toml are ignored).
     fallback_provider: str = ""
     openai: LLMProviderConfig = field(default_factory=LLMProviderConfig)
     claude: LLMProviderConfig = field(default_factory=LLMProviderConfig)
@@ -209,6 +373,11 @@ class BilibiliConfig:
 
     auth_method: str = "cookie"
     cookie: str = ""
+    # Explicit proxy for Bilibili requests only. Empty (default) means
+    # direct connection: the client ignores env/system proxies because
+    # they routinely trip B站 risk control (valid cookie shows as "not
+    # logged in"). Set only if your network cannot reach B站 directly.
+    proxy: str = ""
     browser_executable: str = ""
     browser_headed: bool = False
 
@@ -307,6 +476,18 @@ class DiscoveryConfig:
     # Plan staleness backstop: pending keywords older than this expire even if
     # the profile digest hasn't changed.
     plan_ttl_hours: int = _DEFAULT_PLAN_TTL_HOURS
+    # Optional search-inspired query brainstorming stage. Default off: when
+    # enabled, the keyword planner may use an injected search provider to mine
+    # adjacent concepts and insert metadata-bearing keywords.
+    inspiration_search_enabled: bool = False
+    inspiration_search_backends: tuple[str, ...] = _DEFAULT_INSPIRATION_SEARCH_BACKENDS
+    # Optional experiment mode: when true and inspiration search is available,
+    # due platforms skip the legacy merged keyword planner and are filled only
+    # through the search-inspired flow.
+    inspiration_replace_merged_keywords: bool = False
+    # Breadth tier (low / medium / high) replacing the ten per-knob fields —
+    # effective values come from ``derive_inspiration_breadth_params``.
+    inspiration_breadth: str = _DEFAULT_INSPIRATION_BREADTH
     # Unified recommendation-pool admission floor. Source/provenance metadata
     # must never bypass this; explicit strategy thresholds live on candidates.
     admission_min_score: float = _DEFAULT_ADMISSION_MIN_SCORE
@@ -568,6 +749,9 @@ class ApiAuthConfig:
     trust_loopback: bool = True
     trusted_proxies: list[str] = field(default_factory=list)
     allowed_bearer_origins: list[str] = field(default_factory=list)
+    extension_access_enabled: bool = False
+    extension_access_keys: list[str] = field(default_factory=list)
+    extension_token_ttl_hours: int = _DEFAULT_EXTENSION_TOKEN_TTL_HOURS
 
 
 @dataclass
@@ -706,6 +890,42 @@ def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+def _warn_suspicious_budgets(sources: SourcesConfig) -> None:
+    """Warn once per process for per-source budgets that look like misused toggles.
+
+    ``daily_*_budget`` is a per-UTC-day task-count cap, not an on/off switch; ``0``
+    means unlimited. A value of 1–4 almost always means the user typed ``1`` to
+    "enable" a source and unknowingly throttled it to a single task per day.
+    """
+    source_configs: list[tuple[str, Any]] = [
+        ("xiaohongshu", sources.xiaohongshu),
+        ("douyin", sources.douyin),
+        ("youtube", sources.youtube),
+        ("twitter", sources.twitter),
+        ("zhihu", sources.zhihu),
+        ("reddit", sources.reddit),
+    ]
+    for source_name, source_config in source_configs:
+        for source_field in fields(source_config):
+            name = source_field.name
+            if not (name.startswith("daily_") and name.endswith("_budget")):
+                continue
+            value = getattr(source_config, name)
+            if not isinstance(value, int) or isinstance(value, bool):
+                continue
+            if not (_SUSPICIOUS_BUDGET_LOW <= value <= _SUSPICIOUS_BUDGET_HIGH):
+                continue
+            key = f"sources.{source_name}.{name}"
+            if key in _warned_budget_keys:
+                continue
+            _warned_budget_keys.add(key)
+            logger.warning(
+                "config: %s=%d — 这是每日任务次数上限,不是开关;想不限次数请设为 0",
+                key,
+                value,
+            )
+
+
 def _build_config(raw: dict[str, Any]) -> Config:
     """Build a Config dataclass from raw dict."""
     general = raw.get("general", {})
@@ -728,7 +948,6 @@ def _build_config(raw: dict[str, Any]) -> Config:
         default_provider=llm_raw.get("default_provider", "deepseek"),
         concurrency=_normalize_llm_concurrency(llm_raw.get("concurrency")),
         timeout=_normalize_llm_timeout(llm_raw.get("timeout")),
-        fallback_enabled=bool(llm_raw.get("fallback_enabled", False)),
         fallback_provider=llm_raw.get("fallback_provider", ""),
         openai=LLMProviderConfig(**llm_raw.get("openai", {})),
         claude=LLMProviderConfig(**llm_raw.get("claude", {})),
@@ -777,6 +996,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
     bilibili = BilibiliConfig(
         auth_method=bili_raw.get("auth_method", "cookie"),
         cookie=bili_raw.get("cookie", ""),
+        proxy=bili_raw.get("proxy", ""),
         browser_executable=browser_raw.get("executable", ""),
         browser_headed=browser_raw.get("headed", False),
     )
@@ -865,6 +1085,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
             min_interval_minutes=max(0, int(reddit_raw.get("min_interval_minutes", 60))),
         ),
     )
+    _warn_suspicious_budgets(sources)
 
     soul_raw = raw.get("soul", {}) if isinstance(raw.get("soul"), dict) else {}
     soul_preference_raw = (
@@ -1061,6 +1282,20 @@ def _build_discovery(discovery_raw: dict[str, Any]) -> DiscoveryConfig:
             default=_DEFAULT_PLAN_TTL_HOURS,
             min_value=1,
         ),
+        inspiration_search_enabled=_coerce_bool(
+            discovery_raw.get("inspiration_search_enabled"),
+            default=False,
+        ),
+        inspiration_search_backends=_normalize_inspiration_search_backends(
+            discovery_raw.get("inspiration_search_backends")
+        ),
+        inspiration_replace_merged_keywords=_coerce_bool(
+            discovery_raw.get("inspiration_replace_merged_keywords"),
+            default=False,
+        ),
+        inspiration_breadth=_normalize_inspiration_breadth(
+            discovery_raw.get("inspiration_breadth")
+        ),
         admission_min_score=_normalize_probability(
             discovery_raw.get("admission_min_score"),
             default=_DEFAULT_ADMISSION_MIN_SCORE,
@@ -1148,6 +1383,19 @@ def _coerce_ttl_hours(value: object) -> int:
     return 0
 
 
+def _coerce_extension_token_ttl_hours(value: object) -> int:
+    """Normalize extension token TTL to the supported 1..168 hour range."""
+    if isinstance(value, bool):
+        return _DEFAULT_EXTENSION_TOKEN_TTL_HOURS
+    try:
+        ttl = int(value) if isinstance(value, int | str) else -1
+    except ValueError:
+        return _DEFAULT_EXTENSION_TOKEN_TTL_HOURS
+    if 1 <= ttl <= 168:
+        return ttl
+    return _DEFAULT_EXTENSION_TOKEN_TTL_HOURS
+
+
 def config_local_auth_keys() -> set[str]:
     """``[api.auth]`` keys pinned in ``config.local.toml`` (the override layer that
     ``load_config`` merges OVER ``config.toml``, local winning).
@@ -1198,6 +1446,38 @@ def _coerce_str_list(value: object) -> list[str]:
     if isinstance(value, (list, tuple)):
         return [str(item).strip() for item in value if str(item).strip()]
     return []
+
+
+def _normalize_inspiration_search_backends(value: object) -> tuple[str, ...]:
+    """Normalize inspiration search backend names for the mcporter provider chain."""
+
+    raw_values = (
+        list(_DEFAULT_INSPIRATION_SEARCH_BACKENDS) if value is None else _coerce_str_list(value)
+    )
+    aliases = {
+        "exa": "exa",
+        "local": "local_cache",
+        "cache": "local_cache",
+        "local_cache": "local_cache",
+        "local-cache": "local_cache",
+        "platform-source": "platform_sources",
+        "platform_sources": "platform_sources",
+        "platform": "platform_sources",
+        "you": "you",
+        "you.com": "you",
+        "youcom": "you",
+        "you-search": "you",
+        "you_search": "you",
+    }
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        backend = aliases.get(raw.strip().lower())
+        if backend is None or backend in seen:
+            continue
+        normalized.append(backend)
+        seen.add(backend)
+    return tuple(normalized or _DEFAULT_INSPIRATION_SEARCH_BACKENDS)
 
 
 # Single source of truth: every env var ``_build_api_auth`` honors for
@@ -1268,6 +1548,11 @@ def _build_api_auth(api_raw: dict[str, Any]) -> ApiAuthConfig:
         ),
         trusted_proxies=_coerce_str_list(auth_raw.get("trusted_proxies", [])),
         allowed_bearer_origins=_coerce_str_list(auth_raw.get("allowed_bearer_origins", [])),
+        extension_access_enabled=_coerce_bool(auth_raw.get("extension_access_enabled", False)),
+        extension_access_keys=_coerce_str_list(auth_raw.get("extension_access_keys", [])),
+        extension_token_ttl_hours=_coerce_extension_token_ttl_hours(
+            auth_raw.get("extension_token_ttl_hours", _DEFAULT_EXTENSION_TOKEN_TTL_HOURS)
+        ),
     )
 
 
@@ -1437,6 +1722,15 @@ def _normalize_scheduler_int(
     return normalized
 
 
+def _normalize_inspiration_breadth(value: object) -> str:
+    """Validate the breadth tier; unset → default, invalid → ConfigError."""
+    if value is None:
+        return _DEFAULT_INSPIRATION_BREADTH
+    tier = str(value).strip().lower()
+    derive_inspiration_breadth_params(tier)  # raises ConfigError when invalid
+    return tier
+
+
 def _normalize_auto_update_allowed_remotes(value: object) -> list[str]:
     """Normalize auto-update remote allowlist into non-empty string URLs."""
     if not isinstance(value, list):
@@ -1470,6 +1764,127 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
             )
         )
 
+    # Before the default-provider early return: embedding validation must run
+    # even when default_provider itself is broken.
+    for emb_field, emb_value in (
+        ("provider", config.llm.embedding.provider),
+        ("fallback_provider", config.llm.embedding.fallback_provider),
+    ):
+        normalized = str(emb_value or "").strip().lower()
+        if normalized not in _SUPPORTED_EMBEDDING_PROVIDERS:
+            supported = '"", "ollama", "openai", "gemini", "openai_compatible"'
+            issues.append(
+                ConfigIssue(
+                    field=f"llm.embedding.{emb_field}",
+                    message=(
+                        f"不支持的 embedding {emb_field}: `{emb_value}`。仅支持: {supported}。"
+                        "如果这个值看起来像被翻译过（例如「奥拉玛」），"
+                        "请关闭浏览器的网页翻译后到设置页重新选择。"
+                    ),
+                    severity="blocking",
+                )
+            )
+
+    # `[llm].fallback_provider` dead-state validation. The chat fallback
+    # chain (llm/base.py `_fallback_order`) deliberately drops an unusable
+    # fallback WITHOUT any runtime signal — surfacing the dead state here
+    # at save/load time is the only user-visible diagnosis. Runs before the
+    # default-provider early return so a broken default provider does not
+    # hide fallback problems.
+    fallback_name = str(config.llm.fallback_provider or "").strip().lower()
+    if fallback_name:
+        default_name = str(config.llm.default_provider or "").strip().lower()
+        if fallback_name not in _SUPPORTED_CHAT_PROVIDERS:
+            supported = ", ".join(sorted(_SUPPORTED_CHAT_PROVIDERS))
+            issues.append(
+                ConfigIssue(
+                    field="llm.fallback_provider",
+                    message=(
+                        f"不支持的备选 provider: `{config.llm.fallback_provider}`。"
+                        f"仅支持: {supported}。"
+                        "如果这个值看起来像被翻译过（例如「奥拉玛」），"
+                        "请关闭浏览器的网页翻译后到设置页重新选择。"
+                    ),
+                    severity="blocking",
+                )
+            )
+        elif fallback_name == default_name:
+            issues.append(
+                ConfigIssue(
+                    field="llm.fallback_provider",
+                    message=(
+                        "备选与主 Provider 相同时永远不会生效；"
+                        "请换一个不同类型的 Provider 或留空关闭 fallback。"
+                    ),
+                    severity="blocking",
+                )
+            )
+        else:
+            # Mirrors the default-provider credential logic below: gemini
+            # may take its key from GOOGLE_API_KEY / GEMINI_API_KEY, and
+            # openai may authenticate via Codex OAuth instead of api_key.
+            fallback_cfg = getattr(config.llm, fallback_name, None)
+            fallback_required_field = _REMOTE_PROVIDER_FIELDS.get(fallback_name)
+            fallback_has_env_key = fallback_name == "gemini" and bool(_gemini_api_key_from_env())
+            fallback_uses_codex_oauth = (
+                fallback_name == "openai"
+                and config.llm.openai.auth_mode.strip().lower() == "codex_oauth"
+            )
+            if (
+                fallback_required_field
+                and fallback_cfg is not None
+                and not fallback_cfg.api_key.strip()
+                and not fallback_has_env_key
+                and not fallback_uses_codex_oauth
+            ):
+                issues.append(
+                    ConfigIssue(
+                        field="llm.fallback_provider",
+                        message=(
+                            f"备选 provider `{fallback_name}` 缺少 `api_key`，不会被注册，"
+                            f"fallback 永远不会生效；请填写 `{fallback_required_field}` "
+                            "或留空关闭 fallback。"
+                        ),
+                        severity="blocking",
+                    )
+                )
+            if (
+                fallback_name == "openai_compatible"
+                and not config.llm.openai_compatible.base_url.strip()
+            ):
+                issues.append(
+                    ConfigIssue(
+                        field="llm.fallback_provider",
+                        message=(
+                            "备选 provider `openai_compatible` 必须填 `base_url` "
+                            "(例如 Groq: https://api.groq.com/openai/v1)，"
+                            "否则不会被注册，fallback 永远不会生效。"
+                        ),
+                        severity="blocking",
+                    )
+                )
+            # Keep in sync with llm/registry.py `_maybe_ollama_provider` /
+            # `_ollama_is_chat_capable` (config cannot import the registry —
+            # cycle): Ollama only registers when `[llm.ollama]` has a model
+            # or base_url, and naming it as fallback_provider already marks
+            # it chat-capable — so non-registration is the only dead state
+            # left to check here.
+            if (
+                fallback_name == "ollama"
+                and not config.llm.ollama.model.strip()
+                and not config.llm.ollama.base_url.strip()
+            ):
+                issues.append(
+                    ConfigIssue(
+                        field="llm.fallback_provider",
+                        message=(
+                            "备选 provider `ollama` 需要在 `[llm.ollama]` 填 `model` "
+                            "或 `base_url`，否则不会被注册，fallback 永远不会生效。"
+                        ),
+                        severity="blocking",
+                    )
+                )
+
     provider_name = config.llm.default_provider
     provider_configs: dict[str, LLMProviderConfig] = {
         "openai": config.llm.openai,
@@ -1490,6 +1905,20 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
             )
         )
         return issues
+
+    for flavor_provider in ("openai", "openai_compatible"):
+        flavor = provider_configs[flavor_provider].api_flavor.strip().lower()
+        if flavor not in _SUPPORTED_OPENAI_API_FLAVORS:
+            issues.append(
+                ConfigIssue(
+                    field=f"llm.{flavor_provider}.api_flavor",
+                    message=(
+                        f"`llm.{flavor_provider}.api_flavor` 仅支持: "
+                        '"", "chat_completions", "responses"。'
+                    ),
+                    severity="blocking",
+                )
+            )
 
     openai_auth_mode = config.llm.openai.auth_mode.strip().lower()
     if openai_auth_mode not in _SUPPORTED_OPENAI_AUTH_MODES:
@@ -1632,6 +2061,9 @@ def load_config_with_diagnostics(
                 raw = _deep_merge(raw, file_data)
 
     raw = _apply_env_overrides(raw)
+    # Removed-key notices are collected from the RAW [discovery] table before
+    # _build_discovery ever runs — the values are ignored, never fail-fast.
+    diagnostics.issues.extend(_removed_discovery_key_issues(raw))
     config = _build_config(raw)
     diagnostics.issues.extend(_collect_config_issues(config))
     return config, diagnostics
@@ -1676,6 +2108,9 @@ _LOCAL_AUTH_KEY_TO_FIELD = {
     "trust_loopback": "trust_loopback",
     "trusted_proxies": "trusted_proxies",
     "allowed_bearer_origins": "allowed_bearer_origins",
+    "extension_access_enabled": "extension_access_enabled",
+    "extension_access_keys": "extension_access_keys",
+    "extension_token_ttl_hours": "extension_token_ttl_hours",
 }
 
 
@@ -1825,6 +2260,21 @@ def _api_auth_lines(
         f"allowed_bearer_origins = {_toml_str_list(auth.allowed_bearer_origins)}",
         lambda v: _toml_str_list(_coerce_str_list(v)),
     )
+    emit(
+        "extension_access_enabled",
+        f"extension_access_enabled = {_toml_bool(auth.extension_access_enabled)}",
+        lambda v: _toml_bool(_coerce_bool(v)),
+    )
+    emit(
+        "extension_access_keys",
+        f"extension_access_keys = {_toml_str_list(auth.extension_access_keys)}",
+        lambda v: _toml_str_list(_coerce_str_list(v)),
+    )
+    emit(
+        "extension_token_ttl_hours",
+        f"extension_token_ttl_hours = {auth.extension_token_ttl_hours}",
+        lambda v: str(_coerce_extension_token_ttl_hours(v)),
+    )
     return lines
 
 
@@ -1909,7 +2359,6 @@ def _render_config_toml(
         f"default_provider = {_toml_string(config.llm.default_provider)}",
         f"concurrency = {_normalize_llm_concurrency(config.llm.concurrency)}",
         f"timeout = {_normalize_llm_timeout(config.llm.timeout)}",
-        f"fallback_enabled = {_toml_bool(config.llm.fallback_enabled)}",
         f"fallback_provider = {_toml_string(config.llm.fallback_provider)}",
         "",
     ]
@@ -1957,6 +2406,7 @@ def _render_config_toml(
             "[bilibili]",
             f"auth_method = {_toml_string(config.bilibili.auth_method)}",
             f"cookie = {_toml_string(config.bilibili.cookie)}",
+            f"proxy = {_toml_string(config.bilibili.proxy)}",
             "",
             "[bilibili.browser]",
             f"executable = {_toml_string(config.bilibili.browser_executable)}",
@@ -2091,6 +2541,13 @@ def _render_config_toml(
             f"planner_poll_seconds = {config.discovery.planner_poll_seconds}",
             f"plan_ttl_hours = {config.discovery.plan_ttl_hours}",
             f"admission_min_score = {config.discovery.admission_min_score:g}",
+            "inspiration_search_enabled = "
+            f"{_toml_bool(config.discovery.inspiration_search_enabled)}",
+            "inspiration_search_backends = "
+            f"{_toml_str_list(list(config.discovery.inspiration_search_backends))}",
+            "inspiration_replace_merged_keywords = "
+            f"{_toml_bool(config.discovery.inspiration_replace_merged_keywords)}",
+            f"inspiration_breadth = {_toml_string(config.discovery.inspiration_breadth)}",
             "multimodal_evaluation_enabled = "
             f"{_toml_bool(config.discovery.multimodal_evaluation_enabled)}",
             f"multimodal_batch_size = {config.discovery.multimodal_batch_size}",
@@ -2137,10 +2594,12 @@ def _render_provider_section(name: str, provider: LLMProviderConfig) -> list[str
     lines = [f"[llm.{name}]"]
     lines.append(f"api_key = {_toml_string(provider.api_key)}")
     lines.append(f"model = {_toml_string(provider.model)}")
-    if name in {"openai", "deepseek", "ollama", "openrouter", "openai_compatible"}:
+    if name in {"openai", "claude", "deepseek", "ollama", "openrouter", "openai_compatible"}:
         lines.append(f"base_url = {_toml_string(provider.base_url)}")
     if name == "openai":
         lines.append(f"auth_mode = {_toml_string(provider.auth_mode)}")
+    if name in {"openai", "openai_compatible"}:
+        lines.append(f"api_flavor = {_toml_string(provider.api_flavor)}")
     if name == "deepseek":
         lines.append(f"reasoning_effort = {_toml_string(provider.reasoning_effort)}")
     if name == "openrouter":

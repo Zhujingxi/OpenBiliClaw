@@ -2,6 +2,7 @@
     const DEFAULT_API_BASE = "http://127.0.0.1:8420/api";
     const ENDPOINTS = {
       health: "/health",
+      qrInfo: "/qr-info",
       initStatus: "/init-status",
       startInit: "/init",
       recommendations: "/recommendations",
@@ -27,6 +28,7 @@
       updateStatus: "/update-status",
       updateCheck: "/update/check",
       updateApply: "/update/apply",
+      embeddingRepair: "/embedding/repair",
       config: "/config?reveal_keys=true",
       watchLater: "/watch-later",
       favorites: "/favorites",
@@ -105,7 +107,7 @@
     ];
     const INIT_SOURCE_LOGIN_HINT = "勾选要纳入初始化的平台（至少一个）。使用某个平台前，请先在当前浏览器登录该平台账号；勾选会同时开启该来源。";
     const INIT_REASON_TEXT = {
-      unsupported_runtime: "当前运行环境不支持图形化初始化，请改用 CLI 初始化入口。",
+      unsupported_runtime: "Docker / 容器环境不支持在网页里启动初始化。请在宿主机运行：docker exec -it openbiliclaw-backend openbiliclaw init",
       already_running: "初始化正在进行中。",
       bilibili_not_logged_in: "还没检测到 B 站登录。",
       llm_not_ready: "AI 服务还没配好或当前不可用。",
@@ -114,6 +116,8 @@
       local_only: "只能在本机发起初始化。",
       no_sources_selected: "至少勾选一个数据来源。",
       internal_error: "初始化过程中出错了，请稍后重试。",
+      interrupted: "上次初始化被打断（后端重启），可重试。",
+      cancelled: "初始化已取消。",
       none: ""
     };
     const INIT_STATUS_POLL_MS = Number(window.__OBC_TEST_INIT_POLL_MS) || 3000;
@@ -251,8 +255,38 @@
       console.error(context, error);
     }
 
-    window.addEventListener("error", (event) => showFatal(event.error || event.message, "页面脚本"));
-    window.addEventListener("unhandledrejection", (event) => showFatal(event.reason, "异步加载"));
+    const FOREIGN_SCRIPT_URL_RE = /\b(?:chrome-extension|moz-extension|safari-web-extension|safari-extension|user-script|greasemonkey-script):/i;
+
+    function isForeignScriptError(event) {
+      const filename = event?.filename || "";
+      // 跨域脚本的错误会被浏览器脱敏成空 filename + "Script error."，本站资源不会
+      if (!filename) return true;
+      try {
+        return new URL(filename, window.location.href).origin !== window.location.origin;
+      } catch {
+        return true;
+      }
+    }
+
+    function isForeignRejection(reason) {
+      const stack = typeof reason?.stack === "string" ? reason.stack : "";
+      return FOREIGN_SCRIPT_URL_RE.test(stack) && !stack.includes(window.location.origin);
+    }
+
+    window.addEventListener("error", (event) => {
+      if (isForeignScriptError(event)) {
+        console.warn("已忽略非本站脚本错误（通常来自浏览器扩展/油猴脚本）:", event.filename || "(跨域)", event.message);
+        return;
+      }
+      showFatal(event.error || event.message, "页面脚本");
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      if (isForeignRejection(event.reason)) {
+        console.warn("已忽略非本站脚本 Promise 错误（通常来自浏览器扩展/油猴脚本）:", event.reason);
+        return;
+      }
+      showFatal(event.reason, "异步加载");
+    });
 
     function storageGet(key) {
       try { return window.localStorage?.getItem(key) || ""; } catch { return ""; }
@@ -264,12 +298,34 @@
 
     const DISMISS_ON_RESHUFFLE_KEY = "openbiliclaw.dismissOnReshuffle";
     state.dismissOnReshuffle = storageGet(DISMISS_ON_RESHUFFLE_KEY) === "1";
+    const AUTO_LOAD_ON_SCROLL_KEY = "openbiliclaw.webui.autoLoadOnScroll";
+    const AUTO_LOAD_COOLDOWN_MS = 8000;
+    const AUTO_LOAD_ROOT_MARGIN_PX = 300;
+    state.autoLoadOnScroll = storageGet(AUTO_LOAD_ON_SCROLL_KEY) !== "0";
+    const THEME_STORAGE_KEY = "obc.theme";
+    const THEME_OPTIONS = ["auto", "light", "dark"];
+    const THEME_LABELS = { auto: "跟随系统", light: "浅色", dark: "深色" };
+    const THEME_GLYPHS = { auto: "◐", light: "☼", dark: "☾" };
+    state.themeMode = THEME_OPTIONS.includes(storageGet(THEME_STORAGE_KEY)) ? storageGet(THEME_STORAGE_KEY) : "auto";
     const SIDE_DRAWER_OPEN_KEY = "openbiliclaw.sideDrawerOpen";
     const DELIGHT_QUEUE_LIMIT_KEY = "openbiliclaw.webui.delightQueueLimit";
     const STAR_REPO_URL = "https://github.com/whiteguo233/OpenBiliClaw";
     const STAR_REPO_SLUG = "whiteguo233/OpenBiliClaw";
     const STAR_COUNT_CACHE_KEY = "openbiliclaw.webui.starCount";
     const STAR_COUNT_TTL_MS = 12 * 60 * 60 * 1000;
+    // 加载更多一次向后端请求的条数（后端 append 端点固定 limit=10）；
+    // 返回少于这个数说明候选池当轮见底，据此切换文案并等待补货重试。
+    const APPEND_BATCH_SIZE = 10;
+    const APPEND_SKELETON_COUNT = 4;
+    let autoLoadObserver = null;
+    let autoLoadCheckRaf = 0;
+    let appendMoreInFlight = false;
+    let lastAutoLoadAt = 0;
+    let sentinelInView = false;
+    let _cachedLanIp = "";
+    let _delightAutoTimer = null;
+    let _delightSwipeStartX = 0;
+    const _delightStatusCache = new Map();
 
     function formatStarCount(n) {
       if (typeof n !== "number" || !Number.isFinite(n)) return "";
@@ -397,16 +453,24 @@
       const configuredLimit = config.scheduler?.delight_queue_limit;
       const limit = configuredLimit || storageGet(DELIGHT_QUEUE_LIMIT_KEY) || "20";
       setInput("delightQueueLimit", String(limit));
+      applyThemeMode(state.themeMode);
       renderReshuffleToggle();
+      renderAutoLoadOnScrollToggle();
+      syncAutoLoadObserver();
     }
 
     function persistFrontendSettings() {
       const limit = getDelightQueueLimit();
       setInput("delightQueueLimit", String(limit));
       storageSet(DELIGHT_QUEUE_LIMIT_KEY, String(limit));
+      storageSet(THEME_STORAGE_KEY, state.themeMode);
       storageSet(DISMISS_ON_RESHUFFLE_KEY, state.dismissOnReshuffle ? "1" : "0");
+      storageSet(AUTO_LOAD_ON_SCROLL_KEY, state.autoLoadOnScroll ? "1" : "0");
+      applyThemeMode(state.themeMode);
       renderReshuffleToggle();
-      return { delightQueueLimit: limit, dismissOnReshuffle: state.dismissOnReshuffle };
+      renderAutoLoadOnScrollToggle();
+      syncAutoLoadObserver();
+      return { delightQueueLimit: limit, themeMode: state.themeMode, dismissOnReshuffle: state.dismissOnReshuffle, autoLoadOnScroll: state.autoLoadOnScroll };
     }
 
     function getRuntimeStreamUrl() {
@@ -493,21 +557,17 @@
       _authOverlayShown = true;
       const overlay = document.createElement("div");
       overlay.id = "authOverlay";
+      overlay.className = "auth-overlay";
       overlay.setAttribute("role", "dialog");
       overlay.setAttribute("aria-modal", "true");
-      overlay.style.cssText =
-        "position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;" +
-        "background:rgba(20,28,46,0.55);backdrop-filter:blur(4px);";
       overlay.innerHTML =
-        '<form id="authForm" autocomplete="off" style="width:min(360px,90vw);display:flex;flex-direction:column;gap:14px;' +
-        'padding:28px 24px;background:#fff;border-radius:18px;box-shadow:0 18px 48px rgba(0,0,0,.22);">' +
-        '<h2 style="margin:0;font-size:20px;color:#fb7299;text-align:center;">OpenBiliClaw</h2>' +
-        '<p style="margin:0;font-size:14px;color:#60708c;text-align:center;">请输入访问密码</p>' +
+        '<form id="authForm" class="auth-form" autocomplete="off">' +
+        '<h2 class="auth-title">OpenBiliClaw</h2>' +
+        '<p class="auth-copy">请输入访问密码</p>' +
         '<input id="authPassword" type="password" placeholder="密码" autocomplete="current-password" ' +
-        'aria-label="访问密码" style="padding:12px 14px;font-size:15px;border:1px solid #e2e6ef;border-radius:10px;">' +
-        '<button type="submit" style="padding:12px;font-size:15px;font-weight:600;color:#fff;background:#fb7299;' +
-        'border:none;border-radius:10px;cursor:pointer;">登录</button>' +
-        '<p id="authError" role="alert" hidden style="margin:0;font-size:13px;color:#ef4444;text-align:center;"></p>' +
+        'aria-label="访问密码" class="auth-input">' +
+        '<button class="auth-submit" type="submit">登录</button>' +
+        '<p id="authError" class="auth-error" role="alert" hidden></p>' +
         "</form>";
       document.body.appendChild(overlay);
       const input = overlay.querySelector("#authPassword");
@@ -620,21 +680,87 @@
       return explicit || "bilibili";
     }
 
+    function formatDuration(seconds) {
+      const total = Math.floor(Number(seconds) || 0);
+      if (total <= 0) return "";
+      const hours = Math.floor(total / 3600);
+      const minutes = Math.floor((total % 3600) / 60);
+      const secondsPart = total % 60;
+      if (hours > 0) {
+        return `${hours}:${String(minutes).padStart(2, "0")}:${String(secondsPart).padStart(2, "0")}`;
+      }
+      return `${minutes}:${String(secondsPart).padStart(2, "0")}`;
+    }
+
+    function formatCountCn(n) {
+      const value = Math.floor(Number(n) || 0);
+      if (value <= 0) return "";
+      if (value >= 100000000) {
+        return `${(Math.floor((value / 100000000) * 10) / 10).toFixed(1).replace(/\.0$/, "")}亿`;
+      }
+      if (value >= 10000) {
+        return `${(Math.floor((value / 10000) * 10) / 10).toFixed(1).replace(/\.0$/, "")}万`;
+      }
+      return String(value);
+    }
+
+    function formatPublishedTime(item, now = Date.now()) {
+      const parsed = Date.parse(String(item?.published_at || ""));
+      if (Number.isFinite(parsed)) {
+        const diff = now - parsed;
+        if (diff >= -300_000 && diff < 60_000) return "刚刚";
+        if (diff >= 0 && diff < 86_400_000) return `${Math.max(1, Math.floor(diff / 3_600_000))} 小时前`;
+        if (diff >= 0 && diff < 604_800_000) return `${Math.floor(diff / 86_400_000)} 天前`;
+        const date = new Date(parsed);
+        const current = new Date(now);
+        if (date.getFullYear() === current.getFullYear()) return `${date.getMonth() + 1}月${date.getDate()}日`;
+        return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+      }
+      return String(item?.published_label || "").replace(/\s+/g, " ").trim().slice(0, 64);
+    }
+
+    // Legacy content_cache rows persisted before issue #79 still carry raw
+    // `answer_<id>` / `zhihu_<id>` titles. Derive something readable from the
+    // body text (first sentence), else a generic label, so the card header is
+    // never a bare ID even without re-fetching.
+    const ID_TITLE_RE = /^(answer|article|question|zhihu)_\S+$/;
+    const ZHIHU_TITLE_PLACEHOLDERS = { answer: "来自知乎的回答", article: "来自知乎的文章", question: "来自知乎的提问" };
+    function displayRecommendationTitle(rawTitle, bodyText, contentType) {
+      const title = String(rawTitle || "").trim();
+      if (title && !ID_TITLE_RE.test(title)) return title;
+      const body = String(bodyText || "").trim();
+      if (body) {
+        const first = (body.split(/[。！？!?\n]/, 1)[0] || "").trim() || body;
+        return first.length > 40 ? `${first.slice(0, 40)}…` : first;
+      }
+      return ZHIHU_TITLE_PLACEHOLDERS[contentType] || (title || "未命名内容");
+    }
+
     function normalizeRecommendation(item) {
       const contentId = String(item?.content_id ?? item?.bvid ?? "");
+      const contentType = String(item?.content_type ?? "video").trim().toLowerCase() || "video";
+      const bodyText = decodeHtmlEntities(item?.body_text ?? "");
       return {
         id: Number(item?.id ?? Date.now()),
         bvid: String(item?.bvid ?? contentId),
         content_id: contentId,
-        title: decodeHtmlEntities(item?.title ?? "未命名内容"),
+        title: displayRecommendationTitle(decodeHtmlEntities(item?.title ?? ""), bodyText, contentType) || "未命名内容",
         up: decodeHtmlEntities(item?.up_name ?? item?.up ?? "未知创作者"),
         cover_url: normalizeImageUrl(item?.cover_url ?? item?.cover ?? item?.pic ?? item?.thumbnail_url ?? item?.thumbnail ?? item?.image_url),
         content_url: String(item?.content_url ?? ""),
         topic: decodeHtmlEntities(item?.topic_label ?? item?.topic ?? "未归类"),
         platform: normalizeSourcePlatform(item),
-        content_type: String(item?.content_type ?? "video").trim().toLowerCase() || "video",
-        body_text: decodeHtmlEntities(item?.body_text ?? ""),
-        duration: String(item?.duration ?? ""),
+        content_type: contentType,
+        body_text: bodyText,
+        duration: Number(item?.duration ?? 0) || 0,
+        view_count: Number(item?.view_count ?? 0) || 0,
+        like_count: Number(item?.like_count ?? 0) || 0,
+        danmaku_count: Number(item?.danmaku_count ?? 0) || 0,
+        favorite_count: Number(item?.favorite_count ?? 0) || 0,
+        comment_count: Number(item?.comment_count ?? 0) || 0,
+        up_mid: Number(item?.up_mid ?? 0) || 0,
+        published_at: String(item?.published_at ?? "").trim(),
+        published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
         presented: Boolean(item?.presented),
         feedback_type: String(item?.feedback_type ?? item?.feedback ?? ""),
         pool_status: String(item?.pool_status ?? item?.status ?? ""),
@@ -723,6 +849,15 @@
       window.setTimeout(() => toast.classList.remove("is-open"), 2600);
     }
 
+    const pendingActions = window.OpenBiliClawPendingActions.createPendingActionCoordinator({
+      windowMs: Number(window.__OBC_TEST_UNDO_WINDOW_MS || 10000),
+      onCommitError: (error) => {
+        const detail = configErrorMessage(error?.details) || error?.message || "反馈提交失败";
+        showToast(`${detail}，已恢复原状态。`);
+      }
+    });
+    window.addEventListener("pagehide", () => { void pendingActions.flushAll(); });
+
     function describeInitReason(reason) {
       if (!reason || reason === "none") return "";
       return INIT_REASON_TEXT[reason] || `未知初始化状态：${reason}`;
@@ -738,6 +873,22 @@
       return (Array.isArray(keys) ? keys : []).map((key) => byKey.get(key) || key);
     }
 
+    function embeddingPhaseHint(prereq) {
+      return prereq?.ollama_phase === "starting" ? "Ollama 启动中…" : "";
+    }
+
+    function embeddingPullProgressView(status) {
+      const prereq = status?.prerequisites || {};
+      const active = Boolean(prereq.embedding_repair_running || prereq.embedding_check === "repairing");
+      const completed = Number(prereq.embedding_repair_completed || 0);
+      const total = Number(prereq.embedding_repair_total || 0);
+      const pct = total > 0
+        ? Math.max(1, Math.min(99, Math.round((completed * 100) / total)))
+        : active ? 1 : 0;
+      const label = String(prereq.embedding_pull_status || prereq.embedding_detail || "").trim() || "正在下载向量模型…";
+      return { active, pct, label };
+    }
+
     function buildInitChecklist(status, selected = null) {
       const prereq = status?.prerequisites || {};
       const enabled = initEnabledPlatforms(status);
@@ -745,13 +896,27 @@
       // B 站登录只在勾选了 B 站时才是硬前置。
       const biliSelected = selectedSources ? selectedSources.includes("bilibili") : true;
       const embeddingRequired = Boolean(prereq.embedding_required);
+      const embeddingHint = [
+        embeddingPhaseHint(prereq),
+        String(prereq.embedding_pull_status || prereq.embedding_detail || "").trim()
+      ].filter(Boolean).join(" ");
+      const embeddingCheck = String(prereq.embedding_check || "");
+      const embeddingAutoRepairable = ["model_missing", "model_broken", "model_path_encoding"].includes(embeddingCheck);
+      const embeddingGuidanceOnly = ["disk_full", "network", "model_oom", "provider_error"].includes(embeddingCheck);
+      // label 必须反映探测的真实结果——固定写“已登录”的条目名一旦不再是红 ✗，
+      // 用户就会把它读成“已经登录了”。
+      const biliOk = Boolean(prereq.bilibili_logged_in);
+      const biliState = biliOk ? "B 站已登录" : "B 站登录检测未通过";
+      const biliDetail = String(prereq.bilibili_detail || "").trim();
       return [
         {
           key: "bilibili",
-          label: biliSelected ? "B 站已登录" : "B 站已登录（未勾选 B 站，可跳过）",
-          ok: Boolean(prereq.bilibili_logged_in),
+          label: biliSelected ? biliState : `${biliState}（未勾选 B 站，可跳过）`,
+          ok: biliOk,
           hard: biliSelected,
-          hint: "在浏览器里登录 bilibili.com，扩展会自动把 Cookie 同步给后端；不想接 B 站也可以直接取消勾选。"
+          hint:
+            (biliDetail ? `${biliDetail} ` : "") +
+            "在浏览器里登录 bilibili.com，扩展会自动把 Cookie 同步给后端；不想接 B 站也可以直接取消勾选。"
         },
         {
           key: "llm",
@@ -765,9 +930,20 @@
           label: embeddingRequired ? "向量模型可用" : "向量模型可用（推荐，非必须）",
           ok: Boolean(prereq.embedding_ready),
           hard: embeddingRequired,
-          hint: embeddingRequired
-            ? "本地 Ollama + bge-m3 需要完成一次真实向量请求；模型仍在下载或服务异常时请稍后重试。"
-            : "未配置 embedding 时可以先初始化；推荐去重和语义检索会弱一些。"
+          // Backend-classified cause (embedding_detail, v0.3.155+):
+          // Ollama 未运行 / 缺模型 / 模型损坏 / 配置无效 / repairing（下载中，
+          // detail 带实时百分比，3s 轮询自动刷新）。
+          hint:
+            embeddingHint ||
+            (embeddingRequired
+              ? "本地 Ollama + bge-m3 需要完成一次真实向量请求；模型仍在下载或服务异常时请稍后重试。"
+              : "未配置 embedding 时可以先初始化；推荐去重和语义检索会弱一些。"),
+          // One-click server-side `ollama pull`; hidden while repairing (the
+          // hint already shows live percent).
+          repairable: embeddingAutoRepairable || embeddingGuidanceOnly,
+          repairLabel: embeddingCheck === "model_path_encoding"
+            ? "迁移模型目录并修复"
+            : embeddingGuidanceOnly ? "重新检测" : "自动下载向量模型"
         },
         {
           key: "platforms",
@@ -802,6 +978,21 @@
       };
     }
 
+    // Human text for a failed/cancelled run. ``status.detail`` carries the
+    // backend's stored failure specifics (exception summary / GuidedInitError
+    // message, v0.3.156+) — append it so internal_error is diagnosable from
+    // the UI instead of only the generic "请稍后重试".
+    function initFailureText(status, progress) {
+      const base = describeInitReason(status?.reason) || "";
+      const detail = String(status?.detail || "").trim();
+      // Unmapped codes (empty_history / empty_signals / profile_failed …)
+      // carry their authoritative human message in detail — show it alone
+      // instead of "未知初始化状态：code（message）".
+      if (detail && (!base || base.startsWith("未知初始化状态"))) return detail;
+      if (base && detail) return `${base}（${detail}）`;
+      return base || progress?.failedReason || "初始化未完成，请稍后重试。";
+    }
+
     function initContentReadyFromRuntime(status = state.runtimeStatus) {
       const runtime = normalizeRuntimeStatus(status);
       return Boolean(runtime) && (
@@ -834,13 +1025,45 @@
       if (!status) {
         return '<li class="init-hint-row">点「开始初始化」会先检查 AI 服务 / 向量模型，以及所选平台的登录状态，通过才开始。</li>';
       }
+      // Post-init the pre-init checklist is irrelevant, and the backend no
+      // longer live-probes services for already-initialized status reads —
+      // the cached values could read stale-red here (e.g. right after a
+      // backend restart while the first pool is still filling). Hide it.
+      if (status.initialized) return "";
       return buildInitChecklist(status, selected)
         .map((row) => {
           const mark = row.ok ? "✓" : row.hard ? "✗" : "•";
           const hint = !row.ok && row.hint ? `<p class="init-hint">${escapeHtml(row.hint)}</p>` : "";
-          return `<li class="${row.ok ? "init-ok" : "init-missing"} ${row.hard ? "init-hard" : "init-soft"}"><div class="init-row"><span class="init-mark">${mark}</span><span>${escapeHtml(row.label)}</span></div>${hint}</li>`;
+          const repair = !row.ok && row.repairable
+            ? `<button class="small-btn init-repair-btn" type="button" data-embedding-repair>${escapeHtml(row.repairLabel || "自动下载向量模型")}</button>`
+            : "";
+          return `<li class="${row.ok ? "init-ok" : "init-missing"} ${row.hard ? "init-hard" : "init-soft"}"><div class="init-row"><span class="init-mark">${mark}</span><span>${escapeHtml(row.label)}</span></div>${hint}${repair}</li>`;
         })
         .join("");
+    }
+
+    // Kick the server-side model pull; the 3s init-status poll then renders
+    // live percent on the checklist row (embedding_check="repairing"). The
+    // checklist is re-rendered per poll, so the handler is DELEGATED from the
+    // <ul> (bound once in renderInitOnboarding) instead of per-button.
+    async function handleEmbeddingRepairClick(btn) {
+      const originalLabel = btn.textContent || "自动下载向量模型";
+      btn.disabled = true;
+      btn.textContent = originalLabel === "重新检测" ? "检测中…" : "启动下载…";
+      try {
+        await requestJsonStrict(ENDPOINTS.embeddingRepair, { method: "POST" });
+      } catch (error) {
+        // 409 already_running means a pull is in flight — that's the goal
+        // state; every other error re-enables the button with the reason.
+        if (error?.status !== 409 || error?.details?.error !== "already_running") {
+          btn.disabled = false;
+          btn.textContent = originalLabel;
+          state.initReason = error?.details?.detail || error?.message || "向量模型修复启动失败。";
+          renderInitOnboarding();
+          return;
+        }
+      }
+      void refreshInitStatus({ schedule: true });
     }
 
     function initSourcesMarkup() {
@@ -870,9 +1093,9 @@
       const progressFill = section.querySelector(".init-progress-fill");
       const progressText = progressBox?.querySelector("p");
       const progressLabel = progress.failed
-        ? (describeInitReason(status?.reason) || progress.failedReason || "初始化未完成，请稍后重试。")
+        ? initFailureText(status, progress)
         : progress.active
-          ? `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`
+          ? progress.label || `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`
           : "等待开始";
       if (progressBox) progressBox.hidden = !(Boolean(status?.running) || progress.failed);
       if (progressFill) progressFill.style.width = `${progress.pct}%`;
@@ -895,14 +1118,19 @@
       const progress = initProgressView(status);
       const isRunning = Boolean(status?.running);
       const waitingForFirstPool = initWaitingForFirstPool(status);
+      const embeddingPull = embeddingPullProgressView(status);
       const displayProgress = waitingForFirstPool
         ? { ...progress, active: true, failed: false, pct: 95, stageLabel: "4/4 整理首轮内容池" }
+        : embeddingPull.active && !isRunning
+          ? { active: true, failed: false, pct: embeddingPull.pct, label: embeddingPull.label, stageLabel: "" }
         : progress;
       const alreadyInitialized = Boolean(status?.initialized) && !waitingForFirstPool;
-      const showProgress = isRunning || displayProgress.failed || waitingForFirstPool;
+      const showProgress = isRunning || displayProgress.failed || waitingForFirstPool || embeddingPull.active;
       const reason = waitingForFirstPool
         ? (state.initReason || INIT_FIRST_POOL_WAIT_TEXT)
-        : (state.initReason || describeInitReason(status?.reason) || status?.detail || "");
+        : displayProgress.failed
+          ? (state.initReason || initFailureText(status, displayProgress))
+          : (state.initReason || describeInitReason(status?.reason) || status?.detail || "");
       const phase = initOnboardingPhase(status, displayProgress);
       const buttonLabel = state.initBusy
         ? "检查中…"
@@ -934,7 +1162,7 @@
           <ul class="init-checklist">${initChecklistMarkup(status, state.initSelectedSources)}</ul>
           <div class="init-progress"${showProgress ? "" : " hidden"}>
             <div class="init-progress-track"><div class="init-progress-fill" style="width:${displayProgress.pct}%"></div></div>
-            <p>${escapeHtml(displayProgress.failed ? (describeInitReason(status?.reason) || displayProgress.failedReason || "初始化未完成，请稍后重试。") : displayProgress.active ? `${displayProgress.stageLabel || "正在初始化"}（${displayProgress.pct}%）` : "等待开始")}</p>
+            <p>${escapeHtml(displayProgress.failed ? initFailureText(status, displayProgress) : displayProgress.active ? displayProgress.label || `${displayProgress.stageLabel || "正在初始化"}（${displayProgress.pct}%）` : "等待开始")}</p>
           </div>
           <p class="init-reason"${reason ? "" : " hidden"}>${escapeHtml(reason)}</p>
           <div class="init-actions">
@@ -949,6 +1177,12 @@
       });
       grid.querySelector('[data-init-action="settings"]')?.addEventListener("click", () => {
         openSettingsPage("sources");
+      });
+      // Delegated: the checklist's innerHTML is replaced on every status
+      // poll, so listeners on the buttons themselves would be lost.
+      grid.querySelector(".init-onboarding .init-checklist")?.addEventListener("click", (event) => {
+        const btn = event.target.closest?.("[data-embedding-repair]");
+        if (btn) void handleEmbeddingRepairClick(btn);
       });
       grid.querySelectorAll("input[data-init-source]").forEach((input) => {
         input.addEventListener("change", () => {
@@ -1007,7 +1241,7 @@
           return;
         }
         renderAll();
-        if (status?.running) {
+        if (status?.running || embeddingPullProgressView(status).active) {
           scheduleInitStatusRefresh(schedule ? INIT_STATUS_POLL_MS : INIT_STATUS_WATCHDOG_MS);
         } else if (!status?.running) {
           clearInitPolling();
@@ -1098,14 +1332,45 @@
       }
     }
 
-    function openPanel(id) { document.getElementById(id)?.classList.add("is-open"); }
+    function openPanel(id) {
+      const panel = document.getElementById(id);
+      if (!panel) return;
+      if (panel._closeTimer) {
+        window.clearTimeout(panel._closeTimer);
+        panel._closeTimer = null;
+      }
+      if (panel._closeHandler) {
+        panel.removeEventListener("animationend", panel._closeHandler);
+        panel._closeHandler = null;
+      }
+      panel.classList.remove("is-closing");
+      panel.classList.add("is-open");
+    }
+
     function closePanel(id) {
       const panel = document.getElementById(id);
-      panel?.classList.remove("is-open", "from-mobile-menu");
-      if (id === "messagesDrawer") {
-        state.messageListSnapshot = null;
-        state.messageListDomLocked = false;
-      }
+      if (!panel || !panel.classList.contains("is-open") || panel.classList.contains("is-closing")) return;
+
+      const finishClose = () => {
+        if (panel._closeTimer) {
+          window.clearTimeout(panel._closeTimer);
+          panel._closeTimer = null;
+        }
+        if (panel._closeHandler) {
+          panel.removeEventListener("animationend", panel._closeHandler);
+          panel._closeHandler = null;
+        }
+        panel.classList.remove("is-open", "is-closing", "from-mobile-menu");
+        if (id === "messagesDrawer") {
+          state.messageListSnapshot = null;
+          state.messageListDomLocked = false;
+        }
+      };
+
+      panel._closeHandler = finishClose;
+      panel.classList.add("is-closing");
+      panel.addEventListener("animationend", finishClose, { once: true });
+      panel._closeTimer = window.setTimeout(finishClose, 220);
     }
 
     const MAIN_PAGE_IDS = ["homePage", "watchLaterPage", "favoritesPage", "profilePage", "chatPage", "settingsPage"];
@@ -1203,11 +1468,14 @@
         const card = document.createElement("article");
         card.className = "video-card saved-card";
         const url = contentUrl(item);
-        card.innerHTML = `
-          <button class="cover" data-platform="${escapeHtml(item.source_platform || item.platform || "bilibili")}" type="button" aria-label="打开 ${escapeHtml(item.title || item.bvid)}">
+        const coverContent = `
             ${coverImg(item)}
             <span class="platform">${escapeHtml(platformName(item.source_platform || item.platform))}</span>
-          </button>
+          `;
+        card.innerHTML = `
+          ${url
+            ? `<a class="cover" data-platform="${escapeHtml(item.source_platform || item.platform || "bilibili")}" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" aria-label="打开 ${escapeHtml(item.title || item.bvid)}">${coverContent}</a>`
+            : `<button class="cover" data-platform="${escapeHtml(item.source_platform || item.platform || "bilibili")}" type="button" aria-label="打开 ${escapeHtml(item.title || item.bvid)}">${coverContent}</button>`}
           <div>
             <p class="video-title">${escapeHtml(item.title || item.bvid)}</p>
             <p class="video-meta">${escapeHtml(item.up_name || "")}</p>
@@ -1215,8 +1483,12 @@
           <div class="card-actions saved-card-actions">
             <button class="small-btn saved-remove" type="button">移除</button>
           </div>`;
-        card.querySelector(".cover").addEventListener("click", () => {
-          if (url) window.open(url, "_blank", "noopener,noreferrer");
+        const cover = card.querySelector(".cover");
+        cover.addEventListener("click", () => {
+          if (url) trackRecommendationClick(item);
+        });
+        cover.addEventListener("auxclick", (event) => {
+          if (url && event.button === 1) trackRecommendationClick(item);
         });
         card.querySelector(".saved-remove").addEventListener("click", async (e) => {
           const btn = e.currentTarget;
@@ -1411,6 +1683,49 @@
       });
     }
 
+    function normalizeThemeMode(value) {
+      return THEME_OPTIONS.includes(value) ? value : "auto";
+    }
+
+    function applyThemeMode(mode = state.themeMode) {
+      state.themeMode = normalizeThemeMode(mode);
+      if (state.themeMode === "auto") {
+        document.documentElement.removeAttribute("data-theme");
+      } else {
+        document.documentElement.dataset.theme = state.themeMode;
+      }
+      renderThemeControls();
+    }
+
+    function setThemeMode(mode, { persist = true, toast = false } = {}) {
+      applyThemeMode(mode);
+      if (persist) storageSet(THEME_STORAGE_KEY, state.themeMode);
+      if (toast) showToast(`主题已切换为${THEME_LABELS[state.themeMode]}`);
+    }
+
+    function cycleThemeMode() {
+      const index = THEME_OPTIONS.indexOf(normalizeThemeMode(state.themeMode));
+      setThemeMode(THEME_OPTIONS[(index + 1) % THEME_OPTIONS.length], { toast: true });
+    }
+
+    function renderThemeControls() {
+      const mode = normalizeThemeMode(state.themeMode);
+      const label = THEME_LABELS[mode];
+      const toggle = $("#themeToggleBtn");
+      if (toggle) {
+        toggle.title = `主题：${label}`;
+        toggle.setAttribute("aria-label", `主题：${label}`);
+      }
+      const glyph = $("#themeToggleGlyph");
+      if (glyph) glyph.textContent = THEME_GLYPHS[mode];
+      document.querySelectorAll("[data-theme-choice]").forEach((button) => {
+        const isActive = button.dataset.themeChoice === mode;
+        button.classList.toggle("is-active", isActive);
+        button.setAttribute("aria-checked", isActive ? "true" : "false");
+        button.tabIndex = isActive ? 0 : -1;
+      });
+    }
+
     function setDismissOnReshuffle(enabled, { persist = true, toast = false } = {}) {
       state.dismissOnReshuffle = Boolean(enabled);
       if (persist) storageSet(DISMISS_ON_RESHUFFLE_KEY, state.dismissOnReshuffle ? "1" : "0");
@@ -1425,6 +1740,108 @@
       });
       const settingText = $("#dismissOnReshuffleSettingText");
       if (settingText) settingText.textContent = state.dismissOnReshuffle ? "开启" : "关闭";
+    }
+
+    function setAutoLoadOnScroll(enabled, { persist = true, toast = false } = {}) {
+      state.autoLoadOnScroll = Boolean(enabled);
+      if (persist) storageSet(AUTO_LOAD_ON_SCROLL_KEY, state.autoLoadOnScroll ? "1" : "0");
+      renderAutoLoadOnScrollToggle();
+      syncAutoLoadObserver();
+      if (toast) showToast(state.autoLoadOnScroll ? "滚动到底会自动加载推荐" : "已关闭滚动自动加载");
+    }
+
+    function renderAutoLoadOnScrollToggle() {
+      const toggle = $("#autoLoadOnScrollSetting");
+      if (toggle && toggle.checked !== state.autoLoadOnScroll) toggle.checked = state.autoLoadOnScroll;
+      const settingText = $("#autoLoadOnScrollSettingText");
+      if (settingText) settingText.textContent = state.autoLoadOnScroll ? "开启" : "关闭";
+    }
+
+    function isAutoLoadSentinelInView() {
+      const sentinel = $("#loadMoreSentinel");
+      if (!sentinel || typeof sentinel.getBoundingClientRect !== "function") return false;
+      const rect = sentinel.getBoundingClientRect();
+      const viewportHeight = window.innerHeight || document.documentElement?.clientHeight || 0;
+      return rect.top <= viewportHeight + AUTO_LOAD_ROOT_MARGIN_PX && rect.bottom >= -AUTO_LOAD_ROOT_MARGIN_PX;
+    }
+
+    function refreshAutoLoadSentinelVisibility() {
+      sentinelInView = isAutoLoadSentinelInView();
+      return sentinelInView;
+    }
+
+    function scheduleAutoLoadCheck() {
+      if (!state.autoLoadOnScroll || autoLoadCheckRaf) return;
+      const run = () => {
+        autoLoadCheckRaf = 0;
+        if (!refreshAutoLoadSentinelVisibility()) return;
+        void autoLoadMoreIfNeeded().catch(() => {});
+      };
+      if (typeof requestAnimationFrame === "function") {
+        autoLoadCheckRaf = requestAnimationFrame(run);
+      } else {
+        autoLoadCheckRaf = setTimeout(run, 0);
+      }
+    }
+
+    function syncAutoLoadObserver() {
+      if (autoLoadObserver) {
+        autoLoadObserver.disconnect();
+        autoLoadObserver = null;
+      }
+      sentinelInView = false;
+      if (!state.autoLoadOnScroll) return;
+      const sentinel = $("#loadMoreSentinel");
+      if (!sentinel) return;
+      if (typeof IntersectionObserver !== "undefined") {
+        autoLoadObserver = new IntersectionObserver(handleAutoLoadIntersect, { rootMargin: `${AUTO_LOAD_ROOT_MARGIN_PX}px`, threshold: 0 });
+        autoLoadObserver.observe(sentinel);
+      }
+      scheduleAutoLoadCheck();
+    }
+
+    function handleAutoLoadIntersect(entries) {
+      sentinelInView = entries.some((entry) => entry.isIntersecting);
+      if (!sentinelInView && !refreshAutoLoadSentinelVisibility()) return;
+      scheduleAutoLoadCheck();
+    }
+
+    // 观察器可能已经处于相交状态，运行时库存或渲染状态变化后要补一脚几何检查。
+    function maybeAutoLoadAfterPoolRefill() {
+      scheduleAutoLoadCheck();
+    }
+
+    function shouldAutoLoadMore(now) {
+      if (!state.autoLoadOnScroll) return false;
+      if (appendMoreInFlight) return false;
+      if (now - lastAutoLoadAt < AUTO_LOAD_COOLDOWN_MS) return false;
+      if (!(state.runtimeStatus?.pool_available_count > 0)) return false;
+      const homePage = $("#homePage");
+      if (!homePage || homePage.hidden) return false;
+      const loadMore = $("#loadMoreBtn");
+      if (!loadMore || loadMore.hidden) return false;
+      if (!grid.querySelector(".video-card:not(.is-skeleton)")) return false;
+      return true;
+    }
+
+    async function autoLoadMoreIfNeeded() {
+      const now = Date.now();
+      if (!shouldAutoLoadMore(now)) return;
+      lastAutoLoadAt = now;
+      const button = $("#loadMoreBtn");
+      const previousText = button?.textContent || "加载更多推荐";
+      if (button) {
+        button.disabled = true;
+        button.textContent = "正在自动加载…";
+      }
+      try {
+        await appendMore();
+      } finally {
+        if (button) {
+          button.disabled = false;
+          button.textContent = previousText;
+        }
+      }
     }
 
     function renderFilters() {
@@ -1511,11 +1928,12 @@
     }
 
     function contentUrl(item) {
+      const platform = item.platform || item.source_platform;
       if (item.content_url) return item.content_url;
-      if (item.platform === "bilibili" && item.bvid) return `https://www.bilibili.com/video/${encodeURIComponent(item.bvid)}`;
-      if (item.platform === "youtube" && item.content_id) return `https://www.youtube.com/watch?v=${encodeURIComponent(item.content_id)}`;
-      if (item.platform === "twitter" && item.content_id) return `https://x.com/i/status/${encodeURIComponent(item.content_id)}`;
-      if (item.platform === "reddit") return "";
+      if (platform === "bilibili" && item.bvid) return `https://www.bilibili.com/video/${encodeURIComponent(item.bvid)}`;
+      if (platform === "youtube" && item.content_id) return `https://www.youtube.com/watch?v=${encodeURIComponent(item.content_id)}`;
+      if (platform === "twitter" && item.content_id) return `https://x.com/i/status/${encodeURIComponent(item.content_id)}`;
+      if (platform === "reddit") return "";
       return "";
     }
 
@@ -1528,13 +1946,26 @@
       return textCardContentTypes.has(String(item.content_type || "").toLowerCase()) || !hasCover;
     }
 
+    // A text card that still carries a cover (e.g. a Zhihu answer with an
+    // extracted thumbnail) renders the cover as a blurred backdrop behind the
+    // excerpt — issue #79 §2: glassmorphism unifies covered and cover-less
+    // cards instead of the flat gradient reading as a different visual style.
+    function recommendationTextCardBackdrop(item) {
+      return recommendationIsTextCard(item) ? imageProxyUrl(item.cover_url) : "";
+    }
+
     function recommendationCoverClass(item) {
-      return recommendationIsTextCard(item) ? " is-text-card" : "";
+      if (!recommendationIsTextCard(item)) return "";
+      return recommendationTextCardBackdrop(item) ? " is-text-card has-backdrop" : " is-text-card";
     }
 
     function recommendationMediaHtml(item) {
       if (recommendationIsTextCard(item)) {
-        return `<p class="cover-text">${escapeHtml(recommendationTextCardText(item))}</p>`;
+        const backdrop = recommendationTextCardBackdrop(item);
+        const backdropHtml = backdrop
+          ? `<img class="cover-backdrop" src="${escapeHtml(backdrop)}"${imgCrossOriginAttr()} alt="" aria-hidden="true" loading="eager" decoding="async" referrerpolicy="no-referrer">`
+          : "";
+        return `${backdropHtml}<p class="cover-text">${escapeHtml(recommendationTextCardText(item))}</p>`;
       }
       return coverImg(item);
     }
@@ -1544,6 +1975,62 @@
         .map((part) => String(part || "").trim())
         .filter(Boolean)
         .join(" · ");
+    }
+
+    function recommendationMetaHtml(item) {
+      const up = String(item.up || "").trim();
+      const topic = String(item.topic || "").trim();
+      const published = formatPublishedTime(item);
+      const parts = [];
+      if (up) {
+        const upHtml = item.platform === "bilibili" && item.up_mid > 0
+          ? `<a class="up-link" href="https://space.bilibili.com/${item.up_mid}" target="_blank" rel="noopener noreferrer">${escapeHtml(up)}</a>`
+          : escapeHtml(up);
+        parts.push(upHtml);
+      }
+      if (topic) parts.push(escapeHtml(topic));
+      if (published) {
+        const exactTitle = Number.isFinite(Date.parse(item.published_at))
+          ? new Date(item.published_at).toLocaleString()
+          : "";
+        const title = exactTitle ? ` title="${escapeHtml(exactTitle)}"` : "";
+        parts.push(`<span class="published-time"${title}>${escapeHtml(published)}</span>`);
+      }
+      return parts.join(" · ");
+    }
+
+    function recommendationStats(item) {
+      const segments = [];
+      if (item.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
+      if (item.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
+      if (item.comment_count > 0) segments.push(`💬 ${formatCountCn(item.comment_count)}`);
+      if (item.favorite_count > 0) segments.push(`⭐ ${formatCountCn(item.favorite_count)}`);
+      if (item.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
+      return segments.join(" · ");
+    }
+
+    function makeSkeletonCard() {
+      const card = document.createElement("article");
+      card.className = "video-card is-skeleton";
+      card.setAttribute("aria-hidden", "true");
+      card.innerHTML = `
+        <div class="cover skeleton-shimmer"></div>
+        <div>
+          <p class="video-title skeleton-line skeleton-shimmer"></p>
+          <p class="video-meta skeleton-line skeleton-shimmer short"></p>
+        </div>
+        <p class="reason skeleton-line skeleton-shimmer"></p>`;
+      return card;
+    }
+
+    function showAppendSkeletons(count = APPEND_SKELETON_COUNT) {
+      removeAppendSkeletons();
+      if (grid.querySelector(".empty-state")) grid.replaceChildren();
+      for (let i = 0; i < count; i += 1) grid.appendChild(makeSkeletonCard());
+    }
+
+    function removeAppendSkeletons() {
+      grid.querySelectorAll(".video-card.is-skeleton").forEach((el) => el.remove());
     }
 
     function renderVideos() {
@@ -1565,16 +2052,29 @@
       }
       grid.replaceChildren(...items.map((item) => {
         const card = document.createElement("article");
+        const url = contentUrl(item);
+        const durationBadge = item.content_type === "video" && item.duration > 0
+          ? `<span class="duration-badge">${escapeHtml(formatDuration(item.duration))}</span>`
+          : "";
+        const stats = recommendationStats(item);
         card.className = "video-card";
         card.dataset.bvid = item.bvid || item.id;
         card.innerHTML = `
-          <button class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" type="button" aria-label="打开 ${escapeHtml(item.title)}">
+          ${url
+            ? `<a class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" aria-label="打开 ${escapeHtml(item.title)}">
             ${recommendationMediaHtml(item)}
             <span class="platform">${escapeHtml(platformName(item.platform))}</span>
-          </button>
+            ${durationBadge}
+          </a>`
+            : `<button class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" type="button" aria-label="打开 ${escapeHtml(item.title)}">
+            ${recommendationMediaHtml(item)}
+            <span class="platform">${escapeHtml(platformName(item.platform))}</span>
+            ${durationBadge}
+          </button>`}
           <div>
             <p class="video-title">${escapeHtml(item.title)}</p>
-            <p class="video-meta">${escapeHtml(recommendationMeta(item))}</p>
+            <p class="video-meta">${recommendationMetaHtml(item)}</p>
+            ${stats ? `<p class="video-stats">${escapeHtml(stats)}</p>` : ""}
           </div>
           <p class="reason" role="button" tabindex="0" aria-expanded="false" title="${escapeHtml(item.reason)}"><span class="reason-text">${escapeHtml(item.reason)}</span></p>
           <div class="card-actions" aria-label="推荐反馈操作">
@@ -1616,7 +2116,11 @@
             toggleReason();
           }
         });
-        card.querySelector(".cover").addEventListener("click", () => openRecommendation(item, card));
+        const cover = card.querySelector(".cover");
+        cover.addEventListener("click", () => openRecommendation(item, card));
+        cover.addEventListener("auxclick", (event) => {
+          if (event.button === 1) openRecommendation(item, card);
+        });
         card.querySelectorAll("[data-action]").forEach((btn) => btn.addEventListener("click", () => handleCardAction(btn.dataset.action, item, card)));
         card.querySelector(".comment-field input").addEventListener("keydown", (event) => {
           if (event.key === "Enter") handleCardAction("send-comment", item, card);
@@ -1660,46 +2164,144 @@
           bvid: item.bvid,
           content_id: item.content_id || item.bvid,
           content_url: url || item.content_url,
-          source_platform: item.platform,
+          source_platform: item.platform || item.source_platform,
           title: item.title,
           recommendation_id: item.id,
           topic_label: item.topic,
-          up_name: item.up
+          up_name: item.up || item.up_name
         })
       }).catch(() => {});
     }
 
     function openRecommendation(item, card) {
       const url = contentUrl(item);
-      if (url) window.open(url, "_blank", "noopener,noreferrer");
       trackRecommendationClick(item);
       card.querySelector(".status-line").textContent = url ? "已打开真实内容链接，点击信号会在后台记录。" : "后端没有返回可打开链接；点击信号会在后台记录。";
       showToast(url ? `打开：${item.title}` : "后端没有返回可打开链接");
     }
 
-    async function submitFeedback(item, feedback_type, note = "") {
-      return await requestJsonStrict(ENDPOINTS.feedback, {
+    function submitFeedback(item, feedback_type, note = "", { keepalive = false } = {}) {
+      return requestJsonStrict(ENDPOINTS.feedback, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ recommendation_id: item.id, feedback_type, note }),
-        timeoutMs: 30000
+        timeoutMs: 30000,
+        keepalive
       });
     }
 
-    function recommendationRemoveDelay() {
-      return isMobileViewport() ? 1000 : 2400;
+    function feedbackActionKey(item) {
+      const contentId = item?.bvid || item?.content_id;
+      if (!contentId) return "";
+      const platform = String(item?.platform || item?.source_platform || "").trim().toLowerCase();
+      return `recommendation:${platform}:${contentId}`;
     }
 
-    function removeRecommendationCard(item, card, message, delayMs = recommendationRemoveDelay()) {
-      const key = recommendationKey(item);
-      window.setTimeout(() => {
-        if (card) card.classList.add("is-removing");
-        window.setTimeout(() => {
-          state.videos = state.videos.filter((video) => recommendationKey(video) !== key);
-          renderAll();
-          if (message) showToast(message);
-        }, card ? 180 : 0);
-      }, card ? delayMs : 0);
+    function recommendationFeedbackButtons(card) {
+      return [...card.querySelectorAll('[data-action="like"], [data-action="dislike"], [data-action="dismiss"]')];
+    }
+
+    function recommendationFeedbackSnapshot(item, card, status) {
+      return {
+        feedbackType: item.feedback_type,
+        statusText: status.textContent,
+        pending: card.dataset.feedbackPending,
+        buttons: recommendationFeedbackButtons(card).map((button) => ({
+          button,
+          disabled: button.disabled,
+          pressed: button.getAttribute("aria-pressed"),
+          active: button.classList.contains("is-active")
+        }))
+      };
+    }
+
+    function restoreRecommendationFeedback(item, card, status, snapshot) {
+      item.feedback_type = snapshot.feedbackType;
+      status.classList.remove("has-feedback-action");
+      status.textContent = snapshot.statusText;
+      card.classList.remove("is-feedback-pending", "is-feedback-saving");
+      if (snapshot.pending == null) delete card.dataset.feedbackPending;
+      else card.dataset.feedbackPending = snapshot.pending;
+      snapshot.buttons.forEach(({ button, disabled, pressed, active }) => {
+        button.disabled = disabled;
+        if (pressed == null) button.removeAttribute("aria-pressed");
+        else button.setAttribute("aria-pressed", pressed);
+        button.classList.toggle("is-active", active);
+      });
+    }
+
+    function stageRecommendationFeedback(item, card, feedbackType) {
+      const key = feedbackActionKey(item);
+      if (!key) {
+        showToast("这条推荐缺少稳定内容标识，暂时无法记录反馈。");
+        return false;
+      }
+      const status = card.querySelector(".status-line");
+      const snapshot = recommendationFeedbackSnapshot(item, card, status);
+      const copy = {
+        like: {
+          pending: "已标记喜欢，10 秒内可撤销。",
+          saving: "正在保存喜欢反馈…",
+          committed: "已记录喜欢，推荐会继续保留在当前列表。",
+          toast: "已记录喜欢"
+        },
+        dislike: {
+          pending: "已标记不感兴趣，10 秒内可撤销。",
+          saving: "正在保存不感兴趣反馈…",
+          committed: "已记录不感兴趣，下次刷新列表时会隐藏。",
+          toast: "已记录不感兴趣"
+        },
+        dismiss: {
+          pending: "已标记忽略，10 秒内可撤销。",
+          saving: "正在保存忽略反馈…",
+          committed: "已忽略这条推荐，下次刷新列表时会隐藏。",
+          toast: "已忽略推荐"
+        }
+      }[feedbackType];
+      const scheduled = pendingActions.schedule(key, {
+        commit: ({ keepalive }) => {
+          if (card.isConnected && !keepalive) {
+            card.classList.remove("is-feedback-pending");
+            card.classList.add("is-feedback-saving");
+            status.classList.remove("has-feedback-action");
+            status.textContent = copy.saving;
+          }
+          return submitFeedback(item, feedbackType, "", { keepalive });
+        },
+        rollback: ({ reason }) => {
+          restoreRecommendationFeedback(item, card, status, snapshot);
+          if (reason === "undo") showToast("已撤销反馈");
+        },
+        committed: () => {
+          if (!card.isConnected) return;
+          delete card.dataset.feedbackPending;
+          card.classList.remove("is-feedback-pending", "is-feedback-saving");
+          status.classList.remove("has-feedback-action");
+          status.textContent = copy.committed;
+          showToast(copy.toast);
+        }
+      });
+      if (!scheduled) return false;
+
+      item.feedback_type = feedbackType;
+      card.dataset.feedbackPending = "true";
+      card.classList.add("is-feedback-pending");
+      const clicked = card.querySelector(`[data-action="${feedbackType}"]`);
+      recommendationFeedbackButtons(card).forEach((button) => { button.disabled = true; });
+      if (clicked) {
+        clicked.setAttribute("aria-pressed", "true");
+        clicked.classList.add("is-active");
+      }
+      const undo = document.createElement("button");
+      undo.type = "button";
+      undo.className = "feedback-undo-btn";
+      undo.dataset.feedbackUndo = key;
+      undo.textContent = "撤销";
+      undo.addEventListener("click", () => { pendingActions.undo(key); });
+      status.classList.add("has-feedback-action");
+      status.setAttribute("aria-live", "polite");
+      status.replaceChildren(document.createTextNode(`${copy.pending} `), undo);
+      return true;
     }
 
     function finishRecommendationFeedback(card, feedbackType = "") {
@@ -1786,6 +2388,27 @@
       scheduleActivityRailHeightSync();
     }
 
+    // 用户是否正在惊喜卡上互动：聊天输入框展开 / 有焦点 / 有未发送草稿。
+    // 后台推送（新候选、队列刷新）在此期间不得切卡或重渲染——setActiveDelight
+    // 会 closeDelightComposer 收起输入框（field report 2026-07-05「打着打着惊喜
+    // 推荐突然变了」），切卡更会让随后的发送把这条反馈记到换上来的新卡上。
+    // 有未发送草稿也算互动中：草稿属于当前这张卡，换卡同样会串。
+    function delightUserEngaged() {
+      const input = document.getElementById("delightCommentInput");
+      if (!input) return false;
+      const composing = Boolean(document.querySelector(".delight-main-actions.is-composing"));
+      const focused = document.activeElement === input;
+      const hasDraft = Boolean(String(input.value || "").trim());
+      return composing || focused || hasDraft;
+    }
+
+    // 互动中新候选静默入队时只刷新右上角计数，不触碰卡片 DOM。
+    function syncDelightCount() {
+      if ($("#delightCount") && state.delights.length) {
+        $("#delightCount").textContent = `${state.delightIndex + 1}/${state.delights.length}`;
+      }
+    }
+
     async function handleCardAction(action, item, card) {
       const status = card.querySelector(".status-line");
       if (card.dataset.feedbackPending === "true") return;
@@ -1836,49 +2459,31 @@
         }
         return;
       }
-      card.dataset.feedbackPending = "true";
-      card.querySelectorAll(".card-actions button, .card-actions input").forEach((control) => { control.disabled = true; });
-      try {
-        if (action === "send-comment") {
-          const input = card.querySelector(".comment-field input");
-          const note = input.value.trim();
-          if (!note) {
-            delete card.dataset.feedbackPending;
-            card.querySelectorAll(".card-actions button, .card-actions input").forEach((control) => { control.disabled = false; });
-            status.textContent = "先写一句想聊的内容，再提交这条反馈。";
-            input?.focus();
-            return;
-          }
-          await submitFeedback(item, "comment", note);
-          if (input) input.value = "";
-          closeCardComposer(card);
-          item.feedback_type = "comment";
-          status.textContent = "已提交聊天线索，推荐会继续保留在当前列表。";
-          finishRecommendationFeedback(card, "comment");
-          showToast("已提交聊天线索");
+      if (action === "send-comment") {
+        const input = card.querySelector(".comment-field input");
+        const note = input.value.trim();
+        if (!note) {
+          status.textContent = "先写一句想聊的内容，再提交这条反馈。";
+          input?.focus();
           return;
         }
-        const feedbackType = action === "like" ? "like" : action === "dismiss" ? "dismiss" : "dislike";
-        await submitFeedback(item, feedbackType);
-        const feedbackCopy = {
-          like: ["已记录喜欢，推荐会继续保留在当前列表。", "已记录喜欢"],
-          dislike: ["已记录不感兴趣，几秒后从当前列表移除。", "已记录不感兴趣"],
-          dismiss: ["已忽略这条推荐，几秒后从当前列表移除。", "已忽略推荐"]
-        }[feedbackType];
-        status.textContent = feedbackCopy[0];
-        if (shouldRemoveRecommendationAfterFeedback(feedbackType)) {
-          removeRecommendationCard(item, card, feedbackCopy[1]);
-          return;
-        }
-        item.feedback_type = feedbackType;
-        finishRecommendationFeedback(card, feedbackType);
-        showToast(feedbackCopy[1]);
-      } catch (error) {
-        delete card.dataset.feedbackPending;
-        card.querySelectorAll(".card-actions button, .card-actions input").forEach((control) => { control.disabled = false; });
-        status.textContent = configErrorMessage(error?.details) || error?.message || "反馈提交失败，请稍后重试。";
-        showToast(status.textContent);
+        const previousFeedbackType = item.feedback_type;
+        if (input) input.value = "";
+        closeCardComposer(card);
+        item.feedback_type = "comment";
+        status.textContent = "已提交聊天线索，推荐会继续保留在当前列表。";
+        finishRecommendationFeedback(card, "comment");
+        showToast("已提交聊天线索");
+        void submitFeedback(item, "comment", note).catch((error) => {
+          item.feedback_type = previousFeedbackType;
+          if (input) input.value = note;
+          status.textContent = configErrorMessage(error?.details) || error?.message || "反馈提交失败，请稍后重试。";
+          showToast(status.textContent);
+        });
+        return;
       }
+      const feedbackType = action === "like" ? "like" : action === "dismiss" ? "dismiss" : "dislike";
+      stageRecommendationFeedback(item, card, feedbackType);
     }
 
     function renderRail() {
@@ -2098,12 +2703,17 @@
       return `<div class="profile-meter"><div class="profile-meter-head"><span>${escapeHtml(label)}</span><strong>${Math.round(score * 100)}%</strong></div><div class="profile-meter-track"><div class="profile-meter-fill" style="width:${score * 100}%"></div></div></div>`;
     }
 
+    function isKnownText(value) {
+      const text = String(value == null ? "" : value).trim().toLowerCase();
+      return text !== "" && !["unknown", "none", "n/a", "未知"].includes(text);
+    }
+
     function styleHtml(style) {
       if (!style || typeof style !== "object" || Array.isArray(style)) return paragraphsHtml(style, "内容口味还在继续归拢。");
       const textRows = [
         ["偏好时长", style.preferred_duration],
         ["偏好节奏", style.preferred_pace]
-      ].filter(([, value]) => value).map(([label, value]) => `<div class="profile-context-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+      ].filter(([, value]) => isKnownText(value)).map(([label, value]) => `<div class="profile-context-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
       const bars = [
         ["质量敏感度", style.quality_sensitivity],
         ["幽默偏好", style.humor_preference],
@@ -2119,13 +2729,14 @@
         ["周末", context.weekend_patterns],
         ["一天中的时段", context.time_of_day_patterns],
         ["观看会话", context.session_type]
-      ].filter(([, value]) => value).map(([label, value]) => `<div class="profile-context-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+      ].filter(([, value]) => isKnownText(value)).map(([label, value]) => `<div class="profile-context-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
       return rows ? `<div class="profile-context">${rows}</div>` : paragraphsHtml("", "使用场景还在继续观察。");
     }
 
     function speculativeHtml(items, options = {}) {
       const isAvoidance = options.kind === "avoidance";
       const probeType = isAvoidance ? "avoidance.probe" : "interest.probe";
+      const actionCopy = probeActionCopy(probeType);
       const list = asArray(items).filter((item) => {
         if (typeof item !== "object") return !state.handledProbeKeys.has(probeKey(probeType, item));
         const domain = item.domain || item.name || item.title;
@@ -2158,7 +2769,7 @@
           ${item.reason ? `<p class="video-meta">${escapeHtml(item.reason)}</p>` : ""}
           ${specifics.length ? `<div class="spec-specifics">${specifics.map((s) => `<span class="spec-specific-chip">${escapeHtml(s.name)}${s.count > 0 ? `<span class="spec-specific-count">${s.count}</span>` : ""}</span>`).join("")}</div>` : ""}
           <p class="spec-help">${isAvoidance ? `置信度表示阿B认为你会避开这个方向的把握；确认次数来自后端累计的避雷确认信号，达到 ${threshold} 次后会进入更稳定的避雷画像。` : `置信度表示阿B认为你会喜欢这个方向的把握；确认次数来自后端累计的正向确认信号（包括但不限于这里的“喜欢”），达到 ${threshold} 次后会进入更稳定的兴趣画像。`}</p>
-          ${status === "active" && domain ? `<div class="spec-actions"><button class="probe-btn is-confirm" type="button" data-spec-response="confirm" data-spec-type="${isAvoidance ? "avoidance.probe" : "interest.probe"}">${isAvoidance ? "确实不喜欢" : "喜欢"}</button><button class="probe-btn is-reject" type="button" data-spec-response="reject" data-spec-type="${isAvoidance ? "avoidance.probe" : "interest.probe"}">${isAvoidance ? "不是" : "不喜欢"}</button></div>` : ""}
+          ${status === "active" && domain ? `<div class="spec-actions"><button class="probe-btn is-confirm" type="button" data-spec-response="confirm" data-spec-type="${probeType}">${actionCopy.confirm}</button><button class="probe-btn is-neutral" type="button" data-spec-response="defer" data-spec-type="${probeType}">${actionCopy.defer}</button><button class="probe-btn is-reject" type="button" data-spec-response="reject" data-spec-type="${probeType}">${actionCopy.reject}</button></div>` : ""}
         </div>`;
       }).join("")}</div>`;
     }
@@ -2500,34 +3111,52 @@
       if (!root) return;
       root.querySelector('[data-profile-edit-toggle="exit"]')?.addEventListener("click", () => { void exitProfileEdit(); });
       root.querySelectorAll("[data-edit-remove]").forEach((btn) => {
-        btn.addEventListener("click", () => void applyProfileEdit({ target: btn.dataset.editRemove, op: "remove", value: btn.dataset.editValue }));
+        btn.addEventListener("click", async () => {
+          if (btn.disabled) return;
+          const chip = btn.closest(".edit-chip");
+          if (chip?.classList.contains("is-pending")) return;
+          chip?.classList.add("is-pending");
+          btn.disabled = true;
+          await applyProfileEdit({ target: btn.dataset.editRemove, op: "remove", value: btn.dataset.editValue });
+        });
       });
       root.querySelectorAll("[data-edit-remove-specific]").forEach((btn) => {
-        btn.addEventListener("click", () => void applyProfileEdit({
-          target: btn.dataset.editRemoveSpecific,
-          op: "remove",
-          value: btn.dataset.editValue,
-          parent: btn.dataset.editParent || ""
-        }));
+        btn.addEventListener("click", async () => {
+          if (btn.disabled) return;
+          const chip = btn.closest(".edit-chip");
+          if (chip?.classList.contains("is-pending")) return;
+          chip?.classList.add("is-pending");
+          btn.disabled = true;
+          await applyProfileEdit({
+            target: btn.dataset.editRemoveSpecific,
+            op: "remove",
+            value: btn.dataset.editValue,
+            parent: btn.dataset.editParent || ""
+          });
+        });
       });
       root.querySelectorAll("[data-edit-reset]").forEach((btn) => {
         btn.addEventListener("click", () => void applyProfileEdit({ target: btn.dataset.editReset, op: "reset" }));
       });
       root.querySelectorAll("[data-edit-add]").forEach((btn) => {
-        btn.addEventListener("click", () => {
+        btn.addEventListener("click", async () => {
+          if (btn.disabled) return;
           const path = btn.dataset.editAdd;
           const input = root.querySelector(`[data-edit-add-input="${path}"]`);
           const value = input?.value.trim();
           if (!value) return;
-          void applyProfileEdit({ target: path, op: "add", value });
+          btn.disabled = true;
+          await applyProfileEdit({ target: path, op: "add", value });
         });
       });
       root.querySelectorAll("[data-edit-add-specific]").forEach((btn) => {
-        btn.addEventListener("click", () => {
+        btn.addEventListener("click", async () => {
+          if (btn.disabled) return;
           const input = btn.closest(".edit-add-row")?.querySelector("[data-edit-specific-input]");
           const value = input?.value.trim();
           if (!value) return;
-          void applyProfileEdit({
+          btn.disabled = true;
+          await applyProfileEdit({
             target: btn.dataset.editAddSpecific,
             op: "add",
             value,
@@ -2536,21 +3165,27 @@
         });
       });
       root.querySelectorAll("[data-edit-add-input]").forEach((input) => {
-        input.addEventListener("keydown", (event) => {
+        input.addEventListener("keydown", async (event) => {
           if (event.key !== "Enter") return;
           event.preventDefault();
           const value = input.value.trim();
           if (!value) return;
-          void applyProfileEdit({ target: input.dataset.editAddInput, op: "add", value });
+          const button = root.querySelector(`[data-edit-add="${input.dataset.editAddInput}"]`);
+          if (button?.disabled) return;
+          if (button) button.disabled = true;
+          await applyProfileEdit({ target: input.dataset.editAddInput, op: "add", value });
         });
       });
       root.querySelectorAll("[data-edit-specific-input]").forEach((input) => {
-        input.addEventListener("keydown", (event) => {
+        input.addEventListener("keydown", async (event) => {
           if (event.key !== "Enter") return;
           event.preventDefault();
           const value = input.value.trim();
           if (!value) return;
-          void applyProfileEdit({
+          const button = input.closest(".edit-add-row")?.querySelector("[data-edit-add-specific]");
+          if (button?.disabled) return;
+          if (button) button.disabled = true;
+          await applyProfileEdit({
             target: input.dataset.editSpecificInput,
             op: "add",
             value,
@@ -2613,6 +3248,25 @@
 
     function isAvoidanceProbe(type) {
       return messageType({ type }) === "avoidance.probe";
+    }
+
+    const PROBE_ACTION_COPY = Object.freeze({
+      interest: Object.freeze({
+        confirm: "确认喜欢",
+        defer: "暂时搁置",
+        reject: "确认不喜欢",
+        chat: "多聊聊",
+      }),
+      avoidance: Object.freeze({
+        confirm: "确认避雷",
+        defer: "搁置避雷",
+        reject: "不是雷点",
+        chat: "多聊聊",
+      }),
+    });
+
+    function probeActionCopy(type) {
+      return PROBE_ACTION_COPY[isAvoidanceProbe(type) ? "avoidance" : "interest"];
     }
 
     function isChallengeProbe(item) {
@@ -2727,6 +3381,12 @@
       return Boolean(document.querySelector("#messageList .message-item.is-resolving, #messageList .message-item.is-resolved, #messageList .message-item.is-dismissing"));
     }
 
+    function bindMessageProbeActions(msg, el) {
+      el.querySelectorAll("[data-probe]").forEach((button) => {
+        button.addEventListener("click", () => respondProbe(msg, button.dataset.probe, el));
+      });
+    }
+
     function renderMessages() {
       const list = $("#messageList");
       if (state.messageListDomLocked || isMessageListLocked()) {
@@ -2750,28 +3410,41 @@
         el.dataset.messageKey = key;
         if (messageType(msg) === "notification") {
           el.classList.add("is-notification");
-          el.innerHTML = `<p class="eyebrow">待通知候选</p><h3>${escapeHtml(msg.title)}</h3><p class="video-meta">${escapeHtml(msg.reason)}</p><div class="message-note">这类消息来自后端挑出的高置信推荐，用于插件通知；标记已通知后不会反复出现。</div><div class="message-card-actions"><div class="card-feedback-icons" aria-label="通知候选状态"><button class="feedback-icon-btn" data-notification-msg="dismiss" type="button" aria-label="标记已通知" title="标记已通知"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></button></div><div class="message-primary-actions"><button class="small-btn" data-notification-msg="view">去看看</button></div></div>`;
-          el.querySelectorAll("[data-notification-msg]").forEach((btn) => btn.addEventListener("click", () => respondNotification(msg, btn.dataset.notificationMsg, el)));
+          const viewAction = msg.content_url
+            ? `<a class="small-btn" data-notification-msg="view" href="${escapeHtml(msg.content_url)}" target="_blank" rel="noopener noreferrer">去看看</a>`
+            : `<button class="small-btn" data-notification-msg="view" type="button">去看看</button>`;
+          el.innerHTML = `<p class="eyebrow">待通知候选</p><h3>${escapeHtml(msg.title)}</h3><p class="video-meta">${escapeHtml(msg.reason)}</p><div class="message-note">这类消息来自后端挑出的高置信推荐，用于插件通知；标记已通知后不会反复出现。</div><div class="message-card-actions"><div class="card-feedback-icons" aria-label="通知候选状态"><button class="feedback-icon-btn" data-notification-msg="dismiss" type="button" aria-label="标记已通知" title="标记已通知"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></button></div><div class="message-primary-actions">${viewAction}</div></div>`;
+          el.querySelectorAll("[data-notification-msg]").forEach((btn) => {
+            btn.addEventListener("click", () => respondNotification(msg, btn.dataset.notificationMsg, el));
+            btn.addEventListener("auxclick", (event) => {
+              if (event.button === 1 && btn.dataset.notificationMsg === "view") {
+                respondNotification(msg, "view", el);
+              }
+            });
+          });
         } else {
           const isAvoidance = messageType(msg) === "avoidance.probe";
           const isChallenge = !isAvoidance && isChallengeProbe(msg);
           el.classList.add(isAvoidance ? "is-avoidance-probe" : isChallenge ? "is-challenge-probe" : "is-interest-probe");
           const eyebrow = isAvoidance ? "避雷确认" : isChallenge ? "挑战探针" : "兴趣确认";
           const actionsLabel = isAvoidance ? "确认或排除这个避雷方向" : isChallenge ? "确认或排除这个挑战方向" : "确认或排除这个兴趣";
-          const confirmLabel = isAvoidance ? "确实不喜欢" : "喜欢";
-          const rejectLabel = isAvoidance ? "不是" : "不喜欢";
           const kindCopy = isAvoidance
             ? "想少看这类，就确认这是雷点；如果阿B猜错了，点不是。"
             : isChallenge
               ? "这是挑战方向，会把口味往侧边推一点；想继续试探就点喜欢，不准就点不喜欢。"
             : "想继续探索这个方向，就点喜欢；不准就点不喜欢。";
-          el.innerHTML = `<p class="eyebrow">${eyebrow}</p><div class="message-note probe-kind-copy">${escapeHtml(kindCopy)}</div><h3>${escapeHtml(msg.domain)}</h3><p class="video-meta">${escapeHtml(msg.reason)}</p><div class="profile-chip-row">${asArray(msg.specifics).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join("")}</div><div class="message-card-actions"><div class="card-feedback-icons" aria-label="${actionsLabel}"><button class="feedback-icon-btn" data-probe="confirm" type="button" aria-label="${confirmLabel}" title="${confirmLabel}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg></button><span class="feedback-separator" aria-hidden="true">/</span><button class="feedback-icon-btn" data-probe="reject" type="button" aria-label="${rejectLabel}" title="${rejectLabel}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg></button></div><div class="message-primary-actions"><button class="small-btn" data-probe="chat">多聊聊</button></div></div>`;
+          const actionCopy = probeActionCopy(messageType(msg));
+          const actionButtons = `
+            <button class="probe-btn is-confirm" data-probe="confirm" type="button">${actionCopy.confirm}</button>
+            <button class="probe-btn is-neutral" data-probe="defer" type="button">${actionCopy.defer}</button>
+            <button class="probe-btn is-reject" data-probe="reject" type="button">${actionCopy.reject}</button>`;
+          el.innerHTML = `<p class="eyebrow">${eyebrow}</p><div class="message-note probe-kind-copy">${escapeHtml(kindCopy)}</div><h3>${escapeHtml(msg.domain)}</h3><p class="video-meta">${escapeHtml(msg.reason)}</p><div class="profile-chip-row">${asArray(msg.specifics).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join("")}</div><div class="message-card-actions"><div class="card-feedback-icons" aria-label="${actionsLabel}">${actionButtons}</div><div class="message-primary-actions"><button class="small-btn" data-probe="chat">${actionCopy.chat}</button></div></div>`;
           if (resolvedResult) {
             el.classList.add("is-resolved");
             const resolvedActions = el.querySelector(".message-card-actions");
             if (resolvedActions) resolvedActions.outerHTML = `<div class="message-note is-success">${escapeHtml(resolvedResult)}</div>`;
           } else {
-            el.querySelectorAll("[data-probe]").forEach((btn) => btn.addEventListener("click", () => respondProbe(msg, btn.dataset.probe, el)));
+            bindMessageProbeActions(msg, el);
           }
         }
         return el;
@@ -2779,7 +3452,7 @@
     }
 
     async function respondNotification(msg, response, el) {
-      if (response === "view" && msg.content_url) window.open(msg.content_url, "_blank", "noopener,noreferrer");
+      if (response === "view" && msg.content_url) trackRecommendationClick(msg);
       await requestJson(ENDPOINTS.notificationSent, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bvid: msg.bvid }) });
       state.messages = state.messages.filter((item) => !(messageType(item) === "notification" && String(item.bvid) === String(msg.bvid)));
       renderMessages();
@@ -2919,7 +3592,49 @@
       window.setTimeout(() => input?.focus(), 40);
     }
 
-    async function respondProbe(msg, response, el) {
+    function probePendingKey(type, domain) {
+      const normalizedDomain = String(domain || "").trim().toLowerCase();
+      return normalizedDomain ? `probe:${messageType({ type })}:${normalizedDomain}` : "";
+    }
+
+    function submitProbeResponse(type, domain, response, { surface = "", keepalive = false } = {}) {
+      const isAvoidance = isAvoidanceProbe(type);
+      const endpoint = isAvoidance ? ENDPOINTS.avoidanceProbeRespond : ENDPOINTS.interestProbeRespond;
+      const payload = { domain, response, message: "" };
+      if (!isAvoidance && surface) payload.surface = surface;
+      return requestJsonStrict(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        keepalive
+      }).then((apiResponse) => {
+        if (apiResponse?.ok === false) throw new Error("后端未接受这次探针反馈");
+        return apiResponse;
+      });
+    }
+
+    function messageProbeResult(type, response, apiResponse = null) {
+      const isAvoidance = isAvoidanceProbe(type);
+      const deferExhausted = apiResponse?.action === "defer_exhausted";
+      const deferResult = deferExhausted ? "已多次搁置，之后先不提这个方向了。" : "已搁置，过阵子可能再提。";
+      return isAvoidance
+        ? response === "confirm" ? "已确认避雷方向，后续会减少类似内容。"
+          : response === "defer" ? deferResult
+          : "已搁置，暂时不作为避雷方向。"
+        : response === "confirm" ? "已确认，后续推荐会提高权重。"
+          : response === "defer" ? deferResult
+          : "已搁置，后续会少试探这个方向。";
+    }
+
+    function probeToast(type, response, apiResponse = null) {
+      const isAvoidance = isAvoidanceProbe(type);
+      const deferToast = apiResponse?.action === "defer_exhausted" ? "好，之后先不提了" : "已暂时搁置，过阵子可能再提";
+      return isAvoidance
+        ? response === "confirm" ? "已确认这个避雷方向" : response === "defer" ? deferToast : "已搁置这个避雷方向"
+        : response === "confirm" ? "已确认这个兴趣方向" : response === "defer" ? deferToast : "已搁置这个兴趣方向";
+    }
+
+    function respondProbe(msg, response, el) {
       if (!el) return;
       const actions = el.querySelector(".message-card-actions");
       if (response === "chat") {
@@ -2927,111 +3642,158 @@
         showToast("已在这条消息里打开聊天输入");
         return;
       }
-      const key = messageKey(msg);
-      state.messageListDomLocked = true;
-      if (!state.messageListSnapshot && isMessagesDrawerOpen()) state.messageListSnapshot = getRenderableMessages();
-      el.style.minHeight = `${el.getBoundingClientRect().height}px`;
-      el.classList.add("is-resolving");
-      state.resolvingMessageKeys.add(key);
-      actions?.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+      if (!actions) return;
+      const stateKey = messageKey(msg);
       const probeType = messageType(msg);
       const domain = msg.domain || "";
       const handledKey = probeKey(probeType, domain);
-      if (handledKey) state.handledProbeKeys.add(handledKey);
-      try {
-        const isAvoidance = probeType === "avoidance.probe";
-        const endpoint = isAvoidance ? ENDPOINTS.avoidanceProbeRespond : ENDPOINTS.interestProbeRespond;
-        const apiResp = await requestJson(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: msg.domain, response, message: "" }) });
-        if (apiResp && apiResp.ok === false) {
-          state.resolvingMessageKeys.delete(key);
-          state.messages = state.messages.filter((item) => messageKey(item) !== key);
-          if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((item) => messageKey(item) !== key);
-          state.messageListDomLocked = false;
-          renderMessages();
-          void refreshProfile();
-          return;
-        }
-        const result = isAvoidance
-          ? response === "confirm" ? "已确认避雷方向，后续会减少类似内容。" : "已搁置，暂时不作为避雷方向。"
-          : response === "confirm" ? "已确认，后续推荐会提高权重。" : "已搁置，后续会少试探这个方向。";
-        state.resolvedMessageResults.set(key, result);
-        el.classList.remove("is-resolving");
-        el.classList.add("is-resolved");
-        if (actions) {
+      const pendingKey = probePendingKey(probeType, domain);
+      const snapshot = {
+        actionsHtml: actions.innerHTML,
+        actionsClass: actions.className,
+        minHeight: el.style.minHeight
+      };
+      let apiResponse = null;
+      const scheduled = pendingActions.schedule(pendingKey, {
+        commit: ({ keepalive }) => {
+          if (el.isConnected && !keepalive) {
+            el.classList.remove("is-feedback-pending");
+            el.classList.add("is-feedback-saving");
+            actions.innerHTML = '<div class="message-action-result">正在保存反馈…</div>';
+          }
+          return submitProbeResponse(probeType, domain, response, { keepalive }).then((result) => {
+            apiResponse = result;
+            return result;
+          });
+        },
+        rollback: ({ reason }) => {
+          if (handledKey) state.handledProbeKeys.delete(handledKey);
+          state.resolvingMessageKeys.delete(stateKey);
+          state.messageListDomLocked = state.resolvingMessageKeys.size > 0;
+          state.resolvedMessageResults.delete(stateKey);
+          el.classList.remove("is-feedback-pending", "is-feedback-saving", "is-feedback-committed");
+          el.style.minHeight = snapshot.minHeight;
+          actions.className = snapshot.actionsClass;
+          actions.innerHTML = snapshot.actionsHtml;
+          bindMessageProbeActions(msg, el);
+          if (reason === "undo") showToast("已撤销探针反馈");
+        },
+        committed: () => {
+          const result = messageProbeResult(probeType, response, apiResponse);
+          state.resolvedMessageResults.set(stateKey, result);
+          state.resolvingMessageKeys.delete(stateKey);
+          state.messageListDomLocked = state.resolvingMessageKeys.size > 0;
+          state.messages = state.messages.filter((item) => messageKey(item) !== stateKey);
+          if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((item) => messageKey(item) !== stateKey);
+          syncMessageCount();
+          if (!el.isConnected) return;
+          el.classList.remove("is-feedback-pending", "is-feedback-saving");
+          el.classList.add("is-feedback-committed");
           actions.classList.add("is-result");
           actions.innerHTML = `<div class="message-action-result" title="${escapeHtml(result)}">${escapeHtml(result)}</div>`;
+          showToast(probeToast(probeType, response, apiResponse));
         }
-        showToast(isAvoidance
-          ? response === "confirm" ? "已确认这个避雷方向" : "已搁置这个避雷方向"
-          : response === "confirm" ? "已确认这个兴趣方向" : "已搁置这个兴趣方向");
-        setTimeout(() => {
-          collapseMessageItem(key, el, () => {
-            state.resolvingMessageKeys.delete(key);
-            state.resolvedMessageResults.delete(key);
-            state.messages = state.messages.filter((item) => messageKey(item) !== key);
-            if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((item) => messageKey(item) !== key);
-            state.messageListDomLocked = false;
-            renderMessages();
-            void refreshProfile();
-          });
-        }, 1800);
-      } catch (error) {
-        state.resolvingMessageKeys.delete(key);
-        state.resolvedMessageResults.delete(key);
-        state.messageListDomLocked = false;
-        el.classList.remove("is-resolving");
-        el.style.minHeight = "";
-        if (handledKey) state.handledProbeKeys.delete(handledKey);
-        actions?.querySelectorAll("button").forEach((button) => { button.disabled = false; });
-        showToast(`确认反馈失败：${error.message || "后端不可用"}`);
+      });
+      if (!scheduled) {
+        showToast("这条探针反馈正在处理中。");
+        return;
       }
+
+      state.messageListDomLocked = true;
+      if (!state.messageListSnapshot && isMessagesDrawerOpen()) state.messageListSnapshot = getRenderableMessages();
+      state.resolvingMessageKeys.add(stateKey);
+      if (handledKey) state.handledProbeKeys.add(handledKey);
+      el.style.minHeight = `${el.getBoundingClientRect().height}px`;
+      el.classList.add("is-feedback-pending");
+      const result = messageProbeResult(probeType, response);
+      actions.classList.add("is-result");
+      actions.innerHTML = `<div class="message-action-result">${escapeHtml(result)} <button class="feedback-undo-btn" data-probe-undo type="button">撤销</button></div>`;
+      actions.querySelector("[data-probe-undo]")?.addEventListener("click", () => { pendingActions.undo(pendingKey); });
     }
 
-    function bindSpeculativeActions() {
-      document.querySelectorAll("[data-spec-response]").forEach((button) => {
+    function bindSpeculativeRowActions(row) {
+      row.querySelectorAll("[data-spec-response]").forEach((button) => {
         button.addEventListener("click", () => respondSpeculativeInterest(button));
       });
     }
 
-    async function respondSpeculativeInterest(button) {
+    function bindSpeculativeActions() {
+      document.querySelectorAll("[data-spec-domain]").forEach(bindSpeculativeRowActions);
+    }
+
+    function profileProbeResult(type, response, domain, apiResponse = null) {
+      const isAvoidance = isAvoidanceProbe(type);
+      const deferExhausted = apiResponse?.action === "defer_exhausted";
+      const deferRow = deferExhausted
+        ? `好，「${domain}」之后先不提了。`
+        : `好，「${domain}」先放一放，过阵子可能再提。`;
+      return isAvoidance
+        ? response === "confirm" ? `好，「${domain}」会作为避雷方向处理。`
+          : response === "defer" ? deferRow
+          : `好，「${domain}」不记成避雷。`
+        : response === "confirm" ? `好，「${domain}」记住了。`
+          : response === "defer" ? deferRow
+          : `好，「${domain}」先不看了。`;
+    }
+
+    function respondSpeculativeInterest(button) {
       const row = button.closest("[data-spec-domain]");
       const domain = row?.dataset.specDomain;
       const response = button.dataset.specResponse;
       if (!domain || !response) return;
-      row.querySelectorAll("[data-spec-response]").forEach((btn) => { btn.disabled = true; });
       const type = button.dataset.specType || "interest.probe";
-      const key = probeKey(type, domain);
-      if (key) state.handledProbeKeys.add(key);
-      try {
-        const isAvoidance = isAvoidanceProbe(type);
-        const endpoint = isAvoidance ? ENDPOINTS.avoidanceProbeRespond : ENDPOINTS.interestProbeRespond;
-        const payload = { domain, response, message: "" };
-        if (!isAvoidance) payload.surface = "profile";
-        const apiResp = await requestJson(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-        if (apiResp && apiResp.ok === false) {
-          row.remove();
-          state.messages = state.messages.filter((msg) => messageKey(msg) !== key);
-          if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((msg) => messageKey(msg) !== key);
-          renderMessages();
-          void refreshProfile();
-          return;
+      const handledKey = probeKey(type, domain);
+      const pendingKey = probePendingKey(type, domain);
+      const actions = row.querySelector(".spec-actions");
+      if (!actions) return;
+      const snapshot = {
+        actionsHtml: actions.innerHTML,
+        actionsClass: actions.className
+      };
+      let apiResponse = null;
+      const scheduled = pendingActions.schedule(pendingKey, {
+        commit: ({ keepalive }) => {
+          if (row.isConnected && !keepalive) {
+            row.classList.remove("is-feedback-pending");
+            row.classList.add("is-feedback-saving");
+            actions.innerHTML = '<p class="spec-result">正在保存反馈…</p>';
+          }
+          return submitProbeResponse(type, domain, response, { surface: "profile", keepalive }).then((result) => {
+            apiResponse = result;
+            return result;
+          });
+        },
+        rollback: ({ reason }) => {
+          if (handledKey) state.handledProbeKeys.delete(handledKey);
+          row.classList.remove("is-feedback-pending", "is-feedback-saving", "is-feedback-committed");
+          actions.className = snapshot.actionsClass;
+          actions.innerHTML = snapshot.actionsHtml;
+          bindSpeculativeRowActions(row);
+          if (reason === "undo") showToast("已撤销探针反馈");
+        },
+        committed: () => {
+          const result = profileProbeResult(type, response, domain, apiResponse);
+          const messageStateKey = probeKey(type, domain);
+          state.messages = state.messages.filter((msg) => messageKey(msg) !== messageStateKey);
+          if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((msg) => messageKey(msg) !== messageStateKey);
+          syncMessageCount();
+          if (!row.isConnected) return;
+          row.classList.remove("is-feedback-pending", "is-feedback-saving");
+          row.classList.add("is-feedback-committed");
+          actions.innerHTML = `<p class="spec-result">${escapeHtml(result)}</p>`;
+          showToast(probeToast(type, response, apiResponse));
         }
-        const result = isAvoidance
-          ? (response === "confirm" ? `好，「${escapeHtml(domain)}」会作为避雷方向处理。` : `好，「${escapeHtml(domain)}」不记成避雷。`)
-          : (response === "confirm" ? `好，「${escapeHtml(domain)}」记住了。` : `好，「${escapeHtml(domain)}」先不看了。`);
-        row.innerHTML = `<p class="spec-result">${result}</p>`;
-        state.messages = state.messages.filter((msg) => messageKey(msg) !== key);
-        if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((msg) => messageKey(msg) !== key);
-        renderMessages();
-        showToast(isAvoidance
-          ? response === "confirm" ? "已确认这个避雷方向" : "已排除这个避雷方向"
-          : response === "confirm" ? "已确认这个猜测兴趣" : "已排除这个猜测兴趣");
-        setTimeout(() => { void refreshProfile(); }, 1200);
-      } catch (error) {
-        if (key) state.handledProbeKeys.delete(key);
-        row.querySelectorAll("[data-spec-response]").forEach((btn) => { btn.disabled = false; });
-        showToast(`确认反馈失败：${error.message || "后端不可用"}`);
+      });
+      if (!scheduled) {
+        showToast("这条探针反馈正在处理中。");
+        return;
       }
+
+      if (handledKey) state.handledProbeKeys.add(handledKey);
+      row.classList.add("is-feedback-pending");
+      const result = profileProbeResult(type, response, domain);
+      actions.innerHTML = `<p class="spec-result">${escapeHtml(result)} <button class="feedback-undo-btn" data-probe-undo type="button">撤销</button></p>`;
+      actions.querySelector("[data-probe-undo]")?.addEventListener("click", () => { pendingActions.undo(pendingKey); });
     }
 
     function createClientTurnId(prefix = "webui") {
@@ -3146,6 +3908,45 @@
       return current;
     }
 
+    function delightContentUrl(delight) {
+      if (!delight) return "";
+      return delight.content_url || (delight.bvid ? `https://www.bilibili.com/video/${encodeURIComponent(delight.bvid)}` : "");
+    }
+
+    function ensureDelightThumbAnchor() {
+      const thumb = $("#delightThumb");
+      if (!thumb || thumb.tagName.toLowerCase() === "a") return thumb;
+      const anchor = document.createElement("a");
+      Array.from(thumb.attributes).forEach((attr) => {
+        if (attr.name !== "role" && attr.name !== "tabindex") {
+          anchor.setAttribute(attr.name, attr.value);
+        }
+      });
+      while (thumb.firstChild) anchor.append(thumb.firstChild);
+      thumb.replaceWith(anchor);
+      return anchor;
+    }
+
+    function syncDelightThumbLink(delight) {
+      const thumb = ensureDelightThumbAnchor();
+      if (!thumb) return null;
+      const url = delightContentUrl(delight);
+      if (url) {
+        thumb.href = url;
+        thumb.target = "_blank";
+        thumb.rel = "noopener noreferrer";
+        thumb.removeAttribute("role");
+        thumb.removeAttribute("tabindex");
+        return thumb;
+      }
+      thumb.removeAttribute("href");
+      thumb.removeAttribute("target");
+      thumb.removeAttribute("rel");
+      thumb.setAttribute("role", "button");
+      thumb.setAttribute("tabindex", "0");
+      return thumb;
+    }
+
     function applyTurnToDelight(turn) {
       const subjectId = String(turn?.subject_id || turn?.bvid || "");
       if (!turn || (turn.scope && turn.scope !== "delight") || !subjectId) return null;
@@ -3184,7 +3985,7 @@
       window.setTimeout(poll, 1200);
     }
 
-    async function respondDelight(delight, response, el = null) {
+    async function respondDelight(delight, response, el = null, openUrl = false) {
       if (!delight) return;
       if (response === "chat") { openDelightComposer(); return; }
       if (response === "cancel-comment") { closeDelightComposer(); return; }
@@ -3194,6 +3995,7 @@
         btn.disabled = true;
         const wasSaved = btn.getAttribute("aria-pressed") === "true";
         btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
+        if (delight.bvid) _delightStatusCache.set(delight.bvid, { ...(_delightStatusCache.get(delight.bvid) || {}), watchLater: !wasSaved });
         try {
           if (wasSaved) {
             await requestJson(`${ENDPOINTS.watchLater}/${encodeURIComponent(delight.bvid)}`, { method: "DELETE" });
@@ -3202,6 +4004,7 @@
           }
         } catch {
           btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
+          if (delight.bvid) _delightStatusCache.set(delight.bvid, { ...(_delightStatusCache.get(delight.bvid) || {}), watchLater: wasSaved });
         } finally {
           btn.disabled = false;
         }
@@ -3213,6 +4016,7 @@
         btn.disabled = true;
         const wasSaved = btn.getAttribute("aria-pressed") === "true";
         btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
+        if (delight.bvid) _delightStatusCache.set(delight.bvid, { ...(_delightStatusCache.get(delight.bvid) || {}), favorite: !wasSaved });
         try {
           if (wasSaved) {
             await requestJson(`${ENDPOINTS.favorites}/${encodeURIComponent(delight.bvid)}`, { method: "DELETE" });
@@ -3221,6 +4025,7 @@
           }
         } catch {
           btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
+          if (delight.bvid) _delightStatusCache.set(delight.bvid, { ...(_delightStatusCache.get(delight.bvid) || {}), favorite: wasSaved });
         } finally {
           btn.disabled = false;
         }
@@ -3253,8 +4058,12 @@
         return;
       }
       if (response === "view") {
-        const url = delight.content_url || (delight.bvid ? `https://www.bilibili.com/video/${encodeURIComponent(delight.bvid)}` : "");
-        if (url) window.open(url, "_blank", "noopener,noreferrer");
+        const url = delightContentUrl(delight);
+        // 「去看看」按钮是纯 <button>（不是封面那个 <a>），必须在这里显式打开，
+        // 否则点了只弹 toast 却什么都不开（field report 2026-07-07）。封面缩略图
+        // 已是带 href 的 <a> 靠原生导航打开，openUrl=false 不重复开、避免双开。
+        // window.open 在点击手势的同步栈内调用，不会被拦截。
+        if (openUrl && url) window.open(url, "_blank", "noopener,noreferrer");
         trackRecommendationClick(delight);
         // 浏览过即已读：上报 view 让后端标记 delight_notified，下次重灌不再出现。
         // fire-and-forget，不阻塞打开内容；当场卡片仍保留。
@@ -3404,41 +4213,40 @@
       }
     }
 
-    async function dismissVisibleRecommendationsBeforeReshuffle() {
-      const visibleItems = filteredVideos().filter((item) => item?.id != null);
-      if (!visibleItems.length) return { total: 0, ok: 0, failed: 0 };
-      showToast(`正在忽略当前显示的 ${visibleItems.length} 张推荐…`);
-      const results = await Promise.allSettled(visibleItems.map((item) => submitFeedback(item, "dismiss")));
-      const dismissedKeys = new Set();
-      results.forEach((result, index) => {
-        if (result.status === "fulfilled") dismissedKeys.add(recommendationKey(visibleItems[index]));
+    function dismissVisibleRecommendationsBeforeReshuffle(visibleItems) {
+      const submissions = visibleItems.map((item) => submitFeedback(item, "dismiss"));
+      void Promise.allSettled(submissions).then((results) => {
+        const failed = results.filter((result) => result.status === "rejected").length;
+        if (failed) showToast(`${failed} 张忽略提交失败（不影响当前列表）`);
       });
-      if (dismissedKeys.size) {
-        state.videos = state.videos.filter((item) => !dismissedKeys.has(recommendationKey(item)));
-      }
-      return { total: visibleItems.length, ok: dismissedKeys.size, failed: visibleItems.length - dismissedKeys.size };
     }
 
     async function reshuffle() {
       const reshuffleButton = $("#reshuffleBtn");
       const dismissToggle = $("#dismissOnReshuffleToggle");
+      const visibleForExclusion = filteredVideos().filter((item) => item?.id != null);
+      const visibleKeys = new Set(visibleForExclusion.map((item) => recommendationKey(item)));
       if (reshuffleButton) reshuffleButton.disabled = true;
       if (dismissToggle) dismissToggle.disabled = true;
       try {
-        const dismissResult = state.dismissOnReshuffle ? await dismissVisibleRecommendationsBeforeReshuffle() : null;
-        const payload = await requestJson(ENDPOINTS.reshuffle, { method: "POST" });
-        if (payload?.items?.length) {
-          state.videos = normalizeRecommendationList(payload.items);
+        const excludedBvids = visibleForExclusion.map((item) => item.bvid).filter(Boolean);
+        const payload = await requestJson(ENDPOINTS.reshuffle, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ excluded_bvids: excludedBvids })
+        });
+        const fresh = payload?.items?.length
+          ? normalizeRecommendationList(payload.items).filter((item) => !visibleKeys.has(recommendationKey(item)))
+          : [];
+        if (fresh.length) {
+          state.videos = fresh;
           renderAll();
-          if (dismissResult?.ok) {
-            const failedText = dismissResult.failed ? `，${dismissResult.failed} 张忽略失败` : "";
-            showToast(`已忽略 ${dismissResult.ok} 张当前推荐并换一批${failedText}`);
-          } else {
-            showToast("已换一批推荐");
+          if (state.dismissOnReshuffle && visibleForExclusion.length) {
+            dismissVisibleRecommendationsBeforeReshuffle(visibleForExclusion);
           }
+          showToast("已换一批推荐");
         } else {
-          renderAll();
-          showToast("换一批失败：请检查后端连接");
+          showToast("暂时没有更多新推荐了");
         }
       } finally {
         if (reshuffleButton) reshuffleButton.disabled = false;
@@ -3447,17 +4255,36 @@
     }
 
     async function appendMore() {
-      const payload = await requestJson(ENDPOINTS.append, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ excluded_bvids: state.videos.map((v) => v.bvid) }) });
-      if (payload?.items?.length) {
-        const freshItems = normalizeRecommendationList(payload.items);
-        state.videos = state.videos.concat(freshItems);
-        renderAll();
-        // Keep decoding off the interaction path: slow first-miss covers should
-        // not delay the new recommendation cards from appearing.
-        void warmCoverImages(freshItems, { waitForDecode: true }).catch(() => {});
-        showToast(freshItems.length ? "已加载更多推荐" : "后端返回的内容都已反馈过");
-      } else {
-        showToast("加载更多失败：后端没有返回新候选");
+      if (appendMoreInFlight) return;
+      appendMoreInFlight = true;
+      showAppendSkeletons();
+      try {
+        const payload = await requestJson(ENDPOINTS.append, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ excluded_bvids: state.videos.map((v) => v.bvid) }) });
+        const retryHint = state.autoLoadOnScroll ? "补上后会自动加载" : "稍后可再点一次";
+        if (payload?.items?.length) {
+          const freshItems = normalizeRecommendationList(payload.items);
+          const appendCameUpShort = freshItems.length < APPEND_BATCH_SIZE;
+          state.videos = state.videos.concat(freshItems);
+          renderAll();
+          // Keep decoding off the interaction path: slow first-miss covers should
+          // not delay the new recommendation cards from appearing.
+          void warmCoverImages(freshItems, { waitForDecode: true }).catch(() => {});
+          if (!appendCameUpShort) {
+            showToast("已加载更多推荐");
+          } else if (freshItems.length) {
+            showToast(`已加载 ${freshItems.length} 条，候选池暂时见底，后台正在补货，${retryHint}`);
+          } else {
+            showToast(`这批内容都已反馈过，后台正在补货，${retryHint}`);
+          }
+        } else {
+          showToast(`候选池暂时没有新内容，已请求后台补货，${retryHint}`);
+        }
+      } finally {
+        removeAppendSkeletons();
+        // showAppendSkeletons may have cleared an empty-state placeholder; if
+        // nothing came back, re-render so the grid never ends up blank.
+        if (!grid.childElementCount) renderVideos();
+        appendMoreInFlight = false;
       }
     }
 
@@ -3508,6 +4335,14 @@
       const runtime = normalizeRuntimeStatus(status);
       if (initWaitingForFirstPool(state.initStatus)) return true;
       if (Boolean(state.initStatus?.running)) return true;
+      // /api/init-status is the authoritative pre-init source. runtime-status
+      // can be transiently unreachable (state.runtimeStatus stays null) or get
+      // rebuilt from field-less runtime events / message merges, where the
+      // missing `initialized` defaults to true — neither may hide the guided
+      // init card while the backend explicitly reports it never initialized.
+      if (state.initStatus?.initialized === false && !state.videos.length && !hasPostInitRuntimeSignals(runtime)) {
+        return true;
+      }
       return Boolean(status) && runtime.initialized === false && !hasPostInitRuntimeSignals(runtime);
     }
 
@@ -3590,6 +4425,7 @@
       syncSourceMetric();
       $("#runtimeSummary").textContent = state.runtimeStatus.live_summary || summary?.available || "后端在线，推荐池与采集运行时可读取。";
       renderPoolStatus(state.runtimeStatus);
+      maybeAutoLoadAfterPoolRefill();
     }
 
     function setInput(id, value) {
@@ -3800,11 +4636,13 @@
         if (!row) return;
         const summary = row.querySelector(".source-credential-summary");
         const value = row.querySelector(".source-credential-value");
+        const copyBtn = row.querySelector(".source-credential-copy");
         const item = data?.[key];
         if (!item) {
           row.dataset.available = "false";
           if (summary) summary.textContent = "状态暂不可用";
           if (value) value.value = "暂时无法读取当前 Cookie / 登录凭据。";
+          if (copyBtn) copyBtn.disabled = true;
           return;
         }
         row.dataset.available = item.available ? "true" : "false";
@@ -3816,8 +4654,26 @@
         if (value) {
           value.value = item.value || item.detail || "当前没有可展示 Cookie / 登录凭据。";
         }
+        if (copyBtn) copyBtn.disabled = !item.available;
       });
+      // Reddit's paste box has no config-side cookie field (the value goes to
+      // rdt-cli's credential store), so its "已保存/未保存" placeholder is driven
+      // by credential availability instead of the config snapshot.
+      setCookieOverrideInput("redditCookie", data?.reddit?.available ? "synced" : "", " Reddit");
     }
+
+    $("#sourceCredentialList")?.addEventListener("click", async (event) => {
+      const btn = event.target.closest(".source-credential-copy");
+      if (!btn || btn.disabled) return;
+      const value = btn.closest(".source-credential-row")?.querySelector(".source-credential-value")?.value?.trim() || "";
+      if (!value) return;
+      try {
+        await navigator.clipboard.writeText(value);
+        showToast("已复制当前凭据");
+      } catch {
+        showToast("复制失败：浏览器未授予剪贴板访问权限");
+      }
+    });
 
     async function renderSourceCredentials() {
       let data = null;
@@ -3965,6 +4821,22 @@
       return { reload: load };
     }
 
+    // 主/备选 Provider 同名保护：同名 fallback 永远不会触发（registry 会静默丢弃），
+    // 后端保存也会以 blocking issue 拒绝。这里 (1) 禁用备选下拉里与主 Provider 同名
+    // 的选项（主 Provider 变化时恢复其它选项），(2) 对已经处于同名状态的旧配置只
+    // 显示警告、不自动清空选择，避免悄悄改动用户数据。
+    function syncLlmFallbackSameState() {
+      const providerSelect = $("#llmProvider");
+      const fallbackSelect = $("#llmFallbackProvider");
+      if (!providerSelect || !fallbackSelect) return;
+      const provider = providerSelect.value || "";
+      Array.from(fallbackSelect.options).forEach((option) => {
+        option.disabled = Boolean(option.value) && option.value === provider;
+      });
+      const warning = $("#llmFallbackSameWarning");
+      if (warning) warning.hidden = !(fallbackSelect.value && fallbackSelect.value === provider);
+    }
+
     function applyConfig(config) {
       if (!config || typeof config !== "object") return;
       state.config = config;
@@ -4000,6 +4872,7 @@
       setInput("speculationMaxSecondary", scheduler.speculation_max_secondary_interests);
 
       const discovery = config.discovery || {};
+      setSelect("keywordGenerationMode", discovery.keyword_generation_mode || "legacy");
       setSelect("multimodalEvaluationEnabled", discovery.multimodal_evaluation_enabled ? "on" : "off");
       setInput("multimodalBatchSize", discovery.multimodal_batch_size);
       setInput("multimodalImageMaxPx", discovery.multimodal_image_max_px);
@@ -4026,18 +4899,24 @@
         setInput("llmModel", llm[provider]?.model);
         setInput("llmApiKey", llm[provider]?.api_key);
         setInput("llmBaseUrl", llm[provider]?.base_url);
+        setSelect("llmApiFlavor", llm[provider]?.api_flavor || "");
+      } else {
+        setSelect("llmApiFlavor", "");
       }
       if (fallbackProvider) {
         setSelect("llmFallbackAuthMode", llm[fallbackProvider]?.auth_mode || "api_key");
         setInput("llmFallbackModel", llm[fallbackProvider]?.model);
         setInput("llmFallbackApiKey", llm[fallbackProvider]?.api_key);
         setInput("llmFallbackBaseUrl", llm[fallbackProvider]?.base_url);
+        setSelect("llmFallbackApiFlavor", llm[fallbackProvider]?.api_flavor || "");
       } else {
         setSelect("llmFallbackAuthMode", "api_key");
         setInput("llmFallbackModel", "");
         setInput("llmFallbackApiKey", "");
         setInput("llmFallbackBaseUrl", "");
+        setSelect("llmFallbackApiFlavor", "");
       }
+      syncLlmFallbackSameState();
       setInput("openrouterReferer", llm.openrouter?.http_referer);
       setInput("openrouterTitle", llm.openrouter?.x_title);
       setSelect("deepseekReasoning", llm.deepseek?.reasoning_effort || "");
@@ -4140,10 +5019,21 @@
       // 「已喜欢」文案，让用户看出这条已经表过态。
       const serverState = String(item.state ?? "");
       const fallbackMessage = serverState === "liked" ? "好，这类多来点。" : "";
+      // Same defense as the grid (issue #79): the delight card was the exact
+      // `<h3 id="delightTitle">answer_<id>` the report screenshotted. Route the
+      // title through the ID fallback (derive from body / placeholder), but
+      // keep the friendly delight default when there is genuinely no title.
+      const delightBody = decodeHtmlEntities(item.body_text ?? "");
+      const delightCt = String(item.content_type ?? "").trim().toLowerCase();
+      const derivedTitle = displayRecommendationTitle(
+        decodeHtmlEntities(item.title ?? ""), delightBody, delightCt);
       return {
         type: "delight",
         bvid: String(item.bvid ?? item.content_id ?? ""),
-        title: decodeHtmlEntities(item.title ?? "发现了一条你可能会意外喜欢的内容"),
+        title: derivedTitle && derivedTitle !== "未命名内容"
+          ? derivedTitle
+          : "发现了一条你可能会意外喜欢的内容",
+        body_text: delightBody,
         reason: decodeHtmlEntities(item.delight_reason ?? item.reason ?? item.delight_hook ?? item.message ?? "这条来自后端高惊喜分候选。"),
         cover_url: normalizeImageUrl(item.cover_url ?? item.cover ?? item.pic ?? item.thumbnail_url ?? item.thumbnail ?? item.image_url),
         content_url: String(item.content_url ?? ""),
@@ -4153,17 +5043,72 @@
         chat_draft: String(item.chat_draft ?? ""),
         state: serverState,
         response_message: String(item.response_message ?? "") || fallbackMessage,
+        published_at: String(item?.published_at ?? "").trim(),
+        published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
+        // Engagement stats so the delight card shows the same ▶/👍/💬 row as the
+        // grid (v0.3.159+; 0 = not fetched → recommendationStats renders nothing).
+        view_count: Number(item?.view_count ?? 0) || 0,
+        like_count: Number(item?.like_count ?? 0) || 0,
+        comment_count: Number(item?.comment_count ?? 0) || 0,
+        danmaku_count: Number(item?.danmaku_count ?? 0) || 0,
+        favorite_count: Number(item?.favorite_count ?? 0) || 0,
         turns: delightTurnList(item.turns)
       };
     }
 
+    function renderDelightTextMedia(thumb, delight) {
+      if (!thumb || !delight) return;
+      const bodyText = String(delight.body_text || "").trim();
+      if (!bodyText) return;
+      thumb.replaceChildren();
+      thumb.classList.remove("has-image");
+      thumb.classList.add("is-text-media");
+      thumb.dataset.platform = String(delight.source_platform || "bilibili").toLowerCase();
+      const text = document.createElement("p");
+      text.className = "delight-text-media-copy";
+      text.textContent = bodyText;
+      const badge = document.createElement("span");
+      badge.className = "platform";
+      badge.textContent = platformName(delight.source_platform);
+      thumb.append(text, badge);
+    }
+
+    function renderDelightFallbackMedia(thumb, delight) {
+      const bodyText = String(delight?.body_text || "").trim();
+      if (bodyText) {
+        renderDelightTextMedia(thumb, delight);
+        return;
+      }
+      thumb.replaceChildren();
+      thumb.classList.remove("has-image", "is-text-media");
+      delete thumb.dataset.platform;
+      if (!delight) return;
+      const badge = document.createElement("span");
+      badge.className = "platform";
+      badge.textContent = platformName(delight.source_platform);
+      thumb.append(badge);
+    }
+
     function renderDelightCover(delight) {
-      const thumb = $("#delightBanner .thumb");
+      const thumb = syncDelightThumbLink(delight);
       if (!thumb) return;
       const url = imageProxyUrl(delight?.cover_url);
       thumb.replaceChildren();
+      thumb.classList.remove("has-image", "is-text-media");
+      delete thumb.dataset.platform;
       thumb.classList.toggle("has-image", Boolean(url));
-      if (!url) return;
+      // 设置 banner 背景图（模糊用）
+      const banner = $("#delightBanner");
+      if (banner) banner.style.setProperty("--cover-url", url ? `url("${url}")` : "none");
+      if (!delight) return;
+      if (!url) {
+        renderDelightFallbackMedia(thumb, delight);
+        return;
+      }
+      // 平台徽章不依赖封面 —— 图片正常加载时也始终标明内容来源。
+      const badge = document.createElement("span");
+      badge.className = "platform";
+      badge.textContent = platformName(delight.source_platform);
       const image = document.createElement("img");
       if (isCrossOriginBase()) image.crossOrigin = "anonymous";
       image.alt = "";
@@ -4173,10 +5118,58 @@
       image.referrerPolicy = "no-referrer";
       image.src = url;
       image.addEventListener("error", () => {
-        image.remove();
-        thumb.classList.remove("has-image");
+        if (!image.isConnected || image.parentElement !== thumb) return;
+        renderDelightFallbackMedia(thumb, delight);
+        if (banner) banner.style.setProperty("--cover-url", "none");
       });
       thumb.append(image);
+      thumb.append(badge);
+    }
+
+    function resetDelightExcerpt() {
+      const wrapper = $("#delightExcerpt");
+      const excerpt = $("#delightExcerptText");
+      const toggle = $("#delightExcerptToggle");
+      if (!wrapper || !excerpt || !toggle) return;
+      wrapper.classList.remove("is-expanded");
+      wrapper.hidden = true;
+      excerpt.textContent = "";
+      toggle.hidden = true;
+      toggle.textContent = "展开正文";
+      toggle.setAttribute("aria-expanded", "false");
+    }
+
+    function syncDelightExcerpt(delight) {
+      resetDelightExcerpt();
+      const wrapper = $("#delightExcerpt");
+      const excerpt = $("#delightExcerptText");
+      const toggle = $("#delightExcerptToggle");
+      const bodyText = String(delight?.body_text || "").trim();
+      if (!wrapper || !excerpt || !toggle || !bodyText) return;
+      excerpt.textContent = bodyText;
+      wrapper.hidden = false;
+      requestAnimationFrame(() => {
+        const overflows = excerpt.scrollHeight > excerpt.clientHeight + 1;
+        toggle.hidden = !overflows;
+        toggle.setAttribute("aria-expanded", "false");
+      });
+    }
+
+    function _startDelightAutoAdvance() {
+        _stopDelightAutoAdvance();
+        if (state.delights.length < 2) return;
+        _delightAutoTimer = setInterval(() => {
+            if (delightUserEngaged()) return;
+            const next = state.delightIndex + 1;
+            setActiveDelight(next >= state.delights.length ? 0 : next);
+        }, 4000);
+    }
+
+    function _stopDelightAutoAdvance() {
+        if (_delightAutoTimer !== null) {
+            clearInterval(_delightAutoTimer);
+            _delightAutoTimer = null;
+        }
     }
 
     function setActiveDelight(index = state.delightIndex) {
@@ -4186,8 +5179,16 @@
         closeDelightComposer();
         renderDelightCover(null);
         renderDelightTurns(null);
+        resetDelightExcerpt();
         $("#delightTitle").textContent = "暂无惊喜队列";
         $("#delightReason").textContent = "后端产生新的高惊喜候选后会通过实时流出现在这里。";
+        if ($("#delightStats")) $("#delightStats").hidden = true;
+        const delightPublishedEl = $("#delightPublished");
+        if (delightPublishedEl) {
+          delightPublishedEl.textContent = "";
+          delightPublishedEl.removeAttribute("title");
+          delightPublishedEl.hidden = true;
+        }
         if ($("#delightStatus")) $("#delightStatus").textContent = "";
         if ($("#delightCount")) $("#delightCount").textContent = "0/0";
         controls.forEach((btn) => { btn.disabled = true; });
@@ -4196,38 +5197,170 @@
       }
       state.delightIndex = Math.max(0, Math.min(index, state.delights.length - 1));
       state.delight = state.delights[state.delightIndex];
-      closeDelightComposer();
-      renderDelightCover(state.delight);
-      renderDelightTurns(state.delight);
-      $("#delightTitle").textContent = state.delight.title;
-      $("#delightReason").textContent = state.delight.reason;
-      if ($("#delightStatus")) $("#delightStatus").textContent = state.delight.response_message || "";
+      // 锁定容器高度防止下方布局跳变
+      const banner = $("#delightBanner");
+      if (banner) {
+        banner.style.height = `${banner.offsetHeight}px`;
+        banner.classList.add("is-height-locked");
+        banner.classList.remove("is-height-settling");
+      }
+      // 切换动画：先淡出，再替换内容，再淡入
+      const copy = $(".delight-copy");
+      const thumb = $(".delight .thumb");
+      const applyContent = () => {
+        closeDelightComposer();
+        renderDelightCover(state.delight);
+        renderDelightTurns(state.delight);
+        $("#delightTitle").textContent = state.delight.title;
+        syncDelightExcerpt(state.delight);
+        const delightStatsEl = $("#delightStats");
+        if (delightStatsEl) {
+          const delightStats = recommendationStats(state.delight);
+          delightStatsEl.textContent = delightStats;
+          delightStatsEl.hidden = !delightStats;
+        }
+        const delightPublishedEl = $("#delightPublished");
+        if (delightPublishedEl) {
+          const published = formatPublishedTime(state.delight);
+          delightPublishedEl.textContent = published;
+          delightPublishedEl.title = Number.isFinite(Date.parse(state.delight.published_at))
+            ? new Date(state.delight.published_at).toLocaleString()
+            : "";
+          delightPublishedEl.hidden = !published;
+        }
+        $("#delightReason").textContent = state.delight.reason;
+        if ($("#delightStatus")) $("#delightStatus").textContent = state.delight.response_message || "";
+        if (copy) copy.classList.remove("is-exiting");
+        if (thumb) thumb.classList.remove("is-exiting");
+        // 用 requestAnimationFrame 手动驱动高度动画（避免 CSS transition 启动时序问题）
+        if (banner) {
+          if (banner._heightRaf) cancelAnimationFrame(banner._heightRaf);
+          const startH = parseFloat(banner.style.height) || banner.offsetHeight;
+          banner.style.height = `${startH}px`;
+          banner.classList.remove("is-height-locked");
+          banner.offsetHeight; // 强制 reflow：浏览器确认当前高度为 startH
+          // 临时放开高度测量自然高度
+          banner.style.removeProperty("height");
+          const endH = banner.offsetHeight;
+          if (Math.abs(endH - startH) < 0.5) {
+            banner.style.removeProperty("height");
+            banner.classList.remove("is-height-settling");
+            return;
+          }
+          // 切回起始高度，开始动画
+          banner.style.height = `${startH}px`;
+          banner.offsetHeight;
+          const duration = 200;
+          const t0 = performance.now();
+          const step = (now) => {
+            const p = Math.min((now - t0) / duration, 1);
+            const ease = 1 - (1 - p) * (1 - p); // ease-out quad
+            banner.style.height = `${startH + (endH - startH) * ease}px`;
+            if (p < 1) {
+              banner._heightRaf = requestAnimationFrame(step);
+            } else {
+              banner._heightRaf = null;
+              banner.style.removeProperty("height");
+              banner.classList.remove("is-height-settling");
+            }
+          };
+          banner._heightRaf = requestAnimationFrame(step);
+        }
+      };
+      if (copy) copy.classList.add("is-exiting");
+      if (thumb) thumb.classList.add("is-exiting");
+      if (copy || thumb) {
+        setTimeout(applyContent, 250);
+      } else {
+        applyContent();
+      }
       if ($("#delightCount")) $("#delightCount").textContent = `${state.delightIndex + 1}/${state.delights.length}`;
       // Sync ☆ / ♥ pressed state for the current delight.
       const delightBvid = state.delight.bvid;
-      const wlBtn = document.querySelector('[data-delight="watch-later"]');
-      if (wlBtn && delightBvid) {
-        wlBtn.setAttribute("aria-pressed", "false");
-        watchLaterStatus(delightBvid).then((res) => {
-          if (state.delight?.bvid === delightBvid && res?.saved) {
-            wlBtn.setAttribute("aria-pressed", "true");
-          }
-        }).catch(() => {});
-      }
-      const favBtn = document.querySelector('[data-delight="favorite"]');
-      if (favBtn && delightBvid) {
-        favBtn.setAttribute("aria-pressed", "false");
-        favoriteStatus(delightBvid).then((res) => {
-          if (state.delight?.bvid === delightBvid && res?.saved) {
-            favBtn.setAttribute("aria-pressed", "true");
-          }
-        }).catch(() => {});
+      if (delightBvid && _delightStatusCache.has(delightBvid)) {
+        _syncDelightStatusButtons(delightBvid);
+      } else {
+        const wlBtn = document.querySelector('[data-delight="watch-later"]');
+        if (wlBtn) wlBtn.setAttribute("aria-pressed", "false");
+        const favBtn = document.querySelector('[data-delight="favorite"]');
+        if (favBtn) favBtn.setAttribute("aria-pressed", "false");
       }
       controls.forEach((btn) => {
-        const action = btn.dataset.delight;
-        btn.disabled = (action === "prev" && state.delightIndex === 0) || (action === "next" && state.delightIndex === state.delights.length - 1);
+          btn.disabled = false;
       });
       scheduleActivityRailHeightSync();
+    }
+
+    // 鼠标/触摸拖动切换 delight
+    let _delightDragging = false;
+    let _delightDragLastX = 0;
+    function _initDelightSwipe() {
+        const banner = $("#delightBanner");
+        if (!banner || banner.dataset.swipeInited) return;
+        banner.dataset.swipeInited = "1";
+        const inner = banner.querySelector(".delight-body, .thumb");
+        // 交互元素阻止事件冒泡，避免触发拖拽
+        banner.querySelectorAll("button, [data-delight], input, select, textarea, a").forEach((el) => {
+            el.addEventListener("pointerdown", (e) => e.stopPropagation());
+        });
+        banner.addEventListener("pointerdown", (e) => {
+            _delightDragging = true;
+            _delightSwipeStartX = e.clientX;
+            _delightDragLastX = e.clientX;
+            banner.setPointerCapture(e.pointerId);
+            banner.classList.add("is-dragging");
+        });
+        banner.addEventListener("pointermove", (e) => {
+            if (!_delightDragging) return;
+            const dx = e.clientX - _delightSwipeStartX;
+            const maxDrag = banner.offsetWidth * 0.3;
+            const clamped = Math.max(-maxDrag, Math.min(maxDrag, dx));
+            // 首项/末项增加阻力
+            const atEdge = (dx > 0 && state.delightIndex === 0) || (dx < 0 && state.delightIndex >= state.delights.length - 1);
+            const factor = atEdge ? 0.25 : 1;
+            banner.style.setProperty("--drag-offset", `${clamped * factor}px`);
+            _delightDragLastX = e.clientX;
+        });
+        banner.addEventListener("pointerup", (e) => {
+            if (!_delightDragging) return;
+            _delightDragging = false;
+            banner.classList.remove("is-dragging");
+            banner.releasePointerCapture(e.pointerId);
+            const dx = e.clientX - _delightSwipeStartX;
+            if (Math.abs(dx) >= 50) {
+                if (dx > 0) setActiveDelight(state.delightIndex <= 0 ? state.delights.length - 1 : state.delightIndex - 1);
+                else if (dx < 0) setActiveDelight(state.delightIndex >= state.delights.length - 1 ? 0 : state.delightIndex + 1);
+            }
+            banner.style.removeProperty("--drag-offset");
+        });
+        banner.addEventListener("pointercancel", () => {
+            _delightDragging = false;
+            banner.classList.remove("is-dragging");
+            banner.style.removeProperty("--drag-offset");
+        });
+    }
+
+    let _delightVisibilityObserver = null;
+    function _initDelightVisibilityObserver() {
+      if (_delightVisibilityObserver) return;
+      const banner = $("#delightBanner");
+      if (!banner) return;
+      _delightVisibilityObserver = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) _startDelightAutoAdvance();
+          else _stopDelightAutoAdvance();
+        }
+      }, { threshold: 0.3 });
+      _delightVisibilityObserver.observe(banner);
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) _stopDelightAutoAdvance();
+        else if (_delightVisibilityObserver) {
+          // 切回时检查 banner 是否在视口内
+          const rect = banner.getBoundingClientRect();
+          const inView = rect.top < window.innerHeight && rect.bottom > 0;
+          if (inView) _startDelightAutoAdvance();
+        }
+      });
     }
 
     function applyDelights(payload) {
@@ -4246,10 +5379,48 @@
         if (existingIndex >= 0) state.delights[existingIndex] = merged;
         else state.delights.push(merged);
       }
-      const nextIndex = previousActiveBvid
-        ? Math.max(0, state.delights.findIndex((item) => String(item.bvid || "") === previousActiveBvid))
-        : 0;
-      setActiveDelight(nextIndex);
+      const activePosition = previousActiveBvid
+        ? state.delights.findIndex((item) => String(item.bvid || "") === previousActiveBvid)
+        : -1;
+      if (delightUserEngaged() && state.delight) {
+        // 打字中：只同步队列数据与计数。当前卡还在队列里就更新引用；即便已被
+        // 后端消费 / 过期也保留 state.delight——发送必须落在用户正对着的这张卡上。
+        if (activePosition >= 0) {
+          state.delightIndex = activePosition;
+          state.delight = state.delights[activePosition];
+        }
+        syncDelightCount();
+        return;
+      }
+      setActiveDelight(activePosition >= 0 ? activePosition : 0);
+      _startDelightAutoAdvance();
+      _initDelightSwipe();
+      _initDelightVisibilityObserver();
+      // 批量预取 delight 队列中所有项的稍后再看/收藏状态
+      (async () => {
+        const bvids = state.delights.map((d) => String(d.bvid || "")).filter(Boolean);
+        if (!bvids.length) return;
+        const results = await Promise.allSettled(bvids.map((bvid) => watchLaterStatus(bvid).then((r) => ({ bvid, watchLater: r?.saved ?? false, favorite: false }))));
+        const favResults = await Promise.allSettled(bvids.map((bvid) => favoriteStatus(bvid).then((r) => ({ bvid, saved: r?.saved ?? false }))));
+        const favMap = new Map(favResults.filter((r) => r.status === "fulfilled").map((r) => [r.value.bvid, r.value.saved]));
+        for (const result of results) {
+          if (result.status !== "fulfilled") continue;
+          const { bvid, watchLater } = result.value;
+          _delightStatusCache.set(bvid, { watchLater, favorite: favMap.get(bvid) ?? false });
+        }
+        // 如果当前显示的 delight 缓存已就绪，立即刷新按钮状态
+        const currentBvid = String(state.delight?.bvid || "");
+        if (currentBvid && _delightStatusCache.has(currentBvid)) _syncDelightStatusButtons(currentBvid);
+      })();
+    }
+
+    function _syncDelightStatusButtons(bvid) {
+      const cached = _delightStatusCache.get(bvid);
+      if (!cached) return;
+      const wlBtn = document.querySelector('[data-delight="watch-later"]');
+      if (wlBtn) wlBtn.setAttribute("aria-pressed", cached.watchLater ? "true" : "false");
+      const favBtn = document.querySelector('[data-delight="favorite"]');
+      if (favBtn) favBtn.setAttribute("aria-pressed", cached.favorite ? "true" : "false");
     }
 
     function mergeMessages(items) {
@@ -4276,7 +5447,14 @@
       // (/api/recommendations only returns the latest top window). Header/pool counts
       // still update via applyRuntimeStatus above; user-initiated 换一批 / 加载更多 replace
       // the list explicitly. Matches recommend.js + popup.js (fix 79042ce).
-      if (["config_reloaded"].includes(event.type)) scheduleBackendHydration();
+      if (["config_reloaded"].includes(event.type)) {
+        // config_reloaded 会触发全量再水合，applyConfig 覆盖设置表单里的每个字段。
+        // 用户正在表单里编辑（焦点在 #settingsForm 内）时跳过，避免未保存的输入
+        // 被后台事件悄悄打回。
+        const settingsForm = document.getElementById("settingsForm");
+        const editingSettings = Boolean(settingsForm && settingsForm.contains(document.activeElement));
+        if (!editingSettings) scheduleBackendHydration();
+      }
       if (["init_progress", "init_failed", "init_completed"].includes(event.type)) {
         void refreshInitStatus({ schedule: event.type === "init_progress" });
       }
@@ -4300,10 +5478,23 @@
           const existingIndex = state.delights.findIndex((item) => String(item.bvid || "") === key);
           if (existingIndex >= 0) {
             state.delights[existingIndex] = mergeDelightItem(state.delights[existingIndex], delight);
-            if (state.delight && String(state.delight.bvid || "") === key) setActiveDelight(existingIndex);
+            if (state.delight && String(state.delight.bvid || "") === key) {
+              if (delightUserEngaged()) {
+                // 正在这张卡上打字：只更新数据引用，不重渲染（重渲染会收起输入框）。
+                state.delight = state.delights[existingIndex];
+              } else {
+                setActiveDelight(existingIndex);
+              }
+            }
           } else {
             state.delights.push(delight);
-            setActiveDelight(state.delights.length - 1);
+            if (delightUserEngaged()) {
+              // 用户正在当前卡的聊天框里打字：新候选只静默入队并更新计数，
+              // 不抢走当前卡——否则输入被收起、随后的发送还会串到新卡上。
+              syncDelightCount();
+            } else {
+              setActiveDelight(state.delights.length - 1);
+            }
           }
         }
       }
@@ -4331,7 +5522,17 @@
       try {
         const socket = new WebSocket(getRuntimeStreamUrl());
         state.runtimeSocket = socket;
-        socket.addEventListener("open", () => { $("#statusLabel").textContent = "实时连接中"; });
+        socket.addEventListener("open", () => {
+          $("#statusLabel").textContent = "实时连接中";
+          // The page may load before the backend binds (frozen-entry launch
+          // race): the boot hydrate then swallows every failure into nulls and
+          // nothing else ever re-fetches — an uninitialized backend emits no
+          // runtime events, so the guided-init card would stay hidden forever.
+          // First successful (re)connect with no backend data yet → hydrate.
+          // Scoped to the never-hydrated case so transient reconnects don't
+          // wipe locally appended recommendation cards (see fix 79042ce).
+          if (!state.initStatus && !state.runtimeStatus) scheduleBackendHydration();
+        });
         socket.addEventListener("message", (event) => {
           try { handleRuntimeEvent(JSON.parse(event.data)); } catch {}
         });
@@ -4394,7 +5595,11 @@
           { role: "agent", text: turn.reply || turn.assistant_message || turn.status || "等待后端回复中。" }
         ]).filter((item) => item.text);
       }
-      const effectiveRuntime = await requestJson(ENDPOINTS.runtimeStatus).catch(() => runtime?.status || runtime);
+      // requestJson resolves null on failure (it never rejects), so the
+      // fallback to the Promise.all snapshot must be `||`, not `.catch()` —
+      // otherwise a failed re-fetch discards the runtime status we already
+      // have and the init-onboarding gate loses its initialized=false signal.
+      const effectiveRuntime = (await requestJson(ENDPOINTS.runtimeStatus)) || runtime;
       applyRuntimeStatus(effectiveRuntime?.status || effectiveRuntime);
       applyDelights(delights);
       const delightChatItems = Array.isArray(delightChatTurns) ? delightChatTurns : asArray(delightChatTurns?.items);
@@ -4402,6 +5607,8 @@
       if (notification?.item) mergeMessages([{ ...notification.item, type: "notification" }]);
       applyConfig(config?.config || config);
       renderAll();
+      // 预取 LAN IP，供二维码面板使用
+      requestJson(ENDPOINTS.qrInfo).then((info) => { if (info?.lan_ip) _cachedLanIp = info.lan_ip; }).catch(() => {});
     }
 
     function renderAll() {
@@ -4410,6 +5617,7 @@
         try { step(); } catch (error) { showFatal(error, step.name || "渲染"); }
       }
       scheduleActivityRailHeightSync();
+      scheduleAutoLoadCheck();
     }
 
     function buildConfigUpdate() {
@@ -4417,10 +5625,13 @@
       const fallbackProvider = getInput("llmFallbackProvider");
       const llmProviderConfig = { model: getInput("llmModel") };
       if (provider === "openai") llmProviderConfig.auth_mode = getInput("llmAuthMode") || "api_key";
+      // api_flavor 仅对 OpenAI 协议家族有意义;空值表示回到 chat/completions 默认
+      if (provider === "openai" || provider === "openai_compatible") llmProviderConfig.api_flavor = getInput("llmApiFlavor");
       if (getInput("llmApiKey")) llmProviderConfig.api_key = getInput("llmApiKey");
       if (getInput("llmBaseUrl")) llmProviderConfig.base_url = getInput("llmBaseUrl");
       const llmFallbackConfig = { model: getInput("llmFallbackModel") };
       if (fallbackProvider === "openai") llmFallbackConfig.auth_mode = getInput("llmFallbackAuthMode") || "api_key";
+      if (fallbackProvider === "openai" || fallbackProvider === "openai_compatible") llmFallbackConfig.api_flavor = getInput("llmFallbackApiFlavor");
       if (getInput("llmFallbackApiKey")) llmFallbackConfig.api_key = getInput("llmFallbackApiKey");
       if (getInput("llmFallbackBaseUrl")) llmFallbackConfig.base_url = getInput("llmFallbackBaseUrl");
       const logPath = splitLogPath(getInput("logPath"), state.config?.logging);
@@ -4441,10 +5652,11 @@
       const cookie = getInput("biliCookie");
       const douyinCookie = getInput("douyinCookie");
       const twitterCookie = getInput("twitterCookie");
+      const redditCookie = getInput("redditCookie");
       const llm = {
         ...(state.config?.llm || {}),
         default_provider: provider,
-        fallback_enabled: Boolean(fallbackProvider),
+        // 非空 fallback_provider 即启用 fallback；旧的 fallback_enabled 布尔字段已移除。
         fallback_provider: fallbackProvider,
         concurrency: getIntInput("llmConcurrency", 3),
         timeout: getIntInput("llmTimeout", 60),
@@ -4546,6 +5758,7 @@
           reddit: {
             enabled: $("#redditEnabled").value === "on",
             backend: getInput("redditBackend") || "rdt",
+            ...(redditCookie ? { cookie: redditCookie } : {}),
             source_modes: collectRedditSourceModes(),
             daily_search_budget: getIntInput("redditDailySearchBudget", 300),
             daily_hot_budget: getIntInput("redditDailyHotBudget", 300),
@@ -4591,6 +5804,7 @@
         },
         discovery: {
           ...(state.config?.discovery || {}),
+          keyword_generation_mode: $("#keywordGenerationMode").value,
           multimodal_evaluation_enabled: $("#multimodalEvaluationEnabled").value === "on",
           multimodal_batch_size: getIntInput("multimodalBatchSize", 8),
           multimodal_image_max_px: getIntInput("multimodalImageMaxPx", 384),
@@ -4616,7 +5830,8 @@
     const UPDATE_REASON_TEXT = {
       dirty_worktree: "代码目录有未提交改动，更新被阻止",
       unsupported_install_mode: "当前安装方式不支持自动更新",
-      untrusted_remote: "git 远端不在允许列表，更新被阻止",
+      docker_install_mode: "Docker 安装通过拉取新镜像升级，无法就地自更新",
+      untrusted_remote: "git 远端不在允许列表，更新被阻止（可在后端日志查看实际远端地址）",
       branch_not_fast_forwardable: "本地代码与发布版本分叉，无法快进更新",
       merge_or_rebase_in_progress: "代码目录正在合并 / 变基，更新暂缓",
       github_rate_limited: "GitHub API 限流，请稍后再试",
@@ -4656,14 +5871,46 @@
           return { text: `正在更新到 ${latest || "新版本"}…`, tone: "" };
         case "restart_pending":
           return { text: "更新完成，等待后端重启生效。", tone: "success" };
-        case "blocked":
-          return { text: `更新被阻止：${reasonText || "未知原因"}${suffix}`, tone: "error" };
+        case "blocked": {
+          // Prefer the backend's detailed refusal (actual redacted remote URL
+          // + fix command) over the generic reason mapping when present — a
+          // bare reason code stays mapped via UPDATE_REASON_TEXT.
+          const detail =
+            backend.last_error && !UPDATE_REASON_TEXT[backend.last_error]
+              ? backend.last_error
+              : "";
+          return { text: `更新被阻止：${detail || reasonText || "未知原因"}${suffix}`, tone: "error" };
+        }
         case "unsupported":
           return { text: reasonText || "当前安装方式不支持自动更新。", tone: "error" };
         case "error":
           return { text: `更新检查出错：${reasonText || backend.last_error || "未知错误"}${suffix}`, tone: "error" };
         default:
           return { text: `尚未检查更新${current ? `，当前版本 ${current}` : ""}。`, tone: "" };
+      }
+    }
+
+    // Docker containers can't self-apply — the image is the code. The backend
+    // runs a check-only loop against backend-v* tags and the UI guides the
+    // user to pull the new image instead.
+    function describeDockerUpdateStatus(backend) {
+      const reasonKey = backend.reason && backend.reason !== "none" ? String(backend.reason) : "";
+      const reasonText = UPDATE_REASON_TEXT[reasonKey] || reasonKey;
+      const current = backend.current_version ? `v${backend.current_version}` : "";
+      const latest = backend.latest_version ? `v${backend.latest_version}` : "";
+      const checkedAt = formatUpdateCheckTime(backend.last_check_at);
+      const suffix = checkedAt ? `（${checkedAt} 检查）` : "";
+      switch (backend.state) {
+        case "checking":
+          return { text: "正在检查新版镜像…", tone: "" };
+        case "up_to_date":
+          return { text: `当前镜像已是最新${current ? ` ${current}` : ""}${suffix}`, tone: "success" };
+        case "update_available":
+          return { text: `发现新版镜像 ${latest}（当前 ${current}），在部署目录执行 docker compose pull && docker compose up -d 完成升级${suffix}`, tone: "" };
+        case "error":
+          return { text: `检查新版镜像出错：${reasonText || backend.last_error || "未知错误"}${suffix}`, tone: "error" };
+        default:
+          return { text: `Docker 安装通过拉取新镜像升级；后台会定期检查新版并在这里提醒${current ? `（当前 ${current}）` : ""}。`, tone: "" };
       }
     }
 
@@ -4706,16 +5953,21 @@
       const mode = String(backend.install_mode || "");
       const isGitInstall = mode === "git";
       const isFrozenInstall = mode === "frozen";
+      const isDockerInstall = mode === "docker";
       const isDesktopInstallerUpdate = String(backend.latest_tag || "").startsWith("desktop-v");
       const unsupportedInstall = !isGitInstall;
       const toggle = $("#autoUpdate");
       const interval = $("#autoUpdateInterval");
       // The toggle governs auto-apply, which non-git installs can never do —
-      // frozen check-reminders run unconditionally on the backend side.
+      // frozen / docker check-reminders run unconditionally on the backend side.
       if (toggle) toggle.disabled = unsupportedInstall;
       if (interval) interval.disabled = unsupportedInstall;
       if (isFrozenInstall || isDesktopInstallerUpdate) {
         const { text, tone } = describeFrozenUpdateStatus(backend);
+        line.dataset.tone = tone;
+        line.textContent = text;
+      } else if (isDockerInstall) {
+        const { text, tone } = describeDockerUpdateStatus(backend);
         line.dataset.tone = tone;
         line.textContent = text;
       } else if (unsupportedInstall) {
@@ -4727,10 +5979,12 @@
         line.textContent = text;
       }
       line.hidden = false;
-      // 立即检查 works on git checkouts AND frozen bundles (check-only there);
-      // 立即应用 only when a newer tag is ready to fast-forward on git; the
-      // download link replaces 立即应用 on frozen when a new installer exists.
-      const lockActions = unsupportedInstall && !isFrozenInstall && !isDesktopInstallerUpdate;
+      // 立即检查 works on git checkouts, frozen bundles AND docker containers
+      // (check-only on the latter two); 立即应用 only when a newer tag is ready
+      // to fast-forward on git; the download link replaces 立即应用 on frozen
+      // when a new installer exists.
+      const lockActions =
+        unsupportedInstall && !isFrozenInstall && !isDockerInstall && !isDesktopInstallerUpdate;
       if (actions) actions.hidden = lockActions;
       if (checkBtn) checkBtn.disabled = lockActions || backend.state === "checking" || backend.state === "applying";
       if (applyBtn) {
@@ -4874,6 +6128,24 @@
       }
     }
 
+    async function runLlmFallbackConfigProbe() {
+      const button = $("#probeLlmFallback");
+      const statusEl = $("#probeLlmFallbackStatus");
+      if (button) button.disabled = true;
+      renderProbePending(statusEl, "备选 Provider");
+      try {
+        const result = await probeConfigService("llm_fallback", buildConfigUpdate());
+        renderProbeResult(statusEl, result);
+      } catch (error) {
+        renderProbeResult(statusEl, {
+          ok: false,
+          error: configErrorMessage(error?.details) || error?.message || "备选 Provider 探测失败"
+        });
+      } finally {
+        if (button) button.disabled = false;
+      }
+    }
+
     async function runEmbeddingConfigProbe() {
       const button = $("#probeEmbedding");
       const statusEl = $("#probeEmbeddingStatus");
@@ -4956,6 +6228,73 @@
       button.addEventListener("click", returnToMobileMenu);
     });
 
+    const MOBILE_QR_SEEN_KEY = "openbiliclaw.webui.mobileQrSeen";
+    function markMobileQrSeen() {
+      storageSet(MOBILE_QR_SEEN_KEY, "1");
+      const dot = $("#mobileQrDot");
+      const callout = $("#mobileQrCallout");
+      if (dot) dot.hidden = true;
+      if (callout) callout.hidden = true;
+    }
+    function initMobileQrDiscovery() {
+      if (storageGet(MOBILE_QR_SEEN_KEY)) return;
+      const dot = $("#mobileQrDot");
+      const callout = $("#mobileQrCallout");
+      if (dot) dot.hidden = false;
+      if (callout) {
+        callout.hidden = false;
+        // Quiet down on its own — the dot keeps marking the entry until the
+        // drawer is actually opened once.
+        window.setTimeout(() => { callout.hidden = true; }, 15000);
+      }
+    }
+    async function openMobileQrDrawer() {
+      markMobileQrSeen();
+      openPanel("mobileQrDrawer");
+      const canvas = $("#mobileQrCanvas");
+      const urlEl = $("#mobileQrUrl");
+      const hintEl = $("#mobileQrHint");
+      const qr = window.OBCMobileQr;
+      if (!canvas || !urlEl || !hintEl || !qr) return;
+      canvas.textContent = "";
+      urlEl.textContent = "正在获取局域网地址…";
+      hintEl.hidden = true;
+      hintEl.textContent = "";
+      // The backend knows its own LAN IP; the page host may be 127.0.0.1,
+      // which a phone cannot reach. Use the cached value from page load
+      // prefetch, falling back to a fresh request if unavailable.
+      const lanIp = _cachedLanIp || String((await requestJson(ENDPOINTS.qrInfo))?.lan_ip || "").trim();
+      const def = locationApiDefault();
+      const typedHost = (storageGet("openbiliclaw.webui.backendHost") || "").trim();
+      const typedPort = (storageGet("openbiliclaw.webui.backendPort") || "").trim();
+      const host = lanIp || typedHost || def.host;
+      const url = qr.buildMobileWebUrl({ host, port: typedPort || def.port });
+      urlEl.textContent = url;
+      if (qr.isLoopbackMobileHost(host)) {
+        hintEl.textContent =
+          "没拿到局域网 IP（后端可能只监听了本机地址）。手机打不开本机地址：请用 --host 0.0.0.0 启动后端，或手动把地址里的 127.0.0.1 换成电脑的局域网 IP。";
+        hintEl.hidden = false;
+      }
+      try {
+        canvas.innerHTML = qr.createQrSvgMarkup(url);
+      } catch {
+        canvas.textContent = "二维码生成失败，请直接复制上方链接。";
+      }
+    }
+    safeBind("#mobileQrBtn", "click", () => { closeSideDrawer(); void openMobileQrDrawer(); });
+    safeBind("#mobileQrCalloutOpen", "click", () => { closeSideDrawer(); void openMobileQrDrawer(); });
+    safeBind("#mobileQrCalloutClose", "click", markMobileQrSeen);
+    initMobileQrDiscovery();
+    safeBind("#mobileQrCopyBtn", "click", async () => {
+      const url = $("#mobileQrUrl")?.textContent || "";
+      if (!url.startsWith("http")) return;
+      try {
+        await navigator.clipboard.writeText(url);
+        showToast("手机版链接已复制");
+      } catch {
+        showToast("复制失败，请手动选中链接复制");
+      }
+    });
     safeBind("#profileBtn", "click", openProfilePage);
     safeBind("#homeBtn", "click", openHomePage);
     safeBind("#watchLaterBtn", "click", openWatchLaterPage);
@@ -4979,15 +6318,29 @@
     bindStarButton();
     syncTopbarHeight();
     window.addEventListener("resize", syncTopbarHeight);
+    safeBind("#themeToggleBtn", "click", cycleThemeMode);
+    document.querySelectorAll("[data-theme-choice]").forEach((button) => {
+      button.addEventListener("click", () => setThemeMode(button.dataset.themeChoice, { toast: true }));
+    });
     ["#dismissOnReshuffleToggle", "#dismissOnReshuffleSetting"].forEach((selector) => {
       safeBind(selector, "change", (event) => {
         setDismissOnReshuffle(Boolean(event.target.checked), { toast: true });
       });
     });
+    safeBind("#autoLoadOnScrollSetting", "change", (event) => {
+      setAutoLoadOnScroll(Boolean(event.target.checked), { toast: true });
+    });
+    window.addEventListener("scroll", scheduleAutoLoadCheck, { passive: true });
+    window.addEventListener("resize", scheduleAutoLoadCheck);
     safeBind("#reshuffleBtn", "click", reshuffle);
     safeBind("#loadMoreBtn", "click", appendMore);
+    ensureDelightThumbAnchor();
     safeBind("#delightThumb", "click", () => respondDelight(state.delight, "view"));
+    safeBind("#delightThumb", "auxclick", (event) => {
+      if (event.button === 1) respondDelight(state.delight, "view");
+    });
     safeBind("#delightThumb", "keydown", (event) => {
+      if (event.currentTarget?.getAttribute("href")) return;
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
       respondDelight(state.delight, "view");
@@ -5022,10 +6375,11 @@
         subjectTitle: state.messageChatSubjectTitle
       });
     });
-    safeBind("#llmProvider", "change", () => applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), default_provider: $("#llmProvider")?.value || "" } }));
+    safeBind("#llmProvider", "change", () => { applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), default_provider: $("#llmProvider")?.value || "" } }); syncLlmFallbackSameState(); });
     safeBind("#llmFallbackProvider", "change", () => applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), fallback_provider: $("#llmFallbackProvider")?.value || "" } }));
     safeBind("#embeddingFallbackProvider", "change", () => applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), embedding: { ...(state.config?.llm?.embedding || {}), fallback_provider: $("#embeddingFallbackProvider")?.value || "" } } }));
     safeBind("#probeLlm", "click", () => { void runLlmConfigProbe(); });
+    safeBind("#probeLlmFallback", "click", () => { void runLlmFallbackConfigProbe(); });
     safeBind("#probeEmbedding", "click", () => { void runEmbeddingConfigProbe(); });
     lanAuthControl = initLanAuthControl();
     bootAutostartControl = initBootAutostartControl();
@@ -5058,7 +6412,7 @@
       }
       const endpoint = persistBackendEndpoint();
       const frontend = persistFrontendSettings();
-      if ($("#configStatus")) $("#configStatus").value = `正在保存到 ${endpoint.host}:${endpoint.port}，惊喜队列加载 ${frontend.delightQueueLimit} 条，换一批忽略当前${frontend.dismissOnReshuffle ? "已开启" : "已关闭"}，后端热重载可能需要几秒。`;
+      if ($("#configStatus")) $("#configStatus").value = `正在保存到 ${endpoint.host}:${endpoint.port}，惊喜队列加载 ${frontend.delightQueueLimit} 条，主题${THEME_LABELS[frontend.themeMode]}，换一批忽略当前${frontend.dismissOnReshuffle ? "已开启" : "已关闭"}，滚动自动加载${frontend.autoLoadOnScroll ? "已开启" : "已关闭"}，后端热重载可能需要几秒。`;
       try {
         const payload = buildConfigUpdate();
         const result = await requestJsonStrict(ENDPOINTS.config.replace("?reveal_keys=true", ""), {
@@ -5085,12 +6439,29 @@
         }
       }
     });
+    const delightBanner = $("#delightBanner");
+    if (delightBanner) {
+        delightBanner.addEventListener("mouseenter", _stopDelightAutoAdvance);
+        delightBanner.addEventListener("mouseleave", _startDelightAutoAdvance);
+        delightBanner.addEventListener("touchstart", _stopDelightAutoAdvance, { passive: true });
+        delightBanner.addEventListener("touchend", _startDelightAutoAdvance, { passive: true });
+    }
     document.querySelectorAll("[data-delight]").forEach((btn) => btn.addEventListener("click", async () => {
       const response = btn.dataset.delight;
-      if (response === "prev") { setActiveDelight(state.delightIndex - 1); return; }
-      if (response === "next") { setActiveDelight(state.delightIndex + 1); return; }
-      await respondDelight(state.delight, response);
+        if (response === "prev") { setActiveDelight(state.delightIndex <= 0 ? state.delights.length - 1 : state.delightIndex - 1); return; }
+        if (response === "next") { setActiveDelight(state.delightIndex >= state.delights.length - 1 ? 0 : state.delightIndex + 1); return; }
+      // 「去看看」是纯按钮（不像封面 <a> 能原生导航），必须由 JS 打开内容。
+      await respondDelight(state.delight, response, null, response === "view");
     }));
+    $("#delightExcerptToggle")?.addEventListener("click", () => {
+      const wrapper = $("#delightExcerpt");
+      const toggle = $("#delightExcerptToggle");
+      if (!wrapper || !toggle) return;
+      const expanded = wrapper.classList.toggle("is-expanded");
+      toggle.textContent = expanded ? "收起正文" : "展开正文";
+      toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+      scheduleActivityRailHeightSync();
+    });
 
     restoreBackendEndpoint();
     restoreFrontendSettings();

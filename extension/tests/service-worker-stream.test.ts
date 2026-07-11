@@ -46,3 +46,12 @@ test("background runtime stream reconnect uses a fixed high-frequency interval",
   assert.doesNotMatch(source, /Math\.min\(wsReconnectDelay \* 2/);
   assert.match(scheduleBlock, /}, WS_RECONNECT_DELAY\);/);
 });
+
+test("background runtime stream passes an explicit short session", () => {
+  const source = readFileSync(resolve("src", "background", "service-worker.ts"), "utf8");
+  assert.match(
+    source,
+    /wsUrl\("\/runtime-stream\?client=background", await ensureSession\(\)\)/,
+  );
+  assert.match(source, /clearSession\(\)\.then\(\(\) => connectRuntimeStream\(\)\)/);
+});

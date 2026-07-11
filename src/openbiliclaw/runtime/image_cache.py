@@ -264,6 +264,19 @@ ALLOWED_IMAGE_HOST_SUFFIXES: tuple[str, ...] = (
     "ytimg.com",
     "ggpht.com",
 )
+# CN CDNs must be fetched DIRECT: env/system proxies (Clash & co.) route them
+# through exit IPs their risk control blocks or throttles — the same failure
+# mode that broke the Bilibili login probe (see bilibili/api.py
+# trust_env=False). Overseas CDNs (YouTube thumbnails) stay on trust_env so
+# users who NEED the proxy to reach them keep working.
+_DIRECT_FETCH_HOST_SUFFIXES: tuple[str, ...] = (
+    "hdslb.com",
+    "xhscdn.com",
+    "pstatp.com",
+    "douyinpic.com",
+    "douyinvod.com",
+)
+
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _FETCH_TIMEOUT_SECONDS = 10.0
 _MAX_REDIRECTS = 3
@@ -291,6 +304,14 @@ def is_allowed_image_host(hostname: str) -> bool:
     host = hostname.rstrip(".").lower()
     return any(
         host == suffix or host.endswith(f".{suffix}") for suffix in ALLOWED_IMAGE_HOST_SUFFIXES
+    )
+
+
+def _is_direct_fetch_host(hostname: str) -> bool:
+    """Whether this host is a CN CDN that must bypass env/system proxies."""
+    host = hostname.rstrip(".").lower()
+    return any(
+        host == suffix or host.endswith(f".{suffix}") for suffix in _DIRECT_FETCH_HOST_SUFFIXES
     )
 
 
@@ -390,6 +411,7 @@ async def fetch_cover_bytes(url: str) -> tuple[bytes, str]:
         async with httpx.AsyncClient(
             timeout=_FETCH_TIMEOUT_SECONDS,
             follow_redirects=False,
+            trust_env=not _is_direct_fetch_host(str(parsed.host or "")),
         ) as client:
             response = await _send_with_redirects(client, parsed)
             try:

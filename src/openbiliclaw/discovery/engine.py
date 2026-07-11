@@ -18,6 +18,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
+from openbiliclaw.discovery.admission import effective_admission_threshold
 from openbiliclaw.discovery.strategies._utils import build_profile_summary
 from openbiliclaw.discovery.style_keys import VALID_STYLE_KEYS, normalize_style_key
 from openbiliclaw.llm.json_utils import extract_llm_json_list, parse_llm_json_tolerant
@@ -446,6 +447,8 @@ class DiscoveredContent:
     # ("提瓦特摄影" → 原神, "宝可梦" → 精灵宝可梦, etc.).
     franchise_key: str = ""
     description: str = ""
+    published_at: str = ""
+    published_label: str = ""
     source_strategy: str = ""  # Which strategy found this
     relevance_score: float = 0.0  # 0.0 - 1.0 (based on user soul)
     relevance_reason: str = ""  # Why this is relevant to the user
@@ -497,6 +500,8 @@ class DiscoveredContent:
             "style_key": self.style_key,
             "franchise_key": self.franchise_key,
             "description": self.description,
+            "published_at": self.published_at,
+            "published_label": self.published_label,
             "cover_url": self.cover_url,
             "view_count": self.view_count,
             "like_count": self.like_count,
@@ -2225,6 +2230,8 @@ class ContentDiscoveryEngine:
                     topic_group=str(row.get("topic_group", "")),
                     style_key=str(row.get("style_key", "")),
                     description=str(row.get("description", "")),
+                    published_at=str(row.get("published_at", "") or ""),
+                    published_label=str(row.get("published_label", "") or ""),
                     cover_url=str(row.get("cover_url", "")),
                     view_count=int(row.get("view_count", 0) or 0),
                     like_count=int(row.get("like_count", 0) or 0),
@@ -2738,6 +2745,20 @@ class ContentDiscoveryEngine:
             return "franchise_quota"
         return ""
 
+    def _admission_threshold_for_item(self, item: DiscoveredContent) -> float:
+        database_threshold = getattr(self._database, "pool_admission_threshold", None)
+        if callable(database_threshold):
+            return float(
+                database_threshold(
+                    item.source_strategy,
+                    item.score_threshold or None,
+                )
+            )
+        return effective_admission_threshold(
+            item.source_strategy,
+            requested_threshold=item.score_threshold or None,
+        )
+
     def _cache_results(self, results: list[DiscoveredContent]) -> None:
         if self._database is None or not results:
             return
@@ -2760,6 +2781,7 @@ class ContentDiscoveryEngine:
         persisted: list[DiscoveredContent] = []
         skipped_franchise: dict[str, int] = {}
         skipped_viewed = 0
+        skipped_low_score = 0
         round_franchise_counts: dict[str, int] = {}
         viewed_content_keys = self._recent_viewed_content_keys()
         for item in results:
@@ -2767,6 +2789,9 @@ class ContentDiscoveryEngine:
                 viewed_content_keys
             ):
                 skipped_viewed += 1
+                continue
+            if float(item.relevance_score or 0.0) < self._admission_threshold_for_item(item):
+                skipped_low_score += 1
                 continue
             franchise_key = (item.franchise_key or "").strip().lower()
             if franchise_key and _POOL_FRANCHISE_QUOTA > 0:
@@ -2797,6 +2822,12 @@ class ContentDiscoveryEngine:
             logger.info(
                 "pool cache skipped %d recently viewed item(s) before writing content_cache",
                 skipped_viewed,
+            )
+
+        if skipped_low_score:
+            logger.info(
+                "pool cache skipped %d item(s) below effective admission threshold",
+                skipped_low_score,
             )
 
         if skipped_franchise:

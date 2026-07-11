@@ -48,7 +48,7 @@ def test_desktop_probe_chat_expands_inline_in_message_card() -> None:
     assert "openInlineMessageProbeChat(msg, el);" in chat_branch
     assert "openMessageChat(msg);" not in chat_branch
     inline_helper = app_js.split("function openInlineMessageProbeChat(msg, el)", 1)[1].split(
-        "async function respondProbe",
+        "function probePendingKey",
         1,
     )[0]
     assert "handledProbeKeys" not in inline_helper

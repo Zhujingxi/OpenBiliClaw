@@ -6,6 +6,7 @@ Provides the command-line entry point using Typer.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import sys
@@ -20,7 +21,9 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from openbiliclaw.published_time import format_published_time
 from openbiliclaw.runtime.ollama_supervisor import (
+    _is_default_ollama_endpoint,
     _ollama_is_running,
     _ollama_start_serve_background,
     effective_ollama_endpoint,
@@ -72,10 +75,12 @@ auth_app = typer.Typer(help="B 站认证命令")
 login_app = typer.Typer(help="账号登录命令")
 browser_app = typer.Typer(help="agent-browser 浏览器命令")
 autostart_app = typer.Typer(help="开机自启动命令")
+ext_key_app = typer.Typer(help="浏览器扩展密钥管理命令")
 app.add_typer(auth_app, name="auth")
 app.add_typer(login_app, name="login")
 app.add_typer(browser_app, name="browser")
 app.add_typer(autostart_app, name="autostart")
+app.add_typer(ext_key_app, name="ext-key")
 console = Console()
 _APP_CONTEXT: dict[str, Any] = {}
 _DISCOVER_STRATEGIES_OPTION = typer.Option(
@@ -130,6 +135,39 @@ _DOUYIN_SEARCH_KEYWORDS_OPTION = typer.Option(
     "--keyword",
     "-k",
     help="抖音搜索关键词，可重复传或用逗号分隔。",
+)
+_KEYWORD_INSPIRATION_PLATFORMS_OPTION = typer.Option(
+    None,
+    "--platform",
+    "-p",
+    help=(
+        "目标平台，可重复传或逗号分隔。默认 bilibili；可选 bilibili/xiaohongshu/"
+        "douyin/youtube/twitter/zhihu/reddit。"
+    ),
+)
+_KEYWORD_INSPIRATION_KIND_OPTION = typer.Option(
+    "regular",
+    "--kind",
+    help="关键词类型：regular 或 explore。",
+)
+_KEYWORD_INSPIRATION_LIMIT_OPTION = typer.Option(
+    None,
+    "--limit",
+    min=1,
+    max=48,
+    help="本次 dry-run 每个平台最多生成多少关键词；不传则使用 config.toml。",
+)
+_KEYWORD_INSPIRATION_INTEREST_LIMIT_OPTION = typer.Option(
+    None,
+    "--interest-limit",
+    min=1,
+    max=16,
+    help="本次 dry-run 最多抽取多少个二级兴趣；只影响预览成本，不写回 config.toml。",
+)
+_KEYWORD_INSPIRATION_PERSIST_AXES_OPTION = typer.Option(
+    False,
+    "--persist-axes",
+    help="预览时写入 / 合并 inspiration axis 库；不增加 axis 使用计数。",
 )
 _CODEX_LOGIN_IMPORT_OPTION = typer.Option(
     False,
@@ -264,14 +302,6 @@ def _warn_if_pause_on_disconnect_requires_presence() -> None:
         )
 
 
-def _is_default_ollama_endpoint(endpoint: str) -> bool:
-    from urllib.parse import urlparse
-
-    parsed = urlparse(endpoint)
-    host = (parsed.hostname or "").strip().lower()
-    return host in {"localhost", "127.0.0.1", "::1"} and parsed.port == 11434
-
-
 def _preflight_loopback_ollama(cfg: Any) -> None:
     if not ollama_required(cfg) or not cfg.autostart.manage_ollama:
         return
@@ -384,10 +414,16 @@ async def _run_with_progress(
 
 def _print_recommendation_card(item: Any, index: int) -> None:
     """Render one recommendation in a card-like format."""
+    published = format_published_time(
+        getattr(item.content, "published_at", ""),
+        getattr(item.content, "published_label", ""),
+    )
     rows = [
         ("标题", item.content.title or "（暂无）"),
         ("UP 主", item.content.up_name or "（未知）"),
     ]
+    if published:
+        rows.append(("发布时间", published))
     if item.topic_label:
         rows.append(("话题标签", item.topic_label))
     rows.extend(
@@ -447,7 +483,8 @@ def _build_auth_manager() -> Any:
     from openbiliclaw.bilibili.auth import AuthManager
     from openbiliclaw.config import load_config
 
-    return AuthManager(load_config().data_path)
+    config = load_config()
+    return AuthManager(config.data_path, proxy=config.bilibili.proxy or None)
 
 
 def _build_browser() -> Any:
@@ -478,7 +515,8 @@ def _build_bilibili_client() -> Any:
         cookie=resolve_runtime_cookie(
             data_dir=config.data_path,
             configured_cookie=config.bilibili.cookie,
-        )
+        ),
+        proxy=config.bilibili.proxy or None,
     )
 
 
@@ -537,6 +575,7 @@ def _build_soul_engine() -> Any:
         ),
         profile_consolidation_like_target_soft=cfg.scheduler.profile_consolidation_like_target_soft,
         profile_consolidation_archive_enabled=(cfg.scheduler.profile_consolidation_archive_enabled),
+        database=_get_runtime_database(),
     )
 
 
@@ -624,6 +663,21 @@ def _build_memory_manager() -> Any:
     memory.initialize()
     _RUNTIME_COMPONENTS["memory_manager"] = memory
     return memory
+
+
+def _guided_init_completed_best_effort() -> bool | None:
+    """Cheap pre-server read of whether guided init ever completed.
+
+    Mirrors the runtime's soul-layer check. Returns ``None`` when the check
+    itself fails — callers should stay silent on unknown state rather than
+    nag a healthy install.
+    """
+    try:
+        layer = _build_memory_manager().get_layer("soul")
+        data = getattr(layer, "data", {})
+        return isinstance(data, dict) and bool(data)
+    except Exception:
+        return None
 
 
 def _build_discovery_engine() -> Any:
@@ -1147,8 +1201,8 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
         {
             "label": "MiniMax 官方",
             "description": (
-                "国产代码 / agent 场景的当前 SOTA 之一 (M2.7 在 SWE-Bench 上 80%+),"
-                "便宜 ($0.30 / $1.20 per M),适合做推荐这种结构化输出任务"
+                "国产代码 / agent 场景的当前 SOTA 之一 (M3: 1M ctx / 图文视频输入),"
+                "便宜 ($0.60 / $2.40 per M),适合做推荐这种结构化输出任务"
             ),
             "signup_url": (
                 "https://platform.minimaxi.com/user-center/basic-information/interface-key "
@@ -1156,10 +1210,10 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
             ),
             "supports_embedding": "false",
             "base_url": "https://api.minimax.io/v1",
-            "default_model": "MiniMax-M2.7",
+            "default_model": "MiniMax-M3",
             "hint": (
-                "MiniMax-M2.7 (默认 / 最新 / 4-2026 / 228K ctx) / "
-                "MiniMax-M2.5 / MiniMax-M2.1。"
+                "MiniMax-M3 (默认 / 最新 / 5-2026 / 1M ctx) / "
+                "MiniMax-M2.7 / MiniMax-M2.5 / MiniMax-M2.1。"
                 "旧 abab 系列 (abab6.5*) 已被 M 系列替代"
             ),
             "domain_alt": (
@@ -1767,7 +1821,16 @@ def _prompt_provider_triplet(menu_choice: str) -> tuple[str, str, str, str]:
         ).strip()
         or default_model
     )
-    return provider, default_base_url, api_key, model
+    base_url = default_base_url
+    if provider == "claude":
+        # issue #72 — Claude keys bought from third-party relays need a
+        # custom Anthropic-protocol (/v1/messages) endpoint. Enter = official.
+        base_url = typer.prompt(
+            "Base URL（直接回车 = Anthropic 官方；第三方中转填其地址）",
+            default="",
+            show_default=False,
+        ).strip()
+    return provider, base_url, api_key, model
 
 
 def _interactive_embedding_setup(default_provider: str, *, auto_if_ready: bool = False) -> None:
@@ -4233,6 +4296,14 @@ def start(
         "API 服务",
         f"正在启动本地后端，当前监听 {effective_host}:{effective_port}。",
     )
+    if _guided_init_completed_best_effort() is False:
+        hint_host = "127.0.0.1" if effective_host == "0.0.0.0" else effective_host  # noqa: S104
+        _print_status_panel(
+            "warning",
+            "还没初始化",
+            f"启动后打开 http://{hint_host}:{effective_port}/setup/ 完成引导初始化；"
+            "无浏览器环境改用 `openbiliclaw init`。",
+        )
     _warn_if_pause_on_disconnect_requires_presence()
     if cfg.api.auth.enabled:
         _print_status_panel(
@@ -4630,6 +4701,164 @@ def set_password(
     )
 
 
+# ── ext-key: 浏览器扩展密钥管理 ────────────────────────────────────────
+
+
+_EXT_KEY_AUTH_FIELDS = frozenset({"extension_access_enabled", "extension_access_keys"})
+
+
+def _ensure_ext_key_config_writable() -> None:
+    """Refuse writes that would be hidden by a higher-priority auth layer."""
+    from openbiliclaw.config import API_AUTH_ENV_VARS, config_local_auth_keys
+
+    managed = [name for name in API_AUTH_ENV_VARS if (os.environ.get(name) or "").strip()]
+    if managed:
+        _print_status_panel(
+            "error",
+            "检测到环境变量覆盖，设备密钥配置不会可靠生效",
+            f"已设置 {', '.join(managed)}；请先移除环境变量覆盖，再管理设备密钥。",
+        )
+        raise typer.Exit(code=1)
+    shadowed = sorted(config_local_auth_keys() & _EXT_KEY_AUTH_FIELDS)
+    if shadowed:
+        _print_status_panel(
+            "error",
+            "config.local.toml 正在覆盖设备密钥配置",
+            f"被覆盖字段：{', '.join(shadowed)}；请直接修改 config.local.toml。",
+        )
+        raise typer.Exit(code=1)
+
+
+@ext_key_app.command("generate")
+def ext_key_generate() -> None:
+    """生成并保存一个扩展设备访问密钥（明文只显示一次）。"""
+    from openbiliclaw.auth_core import generate_extension_access_key
+    from openbiliclaw.config import load_config, save_config
+
+    _ensure_ext_key_config_writable()
+    cfg = load_config()
+    key_id, full_key, record = generate_extension_access_key()
+    cfg.api.auth.extension_access_keys.append(record)
+    save_config(cfg)
+    _print_status_panel(
+        "success",
+        "设备访问密钥已生成",
+        f"Key ID: {key_id}\n设备访问密钥（仅显示一次）:\n{full_key}\n\n"
+        "总开关保持关闭；确认保存密钥后执行 `openbiliclaw ext-key enable`。",
+    )
+
+
+@ext_key_app.command("list")
+def ext_key_list() -> None:
+    """显示设备访问开关和已保存的 key ID。"""
+    from openbiliclaw.auth_core import extension_access_key_ids
+    from openbiliclaw.config import load_config
+
+    cfg = load_config()
+    auth = cfg.api.auth
+    key_ids = extension_access_key_ids(auth.extension_access_keys)
+    rows: list[tuple[str, str]] = [
+        ("设备访问", "开启" if auth.extension_access_enabled else "关闭"),
+        ("密钥数量", str(len(key_ids))),
+    ]
+    rows.extend((f"Key [{index}]", key_id) for index, key_id in enumerate(key_ids, start=1))
+    _print_key_value_table("扩展设备访问密钥", rows)
+
+
+@ext_key_app.command("enable")
+def ext_key_enable() -> None:
+    """开启扩展设备访问（至少需要一个有效密钥）。"""
+    from openbiliclaw.auth_core import extension_access_key_ids
+    from openbiliclaw.config import load_config, save_config
+
+    _ensure_ext_key_config_writable()
+    cfg = load_config()
+    if cfg.api.auth.extension_access_enabled:
+        _print_status_panel("info", "已开启", "扩展设备访问已是开启状态。")
+        return
+    if not extension_access_key_ids(cfg.api.auth.extension_access_keys):
+        _print_status_panel(
+            "error",
+            "没有可用的设备密钥",
+            "请先执行 `openbiliclaw ext-key generate`。",
+        )
+        raise typer.Exit(code=1)
+    cfg.api.auth.extension_access_enabled = True
+    save_config(cfg)
+    _print_status_panel("success", "已开启", "扩展设备访问已开启；重启后端后可配对。")
+
+
+@ext_key_app.command("disable")
+def ext_key_disable() -> None:
+    """关闭扩展设备 token 交换，保留已保存密钥。"""
+    from openbiliclaw.config import load_config, save_config
+
+    _ensure_ext_key_config_writable()
+    cfg = load_config()
+    if not cfg.api.auth.extension_access_enabled:
+        _print_status_panel("info", "已关闭", "扩展设备访问已是关闭状态。")
+        return
+    cfg.api.auth.extension_access_enabled = False
+    save_config(cfg)
+    _print_status_panel("success", "已关闭", "新的设备会话交换已关闭；密钥记录仍保留。")
+
+
+@ext_key_app.command("revoke")
+def ext_key_revoke(
+    key_id: str = typer.Argument(..., help="要撤销的 12 位 key ID"),
+) -> None:
+    """撤销一个设备密钥，并立即失效所有现有登录会话。"""
+    from openbiliclaw.auth_core import extension_access_key_ids
+    from openbiliclaw.config import load_config_with_diagnostics, save_config
+
+    _ensure_ext_key_config_writable()
+    cfg, diagnostics = load_config_with_diagnostics()
+    valid_ids = extension_access_key_ids(cfg.api.auth.extension_access_keys)
+    if key_id not in valid_ids:
+        _print_status_panel("error", "未找到设备密钥", f"没有 key ID `{key_id}`。")
+        raise typer.Exit(code=1)
+
+    config_path = diagnostics.config_path
+    if config_path is None:
+        _print_status_panel("error", "无法定位配置文件", "未修改任何设备密钥。")
+        raise typer.Exit(code=1)
+    previous = config_path.read_bytes() if config_path.exists() else None
+    cfg.api.auth.extension_access_keys = [
+        record
+        for record in cfg.api.auth.extension_access_keys
+        if not record.startswith(f"{key_id}:")
+    ]
+    try:
+        save_config(cfg)
+    except Exception as exc:
+        _print_status_panel("error", "保存设备密钥失败", str(exc))
+        raise typer.Exit(code=1) from exc
+
+    if not _bump_auth_epoch(cfg):
+        try:
+            if previous is None:
+                config_path.unlink(missing_ok=True)
+            else:
+                config_path.write_bytes(previous)
+        except OSError as exc:
+            _print_status_panel(
+                "error", "撤销失败且配置回滚失败", f"请立即检查 {config_path}: {exc}"
+            )
+            raise typer.Exit(code=1) from exc
+        _print_status_panel(
+            "error",
+            "未能撤销设备密钥",
+            "运行库不可写，配置已回滚；现有会话和设备密钥均保持有效。",
+        )
+        raise typer.Exit(code=1)
+
+    _print_status_panel(
+        "success",
+        "设备密钥已撤销",
+        f"Key ID {key_id} 已删除；所有 Web 与扩展会话已立即失效。重启后端以重载密钥列表。",
+    )
+
+
 @app.command("serve-api")
 def serve_api(
     host: str = typer.Option("0.0.0.0", "--host", help="API 监听地址"),
@@ -4642,6 +4871,15 @@ def serve_api(
         "API 服务",
         f"正在启动容器友好的后端入口，当前监听 {host}:{port}。",
     )
+    if _guided_init_completed_best_effort() is False:
+        hint_host = "127.0.0.1" if host == "0.0.0.0" else host  # noqa: S104
+        _print_status_panel(
+            "warning",
+            "还没初始化",
+            f"打开 http://{hint_host}:{port}/setup/ 可完成 AI 配置与前置检查；"
+            "容器内图形化初始化不可用，请在容器里运行 `openbiliclaw init`"
+            "（宿主机执行 `docker exec -it openbiliclaw-backend openbiliclaw init`）。",
+        )
     _warn_if_pause_on_disconnect_requires_presence()
     _run_api_server(host=host, port=port)
 
@@ -5984,10 +6222,19 @@ async def run_guided_init(
         try:
             profile_data = await profile_task
         except Exception as exc:
-            raise GuidedInitError(
-                "profile_failed",
-                "画像生成阶段出错。可稍后手动重试 `openbiliclaw init`。",
-            ) from exc
+            # Surface the real LLM cause (moderation refusal / no provider /
+            # rate limit / timeout) so the init page shows *why* it failed
+            # instead of a generic "稍后重试". Falls back to generic when the
+            # failure carries no recognizable LLM signal.
+            from openbiliclaw.llm.base import describe_llm_failure
+
+            llm_reason = describe_llm_failure(exc)
+            message = (
+                f"画像生成失败：{llm_reason}"
+                if llm_reason
+                else "画像生成阶段出错。可稍后手动重试 `openbiliclaw init`。"
+            )
+            raise GuidedInitError("profile_failed", message) from exc
         await _stage_done(3)
 
         # Discover is best-effort: a normal failure leaves a partial pool the
@@ -6819,6 +7066,7 @@ def profile_consolidate(
             like_target_upper=cfg.scheduler.profile_consolidation_like_target_upper,
             like_target_soft=cfg.scheduler.profile_consolidation_like_target_soft,
             archive_enabled=cfg.scheduler.profile_consolidation_archive_enabled,
+            database=_get_runtime_database(),
         )
     else:
         consolidator = ProfileConsolidator(
@@ -6828,6 +7076,7 @@ def profile_consolidate(
             like_target_upper=cfg.scheduler.profile_consolidation_like_target_upper,
             like_target_soft=cfg.scheduler.profile_consolidation_like_target_soft,
             archive_enabled=cfg.scheduler.profile_consolidation_archive_enabled,
+            database=_get_runtime_database(),
         )
 
     if revert.strip():
@@ -8525,6 +8774,157 @@ def profile() -> None:
         f"  [bold]深度偏好[/bold]：{surface.style.depth_preference:.2f}"
         f"   [bold]探索开放度[/bold]：{surface.exploration_openness:.2f}"
     )
+
+
+@app.command("keyword-inspiration-dry-run")
+@app.command("keyword-inspiration-preview")
+def keyword_inspiration_dry_run(
+    platforms: list[str] | None = _KEYWORD_INSPIRATION_PLATFORMS_OPTION,
+    query_kind: str = _KEYWORD_INSPIRATION_KIND_OPTION,
+    limit: int | None = _KEYWORD_INSPIRATION_LIMIT_OPTION,
+    interest_limit: int | None = _KEYWORD_INSPIRATION_INTEREST_LIMIT_OPTION,
+    persist_axes: bool = _KEYWORD_INSPIRATION_PERSIST_AXES_OPTION,
+) -> None:
+    """预览 search-backed inspiration 关键词生成链路，不写入关键词池."""
+
+    import dataclasses
+
+    from openbiliclaw.config import derive_inspiration_breadth_params, load_config
+    from openbiliclaw.discovery.douyin import split_csv_values
+    from openbiliclaw.discovery.inspiration_provider import (
+        build_inspiration_search_provider,
+        build_platform_source_backends,
+    )
+    from openbiliclaw.llm.service import LLMService, module_overrides_from_config
+    from openbiliclaw.runtime.keyword_planner import KeywordPlanner
+    from openbiliclaw.soul.engine import SoulProfileNotInitializedError
+
+    allowed = {
+        "bilibili",
+        "xiaohongshu",
+        "douyin",
+        "youtube",
+        "twitter",
+        "zhihu",
+        "reddit",
+    }
+    selected_platforms = list(split_csv_values(platforms or [])) or ["bilibili"]
+    unknown = [platform for platform in selected_platforms if platform not in allowed]
+    if unknown:
+        _print_status_panel(
+            "error",
+            "平台参数无效",
+            f"未知平台：{', '.join(unknown)}。可选：{', '.join(sorted(allowed))}",
+        )
+        raise typer.Exit(code=1)
+    normalized_kind = query_kind.strip().lower()
+    if normalized_kind not in {"regular", "explore"}:
+        _print_status_panel("error", "kind 参数无效", "仅支持 regular / explore。")
+        raise typer.Exit(code=1)
+
+    _require_runtime_config()
+    config = load_config()
+    config.discovery.inspiration_search_enabled = True
+    # One-shot overrides apply on the DERIVED breadth params (internal config
+    # view injected via planner construction) — the per-knob config fields are
+    # gone (Phase-2 collapse), so nothing mutates config.discovery here.
+    inspiration_params = derive_inspiration_breadth_params(
+        getattr(config.discovery, "inspiration_breadth", "medium")
+    )
+    if limit is not None:
+        inspiration_params = dataclasses.replace(
+            inspiration_params, max_keywords_per_platform=int(limit)
+        )
+    if interest_limit is not None:
+        inspiration_params = dataclasses.replace(
+            inspiration_params, interest_sample_size=int(interest_limit)
+        )
+    memory = _build_memory_manager()
+    database = _get_runtime_database()
+    registry = _build_registry()
+    llm_service = LLMService(
+        registry=registry,
+        memory=memory,
+        usage_recorder=_build_usage_recorder(),
+        module_overrides=module_overrides_from_config(config),
+    )
+    soul_engine = _build_soul_engine()
+    try:
+        profile_data = asyncio.run(soul_engine.get_profile())
+    except SoulProfileNotInitializedError as exc:
+        _print_status_panel(
+            "warning",
+            "尚未初始化用户画像",
+            "请先执行 `openbiliclaw init` 拉取历史并生成初始画像。",
+        )
+        raise typer.Exit(code=1) from exc
+
+    x_client: object | None = None
+    twitter_cfg = getattr(getattr(config, "sources", None), "twitter", None)
+    if twitter_cfg is not None and bool(getattr(twitter_cfg, "enabled", False)):
+        from openbiliclaw.sources.x_auth import resolve_x_cookie
+        from openbiliclaw.sources.x_client import XClient
+
+        x_client = XClient(
+            cookie=resolve_x_cookie(
+                data_dir=config.data_path,
+                cookie_env=str(getattr(twitter_cfg, "cookie_env", "OPENBILICLAW_X_COOKIE")),
+            )
+        )
+
+    planner = KeywordPlanner(
+        llm_service=llm_service,
+        database=database,
+        config=config,
+        soul_engine=soul_engine,
+        pool_target_count=int(getattr(config.scheduler, "pool_target_count", 300)),
+        signal_event_threshold=int(getattr(config.scheduler, "signal_event_threshold", 6)),
+        inspiration_provider=build_inspiration_search_provider(
+            getattr(config.discovery, "inspiration_search_backends", None),
+            database=database,
+            platform_backends=build_platform_source_backends(
+                config,
+                bilibili_client=(
+                    _build_bilibili_client()
+                    if bool(getattr(getattr(config.sources, "bilibili", None), "enabled", True))
+                    else None
+                ),
+                x_client=x_client,
+            ),
+            platforms_per_probe=int(inspiration_params.platforms_per_probe),
+            riskcontrolled_probe_budget=int(inspiration_params.riskcontrolled_probe_budget),
+            pages_per_probe=int(inspiration_params.search_pages_per_probe),
+        ),
+        inspiration_params=inspiration_params,
+    )
+    report = asyncio.run(
+        planner.preview_inspiration_keywords(
+            selected_platforms,
+            profile=profile_data,
+            query_kind=normalized_kind,
+            persist_axes=persist_axes,
+        )
+    )
+    sys.stdout.write(json.dumps(report, ensure_ascii=False, indent=2))
+    sys.stdout.write("\n")
+
+
+@app.command("keyword-inspiration-report")
+def keyword_inspiration_report(
+    window_days: int = typer.Option(
+        14,
+        "--window-days",
+        min=1,
+        help="统计最近 N 天 additive inspiration / merged 关键词 cohort。",
+    ),
+) -> None:
+    """输出 inspiration additive cohort 对比与 replace 启用门禁."""
+
+    _require_runtime_config()
+    database = _get_runtime_database()
+    stats = database.get_keyword_cohort_stats(window_days=int(window_days))
+    sys.stdout.write(json.dumps(stats, ensure_ascii=False, indent=2))
+    sys.stdout.write("\n")
 
 
 _BILIBILI_STRATEGY_NAMES = ("search", "trending", "explore", "related_chain")

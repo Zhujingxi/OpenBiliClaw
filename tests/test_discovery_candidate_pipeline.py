@@ -11,6 +11,8 @@ from openbiliclaw.discovery.candidate_pool import (
     REJECTED_FRANCHISE_QUOTA,
     REJECTED_LOW_SCORE,
     DiscoveryCandidateWrite,
+    discovered_content_to_candidate_write,
+    row_to_discovered_content,
 )
 from openbiliclaw.discovery.engine import ContentDiscoveryEngine, DiscoveredContent
 from openbiliclaw.storage.database import Database
@@ -60,6 +62,23 @@ class _FailingEvalEngine:
         **kwargs: object,
     ) -> list[float]:
         raise RuntimeError("temporary llm outage")
+
+
+class _RateLimitedEvalEngine:
+    async def evaluate_content_batch(
+        self,
+        items: list[object],
+        profile: object,
+        **kwargs: object,
+    ) -> list[float]:
+        from openbiliclaw.llm.base import LLMFallbackError, LLMRateLimitError
+
+        try:
+            raise LLMRateLimitError("429 rate limit exceeded")
+        except LLMRateLimitError as inner:
+            raise LLMFallbackError(
+                "All providers failed (deepseek). Last error: rate limit"
+            ) from inner
 
 
 class _AdmissionCountingEngine:
@@ -273,6 +292,70 @@ def _seed_visible_pool_row(db: Database, bvid: str) -> None:
         style_key="deep_dive",
         topic_group="技术",
     )
+
+
+def test_candidate_roundtrip_preserves_publication_time(tmp_path: Path) -> None:
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    item = DiscoveredContent(
+        bvid="BV1TIME",
+        title="时间测试",
+        published_at="2026-07-08T06:30:00Z",
+        published_label="3 天前",
+    )
+
+    db.enqueue_discovery_candidates([discovered_content_to_candidate_write(item)])
+    row = db.claim_discovery_candidates_for_eval(limit=1)[0]
+    restored = row_to_discovered_content(row)
+
+    assert restored.published_at == "2026-07-08T06:30:00Z"
+    assert restored.published_label == "3 天前"
+    db.close()
+
+
+@pytest.mark.parametrize(
+    ("incoming_at", "incoming_label", "expected_at", "expected_label"),
+    [
+        ("", "更新后的相对时间", "2026-07-08T06:30:00Z", "更新后的相对时间"),
+        ("2026-07-09T06:30:00Z", "", "2026-07-09T06:30:00Z", "旧标签"),
+    ],
+)
+def test_candidate_rediscovery_preserves_each_empty_publication_field_independently(
+    tmp_path: Path,
+    incoming_at: str,
+    incoming_label: str,
+    expected_at: str,
+    expected_label: str,
+) -> None:
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    first = discovered_content_to_candidate_write(
+        DiscoveredContent(
+            bvid="BV1TIME",
+            title="A",
+            published_at="2026-07-08T06:30:00Z",
+            published_label="旧标签",
+        )
+    )
+    second = discovered_content_to_candidate_write(
+        DiscoveredContent(
+            bvid="BV1TIME",
+            title="A",
+            published_at=incoming_at,
+            published_label=incoming_label,
+        )
+    )
+
+    db.enqueue_discovery_candidates([first])
+    db.enqueue_discovery_candidates([second])
+    row = db.conn.execute(
+        "SELECT published_at, published_label FROM discovery_candidates WHERE candidate_key = ?",
+        (first.candidate_key,),
+    ).fetchone()
+
+    assert row["published_at"] == expected_at
+    assert row["published_label"] == expected_label
+    db.close()
 
 
 def test_pipeline_pool_count_uses_dynamic_xhs_self_nickname() -> None:
@@ -650,6 +733,44 @@ async def test_pipeline_resets_transient_eval_failures_to_pending(
 
     assert result == {"evaluated": 0, "cached": 0, "rejected": 0, "failed": 1}
     assert db.count_discovery_candidates_by_status()["pending_eval"] == 1
+
+
+@pytest.mark.asyncio
+async def test_pipeline_logs_rate_limited_eval_calmly_and_requeues(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    import logging
+
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    db.enqueue_discovery_candidates(
+        [
+            DiscoveryCandidateWrite(
+                candidate_key="bilibili:BVRL",
+                source_platform="bilibili",
+                source_strategy="search",
+                content_id="BVRL",
+                title="Rate limited",
+            )
+        ]
+    )
+    pipeline = DiscoveryCandidatePipeline(
+        database=db,
+        discovery_engine=_RateLimitedEvalEngine(),  # type: ignore[arg-type]
+        pool_target_count=30,
+    )
+
+    caplog.set_level(logging.INFO)
+    result = await pipeline.drain_pending(profile=_build_profile(), batch_size=30)
+
+    assert result == {"evaluated": 0, "cached": 0, "rejected": 0, "failed": 1}
+    # Row is re-queued for a later drain tick, not dropped.
+    assert db.count_discovery_candidates_by_status()["pending_eval"] == 1
+    # Calm single-line warning, not a scary ERROR+traceback.
+    assert "batch evaluation deferred (rate_limited)" in caplog.text
+    assert "discovery candidate batch evaluation failed" not in caplog.text
+    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -1496,3 +1617,139 @@ async def test_pipeline_supply_retries_after_zero_insert_duplicate_batch(
     assert engine.calls == [1, 2]
     rows = db.claim_discovery_candidates_for_eval(limit=10)
     assert [row["bvid"] for row in rows] == ["BVNEW"]
+
+
+def test_first_pipeline_of_process_releases_restart_orphans(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart mid-batch leaves seconds-old 'evaluating' claims that the
+    Database.initialize() 30-min sweep misses; the first pipeline of the
+    process must release them all, or the pool starves (field log 2026-07-05:
+    supply fill reports target_reached against 40 immortal rows forever)."""
+    import openbiliclaw.discovery.candidate_pipeline as cp
+
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    db.enqueue_discovery_candidates(
+        [
+            DiscoveryCandidateWrite(
+                candidate_key="bilibili:BVORPHAN",
+                source_platform="bilibili",
+                source_strategy="search",
+                content_id="BVORPHAN",
+                title="Orphan",
+            )
+        ]
+    )
+    assert len(db.claim_discovery_candidates_for_eval(limit=1)) == 1
+
+    monkeypatch.setattr(cp, "_orphan_eval_claims_released", False)
+    DiscoveryCandidatePipeline(
+        database=db,
+        discovery_engine=_BatchRecordingEvalEngine(),  # type: ignore[arg-type]
+        pool_target_count=30,
+    )
+    counts = db.count_discovery_candidates_by_status()
+    assert counts["pending_eval"] == 1
+    assert counts.get("evaluating", 0) == 0
+
+    # Later rebuilds (config reload) must NOT sweep — an in-flight batch from
+    # the previous pipeline instance would be needlessly re-queued.
+    assert len(db.claim_discovery_candidates_for_eval(limit=1)) == 1
+    DiscoveryCandidatePipeline(
+        database=db,
+        discovery_engine=_BatchRecordingEvalEngine(),  # type: ignore[arg-type]
+        pool_target_count=30,
+    )
+    assert db.count_discovery_candidates_by_status()["evaluating"] == 1
+
+
+@pytest.mark.asyncio
+async def test_drain_requeues_stale_evaluating_claims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A claim whose evaluator died mid-run (>30 min old) is re-queued by the
+    periodic drain tick and evaluated like any pending candidate."""
+    import openbiliclaw.discovery.candidate_pipeline as cp
+
+    monkeypatch.setattr(cp, "_orphan_eval_claims_released", True)
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    db.enqueue_discovery_candidates(
+        [
+            DiscoveryCandidateWrite(
+                candidate_key="bilibili:BVSTUCK",
+                source_platform="bilibili",
+                source_strategy="search",
+                content_id="BVSTUCK",
+                content_url="https://www.bilibili.com/video/BVSTUCK",
+                title="Stuck",
+            )
+        ]
+    )
+    assert len(db.claim_discovery_candidates_for_eval(limit=1)) == 1
+    db.conn.execute("UPDATE discovery_candidates SET claimed_at = datetime('now', '-45 minutes')")
+    db.conn.commit()
+
+    engine = _BatchRecordingEvalEngine()
+    pipeline = DiscoveryCandidatePipeline(
+        database=db,
+        discovery_engine=engine,  # type: ignore[arg-type]
+        pool_target_count=30,
+    )
+    result = await pipeline.drain_pending(profile=_build_profile(), batch_size=5)
+
+    assert result["evaluated"] == 1
+    assert engine.batch_lengths == [1]
+    assert db.count_discovery_candidates_by_status().get("evaluating", 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# issue #90: only explore may sit below the global admission gate
+# ---------------------------------------------------------------------------
+
+
+def _threshold_pipeline() -> DiscoveryCandidatePipeline:
+    return DiscoveryCandidatePipeline(
+        database=object(),  # type: ignore[arg-type]
+        discovery_engine=object(),  # type: ignore[arg-type]
+        admission_min_score=0.60,
+    )
+
+
+@pytest.mark.parametrize("strategy", ["trending", "hot", "feed", "search", "related_chain"])
+def test_non_explore_candidate_cannot_lower_admission_threshold(strategy: str) -> None:
+    pipeline = _threshold_pipeline()
+
+    row_threshold = pipeline._threshold_for({"source_strategy": strategy, "score_threshold": 0.20})
+    payload_threshold = pipeline._threshold_for(
+        {"source_strategy": strategy, "raw_payload": json.dumps({"score_threshold": 0.25})}
+    )
+
+    assert row_threshold == 0.60
+    assert payload_threshold == 0.60
+
+
+@pytest.mark.parametrize("strategy", ["trending", "search"])
+def test_non_explore_candidate_may_still_raise_its_own_threshold(strategy: str) -> None:
+    pipeline = _threshold_pipeline()
+    assert pipeline._threshold_for({"source_strategy": strategy, "score_threshold": 0.80}) == 0.80
+
+
+def test_explore_candidate_keeps_only_the_explicit_relaxed_threshold() -> None:
+    pipeline = _threshold_pipeline()
+    assert pipeline._threshold_for({"source_strategy": "explore", "score_threshold": 0.55}) == 0.58
+    assert pipeline._threshold_for({"source_strategy": "explore", "score_threshold": 0.58}) == 0.58
+
+
+def test_explore_prefix_does_not_receive_relaxed_threshold() -> None:
+    pipeline = _threshold_pipeline()
+    assert (
+        pipeline._threshold_for({"source_strategy": "explore-backfill", "score_threshold": 0.58})
+        == 0.60
+    )
+
+
+def test_candidate_without_threshold_falls_back_to_admission_min() -> None:
+    pipeline = _threshold_pipeline()
+    assert pipeline._threshold_for({"source_strategy": "trending"}) == 0.60

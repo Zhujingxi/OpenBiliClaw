@@ -40,6 +40,8 @@
 - 每个分支额度：按真实来源分支独立定义，不要因为多个分支最后都映射成 `favorite` 就共享上限。
 - 状态变更边界：哪些 E2E 动作只读 / 安全，哪些会改变账号状态，必须提前写清楚。
 - 三端内容卡形态：有封面、无封面文字、长文本、外链、评论 / 帖子 / 回答等特殊类型。
+- engagement 计数逐项声明：`view / like / favorite / comment / share / danmaku` 六项，逐项写清「平台可提供并映射」还是「平台结构性缺失」。结构性缺失（如非 B 站的 `danmaku`、Reddit 的 `view`）合法留 0，前端不渲染、不做占位，不当 bug 修。可映射的计数必须在该平台**所有** fetch 子路径（feed / search / bootstrap / creator …）一致填充——同一内容在 A 路径有计数、B 路径全 0 是真实缺陷（参考 `docs/plans/2026-07-07-engagement-stats-completeness-spec.md` 的跨平台矩阵和三类成因）。
+- 登录判定 cookie：声明哪个 cookie 名代表真实登录（例如 XHS `web_session`、知乎 `z_c0`、Reddit `reddit_session`），游客 cookie（`a1` / `_xsrf` 之类）不算。来源登录指示必须优先基于真实登录 cookie；只有没有新鲜 cookie 信号时，内容 / 任务历史等间接信号才可作兜底，不能覆盖或冒充 cookie 登录态。
 
 如果平台依赖登录态，优先走浏览器插件任务链路。真实 E2E 要使用安装了插件且已有登录态的浏览器，不要用 MCP/CDP 临时浏览器代替，除非用户明确要求只做普通 UI 自动化。
 
@@ -88,7 +90,10 @@
 - smoke 任务默认不写 memory、不触发画像。
 - init / profile 任务必须显式带当前 init ownership 或 `profile_update=true` 等语义，避免普通 smoke 污染画像。
 - `/api/sources/status` 基于最近任务结果给出 `ready`、`missing`、`partial`、`unverified`、`login_required` 等真实状态，不要硬编码 `no_auth`。
-- 插件任务平台通常需要 `/api/sources/<slug>/next-task`、`/task-result`、`/kick`。
+- 登录态平台要接真实登录指示链路：插件 `extension/src/background/cookie-sync.ts` 监控该平台登录 cookie（只上报 `logged_in` 布尔，绝不传 cookie 值）→ `POST /api/sources/<slug>/login-state` → 后端存 auth_state kv + 时间戳。`/api/sources/status` 优先按登录 cookie 状态判定，任务历史只作无 cookie 信号时的兜底。
+- 插件任务平台通常需要 `/api/sources/<slug>/next-task`、`/task-result`、`/kick`，且必须严格用这个路径形状：init 写保护中间件按 URL 段精确放行 `/api/sources/<slug>/{kick,task-result}` 的 POST（`api/app.py` 的 `_init_write_allowed`），自造别的端点形状会在 init 期间被 409 拦掉（或反过来意外绕过 init 保护）。
+- 插件 background 对后端的调用一律走带鉴权的共享 API client（device-key / session，见 PR #99），dispatcher 不要自己裸 `fetch`。
+- 如果平台要支持「自定义来源 recipe」（`SourceRecipe`）取数，还需提供 `src/openbiliclaw/sources/<slug>_adapter.py` 实现 `SourceAdapter` 协议并注册进 `AdapterRegistry`。`sources/registry.py` 的 `AdapterRegistry.resolve(recipe)` 按 `recipe.source_type` 查找；当前 `DiscoveryEngine` 只提供 `register_adapter()` / `adapter_registry`，尚未在 discover 运行时调用 `resolve()`，所以只注册不能宣称 recipe 取数已接通，还要补运行时解析与调用。只走平台原生任务 / producer 链路则不需要 adapter。
 
 ## 3. 浏览器插件接入
 
@@ -198,10 +203,13 @@ CLI：
 
 - 没有显式关键词时用画像关键词 fallback。
 - 只要该来源有 `search` 类 discover，就必须同时接入统一关键词链路的两半：
-  - **生成侧**：把 `<slug>` 加进 `KeywordPlanner` 的平台集合，更新 `build_merged_keywords_prompt` 的静态 `<supply_advantage>` / 允许 key / schema 示例，并补测试证明 `<slug>` 缺口会触发一次 merged LLM 生成。
+  - **生成侧（双轨，两条都要覆盖新平台）**：
+    - merged prompt 轨：`runtime/keyword_planner.py` 的 `_PLANNER_PLATFORMS` 平台元组、`_PLATFORM_QUERY_STYLES` 平台 query 风格字典，以及 `llm/prompts.py` 的静态 `PLATFORM_SUPPLY_ADVANTAGES`（`<supply_advantage>` 表）/ 允许 key / schema 示例，都要加 `<slug>`；补测试证明 `<slug>` 缺口会触发一次 merged LLM 生成。
+    - keyword inspiration axis 轨：`runtime/inspiration_pipeline.py` + `build_inspiration_axis_keyword_prompt`（axis+keyword 单次 LLM 调用，cross-domain explore 也从 axis 库取词）。它按 allocation targets 的 `platforms` 分配产词——确认新平台会出现在 allocation targets 里，否则 axis 轨永远不为该平台产词。
   - **抓取侧**：producer 使用 `KeywordFetchCoordinator.claim(<slug>)` 领取关键词，把 `source_keyword_id` 透传到候选；关键词池为空时回退画像关键词，抓取失败时标 `failed`，成功交付候选后标 `used`。
-  - 只做 claim/fetch、不进 planner generation，会导致正式 discover 长期只能吃画像 fallback 或旧词库，不算接入完成。
+  - 只做 claim/fetch、不进 planner generation，会导致正式 discover 长期只能吃画像 fallback 或旧词库，不算接入完成；只接 merged 轨漏 axis 轨（或反之）同样是半截接入。
   - 补齐某个平台时顺手审计所有已接入 search 型来源；文档写着“使用统一关键词”的来源必须都有 generation 测试覆盖，不能只在 producer 里 claim。
+- 候选入池阈值必须走统一 admission policy（`src/openbiliclaw/discovery/admission.py` 的 `effective_admission_threshold`）：策略 / producer 可以提供更严格的 requested threshold，但它只能抬高、不能压低或绕过 policy floor；exact `explore` 是唯一放宽语境。2026-07-10 的统一修复把候选自带的 `score_threshold` 作为 requested input 再与 policy floor 取 `max`，新来源不要恢复“直接采用候选阈值”的旧路径。
 - creator / related 需要 seed；冷启动时可用同轮 search / hot / feed 结果兜底。
 - 停止时给明确 reason：`pool_full`、`source_disabled`、`mode_disabled`、`budget_exhausted`、`login_required` 等。
 - 候选入池必须尊重 `[scheduler.pool_source_shares]`。
@@ -238,7 +246,10 @@ CLI：
 - 长标题、长摘要、无封面卡片不会遮挡按钮。
 - 桌面、移动、插件侧栏都做截图或视觉检查。
 - 推荐页平台过滤 / source badge / source label 要包含新平台。
+- engagement 契约包含 `view / like / favorite / comment / share / danmaku` 六项，但当前展示链路尚未补齐六项：`DiscoveredContent` 有六个字段，`RecommendationOut` 与移动 / 桌面两个 `recommendationStats()` 目前只有 `view / like / favorite / comment / danmaku`，没有 `share_count` / `🔁 share`（缺口见 `docs/plans/2026-07-07-engagement-stats-completeness-spec.md`）；插件侧栏也要单独核对。契约里声明为「结构性缺失」的字段不渲染、不占位；声明可映射的字段要用真实候选验证实际已透传到当前 DTO 与卡片，未落地的 `share` 不得宣称端到端完成。
 - 如果源主要是文字内容，要确认 text-card 在 PC、移动、插件三端都不是断图 fallback，按钮不会被正文遮挡。
+- 封面链路要显式决定：走后端 `/api/image-proxy` 缓存代理，还是浏览器直连。走代理必须把封面 CDN 域名加进 `runtime/image_cache.py` 的 `ALLOWED_IMAGE_HOST_SUFFIXES`（否则一律 403 Domain not in whitelist）；CN CDN 域名还要同时加 `_DIRECT_FETCH_HOST_SUFFIXES` 绕过系统代理（风控会封代理出口 IP，抖音 / B 站 / XHS 都踩过）。浏览器直连则要先确认该 CDN 无防盗链 / referer 限制。
+- 移动 Web 的「去看看」会尝试拉起平台原生 App：`src/openbiliclaw/web/js/app-launch.js` 的 `buildAppDeepLink(url)` 按内容 URL 的 host / path 分支解析并返回 URL scheme。新平台有可靠官方 scheme 就加对应解析分支；没有就返回空串，由 `openContentUrl()` 走浏览器 fallback，不要硬造 scheme。
 
 临时 E2E 截图不要直接提交到根目录。只有迁移到 `docs/images/` 且被 README / 首页 / 文档引用时才提交。
 
@@ -338,12 +349,13 @@ npm run package:firefox:only -- --archive-version <extension-version>
 - 插件版本：`extension/package.json`、`extension/package-lock.json`、`extension/manifest.json`
 - 首页版本 / SEO：`docs/index.html` 的 `softwareVersion`、meta description、首页 source card、英文翻译都要包含新平台。
 - README / README_EN 顶部定位、核心特性、安装登录说明、架构图中的来源列表都要同步。
-- 如果新增 / 修改了本指南或 skill，确认不是未跟踪文件，并与 `origin/main` 已存在版本做 diff，避免合并时丢掉后补规则。
+- 如果新增 / 修改了本指南或 skill，确认不是未跟踪文件，并与 `origin/main` 已存在版本做 diff，避免合并时丢掉后补规则。skill 有两份入口（`.codex/skills/add-platform-source/SKILL.md` 和 `.claude/skills/add-platform-source/SKILL.md`），内容必须保持一致；实现细节只写在本指南，skill 只保留入口指向和精简的关键约束。
 - 推 tag 前先查远端是否已存在同名 tag；如果同名 tag 已经存在，不要改旧 release 对应的 changelog 语义，必须 bump 新版本并把新改动放进新的 changelog block。
 - 常规 tag：
   - `backend-vX.Y.Z`
   - `extension-vA.B.C`
   - `desktop-vX.Y.Z`
+- Docker 渠道：`.github/workflows/release-docker.yml` 分别发布 backend 镜像和独立的 `openbiliclaw-ollama` baked-embedding 镜像，也都在版本对齐范围内。新来源若给 `pyproject.toml` 加了默认依赖（第三方 CLI / SDK），要确认 backend Docker 镜像构建真的带上它。GHCR 新建的 package 默认 private，需要手动设 public，否则用户无法匿名拉取。
 - 本地提交前跑 `git status --short --ignored` 看清楚：未跟踪设计稿、截图、`dist/`、zip/xpi/dmg/exe、临时 release 包不要误提交；只有文档引用的图片或明确要求入库的资产才纳入提交。
 - 本地可先用 `uv build` 验证后端 sdist / wheel；当前项目 venv 可能没有 `python -m build`，不要因此把 `build` 加进运行时依赖。
 - 插件本地包验证后，release 产物仍以 tag-triggered GitHub Actions 为准；本地 zip 只是验证，不提交。
@@ -357,6 +369,11 @@ npm run package:firefox:only -- --archive-version <extension-version>
 
 - 只加了爬取命令，没有接 formal discover。
 - Search 型来源只接 `KeywordFetchCoordinator.claim()`，漏掉 `KeywordPlanner` 平台集合和 merged prompt，导致 query generation 没有真正复用统一链路。
+- 只接 merged prompt 轨，漏掉 keyword inspiration axis 轨的 `_PLATFORM_QUERY_STYLES` / allocation targets（或反之），新平台在其中一条生成轨上永远拿不到词。
+- 策略 / producer 自设 admission min_score，绕过 `discovery/admission.py` 的统一入池阈值。
+- engagement 计数只在某个 fetch 子路径映射，同一内容换个入口（bootstrap / activity / collection）计数全 0。
+- 把平台结构性缺失的计数当 bug，硬造占位值或假数据。
+- 封面走 `/api/image-proxy` 却没把 CDN 域加进 `ALLOWED_IMAGE_HOST_SUFFIXES`，卡片全部断图 403；或 CN CDN 没加 direct-fetch 后缀，被系统代理出口 IP 风控拦掉。
 - 只加后端，没有插件登录态任务。
 - 用临时浏览器自动化替代真实安装插件的登录态浏览器。
 - 用错误 LLM provider / mock provider 跑 eval，和用户本地真实配置不一致。

@@ -135,11 +135,12 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 | 策略 | 说明 |
 |------|------|
 | **兴趣关键词搜索** | 根据用户画像生成关键词组合搜索 |
+| **搜索灵感脑暴** | 可选地从 like 二级兴趣抽样；`OnionProfile.interest.likes` 会优先展开 specifics，一级 domain 只在缺少 specifics 时兜底，并按 parent 计数降权防止小窗口被同一领域占满；结合 recent interest selection count、关键词覆盖频次、raw candidate 数量 / 占比 / dominant content type 和最终候选池占比降权高频兴趣，coverage join 统一走 `_normalize_match_text()` 折叠大小写 / 空白漂移，画像整理会同步迁移 keyword 与 selection ledger 标签，完整 coverage 只在本地控制环使用，LLM payload 只携带 must-cover + 少量 cooldown 摘要；随后由 `discovery.keyword_brainstorm` 脑暴带 `kind_fit=regular|explore|both` 的搜索 probe branch，每兴趣最多 2 条，regular + explore 同轮触发时共用一次 brainstorm 和一次 grounding stage；按 `[discovery].inspiration_search_backends` 通过 search provider 链（默认已启用平台源 → Exa → You.com free MCP）grounding 具体实体 / 社区词 / 讨论点，stage 级搜索预算由 `inspiration_max_probe_searches_per_stage` 控制，平台源扇出由 `inspiration_platforms_per_probe` 控制，每 probe 翻页 / 扩量由 `inspiration_search_pages_per_probe` 控制，B 站 / 抖音 / X 等 risk-controlled 来源受 `inspiration_riskcontrolled_probe_budget` 与 cooldown / 限流约束；`platform_sources` 只把 B站 / YouTube / X / Reddit、抖音 direct client，以及小红书 / 知乎 bridge 可用时的搜索标题 / URL / 摘要作为灵感 evidence，不入候选池；泛词不是硬错误，会交给 curator 结合画像、平台 guide 和覆盖约束判断；再经 `discovery.keyword_inspiration` 做 Profile Curator / Detail Expander，优先生成按平台 keyed 的 `platform_keywords`；`platform_guides.query_style` 明确 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit 的平台检索语法；写库前由系统侧执行 must-cover 排序、每平台二级兴趣 / lens family 上限、原样证据标题 / URL / 过长 query / 平台语言不匹配 / 平台检索语法不匹配过滤、grounding hint `source_interest` 校正、explore 横向 lens 校验，缺失 must-cover 兴趣时用 `discovery.keyword_inspiration.repair` 做一次 bounded repair，repair 仍缺词时用 deterministic platform-native backfill 补齐；默认关闭，开启后 admission yield 会回填 inspiration / expansion 反馈计数；实验开关可让 due 平台完全跳过旧 merged keyword planner，只用新流程产词，并在 B 站 explore 到期时写入 `keyword_kind="explore"` 的探索词池；`keyword-inspiration-dry-run` 可真实预览中间链路但不写关键词池，且使用独立 preview selection scope，`keyword-inspiration-report` 对比 inspiration / merged cohort、输出 production / preview 抽中分布并给出 replace 门禁 |
 | **相关推荐链探索** | 从已知好内容出发，沿相关推荐不断深入 |
 | **分区热门/排行榜** | 固定全站榜，并按本地洗牌轮转覆盖非 0 分区榜，结合用户画像筛选 |
 | **UP 主追踪** | 追踪关注的和发现的优质 UP 主的新动态 |
 | **评论区挖掘** | 从评论区发现用户推荐的其他内容/UP 主 |
-| **跨领域探索** | 刻意推荐用户从未接触过但心理画像暗示可能喜欢的领域；当统一 `KeywordPlanner` 已有 merged keyword 调用、`explore_refresh_hours` 到期或即将到期且 B 站仍有补货空间时，会把 `explore_domains` 合并进同一次关键词生成，把探索 query 写入 B 站 `keyword_kind="explore"` query cache。`ExploreStrategy` 后续从该 explore 候选池 claim query 搜索；池为空时不再单独打一次 explore 计划 LLM |
+| **跨领域探索** | 刻意推荐用户从未接触过但心理画像暗示可能喜欢的领域；当统一 `KeywordPlanner` 已有 merged keyword 调用、`explore_refresh_hours` 到期或即将到期且 B 站仍有补货空间时，默认会把 `explore_domains` 合并进同一次关键词生成，把探索 query 写入 B 站 `keyword_kind="explore"` query cache。开启 inspiration-only 替换模式后，这部分也改由 search-backed inspiration flow 生成 `query_kind="explore"` 的 B 站探索词。`ExploreStrategy` 后续从该 explore 候选池 claim query 搜索；池为空时不再单独打一次 explore 计划 LLM |
 | **热点关联** | 追踪热点话题，判断是否与用户深层兴趣相关 |
 
 #### 内容评估
@@ -148,7 +149,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 
 - **核心评估**：这个内容是否匹配这个用户的深层兴趣和当前状态？
 - **可选辅助指标**：播放量/点赞/弹幕质量等——由用户画像决定是否参考（有些用户在意质量指标，有些人不在意）
-- **统一待评估池**：不同来源先产出 raw candidates 并进入 `discovery_candidates`，再由统一 evaluator 混合 batch 评估；refresh plan 发现新 raw 后会即时触发一次 drain，独立 candidate eval loop 也会周期性处理已有 pending raw，避免评估被来源补货计划是否为空卡住。来源只影响取数方式、配额和 prompt 上下文，不单独决定一套喜好判断流程。评估输入包含正文 / 标签 / 互动指标；开启 `[discovery].multimodal_evaluation_enabled` 且模型支持图像时，还会优先从运行时图片缓存读取封面，未命中才白名单抓取，并把压缩后的封面图送入同一评估器。
+- **统一待评估池与准入**：不同来源先产出 raw candidates 并进入 `discovery_candidates`，API / OpenClaw runtime 再由同一个候选 pipeline 混合 batch 评估；refresh plan 发现新 raw 后会即时触发一次 drain，独立 candidate eval loop 也会周期性处理已有 pending raw，避免评估被来源补货计划是否为空卡住。来源只影响取数方式、配额和 prompt 上下文，不单独决定一套喜好判断流程。`discovery.admission` 的同一策略同时约束 candidate、cache write 与 serve：所有非 `explore` 至少使用全局门槛，只有精确 `explore` 可使用 `0.58`。评估输入包含正文 / 标签 / 互动指标；开启 `[discovery].multimodal_evaluation_enabled` 且模型支持图像时，还会优先从运行时图片缓存读取封面，未命中才白名单抓取，并把压缩后的封面图送入同一评估器。
 
 ---
 
@@ -185,6 +186,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 
 - **隐式反馈**（浏览器插件自动采集）：是否点击、观看时长、是否收藏分享
 - **显式反馈**：在插件中点赞/踩、对话式反馈
+- **桌面端提交屏障**：普通推荐与正向/避雷探针的非聊天动作先即时更新 UI，10 秒内可真实撤销且不写后端；超时或页面离开才提交，失败恢复原状态。评论/聊天因依赖文本语义与服务端回复保持直接提交
 - **记忆迭代**：反馈触发多层记忆网络更新——事件层记录事实，偏好层调整权重，觉察层写观察笔记，洞察层修正假设，灵魂层在必要时更新人格理解
 - **策略自省**：Agent 自我评估推荐命中率，反思发现策略和理解模型的有效性
 
@@ -238,6 +240,10 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │ 配置离线缓存 + 降级模式修复 UI（保存后提示重启）              │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
+│  │ 手机版二维码：桌面/插件 -> /api/qr-info(lan_ip) -> /m        │   │
+│  │ 跳过 /api/health readiness / embedding probe                 │   │
+│  └──────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────┐   │
 │  │ 推荐/消息封面：UI -> /api/image-proxy -> 白名单 CDN -> UI    │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
@@ -248,7 +254,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │ 推荐点击：content_id/url/source_platform -> source-aware click signal │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ 推荐反馈：/api/feedback -> 5s 合并 -> feedback 批学习单飞 │ │
+│  │ 推荐/探针反馈：即时 UI -> 10s 可撤销提交 -> API；推荐再经 5s 合并学习 │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ runtime status：available/raw/pending 库存 -> 插件/移动/桌面 │   │
@@ -275,7 +281,10 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │     PoolCurator + 双轴 fatigue + per-group 窗口 + 新兴趣放大保护 │ │
 │  │     request_replenishment + 定时/手动补货 + B/XHS/DY/YT/X/Zhihu/Reddit=5/1/1/1/1/1/1 │ │
-│  │     DiscoveryCandidatePipeline: raw candidates -> periodic/refresh eval -> pool │ │
+│  │     Shared CandidatePipeline: raw -> eval -> admission -> cache guard -> serve │ │
+│  │     内容元数据：时长/互动/发布时间 -> candidates -> content_cache -> API -> 四端 │ │
+│  │     Query inspiration cache: search preview -> inspiration/expansion -> keyword provenance │ │
+│  │     InspirationKeywordPipeline: axis library learning loop (yield backfill/lifecycle) + breadth config │ │
 │  │     LLM gate: scheduler + extension presence          │   │
 │  │     Soul taxonomy: CATEGORY_VOCAB + category migration + homonym-aware consolidation │ │
 │  │     Autostart: user login item + Ollama preflight/self-heal + Ollama.app runtime 校验 │ │
@@ -344,9 +353,12 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │ Soul+偏好   │ │  向量索引)   │ │  JSON)     │ │         │  │
 │  └───────────┘ └─────────────┘ └────────────┘ └─────────┘  │
 │  SQLite: events(inferred_satisfaction) / discovery_candidates     │
+│          discovery_keywords(+cohort gate) / discovery_inspiration_*│
 │          content_cache / recommendations / chat_turns / avoidance_state │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+远程浏览器扩展认证独立于平台登录态：管理员通过 CLI 生成设备密钥，后端只保存摘要；扩展向 `/api/auth/extension-token` 换取短会话。普通 HTTP 使用 Bearer Header，WebSocket 与图片代理只携带短会话 query。该能力默认关闭，撤销设备密钥会使全部现有会话立即失效。
 
 ---
 

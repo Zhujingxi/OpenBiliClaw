@@ -1288,3 +1288,104 @@ async def test_analyze_events_default_drops_quick_exit_but_keeps_explicit_dislik
     assert "低质混剪" in user_input, "explicit dislikes must remain dislike evidence"
     assert "没写 reason 的点踩" in user_input, "metadata-level explicit dislikes must be kept"
     assert "不要把负向事件提取为 interests" in str(system_instruction)
+
+
+def test_normalize_style_coerces_schema_defying_llm_output(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """LLM output that violates the style schema must be coerced, not persisted
+    verbatim, and the coercion must be logged so the user gets a diagnosable line."""
+    analyzer = PreferenceAnalyzer(FakeStructuredService())
+    with caplog.at_level("WARNING", logger="openbiliclaw.soul.preference_analyzer"):
+        normalized = analyzer._normalize_preference(
+            {
+                "style": {
+                    "preferred_duration": "unknown",
+                    "preferred_pace": "unknown",
+                    "quality_sensitivity": 0,
+                    "humor_preference": 0,
+                    "depth_preference": "unknown",
+                },
+                "exploration_openness": "unknown",
+                "context": {"session_type": "未知"},
+            }
+        )
+
+    style = normalized["style"]
+    assert isinstance(style, dict)
+    # Illegal enums reset to "" so UIs fall back to their observing copy.
+    assert style["preferred_duration"] == ""
+    assert style["preferred_pace"] == ""
+    # Non-numeric taste field resets to the field default (0.5).
+    assert style["depth_preference"] == 0.5
+    # A literal numeric 0 is a legitimate extreme and must survive untouched.
+    assert style["quality_sensitivity"] == 0.0
+    assert style["humor_preference"] == 0.0
+    # Garbage openness falls back to the field default (0.5), NOT 0.0.
+    assert normalized["exploration_openness"] == 0.5
+    # Unknown-ish context placeholder cleared for UI fallback.
+    assert normalized["context"]["session_type"] == ""
+
+    warnings = [rec for rec in caplog.records if rec.levelname == "WARNING"]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    for field in (
+        "preferred_duration",
+        "preferred_pace",
+        "depth_preference",
+        "exploration_openness",
+        "session_type",
+    ):
+        assert field in message
+    # Legal numeric-0 fields must NOT be listed as corrected.
+    assert "quality_sensitivity" not in message
+    assert "humor_preference" not in message
+
+
+def test_normalize_style_accepts_and_clamps_valid_numerics() -> None:
+    analyzer = PreferenceAnalyzer(FakeStructuredService())
+    normalized = analyzer._normalize_preference(
+        {
+            "style": {
+                "preferred_duration": "LONG",
+                "preferred_pace": "moderate",
+                "quality_sensitivity": "0.7",
+                "humor_preference": 1.7,
+                "depth_preference": 0.0,
+            },
+            "exploration_openness": "0.9",
+        }
+    )
+    style = normalized["style"]
+    assert isinstance(style, dict)
+    # Case-insensitive enum accepted and normalized to canonical lowercase.
+    assert style["preferred_duration"] == "long"
+    assert style["preferred_pace"] == "moderate"
+    # Numeric string parsed.
+    assert style["quality_sensitivity"] == 0.7
+    # Out-of-range clamped to [0, 1].
+    assert style["humor_preference"] == 1.0
+    # Literal 0.0 accepted unchanged.
+    assert style["depth_preference"] == 0.0
+    assert normalized["exploration_openness"] == 0.9
+
+
+def test_normalize_style_clean_payload_logs_no_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    analyzer = PreferenceAnalyzer(FakeStructuredService())
+    with caplog.at_level("WARNING", logger="openbiliclaw.soul.preference_analyzer"):
+        analyzer._normalize_preference(
+            {
+                "style": {
+                    "preferred_duration": "medium",
+                    "preferred_pace": "fast",
+                    "quality_sensitivity": 0.4,
+                    "humor_preference": 0.6,
+                    "depth_preference": 0.8,
+                },
+                "exploration_openness": 0.5,
+                "context": {"session_type": "深度钻研型"},
+            }
+        )
+    assert [rec for rec in caplog.records if rec.levelname == "WARNING"] == []

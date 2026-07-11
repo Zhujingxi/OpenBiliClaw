@@ -66,6 +66,20 @@ def test_desktop_web_settings_guides_frozen_installs_to_download_new_installer()
     assert 'startsWith("desktop-v")' in js
 
 
+def test_desktop_web_settings_guides_docker_installs_to_pull_new_image() -> None:
+    """Docker containers get check-only reminders that explain the pull upgrade."""
+    js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    assert "function describeDockerUpdateStatus" in js
+    assert 'const isDockerInstall = mode === "docker"' in js
+    assert "发现新版镜像" in js
+    assert "docker compose pull && docker compose up -d" in js
+    # Blocked-apply reason on docker installs is localized, not raw.
+    assert "docker_install_mode" in js
+    # 立即检查 stays usable on docker (check-only), like frozen.
+    assert "!isFrozenInstall && !isDockerInstall && !isDesktopInstallerUpdate" in js
+
+
 def test_desktop_web_update_actions_require_explicit_install_branch() -> None:
     """Only explicit git installs self-apply; desktop-v* always links to installers."""
     js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")

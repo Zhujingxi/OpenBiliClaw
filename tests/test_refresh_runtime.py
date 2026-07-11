@@ -28,6 +28,11 @@ if TYPE_CHECKING:
 _MULTI_SOURCE_SHARES = {"bilibili": 8, "xiaohongshu": 1, "douyin": 1}
 
 
+def assert_publication(payload: dict[str, object]) -> None:
+    assert payload["published_at"] == "2026-07-08T06:30:00Z"
+    assert payload["published_label"] == "3 days ago"
+
+
 class _FakeClock:
     def __init__(self) -> None:
         self.now = 1_000.0
@@ -906,6 +911,8 @@ async def test_refresh_controller_uses_shared_delight_threshold_for_runtime_quer
             "delight_score": 0.72,
             "delight_hook": "意外击中",
             "cover_url": "https://example.com/cover.jpg",
+            "published_at": "2026-07-08T06:30:00Z",
+            "published_label": "3 days ago",
         },
         delight_count=2,
     )
@@ -922,12 +929,39 @@ async def test_refresh_controller_uses_shared_delight_threshold_for_runtime_quer
 
     assert status["pending_delight_count"] == 2
     assert pending is not None
+    assert_publication(pending)
     assert database.dynamic_default_thresholds == [
         DEFAULT_DELIGHT_THRESHOLD,
         DEFAULT_DELIGHT_THRESHOLD,
     ]
     assert database.count_delight_thresholds == [0.88]
     assert database.get_delight_thresholds == [0.88]
+
+
+async def test_publish_delight_if_available_includes_publication_fields() -> None:
+    event_hub = _FakeEventHub()
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase(
+            [],
+            delight_candidate={
+                "bvid": "BV1DELIGHT",
+                "title": "惊喜候选",
+                "delight_score": 0.95,
+                "published_at": "2026-07-08T06:30:00Z",
+                "published_label": "3 days ago",
+            },
+        ),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        event_hub=event_hub,
+    )
+
+    await controller._publish_delight_if_available()
+
+    assert len(event_hub.events) == 1
+    assert_publication(event_hub.events[0])
 
 
 def test_load_disliked_topic_phrases_reads_effective_dislikes() -> None:

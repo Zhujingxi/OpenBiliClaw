@@ -27,6 +27,21 @@ def test_desktop_web_settings_exposes_and_wires_model_probe_controls() -> None:
     assert ".settings-probe-status" in css
 
 
+def test_desktop_web_settings_exposes_and_wires_llm_fallback_probe() -> None:
+    """The fallback subtab must offer a 「测试备选 Provider」 probe wired to
+    POST /api/config/probe-service kind="llm_fallback" — previously only the
+    default provider was testable, so a dead fallback stayed invisible."""
+    html = (ROOT / "src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")
+    js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    assert 'id="probeLlmFallback"' in html
+    assert 'id="probeLlmFallbackStatus"' in html
+
+    assert "function runLlmFallbackConfigProbe()" in js
+    assert 'probeConfigService("llm_fallback", buildConfigUpdate())' in js
+    assert 'safeBind("#probeLlmFallback"' in js
+
+
 def test_desktop_web_settings_always_sends_deepseek_reasoning_effort() -> None:
     js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
 

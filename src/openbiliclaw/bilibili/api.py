@@ -214,9 +214,16 @@ class BilibiliAPIClient:
 
     _WBI_KEY_TTL: float = 300.0  # Refresh WBI keys every 5 minutes
 
-    def __init__(self, cookie: str = "", *, min_request_interval: float = 0.2) -> None:
+    def __init__(
+        self,
+        cookie: str = "",
+        *,
+        min_request_interval: float = 0.2,
+        proxy: str | None = None,
+    ) -> None:
         self._cookie = cookie
         self._min_request_interval = min_request_interval
+        self._proxy = proxy or None
         self._last_request_at = 0.0
         self._cached_wbi_keys: tuple[str, str] | None = None
         self._wbi_keys_fetched_at: float = 0.0
@@ -230,6 +237,14 @@ class BilibiliAPIClient:
                 "Referer": "https://www.bilibili.com",
             },
             timeout=30.0,
+            # B站 is a CN domain: direct connection always works, while an
+            # inherited proxy (httpx trust_env reads env vars AND the OS
+            # system proxy — Clash & co.) routes through an exit IP that
+            # B站 risk-controls, showing logged-in users as "not logged
+            # in". Never inherit; [bilibili].proxy opts back in for
+            # networks that genuinely require one.
+            trust_env=False,
+            proxy=self._proxy,
         )
         if cookie:
             self._client.headers["Cookie"] = cookie

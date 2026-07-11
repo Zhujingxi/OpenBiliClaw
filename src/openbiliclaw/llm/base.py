@@ -37,6 +37,143 @@ class LLMFallbackError(LLMProviderError):
     """Raised when all candidate providers fail."""
 
 
+def classify_llm_unavailability(exc: BaseException) -> str | None:
+    """Classify an exception chain as an expected-transient LLM outage.
+
+    Walks the ``__cause__`` / ``__context__`` chain (cycle-safe) and returns:
+
+    - ``"rate_limited"`` when any link is an :class:`LLMRateLimitError` or
+      carries a "rate limit" message — a provider is cooling down and the
+      caller should simply retry on its next cycle.
+    - ``"no_provider"`` when any :class:`LLMFallbackError` /
+      ``LLMProviderExecutionError`` in the chain reports that no provider was
+      available (typically during guided init, before a chat LLM is
+      configured).
+    - ``None`` for anything else — a genuine error the caller should keep
+      logging loudly.
+
+    ``rate_limited`` wins when both apply: an "all providers failed … rate
+    limit" fallback wraps a rate-limit cause and should read as backoff, not a
+    missing provider.
+    """
+    # Lazily imported to avoid a circular import (service imports this module).
+    from openbiliclaw.llm.service import LLMProviderExecutionError
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    rate_limited = False
+    no_provider = False
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = str(current).lower()
+        if isinstance(current, LLMRateLimitError) or "rate limit" in message:
+            rate_limited = True
+        if isinstance(current, LLMFallbackError | LLMProviderExecutionError) and (
+            "no provider was available" in message
+        ):
+            no_provider = True
+        current = current.__cause__ or current.__context__
+    if rate_limited:
+        return "rate_limited"
+    if no_provider:
+        return "no_provider"
+    return None
+
+
+# Substrings that mark an upstream content-moderation / compliance refusal.
+# Chinese compat gateways (e.g. iFlytek code 10013) return the refusal *as a
+# 500*, so we cannot key off the HTTP status — we sniff the message instead.
+_LLM_MODERATION_MARKERS = (
+    "法律法规",
+    "健康和谐",
+    "无法提供关于",
+    "内容审查",
+    "content policy",
+    "content_filter",
+    "content management",
+    "risk_control",
+    "10013",
+)
+
+_LLM_AUTH_MARKERS = ("authentication", "unauthorized", "invalid api key", "401")
+_LLM_QUOTA_MARKERS = (
+    "rate limit",
+    "insufficient_quota",
+    "insufficient quota",
+    "quota",
+    "exhausted",
+    "429",
+)
+
+
+def describe_llm_failure(exc: BaseException) -> str | None:
+    """Translate an LLM exception chain into a short, human-readable Chinese
+    reason suitable for page-side display during guided init.
+
+    Walks the ``__cause__`` / ``__context__`` chain (cycle-safe) and returns a
+    one-line explanation the user can act on — a content-moderation refusal,
+    authentication failure, exhausted provider/fallback chain, rate limiting,
+    a timeout, or an empty response. Returns ``None`` when the chain carries no
+    recognizable LLM signal, so callers can fall back to their own generic
+    message.
+
+    Ordering is by specificity: a moderation refusal is the most actionable
+    (switch models), so it wins over the coarser transient buckets.
+    """
+    # Lazily imported to avoid a circular import (service imports this module).
+    from openbiliclaw.llm.service import LLMProviderExecutionError
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    moderation = auth_failed = rate_limited = False
+    timed_out = no_provider = empty_response = False
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = str(current).lower()
+        if any(marker.lower() in message for marker in _LLM_MODERATION_MARKERS):
+            moderation = True
+        if any(marker in message for marker in _LLM_AUTH_MARKERS):
+            auth_failed = True
+        if isinstance(current, LLMRateLimitError) or any(
+            marker in message for marker in _LLM_QUOTA_MARKERS
+        ):
+            rate_limited = True
+        if isinstance(current, LLMTimeoutError) or "timed out" in message:
+            timed_out = True
+        if isinstance(current, LLMFallbackError | LLMProviderExecutionError) and (
+            "no provider was available" in message
+        ):
+            no_provider = True
+        if isinstance(current, LLMResponseError):
+            empty_response = True
+        current = current.__cause__ or current.__context__
+
+    if moderation:
+        return (
+            "AI 服务上游因内容合规策略拒绝了本次请求；可更换一个不带内容审查的模型 / 服务商后重试。"
+        )
+    if auth_failed:
+        return (
+            "AI 服务鉴权失败（HTTP 401），API key 可能填错或已失效。"
+            "请到设置页检查 LLM provider 的 API key 后重试。"
+        )
+    if rate_limited:
+        return (
+            "AI 服务额度用尽或被限流（HTTP 429）。请检查 LLM provider 的余额 / 套餐，"
+            "或在设置里配置一个备选 provider 兜底后重试。"
+        )
+    if timed_out:
+        return "AI 服务响应超时；请检查网络连通性或稍后重试。"
+    if no_provider:
+        return (
+            "没有可用的 AI 服务：主 Provider 与备用 Provider 都调用失败，"
+            "请检查 LLM 配置、密钥与网络。"
+        )
+    if empty_response:
+        return "AI 服务返回了空响应或无法解析的内容；请更换模型或稍后重试。"
+    return None
+
+
 @dataclass
 class LLMResponse:
     """Standardized response from any LLM provider."""
@@ -147,7 +284,9 @@ class LLMRegistry:
         self._providers: dict[str, LLMProvider] = {}
         self._default: str = ""
         self._rate_limited_until: dict[str, float] = {}
-        self.fallback_enabled: bool = False
+        # A non-empty fallback_provider IS the enable switch — there is no
+        # separate boolean (the legacy [llm].fallback_enabled flag was never
+        # consulted and has been removed; empty provider = fallback off).
         self.fallback_provider: str = ""
         # Names of providers that should NOT appear in the chat-completion
         # fallback chain — typically an Ollama instance registered solely
@@ -242,8 +381,10 @@ class LLMRegistry:
         """Execute a completion request with sequential provider fallback."""
         last_error: Exception | None = None
         attempted: list[str] = []
+        order = self._fallback_order()
 
-        for provider_name in self._fallback_order():
+        for position, provider_name in enumerate(order):
+            has_next = position + 1 < len(order)
             attempted.append(provider_name)
             if self._provider_on_cooldown(provider_name):
                 last_error = LLMRateLimitError(
@@ -262,15 +403,18 @@ class LLMRegistry:
                 )
                 self._rate_limited_until.pop(provider_name, None)
                 return response
-            except LLMResponseError:
-                raise
             except LLMRateLimitError as exc:
                 last_error = exc
                 self._mark_rate_limited(provider_name)
-                logger.warning("Provider %s failed, trying next fallback.", provider_name)
+                self._log_provider_failure(provider_name, has_next=has_next)
+            # LLMResponseError (empty/malformed content — flaky gateways
+            # commonly die by returning 200 with no content) falls through to
+            # the next provider like any other failure: the provider already
+            # did its own single in-place retry, and a different provider may
+            # well answer the same prompt.
             except (LLMProviderError, LLMTimeoutError) as exc:
                 last_error = exc
-                logger.warning("Provider %s failed, trying next fallback.", provider_name)
+                self._log_provider_failure(provider_name, has_next=has_next)
 
         attempted_list = ", ".join(attempted)
         if last_error is None:
@@ -278,6 +422,13 @@ class LLMRegistry:
         raise LLMFallbackError(
             f"All providers failed ({attempted_list}). Last error: {last_error}"
         ) from last_error
+
+    @staticmethod
+    def _log_provider_failure(provider_name: str, *, has_next: bool) -> None:
+        if has_next:
+            logger.warning("Provider %s failed, trying next fallback.", provider_name)
+        else:
+            logger.warning("Provider %s failed; no fallback provider left to try.", provider_name)
 
     async def complete_provider(
         self,

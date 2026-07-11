@@ -11,6 +11,15 @@ function normalizeText(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+// Placeholders the LLM emits when it has no signal for a text field. Treated as
+// absent so the profile panel falls back to its "still observing" copy.
+const UNKNOWNISH_TEXT = new Set(["", "unknown", "none", "n/a", "未知"]);
+
+function stripPlaceholderText(value) {
+  const text = normalizeText(value);
+  return UNKNOWNISH_TEXT.has(text.toLowerCase()) ? "" : text;
+}
+
 function normalizeStrList(raw) {
   return Array.isArray(raw) ? raw.map(normalizeText).filter(Boolean) : [];
 }
@@ -313,7 +322,70 @@ export function normalizeRecommendation(item) {
     source_platform: normalizeSourcePlatform(item),
     content_type: normalizeText(item?.content_type) || "video",
     body_text: normalizeText(item?.body_text),
+    published_at: normalizeText(item?.published_at),
+    published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
+    view_count: Number(item?.view_count ?? 0),
+    like_count: Number(item?.like_count ?? 0),
+    comment_count: Number(item?.comment_count ?? 0),
+    favorite_count: Number(item?.favorite_count ?? 0),
+    danmaku_count: Number(item?.danmaku_count ?? 0),
   };
+}
+
+export function formatPublishedTime(item, now = Date.now()) {
+  const parsed = Date.parse(String(item?.published_at || ""));
+  if (Number.isFinite(parsed)) {
+    const diff = now - parsed;
+    if (diff >= -300_000 && diff < 60_000) return "刚刚";
+    if (diff >= 0 && diff < 86_400_000) {
+      return `${Math.max(1, Math.floor(diff / 3_600_000))} 小时前`;
+    }
+    if (diff >= 0 && diff < 604_800_000) {
+      return `${Math.floor(diff / 86_400_000)} 天前`;
+    }
+    const date = new Date(parsed);
+    const current = new Date(now);
+    if (date.getFullYear() === current.getFullYear()) {
+      return `${date.getMonth() + 1}月${date.getDate()}日`;
+    }
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  }
+  return String(item?.published_label || "").replace(/\s+/g, " ").trim().slice(0, 64);
+}
+
+export function getPublishedTimeDisplay(item, now = Date.now()) {
+  const text = formatPublishedTime(item, now);
+  if (!text) return null;
+  const parsed = Date.parse(String(item?.published_at || ""));
+  return {
+    text,
+    title: Number.isFinite(parsed) ? new Date(parsed).toLocaleString() : "",
+  };
+}
+
+// ── Engagement stats ─────────────────────────────────────────
+// Condense a raw count into Chinese-style 万/亿 units. Empty string for
+// non-positive values so callers render nothing.
+export function formatCountCn(n) {
+  const value = Math.floor(Number(n) || 0);
+  if (value <= 0) return "";
+  if (value >= 100000000)
+    return `${(Math.floor((value / 100000000) * 10) / 10).toFixed(1).replace(/\.0$/, "")}亿`;
+  if (value >= 10000)
+    return `${(Math.floor((value / 10000) * 10) / 10).toFixed(1).replace(/\.0$/, "")}万`;
+  return String(value);
+}
+
+// Build the "▶ … · 👍 … · 💬 … · ⭐ … · 弹幕 …" stats line. Only counts
+// > 0 appear; when nothing qualifies the result is "" (render nothing).
+export function recommendationStats(item) {
+  const segments = [];
+  if (item?.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
+  if (item?.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
+  if (item?.comment_count > 0) segments.push(`💬 ${formatCountCn(item.comment_count)}`);
+  if (item?.favorite_count > 0) segments.push(`⭐ ${formatCountCn(item.favorite_count)}`);
+  if (item?.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
+  return segments.join(" · ");
 }
 
 const TEXT_CARD_CONTENT_TYPES = new Set([
@@ -387,9 +459,16 @@ export function normalizeDelightCandidate(item) {
     cover_url: normalizeCoverUrl(item?.cover_url),
     content_url: normalizeText(item?.content_url),
     source_platform: normalizeSourcePlatform(item),
+    published_at: normalizeText(item?.published_at),
+    published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
     state: normalizeText(item?.state) || "pending",
     response_message: normalizeText(item?.response_message),
     chat_reply: normalizeText(item?.chat_reply),
+    view_count: Number(item?.view_count ?? 0),
+    like_count: Number(item?.like_count ?? 0),
+    comment_count: Number(item?.comment_count ?? 0),
+    favorite_count: Number(item?.favorite_count ?? 0),
+    danmaku_count: Number(item?.danmaku_count ?? 0),
     // Local UI fields preserved across re-normalizations
     turns: Array.isArray(item?.turns) ? item.turns : [],
     composer_open: Boolean(item?.composer_open),
@@ -478,16 +557,18 @@ export function getDelightMessageActions() {
 
 export function getProbeMessageActions() {
   return [
-    { label: "喜欢", action: "confirm", primary: true },
-    { label: "不喜欢", action: "reject", primary: false },
+    { label: "确认喜欢", action: "confirm", primary: true },
+    { label: "暂时搁置", action: "defer", primary: false },
+    { label: "确认不喜欢", action: "reject", primary: false },
     { label: "多聊聊", action: "chat", primary: false },
   ];
 }
 
 export function getAvoidanceProbeMessageActions() {
   return [
-    { label: "确实不喜欢", action: "confirm", primary: true },
-    { label: "不是", action: "reject", primary: false },
+    { label: "确认避雷", action: "confirm", primary: true },
+    { label: "搁置避雷", action: "defer", primary: false },
+    { label: "不是雷点", action: "reject", primary: false },
     { label: "多聊聊", action: "chat", primary: false },
   ];
 }
@@ -957,18 +1038,18 @@ export function getProfileStyleDisplay(style) {
   if (!normalized) return null;
   return {
     ...normalized,
-    preferred_duration: mappedLabel(DURATION_LABELS, normalized.preferred_duration),
-    preferred_pace: mappedLabel(PACE_LABELS, normalized.preferred_pace),
+    preferred_duration: mappedLabel(DURATION_LABELS, stripPlaceholderText(normalized.preferred_duration)),
+    preferred_pace: mappedLabel(PACE_LABELS, stripPlaceholderText(normalized.preferred_pace)),
   };
 }
 
 function normalizeContext(raw) {
   if (!raw) return null;
   return {
-    weekday_patterns: normalizeText(raw.weekday_patterns),
-    weekend_patterns: normalizeText(raw.weekend_patterns),
-    time_of_day_patterns: normalizeText(raw.time_of_day_patterns),
-    session_type: normalizeText(raw.session_type),
+    weekday_patterns: stripPlaceholderText(raw.weekday_patterns),
+    weekend_patterns: stripPlaceholderText(raw.weekend_patterns),
+    time_of_day_patterns: stripPlaceholderText(raw.time_of_day_patterns),
+    session_type: stripPlaceholderText(raw.session_type),
   };
 }
 

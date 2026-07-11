@@ -3,8 +3,12 @@ import test from "node:test";
 
 import {
   buildInitChecklist,
+  describeInitFailure,
   describeInitReason,
   describeInitStartError,
+  embeddingPullProgressView,
+  embeddingRepairAction,
+  embeddingRepairStartAccepted,
   getEnabledPlatforms,
   hardPrereqsSatisfied,
   initProgressView,
@@ -53,6 +57,73 @@ test("checklist marks hard prereqs and surfaces hints when missing", () => {
   assert.ok(bili?.hint.length > 0);
   assert.equal(llm?.hard, true);
   assert.equal(llm?.ok, false);
+});
+
+test("embeddingPullProgressView reports live bge-m3 pull percent + label", () => {
+  const idle = embeddingPullProgressView({ embedding_ready: true });
+  assert.equal(idle.active, false);
+  assert.equal(idle.pct, 0);
+
+  const pulling = embeddingPullProgressView({
+    embedding_repair_running: true,
+    embedding_repair_completed: 50,
+    embedding_repair_total: 200,
+    embedding_pull_status: "downloading",
+  });
+  assert.equal(pulling.active, true);
+  assert.equal(pulling.pct, 25);
+  assert.ok(pulling.label.includes("downloading"));
+
+  const starting = embeddingPullProgressView({
+    embedding_repair_running: true,
+    ollama_phase: "starting",
+  });
+  assert.equal(starting.pct, 1); // no totals yet → 1% floor while active
+  assert.ok(starting.label.includes("Ollama"));
+});
+
+test("embeddingRepairAction picks the right button per embedding_check", () => {
+  assert.deepEqual(embeddingRepairAction({ embedding_ready: true }), {
+    repairable: false,
+    label: "",
+  });
+  assert.equal(
+    embeddingRepairAction({ embedding_check: "model_missing" }).label,
+    "自动下载向量模型",
+  );
+  assert.equal(
+    embeddingRepairAction({ embedding_check: "model_path_encoding" }).label,
+    "迁移模型目录并修复",
+  );
+  assert.equal(embeddingRepairAction({ embedding_check: "disk_full" }).label, "重新检测");
+  assert.equal(embeddingRepairAction({ embedding_check: "not_running" }).repairable, false);
+  assert.equal(embeddingRepairStartAccepted({ status: 202 }), true);
+  assert.equal(
+    embeddingRepairStartAccepted({ status: 409, error: "already_running" }),
+    true,
+  );
+  assert.equal(embeddingRepairStartAccepted({ status: 0 }), false);
+  assert.equal(embeddingRepairStartAccepted({ status: 404 }), false);
+  assert.equal(embeddingRepairStartAccepted({ status: 500 }), false);
+});
+
+test("embedding checklist row carries pull progress + repair action", () => {
+  const rows = buildInitChecklist(
+    statusWith({
+      prerequisites: {
+        embedding_ready: false,
+        embedding_required: true,
+        embedding_check: "model_missing",
+        embedding_repair_running: true,
+        embedding_repair_completed: 10,
+        embedding_repair_total: 100,
+      },
+    }),
+  );
+  const emb = rows.find((r) => r.key === "embedding");
+  assert.equal(emb?.pull.active, true);
+  assert.equal(emb?.pull.pct, 10);
+  assert.equal(emb?.repair.repairable, true);
 });
 
 test("hardPrereqsSatisfied is false until both bilibili and llm are ready", () => {
@@ -216,6 +287,36 @@ test("reason + start-error text mapping", () => {
   assert.ok(describeInitStartError(err).includes("进行中"));
 });
 
+test("failure text appends backend detail so internal_error is diagnosable", () => {
+  // Mapped reason + stored crash detail → generic copy with specifics appended.
+  const crashed = statusWith({
+    reason: "internal_error",
+    detail: "RuntimeError: provider exploded mid-run",
+  });
+  const text = describeInitFailure(crashed);
+  assert.ok(text.includes("初始化过程中出错了"));
+  assert.ok(text.includes("RuntimeError: provider exploded mid-run"));
+  // Mapped reason without detail (pre-v0.3.156 backend) → generic copy only.
+  assert.equal(
+    describeInitFailure(statusWith({ reason: "internal_error", detail: "" })),
+    "初始化过程中出错了，请稍后重试。",
+  );
+  // Unmapped typed reason (empty_signals …) → its human message stands alone.
+  assert.equal(
+    describeInitFailure(statusWith({ reason: "empty_signals", detail: "没有拉到任何行为信号。" })),
+    "没有拉到任何行为信号。",
+  );
+  // Nothing at all → stage reason, then the generic retry hint.
+  assert.equal(
+    describeInitFailure(statusWith({ reason: "none" }), { failedReason: "stage-2-broke" }),
+    "stage-2-broke",
+  );
+  assert.equal(describeInitFailure(statusWith({ reason: "none" })), "请稍后重试");
+  // interrupted / cancelled now map to human copy instead of raw codes.
+  assert.ok(describeInitReason("interrupted").includes("打断"));
+  assert.ok(describeInitReason("cancelled").includes("取消"));
+});
+
 // ── Per-run platform source selection ──────────────────────────────────────
 
 test("init source options: bilibili is default-checked but deselectable, others opt-in", () => {
@@ -306,4 +407,83 @@ test("needs-enable: selected optional sources are guided-init opt-ins", () => {
     prerequisites: { enabled_platforms: [] },
   });
   assert.deepEqual(initSelectedSourcesNeedingEnable(["bilibili"], biliDisabled), []);
+});
+
+test("embedding hint prefers backend detail, falls back to check code, then generic", () => {
+  const rows = (prereqOverrides: Record<string, unknown>) =>
+    buildInitChecklist(
+      statusWith({
+        prerequisites: {
+          bilibili_logged_in: true,
+          bilibili_check: "ok",
+          llm_ready: true,
+          embedding_ready: false,
+          enabled_platforms: ["bilibili"],
+          ...prereqOverrides,
+        },
+      }),
+    ).find((r) => r.key === "embedding");
+
+  // Backend-provided detail wins verbatim (v0.3.155+ embedding_detail).
+  const withDetail = rows({
+    embedding_check: "model_broken",
+    embedding_detail: "bge-m3 已安装但调用返回 HTTP 500",
+  });
+  assert.equal(withDetail?.hint, "bge-m3 已安装但调用返回 HTTP 500");
+
+  // No detail → per-code fallback copy.
+  const byCode = rows({ embedding_check: "model_missing", embedding_detail: "" });
+  assert.ok(byCode?.hint.includes("ollama pull bge-m3"));
+  const notRunning = rows({ embedding_check: "not_running", embedding_detail: "" });
+  assert.ok(notRunning?.hint.includes("ollama serve"));
+
+  // Older backend (no embedding_check at all) → legacy generic copy.
+  const legacy = rows({});
+  assert.ok(legacy?.hint.includes("语义检索会弱一些"));
+
+  // Ready → no hint.
+  const ready = rows({ embedding_ready: true, embedding_check: "ok" });
+  assert.equal(ready?.hint, "");
+});
+
+test("embedding row becomes a hard prereq when the backend requires it", () => {
+  // v0.3.137+ a configured embedding provider hard-gates can_start server-side;
+  // the popup used to hardcode the row soft + "非必须", contradicting the
+  // blocked start button (field report 2026-07-05).
+  const status = statusWith({
+    can_start: false,
+    reason: "embedding_not_ready",
+    prerequisites: {
+      bilibili_logged_in: true,
+      bilibili_check: "ok",
+      llm_ready: true,
+      embedding_ready: false,
+      embedding_required: true,
+      enabled_platforms: ["bilibili"],
+    },
+  });
+  const row = buildInitChecklist(status, ["bilibili"]).find((r) => r.key === "embedding");
+  assert.equal(row?.hard, true);
+  assert.equal(row?.label, "向量模型可用");
+  assert.ok(!row?.hint.includes("也能初始化"));
+  assert.equal(hardPrereqsSatisfied(status, ["bilibili"]), false);
+
+  // embedding_not_ready now maps to a real message instead of the generic
+  // "以下条件未满足" fallback.
+  assert.ok(describeInitReason("embedding_not_ready").includes("向量模型"));
+
+  // Optional (not required) keeps the soft row and legacy label.
+  const optional = statusWith({
+    prerequisites: {
+      bilibili_logged_in: true,
+      bilibili_check: "ok",
+      llm_ready: true,
+      embedding_ready: false,
+      embedding_required: false,
+      enabled_platforms: ["bilibili"],
+    },
+  });
+  const softRow = buildInitChecklist(optional, ["bilibili"]).find((r) => r.key === "embedding");
+  assert.equal(softRow?.hard, false);
+  assert.equal(softRow?.label, "向量模型可用（推荐，非必须）");
 });

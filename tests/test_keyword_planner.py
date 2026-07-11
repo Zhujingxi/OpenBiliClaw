@@ -9,13 +9,26 @@ a fake ``llm_service``, a fake deficit source, and a REAL temporary
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from openbiliclaw.config import DiscoveryConfig
+from openbiliclaw.config import DiscoveryConfig, derive_inspiration_breadth_params
+from openbiliclaw.discovery.inspiration import (
+    AllocationTarget,
+    AxisRow,
+    BrainstormBranch,
+    ExaPreviewItem,
+    GroundedProbe,
+    MaterializeCandidate,
+    SecondaryInterest,
+    build_like_secondary_interest_window,
+    materialize_platform_keywords,
+)
 from openbiliclaw.discovery.keyword_digest import profile_kw_digest
 from openbiliclaw.runtime.keyword_planner import KeywordPlanner
 from openbiliclaw.soul.profile import InterestTag, PreferenceLayer, SoulProfile
@@ -32,8 +45,6 @@ _TWITTER = "twitter"
 _ZHIHU = "zhihu"
 _REDDIT = "reddit"
 _SEARCH_PLATFORMS = (_BILI, _XHS, _DOUYIN, _YOUTUBE, _TWITTER, _ZHIHU, _REDDIT)
-
-
 # ── fakes ────────────────────────────────────────────────────────────────
 
 
@@ -46,7 +57,7 @@ class _FakeLLM:
     call is reached (used by the single-flight test instead of a busy-wait).
     """
 
-    payload: dict[str, list[str]]
+    payload: dict[str, object]
     calls: list[dict[str, str]] = field(default_factory=list)
     gate: asyncio.Event | None = None
     entered: asyncio.Event | None = None
@@ -95,6 +106,110 @@ class _RaisingLLM:
 
 
 @dataclass
+class _SequentialLLM:
+    payloads: list[object]
+    calls: list[dict[str, str]] = field(default_factory=list)
+
+    async def complete_structured_task(
+        self,
+        *,
+        system_instruction: str,
+        user_input: str,
+        max_tokens: int = 4096,
+        caller: str = "",
+        reasoning_effort: str | None = None,
+        inject_core_memory: bool = True,
+        **_: object,
+    ) -> Any:
+        self.calls.append(
+            {
+                "system": system_instruction,
+                "user": user_input,
+                "caller": caller,
+                "max_tokens": str(max_tokens),
+                "reasoning_effort": reasoning_effort or "",
+                "inject_core_memory": str(inject_core_memory),
+            }
+        )
+        from openbiliclaw.llm.base import LLMResponse
+
+        payload = self.payloads.pop(0)
+        if isinstance(payload, Exception):
+            raise payload
+        content = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+        return LLMResponse(
+            content=str(content),
+            provider="test",
+            model="test-model",
+        )
+
+
+@dataclass
+class _RawLLM:
+    content: str
+    calls: list[dict[str, str]] = field(default_factory=list)
+
+    async def complete_structured_task(
+        self,
+        *,
+        system_instruction: str,
+        user_input: str,
+        max_tokens: int = 4096,
+        caller: str = "",
+        reasoning_effort: str | None = None,
+        inject_core_memory: bool = True,
+        **_: object,
+    ) -> Any:
+        self.calls.append(
+            {
+                "system": system_instruction,
+                "user": user_input,
+                "caller": caller,
+                "max_tokens": str(max_tokens),
+                "reasoning_effort": reasoning_effort or "",
+                "inject_core_memory": str(inject_core_memory),
+            }
+        )
+        from openbiliclaw.llm.base import LLMResponse
+
+        return LLMResponse(content=self.content, provider="test", model="test-model")
+
+
+@dataclass
+class _FakeInspirationProvider:
+    previews_by_query: dict[str, list[ExaPreviewItem]]
+    calls: list[tuple[str, int]] = field(default_factory=list)
+
+    async def search(self, query: str, *, limit: int) -> list[ExaPreviewItem]:
+        self.calls.append((query, limit))
+        return list(self.previews_by_query.get(query, []))
+
+
+@dataclass
+class _LocalLedgerProvider:
+    previews_by_query: dict[str, list[ExaPreviewItem]]
+    calls: list[tuple[str, int]] = field(default_factory=list)
+    last_search_provider: str | None = None
+
+    def begin_stage(self) -> None:
+        self.last_search_provider = None
+
+    async def search(self, query: str, *, limit: int) -> list[ExaPreviewItem]:
+        self.calls.append((query, limit))
+        previews = list(self.previews_by_query.get(query, []))
+        self.last_search_provider = "local_cache" if previews else None
+        return previews
+
+    def grounding_ledger(self) -> dict[str, object]:
+        hits = sum(1 for _, _limit in self.calls if self.last_search_provider == "local_cache")
+        return {
+            "local_hits": hits,
+            "local_misses": 0,
+            "local_sources": {"content_cache": hits} if hits else {},
+        }
+
+
+@dataclass
 class _FakeDeficitSource:
     """Stand-in for the controller's deficit / catalyst口径."""
 
@@ -140,6 +255,54 @@ class _FakeConfig:
         self.scheduler = type("_Sched", (), {"pool_target_count": pool_target_count})()
 
 
+def test_keyword_interest_hint_terms_infer_source_interest_from_grounding() -> None:
+    interests = [
+        SecondaryInterest(interest_id="interest:anime", label="动漫", parent="动漫"),
+        SecondaryInterest(interest_id="interest:food", label="美食探店", parent="美食"),
+    ]
+    branches = [
+        BrainstormBranch(
+            secondary_interest="动漫",
+            branch_id="anime-seasonal",
+            branch_label="新番季度筛选",
+            probe_queries=("2025年7月新番 推荐 避雷",),
+        ),
+        BrainstormBranch(
+            secondary_interest="美食探店",
+            branch_id="food-local",
+            branch_label="城市美食地图",
+            probe_queries=("广州地道小吃 攻略 2025",),
+        ),
+    ]
+    grounding = [
+        GroundedProbe(
+            secondary_interest="美食探店",
+            branch_id="food-local",
+            probe_query="广州地道小吃 攻略 2025",
+            source_terms=("广州地道小吃",),
+            evidence_titles=("广州地道小吃 本地人推荐",),
+        )
+    ]
+
+    hints = KeywordPlanner._interest_hint_terms(interests, branches, grounding)
+
+    assert (
+        KeywordPlanner._infer_source_interest_from_keyword("广州地道小吃攻略 2025", hints)
+        == "美食探店"
+    )
+    assert (
+        KeywordPlanner._infer_source_interest_from_keyword("2025年7月新番 快速推荐", hints)
+        == "动漫"
+    )
+    assert (
+        KeywordPlanner._infer_source_interest_from_keyword(
+            "local restaurant guide explained",
+            hints,
+        )
+        == "美食探店"
+    )
+
+
 # ── helpers ──────────────────────────────────────────────────────────────
 
 
@@ -152,6 +315,23 @@ def _profile(*names_weights: tuple[str, float]) -> SoulProfile:
             ]
         )
     )
+
+
+# Phase-2 config collapse: the per-knob inspiration_* config fields became
+# derived breadth params. Tests keep passing the old knob kwargs to
+# ``_discovery_cfg`` — they are split out here and injected into the planner as
+# an ``InspirationBreadthParams`` override, so no test body changed.
+_INSPIRATION_TIER_KEY_TO_PARAM = {
+    "inspiration_aspect_window_size": "aspect_window_size",
+    "inspiration_interest_sample_size": "interest_sample_size",
+    "inspiration_max_probe_searches_per_stage": "max_probe_searches_per_stage",
+    "inspiration_platforms_per_probe": "platforms_per_probe",
+    "inspiration_riskcontrolled_probe_budget": "riskcontrolled_probe_budget",
+    "inspiration_search_pages_per_probe": "search_pages_per_probe",
+    "inspiration_search_results_per_query": "search_results_per_query",
+    "inspiration_max_seeds_per_aspect": "max_seeds_per_aspect",
+    "inspiration_max_keywords_per_platform": "max_keywords_per_platform",
+}
 
 
 def _discovery_cfg(**overrides: object) -> DiscoveryConfig:
@@ -167,7 +347,17 @@ def _discovery_cfg(**overrides: object) -> DiscoveryConfig:
         "plan_ttl_hours": 12,
     }
     base.update(overrides)
-    return DiscoveryConfig(**base)  # type: ignore[arg-type]
+    param_overrides = {
+        param: int(base.pop(key))  # type: ignore[call-overload]
+        for key, param in _INSPIRATION_TIER_KEY_TO_PARAM.items()
+        if key in base
+    }
+    cfg = DiscoveryConfig(**base)  # type: ignore[arg-type]
+    if param_overrides:
+        cfg._test_inspiration_params = dataclasses.replace(  # type: ignore[attr-defined]
+            derive_inspiration_breadth_params("medium"), **param_overrides
+        )
+    return cfg
 
 
 def _make_planner(
@@ -178,14 +368,18 @@ def _make_planner(
     deficit: _FakeDeficitSource,
     discovery: DiscoveryConfig | None = None,
     pool_target_count: int = 300,
+    inspiration_provider: Any | None = None,
 ) -> KeywordPlanner:
+    cfg = discovery or _discovery_cfg()
     planner = KeywordPlanner(
         llm_service=llm,
         database=db,
-        config=_FakeConfig(discovery or _discovery_cfg(), pool_target_count),
+        config=_FakeConfig(cfg, pool_target_count),
         soul_engine=_FakeSoulEngine(profile),
         pool_target_count=pool_target_count,
         signal_event_threshold=6,
+        inspiration_provider=inspiration_provider,
+        inspiration_params=getattr(cfg, "_test_inspiration_params", None),
     )
     planner.bind_deficit_source(deficit)
     return planner
@@ -215,6 +409,183 @@ def _pending(
         (platform, keyword_kind, digest),
     ).fetchall()
     return [str(r["keyword"]) for r in rows]
+
+
+async def test_plan_inspiration_axis_keywords_parses_valid_payload_once(db: Database) -> None:
+    payload = {
+        "axes": [
+            {
+                "interest": "游戏评价",
+                "axis_label": "子类型:种田城建模拟",
+                "axis_kind": "subgenre",
+                "example_terms": ["耐玩", "沙盒"],
+                "evidence_refs": ["https://example.test/a"],
+                "time_sensitive": False,
+            }
+        ],
+        "keywords": [
+            {
+                "interest": "游戏评价",
+                "axis_id_or_label": "设计师视角/机制拆解",
+                "platform": _BILI,
+                "core_concept": "只狼 忍义手 设计理念",
+                "decoration": "拆解",
+                "recency_sensitivity": "low",
+            }
+        ],
+    }
+    llm = _RawLLM(json.dumps(payload, ensure_ascii=False))
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=_profile(("游戏评价", 0.9)),
+        deficit=_FakeDeficitSource(),
+    )
+
+    axes, candidates, telemetry = await planner.plan_inspiration_axis_keywords(
+        profile_digest={"interests": ["游戏评价"]},
+        platform_guides={
+            _BILI: {"query_style": ["拆解", "测评"]},
+            _XHS: {"query_style": ["笔记"]},
+        },
+        selected_interests=[
+            {"label": "游戏评价", "parent": "游戏", "weight": 0.9},
+            {"label": "咖啡器具", "parent": "生活", "weight": 0.7},
+            {"label": "城市规划", "parent": "社会", "weight": 0.6},
+            {"label": "摄影", "parent": "艺术", "weight": 0.5},
+            {"label": "多余兴趣", "parent": "测试", "weight": 0.1},
+        ],
+        existing_axes=[
+            AxisRow(
+                interest_label="游戏评价",
+                axis_label=f"既有轴{i}",
+                axis_kind="method",
+                source="test",
+                example_terms=("拆解",),
+            )
+            for i in range(7)
+        ],
+        fresh_evidence=[
+            {
+                "interest": "游戏评价",
+                "title": f"素材{i}",
+                "url": f"https://example.test/{i}",
+                "source": "pooled_history",
+            }
+            for i in range(10)
+        ],
+        allocation_targets={"游戏评价": {"platforms": [_BILI], "min_axes": 2}},
+    )
+
+    assert axes == [
+        AxisRow(
+            interest_label="游戏评价",
+            axis_label="子类型:种田城建模拟",
+            axis_kind="subgenre",
+            source="llm_axis_keyword",
+            example_terms=("耐玩", "沙盒"),
+            evidence_refs=("https://example.test/a",),
+        )
+    ]
+    assert candidates == [
+        MaterializeCandidate(
+            interest="游戏评价",
+            axis_label="设计师视角/机制拆解",
+            platform=_BILI,
+            core_concept="只狼 忍义手 设计理念",
+            decoration="拆解",
+            recency_sensitivity="low",
+            origin="llm_axis_keyword",
+        )
+    ]
+    assert telemetry["llm_call_failed"] is False
+    assert telemetry["selected_interests_truncated"] == 1
+    assert telemetry["existing_axes_truncated"] == 1
+    assert telemetry["fresh_evidence_truncated"] == 2
+    assert telemetry["platform_guides_dropped"] == 1
+    assert len(llm.calls) == 1
+    assert llm.calls[0]["caller"] == "discovery.keyword_inspiration"
+    assert llm.calls[0]["max_tokens"] == "8192"
+    assert "xiaohongshu" not in llm.calls[0]["user"]
+
+
+async def test_plan_inspiration_axis_keywords_salvages_truncated_payload_once(
+    db: Database,
+) -> None:
+    valid_axis = {
+        "interest": "游戏评价",
+        "axis_label": "设计师视角/机制拆解",
+        "axis_kind": "creator_lens",
+        "example_terms": ["设计理念"],
+        "evidence_refs": ["https://example.test/a"],
+        "time_sensitive": False,
+    }
+    valid_keyword = {
+        "interest": "游戏评价",
+        "axis_id_or_label": "设计师视角/机制拆解",
+        "platform": _BILI,
+        "core_concept": "只狼 忍义手 设计理念",
+        "decoration": "拆解",
+        "recency_sensitivity": "low",
+    }
+    content = (
+        '{"axes":['
+        + json.dumps(valid_axis, ensure_ascii=False)
+        + '],"keywords":['
+        + json.dumps(valid_keyword, ensure_ascii=False)
+        + ',{"interest":"游戏评价","axis_id_or_label":"残缺"'
+    )
+    llm = _RawLLM(content)
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=_profile(("游戏评价", 0.9)),
+        deficit=_FakeDeficitSource(),
+    )
+
+    axes, candidates, telemetry = await planner.plan_inspiration_axis_keywords(
+        profile_digest={"interests": ["游戏评价"]},
+        platform_guides={_BILI: {"query_style": ["拆解"]}},
+        selected_interests=[{"label": "游戏评价", "parent": "游戏", "weight": 0.9}],
+        existing_axes=[],
+        fresh_evidence=[],
+        allocation_targets={"游戏评价": {"platforms": [_BILI], "min_axes": 1}},
+    )
+
+    assert [axis.axis_label for axis in axes] == ["设计师视角/机制拆解"]
+    assert [candidate.core_concept for candidate in candidates] == ["只狼 忍义手 设计理念"]
+    assert telemetry["parse_salvaged"] is True
+    assert telemetry["parse_dropped_count"] == 1
+    assert telemetry["llm_call_failed"] is False
+    assert len(llm.calls) == 1
+
+
+@pytest.mark.parametrize("content", ["", "not-json"])
+async def test_plan_inspiration_axis_keywords_marks_failed_output_once(
+    db: Database,
+    content: str,
+) -> None:
+    llm = _RawLLM(content)
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=_profile(("游戏评价", 0.9)),
+        deficit=_FakeDeficitSource(),
+    )
+
+    axes, candidates, telemetry = await planner.plan_inspiration_axis_keywords(
+        profile_digest={"interests": ["游戏评价"]},
+        platform_guides={_BILI: {"query_style": ["拆解"]}},
+        selected_interests=[{"label": "游戏评价", "parent": "游戏", "weight": 0.9}],
+        existing_axes=[],
+        fresh_evidence=[],
+        allocation_targets={"游戏评价": {"platforms": [_BILI], "min_axes": 1}},
+    )
+
+    assert axes == []
+    assert candidates == []
+    assert telemetry["llm_call_failed"] is True
+    assert len(llm.calls) == 1
 
 
 # ── tests ────────────────────────────────────────────────────────────────
@@ -432,6 +803,1234 @@ async def test_planner_does_not_request_explore_domains_when_not_due(
     assert _pending(db, _BILI, digest) == ["人工智能 盘点"]
     assert ledger[_BILI] == 1
     assert deficit.explore_marked == 0
+
+
+async def test_inspiration_replace_mode_skips_merged_keyword_planner(
+    db: Database,
+) -> None:
+    profile = _profile(("独立游戏叙事", 0.93))
+    digest = profile_kw_digest(profile)
+    llm = _SequentialLLM(
+        payloads=[
+            {
+                "expansions": [
+                    {
+                        "aspect_id": "interest:term-cab3f7dbd3",
+                        "inspiration_id": "environmental-narrative",
+                        "expansion_id": "fragmented-clues",
+                        "text": "碎片化线索",
+                        "relation": "mechanic",
+                        "detail_axes": ["机制"],
+                        "keywords": ["环境叙事 碎片化线索 复盘"],
+                        "curator_decision": "keep",
+                        "curator_score": 0.91,
+                        "curator_reason": "具体且贴合叙事设计兴趣。",
+                    }
+                ]
+            },
+        ]
+    )
+    provider = _FakeInspirationProvider(
+        previews_by_query={
+            "独立游戏叙事": [
+                ExaPreviewItem(
+                    title="环境叙事设计",
+                    url="https://example.test/story",
+                    highlights=("环境叙事",),
+                )
+            ]
+        }
+    )
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=_FakeDeficitSource(deficits={_BILI: 40}),
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True,
+            inspiration_replace_merged_keywords=True,
+            inspiration_aspect_window_size=1,
+            inspiration_search_results_per_query=1,
+            inspiration_max_keywords_per_platform=3,
+        ),
+        inspiration_provider=provider,
+    )
+
+    ledger = await planner.run_once()
+
+    assert [call["caller"] for call in llm.calls] == ["discovery.keyword_inspiration"]
+    assert provider.calls == [("独立游戏叙事", 1)]
+    assert _pending(db, _BILI, digest) == [
+        "环境叙事 碎片化线索 复盘",
+        "独立游戏叙事 碎片化线索",
+    ]
+    assert ledger == {_BILI: 2}
+
+
+async def test_inspiration_stage_brainstorms_probe_queries_before_exa_search(
+    db: Database,
+) -> None:
+    profile = SoulProfile(
+        preferences=PreferenceLayer(
+            interests=[
+                InterestTag(
+                    name="Switch 独立游戏",
+                    category="游戏",
+                    weight=0.95,
+                    source="like",
+                )
+            ]
+        )
+    )
+    digest = profile_kw_digest(profile)
+    llm = _SequentialLLM(
+        payloads=[
+            {
+                "expansions": [
+                    {
+                        "inspiration_id": "balatro",
+                        "expansion_id": "switch-hidden-gems-keywords",
+                        "text": "Switch 独立游戏隐藏佳作",
+                        "relation": "artifact",
+                        "detail_axes": ["work_entity"],
+                        "platform_keywords": {_BILI: ["Switch 独立游戏 冷门佳作 盘点"]},
+                        "curator_decision": "keep",
+                        "curator_score": 0.91,
+                    }
+                ]
+            }
+        ]
+    )
+    provider = _FakeInspirationProvider(
+        previews_by_query={
+            "Switch 独立游戏": [
+                ExaPreviewItem(
+                    title="Switch hidden gems list",
+                    url="https://example.test/switch-cn",
+                    highlights=("Balatro",),
+                )
+            ]
+        }
+    )
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=_FakeDeficitSource(deficits={_BILI: 40}),
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True,
+            inspiration_replace_merged_keywords=True,
+            inspiration_aspect_window_size=2,
+            inspiration_search_results_per_query=1,
+            inspiration_max_keywords_per_platform=3,
+        ),
+        inspiration_provider=provider,
+    )
+
+    ledger = await planner.run_once()
+
+    assert [call["caller"] for call in llm.calls] == ["discovery.keyword_inspiration"]
+    assert provider.calls == [("Switch 独立游戏", 1)]
+    assert not any("具体案例 机制 方法 争议 深度分析" in query for query, _ in provider.calls)
+    assert _pending(db, _BILI, digest) == [
+        "Switch 独立游戏 冷门佳作 盘点",
+        "Switch 独立游戏 Switch 独立游戏隐藏佳作",
+    ]
+    assert ledger == {_BILI: 2}
+
+
+async def test_inspiration_stage_uses_deterministic_grounding_probes_without_brainstorm_llm(
+    db: Database,
+) -> None:
+    profile = _profile(("Switch 独立游戏", 0.95))
+    digest = profile_kw_digest(profile)
+    llm = _SequentialLLM(
+        payloads=[
+            {
+                "expansions": [
+                    {
+                        "inspiration_id": "balatro",
+                        "expansion_id": "deterministic-probe-keyword",
+                        "text": "Balatro",
+                        "relation": "artifact",
+                        "platform_keywords": {_BILI: ["Balatro Switch 盘点"]},
+                        "curator_decision": "keep",
+                    }
+                ]
+            }
+        ]
+    )
+    provider = _FakeInspirationProvider(
+        previews_by_query={
+            "Switch 独立游戏": [
+                ExaPreviewItem(
+                    title="Balatro Switch hidden gem",
+                    url="https://example.test/balatro",
+                    highlights=("Balatro",),
+                )
+            ]
+        }
+    )
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=_FakeDeficitSource(deficits={_BILI: 40}),
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True,
+            inspiration_replace_merged_keywords=True,
+            inspiration_search_results_per_query=1,
+            inspiration_max_keywords_per_platform=2,
+        ),
+        inspiration_provider=provider,
+    )
+
+    ledger = await planner.run_once()
+
+    assert [call["caller"] for call in llm.calls] == ["discovery.keyword_inspiration"]
+    assert provider.calls == [("Switch 独立游戏", 1)]
+    assert _pending(db, _BILI, digest) == [
+        "Balatro Switch 盘点",
+        "Switch 独立游戏 Balatro",
+    ]
+    assert ledger == {_BILI: 2}
+
+
+async def test_regular_inspiration_stage_uses_single_axis_keyword_llm_call(
+    db: Database,
+) -> None:
+    profile = _profile(("Switch 独立游戏", 0.95))
+    digest = profile_kw_digest(profile)
+    llm = _SequentialLLM(
+        payloads=[
+            {
+                "axes": [
+                    {
+                        "interest": "Switch 独立游戏",
+                        "axis_label": "冷门佳作",
+                        "axis_kind": "community_vocab",
+                        "example_terms": ["冷门佳作"],
+                    }
+                ],
+                "keywords": [
+                    {
+                        "interest": "Switch 独立游戏",
+                        "axis_id_or_label": "冷门佳作",
+                        "platform": _BILI,
+                        "core_concept": "Switch 独立游戏 冷门佳作",
+                        "decoration": "盘点",
+                    }
+                ],
+            }
+        ]
+    )
+    provider = _FakeInspirationProvider(
+        previews_by_query={
+            "Switch 独立游戏": [
+                ExaPreviewItem(
+                    title="Balatro Switch hidden gem",
+                    url="https://example.test/balatro",
+                    highlights=("Balatro",),
+                )
+            ]
+        }
+    )
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=_FakeDeficitSource(),
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True,
+            inspiration_search_results_per_query=1,
+            inspiration_max_keywords_per_platform=1,
+        ),
+        inspiration_provider=provider,
+    )
+
+    ledger = await planner._run_inspiration_stage([_BILI], profile=profile, digest=digest)
+
+    assert [call["caller"] for call in llm.calls] == ["discovery.keyword_inspiration"]
+    assert _pending(db, _BILI, digest) == ["Switch 独立游戏 冷门佳作 盘点"]
+    assert ledger == {_BILI: 1}
+
+
+async def test_shared_inspiration_stage_uses_single_axis_keyword_llm_call(
+    db: Database,
+) -> None:
+    profile = _profile(("独立游戏叙事", 0.93))
+    digest = profile_kw_digest(profile)
+    llm = _SequentialLLM(
+        payloads=[
+            {
+                "axes": [
+                    {
+                        "interest": "独立游戏叙事",
+                        "axis_label": "环境叙事",
+                        "axis_kind": "method",
+                        "example_terms": ["环境叙事"],
+                    }
+                ],
+                "keywords": [
+                    {
+                        "interest": "独立游戏叙事",
+                        "axis_id_or_label": "环境叙事",
+                        "platform": _BILI,
+                        "core_concept": "B站 环境叙事 案例",
+                    },
+                    {
+                        "interest": "独立游戏叙事",
+                        "axis_id_or_label": "环境叙事",
+                        "platform": _REDDIT,
+                        "core_concept": "environmental storytelling game design",
+                    },
+                ],
+            }
+        ]
+    )
+    provider = _FakeInspirationProvider(
+        previews_by_query={
+            "独立游戏叙事": [
+                ExaPreviewItem(
+                    title="环境叙事设计",
+                    url="https://example.test/story",
+                    highlights=("environmental storytelling",),
+                )
+            ]
+        }
+    )
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=_FakeDeficitSource(),
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True,
+            inspiration_search_results_per_query=1,
+            inspiration_max_keywords_per_platform=1,
+        ),
+        inspiration_provider=provider,
+    )
+
+    ledger, explore_inserted = await planner._run_shared_inspiration_stage(
+        [_BILI],
+        explore_platforms=[_REDDIT],
+        profile=profile,
+        digest=digest,
+    )
+
+    assert [call["caller"] for call in llm.calls] == ["discovery.keyword_inspiration"]
+    assert _pending(db, _BILI, digest) == ["B站 环境叙事 案例"]
+    assert _pending(db, _REDDIT, digest, keyword_kind="explore") == [
+        "environmental storytelling game design"
+    ]
+    assert ledger == {_BILI: 1, _REDDIT: 1}
+    assert explore_inserted == 1
+
+
+async def test_inspiration_llm_failure_uses_deterministic_candidates_without_retry(
+    db: Database,
+) -> None:
+    profile = _profile(("AI tooling", 0.95))
+    digest = profile_kw_digest(profile)
+    llm = _SequentialLLM(payloads=["not json"])
+    provider = _FakeInspirationProvider(previews_by_query={})
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=_FakeDeficitSource(),
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True,
+            inspiration_max_probe_searches_per_stage=1,
+            inspiration_max_keywords_per_platform=2,
+        ),
+        inspiration_provider=provider,
+    )
+
+    ledger = await planner._run_inspiration_stage(
+        [_YOUTUBE, _REDDIT],
+        profile=profile,
+        digest=digest,
+    )
+
+    assert [call["caller"] for call in llm.calls] == ["discovery.keyword_inspiration"]
+    assert _pending(db, _YOUTUBE, digest) == ["AI tooling"]
+    assert _pending(db, _REDDIT, digest) == ["AI tooling"]
+    assert ledger == {_YOUTUBE: 1, _REDDIT: 1}
+
+
+async def test_chinese_interest_failure_records_script_mismatch_shortfall_without_garbage(
+    db: Database,
+) -> None:
+    profile = _profile(("婚恋关系", 0.95))
+    llm = _SequentialLLM(payloads=["not json"])
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=_FakeDeficitSource(),
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True,
+            inspiration_max_probe_searches_per_stage=1,
+            inspiration_max_keywords_per_platform=2,
+        ),
+        inspiration_provider=_FakeInspirationProvider(previews_by_query={}),
+    )
+
+    report = await planner.preview_inspiration_keywords(
+        [_YOUTUBE, _REDDIT],
+        profile=profile,
+        query_kind="regular",
+    )
+
+    assert [call["caller"] for call in llm.calls] == ["discovery.keyword_inspiration"]
+    assert report["platform_keywords"] == {_YOUTUBE: [], _REDDIT: []}
+    telemetry = report["materialize_telemetry"]
+    shortfalls = telemetry["coverage_shortfall"]
+    assert {item["platform"] for item in shortfalls if item["reason"] == "script_mismatch"} == {
+        _YOUTUBE,
+        _REDDIT,
+    }
+
+
+async def test_preview_report_surfaces_axis_pipeline_telemetry(db: Database) -> None:
+    profile = _profile(("游戏评价", 0.95))
+    llm = _SequentialLLM(
+        payloads=[
+            {
+                "axes": [
+                    {
+                        "interest": "游戏评价",
+                        "axis_label": "机制拆解",
+                        "axis_kind": "method",
+                        "example_terms": ["设计理念"],
+                        "evidence_refs": ["https://example.test/axis"],
+                        "time_sensitive": False,
+                    },
+                    {
+                        "interest": "游戏评价",
+                        "axis_label": "社区语言",
+                        "axis_kind": "community_language",
+                        "example_terms": ["玩家黑话"],
+                        "evidence_refs": ["https://example.test/community"],
+                        "time_sensitive": False,
+                    },
+                ],
+                "keywords": [
+                    {
+                        "interest": "游戏评价",
+                        "axis_id_or_label": "机制拆解",
+                        "platform": _BILI,
+                        "core_concept": "只狼 忍义手 设计理念",
+                        "decoration": "拆解",
+                        "recency_sensitivity": "low",
+                    },
+                    {
+                        "interest": "游戏评价",
+                        "axis_id_or_label": "社区语言",
+                        "platform": _BILI,
+                        "core_concept": "只狼 玩家黑话",
+                        "decoration": "讨论",
+                        "recency_sensitivity": "low",
+                    },
+                ],
+            }
+        ]
+    )
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=_FakeDeficitSource(deficits={_BILI: 40}),
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True,
+            inspiration_aspect_window_size=1,
+            inspiration_max_probe_searches_per_stage=1,
+            inspiration_max_keywords_per_platform=2,
+        ),
+        inspiration_provider=_FakeInspirationProvider(previews_by_query={}),
+    )
+
+    report = await planner.preview_inspiration_keywords([_BILI], profile=profile)
+
+    assert "<allocation_targets>" in llm.calls[0]["user"]
+    assert '"min_axes": 2' in llm.calls[0]["user"]
+    assert report["axis_coverage"] == {
+        "游戏评价": {"count": 2, "axes": ["机制拆解", "社区语言"], "platforms": [_BILI]}
+    }
+    assert report["soft_score_summary"]["count"] == 2
+    assert report["deterministic_fill"] == 0
+    assert report["coverage_shortfall"] == []
+    assert report["parse_salvaged"] is False
+    assert report["llm_call_failed"] is False
+    assert report["repair_applied"] == {_BILI: False}
+    assert all(
+        item.get("reason") != "platform_style_mismatch"
+        for reasons in report["rejected_reasons"].values()
+        for item in reasons
+    )
+
+
+async def test_preview_single_axis_llm_response_fills_second_library_axis(
+    db: Database,
+) -> None:
+    profile = _profile(("游戏评价", 0.95))
+    db.upsert_inspiration_axes(
+        [
+            AxisRow(
+                interest_label="游戏评价",
+                axis_label="社区语言",
+                axis_kind="community_language",
+                source="test",
+                example_terms=("玩家黑话",),
+            )
+        ],
+        bump_usage=False,
+    )
+    llm = _SequentialLLM(
+        payloads=[
+            {
+                "axes": [
+                    {
+                        "interest": "游戏评价",
+                        "axis_label": "机制拆解",
+                        "axis_kind": "method",
+                        "example_terms": ["设计理念"],
+                        "evidence_refs": ["https://example.test/axis"],
+                        "time_sensitive": False,
+                    }
+                ],
+                "keywords": [
+                    {
+                        "interest": "游戏评价",
+                        "axis_id_or_label": "机制拆解",
+                        "platform": _BILI,
+                        "core_concept": "只狼 忍义手 设计理念",
+                        "decoration": "拆解",
+                        "recency_sensitivity": "low",
+                    }
+                ],
+            }
+        ]
+    )
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=_FakeDeficitSource(deficits={_BILI: 40}),
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True,
+            inspiration_aspect_window_size=1,
+            inspiration_max_probe_searches_per_stage=1,
+            inspiration_max_keywords_per_platform=2,
+        ),
+        inspiration_provider=_FakeInspirationProvider(previews_by_query={}),
+    )
+
+    report = await planner.preview_inspiration_keywords([_BILI], profile=profile)
+
+    assert report["axis_coverage"] == {
+        "游戏评价": {"count": 2, "axes": ["机制拆解", "社区语言"], "platforms": [_BILI]}
+    }
+    assert report["platform_keywords"] == {
+        _BILI: ["只狼 忍义手 设计理念 拆解", "游戏评价 玩家黑话"]
+    }
+    assert report["deterministic_fill"] == 1
+    assert report["coverage_shortfall"] == []
+
+
+async def test_preview_persist_axes_flag_controls_axis_writes(db: Database) -> None:
+    profile = _profile(("游戏评价", 0.95))
+    payload = {
+        "axes": [
+            {
+                "interest": "游戏评价",
+                "axis_label": "机制拆解",
+                "axis_kind": "method",
+                "example_terms": ["设计理念"],
+                "evidence_refs": ["https://example.test/axis"],
+                "time_sensitive": False,
+            }
+        ],
+        "keywords": [],
+    }
+    planner_without_persist = _make_planner(
+        db,
+        llm=_SequentialLLM(payloads=[payload]),
+        profile=profile,
+        deficit=_FakeDeficitSource(deficits={_BILI: 40}),
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True,
+            inspiration_aspect_window_size=1,
+            inspiration_max_probe_searches_per_stage=1,
+        ),
+        inspiration_provider=_FakeInspirationProvider(previews_by_query={}),
+    )
+
+    await planner_without_persist.preview_inspiration_keywords(
+        [_BILI],
+        profile=profile,
+        persist_axes=False,
+    )
+
+    now = datetime.now(UTC)
+    assert db.list_inspiration_axes(["游戏评价"], limit=10, now=now) == []
+
+    planner_with_persist = _make_planner(
+        db,
+        llm=_SequentialLLM(payloads=[payload]),
+        profile=profile,
+        deficit=_FakeDeficitSource(deficits={_BILI: 40}),
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True,
+            inspiration_aspect_window_size=1,
+            inspiration_max_probe_searches_per_stage=1,
+        ),
+        inspiration_provider=_FakeInspirationProvider(previews_by_query={}),
+    )
+
+    await planner_with_persist.preview_inspiration_keywords(
+        [_BILI],
+        profile=profile,
+        persist_axes=True,
+    )
+
+    axes = db.list_inspiration_axes(["游戏评价"], limit=10, now=now)
+    assert [axis.axis_label for axis in axes] == ["机制拆解"]
+    assert axes[0].use_count == 0
+    assert axes[0].last_used_at is None
+
+
+async def test_preview_axis_upsert_does_not_bump_usage_fields(db: Database) -> None:
+    profile = _profile(("游戏评价", 0.95))
+    existing = AxisRow(
+        interest_label="游戏评价",
+        axis_label="机制拆解",
+        axis_kind="method",
+        source="test",
+        example_terms=("旧术语",),
+        evidence_refs=("https://example.test/old",),
+        use_count=7,
+        last_used_at="2026-01-01T00:00:00+00:00",
+        last_refreshed_at="2026-01-01T00:00:00+00:00",
+    )
+    db.upsert_inspiration_axes([existing], bump_usage=False)
+    llm = _SequentialLLM(
+        payloads=[
+            {
+                "axes": [
+                    {
+                        "interest": "游戏评价",
+                        "axis_label": "机制拆解",
+                        "axis_kind": "method",
+                        "example_terms": ["新术语"],
+                        "evidence_refs": ["https://example.test/new"],
+                        "time_sensitive": False,
+                    }
+                ],
+                "keywords": [],
+            }
+        ]
+    )
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=_FakeDeficitSource(deficits={_BILI: 40}),
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True,
+            inspiration_aspect_window_size=1,
+            inspiration_max_probe_searches_per_stage=1,
+        ),
+        inspiration_provider=_FakeInspirationProvider(previews_by_query={}),
+    )
+
+    await planner.preview_inspiration_keywords([_BILI], profile=profile, persist_axes=True)
+
+    axes = db.list_inspiration_axes(["游戏评价"], limit=10, now=datetime.now(UTC))
+    assert len(axes) == 1
+    assert axes[0].use_count == 7
+    assert axes[0].last_used_at == "2026-01-01T00:00:00+00:00"
+    assert set(axes[0].evidence_refs) == {
+        "https://example.test/old",
+        "https://example.test/new",
+    }
+
+
+async def test_two_persisted_axis_previews_select_identical_interests(db: Database) -> None:
+    profile = _profile(("游戏评价", 0.95), ("咖啡器具", 0.9))
+    payload = {
+        "axes": [
+            {
+                "interest": "游戏评价",
+                "axis_label": "机制拆解",
+                "axis_kind": "method",
+                "example_terms": ["设计理念"],
+                "evidence_refs": ["https://example.test/game"],
+                "time_sensitive": False,
+            },
+            {
+                "interest": "咖啡器具",
+                "axis_label": "冲煮参数",
+                "axis_kind": "method",
+                "example_terms": ["研磨度"],
+                "evidence_refs": ["https://example.test/coffee"],
+                "time_sensitive": False,
+            },
+        ],
+        "keywords": [],
+    }
+    planner = _make_planner(
+        db,
+        llm=_SequentialLLM(payloads=[payload, payload]),
+        profile=profile,
+        deficit=_FakeDeficitSource(deficits={_BILI: 40}),
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True,
+            inspiration_aspect_window_size=2,
+            inspiration_interest_sample_size=2,
+            inspiration_max_probe_searches_per_stage=2,
+        ),
+        inspiration_provider=_FakeInspirationProvider(previews_by_query={}),
+    )
+
+    first = await planner.preview_inspiration_keywords([_BILI], profile=profile, persist_axes=True)
+    second = await planner.preview_inspiration_keywords([_BILI], profile=profile, persist_axes=True)
+
+    first_labels = [item["label"] for item in first["selected_secondary_interests"]]
+    second_labels = [item["label"] for item in second["selected_secondary_interests"]]
+    assert second_labels == first_labels
+
+
+async def test_preview_and_production_share_materialize_platform_keywords_output(
+    db: Database,
+) -> None:
+    candidates = [
+        MaterializeCandidate(
+            interest="游戏评价",
+            axis_label="机制拆解",
+            platform=_BILI,
+            core_concept="只狼 忍义手 设计理念",
+            decoration="拆解",
+            recency_sensitivity="low",
+            origin="test",
+        )
+    ]
+    allocation = {"游戏评价": AllocationTarget(platforms=(_BILI,), min_axes=1)}
+
+    preview_keywords, _ = materialize_platform_keywords(candidates, allocation)
+    production_keywords, _ = materialize_platform_keywords(candidates, allocation)
+
+    assert [item.keyword for item in preview_keywords] == [
+        item.keyword for item in production_keywords
+    ]
+
+
+def test_interest_selection_count_cools_down_previously_selected_interests() -> None:
+    profile = _profile(
+        ("兴趣A", 0.95),
+        ("兴趣B", 0.94),
+        ("兴趣C", 0.93),
+    )
+
+    window = build_like_secondary_interest_window(
+        profile,
+        coverage_snapshot={"兴趣A": {"interest_selection_count": 1}},
+        max_interests=2,
+    )
+
+    assert [item.label for item in window] == ["兴趣B", "兴趣C"]
+
+
+def test_selected_inspiration_interests_caps_selection_at_four(db: Database) -> None:
+    profile = _profile(
+        ("兴趣A", 0.99),
+        ("兴趣B", 0.98),
+        ("兴趣C", 0.97),
+        ("兴趣D", 0.96),
+        ("兴趣E", 0.95),
+        ("兴趣F", 0.94),
+    )
+    planner = _make_planner(
+        db,
+        llm=_FakeLLM(payload={}),
+        profile=profile,
+        deficit=_FakeDeficitSource(),
+        discovery=_discovery_cfg(inspiration_interest_sample_size=6),
+    )
+
+    selected = planner._selected_inspiration_interests(profile, {})
+
+    assert [item.label for item in selected] == ["兴趣A", "兴趣B", "兴趣C", "兴趣D"]
+
+
+def test_selected_inspiration_interests_ignores_preview_selection_ledger(
+    db: Database,
+) -> None:
+    profile = _profile(
+        ("兴趣A", 0.95),
+        ("兴趣B", 0.94),
+    )
+    db.record_keyword_interest_selection(
+        ["兴趣A"],
+        query_kind="regular",
+        selection_scope="preview",
+    )
+    planner = _make_planner(
+        db,
+        llm=_FakeLLM(payload={}),
+        profile=profile,
+        deficit=_FakeDeficitSource(),
+        discovery=_discovery_cfg(inspiration_interest_sample_size=1),
+    )
+
+    selected = planner._selected_inspiration_interests(
+        profile,
+        db.get_keyword_interest_coverage_snapshot(selection_scope="preview"),
+    )
+
+    assert [item.label for item in selected] == ["兴趣A"]
+
+
+def test_selected_inspiration_interests_penalizes_production_frequency_and_saturated_axes(
+    db: Database,
+) -> None:
+    profile = _profile(
+        ("兴趣A", 0.99),
+        ("兴趣B", 0.92),
+    )
+    for _ in range(3):
+        db.record_keyword_interest_selection(
+            ["兴趣A"],
+            query_kind="regular",
+            selection_scope="production",
+        )
+    db.upsert_inspiration_axes(
+        [
+            AxisRow(
+                interest_label="兴趣A",
+                axis_label="已用轴",
+                axis_kind="method",
+                source="test",
+                last_used_at="2999-01-01T00:00:00Z",
+                last_refreshed_at="2999-01-01T00:00:00Z",
+            )
+        ],
+        bump_usage=False,
+    )
+    planner = _make_planner(
+        db,
+        llm=_FakeLLM(payload={}),
+        profile=profile,
+        deficit=_FakeDeficitSource(),
+        discovery=_discovery_cfg(inspiration_interest_sample_size=1),
+    )
+
+    selected = planner._selected_inspiration_interests(profile, {})
+
+    assert [item.label for item in selected] == ["兴趣B"]
+
+
+async def test_preview_inspiration_records_preview_interest_selection(
+    db: Database,
+) -> None:
+    profile = _profile(
+        ("兴趣A", 0.95),
+        ("兴趣B", 0.94),
+        ("兴趣C", 0.93),
+    )
+    llm = _SequentialLLM(
+        payloads=[
+            {
+                "interest_branches": [
+                    {
+                        "secondary_interest": "兴趣A",
+                        "branch_id": "a-method",
+                        "lens_family": "method",
+                        "probe_queries": ["兴趣A probe"],
+                    }
+                ]
+            },
+            {"expansions": []},
+            {
+                "interest_branches": [
+                    {
+                        "secondary_interest": "兴趣B",
+                        "branch_id": "b-method",
+                        "lens_family": "method",
+                        "probe_queries": ["兴趣B probe"],
+                    }
+                ]
+            },
+            {"expansions": []},
+        ]
+    )
+    provider = _FakeInspirationProvider(
+        previews_by_query={
+            "兴趣A probe": [
+                ExaPreviewItem(
+                    title="兴趣A evidence",
+                    url="https://example.test/a",
+                    highlights=("兴趣A detail",),
+                )
+            ],
+            "兴趣B probe": [
+                ExaPreviewItem(
+                    title="兴趣B evidence",
+                    url="https://example.test/b",
+                    highlights=("兴趣B detail",),
+                )
+            ],
+        }
+    )
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=_FakeDeficitSource(),
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True,
+            inspiration_interest_sample_size=1,
+            inspiration_max_probe_searches_per_stage=1,
+            inspiration_search_results_per_query=1,
+            inspiration_max_keywords_per_platform=1,
+        ),
+        inspiration_provider=provider,
+    )
+
+    first = await planner.preview_inspiration_keywords([_BILI], profile=profile)
+    second = await planner.preview_inspiration_keywords([_BILI], profile=profile)
+
+    assert [item["label"] for item in first["selected_secondary_interests"]] == ["兴趣A"]
+    assert [item["label"] for item in second["selected_secondary_interests"]] == ["兴趣A"]
+    production_snapshot = db.get_keyword_interest_coverage_snapshot()
+    preview_snapshot = db.get_keyword_interest_coverage_snapshot(selection_scope="preview")
+    assert production_snapshot.get("兴趣A", {}).get("interest_selection_count", 0) == 0
+    assert preview_snapshot["兴趣A"]["interest_selection_count"] == 2
+
+
+async def test_inspiration_stage_repairs_unparsed_brainstorm_before_fallback(
+    db: Database,
+) -> None:
+    profile = SoulProfile(
+        preferences=PreferenceLayer(
+            interests=[
+                InterestTag(
+                    name="Switch 独立游戏",
+                    category="游戏",
+                    weight=0.95,
+                    source="like",
+                )
+            ]
+        )
+    )
+    digest = profile_kw_digest(profile)
+    llm = _SequentialLLM(
+        payloads=[
+            {
+                "expansions": [
+                    {
+                        "inspiration_id": "balatro",
+                        "expansion_id": "repaired-keyword",
+                        "text": "Balatro",
+                        "relation": "artifact",
+                        "platform_keywords": {_BILI: ["Balatro Switch 修复后盘点"]},
+                        "curator_decision": "keep",
+                    }
+                ]
+            }
+        ]
+    )
+    provider = _FakeInspirationProvider(
+        previews_by_query={
+            "Switch 独立游戏": [
+                ExaPreviewItem(
+                    title="Balatro Switch hidden gem",
+                    url="https://example.test/balatro",
+                    highlights=("Balatro",),
+                )
+            ]
+        }
+    )
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=_FakeDeficitSource(deficits={_BILI: 40}),
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True,
+            inspiration_replace_merged_keywords=True,
+            inspiration_aspect_window_size=1,
+            inspiration_search_results_per_query=1,
+            inspiration_max_keywords_per_platform=3,
+        ),
+        inspiration_provider=provider,
+    )
+
+    ledger = await planner.run_once()
+
+    assert [call["caller"] for call in llm.calls] == ["discovery.keyword_inspiration"]
+    assert provider.calls == [("Switch 独立游戏", 1)]
+    assert _pending(db, _BILI, digest) == [
+        "Balatro Switch 修复后盘点",
+        "Switch 独立游戏 Balatro",
+    ]
+    assert ledger == {_BILI: 2}
+
+
+async def test_inspiration_dry_run_reports_intermediate_keywords_without_inserting(
+    db: Database,
+) -> None:
+    profile = _profile(("Switch 独立游戏", 0.95))
+    digest = profile_kw_digest(profile)
+    llm = _SequentialLLM(
+        payloads=[
+            {
+                "expansions": [
+                    {
+                        "inspiration_id": "balatro",
+                        "expansion_id": "switch-1",
+                        "text": "Balatro",
+                        "detail_axes": ["work_entity"],
+                        "platform_keywords": {_BILI: ["Balatro Switch 玩法 盘点"]},
+                        "curator_decision": "keep",
+                    }
+                ]
+            }
+        ]
+    )
+    provider = _FakeInspirationProvider(
+        previews_by_query={
+            "Switch 独立游戏": [
+                ExaPreviewItem(
+                    title="Switch hidden gems",
+                    url="https://example.test/switch",
+                    highlights=("Balatro",),
+                )
+            ]
+        }
+    )
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=_FakeDeficitSource(deficits={_BILI: 40}),
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True,
+            inspiration_replace_merged_keywords=True,
+            inspiration_aspect_window_size=1,
+            inspiration_search_results_per_query=1,
+            inspiration_max_keywords_per_platform=2,
+        ),
+        inspiration_provider=provider,
+    )
+
+    report = await planner.preview_inspiration_keywords(
+        [_BILI],
+        profile=profile,
+        query_kind="regular",
+    )
+
+    assert report["query_kind"] == "regular"
+    assert report["selected_secondary_interests"][0]["label"] == "Switch 独立游戏"
+    assert report["brainstorm_branches"][0]["branch_id"] == "grounding-switch-switch"
+    assert report["grounding_records"][0]["probe_query"] == "Switch 独立游戏"
+    assert report["grounding_ledger"]["searches"] == 1
+    assert report["platform_keywords"] == {
+        _BILI: ["Balatro Switch 玩法 盘点", "Switch 独立游戏 Balatro"]
+    }
+    assert report["inserted"] is False
+    assert _pending(db, _BILI, digest) == []
+
+
+async def test_local_grounding_dry_run_does_not_consume_external_budget(
+    db: Database,
+) -> None:
+    profile = _profile(("Switch 独立游戏", 0.95))
+    llm = _SequentialLLM(
+        payloads=[
+            {
+                "expansions": [
+                    {
+                        "inspiration_id": "balatro",
+                        "expansion_id": "switch-1",
+                        "text": "Balatro",
+                        "detail_axes": ["work_entity"],
+                        "platform_keywords": {_BILI: ["Balatro Switch 玩法 盘点"]},
+                        "curator_decision": "keep",
+                    }
+                ]
+            }
+        ]
+    )
+    provider = _LocalLedgerProvider(
+        previews_by_query={
+            "Switch 独立游戏": [
+                ExaPreviewItem(
+                    title="Switch hidden gems",
+                    url="https://example.test/switch",
+                    highlights=("Balatro",),
+                )
+            ]
+        }
+    )
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=_FakeDeficitSource(deficits={_BILI: 40}),
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True,
+            inspiration_replace_merged_keywords=True,
+            inspiration_aspect_window_size=1,
+            inspiration_search_results_per_query=1,
+            inspiration_max_probe_searches_per_stage=1,
+            inspiration_max_keywords_per_platform=2,
+        ),
+        inspiration_provider=provider,
+    )
+
+    report = await planner.preview_inspiration_keywords(
+        [_BILI],
+        profile=profile,
+        query_kind="regular",
+    )
+
+    assert report["grounding_ledger"]["searches"] == 0
+    assert report["grounding_ledger"]["local_hits"] == 1
+    assert report["grounding_ledger"]["local_sources"] == {"content_cache": 1}
+    assert report["grounding_ledger"]["external_searches_saved"] == 1
+
+
+async def test_local_grounding_persists_grounding_source_on_keywords(
+    db: Database,
+) -> None:
+    profile = _profile(("独立游戏叙事", 0.93))
+    digest = profile_kw_digest(profile)
+    llm = _SequentialLLM(
+        payloads=[
+            {_BILI: ["独立游戏 叙事设计"]},
+            {
+                "expansions": [
+                    {
+                        "aspect_id": "interest:term-cab3f7dbd3",
+                        "inspiration_id": "environmental-narrative",
+                        "expansion_id": "fragmented-clues",
+                        "text": "碎片化线索",
+                        "relation": "mechanic",
+                        "detail_axes": ["机制", "复盘"],
+                        "keywords": ["环境叙事 碎片化线索 复盘"],
+                        "curator_decision": "keep",
+                    }
+                ]
+            },
+        ]
+    )
+    provider = _LocalLedgerProvider(
+        previews_by_query={
+            "独立游戏叙事": [
+                ExaPreviewItem(
+                    title="环境叙事设计",
+                    url="https://example.test/story",
+                    highlights=("环境叙事",),
+                )
+            ]
+        }
+    )
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=_FakeDeficitSource(deficits={_BILI: 40}),
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True,
+            inspiration_aspect_window_size=1,
+            inspiration_search_results_per_query=3,
+            inspiration_max_keywords_per_platform=3,
+        ),
+        inspiration_provider=provider,
+    )
+
+    await planner.run_once()
+
+    row = db.conn.execute(
+        """
+        SELECT grounding_source
+        FROM discovery_keywords
+        WHERE keyword = ?
+          AND profile_kw_digest = ?
+        """,
+        ("环境叙事 碎片化线索 复盘", digest),
+    ).fetchone()
+    assert row is not None
+    assert row["grounding_source"] == "local_cache"
+
+
+async def test_inspiration_stage_accepts_fenced_curator_json(
+    db: Database,
+) -> None:
+    profile = _profile(("独立游戏叙事", 0.93))
+    digest = profile_kw_digest(profile)
+    llm = _RawLLM(
+        content="""可以，下面是 JSON：
+```json
+{
+  "expansions": [
+    {
+      "aspect_id": "interest:term-cab3f7dbd3",
+      "inspiration_id": "environmental-narrative",
+      "expansion_id": "fragmented-clues",
+      "text": "碎片化线索",
+      "relation": "case",
+      "detail_axes": "案例",
+      "platform_keywords": {
+        "bilibili": "B站 环境叙事 案例",
+        "reddit": ["environmental storytelling game design"]
+      },
+      "curator_decision": "keep",
+      "curator_score": 0.88,
+      "curator_reason": "真实模型可能包 code fence。"
+    }
+  ]
+}
+```
+""",
+    )
+    provider = _FakeInspirationProvider(
+        previews_by_query={
+            "独立游戏叙事": [
+                ExaPreviewItem(
+                    title="环境叙事设计",
+                    url="https://example.test/story",
+                    highlights=("环境叙事",),
+                )
+            ]
+        }
+    )
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=_FakeDeficitSource(),
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True,
+            inspiration_aspect_window_size=1,
+            inspiration_search_results_per_query=1,
+            inspiration_max_keywords_per_platform=3,
+        ),
+        inspiration_provider=provider,
+    )
+
+    ledger = await planner._run_inspiration_stage(
+        [_BILI, _REDDIT],
+        profile=profile,
+        digest=digest,
+    )
+
+    assert ledger == {_BILI: 2, _REDDIT: 1}
+    assert _pending(db, _BILI, digest) == ["B站 环境叙事 案例", "独立游戏叙事 碎片化线索"]
+    assert _pending(db, _REDDIT, digest) == ["environmental storytelling game design"]
 
 
 async def test_planner_requires_bili_deficit_before_requesting_explore_domains(
@@ -1170,3 +2769,423 @@ async def test_merged_max_tokens_scales_with_total_ask(db: Database) -> None:
     cfg = _discovery_cfg(kw_cache_high=30, gen_batch=30)
     await _make_planner(db, llm=llm, profile=profile, deficit=deficit, discovery=cfg).run_once()
     assert llm.max_tokens_seen[0] == 210 * 48 + 1024
+
+
+# ── Phase 2 Task 3: axis backfill tick wiring + ordering regression ──────
+
+
+class _RecordingDb:
+    """Delegating db wrapper recording learning-tick + axis-fetch call order."""
+
+    _SPIED = frozenset(
+        {
+            "backfill_inspiration_axis_yield",
+            "apply_inspiration_axis_lifecycle",
+            "list_inspiration_axes",
+        }
+    )
+
+    def __init__(self, real: Database) -> None:
+        self._real = real
+        self.calls: list[str] = []
+
+    def __getattr__(self, name: str) -> Any:
+        value = getattr(self._real, name)
+        if name in self._SPIED and callable(value):
+
+            def wrapper(*args: Any, **kwargs: Any) -> Any:
+                self.calls.append(name)
+                return value(*args, **kwargs)
+
+            return wrapper
+        return value
+
+
+def _seed_axis(db: Database, label: str, *, interest: str, refreshed_at: str) -> AxisRow:
+    axis = AxisRow(
+        interest_label=interest,
+        axis_label=label,
+        axis_kind="subgenre",
+        source="external_search",
+        created_at=refreshed_at,
+        last_refreshed_at=refreshed_at,
+    )
+    db.upsert_inspiration_axes([axis], bump_usage=False)
+    return axis
+
+
+def _seed_consumed_keywords(
+    db: Database,
+    axis: AxisRow,
+    *,
+    count: int,
+    yield_each: int,
+    created_at: str = "2026-07-01 12:00:00",
+) -> None:
+    for index in range(count):
+        db.conn.execute(
+            """
+            INSERT INTO discovery_keywords (
+                platform, keyword, keyword_kind, profile_kw_digest,
+                angle_id, angle_label, source_interest,
+                inspiration_backend, status, yield_count, created_at
+            )
+            VALUES (?, ?, 'regular', 'digest', ?, ?, ?, 'axis_keyword', 'used', ?, ?)
+            """,
+            (
+                _BILI,
+                f"{axis.axis_label}-{index}",
+                axis.axis_id,
+                axis.axis_label,
+                axis.interest_label,
+                yield_each,
+                created_at,
+            ),
+        )
+    db.conn.commit()
+
+
+def _tick_planner(spy_db: _RecordingDb, *, profile: SoulProfile) -> KeywordPlanner:
+    return _make_planner(
+        spy_db,  # type: ignore[arg-type]
+        llm=_SequentialLLM(payloads=[{"axes": [], "keywords": []}] * 4),
+        profile=profile,
+        deficit=_FakeDeficitSource(),
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True,
+            inspiration_search_results_per_query=1,
+        ),
+        inspiration_provider=_FakeInspirationProvider(previews_by_query={}),
+    )
+
+
+async def test_production_stage_runs_backfill_and_lifecycle_before_axis_fetch(
+    db: Database,
+) -> None:
+    profile = _profile(("Switch 独立游戏", 0.95))
+    axis = _seed_axis(
+        db, "冷门佳作", interest="Switch 独立游戏", refreshed_at="2026-07-04T12:00:00Z"
+    )
+    _seed_consumed_keywords(db, axis, count=2, yield_each=1)
+    spy = _RecordingDb(db)
+    planner = _tick_planner(spy, profile=profile)
+
+    await planner._run_inspiration_stage([_BILI], profile=profile, digest="d1")
+
+    assert spy.calls[0] == "backfill_inspiration_axis_yield"
+    assert spy.calls[1] == "apply_inspiration_axis_lifecycle"
+    assert "list_inspiration_axes" in spy.calls
+    assert spy.calls.index("backfill_inspiration_axis_yield") < spy.calls.index(
+        "list_inspiration_axes"
+    )
+    assert planner.last_axis_backfill["ran"] is True
+    row = db.conn.execute(
+        "SELECT window_uses, admissions, yield_backfilled_at "
+        "FROM discovery_inspiration_axis WHERE axis_id = ?",
+        (axis.axis_id,),
+    ).fetchone()
+    assert row["window_uses"] == 2
+    assert row["admissions"] == 2
+    assert row["yield_backfilled_at"]
+
+
+async def test_shared_production_stage_runs_backfill_tick(db: Database) -> None:
+    profile = _profile(("独立游戏叙事", 0.93))
+    _seed_axis(db, "环境叙事", interest="独立游戏叙事", refreshed_at="2026-07-04T12:00:00Z")
+    spy = _RecordingDb(db)
+    planner = _tick_planner(spy, profile=profile)
+
+    await planner._run_shared_inspiration_stage(
+        [_BILI], explore_platforms=[_REDDIT], profile=profile, digest="d1"
+    )
+
+    assert spy.calls[0] == "backfill_inspiration_axis_yield"
+    assert spy.calls[1] == "apply_inspiration_axis_lifecycle"
+    assert planner.last_axis_backfill["ran"] is True
+
+
+async def test_second_production_stage_within_six_hours_skips_backfill(db: Database) -> None:
+    profile = _profile(("Switch 独立游戏", 0.95))
+    _seed_axis(db, "冷门佳作", interest="Switch 独立游戏", refreshed_at="2026-07-04T12:00:00Z")
+    spy = _RecordingDb(db)
+    planner = _tick_planner(spy, profile=profile)
+
+    await planner._run_inspiration_stage([_BILI], profile=profile, digest="d1")
+    assert planner.last_axis_backfill["ran"] is True
+    first_backfills = spy.calls.count("backfill_inspiration_axis_yield")
+
+    await planner._run_inspiration_stage([_BILI], profile=profile, digest="d1")
+
+    # yield_backfilled_at was just written → the second stage is inside the 6h
+    # throttle window and must skip (telemetry says so, spy confirms no call).
+    assert planner.last_axis_backfill == {"ran": False, "staled": 0, "retired": 0, "purged": 0}
+    assert spy.calls.count("backfill_inspiration_axis_yield") == first_backfills
+
+
+async def test_preview_never_triggers_backfill_or_lifecycle(db: Database) -> None:
+    profile = _profile(("Switch 独立游戏", 0.95))
+    axis = _seed_axis(
+        db, "冷门佳作", interest="Switch 独立游戏", refreshed_at="2026-07-04T12:00:00Z"
+    )
+    _seed_consumed_keywords(db, axis, count=2, yield_each=1)
+    spy = _RecordingDb(db)
+    planner = _tick_planner(spy, profile=profile)
+
+    report = await planner.preview_inspiration_keywords([_BILI], profile=profile)
+    report_second = await planner.preview_inspiration_keywords([_BILI], profile=profile)
+
+    # No backfill timestamp exists (maximally stale) — preview still never ticks.
+    assert "backfill_inspiration_axis_yield" not in spy.calls
+    assert "apply_inspiration_axis_lifecycle" not in spy.calls
+    assert report["axis_backfill"] == {"ran": False, "staled": 0, "retired": 0, "purged": 0}
+    assert report_second["axis_backfill"] == report["axis_backfill"]
+    row = db.conn.execute(
+        "SELECT yield_backfilled_at, window_uses FROM discovery_inspiration_axis WHERE axis_id = ?",
+        (axis.axis_id,),
+    ).fetchone()
+    assert row["yield_backfilled_at"] is None
+    assert row["window_uses"] == 0
+
+
+def test_backfilled_yield_reorders_axis_list_end_to_end(db: Database) -> None:
+    now = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+    interest = "游戏评价"
+    # X: older but genuinely yielding. W: fresher, consumed, zero admissions.
+    # Z: unused (== prior). Y: less fresh than W, consumed, zero admissions.
+    x = _seed_axis(db, "X-有产出", interest=interest, refreshed_at="2026-06-25T12:00:00Z")
+    w = _seed_axis(db, "W-新鲜零产出", interest=interest, refreshed_at="2026-07-05T11:00:00Z")
+    _seed_axis(db, "Z-未使用", interest=interest, refreshed_at="2026-07-05T11:00:00Z")
+    y = _seed_axis(db, "Y-较旧零产出", interest=interest, refreshed_at="2026-06-30T12:00:00Z")
+    _seed_consumed_keywords(db, x, count=3, yield_each=2)
+    _seed_consumed_keywords(db, w, count=5, yield_each=0)
+    _seed_consumed_keywords(db, y, count=5, yield_each=0)
+
+    db.backfill_inspiration_axis_yield(window_days=30, now=now)
+    axes = db.list_inspiration_axes([interest], limit=10, now=now)
+
+    # Spec AC2: X (yield) > Z (unused == prior) > W/Y (consumed, zero
+    # admissions); the freshness crossover holds — old-but-yielding X outranks
+    # the much fresher zero-yield W.
+    assert [a.axis_label for a in axes] == ["X-有产出", "Z-未使用", "W-新鲜零产出", "Y-较旧零产出"]
+
+
+# ── Phase 2.3 Task 5: coexist explore dispatch (rich + degrade) ─────────
+
+
+@dataclass
+class _CoexistLLM:
+    """Dispatches by caller: merged-keyword payload for discovery.keyword_planner,
+    the axis-keyword payload (or a raise) for discovery.keyword_inspiration."""
+
+    merged_payload: dict[str, object]
+    inspiration_payload: dict[str, object] | None
+    calls: list[dict[str, str]] = field(default_factory=list)
+
+    async def complete_structured_task(
+        self,
+        *,
+        system_instruction: str = "",
+        user_input: str = "",
+        max_tokens: int = 4096,
+        caller: str = "",
+        reasoning_effort: str | None = None,
+        inject_core_memory: bool = True,
+        **_: object,
+    ) -> Any:
+        self.calls.append({"caller": caller, "user": user_input})
+        if caller == "discovery.keyword_planner":
+            payload: dict[str, object] | None = self.merged_payload
+        else:
+            payload = self.inspiration_payload
+        if payload is None:
+            raise RuntimeError("inspiration llm down")
+        from openbiliclaw.llm.base import LLMResponse
+
+        return LLMResponse(
+            content=json.dumps(payload, ensure_ascii=False), provider="test", model="test"
+        )
+
+
+def _merged_explore_payload() -> dict[str, object]:
+    return {
+        _BILI: ["人工智能 盘点"],
+        "explore_domains": [
+            {
+                "domain": "天文摄影",
+                "novelty_level": 0.84,
+                "queries": ["天文摄影 入门 盘点", "星空 拍摄 教程"],
+            }
+        ],
+    }
+
+
+def _explore_axis_payload() -> dict[str, object]:
+    return {
+        "axes": [
+            {
+                "interest": "天文摄影",
+                "axis_label": "深空拍摄",
+                "axis_kind": "method",
+                "example_terms": ["深空拍摄"],
+            }
+        ],
+        "keywords": [
+            {
+                "interest": "天文摄影",
+                "axis_id_or_label": "深空拍摄",
+                "platform": _BILI,
+                "core_concept": "詹姆斯韦伯 深空图像",
+                "decoration": "盘点",
+            }
+        ],
+    }
+
+
+async def test_coexist_explore_routes_through_rich_stage_when_due(db: Database) -> None:
+    profile = _profile(("人工智能", 0.9))
+    digest = profile_kw_digest(profile)
+    llm = _CoexistLLM(
+        merged_payload=_merged_explore_payload(), inspiration_payload=_explore_axis_payload()
+    )
+    deficit = _FakeDeficitSource(
+        deficits={_BILI: 40}, explore_due_soon=True, covered_topic_groups=["人工智能"]
+    )
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=deficit,
+        discovery=_discovery_cfg(
+            inspiration_search_enabled=True, inspiration_max_keywords_per_platform=1
+        ),
+        inspiration_provider=_FakeInspirationProvider(previews_by_query={}),
+    )
+
+    await planner.run_once()
+
+    # Explore pool carries the RICH cross-domain keyword, NOT the flat domain
+    # queries — the new stage handled it, not _explore_domain_queries.
+    explore_pool = _pending(db, _BILI, digest, keyword_kind="explore")
+    assert explore_pool == ["詹姆斯韦伯 深空图像 盘点"]
+    assert "天文摄影 入门 盘点" not in explore_pool
+    assert deficit.explore_marked == 1
+    assert planner.last_explore_inspiration_degraded is False
+    # Regular channel is unaffected.
+    assert _pending(db, _BILI, digest) == ["人工智能 盘点"]
+
+
+async def test_coexist_explore_not_triggered_when_not_due(db: Database) -> None:
+    profile = _profile(("人工智能", 0.9))
+    digest = profile_kw_digest(profile)
+    llm = _CoexistLLM(
+        merged_payload=_merged_explore_payload(), inspiration_payload=_explore_axis_payload()
+    )
+    deficit = _FakeDeficitSource(deficits={_BILI: 40}, explore_due_soon=False)
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=deficit,
+        discovery=_discovery_cfg(inspiration_search_enabled=True),
+        inspiration_provider=_FakeInspirationProvider(previews_by_query={}),
+    )
+
+    await planner.run_once()
+
+    assert _pending(db, _BILI, digest, keyword_kind="explore") == []
+    assert deficit.explore_marked == 0
+    assert "<explore_domains>" not in llm.calls[0]["user"]
+
+
+async def test_coexist_explore_degrades_to_flatten_never_bare(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = _profile(("人工智能", 0.9))
+    digest = profile_kw_digest(profile)
+    llm = _CoexistLLM(
+        merged_payload=_merged_explore_payload(), inspiration_payload=_explore_axis_payload()
+    )
+    deficit = _FakeDeficitSource(
+        deficits={_BILI: 40}, explore_due_soon=True, covered_topic_groups=[]
+    )
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=profile,
+        deficit=deficit,
+        discovery=_discovery_cfg(inspiration_search_enabled=True),
+        inspiration_provider=_FakeInspirationProvider(previews_by_query={}),
+    )
+
+    async def _degraded_stage(
+        explore_platforms: list[str],
+        *,
+        profile: SoulProfile,
+        digest: str,
+        explore_domains: Any,
+        covered_topic_groups: Any,
+    ) -> tuple[dict[str, int], dict[str, object]]:
+        return {}, {"explore_degraded": True}
+
+    monkeypatch.setattr(planner, "_run_explore_inspiration_stage", _degraded_stage)
+
+    await planner.run_once()
+
+    # Rich-gen degraded → fall back to the flat merged explore_domains queries so
+    # the explore pool still replenishes (never bare).
+    explore_pool = _pending(db, _BILI, digest, keyword_kind="explore")
+    assert explore_pool == ["天文摄影 入门 盘点", "星空 拍摄 教程"]
+    assert explore_pool  # non-empty
+    assert deficit.explore_marked == 1
+    assert planner.last_explore_inspiration_degraded is True
+
+
+async def test_coexist_explore_budget_one_extra_call_when_due(db: Database) -> None:
+    profile = _profile(("人工智能", 0.9))
+
+    def _fresh() -> tuple[_CoexistLLM, _FakeDeficitSource]:
+        return (
+            _CoexistLLM(
+                merged_payload=_merged_explore_payload(),
+                inspiration_payload=_explore_axis_payload(),
+            ),
+            _FakeDeficitSource(deficits={_BILI: 40}, covered_topic_groups=["人工智能"]),
+        )
+
+    # Not-due cycle.
+    llm_off, deficit_off = _fresh()
+    deficit_off.explore_due_soon = False
+    planner_off = _make_planner(
+        db,
+        llm=llm_off,
+        profile=profile,
+        deficit=deficit_off,
+        discovery=_discovery_cfg(inspiration_search_enabled=True),
+        inspiration_provider=_FakeInspirationProvider(previews_by_query={}),
+    )
+    await planner_off.run_once()
+
+    # Due cycle (fresh db digest is the same; use a second planner + fresh fakes).
+    llm_on, deficit_on = _fresh()
+    deficit_on.explore_due_soon = True
+    planner_on = _make_planner(
+        db,
+        llm=llm_on,
+        profile=profile,
+        deficit=deficit_on,
+        discovery=_discovery_cfg(inspiration_search_enabled=True),
+        inspiration_provider=_FakeInspirationProvider(previews_by_query={}),
+    )
+    await planner_on.run_once()
+
+    def _by_caller(calls: list[dict[str, str]], caller: str) -> int:
+        return sum(1 for c in calls if c["caller"] == caller)
+
+    # Exactly ONE more explore rich-gen (keyword_inspiration) call when due...
+    assert _by_caller(llm_on.calls, "discovery.keyword_inspiration") == (
+        _by_caller(llm_off.calls, "discovery.keyword_inspiration") + 1
+    )
+    # ...while the regular merged channel's call count is unchanged.
+    assert _by_caller(llm_on.calls, "discovery.keyword_planner") == _by_caller(
+        llm_off.calls, "discovery.keyword_planner"
+    )

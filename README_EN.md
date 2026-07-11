@@ -11,6 +11,7 @@
 [![LINUX DO](https://img.shields.io/badge/LINUX_DO-Community-black?style=flat-square&logo=linux)](https://linux.do/)
 [![Discussion](https://img.shields.io/badge/LINUX_DO-Discussion-orange?style=flat-square&logo=discourse)](https://linux.do/t/topic/1978894)
 [![Chrome Web Store](https://img.shields.io/chrome-web-store/v/cdfjfkdjjhdaccbldipkjhpibnfbiamg?style=flat-square&label=Chrome%20Web%20Store&logo=googlechrome&logoColor=white&color=4285F4)](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg)
+[![Gitee Mirror](https://img.shields.io/badge/Gitee-Mirror-C71D23?style=flat-square&logo=gitee&logoColor=white)](https://gitee.com/whiteguo233/OpenBiliClaw)
 
 [Homepage](https://whiteguo233.github.io/OpenBiliClaw/) | English | [中文](README.md)
 
@@ -43,7 +44,7 @@ A local-first AI discovery agent that learns your taste across Bilibili, Xiaohon
 Four steps for most users. Firefox, Docker, scripted, and manual setup paths all live in [Setup Details](#setup-details).
 
 1. **Install the extension** — one-click from the [Chrome Web Store](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg) (auto-updates), or download the zip from [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) for the newest build (the store listing can lag a few days behind).
-2. **Install the backend** — grab the desktop installer from the same [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) (macOS `.dmg` / Windows `.exe`, works out of the box, lives in the menu bar / tray); or, to customize or edit the source, paste this into Claude Code / Codex CLI / Cursor or another AI coding agent:
+2. **Install the backend** — grab the desktop installer from the same [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) (macOS `.dmg` / Windows `.exe`, works out of the box, lives in the menu bar / tray). Each platform ships two variants: the **lean** installer (default; downloads the bge-m3 embedding model on first launch) and the **`-with-embedding`** installer (bge-m3 baked in, ~1.1GB, offline-ready) — pick with-embedding for a poor / offline network, lean otherwise. Or, to customize or edit the source, paste this into Claude Code / Codex CLI / Cursor or another AI coding agent:
 
    ```text
    Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md to deploy the OpenBiliClaw backend for me (use Bash `curl` to fetch the document, NOT WebFetch — WebFetch summarises markdown and drops critical commands).
@@ -188,12 +189,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.152 (2026-07-04)**
+📌 Latest: **v0.3.162 (2026-07-11)**
 
-- **Desktop installer self-heals broken configs** — if a corrupted `config.toml` blocks startup, the bad file is backed up, a default config is regenerated, and `/setup/` opens for re-initialization; your data directory is untouched.
-- **Delight picks are more surprising** — the delight threshold now tracks the top 10% of the candidate pool dynamically, so ordinary high-scoring content is no longer packaged as a "surprise" too early.
-- **Update entry points match your install channel** — "Apply now" only shows for source installs, desktop packages get a Release download link instead; when a backend update is rejected by a safety guard, the extension shows the specific reason.
-- **Aggregate Release assets stay version-aligned** — only same-version extension / installer packages are listed; missing Firefox XPIs are no longer advertised and old assets are no longer backfilled.
+- **Cross-device extension access** — opt-in device-key authentication lets remote browser extensions connect safely to a home or LAN backend, with immediate session revocation.
+- **Instant, undoable feedback** — recommendation cards and interest/avoidance probes respond immediately with a real 10-second undo window; reshuffle shows the new batch before settling old cards in the background.
+- **Publication time across seven platforms** — Bilibili, Xiaohongshu, Douyin, YouTube, X, Zhihu, and Reddit publication times now flow through recommendations and render consistently as local relative dates on every surface.
+- **Stronger Ollama self-healing** — the private with-embedding Ollama restarts with bounded backoff, while missing or broken embedding models can be repaired from guided init with visible progress.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -310,7 +311,7 @@ Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/do
 
 The agent will clone the repo, install dependencies, start the backend with the LAN-accessible default bind (`0.0.0.0:8420`), run a health check, and ask a few questions with defaults. Before auto-init, it verifies that both the configured LLM provider and embedding service answer real lightweight calls; if either fails, init is blocked until you fix the service. If unsure, pick the default. Xiaohongshu, Douyin, YouTube, X, Zhihu, and Reddit signals are used in the initial profile only when you explicitly opt in.
 
-Chrome Web Store / AMO builds only declare local-backend permissions, so keep the extension pointed at `127.0.0.1` / `localhost`. To reach the Mobile Web from your phone, start the backend with `openbiliclaw start --host 0.0.0.0 --port 8420` — the extension QR code will prefer your computer's LAN IP. Pointing the extension directly at another LAN machine or a remote domain needs a developer build with the matching host permission, or a future optional-permission toggle.
+Chrome Web Store / AMO builds only declare local-backend permissions by default. When you select a protocol and enter another LAN or remote endpoint, the browser requests `scheme://host/*`; WebExtension host permissions cannot be port-scoped across browsers, while actual requests remain pinned to the configured port. Public hosts require HTTPS. Enable the default-off device flow first with `ext-key generate` and `ext-key enable`.
 
 ### 3. Log in to content platforms in the same browser
 
@@ -355,13 +356,22 @@ The script needs `git` and Python 3.11+. It clones the repo, then asks for LLM p
 <details>
 <summary>Advanced: Docker deployment</summary>
 
-Good if you already have Docker Desktop installed. v0.3.11+ includes an Ollama embedding sidecar.
+Good if you already have Docker installed; ships with an Ollama embedding sidecar. The prebuilt image needs no source checkout:
+
+```bash
+mkdir -p ~/openbiliclaw && cd ~/openbiliclaw
+curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml
+docker compose -f docker-compose.prebuilt.yml up -d
+# then open http://127.0.0.1:8420/setup/ to finish initialization
+```
+
+Or paste this into an AI coding agent for the terminal wizard + auto-init path:
 
 ```text
 Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/docker-deployment.md to deploy the OpenBiliClaw backend via Docker Compose (use Bash `curl` to fetch the document, NOT WebFetch).
 ```
 
-See the [Docker Deployment Guide](docs/docker-deployment.md). The primary Docker path also goes through `agent_bootstrap.py --mode docker`; after LLM, embedding, Bilibili cookie, and source opt-in confirmations it verifies the AI services and then automatically runs init. `docker exec ... openbiliclaw init` remains an advanced manual fallback.
+Source builds, upgrades, and troubleshooting: [Docker Deployment Guide](docs/docker-deployment.md).
 
 </details>
 
@@ -404,7 +414,7 @@ macOS / Windows users can install the official app from [ollama.com/download](ht
 uv run openbiliclaw setup-embedding
 ```
 
-The wizard pulls `bge-m3` (~568MB, CPU-only is fine) and writes the config.
+The wizard pulls `bge-m3` (~1.1GB, CPU-only is fine) and writes the config.
 
 </details>
 
@@ -571,18 +581,22 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 │  Behavior capture · Cookie sync · Platform tasks │
 └──────────────────────┬─────────────────────────┘
                        │ REST API / WebSocket
-                       │ + Desktop Web (/web) · Mobile Web (/m)
+                       │ + Desktop Web (/web) · Mobile Web (/m) · QR LAN-IP
 ┌──────────────────────▼─────────────────────────┐
 │               Agent Orchestration               │
-│      Skills · Dialogue · Runtime scheduling      │
+│ Skills · Dialogue · Runtime · 10s undo barrier   │
 ├─────────┬──────────┬───────────┬───────────────┤
 │  Soul   │  Memory  │ Discovery │ Recommendation │
-│ Engine  │  System  │  Engine   │     Engine     │
+│ Engine  │  System  │Discovery +│     Engine     │
+│         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
 │   LLM adapters · Source adapters (SourceAdapter) │
-│   Local SQLite (events · pool · recs · chat)     │
+│ Duration/engagement/published → pool → cache → API/UI │
+│   Unified admission · SQLite (events · pool · recs)│
 └────────────────────────────────────────────────┘
 ```
+
+Remote extension access uses explicit, default-off device authentication: `ext-key generate` → digest-only backend config → `/api/auth/extension-token` short session. HTTP uses a Bearer header; only WebSocket and image proxy URLs carry the short session query.
 
 > Full architecture detail (runtime state machine, pool accounting, profile overrides, and more) lives in [Architecture](docs/architecture.md) and the [visual architecture diagrams](docs/index.md).
 
@@ -698,7 +712,13 @@ Contributions welcome! See the [Contributing Guide](docs/contributing.md) to get
 
 If OpenBiliClaw gave you back control of your feed, [a star](https://github.com/whiteguo233/OpenBiliClaw) is the most direct vote for "keep adding platforms".
 
-[![Star History Chart](https://api.star-history.com/svg?repos=whiteguo233/OpenBiliClaw&type=Date)](https://www.star-history.com/#whiteguo233/OpenBiliClaw&Date)
+<a href="https://www.star-history.com/?type=date&repos=whiteguo233%2FOpenBiliClaw">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=whiteguo233/OpenBiliClaw&type=date&theme=dark&legend=top-left&sealed_token=1fDGODQkTTYiiU6QJ7F0nashHo3tbMDGZnmqCKDGTGg2P9q1Ukkxv21R3vab-oDvKPMAb5ZCC-hqY_70gspsAqK_gdvCBooa5QSkgwcR-XN3JD1F6vQ03bmVMrjAcMwGn_nqgoZ5TX1OWcv_92lXeBQAfa2Je-bhkYGk8-S0M0R6kOuJuBsXaANiI-am" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=whiteguo233/OpenBiliClaw&type=date&legend=top-left&sealed_token=1fDGODQkTTYiiU6QJ7F0nashHo3tbMDGZnmqCKDGTGg2P9q1Ukkxv21R3vab-oDvKPMAb5ZCC-hqY_70gspsAqK_gdvCBooa5QSkgwcR-XN3JD1F6vQ03bmVMrjAcMwGn_nqgoZ5TX1OWcv_92lXeBQAfa2Je-bhkYGk8-S0M0R6kOuJuBsXaANiI-am" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=whiteguo233/OpenBiliClaw&type=date&legend=top-left&sealed_token=1fDGODQkTTYiiU6QJ7F0nashHo3tbMDGZnmqCKDGTGg2P9q1Ukkxv21R3vab-oDvKPMAb5ZCC-hqY_70gspsAqK_gdvCBooa5QSkgwcR-XN3JD1F6vQ03bmVMrjAcMwGn_nqgoZ5TX1OWcv_92lXeBQAfa2Je-bhkYGk8-S0M0R6kOuJuBsXaANiI-am" />
+ </picture>
+</a>
 
 ## Privacy at a glance
 

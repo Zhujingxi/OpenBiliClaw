@@ -38,6 +38,13 @@ trusted_proxies = []
 # 默认空 = 只允许同源 Cookie 登录，绝不向 JS 返回 token。
 allowed_bearer_origins = []
 
+# 扩展设备访问默认关闭。启用后仅接受下方已配置设备密钥签发的访问令牌。
+extension_access_enabled = false
+# 扩展设备密钥摘要记录（<12 位 key ID>:<SHA-256 digest>）；不要填入完整密钥。
+extension_access_keys = []
+# 扩展设备访问令牌有效期（小时），允许范围 1..168，默认 24。
+extension_token_ttl_hours = 24
+
 [llm]
 # Default LLM provider: "deepseek" | "openai" | "claude" | "gemini" | "ollama" | "openrouter" | "openai_compatible"
 # 这里选择的 provider 决定了运行时会检查哪一组敏感字段。
@@ -49,8 +56,6 @@ concurrency = 3
 # Applies to OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter /
 # openai_compatible. Allowed range: 10..600. Default 300s.
 timeout = 300
-# 旧兼容开关；实际 fallback 只在 fallback_provider 非空时发生。
-fallback_enabled = false
 # 第二个备选 provider；默认空 = 不 fallback，不再自动尝试其它 provider。
 # 设为 "ollama" 可让本地 Ollama 兜底 chat，但需在 [llm.ollama] 配好 chat 模型
 # （或本地已 `ollama pull llama3`）——bge-m3 只能做 embedding，不能兜底 chat。
@@ -69,6 +74,9 @@ api_key = ""
 model = "gpt-5-nano"
 base_url = ""  # Leave empty for default, or set for compatible APIs
 auth_mode = ""  # "" / "api_key" / "codex_oauth"
+# API 端点协议: "" / "chat_completions" = /v1/chat/completions (默认);
+# "responses" = /v1/responses (部分第三方网关的 GPT 模型只开放这个端点)。
+api_flavor = ""
 
 [llm.claude]
 # 若 default_provider = "claude"，api_key 必填
@@ -76,6 +84,9 @@ auth_mode = ""  # "" / "api_key" / "codex_oauth"
 #                  claude-haiku-4-5 (便宜)
 api_key = ""
 model = "claude-sonnet-4-6"
+# 留空 = Anthropic 官方 (https://api.anthropic.com)。使用第三方中转/网关时
+# 填其地址(需实现 Anthropic 协议 /v1/messages)。
+base_url = ""
 
 [llm.gemini]
 # 若 default_provider = "gemini"，推荐设置 GEMINI_API_KEY / GOOGLE_API_KEY；
@@ -157,6 +168,9 @@ x_title = "OpenBiliClaw"
 api_key = ""
 model = ""
 base_url = ""
+# API 端点协议: "" / "chat_completions" = /v1/chat/completions (默认);
+# "responses" = /v1/responses (部分第三方网关的 GPT 模型只开放这个端点)。
+api_flavor = ""
 
 [llm.embedding]
 # Embedding model for semantic similarity (topic dedup, fatigue, feedback)
@@ -172,7 +186,7 @@ base_url = ""
 # model:    matched to provider when empty:
 #             gemini → gemini-embedding-001
 #             openai → text-embedding-3-small
-#             ollama → bge-m3   (multilingual, ~568MB, sub-second on CPU)
+#             ollama → bge-m3   (multilingual, ~1.1GB, sub-second on CPU)
 #
 # To enable local Ollama embedding:
 #   1. install Ollama   (Mac: `brew install ollama` ; Windows: ollama.com/download)
@@ -245,6 +259,11 @@ model = ""
 auth_method = "cookie"
 # Cookie string (from browser)
 cookie = ""
+# B站 请求专用代理（默认留空 = 恒直连）。
+# 后端访问 B站 时会忽略环境变量和系统代理——代理出口 IP 常触发 B站 风控，
+# 导致明明已登录却显示"未登录"。只有你的网络确实无法直连 B站 时才需要填，
+# 例如 "http://127.0.0.1:7890"。
+proxy = ""
 
 [bilibili.browser]
 # agent-browser executable path (leave empty for global install)
@@ -424,7 +443,8 @@ auto_update_allow_prerelease = false  # 是否允许 backend-vX.Y.Z-rc/beta/dev 
 auto_update_allowed_remotes = [
   "https://github.com/whiteguo233/OpenBiliClaw.git",
   "git@github.com:whiteguo233/OpenBiliClaw.git",
-] # 只有 origin 精确匹配这些远端时才允许自动快进；带凭据的 URL 一律拒绝
+] # 只有 origin 匹配这些远端时才允许自动快进（.git 后缀可省、HTTPS/SSH 拼法等价、大小写
+  # 不敏感）；带凭据的 URL 一律拒绝；走 GitHub 镜像克隆的安装把镜像 URL 加进来即可
 
 [scheduler.pool_source_shares]
 # Candidate-pool source mix by platform family. The saved default 5:1:1:1:1:1
@@ -467,6 +487,26 @@ planner_poll_seconds = 120
 plan_ttl_hours = 12
 # 统一推荐池入池最低分。来源/插件 observed 标签不能绕过该门槛。
 admission_min_score = 0.6
+# 可选 query inspiration 脑暴。默认关闭；开启后 planner 会通过本机 mcporter 调用
+# 搜索 provider 链获取预览，再由 discovery.keyword_inspiration 生成带溯源 metadata 的搜索词。
+inspiration_search_enabled = false
+# 搜索后端按顺序尝试。默认先用 local_cache 复用本地 content_cache evidence；
+# 本地证据不足时再用已启用的平台源做 inspiration-only grounding（当前同步支持
+# B站 / YouTube / X / Reddit，抖音 direct client；小红书 / 知乎 bridge 可用时
+# 也会加入；不写候选池），再用 Exa；Exa 免费 MCP 限流 / 返回空时再用
+# You.com 免费 MCP profile 兜底。远端 MCP 需要在本机 mcporter 配置里有
+# `exa` 和 / 或 `you` server。
+inspiration_search_backends = ["local_cache", "platform_sources", "exa", "you"]
+# 实验开关：开启且 inspiration provider 可用时，跳过旧 merged keyword planner，
+# 每轮 due 平台只用 inspiration flow 产词。
+inspiration_replace_merged_keywords = false
+# 探索广度档位：low / medium / high。medium 与旧默认逐项等值；十个旧的
+# inspiration_* 细粒度旋钮（aspect_window_size / interest_sample_size /
+# max_probe_searches_per_stage / platforms_per_probe / riskcontrolled_probe_budget /
+# search_pages_per_probe / search_results_per_query / max_seeds_per_aspect /
+# max_expansions_per_seed / max_keywords_per_platform）已移除，写了也会被忽略
+# 并在启动提示中给出迁移说明。
+inspiration_breadth = "high"
 # 可选封面图评估。默认关闭；开启后 discovery evaluator 会在模型支持图像输入时
 # 把已压缩的候选封面一并送入评估器，模型不支持时自动退回纯文本评估。
 multimodal_evaluation_enabled = false

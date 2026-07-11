@@ -13,6 +13,7 @@
 [![LINUX DO](https://img.shields.io/badge/LINUX_DO-Community-black?style=flat-square&logo=linux)](https://linux.do/)
 [![讨论帖](https://img.shields.io/badge/LINUX_DO-讨论帖-orange?style=flat-square&logo=discourse)](https://linux.do/t/topic/1978894)
 [![Chrome 应用商店](https://img.shields.io/chrome-web-store/v/cdfjfkdjjhdaccbldipkjhpibnfbiamg?style=flat-square&label=Chrome%20应用商店&logo=googlechrome&logoColor=white&color=4285F4)](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg)
+[![Gitee 镜像](https://img.shields.io/badge/Gitee-镜像-C71D23?style=flat-square&logo=gitee&logoColor=white)](https://gitee.com/whiteguo233/OpenBiliClaw)
 
 [项目主页](https://whiteguo233.github.io/OpenBiliClaw/) | [English](README_EN.md) | 中文
 
@@ -45,7 +46,7 @@
 普通用户只需四步；Firefox、Docker、脚本和手动部署等备用路径都在 [安装与部署详情](#安装与部署详情)。
 
 1. **装插件** —— [Chrome 应用商店一键安装](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg)（自动更新），或从 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 下载 zip 手动安装（最新功能先到，商店版可能滞后几天）。
-2. **装后端** —— 从同一个 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 下载桌面安装包（macOS `.dmg` / Windows `.exe`，开箱即用、常驻菜单栏/托盘）；想改源码或深度定制，就把下面这句话粘给 Claude Code / Codex CLI / Cursor 等 AI 编程助手：
+2. **装后端** —— 从同一个 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) 下载桌面安装包（macOS `.dmg` / Windows `.exe`，开箱即用、常驻菜单栏/托盘）。每个平台有两种安装包:**精简版**(默认,首启自动下载向量模型 bge-m3)与 **`-with-embedding` 完整版**(已内置 bge-m3 ~1.1GB,离线开箱即用)——网络差 / 想离线的选完整版,其余选精简版。想改源码或深度定制,就把下面这句话粘给 Claude Code / Codex CLI / Cursor 等 AI 编程助手：
 
    ```text
    请按照 https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md 的说明帮我部署 OpenBiliClaw 后端(务必用 Bash 的 curl 下载这个文档,不要用 WebFetch — 会丢关键指令)
@@ -208,12 +209,12 @@
 
 ## 最近更新
 
-📌 最新版本：**v0.3.152（2026-07-04）**
+📌 最新版本：**v0.3.162（2026-07-11）**
 
-- **桌面安装包坏配置可自愈** —— `config.toml` 损坏导致启动失败时，自动备份坏文件并重建默认配置，打开 `/setup/` 重新初始化，数据目录不受影响。
-- **惊喜推荐更「惊喜」** —— 改用候选池 Top 10% 动态阈值，普通高分内容不再被过早包装成惊喜推荐。
-- **更新入口按安装渠道区分** —— 源码安装才显示「立即应用」，桌面包只显示 Release 下载入口；后端更新被安全守卫拒绝时，插件会展示具体原因。
-- **Release 聚合页资产对齐** —— 只收录同版本插件包 / 安装包，不再误列缺失的 Firefox XPI 或回填旧版资产。
+- **跨设备扩展访问** —— 新增默认关闭的设备密钥认证，远程浏览器扩展可安全连接家中或局域网后端，并支持即时撤销设备会话。
+- **反馈更跟手、可撤销** —— 推荐卡和兴趣/避雷探针立即响应，10 秒内可真实撤销；换一批先展示新内容，再后台结清旧卡。
+- **七平台发布时间贯通** —— B站、小红书、抖音、YouTube、X、知乎和 Reddit 的发布时间进入推荐全链路，并在各端统一显示本地相对时间。
+- **Ollama 自愈升级** —— with-embedding 私有 Ollama 崩溃后自动退避拉起，缺失或损坏的向量模型可在引导页自动修复并显示进度。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
@@ -314,7 +315,7 @@ npm run package:firefox        # 额外打成未签名 openbiliclaw-extension-v*
 
 AI 助手会克隆仓库、安装依赖、用局域网可访问的默认绑定启动后端（`0.0.0.0:8420`）、做健康检查，并问几个有默认值的问题。自动初始化前会真实验证 LLM provider 和 embedding 服务；有一个不通就先停下让你修配置，不会硬跑出空画像。看不懂就选默认；小红书、抖音、YouTube、X 和知乎数据只有你明确同意才会进入初始画像。
 
-Chrome Web Store / AMO 发布包默认只声明本机后端权限，插件侧建议保持 `127.0.0.1` / `localhost`。如果要让手机访问移动端 Web，可继续用 `openbiliclaw start --host 0.0.0.0 --port 8420` 启动后端，插件二维码会优先展示电脑的局域网 IP。让插件直接连接局域网另一台机器或远程域名，需要带对应 host 权限的开发者构建，或等待后续可选授权开关。
+Chrome Web Store / AMO 发布包默认只声明本机后端权限。让插件连接局域网另一台机器或远程域名时，在设置里选择协议并填写地址，浏览器会请求该 `scheme://host/*` 的可选权限；WebExtension host permission 无法跨浏览器限定端口，但实际请求仍固定到配置端口。公网地址强制 HTTPS。后端需先用 `ext-key generate` 和 `ext-key enable` 开启默认关闭的设备认证。
 
 ### 3. 在同一个浏览器登录内容平台
 
@@ -359,13 +360,22 @@ Windows 原生（PowerShell，不需要 Docker / WSL2）：
 <details>
 <summary>高级：Docker 部署</summary>
 
-适合已经安装 Docker Desktop 的用户。v0.3.11+ 自带 Ollama embedding sidecar。
+适合已经安装 Docker 的用户，自带 Ollama embedding sidecar。预构建镜像无需克隆源码：
+
+```bash
+mkdir -p ~/openbiliclaw && cd ~/openbiliclaw
+curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml
+docker compose -f docker-compose.prebuilt.yml up -d
+# 然后打开 http://127.0.0.1:8420/setup/ 完成初始化
+```
+
+也可以把下面这句粘给 AI 编程助手，走终端向导 + 自动 init：
 
 ```text
 请按照 https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/docker-deployment.md 的说明帮我用 Docker Compose 部署 OpenBiliClaw 后端(务必用 Bash 的 curl 下载这个文档,不要用 WebFetch)
 ```
 
-详见 [Docker 部署指南](docs/docker-deployment.md)。Docker 主路径同样走 `agent_bootstrap.py --mode docker`，会在确认 LLM、embedding、B 站 Cookie 和各来源 opt-in 后先验证 AI 服务，再自动运行 init；`docker exec ... openbiliclaw init` 只作为高级手动 fallback。
+源码构建、升级与排查详见 [Docker 部署指南](docs/docker-deployment.md)。
 
 </details>
 
@@ -408,7 +418,7 @@ macOS / Windows 用户可以从 [ollama.com/download](https://ollama.com/downloa
 uv run openbiliclaw setup-embedding
 ```
 
-向导会自动拉取 `bge-m3`（约 568MB，CPU 可跑）并写入配置。
+向导会自动拉取 `bge-m3`（约 1.1GB，CPU 可跑）并写入配置。
 
 </details>
 
@@ -575,18 +585,21 @@ OpenClaw 收到 `interest.probe` 事件（或主动拉取 `next-probe`），发�
 │   行为采集 · Cookie 同步 · 平台任务 · 侧边栏推荐     │
 └──────────────────────┬─────────────────────────┘
                        │ REST API / WebSocket
-                       │ + 桌面 Web (/web) · 移动 Web (/m)
+                       │ + 桌面 Web (/web) · 移动 Web (/m) · QR LAN-IP
 ┌──────────────────────▼─────────────────────────┐
 │                  Agent 编排层                    │
-│        Skill 系统 · 对话管理 · Runtime 调度        │
+│ Skill · 对话 · Runtime · 反馈 10s 可撤销提交屏障    │
 ├─────────┬──────────┬───────────┬───────────────┤
 │  Soul   │  Memory  │ Discovery │ Recommendation │
-│ 灵魂画像 │ 五层记忆  │  多源发现  │   推荐与表达     │
+│ 灵魂画像 │ 五层记忆  │多源发现+准入│   推荐与表达     │
 ├─────────┴──────────┴───────────┴───────────────┤
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │
-│   SQLite 本地存储（事件 · 候选池 · 推荐 · 对话）      │
+│  时长/互动/发布时间 → 候选池 → 缓存 → API → 四端展示   │
+│   统一准入防线 · SQLite（事件 · 候选池 · 推荐 · 对话） │
 └────────────────────────────────────────────────┘
 ```
+
+远程扩展连接采用显式、默认关闭的设备认证：`ext-key generate` → 配置仅存摘要 → `/api/auth/extension-token` 换短会话；HTTP 使用 Bearer Header，WebSocket / 图片代理仅携带短会话 query。
 
 > 完整架构细节（runtime 状态机、候选池计数、画像覆盖层等）见 [架构设计](docs/architecture.md) 与 [可视化架构图](docs/index.md#可视化架构图)。
 
@@ -710,7 +723,13 @@ OpenBiliClaw 的目标是做你的**全网个性化内容入口**——从 B 站
 
 如果 OpenBiliClaw 帮你找回了对推荐流的控制权，[点个 Star](https://github.com/whiteguo233/OpenBiliClaw) 是对「继续适配更多平台」最直接的投票。
 
-[![Star History Chart](https://api.star-history.com/svg?repos=whiteguo233/OpenBiliClaw&type=Date)](https://www.star-history.com/#whiteguo233/OpenBiliClaw&Date)
+<a href="https://www.star-history.com/?type=date&repos=whiteguo233%2FOpenBiliClaw">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=whiteguo233/OpenBiliClaw&type=date&theme=dark&legend=top-left&sealed_token=1fDGODQkTTYiiU6QJ7F0nashHo3tbMDGZnmqCKDGTGg2P9q1Ukkxv21R3vab-oDvKPMAb5ZCC-hqY_70gspsAqK_gdvCBooa5QSkgwcR-XN3JD1F6vQ03bmVMrjAcMwGn_nqgoZ5TX1OWcv_92lXeBQAfa2Je-bhkYGk8-S0M0R6kOuJuBsXaANiI-am" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=whiteguo233/OpenBiliClaw&type=date&legend=top-left&sealed_token=1fDGODQkTTYiiU6QJ7F0nashHo3tbMDGZnmqCKDGTGg2P9q1Ukkxv21R3vab-oDvKPMAb5ZCC-hqY_70gspsAqK_gdvCBooa5QSkgwcR-XN3JD1F6vQ03bmVMrjAcMwGn_nqgoZ5TX1OWcv_92lXeBQAfa2Je-bhkYGk8-S0M0R6kOuJuBsXaANiI-am" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=whiteguo233/OpenBiliClaw&type=date&legend=top-left&sealed_token=1fDGODQkTTYiiU6QJ7F0nashHo3tbMDGZnmqCKDGTGg2P9q1Ukkxv21R3vab-oDvKPMAb5ZCC-hqY_70gspsAqK_gdvCBooa5QSkgwcR-XN3JD1F6vQ03bmVMrjAcMwGn_nqgoZ5TX1OWcv_92lXeBQAfa2Je-bhkYGk8-S0M0R6kOuJuBsXaANiI-am" />
+ </picture>
+</a>
 
 ## 隐私速览
 

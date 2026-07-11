@@ -9,6 +9,7 @@ from .base import (
     LLMResponse,
     LLMResponseError,
     LLMTimeoutError,
+    classify_llm_unavailability,
 )
 from .claude_provider import ClaudeProvider
 from .gemini_provider import GeminiProvider
@@ -51,6 +52,7 @@ __all__ = [
     "LLMServiceError",
     "LLMResponseContentError",
     "build_llm_registry",
+    "classify_llm_unavailability",
     "is_llm_rate_limit_error",
     "summarize_registry",
 ]

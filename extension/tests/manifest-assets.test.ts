@@ -104,11 +104,13 @@ test("Chrome and Firefox manifests avoid all-sites host permission", () => {
   const root = process.cwd();
   const chromeManifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8")) as {
     host_permissions?: string[];
+    optional_host_permissions?: string[];
   };
   const firefoxManifest = JSON.parse(
     readFileSync(join(root, "manifest.firefox.json"), "utf8"),
   ) as {
     host_permissions?: string[];
+    optional_host_permissions?: string[];
   };
 
   for (const manifest of [chromeManifest, firefoxManifest]) {
@@ -117,6 +119,7 @@ test("Chrome and Firefox manifests avoid all-sites host permission", () => {
     assert.equal(manifest.host_permissions?.includes("<all_urls>"), false);
     assert.equal(manifest.host_permissions?.includes("http://127.0.0.1/*"), true);
     assert.equal(manifest.host_permissions?.includes("http://localhost/*"), true);
+    assert.deepEqual(manifest.optional_host_permissions, ["http://*/*", "https://*/*"]);
     assert.equal(manifest.host_permissions?.includes("*://*.bilibili.com/*"), true);
     assert.equal(manifest.host_permissions?.includes("*://*.xiaohongshu.com/*"), true);
     assert.equal(manifest.host_permissions?.includes("*://*.douyin.com/*"), true);

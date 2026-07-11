@@ -7,7 +7,9 @@ test("settings page exposes advanced config fields from backend schema", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
   const expectedIds = [
+    "cfgBackendScheme",
     "cfgBackendPort",
+    "cfgExtDeviceKey",
     "cfgDataDir",
     "cfgLlmFallbackProvider",
     "cfgEmbeddingFallbackProvider",
@@ -48,6 +50,7 @@ test("settings page exposes advanced config fields from backend schema", () => {
     "cfgYoutubeMinInterval",
     "cfgRedditEnabled",
     "cfgRedditBackend",
+    "cfgRedditCookie",
     "cfgRedditModeSearch",
     "cfgRedditModeHot",
     "cfgRedditModeSubreddit",
@@ -108,6 +111,8 @@ test("settings page exposes advanced config fields from backend schema", () => {
     assert.match(popupHtml, new RegExp(`id="${id}"`), `${id} should exist`);
     assert.match(popupJs, new RegExp(`"${id}"`), `${id} should be wired in popup.js`);
   }
+  assert.doesNotMatch(popupHtml, /cfgExtLoginPassword|扩展登录密码/);
+  assert.doesNotMatch(popupJs, /obc_auth_password|obc_auth_token/);
   assert.doesNotMatch(popupHtml, /id="cfgDiscoveryCron"/);
   assert.doesNotMatch(popupJs, /discovery_cron:\s*getVal\("cfgDiscoveryCron"\)/);
   assert.match(
@@ -221,7 +226,8 @@ test("settings backend update apply failures show backend reason and refresh sta
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
 
   assert.match(popupJs, /dirty_worktree:\s*"代码目录有未提交改动，更新被阻止"/);
-  assert.match(popupJs, /untrusted_remote:\s*"git 远端不在允许列表，更新被阻止"/);
+  assert.match(popupJs, /untrusted_remote:\s*"git 远端不在允许列表，更新被阻止（可在后端日志查看实际远端地址）"/);
+  assert.match(popupJs, /docker_install_mode:\s*"Docker 安装通过拉取新镜像升级，无法就地自更新"/);
   assert.match(popupJs, /branch_not_fast_forwardable:\s*"本地代码与发布版本分叉，无法快进更新"/);
   assert.match(popupJs, /missing_target_tag:\s*"远端未找到目标版本标签"/);
 
@@ -236,6 +242,8 @@ test("settings backend update actions require explicit install branch", () => {
 
   assert.match(popupJs, /const isGitInstall = installMode === "git"/);
   assert.match(popupJs, /const isFrozenInstall = installMode === "frozen"/);
+  assert.match(popupJs, /const isDockerInstall = installMode === "docker"/);
+  assert.match(popupJs, /docker compose pull && docker compose up -d/);
   assert.match(
     popupJs,
     /const isDesktopInstallerUpdate = String\(backend\.latest_tag \|\| ""\)\.startsWith\("desktop-v"\)/,
@@ -317,6 +325,7 @@ test("settings page round-trips Reddit discovery config", () => {
   for (const id of [
     "cfgRedditEnabled",
     "cfgRedditBackend",
+    "cfgRedditCookie",
     "cfgRedditModeSearch",
     "cfgRedditModeHot",
     "cfgRedditModeSubreddit",
@@ -395,6 +404,7 @@ test("settings page round-trips douyin and x cookies like the bilibili card", ()
   assert.match(popupHtml, /<textarea id="cfgBiliCookie"/);
   assert.match(popupHtml, /<textarea id="cfgDouyinCookie"/);
   assert.match(popupHtml, /<textarea id="cfgTwitterCookie"/);
+  assert.match(popupHtml, /<textarea id="cfgRedditCookie"/);
 
   assert.match(popupJs, /setVal\("cfgDouyinCookie", cfg\.sources\?\.douyin\?\.cookie\)/);
   assert.match(popupJs, /setVal\("cfgTwitterCookie", cfg\.sources\?\.twitter\?\.cookie\)/);
@@ -412,6 +422,12 @@ test("settings page round-trips douyin and x cookies like the bilibili card", ()
   assert.match(
     popupJs,
     /\.\.\.\(getVal\("cfgTwitterCookie"\) \? \{ cookie: getVal\("cfgTwitterCookie"\) \} : \{\}\)/,
+  );
+  // Reddit has no config-side cookie echo (GET /api/config carries no
+  // sources.reddit.cookie) — paste-only, routed to rdt-cli's store.
+  assert.match(
+    popupJs,
+    /\.\.\.\(getVal\("cfgRedditCookie"\) \? \{ cookie: getVal\("cfgRedditCookie"\) \} : \{\}\)/,
   );
 });
 
@@ -462,9 +478,26 @@ test("settings page exposes and wires LLM and embedding probe buttons", () => {
   assert.match(popupHtml, /id="cfgProbeEmbedding"/);
   assert.match(popupHtml, /id="cfgProbeLlmStatus"/);
   assert.match(popupHtml, /id="cfgProbeEmbeddingStatus"/);
+  assert.match(popupHtml, /id="cfgProbeLlmFallback"/);
+  assert.match(popupHtml, /id="cfgProbeLlmFallbackStatus"/);
   assert.match(popupJs, /probeConfigService\("llm", collectForm\(\)\)/);
   assert.match(popupJs, /probeConfigService\("embedding", collectForm\(\)\)/);
+  assert.match(popupJs, /probeConfigService\("llm_fallback", collectForm\(\)\)/);
   assert.match(popupJs, /function renderProbeResult/);
+});
+
+test("settings page guards against a same-name LLM fallback (aligned with desktop web)", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  // Inline warning for legacy same-name configs (data is never silently reset).
+  assert.match(popupHtml, /id="cfgLlmFallbackSameWarning"/);
+  assert.match(popupHtml, /备选与默认 Provider 相同时永远不会生效/);
+  // The sync disables the same-name option and runs on hydration + both selects.
+  assert.match(popupJs, /function syncLlmFallbackSameState/);
+  assert.match(popupJs, /option\.value === mainValue/);
+  const syncCalls = popupJs.match(/syncLlmFallbackSameState\(\)/g) ?? [];
+  assert.ok(syncCalls.length >= 2, "sync must run from hydration and the provider change handler");
 });
 
 test("settings page placeholders match config example defaults", () => {
@@ -560,4 +593,65 @@ test("settings page wires offline cache and degraded-mode banners", () => {
   assert.match(popupJs, /renderDegradedBanner\(cfg\)/);
   assert.match(popupJs, /restart_required/);
   assert.match(popupJs, /保存并提示重启/);
+});
+
+test("settings page shows the budget-semantics hint for every per-source budget group", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+
+  // The hint must match the desktop web wording so users learn budget is a
+  // per-day cap, not an on/off toggle.
+  const baseNote =
+    "预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。";
+  const redditNote =
+    "预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限（Reddit 各分支默认 300）。";
+
+  // Every source card that has a daily budget input must carry a note.
+  const budgetCards = ["xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
+  for (const card of budgetCards) {
+    const start = popupHtml.indexOf(`data-source-card="${card}"`);
+    assert.ok(start >= 0, `source card ${card} should exist`);
+    const rest = popupHtml.slice(start);
+    const end = rest.indexOf("settings-source-card", 1);
+    const cardHtml = end >= 0 ? rest.slice(0, end) : rest;
+    assert.match(
+      cardHtml,
+      /class="settings-hint" data-budget-note>预算 = 每日任务次数上限/,
+      `${card} card should carry the budget-semantics hint`,
+    );
+  }
+
+  // Reddit keeps its 300-default clarification.
+  assert.ok(popupHtml.includes(redditNote), "reddit note should mention the 300 default");
+  // The other five use the base wording.
+  const baseCount = popupHtml.split(baseNote).length - 1;
+  assert.ok(baseCount >= 5, `expected >=5 base budget notes, got ${baseCount}`);
+});
+
+test("settings page wires the keyword generation mode selector (matches desktop web)", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  // Select + the three options — values/labels byte-identical to desktop web.
+  assert.match(popupHtml, /id="cfgKeywordGenerationMode"/);
+  assert.match(popupHtml, /<option value="legacy">经典<\/option>/);
+  assert.match(popupHtml, /<option value="hybrid">混合<\/option>/);
+  assert.match(popupHtml, /<option value="inspiration">灵感<\/option>/);
+  // Cost hint conveys 混合最贵.
+  assert.match(popupHtml, /混合最贵/);
+
+  // Load fills the select from the derived discovery field.
+  assert.match(
+    popupJs,
+    /setVal\("cfgKeywordGenerationMode", cfg\.discovery\?\.keyword_generation_mode \|\| "legacy"\)/,
+  );
+
+  // Save collects it into the discovery payload AFTER the snapshot spread, so a
+  // loaded value never clobbers the user's live selection (R2 spread-order).
+  const saveKey = 'keyword_generation_mode: getVal("cfgKeywordGenerationMode")';
+  assert.ok(popupJs.includes(saveKey), "save key should be present");
+  const spread = "...(state.runtimeConfig?.discovery || {})";
+  assert.ok(
+    popupJs.indexOf(spread) !== -1 && popupJs.indexOf(spread) < popupJs.indexOf(saveKey),
+    "keyword_generation_mode must be written after the discovery spread",
+  );
 });

@@ -42,10 +42,19 @@ import {
   normalizeRecommendation,
   normalizeProfileSummary,
   normalizeRuntimeStatus,
+  platformDisplayName,
   shouldFetchProfileSummary,
   shouldAutoLoadRecommendations,
   validateCommentInput,
 } from "../popup/popup-helpers.js";
+
+test("platformDisplayName maps known platforms and passes through unknown", () => {
+  assert.equal(platformDisplayName("bilibili"), "B 站");
+  assert.equal(platformDisplayName("ZHIHU"), "知乎");
+  assert.equal(platformDisplayName("reddit"), "Reddit");
+  assert.equal(platformDisplayName("newtube"), "newtube");
+  assert.equal(platformDisplayName(""), "");
+});
 
 test("buildVideoUrl builds bilibili video url from bvid", () => {
   assert.equal(
@@ -552,9 +561,16 @@ test("normalizeDelightCandidate fills stable fallbacks and upgrades cover urls",
     cover_url: "https://i0.hdslb.com/bfs/archive/delight-cover.jpg",
     content_url: "",
     source_platform: "",
+    published_at: "",
+    published_label: "",
     state: "pending",
     response_message: "",
     chat_reply: "",
+    view_count: 0,
+    like_count: 0,
+    comment_count: 0,
+    favorite_count: 0,
+    danmaku_count: 0,
     turns: [],
     composer_open: false,
     chat_draft: "",
@@ -618,11 +634,26 @@ test("getPopupState distinguishes offline uninitialized refreshing empty and rea
     items: [],
   });
 
+  // Missing runtime snapshot ≠ uninitialized: a transient /runtime-status
+  // failure on an initialized backend must not flash the init CTA.
   assert.deepEqual(getPopupState({ online: true, items: [] }), {
-    kind: "uninitialized",
-    message: "还没完成初始化，先运行 openbiliclaw init",
+    kind: "error",
+    message: "后端状态暂时没读到，稍后自动重试。",
     items: [],
   });
+
+  assert.deepEqual(
+    getPopupState({
+      online: true,
+      items: [],
+      runtimeStatus: { initialized: false },
+    }),
+    {
+      kind: "uninitialized",
+      message: "还没完成初始化，先运行 openbiliclaw init",
+      items: [],
+    },
+  );
 
   assert.deepEqual(
     getPopupState({

@@ -93,6 +93,46 @@ class TestDatabase:
             assert row is not None
             assert row["title"] == "Test Video"
             assert row["up_name"] == "TestUP"
+            assert row["relevance_score"] == 0.0
+
+            db.close()
+
+    def test_cache_content_empty_cover_does_not_wipe_existing(self) -> None:
+        """空封面的重摄入(如仅刷新互动数据)不得抹掉已有的好封面。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            db.cache_content(
+                "BV1cover",
+                title="Cover Video",
+                cover_url="//i2.hdslb.com/bfs/archive/good.jpg",
+                source="search",
+            )
+            db.cache_content(
+                "BV1cover",
+                title="Cover Video",
+                cover_url="",
+                view_count=12345,
+                source="related",
+            )
+
+            row = db.conn.execute(
+                "SELECT cover_url, view_count FROM content_cache WHERE bvid = ?", ("BV1cover",)
+            ).fetchone()
+            assert row["cover_url"] == "//i2.hdslb.com/bfs/archive/good.jpg"
+            assert row["view_count"] == 12345
+
+            db.cache_content(
+                "BV1cover",
+                title="Cover Video",
+                cover_url="//i2.hdslb.com/bfs/archive/new.jpg",
+                source="search",
+            )
+            row = db.conn.execute(
+                "SELECT cover_url FROM content_cache WHERE bvid = ?", ("BV1cover",)
+            ).fetchone()
+            assert row["cover_url"] == "//i2.hdslb.com/bfs/archive/new.jpg"
 
             db.close()
 
@@ -149,6 +189,112 @@ class TestDatabase:
                 "bookmark_count": 20,
             }
 
+            db.close()
+
+    def test_search_local_inspiration_evidence_returns_content_cache_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            db.cache_content(
+                "BVlocal1",
+                content_id="BVlocal1",
+                source_platform="bilibili",
+                title="独立游戏 机制拆解：地图叙事如何成立",
+                content_url="https://www.bilibili.com/video/BVlocal1",
+                description="围绕独立游戏、关卡设计、叙事节奏的分析。",
+                topic_group="独立游戏",
+                pool_topic_label="独立游戏机制",
+                pool_status="fresh",
+            )
+
+            rows = db.search_local_inspiration_evidence(
+                "独立游戏 机制",
+                limit=5,
+                lookback_days=365,
+            )
+
+            assert rows
+            assert rows[0]["title"] == "独立游戏 机制拆解：地图叙事如何成立"
+            assert rows[0]["url"] == "https://www.bilibili.com/video/BVlocal1"
+            assert rows[0]["source_table"] == "content_cache"
+            assert rows[0]["source_platform"] == "bilibili"
+            db.close()
+
+    def test_search_local_inspiration_evidence_matches_spaceless_cjk_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            db.cache_content(
+                "BVlocal1",
+                content_id="BVlocal1",
+                source_platform="bilibili",
+                title="独立游戏 机制拆解：地图叙事如何成立",
+                content_url="https://www.bilibili.com/video/BVlocal1",
+                description="围绕独立游戏、关卡设计、叙事节奏的分析。",
+                topic_group="独立游戏",
+                pool_topic_label="独立游戏机制",
+                pool_status="fresh",
+            )
+
+            rows = db.search_local_inspiration_evidence(
+                "独立游戏机制",
+                limit=5,
+                lookback_days=365,
+            )
+
+            assert rows
+            assert rows[0]["title"] == "独立游戏 机制拆解：地图叙事如何成立"
+            db.close()
+
+    def test_search_local_inspiration_evidence_synthesizes_bilibili_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            db.cache_content(
+                "BVlocal1",
+                content_id="BVlocal1",
+                source_platform="bilibili",
+                title="独立游戏 机制拆解：地图叙事如何成立",
+                content_url="",
+                description="围绕独立游戏、关卡设计、叙事节奏的分析。",
+                topic_group="独立游戏",
+                pool_topic_label="独立游戏机制",
+                pool_status="fresh",
+            )
+
+            rows = db.search_local_inspiration_evidence(
+                "独立游戏 机制",
+                limit=5,
+                lookback_days=365,
+            )
+
+            assert rows
+            assert rows[0]["url"] == "https://www.bilibili.com/video/BVlocal1"
+            db.close()
+
+    def test_search_local_inspiration_evidence_excludes_single_weak_token_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            db.cache_content(
+                "BVlocal2",
+                content_id="BVlocal2",
+                source_platform="bilibili",
+                title="独立音乐人访谈实录",
+                content_url="https://www.bilibili.com/video/BVlocal2",
+                description="音乐创作与巡演生活。",
+                topic_group="音乐",
+                pool_topic_label="独立音乐",
+                pool_status="fresh",
+            )
+
+            rows = db.search_local_inspiration_evidence(
+                "独立游戏 机制",
+                limit=5,
+                lookback_days=365,
+            )
+
+            assert rows == []
             db.close()
 
     def test_iter_cover_lifecycle_reports_status_and_saved_state(self) -> None:
@@ -1689,6 +1835,21 @@ class TestDatabase:
             items = db.get_pool_candidates(limit=10)
 
             assert [item["bvid"] for item in items] == ["BV1HIGH"]
+            assert db.count_pool_candidates() == 1
+
+            db.close()
+
+    def test_pool_serving_allows_only_exact_explore_relaxed_floor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            _seed_visible(db, "BVEXP", source="explore", relevance_score=0.58)
+            _seed_visible(db, "BVTREND", source="trending", relevance_score=0.58)
+            _seed_visible(db, "BVLOOKALIKE", source="explore-backfill", relevance_score=0.58)
+
+            assert [row["bvid"] for row in db.get_pool_candidates(limit=10)] == ["BVEXP"]
+            assert [row["bvid"] for row in db.get_unrecommended_content(limit=10)] == ["BVEXP"]
             assert db.count_pool_candidates() == 1
 
             db.close()
@@ -3258,3 +3419,23 @@ class TestDatabaseMaintenance:
         row = repaired.execute("SELECT title FROM events").fetchone()
         repaired.close()
         assert row == ("恢复成功",)
+
+
+def test_feedback_signals_return_topic_key_and_group() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        db.cache_content(
+            "BV_TOPIC",
+            title="动画叙事拆解",
+            source="search",
+            topic_key="动漫解说",
+            topic_group="动漫",
+        )
+        recommendation_id = db.insert_recommendation("BV_TOPIC", confidence=0.9)
+        db.update_recommendation_feedback(recommendation_id, feedback_type="dislike")
+
+        rows = db.get_feedback_signals()
+
+        assert rows[0]["topic_key"] == "动漫解说"
+        assert rows[0]["topic_group"] == "动漫"

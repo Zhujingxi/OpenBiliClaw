@@ -152,6 +152,7 @@ class SoulEngine:
         profile_consolidation_like_target_soft: int = 450,
         profile_consolidation_archive_enabled: bool = True,
         feedback_batch_threshold: int = 3,
+        database: Any | None = None,
     ) -> None:
         self._llm = llm
         self._memory = memory
@@ -226,6 +227,7 @@ class SoulEngine:
                 like_target_upper=profile_consolidation_like_target_upper,
                 like_target_soft=profile_consolidation_like_target_soft,
                 archive_enabled=profile_consolidation_archive_enabled,
+                database=database,
             )
         self._pipeline = ProfileUpdatePipeline(
             memory=memory,

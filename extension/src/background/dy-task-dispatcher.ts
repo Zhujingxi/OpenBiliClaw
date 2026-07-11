@@ -29,6 +29,8 @@ import type {
   DouyinSearchItem,
 } from "../main/dy-fetch-tap.js";
 import { apiUrl } from "../shared/backend-endpoint.ts";
+import { authenticatedFetch } from "../shared/auth.ts";
+import { ASSET_PREFIX } from "../shared/asset-prefix.ts";
 // Cross-source mutex via globalThis. Mirror of the helper inlined
 // in xhs-task-dispatcher; both dispatchers coordinate by writing to
 // the same field on globalThis. See dispatcher-mutex.ts for the
@@ -65,7 +67,7 @@ function releaseDispatcherMutex(label: string): void {
 function debugLog(event: string, data?: unknown): void {
   void (async () => {
     try {
-      await fetch(await apiUrl("/sources/_debug/log"), {
+      await authenticatedFetch(await apiUrl("/sources/_debug/log"), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ source: "dy", event, data: data ?? null }),
@@ -331,7 +333,7 @@ export function shouldOpenDyTaskActive(task: DyTask): boolean {
 
 async function fetchNextTask(): Promise<DyTask | null> {
   try {
-    const resp = await fetch(await apiUrl("/sources/dy/next-task"));
+    const resp = await authenticatedFetch(await apiUrl("/sources/dy/next-task"));
     if (resp.status === 204) return null; // no pending task
     if (!resp.ok) return null;
     const payload: unknown = await resp.json();
@@ -343,7 +345,7 @@ async function fetchNextTask(): Promise<DyTask | null> {
 
 async function postTaskResult(result: DyTaskResult): Promise<void> {
   try {
-    await fetch(await apiUrl("/sources/dy/task-result"), {
+    await authenticatedFetch(await apiUrl("/sources/dy/task-result"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(result),
@@ -640,11 +642,18 @@ async function injectFetchTapInto(tabId: number): Promise<void> {
   try {
     const result = await chrome.scripting.executeScript({
       target: { tabId, allFrames: false },
-      files: ["dist/main/dy-fetch-tap.js"],
+      files: [`${ASSET_PREFIX}main/dy-fetch-tap.js`],
       world: "MAIN",
     });
     _lastInjectStatus = `ok_results=${Array.isArray(result) ? result.length : "n/a"}`;
   } catch (err) {
+    // Firefox structured-clones the completion value of a MAIN-world file
+    // injection and rejects a non-clonable result even though the script
+    // executed fine (only the result clone failed). Treat that as success.
+    if (String(err).includes("non-structured-clonable")) {
+      _lastInjectStatus = "ok_uncloneable_result";
+      return;
+    }
     // Inject failed — could be scripting permission missing, file
     // not in web_accessible_resources, captcha intermediate page,
     // or chrome:// blocked. Capture the error so the content script

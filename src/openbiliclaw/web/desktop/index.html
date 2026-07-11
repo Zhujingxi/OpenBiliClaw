@@ -3,7 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>OpenBiliClaw 推荐首页</title>
+  <script>
+    (() => {
+      try {
+        const theme = window.localStorage?.getItem("obc.theme");
+        if (theme === "light" || theme === "dark") {
+          document.documentElement.dataset.theme = theme;
+        }
+      } catch {}
+    })();
+  </script>
   <link rel="stylesheet" href="/web/assets/css/app.css">
 </head>
 <body>
@@ -33,6 +44,20 @@
         <button class="backend-status-pill" id="openSettingsHero" type="button">
           <span class="badge-dot"></span><span id="statusLabel">已连接本地后端</span>
         </button>
+        <button class="top-theme-btn icon-btn" id="themeToggleBtn" type="button" title="主题：跟随系统" aria-label="主题：跟随系统">
+          <span id="themeToggleGlyph" aria-hidden="true">◐</span>
+        </button>
+        <div class="mobile-entry-wrap">
+          <button class="top-mobile-btn" id="mobileQrBtn" type="button" title="扫码在手机上使用" aria-label="手机版入口：扫码在手机上使用">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6.5" y="2" width="11" height="20" rx="2.8"/><path d="M10.2 5.2h3.6"/><circle cx="12" cy="18.4" r="0.5" fill="currentColor" stroke="none"/></svg>
+            <span>手机版</span>
+            <span class="mobile-new-dot" id="mobileQrDot" hidden></span>
+          </button>
+          <div class="mobile-qr-callout" id="mobileQrCallout" hidden>
+            <button class="mobile-qr-callout-body" id="mobileQrCalloutOpen" type="button">手机扫码，躺着刷推荐 →</button>
+            <button class="mobile-qr-callout-close" id="mobileQrCalloutClose" type="button" aria-label="关闭提示">×</button>
+          </div>
+        </div>
         <button class="top-message-btn" id="messagesBtn" type="button" aria-label="消息">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
             <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" stroke-linecap="round" stroke-linejoin="round"/>
@@ -101,6 +126,12 @@
             </div>
             <div class="delight-copy">
               <h3 id="delightTitle">你可能会意外喜欢：县域经济的债务齿轮</h3>
+              <p id="delightStats" class="video-stats" hidden></p>
+              <p id="delightPublished" class="published-time" hidden></p>
+              <div id="delightExcerpt" class="delight-excerpt" hidden>
+                <p id="delightExcerptText" class="delight-excerpt-text"></p>
+                <button id="delightExcerptToggle" class="delight-excerpt-toggle" type="button" aria-expanded="false" aria-controls="delightExcerptText" hidden>展开正文</button>
+              </div>
               <p id="delightReason">你最近的轨迹同时出现了宏观债务、地方财政和长叙事内容，这条把它们咬合得很清楚。</p>
               <div class="delight-chat-turns" id="delightTurns" hidden></div>
             </div>
@@ -155,7 +186,18 @@
             </div>
           </div>
           <div class="filter-row" id="filterRow" aria-label="推荐筛选"></div>
-          <div class="card-grid" id="videoGrid"></div>
+          <!-- 首屏骨架占位：后端推荐取回前先撑住版面，renderVideos 首次渲染时整体替换 -->
+          <div class="card-grid" id="videoGrid">
+            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
+            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
+            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
+            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
+            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
+            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
+            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
+            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
+          </div>
+          <div id="loadMoreSentinel" aria-hidden="true"></div>
           <div class="load-row"><button class="pill-btn dark" id="loadMoreBtn" type="button">加载更多推荐</button></div>
         </section>
       </section>
@@ -233,13 +275,14 @@
           </div>
 
           <div class="settings-subpanel is-active" data-model-settings-group="llm" data-model-settings-panel="default">
-            <label class="settings-field"><span>默认 LLM Provider</span><select id="llmProvider"><option value="openai">openai</option><option value="claude">claude</option><option value="gemini">gemini</option><option value="deepseek">deepseek</option><option value="openrouter">openrouter</option><option value="ollama">ollama</option><option value="openai_compatible">openai_compatible</option></select></label>
+            <label class="settings-field"><span>默认 LLM Provider</span><select id="llmProvider" translate="no"><option value="openai">openai</option><option value="claude">claude</option><option value="gemini">gemini</option><option value="deepseek">deepseek</option><option value="openrouter">openrouter</option><option value="ollama">ollama</option><option value="openai_compatible">openai_compatible</option></select></label>
             <label class="settings-field"><span>OpenAI 认证方式</span><select id="llmAuthMode"><option value="api_key">API Key</option><option value="codex_oauth">Codex OAuth</option></select></label>
             <label class="settings-field"><span>默认模型</span><input id="llmModel" value="gpt-5-nano"></label>
             <label class="settings-field"><span>LLM 并发数</span><input id="llmConcurrency" inputmode="numeric" placeholder="3"></label>
             <label class="settings-field"><span>LLM 超时（秒）</span><input id="llmTimeout" inputmode="numeric" placeholder="60"></label>
             <label class="settings-field"><span>当前 Provider API Key</span><input id="llmApiKey" autocomplete="off" placeholder="只保存当前选中的 Provider"></label>
-            <label class="settings-field"><span>当前 Provider Base URL</span><input id="llmBaseUrl" placeholder="OpenAI-compatible / DeepSeek / Ollama 等"></label>
+            <label class="settings-field"><span>当前 Provider Base URL</span><input id="llmBaseUrl" placeholder="OpenAI-compatible / Claude 第三方网关 / DeepSeek / Ollama 等"></label>
+            <label class="settings-field"><span>API 协议（OpenAI / 兼容）</span><select id="llmApiFlavor"><option value="">chat/completions（默认）</option><option value="responses">responses（第三方网关）</option></select></label>
             <label class="settings-field"><span>DeepSeek Reasoning Effort</span><select id="deepseekReasoning"><option value="">默认</option><option value="high">high</option><option value="max">max</option></select></label>
             <label class="settings-field"><span>OpenRouter Referer</span><input id="openrouterReferer" placeholder="https://example.com"></label>
             <label class="settings-field"><span>OpenRouter X-Title</span><input id="openrouterTitle" placeholder="OpenBiliClaw"></label>
@@ -251,11 +294,17 @@
 
           <div class="settings-subpanel" data-model-settings-group="llm" data-model-settings-panel="fallback" hidden>
             <p class="settings-note-inline">默认 LLM Provider 不可用时才会使用备选 Provider；留空表示不启用 LLM fallback。</p>
-            <label class="settings-field"><span>备选 LLM Provider</span><select id="llmFallbackProvider"><option value="">不启用 fallback</option><option value="openai">openai</option><option value="claude">claude</option><option value="gemini">gemini</option><option value="deepseek">deepseek</option><option value="openrouter">openrouter</option><option value="ollama">ollama</option><option value="openai_compatible">openai_compatible</option></select></label>
+            <label class="settings-field"><span>备选 LLM Provider</span><select id="llmFallbackProvider" translate="no"><option value="">不启用 fallback</option><option value="openai">openai</option><option value="claude">claude</option><option value="gemini">gemini</option><option value="deepseek">deepseek</option><option value="openrouter">openrouter</option><option value="ollama">ollama</option><option value="openai_compatible">openai_compatible</option></select></label>
+            <p id="llmFallbackSameWarning" class="settings-note-inline" hidden>备选与默认 Provider 相同时永远不会生效，保存会被拒绝；请换一个不同类型的 Provider 或留空关闭 fallback。</p>
             <label class="settings-field"><span>备选 OpenAI 认证方式</span><select id="llmFallbackAuthMode"><option value="api_key">API Key</option><option value="codex_oauth">Codex OAuth</option></select></label>
             <label class="settings-field"><span>备选模型</span><input id="llmFallbackModel" placeholder="留空使用该 Provider 现有模型"></label>
             <label class="settings-field"><span>备选 Provider API Key</span><input id="llmFallbackApiKey" autocomplete="off" placeholder="只保存备选 Provider"></label>
             <label class="settings-field"><span>备选 Provider Base URL</span><input id="llmFallbackBaseUrl" placeholder="OpenAI-compatible / DeepSeek / Ollama 等"></label>
+            <label class="settings-field"><span>备选 API 协议（OpenAI / 兼容）</span><select id="llmFallbackApiFlavor"><option value="">chat/completions（默认）</option><option value="responses">responses（第三方网关）</option></select></label>
+            <div class="settings-probe-row">
+              <button class="pill-btn" id="probeLlmFallback" type="button">测试备选 Provider</button>
+              <span class="settings-probe-status" id="probeLlmFallbackStatus" aria-live="polite"></span>
+            </div>
           </div>
 
           <p class="settings-section-title">Embedding</p>
@@ -265,7 +314,7 @@
           </div>
 
           <div class="settings-subpanel is-active" data-model-settings-group="embedding" data-model-settings-panel="default">
-            <label class="settings-field"><span>Embedding Provider</span><select id="embeddingProvider"><option value="">跟随默认</option><option>ollama</option><option>openai</option><option>gemini</option><option>openai_compatible</option></select></label>
+            <label class="settings-field"><span>Embedding Provider</span><select id="embeddingProvider" translate="no"><option value="">跟随默认</option><option value="ollama">ollama</option><option value="openai">openai</option><option value="gemini">gemini</option><option value="openai_compatible">openai_compatible</option></select></label>
             <label class="settings-field"><span>Embedding 模型</span><input id="embeddingModel" value="bge-m3"></label>
             <label class="settings-field"><span>Embedding API Key</span><input id="embeddingApiKey" autocomplete="off"></label>
             <label class="settings-field"><span>Embedding Base URL</span><input id="embeddingBaseUrl"></label>
@@ -279,20 +328,20 @@
 
           <div class="settings-subpanel" data-model-settings-group="embedding" data-model-settings-panel="fallback" hidden>
             <p class="settings-note-inline">默认 Embedding Provider 不可用时才会使用备选 Provider；这里编辑的是所选 Provider 的现有配置。</p>
-            <label class="settings-field"><span>备选 Embedding Provider</span><select id="embeddingFallbackProvider"><option value="">不启用 fallback</option><option>ollama</option><option>openai</option><option>gemini</option><option>openai_compatible</option></select></label>
+            <label class="settings-field"><span>备选 Embedding Provider</span><select id="embeddingFallbackProvider" translate="no"><option value="">不启用 fallback</option><option value="ollama">ollama</option><option value="openai">openai</option><option value="gemini">gemini</option><option value="openai_compatible">openai_compatible</option></select></label>
             <label class="settings-field"><span>备选 Provider 模型</span><input id="embeddingFallbackModel" placeholder="写入所选 Provider 的 model"></label>
             <label class="settings-field"><span>备选 Provider API Key</span><input id="embeddingFallbackApiKey" autocomplete="off"></label>
             <label class="settings-field"><span>备选 Provider Base URL</span><input id="embeddingFallbackBaseUrl"></label>
           </div>
 
           <p class="settings-section-title">模块覆盖</p>
-          <label class="settings-field"><span>画像 Provider</span><select id="moduleSoulProvider"><option value="">继承默认</option><option>openai</option><option>claude</option><option>gemini</option><option>deepseek</option><option>ollama</option><option>openrouter</option><option>openai_compatible</option></select></label>
+          <label class="settings-field"><span>画像 Provider</span><select id="moduleSoulProvider" translate="no"><option value="">继承默认</option><option value="openai">openai</option><option value="claude">claude</option><option value="gemini">gemini</option><option value="deepseek">deepseek</option><option value="ollama">ollama</option><option value="openrouter">openrouter</option><option value="openai_compatible">openai_compatible</option></select></label>
           <label class="settings-field"><span>画像 Model</span><input id="moduleSoulModel" placeholder="留空继承"></label>
-          <label class="settings-field"><span>发现 Provider</span><select id="moduleDiscoveryProvider"><option value="">继承默认</option><option>openai</option><option>claude</option><option>gemini</option><option>deepseek</option><option>ollama</option><option>openrouter</option><option>openai_compatible</option></select></label>
+          <label class="settings-field"><span>发现 Provider</span><select id="moduleDiscoveryProvider" translate="no"><option value="">继承默认</option><option value="openai">openai</option><option value="claude">claude</option><option value="gemini">gemini</option><option value="deepseek">deepseek</option><option value="ollama">ollama</option><option value="openrouter">openrouter</option><option value="openai_compatible">openai_compatible</option></select></label>
           <label class="settings-field"><span>发现 Model</span><input id="moduleDiscoveryModel" placeholder="留空继承"></label>
-          <label class="settings-field"><span>推荐表达 Provider</span><select id="moduleRecommendationProvider"><option value="">继承默认</option><option>openai</option><option>claude</option><option>gemini</option><option>deepseek</option><option>ollama</option><option>openrouter</option><option>openai_compatible</option></select></label>
+          <label class="settings-field"><span>推荐表达 Provider</span><select id="moduleRecommendationProvider" translate="no"><option value="">继承默认</option><option value="openai">openai</option><option value="claude">claude</option><option value="gemini">gemini</option><option value="deepseek">deepseek</option><option value="ollama">ollama</option><option value="openrouter">openrouter</option><option value="openai_compatible">openai_compatible</option></select></label>
           <label class="settings-field"><span>推荐表达 Model</span><input id="moduleRecommendationModel" placeholder="留空继承"></label>
-          <label class="settings-field"><span>评估 Provider</span><select id="moduleEvaluationProvider"><option value="">继承默认</option><option>openai</option><option>claude</option><option>gemini</option><option>deepseek</option><option>ollama</option><option>openrouter</option><option>openai_compatible</option></select></label>
+          <label class="settings-field"><span>评估 Provider</span><select id="moduleEvaluationProvider" translate="no"><option value="">继承默认</option><option value="openai">openai</option><option value="claude">claude</option><option value="gemini">gemini</option><option value="deepseek">deepseek</option><option value="ollama">ollama</option><option value="openrouter">openrouter</option><option value="openai_compatible">openai_compatible</option></select></label>
           <label class="settings-field"><span>评估 Model</span><input id="moduleEvaluationModel" placeholder="留空继承"></label>
         </div>
 
@@ -339,35 +388,42 @@
             </div>
           </div>
           <p class="settings-section-title">当前 Cookie / 登录凭据</p>
-          <p class="settings-note-inline">默认折叠；展开后只读查看当前后端可读取的 Cookie 或令牌。手动粘贴新 Cookie 请使用下方覆盖输入框。</p>
+          <p class="settings-note-inline">默认折叠；展开后只读查看当前后端可读取的 Cookie 或令牌，只能复制、不能编辑或粘贴。手动粘贴入口只提供给后端直接带 Cookie 请求平台接口的源——B站、抖音、X、Reddit（下方各自的覆盖输入框，留空保存不会覆盖）；小红书、知乎由浏览器插件用你的登录态取数，YouTube 走公开接口，这三个平台没有也不需要 Cookie 输入框，浏览器登录后插件自动接通。</p>
           <div id="sourceCredentialList" class="source-credential-list">
             <details class="source-credential-row" data-source-credential="bilibili">
-              <summary><strong>Bilibili</strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>Bilibili<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="xiaohongshu">
-              <summary><strong>小红书</strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>小红书<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="douyin">
-              <summary><strong>抖音</strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>抖音<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="youtube">
-              <summary><strong>YouTube</strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>YouTube<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="twitter">
-              <summary><strong>X (Twitter)</strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>X (Twitter)<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="zhihu">
-              <summary><strong>知乎</strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>知乎<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
             <details class="source-credential-row" data-source-credential="reddit">
-              <summary><strong>Reddit</strong><span class="source-credential-summary">加载中…</span></summary>
+              <summary><strong>Reddit<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
               <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
             </details>
           </div>
           <label class="settings-field"><span>B 站认证</span><select id="biliAuth"><option value="cookie">Cookie</option><option value="qrcode">二维码</option><option value="none">无</option></select></label>
@@ -376,6 +432,7 @@
           <label class="settings-field"><span>B 站登录窗口</span><select id="biliBrowserHeaded"><option value="off">隐藏</option><option value="on">显示</option></select></label>
           <label class="settings-field"><span>通用网页 CDP URL</span><input id="sourcesBrowserCdp" placeholder="http://localhost:9222"></label>
           <label class="settings-field"><span>回退浏览器窗口</span><select id="sourcesBrowserHeaded"><option value="off">隐藏</option><option value="on">显示</option></select></label>
+          <p class="settings-note-inline">预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
           <div class="inline-row">
             <label class="settings-field"><span>小红书每日搜索</span><input id="xhsDailySearchBudget" inputmode="numeric" placeholder="0 = 不限"></label>
             <label class="settings-field"><span>小红书每日创作者</span><input id="xhsDailyCreatorBudget" inputmode="numeric" placeholder="0 = 不限"></label>
@@ -401,6 +458,7 @@
           <p class="settings-note-inline">在浏览器登录 x.com 后，插件会自动同步 cookie；也可在下方手动粘贴（需含 auth_token 和 ct0）。</p>
           <label class="settings-field full"><span>X Cookie</span><textarea id="twitterCookie" rows="2" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="保留空值表示不覆盖现有 cookie（登录 x.com 后插件会自动同步）"></textarea></label>
           <label class="settings-field"><span>X Cookie 环境变量</span><input id="twitterCookieEnv" placeholder="OPENBILICLAW_X_COOKIE"></label>
+          <p class="settings-note-inline">预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
           <div class="inline-row">
             <label class="settings-field"><span>X 每日搜索</span><input id="twitterDailySearchBudget" inputmode="numeric" placeholder="0 = 不限"></label>
             <label class="settings-field"><span>X 每日 For-You</span><input id="twitterDailyFeedBudget" inputmode="numeric" placeholder="0 = 不限"></label>
@@ -417,6 +475,7 @@
             <label class="settings-field"><span>作者分支</span><input id="zhihuModeCreator" type="checkbox"></label>
             <label class="settings-field"><span>相关分支</span><input id="zhihuModeRelated" type="checkbox"></label>
           </div>
+          <p class="settings-note-inline">预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
           <div class="inline-row">
             <label class="settings-field"><span>知乎每日搜索</span><input id="zhihuDailySearchBudget" inputmode="numeric" placeholder="0 = 不限"></label>
             <label class="settings-field"><span>知乎每日热榜</span><input id="zhihuDailyHotBudget" inputmode="numeric" placeholder="0 = 不限"></label>
@@ -429,12 +488,14 @@
           <p class="settings-section-title">Reddit</p>
           <p class="settings-note-inline">Reddit 日常 discovery 默认使用 rdt-cli 登录态命令后端；rdt / opencli 不可用时自动 fallback 到 OpenBiliClaw 插件任务。初始化 saved/upvoted/subscribed 信号仍通过插件复用当前浏览器登录态。每个 discovery 分支默认每日 300 条。</p>
           <label class="settings-field"><span>Reddit 后端</span><select id="redditBackend"><option value="rdt">rdt-cli</option><option value="extension">OpenBiliClaw 插件</option><option value="opencli">OpenCLI extension</option><option value="auto">自动选择命令后端</option></select></label>
+          <label class="settings-field full"><span>Reddit Cookie（需含 reddit_session）</span><textarea id="redditCookie" rows="2" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="保留空值表示不覆盖现有 cookie（登录 reddit.com 后插件会自动同步）"></textarea></label>
           <div class="inline-row">
             <label class="settings-field"><span>搜索分支</span><input id="redditModeSearch" type="checkbox"></label>
             <label class="settings-field"><span>热门分支</span><input id="redditModeHot" type="checkbox"></label>
             <label class="settings-field"><span>Subreddit 分支</span><input id="redditModeSubreddit" type="checkbox"></label>
             <label class="settings-field"><span>相关分支</span><input id="redditModeRelated" type="checkbox"></label>
           </div>
+          <p class="settings-note-inline">预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限（Reddit 各分支默认 300）。</p>
           <div class="inline-row">
             <label class="settings-field"><span>Reddit 每日搜索</span><input id="redditDailySearchBudget" inputmode="numeric" placeholder="300"></label>
             <label class="settings-field"><span>Reddit 每日热门</span><input id="redditDailyHotBudget" inputmode="numeric" placeholder="300"></label>
@@ -479,6 +540,14 @@
             <label class="settings-field"><span>反馈分析积累阈值</span><input id="feedbackBatchThreshold" inputmode="numeric" placeholder="3"></label>
             <label class="settings-field"><span>单轮发现上限</span><input id="discoveryLimit" inputmode="numeric" placeholder="30"></label>
           </div>
+          <p class="settings-section-title">搜索词生成</p>
+          <div class="inline-row">
+            <label class="settings-field"><span>搜索词生成模式</span><select id="keywordGenerationMode"><option value="legacy">经典</option><option value="hybrid">混合</option><option value="inspiration">灵感</option></select></label>
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <p class="settings-note-inline">经典：仅用合并关键词生成器；混合：在经典基础上再叠加 search-backed 灵感轴链路（最丰富，但同时跑两套，混合最贵）；灵感：完全用灵感轴链路替代经典。</p>
           <p class="settings-section-title">评估输入</p>
           <div class="inline-row">
             <label class="settings-field"><span>封面图评估</span><select id="multimodalEvaluationEnabled"><option value="off">关闭</option><option value="on">开启</option></select></label>
@@ -532,6 +601,14 @@
           <label class="settings-field"><span>后端地址</span><input id="backendHost" placeholder="默认跟随当前页面地址"></label>
           <label class="settings-field"><span>后端端口</span><input id="backendPort" inputmode="numeric" placeholder="默认跟随当前页面端口"></label>
           <label class="settings-field"><span>惊喜推荐加载数量</span><input id="delightQueueLimit" value="20" inputmode="numeric" min="1" max="100"></label>
+          <div class="settings-field full settings-theme-field">
+            <span>外观主题</span>
+            <div class="theme-segmented" id="themeModeSetting" role="radiogroup" aria-label="外观主题">
+              <button type="button" data-theme-choice="auto">跟随系统</button>
+              <button type="button" data-theme-choice="light">浅色</button>
+              <button type="button" data-theme-choice="dark">深色</button>
+            </div>
+          </div>
           <label class="settings-field full settings-switch-field" title="开启：换一批前先将当前显示的推荐标记为忽略；关闭：只重排当前推荐池，不反馈当前内容。">
             <span>换一批时忽略当前</span>
             <span class="settings-switch-copy">开启：换一批前先将当前显示的推荐标记为忽略；关闭：只重排当前推荐池，不反馈当前内容。</span>
@@ -541,13 +618,22 @@
               <span id="dismissOnReshuffleSettingText">关闭</span>
             </span>
           </label>
-          <p class="settings-note-inline">后端地址、端口和换一批偏好保存在当前浏览器；惊喜推荐加载数量会随保存配置写入后端，供桌面 Web、移动 Web 和插件共享。</p>
+          <label class="settings-field full settings-switch-field" title="开启：滚动到底部且推荐池可用时自动加载更多；关闭：保留纯手动加载。">
+            <span>滚动到底自动加载推荐</span>
+            <span class="settings-switch-copy">开启：滚动到底部且推荐池可用时自动加载更多；关闭：保留纯手动加载。</span>
+            <span class="reshuffle-toggle settings-toggle-inline">
+              <input id="autoLoadOnScrollSetting" type="checkbox" checked>
+              <span class="reshuffle-switch" aria-hidden="true"></span>
+              <span id="autoLoadOnScrollSettingText">开启</span>
+            </span>
+          </label>
+          <p class="settings-note-inline">后端地址、端口、外观主题、换一批偏好和自动加载偏好保存在当前浏览器；惊喜推荐加载数量会随保存配置写入后端，供桌面 Web、移动 Web 和插件共享。</p>
         </div>
 
         <div class="settings-panel" data-settings-panel="logging" hidden>
           <p class="settings-section-title">日志</p>
-          <label class="settings-field"><span>控制台级别</span><select id="logLevel"><option>DEBUG</option><option selected="">INFO</option><option>WARNING</option><option>ERROR</option></select></label>
-          <label class="settings-field"><span>文件级别</span><select id="logFileLevel"><option selected="">DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option></select></label>
+          <label class="settings-field"><span>控制台级别</span><select id="logLevel" translate="no"><option value="DEBUG">DEBUG</option><option value="INFO" selected="">INFO</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option></select></label>
+          <label class="settings-field"><span>文件级别</span><select id="logFileLevel" translate="no"><option value="DEBUG" selected="">DEBUG</option><option value="INFO">INFO</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option></select></label>
           <label class="settings-field full"><span>完整日志路径</span><input id="logPath" placeholder="logs/openbiliclaw.log"></label>
           <div class="inline-row">
             <label class="settings-field"><span>单日志文件上限 MB</span><input id="logMaxFileSize" inputmode="numeric" placeholder="100"></label>
@@ -619,6 +705,27 @@
     </div>
   </section>
 
+  <section class="drawer" id="mobileQrDrawer" aria-label="手机版入口" data-od-id="mobile-qr-drawer">
+    <div class="scrim" data-close="mobileQrDrawer"></div>
+    <div class="drawer-panel mobile-qr-panel">
+      <div class="drawer-head"><div><p class="eyebrow">Mobile web</p><h2>手机上也能用</h2></div><button class="icon-btn" data-close="mobileQrDrawer" type="button">×</button></div>
+      <p class="video-meta mobile-qr-lead">推荐点开直接拉起 B站 / 小红书等 App，躺着刷更顺手。</p>
+      <div class="mobile-qr-card">
+        <div class="mobile-qr-canvas" id="mobileQrCanvas" aria-live="polite"></div>
+        <code class="mobile-qr-url" id="mobileQrUrl"></code>
+        <div class="drawer-actions">
+          <button class="pill-btn primary" id="mobileQrCopyBtn" type="button">复制链接</button>
+        </div>
+      </div>
+      <ol class="mobile-qr-steps" aria-label="使用步骤">
+        <li><span class="step-num">1</span>手机和这台电脑连同一个 WiFi</li>
+        <li><span class="step-num">2</span>用相机或浏览器扫码打开</li>
+        <li><span class="step-num">3</span>「添加到主屏幕」，下次像 App 一样直接开</li>
+      </ol>
+      <p class="mobile-qr-hint" id="mobileQrHint" hidden></p>
+    </div>
+  </section>
+
   <section class="drawer" id="activityDrawer" aria-label="动态历史" data-od-id="activity-drawer">
     <div class="scrim" data-close="activityDrawer"></div>
     <div class="drawer-panel">
@@ -629,5 +736,7 @@
   </section>
 
   <div class="toast" id="toast" role="status"></div>
+  <script src="/web/assets/js/mobile-qr.js" defer></script>
+  <script src="/web/assets/js/pending-actions.js" defer></script>
   <script src="/web/assets/js/app.js" defer></script>
 </body></html>

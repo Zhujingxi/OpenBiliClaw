@@ -24,20 +24,33 @@
 | 推荐反馈批学习调度 | ✅ | `FeedbackBatchScheduler` 挂在 FastAPI `app.state`，`/api/feedback` 每次只标记 dirty 并触发 5 秒 debounce；burst 内多条推荐反馈 coalesce 成一次 `SoulEngine.process_feedback_batch_if_needed()`，处理期间又有新反馈时会在本轮结束后再补跑一轮，避免每条反馈都启动画像重分析。 |
 | 浏览器 presence gate | ✅ | `background_llm_work_allowed()` 结合 `scheduler.enabled` 与 `pause_on_extension_disconnect` 控制 daemon-owned 后台 LLM / embedding 工作。 |
 | Runtime event stream | ✅ | `/api/runtime-stream` 向扩展推送状态、Cookie sync 请求、配置重载、候选池快照和 presence 事件；`RuntimeEventHub.publish()` 会返回是否至少有一个订阅者接收，供一次性事件判断是否真正投递。 |
+| WebSocket 运行时依赖 | ✅ | 默认安装显式携带 `websockets>=13`，PyInstaller spec 显式收集 `uvicorn.protocols.websockets.websockets_impl` 与 `websockets`，避免源码 / Docker / 桌面包只安装裸 `uvicorn` 时 `/api/runtime-stream` 缺协议实现。 |
 | Activity feed 状态摘要 | ✅ | `/api/activity-feed` 聚合认知更新、反馈、推荐池补货和 live summary；未初始化且还没有推荐 / 可换池 / 补货产物时，普通 `/api/events` 不会新写入 pending signals，旧的 `pending_signal_events` 也不会抢占初始化提示。初始化后 pending 文案统一为“已记下 N 个新动作，下一轮补货会拿来参考”，表示 discovery refresh 水位，不表示画像待处理队列。 |
+| 桌面 Web 推荐卡链接与元信息 | ✅ | `/web` 推荐卡、稍后再看 / 收藏卡、消息抽屉内容和惊喜推荐封面都改为真实 `<a href target="_blank" rel="noopener noreferrer">`；点击上报同时绑定 `click` 与中键 `auxclick`，但不阻止浏览器原生中键 / Ctrl 或 Cmd 点击 / 右键菜单行为。`RecommendationOut` 增量暴露 `duration`、`view_count`、`like_count`、`danmaku_count`、`up_mid`，桌面卡片展示视频时长徽标和播放 / 点赞 / 弹幕统计；字段为 0 或缺失时整段隐藏，不在 X / 小红书 / YouTube 等无数据卡片上显示空元信息。B 站且 `up_mid>0` 时 UP 主名跳到 `space.bilibili.com`，其它平台保持纯文本。 |
+| 桌面 Web 动效与布局稳定 | ✅ | 根滚动启用 `scrollbar-gutter: stable`，避免内容变长时顶栏横向抖动；消息 / 活动 / 手机二维码抽屉关闭进入 `.is-closing` 退出动画，快速开关会取消未完成 close；六个主分区切换使用短 `page-enter` 淡入。新增动效统一受 `prefers-reduced-motion: reduce` 保护。 |
+| 桌面 Web 暗色模式 | ✅ | `/web` 支持 `auto` / `light` / `dark` 三态主题，顶栏按钮和设置页分段控件共享 `obc.theme` 本地键；`auto` 不写 `data-theme`，交给 `prefers-color-scheme`，手动浅色 / 深色写入 `:root[data-theme=...]`。暗色实现只覆盖 CSS token（暖暗背景、前景、边框、语义色、overlay、shadow），不为单个组件分叉硬编码颜色；`<meta name="color-scheme" content="light dark">` 让原生控件和滚动条跟随主题。 |
+| 推荐/惊喜发布时间出口 | ✅ | `RecommendationOut`、`PendingDelightOut`、推荐列表/换批、pending delight 单条/批量、手动 delight 与 proactive runtime 事件均增量返回 `published_at` / `published_label`（默认空字符串）。API 不把发现时间或推荐生成时间改写为发布时间；桌面 Web 与移动 Web 精确时间优先、相对标签兜底、缺失隐藏，精确时间按本地时区显示并提供完整时间 tooltip。 |
+| 桌面 Web 滚动自动加载 | ✅ | 首页推荐列表底部 sentinel 通过 `IntersectionObserver` 触发 `/api/recommendations/append`，默认开启并保留手动“继续追加”按钮。自动触发必须满足单飞、距上次自动加载至少 8 秒、首页可见、列表非空、加载按钮可见且 `state.runtimeStatus.pool_available_count > 0`；候选池见底时自动续页暂停但手动按钮仍可用。设置页开关写入 `openbiliclaw.webui.autoLoadOnScroll`，关闭后 observer 断开。 |
+| 桌面 Web 画像编辑即时反馈 | ✅ | 画像编辑的 chip 删除和添加按钮在请求 `/api/profile/edit` 前立即禁用并标记 `.is-pending`，让慢后端下也有置灰反馈；`state.profileEditState` 仍只接受服务端响应，成功 / 失败都通过重新渲染清除 pending 或恢复 chip，避免为低频编辑面引入复杂乐观回滚。 |
+| 桌面 Web 可撤销即时反馈 | ✅ | 普通推荐卡和正向/避雷探针的非聊天动作先更新本地 UI，再由共享 pending-action coordinator 保留 10 秒提交屏障；点击撤销会取消定时器且不发 API 写请求，提交失败恢复原状态，`pagehide` 会以 keepalive 立即结清未提交动作。探针聊天和推荐评论需要服务端回复或文本语义，保持直接提交，不伪装成可撤销动作。 |
+| 三端 probe 反馈语义 | ✅ | 桌面、移动和插件的兴趣/避雷 probe 统一使用 confirm/defer/reject/chat 语义，所有操作均有可见文字；推荐区不新增画像或对话纠偏引导入口。 |
+| 桌面 Web 前端偏好键 | ✅ | `/web` 的纯前端偏好继续走 `storageGet` / `storageSet`，不写 `config.toml`：`obc.theme` 保存主题三态，`openbiliclaw.webui.autoLoadOnScroll` 保存滚动自动加载开关；设置页保存状态行会同时回显主题、换一批忽略当前和滚动自动加载状态。 |
 | 扩展捕捉 E2E 控制事件 | ✅ | local-only `/api/extension/e2e/run` 会通过 runtime stream 投递 `extension_e2e_run`，要求已安装扩展在真实平台页执行白名单 DOM 操作；`/api/extension/e2e/result` 回收插件执行结果，后端再按运行窗口匹配 `/api/events` 中自然捕捉到的事件。 |
 | 兴趣探针投递保护 | ✅ | `interest.probe` 只有成功投递到 runtime stream 后才写入 `probed_domains` / `probed_axes` / `probed_distance_bands` 冷却状态；事件 payload 会带 `probe_mode` 与 `challenge`，前端离线时不会消耗 active probe。普通 `near` 探针与挑战探针使用独立 active 额度，运行时选择时仍统一仲裁。 |
 | 避雷探针投递与仲裁 | ✅ | `avoidance.probe` 与 `interest.probe` 共用 proactive push 循环；每轮最多投递一个 probe，并用 `last_probe_kind` 在正向/负向都有候选时轮流选择，避免探针频率翻倍。 |
 | 图片代理 API | ✅ | `/api/image-proxy` 为移动 Web 和浏览器插件代理白名单 CDN 封面图，逐跳校验 redirect，并在返回前完成类型和 10MB 大小校验；成功封面写入 `data/image-cache/`（小红书 token 归一化），并按「已消费且未保存」定期清理、保护无法重抓的封面；多模态 discovery 评估也复用同一缓存，命中时不再重新请求 CDN。 |
-| 自动更新 | ✅ | `AutoUpdateService` 检查 backend git tag，支持 `/api/update-status`、`/api/runtime-status` 更新摘要、手动 check/apply、apply 锁、可信 remote / dirty worktree / fast-forward guard，并通过 runtime stream 推送后端更新事件。dirty worktree guard 豁免 `uv.lock`、未跟踪文件、纯 index-only 条目和本地 `ollama-models/`；apply 前会重置 `uv.lock` 再快进。git 命令通过 `asyncio.create_subprocess_exec` 执行，避免 Windows 长时间运行后线程池 `subprocess.run` 卡死或异常返回；tag fetch 使用 `git fetch --force --tags origin`，避免本地旧 tag 被远端重打后卡在 `would clobber existing tag`。GitHub tags API 的 403/429 限流会先尝试 GitHub tags Atom feed 兜底，兜底失败才稳定上报 `github_rate_limited`，区别于真正网络不可达的 `github_unreachable`。`detect_install_mode()` 上报 `frozen / git / unsupported` 安装形态，桌面冻结包据此在前端禁用自动更新开关。**冻结守卫**：apply 路径显式判 `install_mode == "git"`，冻结包即便与 git 检出共用目录也以 `unsupported_install_mode` 拒绝，杜绝无限重启循环；冻结包后台改跑 check-only 提醒循环（无论开关状态），跟踪 `desktop-v*` 安装包 tag，发现新包时设置页提示并附「前往下载新安装包」直达链接 + toast 提醒。桌面 Web 设置页提供「立即检查 / 立即应用」按钮并随 runtime stream 更新事件实时刷新状态行；配置保存重建服务时经 `adopt_status_from` 保留上次检查结果。降级模式（LLM 注册表不可用）放行 update-status / check / apply 并构建真实 `AutoUpdateService`，便于拉取修复版本恢复。 |
+| 自动更新 | ✅ | `AutoUpdateService` 检查 backend git tag，支持 `/api/update-status`、`/api/runtime-status` 更新摘要、手动 check/apply、apply 锁、可信 remote / dirty worktree / fast-forward guard，并通过 runtime stream 推送后端更新事件。dirty worktree guard 豁免 `uv.lock`、未跟踪文件、纯 index-only 条目和本地 `ollama-models/`；apply 前会重置 `uv.lock` 再快进。git 命令通过 `asyncio.create_subprocess_exec` 执行，避免 Windows 长时间运行后线程池 `subprocess.run` 卡死或异常返回；tag fetch 使用 `git fetch --force --tags origin`，避免本地旧 tag 被远端重打后卡在 `would clobber existing tag`。GitHub tags API 的 403/429 限流会先尝试 GitHub tags Atom feed 兜底，兜底失败才稳定上报 `github_rate_limited`，区别于真正网络不可达的 `github_unreachable`。`detect_install_mode()` 上报 `frozen / docker / git / unsupported` 安装形态，桌面冻结包与 Docker 容器据此在前端禁用自动更新开关。**可信 remote 按规范化形式比较**（大小写不敏感、`.git` 后缀可选、`https://` 与 `git@…:` / `ssh://` 等价），手动克隆少写 `.git` 后缀不再被 `untrusted_remote` 永久拦截；镜像/代理包装 URL 不会自动折算成官方地址，镜像用户需把镜像 URL 显式加入 `auto_update_allowed_remotes`。**守卫拒绝不再静默**：每条 guard 拒绝都 `logger.warning` 写明细（含实际 remote URL、脏文件列表等），并把原因写入 `last_error` 供状态卡展示。`untrusted_remote` 三条拒绝路径（无 origin / 内嵌凭证 / 不在允许列表）进一步把**脱敏后的实际远端地址 + 一键修复命令**（`git remote set-url origin …`）写入 `last_error`（`_guard_detail`），状态卡「最近错误」直接可自助排查，无需翻后端日志；`_redact_remote_url` 确保内嵌凭证不泄露到 UI。**冻结守卫**：apply 路径显式判 `install_mode == "git"`，冻结包即便与 git 检出共用目录也以 `unsupported_install_mode` 拒绝（Docker 容器同理以 `docker_install_mode` 拒绝），杜绝无限重启循环；冻结包后台改跑 check-only 提醒循环（无论开关状态），跟踪 `desktop-v*` 安装包 tag，发现新包时设置页提示并附「前往下载新安装包」直达链接 + toast 提醒；Docker 容器同样跑 check-only 循环（跟踪 `backend-v*`，镜像随后端版本发布），发现新版时设置页提示 `docker compose pull && docker compose up -d` 升级。桌面 Web 设置页提供「立即检查 / 立即应用」按钮并随 runtime stream 更新事件实时刷新状态行；配置保存重建服务时经 `adopt_status_from` 保留上次检查结果。降级模式（LLM 注册表不可用）放行 update-status / check / apply 并构建真实 `AutoUpdateService`，便于拉取修复版本恢复。 |
 | 开机自启动管理 | ✅ | `runtime.autostart` 提供 macOS LaunchAgent、Windows HKCU Run + `.pyw`、Linux XDG autostart 三套当前用户作用域 manager；`/api/autostart-status`、`/api/autostart/apply`、`openbiliclaw autostart` 和插件设置页共用 env / shadow guard 与方向化 enable/disable 事务。 |
-| Ollama 启动预检与生命周期 | ✅ | `runtime.ollama_supervisor` 统一提供 `ollama_required()`、endpoint 归一化、loopback 判定和 `_ollama_is_running()` / `_ollama_start_serve_background()`；`start` 仅在默认 `localhost:11434` 需要本机 Ollama 时尝试后台拉起，远端 / 自定义端口不强行 `serve`。托管启动会给子进程默认传入 `OLLAMA_KEEP_ALIVE=24h`（若用户已设置则保留用户值），减少 `bge-m3` / `llama-server` 在 UI 请求间隔中卸载再冷启动。`_ollama_start_serve_background()` 现在记录**亲手拉起**的 `Popen` 句柄（复用外部已运行实例时句柄留空），`stop_managed_ollama()` 据此在退出时停掉整棵进程树（Windows `taskkill /T`、类 Unix 进程组 `SIGTERM`），对外部托管的 Ollama 一律不动 —— 桌面托盘「退出」经此调用，clean quit 不再遗留孤儿 `ollama serve` / `llama-server` runner。macOS 桌面包构建必须使用官方 `Ollama.app/Contents/Resources/ollama`，并同时打入同目录 `llama-server`、`llama-*`、`lib*.dylib`、`lib*.so` 和 `mlx_metal_*`；如果只发现 Homebrew 风格单独主程序或缺关键动态库，打包会失败，避免随包 daemon `/api/version` 正常但真实 embedding 500。 |
+| Ollama 启动预检与生命周期 | ✅ | `runtime.ollama_supervisor` 统一提供 `ollama_required()`、endpoint 归一化、loopback 判定和 `_ollama_is_running()` / `_ollama_start_serve_background()`；`start` 仅在默认 `localhost:11434` 需要本机 Ollama 时尝试后台拉起，远端 / 自定义端口不强行 `serve`。托管启动会给子进程默认传入 `OLLAMA_KEEP_ALIVE=24h`（若用户已设置则保留用户值），减少 `bge-m3` / `llama-server` 在 UI 请求间隔中卸载再冷启动。Windows 模型路径编码故障自愈使用 `ollama_models_relocation_candidate()` 选 `%PROGRAMDATA%\OpenBiliClaw\ollama-models`（路径含非 ASCII 时放弃自动迁移），目录存在即视作 `managed_models_dir()` 持久迁移标记；后续托管启动用 `env.setdefault("OLLAMA_MODELS", managed_models_dir)`，显式用户环境变量优先。`restart_managed_ollama_with_models_dir()` 只重启本进程管理的 Ollama；若检测到外部启动的 daemon（运行中但没有 `_managed_proc`）则返回 `external_ollama`，避免杀掉用户自己开的官方 App / 服务。`_ollama_start_serve_background()` 现在记录**亲手拉起**的 `Popen` 句柄（复用外部已运行实例时句柄留空），`stop_managed_ollama()` 据此在退出时停掉整棵进程树（Windows `taskkill /T`、类 Unix 进程组 `SIGTERM`），对外部托管的 Ollama 一律不动 —— 桌面托盘「退出」经此调用，clean quit 不再遗留孤儿 `ollama serve` / `llama-server` runner。macOS 桌面包构建必须使用官方 `Ollama.app/Contents/Resources/ollama`，并同时打入同目录 `llama-server`、`llama-*`、`lib*.dylib`、`lib*.so` 和 `mlx_metal_*`；如果只发现 Homebrew 风格单独主程序或缺关键动态库，打包会失败，避免随包 daemon `/api/version` 正常但真实 embedding 500。 |
+| Embedding 初始化进度单例 | ✅ | `runtime.embedding_progress` 是进程全局、线程安全的无依赖状态源，供桌面包首启自动拉取、guided init 自动拉取、API 一键修复和 Ollama supervisor 共享。各生产路径调用 `mark_pull_running()` / `report_pull()` / `mark_pull_done()`，`/api/init-status` 再把它合并到 `embedding_check="repairing"`、`embedding_repair_*` 和 `embedding_pull_status`；`_ollama_start_serve_background()` 同步报告 `ollama_phase` 为 `starting` / `ready` / `down`。`reset()` 仅供测试隔离进程级状态。 |
 | 账号同步 | ✅ | `AccountSyncService` 同步 B 站账号历史、收藏和关注等信号；历史按 `view_at + 同秒 bvid 集合` 增量导入，收藏 / 关注只把新增 ID 转成画像事件，避免重放旧信号。 |
 | 多源 bootstrap 去重 | ✅ | `/api/sources/{xhs,dy,yt}/task-result` 会用 `source_bootstrap_state.json` 过滤跨任务旧 identity key；任务结果仍完整保留，只有新增项进入 memory / profile pipeline。 |
 | 扩展任务 claim / 复用 | ✅ | XHS / 抖音 / YouTube bootstrap 任务在扩展 poll 时用短生命周期 SQLite 连接标记 `in_progress`，CLI 默认复用 6 小时内近期任务，避免重复打开前台 tab 全量扫描，也避免 FastAPI 并发 poll 在共享 connection 上嵌套事务。 |
 | Soul 画像自动 bootstrap | ✅ | `AccountSyncService` 首次成功写入账号行为并完成 `analyze_events()` 后，若 soul 画像仍为空，会自动调用 `build_initial_profile([])`；每进程生命周期最多尝试一次。 |
 | 降级模式启动 | ✅ | 生产 `create_app()` 遇到 `RegistryBuildError` 时构造 degraded `RuntimeContext`，保留健康检查、配置读取/保存、runtime status、runtime stream、`/m` 移动静态壳与 `/favicon.ico`，方便用户从 popup 或手机入口识别并修复错误配置。 |
 | 配置热重载 LLM override | ✅ | `RuntimeContext._rebuild_components()` 从 config 构造 `module_overrides`，同时注入主 `LLMService` 与 `SoulEngine` 内部 service；热重载后的正向兴趣和避雷 speculator tick 都 detached 到 `BackgroundTaskRegistry`，不阻塞 `/api/config` 响应。 |
+| 桌面包 SOCKS 代理兼容 | ✅ | 默认运行依赖使用 `httpx[socks]`，PyInstaller spec 显式收集 `socksio`；用户系统配置 `ALL_PROXY` / `HTTPS_PROXY=socks5://...` 时，冻结桌面包创建 OpenAI / 兼容 LLM 客户端不会因缺少可选 SOCKS 运行时依赖而在启动阶段崩溃。 |
+| 运行时图像处理依赖 | ✅ | 默认安装显式携带 `Pillow>=10.0`，因为 `discovery.multimodal` 的封面压缩路径直接 import `PIL`；不再依赖 B 站 SDK 或打包 extra 的传递依赖碰巧提供 Pillow。 |
 | 运行日志降噪 | ✅ | 全局 logging 初始化会把 `httpx` / `httpcore` / `openai` / `openai._base_client` logger 提升到 WARNING，避免文件日志在 DEBUG 模式下被连接细节和完整 LLM 请求体刷屏；业务模块仍按 `logging.file_level` 输出。 |
 
 ## 公开 API
@@ -53,11 +66,11 @@ status_code, apply_payload = await service.request_apply(tag="backend-v0.3.92")
 核心调用：
 
 - `check_now()`：立即检查 GitHub tags，只刷新后端更新状态，不自动应用。
-- `request_apply(tag="backend-vX.Y.Z")`：先检查安装形态为 `git`（`detect_install_mode() != "git"` 直接以 `unsupported_install_mode` 拒绝——见下）、git repo、可信 `origin`、worktree clean（仅 `uv.lock` 改动豁免——发布 tag 携带过期 lock 时安装侧 `uv sync` 必然改写它，不能因此永久阻塞更新）、未 merge/rebase、目标 tag 存在且当前 HEAD 可 fast-forward，再返回 `202/applying` 并在后台执行 `git checkout -- uv.lock`、`git merge --ff-only <tag>`、依赖同步和 `os.execv` 重启。
-- `check_and_update_if_due()` / `check_and_update_now()`：供后台调度使用；只有 `scheduler.auto_update_enabled=true` 时才会定时自动应用。冻结桌面包走 check-only 分支：**无论开关状态**都按间隔检查 `desktop-v*` 安装包 tag（`_background_loop_enabled()` 对 frozen 恒真），发现新包置 `update_available` 并推 `backend_update_available` 事件提醒用户下载新安装包，但永不进入 apply——`request_apply` 的非 git 守卫独立兜底，后台循环不可能 fast-forward 共享目录里的 git 检出。
+- `request_apply(tag="backend-vX.Y.Z")`：先检查安装形态为 `git`（`frozen` / 其他以 `unsupported_install_mode` 拒绝、`docker` 以 `docker_install_mode` 拒绝——见下）、git repo、可信 `origin`（按 `_canonicalize_remote_url` 规范化比较：大小写不敏感、`.git` 后缀可选、`https://` 与 `git@…:` / `ssh://` 等价；镜像包装 URL 不折算，需显式加入 allowlist）、worktree clean（仅 `uv.lock` 改动豁免——发布 tag 携带过期 lock 时安装侧 `uv sync` 必然改写它，不能因此永久阻塞更新）、未 merge/rebase、目标 tag 存在且当前 HEAD 可 fast-forward，再返回 `202/applying` 并在后台执行 `git checkout -- uv.lock`、`git merge --ff-only <tag>`、依赖同步和 `os.execv` 重启。任何守卫拒绝都会 `logger.warning` 写明细（含实际 remote URL / 脏文件列表）并把原因写入 `last_error`。
+- `check_and_update_if_due()` / `check_and_update_now()`：供后台调度使用；只有 `scheduler.auto_update_enabled=true` 时才会定时自动应用。冻结桌面包与 Docker 容器走 check-only 分支：**无论开关状态**都按间隔检查（`_background_loop_enabled()` 对 frozen / docker 恒真）——frozen 跟踪 `desktop-v*` 安装包 tag，docker 跟踪 `backend-v*`（镜像随后端版本发布），发现新版置 `update_available` 并推 `backend_update_available` 事件提醒用户下载新安装包 / 拉取新镜像，但永不进入 apply——`request_apply` 的非 git 守卫独立兜底，后台循环不可能 fast-forward 共享目录里的 git 检出。
 - `adopt_status_from(other)`：配置保存触发热重载、本服务被重建时，由 `rebuild_from_config` 调用以携带上一实例的检查结果（版本 / tag / 上次检查时间总是携带；`update_available` / `up_to_date` / `blocked` 等已结算状态也携带，瞬态 `checking` / `applying` 不携带）。否则设置页状态行会从「发现新版本」回退到「尚未检查更新」直到下个检查周期。
-- `detect_install_mode()`（模块级函数）：上报安装形态——`frozen`（PyInstaller 桌面包，结构上无法 git 自更新）、`git`（installer / agent / dev 克隆）、`unsupported`（其他）。**安全守卫**：冻结桌面包可能与 AI / 一键安装共用 `~/OpenBiliClaw` 目录（`entry.py` 把 `OPENBILICLAW_PROJECT_ROOT` 指向它，目录里是真实 git 检出），此时磁盘上有 `.git` 但仍必须拒绝自更新——否则会改写他人源码 + venv 而冻结包重启后仍跑捆绑旧码，形成无限重启循环。故 apply 路径显式判 `install_mode == "git"`，不只依赖 `.git` 是否存在。
-- **更新通道**：git 安装跟踪 `backend-v*` 源码 tag（legacy `v*` / 裸 semver 兜底）；冻结桌面包跟踪 `desktop-v*` 安装包 tag（`_parse_desktop_candidate`，无 legacy 兜底——两类 tag 不总是同步发布，桌面用户只关心有没有新安装包）。`_fetch_latest_candidate(channel=...)` 按 `check_now` 里的安装形态选通道。
+- `detect_install_mode()`（模块级函数）：上报安装形态——`frozen`（PyInstaller 桌面包，结构上无法 git 自更新）、`docker`（容器内运行，代码烧在镜像里；经 `docker_runtime.is_running_in_container()` 判定：`OPENBILICLAW_IN_CONTAINER` 环境变量（Dockerfile 已内置）或 `/.dockerenv` / `/run/.containerenv` 标记）、`git`（installer / agent / dev 克隆）、`unsupported`（其他）。**安全守卫**：冻结桌面包可能与 AI / 一键安装共用 `~/OpenBiliClaw` 目录（`entry.py` 把 `OPENBILICLAW_PROJECT_ROOT` 指向它，目录里是真实 git 检出），此时磁盘上有 `.git` 但仍必须拒绝自更新——否则会改写他人源码 + venv 而冻结包重启后仍跑捆绑旧码，形成无限重启循环。故 apply 路径显式判 `install_mode == "git"`，不只依赖 `.git` 是否存在；`docker` 判定优先于 `git`，容器里即便挂载了 git 检出也不会误入自更新路径（快进检出改不了运行中的镜像代码）。
+- **更新通道**：git 安装与 Docker 容器跟踪 `backend-v*` 源码 tag（legacy `v*` / 裸 semver 兜底；GHCR 镜像随 backend tag 发布，同一版本号）；冻结桌面包跟踪 `desktop-v*` 安装包 tag（`_parse_desktop_candidate`，无 legacy 兜底——两类 tag 不总是同步发布，桌面用户只关心有没有新安装包）。`_fetch_latest_candidate(channel=...)` 按 `check_now` 里的安装形态选通道。
 - `get_update_status()`：返回 `/api/update-status` 使用的 backend 状态对象，含 `install_mode`。
 - `get_runtime_status()`：返回 `/api/runtime-status` 合并用的自动更新摘要，包含当前版本、最新远端版本、上次检查、错误、状态原因和 `install_mode`。
 
@@ -99,6 +112,25 @@ scheduler.schedule()
 ### InitCoordinator + InitPrereqs（引导初始化）
 
 `InitCoordinator`（`runtime/init_coordinator.py`，惰性挂在 `RuntimeContext.init_coordinator`）是图形化引导初始化的生命周期所有者：`init_runs` 持久化状态机、单写者进度事件（`_write_lock` 串行化，并行 stage 3/4 的 `sequence` 不丢更新）、`BEGIN IMMEDIATE` 单飞预定、启动 `reconcile_on_boot()`（崩溃残留 `starting/running` 判失败）、协作取消、bootstrap task 归属（供写者门控放行 init 自己的 task-result）。`InitPrereqs`（`runtime/init_prereqs.py`）提供 TTL 缓存 + 单飞的 `chat_ready()` / `bilibili_check()` / `enabled_platforms()` 前置探测。共享流水线 `cli.run_guided_init`、`/api/init*` 端点和 init 期间写者门控详见 [init 模块文档](init.md)。
+
+### Embedding Progress
+
+```python
+from openbiliclaw.runtime import embedding_progress
+
+embedding_progress.mark_pull_running("bge-m3")
+embedding_progress.report_pull("downloading", completed=240_000_000, total=568_000_000)
+snapshot = embedding_progress.snapshot()
+embedding_progress.mark_pull_done(ok=True, error="")
+
+embedding_progress.report_ollama_phase("starting")
+phase = embedding_progress.ollama_phase()
+
+# 仅测试隔离：清空拉取态并把 Ollama phase 置回 ready
+embedding_progress.reset()
+```
+
+`snapshot()` 返回 `{running, model, completed, total, status_text, done, ok, error, started_monotonic}`。`reset()` 会同时清空拉取状态并把 `_ollama_phase` 置为 `ready`，因此仅用于测试前后隔离；生产调度失败的回滚必须用 `mark_pull_done(False, error)`，以保留真实 Ollama phase。该模块不能 import API / config / registry，避免桌面入口、API app 和 supervisor 之间形成循环；所有环境判断仍留在调用方。`/api/embedding/repair` 的 `not_running` 自愈也复用 `runtime.ollama_supervisor.ollama_required()`、`is_loopback()` 与 `_is_default_ollama_endpoint()`，只在 `autostart.manage_ollama=true` 且 endpoint 是默认 loopback `11434` 时尝试拉起托管 Ollama。
 
 ### Degraded RuntimeContext
 
@@ -145,7 +177,7 @@ scheduler.schedule()
 `GET /api/runtime-status` 会保留自动更新摘要字段，供插件和 Web 前端在统一 runtime 状态对象中读取：
 
 - `auto_update_enabled`：当前后台定时自动更新是否开启；关闭时仍允许手动检查和手动 apply。
-- `install_mode`：安装形态（`frozen` / `git` / `unsupported`）。桌面 Web 设置页在非 `git` 时禁用自动更新开关并提示用安装包升级。
+- `install_mode`：安装形态（`frozen` / `docker` / `git` / `unsupported`）。桌面 Web 设置页在非 `git` 时禁用自动更新开关，并按形态提示升级方式（frozen → 下载新安装包，docker → `docker compose pull`）。
 - `current_version`：本地后端版本。
 - `latest_remote_version`：最近一次检查得到的后端远端版本。
 - `last_update_check_at`：最近一次检查时间。
@@ -233,7 +265,7 @@ autostart.unregister()
 
 #### 发现即缓存（封面预取）
 
-白名单 / redirect / 大小 / 类型校验的抓取核心 `fetch_cover_bytes` 是唯一真源，由 proxy 路由和预取共用；失败抛 `CoverFetchError`（携带 400/403/413/502/504），proxy 路由再映射回对应 HTTP 状态。`get_or_fetch_cover_bytes` 是缓存优先入口：先按同一白名单边界校验 URL，再读取 `data/image-cache/` 的非空文件，未命中才调用 `fetch_cover_bytes` 并写回缓存。多模态 discovery evaluator 使用这个入口，因此小红书已缓存头图即使原 CDN token 过期，也能继续参与封面图评估。
+白名单 / redirect / 大小 / 类型校验的抓取核心 `fetch_cover_bytes` 是唯一真源，由 proxy 路由和预取共用；失败抛 `CoverFetchError`（携带 400/403/413/502/504），proxy 路由再映射回对应 HTTP 状态。v0.3.153+：抓取按主机分流代理——国内 CDN（hdslb / xhscdn / pstatp / douyinpic / douyinvod）恒直连（`trust_env=False`，代理出口 IP 易被风控，与 B站 登录探测同因），境外 CDN（ytimg / ggpht）保持继承环境 / 系统代理，需要代理才能拉 YouTube 封面的用户不受影响。`get_or_fetch_cover_bytes` 是缓存优先入口：先按同一白名单边界校验 URL，再读取 `data/image-cache/` 的非空文件，未命中才调用 `fetch_cover_bytes` 并写回缓存。多模态 discovery evaluator 使用这个入口，因此小红书已缓存头图即使原 CDN token 过期，也能继续参与封面图评估。
 
 `RefreshRuntime._loop_cover_prefetch` 每 60 秒做一次「发现即缓存」：从 `Database.iter_servable_cover_urls` 取最近 12 小时内、仍可展示（`fresh / shown / suppressed` 或已保存）的封面（最新优先），`select_prefetch_targets` 过滤掉非白名单和已缓存项、把**无法重抓的小红书封面排在最前**，每轮最多抓 40 张写入缓存。这修复了此前封面只在「展示时」才懒加载、而小红书签名 token 早已过期导致 502 破图的问题——预取趁 token 新鲜时就把图落盘；最近窗口也避免对 token 已死的旧内容反复重试。预取按 `content_cache.cover_url` 原始值（可能是 `//` 或 `http://`）归一化后再抓，落盘 key 与 proxy 查找一致，故预取的封面 proxy 能直接命中。
 
@@ -340,7 +372,7 @@ XHS / 抖音 / YouTube 的插件任务桥保留两层去重：
 | `scheduler.auto_update_enabled` | `false` | 是否启用后台自动更新检查。 |
 | `scheduler.auto_update_check_interval_hours` | `6` | 自动更新检查间隔。 |
 | `scheduler.auto_update_allow_prerelease` | `false` | 是否允许 `backend-vX.Y.Z-rc/beta/dev` 预发布 tag 进入候选。 |
-| `scheduler.auto_update_allowed_remotes` | OpenBiliClaw GitHub HTTPS / SSH | 允许自动更新快进的 `origin` 精确 allowlist；unknown remote 或带凭据 URL 会被拒绝。 |
+| `scheduler.auto_update_allowed_remotes` | OpenBiliClaw GitHub HTTPS / SSH | 允许自动更新快进的 `origin` allowlist；按规范化形式比较（`.git` 后缀可选、HTTPS/SSH 拼法等价、大小写不敏感），带凭据 URL 或未匹配的 remote（含镜像包装 URL——镜像用户把镜像地址加进来即可）会被拒绝。 |
 | `scheduler.enabled` | `true` | 后台 LLM / embedding 总开关。 |
 | `scheduler.pause_on_extension_disconnect` | `false` | 浏览器插件断开后是否暂停后台 LLM / embedding 工作。 |
 | `scheduler.extension_disconnect_grace_seconds` | `90` | 插件断开后的宽限秒数。 |

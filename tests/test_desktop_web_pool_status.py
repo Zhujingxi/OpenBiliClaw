@@ -55,9 +55,10 @@ def test_desktop_hydration_refetches_runtime_after_recommendation_bootstrap() ->
     )
     assert hydrate is not None, "desktop hydrateFromBackend not found"
     body = hydrate.group("body")
-    assert (
-        "await requestJson(ENDPOINTS.runtimeStatus).catch(() => runtime?.status || runtime)" in body
-    )
+    # requestJson resolves null on failure (never rejects), so the fallback to
+    # the Promise.all snapshot must be `||`, not a dead `.catch()`.
+    assert "(await requestJson(ENDPOINTS.runtimeStatus)) || runtime" in body
+    assert "requestJson(ENDPOINTS.runtimeStatus).catch(" not in body
     assert "applyRuntimeStatus(effectiveRuntime?.status || effectiveRuntime);" in body
 
 
@@ -183,7 +184,7 @@ def test_desktop_click_payload_keeps_x_source_metadata() -> None:
 
 
 def test_desktop_positive_feedback_keeps_recommendation_card_visible() -> None:
-    """Desktop feedback should match mobile: like stays, negative feedback hides."""
+    """Desktop feedback mutates one card and defers durable writes for undo."""
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
 
     decision = re.search(
@@ -194,16 +195,20 @@ def test_desktop_positive_feedback_keeps_recommendation_card_visible() -> None:
     assert decision is not None, "desktop feedback removal decision helper not found"
     assert 'return normalized === "dislike" || normalized === "dismiss";' in decision.group("body")
 
-    feedback_branch = re.search(
-        r'const feedbackType = action === "like"(?P<body>.*?)\n      \} catch',
-        app_js,
-        flags=re.S,
+    start = app_js.index("function stageRecommendationFeedback(item, card, feedbackType)")
+    end = app_js.index("\n    function finishRecommendationFeedback", start)
+    body = app_js[start:end]
+    assert "pendingActions.schedule(key" in body
+    assert "undo.dataset.feedbackUndo = key;" in body
+    assert "item.feedback_type = feedbackType;" in body
+    assert "renderAll()" not in body
+    assert "removeRecommendationCard" not in body
+    assert 'committed: "已记录喜欢，推荐会继续保留在当前列表。"' in body
+    assert "function feedbackActionKey(item)" in app_js
+    assert "`recommendation:${platform}:${contentId}`" in app_js
+    assert (
+        'window.addEventListener("pagehide", () => { void pendingActions.flushAll(); });' in app_js
     )
-    assert feedback_branch is not None, "desktop feedback branch not found"
-    body = feedback_branch.group("body")
-    assert 'like: ["已记录喜欢，推荐会继续保留在当前列表。", "已记录喜欢"]' in body
-    assert "if (shouldRemoveRecommendationAfterFeedback(feedbackType))" in body
-    assert "finishRecommendationFeedback(card, feedbackType);" in body
 
 
 def test_desktop_recommendation_hydration_filters_only_negative_feedback() -> None:
@@ -241,11 +246,13 @@ def test_desktop_pool_update_does_not_replace_recommendation_list() -> None:
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
 
     match = re.search(
-        r"if \(\[[^\]]*\]\.includes\(event\.type\)\) scheduleBackendHydration\(\);",
+        r"if \(\[(?P<events>[^\]]*)\]\.includes\(event\.type\)\) \{(?P<body>.*?)\n      \}",
         app_js,
+        flags=re.S,
     )
     assert match is not None, "desktop hydration trigger line not found"
-    trigger = match.group(0)
+    trigger = f"{match.group('events')}\n{match.group('body')}"
+    assert "scheduleBackendHydration();" in match.group("body")
     assert "refresh.pool_updated" not in trigger
     assert "recommendation.reshuffled" not in trigger
     assert "config_reloaded" in trigger
@@ -303,3 +310,18 @@ def test_desktop_append_more_renders_before_cover_decode() -> None:
     assert render_index < warm_index
     assert "await warmCoverImages(freshItems" not in body
     assert "void warmCoverImages(freshItems" in body
+
+
+def test_desktop_reshuffle_swaps_before_background_dismiss() -> None:
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+    start = app_js.index("async function reshuffle()")
+    end = app_js.index("\n    async function appendMore()", start)
+    body = app_js[start:end]
+
+    assert "visibleForExclusion" in body
+    assert "excluded_bvids" in body
+    assert "state.dismissOnReshuffle" in body
+    assert "await dismissVisibleRecommendationsBeforeReshuffle" not in body
+    swap_index = body.index("state.videos = fresh;")
+    dismiss_index = body.index("dismissVisibleRecommendationsBeforeReshuffle(")
+    assert swap_index < dismiss_index

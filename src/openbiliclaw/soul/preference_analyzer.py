@@ -57,6 +57,16 @@ _COMPACT_METADATA_KEYS = frozenset(
     }
 )
 
+# Legal enum values for style fields. LLMs sometimes dump placeholders like
+# "unknown" that schema-defy these; those get coerced to "" so UIs fall back
+# to their "still observing" copy instead of rendering the garbage verbatim.
+_LEGAL_DURATIONS = frozenset({"short", "medium", "long", ""})
+_LEGAL_PACES = frozenset({"fast", "moderate", "slow", ""})
+_STYLE_TASTE_FIELDS = ("quality_sensitivity", "humor_preference", "depth_preference")
+# Case-insensitive placeholders the LLM emits when it has no signal. Treated as
+# absent for text fields so downstream fallback copy applies.
+_UNKNOWN_PLACEHOLDERS = frozenset({"unknown", "none", "n/a", "未知"})
+
 
 class SupportsCoreMemoryTask(Protocol):
     async def complete_structured_task(
@@ -792,12 +802,21 @@ class PreferenceAnalyzer:
         )[:_DISLIKED_TOPICS_STORE_CAP]
 
         default_preference = self._default_preference()
-        style = self._as_dict(default_preference["style"]).copy()
-        style.update(self._as_dict(existing_preference.get("style", {})))
-        style.update(self._as_dict(new_preference.get("style", {})))
-        context = self._as_dict(default_preference["context"]).copy()
-        context.update(self._as_dict(existing_preference.get("context", {})))
-        context.update(self._as_dict(new_preference.get("context", {})))
+        style_raw = self._as_dict(default_preference["style"]).copy()
+        style_raw.update(self._as_dict(existing_preference.get("style", {})))
+        style_raw.update(self._as_dict(new_preference.get("style", {})))
+        context_raw = self._as_dict(default_preference["context"]).copy()
+        context_raw.update(self._as_dict(existing_preference.get("context", {})))
+        context_raw.update(self._as_dict(new_preference.get("context", {})))
+        openness_raw = new_preference.get(
+            "exploration_openness",
+            existing_preference.get("exploration_openness", 0.5),
+        )
+        style, context, exploration_openness = self._finalize_taste(
+            style_raw=style_raw,
+            context_raw=context_raw,
+            openness_raw=openness_raw,
+        )
 
         # Preserve speculative_interests from new analysis (for speculator seeding)
         speculative = self._as_list(new_preference.get("speculative_interests", []))
@@ -810,14 +829,7 @@ class PreferenceAnalyzer:
             ),
             "style": style,
             "context": context,
-            "exploration_openness": self._clamp_weight(
-                self._to_float(
-                    new_preference.get(
-                        "exploration_openness",
-                        existing_preference.get("exploration_openness", 0.5),
-                    )
-                )
-            ),
+            "exploration_openness": exploration_openness,
             "disliked_topics": disliked_topics,
             "favorite_up_users": favorite_up_users,
             "speculative_interests": speculative,
@@ -878,10 +890,15 @@ class PreferenceAnalyzer:
 
     def _normalize_preference(self, raw_preference: dict[str, object]) -> dict[str, object]:
         normalized = self._default_preference()
-        style = self._as_dict(normalized["style"]).copy()
-        style.update(self._as_dict(raw_preference.get("style")))
-        context = self._as_dict(normalized["context"]).copy()
-        context.update(self._as_dict(raw_preference.get("context")))
+        style_raw = self._as_dict(normalized["style"]).copy()
+        style_raw.update(self._as_dict(raw_preference.get("style")))
+        context_raw = self._as_dict(normalized["context"]).copy()
+        context_raw.update(self._as_dict(raw_preference.get("context")))
+        style, context, exploration_openness = self._finalize_taste(
+            style_raw=style_raw,
+            context_raw=context_raw,
+            openness_raw=raw_preference.get("exploration_openness", 0.5),
+        )
         normalized["interests"] = [
             self._normalize_interest(item)
             for item in self._as_list(raw_preference.get("interests", []))
@@ -889,9 +906,7 @@ class PreferenceAnalyzer:
         ]
         normalized["style"] = style
         normalized["context"] = context
-        normalized["exploration_openness"] = self._clamp_weight(
-            self._to_float(raw_preference.get("exploration_openness", 0.5))
-        )
+        normalized["exploration_openness"] = exploration_openness
         normalized["disliked_topics"] = self._as_str_list(raw_preference.get("disliked_topics", []))
         normalized["favorite_up_users"] = self._as_str_list(
             raw_preference.get("favorite_up_users", [])
@@ -1044,6 +1059,103 @@ class PreferenceAnalyzer:
             except ValueError:
                 return 0.0
         return 0.0
+
+    @staticmethod
+    def _parse_float(raw_value: object) -> tuple[float, bool]:
+        """Parse a float, reporting whether the value was numerically valid.
+
+        Unlike ``_to_float`` (which silently maps non-numeric garbage to 0.0),
+        the second tuple element is ``False`` when the input could not be
+        parsed, so callers can substitute a field-appropriate default instead
+        of a misleading 0.0.
+        """
+        if isinstance(raw_value, bool):
+            return float(raw_value), True
+        if isinstance(raw_value, (int, float)):
+            return float(raw_value), True
+        if isinstance(raw_value, str):
+            try:
+                return float(raw_value), True
+            except ValueError:
+                return 0.0, False
+        return 0.0, False
+
+    def _normalize_style(self, raw_style: object) -> tuple[dict[str, object], list[str]]:
+        """Validate a style dict against the schema, returning the clean dict
+        and the names of any fields that had to be corrected."""
+        raw = self._as_dict(raw_style)
+        default = self._as_dict(self._default_preference()["style"])
+        style: dict[str, object] = dict(default)
+        corrected: list[str] = []
+
+        for field, legal in (
+            ("preferred_duration", _LEGAL_DURATIONS),
+            ("preferred_pace", _LEGAL_PACES),
+        ):
+            raw_value = raw.get(field, "")
+            text = raw_value.strip().lower() if isinstance(raw_value, str) else ""
+            if text in legal:
+                style[field] = text
+            else:
+                style[field] = ""
+                corrected.append(field)
+
+        for field in _STYLE_TASTE_FIELDS:
+            value, ok = self._parse_float(raw.get(field, default[field]))
+            if ok:
+                # A literal numeric 0 is legal (user with genuinely low taste
+                # on this axis); only non-numeric / unparseable values reset.
+                style[field] = self._clamp_weight(value)
+            else:
+                style[field] = 0.5
+                corrected.append(field)
+
+        return style, corrected
+
+    def _normalize_context_dict(self, raw_context: object) -> tuple[dict[str, object], list[str]]:
+        """Strip context text fields and coerce unknown-ish placeholders to ""
+        so UIs fall back to their observing-in-progress copy."""
+        raw = self._as_dict(raw_context)
+        default = self._as_dict(self._default_preference()["context"])
+        context: dict[str, object] = dict(default)
+        corrected: list[str] = []
+        for key in {*default, *raw}:
+            value = raw.get(key, default.get(key, ""))
+            if isinstance(value, str):
+                text = value.strip()
+                if text.lower() in _UNKNOWN_PLACEHOLDERS:
+                    corrected.append(key)
+                    text = ""
+                context[key] = text
+            else:
+                context[key] = value
+        return context, corrected
+
+    def _finalize_taste(
+        self,
+        *,
+        style_raw: dict[str, object],
+        context_raw: dict[str, object],
+        openness_raw: object,
+    ) -> tuple[dict[str, object], dict[str, object], float]:
+        """Validate style / context / exploration_openness together and emit a
+        single WARNING listing every field coerced from schema-defying output."""
+        style, style_corrected = self._normalize_style(style_raw)
+        context, context_corrected = self._normalize_context_dict(context_raw)
+        openness_value, openness_ok = self._parse_float(openness_raw)
+        openness_corrected: list[str] = []
+        if openness_ok:
+            openness = self._clamp_weight(openness_value)
+        else:
+            openness = 0.5
+            openness_corrected.append("exploration_openness")
+        corrected = [*style_corrected, *context_corrected, *openness_corrected]
+        if corrected:
+            logger.warning(
+                "偏好分析：LLM 输出不符合 schema,已纠偏字段 %s(重置为默认值/空)",
+                ", ".join(corrected),
+            )
+        return style, context, openness
 
     @staticmethod
     def _clamp_weight(value: float) -> float:

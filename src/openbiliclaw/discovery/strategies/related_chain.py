@@ -27,6 +27,7 @@ from openbiliclaw.discovery.strategies._utils import (
     search_cooldown_remaining,
     to_int,
 )
+from openbiliclaw.published_time import normalize_published_time
 
 if TYPE_CHECKING:
     from openbiliclaw.soul.profile import SoulProfile
@@ -241,8 +242,7 @@ class RelatedChainStrategy(DiscoveryStrategy):
                 scores,
                 strict=True,
             ):
-                bonus = self._seed_bonus(seed_index) + self._depth_bonus(depth)
-                content.relevance_score = min(1.0, round(score + bonus, 4))
+                content.relevance_score = min(1.0, round(score, 4))
                 if content.relevance_score < self.score_threshold:
                     continue
                 results.append(content)
@@ -462,6 +462,7 @@ class RelatedChainStrategy(DiscoveryStrategy):
         # Prefer B站分区名 (tname) for topic_key, fall back to seed's key
         tname = str(item.get("tname", "")).strip()
         item_topic_key = re.sub(r"\s+", "", tname).lower()[:16] if tname else seed_topic_key
+        published = normalize_published_time(item.get("pubdate") or item.get("publish_time"))
         return DiscoveredContent(
             bvid=bvid,
             title=title_text,
@@ -484,6 +485,8 @@ class RelatedChainStrategy(DiscoveryStrategy):
                 source_strategy=self.name,
             ),
             source_strategy=self.name,
+            published_at=published.published_at,
+            published_label=published.published_label,
         )
 
     @staticmethod
@@ -530,11 +533,3 @@ class RelatedChainStrategy(DiscoveryStrategy):
         if parts:
             return re.sub(r"\s+", "", parts[0]).lower()[:8]
         return ""
-
-    @staticmethod
-    def _seed_bonus(seed_index: int) -> float:
-        return max(0.0, 0.03 - seed_index * 0.01)
-
-    @staticmethod
-    def _depth_bonus(depth: int) -> float:
-        return max(0.0, 0.02 - max(0, depth - 1) * 0.01)

@@ -174,6 +174,7 @@ def test_reddit_source_status_uses_extension_backend_without_command_probe(
     tmp_path: Path,
 ) -> None:
     project_root = tmp_path / "runtime"
+    credential_file = tmp_path / "rdt-cli" / "credential.json"
     cfg = Config(
         llm=LLMConfig(
             default_provider="ollama",
@@ -185,8 +186,18 @@ def test_reddit_source_status_uses_extension_backend_without_command_probe(
     save_config(cfg, project_root / "config.toml")
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(project_root))
     monkeypatch.setattr(
+        "openbiliclaw.sources.reddit_tasks._rdt_credential_file",
+        lambda: credential_file,
+    )
+    monkeypatch.setattr(
         "openbiliclaw.sources.reddit_tasks.probe_reddit_command_backend",
         lambda backend: pytest.fail("extension status must not probe command backends"),
+    )
+    # rdt-cli 的 credential.json 走 HOME 而非 OPENBILICLAW_PROJECT_ROOT;
+    # 开发机上真实登录过 Reddit 会让状态变 ready,必须隔离。
+    monkeypatch.setattr(
+        "openbiliclaw.sources.reddit_tasks.rdt_credential_cookie_names",
+        lambda: (),
     )
 
     db = _make_database(tmp_path)
