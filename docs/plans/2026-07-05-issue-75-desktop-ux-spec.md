@@ -7,9 +7,10 @@
 **Scope:** desktop web UI (`src/openbiliclaw/web/desktop/` — `index.html`, `assets/js/app.js`,
 `assets/css/app.css`) plus one **additive** API payload change (`RecommendationOut`).
 **Out of scope:** extension popup (issue's selectors are all desktop-web classes), the guided-init
-setup page (`web/setup/`), publish-time (`pubdate`) and coin-count capture (neither exists
-anywhere in the discovery→cache→serving pipeline; adding them means new discovery capture + DB
-schema + backfill — deferred, see Rejected/Deferred), a generic optimistic-update framework.
+setup page (`web/setup/`), and a generic optimistic-update framework. Publication-time
+(`pubdate`) capture was continued by the 2026-07-11 cross-platform design/plan with additive
+schema migration and no historical network backfill; coin-count capture remains rejected by
+maintainer decision (see Rejected/Deferred).
 
 ## Goal
 
@@ -75,8 +76,13 @@ the frontend normalizer **already reads `item?.duration`** (`app.js:670`, always
 and both row→object rebuild sites map them (`recommendation/engine.py:2489`,
 `discovery/engine.py:2221`). The gap is exactly two serialization sites:
 `_serialize_recommendation_items` (`api/app.py:2867`) and the reshuffle path (`api/app.py:3641`).
-Publish time and coin count, by contrast, are captured **nowhere** (pubdate only exists for
-watch history, `bilibili/api.py:471`) — full-pipeline work, deferred.
+At the time of this spec, publish time and coin count were captured **nowhere** (pubdate only
+existed for watch history, `bilibili/api.py:471`). Publication time is now continued as
+cross-platform full-pipeline work in the
+[multi-platform design](../superpowers/specs/2026-07-11-multiplatform-published-time-design.md)
+and [implementation plan](../superpowers/plans/2026-07-11-multiplatform-published-time.md).
+Coin count remains rejected by maintainer decision: it is Bilibili-only and not part of the
+cross-platform card contract.
 
 ### D4. No author-page link
 
@@ -124,7 +130,7 @@ three-state toggle (auto / light / dark), and `color-scheme` metadata for native
 | --- | --- | --- | --- | --- |
 | 1 | Anchor-ize all content opens (middle/Ctrl-click, context menu) | 一(中键) | **MUST** | Browser-convention bug, small diff, no API surface |
 | 2 | CSS polish bundle: scrollbar gutter + drawer exit + page-switch fade + reduced-motion guard | 二 / 五 / 六 | **MUST** | Three cheap fixes, one file each; bundling avoids churn |
-| 3 | Card metadata: serialize + render `duration` / `view_count` / `like_count` / `danmaku_count` / `up_mid` | 三 (subset) | **MUST** | Data already captured & stored; gap is 2 serialization sites + card meta row. Pubdate/coin explicitly deferred |
+| 3 | Card metadata: serialize + render `duration` / `view_count` / `like_count` / `danmaku_count` / `up_mid` | 三 (subset) | **MUST** | Data already captured & stored; gap is 2 serialization sites + card meta row. Publication time is continued in the 2026-07-11 cross-platform design/plan; coin remains rejected |
 | 4 | UP 主 author link (bilibili-only, consumes Phase 3's `up_mid`) | 一(UP跳转) | RECOMMENDED | Depends on Phase 3 payload; conditional render per invariant 3 |
 | 5 | Dark mode (auto/light/dark, token-level) | comment | RECOMMENDED | Highest user-visible value; structurally ready (D9) but widest visual blast radius → own phase |
 | 6 | Auto-load on scroll (IntersectionObserver sentinel, pool-aware throttle) | 七 | RECOMMENDED | UX win but must not drain the pool (invariant 6); button kept as fallback |
@@ -157,6 +163,10 @@ to the anchor; add `display:block` resets as needed). Event wiring:
 Acceptance: middle-click and Ctrl+click open new tabs on every card type; both record a click
 signal; right-click shows the native link menu; keyboard Enter still opens (native anchor
 behavior); no-URL cards unchanged.
+
+Regression status: the recommendation cover's left-click and `auxclick(button === 1)` paths
+now have an exact contract test requiring both to call `openRecommendation(item, card)`, so
+tracking, status-line updates and toast behavior cannot silently diverge.
 
 ### Phase 2 — CSS polish bundle
 
@@ -195,7 +205,9 @@ meta row under the title:
   flows (watch-later/favorites rows come from their own endpoints — check payloads; render
   only what's present, do not extend those endpoints in this phase).
 
-Explicitly deferred: publish time, coin count (see Rejected/Deferred).
+Publication time is no longer deferred here: the 2026-07-11 cross-platform design/plan carries
+it through discovery, storage, recommendation/delight APIs and all four user surfaces. Coin
+count remains explicitly rejected (see Rejected/Deferred).
 
 ### Phase 4 — UP 主 author link
 
@@ -252,9 +264,13 @@ No changes to `applyProfileEdit`'s state semantics (invariant 8).
 
 ## Rejected / deferred (with reasons, for the issue reply)
 
-- **Publish time + coin count on cards** — deferred: neither is captured anywhere in the
-  pipeline (D3); requires discovery capture + `content_cache` schema + backfill across 4
-  platforms, and coin count is bilibili-only. Revisit if card metadata proves valuable.
+- **Publish time on cards** — continued and implemented by the
+  [2026-07-11 cross-platform design](../superpowers/specs/2026-07-11-multiplatform-published-time-design.md)
+  and [plan](../superpowers/plans/2026-07-11-multiplatform-published-time.md): best-effort exact
+  time plus source-relative fallback flows through seven platforms and four surfaces, without
+  detail-page requests or network backfill of old cache rows.
+- **Coin count on cards** — rejected by maintainer decision: Bilibili-only metadata is not
+  collected, stored or rendered by the cross-platform contract.
 - **True optimistic updates for profile edits** — rejected for now: rollback complexity on
   nested edit-state vs. a low-frequency surface; Phase 7 delivers the perceived-latency fix.
 - **Unbounded infinite scroll** — rejected: pool replenishment is slow; throttled auto-load

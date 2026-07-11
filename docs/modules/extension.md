@@ -382,7 +382,8 @@ CLI 入口：
 - 设置页保存配置时会保留后端已有的高级字段：`save_config()` 会串行化 scheduler speculation / auto-update 和 logging unmanaged cleanup 字段，避免 UI 修改常用项时把隐藏高级项写回默认值
 - 设置页“版本与更新”只展示后端更新状态并调用 `/api/update-status`、`/api/update/check`、`/api/update/apply` 的 backend target；插件版本行只读取本地 manifest 版本并链接 GitHub Releases。
 - 推荐 tab 现已改成“换一批”，会调用 `/api/recommendations/reshuffle` 直接从 discovery pool 秒级换出一批新推荐
-- `/api/recommendations` 的 `RecommendationOut` 现增量携带 `duration`、`view_count`、`like_count`、`danmaku_count`、`up_mid` 元信息；popup 忽略未知字段，本轮没有发插件卡片 UI 改动。
+- `/api/recommendations` 的 `RecommendationOut` 现增量携带 `duration`、`view_count`、`like_count`、`danmaku_count`、`up_mid`、`published_at`、`published_label` 元信息。popup 对推荐和惊喜卡统一采用精确时间优先、来源相对标签兜底、缺失隐藏的规则；文本用 `textContent` 写入，精确时间提供本地完整时间 tooltip。
+- 登录态来源只保留语义明确的发布时间：B 站 DOM 日期作为 `published_label`，小红书状态对象、抖音 `create_time`、知乎内容创建时间和 Reddit `created_utc` 作为 `published_at`；字段缺失时不写属性，不用任务执行/DOM 观察/互动时间猜测，也不额外请求详情页。回传后由后端统一规范化并进入候选池。
 - 推荐 tab 滚到底时会调用 `/api/recommendations/append` 继续往下续 10 条，不会把当前这一屏直接替换掉；首次渲染、切回推荐 tab 和追加完成后也会再检查一次底部距离，避免停在底部时没有新 scroll 事件导致续页卡住
 - 收到后台 `refresh.pool_updated` 时，推荐 tab 只更新池子数量、最近补货数量、方向提示和底部可换提示；移动 Web 空态也会用同一 runtime status 重新计算“还有多少可换 / 多少素材在整理”。不会调用 `/api/recommendations` 替换当前列表，用户已续页出来的历史内容会保留到下一次主动“换一批”或页面重新初始化。首次初始化推荐列表后会再读一次 `/api/runtime-status`，避免 `/api/recommendations` 从候选池 bootstrap 后仍显示 bootstrap 前库存
 - popup API 现在会统一规范化推荐项，追加出来的 `cover_url` 也会被收敛成可直接加载的 `https://` 地址；推荐点击 payload 会保留 `content_id / content_url / source_platform`，因此 YouTube 等跨源卡片打开后也会被后端记成对应来源，而不是落回 B 站 BV 号语义

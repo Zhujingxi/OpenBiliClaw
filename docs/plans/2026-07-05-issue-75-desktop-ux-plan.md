@@ -19,7 +19,8 @@
 > JS/CSS are served live** — a plain browser refresh picks up frontend edits, no restart needed.
 
 **Invariants that MUST hold (from Spec — re-read before each task):**
-- `RecommendationOut` changes are additive with defaults; extension popup untouched and unbroken.
+- `RecommendationOut` changes are additive with defaults; the later 2026-07-11 publication-time
+  follow-up also updates the extension popup under its own cross-platform contract.
 - Content opens are real anchors; click tracking fires on both `click` and `auxclick`.
 - Zero/absent metadata hides the element (no "0 播放", no empty badges on xhs/X/YouTube items).
 - Dark mode = one token override block; no per-component color forks; tokenize literals first.
@@ -50,6 +51,8 @@ Test add `tests/test_desktop_web_card_links.py`
    tracking + status-line routine. Wire it to the anchor's `click` (no `preventDefault` —
    browser opens the tab natively, which also fixes Ctrl/Cmd/Shift+click) and `auxclick`
    (fire tracking only when `event.button === 1`).
+   The shipped path has an exact regression contract requiring left `click` and middle
+   `auxclick(button === 1)` to invoke the same `openRecommendation(item, card)` handler.
 4. Same anchor treatment for: saved watch-later/favorites cards (`app.js:1305,1317` —
    `renderSavedList`), message-drawer content links (`app.js:2880` uses a confirm-style
    `window.open`; convert the "view" affordance to an anchor where a URL exists), delight
@@ -124,8 +127,9 @@ Test `tests/test_api_app.py`, add `tests/test_desktop_web_card_metadata.py`
    is absent). Keep `recommendationMeta` (author) as-is; stats are a sibling line.
 7. CSS: `.duration-badge` (bottom-right of cover, `--overlay`-style bg, small text),
    `.video-stats` muted line — token colors only (Task 5 will inherit them for free).
-8. Manual verification: bilibili cards show badge + stats; an X/tweet card shows neither; the
-   extension popup (unchanged code) still renders against the new payload.
+8. Manual verification for this phase: bilibili cards show badge + stats; an X/tweet card
+   shows neither; the extension popup still renders against the additive payload. Its later
+   publication-time rendering is covered by the 2026-07-11 cross-platform plan.
 9. Run `pytest tests/test_api_app.py -q tests/test_desktop_web_card_metadata.py -q` + ruff +
    mypy (backend files).
 
@@ -244,15 +248,18 @@ issue reply draft (not committed)
 1. `runtime.md` desktop-web section: card anchors + metadata row (fields, zero-hide rule),
    dark mode (three-state, token architecture, storage key), auto-load behavior + pool guard,
    pending-state edit feedback, new frontend settings keys.
-2. `extension.md`: one line noting `RecommendationOut` gained additive metadata fields
-   (popup ignores them; no popup change shipped).
+2. `extension.md`: record the additive metadata contract. Historical duration/engagement
+   fields remained ignorable; the 2026-07-11 follow-up additionally consumes
+   `published_at` / `published_label` in popup recommendation and delight cards.
 3. `docs/changelog.md`: bullet under the current version block, e.g.
    `feat: 桌面 Web 交互打磨(issue #75)——视频卡片改真链接(中键/Ctrl+点击可用)+时长/播放/点赞
    元信息 + UP 主跳转;新增暗色模式(跟随系统/手动);抽屉退出动画、分区切换过渡、滚动条防抖动;
    滚动到底自动加载(带候选池保护);画像编辑即时反馈`.
 4. Draft the issue #75 reply from the Spec's triage table: adopted (items 1/2/5/6 + dark
-   mode), adopted-with-conditions (metadata subset — pubdate/coin deferred with the pipeline
-   reason; UP link bilibili-only; auto-load throttled with the pool-protection reason),
+   mode), adopted-with-conditions (metadata subset — publication time is continued by the
+   [2026-07-11 design](../superpowers/specs/2026-07-11-multiplatform-published-time-design.md)
+   and [plan](../superpowers/plans/2026-07-11-multiplatform-published-time.md), while coin count
+   remains rejected by maintainer decision; UP link bilibili-only; auto-load throttled with the pool-protection reason),
    downgraded (item 4 → instant feedback, optimistic updates rejected for now). **Post only
    after maintainer approval.**
 5. Full suite once at the end: `.venv/bin/python -m pytest -q` + ruff + mypy.
@@ -263,16 +270,18 @@ issue reply draft (not committed)
 
 1. Manual smoke on a real backend: middle-click every card type; drawer close animation;
    page-switch fade; dark mode across all pages; auto-load at bottom with a healthy pool.
-2. Extension popup regression: load the extension against the updated backend — cards render
-   as before (additive fields ignored).
+2. Extension popup regression: load the extension against the updated backend. The original
+   additive duration/engagement fields remain compatible; the 2026-07-11 follow-up verifies
+   publication time on recommendation and delight cards.
 3. Watch `pool_available_count` behavior for a few days with auto-load on — if the pool sits
    at 0 noticeably more often, lengthen the cooldown before considering pool-side changes.
 4. Issue #75: post the approved reply; close or tag `partially-adopted` per maintainer call.
 
 ## Explicitly out of scope
 
-- Extension popup UI (`extension/popup/`) — separate surface, separate issue if wanted.
+- Extension popup UI (`extension/popup/`) — out of scope for this 2026-07-05 plan; the
+  2026-07-11 publication-time follow-up updates its recommendation and delight cards.
 - `web/setup/` guided-init page styling.
-- Publish-time / coin-count capture (discovery + schema + backfill — deferred, tracked in the
-  Spec's Rejected/Deferred section).
+- Publish-time capture is continued by the 2026-07-11 cross-platform design/plan without
+  detail requests or historical network backfill; coin-count capture remains rejected.
 - Any recommendation/discovery behavior change; any non-additive API change.
