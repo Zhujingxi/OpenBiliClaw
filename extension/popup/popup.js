@@ -70,6 +70,7 @@ import {
   createSavedToggleRegistry,
   captureSavedFocus,
   createRetainedSavedListState,
+  createSavedTaskCoordinator,
   createSavedSyncTaskTracker,
   getSavedSyncPresentation,
   normalizeCanonicalSavedItem,
@@ -627,18 +628,34 @@ const savedListStates = {
   watch_later: createRetainedSavedListState(),
   favorite: createRetainedSavedListState(),
 };
-const activeSavedTaskIds = new Set();
-const savedSyncTracker = createSavedSyncTaskTracker({
-  poll: (taskId) => pollSavedSyncTask(taskId),
-});
+const savedPendingFocus = { watch_later: null, favorite: null };
+function createSavedTaskRuntime() {
+  const tracker = createSavedSyncTaskTracker({ poll: (taskId) => pollSavedSyncTask(taskId) });
+  return {
+    tracker,
+    coordinator: createSavedTaskCoordinator({
+      tracker,
+      fetchTask: (taskId) => pollSavedSyncTask(taskId),
+    }),
+  };
+}
+const savedTaskRuntimes = {
+  watch_later: createSavedTaskRuntime(),
+  favorite: createSavedTaskRuntime(),
+};
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
-    for (const taskId of activeSavedTaskIds) savedSyncTracker.resume(taskId);
+    for (const runtime of Object.values(savedTaskRuntimes)) runtime.coordinator.resumeAll();
   }
 });
+window.addEventListener("pagehide", () => {
+  for (const runtime of Object.values(savedTaskRuntimes)) runtime.coordinator.dispose();
+}, { once: true });
 
-function syncEligible(item) {
-  return !["synced", "already_synced", "syncing"].includes(item?.sync_status);
+function syncEligible(item, listKind = "") {
+  const coordinator = savedTaskRuntimes[listKind]?.coordinator;
+  return !["synced", "already_synced", "syncing"].includes(item?.sync_status)
+    && !coordinator?.owns(item?.item_key);
 }
 
 function savedSyncDetail(item) {
@@ -650,7 +667,8 @@ function savedSyncDetail(item) {
 
 async function runSavedSync(listKind, items, button, status, reload, confirmBatch = false) {
   if (button?.disabled) return;
-  const selected = (Array.isArray(items) ? items : []).filter(syncEligible);
+  const coordinator = savedTaskRuntimes[listKind].coordinator;
+  const selected = (Array.isArray(items) ? items : []).filter((item) => syncEligible(item, listKind));
   if (!selected.length) return;
   const platforms = Array.from(new Set(selected.map((item) => (
     platformDisplayName(item.source_platform || item.item_key?.split(":", 1)[0])
@@ -660,6 +678,9 @@ async function runSavedSync(listKind, items, button, status, reload, confirmBatc
   )) return;
 
   if (button) {
+    const focusRoot = button.closest?.(".view") || button.parentElement;
+    savedPendingFocus[listKind] = captureSavedFocus(focusRoot, button)
+      || { itemKey: "__list__", action: "sync-all", index: 0 };
     button.disabled = true;
     button.textContent = "同步中…";
   }
@@ -672,8 +693,7 @@ async function runSavedSync(listKind, items, button, status, reload, confirmBatc
       await syncSavedItems(listKind, selected.map((item) => item.item_key)),
     );
     if (!task.task_id) throw new Error("同步任务缺少 task_id，请重试。");
-    activeSavedTaskIds.add(task.task_id);
-    savedSyncTracker.track(task, {
+    coordinator.track(task, selected.map((item) => item.item_key), {
       onProgress: () => {
         if (status) status.textContent = `正在同步 ${selected.length} 项…`;
       },
@@ -684,7 +704,6 @@ async function runSavedSync(listKind, items, button, status, reload, confirmBatc
         if (status) status.textContent = "仍在后台同步；连接恢复后会继续查询。";
       },
       onTerminal: (terminalTask) => {
-        activeSavedTaskIds.delete(task.task_id);
         if (status) status.textContent = summarizeSavedSyncResults(terminalTask.items) || "同步已完成";
         void reload();
       },
@@ -703,14 +722,31 @@ async function runSavedSync(listKind, items, button, status, reload, confirmBatc
 
 async function loadSavedList(listKind, { list, empty, syncAll, status, toggles }) {
   if (!(list instanceof HTMLElement)) return;
-  const focusToken = captureSavedFocus(list);
+  const focusRoot = list.closest?.(".view") || list;
+  const focusToken = captureSavedFocus(focusRoot) || savedPendingFocus[listKind];
   const retained = savedListStates[listKind];
+  const coordinator = savedTaskRuntimes[listKind].coordinator;
   const hadLoadError = Boolean(retained.snapshot().error);
   try {
     const data = await fetchSavedItems(listKind, 100, 0);
     retained.commit({
       items: Array.isArray(data?.items) ? data.items.map(normalizePopupSavedItem) : [],
       total: data?.total,
+    });
+    await coordinator.recover(retained.snapshot().items, {
+      onProgress: () => {
+        if (status) status.textContent = "正在同步已恢复的任务…";
+      },
+      onBackground: () => {
+        if (status) status.textContent = "仍在后台同步；可切换页面，返回后会继续更新。";
+      },
+      onPollError: () => {
+        if (status) status.textContent = "同步状态查询超时；连接恢复后会继续查询。";
+      },
+      onTerminal: (task) => {
+        if (status) status.textContent = summarizeSavedSyncResults(task.items) || "同步已完成";
+        void loadSavedList(listKind, { list, empty, syncAll, status, toggles });
+      },
     });
     if (status && hadLoadError) {
       status.removeAttribute("role");
@@ -723,6 +759,7 @@ async function loadSavedList(listKind, { list, empty, syncAll, status, toggles }
       const retry = document.createElement("button");
       retry.type = "button";
       retry.className = "saved-load-retry";
+      retry.dataset.savedListAction = "retry";
       retry.textContent = "重试加载";
       retry.addEventListener("click", () => {
         void loadSavedList(listKind, { list, empty, syncAll, status, toggles });
@@ -740,8 +777,8 @@ async function loadSavedList(listKind, { list, empty, syncAll, status, toggles }
     toggles.setSaved(item.item_key, true);
     list.appendChild(buildSavedCard(listKind, item, { list, empty, toggles }));
   }
-  restoreSavedFocus(list, focusToken);
-  const pendingCount = items.filter(syncEligible).length;
+  if (restoreSavedFocus(focusRoot, focusToken)) savedPendingFocus[listKind] = null;
+  const pendingCount = items.filter((item) => syncEligible(item, listKind)).length;
   if (syncAll instanceof HTMLButtonElement) {
     syncAll.textContent = `同步未同步内容（${pendingCount}）`;
     syncAll.disabled = pendingCount === 0;
@@ -770,9 +807,10 @@ async function loadWatchLater() {
 // whenever the DELETE queued behind slow same-origin requests (covers via
 // image-proxy compete for Chrome's 6-connection limit) or failed, clicking
 // looked like it did nothing.
-function bindSavedCardRemove(card, remove, { itemKey, requestRemove, toggles, list, empty, onRemoved }) {
+function bindSavedCardRemove(card, remove, { listKind, itemKey, requestRemove, toggles, list, empty, onRemoved }) {
   remove.addEventListener("click", async () => {
     if (remove.disabled) return;
+    savedPendingFocus[listKind] = captureSavedFocus(list.closest?.(".view") || list, remove);
     remove.disabled = true;
     const anchor = card.nextElementSibling;
     card.remove();
@@ -797,6 +835,9 @@ function bindSavedCardRemove(card, remove, { itemKey, requestRemove, toggles, li
 }
 
 function buildSavedCard(listKind, item, { list, empty, toggles }) {
+  if (savedTaskRuntimes[listKind].coordinator.owns(item.item_key)) {
+    item = { ...item, sync_status: "syncing" };
+  }
   const card = document.createElement("article");
   card.className = "saved-card";
   card.dataset.itemKey = item.item_key;
@@ -840,6 +881,7 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
   remove.textContent = "移除";
   remove.title = listKind === "watch_later" ? "移出本地稍后再看" : "从本地收藏移除";
   bindSavedCardRemove(card, remove, {
+    listKind,
     itemKey: item.item_key,
     requestRemove: (itemKey) => removeSavedItem(listKind, itemKey),
     toggles,
@@ -850,7 +892,7 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
 
   const actions = document.createElement("span");
   actions.className = "saved-card-actions";
-  if (syncEligible(item)) {
+  if (syncEligible(item, listKind)) {
     const sync = document.createElement("button");
     sync.type = "button";
     sync.className = "saved-card-sync";
@@ -5109,6 +5151,12 @@ function renderDelightSlot() {
           }
           if (value?.sync_task_id && ["pending", "syncing"].includes(value?.sync_status)) {
             syncing += 1;
+            savedTaskRuntimes.watch_later.coordinator.track({
+              task_id: value.sync_task_id,
+              items: [{ item_key: itemKey, status: value.sync_status }],
+            }, [itemKey], {
+              onTerminal: () => { void loadWatchLater(); },
+            });
           }
           rememberDismissedDelight(item.bvid || item.content_id);
         });

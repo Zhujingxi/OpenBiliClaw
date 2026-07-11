@@ -10,6 +10,9 @@
 const BASE_URL = `${location.protocol}//${location.host}/api`;
 const DEFAULT_READ_TIMEOUT_MS = 12_000;
 const QUICK_READ_TIMEOUT_MS = 5_000;
+const CONFIG_WRITE_TIMEOUT_MS = 60_000;
+const SAVED_READ_TIMEOUT_MS = 10_000;
+const SAVED_MUTATION_TIMEOUT_MS = 10_000;
 const CSRF_HEADER = "X-OBC-Auth";
 
 /** Notify the shell that the session is gone so it can show the login view. */
@@ -124,13 +127,14 @@ export async function checkHealth() {
   } catch { return false; }
 }
 
-export async function fetchConfig() {
-  return requestJson("/config");
+export async function fetchConfig(timeoutMs = DEFAULT_READ_TIMEOUT_MS) {
+  return requestJson("/config", { timeoutMs });
 }
 
-export async function updateConfig(data) {
+export async function updateConfig(data, timeoutMs = CONFIG_WRITE_TIMEOUT_MS) {
   return requestJson("/config", {
     method: "PUT",
+    timeoutMs,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });
@@ -338,33 +342,43 @@ export function normalizeSavedItemInput(item = {}) {
   };
 }
 
-export async function saveItem(listKind, item) {
-  return requestJson(savedListPath(listKind), json(normalizeSavedItemInput(item)));
+export async function saveItem(listKind, item, timeoutMs = SAVED_MUTATION_TIMEOUT_MS) {
+  return requestJson(savedListPath(listKind), {
+    ...json(normalizeSavedItemInput(item)), timeoutMs,
+  });
 }
 
-export async function removeSavedItem(listKind, itemKey) {
-  return requestJson(`${savedListPath(listKind)}/remove`, json({ item_key: String(itemKey || "").trim() }));
+export async function removeSavedItem(listKind, itemKey, timeoutMs = SAVED_MUTATION_TIMEOUT_MS) {
+  return requestJson(`${savedListPath(listKind)}/remove`, {
+    ...json({ item_key: String(itemKey || "").trim() }), timeoutMs,
+  });
 }
 
-export async function fetchSavedItems(listKind, limit = 50, offset = 0) {
+export async function fetchSavedItems(listKind, limit = 50, offset = 0, timeoutMs = SAVED_READ_TIMEOUT_MS) {
   return requestJson(
     `${savedListPath(listKind)}?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`,
+    { timeoutMs },
   );
 }
 
-export async function savedItemStatus(listKind, itemKey) {
+export async function savedItemStatus(listKind, itemKey, timeoutMs = SAVED_READ_TIMEOUT_MS) {
   const query = new URLSearchParams({ item_key: String(itemKey || "").trim() });
-  return requestJson(`${savedListPath(listKind)}/status?${query}`);
+  return requestJson(`${savedListPath(listKind)}/status?${query}`, { timeoutMs });
 }
 
-export async function syncSavedItems(listKind, itemKeys = []) {
-  return requestJson(`${savedListPath(listKind)}/sync`, json({
-    item_keys: Array.from(new Set(itemKeys.map((key) => String(key || "").trim()).filter(Boolean))),
-  }));
+export async function syncSavedItems(listKind, itemKeys = [], timeoutMs = SAVED_MUTATION_TIMEOUT_MS) {
+  return requestJson(`${savedListPath(listKind)}/sync`, {
+    ...json({
+      item_keys: Array.from(new Set(itemKeys.map((key) => String(key || "").trim()).filter(Boolean))),
+    }),
+    timeoutMs,
+  });
 }
 
-export async function pollSavedSyncTask(taskId) {
-  return requestJson(`/saved-sync/tasks/${encodeURIComponent(String(taskId || "").trim())}`);
+export async function pollSavedSyncTask(taskId, timeoutMs = SAVED_READ_TIMEOUT_MS) {
+  return requestJson(`/saved-sync/tasks/${encodeURIComponent(String(taskId || "").trim())}`, {
+    timeoutMs,
+  });
 }
 
 export async function addToWatchLater(bvid) {

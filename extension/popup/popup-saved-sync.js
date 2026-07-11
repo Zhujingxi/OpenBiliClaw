@@ -148,19 +148,41 @@ export function captureSavedFocus(root, activeElement = globalThis.document?.act
   const card = activeElement?.closest?.("[data-item-key]");
   const itemKey = String(card?.dataset?.itemKey || "").trim();
   const action = String(activeElement?.dataset?.savedAction || "").trim();
-  return root && itemKey && action ? { itemKey, action } : null;
+  const cards = Array.from(root?.querySelectorAll?.("[data-item-key]") || []);
+  const index = cards.indexOf(card);
+  return root && itemKey && action ? { itemKey, action, index: Math.max(0, index) } : null;
 }
 
 export function restoreSavedFocus(root, token) {
   if (!root || !token?.itemKey || !token?.action) return false;
-  for (const card of root.querySelectorAll?.("[data-item-key]") || []) {
+  const cards = Array.from(root.querySelectorAll?.("[data-item-key]") || []);
+  const focusAction = (card) => {
+    const actions = Array.from(card?.querySelectorAll?.("[data-saved-action]") || []);
+    const action = actions.find((candidate) => candidate.dataset?.savedAction === token.action)
+      || actions[0];
+    action?.focus?.();
+    return Boolean(action);
+  };
+  let sameIndex = -1;
+  for (let cardIndex = 0; cardIndex < cards.length; cardIndex += 1) {
+    const card = cards[cardIndex];
     if (card.dataset?.itemKey !== token.itemKey) continue;
-    for (const action of card.querySelectorAll?.("[data-saved-action]") || []) {
-      if (action.dataset?.savedAction !== token.action) continue;
-      action.focus?.();
-      return true;
-    }
+    sameIndex = cardIndex;
+    const exact = Array.from(card.querySelectorAll?.("[data-saved-action]") || [])
+      .find((action) => action.dataset?.savedAction === token.action);
+    if (exact) { exact.focus?.(); return true; }
   }
+  const index = sameIndex >= 0
+    ? sameIndex + 1
+    : Math.max(0, Math.min(Number(token.index) || 0, cards.length));
+  const previousIndex = sameIndex >= 0 ? sameIndex - 1 : index - 1;
+  if (focusAction(cards[index]) || focusAction(cards[previousIndex])) return true;
+  const listAction = root.querySelector?.(
+    '[data-saved-list-action="sync-all"], [data-saved-list-action="retry"]',
+  );
+  if (listAction) { listAction.focus?.(); return true; }
+  const heading = root.querySelector?.("[data-saved-heading]");
+  if (heading) { heading.focus?.(); return true; }
   return false;
 }
 
@@ -191,6 +213,7 @@ export function createSavedSyncTaskTracker(options = {}) {
     entry.polling = true;
     try {
       const next = await poll(entry.taskId);
+      if (!active.has(entry.taskId)) return;
       if (next && typeof next === "object") entry.task = sanitizeSavedSyncTask(next);
       if (terminal(entry.task)) {
         active.delete(entry.taskId);
@@ -203,13 +226,14 @@ export function createSavedSyncTaskTracker(options = {}) {
         entry.callbacks.onBackground?.(entry.task);
       }
     } catch (error) {
+      if (!active.has(entry.taskId)) return;
       entry.callbacks.onPollError?.(error, entry.task);
     } finally {
       entry.polling = false;
     }
     queue(entry);
   };
-  return {
+  const api = {
     has(taskId) { return active.has(safeSyncText(taskId, 64)); },
     track(initial, callbacks = {}) {
       const task = sanitizeSavedSyncTask(initial);
@@ -244,6 +268,108 @@ export function createSavedSyncTaskTracker(options = {}) {
       if (entry.timer != null) cancel(entry.timer);
       active.delete(entry.taskId);
       return true;
+    },
+    resumeAll() {
+      let resumed = 0;
+      for (const taskId of active.keys()) if (api.resume(taskId)) resumed += 1;
+      return resumed;
+    },
+    dispose() {
+      for (const entry of active.values()) if (entry.timer != null) cancel(entry.timer);
+      active.clear();
+    },
+  };
+  return api;
+}
+
+export function createSavedTaskCoordinator(options = {}) {
+  const tracker = options.tracker;
+  const fetchTask = options.fetchTask;
+  const ownersByTask = new Map();
+  const taskByItem = new Map();
+  const recovering = new Map();
+  let disposed = false;
+  const release = (taskId) => {
+    for (const itemKey of ownersByTask.get(taskId) || []) {
+      if (taskByItem.get(itemKey) === taskId) taskByItem.delete(itemKey);
+    }
+    ownersByTask.delete(taskId);
+  };
+  const claim = (taskId, itemKeys) => {
+    const keys = new Set(ownersByTask.get(taskId) || []);
+    for (const key of (itemKeys || []).map((value) => safeSyncText(value, 2048)).filter(Boolean)) {
+      keys.add(key);
+    }
+    ownersByTask.set(taskId, keys);
+    for (const key of keys) taskByItem.set(key, taskId);
+  };
+  const track = (task, itemKeys, callbacks = {}) => {
+    const taskId = safeSyncText(task?.task_id, 64);
+    if (!taskId || disposed) return null;
+    claim(taskId, itemKeys);
+    return tracker.track(task, {
+      ...callbacks,
+      onTerminal(terminalTask) {
+        release(taskId);
+        callbacks.onTerminal?.(terminalTask);
+        options.onTerminal?.(terminalTask);
+      },
+      onProgress(progressTask) {
+        callbacks.onProgress?.(progressTask);
+        options.onProgress?.(progressTask);
+      },
+      onBackground(progressTask) {
+        callbacks.onBackground?.(progressTask);
+        options.onBackground?.(progressTask);
+      },
+      onPollError(error, progressTask) {
+        callbacks.onPollError?.(error, progressTask);
+        options.onPollError?.(error, progressTask);
+      },
+    });
+  };
+  return {
+    owns(itemKey) { return taskByItem.has(safeSyncText(itemKey, 2048)); },
+    taskFor(itemKey) { return taskByItem.get(safeSyncText(itemKey, 2048)) || ""; },
+    track,
+    async recover(rows, callbacks = {}) {
+      if (disposed) return;
+      const grouped = new Map();
+      for (const row of Array.isArray(rows) ? rows : []) {
+        if (!["pending", "syncing"].includes(row?.sync_status)) continue;
+        const taskId = safeSyncText(row?.sync_task_id, 64);
+        const itemKey = safeSyncText(row?.item_key, 2048);
+        if (!taskId || !itemKey) continue;
+        if (!grouped.has(taskId)) grouped.set(taskId, []);
+        grouped.get(taskId).push(itemKey);
+      }
+      await Promise.all(Array.from(grouped, async ([taskId, itemKeys]) => {
+        claim(taskId, itemKeys);
+        if (tracker.has(taskId)) return;
+        if (recovering.has(taskId)) return recovering.get(taskId);
+        const recovery = Promise.resolve()
+          .then(() => fetchTask(taskId))
+          .then((task) => track(task, itemKeys, callbacks))
+          .catch((error) => {
+            if (disposed) return;
+            track({
+              task_id: taskId,
+              items: itemKeys.map((item_key) => ({ item_key, status: "syncing" })),
+            }, itemKeys, callbacks);
+            callbacks.onPollError?.(error);
+          })
+          .finally(() => recovering.delete(taskId));
+        recovering.set(taskId, recovery);
+        return recovery;
+      }));
+    },
+    resumeAll() { return tracker.resumeAll?.() || 0; },
+    dispose() {
+      disposed = true;
+      recovering.clear();
+      ownersByTask.clear();
+      taskByItem.clear();
+      tracker.dispose?.();
     },
   };
 }

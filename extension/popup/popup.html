@@ -4448,6 +4448,9 @@
       justify-content: center;
       min-width: 38px;
     }
+    #watchLaterSyncAll,
+    #favoritesSyncAll { min-inline-size: 190px; }
+    .saved-card-sync { min-inline-size: 68px; }
     .saved-toggle svg,
     .delight-save-toggle svg { width: 16px; height: 16px; }
     .saved-toggle.watch-later-btn[aria-pressed="true"],
@@ -4594,6 +4597,8 @@
       white-space: nowrap;
     }
     @media (max-width: 520px), (pointer: coarse) {
+      .saved-toggle,
+      .delight-save-toggle { min-width: 44px; min-height: 44px; }
       .saved-card-sync,
       .saved-card-remove,
       .saved-sync-toolbar button,
@@ -4726,10 +4731,10 @@
       <section id="viewWatchLater" class="view" role="tabpanel" aria-labelledby="tabWatchLater" hidden>
         <div class="view-intro">
           <p class="view-kicker">Watch later</p>
-          <h2>稍后再看</h2>
+          <h2 data-saved-heading tabindex="-1">稍后再看</h2>
           <p class="view-subtitle">点时钟图标加入临时队列，看完可以随手移除。</p>
           <div class="saved-sync-toolbar">
-            <button id="watchLaterSyncAll" class="action-button action-secondary" type="button" disabled>同步未同步内容（0）</button>
+            <button id="watchLaterSyncAll" class="action-button action-secondary" data-saved-list-action="sync-all" type="button" disabled>同步未同步内容（0）</button>
             <span id="watchLaterSyncStatus" class="saved-sync-status" aria-live="polite"></span>
           </div>
         </div>
@@ -4743,10 +4748,10 @@
       <section id="viewFavorites" class="view" role="tabpanel" aria-labelledby="tabFavorites" hidden>
         <div class="view-intro">
           <p class="view-kicker">Favorites</p>
-          <h2>我的收藏</h2>
+          <h2 data-saved-heading tabindex="-1">我的收藏</h2>
           <p class="view-subtitle">点星标收藏的内容会长期留在这里，和稍后再看互相独立。</p>
           <div class="saved-sync-toolbar">
-            <button id="favoritesSyncAll" class="action-button action-secondary" type="button" disabled>同步未同步内容（0）</button>
+            <button id="favoritesSyncAll" class="action-button action-secondary" data-saved-list-action="sync-all" type="button" disabled>同步未同步内容（0）</button>
             <span id="favoritesSyncStatus" class="saved-sync-status" aria-live="polite"></span>
           </div>
         </div>

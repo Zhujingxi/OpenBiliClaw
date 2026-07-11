@@ -12,6 +12,7 @@ import {
   captureSavedFocus,
   createDurableTaskTracker,
   createRetainedSavedListState,
+  createSavedTaskCoordinator,
   restoreSavedFocus,
 } from "../saved-sync-runtime.js";
 
@@ -99,36 +100,68 @@ function createSavedView(cfg) {
   let message = "";
   let messageIsError = false;
   let pendingFocus = null;
+  let visibilityBound = false;
   const retained = createRetainedSavedListState();
-  const activeTaskIds = new Set();
   const taskTracker = createDurableTaskTracker({
     poll: (taskId) => pollSavedSyncTask(safeText(taskId, 64)),
   });
+  const taskCoordinator = createSavedTaskCoordinator({
+    tracker: taskTracker,
+    fetchTask: (taskId) => pollSavedSyncTask(safeText(taskId, 64)),
+  });
+
+  const recoveredTaskCallbacks = () => ({
+    onProgress: () => {
+      message = "正在同步已恢复的任务…";
+      messageIsError = false;
+      renderList();
+    },
+    onBackground: () => {
+      message = "仍在后台同步；可离开此页，返回后会继续更新。";
+      messageIsError = false;
+      renderList();
+    },
+    onPollError: () => {
+      message = "同步状态查询超时；连接恢复后会继续查询。";
+      messageIsError = false;
+      renderList();
+    },
+    onTerminal: (terminalTask) => {
+      message = summarize(terminalTask.items) || "同步已完成";
+      messageIsError = false;
+      void load();
+    },
+  });
 
   function renderShell(bodyHtml) {
-    const pending = items.filter((item) => eligible(item) && !syncingKeys.has(item.item_key)).length;
+    const pending = items.filter((item) => (
+      eligible(item) && !syncingKeys.has(item.item_key) && !taskCoordinator.owns(item.item_key)
+    )).length;
     $root.innerHTML = `
       <div class="saved-view">
         <div class="saved-head">
           <span class="saved-head-icon" aria-hidden="true">${cfg.icon}</span>
-          <span class="saved-head-title">${esc(cfg.title)}</span>
+          <h2 class="saved-head-title" data-saved-heading tabindex="-1">${esc(cfg.title)}</h2>
           <span class="saved-head-count" id="${cfg.countId}">${total > 0 ? total : ""}</span>
         </div>
         <div class="saved-sync-toolbar">
-          <button class="btn btn-outline saved-sync-all" type="button" ${pending === 0 ? "disabled" : ""}>同步未同步内容（${pending}）</button>
+          <button class="btn btn-outline saved-sync-all" data-saved-list-action="sync-all" type="button" ${pending === 0 ? "disabled" : ""}>同步未同步内容（${pending}）</button>
           <span class="saved-sync-message" aria-live="polite" ${messageIsError ? 'role="alert"' : ""}>${esc(message)}</span>
-          ${retained.snapshot().error ? '<button class="btn btn-outline saved-load-retry" type="button">重试加载</button>' : ""}
+          ${retained.snapshot().error ? '<button class="btn btn-outline saved-load-retry" data-saved-list-action="retry" type="button">重试加载</button>' : ""}
         </div>
         <div class="saved-body">${bodyHtml}</div>
       </div>`;
     $root.querySelector(".saved-sync-all")?.addEventListener("click", (event) => {
-      pendingFocus = { itemKey: "__list__", action: "sync-all" };
-      void runSync(items.filter((item) => eligible(item) && !syncingKeys.has(item.item_key)), event.currentTarget, true);
+      pendingFocus = { itemKey: "__list__", action: "sync-all", index: 0 };
+      void runSync(items.filter((item) => (
+        eligible(item) && !syncingKeys.has(item.item_key) && !taskCoordinator.owns(item.item_key)
+      )), event.currentTarget, true);
     });
     $root.querySelector(".saved-load-retry")?.addEventListener("click", () => { void load(); });
   }
 
   async function runSync(selected, activeButton, confirmBatch = false) {
+    selected = selected.filter((item) => !taskCoordinator.owns(item.item_key));
     if (!selected.length || activeButton.disabled) return;
     const platforms = Array.from(new Set(selected.map((item) => (
       PLATFORM_NAMES[item.source_platform] || item.source_platform
@@ -145,8 +178,7 @@ function createSavedView(cfg) {
       const task = await syncSavedItems(cfg.listKind, selected.map((item) => item.item_key));
       const taskId = safeText(task?.task_id, 64);
       if (!taskId) throw new Error("同步任务缺少 task_id，请重试。");
-      activeTaskIds.add(taskId);
-      taskTracker.track(task, {
+      taskCoordinator.track(task, selected.map((item) => item.item_key), {
         onProgress: () => {
           message = `正在同步 ${selected.length} 项…`;
           messageIsError = false;
@@ -163,7 +195,6 @@ function createSavedView(cfg) {
           renderList();
         },
         onTerminal: (terminalTask) => {
-          activeTaskIds.delete(taskId);
           for (const item of selected) syncingKeys.delete(item.item_key);
           message = summarize(terminalTask.items) || "同步已完成";
           messageIsError = false;
@@ -193,7 +224,9 @@ function createSavedView(cfg) {
     }
     const cards = items.map((raw) => {
       const it = getSavedSyncViewModel(
-        syncingKeys.has(raw.item_key) ? { ...raw, sync_status: "syncing" } : raw,
+        syncingKeys.has(raw.item_key) || taskCoordinator.owns(raw.item_key)
+          ? { ...raw, sync_status: "syncing" }
+          : raw,
       );
       const cover = getCoverImageAttrs(it.cover_url);
       const url = buildContentUrl(it);
@@ -209,7 +242,7 @@ function createSavedView(cfg) {
           <div class="saved-sync-line"><span class="saved-sync-chip" data-tone="${esc(it.tone)}">${esc(it.label)}</span><span>${esc(it.detail)}</span></div>
         </div>
         <div class="saved-card-actions">
-          ${eligible(it) && !syncingKeys.has(it.item_key) ? `<button class="saved-card-sync" data-saved-action="sync" type="button">${syncLabel}</button>` : ""}
+          ${eligible(it) && !syncingKeys.has(it.item_key) && !taskCoordinator.owns(it.item_key) ? `<button class="saved-card-sync" data-saved-action="sync" type="button">${syncLabel}</button>` : ""}
           <button class="saved-card-remove" data-saved-action="remove" type="button" aria-label="从本地移除" title="只从 OpenBiliClaw 本地移除">×</button>
         </div>
       </article>`;
@@ -223,12 +256,14 @@ function createSavedView(cfg) {
         if (open.dataset.url) openContentUrl(open.dataset.url);
       });
       card.querySelector(".saved-card-sync")?.addEventListener("click", (event) => {
-        pendingFocus = { itemKey: item.item_key, action: "sync" };
+        pendingFocus = captureSavedFocus($root, event.currentTarget)
+          || { itemKey: item.item_key, action: "sync", index: 0 };
         void runSync([item], event.currentTarget);
       });
       const remove = card.querySelector(".saved-card-remove");
       remove.addEventListener("click", async () => {
-        pendingFocus = { itemKey: item.item_key, action: "remove" };
+        pendingFocus = captureSavedFocus($root, remove)
+          || { itemKey: item.item_key, action: "remove", index: 0 };
         remove.disabled = true;
         try {
           await removeSavedItem(cfg.listKind, item.item_key);
@@ -255,6 +290,7 @@ function createSavedView(cfg) {
         total: Number(data?.total) || (Array.isArray(data?.items) ? data.items.length : 0),
       });
       ({ items, total, loaded } = retained.snapshot());
+      await taskCoordinator.recover(items, recoveredTaskCallbacks());
       if (hadLoadError) message = "";
       messageIsError = false;
     } catch (error) {
@@ -270,9 +306,13 @@ function createSavedView(cfg) {
 
   return function init(rootEl) {
     $root = rootEl;
-    document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) for (const taskId of activeTaskIds) taskTracker.resume(taskId);
-    });
+    if (!visibilityBound) {
+      visibilityBound = true;
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) taskCoordinator.resumeAll();
+      });
+      window.addEventListener("pagehide", () => taskCoordinator.dispose(), { once: true });
+    }
     void load();
   };
 }

@@ -40,6 +40,7 @@ def test_mobile_web_saved_sync_api_and_view_contract() -> None:
 def test_desktop_web_saved_sync_controls_and_consent_contract() -> None:
     html = _read("src/openbiliclaw/web/desktop/index.html")
     js = _read("src/openbiliclaw/web/desktop/assets/js/app.js")
+    core = _read("src/openbiliclaw/web/desktop/assets/js/saved-sync-core.js")
 
     assert 'id="savedAutoSync"' in html
     assert "保存时自动同步到对应平台" in html
@@ -47,7 +48,11 @@ def test_desktop_web_saved_sync_controls_and_consent_contract() -> None:
     assert 'id="favoritesSyncAll"' in html
     assert 'aria-live="polite"' in html
     assert WARNING in js
-    assert "`/saved/${listKind}`" in js
+    assert "`/saved/${listKind}`" in core
+    assert html.index('src="/web/assets/js/saved-sync-core.js"') < html.index(
+        'src="/web/assets/js/app.js"'
+    )
+    assert "createStrictSavedApi(requestJsonStrict)" in js
     assert "同步未同步内容" in js
     assert all(label in js for label in ("待同步", "同步中", "已同步", "需要登录", "同步失败"))
     assert "extension_required" in js
@@ -115,3 +120,44 @@ def test_saved_sync_review_repairs_are_wired_to_all_surfaces() -> None:
     assert "仍在后台同步" in desktop
     assert "for (let attempt = 0; task.task_id" not in desktop
     assert "timeoutMs" in desktop_core
+
+
+def test_saved_sync_second_review_timeout_recovery_and_focus_contract() -> None:
+    popup_api = _read("extension/popup/popup-api.js")
+    popup = _read("extension/popup/popup.js")
+    popup_html = _read("extension/popup/popup.html")
+    mobile_api = _read("src/openbiliclaw/web/js/api.js")
+    mobile_saved = _read("src/openbiliclaw/web/js/views/saved.js")
+    desktop = _read("src/openbiliclaw/web/desktop/assets/js/app.js")
+    desktop_html = _read("src/openbiliclaw/web/desktop/index.html")
+
+    for api in (popup_api, mobile_api):
+        for helper in (
+            "saveItem",
+            "removeSavedItem",
+            "fetchSavedItems",
+            "savedItemStatus",
+            "syncSavedItems",
+            "pollSavedSyncTask",
+        ):
+            definition = api.split(f"function {helper}", 1)[1].split("\n}", 1)[0]
+            assert "timeoutMs" in definition
+        assert "function fetchConfig(timeoutMs" in api
+        assert "function updateConfig(data, timeoutMs" in api
+
+    for source in (popup, mobile_saved, desktop):
+        assert any(
+            marker in source
+            for marker in (
+                ".coordinator.recover(",
+                "taskCoordinator.recover(",
+                "coordinator.recover(",
+            )
+        )
+        assert ".coordinator.owns(" in source or "taskCoordinator.owns(" in source
+        assert 'addEventListener("pagehide"' in source
+        assert "同步状态查询超时" in source
+
+    for markup in (popup_html, mobile_saved, desktop_html):
+        assert "data-saved-list-action" in markup
+        assert "data-saved-heading" in markup

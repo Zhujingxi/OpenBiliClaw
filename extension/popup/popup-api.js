@@ -6,6 +6,7 @@ import {
 } from "./popup-device-auth.js";
 
 export const CONFIG_CACHE_KEY = "openbiliclaw.config_cache";
+export const CONFIG_GET_TIMEOUT_MS = 12_000;
 export const CONFIG_PUT_TIMEOUT_MS = 60_000;
 const HEALTH_SUCCESS_CACHE_TTL_MS = 3_000;
 const HEALTH_FAILURE_CACHE_TTL_MS = 1_000;
@@ -588,8 +589,8 @@ export async function respondToDelight(bvid, responseType, title = "", message =
   }
 }
 
-export async function fetchConfig() {
-  const config = await requestJson("/config?reveal_keys=true", { method: "GET" });
+export async function fetchConfig(timeoutMs = CONFIG_GET_TIMEOUT_MS) {
+  const config = await requestJson("/config?reveal_keys=true", { method: "GET", timeoutMs });
   await cacheConfigSnapshot(config);
   return config;
 }
@@ -618,10 +619,10 @@ export async function probeConfigService(kind, config) {
   });
 }
 
-export async function updateConfig(data) {
+export async function updateConfig(data, timeoutMs = CONFIG_PUT_TIMEOUT_MS) {
   return requestJson("/config", {
     method: "PUT",
-    timeoutMs: CONFIG_PUT_TIMEOUT_MS,
+    timeoutMs,
     headers: {
       "Content-Type": "application/json",
     },
@@ -648,6 +649,7 @@ export async function updateRuntimeToggle(name, value) {
 // fetches. A bounded timeout turns "hangs forever, button stuck disabled"
 // into a visible, retryable failure.
 const SAVED_MUTATION_TIMEOUT_MS = 10_000;
+const SAVED_READ_TIMEOUT_MS = 10_000;
 
 function savedListPath(listKind) {
   if (listKind !== "favorite" && listKind !== "watch_later") {
@@ -677,27 +679,28 @@ export function normalizeSavedItemInput(item = {}) {
   };
 }
 
-export async function saveItem(listKind, item) {
+export async function saveItem(listKind, item, timeoutMs = SAVED_MUTATION_TIMEOUT_MS) {
   return requestJson(savedListPath(listKind), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(normalizeSavedItemInput(item)),
-    timeoutMs: SAVED_MUTATION_TIMEOUT_MS,
+    timeoutMs,
   });
 }
 
-export async function removeSavedItem(listKind, itemKey) {
+export async function removeSavedItem(listKind, itemKey, timeoutMs = SAVED_MUTATION_TIMEOUT_MS) {
   return requestJson(`${savedListPath(listKind)}/remove`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ item_key: String(itemKey || "").trim() }),
-    timeoutMs: SAVED_MUTATION_TIMEOUT_MS,
+    timeoutMs,
   });
 }
 
-export async function fetchSavedItems(listKind, limit = 50, offset = 0) {
+export async function fetchSavedItems(listKind, limit = 50, offset = 0, timeoutMs = SAVED_READ_TIMEOUT_MS) {
   const payload = await requestJson(
     `${savedListPath(listKind)}?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`,
+    { timeoutMs },
   );
   return {
     ...payload,
@@ -705,24 +708,26 @@ export async function fetchSavedItems(listKind, limit = 50, offset = 0) {
   };
 }
 
-export async function savedItemStatus(listKind, itemKey) {
+export async function savedItemStatus(listKind, itemKey, timeoutMs = SAVED_READ_TIMEOUT_MS) {
   const query = new URLSearchParams({ item_key: String(itemKey || "").trim() });
-  return requestJson(`${savedListPath(listKind)}/status?${query}`);
+  return requestJson(`${savedListPath(listKind)}/status?${query}`, { timeoutMs });
 }
 
-export async function syncSavedItems(listKind, itemKeys = []) {
+export async function syncSavedItems(listKind, itemKeys = [], timeoutMs = SAVED_MUTATION_TIMEOUT_MS) {
   return requestJson(`${savedListPath(listKind)}/sync`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       item_keys: Array.from(new Set(itemKeys.map((key) => String(key || "").trim()).filter(Boolean))),
     }),
-    timeoutMs: SAVED_MUTATION_TIMEOUT_MS,
+    timeoutMs,
   });
 }
 
-export async function pollSavedSyncTask(taskId) {
-  return requestJson(`/saved-sync/tasks/${encodeURIComponent(String(taskId || "").trim())}`);
+export async function pollSavedSyncTask(taskId, timeoutMs = SAVED_READ_TIMEOUT_MS) {
+  return requestJson(`/saved-sync/tasks/${encodeURIComponent(String(taskId || "").trim())}`, {
+    timeoutMs,
+  });
 }
 
 export async function addToWatchLater(bvid) {

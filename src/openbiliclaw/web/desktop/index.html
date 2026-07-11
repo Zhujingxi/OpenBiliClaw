@@ -205,10 +205,10 @@
         <div class="content-page-head">
           <div>
             <p class="eyebrow">Watch later</p>
-            <h2>稍后再看</h2>
+            <h2 data-saved-heading tabindex="-1">稍后再看</h2>
             <p class="video-meta">你加入稍后再看的内容会在这里排队，看完随手移除即可。</p>
           </div>
-          <button class="pill-btn" id="watchLaterSyncAll" type="button" disabled>同步未同步内容（0）</button>
+          <button class="pill-btn" id="watchLaterSyncAll" data-saved-list-action="sync-all" type="button" disabled>同步未同步内容（0）</button>
         </div>
         <p class="saved-sync-status" id="watchLaterSyncStatus" aria-live="polite"></p>
         <div class="saved-grid" id="watchLaterList"></div>
@@ -219,10 +219,10 @@
         <div class="content-page-head">
           <div>
             <p class="eyebrow">Favorites</p>
-            <h2>我的收藏</h2>
+            <h2 data-saved-heading tabindex="-1">我的收藏</h2>
             <p class="video-meta">点 ★ 收藏的内容会长期留在这里，和稍后再看互相独立。</p>
           </div>
-          <button class="pill-btn" id="favoritesSyncAll" type="button" disabled>同步未同步内容（0）</button>
+          <button class="pill-btn" id="favoritesSyncAll" data-saved-list-action="sync-all" type="button" disabled>同步未同步内容（0）</button>
         </div>
         <p class="saved-sync-status" id="favoritesSyncStatus" aria-live="polite"></p>
         <div class="saved-grid" id="favoritesList"></div>

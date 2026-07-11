@@ -2139,6 +2139,7 @@ body {
 .saved-head-title { font-size: 16px; font-weight: 600; }
 .saved-head-count { margin-left: auto; font-size: 12px; color: var(--text-muted); }
 .saved-sync-toolbar { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-bottom: 12px; }
+.saved-sync-all { min-inline-size: 190px; }
 .saved-sync-message { min-height: 18px; color: var(--text-muted); font-size: 12px; }
 .saved-action-status { margin: 0 16px 10px; min-height: 18px; color: var(--text-muted); font-size: 12px; }
 .saved-list { display: flex; flex-direction: column; gap: 10px; }
@@ -2153,7 +2154,7 @@ body {
 .saved-card-up { margin-top: 3px; font-size: 11px; color: var(--text-muted); }
 .saved-card-actions { display: flex; flex-direction: column; flex-shrink: 0; gap: 8px; }
 .saved-card-sync, .saved-card-remove { min-width: 44px; min-height: 44px; border: none; background: transparent; color: var(--text-muted); cursor: pointer; border-radius: 8px; }
-.saved-card-sync { color: var(--brand); font-size: 12px; }
+.saved-card-sync { min-inline-size: 68px; color: var(--brand); font-size: 12px; }
 .saved-card-remove:hover { background: var(--brand-soft, #f3f3f3); color: var(--danger, #e0506a); }
 .saved-sync-line { display: flex; align-items: center; gap: 5px; margin-top: 5px; min-width: 0; color: var(--text-muted); font-size: 10px; }
 .saved-sync-line > :last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

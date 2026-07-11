@@ -163,3 +163,48 @@ Results: extension `694 passed, 0 failed`; Python `126 passed`; TypeScript typec
 Chrome/Edge production bundle built successfully. The one timing-sensitive Bilibili dispatcher case
 that transiently failed during the first full run passed both in isolation (`8/8`) and in the fresh
 full rerun. No Task 9 real integration E2E or account mutation was performed.
+
+## Second Review Repair
+
+The second review started with six failing JavaScript regression groups out of 19 and one failing
+front-end contract out of five. The JavaScript RED results demonstrated absent saved/config request
+bounds, reload task recovery, persisted item ownership, focus fallback, coarse-pointer sizing, and
+stable button width. The Python RED result proved the desktop contract inspected the removed route
+literal in `app.js` instead of the authoritative route builder in `saved-sync-core.js`. Follow-up RED
+cycles separately caught same-task ownership cleanup, focus loss when a sync control disappears but
+its card remains, missing page-teardown cleanup, callbacks escaping from an in-flight poll after
+dispose, and desktop per-item sync label shift.
+
+The repaired clients now apply explicit Abort timeouts to every extension/mobile saved save, remove,
+list, status, sync, and task-poll call, plus config GET/PUT. Never-settling fetch tests exercise real
+AbortSignals; mutation registries release busy state in `finally`, task poll timeouts remain
+recoverable, and the mobile config dialog exposes its existing retry state. Each successful saved-list
+load groups nonterminal rows by persisted `sync_task_id`, fetches each task once, and installs a
+deduplicated tracker. Per-list task ownership marks every owned `item_key` as syncing and excludes it
+from duplicate single/batch submissions, including popup all-queue auto-sync responses. Tracker
+visibility listeners are bound once per view; page teardown disposes timers and suppresses late
+in-flight callbacks.
+
+Focus tokens now retain the original card index. If the exact action no longer exists, all three
+surfaces try the next card action, then the previous card action, then the list sync/retry control,
+then a focusable page heading. Rendered markup exposes deterministic hooks for those fallbacks.
+Extension and desktop recommendation/delight save toggles meet 44×44 coarse-pointer targets, while
+batch and per-item sync controls reserve inline width so `同步` / `同步中…` / `重试同步` does not shift
+layout. Desktop delight tooltips and accessible labels now follow the pressed state.
+
+Fresh final verification commands:
+
+```bash
+cd extension && npm test
+PYTHONPATH=src .venv/bin/pytest -q \
+  tests/test_saved_sync_api.py \
+  tests/test_saved_sync_storage.py \
+  tests/test_saved_sync_service.py \
+  tests/test_saved_sync_frontend_contract.py
+cd extension && npm run typecheck && npm run build
+```
+
+Final results: extension `702 passed, 0 failed` on repeated clean full runs; Python `127 passed`;
+TypeScript typecheck and the Chrome/Edge production build passed. Every modified JavaScript file
+passed `node --check`; the Python contract file passed Ruff format/check; and `git diff --check` was
+clean. No Task 9 real integration E2E, signed-in browser automation, or account mutation was run.

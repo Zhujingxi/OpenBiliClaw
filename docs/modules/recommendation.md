@@ -6,7 +6,7 @@
 
 `recommendation/` 包负责把已经发现并评分过的内容，转成真正准备展示给用户的推荐结果。
 
-推荐卡与 delight 的收藏 / 稍后再看动作在插件 side panel、桌面 Web 与移动 Web 中统一保留 canonical `item_key/source_platform/content_id/content_url/content_type`，调用平台中立 `/api/saved/{list_kind}`。URL fallback 保持空 `content_id`，不会把 recommendation row ID 或 namespaced legacy ID 当原始内容 ID，也不会把 X / 知乎文本强制写成 video。前端只对本地保存做 optimistic update；busy/version 状态按 `list_kind:item_key` 隔离，平台同步状态由保存列表和 durable task polling 展示，失败不撤销本地已保存态。
+推荐卡与 delight 的收藏 / 稍后再看动作在插件 side panel、桌面 Web 与移动 Web 中统一保留 canonical `item_key/source_platform/content_id/content_url/content_type`，调用平台中立 `/api/saved/{list_kind}`。URL fallback 保持空 `content_id`，不会把 recommendation row ID 或 namespaced legacy ID 当原始内容 ID，也不会把 X / 知乎文本强制写成 video。前端只对本地保存做 optimistic update；busy/version 状态按 `list_kind:item_key` 隔离，平台同步状态由保存列表和 durable task polling 展示，失败不撤销本地已保存态。插件与桌面 Web 的这些保存 toggle 在 coarse pointer 下提供至少 44×44 的触控目标，pressed tooltip / aria-label 与真实状态同步。
 
 当前模块包含：
 

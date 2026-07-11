@@ -13,7 +13,17 @@ import {
   partitionSavedQueueResults,
   restoreSavedFocus as restorePopupSavedFocus,
 } from "../popup/popup-saved-sync.js";
-import { normalizeSavedItemInput } from "../popup/popup-api.js";
+import {
+  fetchConfig as fetchPopupConfig,
+  fetchSavedItems as fetchPopupSavedItems,
+  normalizeSavedItemInput,
+  pollSavedSyncTask as pollPopupSavedSyncTask,
+  removeSavedItem as removePopupSavedItem,
+  saveItem as savePopupItem,
+  savedItemStatus as popupSavedItemStatus,
+  syncSavedItems as syncPopupSavedItems,
+  updateConfig as updatePopupConfig,
+} from "../popup/popup-api.js";
 import {
   createDurableTaskTracker as createMobileTaskTracker,
   createRetainedSavedListState,
@@ -304,7 +314,7 @@ test("saved focus token restores the same item action after rerender", () => {
   };
   const root = { querySelectorAll() { return [card]; } };
   const token = captureSavedFocus(root, action);
-  assert.deepEqual(token, { itemKey: "youtube:video-1", action: "remove" });
+  assert.deepEqual(token, { itemKey: "youtube:video-1", action: "remove", index: 0 });
   assert.equal(restoreSavedFocus(root, token), true);
   assert.equal(focused, 1);
 });
@@ -410,4 +420,269 @@ test("extension all-queue keeps failed URL items and accepts server-issued item 
   assert.equal(partition.failedCount, 1);
   assert.equal(partition.saved[0].itemKey, "web:url:0123456789abcdef01234567");
   assert.deepEqual(partition.remaining, [failed]);
+});
+
+function installAbortAwareNeverFetch(safetyMs = 80) {
+  const original = globalThis.fetch;
+  const seenSignals: AbortSignal[] = [];
+  globalThis.fetch = (async (_input: unknown, init: RequestInit = {}) => new Promise((_resolve, reject) => {
+    const signal = init.signal as AbortSignal | undefined;
+    if (signal) seenSignals.push(signal);
+    const safety = setTimeout(() => reject(Object.assign(new Error("safety timeout"), { name: "SafetyError" })), safetyMs);
+    const abort = () => {
+      clearTimeout(safety);
+      reject(signal?.reason || Object.assign(new Error("aborted"), { name: "AbortError" }));
+    };
+    if (signal?.aborted) abort();
+    else signal?.addEventListener("abort", abort, { once: true });
+  })) as typeof fetch;
+  return {
+    seenSignals,
+    restore() { globalThis.fetch = original; },
+  };
+}
+
+test("extension saved and config requests abort a never-resolving fetch within their supplied bound", async () => {
+  const never = installAbortAwareNeverFetch();
+  try {
+    await assert.rejects(fetchPopupSavedItems("favorite", 10, 0, 5), { name: "AbortError" });
+    await assert.rejects(popupSavedItemStatus("favorite", "youtube:1", 5), { name: "AbortError" });
+    await assert.rejects(removePopupSavedItem("favorite", "youtube:1", 5), { name: "AbortError" });
+    await assert.rejects(syncPopupSavedItems("favorite", ["youtube:1"], 5), { name: "AbortError" });
+    await assert.rejects(pollPopupSavedSyncTask("task-timeout", 5), { name: "AbortError" });
+    await assert.rejects(fetchPopupConfig(5), { name: "AbortError" });
+    await assert.rejects(updatePopupConfig({ saved_sync: { auto_sync_enabled: false } }, 5), { name: "AbortError" });
+    assert.equal(never.seenSignals.length, 7);
+    assert.ok(never.seenSignals.every((signal) => signal.aborted));
+  } finally {
+    never.restore();
+  }
+});
+
+test("a timed-out extension mutation clears per-item busy state", async () => {
+  const never = installAbortAwareNeverFetch();
+  const registry = createSavedMutationRegistry();
+  try {
+    const mutation = registry.toggle("favorite", "youtube:timeout", {
+      add: () => savePopupItem("favorite", {
+        source_platform: "youtube",
+        content_id: "timeout",
+        content_url: "https://youtube.com/watch?v=timeout",
+        content_type: "video",
+      }, 5),
+      remove: async () => ({ saved: false }),
+    });
+    assert.equal(registry.isBusy("favorite", "youtube:timeout"), true);
+    await assert.rejects(mutation, { name: "AbortError" });
+    assert.equal(registry.isBusy("favorite", "youtube:timeout"), false);
+  } finally {
+    never.restore();
+  }
+});
+
+test("mobile saved and config requests abort and remain retryable after a hung fetch", async () => {
+  const oldLocation = (globalThis as any).location;
+  (globalThis as any).location = { protocol: "http:", host: "127.0.0.1:8420" };
+  const api = await import(`../../src/openbiliclaw/web/js/api.js?review-timeout=${Date.now()}`);
+  const never = installAbortAwareNeverFetch();
+  try {
+    await assert.rejects(api.fetchSavedItems("watch_later", 10, 0, 5), { name: "AbortError" });
+    await assert.rejects(api.savedItemStatus("watch_later", "youtube:1", 5), { name: "AbortError" });
+    await assert.rejects(api.saveItem("watch_later", { source_platform: "youtube", content_id: "1" }, 5), { name: "AbortError" });
+    await assert.rejects(api.removeSavedItem("watch_later", "youtube:1", 5), { name: "AbortError" });
+    await assert.rejects(api.syncSavedItems("watch_later", ["youtube:1"], 5), { name: "AbortError" });
+    await assert.rejects(api.pollSavedSyncTask("task-timeout", 5), { name: "AbortError" });
+    await assert.rejects(api.fetchConfig(5), { name: "AbortError" });
+    await assert.rejects(api.updateConfig({ saved_sync: { auto_sync_enabled: false } }, 5), { name: "AbortError" });
+    assert.equal(never.seenSignals.length, 8);
+    assert.ok(never.seenSignals.every((signal) => signal.aborted));
+  } finally {
+    never.restore();
+    (globalThis as any).location = oldLocation;
+  }
+});
+
+async function exerciseRecoveredTaskCoordinator(createCoordinator: Function) {
+  const tracked = new Map<string, any>();
+  const tracker = {
+    has(taskId: string) { return tracked.has(taskId); },
+    track(task: any, callbacks: any) { tracked.set(task.task_id, callbacks); return task.task_id; },
+    stop(taskId: string) { return tracked.delete(taskId); },
+  };
+  let fetches = 0;
+  let terminals = 0;
+  const coordinator = createCoordinator({
+    tracker,
+    fetchTask: async (taskId: string) => {
+      fetches += 1;
+      return { task_id: taskId, items: [{ item_key: "youtube:1", status: "syncing" }] };
+    },
+    onTerminal: () => { terminals += 1; },
+  });
+  const rows = [
+    { item_key: "youtube:1", sync_status: "syncing", sync_task_id: "persisted-task" },
+    { item_key: "twitter:2", sync_status: "pending", sync_task_id: "persisted-task" },
+  ];
+  await Promise.all([coordinator.recover(rows), coordinator.recover(rows)]);
+  assert.equal(fetches, 1);
+  assert.equal(tracked.size, 1);
+  assert.equal(coordinator.owns("youtube:1"), true);
+  assert.equal(coordinator.owns("twitter:2"), true);
+  tracked.get("persisted-task").onTerminal({
+    task_id: "persisted-task",
+    items: rows.map((row) => ({ item_key: row.item_key, status: "synced" })),
+  });
+  assert.equal(coordinator.owns("youtube:1"), false);
+  assert.equal(terminals, 1);
+
+  coordinator.track({
+    task_id: "new-task",
+    items: [{ item_key: "reddit:1", status: "syncing" }],
+  }, ["reddit:1"]);
+  coordinator.track({
+    task_id: "new-task",
+    items: [{ item_key: "zhihu:2", status: "syncing" }],
+  }, ["zhihu:2"]);
+  assert.equal(coordinator.owns("reddit:1"), true);
+  assert.equal(coordinator.owns("zhihu:2"), true);
+  tracked.get("new-task").onTerminal({
+    task_id: "new-task",
+    items: [{ item_key: "reddit:1", status: "synced" }, { item_key: "zhihu:2", status: "synced" }],
+  });
+  assert.equal(coordinator.owns("reddit:1"), false);
+  assert.equal(coordinator.owns("zhihu:2"), false);
+}
+
+test("all three saved runtimes recover and deduplicate persisted nonterminal tasks", async () => {
+  const popup = await import("../popup/popup-saved-sync.js");
+  const mobile = await import("../../src/openbiliclaw/web/js/saved-sync-runtime.js");
+  await import("../../src/openbiliclaw/web/desktop/assets/js/saved-sync-core.js");
+  const desktop = (globalThis as any).OpenBiliClawSavedSync;
+  for (const createCoordinator of [
+    popup.createSavedTaskCoordinator,
+    mobile.createSavedTaskCoordinator,
+    desktop.createSavedTaskCoordinator,
+  ]) {
+    assert.equal(typeof createCoordinator, "function");
+    await exerciseRecoveredTaskCoordinator(createCoordinator);
+  }
+});
+
+function actionCard(itemKey: string, action: string, sink: string[]) {
+  const button = {
+    dataset: { savedAction: action },
+    focus() { sink.push(itemKey); },
+  };
+  return {
+    dataset: { itemKey },
+    querySelectorAll(selector: string) { return selector === "[data-saved-action]" ? [button] : []; },
+  };
+}
+
+function fallbackRoot(cards: any[], listAction: any = null, heading: any = null) {
+  return {
+    querySelectorAll(selector: string) { return selector === "[data-item-key]" ? cards : []; },
+    querySelector(selector: string) {
+      if (selector.includes("data-saved-list-action")) return listAction;
+      if (selector === "[data-saved-heading]") return heading;
+      return null;
+    },
+  };
+}
+
+test("focus restoration follows adjacent card, batch action, then heading across all surfaces", async () => {
+  const popup = await import("../popup/popup-saved-sync.js");
+  const mobile = await import("../../src/openbiliclaw/web/js/saved-sync-runtime.js");
+  const desktop = (globalThis as any).OpenBiliClawSavedSync;
+  const flows = [
+    [popup.restoreSavedFocus, "popup-remove"],
+    [mobile.restoreSavedFocus, "mobile-sync"],
+    [desktop.restoreSavedFocus, "desktop-batch"],
+  ];
+  for (const [restore, label] of flows) {
+    const focused: string[] = [];
+    const cards = [actionCard("previous", "remove", focused), actionCard("next", "sync", focused)];
+    assert.equal(restore(fallbackRoot(cards), { itemKey: "removed", action: "remove", index: 1 }), true, label);
+    assert.deepEqual(focused, ["next"], label);
+
+    focused.length = 0;
+    const syncedCard = actionCard("synced", "remove", focused);
+    const afterSynced = actionCard("after-synced", "sync", focused);
+    assert.equal(restore(
+      fallbackRoot([syncedCard, afterSynced]),
+      { itemKey: "synced", action: "sync", index: 0 },
+    ), true, label);
+    assert.deepEqual(focused, ["after-synced"], label);
+
+    const batch = { focus() { focused.push("batch"); } };
+    assert.equal(restore(fallbackRoot([], batch), { itemKey: "removed", action: "remove", index: 0 }), true, label);
+    assert.equal(focused.at(-1), "batch", label);
+
+    const heading = { focus() { focused.push("heading"); } };
+    assert.equal(restore(fallbackRoot([], null, heading), { itemKey: "removed", action: "remove", index: 0 }), true, label);
+    assert.equal(focused.at(-1), "heading", label);
+  }
+});
+
+test("Task 8 save and sync controls reserve coarse-pointer size without label shift", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const popupCss = await readFile(new URL("../popup/popup.html", import.meta.url), "utf8");
+  const desktopCss = await readFile(new URL("../../src/openbiliclaw/web/desktop/assets/css/app.css", import.meta.url), "utf8");
+  for (const css of [popupCss, desktopCss]) {
+    assert.match(css, /\(pointer:\s*coarse\)[\s\S]*?(saved-toggle|watch-later-btn)[\s\S]*?44px/);
+    assert.match(css, /(saved-sync-all|watchLaterSyncAll)[\s\S]*?min-inline-size/);
+  }
+  const mobileCss = await readFile(new URL("../../src/openbiliclaw/web/css/app.css", import.meta.url), "utf8");
+  assert.match(popupCss, /saved-card-sync[\s\S]*?min-inline-size/);
+  assert.match(mobileCss, /saved-card-sync[\s\S]*?min-inline-size/);
+  assert.match(desktopCss, /saved-sync-one[\s\S]*?min-inline-size/);
+});
+
+test("saved task lifecycles dispose on page teardown and mobile binds visibility once", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const popup = await readFile(new URL("../popup/popup.js", import.meta.url), "utf8");
+  const mobile = await readFile(new URL("../../src/openbiliclaw/web/js/views/saved.js", import.meta.url), "utf8");
+  const desktop = await readFile(new URL("../../src/openbiliclaw/web/desktop/assets/js/app.js", import.meta.url), "utf8");
+  for (const source of [popup, mobile, desktop]) {
+    assert.match(source, /addEventListener\("pagehide"[\s\S]*?\.dispose\(\)/);
+  }
+  assert.match(mobile, /let visibilityBound = false[\s\S]*?if \(!visibilityBound\)/);
+  assert.match(desktop, /wlBtn\.title = cached\.watchLater \? "取消稍后再看" : "稍后再看"/);
+});
+
+test("disposing a task tracker suppresses callbacks from an in-flight poll", async () => {
+  const popup = await import("../popup/popup-saved-sync.js");
+  const mobile = await import("../../src/openbiliclaw/web/js/saved-sync-runtime.js");
+  const desktop = (globalThis as any).OpenBiliClawSavedSync;
+  for (const createTracker of [
+    popup.createSavedSyncTaskTracker,
+    mobile.createDurableTaskTracker,
+    desktop.createDurableTaskTracker,
+  ]) {
+    let scheduled: (() => Promise<void>) | null = null;
+    let finishPoll: (task: any) => void = () => {};
+    let callbacks = 0;
+    const tracker = createTracker({
+      poll: () => new Promise((resolve) => { finishPoll = resolve; }),
+      schedule: (run: () => Promise<void>) => { scheduled = run; return 1; },
+      cancel: () => {},
+    });
+    tracker.track({
+      task_id: "dispose-task",
+      items: [{ item_key: "youtube:1", status: "syncing" }],
+    }, {
+      onProgress: () => { callbacks += 1; },
+      onTerminal: () => { callbacks += 1; },
+      onPollError: () => { callbacks += 1; },
+    });
+    callbacks = 0;
+    const inFlight = scheduled?.();
+    tracker.dispose();
+    finishPoll({
+      task_id: "dispose-task",
+      items: [{ item_key: "youtube:1", status: "synced" }],
+    });
+    await inFlight;
+    assert.equal(callbacks, 0);
+  }
 });
