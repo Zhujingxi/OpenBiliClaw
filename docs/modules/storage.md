@@ -51,13 +51,6 @@ native = db.ensure_native_save_state("favorite", item.item_key, "favorite")
 current = db.get_saved_membership("favorite", item.item_key)
 rows = db.list_saved_memberships("favorite", limit=50, offset=0)
 
-db.upsert_native_save_state(
-    "favorite",
-    item.item_key,
-    requested_action="favorite",
-    status="pending",
-    task_id="task-id",
-)
 eligible = db.list_native_sync_eligible("favorite")
 claimed = db.claim_native_sync_task("favorite", [item.item_key], "task-id")
 db.mark_native_sync_task_started("task-id")
@@ -78,8 +71,8 @@ removed = db.remove_saved_membership("favorite", item.item_key)
 - `saved_items.item_key` 是平台 canonical identity；不同平台可安全复用相同裸 `content_id`。
 - `content_cache` 与 `recommendations` 用同一 canonical `item_key` 做跨源关联；新推荐写入会随历史记录持久化该键，读取不再依赖可能跨平台碰撞的裸 ID。
 - `saved_memberships` 以 `(list_kind, item_key)` 为主键，同一内容可同时属于 `favorite` 与 `watch_later`。无 `native_save_states` 行时，membership 查询返回 `sync_status="pending"`。
-- `native_save_states` 以同一联合键引用 membership；状态 upsert 在启用外键的 `BEGIN IMMEDIATE` 事务内先验证本地 membership，未本地保存的 key 会抛出 `ValueError`，不会留下 orphan state。`ensure_native_save_state()` 使用 `INSERT OR IGNORE` 并在同一事务返回 effective row，任何已存在的 pending / claimed / syncing / retryable / terminal 状态都不会被本地重复保存降级或清空 owner。
-- `claim_native_sync_task()` 在单个 `BEGIN IMMEDIATE` 中选择 eligible membership 并写 task owner；非空但全空白的 `item_keys` 会 fail closed，真正空序列才表示整表选择。`release_native_sync_task()` 只释放登记失败 task 仍为 pending 的行；`release_stale_unstarted_native_sync_tasks()` 只回收超过 5 分钟且从未写入 `task_started_at` 的 owner；`mark_native_sync_task_started()` 防止正常 runner 被当成未启动任务。
+- `native_save_states` 以同一联合键引用 membership；状态写入在启用外键的事务内先验证本地 membership，未本地保存的 key 会抛出 `ValueError`，不会留下 orphan state。`ensure_native_save_state()` 使用 `INSERT OR IGNORE` 并在同一事务返回 effective row，任何已存在的 pending / claimed / syncing / retryable / terminal 状态都不会被本地重复保存降级或清空 owner。兼容用 `upsert_native_save_state()` 只能写无 owner 的 pending 或 terminal 快照：传入 `execution_id`、`status='syncing'`、带 `task_id` 的 pending，或试图覆盖已有 active owner 都会拒绝；它不能建立 / 改写 task ownership。
+- `claim_native_sync_task()` 是建立 active task owner 的唯一入口：它在单个 `BEGIN IMMEDIATE` 中选择 eligible membership，同时写入非空 `task_id` 与 `task_claimed_at`。非空但全空白的 `item_keys` 会 fail closed，真正空序列才表示整表选择。`release_native_sync_task()` 只释放登记失败 task 仍为 pending 的行；`release_stale_unstarted_native_sync_tasks()` 只回收超过 5 分钟且从未写入 `task_started_at` 的 owner；`mark_native_sync_task_started()` 防止正常 runner 被当成未启动任务。所有按 task 查询 / 修改的 DAO 都拒绝空白 `task_id`，不会把 `task_id=''` 的未领取 pending 行误当成一个批次。
 - `claim_native_save_item()` 用 `execution_id` 原子执行 `pending → syncing`；`update_native_save_claim_route()`、`heartbeat_native_save_claim()`、`complete_native_save_claim()` 都要求 `(list_kind, item_key, task_id, execution_id, status='syncing')` owner 完整匹配，旧 worker 无法刷新或完成新 owner。`reconcile_stale_native_save_claims(task_id)` 供轮询恢复一个已知 task；`reconcile_stale_native_save_claims_for_list(list_kind, item_keys)` 供普通手动创建在 eligibility selection 前恢复匹配的崩溃遗留项。两者只把超过 5 分钟无 heartbeat 的 `syncing` 写成 `failed/interrupted`。
 - `list_native_sync_eligible()` 是只读诊断 / selection 视图；`list_native_save_states_by_task()` 是 durable polling 视图。任务创建的写入必须走 atomic claim DAO，不能用 list 后逐项无条件 upsert。
 - 初始化只在 `saved_sync_migrations` 缺少 `legacy_saved_tables_v1` 时迁移旧表。迁移用当时的 `content_cache` 恢复平台、内容 ID 与元数据；身份字段不完整时按兼容语义回落 `bilibili:<legacy bvid>`。解析出的 canonical key 同时写入旧 `watch_later.item_key` / `favorites.item_key`，之后的状态和删除不再依赖可变或可清理的 `content_cache`。marker 在两个列表都复制成功后写入，避免已删除的 normalized membership 下次启动复活；`legacy_saved_item_keys_v2` 只为此前已迁移数据库补稳定关联，不重新导入 membership。

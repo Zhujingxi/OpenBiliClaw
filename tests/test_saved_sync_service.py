@@ -101,6 +101,17 @@ class CancellationSuppressingAdapter(FakeAdapter):
         )
 
 
+class MalformedCancellationSuppressingAdapter(CancellationSuppressingAdapter):
+    async def save(self, item: SavedItemInput, route: NativeSaveRoute) -> NativeSaveResult:
+        self.calls.append(item.item_key)
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancel_seen.set()
+            await self.release.wait()
+        return cast("NativeSaveResult", {"private_response": "must not leak"})
+
+
 def test_local_save_without_auto_sync_never_invokes_adapter(db: Database) -> None:
     adapter = FakeAdapter(NativeSaveCapability("bilibili", True, True, True))
     service = SavedSyncService(db, NativeSaveRouter([adapter]))
@@ -236,6 +247,24 @@ async def test_platform_failure_keeps_local_membership(db: Database) -> None:
     assert db.get_saved_membership("watch_later", item.item_key) is not None
     assert local.saved is True
     assert result.items[0].status == "failed"
+
+
+async def test_blank_task_ids_fail_closed_without_reading_or_executing(db: Database) -> None:
+    adapter = FakeAdapter(NativeSaveCapability("bilibili", True, True, True))
+    service = SavedSyncService(db, NativeSaveRouter([adapter]))
+    first = SavedItemInput("bilibili", "BV1BLANKTASK")
+    second = SavedItemInput("reddit", "blank-task-post")
+    service.save_local("favorite", first)
+    service.save_local("favorite", second)
+
+    with pytest.raises(ValueError, match="task_id"):
+        await service.run_sync_task("")
+    with pytest.raises(ValueError, match="task_id"):
+        service.get_sync_task("   ")
+
+    assert adapter.calls == []
+    assert db.get_saved_membership("favorite", first.item_key)["sync_task_id"] == ""  # type: ignore[index]
+    assert db.get_saved_membership("favorite", second.item_key)["sync_task_id"] == ""  # type: ignore[index]
 
 
 def test_create_sync_task_uses_one_task_id_for_selected_eligible_items(db: Database) -> None:
@@ -567,6 +596,43 @@ async def test_adapter_deadline_keeps_lease_until_cancellation_suppressing_call_
     assert persisted.items[0].status == "synced"
     assert persisted.items[0].error_code == ""
     assert adapter.calls == [item.item_key]
+    for _ in range(100):
+        if not service._detached_attempts:
+            break
+        await asyncio.sleep(0)
+    assert service._detached_attempts == set()
+
+
+async def test_detached_malformed_adapter_result_is_sanitized_and_completed(
+    db: Database,
+) -> None:
+    release = asyncio.Event()
+    adapter = MalformedCancellationSuppressingAdapter(release)
+    service = SavedSyncService(
+        db,
+        NativeSaveRouter([adapter]),
+        claim_heartbeat_interval_seconds=0.005,
+        adapter_timeout_seconds=0.02,
+    )
+    item = SavedItemInput("bilibili", "BV1LATEMALFORMED")
+    service.save_local("favorite", item)
+    task = service.create_sync_task("favorite", [item.item_key], "manual_single")
+
+    initial = await service.run_sync_task(task.task_id)
+    assert initial.items[0].status == "syncing"
+    assert len(service._detached_attempts) == 1
+    await adapter.cancel_seen.wait()
+
+    release.set()
+    for _ in range(100):
+        result = service.get_sync_task(task.task_id)
+        if result.items and result.items[0].status != "syncing":
+            break
+        await asyncio.sleep(0.01)
+
+    assert result.items[0].status == "failed"
+    assert result.items[0].error_code == "invalid_adapter_result"
+    assert "private" not in result.items[0].error_message
     for _ in range(100):
         if not service._detached_attempts:
             break

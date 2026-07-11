@@ -7636,6 +7636,20 @@ class Database:
             raise ValueError("list_kind must be 'favorite' or 'watch_later'")
         return cast("SavedListKind", list_kind)
 
+    @staticmethod
+    def _native_task_id(value: str) -> str:
+        task_id = value.strip()
+        if not task_id:
+            raise ValueError("task_id must not be blank")
+        return task_id
+
+    @staticmethod
+    def _native_execution_id(value: str) -> str:
+        execution_id = value.strip()
+        if not execution_id:
+            raise ValueError("execution_id must not be blank")
+        return execution_id
+
     def _bilibili_saved_item_input(self, bvid: str) -> SavedItemInput:
         """Build a Bilibili compatibility input with any cached metadata snapshot."""
         content_id = bvid.strip()
@@ -7856,6 +7870,9 @@ class Database:
         """Persist the latest native-save routing and execution state for one item."""
         normalized_kind = self._saved_list_kind(list_kind)
         normalized_key = item_key.strip()
+        normalized_task_id = task_id.strip()
+        if task_id and not normalized_task_id:
+            raise ValueError("task_id must not be blank")
         conn = self.open_connection()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -7867,6 +7884,24 @@ class Database:
                 raise ValueError(
                     f"saved membership does not exist: {normalized_kind}/{normalized_key}"
                 )
+            if execution_id or status == "syncing" or (
+                status == "pending" and normalized_task_id
+            ):
+                raise ValueError("active task ownership must use the atomic claim APIs")
+            current = conn.execute(
+                """
+                SELECT status, task_id
+                FROM native_save_states
+                WHERE list_kind = ? AND item_key = ?
+                """,
+                (normalized_kind, normalized_key),
+            ).fetchone()
+            if (
+                current is not None
+                and str(current["status"]) in {"pending", "syncing"}
+                and str(current["task_id"])
+            ):
+                raise ValueError("active task ownership must use the atomic claim APIs")
             conn.execute(
                 """
                 INSERT INTO native_save_states (
@@ -7906,8 +7941,8 @@ class Database:
                     resolved_action,
                     resolved_target,
                     status,
-                    task_id,
-                    execution_id,
+                    normalized_task_id,
+                    "",
                     last_error_code,
                     last_error_message,
                     status,
@@ -7986,9 +8021,7 @@ class Database:
         the original task ID.
         """
         normalized_kind = self._saved_list_kind(list_kind)
-        normalized_task_id = task_id.strip()
-        if not normalized_task_id:
-            raise ValueError("task_id must not be empty")
+        normalized_task_id = self._native_task_id(task_id)
         raw_keys = list(item_keys or ())
         cleaned_keys = list(dict.fromkeys(key.strip() for key in raw_keys if key.strip()))
         if raw_keys and not cleaned_keys:
@@ -8059,6 +8092,7 @@ class Database:
 
     def release_native_sync_task(self, task_id: str) -> int:
         """Release pending ownership when a task could not be registered."""
+        normalized_task_id = self._native_task_id(task_id)
         cursor = self._execute_write(
             """
             UPDATE native_save_states
@@ -8066,7 +8100,7 @@ class Database:
                 task_started_at = NULL
             WHERE task_id = ? AND status = 'pending' AND execution_id = ''
             """,
-            (task_id.strip(),),
+            (normalized_task_id,),
         )
         return int(cursor.rowcount or 0)
 
@@ -8094,13 +8128,14 @@ class Database:
 
     def mark_native_sync_task_started(self, task_id: str) -> int:
         """Fence pending-task reclamation once a durable runner starts."""
+        normalized_task_id = self._native_task_id(task_id)
         cursor = self._execute_write(
             """
             UPDATE native_save_states
             SET task_started_at = COALESCE(task_started_at, CURRENT_TIMESTAMP)
             WHERE task_id = ? AND status IN ('pending', 'syncing')
             """,
-            (task_id.strip(),),
+            (normalized_task_id,),
         )
         return int(cursor.rowcount or 0)
 
@@ -8113,6 +8148,8 @@ class Database:
     ) -> bool:
         """Atomically claim one pending task item for adapter execution."""
         normalized_kind = self._saved_list_kind(list_kind)
+        normalized_task_id = self._native_task_id(task_id)
+        normalized_execution_id = self._native_execution_id(execution_id)
         cursor = self._execute_write(
             """
             UPDATE native_save_states
@@ -8120,7 +8157,12 @@ class Database:
             WHERE list_kind = ? AND item_key = ? AND task_id = ?
               AND status = 'pending' AND execution_id = ''
             """,
-            (execution_id, normalized_kind, item_key.strip(), task_id.strip()),
+            (
+                normalized_execution_id,
+                normalized_kind,
+                item_key.strip(),
+                normalized_task_id,
+            ),
         )
         return int(cursor.rowcount or 0) > 0
 
@@ -8135,6 +8177,8 @@ class Database:
     ) -> bool:
         """Persist the router-owned destination for a live execution claim."""
         normalized_kind = self._saved_list_kind(list_kind)
+        normalized_task_id = self._native_task_id(task_id)
+        normalized_execution_id = self._native_execution_id(execution_id)
         cursor = self._execute_write(
             """
             UPDATE native_save_states
@@ -8147,8 +8191,8 @@ class Database:
                 resolved_target,
                 normalized_kind,
                 item_key.strip(),
-                task_id.strip(),
-                execution_id,
+                normalized_task_id,
+                normalized_execution_id,
             ),
         )
         return int(cursor.rowcount or 0) > 0
@@ -8162,6 +8206,8 @@ class Database:
     ) -> bool:
         """Refresh a live adapter lease only while the execution owner matches."""
         normalized_kind = self._saved_list_kind(list_kind)
+        normalized_task_id = self._native_task_id(task_id)
+        normalized_execution_id = self._native_execution_id(execution_id)
         cursor = self._execute_write(
             """
             UPDATE native_save_states
@@ -8169,7 +8215,7 @@ class Database:
             WHERE list_kind = ? AND item_key = ? AND task_id = ?
               AND status = 'syncing' AND execution_id = ?
             """,
-            (normalized_kind, item_key.strip(), task_id.strip(), execution_id),
+            (normalized_kind, item_key.strip(), normalized_task_id, normalized_execution_id),
         )
         return int(cursor.rowcount or 0) > 0
 
@@ -8189,6 +8235,8 @@ class Database:
     ) -> bool:
         """Complete one item only when the caller still owns its execution claim."""
         normalized_kind = self._saved_list_kind(list_kind)
+        normalized_task_id = self._native_task_id(task_id)
+        normalized_execution_id = self._native_execution_id(execution_id)
         cursor = self._execute_write(
             """
             UPDATE native_save_states
@@ -8210,8 +8258,8 @@ class Database:
                 status,
                 normalized_kind,
                 item_key.strip(),
-                task_id.strip(),
-                execution_id,
+                normalized_task_id,
+                normalized_execution_id,
             ),
         )
         return int(cursor.rowcount or 0) > 0
@@ -8223,6 +8271,7 @@ class Database:
         stale_after_seconds: int = 300,
     ) -> int:
         """Turn abandoned syncing leases into explicit retryable failures."""
+        normalized_task_id = self._native_task_id(task_id)
         age = max(0, int(stale_after_seconds))
         cursor = self._execute_write(
             """
@@ -8234,7 +8283,7 @@ class Database:
               AND last_attempt_at IS NOT NULL
               AND last_attempt_at <= datetime('now', ?)
             """,
-            (task_id.strip(), f"-{age} seconds"),
+            (normalized_task_id, f"-{age} seconds"),
         )
         return int(cursor.rowcount or 0)
 
@@ -8311,6 +8360,7 @@ class Database:
 
     def list_native_save_states_by_task(self, task_id: str) -> list[dict[str, Any]]:
         """Return all persisted item results for a native-save task."""
+        normalized_task_id = self._native_task_id(task_id)
         self._ensure_fresh_read()
         rows = self.conn.execute(
             """
@@ -8345,7 +8395,7 @@ class Database:
             WHERE n.task_id = ?
             ORDER BY m.added_at DESC, n.item_key ASC
             """,
-            (task_id.strip(),),
+            (normalized_task_id,),
         ).fetchall()
         return [dict(row) for row in rows]
 

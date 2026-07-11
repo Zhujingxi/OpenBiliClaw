@@ -176,6 +176,7 @@ class SavedSyncService:
 
     async def run_sync_task(self, task_id: str) -> SavedSyncBatchResult:
         """Execute persisted task rows sequentially within each platform group."""
+        task_id = self._validated_task_id(task_id)
         entry = self._task_run_locks.setdefault(
             task_id,
             _TaskRunLockEntry(lock=asyncio.Lock()),
@@ -201,6 +202,7 @@ class SavedSyncService:
 
     def get_sync_task(self, task_id: str) -> SavedSyncBatchResult:
         """Reconstruct a batch entirely from persisted native-save states."""
+        task_id = self._validated_task_id(task_id)
         self._database.reconcile_stale_native_save_claims(task_id)
         rows = self._database.list_native_save_states_by_task(task_id)
         items = tuple(self._result_from_row(row) for row in rows)
@@ -482,28 +484,52 @@ class SavedSyncService:
     @staticmethod
     def _normalize_adapter_result(
         item_key: str,
-        adapter_result: NativeSaveResult,
+        adapter_result: object,
         *,
         resolved_action: NativeSaveAction,
         resolved_target: str,
     ) -> NativeSaveResult:
-        if adapter_result.status not in _TERMINAL_ADAPTER_STATUSES:
-            return NativeSaveResult(
-                item_key=item_key,
-                status="failed",
-                resolved_action=resolved_action,
-                resolved_target=resolved_target,
-                error_code="invalid_adapter_result",
-                error_message="Native save adapter returned a nonterminal status",
-            )
-        return NativeSaveResult(
+        invalid_result = NativeSaveResult(
             item_key=item_key,
-            status=adapter_result.status,
+            status="failed",
             resolved_action=resolved_action,
             resolved_target=resolved_target,
-            error_code=adapter_result.error_code,
-            error_message=adapter_result.error_message,
+            error_code="invalid_adapter_result",
+            error_message="Native save adapter returned a nonterminal status",
         )
+        if not isinstance(adapter_result, NativeSaveResult):
+            return invalid_result
+        try:
+            if (
+                not isinstance(adapter_result.status, str)
+                or adapter_result.status not in _TERMINAL_ADAPTER_STATUSES
+            ):
+                return invalid_result
+            error_code = (
+                adapter_result.error_code if isinstance(adapter_result.error_code, str) else ""
+            )
+            error_message = (
+                adapter_result.error_message
+                if isinstance(adapter_result.error_message, str)
+                else ""
+            )
+            return NativeSaveResult(
+                item_key=item_key,
+                status=adapter_result.status,
+                resolved_action=resolved_action,
+                resolved_target=resolved_target,
+                error_code=error_code,
+                error_message=error_message,
+            )
+        except Exception:
+            return invalid_result
+
+    @staticmethod
+    def _validated_task_id(value: str) -> str:
+        task_id = value.strip()
+        if not task_id:
+            raise ValueError("task_id must not be blank")
+        return task_id
 
     async def _heartbeat_claim(
         self,

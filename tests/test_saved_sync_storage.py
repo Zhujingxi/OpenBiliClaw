@@ -145,6 +145,53 @@ def test_native_save_state_controls_eligibility_and_task_lookup(db: Database) ->
     assert states[0]["title"] == ""
 
 
+def test_generic_native_state_upsert_cannot_establish_active_task_ownership(
+    db: Database,
+) -> None:
+    item = SavedItemInput("bilibili", "BV1UNSAFEUPSERT")
+    db.upsert_saved_membership("favorite", item)
+
+    with pytest.raises(ValueError, match="atomic claim"):
+        db.upsert_native_save_state(
+            "favorite",
+            item.item_key,
+            requested_action="favorite",
+            status="pending",
+            task_id="unsafe-task-owner",
+        )
+    with pytest.raises(ValueError, match="atomic claim"):
+        db.upsert_native_save_state(
+            "favorite",
+            item.item_key,
+            requested_action="favorite",
+            status="syncing",
+            task_id="unsafe-task-owner",
+            execution_id="unsafe-execution-owner",
+        )
+
+    row = db.get_saved_membership("favorite", item.item_key)
+    assert row is not None
+    assert row["sync_task_id"] == ""
+    assert db.list_native_save_states_by_task("unsafe-task-owner") == []
+
+
+def test_native_task_dao_boundaries_reject_blank_task_ids(db: Database) -> None:
+    item = SavedItemInput("bilibili", "BV1BLANKDAO")
+    db.upsert_saved_membership("favorite", item)
+    db.ensure_native_save_state("favorite", item.item_key, "favorite")
+
+    with pytest.raises(ValueError, match="task_id"):
+        db.list_native_save_states_by_task(" ")
+    with pytest.raises(ValueError, match="task_id"):
+        db.reconcile_stale_native_save_claims("")
+    with pytest.raises(ValueError, match="task_id"):
+        db.release_native_sync_task("\t")
+    with pytest.raises(ValueError, match="task_id"):
+        db.mark_native_sync_task_started("  ")
+    with pytest.raises(ValueError, match="task_id"):
+        db.claim_native_save_item("favorite", item.item_key, "", "execution")
+
+
 def test_atomic_task_claim_rejects_nonempty_all_blank_selection(db: Database) -> None:
     item = SavedItemInput("bilibili", "BV1DAOFILTER")
     db.upsert_saved_membership("favorite", item)
