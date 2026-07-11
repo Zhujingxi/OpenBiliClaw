@@ -27,6 +27,7 @@ class CandidateEvalSnapshot:
     pending_eval: int
     evaluating: int
     evaluated: int
+    committed_pending: int = 0
 
 
 def effective_candidate_eval_workers(configured: int, llm_concurrency: int) -> int:
@@ -49,6 +50,7 @@ class CandidateEvalCoordinator:
         worker_count: int = 3,
         batch_size: int = 30,
         supply_callback: Any | None = None,
+        post_commit_callback: Any | None = None,
         work_allowed: Any | None = None,
         safety_wake_seconds: float = 60.0,
         time_fn: Any = time.monotonic,
@@ -59,6 +61,7 @@ class CandidateEvalCoordinator:
         self.worker_count = max(1, min(8, int(worker_count)))
         self.batch_size = max(1, min(30, int(batch_size)))
         self.supply_callback = supply_callback
+        self.post_commit_callback = post_commit_callback
         self.work_allowed = work_allowed
         self.safety_wake_seconds = max(0.01, float(safety_wake_seconds))
         self.time_fn = time_fn
@@ -67,6 +70,8 @@ class CandidateEvalCoordinator:
         self._generation = 0
         self._workers: dict[asyncio.Task[Any], Any] = {}
         self._supply_task: asyncio.Task[Any] | None = None
+        self._post_commit_task: asyncio.Task[Any] | None = None
+        self._post_commit_requested = False
         self._cleanup_lock = asyncio.Lock()
         self._released_tokens: set[str] = set()
         self._stopping = False
@@ -109,6 +114,7 @@ class CandidateEvalCoordinator:
                     break
 
                 await self._settle_supply_task()
+                await self._settle_post_commit_task()
                 if self.work_allowed is not None and not bool(self.work_allowed()):
                     self.state = "paused"
                     await self._wait_for_activity(self.safety_wake_seconds)
@@ -127,7 +133,7 @@ class CandidateEvalCoordinator:
                 self._backoff_until = 0.0
 
                 snapshot = self._snapshot()
-                if snapshot.available >= snapshot.target:
+                if self._projected_inventory(snapshot) >= snapshot.target:
                     self.state = "idle"
                 else:
                     self._admit_evaluated(snapshot)
@@ -145,6 +151,7 @@ class CandidateEvalCoordinator:
             self._stopping = True
             await self._cleanup_workers()
             await self._cancel_supply_task()
+            await self._cancel_post_commit_task()
             self._running = False
 
     async def stop(self) -> None:
@@ -155,6 +162,7 @@ class CandidateEvalCoordinator:
         self._wake_event.set()
         await self._cleanup_workers()
         await self._cancel_supply_task()
+        await self._cancel_post_commit_task()
 
     def status_payload(self) -> dict[str, Any]:
         """Return stable runtime diagnostics for API and event payloads."""
@@ -182,12 +190,13 @@ class CandidateEvalCoordinator:
             pending_eval=int(value.get("pending_eval", 0)),
             evaluating=int(value.get("evaluating", 0)),
             evaluated=int(value.get("evaluated", 0)),
+            committed_pending=int(value.get("committed_pending", 0)),
         )
 
     def _fill_open_slots(self) -> None:
         while not self._stopping and len(self._workers) < self.worker_count:
             snapshot = self._snapshot()
-            if snapshot.available >= snapshot.target or snapshot.pending_eval <= 0:
+            if self._projected_inventory(snapshot) >= snapshot.target or snapshot.pending_eval <= 0:
                 return
             claim = self.pipeline.claim_batch(limit=self.batch_size)
             if claim is None:
@@ -248,6 +257,8 @@ class CandidateEvalCoordinator:
                 self._zero_cache_streak = 0
                 self._backoff_until = max(self._backoff_until, self.time_fn() + delay)
                 self._request_supply("candidate_eval_no_progress")
+            if self.last_cached > 0:
+                self._request_post_commit()
 
     def _record_failure(self, exc: BaseException) -> None:
         self.last_error = str(exc)
@@ -281,6 +292,8 @@ class CandidateEvalCoordinator:
         waiters: set[asyncio.Task[Any]] = {wake_task, *self._workers.keys()}
         if self._supply_task is not None:
             waiters.add(self._supply_task)
+        if self._post_commit_task is not None:
+            waiters.add(self._post_commit_task)
         try:
             await asyncio.wait(
                 waiters,
@@ -327,6 +340,52 @@ class CandidateEvalCoordinator:
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
+    def _request_post_commit(self) -> None:
+        callback = self.post_commit_callback
+        if callback is None or self._stopping:
+            return
+        if self._post_commit_task is not None:
+            self._post_commit_requested = True
+            return
+
+        async def run() -> Any:
+            result = callback()
+            if inspect.isawaitable(result):
+                return await result
+            return result
+
+        self._post_commit_task = asyncio.create_task(
+            run(),
+            name="candidate_eval:post_commit",
+        )
+
+    async def _settle_post_commit_task(self) -> None:
+        task = self._post_commit_task
+        if task is None or not task.done():
+            return
+        self._post_commit_task = None
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.warning("candidate evaluation post-commit hook failed: %s", exc)
+            self.last_error = str(exc)
+        rerun = self._post_commit_requested
+        self._post_commit_requested = False
+        if rerun and not self._stopping:
+            self._request_post_commit()
+
+    async def _cancel_post_commit_task(self) -> None:
+        task = self._post_commit_task
+        self._post_commit_task = None
+        self._post_commit_requested = False
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
     async def _cleanup_workers(self) -> None:
         async with self._cleanup_lock:
             entries = list(self._workers.items())
@@ -345,6 +404,10 @@ class CandidateEvalCoordinator:
             return
         self._released_tokens.add(token)
         self.pipeline.release_claim(claim, reason=reason, increment_attempts=False)
+
+    @staticmethod
+    def _projected_inventory(snapshot: CandidateEvalSnapshot) -> int:
+        return max(0, snapshot.available) + max(0, snapshot.committed_pending)
 
     @staticmethod
     def _resume_notification(reason: str) -> bool:

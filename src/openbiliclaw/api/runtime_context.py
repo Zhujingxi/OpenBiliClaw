@@ -857,17 +857,35 @@ class RuntimeContext:
         def _candidate_eval_snapshot() -> CandidateEvalSnapshot:
             readiness = new_runtime_controller._pool_readiness_counts()  # noqa: SLF001
             status_counts = self.database.count_discovery_candidates_by_status()
+            discovery_backlog = sum(
+                int(status_counts.get(status, 0))
+                for status in ("pending_eval", "evaluating", "evaluated")
+            )
             return CandidateEvalSnapshot(
                 available=int(readiness.get("available", 0)),
                 target=int(new_config.scheduler.pool_target_count),
                 pending_eval=int(status_counts.get("pending_eval", 0)),
                 evaluating=int(status_counts.get("evaluating", 0)),
                 evaluated=int(status_counts.get("evaluated", 0)),
+                committed_pending=max(
+                    0,
+                    int(readiness.get("pending", 0)) - discovery_backlog,
+                ),
             )
 
         async def _request_candidate_supply(reason: str) -> dict[str, object]:
             await new_runtime_controller.request_replenishment(reason=reason)
             return await new_runtime_controller.refresh_if_needed()
+
+        async def _precompute_committed_candidates() -> None:
+            profile = await new_soul_engine.get_profile()
+            if profile is None:
+                return
+            before = int(_candidate_eval_snapshot().available)
+            await new_runtime_controller._safe_precompute_pool_copy(profile=profile)  # noqa: SLF001
+            await new_runtime_controller._publish_precompute_replenishment_if_needed(  # noqa: SLF001
+                before_pool_count=before
+            )
 
         candidate_eval_workers = effective_candidate_eval_workers(
             int(getattr(discovery_cfg, "candidate_eval_concurrency", 3)),
@@ -880,6 +898,7 @@ class RuntimeContext:
             worker_count=candidate_eval_workers,
             batch_size=30,
             supply_callback=_request_candidate_supply,
+            post_commit_callback=_precompute_committed_candidates,
             work_allowed=lambda: (
                 new_runtime_controller._is_initialized()  # noqa: SLF001
                 and new_runtime_controller._llm_work_allowed()  # noqa: SLF001

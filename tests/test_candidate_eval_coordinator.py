@@ -156,6 +156,75 @@ async def test_three_workers_refill_fast_slot_without_waiting_for_slow_slots() -
 
 
 @pytest.mark.asyncio
+async def test_post_commit_hook_does_not_block_fast_slot_refill() -> None:
+    pipeline = _FakeStagedPipeline(candidate_count=120)
+    hook_started = asyncio.Event()
+    hook_release = asyncio.Event()
+
+    async def post_commit() -> None:
+        hook_started.set()
+        await hook_release.wait()
+
+    coordinator = CandidateEvalCoordinator(
+        pipeline=pipeline,  # type: ignore[arg-type]
+        snapshot_provider=lambda: CandidateEvalSnapshot(
+            available=pipeline.available,
+            target=600,
+            pending_eval=pipeline.pending_eval,
+            evaluating=pipeline.in_flight * 30,
+            evaluated=0,
+        ),
+        profile_provider=lambda: object(),
+        worker_count=3,
+        batch_size=30,
+        post_commit_callback=post_commit,
+        safety_wake_seconds=0.01,
+    )
+    task = asyncio.create_task(coordinator.run_forever())
+    await pipeline.wait_for_started(3)
+    pipeline.finish(0, cached=10)
+
+    await asyncio.wait_for(hook_started.wait(), timeout=2)
+    await pipeline.wait_for_started(4)
+    assert hook_release.is_set() is False
+
+    hook_release.set()
+    await coordinator.stop()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_committed_pending_inventory_stops_new_claims_at_target() -> None:
+    pipeline = _FakeStagedPipeline(candidate_count=120)
+    coordinator = CandidateEvalCoordinator(
+        pipeline=pipeline,  # type: ignore[arg-type]
+        snapshot_provider=lambda: CandidateEvalSnapshot(
+            available=0,
+            target=10,
+            pending_eval=pipeline.pending_eval,
+            evaluating=pipeline.in_flight * 30,
+            evaluated=0,
+            committed_pending=pipeline.available,
+        ),
+        profile_provider=lambda: object(),
+        worker_count=3,
+        batch_size=30,
+        safety_wake_seconds=0.01,
+    )
+    task = asyncio.create_task(coordinator.run_forever())
+    await pipeline.wait_for_started(3)
+    pipeline.finish(0, cached=10)
+    async with asyncio.timeout(2):
+        while pipeline.available < 10:
+            await asyncio.sleep(0)
+    await asyncio.sleep(0.05)
+
+    assert len(pipeline.started) == 3
+    await coordinator.stop()
+    await task
+
+
+@pytest.mark.asyncio
 async def test_target_stops_new_claims_and_stop_releases_in_flight() -> None:
     pipeline = _FakeStagedPipeline(candidate_count=90)
     coordinator = _coordinator(pipeline, target=10)

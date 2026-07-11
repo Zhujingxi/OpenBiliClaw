@@ -253,17 +253,41 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
     def _candidate_eval_snapshot() -> CandidateEvalSnapshot:
         readiness = runtime_controller._pool_readiness_counts()  # noqa: SLF001
         status_counts = database.count_discovery_candidates_by_status()
+        discovery_backlog = sum(
+            int(status_counts.get(status, 0))
+            for status in ("pending_eval", "evaluating", "evaluated")
+        )
         return CandidateEvalSnapshot(
             available=int(readiness.get("available", 0)),
             target=int(config.scheduler.pool_target_count),
             pending_eval=int(status_counts.get("pending_eval", 0)),
             evaluating=int(status_counts.get("evaluating", 0)),
             evaluated=int(status_counts.get("evaluated", 0)),
+            committed_pending=max(0, int(readiness.get("pending", 0)) - discovery_backlog),
         )
 
     async def _request_candidate_supply(reason: str) -> dict[str, object]:
         await runtime_controller.request_replenishment(reason=reason)
         return await runtime_controller.refresh_if_needed()
+
+    async def _precompute_committed_candidates() -> None:
+        get_profile = getattr(soul_engine, "get_profile", None)
+        if not callable(get_profile):
+            return
+        profile = await get_profile()
+        if profile is None:
+            return
+        before = int(_candidate_eval_snapshot().available)
+        precompute = getattr(runtime_controller, "_safe_precompute_pool_copy", None)
+        if callable(precompute):
+            await precompute(profile=profile)
+        publish = getattr(
+            runtime_controller,
+            "_publish_precompute_replenishment_if_needed",
+            None,
+        )
+        if callable(publish):
+            await publish(before_pool_count=before)
 
     candidate_eval_coordinator = CandidateEvalCoordinator(
         pipeline=candidate_pipeline,
@@ -275,6 +299,7 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         ),
         batch_size=30,
         supply_callback=_request_candidate_supply,
+        post_commit_callback=_precompute_committed_candidates,
         work_allowed=lambda: bool(
             getattr(runtime_controller, "_is_initialized", lambda: True)()
             and getattr(runtime_controller, "_llm_work_allowed", lambda: True)()
