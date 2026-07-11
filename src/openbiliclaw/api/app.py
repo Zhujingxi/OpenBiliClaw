@@ -17,7 +17,7 @@ import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlparse, urlsplit, urlunsplit
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -83,6 +83,7 @@ from openbiliclaw.api.models import (
     LLMProviderConfigOut,
     LoggingConfigOut,
     ModuleLLMConfigOut,
+    NetworkConfigOut,
     NotificationAckIn,
     NotificationAckResponse,
     PendingCognitionUpdateOut,
@@ -998,6 +999,26 @@ def _mode_to_flags(mode: str) -> tuple[bool, bool]:
     Literal (the handler validates before calling).
     """
     return (mode != "legacy", mode == "inspiration")
+
+
+def _mask_proxy_userinfo(url: str) -> str:
+    """Mask any ``user:pass@`` credential in a proxy URL for GET responses.
+
+    ``socks5://u:p@host:1`` → ``socks5://***@host:1``. A bare
+    ``socks5://host:1`` has no secret and is returned verbatim.
+    """
+    if not url:
+        return url
+    parts = urlsplit(url)
+    if "@" not in parts.netloc:
+        return url
+    host = parts.netloc.rsplit("@", 1)[1]
+    return urlunsplit((parts.scheme, f"***@{host}", parts.path, parts.query, parts.fragment))
+
+
+def _is_masked_proxy_echo(value: str) -> bool:
+    """Whether a submitted proxy value is a masked GET echo (contains ``***``)."""
+    return "***" in value
 
 
 def create_app(
@@ -9101,6 +9122,9 @@ def create_app(
                 browser_executable=cfg.bilibili.browser_executable,
                 browser_headed=cfg.bilibili.browser_headed,
             ),
+            network=NetworkConfigOut(
+                proxy=_mask_proxy_userinfo(cfg.network.proxy) if mask_keys else cfg.network.proxy,
+            ),
             sources=SourcesConfigOut(
                 browser=SourcesBrowserConfigOut(
                     cdp_url=cfg.sources.browser_cdp_url,
@@ -9586,6 +9610,7 @@ def create_app(
             _normalize_probability,
             _normalize_scheduler_int,
             load_config,
+            normalize_outbound_proxy,
             save_config,
         )
 
@@ -10071,6 +10096,19 @@ def create_app(
                 if key in ldata:
                     setattr(cfg.logging, key, int(ldata[key]))
 
+        # Apply network (overseas outbound proxy) updates
+        if "network" in update:
+            ndata = update["network"]
+            if isinstance(ndata, dict) and "proxy" in ndata:
+                raw_proxy = str(ndata["proxy"])
+                # A masked GET echo (socks5://***@host) must never overwrite the
+                # stored credentialed URL; an empty value legitimately clears it.
+                if not _is_masked_proxy_echo(raw_proxy):
+                    try:
+                        cfg.network.proxy = normalize_outbound_proxy(raw_proxy)
+                    except ValueError as exc:
+                        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
         for field in reset_fields:
             target = _RESETTABLE_CONFIG_FIELDS[field]
             section = getattr(cfg, target[0])
@@ -10123,6 +10161,13 @@ def create_app(
 
             saved_path = save_config(cfg)
             logger.info("Configuration saved to %s", saved_path)
+
+            # Refresh the process-level outbound-proxy mirror BEFORE any runtime
+            # rebuild so the rebuilt LLM registry constructs its clients with the
+            # new proxy. CN-direct clients never read this value.
+            from openbiliclaw.network import set_outbound_proxy
+
+            set_outbound_proxy(cfg.network.proxy)
 
             if bool(getattr(ctx, "degraded", False)):
                 return ConfigUpdateResponse(
