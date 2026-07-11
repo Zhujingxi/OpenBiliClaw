@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
+import unicodedata
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictStr,
+    ValidationInfo,
+    field_validator,
+)
 
 from openbiliclaw.saved_sync.identity import canonical_source_platform, make_item_key
 
@@ -23,6 +33,54 @@ NativeSaveStatusOut = Literal[
 ]
 NativeSaveActionOut = Literal["favorite", "watch_later"]
 _SAVED_PLATFORM_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+_URL_FALLBACK_ID_RE = re.compile(r"[0-9a-f]{24}")
+
+
+def _has_unicode_control(value: str) -> bool:
+    return any(unicodedata.category(character).startswith("C") for character in value)
+
+
+def _has_identity_whitespace(value: str) -> bool:
+    return any(character.isspace() for character in value)
+
+
+def _validate_http_url(value: str) -> str:
+    if _has_identity_whitespace(value) or _has_unicode_control(value):
+        raise ValueError("URL fields must not contain whitespace or control characters")
+    try:
+        parts = urlsplit(value)
+        hostname = parts.hostname
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError("URL fields must use a valid absolute HTTP(S) URL") from exc
+    if parts.scheme.lower() not in {"http", "https"} or not parts.netloc or hostname is None:
+        raise ValueError("URL fields must use a valid absolute HTTP(S) URL")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("URL fields must not contain credentials")
+    if port is not None and port <= 0:
+        raise ValueError("URL fields must use a valid TCP port")
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        try:
+            ascii_hostname = hostname.encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise ValueError("URL fields must contain a valid hostname") from exc
+        labels = ascii_hostname.removesuffix(".").split(".")
+        if (
+            not ascii_hostname
+            or len(ascii_hostname.removesuffix(".")) > 253
+            or any(
+                not label
+                or len(label) > 63
+                or label.startswith("-")
+                or label.endswith("-")
+                or re.fullmatch(r"[A-Za-z0-9-]+", label) is None
+                for label in labels
+            )
+        ):
+            raise ValueError("URL fields must contain a valid hostname") from None
+    return value
 
 
 class BehaviorEventIn(BaseModel):
@@ -988,16 +1046,27 @@ def validate_saved_item_key(value: str) -> str:
     if not isinstance(value, str):
         raise ValueError("item_key must be a string")
     item_key = value.strip()
-    if not item_key or item_key != value or len(item_key) > 2048:
-        raise ValueError("item_key must be a non-blank canonical key")
-    platform, separator, content_identity = item_key.partition(":")
     if (
-        not separator
-        or not platform
-        or not content_identity
+        not item_key
+        or item_key != value
+        or len(item_key) > 2048
+        or _has_identity_whitespace(item_key)
+        or _has_unicode_control(item_key)
+    ):
+        raise ValueError("item_key must be a non-blank canonical key")
+    parts = item_key.split(":")
+    platform = parts[0]
+    stable_key = len(parts) == 2 and bool(parts[1])
+    url_fallback_key = (
+        len(parts) == 3
+        and parts[1] == "url"
+        and _URL_FALLBACK_ID_RE.fullmatch(parts[2]) is not None
+    )
+    if (
+        not platform
+        or not (stable_key or url_fallback_key)
         or canonical_source_platform(platform) != platform
         or _SAVED_PLATFORM_RE.fullmatch(platform) is None
-        or any(ord(character) < 32 or ord(character) == 127 for character in item_key)
     ):
         raise ValueError("item_key must be a canonical platform:content identity")
     return item_key
@@ -1028,10 +1097,21 @@ class SavedItemIn(BaseModel):
         "note",
     )
     @classmethod
-    def _strip_safe_text(cls, value: str) -> str:
+    def _strip_safe_text(cls, value: str, info: ValidationInfo) -> str:
+        if _has_unicode_control(value):
+            raise ValueError("saved item fields must not contain Unicode control characters")
+        if (
+            info.field_name
+            in {
+                "source_platform",
+                "content_id",
+                "content_url",
+                "cover_url",
+            }
+            and value != value.strip()
+        ):
+            raise ValueError("saved identity and URL fields must not have surrounding whitespace")
         normalized = value.strip()
-        if any(ord(character) < 32 or ord(character) == 127 for character in normalized):
-            raise ValueError("saved item fields must not contain control characters")
         return normalized
 
     @field_validator("source_platform")
@@ -1056,16 +1136,13 @@ class SavedItemIn(BaseModel):
     def _validate_optional_http_url(cls, value: str) -> str:
         if not value:
             return value
-        parts = urlsplit(value)
-        if parts.scheme not in {"http", "https"} or not parts.netloc:
-            raise ValueError("URL fields must use an absolute HTTP(S) URL")
-        return value
+        return _validate_http_url(value)
 
     @field_validator("content_id")
     @classmethod
     def _validate_content_id(cls, value: str) -> str:
-        if ":" in value:
-            raise ValueError("content_id must not contain ':'")
+        if ":" in value or _has_identity_whitespace(value) or _has_unicode_control(value):
+            raise ValueError("content_id must be one non-blank stable identity segment")
         return value
 
     def model_post_init(self, __context: object) -> None:

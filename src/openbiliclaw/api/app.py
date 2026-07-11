@@ -166,7 +166,6 @@ from openbiliclaw.runtime.keyword_fetch import (
 from openbiliclaw.saved_sync.identity import make_item_key
 from openbiliclaw.saved_sync.models import (
     NATIVE_SAVE_STATUSES,
-    NativeSaveAction,
     NativeSaveResult,
     NativeSaveStatus,
     SavedItemInput,
@@ -4205,88 +4204,26 @@ def create_app(
         list_kind: SavedListKind,
         payload: SavedSyncRequest,
     ) -> SavedSyncBatchResponse:
-        selected = payload.item_keys
-        missing = {
-            item_key
-            for item_key in selected
-            if ctx.database.get_saved_membership(list_kind, item_key) is None
-        }
-        eligible_selection = [item_key for item_key in selected if item_key not in missing]
-        if selected and not eligible_selection:
-            created = SavedSyncBatchResult(task_id="", items=())
-        else:
-            trigger = "manual_single" if len(selected) == 1 else "manual_batch"
-            try:
-                created = _saved_service().create_sync_task(
-                    list_kind,
-                    eligible_selection,
-                    trigger,
-                )
-            except ValueError as exc:
-                raise HTTPException(status_code=422, detail="invalid sync selection") from exc
-
-        created_by_key = {item.item_key: item for item in created.items}
-        if not selected:
-            items = list(created.items)
-        else:
-            items = []
-            for item_key in selected:
-                if item_key in missing:
-                    items.append(
-                        NativeSaveResult(
-                            item_key=item_key,
-                            status="failed",
-                            resolved_action=list_kind,
-                            resolved_target="",
-                            error_code="not_saved_locally",
-                            error_message="Item is not saved locally",
-                        )
-                    )
-                    continue
-                created_item = created_by_key.get(item_key)
-                if created_item is not None:
-                    items.append(created_item)
-                    continue
-                row = ctx.database.get_saved_membership(list_kind, item_key)
-                if row is None:  # pragma: no cover - membership deleted after validation
-                    items.append(
-                        NativeSaveResult(
-                            item_key=item_key,
-                            status="failed",
-                            resolved_action=list_kind,
-                            resolved_target="",
-                            error_code="not_saved_locally",
-                            error_message="Item is not saved locally",
-                        )
-                    )
-                    continue
-                items.append(
-                    NativeSaveResult(
-                        item_key=item_key,
-                        status=_safe_native_status(row.get("sync_status")),
-                        resolved_action=cast(
-                            "NativeSaveAction",
-                            str(row.get("resolved_action", "")) or list_kind,
-                        ),
-                        resolved_target=str(row.get("resolved_target", "")),
-                        error_code=_safe_result_text(
-                            row.get("last_error_code", ""),
-                            limit=128,
-                        ),
-                        error_message=_safe_result_text(row.get("last_error_message", "")),
-                    )
-                )
-        return _sync_batch_response(
-            SavedSyncBatchResult(task_id=created.task_id, items=tuple(items))
-        )
+        trigger = "manual_single" if len(payload.item_keys) == 1 else "manual_batch"
+        try:
+            created = _saved_service().create_sync_task(
+                list_kind,
+                payload.item_keys,
+                trigger,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="invalid sync selection") from exc
+        return _sync_batch_response(created)
 
     @app.get("/api/saved-sync/tasks/{task_id}", response_model=SavedSyncBatchResponse)
     async def saved_sync_task(task_id: UUID) -> SavedSyncBatchResponse:
+        service = _saved_service()
         try:
-            result = _saved_service().get_sync_task(str(task_id))
+            exists = service.has_sync_task(str(task_id))
+            result = service.get_sync_task(str(task_id)) if exists else None
         except ValueError as exc:  # pragma: no cover - UUID path validation protects this
             raise HTTPException(status_code=422, detail="invalid task_id") from exc
-        if not result.items:
+        if result is None:
             raise HTTPException(status_code=404, detail="saved sync task not found")
         return _sync_batch_response(result)
 

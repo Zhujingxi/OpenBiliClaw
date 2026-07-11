@@ -9,14 +9,14 @@
 - 行为、推荐、候选池、聊天和鉴权状态的 SQLite 表结构管理。
 - 推荐池 `content_cache` 的可换 / raw / pending 计数口径。
 - discovery 待评估池 `discovery_candidates` 的生命周期管理。
-- 跨平台收藏 / 稍后再看的 canonical 本地 membership、元数据快照和 native sync 状态持久化。
+- 跨平台收藏 / 稍后再看的 canonical 本地 membership、元数据快照、native sync 状态和独立任务快照持久化。
 
 ## 已实现功能
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
 | SQLite schema 初始化 | ✅ | `Database.initialize()` 自动创建核心表和索引，支持旧库增量补列 / 补索引。 |
-| 规范化保存存储 | ✅ | `saved_items` 以 `source_platform:content_id` canonical key 保存跨平台元数据快照，`saved_memberships` 独立表达收藏 / 稍后看归属，`native_save_states` 持久化逐项同步状态；旧 `watch_later` / `favorites` 由带 marker 的单次事务迁移导入，并用 additive `item_key` 列持久关联 normalized identity。 |
+| 规范化保存存储 | ✅ | `saved_items` 以 canonical key 保存跨平台元数据快照，`saved_memberships` 独立表达收藏 / 稍后看归属，`native_save_states` 持久化当前逐项同步状态；`native_save_tasks` / `native_save_task_items` 独立持久化每次请求的 UUID、不可变成员集合和 task-scoped 结果。旧 `watch_later` / `favorites` 由带 marker 的单次事务迁移导入。 |
 | 推荐链路 canonical identity | ✅ | `content_cache.item_key` 唯一索引、`recommendations.item_key` 普通索引；初始化按平台 + raw `content_id` 回填旧行，并在建唯一索引前确定性合并 canonical 重复行（优先 canonical storage key、填补非空元数据、重定向 recommendation 引用）。若 loser 仍被旧 `watch_later` / `favorites` 引用，consolidation 会先为真实 legacy schema 补 additive `item_key` 并写入 canonical key；后续 normalized saved migration 在 exact `bvid` 不存在时用该稳定键 join keeper，既保留 membership，也不绕过 Task 2 的单次 marker / no-resurrection 语义。B 站 `bvid` 主键保持 raw BV 兼容，非 B 站 `bvid` 存储键使用 namespaced identity，API 继续从独立字段输出 raw ID 与 authoritative URL。 |
 | 推荐池 readiness 计数 | ✅ | `count_pool_readiness()` 返回 `available/raw/pending/pending_eval/evaluated_pending`，供 runtime status 和补货判断使用。 |
 | 来源 raw material 统计 | ✅ | `count_pool_raw_material_by_source()` 合并 `content_cache` raw rows 和 `discovery_candidates` 待评估候选，供 raw ceiling headroom 使用。 |
@@ -51,8 +51,9 @@ native = db.ensure_native_save_state("favorite", item.item_key, "favorite")
 current = db.get_saved_membership("favorite", item.item_key)
 rows = db.list_saved_memberships("favorite", limit=50, offset=0)
 
-eligible = db.list_native_sync_eligible("favorite")
-claimed = db.claim_native_sync_task("favorite", [item.item_key], "task-id")
+task_rows = db.create_native_sync_task_snapshot(
+    "favorite", [item.item_key], "task-id", "manual_selected"
+)
 if db.claim_native_sync_task_runner("task-id", "runner-id") and db.claim_native_save_item(
     "favorite", item.item_key, "task-id", "runner-id", "execution-id"
 ):
@@ -64,7 +65,7 @@ if db.claim_native_sync_task_runner("task-id", "runner-id") and db.claim_native_
         "favorite", item.item_key, "task-id", "execution-id"
     )
     db.heartbeat_native_sync_task("task-id", "runner-id")
-task_rows = db.list_native_save_states_by_task("task-id")
+task_rows = db.list_native_sync_task_items("task-id")
 removed = db.remove_saved_membership("favorite", item.item_key)
 ```
 
@@ -74,12 +75,13 @@ removed = db.remove_saved_membership("favorite", item.item_key)
 - `content_cache` 与 `recommendations` 用同一 canonical `item_key` 做跨源关联；新推荐写入会随历史记录持久化该键，读取不再依赖可能跨平台碰撞的裸 ID。
 - `saved_memberships` 以 `(list_kind, item_key)` 为主键，同一内容可同时属于 `favorite` 与 `watch_later`。无 `native_save_states` 行时，membership 查询返回 `sync_status="pending"`。
 - `native_save_states` 以同一联合键引用 membership；状态写入在启用外键的事务内先验证本地 membership，未本地保存的 key 会抛出 `ValueError`，不会留下 orphan state。所有 DAO 写入只接受显式 `NativeSaveStatus` 集合；新建表还有等价 `CHECK`。`ensure_native_save_state()` 使用 `INSERT OR IGNORE` 并在同一事务返回 effective row，任何已存在的 pending / claimed / syncing / retryable / terminal 状态都不会被本地重复保存降级或清空 owner。兼容用 `upsert_native_save_state()` 只能插入 / 刷新无 owner 的 pending 或写允许的 terminal 快照：传入未知 / 带空白状态、`execution_id`、`status='syncing'`、带 `task_id` 的 pending，覆盖已有 active owner，或把 terminal 降回 pending 都会拒绝；它不能建立 / 改写 task ownership。`complete_native_save_claim()` 只接受 terminal 状态，`pending/syncing/unknown` 不会清空 execution owner。
-- `claim_native_sync_task()` 是建立 active task owner 的唯一入口：它在单个 `BEGIN IMMEDIATE` 中选择 eligible membership，同时写入非空 `task_id` 与 `task_claimed_at`。执行前 `claim_native_sync_task_runner(task_id, runner_id)` 原子取得唯一 runner lease；fresh 的其它 runner 返回 `False`，stale lease 才允许接管。task heartbeat、item claim 与 pending release 都要求 runner token 匹配。runner 正常 / 取消退出释放余项；崩溃由 poll / manual-create 在 5 分钟后回收。所有 task / runner 边界拒绝空白 ID，公开 runner ID 还拒绝 `__openbiliclaw_` 保留前缀。
+- `native_save_tasks` 以 UUID 为主键；`native_save_task_items` 以 `(task_id, item_key)` 为主键并保存请求顺序、requested/resolved action、target、status/error 与 `is_live`。task/item 集合不引用 membership，因此本地删除后轮询快照仍存在。`create_native_sync_task_snapshot()` 在一个 `BEGIN IMMEDIATE` 中写 task/items 并领取 eligible 的 live owner；缺失、terminal、已有 owner 与零 eligible 都形成可查询快照。
+- `claim_native_sync_task()` 保留为底层兼容 owner 入口；生产 service 使用上述快照 DAO 原子建立 ledger 与 ownership。执行前 `claim_native_sync_task_runner(task_id, runner_id)` 原子取得唯一 runner lease；fresh 的其它 runner 返回 `False`，stale lease 才允许接管。task heartbeat、item claim 与 pending release 都要求 runner token 匹配。runner 正常 / 取消退出释放余项；崩溃由 poll / manual-create 在 5 分钟后回收。所有 task / runner 边界拒绝空白 ID，公开 runner ID 还拒绝 `__openbiliclaw_` 保留前缀。
 - `claim_native_save_item()` 还要求当前 `task_runner_id` 匹配，用 `execution_id` 原子执行 `pending → syncing`；`update_native_save_claim_route()`、`heartbeat_native_save_claim()`、`complete_native_save_claim()` 要求 `(list_kind, item_key, task_id, execution_id, status='syncing')` owner 完整匹配，旧 worker 无法刷新或完成新 owner。`reconcile_stale_native_save_claims(task_id)` 供轮询恢复一个已知 task；`reconcile_stale_native_save_claims_for_list(list_kind, item_keys)` 供普通手动创建在 eligibility selection 前恢复匹配的崩溃遗留项。两者只把超过 5 分钟无 item heartbeat 的 `syncing` 写成 `failed/interrupted`。
-- `list_native_sync_eligible()` 是只读诊断 / selection 视图，与 atomic claim 同样排除 `pending + 非空 task_id`；`list_native_save_states_by_task()` 是 durable polling 视图。任务创建的写入必须走 atomic claim DAO，不能用 list 后逐项无条件 upsert。
+- `list_native_sync_eligible()` 是只读诊断 / selection 视图；`list_native_save_states_by_task()` 只用于 live runner 工作集，durable polling 必须使用 `native_sync_task_exists()` + `list_native_sync_task_items()`。claim、route、complete、membership 删除和 stale/cancel recovery 都在同一事务同步更新 task item 快照。
 - 初始化只在 `saved_sync_migrations` 缺少 `legacy_saved_tables_v1` 时迁移旧表。迁移用当时的 `content_cache` 恢复平台、内容 ID 与元数据；身份字段不完整时按兼容语义回落 `bilibili:<legacy bvid>`。解析出的 canonical key 同时写入旧 `watch_later.item_key` / `favorites.item_key`，之后的状态和删除不再依赖可变或可清理的 `content_cache`。marker 在两个列表都复制成功后写入，避免已删除的 normalized membership 下次启动复活；`legacy_saved_item_keys_v2` 只为此前已迁移数据库补稳定关联，不重新导入 membership。
 - 旧 `add/remove/list/count/status` Bilibili wrappers 继续维护兼容表及其 stable `item_key` link，但用户可见读取以 normalized membership 为准。状态 / 移除 wrapper 会优先匹配 Bilibili key，否则只在裸 `content_id` 唯一对应一个 normalized membership 时解析跨平台 key；移除时按旧行已持久化的 `item_key` 同步清理迁移来源行。多个非 Bilibili 平台共享该裸 ID 时状态返回 `False`、移除也返回 `False`，不删除任何一侧。
-- 本节只描述本地存储基础；平台 adapter、新的 platform-neutral HTTP API 与三端同步 UI 尚未在此阶段宣称完成。
+- 本节只描述本地存储基础；平台 adapter 与 platform-neutral HTTP API 已接入，三端同步 UI 仍属后续任务。
 
 `native_save_states` 完整字段如下：
 

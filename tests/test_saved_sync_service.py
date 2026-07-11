@@ -227,9 +227,7 @@ def test_local_save_cannot_erase_task_claimed_between_membership_and_state_inser
     def read_then_claim(list_kind: str, item_key: str) -> dict[str, Any] | None:
         row = original_get(list_kind, item_key)
         if not claimed_task_ids and row is not None and not str(row["requested_action"]):
-            claimed = claiming_service.create_sync_task(
-                "favorite", [item_key], "manual_single"
-            )
+            claimed = claiming_service.create_sync_task("favorite", [item_key], "manual_single")
             claimed_task_ids.append(claimed.task_id)
         return row
 
@@ -239,9 +237,7 @@ def test_local_save_cannot_erase_task_claimed_between_membership_and_state_inser
         requested_action: str,
     ) -> dict[str, Any]:
         if not claimed_task_ids:
-            claimed = claiming_service.create_sync_task(
-                "favorite", [item_key], "manual_single"
-            )
+            claimed = claiming_service.create_sync_task("favorite", [item_key], "manual_single")
             claimed_task_ids.append(claimed.task_id)
         return original_ensure(list_kind, item_key, requested_action)
 
@@ -315,8 +311,17 @@ def test_create_sync_task_uses_one_task_id_for_selected_eligible_items(db: Datab
     )
 
     assert created.task_id
-    assert {item.item_key for item in created.items} == {first.item_key, second.item_key}
-    assert {item.status for item in created.items} == {"pending"}
+    assert {item.item_key for item in created.items} == {
+        first.item_key,
+        second.item_key,
+        excluded.item_key,
+    }
+    assert {item.status for item in created.items if item.item_key != excluded.item_key} == {
+        "pending"
+    }
+    assert next(item for item in created.items if item.item_key == excluded.item_key).status == (
+        "synced"
+    )
     rows = db.list_native_save_states_by_task(created.task_id)
     assert {row["item_key"] for row in rows} == {first.item_key, second.item_key}
 
@@ -330,9 +335,10 @@ def test_duplicate_task_creation_does_not_steal_pending_task_rows(db: Database) 
     duplicate = service.create_sync_task("favorite", [item.item_key], "manual_single")
 
     assert [result.item_key for result in first.items] == [item.item_key]
-    assert duplicate.items == ()
+    assert duplicate.items[0].status == "failed"
+    assert duplicate.items[0].error_code == "sync_already_in_progress"
     assert service.get_sync_task(first.task_id).items[0].status == "pending"
-    assert service.get_sync_task(duplicate.task_id).items == ()
+    assert service.get_sync_task(duplicate.task_id) == duplicate
 
 
 def test_task_starter_failure_releases_pending_ownership(db: Database) -> None:
@@ -393,7 +399,8 @@ def test_stale_never_started_task_can_be_safely_reclaimed(db: Database) -> None:
     recovered = service.create_sync_task("favorite", [item.item_key], "manual_single")
 
     assert [result.item_key for result in recovered.items] == [item.item_key]
-    assert service.get_sync_task(abandoned.task_id).items == ()
+    assert service.get_sync_task(abandoned.task_id).items[0].status == "failed"
+    assert service.get_sync_task(abandoned.task_id).items[0].error_code == "interrupted"
     assert service.get_sync_task(recovered.task_id).items[0].status == "pending"
 
 
@@ -434,11 +441,12 @@ async def test_concurrent_services_atomically_claim_task_creation(db: Database) 
         ),
     )
 
-    winner, loser = (first, second) if first.items else (second, first)
+    winner, loser = (first, second) if first.items[0].status == "pending" else (second, first)
     assert [result.item_key for result in winner.items] == [item.item_key]
-    assert loser.items == ()
+    assert loser.items[0].status == "failed"
+    assert loser.items[0].error_code == "sync_already_in_progress"
     assert first_service.get_sync_task(winner.task_id).items[0].status == "pending"
-    assert second_service.get_sync_task(loser.task_id).items == ()
+    assert second_service.get_sync_task(loser.task_id) == loser
 
 
 async def test_adapter_exception_is_sanitized_and_persisted_per_item(db: Database) -> None:
@@ -526,7 +534,8 @@ def test_polling_releases_stale_started_but_unclaimed_pending_rows(db: Database)
 
     polled = service.get_sync_task(abandoned.task_id)
 
-    assert polled.items == ()
+    assert polled.items[0].status == "failed"
+    assert polled.items[0].error_code == "interrupted"
     row = db.get_saved_membership("favorite", item.item_key)
     assert row is not None
     assert row["sync_status"] == "pending"
@@ -573,9 +582,7 @@ async def test_active_task_heartbeat_protects_later_sequential_pending_row(
     second = SavedItemInput("bilibili", "BV1ACTIVEB")
     service.save_local("favorite", first)
     service.save_local("favorite", second)
-    task = service.create_sync_task(
-        "favorite", [first.item_key, second.item_key], "manual_batch"
-    )
+    task = service.create_sync_task("favorite", [first.item_key, second.item_key], "manual_batch")
     runner = asyncio.create_task(service.run_sync_task(task.task_id))
     for _ in range(100):
         if adapter.calls:
@@ -604,7 +611,8 @@ async def test_active_task_heartbeat_protects_later_sequential_pending_row(
         await asyncio.sleep(0.01)
 
     duplicate = service.create_sync_task("favorite", [second.item_key], "manual_single")
-    assert duplicate.items == ()
+    assert duplicate.items[0].status == "failed"
+    assert duplicate.items[0].error_code == "sync_already_in_progress"
     assert adapter.calls == [first.item_key]
 
     gate.set()
@@ -677,9 +685,7 @@ async def test_task_heartbeat_failure_cancels_work_and_releases_pending(
     second = SavedItemInput("bilibili", "BV1HEARTFAILB")
     service.save_local("favorite", first)
     service.save_local("favorite", second)
-    task = service.create_sync_task(
-        "favorite", [first.item_key, second.item_key], "manual_batch"
-    )
+    task = service.create_sync_task("favorite", [first.item_key, second.item_key], "manual_batch")
 
     def fail_heartbeat(*args: object, **kwargs: object) -> int:
         del args, kwargs
@@ -763,7 +769,8 @@ async def test_item_heartbeat_exception_detaches_with_retrying_lease_and_late_re
             break
         await asyncio.sleep(0.01)
     duplicate = second_service.create_sync_task("favorite", [item.item_key], "manual_single")
-    assert duplicate.items == ()
+    assert duplicate.items[0].status == "failed"
+    assert duplicate.items[0].error_code == "sync_already_in_progress"
     assert adapter.calls == [item.item_key]
 
     release.set()
@@ -786,9 +793,7 @@ async def test_partial_batch_cancellation_releases_later_pending_ownership(
     second = SavedItemInput("bilibili", "BV1CANCELB")
     service.save_local("favorite", first)
     service.save_local("favorite", second)
-    task = service.create_sync_task(
-        "favorite", [first.item_key, second.item_key], "manual_batch"
-    )
+    task = service.create_sync_task("favorite", [first.item_key, second.item_key], "manual_batch")
 
     runner = asyncio.create_task(service.run_sync_task(task.task_id))
     for _ in range(100):
@@ -797,9 +802,7 @@ async def test_partial_batch_cancellation_releases_later_pending_ownership(
         await asyncio.sleep(0)
     assert len(adapter.calls) == 1
     active_key = adapter.calls[0]
-    pending_key = next(
-        item.item_key for item in (first, second) if item.item_key != active_key
-    )
+    pending_key = next(item.item_key for item in (first, second) if item.item_key != active_key)
     runner.cancel()
     with pytest.raises(asyncio.CancelledError):
         await runner
@@ -914,7 +917,8 @@ async def test_adapter_deadline_keeps_lease_until_cancellation_suppressing_call_
         await asyncio.sleep(0.01)
 
     second = second_service.create_sync_task("favorite", [item.item_key], "manual_single")
-    assert second.items == ()
+    assert second.items[0].status == "failed"
+    assert second.items[0].error_code == "sync_already_in_progress"
     assert adapter.calls == [item.item_key]
 
     release.set()
@@ -1000,7 +1004,8 @@ async def test_detached_timeout_restarts_heartbeat_after_later_failure(
         await asyncio.sleep(0.01)
 
     duplicate = second_service.create_sync_task("favorite", [item.item_key], "manual_single")
-    assert duplicate.items == ()
+    assert duplicate.items[0].status == "failed"
+    assert duplicate.items[0].error_code == "sync_already_in_progress"
     assert adapter.calls == [item.item_key]
 
     release.set()

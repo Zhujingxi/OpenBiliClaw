@@ -300,8 +300,8 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │       -> get_profile()/sync_profile_files 读时叠加（抗画像重建）│ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ /api/saved/* -> 本地 membership 先提交 -> 持久化 task -> capability router │
-│  │ -> BilibiliNativeSaveAdapter（收藏夹/稍后再看）-> 逐项 state/task poll │
+│  │ /api/saved/* -> membership 先提交 -> native_save_tasks/items 快照 -> router │
+│  │ -> BilibiliNativeSaveAdapter（收藏夹/稍后再看）-> durable task-item poll │
 │  │ （runtime 已接入；自动同步默认关闭；四端 UI 尚未接入）             │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │

@@ -13,13 +13,13 @@
 | Canonical 保存身份 | ✅ | `SavedItemInput.item_key` 使用规范化的 `source_platform:content_id`；B 站 legacy storage key 兼容由 identity / storage 层处理。 |
 | Capability router | ✅ | `NativeSaveRouter` 按 canonical 平台注册 adapter；`favorite` 只路由到 native favorite，`watch_later` 优先 native watch-later，不支持时仅在 favorite 可用时回退。adapter 的 `target_label()` 运行时返回必须是去空白后 1–256 字符且无控制字符的字符串，否则逐项安全失败且不会写 route / 调用平台。 |
 | Local-first 保存 | ✅ | `SavedSyncService.save_local()` 先提交 membership；自动同步关闭时只落 `pending` native state，不调用 adapter。 |
-| 持久化同步任务 | ✅ | 自动 / 手动触发统一经 `create_sync_task()` 生成一个 UUID，并在单个 `BEGIN IMMEDIATE` 事务中 claim 所有 eligible 项；执行前另以唯一 `task_runner_id` 原子领取 batch runner。第二个 service 不能执行 item、刷新 heartbeat 或释放 live runner 的 pending。runner 正常 / 取消退出立即释放余项，崩溃后超过 5 分钟由轮询或下一次创建回收。 |
+| 持久化同步任务 | ✅ | 自动 / 手动触发统一经 `create_sync_task()` 生成一个非空 UUID，并在单个 `BEGIN IMMEDIATE` 事务中写入 `native_save_tasks` / `native_save_task_items` 快照，同时 claim eligible 项。缺失、已完成和已有 owner 的选择也会得到稳定的 terminal 快照；空的 all-eligible 请求仍持久化零项 task。执行前另以唯一 `task_runner_id` 原子领取 batch runner。 |
 | 批量逐项执行 | ✅ | `run_sync_task()` 只读取该 task ID 仍存在的 membership，按平台分组、平台内串行执行，并以 `execution_id` 原子 claim / 完成每一项；同一任务的并发 runner 不会重复调用 adapter，平台组之间仍可并行。执行中每 30 秒 owner-fenced heartbeat；240 秒是调用方响应 deadline，不假定能强制终止不遵守 cancellation 的底层 I/O。 |
-| 可恢复任务查询 | ✅ | `get_sync_task()` 只从 `native_save_states` 与 membership/item join 重建结果，进程内不保存易丢失的任务结果。 |
+| 可恢复任务查询 | ✅ | `get_sync_task()` 从独立 task/item ledger 重建结果，不依赖当前 membership 或可变的 `native_save_states.task_id`。删除本地 membership、service/API 重建后仍可按 UUID 查询同一批逐项快照；未知 UUID 在 HTTP 层返回 404。 |
 | 安全失败归一化 | ✅ | 未注册 / 不支持的路由写为 `unsupported`；malformed target / result 写固定 `failed/invalid_adapter_result`；adapter 异常写 `failed/adapter_exception`。凡 adapter 因 item heartbeat 异常、响应 deadline 或调用方取消而进入 detached 状态，tracked watchdog 都会切换到 10ms–1s 有界退避的 owner-fenced heartbeat，直到真实终止后归一化 late terminal / malformed 结果，避免 detached 期间的后续心跳异常开放重叠重试。 |
 | B 站原生 adapter | ✅ | favorite 精确复用或创建 `OpenBiliClaw` 收藏夹；watch-later 写 B 站稍后再看。任意 endpoint 的 `-101` → `login_required`；只有最终 favorite resource-deal POST 的 `11201` 会由 client 标记为 dedicated duplicate，且 adapter 仍要求 resolved action 为 favorite 才映射 `already_synced`；folder/resolver 的同码与非 favorite route 的该异常均为 `failed`；watch-later 的 `90003` 固定为 `failed/bilibili_video_unavailable`。 |
-| 平台中立 HTTP API | ✅ | `/api/saved/{list_kind}` 提供 save/list/remove/status/sync，`/api/saved-sync/tasks/{task_id}` 返回 durable 逐项结果；`list_kind`、canonical key、选择和 UUID 均 fail closed。缺失 membership 只返回安全的 `failed/not_saved_locally`，不会成为任意 URL/ID 的平台写入代理。 |
-| Runtime wiring | ✅ | `RuntimeContext` 把当前 `BilibiliAPIClient` 注册到新 router/service，并把自动/手动 sync coroutine 交给 `BackgroundTaskRegistry`；配置热重载在所有新组件构造成功后原子替换 client 与 service。 |
+| 平台中立 HTTP API | ✅ | `/api/saved/{list_kind}` 提供 save/list/remove/status/sync，`/api/saved-sync/tasks/{task_id}` 返回 durable 逐项结果；`list_kind`、canonical key、选择和 UUID 均 fail closed。稳定键严格为 `<canonical-platform>:<nonblank-stable-id>`；URL fallback 严格为 `<platform>:url:<24位小写十六进制>`，URL 只接受无凭据、无空白/控制字符且 host/port 有效的 HTTP(S)。缺失 membership 只返回安全的 `failed/not_saved_locally`。 |
+| Runtime wiring | ✅ | `RuntimeContext` 把当前 `BilibiliAPIClient` 注册到 router/service；只有顶层 sync runner 交给 `BackgroundTaskRegistry`。service 自有的 heartbeat、adapter save 和 watchdog 会由 service 内部强引用到真实 I/O 结束，避免 registry 取消后失去 owner fencing。配置热重载先取消旧 registry task，并在所有新组件构造成功后原子替换 client 与 service。 |
 
 ## 公开 API
 
@@ -66,7 +66,7 @@ adapter = BilibiliNativeSaveAdapter(client)
 | `POST` | `/api/saved/{favorite|watch_later}/remove` | 用 exact `item_key` 只删本地 membership，不反向取消平台保存。 |
 | `GET` | `/api/saved/{favorite|watch_later}/status?item_key=...` | 查询单项本地 / 同步状态。 |
 | `POST` | `/api/saved/{favorite|watch_later}/sync` | 手动同步；`item_keys=[]` 表示全部 eligible，且始终无视自动同步开关。 |
-| `GET` | `/api/saved-sync/tasks/{uuid}` | 轮询持久化逐项状态；`login_required` / `rate_limited` / `failed` 不包装成泛化成功。 |
+| `GET` | `/api/saved-sync/tasks/{uuid}` | 轮询持久化逐项状态；已存在的零项 task 返回 200，未知 UUID 返回 404；`login_required` / `rate_limited` / `failed` 不包装成泛化成功。 |
 
 所有 `/api/*` 路径继续受现有 API auth middleware 保护。旧 `/api/watch-later` 与 `/api/favorites` 保留 B 站 `bvid` 契约，响应只新增 identity / sync 字段；POST 通过 service 本地保存但永不自动同步。
 
@@ -81,9 +81,9 @@ persisted = service.get_sync_task(created.task_id)
 ```
 
 - `save_local(list_kind, item, note="", auto_sync=False)`：先写本地；首次关闭自动同步时返回 `pending` 且 `sync_task_id=""`。重复保存只更新 membership / 内容快照，不会把既有 terminal 或 active native state 降级或改写 owner。
-- `create_sync_task(list_kind, item_keys, trigger)`：真正的空 `item_keys` 表示该列表全部 eligible 项；非空但全部为空白的选择会 fail closed。terminal success 和已有 task owner 的 active 项不会重新入队。若注入的 `task_starter(name, coro)` 登记失败，刚 claim 的 pending owner 会先原子释放再重新抛错；旧的未启动 owner 在 5 分钟保护窗后由后续创建回收。
+- `create_sync_task(list_kind, item_keys, trigger)`：真正的空 `item_keys` 表示该列表全部 eligible 项；非空但全部为空白的选择会 fail closed。每次调用都先持久化 task row 和不可变的 item 集合：显式缺失项写 `failed/not_saved_locally`，terminal 项复制现状，已有 live owner 写 `failed/sync_already_in_progress`，只有新 claim 项进入 `pending` 并启动 runner。若 `task_starter(name, coro)` 登记失败，刚 claim 的 pending owner 与 task ledger 会先回滚清理再重新抛错。
 - `run_sync_task(task_id)`：先原子领取唯一 runner token；领取失败只返回 durable snapshot。task heartbeat 与 work 使用 `FIRST_COMPLETED` 监控，task heartbeat 失败立即取消 work并 owner-fenced 释放余项。adapter 在 item heartbeat 异常、响应 deadline 或调用方取消后仍存活时，独立 watchdog 统一持续重试 execution heartbeat，并在 late 结果落库后自清理。进程崩溃才由 poll / 下一次创建按 5 分钟 lease 回收。
-- `get_sync_task(task_id)`：非空未知 task 返回同一 ID 和空 items；已有 task 返回持久化逐项结果。空白 `task_id` 在 service 与 DAO 两层都 fail closed，既不会聚合未领取 pending 行，也不会触发 adapter。
+- `get_sync_task(task_id)`：已有 task 从 `native_save_task_items` 返回持久化逐项结果；service 用 `has_sync_task()` 区分未知 task 与合法零项 task，HTTP 对前者返回 404。空白 `task_id` 在 service 与 DAO 两层都 fail closed，既不会聚合未领取 pending 行，也不会触发 adapter。
 
 ## 数据流与边界
 
@@ -91,15 +91,15 @@ persisted = service.get_sync_task(created.task_id)
 SavedItemInput
   -> POST /api/saved/{list_kind}  # strict identity; local response first
   -> Database.upsert_saved_membership()  # 本地事务先提交
-  -> Database.claim_native_sync_task(pending, task_id)  # atomic batch ownership
-  -> injected task_starter
+  -> Database.create_native_sync_task_snapshot() # task/items + live claims, one transaction
+  -> injected task_starter                    # top-level runner only
   -> SavedSyncService.run_sync_task()
   -> Database.claim_native_save_item(execution_id)      # atomic item ownership
   -> NativeSaveRouter.route()
   -> Database.update_native_save_claim_route()           # owner fence
   -> BilibiliNativeSaveAdapter.save()                     # first production adapter
   -> BilibiliAPIClient authenticated POST + owner heartbeat/deadline
-  -> Database.complete_native_save_claim(item result)   # owner-checked terminal write
+  -> Database.complete_native_save_claim(item result)   # state + task snapshot, one transaction
   -> SavedSyncService.get_sync_task()
   -> GET /api/saved-sync/tasks/{task_id} # truthful per-item polling
 ```

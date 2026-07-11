@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -60,6 +61,26 @@ class _FakeBilibiliAdapter:
             resolved_action=route.resolved_action,
             resolved_target=route.resolved_target,
         )
+
+
+class _BlockingBilibiliAdapter(_FakeBilibiliAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def save(
+        self,
+        item: SavedItemInput,
+        route: NativeSaveRoute,
+    ) -> NativeSaveResult:
+        self.calls.append(item.item_key)
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
 
 
 @pytest.fixture
@@ -306,6 +327,182 @@ def test_manual_sync_reports_missing_memberships_per_item_without_claiming_them(
     assert missing["error_message"] == "Item is not saved locally"
 
 
+def test_partial_missing_batch_poll_matches_creation_after_service_reconstruction(
+    saved_sync_client: tuple[TestClient, Database, _FakeBilibiliAdapter],
+) -> None:
+    client, database, adapter = saved_sync_client
+    client.post("/api/saved/favorite", json=_saved_item("BV1DURABLE"))
+
+    created = client.post(
+        "/api/saved/favorite/sync",
+        json={"item_keys": ["bilibili:BV1DURABLE", "bilibili:BV1ABSENT"]},
+    )
+    assert created.status_code == 200
+    assert created.json()["task_id"]
+
+    client.app.state.runtime_context.saved_sync_service = SavedSyncService(
+        database,
+        NativeSaveRouter([adapter]),
+    )
+    polled = client.get(f"/api/saved-sync/tasks/{created.json()['task_id']}")
+
+    assert polled.status_code == 200
+    assert polled.json() == created.json()
+
+
+def test_all_missing_batch_has_stable_uuid_and_pollable_item_set(
+    saved_sync_client: tuple[TestClient, Database, _FakeBilibiliAdapter],
+) -> None:
+    client, database, adapter = saved_sync_client
+
+    created = client.post(
+        "/api/saved/watch_later/sync",
+        json={"item_keys": ["bilibili:BV1MISS1", "youtube:missing-2"]},
+    )
+
+    assert created.status_code == 200
+    uuid.UUID(created.json()["task_id"])
+    assert [item["error_code"] for item in created.json()["items"]] == [
+        "not_saved_locally",
+        "not_saved_locally",
+    ]
+    client.app.state.runtime_context.saved_sync_service = SavedSyncService(
+        database,
+        NativeSaveRouter([adapter]),
+    )
+    assert client.get(f"/api/saved-sync/tasks/{created.json()['task_id']}").json() == created.json()
+
+
+def test_empty_all_batch_is_pollable_and_distinct_from_unknown_uuid(
+    saved_sync_client: tuple[TestClient, Database, _FakeBilibiliAdapter],
+) -> None:
+    client, database, adapter = saved_sync_client
+
+    created = client.post("/api/saved/favorite/sync", json={"item_keys": []})
+
+    assert created.status_code == 200
+    uuid.UUID(created.json()["task_id"])
+    assert created.json()["items"] == []
+    client.app.state.runtime_context.saved_sync_service = SavedSyncService(
+        database,
+        NativeSaveRouter([adapter]),
+    )
+    assert client.get(f"/api/saved-sync/tasks/{created.json()['task_id']}").json() == created.json()
+    assert client.get(f"/api/saved-sync/tasks/{uuid.uuid4()}").status_code == 404
+
+
+def test_already_synced_selection_is_a_durable_terminal_noop(
+    saved_sync_client: tuple[TestClient, Database, _FakeBilibiliAdapter],
+) -> None:
+    client, database, adapter = saved_sync_client
+    client.post("/api/saved/favorite", json=_saved_item("BV1DONE"))
+    database.upsert_native_save_state(
+        "favorite",
+        "bilibili:BV1DONE",
+        requested_action="favorite",
+        resolved_action="favorite",
+        resolved_target="B站 OpenBiliClaw 收藏夹",
+        status="already_synced",
+        task_id="older-task",
+    )
+
+    created = client.post(
+        "/api/saved/favorite/sync",
+        json={"item_keys": ["bilibili:BV1DONE"]},
+    )
+
+    assert created.status_code == 200
+    uuid.UUID(created.json()["task_id"])
+    assert created.json()["items"][0]["status"] == "already_synced"
+    assert adapter.calls == []
+    client.app.state.runtime_context.saved_sync_service = SavedSyncService(
+        database,
+        NativeSaveRouter([adapter]),
+    )
+    assert client.get(f"/api/saved-sync/tasks/{created.json()['task_id']}").json() == created.json()
+
+
+def test_all_eligible_with_only_terminal_memberships_is_a_pollable_empty_task(
+    saved_sync_client: tuple[TestClient, Database, _FakeBilibiliAdapter],
+) -> None:
+    client, database, adapter = saved_sync_client
+    client.post("/api/saved/favorite", json=_saved_item("BV1NOELIGIBLE"))
+    database.upsert_native_save_state(
+        "favorite",
+        "bilibili:BV1NOELIGIBLE",
+        requested_action="favorite",
+        resolved_action="favorite",
+        resolved_target="B站 OpenBiliClaw 收藏夹",
+        status="already_synced",
+    )
+
+    created = client.post("/api/saved/favorite/sync", json={"item_keys": []})
+
+    assert created.status_code == 200
+    uuid.UUID(created.json()["task_id"])
+    assert created.json()["items"] == []
+    client.app.state.runtime_context.saved_sync_service = SavedSyncService(
+        database,
+        NativeSaveRouter([adapter]),
+    )
+    assert client.get(f"/api/saved-sync/tasks/{created.json()['task_id']}").json() == created.json()
+
+
+def test_active_owner_selection_is_a_durable_terminal_noop(
+    saved_sync_client: tuple[TestClient, Database, _FakeBilibiliAdapter],
+) -> None:
+    client, database, adapter = saved_sync_client
+    client.post("/api/saved/favorite", json=_saved_item("BV1ACTIVE"))
+    owner = client.post(
+        "/api/saved/favorite/sync",
+        json={"item_keys": ["bilibili:BV1ACTIVE"]},
+    ).json()
+
+    duplicate = client.post(
+        "/api/saved/favorite/sync",
+        json={"item_keys": ["bilibili:BV1ACTIVE"]},
+    )
+
+    assert duplicate.status_code == 200
+    assert duplicate.json()["task_id"] != owner["task_id"]
+    assert duplicate.json()["items"][0]["status"] == "failed"
+    assert duplicate.json()["items"][0]["error_code"] == "sync_already_in_progress"
+    client.app.state.runtime_context.saved_sync_service = SavedSyncService(
+        database,
+        NativeSaveRouter([adapter]),
+    )
+    assert (
+        client.get(f"/api/saved-sync/tasks/{duplicate.json()['task_id']}").json()
+        == duplicate.json()
+    )
+
+
+def test_claimed_batch_survives_membership_removal_and_service_reconstruction(
+    saved_sync_client: tuple[TestClient, Database, _FakeBilibiliAdapter],
+) -> None:
+    client, database, adapter = saved_sync_client
+    client.post("/api/saved/watch_later", json=_saved_item("BV1REMOVED"))
+    created = client.post(
+        "/api/saved/watch_later/sync",
+        json={"item_keys": ["bilibili:BV1REMOVED"]},
+    ).json()
+
+    client.post(
+        "/api/saved/watch_later/remove",
+        json={"item_key": "bilibili:BV1REMOVED"},
+    )
+    client.app.state.runtime_context.saved_sync_service = SavedSyncService(
+        database,
+        NativeSaveRouter([adapter]),
+    )
+    polled = client.get(f"/api/saved-sync/tasks/{created['task_id']}")
+
+    assert polled.status_code == 200
+    assert [item["item_key"] for item in polled.json()["items"]] == ["bilibili:BV1REMOVED"]
+    assert polled.json()["items"][0]["status"] == "failed"
+    assert polled.json()["items"][0]["error_code"] == "not_saved_locally"
+
+
 def test_saved_list_status_and_local_only_remove_round_trip(
     saved_sync_client: tuple[TestClient, Database, _FakeBilibiliAdapter],
 ) -> None:
@@ -388,6 +585,31 @@ def test_saved_list_status_and_local_only_remove_round_trip(
             {"json": {"item_key": "not-an-item-key"}},
         ),
         (
+            "post",
+            "/api/saved/favorite/remove",
+            {"json": {"item_key": "bilibili:extra:colon"}},
+        ),
+        (
+            "post",
+            "/api/saved/favorite/remove",
+            {"json": {"item_key": "bilibili:url:ABCDEF0123456789ABCDEF01"}},
+        ),
+        (
+            "post",
+            "/api/saved/favorite/remove",
+            {"json": {"item_key": "bilibili:url:0123456789abcdef0123456"}},
+        ),
+        (
+            "post",
+            "/api/saved/favorite/remove",
+            {"json": {"item_key": "bilibili:space id"}},
+        ),
+        (
+            "post",
+            "/api/saved/favorite/remove",
+            {"json": {"item_key": "bilibili:hidden\u200bid"}},
+        ),
+        (
             "get",
             "/api/saved/favorite/status",
             {"params": {"item_key": " "}},
@@ -399,6 +621,65 @@ def test_saved_list_status_and_local_only_remove_round_trip(
         ),
         ("get", "/api/saved-sync/tasks/not-a-uuid", {}),
         ("get", "/api/favorites/%20", {}),
+        (
+            "post",
+            "/api/saved/favorite",
+            {"json": {"source_platform": "bilibili", "content_id": " leading"}},
+        ),
+        (
+            "post",
+            "/api/saved/favorite",
+            {"json": {"source_platform": "bilibili", "content_id": "bad id"}},
+        ),
+        (
+            "post",
+            "/api/saved/favorite",
+            {"json": {"source_platform": "bilibili", "content_id": "bad\u0085id"}},
+        ),
+        (
+            "post",
+            "/api/saved/favorite",
+            {
+                "json": {
+                    "source_platform": "bilibili",
+                    "content_id": "",
+                    "content_url": "https://user:secret@example.com/video",
+                }
+            },
+        ),
+        (
+            "post",
+            "/api/saved/favorite",
+            {
+                "json": {
+                    "source_platform": "bilibili",
+                    "content_id": "",
+                    "content_url": "https://example.com:99999/video",
+                }
+            },
+        ),
+        (
+            "post",
+            "/api/saved/favorite",
+            {
+                "json": {
+                    "source_platform": "bilibili",
+                    "content_id": "",
+                    "content_url": "https://bad..example/video",
+                }
+            },
+        ),
+        (
+            "post",
+            "/api/saved/favorite",
+            {
+                "json": {
+                    "source_platform": "bilibili",
+                    "content_id": "",
+                    "content_url": "https://example.com/white space",
+                }
+            },
+        ),
     ],
 )
 def test_saved_routes_reject_invalid_identifiers_and_selections(
@@ -415,6 +696,100 @@ def test_saved_routes_reject_invalid_identifiers_and_selections(
     assert database.count_favorites() == 0
     assert database.count_watch_later() == 0
     assert adapter.calls == []
+
+
+def test_saved_url_fallback_emits_exact_lowercase_hash_key(
+    saved_sync_client: tuple[TestClient, Database, _FakeBilibiliAdapter],
+) -> None:
+    client, _database, _adapter = saved_sync_client
+
+    response = client.post(
+        "/api/saved/favorite",
+        json={
+            "source_platform": "reddit",
+            "content_id": "",
+            "content_url": "https://www.reddit.com/r/python/comments/abc/example",
+            "content_type": "post",
+        },
+    )
+
+    assert response.status_code == 200
+    item_key = response.json()["item_key"]
+    assert item_key.startswith("reddit:url:")
+    assert len(item_key) == len("reddit:url:") + 24
+    assert item_key.removeprefix("reddit:url:") == item_key.removeprefix("reddit:url:").lower()
+
+
+async def test_runtime_rebuild_cancels_inflight_saved_sync_before_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.api.runtime_context import RuntimeContext
+    from openbiliclaw.config import Config
+
+    database = Database(tmp_path / "runtime-cancel.db")
+    database.initialize()
+    context = RuntimeContext(database=database)
+    adapter = _BlockingBilibiliAdapter()
+    old_service = SavedSyncService(
+        database,
+        NativeSaveRouter([adapter]),
+        task_starter=lambda name, coro: context.task_registry.track(name, coro),
+    )
+    context.saved_sync_service = old_service
+    old_service.save_local("favorite", SavedItemInput("bilibili", "BV1CANCEL"))
+    created = old_service.create_sync_task(
+        "favorite",
+        ["bilibili:BV1CANCEL"],
+        "manual_single",
+    )
+    await adapter.started.wait()
+    replacement = object()
+
+    def fake_rebuild(self: RuntimeContext, config: Config) -> None:
+        del config
+        assert adapter.cancelled.is_set()
+        self.saved_sync_service = replacement
+
+    monkeypatch.setattr(RuntimeContext, "_rebuild_components", fake_rebuild)
+
+    await context.rebuild_from_config(Config())
+
+    assert context.saved_sync_service is replacement
+    assert old_service.get_sync_task(created.task_id).items[0].status == "failed"
+    assert old_service.get_sync_task(created.task_id).items[0].error_code == "interrupted"
+
+
+def test_runtime_construction_failure_keeps_existing_saved_sync_and_bilibili_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.api.runtime_context import build_runtime_context
+    from openbiliclaw.config import Config
+    from openbiliclaw.recommendation import engine as recommendation_module
+
+    config = Config(data_dir=str(tmp_path / "runtime-atomic"))
+    config.scheduler.enabled = False
+    config.llm.default_provider = "ollama"
+    config.llm.ollama.model = "llama3"
+    context = build_runtime_context(config)
+    old_service = context.saved_sync_service
+    old_client = context.bilibili_client
+
+    class _ConstructionFailureError(RuntimeError):
+        pass
+
+    def fail_recommendation(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise _ConstructionFailureError("late component failed")
+
+    monkeypatch.setattr(recommendation_module, "RecommendationEngine", fail_recommendation)
+
+    with pytest.raises(_ConstructionFailureError, match="late component failed"):
+        context._rebuild_components(config)
+
+    assert context.saved_sync_service is old_service
+    assert context.bilibili_client is old_client
 
 
 async def test_runtime_context_rebuilds_tracked_bilibili_saved_sync_service(
@@ -443,7 +818,11 @@ async def test_runtime_context_rebuilds_tracked_bilibili_saved_sync_service(
     )
     for _ in range(100):
         result = first_service.get_sync_task(created.task_id)
-        if result.items and result.items[0].status != "pending":
+        if (
+            result.items
+            and result.items[0].status not in {"pending", "syncing"}
+            and context.task_registry.stats() == {}
+        ):
             break
         await asyncio.sleep(0.01)
 

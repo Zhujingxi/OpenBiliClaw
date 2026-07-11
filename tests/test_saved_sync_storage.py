@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING
 import pytest
 
 from openbiliclaw.saved_sync.models import SavedItemInput
+from openbiliclaw.saved_sync.router import NativeSaveRouter
+from openbiliclaw.saved_sync.service import SavedSyncService
 from openbiliclaw.storage.database import Database
 
 if TYPE_CHECKING:
@@ -364,15 +366,11 @@ def test_execution_heartbeat_is_fenced_by_owner_token(db: Database) -> None:
     )
 
     assert (
-        db.heartbeat_native_save_claim(
-            "favorite", item.item_key, "heartbeat-task", "stale-owner"
-        )
+        db.heartbeat_native_save_claim("favorite", item.item_key, "heartbeat-task", "stale-owner")
         is False
     )
     assert (
-        db.heartbeat_native_save_claim(
-            "favorite", item.item_key, "heartbeat-task", "live-owner"
-        )
+        db.heartbeat_native_save_claim("favorite", item.item_key, "heartbeat-task", "live-owner")
         is True
     )
 
@@ -626,3 +624,27 @@ def test_legacy_wrappers_stay_consistent_for_migrated_non_bilibili_item(
     assert list_method() == []
     assert database.get_saved_membership(list_kind, "youtube:video-123") is None
     assert database.conn.execute(f"SELECT 1 FROM {legacy_table}").fetchone() is None
+
+
+def test_native_sync_task_snapshot_tables_are_idempotent_and_survive_membership_delete(
+    db: Database,
+) -> None:
+    service = SavedSyncService(db, NativeSaveRouter())
+    item = SavedItemInput("bilibili", "BV1SNAPSHOT")
+    service.save_local("favorite", item)
+    created = service.create_sync_task("favorite", [item.item_key], "manual_single")
+
+    db._ensure_saved_sync_tables()
+    db._ensure_saved_sync_tables()
+    table_names = {
+        str(row["name"])
+        for row in db.conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    }
+    assert {"native_save_tasks", "native_save_task_items"} <= table_names
+
+    db.remove_saved_membership("favorite", item.item_key)
+    reconstructed = SavedSyncService(db, NativeSaveRouter()).get_sync_task(created.task_id)
+
+    assert [result.item_key for result in reconstructed.items] == [item.item_key]
+    assert reconstructed.items[0].status == "failed"
+    assert reconstructed.items[0].error_code == "not_saved_locally"

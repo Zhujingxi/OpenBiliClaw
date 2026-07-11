@@ -111,10 +111,11 @@ class SavedSyncService:
 
         created = self.create_sync_task(list_kind, [item.item_key], "auto")
         if created.items:
+            created_item = created.items[0]
             return SavedMembershipResult(
                 saved=True,
                 item_key=item.item_key,
-                sync_status="pending",
+                sync_status=created_item.status,
                 sync_task_id=created.task_id,
             )
 
@@ -150,30 +151,24 @@ class SavedSyncService:
             list_kind,
             selected_keys,
         )
-        claimed_keys = self._database.claim_native_sync_task(
+        snapshot_rows = self._database.create_native_sync_task_snapshot(
             list_kind,
             selected_keys,
             task_id,
+            trigger,
         )
-        items: list[NativeSaveResult] = []
-        for item_key in claimed_keys:
-            items.append(
-                NativeSaveResult(
-                    item_key=item_key,
-                    status="pending",
-                    resolved_action=list_kind,
-                    resolved_target="",
-                )
-            )
+        items = [self._result_from_row(row) for row in snapshot_rows]
+        has_live_items = any(bool(row["is_live"]) for row in snapshot_rows)
 
         result = SavedSyncBatchResult(task_id=task_id, items=tuple(items))
-        if items and self._task_starter is not None:
+        if has_live_items and self._task_starter is not None:
             coro = self.run_sync_task(task_id)
             try:
                 self._task_starter(f"saved-sync:{trigger}:{task_id}", coro)
             except BaseException:
                 coro.close()
                 self._database.release_native_sync_task(task_id)
+                self._database.discard_native_sync_task(task_id)
                 raise
         return result
 
@@ -191,9 +186,7 @@ class SavedSyncService:
                 if not self._database.claim_native_sync_task_runner(task_id, runner_id):
                     return self.get_sync_task(task_id)
                 self._database.reconcile_stale_native_save_claims(task_id)
-                task_heartbeat = asyncio.create_task(
-                    self._heartbeat_sync_task(task_id, runner_id)
-                )
+                task_heartbeat = asyncio.create_task(self._heartbeat_sync_task(task_id, runner_id))
                 work: asyncio.Future[list[None]] = asyncio.gather(
                     *(
                         self._run_platform_group(group, runner_id)
@@ -237,9 +230,13 @@ class SavedSyncService:
         task_id = self._validated_task_id(task_id)
         self._database.release_stale_pending_native_sync_task(task_id)
         self._database.reconcile_stale_native_save_claims(task_id)
-        rows = self._database.list_native_save_states_by_task(task_id)
+        rows = self._database.list_native_sync_task_items(task_id)
         items = tuple(self._result_from_row(row) for row in rows)
         return SavedSyncBatchResult(task_id=task_id, items=items)
+
+    def has_sync_task(self, task_id: str) -> bool:
+        """Return whether a durable task exists, including a zero-item batch."""
+        return self._database.native_sync_task_exists(self._validated_task_id(task_id))
 
     def _group_task_rows(self, task_id: str) -> tuple[list[dict[str, Any]], ...]:
         rows = self._database.list_native_save_states_by_task(task_id)

@@ -591,7 +591,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
 │ LLM / source adapters · /api/saved/* · router · Bilibili native save │
-│ Canonical ID · Local-first sync · Task poll · SQLite (events · pool · saved)│
+│ Canonical ID · Local-first sync · Task poll · SQLite (events · pool · recs · saved/tasks)│
 └────────────────────────────────────────────────┘
 ```
 
