@@ -7398,7 +7398,7 @@ def create_app(
 
         if status in {"partial", "ok"} or (status == "empty" and task_type == "bootstrap_profile"):
             is_final = status == "ok" or (status == "empty" and task_type == "bootstrap_profile")
-            added_notes = _xhs_task_queue.merge_result(
+            added_notes, enriched_notes = _xhs_task_queue.merge_result_with_enrichment(
                 task_id,
                 urls=urls,
                 notes=notes if notes else None,
@@ -7441,7 +7441,8 @@ def create_app(
             if valid_urls and not _init_busy:
                 ctx.database.save_xhs_observed_urls(valid_urls, "task")
                 _backfill_xhs_tokens(ctx.database, valid_urls)
-            if added_notes and not _init_busy:
+            candidate_notes = [*added_notes, *enriched_notes]
+            if candidate_notes and not _init_busy:
                 # P1.8: a planner-driven xhs *search* task carries its
                 # ``source_keyword_id`` on the payload → thread it onto the
                 # ingested candidates so admission backfills the keyword's yield.
@@ -7453,7 +7454,7 @@ def create_app(
                 )
                 enqueued = _cache_xhs_notes(
                     ctx.database,
-                    added_notes,
+                    candidate_notes,
                     "task",
                     self_info_now,
                     source_keyword_id=task_source_keyword_id,

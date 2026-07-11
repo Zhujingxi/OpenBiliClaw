@@ -104,6 +104,15 @@ function pickNumber(value: unknown): number {
   return 0;
 }
 
+function pickOptionalNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.floor(value);
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number.parseFloat(value.replace(/,/g, ""));
+    return Number.isFinite(parsed) ? Math.floor(parsed) : undefined;
+  }
+  return undefined;
+}
+
 function pickAwemeMetrics(rawStatistics: unknown): {
   view_count?: number;
   like_count?: number;
@@ -187,7 +196,7 @@ export function parseAwemeListResponse(
     if (!awemeId && !title) continue;
     const author = pickAuthor(aweme.author);
     const coverUrl = pickFirstUrl(aweme.video?.cover);
-    const publishedAt = pickNumber(aweme.create_time);
+    const publishedAt = pickOptionalNumber(aweme.create_time);
     items.push({
       scope,
       aweme_id: awemeId,
@@ -275,7 +284,7 @@ function normalizeSearchAweme(
     pickString(aweme.share_info?.share_desc);
   if (!awemeId && !title) return null;
   const author = pickAuthor(aweme.author);
-  const publishedAt = pickNumber(aweme.create_time);
+  const publishedAt = pickOptionalNumber(aweme.create_time);
   const item: DouyinSearchItem = {
     scope,
     aweme_id: awemeId,

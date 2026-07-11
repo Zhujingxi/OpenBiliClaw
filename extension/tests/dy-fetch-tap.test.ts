@@ -124,6 +124,7 @@ test("parseAwemeListResponse falls back to preview_title when desc is empty", ()
     "dy_collect",
   );
   assert.equal(items[0]!.title, "回退标题");
+  assert.equal("published_at" in items[0]!, false);
 });
 
 test("parseAwemeListResponse drops items with no aweme_id and no title", () => {
@@ -213,6 +214,7 @@ test("parseSearchAwemeResponse accepts aweme_list from video search endpoint", (
   assert.equal(items[0]!.scope, "dy_search");
   assert.equal(items[0]!.aweme_id, "search-2");
   assert.equal(items[0]!.title, "视频搜索 2");
+  assert.equal("published_at" in items[0]!, false);
 });
 
 test("parseRelatedAwemeResponse maps related aweme_list to dy_hot items", () => {

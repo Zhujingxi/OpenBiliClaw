@@ -1014,6 +1014,7 @@ class TestXhsTaskResults:
         assert [note["note_id"] for note in partial_result["notes"]] == ["saved-partial"]
         assert len(memory.events) == 1
         assert memory.events[0]["event_type"] == "favorite"
+        assert len(memory.profile_signals) == 1
 
         final = app_client.post(
             "/api/sources/xhs/task-result",
@@ -1027,6 +1028,8 @@ class TestXhsTaskResults:
                         "title": "partial saved",
                         "url": saved_url,
                         "note_id": "saved-partial",
+                        "published_at": 1783492200000,
+                        "published_label": "3小时前",
                     },
                     {
                         "scope": "liked",
@@ -1043,6 +1046,7 @@ class TestXhsTaskResults:
         assert final.status_code == 200
         assert len(memory.events) == 2
         assert memory.events[1]["event_type"] == "like"
+        assert len(memory.profile_signals) == 2
         row = db.conn.execute(
             "SELECT status, result_json, completed_at FROM xhs_tasks WHERE id=?",
             (task["id"],),
@@ -1055,7 +1059,16 @@ class TestXhsTaskResults:
             "saved-partial",
             "liked-final",
         ]
+        assert result["notes"][0]["published_at"] == 1783492200000
+        assert result["notes"][0]["published_label"] == "3小时前"
         assert result["scope_counts"] == {"saved": 1, "liked": 1, "xhs_history": 0}
+        candidate = db.conn.execute(
+            "SELECT published_at, published_label FROM discovery_candidates WHERE content_id=?",
+            ("saved-partial",),
+        ).fetchone()
+        assert candidate is not None
+        assert candidate["published_at"] == "2026-07-08T06:30:00Z"
+        assert candidate["published_label"] == "3小时前"
 
     def test_xhs_bootstrap_empty_result_preserves_scope_counts(
         self,
