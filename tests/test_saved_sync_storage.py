@@ -145,6 +145,42 @@ def test_native_save_state_controls_eligibility_and_task_lookup(db: Database) ->
     assert states[0]["title"] == ""
 
 
+def test_atomic_task_claim_rejects_nonempty_all_blank_selection(db: Database) -> None:
+    item = SavedItemInput("bilibili", "BV1DAOFILTER")
+    db.upsert_saved_membership("favorite", item)
+
+    with pytest.raises(ValueError, match="item_keys"):
+        db.claim_native_sync_task("favorite", ["  ", "\t"], "must-not-own-all")
+
+    row = db.get_saved_membership("favorite", item.item_key)
+    assert row is not None
+    assert row["sync_task_id"] == ""
+
+
+def test_execution_heartbeat_is_fenced_by_owner_token(db: Database) -> None:
+    item = SavedItemInput("bilibili", "BV1HEARTBEATFENCE")
+    db.upsert_saved_membership("favorite", item)
+    assert db.claim_native_sync_task("favorite", [item.item_key], "heartbeat-task") == [
+        item.item_key
+    ]
+    assert db.claim_native_save_item(
+        "favorite", item.item_key, "heartbeat-task", "live-owner"
+    )
+
+    assert (
+        db.heartbeat_native_save_claim(
+            "favorite", item.item_key, "heartbeat-task", "stale-owner"
+        )
+        is False
+    )
+    assert (
+        db.heartbeat_native_save_claim(
+            "favorite", item.item_key, "heartbeat-task", "live-owner"
+        )
+        is True
+    )
+
+
 @pytest.mark.parametrize(
     ("list_kind", "add_method_name"),
     [("watch_later", "add_to_watch_later"), ("favorite", "add_to_favorites")],

@@ -7454,6 +7454,8 @@ class Database:
                 status             TEXT NOT NULL DEFAULT 'pending',
                 task_id            TEXT NOT NULL DEFAULT '',
                 execution_id       TEXT NOT NULL DEFAULT '',
+                task_claimed_at    TIMESTAMP,
+                task_started_at    TIMESTAMP,
                 last_error_code    TEXT NOT NULL DEFAULT '',
                 last_error_message TEXT NOT NULL DEFAULT '',
                 last_attempt_at    TIMESTAMP,
@@ -7476,6 +7478,19 @@ class Database:
                 "ALTER TABLE native_save_states "
                 "ADD COLUMN execution_id TEXT NOT NULL DEFAULT ''"
             )
+        for column_name in ("task_claimed_at", "task_started_at"):
+            if column_name not in native_state_columns:
+                self.conn.execute(
+                    f"ALTER TABLE native_save_states ADD COLUMN {column_name} TIMESTAMP"
+                )
+        self.conn.execute(
+            """
+            UPDATE native_save_states
+            SET task_claimed_at = CURRENT_TIMESTAMP
+            WHERE status = 'pending' AND task_id != '' AND task_claimed_at IS NULL
+            """
+        )
+        self.conn.commit()
         self.conn.execute("BEGIN IMMEDIATE")
         try:
             migrated = self.conn.execute(
@@ -7922,7 +7937,10 @@ class Database:
         normalized_task_id = task_id.strip()
         if not normalized_task_id:
             raise ValueError("task_id must not be empty")
-        cleaned_keys = list(dict.fromkeys(key.strip() for key in item_keys or () if key.strip()))
+        raw_keys = list(item_keys or ())
+        cleaned_keys = list(dict.fromkeys(key.strip() for key in raw_keys if key.strip()))
+        if raw_keys and not cleaned_keys:
+            raise ValueError("item_keys must contain at least one non-blank key")
         params: list[Any] = [normalized_kind]
         item_filter = ""
         if cleaned_keys:
@@ -7960,9 +7978,11 @@ class Database:
                     INSERT INTO native_save_states (
                         list_kind, item_key, requested_action, status, task_id,
                         execution_id, resolved_action, resolved_target,
-                        last_error_code, last_error_message, last_attempt_at
+                        last_error_code, last_error_message, last_attempt_at,
+                        task_claimed_at, task_started_at
                     )
-                    VALUES (?, ?, ?, 'pending', ?, '', '', '', '', '', NULL)
+                    VALUES (?, ?, ?, 'pending', ?, '', '', '', '', '', NULL,
+                            CURRENT_TIMESTAMP, NULL)
                     ON CONFLICT(list_kind, item_key) DO UPDATE SET
                         requested_action = excluded.requested_action,
                         status = 'pending',
@@ -7971,7 +7991,9 @@ class Database:
                         resolved_action = '',
                         resolved_target = '',
                         last_error_code = '',
-                        last_error_message = ''
+                        last_error_message = '',
+                        task_claimed_at = CURRENT_TIMESTAMP,
+                        task_started_at = NULL
                     """,
                     (normalized_kind, item_key, normalized_kind, normalized_task_id),
                 )
@@ -7982,6 +8004,53 @@ class Database:
             raise
         finally:
             conn.close()
+
+    def release_native_sync_task(self, task_id: str) -> int:
+        """Release pending ownership when a task could not be registered."""
+        cursor = self._execute_write(
+            """
+            UPDATE native_save_states
+            SET task_id = '', execution_id = '', task_claimed_at = NULL,
+                task_started_at = NULL
+            WHERE task_id = ? AND status = 'pending' AND execution_id = ''
+            """,
+            (task_id.strip(),),
+        )
+        return int(cursor.rowcount or 0)
+
+    def release_stale_unstarted_native_sync_tasks(
+        self,
+        list_kind: str,
+        *,
+        stale_after_seconds: int = 300,
+    ) -> int:
+        """Release old pending task owners only when no runner ever started."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        age = max(0, int(stale_after_seconds))
+        cursor = self._execute_write(
+            """
+            UPDATE native_save_states
+            SET task_id = '', execution_id = '', task_claimed_at = NULL,
+                task_started_at = NULL
+            WHERE list_kind = ? AND status = 'pending' AND task_id != ''
+              AND task_started_at IS NULL AND task_claimed_at IS NOT NULL
+              AND task_claimed_at <= datetime('now', ?)
+            """,
+            (normalized_kind, f"-{age} seconds"),
+        )
+        return int(cursor.rowcount or 0)
+
+    def mark_native_sync_task_started(self, task_id: str) -> int:
+        """Fence pending-task reclamation once a durable runner starts."""
+        cursor = self._execute_write(
+            """
+            UPDATE native_save_states
+            SET task_started_at = COALESCE(task_started_at, CURRENT_TIMESTAMP)
+            WHERE task_id = ? AND status IN ('pending', 'syncing')
+            """,
+            (task_id.strip(),),
+        )
+        return int(cursor.rowcount or 0)
 
     def claim_native_save_item(
         self,
@@ -8029,6 +8098,26 @@ class Database:
                 task_id.strip(),
                 execution_id,
             ),
+        )
+        return int(cursor.rowcount or 0) > 0
+
+    def heartbeat_native_save_claim(
+        self,
+        list_kind: str,
+        item_key: str,
+        task_id: str,
+        execution_id: str,
+    ) -> bool:
+        """Refresh a live adapter lease only while the execution owner matches."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        cursor = self._execute_write(
+            """
+            UPDATE native_save_states
+            SET last_attempt_at = CURRENT_TIMESTAMP
+            WHERE list_kind = ? AND item_key = ? AND task_id = ?
+              AND status = 'syncing' AND execution_id = ?
+            """,
+            (normalized_kind, item_key.strip(), task_id.strip(), execution_id),
         )
         return int(cursor.rowcount or 0) > 0
 
@@ -8153,6 +8242,8 @@ class Database:
                 n.status,
                 n.task_id,
                 n.execution_id,
+                n.task_claimed_at,
+                n.task_started_at,
                 n.last_error_code,
                 n.last_error_message,
                 n.last_attempt_at,

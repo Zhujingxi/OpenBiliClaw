@@ -4,6 +4,7 @@ import asyncio
 import uuid
 from collections import defaultdict
 from collections.abc import Callable, Coroutine, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from .models import (
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
 TaskStarter = Callable[[str, Coroutine[Any, Any, Any]], asyncio.Task[Any]]
 
 _ACTIVE_STATUSES = frozenset({"pending"})
+_MAX_ADAPTER_TIMEOUT_SECONDS = 240.0
 _TERMINAL_ADAPTER_STATUSES = frozenset(
     {
         "synced",
@@ -38,6 +40,16 @@ _TERMINAL_ADAPTER_STATUSES = frozenset(
 )
 
 
+@dataclass(slots=True)
+class _TaskRunLockEntry:
+    lock: asyncio.Lock
+    users: int = 0
+
+
+class _NativeSaveClaimLostError(RuntimeError):
+    """The execution lease no longer belongs to this adapter call."""
+
+
 class SavedSyncService:
     """Persist local membership first, then coordinate optional native saves."""
 
@@ -46,11 +58,22 @@ class SavedSyncService:
         database: Database,
         router: NativeSaveRouter,
         task_starter: TaskStarter | None = None,
+        *,
+        claim_heartbeat_interval_seconds: float = 30.0,
+        adapter_timeout_seconds: float = 240.0,
     ) -> None:
         self._database = database
         self._router = router
         self._task_starter = task_starter
-        self._task_run_locks: dict[str, asyncio.Lock] = {}
+        self._claim_heartbeat_interval_seconds = max(
+            0.001,
+            float(claim_heartbeat_interval_seconds),
+        )
+        self._adapter_timeout_seconds = min(
+            _MAX_ADAPTER_TIMEOUT_SECONDS,
+            max(0.001, float(adapter_timeout_seconds)),
+        )
+        self._task_run_locks: dict[str, _TaskRunLockEntry] = {}
 
     def save_local(
         self,
@@ -109,9 +132,19 @@ class SavedSyncService:
     ) -> SavedSyncBatchResult:
         """Persist one pending task for selected eligible memberships."""
         task_id = str(uuid.uuid4())
+        selected_keys: Sequence[str] | None
+        if item_keys:
+            selected_keys = tuple(
+                dict.fromkeys(item_key.strip() for item_key in item_keys if item_key.strip())
+            )
+            if not selected_keys:
+                raise ValueError("item_keys must contain at least one non-blank key")
+        else:
+            selected_keys = None
+        self._database.release_stale_unstarted_native_sync_tasks(list_kind)
         claimed_keys = self._database.claim_native_sync_task(
             list_kind,
-            item_keys or None,
+            selected_keys,
             task_id,
         )
         items: list[NativeSaveResult] = []
@@ -132,23 +165,34 @@ class SavedSyncService:
                 self._task_starter(f"saved-sync:{trigger}:{task_id}", coro)
             except Exception:
                 coro.close()
+                self._database.release_native_sync_task(task_id)
                 raise
         return result
 
     async def run_sync_task(self, task_id: str) -> SavedSyncBatchResult:
         """Execute persisted task rows sequentially within each platform group."""
-        lock = self._task_run_locks.setdefault(task_id, asyncio.Lock())
-        async with lock:
-            self._database.reconcile_stale_native_save_claims(task_id)
-            rows = self._database.list_native_save_states_by_task(task_id)
-            grouped_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
-            for row in rows:
-                grouped_rows[str(row["source_platform"])].append(row)
+        entry = self._task_run_locks.setdefault(
+            task_id,
+            _TaskRunLockEntry(lock=asyncio.Lock()),
+        )
+        entry.users += 1
+        try:
+            async with entry.lock:
+                self._database.mark_native_sync_task_started(task_id)
+                self._database.reconcile_stale_native_save_claims(task_id)
+                rows = self._database.list_native_save_states_by_task(task_id)
+                grouped_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+                for row in rows:
+                    grouped_rows[str(row["source_platform"])].append(row)
 
-            await asyncio.gather(
-                *(self._run_platform_group(group) for group in grouped_rows.values())
-            )
-            return self.get_sync_task(task_id)
+                await asyncio.gather(
+                    *(self._run_platform_group(group) for group in grouped_rows.values())
+                )
+                return self.get_sync_task(task_id)
+        finally:
+            entry.users -= 1
+            if entry.users == 0 and self._task_run_locks.get(task_id) is entry:
+                del self._task_run_locks[task_id]
 
     def get_sync_task(self, task_id: str) -> SavedSyncBatchResult:
         """Reconstruct a batch entirely from persisted native-save states."""
@@ -210,7 +254,7 @@ class SavedSyncService:
             )
             return
 
-        self._database.update_native_save_claim_route(
+        route_persisted = self._database.update_native_save_claim_route(
             list_kind,
             item.item_key,
             task_id,
@@ -218,8 +262,16 @@ class SavedSyncService:
             resolved_action=route.resolved_action,
             resolved_target=route.resolved_target,
         )
+        if not route_persisted:
+            return
         try:
-            adapter_result = await adapter.save(item, route)
+            adapter_result = await self._save_with_live_claim(
+                adapter.save(item, route),
+                list_kind=list_kind,
+                item_key=item.item_key,
+                task_id=task_id,
+                execution_id=execution_id,
+            )
             if adapter_result.status not in _TERMINAL_ADAPTER_STATUSES:
                 result = NativeSaveResult(
                     item_key=item.item_key,
@@ -254,6 +306,17 @@ class SavedSyncService:
                 requested_action=requested_action,
             )
             raise
+        except _NativeSaveClaimLostError:
+            return
+        except TimeoutError:
+            result = NativeSaveResult(
+                item_key=item.item_key,
+                status="failed",
+                resolved_action=route.resolved_action,
+                resolved_target=route.resolved_target,
+                error_code="adapter_timeout",
+                error_message="Native save timed out",
+            )
         except Exception:
             result = NativeSaveResult(
                 item_key=item.item_key,
@@ -270,6 +333,51 @@ class SavedSyncService:
             execution_id=execution_id,
             requested_action=requested_action,
         )
+
+    async def _save_with_live_claim(
+        self,
+        save_coro: Coroutine[Any, Any, NativeSaveResult],
+        *,
+        list_kind: SavedListKind,
+        item_key: str,
+        task_id: str,
+        execution_id: str,
+    ) -> NativeSaveResult:
+        heartbeat = asyncio.create_task(
+            self._heartbeat_claim(list_kind, item_key, task_id, execution_id)
+        )
+        save_task = asyncio.create_task(save_coro)
+        try:
+            async with asyncio.timeout(self._adapter_timeout_seconds):
+                done, _ = await asyncio.wait(
+                    {heartbeat, save_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if heartbeat in done:
+                    await heartbeat
+                    raise _NativeSaveClaimLostError
+                return await save_task
+        finally:
+            heartbeat.cancel()
+            save_task.cancel()
+            await asyncio.gather(heartbeat, save_task, return_exceptions=True)
+
+    async def _heartbeat_claim(
+        self,
+        list_kind: SavedListKind,
+        item_key: str,
+        task_id: str,
+        execution_id: str,
+    ) -> None:
+        while True:
+            await asyncio.sleep(self._claim_heartbeat_interval_seconds)
+            if not self._database.heartbeat_native_save_claim(
+                list_kind,
+                item_key,
+                task_id,
+                execution_id,
+            ):
+                return
 
     def _persist_result(
         self,
