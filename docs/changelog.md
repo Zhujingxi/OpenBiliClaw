@@ -15,6 +15,7 @@
 - **本地 embedding 冷加载不再误报停服**：readiness probe 改为缓存成功、明确失败与超时三态；普通 health 仅容忍 loopback Ollama 冷加载超时，初始化仍严格等待真实向量成功，远端超时、404/500 和空向量继续报告未就绪。
 - **推荐准入与 API 兼容边界收紧**：除 `explore` 外所有来源统一执行全局 admission 下限，缓存与展示出口 fail closed；OpenAI Responses 请求固定发送 `store=false`，避免兼容网关拒绝无状态调用。
 - **默认 CI 不再被可选浏览器依赖阻断**：issue #98 的真实浏览器 E2E 改为与既有引导 E2E 相同的 `pytest.importorskip` 收集契约；普通 `[dev,x]` 测试环境未安装 Playwright 时跳过 integration 模块，安装 `[browser]` 后仍执行完整浏览器用例。
+- **Web 空库存假象自动恢复**：移动 Web `/m` 与桌面 Web `/web` 不再把推荐或 `runtime-status` 超时折叠成真实零库存；两类读取独立按 1/2/4/8 秒最多重试四次，成功空数组才进入真实空态。库存实时事件只会唤醒仍为空且上次读取失败的推荐页，已显示或滚动追加的卡片不会被后台刷新覆盖。
 
 ## v0.3.161 / extension v0.3.161 / desktop v0.3.161：Keyword inspiration 轴库 + 搜索词生成模式选择器（2026-07-09）
 

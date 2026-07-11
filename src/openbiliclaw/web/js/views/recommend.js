@@ -77,6 +77,18 @@ let autoAppendExhausted = false;
 let autoAppendUserArmed = false;
 let autoAppendTouchY = null;
 let autoAppendIntentInitialized = false;
+const RECOVERY_DELAYS_MS = [1000, 2000, 4000, 8000];
+let recommendationLoadState = "idle";
+let runtimeStatusLoadState = "idle";
+let recommendationRecoveryAttempt = 0;
+let runtimeStatusRecoveryAttempt = 0;
+let recommendationRecoveryTimer = null;
+let runtimeStatusRecoveryTimer = null;
+let recommendationRecoveryInFlight = false;
+let runtimeStatusRecoveryInFlight = false;
+let recommendationRecoveryPending = false;
+let runtimeStatusRecoveryPending = false;
+let runtimeStatusGeneration = 0;
 
 // Delight auto-advance
 let _delightAutoTimer = null;
@@ -130,10 +142,20 @@ function render() {
   // Recommendation cards — hide disliked items
   const recs = state.recommendations.filter((r) => feedbackDone.get(r.id) !== "dislike" && r.feedback_type !== "dislike");
   if (recs.length === 0 && !loading) {
-    const hint = getReadyRecommendationHint(state.runtimeStatus);
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.innerHTML = `<div class="empty-state-icon">\u{1F30A}</div><div class="empty-state-text">${esc(hint.message)}</div>`;
+    empty.innerHTML = `<div class="empty-state-icon">\u{1F30A}</div><div class="empty-state-text">${esc(recommendationEmptyMessage())}</div>`;
+    if (
+      recommendationLoadState === "failed-exhausted" ||
+      runtimeStatusLoadState === "failed-exhausted"
+    ) {
+      const retry = document.createElement("button");
+      retry.className = "btn btn-outline";
+      retry.type = "button";
+      retry.textContent = "重新加载";
+      retry.addEventListener("click", restartFailedRecoveries);
+      empty.appendChild(retry);
+    }
     frag.appendChild(empty);
   }
 
@@ -263,7 +285,7 @@ function rerenderRuntimeDependentChrome() {
   rerenderHeaderOnly();
   const emptyText = document.querySelector(".empty-state .empty-state-text");
   if (emptyText) {
-    emptyText.textContent = getReadyRecommendationHint(state.runtimeStatus).message;
+    emptyText.textContent = recommendationEmptyMessage();
   }
 }
 
@@ -1400,8 +1422,7 @@ async function handleReshuffle() {
   render();
   try {
     const result = await reshuffleRecommendations();
-    autoAppendExhausted = false;
-    patchState({ recommendations: (result.items || []).map(normalizeRecommendation) });
+    applyRecommendationSnapshot(result.items || [], { replace: true });
   } catch { /* ignore */ }
   loading = false;
   render();
@@ -1546,33 +1567,208 @@ function rememberRecommendationFeedback(normalizedRecs) {
   }
 }
 
+function recommendationEmptyMessage() {
+  if (recommendationLoadState === "failed") {
+    return "推荐加载失败，正在重试。";
+  }
+  if (recommendationLoadState === "failed-exhausted") {
+    return "推荐加载失败，点一下重新加载。";
+  }
+  if (runtimeStatusLoadState === "failed") {
+    return "库存状态同步失败，正在重试。";
+  }
+  if (runtimeStatusLoadState === "failed-exhausted") {
+    return "库存状态同步失败，点一下重新加载。";
+  }
+  return getReadyRecommendationHint(state.runtimeStatus).message;
+}
+
+function clearRecommendationRecovery(nextState) {
+  if (recommendationRecoveryTimer !== null) {
+    clearTimeout(recommendationRecoveryTimer);
+    recommendationRecoveryTimer = null;
+  }
+  recommendationRecoveryAttempt = 0;
+  recommendationRecoveryPending = false;
+  recommendationLoadState = nextState;
+}
+
+function clearRuntimeStatusRecovery(nextState = "ready") {
+  if (runtimeStatusRecoveryTimer !== null) {
+    clearTimeout(runtimeStatusRecoveryTimer);
+    runtimeStatusRecoveryTimer = null;
+  }
+  runtimeStatusRecoveryAttempt = 0;
+  runtimeStatusRecoveryPending = false;
+  runtimeStatusLoadState = nextState;
+}
+
+function applyRecommendationSnapshot(recs, { replace = false } = {}) {
+  const normalizedRecs = recs.map(normalizeRecommendation);
+  if (normalizedRecs.length > 0) {
+    recommendationLoadState = "ready";
+  } else {
+    recommendationLoadState = "empty-success";
+  }
+  clearRecommendationRecovery(recommendationLoadState);
+  if (!replace && state.recommendations.length > 0) return;
+  autoAppendExhausted = false;
+  resetAutoAppendIntent();
+  rememberRecommendationFeedback(normalizedRecs);
+  patchState({ recommendations: normalizedRecs });
+}
+
+function applyRuntimeStatusSnapshot(status, requestGeneration) {
+  if (requestGeneration !== runtimeStatusGeneration) return false;
+  if (!status) throw new Error("runtime status unavailable");
+  runtimeStatusGeneration += 1;
+  clearRuntimeStatusRecovery();
+  patchState({ runtimeStatus: normalizeRuntimeStatus(status) });
+  rerenderRuntimeDependentChrome();
+  return true;
+}
+
+function scheduleRecommendationRecovery() {
+  if (state.recommendations.length > 0) {
+    clearRecommendationRecovery("ready");
+    return;
+  }
+  if (recommendationLoadState !== "failed") return;
+  if (recommendationRecoveryInFlight) {
+    recommendationRecoveryPending = true;
+    return;
+  }
+  if (recommendationRecoveryTimer !== null) return;
+  if (recommendationRecoveryAttempt >= RECOVERY_DELAYS_MS.length) {
+    recommendationLoadState = "failed-exhausted";
+    render();
+    return;
+  }
+  const delayMs = RECOVERY_DELAYS_MS[recommendationRecoveryAttempt];
+  recommendationRecoveryTimer = setTimeout(() => {
+    recommendationRecoveryTimer = null;
+    recommendationRecoveryAttempt += 1;
+    void runRecommendationRecovery();
+  }, delayMs);
+}
+
+async function runRecommendationRecovery() {
+  if (state.recommendations.length > 0) {
+    clearRecommendationRecovery("ready");
+    return;
+  }
+  if (recommendationLoadState !== "failed") return;
+  if (recommendationRecoveryInFlight) {
+    recommendationRecoveryPending = true;
+    return;
+  }
+  recommendationRecoveryInFlight = true;
+  try {
+    const recs = await fetchRecommendations();
+    applyRecommendationSnapshot(recs);
+  } catch {
+    recommendationLoadState = "failed";
+  } finally {
+    recommendationRecoveryInFlight = false;
+    render();
+    if (recommendationRecoveryPending) recommendationRecoveryPending = false;
+    scheduleRecommendationRecovery();
+  }
+}
+
+function scheduleRuntimeStatusRecovery() {
+  if (runtimeStatusLoadState !== "failed") return;
+  if (runtimeStatusRecoveryInFlight) {
+    runtimeStatusRecoveryPending = true;
+    return;
+  }
+  if (runtimeStatusRecoveryTimer !== null) return;
+  if (runtimeStatusRecoveryAttempt >= RECOVERY_DELAYS_MS.length) {
+    runtimeStatusLoadState = "failed-exhausted";
+    render();
+    return;
+  }
+  const delayMs = RECOVERY_DELAYS_MS[runtimeStatusRecoveryAttempt];
+  runtimeStatusRecoveryTimer = setTimeout(() => {
+    runtimeStatusRecoveryTimer = null;
+    runtimeStatusRecoveryAttempt += 1;
+    void runRuntimeStatusRecovery();
+  }, delayMs);
+}
+
+async function runRuntimeStatusRecovery() {
+  if (runtimeStatusLoadState !== "failed") return;
+  if (runtimeStatusRecoveryInFlight) {
+    runtimeStatusRecoveryPending = true;
+    return;
+  }
+  runtimeStatusRecoveryInFlight = true;
+  const requestGeneration = runtimeStatusGeneration;
+  try {
+    applyRuntimeStatusSnapshot(await fetchRuntimeStatus(), requestGeneration);
+  } catch {
+    if (requestGeneration !== runtimeStatusGeneration) return;
+    runtimeStatusLoadState = "failed";
+  } finally {
+    runtimeStatusRecoveryInFlight = false;
+    if (runtimeStatusRecoveryPending) runtimeStatusRecoveryPending = false;
+    scheduleRuntimeStatusRecovery();
+    rerenderRuntimeDependentChrome();
+  }
+}
+
+function restartFailedRecoveries() {
+  let recommendationRestarted = false;
+  let runtimeRestarted = false;
+  if (
+    state.recommendations.length === 0 &&
+    (recommendationLoadState === "failed" || recommendationLoadState === "failed-exhausted")
+  ) {
+    if (recommendationRecoveryTimer !== null) clearTimeout(recommendationRecoveryTimer);
+    recommendationRecoveryTimer = null;
+    recommendationRecoveryAttempt = 0;
+    recommendationLoadState = "failed";
+    scheduleRecommendationRecovery();
+    recommendationRestarted = true;
+  }
+  if (runtimeStatusLoadState === "failed" || runtimeStatusLoadState === "failed-exhausted") {
+    if (runtimeStatusRecoveryTimer !== null) clearTimeout(runtimeStatusRecoveryTimer);
+    runtimeStatusRecoveryTimer = null;
+    runtimeStatusRecoveryAttempt = 0;
+    runtimeStatusLoadState = "failed";
+    scheduleRuntimeStatusRecovery();
+    runtimeRestarted = true;
+  }
+  if (recommendationRestarted) render();
+  else if (runtimeRestarted) rerenderRuntimeDependentChrome();
+}
+
 async function loadData() {
   loading = true;
+  recommendationLoadState = "loading";
   render();
   try {
-    const recs = await fetchRecommendations().catch(() => []);
-    const normalizedRecs = recs.map(normalizeRecommendation);
-    autoAppendExhausted = false;
-    resetAutoAppendIntent();
-    // Restore feedback state from backend so it survives page refresh.
-    rememberRecommendationFeedback(normalizedRecs);
-    patchState({
-      recommendations: normalizedRecs,
-    });
-  } catch { /* ignore */ }
+    applyRecommendationSnapshot(await fetchRecommendations(), { replace: true });
+  } catch {
+    recommendationLoadState = "failed";
+    scheduleRecommendationRecovery();
+  }
   loading = false;
   render();
   void hydrateRecommendSideChannels();
 }
 
 function hydrateRecommendSideChannels() {
+  if (runtimeStatusLoadState !== "ready") runtimeStatusLoadState = "loading";
+  const requestGeneration = runtimeStatusGeneration;
   fetchRuntimeStatus()
-    .then((status) => {
-      if (!status) return;
-      patchState({ runtimeStatus: normalizeRuntimeStatus(status) });
+    .then((status) => applyRuntimeStatusSnapshot(status, requestGeneration))
+    .catch(() => {
+      if (requestGeneration !== runtimeStatusGeneration) return;
+      runtimeStatusLoadState = "failed";
+      scheduleRuntimeStatusRecovery();
       rerenderRuntimeDependentChrome();
-    })
-    .catch(() => {});
+    });
 
   fetchActivityFeed({ limit: 5 })
     .then((activityFeed) => {
@@ -1601,9 +1797,15 @@ export function initRecommendView(root) {
     initPullRefresh();
     initAutoAppendIntent();
     loadData();
+  } else {
+    restartFailedRecoveries();
   }
-  // Tab switch back: don't refetch — just re-render with existing state.
-  // Pull-to-refresh or WebSocket events handle live updates.
+  // Tab switch back preserves existing cards. Only failed empty resources
+  // start a fresh bounded recovery round.
+}
+
+export function onStreamConnect() {
+  restartFailedRecoveries();
 }
 
 export function onStreamEvent(payload) {
@@ -1612,10 +1814,26 @@ export function onStreamEvent(payload) {
     // Merge pool status only. Do not replace recommendation cards here:
     // users may have appended older cards that /api/recommendations would not
     // return in its latest top window.
-    patchState({
-      runtimeStatus: mergeRuntimeStatusEvent(state.runtimeStatus, payload.data || payload),
-    });
+    const poolEvent = payload.data || payload;
+    patchState({ runtimeStatus: mergeRuntimeStatusEvent(state.runtimeStatus, poolEvent) });
+    if (typeof poolEvent?.pool_available_count === "number") {
+      runtimeStatusGeneration += 1;
+      clearRuntimeStatusRecovery();
+    }
     rerenderRuntimeDependentChrome();
+    if (
+      state.recommendations.length === 0 &&
+      recommendationLoadState === "failed-exhausted"
+    ) {
+      recommendationRecoveryAttempt = 0;
+      recommendationLoadState = "failed";
+    }
+    if (
+      state.recommendations.length === 0 &&
+      recommendationLoadState === "failed"
+    ) {
+      scheduleRecommendationRecovery();
+    }
   } else if (type === "refresh.started" || type === "refresh.strategy") {
     patchState({ runtimeEvent: payload.data || payload });
     rerenderRuntimeDependentChrome();
