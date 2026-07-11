@@ -137,9 +137,10 @@ def test_hydrate_runtime_status_fallback_is_not_dead_catch() -> None:
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
 
     assert "settleResource(readRuntimeStatusSnapshot())" in app_js
-    assert "let effectiveRuntime = runtimeResult.ok ? runtimeResult.value : null;" in app_js
-    assert "effectiveRuntime = await readRuntimeStatusSnapshot();" in app_js
-    assert "applyDesktopRuntimeSnapshot(effectiveRuntime);" in app_js
+    assert "const firstRuntimeGeneration = desktopRuntimeGeneration;" in app_js
+    assert "const secondRuntimeGeneration = desktopRuntimeGeneration;" in app_js
+    assert "const latestRuntime = await readRuntimeStatusSnapshot();" in app_js
+    assert "applyDesktopRuntimeSnapshot(effectiveRuntime, effectiveRuntimeGeneration);" in app_js
 
 
 def test_bili_checklist_label_reflects_probe_result_and_surfaces_detail() -> None:

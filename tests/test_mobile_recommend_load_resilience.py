@@ -50,7 +50,14 @@ def test_mobile_manual_reshuffle_clears_failed_recovery_state() -> None:
 def test_mobile_late_runtime_timeout_does_not_override_stream_recovery() -> None:
     recommend_js = Path("src/openbiliclaw/web/js/views/recommend.js").read_text()
 
-    assert 'if (runtimeStatusLoadState !== "ready")' in recommend_js
+    assert "let runtimeStatusGeneration = 0;" in recommend_js
+    assert "const requestGeneration = runtimeStatusGeneration;" in recommend_js
+    assert "if (requestGeneration !== runtimeStatusGeneration) return;" in recommend_js
+    assert "runtimeStatusGeneration += 1;" in recommend_js
+    assert (
+        'if (typeof poolEvent?.pool_available_count === "number") {\n'
+        "      runtimeStatusGeneration += 1;"
+    ) in recommend_js
 
 
 def test_mobile_healthy_stream_reconnect_does_not_rebuild_cards() -> None:

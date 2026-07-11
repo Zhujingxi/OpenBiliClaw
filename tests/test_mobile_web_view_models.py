@@ -926,6 +926,26 @@ class TestMobileWebViewModels:
         """)
         )
 
+    def test_pool_stream_snapshot_can_initialize_mobile_inventory_summary(self) -> None:
+        _assert_js(
+            dedent("""
+            import assert from "node:assert/strict";
+            import {
+              getPoolStatusSummary,
+              mergeRuntimeStatusEvent,
+            } from "./src/openbiliclaw/web/js/view-models.js";
+
+            const runtime = mergeRuntimeStatusEvent(null, {
+              pool_available_count: 23,
+              pool_pending_count: 4,
+              recent_pool_topics: ["城市影像"],
+            });
+
+            assert.equal(runtime.initialized, true);
+            assert.equal(getPoolStatusSummary(runtime).available, "还有 23 条可换");
+        """),
+        )
+
     def test_normalize_activity_feed(self) -> None:
         _assert_js(
             dedent("""

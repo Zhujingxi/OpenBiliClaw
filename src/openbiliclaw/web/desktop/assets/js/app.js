@@ -154,6 +154,7 @@
     let desktopRuntimeRecoveryTimer = null;
     let desktopRecommendationRecoveryInFlight = false;
     let desktopRuntimeRecoveryInFlight = false;
+    let desktopRuntimeGeneration = 0;
 
     function debounceAsync(fn, delayMs = 1000) {
       let timer = null;
@@ -239,8 +240,10 @@
       const poolAvailable = $("#poolAvailable");
       if (poolAvailable) {
         poolAvailable.onclick = null;
+        poolAvailable.onkeydown = null;
         poolAvailable.removeAttribute("role");
         poolAvailable.removeAttribute("tabindex");
+        poolAvailable.removeAttribute("aria-label");
       }
     }
 
@@ -256,10 +259,13 @@
       state.videos = normalized;
     }
 
-    function applyDesktopRuntimeSnapshot(payload) {
+    function applyDesktopRuntimeSnapshot(payload, requestGeneration) {
+      if (requestGeneration !== desktopRuntimeGeneration) return false;
       if (!payload) throw new Error("runtime status unavailable");
+      desktopRuntimeGeneration += 1;
       clearDesktopRuntimeRecovery();
       applyRuntimeStatus(payload);
+      return true;
     }
 
     function renderDesktopRuntimeFailure() {
@@ -269,13 +275,24 @@
         $("#metricPool").textContent = "—";
         $("#poolAvailable").textContent = exhausted ? "同步失败，点击重试" : "同步失败，正在重试";
         $("#runtimeSummary").textContent = "库存状态读取失败；这不代表候选池真的为空。";
+      } else {
+        $("#runtimeSummary").textContent = exhausted
+          ? "库存状态同步失败；当前显示的是上次成功读取的库存，点击库存数可重试。"
+          : "库存状态同步失败，正在重试；当前显示的是上次成功读取的库存。";
       }
-      $("#poolRefreshState").textContent = exhausted ? "等待重试" : "状态重试中";
+      $("#poolRefreshState").textContent = exhausted ? "同步失败，点击库存重试" : "状态重试中";
       if (exhausted) {
         const poolAvailable = $("#poolAvailable");
         poolAvailable.setAttribute("role", "button");
         poolAvailable.setAttribute("tabindex", "0");
+        poolAvailable.setAttribute("aria-label", "库存状态同步失败，重新加载");
         poolAvailable.onclick = restartDesktopFailedRecoveries;
+        poolAvailable.onkeydown = (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            restartDesktopFailedRecoveries();
+          }
+        };
       }
     }
 
@@ -336,10 +353,11 @@
     async function runDesktopRuntimeRecovery() {
       if (desktopRuntimeLoadState !== "failed" || desktopRuntimeRecoveryInFlight) return;
       desktopRuntimeRecoveryInFlight = true;
+      const requestGeneration = desktopRuntimeGeneration;
       try {
-        applyDesktopRuntimeSnapshot(await readRuntimeStatusSnapshot());
+        applyDesktopRuntimeSnapshot(await readRuntimeStatusSnapshot(), requestGeneration);
       } catch {
-        if (desktopRuntimeLoadState === "ready") return;
+        if (requestGeneration !== desktopRuntimeGeneration) return;
         desktopRuntimeLoadState = "failed";
       } finally {
         desktopRuntimeRecoveryInFlight = false;
@@ -4601,6 +4619,7 @@
       $("#poolReplenished").textContent = summary?.replenished || "—";
       $("#poolTopics").textContent = summary?.topics || "—";
       $("#poolRefreshState").textContent = getPoolRefreshLabel(runtime);
+      renderDesktopRuntimeFailure();
     }
 
     function applyRuntimeStatus(payload) {
@@ -5630,6 +5649,7 @@
     function handleRuntimeEvent(event) {
       if (!event?.type) return;
       if (event.type === "refresh.pool_updated" && typeof event.pool_available_count === "number") {
+        desktopRuntimeGeneration += 1;
         clearDesktopRuntimeRecovery();
       }
       applyRuntimeStatus({ ...event, live_summary: event.message || event.live_summary || event.type });
@@ -5766,6 +5786,7 @@
     }
 
     async function hydrateFromBackend() {
+      const firstRuntimeGeneration = desktopRuntimeGeneration;
       const [health, recommendationResult, runtimeResult, activity, profile, delights, notification, chatTurns, delightChatTurns, config, initStatus] = await Promise.all([
         requestJson(ENDPOINTS.health),
         settleResource(readRecommendationSnapshot()),
@@ -5811,16 +5832,24 @@
       // Re-read after recommendations: GET /api/recommendations may consume the
       // pool, so the later snapshot is preferred. Keep the settled first read
       // as fallback and never turn a late timeout into a fake zero inventory.
-      let effectiveRuntime = runtimeResult.ok ? runtimeResult.value : null;
+      let effectiveRuntime = runtimeResult.ok && firstRuntimeGeneration === desktopRuntimeGeneration
+        ? runtimeResult.value
+        : null;
+      let effectiveRuntimeGeneration = effectiveRuntime ? firstRuntimeGeneration : null;
+      const secondRuntimeGeneration = desktopRuntimeGeneration;
       try {
-        effectiveRuntime = await readRuntimeStatusSnapshot();
+        const latestRuntime = await readRuntimeStatusSnapshot();
+        if (secondRuntimeGeneration === desktopRuntimeGeneration) {
+          effectiveRuntime = latestRuntime;
+          effectiveRuntimeGeneration = secondRuntimeGeneration;
+        }
       } catch {
         // Keep the first settled snapshot, or a runtime-stream recovery that
         // may have completed while this slower HTTP read was in flight.
       }
-      if (effectiveRuntime) {
-        applyDesktopRuntimeSnapshot(effectiveRuntime);
-      } else if (desktopRuntimeLoadState !== "ready") {
+      if (effectiveRuntime && effectiveRuntimeGeneration !== null) {
+        applyDesktopRuntimeSnapshot(effectiveRuntime, effectiveRuntimeGeneration);
+      } else if (secondRuntimeGeneration === desktopRuntimeGeneration) {
         desktopRuntimeLoadState = "failed";
         scheduleDesktopRuntimeRecovery();
         renderDesktopRuntimeFailure();

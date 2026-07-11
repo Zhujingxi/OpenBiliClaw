@@ -57,9 +57,10 @@ def test_desktop_hydration_refetches_runtime_after_recommendation_bootstrap() ->
     )
     assert hydrate is not None, "desktop hydrateFromBackend not found"
     body = hydrate.group("body")
-    assert "let effectiveRuntime = runtimeResult.ok ? runtimeResult.value : null;" in body
-    assert "effectiveRuntime = await readRuntimeStatusSnapshot();" in body
-    assert "applyDesktopRuntimeSnapshot(effectiveRuntime);" in body
+    assert "const firstRuntimeGeneration = desktopRuntimeGeneration;" in body
+    assert "const secondRuntimeGeneration = desktopRuntimeGeneration;" in body
+    assert "applyDesktopRuntimeSnapshot(" in body
+    assert "secondRuntimeGeneration" in body
 
 
 def test_desktop_pool_status_labels_pending_signals_as_discovery_context() -> None:
@@ -275,7 +276,22 @@ def test_desktop_runtime_failure_recovers_independently() -> None:
     assert "scheduleDesktopRuntimeRecovery" in app_js
     assert "[1000, 2000, 4000, 8000]" in app_js
     assert 'desktopRuntimeLoadState = "failed"' in app_js
-    assert 'if (desktopRuntimeLoadState === "ready") return;' in app_js
+    assert "let desktopRuntimeGeneration = 0;" in app_js
+    assert "if (requestGeneration !== desktopRuntimeGeneration) return;" in app_js
+
+
+def test_desktop_runtime_failure_survives_full_render_and_is_keyboard_retryable() -> None:
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    render_pool = re.search(
+        r"function renderPoolStatus\(.*?\) \{(?P<body>.*?)\n    \}",
+        app_js,
+        flags=re.S,
+    )
+    assert render_pool is not None
+    assert "renderDesktopRuntimeFailure();" in render_pool.group("body")
+    assert "poolAvailable.onkeydown" in app_js
+    assert 'event.key === "Enter" || event.key === " "' in app_js
 
 
 def test_desktop_healthy_stream_reconnect_does_not_rebuild_cards() -> None:

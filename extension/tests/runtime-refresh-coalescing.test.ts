@@ -85,12 +85,14 @@ test("runtime stream refresh handlers coalesce expensive frontend reloads", () =
   assert.match(desktopRuntimeHandler, /desktopRecommendationLoadState === "failed"/);
   assert.match(desktopRuntimeHandler, /desktopRecommendationLoadState === "failed-exhausted"/);
   assert.match(desktopRuntimeHandler, /scheduleDesktopRecommendationRecovery\(\);/);
+  assert.match(desktopRuntimeHandler, /desktopRuntimeGeneration \+= 1;/);
   assert.doesNotMatch(desktopRuntimeHandler, /state\.videos\s*=\s*normalizeRecommendationList/);
 
   const poolUpdatedBlock =
     mobileRecommendJs.match(/if \(type === "refresh\.pool_updated"\) \{[\s\S]*?\} else if/)?.[0] ?? "";
   assert.notEqual(poolUpdatedBlock, "", "mobile recommend stream handler should handle pool updates");
   assert.match(poolUpdatedBlock, /mergeRuntimeStatusEvent/);
+  assert.match(poolUpdatedBlock, /runtimeStatusGeneration \+= 1;/);
   assert.match(poolUpdatedBlock, /rerenderRuntimeDependentChrome\(\);/);
   assert.match(poolUpdatedBlock, /state\.recommendations\.length === 0/);
   assert.match(poolUpdatedBlock, /recommendationLoadState === "failed"/);

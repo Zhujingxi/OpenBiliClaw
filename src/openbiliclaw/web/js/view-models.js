@@ -624,6 +624,10 @@ export function mergeRuntimeStatusEvent(status, event) {
   const runtime = normalizeRuntimeStatus(status);
   const next = { ...runtime };
   if (typeof event?.pool_available_count === "number") {
+    // A pool snapshot can only be emitted by a running, initialized backend.
+    // Promote the partial stream payload so first-load HTTP timeouts do not
+    // hide otherwise authoritative inventory from the mobile header.
+    next.initialized = true;
     next.pool_available_count = Number(event.pool_available_count);
   }
   if (typeof event?.pool_raw_count === "number") {

@@ -88,6 +88,7 @@ let recommendationRecoveryInFlight = false;
 let runtimeStatusRecoveryInFlight = false;
 let recommendationRecoveryPending = false;
 let runtimeStatusRecoveryPending = false;
+let runtimeStatusGeneration = 0;
 
 // Delight auto-advance
 let _delightAutoTimer = null;
@@ -1617,11 +1618,14 @@ function applyRecommendationSnapshot(recs, { replace = false } = {}) {
   patchState({ recommendations: normalizedRecs });
 }
 
-function applyRuntimeStatusSnapshot(status) {
+function applyRuntimeStatusSnapshot(status, requestGeneration) {
+  if (requestGeneration !== runtimeStatusGeneration) return false;
   if (!status) throw new Error("runtime status unavailable");
+  runtimeStatusGeneration += 1;
   clearRuntimeStatusRecovery();
   patchState({ runtimeStatus: normalizeRuntimeStatus(status) });
   rerenderRuntimeDependentChrome();
+  return true;
 }
 
 function scheduleRecommendationRecovery() {
@@ -1699,9 +1703,11 @@ async function runRuntimeStatusRecovery() {
     return;
   }
   runtimeStatusRecoveryInFlight = true;
+  const requestGeneration = runtimeStatusGeneration;
   try {
-    applyRuntimeStatusSnapshot(await fetchRuntimeStatus());
+    applyRuntimeStatusSnapshot(await fetchRuntimeStatus(), requestGeneration);
   } catch {
+    if (requestGeneration !== runtimeStatusGeneration) return;
     runtimeStatusLoadState = "failed";
   } finally {
     runtimeStatusRecoveryInFlight = false;
@@ -1754,10 +1760,11 @@ async function loadData() {
 
 function hydrateRecommendSideChannels() {
   if (runtimeStatusLoadState !== "ready") runtimeStatusLoadState = "loading";
+  const requestGeneration = runtimeStatusGeneration;
   fetchRuntimeStatus()
-    .then(applyRuntimeStatusSnapshot)
+    .then((status) => applyRuntimeStatusSnapshot(status, requestGeneration))
     .catch(() => {
-      if (runtimeStatusLoadState === "ready") return;
+      if (requestGeneration !== runtimeStatusGeneration) return;
       runtimeStatusLoadState = "failed";
       scheduleRuntimeStatusRecovery();
       rerenderRuntimeDependentChrome();
@@ -1810,6 +1817,7 @@ export function onStreamEvent(payload) {
     const poolEvent = payload.data || payload;
     patchState({ runtimeStatus: mergeRuntimeStatusEvent(state.runtimeStatus, poolEvent) });
     if (typeof poolEvent?.pool_available_count === "number") {
+      runtimeStatusGeneration += 1;
       clearRuntimeStatusRecovery();
     }
     rerenderRuntimeDependentChrome();
