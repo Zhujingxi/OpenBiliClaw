@@ -32,6 +32,8 @@ class SupportsDelightCandidate(Protocol):
     topic_group: str
     source_strategy: str
     relevance_score: float
+    # Optional; used for image-only cover embedding alignment.
+    cover_url: str
 
 
 class SupportsRecommendationSignalStore(Protocol):
@@ -51,6 +53,9 @@ class DelightSignals:
     novelty_factor: float = 0.0
     quality_indicator: float = 0.0
     exploration_match: float = 0.0
+    # Image-only cover embedding vs text interest anchors (same multimodal
+    # embedding space). 0 when cover missing, image embed inactive, or fail.
+    visual_alignment: float = 0.0
     # Embedding match against the user's disliked_topics. Higher means
     # the content semantically resembles something they explicitly
     # rejected → subtracts from final score.
@@ -61,12 +66,14 @@ class DelightSignals:
 class DelightWeights:
     """Tuneable weights for the composite delight score."""
 
-    deep_need: float = 0.20
-    insight: float = 0.15
-    likes: float = 0.30
-    novelty: float = 0.15
-    quality: float = 0.10
-    exploration: float = 0.10
+    deep_need: float = 0.18
+    insight: float = 0.14
+    likes: float = 0.28
+    novelty: float = 0.14
+    quality: float = 0.09
+    exploration: float = 0.09
+    # Cover visual style vs profile interest anchors (image-only embed).
+    visual: float = 0.08
     # Multiplier applied to dislike_penalty before it's subtracted from
     # the positive sum.  0.50 means a strongly disliked match (penalty=1.0)
     # subtracts 0.50 from the score, typically pushing it below threshold.
@@ -152,6 +159,7 @@ class DelightScorer:
             + signals.novelty_factor * w.novelty
             + signals.quality_indicator * w.quality
             + signals.exploration_match * w.exploration
+            + signals.visual_alignment * w.visual
         )
         penalty = signals.dislike_penalty * w.dislike_penalty
         score = positive - penalty
@@ -184,6 +192,7 @@ class DelightScorer:
         quality = self._quality_indicator(candidate)
         exploration = self._exploration_match(candidate, profile, novelty)
         dislike = await self._dislike_penalty(content_text, profile)
+        visual = await self._visual_alignment(candidate, profile)
 
         # Surface "embedding subsystem dead" cascades — only when the
         # provider actually returned no vector for the content. Earlier
@@ -207,8 +216,113 @@ class DelightScorer:
             novelty_factor=novelty,
             quality_indicator=quality,
             exploration_match=exploration,
+            visual_alignment=visual,
             dislike_penalty=dislike,
         )
+
+    async def _visual_alignment(
+        self,
+        candidate: SupportsDelightCandidate,
+        profile: Any,
+    ) -> float:
+        """Score cover image vs text interest anchors in one embedding space.
+
+        Image-only path: embed compressed cover, compare to deep_needs /
+        like domain text vectors. Returns 0 when multimodal embedding is
+        inactive, cover is missing, or prepare/embed fails.
+        """
+        embedding = self._embedding
+        if embedding is None:
+            return 0.0
+        active = getattr(embedding, "image_embedding_active", None)
+        if callable(active):
+            if not active():
+                return 0.0
+        elif not (
+            bool(getattr(embedding, "multimodal_enabled", False))
+            and bool(getattr(embedding, "supports_image_embedding", False))
+        ):
+            return 0.0
+        embed_image = getattr(embedding, "embed_image", None)
+        if not callable(embed_image):
+            return 0.0
+
+        cover_url = str(getattr(candidate, "cover_url", "") or "").strip()
+        if not cover_url:
+            return 0.0
+
+        try:
+            from openbiliclaw.discovery.multimodal import prepare_cover_bytes_for_embedding
+        except Exception:
+            return 0.0
+
+        try:
+            prepared = await prepare_cover_bytes_for_embedding(
+                cover_url,
+                max_px=384,
+                quality=72,
+                timeout_seconds=6,
+            )
+        except Exception:
+            logger.debug("visual_alignment: cover prepare failed", exc_info=True)
+            return 0.0
+        if prepared is None:
+            return 0.0
+        image_bytes, mime_type = prepared
+
+        try:
+            cover_vec = await embed_image(image_bytes, mime_type=mime_type)
+        except Exception:
+            logger.debug("visual_alignment: embed_image failed", exc_info=True)
+            return 0.0
+        if not cover_vec:
+            return 0.0
+
+        anchors = self._visual_anchor_texts(profile)
+        if not anchors:
+            return 0.0
+
+        from openbiliclaw.llm.embedding import cosine_similarity
+
+        max_sim = 0.0
+        for anchor in anchors:
+            anchor_vec = await embedding.embed(anchor)
+            if not anchor_vec:
+                continue
+            max_sim = max(max_sim, cosine_similarity(cover_vec, anchor_vec))
+
+        return max(0.0, min(1.0, (max_sim - 0.5) * 2.0))
+
+    @staticmethod
+    def _visual_anchor_texts(profile: Any) -> list[str]:
+        """Short text anchors for cover visual alignment (same as text space)."""
+        texts: list[str] = []
+        seen: set[str] = set()
+
+        def _add(raw: object) -> None:
+            text = str(raw or "").strip()
+            if not text or text in seen:
+                return
+            seen.add(text)
+            texts.append(text)
+
+        for need in getattr(profile, "deep_needs", [])[:5]:
+            _add(need)
+
+        interest_layer = getattr(profile, "interest", None)
+        likes = getattr(interest_layer, "likes", []) if interest_layer is not None else []
+        for dom in likes[:6]:
+            domain = str(getattr(dom, "domain", "")).strip()
+            if domain:
+                _add(domain)
+
+        if len(texts) < 3:
+            prefs = getattr(profile, "preferences", None)
+            interests = getattr(prefs, "interests", []) if prefs is not None else []
+            for tag in interests[:6]:
+                _add(getattr(tag, "name", ""))
+
+        return texts[:8]
 
     async def _deep_need_alignment(
         self,

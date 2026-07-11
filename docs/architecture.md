@@ -165,6 +165,7 @@ X 是第六个内容源，分两条独立通路：
 - 结构化输出共享解析：`llm/json_utils.py` 为 discovery eval-batch、recommendation copy/classify、soul awareness/insight/profile/speculator 提供统一 JSON 容错，兼容 MiMo / OpenAI-compatible wrapper、fenced JSON、JSONL、schema echo 和 malformed `{ [ ... ] }`
 - v0.3.0+ embedding 兜底：`OllamaProvider.embed()` 走原生 `/api/embeddings`，配 `bge-m3` 模型可在 Mac/Win/Linux CPU 跑相似度计算，不需额外 API Key
 - `EmbeddingService` L1 内存 + L2 SQLite 双层缓存；`embedding.provider="ollama"` 且 embedding 凭据为空时直接使用本地 Ollama 默认地址，不再产生向后兼容 warning
+- 可选封面 **image-only** embedding（`[llm.embedding].multimodal_enabled` + 如 `gemini-embedding-2` 或 `dashscope`/`qwen3-vl-embedding`）：封面单独入同一向量空间（不与标题联合一次 embed），discovery 入池预热、Delight `visual_alignment` 消费；与 discovery vision LLM 评估开关独立
 
 ### Storage (`storage/`)
 - SQLite 数据库管理

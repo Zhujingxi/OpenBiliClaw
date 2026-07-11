@@ -4,6 +4,11 @@
 
 ---
 
+## Unreleased
+
+- **封面 image-only embedding 打通**：`EmbeddingService.embed_image()` + L1/L2 `img:{sha256}` 缓存；Gemini `gemini-embedding-2` 族原生图像向量；`[llm.embedding].multimodal_enabled`（默认关）。discovery 入池预热封面向量；Delight 新增 `visual_alignment`（封面向量 vs 兴趣文本锚点）。与 `[discovery].multimodal_evaluation_enabled`（vision LLM 评估）相互独立；本地 bge-m3 等纯文本 embedding 自动跳过。
+- **DashScope / Qwen 多模态 embedding**：新增 `provider = "dashscope"`（`DashScopeEmbeddingProvider`），走百炼原生 `multimodal-embedding` API（非 OpenAI `/v1/embeddings`）；默认模型 `qwen3-vl-embedding`，文本与封面独立向量同空间；`output_dimensionality` 可对齐 1024（亦支持 2560/2048/…）；`api_key` 可写在 `[llm.embedding]` 或环境变量 `DASHSCOPE_API_KEY`。
+
 ## v0.3.152 / extension v0.3.152 / desktop v0.3.152: 桌面启动自愈与动态惊喜阈值（2026-07-04）
 
 后端源码走 `backend-v0.3.152`，浏览器插件走 `extension-v0.3.152`，桌面安装包走 `desktop-v0.3.152`。

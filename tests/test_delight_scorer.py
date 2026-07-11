@@ -90,8 +90,21 @@ def test_delight_signals_defaults_to_zero() -> None:
 
 def test_delight_weights_defaults_sum_to_one() -> None:
     w = DelightWeights()
-    total = w.deep_need + w.insight + w.likes + w.novelty + w.quality + w.exploration
+    total = (
+        w.deep_need
+        + w.insight
+        + w.likes
+        + w.novelty
+        + w.quality
+        + w.exploration
+        + w.visual
+    )
     assert abs(total - 1.0) < 0.01
+
+
+def test_delight_signals_include_visual_alignment_default() -> None:
+    signals = DelightSignals()
+    assert signals.visual_alignment == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +127,84 @@ async def test_scorer_without_embedding_returns_valid_score(tmp_path: Path) -> N
     # Without embeddings, deep_need and insight should be 0
     assert signals.deep_need_alignment == 0.0
     assert signals.insight_resonance == 0.0
+    assert signals.visual_alignment == 0.0
+
+
+@pytest.mark.asyncio
+async def test_visual_alignment_uses_cover_image_embedding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cover image vector vs text anchors lifts visual_alignment when active."""
+
+    class _Emb:
+        multimodal_enabled = True
+        supports_image_embedding = True
+        similarity_threshold = 0.82
+
+        def image_embedding_active(self) -> bool:
+            return True
+
+        async def embed(self, text: str) -> list[float]:
+            # Same direction as cover image so visual cosine stays high;
+            # text signals still get non-empty vectors.
+            return [1.0, 0.0, 0.0]
+
+        async def embed_image(
+            self,
+            image_bytes: bytes,
+            *,
+            mime_type: str = "image/jpeg",
+            cache_key: str | None = None,
+        ) -> list[float]:
+            assert image_bytes
+            assert mime_type == "image/jpeg"
+            return [0.95, 0.05, 0.0]
+
+    async def fake_prepare(
+        cover_url: str,
+        *,
+        max_px: int,
+        quality: int,
+        timeout_seconds: int,
+    ) -> tuple[bytes, str] | None:
+        assert cover_url == "https://example.com/cover.jpg"
+        return b"jpeg-cover", "image/jpeg"
+
+    monkeypatch.setattr(
+        "openbiliclaw.discovery.multimodal.prepare_cover_bytes_for_embedding",
+        fake_prepare,
+    )
+
+    database = _make_database(tmp_path)
+    scorer = DelightScorer(embedding_service=_Emb(), database=database)  # type: ignore[arg-type]
+    score, signals, _ = await scorer.score(_make_candidate(), _make_profile())
+
+    assert signals.visual_alignment > 0.5
+    assert 0.0 <= score <= 1.0
+
+
+@pytest.mark.asyncio
+async def test_visual_alignment_zero_when_image_embedding_inactive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _Emb:
+        multimodal_enabled = False
+        supports_image_embedding = True
+        similarity_threshold = 0.82
+
+        def image_embedding_active(self) -> bool:
+            return False
+
+        async def embed(self, text: str) -> list[float]:
+            return [1.0, 0.0]
+
+        async def embed_image(self, *args: object, **kwargs: object) -> list[float]:
+            raise AssertionError("embed_image must not run when inactive")
+
+    database = _make_database(tmp_path)
+    scorer = DelightScorer(embedding_service=_Emb(), database=database)  # type: ignore[arg-type]
+    _, signals, _ = await scorer.score(_make_candidate(), _make_profile())
+    assert signals.visual_alignment == 0.0
 
 
 @pytest.mark.asyncio

@@ -4,11 +4,18 @@ Provides text embedding via configurable models (default: Gemini),
 with L1 in-memory cache and L2 SQLite persistent cache.
 Discovery writes embeddings to L2; recommendation reads from L2
 with zero API calls on the hot path.
+
+Optional image embedding (cover-only vectors) is gated by
+``[llm.embedding].multimodal_enabled`` plus a provider/model that
+supports native image embed (e.g. Gemini Embedding 2). Image vectors
+share the same cache table under ``img:`` keys and the same model
+namespace so they stay in one vector space with text embeds.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -19,6 +26,8 @@ from pathlib import Path
 from typing import Protocol
 
 logger = logging.getLogger(__name__)
+
+_IMAGE_CACHE_KEY_PREFIX = "img:"
 
 
 class SupportsEmbed(Protocol):
@@ -31,12 +40,38 @@ class SupportsEmbeddingService(Protocol):
     """Protocol for semantic embedding helpers used by mainline services."""
 
     similarity_threshold: float
+    supports_image_embedding: bool
+    multimodal_enabled: bool
 
     async def embed(self, text: str) -> list[float]: ...
 
     def lookup_cached(self, text: str) -> list[float]:
         """Cache-only lookup; default returns ``[]`` for protocol compatibility."""
         return []
+
+    def image_embedding_active(self) -> bool:
+        """True when config + provider allow image embeds."""
+        return False
+
+    async def embed_image(
+        self,
+        image_bytes: bytes,
+        *,
+        mime_type: str = "image/jpeg",
+        cache_key: str | None = None,
+    ) -> list[float]:
+        """Image-only embed; default returns ``[]`` when unsupported."""
+        return []
+
+    def lookup_cached_image(self, cache_key: str) -> list[float]:
+        """Cache-only image lookup; default returns ``[]``."""
+        return []
+
+
+def image_embedding_cache_key(image_bytes: bytes) -> str:
+    """Stable L1/L2 key for compressed cover bytes."""
+    digest = hashlib.sha256(image_bytes).hexdigest()[:40]
+    return f"{_IMAGE_CACHE_KEY_PREFIX}{digest}"
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -181,6 +216,7 @@ class EmbeddingService:
         similarity_threshold: float = 0.82,
         persistent_cache: EmbeddingCache | None = None,
         max_concurrent_provider_calls: int = 2,
+        multimodal_enabled: bool = False,
     ) -> None:
         self._provider = provider
         self._model = model
@@ -204,17 +240,27 @@ class EmbeddingService:
         # cost. Default 2 keeps single-CPU bge-m3 healthy while still
         # using both cores for inference + tokenization.
         self._provider_semaphore = asyncio.Semaphore(max_concurrent_provider_calls)
+        self.multimodal_enabled = bool(multimodal_enabled)
+        self.supports_image_embedding = self._detect_image_embedding_support()
 
-    def lookup_cached(self, text: str) -> list[float]:
-        """Cache-only lookup — never triggers a provider API call.
+    def image_embedding_active(self) -> bool:
+        """True when config opts in and the provider/model can embed images."""
+        return self.multimodal_enabled and self.supports_image_embedding
 
-        Returns ``[]`` on miss. Callers (recommendation hot path) use
-        this when they need a hard latency budget: a miss means the
-        item simply doesn't participate in embedding-based diversity
-        for this batch, and the warmer task fills the cache asynchronously
-        for subsequent batches.
-        """
-        key = text.strip().lower()[:200]
+    def _detect_image_embedding_support(self) -> bool:
+        provider = self._provider
+        checker = getattr(provider, "is_multimodal_embedding_model", None)
+        if callable(checker):
+            try:
+                if not bool(checker(self._model)):
+                    return False
+            except Exception:
+                return False
+        elif not bool(getattr(provider, "supports_image_embedding", False)):
+            return False
+        return callable(getattr(provider, "embed_image", None))
+
+    def _lookup_cache_key(self, key: str) -> list[float]:
         if not key:
             return []
         cached = self._l1_cache.get(key)
@@ -227,6 +273,35 @@ class EmbeddingService:
                 self._l1_cache[key] = persisted
                 return persisted
         return []
+
+    def _store_vector(self, key: str, vector: list[float]) -> None:
+        if len(self._l1_cache) >= self._cache_size and key not in self._l1_cache:
+            self._l1_cache.popitem(last=False)
+        self._l1_cache[key] = vector
+        if self._l2_cache is not None:
+            try:
+                self._l2_cache.put(key, vector, model=self._cache_model)
+            except Exception:
+                logger.debug("L2 cache write failed", exc_info=True)
+
+    def lookup_cached(self, text: str) -> list[float]:
+        """Cache-only lookup — never triggers a provider API call.
+
+        Returns ``[]`` on miss. Callers (recommendation hot path) use
+        this when they need a hard latency budget: a miss means the
+        item simply doesn't participate in embedding-based diversity
+        for this batch, and the warmer task fills the cache asynchronously
+        for subsequent batches.
+        """
+        key = text.strip().lower()[:200]
+        return self._lookup_cache_key(key)
+
+    def lookup_cached_image(self, cache_key: str) -> list[float]:
+        """Cache-only image lookup — never triggers a provider API call."""
+        key = (cache_key or "").strip()
+        if not key.startswith(_IMAGE_CACHE_KEY_PREFIX):
+            return []
+        return self._lookup_cache_key(key)
 
     async def embed(self, text: str) -> list[float]:
         """Get embedding for text. Checks L1 → L2 → API."""
@@ -266,19 +341,65 @@ class EmbeddingService:
             )
             return []
 
-        # Store in both caches (LRU eviction: popitem(last=False) drops
-        # the least-recently-used entry — combined with move_to_end on
-        # cache hit above, this is true LRU instead of FIFO).
-        if len(self._l1_cache) >= self._cache_size:
-            self._l1_cache.popitem(last=False)
-        self._l1_cache[key] = vector
+        self._store_vector(key, vector)
+        return vector
 
-        if self._l2_cache is not None:
+    async def embed_image(
+        self,
+        image_bytes: bytes,
+        *,
+        mime_type: str = "image/jpeg",
+        cache_key: str | None = None,
+    ) -> list[float]:
+        """Get embedding for image bytes (cover-only). Checks L1 → L2 → API.
+
+        No-ops with ``[]`` when image embedding is inactive (config off or
+        provider/model is text-only). Never mixes a different model space
+        with text embeds — same ``self._model`` / cache_model namespace.
+        """
+        if not self.image_embedding_active():
+            return []
+        if not image_bytes:
+            return []
+
+        key = (cache_key or "").strip() or image_embedding_cache_key(image_bytes)
+        if not key.startswith(_IMAGE_CACHE_KEY_PREFIX):
+            key = image_embedding_cache_key(image_bytes)
+
+        cached = self._lookup_cache_key(key)
+        if cached:
+            return cached
+
+        embed_image = getattr(self._provider, "embed_image", None)
+        if not callable(embed_image):
+            return []
+
+        async with self._provider_semaphore:
             try:
-                self._l2_cache.put(key, vector, model=self._cache_model)
+                raw_vector = await embed_image(
+                    image_bytes,
+                    mime_type=mime_type or "image/jpeg",
+                    model=self._model,
+                )
             except Exception:
-                logger.debug("L2 cache write failed", exc_info=True)
+                logger.warning(
+                    "Image embedding failed for key=%s",
+                    key[:50],
+                    exc_info=True,
+                )
+                return []
 
+        vector = _coerce_embedding_vector(raw_vector) or []
+        if not vector:
+            logger.warning(
+                "Embedding service got empty image vector for key=%r — "
+                "provider returned [] (likely transient failure). "
+                "Skipping cache write so the next call retries.",
+                key[:80],
+            )
+            return []
+
+        self._store_vector(key, vector)
         return vector
 
     async def probe(self) -> bool:

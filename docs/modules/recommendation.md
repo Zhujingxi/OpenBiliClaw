@@ -39,6 +39,7 @@
 | M127b 避雷探针用户确认 | ✅ | WebSocket 推送 `avoidance.probe` → popup / Web / OpenClaw 卡片（确实不喜欢 / 不是 / 多聊聊）→ `POST /api/avoidance-probes/respond`；确认后写入 `disliked_topics` 并清理候选池，未确认时不参与过滤 |
 | M128 CLI delight + probe | ✅ | `openbiliclaw delight` 手动查看惊喜推荐候选；`openbiliclaw probe` 手动列出猜测方向并交互确认/拒绝 |
 | M129 惊喜候选自动预热与回填 | ✅ | delight 运行时统一使用动态阈值：默认底线 `0.70`，保守用户底线 `0.80`，正式候选池样本足够时抬高到池内 Top 10% 分数边界；`precompute_delight_scores()` 直接复用 Evo 写入的 `relevance_score` 生成 `delight_score`，并优先复用面向用户的 `pool_expression` 作为 `delight_reason`（缺失时 fallback 到 `relevance_reason/topic`），不再额外调用单独的 Delight LLM 评分或文案任务；后台启动会自动补齐高分但缺 `reason/hook` 的候选，`suppressed` 高分库存也允许作为惊喜推荐入口 |
+| Delight `visual_alignment` | ✅ | 当 embedding 开启 image-only 封面向量（`[llm.embedding].multimodal_enabled` + 多模态 embedding 模型）时，`DelightScorer` 将压缩封面 `embed_image` 与 deep_needs / likes 文本锚点做 cosine，得到 `visual_alignment`（默认权重 0.08）；无封面或能力关闭时恒 0，不影响默认路径 |
 | 惊喜推荐反馈保留 | ✅ | `POST /api/delight/respond` 中 `like / chat` 记录正向学习信号并保留候选；`view` 当场保留卡片但标记已读（对齐推荐池 `shown` 语义，下次重灌不再出现）；`dislike / dismiss` 消费候选并驱动三端立即移除。`pending-batch` 重灌以 `include_liked=True` 保留已喜欢候选并下发 `state="liked"`，喜欢过的卡片在 popup 重开后不再静默消失 |
 | v0.3.0 在线 supergroup 合并 | ✅ | `_merge_topic_supergroups` serve 时基于 embedding 把 `动漫杂谈/补番/解说` 等近义 topic 合并为同一聚类，让多样化器把它们当作一个桶 |
 | v0.3.0 reshuffle 性能优化 | ✅ | 三段并发：embedding `asyncio.gather` 并行（替代顺序 await）+ embedding cache key 改为 label-only（命中率 ~0% → ~100%）+ `batch_insert_recommendations` 单 transaction 插入 10 条（10 次 fsync → 1 次）。换一批 2.6s → 0.6s |

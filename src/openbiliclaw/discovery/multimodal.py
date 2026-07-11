@@ -61,18 +61,21 @@ def _compress_cover_image(data: bytes, *, max_px: int, quality: int) -> bytes:
         return output.getvalue()
 
 
-async def prepare_cover_image_input(
-    *,
-    content_id: str,
+async def prepare_cover_bytes_for_embedding(
     cover_url: str,
+    *,
     max_px: int,
     quality: int,
     timeout_seconds: int,
-) -> PreparedCoverImage | None:
-    """Fetch, resize, JPEG-compress, and base64-encode one cover image."""
+) -> tuple[bytes, str] | None:
+    """Fetch and compress a cover for image-only embedding.
+
+    Returns ``(jpeg_bytes, "image/jpeg")`` or ``None`` on skip/failure.
+    Shares the image-cache + compression path with vision evaluation so
+    warm/embed and multimodal eval do not download twice from CDN.
+    """
     url = (cover_url or "").strip()
-    cid = (content_id or "").strip()
-    if not url or not cid:
+    if not url:
         return None
 
     try:
@@ -86,13 +89,41 @@ async def prepare_cover_image_input(
         ValueError,
         TimeoutError,
     ) as exc:
-        logger.info("Skipping cover image for %s: %s", cid, exc)
+        logger.info("Skipping cover bytes for embedding: %s (%s)", url[:80], exc)
         return None
 
+    if not compressed:
+        return None
+    return compressed, "image/jpeg"
+
+
+async def prepare_cover_image_input(
+    *,
+    content_id: str,
+    cover_url: str,
+    max_px: int,
+    quality: int,
+    timeout_seconds: int,
+) -> PreparedCoverImage | None:
+    """Fetch, resize, JPEG-compress, and base64-encode one cover image."""
+    cid = (content_id or "").strip()
+    if not cid:
+        return None
+
+    prepared = await prepare_cover_bytes_for_embedding(
+        cover_url,
+        max_px=max_px,
+        quality=quality,
+        timeout_seconds=timeout_seconds,
+    )
+    if prepared is None:
+        return None
+    compressed, mime_type = prepared
     encoded = base64.b64encode(compressed).decode("ascii")
     return PreparedCoverImage(
         content_id=cid,
-        data_url=f"data:image/jpeg;base64,{encoded}",
+        data_url=f"data:{mime_type};base64,{encoded}",
+        mime_type=mime_type,
     )
 
 

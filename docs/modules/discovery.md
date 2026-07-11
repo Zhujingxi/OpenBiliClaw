@@ -22,7 +22,7 @@
 - **DiscoveryCandidatePipeline** — 统一候选待评估池的生产 / 入队 / 混源 batch 评估 / 入推荐池 admission 编排器
 - **DiscoveryCandidateWrite / discovery_candidates** — 原始候选的持久化队列结构，所有来源先落到 `pending_eval`，再由统一 evaluator claim
 - **DiscoveredContent** — 统一的候选内容数据结构
-- **multimodal.py** — 可选封面图评估的图片准备模块：复用后端封面磁盘缓存与图片白名单抓取边界，压缩为 JPEG data URL 后交给支持图像输入的 evaluator
+- **multimodal.py** — 封面图准备模块：复用后端封面磁盘缓存与图片白名单抓取边界；可压缩为 JPEG data URL 交给支持图像输入的 evaluator，也可压缩为 JPEG bytes 供 EmbeddingService.embed_image()（image-only 封面向量预热）
 - **SearchStrategy** — 基于画像生成搜索词并调用 B 站搜索的策略
 - **TrendingStrategy** — 从全站榜和相关分区榜中筛选高匹配热点内容
 - **RelatedChainStrategy** — 从近期高价值视频种子出发，沿相关推荐链扩展候选内容
@@ -615,6 +615,7 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 | v0.3.147 eval 画像分层 prompt cache | ✅ | `_evaluate_batch` 构造 prompt 时通过共享 `profile_prompt_layers()` 把 `build_profile_summary()` 输出按稳定性拆为 core / life_context / interests / style_context / recent_context 五层；`ContentDiscoveryEngine` 实例内的 `PromptLayerRenderCache` 按层 digest 复用渲染文本，画像某一层变动时只替换该层，帮助 provider prompt-cache 命中更长稳定前缀 |
 | v0.3.81 eval-batch 按内容 ID 绑定 | ✅ | batch 内容评估 prompt 会携带 `bvid/content_id`，解析时优先按返回 ID 写回 `score/reason/topic/style/franchise`。provider 乱序或漏项时，不再把后一条候选的 `relevance_reason` 写到前一条；无 ID 且数量不完整时降级逐条评估 |
 | eval-batch 互动指标与封面图输入 | ✅ | `DiscoveredContent` / `discovery_candidates` / `content_cache` 透传观看、点赞、收藏、评论、分享、弹幕、转推、书签等指标；batch prompt 会带 `tags/body_text` 和互动指标，但画像摘要会先压缩到高权重兴趣、最新 awareness / insight 与完整避雷项。`[discovery].multimodal_evaluation_enabled=true` 且 evaluation 模型支持图像时，封面图经运行时图片缓存命中或白名单抓取后压缩为 image input 一并评估，并用 `cover_image_ref="cover:<content_id>"` 和图片前置文字锚点稳定绑定候选，自动使用更小 batch |
+| 封面 image-only embedding 预热 | ✅ | 入池后除 MMR 文本 embedding 预热外，当 `[llm.embedding].multimodal_enabled=true` 且 embedding model 支持图像（如 `gemini-embedding-2` 或 `dashscope`/`qwen3-vl-embedding`）时，`_warm_cover_embeddings` 用 `prepare_cover_bytes_for_embedding` + `embed_image` 预热封面向量（与 vision eval 开关独立；纯文本 embedding 自动跳过） |
 | v0.3.x eval-batch 限流保护 | ✅ | batch LLM 调用若失败原因为 provider rate limit / cooldown / quota，不再降级到逐条 `evaluate_content()`，也不把候选当 0 分拒绝；runtime 待评估池会把本批 claim 释放回 `pending_eval`，待 provider 恢复后继续评估，避免一次 Gemini 429 放大成逐条请求或误淘汰整批候选 |
 | v0.3.144 eval 双 worker + 默认 45 | ✅ | `DiscoveryCandidatePipeline.drain_pending()` 文本 batch 默认 45，默认一次最多领取 `batch_size * 2` 个候选（90 条，仍 clamp evaluator hard cap），`ContentDiscoveryEngine.evaluate_content_batch()` 默认用 2 个 worker 跑 LLM batch；多模态 eval 继续使用独立小 batch；外层 drain lock 和全局 LLM semaphore 仍负责多入口 / provider 级并发控制 |
 | B 站 search 风控冷却 | ✅ | `BilibiliAPIClient.search()` 连续 `v_voucher` 重试耗尽或 412 后会设置共享 cooldown；Search / Explore / RelatedChain 的搜索路径在冷却期直接跳过，不再继续生成 query/domain 或逐 query 撞风控 |

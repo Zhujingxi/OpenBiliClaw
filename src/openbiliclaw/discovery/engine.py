@@ -2821,6 +2821,7 @@ class ContentDiscoveryEngine:
                 # fall through silently rather than raise.
                 return
             loop.create_task(self._warm_mmr_embeddings(persisted))
+            loop.create_task(self._warm_cover_embeddings(persisted))
 
     def _backfill_keyword_yield(self, item: DiscoveredContent) -> None:
         """Credit one admitted item to its producing keyword (P1.8), if any.
@@ -2866,6 +2867,61 @@ class ContentDiscoveryEngine:
             except Exception:
                 logger.debug(
                     "discovery._warm_mmr_embeddings: embed failed for %s",
+                    item.bvid,
+                    exc_info=True,
+                )
+
+        await asyncio.gather(*(_warm(item) for item in items))
+
+    async def _warm_cover_embeddings(
+        self,
+        items: list[DiscoveredContent],
+    ) -> None:
+        """Pre-warm image-only cover embeddings when multimodal embedding is active.
+
+        Independent of discovery vision evaluation. Uses compressed cover
+        bytes so delight can hit L2 on the hot path. Best-effort — never raises.
+        """
+        embedding_service = self._embedding_service
+        if embedding_service is None or not items:
+            return
+        active = getattr(embedding_service, "image_embedding_active", None)
+        if callable(active):
+            if not active():
+                return
+        elif not (
+            bool(getattr(embedding_service, "multimodal_enabled", False))
+            and bool(getattr(embedding_service, "supports_image_embedding", False))
+        ):
+            return
+        embed_image = getattr(embedding_service, "embed_image", None)
+        if not callable(embed_image):
+            return
+
+        from openbiliclaw.discovery import multimodal as multimodal_mod
+
+        max_px = int(getattr(self, "multimodal_image_max_px", 384))
+        quality = int(getattr(self, "multimodal_image_quality", 72))
+        timeout_seconds = int(getattr(self, "multimodal_image_timeout_seconds", 6))
+
+        async def _warm(item: DiscoveredContent) -> None:
+            cover_url = (item.cover_url or "").strip()
+            if not cover_url:
+                return
+            try:
+                prepared = await multimodal_mod.prepare_cover_bytes_for_embedding(
+                    cover_url,
+                    max_px=max_px,
+                    quality=quality,
+                    timeout_seconds=timeout_seconds,
+                )
+                if prepared is None:
+                    return
+                image_bytes, mime_type = prepared
+                await embed_image(image_bytes, mime_type=mime_type)
+            except Exception:
+                logger.debug(
+                    "discovery._warm_cover_embeddings: embed failed for %s",
                     item.bvid,
                     exc_info=True,
                 )
