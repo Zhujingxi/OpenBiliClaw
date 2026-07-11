@@ -7,6 +7,8 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from openbiliclaw import network
+
 from .base import LLMProvider, LLMProviderError, LLMRegistry
 from .claude_provider import ClaudeProvider
 from .gemini_provider import GeminiProvider, gemini_sdk_available
@@ -335,6 +337,7 @@ def _build_dedicated_embedding_provider(
                 model=effective_model,
                 base_url=base_url,
                 embedding_output_dimensionality=output_dimensionality,
+                proxy=_outbound_proxy(),
             ),
             effective_model,
         )
@@ -350,6 +353,7 @@ def _build_dedicated_embedding_provider(
                 model=effective_model,
                 base_url=base_url,
                 embedding_output_dimensionality=output_dimensionality,
+                proxy=_outbound_proxy(),
             ),
             effective_model,
         )
@@ -366,6 +370,7 @@ def _build_dedicated_embedding_provider(
                 model=effective_model,
                 base_url=base_url,
                 provider_name="openai_compatible",
+                proxy=_outbound_proxy(),
             ),
             effective_model,
         )
@@ -389,6 +394,7 @@ def _build_dedicated_embedding_provider(
                 base_url=base_url or "https://openrouter.ai/api/v1",
                 http_referer=chat_openrouter.http_referer,
                 x_title=chat_openrouter.x_title,
+                proxy=_outbound_proxy(),
             ),
             effective_model,
         )
@@ -450,6 +456,11 @@ def summarize_registry(config: Config, registry: LLMRegistry) -> RegistrySummary
     )
 
 
+def _outbound_proxy() -> str:
+    """Overseas-outbound proxy from the process-level source of truth (or "")."""
+    return network.outbound_proxy_url() or ""
+
+
 def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) -> LLMProvider | None:
     if "openai" in overrides:
         return overrides["openai"]
@@ -472,6 +483,7 @@ def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) ->
             token_provider=_codex_token_provider,
             timeout=float(config.llm.timeout),
             api_flavor=config.llm.openai.api_flavor,
+            proxy=_outbound_proxy(),
         )
     if not config.llm.openai.api_key.strip():
         return None
@@ -481,6 +493,7 @@ def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         base_url=config.llm.openai.base_url,
         timeout=float(config.llm.timeout),
         api_flavor=config.llm.openai.api_flavor,
+        proxy=_outbound_proxy(),
     )
 
 
@@ -494,6 +507,7 @@ def _maybe_claude_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         model=config.llm.claude.model or "claude-sonnet-4-20250514",
         timeout=float(config.llm.timeout),
         base_url=config.llm.claude.base_url,
+        proxy=_outbound_proxy(),
     )
 
 
@@ -509,6 +523,7 @@ def _maybe_deepseek_provider(
         model=config.llm.deepseek.model or "deepseek-v4-flash",
         reasoning_effort=config.llm.deepseek.reasoning_effort,
         timeout=float(config.llm.timeout),
+        proxy=_outbound_proxy(),
     )
 
 
@@ -530,6 +545,7 @@ def _maybe_gemini_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         api_key=api_key,
         model=config.llm.gemini.model or "gemini-2.5-flash",
         timeout=float(config.llm.timeout),
+        proxy=_outbound_proxy(),
     )
 
 
@@ -626,6 +642,7 @@ def _maybe_openrouter_provider(
         http_referer=config.llm.openrouter.http_referer,
         x_title=config.llm.openrouter.x_title,
         timeout=float(config.llm.timeout),
+        proxy=_outbound_proxy(),
     )
 
 
@@ -656,4 +673,5 @@ def _maybe_openai_compatible_provider(
         provider_name="openai_compatible",
         timeout=float(config.llm.timeout),
         api_flavor=cfg.api_flavor,
+        proxy=_outbound_proxy(),
     )

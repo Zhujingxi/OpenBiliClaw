@@ -11,6 +11,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
+import httpx
 from openai import AsyncOpenAI
 
 from .base import (
@@ -77,6 +78,7 @@ class OpenAIProvider(LLMProvider):
         timeout: float = 300.0,
         embedding_output_dimensionality: int = 0,
         api_flavor: str = "",
+        proxy: str = "",
     ) -> None:
         self._model = model
         self._provider_name = provider_name
@@ -88,11 +90,19 @@ class OpenAIProvider(LLMProvider):
         self._token_provider = token_provider
         self._timeout = timeout
         self._embedding_output_dimensionality = max(0, int(embedding_output_dimensionality or 0))
+        # [network].proxy: overseas outbound only. Non-empty routes the SDK's
+        # httpx client through the proxy; empty leaves construction untouched
+        # (zero-drift — the SDK keeps its default env-inheriting client).
+        self._proxy = proxy.strip()
+        client_kwargs: dict[str, Any] = {}
+        if self._proxy:
+            client_kwargs["http_client"] = httpx.AsyncClient(proxy=self._proxy, timeout=timeout)
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url or None,
             max_retries=0,
             timeout=timeout,
+            **client_kwargs,
         )
 
     @property
@@ -646,6 +656,7 @@ class DeepSeekProvider(OpenAIProvider):
         *,
         reasoning_effort: str = "",
         timeout: float = 300.0,
+        proxy: str = "",
     ) -> None:
         super().__init__(
             api_key=api_key,
@@ -653,6 +664,7 @@ class DeepSeekProvider(OpenAIProvider):
             base_url="https://api.deepseek.com",
             provider_name="deepseek",
             timeout=timeout,
+            proxy=proxy,
         )
         self._reasoning_effort = reasoning_effort.strip()
 
