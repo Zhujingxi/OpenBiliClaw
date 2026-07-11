@@ -153,10 +153,12 @@ def normalize_tweet(
 
     cover_url = _first_media_url(raw.get("media"))
     tags = _extract_hashtags(text)
-    published = normalize_published_time(
-        raw.get("createdAtISO") or raw.get("createdAt"),
-        label=raw.get("createdAtLocal"),
-    )
+    published = normalize_published_time()
+    for field in ("createdAtISO", "createdAt", "createdAtLocal"):
+        candidate = normalize_published_time(raw.get(field))
+        if candidate.published_at:
+            published = candidate
+            break
 
     return DiscoveredContent(
         title=title,
