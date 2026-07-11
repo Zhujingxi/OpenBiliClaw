@@ -5,6 +5,15 @@
     "synced", "already_synced", "login_required", "unsupported",
     "rate_limited", "extension_required", "failed",
   ]);
+  const PLATFORM_ALIASES = Object.freeze({
+    bili: "bilibili",
+    xhs: "xiaohongshu",
+    dy: "douyin",
+    yt: "youtube",
+    x: "twitter",
+    zh: "zhihu",
+    rd: "reddit",
+  });
 
   function text(value) {
     return String(value || "").trim();
@@ -12,7 +21,7 @@
 
   function inferPlatform(item) {
     const explicit = text(item?.source_platform || item?.platform).toLowerCase();
-    if (explicit) return explicit;
+    if (explicit) return PLATFORM_ALIASES[explicit] || explicit;
     try {
       const host = new URL(text(item?.content_url || item?.url)).hostname.toLowerCase();
       if (host === "youtu.be" || host.endsWith(".youtube.com")) return "youtube";

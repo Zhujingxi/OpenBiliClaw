@@ -90,6 +90,7 @@ def test_saved_sync_review_repairs_are_wired_to_all_surfaces() -> None:
     popup = _read("extension/popup/popup.js")
     popup_runtime = _read("extension/popup/popup-saved-sync.js")
     mobile_app = _read("src/openbiliclaw/web/js/app.js")
+    mobile_css = _read("src/openbiliclaw/web/css/app.css")
     mobile_saved = _read("src/openbiliclaw/web/js/views/saved.js")
     mobile_recommend = _read("src/openbiliclaw/web/js/views/recommend.js")
     desktop_html = _read("src/openbiliclaw/web/desktop/index.html")
@@ -109,6 +110,7 @@ def test_saved_sync_review_repairs_are_wired_to_all_surfaces() -> None:
     assert 'setAttribute("aria-modal", "true")' in mobile_app
     assert "createDialogFocusController" in mobile_app
     assert "mobile-settings-retry" in mobile_app
+    assert ".mobile-settings-retry[hidden] { display: none; }" in mobile_css
     assert "configLoaded" in mobile_app
 
     assert "saved-sync-core.js" in desktop_html

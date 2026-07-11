@@ -38,6 +38,17 @@
 
 `src/openbiliclaw/saved_sync/router.py` 的 `NativeSaveAdapter` 是收藏/稍后再看平台写入协议，和本页下方的 OpenClaw integration adapter 不是同一层。首个实现 `BilibiliNativeSaveAdapter` 只消费既有 `BilibiliAPIClient`：favorite 写 exact-title `OpenBiliClaw` 收藏夹，watch-later 写 B 站稍后再看；只有 resource-deal POST 产生的 dedicated favorite duplicate 异常视为重复成功，generic `11201` 保持失败，watch-later `90003` 视为视频不可用失败；登录失效与 GET/POST HTTP/application 限流分别输出稳定状态，不透传 Cookie、CSRF 或 response body。
 
+稳定动作 token 与当前 Phase 1 映射如下：
+
+| 用户意图 | Bilibili resolved action | 真实目标 |
+|---|---|---|
+| `favorite` | `favorite` | `B站 OpenBiliClaw 收藏夹`（按名称精确复用，不存在时创建） |
+| `watch_later` | `watch_later` | `B站稍后观看` |
+
+这张表只描述已经实现并注册的 Bilibili adapter。YouTube、小红书、抖音、X、知乎和
+Reddit 当前可以使用平台中立的本地 membership / 状态 / UI，但平台账号写入 adapter 仍是
+后续独立计划；未注册能力会诚实返回 `unsupported`，不能把本地保存表述成平台同步成功。
+
 平台 adapter 不拥有本地 membership、任务调度、重试或 HTTP 路由。`SavedSyncService` 保持 local-first 顺序，并用独立 task/item ledger 持久化每次请求结果；`RuntimeContext` 与 `/api/saved/*` 已完成平台中立 wiring。共享 task registry 只跟踪顶层 sync runner；service-owned heartbeat、adapter save 与 watchdog 由 service 内部保留到真实 I/O 终止，以维持 owner fence。真实 B 站写入 E2E 属于账号状态变更，必须等待明确授权或测试账号。
 
 ### 构建 adapter

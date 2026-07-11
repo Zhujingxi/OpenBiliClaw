@@ -194,7 +194,7 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 - **Instant, undoable feedback** — Desktop recommendation cards and interest/avoidance probes respond immediately with a real 10-second undo window; reshuffle displays the new batch before recording old-card dismissals in the background.
 - **Keyword generation mode in settings** — choose Classic, Hybrid, or Inspiration directly from the config UI to enable search-backed keyword inspiration.
 - **Keyword inspiration axis library** — keyword generation now reuses secondary interests, real search evidence, platform supply advantages, and historical yield for more specific platform-native queries.
-- **Diagnosable inspiration flow** — new dry-run and report surfaces show selected interests, grounding evidence, keyword provenance, and cohort performance.
+- **Local-first favorites and watch later** — every surface saves locally first, then syncs manually or through an explicitly enabled default-off setting; Bilibili is the first live write adapter.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -566,6 +566,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 - ⚡ **Instant Reshuffle** — ~0.6s per reshuffle; rapid clicks stay snappy
 - 💬 **Warm Recommendations** — friend-like explanations of why you'd enjoy something, not "because you watched similar videos"
 - 🔄 **Continuous Learning** — Socratic dialogue + behavioral analysis + instant feedback; it understands you better over time
+- ⭐ **Local-First Favorites / Watch Later** — cards save to local SQLite first; with explicit consent, Bilibili can sync to the `OpenBiliClaw` favorites folder or Watch Later, while other native-write adapters remain follow-on work
 - 🧩 **Browser Extension** — Chrome / Edge / Brave / Arc / Firefox; side-panel recommendations + cross-site behavior collection, install and go
 - 🚀 **Guided Init in the UI** — the packaged `/setup/` wizard, Desktop Web, and the extension can all initialize with one click; no terminal required
 - 🔬 **Self-Optimizing Eval Loops** — five modules each carry an LLM-as-judge loop that improves prompt quality over rounds

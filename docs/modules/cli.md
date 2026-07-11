@@ -83,8 +83,13 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 $ openbiliclaw config-show
 当前配置概览
 配置项
+  收藏自动同步  关闭
 Provider 概览
 ```
+
+`config-show` 只读取并展示配置，不创建保存任务，也不会执行平台账号写入。当前没有默认执行
+原生保存写入的 CLI smoke；Bilibili `favorite` / `watch_later` 的真实 E2E 通过平台中立
+`/api/saved/*` 明确选择命名 BV ID，并且必须先取得当次用户授权或使用测试账号。
 
 ### `openbiliclaw health-check`
 

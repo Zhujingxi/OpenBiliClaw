@@ -303,7 +303,8 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ /api/saved/* -> membership 先提交 -> native_save_tasks/items 快照 -> router │
 │  │ -> BilibiliNativeSaveAdapter（收藏夹/稍后再看）-> durable task-item poll │
-│  │ （runtime 已接入；自动同步默认关闭；四端 UI 尚未接入）             │
+│  │ -> 插件/桌面/移动 saved UI；CLI config-show（自动同步默认关闭）    │
+│  │ 其它平台：local-only；账号写入 adapter 与授权 E2E 属后续独立计划   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │              Skill System (可扩展技能)                 │   │
@@ -360,6 +361,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  SQLite: events(inferred_satisfaction) / discovery_candidates     │
 │          discovery_keywords(+cohort gate) / discovery_inspiration_*│
 │          content_cache(item_key) / recommendations(item_key) / chat_turns / avoidance_state │
+│          saved_items/memberships/native_save_states + durable task ledger │
 └──────────────────────────────────────────────────────────────┘
 ```
 

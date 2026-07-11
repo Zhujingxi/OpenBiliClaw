@@ -22,7 +22,8 @@
 | 惊喜推荐平台标识 | ✅ | 消息流惊喜卡和 delight banner 均显示来源平台 chip（`platformDisplayName`，popup-helpers.js），无封面时也可见；桌面 Web 的惊喜大卡平台徽章同步改为不依赖封面存在（v0.3.162+）。 |
 | X 推荐卡来源与文字卡 | ✅ | 插件 side panel、移动 Web 与桌面 Web 会把 `x` / `twitter` / `x.com` / `twitter.com` 统一归一为 `source_platform="twitter"`，标签显示 `X (Twitter)`，不再退成 Web 或 B 站；X tweet / thread 或无有效封面的推荐使用 `body_text` / title 渲染文本卡，桌面 Web 点击上报同步携带 `content_id` / `content_url` / `source_platform`。 |
 | 知乎候选链接保真 | ✅ | 知乎任务 executor 对站内 API 响应做 lossless JSON 解析，把超过 JS 安全整数范围的裸整数 token 先转成字符串；归一化 discovery / 收藏 / 动态条目时也会优先从 URL 字符串解析 question / answer / article ID，再退回 JSON 字段，避免 19 位 question id 被 `Number` 舍入后拼出不可打开链接。 |
-| 收藏夹 / 稍后再看 | ✅ | 推荐卡和 delight banner 的「时钟=稍后再看」「星星=收藏」统一把 canonical identity 交给 `/api/saved/*`；optimistic 状态只代表本地保存，平台失败不取消按下态。独立「稍后 / 收藏」页显示真实 target 与五档同步状态，提供单项重试和「同步未同步内容（N）」批量确认，轮询 durable task 并按平台显示成功/总数；`extension_required` 只提示连接已安装的登录态插件。移除只删本地 membership。「全部稍后看」只移除本地保存成功项。设置页新增默认关闭的「保存时自动同步到对应平台」，首次开启确认账号写入警告；手动同步不受开关影响。saved/config 的单个 Abort deadline 覆盖设备会话交换与 401 强制刷新；批量同步和重试加载会在重渲染前捕获列表级焦点并优先还原到同一动作。 |
+| 收藏夹 / 稍后再看 | ✅ | 推荐卡和 delight banner 的「时钟=稍后再看」「星星=收藏」统一把 canonical identity 交给 `/api/saved/*`；optimistic 状态只代表本地保存，平台失败不取消按下态。独立「稍后 / 收藏」页显示真实 target 与五档同步状态，提供单项重试和「同步未同步内容（N）」批量确认，轮询 durable task 并按平台显示成功/总数；`extension_required` 只提示连接已安装的登录态插件。移除只删本地 membership。「全部稍后看」只移除本地保存成功项。设置页新增默认关闭的「保存时自动同步到对应平台」，首次开启确认账号写入警告；手动同步不受开关影响。saved/config 的单个 Abort deadline 覆盖设备会话交换与 401 强制刷新；批量同步和重试加载会在重渲染前捕获列表级焦点并优先还原到同一动作。移动设置加载成功时 retry 控件保持真正隐藏，只在配置读取失败后显示。 |
+| 原生保存验证边界 | ✅ | 本地 / CI / 默认 smoke 只验证默认关闭、local-first membership、列表与任务状态，不点击或请求平台 favorite / watch-later。Bilibili `favorite` / `watch_later` 会修改真实账号，只有用户为命名 BV ID 明确授权或使用指定测试账号后才能执行；Cookie、CSRF 和签名响应不得出现在截图、报告或 task result。其它平台账号写入 adapter 仍属后续计划。 |
 | 惊喜推荐正向保留 | ✅ | 插件 side panel、桌面 Web 和移动 Web 对惊喜推荐采用同一反馈语义：`喜欢 / 收藏 / 稍后再看 / 聊一聊` 保留候选在队列中；`去看看` 当场保留卡片但会上报 `view` 标记已读（三端统一，下次队列重灌不再出现）；`不感兴趣 / 忽略 / 关闭` 才立即移出当前队列。已喜欢的候选重灌后以 `state="liked"` 恢复展示。三端默认加载数量统一读取 `[scheduler].delight_queue_limit`，桌面 Web 设置页保存后插件和移动端随下一次队列拉取同步生效。 |
 | Firefox 140+ 支持 | ✅ | `manifest.firefox.json` 使用 `sidebar_action` 承载同一套 popup UI，`openExtensionUi()` 按 Chrome sidePanel -> Firefox sidebarAction -> tab 降级；Firefox manifest 在构建时注入主 manifest version，并声明 AMO 所需 `data_collection_permissions`。发布链路会把 `dist-firefox/` 先打成未签名 `openbiliclaw-extension-v*-firefox.zip`（开发 / 临时加载 / AMO 输入）；只有启用 AMO signing 且凭据可用时，才通过 `web-ext sign --channel=unlisted` 生成可直接安装的 `openbiliclaw-extension-v*-firefox.xpi` |
 | 持续补货与通知 | ✅ | 运行状态已接入 popup，service worker 会拉取高置信通知并回写发送状态 |
@@ -554,7 +555,8 @@ npm run build
 - inline comment 采用轻量输入，不支持复杂反馈历史浏览
 - side panel 视觉验证当前以静态快照 + extension 构建回归为主，仍建议结合真实后端做一次手动联调
 - 浏览器通知当前只推送一条最高分未通知内容，不做通知中心或多条队列
-- 惊喜推荐当前只维护一个首屏候选位，不做多条轮播或历史收件箱；`稍后看` 只在当前 popup 会话里隐藏，不做长期持久化
+- 惊喜推荐当前只维护一个首屏候选位，不做多条历史收件箱；`稍后看` / `收藏`
+  已通过 `/api/saved/*` 长期持久化，只有 `忽略` 仍是当前候选队列的本地展示动作
 - 认知变化通知当前只提示最重要的一条，不支持用户确认/反驳，也不会在插件里维护完整通知历史
 - 聚合型认知卡片如果后端暂时拿不到可信标题，会保守显示为“基于最近几条相关内容”，不会伪造具体视频名
 - “换一批”依赖 discovery pool 当前已有候选；如果候选池本身供给不足，仍可能提示“池子里这会儿还没刷出新的”

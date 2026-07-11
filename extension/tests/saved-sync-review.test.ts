@@ -186,6 +186,18 @@ test("desktop saved API uses bounded strict requests and propagates failures", a
     content_type: "tweet",
   };
   assert.deepEqual(core.normalizeSavedItem(xItem), xItem);
+  assert.deepEqual(core.normalizeSavedItem({
+    source_platform: "x",
+    content_id: "1900000000000000002",
+    content_url: "https://x.com/openai/status/1900000000000000002",
+    content_type: "tweet",
+  }), {
+    source_platform: "twitter",
+    content_id: "1900000000000000002",
+    content_url: "https://x.com/openai/status/1900000000000000002",
+    content_type: "tweet",
+    item_key: "twitter:1900000000000000002",
+  });
   await api.save("favorite", xItem);
   await api.remove("favorite", xItem.item_key);
   await api.list("favorite");

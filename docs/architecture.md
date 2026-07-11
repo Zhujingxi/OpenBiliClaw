@@ -37,7 +37,8 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 - 同平台逐项串行、不同平台组可并行；未注册能力写 `unsupported`，adapter 异常写安全的 `failed`，均不回滚本地保存或自动重试
 - `BilibiliNativeSaveAdapter` 是首个生产 adapter：favorite 精确复用/创建 `OpenBiliClaw`（仅同一个 client 实例/title 在锁内重查并单飞，不覆盖跨 client/process），watch-later 写 B 站稍后再看；BV → aid 先走 application-aware GET 并要求非 bool 正整数，`BilibiliAPIClient` 在任何请求前校验 `SESSDATA + bili_jct`；GET/POST HTTP 412/429 共用脱敏映射，favorite duplicate 由 resource-deal 专项异常标记而非 adapter action 猜测
 - `/api/saved/{list_kind}` 提供严格 canonical save/list/remove/status/sync，`/api/saved-sync/tasks/{uuid}` 从 task ledger 轮询逐项结果；零项已知任务返回 200、未知 UUID 返回 404，缺失 membership 固定返回 `failed/not_saved_locally`，旧 B 站端点只做 local-only 兼容
-- `RuntimeContext` 在 B 站 client 热重载时先取消 registry inflight，再原子重建 router/service；registry 只拥有顶层 sync runner，service-owned heartbeat/save/watchdog 自行保留到 I/O 结束；四端 UI wiring 留给后续任务
+- `RuntimeContext` 在 B 站 client 热重载时先取消 registry inflight，再原子重建 router/service；registry 只拥有顶层 sync runner，service-owned heartbeat/save/watchdog 自行保留到 I/O 结束；插件 side panel、桌面 Web、移动 Web 和 CLI 配置输出已经接入同一默认关闭配置与状态契约
+- Phase 1 只注册 Bilibili 账号写入 adapter；其它来源当前保持 local-only，平台同步 adapter、登录态任务与授权 E2E 分别留给后续独立计划
 
 ### User Soul Engine (`soul/`)
 - 行为数据分析和画像构建

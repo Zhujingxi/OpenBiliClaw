@@ -82,7 +82,10 @@ removed = db.remove_saved_membership("favorite", item.item_key)
 - `list_native_sync_eligible()` 是只读诊断 / selection 视图；`list_native_save_states_by_task()` 只用于 live runner 工作集，durable polling 必须使用 `native_sync_task_exists()` + `list_native_sync_task_items()`。claim、route、complete、membership 删除和 stale/cancel recovery 都在同一事务同步更新 task item 快照。
 - 初始化只在 `saved_sync_migrations` 缺少 `legacy_saved_tables_v1` 时迁移旧表。迁移用当时的 `content_cache` 恢复平台、内容 ID 与元数据；身份字段不完整时按兼容语义回落 `bilibili:<legacy bvid>`。解析出的 canonical key 同时写入旧 `watch_later.item_key` / `favorites.item_key`，之后的状态和删除不再依赖可变或可清理的 `content_cache`。marker 在两个列表都复制成功后写入，避免已删除的 normalized membership 下次启动复活；`legacy_saved_item_keys_v2` 只为此前已迁移数据库补稳定关联，不重新导入 membership。
 - 旧 `add/remove/list/count/status` Bilibili wrappers 继续维护兼容表及其 stable `item_key` link，但用户可见读取以 normalized membership 为准。状态 / 移除 wrapper 会优先匹配 Bilibili key，否则只在裸 `content_id` 唯一对应一个 normalized membership 时解析跨平台 key；移除时按旧行已持久化的 `item_key` 同步清理迁移来源行。多个非 Bilibili 平台共享该裸 ID 时状态返回 `False`、移除也返回 `False`，不删除任何一侧。
-- 本节只描述本地存储基础；平台 adapter 与 platform-neutral HTTP API 已接入，三端同步 UI 仍属后续任务。
+- 平台 adapter、platform-neutral HTTP API，以及插件 side panel / 桌面 Web / 移动 Web
+  保存与同步 UI 已接入同一 normalized store。当前只有 Bilibili 注册真实账号写入 adapter；
+  其它来源的本地 membership 仍可正常保存、列出和删除，手动同步会返回稳定
+  `unsupported`，直到各平台后续计划实现对应 adapter。
 
 `native_save_states` 完整字段如下：
 
