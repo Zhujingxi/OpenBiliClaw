@@ -252,9 +252,114 @@ def test_legacy_remove_wrapper_fails_closed_for_ambiguous_cross_platform_id(
     database.conn.commit()
     database._ensure_saved_sync_tables()
 
+    assert database.is_in_watch_later("video-123") is False
     assert database.remove_from_watch_later("video-123") is False
     assert database.get_saved_membership("watch_later", "youtube:video-123") is not None
     assert database.get_saved_membership("watch_later", "douyin:video-123") is not None
     legacy_count = database.conn.execute("SELECT COUNT(*) FROM watch_later").fetchone()
     assert legacy_count is not None
     assert int(legacy_count[0]) == 2
+
+
+def _migrate_youtube_legacy_row(
+    tmp_path: Path,
+    legacy_table: str,
+) -> Database:
+    database = Database(tmp_path / f"stable-{legacy_table}.db")
+    database.initialize()
+    database.conn.execute("DELETE FROM saved_sync_migrations")
+    database.cache_content(
+        "legacy-storage-key",
+        source_platform="youtube",
+        content_id="video-123",
+        content_url="https://www.youtube.com/watch?v=video-123",
+        title="stable mapping",
+    )
+    database.conn.execute(
+        f"INSERT INTO {legacy_table} (bvid, note) VALUES (?, ?)",
+        ("legacy-storage-key", "legacy note"),
+    )
+    database.conn.commit()
+    database._ensure_saved_sync_tables()
+    database.conn.execute("DELETE FROM content_cache WHERE bvid = ?", ("legacy-storage-key",))
+    database.conn.commit()
+    return database
+
+
+@pytest.mark.parametrize(
+    ("list_kind", "legacy_table"),
+    [("watch_later", "watch_later"), ("favorite", "favorites")],
+)
+def test_generic_remove_uses_stable_legacy_mapping_after_cache_deleted(
+    tmp_path: Path,
+    list_kind: str,
+    legacy_table: str,
+) -> None:
+    database = _migrate_youtube_legacy_row(tmp_path, legacy_table)
+
+    legacy_row = database.conn.execute(
+        f"SELECT item_key FROM {legacy_table} WHERE bvid = ?", ("legacy-storage-key",)
+    ).fetchone()
+    assert legacy_row is not None
+    assert legacy_row["item_key"] == "youtube:video-123"
+
+    assert database.remove_saved_membership(list_kind, "youtube:video-123") is True
+    assert database.get_saved_membership(list_kind, "youtube:video-123") is None
+    assert database.conn.execute(f"SELECT 1 FROM {legacy_table}").fetchone() is None
+    database._ensure_saved_sync_tables()
+    assert database.get_saved_membership(list_kind, "youtube:video-123") is None
+
+
+@pytest.mark.parametrize(
+    (
+        "list_kind",
+        "legacy_table",
+        "list_method_name",
+        "status_method_name",
+        "count_method_name",
+        "remove_method_name",
+    ),
+    [
+        (
+            "watch_later",
+            "watch_later",
+            "list_watch_later",
+            "is_in_watch_later",
+            "count_watch_later",
+            "remove_from_watch_later",
+        ),
+        (
+            "favorite",
+            "favorites",
+            "list_favorites",
+            "is_in_favorites",
+            "count_favorites",
+            "remove_from_favorites",
+        ),
+    ],
+)
+def test_legacy_wrappers_stay_consistent_for_migrated_non_bilibili_item(
+    tmp_path: Path,
+    list_kind: str,
+    legacy_table: str,
+    list_method_name: str,
+    status_method_name: str,
+    count_method_name: str,
+    remove_method_name: str,
+) -> None:
+    database = _migrate_youtube_legacy_row(tmp_path, legacy_table)
+    list_method = getattr(database, list_method_name)
+    status_method = getattr(database, status_method_name)
+    count_method = getattr(database, count_method_name)
+    remove_method = getattr(database, remove_method_name)
+
+    assert [row["bvid"] for row in list_method()] == ["video-123"]
+    assert status_method("video-123") is True
+    assert count_method() == 1
+
+    assert remove_method("video-123") is True
+    assert status_method("video-123") is False
+    assert count_method() == 0
+    assert list_method() == []
+    assert database.get_saved_membership(list_kind, "youtube:video-123") is None
+    assert database.conn.execute(f"SELECT 1 FROM {legacy_table}").fetchone() is None

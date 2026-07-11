@@ -4930,11 +4930,13 @@ class Database:
             CREATE TABLE IF NOT EXISTS watch_later (
                 bvid     TEXT PRIMARY KEY,
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                note     TEXT DEFAULT ''
+                note     TEXT DEFAULT '',
+                item_key TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_watch_later_added
                 ON watch_later(added_at DESC);
         """)
+        self._ensure_legacy_saved_item_key_column("watch_later")
 
     def _ensure_discovery_keywords_table(self) -> None:
         """Create the unified search-keyword store + planner single-flight lock.
@@ -7064,13 +7066,14 @@ class Database:
         self.upsert_saved_membership("watch_later", item, note)
         self._execute_write(
             """
-            INSERT INTO watch_later (bvid, note)
-            VALUES (?, ?)
+            INSERT INTO watch_later (bvid, note, item_key)
+            VALUES (?, ?, ?)
             ON CONFLICT(bvid) DO UPDATE SET
                 added_at = CURRENT_TIMESTAMP,
-                note = excluded.note
+                note = excluded.note,
+                item_key = excluded.item_key
             """,
-            (bvid.strip(), note),
+            (bvid.strip(), note, item.item_key),
         )
         return self.conn.total_changes > 0
 
@@ -7083,7 +7086,10 @@ class Database:
 
     def is_in_watch_later(self, bvid: str) -> bool:
         """Check whether a video is bookmarked."""
-        return self.get_saved_membership("watch_later", f"bilibili:{bvid.strip()}") is not None
+        item_key = self._resolve_legacy_saved_item_key("watch_later", bvid)
+        return (
+            item_key is not None and self.get_saved_membership("watch_later", item_key) is not None
+        )
 
     def count_watch_later(self) -> int:
         """Return total number of bookmarked videos."""
@@ -7120,11 +7126,26 @@ class Database:
             CREATE TABLE IF NOT EXISTS favorites (
                 bvid     TEXT PRIMARY KEY,
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                note     TEXT DEFAULT ''
+                note     TEXT DEFAULT '',
+                item_key TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_favorites_added
                 ON favorites(added_at DESC);
         """)
+        self._ensure_legacy_saved_item_key_column("favorites")
+
+    def _ensure_legacy_saved_item_key_column(self, table_name: str) -> None:
+        """Add the stable normalized identity link to a trusted legacy saved table."""
+        if table_name not in {"watch_later", "favorites"}:
+            raise ValueError(f"unsupported legacy saved table: {table_name}")
+        columns = {
+            str(row["name"])
+            for row in self.conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if "item_key" not in columns:
+            self.conn.execute(
+                f"ALTER TABLE {table_name} ADD COLUMN item_key TEXT NOT NULL DEFAULT ''"
+            )
 
     def _ensure_saved_sync_tables(self) -> None:
         """Create normalized saved-content tables and import legacy saved rows once."""
@@ -7182,6 +7203,17 @@ class Database:
                     "INSERT INTO saved_sync_migrations (name) VALUES (?)",
                     ("legacy_saved_tables_v1",),
                 )
+            stable_links = self.conn.execute(
+                "SELECT 1 FROM saved_sync_migrations WHERE name = ?",
+                ("legacy_saved_item_keys_v2",),
+            ).fetchone()
+            if stable_links is None:
+                self._backfill_legacy_saved_item_keys("watch_later", "watch_later")
+                self._backfill_legacy_saved_item_keys("favorites", "favorite")
+                self.conn.execute(
+                    "INSERT INTO saved_sync_migrations (name) VALUES (?)",
+                    ("legacy_saved_item_keys_v2",),
+                )
             self.conn.commit()
         except Exception:
             self.conn.rollback()
@@ -7223,6 +7255,7 @@ class Database:
             """,
             (list_kind,),
         )
+        self._backfill_legacy_saved_item_keys(table_name, list_kind)
 
     @staticmethod
     def _legacy_saved_identity_sql() -> tuple[str, str, str]:
@@ -7251,6 +7284,39 @@ class Database:
         )
         item_key_sql = f"({platform_sql}) || ':' || ({content_id_sql})"
         return platform_sql, content_id_sql, item_key_sql
+
+    def _backfill_legacy_saved_item_keys(
+        self,
+        table_name: str,
+        list_kind: SavedListKind,
+    ) -> None:
+        """Persist the migration-time identity link without creating memberships."""
+        if table_name not in {"watch_later", "favorites"}:
+            raise ValueError(f"unsupported legacy saved table: {table_name}")
+        _, _, item_key_sql = self._legacy_saved_identity_sql()
+        self.conn.execute(
+            f"""
+            UPDATE {table_name} AS legacy
+            SET item_key = COALESCE(
+                (
+                    SELECT {item_key_sql}
+                    FROM content_cache AS c
+                    JOIN saved_memberships AS m
+                      ON m.list_kind = ? AND m.item_key = ({item_key_sql})
+                    WHERE c.bvid = legacy.bvid
+                    LIMIT 1
+                ),
+                CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM saved_memberships AS m
+                    WHERE m.list_kind = ?
+                      AND m.item_key = 'bilibili:' || legacy.bvid
+                ) THEN 'bilibili:' || legacy.bvid ELSE '' END
+            )
+            WHERE item_key = ''
+            """,
+            (list_kind, list_kind),
+        )
 
     @staticmethod
     def _saved_list_kind(value: str) -> SavedListKind:
@@ -7418,20 +7484,12 @@ class Database:
                 (normalized_kind, normalized_key),
             )
             removed = int(cursor.rowcount or 0) > 0
-            _, _, legacy_item_key_sql = self._legacy_saved_identity_sql()
-            direct_bilibili_clause = "legacy.bvid = ? OR" if legacy_bvid is not None else ""
-            legacy_params = (
-                (legacy_bvid, normalized_key) if legacy_bvid is not None else (normalized_key,)
-            )
+            direct_bilibili_clause = "bvid = ? OR" if legacy_bvid is not None else ""
+            legacy_params = (legacy_bvid, normalized_key) if legacy_bvid else (normalized_key,)
             legacy_cursor = conn.execute(
                 f"""
                 DELETE FROM {legacy_table}
-                WHERE bvid IN (
-                    SELECT legacy.bvid
-                    FROM {legacy_table} AS legacy
-                    LEFT JOIN content_cache AS c ON c.bvid = legacy.bvid
-                    WHERE {direct_bilibili_clause} ({legacy_item_key_sql}) = ?
-                )
+                WHERE {direct_bilibili_clause} item_key = ?
                 """,
                 legacy_params,
             )
@@ -7984,13 +8042,14 @@ class Database:
         self.upsert_saved_membership("favorite", item, note)
         self._execute_write(
             """
-            INSERT INTO favorites (bvid, note)
-            VALUES (?, ?)
+            INSERT INTO favorites (bvid, note, item_key)
+            VALUES (?, ?, ?)
             ON CONFLICT(bvid) DO UPDATE SET
                 added_at = CURRENT_TIMESTAMP,
-                note = excluded.note
+                note = excluded.note,
+                item_key = excluded.item_key
             """,
-            (bvid.strip(), note),
+            (bvid.strip(), note, item.item_key),
         )
         return self.conn.total_changes > 0
 
@@ -8003,7 +8062,8 @@ class Database:
 
     def is_in_favorites(self, bvid: str) -> bool:
         """Check whether a video is favorited."""
-        return self.get_saved_membership("favorite", f"bilibili:{bvid.strip()}") is not None
+        item_key = self._resolve_legacy_saved_item_key("favorite", bvid)
+        return item_key is not None and self.get_saved_membership("favorite", item_key) is not None
 
     def count_favorites(self) -> int:
         """Return total number of favorited videos."""
