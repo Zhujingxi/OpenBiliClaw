@@ -80,6 +80,27 @@ class MisroutingAdapter(FakeAdapter):
         )
 
 
+class CancellationSuppressingAdapter(FakeAdapter):
+    def __init__(self, release: asyncio.Event) -> None:
+        super().__init__(NativeSaveCapability("bilibili", True, True, True))
+        self.release = release
+        self.cancel_seen = asyncio.Event()
+
+    async def save(self, item: SavedItemInput, route: NativeSaveRoute) -> NativeSaveResult:
+        self.calls.append(item.item_key)
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancel_seen.set()
+            await self.release.wait()
+        return NativeSaveResult(
+            item_key=item.item_key,
+            status="synced",
+            resolved_action=route.resolved_action,
+            resolved_target=route.resolved_target,
+        )
+
+
 def test_local_save_without_auto_sync_never_invokes_adapter(db: Database) -> None:
     adapter = FakeAdapter(NativeSaveCapability("bilibili", True, True, True))
     service = SavedSyncService(db, NativeSaveRouter([adapter]))
@@ -154,6 +175,50 @@ def test_duplicate_local_save_preserves_terminal_native_state(
     assert row["sync_status"] == terminal_status
     assert row["sync_task_id"] == "terminal-task"
     assert row["resolved_target"] == "B站 OpenBiliClaw 收藏夹"
+
+
+def test_local_save_cannot_erase_task_claimed_between_membership_and_state_insert(
+    db: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = SavedSyncService(db, NativeSaveRouter())
+    claiming_service = SavedSyncService(db, NativeSaveRouter())
+    item = SavedItemInput("bilibili", "BV1INTERLEAVE")
+    original_get = db.get_saved_membership
+    original_ensure = db.ensure_native_save_state
+    claimed_task_ids: list[str] = []
+
+    def read_then_claim(list_kind: str, item_key: str) -> dict[str, Any] | None:
+        row = original_get(list_kind, item_key)
+        if not claimed_task_ids and row is not None and not str(row["requested_action"]):
+            claimed = claiming_service.create_sync_task(
+                "favorite", [item_key], "manual_single"
+            )
+            claimed_task_ids.append(claimed.task_id)
+        return row
+
+    def claim_then_ensure(
+        list_kind: str,
+        item_key: str,
+        requested_action: str,
+    ) -> dict[str, Any]:
+        if not claimed_task_ids:
+            claimed = claiming_service.create_sync_task(
+                "favorite", [item_key], "manual_single"
+            )
+            claimed_task_ids.append(claimed.task_id)
+        return original_ensure(list_kind, item_key, requested_action)
+
+    monkeypatch.setattr(db, "get_saved_membership", read_then_claim)
+    monkeypatch.setattr(db, "ensure_native_save_state", claim_then_ensure)
+
+    result = service.save_local("favorite", item, auto_sync=False)
+    row = db.get_saved_membership("favorite", item.item_key)
+
+    assert row is not None
+    assert row["sync_task_id"] == claimed_task_ids[0]
+    assert result.sync_task_id == claimed_task_ids[0]
+    assert claiming_service.get_sync_task(claimed_task_ids[0]).items[0].status == "pending"
 
 
 async def test_platform_failure_keeps_local_membership(db: Database) -> None:
@@ -236,6 +301,24 @@ def test_task_starter_failure_releases_pending_ownership(db: Database) -> None:
         "favorite", [item.item_key], "manual_single"
     )
     assert [result.item_key for result in retry.items] == [item.item_key]
+
+
+def test_task_starter_cancellation_releases_pending_ownership(db: Database) -> None:
+    def cancelled_starter(name: str, coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
+        del name, coro
+        raise asyncio.CancelledError
+
+    item = SavedItemInput("bilibili", "BV1STARTCANCEL")
+    db.upsert_saved_membership("favorite", item)
+    service = SavedSyncService(db, NativeSaveRouter(), task_starter=cancelled_starter)
+
+    with pytest.raises(asyncio.CancelledError):
+        service.create_sync_task("favorite", [item.item_key], "manual_single")
+
+    row = db.get_saved_membership("favorite", item.item_key)
+    assert row is not None
+    assert row["sync_status"] == "pending"
+    assert row["sync_task_id"] == ""
 
 
 def test_stale_never_started_task_can_be_safely_reclaimed(db: Database) -> None:
@@ -425,17 +508,20 @@ async def test_live_aged_claim_heartbeat_prevents_cross_service_reexecution(
     assert adapter.calls == [item.item_key]
 
 
-async def test_adapter_deadline_finishes_claim_as_retryable_failure(db: Database) -> None:
-    adapter = FakeAdapter(
-        NativeSaveCapability("bilibili", True, True, True),
-        gate=asyncio.Event(),
-    )
+async def test_adapter_deadline_keeps_lease_until_cancellation_suppressing_call_ends(
+    db: Database,
+) -> None:
+    release = asyncio.Event()
+    adapter = CancellationSuppressingAdapter(release)
+    second_db = Database(db._db_path)
+    second_db.initialize()
     service = SavedSyncService(
         db,
         NativeSaveRouter([adapter]),
         claim_heartbeat_interval_seconds=0.005,
         adapter_timeout_seconds=0.02,
     )
+    second_service = SavedSyncService(second_db, NativeSaveRouter([adapter]))
     item = SavedItemInput("bilibili", "BV1TIMEOUT")
     service.save_local("favorite", item)
     task = service.create_sync_task("favorite", [item.item_key], "manual_single")
@@ -443,8 +529,49 @@ async def test_adapter_deadline_finishes_claim_as_retryable_failure(db: Database
     result = await service.run_sync_task(task.task_id)
 
     assert adapter.calls == [item.item_key]
-    assert result.items[0].status == "failed"
-    assert result.items[0].error_code == "adapter_timeout"
+    assert result.items[0].status == "syncing"
+    assert len(service._detached_attempts) == 1
+    await adapter.cancel_seen.wait()
+    db.conn.execute(
+        """
+        UPDATE native_save_states
+        SET last_attempt_at = datetime('now', '-10 minutes')
+        WHERE list_kind = 'favorite' AND item_key = ?
+        """,
+        (item.item_key,),
+    )
+    db.conn.commit()
+    for _ in range(100):
+        refreshed = db.conn.execute(
+            """
+            SELECT last_attempt_at > datetime('now', '-1 minute')
+            FROM native_save_states
+            WHERE list_kind = 'favorite' AND item_key = ?
+            """,
+            (item.item_key,),
+        ).fetchone()
+        if refreshed is not None and int(refreshed[0]) == 1:
+            break
+        await asyncio.sleep(0.01)
+
+    second = second_service.create_sync_task("favorite", [item.item_key], "manual_single")
+    assert second.items == ()
+    assert adapter.calls == [item.item_key]
+
+    release.set()
+    for _ in range(100):
+        persisted = service.get_sync_task(task.task_id)
+        if persisted.items and persisted.items[0].status == "synced":
+            break
+        await asyncio.sleep(0.01)
+    assert persisted.items[0].status == "synced"
+    assert persisted.items[0].error_code == ""
+    assert adapter.calls == [item.item_key]
+    for _ in range(100):
+        if not service._detached_attempts:
+            break
+        await asyncio.sleep(0)
+    assert service._detached_attempts == set()
 
 
 async def test_lost_route_claim_does_not_start_adapter(
@@ -525,6 +652,52 @@ async def test_stale_syncing_claim_is_reconciled_without_reexecuting_adapter(
     assert adapter.calls == []
     assert result.items[0].status == "failed"
     assert result.items[0].error_code == "interrupted"
+
+
+def test_polling_reconciles_stale_syncing_claim(db: Database) -> None:
+    service = SavedSyncService(db, NativeSaveRouter())
+    item = SavedItemInput("bilibili", "BV1STALEPOLL")
+    service.save_local("favorite", item)
+    task = service.create_sync_task("favorite", [item.item_key], "manual_single")
+    assert db.claim_native_save_item("favorite", item.item_key, task.task_id, "dead-poller")
+    db.conn.execute(
+        """
+        UPDATE native_save_states
+        SET last_attempt_at = datetime('now', '-10 minutes')
+        WHERE list_kind = 'favorite' AND item_key = ?
+        """,
+        (item.item_key,),
+    )
+    db.conn.commit()
+
+    result = service.get_sync_task(task.task_id)
+
+    assert result.items[0].status == "failed"
+    assert result.items[0].error_code == "interrupted"
+
+
+def test_manual_task_creation_recovers_stale_syncing_claim(db: Database) -> None:
+    service = SavedSyncService(db, NativeSaveRouter())
+    item = SavedItemInput("bilibili", "BV1STALERETRY")
+    service.save_local("favorite", item)
+    abandoned = service.create_sync_task("favorite", [item.item_key], "manual_single")
+    assert db.claim_native_save_item(
+        "favorite", item.item_key, abandoned.task_id, "dead-retry-owner"
+    )
+    db.conn.execute(
+        """
+        UPDATE native_save_states
+        SET last_attempt_at = datetime('now', '-10 minutes')
+        WHERE list_kind = 'favorite' AND item_key = ?
+        """,
+        (item.item_key,),
+    )
+    db.conn.commit()
+
+    retry = service.create_sync_task("favorite", [item.item_key], "manual_single")
+
+    assert [result.item_key for result in retry.items] == [item.item_key]
+    assert retry.task_id != abandoned.task_id
 
 
 @pytest.mark.parametrize("invalid_status", ["pending", "syncing"])

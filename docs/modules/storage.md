@@ -47,6 +47,7 @@ item = SavedItemInput(
     title="Example",
 )
 membership = db.upsert_saved_membership("favorite", item, note="稍后整理")
+native = db.ensure_native_save_state("favorite", item.item_key, "favorite")
 current = db.get_saved_membership("favorite", item.item_key)
 rows = db.list_saved_memberships("favorite", limit=50, offset=0)
 
@@ -58,6 +59,16 @@ db.upsert_native_save_state(
     task_id="task-id",
 )
 eligible = db.list_native_sync_eligible("favorite")
+claimed = db.claim_native_sync_task("favorite", [item.item_key], "task-id")
+db.mark_native_sync_task_started("task-id")
+if db.claim_native_save_item("favorite", item.item_key, "task-id", "execution-id"):
+    db.update_native_save_claim_route(
+        "favorite", item.item_key, "task-id", "execution-id",
+        "favorite", "OpenBiliClaw",
+    )
+    db.heartbeat_native_save_claim(
+        "favorite", item.item_key, "task-id", "execution-id"
+    )
 task_rows = db.list_native_save_states_by_task("task-id")
 removed = db.remove_saved_membership("favorite", item.item_key)
 ```
@@ -67,10 +78,31 @@ removed = db.remove_saved_membership("favorite", item.item_key)
 - `saved_items.item_key` 是平台 canonical identity；不同平台可安全复用相同裸 `content_id`。
 - `content_cache` 与 `recommendations` 用同一 canonical `item_key` 做跨源关联；新推荐写入会随历史记录持久化该键，读取不再依赖可能跨平台碰撞的裸 ID。
 - `saved_memberships` 以 `(list_kind, item_key)` 为主键，同一内容可同时属于 `favorite` 与 `watch_later`。无 `native_save_states` 行时，membership 查询返回 `sync_status="pending"`。
-- `native_save_states` 以同一联合键引用 membership；状态 upsert 在启用外键的 `BEGIN IMMEDIATE` 事务内先验证本地 membership，未本地保存的 key 会抛出 `ValueError`，不会留下 orphan state。
+- `native_save_states` 以同一联合键引用 membership；状态 upsert 在启用外键的 `BEGIN IMMEDIATE` 事务内先验证本地 membership，未本地保存的 key 会抛出 `ValueError`，不会留下 orphan state。`ensure_native_save_state()` 使用 `INSERT OR IGNORE` 并在同一事务返回 effective row，任何已存在的 pending / claimed / syncing / retryable / terminal 状态都不会被本地重复保存降级或清空 owner。
+- `claim_native_sync_task()` 在单个 `BEGIN IMMEDIATE` 中选择 eligible membership 并写 task owner；非空但全空白的 `item_keys` 会 fail closed，真正空序列才表示整表选择。`release_native_sync_task()` 只释放登记失败 task 仍为 pending 的行；`release_stale_unstarted_native_sync_tasks()` 只回收超过 5 分钟且从未写入 `task_started_at` 的 owner；`mark_native_sync_task_started()` 防止正常 runner 被当成未启动任务。
+- `claim_native_save_item()` 用 `execution_id` 原子执行 `pending → syncing`；`update_native_save_claim_route()`、`heartbeat_native_save_claim()`、`complete_native_save_claim()` 都要求 `(list_kind, item_key, task_id, execution_id, status='syncing')` owner 完整匹配，旧 worker 无法刷新或完成新 owner。`reconcile_stale_native_save_claims(task_id)` 供轮询恢复一个已知 task；`reconcile_stale_native_save_claims_for_list(list_kind, item_keys)` 供普通手动创建在 eligibility selection 前恢复匹配的崩溃遗留项。两者只把超过 5 分钟无 heartbeat 的 `syncing` 写成 `failed/interrupted`。
+- `list_native_sync_eligible()` 是只读诊断 / selection 视图；`list_native_save_states_by_task()` 是 durable polling 视图。任务创建的写入必须走 atomic claim DAO，不能用 list 后逐项无条件 upsert。
 - 初始化只在 `saved_sync_migrations` 缺少 `legacy_saved_tables_v1` 时迁移旧表。迁移用当时的 `content_cache` 恢复平台、内容 ID 与元数据；身份字段不完整时按兼容语义回落 `bilibili:<legacy bvid>`。解析出的 canonical key 同时写入旧 `watch_later.item_key` / `favorites.item_key`，之后的状态和删除不再依赖可变或可清理的 `content_cache`。marker 在两个列表都复制成功后写入，避免已删除的 normalized membership 下次启动复活；`legacy_saved_item_keys_v2` 只为此前已迁移数据库补稳定关联，不重新导入 membership。
 - 旧 `add/remove/list/count/status` Bilibili wrappers 继续维护兼容表及其 stable `item_key` link，但用户可见读取以 normalized membership 为准。状态 / 移除 wrapper 会优先匹配 Bilibili key，否则只在裸 `content_id` 唯一对应一个 normalized membership 时解析跨平台 key；移除时按旧行已持久化的 `item_key` 同步清理迁移来源行。多个非 Bilibili 平台共享该裸 ID 时状态返回 `False`、移除也返回 `False`，不删除任何一侧。
 - 本节只描述本地存储基础；平台 adapter、新的 platform-neutral HTTP API 与三端同步 UI 尚未在此阶段宣称完成。
+
+`native_save_states` 完整字段如下：
+
+| 字段 | 语义 |
+|------|------|
+| `list_kind`, `item_key` | 联合主键，同时外键引用 `saved_memberships`。 |
+| `requested_action` | 用户请求的 `favorite` / `watch_later`。 |
+| `resolved_action`, `resolved_target` | capability router 决定且由 execution owner fence 写入的平台动作 / 目标。 |
+| `status` | `pending`、`syncing` 或逐次尝试的 terminal 状态。 |
+| `task_id` | durable batch polling / pending owner ID；空串表示尚未被任务领取。 |
+| `execution_id` | 单次 adapter 调用 owner token；仅 `syncing` 生命周期非空。 |
+| `task_claimed_at` | task 领取时间，供“已领取但 runner 未启动”保护窗判断。 |
+| `task_started_at` | runner 首次开始时间；非空后不会走 never-started 回收。 |
+| `last_error_code`, `last_error_message` | 安全归一化错误，不存平台响应正文或异常正文。 |
+| `last_attempt_at` | execution claim / heartbeat 最近时间，供 5 分钟 stale 判定。 |
+| `synced_at` | 最近一次 `synced` / `already_synced` 完成时间。 |
+
+其父表字段：`saved_items(item_key, source_platform, content_id, content_url, content_type, title, author_name, cover_url, created_at, updated_at)` 保存 canonical 内容快照；`saved_memberships(list_kind, item_key, note, added_at)` 保存本地列表归属；`saved_sync_migrations(name, applied_at)` 保存 legacy migration marker。旧 `watch_later` / `favorites` 继续保留 `bvid, added_at, note, item_key` 兼容字段。
 
 ### Discovery Candidates
 

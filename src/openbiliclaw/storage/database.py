@@ -7921,6 +7921,58 @@ class Database:
         finally:
             conn.close()
 
+    def ensure_native_save_state(
+        self,
+        list_kind: str,
+        item_key: str,
+        requested_action: str,
+    ) -> dict[str, Any]:
+        """Insert a pending state only when absent and return the effective state.
+
+        Existing active, claimed, syncing, retryable, and terminal rows are never
+        modified. This closes the local-save/task-claim read-then-write race.
+        """
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_key = item_key.strip()
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            membership = conn.execute(
+                "SELECT 1 FROM saved_memberships WHERE list_kind = ? AND item_key = ?",
+                (normalized_kind, normalized_key),
+            ).fetchone()
+            if membership is None:
+                raise ValueError(
+                    f"saved membership does not exist: {normalized_kind}/{normalized_key}"
+                )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO native_save_states (
+                    list_kind, item_key, requested_action, status
+                ) VALUES (?, ?, ?, 'pending')
+                """,
+                (normalized_kind, normalized_key, requested_action),
+            )
+            row = conn.execute(
+                """
+                SELECT requested_action, resolved_action, resolved_target, status,
+                       task_id, execution_id, last_error_code, last_error_message,
+                       last_attempt_at, synced_at, task_claimed_at, task_started_at
+                FROM native_save_states
+                WHERE list_kind = ? AND item_key = ?
+                """,
+                (normalized_kind, normalized_key),
+            ).fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        if row is None:  # pragma: no cover - insert/select share one write transaction
+            raise RuntimeError("native save state disappeared during ensure")
+        return dict(row)
+
     def claim_native_sync_task(
         self,
         list_kind: str,
@@ -8183,6 +8235,44 @@ class Database:
               AND last_attempt_at <= datetime('now', ?)
             """,
             (task_id.strip(), f"-{age} seconds"),
+        )
+        return int(cursor.rowcount or 0)
+
+    def reconcile_stale_native_save_claims_for_list(
+        self,
+        list_kind: str,
+        item_keys: Sequence[str] | None = None,
+        *,
+        stale_after_seconds: int = 300,
+    ) -> int:
+        """Recover stale syncing rows selected by a normal manual-list action."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        raw_keys = list(item_keys or ())
+        cleaned_keys = list(dict.fromkeys(key.strip() for key in raw_keys if key.strip()))
+        if raw_keys and not cleaned_keys:
+            raise ValueError("item_keys must contain at least one non-blank key")
+        item_filter = ""
+        params: list[Any] = [normalized_kind]
+        if cleaned_keys:
+            placeholders = ", ".join("?" for _ in cleaned_keys)
+            item_filter = f" AND item_key IN ({placeholders})"
+            params.extend(cleaned_keys)
+        age = max(0, int(stale_after_seconds))
+        params.append(f"-{age} seconds")
+        cursor = self._execute_write(
+            """
+            UPDATE native_save_states
+            SET status = 'failed', execution_id = '',
+                last_error_code = 'interrupted',
+                last_error_message = 'Native save was interrupted'
+            WHERE list_kind = ? AND status = 'syncing'
+            """
+            + item_filter
+            + """
+              AND last_attempt_at IS NOT NULL
+              AND last_attempt_at <= datetime('now', ?)
+            """,
+            params,
         )
         return int(cursor.rowcount or 0)
 

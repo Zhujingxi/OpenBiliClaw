@@ -50,6 +50,14 @@ class _NativeSaveClaimLostError(RuntimeError):
     """The execution lease no longer belongs to this adapter call."""
 
 
+class _NativeSaveAttemptDetachedError(RuntimeError):
+    """The caller returned while a fenced adapter coroutine finishes."""
+
+
+class _NativeSaveDetachedCancellationError(asyncio.CancelledError):
+    """Cancellation propagated after handing the live lease to a watchdog."""
+
+
 class SavedSyncService:
     """Persist local membership first, then coordinate optional native saves."""
 
@@ -74,6 +82,7 @@ class SavedSyncService:
             max(0.001, float(adapter_timeout_seconds)),
         )
         self._task_run_locks: dict[str, _TaskRunLockEntry] = {}
+        self._detached_attempts: set[asyncio.Task[None]] = set()
 
     def save_local(
         self,
@@ -84,25 +93,17 @@ class SavedSyncService:
     ) -> SavedMembershipResult:
         """Commit a local save before optionally creating a native-sync task."""
         self._database.upsert_saved_membership(list_kind, item, note)
-        current = self._database.get_saved_membership(list_kind, item.item_key)
-        if current is None:  # pragma: no cover - membership vanished after committed write
-            raise RuntimeError("saved membership disappeared after upsert")
+        current = self._database.ensure_native_save_state(
+            list_kind,
+            item.item_key,
+            requested_action=list_kind,
+        )
         if not auto_sync:
-            if not str(current["requested_action"]):
-                self._database.upsert_native_save_state(
-                    list_kind,
-                    item.item_key,
-                    requested_action=list_kind,
-                    status="pending",
-                )
-                current = self._database.get_saved_membership(list_kind, item.item_key)
-                if current is None:  # pragma: no cover - state parent vanished externally
-                    raise RuntimeError("saved membership disappeared after state upsert")
             return SavedMembershipResult(
                 saved=True,
                 item_key=item.item_key,
-                sync_status=cast("NativeSaveStatus", str(current["sync_status"])),
-                sync_task_id=str(current["sync_task_id"]),
+                sync_status=cast("NativeSaveStatus", str(current["status"])),
+                sync_task_id=str(current["task_id"]),
             )
 
         created = self.create_sync_task(list_kind, [item.item_key], "auto")
@@ -142,6 +143,10 @@ class SavedSyncService:
         else:
             selected_keys = None
         self._database.release_stale_unstarted_native_sync_tasks(list_kind)
+        self._database.reconcile_stale_native_save_claims_for_list(
+            list_kind,
+            selected_keys,
+        )
         claimed_keys = self._database.claim_native_sync_task(
             list_kind,
             selected_keys,
@@ -163,7 +168,7 @@ class SavedSyncService:
             coro = self.run_sync_task(task_id)
             try:
                 self._task_starter(f"saved-sync:{trigger}:{task_id}", coro)
-            except Exception:
+            except BaseException:
                 coro.close()
                 self._database.release_native_sync_task(task_id)
                 raise
@@ -196,6 +201,7 @@ class SavedSyncService:
 
     def get_sync_task(self, task_id: str) -> SavedSyncBatchResult:
         """Reconstruct a batch entirely from persisted native-save states."""
+        self._database.reconcile_stale_native_save_claims(task_id)
         rows = self._database.list_native_save_states_by_task(task_id)
         items = tuple(self._result_from_row(row) for row in rows)
         return SavedSyncBatchResult(task_id=task_id, items=items)
@@ -271,25 +277,18 @@ class SavedSyncService:
                 item_key=item.item_key,
                 task_id=task_id,
                 execution_id=execution_id,
+                requested_action=requested_action,
+                resolved_action=route.resolved_action,
+                resolved_target=route.resolved_target,
             )
-            if adapter_result.status not in _TERMINAL_ADAPTER_STATUSES:
-                result = NativeSaveResult(
-                    item_key=item.item_key,
-                    status="failed",
-                    resolved_action=route.resolved_action,
-                    resolved_target=route.resolved_target,
-                    error_code="invalid_adapter_result",
-                    error_message="Native save adapter returned a nonterminal status",
-                )
-            else:
-                result = NativeSaveResult(
-                    item_key=item.item_key,
-                    status=adapter_result.status,
-                    resolved_action=route.resolved_action,
-                    resolved_target=route.resolved_target,
-                    error_code=adapter_result.error_code,
-                    error_message=adapter_result.error_message,
-                )
+            result = self._normalize_adapter_result(
+                item.item_key,
+                adapter_result,
+                resolved_action=route.resolved_action,
+                resolved_target=route.resolved_target,
+            )
+        except _NativeSaveDetachedCancellationError:
+            raise
         except asyncio.CancelledError:
             self._persist_result(
                 list_kind,
@@ -306,17 +305,10 @@ class SavedSyncService:
                 requested_action=requested_action,
             )
             raise
+        except _NativeSaveAttemptDetachedError:
+            return
         except _NativeSaveClaimLostError:
             return
-        except TimeoutError:
-            result = NativeSaveResult(
-                item_key=item.item_key,
-                status="failed",
-                resolved_action=route.resolved_action,
-                resolved_target=route.resolved_target,
-                error_code="adapter_timeout",
-                error_message="Native save timed out",
-            )
         except Exception:
             result = NativeSaveResult(
                 item_key=item.item_key,
@@ -342,25 +334,176 @@ class SavedSyncService:
         item_key: str,
         task_id: str,
         execution_id: str,
+        requested_action: NativeSaveAction,
+        resolved_action: NativeSaveAction,
+        resolved_target: str,
     ) -> NativeSaveResult:
         heartbeat = asyncio.create_task(
             self._heartbeat_claim(list_kind, item_key, task_id, execution_id)
         )
         save_task = asyncio.create_task(save_coro)
         try:
-            async with asyncio.timeout(self._adapter_timeout_seconds):
-                done, _ = await asyncio.wait(
-                    {heartbeat, save_task},
-                    return_when=asyncio.FIRST_COMPLETED,
+            done, _ = await asyncio.wait(
+                {heartbeat, save_task},
+                timeout=self._adapter_timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except asyncio.CancelledError:
+            save_task.cancel()
+            interrupted = NativeSaveResult(
+                item_key=item_key,
+                status="failed",
+                resolved_action=resolved_action,
+                resolved_target=resolved_target,
+                error_code="interrupted",
+                error_message="Native save was interrupted",
+            )
+            await asyncio.sleep(0)
+            if save_task.done():
+                heartbeat.cancel()
+                await asyncio.gather(heartbeat, save_task, return_exceptions=True)
+                self._persist_result(
+                    list_kind,
+                    interrupted,
+                    task_id=task_id,
+                    execution_id=execution_id,
+                    requested_action=requested_action,
                 )
-                if heartbeat in done:
-                    await heartbeat
-                    raise _NativeSaveClaimLostError
-                return await save_task
-        finally:
-            heartbeat.cancel()
+            else:
+                self._detach_live_attempt(
+                    heartbeat,
+                    save_task,
+                    list_kind=list_kind,
+                    item_key=item_key,
+                    task_id=task_id,
+                    execution_id=execution_id,
+                    requested_action=requested_action,
+                    result=interrupted,
+                )
+            raise _NativeSaveDetachedCancellationError from None
+        if not done:
+            save_task.cancel()
+            self._detach_live_attempt(
+                heartbeat,
+                save_task,
+                list_kind=list_kind,
+                item_key=item_key,
+                task_id=task_id,
+                execution_id=execution_id,
+                requested_action=requested_action,
+                result=NativeSaveResult(
+                    item_key=item_key,
+                    status="failed",
+                    resolved_action=resolved_action,
+                    resolved_target=resolved_target,
+                    error_code="adapter_timeout",
+                    error_message="Native save timed out",
+                ),
+            )
+            raise _NativeSaveAttemptDetachedError
+        if heartbeat in done:
             save_task.cancel()
             await asyncio.gather(heartbeat, save_task, return_exceptions=True)
+            if not heartbeat.cancelled():
+                heartbeat.exception()
+            raise _NativeSaveClaimLostError
+        heartbeat.cancel()
+        await asyncio.gather(heartbeat, return_exceptions=True)
+        return await save_task
+
+    def _detach_live_attempt(
+        self,
+        heartbeat: asyncio.Task[None],
+        save_task: asyncio.Task[NativeSaveResult],
+        *,
+        list_kind: SavedListKind,
+        item_key: str,
+        task_id: str,
+        execution_id: str,
+        requested_action: NativeSaveAction,
+        result: NativeSaveResult,
+    ) -> None:
+        watchdog = asyncio.create_task(
+            self._finish_detached_attempt(
+                heartbeat,
+                save_task,
+                list_kind=list_kind,
+                item_key=item_key,
+                task_id=task_id,
+                execution_id=execution_id,
+                requested_action=requested_action,
+                result=result,
+            )
+        )
+        self._detached_attempts.add(watchdog)
+        watchdog.add_done_callback(self._consume_detached_attempt)
+
+    async def _finish_detached_attempt(
+        self,
+        heartbeat: asyncio.Task[None],
+        save_task: asyncio.Task[NativeSaveResult],
+        *,
+        list_kind: SavedListKind,
+        item_key: str,
+        task_id: str,
+        execution_id: str,
+        requested_action: NativeSaveAction,
+        result: NativeSaveResult,
+    ) -> None:
+        del item_key
+        final_result = result
+        try:
+            adapter_result = await save_task
+        except BaseException:
+            pass
+        else:
+            final_result = self._normalize_adapter_result(
+                result.item_key,
+                adapter_result,
+                resolved_action=result.resolved_action,
+                resolved_target=result.resolved_target,
+            )
+        finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, save_task, return_exceptions=True)
+        self._persist_result(
+            list_kind,
+            final_result,
+            task_id=task_id,
+            execution_id=execution_id,
+            requested_action=requested_action,
+        )
+
+    def _consume_detached_attempt(self, task: asyncio.Task[None]) -> None:
+        self._detached_attempts.discard(task)
+        if not task.cancelled():
+            task.exception()
+
+    @staticmethod
+    def _normalize_adapter_result(
+        item_key: str,
+        adapter_result: NativeSaveResult,
+        *,
+        resolved_action: NativeSaveAction,
+        resolved_target: str,
+    ) -> NativeSaveResult:
+        if adapter_result.status not in _TERMINAL_ADAPTER_STATUSES:
+            return NativeSaveResult(
+                item_key=item_key,
+                status="failed",
+                resolved_action=resolved_action,
+                resolved_target=resolved_target,
+                error_code="invalid_adapter_result",
+                error_message="Native save adapter returned a nonterminal status",
+            )
+        return NativeSaveResult(
+            item_key=item_key,
+            status=adapter_result.status,
+            resolved_action=resolved_action,
+            resolved_target=resolved_target,
+            error_code=adapter_result.error_code,
+            error_message=adapter_result.error_message,
+        )
 
     async def _heartbeat_claim(
         self,
