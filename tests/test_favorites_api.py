@@ -70,6 +70,10 @@ def test_favorites_endpoints_round_trip_with_metadata(
         "item_key": "bilibili:BV1FAV",
         "sync_status": None,
         "sync_task_id": "",
+        "resolved_action": "",
+        "resolved_target": "",
+        "error_code": "",
+        "error_message": "",
     }
 
     response = client.post("/api/favorites", json={"bvid": " BV1FAV "})
@@ -80,6 +84,10 @@ def test_favorites_endpoints_round_trip_with_metadata(
         "item_key": "bilibili:BV1FAV",
         "sync_status": "pending",
         "sync_task_id": "",
+        "resolved_action": "",
+        "resolved_target": "",
+        "error_code": "",
+        "error_message": "",
     }
 
     list_response = client.get("/api/favorites?limit=20&offset=0")
@@ -116,6 +124,10 @@ def test_favorites_endpoints_round_trip_with_metadata(
         "item_key": "bilibili:BV1FAV",
         "sync_status": None,
         "sync_task_id": "",
+        "resolved_action": "",
+        "resolved_target": "",
+        "error_code": "",
+        "error_message": "",
     }
 
 

@@ -187,6 +187,46 @@ def test_auto_sync_returns_pending_task_without_waiting_for_platform_io(
     captured[0].close()  # type: ignore[union-attr]
 
 
+def test_resave_during_active_auto_sync_returns_new_coherent_noop_snapshot(
+    saved_sync_client: tuple[TestClient, Database, _FakeBilibiliAdapter],
+) -> None:
+    client, database, adapter = saved_sync_client
+    context = client.app.state.runtime_context
+    context.config.saved_sync.auto_sync_enabled = True
+    captured: list[object] = []
+
+    def capture_task(_name: str, coro: object) -> object:
+        captured.append(coro)
+        return SimpleNamespace()
+
+    context.saved_sync_service = SavedSyncService(
+        database,
+        NativeSaveRouter([adapter]),
+        task_starter=capture_task,  # type: ignore[arg-type]
+    )
+    first = client.post("/api/saved/favorite", json=_saved_item("BV1ACTIVEAUTO"))
+    assert first.json()["sync_status"] == "pending"
+
+    repeated = client.post("/api/saved/favorite", json=_saved_item("BV1ACTIVEAUTO"))
+    assert len(captured) == 1
+    captured[0].close()  # type: ignore[union-attr]
+
+    assert repeated.status_code == 200
+    body = repeated.json()
+    assert body["sync_task_id"] != first.json()["sync_task_id"]
+    assert body["sync_status"] == "failed"
+    assert body["error_code"] == "sync_already_in_progress"
+    polled = client.get(f"/api/saved-sync/tasks/{body['sync_task_id']}").json()["items"][0]
+    assert {
+        "item_key": body["item_key"],
+        "status": body["sync_status"],
+        "resolved_action": body["resolved_action"],
+        "resolved_target": body["resolved_target"],
+        "error_code": body["error_code"],
+        "error_message": body["error_message"],
+    } == polled
+
+
 def test_auto_sync_response_stays_pending_if_background_result_wins_race(
     saved_sync_client: tuple[TestClient, Database, _FakeBilibiliAdapter],
 ) -> None:
@@ -237,6 +277,54 @@ def test_auto_sync_response_stays_pending_if_background_result_wins_race(
         "error_code": "",
         "error_message": "",
     }
+
+
+def test_adapter_controlled_result_text_is_sanitized_on_every_saved_surface(
+    saved_sync_client: tuple[TestClient, Database, _FakeBilibiliAdapter],
+) -> None:
+    client, database, _adapter = saved_sync_client
+    controls = "\u202e\u200b\u0085"
+    dirty_target = f"tar{controls}get"
+    dirty_code = "\u200b" * 128 + "co\u202e\u0085de"
+    dirty_message = f"mes{controls}sage"
+
+    for list_kind in ("favorite", "watch_later"):
+        item = SavedItemInput("bilibili", f"BV1SANITIZE{list_kind[0]}")
+        database.upsert_saved_membership(list_kind, item)
+        database.upsert_native_save_state(
+            list_kind,
+            item.item_key,
+            requested_action=list_kind,
+            resolved_action=list_kind,
+            resolved_target=dirty_target,
+            status="already_synced",
+            last_error_code=dirty_code,
+            last_error_message=dirty_message,
+        )
+
+    def assert_safe_fields(payload: dict[str, object]) -> None:
+        assert payload["resolved_target"] == "target"
+        assert payload["error_code"] == "code"
+        assert payload["error_message"] == "message"
+        serialized = str(payload)
+        assert all(character not in serialized for character in controls)
+
+    item_key = "bilibili:BV1SANITIZEf"
+    assert_safe_fields(
+        client.get("/api/saved/favorite/status", params={"item_key": item_key}).json()
+    )
+    assert_safe_fields(client.get("/api/saved/favorite").json()["items"][0])
+    created = client.post(
+        "/api/saved/favorite/sync",
+        json={"item_keys": [item_key]},
+    ).json()
+    assert_safe_fields(created["items"][0])
+    assert_safe_fields(client.get(f"/api/saved-sync/tasks/{created['task_id']}").json()["items"][0])
+
+    assert_safe_fields(client.get("/api/favorites/BV1SANITIZEf").json())
+    assert_safe_fields(client.get("/api/favorites").json()["items"][0])
+    assert_safe_fields(client.get("/api/watch-later/BV1SANITIZEw").json())
+    assert_safe_fields(client.get("/api/watch-later").json()["items"][0])
 
 
 def test_manual_sync_ignores_auto_sync_toggle_and_poll_exposes_terminal_result(

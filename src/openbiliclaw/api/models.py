@@ -963,6 +963,10 @@ class WatchLaterStateResponse(BaseModel):
     item_key: str = ""
     sync_status: NativeSaveStatusOut | None = None
     sync_task_id: str = ""
+    resolved_action: str = ""
+    resolved_target: str = ""
+    error_code: str = ""
+    error_message: str = ""
 
 
 class WatchLaterItem(BaseModel):
@@ -1008,6 +1012,10 @@ class FavoriteStateResponse(BaseModel):
     item_key: str = ""
     sync_status: NativeSaveStatusOut | None = None
     sync_task_id: str = ""
+    resolved_action: str = ""
+    resolved_target: str = ""
+    error_code: str = ""
+    error_message: str = ""
 
 
 class FavoriteItem(BaseModel):

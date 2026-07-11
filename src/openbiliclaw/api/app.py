@@ -13,6 +13,7 @@ import shutil
 import socket
 import subprocess
 import time
+import unicodedata
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
@@ -4066,11 +4067,10 @@ def create_app(
     def _safe_result_text(value: object, *, limit: int = 512) -> str:
         if not isinstance(value, str):
             return ""
-        return "".join(
-            character
-            for character in value[:limit]
-            if ord(character) >= 32 and ord(character) != 127
+        filtered = "".join(
+            character for character in value if not unicodedata.category(character).startswith("C")
         )
+        return filtered[:limit]
 
     def _saved_state_response(
         list_kind: SavedListKind,
@@ -4085,7 +4085,7 @@ def create_app(
             sync_status=_safe_native_status(row.get("sync_status")),
             sync_task_id=str(row.get("sync_task_id", "")),
             resolved_action=str(row.get("resolved_action", "")),
-            resolved_target=str(row.get("resolved_target", "")),
+            resolved_target=_safe_result_text(row.get("resolved_target", ""), limit=256),
             error_code=_safe_result_text(row.get("last_error_code", ""), limit=128),
             error_message=_safe_result_text(row.get("last_error_message", "")),
         )
@@ -4106,7 +4106,7 @@ def create_app(
             sync_task_id=str(row.get("sync_task_id", "")),
             requested_action=str(row.get("requested_action", "")),
             resolved_action=str(row.get("resolved_action", "")),
-            resolved_target=str(row.get("resolved_target", "")),
+            resolved_target=_safe_result_text(row.get("resolved_target", ""), limit=256),
             error_code=_safe_result_text(row.get("last_error_code", ""), limit=128),
             error_message=_safe_result_text(row.get("last_error_message", "")),
         )
@@ -4159,6 +4159,27 @@ def create_app(
                 sync_status="pending",
                 sync_task_id=result.sync_task_id,
             )
+        if result.sync_task_id:
+            try:
+                created = _saved_service().get_sync_task(result.sync_task_id)
+            except (AttributeError, ValueError):  # pragma: no cover - compatibility injection
+                created = SavedSyncBatchResult(task_id=result.sync_task_id, items=())
+            created_item = next(
+                (item for item in created.items if item.item_key == result.item_key),
+                None,
+            )
+            if created_item is not None:
+                item_response = _sync_item_response(created_item)
+                return SavedItemStateResponse(
+                    saved=result.saved,
+                    item_key=result.item_key,
+                    sync_status=item_response.status,
+                    sync_task_id=result.sync_task_id,
+                    resolved_action=item_response.resolved_action,
+                    resolved_target=item_response.resolved_target,
+                    error_code=item_response.error_code,
+                    error_message=item_response.error_message,
+                )
         state = _saved_state_response(list_kind, result.item_key)
         return state.model_copy(
             update={
@@ -4232,7 +4253,7 @@ def create_app(
     def _legacy_saved_state(
         list_kind: SavedListKind,
         bvid: str,
-    ) -> tuple[bool, str, NativeSaveStatus | None, str]:
+    ) -> tuple[bool, str, NativeSaveStatus | None, str, str, str, str, str]:
         normalized_bvid = bvid.strip()
         if not normalized_bvid:
             raise HTTPException(status_code=422, detail="bvid is required")
@@ -4243,16 +4264,33 @@ def create_app(
             item_key,
             _safe_native_status(row.get("sync_status")) if row is not None else None,
             str(row.get("sync_task_id", "")) if row is not None else "",
+            str(row.get("resolved_action", "")) if row is not None else "",
+            _safe_result_text(row.get("resolved_target", ""), limit=256) if row is not None else "",
+            _safe_result_text(row.get("last_error_code", ""), limit=128) if row is not None else "",
+            _safe_result_text(row.get("last_error_message", "")) if row is not None else "",
         )
 
     def _watch_later_state(bvid: str) -> WatchLaterStateResponse:
-        saved, item_key, sync_status, sync_task_id = _legacy_saved_state("watch_later", bvid)
+        (
+            saved,
+            item_key,
+            sync_status,
+            sync_task_id,
+            resolved_action,
+            resolved_target,
+            error_code,
+            error_message,
+        ) = _legacy_saved_state("watch_later", bvid)
         return WatchLaterStateResponse(
             saved=saved,
             total=ctx.database.count_watch_later(),
             item_key=item_key,
             sync_status=sync_status,
             sync_task_id=sync_task_id,
+            resolved_action=resolved_action,
+            resolved_target=resolved_target,
+            error_code=error_code,
+            error_message=error_message,
         )
 
     @app.post("/api/watch-later", response_model=WatchLaterStateResponse)
@@ -4302,7 +4340,7 @@ def create_app(
                     sync_status=_safe_native_status(row.get("sync_status")),
                     sync_task_id=str(row.get("sync_task_id", "")),
                     resolved_action=str(row.get("resolved_action", "")),
-                    resolved_target=str(row.get("resolved_target", "")),
+                    resolved_target=_safe_result_text(row.get("resolved_target", ""), limit=256),
                     error_code=_safe_result_text(row.get("last_error_code", ""), limit=128),
                     error_message=_safe_result_text(row.get("last_error_message", "")),
                 )
@@ -4314,13 +4352,26 @@ def create_app(
     # ── Favorites (收藏夹) ────────────────────────────────────────
 
     def _favorite_state(bvid: str) -> FavoriteStateResponse:
-        saved, item_key, sync_status, sync_task_id = _legacy_saved_state("favorite", bvid)
+        (
+            saved,
+            item_key,
+            sync_status,
+            sync_task_id,
+            resolved_action,
+            resolved_target,
+            error_code,
+            error_message,
+        ) = _legacy_saved_state("favorite", bvid)
         return FavoriteStateResponse(
             saved=saved,
             total=ctx.database.count_favorites(),
             item_key=item_key,
             sync_status=sync_status,
             sync_task_id=sync_task_id,
+            resolved_action=resolved_action,
+            resolved_target=resolved_target,
+            error_code=error_code,
+            error_message=error_message,
         )
 
     @app.post("/api/favorites", response_model=FavoriteStateResponse)
@@ -4370,7 +4421,7 @@ def create_app(
                     sync_status=_safe_native_status(row.get("sync_status")),
                     sync_task_id=str(row.get("sync_task_id", "")),
                     resolved_action=str(row.get("resolved_action", "")),
-                    resolved_target=str(row.get("resolved_target", "")),
+                    resolved_target=_safe_result_text(row.get("resolved_target", ""), limit=256),
                     error_code=_safe_result_text(row.get("last_error_code", ""), limit=128),
                     error_message=_safe_result_text(row.get("last_error_message", "")),
                 )

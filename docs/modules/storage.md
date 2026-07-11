@@ -76,6 +76,7 @@ removed = db.remove_saved_membership("favorite", item.item_key)
 - `saved_memberships` 以 `(list_kind, item_key)` 为主键，同一内容可同时属于 `favorite` 与 `watch_later`。无 `native_save_states` 行时，membership 查询返回 `sync_status="pending"`。
 - `native_save_states` 以同一联合键引用 membership；状态写入在启用外键的事务内先验证本地 membership，未本地保存的 key 会抛出 `ValueError`，不会留下 orphan state。所有 DAO 写入只接受显式 `NativeSaveStatus` 集合；新建表还有等价 `CHECK`。`ensure_native_save_state()` 使用 `INSERT OR IGNORE` 并在同一事务返回 effective row，任何已存在的 pending / claimed / syncing / retryable / terminal 状态都不会被本地重复保存降级或清空 owner。兼容用 `upsert_native_save_state()` 只能插入 / 刷新无 owner 的 pending 或写允许的 terminal 快照：传入未知 / 带空白状态、`execution_id`、`status='syncing'`、带 `task_id` 的 pending，覆盖已有 active owner，或把 terminal 降回 pending 都会拒绝；它不能建立 / 改写 task ownership。`complete_native_save_claim()` 只接受 terminal 状态，`pending/syncing/unknown` 不会清空 execution owner。
 - `native_save_tasks` 以 UUID 为主键；`native_save_task_items` 以 `(task_id, item_key)` 为主键并保存请求顺序、requested/resolved action、target、status/error 与 `is_live`。task/item 集合不引用 membership，因此本地删除后轮询快照仍存在。`create_native_sync_task_snapshot()` 在一个 `BEGIN IMMEDIATE` 中写 task/items 并领取 eligible 的 live owner；缺失、terminal、已有 owner 与零 eligible 都形成可查询快照。
+- 当前 task ledger 采用数据库生命周期保留：已返回任务没有 TTL、容量上限或自动删除，只有 starter 注册失败且未返回的 ledger 会回滚删除。未来若引入 bounded pruning，必须先定义轮询保留窗口、容量阈值以及 active/recent task 保护；该策略当前延期，不能假定存在后台清理。
 - `claim_native_sync_task()` 保留为底层兼容 owner 入口；生产 service 使用上述快照 DAO 原子建立 ledger 与 ownership。执行前 `claim_native_sync_task_runner(task_id, runner_id)` 原子取得唯一 runner lease；fresh 的其它 runner 返回 `False`，stale lease 才允许接管。task heartbeat、item claim 与 pending release 都要求 runner token 匹配。runner 正常 / 取消退出释放余项；崩溃由 poll / manual-create 在 5 分钟后回收。所有 task / runner 边界拒绝空白 ID，公开 runner ID 还拒绝 `__openbiliclaw_` 保留前缀。
 - `claim_native_save_item()` 还要求当前 `task_runner_id` 匹配，用 `execution_id` 原子执行 `pending → syncing`；`update_native_save_claim_route()`、`heartbeat_native_save_claim()`、`complete_native_save_claim()` 要求 `(list_kind, item_key, task_id, execution_id, status='syncing')` owner 完整匹配，旧 worker 无法刷新或完成新 owner。`reconcile_stale_native_save_claims(task_id)` 供轮询恢复一个已知 task；`reconcile_stale_native_save_claims_for_list(list_kind, item_keys)` 供普通手动创建在 eligibility selection 前恢复匹配的崩溃遗留项。两者只把超过 5 分钟无 item heartbeat 的 `syncing` 写成 `failed/interrupted`。
 - `list_native_sync_eligible()` 是只读诊断 / selection 视图；`list_native_save_states_by_task()` 只用于 live runner 工作集，durable polling 必须使用 `native_sync_task_exists()` + `list_native_sync_task_items()`。claim、route、complete、membership 删除和 stale/cancel recovery 都在同一事务同步更新 task item 快照。
@@ -91,7 +92,7 @@ removed = db.remove_saved_membership("favorite", item.item_key)
 | `requested_action` | 用户请求的 `favorite` / `watch_later`。 |
 | `resolved_action`, `resolved_target` | capability router 决定且由 execution owner fence 写入的平台动作 / 目标。 |
 | `status` | `pending`、`syncing` 或逐次尝试的 terminal 状态。 |
-| `task_id` | durable batch polling / pending owner ID；空串表示尚未被任务领取。 |
+| `task_id` | 当前 live batch owner ID；空串表示尚未被任务领取。durable polling 的 UUID 与结果位于独立 task ledger。 |
 | `execution_id` | 单次 adapter 调用 owner token；仅 `syncing` 生命周期非空。 |
 | `task_claimed_at` | task 领取时间，供“已领取但 runner 未启动”保护窗判断。 |
 | `task_started_at` | runner 首次开始时间；非空后不会走 never-started 回收。 |

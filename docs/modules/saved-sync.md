@@ -68,7 +68,7 @@ adapter = BilibiliNativeSaveAdapter(client)
 | `POST` | `/api/saved/{favorite|watch_later}/sync` | 手动同步；`item_keys=[]` 表示全部 eligible，且始终无视自动同步开关。 |
 | `GET` | `/api/saved-sync/tasks/{uuid}` | 轮询持久化逐项状态；已存在的零项 task 返回 200，未知 UUID 返回 404；`login_required` / `rate_limited` / `failed` 不包装成泛化成功。 |
 
-所有 `/api/*` 路径继续受现有 API auth middleware 保护。旧 `/api/watch-later` 与 `/api/favorites` 保留 B 站 `bvid` 契约，响应只新增 identity / sync 字段；POST 通过 service 本地保存但永不自动同步。
+所有 `/api/*` 路径继续受现有 API auth middleware 保护。所有 adapter-controlled `resolved_target/error_code/error_message` 在进入 task poll、单项 status、通用列表和 legacy 列表/state 响应前，都会先移除全部 Unicode category-C 字符，再按字段上限截断。旧 `/api/watch-later` 与 `/api/favorites` 保留 B 站 `bvid` 契约，state/list 响应增量返回 identity、sync 与脱敏后的逐项结果字段；POST 通过 service 本地保存但永不自动同步。
 
 ### Local-first service
 
@@ -80,10 +80,14 @@ result = await service.run_sync_task(created.task_id)
 persisted = service.get_sync_task(created.task_id)
 ```
 
-- `save_local(list_kind, item, note="", auto_sync=False)`：先写本地；首次关闭自动同步时返回 `pending` 且 `sync_task_id=""`。重复保存只更新 membership / 内容快照，不会把既有 terminal 或 active native state 降级或改写 owner。
+- `save_local(list_kind, item, note="", auto_sync=False)`：先写本地；首次关闭自动同步时返回 `pending` 且 `sync_task_id=""`。重复保存只更新 membership / 内容快照，不会把既有 terminal 或 active native state 降级或改写 owner；若原自动同步仍有 active owner，新 save 响应使用新 no-op task 的完整 `failed/sync_already_in_progress` 快照，不与旧 membership 的 route/error 字段拼接。
 - `create_sync_task(list_kind, item_keys, trigger)`：真正的空 `item_keys` 表示该列表全部 eligible 项；非空但全部为空白的选择会 fail closed。每次调用都先持久化 task row 和不可变的 item 集合：显式缺失项写 `failed/not_saved_locally`，terminal 项复制现状，已有 live owner 写 `failed/sync_already_in_progress`，只有新 claim 项进入 `pending` 并启动 runner。若 `task_starter(name, coro)` 登记失败，刚 claim 的 pending owner 与 task ledger 会先回滚清理再重新抛错。
 - `run_sync_task(task_id)`：先原子领取唯一 runner token；领取失败只返回 durable snapshot。task heartbeat 与 work 使用 `FIRST_COMPLETED` 监控，task heartbeat 失败立即取消 work并 owner-fenced 释放余项。adapter 在 item heartbeat 异常、响应 deadline 或调用方取消后仍存活时，独立 watchdog 统一持续重试 execution heartbeat，并在 late 结果落库后自清理。进程崩溃才由 poll / 下一次创建按 5 分钟 lease 回收。
 - `get_sync_task(task_id)`：已有 task 从 `native_save_task_items` 返回持久化逐项结果；service 用 `has_sync_task()` 区分未知 task 与合法零项 task，HTTP 对前者返回 404。空白 `task_id` 在 service 与 DAO 两层都 fail closed，既不会聚合未领取 pending 行，也不会触发 adapter。
+
+### Task ledger 保留策略
+
+当前版本把已经返回给调用方的 `native_save_tasks` / `native_save_task_items` 保留到该 SQLite 数据库被用户删除或重建为止，**没有 TTL、容量上限或自动 pruning**；唯一立即删除的是 task starter 注册失败、从未返回给调用方的任务。这样可保证现阶段 durable polling 不会因后台清理变成 404，但长期运行的账本会持续增长。有界保留窗口、容量阈值与 active/recent task 保护规则尚未在计划中定义，因此作为后续存储治理项延期，不在本任务中发明破坏性过期策略。
 
 ## 数据流与边界
 
