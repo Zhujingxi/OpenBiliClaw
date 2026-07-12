@@ -55,12 +55,16 @@ def _recommendations(
 class Issue98Stub:
     def __init__(self) -> None:
         self.health_delay_seconds = 0.0
+        self.recommendation_delay_seconds = 0.0
         self.recommendation_reads = 0
         self.runtime_reads = 0
         self.runtime_first_delay_seconds = 0.0
+        self.runtime_reread_status = 200
         self.runtime_reread_received = threading.Event()
         self.recommendations = _recommendations()
         self.image_proxy_reads = 0
+        self.append_posts: list[dict[str, Any]] = []
+        self.append_received = threading.Event()
         self.feedback_posts: list[dict[str, Any]] = []
         self.feedback_received = threading.Event()
         self.feedback_delay_seconds = 0.0
@@ -125,6 +129,8 @@ def issue_98_server() -> tuple[str, Issue98Stub]:
                 return _json_response(self, {"enabled": False, "authenticated": True})
             if path == "/api/recommendations":
                 state.recommendation_reads += 1
+                if state.recommendation_delay_seconds:
+                    time.sleep(state.recommendation_delay_seconds)
                 return _json_response(self, {"items": state.recommendations})
             if path == "/api/runtime-status":
                 state.runtime_reads += 1
@@ -133,6 +139,12 @@ def issue_98_server() -> tuple[str, Issue98Stub]:
                     state.runtime_reread_received.set()
                 if runtime_read == 1 and state.runtime_first_delay_seconds:
                     time.sleep(state.runtime_first_delay_seconds)
+                if runtime_read >= 2 and state.runtime_reread_status >= 400:
+                    return _json_response(
+                        self,
+                        {"error": "runtime reread failed"},
+                        state.runtime_reread_status,
+                    )
                 available = 30 if runtime_read == 1 else 27
                 return _json_response(
                     self,
@@ -224,6 +236,10 @@ def issue_98_server() -> tuple[str, Issue98Stub]:
                 payload = json.loads(raw.decode("utf-8") or "{}")
             except json.JSONDecodeError:
                 payload = {}
+            if path == "/api/recommendations/append":
+                state.append_posts.append(payload)
+                state.append_received.set()
+                return _json_response(self, {"items": []})
             if path == "/api/feedback":
                 state.feedback_posts.append(payload)
                 state.feedback_received.set()
@@ -445,6 +461,35 @@ def test_runtime_reread_does_not_wait_for_slow_initial_runtime(
     expect(chromium_page.locator("#videoGrid .video-card")).to_have_count(3, timeout=500)
     expect(chromium_page.locator("#poolAvailable")).to_contain_text("27", timeout=3000)
     assert stub.runtime_reads >= 2
+
+
+def test_delayed_recommendations_schedule_autoload_after_failed_runtime_reread(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = issue_98_server
+    stub.recommendation_delay_seconds = 0.8
+    stub.runtime_reread_status = 500
+    chromium_page.set_viewport_size({"width": 1440, "height": 2200})
+    chromium_page.goto(f"{base_url}/web/", wait_until="domcontentloaded")
+
+    cards = chromium_page.locator("#videoGrid .video-card")
+    expect(cards).to_have_count(3, timeout=3000)
+    assert stub.runtime_reread_received.wait(timeout=1.5)
+    assert chromium_page.evaluate(
+        """() => {
+          const sentinel = document.getElementById('loadMoreSentinel');
+          const rect = sentinel.getBoundingClientRect();
+          return rect.top <= window.innerHeight + 50 && rect.bottom >= -50;
+        }"""
+    )
+
+    assert stub.append_received.wait(timeout=1.5), (
+        "recommendation render did not re-check auto-load geometry"
+    )
+    assert stub.append_posts == [
+        {"excluded_bvids": ["BV1ISSUE981", "BV1ISSUE982", "BV1ISSUE983"]}
+    ]
 
 
 def test_recommendation_cover_requests_are_bounded_before_scroll(

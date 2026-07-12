@@ -6027,6 +6027,7 @@
         applyDesktopRecommendationSnapshot(items, { replace: true });
         renderFilters();
         renderVideos();
+        scheduleAutoLoadCheck();
       }
 
       function markDesktopRecommendationFailedAndRecover() {
