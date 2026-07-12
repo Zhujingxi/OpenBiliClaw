@@ -251,7 +251,8 @@
     button { cursor: pointer; }
     button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: none; box-shadow: var(--focus-ring); }
     a { color: inherit; text-decoration: none; }
-    .app-shell { min-height: 100vh; overflow-x: clip; }
+    .app-shell { min-height: 100vh; overflow-x: clip; display: flex; flex-direction: column; }
+    .app-body { display: flex; flex: 1; min-height: 0; }
     .topbar { position: sticky; top: 0; z-index: 20; display: grid; grid-template-columns: minmax(220px, 1fr) minmax(280px, 560px) auto; align-items: center; gap: var(--space-4); padding: var(--space-4) clamp(var(--space-4), 3vw, var(--space-8)); background: color-mix(in oklab, var(--bg), transparent 6%); border-bottom: 1px solid var(--border-soft); backdrop-filter: blur(18px); }
     .top-left { display: flex; align-items: center; gap: var(--space-4); min-width: 0; justify-self: start; }
     .brand { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
@@ -321,19 +322,16 @@
     .mobile-qr-hint { margin: var(--space-4) 0 0; padding: 10px var(--space-3); border: 1px solid color-mix(in oklab, var(--danger), var(--border) 65%); border-radius: var(--radius-md); background: color-mix(in oklab, var(--danger), var(--surface) 92%); color: var(--danger); font-size: 13px; line-height: 1.5; }
     [hidden] { display: none !important; }
     :root { --side-drawer-width: 312px; --topbar-height: 75px; }
-    .layout, .fatal-banner { transition: transform var(--motion-base) var(--ease-standard), margin var(--motion-base) var(--ease-standard), width var(--motion-base) var(--ease-standard); }
+    .fatal-banner { transition: transform var(--motion-base) var(--ease-standard), margin var(--motion-base) var(--ease-standard), width var(--motion-base) var(--ease-standard); }
     .icon-btn, .pill-btn { border: 1px solid var(--border-soft); background: var(--surface); color: var(--fg-2); border-radius: var(--radius-pill); min-height: 40px; padding: 0 var(--space-4); box-shadow: var(--elev-ring); }
     .icon-btn { min-width: 40px; padding: 0; }
     .nav-compact { min-width: 64px; padding-inline: var(--space-3); }
     .side-drawer-btn svg { width: 20px; height: 20px; stroke-width: 2; }
-    .side-drawer { position: fixed; inset: var(--topbar-height) auto 0 0; z-index: 15; width: var(--side-drawer-width); pointer-events: none; }
+    .side-drawer { width: var(--side-drawer-width); min-width: var(--side-drawer-width); position: relative; z-index: 15; transition: margin var(--motion-base) var(--ease-standard), transform var(--motion-base) var(--ease-standard); margin-left: 0; transform: translateX(0); }
+    .side-drawer.is-open { margin-left: 0; transform: translateX(0); }
+    .side-drawer:not(.is-open) { margin-left: calc(-1 * var(--side-drawer-width)); transform: translateX(calc(-1 * var(--side-drawer-width))); }
     .side-drawer-scrim { display: none; }
-    .side-drawer-panel { width: var(--side-drawer-width); height: 100%; display: grid; align-content: start; gap: 0; padding: 18px var(--space-4); overflow: auto; background: var(--bg); color: var(--fg); border-right: 1px solid var(--border-soft); box-shadow: 1px 0 0 var(--border); transform: translateX(-100%); transition: transform var(--motion-base) var(--ease-standard); pointer-events: auto; }
-    .side-drawer.is-open .side-drawer-panel { transform: translateX(0); }
-    /* Push (not overlay): content yields the full drawer width and re-centers
-       in the remaining space, so the drawer never covers the content. */
-    body.side-drawer-open .layout,
-    body.side-drawer-open .fatal-banner { transform: none; margin-left: var(--side-drawer-width); width: calc(100% - var(--side-drawer-width)); max-width: none; }
+    .side-drawer-panel { width: var(--side-drawer-width); height: 100%; display: grid; align-content: start; gap: 0; padding: 18px var(--space-4); overflow: auto; background: var(--bg); color: var(--fg); border-right: 1px solid var(--border-soft); box-shadow: 1px 0 0 var(--border); }
     .side-drawer-nav { display: grid; gap: 4px; padding: 0 0 var(--space-4); border-bottom: 1px solid var(--border-soft); }
     .side-drawer-nav .nav-action { width: 100%; min-height: 40px; display: flex; align-items: center; gap: var(--space-3); padding: 0 var(--space-3); border: 0; border-radius: var(--radius-md); background: transparent; color: var(--fg-2); box-shadow: none; text-align: left; }
     .side-drawer-nav .nav-action:hover { background: color-mix(in oklab, var(--surface-warm), var(--accent) 6%); color: var(--fg); }
@@ -360,7 +358,7 @@
     .pill-btn.primary { border-color: var(--accent); background: var(--accent); color: var(--accent-on); }
     .pill-btn.dark { background: var(--fg); color: var(--surface); border-color: var(--fg); }
     .badge-dot { display: inline-flex; width: 9px; height: 9px; border-radius: var(--radius-pill); background: var(--success); margin-right: var(--space-2); }
-    .layout { width: min(100%, calc(var(--recommendation-grid-max) + var(--page-gutter) + var(--page-gutter))); margin: 0 auto; padding: var(--space-6) var(--page-gutter) var(--section-y-tablet); }
+    .layout { flex: 1; min-width: 0; padding: var(--space-6) var(--page-gutter) var(--section-y-tablet); }
     body.chat-page-open { overflow-y: hidden; }
     body.chat-page-open .layout { height: calc(100vh - var(--topbar-height)); padding-block: var(--space-6); overflow: hidden; }
     .main-col { min-width: 0; }
@@ -937,8 +935,6 @@
     }
     @media (max-width: 820px) {
       body.mobile-menu-open { overflow: hidden; }
-      body.side-drawer-open .layout,
-      body.side-drawer-open .fatal-banner { transform: none; }
       .side-drawer { display: none; }
       .topbar { grid-template-columns: minmax(0, 1fr) auto; padding: var(--space-3); gap: var(--space-3); }
       .topbar .search, .topbar .nav-actions, .topbar .top-actions, .side-drawer-btn { display: none; }

@@ -73,10 +73,11 @@
 
     <div class="fatal-banner" id="fatalBanner" role="alert"></div>
 
-    <aside class="side-drawer" id="sideDrawer" aria-label="侧边菜单" aria-hidden="true">
-      <div class="side-drawer-scrim" id="sideDrawerScrim"></div>
-      <div class="side-drawer-panel" aria-label="侧边菜单">
-        <nav class="side-drawer-nav" aria-label="全局功能">
+    <div class="app-body">
+      <aside class="side-drawer" id="sideDrawer" aria-label="侧边菜单" aria-hidden="true">
+        <div class="side-drawer-scrim" id="sideDrawerScrim"></div>
+        <div class="side-drawer-panel" aria-label="侧边菜单">
+          <nav class="side-drawer-nav" aria-label="全局功能">
           <button class="nav-action" id="homeBtn" type="button"><span class="nav-glyph">⌂</span><span>首页</span></button>
           <button class="nav-action" id="watchLaterBtn" type="button"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg></span><span>稍后再看</span><span class="nav-count-badge" id="watchLaterCountBadge" hidden></span></button>
           <button class="nav-action" id="favoritesBtn" type="button"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg></span><span>我的收藏</span><span class="nav-count-badge" id="favoritesCountBadge" hidden></span></button>
@@ -656,6 +657,7 @@
       </form>
       </section>
     </main>
+    </div>
   </div>
 
   <section class="mobile-menu" id="mobileMenu" aria-label="手机菜单">

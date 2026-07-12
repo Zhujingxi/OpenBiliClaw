@@ -1779,7 +1779,6 @@
       const drawer = document.getElementById("sideDrawer");
       drawer?.classList.toggle("is-open", open);
       drawer?.setAttribute("aria-hidden", open ? "false" : "true");
-      document.body.classList.toggle("side-drawer-open", open);
       const button = document.getElementById("sideDrawerBtn");
       if (button) {
         button.setAttribute("aria-expanded", open ? "true" : "false");
