@@ -81,3 +81,4 @@ output/
 logs/
 extension/dist-firefox/
 backend.err
+.reasonix/
