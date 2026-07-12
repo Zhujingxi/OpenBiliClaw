@@ -4,6 +4,8 @@
 
 gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一对象上调整 total/background，因此旧 HTTP/对话学习调用与新服务仍竞争同一个真实总上限。
 
+`create_app()` 的显式依赖注入路径会先核对 Soul 内部 service 与 runtime controller 的 gate：单侧提供时采用该对象并补齐另一侧，两侧同对象时直接采用，两侧不同则立即抛出清晰错误；旧测试 double 都未暴露 gate 时才按配置创建一套新的共享对象。采用外部 gate 时不会先按配置静默改写其容量，后续正常热重载仍在该对象上显式 reconfigure。
+
 ## 概述
 
 `src/openbiliclaw/runtime/` 负责后端 daemon 的长期运行能力：后台刷新、账号同步、反馈批学习调度、运行时事件流、浏览器插件 presence gate、自动更新和任务生命周期管理。FastAPI 启动后会通过 `RuntimeContext` 持有这些 runtime 服务，配置热重载时重建可替换组件。

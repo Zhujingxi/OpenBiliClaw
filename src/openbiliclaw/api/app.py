@@ -1076,6 +1076,8 @@ def create_app(
     if soul_engine is not None:
         # Injection path: caller provides swappable components.
         # Auto-create stable components (database, memory_manager) if missing.
+        from openbiliclaw.config import llm_concurrency_from_config
+        from openbiliclaw.llm.concurrency import LLMConcurrencyGate
         from openbiliclaw.runtime.events import RuntimeEventHub as _RuntimeEventHub
 
         _db = database
@@ -1093,6 +1095,38 @@ def create_app(
             _mm = MemoryManager(config.data_path, database=_db if _created_db else None)
             _mm.initialize()
 
+        soul_service = getattr(soul_engine, "_llm_service", None)
+        soul_declared_gate = getattr(soul_engine, "_llm_concurrency_gate", None)
+        soul_service_gate = getattr(soul_service, "concurrency_gate", None)
+        if (
+            soul_declared_gate is not None
+            and soul_service_gate is not None
+            and soul_declared_gate is not soul_service_gate
+        ):
+            raise ValueError("Injected SoulEngine contains different LLM concurrency gates.")
+        soul_gate = soul_declared_gate or soul_service_gate
+        controller_gate = getattr(runtime_controller, "llm_concurrency_gate", None)
+        if (
+            soul_gate is not None
+            and controller_gate is not None
+            and soul_gate is not controller_gate
+        ):
+            raise ValueError(
+                "Injected SoulEngine and runtime controller use different LLM concurrency gates."
+            )
+        injected_gate = soul_gate or controller_gate
+        if injected_gate is None:
+            injected_gate = LLMConcurrencyGate(llm_concurrency_from_config(config))
+
+        with suppress(Exception):
+            soul_engine._llm_concurrency_gate = injected_gate
+        if soul_service is not None:
+            with suppress(Exception):
+                soul_service.concurrency_gate = injected_gate
+        if runtime_controller is not None:
+            with suppress(Exception):
+                runtime_controller.llm_concurrency_gate = injected_gate
+
         ctx = RuntimeContext(
             database=_db,
             memory_manager=_mm,
@@ -1108,6 +1142,7 @@ def create_app(
             recommendation_engine=recommendation_engine,
             account_sync_service=account_sync_service,
             auto_update_service=auto_update_service,
+            llm_concurrency_gate=injected_gate,
         )
         if ctx.dialogue is None:
             from openbiliclaw.soul.dialogue import SocraticDialogue

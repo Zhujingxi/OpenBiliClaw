@@ -43,6 +43,148 @@ def _wait_for_presence_count(ctx: object, expected: int) -> None:
     assert ctx.presence.snapshot()["active_count"] == expected
 
 
+def _injected_soul_engine(gate: object) -> object:
+    from openbiliclaw.soul.engine import SoulEngine
+
+    class Registry:
+        default_provider = "fake"
+
+        def is_chat_capable(self, name: str) -> bool:
+            return name == "fake"
+
+        async def complete(self, *args: object, **kwargs: object) -> object:
+            raise AssertionError("provider call was not expected")
+
+        async def complete_provider(self, *args: object, **kwargs: object) -> object:
+            raise AssertionError("provider call was not expected")
+
+    memory = SimpleNamespace(_data_dir=None)
+    return SoulEngine(
+        llm=Registry(),  # type: ignore[arg-type]
+        memory=memory,  # type: ignore[arg-type]
+        llm_concurrency_gate=gate,
+    )
+
+
+def test_injected_runtime_adopts_shared_soul_controller_gate(monkeypatch, tmp_path) -> None:
+    from fastapi.testclient import TestClient
+
+    from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+    from openbiliclaw.llm.base import LLMResponse
+    from openbiliclaw.llm.concurrency import LLMConcurrencyGate
+
+    gate = LLMConcurrencyGate(2)
+    soul = _injected_soul_engine(gate)
+    controller = SimpleNamespace(llm_concurrency_gate=gate, event_hub=None)
+    config = Config(
+        data_dir=str(tmp_path),
+        llm=LLMConfig(
+            default_provider="deepseek",
+            deepseek=LLMProviderConfig(api_key="test", model="test-model"),
+        ),
+    )
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
+
+    class ProbeRegistry:
+        default_provider = "deepseek"
+
+        def is_chat_capable(self, name: str) -> bool:
+            return name == "deepseek"
+
+        async def complete_provider(self, *args: object, **kwargs: object) -> LLMResponse:
+            assert gate.status_payload()["llm_total_active"] == 1
+            assert gate.status_payload()["llm_background_active"] == 1
+            return LLMResponse(content="OK", provider="deepseek")
+
+    monkeypatch.setattr(
+        "openbiliclaw.llm.registry.build_llm_registry", lambda _config: ProbeRegistry()
+    )
+    app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=soul,
+        runtime_controller=controller,
+    )
+    ctx = app.state.runtime_context
+
+    assert ctx.llm_concurrency_gate is gate
+    assert soul._llm_service.concurrency_gate is gate  # type: ignore[attr-defined]
+    assert ctx.dialogue._build_service() is soul._llm_service  # type: ignore[attr-defined]
+    response = TestClient(app).post(
+        "/api/config/probe-service",
+        json={"kind": "llm", "config": {}},
+    )
+    assert response.json()["ok"] is True
+
+
+def test_injected_runtime_adopts_one_sided_gate_and_rejects_conflict(monkeypatch, tmp_path) -> None:
+    from openbiliclaw.config import Config
+    from openbiliclaw.llm.concurrency import LLMConcurrencyGate
+
+    config = Config(data_dir=str(tmp_path))
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
+    soul_gate = LLMConcurrencyGate(2)
+    soul = _injected_soul_engine(soul_gate)
+    controller = SimpleNamespace(llm_concurrency_gate=None, event_hub=None)
+
+    soul_app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=soul,
+        runtime_controller=controller,
+    )
+    assert soul_app.state.runtime_context.llm_concurrency_gate is soul_gate
+    assert controller.llm_concurrency_gate is soul_gate
+    assert soul_gate.status_payload()["llm_total_concurrency"] == 2
+
+    controller_gate = LLMConcurrencyGate(3)
+    gate_less_soul = SimpleNamespace(
+        _llm_concurrency_gate=None,
+        _llm_service=SimpleNamespace(concurrency_gate=None),
+    )
+    controller = SimpleNamespace(llm_concurrency_gate=controller_gate, event_hub=None)
+    controller_app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=gate_less_soul,
+        runtime_controller=controller,
+    )
+    assert controller_app.state.runtime_context.llm_concurrency_gate is controller_gate
+    assert gate_less_soul._llm_concurrency_gate is controller_gate
+    assert gate_less_soul._llm_service.concurrency_gate is controller_gate
+
+    with pytest.raises(ValueError, match="different LLM concurrency gates"):
+        create_app(
+            memory_manager=SimpleNamespace(),
+            database=SimpleNamespace(),
+            soul_engine=_injected_soul_engine(LLMConcurrencyGate(2)),
+            runtime_controller=SimpleNamespace(
+                llm_concurrency_gate=LLMConcurrencyGate(2), event_hub=None
+            ),
+        )
+
+
+def test_injected_compatibility_doubles_receive_fresh_shared_gate(monkeypatch, tmp_path) -> None:
+    from openbiliclaw.config import Config, LLMConfig
+
+    config = Config(data_dir=str(tmp_path), llm=LLMConfig(concurrency=3))
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
+    soul = SimpleNamespace()
+    controller = SimpleNamespace(event_hub=None)
+
+    app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=soul,
+        runtime_controller=controller,
+    )
+    gate = app.state.runtime_context.llm_concurrency_gate
+
+    assert gate.status_payload()["llm_total_concurrency"] == 3
+    assert controller.llm_concurrency_gate is gate
+    assert soul._llm_concurrency_gate is gate
+
+
 def _store_xhs_login_state(db: object, *, logged_in: bool, when_iso: str) -> None:
     db.conn.executemany(
         "INSERT OR REPLACE INTO auth_state (key, value) VALUES (?, ?)",
