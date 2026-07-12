@@ -4490,20 +4490,16 @@ def create_app(
             if asyncio.iscoroutine(result):
                 await result
 
-    async def _on_pool_inventory_commit() -> None:
-        available = _canonical_pool_available()
-        update = getattr(ctx.llm_concurrency_gate, "update_inventory", None)
-        if available is not None and callable(update):
-            update(available=available, target=_inventory_target())
-        await _publish_pool_status_snapshot()
-
+    add_pool_commit_subscriber = getattr(ctx, "add_pool_inventory_commit_subscriber", None)
+    if callable(add_pool_commit_subscriber):
+        add_pool_commit_subscriber(_publish_pool_status_snapshot)
     set_pool_commit_callback = getattr(
         ctx.recommendation_engine,
         "set_pool_inventory_commit_callback",
         None,
     )
     if callable(set_pool_commit_callback):
-        set_pool_commit_callback(_on_pool_inventory_commit)
+        set_pool_commit_callback(ctx.pool_inventory_commit_callback)
 
     async def _run_auto_replenishment(trigger: Callable[[], Any]) -> None:
         try:

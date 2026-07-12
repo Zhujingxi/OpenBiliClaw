@@ -23,6 +23,7 @@ required.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -261,6 +262,13 @@ class RuntimeContext:
     # built runtime for SQLite writes / LLM tokens.
     task_registry: BackgroundTaskRegistry = field(default_factory=BackgroundTaskRegistry)
     llm_concurrency_gate: Any = None
+    pool_inventory_commit_callback: Any = field(init=False, repr=False, compare=False)
+    _pool_inventory_commit_subscribers: list[Any] = field(
+        default_factory=list,
+        init=False,
+        repr=False,
+        compare=False,
+    )
     # Lazily-built guided-init coordinator (gui-init spec §5). Not a constructor
     # arg; created on first access bound to THIS ctx so it always reads the
     # current database / runtime_controller even after a hot-reload swaps them
@@ -283,6 +291,65 @@ class RuntimeContext:
     runtime_controller: Any = None
     account_sync_service: Any = None
     auto_update_service: Any = None
+
+    def __post_init__(self) -> None:
+        """Cache one callback object that remains valid across hot reloads."""
+        self.pool_inventory_commit_callback = self._handle_pool_inventory_commit
+
+    def add_pool_inventory_commit_subscriber(self, callback: Any) -> None:
+        """Register a stable post-commit observer once for this context."""
+        if callback not in self._pool_inventory_commit_subscribers:
+            self._pool_inventory_commit_subscribers.append(callback)
+
+    async def _handle_pool_inventory_commit(self) -> None:
+        """Refresh current inventory, then notify stable observers."""
+        controller = self.runtime_controller
+        readiness = getattr(controller, "_pool_readiness_counts", None)
+        if callable(readiness):
+            try:
+                result = readiness()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.exception("post-commit inventory synchronization failed")
+        else:
+            self._sync_inventory_without_controller()
+
+        for callback in tuple(self._pool_inventory_commit_subscribers):
+            try:
+                result = callback()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.exception("post-commit inventory subscriber failed")
+
+    def _sync_inventory_without_controller(self) -> None:
+        count_pool = getattr(self.database, "count_pool_candidates", None)
+        update = getattr(self.llm_concurrency_gate, "update_inventory", None)
+        if not callable(count_pool) or not callable(update):
+            return
+        try:
+            nickname = ""
+            load_state = getattr(self.memory_manager, "load_discovery_runtime_state", None)
+            if callable(load_state):
+                state = load_state()
+                info = state.get("xhs_self_info", {}) if isinstance(state, dict) else {}
+                if isinstance(info, dict):
+                    nickname = str(info.get("nickname", "") or "").strip()
+            try:
+                available = int(count_pool(xhs_self_nickname=nickname))
+            except TypeError:
+                available = int(count_pool())
+            controller_target = getattr(self.runtime_controller, "pool_target_count", None)
+            scheduler = getattr(getattr(self, "config", None), "scheduler", None)
+            target = (
+                controller_target
+                if controller_target is not None
+                else getattr(scheduler, "pool_target_count", 0)
+            )
+            update(available=max(0, available), target=max(0, int(target)))
+        except Exception:
+            logger.exception("post-commit inventory fallback synchronization failed")
 
     @property
     def init_coordinator(self) -> Any:
@@ -937,7 +1004,7 @@ class RuntimeContext:
             None,
         )
         if callable(set_pool_commit_callback):
-            set_pool_commit_callback(new_runtime_controller._pool_readiness_counts)  # noqa: SLF001
+            set_pool_commit_callback(self.pool_inventory_commit_callback)
 
         # 9. Account sync
         new_account_sync = AccountSyncService(

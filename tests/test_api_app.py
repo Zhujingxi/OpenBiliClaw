@@ -316,6 +316,126 @@ def test_successful_hot_reload_commits_new_inventory_target(monkeypatch, tmp_pat
     assert ctx.config is proposed
 
 
+@pytest.mark.asyncio
+async def test_old_engine_commit_callback_uses_current_controller_after_two_reloads(
+    tmp_path,
+) -> None:
+    from openbiliclaw.api.runtime_context import build_runtime_context
+    from openbiliclaw.config import Config
+    from openbiliclaw.llm.concurrency import InventoryPriorityState
+
+    config = Config(data_dir=str(tmp_path / "data"))
+    config.llm.default_provider = "ollama"
+    config.llm.ollama.model = "llama3"
+    config.scheduler.pool_target_count = 30
+    ctx = build_runtime_context(config)
+    for index in range(15):
+        ctx.database.cache_content(
+            f"BVHOT{index:02d}",
+            title=f"hot {index}",
+            source="search",
+            relevance_score=0.9,
+            pool_expression=f"expression {index}",
+            pool_topic_label=f"topic {index}",
+            style_key="tutorial",
+            topic_group=f"group {index}",
+        )
+
+    first = Config(data_dir=str(tmp_path / "data"))
+    first.llm.default_provider = "ollama"
+    first.llm.ollama.model = "llama3"
+    first.scheduler.pool_target_count = 30
+    ctx._rebuild_components(first)
+    old_engine = ctx.recommendation_engine
+    old_callback = old_engine._pool_inventory_commit_callback
+    assert old_callback is ctx.pool_inventory_commit_callback
+    assert ctx.llm_concurrency_gate.inventory_priority_state is InventoryPriorityState.REFILL
+
+    second = Config(data_dir=str(tmp_path / "data"))
+    second.llm.default_provider = "ollama"
+    second.llm.ollama.model = "llama3"
+    second.scheduler.pool_target_count = 10
+    ctx._rebuild_components(second)
+    assert ctx.recommendation_engine._pool_inventory_commit_callback is old_callback
+    assert ctx.llm_concurrency_gate.inventory_priority_state is InventoryPriorityState.HEALTHY
+
+    result = old_callback()
+    if asyncio.iscoroutine(result):
+        await result
+    assert ctx.llm_concurrency_gate.inventory_priority_state is InventoryPriorityState.HEALTHY
+
+
+@pytest.mark.asyncio
+async def test_api_pool_commit_publication_survives_multiple_reloads(
+    monkeypatch, tmp_path
+) -> None:
+    from openbiliclaw.api.runtime_context import build_runtime_context
+    from openbiliclaw.config import Config
+
+    class EventHub:
+        def __init__(self) -> None:
+            self.events: list[dict[str, object]] = []
+
+        async def publish(self, event: dict[str, object]) -> bool:
+            self.events.append(dict(event))
+            return True
+
+    config = Config(data_dir=str(tmp_path / "data"))
+    config.llm.default_provider = "ollama"
+    config.llm.ollama.model = "llama3"
+    config.scheduler.pool_target_count = 30
+    hub = EventHub()
+    built = build_runtime_context(config, event_hub=hub)
+    for index in range(4):
+        built.database.cache_content(
+            f"BVEVENT{index}",
+            title=f"event {index}",
+            source="search",
+            relevance_score=0.9,
+            pool_expression=f"expression {index}",
+            pool_topic_label=f"topic {index}",
+            style_key="tutorial",
+            topic_group=f"event-group {index}",
+        )
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
+    app = create_app(
+        memory_manager=built.memory_manager,
+        database=built.database,
+        soul_engine=built.soul_engine,
+        dialogue=built.dialogue,
+        runtime_controller=built.runtime_controller,
+        recommendation_engine=built.recommendation_engine,
+        runtime_event_hub=hub,
+        account_sync_service=built.account_sync_service,
+        auto_update_service=built.auto_update_service,
+    )
+    ctx = app.state.runtime_context
+
+    first = Config(data_dir=str(tmp_path / "data"))
+    first.llm.default_provider = "ollama"
+    first.llm.ollama.model = "llama3"
+    first.scheduler.pool_target_count = 30
+    ctx._rebuild_components(first)
+    first_reloaded_engine = ctx.recommendation_engine
+    first_callback = first_reloaded_engine._pool_inventory_commit_callback
+
+    second = Config(data_dir=str(tmp_path / "data"))
+    second.llm.default_provider = "ollama"
+    second.llm.ollama.model = "llama3"
+    second.scheduler.pool_target_count = 10
+    ctx._rebuild_components(second)
+    current_callback = ctx.recommendation_engine._pool_inventory_commit_callback
+    assert current_callback is first_callback
+
+    await current_callback()
+    assert hub.events[-1]["type"] == "refresh.pool_updated"
+    assert hub.events[-1]["pool_available_count"] == 4
+
+    await first_callback()
+    assert hub.events[-1]["pool_available_count"] == 4
+    assert hub.events[-1]["pool_target_count"] == 10
+
+
 def test_injected_runtime_adopts_real_dialogue_gate_and_injects_gate_less_service(
     monkeypatch, tmp_path
 ) -> None:
