@@ -12,10 +12,10 @@ OUTPUT_DIR = ROOT / "docs/images/chrome-web-store"
 CANVAS = (1280, 800)
 PLATFORMS = ("B站", "小红书", "抖音", "YouTube", "X", "知乎", "Reddit")
 
-BG = "#F7F5EF"
-INK = "#171714"
-MUTED = "#68665F"
-LINE = "#DEDAD0"
+BG = "#11151E"
+INK = "#F8FAFC"
+MUTED = "#B7C0CE"
+LINE = "#3A4556"
 PINK = "#FF6B96"
 PINK_SOFT = "#FFE3EB"
 BLUE = "#3186FF"
@@ -60,14 +60,14 @@ def _gradient() -> Image.Image:
     pixels = image.load()
     for y in range(CANVAS[1]):
         for x in range(CANVAS[0]):
-            pink_weight = max(0.0, 1.0 - ((x - 90) ** 2 + (y - 70) ** 2) ** 0.5 / 720)
-            blue_weight = max(0.0, 1.0 - ((x - 1210) ** 2 + (y - 690) ** 2) ** 0.5 / 840)
-            base = (247, 245, 239)
+            pink_weight = max(0.0, 1.0 - ((x - 80) ** 2 + (y - 40) ** 2) ** 0.5 / 760)
+            blue_weight = max(0.0, 1.0 - ((x - 1180) ** 2 + (y - 720) ** 2) ** 0.5 / 900)
+            base = (17, 21, 30)
             pixels[x, y] = tuple(
                 int(
                     base[channel]
-                    + pink_weight * ((255, 227, 235)[channel] - base[channel]) * 0.42
-                    + blue_weight * ((232, 242, 255)[channel] - base[channel]) * 0.5
+                    + pink_weight * ((78, 35, 58)[channel] - base[channel]) * 0.58
+                    + blue_weight * ((28, 52, 82)[channel] - base[channel]) * 0.62
                 )
                 for channel in range(3)
             )
@@ -79,19 +79,14 @@ def _text_width(draw: ImageDraw.ImageDraw, text: str, face: ImageFont.ImageFont)
     return box[2] - box[0]
 
 
-def _brand(draw: ImageDraw.ImageDraw, index: int) -> None:
-    draw.rounded_rectangle((58, 42, 102, 86), radius=13, fill=INK)
-    draw.text((72, 49), "B", font=font(24, bold=True), fill="white")
-    draw.text((116, 48), "OpenBiliClaw", font=FONT_BRAND, fill=INK)
-    draw.text((116, 73), "本地优先的全网推荐入口", font=FONT_SMALL, fill=MUTED)
-    draw.text((1170, 50), f"0{index} / 05", font=FONT_KICKER, fill=MUTED)
-
-
-def _footer(draw: ImageDraw.ImageDraw) -> None:
-    draw.line((58, 748, 1222, 748), fill=LINE, width=1)
-    draw.ellipse((60, 768, 68, 776), fill=GREEN)
-    draw.text((78, 761), "本地优先 · 数据默认留在你的设备上", font=FONT_SMALL, fill=MUTED)
-    draw.text((1106, 761), "openbiliclaw.com", font=FONT_SMALL, fill=MUTED)
+def _brand(image: Image.Image, draw: ImageDraw.ImageDraw, index: int) -> None:
+    icon_path = ROOT / "extension/icons/icon128.png"
+    with Image.open(icon_path) as icon_source:
+        icon = icon_source.convert("RGBA").resize((44, 44), Image.Resampling.LANCZOS)
+    image.alpha_composite(icon, (58, 38))
+    draw.text((116, 42), "OpenBiliClaw", font=FONT_BRAND, fill=INK)
+    draw.text((116, 68), "本地优先的七平台内容 Agent", font=FONT_SMALL, fill=MUTED)
+    draw.text((1168, 48), f"0{index} / 03", font=FONT_KICKER, fill=MUTED)
 
 
 def _headline(
@@ -177,8 +172,7 @@ def _rounded_screenshot(
 def _base(index: int) -> tuple[Image.Image, ImageDraw.ImageDraw]:
     image = _gradient().convert("RGBA")
     draw = ImageDraw.Draw(image)
-    _brand(draw, index)
-    _footer(draw)
+    _brand(image, draw, index)
     return image, draw
 
 
@@ -318,15 +312,102 @@ def build_settings_slide(source_dir: Path) -> Image.Image:
     return image.convert("RGB")
 
 
+def _platform_row(draw: ImageDraw.ImageDraw, *, x: int, y: int) -> None:
+    colors = (
+        ("#41243A", "#FF8CB0"),
+        ("#1E3854", "#7BB7FF"),
+        ("#163F35", "#5AD6AD"),
+    )
+    for index, label in enumerate(PLATFORMS):
+        fill, color = colors[index % len(colors)]
+        x = _chip(draw, x, y, label, fill=fill, color=color, outline=fill) + 10
+
+
+def _status_legend(draw: ImageDraw.ImageDraw, *, x: int, y: int) -> None:
+    rows = (
+        ("凭据已就绪", "本地已保存", GREEN, "#173A31"),
+        ("状态待验证", "没有假装访问平台", BLUE, "#1D3555"),
+        ("无需登录", "公开内容直接发现", "#A8B0BC", "#303845"),
+    )
+    for index, (title, detail, color, fill) in enumerate(rows):
+        top = y + index * 104
+        draw.rounded_rectangle((x, top, x + 224, top + 84), radius=20, fill=fill, outline=LINE)
+        draw.ellipse((x + 18, top + 20, x + 30, top + 32), fill=color)
+        draw.text((x + 42, top + 11), title, font=FONT_CHIP, fill=INK)
+        draw.text((x + 18, top + 48), detail, font=FONT_SMALL, fill=MUTED)
+
+
+def build_hero_slide(source_dir: Path) -> Image.Image:
+    image, draw = _base(1)
+    draw.text((60, 112), "七平台内容推荐，", font=font(48, bold=True), fill=INK)
+    draw.text((60, 170), "数据默认留在本机", font=font(48, bold=True), fill=INK)
+    draw.text((62, 234), "有头图、有理由，也能继续反馈调教。", font=FONT_SUBTITLE, fill=MUTED)
+    _platform_row(draw, x=60, y=272)
+    _rounded_screenshot(
+        image,
+        source_dir / "desktop-recommend.png",
+        (58, 334, 1222, 746),
+        centering=(0.61, 0.28),
+        radius=24,
+    )
+    return image.convert("RGB")
+
+
+def build_concise_three_surfaces_slide(source_dir: Path) -> Image.Image:
+    image, draw = _base(2)
+    draw.text((60, 112), "PC、插件、手机，一套推荐体验", font=font(44, bold=True), fill=INK)
+    draw.text((62, 171), "同一批内容，随手看、及时存、继续反馈。", font=FONT_SUBTITLE, fill=MUTED)
+    labels = (("PC Web", 62), ("浏览器插件", 746), ("Mobile Web", 1000))
+    for label, x in labels:
+        draw.text((x, 214), label, font=FONT_KICKER, fill=MUTED)
+    _rounded_screenshot(
+        image,
+        source_dir / "desktop-recommend.png",
+        (58, 248, 716, 746),
+        centering=(0.62, 0.48),
+        radius=22,
+    )
+    _rounded_screenshot(
+        image,
+        source_dir / "extension-recommend.png",
+        (738, 248, 982, 746),
+        radius=22,
+    )
+    _rounded_screenshot(
+        image,
+        source_dir / "mobile-recommend.png",
+        (998, 248, 1224, 746),
+        radius=22,
+    )
+    return image.convert("RGB")
+
+
+def build_truthful_status_slide(source_dir: Path) -> Image.Image:
+    image, draw = _base(3)
+    draw.text((60, 112), "登录状态说人话，数据默认在本机", font=font(44, bold=True), fill=INK)
+    draw.text((62, 171), "区分来源开关、凭据就绪、待验证与无需登录。", font=FONT_SUBTITLE, fill=MUTED)
+    _status_legend(draw, x=60, y=264)
+    _rounded_screenshot(
+        image,
+        source_dir / "desktop-settings.png",
+        (314, 232, 1222, 746),
+        centering=(0.64, 0.68),
+        radius=24,
+    )
+    return image.convert("RGB")
+
+
 def build_assets(source_dir: Path, output_dir: Path) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     builders = (
-        ("01-local-seven-platforms.png", build_local_platform_slide),
-        ("02-three-surfaces.png", build_three_surfaces_slide),
-        ("03-cross-platform-recommendations.png", build_recommendation_slide),
-        ("04-trainable-profile.png", build_profile_slide),
-        ("05-truthful-login-local-data.png", build_settings_slide),
+        ("01-seven-platform-recommendations.png", build_hero_slide),
+        ("02-three-surfaces.png", build_concise_three_surfaces_slide),
+        ("03-truthful-status-local-data.png", build_truthful_status_slide),
     )
+    expected = {filename for filename, _ in builders}
+    for stale in output_dir.glob("*.png"):
+        if stale.name not in expected:
+            stale.unlink()
     outputs: list[Path] = []
     for filename, builder in builders:
         image = builder(source_dir)

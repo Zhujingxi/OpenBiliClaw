@@ -6,11 +6,9 @@ ROOT = Path(__file__).resolve().parents[1]
 LISTING = ROOT / "docs/chrome-webstore-listing.md"
 ASSET_DIR = ROOT / "docs/images/chrome-web-store"
 EXPECTED = [
-    "01-local-seven-platforms.png",
+    "01-seven-platform-recommendations.png",
     "02-three-surfaces.png",
-    "03-cross-platform-recommendations.png",
-    "04-trainable-profile.png",
-    "05-truthful-login-local-data.png",
+    "03-truthful-status-local-data.png",
 ]
 
 
@@ -22,12 +20,14 @@ def test_store_listing_names_all_supported_platforms_and_local_backend() -> None
     assert "数据默认保存在你的本机" in text
 
 
-def test_store_listing_assets_have_stable_order_and_dimensions() -> None:
+def test_store_listing_assets_have_stable_order_dimensions_and_visual_detail() -> None:
     assert [path.name for path in sorted(ASSET_DIR.glob("*.png"))] == EXPECTED
     for name in EXPECTED:
         with Image.open(ASSET_DIR / name) as image:
             assert image.size == (1280, 800)
             assert image.mode in {"RGB", "RGBA"}
+            colors = image.convert("RGB").resize((64, 40)).getcolors(maxcolors=2560) or []
+            assert len(colors) > 80
 
 
 def test_listing_document_declares_dashboard_upload_order() -> None:

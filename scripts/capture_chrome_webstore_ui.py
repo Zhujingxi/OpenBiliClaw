@@ -15,7 +15,6 @@ ROOT = Path(__file__).resolve().parents[1]
 EXTENSION_ROOT = ROOT / "extension"
 EXPECTED = (
     "desktop-recommend.png",
-    "desktop-profile.png",
     "desktop-settings.png",
     "mobile-recommend.png",
     "extension-recommend.png",
@@ -76,6 +75,18 @@ def _prepare_page(page: Page) -> None:
     )
 
 
+def _wait_for_covers(page: Page, selector: str, minimum: int) -> None:
+    page.wait_for_function(
+        """({selector, minimum}) => {
+          const images = [...document.querySelectorAll(selector)];
+          return images.length >= minimum
+            && images.every((image) => image.complete && image.naturalWidth > 0);
+        }""",
+        arg={"selector": selector, "minimum": minimum},
+        timeout=15_000,
+    )
+
+
 def _capture_web(origin: str, output_dir: Path, blocked: list[str]) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(channel="chrome", headless=True)
@@ -90,12 +101,9 @@ def _capture_web(origin: str, output_dir: Path, blocked: list[str]) -> None:
             "document.querySelectorAll('#videoGrid .video-card:not(.is-skeleton)').length >= 3",
             timeout=15_000,
         )
+        _wait_for_covers(page, "#videoGrid .video-card .cover img", 3)
+        _wait_for_covers(page, "#delightThumb img", 1)
         page.screenshot(path=output_dir / "desktop-recommend.png")
-
-        page.locator("#profileBtn").click()
-        page.locator("#profilePage:not([hidden])").wait_for(state="visible")
-        page.wait_for_function("document.querySelector('#profileDetails')?.children.length > 2")
-        page.screenshot(path=output_dir / "desktop-profile.png")
 
         page.locator("#settingsBtn").click()
         page.locator('[data-settings-tab="sources"]').click()
@@ -122,6 +130,7 @@ def _capture_web(origin: str, output_dir: Path, blocked: list[str]) -> None:
             "document.querySelectorAll('#app .card').length >= 1",
             timeout=15_000,
         )
+        _wait_for_covers(mobile_page, "#app .card-cover-frame img.card-cover", 2)
         mobile_page.screenshot(path=output_dir / "mobile-recommend.png")
         mobile_context.close()
         mobile.close()
@@ -180,12 +189,17 @@ def _capture_extension(origin: str, output_dir: Path, blocked: list[str]) -> Non
             state="visible",
             timeout=20_000,
         )
+        _wait_for_covers(page, "#recommendationList .recommendation-cover img", 2)
         page.screenshot(path=output_dir / "extension-recommend.png")
         context.close()
 
 
 def capture(output_dir: Path) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
+    expected_names = set(EXPECTED)
+    for stale in output_dir.glob("*.png"):
+        if stale.name not in expected_names:
+            stale.unlink()
     blocked: list[str] = []
     with DemoServer() as origin:
         _capture_web(origin, output_dir, blocked)
