@@ -956,6 +956,7 @@ class RecommendationEngine:
         profile: SoulProfile,
         limit: int,
         batch_size: int = _DEFAULT_EXPRESSION_BATCH_SIZE,
+        max_extra_requests: int = 6,
     ) -> int:
         """Generate popup copy for classified-but-uncopied pool candidates.
 
@@ -989,6 +990,7 @@ class RecommendationEngine:
                         results[batch_index] = await self._precompute_batch_with_split_retry(
                             batches[batch_index],
                             profile,
+                            max_extra_requests=max_extra_requests,
                         )
                     except asyncio.CancelledError:
                         raise
@@ -1051,13 +1053,21 @@ class RecommendationEngine:
         *,
         profile: SoulProfile,
         limit: int = 60,
+        max_extra_requests: int = 6,
     ) -> int:
-        """Drain only durable classified rows awaiting expression copy."""
+        """Drain only durable classified rows awaiting expression copy.
+
+        ``max_extra_requests`` controls split retries after a provider returns
+        a malformed or partial batch.  The default preserves the daemon/API
+        repair behavior; short-lived callers may set it to zero to persist a
+        valid subset and leave the remaining rows durable for a later pass.
+        """
 
         return await self._drain_expression_copy(
             profile=profile,
             limit=max(0, min(60, int(limit))),
             batch_size=_DEFAULT_EXPRESSION_BATCH_SIZE,
+            max_extra_requests=max(0, int(max_extra_requests)),
         )
 
     def set_copy_pending_callback(self, callback: Callable[[str], None] | None) -> None:

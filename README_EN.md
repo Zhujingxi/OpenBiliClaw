@@ -604,7 +604,7 @@ background ─ background admission (default 3) ──────┘
 │   LLM adapters · Source adapters (SourceAdapter) │
 │ Source-family registry: alias · strategy · URL host │
 │             → pool accounting · viewed identity    │
-│ API projected stock → 3×30 workers → serial admit; OpenClaw ≤90 inline → await copy≤60 → UI │
+│ API projected stock → 3×30 workers → serial admit; OpenClaw first batch≤4 → copy≤4/no split retry → UI │
 │ API/OpenClaw startup hook → recover/maintain → expose LLM │
 │   Unified admission · SQLite (events · pool · recs)│
 └────────────────────────────────────────────────┘

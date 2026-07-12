@@ -607,7 +607,7 @@ background ─ background admission (default 3) ──────┘
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │
 │  来源族注册表：alias · strategy · URL host             │
 │             → pool 统计 · 已看身份                     │
-│ API projected 库存 → 3×30 worker → 串行入池；OpenClaw ≤90 inline → await copy≤60 → 四端 │
+│ API projected 库存 → 3×30 worker → 串行入池；OpenClaw 首批≤4 → copy≤4/不拆分重试 → 四端 │
 │ API/OpenClaw 启动钩子 → 历史恢复/原子维护 → 再暴露 LLM │
 │   统一准入防线 · SQLite（事件 · 候选池 · 推荐 · 对话） │
 └────────────────────────────────────────────────┘

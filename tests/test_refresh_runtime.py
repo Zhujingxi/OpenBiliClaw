@@ -1491,6 +1491,64 @@ async def test_refresh_plan_uses_candidate_pipeline_when_available() -> None:
     assert memory.state["recent_pool_topics"][:1] == ["pipeline-topic"]
 
 
+async def test_one_shot_inline_eval_cap_bounds_default_pool_supply_and_drain() -> None:
+    """A one-shot bridge serves one bounded batch, not the daemon's 30-row wave."""
+
+    pipeline = _FakeCandidatePipeline()
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase([{"id": 1, "event_type": "view"}], pool_count=0),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        discovery_candidate_pipeline=pipeline,
+        one_shot_inline_eval_limit=4,
+        pool_target_count=300,
+        discovery_limit=30,
+    )
+
+    result = await controller.force_refresh()
+
+    assert result["refreshed"] is True
+    assert pipeline.enqueued
+    assert pipeline.drains == [4]
+    assert all(limit <= 4 for _strategies, limit in pipeline.enqueued)
+
+
+async def test_managed_candidate_coordinator_keeps_daemon_sized_supply_wave() -> None:
+    """The one-shot cap must not shrink the API runtime's coordinator-owned wave."""
+
+    class Coordinator:
+        def __init__(self) -> None:
+            self.notifications: list[str] = []
+
+        def notify(self, reason: str) -> None:
+            self.notifications.append(reason)
+
+    pipeline = _FakeCandidatePipeline()
+    coordinator = Coordinator()
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase([{"id": 1, "event_type": "view"}], pool_count=0),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        discovery_candidate_pipeline=pipeline,
+        candidate_eval_coordinator=coordinator,
+        one_shot_inline_eval_limit=4,
+        pool_target_count=300,
+        discovery_limit=30,
+    )
+
+    result = await controller.force_refresh()
+
+    assert result["refreshed"] is True
+    assert pipeline.enqueued
+    assert all(limit == 30 for _strategies, limit in pipeline.enqueued)
+    assert pipeline.drains == []
+    assert coordinator.notifications
+
+
 async def test_refresh_pipeline_drain_uses_shared_candidate_lock() -> None:
     pipeline = _FakeCandidatePipeline()
     controller = ContinuousRefreshController(

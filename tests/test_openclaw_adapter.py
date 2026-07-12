@@ -1013,6 +1013,13 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     assert pipeline.kwargs["database"] is created_databases[0]
     assert pipeline.kwargs["discovery_engine"] is services.discovery_engine
     assert pipeline.kwargs["admission_min_score"] == 0.60
+    # OpenClaw has no daemon to consume a large raw backlog after returning.
+    # Its direct refresh starts with one fixed small evaluation claim, while
+    # the API runtime retains its oversampled continuous-refill settings.
+    assert pipeline.kwargs["candidate_fetch_oversample"] == 1
+    assert pipeline.kwargs["eval_batch_concurrency"] == 1
+    assert pipeline.kwargs["min_eval_batch_size"] == 4
+    assert services.runtime_controller.kwargs["one_shot_inline_eval_limit"] == 4
     assert len(producer_kwargs) == 2
     assert all(kwargs["candidate_pipeline"] is pipeline for kwargs in producer_kwargs)
     assert services.runtime_controller.kwargs["youtube_producer"].kind == "youtube"
@@ -1214,10 +1221,7 @@ async def test_openclaw_controller_refresh_owns_post_admission_copy_once(
                 DiscoveredContent(
                     bvid=f"BV-openclaw-controller-{index}",
                     content_id=f"openclaw-controller-{index}",
-                    content_url=(
-                        "https://www.bilibili.com/video/"
-                        f"BV-openclaw-controller-{index}"
-                    ),
+                    content_url=(f"https://www.bilibili.com/video/BV-openclaw-controller-{index}"),
                     title=f"一次性补货链路 {index}",
                     source_platform="bilibili",
                     source_strategy=strategies[0] if strategies else "search",
@@ -1300,8 +1304,8 @@ async def test_openclaw_controller_refresh_owns_post_admission_copy_once(
             limit=60,
         )
 
-    candidate_pipeline.on_candidates_admitted = (
-        lambda callback_profile, _admitted: drain_one_shot_copy(callback_profile)
+    candidate_pipeline.on_candidates_admitted = lambda callback_profile, _admitted: (
+        drain_one_shot_copy(callback_profile)
     )
     controller = ContinuousRefreshController(
         memory_manager=Memory(),
@@ -1327,7 +1331,7 @@ async def test_openclaw_controller_refresh_owns_post_admission_copy_once(
 
 
 @pytest.mark.asyncio
-async def test_openclaw_bootstrap_one_shot_producer_copies_and_serves_fresh_pool(
+async def test_openclaw_bootstrap_one_shot_keeps_partial_copy_durable_without_split_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1377,26 +1381,39 @@ async def test_openclaw_bootstrap_one_shot_producer_copies_and_serves_fresh_pool
 
     class BootstrapLLM:
         expression_calls = 0
+        expression_batch_sizes: list[int] = []
 
         def __init__(self, **_kwargs: object) -> None:
             pass
 
         async def complete_structured_task(
-            self, *, caller: str, **_kwargs: object
+            self,
+            *,
+            caller: str,
+            user_input: str,
+            **_kwargs: object,
         ) -> SimpleNamespace:
             assert caller == "recommendation.write_expression"
+            payload = user_input.split("<content_batch>", 1)[1].split("</content_batch>", 1)[0]
+            batch = json.loads(payload)
             type(self).expression_calls += 1
+            type(self).expression_batch_sizes.append(len(batch))
             return SimpleNamespace(
                 content=json.dumps(
                     [
                         {
-                            "content_id": f"dy-openclaw-copy-{index}",
+                            "content_id": str(item["content_id"]),
                             "expression": (
-                                f"第 {index} 条把并发补货讲得很具体，正好接住你想把系统跑稳的劲头。"
+                                f"{item['content_id']} 把并发补货讲得很具体，"
+                                "正好接住你想把系统跑稳的劲头。"
                             ),
-                            "topic_label": f"把补货链路跑稳 {index}",
+                            "topic_label": "把补货链路跑稳",
                         }
-                        for index in range(8)
+                        # Deliberately return a valid subset.  The one-shot
+                        # bridge must make this completed subset servable,
+                        # rather than spend its interaction budget recursively
+                        # split-retrying the remaining durable rows.
+                        for item in batch[:2]
                     ],
                     ensure_ascii=False,
                 )
@@ -1469,7 +1486,7 @@ async def test_openclaw_bootstrap_one_shot_producer_copies_and_serves_fresh_pool
                     source_strategy="search",
                     author_name="系统实验室",
                 )
-                for index in range(8)
+                for index in range(4)
             ],
             cached=False,
             source_counts={"search": 8},
@@ -1488,8 +1505,8 @@ async def test_openclaw_bootstrap_one_shot_producer_copies_and_serves_fresh_pool
     scheduler = SimpleNamespace(
         enabled=True,
         pause_on_extension_disconnect=False,
-        pool_target_count=8,
-        pool_source_shares={"douyin": 8},
+        pool_target_count=4,
+        pool_source_shares={"douyin": 4},
         account_sync_interval_hours=6,
         refresh_check_interval_seconds=60,
         signal_event_threshold=6,
@@ -1530,7 +1547,7 @@ async def test_openclaw_bootstrap_one_shot_producer_copies_and_serves_fresh_pool
     monkeypatch.setattr(bootstrap_module, "ExploreStrategy", BootstrapStrategy)
     monkeypatch.setattr(bootstrap_module, "AccountSyncService", BootstrapAccountSync)
     monkeypatch.setattr(
-        bootstrap_module, "effective_pool_source_shares", lambda _config: {"douyin": 8}
+        bootstrap_module, "effective_pool_source_shares", lambda _config: {"douyin": 4}
     )
     monkeypatch.setattr(
         bootstrap_module, "build_youtube_discovery_producer", lambda **_kwargs: None
@@ -1541,15 +1558,47 @@ async def test_openclaw_bootstrap_one_shot_producer_copies_and_serves_fresh_pool
     services = bootstrap_module.build_openclaw_adapter_services()
     producer = services.runtime_controller.douyin_producer
 
+    copy_drain_calls: list[tuple[int, int]] = []
+    original_drain = services.recommendation_engine.drain_pending_expression_copy
+
+    async def monitored_drain(*args: object, **kwargs: object) -> int:
+        copy_drain_calls.append(
+            (
+                int(kwargs.get("limit", 60) or 0),
+                int(kwargs.get("max_extra_requests", 6) or 0),
+            )
+        )
+        return await original_drain(*args, **kwargs)
+
+    services.recommendation_engine.drain_pending_expression_copy = monitored_drain
+
+    # The post-admission hook must delegate to the controller callback, rather
+    # than capture a parallel copy closure.  This gives the structured receipt
+    # a single observable owner and lets the live OpenClaw E2E monitor the
+    # exact callback that would otherwise be used as the controller fallback.
+    callback_calls = 0
+    original_copy_callback = services.runtime_controller.one_shot_expression_copy_callback
+    assert callable(original_copy_callback)
+
+    async def counting_copy_callback(callback_profile: SoulProfile) -> int:
+        nonlocal callback_calls
+        callback_calls += 1
+        return int(await original_copy_callback(callback_profile))
+
+    services.runtime_controller.one_shot_expression_copy_callback = counting_copy_callback
+
     assert services.runtime_controller.expression_copy_coordinator is None
     assert producer is not None
-    produced = await producer.produce_if_due(limit=8)
+    produced = await producer.produce_if_due(limit=4)
 
-    assert produced["enqueued"] == 8
-    assert produced["cached"] == 8
-    assert services.database.count_pool_candidates() == 8
-    assert services.database.get_pool_candidates_needing_copy(limit=10) == []
+    assert produced["enqueued"] == 4
+    assert produced["cached"] == 4
+    assert services.runtime_controller._pool_readiness_counts()["available"] == 2  # noqa: SLF001
+    assert len(services.database.get_pool_candidates_needing_copy(limit=10)) == 2
+    assert callback_calls == 1
     assert BootstrapLLM.expression_calls == 1
+    assert BootstrapLLM.expression_batch_sizes == [4]
+    assert copy_drain_calls == [(4, 0)]
 
     adapter = OpenClawAdapter(services=services)
     response = await adapter.recommend(limit=1, refresh_if_needed=True)

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
@@ -14,13 +16,15 @@ from openbiliclaw.bilibili.api import BilibiliAPIClient
 from openbiliclaw.config import load_config
 from openbiliclaw.discovery.candidate_pipeline import DiscoveryCandidatePipeline
 from openbiliclaw.discovery.engine import ContentDiscoveryEngine, DiscoveredContent
+from openbiliclaw.integrations.openclaw.bootstrap import build_openclaw_adapter_services
+from openbiliclaw.integrations.openclaw.operations import OpenClawAdapter
 from openbiliclaw.llm.base import classify_llm_failure_kind
 from openbiliclaw.llm.concurrency import LLMConcurrencyGate
 from openbiliclaw.llm.registry import build_llm_registry
 from openbiliclaw.llm.service import LLMService, module_overrides_from_config
 from openbiliclaw.memory.manager import MemoryManager
 from openbiliclaw.recommendation.engine import RecommendationEngine
-from openbiliclaw.soul.profile import InterestTag, PreferenceLayer, SoulProfile
+from openbiliclaw.soul.profile import InterestTag, OnionProfile, PreferenceLayer, SoulProfile
 from openbiliclaw.storage.database import Database
 
 if TYPE_CHECKING:
@@ -34,6 +38,9 @@ _LIVE_CONFIG_ENV = "OPENBILICLAW_REFILL_CONFIG"
 _LIVE_PROVIDER_ENV = "OPENBILICLAW_REFILL_PROVIDER"
 _LIVE_RANKING_RID = 188
 _LIVE_RANKING_LIMIT = 8
+_LIVE_OPENCLAW_POOL_TARGET = 300
+_LIVE_OPENCLAW_DISCOVERY_LIMIT = 30
+_LIVE_OPENCLAW_INLINE_EVAL_LIMIT = 4
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not _LIVE, reason="set OPENBILICLAW_REFILL_E2E=1 for live refill E2E"),
@@ -101,11 +108,85 @@ class _LiveMetrics:
     peak_provider_active: int = 0
     expression_active: int = 0
     peak_expression_active: int = 0
+    expression_requests: list[_LiveExpressionRequest] = field(default_factory=list)
+    copy_batch_attempts: list[_LiveCopyBatchAttempt] = field(default_factory=list)
 
     def observe_gate(self) -> None:
         status = self.gate.status_payload()
         self.peak_total = max(self.peak_total, int(status["llm_total_active"]))
         self.peak_background = max(self.peak_background, int(status["llm_background_active"]))
+
+
+@dataclass
+class _LiveExpressionRequest:
+    """Sanitized timing record for one real expression-provider request."""
+
+    caller: str
+    batch_size: int
+    started: float
+    elapsed_seconds: float = 0.0
+    outcome: str = "started"
+    cancelled: bool = False
+
+
+@dataclass
+class _LiveCopyBatchAttempt:
+    """Sanitized result for one copy batch before split-retry handling."""
+
+    batch_size: int
+    source: str = "recommendation._precompute_batch"
+    elapsed_seconds: float = 0.0
+    outcome: str = "started"
+    cancelled: bool = False
+
+
+def _content_batch_size(user_input: str) -> int:
+    """Return a prompt's content batch size without retaining its contents."""
+
+    match = re.search(r"<content_batch>\s*(.*?)\s*</content_batch>", user_input, re.S)
+    if match is None:
+        return 0
+    try:
+        value = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return 0
+    return len(value) if isinstance(value, list) else 0
+
+
+def _expression_request_trace_summary(
+    requests: list[_LiveExpressionRequest], *, origin: float
+) -> str:
+    """Format provider observations without exposing prompts or responses."""
+
+    return (
+        "["
+        + ";".join(
+            (
+                f"caller={request.caller},batch={request.batch_size},"
+                f"start={request.started - origin:.2f},elapsed={request.elapsed_seconds:.2f},"
+                f"outcome={request.outcome},cancelled={request.cancelled}"
+            )
+            for request in requests
+        )
+        + "]"
+    )
+
+
+def _copy_batch_attempt_summary(attempts: list[_LiveCopyBatchAttempt]) -> str:
+    """Format copy-validation observations without exposing item data."""
+
+    return (
+        "["
+        + ";".join(
+            (
+                f"source={attempt.source},batch={attempt.batch_size},"
+                f"elapsed={attempt.elapsed_seconds:.2f},outcome={attempt.outcome},"
+                f"cancelled={attempt.cancelled}"
+            )
+            for attempt in attempts
+        )
+        + "]"
+    )
 
 
 class _MonitoredRegistry:
@@ -158,13 +239,9 @@ class _MonitoredRegistry:
             self.metrics.peak_expression_active = max(
                 self.metrics.peak_expression_active, self.metrics.expression_active
             )
-            match = re.search(
-                r"<content_batch>\s*(.*?)\s*</content_batch>", messages[-1]["content"], re.S
-            )
-            if match is not None:
-                value = json.loads(match.group(1))
-                if isinstance(value, list):
-                    self.metrics.expression_batch_sizes.append(len(value))
+            batch_size = _content_batch_size(messages[-1]["content"])
+            if batch_size:
+                self.metrics.expression_batch_sizes.append(batch_size)
         try:
             if method == "complete_provider":
                 assert provider_name is not None
@@ -435,3 +512,297 @@ async def test_real_provider_refill_and_interactive_fourth_slot(tmp_path: Path) 
         f"transient_retry_count={metrics.transient_retry_count} "
         f"transient_registry_failures={metrics.transient_registry_failures}"
     )
+
+
+@pytest.mark.asyncio
+async def test_real_provider_openclaw_one_shot_refill_uses_single_copy_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise the real OpenClaw bootstrap through its 45-second adapter path.
+
+    This remains explicitly opt-in with the same provider controls as the
+    refill integration above.  It uses a temporary database and a synthetic
+    profile, while the ranking request and bounded evaluation/copy requests
+    reach the configured real provider.
+    """
+
+    import openbiliclaw.integrations.openclaw.bootstrap as bootstrap_module
+
+    print("live_openclaw_one_shot_phase=config", flush=True)
+    loaded_config, registry = _load_live_config_and_registry()
+    config = replace(
+        loaded_config,
+        data_dir=str(tmp_path),
+        bilibili=replace(loaded_config.bilibili, cookie="", proxy=""),
+        scheduler=replace(
+            loaded_config.scheduler,
+            enabled=True,
+            pause_on_extension_disconnect=False,
+            pool_target_count=_LIVE_OPENCLAW_POOL_TARGET,
+            pool_source_shares={"bilibili": 1},
+            discovery_limit=_LIVE_OPENCLAW_DISCOVERY_LIMIT,
+        ),
+    )
+    gate = LLMConcurrencyGate(total_concurrency=4)
+    metrics = _LiveMetrics(gate)
+    monitored_registry = _MonitoredRegistry(registry, metrics)
+    monkeypatch.setattr(bootstrap_module, "load_config", lambda: config)
+    monkeypatch.setattr(
+        bootstrap_module,
+        "build_llm_registry",
+        lambda _config: monitored_registry,
+    )
+
+    services = build_openclaw_adapter_services()
+    try:
+        trace_origin = time.monotonic()
+        original_complete_structured_task = services.llm_service.complete_structured_task
+
+        async def monitored_complete_structured_task(*args: Any, **kwargs: Any) -> Any:
+            caller = str(kwargs.get("caller", "") or "")
+            if caller != "recommendation.write_expression":
+                return await original_complete_structured_task(*args, **kwargs)
+            request = _LiveExpressionRequest(
+                caller=caller,
+                batch_size=_content_batch_size(str(kwargs.get("user_input", "") or "")),
+                started=time.monotonic(),
+            )
+            metrics.expression_requests.append(request)
+            try:
+                response = await original_complete_structured_task(*args, **kwargs)
+            except asyncio.CancelledError:
+                request.cancelled = True
+                request.outcome = "cancelled"
+                raise
+            except Exception as exc:
+                request.outcome = classify_llm_failure_kind(exc)
+                raise
+            else:
+                request.outcome = "returned"
+                return response
+            finally:
+                request.elapsed_seconds = time.monotonic() - request.started
+
+        original_precompute_batch = services.recommendation_engine._precompute_batch  # noqa: SLF001
+
+        async def monitored_precompute_batch(
+            batch: list[Any],
+            callback_profile: Any,
+            *,
+            fallback_to_single: bool = True,
+        ) -> int:
+            attempt = _LiveCopyBatchAttempt(batch_size=len(batch))
+            metrics.copy_batch_attempts.append(attempt)
+            started = time.monotonic()
+            try:
+                result = await original_precompute_batch(
+                    batch,
+                    callback_profile,
+                    fallback_to_single=fallback_to_single,
+                )
+            except asyncio.CancelledError:
+                attempt.cancelled = True
+                attempt.outcome = "cancelled"
+                raise
+            except Exception as exc:
+                attempt.outcome = type(exc).__name__
+                raise
+            else:
+                attempt.outcome = "completed"
+                return result
+            finally:
+                attempt.elapsed_seconds = time.monotonic() - started
+
+        monkeypatch.setattr(
+            services.llm_service,
+            "complete_structured_task",
+            monitored_complete_structured_task,
+        )
+        monkeypatch.setattr(
+            services.recommendation_engine,
+            "_precompute_batch",
+            monitored_precompute_batch,
+        )
+        profile = _profile()
+        soul_layer = services.memory_manager.get_layer("soul")
+        soul_layer.data.clear()
+        soul_layer.data.update(OnionProfile.from_legacy(profile).to_dict())
+        soul_layer.save()
+
+        trending = next(
+            strategy
+            for strategy in services.discovery_engine._strategies  # noqa: SLF001
+            if strategy.name == "trending"
+        )
+
+        async def only_technology_ranking(_profile: object) -> list[int]:
+            return [_LIVE_RANKING_RID]
+
+        monkeypatch.setattr(trending, "_select_rids", only_technology_ranking)
+        trending.llm_evaluation = False
+
+        ranking_rids: list[int] = []
+        ranking_elapsed_seconds = 0.0
+        original_get_ranking = services.bilibili_client.get_ranking
+
+        async def monitored_get_ranking(rid: int = 0) -> list[dict[str, object]]:
+            nonlocal ranking_elapsed_seconds
+            ranking_rids.append(int(rid))
+            started = time.monotonic()
+            try:
+                return await original_get_ranking(rid)
+            finally:
+                ranking_elapsed_seconds = time.monotonic() - started
+
+        monkeypatch.setattr(services.bilibili_client, "get_ranking", monitored_get_ranking)
+        controller = services.runtime_controller
+        monkeypatch.setattr(
+            controller,
+            "_build_source_replenishment_plan",
+            lambda: [(["trending"], _LIVE_OPENCLAW_DISCOVERY_LIMIT)],
+        )
+
+        pipeline = controller.discovery_candidate_pipeline
+        assert pipeline is not None
+        evaluation_started = False
+        evaluation_cancelled = False
+        evaluation_elapsed_seconds = 0.0
+        evaluation_batch_sizes: list[int] = []
+        original_evaluate = services.discovery_engine.evaluate_content_batch
+
+        async def monitored_evaluate(*args: object, **kwargs: object) -> list[float]:
+            nonlocal evaluation_started, evaluation_cancelled, evaluation_elapsed_seconds
+            evaluation_started = True
+            if args and isinstance(args[0], list):
+                evaluation_batch_sizes.append(len(args[0]))
+            started = time.monotonic()
+            try:
+                return await original_evaluate(*args, **kwargs)
+            except asyncio.CancelledError:
+                evaluation_cancelled = True
+                raise
+            finally:
+                evaluation_elapsed_seconds = time.monotonic() - started
+
+        monkeypatch.setattr(services.discovery_engine, "evaluate_content_batch", monitored_evaluate)
+        original_admission_callback = pipeline.on_candidates_admitted
+        original_copy_callback = controller.one_shot_expression_copy_callback
+        assert callable(original_admission_callback)
+        assert callable(original_copy_callback)
+        admission_callback_calls = 0
+        controller_copy_callback_calls = 0
+        controller_copy_callback_cancelled = False
+        refresh_cancelled = False
+        refresh_elapsed_seconds = 0.0
+
+        async def await_callback(callback: object, *args: object) -> int:
+            assert callable(callback)
+            result = callback(*args)
+            if inspect.isawaitable(result):
+                result = await result
+            return max(0, int(result or 0))
+
+        async def monitored_admission_callback(
+            callback_profile: object,
+            admitted: int,
+        ) -> int:
+            nonlocal admission_callback_calls
+            admission_callback_calls += 1
+            return await await_callback(original_admission_callback, callback_profile, admitted)
+
+        async def monitored_copy_callback(callback_profile: object) -> int:
+            nonlocal controller_copy_callback_calls, controller_copy_callback_cancelled
+            controller_copy_callback_calls += 1
+            try:
+                return await await_callback(original_copy_callback, callback_profile)
+            except asyncio.CancelledError:
+                controller_copy_callback_cancelled = True
+                raise
+
+        original_refresh = controller.refresh_if_needed
+
+        async def monitored_refresh() -> dict[str, object]:
+            nonlocal refresh_cancelled, refresh_elapsed_seconds
+            started = time.monotonic()
+            try:
+                return await original_refresh()
+            except asyncio.CancelledError:
+                refresh_cancelled = True
+                raise
+            finally:
+                refresh_elapsed_seconds = time.monotonic() - started
+
+        pipeline.on_candidates_admitted = monitored_admission_callback
+        controller.one_shot_expression_copy_callback = monitored_copy_callback
+        monkeypatch.setattr(controller, "refresh_if_needed", monitored_refresh)
+        adapter = OpenClawAdapter(services=services)
+        started = time.monotonic()
+        response = await adapter.recommend(limit=1, refresh_if_needed=True)
+        total_elapsed_seconds = time.monotonic() - started
+        readiness = controller._pool_readiness_counts()  # noqa: SLF001
+        canonical_available = int(readiness.get("available", 0) or 0)
+        candidate_status_counts = services.database.count_discovery_candidates_by_status()
+        raw_candidate_total = sum(int(value or 0) for value in candidate_status_counts.values())
+        pending_copy_rows = len(services.database.get_pool_candidates_needing_copy(limit=100))
+        expression_request_traces = _expression_request_trace_summary(
+            metrics.expression_requests,
+            origin=trace_origin,
+        )
+        copy_batch_attempts = _copy_batch_attempt_summary(metrics.copy_batch_attempts)
+        print(
+            "live_openclaw_one_shot_summary "
+            f"ranking_rid={_LIVE_RANKING_RID} ranking_calls={len(ranking_rids)} "
+            f"requested_limit={_LIVE_OPENCLAW_DISCOVERY_LIMIT} "
+            f"inline_eval_limit={controller.one_shot_inline_eval_limit} "
+            f"ranking_elapsed_seconds={ranking_elapsed_seconds:.2f} "
+            f"canonical_available={canonical_available} "
+            f"evaluation_started={evaluation_started} "
+            f"evaluation_cancelled={evaluation_cancelled} "
+            f"evaluation_elapsed_seconds={evaluation_elapsed_seconds:.2f} "
+            f"evaluation_batch_sizes={evaluation_batch_sizes} "
+            f"admission_callbacks={admission_callback_calls} "
+            f"controller_copy_callbacks={controller_copy_callback_calls} "
+            f"controller_copy_callback_cancelled={controller_copy_callback_cancelled} "
+            f"expression_provider_calls={len(metrics.expression_batch_sizes)} "
+            f"provider_round_count={metrics.provider_round_count} "
+            f"expression_request_traces={expression_request_traces} "
+            f"copy_batch_attempts={copy_batch_attempts} "
+            f"candidate_cached={int(candidate_status_counts.get('cached', 0) or 0)} "
+            f"candidate_pending_eval={int(candidate_status_counts.get('pending_eval', 0) or 0)} "
+            f"raw_candidate_total={raw_candidate_total} "
+            f"pending_copy_rows={pending_copy_rows} "
+            f"refresh_elapsed_seconds={refresh_elapsed_seconds:.2f} "
+            f"total_elapsed_seconds={total_elapsed_seconds:.2f} "
+            f"adapter_wait_boundary_seconds={adapter.refresh_timeout_seconds:.2f} "
+            f"refresh_cancelled={refresh_cancelled}",
+            flush=True,
+        )
+
+        assert ranking_rids == [_LIVE_RANKING_RID]
+        assert controller.one_shot_inline_eval_limit == _LIVE_OPENCLAW_INLINE_EVAL_LIMIT
+        assert (
+            evaluation_batch_sizes
+            and max(evaluation_batch_sizes) <= _LIVE_OPENCLAW_INLINE_EVAL_LIMIT
+        )
+        assert raw_candidate_total <= _LIVE_OPENCLAW_INLINE_EVAL_LIMIT
+        assert not refresh_cancelled, (
+            "live OpenClaw refresh was cancelled at its adapter wait boundary; "
+            f"refresh_elapsed_seconds={refresh_elapsed_seconds:.2f} "
+            f"adapter_wait_boundary_seconds={adapter.refresh_timeout_seconds:.2f}"
+        )
+        assert canonical_available > 0, "live OpenClaw refill left no canonical available rows"
+        assert admission_callback_calls == 1
+        assert controller_copy_callback_calls == 1
+        assert len(metrics.expression_batch_sizes) <= 1
+        assert len(metrics.expression_requests) <= 1
+        assert all(
+            batch_size <= _LIVE_OPENCLAW_INLINE_EVAL_LIMIT
+            for batch_size in metrics.expression_batch_sizes
+        )
+        assert response.items, "live OpenClaw refill returned no usable recommendation"
+        assert response.items[0].bvid
+        assert response.items[0].reason
+    finally:
+        await services.bilibili_client.close()
+        services.database.close()

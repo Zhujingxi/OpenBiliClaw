@@ -2,7 +2,7 @@
 
 > 从用户画像出发，在 B 站、小红书、抖音、YouTube、X、知乎、Reddit 和通用 Web 等来源主动寻找潜在会喜欢的内容。
 
-API daemon 的候选 admission 成功后只同步调用轻量 expression `notify()`，不会 inline 或 await 文案 provider；generation-owned coordinator 按 durable `admitted_pending_copy` 连续补齐文案，因此评估 worker 可立即继续补位。OpenClaw direct one-shot 没有 daemon owner：它在 admission commit 后 await 最多 60 条 durable expression copy，确保返回时 canonical pool 已可 serve，不留下 copy/provider task。`drain_pending()` 会随原有 metrics 返回结构化 post-admission copy receipt；refresh 仅在本轮没有 callback owner 时执行 copy 兜底，避免同一 durable admission 被 controller 收尾再次调用。
+API daemon 的候选 admission 成功后只同步调用轻量 expression `notify()`，不会 inline 或 await 文案 provider；generation-owned coordinator 按 durable `admitted_pending_copy` 连续补齐文案，因此评估 worker 可立即继续补位。OpenClaw direct one-shot 没有 daemon owner：它在 admission commit 后 await `expression-copy(limit=4, max_extra_requests=0)`，首 batch 的有效 subset 立即进入 canonical pool，剩余 pending-copy 留给下一次 operation；若首 batch 全部无效，本次可服务池仍可能为空，但不会留下 copy/provider task。`drain_pending()` 会随原有 metrics 返回结构化 post-admission copy receipt；refresh 仅在本轮没有 callback owner 时执行 copy 兜底，避免同一 durable admission 被 controller 收尾再次调用。
 
 ## 概述
 
@@ -116,7 +116,7 @@ API daemon 的候选 admission 成功后只同步调用轻量 expression `notify
    这一步的作用，是把不同来源的原始线索先汇入同一个 `pending_eval` 队列；从这里往后，来源差异只作为 prompt 上下文和配额统计信号存在，不再决定一套单独评估流程。
 
 4. **混源连续评估**
-   `DiscoveryCandidatePipeline` 提供 `claim_batch → evaluate_claim → complete_claim / release_claim` 四阶段 API。`CandidateEvalCoordinator` 是 API runtime 唯一 claim owner，默认 3 个、每个最多 30 条 worker；worker 只跑 LLM，落库与 admission 串行，任一完成即补位，全局最多 90 条在途。调度库存严格使用 `available + admitted_pending_copy + evaluated_pending_admission`，普通 `pending_eval/evaluating` raw 不计入；每个完成 batch 先把所有 token-owned 评分持久化，再按当时 `target - available - admitted_pending_copy` headroom 入池，超过 headroom 的合格行保留为 durable `evaluated`。API 成功 admission 同步发出轻量 `on_admitted(count)` 通知，不等待文案工作。OpenClaw direct one-shot 则保留同一 pipeline 的 ≤90 inline drain，使用 post-admission callback 在 DB commit 后 await ≤60 expression copy；这一 callback 失败不会回滚已经 durable 的 admission，未复制行保留 pending-copy 以供下一次 operation 重试。每批唯一 `claim_token` 防止旧 worker 覆盖新 claim；worker completion 直接驱动补位，60 秒只作 API 遗漏通知的 safety wake。平台请求间隔、raw ceiling、来源配比和 admission 阈值均未改变。
+   `DiscoveryCandidatePipeline` 提供 `claim_batch → evaluate_claim → complete_claim / release_claim` 四阶段 API。`CandidateEvalCoordinator` 是 API runtime 唯一 claim owner，默认 3 个、每个最多 30 条 worker；worker 只跑 LLM，落库与 admission 串行，任一完成即补位，全局最多 90 条在途。调度库存严格使用 `available + admitted_pending_copy + evaluated_pending_admission`，普通 `pending_eval/evaluating` raw 不计入；每个完成 batch 先把所有 token-owned 评分持久化，再按当时 `target - available - admitted_pending_copy` headroom 入池，超过 headroom 的合格行保留为 durable `evaluated`。API 成功 admission 同步发出轻量 `on_admitted(count)` 通知，不等待文案工作。OpenClaw direct one-shot 则把同一 pipeline 的首轮 source / inline evaluation / copy 都限制为 ≤4，使用 post-admission callback 在 DB commit 后 await `expression-copy(limit=4, max_extra_requests=0)`；首 batch 的有效 subset 可服务，未复制行保留 pending-copy 以供下一次 operation 重试，且 callback 失败不会回滚已经 durable 的 admission。每批唯一 `claim_token` 防止旧 worker 覆盖新 claim；worker completion 直接驱动补位，60 秒只作 API 遗漏通知的 safety wake。平台请求间隔、raw ceiling、来源配比和 admission 阈值均未改变。
 
    进入批量 LLM 评估前，`evaluate_content_batch()` 会读取 `Database.get_recent_viewed_content_keys()`，并通过 `sources.platforms.normalize_source_platform()` 生成统一的 `source_platform:content_id`，判断最近看过的 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit 候选；命中项直接记为 0 分并从 prompt 中剔除，避免为已看内容消耗 discovery token。老 BVID 也保留 raw key 兼容旧数据。
 

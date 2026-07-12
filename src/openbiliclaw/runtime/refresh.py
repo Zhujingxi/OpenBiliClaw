@@ -292,6 +292,11 @@ class ContinuousRefreshController:
     # the durable copy stage synchronously after inline admission instead of
     # scheduling the daemon-oriented precompute path.
     one_shot_expression_copy_callback: Callable[[Any], Any] | None = None
+    # Non-daemon bridges can cap their first source/evaluation wave so an
+    # interactive request produces a serviceable batch before its own timeout.
+    # ``0`` preserves the existing uncapped inline behavior; API runtime
+    # controllers leave this at zero and use CandidateEvalCoordinator instead.
+    one_shot_inline_eval_limit: int = 0
     llm_concurrency_gate: Any | None = None
     bilibili_producer: Any | None = None
     xhs_producer: Any | None = None
@@ -2047,6 +2052,7 @@ class ContinuousRefreshController:
                 current_pool_count=current_pool_count,
                 pool_below_target=initial_pool_below_target,
             )
+            effective_limit = self._bounded_one_shot_inline_eval_limit(effective_limit)
             strategy_limits = self._requested_strategy_limits(
                 strategies=strategies,
                 requested_limit=requested_limit,
@@ -3004,6 +3010,26 @@ class ContinuousRefreshController:
         except (TypeError, ValueError):
             configured = 1
         return min(_MAX_DISCOVERY_BACKFILL_PER_REFRESH, max(1, configured))
+
+    def _bounded_one_shot_inline_eval_limit(self, requested_limit: int) -> int:
+        """Cap a non-daemon refresh's first supply/evaluation wave when configured.
+
+        The API runtime has a live ``CandidateEvalCoordinator`` which can keep
+        draining the raw queue after the HTTP response returns.  OpenClaw's
+        short-lived adapter has no such owner, so its bootstrap opts into a
+        small first wave that can reach durable copy within the adapter timeout.
+        """
+
+        requested = max(1, int(requested_limit))
+        if self.candidate_eval_coordinator is not None:
+            return requested
+        try:
+            configured = int(self.one_shot_inline_eval_limit)
+        except (TypeError, ValueError):
+            configured = 0
+        if configured <= 0:
+            return requested
+        return min(requested, configured)
 
     def _candidate_eval_drain_batch_size(self, batch_size: int | None) -> int:
         default = min(

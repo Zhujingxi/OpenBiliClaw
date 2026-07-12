@@ -212,3 +212,31 @@ Second review remediation verification:
   coordinator and recommendation engine): `239 passed in 11.36s`.
 - Repository-wide Ruff and MyPy (189 source files), plus `git diff --check`,
   passed after the final fingerprint change.
+
+## OpenClaw one-shot bounded-copy follow-up
+
+- OpenClaw direct bootstrap now bounds one interactive replenishment wave at
+  four source/evaluation/copy rows. Its copy callback calls
+  `drain_pending_expression_copy(limit=4, max_extra_requests=0)`; the generic
+  API/daemon default remains `limit<=60, max_extra_requests=6`.
+- The deterministic bootstrap regression first failed against the old behavior:
+  a four-item provider response with a valid two-item subset was split and
+  retried. It now proves exactly one copy provider call, a two-row canonical
+  subset, two durable pending-copy rows, and exactly one receipt/callback
+  owner.
+- Focused final guard command (with the real test intentionally opt-in and
+  therefore skipped here) completed as `9 passed, 1 skipped in 3.47s`:
+  OpenClaw bootstrap/controller, one-shot refresh caps, generic expression
+  split-retry defaults, and the live-test skip guard.
+- Formatting/lint command over touched production and test files passed;
+  `mypy src/` reported no issues in 189 files; `git diff --check` passed.
+- Real opt-in SenseTime/OpenAI-compatible run used a temporary database,
+  anonymous public Bilibili technology ranking (`rid=188`), synthetic generic
+  profile, default OpenClaw `pool_target=300` and `discovery_limit=30`. It
+  passed in 45.82s wall time: evaluation `[4]` took 15.92s; two rows were
+  admitted; one `recommendation.write_expression` request for batch two took
+  10.89s; refresh was 28.42s and adapter end-to-end time 43.03s, below the
+  unchanged 45s boundary. There was one admission callback, one controller
+  copy callback, no cancellation, one canonical available row, and a usable
+  response. The test prints only sanitized counts/timings, never API keys,
+  prompts, or provider content.

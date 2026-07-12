@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -212,9 +213,17 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         discovery_engine=discovery_engine,
         pool_target_count=config.scheduler.pool_target_count,
         admission_min_score=admission_min_score,
-        min_eval_batch_size=8,
+        min_eval_batch_size=4,
         max_eval_wait_seconds=120,
-        candidate_fetch_oversample=4,
+        # OpenClaw invokes a one-shot refresh rather than owning the API
+        # runtime's continuous evaluator. Start with a small fixed first
+        # claim so evaluation plus durable copy can complete inside the
+        # adapter's bounded interaction window; a later OpenClaw request can
+        # refill the next batch. The API runtime deliberately keeps its 4x
+        # oversample and default two-way evaluator fan-out for sustained
+        # supply.
+        candidate_fetch_oversample=1,
+        eval_batch_concurrency=1,
     )
 
     from openbiliclaw.runtime.douyin_producer import build_douyin_discovery_producer
@@ -251,9 +260,16 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         if profile is None:
             return 0
         before = int(runtime_controller._pool_readiness_counts().get("available", 0))  # noqa: SLF001
+        # This bridge has one bounded interactive request rather than a daemon
+        # retry loop.  Keep its copy work inside the same four-item first-wave
+        # budget and persist any valid partial response immediately; remaining
+        # rows stay durable for the next OpenClaw request instead of consuming
+        # the interaction window on recursive split retries.
+        copy_limit = max(1, min(4, int(runtime_controller.one_shot_inline_eval_limit or 4)))
         completed = await recommendation_engine.drain_pending_expression_copy(
             profile=profile,
-            limit=60,
+            limit=copy_limit,
+            max_extra_requests=0,
         )
         await runtime_controller._publish_precompute_replenishment_if_needed(  # noqa: SLF001
             before_pool_count=before,
@@ -261,7 +277,21 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         return int(completed)
 
     async def _copy_after_inline_admission(profile: Any, _admitted: int) -> int:
-        return await _drain_one_shot_expression_copy(profile)
+        """Delegate admission copy to the controller's one-shot owner.
+
+        The pipeline receipt records this callback as the durable copy owner.
+        Resolving the callback through the controller keeps that owner identical
+        to the controller fallback, so a one-shot caller has one observable
+        path rather than two captured closures that could drift apart.
+        """
+
+        callback = runtime_controller.one_shot_expression_copy_callback
+        if callback is None:
+            return 0
+        result = callback(profile)
+        if inspect.isawaitable(result):
+            result = await result
+        return max(0, int(result or 0))
 
     runtime_controller = ContinuousRefreshController(
         memory_manager=memory_manager,
@@ -286,6 +316,7 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         presence=presence,
         llm_concurrency_gate=llm_gate,
         one_shot_expression_copy_callback=_drain_one_shot_expression_copy,
+        one_shot_inline_eval_limit=4,
     )
     # The OpenClaw adapter has no daemon lifecycle.  Keep the evaluator's
     # bounded inline drain, then finish copy through the awaited callback
