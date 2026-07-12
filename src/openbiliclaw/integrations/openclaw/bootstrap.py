@@ -69,6 +69,19 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
     memory_manager.initialize()
 
     llm_gate = LLMConcurrencyGate(llm_concurrency)
+    count_pool = getattr(database, "count_pool_candidates", None)
+    if callable(count_pool):
+        try:
+            state = memory_manager.load_discovery_runtime_state()
+            info = state.get("xhs_self_info", {}) if isinstance(state, dict) else {}
+            nickname = str(info.get("nickname", "")) if isinstance(info, dict) else ""
+            available = int(count_pool(xhs_self_nickname=nickname))
+        except (AttributeError, TypeError):
+            available = int(count_pool())
+        llm_gate.update_inventory(
+            available=max(0, available),
+            target=int(config.scheduler.pool_target_count),
+        )
 
     usage_recorder = UsageRecorder(sink=database)
 
@@ -255,6 +268,9 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
 
     def _candidate_eval_snapshot() -> CandidateEvalSnapshot:
         readiness = runtime_controller._pool_readiness_counts()  # noqa: SLF001
+        update_inventory = getattr(runtime_controller, "_update_llm_inventory_state", None)
+        if callable(update_inventory):
+            update_inventory(int(readiness.get("available", 0)))
         status_counts = database.count_discovery_candidates_by_status()
         discovery_backlog = sum(
             int(status_counts.get(status, 0))

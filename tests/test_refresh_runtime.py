@@ -16,6 +16,7 @@ from openbiliclaw.discovery.candidate_pipeline import DiscoveryCandidatePipeline
 from openbiliclaw.discovery.candidate_pool import DiscoveryCandidateWrite
 from openbiliclaw.discovery.engine import ContentDiscoveryEngine
 from openbiliclaw.llm.base import LLMRateLimitError
+from openbiliclaw.llm.concurrency import InventoryPriorityState, LLMConcurrencyGate
 from openbiliclaw.recommendation.delight import DEFAULT_DELIGHT_THRESHOLD
 from openbiliclaw.runtime.events import RuntimeEventHub
 from openbiliclaw.runtime.presence import PresenceTracker
@@ -1065,6 +1066,7 @@ def test_get_pending_delight_skips_effective_disliked_candidate() -> None:
 
 
 def test_runtime_status_reports_pool_readiness_counts() -> None:
+    gate = LLMConcurrencyGate(4)
     controller = ContinuousRefreshController(
         memory_manager=_FakeMemoryManager(),
         database=_FakeDatabase(
@@ -1077,6 +1079,8 @@ def test_runtime_status_reports_pool_readiness_counts() -> None:
         soul_engine=_FakeSoulEngine(),
         discovery_engine=_FakeDiscoveryEngine(),
         recommendation_engine=_FakeRecommendationEngine(),
+        llm_concurrency_gate=gate,
+        pool_target_count=30,
     )
 
     status = controller.get_runtime_status()
@@ -1086,6 +1090,28 @@ def test_runtime_status_reports_pool_readiness_counts() -> None:
     assert status["pool_pending_count"] == 142
     assert status["pool_pending_eval_count"] == 4
     assert status["pool_evaluated_pending_count"] == 2
+    assert gate.inventory_priority_state is InventoryPriorityState.EMPTY
+    assert status["inventory_priority_state"] == "empty"
+
+
+def test_pool_readiness_snapshot_updates_refill_state_from_canonical_available() -> None:
+    database = _FakeDatabase([], pool_count=7)
+    gate = LLMConcurrencyGate(4)
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        llm_concurrency_gate=gate,
+        pool_target_count=30,
+    )
+
+    assert controller._pool_readiness_counts()["available"] == 7
+    assert gate.inventory_priority_state is InventoryPriorityState.REFILL
+    database.pool_count = 30
+    assert controller._pool_readiness_counts()["available"] == 30
+    assert gate.inventory_priority_state is InventoryPriorityState.HEALTHY
 
 
 async def test_refresh_controller_prepares_delight_candidates_without_refresh() -> None:

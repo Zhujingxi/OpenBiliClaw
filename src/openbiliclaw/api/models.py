@@ -198,6 +198,12 @@ class RuntimeStatusResponse(BaseModel):
     llm_total_waiting: int = 0
     llm_background_active: int = 0
     llm_background_waiting: int = 0
+    llm_refill_active: int = 0
+    llm_refill_waiting: int = 0
+    llm_maintenance_active: int = 0
+    llm_maintenance_waiting: int = 0
+    llm_refill_priority_active: bool = False
+    inventory_priority_state: str = "healthy"
     last_discovered_count: int = 0
     last_replenished_count: int = 0
     recent_pool_topics: list[str] = Field(default_factory=list)

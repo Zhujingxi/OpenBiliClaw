@@ -446,7 +446,7 @@ class ContinuousRefreshController:
         try:
             readiness = self.database.count_pool_readiness(xhs_self_nickname=nickname)
             available = int(readiness.get("available", 0))
-            return {
+            counts = {
                 "available": max(0, available),
                 "raw": max(0, int(readiness.get("raw", available))),
                 "pending": max(0, int(readiness.get("pending", 0))),
@@ -455,13 +455,22 @@ class ContinuousRefreshController:
             }
         except Exception:
             available = int(self.database.count_pool_candidates(xhs_self_nickname=nickname))
-            return {
+            counts = {
                 "available": max(0, available),
                 "raw": max(0, available),
                 "pending": 0,
                 "pending_eval": 0,
                 "evaluated_pending": 0,
             }
+        self._update_llm_inventory_state(counts["available"])
+        return counts
+
+    def _update_llm_inventory_state(self, available: int) -> None:
+        """Synchronize refill admission from canonical durable availability."""
+        gate = self.llm_concurrency_gate
+        update = getattr(gate, "update_inventory", None)
+        if callable(update):
+            update(available=max(0, int(available)), target=self.pool_target_count)
 
     @staticmethod
     def _pool_count_payload(counts: dict[str, int]) -> dict[str, int]:
@@ -732,6 +741,7 @@ class ContinuousRefreshController:
             pool_available = self.database.count_pool_candidates(
                 xhs_self_nickname=self._xhs_self_nickname()
             )
+            self._update_llm_inventory_state(pool_available)
             return pool_available >= self.pool_target_count
 
         log_fn = logger.error if result.rolled_back else logger.info
@@ -766,8 +776,10 @@ class ContinuousRefreshController:
             result.reason,
         )
         if result.rolled_back:
+            self._update_llm_inventory_state(result.available_before)
             return result.available_before >= self.pool_target_count
         self._last_pool_maintenance_succeeded = True
+        self._update_llm_inventory_state(result.available_after)
         return result.at_target
 
     def run_startup_maintenance(self) -> None:
@@ -1200,6 +1212,7 @@ class ContinuousRefreshController:
             before_pool_count = int(
                 self.database.count_pool_candidates(xhs_self_nickname=self._xhs_self_nickname())
             )
+            self._update_llm_inventory_state(before_pool_count)
         except Exception:
             before_pool_count = -1
         try:
@@ -1676,6 +1689,7 @@ class ContinuousRefreshController:
         pool_available = self.database.count_pool_candidates(
             xhs_self_nickname=self._xhs_self_nickname()
         )
+        self._update_llm_inventory_state(pool_available)
         pool_below_target = pool_available < self.pool_target_count
 
         if pool_below_target:
@@ -1826,6 +1840,7 @@ class ContinuousRefreshController:
             except TypeError:
                 pool_available = self.database.count_pool_candidates()
             before_pool_count = int(pool_available)
+            self._update_llm_inventory_state(before_pool_count)
             if int(pool_available) >= self.pool_target_count:
                 logger.debug(
                     "candidate eval drain skipped: reason=pool_at_cap "
@@ -2747,6 +2762,7 @@ class ContinuousRefreshController:
             )
         except TypeError:
             current_global_available = self.database.count_pool_candidates()
+        self._update_llm_inventory_state(current_global_available)
         global_available_deficit = max(0, self.pool_target_count - int(current_global_available))
         raw_target = int(raw_target_counts.get(source_family, 0))
         current_raw = self._platform_source_count(source_raw_counts, source_family)

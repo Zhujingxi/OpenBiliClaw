@@ -388,6 +388,19 @@ class RuntimeContext:
         new_module_overrides = module_overrides_from_config(new_config)
         llm_concurrency = _llm_concurrency_from_config(new_config)
         new_llm_gate = self.llm_concurrency_gate or LLMConcurrencyGate(llm_concurrency)
+        count_pool = getattr(self.database, "count_pool_candidates", None)
+        if callable(count_pool):
+            try:
+                state = self.memory_manager.load_discovery_runtime_state()
+                info = state.get("xhs_self_info", {}) if isinstance(state, dict) else {}
+                nickname = str(info.get("nickname", "")) if isinstance(info, dict) else ""
+                available = int(count_pool(xhs_self_nickname=nickname))
+            except (AttributeError, TypeError):
+                available = int(count_pool())
+            new_llm_gate.update_inventory(
+                available=max(0, available),
+                target=int(new_config.scheduler.pool_target_count),
+            )
         new_llm_service = LLMService(
             registry=new_registry,
             memory=self.memory_manager,
@@ -862,6 +875,9 @@ class RuntimeContext:
 
         def _candidate_eval_snapshot() -> CandidateEvalSnapshot:
             readiness = new_runtime_controller._pool_readiness_counts()  # noqa: SLF001
+            new_runtime_controller._update_llm_inventory_state(  # noqa: SLF001
+                int(readiness.get("available", 0))
+            )
             status_counts = self.database.count_discovery_candidates_by_status()
             discovery_backlog = sum(
                 int(status_counts.get(status, 0))

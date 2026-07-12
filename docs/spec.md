@@ -207,9 +207,13 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 ## 3. 系统架构
 
 ```text
-interactive ─────────────────────────┐
-                                    ├─ runtime total gate (default 4) ─ provider
-background ─ background gate (3) ───┘
+interactive ─────────────────────────────────────────┐
+                                                    ├─ runtime total gate (default 4) ─ provider
+background ─ background admission (default 3) ──────┘
+             ├─ refill: expression > evaluation > supply
+             │  └─ while queued: guarantee 2, may borrow all 3
+             └─ maintenance: at most 1 while refill waits;
+                parked when canonical available = 0
 ```
 
 ```

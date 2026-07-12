@@ -615,6 +615,14 @@ class OpenClawAdapter:
             unread_count=self._to_int(runtime_status.get("unread_count", 0)),
             pool_available_count=self._to_int(runtime_status.get("pool_available_count", 0)),
             pool_target_count=self._to_int(runtime_status.get("pool_target_count", 0)),
+            llm_refill_active=self._to_int(runtime_status.get("llm_refill_active", 0)),
+            llm_refill_waiting=self._to_int(runtime_status.get("llm_refill_waiting", 0)),
+            llm_maintenance_active=self._to_int(runtime_status.get("llm_maintenance_active", 0)),
+            llm_maintenance_waiting=self._to_int(runtime_status.get("llm_maintenance_waiting", 0)),
+            llm_refill_priority_active=bool(
+                runtime_status.get("llm_refill_priority_active", False)
+            ),
+            inventory_priority_state=str(runtime_status.get("inventory_priority_state", "healthy")),
             last_discovered_count=self._to_int(runtime_status.get("last_discovered_count", 0)),
             last_refresh_at=str(runtime_status.get("last_refresh_at", "")),
             last_account_sync_at=str(runtime_status.get("last_account_sync_at", "")),

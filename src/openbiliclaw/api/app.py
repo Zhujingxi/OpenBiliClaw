@@ -4339,24 +4339,35 @@ def create_app(
 
     def _pool_available_count() -> int | None:
         """Return the best available servable-pool count for hot-path guards."""
+
+        def _sync_inventory(available: int) -> int:
+            update = getattr(ctx.llm_concurrency_gate, "update_inventory", None)
+            if callable(update):
+                target = getattr(getattr(ctx, "config", None), "scheduler", None)
+                update(
+                    available=available,
+                    target=int(getattr(target, "pool_target_count", 0)),
+                )
+            return available
+
         get_runtime_status = getattr(ctx.runtime_controller, "get_runtime_status", None)
         if callable(get_runtime_status):
             with suppress(Exception):
                 status = get_runtime_status()
                 if isinstance(status, dict) and "pool_available_count" in status:
-                    return max(0, int(status.get("pool_available_count") or 0))
+                    return _sync_inventory(max(0, int(status.get("pool_available_count") or 0)))
 
         readiness = getattr(ctx.database, "count_pool_readiness", None)
         if callable(readiness):
             with suppress(Exception):
                 counts = readiness()
                 if isinstance(counts, dict) and "available" in counts:
-                    return max(0, int(counts.get("available") or 0))
+                    return _sync_inventory(max(0, int(counts.get("available") or 0)))
 
         count_pool = getattr(ctx.database, "count_pool_candidates", None)
         if callable(count_pool):
             with suppress(Exception):
-                return max(0, int(count_pool()))
+                return _sync_inventory(max(0, int(count_pool())))
         return None
 
     def _runtime_pool_status_payload() -> dict[str, object]:
@@ -4409,6 +4420,14 @@ def create_app(
                 raw_value = 0
             with suppress(TypeError, ValueError):
                 payload[field] = max(0, int(cast("Any", raw_value)))
+        available = payload.get("pool_available_count")
+        update_inventory = getattr(ctx.llm_concurrency_gate, "update_inventory", None)
+        if isinstance(available, int) and callable(update_inventory):
+            target = getattr(getattr(ctx, "config", None), "scheduler", None)
+            update_inventory(
+                available=available,
+                target=int(getattr(target, "pool_target_count", 0)),
+            )
         recent_pool_topics = status.get("recent_pool_topics")
         if isinstance(recent_pool_topics, list):
             payload["recent_pool_topics"] = [

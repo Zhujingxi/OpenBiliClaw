@@ -109,6 +109,12 @@ def test_runtime_status_response_serializes_public_runtime_fields() -> None:
         "unread_count": 2,
         "pool_available_count": 18,
         "pool_target_count": 30,
+        "llm_refill_active": 0,
+        "llm_refill_waiting": 0,
+        "llm_maintenance_active": 0,
+        "llm_maintenance_waiting": 0,
+        "llm_refill_priority_active": False,
+        "inventory_priority_state": "healthy",
         "last_discovered_count": 7,
         "last_refresh_at": "2026-03-15T12:00:00+08:00",
         "last_account_sync_at": "2026-03-15T12:05:00+08:00",
@@ -686,6 +692,9 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
         def initialize(self) -> None:
             self.initialized += 1
 
+        def count_pool_candidates(self, *, xhs_self_nickname: str = "") -> int:
+            return 0
+
     class FakeMemoryManager:
         def __init__(self, data_path: str, database=None) -> None:
             self.data_path = data_path
@@ -892,6 +901,10 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     )
     assert services.runtime_controller.kwargs["llm_concurrency_gate"] is (
         services.llm_service.concurrency_gate
+    )
+    assert (
+        services.llm_service.concurrency_gate.status_payload()["inventory_priority_state"]
+        == "empty"
     )
     assert registered_strategies == [
         "FakeStrategy",

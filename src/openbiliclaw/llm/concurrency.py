@@ -116,6 +116,166 @@ class LLMTrafficClass(StrEnum):
     MAINTENANCE = "maintenance"
 
 
+class InventoryPriorityState(StrEnum):
+    """Durable recommendation inventory state used for LLM admission."""
+
+    HEALTHY = "healthy"
+    REFILL = "refill"
+    EMPTY = "empty"
+
+
+class RefillAdmissionSemaphore:
+    """Cancellation-safe, work-conserving admission for background traffic."""
+
+    def __init__(self, capacity: int) -> None:
+        if capacity < 1:
+            raise ValueError("capacity must be >= 1")
+        self._capacity = capacity
+        self._active_total = 0
+        self._active_refill = 0
+        self._active_maintenance = 0
+        self._waiting_refill = 0
+        self._waiting_maintenance = 0
+        self._inventory_state = InventoryPriorityState.HEALTHY
+        self._waiters: list[tuple[int, int, LLMTrafficClass, asyncio.Future[None]]] = []
+        self._counter = itertools.count()
+
+    @property
+    def capacity(self) -> int:
+        return self._capacity
+
+    @property
+    def active(self) -> int:
+        return self._active_total
+
+    @property
+    def waiting(self) -> int:
+        return self._waiting_refill + self._waiting_maintenance
+
+    @property
+    def active_refill(self) -> int:
+        return self._active_refill
+
+    @property
+    def active_maintenance(self) -> int:
+        return self._active_maintenance
+
+    @property
+    def waiting_refill(self) -> int:
+        return self._waiting_refill
+
+    @property
+    def waiting_maintenance(self) -> int:
+        return self._waiting_maintenance
+
+    @property
+    def inventory_state(self) -> InventoryPriorityState:
+        return self._inventory_state
+
+    async def acquire(self, traffic: LLMTrafficClass, priority: int) -> None:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[None] = loop.create_future()
+        heapq.heappush(
+            self._waiters,
+            (priority, next(self._counter), traffic, future),
+        )
+        self._increment_waiting(traffic)
+        self._drain_waiters()
+        try:
+            await asyncio.shield(future)
+        except asyncio.CancelledError:
+            if future.done() and not future.cancelled():
+                self.release(traffic)
+            else:
+                self._remove_waiter(future, traffic)
+                self._drain_waiters()
+            raise
+
+    def release(self, traffic: LLMTrafficClass) -> None:
+        if self._active_total <= 0:
+            raise RuntimeError("RefillAdmissionSemaphore released too many times")
+        self._active_total -= 1
+        if traffic is LLMTrafficClass.MAINTENANCE:
+            if self._active_maintenance <= 0:
+                raise RuntimeError("maintenance admission released too many times")
+            self._active_maintenance -= 1
+        else:
+            if self._active_refill <= 0:
+                raise RuntimeError("refill admission released too many times")
+            self._active_refill -= 1
+        self._drain_waiters()
+
+    def resize(self, capacity: int) -> None:
+        """Change capacity without revoking active holders."""
+        if capacity < 1:
+            raise ValueError("capacity must be >= 1")
+        self._capacity = capacity
+        self._drain_waiters()
+
+    def update_inventory(self, state: InventoryPriorityState) -> None:
+        """Apply a canonical inventory state and reconsider parked waiters."""
+        self._inventory_state = state
+        self._drain_waiters()
+
+    @asynccontextmanager
+    async def slot(self, traffic: LLMTrafficClass, priority: int) -> AsyncIterator[None]:
+        await self.acquire(traffic, priority)
+        try:
+            yield
+        finally:
+            self.release(traffic)
+
+    def _can_admit(self, traffic: LLMTrafficClass) -> bool:
+        if self._active_total >= self.capacity:
+            return False
+        if traffic is not LLMTrafficClass.MAINTENANCE:
+            return True
+        if self._inventory_state is InventoryPriorityState.EMPTY:
+            return False
+        if self._waiting_refill > 0 and self._active_maintenance >= 1:  # noqa: SIM103
+            return False
+        return True
+
+    def _drain_waiters(self) -> None:
+        while self._active_total < self._capacity and self._waiters:
+            admissible = [
+                (priority, sequence, index)
+                for index, (priority, sequence, traffic, future) in enumerate(self._waiters)
+                if not future.done() and self._can_admit(traffic)
+            ]
+            admissible_index = min(admissible)[2] if admissible else None
+            if admissible_index is None:
+                return
+            _, _, traffic, future = self._waiters.pop(admissible_index)
+            heapq.heapify(self._waiters)
+            self._decrement_waiting(traffic)
+            self._active_total += 1
+            if traffic is LLMTrafficClass.MAINTENANCE:
+                self._active_maintenance += 1
+            else:
+                self._active_refill += 1
+            future.set_result(None)
+
+    def _remove_waiter(self, future: asyncio.Future[None], traffic: LLMTrafficClass) -> None:
+        original_length = len(self._waiters)
+        self._waiters = [entry for entry in self._waiters if entry[3] is not future]
+        if len(self._waiters) != original_length:
+            self._decrement_waiting(traffic)
+            heapq.heapify(self._waiters)
+
+    def _increment_waiting(self, traffic: LLMTrafficClass) -> None:
+        if traffic is LLMTrafficClass.MAINTENANCE:
+            self._waiting_maintenance += 1
+        else:
+            self._waiting_refill += 1
+
+    def _decrement_waiting(self, traffic: LLMTrafficClass) -> None:
+        if traffic is LLMTrafficClass.MAINTENANCE:
+            self._waiting_maintenance -= 1
+        else:
+            self._waiting_refill -= 1
+
+
 _INTERACTIVE_CALLERS = {
     "soul.dialogue",
     "soul.dialogue.tools",
@@ -135,6 +295,7 @@ _SUPPLY_PREFIXES = (
     "discovery.douyin.keyword_gen",
     "discovery.keyword_inspiration",
     "discovery.keyword_planner",
+    "discovery.search.queries",
     "discovery.x.keyword_gen",
     "runtime.bilibili_extension_search.queries",
     "sources.xhs.keyword_gen",
@@ -157,8 +318,25 @@ class LLMConcurrencyGate:
         self.total_concurrency = coerce_total_concurrency(total_concurrency)
         self.background_concurrency = background_llm_concurrency(self.total_concurrency)
         self._total = PrioritySemaphore(self.total_concurrency)
-        self._background = PrioritySemaphore(self.background_concurrency)
+        self._background = RefillAdmissionSemaphore(self.background_concurrency)
         self._warned_unknown_callers: set[str] = set()
+
+    @property
+    def inventory_priority_state(self) -> InventoryPriorityState:
+        """Return the current durable inventory classification."""
+        return self._background.inventory_state
+
+    def update_inventory(self, *, available: int, target: int) -> None:
+        """Update refill admission from a canonical durable inventory snapshot."""
+        normalized_available = max(0, int(available))
+        normalized_target = max(0, int(target))
+        if normalized_target <= 0 or normalized_available >= normalized_target:
+            state = InventoryPriorityState.HEALTHY
+        elif normalized_available == 0:
+            state = InventoryPriorityState.EMPTY
+        else:
+            state = InventoryPriorityState.REFILL
+        self._background.update_inventory(state)
 
     def reconfigure(self, total_concurrency: int) -> None:
         """Resize this runtime-owned gate in place for a hot reload."""
@@ -178,7 +356,9 @@ class LLMConcurrencyGate:
         if tag in _EVALUATION_CALLERS:
             return LLMTrafficClass.REFILL_EVALUATION
         if any(tag == prefix or tag.startswith(prefix + ".") for prefix in _SUPPLY_PREFIXES):
-            return LLMTrafficClass.REFILL_SUPPLY
+            if self.inventory_priority_state is not InventoryPriorityState.HEALTHY:
+                return LLMTrafficClass.REFILL_SUPPLY
+            return LLMTrafficClass.MAINTENANCE
         if tag.startswith("sources.") and tag.endswith(".extract"):
             return LLMTrafficClass.MAINTENANCE
         if tag in _MAINTENANCE_CALLERS or any(
@@ -195,9 +375,9 @@ class LLMConcurrencyGate:
         return {
             LLMTrafficClass.INTERACTIVE: 0,
             LLMTrafficClass.REFILL_EXPRESSION: 1,
-            LLMTrafficClass.REFILL_EVALUATION: 1,
-            LLMTrafficClass.REFILL_SUPPLY: 2,
-            LLMTrafficClass.MAINTENANCE: 3,
+            LLMTrafficClass.REFILL_EVALUATION: 2,
+            LLMTrafficClass.REFILL_SUPPLY: 3,
+            LLMTrafficClass.MAINTENANCE: 4,
         }[traffic]
 
     @asynccontextmanager
@@ -206,7 +386,7 @@ class LLMConcurrencyGate:
         priority = self._priority(traffic)
         uses_background = traffic is not LLMTrafficClass.INTERACTIVE and not bypass_background
         if uses_background:
-            async with self._background.slot(priority), self._total.slot(priority):
+            async with self._background.slot(traffic, priority), self._total.slot(priority):
                 yield
             return
         async with self._total.slot(priority):
@@ -220,4 +400,12 @@ class LLMConcurrencyGate:
             "llm_total_waiting": self._total.waiting,
             "llm_background_active": self._background.active,
             "llm_background_waiting": self._background.waiting,
+            "llm_refill_active": self._background.active_refill,
+            "llm_refill_waiting": self._background.waiting_refill,
+            "llm_maintenance_active": self._background.active_maintenance,
+            "llm_maintenance_waiting": self._background.waiting_maintenance,
+            "llm_refill_priority_active": (
+                self.inventory_priority_state is not InventoryPriorityState.HEALTHY
+            ),
+            "inventory_priority_state": self.inventory_priority_state.value,
         }
