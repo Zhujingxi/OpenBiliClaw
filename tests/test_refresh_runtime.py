@@ -1114,6 +1114,45 @@ def test_pool_readiness_snapshot_updates_refill_state_from_canonical_available()
     assert gate.inventory_priority_state is InventoryPriorityState.HEALTHY
 
 
+def test_pool_readiness_preserves_database_admitted_pending_copy(tmp_path: Path) -> None:
+    database = Database(tmp_path / "readiness.db")
+    database.initialize()
+    database.cache_content(
+        "BVPENDINGCOPY",
+        title="classified admitted row",
+        source="search",
+        relevance_score=0.9,
+        style_key="tutorial",
+        topic_group="testing",
+    )
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        pool_target_count=10,
+    )
+
+    assert database.count_pool_readiness()["admitted_pending_copy"] == 1
+    assert controller._pool_readiness_counts()["admitted_pending_copy"] == 1
+    database.close()
+
+
+def test_pool_readiness_fallback_sets_admitted_pending_copy_to_zero() -> None:
+    database = _FakeDatabase([], pool_count=3)
+    database.count_pool_readiness = lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("boom"))  # type: ignore[method-assign]
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+    )
+
+    assert controller._pool_readiness_counts()["admitted_pending_copy"] == 0
+
+
 async def test_refresh_controller_prepares_delight_candidates_without_refresh() -> None:
     recommendations = _FakeRecommendationEngine()
     controller = ContinuousRefreshController(

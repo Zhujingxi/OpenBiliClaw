@@ -313,6 +313,32 @@ async def test_admitted_pending_copy_inventory_stops_new_claims_at_target() -> N
 
 
 @pytest.mark.asyncio
+async def test_existing_pending_copy_at_target_avoids_claim_and_admission() -> None:
+    pipeline = _FakeStagedPipeline(candidate_count=120)
+    pipeline.admitted_pending_copy = 10
+    coordinator = CandidateEvalCoordinator(
+        pipeline=pipeline,
+        snapshot_provider=lambda: CandidateEvalSnapshot(
+            available=0,
+            target=10,
+            pending_eval=pipeline.pending_eval,
+            evaluating=0,
+            evaluated_pending_admission=0,
+            admitted_pending_copy=pipeline.admitted_pending_copy,
+        ),
+        profile_provider=lambda: object(),
+        safety_wake_seconds=0.01,
+    )
+    task = asyncio.create_task(coordinator.run_forever())
+    await asyncio.sleep(0.05)
+
+    assert pipeline.started == []
+    assert pipeline.admit_limits == []
+    await coordinator.stop()
+    await task
+
+
+@pytest.mark.asyncio
 async def test_admits_evaluated_rows_before_projected_target_stop() -> None:
     pipeline = _FakeStagedPipeline(candidate_count=30)
     pipeline.evaluated_pending_admission = 10

@@ -450,6 +450,9 @@ class ContinuousRefreshController:
                 "available": max(0, available),
                 "raw": max(0, int(readiness.get("raw", available))),
                 "pending": max(0, int(readiness.get("pending", 0))),
+                "admitted_pending_copy": max(
+                    0, int(readiness.get("admitted_pending_copy", 0))
+                ),
                 "pending_eval": max(0, int(readiness.get("pending_eval", 0))),
                 "evaluated_pending": max(0, int(readiness.get("evaluated_pending", 0))),
             }
@@ -459,6 +462,7 @@ class ContinuousRefreshController:
                 "available": max(0, available),
                 "raw": max(0, available),
                 "pending": 0,
+                "admitted_pending_copy": 0,
                 "pending_eval": 0,
                 "evaluated_pending": 0,
             }

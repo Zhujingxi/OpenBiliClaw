@@ -329,15 +329,15 @@ def test_api_candidate_snapshot_uses_exact_durable_readiness_and_available_gate(
     config.scheduler.pool_target_count = 10
     ctx = build_runtime_context(config)
     ctx._rebuild_components(config)
-    monkeypatch.setattr(
-        ctx.runtime_controller,
-        "_pool_readiness_counts",
-        lambda: {
-            "available": 2,
-            "pending": 999,
-            "admitted_pending_copy": 4,
-        },
-    )
+    for index in range(4):
+        ctx.database.cache_content(
+            f"BVPENDINGCOPY{index}",
+            title=f"classified admitted row {index}",
+            source="search",
+            relevance_score=0.9,
+            style_key="tutorial",
+            topic_group="testing",
+        )
     monkeypatch.setattr(
         ctx.database,
         "count_discovery_candidates_by_status",
@@ -346,12 +346,12 @@ def test_api_candidate_snapshot_uses_exact_durable_readiness_and_available_gate(
 
     snapshot = ctx.runtime_controller.candidate_eval_coordinator._snapshot()
 
-    assert snapshot.available == 2
+    assert snapshot.available == 0
     assert snapshot.pending_eval == 500
     assert snapshot.evaluating == 60
     assert snapshot.evaluated_pending_admission == 3
     assert snapshot.admitted_pending_copy == 4
-    assert ctx.llm_concurrency_gate.inventory_priority_state is InventoryPriorityState.REFILL
+    assert ctx.llm_concurrency_gate.inventory_priority_state is InventoryPriorityState.EMPTY
 
 
 @pytest.mark.asyncio
