@@ -1,6 +1,6 @@
 # Task 9 end-to-end verification report
 
-Status: **BLOCKED — the strict live-admission gate rejected all eight real candidates**
+Status: **PASS — deterministic and real SenseTime verification complete**
 
 ## Deterministic evidence
 
@@ -108,6 +108,21 @@ Second run after adding phase-only markers and explicit timeouts:
   downstream result, not the initial cause. No raw prompt, title, response, or
   credential was retained.
 
+### Technology-ranking post-compatibility rerun
+
+- After the reviewed structured JSON compatibility fix, the same exact
+  `ranking_rid=188` / explicit-provider command passed at harness head
+  `e3c7e325` in **83.83 seconds**.
+- Sanitized live phases: `fetched=8`, `evaluated=8`, `passing_scores=4`,
+  `parser_unresolved=0`, `admitted=4`, `rejected=4`, `copied=4`, and
+  maintenance `available_before=4 available_after=4`.
+- The live interactive reservation completed: total/background peaks were
+  `4/3`, the fourth interactive slot entered, maximum copy batch was `4`, copy
+  fan-out was `1`, provider rounds were `8`, and transient retry/failure counts
+  were both `0`. The real provider, public anonymous Bilibili source, temporary
+  SQLite/memory state, synthetic profile, and unchanged `0.60` threshold all
+  remained in effect.
+
 ## Guard and focused checks
 
 - Live integration remains opt-in and is skipped when its explicit flag is
@@ -115,15 +130,16 @@ Second run after adding phase-only markers and explicit timeouts:
 - Repository-wide Ruff and MyPy checks pass; current exact affected counts are
   recorded in the review-remediation section below.
 
-## Remaining gates
+## Final gates
 
-The mandatory live provider verification remains failed because this real
-candidate batch did not satisfy strict admission. All deterministic gates were
-subsequently run:
+All Task 9 verification gates now pass:
 
-- Full Python suite: `4255 passed, 36 skipped` in 337.67 seconds. The 2288
+- Full Python suite: `4274 passed, 36 skipped` in 252.05 seconds. The 2288
   warnings are existing FastAPI/websocket deprecation warnings.
-- Ruff: `ruff check src/ tests/` passed.
+- Ruff: `ruff check src/ tests/` passed; the two touched LLM files are already
+  formatted. A full `ruff format --check src/ tests/` still reports ten
+  pre-existing, unrelated files that would be reformatted, so they were not
+  modified by this branch.
 - MyPy: 189 source files checked with no issues.
 - Extension: 711 tests passed; TypeScript typecheck and production build passed.
 - Concurrency/cancellation soak: 50/50 rounds passed; each round ran 96 gate,
