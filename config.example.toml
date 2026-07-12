@@ -123,12 +123,14 @@ reasoning_effort = "max"
 # base_url MUST include the /v1 suffix — OpenBiliClaw uses Ollama's
 # OpenAI-compatible shim (`/v1/chat/completions`) for chat, and the
 # native `/api/embeddings` route is derived by stripping that suffix.
-# A bare "http://localhost:11434" makes the OpenAI SDK call
+# A bare "http://127.0.0.1:11434" makes the OpenAI SDK call
 # `/chat/completions` which Ollama 404s.
+# 用 127.0.0.1 而非 localhost：Ollama 默认只监听 IPv4 (127.0.0.1)，而
+# localhost 在部分系统上先解析到 IPv6 (::1)，会导致连接超时/被拒。
 # 当前 (2026-05) 推荐: qwen2.5:7b (中文好) / llama3.2 (Meta 新版) /
 # gemma2 / mistral / deepseek-r1。``ollama list`` 看本地已拉的模型
 model = "qwen2.5:7b"
-base_url = "http://localhost:11434/v1"
+base_url = "http://127.0.0.1:11434/v1"
 # num_ctx: 上下文窗口大小 (tokens)。0 = 用 Ollama 服务端默认值 (通常 4096),
 # 走 OpenAI 兼容的 /v1 路径。⚠️ /v1 兼容层会"静默丢弃"num_ctx,大批量
 # prompt 一旦超过 4096 就被截断,导致本地小模型 (如 qwen) 输出无法解析的
@@ -521,7 +523,7 @@ multimodal_image_timeout_seconds = 6
 # `openbiliclaw autostart enable` 开启，以便同步注册/反注册 OS 自启动项。
 enabled = false
 # 当 LLM / embedding 使用本机 Ollama 时，后端启动时顺带确保 `ollama serve`
-# 已运行。仅管理本机 localhost:11434，远端 Ollama 不会被拉起。
+# 已运行。仅管理本机 127.0.0.1:11434，远端 Ollama 不会被拉起。
 manage_ollama = true
 
 [storage]

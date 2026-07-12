@@ -1903,7 +1903,7 @@ def create_app(
         model → bge-m3.
         """
         emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
-        base_url = str(getattr(emb, "base_url", "") or "").strip() or "http://localhost:11434/v1"
+        base_url = str(getattr(emb, "base_url", "") or "").strip() or "http://127.0.0.1:11434/v1"
         model = str(getattr(emb, "model", "") or "").strip() or "bge-m3"
         return base_url, model
 

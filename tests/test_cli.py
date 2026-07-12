@@ -4667,7 +4667,7 @@ def test_save_embedding_config_writes_to_toml(
     reloaded, _ = load_config_with_diagnostics()
     assert reloaded.llm.embedding.provider == "ollama"
     assert reloaded.llm.embedding.model == "bge-m3"
-    assert reloaded.llm.embedding.base_url == "http://localhost:11434/v1"
+    assert reloaded.llm.embedding.base_url == "http://127.0.0.1:11434/v1"
 
 
 def test_save_embedding_config_custom_openai_compat(

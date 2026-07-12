@@ -1084,7 +1084,7 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
     "deepseek": {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash"},
     # Ollama: project is Chinese-primary; qwen2.5:7b handles Chinese
     # noticeably better than llama3 at the same size.
-    "ollama": {"base_url": "http://localhost:11434/v1", "model": "qwen2.5:7b"},
+    "ollama": {"base_url": "http://127.0.0.1:11434/v1", "model": "qwen2.5:7b"},
     # OpenRouter: route to OpenAI's cheapest current-gen by default.
     "openrouter": {"base_url": "https://openrouter.ai/api/v1", "model": "openai/gpt-5-nano"},
 }
@@ -1364,7 +1364,7 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
 )
 
 
-def _ollama_has_model(model: str, host: str = "http://localhost:11434") -> bool:
+def _ollama_has_model(model: str, host: str = "http://127.0.0.1:11434") -> bool:
     """Return True if Ollama already has the named model pulled."""
     import httpx
 
@@ -1383,7 +1383,7 @@ def _ollama_has_model(model: str, host: str = "http://localhost:11434") -> bool:
     return False
 
 
-def _ollama_pull_model(model: str, host: str = "http://localhost:11434") -> bool:
+def _ollama_pull_model(model: str, host: str = "http://127.0.0.1:11434") -> bool:
     """Stream a model pull from Ollama; print progress to console."""
     import httpx
 
@@ -1514,7 +1514,7 @@ def _save_embedding_config(
     if base_url:
         config.llm.embedding.base_url = base_url.strip()
     elif provider == "ollama" and not config.llm.embedding.base_url.strip():
-        config.llm.embedding.base_url = "http://localhost:11434/v1"
+        config.llm.embedding.base_url = "http://127.0.0.1:11434/v1"
     if api_key:
         config.llm.embedding.api_key = api_key.strip()
     save_config(config, diagnostics.config_path)

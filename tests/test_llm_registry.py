@@ -443,7 +443,7 @@ def test_ollama_embedding_with_empty_credentials_uses_local_default_without_warn
     assert service is not None
     assert service._provider.name == "ollama"
     assert service._model == "bge-m3"
-    assert service._provider.base_url == "http://localhost:11434/v1"
+    assert service._provider.base_url == "http://127.0.0.1:11434/v1"
     assert "back-compat" not in caplog.text.lower()
 
 
@@ -471,7 +471,7 @@ def test_ollama_embedding_without_base_url_uses_local_default(
 
     assert service is not None
     assert service._provider.name == "ollama"
-    assert service._provider.base_url == "http://localhost:11434/v1"
+    assert service._provider.base_url == "http://127.0.0.1:11434/v1"
     assert "back-compat" not in caplog.text.lower()
 
 

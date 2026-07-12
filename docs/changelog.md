@@ -6,6 +6,7 @@
 
 ## v0.3.164：WebUI 可配置的海外出口代理（issue #89，2026-07-12）
 
+- **本机 Ollama 默认端点改用 `127.0.0.1` 并给出超时根因提示**：chat / embedding provider、CLI `setup-embedding` / 模型探测、`ollama_supervisor` 托管端点、`config.example.toml` 与文档示例的默认 `base_url` 从 `localhost:11434` 统一切到 `127.0.0.1:11434`，与 Ollama 默认只监听 IPv4 的行为对齐，避免 `localhost` 被解析到 IPv6 (`::1`) 时连接超时。`ollama_diagnostics` 遇到 `ConnectTimeout`（区别于连接被拒）时额外提示两条真正根因——系统级 TUN 代理（Clash/V2Ray 增强模式）在网卡层劫持了 `127.0.0.1`（`trust_env=False` 拦不住，需加直连白名单），或 `base_url` 仍用 `localhost` 触发 IPv6 解析；该提示会透传进「自动修复已达到上限」文案，让单独安装 Ollama 的用户不再被误导为「服务没启动」。
 - **新增 `[network].proxy` 海外出口代理**：一个字段即可让所有海外请求走代理——OpenAI / Claude / Gemini / DeepSeek / OpenRouter / openai_compatible 的 chat + embedding SDK、YouTube（yt-dlp）、GitHub 自动更新、Codex OAuth 令牌刷新。支持 `http` / `https` / `socks5` / `socks5h`，零新依赖（复用已有 `httpx[socks]`）。留空时行为与当前一致（沿用进程 env，Docker 代理探测不受影响）。
 - **国内直连严格隔离**：B站 / 抖音 / Ollama / 国内 CDN 图片缓存等 `trust_env=False` 客户端永不使用该代理（继承代理曾触发 B站 风控，`df626f3f`），并由 `tests/test_network_proxy_isolation.py` 守卫测试钉死「未来不得接入 CN 客户端」。
 - **保存时拒绝非法值 + 桌面 UI + 连通性探测**：协议 / 主机白名单校验，非法值经 `PUT /api/config` 返回 400 且不落盘，`config.toml` 手改非法值加载时 WARNING 并按空值处理；桌面 Web「设置-通用」与扩展 popup「后端设置-通用」新增输入框和「测试代理」按钮（`probe-service kind=network_proxy`，经待测代理请求 204 端点并区分 `proxy_unreachable` / `proxy_rejected` / `timeout`）。GET 响应对代理 URL 中的账号密码做遮蔽。四端契约：桌面 Web + 扩展 popup 提供设置；CLI 用 `config-show`；移动 Web 无设置页。
