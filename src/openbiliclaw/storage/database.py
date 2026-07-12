@@ -17,7 +17,8 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
+from uuid import UUID
 
 from openbiliclaw.discovery.admission import (
     DEFAULT_ADMISSION_MIN_SCORE,
@@ -45,6 +46,8 @@ from openbiliclaw.saved_sync.models import (
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from openbiliclaw.saved_sync.extension_broker import ExtensionNativeSaveJob
+
 logger = logging.getLogger(__name__)
 # v0.3.62+: retry budget tightened from 5×100ms (worst-case 500ms
 # blocking the asyncio event loop on lock contention) to 8×20ms
@@ -62,6 +65,30 @@ _LOCK_RETRY_ATTEMPTS = 8
 _LOCK_RETRY_SLEEP_SECONDS = 0.02
 _NATIVE_INTERNAL_RUNNER_PREFIX = "__openbiliclaw_"
 _LEGACY_NATIVE_SAVE_RUNNER_ID = f"{_NATIVE_INTERNAL_RUNNER_PREFIX}legacy_runner__"
+_EXTENSION_NATIVE_SAVE_PLATFORM_SLUGS = {
+    "youtube": "yt",
+    "xiaohongshu": "xhs",
+    "douyin": "dy",
+    "twitter": "x",
+    "zhihu": "zhihu",
+    "reddit": "reddit",
+}
+_EXTENSION_NATIVE_SAVE_HOSTS = {
+    "youtube": ("youtube.com", "youtu.be"),
+    "xiaohongshu": ("xiaohongshu.com",),
+    "douyin": ("douyin.com", "iesdouyin.com"),
+    "twitter": ("x.com", "twitter.com"),
+    "zhihu": ("zhihu.com",),
+    "reddit": ("reddit.com", "redd.it"),
+}
+_EXTENSION_NATIVE_SAVE_IDENTITY_QUERY_FIELDS = {"youtube": frozenset({"v"})}
+_EXTENSION_NATIVE_SAVE_ACTIONS = frozenset({"favorite", "watch_later"})
+_EXTENSION_NATIVE_SAVE_RESULT_STATUSES = frozenset(
+    {"synced", "already_synced", "login_required", "rate_limited", "unsupported", "failed"}
+)
+_EXTENSION_NATIVE_SAVE_SLUGS = frozenset(_EXTENSION_NATIVE_SAVE_PLATFORM_SLUGS.values())
+_EXTENSION_NATIVE_SAVE_CODE_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,127}\Z")
+_CONTROL_CHARACTER_RE = re.compile(r"[\x00-\x1f\x7f]")
 _BVID_PATTERN = re.compile(r"(BV[0-9A-Za-z]+)")
 _LOCAL_EVIDENCE_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 _VIEW_CONTENT_ID_METADATA_KEYS = (
@@ -804,6 +831,122 @@ def _xhs_self_author_guard_params(xhs_self_nickname: str | None) -> tuple[str, s
     """Return the 3 bind values for ``_xhs_self_author_guard_sql``."""
     nickname = str(xhs_self_nickname or "").strip()
     return (nickname, nickname, nickname)
+
+
+def _validated_extension_native_save_uuid(value: object, field_name: str) -> str:
+    raw_text = str(value or "")
+    if _CONTROL_CHARACTER_RE.search(raw_text):
+        raise ValueError(f"{field_name} must not contain control characters")
+    text = raw_text.strip()
+    try:
+        parsed = UUID(text)
+    except (ValueError, AttributeError) as exc:
+        raise ValueError(f"{field_name} must be a UUID") from exc
+    if str(parsed) != text.lower():
+        raise ValueError(f"{field_name} must be a canonical UUID")
+    return text.lower()
+
+
+def _validated_extension_native_save_text(
+    value: object,
+    field_name: str,
+    *,
+    max_length: int,
+    allow_blank: bool = False,
+) -> str:
+    raw_text = str(value or "")
+    if _CONTROL_CHARACTER_RE.search(raw_text):
+        raise ValueError(f"{field_name} must not contain control characters")
+    text = raw_text.strip()
+    if not text and not allow_blank:
+        raise ValueError(f"{field_name} must not be blank")
+    if len(text) > max_length:
+        raise ValueError(f"{field_name} must be at most {max_length} characters")
+    return text
+
+
+def _canonical_extension_native_save_url(platform: str, value: object) -> str:
+    raw_url = _validated_extension_native_save_text(value, "content_url", max_length=2048)
+    parts = urlsplit(raw_url)
+    hostname = (parts.hostname or "").lower().rstrip(".")
+    allowed_hosts = _EXTENSION_NATIVE_SAVE_HOSTS[platform]
+    if (
+        parts.scheme.lower() != "https"
+        or not hostname
+        or parts.username is not None
+        or parts.password is not None
+        or not any(hostname == host or hostname.endswith(f".{host}") for host in allowed_hosts)
+    ):
+        raise ValueError("content_url must use an allow-listed platform HTTPS host")
+    retained_fields = _EXTENSION_NATIVE_SAVE_IDENTITY_QUERY_FIELDS.get(platform, frozenset())
+    query = urlencode(
+        [(key, item) for key, item in parse_qsl(parts.query) if key in retained_fields]
+    )
+    return urlunsplit(("https", parts.netloc.lower(), parts.path or "/", query, ""))
+
+
+def _validated_extension_native_save_job(
+    job: ExtensionNativeSaveJob,
+) -> dict[str, str]:
+    job_id = _validated_extension_native_save_uuid(job.job_id, "job_id")
+    platform = canonical_source_platform(job.platform)
+    if platform != job.platform or platform not in _EXTENSION_NATIVE_SAVE_PLATFORM_SLUGS:
+        raise ValueError("platform must be a supported canonical platform")
+    platform_slug = _validated_extension_native_save_text(
+        job.platform_slug, "platform_slug", max_length=16
+    ).lower()
+    if platform_slug != _EXTENSION_NATIVE_SAVE_PLATFORM_SLUGS[platform]:
+        raise ValueError("platform_slug does not match platform")
+    content_id = _validated_extension_native_save_text(job.content_id, "content_id", max_length=512)
+    content_url = _canonical_extension_native_save_url(platform, job.content_url)
+    item_key = _validated_extension_native_save_text(job.item_key, "item_key", max_length=768)
+    if item_key != make_item_key(platform, content_id, content_url):
+        raise ValueError("item_key does not match the canonical platform identity")
+    content_type = _validated_extension_native_save_text(
+        job.content_type, "content_type", max_length=128
+    )
+    requested_action = _validated_extension_native_save_text(
+        job.requested_action, "requested_action", max_length=32
+    )
+    resolved_action = _validated_extension_native_save_text(
+        job.resolved_action, "resolved_action", max_length=32
+    )
+    if requested_action not in _EXTENSION_NATIVE_SAVE_ACTIONS:
+        raise ValueError("requested_action is invalid")
+    if resolved_action not in _EXTENSION_NATIVE_SAVE_ACTIONS:
+        raise ValueError("resolved_action is invalid")
+    target_label = _validated_extension_native_save_text(
+        job.target_label, "target_label", max_length=256
+    )
+    return {
+        "job_id": job_id,
+        "platform": platform,
+        "platform_slug": platform_slug,
+        "item_key": item_key,
+        "content_id": content_id,
+        "content_url": content_url,
+        "content_type": content_type,
+        "requested_action": requested_action,
+        "resolved_action": resolved_action,
+        "target_label": target_label,
+    }
+
+
+def _validated_extension_native_save_result(
+    status: object, error_code: object, error_message: object
+) -> tuple[str, str, str]:
+    safe_status = _validated_extension_native_save_text(status, "status", max_length=32)
+    if safe_status not in _EXTENSION_NATIVE_SAVE_RESULT_STATUSES:
+        raise ValueError("status is invalid")
+    safe_code = _validated_extension_native_save_text(
+        error_code, "error_code", max_length=128, allow_blank=True
+    )
+    if safe_code and _EXTENSION_NATIVE_SAVE_CODE_RE.fullmatch(safe_code) is None:
+        raise ValueError("error_code contains unsupported characters")
+    safe_message = _validated_extension_native_save_text(
+        error_message, "error_message", max_length=512, allow_blank=True
+    )
+    return safe_status, safe_code, safe_message
 
 
 def _normalize_admission_min_score(value: object) -> float:
@@ -7506,6 +7649,37 @@ class Database:
             );
             CREATE INDEX IF NOT EXISTS idx_native_save_task_items_order
                 ON native_save_task_items(task_id, ordinal, item_key);
+            CREATE TABLE IF NOT EXISTS extension_native_save_jobs (
+                job_id             TEXT PRIMARY KEY,
+                platform           TEXT NOT NULL,
+                platform_slug      TEXT NOT NULL,
+                item_key           TEXT NOT NULL,
+                content_id         TEXT NOT NULL,
+                content_url        TEXT NOT NULL,
+                content_type       TEXT NOT NULL,
+                requested_action   TEXT NOT NULL
+                    CHECK(requested_action IN ('favorite', 'watch_later')),
+                resolved_action    TEXT NOT NULL
+                    CHECK(resolved_action IN ('favorite', 'watch_later')),
+                target_label       TEXT NOT NULL,
+                status             TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN (
+                        'pending', 'in_progress', 'synced', 'already_synced',
+                        'login_required', 'rate_limited', 'unsupported', 'failed',
+                        'extension_required', 'cancelled'
+                    )),
+                claimed_at         TIMESTAMP,
+                completed_at       TIMESTAMP,
+                last_error_code    TEXT NOT NULL DEFAULT '',
+                last_error_message TEXT NOT NULL DEFAULT '',
+                created_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_extension_native_save_jobs_claim
+                ON extension_native_save_jobs(platform_slug, status, created_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_extension_native_save_jobs_active_item
+                ON extension_native_save_jobs(platform, item_key, requested_action)
+                WHERE status IN ('pending', 'in_progress');
             CREATE TABLE IF NOT EXISTS saved_sync_migrations (
                 name       TEXT PRIMARY KEY,
                 applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -7617,6 +7791,207 @@ class Database:
         except Exception:
             self.conn.rollback()
             raise
+
+    def create_or_reuse_extension_native_save_job(
+        self, job: ExtensionNativeSaveJob
+    ) -> dict[str, Any]:
+        """Atomically persist or reuse one active extension native-save job."""
+        payload = _validated_extension_native_save_job(job)
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            active = self.conn.execute(
+                """
+                SELECT * FROM extension_native_save_jobs
+                WHERE platform = ? AND item_key = ? AND requested_action = ?
+                  AND status IN ('pending', 'in_progress')
+                """,
+                (
+                    payload["platform"],
+                    payload["item_key"],
+                    payload["requested_action"],
+                ),
+            ).fetchone()
+            if active is None:
+                self.conn.execute(
+                    """
+                    INSERT INTO extension_native_save_jobs (
+                        job_id, platform, platform_slug, item_key, content_id,
+                        content_url, content_type, requested_action, resolved_action,
+                        target_label
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        payload["job_id"],
+                        payload["platform"],
+                        payload["platform_slug"],
+                        payload["item_key"],
+                        payload["content_id"],
+                        payload["content_url"],
+                        payload["content_type"],
+                        payload["requested_action"],
+                        payload["resolved_action"],
+                        payload["target_label"],
+                    ),
+                )
+                active = self.conn.execute(
+                    "SELECT * FROM extension_native_save_jobs WHERE job_id = ?",
+                    (payload["job_id"],),
+                ).fetchone()
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        if active is None:
+            raise RuntimeError("extension native-save job insert did not persist")
+        return dict(active)
+
+    def claim_extension_native_save_job(
+        self, platform_slug: str, lease_seconds: float
+    ) -> dict[str, Any] | None:
+        """Claim the oldest pending platform job after expiring uncertain stale claims."""
+        slug = self._validated_extension_native_save_slug(platform_slug)
+        lease = self._validated_extension_native_save_lease(lease_seconds)
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._expire_stale_extension_native_save_jobs_in_transaction(slug, lease)
+            pending = self.conn.execute(
+                """
+                SELECT job_id FROM extension_native_save_jobs
+                WHERE platform_slug = ? AND status = 'pending'
+                ORDER BY created_at, job_id
+                LIMIT 1
+                """,
+                (slug,),
+            ).fetchone()
+            claimed = None
+            if pending is not None:
+                job_id = str(pending["job_id"])
+                cursor = self.conn.execute(
+                    """
+                    UPDATE extension_native_save_jobs
+                    SET status = 'in_progress',
+                        claimed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
+                        updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                    WHERE job_id = ? AND status = 'pending'
+                    """,
+                    (job_id,),
+                )
+                if cursor.rowcount == 1:
+                    claimed = self.conn.execute(
+                        "SELECT * FROM extension_native_save_jobs WHERE job_id = ?",
+                        (job_id,),
+                    ).fetchone()
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return dict(claimed) if claimed is not None else None
+
+    def complete_extension_native_save_job(
+        self,
+        job_id: str,
+        item_key: str,
+        status: str,
+        error_code: str,
+        error_message: str,
+    ) -> bool:
+        """Complete one claimed job when both its UUID and item identity match."""
+        safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
+        safe_item_key = _validated_extension_native_save_text(item_key, "item_key", max_length=768)
+        safe_status, safe_code, safe_message = _validated_extension_native_save_result(
+            status, error_code, error_message
+        )
+        cursor = self.conn.execute(
+            """
+            UPDATE extension_native_save_jobs
+            SET status = ?, last_error_code = ?, last_error_message = ?,
+                completed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
+                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+            WHERE job_id = ? AND item_key = ? AND status = 'in_progress'
+            """,
+            (safe_status, safe_code, safe_message, safe_job_id, safe_item_key),
+        )
+        self.conn.commit()
+        return cursor.rowcount == 1
+
+    def cancel_unclaimed_extension_native_save_job(self, job_id: str) -> bool:
+        """Cancel a pending job without touching a possibly state-changing claimed job."""
+        safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
+        cursor = self.conn.execute(
+            """
+            UPDATE extension_native_save_jobs
+            SET status = 'cancelled',
+                completed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
+                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+            WHERE job_id = ? AND status = 'pending'
+            """,
+            (safe_job_id,),
+        )
+        self.conn.commit()
+        return cursor.rowcount == 1
+
+    def get_extension_native_save_job(self, job_id: str) -> dict[str, Any] | None:
+        """Return a copied durable extension job row by canonical UUID."""
+        safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
+        row = self.conn.execute(
+            "SELECT * FROM extension_native_save_jobs WHERE job_id = ?", (safe_job_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def expire_stale_extension_native_save_jobs(
+        self, platform_slug: str, lease_seconds: float
+    ) -> int:
+        """Fail stale claimed writes without returning them to the pending queue."""
+        slug = self._validated_extension_native_save_slug(platform_slug)
+        lease = self._validated_extension_native_save_lease(lease_seconds)
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            count = self._expire_stale_extension_native_save_jobs_in_transaction(slug, lease)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return count
+
+    def _expire_stale_extension_native_save_jobs_in_transaction(
+        self, platform_slug: str, lease_seconds: float
+    ) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE extension_native_save_jobs
+            SET status = 'failed',
+                last_error_code = 'extension_task_timeout',
+                last_error_message = 'Extension native-save task timed out',
+                completed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
+                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+            WHERE platform_slug = ? AND status = 'in_progress'
+              AND claimed_at IS NOT NULL
+              AND (JULIANDAY('now') - JULIANDAY(claimed_at)) * 86400.0 >= ?
+            """,
+            (platform_slug, lease_seconds),
+        )
+        return cursor.rowcount
+
+    @staticmethod
+    def _validated_extension_native_save_slug(platform_slug: object) -> str:
+        slug = _validated_extension_native_save_text(
+            platform_slug, "platform_slug", max_length=16
+        ).lower()
+        if slug not in _EXTENSION_NATIVE_SAVE_SLUGS:
+            raise ValueError("platform_slug is invalid")
+        return slug
+
+    @staticmethod
+    def _validated_extension_native_save_lease(lease_seconds: object) -> float:
+        if isinstance(lease_seconds, bool):
+            raise ValueError("lease_seconds must be a positive finite number")
+        try:
+            lease = float(lease_seconds)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("lease_seconds must be a positive finite number") from exc
+        if not math.isfinite(lease) or lease <= 0:
+            raise ValueError("lease_seconds must be a positive finite number")
+        return lease
 
     def _migrate_legacy_saved_list(self, table_name: str, list_kind: SavedListKind) -> None:
         """Copy one trusted legacy saved table into normalized storage."""
