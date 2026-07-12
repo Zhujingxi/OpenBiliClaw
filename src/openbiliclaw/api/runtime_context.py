@@ -388,6 +388,7 @@ class RuntimeContext:
         new_module_overrides = module_overrides_from_config(new_config)
         llm_concurrency = _llm_concurrency_from_config(new_config)
         new_llm_gate = self.llm_concurrency_gate or LLMConcurrencyGate(llm_concurrency)
+        new_inventory_available: int | None = None
         count_pool = getattr(self.database, "count_pool_candidates", None)
         if callable(count_pool):
             try:
@@ -397,10 +398,7 @@ class RuntimeContext:
                 available = int(count_pool(xhs_self_nickname=nickname))
             except (AttributeError, TypeError):
                 available = int(count_pool())
-            new_llm_gate.update_inventory(
-                available=max(0, available),
-                target=int(new_config.scheduler.pool_target_count),
-            )
+            new_inventory_available = max(0, available)
         new_llm_service = LLMService(
             registry=new_registry,
             memory=self.memory_manager,
@@ -933,6 +931,13 @@ class RuntimeContext:
         new_candidate_pipeline.on_candidates_enqueued = lambda _count: (
             new_candidate_eval_coordinator.notify("candidate_enqueued:pipeline")
         )
+        set_pool_commit_callback = getattr(
+            new_recommendation_engine,
+            "set_pool_inventory_commit_callback",
+            None,
+        )
+        if callable(set_pool_commit_callback):
+            set_pool_commit_callback(new_runtime_controller._pool_readiness_counts)  # noqa: SLF001
 
         # 9. Account sync
         new_account_sync = AccountSyncService(
@@ -994,6 +999,11 @@ class RuntimeContext:
         self.runtime_controller = new_runtime_controller
         self.account_sync_service = new_account_sync
         self.auto_update_service = new_auto_update
+        if new_inventory_available is not None:
+            new_llm_gate.update_inventory(
+                available=new_inventory_available,
+                target=int(new_config.scheduler.pool_target_count),
+            )
         # Drop the cached init prerequisite probes (chat/bilibili) — config or
         # cookie just changed, so the next /api/init pre-flight must re-probe
         # against the new provider/cookie instead of a stale TTL value (gui-init

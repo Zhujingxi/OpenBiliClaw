@@ -186,6 +186,136 @@ def test_injected_compatibility_doubles_receive_fresh_shared_gate(monkeypatch, t
     assert soul._llm_concurrency_gate is gate
 
 
+def test_injected_runtime_initializes_inventory_from_database_and_controller_target(
+    monkeypatch, tmp_path
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from openbiliclaw.config import Config
+    from openbiliclaw.llm.concurrency import InventoryPriorityState, LLMConcurrencyGate
+
+    config = Config(data_dir=str(tmp_path))
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
+
+    class EmptyDatabase:
+        def count_pool_candidates(self, *, xhs_self_nickname: str = "") -> int:
+            return 0
+
+    gate = LLMConcurrencyGate(4)
+    controller = SimpleNamespace(
+        llm_concurrency_gate=gate,
+        pool_target_count=30,
+        event_hub=None,
+    )
+    app = create_app(
+        memory_manager=SimpleNamespace(load_discovery_runtime_state=lambda: {}),
+        database=EmptyDatabase(),
+        soul_engine=_injected_soul_engine(gate),
+        runtime_controller=controller,
+        recommendation_engine=SimpleNamespace(),
+    )
+
+    assert gate.inventory_priority_state is InventoryPriorityState.EMPTY
+    response = TestClient(app).post("/api/recommendations/append", json={"excluded_bvids": []})
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
+    assert gate.inventory_priority_state is InventoryPriorityState.EMPTY
+
+
+def test_injected_inventory_sync_keeps_compatibility_double_without_target_healthy(
+    monkeypatch, tmp_path
+) -> None:
+    from openbiliclaw.config import Config
+    from openbiliclaw.llm.concurrency import InventoryPriorityState
+
+    config = Config(data_dir=str(tmp_path))
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
+    app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=SimpleNamespace(),
+        runtime_controller=SimpleNamespace(event_hub=None),
+    )
+
+    assert (
+        app.state.runtime_context.llm_concurrency_gate.inventory_priority_state
+        is InventoryPriorityState.HEALTHY
+    )
+
+
+def test_failed_late_hot_reload_does_not_mutate_stable_gate_inventory(
+    monkeypatch, tmp_path
+) -> None:
+    from openbiliclaw.api.runtime_context import build_runtime_context
+    from openbiliclaw.config import Config
+    from openbiliclaw.llm.concurrency import InventoryPriorityState
+
+    current = Config(data_dir=str(tmp_path / "data"))
+    current.llm.default_provider = "ollama"
+    current.llm.ollama.model = "llama3"
+    current.scheduler.pool_target_count = 10
+    ctx = build_runtime_context(current)
+    gate = ctx.llm_concurrency_gate
+    gate.update_inventory(available=10, target=10)
+    update_calls: list[tuple[int, int]] = []
+    real_update = gate.update_inventory
+
+    def record_update(*, available: int, target: int) -> None:
+        update_calls.append((available, target))
+        real_update(available=available, target=target)
+
+    monkeypatch.setattr(gate, "update_inventory", record_update)
+
+    class LateFailure:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            raise RuntimeError("late dialogue construction failed")
+
+    monkeypatch.setattr("openbiliclaw.soul.dialogue.SocraticDialogue", LateFailure)
+    proposed = Config(data_dir=str(tmp_path / "data"))
+    proposed.llm.default_provider = "ollama"
+    proposed.llm.ollama.model = "llama3"
+    proposed.scheduler.pool_target_count = 30
+
+    with pytest.raises(RuntimeError, match="late dialogue"):
+        ctx._rebuild_components(proposed)
+
+    assert update_calls == []
+    assert gate.inventory_priority_state is InventoryPriorityState.HEALTHY
+    assert ctx.config is current
+
+
+def test_successful_hot_reload_commits_new_inventory_target(monkeypatch, tmp_path) -> None:
+    from openbiliclaw.api.runtime_context import build_runtime_context
+    from openbiliclaw.config import Config
+    from openbiliclaw.llm.concurrency import InventoryPriorityState
+
+    current = Config(data_dir=str(tmp_path / "data"))
+    current.llm.default_provider = "ollama"
+    current.llm.ollama.model = "llama3"
+    current.scheduler.pool_target_count = 10
+    ctx = build_runtime_context(current)
+    gate = ctx.llm_concurrency_gate
+    monkeypatch.setattr(ctx.database, "count_pool_candidates", lambda **_kwargs: 10)
+    update_calls: list[tuple[int, int]] = []
+    real_update = gate.update_inventory
+
+    def record_update(*, available: int, target: int) -> None:
+        update_calls.append((available, target))
+        real_update(available=available, target=target)
+
+    monkeypatch.setattr(gate, "update_inventory", record_update)
+    proposed = Config(data_dir=str(tmp_path / "data"))
+    proposed.llm.default_provider = "ollama"
+    proposed.llm.ollama.model = "llama3"
+    proposed.scheduler.pool_target_count = 30
+
+    ctx._rebuild_components(proposed)
+
+    assert update_calls[-1] == (10, 30)
+    assert gate.inventory_priority_state is InventoryPriorityState.REFILL
+    assert ctx.config is proposed
+
+
 def test_injected_runtime_adopts_real_dialogue_gate_and_injects_gate_less_service(
     monkeypatch, tmp_path
 ) -> None:

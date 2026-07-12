@@ -329,6 +329,13 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
     candidate_pipeline.on_candidates_enqueued = lambda _count: candidate_eval_coordinator.notify(
         "candidate_enqueued:pipeline"
     )
+    set_pool_commit_callback = getattr(
+        recommendation_engine,
+        "set_pool_inventory_commit_callback",
+        None,
+    )
+    if callable(set_pool_commit_callback):
+        set_pool_commit_callback(runtime_controller._pool_readiness_counts)  # noqa: SLF001
     runtime_controller.run_startup_maintenance()
     account_sync_service = AccountSyncService(
         memory_manager=memory_manager,

@@ -7,6 +7,7 @@ to the user in a warm, friend-like manner with deep personal insights.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import re
@@ -180,6 +181,7 @@ class RecommendationEngine:
         embedding_service: SupportsEmbeddingService | None = None,
         task_registry: BackgroundTaskRegistry | None = None,
         xhs_self_info_provider: Callable[[], dict[str, object] | None] | None = None,
+        pool_inventory_commit_callback: Callable[[], object] | None = None,
         expression_batch_concurrency: int = _DEFAULT_EXPRESSION_BATCH_CONCURRENCY,
     ) -> None:
         self._llm = llm
@@ -187,6 +189,7 @@ class RecommendationEngine:
         self._curator = curator
         self._embedding_service = embedding_service
         self._xhs_self_info_provider = xhs_self_info_provider
+        self._pool_inventory_commit_callback = pool_inventory_commit_callback
         self._expression_batch_concurrency = max(1, min(16, int(expression_batch_concurrency)))
         # v0.3.63+: optional registry for detached fire-and-forget tasks
         # (classify_pool_backlog_detached, precompute_delight_scores_detached).
@@ -496,17 +499,34 @@ class RecommendationEngine:
             # serve() is normally invoked from an event loop; only the
             # rare sync-test path falls through here.
             self._database.mark_pool_items_shown(ranked_bvids)
+            await self._notify_pool_inventory_commit()
         return recommendations
 
     async def _mark_pool_shown_async(self, bvids: list[str]) -> None:
         """Fire-and-forget pool-marking helper. Never raises."""
         try:
             self._database.mark_pool_items_shown(bvids)
+            await self._notify_pool_inventory_commit()
         except Exception:
             logger.exception(
                 "mark_pool_items_shown (detached) failed for %d bvids",
                 len(bvids),
             )
+
+    def set_pool_inventory_commit_callback(self, callback: Callable[[], object] | None) -> None:
+        """Set the hook run only after the shown-state write commits."""
+        self._pool_inventory_commit_callback = callback
+
+    async def _notify_pool_inventory_commit(self) -> None:
+        callback = self._pool_inventory_commit_callback
+        if callback is None:
+            return
+        try:
+            result = callback()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.exception("pool inventory commit callback failed")
 
     # Hybrid rule for online supergroup merging:
     #   - Strict embedding alone: sim >= 0.90 (catches 自走棋↔金铲铲之战

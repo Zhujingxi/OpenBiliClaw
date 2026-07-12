@@ -526,6 +526,67 @@ async def test_get_profile_returns_trimmed_profile_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_openclaw_recommend_updates_gate_after_durable_pool_commit(tmp_path: Path) -> None:
+    from openbiliclaw.llm.concurrency import InventoryPriorityState, LLMConcurrencyGate
+    from openbiliclaw.recommendation.engine import RecommendationEngine
+    from openbiliclaw.storage.database import Database
+
+    database = Database(tmp_path / "openclaw-recommend.db")
+    database.initialize()
+    database.cache_content(
+        "BV1OPENCLAW",
+        title="OpenClaw durable recommendation",
+        up_name="UP",
+        source="search",
+        relevance_score=0.95,
+        pool_expression="durable expression",
+        pool_topic_label="durable topic",
+        style_key="tutorial",
+        topic_group="durable",
+    )
+    gate = LLMConcurrencyGate(4)
+    gate.update_inventory(available=1, target=1)
+
+    class PrecomputedRecommendationEngine(RecommendationEngine):
+        async def generate_recommendations(
+            self,
+            discovered: list[DiscoveredContent] | None,
+            profile: SoulProfile,
+            limit: int = 10,
+        ) -> list[Recommendation]:
+            return await self.serve(profile, limit=limit, expression_mode="precomputed")
+
+    class Controller:
+        pool_target_count = 1
+
+        def _pool_readiness_counts(self) -> dict[str, int]:
+            available = database.count_pool_candidates()
+            gate.update_inventory(available=available, target=self.pool_target_count)
+            return {"available": available}
+
+    controller = Controller()
+    engine = PrecomputedRecommendationEngine(llm=object(), database=database)  # type: ignore[arg-type]
+    engine.set_pool_inventory_commit_callback(controller._pool_readiness_counts)
+    services = SimpleNamespace(
+        soul_engine=_FakeSoulEngine(),
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        runtime_controller=controller,
+        account_sync_service=_FakeAccountSyncService(),
+        recommendation_engine=engine,
+        llm_service=_FakeLLMService(),
+    )
+
+    result = await OpenClawAdapter(services=services).recommend(limit=1)
+    assert len(result.items) == 1
+    async with asyncio.timeout(1):
+        while gate.inventory_priority_state is not InventoryPriorityState.EMPTY:
+            await asyncio.sleep(0)
+    assert database.count_pool_candidates() == 0
+    database.close()
+
+
+@pytest.mark.asyncio
 async def test_get_runtime_status_merges_refresh_and_account_sync_status() -> None:
     adapter, *_ = _build_adapter()
 
@@ -687,13 +748,14 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
         def __init__(self, path: str) -> None:
             self.path = path
             self.initialized = 0
+            self.pool_count = 30
             created_databases.append(self)
 
         def initialize(self) -> None:
             self.initialized += 1
 
         def count_pool_candidates(self, *, xhs_self_nickname: str = "") -> int:
-            return 0
+            return self.pool_count
 
     class FakeMemoryManager:
         def __init__(self, data_path: str, database=None) -> None:
@@ -741,6 +803,10 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
         ) -> None:
             self.llm = llm
             self.database = database
+            self.pool_inventory_commit_callback = None
+
+        def set_pool_inventory_commit_callback(self, callback) -> None:
+            self.pool_inventory_commit_callback = callback
 
     class FakeBilibiliClient:
         def __init__(self, *, cookie: str, proxy: str | None = None) -> None:
@@ -776,6 +842,14 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
 
         def run_startup_maintenance(self) -> None:
             startup_events.append("maintenance")
+
+        def _pool_readiness_counts(self) -> dict[str, int]:
+            available = created_databases[0].pool_count
+            self.kwargs["llm_concurrency_gate"].update_inventory(
+                available=available,
+                target=self.kwargs["pool_target_count"],
+            )
+            return {"available": available}
 
     class FakeCandidatePipeline:
         def __init__(self, **kwargs) -> None:
@@ -902,6 +976,12 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     assert services.runtime_controller.kwargs["llm_concurrency_gate"] is (
         services.llm_service.concurrency_gate
     )
+    assert services.llm_service.concurrency_gate.status_payload()["inventory_priority_state"] == (
+        "healthy"
+    )
+    assert services.recommendation_engine.pool_inventory_commit_callback is not None
+    created_databases[0].pool_count = 0
+    services.recommendation_engine.pool_inventory_commit_callback()
     assert (
         services.llm_service.concurrency_gate.status_payload()["inventory_priority_state"]
         == "empty"

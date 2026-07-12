@@ -3612,6 +3612,119 @@ async def test_reshuffle_exclusions_refill_beyond_the_old_candidate_window() -> 
 
 
 @pytest.mark.asyncio
+async def test_serve_notifies_inventory_only_after_detached_shown_commit() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(db, "BV1COMMIT", title="durable", relevance_score=0.95)
+        committed = asyncio.Event()
+        observed_counts: list[int] = []
+
+        async def on_commit() -> None:
+            observed_counts.append(db.count_pool_candidates())
+            committed.set()
+
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            pool_inventory_commit_callback=on_commit,
+        )
+
+        recommendations = await engine.serve(_build_profile(), limit=1)
+        assert len(recommendations) == 1
+        await asyncio.wait_for(committed.wait(), timeout=1)
+        assert observed_counts == [0]
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_serve_does_not_notify_inventory_when_detached_shown_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(db, "BV1FAIL", title="failure", relevance_score=0.95)
+        callback_calls = 0
+
+        def on_commit() -> None:
+            nonlocal callback_calls
+            callback_calls += 1
+
+        def fail_mark(_bvids: list[str]) -> None:
+            raise RuntimeError("write failed")
+
+        monkeypatch.setattr(db, "mark_pool_items_shown", fail_mark)
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            pool_inventory_commit_callback=on_commit,
+        )
+
+        await engine.serve(_build_profile(), limit=1)
+        await asyncio.sleep(0)
+        assert callback_calls == 0
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_serve_sync_fallback_notifies_after_shown_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(db, "BV1SYNC", title="sync", relevance_score=0.95)
+        observed_counts: list[int] = []
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            pool_inventory_commit_callback=lambda: observed_counts.append(
+                db.count_pool_candidates()
+            ),
+        )
+        monkeypatch.setattr(
+            asyncio,
+            "get_running_loop",
+            lambda: (_ for _ in ()).throw(RuntimeError),
+        )
+
+        recommendations = await engine.serve(_build_profile(), limit=1)
+        assert len(recommendations) == 1
+        assert observed_counts == [0]
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_serve_sync_fallback_does_not_fail_when_commit_callback_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(db, "BV1CALLBACK", title="callback", relevance_score=0.95)
+
+        def fail_callback() -> None:
+            raise RuntimeError("callback failed")
+
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            pool_inventory_commit_callback=fail_callback,
+        )
+        monkeypatch.setattr(
+            asyncio,
+            "get_running_loop",
+            lambda: (_ for _ in ()).throw(RuntimeError),
+        )
+
+        recommendations = await engine.serve(_build_profile(), limit=1)
+        assert len(recommendations) == 1
+        assert db.count_pool_candidates() == 0
+        db.close()
+
+
+@pytest.mark.asyncio
 async def test_serve_final_exclusion_blocks_platform_floor_reintroduction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

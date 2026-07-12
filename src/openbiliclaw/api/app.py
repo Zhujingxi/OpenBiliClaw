@@ -1244,6 +1244,51 @@ def create_app(
         from openbiliclaw.llm.concurrency import LLMConcurrencyGate
 
         ctx.llm_concurrency_gate = LLMConcurrencyGate(llm_concurrency_from_config(config))
+
+    def _inventory_target() -> int:
+        controller_target = getattr(ctx.runtime_controller, "pool_target_count", None)
+        if controller_target is not None:
+            with suppress(TypeError, ValueError):
+                return max(0, int(controller_target))
+        runtime_scheduler = getattr(getattr(ctx, "config", None), "scheduler", None)
+        configured_target = getattr(runtime_scheduler, "pool_target_count", None)
+        if configured_target is None:
+            configured_target = getattr(
+                getattr(config, "scheduler", None),
+                "pool_target_count",
+                0,
+            )
+        with suppress(TypeError, ValueError):
+            return max(0, int(cast("Any", configured_target)))
+        return 0
+
+    def _canonical_pool_available() -> int | None:
+        nickname = ""
+        load_state = getattr(ctx.memory_manager, "load_discovery_runtime_state", None)
+        if callable(load_state):
+            with suppress(Exception):
+                state = load_state()
+                info = state.get("xhs_self_info", {}) if isinstance(state, dict) else {}
+                if isinstance(info, dict):
+                    nickname = str(info.get("nickname", "") or "").strip()
+        readiness = getattr(ctx.database, "count_pool_readiness", None)
+        if callable(readiness):
+            with suppress(Exception):
+                counts = readiness(xhs_self_nickname=nickname)
+                if isinstance(counts, dict):
+                    return max(0, int(counts.get("available", 0)))
+        count_pool = getattr(ctx.database, "count_pool_candidates", None)
+        if callable(count_pool):
+            with suppress(TypeError):
+                return max(0, int(count_pool(xhs_self_nickname=nickname)))
+            with suppress(Exception):
+                return max(0, int(count_pool()))
+        return None
+
+    initial_available = _canonical_pool_available()
+    update_inventory = getattr(ctx.llm_concurrency_gate, "update_inventory", None)
+    if initial_available is not None and callable(update_inventory):
+        update_inventory(available=initial_available, target=_inventory_target())
     app.state.runtime_context = ctx
     auto_replenishment_task: asyncio.Task[None] | None = None
     auto_replenishment_started_at = 0.0
@@ -4343,10 +4388,9 @@ def create_app(
         def _sync_inventory(available: int) -> int:
             update = getattr(ctx.llm_concurrency_gate, "update_inventory", None)
             if callable(update):
-                target = getattr(getattr(ctx, "config", None), "scheduler", None)
                 update(
                     available=available,
-                    target=int(getattr(target, "pool_target_count", 0)),
+                    target=_inventory_target(),
                 )
             return available
 
@@ -4420,14 +4464,6 @@ def create_app(
                 raw_value = 0
             with suppress(TypeError, ValueError):
                 payload[field] = max(0, int(cast("Any", raw_value)))
-        available = payload.get("pool_available_count")
-        update_inventory = getattr(ctx.llm_concurrency_gate, "update_inventory", None)
-        if isinstance(available, int) and callable(update_inventory):
-            target = getattr(getattr(ctx, "config", None), "scheduler", None)
-            update_inventory(
-                available=available,
-                target=int(getattr(target, "pool_target_count", 0)),
-            )
         recent_pool_topics = status.get("recent_pool_topics")
         if isinstance(recent_pool_topics, list):
             payload["recent_pool_topics"] = [
@@ -4453,6 +4489,21 @@ def create_app(
             result = publish(event)
             if asyncio.iscoroutine(result):
                 await result
+
+    async def _on_pool_inventory_commit() -> None:
+        available = _canonical_pool_available()
+        update = getattr(ctx.llm_concurrency_gate, "update_inventory", None)
+        if available is not None and callable(update):
+            update(available=available, target=_inventory_target())
+        await _publish_pool_status_snapshot()
+
+    set_pool_commit_callback = getattr(
+        ctx.recommendation_engine,
+        "set_pool_inventory_commit_callback",
+        None,
+    )
+    if callable(set_pool_commit_callback):
+        set_pool_commit_callback(_on_pool_inventory_commit)
 
     async def _run_auto_replenishment(trigger: Callable[[], Any]) -> None:
         try:
