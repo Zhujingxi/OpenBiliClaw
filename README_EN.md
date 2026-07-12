@@ -594,7 +594,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 │ Source-family registry: alias · strategy · URL host │
 │             → pool accounting · viewed identity    │
 │ Pool → token claim → 3×LLM workers → serial admit → UI │
-│ Recover paid results → canonical protection → maintenance → LLM │
+│ API/OpenClaw startup hook → recover/maintain → expose LLM │
 │   Unified admission · SQLite (events · pool · recs)│
 └────────────────────────────────────────────────┘
 ```

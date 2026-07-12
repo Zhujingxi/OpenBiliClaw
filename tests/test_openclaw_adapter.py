@@ -675,6 +675,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     registered_strategies: list[str] = []
     created_strategy_kwargs: list[dict[str, object]] = []
     producer_kwargs: list[dict[str, object]] = []
+    startup_events: list[str] = []
 
     class FakeDatabase:
         def __init__(self, path: str) -> None:
@@ -761,12 +762,16 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
         def __init__(self, **kwargs) -> None:
             self.kwargs = kwargs
 
+        def run_startup_maintenance(self) -> None:
+            startup_events.append("maintenance")
+
     class FakeCandidatePipeline:
         def __init__(self, **kwargs) -> None:
             self.kwargs = kwargs
 
     class FakeAccountSyncService:
         def __init__(self, **kwargs) -> None:
+            startup_events.append("account_sync")
             self.kwargs = kwargs
 
     fake_config = SimpleNamespace(
@@ -850,6 +855,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     services = build_openclaw_adapter_services()
 
     assert isinstance(services, OpenClawAdapterServices)
+    assert startup_events == ["maintenance", "account_sync"]
     assert len(created_databases) == 1
     assert created_databases[0].initialized == 1
     assert len(created_memories) == 1

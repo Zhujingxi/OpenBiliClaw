@@ -3848,6 +3848,64 @@ async def test_run_forever_startup_order_repairs_before_llm_and_background_tasks
             await task
 
 
+async def test_run_forever_does_not_repeat_host_startup_maintenance() -> None:
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase(events=[]),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        check_interval_seconds=3600,
+    )
+    maintenance_calls = 0
+    prepare_started = asyncio.Event()
+
+    def _maintenance() -> bool:
+        nonlocal maintenance_calls
+        maintenance_calls += 1
+        return False
+
+    async def _prepare() -> int:
+        prepare_started.set()
+        return 0
+
+    controller._enforce_pool_cap = _maintenance  # type: ignore[method-assign]
+    controller.prepare_delight_candidates = _prepare  # type: ignore[method-assign]
+    controller.run_startup_maintenance()
+
+    task = asyncio.create_task(controller.run_forever())
+    try:
+        await asyncio.wait_for(prepare_started.wait(), timeout=0.5)
+        assert maintenance_calls == 1
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+def test_startup_maintenance_failure_remains_retryable() -> None:
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase(events=[]),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+    )
+    maintenance_calls = 0
+
+    def _broken_maintenance() -> bool:
+        nonlocal maintenance_calls
+        maintenance_calls += 1
+        raise RuntimeError("maintenance unavailable")
+
+    controller._enforce_pool_cap = _broken_maintenance  # type: ignore[method-assign]
+
+    controller.run_startup_maintenance()
+    controller.run_startup_maintenance()
+
+    assert maintenance_calls == 2
+
+
 async def test_hot_reload_new_controller_repairs_before_new_background_tasks() -> None:
     async def _run_controller_once(label: str) -> list[str]:
         calls: list[str] = []

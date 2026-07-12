@@ -395,6 +395,7 @@ class ContinuousRefreshController:
     # exhausted retries on the first half-hour.
     _init_grace_consumed: bool = False
     _last_llm_gate_allowed: bool = field(default=True, init=False)
+    _startup_maintenance_completed: bool = field(default=False, init=False)
 
     _signal_event_types = [
         "view",
@@ -761,6 +762,16 @@ class ContinuousRefreshController:
             return result.available_before >= self.pool_target_count
         return result.at_target
 
+    def run_startup_maintenance(self) -> None:
+        """Run the host's pre-service pool repair at most once per controller."""
+        if self._startup_maintenance_completed:
+            return
+        try:
+            self._enforce_pool_cap()
+        except Exception:
+            return
+        self._startup_maintenance_completed = True
+
     async def trigger_manual_refresh(self, *, reason: str = "manual") -> dict[str, object]:
         """Schedule one background manual refresh without blocking the caller."""
         normalized_reason = self._normalize_replenishment_reason(reason)
@@ -1047,8 +1058,7 @@ class ContinuousRefreshController:
             ├─ _loop_image_cache_cleanup() 6h  prune consumed+unsaved covers
             └─ _loop_cover_prefetch()    60s   cache fresh-token covers (XHS)
         """
-        with suppress(Exception):
-            self._enforce_pool_cap()
+        self.run_startup_maintenance()
         if self._llm_work_allowed():
             with suppress(Exception):
                 await self.prepare_delight_candidates()

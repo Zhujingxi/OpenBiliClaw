@@ -310,6 +310,7 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
     candidate_pipeline.on_candidates_enqueued = lambda _count: candidate_eval_coordinator.notify(
         "candidate_enqueued:pipeline"
     )
+    runtime_controller.run_startup_maintenance()
     account_sync_service = AccountSyncService(
         memory_manager=memory_manager,
         bilibili_client=bilibili_client,
