@@ -65,7 +65,7 @@ def make_claimed_job(
             platform_slug=platform_slug,
             item_key=item_key,
             content_id=content_id,
-            content_url="https://x.com/example/status/123",
+            content_url=f"https://x.com/example/status/{content_id}",
         )
     )
     row = database.claim_extension_native_save_job(platform_slug, 60.0)
@@ -175,6 +175,59 @@ def test_result_validation_rejects_unknown_or_unsafe_fields(
     with pytest.raises(ValueError):
         database.complete_extension_native_save_job(
             str(job["job_id"]), "twitter:123", status, code, message
+        )
+
+
+@pytest.mark.parametrize(
+    "extension_message",
+    [
+        "Cookie: session=secret-token",
+        "<html><body>raw platform response</body></html>",
+    ],
+)
+def test_result_persists_only_backend_owned_safe_message(
+    database: Database, extension_message: str
+) -> None:
+    job = make_claimed_job(database)
+
+    assert database.complete_extension_native_save_job(
+        str(job["job_id"]),
+        "twitter:123",
+        "failed",
+        "native_save_failed",
+        extension_message,
+    )
+
+    row = database.get_extension_native_save_job(str(job["job_id"]))
+    assert row is not None
+    assert row["last_error_message"] == "Platform native save failed"
+    assert "secret-token" not in str(row)
+    assert "<html>" not in str(row)
+
+
+def test_result_rejects_unknown_code_and_unicode_control(database: Database) -> None:
+    unknown_code_job = make_claimed_job(database)
+    with pytest.raises(ValueError):
+        database.complete_extension_native_save_job(
+            str(unknown_code_job["job_id"]),
+            "twitter:123",
+            "failed",
+            "unknown_code",
+            "safe",
+        )
+
+    unicode_control_job = make_claimed_job(
+        database,
+        item_key="twitter:456",
+        content_id="456",
+    )
+    with pytest.raises(ValueError):
+        database.complete_extension_native_save_job(
+            str(unicode_control_job["job_id"]),
+            "twitter:456",
+            "failed",
+            "native_save_failed",
+            "unsafe\u0085message",
         )
 
 
@@ -345,6 +398,75 @@ async def test_unclaimed_dispatch_timeout_returns_extension_required(database: D
     wake.assert_awaited_once_with("reddit")
     assert result.status == "extension_required"
     assert result.error_code == "extension_unavailable"
+    row = database.conn.execute(
+        "SELECT * FROM extension_native_save_jobs ORDER BY created_at LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    assert row["status"] == "extension_required"
+    assert row["last_error_code"] == "extension_unavailable"
+    assert not database.complete_extension_native_save_job(
+        str(row["job_id"]), "reddit:t3_abc", "synced", "", ""
+    )
+    durable = database.get_extension_native_save_job(str(row["job_id"]))
+    assert durable is not None
+    assert durable["status"] == "extension_required"
+
+
+@pytest.mark.asyncio
+async def test_hanging_wake_is_bounded_by_dispatch_deadline(database: Database) -> None:
+    async def hanging_wake(platform_slug: str) -> None:
+        assert platform_slug == "reddit"
+        await asyncio.Event().wait()
+
+    broker = ExtensionNativeSaveBroker(
+        database,
+        wake_platform=hanging_wake,
+        dispatch_deadline_seconds=0.01,
+        execution_deadline_seconds=0.05,
+        poll_interval_seconds=0.001,
+    )
+
+    result = await asyncio.wait_for(
+        broker.save(
+            SavedItemInput(
+                "reddit",
+                "t3_hung",
+                "https://www.reddit.com/r/test/comments/hung/demo/",
+                "post",
+            ),
+            NativeSaveRoute("favorite", "favorite", "Reddit Saved"),
+        ),
+        timeout=0.2,
+    )
+
+    assert result.status == "extension_required"
+
+
+@pytest.mark.asyncio
+async def test_throwing_wake_still_polls_until_dispatch_deadline(database: Database) -> None:
+    async def throwing_wake(platform_slug: str) -> None:
+        assert platform_slug == "reddit"
+        raise RuntimeError("event hub unavailable")
+
+    broker = ExtensionNativeSaveBroker(
+        database,
+        wake_platform=throwing_wake,
+        dispatch_deadline_seconds=0.01,
+        execution_deadline_seconds=0.05,
+        poll_interval_seconds=0.001,
+    )
+
+    result = await broker.save(
+        SavedItemInput(
+            "reddit",
+            "t3_throw",
+            "https://www.reddit.com/r/test/comments/throw/demo/",
+            "post",
+        ),
+        NativeSaveRoute("favorite", "favorite", "Reddit Saved"),
+    )
+
+    assert result.status == "extension_required"
 
 
 @pytest.mark.asyncio

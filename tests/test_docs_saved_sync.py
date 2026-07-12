@@ -7,6 +7,9 @@ def test_saved_sync_docs_name_default_and_routes() -> None:
     saved_sync_doc = Path("docs/modules/saved-sync.md").read_text()
     storage_doc = Path("docs/modules/storage.md").read_text()
     architecture_doc = Path("docs/architecture.md").read_text()
+    spec_doc = Path("docs/spec.md").read_text()
+    readme = Path("README.md").read_text()
+    readme_en = Path("README_EN.md").read_text()
     docs_index = Path("docs/index.md").read_text()
     e2e_doc = Path("docs/native-save-e2e.md").read_text()
     changelog = Path("docs/changelog.md").read_text()
@@ -42,3 +45,22 @@ def test_saved_sync_docs_name_default_and_routes() -> None:
     assert "trap - EXIT INT TERM" in e2e_doc
     assert "(.items | length) > 0" in e2e_doc
     assert "非浏览器 Bearer" in e2e_doc
+
+    for token in (
+        "ExtensionNativeSaveBroker",
+        "ExtensionNativeSaveJob",
+        "ExtensionNativeSaveResultIn",
+    ):
+        assert token in saved_sync_doc
+    for token in (
+        "extension_native_save_jobs",
+        "create_or_reuse_extension_native_save_job",
+        "claim_extension_native_save_job",
+        "complete_extension_native_save_job",
+        "mark_unclaimed_extension_native_save_job_extension_required",
+    ):
+        assert token in storage_doc
+    assert "扩展原生保存 durable broker" in changelog
+    for diagram_doc in (architecture_doc, spec_doc, readme, readme_en):
+        assert "ExtensionNativeSaveBroker" in diagram_doc
+        assert "extension_native_save_jobs" in diagram_doc

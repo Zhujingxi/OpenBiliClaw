@@ -114,9 +114,12 @@ class ExtensionNativeSaveBroker:
 
     async def save(self, item: SavedItemInput, route: NativeSaveRoute) -> NativeSaveResult:
         job_id = self.enqueue(item, route)
+        dispatch_deadline_at = time.monotonic() + self._dispatch_deadline_seconds
         try:
-            await self._wake_platform(self._platform_slug(item.platform))
-            row = await self._wait_for_terminal(job_id)
+            await self._wake_before_deadline(
+                self._platform_slug(item.platform), dispatch_deadline_at
+            )
+            row = await self._wait_for_terminal(job_id, dispatch_deadline_at)
         except asyncio.CancelledError:
             self._database.cancel_unclaimed_extension_native_save_job(job_id)
             raise
@@ -137,8 +140,31 @@ class ExtensionNativeSaveBroker:
             result.error_message,
         )
 
-    async def _wait_for_terminal(self, job_id: str) -> dict[str, object]:
-        started_at = time.monotonic()
+    async def _wake_before_deadline(self, platform_slug: str, deadline_at: float) -> None:
+        try:
+            wake_task: asyncio.Future[None] = asyncio.ensure_future(
+                self._wake_platform(platform_slug)
+            )
+        except Exception:
+            return
+        try:
+            done, _ = await asyncio.wait(
+                (wake_task,), timeout=max(0.0, deadline_at - time.monotonic())
+            )
+        except asyncio.CancelledError:
+            wake_task.cancel()
+            raise
+        if not done:
+            wake_task.cancel()
+            return
+        try:
+            wake_task.result()
+        except Exception:
+            return
+
+    async def _wait_for_terminal(
+        self, job_id: str, dispatch_deadline_at: float
+    ) -> dict[str, object]:
         while True:
             row = self._database.get_extension_native_save_job(job_id)
             if row is None:
@@ -148,15 +174,15 @@ class ExtensionNativeSaveBroker:
                 return row
             if status == "pending":
                 if (
-                    time.monotonic() - started_at >= self._dispatch_deadline_seconds
-                    and self._database.cancel_unclaimed_extension_native_save_job(job_id)
+                    time.monotonic() >= dispatch_deadline_at
+                    and self._database.mark_unclaimed_extension_native_save_job_extension_required(
+                        job_id
+                    )
                 ):
-                    return {
-                        **row,
-                        "status": "extension_required",
-                        "last_error_code": "extension_unavailable",
-                        "last_error_message": "OpenBiliClaw extension is unavailable",
-                    }
+                    terminal = self._database.get_extension_native_save_job(job_id)
+                    if terminal is None:
+                        raise RuntimeError("extension native-save job disappeared")
+                    return terminal
             elif status == "in_progress":
                 self._database.expire_stale_extension_native_save_jobs(
                     str(row["platform_slug"]), self._execution_deadline_seconds

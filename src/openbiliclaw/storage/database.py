@@ -13,6 +13,7 @@ import re
 import sqlite3
 import statistics
 import time
+import unicodedata
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -87,8 +88,17 @@ _EXTENSION_NATIVE_SAVE_RESULT_STATUSES = frozenset(
     {"synced", "already_synced", "login_required", "rate_limited", "unsupported", "failed"}
 )
 _EXTENSION_NATIVE_SAVE_SLUGS = frozenset(_EXTENSION_NATIVE_SAVE_PLATFORM_SLUGS.values())
-_EXTENSION_NATIVE_SAVE_CODE_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,127}\Z")
-_CONTROL_CHARACTER_RE = re.compile(r"[\x00-\x1f\x7f]")
+_EXTENSION_NATIVE_SAVE_RESULT_MESSAGES = {
+    ("synced", ""): "",
+    ("already_synced", ""): "",
+    ("login_required", ""): "Platform login required",
+    ("rate_limited", ""): "Platform native save rate limited",
+    ("unsupported", "unsupported_content_type"): (
+        "Content type is unsupported for platform native save"
+    ),
+    ("failed", "native_save_failed"): "Platform native save failed",
+    ("failed", "native_save_timeout"): "Platform native-save task timed out",
+}
 _BVID_PATTERN = re.compile(r"(BV[0-9A-Za-z]+)")
 _LOCAL_EVIDENCE_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 _VIEW_CONTENT_ID_METADATA_KEYS = (
@@ -835,7 +845,7 @@ def _xhs_self_author_guard_params(xhs_self_nickname: str | None) -> tuple[str, s
 
 def _validated_extension_native_save_uuid(value: object, field_name: str) -> str:
     raw_text = str(value or "")
-    if _CONTROL_CHARACTER_RE.search(raw_text):
+    if any(unicodedata.category(character).startswith("C") for character in raw_text):
         raise ValueError(f"{field_name} must not contain control characters")
     text = raw_text.strip()
     try:
@@ -855,7 +865,7 @@ def _validated_extension_native_save_text(
     allow_blank: bool = False,
 ) -> str:
     raw_text = str(value or "")
-    if _CONTROL_CHARACTER_RE.search(raw_text):
+    if any(unicodedata.category(character).startswith("C") for character in raw_text):
         raise ValueError(f"{field_name} must not contain control characters")
     text = raw_text.strip()
     if not text and not allow_blank:
@@ -941,11 +951,13 @@ def _validated_extension_native_save_result(
     safe_code = _validated_extension_native_save_text(
         error_code, "error_code", max_length=128, allow_blank=True
     )
-    if safe_code and _EXTENSION_NATIVE_SAVE_CODE_RE.fullmatch(safe_code) is None:
-        raise ValueError("error_code contains unsupported characters")
-    safe_message = _validated_extension_native_save_text(
+    _validated_extension_native_save_text(
         error_message, "error_message", max_length=512, allow_blank=True
     )
+    try:
+        safe_message = _EXTENSION_NATIVE_SAVE_RESULT_MESSAGES[(safe_status, safe_code)]
+    except KeyError as exc:
+        raise ValueError("status and error_code combination is invalid") from exc
     return safe_status, safe_code, safe_message
 
 
@@ -7930,6 +7942,24 @@ class Database:
         self.conn.commit()
         return cursor.rowcount == 1
 
+    def mark_unclaimed_extension_native_save_job_extension_required(self, job_id: str) -> bool:
+        """Durably mark a still-pending job when no extension claims it in time."""
+        safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
+        cursor = self.conn.execute(
+            """
+            UPDATE extension_native_save_jobs
+            SET status = 'extension_required',
+                last_error_code = 'extension_unavailable',
+                last_error_message = 'OpenBiliClaw extension is unavailable',
+                completed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
+                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+            WHERE job_id = ? AND status = 'pending'
+            """,
+            (safe_job_id,),
+        )
+        self.conn.commit()
+        return cursor.rowcount == 1
+
     def get_extension_native_save_job(self, job_id: str) -> dict[str, Any] | None:
         """Return a copied durable extension job row by canonical UUID."""
         safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
@@ -7986,7 +8016,7 @@ class Database:
         if isinstance(lease_seconds, bool):
             raise ValueError("lease_seconds must be a positive finite number")
         try:
-            lease = float(lease_seconds)
+            lease = float(cast("Any", lease_seconds))
         except (TypeError, ValueError) as exc:
             raise ValueError("lease_seconds must be a positive finite number") from exc
         if not math.isfinite(lease) or lease <= 0:
