@@ -9,20 +9,80 @@ from contextlib import suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
+DEMO_COVER_HOST = "covers.openbiliclaw.invalid"
+DEMO_COVER_DIR = ROOT / "docs/images/chrome-web-store/demo-covers"
+
+
+def _cover_url(filename: str) -> str:
+    return f"https://{DEMO_COVER_HOST}/{filename}"
+
+
+def _demo_cover_path(raw_url: str) -> Path | None:
+    parsed = urlsplit(raw_url)
+    if parsed.scheme != "https" or parsed.hostname != DEMO_COVER_HOST:
+        return None
+    candidate = (DEMO_COVER_DIR / Path(parsed.path).name).resolve()
+    try:
+        candidate.relative_to(DEMO_COVER_DIR.resolve())
+    except ValueError:
+        return None
+    return candidate if candidate.is_file() else None
 
 
 def _recommendations() -> list[dict[str, Any]]:
     rows = (
-        ("bilibili", "系统设计不是画框：从一次真实重构说起", "工程漫游指南", "系统设计"),
-        ("xiaohongshu", "把信息流变成自己的研究工作台", "认真生活实验室", "效率方法"),
-        ("zhihu", "为什么长期兴趣比短期热点更值得建模？", "知识花园", "认知科学"),
-        ("reddit", "Local-first software: what actually matters", "r/LocalFirst", "本地优先"),
-        ("youtube", "A Visual Guide to Recommendation Systems", "Signal & Craft", "推荐系统"),
-        ("douyin", "三分钟看懂个人知识库的数据流", "产品显微镜", "产品设计"),
-        ("twitter", "Seven practical notes on agent memory", "@open_notes", "Agent"),
+        (
+            "bilibili",
+            "系统设计不是画框：从一次真实重构说起",
+            "工程漫游指南",
+            "系统设计",
+            "01-system-design.png",
+        ),
+        (
+            "xiaohongshu",
+            "把信息流变成自己的研究工作台",
+            "认真生活实验室",
+            "效率方法",
+            "02-research-workflow.png",
+        ),
+        (
+            "zhihu",
+            "为什么长期兴趣比短期热点更值得建模？",
+            "知识花园",
+            "认知科学",
+            "03-cognitive-science.png",
+        ),
+        (
+            "reddit",
+            "Local-first software: what actually matters",
+            "r/LocalFirst",
+            "本地优先",
+            "04-local-first.png",
+        ),
+        (
+            "youtube",
+            "A Visual Guide to Recommendation Systems",
+            "Signal & Craft",
+            "推荐系统",
+            "05-recommendation-systems.png",
+        ),
+        (
+            "douyin",
+            "三分钟看懂个人知识库的数据流",
+            "产品显微镜",
+            "产品设计",
+            "06-knowledge-flow.png",
+        ),
+        (
+            "twitter",
+            "Seven practical notes on agent memory",
+            "@open_notes",
+            "Agent",
+            "07-agent-memory.png",
+        ),
     )
     return [
         {
@@ -34,12 +94,34 @@ def _recommendations() -> list[dict[str, Any]]:
             "title": title,
             "up_name": author,
             "topic_label": topic,
+            "cover_url": _cover_url(cover),
+            "content_type": "video",
             "expression": "因为你持续关注高质量、可复用的方法论，同时愿意探索相邻主题。",
             "duration": 720,
             "view": 12800 + index * 137,
             "feedback_type": "",
         }
-        for index, (platform, title, author, topic) in enumerate(rows, 1)
+        for index, (platform, title, author, topic, cover) in enumerate(rows, 1)
+    ]
+
+
+def _delight_items() -> list[dict[str, Any]]:
+    return [
+        {
+            "bvid": "demo-delight-local-first",
+            "content_id": "demo-delight-local-first",
+            "content_url": "https://example.invalid/bilibili/delight",
+            "source_platform": "bilibili",
+            "title": "本地优先，不只是隐私：把主动权留在自己的设备上",
+            "delight_reason": "它把隐私、可迁移性与长期可控性放进同一套产品设计里。",
+            "delight_hook": "刚好连接你最近的系统设计兴趣",
+            "delight_score": 0.91,
+            "cover_url": _cover_url("08-delight-local-first.png"),
+            "state": "pending",
+            "view_count": 28600,
+            "like_count": 1900,
+            "comment_count": 186,
+        }
     ]
 
 
@@ -183,7 +265,7 @@ def demo_payload(path: str) -> tuple[int, Any]:
             for key in _sources_status()
         },
         "/api/activity-feed": {"items": [], "has_more": False, "next_cursor": ""},
-        "/api/delight/pending-batch": {"items": []},
+        "/api/delight/pending-batch": {"items": _delight_items()},
         "/api/notifications/pending": {"items": []},
         "/api/cognition-updates/pending": {"items": []},
         "/api/chat/turns": {"items": []},
@@ -232,7 +314,14 @@ class DemoServer:
 
             def do_GET(self) -> None:  # noqa: N802
                 owner.requests.append(self.path)
-                path = urlsplit(self.path).path
+                parsed_request = urlsplit(self.path)
+                path = parsed_request.path
+                if path == "/api/image-proxy":
+                    raw_url = parse_qs(parsed_request.query).get("url", [""])[0]
+                    cover_path = _demo_cover_path(raw_url)
+                    if cover_path is None:
+                        return self._json({"error": "demo_cover_not_found"}, 404)
+                    return self._serve_file(cover_path)
                 if path in {"/web", "/web/", "/web/index.html"}:
                     return self._serve_file(ROOT / "src/openbiliclaw/web/desktop/index.html")
                 if path.startswith("/web/assets/"):
