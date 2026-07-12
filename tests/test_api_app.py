@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import time
 from datetime import UTC, datetime, timedelta
@@ -311,6 +312,90 @@ def test_injected_compatibility_dialogue_double_without_gate_is_supported(
     )
 
     assert app.state.runtime_context.dialogue is dialogue
+
+
+def test_injected_controller_nested_discovery_gate_is_validated_and_injected(
+    monkeypatch, tmp_path
+) -> None:
+    from openbiliclaw.config import Config
+    from openbiliclaw.llm.concurrency import LLMConcurrencyGate
+
+    config = Config(data_dir=str(tmp_path))
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
+    adopted_gate = LLMConcurrencyGate(2)
+
+    gate_less_service = SimpleNamespace(concurrency_gate=None)
+    gate_less_controller = SimpleNamespace(
+        event_hub=None,
+        llm_concurrency_gate=adopted_gate,
+        discovery_engine=SimpleNamespace(_llm_service=gate_less_service),
+    )
+    gate_less_app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=SimpleNamespace(),
+        runtime_controller=gate_less_controller,
+    )
+    assert gate_less_app.state.runtime_context.llm_concurrency_gate is adopted_gate
+    assert gate_less_service.concurrency_gate is adopted_gate
+
+    common_service = SimpleNamespace(concurrency_gate=adopted_gate)
+    common_controller = SimpleNamespace(
+        event_hub=None,
+        llm_concurrency_gate=adopted_gate,
+        discovery_engine=SimpleNamespace(_llm_service=common_service),
+    )
+    common_app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=SimpleNamespace(),
+        runtime_controller=common_controller,
+    )
+    assert common_app.state.runtime_context.llm_concurrency_gate is adopted_gate
+    assert common_service.concurrency_gate is adopted_gate
+
+    conflicting_gate = LLMConcurrencyGate(2)
+    conflicting_service = SimpleNamespace(concurrency_gate=conflicting_gate)
+    with pytest.raises(ValueError, match="different LLM concurrency gates"):
+        create_app(
+            memory_manager=SimpleNamespace(),
+            database=SimpleNamespace(),
+            soul_engine=SimpleNamespace(),
+            runtime_controller=SimpleNamespace(
+                event_hub=None,
+                llm_concurrency_gate=adopted_gate,
+                discovery_engine=SimpleNamespace(_llm_service=conflicting_service),
+            ),
+        )
+    assert conflicting_service.concurrency_gate is conflicting_gate
+
+
+@pytest.mark.parametrize(
+    ("qualified_name", "runtime_attribute"),
+    [
+        ("openbiliclaw.soul.engine.SoulEngine", "_llm_service"),
+        ("openbiliclaw.soul.dialogue.SocraticDialogue", "_llm_service"),
+        ("openbiliclaw.recommendation.engine.RecommendationEngine", "_llm"),
+        ("openbiliclaw.discovery.engine.ContentDiscoveryEngine", "_llm_service"),
+        ("openbiliclaw.runtime.account_sync.AccountSyncService", "soul_engine"),
+    ],
+)
+def test_injected_llm_owner_attribute_audit(
+    qualified_name: str, runtime_attribute: str
+) -> None:
+    module_name, class_name = qualified_name.rsplit(".", 1)
+    module = __import__(module_name, fromlist=[class_name])
+    owner_type = getattr(module, class_name)
+    source = inspect.getsource(owner_type)
+
+    assert (
+        f"self.{runtime_attribute}" in source
+        or runtime_attribute in getattr(owner_type, "__annotations__", {})
+    ), f"{qualified_name} no longer stores its injected LLM owner at {runtime_attribute}"
+
+    app_source = inspect.getsource(create_app)
+    if class_name == "ContentDiscoveryEngine":
+        assert f'getattr(controller_discovery, "{runtime_attribute}", None)' in app_source
 
 
 def _store_xhs_login_state(db: object, *, logged_in: bool, when_iso: str) -> None:

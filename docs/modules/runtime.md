@@ -8,6 +8,8 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 
 同一核对还覆盖显式 `dialogue` 的 declared/service gate、recommendation service，以及 runtime controller / account-sync 内可见的 Soul、recommendation、discovery service；任何非空身份冲突都在写回前失败。真实 `SocraticDialogue` 的显式 service 与 `_build_service()` fallback 最终都引用 context gate；没有相关属性的旧 double 继续兼容。
 
+实现读取真实引擎字段：Soul / Dialogue / Discovery 为 `_llm_service`，Recommendation 为 `_llm`，AccountSync 为 `soul_engine`；参数化结构测试会在这些类改名但注入审计未同步时失败。
+
 ## 概述
 
 `src/openbiliclaw/runtime/` 负责后端 daemon 的长期运行能力：后台刷新、账号同步、反馈批学习调度、运行时事件流、浏览器插件 presence gate、自动更新和任务生命周期管理。FastAPI 启动后会通过 `RuntimeContext` 持有这些 runtime 服务，配置热重载时重建可替换组件。

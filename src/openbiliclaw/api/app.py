@@ -1113,7 +1113,7 @@ def create_app(
         controller_recommendation = getattr(runtime_controller, "recommendation_engine", None)
         controller_recommendation_llm = getattr(controller_recommendation, "_llm", None)
         controller_discovery = getattr(runtime_controller, "discovery_engine", None)
-        controller_discovery_llm = getattr(controller_discovery, "llm_service", None)
+        controller_discovery_llm = getattr(controller_discovery, "_llm_service", None)
         gate_sources = [
             ("SoulEngine", soul_declared_gate),
             ("SoulEngine service", soul_service_gate),
