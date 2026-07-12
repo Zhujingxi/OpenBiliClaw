@@ -47,3 +47,15 @@ The test suite was written first for total/background capacity, total=1 degradat
 - Unknown/empty caller tags are maintenance-limited and warning-once per gate.
 - With explicit total 1, background capacity is 1: safe/no deadlock, but no interactive reservation is mathematically possible; documented.
 - Full-suite timeout is the only incomplete verification item; no failure was observed, and all directly affected suites plus refresh passed.
+
+## Review-fix follow-up
+
+Review RED evidence:
+
+- Resize tests failed with `AttributeError: LLMConcurrencyGate has no attribute reconfigure`.
+- API rebuild identity test showed old/new services held different gate objects.
+- Live `/api/config/probe-service` test observed the direct provider call outside both total and background admission.
+
+Fixes add cancellation-safe in-place semaphore resize, a stable `RuntimeContext.llm_concurrency_gate`, exact `api.config_probe` maintenance admission, the absent API fallback of 4, authoritative config-doc defaults, and explicit API/OpenClaw/CLI identity/derivation coverage. Lowering capacity never revokes active work; increasing capacity wakes priority waiters. Task 5 reservation state and Soul prompt/token/cost semantics remain untouched.
+
+Follow-up GREEN evidence: affected backend matrix `1009 passed`; Ruff passed; full MyPy passed for 188 source files; `git diff --check` passed. No frontend file changed in the review-fix commit, so the already-green Task 4 extension build was not rerun.

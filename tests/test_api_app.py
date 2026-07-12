@@ -1337,6 +1337,19 @@ class TestBackendAPI:
         assert captured["soul_engine_kwargs"]["speculator_idle_interval_minutes"] == 11
         assert callable(captured["account_sync_kwargs"]["llm_work_allowed"])
 
+        runtime_context = app.state.runtime_context
+        old_service = runtime_context.llm_service
+        shared_gate = old_service.concurrency_gate
+        fake_config.llm.concurrency = 2
+
+        runtime_context._rebuild_components(fake_config)
+
+        assert runtime_context.llm_service is not old_service
+        assert old_service.concurrency_gate is shared_gate
+        assert runtime_context.llm_service.concurrency_gate is shared_gate
+        assert captured["soul_engine_kwargs"]["llm_concurrency_gate"] is shared_gate
+        assert shared_gate.status_payload()["llm_total_concurrency"] == 2
+
     def test_cap_by_franchise_keeps_at_most_n_per_franchise(self) -> None:
         """Regression for the 'one popup full of 原神' bug. The API
         layer caps how many same-``franchise_key`` items reach the
@@ -12630,8 +12643,10 @@ class TestLlmFallbackConfigValidationAndProbe:
 
     def test_probe_llm_fallback_probes_exact_fallback_provider(self, monkeypatch, tmp_path) -> None:
         from openbiliclaw.llm.base import LLMResponse
+        from openbiliclaw.llm.concurrency import LLMTrafficClass
 
         calls: list[tuple[str, object]] = []
+        runtime_gate = None
 
         class FakeRegistry:
             available_providers = ["openai", "deepseek"]
@@ -12641,6 +12656,10 @@ class TestLlmFallbackConfigValidationAndProbe:
                 return name in ("openai", "deepseek")
 
             async def complete_provider(self, provider_name, messages, **kwargs):  # noqa: ARG002
+                assert runtime_gate is not None
+                status = runtime_gate.status_payload()
+                assert status["llm_total_active"] == 1
+                assert status["llm_background_active"] == 1
                 calls.append((provider_name, kwargs.get("model")))
                 return LLMResponse(
                     content="OK",
@@ -12654,6 +12673,7 @@ class TestLlmFallbackConfigValidationAndProbe:
         )
         cfg = self._base_config()
         client, config_path = self._client(monkeypatch, tmp_path, cfg)
+        runtime_gate = client.app.state.runtime_context.llm_concurrency_gate
         before = config_path.read_bytes()
 
         response = client.post(
@@ -12666,11 +12686,13 @@ class TestLlmFallbackConfigValidationAndProbe:
 
         assert response.status_code == 200
         body = response.json()
-        assert body["ok"] is True
+        assert body["ok"] is True, body
         assert body["kind"] == "llm_fallback"
         assert body["provider"] == "deepseek"
         # Exact single-provider probe — never the fallback chain.
         assert [provider for provider, _model in calls] == ["deepseek"]
+        assert runtime_gate.classify("api.config_probe") is LLMTrafficClass.MAINTENANCE
+        assert runtime_gate.status_payload()["llm_total_active"] == 0
         assert config_path.read_bytes() == before
 
     def test_probe_llm_fallback_refuses_cleanly_when_unconfigured(

@@ -1342,6 +1342,7 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
     import openbiliclaw.llm.service as llm_service_module
     import openbiliclaw.memory.manager as memory_module
     import openbiliclaw.recommendation.engine as recommendation_module
+    import openbiliclaw.soul.engine as soul_module
     import openbiliclaw.storage.database as database_module
 
     created_databases: list[object] = []
@@ -1418,10 +1419,35 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = kwargs
 
+    class FakeSoulEngine:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
     fake_config = SimpleNamespace(
         data_path=Path("/tmp/openbiliclaw-test-data"),
         bilibili=SimpleNamespace(cookie=""),
         llm=SimpleNamespace(concurrency=3),
+        soul=SimpleNamespace(preference=SimpleNamespace(satisfaction_filter_enabled=True)),
+        scheduler=SimpleNamespace(
+            speculation_interval_minutes=10,
+            speculation_ttl_days=3,
+            speculation_cooldown_days=7,
+            speculation_confirmation_threshold=3,
+            speculation_max_active=5,
+            speculation_max_primary_interests=15,
+            speculation_max_secondary_interests=60,
+            avoidance_speculation_interval_minutes=10,
+            avoidance_speculation_ttl_days=3,
+            avoidance_speculation_cooldown_days=7,
+            avoidance_speculation_confirmation_threshold=3,
+            avoidance_speculation_max_active=5,
+            speculator_idle_interval_minutes=30,
+            profile_consolidation_enabled=True,
+            profile_consolidation_interval_hours=12,
+            profile_consolidation_like_target_upper=512,
+            profile_consolidation_like_target_soft=450,
+            profile_consolidation_archive_enabled=True,
+        ),
     )
 
     monkeypatch.setattr(cli_module, "_RUNTIME_COMPONENTS", {}, raising=False)
@@ -1432,6 +1458,7 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(memory_module, "MemoryManager", FakeMemoryManager)
     monkeypatch.setattr(llm_service_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(recommendation_module, "RecommendationEngine", FakeRecommendationEngine)
+    monkeypatch.setattr(soul_module, "SoulEngine", FakeSoulEngine)
     monkeypatch.setattr(discovery_module, "ContentDiscoveryEngine", FakeDiscoveryEngine)
     monkeypatch.setattr(strategy_module, "SearchStrategy", FakeStrategy)
     monkeypatch.setattr(strategy_module, "TrendingStrategy", FakeStrategy)
@@ -1440,6 +1467,7 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
 
     recommendation_engine = cli_module._build_recommendation_engine()
     discovery_engine = cli_module._build_discovery_engine()
+    soul_engine = cli_module._build_soul_engine()
 
     assert len(created_databases) == 1
     assert created_databases[0].initialized == 1
@@ -1455,6 +1483,8 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
     assert (
         recommendation_engine.llm.concurrency_gate is discovery_engine.llm_service.concurrency_gate
     )
+    assert soul_engine.kwargs["llm_concurrency_gate"] is recommendation_engine.llm.concurrency_gate
+    assert discovery_engine.concurrency.llm_evaluation_concurrency == 2
 
 
 def test_start_accepts_explicit_host_and_port(

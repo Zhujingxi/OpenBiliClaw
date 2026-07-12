@@ -1142,6 +1142,11 @@ def create_app(
                 ctx.degraded_reason,
                 "; ".join(str(getattr(issue, "message", issue)) for issue in ctx.degraded_issues),
             )
+    if ctx.llm_concurrency_gate is None:
+        from openbiliclaw.config import llm_concurrency_from_config
+        from openbiliclaw.llm.concurrency import LLMConcurrencyGate
+
+        ctx.llm_concurrency_gate = LLMConcurrencyGate(llm_concurrency_from_config(config))
     app.state.runtime_context = ctx
     auto_replenishment_task: asyncio.Task[None] | None = None
     auto_replenishment_started_at = 0.0
@@ -9064,7 +9069,7 @@ def create_app(
             degraded_reason=degraded_reason,
             llm=LLMConfigOut(
                 default_provider=cfg.llm.default_provider,
-                concurrency=int(getattr(cfg.llm, "concurrency", 3)),
+                concurrency=int(getattr(cfg.llm, "concurrency", 4)),
                 timeout=int(getattr(cfg.llm, "timeout", 300)),
                 fallback_provider=cfg.llm.fallback_provider,
                 openai=_provider_out(cfg.llm.openai),
@@ -9461,18 +9466,23 @@ def create_app(
                     latency_ms=int((time.perf_counter() - started) * 1000),
                 )
             timeout_s = min(max(float(getattr(cfg.llm, "timeout", 300) or 300), 10.0), 30.0)
+
+            async def _complete_probe() -> Any:
+                async with ctx.llm_concurrency_gate.slot(caller="api.config_probe"):
+                    return await registry.complete_provider(
+                        provider,
+                        [
+                            {"role": "system", "content": "Reply with only OK."},
+                            {"role": "user", "content": "OpenBiliClaw connectivity probe."},
+                        ],
+                        temperature=0,
+                        max_tokens=LLM_CONNECTIVITY_PROBE_MAX_TOKENS,
+                        reasoning_effort="",
+                        model=model or None,
+                    )
+
             response = await asyncio.wait_for(
-                registry.complete_provider(
-                    provider,
-                    [
-                        {"role": "system", "content": "Reply with only OK."},
-                        {"role": "user", "content": "OpenBiliClaw connectivity probe."},
-                    ],
-                    temperature=0,
-                    max_tokens=LLM_CONNECTIVITY_PROBE_MAX_TOKENS,
-                    reasoning_effort="",
-                    model=model or None,
-                ),
+                _complete_probe(),
                 timeout=timeout_s,
             )
             ok = bool(str(getattr(response, "content", "") or "").strip())

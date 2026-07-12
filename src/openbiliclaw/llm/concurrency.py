@@ -69,27 +69,35 @@ class PrioritySemaphore:
         loop = asyncio.get_event_loop()
         future: asyncio.Future[None] = loop.create_future()
         heapq.heappush(self._waiters, (priority, next(self._counter), future))
+        self._drain_waiters()
         try:
-            await future
+            await asyncio.shield(future)
         except asyncio.CancelledError:
             self._waiters = [entry for entry in self._waiters if entry[2] is not future]
             heapq.heapify(self._waiters)
             if future.done() and not future.cancelled():
-                self._release_one()
+                self.release()
             raise
 
     def release(self) -> None:
         if self._in_flight <= 0:
             raise RuntimeError("PrioritySemaphore released too many times")
-        self._release_one()
+        self._in_flight -= 1
+        self._drain_waiters()
 
-    def _release_one(self) -> None:
-        while self._waiters:
+    def _drain_waiters(self) -> None:
+        while self._in_flight < self._capacity and self._waiters:
             _, _, future = heapq.heappop(self._waiters)
             if not future.done():
+                self._in_flight += 1
                 future.set_result(None)
-                return
-        self._in_flight = max(0, self._in_flight - 1)
+
+    def resize(self, capacity: int) -> None:
+        """Change capacity without revoking active holders."""
+        if capacity < 1:
+            raise ValueError("capacity must be >= 1")
+        self._capacity = capacity
+        self._drain_waiters()
 
     @asynccontextmanager
     async def slot(self, priority: int) -> AsyncIterator[None]:
@@ -139,6 +147,7 @@ _KNOWN_MAINTENANCE_PREFIXES = (
     "soul.",
     "sources.",
 )
+_MAINTENANCE_CALLERS = {"api.config_probe"}
 
 
 class LLMConcurrencyGate:
@@ -150,6 +159,15 @@ class LLMConcurrencyGate:
         self._total = PrioritySemaphore(self.total_concurrency)
         self._background = PrioritySemaphore(self.background_concurrency)
         self._warned_unknown_callers: set[str] = set()
+
+    def reconfigure(self, total_concurrency: int) -> None:
+        """Resize this runtime-owned gate in place for a hot reload."""
+        total = coerce_total_concurrency(total_concurrency)
+        background = background_llm_concurrency(total)
+        self.total_concurrency = total
+        self.background_concurrency = background
+        self._total.resize(total)
+        self._background.resize(background)
 
     def classify(self, caller: str) -> LLMTrafficClass:
         tag = caller.strip()
@@ -163,7 +181,9 @@ class LLMConcurrencyGate:
             return LLMTrafficClass.REFILL_SUPPLY
         if tag.startswith("sources.") and tag.endswith(".extract"):
             return LLMTrafficClass.MAINTENANCE
-        if any(tag.startswith(prefix) for prefix in _KNOWN_MAINTENANCE_PREFIXES):
+        if tag in _MAINTENANCE_CALLERS or any(
+            tag.startswith(prefix) for prefix in _KNOWN_MAINTENANCE_PREFIXES
+        ):
             return LLMTrafficClass.MAINTENANCE
         if tag not in self._warned_unknown_callers:
             self._warned_unknown_callers.add(tag)

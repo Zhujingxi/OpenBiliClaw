@@ -10,6 +10,7 @@ from openbiliclaw.llm.concurrency import (
     LLMTrafficClass,
     background_llm_concurrency,
 )
+from openbiliclaw.llm.service import LLMService
 
 
 async def _wait_until(predicate: object) -> None:
@@ -25,6 +26,112 @@ def test_background_concurrency_reserves_one_total_slot() -> None:
     assert background_llm_concurrency(3) == 2
     assert background_llm_concurrency(1) == 1
     assert background_llm_concurrency("invalid") == 3
+
+
+def test_two_services_share_exact_gate_object() -> None:
+    gate = LLMConcurrencyGate(4)
+    registry = object()
+    memory = object()
+
+    left = LLMService(registry=registry, memory=memory, concurrency_gate=gate)  # type: ignore[arg-type]
+    right = LLMService(registry=registry, memory=memory, concurrency_gate=gate)  # type: ignore[arg-type]
+
+    assert left.concurrency_gate is gate
+    assert right.concurrency_gate is gate
+
+
+async def test_resize_up_wakes_queued_waiters() -> None:
+    gate = LLMConcurrencyGate(1)
+    release = asyncio.Event()
+    entered = 0
+
+    async def call() -> None:
+        nonlocal entered
+        async with gate.slot(caller="soul.dialogue"):
+            entered += 1
+            await release.wait()
+
+    tasks = [asyncio.create_task(call()) for _ in range(3)]
+    await _wait_until(lambda: gate.status_payload()["llm_total_waiting"] == 2)
+    gate.reconfigure(3)
+    await _wait_until(lambda: entered == 3)
+    assert gate.status_payload()["llm_total_active"] == 3
+    release.set()
+    await asyncio.gather(*tasks)
+
+
+async def test_resize_down_waits_for_active_calls_before_new_admission() -> None:
+    gate = LLMConcurrencyGate(3)
+    releases = [asyncio.Event() for _ in range(4)]
+    entered = 0
+
+    async def call(index: int) -> None:
+        nonlocal entered
+        async with gate.slot(caller="soul.dialogue"):
+            entered += 1
+            await releases[index].wait()
+
+    active = [asyncio.create_task(call(index)) for index in range(3)]
+    await _wait_until(lambda: entered == 3)
+    gate.reconfigure(1)
+    queued = asyncio.create_task(call(3))
+    await _wait_until(lambda: gate.status_payload()["llm_total_waiting"] == 1)
+    releases[0].set()
+    await _wait_until(lambda: gate.status_payload()["llm_total_active"] == 2)
+    assert entered == 3
+    releases[1].set()
+    await _wait_until(lambda: gate.status_payload()["llm_total_active"] == 1)
+    assert entered == 3
+    releases[2].set()
+    await _wait_until(lambda: entered == 4)
+    releases[3].set()
+    await asyncio.gather(*active, queued)
+    assert gate.status_payload()["llm_total_active"] == 0
+
+
+async def test_old_and_new_services_share_total_during_rebuild_overlap() -> None:
+    from openbiliclaw.llm.base import LLMResponse
+
+    gate = LLMConcurrencyGate(1)
+    release = asyncio.Event()
+    provider_entered = 0
+
+    class Registry:
+        default_provider = "fake"
+
+        def is_chat_capable(self, name: str) -> bool:
+            return name == "fake"
+
+        async def complete(self, messages: object, **kwargs: object) -> LLMResponse:
+            nonlocal provider_entered
+            provider_entered += 1
+            await release.wait()
+            return LLMResponse(content="ok", provider="fake")
+
+        async def complete_provider(
+            self, provider_name: str, messages: object, **kwargs: object
+        ) -> LLMResponse:
+            return await self.complete(messages, **kwargs)
+
+    registry = Registry()
+    old_service = LLMService(registry=registry, memory=object(), concurrency_gate=gate)  # type: ignore[arg-type]
+    new_service = LLMService(registry=registry, memory=object(), concurrency_gate=gate)  # type: ignore[arg-type]
+    old_call = asyncio.create_task(
+        old_service.complete_with_core_memory(
+            system_instruction="system", user_input="old", caller="soul.dialogue"
+        )
+    )
+    await _wait_until(lambda: provider_entered == 1)
+    new_call = asyncio.create_task(
+        new_service.complete_with_core_memory(
+            system_instruction="system", user_input="new", caller="soul.dialogue"
+        )
+    )
+    await _wait_until(lambda: gate.status_payload()["llm_total_waiting"] == 1)
+    assert provider_entered == 1
+    release.set()
+    await asyncio.gather(old_call, new_call)
+    assert gate.status_payload()["llm_total_active"] == 0
 
 
 async def test_three_background_calls_leave_default_interactive_slot() -> None:

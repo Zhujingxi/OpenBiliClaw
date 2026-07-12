@@ -749,6 +749,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
         ) -> None:
             self.llm_service = llm_service
             self.database = database
+            self.concurrency = concurrency
 
         def register_strategy(self, strategy: object) -> None:
             registered_strategies.append(str(getattr(strategy, "name", "")))
@@ -779,6 +780,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     fake_config = SimpleNamespace(
         data_path=Path("/tmp/openclaw-data"),
         llm=SimpleNamespace(
+            concurrency=3,
             soul=SimpleNamespace(provider="claude", model="claude-sonnet"),
             discovery=SimpleNamespace(provider="deepseek", model="deepseek-chat"),
             recommendation=SimpleNamespace(provider="", model=""),
@@ -880,10 +882,11 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     assert services.soul_engine.kwargs["speculation_max_primary_interests"] == 17
     assert services.soul_engine.kwargs["speculation_max_secondary_interests"] == 66
     assert services.soul_engine.kwargs["speculator_idle_interval_minutes"] == 11
-    assert services.soul_engine.kwargs["llm_concurrency"] == 4
+    assert services.soul_engine.kwargs["llm_concurrency"] == 3
     assert services.llm_service.module_overrides["discovery"].provider == "deepseek"
     assert services.llm_service.module_overrides["evaluation"].model == "gpt-4o-mini"
-    assert services.llm_service.concurrency == 4
+    assert services.llm_service.concurrency == 3
+    assert services.discovery_engine.concurrency.llm_evaluation_concurrency == 2
     assert (
         services.llm_service.concurrency_gate is services.soul_engine.kwargs["llm_concurrency_gate"]
     )

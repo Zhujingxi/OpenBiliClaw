@@ -1,6 +1,8 @@
 # Runtime Module
 
-> API runtime/热重载各创建一套共享 LLM gate 并注入主服务、Soul 与 refresh；runtime status 暴露 total/background capacity、active、waiting，发现评估 fan-out 派生自总并发。
+> API runtime 启动时创建一套共享 LLM gate 并注入主服务、Soul 与 refresh；runtime status 暴露 total/background capacity、active、waiting，发现评估 fan-out 派生自总并发。
+
+gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一对象上调整 total/background，因此旧 HTTP/对话学习调用与新服务仍竞争同一个真实总上限。
 
 ## 概述
 

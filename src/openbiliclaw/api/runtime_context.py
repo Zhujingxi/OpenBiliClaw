@@ -260,6 +260,7 @@ class RuntimeContext:
     # are constructed so old detached work doesn't compete with the freshly
     # built runtime for SQLite writes / LLM tokens.
     task_registry: BackgroundTaskRegistry = field(default_factory=BackgroundTaskRegistry)
+    llm_concurrency_gate: Any = None
     # Lazily-built guided-init coordinator (gui-init spec §5). Not a constructor
     # arg; created on first access bound to THIS ctx so it always reads the
     # current database / runtime_controller even after a hot-reload swaps them
@@ -386,7 +387,7 @@ class RuntimeContext:
         new_usage_recorder = UsageRecorder(sink=self.database)
         new_module_overrides = module_overrides_from_config(new_config)
         llm_concurrency = _llm_concurrency_from_config(new_config)
-        new_llm_gate = LLMConcurrencyGate(llm_concurrency)
+        new_llm_gate = self.llm_concurrency_gate or LLMConcurrencyGate(llm_concurrency)
         new_llm_service = LLMService(
             registry=new_registry,
             memory=self.memory_manager,
@@ -964,6 +965,8 @@ class RuntimeContext:
 
         # ── Atomic swap ─────────────────────────────────────────────
         # All construction succeeded → assign attributes.
+        new_llm_gate.reconfigure(llm_concurrency)
+        self.llm_concurrency_gate = new_llm_gate
         self.config = new_config
         self.llm_registry = new_registry
         self.llm_service = new_llm_service
