@@ -1665,8 +1665,21 @@ class RecommendationEngine:
                     budget["remaining"] -= 1
                     try:
                         total += await run(subset, depth + 1)
-                    except ExpressionCopyTransientError as transient:
-                        transient.completed += total
+                    except ExpressionCopyTransientError as downstream:
+                        raise ExpressionCopyTransientError(
+                            kind=downstream.kind,
+                            completed=total + downstream.completed,
+                            retry_after=downstream.retry_after,
+                        ) from downstream
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as downstream:
+                        if classify_llm_failure_kind(downstream) in {
+                            "auth_failed",
+                            "no_provider",
+                        }:
+                            prior = max(0, int(getattr(downstream, "completed", 0) or 0))
+                            downstream.completed = total + prior  # type: ignore[attr-defined]
                         raise
                 return total
 

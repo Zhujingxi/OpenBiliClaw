@@ -66,3 +66,16 @@ batch completion, carries cumulative successful writes and provider retry-after,
 invalidates duplicate keyed evaluation rows before retry, restricts resume to
 exact `startup` or `config_*` / `manual_*`, applies retry-after to every transient
 kind, and recognizes only connection-specific `OSError` errno/message shapes.
+
+## Cumulative same-branch follow-up
+
+An additional review isolated the nested shape “A/B persisted, C/D missing-only
+retry fails”. The public drain regression already proved transient progress was
+two, but the recursive implementation mutated the downstream exception and did
+not attach ancestor progress to auth/no-provider exceptions. A new RED auth case
+recorded `completed=0` after two successful writes. The recursion now creates a
+fresh transient error with `ancestor_total + downstream.completed` (preserving
+kind and retry-after), avoiding mutation/double counting, and attaches the same
+cumulative count to auth/no-provider failures. Public drain plus coordinator
+coverage asserts A/B persisted, C/D pending, propagated `completed=2`, and
+`expression_last_completed=2`.

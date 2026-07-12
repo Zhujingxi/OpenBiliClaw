@@ -228,13 +228,16 @@ async def test_no_provider_pauses_until_exact_config_notification() -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
-            raise LLMFallbackError("No provider was available to process the request.")
+            error = LLMFallbackError("No provider was available to process the request.")
+            error.completed = 2  # type: ignore[attr-defined]
+            raise error
         pending.value = 0
         return 8
 
     coordinator = _coordinator(pending, drain, safety_wake_seconds=0.01)
     task = asyncio.create_task(coordinator.run_forever())
     await _wait_until(lambda: coordinator.status_payload()["expression_batch_state"] == "paused")
+    assert coordinator.status_payload()["expression_last_completed"] == 2
     coordinator.notify("configurationless")
     await asyncio.sleep(0.03)
     assert calls == 1

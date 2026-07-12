@@ -22,6 +22,7 @@ from openbiliclaw.recommendation.engine import (
     RecommendationEngine,
     _recommendation_profile_summary,
 )
+from openbiliclaw.runtime.expression_copy import ExpressionCopyCoordinator
 from openbiliclaw.soul.profile import InterestTag, PreferenceLayer, SoulProfile
 from openbiliclaw.storage.database import Database
 
@@ -3063,6 +3064,171 @@ async def test_public_expression_drain_propagates_auth_and_no_provider(
         with pytest.raises(type(error)):
             await engine.drain_pending_expression_copy(profile=_build_profile(), limit=2)
     assert llm.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_public_expression_drain_carries_partial_progress_into_missing_retry_transient() -> (
+    None
+):
+    class _PartialThenTransientLLM:
+        def __init__(self) -> None:
+            self.request_ids: list[tuple[str, ...]] = []
+
+        async def complete_structured_task(
+            self, *, user_input: str, **kwargs: object
+        ) -> LLMResponse:
+            batch = _content_batch_from_prompt(user_input)
+            ids = tuple(str(item["bvid"]) for item in batch)
+            self.request_ids.append(ids)
+            if len(self.request_ids) == 1:
+                return LLMResponse(
+                    content=json.dumps(
+                        [
+                            {"bvid": key, "expression": f"copy-{key}", "topic_label": "ok"}
+                            for key in ids[:2]
+                        ]
+                    ),
+                    provider="test",
+                    model="dummy",
+                    usage={},
+                )
+            error = TimeoutError("missing subset timed out")
+            error.retry_after = 45  # type: ignore[attr-defined]
+            raise error
+
+    items = [
+        DiscoveredContent(
+            bvid=key,
+            title=key,
+            style_key="deep_dive",
+            topic_group="test",
+            relevance_score=0.8,
+        )
+        for key in ("A", "B", "C", "D")
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, items, precomputed=False)
+        llm = _PartialThenTransientLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+        with pytest.raises(ExpressionCopyTransientError) as exc_info:
+            await engine.drain_pending_expression_copy(profile=_build_profile(), limit=4)
+        rows = {row["bvid"]: dict(row) for row in db.get_cached_content(limit=10)}
+    assert llm.request_ids == [("A", "B", "C", "D"), ("C", "D")]
+    assert exc_info.value.completed == 2
+    assert exc_info.value.retry_after == 45.0
+    assert rows["A"]["pool_expression"] == "copy-A"
+    assert rows["B"]["pool_expression"] == "copy-B"
+    assert rows["C"]["pool_expression"] == ""
+    assert rows["D"]["pool_expression"] == ""
+
+
+@pytest.mark.asyncio
+async def test_expression_partial_progress_is_attached_to_downstream_auth_failure() -> None:
+    class _PartialThenAuthLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured_task(
+            self, *, user_input: str, **kwargs: object
+        ) -> LLMResponse:
+            self.calls += 1
+            ids = tuple(str(item["bvid"]) for item in _content_batch_from_prompt(user_input))
+            if self.calls == 1:
+                return LLMResponse(
+                    content=json.dumps(
+                        [
+                            {"bvid": key, "expression": f"copy-{key}", "topic_label": "ok"}
+                            for key in ids[:2]
+                        ]
+                    ),
+                    provider="test",
+                    model="dummy",
+                    usage={},
+                )
+            raise LLMProviderError("HTTP 401 unauthorized: invalid api key")
+
+    items = [
+        DiscoveredContent(
+            bvid=key,
+            title=key,
+            style_key="deep_dive",
+            topic_group="test",
+            relevance_score=0.8,
+        )
+        for key in ("A", "B", "C", "D")
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, items, precomputed=False)
+        engine = RecommendationEngine(llm=_PartialThenAuthLLM(), database=db)
+        with pytest.raises(LLMProviderError) as exc_info:
+            await engine.drain_pending_expression_copy(profile=_build_profile(), limit=4)
+    assert getattr(exc_info.value, "completed", 0) == 2
+
+
+@pytest.mark.asyncio
+async def test_expression_coordinator_reports_same_branch_partial_progress() -> None:
+    class _PartialThenTimeoutLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured_task(
+            self, *, user_input: str, **kwargs: object
+        ) -> LLMResponse:
+            self.calls += 1
+            ids = tuple(str(item["bvid"]) for item in _content_batch_from_prompt(user_input))
+            if self.calls == 1:
+                return LLMResponse(
+                    content=json.dumps(
+                        [
+                            {"bvid": key, "expression": f"copy-{key}", "topic_label": "ok"}
+                            for key in ids[:2]
+                        ]
+                    ),
+                    provider="test",
+                    model="dummy",
+                    usage={},
+                )
+            raise TimeoutError("missing subset timed out")
+
+    items = [
+        DiscoveredContent(
+            bvid=key,
+            title=key,
+            style_key="deep_dive",
+            topic_group="test",
+            relevance_score=0.8,
+        )
+        for key in ("A", "B", "C", "D")
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, items, precomputed=False)
+        engine = RecommendationEngine(llm=_PartialThenTimeoutLLM(), database=db)
+        coordinator = ExpressionCopyCoordinator(
+            pending_count_provider=lambda: 4,
+            drain_callback=lambda limit: engine.drain_pending_expression_copy(
+                profile=_build_profile(), limit=limit
+            ),
+            min_items=1,
+            safety_wake_seconds=0.01,
+        )
+        task = asyncio.create_task(coordinator.run_forever())
+        async with asyncio.timeout(2):
+            while coordinator.status_payload()["expression_batch_state"] != "backoff":
+                await asyncio.sleep(0)
+        rows = {row["bvid"]: dict(row) for row in db.get_cached_content(limit=10)}
+        assert coordinator.status_payload()["expression_last_completed"] == 2
+        assert rows["A"]["pool_expression"] == "copy-A"
+        assert rows["B"]["pool_expression"] == "copy-B"
+        assert rows["C"]["pool_expression"] == ""
+        assert rows["D"]["pool_expression"] == ""
+        await coordinator.stop()
+        await task
 
 
 @pytest.mark.asyncio
