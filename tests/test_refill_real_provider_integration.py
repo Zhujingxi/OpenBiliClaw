@@ -51,9 +51,24 @@ def _load_live_config_and_registry() -> tuple[Config, LLMRegistry]:
     config = load_config(config_path) if config_path else load_config()
     requested_provider = os.getenv(_LIVE_PROVIDER_ENV, "").strip().lower()
     if requested_provider:
+        # A selected live provider must win over every LLMService routing
+        # bucket. Retaining an old module model (for example an Ollama model)
+        # would still route the selected provider to the wrong model, so each
+        # override deliberately falls back to the selected provider's model.
         config = replace(
             config,
-            llm=replace(config.llm, default_provider=requested_provider),
+            llm=replace(
+                config.llm,
+                default_provider=requested_provider,
+                soul=replace(config.llm.soul, provider=requested_provider, model=""),
+                discovery=replace(config.llm.discovery, provider=requested_provider, model=""),
+                recommendation=replace(
+                    config.llm.recommendation,
+                    provider=requested_provider,
+                    model="",
+                ),
+                evaluation=replace(config.llm.evaluation, provider=requested_provider, model=""),
+            ),
         )
     registry = build_llm_registry(config)
     if requested_provider and registry.default_provider != requested_provider:

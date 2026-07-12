@@ -43,8 +43,8 @@ Second run after adding phase-only markers and explicit timeouts:
   `OPENBILICLAW_REFILL_E2E=1`,
   `OPENBILICLAW_REFILL_CONFIG=/Users/white/workspace/OpenBiliClaw/config.toml`,
   and `OPENBILICLAW_REFILL_PROVIDER=openai_compatible`. The test loads that
-  path only when explicitly supplied and clones the provider default in memory;
-  it never writes config or logs credentials.
+  path only when explicitly supplied and clones the selected default plus every
+  LLMService module route in memory; it never writes config or logs credentials.
 - A 30-second normal-registry completion probe succeeded in **5.6 seconds**.
 - The full temporary-DB/read-only-ranking run reached `fetched=8`, then failed
   its intentional admission assertion in **33.57 seconds**: `evaluated=8`,
@@ -61,6 +61,13 @@ Second run after adding phase-only markers and explicit timeouts:
   failure. No threshold, profile, source data, or provider configuration was
   changed to manufacture a pass; no raw response, prompt, content body, Cookie,
   or key was printed.
+- Follow-up harness correction: an explicit live provider now also overrides
+  `soul`, `discovery`, `recommendation`, and `evaluation` module providers and
+  clears their old per-module model overrides, so an `evaluation=ollama`
+  setting cannot silently win over the requested compatible provider. A guard
+  test proves `discovery.evaluate_batch` resolves the explicit provider. The
+  full live test was deliberately not rerun after this routing correction,
+  pending review of the selection semantics.
 
 ## Guard and focused checks
 

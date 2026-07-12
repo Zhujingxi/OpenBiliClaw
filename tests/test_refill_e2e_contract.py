@@ -4,9 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig, ModuleLLMConfig
 from openbiliclaw.llm.base import LLMResponse, LLMTimeoutError
 from openbiliclaw.llm.concurrency import LLMConcurrencyGate
+from openbiliclaw.llm.service import LLMService, module_overrides_from_config
 
 from . import test_refill_real_provider_integration as live_refill
 from .test_refill_real_provider_integration import _LiveMetrics, _MonitoredRegistry
@@ -149,6 +150,47 @@ def test_live_refill_uses_explicit_config_and_provider_without_mutating_loaded_c
     assert loaded.llm.default_provider == "ollama"
     assert config.llm.default_provider == "openai_compatible"
     assert registry.default_provider == "openai_compatible"
+
+
+def test_live_refill_provider_override_wins_over_evaluation_module_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = Config(
+        llm=LLMConfig(
+            default_provider="openai_compatible",
+            openai_compatible=LLMProviderConfig(
+                api_key="test-compatible-key",
+                base_url="https://compatible.example/v1",
+                model="test-compatible-model",
+            ),
+            ollama=LLMProviderConfig(model="old-local-model"),
+            soul=ModuleLLMConfig(provider="ollama", model="old-soul-model"),
+            discovery=ModuleLLMConfig(provider="ollama", model="old-discovery-model"),
+            recommendation=ModuleLLMConfig(provider="ollama", model="old-recommendation-model"),
+            evaluation=ModuleLLMConfig(provider="ollama", model="old-evaluation-model"),
+        )
+    )
+    monkeypatch.delenv("OPENBILICLAW_REFILL_CONFIG", raising=False)
+    monkeypatch.setattr(live_refill, "load_config", lambda: loaded)
+    monkeypatch.setenv("OPENBILICLAW_REFILL_PROVIDER", "openai_compatible")
+
+    config, registry = live_refill._load_live_config_and_registry()
+    overrides = module_overrides_from_config(config)
+    service = LLMService(registry=registry, memory=None, module_overrides=overrides)  # type: ignore[arg-type]
+
+    assert loaded.llm.evaluation.provider == "ollama"
+    assert set(overrides) == {"soul", "discovery", "recommendation", "evaluation"}
+    assert {name: override.provider for name, override in overrides.items()} == {
+        "soul": "openai_compatible",
+        "discovery": "openai_compatible",
+        "recommendation": "openai_compatible",
+        "evaluation": "openai_compatible",
+    }
+    assert all(override.model == "" for override in overrides.values())
+    assert service._resolve_module_override("discovery.evaluate_batch") == (
+        "openai_compatible",
+        None,
+    )
 
 
 def test_live_refill_fails_when_explicit_provider_is_not_registered(
