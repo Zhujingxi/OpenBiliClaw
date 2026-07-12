@@ -32,6 +32,8 @@ if TYPE_CHECKING:
 _LIVE = os.getenv("OPENBILICLAW_REFILL_E2E", "") == "1"
 _LIVE_CONFIG_ENV = "OPENBILICLAW_REFILL_CONFIG"
 _LIVE_PROVIDER_ENV = "OPENBILICLAW_REFILL_PROVIDER"
+_LIVE_RANKING_RID = 188
+_LIVE_RANKING_LIMIT = 8
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not _LIVE, reason="set OPENBILICLAW_REFILL_E2E=1 for live refill E2E"),
@@ -292,7 +294,7 @@ async def test_real_provider_refill_and_interactive_fourth_slot(tmp_path: Path) 
     client = BilibiliAPIClient(cookie="")
     try:
         async with asyncio.timeout(30):
-            rows = (await client.get_ranking())[:8]
+            rows = (await client.get_ranking(rid=_LIVE_RANKING_RID))[:_LIVE_RANKING_LIMIT]
     finally:
         await client.close()
     items = [
@@ -310,7 +312,10 @@ async def test_real_provider_refill_and_interactive_fourth_slot(tmp_path: Path) 
         for row in rows
         if str(row.get("bvid", ""))
     ]
-    print(f"live_refill_phase=ranking fetched={len(items)}", flush=True)
+    print(
+        f"live_refill_phase=ranking ranking_rid={_LIVE_RANKING_RID} fetched={len(items)}",
+        flush=True,
+    )
     assert items, "live fetched_count=0"
     pipeline = DiscoveryCandidatePipeline(
         database=db,

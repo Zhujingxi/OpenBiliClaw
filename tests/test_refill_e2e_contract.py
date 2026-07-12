@@ -52,6 +52,15 @@ def test_live_rejection_failure_reports_sanitized_score_and_admission_counts() -
     assert "parser_unresolved=" in source
 
 
+def test_live_refill_uses_public_technology_ranking_with_sanitized_rid() -> None:
+    source = Path("tests/test_refill_real_provider_integration.py").read_text(encoding="utf-8")
+    assert live_refill._LIVE_RANKING_RID == 188
+    assert live_refill._LIVE_RANKING_LIMIT == 8
+    assert "get_ranking(rid=_LIVE_RANKING_RID)" in source
+    assert "[:_LIVE_RANKING_LIMIT]" in source
+    assert "ranking_rid={_LIVE_RANKING_RID}" in source
+
+
 @pytest.mark.asyncio
 async def test_retry_observer_counts_only_next_actual_invocation_after_transient() -> None:
     class _SequenceRegistry:
