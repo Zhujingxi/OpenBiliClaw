@@ -601,6 +601,14 @@ test("mergeDelightCandidate keeps handled local state for the same bvid and igno
     normalizeDelightCandidate({ bvid: "BV1LIKED", state: "pending" }),
     { bvid: "BV1LIKED", state: "liked", response_message: "好，这类多来点。" },
   );
+  const sameStateLiked = mergeDelightCandidate(
+    normalizeDelightCandidate({
+      bvid: "BV1LIKEDLOCAL",
+      state: "liked",
+      response_message: "本地已喜欢文案",
+    }),
+    { bvid: "BV1LIKEDLOCAL", state: "liked" },
+  );
 
   assert.equal(merged.title, "新标题");
   assert.equal(merged.delight_reason, "新理由");
@@ -609,6 +617,28 @@ test("mergeDelightCandidate keeps handled local state for the same bvid and igno
   assert.equal(ignored, current);
   assert.equal(refreshedLiked?.state, "liked");
   assert.equal(refreshedLiked?.response_message, "好，这类多来点。");
+  assert.equal(sameStateLiked?.response_message, "本地已喜欢文案");
+});
+
+test("authoritative liked state does not inherit response copy from a different state", () => {
+  const currentViewed = normalizeDelightCandidate({
+    bvid: "BV1STATECHANGE",
+    state: "viewed",
+    response_message: "已打开，阿B 会把这次点击当成强信号。",
+  });
+  const merged = mergeDelightCandidate(currentViewed, {
+    bvid: "BV1STATECHANGE",
+    state: "liked",
+  });
+  const uiState = getDelightUiState(merged);
+
+  assert.equal(merged?.state, "liked");
+  assert.equal(merged?.response_message, "");
+  assert.equal(uiState.response_message, "好，这类多来点。");
+  assert.equal(uiState.show_status, true);
+  assert.equal(uiState.show_actions, true);
+  assert.equal(uiState.like_pressed, true);
+  assert.equal(uiState.like_disabled, true);
 });
 
 test("getDelightUiState projects status and actions independently for every state", () => {

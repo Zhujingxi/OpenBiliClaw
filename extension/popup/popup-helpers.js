@@ -378,13 +378,17 @@ export function mergeDelightCandidate(current, incoming, dismissedBvids = []) {
   }
   const currentState = normalizeText(current?.state) || "pending";
   const incomingState = normalizedIncoming.state;
+  const currentResponse = normalizeText(current?.response_message);
+  let responseMessage = normalizedIncoming.response_message;
+  if (incomingState === "pending") {
+    responseMessage = currentResponse || responseMessage;
+  } else if (incomingState === currentState && !responseMessage) {
+    responseMessage = currentResponse;
+  }
   return {
     ...normalizedIncoming,
     state: incomingState !== "pending" ? incomingState : currentState,
-    response_message:
-      (incomingState !== "pending" && normalizedIncoming.response_message)
-      || normalizeText(current?.response_message)
-      || normalizedIncoming.response_message,
+    response_message: responseMessage,
     chat_reply: normalizeText(current?.chat_reply) || normalizedIncoming.chat_reply,
     composer_open: Boolean(current?.composer_open),
     chat_draft: normalizeText(current?.chat_draft),
