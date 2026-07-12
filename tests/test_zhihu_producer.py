@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class _Soul:
@@ -12,10 +16,15 @@ class _Soul:
 
 
 class _Pipeline:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        on_candidates_enqueued: Callable[[int], None] | None = None,
+    ) -> None:
         self.items: list[object] = []
         self.drained = False
         self.source_contexts: list[str] = []
+        self.on_candidates_enqueued = on_candidates_enqueued
 
     def pool_full(self) -> bool:
         return False
@@ -24,7 +33,10 @@ class _Pipeline:
         self.items.extend(items)
         self.source_context = source_context
         self.source_contexts.append(source_context)
-        return len(items)
+        inserted = len(items)
+        if inserted > 0 and self.on_candidates_enqueued is not None:
+            self.on_candidates_enqueued(inserted)
+        return inserted
 
     async def drain_pending(self, *, profile: object, batch_size: int) -> dict[str, int]:
         self.drained = True
@@ -160,6 +172,48 @@ async def test_zhihu_producer_enqueues_search_results_and_marks_keyword_used() -
     assert keyword_fetch.failed == []
     assert pipeline.source_context == "zhihu-search"
     assert pipeline.items[0].source_keyword_id == 11
+    assert pipeline.drained is True
+
+
+@pytest.mark.asyncio
+async def test_zhihu_producer_defers_to_coordinator_owned_candidate_evaluation() -> None:
+    from openbiliclaw.runtime.zhihu_producer import ZhihuDiscoveryProducer
+
+    queue = _Queue(
+        {
+            "items": [
+                {
+                    "scope": "zhihu_search",
+                    "search_keyword": "AI 工程化",
+                    "title": "如何做 AI 工程化？",
+                    "url": "https://www.zhihu.com/question/1/answer/2",
+                    "content_type": "answer",
+                    "content_id": "2",
+                }
+            ]
+        }
+    )
+    notifications: list[int] = []
+    pipeline = _Pipeline(
+        on_candidates_enqueued=notifications.append,
+    )
+    keyword_fetch = _KeywordFetch([SimpleNamespace(id=13, keyword="AI 工程化")])
+    producer = ZhihuDiscoveryProducer(
+        task_queue=queue,
+        soul_engine=_Soul(),
+        candidate_pipeline=pipeline,
+        candidate_evaluation_owned_by_coordinator=True,
+        keyword_fetch=keyword_fetch,
+        min_interval_minutes=0,
+        wait_seconds=0,
+    )
+
+    result = await producer.produce_if_due(limit=5)
+
+    assert result["enqueued"] == 1
+    assert notifications == [1]
+    assert pipeline.drained is False
+    assert "cached" not in result
 
 
 @pytest.mark.asyncio

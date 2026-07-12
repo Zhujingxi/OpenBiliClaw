@@ -1675,6 +1675,59 @@ class TestBackendAPI:
         assert isinstance(ctx.runtime_controller.reddit_producer, RedditDiscoveryProducer)
         assert ctx.runtime_controller.pool_source_shares["reddit"] == 2
 
+    def test_runtime_context_delegates_runtime_producer_evaluation_to_shared_coordinator(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        import openbiliclaw.api.runtime_context as runtime_context_module
+        import openbiliclaw.runtime.douyin_producer as douyin_producer_module
+        import openbiliclaw.runtime.zhihu_producer as zhihu_producer_module
+        from openbiliclaw.config import Config
+
+        config = Config(data_dir=str(tmp_path / "data"))
+        config.llm.default_provider = "ollama"
+        config.llm.ollama.model = "llama3"
+        config.sources.douyin.enabled = True
+        config.sources.youtube.enabled = True
+        config.sources.zhihu.enabled = True
+        producers: dict[str, SimpleNamespace] = {}
+
+        def build_producer(kind: str) -> SimpleNamespace:
+            producer = SimpleNamespace(kind=kind)
+            producers[kind] = producer
+            return producer
+
+        monkeypatch.setattr(
+            douyin_producer_module,
+            "build_douyin_discovery_producer",
+            lambda **_kwargs: build_producer("douyin"),
+        )
+        monkeypatch.setattr(
+            runtime_context_module,
+            "build_youtube_discovery_producer",
+            lambda **_kwargs: build_producer("youtube"),
+        )
+        monkeypatch.setattr(
+            zhihu_producer_module,
+            "build_zhihu_discovery_producer",
+            lambda **_kwargs: build_producer("zhihu"),
+        )
+
+        ctx = runtime_context_module.build_runtime_context(config)
+
+        assert set(producers) == {"douyin", "youtube", "zhihu"}
+        assert all(
+            producer.candidate_evaluation_owned_by_coordinator is True
+            for producer in producers.values()
+        )
+        notifications: list[str] = []
+        ctx.runtime_controller.candidate_eval_coordinator.notify = notifications.append
+        pipeline = ctx.runtime_controller.discovery_candidate_pipeline
+        assert callable(pipeline.on_candidates_enqueued)
+        pipeline.on_candidates_enqueued(1)
+        assert notifications == ["candidate_enqueued:pipeline"]
+
     def test_create_app_bootstrap_wires_discovery_concurrency_controller(
         self,
         monkeypatch,

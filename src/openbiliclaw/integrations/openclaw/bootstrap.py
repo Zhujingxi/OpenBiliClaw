@@ -301,21 +301,15 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         completed = await recommendation_engine.drain_pending_expression_copy(
             profile=profile, limit=limit
         )
-        publish = getattr(
-            runtime_controller, "_publish_precompute_replenishment_if_needed", None
-        )
+        publish = getattr(runtime_controller, "_publish_precompute_replenishment_if_needed", None)
         if callable(publish):
             await publish(before_pool_count=before)
         return int(completed)
 
     expression_coordinator = ExpressionCopyCoordinator(
-        pending_count_provider=lambda: int(
-            _candidate_eval_snapshot().admitted_pending_copy
-        ),
+        pending_count_provider=lambda: int(_candidate_eval_snapshot().admitted_pending_copy),
         drain_callback=_drain_expression_copy,
-        safety_wake_seconds=float(
-            getattr(config.scheduler, "refresh_check_interval_seconds", 60)
-        ),
+        safety_wake_seconds=float(getattr(config.scheduler, "refresh_check_interval_seconds", 60)),
     )
     runtime_controller.expression_copy_coordinator = expression_coordinator
     set_copy_callback = getattr(recommendation_engine, "set_copy_pending_callback", None)
@@ -333,9 +327,7 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         batch_size=30,
         supply_callback=_request_candidate_supply,
         post_commit_callback=_precompute_committed_candidates,
-        on_admitted=lambda count: expression_coordinator.notify(
-            f"candidate_admitted:{count}"
-        ),
+        on_admitted=lambda count: expression_coordinator.notify(f"candidate_admitted:{count}"),
         work_allowed=lambda: bool(
             getattr(runtime_controller, "_is_initialized", lambda: True)()
             and getattr(runtime_controller, "_llm_work_allowed", lambda: True)()
@@ -346,6 +338,9 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
     candidate_pipeline.on_candidates_enqueued = lambda _count: candidate_eval_coordinator.notify(
         "candidate_enqueued:pipeline"
     )
+    for producer in (douyin_producer, youtube_producer):
+        if producer is not None:
+            producer.candidate_evaluation_owned_by_coordinator = True
     set_pool_commit_callback = getattr(
         recommendation_engine,
         "set_pool_inventory_commit_callback",

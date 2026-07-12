@@ -976,18 +976,14 @@ class RuntimeContext:
             return int(completed)
 
         expression_coordinator = ExpressionCopyCoordinator(
-            pending_count_provider=lambda: int(
-                _candidate_eval_snapshot().admitted_pending_copy
-            ),
+            pending_count_provider=lambda: int(_candidate_eval_snapshot().admitted_pending_copy),
             drain_callback=_drain_expression_copy,
             safety_wake_seconds=float(
                 getattr(new_config.scheduler, "refresh_check_interval_seconds", 60)
             ),
         )
         new_runtime_controller.expression_copy_coordinator = expression_coordinator
-        set_copy_callback = getattr(
-            new_recommendation_engine, "set_copy_pending_callback", None
-        )
+        set_copy_callback = getattr(new_recommendation_engine, "set_copy_pending_callback", None)
         if callable(set_copy_callback):
             set_copy_callback(expression_coordinator.notify)
 
@@ -1003,9 +999,7 @@ class RuntimeContext:
             batch_size=30,
             supply_callback=_request_candidate_supply,
             post_commit_callback=_precompute_committed_candidates,
-            on_admitted=lambda count: expression_coordinator.notify(
-                f"candidate_admitted:{count}"
-            ),
+            on_admitted=lambda count: expression_coordinator.notify(f"candidate_admitted:{count}"),
             work_allowed=lambda: (
                 new_runtime_controller._is_initialized()  # noqa: SLF001
                 and new_runtime_controller._llm_work_allowed()  # noqa: SLF001
@@ -1018,6 +1012,13 @@ class RuntimeContext:
         new_candidate_pipeline.on_candidates_enqueued = lambda _count: (
             new_candidate_eval_coordinator.notify("candidate_enqueued:pipeline")
         )
+        for producer in (
+            new_douyin_producer,
+            new_youtube_producer,
+            new_zhihu_producer,
+        ):
+            if producer is not None:
+                producer.candidate_evaluation_owned_by_coordinator = True
         set_pool_commit_callback = getattr(
             new_recommendation_engine,
             "set_pool_inventory_commit_callback",
@@ -1217,15 +1218,11 @@ class RuntimeContext:
                         "post_reload_precompute_delight_scores",
                         delight(profile=profile, limit=30),
                     )
-                coordinator = getattr(
-                    self.runtime_controller, "expression_copy_coordinator", None
-                )
+                coordinator = getattr(self.runtime_controller, "expression_copy_coordinator", None)
                 if coordinator is not None:
                     coordinator.notify("hot_reload")
                 else:
-                    precompute = getattr(
-                        self.recommendation_engine, "precompute_pool_copy", None
-                    )
+                    precompute = getattr(self.recommendation_engine, "precompute_pool_copy", None)
                     if callable(precompute):
                         self.task_registry.track(
                             "post_reload_precompute_pool_copy",

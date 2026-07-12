@@ -1011,6 +1011,23 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     assert len(producer_kwargs) == 2
     assert all(kwargs["candidate_pipeline"] is pipeline for kwargs in producer_kwargs)
     assert services.runtime_controller.kwargs["youtube_producer"].kind == "youtube"
+    assert (
+        services.runtime_controller.kwargs[
+            "douyin_producer"
+        ].candidate_evaluation_owned_by_coordinator
+        is True
+    )
+    assert (
+        services.runtime_controller.kwargs[
+            "youtube_producer"
+        ].candidate_evaluation_owned_by_coordinator
+        is True
+    )
+    notifications: list[str] = []
+    services.runtime_controller.candidate_eval_coordinator.notify = notifications.append
+    assert callable(pipeline.on_candidates_enqueued)
+    pipeline.on_candidates_enqueued(1)
+    assert notifications == ["candidate_enqueued:pipeline"]
     assert services.runtime_controller.kwargs["check_interval_seconds"] == 77
     assert services.runtime_controller.kwargs["signal_event_threshold"] == 9
     assert services.runtime_controller.kwargs["trending_refresh_hours"] == 5
