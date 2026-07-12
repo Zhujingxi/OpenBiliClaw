@@ -22,6 +22,9 @@ def test_desktop_web_settings_wires_multimodal_discovery_controls() -> None:
     ):
         assert f'id="{element_id}"' in html
 
+    assert (
+        'id="candidateEvalConcurrency" inputmode="numeric" placeholder="3" min="1" max="3"' in html
+    )
     assert "const discovery = config.discovery || {}" in js
     assert 'setInput("candidateEvalConcurrency", discovery.candidate_eval_concurrency)' in js
     assert 'setSelect("multimodalEvaluationEnabled"' in js

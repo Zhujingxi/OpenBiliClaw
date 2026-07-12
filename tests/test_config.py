@@ -2163,7 +2163,7 @@ inspiration_replace_merged_keywords = true
 inspiration_search_backends = ["platform_sources", "exa", "you"]
 inspiration_breadth = "high"
 multimodal_evaluation_enabled = true
-candidate_eval_concurrency = 5
+candidate_eval_concurrency = 3
 multimodal_batch_size = 4
 multimodal_image_max_px = 512
 multimodal_image_quality = 80
@@ -2190,7 +2190,7 @@ multimodal_image_timeout_seconds = 10
         assert config.discovery.inspiration_search_backends == ("platform_sources", "exa", "you")
         assert config.discovery.inspiration_breadth == "high"
         assert config.discovery.multimodal_evaluation_enabled is True
-        assert config.discovery.candidate_eval_concurrency == 5
+        assert config.discovery.candidate_eval_concurrency == 3
         assert config.discovery.multimodal_batch_size == 4
         assert config.discovery.multimodal_image_max_px == 512
         assert config.discovery.multimodal_image_quality == 80
@@ -2212,6 +2212,31 @@ multimodal_image_timeout_seconds = 10
         )
 
     @pytest.mark.parametrize(
+        ("configured", "expected"),
+        [
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            # Scheduler integer settings fall back to their default when a
+            # persisted value exceeds the documented ceiling; they do not
+            # silently retain an unsafe value.
+            (8, 3),
+        ],
+    )
+    def test_discovery_candidate_eval_concurrency_is_limited_to_three(
+        self, tmp_path: Path, configured: int, expected: int
+    ) -> None:
+        toml_path = tmp_path / "c.toml"
+        toml_path.write_text(
+            f"[discovery]\ncandidate_eval_concurrency = {configured}\n",
+            encoding="utf-8",
+        )
+
+        config = load_config(toml_path)
+
+        assert config.discovery.candidate_eval_concurrency == expected
+
+    @pytest.mark.parametrize(
         ("field", "literal", "expected"),
         [
             ("kw_cache_high", "0", 30),
@@ -2225,7 +2250,7 @@ multimodal_image_timeout_seconds = 10
             ("planner_poll_seconds", '"nope"', 120),
             ("plan_ttl_hours", "0", 12),
             ("candidate_eval_concurrency", "0", 3),
-            ("candidate_eval_concurrency", "9", 3),
+            ("candidate_eval_concurrency", "4", 3),
             ("multimodal_batch_size", "0", 8),
             ("multimodal_batch_size", "13", 8),
             ("multimodal_image_max_px", "127", 384),

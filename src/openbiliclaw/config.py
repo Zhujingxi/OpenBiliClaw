@@ -508,8 +508,9 @@ class DiscoveryConfig:
     # Unified recommendation-pool admission floor. Source/provenance metadata
     # must never bypass this; explicit strategy thresholds live on candidates.
     admission_min_score: float = _DEFAULT_ADMISSION_MIN_SCORE
-    # Desired candidate-evaluation workers. Runtime reserves one global LLM
-    # slot, so the effective count may be lower than this configured value.
+    # Desired candidate-evaluation workers. The approved inventory-safe
+    # 3×30 design caps this at three (90 raw candidates in flight); runtime
+    # also reserves one global LLM slot, so the effective count may be lower.
     candidate_eval_concurrency: int = _DEFAULT_CANDIDATE_EVAL_CONCURRENCY
     # Optional cover-image evaluation. Kept off by default because it changes
     # LLM cost/latency and requires a vision-capable evaluation model.
@@ -1376,7 +1377,7 @@ def _build_discovery(discovery_raw: dict[str, Any]) -> DiscoveryConfig:
             discovery_raw.get("candidate_eval_concurrency"),
             default=_DEFAULT_CANDIDATE_EVAL_CONCURRENCY,
             min_value=1,
-            max_value=8,
+            max_value=3,
         ),
         multimodal_evaluation_enabled=_coerce_bool(
             discovery_raw.get("multimodal_evaluation_enabled"),

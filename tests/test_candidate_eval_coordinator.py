@@ -156,8 +156,28 @@ def _coordinator(
 def test_effective_candidate_eval_workers_reserves_one_llm_slot() -> None:
     assert effective_candidate_eval_workers(3, 4) == 3
     assert effective_candidate_eval_workers(3, 3) == 2
+    assert effective_candidate_eval_workers(8, 9) == 3
     assert effective_candidate_eval_workers(8, 1) == 1
     assert effective_candidate_eval_workers(0, 99) == 1
+
+
+@pytest.mark.asyncio
+async def test_coordinator_caps_worker_claims_at_three_batches_and_ninety_raw() -> None:
+    pipeline = _FakeStagedPipeline(candidate_count=240)
+    coordinator = _coordinator(pipeline, worker_count=8)
+
+    assert coordinator.worker_count == 3
+    task = asyncio.create_task(coordinator.run_forever())
+    coordinator.notify("test-cap")
+    await pipeline.wait_for_started(3)
+
+    assert len(pipeline.started) == 3
+    assert [len(batch.claim.rows) for batch in pipeline.started] == [30, 30, 30]
+    assert sum(len(batch.claim.rows) for batch in pipeline.started) == 90
+    assert pipeline.max_in_flight == 3
+
+    await coordinator.stop()
+    await task
 
 
 def test_projected_inventory_excludes_unscored_raw() -> None:

@@ -29,6 +29,16 @@ def test_source_platform_helpers_delegate_to_canonical_registry() -> None:
     assert _infer_source_platform_from_url("https://example.com/zhihu.com/question/1") == ""
 
 
+def test_discovery_config_response_caps_candidate_eval_concurrency_at_three() -> None:
+    from pydantic import ValidationError
+
+    from openbiliclaw.api.models import DiscoveryConfigOut
+
+    assert DiscoveryConfigOut(candidate_eval_concurrency=3).candidate_eval_concurrency == 3
+    with pytest.raises(ValidationError):
+        DiscoveryConfigOut(candidate_eval_concurrency=4)
+
+
 def assert_publication(payload: dict[str, object]) -> None:
     assert payload["published_at"] == "2026-07-08T06:30:00Z"
     assert payload["published_label"] == "3 days ago"
@@ -10141,7 +10151,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "git@github.com:example/OpenBiliClaw.git",
         ]
         cfg.discovery.multimodal_evaluation_enabled = True
-        cfg.discovery.candidate_eval_concurrency = 5
+        cfg.discovery.candidate_eval_concurrency = 3
         cfg.discovery.multimodal_batch_size = 4
         cfg.discovery.multimodal_image_max_px = 512
         cfg.discovery.multimodal_image_quality = 80
@@ -10219,7 +10229,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "git@github.com:example/OpenBiliClaw.git",
         ]
         assert data["discovery"]["multimodal_evaluation_enabled"] is True
-        assert data["discovery"]["candidate_eval_concurrency"] == 5
+        assert data["discovery"]["candidate_eval_concurrency"] == 3
         assert data["discovery"]["multimodal_batch_size"] == 4
         assert data["discovery"]["multimodal_image_max_px"] == 512
         assert data["discovery"]["multimodal_image_quality"] == 80
@@ -10284,7 +10294,9 @@ class TestEmbeddingAndCompatProviderE2E:
         assert "reddit_session" in detail["message"]
         assert not credential_file.exists()
 
-    def test_put_config_updates_multimodal_discovery_settings(self, monkeypatch, tmp_path) -> None:
+    def test_put_config_caps_candidate_eval_concurrency_at_three(
+        self, monkeypatch, tmp_path
+    ) -> None:
         from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
 
         cfg = Config(llm=LLMConfig(openai=LLMProviderConfig(api_key="sk-openai")))
@@ -10294,7 +10306,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "/api/config",
             json={
                 "discovery": {
-                    "candidate_eval_concurrency": 5,
+                    "candidate_eval_concurrency": 8,
                     "multimodal_evaluation_enabled": "true",
                     "multimodal_batch_size": 4,
                     "multimodal_image_max_px": 512,
@@ -10305,14 +10317,14 @@ class TestEmbeddingAndCompatProviderE2E:
         )
 
         assert response.status_code == 200
-        assert cfg.discovery.candidate_eval_concurrency == 5
+        assert cfg.discovery.candidate_eval_concurrency == 3
         assert cfg.discovery.multimodal_evaluation_enabled is True
         assert cfg.discovery.multimodal_batch_size == 4
         assert cfg.discovery.multimodal_image_max_px == 512
         assert cfg.discovery.multimodal_image_quality == 80
         assert cfg.discovery.multimodal_image_timeout_seconds == 10
         discovery = response.json()["config"]["discovery"]
-        assert discovery["candidate_eval_concurrency"] == 5
+        assert discovery["candidate_eval_concurrency"] == 3
         assert discovery["multimodal_evaluation_enabled"] is True
         assert discovery["multimodal_batch_size"] == 4
         assert discovery["multimodal_image_max_px"] == 512

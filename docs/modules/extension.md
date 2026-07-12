@@ -1,6 +1,6 @@
 # 浏览器插件模块
 
-> popup 的 LLM 总并发 placeholder/读取/保存 fallback 同步为 4；候选评估并发仍为 3，后台容量由后端派生。
+> popup 的 LLM 总并发 placeholder/读取/保存 fallback 同步为 4；候选评估并发可设 `1..3`（默认 3、每批 30 条、最多 90 条 raw 在途），后台容量仍由后端派生。
 
 ## 模块范围
 

@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 _RATE_LIMIT_BACKOFF_SECONDS = (15.0, 30.0, 60.0, 120.0, 300.0)
 _TRANSIENT_BACKOFF_SECONDS = (15.0, 30.0, 60.0, 120.0, 300.0)
 _NO_PROGRESS_BACKOFF_SECONDS = (60.0, 120.0, 300.0)
+_MAX_CANDIDATE_EVAL_WORKERS = 3
+_MAX_CANDIDATE_EVAL_BATCH_SIZE = 30
 
 
 @dataclass(frozen=True)
@@ -36,7 +38,7 @@ class CandidateEvalSnapshot:
 def effective_candidate_eval_workers(configured: int, llm_concurrency: int) -> int:
     """Reserve one global LLM slot while allocating candidate workers."""
 
-    desired = max(1, min(8, int(configured)))
+    desired = max(1, min(_MAX_CANDIDATE_EVAL_WORKERS, int(configured)))
     global_limit = max(1, int(llm_concurrency))
     return min(desired, max(1, global_limit - 1))
 
@@ -62,8 +64,11 @@ class CandidateEvalCoordinator:
         self.pipeline = pipeline
         self.snapshot_provider = snapshot_provider
         self.profile_provider = profile_provider
-        self.worker_count = max(1, min(8, int(worker_count)))
-        self.batch_size = max(1, min(30, int(batch_size)))
+        # The approved inventory-safe design bounds live raw work to 3×30.
+        # This constructor clamp protects direct composition roots as well as
+        # normal config/API validation.
+        self.worker_count = max(1, min(_MAX_CANDIDATE_EVAL_WORKERS, int(worker_count)))
+        self.batch_size = max(1, min(_MAX_CANDIDATE_EVAL_BATCH_SIZE, int(batch_size)))
         self.supply_callback = supply_callback
         self.post_commit_callback = post_commit_callback
         self.on_admitted = on_admitted

@@ -10255,7 +10255,7 @@ def create_app(
                     "candidate_eval_concurrency": (
                         _DEFAULT_CANDIDATE_EVAL_CONCURRENCY,
                         1,
-                        8,
+                        3,
                     ),
                     "multimodal_batch_size": (
                         _DEFAULT_MULTIMODAL_BATCH_SIZE,

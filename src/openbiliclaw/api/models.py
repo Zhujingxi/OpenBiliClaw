@@ -1251,7 +1251,7 @@ class DiscoveryConfigOut(BaseModel):
     planner_poll_seconds: int = 120
     plan_ttl_hours: int = 12
     admission_min_score: float = 0.60
-    candidate_eval_concurrency: int = 3
+    candidate_eval_concurrency: int = Field(default=3, ge=1, le=3)
     multimodal_evaluation_enabled: bool = False
     multimodal_batch_size: int = 8
     multimodal_image_max_px: int = 384

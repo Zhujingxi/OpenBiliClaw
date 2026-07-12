@@ -368,6 +368,11 @@ test("settings page round-trips multimodal discovery evaluation controls", () =>
   }
 
   assert.match(
+    popupHtml,
+    /id="cfgCandidateEvalConcurrency" type="number" min="1" max="3" step="1" placeholder="3"/,
+  );
+
+  assert.match(
     popupJs,
     /setVal\("cfgCandidateEvalConcurrency", cfg\.discovery\?\.candidate_eval_concurrency\)/,
   );
