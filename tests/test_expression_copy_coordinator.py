@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from openbiliclaw.llm.base import LLMFallbackError
+from openbiliclaw.recommendation.engine import ExpressionCopyTransientError
 from openbiliclaw.runtime.expression_copy import ExpressionCopyCoordinator
 
 if TYPE_CHECKING:
@@ -69,9 +71,7 @@ def _coordinator(
 async def test_eight_pending_starts_immediately() -> None:
     pending = _Pending(8)
     started = asyncio.Event()
-    coordinator = _coordinator(
-        pending, lambda limit: started.set() or min(limit, pending.value)
-    )
+    coordinator = _coordinator(pending, lambda limit: started.set() or min(limit, pending.value))
     task = asyncio.create_task(coordinator.run_forever())
     coordinator.notify("candidate_admitted")
     await asyncio.wait_for(started.wait(), timeout=0.2)
@@ -197,6 +197,49 @@ async def test_zero_progress_backs_off_fifteen_seconds() -> None:
     assert coordinator.status_payload()["expression_batch_deadline"] == 15.0
     await asyncio.sleep(0)
     assert calls == [8]
+    await coordinator.stop()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_transient_error_uses_retry_after_and_preserves_completed_progress() -> None:
+    clock = _FakeClock()
+    pending = _Pending(8)
+
+    def drain(_limit: int) -> int:
+        raise ExpressionCopyTransientError(kind="connection", completed=3, retry_after=45.0)
+
+    coordinator = _coordinator(pending, drain, time_fn=clock, wait_fn=clock.wait)
+    task = asyncio.create_task(coordinator.run_forever())
+    coordinator.notify("start")
+    await _wait_until(lambda: coordinator.status_payload()["expression_batch_state"] == "backoff")
+    assert coordinator.status_payload()["expression_batch_deadline"] == 45.0
+    assert coordinator.status_payload()["expression_last_completed"] == 3
+    await coordinator.stop()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_no_provider_pauses_until_exact_config_notification() -> None:
+    pending = _Pending(8)
+    calls = 0
+
+    def drain(_limit: int) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise LLMFallbackError("No provider was available to process the request.")
+        pending.value = 0
+        return 8
+
+    coordinator = _coordinator(pending, drain, safety_wake_seconds=0.01)
+    task = asyncio.create_task(coordinator.run_forever())
+    await _wait_until(lambda: coordinator.status_payload()["expression_batch_state"] == "paused")
+    coordinator.notify("configurationless")
+    await asyncio.sleep(0.03)
+    assert calls == 1
+    coordinator.notify("config_reloaded")
+    await _wait_until(lambda: calls == 2)
     await coordinator.stop()
     await task
 

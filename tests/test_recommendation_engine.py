@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from openbiliclaw.discovery.engine import DiscoveredContent
-from openbiliclaw.llm.base import LLMResponse
+from openbiliclaw.llm.base import LLMFallbackError, LLMProviderError, LLMRateLimitError, LLMResponse
 from openbiliclaw.llm.service import LLMProviderExecutionError
 from openbiliclaw.recommendation.engine import (
     ExpressionBatchMalformed,
@@ -2963,6 +2963,106 @@ async def test_expression_malformed_singleton_stays_pending_without_single_fallb
         row = next(row for row in db.get_cached_content(limit=10) if row["bvid"] == item.bvid)
     assert llm.callers == ["recommendation.write_expression"]
     assert row["pool_expression"] == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "kind"),
+    [
+        (LLMRateLimitError("429 too many requests"), "rate_limited"),
+        (TimeoutError("request timed out"), "timeout"),
+        (ConnectionError("connection reset"), "connection"),
+        (LLMProviderExecutionError("upstream HTTP 503"), "server_error"),
+    ],
+)
+async def test_public_expression_drain_propagates_transient_after_sibling_progress(
+    error: BaseException, kind: str
+) -> None:
+    error.retry_after = 45  # type: ignore[attr-defined]
+
+    class _OneFailedBatchLLM:
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        async def complete_structured_task(
+            self, *, user_input: str, **kwargs: object
+        ) -> LLMResponse:
+            batch = _content_batch_from_prompt(user_input)
+            self.batch_sizes.append(len(batch))
+            if len(batch) > 1:
+                raise error
+            item = batch[0]
+            return LLMResponse(
+                content=json.dumps(
+                    [{"bvid": item["bvid"], "expression": "sibling", "topic_label": "ok"}]
+                ),
+                provider="test",
+                model="dummy",
+                usage={},
+            )
+
+    items = [
+        DiscoveredContent(
+            bvid=f"BV_PUBLIC_TRANSIENT_{i:02d}",
+            title=str(i),
+            style_key="deep_dive",
+            topic_group="test",
+            relevance_score=0.8,
+        )
+        for i in range(31)
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, items, precomputed=False)
+        llm = _OneFailedBatchLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+        with pytest.raises(ExpressionCopyTransientError) as exc_info:
+            await engine.drain_pending_expression_copy(profile=_build_profile(), limit=31)
+    assert sorted(llm.batch_sizes) == [1, 30]
+    assert exc_info.value.kind == kind
+    assert exc_info.value.completed == 1
+    assert exc_info.value.retry_after == 45.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        LLMProviderError("HTTP 401 unauthorized: invalid api key"),
+        LLMFallbackError("No provider was available to process the request."),
+    ],
+)
+async def test_public_expression_drain_propagates_auth_and_no_provider(
+    error: BaseException,
+) -> None:
+    class _UnavailableLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured_task(self, **kwargs: object) -> LLMResponse:
+            self.calls += 1
+            raise error
+
+    items = [
+        DiscoveredContent(
+            bvid=f"BV_PUBLIC_AUTH_{i}",
+            title=str(i),
+            style_key="deep_dive",
+            topic_group="test",
+            relevance_score=0.8,
+        )
+        for i in range(2)
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, items, precomputed=False)
+        llm = _UnavailableLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+        with pytest.raises(type(error)):
+            await engine.drain_pending_expression_copy(profile=_build_profile(), limit=2)
+    assert llm.calls == 1
 
 
 @pytest.mark.asyncio

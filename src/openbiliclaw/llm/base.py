@@ -6,6 +6,7 @@ dynamically selecting and switching between providers.
 
 from __future__ import annotations
 
+import errno
 import logging
 import time
 from abc import ABC, abstractmethod
@@ -142,8 +143,20 @@ def classify_llm_failure_kind(exc: BaseException) -> str | None:
             marker in message for marker in _LLM_TIMEOUT_MARKERS
         ):
             timed_out = True
-        if isinstance(current, (ConnectionError, OSError)) or any(
-            marker in message for marker in _LLM_CONNECTION_MARKERS
+        network_errno = isinstance(current, OSError) and current.errno in {
+            errno.ECONNABORTED,
+            errno.ECONNREFUSED,
+            errno.ECONNRESET,
+            errno.ENETDOWN,
+            errno.ENETUNREACH,
+            errno.EHOSTDOWN,
+            errno.EHOSTUNREACH,
+            errno.ETIMEDOUT,
+        }
+        if (
+            isinstance(current, ConnectionError)
+            or network_errno
+            or any(marker in message for marker in _LLM_CONNECTION_MARKERS)
         ):
             connection = True
         if any(marker in message for marker in _LLM_SERVER_ERROR_MARKERS):

@@ -50,3 +50,19 @@ was not on PATH; it was not treated as RED evidence.
 See the final handoff for fresh command results. Documentation checklist applied:
 LLM, discovery, recommendation, runtime module docs and current changelog updated;
 no architecture, CLI, config, dependency, installer, or positioning boundary changed.
+
+## Review-fix follow-up
+
+Review found five boundary gaps. A second RED run was captured in
+`/tmp/task8-review-red.txt`: 14 failures proved that the public expression drain
+swallowed typed failures, duplicate evaluation IDs used last-wins, candidate
+resume matching was too broad, non-rate-limit transients ignored `retry_after`,
+and arbitrary local `OSError` values were classified as network failures. Two
+additional coordinator RED failures proved cumulative progress was lost and a
+stale retry deadline blocked config resume.
+
+The follow-up now propagates transient/auth/no-provider failures after sibling
+batch completion, carries cumulative successful writes and provider retry-after,
+invalidates duplicate keyed evaluation rows before retry, restricts resume to
+exact `startup` or `config_*` / `manual_*`, applies retry-after to every transient
+kind, and recognizes only connection-specific `OSError` errno/message shapes.

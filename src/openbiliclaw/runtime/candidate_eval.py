@@ -313,7 +313,7 @@ class CandidateEvalCoordinator:
             min(self._transient_streak, len(_TRANSIENT_BACKOFF_SECONDS) - 1)
         ]
         self._transient_streak += 1
-        self._backoff_until = now + delay
+        self._backoff_until = now + max(delay, self._retry_after_seconds(exc))
         logger.warning("candidate evaluation worker failed: %s", exc)
 
     async def _wait_for_activity(self, timeout: float) -> None:
@@ -449,7 +449,7 @@ class CandidateEvalCoordinator:
     @staticmethod
     def _resume_notification(reason: str) -> bool:
         normalized = str(reason).strip().lower()
-        return normalized.startswith(("config", "manual", "presence", "startup"))
+        return normalized == "startup" or normalized.startswith(("config_", "manual_"))
 
     @staticmethod
     def _retry_after_seconds(exc: BaseException) -> float:

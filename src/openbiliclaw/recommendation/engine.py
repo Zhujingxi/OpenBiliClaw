@@ -999,10 +999,52 @@ class RecommendationEngine:
             completed = 0
             for r in results:
                 if isinstance(r, Exception):
-                    logger.warning("Expression batch failed: %s", r)
                     continue
                 completed += int(r or 0)
+            critical: Exception | None = None
+            unavailable: Exception | None = None
+            transient_kind: str | None = None
+            retry_after = 0.0
+            for result in results:
+                if not isinstance(result, Exception):
+                    continue
+                completed += int(getattr(result, "completed", 0) or 0)
+                kind = getattr(result, "kind", None) or classify_llm_failure_kind(result)
+                if kind in {"rate_limited", "timeout", "connection", "server_error"}:
+                    transient_kind = str(kind)
+                    retry_after = max(
+                        retry_after,
+                        self._retry_after_seconds(result),
+                        float(getattr(result, "retry_after", 0.0) or 0.0),
+                    )
+                    critical = result
+                elif kind in {"auth_failed", "no_provider"} and unavailable is None:
+                    unavailable = result
+                else:
+                    logger.warning("Expression batch failed: %s", result)
+            if unavailable is not None:
+                raise unavailable
+            if transient_kind is not None:
+                raise ExpressionCopyTransientError(
+                    kind=transient_kind,
+                    completed=completed,
+                    retry_after=retry_after,
+                ) from critical
+            if critical is not None:
+                raise critical
         return completed
+
+    @staticmethod
+    def _retry_after_seconds(exc: BaseException) -> float:
+        seen: set[int] = set()
+        current: BaseException | None = exc
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            value = getattr(current, "retry_after", None)
+            if isinstance(value, int | float) and value > 0:
+                return float(value)
+            current = current.__cause__ or current.__context__
+        return 0.0
 
     async def drain_pending_expression_copy(
         self,
@@ -1497,7 +1539,10 @@ class RecommendationEngine:
         except Exception as exc:
             kind = classify_llm_failure_kind(exc)
             if kind in {"rate_limited", "timeout", "connection", "server_error"}:
-                raise ExpressionCopyTransientError(kind=kind) from exc
+                raise ExpressionCopyTransientError(
+                    kind=kind,
+                    retry_after=self._retry_after_seconds(exc),
+                ) from exc
             raise
 
         payload = extract_llm_json_list(
@@ -1618,7 +1663,11 @@ class RecommendationEngine:
                     if not subset or budget["remaining"] <= 0:
                         break
                     budget["remaining"] -= 1
-                    total += await run(subset, depth + 1)
+                    try:
+                        total += await run(subset, depth + 1)
+                    except ExpressionCopyTransientError as transient:
+                        transient.completed += total
+                        raise
                 return total
 
         return await run(batch, 0)

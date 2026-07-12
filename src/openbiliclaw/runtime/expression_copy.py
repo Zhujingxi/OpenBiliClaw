@@ -64,6 +64,7 @@ class ExpressionCopyCoordinator:
             or reason == "startup"
         ):
             self._paused = False
+            self._retry_not_before = 0.0
         self._generation += 1
         self.last_wake_reason = str(reason)
         if self._first_pending_at is None:
@@ -167,7 +168,7 @@ class ExpressionCopyCoordinator:
             return
         except Exception as exc:
             self.last_error = str(exc)
-            completed = 0
+            completed = max(0, int(getattr(exc, "completed", 0) or 0))
             kind = getattr(exc, "kind", None) or classify_llm_failure_kind(exc)
             failure_kind = kind
             now = float(self.time_fn())
@@ -186,7 +187,9 @@ class ExpressionCopyCoordinator:
         self.last_completed = completed
         now = float(self.time_fn())
         pending = self._pending_count()
-        if completed <= 0 and pending > 0:
+        if failure_kind in {"rate_limited", "timeout", "connection", "server_error"}:
+            self._first_pending_at = None
+        elif completed <= 0 and pending > 0:
             if failure_kind not in {
                 "rate_limited",
                 "timeout",

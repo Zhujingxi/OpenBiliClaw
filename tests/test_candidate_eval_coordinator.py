@@ -13,6 +13,7 @@ from openbiliclaw.discovery.candidate_pipeline import (
 )
 from openbiliclaw.discovery.candidate_pool import DiscoveryCandidateWrite
 from openbiliclaw.llm.base import LLMFallbackError, LLMRateLimitError
+from openbiliclaw.llm.service import LLMProviderExecutionError
 from openbiliclaw.runtime.candidate_eval import (
     CandidateEvalCoordinator,
     CandidateEvalSnapshot,
@@ -495,6 +496,40 @@ async def test_no_provider_pauses_until_config_notification() -> None:
 
     await coordinator.stop()
     await task
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("startup", True),
+        ("config_reloaded", True),
+        ("manual_retry", True),
+        ("presence", False),
+        ("configurationless", False),
+        ("manual", False),
+    ],
+)
+def test_auth_pause_resume_notification_policy_is_exact(reason: str, expected: bool) -> None:
+    assert CandidateEvalCoordinator._resume_notification(reason) is expected
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_until"),
+    [
+        (LLMRateLimitError("429"), 145.0),
+        (TimeoutError("timed out"), 145.0),
+        (ConnectionError("connection reset"), 145.0),
+        (LLMProviderExecutionError("HTTP 503"), 145.0),
+    ],
+)
+def test_all_candidate_transients_honor_retry_after(
+    error: BaseException, expected_until: float
+) -> None:
+    error.retry_after = 45  # type: ignore[attr-defined]
+    coordinator = _coordinator(_FakeStagedPipeline(candidate_count=0), worker_count=1)
+    coordinator.time_fn = lambda: 100.0
+    coordinator._record_failure(error)
+    assert coordinator.status_payload()["candidate_eval_backoff_until"] == expected_until
 
 
 @pytest.mark.asyncio

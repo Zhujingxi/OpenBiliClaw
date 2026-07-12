@@ -398,6 +398,7 @@ def _batch_results_by_content_key(
         valid_keys.update(_content_result_keys(content))
 
     matched: dict[str, dict[str, Any]] = {}
+    duplicated_keys: set[str] = set()
     saw_identifier = False
     for item in payload:
         raw_key = str(item.get("bvid") or item.get("content_id") or "").strip()
@@ -405,6 +406,12 @@ def _batch_results_by_content_key(
             continue
         saw_identifier = True
         if raw_key not in valid_keys:
+            continue
+        if raw_key in duplicated_keys:
+            continue
+        if raw_key in matched:
+            matched.pop(raw_key, None)
+            duplicated_keys.add(raw_key)
             continue
         matched[raw_key] = item
 
@@ -1946,7 +1953,7 @@ class ContentDiscoveryEngine:
                 results[index] = score
                 if score is None:
                     missing.append(index)
-            if len(missing) <= 1 or depth >= max_split_depth or budget["remaining"] <= 0:
+            if not missing or depth >= max_split_depth or budget["remaining"] <= 0:
                 return
             children: tuple[list[int], ...]
             if len(missing) < len(indices):

@@ -203,6 +203,20 @@ def test_classify_llm_failure_kind_preserves_auth_precedence_over_wrapper_text()
     assert classify_llm_failure_kind(wrapped) == "auth_failed"
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        FileNotFoundError("missing local file"),
+        PermissionError("local disk denied"),
+        OSError("disk full"),
+    ],
+)
+def test_classify_llm_failure_kind_does_not_treat_local_os_errors_as_connection(
+    error: OSError,
+) -> None:
+    assert classify_llm_failure_kind(error) is None
+
+
 def test_describe_llm_failure_content_moderation_500() -> None:
     # A Chinese compat gateway returns a compliance refusal *as a 500*; the
     # cause chain carries the 法律法规 text. Guided init must show "switch model"

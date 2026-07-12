@@ -2449,6 +2449,35 @@ async def test_evaluate_batch_retries_only_missing_keyed_members() -> None:
 
 
 @pytest.mark.asyncio
+async def test_evaluate_batch_retries_duplicate_key_without_overwriting_valid_sibling() -> None:
+    class _DuplicateKeyLLM:
+        def __init__(self) -> None:
+            self.request_ids: list[tuple[str, ...]] = []
+
+        async def complete_structured_task(self, *, user_input: str, **kwargs: object) -> object:
+            raw = user_input.split("<content_batch>", 1)[1].split("</content_batch>", 1)[0]
+            ids = tuple(str(item["bvid"]) for item in json.loads(raw.strip()))
+            self.request_ids.append(ids)
+            if len(self.request_ids) == 1:
+                payload = [
+                    {"bvid": "A", "score": 0.1, "reason": "bad first"},
+                    {"bvid": "A", "score": 0.2, "reason": "bad last"},
+                    {"bvid": "B", "score": 0.8, "reason": "B once"},
+                ]
+            else:
+                payload = [{"bvid": "A", "score": 0.7, "reason": "A retry"}]
+            return _SlowResponse(json.dumps(payload))
+
+    llm = _DuplicateKeyLLM()
+    engine = ContentDiscoveryEngine(llm_service=llm)
+    batch = [DiscoveredContent(bvid=key, title=key) for key in ("A", "B")]
+    assert await engine._evaluate_batch(batch, _build_profile()) == [0.7, 0.8]
+    assert llm.request_ids == [("A", "B"), ("A",)]
+    assert batch[0].relevance_reason == "A retry"
+    assert batch[1].relevance_reason == "B once"
+
+
+@pytest.mark.asyncio
 async def test_evaluate_batch_accepts_newline_delimited_json_objects() -> None:
     """Some providers return one scored JSON object per line instead of an array."""
 
