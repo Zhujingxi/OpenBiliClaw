@@ -258,9 +258,7 @@ class SupportsRecommendationEngine(Protocol):
         limit: int,
     ) -> int: ...
 
-    async def precompute_delight_scores(
-        self, *, profile: Any, limit: int
-    ) -> int: ...
+    async def precompute_delight_scores(self, *, profile: Any, limit: int) -> int: ...
 
     async def classify_pool_backlog(self, *, profile: Any, limit: int) -> int: ...
 
@@ -457,9 +455,7 @@ class ContinuousRefreshController:
                 "available": max(0, available),
                 "raw": max(0, int(readiness.get("raw", available))),
                 "pending": max(0, int(readiness.get("pending", 0))),
-                "admitted_pending_copy": max(
-                    0, int(readiness.get("admitted_pending_copy", 0))
-                ),
+                "admitted_pending_copy": max(0, int(readiness.get("admitted_pending_copy", 0))),
                 "pending_eval": max(0, int(readiness.get("pending_eval", 0))),
                 "evaluated_pending": max(0, int(readiness.get("evaluated_pending", 0))),
             }
@@ -988,9 +984,7 @@ class ContinuousRefreshController:
         delight = getattr(self.recommendation_engine, "precompute_delight_scores", None)
         if callable(delight):
             return int(await delight(profile=profile, limit=30))
-        return int(
-            await self.recommendation_engine.precompute_pool_copy(profile=profile, limit=0)
-        )
+        return int(await self.recommendation_engine.precompute_pool_copy(profile=profile, limit=0))
 
     @staticmethod
     def _normalize_replenishment_reason(reason: str) -> str:
@@ -2131,12 +2125,24 @@ class ContinuousRefreshController:
                         )
                     else:
                         produced_count = await pipeline.produce_and_enqueue(**produce_kwargs)
-                    drain_result = await self._drain_discovery_candidates_and_precompute(
-                        reason="refresh",
-                        profile=profile,
-                        batch_size=effective_limit,
-                        precompute=False,
-                    )
+                    coordinator_notify = getattr(self.candidate_eval_coordinator, "notify", None)
+                    if callable(coordinator_notify):
+                        # API runtime wires ``pipeline.on_candidates_enqueued`` to
+                        # this coordinator.  That callback is the one immediate
+                        # wake for every successful enqueue; doing an inline
+                        # drain here would create a second durable claim owner
+                        # and could take the 3×30 cap to 180 rows.
+                        drain_result = {"evaluated": 0, "cached": 0, "rejected": 0}
+                    else:
+                        # One-shot / legacy compositions deliberately have no
+                        # live coordinator, so preserve their bounded inline
+                        # drain semantics.
+                        drain_result = await self._drain_discovery_candidates_and_precompute(
+                            reason="refresh",
+                            profile=profile,
+                            batch_size=effective_limit,
+                            precompute=False,
+                        )
                     discovered_count = int(produced_count or 0)
                     admitted_count = int(drain_result.get("cached", 0) or 0)
                     if admitted_count > 0:
@@ -2180,9 +2186,7 @@ class ContinuousRefreshController:
             if admitted_count > 0:
                 replenished_topics.extend(self._extract_topics(topic_items))
                 if self.expression_copy_coordinator is not None:
-                    self.expression_copy_coordinator.notify(
-                        f"refresh_admitted:{admitted_count}"
-                    )
+                    self.expression_copy_coordinator.notify(f"refresh_admitted:{admitted_count}")
 
         if flattened_strategies:
             # Snapshot delight count BEFORE precompute so we can detect

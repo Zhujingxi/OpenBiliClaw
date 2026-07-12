@@ -823,6 +823,7 @@ class RuntimeContext:
                 database=self.database,
                 soul_engine=new_soul_engine,
                 llm_service=new_llm_service,
+                candidate_pipeline=new_candidate_pipeline,
                 keyword_fetch=new_keyword_fetch,
             )
             from openbiliclaw.runtime.zhihu_producer import build_zhihu_discovery_producer

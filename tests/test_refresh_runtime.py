@@ -8,16 +8,21 @@ from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from openbiliclaw.discovery.candidate_pipeline import DiscoveryCandidatePipeline
+from openbiliclaw.discovery.candidate_pipeline import (
+    CandidateEvalClaim,
+    CandidateEvalOutcome,
+    DiscoveryCandidatePipeline,
+)
 from openbiliclaw.discovery.candidate_pool import DiscoveryCandidateWrite
 from openbiliclaw.discovery.engine import ContentDiscoveryEngine
 from openbiliclaw.llm.base import LLMRateLimitError
 from openbiliclaw.llm.concurrency import InventoryPriorityState, LLMConcurrencyGate
 from openbiliclaw.recommendation.delight import DEFAULT_DELIGHT_THRESHOLD
+from openbiliclaw.runtime.candidate_eval import CandidateEvalCoordinator, CandidateEvalSnapshot
 from openbiliclaw.runtime.events import RuntimeEventHub
 from openbiliclaw.runtime.presence import PresenceTracker
 from openbiliclaw.runtime.refresh import ContinuousRefreshController
@@ -1508,6 +1513,175 @@ async def test_refresh_pipeline_drain_uses_shared_candidate_lock() -> None:
 
     assert pipeline.enqueued == [(["search"], 7)]
     assert pipeline.drains == []
+
+
+async def test_managed_refresh_leaves_all_durable_eval_claims_to_coordinator(
+    tmp_path: Path,
+) -> None:
+    """A live coordinator is the sole owner of refresh-created raw claims.
+
+    The producer intentionally overfills the raw queue.  The coordinator can
+    claim only three 30-item batches; the old inline refresh drain would claim
+    a second 90-item batch, making the durable ``evaluating`` count reach 180.
+    """
+
+    class _BlockingManagedPipeline:
+        def __init__(self, database: Database) -> None:
+            self.database = database
+            self.on_candidates_enqueued: Any | None = None
+            self.inline_drain_calls = 0
+            self.claim_sequence = 0
+            self.release = asyncio.Event()
+
+        async def ensure_pending_supply(self, **_kwargs: object) -> dict[str, int]:
+            writes = [
+                DiscoveryCandidateWrite(
+                    candidate_key=f"bilibili:managed-{index}",
+                    source_platform="bilibili",
+                    source_strategy="search",
+                    content_id=f"managed-{index}",
+                    title=f"Managed candidate {index}",
+                )
+                for index in range(180)
+            ]
+            inserted = self.database.enqueue_discovery_candidates(writes)
+            if inserted > 0 and callable(self.on_candidates_enqueued):
+                self.on_candidates_enqueued(inserted)
+            return {
+                "inserted": inserted,
+                "pending_eval": inserted,
+                "evaluating": 0,
+                "attempts": 1,
+            }
+
+        async def drain_pending(self, **_kwargs: object) -> dict[str, int]:
+            self.inline_drain_calls += 1
+            # This is the old competing owner: it creates a second durable
+            # claim while the coordinator's three workers are still blocked.
+            self.database.claim_discovery_candidates_for_eval(
+                limit=90,
+                claim_token="legacy-inline-drain",
+            )
+            await self.release.wait()
+            return {"evaluated": 0, "cached": 0, "rejected": 0}
+
+        def claim_batch(self, *, limit: int) -> CandidateEvalClaim | None:
+            self.claim_sequence += 1
+            token = f"coordinator-{self.claim_sequence}-{id(self)}-{limit}"
+            rows = self.database.claim_discovery_candidates_for_eval(
+                limit=limit,
+                claim_token=token,
+            )
+            if not rows:
+                return None
+            return CandidateEvalClaim(token=token, rows=tuple(rows), items=())
+
+        async def evaluate_claim(
+            self,
+            claim: CandidateEvalClaim,
+            _profile: object,
+        ) -> CandidateEvalOutcome:
+            await self.release.wait()
+            return CandidateEvalOutcome(claim=claim, scores=(), elapsed_seconds=0.0)
+
+        async def complete_claim(
+            self,
+            _outcome: CandidateEvalOutcome,
+            *,
+            admission_limit: int | None = None,
+        ) -> dict[str, int]:
+            del admission_limit
+            return {"evaluated": 0, "cached": 0, "rejected": 0}
+
+        def release_claim(
+            self,
+            claim: CandidateEvalClaim,
+            *,
+            reason: str,
+            increment_attempts: bool = False,
+        ) -> int:
+            del reason, increment_attempts
+            return self.database.reset_claimed_discovery_candidates_to_pending(
+                [int(row["id"]) for row in claim.rows],
+                claim_token=claim.token,
+                reason="test cleanup",
+                max_attempts=5,
+                max_batch_attempts=50,
+            )
+
+        def admit_evaluated(self, *, limit: int) -> dict[str, int]:
+            del limit
+            return {"cached": 0, "rejected": 0}
+
+    database = Database(tmp_path / "managed-refresh.db")
+    database.initialize()
+    pipeline = _BlockingManagedPipeline(database)
+
+    def snapshot() -> CandidateEvalSnapshot:
+        statuses = database.count_discovery_candidates_by_status()
+        return CandidateEvalSnapshot(
+            available=0,
+            target=500,
+            pending_eval=int(statuses.get("pending_eval", 0)),
+            evaluating=int(statuses.get("evaluating", 0)),
+            evaluated_pending_admission=int(statuses.get("evaluated", 0)),
+            admitted_pending_copy=0,
+        )
+
+    coordinator = CandidateEvalCoordinator(
+        pipeline=pipeline,
+        snapshot_provider=snapshot,
+        profile_provider=lambda: object(),
+        worker_count=3,
+        batch_size=30,
+        safety_wake_seconds=60,
+    )
+    enqueue_notifications: list[int] = []
+
+    def notify_enqueued(count: int) -> None:
+        enqueue_notifications.append(count)
+        coordinator.notify("candidate_enqueued:pipeline")
+
+    pipeline.on_candidates_enqueued = notify_enqueued
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        soul_engine=_ProfileSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        discovery_candidate_pipeline=pipeline,
+        pool_target_count=500,
+        discovery_limit=90,
+        pool_source_shares={"bilibili": 1},
+        candidate_eval_coordinator=coordinator,
+    )
+
+    coordinator_task = asyncio.create_task(coordinator.run_forever())
+    refresh_task = asyncio.create_task(
+        controller._run_refresh_plan(
+            state=_FakeMemoryManager().load_discovery_runtime_state(),
+            profile=await _ProfileSoulEngine().get_profile(),
+            plan=[(["search"], 180)],
+            reason="managed-refresh",
+        )
+    )
+    try:
+        async with asyncio.timeout(2):
+            while int(database.count_discovery_candidates_by_status().get("evaluating", 0)) < 90:
+                await asyncio.sleep(0)
+        # Give a competing inline drain one scheduling turn.  On the old path
+        # it grows durable evaluating rows to 180 and keeps refresh blocked.
+        await asyncio.sleep(0.02)
+        assert enqueue_notifications == [180]
+        assert pipeline.inline_drain_calls == 0
+        assert int(database.count_discovery_candidates_by_status().get("evaluating", 0)) <= 90
+        assert refresh_task.done()
+    finally:
+        pipeline.release.set()
+        if not refresh_task.done():
+            await asyncio.wait_for(refresh_task, timeout=2)
+        await coordinator.stop()
+        await asyncio.wait_for(coordinator_task, timeout=2)
 
 
 async def test_candidate_eval_drain_runs_when_refresh_plan_empty() -> None:

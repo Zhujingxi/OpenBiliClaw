@@ -25,11 +25,7 @@ from openbiliclaw.llm.usage_recorder import UsageRecorder
 from openbiliclaw.memory.manager import MemoryManager
 from openbiliclaw.recommendation.engine import RecommendationEngine
 from openbiliclaw.runtime.account_sync import AccountSyncService
-from openbiliclaw.runtime.candidate_eval import (
-    CandidateEvalCoordinator,
-    CandidateEvalSnapshot,
-    effective_candidate_eval_workers,
-)
+from openbiliclaw.runtime.candidate_eval import CandidateEvalSnapshot
 from openbiliclaw.runtime.presence import PresenceTracker
 from openbiliclaw.runtime.refresh import ContinuousRefreshController
 from openbiliclaw.runtime.source_policy import effective_pool_source_shares
@@ -281,13 +277,6 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
             admitted_pending_copy=int(readiness.get("admitted_pending_copy", 0)),
         )
 
-    async def _request_candidate_supply(reason: str) -> dict[str, object]:
-        await runtime_controller.request_replenishment(reason=reason)
-        return await runtime_controller.refresh_if_needed()
-
-    async def _precompute_committed_candidates() -> None:
-        expression_coordinator.notify("candidate_commit")
-
     from openbiliclaw.runtime.expression_copy import ExpressionCopyCoordinator
 
     async def _drain_expression_copy(limit: int) -> int:
@@ -316,31 +305,11 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
     if callable(set_copy_callback):
         set_copy_callback(expression_coordinator.notify)
 
-    candidate_eval_coordinator = CandidateEvalCoordinator(
-        pipeline=candidate_pipeline,
-        snapshot_provider=_candidate_eval_snapshot,
-        profile_provider=cast("Any", getattr(soul_engine, "get_profile", lambda: None)),
-        worker_count=effective_candidate_eval_workers(
-            int(getattr(discovery_cfg, "candidate_eval_concurrency", 3)),
-            llm_concurrency,
-        ),
-        batch_size=30,
-        supply_callback=_request_candidate_supply,
-        post_commit_callback=_precompute_committed_candidates,
-        on_admitted=lambda count: expression_coordinator.notify(f"candidate_admitted:{count}"),
-        work_allowed=lambda: bool(
-            getattr(runtime_controller, "_is_initialized", lambda: True)()
-            and getattr(runtime_controller, "_llm_work_allowed", lambda: True)()
-        ),
-        safety_wake_seconds=float(getattr(config.scheduler, "refresh_check_interval_seconds", 60)),
-    )
-    runtime_controller.candidate_eval_coordinator = candidate_eval_coordinator
-    candidate_pipeline.on_candidates_enqueued = lambda _count: candidate_eval_coordinator.notify(
-        "candidate_enqueued:pipeline"
-    )
-    for producer in (douyin_producer, youtube_producer):
-        if producer is not None:
-            producer.candidate_evaluation_owned_by_coordinator = True
+    # The OpenClaw adapter exposes one-shot operations and never starts the
+    # controller's daemon ``run_forever`` lifecycle.  Do not attach a dormant
+    # coordinator or transfer producer ownership to it: direct refresh and
+    # producer calls retain DiscoveryCandidatePipeline's bounded inline drain
+    # (its hard cap remains 90 raw claims) so candidates are actually admitted.
     set_pool_commit_callback = getattr(
         recommendation_engine,
         "set_pool_inventory_commit_callback",

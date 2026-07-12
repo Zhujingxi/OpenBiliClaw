@@ -10,6 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from openbiliclaw.discovery.candidate_pipeline import DiscoveryCandidatePipeline
+from openbiliclaw.discovery.douyin import DouyinDiscoveryOptions, DouyinDiscoveryResult
 from openbiliclaw.discovery.engine import DiscoveredContent
 from openbiliclaw.integrations.openclaw.bootstrap import (
     OpenClawAdapterServices,
@@ -35,7 +37,9 @@ from openbiliclaw.integrations.openclaw.schemas import (
     SyncAccountResponse,
 )
 from openbiliclaw.recommendation.engine import Recommendation
+from openbiliclaw.runtime.douyin_producer import DouyinDiscoveryProducer
 from openbiliclaw.soul.profile import InterestTag, PreferenceLayer, SoulProfile
+from openbiliclaw.storage.database import Database
 
 
 def test_profile_response_serializes_only_public_fields() -> None:
@@ -1011,23 +1015,27 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     assert len(producer_kwargs) == 2
     assert all(kwargs["candidate_pipeline"] is pipeline for kwargs in producer_kwargs)
     assert services.runtime_controller.kwargs["youtube_producer"].kind == "youtube"
+    # The adapter is a one-shot composition: it never starts the daemon's
+    # coordinator loop, so producer evaluation remains bounded inline rather
+    # than being handed to an idle background owner.
+    assert getattr(services.runtime_controller, "candidate_eval_coordinator", None) is None
     assert (
-        services.runtime_controller.kwargs[
-            "douyin_producer"
-        ].candidate_evaluation_owned_by_coordinator
-        is True
+        getattr(
+            services.runtime_controller.kwargs["douyin_producer"],
+            "candidate_evaluation_owned_by_coordinator",
+            False,
+        )
+        is False
     )
     assert (
-        services.runtime_controller.kwargs[
-            "youtube_producer"
-        ].candidate_evaluation_owned_by_coordinator
-        is True
+        getattr(
+            services.runtime_controller.kwargs["youtube_producer"],
+            "candidate_evaluation_owned_by_coordinator",
+            False,
+        )
+        is False
     )
-    notifications: list[str] = []
-    services.runtime_controller.candidate_eval_coordinator.notify = notifications.append
-    assert callable(pipeline.on_candidates_enqueued)
-    pipeline.on_candidates_enqueued(1)
-    assert notifications == ["candidate_enqueued:pipeline"]
+    assert getattr(pipeline, "on_candidates_enqueued", None) is None
     assert services.runtime_controller.kwargs["check_interval_seconds"] == 77
     assert services.runtime_controller.kwargs["signal_event_threshold"] == 9
     assert services.runtime_controller.kwargs["trending_refresh_hours"] == 5
@@ -1035,15 +1043,114 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     assert services.runtime_controller.kwargs["discovery_limit"] == 17
     assert services.runtime_controller.kwargs["proactive_push_interval_seconds"] == 155
     created_databases[0].pool_count = 7
-    candidate_snapshot = services.runtime_controller.candidate_eval_coordinator._snapshot()
-    assert candidate_snapshot.available == 7
-    assert candidate_snapshot.pending_eval == 500
-    assert candidate_snapshot.evaluating == 60
-    assert candidate_snapshot.evaluated_pending_admission == 3
-    assert candidate_snapshot.admitted_pending_copy == 4
+    # Expression copy still reads the same durable snapshot in one-shot mode;
+    # only the unstarted candidate-evaluation background owner is omitted.
+    assert services.runtime_controller.expression_copy_coordinator.pending_count_provider() == 4
     assert services.llm_service.concurrency_gate.status_payload()["inventory_priority_state"] == (
         "refill"
     )
+
+
+@pytest.mark.asyncio
+async def test_openclaw_one_shot_producer_admits_inline_with_ninety_claim_cap(
+    tmp_path: Path,
+) -> None:
+    """The non-daemon OpenClaw composition must not strand producer output."""
+
+    class _Soul:
+        async def get_profile(self) -> object:
+            return object()
+
+    class _InlineEvaluationEngine:
+        _EVALUATE_BATCH_HARD_CAP = 90
+
+        def __init__(self, database: Database) -> None:
+            self.database = database
+            self.max_evaluated_batch = 0
+
+        async def evaluate_content_batch(
+            self,
+            contents: list[DiscoveredContent],
+            _profile: object,
+            **_kwargs: object,
+        ) -> list[float]:
+            self.max_evaluated_batch = max(self.max_evaluated_batch, len(contents))
+            for item in contents:
+                item.relevance_score = 0.91
+                item.relevance_reason = "one-shot fit"
+                item.topic_group = "OpenClaw direct"
+                item.style_key = "deep_dive"
+            return [0.91] * len(contents)
+
+        def cache_evaluated_results(self, items: list[DiscoveredContent]) -> int:
+            for item in items:
+                content_id = item.content_id or item.bvid
+                self.database.cache_content(
+                    content_id,
+                    title=item.title,
+                    up_name=item.author_name or item.up_name,
+                    source=item.source_strategy,
+                    source_platform=item.source_platform,
+                    content_id=content_id,
+                    content_url=item.content_url,
+                    relevance_score=item.relevance_score,
+                    relevance_reason=item.relevance_reason,
+                    topic_group=item.topic_group,
+                    style_key=item.style_key,
+                )
+            return len(items)
+
+    database = Database(tmp_path / "openclaw-one-shot.db")
+    database.initialize()
+    evaluation_engine = _InlineEvaluationEngine(database)
+    pipeline = DiscoveryCandidatePipeline(
+        database=database,
+        discovery_engine=evaluation_engine,  # type: ignore[arg-type]
+        pool_target_count=180,
+    )
+    raw_items = [
+        DiscoveredContent(
+            bvid=f"dy-openclaw-{index}",
+            content_id=f"dy-openclaw-{index}",
+            content_url=f"https://www.douyin.com/video/dy-openclaw-{index}",
+            title=f"OpenClaw direct {index}",
+            source_platform="douyin",
+            source_strategy="search",
+            author_name="creator",
+        )
+        for index in range(120)
+    ]
+
+    async def discover(
+        _profile: object,
+        _options: DouyinDiscoveryOptions,
+    ) -> DouyinDiscoveryResult:
+        return DouyinDiscoveryResult(
+            items=raw_items,
+            cached=False,
+            source_counts={"search": len(raw_items)},
+        )
+
+    # This is the producer state OpenClaw bootstrap intentionally leaves in
+    # place: no coordinator task exists, so the bounded inline path owns work.
+    producer = DouyinDiscoveryProducer(
+        soul_engine=_Soul(),
+        discover=discover,
+        enabled=True,
+        min_interval_minutes=0,
+        sources=("search",),
+        candidate_pipeline=pipeline,
+    )
+
+    result = await producer.produce_if_due(limit=120)
+
+    statuses = database.count_discovery_candidates_by_status()
+    assert producer.candidate_evaluation_owned_by_coordinator is False
+    assert result["enqueued"] == 120
+    assert result["cached"] == 90
+    assert statuses["cached"] == 90
+    assert statuses["pending_eval"] == 30
+    assert evaluation_engine.max_evaluated_batch == 90
 
 
 def test_build_openclaw_adapter_returns_ready_adapter(monkeypatch) -> None:

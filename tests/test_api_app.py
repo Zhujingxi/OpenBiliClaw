@@ -1682,6 +1682,7 @@ class TestBackendAPI:
     ) -> None:
         import openbiliclaw.api.runtime_context as runtime_context_module
         import openbiliclaw.runtime.douyin_producer as douyin_producer_module
+        import openbiliclaw.runtime.x_producer as x_producer_module
         import openbiliclaw.runtime.zhihu_producer as zhihu_producer_module
         from openbiliclaw.config import Config
 
@@ -1692,6 +1693,7 @@ class TestBackendAPI:
         config.sources.youtube.enabled = True
         config.sources.zhihu.enabled = True
         producers: dict[str, SimpleNamespace] = {}
+        x_kwargs: list[dict[str, object]] = []
 
         def build_producer(kind: str) -> SimpleNamespace:
             producer = SimpleNamespace(kind=kind)
@@ -1713,13 +1715,19 @@ class TestBackendAPI:
             "build_zhihu_discovery_producer",
             lambda **_kwargs: build_producer("zhihu"),
         )
+        monkeypatch.setattr(
+            x_producer_module,
+            "build_x_discovery_producer",
+            lambda **kwargs: x_kwargs.append(kwargs) or build_producer("twitter"),
+        )
 
         ctx = runtime_context_module.build_runtime_context(config)
 
-        assert set(producers) == {"douyin", "youtube", "zhihu"}
+        assert set(producers) == {"douyin", "youtube", "zhihu", "twitter"}
         assert all(
             producer.candidate_evaluation_owned_by_coordinator is True
-            for producer in producers.values()
+            for kind, producer in producers.items()
+            if kind != "twitter"
         )
         notifications: list[str] = []
         ctx.runtime_controller.candidate_eval_coordinator.notify = notifications.append
@@ -1727,6 +1735,7 @@ class TestBackendAPI:
         assert callable(pipeline.on_candidates_enqueued)
         pipeline.on_candidates_enqueued(1)
         assert notifications == ["candidate_enqueued:pipeline"]
+        assert x_kwargs[0]["candidate_pipeline"] is pipeline
 
     def test_create_app_bootstrap_wires_discovery_concurrency_controller(
         self,

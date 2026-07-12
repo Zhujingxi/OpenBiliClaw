@@ -91,6 +91,26 @@ class _FakeXAdapter:
         return list(self.by_strategy.get(recipe.strategy, []))
 
 
+@dataclass
+class _SharedCandidatePipeline:
+    """Minimal shared-pipeline seam that preserves its enqueue callback."""
+
+    on_candidates_enqueued: Any | None = None
+    batches: list[tuple[list[DiscoveredContent], str]] = field(default_factory=list)
+
+    def enqueue_candidates(
+        self,
+        items: list[DiscoveredContent],
+        *,
+        source_context: str = "",
+    ) -> int:
+        self.batches.append((list(items), source_context))
+        inserted = len(items)
+        if inserted > 0 and callable(self.on_candidates_enqueued):
+            self.on_candidates_enqueued(inserted)
+        return inserted
+
+
 def _count_content_cache(db: Database) -> int:
     row = db.conn.execute("SELECT COUNT(*) FROM content_cache").fetchone()
     return int(row[0])
@@ -167,6 +187,37 @@ async def test_enabled_producer_enqueues_claimable_candidates(tmp_path: Path) ->
     target = next(r for r in twitter_rows if r["content_id"] == "1790000000000000001")
     assert target["content_type"] == "thread"
     assert str(target["body_text"]).startswith("1/ long-form")
+
+
+@pytest.mark.asyncio
+async def test_x_producer_uses_shared_pipeline_and_wakes_coordinator_once(tmp_path: Path) -> None:
+    """X must use the same immediate enqueue callback as every managed source."""
+
+    db = _db(tmp_path)
+    notifications: list[int] = []
+    pipeline = _SharedCandidatePipeline(on_candidates_enqueued=notifications.append)
+    producer = XDiscoveryProducer(
+        database=db,
+        soul_engine=_FakeSoulEngine(),
+        adapter=_FakeXAdapter(
+            by_strategy={"search": [_tweet_item("1790000000000000002", "x-search")]}
+        ),
+        creator_store=XCreatorStore(db),
+        health_store=XSourceHealthStore(db),
+        enabled=True,
+        request_interval_seconds=0,
+        min_interval_minutes=0,
+        candidate_pipeline=pipeline,
+    )
+
+    result = await producer.produce_if_due(limit=10)
+
+    assert result["enqueued"] == 1
+    assert [(items[0].content_id, context) for items, context in pipeline.batches] == [
+        ("1790000000000000002", "twitter")
+    ]
+    assert notifications == [1]
+    assert _claim_all(db) == []
 
 
 @pytest.mark.asyncio
