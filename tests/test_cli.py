@@ -2939,7 +2939,7 @@ def test_init_runs_history_preference_profile_and_discovery(
             self.built_history: list[list[dict[str, object]]] = []
 
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self, events: list[dict[str, object]], event_chunk_size: int = 0, **_: object
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -3084,7 +3084,7 @@ def test_init_caps_bilibili_history_and_favorites_at_500_and_following_at_100(
             self.built_history: list[list[dict[str, object]]] = []
 
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self, events: list[dict[str, object]], event_chunk_size: int = 0, **_: object
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -3193,7 +3193,7 @@ def test_init_accepts_custom_bilibili_history_favorites_and_following_limits(
             self.analyzed_events: list[list[dict[str, object]]] = []
 
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self, events: list[dict[str, object]], event_chunk_size: int = 0, **_: object
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -3300,6 +3300,7 @@ def test_init_includes_xhs_bootstrap_events(
             self,
             events: list[dict[str, object]],
             event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -3456,6 +3457,7 @@ def test_init_includes_douyin_bootstrap_events_in_analysis_and_profile(
             self,
             events: list[dict[str, object]],
             event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -3927,7 +3929,7 @@ def test_init_youtube_env_skip_overrides_yes_flag(
 
     class FakeSoulEngine:
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self, events: list[dict[str, object]], event_chunk_size: int = 0, **_: object
         ) -> None:
             return None
 
@@ -4129,7 +4131,7 @@ def test_init_no_xhs_flag_skips_enqueue(
             self.analyzed_events: list[list[dict[str, object]]] = []
 
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self, events: list[dict[str, object]], event_chunk_size: int = 0, **_: object
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -4236,7 +4238,7 @@ def test_init_backfills_pool_in_stages_until_target_is_reached(
 
     class FakeSoulEngine:
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self, events: list[dict[str, object]], event_chunk_size: int = 0, **_: object
         ) -> None:
             return None
 
@@ -4384,7 +4386,7 @@ def test_init_skips_backfill_when_pool_target_is_already_reached(
 
     class FakeSoulEngine:
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self, events: list[dict[str, object]], event_chunk_size: int = 0, **_: object
         ) -> None:
             return None
 
@@ -4492,7 +4494,7 @@ def test_init_reports_partial_success_when_discovery_fails(
 
     class FakeSoulEngine:
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self, events: list[dict[str, object]], event_chunk_size: int = 0, **_: object
         ) -> None:
             return None
 
