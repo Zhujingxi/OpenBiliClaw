@@ -131,16 +131,17 @@ class ExtensionNativeSaveBroker:
         )
         return self._job_from_row(row) if row is not None else None
 
-    def owns(self, task_id: str) -> bool:
-        """Return whether the durable ledger owns ``task_id`` in any state."""
+    def owns(self, task_id: str, platform_slug: str) -> bool:
+        """Return whether ``task_id`` belongs to the exact slug in any state."""
         try:
-            return self._database.get_extension_native_save_job(task_id) is not None
+            return self._database.owns_extension_native_save_job(task_id, platform_slug)
         except ValueError:
             return False
 
-    def submit_result(self, result: ExtensionNativeSaveResultIn) -> bool:
+    def submit_result(self, platform_slug: str, result: ExtensionNativeSaveResultIn) -> bool:
         return self._database.complete_extension_native_save_job(
             result.task_id,
+            platform_slug,
             result.item_key,
             result.status,
             result.error_code,

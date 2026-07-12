@@ -58,6 +58,7 @@ def make_claimed_job(
     platform_slug: str = "x",
     item_key: str = "twitter:123",
     content_id: str = "123",
+    content_url: str | None = None,
 ) -> dict[str, object]:
     database.create_or_reuse_extension_native_save_job(
         make_job(
@@ -65,7 +66,7 @@ def make_claimed_job(
             platform_slug=platform_slug,
             item_key=item_key,
             content_id=content_id,
-            content_url=f"https://x.com/example/status/{content_id}",
+            content_url=content_url or f"https://x.com/example/status/{content_id}",
         )
     )
     row = database.claim_extension_native_save_job(platform_slug, 60.0)
@@ -137,7 +138,7 @@ def test_callback_requires_job_and_item_correlation(database: Database) -> None:
     job = make_claimed_job(database)
 
     assert not database.complete_extension_native_save_job(
-        str(job["job_id"]), "twitter:999", "synced", "", ""
+        str(job["job_id"]), "x", "twitter:999", "synced", "", ""
     )
     row = database.get_extension_native_save_job(str(job["job_id"]))
     assert row is not None
@@ -148,9 +149,9 @@ def test_duplicate_or_late_completion_is_rejected(database: Database) -> None:
     job = make_claimed_job(database)
     job_id = str(job["job_id"])
 
-    assert database.complete_extension_native_save_job(job_id, "twitter:123", "synced", "", "")
+    assert database.complete_extension_native_save_job(job_id, "x", "twitter:123", "synced", "", "")
     assert not database.complete_extension_native_save_job(
-        job_id, "twitter:123", "failed", "native_save_timeout", "late"
+        job_id, "x", "twitter:123", "failed", "native_save_timeout", "late"
     )
     row = database.get_extension_native_save_job(job_id)
     assert row is not None
@@ -164,13 +165,32 @@ def test_broker_ownership_includes_terminal_jobs_and_rejects_invalid_ids(
     job = make_claimed_job(database)
     job_id = str(job["job_id"])
 
-    assert broker.owns(job_id)
-    assert broker.submit_result(
-        ExtensionNativeSaveResultIn(job_id, "twitter:123", "synced")
+    assert broker.owns(job_id, "x")
+    assert broker.submit_result("x", ExtensionNativeSaveResultIn(job_id, "twitter:123", "synced"))
+    assert broker.owns(job_id, "x")
+    assert not broker.owns(str(uuid4()), "x")
+    assert not broker.owns("not-a-uuid", "x")
+
+
+def test_broker_ownership_and_completion_are_bound_to_platform_slug(
+    database: Database,
+) -> None:
+    broker = ExtensionNativeSaveBroker(database, wake_platform=AsyncMock())
+    job = make_claimed_job(
+        database,
+        platform="reddit",
+        platform_slug="reddit",
+        item_key="reddit:t3_abc",
+        content_id="t3_abc",
+        content_url="https://www.reddit.com/r/test/comments/abc/demo/",
     )
-    assert broker.owns(job_id)
-    assert not broker.owns(str(uuid4()))
-    assert not broker.owns("not-a-uuid")
+    job_id = str(job["job_id"])
+    result = ExtensionNativeSaveResultIn(job_id, "reddit:t3_abc", "synced")
+
+    assert broker.owns(job_id, "reddit")
+    assert not broker.owns(job_id, "x")
+    assert not broker.submit_result("x", result)
+    assert broker.submit_result("reddit", result)
 
 
 @pytest.mark.parametrize(
@@ -190,7 +210,7 @@ def test_result_validation_rejects_unknown_or_unsafe_fields(
 
     with pytest.raises(ValueError):
         database.complete_extension_native_save_job(
-            str(job["job_id"]), "twitter:123", status, code, message
+            str(job["job_id"]), "x", "twitter:123", status, code, message
         )
 
 
@@ -208,6 +228,7 @@ def test_result_persists_only_backend_owned_safe_message(
 
     assert database.complete_extension_native_save_job(
         str(job["job_id"]),
+        "x",
         "twitter:123",
         "failed",
         "native_save_failed",
@@ -226,6 +247,7 @@ def test_result_rejects_unknown_code_and_unicode_control(database: Database) -> 
     with pytest.raises(ValueError):
         database.complete_extension_native_save_job(
             str(unknown_code_job["job_id"]),
+            "x",
             "twitter:123",
             "failed",
             "unknown_code",
@@ -240,6 +262,7 @@ def test_result_rejects_unknown_code_and_unicode_control(database: Database) -> 
     with pytest.raises(ValueError):
         database.complete_extension_native_save_job(
             str(unicode_control_job["job_id"]),
+            "x",
             "twitter:456",
             "failed",
             "native_save_failed",
@@ -357,13 +380,14 @@ async def test_submit_result_translates_terminal_durable_row(database: Database)
         job = broker.claim_next(platform_slug)
         assert job is not None
         assert broker.submit_result(
+            platform_slug,
             ExtensionNativeSaveResultIn(
                 task_id=job.job_id,
                 item_key=job.item_key,
                 status="already_synced",
                 error_code="",
                 error_message="",
-            )
+            ),
         )
 
     broker = ExtensionNativeSaveBroker(
@@ -421,7 +445,7 @@ async def test_unclaimed_dispatch_timeout_returns_extension_required(database: D
     assert row["status"] == "extension_required"
     assert row["last_error_code"] == "extension_unavailable"
     assert not database.complete_extension_native_save_job(
-        str(row["job_id"]), "reddit:t3_abc", "synced", "", ""
+        str(row["job_id"]), "reddit", "reddit:t3_abc", "synced", "", ""
     )
     durable = database.get_extension_native_save_job(str(row["job_id"]))
     assert durable is not None

@@ -29,9 +29,7 @@ _NATIVE_CASES = {
         NativeSaveRoute("favorite", "favorite", "Douyin Favorites"),
     ),
     "yt": (
-        SavedItemInput(
-            "youtube", "video-123", "https://www.youtube.com/watch?v=video-123"
-        ),
+        SavedItemInput("youtube", "video-123", "https://www.youtube.com/watch?v=video-123"),
         NativeSaveRoute("watch_later", "watch_later", "YouTube Watch Later"),
     ),
     "x": (
@@ -128,9 +126,7 @@ def test_next_task_serves_exact_native_job_shape(
         "platform_slug": slug,
         "content_id": item.content_id,
         "content_url": (
-            "https://www.xiaohongshu.com/explore/note-123"
-            if slug == "xhs"
-            else item.content_url
+            "https://www.xiaohongshu.com/explore/note-123" if slug == "xhs" else item.content_url
         ),
         "content_type": item.content_type,
         "requested_action": route.requested_action,
@@ -301,6 +297,67 @@ def test_x_rejects_unknown_result(client: TestClient) -> None:
     assert response.status_code == 409
 
 
+def test_native_result_cannot_complete_job_through_wrong_source(
+    client: TestClient,
+    broker: ExtensionNativeSaveBroker,
+    database: Database,
+) -> None:
+    job_id = enqueue_native_job(broker, "reddit")
+    claimed = broker.claim_next("reddit")
+    assert claimed is not None
+
+    response = client.post(
+        "/api/sources/x/task-result",
+        json={
+            "task_id": job_id,
+            "item_key": claimed.item_key,
+            "status": "synced",
+            "error_code": "",
+            "error_message": "",
+        },
+    )
+
+    assert response.status_code == 409
+    row = database.get_extension_native_save_job(job_id)
+    assert row is not None
+    assert row["status"] == "in_progress"
+
+
+@pytest.mark.parametrize(
+    ("slug", "legacy_collection"),
+    [
+        ("xhs", "notes"),
+        ("dy", "videos"),
+        ("reddit", "items"),
+        ("zhihu", "items"),
+        ("yt", "items"),
+    ],
+)
+def test_owned_native_result_validates_before_touching_legacy_collections(
+    client: TestClient,
+    broker: ExtensionNativeSaveBroker,
+    slug: str,
+    legacy_collection: str,
+) -> None:
+    job_id = enqueue_native_job(broker, slug)
+    claimed = broker.claim_next(slug)
+    assert claimed is not None
+
+    response = client.post(
+        f"/api/sources/{slug}/task-result",
+        json={
+            "task_id": job_id,
+            "item_key": claimed.item_key,
+            "status": "synced",
+            "error_code": "",
+            "error_message": "",
+            legacy_collection: None,
+        },
+    )
+
+    assert response.status_code == 422
+
+
 @pytest.mark.parametrize("slug", tuple(_NATIVE_CASES))
 def test_kick_publishes_exact_source_event(
     client: TestClient,
@@ -321,6 +378,8 @@ def test_native_save_source_api_is_documented() -> None:
     required = {
         "docs/modules/runtime.md": "extension_native_save_broker",
         "docs/modules/saved-sync.md": "type: native_save",
+        "docs/modules/init.md": "legacy discovery/bootstrap queues",
+        "docs/modules/api-auth.md": "six state-changing GET `/next-task`",
         "docs/architecture.md": "/api/sources/{xhs,dy,yt,x,zhihu,reddit}",
         "docs/spec.md": "native_save multiplex",
         "README.md": "六平台 source task multiplex",

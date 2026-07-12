@@ -7665,11 +7665,11 @@ def create_app(
             "target_label": job.target_label,
         }
 
-    def _is_extension_native_job(task_id: str) -> bool:
+    def _is_extension_native_job(task_id: str, slug: str) -> bool:
         broker = getattr(ctx, "extension_native_save_broker", None)
-        return bool(broker is not None and broker.owns(task_id))
+        return bool(broker is not None and broker.owns(task_id, slug))
 
-    def _submit_extension_native_result(payload: dict[str, Any]) -> dict[str, Any]:
+    def _submit_extension_native_result(slug: str, payload: dict[str, Any]) -> dict[str, Any]:
         from pydantic import ValidationError
 
         try:
@@ -7680,13 +7680,14 @@ def create_app(
         accepted = bool(
             broker is not None
             and broker.submit_result(
+                slug,
                 BrokerExtensionNativeSaveResultIn(
                     task_id=result.task_id,
                     item_key=result.item_key,
                     status=result.status,
                     error_code=result.error_code,
                     error_message=result.error_message,
-                )
+                ),
             )
         )
         if not accepted:
@@ -7756,7 +7757,12 @@ def create_app(
     @app.post("/api/sources/xhs/task-result")
     async def xhs_task_result(payload: dict[str, Any]) -> dict[str, Any]:
         """Accept a task result from the extension dispatcher."""
-        task_id = payload.get("task_id", "")
+        task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        if _is_extension_native_job(task_id, "xhs"):
+            return _submit_extension_native_result("xhs", payload)
+
         status = payload.get("status", "")
         urls = payload.get("urls", [])
         notes = [note for note in payload.get("notes", []) if isinstance(note, dict)]
@@ -7766,15 +7772,6 @@ def create_app(
         debug = payload.get("debug")
         if not isinstance(debug, dict):
             debug = None
-
-        if not task_id:
-            from fastapi import HTTPException
-
-            raise HTTPException(status_code=422, detail="task_id is required")
-
-        task_id = str(task_id).strip()
-        if _is_extension_native_job(task_id):
-            return _submit_extension_native_result(payload)
 
         legacy_queue = _xhs_task_queue
         if legacy_queue is None:
@@ -8559,7 +8556,12 @@ def create_app(
         (Douyin has its own posts in ``dy_post`` scope which we treat as
         a weak ``view`` signal — they're meant to count as input).
         """
-        task_id = payload.get("task_id", "")
+        task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        if _is_extension_native_job(task_id, "dy"):
+            return _submit_extension_native_result("dy", payload)
+
         status = payload.get("status", "")
         videos = [v for v in payload.get("videos", []) if isinstance(v, dict)]
         # TEMP DEBUG: surface incoming partial debug field for the dy
@@ -8576,15 +8578,6 @@ def create_app(
         debug = payload.get("debug")
         if not isinstance(debug, dict):
             debug = None
-
-        if not task_id:
-            from fastapi import HTTPException
-
-            raise HTTPException(status_code=422, detail="task_id is required")
-
-        task_id = str(task_id).strip()
-        if _is_extension_native_job(task_id):
-            return _submit_extension_native_result(payload)
 
         legacy_queue = _dy_task_queue
         if legacy_queue is None:
@@ -8681,9 +8674,9 @@ def create_app(
         task_id = str(payload.get("task_id", "") or "").strip()
         if not task_id:
             raise HTTPException(status_code=422, detail="task_id is required")
-        if not _is_extension_native_job(task_id):
+        if not _is_extension_native_job(task_id, "x"):
             raise HTTPException(status_code=409, detail="task_result_conflict")
-        return _submit_extension_native_result(payload)
+        return _submit_extension_native_result("x", payload)
 
     @app.post("/api/sources/x/kick")
     async def x_task_kick() -> dict[str, Any]:
@@ -8738,6 +8731,11 @@ def create_app(
     async def reddit_task_result(payload: dict[str, Any]) -> dict[str, Any]:
         """Accept a Reddit task result from the extension dispatcher."""
         task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        if _is_extension_native_job(task_id, "reddit"):
+            return _submit_extension_native_result("reddit", payload)
+
         status = str(payload.get("status", "") or "").strip()
         items = [v for v in payload.get("items", []) if isinstance(v, dict)]
         scope_counts = payload.get("scope_counts")
@@ -8746,14 +8744,6 @@ def create_app(
         debug = payload.get("debug")
         if not isinstance(debug, dict):
             debug = None
-
-        if not task_id:
-            from fastapi import HTTPException
-
-            raise HTTPException(status_code=422, detail="task_id is required")
-
-        if _is_extension_native_job(task_id):
-            return _submit_extension_native_result(payload)
 
         legacy_queue = _reddit_task_queue
         if legacy_queue is None:
@@ -8816,6 +8806,11 @@ def create_app(
         pipeline.
         """
         task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        if _is_extension_native_job(task_id, "zhihu"):
+            return _submit_extension_native_result("zhihu", payload)
+
         status = str(payload.get("status", "") or "").strip()
         items = [v for v in payload.get("items", []) if isinstance(v, dict)]
         scope_counts = payload.get("scope_counts")
@@ -8824,14 +8819,6 @@ def create_app(
         debug = payload.get("debug")
         if not isinstance(debug, dict):
             debug = None
-
-        if not task_id:
-            from fastapi import HTTPException
-
-            raise HTTPException(status_code=422, detail="task_id is required")
-
-        if _is_extension_native_job(task_id):
-            return _submit_extension_native_result(payload)
 
         legacy_queue = _zhihu_task_queue
         if legacy_queue is None:
@@ -8921,7 +8908,12 @@ def create_app(
     @app.post("/api/sources/yt/task-result")
     async def yt_task_result(payload: dict[str, Any]) -> dict[str, Any]:
         """Accept a YouTube task result from the extension dispatcher."""
-        task_id = payload.get("task_id", "")
+        task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        if _is_extension_native_job(task_id, "yt"):
+            return _submit_extension_native_result("yt", payload)
+
         status = payload.get("status", "")
         items = [v for v in payload.get("items", []) if isinstance(v, dict)]
         scope_counts = payload.get("scope_counts")
@@ -8930,15 +8922,6 @@ def create_app(
         debug = payload.get("debug")
         if not isinstance(debug, dict):
             debug = None
-
-        if not task_id:
-            from fastapi import HTTPException
-
-            raise HTTPException(status_code=422, detail="task_id is required")
-
-        task_id = str(task_id).strip()
-        if _is_extension_native_job(task_id):
-            return _submit_extension_native_result(payload)
 
         legacy_queue = _yt_task_queue
         if legacy_queue is None:

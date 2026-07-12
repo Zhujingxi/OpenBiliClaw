@@ -7902,13 +7902,15 @@ class Database:
     def complete_extension_native_save_job(
         self,
         job_id: str,
+        platform_slug: str,
         item_key: str,
         status: str,
         error_code: str,
         error_message: str,
     ) -> bool:
-        """Complete one claimed job when both its UUID and item identity match."""
+        """Complete one claimed job when slug, UUID, and item identity match."""
         safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
+        safe_slug = self._validated_extension_native_save_slug(platform_slug)
         safe_item_key = _validated_extension_native_save_text(item_key, "item_key", max_length=768)
         safe_status, safe_code, safe_message = _validated_extension_native_save_result(
             status, error_code, error_message
@@ -7919,9 +7921,10 @@ class Database:
             SET status = ?, last_error_code = ?, last_error_message = ?,
                 completed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
                 updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
-            WHERE job_id = ? AND item_key = ? AND status = 'in_progress'
+            WHERE job_id = ? AND platform_slug = ? AND item_key = ?
+              AND status = 'in_progress'
             """,
-            (safe_status, safe_code, safe_message, safe_job_id, safe_item_key),
+            (safe_status, safe_code, safe_message, safe_job_id, safe_slug, safe_item_key),
         )
         self.conn.commit()
         return cursor.rowcount == 1
@@ -7967,6 +7970,16 @@ class Database:
             "SELECT * FROM extension_native_save_jobs WHERE job_id = ?", (safe_job_id,)
         ).fetchone()
         return dict(row) if row is not None else None
+
+    def owns_extension_native_save_job(self, job_id: str, platform_slug: str) -> bool:
+        """Return whether a durable job belongs to the exact source slug."""
+        safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
+        safe_slug = self._validated_extension_native_save_slug(platform_slug)
+        row = self.conn.execute(
+            "SELECT 1 FROM extension_native_save_jobs WHERE job_id = ? AND platform_slug = ?",
+            (safe_job_id, safe_slug),
+        ).fetchone()
+        return row is not None
 
     def expire_stale_extension_native_save_jobs(
         self, platform_slug: str, lease_seconds: float
