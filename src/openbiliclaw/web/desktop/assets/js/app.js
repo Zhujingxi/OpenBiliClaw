@@ -5514,7 +5514,9 @@
     }
 
     // 鼠标/触摸拖动切换 delight
-    let _delightDragging = false;
+    const _DELIGHT_DRAG_DEAD_ZONE = 10;
+    let _delightDragging = false;   // 按下已就绪，尚未越过死区
+    let _delightDragActive = false; // 已越过死区，真正进入拖拽
     let _delightDragLastX = 0;
     function _initDelightSwipe() {
         const banner = $("#delightBanner");
@@ -5527,14 +5529,21 @@
         });
         banner.addEventListener("pointerdown", (e) => {
             _delightDragging = true;
+            _delightDragActive = false;
             _delightSwipeStartX = e.clientX;
             _delightDragLastX = e.clientX;
             banner.setPointerCapture(e.pointerId);
-            banner.classList.add("is-dragging");
+            // 死区内不进入拖拽视觉态
         });
         banner.addEventListener("pointermove", (e) => {
             if (!_delightDragging) return;
             const dx = e.clientX - _delightSwipeStartX;
+            // 死区判定：未越过阈值前不应用位移、不加 is-dragging
+            if (!_delightDragActive) {
+                if (Math.abs(dx) < _DELIGHT_DRAG_DEAD_ZONE) return;
+                _delightDragActive = true;
+                banner.classList.add("is-dragging");
+            }
             const maxDrag = banner.offsetWidth * 0.3;
             const clamped = Math.max(-maxDrag, Math.min(maxDrag, dx));
             // 首项/末项增加阻力
@@ -5546,10 +5555,12 @@
         banner.addEventListener("pointerup", (e) => {
             if (!_delightDragging) return;
             _delightDragging = false;
+            const wasActive = _delightDragActive;
+            _delightDragActive = false;
             banner.classList.remove("is-dragging");
             banner.releasePointerCapture(e.pointerId);
             const dx = e.clientX - _delightSwipeStartX;
-            if (Math.abs(dx) >= 50) {
+            if (wasActive && Math.abs(dx) >= 50) {
                 if (dx > 0) setActiveDelight(state.delightIndex <= 0 ? state.delights.length - 1 : state.delightIndex - 1);
                 else if (dx < 0) setActiveDelight(state.delightIndex >= state.delights.length - 1 ? 0 : state.delightIndex + 1);
             }
@@ -5557,6 +5568,7 @@
         });
         banner.addEventListener("pointercancel", () => {
             _delightDragging = false;
+            _delightDragActive = false;
             banner.classList.remove("is-dragging");
             banner.style.removeProperty("--drag-offset");
         });
