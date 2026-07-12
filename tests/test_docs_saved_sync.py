@@ -8,6 +8,7 @@ def test_saved_sync_docs_name_default_and_routes() -> None:
     architecture_doc = Path("docs/architecture.md").read_text()
     docs_index = Path("docs/index.md").read_text()
     e2e_doc = Path("docs/native-save-e2e.md").read_text()
+    changelog = Path("docs/changelog.md").read_text()
 
     assert "[saved_sync]" in config_doc
     assert "auto_sync_enabled = false" in config_doc
@@ -28,6 +29,10 @@ def test_saved_sync_docs_name_default_and_routes() -> None:
     assert "OBC_CONFIG_TOUCHED=1" in e2e_doc
     assert "自动同步配置恢复失败" in e2e_doc
     assert "OBC_HEADERS=()" in e2e_doc
+    assert "if (( ${#OBC_HEADERS[@]} )); then" in e2e_doc
+    assert "Bash 3.2" in e2e_doc
+    assert "授权 E2E" in saved_sync_doc
+    assert "授权真实账号 E2E" in changelog
     assert "trap - EXIT INT TERM" in e2e_doc
     assert "(.items | length) > 0" in e2e_doc
     assert "非浏览器 Bearer" in e2e_doc

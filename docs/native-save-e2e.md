@@ -80,8 +80,13 @@ trap 'exit 143' TERM
 #   -H "Authorization: Bearer $OBC_TOKEN")
 
 api() {
-  curl --noproxy '*' --connect-timeout 5 --max-time 30 -fsS \
-    "${OBC_HEADERS[@]}" "$@"
+  # macOS 自带的 Bash 3.2 在 `set -u` 下展开空数组会报 unbound variable。
+  if (( ${#OBC_HEADERS[@]} )); then
+    curl --noproxy '*' --connect-timeout 5 --max-time 30 -fsS \
+      "${OBC_HEADERS[@]}" "$@"
+  else
+    curl --noproxy '*' --connect-timeout 5 --max-time 30 -fsS "$@"
+  fi
 }
 ```
 

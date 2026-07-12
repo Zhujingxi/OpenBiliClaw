@@ -117,3 +117,8 @@ Bilibili favorite / watch-later 请求。真实 `favorite` 与 `watch_later` 都
 为具体 BV ID 取得用户当次授权或使用指定测试账号后才能运行；验证记录只保留 task ID、
 状态、计数和脱敏错误码。YouTube、小红书、抖音、X、知乎与 Reddit 的账号写入 adapter
 仍是后续独立计划，Phase 1 不能宣称这些平台已经原生同步。
+
+2026-07-13 已在当次明确授权下完成 B 站真实账号授权 E2E：手动收藏、手动稍后再看和
+开启配置后的自动收藏均返回 `synced`；删除三条本地 membership 后，两条平台收藏与一条
+平台稍后再看仍可读，自动同步配置也恢复为测试前的关闭值。该结果只证明 Bilibili Phase 1
+adapter 的授权链路，不扩大其它平台边界。
