@@ -287,6 +287,11 @@ class ContinuousRefreshController:
     discovery_candidate_pipeline: Any | None = None
     candidate_eval_coordinator: Any | None = None
     expression_copy_coordinator: Any | None = None
+    # OpenClaw's bridge is intentionally one-shot: it has no daemon loop to
+    # own ExpressionCopyCoordinator.  When supplied, this callback finishes
+    # the durable copy stage synchronously after inline admission instead of
+    # scheduling the daemon-oriented precompute path.
+    one_shot_expression_copy_callback: Callable[[Any], Any] | None = None
     llm_concurrency_gate: Any | None = None
     bilibili_producer: Any | None = None
     xhs_producer: Any | None = None
@@ -1047,6 +1052,23 @@ class ContinuousRefreshController:
             )
         except Exception:
             logger.exception("precompute_pool_copy task failed")
+            return 0
+
+    async def _safe_one_shot_expression_copy(self, *, profile: Any) -> int:
+        """Finish a non-daemon copy drain without creating background work."""
+
+        callback = self.one_shot_expression_copy_callback
+        if callback is None:
+            return 0
+        try:
+            result = callback(profile)
+            if inspect.isawaitable(result):
+                result = await result
+            return max(0, int(result or 0))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("one-shot expression-copy drain failed")
             return 0
 
     async def _safe_prewarm_pool_mmr_embeddings(self) -> int:
@@ -1904,6 +1926,8 @@ class ContinuousRefreshController:
         if cached > 0 and precompute:
             if self.expression_copy_coordinator is not None:
                 self.expression_copy_coordinator.notify(f"candidate_admitted:{cached}")
+            elif self.one_shot_expression_copy_callback is not None:
+                await self._safe_one_shot_expression_copy(profile=profile)
             else:
                 await self._safe_precompute_pool_copy(profile=profile)
                 await self._publish_precompute_replenishment_if_needed(
@@ -2196,24 +2220,24 @@ class ContinuousRefreshController:
             delight_count_before = self._safe_count_delight_candidates()
             if self.expression_copy_coordinator is not None:
                 self.expression_copy_coordinator.notify("refresh_complete")
+            elif self.one_shot_expression_copy_callback is not None:
+                await self._safe_one_shot_expression_copy(profile=profile)
             else:
                 await self._safe_precompute_pool_copy(profile=profile)
             # Pre-warm supergroup-merge embeddings so the popup's "换一批"
-            # hot path always hits the L1/L2 cache. New labels added by
-            # this refresh round get warmed before the user clicks.
-            # Warm embedding-derived caches in the background. They are
-            # latency optimizations for later serve() calls, not
-            # requirements for this refresh result to become visible.
-            # Keeping them off the refresh lock prevents slow local
-            # embedding backends from leaving the popup stuck at "正在补货".
-            self._track_task(
-                "prewarm_supergroup_embeddings",
-                self._safe_prewarm_supergroup_embeddings(),
-            )
-            self._track_task(
-                "prewarm_pool_mmr_embeddings",
-                self._safe_prewarm_pool_mmr_embeddings(),
-            )
+            # hot path always hits the L1/L2 cache. These are daemon latency
+            # optimizations, not part of a one-shot adapter's completed
+            # operation; OpenClaw deliberately leaves no provider-backed
+            # background task behind after returning.
+            if self.one_shot_expression_copy_callback is None:
+                self._track_task(
+                    "prewarm_supergroup_embeddings",
+                    self._safe_prewarm_supergroup_embeddings(),
+                )
+                self._track_task(
+                    "prewarm_pool_mmr_embeddings",
+                    self._safe_prewarm_pool_mmr_embeddings(),
+                )
             delight_count_after = self._safe_count_delight_candidates()
             net_new_delights = max(0, delight_count_after - delight_count_before)
             if net_new_delights > 0:

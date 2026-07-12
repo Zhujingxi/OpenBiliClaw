@@ -153,7 +153,11 @@ class OpenClawAdapter:
                     rows = [
                         row for row in get_recommendations(limit=limit) if isinstance(row, dict)
                     ]
-            if rows is not None:
+            # A fresh one-shot runtime has canonical pool rows but no
+            # recommendation-history rows yet.  Only return the history fast
+            # path when it actually has entries; otherwise serve the newly
+            # copied pool below.
+            if rows:
                 return RecommendationResponse(
                     items=[
                         RecommendationItem(

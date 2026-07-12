@@ -149,7 +149,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 
 - **核心评估**：这个内容是否匹配这个用户的深层兴趣和当前状态？
 - **可选辅助指标**：播放量/点赞/弹幕质量等——由用户画像决定是否参考（有些用户在意质量指标，有些人不在意）
-- **统一待评估池与准入**：API daemon 的不同来源 raw candidates 进入 `discovery_candidates` 后，由唯一 `CandidateEvalCoordinator` tokenized claim；默认 3 个 30 条 LLM worker 并行，任一完成即补位，SQLite 完成提交与 admission 串行。pipeline 单次 enqueue callback 立即唤醒这个 owner，refresh / managed producer 不再同步 drain。串行 lane 先持久化全部 token-owned 评分，再按 `target - available - admitted_pending_copy` admission；超过 headroom 的达标结果保留为 `evaluated`。OpenClaw direct one-shot 不启动 daemon owner，改用同一 pipeline 的 ≤90 条 inline drain，确保本次调用会实际 admission。调度 projected 固定为 `available + admitted_pending_copy + evaluated_pending_admission`，普通 `pending_eval/evaluating` 不计入；60 秒只作 API coordinator 的安全 backstop。来源只影响取数方式、配额和 prompt 上下文；平台节流、raw ceiling 与准入阈值不变。
+- **统一待评估池与准入**：API daemon 的不同来源 raw candidates 进入 `discovery_candidates` 后，由唯一 `CandidateEvalCoordinator` tokenized claim；默认 3 个 30 条 LLM worker 并行，任一完成即补位，SQLite 完成提交与 admission 串行。pipeline 单次 enqueue callback 立即唤醒这个 owner，refresh / managed producer 不再同步 drain。串行 lane 先持久化全部 token-owned 评分，再按 `target - available - admitted_pending_copy` admission；超过 headroom 的达标结果保留为 `evaluated`。OpenClaw direct one-shot 不启动 daemon owner，改用同一 pipeline 的 ≤90 条 inline drain，并在每次 durable admission 后同步 drain ≤60 条 expression copy；因此调用返回前 canonical pool 已可 serve，既不遗留 notify-only coordinator，也不遗留 provider copy task。调度 projected 固定为 `available + admitted_pending_copy + evaluated_pending_admission`，普通 `pending_eval/evaluating` 不计入；60 秒只作 API coordinator 的安全 backstop。来源只影响取数方式、配额和 prompt 上下文；平台节流、raw ceiling 与准入阈值不变。
 
 ---
 
@@ -293,7 +293,7 @@ background ─ background admission (default 3) ──────┘
 │  │     PoolCurator + 双轴 fatigue + per-group 窗口 + 新兴趣放大保护 │ │
 │  │     request_replenishment + 定时/手动补货 + B/XHS/DY/YT/X/Zhihu/Reddit=5/1/1/1/1/1/1 │ │
 │  │ API CandidateEvalCoordinator: durable projected -> 3×30 workers -> serial headroom admit │ │
-│  │ OpenClaw one-shot: shared pipeline inline drain <=90; both hosts recover/maintain first │ │
+│  │ OpenClaw one-shot: inline drain <=90 -> await copy <=60 -> canonical pool; both hosts recover/maintain first │ │
 │  │     内容元数据：时长/互动/发布时间 -> candidates -> content_cache -> API -> 四端 │ │
 │  │     Query inspiration cache: search preview -> inspiration/expansion -> keyword provenance │ │
 │  │     InspirationKeywordPipeline: axis library learning loop (yield backfill/lifecycle) + breadth config │ │

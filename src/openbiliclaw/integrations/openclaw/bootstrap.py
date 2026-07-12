@@ -25,7 +25,6 @@ from openbiliclaw.llm.usage_recorder import UsageRecorder
 from openbiliclaw.memory.manager import MemoryManager
 from openbiliclaw.recommendation.engine import RecommendationEngine
 from openbiliclaw.runtime.account_sync import AccountSyncService
-from openbiliclaw.runtime.candidate_eval import CandidateEvalSnapshot
 from openbiliclaw.runtime.presence import PresenceTracker
 from openbiliclaw.runtime.refresh import ContinuousRefreshController
 from openbiliclaw.runtime.source_policy import effective_pool_source_shares
@@ -238,6 +237,32 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         concurrency=concurrency,
         candidate_pipeline=candidate_pipeline,
     )
+    runtime_controller: ContinuousRefreshController
+
+    async def _drain_one_shot_expression_copy(profile: Any) -> int:
+        """Complete OpenClaw's terminal copy stage before returning control.
+
+        OpenClaw only invokes short-lived operations and never starts
+        ``ContinuousRefreshController.run_forever()``.  It must therefore
+        await the durable expression-copy work itself rather than notify a
+        daemon coordinator that will never run.
+        """
+
+        if profile is None:
+            return 0
+        before = int(runtime_controller._pool_readiness_counts().get("available", 0))  # noqa: SLF001
+        completed = await recommendation_engine.drain_pending_expression_copy(
+            profile=profile,
+            limit=60,
+        )
+        await runtime_controller._publish_precompute_replenishment_if_needed(  # noqa: SLF001
+            before_pool_count=before,
+        )
+        return int(completed)
+
+    async def _copy_after_inline_admission(profile: Any, _admitted: int) -> int:
+        return await _drain_one_shot_expression_copy(profile)
+
     runtime_controller = ContinuousRefreshController(
         memory_manager=memory_manager,
         database=database,
@@ -260,56 +285,13 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         scheduler_config=config.scheduler,
         presence=presence,
         llm_concurrency_gate=llm_gate,
+        one_shot_expression_copy_callback=_drain_one_shot_expression_copy,
     )
-
-    def _candidate_eval_snapshot() -> CandidateEvalSnapshot:
-        readiness = runtime_controller._pool_readiness_counts()  # noqa: SLF001
-        update_inventory = getattr(runtime_controller, "_update_llm_inventory_state", None)
-        if callable(update_inventory):
-            update_inventory(int(readiness.get("available", 0)))
-        status_counts = database.count_discovery_candidates_by_status()
-        return CandidateEvalSnapshot(
-            available=int(readiness.get("available", 0)),
-            target=int(config.scheduler.pool_target_count),
-            pending_eval=int(status_counts.get("pending_eval", 0)),
-            evaluating=int(status_counts.get("evaluating", 0)),
-            evaluated_pending_admission=int(status_counts.get("evaluated", 0)),
-            admitted_pending_copy=int(readiness.get("admitted_pending_copy", 0)),
-        )
-
-    from openbiliclaw.runtime.expression_copy import ExpressionCopyCoordinator
-
-    async def _drain_expression_copy(limit: int) -> int:
-        get_profile = getattr(soul_engine, "get_profile", None)
-        if not callable(get_profile):
-            return 0
-        profile = await get_profile()
-        if profile is None:
-            return 0
-        before = int(_candidate_eval_snapshot().available)
-        completed = await recommendation_engine.drain_pending_expression_copy(
-            profile=profile, limit=limit
-        )
-        publish = getattr(runtime_controller, "_publish_precompute_replenishment_if_needed", None)
-        if callable(publish):
-            await publish(before_pool_count=before)
-        return int(completed)
-
-    expression_coordinator = ExpressionCopyCoordinator(
-        pending_count_provider=lambda: int(_candidate_eval_snapshot().admitted_pending_copy),
-        drain_callback=_drain_expression_copy,
-        safety_wake_seconds=float(getattr(config.scheduler, "refresh_check_interval_seconds", 60)),
-    )
-    runtime_controller.expression_copy_coordinator = expression_coordinator
-    set_copy_callback = getattr(recommendation_engine, "set_copy_pending_callback", None)
-    if callable(set_copy_callback):
-        set_copy_callback(expression_coordinator.notify)
-
-    # The OpenClaw adapter exposes one-shot operations and never starts the
-    # controller's daemon ``run_forever`` lifecycle.  Do not attach a dormant
-    # coordinator or transfer producer ownership to it: direct refresh and
-    # producer calls retain DiscoveryCandidatePipeline's bounded inline drain
-    # (its hard cap remains 90 raw claims) so candidates are actually admitted.
+    # The OpenClaw adapter has no daemon lifecycle.  Keep the evaluator's
+    # bounded inline drain, then finish copy through the awaited callback
+    # above; unlike a notify-only coordinator this leaves no dormant owner or
+    # background copy task behind.
+    candidate_pipeline.on_candidates_admitted = _copy_after_inline_admission
     set_pool_commit_callback = getattr(
         recommendation_engine,
         "set_pool_inventory_commit_callback",

@@ -94,6 +94,10 @@ class DiscoveryCandidatePipeline:
     max_supply_fill_seconds: float = 240.0
     eval_batch_concurrency: int = 2
     on_candidates_enqueued: Callable[[int], None] | None = None
+    # Non-daemon callers may own the final, durable expression-copy stage
+    # inline.  The API runtime leaves this unset because its coordinator owns
+    # that stage after claim completion.
+    on_candidates_admitted: Callable[[Any, int], Any] | None = None
     time_fn: Callable[[], float] = field(default=time.monotonic, repr=False)
     _drain_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock,
@@ -370,7 +374,33 @@ class DiscoveryCandidatePipeline:
             self.last_admitted_items = []
             return {"evaluated": 0, "cached": 0, "rejected": 0}
         async with self._drain_lock:
-            return await self._drain_pending_locked(profile=profile, batch_size=batch_size)
+            result = await self._drain_pending_locked(profile=profile, batch_size=batch_size)
+        await self._notify_candidates_admitted(
+            profile=profile,
+            admitted=int(result.get("cached", 0) or 0),
+        )
+        return result
+
+    async def _notify_candidates_admitted(self, *, profile: Any, admitted: int) -> None:
+        """Run the optional post-admission owner after its DB commit.
+
+        Candidate evaluation owns only raw evaluation and cache admission.  A
+        non-daemon composition can supply the final copy owner here, after the
+        candidate transaction is durable; failures remain retryable because
+        un-copied rows stay in the durable pending-copy set.
+        """
+
+        callback = self.on_candidates_admitted
+        if admitted <= 0 or callback is None:
+            return
+        try:
+            result = callback(profile, admitted)
+            if inspect.isawaitable(result):
+                await result
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("post-admission candidate callback failed")
 
     def claim_batch(self, *, limit: int) -> CandidateEvalClaim | None:
         """Claim one token-owned batch without performing LLM work."""

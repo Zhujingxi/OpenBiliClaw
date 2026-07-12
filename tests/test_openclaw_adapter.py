@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -1015,10 +1016,11 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     assert len(producer_kwargs) == 2
     assert all(kwargs["candidate_pipeline"] is pipeline for kwargs in producer_kwargs)
     assert services.runtime_controller.kwargs["youtube_producer"].kind == "youtube"
-    # The adapter is a one-shot composition: it never starts the daemon's
-    # coordinator loop, so producer evaluation remains bounded inline rather
-    # than being handed to an idle background owner.
+    # The adapter is a one-shot composition: it never starts daemon owners.
+    # Producer evaluation stays bounded inline and admission hands copy to the
+    # awaited one-shot owner rather than an idle coordinator.
     assert getattr(services.runtime_controller, "candidate_eval_coordinator", None) is None
+    assert getattr(services.runtime_controller, "expression_copy_coordinator", None) is None
     assert (
         getattr(
             services.runtime_controller.kwargs["douyin_producer"],
@@ -1036,6 +1038,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
         is False
     )
     assert getattr(pipeline, "on_candidates_enqueued", None) is None
+    assert callable(getattr(pipeline, "on_candidates_admitted", None))
     assert services.runtime_controller.kwargs["check_interval_seconds"] == 77
     assert services.runtime_controller.kwargs["signal_event_threshold"] == 9
     assert services.runtime_controller.kwargs["trending_refresh_hours"] == 5
@@ -1043,9 +1046,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     assert services.runtime_controller.kwargs["discovery_limit"] == 17
     assert services.runtime_controller.kwargs["proactive_push_interval_seconds"] == 155
     created_databases[0].pool_count = 7
-    # Expression copy still reads the same durable snapshot in one-shot mode;
-    # only the unstarted candidate-evaluation background owner is omitted.
-    assert services.runtime_controller.expression_copy_coordinator.pending_count_provider() == 4
+    services.runtime_controller._pool_readiness_counts()
     assert services.llm_service.concurrency_gate.status_payload()["inventory_priority_state"] == (
         "refill"
     )
@@ -1151,6 +1152,247 @@ async def test_openclaw_one_shot_producer_admits_inline_with_ninety_claim_cap(
     assert statuses["cached"] == 90
     assert statuses["pending_eval"] == 30
     assert evaluation_engine.max_evaluated_batch == 90
+
+
+@pytest.mark.asyncio
+async def test_openclaw_bootstrap_one_shot_producer_copies_and_serves_fresh_pool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-daemon OpenClaw refill must finish the durable copy stage inline."""
+
+    import openbiliclaw.integrations.openclaw.bootstrap as bootstrap_module
+    import openbiliclaw.llm.registry as registry_module
+    import openbiliclaw.runtime.douyin_producer as douyin_producer_module
+
+    profile = SoulProfile(
+        core_traits=["好奇"],
+        preferences=PreferenceLayer(
+            interests=[InterestTag(name="系统设计", category="技术", weight=0.95)]
+        ),
+    )
+
+    class BootstrapMemory:
+        def __init__(self, _data_path: Path, database: Database | None = None) -> None:
+            self.database = database
+            self.runtime_state: dict[str, object] = {}
+
+        def initialize(self) -> None:
+            pass
+
+        def load_discovery_runtime_state(self) -> dict[str, object]:
+            return dict(self.runtime_state)
+
+        def save_discovery_runtime_state(self, state: dict[str, object]) -> None:
+            self.runtime_state = dict(state)
+
+        def update_discovery_runtime_state(self, mutator) -> dict[str, object]:
+            state = dict(self.runtime_state)
+            result = mutator(state)
+            self.runtime_state = dict(state if result is None else result)
+            return dict(self.runtime_state)
+
+        def get_layer(self, name: str) -> SimpleNamespace:
+            assert name == "soul"
+            return SimpleNamespace(data={"ready": True})
+
+    class BootstrapSoul:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def get_profile(self) -> SoulProfile:
+            return profile
+
+    class BootstrapLLM:
+        expression_calls = 0
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def complete_structured_task(
+            self, *, caller: str, **_kwargs: object
+        ) -> SimpleNamespace:
+            assert caller == "recommendation.write_expression"
+            type(self).expression_calls += 1
+            return SimpleNamespace(
+                content=json.dumps(
+                    [
+                        {
+                            "content_id": f"dy-openclaw-copy-{index}",
+                            "expression": (
+                                f"第 {index} 条把并发补货讲得很具体，正好接住你想把系统跑稳的劲头。"
+                            ),
+                            "topic_label": f"把补货链路跑稳 {index}",
+                        }
+                        for index in range(8)
+                    ],
+                    ensure_ascii=False,
+                )
+            )
+
+    class BootstrapDiscovery:
+        _EVALUATE_BATCH_HARD_CAP = 90
+
+        def __init__(self, *, database: Database, **_kwargs: object) -> None:
+            self.database = database
+
+        def register_strategy(self, _strategy: object) -> None:
+            pass
+
+        async def evaluate_content_batch(
+            self,
+            contents: list[DiscoveredContent],
+            _profile: SoulProfile,
+            **_kwargs: object,
+        ) -> list[float]:
+            for item in contents:
+                item.relevance_score = 0.91
+                item.relevance_reason = "OpenClaw one-shot fit"
+                item.topic_group = f"系统设计-{item.content_id}"
+                item.style_key = "deep_dive"
+            return [0.91] * len(contents)
+
+        def cache_evaluated_results(self, items: list[DiscoveredContent]) -> int:
+            for item in items:
+                content_id = item.content_id or item.bvid
+                self.database.cache_content(
+                    item.bvid,
+                    title=item.title,
+                    up_name=item.author_name or item.up_name,
+                    source=item.source_strategy,
+                    source_platform=item.source_platform,
+                    content_id=content_id,
+                    content_url=item.content_url,
+                    relevance_score=item.relevance_score,
+                    relevance_reason=item.relevance_reason,
+                    topic_group=item.topic_group,
+                    style_key=item.style_key,
+                )
+            return len(items)
+
+    class BootstrapStrategy:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+    class BootstrapBilibiliClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+    class BootstrapAccountSync:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+    async def discover(
+        _profile: SoulProfile,
+        _options: DouyinDiscoveryOptions,
+    ) -> DouyinDiscoveryResult:
+        return DouyinDiscoveryResult(
+            items=[
+                DiscoveredContent(
+                    bvid=f"dy-openclaw-copy-{index}",
+                    content_id=f"dy-openclaw-copy-{index}",
+                    content_url=f"https://www.douyin.com/video/dy-openclaw-copy-{index}",
+                    title=f"连续补货的并发控制 {index}",
+                    source_platform="douyin",
+                    source_strategy="search",
+                    author_name="系统实验室",
+                )
+                for index in range(8)
+            ],
+            cached=False,
+            source_counts={"search": 8},
+        )
+
+    def build_douyin(**kwargs: object) -> DouyinDiscoveryProducer:
+        return DouyinDiscoveryProducer(
+            soul_engine=kwargs["soul_engine"],
+            discover=discover,
+            enabled=True,
+            min_interval_minutes=0,
+            sources=("search",),
+            candidate_pipeline=kwargs["candidate_pipeline"],
+        )
+
+    scheduler = SimpleNamespace(
+        enabled=True,
+        pause_on_extension_disconnect=False,
+        pool_target_count=8,
+        pool_source_shares={"douyin": 8},
+        account_sync_interval_hours=6,
+        refresh_check_interval_seconds=60,
+        signal_event_threshold=6,
+        trending_refresh_hours=3,
+        explore_refresh_hours=12,
+        discovery_limit=30,
+        proactive_push_interval_seconds=120,
+        speculation_interval_minutes=15,
+        speculation_ttl_days=7,
+        speculation_cooldown_days=7,
+        speculation_confirmation_threshold=3,
+        speculation_max_active=5,
+        speculation_max_primary_interests=12,
+        speculation_max_secondary_interests=48,
+        speculator_idle_interval_minutes=10,
+    )
+    config = SimpleNamespace(
+        data_path=tmp_path,
+        llm=SimpleNamespace(concurrency=3),
+        bilibili=SimpleNamespace(cookie="", proxy=""),
+        discovery=SimpleNamespace(admission_min_score=0.60),
+        scheduler=scheduler,
+    )
+
+    monkeypatch.setattr(bootstrap_module, "load_config", lambda: config)
+    monkeypatch.setattr(bootstrap_module, "build_llm_registry", lambda _config: object())
+    monkeypatch.setattr(bootstrap_module, "module_overrides_from_config", lambda _config: {})
+    monkeypatch.setattr(bootstrap_module, "_llm_concurrency_from_config", lambda _config: 3)
+    monkeypatch.setattr(bootstrap_module, "resolve_runtime_cookie", lambda **_kwargs: "")
+    monkeypatch.setattr(bootstrap_module, "MemoryManager", BootstrapMemory)
+    monkeypatch.setattr(bootstrap_module, "SoulEngine", BootstrapSoul)
+    monkeypatch.setattr(bootstrap_module, "LLMService", BootstrapLLM)
+    monkeypatch.setattr(bootstrap_module, "BilibiliAPIClient", BootstrapBilibiliClient)
+    monkeypatch.setattr(bootstrap_module, "ContentDiscoveryEngine", BootstrapDiscovery)
+    monkeypatch.setattr(bootstrap_module, "SearchStrategy", BootstrapStrategy)
+    monkeypatch.setattr(bootstrap_module, "TrendingStrategy", BootstrapStrategy)
+    monkeypatch.setattr(bootstrap_module, "RelatedChainStrategy", BootstrapStrategy)
+    monkeypatch.setattr(bootstrap_module, "ExploreStrategy", BootstrapStrategy)
+    monkeypatch.setattr(bootstrap_module, "AccountSyncService", BootstrapAccountSync)
+    monkeypatch.setattr(
+        bootstrap_module, "effective_pool_source_shares", lambda _config: {"douyin": 8}
+    )
+    monkeypatch.setattr(
+        bootstrap_module, "build_youtube_discovery_producer", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(registry_module, "build_embedding_service", lambda *_args: None)
+    monkeypatch.setattr(douyin_producer_module, "build_douyin_discovery_producer", build_douyin)
+
+    services = bootstrap_module.build_openclaw_adapter_services()
+    producer = services.runtime_controller.douyin_producer
+
+    assert services.runtime_controller.expression_copy_coordinator is None
+    assert producer is not None
+    produced = await producer.produce_if_due(limit=8)
+
+    assert produced["enqueued"] == 8
+    assert produced["cached"] == 8
+    assert services.database.count_pool_candidates() == 8
+    assert services.database.get_pool_candidates_needing_copy(limit=10) == []
+    assert BootstrapLLM.expression_calls == 1
+
+    adapter = OpenClawAdapter(services=services)
+    response = await adapter.recommend(limit=1, refresh_if_needed=True)
+
+    assert len(response.items) == 1
+    assert response.items[0].bvid.startswith("dy-openclaw-copy-")
+    assert response.items[0].reason
+    assert BootstrapLLM.expression_calls == 1
+    await asyncio.sleep(0)
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task()
+        and task.get_name() in {"expression_copy", "classify_pool_backlog_detached"}
+    ]
 
 
 def test_build_openclaw_adapter_returns_ready_adapter(monkeypatch) -> None:
