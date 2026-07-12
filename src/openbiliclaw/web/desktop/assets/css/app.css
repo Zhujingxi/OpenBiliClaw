@@ -443,9 +443,12 @@
     .delight-meta { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
     .delight-meta .eyebrow { margin: 0; }
     .delight-queue-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: end; gap: 6px; }
-    .delight-nav { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 12px; line-height: 1; }
+    .delight-nav { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border-radius: var(--radius-pill); background: rgba(0,0,0,0.42); border: 1px solid rgba(255,255,255,0.16); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); box-shadow: 0 2px 8px rgba(0,0,0,0.18); color: #fff; font-size: 12px; line-height: 1; }
+    .delight-nav #delightCount { color: #fff; }
     .icon-btn { width: 32px; height: 32px; display: inline-grid; place-items: center; border: 1px solid var(--border-soft); border-radius: var(--radius-pill); background: var(--surface); color: var(--fg-2); }
-    .delight-nav .icon-btn { width: 26px; height: 26px; font-size: 14px; }
+    .delight-nav .icon-btn { width: 26px; height: 26px; font-size: 14px; background: transparent; border: 1px solid rgba(255,255,255,0.14); color: #fff; transition: background 0.15s ease, border-color 0.15s ease; }
+    .delight-nav .icon-btn:hover { background: rgba(255,255,255,0.18); border-color: rgba(255,255,255,0.28); }
+    .delight-nav .icon-btn:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(255,255,255,0.6); }
     .delight-queue-tools .ghost-danger { height: 26px; min-height: 26px; padding: 0 9px; font-size: 12px; line-height: 1; }
     .thumb { aspect-ratio: 16 / 9; border-radius: var(--radius-lg); background: linear-gradient(135deg, color-mix(in oklab, var(--accent), var(--surface) 46%), var(--fg)); position: relative; overflow: hidden; }
     .thumb::before { content: ""; position: absolute; inset: 18% 22%; border: 1px solid color-mix(in oklab, var(--surface), transparent 25%); border-radius: var(--radius-lg); }
@@ -520,7 +523,7 @@
     .delight-main-actions.is-composing .comment-field { max-width: 100%; opacity: 1; transform: translateX(0); pointer-events: auto; }
     .delight-main-actions .chat-action.is-send { width: 38px; min-width: 38px; padding: 0; }
     .delight-main-actions .chat-action.is-send svg { width: 17px; height: 17px; stroke-width: 2.2; }
-    .delight-feedback-actions.card-feedback-icons { order: 1; flex: 0 0 auto; justify-self: auto; justify-content: center; max-width: none; width: auto; height: 40px; min-height: 40px; padding: 3px 8px; gap: 6px; }
+    .delight-feedback-actions.card-feedback-icons { order: 1; flex: 0 0 auto; justify-self: auto; justify-content: center; max-width: none; width: auto; height: 40px; min-height: 40px; padding: 3px 8px; gap: 6px; border-color: transparent; background: color-mix(in oklab, var(--muted), transparent 78%); }
     .delight-actions .small-btn { min-width: 0; }
     .delight-feedback-actions .feedback-icon-btn { flex: 0 0 26px; width: 26px; height: 26px; min-height: 26px; }
     .delight-feedback-actions .feedback-icon-btn svg { width: 14px; height: 14px; }
