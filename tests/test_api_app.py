@@ -185,6 +185,134 @@ def test_injected_compatibility_doubles_receive_fresh_shared_gate(monkeypatch, t
     assert soul._llm_concurrency_gate is gate
 
 
+def test_injected_runtime_adopts_real_dialogue_gate_and_injects_gate_less_service(
+    monkeypatch, tmp_path
+) -> None:
+    from openbiliclaw.config import Config
+    from openbiliclaw.llm.concurrency import LLMConcurrencyGate
+    from openbiliclaw.llm.service import LLMService
+    from openbiliclaw.soul.dialogue import SocraticDialogue
+
+    config = Config(data_dir=str(tmp_path))
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
+    dialogue_gate = LLMConcurrencyGate(2)
+    soul = _injected_soul_engine(dialogue_gate)
+    dialogue_service = LLMService(
+        registry=soul._llm,  # type: ignore[attr-defined]
+        memory=soul._memory,  # type: ignore[attr-defined]
+        concurrency_gate=dialogue_gate,
+    )
+    dialogue = SocraticDialogue(
+        llm=None,
+        soul_engine=soul,  # type: ignore[arg-type]
+        llm_service=dialogue_service,
+    )
+    controller = SimpleNamespace(llm_concurrency_gate=dialogue_gate, event_hub=None)
+
+    app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=soul,
+        dialogue=dialogue,
+        runtime_controller=controller,
+    )
+
+    assert app.state.runtime_context.llm_concurrency_gate is dialogue_gate
+    assert dialogue._llm_service is dialogue_service
+    assert dialogue._llm_service.concurrency_gate is dialogue_gate
+    assert dialogue._build_service().concurrency_gate is dialogue_gate
+
+    controller_gate = LLMConcurrencyGate(3)
+    gate_less_soul = SimpleNamespace(
+        _llm_concurrency_gate=None,
+        _llm_service=SimpleNamespace(concurrency_gate=None),
+    )
+    gate_less_dialogue_service = SimpleNamespace(concurrency_gate=None)
+    gate_less_dialogue = SocraticDialogue(
+        llm=None,
+        soul_engine=gate_less_soul,
+        llm_service=gate_less_dialogue_service,  # type: ignore[arg-type]
+    )
+    gate_less_app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=gate_less_soul,
+        dialogue=gate_less_dialogue,
+        runtime_controller=SimpleNamespace(llm_concurrency_gate=controller_gate, event_hub=None),
+    )
+    assert gate_less_app.state.runtime_context.llm_concurrency_gate is controller_gate
+    assert gate_less_dialogue._build_service().concurrency_gate is controller_gate
+
+
+def test_injected_runtime_adopts_dialogue_only_gate_and_rejects_dialogue_conflict(
+    monkeypatch, tmp_path
+) -> None:
+    from openbiliclaw.config import Config
+    from openbiliclaw.llm.concurrency import LLMConcurrencyGate
+    from openbiliclaw.soul.dialogue import SocraticDialogue
+
+    config = Config(data_dir=str(tmp_path))
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
+    dialogue_gate = LLMConcurrencyGate(2)
+    soul = SimpleNamespace(
+        _llm_concurrency_gate=None,
+        _llm_service=SimpleNamespace(concurrency_gate=None),
+    )
+    dialogue_service = SimpleNamespace(concurrency_gate=dialogue_gate)
+    dialogue = SocraticDialogue(
+        llm=None,
+        soul_engine=soul,
+        llm_service=dialogue_service,  # type: ignore[arg-type]
+    )
+    controller = SimpleNamespace(llm_concurrency_gate=None, event_hub=None)
+
+    app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=soul,
+        dialogue=dialogue,
+        runtime_controller=controller,
+    )
+    assert app.state.runtime_context.llm_concurrency_gate is dialogue_gate
+    assert soul._llm_service.concurrency_gate is dialogue_gate
+    assert controller.llm_concurrency_gate is dialogue_gate
+
+    with pytest.raises(ValueError, match="different LLM concurrency gates"):
+        create_app(
+            memory_manager=SimpleNamespace(),
+            database=SimpleNamespace(),
+            soul_engine=_injected_soul_engine(LLMConcurrencyGate(2)),
+            dialogue=SocraticDialogue(
+                llm=None,
+                soul_engine=SimpleNamespace(),  # type: ignore[arg-type]
+                llm_service=SimpleNamespace(  # type: ignore[arg-type]
+                    concurrency_gate=LLMConcurrencyGate(2)
+                ),
+            ),
+            runtime_controller=SimpleNamespace(event_hub=None),
+        )
+
+
+def test_injected_compatibility_dialogue_double_without_gate_is_supported(
+    monkeypatch, tmp_path
+) -> None:
+    from openbiliclaw.config import Config
+
+    config = Config(data_dir=str(tmp_path))
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
+    dialogue = SimpleNamespace()
+
+    app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=SimpleNamespace(),
+        dialogue=dialogue,
+        runtime_controller=SimpleNamespace(event_hub=None),
+    )
+
+    assert app.state.runtime_context.dialogue is dialogue
+
+
 def _store_xhs_login_state(db: object, *, logged_in: bool, when_iso: str) -> None:
     db.conn.executemany(
         "INSERT OR REPLACE INTO auth_state (key, value) VALUES (?, ?)",

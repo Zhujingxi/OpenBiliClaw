@@ -1098,23 +1098,59 @@ def create_app(
         soul_service = getattr(soul_engine, "_llm_service", None)
         soul_declared_gate = getattr(soul_engine, "_llm_concurrency_gate", None)
         soul_service_gate = getattr(soul_service, "concurrency_gate", None)
-        if (
-            soul_declared_gate is not None
-            and soul_service_gate is not None
-            and soul_declared_gate is not soul_service_gate
-        ):
-            raise ValueError("Injected SoulEngine contains different LLM concurrency gates.")
-        soul_gate = soul_declared_gate or soul_service_gate
+        dialogue_service = getattr(dialogue, "_llm_service", None)
+        dialogue_declared_gate = getattr(dialogue, "_llm_concurrency_gate", None) or getattr(
+            dialogue, "llm_concurrency_gate", None
+        )
+        dialogue_service_gate = getattr(dialogue_service, "concurrency_gate", None)
         controller_gate = getattr(runtime_controller, "llm_concurrency_gate", None)
-        if (
-            soul_gate is not None
-            and controller_gate is not None
-            and soul_gate is not controller_gate
-        ):
+        recommendation_llm = getattr(recommendation_engine, "_llm", None)
+        recommendation_gate = getattr(recommendation_llm, "concurrency_gate", None)
+        account_soul = getattr(account_sync_service, "soul_engine", None)
+        account_soul_service = getattr(account_soul, "_llm_service", None)
+        controller_soul = getattr(runtime_controller, "soul_engine", None)
+        controller_soul_service = getattr(controller_soul, "_llm_service", None)
+        controller_recommendation = getattr(runtime_controller, "recommendation_engine", None)
+        controller_recommendation_llm = getattr(controller_recommendation, "_llm", None)
+        controller_discovery = getattr(runtime_controller, "discovery_engine", None)
+        controller_discovery_llm = getattr(controller_discovery, "llm_service", None)
+        gate_sources = [
+            ("SoulEngine", soul_declared_gate),
+            ("SoulEngine service", soul_service_gate),
+            ("dialogue", dialogue_declared_gate),
+            ("dialogue service", dialogue_service_gate),
+            ("runtime controller", controller_gate),
+            ("recommendation service", recommendation_gate),
+            ("account-sync SoulEngine", getattr(account_soul, "_llm_concurrency_gate", None)),
+            (
+                "account-sync SoulEngine service",
+                getattr(account_soul_service, "concurrency_gate", None),
+            ),
+            (
+                "runtime-controller SoulEngine",
+                getattr(controller_soul, "_llm_concurrency_gate", None),
+            ),
+            (
+                "runtime-controller SoulEngine service",
+                getattr(controller_soul_service, "concurrency_gate", None),
+            ),
+            (
+                "runtime-controller recommendation service",
+                getattr(controller_recommendation_llm, "concurrency_gate", None),
+            ),
+            (
+                "runtime-controller discovery service",
+                getattr(controller_discovery_llm, "concurrency_gate", None),
+            ),
+        ]
+        provided_gates = [(label, gate) for label, gate in gate_sources if gate is not None]
+        injected_gate = provided_gates[0][1] if provided_gates else None
+        conflicting_labels = [label for label, gate in provided_gates if gate is not injected_gate]
+        if conflicting_labels:
+            sources = ", ".join([provided_gates[0][0], *conflicting_labels])
             raise ValueError(
-                "Injected SoulEngine and runtime controller use different LLM concurrency gates."
+                f"Injected LLM-bearing components use different LLM concurrency gates: {sources}."
             )
-        injected_gate = soul_gate or controller_gate
         if injected_gate is None:
             injected_gate = LLMConcurrencyGate(llm_concurrency_from_config(config))
 
@@ -1123,9 +1159,35 @@ def create_app(
         if soul_service is not None:
             with suppress(Exception):
                 soul_service.concurrency_gate = injected_gate
+        if dialogue is not None:
+            with suppress(Exception):
+                dialogue._llm_concurrency_gate = injected_gate
+        if dialogue_service is not None:
+            with suppress(Exception):
+                dialogue_service.concurrency_gate = injected_gate
         if runtime_controller is not None:
             with suppress(Exception):
                 runtime_controller.llm_concurrency_gate = injected_gate
+        if recommendation_llm is not None:
+            with suppress(Exception):
+                recommendation_llm.concurrency_gate = injected_gate
+        for nested_soul, nested_service in (
+            (account_soul, account_soul_service),
+            (controller_soul, controller_soul_service),
+        ):
+            if nested_soul is not None:
+                with suppress(Exception):
+                    nested_soul._llm_concurrency_gate = injected_gate
+            if nested_service is not None:
+                with suppress(Exception):
+                    nested_service.concurrency_gate = injected_gate
+        for nested_service in (
+            controller_recommendation_llm,
+            controller_discovery_llm,
+        ):
+            if nested_service is not None:
+                with suppress(Exception):
+                    nested_service.concurrency_gate = injected_gate
 
         ctx = RuntimeContext(
             database=_db,
