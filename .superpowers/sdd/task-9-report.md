@@ -80,6 +80,34 @@ Second run after adding phase-only markers and explicit timeouts:
   evaluated but rated below the unchanged admission threshold. No threshold,
   profile, source data, or provider setting was changed after this result.
 
+### Technology-ranking rerun
+
+- The live fixture was narrowed to the public Bilibili technology ranking
+  (`ranking_rid=188`, still anonymous and capped at eight) while keeping the
+  synthetic software/technology profile, provider route, and `0.60` threshold
+  unchanged.
+- At harness head `9af1c0f1`, the full exact run reached
+  `ranking_rid=188 fetched=8` and `evaluation_start`, then failed in
+  **59.56 seconds** before any score/admission result was returned.
+- The selected compatible provider rejected the JSON-object request with an
+  HTTP 400 message-format policy error, then the exact route entered its
+  rate-limit state. This is a provider request-compatibility failure, not a
+  low-score admission result; copy, maintenance, and interactive phases did
+  not run. No profile, threshold, source breadth, or provider configuration was
+  changed after the failure.
+- Aggregate contract reconstruction used the actual `LLMService` routing path
+  with no provider request: all-ranking and technology-ranking calls both used
+  `openai_compatible` / `deepseek-v4-flash`, chat-completions
+  `response_format=json_object`, `complete_provider`, `system/user`, eight
+  items, `discovery.evaluate_batch`, `max_tokens=16384`, `temperature=0.7`,
+  disabled reasoning, and no module model override. Both pairs lacked a literal
+  lowercase `json` token (the system prompt has uppercase `JSON`); only the
+  technology user-message size was larger. The evidence supports a nonstandard
+  case-sensitive provider JSON-object policy whose enforcement changed or was
+  inconsistent after the prior all-ranking success; the later rate-limit is a
+  downstream result, not the initial cause. No raw prompt, title, response, or
+  credential was retained.
+
 ## Guard and focused checks
 
 - Live integration remains opt-in and is skipped when its explicit flag is
