@@ -48,6 +48,7 @@ import {
   INIT_EXPECTATION_HINT,
   INIT_SOURCE_OPTIONS,
   INIT_SOURCE_LOGIN_HINT,
+  shouldAttachRunningInitProgress,
   stalenessView,
 } from "./popup-init-control.js";
 import {
@@ -1085,6 +1086,27 @@ async function pollInitProgress() {
     scheduleRecommendationsRefresh();
     void loadProfileSummary({ force: true });
   }
+}
+
+// Boot-time re-attach: when the popup opens while a run is already live, the
+// uninitialized branch would otherwise paint the idle panel and never poll
+// (the run started elsewhere, so no click/SSE kicked the poll here). Fetch once
+// and, ONLY if a run is in flight, take over with the progress view + poll.
+// The idle path is left untouched (renderInitProgress would clobber it). This
+// mirrors the setup wizard's boot guard and the desktop hydrate re-attach.
+async function maybeAttachRunningInitProgress() {
+  let status;
+  try {
+    status = await fetchInitStatus();
+  } catch {
+    return false;
+  }
+  if (!shouldAttachRunningInitProgress(status)) {
+    return false;
+  }
+  renderInitProgress(status);
+  _startInitProgressPoll();
+  return true;
 }
 
 function _startInitProgressPoll() {
@@ -5462,6 +5484,9 @@ function renderRecommendationState(stateShape) {
     );
     setHint("先完成初始化，把画像和候选池攒起来。");
     renderInitPanelIdle();
+    // If a run is already live (started elsewhere / page reopened mid-init),
+    // take over with the progress view + poll instead of a dead idle panel.
+    void maybeAttachRunningInitProgress();
     return;
   }
 

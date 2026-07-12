@@ -445,6 +445,14 @@ export function isInitTerminal(status) {
   return Boolean(status.initialized) || initProgressView(status).failed;
 }
 
+// Whether a freshly-loaded popup should re-attach the progress poll instead of
+// painting the idle panel. True only when a run is live (started elsewhere, or
+// the page was reopened / refreshed mid-init, so no click or SSE frame kicked
+// the poll on this instance). Tolerant of missing / legacy status objects.
+export function shouldAttachRunningInitProgress(status) {
+  return Boolean(status && status.running);
+}
+
 // Map an error thrown by startInit() (requestJson attaches .status/.details)
 // onto human text. 409 carries a machine reason in details.error.
 export function describeInitStartError(error) {

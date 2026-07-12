@@ -5425,6 +5425,20 @@
       if (notification?.item) mergeMessages([{ ...notification.item, type: "notification" }]);
       applyConfig(config?.config || config);
       renderAll();
+      // Re-attach the init poll if a run is live at load time. Hydrate only
+      // fetches init-status ONCE; without this a page opened/refreshed mid-init
+      // freezes on that single frame whenever SSE is unavailable (proxy strips
+      // it / stream dropped). Critically, the touch() heartbeat deliberately
+      // publishes NO SSE event (coordinator invariant 5), so a hung backend
+      // emits no init_progress at all — only the poll observes last_activity,
+      // so only the poll can drive the stall detector. Mirrors the setup
+      // wizard's boot guard. First-pool waiting also needs the poll to notice
+      // the pool filling.
+      if (initStatus?.running
+        || embeddingPullProgressView(initStatus).active
+        || initWaitingForFirstPool(initStatus)) {
+        scheduleInitStatusRefresh(INIT_STATUS_POLL_MS);
+      }
       // 预取 LAN IP，供二维码面板使用
       requestJson(ENDPOINTS.qrInfo).then((info) => { if (info?.lan_ip) _cachedLanIp = info.lan_ip; }).catch(() => {});
     }

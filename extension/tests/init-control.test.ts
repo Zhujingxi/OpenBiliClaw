@@ -18,6 +18,7 @@ import {
   INIT_SOURCE_OPTIONS,
   initStartButtonState,
   isInitTerminal,
+  shouldAttachRunningInitProgress,
 } from "../popup/popup-init-control.js";
 
 function statusWith(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -698,4 +699,16 @@ test("stageEtaText rounds up to half minutes and expectation copy exists", () =>
   assert.equal(stageEtaText(null), "");
   assert.ok(INIT_EXPECTATION_HINT.includes("2–5 分钟"));
   assert.ok(INIT_EXPECTATION_HINT.includes("进度会保留"));
+});
+
+test("shouldAttachRunningInitProgress: boot re-attach only when a run is live", () => {
+  // A run in flight (popup opened / refreshed mid-init, started elsewhere so no
+  // click or SSE kicked the poll here) → re-attach the progress poll.
+  assert.equal(shouldAttachRunningInitProgress(statusWith({ running: true })), true);
+  // Idle / not-yet-started → leave the idle panel, no poll.
+  assert.equal(shouldAttachRunningInitProgress(statusWith({ running: false })), false);
+  // Missing/legacy status must never throw or falsely attach.
+  assert.equal(shouldAttachRunningInitProgress(null), false);
+  assert.equal(shouldAttachRunningInitProgress(undefined), false);
+  assert.equal(shouldAttachRunningInitProgress({}), false);
 });

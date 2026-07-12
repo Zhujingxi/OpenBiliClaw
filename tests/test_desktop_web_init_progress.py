@@ -111,3 +111,21 @@ def test_setup_wizard_keeps_first_pool_and_embedding_overrides() -> None:
     assert "整理首轮内容池" in html
     # Embedding pull borrows the progress bar while idle.
     assert "pull.active && !status?.running" in html
+
+
+def test_desktop_reattaches_init_poll_when_a_run_is_live_at_load() -> None:
+    """A page opened/refreshed mid-init must start polling from hydrate.
+
+    Hydrate fetches init-status once; without a boot re-attach the progress
+    bar freezes on that single frame whenever SSE is unavailable, and — since
+    the touch() heartbeat publishes no SSE event — a hung backend would never
+    drive the stall detector either. The poll is the only observer of
+    last_activity in that case.
+    """
+    app_js = _app_js()
+    # The hydrate path must kick the scheduled poll when a run is live.
+    assert "scheduleInitStatusRefresh(INIT_STATUS_POLL_MS)" in app_js
+    assert "initStatus?.running" in app_js
+    # And it must also cover the embedding-pull and first-pool-wait cases.
+    assert "embeddingPullProgressView(initStatus).active" in app_js
+    assert "initWaitingForFirstPool(initStatus)" in app_js
