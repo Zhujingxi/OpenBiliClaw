@@ -90,6 +90,22 @@ def _candidate_state(db: Database) -> list[tuple[int, str, str | None, str | Non
     ]
 
 
+class _BeginImmediateFailure:
+    def __init__(self) -> None:
+        self.rolled_back = False
+        self.closed = False
+
+    def execute(self, sql: str, *_: Any) -> None:
+        assert sql == "BEGIN IMMEDIATE"
+        raise database_module.sqlite3.OperationalError("database is locked")
+
+    def rollback(self) -> None:
+        self.rolled_back = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def test_user_a_shape_raw_trim_cannot_erase_sixteen_available(tmp_path: Path) -> None:
     db = _database(tmp_path)
     for index in range(16):
@@ -295,3 +311,29 @@ def test_invariant_failure_rolls_back_every_victim_update(
     assert content_after == content_before
     assert _candidate_state(db) == candidates_before
     assert candidate_ids
+
+
+def test_begin_immediate_failure_does_not_fabricate_zero_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _database(tmp_path)
+    _seed_ready(db, "BV_LOCKED_READY", topic_group="ready")
+    failing_connection = _BeginImmediateFailure()
+    monkeypatch.setattr(db, "open_connection", lambda: failing_connection)
+    snapshot_error = getattr(
+        database_module,
+        "PoolMaintenanceSnapshotUnavailableError",
+        RuntimeError,
+    )
+
+    with pytest.raises(snapshot_error, match="snapshot unavailable"):
+        db.maintain_pool_inventory(
+            target=1,
+            raw_ceiling=2,
+            source_share_quotas={"bilibili": 1},
+        )
+
+    assert db.count_pool_candidates() == 1
+    assert failing_connection.rolled_back is True
+    assert failing_connection.closed is True

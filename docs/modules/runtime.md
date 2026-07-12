@@ -87,7 +87,7 @@ controller.candidate_eval_coordinator.notify("candidate_enqueued:bilibili")
 - `drain_discovery_candidates_once(..., reason=...)`：runtime 已有 coordinator 时退化为耐久 `notify(reason)`，不再创建一次性 drain task；没有 coordinator 的 CLI / 兼容 runtime 仍通过相同 staged pipeline 执行一次 drain。
 - `run_init_backfill(profile, target_pool_count, *, fully_parallel=True)`：图形化引导初始化（gui-init）stage 4 的发现补池。持 `_refresh_lock` 与连续 refresh 串行，绝不与之争 `content_cache`；`async with` 在 `CancelledError` 时释放锁。不查 `_llm_work_allowed()`，因此 init 期间后台门控暂停不会自锁 init 自己的补池。
 - `_pool_count_payload()`：统一生成 runtime status / runtime stream 的池子字段，包含 pending eval 与 evaluated pending 拆分。
-- `_enforce_pool_cap()`：把 target、跨表 raw ceiling、available/raw source quotas、topic/explore cap、stale age 与 XHS 本人昵称一次传给 storage 原子维护入口；成功返回 `result.at_target`，rollback 时记录 ERROR 并按事务前 availability 决策。每轮只输出一条包含 `PoolMaintenanceResult` 全字段的汇总日志。
+- `_enforce_pool_cap()`：把 target、跨表 raw ceiling、available/raw source quotas、topic/explore cap、stale age 与 XHS 本人昵称一次传给 storage 原子维护入口；成功返回 `result.at_target`，post-snapshot rollback 时记录 ERROR 并按事务前 availability 决策。若 BEGIN / snapshot 尚未取得就失败，storage 抛出专用异常，runtime 重新调用 canonical `count_pool_candidates()` 决策，绝不信任默认零值。每个有结果的维护轮只输出一条包含 `PoolMaintenanceResult` 全字段的汇总日志。
 
 `_run_refresh_plan()` 在 durable admission 与文案完成后只调用这一个入口；不再组合 `trim_topic_group_overflow()`、`trim_explore_cluster_overflow()`、`evict_stale_pool_items()`、source trim 或 raw trim，因此不会留下“前半段已提交、后半段才发现库存归零”的中间状态。旧数据库 trim 方法仍保留给兼容测试和手动工具。
 

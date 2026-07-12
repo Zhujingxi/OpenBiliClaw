@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 from contextlib import suppress
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -3526,6 +3527,44 @@ def test_pool_cap_uses_one_atomic_maintenance_entry_point() -> None:
             "xhs_self_nickname": "",
         }
     ]
+
+
+def test_pool_cap_uses_canonical_fallback_when_begin_immediate_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BeginFailure:
+        def execute(self, sql: str) -> None:
+            assert sql == "BEGIN IMMEDIATE"
+            raise sqlite3.OperationalError("database is locked")
+
+        def rollback(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    database = Database(tmp_path / "begin-failure.db")
+    database.initialize()
+    _seed_visible_pool_row(
+        database,
+        "BV_LOCKED_READY",
+        topic_group="ready",
+        relevance_score=0.9,
+    )
+    assert database.count_pool_candidates() == 1
+    monkeypatch.setattr(database, "open_connection", BeginFailure)
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        pool_target_count=1,
+    )
+
+    assert controller._enforce_pool_cap() is True
+    assert database.count_pool_candidates() == 1
 
 
 def test_pool_cap_skips_platform_overflow_when_ready_pool_below_target() -> None:

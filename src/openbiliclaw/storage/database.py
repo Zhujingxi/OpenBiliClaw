@@ -97,6 +97,10 @@ class PoolMaintenanceInvariantError(RuntimeError):
     """Raised when a maintenance transaction would violate availability."""
 
 
+class PoolMaintenanceSnapshotUnavailableError(RuntimeError):
+    """Raised when maintenance cannot acquire a canonical pre-change snapshot."""
+
+
 @dataclass(frozen=True)
 class _ContentTrimPlan:
     victim_bvids: tuple[str, ...] = ()
@@ -4027,17 +4031,20 @@ class Database:
         clean_raw_source_quotas = self._clean_pool_quotas(
             raw_source_share_quotas or source_share_quotas
         )
-        conn = self.open_connection()
+        conn: sqlite3.Connection | None = None
+        snapshot_acquired = False
         available_before = 0
         raw_before = 0
         protected_ids: set[str] = set()
         try:
+            conn = self.open_connection()
             conn.execute("BEGIN IMMEDIATE")
             before_rows = self._load_available_pool_candidate_rows_on(
                 conn,
                 xhs_self_nickname=xhs_self_nickname,
             )
             available_before = len(before_rows)
+            snapshot_acquired = True
             protected_ids = {
                 str(row["bvid"]) for row in before_rows[: min(len(before_rows), clean_target)]
             }
@@ -4160,7 +4167,13 @@ class Database:
                 )
             return result
         except Exception as exc:
-            conn.rollback()
+            if conn is not None:
+                conn.rollback()
+            if not snapshot_acquired:
+                logger.error("pool maintenance snapshot unavailable: %s", exc)
+                raise PoolMaintenanceSnapshotUnavailableError(
+                    "pool maintenance snapshot unavailable"
+                ) from exc
             logger.error("pool maintenance rolled back: %s", exc)
             return PoolMaintenanceResult(
                 available_before=available_before,
@@ -4186,7 +4199,8 @@ class Database:
                 reason=str(exc),
             )
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
 
     def trim_explore_cluster_overflow(self, *, max_per_cluster: int = 3) -> int:
         """Suppress excess fresh explore items from high-risk topic clusters."""
