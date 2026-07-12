@@ -1552,10 +1552,21 @@ async def test_openclaw_bootstrap_one_shot_keeps_partial_copy_durable_without_sp
     monkeypatch.setattr(
         bootstrap_module, "build_youtube_discovery_producer", lambda **_kwargs: None
     )
-    monkeypatch.setattr(registry_module, "build_embedding_service", lambda *_args: None)
+    embedding_builder_calls = 0
+
+    def disabled_embedding_builder(*_args: object) -> None:
+        nonlocal embedding_builder_calls
+        embedding_builder_calls += 1
+        return None
+
+    # ``build_openclaw_adapter_services`` imports this symbol inside its
+    # factory, so patching the registry module verifies the same local-import
+    # seam that the real opt-in harness uses to prohibit embedding providers.
+    monkeypatch.setattr(registry_module, "build_embedding_service", disabled_embedding_builder)
     monkeypatch.setattr(douyin_producer_module, "build_douyin_discovery_producer", build_douyin)
 
     services = bootstrap_module.build_openclaw_adapter_services()
+    assert embedding_builder_calls == 1
     producer = services.runtime_controller.douyin_producer
 
     copy_drain_calls: list[tuple[int, int]] = []

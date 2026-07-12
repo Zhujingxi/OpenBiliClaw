@@ -47,7 +47,10 @@ pytestmark = [
 ]
 
 
-def _load_live_config_and_registry() -> tuple[Config, LLMRegistry]:
+def _load_live_config_and_registry(
+    *,
+    disable_embedding: bool = False,
+) -> tuple[Config, LLMRegistry]:
     """Load an opt-in live-test config without changing persisted settings.
 
     The optional environment controls exist only for this explicitly enabled
@@ -79,6 +82,28 @@ def _load_live_config_and_registry() -> tuple[Config, LLMRegistry]:
                 evaluation=replace(config.llm.evaluation, provider=requested_provider, model=""),
             ),
         )
+    if disable_embedding:
+        # The OpenClaw one-shot latency proof is intentionally chat-provider
+        # only.  Do this before building the registry so a locally configured
+        # Ollama chat/embedding endpoint cannot even be registered or reached
+        # by this opt-in SenseTime test.
+        config = replace(
+            config,
+            llm=replace(
+                config.llm,
+                fallback_provider="",
+                ollama=replace(config.llm.ollama, api_key="", base_url="", model=""),
+                embedding=replace(
+                    config.llm.embedding,
+                    provider="",
+                    model="",
+                    api_key="",
+                    base_url="",
+                    fallback_enabled=False,
+                    fallback_provider="",
+                ),
+            ),
+        )
     registry = build_llm_registry(config)
     if requested_provider and registry.default_provider != requested_provider:
         raise RuntimeError("Requested live refill provider is unavailable.")
@@ -100,6 +125,7 @@ class _LiveMetrics:
     peak_total: int = 0
     peak_background: int = 0
     provider_round_count: int = 0
+    provider_names: list[str] = field(default_factory=list)
     transient_retry_count: int = 0
     transient_registry_failures: int = 0
     retry_pending: set[str] = field(default_factory=set)
@@ -226,6 +252,9 @@ class _MonitoredRegistry:
             kwargs=kwargs,
         )
         self.metrics.provider_round_count += 1
+        self.metrics.provider_names.append(
+            str(provider_name or self.default_provider).strip().lower()
+        )
         if request_fingerprint in self.metrics.retry_pending:
             self.metrics.retry_pending.remove(request_fingerprint)
             self.metrics.transient_retry_count += 1
@@ -528,9 +557,10 @@ async def test_real_provider_openclaw_one_shot_refill_uses_single_copy_owner(
     """
 
     import openbiliclaw.integrations.openclaw.bootstrap as bootstrap_module
+    import openbiliclaw.llm.registry as registry_module
 
     print("live_openclaw_one_shot_phase=config", flush=True)
-    loaded_config, registry = _load_live_config_and_registry()
+    loaded_config, registry = _load_live_config_and_registry(disable_embedding=True)
     config = replace(
         loaded_config,
         data_dir=str(tmp_path),
@@ -544,18 +574,46 @@ async def test_real_provider_openclaw_one_shot_refill_uses_single_copy_owner(
             discovery_limit=_LIVE_OPENCLAW_DISCOVERY_LIMIT,
         ),
     )
+    assert config.llm.default_provider == "openai_compatible"
+    assert config.llm.embedding.provider == ""
+    assert config.llm.embedding.fallback_provider == ""
+    assert config.llm.ollama.model == ""
+    assert config.llm.ollama.base_url == ""
+    assert "ollama" not in registry.available_providers
     gate = LLMConcurrencyGate(total_concurrency=4)
     metrics = _LiveMetrics(gate)
     monitored_registry = _MonitoredRegistry(registry, metrics)
+    embedding_builder_calls = 0
+
+    def disabled_embedding_builder(
+        callback_config: Config,
+        _registry: LLMRegistry,
+    ) -> None:
+        nonlocal embedding_builder_calls
+        embedding_builder_calls += 1
+        assert callback_config.llm.embedding.provider == ""
+        assert callback_config.llm.embedding.fallback_provider == ""
+        assert callback_config.llm.ollama.model == ""
+        assert callback_config.llm.ollama.base_url == ""
+        return None
+
     monkeypatch.setattr(bootstrap_module, "load_config", lambda: config)
     monkeypatch.setattr(
         bootstrap_module,
         "build_llm_registry",
         lambda _config: monitored_registry,
     )
+    monkeypatch.setattr(registry_module, "build_embedding_service", disabled_embedding_builder)
 
     services = build_openclaw_adapter_services()
     try:
+        assert embedding_builder_calls == 1
+        assert services.recommendation_engine._embedding_service is None  # noqa: SLF001
+        assert services.discovery_engine._embedding_service is None  # noqa: SLF001
+        assert all(
+            getattr(strategy, "embedding_service", None) is None
+            for strategy in services.discovery_engine._strategies  # noqa: SLF001
+        )
         trace_origin = time.monotonic()
         original_complete_structured_task = services.llm_service.complete_structured_task
 
@@ -657,6 +715,30 @@ async def test_real_provider_openclaw_one_shot_refill_uses_single_copy_owner(
 
         monkeypatch.setattr(services.bilibili_client, "get_ranking", monitored_get_ranking)
         controller = services.runtime_controller
+        detached_controller_task_names: list[str] = []
+        original_track_task = controller._track_task  # noqa: SLF001
+
+        def monitored_track_task(name: str, coro: Any) -> Any:
+            if name in {
+                "prewarm_supergroup_embeddings",
+                "prewarm_pool_mmr_embeddings",
+            }:
+                detached_controller_task_names.append(name)
+            return original_track_task(name, coro)
+
+        detached_recommendation_task_names: list[str] = []
+        original_spawn_detached_task = services.recommendation_engine._spawn_detached_task  # noqa: SLF001
+
+        def monitored_spawn_detached_task(name: str, coro: Any) -> Any:
+            detached_recommendation_task_names.append(name)
+            return original_spawn_detached_task(name, coro)
+
+        monkeypatch.setattr(controller, "_track_task", monitored_track_task)
+        monkeypatch.setattr(
+            services.recommendation_engine,
+            "_spawn_detached_task",
+            monitored_spawn_detached_task,
+        )
         monkeypatch.setattr(
             controller,
             "_build_source_replenishment_plan",
@@ -737,9 +819,14 @@ async def test_real_provider_openclaw_one_shot_refill_uses_single_copy_owner(
         controller.one_shot_expression_copy_callback = monitored_copy_callback
         monkeypatch.setattr(controller, "refresh_if_needed", monitored_refresh)
         adapter = OpenClawAdapter(services=services)
+        # Profile/database setup deliberately sits outside this timer.  The
+        # measured operation is the public adapter call itself (refresh plus
+        # its final serve), which is stricter than the production refresh-only
+        # ``asyncio.wait_for`` boundary and catches a slow post-refresh tail.
         started = time.monotonic()
         response = await adapter.recommend(limit=1, refresh_if_needed=True)
         total_elapsed_seconds = time.monotonic() - started
+        await asyncio.sleep(0)
         readiness = controller._pool_readiness_counts()  # noqa: SLF001
         canonical_available = int(readiness.get("available", 0) or 0)
         candidate_status_counts = services.database.count_discovery_candidates_by_status()
@@ -766,6 +853,11 @@ async def test_real_provider_openclaw_one_shot_refill_uses_single_copy_owner(
             f"controller_copy_callback_cancelled={controller_copy_callback_cancelled} "
             f"expression_provider_calls={len(metrics.expression_batch_sizes)} "
             f"provider_round_count={metrics.provider_round_count} "
+            f"provider_names={sorted(set(metrics.provider_names))} "
+            f"embedding_builder_calls={embedding_builder_calls} "
+            "embedding_service_configured=False "
+            f"detached_controller_tasks={detached_controller_task_names} "
+            f"detached_recommendation_tasks={detached_recommendation_task_names} "
             f"expression_request_traces={expression_request_traces} "
             f"copy_batch_attempts={copy_batch_attempts} "
             f"candidate_cached={int(candidate_status_counts.get('cached', 0) or 0)} "
@@ -786,6 +878,11 @@ async def test_real_provider_openclaw_one_shot_refill_uses_single_copy_owner(
             and max(evaluation_batch_sizes) <= _LIVE_OPENCLAW_INLINE_EVAL_LIMIT
         )
         assert raw_candidate_total <= _LIVE_OPENCLAW_INLINE_EVAL_LIMIT
+        assert total_elapsed_seconds <= adapter.refresh_timeout_seconds, (
+            "live OpenClaw adapter operation exceeded its 45-second endpoint SLA; "
+            f"total_elapsed_seconds={total_elapsed_seconds:.2f} "
+            f"adapter_wait_boundary_seconds={adapter.refresh_timeout_seconds:.2f}"
+        )
         assert not refresh_cancelled, (
             "live OpenClaw refresh was cancelled at its adapter wait boundary; "
             f"refresh_elapsed_seconds={refresh_elapsed_seconds:.2f} "
@@ -796,6 +893,11 @@ async def test_real_provider_openclaw_one_shot_refill_uses_single_copy_owner(
         assert controller_copy_callback_calls == 1
         assert len(metrics.expression_batch_sizes) <= 1
         assert len(metrics.expression_requests) <= 1
+        assert metrics.provider_names
+        assert set(metrics.provider_names) == {"openai_compatible"}
+        assert embedding_builder_calls == 1
+        assert not detached_controller_task_names
+        assert not detached_recommendation_task_names
         assert all(
             batch_size <= _LIVE_OPENCLAW_INLINE_EVAL_LIMIT
             for batch_size in metrics.expression_batch_sizes

@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig, ModuleLLMConfig
+from openbiliclaw.config import (
+    Config,
+    EmbeddingConfig,
+    LLMConfig,
+    LLMProviderConfig,
+    ModuleLLMConfig,
+)
 from openbiliclaw.llm.base import LLMResponse, LLMTimeoutError
 from openbiliclaw.llm.concurrency import LLMConcurrencyGate
 from openbiliclaw.llm.service import LLMService, module_overrides_from_config
@@ -159,6 +165,59 @@ def test_live_refill_uses_explicit_config_and_provider_without_mutating_loaded_c
     assert loaded.llm.default_provider == "ollama"
     assert config.llm.default_provider == "openai_compatible"
     assert registry.default_provider == "openai_compatible"
+
+
+def test_openclaw_live_config_disables_embedding_and_ollama_without_mutating_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = Config(
+        llm=LLMConfig(
+            default_provider="ollama",
+            fallback_provider="ollama",
+            ollama=LLMProviderConfig(
+                api_key="original-ollama-key",
+                base_url="http://127.0.0.1:11434/v1",
+                model="original-local-model",
+            ),
+            embedding=EmbeddingConfig(
+                provider="ollama",
+                model="bge-m3",
+                api_key="original-embedding-key",
+                base_url="http://127.0.0.1:11434/v1",
+                fallback_enabled=True,
+                fallback_provider="ollama",
+            ),
+            openai_compatible=LLMProviderConfig(
+                api_key="test-compatible-key",
+                base_url="https://compatible.example/v1",
+                model="test-compatible-model",
+            ),
+        )
+    )
+    monkeypatch.delenv("OPENBILICLAW_REFILL_CONFIG", raising=False)
+    monkeypatch.setattr(live_refill, "load_config", lambda: loaded)
+    monkeypatch.setenv("OPENBILICLAW_REFILL_PROVIDER", "openai_compatible")
+
+    config, registry = live_refill._load_live_config_and_registry(disable_embedding=True)
+
+    assert loaded.llm.default_provider == "ollama"
+    assert loaded.llm.fallback_provider == "ollama"
+    assert loaded.llm.ollama.model == "original-local-model"
+    assert loaded.llm.embedding.provider == "ollama"
+    assert loaded.llm.embedding.fallback_provider == "ollama"
+    assert config.llm.default_provider == "openai_compatible"
+    assert config.llm.fallback_provider == ""
+    assert config.llm.ollama.api_key == ""
+    assert config.llm.ollama.base_url == ""
+    assert config.llm.ollama.model == ""
+    assert config.llm.embedding.provider == ""
+    assert config.llm.embedding.model == ""
+    assert config.llm.embedding.api_key == ""
+    assert config.llm.embedding.base_url == ""
+    assert config.llm.embedding.fallback_enabled is False
+    assert config.llm.embedding.fallback_provider == ""
+    assert registry.default_provider == "openai_compatible"
+    assert "ollama" not in registry.available_providers
 
 
 def test_live_refill_provider_override_wins_over_evaluation_module_override(

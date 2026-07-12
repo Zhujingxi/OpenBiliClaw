@@ -240,3 +240,30 @@ Second review remediation verification:
   copy callback, no cancellation, one canonical available row, and a usable
   response. The test prints only sanitized counts/timings, never API keys,
   prompts, or provider content.
+
+## OpenClaw live-harness embedding isolation
+
+- The opt-in OpenClaw SenseTime harness now creates an in-memory clone with
+  `llm.embedding` and `llm.ollama` disabled before registry construction. It
+  clears the chat fallback too, so Ollama is neither registered nor reachable
+  by the test; no persisted config is modified.
+- A non-live contract test verifies that clone behavior, including original
+  config immutability. The deterministic OpenClaw bootstrap test also counts
+  the registry-module `build_embedding_service` patch, proving the factory's
+  local import seam is intercepted once.
+- The live harness injects a `None` embedding builder, asserts no embedding
+  service on the engine/strategies, records all chat provider routes, and
+  records any prewarm/detached provider task starts. It additionally measures
+  the whole public `adapter.recommend()` call (setup excluded) against the
+  unchanged 45-second boundary.
+- Fresh live SenseTime/OpenAI-compatible result: provider route
+  `openai_compatible` only; embedding builder `1`, no configured embedding
+  service, no detached controller/recommendation task; evaluation `[4]` took
+  20.20s, one batch-three copy request took 15.78s, refresh took 36.13s, and
+  complete adapter call took 41.02s. It returned a usable recommendation with
+  two canonical rows and no cancellation.
+- Fresh focused/static verification: `21 passed, 1 skipped in 2.85s`, Ruff,
+  MyPy over 189 source files, and `git diff --check` all passed. The full
+  suite was not rerun for this harness-only follow-up; do not treat historical
+  full-suite runs as green evidence because a known 150ms test-order flake
+  exists.
