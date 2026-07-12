@@ -75,7 +75,7 @@ const SYNC_PRESENTATIONS = {
   synced: { label: "已同步", tone: "success", retryable: false },
   already_synced: { label: "已同步", tone: "success", retryable: false },
   login_required: { label: "需要登录", tone: "warning", retryable: true },
-  unsupported: { label: "同步失败", tone: "error", retryable: true },
+  unsupported: { label: "仅本地保存", tone: "neutral", retryable: false },
   rate_limited: { label: "同步失败", tone: "error", retryable: true },
   extension_required: { label: "需要连接插件", tone: "warning", retryable: true },
   failed: { label: "同步失败", tone: "error", retryable: true },
@@ -97,6 +97,10 @@ function safeSyncText(value, maxLength = 240) {
 
 export function getSavedSyncPresentation(status) {
   return { ...(SYNC_PRESENTATIONS[status] || SYNC_PRESENTATIONS.failed) };
+}
+
+export function isSavedSyncEligibleStatus(status) {
+  return !["synced", "already_synced", "syncing", "unsupported"].includes(status);
 }
 
 export function sanitizeSavedSyncTask(payload) {

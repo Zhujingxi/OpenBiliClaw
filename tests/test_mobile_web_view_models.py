@@ -1130,5 +1130,17 @@ class TestMobileWebViewModels:
                 detail: "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。",
               },
             );
+
+            const unsupported = getSavedSyncViewModel({
+              item_key: "youtube:abc",
+              source_platform: "youtube",
+              content_id: "abc",
+              sync_status: "unsupported",
+              error_message: "adapter unavailable",
+            });
+            assert.equal(unsupported.label, "仅本地保存");
+            assert.equal(unsupported.tone, "neutral");
+            assert.equal(unsupported.retryable, false);
+            assert.equal(unsupported.detail, "暂不支持平台同步");
         """)
         )

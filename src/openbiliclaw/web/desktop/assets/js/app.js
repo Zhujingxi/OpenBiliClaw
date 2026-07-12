@@ -1421,7 +1421,7 @@
     const SAVED_SYNC_PRESENTATION = {
       pending: ["待同步", "neutral", false], syncing: ["同步中", "info", false],
       synced: ["已同步", "success", false], already_synced: ["已同步", "success", false],
-      login_required: ["需要登录", "warning", true], unsupported: ["同步失败", "error", true],
+      login_required: ["需要登录", "warning", true], unsupported: ["仅本地保存", "neutral", false],
       rate_limited: ["同步失败", "error", true], extension_required: ["需要连接插件", "warning", true],
       failed: ["同步失败", "error", true]
     };
@@ -1511,7 +1511,7 @@
     }
 
     function savedSyncEligible(item, listKind = "") {
-      return !["synced", "already_synced", "syncing"].includes(item.sync_status)
+      return window.OpenBiliClawSavedSync.isSavedSyncEligibleStatus(item.sync_status)
         && !desktopSavedTaskRuntimes[listKind]?.coordinator.owns(item.item_key);
     }
 
@@ -1566,7 +1566,7 @@
           <div>
             <p class="video-title">${escapeHtml(item.title || item.content_id)}</p>
             <p class="video-meta">${escapeHtml(item.author_name || "")}</p>
-            <p class="saved-sync-line"><span class="saved-sync-chip" data-tone="${escapeHtml(SAVED_SYNC_PRESENTATION[item.sync_status][1])}">${escapeHtml(SAVED_SYNC_PRESENTATION[item.sync_status][0])}</span><span>${escapeHtml(item.sync_status === "extension_required" ? "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。" : item.error_message || item.resolved_target || "平台目标将在同步时确认")}</span></p>
+            <p class="saved-sync-line"><span class="saved-sync-chip" data-tone="${escapeHtml(SAVED_SYNC_PRESENTATION[item.sync_status][1])}">${escapeHtml(SAVED_SYNC_PRESENTATION[item.sync_status][0])}</span><span>${escapeHtml(item.sync_status === "unsupported" ? "暂不支持平台同步" : item.sync_status === "extension_required" ? "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。" : item.error_message || item.resolved_target || "平台目标将在同步时确认")}</span></p>
           </div>
           <div class="card-actions saved-card-actions">
             ${savedSyncEligible(item, listKind) && !desktopSyncingKeys[listKind].has(item.item_key) ? `<button class="small-btn saved-sync-one" data-saved-action="sync" type="button">${SAVED_SYNC_PRESENTATION[item.sync_status][2] ? "重试同步" : "同步"}</button>` : ""}

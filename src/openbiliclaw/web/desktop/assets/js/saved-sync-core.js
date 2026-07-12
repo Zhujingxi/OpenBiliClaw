@@ -112,6 +112,10 @@
     return rows.every((item) => TERMINAL_STATUSES.has(item?.status));
   }
 
+  function isSavedSyncEligibleStatus(status) {
+    return !["synced", "already_synced", "syncing", "unsupported"].includes(status);
+  }
+
   function createRetainedSavedListState() {
     let value = { items: [], total: 0, loaded: false, error: "" };
     return {
@@ -440,6 +444,7 @@
     createRetainedSavedListState,
     createSavedMutationRegistry,
     createStrictSavedApi,
+    isSavedSyncEligibleStatus,
     normalizeSavedItem,
     restoreSavedFocus,
     taskIsTerminal,

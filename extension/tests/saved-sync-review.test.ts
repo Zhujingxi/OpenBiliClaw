@@ -661,6 +661,37 @@ test("all three saved runtimes recover and deduplicate persisted nonterminal tas
   }
 });
 
+test("unsupported saved sync is local-only and excluded from retry across all surfaces", async () => {
+  const oldLocation = (globalThis as any).location;
+  (globalThis as any).location = { protocol: "http:", host: "127.0.0.1:8420" };
+  const popup = await import("../popup/popup-saved-sync.js");
+  const mobile = await import("../../src/openbiliclaw/web/js/views/saved.js");
+  (globalThis as any).location = oldLocation;
+  await import("../../src/openbiliclaw/web/desktop/assets/js/saved-sync-core.js");
+  const desktop = (globalThis as any).OpenBiliClawSavedSync;
+
+  for (const runtime of [popup, mobile, desktop]) {
+    assert.equal(typeof runtime.isSavedSyncEligibleStatus, "function");
+    assert.equal(runtime.isSavedSyncEligibleStatus("unsupported"), false);
+    assert.equal(runtime.isSavedSyncEligibleStatus("pending"), true);
+    for (const retryable of ["login_required", "failed", "rate_limited"]) {
+      assert.equal(runtime.isSavedSyncEligibleStatus(retryable), true);
+    }
+  }
+
+  const { readFile } = await import("node:fs/promises");
+  const [popupRuntime, popupView, mobileView, desktopView] = await Promise.all([
+    readFile(new URL("../popup/popup-saved-sync.js", import.meta.url), "utf8"),
+    readFile(new URL("../popup/popup.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/openbiliclaw/web/js/views/saved.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/openbiliclaw/web/desktop/assets/js/app.js", import.meta.url), "utf8"),
+  ]);
+  for (const source of [`${popupRuntime}\n${popupView}`, mobileView, desktopView]) {
+    assert.match(source, /仅本地保存/);
+    assert.match(source, /暂不支持平台同步/);
+  }
+});
+
 function actionCard(itemKey: string, action: string, sink: string[]) {
   const button = {
     dataset: { savedAction: action },

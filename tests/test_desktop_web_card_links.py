@@ -105,3 +105,14 @@ def test_saved_pages_render_manual_sync_without_platform_routing() -> None:
     assert "switch (item.source_platform" not in app_js
     assert ".saved-sync-chip" in app_css
     assert "min-height: 44px" in app_css
+
+
+def test_unsupported_saved_items_are_truthful_local_only_and_not_sync_eligible() -> None:
+    app_js = APP_JS.read_text(encoding="utf-8")
+
+    assert 'unsupported: ["仅本地保存", "neutral", false]' in app_js
+    assert 'item.sync_status === "unsupported" ? "暂不支持平台同步"' in app_js
+    assert (
+        "window.OpenBiliClawSavedSync.isSavedSyncEligibleStatus(item.sync_status)"
+        "\n        && !desktopSavedTaskRuntimes"
+    ) in app_js

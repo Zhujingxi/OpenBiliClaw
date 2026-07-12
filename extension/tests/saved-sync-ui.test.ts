@@ -124,5 +124,10 @@ test("saved sync view model sanitizes task snapshots and groups platform results
     tone: "success",
     retryable: false,
   });
+  assert.deepEqual(getSavedSyncPresentation("unsupported"), {
+    label: "仅本地保存",
+    tone: "neutral",
+    retryable: false,
+  });
   assert.equal(summarizeSavedSyncResults(task.items), "B站 1/1 · YouTube 0/1");
 });

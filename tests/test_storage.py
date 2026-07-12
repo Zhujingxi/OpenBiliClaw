@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from openbiliclaw.discovery.candidate_pool import DiscoveryCandidateWrite
+from openbiliclaw.saved_sync.models import SavedItemInput
 from openbiliclaw.storage.database import Database
 
 
@@ -52,6 +53,20 @@ class TestDatabase:
 
             assert "idx_recommendations_created_id" in recommendation_indexes
             assert "idx_content_cache_content_id" in content_indexes
+
+            db.close()
+
+    def test_initialize_creates_saved_membership_item_key_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            membership_indexes = {
+                str(row["name"])
+                for row in db.conn.execute("PRAGMA index_list(saved_memberships)").fetchall()
+            }
+
+            assert "idx_saved_memberships_item_key" in membership_indexes
 
             db.close()
 
@@ -324,6 +339,39 @@ class TestDatabase:
 
             db.close()
 
+    def test_iter_cover_lifecycle_uses_normalized_saved_memberships(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            bilibili = SavedItemInput(source_platform="bilibili", content_id="BV1normalized")
+            xhs = SavedItemInput(source_platform="xiaohongshu", content_id="note-normalized")
+            db.cache_content(
+                "BV1normalized",
+                source_platform="bilibili",
+                content_id="BV1normalized",
+                cover_url="https://i1.hdslb.com/normalized.jpg",
+                source="search",
+            )
+            db.cache_content(
+                "xiaohongshu:note-normalized",
+                source_platform="xiaohongshu",
+                content_id="note-normalized",
+                cover_url="https://sns-webpic-qc.xhscdn.com/normalized.jpg",
+                source="xhs-feed",
+            )
+
+            db.upsert_saved_membership("favorite", bilibili)
+            db.upsert_saved_membership("watch_later", xhs)
+
+            assert db.conn.execute("SELECT COUNT(*) FROM favorites").fetchone()[0] == 0
+            assert db.conn.execute("SELECT COUNT(*) FROM watch_later").fetchone()[0] == 0
+            rows = {cover: saved for cover, _, saved in db.iter_cover_lifecycle()}
+            assert rows["https://i1.hdslb.com/normalized.jpg"] is True
+            assert rows["https://sns-webpic-qc.xhscdn.com/normalized.jpg"] is True
+
+            db.close()
+
     def test_iter_servable_cover_urls_recent_and_servable_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(Path(tmpdir) / "test.db")
@@ -353,6 +401,47 @@ class TestDatabase:
             assert "https://i1.hdslb.com/saved.jpg" in urls  # stale but saved -> kept
             assert "https://i1.hdslb.com/stale.jpg" not in urls  # stale + unsaved -> excluded
             assert "https://i1.hdslb.com/old.jpg" not in urls  # outside recency window
+
+            db.close()
+
+    def test_iter_servable_cover_urls_uses_normalized_saved_memberships(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            bilibili = SavedItemInput(source_platform="bilibili", content_id="BV1normalized")
+            xhs = SavedItemInput(source_platform="xiaohongshu", content_id="note-normalized")
+            db.cache_content(
+                "BV1normalized",
+                source_platform="bilibili",
+                content_id="BV1normalized",
+                cover_url="https://i1.hdslb.com/normalized.jpg",
+                source="search",
+            )
+            db.cache_content(
+                "xiaohongshu:note-normalized",
+                source_platform="xiaohongshu",
+                content_id="note-normalized",
+                cover_url="https://sns-webpic-qc.xhscdn.com/normalized.jpg",
+                source="xhs-feed",
+            )
+            db.cache_content(
+                "xiaohongshu:note-unsaved",
+                source_platform="xiaohongshu",
+                content_id="note-unsaved",
+                cover_url="https://sns-webpic-qc.xhscdn.com/unsaved.jpg",
+                source="xhs-feed",
+            )
+            db.conn.execute("UPDATE content_cache SET pool_status='stale'")
+            db.conn.commit()
+
+            db.upsert_saved_membership("favorite", bilibili)
+            db.upsert_saved_membership("watch_later", xhs)
+
+            urls = db.iter_servable_cover_urls(recent_hours=12, limit=100)
+            assert "https://i1.hdslb.com/normalized.jpg" in urls
+            assert "https://sns-webpic-qc.xhscdn.com/normalized.jpg" in urls
+            assert "https://sns-webpic-qc.xhscdn.com/unsaved.jpg" not in urls
 
             db.close()
 

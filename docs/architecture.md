@@ -84,7 +84,7 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 
 ### Recommendation Engine (`recommendation/`)
 - 推荐排序与朋友式推荐表达生成；统一从候选池读取
-- 推荐、delight 与保存列表出口共享 `item_key / content_id / source_platform / content_url / content_type` 身份契约；`content_cache.item_key` 唯一索引并由 `recommendations.item_key` 引用。插件 side panel、桌面 Web 与移动 Web 的卡片先 POST `/api/saved/{list_kind}`，保存页再用 `/sync` + durable task poll 做显式平台写入；默认关闭的 `saved_sync.auto_sync_enabled` 只决定本地保存后是否创建后台任务，手动同步始终可用，本地 `/remove` 永不反向删除平台记录。`/api/recommendation-click` 会保留跨源字段：插件、移动 Web 或桌面 Web 打开推荐内容后，后端把点击写成对应来源的统一事件和 `recommendation_click` 强画像信号；只传 `recommendation_id` 时会从 `recommendations + content_cache` 回填，避免 YouTube / 抖音等内部键被套成 B 站 URL。
+- 推荐、delight 与保存列表出口共享 `item_key / content_id / source_platform / content_url / content_type` 身份契约；`content_cache.item_key` 唯一索引并由 `recommendations.item_key` 引用。插件 side panel、桌面 Web 与移动 Web 的卡片先 POST `/api/saved/{list_kind}`，保存页再用 `/sync` + durable task poll 做显式平台写入；默认关闭的 `saved_sync.auto_sync_enabled` 只决定本地保存后是否创建后台任务。手动同步对当前 adapter 支持且未处于已同步 / 同步中的项始终可用；后端终态 `unsupported` 在三端明确显示为仅本地保存，不再进入单项或批量同步资格。本地 `/remove` 永不反向删除平台记录。`/api/recommendation-click` 会保留跨源字段：插件、移动 Web 或桌面 Web 打开推荐内容后，后端把点击写成对应来源的统一事件和 `recommendation_click` 强画像信号；只传 `recommendation_id` 时会从 `recommendations + content_cache` 回填，避免 YouTube / 抖音等内部键被套成 B 站 URL。
 - `PoolCurator` 五维评分（relevance · freshness · topic_fatigue · source_monotony · serendipity）
 - v0.3.1 双轴 fatigue：`recent_topic_keys` (细) + `recent_topic_groups` (粗) 取 max；曲线 `count^1.5/len*5`，count=2 即触发 0.47 强抑制
 - 新兴趣 amplification guard：刚确认的探针兴趣会用 domain/specific/topic key 形成 guard，`PoolCurator` 做 24h rolling budget 软降权，最终批选择做 `max(1, floor(limit*0.25))` 硬上限

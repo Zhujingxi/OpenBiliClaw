@@ -7450,6 +7450,8 @@ class Database:
                 added_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (list_kind, item_key)
             );
+            CREATE INDEX IF NOT EXISTS idx_saved_memberships_item_key
+                ON saved_memberships(item_key);
             CREATE TABLE IF NOT EXISTS native_save_states (
                 list_kind          TEXT NOT NULL,
                 item_key           TEXT NOT NULL,
@@ -9545,17 +9547,23 @@ class Database:
     def iter_cover_lifecycle(self) -> list[tuple[str, str, bool]]:
         """Return ``(cover_url, pool_status, is_saved)`` for every cached-cover candidate.
 
-        ``is_saved`` is True when the bvid is in favorites or watch_later. Consumed
-        by the image-cache cleanup (:mod:`openbiliclaw.runtime.image_cache`) to decide
-        which cached cover files are safe to evict: covers of saved or still-pending
-        content are kept; covers of consumed, unsaved content are eligible for removal.
+        ``is_saved`` is True when the canonical item key has a normalized saved
+        membership, with legacy Bilibili tables retained as a compatibility fallback.
+        Consumed by the image-cache cleanup (:mod:`openbiliclaw.runtime.image_cache`)
+        to decide which cached cover files are safe to evict: covers of saved or
+        still-pending content are kept; covers of consumed, unsaved content are
+        eligible for removal.
         """
         cursor = self.conn.execute(
             """
             SELECT
                 COALESCE(cc.cover_url, '') AS cover_url,
                 COALESCE(cc.pool_status, 'fresh') AS pool_status,
-                CASE WHEN f.bvid IS NOT NULL OR w.bvid IS NOT NULL THEN 1 ELSE 0 END AS is_saved
+                CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM saved_memberships AS m
+                    WHERE m.item_key = cc.item_key
+                ) OR f.bvid IS NOT NULL OR w.bvid IS NOT NULL THEN 1 ELSE 0 END AS is_saved
             FROM content_cache AS cc
             LEFT JOIN favorites AS f ON f.bvid = cc.bvid
             LEFT JOIN watch_later AS w ON w.bvid = cc.bvid
@@ -9587,6 +9595,11 @@ class Database:
               AND cc.discovered_at >= datetime('now', ?)
               AND (
                 COALESCE(cc.pool_status, 'fresh') IN ('fresh', 'shown', 'suppressed')
+                OR EXISTS (
+                    SELECT 1
+                    FROM saved_memberships AS m
+                    WHERE m.item_key = cc.item_key
+                )
                 OR f.bvid IS NOT NULL
                 OR w.bvid IS NOT NULL
               )

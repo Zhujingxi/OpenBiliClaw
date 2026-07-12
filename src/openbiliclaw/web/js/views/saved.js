@@ -23,7 +23,7 @@ const PRESENTATION = {
   synced: ["已同步", "success", false],
   already_synced: ["已同步", "success", false],
   login_required: ["需要登录", "warning", true],
-  unsupported: ["同步失败", "error", true],
+  unsupported: ["仅本地保存", "neutral", false],
   rate_limited: ["同步失败", "error", true],
   extension_required: ["需要连接插件", "warning", true],
   failed: ["同步失败", "error", true],
@@ -68,6 +68,8 @@ export function getSavedSyncViewModel(item) {
   let detail = normalized.error_message || normalized.resolved_target || "平台目标将在同步时确认";
   if (normalized.sync_status === "extension_required") {
     detail = "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。";
+  } else if (normalized.sync_status === "unsupported") {
+    detail = "暂不支持平台同步";
   }
   return { ...normalized, label, tone, retryable, detail };
 }
@@ -86,8 +88,12 @@ function summarize(items) {
   )).join(" · ");
 }
 
+export function isSavedSyncEligibleStatus(status) {
+  return !["synced", "already_synced", "syncing", "unsupported"].includes(status);
+}
+
 function eligible(item) {
-  return !["synced", "already_synced", "syncing"].includes(item.sync_status);
+  return isSavedSyncEligibleStatus(item.sync_status);
 }
 
 function createSavedView(cfg) {
@@ -166,7 +172,9 @@ function createSavedView(cfg) {
   }
 
   async function runSync(selected, activeButton, confirmBatch = false) {
-    selected = selected.filter((item) => !taskCoordinator.owns(item.item_key));
+    selected = selected.filter((item) => (
+      eligible(item) && !taskCoordinator.owns(item.item_key)
+    ));
     if (!selected.length || activeButton.disabled) return;
     const platforms = Array.from(new Set(selected.map((item) => (
       PLATFORM_NAMES[item.source_platform] || item.source_platform

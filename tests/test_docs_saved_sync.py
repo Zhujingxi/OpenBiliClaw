@@ -5,6 +5,7 @@ def test_saved_sync_docs_name_default_and_routes() -> None:
     config_doc = Path("docs/modules/config.md").read_text()
     integration_doc = Path("docs/modules/integrations.md").read_text()
     saved_sync_doc = Path("docs/modules/saved-sync.md").read_text()
+    storage_doc = Path("docs/modules/storage.md").read_text()
     architecture_doc = Path("docs/architecture.md").read_text()
     docs_index = Path("docs/index.md").read_text()
     e2e_doc = Path("docs/native-save-e2e.md").read_text()
@@ -33,6 +34,9 @@ def test_saved_sync_docs_name_default_and_routes() -> None:
     assert "Bash 3.2" in e2e_doc
     assert "授权 E2E" in saved_sync_doc
     assert "授权真实账号 E2E" in changelog
+    assert "仅本地保存" in saved_sync_doc
+    assert "saved_memberships(item_key)" in storage_doc
+    assert "canonical `saved_memberships` 保护" in changelog
     assert "trap - EXIT INT TERM" in e2e_doc
     assert "(.items | length) > 0" in e2e_doc
     assert "非浏览器 Bearer" in e2e_doc

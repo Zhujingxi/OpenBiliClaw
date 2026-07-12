@@ -32,6 +32,7 @@
 | serve 平台保底查询 | ✅ | `get_pool_candidates_for_platform(platform, limit=5)` 复用 `get_pool_candidates()` 同一 servable WHERE / guards / 排序，追加 `COALESCE(NULLIF(source_platform,''),'bilibili')` 平台过滤，供推荐 serve 对窗口内缺席平台补拉；`list_servable_pool_platforms()` 返回当前可服务候选的去重平台 token（复用 `_load_available_pool_candidate_rows` 的同口径守卫）。 |
 | `style_key` 历史值迁移 | ✅ | `Database.initialize()` 会把 `content_cache` / `discovery_candidates` 中已知旧内容风格 key 迁移到新的观看模式 key；写入 `cache_content()` 和 `update_discovery_candidate_evaluations()` 时也会归一化已知旧值。 |
 | 封面粘性保护 | ✅ | `cache_content()` upsert 对 `cover_url` 用 `COALESCE(NULLIF(excluded,''), 现值)`——带空封面的重摄入（如互动数据刷新、事件驱动 related-chain）不再抹掉已有好封面，与 `author_name` / `body_text` 同一保护策略（v0.3.162+）。 |
+| 保存内容封面生命周期 | ✅ | `iter_cover_lifecycle()` / `iter_servable_cover_urls()` 以 `content_cache.item_key` 关联 normalized `saved_memberships`，跨平台本地保存内容不会因缺少 legacy BVID 行而被漏预取或误清理；旧 `favorites` / `watch_later` 仍作为兼容 fallback。`saved_memberships(item_key)` 独立索引支持该关联。 |
 
 ## 公开 API
 
@@ -74,6 +75,7 @@ removed = db.remove_saved_membership("favorite", item.item_key)
 - `saved_items.item_key` 是平台 canonical identity；不同平台可安全复用相同裸 `content_id`。
 - `content_cache` 与 `recommendations` 用同一 canonical `item_key` 做跨源关联；新推荐写入会随历史记录持久化该键，读取不再依赖可能跨平台碰撞的裸 ID。
 - `saved_memberships` 以 `(list_kind, item_key)` 为主键，同一内容可同时属于 `favorite` 与 `watch_later`。无 `native_save_states` 行时，membership 查询返回 `sync_status="pending"`。
+- 封面预取和清理读取以 `content_cache.item_key → saved_memberships.item_key` 判断是否已保存，不依赖 legacy 表是否有同 BVID 行；初始化会为反向关联补 `saved_memberships(item_key)` 索引，并保留旧表 join 作为兼容 fallback。
 - `native_save_states` 以同一联合键引用 membership；状态写入在启用外键的事务内先验证本地 membership，未本地保存的 key 会抛出 `ValueError`，不会留下 orphan state。所有 DAO 写入只接受显式 `NativeSaveStatus` 集合；新建表还有等价 `CHECK`。`ensure_native_save_state()` 使用 `INSERT OR IGNORE` 并在同一事务返回 effective row，任何已存在的 pending / claimed / syncing / retryable / terminal 状态都不会被本地重复保存降级或清空 owner。兼容用 `upsert_native_save_state()` 只能插入 / 刷新无 owner 的 pending 或写允许的 terminal 快照：传入未知 / 带空白状态、`execution_id`、`status='syncing'`、带 `task_id` 的 pending，覆盖已有 active owner，或把 terminal 降回 pending 都会拒绝；它不能建立 / 改写 task ownership。`complete_native_save_claim()` 只接受 terminal 状态，`pending/syncing/unknown` 不会清空 execution owner。
 - `native_save_tasks` 以 UUID 为主键；`native_save_task_items` 以 `(task_id, item_key)` 为主键并保存请求顺序、requested/resolved action、target、status/error 与 `is_live`。task/item 集合不引用 membership，因此本地删除后轮询快照仍存在。`create_native_sync_task_snapshot()` 在一个 `BEGIN IMMEDIATE` 中写 task/items 并领取 eligible 的 live owner；缺失、terminal、已有 owner 与零 eligible 都形成可查询快照。
 - 当前 task ledger 采用数据库生命周期保留：已返回任务没有 TTL、容量上限或自动删除，只有 starter 注册失败且未返回的 ledger 会回滚删除。未来若引入 bounded pruning，必须先定义轮询保留窗口、容量阈值以及 active/recent task 保护；该策略当前延期，不能假定存在后台清理。

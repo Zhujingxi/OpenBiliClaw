@@ -73,6 +73,7 @@ import {
   createSavedTaskCoordinator,
   createSavedSyncTaskTracker,
   getSavedSyncPresentation,
+  isSavedSyncEligibleStatus,
   normalizeCanonicalSavedItem,
   partitionSavedQueueResults,
   restoreSavedFocus,
@@ -654,11 +655,14 @@ window.addEventListener("pagehide", () => {
 
 function syncEligible(item, listKind = "") {
   const coordinator = savedTaskRuntimes[listKind]?.coordinator;
-  return !["synced", "already_synced", "syncing"].includes(item?.sync_status)
+  return isSavedSyncEligibleStatus(item?.sync_status)
     && !coordinator?.owns(item?.item_key);
 }
 
 function savedSyncDetail(item) {
+  if (item?.sync_status === "unsupported") {
+    return "暂不支持平台同步";
+  }
   if (item?.sync_status === "extension_required") {
     return "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。";
   }
