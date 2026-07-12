@@ -394,6 +394,24 @@ async def test_complete_with_core_memory_can_skip_core_memory_for_cacheable_eval
 
 
 @pytest.mark.asyncio
+async def test_complete_with_core_memory_does_not_normalize_nonstructured_json_text() -> None:
+    registry = FakeRegistry(LLMResponse(content="ok", provider="openai"))
+    memory = FakeMemoryManager(core_prompt="## 用户画像\nportrait")
+    service = LLMService(registry=registry, memory=memory)  # type: ignore[arg-type]
+
+    await service.complete_with_core_memory(
+        system_instruction="输出 JSON。",
+        user_input="普通对话请求。",
+    )
+
+    assert registry.json_modes == [False]
+    assert registry.calls[0][0]["content"] == (
+        "输出 JSON。\n\n以下是当前用户的 core memory，请作为理解背景：\n\n## 用户画像\nportrait"
+    )
+    assert registry.calls[0][1]["content"] == "普通对话请求。"
+
+
+@pytest.mark.asyncio
 async def test_complete_structured_task_enables_json_mode() -> None:
     registry = FakeRegistry(LLMResponse(content='{"ok": true}', provider="openai"))
     memory = FakeMemoryManager(core_prompt="## 用户画像\nportrait")
@@ -406,6 +424,25 @@ async def test_complete_structured_task_enables_json_mode() -> None:
 
     assert registry.calls
     assert registry.json_modes == [True]
+    assert registry.calls[0][0]["content"] == (
+        "输出 json。\n\n以下是当前用户的 core memory，请作为理解背景：\n\n## 用户画像\nportrait"
+    )
+
+
+@pytest.mark.asyncio
+async def test_structured_task_adds_json_contract_when_absent() -> None:
+    registry = FakeRegistry(LLMResponse(content='{"ok": true}', provider="openai"))
+    service = LLMService(
+        registry=registry,
+        memory=FakeMemoryManager(core_prompt=""),
+    )  # type: ignore[arg-type]
+
+    await service.complete_structured_task(
+        system_instruction="请返回结构化结果。",
+        user_input="请求。",
+    )
+
+    assert registry.calls[0][0]["content"] == "请返回结构化结果。\n\njson"
 
 
 @pytest.mark.asyncio
@@ -428,6 +465,9 @@ async def test_complete_multimodal_structured_task_sends_text_and_images() -> No
     )
 
     assert registry.json_modes == [True]
+    assert registry.calls[0][0]["content"] == (
+        "输出 json。\n\n以下是当前用户的 core memory，请作为理解背景：\n\n## 用户画像\nportrait"
+    )
     user_message = registry.calls[0][1]
     assert user_message["role"] == "user"
     assert isinstance(user_message["content"], list)

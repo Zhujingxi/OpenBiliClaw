@@ -276,6 +276,25 @@ class LLMService:
             return None
         return provider, model or None
 
+    @staticmethod
+    def _structured_json_contract(system_instruction: str) -> str:
+        """Ensure JSON-mode instructions carry a lowercase ``json`` token.
+
+        Some OpenAI-compatible endpoints reject ``response_format=json_object``
+        unless a message contains the literal lowercase token. Preserve an
+        existing instruction's meaning by normalizing its uppercase ``JSON``
+        spelling first; only append the minimal contract token when no such
+        spelling exists.
+        """
+
+        instruction = system_instruction.strip()
+        if "json" in instruction:
+            return instruction
+        normalized = instruction.replace("JSON", "json")
+        if "json" in normalized:
+            return normalized
+        return f"{normalized}\n\njson" if normalized else "json"
+
     async def complete_with_core_memory(
         self,
         *,
@@ -383,7 +402,7 @@ class LLMService:
         DeepSeek-V4 cuts a 30-item batch from ~10 min to ~30s.
         """
         return await self.complete_with_core_memory(
-            system_instruction=system_instruction,
+            system_instruction=self._structured_json_contract(system_instruction),
             user_input=user_input,
             history=history,
             temperature=temperature,
@@ -450,7 +469,7 @@ class LLMService:
         if inject_core_memory and self.memory is not None:
             with suppress(Exception):
                 core_memory_block = self.memory.render_core_memory_prompt()
-        parts = [system_instruction.strip()]
+        parts = [self._structured_json_contract(system_instruction)]
         if core_memory_block:
             parts.append("以下是当前用户的 core memory，请作为理解背景：")
             parts.append(core_memory_block)
