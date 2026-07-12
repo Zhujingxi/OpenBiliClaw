@@ -594,6 +594,19 @@ async def test_evaluate_content_batch_skips_recently_viewed_non_bilibili_before_
     assert "已经看过的 YouTube" not in user_input
 
 
+def test_candidate_view_keys_normalize_zhihu_alias() -> None:
+    keys = ContentDiscoveryEngine._candidate_view_keys(
+        DiscoveredContent(
+            content_id="answer:42",
+            source_platform="zh",
+            title="知乎回答",
+            source_strategy="zhihu-hot",
+        )
+    )
+
+    assert "zhihu:answer:42" in keys
+
+
 @pytest.mark.asyncio
 async def test_evaluate_content_batch_omits_duplicate_text_description() -> None:
     llm_service = _DynamicBatchLLMService()

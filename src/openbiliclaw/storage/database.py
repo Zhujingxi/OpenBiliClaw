@@ -32,6 +32,28 @@ from openbiliclaw.discovery.inspiration import (
     derive_inspiration_axis_id,
 )
 from openbiliclaw.published_time import normalize_published_time
+from openbiliclaw.sources.platforms import (
+    PLATFORM_BILIBILI as _BILIBILI_SOURCE_FAMILY,
+)
+from openbiliclaw.sources.platforms import (
+    PLATFORM_DOUYIN as _DOUYIN_SOURCE_FAMILY,
+)
+from openbiliclaw.sources.platforms import (
+    PLATFORM_REDDIT as _REDDIT_SOURCE_FAMILY,
+)
+from openbiliclaw.sources.platforms import (
+    PLATFORM_XIAOHONGSHU as _XHS_SOURCE_FAMILY,
+)
+from openbiliclaw.sources.platforms import (
+    PLATFORM_YOUTUBE as _YOUTUBE_SOURCE_FAMILY,
+)
+from openbiliclaw.sources.platforms import (
+    infer_source_platform_from_url,
+    normalize_source_platform,
+)
+from openbiliclaw.sources.platforms import (
+    source_family as _source_family,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -495,18 +517,6 @@ _LEGACY_STYLE_KEY_MAP: dict[str, str] = {
     "sci_fact": "curiosity_spark",
 }
 
-_XHS_SOURCE_FAMILY = "xiaohongshu"
-_XHS_SOURCE_PREFIXES = ("xhs-", "xhs_", "xiaohongshu")
-_DOUYIN_SOURCE_FAMILY = "douyin"
-_DOUYIN_SOURCE_PREFIXES = ("dy-", "dy_", "douyin")
-_BILIBILI_SOURCE_FAMILY = "bilibili"
-_BILIBILI_SOURCE_KEYS = ("search", "related_chain", "trending", "explore")
-_YOUTUBE_SOURCE_FAMILY = "youtube"
-_YOUTUBE_SOURCE_PREFIXES = ("yt-", "yt_", "youtube")
-_TWITTER_SOURCE_FAMILY = "twitter"
-_TWITTER_SOURCE_PREFIXES = ("x-", "x_", "twitter")
-_REDDIT_SOURCE_FAMILY = "reddit"
-_REDDIT_SOURCE_PREFIXES = ("reddit-", "reddit_")
 _EXPLORE_HIGH_RISK_CLUSTERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "manufacturing",
@@ -716,42 +726,12 @@ CREATE INDEX IF NOT EXISTS idx_llm_usage_provider ON llm_usage(provider, model);
 
 def _pool_source_family(source: object, source_platform: object = "") -> str:
     """Return the source family key used by pool share accounting."""
-    platform = str(source_platform or "").strip().lower()
-    raw_source = str(source or "").strip()
-    source_key = raw_source.lower()
-    if platform in {_XHS_SOURCE_FAMILY, "xhs"} or source_key.startswith(_XHS_SOURCE_PREFIXES):
-        return _XHS_SOURCE_FAMILY
-    if platform in {_DOUYIN_SOURCE_FAMILY, "dy"} or source_key.startswith(_DOUYIN_SOURCE_PREFIXES):
-        return _DOUYIN_SOURCE_FAMILY
-    if platform in {_YOUTUBE_SOURCE_FAMILY, "yt"} or source_key.startswith(
-        _YOUTUBE_SOURCE_PREFIXES
-    ):
-        return _YOUTUBE_SOURCE_FAMILY
-    if platform in {_TWITTER_SOURCE_FAMILY, "x"} or source_key.startswith(_TWITTER_SOURCE_PREFIXES):
-        return _TWITTER_SOURCE_FAMILY
-    if platform in {_REDDIT_SOURCE_FAMILY, "rd"} or source_key.startswith(_REDDIT_SOURCE_PREFIXES):
-        return _REDDIT_SOURCE_FAMILY
-    if platform in {_BILIBILI_SOURCE_FAMILY, "bili"} or source_key in _BILIBILI_SOURCE_KEYS:
-        return _BILIBILI_SOURCE_FAMILY
-    return raw_source or "unknown"
+    return _source_family(source, source_platform)
 
 
 def _normalize_source_platform_key(source_platform: object) -> str:
     """Return the canonical source key used in cross-source content IDs."""
-    raw = str(source_platform or "").strip().lower()
-    if raw in {_XHS_SOURCE_FAMILY, "xhs"}:
-        return _XHS_SOURCE_FAMILY
-    if raw in {_DOUYIN_SOURCE_FAMILY, "dy"}:
-        return _DOUYIN_SOURCE_FAMILY
-    if raw in {_YOUTUBE_SOURCE_FAMILY, "yt"}:
-        return _YOUTUBE_SOURCE_FAMILY
-    if raw in {_TWITTER_SOURCE_FAMILY, "x"}:
-        return _TWITTER_SOURCE_FAMILY
-    if raw in {_REDDIT_SOURCE_FAMILY, "rd"}:
-        return _REDDIT_SOURCE_FAMILY
-    if raw in {_BILIBILI_SOURCE_FAMILY, "bili"}:
-        return _BILIBILI_SOURCE_FAMILY
-    return raw
+    return normalize_source_platform(source_platform)
 
 
 def _normalize_style_key_for_storage(value: object) -> str:
@@ -8241,27 +8221,7 @@ class Database:
 
     @staticmethod
     def _infer_source_platform_from_url(url: str) -> str:
-        if not url:
-            return ""
-        host = urlparse(url).netloc.lower()
-        if "bilibili.com" in host or host == "b23.tv":
-            return _BILIBILI_SOURCE_FAMILY
-        if "xiaohongshu.com" in host or "xhslink.com" in host:
-            return _XHS_SOURCE_FAMILY
-        if "douyin.com" in host:
-            return _DOUYIN_SOURCE_FAMILY
-        if "youtube.com" in host or host == "youtu.be":
-            return _YOUTUBE_SOURCE_FAMILY
-        if (
-            host == "x.com"
-            or host.endswith(".x.com")
-            or host == "twitter.com"
-            or host.endswith(".twitter.com")
-        ):
-            return _TWITTER_SOURCE_FAMILY
-        if host == "reddit.com" or host.endswith(".reddit.com") or host == "redd.it":
-            return _REDDIT_SOURCE_FAMILY
-        return ""
+        return infer_source_platform_from_url(url)
 
     @staticmethod
     def _extract_content_id_from_url(platform: str, url: str) -> str:

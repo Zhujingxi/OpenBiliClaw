@@ -17,7 +17,7 @@ import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
-from urllib.parse import quote, urlparse, urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -156,6 +156,12 @@ from openbiliclaw.runtime.keyword_fetch import (
 from openbiliclaw.soul.dislike_writeback import (
     apply_new_dislikes,
     topics_for_confirmed_avoidance,
+)
+from openbiliclaw.sources.platforms import (
+    infer_source_platform_from_url as _registry_infer_source_platform_from_url,
+)
+from openbiliclaw.sources.platforms import (
+    normalize_source_platform,
 )
 
 if TYPE_CHECKING:
@@ -524,42 +530,11 @@ def _init_crash_detail(exc: BaseException) -> str:
 
 
 def _normalize_source_platform(source: object) -> str:
-    source_key = str(source or "").strip().lower()
-    if source_key in {"x", "twitter"}:
-        return "twitter"
-    if source_key in {"xhs", "rednote"}:
-        return "xiaohongshu"
-    if source_key in {"yt", "youtube"}:
-        return "youtube"
-    if source_key in {"douyin", "tiktok"}:
-        return "douyin"
-    if source_key in {"zhihu", "知乎"}:
-        return "zhihu"
-    if source_key in {"reddit", "rd"}:
-        return "reddit"
-    if source_key in {"bilibili", "bili", ""}:
-        return "bilibili"
-    return source_key
+    return normalize_source_platform(source, default="bilibili")
 
 
 def _infer_source_platform_from_url(url: object) -> str:
-    text = str(url or "").strip().lower()
-    if "youtube.com" in text or "youtu.be" in text:
-        return "youtube"
-    host = (urlparse(text if "://" in text else f"https://{text}").hostname or "").lower()
-    if host in {"x.com", "twitter.com"} or host.endswith(".x.com") or host.endswith(".twitter.com"):
-        return "twitter"
-    if "xiaohongshu.com" in text or "xhslink.com" in text:
-        return "xiaohongshu"
-    if "douyin.com" in text:
-        return "douyin"
-    if "zhihu.com" in text:
-        return "zhihu"
-    if "reddit.com" in text or "redd.it" in text:
-        return "reddit"
-    if "bilibili.com" in text or "b23.tv" in text:
-        return "bilibili"
-    return ""
+    return _registry_infer_source_platform_from_url(url)
 
 
 def _extension_e2e_actions_for_request(

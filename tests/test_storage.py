@@ -1238,6 +1238,26 @@ class TestDatabase:
             assert counts == {"bilibili": 4}
             db.close()
 
+    def test_zhihu_pool_accounting_collapses_blank_platform_strategies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            for index, source in enumerate(("zhihu-creator", "zhihu-hot", "zhihu-feed")):
+                _seed_visible(
+                    db,
+                    f"zhihu:answer:{index}",
+                    title=f"知乎回答 {index}",
+                    source=source,
+                    source_platform="",
+                    content_id=f"answer:{index}",
+                    content_url=f"https://www.zhihu.com/question/1/answer/{index}",
+                )
+
+            assert db.count_pool_available_candidates_by_source() == {"zhihu": 3}
+            assert db.count_pool_raw_material_by_source() == {"zhihu": 3}
+            db.close()
+
     def test_trim_pool_share_quotas_protect_xhs_source_family(self) -> None:
         """Xiaohongshu rows are protected by the xiaohongshu quota.
 
@@ -2463,6 +2483,12 @@ class TestDatabase:
                 url="https://www.bilibili.com/video/BV1SEEN",
                 metadata={"source_platform": "bilibili", "bvid": "BV1SEEN"},
             )
+            db.insert_event(
+                "view",
+                title="知乎回答",
+                url="https://www.zhihu.com/question/1/answer/42",
+                metadata={"source_platform": "zh", "content_id": "answer:42"},
+            )
 
             keys = db.get_recent_viewed_content_keys()
 
@@ -2472,6 +2498,7 @@ class TestDatabase:
             assert "reddit:t3_abc123" in keys
             assert "bilibili:BV1SEEN" in keys
             assert "BV1SEEN" in keys
+            assert "zhihu:answer:42" in keys
 
             db.close()
 

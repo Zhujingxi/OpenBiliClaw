@@ -19,6 +19,15 @@ from openbiliclaw import __version__
 from openbiliclaw.api.app import create_app
 
 
+def test_source_platform_helpers_delegate_to_canonical_registry() -> None:
+    from openbiliclaw.api.app import _infer_source_platform_from_url, _normalize_source_platform
+
+    assert _normalize_source_platform("zh") == "zhihu"
+    assert _normalize_source_platform("") == "bilibili"
+    assert _infer_source_platform_from_url("https://www.zhihu.com/question/1/answer/2") == "zhihu"
+    assert _infer_source_platform_from_url("https://example.com/zhihu.com/question/1") == ""
+
+
 def assert_publication(payload: dict[str, object]) -> None:
     assert payload["published_at"] == "2026-07-08T06:30:00Z"
     assert payload["published_label"] == "3 days ago"

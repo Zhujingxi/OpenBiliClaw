@@ -29,6 +29,7 @@ from openbiliclaw.llm.prompt_cache import (
 )
 from openbiliclaw.llm.service import is_llm_rate_limit_error
 from openbiliclaw.llm.task_options import without_core_memory_kwargs
+from openbiliclaw.sources.platforms import normalize_source_platform
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Sequence
@@ -1525,15 +1526,10 @@ class ContentDiscoveryEngine:
 
     @staticmethod
     def _candidate_view_keys(content: DiscoveredContent) -> set[str]:
-        platform = (content.source_platform or ("bilibili" if content.bvid else "")).strip().lower()
-        if platform == "xhs":
-            platform = "xiaohongshu"
-        elif platform == "dy":
-            platform = "douyin"
-        elif platform == "yt":
-            platform = "youtube"
-        elif platform == "bili":
-            platform = "bilibili"
+        platform = normalize_source_platform(
+            content.source_platform,
+            default="bilibili" if content.bvid else "",
+        )
 
         keys: set[str] = set()
         for value in {content.bvid, content.content_id}:
