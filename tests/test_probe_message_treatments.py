@@ -1,6 +1,17 @@
 """Static regressions for distinct probe treatments across web surfaces."""
 
+import re
 from pathlib import Path
+
+import pytest
+
+APP_JS = Path("src/openbiliclaw/web/desktop/assets/js/app.js")
+
+
+def _function_body(js: str, name: str) -> str:
+    match = re.search(rf"function {name}\([^)]*\) \{{(?P<body>.*?)\n    \}}", js, flags=re.S)
+    assert match is not None, f"{name} function not found"
+    return match.group("body")
 
 
 def test_mobile_web_probe_cards_have_type_specific_copy_and_styles() -> None:
@@ -62,3 +73,47 @@ def test_desktop_probe_chat_expands_inline_in_message_card() -> None:
     assert ".message-item .inline-chat-area" in app_css
     assert ".message-item .inline-chat-input" in app_css
     assert ".message-item .inline-chat-reply" in app_css
+
+
+def test_desktop_probe_feedback_copy_is_domain_aware_and_bounded() -> None:
+    app_js = APP_JS.read_text(encoding="utf-8")
+
+    assert (
+        "function probeFeedbackMessage(type, response, domain, apiResponse = null)"
+        in app_js
+    )
+    assert "probeFeedbackMessage(type, response, domain, apiResponse)" in app_js
+    assert ".slice(0," in _function_body(app_js, "probeFeedbackMessage")
+    assert "function messageProbeResult(" not in app_js
+    assert "function probeToast(" not in app_js
+    assert app_js.count("showToast(result);") == 2
+    assert app_js.count(".textContent = result;") >= 2
+    assert "${escapeHtml(result)}" not in app_js
+
+
+@pytest.mark.parametrize(
+    ("probe_type", "response", "domain", "expected"),
+    [
+        ("interest.probe", "confirm", "系统设计", "已确认兴趣「系统设计」"),
+        (
+            "interest.probe",
+            "defer",
+            "短视频热点",
+            "已搁置兴趣「短视频热点」，过阵子可能再提",
+        ),
+        ("avoidance.probe", "confirm", "标题党", "已确认避雷「标题党」"),
+        ("avoidance.probe", "reject", "长视频", "已排除避雷「长视频」"),
+    ],
+)
+def test_desktop_probe_feedback_copy_table(
+    probe_type: str,
+    response: str,
+    domain: str,
+    expected: str,
+) -> None:
+    body = _function_body(APP_JS.read_text(encoding="utf-8"), "probeFeedbackMessage")
+    template = expected.replace(f"「{domain}」", "${quoted}")
+
+    assert probe_type in {"interest.probe", "avoidance.probe"}
+    assert response in {"confirm", "defer", "reject"}
+    assert template in body

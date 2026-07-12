@@ -4029,25 +4029,21 @@
       });
     }
 
-    function messageProbeResult(type, response, apiResponse = null) {
-      const isAvoidance = isAvoidanceProbe(type);
-      const deferExhausted = apiResponse?.action === "defer_exhausted";
-      const deferResult = deferExhausted ? "已多次搁置，之后先不提这个方向了。" : "已搁置，过阵子可能再提。";
-      return isAvoidance
-        ? response === "confirm" ? "已确认避雷方向，后续会减少类似内容。"
-          : response === "defer" ? deferResult
-          : "已搁置，暂时不作为避雷方向。"
-        : response === "confirm" ? "已确认，后续推荐会提高权重。"
-          : response === "defer" ? deferResult
-          : "已搁置，后续会少试探这个方向。";
-    }
-
-    function probeToast(type, response, apiResponse = null) {
-      const isAvoidance = isAvoidanceProbe(type);
-      const deferToast = apiResponse?.action === "defer_exhausted" ? "好，之后先不提了" : "已暂时搁置，过阵子可能再提";
-      return isAvoidance
-        ? response === "confirm" ? "已确认这个避雷方向" : response === "defer" ? deferToast : "已搁置这个避雷方向"
-        : response === "confirm" ? "已确认这个兴趣方向" : response === "defer" ? deferToast : "已搁置这个兴趣方向";
+    function probeFeedbackMessage(type, response, domain, apiResponse = null) {
+      const raw = String(domain || apiResponse?.domain || "这个方向").replace(/\s+/g, " ").trim();
+      const subject = raw.length > 24 ? `${raw.slice(0, 23)}…` : raw;
+      const quoted = `「${subject || "这个方向"}」`;
+      const avoidance = type === "avoidance.probe";
+      if (response === "confirm") return avoidance ? `已确认避雷${quoted}` : `已确认兴趣${quoted}`;
+      if (response === "defer") {
+        if (apiResponse?.action === "defer_exhausted") {
+          return avoidance ? `已搁置避雷${quoted}，之后先不提` : `已搁置兴趣${quoted}，之后先不提`;
+        }
+        return avoidance
+          ? `已搁置避雷${quoted}，过阵子可能再提`
+          : `已搁置兴趣${quoted}，过阵子可能再提`;
+      }
+      return avoidance ? `已排除避雷${quoted}` : `已排除兴趣${quoted}`;
     }
 
     function respondProbe(msg, response, el) {
@@ -4095,7 +4091,7 @@
           if (reason === "undo") showToast("已撤销探针反馈");
         },
         committed: () => {
-          const result = messageProbeResult(probeType, response, apiResponse);
+          const result = probeFeedbackMessage(probeType, response, domain, apiResponse);
           state.resolvedMessageResults.set(stateKey, result);
           state.resolvingMessageKeys.delete(stateKey);
           state.messageListDomLocked = state.resolvingMessageKeys.size > 0;
@@ -4106,8 +4102,12 @@
           el.classList.remove("is-feedback-pending", "is-feedback-saving");
           el.classList.add("is-feedback-committed");
           actions.classList.add("is-result");
-          actions.innerHTML = `<div class="message-action-result" title="${escapeHtml(result)}">${escapeHtml(result)}</div>`;
-          showToast(probeToast(probeType, response, apiResponse));
+          const resultNode = document.createElement("div");
+          resultNode.className = "message-action-result";
+          resultNode.title = result;
+          resultNode.textContent = result;
+          actions.replaceChildren(resultNode);
+          showToast(result);
         }
       });
       if (!scheduled) {
@@ -4121,10 +4121,19 @@
       if (handledKey) state.handledProbeKeys.add(handledKey);
       el.style.minHeight = `${el.getBoundingClientRect().height}px`;
       el.classList.add("is-feedback-pending");
-      const result = messageProbeResult(probeType, response);
+      const result = probeFeedbackMessage(probeType, response, domain);
       actions.classList.add("is-result");
-      actions.innerHTML = `<div class="message-action-result">${escapeHtml(result)} <button class="feedback-undo-btn" data-probe-undo type="button">撤销</button></div>`;
-      actions.querySelector("[data-probe-undo]")?.addEventListener("click", () => { pendingActions.undo(pendingKey); });
+      const resultNode = document.createElement("div");
+      resultNode.className = "message-action-result";
+      resultNode.textContent = `${result} `;
+      const undoButton = document.createElement("button");
+      undoButton.className = "feedback-undo-btn";
+      undoButton.setAttribute("data-probe-undo", "");
+      undoButton.type = "button";
+      undoButton.textContent = "撤销";
+      undoButton.addEventListener("click", () => { pendingActions.undo(pendingKey); });
+      resultNode.appendChild(undoButton);
+      actions.replaceChildren(resultNode);
     }
 
     function bindSpeculativeRowActions(row) {
@@ -4135,21 +4144,6 @@
 
     function bindSpeculativeActions() {
       document.querySelectorAll("[data-spec-domain]").forEach(bindSpeculativeRowActions);
-    }
-
-    function profileProbeResult(type, response, domain, apiResponse = null) {
-      const isAvoidance = isAvoidanceProbe(type);
-      const deferExhausted = apiResponse?.action === "defer_exhausted";
-      const deferRow = deferExhausted
-        ? `好，「${domain}」之后先不提了。`
-        : `好，「${domain}」先放一放，过阵子可能再提。`;
-      return isAvoidance
-        ? response === "confirm" ? `好，「${domain}」会作为避雷方向处理。`
-          : response === "defer" ? deferRow
-          : `好，「${domain}」不记成避雷。`
-        : response === "confirm" ? `好，「${domain}」记住了。`
-          : response === "defer" ? deferRow
-          : `好，「${domain}」先不看了。`;
     }
 
     function respondSpeculativeInterest(button) {
@@ -4188,7 +4182,7 @@
           if (reason === "undo") showToast("已撤销探针反馈");
         },
         committed: () => {
-          const result = profileProbeResult(type, response, domain, apiResponse);
+          const result = probeFeedbackMessage(type, response, domain, apiResponse);
           const messageStateKey = probeKey(type, domain);
           state.messages = state.messages.filter((msg) => messageKey(msg) !== messageStateKey);
           if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((msg) => messageKey(msg) !== messageStateKey);
@@ -4196,8 +4190,11 @@
           if (!row.isConnected) return;
           row.classList.remove("is-feedback-pending", "is-feedback-saving");
           row.classList.add("is-feedback-committed");
-          actions.innerHTML = `<p class="spec-result">${escapeHtml(result)}</p>`;
-          showToast(probeToast(type, response, apiResponse));
+          const resultNode = document.createElement("p");
+          resultNode.className = "spec-result";
+          resultNode.textContent = result;
+          actions.replaceChildren(resultNode);
+          showToast(result);
         }
       });
       if (!scheduled) {
@@ -4207,9 +4204,18 @@
 
       if (handledKey) state.handledProbeKeys.add(handledKey);
       row.classList.add("is-feedback-pending");
-      const result = profileProbeResult(type, response, domain);
-      actions.innerHTML = `<p class="spec-result">${escapeHtml(result)} <button class="feedback-undo-btn" data-probe-undo type="button">撤销</button></p>`;
-      actions.querySelector("[data-probe-undo]")?.addEventListener("click", () => { pendingActions.undo(pendingKey); });
+      const result = probeFeedbackMessage(type, response, domain);
+      const resultNode = document.createElement("p");
+      resultNode.className = "spec-result";
+      resultNode.textContent = `${result} `;
+      const undoButton = document.createElement("button");
+      undoButton.className = "feedback-undo-btn";
+      undoButton.setAttribute("data-probe-undo", "");
+      undoButton.type = "button";
+      undoButton.textContent = "撤销";
+      undoButton.addEventListener("click", () => { pendingActions.undo(pendingKey); });
+      resultNode.appendChild(undoButton);
+      actions.replaceChildren(resultNode);
     }
 
     function createClientTurnId(prefix = "webui") {

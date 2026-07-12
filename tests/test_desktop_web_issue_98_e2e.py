@@ -716,7 +716,7 @@ def test_interest_and_avoidance_probe_actions_are_immediate_and_undoable(
             "message": "",
         }
     ]
-    expect(avoidance).to_contain_text("作为避雷方向")
+    expect(avoidance).to_contain_text("已确认避雷「标题党」")
 
     stub.probe_status = 500
     stub.probe_received.clear()
@@ -725,3 +725,23 @@ def test_interest_and_avoidance_probe_actions_are_immediate_and_undoable(
     assert stub.probe_received.wait(timeout=2)
     expect(interest_row.locator('[data-spec-response="reject"]')).to_be_visible()
     expect(chromium_page.locator("#toastContainer .toast-item").first).to_contain_text("已恢复")
+
+
+def test_committed_probe_toast_names_its_domain(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = issue_98_server
+    chromium_page.goto(f"{base_url}/web/")
+
+    chromium_page.locator("#messagesBtn").click()
+    interest = chromium_page.locator(
+        "#messagesDrawer .message-item.is-interest-probe"
+    )
+    expect(interest).to_have_count(1)
+    interest.locator('[data-probe="confirm"]').click()
+
+    assert stub.probe_received.wait(timeout=3)
+    expect(chromium_page.locator("#toastContainer .toast-item").first).to_contain_text(
+        "系统设计"
+    )

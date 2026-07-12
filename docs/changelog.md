@@ -15,6 +15,8 @@
 - **桌面 Web 侧栏动画与交互细节打磨（PR #102）**：侧边抽屉从 `position:fixed` + `body.side-drawer-open` 推挤改为 flex 行内项，用 `margin-left + transform` 双可插值属性做过渡，展开 / 折叠全程平滑无跳变，并置为 `position:sticky` 固定视口高度让导航常驻；delight 卡片拖拽新增 10px 死区（`_DELIGHT_DRAG_DEAD_ZONE`），微小位移不再误触切换，死区内松手视为点击；单条静态 `#toast` 升级为右下角栈式 `#toastContainer` 通知（进出场滑动、hover 暂停、点击关闭、磨砂玻璃样式）；delight-nav / 反馈按钮加磨砂底衬保证在封面背景上可读；进入聊天页补 `renderChat()` 确保滚到底部。纯桌面 Web 前端改动，移动 Web 与其它三端不受影响。
 - **桌面 Web 侧栏、拖拽与自动加载阈值回归（issues #102 / #105）**：真实 Chromium 现锁定侧栏按钮 / 面板 ARIA 同步和 flex 主栏让渡，并逐一验证 Delight 9px 不进入拖动态、10px 进入拖动态、49px 不切卡、50px 切卡；滚动自动加载的 50px root margin 继续由独立 E2E 守卫，未改回过早预载。
 - **Delight 按可用主栏宽度响应（issue #106）**：`.layout` 新增命名 inline-size container，Delight 在实际主栏宽度 700 / 620 / 430px 处复用现有紧凑布局，修复 860px 视口展开 312px 侧栏后仍保持双栏、内容被挤压的问题；viewport media query 继续独占移动导航切换，侧栏宽度与过渡不变。
+- **移动 Web 探针提交状态跨重渲染保留（issue #103）**：兴趣与避雷探针的非聊天动作按归一化 `type + domain` 保留 in-flight 状态；消息层关闭再打开时整卡仍保持禁用与 `aria-busy`，结算成功后才记为已处理，失败则保留卡片并恢复重试，避免重复 POST 或失败后消息消失。
+- **桌面 Web 探针反馈明确显示主题（issue #109）**：消息抽屉与画像页的 inline 结果和 toast 统一使用同一条安全文案，显示有长度上限的兴趣/避雷主题，不再只提示泛化的“这个方向”。
 
 ## v0.3.163 / extension v0.3.163 / desktop v0.3.163：登录状态诚实同步、Web 库存恢复与冷加载判定（2026-07-11）
 

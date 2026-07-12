@@ -24,6 +24,10 @@ test("probeNotificationKey normalizes type and domain", () => {
     "interest.probe:mixedcase domain",
   );
   assert.equal(probeNotificationKey("interest.probe", ""), "");
+  assert.notEqual(
+    probeNotificationKey("interest.probe", "同一主题"),
+    probeNotificationKey("avoidance.probe", "同一主题"),
+  );
 });
 
 test("handled probes are skipped by hydrate and websocket gates", () => {
