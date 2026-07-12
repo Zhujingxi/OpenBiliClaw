@@ -114,7 +114,7 @@
    这一步的作用，是把不同来源的原始线索先汇入同一个 `pending_eval` 队列；从这里往后，来源差异只作为 prompt 上下文和配额统计信号存在，不再决定一套单独评估流程。
 
 4. **混源连续评估**
-   `DiscoveryCandidatePipeline` 提供 `claim_batch → evaluate_claim → complete_claim / release_claim` 四阶段 API。`CandidateEvalCoordinator` 是 runtime 唯一 claim owner，默认期望 3 个 30 条 worker；worker 只跑 LLM，落库与 admission 串行。任一完成就立即补位，全局最多 90 条在途。成功缓存会立即、单飞触发 recommendation copy 预计算，copy 较慢时 worker 仍继续；已缓存待 copy 行计入 committed inventory，防止可服务计数尚未更新时过度领取。每批唯一 `claim_token` 防止旧 worker 覆盖新 claim；event + generation 负责即时唤醒，60 秒只作 backstop。平台请求间隔、raw ceiling、来源配比和 admission 阈值均未改变。
+   `DiscoveryCandidatePipeline` 提供 `claim_batch → evaluate_claim → complete_claim / release_claim` 四阶段 API。`CandidateEvalCoordinator` 是 runtime 唯一 claim owner，默认 3 个、每个最多 30 条 worker；worker 只跑 LLM，落库与 admission 串行，任一完成即补位，全局最多 90 条在途。调度库存严格使用 `available + admitted_pending_copy + evaluated_pending_admission`，普通 `pending_eval/evaluating` raw 不计入；每个完成 batch 先把所有 token-owned 评分持久化，再按当时 `target - available - admitted_pending_copy` headroom 入池，超过 headroom 的合格行保留为 durable `evaluated`。协调器每轮先 drain 已评估结果再判断 projected stop；成功 admission 同步发出轻量 `on_admitted(count)` 通知，不等待文案工作。每批唯一 `claim_token` 防止旧 worker 覆盖新 claim；worker completion 直接驱动补位，60 秒只作遗漏通知的 safety wake。平台请求间隔、raw ceiling、来源配比和 admission 阈值均未改变。
 
    进入批量 LLM 评估前，`evaluate_content_batch()` 会读取 `Database.get_recent_viewed_content_keys()`，并通过 `sources.platforms.normalize_source_platform()` 生成统一的 `source_platform:content_id`，判断最近看过的 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit 候选；命中项直接记为 0 分并从 prompt 中剔除，避免为已看内容消耗 discovery token。老 BVID 也保留 raw key 兼容旧数据。
 

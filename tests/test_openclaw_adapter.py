@@ -757,6 +757,9 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
         def count_pool_candidates(self, *, xhs_self_nickname: str = "") -> int:
             return self.pool_count
 
+        def count_discovery_candidates_by_status(self) -> dict[str, int]:
+            return {"pending_eval": 500, "evaluating": 60, "evaluated": 3}
+
     class FakeMemoryManager:
         def __init__(self, data_path: str, database=None) -> None:
             self.data_path = data_path
@@ -849,7 +852,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
                 available=available,
                 target=self.kwargs["pool_target_count"],
             )
-            return {"available": available}
+            return {"available": available, "admitted_pending_copy": 4}
 
     class FakeCandidatePipeline:
         def __init__(self, **kwargs) -> None:
@@ -1014,6 +1017,16 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     assert services.runtime_controller.kwargs["explore_refresh_hours"] == 18
     assert services.runtime_controller.kwargs["discovery_limit"] == 17
     assert services.runtime_controller.kwargs["proactive_push_interval_seconds"] == 155
+    created_databases[0].pool_count = 7
+    candidate_snapshot = services.runtime_controller.candidate_eval_coordinator._snapshot()
+    assert candidate_snapshot.available == 7
+    assert candidate_snapshot.pending_eval == 500
+    assert candidate_snapshot.evaluating == 60
+    assert candidate_snapshot.evaluated_pending_admission == 3
+    assert candidate_snapshot.admitted_pending_copy == 4
+    assert services.llm_service.concurrency_gate.status_payload()["inventory_priority_state"] == (
+        "refill"
+    )
 
 
 def test_build_openclaw_adapter_returns_ready_adapter(monkeypatch) -> None:

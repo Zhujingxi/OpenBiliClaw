@@ -333,7 +333,7 @@ async def test_staged_claim_evaluate_complete_matches_legacy_drain(tmp_path: Pat
     assert claim.token
     assert len(claim.rows) == 3
     outcome = await pipeline.evaluate_claim(claim, _build_profile())
-    result = await pipeline.complete_claim(outcome)
+    result = await pipeline.complete_claim(outcome, admission_limit=10)
 
     assert result == {"evaluated": 3, "cached": 3, "rejected": 0, "stale": 0}
     assert db.count_discovery_candidates_by_status()["cached"] == 3
@@ -387,12 +387,89 @@ async def test_complete_claim_admits_only_ids_persisted_by_its_token(tmp_path: P
         )
         == 1
     )
-    result = await pipeline.complete_claim(outcome)
+    result = await pipeline.complete_claim(outcome, admission_limit=10)
 
     assert result == {"evaluated": 1, "cached": 1, "rejected": 0, "stale": 1}
     counts = db.count_discovery_candidates_by_status()
     assert counts["cached"] == 1
     assert counts["pending_eval"] == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_claim_persists_all_scores_but_limits_admission(tmp_path: Path) -> None:
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    db.enqueue_discovery_candidates(
+        [
+            DiscoveryCandidateWrite(
+                candidate_key=f"bilibili:BVHEADROOM{i}",
+                source_platform="bilibili",
+                source_strategy="search",
+                content_id=f"BVHEADROOM{i}",
+                title=f"Headroom {i}",
+            )
+            for i in range(30)
+        ]
+    )
+    visible_count = {"count": 0}
+    pipeline = DiscoveryCandidatePipeline(
+        database=db,
+        discovery_engine=_AdmissionCountingEngine(visible_count),  # type: ignore[arg-type]
+        pool_target_count=30,
+    )
+    claim = pipeline.claim_batch(limit=30)
+    assert claim is not None
+    outcome = await pipeline.evaluate_claim(claim, _build_profile())
+
+    result = await pipeline.complete_claim(outcome, admission_limit=10)
+
+    assert result == {"evaluated": 30, "cached": 10, "rejected": 0, "stale": 0}
+    counts = db.count_discovery_candidates_by_status()
+    assert counts["cached"] == 10
+    assert counts["evaluated"] == 20
+
+
+@pytest.mark.asyncio
+async def test_complete_claim_zero_admission_still_persists_token_owned_scores(
+    tmp_path: Path,
+) -> None:
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    db.enqueue_discovery_candidates(
+        [
+            DiscoveryCandidateWrite(
+                candidate_key="bilibili:BVNOHEADROOM",
+                source_platform="bilibili",
+                source_strategy="search",
+                content_id="BVNOHEADROOM",
+                title="No headroom",
+            )
+        ]
+    )
+    llm = _ScoringLLM(
+        [
+            {
+                "content_id": "BVNOHEADROOM",
+                "score": 0.9,
+                "reason": "fit",
+                "topic_group": "tech",
+                "style_key": "deep_dive",
+            }
+        ]
+    )
+    pipeline = DiscoveryCandidatePipeline(
+        database=db,
+        discovery_engine=ContentDiscoveryEngine(llm_service=llm, database=db),
+        pool_target_count=30,
+    )
+    claim = pipeline.claim_batch(limit=1)
+    assert claim is not None
+    outcome = await pipeline.evaluate_claim(claim, _build_profile())
+
+    result = await pipeline.complete_claim(outcome, admission_limit=0)
+
+    assert result == {"evaluated": 1, "cached": 0, "rejected": 0, "stale": 0}
+    assert db.count_discovery_candidates_by_status()["evaluated"] == 1
 
 
 def test_candidate_roundtrip_preserves_publication_time(tmp_path: Path) -> None:

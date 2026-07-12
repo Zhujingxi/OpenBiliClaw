@@ -39,6 +39,10 @@ class _FakeStagedPipeline:
         self.in_flight = 0
         self.max_in_flight = 0
         self._started_event = asyncio.Event()
+        self.completion_limits: list[int | None] = []
+        self.admit_limits: list[int] = []
+        self.evaluated_pending_admission = 0
+        self.admitted_pending_copy = 0
 
     def claim_batch(self, *, limit: int) -> CandidateEvalClaim | None:
         count = min(limit, self.pending_eval)
@@ -63,12 +67,29 @@ class _FakeStagedPipeline:
             claim=claim, scores=(0.9,) * len(claim.rows), elapsed_seconds=0.1
         )
 
-    async def complete_claim(self, outcome: CandidateEvalOutcome) -> dict[str, int]:
+    async def complete_claim(
+        self,
+        outcome: CandidateEvalOutcome,
+        *,
+        admission_limit: int | None = None,
+    ) -> dict[str, int]:
         batch = next(batch for batch in self.started if batch.claim.token == outcome.claim.token)
-        result = batch.future.result()
+        raw_result = batch.future.result()
+        self.completion_limits.append(admission_limit)
+        cached = min(int(raw_result.get("cached", 0)), admission_limit or 0)
+        result = {**raw_result, "cached": cached, "rejected": 0}
         self.in_flight -= 1
-        self.available += result.get("cached", 0)
+        self.available += cached
+        self.admitted_pending_copy += cached
+        self.evaluated_pending_admission += max(0, int(result.get("evaluated", 0)) - cached)
         return result
+
+    def admit_evaluated(self, *, limit: int) -> dict[str, int]:
+        self.admit_limits.append(limit)
+        cached = min(limit, self.evaluated_pending_admission)
+        self.evaluated_pending_admission -= cached
+        self.admitted_pending_copy += cached
+        return {"cached": cached, "rejected": 0}
 
     def release_claim(
         self,
@@ -121,7 +142,8 @@ def _coordinator(
             target=target,
             pending_eval=pipeline.pending_eval,
             evaluating=pipeline.in_flight * 30,
-            evaluated=0,
+            evaluated_pending_admission=pipeline.evaluated_pending_admission,
+            admitted_pending_copy=pipeline.admitted_pending_copy,
         ),
         profile_provider=lambda: object(),
         worker_count=worker_count,
@@ -137,6 +159,19 @@ def test_effective_candidate_eval_workers_reserves_one_llm_slot() -> None:
     assert effective_candidate_eval_workers(0, 99) == 1
 
 
+def test_projected_inventory_excludes_unscored_raw() -> None:
+    snapshot = CandidateEvalSnapshot(
+        available=2,
+        target=10,
+        pending_eval=500,
+        evaluating=60,
+        evaluated_pending_admission=3,
+        admitted_pending_copy=4,
+    )
+
+    assert CandidateEvalCoordinator._projected_inventory(snapshot) == 9
+
+
 @pytest.mark.asyncio
 async def test_three_workers_refill_fast_slot_without_waiting_for_slow_slots() -> None:
     pipeline = _FakeStagedPipeline(candidate_count=120)
@@ -149,6 +184,58 @@ async def test_three_workers_refill_fast_slot_without_waiting_for_slow_slots() -
     pipeline.finish(0, cached=10)
     await pipeline.wait_for_started(4)
 
+    assert pipeline.started[1].future.done() is False
+    assert pipeline.started[2].future.done() is False
+    await coordinator.stop()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_fast_worker_refills_under_one_second_with_sixty_second_safety_wake() -> None:
+    pipeline = _FakeStagedPipeline(candidate_count=120)
+    completed_at = 0.0
+    claimed_at = 0.0
+    original_complete = pipeline.complete_claim
+    original_claim = pipeline.claim_batch
+
+    async def complete(
+        outcome: CandidateEvalOutcome, *, admission_limit: int | None = None
+    ) -> dict[str, int]:
+        nonlocal completed_at
+        result = await original_complete(outcome, admission_limit=admission_limit)
+        completed_at = asyncio.get_running_loop().time()
+        return result
+
+    def claim(*, limit: int) -> CandidateEvalClaim | None:
+        nonlocal claimed_at
+        result = original_claim(limit=limit)
+        if result is not None and len(pipeline.started) == 4:
+            claimed_at = asyncio.get_running_loop().time()
+        return result
+
+    pipeline.complete_claim = complete  # type: ignore[method-assign]
+    pipeline.claim_batch = claim  # type: ignore[method-assign]
+    coordinator = CandidateEvalCoordinator(
+        pipeline=pipeline,
+        snapshot_provider=lambda: CandidateEvalSnapshot(
+            available=pipeline.available,
+            target=600,
+            pending_eval=pipeline.pending_eval,
+            evaluating=pipeline.in_flight * 30,
+            evaluated_pending_admission=pipeline.evaluated_pending_admission,
+            admitted_pending_copy=pipeline.admitted_pending_copy,
+        ),
+        profile_provider=lambda: object(),
+        worker_count=3,
+        batch_size=30,
+        safety_wake_seconds=60.0,
+    )
+    task = asyncio.create_task(coordinator.run_forever())
+    await pipeline.wait_for_started(3)
+    pipeline.finish(0, cached=1)
+    await pipeline.wait_for_started(4)
+
+    assert 0 <= claimed_at - completed_at < 1.0
     assert pipeline.started[1].future.done() is False
     assert pipeline.started[2].future.done() is False
     await coordinator.stop()
@@ -172,7 +259,8 @@ async def test_post_commit_hook_does_not_block_fast_slot_refill() -> None:
             target=600,
             pending_eval=pipeline.pending_eval,
             evaluating=pipeline.in_flight * 30,
-            evaluated=0,
+            evaluated_pending_admission=pipeline.evaluated_pending_admission,
+            admitted_pending_copy=pipeline.admitted_pending_copy,
         ),
         profile_provider=lambda: object(),
         worker_count=3,
@@ -194,7 +282,7 @@ async def test_post_commit_hook_does_not_block_fast_slot_refill() -> None:
 
 
 @pytest.mark.asyncio
-async def test_committed_pending_inventory_stops_new_claims_at_target() -> None:
+async def test_admitted_pending_copy_inventory_stops_new_claims_at_target() -> None:
     pipeline = _FakeStagedPipeline(candidate_count=120)
     coordinator = CandidateEvalCoordinator(
         pipeline=pipeline,  # type: ignore[arg-type]
@@ -203,8 +291,8 @@ async def test_committed_pending_inventory_stops_new_claims_at_target() -> None:
             target=10,
             pending_eval=pipeline.pending_eval,
             evaluating=pipeline.in_flight * 30,
-            evaluated=0,
-            committed_pending=pipeline.available,
+            evaluated_pending_admission=pipeline.evaluated_pending_admission,
+            admitted_pending_copy=pipeline.admitted_pending_copy,
         ),
         profile_provider=lambda: object(),
         worker_count=3,
@@ -220,6 +308,74 @@ async def test_committed_pending_inventory_stops_new_claims_at_target() -> None:
     await asyncio.sleep(0.05)
 
     assert len(pipeline.started) == 3
+    await coordinator.stop()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_admits_evaluated_rows_before_projected_target_stop() -> None:
+    pipeline = _FakeStagedPipeline(candidate_count=30)
+    pipeline.evaluated_pending_admission = 10
+    admitted: list[int] = []
+    coordinator = CandidateEvalCoordinator(
+        pipeline=pipeline,
+        snapshot_provider=lambda: CandidateEvalSnapshot(
+            available=pipeline.available,
+            target=10,
+            pending_eval=pipeline.pending_eval,
+            evaluating=0,
+            evaluated_pending_admission=pipeline.evaluated_pending_admission,
+            admitted_pending_copy=pipeline.admitted_pending_copy,
+        ),
+        profile_provider=lambda: object(),
+        on_admitted=admitted.append,
+        safety_wake_seconds=60.0,
+    )
+    task = asyncio.create_task(coordinator.run_forever())
+    async with asyncio.timeout(2):
+        while not pipeline.admit_limits:
+            await asyncio.sleep(0)
+
+    assert pipeline.admit_limits == [10]
+    assert admitted == [10]
+    assert pipeline.started == []
+    await coordinator.stop()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_serial_worker_commits_use_remaining_copy_aware_headroom() -> None:
+    pipeline = _FakeStagedPipeline(candidate_count=90)
+    admitted: list[int] = []
+    coordinator = CandidateEvalCoordinator(
+        pipeline=pipeline,
+        snapshot_provider=lambda: CandidateEvalSnapshot(
+            available=pipeline.available,
+            target=10,
+            pending_eval=pipeline.pending_eval,
+            evaluating=pipeline.in_flight * 30,
+            evaluated_pending_admission=pipeline.evaluated_pending_admission,
+            admitted_pending_copy=pipeline.admitted_pending_copy,
+        ),
+        profile_provider=lambda: object(),
+        worker_count=3,
+        batch_size=30,
+        on_admitted=admitted.append,
+        safety_wake_seconds=60.0,
+    )
+    task = asyncio.create_task(coordinator.run_forever())
+    await pipeline.wait_for_started(3)
+    pipeline.finish(0, cached=30)
+    pipeline.finish(1, cached=30)
+    pipeline.finish(2, cached=30)
+    async with asyncio.timeout(2):
+        while len(pipeline.completion_limits) < 3:
+            await asyncio.sleep(0)
+
+    assert pipeline.completion_limits == [10, 0, 0]
+    assert pipeline.available == 10
+    assert pipeline.evaluated_pending_admission == 80
+    assert admitted == [10]
     await coordinator.stop()
     await task
 
@@ -270,7 +426,8 @@ async def test_rate_limit_uses_provider_retry_after() -> None:
             target=600,
             pending_eval=pipeline.pending_eval,
             evaluating=pipeline.in_flight * 30,
-            evaluated=0,
+            evaluated_pending_admission=pipeline.evaluated_pending_admission,
+            admitted_pending_copy=pipeline.admitted_pending_copy,
         ),
         profile_provider=lambda: object(),
         worker_count=1,
@@ -329,7 +486,8 @@ async def test_three_zero_cache_batches_trigger_supply_and_backoff() -> None:
             target=600,
             pending_eval=pipeline.pending_eval,
             evaluating=pipeline.in_flight * 30,
-            evaluated=0,
+            evaluated_pending_admission=pipeline.evaluated_pending_admission,
+            admitted_pending_copy=pipeline.admitted_pending_copy,
         ),
         profile_provider=lambda: object(),
         worker_count=1,
@@ -420,7 +578,8 @@ async def test_sqlite_random_completion_soak(tmp_path: Any) -> None:
             target=60,
             pending_eval=readiness["pending_eval"],
             evaluating=counts.get("evaluating", 0),
-            evaluated=readiness["evaluated_pending"],
+            evaluated_pending_admission=readiness["evaluated_pending"],
+            admitted_pending_copy=readiness["admitted_pending_copy"],
         )
 
     coordinator = CandidateEvalCoordinator(

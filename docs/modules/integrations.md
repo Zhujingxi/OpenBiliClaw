@@ -23,7 +23,7 @@
 
 | 任务 | 状态 | 说明 |
 |------|------|------|
-| OpenClaw bootstrap | ✅ | `build_openclaw_adapter_services()` 初始化 database/memory 后立刻用 canonical available 配置共享 LLM gate，再构造任何可调用 provider 的 service；candidate snapshot closure 继续从 controller canonical readiness 同步 `healthy/refill/empty`。coordinator attach 后、adapter services 暴露前同步调用 controller 的幂等 `run_startup_maintenance()`；只有非 rollback 的真实维护结果才完成该标记。 |
+| OpenClaw bootstrap | ✅ | `build_openclaw_adapter_services()` 初始化 database/memory 后立刻用 canonical available 配置共享 LLM gate，再构造任何可调用 provider 的 service。API/OpenClaw candidate snapshot 都从同一次 readiness 读取 `available`（并用该值更新 gate）与 `admitted_pending_copy`，从 candidate status 读取 `pending_eval/evaluating/evaluated_pending_admission`；不再用 `pending - discovery_backlog` 近似。coordinator attach 后、adapter services 暴露前同步调用 controller 的幂等 `run_startup_maintenance()`。 |
 | OpenClaw adapter operations | ✅ | 已提供 `sync_account / get_profile / recommend / submit_feedback / get_runtime_status` |
 | 推荐消费后的 durable inventory 同步 | ✅ | API 与 OpenClaw composition 都给真实 `RecommendationEngine` 注入 post-commit callback；`mark_pool_items_shown()` 成功后才读取 canonical available 并更新共享 gate，detached write 失败不发布伪库存，callback 失败也不取消推荐响应。 |
 | OpenClaw skill descriptors | ✅ | 已提供协议中立的 skill descriptor 列表与 async handler |

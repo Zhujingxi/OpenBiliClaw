@@ -7,9 +7,12 @@ import inspect
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from openbiliclaw.llm.base import classify_llm_failure_kind
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +29,8 @@ class CandidateEvalSnapshot:
     target: int
     pending_eval: int
     evaluating: int
-    evaluated: int
-    committed_pending: int = 0
+    evaluated_pending_admission: int
+    admitted_pending_copy: int
 
 
 def effective_candidate_eval_workers(configured: int, llm_concurrency: int) -> int:
@@ -51,6 +54,7 @@ class CandidateEvalCoordinator:
         batch_size: int = 30,
         supply_callback: Any | None = None,
         post_commit_callback: Any | None = None,
+        on_admitted: Callable[[int], None] | None = None,
         work_allowed: Any | None = None,
         safety_wake_seconds: float = 60.0,
         time_fn: Any = time.monotonic,
@@ -62,6 +66,7 @@ class CandidateEvalCoordinator:
         self.batch_size = max(1, min(30, int(batch_size)))
         self.supply_callback = supply_callback
         self.post_commit_callback = post_commit_callback
+        self.on_admitted = on_admitted
         self.work_allowed = work_allowed
         self.safety_wake_seconds = max(0.01, float(safety_wake_seconds))
         self.time_fn = time_fn
@@ -133,10 +138,11 @@ class CandidateEvalCoordinator:
                 self._backoff_until = 0.0
 
                 snapshot = self._snapshot()
+                self._admit_evaluated(snapshot)
+                snapshot = self._snapshot()
                 if self._projected_inventory(snapshot) >= snapshot.target:
                     self.state = "idle"
                 else:
-                    self._admit_evaluated(snapshot)
                     self._fill_open_slots()
                     snapshot = self._snapshot()
                     if not self._workers and snapshot.pending_eval <= 0:
@@ -189,8 +195,8 @@ class CandidateEvalCoordinator:
             target=int(value.get("target", 0)),
             pending_eval=int(value.get("pending_eval", 0)),
             evaluating=int(value.get("evaluating", 0)),
-            evaluated=int(value.get("evaluated", 0)),
-            committed_pending=int(value.get("committed_pending", 0)),
+            evaluated_pending_admission=int(value.get("evaluated_pending_admission", 0)),
+            admitted_pending_copy=int(value.get("admitted_pending_copy", 0)),
         )
 
     def _fill_open_slots(self) -> None:
@@ -214,14 +220,21 @@ class CandidateEvalCoordinator:
         return await self.pipeline.evaluate_claim(claim, profile)
 
     def _admit_evaluated(self, snapshot: CandidateEvalSnapshot) -> None:
-        if snapshot.evaluated <= 0 or snapshot.available >= snapshot.target:
+        if snapshot.evaluated_pending_admission <= 0:
             return
         admit = getattr(self.pipeline, "admit_evaluated", None)
         if not callable(admit):
             return
-        result = admit(limit=min(self.batch_size, snapshot.target - snapshot.available))
+        admission_headroom = max(
+            0,
+            snapshot.target - snapshot.available - snapshot.admitted_pending_copy,
+        )
+        if admission_headroom <= 0:
+            return
+        result = admit(limit=admission_headroom)
         self.last_cached = int(result.get("cached", 0))
         self.last_rejected = int(result.get("rejected", 0))
+        self._notify_admitted(self.last_cached)
 
     async def _commit_finished_workers(self) -> None:
         done = [task for task in self._workers if task.done()]
@@ -229,7 +242,15 @@ class CandidateEvalCoordinator:
             claim = self._workers.pop(task)
             try:
                 outcome = task.result()
-                result = await self.pipeline.complete_claim(outcome)
+                snapshot = self._snapshot()
+                admission_headroom = max(
+                    0,
+                    snapshot.target - snapshot.available - snapshot.admitted_pending_copy,
+                )
+                result = await self.pipeline.complete_claim(
+                    outcome,
+                    admission_limit=admission_headroom,
+                )
             except asyncio.CancelledError:
                 self._release_once(claim, reason="evaluation cancelled")
                 continue
@@ -258,7 +279,16 @@ class CandidateEvalCoordinator:
                 self._backoff_until = max(self._backoff_until, self.time_fn() + delay)
                 self._request_supply("candidate_eval_no_progress")
             if self.last_cached > 0:
+                self._notify_admitted(self.last_cached)
                 self._request_post_commit()
+
+    def _notify_admitted(self, cached_count: int) -> None:
+        if cached_count <= 0 or self.on_admitted is None:
+            return
+        try:
+            self.on_admitted(cached_count)
+        except Exception:
+            logger.warning("candidate admission callback failed", exc_info=True)
 
     def _record_failure(self, exc: BaseException) -> None:
         self.last_error = str(exc)
@@ -407,7 +437,11 @@ class CandidateEvalCoordinator:
 
     @staticmethod
     def _projected_inventory(snapshot: CandidateEvalSnapshot) -> int:
-        return max(0, snapshot.available) + max(0, snapshot.committed_pending)
+        return (
+            max(0, snapshot.available)
+            + max(0, snapshot.admitted_pending_copy)
+            + max(0, snapshot.evaluated_pending_admission)
+        )
 
     @staticmethod
     def _resume_notification(reason: str) -> bool:

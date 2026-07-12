@@ -3333,9 +3333,86 @@ class Database:
             "available": self.count_pool_candidates(xhs_self_nickname=xhs_self_nickname),
             "raw": raw_count + discovery_pending_count,
             "pending": pending_count + discovery_pending_count,
+            "admitted_pending_copy": len(
+                self._load_admitted_pending_copy_rows_on(
+                    self.conn,
+                    xhs_self_nickname=xhs_self_nickname,
+                )
+            ),
             "pending_eval": pending_eval_count,
             "evaluated_pending": evaluated_pending_count,
         }
+
+    def _load_admitted_pending_copy_rows_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        xhs_self_nickname: str = "",
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Load admitted, classified rows whose recommendation copy is incomplete."""
+
+        admission_sql, admission_params = self._pool_admission_sql()
+        guard_sql = _xhs_self_author_guard_sql()
+        guard_params = _xhs_self_author_guard_params(xhs_self_nickname)
+        delight_threshold = self._dynamic_delight_threshold_on(
+            conn, default_threshold=_DELIGHT_CLAIM_MIN_SCORE
+        )
+        delight_guard_sql = _delight_claim_guard_sql()
+        max_rows = None if limit is None else max(0, int(limit))
+        if max_rows == 0:
+            return []
+        cursor = conn.execute(
+            f"""
+            SELECT *
+            FROM content_cache
+            WHERE COALESCE(pool_status, 'fresh') = 'fresh'
+              AND COALESCE(feedback_type, '') != 'dislike'
+              AND {admission_sql}
+              AND COALESCE(style_key, '') != ''
+              AND COALESCE(topic_group, '') != ''
+              AND (
+                COALESCE(pool_expression, '') = ''
+                OR COALESCE(pool_topic_label, '') = ''
+              )
+              AND (
+                source_platform != 'xiaohongshu'
+                OR content_url LIKE '%xsec_token=%'
+              )
+              {guard_sql}
+              {delight_guard_sql}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM recommendations AS r
+                WHERE r.bvid = content_cache.bvid
+              )
+            ORDER BY
+                CASE candidate_tier WHEN 'primary' THEN 0 ELSE 1 END ASC,
+                relevance_score DESC,
+                last_scored_at DESC,
+                view_count DESC,
+                bvid ASC
+            """,
+            (*admission_params, *guard_params, delight_threshold),
+        )
+        viewed_content_keys = self._recent_viewed_content_keys_on(conn)
+        rows: list[dict[str, Any]] = []
+        for row in cursor.fetchall():
+            item = dict(row)
+            if not str(item.get("bvid", "")).strip():
+                continue
+            if self._is_viewed_row(item, viewed_content_keys):
+                continue
+            if not _is_linkable_pool_source(
+                item.get("source"),
+                item.get("source_platform"),
+                item.get("content_url"),
+            ):
+                continue
+            rows.append(item)
+            if max_rows is not None and len(rows) >= max_rows:
+                break
+        return rows
 
     def count_pool_candidates_by_source(self) -> dict[str, int]:
         """Return fresh pool counts grouped by discovery source family."""
@@ -5099,45 +5176,12 @@ class Database:
         unclassified items (e.g. raw XHS notes) from getting an expression
         and leaking through the serve gate without proper relevance scoring.
         """
-        admission_sql, admission_params = self._pool_admission_sql()
-        guard_sql = _xhs_self_author_guard_sql()
-        guard_params = _xhs_self_author_guard_params(xhs_self_nickname)
-        cursor = self.conn.execute(
-            f"""
-            SELECT *
-            FROM content_cache
-            WHERE COALESCE(pool_status, 'fresh') = 'fresh'
-              AND COALESCE(feedback_type, '') != 'dislike'
-              AND {admission_sql}
-              AND COALESCE(style_key, '') != ''
-              AND COALESCE(topic_group, '') != ''
-              AND (
-                COALESCE(pool_expression, '') = ''
-                OR COALESCE(pool_topic_label, '') = ''
-              )
-              {guard_sql}
-              AND NOT EXISTS (
-                SELECT 1
-                FROM recommendations AS r
-                WHERE r.bvid = content_cache.bvid
-              )
-            ORDER BY
-                CASE candidate_tier WHEN 'primary' THEN 0 ELSE 1 END ASC,
-                relevance_score DESC,
-                last_scored_at DESC,
-                view_count DESC,
-                bvid ASC
-            LIMIT ?
-            """,
-            (*admission_params, *guard_params, limit),
+        self._ensure_fresh_read()
+        return self._load_admitted_pending_copy_rows_on(
+            self.conn,
+            xhs_self_nickname=xhs_self_nickname,
+            limit=limit,
         )
-        rows = [dict(row) for row in cursor.fetchall()]
-        rows = self._exclude_viewed_rows(
-            rows,
-            self.get_recent_viewed_content_keys(),
-            limit=len(rows),
-        )
-        return rows[:limit]
 
     def update_pool_copy(
         self,

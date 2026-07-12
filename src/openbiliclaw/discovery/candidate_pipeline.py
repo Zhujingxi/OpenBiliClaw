@@ -413,7 +413,12 @@ class DiscoveryCandidatePipeline:
             elapsed_seconds=max(0.0, self.time_fn() - started),
         )
 
-    async def complete_claim(self, outcome: CandidateEvalOutcome) -> dict[str, int]:
+    async def complete_claim(
+        self,
+        outcome: CandidateEvalOutcome,
+        *,
+        admission_limit: int | None = None,
+    ) -> dict[str, int]:
         """Persist and admit one completed claim while honoring token ownership."""
 
         claim = outcome.claim
@@ -450,6 +455,7 @@ class DiscoveryCandidatePipeline:
             accepted,
             recently_viewed=recently_viewed,
             admitted_items=admitted_items,
+            limit=admission_limit,
         )
         self.last_admitted_items = list(admitted_items)
         return {
@@ -645,6 +651,7 @@ class DiscoveryCandidatePipeline:
             accepted,
             recently_viewed=recently_viewed,
             admitted_items=admitted_items,
+            limit=limit,
         )
 
     def _release_eval_claims(
@@ -744,11 +751,13 @@ class DiscoveryCandidatePipeline:
         *,
         recently_viewed: set[str],
         admitted_items: list[DiscoveredContent],
+        limit: int | None = None,
     ) -> tuple[int, int]:
         cached = 0
         rejected = 0
+        cache_limit = None if limit is None else max(0, int(limit))
         for row, item in accepted:
-            if self._pool_full():
+            if (cache_limit is not None and cached >= cache_limit) or self._pool_full():
                 break
             if self._is_recently_viewed(item, recently_viewed):
                 self.database.reject_discovery_candidate(

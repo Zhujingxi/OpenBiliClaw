@@ -606,7 +606,7 @@ background ─ background admission (default 3) ──────┘
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │
 │  来源族注册表：alias · strategy · URL host             │
 │             → pool 统计 · 已看身份                     │
-│ 候选池 → token 领取 → 3×LLM worker → 串行入池 → 四端 │
+│ projected 库存 → 3×30 worker → 串行入池 → 四端       │
 │ API/OpenClaw 启动钩子 → 历史恢复/原子维护 → 再暴露 LLM │
 │   统一准入防线 · SQLite（事件 · 候选池 · 推荐 · 对话） │
 └────────────────────────────────────────────────┘
@@ -634,7 +634,7 @@ background ─ background admission (default 3) ──────┘
 发现之后的统一流程：
 
 - **安全取数** — 后端不代登录、不爬你看不到的内容；所有平台复用你浏览器里已有的登录会话，首轮画像信号只在你点「开始初始化」后按所选来源拉取。
-- **连续统一评估** — 各来源原始候选进入同一待评估池，默认 3 个 LLM worker 任一完成即补位，token 化领取与串行入池保证乱序/热重载安全；库存到目标后自动停止。
+- **连续统一评估** — 各来源原始候选进入同一待评估池，默认 3×30 worker 任一完成即补位；调度只计可用、待文案与已评估 durable 库存，串行 admission 按实时 headroom 封顶，raw 不会虚增库存。
 - **多样性选择** — 平台配额 → 主题去重 → 风格均衡 → 跨平台混排 → 数量封顶；开箱只启用 B 站，其余平台在设置里显式打开。
 
 > 各平台任务链路、候选池计数、fallback 策略等完整机制见 [内容发现引擎文档](docs/modules/discovery.md)。

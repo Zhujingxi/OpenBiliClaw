@@ -2389,10 +2389,124 @@ class TestDatabase:
                 "available": 1,
                 "raw": 3,
                 "pending": 1,
+                "admitted_pending_copy": 1,
                 "pending_eval": 0,
                 "evaluated_pending": 0,
             }
 
+            db.close()
+
+    def test_count_pool_readiness_reports_only_canonical_admitted_pending_copy(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            _seed_visible(db, "BVREADY", source="search")
+            db.cache_content(
+                "BVCOPY",
+                title="classified and admitted",
+                source="search",
+                relevance_score=0.9,
+                style_key="tutorial",
+                topic_group="testing",
+            )
+            db.cache_content(
+                "BVUNCLASSIFIED",
+                title="not copy ready",
+                source="search",
+                relevance_score=0.9,
+                topic_group="testing",
+            )
+            for bvid in ("BVRECOMMENDED", "BVVIEWED", "BVDELIGHT"):
+                db.cache_content(
+                    bvid,
+                    title=bvid,
+                    source="search",
+                    relevance_score=0.9,
+                    style_key="tutorial",
+                    topic_group="testing",
+                )
+            db.insert_recommendation(
+                "BVRECOMMENDED",
+                confidence=0.9,
+                expression="already recommended",
+                topic="testing",
+            )
+            db.insert_event(
+                "view",
+                title="BVVIEWED",
+                url="https://www.bilibili.com/video/BVVIEWED",
+                metadata={"bvid": "BVVIEWED"},
+            )
+            db.conn.execute(
+                """
+                UPDATE content_cache
+                SET delight_score=0.9, delight_reason='surprise', delight_hook='hook'
+                WHERE bvid='BVDELIGHT'
+                """
+            )
+            xhs_url = "https://www.xiaohongshu.com/explore/note"
+            for bvid, up_name, content_url in (
+                ("XHSBARE", "Friend", xhs_url),
+                ("XHSSELF", "Me", f"{xhs_url}?xsec_token=token"),
+            ):
+                db.cache_content(
+                    bvid,
+                    title=bvid,
+                    up_name=up_name,
+                    source="xhs-extension-task",
+                    source_platform="xiaohongshu",
+                    content_url=content_url,
+                    relevance_score=0.9,
+                    style_key="tutorial",
+                    topic_group="testing",
+                )
+            db.enqueue_discovery_candidates(
+                [
+                    DiscoveryCandidateWrite(
+                        candidate_key=f"bilibili:{bvid}",
+                        source_platform="bilibili",
+                        source_strategy="search",
+                        content_id=bvid,
+                        title=bvid,
+                    )
+                    for bvid in ("BVEVALUATED", "BVPENDING", "BVEVALUATING")
+                ]
+            )
+            evaluated = db.claim_discovery_candidates_for_eval(
+                limit=1, claim_token="evaluated-token"
+            )
+            assert db.persist_claimed_discovery_candidate_evaluations(
+                [
+                    {
+                        "candidate_id": int(evaluated[0]["id"]),
+                        "status": "evaluated",
+                        "relevance_score": 0.9,
+                        "relevance_reason": "fit",
+                        "topic_key": "testing",
+                        "topic_group": "testing",
+                        "style_key": "tutorial",
+                        "franchise_key": "",
+                        "pool_expression": "",
+                        "pool_topic_label": "",
+                        "eval_error": "",
+                    }
+                ],
+                claim_token="evaluated-token",
+            )
+            db.claim_discovery_candidates_for_eval(limit=1, claim_token="evaluating-token")
+
+            readiness = db.count_pool_readiness(xhs_self_nickname="Me")
+
+            assert readiness["available"] == 1
+            assert readiness["admitted_pending_copy"] == 1
+            assert readiness["evaluated_pending"] == 1
+            assert readiness["pending_eval"] == 2
+            assert [
+                row["bvid"]
+                for row in db.get_pool_candidates_needing_copy(limit=20, xhs_self_nickname="Me")
+            ] == ["BVCOPY"]
             db.close()
 
     def test_count_pool_readiness_includes_pending_discovery_candidates(self) -> None:

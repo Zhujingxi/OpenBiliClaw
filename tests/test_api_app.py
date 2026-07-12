@@ -316,6 +316,44 @@ def test_successful_hot_reload_commits_new_inventory_target(monkeypatch, tmp_pat
     assert ctx.config is proposed
 
 
+def test_api_candidate_snapshot_uses_exact_durable_readiness_and_available_gate(
+    monkeypatch, tmp_path
+) -> None:
+    from openbiliclaw.api.runtime_context import build_runtime_context
+    from openbiliclaw.config import Config
+    from openbiliclaw.llm.concurrency import InventoryPriorityState
+
+    config = Config(data_dir=str(tmp_path / "data"))
+    config.llm.default_provider = "ollama"
+    config.llm.ollama.model = "llama3"
+    config.scheduler.pool_target_count = 10
+    ctx = build_runtime_context(config)
+    ctx._rebuild_components(config)
+    monkeypatch.setattr(
+        ctx.runtime_controller,
+        "_pool_readiness_counts",
+        lambda: {
+            "available": 2,
+            "pending": 999,
+            "admitted_pending_copy": 4,
+        },
+    )
+    monkeypatch.setattr(
+        ctx.database,
+        "count_discovery_candidates_by_status",
+        lambda: {"pending_eval": 500, "evaluating": 60, "evaluated": 3},
+    )
+
+    snapshot = ctx.runtime_controller.candidate_eval_coordinator._snapshot()
+
+    assert snapshot.available == 2
+    assert snapshot.pending_eval == 500
+    assert snapshot.evaluating == 60
+    assert snapshot.evaluated_pending_admission == 3
+    assert snapshot.admitted_pending_copy == 4
+    assert ctx.llm_concurrency_gate.inventory_priority_state is InventoryPriorityState.REFILL
+
+
 @pytest.mark.asyncio
 async def test_old_engine_commit_callback_uses_current_controller_after_two_reloads(
     tmp_path,
@@ -366,9 +404,7 @@ async def test_old_engine_commit_callback_uses_current_controller_after_two_relo
 
 
 @pytest.mark.asyncio
-async def test_api_pool_commit_publication_survives_multiple_reloads(
-    monkeypatch, tmp_path
-) -> None:
+async def test_api_pool_commit_publication_survives_multiple_reloads(monkeypatch, tmp_path) -> None:
     from openbiliclaw.api.runtime_context import build_runtime_context
     from openbiliclaw.config import Config
 
@@ -630,17 +666,14 @@ def test_injected_controller_nested_discovery_gate_is_validated_and_injected(
         ("openbiliclaw.runtime.account_sync.AccountSyncService", "soul_engine"),
     ],
 )
-def test_injected_llm_owner_attribute_audit(
-    qualified_name: str, runtime_attribute: str
-) -> None:
+def test_injected_llm_owner_attribute_audit(qualified_name: str, runtime_attribute: str) -> None:
     module_name, class_name = qualified_name.rsplit(".", 1)
     module = __import__(module_name, fromlist=[class_name])
     owner_type = getattr(module, class_name)
     source = inspect.getsource(owner_type)
 
-    assert (
-        f"self.{runtime_attribute}" in source
-        or runtime_attribute in getattr(owner_type, "__annotations__", {})
+    assert f"self.{runtime_attribute}" in source or runtime_attribute in getattr(
+        owner_type, "__annotations__", {}
     ), f"{qualified_name} no longer stores its injected LLM owner at {runtime_attribute}"
 
     app_source = inspect.getsource(create_app)

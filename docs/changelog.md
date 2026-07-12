@@ -6,6 +6,7 @@
 
 ## v0.3.164：WebUI 可配置的海外出口代理（issue #89，2026-07-12）
 
+- **候选评估改用 durable projected inventory**：调度只统计 canonical available、已 admission 待文案与已评估待 admission，普通 raw pending/evaluating 不再虚报库存。3×30 worker 乱序完成时，串行 commit 先保存全部 token-owned 评分，再按 copy-aware headroom 入池；超额达标结果留在 `evaluated`，worker 完成直接补位，60 秒仅作 safety wake。API 与 OpenClaw 使用同一精确 snapshot mapping 和 available gate 值。
 - **后台补货获得两槽新准入保证**：共享 total=4/background=3 gate 新增 cancellation-safe refill admission，优先级为文案 > 候选评估 > 缺货供给 > maintenance；低库存且 refill 排队时 maintenance 新准入最多一个、refill 可借满三槽，库存为零时 park 新 maintenance。规则只影响新 admission，不取消已进入 provider 的 Soul/维护请求；无 refill 可运行时 maintenance 继续借用全部空槽。
 - **补货优先级只跟随 durable canonical 库存**：API、OpenClaw 在任何 provider 工作前用数据库可换数初始化 gate，controller readiness、原子维护、推荐消费/文案完成和 candidate snapshot 持续同步 `healthy/refill/empty`。runtime status 新增 refill/maintenance active、waiting、priority-active 与 inventory state，便于定位库存不足时的真实占槽。
 - **库存 gate 生命周期补强**：显式注入 API 会从真实 controller target + canonical DB count 初始化 gate，不再因 `ctx.config=None` 把 target 当零；推荐消费只在 detached `mark_pool_items_shown()` 成功提交后通过 callback 更新 canonical state，失败写不误报、callback 失败不拖垮响应；热重载也延迟到所有新组件构造并 atomic swap 成功后才提交 proposed target/state，晚期失败保持旧 gate 原样。

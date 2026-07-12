@@ -944,20 +944,13 @@ class RuntimeContext:
                 int(readiness.get("available", 0))
             )
             status_counts = self.database.count_discovery_candidates_by_status()
-            discovery_backlog = sum(
-                int(status_counts.get(status, 0))
-                for status in ("pending_eval", "evaluating", "evaluated")
-            )
             return CandidateEvalSnapshot(
                 available=int(readiness.get("available", 0)),
                 target=int(new_config.scheduler.pool_target_count),
                 pending_eval=int(status_counts.get("pending_eval", 0)),
                 evaluating=int(status_counts.get("evaluating", 0)),
-                evaluated=int(status_counts.get("evaluated", 0)),
-                committed_pending=max(
-                    0,
-                    int(readiness.get("pending", 0)) - discovery_backlog,
-                ),
+                evaluated_pending_admission=int(status_counts.get("evaluated", 0)),
+                admitted_pending_copy=int(readiness.get("admitted_pending_copy", 0)),
             )
 
         async def _request_candidate_supply(reason: str) -> dict[str, object]:
