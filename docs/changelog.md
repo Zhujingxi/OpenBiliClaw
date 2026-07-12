@@ -13,6 +13,8 @@
 - **桌面 Web 滚动自动加载预载边距 300px → 50px**：`#loadMoreSentinel` 哨兵紧贴推荐网格底部，旧的 300px `rootMargin` 约等于一整行卡片高度（16:9 封面 + 文案约 250–350px），导致最后一行（最多 4 张）还在视口下方约 300px 时就追加了新卡片，用户永远看不全当前批次、也到不了「已看完」的干净状态。收到 50px 后，哨兵需几乎滚到视口底部才触发。真实 chromium 浏览器端到端验证（`tests/test_desktop_web_autoload_margin_e2e.py`）：300px 时哨兵在视口下方 150px 即触发，50px 时约 20px 才触发，改回 300 该测试失败——守卫回归而非 grep 源码文本。
 - **桌面 Web 首屏渐进渲染与封面请求限流（issue #101）**：首屏改用 `/api/ping` 判断连接，推荐与 runtime 独立于慢 health / 次级读取即时渲染并保留消费后库存复读与 1/2/4/8 秒恢复；推荐网格仅前 4 张封面使用 `eager/high`，其余改为 `lazy/low`，Delight 优先级不变。
 - **桌面 Web 侧栏动画与交互细节打磨（PR #102）**：侧边抽屉从 `position:fixed` + `body.side-drawer-open` 推挤改为 flex 行内项，用 `margin-left + transform` 双可插值属性做过渡，展开 / 折叠全程平滑无跳变，并置为 `position:sticky` 固定视口高度让导航常驻；delight 卡片拖拽新增 10px 死区（`_DELIGHT_DRAG_DEAD_ZONE`），微小位移不再误触切换，死区内松手视为点击；单条静态 `#toast` 升级为右下角栈式 `#toastContainer` 通知（进出场滑动、hover 暂停、点击关闭、磨砂玻璃样式）；delight-nav / 反馈按钮加磨砂底衬保证在封面背景上可读；进入聊天页补 `renderChat()` 确保滚到底部。纯桌面 Web 前端改动，移动 Web 与其它三端不受影响。
+- **桌面 Web 侧栏、拖拽与自动加载阈值回归（issues #102 / #105）**：真实 Chromium 现锁定侧栏按钮 / 面板 ARIA 同步和 flex 主栏让渡，并逐一验证 Delight 9px 不进入拖动态、10px 进入拖动态、49px 不切卡、50px 切卡；滚动自动加载的 50px root margin 继续由独立 E2E 守卫，未改回过早预载。
+- **Delight 按可用主栏宽度响应（issue #106）**：`.layout` 新增命名 inline-size container，Delight 在实际主栏宽度 700 / 620 / 430px 处复用现有紧凑布局，修复 860px 视口展开 312px 侧栏后仍保持双栏、内容被挤压的问题；viewport media query 继续独占移动导航切换，侧栏宽度与过渡不变。
 
 ## v0.3.163 / extension v0.3.163 / desktop v0.3.163：登录状态诚实同步、Web 库存恢复与冷加载判定（2026-07-11）
 

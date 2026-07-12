@@ -21,8 +21,7 @@ pytestmark = pytest.mark.integration
 
 ROOT = Path(__file__).resolve().parents[1]
 ONE_PIXEL_PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42Y"
-    "AAAAASUVORK5CYII="
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
 
 
@@ -43,12 +42,26 @@ def _recommendations(
             "topic_label": "交互测试",
             "expression": f"第 {index} 张卡片的推荐理由。",
             "cover_url": (
-                f"https://synthetic.invalid/covers/issue-98-{index}.png"
-                if image_backed
-                else ""
+                f"https://synthetic.invalid/covers/issue-98-{index}.png" if image_backed else ""
             ),
         }
         for index in range(1, count + 1)
+    ]
+
+
+def _delights() -> list[dict[str, Any]]:
+    return [
+        {
+            "bvid": f"BV1DELIGHT{index}",
+            "content_id": f"BV1DELIGHT{index}",
+            "content_url": f"https://www.bilibili.com/video/BV1DELIGHT{index}",
+            "source_platform": "bilibili",
+            "title": f"惊喜卡片 {index}",
+            "delight_reason": f"第 {index} 张惊喜卡片的推荐理由。",
+            "delight_score": 0.9,
+            "state": "pending",
+        }
+        for index in range(1, 3)
     ]
 
 
@@ -62,6 +75,7 @@ class Issue98Stub:
         self.runtime_reread_status = 200
         self.runtime_reread_received = threading.Event()
         self.recommendations = _recommendations()
+        self.delights = _delights()
         self.image_proxy_reads = 0
         self.append_posts: list[dict[str, Any]] = []
         self.append_received = threading.Event()
@@ -220,7 +234,9 @@ def issue_98_server() -> tuple[str, Issue98Stub]:
                     self,
                     {"items": [], "has_more": False, "next_cursor": ""},
                 )
-            if path in {"/api/delight/pending-batch", "/api/notifications/pending"}:
+            if path == "/api/delight/pending-batch":
+                return _json_response(self, {"items": state.delights})
+            if path == "/api/notifications/pending":
                 return _json_response(self, {"items": []})
             if path == "/api/chat/turns":
                 return _json_response(self, {"items": []})
@@ -339,6 +355,140 @@ def _card_position(card: Any) -> tuple[float, float]:
 def _assert_position_stable(actual: tuple[float, float], expected: tuple[float, float]) -> None:
     assert actual[0] == pytest.approx(expected[0], abs=2.0)
     assert actual[1] == pytest.approx(expected[1], abs=2.0)
+
+
+def _rect(locator: Any) -> dict[str, float]:
+    return locator.evaluate(
+        """el => { const r = el.getBoundingClientRect();
+        return {left: r.left, right: r.right, top: r.top, width: r.width}; }"""
+    )
+
+
+def _start_horizontal_drag(page: Page, locator: Any, delta_x: int) -> None:
+    box = locator.bounding_box()
+    assert box is not None
+    x = box["x"] + box["width"] / 2
+    y = box["y"] + box["height"] / 2
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x + delta_x, y)
+
+
+def _drag_horizontally(page: Page, locator: Any, delta_x: int) -> None:
+    _start_horizontal_drag(page, locator, delta_x)
+    page.mouse.up()
+
+
+def _load_desktop_with_closed_drawer(
+    page: Page,
+    base_url: str,
+    *,
+    width: int,
+) -> None:
+    page.set_viewport_size({"width": width, "height": 900})
+    page.add_init_script("window.localStorage.setItem('openbiliclaw.sideDrawerOpen', '0')")
+    page.goto(f"{base_url}/web/")
+    expect(page.locator("#delightCount")).to_have_text("1/2")
+
+
+def _delight_geometry(page: Page) -> dict[str, Any]:
+    return page.evaluate(
+        """() => {
+          const layout = document.querySelector('.layout').getBoundingClientRect();
+          const delight = document.querySelector('#delightBanner').getBoundingClientRect();
+          return {
+            layoutRight: layout.right,
+            delightRight: delight.right,
+            docClient: document.documentElement.clientWidth,
+            docScroll: document.documentElement.scrollWidth,
+            columns: getComputedStyle(document.querySelector('#delightBanner')).gridTemplateColumns,
+          };
+        }"""
+    )
+
+
+def _assert_delight_fits_available_width(geometry: dict[str, Any]) -> None:
+    assert geometry["delightRight"] <= geometry["layoutRight"] + 1
+    assert geometry["docScroll"] <= geometry["docClient"] + 1
+
+
+def test_side_drawer_aria_and_flex_allocation_stay_synchronized(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, _ = issue_98_server
+    _load_desktop_with_closed_drawer(chromium_page, base_url, width=860)
+
+    button = chromium_page.locator("#sideDrawerBtn")
+    drawer = chromium_page.locator("#sideDrawer")
+    layout = chromium_page.locator(".layout")
+    expect(button).to_have_attribute("aria-expanded", "false")
+    expect(drawer).to_have_attribute("aria-hidden", "true")
+    closed_width = _rect(layout)["width"]
+    button.click()
+    expect(button).to_have_attribute("aria-expanded", "true")
+    expect(drawer).to_have_attribute("aria-hidden", "false")
+    chromium_page.wait_for_timeout(400)
+    assert _rect(layout)["width"] < closed_width
+
+
+@pytest.mark.parametrize("delta_x", [9, 10, 49, 50])
+def test_delight_drag_and_switch_thresholds_in_chromium(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+    delta_x: int,
+) -> None:
+    base_url, _ = issue_98_server
+    _load_desktop_with_closed_drawer(chromium_page, base_url, width=1440)
+    banner = chromium_page.locator("#delightBanner")
+    count = chromium_page.locator("#delightCount")
+
+    if delta_x in {9, 10}:
+        _start_horizontal_drag(chromium_page, banner, -delta_x)
+        classes = (banner.get_attribute("class") or "").split()
+        if delta_x == 9:
+            assert "is-dragging" not in classes
+        else:
+            assert "is-dragging" in classes
+        chromium_page.mouse.up()
+    else:
+        _drag_horizontally(chromium_page, banner, -delta_x)
+
+    if delta_x < 50:
+        expect(count).to_have_text("1/2")
+    else:
+        expect(count).to_have_text("2/2")
+
+
+def test_delight_uses_available_layout_width_without_horizontal_overflow(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, _ = issue_98_server
+    _load_desktop_with_closed_drawer(chromium_page, base_url, width=860)
+
+    closed_geometry = _delight_geometry(chromium_page)
+    _assert_delight_fits_available_width(closed_geometry)
+
+    chromium_page.locator("#sideDrawerBtn").click()
+    chromium_page.wait_for_timeout(400)
+    open_geometry = _delight_geometry(chromium_page)
+    _assert_delight_fits_available_width(open_geometry)
+    assert len(str(open_geometry["columns"]).split()) == 1
+
+
+def test_delight_keeps_two_columns_when_wide_and_drawer_is_closed(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, _ = issue_98_server
+    _load_desktop_with_closed_drawer(chromium_page, base_url, width=1440)
+
+    geometry = _delight_geometry(chromium_page)
+    _assert_delight_fits_available_width(geometry)
+    tracks = str(geometry["columns"]).split()
+    assert len(tracks) == 2
+    assert all(track.endswith("px") for track in tracks)
 
 
 def test_recommendation_feedback_is_immediate_stable_and_undoable(
@@ -487,9 +637,7 @@ def test_delayed_recommendations_schedule_autoload_after_failed_runtime_reread(
     assert stub.append_received.wait(timeout=1.5), (
         "recommendation render did not re-check auto-load geometry"
     )
-    assert stub.append_posts == [
-        {"excluded_bvids": ["BV1ISSUE981", "BV1ISSUE982", "BV1ISSUE983"]}
-    ]
+    assert stub.append_posts == [{"excluded_bvids": ["BV1ISSUE981", "BV1ISSUE982", "BV1ISSUE983"]}]
 
 
 def test_recommendation_cover_requests_are_bounded_before_scroll(
