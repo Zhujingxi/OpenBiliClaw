@@ -7971,9 +7971,15 @@ class Database:
         ).fetchone()
         return dict(row) if row is not None else None
 
-    def owns_extension_native_save_job(self, job_id: str, platform_slug: str) -> bool:
-        """Return whether a durable job belongs to the exact source slug."""
+    def owns_extension_native_save_job(self, job_id: str, platform_slug: str | None = None) -> bool:
+        """Return global job ownership, optionally restricted to one exact slug."""
         safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
+        if platform_slug is None:
+            row = self.conn.execute(
+                "SELECT 1 FROM extension_native_save_jobs WHERE job_id = ?",
+                (safe_job_id,),
+            ).fetchone()
+            return row is not None
         safe_slug = self._validated_extension_native_save_slug(platform_slug)
         row = self.conn.execute(
             "SELECT 1 FROM extension_native_save_jobs WHERE job_id = ? AND platform_slug = ?",

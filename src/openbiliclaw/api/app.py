@@ -7665,7 +7665,7 @@ def create_app(
             "target_label": job.target_label,
         }
 
-    def _is_extension_native_job(task_id: str, slug: str) -> bool:
+    def _is_extension_native_job(task_id: str, slug: str | None = None) -> bool:
         broker = getattr(ctx, "extension_native_save_broker", None)
         return bool(broker is not None and broker.owns(task_id, slug))
 
@@ -7760,7 +7760,9 @@ def create_app(
         task_id = str(payload.get("task_id", "") or "").strip()
         if not task_id:
             raise HTTPException(status_code=422, detail="task_id is required")
-        if _is_extension_native_job(task_id, "xhs"):
+        if _is_extension_native_job(task_id):
+            if not _is_extension_native_job(task_id, "xhs"):
+                raise HTTPException(status_code=409, detail="task_result_conflict")
             return _submit_extension_native_result("xhs", payload)
 
         status = payload.get("status", "")
@@ -8559,7 +8561,9 @@ def create_app(
         task_id = str(payload.get("task_id", "") or "").strip()
         if not task_id:
             raise HTTPException(status_code=422, detail="task_id is required")
-        if _is_extension_native_job(task_id, "dy"):
+        if _is_extension_native_job(task_id):
+            if not _is_extension_native_job(task_id, "dy"):
+                raise HTTPException(status_code=409, detail="task_result_conflict")
             return _submit_extension_native_result("dy", payload)
 
         status = payload.get("status", "")
@@ -8674,6 +8678,8 @@ def create_app(
         task_id = str(payload.get("task_id", "") or "").strip()
         if not task_id:
             raise HTTPException(status_code=422, detail="task_id is required")
+        if not _is_extension_native_job(task_id):
+            raise HTTPException(status_code=409, detail="task_result_conflict")
         if not _is_extension_native_job(task_id, "x"):
             raise HTTPException(status_code=409, detail="task_result_conflict")
         return _submit_extension_native_result("x", payload)
@@ -8733,7 +8739,9 @@ def create_app(
         task_id = str(payload.get("task_id", "") or "").strip()
         if not task_id:
             raise HTTPException(status_code=422, detail="task_id is required")
-        if _is_extension_native_job(task_id, "reddit"):
+        if _is_extension_native_job(task_id):
+            if not _is_extension_native_job(task_id, "reddit"):
+                raise HTTPException(status_code=409, detail="task_result_conflict")
             return _submit_extension_native_result("reddit", payload)
 
         status = str(payload.get("status", "") or "").strip()
@@ -8808,7 +8816,9 @@ def create_app(
         task_id = str(payload.get("task_id", "") or "").strip()
         if not task_id:
             raise HTTPException(status_code=422, detail="task_id is required")
-        if _is_extension_native_job(task_id, "zhihu"):
+        if _is_extension_native_job(task_id):
+            if not _is_extension_native_job(task_id, "zhihu"):
+                raise HTTPException(status_code=409, detail="task_result_conflict")
             return _submit_extension_native_result("zhihu", payload)
 
         status = str(payload.get("status", "") or "").strip()
@@ -8911,7 +8921,9 @@ def create_app(
         task_id = str(payload.get("task_id", "") or "").strip()
         if not task_id:
             raise HTTPException(status_code=422, detail="task_id is required")
-        if _is_extension_native_job(task_id, "yt"):
+        if _is_extension_native_job(task_id):
+            if not _is_extension_native_job(task_id, "yt"):
+                raise HTTPException(status_code=409, detail="task_result_conflict")
             return _submit_extension_native_result("yt", payload)
 
         status = payload.get("status", "")

@@ -323,6 +323,42 @@ def test_native_result_cannot_complete_job_through_wrong_source(
     assert row["status"] == "in_progress"
 
 
+def test_cross_slug_native_legacy_uuid_collision_mutates_neither_row(
+    client: TestClient,
+    broker: ExtensionNativeSaveBroker,
+    database: Database,
+) -> None:
+    job_id = enqueue_native_job(broker, "reddit")
+    claimed = broker.claim_next("reddit")
+    assert claimed is not None
+    database.conn.execute(
+        "INSERT INTO xhs_tasks (id, type, payload_json) VALUES (?, 'search', '{}')",
+        (job_id,),
+    )
+    database.conn.commit()
+
+    response = client.post(
+        "/api/sources/xhs/task-result",
+        json={
+            "task_id": job_id,
+            "item_key": claimed.item_key,
+            "status": "ok",
+            "notes": [],
+        },
+    )
+
+    assert response.status_code == 409
+    native_row = database.get_extension_native_save_job(job_id)
+    legacy_row = database.conn.execute(
+        "SELECT status, result_json FROM xhs_tasks WHERE id = ?", (job_id,)
+    ).fetchone()
+    assert native_row is not None
+    assert native_row["status"] == "in_progress"
+    assert legacy_row is not None
+    assert legacy_row["status"] == "pending"
+    assert legacy_row["result_json"] is None
+
+
 @pytest.mark.parametrize(
     ("slug", "legacy_collection"),
     [
@@ -377,7 +413,7 @@ def test_kick_publishes_exact_source_event(
 def test_native_save_source_api_is_documented() -> None:
     required = {
         "docs/modules/runtime.md": "extension_native_save_broker",
-        "docs/modules/saved-sync.md": "type: native_save",
+        "docs/modules/saved-sync.md": "global native ownership",
         "docs/modules/init.md": "legacy discovery/bootstrap queues",
         "docs/modules/api-auth.md": "six state-changing GET `/next-task`",
         "docs/architecture.md": "/api/sources/{xhs,dy,yt,x,zhihu,reddit}",

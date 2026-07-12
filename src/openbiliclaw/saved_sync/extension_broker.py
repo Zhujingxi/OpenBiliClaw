@@ -131,8 +131,8 @@ class ExtensionNativeSaveBroker:
         )
         return self._job_from_row(row) if row is not None else None
 
-    def owns(self, task_id: str, platform_slug: str) -> bool:
-        """Return whether ``task_id`` belongs to the exact slug in any state."""
+    def owns(self, task_id: str, platform_slug: str | None = None) -> bool:
+        """Return global ownership, optionally restricted to one exact slug."""
         try:
             return self._database.owns_extension_native_save_job(task_id, platform_slug)
         except ValueError:

@@ -187,6 +187,7 @@ def test_broker_ownership_and_completion_are_bound_to_platform_slug(
     job_id = str(job["job_id"])
     result = ExtensionNativeSaveResultIn(job_id, "reddit:t3_abc", "synced")
 
+    assert broker.owns(job_id)
     assert broker.owns(job_id, "reddit")
     assert not broker.owns(job_id, "x")
     assert not broker.submit_result("x", result)
