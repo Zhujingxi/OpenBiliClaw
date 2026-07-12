@@ -8,7 +8,7 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 2. **外部集成层** — OpenClaw adapter / skill wrappers / 本地 API / Codex CLI 凭据导入等对外接入边界
 3. **Agent 核心层** — 自研编排器 + Soul Engine + Discovery Engine + Recommendation Engine + Skill System
 4. **多源适配层（v0.3.0+）** — `SourceAdapter` 协议下的 B 站 / 小红书 / 抖音 / YouTube / X (Twitter) / 知乎 / Reddit / 通用 Web 源
-5. **保存同步编排层（API/runtime + B 站 adapter + 三个图形化保存界面 + CLI 配置可见）** — canonical saved identity + normalized membership / native state + `/api/saved/*` + capability router + local-first `SavedSyncService` + `BilibiliNativeSaveAdapter`；`ExtensionNativeSaveBroker -> extension_native_save_jobs -> /api/sources/{xhs,dy,yt,x,zhihu,reddit}` 已接 source task multiplex 与稳定 RuntimeContext 注入点，但生产 adapter 注册和扩展 executor 仍属后续任务；插件、移动 Web 与桌面 Web 共享 `item_key`，以 bounded request、retained list、per-key mutation fence、reload task recovery / item ownership 和 visibility-aware durable tracker 呈现同步状态；CLI 只通过 `config-show` 展示自动同步配置，不提供保存 / 同步动作命令
+5. **保存同步编排层（API/runtime + B 站 adapter + 三个图形化保存界面 + CLI 配置可见）** — canonical saved identity + normalized membership / native state + `/api/saved/*` + capability router + local-first `SavedSyncService` + `BilibiliNativeSaveAdapter`；六平台扩展保存 adapter 已按能力/目标矩阵注册，经稳定的 `ExtensionNativeSaveBroker -> extension_native_save_jobs -> /api/sources/{xhs,dy,yt,x,zhihu,reddit}` source task multiplex 入队；历史 `unsupported_adapter_missing` 行可重新同步，但真正的 `unsupported_content_type` 保持终态。扩展 executor 尚未实现，当前不能宣称平台账号写入已闭环；插件、移动 Web 与桌面 Web 共享 `item_key`，以 bounded request、retained list、per-key mutation fence、reload task recovery / item ownership 和 visibility-aware durable tracker 呈现同步状态；CLI 只通过 `config-show` 展示自动同步配置，不提供保存 / 同步动作命令
 6. **多层网状记忆存储** — Core / Episodic / Semantic / Working Memory（SQLite + 向量索引 + JSON）
 
 详见 [项目 Spec](spec.md) 中的架构图。模块级可视化图放在 `docs/diagrams/`：
@@ -34,8 +34,8 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 ### Saved Sync (`saved_sync/`)
 - `NativeSaveRouter` 根据 adapter capability 确定 favorite / watch-later 路由；watch-later 仅在平台不支持原生动作且支持 favorite 时回退
 - `SavedSyncService` 在任何平台 I/O 前提交本地 membership；每次自动 / 手动触发都在独立 `native_save_tasks` / `native_save_task_items` ledger 留下 durable UUID 快照，再对其中 live 项执行同步
-- `ExtensionNativeSaveBroker` 已提供六个非 B 站平台的 sanitized job foundation：canonical item/route 经 allow-listed URL 清洗后进入独立 `extension_native_save_jobs`，active row 原子复用；pending dispatch 超时持久化 `extension_required`，claimed lease 超时固定失败且不重放。FastAPI exact source endpoints 先查 broker，再保留原 discovery/bootstrap queue；owned result 不会 fall through。生产 adapter 注册与扩展 executor 尚未连接
-- 同平台逐项串行、不同平台组可并行；未注册能力写 `unsupported`，adapter 异常写安全的 `failed`，均不回滚本地保存或自动重试
+- `ExtensionNativeSaveBroker` 已提供六个非 B 站平台的 sanitized job foundation：canonical item/route 经 allow-listed URL 清洗后进入独立 `extension_native_save_jobs`，active row 原子复用；pending dispatch 超时持久化 `extension_required`，claimed lease 超时固定失败且不重放。FastAPI exact source endpoints 先查 broker，再保留原 discovery/bootstrap queue；owned result 不会 fall through。六平台 production adapter 与 broker 已注册，扩展 executor 尚未实现
+- 同平台逐项串行、不同平台组可并行；路由缺失写 `unsupported/unsupported_adapter_missing` 并可在 adapter 到位后重试，平台返回的 `unsupported_content_type` 仍是 local-only 终态；adapter 异常写安全的 `failed`，均不回滚本地保存
 - `BilibiliNativeSaveAdapter` 是首个生产 adapter：favorite 精确复用/创建 `OpenBiliClaw`（仅同一个 client 实例/title 在锁内重查并单飞，不覆盖跨 client/process），watch-later 写 B 站稍后再看；BV → aid 先走 application-aware GET 并要求非 bool 正整数，`BilibiliAPIClient` 在任何请求前校验 `SESSDATA + bili_jct`；GET/POST HTTP 412/429 共用脱敏映射，favorite duplicate 由 resource-deal 专项异常标记而非 adapter action 猜测
 - `/api/saved/{list_kind}` 提供严格 canonical save/list/remove/status/sync，`/api/saved-sync/tasks/{uuid}` 从 task ledger 轮询逐项结果；零项已知任务返回 200、未知 UUID 返回 404，缺失 membership 固定返回 `failed/not_saved_locally`，旧 B 站端点只做 local-only 兼容
 - `RuntimeContext` 在 B 站 client 热重载时先取消 registry inflight，再原子重建 router/service；registry 只拥有顶层 sync runner，service-owned heartbeat/save/watchdog 自行保留到 I/O 结束；插件 side panel、桌面 Web、移动 Web 和 CLI 配置输出已经接入同一默认关闭配置与状态契约
@@ -85,7 +85,7 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 
 ### Recommendation Engine (`recommendation/`)
 - 推荐排序与朋友式推荐表达生成；统一从候选池读取
-- 推荐、delight 与保存列表出口共享 `item_key / content_id / source_platform / content_url / content_type` 身份契约；`content_cache.item_key` 唯一索引并由 `recommendations.item_key` 引用。插件 side panel、桌面 Web 与移动 Web 的卡片先 POST `/api/saved/{list_kind}`，保存页再用 `/sync` + durable task poll 做显式平台写入；默认关闭的 `saved_sync.auto_sync_enabled` 只决定本地保存后是否创建后台任务。手动同步对当前 adapter 支持且未处于已同步 / 同步中的项始终可用；后端终态 `unsupported` 在三端明确显示为仅本地保存，不再进入单项或批量同步资格。本地 `/remove` 永不反向删除平台记录。`/api/recommendation-click` 会保留跨源字段：插件、移动 Web 或桌面 Web 打开推荐内容后，后端把点击写成对应来源的统一事件和 `recommendation_click` 强画像信号；只传 `recommendation_id` 时会从 `recommendations + content_cache` 回填，避免 YouTube / 抖音等内部键被套成 B 站 URL。
+- 推荐、delight 与保存列表出口共享 `item_key / content_id / source_platform / content_url / content_type` 身份契约；`content_cache.item_key` 唯一索引并由 `recommendations.item_key` 引用。插件 side panel、桌面 Web 与移动 Web 的卡片先 POST `/api/saved/{list_kind}`，保存页再用 `/sync` + durable task poll 做显式平台写入；默认关闭的 `saved_sync.auto_sync_enabled` 只决定本地保存后是否创建后台任务。手动同步对当前 adapter 支持且未处于已同步 / 同步中的项始终可用；仅 `unsupported_adapter_missing` 可在 adapter 注册后重新进入单项/批量快照，`unsupported_content_type` 等真实能力限制继续显示为仅本地保存。本地 `/remove` 永不反向删除平台记录。`/api/recommendation-click` 会保留跨源字段：插件、移动 Web 或桌面 Web 打开推荐内容后，后端把点击写成对应来源的统一事件和 `recommendation_click` 强画像信号；只传 `recommendation_id` 时会从 `recommendations + content_cache` 回填，避免 YouTube / 抖音等内部键被套成 B 站 URL。
 - `PoolCurator` 五维评分（relevance · freshness · topic_fatigue · source_monotony · serendipity）
 - v0.3.1 双轴 fatigue：`recent_topic_keys` (细) + `recent_topic_groups` (粗) 取 max；曲线 `count^1.5/len*5`，count=2 即触发 0.47 强抑制
 - 新兴趣 amplification guard：刚确认的探针兴趣会用 domain/specific/topic key 形成 guard，`PoolCurator` 做 24h rolling budget 软降权，最终批选择做 `max(1, floor(limit*0.25))` 硬上限

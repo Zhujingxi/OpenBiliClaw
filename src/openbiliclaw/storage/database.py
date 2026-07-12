@@ -7803,6 +7803,50 @@ class Database:
         except Exception:
             self.conn.rollback()
             raise
+        self.migrate_legacy_native_save_unsupported()
+
+    def migrate_legacy_native_save_unsupported(self) -> int:
+        """Mark only pre-adapter unsupported rows for the six extension sources."""
+        migration_name = "extension_adapter_missing_unsupported_v1"
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            migrated = conn.execute(
+                "SELECT 1 FROM saved_sync_migrations WHERE name = ?",
+                (migration_name,),
+            ).fetchone()
+            if migrated is not None:
+                conn.commit()
+                return 0
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET last_error_code = 'unsupported_adapter_missing',
+                    last_error_message =
+                        'Native save adapter was unavailable; retry is now supported'
+                WHERE status = 'unsupported'
+                  AND last_error_code IN ('', 'unsupported')
+                  AND item_key IN (
+                      SELECT item_key
+                      FROM saved_items
+                      WHERE source_platform IN (
+                          'youtube', 'xiaohongshu', 'douyin',
+                          'twitter', 'zhihu', 'reddit'
+                      )
+                  )
+                """
+            )
+            conn.execute(
+                "INSERT INTO saved_sync_migrations (name) VALUES (?)",
+                (migration_name,),
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def create_or_reuse_extension_native_save_job(
         self, job: ExtensionNativeSaveJob
@@ -8711,6 +8755,10 @@ class Database:
                               'login_required', 'rate_limited',
                               'extension_required', 'failed'
                           )
+                          OR (
+                              n.status = 'unsupported'
+                              AND n.last_error_code = 'unsupported_adapter_missing'
+                          )
                       )
                     ORDER BY m.added_at DESC, m.item_key ASC
                     """,
@@ -8757,6 +8805,10 @@ class Database:
                         row["status"] is None
                         or (current_status == "pending" and not current_task_id)
                         or current_status in retryable_statuses
+                        or (
+                            current_status == "unsupported"
+                            and error_code == "unsupported_adapter_missing"
+                        )
                     )
                     if eligible:
                         status = "pending"
@@ -9501,6 +9553,10 @@ class Database:
                   OR n.status IN (
                       'login_required', 'rate_limited',
                       'extension_required', 'failed'
+                  )
+                  OR (
+                      n.status = 'unsupported'
+                      AND n.last_error_code = 'unsupported_adapter_missing'
                   )
               )
             """

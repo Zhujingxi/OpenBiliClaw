@@ -1292,4 +1292,20 @@ async def test_unregistered_platform_is_persisted_as_unsupported(db: Database) -
     result = await service.run_sync_task(task.task_id)
 
     assert result.items[0].status == "unsupported"
+    assert result.items[0].error_code == "unsupported_adapter_missing"
     assert service.get_sync_task(task.task_id) == result
+
+
+async def test_missing_adapter_unsupported_row_can_be_retried_explicitly(
+    db: Database,
+) -> None:
+    service = SavedSyncService(db, NativeSaveRouter())
+    item = SavedItemInput("youtube", "video-retry")
+    service.save_local("favorite", item)
+    first = service.create_sync_task("favorite", [item.item_key], "manual_single")
+    await service.run_sync_task(first.task_id)
+
+    retry = service.create_sync_task("favorite", [item.item_key], "manual_single")
+
+    assert retry.items[0].status == "pending"
+    assert retry.items[0].error_code == ""

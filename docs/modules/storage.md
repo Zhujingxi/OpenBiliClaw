@@ -17,7 +17,7 @@
 |------|------|------|
 | SQLite schema 初始化 | ✅ | `Database.initialize()` 自动创建核心表和索引，支持旧库增量补列 / 补索引。 |
 | 规范化保存存储 | ✅ | `saved_items` 以 canonical key 保存跨平台元数据快照，`saved_memberships` 独立表达收藏 / 稍后看归属，`native_save_states` 持久化当前逐项同步状态；`native_save_tasks` / `native_save_task_items` 独立持久化每次请求的 UUID、不可变成员集合和 task-scoped 结果。旧 `watch_later` / `favorites` 由带 marker 的单次事务迁移导入。 |
-| 扩展原生保存 job ledger | ✅（基础设施） | `extension_native_save_jobs` 保存脱敏后的六平台扩展任务；partial unique index 保证 `(platform, item_key, requested_action)` 只有一个 pending/in-progress row。claim、exact slug ownership、correlated completion、pending cancellation/extension-required 与 stale claim failure 均有 status fence。 |
+| 扩展原生保存 job ledger 与旧状态迁移 | ✅ | `extension_native_save_jobs` 保存脱敏后的六平台扩展任务；partial unique index 保证 `(platform, item_key, requested_action)` 只有一个 pending/in-progress row。命名迁移只把六个 canonical 平台的旧 `unsupported`/空 error code 改为 `unsupported_adapter_missing`，绝不改 Bilibili、未知平台或 `unsupported_content_type`。 |
 | 推荐链路 canonical identity | ✅ | `content_cache.item_key` 唯一索引、`recommendations.item_key` 普通索引；初始化按平台 + raw `content_id` 回填旧行，并在建唯一索引前确定性合并 canonical 重复行（优先 canonical storage key、填补非空元数据、重定向 recommendation 引用）。若 loser 仍被旧 `watch_later` / `favorites` 引用，consolidation 会先为真实 legacy schema 补 additive `item_key` 并写入 canonical key；后续 normalized saved migration 在 exact `bvid` 不存在时用该稳定键 join keeper，既保留 membership，也不绕过 Task 2 的单次 marker / no-resurrection 语义。B 站 `bvid` 主键保持 raw BV 兼容，非 B 站 `bvid` 存储键使用 namespaced identity，API 继续从独立字段输出 raw ID 与 authoritative URL。 |
 | 推荐池 readiness 计数 | ✅ | `count_pool_readiness()` 返回 `available/raw/pending/pending_eval/evaluated_pending`，供 runtime status 和补货判断使用。 |
 | 来源 raw material 统计 | ✅ | `count_pool_raw_material_by_source()` 合并 `content_cache` raw rows 和 `discovery_candidates` 待评估候选，供 raw ceiling headroom 使用。 |
@@ -88,7 +88,7 @@ removed = db.remove_saved_membership("favorite", item.item_key)
 - 初始化只在 `saved_sync_migrations` 缺少 `legacy_saved_tables_v1` 时迁移旧表。迁移用当时的 `content_cache` 恢复平台、内容 ID 与元数据；身份字段不完整时按兼容语义回落 `bilibili:<legacy bvid>`。解析出的 canonical key 同时写入旧 `watch_later.item_key` / `favorites.item_key`，之后的状态和删除不再依赖可变或可清理的 `content_cache`。marker 在两个列表都复制成功后写入，避免已删除的 normalized membership 下次启动复活；`legacy_saved_item_keys_v2` 只为此前已迁移数据库补稳定关联，不重新导入 membership。
 - 旧 `add/remove/list/count/status` Bilibili wrappers 继续维护兼容表及其 stable `item_key` link，但用户可见读取以 normalized membership 为准。状态 / 移除 wrapper 会优先匹配 Bilibili key，否则只在裸 `content_id` 唯一对应一个 normalized membership 时解析跨平台 key；移除时按旧行已持久化的 `item_key` 同步清理迁移来源行。多个非 Bilibili 平台共享该裸 ID 时状态返回 `False`、移除也返回 `False`，不删除任何一侧。
 - 平台 adapter、platform-neutral HTTP API，以及插件 side panel / 桌面 Web / 移动 Web
-  保存与同步 UI 已接入同一 normalized store。当前只有 Bilibili 注册真实账号写入 adapter；
+  保存与同步 UI 已接入同一 normalized store。Bilibili 保持 direct adapter，六平台已注册 extension-backed adapter；
   其它来源的本地 membership 仍可正常保存、列出和删除，手动同步会返回稳定
   `unsupported`，直到各平台后续计划实现对应 adapter。
 

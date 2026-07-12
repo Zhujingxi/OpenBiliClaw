@@ -64,3 +64,17 @@ def test_saved_sync_docs_name_default_and_routes() -> None:
     for diagram_doc in (architecture_doc, spec_doc, readme, readme_en):
         assert "ExtensionNativeSaveBroker" in diagram_doc
         assert "extension_native_save_jobs" in diagram_doc
+
+
+def test_saved_sync_docs_register_extension_adapters_without_claiming_executor() -> None:
+    architecture = Path("docs/architecture.md").read_text(encoding="utf-8")
+    spec = Path("docs/spec.md").read_text(encoding="utf-8")
+    module = Path("docs/modules/saved-sync.md").read_text(encoding="utf-8")
+    changelog = Path("docs/changelog.md").read_text(encoding="utf-8")
+    readme = Path("README.md").read_text(encoding="utf-8")
+    readme_en = Path("README_EN.md").read_text(encoding="utf-8")
+
+    for text in (architecture, spec, module, changelog, readme, readme_en):
+        assert "unsupported_adapter_missing" in text
+    assert "六平台扩展保存 adapter" in architecture
+    assert "扩展 executor 尚未实现" in architecture

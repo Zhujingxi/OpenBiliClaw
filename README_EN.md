@@ -593,7 +593,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 ├─────────┴──────────┴───────────┴───────────────┤
 │ LLM / source adapters · /api/saved/* · router · Bilibili native save │
 │ Canonical ID · Local-first sync · Task poll · SQLite (events · pool · recs · saved/tasks)│
-│ ExtensionNativeSaveBroker → jobs → six-platform source task multiplex (production execution pending)│
+│ Six adapters → ExtensionNativeSaveBroker → extension_native_save_jobs → six-platform source task multiplex (unsupported_adapter_missing retryable; executor pending)│
 └────────────────────────────────────────────────┘
 ```
 

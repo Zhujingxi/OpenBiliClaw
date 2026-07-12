@@ -10,6 +10,7 @@ required.
   - ``database`` — owns the SQLite connection
   - ``memory_manager`` — owns file-backed memory layers
   - ``event_hub`` — holds live WebSocket subscriber queues
+  - ``extension_native_save_broker`` — owns durable extension save jobs
   - ``presence`` — tracks shared extension runtime-stream presence
 
 **Swappable components** (rebuilt on hot-reload):
@@ -289,14 +290,34 @@ class RuntimeContext:
 
     def __post_init__(self) -> None:
         """Provide local-only saved-list behavior for injected/degraded contexts."""
-        if self.saved_sync_service is not None or self.database is None:
+        if self.database is None:
             return
+        from openbiliclaw.saved_sync.adapters.extension import (
+            build_extension_native_save_adapters,
+        )
+        from openbiliclaw.saved_sync.extension_broker import ExtensionNativeSaveBroker
         from openbiliclaw.saved_sync.router import NativeSaveRouter
         from openbiliclaw.saved_sync.service import SavedSyncService
 
+        if self.extension_native_save_broker is None:
+
+            async def wake_platform(platform_slug: str) -> None:
+                publish = getattr(self.event_hub, "publish", None)
+                if callable(publish):
+                    with suppress(Exception):
+                        await publish({"type": f"{platform_slug}_task_available"})
+
+            self.extension_native_save_broker = ExtensionNativeSaveBroker(
+                self.database,
+                wake_platform=wake_platform,
+            )
+        if self.saved_sync_service is not None:
+            return
         self.saved_sync_service = SavedSyncService(
             self.database,
-            NativeSaveRouter(),
+            NativeSaveRouter(
+                build_extension_native_save_adapters(self.extension_native_save_broker)
+            ),
             task_starter=lambda name, coro: self.task_registry.track(name, coro),
         )
 
@@ -395,6 +416,9 @@ class RuntimeContext:
         from openbiliclaw.runtime.refresh import ContinuousRefreshController
         from openbiliclaw.runtime.updater import AutoUpdateService
         from openbiliclaw.saved_sync.adapters.bilibili import BilibiliNativeSaveAdapter
+        from openbiliclaw.saved_sync.adapters.extension import (
+            build_extension_native_save_adapters,
+        )
         from openbiliclaw.saved_sync.router import NativeSaveRouter
         from openbiliclaw.saved_sync.service import SavedSyncService
         from openbiliclaw.soul.dialogue import SocraticDialogue
@@ -423,7 +447,12 @@ class RuntimeContext:
         )
         new_saved_sync_service = SavedSyncService(
             self.database,
-            NativeSaveRouter([BilibiliNativeSaveAdapter(new_bilibili_client)]),
+            NativeSaveRouter(
+                (
+                    *build_extension_native_save_adapters(self.extension_native_save_broker),
+                    BilibiliNativeSaveAdapter(new_bilibili_client),
+                )
+            ),
             task_starter=lambda name, coro: self.task_registry.track(name, coro),
         )
 

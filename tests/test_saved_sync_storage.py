@@ -158,6 +158,74 @@ def test_eligible_view_excludes_pending_rows_owned_by_a_task(db: Database) -> No
     assert db.list_native_sync_eligible("favorite", [item.item_key]) == []
 
 
+def test_legacy_adapter_missing_unsupported_migration_is_narrow_and_idempotent(
+    db: Database,
+) -> None:
+    platforms_and_codes = [
+        ("youtube", "unsupported"),
+        ("xiaohongshu", ""),
+        ("douyin", "unsupported_content_type"),
+        ("bilibili", "unsupported"),
+        ("unknown", "unsupported"),
+    ]
+    for index, (platform, error_code) in enumerate(platforms_and_codes):
+        item = SavedItemInput(platform, f"legacy-{index}")
+        db.upsert_saved_membership("favorite", item)
+        db.upsert_native_save_state(
+            "favorite",
+            item.item_key,
+            requested_action="favorite",
+            resolved_action="favorite",
+            resolved_target="",
+            status="unsupported",
+            last_error_code=error_code,
+        )
+    db.conn.execute(
+        "DELETE FROM saved_sync_migrations WHERE name = ?",
+        ("extension_adapter_missing_unsupported_v1",),
+    )
+    db.conn.commit()
+
+    assert db.migrate_legacy_native_save_unsupported() == 2
+    assert db.migrate_legacy_native_save_unsupported() == 0
+
+    rows = {row["source_platform"]: row for row in db.list_saved_memberships("favorite", limit=20)}
+    assert rows["youtube"]["last_error_code"] == "unsupported_adapter_missing"
+    assert rows["xiaohongshu"]["last_error_code"] == "unsupported_adapter_missing"
+    assert rows["douyin"]["last_error_code"] == "unsupported_content_type"
+    assert rows["bilibili"]["last_error_code"] == "unsupported"
+    assert rows["unknown"]["last_error_code"] == "unsupported"
+
+
+def test_only_adapter_missing_unsupported_is_snapshot_eligible(db: Database) -> None:
+    missing = SavedItemInput("youtube", "missing-adapter")
+    content_type = SavedItemInput("youtube", "bad-content-type")
+    for item, error_code in (
+        (missing, "unsupported_adapter_missing"),
+        (content_type, "unsupported_content_type"),
+    ):
+        db.upsert_saved_membership("favorite", item)
+        db.upsert_native_save_state(
+            "favorite",
+            item.item_key,
+            requested_action="favorite",
+            resolved_action="favorite",
+            resolved_target="",
+            status="unsupported",
+            last_error_code=error_code,
+        )
+
+    bulk = db.create_native_sync_task_snapshot("favorite", None, "bulk-missing", "manual_bulk")
+    explicit_terminal = db.create_native_sync_task_snapshot(
+        "favorite", [content_type.item_key], "explicit-content", "manual_single"
+    )
+
+    assert [row["item_key"] for row in bulk] == [missing.item_key]
+    assert bulk[0]["status"] == "pending"
+    assert explicit_terminal[0]["status"] == "unsupported"
+    assert explicit_terminal[0]["is_live"] == 0
+
+
 def test_live_legacy_runner_migration_is_reserved_until_task_lease_stales(
     db: Database,
 ) -> None:

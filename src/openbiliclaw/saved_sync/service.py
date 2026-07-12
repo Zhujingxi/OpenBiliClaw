@@ -295,7 +295,7 @@ class SavedSyncService:
                     status="unsupported",
                     resolved_action=requested_action,
                     resolved_target="",
-                    error_code="unsupported",
+                    error_code="unsupported_adapter_missing",
                     error_message="Native save is unsupported for this platform or action",
                 ),
                 task_id=task_id,

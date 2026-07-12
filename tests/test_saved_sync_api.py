@@ -4,6 +4,7 @@ import asyncio
 import uuid
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -937,6 +938,7 @@ async def test_runtime_context_rebuilds_tracked_bilibili_saved_sync_service(
     context = build_runtime_context(config)
     first_service = context.saved_sync_service
     first_client = context.bilibili_client
+    first_broker = context.extension_native_save_broker
 
     local = first_service.save_local(
         "favorite",
@@ -965,3 +967,39 @@ async def test_runtime_context_rebuilds_tracked_bilibili_saved_sync_service(
 
     assert context.saved_sync_service is not first_service
     assert context.bilibili_client is not first_client
+    assert context.extension_native_save_broker is first_broker
+    bilibili_adapter, _ = context.saved_sync_service._router.route("bilibili", "favorite")
+    assert bilibili_adapter.__class__.__name__ == "BilibiliNativeSaveAdapter"
+    extension_adapter, _ = context.saved_sync_service._router.route("youtube", "favorite")
+    assert extension_adapter.capability.requires_extension is True
+
+
+async def test_local_runtime_registers_extension_adapters_without_event_hub(
+    tmp_path: Path,
+) -> None:
+    from openbiliclaw.api.runtime_context import RuntimeContext
+
+    database = Database(tmp_path / "local-extension.db")
+    database.initialize()
+
+    context = RuntimeContext(database=database)
+
+    adapter, route = context.saved_sync_service._router.route("twitter", "watch_later")
+    assert context.extension_native_save_broker is not None
+    assert adapter.capability.requires_extension is True
+    assert route.resolved_action == "favorite"
+
+
+async def test_runtime_broker_wake_publishes_source_task_available_best_effort(
+    tmp_path: Path,
+) -> None:
+    from openbiliclaw.api.runtime_context import RuntimeContext
+
+    database = Database(tmp_path / "wake-extension.db")
+    database.initialize()
+    event_hub = SimpleNamespace(publish=AsyncMock())
+    context = RuntimeContext(database=database, event_hub=event_hub)
+
+    await context.extension_native_save_broker._wake_platform("yt")
+
+    event_hub.publish.assert_awaited_once_with({"type": "yt_task_available"})
