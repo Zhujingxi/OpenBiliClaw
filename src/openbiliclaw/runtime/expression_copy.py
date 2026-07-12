@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
-from contextlib import suppress
 from typing import Any
 
 
@@ -195,5 +194,9 @@ class ExpressionCopyCoordinator:
             return
         if not task.done():
             task.cancel()
-        with suppress(asyncio.CancelledError):
+        try:
             await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            self.last_error = str(exc)

@@ -246,6 +246,28 @@ async def test_stop_cancels_running_callback() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stop_consumes_already_failed_callback_without_raising() -> None:
+    pending = _Pending(8)
+    failed = asyncio.Event()
+
+    async def drain(_limit: int) -> int:
+        failed.set()
+        raise RuntimeError("provider exploded")
+
+    coordinator = _coordinator(pending, drain)
+    collector = asyncio.create_task(coordinator.run_forever())
+    coordinator.notify("start")
+    await failed.wait()
+
+    await coordinator.stop()
+    await collector
+
+    status = coordinator.status_payload()
+    assert status["expression_batch_state"] == "stopping"
+    assert status["expression_last_error"] == "provider exploded"
+
+
+@pytest.mark.asyncio
 async def test_stale_generation_notification_cannot_wake_replacement() -> None:
     old_pending = _Pending(0)
     new_pending = _Pending(0)
