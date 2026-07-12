@@ -18,7 +18,7 @@ from openbiliclaw.recommendation.delight import DEFAULT_DELIGHT_THRESHOLD
 from openbiliclaw.runtime.events import RuntimeEventHub
 from openbiliclaw.runtime.presence import PresenceTracker
 from openbiliclaw.runtime.refresh import ContinuousRefreshController
-from openbiliclaw.storage.database import Database
+from openbiliclaw.storage.database import Database, PoolMaintenanceResult
 
 from .test_search_strategy import _build_profile
 
@@ -130,6 +130,8 @@ class _FakeDatabase:
         self.trim_overflow_source_share_quotas: dict[str, int] | None = None
         self.reactivate_source_share_quotas: dict[str, int] | None = None
         self.reactivate_raw_source_share_quotas: dict[str, int] | None = None
+        self.maintenance_calls: list[dict[str, object]] = []
+        self.legacy_maintenance_calls = 0
         self.distribution_counts: dict[str, dict[str, int]] = {
             "topic_group": {"科技": 3},
             "style_key": {"deep_dive": 2},
@@ -196,9 +198,11 @@ class _FakeDatabase:
         return {axis: dict(counts) for axis, counts in self.distribution_counts.items()}
 
     def trim_explore_cluster_overflow(self, *, max_per_cluster: int = 3) -> int:
+        self.legacy_maintenance_calls += 1
         return 0
 
     def trim_topic_group_overflow(self, *, max_per_group: int) -> int:
+        self.legacy_maintenance_calls += 1
         return 0
 
     def reactivate_under_quota_pool_sources(
@@ -208,6 +212,7 @@ class _FakeDatabase:
         source_share_quotas: dict[str, int],
         raw_source_share_quotas: dict[str, int] | None = None,
     ) -> int:
+        self.legacy_maintenance_calls += 1
         self.reactivate_source_share_quotas = dict(source_share_quotas)
         self.reactivate_raw_source_share_quotas = (
             dict(raw_source_share_quotas) if raw_source_share_quotas is not None else None
@@ -225,6 +230,7 @@ class _FakeDatabase:
         target: int,
         source_share_quotas: dict[str, int] | None = None,
     ) -> int:
+        self.legacy_maintenance_calls += 1
         self.trim_target = target
         self.trim_source_share_quotas = (
             dict(source_share_quotas) if source_share_quotas is not None else None
@@ -240,11 +246,64 @@ class _FakeDatabase:
         return trimmed
 
     def trim_pool_source_overflow(self, *, source_share_quotas: dict[str, int]) -> int:
+        self.legacy_maintenance_calls += 1
         self.trim_overflow_source_share_quotas = dict(source_share_quotas)
         return 0
 
     def evict_stale_pool_items(self, *, max_age_days: int = 14) -> int:
+        self.legacy_maintenance_calls += 1
         return 0
+
+    def maintain_pool_inventory(
+        self,
+        *,
+        target: int,
+        raw_ceiling: int,
+        source_share_quotas: dict[str, int],
+        raw_source_share_quotas: dict[str, int] | None = None,
+        max_per_topic_group: int = 3,
+        max_per_explore_cluster: int = 3,
+        stale_max_age_days: int = 14,
+        xhs_self_nickname: str = "",
+    ) -> PoolMaintenanceResult:
+        self.maintenance_calls.append(
+            {
+                "target": target,
+                "raw_ceiling": raw_ceiling,
+                "source_share_quotas": dict(source_share_quotas),
+                "raw_source_share_quotas": dict(raw_source_share_quotas or {}),
+                "max_per_topic_group": max_per_topic_group,
+                "max_per_explore_cluster": max_per_explore_cluster,
+                "stale_max_age_days": stale_max_age_days,
+                "xhs_self_nickname": xhs_self_nickname,
+            }
+        )
+        raw_before = self.pool_count if self.pool_raw_count is None else self.pool_raw_count
+        raw_after = min(raw_before, raw_ceiling)
+        if self.pool_raw_count is not None:
+            self.pool_raw_count = raw_after
+        return PoolMaintenanceResult(
+            available_before=self.pool_count,
+            available_after=self.pool_count,
+            target=target,
+            protected_available=min(self.pool_count, target),
+            recovered_suppressed=0,
+            trimmed_stale=0,
+            trimmed_explore_cluster=0,
+            trimmed_ready_reserve=0,
+            trimmed_evaluated=0,
+            trimmed_raw=max(0, raw_before - raw_after),
+            trimmed_by_source={},
+            deferred_topic_trim=0,
+            deferred_source_trim=0,
+            deferred_stale_trim=0,
+            deferred_explore_cluster_trim=0,
+            raw_before=raw_before,
+            raw_after=raw_after,
+            raw_ceiling=raw_ceiling,
+            untrimmed_raw_excess=0,
+            rolled_back=False,
+        )
 
     def get_delight_candidate(
         self,
@@ -2641,7 +2700,7 @@ async def test_refresh_skips_discovery_when_available_pool_is_at_target_floor() 
 
     assert result["reason"] == "pool_at_cap"
     assert database.pool_count == 50
-    assert database.trim_target == 150
+    assert database.maintenance_calls[0]["raw_ceiling"] == 150
 
 
 def test_source_target_counts_use_platform_default_shares() -> None:
@@ -3432,12 +3491,41 @@ def test_pool_cap_total_trim_receives_raw_ceiling_source_quotas() -> None:
     )
 
     assert controller._enforce_pool_cap() is True
-    assert database.trim_target == 1200
-    assert database.trim_source_share_quotas is not None
-    assert database.trim_source_share_quotas["bilibili"] == 960
-    assert database.trim_source_share_quotas["xiaohongshu"] == 120
-    assert database.trim_source_share_quotas["douyin"] == 120
+    call = database.maintenance_calls[0]
+    assert call["raw_ceiling"] == 1200
+    assert call["raw_source_share_quotas"] == {
+        "bilibili": 960,
+        "xiaohongshu": 120,
+        "douyin": 120,
+    }
     assert database.pool_raw_count == 1200
+
+
+def test_pool_cap_uses_one_atomic_maintenance_entry_point() -> None:
+    database = _FakeDatabase([], pool_count=20, pool_raw_count=70)
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        pool_target_count=30,
+    )
+
+    assert controller._enforce_pool_cap() is False
+    assert database.legacy_maintenance_calls == 0
+    assert database.maintenance_calls == [
+        {
+            "target": 30,
+            "raw_ceiling": 150,
+            "source_share_quotas": {"bilibili": 30},
+            "raw_source_share_quotas": {"bilibili": 150},
+            "max_per_topic_group": 3,
+            "max_per_explore_cluster": 3,
+            "stale_max_age_days": 14,
+            "xhs_self_nickname": "",
+        }
+    ]
 
 
 def test_pool_cap_skips_platform_overflow_when_ready_pool_below_target() -> None:
@@ -3456,7 +3544,7 @@ def test_pool_cap_skips_platform_overflow_when_ready_pool_below_target() -> None
     assert database.trim_overflow_source_share_quotas is None
 
 
-def test_pool_cap_reactivates_under_quota_sources_before_trim() -> None:
+def test_pool_cap_does_not_compose_legacy_reactivation_before_maintenance() -> None:
     database = _FakeDatabase([], pool_count=600, reactivate_pool_count=20)
     controller = ContinuousRefreshController(
         memory_manager=_FakeMemoryManager(),
@@ -3469,17 +3557,14 @@ def test_pool_cap_reactivates_under_quota_sources_before_trim() -> None:
     )
 
     assert controller._enforce_pool_cap() is True
-    assert database.reactivate_source_share_quotas is not None
-    assert database.reactivate_source_share_quotas["bilibili"] == 480
-    assert database.reactivate_source_share_quotas["xiaohongshu"] == 60
-    assert database.reactivate_source_share_quotas["douyin"] == 60
-    assert database.reactivate_raw_source_share_quotas is not None
-    assert database.reactivate_raw_source_share_quotas["bilibili"] == 960
-    assert database.reactivate_raw_source_share_quotas["xiaohongshu"] == 120
-    assert database.reactivate_raw_source_share_quotas["douyin"] == 120
-    assert database.trim_source_share_quotas is not None
-    assert database.trim_source_share_quotas["bilibili"] == 960
-    assert database.pool_count == 620
+    assert database.legacy_maintenance_calls == 0
+    assert database.reactivate_source_share_quotas is None
+    assert database.maintenance_calls[0]["source_share_quotas"] == {
+        "bilibili": 480,
+        "xiaohongshu": 60,
+        "douyin": 60,
+    }
+    assert database.pool_count == 600
 
 
 async def test_run_refresh_plan_enforces_raw_ceiling_when_discovery_overshoots() -> None:

@@ -1590,11 +1590,20 @@ def test_pipeline_target_zero_still_bounds_enqueued_candidates(tmp_path: Path) -
 
     enqueued = pipeline.enqueue_candidates(items, source_context="search")
 
-    count = db.conn.execute(
-        "SELECT COUNT(*) FROM discovery_candidates WHERE source_platform='xiaohongshu'"
-    ).fetchone()[0]
+    rows = db.conn.execute(
+        """
+        SELECT status, eval_error
+        FROM discovery_candidates
+        WHERE source_platform='xiaohongshu'
+        """
+    ).fetchall()
     assert enqueued == 605
-    assert count == 600
+    assert len(rows) == 605
+    assert sum(row["status"] == "pending_eval" for row in rows) == 600
+    assert sum(row["status"] == "trimmed_capacity" for row in rows) == 5
+    assert {row["eval_error"] for row in rows if row["status"] == "trimmed_capacity"} == {
+        "source_raw_ceiling:xiaohongshu"
+    }
 
 
 @pytest.mark.asyncio

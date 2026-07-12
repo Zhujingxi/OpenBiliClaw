@@ -16,6 +16,7 @@ import statistics
 import time
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, urlparse
@@ -59,6 +60,57 @@ if TYPE_CHECKING:
     from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PoolMaintenanceResult:
+    """Observable outcome of one atomic recommendation-pool maintenance pass."""
+
+    available_before: int
+    available_after: int
+    target: int
+    protected_available: int
+    recovered_suppressed: int
+    trimmed_stale: int
+    trimmed_explore_cluster: int
+    trimmed_ready_reserve: int
+    trimmed_evaluated: int
+    trimmed_raw: int
+    trimmed_by_source: dict[str, int]
+    deferred_topic_trim: int
+    deferred_source_trim: int
+    deferred_stale_trim: int
+    deferred_explore_cluster_trim: int
+    raw_before: int
+    raw_after: int
+    raw_ceiling: int
+    untrimmed_raw_excess: int
+    rolled_back: bool
+    reason: str = ""
+
+    @property
+    def at_target(self) -> bool:
+        return self.available_after >= self.target
+
+
+class PoolMaintenanceInvariantError(RuntimeError):
+    """Raised when a maintenance transaction would violate availability."""
+
+
+@dataclass(frozen=True)
+class _ContentTrimPlan:
+    victim_bvids: tuple[str, ...] = ()
+    deferred: int = 0
+
+
+@dataclass(frozen=True)
+class _RawTrimPlan:
+    content_bvids: tuple[str, ...] = ()
+    candidate_ids: tuple[int, ...] = ()
+    candidate_statuses: tuple[tuple[int, str], ...] = ()
+    untrimmed_excess: int = 0
+
+
 # v0.3.62+: retry budget tightened from 5×100ms (worst-case 500ms
 # blocking the asyncio event loop on lock contention) to 8×20ms
 # (worst-case 160ms). Same total absolute timeout floor (~160-500ms)
@@ -1969,11 +2021,11 @@ class Database:
         source_platform: str,
         max_pending: int,
     ) -> int:
-        """Drop oldest candidate rows for one source over a queue cap.
+        """Terminalize unclaimed active rows over one source's queue cap.
 
-        In-flight ``evaluating`` rows are never deleted. Terminal rows are
-        trimmed before pending/evaluated rows so active raw material is kept
-        whenever possible.
+        Terminal history does not consume the cap. Token-owned and
+        ``evaluating`` rows remain untouched; victims retain an auditable row
+        with ``status='trimmed_capacity'``.
         """
 
         source = str(source_platform or "").strip()
@@ -1986,6 +2038,7 @@ class Database:
             SELECT COUNT(*) AS count
             FROM discovery_candidates
             WHERE source_platform = ?
+              AND status IN ('pending_eval', 'evaluating', 'evaluated')
             """,
             (source,),
         ).fetchone()
@@ -1993,33 +2046,30 @@ class Database:
         excess = current - cap
         if excess <= 0:
             return 0
+        family = _pool_source_family("", source)
         cursor = self._execute_write(
             """
-            DELETE FROM discovery_candidates
+            UPDATE discovery_candidates
+            SET status = 'trimmed_capacity',
+                eval_error = ?,
+                claimed_at = NULL,
+                claim_token = NULL
             WHERE id IN (
                 SELECT id
                 FROM discovery_candidates
                 WHERE source_platform = ?
-                  AND status != 'evaluating'
+                  AND status IN ('pending_eval', 'evaluated')
+                  AND claim_token IS NULL
                 ORDER BY
-                    CASE
-                        WHEN status IN (
-                            'cached',
-                            'rejected_low_score',
-                            'rejected_duplicate',
-                            'rejected_cache_admission',
-                            'rejected_recently_viewed',
-                            'rejected_franchise_quota',
-                            'failed_eval'
-                        ) THEN 0
-                        ELSE 1
-                    END ASC,
+                    CASE status WHEN 'pending_eval' THEN 0 ELSE 1 END ASC,
                     last_seen_at ASC,
                     id ASC
                 LIMIT ?
             )
+              AND status IN ('pending_eval', 'evaluated')
+              AND claim_token IS NULL
             """,
-            (source, excess),
+            (f"source_raw_ceiling:{family}", source, excess),
         )
         return int(cursor.rowcount)
 
@@ -2964,25 +3014,40 @@ class Database:
     def _load_available_pool_candidate_rows(
         self, *, max_per_topic_group: int = 3, xhs_self_nickname: str = ""
     ) -> list[dict[str, Any]]:
+        """Load rows counted by the frontend-visible pool availability gate."""
+        self._ensure_fresh_read()
+        return self._load_available_pool_candidate_rows_on(
+            self.conn,
+            max_per_topic_group=max_per_topic_group,
+            xhs_self_nickname=xhs_self_nickname,
+        )
+
+    def _load_available_pool_candidate_rows_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        max_per_topic_group: int = 3,
+        xhs_self_nickname: str = "",
+    ) -> list[dict[str, Any]]:
         """Load rows counted by the frontend-visible pool availability gate.
 
         Applies the delight claim guard like ``get_pool_candidates`` so
         the availability count never includes surprise-channel rows serve()
         would refuse to load.
         """
-        self._ensure_fresh_read()
         admission_sql, admission_params = self._pool_admission_sql()
         guard_sql = _xhs_self_author_guard_sql()
         guard_params = _xhs_self_author_guard_params(xhs_self_nickname)
-        delight_threshold = self.dynamic_delight_threshold(
-            default_threshold=_DELIGHT_CLAIM_MIN_SCORE
+        delight_threshold = self._dynamic_delight_threshold_on(
+            conn, default_threshold=_DELIGHT_CLAIM_MIN_SCORE
         )
         delight_guard_sql = _delight_claim_guard_sql()
         if max_per_topic_group > 0:
-            cursor = self.conn.execute(
+            cursor = conn.execute(
                 f"""
                 WITH ranked AS (
                     SELECT bvid, source, source_platform, content_url,
+                           candidate_tier, relevance_score, last_scored_at, view_count,
                            ROW_NUMBER() OVER (
                                PARTITION BY topic_group
                                ORDER BY
@@ -3011,16 +3076,24 @@ class Database:
                         WHERE r.bvid = content_cache.bvid
                       )
                 )
-                SELECT bvid, source, source_platform, content_url
+                SELECT bvid, source, source_platform, content_url,
+                       candidate_tier, relevance_score, last_scored_at, view_count
                 FROM ranked
                 WHERE group_rank <= ?
+                ORDER BY
+                    CASE candidate_tier WHEN 'primary' THEN 0 ELSE 1 END ASC,
+                    relevance_score DESC,
+                    last_scored_at DESC,
+                    view_count DESC,
+                    bvid ASC
                 """,
                 (*admission_params, *guard_params, delight_threshold, max_per_topic_group),
             )
         else:
-            cursor = self.conn.execute(
+            cursor = conn.execute(
                 f"""
-                SELECT bvid, source, source_platform, content_url
+                SELECT bvid, source, source_platform, content_url,
+                       candidate_tier, relevance_score, last_scored_at, view_count
                 FROM content_cache
                 WHERE COALESCE(pool_status, 'fresh') = 'fresh'
                   AND COALESCE(feedback_type, '') != 'dislike'
@@ -3040,10 +3113,16 @@ class Database:
                     FROM recommendations AS r
                     WHERE r.bvid = content_cache.bvid
                   )
+                ORDER BY
+                    CASE candidate_tier WHEN 'primary' THEN 0 ELSE 1 END ASC,
+                    relevance_score DESC,
+                    last_scored_at DESC,
+                    view_count DESC,
+                    bvid ASC
                 """,
                 (*admission_params, *guard_params, delight_threshold),
             )
-        viewed_content_keys = self.get_recent_viewed_content_keys()
+        viewed_content_keys = self._recent_viewed_content_keys_on(conn)
         rows: list[dict[str, Any]] = []
         for row in cursor.fetchall():
             row_dict = dict(row)
@@ -3077,8 +3156,15 @@ class Database:
     def _load_pool_raw_material_rows(self) -> list[dict[str, Any]]:
         """Load raw fresh material rows governed by the raw ceiling."""
         self._ensure_fresh_read()
+        return self._load_pool_raw_material_rows_on(self.conn)
+
+    def _load_pool_raw_material_rows_on(
+        self,
+        conn: sqlite3.Connection,
+    ) -> list[dict[str, Any]]:
+        """Connection-aware raw content-cache rows governed by the ceiling."""
         admission_sql, admission_params = self._pool_admission_sql()
-        cursor = self.conn.execute(
+        cursor = conn.execute(
             f"""
             SELECT
                 bvid,
@@ -3101,7 +3187,7 @@ class Database:
             """,
             admission_params,
         )
-        viewed_content_keys = self.get_recent_viewed_content_keys()
+        viewed_content_keys = self._recent_viewed_content_keys_on(conn)
         rows: list[dict[str, Any]] = []
         for row in cursor.fetchall():
             row_dict = dict(row)
@@ -3117,6 +3203,16 @@ class Database:
         return (
             len(self._load_pool_raw_material_rows()) + self._count_pending_discovery_raw_material()
         )
+
+    def _count_pool_raw_material_on(self, conn: sqlite3.Connection) -> int:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM discovery_candidates
+            WHERE status IN ('pending_eval', 'evaluating', 'evaluated')
+            """
+        ).fetchone()
+        return len(self._load_pool_raw_material_rows_on(conn)) + int(row["count"] if row else 0)
 
     def count_pool_raw_material_by_source(self) -> dict[str, int]:
         """Return raw fresh material grouped by source family.
@@ -3564,6 +3660,533 @@ class Database:
             key=lambda g: (-group_count[g], -group_max_score.get(g, 0.0), g),
         )
         return [(group, by_group[group]) for group in ranked[:top_n_groups]]
+
+    @staticmethod
+    def _clean_pool_quotas(quotas: Mapping[str, int]) -> dict[str, int]:
+        clean: dict[str, int] = {}
+        for source, quota in quotas.items():
+            try:
+                clean[_pool_source_family("", source)] = max(0, int(quota))
+            except (TypeError, ValueError):
+                continue
+        return clean
+
+    def _plan_stale_trim_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        protected_ids: set[str],
+        max_age_days: int,
+    ) -> _ContentTrimPlan:
+        rows = conn.execute(
+            """
+            SELECT bvid
+            FROM content_cache
+            WHERE COALESCE(pool_status, 'fresh') = 'fresh'
+              AND discovered_at < datetime('now', '-' || ? || ' days')
+              AND NOT EXISTS (
+                SELECT 1 FROM recommendations AS r WHERE r.bvid = content_cache.bvid
+              )
+            ORDER BY discovered_at ASC, bvid ASC
+            """,
+            (max_age_days,),
+        ).fetchall()
+        stale_ids = [str(row["bvid"]) for row in rows]
+        return _ContentTrimPlan(
+            victim_bvids=tuple(bvid for bvid in stale_ids if bvid not in protected_ids),
+            deferred=sum(bvid in protected_ids for bvid in stale_ids),
+        )
+
+    def _plan_explore_cluster_trim_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        protected_ids: set[str],
+        max_per_cluster: int,
+    ) -> _ContentTrimPlan:
+        admission_sql, admission_params = self._pool_admission_sql()
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT bvid, title, topic_key, relevance_score, last_scored_at
+                FROM content_cache
+                WHERE COALESCE(pool_status, 'fresh') = 'fresh'
+                  AND COALESCE(feedback_type, '') != 'dislike'
+                  AND {admission_sql}
+                  AND COALESCE(source, '') = 'explore'
+                """,
+                admission_params,
+            ).fetchall()
+        ]
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            cluster = self._explore_risk_cluster(row)
+            if cluster:
+                grouped[cluster].append(row)
+        victims: list[str] = []
+        deferred = 0
+        cap = max(0, max_per_cluster)
+        for items in grouped.values():
+            protected = [row for row in items if str(row["bvid"]) in protected_ids]
+            deferred += max(0, len(protected) - cap)
+            remaining = max(0, cap - len(protected))
+            unprotected = sorted(
+                (row for row in items if str(row["bvid"]) not in protected_ids),
+                key=lambda row: (
+                    -float(row.get("relevance_score", 0.0) or 0.0),
+                    -self._sort_timestamp_score(str(row.get("last_scored_at", ""))),
+                    str(row.get("bvid", "")),
+                ),
+            )
+            victims.extend(str(row["bvid"]) for row in unprotected[remaining:])
+        return _ContentTrimPlan(tuple(victims), deferred)
+
+    def _plan_topic_trim_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        protected_ids: set[str],
+        max_per_topic_group: int,
+    ) -> _ContentTrimPlan:
+        if max_per_topic_group <= 0:
+            return _ContentTrimPlan()
+        admission_sql, admission_params = self._pool_admission_sql()
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT bvid, source, source_platform, content_url, topic_group,
+                       relevance_score, last_scored_at, pool_expression,
+                       pool_topic_label, style_key
+                FROM content_cache
+                WHERE COALESCE(pool_status, 'fresh') = 'fresh'
+                  AND COALESCE(feedback_type, '') != 'dislike'
+                  AND {admission_sql}
+                  AND COALESCE(topic_group, '') != ''
+                  AND NOT EXISTS (
+                    SELECT 1 FROM recommendations AS r WHERE r.bvid = content_cache.bvid
+                  )
+                """,
+                admission_params,
+            ).fetchall()
+        ]
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            if not self._content_is_ready_reserve(row):
+                continue
+            grouped[str(row["topic_group"]).strip().lower()].append(row)
+        victims: list[str] = []
+        deferred = 0
+        for items in grouped.values():
+            protected = [row for row in items if str(row["bvid"]) in protected_ids]
+            deferred += max(0, len(protected) - max_per_topic_group)
+            remaining = max(0, max_per_topic_group - len(protected))
+            unprotected = sorted(
+                (row for row in items if str(row["bvid"]) not in protected_ids),
+                key=lambda row: (
+                    -float(row.get("relevance_score", 0.0) or 0.0),
+                    -self._sort_timestamp_score(str(row.get("last_scored_at", ""))),
+                    str(row.get("bvid", "")),
+                ),
+            )
+            victims.extend(str(row["bvid"]) for row in unprotected[remaining:])
+        return _ContentTrimPlan(tuple(victims), deferred)
+
+    def _plan_source_trim_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        protected_ids: set[str],
+        source_share_quotas: Mapping[str, int],
+    ) -> _ContentTrimPlan:
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in self._load_pool_raw_material_rows_on(conn):
+            if not self._content_is_ready_reserve(row):
+                continue
+            grouped[_pool_source_family(row["source"], row["source_platform"])].append(row)
+        victims: list[str] = []
+        deferred = 0
+        for family, quota in source_share_quotas.items():
+            items = grouped.get(family, [])
+            protected = [row for row in items if str(row["bvid"]) in protected_ids]
+            deferred += max(0, len(protected) - quota)
+            remaining = max(0, quota - len(protected))
+            unprotected = sorted(
+                (row for row in items if str(row["bvid"]) not in protected_ids),
+                key=self._pool_trim_keep_key,
+            )
+            victims.extend(str(row["bvid"]) for row in unprotected[remaining:])
+        return _ContentTrimPlan(tuple(victims), deferred)
+
+    @staticmethod
+    def _content_is_ready_reserve(row: Mapping[str, Any]) -> bool:
+        return all(
+            str(row.get(field, "") or "").strip()
+            for field in ("pool_expression", "pool_topic_label", "style_key", "topic_group")
+        ) and _is_linkable_pool_source(
+            row.get("source"),
+            row.get("source_platform"),
+            row.get("content_url"),
+        )
+
+    def _raw_victim_key(
+        self,
+        row: Mapping[str, Any],
+        *,
+        family_counts: Mapping[str, int],
+        quotas: Mapping[str, int],
+        candidate: bool = False,
+    ) -> tuple[int, float, float, int, str]:
+        source = row.get("source_strategy" if candidate else "source", "")
+        family = _pool_source_family(source, row.get("source_platform", ""))
+        quota = quotas.get(family)
+        over_quota = quota is not None and family_counts.get(family, 0) > quota
+        timestamp = row.get("last_seen_at" if candidate else "last_scored_at", "")
+        stable_id = row.get("id" if candidate else "bvid", "")
+        return (
+            0 if over_quota else 1,
+            float(row.get("relevance_score", 0.0) or 0.0),
+            self._sort_timestamp_score(str(timestamp or "")),
+            0 if str(source or "").strip().lower() == "explore" else 1,
+            str(stable_id),
+        )
+
+    def _plan_raw_trim_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        protected_ids: set[str],
+        raw_ceiling: int,
+        raw_source_share_quotas: Mapping[str, int],
+    ) -> _RawTrimPlan:
+        content_rows = self._load_pool_raw_material_rows_on(conn)
+        candidate_rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT id, status, source_platform, source_strategy,
+                       relevance_score, last_seen_at, claim_token
+                FROM discovery_candidates
+                WHERE status IN ('pending_eval', 'evaluating', 'evaluated')
+                """
+            ).fetchall()
+        ]
+        raw_count = len(content_rows) + len(candidate_rows)
+        excess = max(0, raw_count - raw_ceiling)
+        if excess <= 0:
+            return _RawTrimPlan()
+
+        family_counts: dict[str, int] = defaultdict(int)
+        for row in content_rows:
+            family_counts[_pool_source_family(row["source"], row["source_platform"])] += 1
+        for row in candidate_rows:
+            family_counts[_pool_source_family(row["source_strategy"], row["source_platform"])] += 1
+
+        unprotected_content = [row for row in content_rows if str(row["bvid"]) not in protected_ids]
+        unready = sorted(
+            (row for row in unprotected_content if not self._content_is_ready_reserve(row)),
+            key=lambda row: self._raw_victim_key(
+                row,
+                family_counts=family_counts,
+                quotas=raw_source_share_quotas,
+            ),
+        )
+        pending = sorted(
+            (
+                row
+                for row in candidate_rows
+                if row["status"] == "pending_eval" and row["claim_token"] is None
+            ),
+            key=lambda row: self._raw_victim_key(
+                row,
+                family_counts=family_counts,
+                quotas=raw_source_share_quotas,
+                candidate=True,
+            ),
+        )
+        evaluated = sorted(
+            (
+                row
+                for row in candidate_rows
+                if row["status"] == "evaluated" and row["claim_token"] is None
+            ),
+            key=lambda row: self._raw_victim_key(
+                row,
+                family_counts=family_counts,
+                quotas=raw_source_share_quotas,
+                candidate=True,
+            ),
+        )
+        ready_reserve = sorted(
+            (row for row in unprotected_content if self._content_is_ready_reserve(row)),
+            key=lambda row: self._raw_victim_key(
+                row,
+                family_counts=family_counts,
+                quotas=raw_source_share_quotas,
+            ),
+        )
+        ordered: list[tuple[str, dict[str, Any]]] = [
+            *(("content", row) for row in unready),
+            *(("candidate", row) for row in pending),
+            *(("candidate", row) for row in evaluated),
+            *(("content", row) for row in ready_reserve),
+        ]
+        selected = ordered[:excess]
+        content_ids = tuple(str(row["bvid"]) for kind, row in selected if kind == "content")
+        candidate_statuses = tuple(
+            (int(row["id"]), str(row["status"])) for kind, row in selected if kind == "candidate"
+        )
+        return _RawTrimPlan(
+            content_bvids=content_ids,
+            candidate_ids=tuple(candidate_id for candidate_id, _ in candidate_statuses),
+            candidate_statuses=candidate_statuses,
+            untrimmed_excess=max(0, excess - len(selected)),
+        )
+
+    @staticmethod
+    def _apply_content_status_on(
+        conn: sqlite3.Connection,
+        bvids: Sequence[str],
+        *,
+        status: str,
+    ) -> int:
+        if not bvids:
+            return 0
+        placeholders = ", ".join("?" for _ in bvids)
+        cursor = conn.execute(
+            f"""
+            UPDATE content_cache
+            SET pool_status = ?
+            WHERE bvid IN ({placeholders})
+              AND COALESCE(pool_status, 'fresh') = 'fresh'
+            """,
+            (status, *bvids),
+        )
+        return int(cursor.rowcount)
+
+    def _apply_content_suppression_on(
+        self,
+        conn: sqlite3.Connection,
+        bvids: Sequence[str],
+    ) -> int:
+        return self._apply_content_status_on(conn, bvids, status="suppressed")
+
+    def _apply_raw_trim_on(self, conn: sqlite3.Connection, plan: _RawTrimPlan) -> None:
+        self._apply_content_suppression_on(conn, plan.content_bvids)
+        if not plan.candidate_ids:
+            return
+        placeholders = ", ".join("?" for _ in plan.candidate_ids)
+        conn.execute(
+            f"""
+            UPDATE discovery_candidates
+            SET status = 'trimmed_capacity',
+                eval_error = ?,
+                claimed_at = NULL,
+                claim_token = NULL
+            WHERE id IN ({placeholders})
+              AND status IN ('pending_eval', 'evaluated')
+              AND claim_token IS NULL
+            """,
+            ("pool_raw_ceiling", *plan.candidate_ids),
+        )
+
+    @staticmethod
+    def _validate_pool_maintenance_invariant(
+        *,
+        available_before: int,
+        available_after: int,
+        target: int,
+    ) -> None:
+        minimum = min(available_before, target)
+        if available_after < minimum:
+            raise PoolMaintenanceInvariantError(
+                f"available inventory fell below protected floor: "
+                f"before={available_before} after={available_after} target={target}"
+            )
+
+    def maintain_pool_inventory(
+        self,
+        *,
+        target: int,
+        raw_ceiling: int,
+        source_share_quotas: Mapping[str, int],
+        raw_source_share_quotas: Mapping[str, int] | None = None,
+        max_per_topic_group: int = 3,
+        max_per_explore_cluster: int = 3,
+        stale_max_age_days: int = 14,
+        xhs_self_nickname: str = "",
+    ) -> PoolMaintenanceResult:
+        """Maintain pool diversity and raw capacity in one short transaction."""
+        clean_target = max(0, int(target))
+        clean_raw_ceiling = max(0, int(raw_ceiling))
+        clean_topic_cap = max(0, int(max_per_topic_group))
+        clean_explore_cap = max(0, int(max_per_explore_cluster))
+        clean_stale_days = max(0, int(stale_max_age_days))
+        clean_source_quotas = self._clean_pool_quotas(source_share_quotas)
+        clean_raw_source_quotas = self._clean_pool_quotas(
+            raw_source_share_quotas or source_share_quotas
+        )
+        conn = self.open_connection()
+        available_before = 0
+        raw_before = 0
+        protected_ids: set[str] = set()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            before_rows = self._load_available_pool_candidate_rows_on(
+                conn,
+                xhs_self_nickname=xhs_self_nickname,
+            )
+            available_before = len(before_rows)
+            protected_ids = {
+                str(row["bvid"]) for row in before_rows[: min(len(before_rows), clean_target)]
+            }
+            raw_before = self._count_pool_raw_material_on(conn)
+            initial_raw_rows = {
+                str(row["bvid"]): row for row in self._load_pool_raw_material_rows_on(conn)
+            }
+
+            stale_plan = self._plan_stale_trim_on(
+                conn,
+                protected_ids=protected_ids,
+                max_age_days=clean_stale_days,
+            )
+            explore_plan = self._plan_explore_cluster_trim_on(
+                conn,
+                protected_ids=protected_ids,
+                max_per_cluster=clean_explore_cap,
+            )
+            topic_plan = self._plan_topic_trim_on(
+                conn,
+                protected_ids=protected_ids,
+                max_per_topic_group=clean_topic_cap,
+            )
+            source_plan = self._plan_source_trim_on(
+                conn,
+                protected_ids=protected_ids,
+                source_share_quotas=clean_source_quotas,
+            )
+
+            stale_ids = set(stale_plan.victim_bvids)
+            explore_ids = set(explore_plan.victim_bvids) - stale_ids
+            topic_ids = set(topic_plan.victim_bvids) - stale_ids - explore_ids
+            source_ids = set(source_plan.victim_bvids) - stale_ids - explore_ids - topic_ids
+            self._apply_content_status_on(conn, sorted(stale_ids), status="stale")
+            self._apply_content_suppression_on(conn, sorted(explore_ids))
+            self._apply_content_suppression_on(conn, sorted(topic_ids))
+            self._apply_content_suppression_on(conn, sorted(source_ids))
+
+            raw_plan = self._plan_raw_trim_on(
+                conn,
+                protected_ids=protected_ids,
+                raw_ceiling=clean_raw_ceiling,
+                raw_source_share_quotas=clean_raw_source_quotas,
+            )
+            self._apply_raw_trim_on(conn, raw_plan)
+            after_rows = self._load_available_pool_candidate_rows_on(
+                conn,
+                xhs_self_nickname=xhs_self_nickname,
+            )
+            raw_after = self._count_pool_raw_material_on(conn)
+            self._validate_pool_maintenance_invariant(
+                available_before=available_before,
+                available_after=len(after_rows),
+                target=clean_target,
+            )
+
+            all_content_victims = (
+                stale_ids | explore_ids | topic_ids | source_ids | set(raw_plan.content_bvids)
+            )
+            candidate_statuses = dict(raw_plan.candidate_statuses)
+            trimmed_ready_reserve = sum(
+                self._content_is_ready_reserve(initial_raw_rows[bvid])
+                for bvid in all_content_victims
+                if bvid in initial_raw_rows
+            )
+            trimmed_raw = sum(
+                not self._content_is_ready_reserve(initial_raw_rows[bvid])
+                for bvid in all_content_victims
+                if bvid in initial_raw_rows
+            ) + sum(status == "pending_eval" for status in candidate_statuses.values())
+            trimmed_evaluated = sum(status == "evaluated" for status in candidate_statuses.values())
+            trimmed_by_source: dict[str, int] = defaultdict(int)
+            for bvid in all_content_victims:
+                row = initial_raw_rows.get(bvid)
+                if row is not None:
+                    trimmed_by_source[
+                        _pool_source_family(row["source"], row["source_platform"])
+                    ] += 1
+            if raw_plan.candidate_ids:
+                placeholders = ", ".join("?" for _ in raw_plan.candidate_ids)
+                for row in conn.execute(
+                    f"""
+                    SELECT source_platform, source_strategy
+                    FROM discovery_candidates
+                    WHERE id IN ({placeholders})
+                    """,
+                    raw_plan.candidate_ids,
+                ).fetchall():
+                    trimmed_by_source[
+                        _pool_source_family(row["source_strategy"], row["source_platform"])
+                    ] += 1
+
+            result = PoolMaintenanceResult(
+                available_before=available_before,
+                available_after=len(after_rows),
+                target=clean_target,
+                protected_available=len(protected_ids),
+                recovered_suppressed=0,
+                trimmed_stale=len(stale_ids),
+                trimmed_explore_cluster=len(explore_ids),
+                trimmed_ready_reserve=trimmed_ready_reserve,
+                trimmed_evaluated=trimmed_evaluated,
+                trimmed_raw=trimmed_raw,
+                trimmed_by_source=dict(trimmed_by_source),
+                deferred_topic_trim=topic_plan.deferred,
+                deferred_source_trim=source_plan.deferred,
+                deferred_stale_trim=stale_plan.deferred,
+                deferred_explore_cluster_trim=explore_plan.deferred,
+                raw_before=raw_before,
+                raw_after=raw_after,
+                raw_ceiling=clean_raw_ceiling,
+                untrimmed_raw_excess=raw_plan.untrimmed_excess,
+                rolled_back=False,
+            )
+            conn.commit()
+            if result.untrimmed_raw_excess > 0:
+                logger.error(
+                    "pool maintenance retained protected/token-owned raw excess: %s",
+                    result.untrimmed_raw_excess,
+                )
+            return result
+        except Exception as exc:
+            conn.rollback()
+            logger.error("pool maintenance rolled back: %s", exc)
+            return PoolMaintenanceResult(
+                available_before=available_before,
+                available_after=available_before,
+                target=clean_target,
+                protected_available=len(protected_ids),
+                recovered_suppressed=0,
+                trimmed_stale=0,
+                trimmed_explore_cluster=0,
+                trimmed_ready_reserve=0,
+                trimmed_evaluated=0,
+                trimmed_raw=0,
+                trimmed_by_source={},
+                deferred_topic_trim=0,
+                deferred_source_trim=0,
+                deferred_stale_trim=0,
+                deferred_explore_cluster_trim=0,
+                raw_before=raw_before,
+                raw_after=raw_before,
+                raw_ceiling=clean_raw_ceiling,
+                untrimmed_raw_excess=max(0, raw_before - clean_raw_ceiling),
+                rolled_back=True,
+                reason=str(exc),
+            )
+        finally:
+            conn.close()
 
     def trim_explore_cluster_overflow(self, *, max_per_cluster: int = 3) -> int:
         """Suppress excess fresh explore items from high-risk topic clusters."""
@@ -4062,7 +4685,16 @@ class Database:
         Keys are source-aware (``source_platform:content_id``) and include
         raw BVIDs for legacy Bilibili callers.
         """
-        cursor = self.conn.execute(
+        return self._recent_viewed_content_keys_on(self.conn, limit=limit)
+
+    def _recent_viewed_content_keys_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        limit: int = 2000,
+    ) -> set[str]:
+        """Connection-aware recent viewed identity extraction."""
+        cursor = conn.execute(
             """
             SELECT url, metadata
             FROM events
@@ -7932,14 +8564,26 @@ class Database:
         too homogeneous for a meaningful percentile, the caller-provided
         default is returned unchanged.
         """
+        self._ensure_fresh_read()
+        return self._dynamic_delight_threshold_on(
+            self.conn,
+            default_threshold=default_threshold,
+        )
+
+    def _dynamic_delight_threshold_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        default_threshold: float,
+    ) -> float:
+        """Connection-aware dynamic delight threshold calculation."""
         try:
             floor = float(default_threshold)
         except (TypeError, ValueError):
             floor = _DELIGHT_CLAIM_MIN_SCORE
         floor = min(1.0, max(0.0, floor))
 
-        self._ensure_fresh_read()
-        cursor = self.conn.execute(
+        cursor = conn.execute(
             """
             SELECT COALESCE(delight_score, 0.0) AS score
             FROM content_cache

@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from openbiliclaw.runtime.task_registry import BackgroundTaskRegistry
+    from openbiliclaw.storage.database import PoolMaintenanceResult
 
 logger = logging.getLogger(__name__)
 
@@ -172,23 +173,18 @@ class SupportsEventDatabase(Protocol):
     def count_pool_raw_material_candidates(self) -> int: ...
     def count_pool_raw_material_by_source(self) -> dict[str, int]: ...
     def get_pool_distribution_counts(self) -> dict[str, dict[str, int]]: ...
-    def trim_explore_cluster_overflow(self, *, max_per_cluster: int = 3) -> int: ...
-    def trim_topic_group_overflow(self, *, max_per_group: int) -> int: ...
-    def trim_pool_to_target_count(
+    def maintain_pool_inventory(
         self,
         *,
         target: int,
-        source_share_quotas: dict[str, int] | None = None,
-    ) -> int: ...
-    def trim_pool_source_overflow(self, *, source_share_quotas: dict[str, int]) -> int: ...
-    def reactivate_under_quota_pool_sources(
-        self,
-        *,
-        target: int,
+        raw_ceiling: int,
         source_share_quotas: dict[str, int],
         raw_source_share_quotas: dict[str, int] | None = None,
-    ) -> int: ...
-    def evict_stale_pool_items(self, *, max_age_days: int = 14) -> int: ...
+        max_per_topic_group: int = 3,
+        max_per_explore_cluster: int = 3,
+        stale_max_age_days: int = 14,
+        xhs_self_nickname: str = "",
+    ) -> PoolMaintenanceResult: ...
     def iter_cover_lifecycle(self) -> list[tuple[str, str, bool]]: ...
     def iter_servable_cover_urls(
         self, *, recent_hours: int = 12, limit: int = 300
@@ -710,109 +706,59 @@ class ContinuousRefreshController:
         ``pool_target_count`` is a frontend-visible availability floor, not the
         raw material cap. Raw rows may exceed it until ``_raw_material_ceiling``.
         """
-        source_targets = self._source_target_counts()
-        raw_source_targets = self._raw_source_target_counts()
-
-        # Cross-source topic_group quota runs every tick, not just inside
-        # _run_refresh_plan: when pool sits at cap, refresh exits before
-        # discover, so the in-plan trim would never fire and pre-existing
-        # topic concentration would persist indefinitely. This call is a
-        # cheap SQL group-by + UPDATE, safe to run unconditionally.
-        try:
-            self.database.trim_topic_group_overflow(
-                max_per_group=max(3, self.pool_target_count // 10),
-            )
-        except Exception:
-            logger.exception("trim_topic_group_overflow failed")
-
-        reactivate_fn = getattr(self.database, "reactivate_under_quota_pool_sources", None)
-        if callable(reactivate_fn):
-            try:
-                reactivated = reactivate_fn(
-                    target=self.pool_target_count,
-                    source_share_quotas=source_targets,
-                    raw_source_share_quotas=raw_source_targets,
-                )
-                if reactivated > 0:
-                    # Demote to DEBUG when the count is identical to the
-                    # previous tick — pool sitting in steady-state with
-                    # the same N items reactivating each minute is noise,
-                    # not signal. INFO fires only when N changes (real
-                    # state transition: pool drained to refill, or new
-                    # source surge).
-                    last_reactivated = self._last_pool_maintenance_fingerprint[1]
-                    log_fn = logger.info if reactivated != last_reactivated else logger.debug
-                    log_fn(
-                        "enforce_pool_cap: reactivated=%s under-quota source items",
-                        reactivated,
-                    )
-                    self._last_pool_maintenance_fingerprint = (
-                        self._last_pool_maintenance_fingerprint[0],
-                        reactivated,
-                        self._last_pool_maintenance_fingerprint[2],
-                    )
-                    self.database.trim_topic_group_overflow(
-                        max_per_group=max(3, self.pool_target_count // 10),
-                    )
-            except Exception:
-                logger.exception("reactivate_under_quota_pool_sources failed")
-
-        pool_available = self.database.count_pool_candidates(
-            xhs_self_nickname=self._xhs_self_nickname()
-        )
-
-        trim_source_overflow_fn = getattr(self.database, "trim_pool_source_overflow", None)
-        if callable(trim_source_overflow_fn) and pool_available >= self.pool_target_count:
-            try:
-                source_overflow_suppressed = trim_source_overflow_fn(
-                    source_share_quotas=raw_source_targets,
-                )
-                if source_overflow_suppressed > 0:
-                    logger.info(
-                        "enforce_pool_cap: suppressed=%s over-quota source items",
-                        source_overflow_suppressed,
-                    )
-                    self.database.trim_topic_group_overflow(
-                        max_per_group=max(3, self.pool_target_count // 10),
-                    )
-            except Exception:
-                logger.exception("trim_pool_source_overflow failed")
-        elif callable(trim_source_overflow_fn):
-            logger.debug(
-                "enforce_pool_cap: skipped source overflow trim below target "
-                "pool_available=%s target=%s",
-                pool_available,
-                self.pool_target_count,
-            )
         raw_ceiling = self._raw_material_ceiling()
-        trimmed = 0
         try:
-            trimmed = self.database.trim_pool_to_target_count(
-                target=raw_ceiling,
-                source_share_quotas=raw_source_targets,
+            result = self.database.maintain_pool_inventory(
+                target=self.pool_target_count,
+                raw_ceiling=raw_ceiling,
+                source_share_quotas=self._source_target_counts(),
+                raw_source_share_quotas=self._raw_source_target_counts(),
+                max_per_topic_group=max(3, self.pool_target_count // 10),
+                max_per_explore_cluster=3,
+                stale_max_age_days=14,
+                xhs_self_nickname=self._xhs_self_nickname(),
             )
         except Exception:
-            logger.exception("trim_pool_to_target_count failed")
-        if trimmed > 0:
+            logger.exception("atomic pool maintenance failed")
             pool_available = self.database.count_pool_candidates(
                 xhs_self_nickname=self._xhs_self_nickname()
             )
-            logger.info(
-                "enforce_pool_cap: raw_trimmed=%s, pool_available=%s, target=%s, raw_ceiling=%s",
-                trimmed,
-                pool_available,
-                self.pool_target_count,
-                raw_ceiling,
-            )
-        else:
-            logger.debug(
-                "enforce_pool_cap: no raw trim needed, "
-                "pool_available=%s, target=%s, raw_ceiling=%s",
-                pool_available,
-                self.pool_target_count,
-                raw_ceiling,
-            )
-        return pool_available >= self.pool_target_count
+            return pool_available >= self.pool_target_count
+
+        log_fn = logger.error if result.rolled_back else logger.info
+        log_fn(
+            "pool_maintenance available_before=%s available_after=%s target=%s "
+            "protected_available=%s recovered_suppressed=%s trimmed_stale=%s "
+            "trimmed_explore_cluster=%s trimmed_ready_reserve=%s trimmed_evaluated=%s "
+            "trimmed_raw=%s trimmed_by_source=%s deferred_topic_trim=%s "
+            "deferred_source_trim=%s deferred_stale_trim=%s "
+            "deferred_explore_cluster_trim=%s raw_before=%s raw_after=%s "
+            "raw_ceiling=%s untrimmed_raw_excess=%s rolled_back=%s reason=%s",
+            result.available_before,
+            result.available_after,
+            result.target,
+            result.protected_available,
+            result.recovered_suppressed,
+            result.trimmed_stale,
+            result.trimmed_explore_cluster,
+            result.trimmed_ready_reserve,
+            result.trimmed_evaluated,
+            result.trimmed_raw,
+            result.trimmed_by_source,
+            result.deferred_topic_trim,
+            result.deferred_source_trim,
+            result.deferred_stale_trim,
+            result.deferred_explore_cluster_trim,
+            result.raw_before,
+            result.raw_after,
+            result.raw_ceiling,
+            result.untrimmed_raw_excess,
+            result.rolled_back,
+            result.reason,
+        )
+        if result.rolled_back:
+            return result.available_before >= self.pool_target_count
+        return result.at_target
 
     async def trigger_manual_refresh(self, *, reason: str = "manual") -> dict[str, object]:
         """Schedule one background manual refresh without blocking the caller."""
@@ -2178,15 +2124,6 @@ class ContinuousRefreshController:
                 )
 
         if flattened_strategies:
-            self.database.trim_explore_cluster_overflow(max_per_cluster=3)
-            # Cap each topic_group at ~10% of pool target so a single hot
-            # topic (e.g. 人工智能 from related_chain) can't accumulate
-            # hundreds of fresh candidates across rounds and starve other
-            # sources/topics. Floor at 3 to keep small pools usable.
-            self.database.trim_topic_group_overflow(
-                max_per_group=max(3, self.pool_target_count // 10),
-            )
-            self.database.evict_stale_pool_items(max_age_days=14)
             # Snapshot delight count BEFORE precompute so we can detect
             # net new above-threshold delights and push a refresh event
             # to the popup (no per-item chrome notification — popup
@@ -2238,19 +2175,10 @@ class ContinuousRefreshController:
             await self._publish_delight_if_available()
             await self._publish_probe_if_available()
 
-            # v0.3.66+: enforce the absolute pool cap at the end of every
-            # refresh plan. The earlier trim_topic_group_overflow /
-            # trim_explore_cluster_overflow / evict_stale calls only bound
-            # per-axis concentration (topic, cluster, age) — none of them
-            # cap the total count. Long-running discovery cycles (10-30
-            # min for the LLM eval batch) also block the periodic
-            # _enforce_pool_cap tick in run_forever, so the popup
-            # routinely saw pool_available_count drift well past
-            # pool_target_count (e.g. 668 with target=600 in production).
-            # _enforce_pool_cap also runs reactivate_under_quota and
-            # source-share-aware trim, so this is the right place to land
-            # the freshly-discovered items into their final shape before
-            # the popup re-fetches.
+            # Land all newly durable admissions through the one atomic
+            # topic/source/stale/raw maintenance boundary before the popup
+            # re-fetches. No separately committed destructive pass belongs
+            # in this refresh plan.
             try:
                 self._enforce_pool_cap()
             except Exception:

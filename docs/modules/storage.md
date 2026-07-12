@@ -17,6 +17,7 @@
 | SQLite schema 初始化 | ✅ | `Database.initialize()` 自动创建核心表和索引，支持旧库增量补列 / 补索引。 |
 | 推荐池 readiness 计数 | ✅ | `count_pool_readiness()` 返回 `available/raw/pending/pending_eval/evaluated_pending`，供 runtime status 和补货判断使用。 |
 | 来源 raw material 统计 | ✅ | `count_pool_raw_material_by_source()` 合并 `content_cache` raw rows 和 `discovery_candidates` 待评估候选，供 raw ceiling headroom 使用。 |
+| 原子库存维护 | ✅ | `maintain_pool_inventory()` 在短连接 `BEGIN IMMEDIATE` 中统一 stale / explore / topic / source / raw 维护，保护 canonical available 底线并在不变量失败时整体回滚。 |
 | 七平台来源族归一化 | ✅ | `sources.platforms` 以可枚举规则统一 Bilibili、小红书、抖音、YouTube、X、知乎、Reddit 的别名、策略前缀和 URL host；pool accounting、已看身份与 URL 推断共用同一口径。 |
 | discovery 待评估池 | ✅ | `discovery_candidates` 支持 mixed-source enqueue / claim / evaluation / admission，并持久化 `claim_token`、`score_threshold`、`eval_attempts` 与 batch 级 `batch_eval_attempts`；stale-sensitive 完成和释放都匹配 `id + status + claim_token`。 |
 | discovery 历史候选查询 | ✅ | `get_existing_discovery_candidate_keys()` 与 `get_existing_content_cache_ids()` 支持 pipeline 在 enqueue 前过滤历史候选和已缓存内容，避免重复 raw 占住 Evo 前供给窗口。 |
@@ -97,7 +98,7 @@ known_content_ids = db.get_existing_content_cache_ids(["BV1xx411c7mD"])
 
 行为说明：
 
-- `enqueue_discovery_candidates()` 用 `candidate_key` 去重；重复发现只刷新 `last_seen_at`。传入 `max_pending_per_source` 时，会按来源用总行数判断 cap、删除时保护 `evaluating` 行，并优先删除 terminal rows，避免长期满池时 candidate table 无界增长。
+- `enqueue_discovery_candidates()` 用 `candidate_key` 去重；重复发现只刷新 `last_seen_at`。传入 `max_pending_per_source` 时，cap 只统计 active `pending_eval/evaluating/evaluated`；超额且未领取的 active 行进入 `trimmed_capacity`，保留 `source_raw_ceiling:<family>` 审计原因，terminal history 不占 cap，`evaluating` / 非空 token 永不成为 victim。
 - `claim_discovery_candidates_for_eval(limit=..., claim_token=...)` 原子领取 `pending_eval`，按来源 round-robin 混合取样，并把同一 token 写到整批；不传 token 时自动生成，兼容单次 CLI drain。
 - `persist_claimed_discovery_candidate_evaluations(..., claim_token=...)` 返回实际更新的 ID 集合，只接受仍为 `evaluating` 且 token 匹配的行；完成后清空 token / claimed_at。`reset_claimed_discovery_candidates_to_pending()` 使用相同所有权条件，因此旧 worker 不能覆盖或释放重新领取的行。
 - `get_evaluated_discovery_candidates_for_admission(limit=...)` 读取已完成评估但尚未写入 `content_cache` 的行，供池子从满池降回目标以下后重试 admission。
@@ -254,6 +255,21 @@ raw_by_source = db.count_pool_raw_material_by_source()
 - `raw` 包含正式池 fresh raw material 和 `discovery_candidates` 中尚未缓存的候选。
 - `pending` 独立计算，不用 `raw - available` 近似，避免 recently viewed 内容被误算为待整理。
 - `pending_eval` 统计 `pending_eval + evaluating`；`evaluated_pending` 统计已评估但尚未 admission 到 `content_cache` 的候选。
+
+### Atomic Pool Maintenance
+
+```python
+result = db.maintain_pool_inventory(
+    target=600,
+    raw_ceiling=1200,
+    source_share_quotas={"bilibili": 480, "zhihu": 120},
+    raw_source_share_quotas={"bilibili": 960, "zhihu": 240},
+)
+```
+
+`PoolMaintenanceResult` 是 immutable 观测快照，记录维护前后 available/raw、保护量、各层 trim、来源拆分、延期 quota、不收敛 raw excess 与 rollback 原因。事务先通过连接感知的 `_load_available_pool_candidate_rows_on()` 读取唯一 canonical servability SQL，按现有 serve 排序保护 `min(available_before, target)`；topic/source/stale/explore 配额不能牺牲保护行，超额记入 deferred 字段。
+
+raw ceiling 同时统计 `content_cache` 和 `discovery_candidates` active 行，victim 顺序为 unready content → 未领取 `pending_eval` → 未领取 `evaluated` → 非保护 ready reserve。候选不删除，而是 terminalize 为 `trimmed_capacity`，`eval_error='pool_raw_ceiling'`；`evaluating` 与任意 token-owned 行永不裁剪。若保护行加 active claim 已超过 ceiling，保留所有权与可用库存、报告 `untrimmed_raw_excess` 并记录 ERROR。提交前重新计算 canonical available，必须满足 `available_after >= min(available_before, target)`，否则整笔 `BEGIN IMMEDIATE` 回滚。
 
 ### Admission Cleanup
 

@@ -296,6 +296,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │     AccountSync: B 站账号增量 -> Memory/Soul bootstrap     │   │
 │  │     Guided init: selected profile-signal sources + LLM/embedding live probe -> run_guided_init + InitCoordinator │ │
 │  │     Pool readiness: servable/raw/pending 统一库存口径       │   │
+│  │     Atomic maintenance: canonical protected -> topic/source/raw -> invariant/rollback │ │
 │  │     Source bootstrap seen-key guard -> Memory/Profile      │   │
 │  │     Profile overrides overlay: 用户编辑 -> profile_overrides.json │ │
 │  │       -> get_profile()/sync_profile_files 读时叠加（抗画像重建）│ │

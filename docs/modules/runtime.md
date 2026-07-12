@@ -10,7 +10,7 @@
 |------|------|------|
 | 统一补货请求入口 | ✅ | `ContinuousRefreshController.request_replenishment(reason, force=False)` 收束补货触发：普通事件和反馈只排队 reason；初始化完成、用户手动刷新或推荐刷新后低库存用 `force=True` 进入手动补货。 |
 | 后台刷新控制 | ✅ | `ContinuousRefreshController` 按 scheduler 配置补充候选池，并通过 source policy 计算各平台有效配比；后台定时 refresh 使用约 90% 的可换池低水位，库存只是略低于 `pool_target_count` 时不跑 discovery。注入 `DiscoveryCandidatePipeline` 后，B 站主补货会在现有 `_refresh_lock` 内按 `pending_eval + evaluating` 水位循环生产 raw candidates，直到待评估供给接近目标 batch 或达到预算；小缺口阶段先给 `search + related_chain` 配额，延后 `trending/explore`。统一关键词 planner 开启但 B 站关键词 store 暂空时，本轮只剔除 `search` 子策略，保留其它 B 站策略，避免回落到旧 `discovery.search.queries` LLM 生成。v0.3.149+ 当 `explore_refresh_hours` 到期或距到期不足一个 refresh tick，且 B 站平台族仍有补货空间时，controller 会允许 `KeywordPlanner` 在同一轮 merged keyword LLM 调用里请求 `explore_domains`，成功写入 B 站 `keyword_kind="explore"` query cache 后同步推进 `last_explore_refresh_at`；后续 `ExploreStrategy` 从该 explore 池 claim query。 |
-| 低可用池补货防死锁 | ✅ | `_source_requested_count()` 仍用 raw headroom 限制正常补货规模，但当 `pool_available_count < pool_target_count` 且 raw ceiling 已满时，不再把 source deficit 直接压成 0；低于 target 时 `_enforce_pool_cap()` 会跳过 source overflow trim，只用 raw ceiling 总量 trim 收敛素材，避免大量不可换 raw material 或 over-quota source suppression 让 Search / producer 永久停摆。 |
+| 原子库存维护入口 | ✅ | `_enforce_pool_cap()` 每轮只调用一次 `Database.maintain_pool_inventory()`；topic/source/stale/explore/raw 不再分别提交。低于 target 时 canonical available 优先，source/topic 超额可延期并在统一结果中观测。 |
 | 连续候选评估协调器 | ✅ | `CandidateEvalCoordinator` 是 runtime 内唯一 claim owner：默认期望 3 个、每个最多 30 条的 LLM worker，任一槽位完成即补位；主协调任务串行执行 token-aware 落库与 admission，最多 90 条在途。成功缓存后立即以单飞 post-commit task 触发文案预计算，不阻塞空闲评估槽补位；期间已缓存待文案行计入 committed inventory，避免过度评估。有效 worker 为 `min(candidate_eval_concurrency, max(1, llm.concurrency-1))`，60 秒 tick 仅是安全唤醒。 |
 | B 站扩展搜索兜底 producer | ✅ | `BilibiliExtensionSearchProducer` 在 B 站平台族低于 quota、`BilibiliAPIClient.search_cooldown_remaining()>0`、扩展 presence 在线且候选池未满时入队 `bili_tasks(type="search")`；扩展回传后仍进入 `DiscoveryCandidatePipeline` 统一评估。兜底关键词生成 prompt 已携带结构化画像，调用 `LLMService` 时会在支持路径上关闭额外 core memory 注入；统一关键词 planner 会把画像按 core / life / interests / style / recent 分层渲染，保护 prompt-cache 前缀。 |
 | 候选池文案预计算状态同步 | ✅ | 独立 `_loop_pool_precompute()` 将 fresh 候选补齐 `pool_expression` / `pool_topic_label` 后，会同步更新 `last_replenished_count` 并推送 `refresh.pool_updated`；推荐文案 batch 默认 30 条、2 个 worker 并发生成，但仍受 `_expression_lock` 串行化多入口，避免重复消费同一批候选。批量解析失败会先在当前 worker 内拆半重试，限流则留空等下一轮。`GET /api/recommendations` bootstrap、`reshuffle` 和 `append` 消费可换池后也会发布同一池子快照。前端消费该事件时只刷新池子状态和相关提示，不全量替换推荐列表，避免覆盖已 append 的历史内容。 |
@@ -87,6 +87,9 @@ controller.candidate_eval_coordinator.notify("candidate_enqueued:bilibili")
 - `drain_discovery_candidates_once(..., reason=...)`：runtime 已有 coordinator 时退化为耐久 `notify(reason)`，不再创建一次性 drain task；没有 coordinator 的 CLI / 兼容 runtime 仍通过相同 staged pipeline 执行一次 drain。
 - `run_init_backfill(profile, target_pool_count, *, fully_parallel=True)`：图形化引导初始化（gui-init）stage 4 的发现补池。持 `_refresh_lock` 与连续 refresh 串行，绝不与之争 `content_cache`；`async with` 在 `CancelledError` 时释放锁。不查 `_llm_work_allowed()`，因此 init 期间后台门控暂停不会自锁 init 自己的补池。
 - `_pool_count_payload()`：统一生成 runtime status / runtime stream 的池子字段，包含 pending eval 与 evaluated pending 拆分。
+- `_enforce_pool_cap()`：把 target、跨表 raw ceiling、available/raw source quotas、topic/explore cap、stale age 与 XHS 本人昵称一次传给 storage 原子维护入口；成功返回 `result.at_target`，rollback 时记录 ERROR 并按事务前 availability 决策。每轮只输出一条包含 `PoolMaintenanceResult` 全字段的汇总日志。
+
+`_run_refresh_plan()` 在 durable admission 与文案完成后只调用这一个入口；不再组合 `trim_topic_group_overflow()`、`trim_explore_cluster_overflow()`、`evict_stale_pool_items()`、source trim 或 raw trim，因此不会留下“前半段已提交、后半段才发现库存归零”的中间状态。旧数据库 trim 方法仍保留给兼容测试和手动工具。
 
 ### CandidateEvalCoordinator
 

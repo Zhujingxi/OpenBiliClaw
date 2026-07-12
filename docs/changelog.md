@@ -6,6 +6,7 @@
 
 ## v0.3.164：WebUI 可配置的海外出口代理（issue #89，2026-07-12）
 
+- **推荐库存维护改为原子且保护可用底线**：runtime 的 topic/source/stale/explore/raw 维护收敛为一次短连接 `BEGIN IMMEDIATE`；canonical available 按 serve SQL/排序保护，维护后必须满足 `available_after >= min(available_before, target)`，否则整笔回滚。raw ceiling 统一覆盖 `content_cache` 与 active `discovery_candidates`，未领取候选进入可审计的 `trimmed_capacity` 而不是删除，`evaluating` / token-owned 行永不裁剪；source/topic 配额在库存不足时允许延期并输出统一观测汇总。
 - **知乎来源配额归类修复**：新增七平台唯一可枚举来源族规则表，pool available/raw accounting、discovery 已看过滤、已看事件身份和 URL host 推断统一复用同一别名 / strategy 前缀口径；`zhihu-search/hot/feed/creator/related` 即使旧数据缺少 `source_platform` 也会计入 `zhihu`，不再以五个碎片来源绕过知乎配额。
 - **本机 Ollama 默认端点改用 `127.0.0.1` 并给出超时根因提示**：chat / embedding provider、CLI `setup-embedding` / 模型探测、`ollama_supervisor` 托管端点、`config.example.toml` 与文档示例的默认 `base_url` 从 `localhost:11434` 统一切到 `127.0.0.1:11434`，与 Ollama 默认只监听 IPv4 的行为对齐，避免 `localhost` 被解析到 IPv6 (`::1`) 时连接超时。`ollama_diagnostics` 遇到 `ConnectTimeout`（区别于连接被拒）时额外提示两条真正根因——系统级 TUN 代理（Clash/V2Ray 增强模式）在网卡层劫持了 `127.0.0.1`（`trust_env=False` 拦不住，需加直连白名单），或 `base_url` 仍用 `localhost` 触发 IPv6 解析；该提示会透传进「自动修复已达到上限」文案，让单独安装 Ollama 的用户不再被误导为「服务没启动」。
 - **新增 `[network].proxy` 海外出口代理**：一个字段即可让所有海外请求走代理——OpenAI / Claude / Gemini / DeepSeek / OpenRouter / openai_compatible 的 chat + embedding SDK、YouTube（yt-dlp）、GitHub 自动更新、Codex OAuth 令牌刷新。支持 `http` / `https` / `socks5` / `socks5h`，零新依赖（复用已有 `httpx[socks]`）。留空时行为与当前一致（沿用进程 env，Docker 代理探测不受影响）。
