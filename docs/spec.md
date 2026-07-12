@@ -186,6 +186,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 
 - **隐式反馈**（浏览器插件自动采集）：是否点击、观看时长、是否收藏分享
 - **显式反馈**：在插件中点赞/踩、对话式反馈
+- **桌面端提交屏障**：普通推荐与正向/避雷探针的非聊天动作先即时更新 UI，10 秒内可真实撤销且不写后端；超时或页面离开才提交，失败恢复原状态。评论/聊天因依赖文本语义与服务端回复保持直接提交
 - **记忆迭代**：反馈触发多层记忆网络更新——事件层记录事实，偏好层调整权重，觉察层写观察笔记，洞察层修正假设，灵魂层在必要时更新人格理解
 - **策略自省**：Agent 自我评估推荐命中率，反思发现策略和理解模型的有效性
 
@@ -253,7 +254,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │ 推荐点击：content_id/url/source_platform -> source-aware click signal │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ 推荐反馈：/api/feedback -> 5s 合并 -> feedback 批学习单飞 │ │
+│  │ 推荐/探针反馈：即时 UI -> 10s 可撤销提交 -> API；推荐再经 5s 合并学习 │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ runtime status：available/raw/pending 库存 -> 插件/移动/桌面 │   │
@@ -281,6 +282,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │     PoolCurator + 双轴 fatigue + per-group 窗口 + 新兴趣放大保护 │ │
 │  │     request_replenishment + 定时/手动补货 + B/XHS/DY/YT/X/Zhihu/Reddit=5/1/1/1/1/1/1 │ │
 │  │     Shared CandidatePipeline: raw -> eval -> admission -> cache guard -> serve │ │
+│  │     内容元数据：时长/互动/发布时间 -> candidates -> content_cache -> API -> 四端 │ │
 │  │     Query inspiration cache: search preview -> inspiration/expansion -> keyword provenance │ │
 │  │     InspirationKeywordPipeline: axis library learning loop (yield backfill/lifecycle) + breadth config │ │
 │  │     LLM gate: scheduler + extension presence          │   │

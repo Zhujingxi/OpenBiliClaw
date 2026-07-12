@@ -42,10 +42,19 @@ import {
   normalizeRecommendation,
   normalizeProfileSummary,
   normalizeRuntimeStatus,
+  platformDisplayName,
   shouldFetchProfileSummary,
   shouldAutoLoadRecommendations,
   validateCommentInput,
 } from "../popup/popup-helpers.js";
+
+test("platformDisplayName maps known platforms and passes through unknown", () => {
+  assert.equal(platformDisplayName("bilibili"), "B 站");
+  assert.equal(platformDisplayName("ZHIHU"), "知乎");
+  assert.equal(platformDisplayName("reddit"), "Reddit");
+  assert.equal(platformDisplayName("newtube"), "newtube");
+  assert.equal(platformDisplayName(""), "");
+});
 
 test("buildVideoUrl builds bilibili video url from bvid", () => {
   assert.equal(
@@ -552,6 +561,8 @@ test("normalizeDelightCandidate fills stable fallbacks and upgrades cover urls",
     cover_url: "https://i0.hdslb.com/bfs/archive/delight-cover.jpg",
     content_url: "",
     source_platform: "",
+    published_at: "",
+    published_label: "",
     state: "pending",
     response_message: "",
     chat_reply: "",

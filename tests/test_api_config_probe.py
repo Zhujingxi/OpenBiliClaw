@@ -260,3 +260,120 @@ def test_probe_embedding_returns_failure_when_service_probe_fails(
     body = response.json()
     assert body["ok"] is False
     assert "no vector" in body["error"].lower()
+
+
+# ── network_proxy probe ─────────────────────────────────────────────────────
+
+
+class _FakeProxyResponse:
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+
+
+class _FakeProxyClient:
+    """Async context manager standing in for httpx.AsyncClient in probe tests."""
+
+    def __init__(self, behavior: object, recorder: dict[str, Any]) -> None:
+        self._behavior = behavior
+        self._recorder = recorder
+
+    async def __aenter__(self) -> _FakeProxyClient:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> bool:
+        return False
+
+    async def get(self, url: str) -> _FakeProxyResponse:
+        self._recorder["url"] = url
+        if isinstance(self._behavior, Exception):
+            raise self._behavior
+        return _FakeProxyResponse(int(self._behavior))
+
+
+def _patch_proxy_client(
+    monkeypatch: pytest.MonkeyPatch, behavior: object
+) -> dict[str, Any]:
+    import httpx
+
+    recorder: dict[str, Any] = {}
+
+    def _factory(**kwargs: Any) -> _FakeProxyClient:
+        recorder.update(kwargs)
+        return _FakeProxyClient(behavior, recorder)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _factory)
+    return recorder
+
+
+def test_probe_network_proxy_ok_on_204(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    recorder = _patch_proxy_client(monkeypatch, 204)
+    client, _path = _client_for_config(monkeypatch, tmp_path, _probe_base_config())
+
+    response = client.post(
+        "/api/config/probe-service",
+        json={"kind": "network_proxy", "config": {"network": {"proxy": "socks5://127.0.0.1:1080"}}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["kind"] == "network_proxy"
+    # Probe must use the candidate proxy and never inherit process env.
+    assert recorder["proxy"] == "socks5://127.0.0.1:1080"
+    assert recorder["trust_env"] is False
+
+
+def test_probe_network_proxy_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import httpx
+
+    _patch_proxy_client(monkeypatch, httpx.ConnectError("refused"))
+    client, _path = _client_for_config(monkeypatch, tmp_path, _probe_base_config())
+
+    response = client.post(
+        "/api/config/probe-service",
+        json={"kind": "network_proxy", "config": {"network": {"proxy": "socks5://127.0.0.1:1080"}}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["error"] == "proxy_unreachable"
+
+
+def test_probe_network_proxy_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import httpx
+
+    _patch_proxy_client(monkeypatch, httpx.ConnectTimeout("slow"))
+    client, _path = _client_for_config(monkeypatch, tmp_path, _probe_base_config())
+
+    response = client.post(
+        "/api/config/probe-service",
+        json={"kind": "network_proxy", "config": {"network": {"proxy": "http://127.0.0.1:7890"}}},
+    )
+
+    body = response.json()
+    assert body["ok"] is False
+    assert body["error"] == "proxy_unreachable"
+
+
+def test_probe_network_proxy_rejects_invalid_scheme(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    client, _path = _client_for_config(monkeypatch, tmp_path, _probe_base_config())
+
+    response = client.post(
+        "/api/config/probe-service",
+        json={"kind": "network_proxy", "config": {"network": {"proxy": "ftp://127.0.0.1:1"}}},
+    )
+
+    assert response.status_code == 400

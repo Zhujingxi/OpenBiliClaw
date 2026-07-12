@@ -6,6 +6,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any, cast
 
+import httpx
 from anthropic import AsyncAnthropic
 
 from .base import (
@@ -35,9 +36,17 @@ class ClaudeProvider(LLMProvider):
         model: str = "claude-sonnet-4-20250514",
         timeout: float = 300.0,
         base_url: str = "",
+        proxy: str = "",
     ) -> None:
         self._model = model
         self.base_url = base_url.strip()
+        # [network].proxy: overseas outbound only. Non-empty routes the SDK's
+        # httpx client through the proxy; empty keeps the default client
+        # (zero-drift).
+        self._proxy = proxy.strip()
+        client_kwargs: dict[str, Any] = {}
+        if self._proxy:
+            client_kwargs["http_client"] = httpx.AsyncClient(proxy=self._proxy, timeout=timeout)
         # Empty base_url → SDK default (https://api.anthropic.com). A custom
         # value points at any Anthropic-protocol gateway serving /v1/messages
         # (third-party relays, LiteLLM, etc.) — see issue #72.
@@ -45,6 +54,7 @@ class ClaudeProvider(LLMProvider):
             api_key=api_key,
             timeout=timeout,
             base_url=self.base_url or None,
+            **client_kwargs,
         )
 
     @property

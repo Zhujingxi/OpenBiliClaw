@@ -422,6 +422,43 @@ test("cookie sync runtime event posts the current reddit cookie immediately", as
   });
 });
 
+test("runtime events refresh xhs and zhihu login state locally", async () => {
+  const { handleCookieSyncRuntimeEvent } = await importCookieSync();
+  installChromeMock([
+    { name: "web_session", value: "xhs-session", domain: ".xiaohongshu.com" },
+    { name: "z_c0", value: "zhihu-session", domain: ".zhihu.com" },
+  ]);
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({
+      url: String(url),
+      body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+    });
+    return new Response(JSON.stringify({ ok: true, logged_in: true }), { status: 200 });
+  };
+
+  assert.equal(
+    handleCookieSyncRuntimeEvent({ type: "xhs_login_state_sync_requested" }),
+    true,
+  );
+  assert.equal(
+    handleCookieSyncRuntimeEvent({ type: "zhihu_login_state_sync_requested" }),
+    true,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(calls, [
+    {
+      url: "http://127.0.0.1:8420/api/sources/xhs/login-state",
+      body: { logged_in: true },
+    },
+    {
+      url: "http://127.0.0.1:8420/api/sources/zhihu/login-state",
+      body: { logged_in: true },
+    },
+  ]);
+});
+
 test("legacy shared cookie sync alarm refreshes bilibili, douyin AND x cookies together", async () => {
   const { handleCookieSyncAlarm } = await importCookieSync();
   installChromeMock([

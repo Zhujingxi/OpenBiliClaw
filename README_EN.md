@@ -189,11 +189,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.161 (2026-07-09)**
+📌 Latest: **v0.3.163 (2026-07-11)**
 
-- **Keyword generation mode in settings** — choose Classic, Hybrid, or Inspiration directly from the config UI to enable search-backed keyword inspiration.
-- **Keyword inspiration axis library** — keyword generation now reuses secondary interests, real search evidence, platform supply advantages, and historical yield for more specific platform-native queries.
-- **Diagnosable inspiration flow** — new dry-run and report surfaces show selected interests, grounding evidence, keyword provenance, and cohort performance.
+- **Truthful login status** — PC and Web settings now use only local credentials and extension heartbeats, distinguishing signed-in, unverified, and content-token states without probing platforms.
+- **Automatic Web inventory recovery** — bounded retries recover transient recommendation or runtime-status timeouts without replacing cards already being viewed or appended.
+- **Cold embedding loads are no longer outages** — local Ollama model warm-up timeouts are separated from real failures while guided init still requires a valid embedding.
+- **More accurate preference feedback** — interest and avoidance feedback now applies across fine and broad topics, preserves the real source platform, and uses consistent actions on all three surfaces.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -583,13 +584,14 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
                        │ + Desktop Web (/web) · Mobile Web (/m) · QR LAN-IP
 ┌──────────────────────▼─────────────────────────┐
 │               Agent Orchestration               │
-│      Skills · Dialogue · Runtime scheduling      │
+│ Skills · Dialogue · Runtime · 10s undo barrier   │
 ├─────────┬──────────┬───────────┬───────────────┤
 │  Soul   │  Memory  │ Discovery │ Recommendation │
 │ Engine  │  System  │Discovery +│     Engine     │
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
 │   LLM adapters · Source adapters (SourceAdapter) │
+│ Duration/engagement/published → pool → cache → API/UI │
 │   Unified admission · SQLite (events · pool · recs)│
 └────────────────────────────────────────────────┘
 ```
@@ -705,6 +707,7 @@ Contributions welcome! See the [Contributing Guide](docs/contributing.md) to get
 - Thanks to [@addtion99](https://github.com/addtion99) for proposing configurable browser-extension backend host / port settings and sharing the popup-side implementation idea in [#8](https://github.com/whiteguo233/OpenBiliClaw/pull/8).
 - Thanks to [@jiaobenhaimo](https://github.com/jiaobenhaimo) for contributing Safari extension, watch-later bookmarks, YouTube repost detection, and marketing filter designs in [#53](https://github.com/whiteguo233/OpenBiliClaw/pull/53). The OR-join dedup fix and watch-later feature have been merged into main.
 - Thanks to [@tangle111-design](https://github.com/tangle111-design) for exploring `style_key` viewing modes, recommendation tone, Bilibili initialization, and LLM / profile workflow improvements in [#69](https://github.com/whiteguo233/OpenBiliClaw/pull/69). The relevant ideas have been reviewed, split up, and selectively merged into main.
+- Thanks to [@DongLanQwQ0](https://github.com/DongLanQwQ0) for polishing desktop web interactions — side-drawer collapse animation, a delight-card drag dead zone, and a stacked toast notification system — in [#102](https://github.com/whiteguo233/OpenBiliClaw/pull/102). Merged into main.
 
 ## ⭐ Star History
 

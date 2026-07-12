@@ -30,6 +30,7 @@ from openbiliclaw.discovery.inspiration import (
     _normalize_match_text,
     derive_inspiration_axis_id,
 )
+from openbiliclaw.published_time import normalize_published_time
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -548,6 +549,8 @@ CREATE TABLE IF NOT EXISTS content_cache (
     style_key   TEXT DEFAULT '',
     franchise_key TEXT DEFAULT '',  -- LLM IP/series; see _ensure_content_cache_topic_columns
     description TEXT,
+    published_at TEXT NOT NULL DEFAULT '',
+    published_label TEXT NOT NULL DEFAULT '',
     cover_url   TEXT,
     view_count  INTEGER DEFAULT 0,
     like_count  INTEGER DEFAULT 0,
@@ -600,6 +603,8 @@ CREATE TABLE IF NOT EXISTS discovery_candidates (
     up_name               TEXT NOT NULL DEFAULT '',
     up_mid                INTEGER NOT NULL DEFAULT 0,
     description           TEXT NOT NULL DEFAULT '',
+    published_at          TEXT NOT NULL DEFAULT '',
+    published_label       TEXT NOT NULL DEFAULT '',
     cover_url             TEXT NOT NULL DEFAULT '',
     duration              INTEGER NOT NULL DEFAULT 0,
     view_count            INTEGER NOT NULL DEFAULT 0,
@@ -1579,6 +1584,10 @@ class Database:
         """
         import json
 
+        published = normalize_published_time(
+            kwargs.get("published_at"),
+            label=kwargs.get("published_label"),
+        )
         self._execute_write(
             """
             INSERT INTO content_cache (
@@ -1593,6 +1602,8 @@ class Database:
                 style_key,
                 franchise_key,
                 description,
+                published_at,
+                published_label,
                 cover_url,
                 view_count,
                 like_count,
@@ -1620,7 +1631,8 @@ class Database:
                 source_keyword_id
             )
             VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(bvid) DO UPDATE SET
@@ -1655,7 +1667,21 @@ class Database:
                     ''
                 ),
                 description = excluded.description,
-                cover_url = excluded.cover_url,
+                published_at = COALESCE(
+                    NULLIF(excluded.published_at, ''),
+                    content_cache.published_at,
+                    ''
+                ),
+                published_label = COALESCE(
+                    NULLIF(excluded.published_label, ''),
+                    content_cache.published_label,
+                    ''
+                ),
+                cover_url = COALESCE(
+                    NULLIF(excluded.cover_url, ''),
+                    content_cache.cover_url,
+                    ''
+                ),
                 view_count = excluded.view_count,
                 like_count = excluded.like_count,
                 favorite_count = excluded.favorite_count,
@@ -1750,6 +1776,8 @@ class Database:
                 _normalize_style_key_for_storage(kwargs.get("style_key", "")),
                 kwargs.get("franchise_key", ""),
                 kwargs.get("description", ""),
+                published.published_at,
+                published.published_label,
                 kwargs.get("cover_url", ""),
                 kwargs.get("view_count", 0),
                 kwargs.get("like_count", 0),
@@ -1842,6 +1870,10 @@ class Database:
                 self._candidate_value(candidate, "raw_payload", {}),
                 default={},
             )
+            published = normalize_published_time(
+                self._candidate_value(candidate, "published_at", ""),
+                label=self._candidate_value(candidate, "published_label", ""),
+            )
             score_threshold = float(self._candidate_value(candidate, "score_threshold", 0.0) or 0.0)
             cursor = self._execute_write(
                 """
@@ -1861,6 +1893,8 @@ class Database:
                     up_name,
                     up_mid,
                     description,
+                    published_at,
+                    published_label,
                     cover_url,
                     duration,
                     view_count,
@@ -1881,7 +1915,7 @@ class Database:
                 )
                 VALUES (
                     ?, 'pending_eval', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -1899,6 +1933,8 @@ class Database:
                     str(self._candidate_value(candidate, "up_name", "") or ""),
                     int(self._candidate_value(candidate, "up_mid", 0) or 0),
                     str(self._candidate_value(candidate, "description", "") or ""),
+                    published.published_at,
+                    published.published_label,
                     str(self._candidate_value(candidate, "cover_url", "") or ""),
                     int(self._candidate_value(candidate, "duration", 0) or 0),
                     int(self._candidate_value(candidate, "view_count", 0) or 0),
@@ -1928,10 +1964,12 @@ class Database:
             self._execute_write(
                 """
                 UPDATE discovery_candidates
-                SET last_seen_at = CURRENT_TIMESTAMP
+                SET last_seen_at = CURRENT_TIMESTAMP,
+                    published_at = COALESCE(NULLIF(?, ''), published_at, ''),
+                    published_label = COALESCE(NULLIF(?, ''), published_label, '')
                 WHERE candidate_key = ?
                 """,
-                (candidate_key,),
+                (published.published_at, published.published_label, candidate_key),
             )
         if max_pending_per_source is not None:
             max_pending = max(0, int(max_pending_per_source))
@@ -4393,7 +4431,7 @@ class Database:
         cursor = self.conn.execute(
             """
             SELECT r.feedback_type, c.up_mid, c.up_name, c.topic_key,
-                   c.source, c.title, c.franchise_key
+                   c.topic_group, c.source, c.title, c.franchise_key
             FROM recommendations AS r
             JOIN content_cache AS c ON c.bvid = COALESCE(
                 (SELECT bvid FROM content_cache WHERE bvid = r.bvid),
@@ -4446,6 +4484,8 @@ class Database:
                 COALESCE(c.source_platform, '') AS source_platform,
                 COALESCE(c.content_type, 'video') AS content_type,
                 COALESCE(c.body_text, '') AS body_text,
+                COALESCE(c.published_at, '') AS published_at,
+                COALESCE(c.published_label, '') AS published_label,
                 COALESCE(c.franchise_key, '') AS franchise_key,
                 COALESCE(c.duration, 0) AS duration,
                 COALESCE(c.view_count, 0) AS view_count,
@@ -4792,6 +4832,8 @@ class Database:
             "reply_count": "INTEGER DEFAULT 0",
             "retweet_count": "INTEGER DEFAULT 0",
             "bookmark_count": "INTEGER DEFAULT 0",
+            "published_at": "TEXT NOT NULL DEFAULT ''",
+            "published_label": "TEXT NOT NULL DEFAULT ''",
             # P1.8 yield provenance: the discovery_keywords.id that produced this
             # row (NULL for legacy / non-search / flag-off). Nullable, additive.
             "source_keyword_id": "INTEGER",
@@ -4825,6 +4867,8 @@ class Database:
             "reply_count": "INTEGER NOT NULL DEFAULT 0",
             "retweet_count": "INTEGER NOT NULL DEFAULT 0",
             "bookmark_count": "INTEGER NOT NULL DEFAULT 0",
+            "published_at": "TEXT NOT NULL DEFAULT ''",
+            "published_label": "TEXT NOT NULL DEFAULT ''",
             # P1.8 yield provenance: nullable, additive (existing rows stay NULL).
             "source_keyword_id": "INTEGER",
         }
@@ -7281,6 +7325,50 @@ class Database:
         except (TypeError, ValueError) as exc:
             raise ValueError(f"corrupt auth_epoch value: {row[0]!r}") from exc
 
+    def _set_browser_login_state(
+        self,
+        *,
+        state_key: str,
+        timestamp_key: str,
+        logged_in: bool,
+        when_iso: str,
+    ) -> None:
+        """Persist a browser heartbeat on an isolated FastAPI-safe connection."""
+        conn = self.open_connection()
+        try:
+            conn.executemany(
+                "INSERT OR REPLACE INTO auth_state (key, value) VALUES (?, ?)",
+                [
+                    (state_key, "1" if logged_in else "0"),
+                    (timestamp_key, when_iso),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _get_browser_login_state(
+        self,
+        *,
+        state_key: str,
+        timestamp_key: str,
+    ) -> tuple[bool, str]:
+        """Read a browser heartbeat without sharing the process connection."""
+        conn = self.open_connection()
+        try:
+            rows = conn.execute(
+                "SELECT key, value FROM auth_state WHERE key IN (?, ?)",
+                (state_key, timestamp_key),
+            ).fetchall()
+        finally:
+            conn.close()
+        values = {str(row["key"]): str(row["value"]) for row in rows}
+        state = values.get(state_key)
+        when_iso = values.get(timestamp_key, "").strip()
+        if state not in {"0", "1"} or not when_iso:
+            return False, ""
+        return state == "1", when_iso
+
     def set_xhs_login_state(self, logged_in: bool, when_iso: str | None = None) -> None:
         """Persist the latest browser-observed xhs login state.
 
@@ -7293,27 +7381,19 @@ class Database:
             from datetime import UTC, datetime
 
             when_iso = datetime.now(UTC).isoformat()
-        self._execute_many_write(
-            "INSERT OR REPLACE INTO auth_state (key, value) VALUES (?, ?)",
-            [
-                ("xhs_login_state", "1" if logged_in else "0"),
-                ("xhs_login_state_at", str(when_iso)),
-            ],
+        self._set_browser_login_state(
+            state_key="xhs_login_state",
+            timestamp_key="xhs_login_state_at",
+            logged_in=logged_in,
+            when_iso=str(when_iso),
         )
 
     def get_xhs_login_state(self) -> tuple[bool, str]:
         """Return ``(logged_in, iso_timestamp)`` for xhs, or ``(False, "")``."""
-        self._ensure_fresh_read()
-        rows = self.conn.execute(
-            "SELECT key, value FROM auth_state WHERE key IN (?, ?)",
-            ("xhs_login_state", "xhs_login_state_at"),
-        ).fetchall()
-        values = {str(row["key"]): str(row["value"]) for row in rows}
-        state = values.get("xhs_login_state")
-        when_iso = values.get("xhs_login_state_at", "").strip()
-        if state not in {"0", "1"} or not when_iso:
-            return False, ""
-        return state == "1", when_iso
+        return self._get_browser_login_state(
+            state_key="xhs_login_state",
+            timestamp_key="xhs_login_state_at",
+        )
 
     def set_zhihu_login_state(self, logged_in: bool, when_iso: str | None = None) -> None:
         """Persist the latest browser-observed Zhihu login state.
@@ -7327,27 +7407,19 @@ class Database:
             from datetime import UTC, datetime
 
             when_iso = datetime.now(UTC).isoformat()
-        self._execute_many_write(
-            "INSERT OR REPLACE INTO auth_state (key, value) VALUES (?, ?)",
-            [
-                ("zhihu_login_state", "1" if logged_in else "0"),
-                ("zhihu_login_state_at", str(when_iso)),
-            ],
+        self._set_browser_login_state(
+            state_key="zhihu_login_state",
+            timestamp_key="zhihu_login_state_at",
+            logged_in=logged_in,
+            when_iso=str(when_iso),
         )
 
     def get_zhihu_login_state(self) -> tuple[bool, str]:
         """Return ``(logged_in, iso_timestamp)`` for Zhihu, or ``(False, "")``."""
-        self._ensure_fresh_read()
-        rows = self.conn.execute(
-            "SELECT key, value FROM auth_state WHERE key IN (?, ?)",
-            ("zhihu_login_state", "zhihu_login_state_at"),
-        ).fetchall()
-        values = {str(row["key"]): str(row["value"]) for row in rows}
-        state = values.get("zhihu_login_state")
-        when_iso = values.get("zhihu_login_state_at", "").strip()
-        if state not in {"0", "1"} or not when_iso:
-            return False, ""
-        return state == "1", when_iso
+        return self._get_browser_login_state(
+            state_key="zhihu_login_state",
+            timestamp_key="zhihu_login_state_at",
+        )
 
     def bump_auth_epoch(self) -> int:
         """Atomically increment and return the revocation epoch.

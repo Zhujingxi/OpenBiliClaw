@@ -73,10 +73,11 @@
 
     <div class="fatal-banner" id="fatalBanner" role="alert"></div>
 
-    <aside class="side-drawer" id="sideDrawer" aria-label="侧边菜单" aria-hidden="true">
-      <div class="side-drawer-scrim" id="sideDrawerScrim"></div>
-      <div class="side-drawer-panel" aria-label="侧边菜单">
-        <nav class="side-drawer-nav" aria-label="全局功能">
+    <div class="app-body">
+      <aside class="side-drawer" id="sideDrawer" aria-label="侧边菜单" aria-hidden="true">
+        <div class="side-drawer-scrim" id="sideDrawerScrim"></div>
+        <div class="side-drawer-panel" aria-label="侧边菜单">
+          <nav class="side-drawer-nav" aria-label="全局功能">
           <button class="nav-action" id="homeBtn" type="button"><span class="nav-glyph">⌂</span><span>首页</span></button>
           <button class="nav-action" id="watchLaterBtn" type="button"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg></span><span>稍后再看</span><span class="nav-count-badge" id="watchLaterCountBadge" hidden></span></button>
           <button class="nav-action" id="favoritesBtn" type="button"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg></span><span>我的收藏</span><span class="nav-count-badge" id="favoritesCountBadge" hidden></span></button>
@@ -127,6 +128,11 @@
             <div class="delight-copy">
               <h3 id="delightTitle">你可能会意外喜欢：县域经济的债务齿轮</h3>
               <p id="delightStats" class="video-stats" hidden></p>
+              <p id="delightPublished" class="published-time" hidden></p>
+              <div id="delightExcerpt" class="delight-excerpt" hidden>
+                <p id="delightExcerptText" class="delight-excerpt-text"></p>
+                <button id="delightExcerptToggle" class="delight-excerpt-toggle" type="button" aria-expanded="false" aria-controls="delightExcerptText" hidden>展开正文</button>
+              </div>
               <p id="delightReason">你最近的轨迹同时出现了宏观债务、地方财政和长叙事内容，这条把它们咬合得很清楚。</p>
               <div class="delight-chat-turns" id="delightTurns" hidden></div>
             </div>
@@ -589,6 +595,13 @@
           <p class="settings-note-inline" id="authHint">本机与浏览器插件免登录；开启后局域网 / 远程设备访问需要密码。</p>
           <label class="settings-field"><span>开机自启动</span><input id="autostartEnabled" type="checkbox"></label>
           <p class="settings-note-inline" id="autostartHint">开启后下次登录系统会自动拉起后端（不影响当前进程）。</p>
+          <p class="settings-section-title">网络</p>
+          <label class="settings-field full"><span>海外出口代理</span><input id="networkProxy" placeholder="socks5://127.0.0.1:1080"></label>
+          <div class="settings-probe-row">
+            <button class="pill-btn" id="probeNetworkProxy" type="button">测试代理</button>
+            <span class="settings-probe-status" id="probeNetworkProxyStatus" aria-live="polite"></span>
+          </div>
+          <p class="settings-note-inline" id="networkProxyHint">仅作用于海外 AI 服务 / YouTube / 更新检查；B 站等国内请求始终直连。支持 http/https/socks5/socks5h，留空表示不使用。</p>
         </div>
 
         <div class="settings-panel" data-settings-panel="frontend" hidden>
@@ -644,6 +657,7 @@
       </form>
       </section>
     </main>
+    </div>
   </div>
 
   <section class="mobile-menu" id="mobileMenu" aria-label="手机菜单">
@@ -730,7 +744,8 @@
     </div>
   </section>
 
-  <div class="toast" id="toast" role="status"></div>
+  <div class="toast-container" id="toastContainer" role="status" aria-live="polite"></div>
   <script src="/web/assets/js/mobile-qr.js" defer></script>
+  <script src="/web/assets/js/pending-actions.js" defer></script>
   <script src="/web/assets/js/app.js" defer></script>
 </body></html>

@@ -322,11 +322,44 @@ export function normalizeRecommendation(item) {
     source_platform: normalizeSourcePlatform(item),
     content_type: normalizeText(item?.content_type) || "video",
     body_text: normalizeText(item?.body_text),
+    published_at: normalizeText(item?.published_at),
+    published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
     view_count: Number(item?.view_count ?? 0),
     like_count: Number(item?.like_count ?? 0),
     comment_count: Number(item?.comment_count ?? 0),
     favorite_count: Number(item?.favorite_count ?? 0),
     danmaku_count: Number(item?.danmaku_count ?? 0),
+  };
+}
+
+export function formatPublishedTime(item, now = Date.now()) {
+  const parsed = Date.parse(String(item?.published_at || ""));
+  if (Number.isFinite(parsed)) {
+    const diff = now - parsed;
+    if (diff >= -300_000 && diff < 60_000) return "刚刚";
+    if (diff >= 0 && diff < 86_400_000) {
+      return `${Math.max(1, Math.floor(diff / 3_600_000))} 小时前`;
+    }
+    if (diff >= 0 && diff < 604_800_000) {
+      return `${Math.floor(diff / 86_400_000)} 天前`;
+    }
+    const date = new Date(parsed);
+    const current = new Date(now);
+    if (date.getFullYear() === current.getFullYear()) {
+      return `${date.getMonth() + 1}月${date.getDate()}日`;
+    }
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  }
+  return String(item?.published_label || "").replace(/\s+/g, " ").trim().slice(0, 64);
+}
+
+export function getPublishedTimeDisplay(item, now = Date.now()) {
+  const text = formatPublishedTime(item, now);
+  if (!text) return null;
+  const parsed = Date.parse(String(item?.published_at || ""));
+  return {
+    text,
+    title: Number.isFinite(parsed) ? new Date(parsed).toLocaleString() : "",
   };
 }
 
@@ -426,6 +459,8 @@ export function normalizeDelightCandidate(item) {
     cover_url: normalizeCoverUrl(item?.cover_url),
     content_url: normalizeText(item?.content_url),
     source_platform: normalizeSourcePlatform(item),
+    published_at: normalizeText(item?.published_at),
+    published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
     state: normalizeText(item?.state) || "pending",
     response_message: normalizeText(item?.response_message),
     chat_reply: normalizeText(item?.chat_reply),
@@ -522,18 +557,18 @@ export function getDelightMessageActions() {
 
 export function getProbeMessageActions() {
   return [
-    { label: "喜欢", action: "confirm", primary: true },
-    { label: "暂时忽略", action: "defer", primary: false },
-    { label: "不喜欢", action: "reject", primary: false },
+    { label: "确认喜欢", action: "confirm", primary: true },
+    { label: "暂时搁置", action: "defer", primary: false },
+    { label: "确认不喜欢", action: "reject", primary: false },
     { label: "多聊聊", action: "chat", primary: false },
   ];
 }
 
 export function getAvoidanceProbeMessageActions() {
   return [
-    { label: "确实不喜欢", action: "confirm", primary: true },
-    { label: "暂时忽略", action: "defer", primary: false },
-    { label: "不是", action: "reject", primary: false },
+    { label: "确认避雷", action: "confirm", primary: true },
+    { label: "搁置避雷", action: "defer", primary: false },
+    { label: "不是雷点", action: "reject", primary: false },
     { label: "多聊聊", action: "chat", primary: false },
   ];
 }
@@ -589,6 +624,10 @@ export function mergeRuntimeStatusEvent(status, event) {
   const runtime = normalizeRuntimeStatus(status);
   const next = { ...runtime };
   if (typeof event?.pool_available_count === "number") {
+    // A pool snapshot can only be emitted by a running, initialized backend.
+    // Promote the partial stream payload so first-load HTTP timeouts do not
+    // hide otherwise authoritative inventory from the mobile header.
+    next.initialized = true;
     next.pool_available_count = Number(event.pool_available_count);
   }
   if (typeof event?.pool_raw_count === "number") {

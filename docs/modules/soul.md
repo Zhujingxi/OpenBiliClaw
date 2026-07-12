@@ -52,6 +52,7 @@
 | SoulEngine.update_from_feedback() | ✅ | feedback 事件落库，并校准匹配的洞察假设——确认→`validated=True`+置信度抬到 ≥0.75；推翻→`validated=False`+压到 ≤0.35（软作废：不删除、靠 delight 置信度加权降权）。**已接线**到 `POST /api/insights/feedback`（插件 + web/桌面三端洞察卡片「准/不准」按钮驱动），返回 `{matched, validated, confidence}`；此前实现但无生产调用方。命中后经 `_sync_insight_to_soul_snapshot` **同步把校准写回 soul 层 `active_insights` 快照**（`get_profile` / profile-summary / delight 读的是该快照，不是 insight 层），否则校准要等下一次 12h 认知 sync 才对 UI / 推荐生效 |
 | SoulEngine.process_feedback_batch_if_needed() | ✅ | 达到反馈阈值后重分析偏好，并在变化明显时重建画像；批处理入口带 single-flight 锁，已有任务在跑时直接返回 `feedback_batch_in_progress`，避免多个 `/api/feedback` 后台任务用同一旧游标重复分析未处理反馈；传给 LLM 前会瘦身 feedback 事件，只保留标题、上下文和偏好相关 metadata；若本批新增 `disliked_topics`，会按新旧差集调度 `purge_pool_for_new_dislikes` 后台清理 fresh 候选池，保持普通推荐卡片 `dislike` 学到长期避雷项后的清池行为与手动编辑 / 避雷探针一致 |
 | SoulEngine.record_immediate_feedback_cognition() | ✅ | 单条 `dislike/comment` 可即时写入结构化 cognition card，供插件画像页展示；评论类更新会带上对应内容标题，并以中性直接反馈记录，不预设正负向 |
+| 卡片反馈纠偏边界 | ✅ | 卡片 like/dislike 是可撤销的软信号并由后台批处理学习；需要确定性修正时，用户仍可主动前往原有画像页写入持久 override，或在原有对话页用自由文本说明偏好；推荐区不新增纠偏引导入口。单次 dislike 不会直接永久屏蔽主题 |
 | DialogueInsightAnalyzer | ✅ | 从聊天轮次提取 `goal/value/interest/dislike/state` 候选信号 |
 | SoulEngine.learn_from_dialogue() | ✅ | 聊天落 `dialogue` 事件、累计 insight candidate；单条 `interest/value/goal/dislike` 聊天信号到中高置信度时会先写入轻量 cognition update，高置信度或重复出现达阈值后再驱动偏好/画像更新 |
 | 兴趣探针聊天情绪判断 | ✅ | `/api/interest-probes/respond` 的 chat 分支会先让对话引擎回复，再用非 JSON 的单词分类 LLM 调用判断 `strong_positive / weak_positive / neutral_deferred / neutral / negative`（系统提示是 `llm/prompts.py:build_probe_sentiment_prompt` 的静态常量，走 prompt 缓存），失败时回退关键词；强正向直接确认，弱正向进入短期探索 buffer，`neutral_deferred`（用户主动说「先放着」「稍后再看」）走 defer 搁置状态机，`neutral`（态度模糊，如「再看看」）不改状态，避免一句“有点意思”立刻写成长期兴趣 |
@@ -66,6 +67,7 @@
 | Layered profile cognition | ✅ | `OnionProfile` 新增 MBTI / Values / Interest 等分层，画像生成会同时消费 `history + preference + awareness + insights`，避免把兴趣 topic 堆成整段画像 |
 | 猜测兴趣系统 | ✅ | `InterestSpeculator` 定期通过 LLM 过采样生成猜测兴趣方向，并按 `[scheduler]` 的 generation interval、TTL、cooldown、确认阈值和上限运行；候选带 `probe_mode=near/lateral/bridge/wildcard` 四档距离，普通 `near` 池最多 5 条，`lateral/bridge/wildcard` 挑战池单独最多 3 条；通过事件或用户确认后按来源权重转正为正式兴趣，未确认则拒绝并冷却；`tick/force_tick` 会读取最新 `probe_feedback_history`，确认/拒绝/探针聊天后的 domain 不会被旧快照重新生成 |
 | 探针「暂时忽略」（defer/搁置） | ✅ | 用户对探针点「暂时忽略」（或聊天说「先放着」）时，`user_defer_speculation` 把探针置为 `status="deferred"` 并按阶梯隐藏：第 1 次 7 天、第 2 次 14 天（`PROBE_DEFER_DAYS`），第 3 次（`PROBE_MAX_DEFERS`）耗尽转 `rejected` + 30 天 cooldown（走 TTL 过期语义，记 `defer_exhausted`，**不**进 handled 集，冷却后可重新猜——区别于显式 reject 的永久拉黑）。`deferred` 探针从所有读侧（pending 端点 / WS 推送 / `get_active_speculations`）消失；`tick/force_tick` 维护段的最后一步 `revive_deferred` 在 `deferred_until` 到期后把它复活为 `active`（重置 `created_at` 给新 TTL 窗口、`confirmation_count` 夹到阈值-1，保证复活后先以探针形式再露面而非静默转正）。避雷探针有对称的 `user_defer_avoidance` / `revive_deferred_avoidances`（复活排在 compaction 之后） |
+| 桌面 Web 探针即时反馈与撤销 | ✅ | 正向兴趣和避雷探针的 `confirm / reject / defer` 在消息抽屉与画像页复用同一稳定 action key，先即时隐藏或更新卡片，再保留 10 秒撤销窗口；撤销不调用 respond API，提交失败恢复原卡。`chat` 需要对话回复和情绪分类，继续直接调用后端，不进入可撤销屏障。 |
 | 短期探索 buffer | ✅ | `exploration_buffer.py` 把弱正向聊天、推荐喜欢、惊喜喜欢、普通点击和负反馈汇总到 `discovery_runtime_state["short_term_exploration_buffer"]`；7 天内显式弱证据累计到阈值后以 `buffer_promoted` 写回兴趣，负向反馈会进入 48h 冷却并抵消分数 |
 | 不喜欢领域探针系统 | ✅ | `AvoidanceSpeculator` 与正向兴趣探针并行运行，最多 5 条 active 避雷假设；只在用户确认或显式负向证据达到阈值后写入 `disliked_topics`，未确认前不参与 discovery / recommendation 过滤；生成前会读取最新 `avoidance_probe_feedback_history`，确认/否认/探针聊天处理过的方向不再作为 active 避雷探针重复出现 |
 | ROLE/VALUES/CORE 增量更新器 | ✅ | `_update_role`（`build_role_delta_prompt`，基于信号证据 + LLM diff-protection）、`_update_values`（LLM delta，每周期最多 add/remove 1 条，注入完整画像上下文）、`_update_core`（`build_core_delta_prompt`，更新 traits/needs/MBTI，强 diff-protection）均已完整实现 |
@@ -179,6 +181,7 @@
 - 从 `speculative_state.json` 直接加载，最多返回 6 条活跃猜测
 - `POST /api/interest-probes/respond` 的 profile 页面确认会传 `surface="profile"` 并记录为 `profile_confirmed`；runtime/inbox 卡片确认默认仍是 `probe_confirmed`；聊天强确认记录为 `chat_confirmed`，buffer 晋升记录为 `buffer_promoted`
 - `POST /api/interest-probes/respond` 与 `POST /api/avoidance-probes/respond` 的 `response` 取值：`confirm` / `reject` / `defer` / `chat`。`defer`（暂时忽略）返回 `{ok, action: "deferred"|"defer_exhausted", deferred_until, defer_count}`，并发 `interest.deferred` / `avoidance.deferred` runtime event（耗尽时复用 `*.rejected` event）。`deferred` 不改画像，桌面 Web 因此不对这两个 event 触发 profile 刷新
+- 桌面 Web 对 `confirm / reject / defer` 使用 10 秒客户端提交屏障，并以 `probe:<messageType>:<normalizedDomain>` 作为跨消息抽屉/画像页的稳定动作键；同一探针不会在两个 surface 产生两次待提交写入。`chat` 不走该屏障
 
 ### Probe 选择
 
@@ -447,6 +450,10 @@ active 池会做两层多样性保护：词面 / specifics 的 novelty guard 阻
 ### 3. 推荐反馈路径：分成“即时记住”和“批量学习”两档
 
 推荐反馈是当前画像更新里最细的一条链。它不是每点一次 `like/dislike` 都立刻重建画像，而是分成两层处理。
+
+卡片 like/dislike 属于可撤销的软信号，并由后台批处理学习。单次 dislike 不会直接把某个
+主题永久写成硬屏蔽；需要确定性修正时，用户仍可主动前往原有画像页写入持久 override，
+或在原有对话页用自由文本说明偏好。本 Issue 不在推荐区新增纠偏引导入口。
 
 #### 第一层：即时认知更新，不重建画像
 

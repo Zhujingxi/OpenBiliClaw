@@ -447,6 +447,8 @@ class DiscoveredContent:
     # ("提瓦特摄影" → 原神, "宝可梦" → 精灵宝可梦, etc.).
     franchise_key: str = ""
     description: str = ""
+    published_at: str = ""
+    published_label: str = ""
     source_strategy: str = ""  # Which strategy found this
     relevance_score: float = 0.0  # 0.0 - 1.0 (based on user soul)
     relevance_reason: str = ""  # Why this is relevant to the user
@@ -498,6 +500,8 @@ class DiscoveredContent:
             "style_key": self.style_key,
             "franchise_key": self.franchise_key,
             "description": self.description,
+            "published_at": self.published_at,
+            "published_label": self.published_label,
             "cover_url": self.cover_url,
             "view_count": self.view_count,
             "like_count": self.like_count,
@@ -2226,6 +2230,8 @@ class ContentDiscoveryEngine:
                     topic_group=str(row.get("topic_group", "")),
                     style_key=str(row.get("style_key", "")),
                     description=str(row.get("description", "")),
+                    published_at=str(row.get("published_at", "") or ""),
+                    published_label=str(row.get("published_label", "") or ""),
                     cover_url=str(row.get("cover_url", "")),
                     view_count=int(row.get("view_count", 0) or 0),
                     like_count=int(row.get("like_count", 0) or 0),

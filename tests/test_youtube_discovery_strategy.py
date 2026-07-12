@@ -90,6 +90,7 @@ def test_normalize_yt_video_maps_optional_engagement_metrics() -> None:
             "viewCountText": {"simpleText": "1,234 views"},
             "like_count": 55,
             "comment_count": "44",
+            "publishedAt": "2026-07-08T06:30:00Z",
         },
         source_strategy="yt_search",
     )
@@ -98,6 +99,33 @@ def test_normalize_yt_video_maps_optional_engagement_metrics() -> None:
     assert content.view_count == 1234
     assert content.like_count == 55
     assert content.comment_count == 44
+    assert content.published_at == "2026-07-08T06:30:00Z"
+
+
+def test_normalize_yt_video_keeps_relative_publication_time_as_label_only() -> None:
+    content = normalize_yt_video(
+        {
+            "videoId": "yt-relative",
+            "title": {"simpleText": "A recent video"},
+            "publishedTimeText": {"simpleText": "3 days ago"},
+        },
+        source_strategy="yt_search",
+    )
+
+    assert content is not None
+    assert content.published_at == ""
+    assert content.published_label == "3 days ago"
+
+
+def test_normalize_yt_video_keeps_candidate_without_publication() -> None:
+    content = normalize_yt_video(
+        {"videoId": "yt-no-time", "title": {"simpleText": "An undated video"}},
+        source_strategy="yt_search",
+    )
+
+    assert content is not None
+    assert content.published_at == ""
+    assert content.published_label == ""
 
 
 def test_youtube_search_and_channel_default_thresholds_are_normal_floor() -> None:

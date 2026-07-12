@@ -58,6 +58,8 @@
 | v0.3.x dislike-aware prompts | ✅ | `build_preference_analysis_prompt` 明确把 negative / dislike / thumbs_down 事件限制为 `disliked_topics` 与风格避让证据，禁止提取为正向兴趣；`build_awareness_prompt` 可从近期 dislike 生成“最近开始避开 X”的保守观察；单条 / 批量推荐表达 prompt 会消费 `profile_summary.disliked_topics`，命中避雷项时不得热情背书 |
 | v0.3.x 避雷探针多样性 prompt | ✅ | `build_avoidance_generation_prompt` 会携带 `existing_avoidance_details`，让 LLM 看到已有 active 的 `source_mode`、`source_signal`、体验轴和 specifics；system prompt 要求同一 `source_mode` + 同一粗主题 / 证据源只生成一个候选，已有 AI positive_boundary 时不再输出 AI 教程 / 测评 / 趋势换皮项 |
 | v0.3.x 第三方 API 网关适配（issue #72） | ✅ | 两条路径：(1) `[llm.claude].base_url` 全链路穿透到 `AsyncAnthropic`，Claude 可走任何 Anthropic 协议（`/v1/messages`）中转网关，留空仍用官方地址；(2) `[llm.openai]` / `[llm.openai_compatible]` 新增 `api_flavor` —— `""`/`"chat_completions"` 走 `/v1/chat/completions`（默认），`"responses"` 走 `/v1/responses`（system→`instructions`、`max_tokens`→`max_output_tokens`、json_mode→`text.format`、`input_tokens_details.cached_tokens` 归一为 `cached_input_tokens`；每个 Responses 请求都会显式发送顶层 `store=false`，兼容官方 OpenAI 及由 ChatGPT/Codex Responses 端点驱动的第三方网关；gpt-5 家族拒收 `temperature` 时自动降参重试）。非法值被 `_collect_config_issues` blocking 拦下 |
+| v0.3.162+ 托管 Ollama 生命周期自愈 | ✅ | `runtime/ollama_supervisor.py` 记录托管 daemon 的完整启动规格并新增 watchdog；`with-embedding` 私有 11435 daemon 纳入一键修复与崩溃自动拉起（详见下方[托管 Ollama 生命周期](#托管-ollama-生命周期v03162)） |
+| v0.3.164 海外出口代理透传（issue #89） | ✅ | `OpenAIProvider` / `ClaudeProvider` / `GeminiProvider`（含 DeepSeek / OpenRouter 子类与 embedding 实例）新增 `proxy: str = ""` 形参；非空时 OpenAI/Claude 经 `http_client=httpx.AsyncClient(proxy=...)`、Gemini 经 `http_options` 的 `client_args`/`async_client_args` 路由。各 `_maybe_*` 工厂统一读 `openbiliclaw.network.outbound_proxy_url()`（源自 `[network].proxy`）。空值零漂移（不注入任何代理参数）。**Ollama 工厂不读该值**——本地 / CN 直连由 `tests/test_network_proxy_isolation.py` 守卫 |
 
 ## 公开 API
 
@@ -373,6 +375,52 @@ base_url = "https://openrouter.ai/api/v1"
 http_referer = ""
 x_title = "OpenBiliClaw"
 ```
+
+## 托管 Ollama 生命周期（v0.3.162+）
+
+`runtime/ollama_supervisor.py` 负责本进程"拥有"的 Ollama daemon 的完整生命周期。
+
+**记录的 daemon 规格**：模块级 `_ManagedDaemon(proc, base_url, models_dir)` 取代了旧的裸
+`_managed_proc` 句柄。`proc` 为我们 spawn 的 `Popen`（可发信号），或 `None` 表示"收养"——
+仅限专用私有端口（`with-embedding` 的 `127.0.0.1:11435`）在启动时已有 daemon 应答的
+force-quit 残留场景；收养只做记录、绝不发信号，但让 watchdog 能在它死后按记录的
+`(host, models_dir)` 拉起新 daemon。任何 restart 都复用记录规格：私有 daemon 永远不会
+回到 11434、也不会丢私有模型目录。`stop_managed_ollama` 清整条记录。
+
+**端点判定**：`is_managed_endpoint(endpoint)` 做 host:port 归一化比较（`localhost` ≡
+`127.0.0.1` ≡ `::1`，scheme / `/v1` path 不敏感）；`may_manage_ollama_endpoint(endpoint)` =
+默认 loopback 11434 **或** 已记录的托管 daemon，是 `api/app.py` 两个修复 gate
+（not_running / provider_error）唯一使用的谓词。`ensure_managed_ollama(endpoint)` 按记录
+路由 not_running 修复的启动动作（私有 → `start_managed_ollama_at(记录目录, 记录端口)`，
+否则默认路径）。
+
+**Watchdog**：`start_ollama_watchdog(interval_seconds=30)` 幂等地启动单个 daemon 线程
+（`obc-ollama-watchdog`），两条成功启动路径（默认 + 私有，含收养分支）都会自动布防。
+每周期探测记录端点：健康即清零失败计数；探测失败且（自有进程已退出，或收养记录不再应答）
+才经 spec-aware `restart_managed_ollama()` 重启——探测失败但自有进程仍存活时不动它
+（绝不因单次探测失败杀活 daemon）。连续重启失败按 5s 起步、翻倍、300s 封顶退避，
+连续 5 次失败后放弃（上报 phase `down` + ERROR 日志），直到 `reset_watchdog_backoff()`
+（任何一次成功启动 / 手动修复成功都会调用）或进程重启。重启用 restart-in-progress 标志
+与手动修复互斥。
+
+**修复覆盖**（`POST /api/embedding/repair` 的 `may_manage` 判定，其余条件：
+`manage_ollama=true` + `ollama_required` + loopback）：
+
+| Endpoint | 记录状态 | not_running 动作 | provider_error 动作 |
+| --- | --- | --- | --- |
+| `localhost:11434`（默认） | 有/无记录 | 默认路径启动（同旧行为） | spec-aware restart |
+| `127.0.0.1:11435`（with-embedding 私有） | 有记录（spawn 或收养） | `start_managed_ollama_at(记录目录, 记录端口)` | spec-aware restart（私有路径） |
+| 自定义端口 / 远端 | 无记录 | 409（不越权，同旧行为） | 409 |
+| 任意 | `manage_ollama=false` | 409 | 409 |
+
+拒绝原因：`external_ollama`（记录外的 daemon 在应答）、`adopted_alive`（收养 daemon 仍
+活着——不能停我们不拥有的进程）、`private_daemon`（`restart_managed_ollama_with_models_dir`
+是默认 daemon 的路径迁移工具，对私有记录拒绝）、`restart_in_progress`。
+
+**`OLLAMA_KEEP_ALIVE` 归属**：私有 daemon 完全由我们拥有，`OLLAMA_KEEP_ALIVE=24h` 与
+`OLLAMA_HOST` / `OLLAMA_MODELS` 一律**硬设**（用户环境里的 `OLLAMA_KEEP_ALIVE=0` 不会
+渗入导致 5 分钟卸载 + 冷启动 502 被误诊为 `model_broken`）；默认 daemon 路径保持
+`setdefault`，尊重用户的全局设置。
 
 ## 设计决策
 

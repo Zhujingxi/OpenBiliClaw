@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 from urllib import request as urllib_request
 
 from openbiliclaw.discovery.engine import DiscoveredContent
+from openbiliclaw.published_time import normalize_published_time
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -68,6 +69,22 @@ _YTDLP_FLAT_OPTIONS: dict[str, Any] = {
     "ignoreerrors": True,
     "socket_timeout": 20,
 }
+
+
+def _ytdlp_options(**extra: Any) -> dict[str, Any]:
+    """Base flat yt-dlp options plus the overseas outbound proxy when set.
+
+    YouTube is an overseas source, so it honors ``[network].proxy``. yt-dlp's
+    native ``proxy`` option routes its HTTP through it; omitting the key keeps
+    yt-dlp's default (env-inheriting) behavior — zero drift when unset.
+    """
+    from openbiliclaw.network import outbound_proxy_url
+
+    options: dict[str, Any] = {**_YTDLP_FLAT_OPTIONS, **extra}
+    proxy = outbound_proxy_url()
+    if proxy:
+        options["proxy"] = proxy
+    return options
 
 
 @dataclass(frozen=True)
@@ -108,7 +125,7 @@ def _ytdlp_search(query: str, limit: int) -> list[dict[str, Any]]:
     try:
         from yt_dlp import YoutubeDL  # type: ignore[import-untyped]
 
-        with YoutubeDL(_YTDLP_FLAT_OPTIONS) as ydl:
+        with YoutubeDL(_ytdlp_options()) as ydl:
             info = ydl.extract_info(f"ytsearch{max(1, limit)}:{query}", download=False)
         return _ytdlp_entries(info, limit)
     except Exception as exc:
@@ -164,7 +181,7 @@ def _ytdlp_channel(channel_ref: str, limit: int) -> list[dict[str, Any]]:
     try:
         from yt_dlp import YoutubeDL
 
-        with YoutubeDL({**_YTDLP_FLAT_OPTIONS, "playlistend": limit}) as ydl:
+        with YoutubeDL(_ytdlp_options(playlistend=limit)) as ydl:
             info = ydl.extract_info(url, download=False)
         return _ytdlp_entries(info, limit)
     except Exception as exc:
@@ -546,6 +563,13 @@ def normalize_yt_video(
 
     # Description snippet
     description = _extract_text(raw.get("descriptionSnippet") or raw.get("description") or "")[:300]
+    published = normalize_published_time(
+        raw.get("timestamp")
+        or raw.get("release_timestamp")
+        or raw.get("upload_date")
+        or raw.get("publishedAt"),
+        label=_extract_text(raw.get("publishedTimeText") or ""),
+    )
 
     return DiscoveredContent(
         content_id=video_id,
@@ -561,6 +585,8 @@ def normalize_yt_video(
         comment_count=comment_count,
         description=description,
         source_strategy=source_strategy,
+        published_at=published.published_at,
+        published_label=published.published_label,
     )
 
 

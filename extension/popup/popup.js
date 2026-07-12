@@ -8,6 +8,7 @@ import {
   buildRecommendationClickPayload,
   buildVideoUrl,
   formatRelativeTimestamp,
+  formatPublishedTime,
   getCommentSubmitUiState,
   getCognitionHistoryUiState,
   getConnectionBadgeState,
@@ -28,6 +29,7 @@ import {
   normalizeProbeType,
   normalizeRuntimeStatus,
   normalizeProfileSummary,
+  platformDisplayName,
   probeMessageKey,
   shouldDisplayProbeFromWebSocket,
   shouldHydrateProbe,
@@ -1438,6 +1440,39 @@ function isAvoidanceProbeType(type) {
   return normalizeProbeType(type) === "avoidance.probe";
 }
 
+function probeActionDescriptors(type) {
+  return isAvoidanceProbeType(type)
+    ? [
+        { action: "confirm", label: "确认避雷", className: "is-confirm" },
+        { action: "defer", label: "搁置避雷", className: "is-neutral" },
+        { action: "reject", label: "不是雷点", className: "is-reject" },
+        { action: "chat", label: "多聊聊", className: "is-chat" },
+      ]
+    : [
+        { action: "confirm", label: "确认喜欢", className: "is-confirm" },
+        { action: "defer", label: "暂时搁置", className: "is-neutral" },
+        { action: "reject", label: "确认不喜欢", className: "is-reject" },
+        { action: "chat", label: "多聊聊", className: "is-chat" },
+      ];
+}
+
+function probeResponseMessage(type, responseType, domain) {
+  const isAvoidance = isAvoidanceProbeType(type);
+  if (responseType === "defer") {
+    return isAvoidance
+      ? `好，「${domain}」先搁置，过阵子再确认是不是雷点。`
+      : `好，「${domain}」先搁置，过阵子再问。`;
+  }
+  if (responseType === "confirm") {
+    return isAvoidance
+      ? `好，「${domain}」会作为避雷方向处理。`
+      : `好，「${domain}」记住了。`;
+  }
+  return isAvoidance
+    ? `好，「${domain}」不记成避雷。`
+    : `好，「${domain}」会作为不喜欢处理。`;
+}
+
 function isChallengeProbe(probe) {
   const mode = String(probe?.probe_mode || "").toLowerCase();
   return Boolean(probe?.challenge) || mode === "lateral" || mode === "bridge" || mode === "wildcard";
@@ -1893,22 +1928,21 @@ function renderSpeculativeInterests(container, items, { kind = "interest" } = {}
     if ((item.status || "active") === "active" && item.domain) {
       const actions = document.createElement("div");
       actions.className = "spec-actions";
-
-      const confirmBtn = document.createElement("button");
-      confirmBtn.className = "probe-btn is-confirm";
-      confirmBtn.textContent = isAvoidance ? "确实不喜欢" : "喜欢";
-      confirmBtn.addEventListener("click", () =>
-        handleSpecResponse(item.domain, "confirm", row, isAvoidance ? "avoidance.probe" : "interest.probe"),
-      );
-
-      const rejectBtn = document.createElement("button");
-      rejectBtn.className = "probe-btn is-reject";
-      rejectBtn.textContent = isAvoidance ? "不是" : "不喜欢";
-      rejectBtn.addEventListener("click", () =>
-        handleSpecResponse(item.domain, "reject", row, isAvoidance ? "avoidance.probe" : "interest.probe"),
-      );
-
-      actions.append(confirmBtn, rejectBtn);
+      for (const { action: responseType, label, className } of probeActionDescriptors(
+        probeType,
+      ).filter(({ action }) => action !== "chat")) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `probe-btn ${className}`;
+        button.textContent = label;
+        button.setAttribute("aria-label", label);
+        button.title = label;
+        button.dataset.responseType = responseType;
+        button.addEventListener("click", () =>
+          handleSpecResponse(item.domain, responseType, row, probeType),
+        );
+        actions.append(button);
+      }
       row.append(actions);
     }
 
@@ -1941,9 +1975,7 @@ async function handleSpecResponse(domain, responseType, rowEl, type = "interest.
       rowEl.replaceChildren();
       const msg = document.createElement("p");
       msg.className = "spec-result";
-      msg.textContent = isAvoidance
-        ? (responseType === "confirm" ? `好，「${domain}」会作为避雷方向处理。` : `好，「${domain}」不记成避雷。`)
-        : (responseType === "confirm" ? `好，「${domain}」记住了。` : `好，「${domain}」先不看了。`);
+      msg.textContent = probeResponseMessage(type, responseType, domain);
       rowEl.append(msg);
       setTimeout(() => rowEl.remove(), 2500);
     }
@@ -2014,23 +2046,16 @@ function renderProbeCard() {
 
   const actions = document.createElement("div");
   actions.className = "probe-actions";
-
-  const confirmBtn = document.createElement("button");
-  confirmBtn.className = "probe-btn is-confirm";
-  confirmBtn.textContent = "\u559C\u6B22";
-  confirmBtn.addEventListener("click", () => handleProbeResponse("confirm"));
-
-  const rejectBtn = document.createElement("button");
-  rejectBtn.className = "probe-btn is-reject";
-  rejectBtn.textContent = "\u4E0D\u559C\u6B22";
-  rejectBtn.addEventListener("click", () => handleProbeResponse("reject"));
-
-  const chatBtn = document.createElement("button");
-  chatBtn.className = "probe-btn is-chat";
-  chatBtn.textContent = "\u591a\u804a\u804a";
-  chatBtn.addEventListener("click", () => handleProbeResponse("chat"));
-
-  actions.append(confirmBtn, rejectBtn, chatBtn);
+  for (const descriptor of probeActionDescriptors("interest.probe")) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `probe-btn ${descriptor.className}`;
+    button.textContent = descriptor.label;
+    button.setAttribute("aria-label", descriptor.label);
+    button.title = descriptor.label;
+    button.addEventListener("click", () => handleProbeResponse(descriptor.action));
+    actions.append(button);
+  }
   card.append(actions);
 
   // Insert at the top of the speculative interests container
@@ -2069,9 +2094,7 @@ async function handleProbeResponse(responseType) {
       probeCard.replaceChildren();
       const msg = document.createElement("p");
       msg.className = "probe-result";
-      msg.textContent = responseType === "confirm"
-        ? `\u597D\uFF0C\u300C${domain}\u300D\u8BB0\u4F4F\u4E86\u3002`
-        : `\u597D\uFF0C\u300C${domain}\u300D\u5148\u4E0D\u770B\u4E86\u3002`;
+      msg.textContent = probeResponseMessage("interest.probe", responseType, domain);
       probeCard.append(msg);
       setTimeout(() => probeCard.remove(), 3000);
     }
@@ -2375,7 +2398,7 @@ function onMessageActionClick(event) {
     dismissMessage(domain, type);
   } else if (action === "chat") {
     expandInlineChat(card, domain, type);
-  } else if (action === "confirm" || action === "reject") {
+  } else if (action === "confirm" || action === "defer" || action === "reject") {
     // Guard against a double-click firing the API twice before the card is
     // replaced with its success state; clear on settle so an error path (card
     // kept) can be retried (success replaces the card, so it's moot there).
@@ -2483,29 +2506,17 @@ function buildMessageCard(probe) {
 
   const actions = document.createElement("div");
   actions.className = "message-actions";
-
-  const confirmBtn = document.createElement("button");
-  confirmBtn.className = "probe-btn is-confirm";
-  confirmBtn.textContent = isAvoidance ? "确实不喜欢" : "\u559C\u6B22";
-  confirmBtn.dataset.msgAction = "confirm";
-
-  const rejectBtn = document.createElement("button");
-  rejectBtn.className = "probe-btn is-reject";
-  rejectBtn.textContent = isAvoidance ? "不是" : "\u4E0D\u559C\u6B22";
-  rejectBtn.dataset.msgAction = "reject";
-
-  const chatBtn = document.createElement("button");
-  chatBtn.className = "probe-btn is-chat";
-  chatBtn.textContent = "\u591A\u804A\u804A";
-  chatBtn.dataset.msgAction = "chat";
-
-  if (probe.chat_status === "pending") {
-    confirmBtn.disabled = true;
-    rejectBtn.disabled = true;
-    chatBtn.disabled = true;
+  for (const descriptor of probeActionDescriptors(type)) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `probe-btn ${descriptor.className}`;
+    button.textContent = descriptor.label;
+    button.setAttribute("aria-label", descriptor.label);
+    button.title = descriptor.label;
+    button.dataset.msgAction = descriptor.action;
+    button.disabled = probe.chat_status === "pending";
+    actions.append(button);
   }
-
-  actions.append(confirmBtn, rejectBtn, chatBtn);
   item.append(actions);
   return item;
 }
@@ -2544,6 +2555,18 @@ function appendRecommendationStats(parent, item) {
   stats.className = "recommendation-stats";
   stats.textContent = text;
   parent.append(stats);
+}
+
+function appendPublishedTime(parent, item) {
+  const text = formatPublishedTime(item);
+  if (!text) return;
+  const time = document.createElement("span");
+  time.className = "recommendation-published-time";
+  time.textContent = text;
+  if (item.published_at && Number.isFinite(Date.parse(item.published_at))) {
+    time.title = new Date(item.published_at).toLocaleString();
+  }
+  parent.append(time);
 }
 
 // ── Delight (surprise recommendation) card ─────────────────────
@@ -2593,10 +2616,16 @@ function buildDelightCard(delight) {
     textCol.append(hookBadge);
   }
 
+  const platformChip = document.createElement("span");
+  platformChip.className = "message-delight-platform";
+  platformChip.textContent = platformDisplayName(delight.source_platform || "bilibili");
+  textCol.append(platformChip);
+
   const title = document.createElement("div");
   title.className = "message-delight-title";
   title.textContent = delight.title || "";
   textCol.append(title);
+  appendPublishedTime(textCol, delight);
 
   top.append(textCol);
   item.append(top);
@@ -2955,9 +2984,7 @@ async function handleMessageResponse(domain, responseType, type = "interest.prob
       item.replaceChildren();
       const msg = document.createElement("p");
       msg.className = "message-result";
-      msg.textContent = isAvoidance
-        ? (responseType === "confirm" ? `好，「${domain}」会作为避雷方向处理。` : `好，「${domain}」不记成避雷。`)
-        : (responseType === "confirm" ? `\u597D\uFF0C\u300C${domain}\u300D\u8BB0\u4F4F\u4E86\u3002` : `\u597D\uFF0C\u300C${domain}\u300D\u5148\u4E0D\u770B\u4E86\u3002`);
+      msg.textContent = probeResponseMessage(type, responseType, domain);
       item.append(msg);
       setTimeout(() => {
         item.remove();
@@ -4639,6 +4666,11 @@ function renderDelightSlot() {
   kicker.className = "delight-banner-kicker";
   kicker.textContent = `✨ ${delight.delight_hook || "惊喜推荐"}`;
   kickerLine.append(kicker);
+  const platformChip = document.createElement("span");
+  platformChip.className = "delight-banner-platform";
+  platformChip.textContent = platformDisplayName(delight.source_platform || "bilibili");
+  kickerLine.append(platformChip);
+  appendPublishedTime(kickerLine, delight);
   if (queueLength > 1) {
     const prevBtn = document.createElement("button");
     prevBtn.type = "button";
@@ -5223,6 +5255,7 @@ function renderRecommendations(items, { append = false } = {}) {
     const metaLine = document.createElement("p");
     metaLine.className = "recommendation-meta-line";
     metaLine.textContent = `这位 UP：${item.up_name}`;
+    appendPublishedTime(metaLine, item);
 
     content.append(top, copyBlock, metaLine);
     appendRecommendationStats(content, item);
@@ -6498,6 +6531,7 @@ function bindSettings() {
     ready: "#2ecc71",
     syncing: "#9aa0a6",
     no_auth: "#9aa0a6",
+    unverified: "#9aa0a6",
     missing: "#e0a800",
     missing_cookie: "#e0a800",
     login_required: "#e0a800",
@@ -6509,7 +6543,21 @@ function bindSettings() {
     blocked: "#e74c3c",
   };
   const SOURCE_STATUS_LABEL = {
+    ok: "接入可用",
+    ready: "凭据已就绪",
     syncing: "接入中",
+    no_auth: "无需登录",
+    unverified: "状态待验证",
+    missing: "需要登录",
+    missing_cookie: "缺少 Cookie",
+    login_required: "需要登录",
+    rate_limited: "频率受限",
+    partial: "部分可用",
+    stale: "需要刷新",
+    error: "检查失败",
+    expired: "凭据失效",
+    expired_cookie: "Cookie 失效",
+    blocked: "接入受阻",
   };
   const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
 
@@ -6678,6 +6726,7 @@ function bindSettings() {
     if (lang) lang.value = cfg.language || "zh";
     setVal("cfgDataDir", cfg.data_dir);
     setVal("cfgStorageDbPath", cfg.storage?.db_path);
+    setVal("cfgNetworkProxy", cfg.network?.proxy || "");
 
     // Scheduler
     const schedEnabled = document.getElementById("cfgSchedulerEnabled");
@@ -6940,6 +6989,9 @@ function bindSettings() {
       storage: {
         db_path: getVal("cfgStorageDbPath"),
       },
+      network: {
+        proxy: getVal("cfgNetworkProxy"),
+      },
       logging: {
         level: getVal("cfgLogLevel"),
         file_level: getVal("cfgLogFileLevel"),
@@ -7045,6 +7097,32 @@ function bindSettings() {
   if (probeEmbeddingBtn instanceof HTMLButtonElement) {
     probeEmbeddingBtn.addEventListener("click", () => {
       void runEmbeddingConfigProbe(probeEmbeddingBtn, probeEmbeddingStatus);
+    });
+  }
+
+  async function runNetworkProxyConfigProbe(button, statusEl) {
+    if (!button) return;
+    button.disabled = true;
+    renderProbePending(statusEl, "代理");
+    try {
+      const proxy = getVal("cfgNetworkProxy");
+      const result = await probeConfigService("network_proxy", { network: { proxy } });
+      renderProbeResult(statusEl, result);
+    } catch (err) {
+      renderProbeResult(statusEl, {
+        ok: false,
+        error: err?.message || "代理探测失败",
+      });
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  const probeNetworkProxyBtn = document.getElementById("cfgProbeNetworkProxy");
+  const probeNetworkProxyStatus = document.getElementById("cfgProbeNetworkProxyStatus");
+  if (probeNetworkProxyBtn instanceof HTMLButtonElement) {
+    probeNetworkProxyBtn.addEventListener("click", () => {
+      void runNetworkProxyConfigProbe(probeNetworkProxyBtn, probeNetworkProxyStatus);
     });
   }
 

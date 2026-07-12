@@ -6,10 +6,13 @@ See docs/specs/gui-init.md §5a and docs/plans/2026-06-07-gui-init-implementatio
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 import pytest
 
+from openbiliclaw.discovery.candidate_pool import discovered_content_to_candidate_write
+from openbiliclaw.discovery.engine import DiscoveredContent
 from openbiliclaw.storage.database import Database
 
 if TYPE_CHECKING:
@@ -151,6 +154,26 @@ def test_zhihu_login_state_roundtrips_through_auth_state(tmp_path: Path) -> None
     )
 
 
+def test_login_state_writes_are_safe_across_concurrent_fastapi_threads(tmp_path: Path) -> None:
+    """XHS and Zhihu heartbeats arrive together on runtime-stream connect."""
+    db = _db(tmp_path)
+
+    def write_login_state(index: int) -> None:
+        logged_in = index % 2 == 0
+        if index % 2 == 0:
+            db.set_xhs_login_state(logged_in)
+        else:
+            db.set_zhihu_login_state(logged_in)
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        futures = [executor.submit(write_login_state, index) for index in range(200)]
+        for future in futures:
+            future.result()
+
+    assert db.get_xhs_login_state()[1]
+    assert db.get_zhihu_login_state()[1]
+
+
 def test_get_recommendations_rows_carry_card_metadata_columns(tmp_path: Path) -> None:
     """Regression (issue #75): the history join must SELECT the card-metadata
     columns, otherwise /api/recommendations serializes them all as 0 even
@@ -171,6 +194,8 @@ def test_get_recommendations_rows_carry_card_metadata_columns(tmp_path: Path) ->
         cover_url="https://example.com/cover.jpg",
         source_platform="bilibili",
         content_type="video",
+        published_at="2026-07-08T06:30:00Z",
+        published_label="3 天前",
         relevance_score=0.9,
     )
     db.insert_recommendation("BV1meta", confidence=0.9, expression="试试", topic="测试")
@@ -186,3 +211,93 @@ def test_get_recommendations_rows_carry_card_metadata_columns(tmp_path: Path) ->
     assert row["favorite_count"] == 321
     assert row["comment_count"] == 654
     assert row["up_mid"] == 12345
+    assert row["published_at"] == "2026-07-08T06:30:00Z"
+    assert row["published_label"] == "3 天前"
+
+
+@pytest.mark.parametrize(
+    ("incoming_at", "incoming_label", "expected_at", "expected_label"),
+    [
+        ("", "更新后的相对时间", "2026-07-08T06:30:00Z", "更新后的相对时间"),
+        ("2026-07-09T06:30:00Z", "", "2026-07-09T06:30:00Z", "旧标签"),
+    ],
+)
+def test_content_cache_rediscovery_preserves_each_empty_publication_field_independently(
+    tmp_path: Path,
+    incoming_at: str,
+    incoming_label: str,
+    expected_at: str,
+    expected_label: str,
+) -> None:
+    db = _db(tmp_path)
+    db.cache_content(
+        "BV1TIME",
+        title="A",
+        published_at="2026-07-08T06:30:00Z",
+        published_label="旧标签",
+    )
+    db.cache_content(
+        "BV1TIME",
+        title="A",
+        published_at=incoming_at,
+        published_label=incoming_label,
+    )
+
+    row = db.conn.execute(
+        "SELECT published_at, published_label FROM content_cache WHERE bvid='BV1TIME'"
+    ).fetchone()
+
+    assert row["published_at"] == expected_at
+    assert row["published_label"] == expected_label
+
+
+def test_legacy_content_tables_gain_publication_columns(tmp_path: Path) -> None:
+    db_path = tmp_path / "init.db"
+    db = Database(db_path)
+    db.initialize()
+    db.cache_content("BV1LEGACY", title="legacy content")
+    candidate = DiscoveredContent(bvid="BV1LEGACY-CANDIDATE", title="legacy candidate")
+    candidate_write = discovered_content_to_candidate_write(candidate)
+    db.enqueue_discovery_candidates([candidate_write])
+    for table_name in ("content_cache", "discovery_candidates"):
+        existing = {
+            str(row["name"])
+            for row in db.conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        for column_name in ("published_at", "published_label"):
+            if column_name in existing:
+                db.conn.execute(f"ALTER TABLE {table_name} DROP COLUMN {column_name}")
+    db.conn.commit()
+    db.close()
+
+    migrated = Database(db_path)
+    migrated.initialize()
+
+    for table_name in ("content_cache", "discovery_candidates"):
+        columns = {
+            str(row["name"]): row
+            for row in migrated.conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        for column_name in ("published_at", "published_label"):
+            assert columns[column_name]["notnull"] == 1
+            assert columns[column_name]["dflt_value"] == "''"
+    content = migrated.conn.execute(
+        "SELECT title, published_at, published_label FROM content_cache WHERE bvid = ?",
+        ("BV1LEGACY",),
+    ).fetchone()
+    assert dict(content) == {
+        "title": "legacy content",
+        "published_at": "",
+        "published_label": "",
+    }
+    candidate_row = migrated.conn.execute(
+        "SELECT title, published_at, published_label "
+        "FROM discovery_candidates WHERE candidate_key = ?",
+        (candidate_write.candidate_key,),
+    ).fetchone()
+    assert dict(candidate_row) == {
+        "title": "legacy candidate",
+        "published_at": "",
+        "published_label": "",
+    }
+    migrated.close()

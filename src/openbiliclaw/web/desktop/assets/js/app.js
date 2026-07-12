@@ -145,6 +145,16 @@
     let activityPageRefreshTimer = null;
     let activityPageRefreshInFlight = false;
     let activityPageRefreshPending = false;
+    const DESKTOP_RECOVERY_DELAYS_MS = [1000, 2000, 4000, 8000];
+    let desktopRecommendationLoadState = "idle";
+    let desktopRuntimeLoadState = "idle";
+    let desktopRecommendationRecoveryAttempt = 0;
+    let desktopRuntimeRecoveryAttempt = 0;
+    let desktopRecommendationRecoveryTimer = null;
+    let desktopRuntimeRecoveryTimer = null;
+    let desktopRecommendationRecoveryInFlight = false;
+    let desktopRuntimeRecoveryInFlight = false;
+    let desktopRuntimeGeneration = 0;
 
     function debounceAsync(fn, delayMs = 1000) {
       let timer = null;
@@ -192,6 +202,202 @@
         backendHydrationTimer = null;
         void runBackendHydration();
       }, 1000);
+    }
+
+    function settleResource(promise) {
+      return promise.then(
+        (value) => ({ ok: true, value }),
+        (error) => ({ ok: false, error })
+      );
+    }
+
+    async function readRecommendationSnapshot() {
+      const payload = await requestJsonStrict(ENDPOINTS.recommendations, { timeoutMs: 15000 });
+      return Array.isArray(payload) ? payload : asArray(payload?.items);
+    }
+
+    async function readRuntimeStatusSnapshot() {
+      const payload = await requestJsonStrict(ENDPOINTS.runtimeStatus, { timeoutMs: 15000 });
+      return payload?.status || payload;
+    }
+
+    function clearDesktopRecommendationRecovery(nextState) {
+      if (desktopRecommendationRecoveryTimer !== null) {
+        window.clearTimeout(desktopRecommendationRecoveryTimer);
+        desktopRecommendationRecoveryTimer = null;
+      }
+      desktopRecommendationRecoveryAttempt = 0;
+      desktopRecommendationLoadState = nextState;
+    }
+
+    function clearDesktopRuntimeRecovery(nextState = "ready") {
+      if (desktopRuntimeRecoveryTimer !== null) {
+        window.clearTimeout(desktopRuntimeRecoveryTimer);
+        desktopRuntimeRecoveryTimer = null;
+      }
+      desktopRuntimeRecoveryAttempt = 0;
+      desktopRuntimeLoadState = nextState;
+      const poolAvailable = $("#poolAvailable");
+      if (poolAvailable) {
+        poolAvailable.onclick = null;
+        poolAvailable.onkeydown = null;
+        poolAvailable.removeAttribute("role");
+        poolAvailable.removeAttribute("tabindex");
+        poolAvailable.removeAttribute("aria-label");
+      }
+    }
+
+    function applyDesktopRecommendationSnapshot(items, { replace = false } = {}) {
+      const normalized = normalizeRecommendationList(items);
+      if (normalized.length > 0) {
+        desktopRecommendationLoadState = "ready";
+      } else {
+        desktopRecommendationLoadState = "empty-success";
+      }
+      clearDesktopRecommendationRecovery(desktopRecommendationLoadState);
+      if (!replace && state.videos.length > 0) return;
+      state.videos = normalized;
+    }
+
+    function applyDesktopRuntimeSnapshot(payload, requestGeneration) {
+      if (requestGeneration !== desktopRuntimeGeneration) return false;
+      if (!payload) throw new Error("runtime status unavailable");
+      desktopRuntimeGeneration += 1;
+      clearDesktopRuntimeRecovery();
+      applyRuntimeStatus(payload);
+      return true;
+    }
+
+    function renderDesktopRuntimeFailure() {
+      if (desktopRuntimeLoadState !== "failed" && desktopRuntimeLoadState !== "failed-exhausted") return;
+      const exhausted = desktopRuntimeLoadState === "failed-exhausted";
+      if (!state.runtimeStatus) {
+        $("#metricPool").textContent = "—";
+        $("#poolAvailable").textContent = exhausted ? "同步失败，点击重试" : "同步失败，正在重试";
+        $("#runtimeSummary").textContent = "库存状态读取失败；这不代表候选池真的为空。";
+      } else {
+        $("#runtimeSummary").textContent = exhausted
+          ? "库存状态同步失败；当前显示的是上次成功读取的库存，点击库存数可重试。"
+          : "库存状态同步失败，正在重试；当前显示的是上次成功读取的库存。";
+      }
+      $("#poolRefreshState").textContent = exhausted ? "同步失败，点击库存重试" : "状态重试中";
+      if (exhausted) {
+        const poolAvailable = $("#poolAvailable");
+        poolAvailable.setAttribute("role", "button");
+        poolAvailable.setAttribute("tabindex", "0");
+        poolAvailable.setAttribute("aria-label", "库存状态同步失败，重新加载");
+        poolAvailable.onclick = restartDesktopFailedRecoveries;
+        poolAvailable.onkeydown = (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            restartDesktopFailedRecoveries();
+          }
+        };
+      }
+    }
+
+    function scheduleDesktopRecommendationRecovery() {
+      if (state.videos.length > 0) {
+        clearDesktopRecommendationRecovery("ready");
+        return;
+      }
+      if (desktopRecommendationLoadState !== "failed") return;
+      if (desktopRecommendationRecoveryInFlight || desktopRecommendationRecoveryTimer !== null) return;
+      if (desktopRecommendationRecoveryAttempt >= DESKTOP_RECOVERY_DELAYS_MS.length) {
+        desktopRecommendationLoadState = "failed-exhausted";
+        renderVideos();
+        return;
+      }
+      const delayMs = DESKTOP_RECOVERY_DELAYS_MS[desktopRecommendationRecoveryAttempt];
+      desktopRecommendationRecoveryTimer = window.setTimeout(() => {
+        desktopRecommendationRecoveryTimer = null;
+        desktopRecommendationRecoveryAttempt += 1;
+        void runDesktopRecommendationRecovery();
+      }, delayMs);
+    }
+
+    async function runDesktopRecommendationRecovery() {
+      if (state.videos.length > 0) {
+        clearDesktopRecommendationRecovery("ready");
+        return;
+      }
+      if (desktopRecommendationLoadState !== "failed" || desktopRecommendationRecoveryInFlight) return;
+      desktopRecommendationRecoveryInFlight = true;
+      try {
+        applyDesktopRecommendationSnapshot(await readRecommendationSnapshot());
+      } catch {
+        desktopRecommendationLoadState = "failed";
+      } finally {
+        desktopRecommendationRecoveryInFlight = false;
+        renderVideos();
+        scheduleDesktopRecommendationRecovery();
+      }
+    }
+
+    function scheduleDesktopRuntimeRecovery() {
+      if (desktopRuntimeLoadState !== "failed") return;
+      if (desktopRuntimeRecoveryInFlight || desktopRuntimeRecoveryTimer !== null) return;
+      if (desktopRuntimeRecoveryAttempt >= DESKTOP_RECOVERY_DELAYS_MS.length) {
+        desktopRuntimeLoadState = "failed-exhausted";
+        renderDesktopRuntimeFailure();
+        return;
+      }
+      const delayMs = DESKTOP_RECOVERY_DELAYS_MS[desktopRuntimeRecoveryAttempt];
+      desktopRuntimeRecoveryTimer = window.setTimeout(() => {
+        desktopRuntimeRecoveryTimer = null;
+        desktopRuntimeRecoveryAttempt += 1;
+        void runDesktopRuntimeRecovery();
+      }, delayMs);
+    }
+
+    async function runDesktopRuntimeRecovery() {
+      if (desktopRuntimeLoadState !== "failed" || desktopRuntimeRecoveryInFlight) return;
+      desktopRuntimeRecoveryInFlight = true;
+      const requestGeneration = desktopRuntimeGeneration;
+      try {
+        const applied = applyDesktopRuntimeSnapshot(
+          await readRuntimeStatusSnapshot(),
+          requestGeneration
+        );
+        // Initial recommendation and runtime reads recover independently. If
+        // recommendations recover first, the guided-init gate remains in the
+        // grid until the runtime snapshot proves the first pool is ready.
+        // Refresh only that gate; do not rebuild healthy, interactive cards.
+        if (applied && grid.querySelector(".init-onboarding")) renderVideos();
+      } catch {
+        if (requestGeneration !== desktopRuntimeGeneration) return;
+        desktopRuntimeLoadState = "failed";
+      } finally {
+        desktopRuntimeRecoveryInFlight = false;
+        scheduleDesktopRuntimeRecovery();
+        renderDesktopRuntimeFailure();
+      }
+    }
+
+    function restartDesktopFailedRecoveries() {
+      let recommendationRestarted = false;
+      let runtimeRestarted = false;
+      if (
+        state.videos.length === 0 &&
+        (desktopRecommendationLoadState === "failed" || desktopRecommendationLoadState === "failed-exhausted")
+      ) {
+        if (desktopRecommendationRecoveryTimer !== null) window.clearTimeout(desktopRecommendationRecoveryTimer);
+        desktopRecommendationRecoveryTimer = null;
+        desktopRecommendationRecoveryAttempt = 0;
+        desktopRecommendationLoadState = "failed";
+        scheduleDesktopRecommendationRecovery();
+        recommendationRestarted = true;
+      }
+      if (desktopRuntimeLoadState === "failed" || desktopRuntimeLoadState === "failed-exhausted") {
+        if (desktopRuntimeRecoveryTimer !== null) window.clearTimeout(desktopRuntimeRecoveryTimer);
+        desktopRuntimeRecoveryTimer = null;
+        desktopRuntimeRecoveryAttempt = 0;
+        desktopRuntimeLoadState = "failed";
+        scheduleDesktopRuntimeRecovery();
+        runtimeRestarted = true;
+      }
+      if (recommendationRestarted) renderVideos();
+      if (runtimeRestarted) renderDesktopRuntimeFailure();
     }
 
     async function runActivityPageRefresh() {
@@ -300,7 +506,11 @@
     state.dismissOnReshuffle = storageGet(DISMISS_ON_RESHUFFLE_KEY) === "1";
     const AUTO_LOAD_ON_SCROLL_KEY = "openbiliclaw.webui.autoLoadOnScroll";
     const AUTO_LOAD_COOLDOWN_MS = 8000;
-    const AUTO_LOAD_ROOT_MARGIN_PX = 300;
+    // 校准：一行卡片(16:9 封面 + 文案)高约 250–350px，若预载边距接近一行高度，
+    // 自动加载会在最后一行(最多 4 张)还没滚进视口时就追加新卡片，用户永远看不全
+    // 当前批次、也到不了「已看完」的干净状态。收到 50px：哨兵几乎贴到视口底部才触发，
+    // 最后一行基本看全后再加载下一批。（2026-07-12，用户反馈强迫症体验）
+    const AUTO_LOAD_ROOT_MARGIN_PX = 50;
     state.autoLoadOnScroll = storageGet(AUTO_LOAD_ON_SCROLL_KEY) !== "0";
     const THEME_STORAGE_KEY = "obc.theme";
     const THEME_OPTIONS = ["auto", "light", "dark"];
@@ -704,6 +914,21 @@
       return String(value);
     }
 
+    function formatPublishedTime(item, now = Date.now()) {
+      const parsed = Date.parse(String(item?.published_at || ""));
+      if (Number.isFinite(parsed)) {
+        const diff = now - parsed;
+        if (diff >= -300_000 && diff < 60_000) return "刚刚";
+        if (diff >= 0 && diff < 86_400_000) return `${Math.max(1, Math.floor(diff / 3_600_000))} 小时前`;
+        if (diff >= 0 && diff < 604_800_000) return `${Math.floor(diff / 86_400_000)} 天前`;
+        const date = new Date(parsed);
+        const current = new Date(now);
+        if (date.getFullYear() === current.getFullYear()) return `${date.getMonth() + 1}月${date.getDate()}日`;
+        return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+      }
+      return String(item?.published_label || "").replace(/\s+/g, " ").trim().slice(0, 64);
+    }
+
     // Legacy content_cache rows persisted before issue #79 still carry raw
     // `answer_<id>` / `zhihu_<id>` titles. Derive something readable from the
     // body text (first sentence), else a generic label, so the card header is
@@ -744,6 +969,8 @@
         favorite_count: Number(item?.favorite_count ?? 0) || 0,
         comment_count: Number(item?.comment_count ?? 0) || 0,
         up_mid: Number(item?.up_mid ?? 0) || 0,
+        published_at: String(item?.published_at ?? "").trim(),
+        published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
         presented: Boolean(item?.presented),
         feedback_type: String(item?.feedback_type ?? item?.feedback ?? ""),
         pool_status: String(item?.pool_status ?? item?.status ?? ""),
@@ -825,12 +1052,92 @@
       return details.message || details.detail?.message || details.detail?.error || details.error || "";
     }
 
-    function showToast(message) {
-      const toast = $("#toast");
-      toast.textContent = message;
-      toast.classList.add("is-open");
-      window.setTimeout(() => toast.classList.remove("is-open"), 2600);
-    }
+    const toastManager = {
+      items: [], gap: 8, container: null,
+      init() {
+        this.container = document.getElementById("toastContainer");
+        if (!this.container) {
+          this.container = document.createElement("div");
+          this.container.className = "toast-container";
+          document.body.appendChild(this.container);
+        }
+      },
+      showToast(msg, { duration = 2600 } = {}) {
+        const el = document.createElement("div");
+        el.className = "toast-item entering";
+        el.textContent = msg;
+        el.addEventListener("click", (e) => this.dismiss(el));
+        el.addEventListener("mouseenter", () => { const i = this.items.find(it => it.el === el); if (i) this._pause(i); });
+        el.addEventListener("mouseleave", () => { const i = this.items.find(it => it.el === el); if (i) this._resume(i); });
+        this.container.appendChild(el);
+        const item = { el, timer: null, remaining: duration, started: Date.now(), paused: false, exiting: false };
+        this.items.push(item);
+        this._reposition();
+        void el.offsetHeight;
+        el.classList.remove("entering");
+        return item;
+      },
+      _reposition() {
+        let bottom = 0;
+        for (const item of this.items) {
+          if (item.exiting) continue;
+          const first = bottom === 0;
+          item.el.style.bottom = bottom + "px";
+          if (first && !item.reachedBottom) {
+            item.reachedBottom = true;
+            const elapsed = Date.now() - item.started;
+            const actual = Math.max(0, item.remaining - elapsed);
+            if (actual < 2000) item.remaining = actual + 2000;
+            if (!item.paused) this._startTimer(item);
+          }
+          bottom += item.el.offsetHeight + this.gap;
+        }
+      },
+      dismiss(el) {
+        const item = this.items.find((i) => i.el === el);
+        if (!item || item.exiting) return;
+        item.exiting = true;
+        this._clearTimer(item);
+        el.classList.add("exiting");
+        el.addEventListener("transitionend", () => {
+          const idx = this.items.indexOf(item);
+          if (idx >= 0) this.items.splice(idx, 1);
+          el.remove();
+          this._reposition();
+        }, { once: true });
+      },
+      _startTimer(item) {
+        this._clearTimer(item);
+        item.started = Date.now();
+        item.timer = setTimeout(() => this.dismiss(item.el), item.remaining);
+      },
+      _clearTimer(item) {
+        if (item.timer) { clearTimeout(item.timer); item.timer = null; }
+      },
+      _pause(item) {
+        if (item.paused || item.exiting || !item.reachedBottom) return;
+        this._clearTimer(item);
+        item.remaining -= Date.now() - item.started;
+        item.paused = true;
+      },
+      _resume(item) {
+        if (!item.paused || item.exiting || !item.reachedBottom) return;
+        item.paused = false;
+        item.started = Date.now();
+        item.timer = setTimeout(() => this.dismiss(item.el), Math.max(item.remaining, 2000));
+      }
+    };
+    function showToast(message) { toastManager.showToast(message); }
+    window.showToast = showToast;// 用于终端测试ToastNotice
+
+    const pendingActions = window.OpenBiliClawPendingActions.createPendingActionCoordinator({
+      windowMs: Number(window.__OBC_TEST_UNDO_WINDOW_MS || 10000),
+      onCommitError: (error) => {
+        const detail = configErrorMessage(error?.details) || error?.message || "反馈提交失败";
+        showToast(`${detail}，已恢复原状态。`);
+      }
+    });
+    window.addEventListener("pagehide", () => { void pendingActions.flushAll(); });
 
     function describeInitReason(reason) {
       if (!reason || reason === "none") return "";
@@ -1509,6 +1816,7 @@
       closeMobileMenu();
       document.querySelectorAll(".drawer.is-open, .overlay.is-open").forEach((panel) => closePanel(panel.id));
       showMainPage("chatPage");
+      renderChat();
       const input = document.getElementById("chatInput");
       window.scrollTo({ top: 0, behavior: "smooth" });
       window.setTimeout(() => input?.focus(), 100);
@@ -1671,7 +1979,6 @@
       const drawer = document.getElementById("sideDrawer");
       drawer?.classList.toggle("is-open", open);
       drawer?.setAttribute("aria-hidden", open ? "false" : "true");
-      document.body.classList.toggle("side-drawer-open", open);
       const button = document.getElementById("sideDrawerBtn");
       if (button) {
         button.setAttribute("aria-expanded", open ? "true" : "false");
@@ -2078,6 +2385,7 @@
     function recommendationMetaHtml(item) {
       const up = String(item.up || "").trim();
       const topic = String(item.topic || "").trim();
+      const published = formatPublishedTime(item);
       const parts = [];
       if (up) {
         const upHtml = item.platform === "bilibili" && item.up_mid > 0
@@ -2086,6 +2394,13 @@
         parts.push(upHtml);
       }
       if (topic) parts.push(escapeHtml(topic));
+      if (published) {
+        const exactTitle = Number.isFinite(Date.parse(item.published_at))
+          ? new Date(item.published_at).toLocaleString()
+          : "";
+        const title = exactTitle ? ` title="${escapeHtml(exactTitle)}"` : "";
+        parts.push(`<span class="published-time"${title}>${escapeHtml(published)}</span>`);
+      }
       return parts.join(" · ");
     }
 
@@ -2136,8 +2451,16 @@
           ? `没有找到包含“${escapeHtml(state.query.trim())}”的推荐。`
           : state.videos.length
             ? "当前筛选下没有推荐。"
-            : "当前列表里的推荐都已处理，可以加载更多推荐或等待后端补货。";
-        grid.innerHTML = `<div class="empty-state">${message}</div>`;
+            : desktopRecommendationLoadState === "failed"
+              ? "推荐加载失败，正在重试；这不代表候选池真的为空。"
+              : desktopRecommendationLoadState === "failed-exhausted"
+                ? "推荐加载失败，点一下重新加载。"
+                : "当前列表里的推荐都已处理，可以加载更多推荐或等待后端补货。";
+        const retry = desktopRecommendationLoadState === "failed-exhausted"
+          ? '<button class="small-btn" id="retryEmptyRecommendations" type="button">重新加载</button>'
+          : "";
+        grid.innerHTML = `<div class="empty-state">${message}${retry}</div>`;
+        $("#retryEmptyRecommendations")?.addEventListener("click", restartDesktopFailedRecoveries);
         return;
       }
       grid.replaceChildren(...items.map((item) => {
@@ -2270,29 +2593,128 @@
       showToast(url ? `打开：${item.title}` : "后端没有返回可打开链接");
     }
 
-    async function submitFeedback(item, feedback_type, note = "") {
-      return await requestJsonStrict(ENDPOINTS.feedback, {
+    function submitFeedback(item, feedback_type, note = "", { keepalive = false } = {}) {
+      return requestJsonStrict(ENDPOINTS.feedback, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ recommendation_id: item.id, feedback_type, note }),
-        timeoutMs: 30000
+        timeoutMs: 30000,
+        keepalive
       });
     }
 
-    function recommendationRemoveDelay() {
-      return isMobileViewport() ? 1000 : 2400;
+    function feedbackActionKey(item) {
+      const contentId = item?.bvid || item?.content_id;
+      if (!contentId) return "";
+      const platform = String(item?.platform || item?.source_platform || "").trim().toLowerCase();
+      return `recommendation:${platform}:${contentId}`;
     }
 
-    function removeRecommendationCard(item, card, message, delayMs = recommendationRemoveDelay()) {
-      const key = recommendationKey(item);
-      window.setTimeout(() => {
-        if (card) card.classList.add("is-removing");
-        window.setTimeout(() => {
-          state.videos = state.videos.filter((video) => recommendationKey(video) !== key);
-          renderAll();
-          if (message) showToast(message);
-        }, card ? 180 : 0);
-      }, card ? delayMs : 0);
+    function recommendationFeedbackButtons(card) {
+      return [...card.querySelectorAll('[data-action="like"], [data-action="dislike"], [data-action="dismiss"]')];
+    }
+
+    function recommendationFeedbackSnapshot(item, card, status) {
+      return {
+        feedbackType: item.feedback_type,
+        statusText: status.textContent,
+        pending: card.dataset.feedbackPending,
+        buttons: recommendationFeedbackButtons(card).map((button) => ({
+          button,
+          disabled: button.disabled,
+          pressed: button.getAttribute("aria-pressed"),
+          active: button.classList.contains("is-active")
+        }))
+      };
+    }
+
+    function restoreRecommendationFeedback(item, card, status, snapshot) {
+      item.feedback_type = snapshot.feedbackType;
+      status.classList.remove("has-feedback-action");
+      status.textContent = snapshot.statusText;
+      card.classList.remove("is-feedback-pending", "is-feedback-saving");
+      if (snapshot.pending == null) delete card.dataset.feedbackPending;
+      else card.dataset.feedbackPending = snapshot.pending;
+      snapshot.buttons.forEach(({ button, disabled, pressed, active }) => {
+        button.disabled = disabled;
+        if (pressed == null) button.removeAttribute("aria-pressed");
+        else button.setAttribute("aria-pressed", pressed);
+        button.classList.toggle("is-active", active);
+      });
+    }
+
+    function stageRecommendationFeedback(item, card, feedbackType) {
+      const key = feedbackActionKey(item);
+      if (!key) {
+        showToast("这条推荐缺少稳定内容标识，暂时无法记录反馈。");
+        return false;
+      }
+      const status = card.querySelector(".status-line");
+      const snapshot = recommendationFeedbackSnapshot(item, card, status);
+      const copy = {
+        like: {
+          pending: "已标记喜欢，10 秒内可撤销。",
+          saving: "正在保存喜欢反馈…",
+          committed: "已记录喜欢，推荐会继续保留在当前列表。",
+          toast: "已记录喜欢"
+        },
+        dislike: {
+          pending: "已标记不感兴趣，10 秒内可撤销。",
+          saving: "正在保存不感兴趣反馈…",
+          committed: "已记录不感兴趣，下次刷新列表时会隐藏。",
+          toast: "已记录不感兴趣"
+        },
+        dismiss: {
+          pending: "已标记忽略，10 秒内可撤销。",
+          saving: "正在保存忽略反馈…",
+          committed: "已忽略这条推荐，下次刷新列表时会隐藏。",
+          toast: "已忽略推荐"
+        }
+      }[feedbackType];
+      const scheduled = pendingActions.schedule(key, {
+        commit: ({ keepalive }) => {
+          if (card.isConnected && !keepalive) {
+            card.classList.remove("is-feedback-pending");
+            card.classList.add("is-feedback-saving");
+            status.classList.remove("has-feedback-action");
+            status.textContent = copy.saving;
+          }
+          return submitFeedback(item, feedbackType, "", { keepalive });
+        },
+        rollback: ({ reason }) => {
+          restoreRecommendationFeedback(item, card, status, snapshot);
+          if (reason === "undo") showToast("已撤销反馈");
+        },
+        committed: () => {
+          if (!card.isConnected) return;
+          delete card.dataset.feedbackPending;
+          card.classList.remove("is-feedback-pending", "is-feedback-saving");
+          status.classList.remove("has-feedback-action");
+          status.textContent = copy.committed;
+          showToast(copy.toast);
+        }
+      });
+      if (!scheduled) return false;
+
+      item.feedback_type = feedbackType;
+      card.dataset.feedbackPending = "true";
+      card.classList.add("is-feedback-pending");
+      const clicked = card.querySelector(`[data-action="${feedbackType}"]`);
+      recommendationFeedbackButtons(card).forEach((button) => { button.disabled = true; });
+      if (clicked) {
+        clicked.setAttribute("aria-pressed", "true");
+        clicked.classList.add("is-active");
+      }
+      const undo = document.createElement("button");
+      undo.type = "button";
+      undo.className = "feedback-undo-btn";
+      undo.dataset.feedbackUndo = key;
+      undo.textContent = "撤销";
+      undo.addEventListener("click", () => { pendingActions.undo(key); });
+      status.classList.add("has-feedback-action");
+      status.setAttribute("aria-live", "polite");
+      status.replaceChildren(document.createTextNode(`${copy.pending} `), undo);
+      return true;
     }
 
     function finishRecommendationFeedback(card, feedbackType = "") {
@@ -2450,49 +2872,31 @@
         }
         return;
       }
-      card.dataset.feedbackPending = "true";
-      card.querySelectorAll(".card-actions button, .card-actions input").forEach((control) => { control.disabled = true; });
-      try {
-        if (action === "send-comment") {
-          const input = card.querySelector(".comment-field input");
-          const note = input.value.trim();
-          if (!note) {
-            delete card.dataset.feedbackPending;
-            card.querySelectorAll(".card-actions button, .card-actions input").forEach((control) => { control.disabled = false; });
-            status.textContent = "先写一句想聊的内容，再提交这条反馈。";
-            input?.focus();
-            return;
-          }
-          await submitFeedback(item, "comment", note);
-          if (input) input.value = "";
-          closeCardComposer(card);
-          item.feedback_type = "comment";
-          status.textContent = "已提交聊天线索，推荐会继续保留在当前列表。";
-          finishRecommendationFeedback(card, "comment");
-          showToast("已提交聊天线索");
+      if (action === "send-comment") {
+        const input = card.querySelector(".comment-field input");
+        const note = input.value.trim();
+        if (!note) {
+          status.textContent = "先写一句想聊的内容，再提交这条反馈。";
+          input?.focus();
           return;
         }
-        const feedbackType = action === "like" ? "like" : action === "dismiss" ? "dismiss" : "dislike";
-        await submitFeedback(item, feedbackType);
-        const feedbackCopy = {
-          like: ["已记录喜欢，推荐会继续保留在当前列表。", "已记录喜欢"],
-          dislike: ["已记录不感兴趣，几秒后从当前列表移除。", "已记录不感兴趣"],
-          dismiss: ["已忽略这条推荐，几秒后从当前列表移除。", "已忽略推荐"]
-        }[feedbackType];
-        status.textContent = feedbackCopy[0];
-        if (shouldRemoveRecommendationAfterFeedback(feedbackType)) {
-          removeRecommendationCard(item, card, feedbackCopy[1]);
-          return;
-        }
-        item.feedback_type = feedbackType;
-        finishRecommendationFeedback(card, feedbackType);
-        showToast(feedbackCopy[1]);
-      } catch (error) {
-        delete card.dataset.feedbackPending;
-        card.querySelectorAll(".card-actions button, .card-actions input").forEach((control) => { control.disabled = false; });
-        status.textContent = configErrorMessage(error?.details) || error?.message || "反馈提交失败，请稍后重试。";
-        showToast(status.textContent);
+        const previousFeedbackType = item.feedback_type;
+        if (input) input.value = "";
+        closeCardComposer(card);
+        item.feedback_type = "comment";
+        status.textContent = "已提交聊天线索，推荐会继续保留在当前列表。";
+        finishRecommendationFeedback(card, "comment");
+        showToast("已提交聊天线索");
+        void submitFeedback(item, "comment", note).catch((error) => {
+          item.feedback_type = previousFeedbackType;
+          if (input) input.value = note;
+          status.textContent = configErrorMessage(error?.details) || error?.message || "反馈提交失败，请稍后重试。";
+          showToast(status.textContent);
+        });
+        return;
       }
+      const feedbackType = action === "like" ? "like" : action === "dismiss" ? "dismiss" : "dislike";
+      stageRecommendationFeedback(item, card, feedbackType);
     }
 
     function renderRail() {
@@ -2745,6 +3149,7 @@
     function speculativeHtml(items, options = {}) {
       const isAvoidance = options.kind === "avoidance";
       const probeType = isAvoidance ? "avoidance.probe" : "interest.probe";
+      const actionCopy = probeActionCopy(probeType);
       const list = asArray(items).filter((item) => {
         if (typeof item !== "object") return !state.handledProbeKeys.has(probeKey(probeType, item));
         const domain = item.domain || item.name || item.title;
@@ -2777,7 +3182,7 @@
           ${item.reason ? `<p class="video-meta">${escapeHtml(item.reason)}</p>` : ""}
           ${specifics.length ? `<div class="spec-specifics">${specifics.map((s) => `<span class="spec-specific-chip">${escapeHtml(s.name)}${s.count > 0 ? `<span class="spec-specific-count">${s.count}</span>` : ""}</span>`).join("")}</div>` : ""}
           <p class="spec-help">${isAvoidance ? `置信度表示阿B认为你会避开这个方向的把握；确认次数来自后端累计的避雷确认信号，达到 ${threshold} 次后会进入更稳定的避雷画像。` : `置信度表示阿B认为你会喜欢这个方向的把握；确认次数来自后端累计的正向确认信号（包括但不限于这里的“喜欢”），达到 ${threshold} 次后会进入更稳定的兴趣画像。`}</p>
-          ${status === "active" && domain ? `<div class="spec-actions"><button class="probe-btn is-confirm" type="button" data-spec-response="confirm" data-spec-type="${isAvoidance ? "avoidance.probe" : "interest.probe"}">${isAvoidance ? "确实不喜欢" : "喜欢"}</button><button class="probe-btn is-neutral" type="button" data-spec-response="defer" data-spec-type="${isAvoidance ? "avoidance.probe" : "interest.probe"}">暂时忽略</button><button class="probe-btn is-reject" type="button" data-spec-response="reject" data-spec-type="${isAvoidance ? "avoidance.probe" : "interest.probe"}">${isAvoidance ? "不是" : "不喜欢"}</button></div>` : ""}
+          ${status === "active" && domain ? `<div class="spec-actions"><button class="probe-btn is-confirm" type="button" data-spec-response="confirm" data-spec-type="${probeType}">${actionCopy.confirm}</button><button class="probe-btn is-neutral" type="button" data-spec-response="defer" data-spec-type="${probeType}">${actionCopy.defer}</button><button class="probe-btn is-reject" type="button" data-spec-response="reject" data-spec-type="${probeType}">${actionCopy.reject}</button></div>` : ""}
         </div>`;
       }).join("")}</div>`;
     }
@@ -3258,6 +3663,25 @@
       return messageType({ type }) === "avoidance.probe";
     }
 
+    const PROBE_ACTION_COPY = Object.freeze({
+      interest: Object.freeze({
+        confirm: "确认喜欢",
+        defer: "暂时搁置",
+        reject: "确认不喜欢",
+        chat: "多聊聊",
+      }),
+      avoidance: Object.freeze({
+        confirm: "确认避雷",
+        defer: "搁置避雷",
+        reject: "不是雷点",
+        chat: "多聊聊",
+      }),
+    });
+
+    function probeActionCopy(type) {
+      return PROBE_ACTION_COPY[isAvoidanceProbe(type) ? "avoidance" : "interest"];
+    }
+
     function isChallengeProbe(item) {
       const mode = String(item?.probe_mode || "").toLowerCase();
       return Boolean(item?.challenge) || mode === "lateral" || mode === "bridge" || mode === "wildcard";
@@ -3370,6 +3794,12 @@
       return Boolean(document.querySelector("#messageList .message-item.is-resolving, #messageList .message-item.is-resolved, #messageList .message-item.is-dismissing"));
     }
 
+    function bindMessageProbeActions(msg, el) {
+      el.querySelectorAll("[data-probe]").forEach((button) => {
+        button.addEventListener("click", () => respondProbe(msg, button.dataset.probe, el));
+      });
+    }
+
     function renderMessages() {
       const list = $("#messageList");
       if (state.messageListDomLocked || isMessageListLocked()) {
@@ -3411,20 +3841,23 @@
           el.classList.add(isAvoidance ? "is-avoidance-probe" : isChallenge ? "is-challenge-probe" : "is-interest-probe");
           const eyebrow = isAvoidance ? "避雷确认" : isChallenge ? "挑战探针" : "兴趣确认";
           const actionsLabel = isAvoidance ? "确认或排除这个避雷方向" : isChallenge ? "确认或排除这个挑战方向" : "确认或排除这个兴趣";
-          const confirmLabel = isAvoidance ? "确实不喜欢" : "喜欢";
-          const rejectLabel = isAvoidance ? "不是" : "不喜欢";
           const kindCopy = isAvoidance
             ? "想少看这类，就确认这是雷点；如果阿B猜错了，点不是。"
             : isChallenge
               ? "这是挑战方向，会把口味往侧边推一点；想继续试探就点喜欢，不准就点不喜欢。"
             : "想继续探索这个方向，就点喜欢；不准就点不喜欢。";
-          el.innerHTML = `<p class="eyebrow">${eyebrow}</p><div class="message-note probe-kind-copy">${escapeHtml(kindCopy)}</div><h3>${escapeHtml(msg.domain)}</h3><p class="video-meta">${escapeHtml(msg.reason)}</p><div class="profile-chip-row">${asArray(msg.specifics).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join("")}</div><div class="message-card-actions"><div class="card-feedback-icons" aria-label="${actionsLabel}"><button class="feedback-icon-btn" data-probe="confirm" type="button" aria-label="${confirmLabel}" title="${confirmLabel}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg></button><span class="feedback-separator" aria-hidden="true">/</span><button class="feedback-icon-btn is-neutral" data-probe="defer" type="button" aria-label="暂时忽略" title="暂时忽略"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="8" y1="12" x2="16" y2="12"/></svg></button><span class="feedback-separator" aria-hidden="true">/</span><button class="feedback-icon-btn" data-probe="reject" type="button" aria-label="${rejectLabel}" title="${rejectLabel}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg></button></div><div class="message-primary-actions"><button class="small-btn" data-probe="chat">多聊聊</button></div></div>`;
+          const actionCopy = probeActionCopy(messageType(msg));
+          const actionButtons = `
+            <button class="probe-btn is-confirm" data-probe="confirm" type="button">${actionCopy.confirm}</button>
+            <button class="probe-btn is-neutral" data-probe="defer" type="button">${actionCopy.defer}</button>
+            <button class="probe-btn is-reject" data-probe="reject" type="button">${actionCopy.reject}</button>`;
+          el.innerHTML = `<p class="eyebrow">${eyebrow}</p><div class="message-note probe-kind-copy">${escapeHtml(kindCopy)}</div><h3>${escapeHtml(msg.domain)}</h3><p class="video-meta">${escapeHtml(msg.reason)}</p><div class="profile-chip-row">${asArray(msg.specifics).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join("")}</div><div class="message-card-actions"><div class="card-feedback-icons" aria-label="${actionsLabel}">${actionButtons}</div><div class="message-primary-actions"><button class="small-btn" data-probe="chat">${actionCopy.chat}</button></div></div>`;
           if (resolvedResult) {
             el.classList.add("is-resolved");
             const resolvedActions = el.querySelector(".message-card-actions");
             if (resolvedActions) resolvedActions.outerHTML = `<div class="message-note is-success">${escapeHtml(resolvedResult)}</div>`;
           } else {
-            el.querySelectorAll("[data-probe]").forEach((btn) => btn.addEventListener("click", () => respondProbe(msg, btn.dataset.probe, el)));
+            bindMessageProbeActions(msg, el);
           }
         }
         return el;
@@ -3572,7 +4005,49 @@
       window.setTimeout(() => input?.focus(), 40);
     }
 
-    async function respondProbe(msg, response, el) {
+    function probePendingKey(type, domain) {
+      const normalizedDomain = String(domain || "").trim().toLowerCase();
+      return normalizedDomain ? `probe:${messageType({ type })}:${normalizedDomain}` : "";
+    }
+
+    function submitProbeResponse(type, domain, response, { surface = "", keepalive = false } = {}) {
+      const isAvoidance = isAvoidanceProbe(type);
+      const endpoint = isAvoidance ? ENDPOINTS.avoidanceProbeRespond : ENDPOINTS.interestProbeRespond;
+      const payload = { domain, response, message: "" };
+      if (!isAvoidance && surface) payload.surface = surface;
+      return requestJsonStrict(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        keepalive
+      }).then((apiResponse) => {
+        if (apiResponse?.ok === false) throw new Error("后端未接受这次探针反馈");
+        return apiResponse;
+      });
+    }
+
+    function messageProbeResult(type, response, apiResponse = null) {
+      const isAvoidance = isAvoidanceProbe(type);
+      const deferExhausted = apiResponse?.action === "defer_exhausted";
+      const deferResult = deferExhausted ? "已多次搁置，之后先不提这个方向了。" : "已搁置，过阵子可能再提。";
+      return isAvoidance
+        ? response === "confirm" ? "已确认避雷方向，后续会减少类似内容。"
+          : response === "defer" ? deferResult
+          : "已搁置，暂时不作为避雷方向。"
+        : response === "confirm" ? "已确认，后续推荐会提高权重。"
+          : response === "defer" ? deferResult
+          : "已搁置，后续会少试探这个方向。";
+    }
+
+    function probeToast(type, response, apiResponse = null) {
+      const isAvoidance = isAvoidanceProbe(type);
+      const deferToast = apiResponse?.action === "defer_exhausted" ? "好，之后先不提了" : "已暂时搁置，过阵子可能再提";
+      return isAvoidance
+        ? response === "confirm" ? "已确认这个避雷方向" : response === "defer" ? deferToast : "已搁置这个避雷方向"
+        : response === "confirm" ? "已确认这个兴趣方向" : response === "defer" ? deferToast : "已搁置这个兴趣方向";
+    }
+
+    function respondProbe(msg, response, el) {
       if (!el) return;
       const actions = el.querySelector(".message-card-actions");
       if (response === "chat") {
@@ -3580,127 +4055,158 @@
         showToast("已在这条消息里打开聊天输入");
         return;
       }
-      const key = messageKey(msg);
-      state.messageListDomLocked = true;
-      if (!state.messageListSnapshot && isMessagesDrawerOpen()) state.messageListSnapshot = getRenderableMessages();
-      el.style.minHeight = `${el.getBoundingClientRect().height}px`;
-      el.classList.add("is-resolving");
-      state.resolvingMessageKeys.add(key);
-      actions?.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+      if (!actions) return;
+      const stateKey = messageKey(msg);
       const probeType = messageType(msg);
       const domain = msg.domain || "";
       const handledKey = probeKey(probeType, domain);
-      if (handledKey) state.handledProbeKeys.add(handledKey);
-      try {
-        const isAvoidance = probeType === "avoidance.probe";
-        const endpoint = isAvoidance ? ENDPOINTS.avoidanceProbeRespond : ENDPOINTS.interestProbeRespond;
-        const apiResp = await requestJson(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: msg.domain, response, message: "" }) });
-        if (apiResp && apiResp.ok === false) {
-          state.resolvingMessageKeys.delete(key);
-          state.messages = state.messages.filter((item) => messageKey(item) !== key);
-          if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((item) => messageKey(item) !== key);
-          state.messageListDomLocked = false;
-          renderMessages();
-          void refreshProfile();
-          return;
-        }
-        const deferExhausted = apiResp?.action === "defer_exhausted";
-        const deferResult = deferExhausted ? "已多次搁置，之后先不提这个方向了。" : "已搁置，过阵子可能再提。";
-        const result = isAvoidance
-          ? response === "confirm" ? "已确认避雷方向，后续会减少类似内容。"
-            : response === "defer" ? deferResult
-            : "已搁置，暂时不作为避雷方向。"
-          : response === "confirm" ? "已确认，后续推荐会提高权重。"
-            : response === "defer" ? deferResult
-            : "已搁置，后续会少试探这个方向。";
-        state.resolvedMessageResults.set(key, result);
-        el.classList.remove("is-resolving");
-        el.classList.add("is-resolved");
-        if (actions) {
+      const pendingKey = probePendingKey(probeType, domain);
+      const snapshot = {
+        actionsHtml: actions.innerHTML,
+        actionsClass: actions.className,
+        minHeight: el.style.minHeight
+      };
+      let apiResponse = null;
+      const scheduled = pendingActions.schedule(pendingKey, {
+        commit: ({ keepalive }) => {
+          if (el.isConnected && !keepalive) {
+            el.classList.remove("is-feedback-pending");
+            el.classList.add("is-feedback-saving");
+            actions.innerHTML = '<div class="message-action-result">正在保存反馈…</div>';
+          }
+          return submitProbeResponse(probeType, domain, response, { keepalive }).then((result) => {
+            apiResponse = result;
+            return result;
+          });
+        },
+        rollback: ({ reason }) => {
+          if (handledKey) state.handledProbeKeys.delete(handledKey);
+          state.resolvingMessageKeys.delete(stateKey);
+          state.messageListDomLocked = state.resolvingMessageKeys.size > 0;
+          state.resolvedMessageResults.delete(stateKey);
+          el.classList.remove("is-feedback-pending", "is-feedback-saving", "is-feedback-committed");
+          el.style.minHeight = snapshot.minHeight;
+          actions.className = snapshot.actionsClass;
+          actions.innerHTML = snapshot.actionsHtml;
+          bindMessageProbeActions(msg, el);
+          if (reason === "undo") showToast("已撤销探针反馈");
+        },
+        committed: () => {
+          const result = messageProbeResult(probeType, response, apiResponse);
+          state.resolvedMessageResults.set(stateKey, result);
+          state.resolvingMessageKeys.delete(stateKey);
+          state.messageListDomLocked = state.resolvingMessageKeys.size > 0;
+          state.messages = state.messages.filter((item) => messageKey(item) !== stateKey);
+          if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((item) => messageKey(item) !== stateKey);
+          syncMessageCount();
+          if (!el.isConnected) return;
+          el.classList.remove("is-feedback-pending", "is-feedback-saving");
+          el.classList.add("is-feedback-committed");
           actions.classList.add("is-result");
           actions.innerHTML = `<div class="message-action-result" title="${escapeHtml(result)}">${escapeHtml(result)}</div>`;
+          showToast(probeToast(probeType, response, apiResponse));
         }
-        const deferToast = deferExhausted ? "好，之后先不提了" : "已暂时搁置，过阵子可能再提";
-        showToast(isAvoidance
-          ? response === "confirm" ? "已确认这个避雷方向" : response === "defer" ? deferToast : "已搁置这个避雷方向"
-          : response === "confirm" ? "已确认这个兴趣方向" : response === "defer" ? deferToast : "已搁置这个兴趣方向");
-        setTimeout(() => {
-          collapseMessageItem(key, el, () => {
-            state.resolvingMessageKeys.delete(key);
-            state.resolvedMessageResults.delete(key);
-            state.messages = state.messages.filter((item) => messageKey(item) !== key);
-            if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((item) => messageKey(item) !== key);
-            state.messageListDomLocked = false;
-            renderMessages();
-            void refreshProfile();
-          });
-        }, 1800);
-      } catch (error) {
-        state.resolvingMessageKeys.delete(key);
-        state.resolvedMessageResults.delete(key);
-        state.messageListDomLocked = false;
-        el.classList.remove("is-resolving");
-        el.style.minHeight = "";
-        if (handledKey) state.handledProbeKeys.delete(handledKey);
-        actions?.querySelectorAll("button").forEach((button) => { button.disabled = false; });
-        showToast(`确认反馈失败：${error.message || "后端不可用"}`);
+      });
+      if (!scheduled) {
+        showToast("这条探针反馈正在处理中。");
+        return;
       }
+
+      state.messageListDomLocked = true;
+      if (!state.messageListSnapshot && isMessagesDrawerOpen()) state.messageListSnapshot = getRenderableMessages();
+      state.resolvingMessageKeys.add(stateKey);
+      if (handledKey) state.handledProbeKeys.add(handledKey);
+      el.style.minHeight = `${el.getBoundingClientRect().height}px`;
+      el.classList.add("is-feedback-pending");
+      const result = messageProbeResult(probeType, response);
+      actions.classList.add("is-result");
+      actions.innerHTML = `<div class="message-action-result">${escapeHtml(result)} <button class="feedback-undo-btn" data-probe-undo type="button">撤销</button></div>`;
+      actions.querySelector("[data-probe-undo]")?.addEventListener("click", () => { pendingActions.undo(pendingKey); });
     }
 
-    function bindSpeculativeActions() {
-      document.querySelectorAll("[data-spec-response]").forEach((button) => {
+    function bindSpeculativeRowActions(row) {
+      row.querySelectorAll("[data-spec-response]").forEach((button) => {
         button.addEventListener("click", () => respondSpeculativeInterest(button));
       });
     }
 
-    async function respondSpeculativeInterest(button) {
+    function bindSpeculativeActions() {
+      document.querySelectorAll("[data-spec-domain]").forEach(bindSpeculativeRowActions);
+    }
+
+    function profileProbeResult(type, response, domain, apiResponse = null) {
+      const isAvoidance = isAvoidanceProbe(type);
+      const deferExhausted = apiResponse?.action === "defer_exhausted";
+      const deferRow = deferExhausted
+        ? `好，「${domain}」之后先不提了。`
+        : `好，「${domain}」先放一放，过阵子可能再提。`;
+      return isAvoidance
+        ? response === "confirm" ? `好，「${domain}」会作为避雷方向处理。`
+          : response === "defer" ? deferRow
+          : `好，「${domain}」不记成避雷。`
+        : response === "confirm" ? `好，「${domain}」记住了。`
+          : response === "defer" ? deferRow
+          : `好，「${domain}」先不看了。`;
+    }
+
+    function respondSpeculativeInterest(button) {
       const row = button.closest("[data-spec-domain]");
       const domain = row?.dataset.specDomain;
       const response = button.dataset.specResponse;
       if (!domain || !response) return;
-      row.querySelectorAll("[data-spec-response]").forEach((btn) => { btn.disabled = true; });
       const type = button.dataset.specType || "interest.probe";
-      const key = probeKey(type, domain);
-      if (key) state.handledProbeKeys.add(key);
-      try {
-        const isAvoidance = isAvoidanceProbe(type);
-        const endpoint = isAvoidance ? ENDPOINTS.avoidanceProbeRespond : ENDPOINTS.interestProbeRespond;
-        const payload = { domain, response, message: "" };
-        if (!isAvoidance) payload.surface = "profile";
-        const apiResp = await requestJson(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-        if (apiResp && apiResp.ok === false) {
-          row.remove();
-          state.messages = state.messages.filter((msg) => messageKey(msg) !== key);
-          if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((msg) => messageKey(msg) !== key);
-          renderMessages();
-          void refreshProfile();
-          return;
+      const handledKey = probeKey(type, domain);
+      const pendingKey = probePendingKey(type, domain);
+      const actions = row.querySelector(".spec-actions");
+      if (!actions) return;
+      const snapshot = {
+        actionsHtml: actions.innerHTML,
+        actionsClass: actions.className
+      };
+      let apiResponse = null;
+      const scheduled = pendingActions.schedule(pendingKey, {
+        commit: ({ keepalive }) => {
+          if (row.isConnected && !keepalive) {
+            row.classList.remove("is-feedback-pending");
+            row.classList.add("is-feedback-saving");
+            actions.innerHTML = '<p class="spec-result">正在保存反馈…</p>';
+          }
+          return submitProbeResponse(type, domain, response, { surface: "profile", keepalive }).then((result) => {
+            apiResponse = result;
+            return result;
+          });
+        },
+        rollback: ({ reason }) => {
+          if (handledKey) state.handledProbeKeys.delete(handledKey);
+          row.classList.remove("is-feedback-pending", "is-feedback-saving", "is-feedback-committed");
+          actions.className = snapshot.actionsClass;
+          actions.innerHTML = snapshot.actionsHtml;
+          bindSpeculativeRowActions(row);
+          if (reason === "undo") showToast("已撤销探针反馈");
+        },
+        committed: () => {
+          const result = profileProbeResult(type, response, domain, apiResponse);
+          const messageStateKey = probeKey(type, domain);
+          state.messages = state.messages.filter((msg) => messageKey(msg) !== messageStateKey);
+          if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((msg) => messageKey(msg) !== messageStateKey);
+          syncMessageCount();
+          if (!row.isConnected) return;
+          row.classList.remove("is-feedback-pending", "is-feedback-saving");
+          row.classList.add("is-feedback-committed");
+          actions.innerHTML = `<p class="spec-result">${escapeHtml(result)}</p>`;
+          showToast(probeToast(type, response, apiResponse));
         }
-        const deferExhausted = apiResp?.action === "defer_exhausted";
-        const deferRow = deferExhausted
-          ? `好，「${escapeHtml(domain)}」之后先不提了。`
-          : `好，「${escapeHtml(domain)}」先放一放，过阵子可能再提。`;
-        const result = isAvoidance
-          ? (response === "confirm" ? `好，「${escapeHtml(domain)}」会作为避雷方向处理。`
-            : response === "defer" ? deferRow
-            : `好，「${escapeHtml(domain)}」不记成避雷。`)
-          : (response === "confirm" ? `好，「${escapeHtml(domain)}」记住了。`
-            : response === "defer" ? deferRow
-            : `好，「${escapeHtml(domain)}」先不看了。`);
-        row.innerHTML = `<p class="spec-result">${result}</p>`;
-        state.messages = state.messages.filter((msg) => messageKey(msg) !== key);
-        if (state.messageListSnapshot) state.messageListSnapshot = state.messageListSnapshot.filter((msg) => messageKey(msg) !== key);
-        renderMessages();
-        const deferToast = deferExhausted ? "好，之后先不提了" : "已暂时搁置，过阵子可能再提";
-        showToast(isAvoidance
-          ? response === "confirm" ? "已确认这个避雷方向" : response === "defer" ? deferToast : "已排除这个避雷方向"
-          : response === "confirm" ? "已确认这个猜测兴趣" : response === "defer" ? deferToast : "已排除这个猜测兴趣");
-        setTimeout(() => { void refreshProfile(); }, 1200);
-      } catch (error) {
-        if (key) state.handledProbeKeys.delete(key);
-        row.querySelectorAll("[data-spec-response]").forEach((btn) => { btn.disabled = false; });
-        showToast(`确认反馈失败：${error.message || "后端不可用"}`);
+      });
+      if (!scheduled) {
+        showToast("这条探针反馈正在处理中。");
+        return;
       }
+
+      if (handledKey) state.handledProbeKeys.add(handledKey);
+      row.classList.add("is-feedback-pending");
+      const result = profileProbeResult(type, response, domain);
+      actions.innerHTML = `<p class="spec-result">${escapeHtml(result)} <button class="feedback-undo-btn" data-probe-undo type="button">撤销</button></p>`;
+      actions.querySelector("[data-probe-undo]")?.addEventListener("click", () => { pendingActions.undo(pendingKey); });
     }
 
     function createClientTurnId(prefix = "webui") {
@@ -4120,41 +4626,40 @@
       }
     }
 
-    async function dismissVisibleRecommendationsBeforeReshuffle() {
-      const visibleItems = filteredVideos().filter((item) => item?.id != null);
-      if (!visibleItems.length) return { total: 0, ok: 0, failed: 0 };
-      showToast(`正在忽略当前显示的 ${visibleItems.length} 张推荐…`);
-      const results = await Promise.allSettled(visibleItems.map((item) => submitFeedback(item, "dismiss")));
-      const dismissedKeys = new Set();
-      results.forEach((result, index) => {
-        if (result.status === "fulfilled") dismissedKeys.add(recommendationKey(visibleItems[index]));
+    function dismissVisibleRecommendationsBeforeReshuffle(visibleItems) {
+      const submissions = visibleItems.map((item) => submitFeedback(item, "dismiss"));
+      void Promise.allSettled(submissions).then((results) => {
+        const failed = results.filter((result) => result.status === "rejected").length;
+        if (failed) showToast(`${failed} 张忽略提交失败（不影响当前列表）`);
       });
-      if (dismissedKeys.size) {
-        state.videos = state.videos.filter((item) => !dismissedKeys.has(recommendationKey(item)));
-      }
-      return { total: visibleItems.length, ok: dismissedKeys.size, failed: visibleItems.length - dismissedKeys.size };
     }
 
     async function reshuffle() {
       const reshuffleButton = $("#reshuffleBtn");
       const dismissToggle = $("#dismissOnReshuffleToggle");
+      const visibleForExclusion = filteredVideos().filter((item) => item?.id != null);
+      const visibleKeys = new Set(visibleForExclusion.map((item) => recommendationKey(item)));
       if (reshuffleButton) reshuffleButton.disabled = true;
       if (dismissToggle) dismissToggle.disabled = true;
       try {
-        const dismissResult = state.dismissOnReshuffle ? await dismissVisibleRecommendationsBeforeReshuffle() : null;
-        const payload = await requestJson(ENDPOINTS.reshuffle, { method: "POST" });
-        if (payload?.items?.length) {
-          state.videos = normalizeRecommendationList(payload.items);
+        const excludedBvids = visibleForExclusion.map((item) => item.bvid).filter(Boolean);
+        const payload = await requestJson(ENDPOINTS.reshuffle, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ excluded_bvids: excludedBvids })
+        });
+        const fresh = payload?.items?.length
+          ? normalizeRecommendationList(payload.items).filter((item) => !visibleKeys.has(recommendationKey(item)))
+          : [];
+        if (fresh.length) {
+          state.videos = fresh;
           renderAll();
-          if (dismissResult?.ok) {
-            const failedText = dismissResult.failed ? `，${dismissResult.failed} 张忽略失败` : "";
-            showToast(`已忽略 ${dismissResult.ok} 张当前推荐并换一批${failedText}`);
-          } else {
-            showToast("已换一批推荐");
+          if (state.dismissOnReshuffle && visibleForExclusion.length) {
+            dismissVisibleRecommendationsBeforeReshuffle(visibleForExclusion);
           }
+          showToast("已换一批推荐");
         } else {
-          renderAll();
-          showToast("换一批失败：请检查后端连接");
+          showToast("暂时没有更多新推荐了");
         }
       } finally {
         if (reshuffleButton) reshuffleButton.disabled = false;
@@ -4321,6 +4826,7 @@
       $("#poolReplenished").textContent = summary?.replenished || "—";
       $("#poolTopics").textContent = summary?.topics || "—";
       $("#poolRefreshState").textContent = getPoolRefreshLabel(runtime);
+      renderDesktopRuntimeFailure();
     }
 
     function applyRuntimeStatus(payload) {
@@ -4466,14 +4972,17 @@
     };
     const SOURCE_ACCESS_STATE = {
       ok: { tone: "ready", label: "接入可用" },
-      ready: { tone: "ready", label: "接入可用" },
+      ready: { tone: "ready", label: "凭据已就绪" },
       no_auth: { tone: "public", label: "无需登录" },
       unverified: { tone: "pending", label: "状态待验证" },
       missing: { tone: "warning", label: "需要登录" },
+      login_required: { tone: "warning", label: "需要登录" },
       missing_cookie: { tone: "warning", label: "缺少 Cookie" },
       rate_limited: { tone: "warning", label: "频率受限" },
       partial: { tone: "warning", label: "部分可用" },
       stale: { tone: "warning", label: "需要刷新" },
+      error: { tone: "danger", label: "检查失败" },
+      expired: { tone: "danger", label: "凭据失效" },
       expired_cookie: { tone: "danger", label: "Cookie 失效" },
       blocked: { tone: "danger", label: "接入受阻" }
     };
@@ -4555,9 +5064,13 @@
         }
         row.dataset.available = item.available ? "true" : "false";
         if (summary) {
-          summary.textContent = item.available
-            ? `${item.label || "Cookie"} 已保存，展开查看`
-            : item.detail || "当前没有可展示 Cookie";
+          if (key === "xiaohongshu" && item.available) {
+            summary.textContent = "xsec_token 内容令牌已保存（不代表账号登录），展开查看";
+          } else {
+            summary.textContent = item.available
+              ? `${item.label || "Cookie"} 已保存，展开查看`
+              : item.detail || "当前没有可展示 Cookie";
+          }
         }
         if (value) {
           value.value = item.value || item.detail || "当前没有可展示 Cookie / 登录凭据。";
@@ -4794,6 +5307,7 @@
       setSelect("language", config.language || "zh");
       setInput("dataDir", config.data_dir);
       setInput("storageDbPath", config.storage?.db_path);
+      setInput("networkProxy", config.network?.proxy || "");
 
       const llm = config.llm || {};
       const provider = llm.default_provider || llm.provider;
@@ -4941,6 +5455,7 @@
         title: derivedTitle && derivedTitle !== "未命名内容"
           ? derivedTitle
           : "发现了一条你可能会意外喜欢的内容",
+        body_text: delightBody,
         reason: decodeHtmlEntities(item.delight_reason ?? item.reason ?? item.delight_hook ?? item.message ?? "这条来自后端高惊喜分候选。"),
         cover_url: normalizeImageUrl(item.cover_url ?? item.cover ?? item.pic ?? item.thumbnail_url ?? item.thumbnail ?? item.image_url),
         content_url: String(item.content_url ?? ""),
@@ -4950,6 +5465,8 @@
         chat_draft: String(item.chat_draft ?? ""),
         state: serverState,
         response_message: String(item.response_message ?? "") || fallbackMessage,
+        published_at: String(item?.published_at ?? "").trim(),
+        published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
         // Engagement stats so the delight card shows the same ▶/👍/💬 row as the
         // grid (v0.3.159+; 0 = not fetched → recommendationStats renders nothing).
         view_count: Number(item?.view_count ?? 0) || 0,
@@ -4961,16 +5478,59 @@
       };
     }
 
+    function renderDelightTextMedia(thumb, delight) {
+      if (!thumb || !delight) return;
+      const bodyText = String(delight.body_text || "").trim();
+      if (!bodyText) return;
+      thumb.replaceChildren();
+      thumb.classList.remove("has-image");
+      thumb.classList.add("is-text-media");
+      thumb.dataset.platform = String(delight.source_platform || "bilibili").toLowerCase();
+      const text = document.createElement("p");
+      text.className = "delight-text-media-copy";
+      text.textContent = bodyText;
+      const badge = document.createElement("span");
+      badge.className = "platform";
+      badge.textContent = platformName(delight.source_platform);
+      thumb.append(text, badge);
+    }
+
+    function renderDelightFallbackMedia(thumb, delight) {
+      const bodyText = String(delight?.body_text || "").trim();
+      if (bodyText) {
+        renderDelightTextMedia(thumb, delight);
+        return;
+      }
+      thumb.replaceChildren();
+      thumb.classList.remove("has-image", "is-text-media");
+      delete thumb.dataset.platform;
+      if (!delight) return;
+      const badge = document.createElement("span");
+      badge.className = "platform";
+      badge.textContent = platformName(delight.source_platform);
+      thumb.append(badge);
+    }
+
     function renderDelightCover(delight) {
       const thumb = syncDelightThumbLink(delight);
       if (!thumb) return;
       const url = imageProxyUrl(delight?.cover_url);
       thumb.replaceChildren();
+      thumb.classList.remove("has-image", "is-text-media");
+      delete thumb.dataset.platform;
       thumb.classList.toggle("has-image", Boolean(url));
       // 设置 banner 背景图（模糊用）
       const banner = $("#delightBanner");
       if (banner) banner.style.setProperty("--cover-url", url ? `url("${url}")` : "none");
-      if (!url) return;
+      if (!delight) return;
+      if (!url) {
+        renderDelightFallbackMedia(thumb, delight);
+        return;
+      }
+      // 平台徽章不依赖封面 —— 图片正常加载时也始终标明内容来源。
+      const badge = document.createElement("span");
+      badge.className = "platform";
+      badge.textContent = platformName(delight.source_platform);
       const image = document.createElement("img");
       if (isCrossOriginBase()) image.crossOrigin = "anonymous";
       image.alt = "";
@@ -4980,14 +5540,41 @@
       image.referrerPolicy = "no-referrer";
       image.src = url;
       image.addEventListener("error", () => {
-        image.remove();
-        thumb.classList.remove("has-image");
+        if (!image.isConnected || image.parentElement !== thumb) return;
+        renderDelightFallbackMedia(thumb, delight);
+        if (banner) banner.style.setProperty("--cover-url", "none");
       });
       thumb.append(image);
-      const badge = document.createElement("span");
-      badge.className = "platform";
-      badge.textContent = platformName(delight.source_platform);
       thumb.append(badge);
+    }
+
+    function resetDelightExcerpt() {
+      const wrapper = $("#delightExcerpt");
+      const excerpt = $("#delightExcerptText");
+      const toggle = $("#delightExcerptToggle");
+      if (!wrapper || !excerpt || !toggle) return;
+      wrapper.classList.remove("is-expanded");
+      wrapper.hidden = true;
+      excerpt.textContent = "";
+      toggle.hidden = true;
+      toggle.textContent = "展开正文";
+      toggle.setAttribute("aria-expanded", "false");
+    }
+
+    function syncDelightExcerpt(delight) {
+      resetDelightExcerpt();
+      const wrapper = $("#delightExcerpt");
+      const excerpt = $("#delightExcerptText");
+      const toggle = $("#delightExcerptToggle");
+      const bodyText = String(delight?.body_text || "").trim();
+      if (!wrapper || !excerpt || !toggle || !bodyText) return;
+      excerpt.textContent = bodyText;
+      wrapper.hidden = false;
+      requestAnimationFrame(() => {
+        const overflows = excerpt.scrollHeight > excerpt.clientHeight + 1;
+        toggle.hidden = !overflows;
+        toggle.setAttribute("aria-expanded", "false");
+      });
     }
 
     function _startDelightAutoAdvance() {
@@ -5014,9 +5601,16 @@
         closeDelightComposer();
         renderDelightCover(null);
         renderDelightTurns(null);
+        resetDelightExcerpt();
         $("#delightTitle").textContent = "暂无惊喜队列";
         $("#delightReason").textContent = "后端产生新的高惊喜候选后会通过实时流出现在这里。";
         if ($("#delightStats")) $("#delightStats").hidden = true;
+        const delightPublishedEl = $("#delightPublished");
+        if (delightPublishedEl) {
+          delightPublishedEl.textContent = "";
+          delightPublishedEl.removeAttribute("title");
+          delightPublishedEl.hidden = true;
+        }
         if ($("#delightStatus")) $("#delightStatus").textContent = "";
         if ($("#delightCount")) $("#delightCount").textContent = "0/0";
         controls.forEach((btn) => { btn.disabled = true; });
@@ -5040,11 +5634,21 @@
         renderDelightCover(state.delight);
         renderDelightTurns(state.delight);
         $("#delightTitle").textContent = state.delight.title;
+        syncDelightExcerpt(state.delight);
         const delightStatsEl = $("#delightStats");
         if (delightStatsEl) {
           const delightStats = recommendationStats(state.delight);
           delightStatsEl.textContent = delightStats;
           delightStatsEl.hidden = !delightStats;
+        }
+        const delightPublishedEl = $("#delightPublished");
+        if (delightPublishedEl) {
+          const published = formatPublishedTime(state.delight);
+          delightPublishedEl.textContent = published;
+          delightPublishedEl.title = Number.isFinite(Date.parse(state.delight.published_at))
+            ? new Date(state.delight.published_at).toLocaleString()
+            : "";
+          delightPublishedEl.hidden = !published;
         }
         $("#delightReason").textContent = state.delight.reason;
         if ($("#delightStatus")) $("#delightStatus").textContent = state.delight.response_message || "";
@@ -5110,7 +5714,9 @@
     }
 
     // 鼠标/触摸拖动切换 delight
-    let _delightDragging = false;
+    const _DELIGHT_DRAG_DEAD_ZONE = 10;
+    let _delightDragging = false;   // 按下已就绪，尚未越过死区
+    let _delightDragActive = false; // 已越过死区，真正进入拖拽
     let _delightDragLastX = 0;
     function _initDelightSwipe() {
         const banner = $("#delightBanner");
@@ -5123,14 +5729,21 @@
         });
         banner.addEventListener("pointerdown", (e) => {
             _delightDragging = true;
+            _delightDragActive = false;
             _delightSwipeStartX = e.clientX;
             _delightDragLastX = e.clientX;
             banner.setPointerCapture(e.pointerId);
-            banner.classList.add("is-dragging");
+            // 死区内不进入拖拽视觉态
         });
         banner.addEventListener("pointermove", (e) => {
             if (!_delightDragging) return;
             const dx = e.clientX - _delightSwipeStartX;
+            // 死区判定：未越过阈值前不应用位移、不加 is-dragging
+            if (!_delightDragActive) {
+                if (Math.abs(dx) < _DELIGHT_DRAG_DEAD_ZONE) return;
+                _delightDragActive = true;
+                banner.classList.add("is-dragging");
+            }
             const maxDrag = banner.offsetWidth * 0.3;
             const clamped = Math.max(-maxDrag, Math.min(maxDrag, dx));
             // 首项/末项增加阻力
@@ -5142,10 +5755,12 @@
         banner.addEventListener("pointerup", (e) => {
             if (!_delightDragging) return;
             _delightDragging = false;
+            const wasActive = _delightDragActive;
+            _delightDragActive = false;
             banner.classList.remove("is-dragging");
             banner.releasePointerCapture(e.pointerId);
             const dx = e.clientX - _delightSwipeStartX;
-            if (Math.abs(dx) >= 50) {
+            if (wasActive && Math.abs(dx) >= 50) {
                 if (dx > 0) setActiveDelight(state.delightIndex <= 0 ? state.delights.length - 1 : state.delightIndex - 1);
                 else if (dx < 0) setActiveDelight(state.delightIndex >= state.delights.length - 1 ? 0 : state.delightIndex + 1);
             }
@@ -5153,6 +5768,7 @@
         });
         banner.addEventListener("pointercancel", () => {
             _delightDragging = false;
+            _delightDragActive = false;
             banner.classList.remove("is-dragging");
             banner.style.removeProperty("--drag-offset");
         });
@@ -5259,6 +5875,10 @@
 
     function handleRuntimeEvent(event) {
       if (!event?.type) return;
+      if (event.type === "refresh.pool_updated" && typeof event.pool_available_count === "number") {
+        desktopRuntimeGeneration += 1;
+        clearDesktopRuntimeRecovery();
+      }
       applyRuntimeStatus({ ...event, live_summary: event.message || event.live_summary || event.type });
       // refresh.pool_updated / recommendation.reshuffled are pool-status signals, not
       // list-replacement signals: hydrating here would wipe locally appended cards
@@ -5278,6 +5898,21 @@
       }
       if (event.type === "refresh.pool_updated" && Boolean(state.initStatus?.initialized)) {
         void refreshInitStatus({ schedule: false });
+      }
+      if (
+        event.type === "refresh.pool_updated" &&
+        state.videos.length === 0 &&
+        desktopRecommendationLoadState === "failed-exhausted"
+      ) {
+        desktopRecommendationRecoveryAttempt = 0;
+        desktopRecommendationLoadState = "failed";
+      }
+      if (
+        event.type === "refresh.pool_updated" &&
+        state.videos.length === 0 &&
+        desktopRecommendationLoadState === "failed"
+      ) {
+        scheduleDesktopRecommendationRecovery();
       }
       if (event.type === "activity.added") scheduleActivityPageRefresh();
       if (
@@ -5342,6 +5977,7 @@
         state.runtimeSocket = socket;
         socket.addEventListener("open", () => {
           $("#statusLabel").textContent = "实时连接中";
+          restartDesktopFailedRecoveries();
           // The page may load before the backend binds (frozen-entry launch
           // race): the boot hydrate then swallows every failure into nulls and
           // nothing else ever re-fetches — an uninitialized backend emits no
@@ -5377,10 +6013,11 @@
     }
 
     async function hydrateFromBackend() {
-      const [health, recs, runtime, activity, profile, delights, notification, chatTurns, delightChatTurns, config, initStatus] = await Promise.all([
+      const firstRuntimeGeneration = desktopRuntimeGeneration;
+      const [health, recommendationResult, runtimeResult, activity, profile, delights, notification, chatTurns, delightChatTurns, config, initStatus] = await Promise.all([
         requestJson(ENDPOINTS.health),
-        requestJson(ENDPOINTS.recommendations),
-        requestJson(ENDPOINTS.runtimeStatus),
+        settleResource(readRecommendationSnapshot()),
+        settleResource(readRuntimeStatusSnapshot()),
         requestJson(`${ENDPOINTS.activityFeed}?limit=5`),
         requestJson(ENDPOINTS.profile),
         requestJson(ENDPOINTS.delightBatch),
@@ -5392,8 +6029,14 @@
       ]);
       if (health) $("#statusLabel").textContent = "已连接本地后端";
       if (initStatus) state.initStatus = initStatus;
-      const recommendationItems = Array.isArray(recs) ? recs : asArray(recs?.items);
-      state.videos = normalizeRecommendationList(recommendationItems);
+      if (recommendationResult.ok) {
+        applyDesktopRecommendationSnapshot(recommendationResult.value, { replace: true });
+      } else if (state.videos.length > 0) {
+        clearDesktopRecommendationRecovery("ready");
+      } else {
+        desktopRecommendationLoadState = "failed";
+        scheduleDesktopRecommendationRecovery();
+      }
       if (activity) {
         state.activity = activity;
         state.activityItems = asArray(activity.items);
@@ -5413,12 +6056,31 @@
           { role: "agent", text: turn.reply || turn.assistant_message || turn.status || "等待后端回复中。" }
         ]).filter((item) => item.text);
       }
-      // requestJson resolves null on failure (it never rejects), so the
-      // fallback to the Promise.all snapshot must be `||`, not `.catch()` —
-      // otherwise a failed re-fetch discards the runtime status we already
-      // have and the init-onboarding gate loses its initialized=false signal.
-      const effectiveRuntime = (await requestJson(ENDPOINTS.runtimeStatus)) || runtime;
-      applyRuntimeStatus(effectiveRuntime?.status || effectiveRuntime);
+      // Re-read after recommendations: GET /api/recommendations may consume the
+      // pool, so the later snapshot is preferred. Keep the settled first read
+      // as fallback and never turn a late timeout into a fake zero inventory.
+      let effectiveRuntime = runtimeResult.ok && firstRuntimeGeneration === desktopRuntimeGeneration
+        ? runtimeResult.value
+        : null;
+      let effectiveRuntimeGeneration = effectiveRuntime ? firstRuntimeGeneration : null;
+      const secondRuntimeGeneration = desktopRuntimeGeneration;
+      try {
+        const latestRuntime = await readRuntimeStatusSnapshot();
+        if (secondRuntimeGeneration === desktopRuntimeGeneration) {
+          effectiveRuntime = latestRuntime;
+          effectiveRuntimeGeneration = secondRuntimeGeneration;
+        }
+      } catch {
+        // Keep the first settled snapshot, or a runtime-stream recovery that
+        // may have completed while this slower HTTP read was in flight.
+      }
+      if (effectiveRuntime && effectiveRuntimeGeneration !== null) {
+        applyDesktopRuntimeSnapshot(effectiveRuntime, effectiveRuntimeGeneration);
+      } else if (secondRuntimeGeneration === desktopRuntimeGeneration) {
+        desktopRuntimeLoadState = "failed";
+        scheduleDesktopRuntimeRecovery();
+        renderDesktopRuntimeFailure();
+      }
       applyDelights(delights);
       const delightChatItems = Array.isArray(delightChatTurns) ? delightChatTurns : asArray(delightChatTurns?.items);
       for (const turn of delightChatItems.filter(Boolean)) applyTurnToDelight({ ...turn, scope: turn.scope || "delight" });
@@ -5644,6 +6306,7 @@
           multimodal_image_timeout_seconds: getIntInput("multimodalImageTimeout", 6)
         },
         storage: { db_path: getInput("storageDbPath") },
+        network: { proxy: getInput("networkProxy") },
         logging: {
           level: getInput("logLevel") || "INFO",
           file_level: getInput("logFileLevel") || "DEBUG",
@@ -5996,6 +6659,24 @@
       }
     }
 
+    async function runNetworkProxyConfigProbe() {
+      const button = $("#probeNetworkProxy");
+      const statusEl = $("#probeNetworkProxyStatus");
+      if (button) button.disabled = true;
+      renderProbePending(statusEl, "代理");
+      try {
+        const result = await probeConfigService("network_proxy", { network: { proxy: getInput("networkProxy") } });
+        renderProbeResult(statusEl, result);
+      } catch (error) {
+        renderProbeResult(statusEl, {
+          ok: false,
+          error: configErrorMessage(error?.details) || error?.message || "代理探测失败"
+        });
+      } finally {
+        if (button) button.disabled = false;
+      }
+    }
+
     document.addEventListener("click", (event) => {
       const closeId = event.target?.dataset?.close;
       if (closeId) closePanel(closeId);
@@ -6213,6 +6894,7 @@
     safeBind("#probeLlm", "click", () => { void runLlmConfigProbe(); });
     safeBind("#probeLlmFallback", "click", () => { void runLlmFallbackConfigProbe(); });
     safeBind("#probeEmbedding", "click", () => { void runEmbeddingConfigProbe(); });
+    safeBind("#probeNetworkProxy", "click", () => { void runNetworkProxyConfigProbe(); });
     lanAuthControl = initLanAuthControl();
     bootAutostartControl = initBootAutostartControl();
     Object.values(SOURCE_ENABLE_SELECT_IDS).forEach((id) => {
@@ -6285,11 +6967,21 @@
       // 「去看看」是纯按钮（不像封面 <a> 能原生导航），必须由 JS 打开内容。
       await respondDelight(state.delight, response, null, response === "view");
     }));
+    $("#delightExcerptToggle")?.addEventListener("click", () => {
+      const wrapper = $("#delightExcerpt");
+      const toggle = $("#delightExcerptToggle");
+      if (!wrapper || !toggle) return;
+      const expanded = wrapper.classList.toggle("is-expanded");
+      toggle.textContent = expanded ? "收起正文" : "展开正文";
+      toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+      scheduleActivityRailHeightSync();
+    });
 
     restoreBackendEndpoint();
     restoreFrontendSettings();
     setSideDrawerOpen(!isMobileViewport() && storageGet(SIDE_DRAWER_OPEN_KEY) !== "0", { persist: false });
     startChatPlaceholderRotation();
+    toastManager.init();
     try {
       renderAll();
     } catch (error) {

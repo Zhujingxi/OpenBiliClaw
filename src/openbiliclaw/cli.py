@@ -21,6 +21,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from openbiliclaw.published_time import format_published_time
 from openbiliclaw.runtime.ollama_supervisor import (
     _is_default_ollama_endpoint,
     _ollama_is_running,
@@ -413,10 +414,16 @@ async def _run_with_progress(
 
 def _print_recommendation_card(item: Any, index: int) -> None:
     """Render one recommendation in a card-like format."""
+    published = format_published_time(
+        getattr(item.content, "published_at", ""),
+        getattr(item.content, "published_label", ""),
+    )
     rows = [
         ("标题", item.content.title or "（暂无）"),
         ("UP 主", item.content.up_name or "（未知）"),
     ]
+    if published:
+        rows.append(("发布时间", published))
     if item.topic_label:
         rows.append(("话题标签", item.topic_label))
     rows.extend(
@@ -926,6 +933,24 @@ def main(log_level: str | None = typer.Option(None, "--log-level")) -> None:
     _APP_CONTEXT["log_level"] = log_level
     _bootstrap_container_runtime()
     _initialize_logging(log_level_override=log_level)
+    _sync_outbound_proxy()
+
+
+def _sync_outbound_proxy() -> None:
+    """Mirror [network].proxy into the process-level source of truth for CLI.
+
+    Runs once per CLI invocation so any command that builds an LLM registry or
+    the updater routes overseas traffic through the configured proxy. Guarded
+    so a missing/broken config never blocks a command from starting.
+    """
+    import contextlib
+
+    from openbiliclaw.config import load_config
+    from openbiliclaw.network import set_outbound_proxy
+
+    # Config resolution must never block a command from starting.
+    with contextlib.suppress(Exception):
+        set_outbound_proxy(load_config().network.proxy)
 
 
 def _print_config_guidance(messages: list[str]) -> None:
@@ -1059,7 +1084,7 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
     "deepseek": {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash"},
     # Ollama: project is Chinese-primary; qwen2.5:7b handles Chinese
     # noticeably better than llama3 at the same size.
-    "ollama": {"base_url": "http://localhost:11434/v1", "model": "qwen2.5:7b"},
+    "ollama": {"base_url": "http://127.0.0.1:11434/v1", "model": "qwen2.5:7b"},
     # OpenRouter: route to OpenAI's cheapest current-gen by default.
     "openrouter": {"base_url": "https://openrouter.ai/api/v1", "model": "openai/gpt-5-nano"},
 }
@@ -1339,7 +1364,7 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
 )
 
 
-def _ollama_has_model(model: str, host: str = "http://localhost:11434") -> bool:
+def _ollama_has_model(model: str, host: str = "http://127.0.0.1:11434") -> bool:
     """Return True if Ollama already has the named model pulled."""
     import httpx
 
@@ -1358,7 +1383,7 @@ def _ollama_has_model(model: str, host: str = "http://localhost:11434") -> bool:
     return False
 
 
-def _ollama_pull_model(model: str, host: str = "http://localhost:11434") -> bool:
+def _ollama_pull_model(model: str, host: str = "http://127.0.0.1:11434") -> bool:
     """Stream a model pull from Ollama; print progress to console."""
     import httpx
 
@@ -1489,7 +1514,7 @@ def _save_embedding_config(
     if base_url:
         config.llm.embedding.base_url = base_url.strip()
     elif provider == "ollama" and not config.llm.embedding.base_url.strip():
-        config.llm.embedding.base_url = "http://localhost:11434/v1"
+        config.llm.embedding.base_url = "http://127.0.0.1:11434/v1"
     if api_key:
         config.llm.embedding.api_key = api_key.strip()
     save_config(config, diagnostics.config_path)
@@ -9945,6 +9970,7 @@ def config_show() -> None:
             ),
         ),
         ("开机自启动", _format_autostart_config_status(cfg)),
+        ("海外出口代理", cfg.network.proxy or "未设置（海外请求走进程 env / 直连）"),
         ("数据目录", str(cfg.data_path)),
     ]
     if diagnostics.config_path:

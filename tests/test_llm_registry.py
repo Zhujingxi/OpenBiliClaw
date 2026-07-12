@@ -443,7 +443,7 @@ def test_ollama_embedding_with_empty_credentials_uses_local_default_without_warn
     assert service is not None
     assert service._provider.name == "ollama"
     assert service._model == "bge-m3"
-    assert service._provider.base_url == "http://localhost:11434/v1"
+    assert service._provider.base_url == "http://127.0.0.1:11434/v1"
     assert "back-compat" not in caplog.text.lower()
 
 
@@ -471,7 +471,7 @@ def test_ollama_embedding_without_base_url_uses_local_default(
 
     assert service is not None
     assert service._provider.name == "ollama"
-    assert service._provider.base_url == "http://localhost:11434/v1"
+    assert service._provider.base_url == "http://127.0.0.1:11434/v1"
     assert "back-compat" not in caplog.text.lower()
 
 
@@ -791,6 +791,7 @@ def test_gemini_embedding_uses_independent_dimension_config(
             timeout: float = 300.0,
             base_url: str = "",
             embedding_output_dimensionality: int | None = None,
+            **_: object,
         ) -> None:
             self.api_key = api_key
             self.model = model
@@ -1671,3 +1672,73 @@ def test_build_llm_registry_healthy_fallback_emits_no_dead_fallback_warning(
 
     assert registry._fallback_order() == ["openai", "deepseek"]
     assert "never be used" not in caplog.text
+
+
+# ── [network].proxy → registry factory wiring ───────────────────────────────
+
+
+@pytest.fixture
+def _reset_outbound_proxy() -> object:
+    from openbiliclaw import network
+
+    network.reset_outbound_proxy_for_tests()
+    yield
+    network.reset_outbound_proxy_for_tests()
+
+
+def _overseas_config() -> Config:
+    return Config(
+        llm=LLMConfig(
+            openai=LLMProviderConfig(api_key="openai-key"),
+            claude=LLMProviderConfig(api_key="claude-key"),
+            deepseek=LLMProviderConfig(api_key="deepseek-key"),
+            openrouter=LLMProviderConfig(api_key="or-key"),
+            openai_compatible=LLMProviderConfig(
+                api_key="compat-key", base_url="https://gw.example.com/v1"
+            ),
+            ollama=LLMProviderConfig(model="llama3"),
+        )
+    )
+
+
+def test_overseas_factories_read_proxy_from_helper(_reset_outbound_proxy: object) -> None:
+    from openbiliclaw import network
+    from openbiliclaw.llm.registry import (
+        _maybe_claude_provider,
+        _maybe_deepseek_provider,
+        _maybe_openai_compatible_provider,
+        _maybe_openai_provider,
+        _maybe_openrouter_provider,
+    )
+
+    network.set_outbound_proxy("socks5://127.0.0.1:1080")
+    config = _overseas_config()
+
+    for factory in (
+        _maybe_openai_provider,
+        _maybe_claude_provider,
+        _maybe_deepseek_provider,
+        _maybe_openrouter_provider,
+        _maybe_openai_compatible_provider,
+    ):
+        provider = factory(config, {})
+        assert provider is not None
+        assert getattr(provider, "_proxy", "") == "socks5://127.0.0.1:1080", factory.__name__
+
+
+def test_ollama_factory_never_reads_proxy(_reset_outbound_proxy: object) -> None:
+    from openbiliclaw import network
+    from openbiliclaw.llm.registry import _maybe_ollama_provider
+
+    network.set_outbound_proxy("socks5://127.0.0.1:1080")
+    provider = _maybe_ollama_provider(_overseas_config(), {})
+    assert provider is not None
+    assert getattr(provider, "_proxy", "") == ""
+
+
+def test_overseas_factories_no_proxy_when_helper_unset(_reset_outbound_proxy: object) -> None:
+    from openbiliclaw.llm.registry import _maybe_openai_provider
+
+    provider = _maybe_openai_provider(_overseas_config(), {})
+    assert provider is not None
+    assert getattr(provider, "_proxy", "") == ""

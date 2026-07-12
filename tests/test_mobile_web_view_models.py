@@ -10,6 +10,43 @@ from textwrap import dedent
 import pytest
 
 _NODE = shutil.which("node")
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_mobile_probe_action_copy_is_canonical() -> None:
+    view_models = (ROOT / "src/openbiliclaw/web/js/view-models.js").read_text(encoding="utf-8")
+
+    assert 'label: "确认喜欢", action: "confirm"' in view_models
+    assert 'label: "暂时搁置", action: "defer"' in view_models
+    assert 'label: "确认不喜欢", action: "reject"' in view_models
+    assert 'label: "确认避雷", action: "confirm"' in view_models
+    assert 'label: "搁置避雷", action: "defer"' in view_models
+    assert 'label: "不是雷点", action: "reject"' in view_models
+
+
+def test_mobile_profile_uses_probe_action_descriptors() -> None:
+    profile_js = (ROOT / "src/openbiliclaw/web/js/views/profile.js").read_text(encoding="utf-8")
+    assert "getProbeMessageActions" in profile_js
+    assert "getAvoidanceProbeMessageActions" in profile_js
+    assert 'data-action="${action.action}"' in profile_js
+    assert "const action = e.target.dataset.action" in profile_js
+    assert 'data-action="confirm">\\u2713</button>' not in profile_js
+    assert 'data-action="reject">\\u2717</button>' not in profile_js
+    assert profile_js.count('const buttons = [...row.querySelectorAll(".spec-btn")];') == 2
+    assert (
+        profile_js.count("for (const actionButton of buttons) actionButton.disabled = true;") == 2
+    )
+    assert (
+        profile_js.count("for (const actionButton of buttons) actionButton.disabled = false;") == 2
+    )
+
+
+def test_mobile_probe_action_buttons_have_explicit_button_type() -> None:
+    profile_js = (ROOT / "src/openbiliclaw/web/js/views/profile.js").read_text(encoding="utf-8")
+    chat_js = (ROOT / "src/openbiliclaw/web/js/views/chat.js").read_text(encoding="utf-8")
+
+    assert '<button type="button" class="${classes}"' in profile_js
+    assert '<button type="button" class="message-action-btn ${item.primary' in chat_js
 
 
 def _run_js(script: str) -> subprocess.CompletedProcess[str]:
@@ -112,7 +149,7 @@ class TestMobileWebViewModels:
               "getReadyRecommendationHint",
               "getRecommendationCoverPreloadUrls", "getRecommendationImageLoadingAttrs",
               "shouldAutoAppendRecommendations",
-              "formatRelativeTimestamp",
+              "formatRelativeTimestamp", "formatPublishedTime", "getPublishedTimeDisplay",
               "normalizeSourcePlatform", "getSourceLabel",
               "normalizeCoverUrl", "getCoverImageAttrs",
               "normalizePoolStatus", "normalizeMbtiDimensions", "normalizeChatTurn",
@@ -120,6 +157,86 @@ class TestMobileWebViewModels:
             for (const name of required) {
                 assert.equal(typeof vm[name], "function", `missing export: ${name}`);
             }
+        """)
+        )
+
+    def test_publication_time_prefers_exact_time_and_falls_back_safely(self) -> None:
+        _assert_js(
+            dedent("""
+            import assert from "node:assert/strict";
+            import {
+              formatPublishedTime,
+              normalizeDelightCandidate,
+              normalizeRecommendation,
+            } from "./src/openbiliclaw/web/js/view-models.js";
+
+            const now = new Date(2026, 6, 11, 12, 0, 0, 0).getTime();
+            const iso = (offset) => new Date(now + offset).toISOString();
+            const exact = normalizeRecommendation({
+              id: 1,
+              bvid: "BV1",
+              published_at: iso(-10_800_000),
+              published_label: "fallback",
+            });
+            const delight = normalizeDelightCandidate({
+              bvid: "BV2",
+              published_at: "",
+              published_label: "  3   days ago\\n",
+            });
+
+            assert.equal(exact.published_at, iso(-10_800_000));
+            assert.equal(exact.published_label, "fallback");
+            assert.equal(delight.published_label, "3 days ago");
+
+            const cases = [
+              [exact, "3 小时前"],
+              [{ published_label: "  3   天前\\n" }, "3 天前"],
+              [{}, ""],
+              [{ published_at: "not-a-date", published_label: "来源时间" }, "来源时间"],
+              [{ published_at: iso(-59_999) }, "刚刚"],
+              [{ published_at: iso(-60_000) }, "1 小时前"],
+              [{ published_at: iso(-86_399_999) }, "23 小时前"],
+              [{ published_at: iso(-86_400_000) }, "1 天前"],
+              [{ published_at: iso(-604_799_999) }, "6 天前"],
+              [{ published_at: iso(-604_800_000) }, "7月4日"],
+              [{ published_at: new Date(2026, 0, 2, 12).toISOString() }, "1月2日"],
+              [{ published_at: new Date(2025, 10, 9, 12).toISOString() }, "2025-11-09"],
+              [{ published_at: iso(300_000) }, "刚刚"],
+              [{ published_at: iso(300_001) }, "7月11日"],
+            ];
+            for (const [item, expected] of cases) {
+              assert.equal(formatPublishedTime(item, now), expected);
+            }
+        """)
+        )
+
+    def test_publication_display_exposes_tooltip_only_for_valid_exact_time(self) -> None:
+        _assert_js(
+            dedent("""
+            import assert from "node:assert/strict";
+            import { getPublishedTimeDisplay } from "./src/openbiliclaw/web/js/view-models.js";
+
+            const now = new Date(2026, 6, 11, 12, 0, 0, 0).getTime();
+            const exactAt = new Date(now - 10_800_000).toISOString();
+            assert.deepEqual(getPublishedTimeDisplay({
+              published_at: exactAt,
+              published_label: "fallback",
+            }, now), {
+              text: "3 小时前",
+              title: new Date(exactAt).toLocaleString(),
+            });
+            assert.deepEqual(getPublishedTimeDisplay({ published_label: "3 天前" }, now), {
+              text: "3 天前",
+              title: "",
+            });
+            assert.deepEqual(getPublishedTimeDisplay({
+              published_at: "not-a-date",
+              published_label: "来源时间",
+            }, now), {
+              text: "来源时间",
+              title: "",
+            });
+            assert.equal(getPublishedTimeDisplay({}, now), null);
         """)
         )
 
@@ -656,18 +773,18 @@ class TestMobileWebViewModels:
             assert.deepEqual(
               getProbeMessageActions().map((item) => [item.label, item.action]),
               [
-                ["喜欢", "confirm"],
-                ["暂时忽略", "defer"],
-                ["不喜欢", "reject"],
+                ["确认喜欢", "confirm"],
+                ["暂时搁置", "defer"],
+                ["确认不喜欢", "reject"],
                 ["多聊聊", "chat"],
               ],
             );
             assert.deepEqual(
               getAvoidanceProbeMessageActions().map((item) => [item.label, item.action]),
               [
-                ["确实不喜欢", "confirm"],
-                ["暂时忽略", "defer"],
-                ["不是", "reject"],
+                ["确认避雷", "confirm"],
+                ["搁置避雷", "defer"],
+                ["不是雷点", "reject"],
                 ["多聊聊", "chat"],
               ],
             );
@@ -809,6 +926,26 @@ class TestMobileWebViewModels:
         """)
         )
 
+    def test_pool_stream_snapshot_can_initialize_mobile_inventory_summary(self) -> None:
+        _assert_js(
+            dedent("""
+            import assert from "node:assert/strict";
+            import {
+              getPoolStatusSummary,
+              mergeRuntimeStatusEvent,
+            } from "./src/openbiliclaw/web/js/view-models.js";
+
+            const runtime = mergeRuntimeStatusEvent(null, {
+              pool_available_count: 23,
+              pool_pending_count: 4,
+              recent_pool_topics: ["城市影像"],
+            });
+
+            assert.equal(runtime.initialized, true);
+            assert.equal(getPoolStatusSummary(runtime).available, "还有 23 条可换");
+        """),
+        )
+
     def test_normalize_activity_feed(self) -> None:
         _assert_js(
             dedent("""
@@ -900,7 +1037,11 @@ class TestMobileWebViewModels:
 
         assert "export async function respondToProbe(domain, responseType, options = {})" in api_js
         assert 'surface: "profile"' in profile_js
-        assert 'payload.surface = "profile"' in desktop_js
+        assert "if (!isAvoidance && surface) payload.surface = surface;" in desktop_js
+        assert (
+            'submitProbeResponse(type, domain, response, { surface: "profile", keepalive })'
+            in desktop_js
+        )
         assert 'respondToProbe(domain, action, { surface: "profile" })' in profile_js
 
     def test_profile_edit_interest_specifics_are_editable_in_web_surfaces(self) -> None:
@@ -944,11 +1085,90 @@ class TestMobileWebViewModels:
         assert 'type === "avoidance.probe"' in chat_js
         assert '"avoidance_probe"' in chat_js
         assert "getAvoidanceProbeMessageActions" in chat_js
-        assert "确实不喜欢" in view_models_js
+        assert "确认避雷" in view_models_js
 
         assert "speculative_avoidances" in profile_js
         assert "renderSpecAvoidances" in profile_js
         assert "respondToAvoidanceProbe" in profile_js
+
+    def test_mobile_avoidance_actions_do_not_bind_interest_handler(self) -> None:
+        profile_js = Path("src/openbiliclaw/web/js/views/profile.js").read_text()
+        interest_binder = (
+            "function bindSpecInterestActions()"
+            + profile_js.split("function bindSpecInterestActions()", 1)[1].split(
+                "\n}\n\nfunction bindInsightActions", 1
+            )[0]
+            + "\n}"
+        )
+        avoidance_binder = (
+            "function bindSpecAvoidanceActions()"
+            + profile_js.split("function bindSpecAvoidanceActions()", 1)[1].split(
+                "\n}\n\n// ── Cognition Cards", 1
+            )[0]
+            + "\n}"
+        )
+
+        script = (
+            dedent("""
+            import assert from "node:assert/strict";
+
+            const interestBinderSource = __INTEREST_BINDER__;
+            const avoidanceBinderSource = __AVOIDANCE_BINDER__;
+            const createBindings = new Function(
+              "$root", "state", "patchState", "respondToProbe", "respondToAvoidanceProbe",
+              "rememberHandledProbe", "forgetHandledProbe", "render",
+              `${interestBinderSource}\n${avoidanceBinderSource}\n` +
+                "return { bindSpecInterestActions, bindSpecAvoidanceActions };",
+            );
+
+            for (const action of ["confirm", "defer", "reject"]) {
+              const row = {
+                dataset: { domain: "浅层热点复读" },
+                querySelectorAll: () => buttons,
+              };
+              const buttons = ["confirm", "defer", "reject"].map((buttonAction) => ({
+                dataset: { action: buttonAction },
+                disabled: false,
+                listeners: [],
+                addEventListener(_event, listener) { this.listeners.push(listener); },
+                closest: () => row,
+              }));
+              const root = {
+                querySelectorAll(selector) {
+                  if (selector === ".spec-avoidance .spec-avoidance-btn") return buttons;
+                  if (selector === ".spec-interest .spec-btn") return buttons;
+                  if (selector === ".spec-interest:not(.spec-avoidance) .spec-btn") return [];
+                  throw new Error(`unexpected selector: ${selector}`);
+                },
+              };
+              const calls = { interest: [], avoidance: [] };
+              const state = {
+                profile: { speculative_interests: [], speculative_avoidances: [] },
+              };
+              const bindings = createBindings(
+                root,
+                state,
+                () => {},
+                async (domain, response) => calls.interest.push([domain, response]),
+                async (domain, response) => calls.avoidance.push([domain, response]),
+                () => {},
+                () => {},
+                () => {},
+              );
+
+              bindings.bindSpecInterestActions();
+              bindings.bindSpecAvoidanceActions();
+              const button = buttons.find((candidate) => candidate.dataset.action === action);
+              await Promise.all(button.listeners.map((listener) => listener({ target: button })));
+
+              assert.deepEqual(calls.avoidance, [["浅层热点复读", action]]);
+              assert.deepEqual(calls.interest, []);
+            }
+        """)
+            .replace("__INTEREST_BINDER__", repr(interest_binder))
+            .replace("__AVOIDANCE_BINDER__", repr(avoidance_binder))
+        )
+        _assert_js(script)
 
     def test_mobile_probe_card_locks_all_actions_after_tap(self) -> None:
         chat_js = Path("src/openbiliclaw/web/js/views/chat.js").read_text()
@@ -969,7 +1189,7 @@ class TestMobileWebViewModels:
 
         assert "avoidanceProbeRespond" in source
         assert "avoidance.probe" in source
-        assert "确实不喜欢" in source
+        assert "确认避雷" in source
 
     def test_profile_display_helpers_preserve_plugin_semantics(self) -> None:
         _assert_js(

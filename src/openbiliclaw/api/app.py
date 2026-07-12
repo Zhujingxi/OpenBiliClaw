@@ -16,10 +16,10 @@ import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, cast
-from urllib.parse import quote, urlparse
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from urllib.parse import quote, urlparse, urlsplit, urlunsplit
 
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
@@ -83,6 +83,7 @@ from openbiliclaw.api.models import (
     LLMProviderConfigOut,
     LoggingConfigOut,
     ModuleLLMConfigOut,
+    NetworkConfigOut,
     NotificationAckIn,
     NotificationAckResponse,
     PendingCognitionUpdateOut,
@@ -99,6 +100,7 @@ from openbiliclaw.api.models import (
     RecommendationListResponse,
     RecommendationOut,
     RecommendationRefreshResponse,
+    RecommendationReshuffleIn,
     RecommendationReshuffleResponse,
     RedditCookieIn,
     RedditCookieResponse,
@@ -186,24 +188,18 @@ async def _run_init_heartbeat(
         except Exception:
             logger.warning("init heartbeat touch failed for run %s", run_id, exc_info=True)
 
-# /api/health embedding readiness: cache the live-probe result for this many
-# seconds so Docker healthchecks and popup re-polls don't hit the embedding
-# provider on every call. Kept short so a freshly-fixed provider (e.g. right
-# after `ollama pull bge-m3`) clears the popup's "semantic dedup off" banner
-# quickly. The probe itself is capped by a separate timeout so a hung/retrying
-# provider can never stall /api/health. The timeout is generous enough to
-# absorb an Ollama cold model-load (bge-m3 unloads after keep_alive idle; the
-# first embed re-loads it — measured ~3s), and a timeout is treated as
-# "loading, optimistically ready", NOT a hard failure — otherwise the banner
-# would flash on every popup-open-after-idle. A genuinely-missing model 404s
-# *fast*, so it still resolves to not-ready well within the cap.
+# /api/health embedding readiness: cache the raw live-probe outcome so Docker
+# healthchecks and popup re-polls don't hit the embedding provider on every
+# call. Success caches for 30s; failure/timeout for 8s so a freshly-fixed or
+# just-finished cold load greens quickly. The probe itself is capped at 15s,
+# but local bge-m3 cold loads were observed at 16-29s on 2026-07-11. Ordinary
+# health therefore treats only a loopback-Ollama timeout as cold-loading and
+# optimistically available; guided init remains strict until a real vector
+# succeeds. Explicit False/errors still fail everywhere.
 _EMBEDDING_READY_TTL_SECONDS = 30.0
-# Strict readiness (gui-init): a failure/timeout caches briefly so a service
-# that finished a cold model load greens within seconds; the probe timeout is
-# generous enough for a cold Ollama load but still fails (does not optimistically
-# pass) if the embedding service never answers.
 _EMBEDDING_FAIL_TTL_SECONDS = 8.0
 _EMBEDDING_PROBE_TIMEOUT_SECONDS = 15.0
+_EmbeddingProbeOutcome = Literal["ready", "failed", "timed_out"]
 _LAN_IP_TTL_SECONDS = 30.0
 _AUTO_REPLENISH_DEBOUNCE_SECONDS = 30.0
 _FEEDBACK_BATCH_DEBOUNCE_SECONDS = 5.0
@@ -1027,6 +1023,26 @@ def _mode_to_flags(mode: str) -> tuple[bool, bool]:
     return (mode != "legacy", mode == "inspiration")
 
 
+def _mask_proxy_userinfo(url: str) -> str:
+    """Mask any ``user:pass@`` credential in a proxy URL for GET responses.
+
+    ``socks5://u:p@host:1`` → ``socks5://***@host:1``. A bare
+    ``socks5://host:1`` has no secret and is returned verbatim.
+    """
+    if not url:
+        return url
+    parts = urlsplit(url)
+    if "@" not in parts.netloc:
+        return url
+    host = parts.netloc.rsplit("@", 1)[1]
+    return urlunsplit((parts.scheme, f"***@{host}", parts.path, parts.query, parts.fragment))
+
+
+def _is_masked_proxy_echo(value: str) -> bool:
+    """Whether a submitted proxy value is a masked GET echo (contains ``***``)."""
+    return "***" in value
+
+
 def create_app(
     *,
     memory_manager: Any | None = None,
@@ -1070,6 +1086,13 @@ def create_app(
 
     # ── Build RuntimeContext ────────────────────────────────────────
     config = load_config()
+
+    # Mirror the overseas-outbound proxy into the process-level source of truth
+    # before any LLM/updater client is built. CN-direct clients never read it.
+    # getattr-guarded so a partial config object never hard-crashes app boot.
+    from openbiliclaw.network import set_outbound_proxy
+
+    set_outbound_proxy(getattr(getattr(config, "network", None), "proxy", "") or "")
 
     # Auto-generate the session signing secret on first enable so login state
     # survives restarts (see docs/plans/2026-05-30-web-password-auth-design.md).
@@ -1880,7 +1903,7 @@ def create_app(
 
     # Embedding readiness is probed live (see _health_embedding_ready) and the
     # result cached here so frequent /api/health polls share one provider call.
-    _embedding_ready_value = False
+    _embedding_probe_outcome: _EmbeddingProbeOutcome = "failed"
     _embedding_ready_checked_at = float("-inf")
     _embedding_ready_lock = asyncio.Lock()
     # Classified not-ready cause (v0.3.155+), cached on the same cadence so
@@ -1902,9 +1925,26 @@ def create_app(
         model → bge-m3.
         """
         emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
-        base_url = str(getattr(emb, "base_url", "") or "").strip() or "http://localhost:11434/v1"
+        base_url = str(getattr(emb, "base_url", "") or "").strip() or "http://127.0.0.1:11434/v1"
         model = str(getattr(emb, "model", "") or "").strip() or "bge-m3"
         return base_url, model
+
+    def _embedding_probe_ttl(outcome: _EmbeddingProbeOutcome) -> float:
+        return _EMBEDDING_READY_TTL_SECONDS if outcome == "ready" else _EMBEDDING_FAIL_TTL_SECONDS
+
+    def _embedding_probe_result(outcome: _EmbeddingProbeOutcome, *, strict: bool) -> bool:
+        if outcome == "ready":
+            return True
+        if outcome != "timed_out" or strict:
+            return False
+        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
+        provider = str(getattr(emb, "provider", "") or "").strip().lower()
+        if provider != "ollama":
+            return False
+        from openbiliclaw.runtime.ollama_supervisor import is_loopback
+
+        base_url, _ = _embedding_ollama_target()
+        return is_loopback(base_url)
 
     async def _diagnose_embedding(ready: bool) -> tuple[str, str]:
         """Classify why embedding is not ready (``("ok", "")`` when it is).
@@ -1984,8 +2024,8 @@ def create_app(
             _embedding_diag_checked_at = time.monotonic()
             return diag
 
-    async def _health_embedding_ready() -> bool:
-        """Whether the embedding service can *currently* produce a vector.
+    async def _health_embedding_ready(*, strict: bool = False) -> bool:
+        """Interpret the cached live embedding probe for health or strict init.
 
         This is a live signal, not a build-time one. A service object that
         was constructed at startup but whose provider now 404s (``bge-m3``
@@ -1999,9 +2039,10 @@ def create_app(
           - service without a ``probe()`` (legacy/stub) -> build-only ``True``;
           - otherwise a cache-bypassing ``probe()``, result cached for
             ``_EMBEDDING_READY_TTL_SECONDS`` and single-flighted so concurrent
-            polls share one provider round-trip.
+            polls share one provider round-trip. A loopback-Ollama timeout is
+            optimistic only when ``strict`` is false; init always passes true.
         """
-        nonlocal _embedding_ready_value, _embedding_ready_checked_at
+        nonlocal _embedding_probe_outcome, _embedding_ready_checked_at
 
         soul_engine = getattr(ctx, "soul_engine", None)
         service = getattr(soul_engine, "_embedding_service", None)
@@ -2012,39 +2053,32 @@ def create_app(
             # Legacy service without a live probe — "built" is the best signal.
             return True
 
-        _embedding_ttl = (
-            _EMBEDDING_READY_TTL_SECONDS if _embedding_ready_value else _EMBEDDING_FAIL_TTL_SECONDS
-        )
+        _embedding_ttl = _embedding_probe_ttl(_embedding_probe_outcome)
         if time.monotonic() - _embedding_ready_checked_at < _embedding_ttl:
-            return _embedding_ready_value
+            return _embedding_probe_result(_embedding_probe_outcome, strict=strict)
 
         async with _embedding_ready_lock:
             # Another request may have refreshed the cache while we waited.
-            _embedding_ttl = (
-                _EMBEDDING_READY_TTL_SECONDS
-                if _embedding_ready_value
-                else _EMBEDDING_FAIL_TTL_SECONDS
-            )
+            _embedding_ttl = _embedding_probe_ttl(_embedding_probe_outcome)
             if time.monotonic() - _embedding_ready_checked_at < _embedding_ttl:
-                return _embedding_ready_value
+                return _embedding_probe_result(_embedding_probe_outcome, strict=strict)
             try:
                 ready = bool(
                     await asyncio.wait_for(probe(), timeout=_EMBEDDING_PROBE_TIMEOUT_SECONDS)
                 )
+                outcome: _EmbeddingProbeOutcome = "ready" if ready else "failed"
             except TimeoutError:
-                # Strict (gui-init): a prereq is "ok" only on a confirmed real
-                # embedding round-trip. A timeout (even a cold model load) within
-                # the generous window means we could NOT confirm it works → report
-                # not-ready, and the short fail-TTL re-probes soon so it greens
-                # quickly once the load finishes.
-                logger.debug("Embedding readiness probe timed out; reporting not ready")
-                ready = False
+                logger.debug(
+                    "Embedding readiness probe timed out; ordinary loopback-Ollama health "
+                    "treats this as cold-loading while init remains strict"
+                )
+                outcome = "timed_out"
             except Exception:
                 logger.debug("Embedding readiness probe errored", exc_info=True)
-                ready = False
-            _embedding_ready_value = ready
+                outcome = "failed"
+            _embedding_probe_outcome = outcome
             _embedding_ready_checked_at = time.monotonic()
-            return ready
+            return _embedding_probe_result(outcome, strict=strict)
 
     def _embedding_required_for_init() -> bool:
         """Whether guided init must wait for a configured embedding provider."""
@@ -2124,7 +2158,7 @@ def create_app(
             # the same TTL-cached probe /api/health already exercises.
             bili = prereqs.peek_bilibili()
             chat = prereqs.peek_chat()
-            embedding = await _health_embedding_ready()
+            embedding = await _health_embedding_ready(strict=True)
         else:
             # Probe the three services concurrently — each is a real (now
             # strict) request with a generous cold-load timeout, so running
@@ -2134,7 +2168,7 @@ def create_app(
             bili, chat, embedding = await asyncio.gather(
                 prereqs.bilibili_check(),
                 prereqs.chat_ready(),
-                _health_embedding_ready(),
+                _health_embedding_ready(strict=True),
             )
         platforms = prereqs.enabled_platforms()
         trusted = _get_auth_gate().is_trusted_local(request)
@@ -2442,7 +2476,7 @@ def create_app(
         if not chat:
             coord.reset_to_idle(run_id, reason="llm_not_ready")
             return JSONResponse({"error": "llm_not_ready"}, status_code=409)
-        if _embedding_required_for_init() and not await _health_embedding_ready():
+        if _embedding_required_for_init() and not await _health_embedding_ready(strict=True):
             pulling = await _maybe_autostart_embedding_pull()
             coord.reset_to_idle(run_id, reason="embedding_not_ready")
             detail = (
@@ -2669,10 +2703,10 @@ def create_app(
                     return JSONResponse({"ok": True, "already_ok": True, "model": model})
                 if code == DIAG_NOT_RUNNING:
                     from openbiliclaw.runtime.ollama_supervisor import (
-                        _is_default_ollama_endpoint,
-                        _ollama_start_serve_background,
                         effective_ollama_endpoint,
+                        ensure_managed_ollama,
                         is_loopback,
+                        may_manage_ollama_endpoint,
                         ollama_required,
                     )
 
@@ -2682,7 +2716,7 @@ def create_app(
                         bool(getattr(getattr(cfg, "autostart", None), "manage_ollama", False))
                         and ollama_required(cfg)
                         and is_loopback(endpoint)
-                        and _is_default_ollama_endpoint(endpoint)
+                        and may_manage_ollama_endpoint(endpoint)
                     )
                     if not may_manage:
                         return JSONResponse(
@@ -2697,7 +2731,7 @@ def create_app(
                             },
                             status_code=409,
                         )
-                    if not _ollama_start_serve_background():
+                    if not ensure_managed_ollama(endpoint):
                         return JSONResponse(
                             {"error": "not_running", "detail": detail},
                             status_code=409,
@@ -2757,9 +2791,9 @@ def create_app(
                 if code == DIAG_ERROR:
                     if not provider_error_restarted:
                         from openbiliclaw.runtime.ollama_supervisor import (
-                            _is_default_ollama_endpoint,
                             effective_ollama_endpoint,
                             is_loopback,
+                            may_manage_ollama_endpoint,
                             ollama_required,
                             restart_managed_ollama,
                         )
@@ -2770,7 +2804,7 @@ def create_app(
                             bool(getattr(getattr(cfg, "autostart", None), "manage_ollama", False))
                             and ollama_required(cfg)
                             and is_loopback(endpoint)
-                            and _is_default_ollama_endpoint(endpoint)
+                            and may_manage_ollama_endpoint(endpoint)
                         )
                         provider_error_restarted = True
                         if may_manage and actions < _max_embedding_repair_actions:
@@ -3231,6 +3265,8 @@ def create_app(
                 content_id=str(getattr(item.content, "content_id", "") or item.content.bvid),
                 content_url=str(getattr(item.content, "content_url", "") or ""),
                 source_platform=str(getattr(item.content, "source_platform", "") or "bilibili"),
+                published_at=str(getattr(item.content, "published_at", "") or ""),
+                published_label=str(getattr(item.content, "published_label", "") or ""),
                 content_type=str(getattr(item.content, "content_type", "") or "video"),
                 body_text=str(getattr(item.content, "body_text", "") or ""),
                 duration=int(getattr(item.content, "duration", 0) or 0),
@@ -3340,6 +3376,23 @@ def create_app(
                 from openbiliclaw.sources.douyin_auth import resolve_douyin_cookie
 
                 runtime_config = getattr(ctx, "config", None) or config
+                # Browser-only sources persist just a boolean login heartbeat.
+                # Ask once per runtime connection so settings immediately
+                # reflects the current browser, without contacting a platform.
+                await websocket.send_json(
+                    {
+                        "type": "xhs_login_state_sync_requested",
+                        "reason": "runtime_connected",
+                        "source": "runtime-stream",
+                    }
+                )
+                await websocket.send_json(
+                    {
+                        "type": "zhihu_login_state_sync_requested",
+                        "reason": "runtime_connected",
+                        "source": "runtime-stream",
+                    }
+                )
                 with suppress(Exception):
                     cookie = resolve_runtime_cookie(
                         data_dir=runtime_config.data_path,
@@ -4027,6 +4080,8 @@ def create_app(
                     content_id=str(row.get("content_id", "") or row.get("bvid", "")),
                     content_url=str(row.get("content_url", "") or ""),
                     source_platform=str(row.get("source_platform", "") or "bilibili"),
+                    published_at=str(row.get("published_at", "") or ""),
+                    published_label=str(row.get("published_label", "") or ""),
                     content_type=str(row.get("content_type", "") or "video"),
                     body_text=str(row.get("body_text", "") or ""),
                     duration=int(row.get("duration", 0) or 0),
@@ -4398,7 +4453,9 @@ def create_app(
         task.add_done_callback(_fire_and_forget_tasks.discard)
 
     @app.post("/api/recommendations/reshuffle", response_model=RecommendationReshuffleResponse)
-    async def reshuffle_recommendations() -> RecommendationReshuffleResponse:
+    async def reshuffle_recommendations(
+        payload: Annotated[RecommendationReshuffleIn | None, Body()] = None,
+    ) -> RecommendationReshuffleResponse:
         if ctx.recommendation_engine is None or ctx.soul_engine is None:
             return RecommendationReshuffleResponse(items=[])
         if _pool_available_count() == 0:
@@ -4408,7 +4465,18 @@ def create_app(
             profile = await ctx.soul_engine.get_profile()
         except Exception:
             return RecommendationReshuffleResponse(items=[])
-        items = await ctx.recommendation_engine.reshuffle_recommendations(profile=profile, limit=10)
+        excluded_bvids = list(
+            dict.fromkeys(
+                bvid.strip()
+                for bvid in (payload.excluded_bvids if payload is not None else [])
+                if bvid and bvid.strip()
+            )
+        )
+        items = await ctx.recommendation_engine.reshuffle_recommendations(
+            profile=profile,
+            excluded_bvids=excluded_bvids,
+            limit=10,
+        )
         await _publish_pool_status_snapshot()
         await _trigger_replenishment_if_needed()
         return RecommendationReshuffleResponse(items=_serialize_recommendation_items(items))
@@ -4653,6 +4721,8 @@ def create_app(
                 "cover_url": str(row.get("cover_url", "")),
                 "content_url": str(row.get("content_url", "")),
                 "source_platform": str(row.get("source_platform", "bilibili")),
+                "published_at": str(row.get("published_at", "") or ""),
+                "published_label": str(row.get("published_label", "") or ""),
                 # body_text / content_type let the desktop delight card derive a
                 # readable title for legacy rows still holding answer_<id> (#79).
                 "content_type": str(row.get("content_type", "") or ""),
@@ -4739,6 +4809,8 @@ def create_app(
                 "cover_url": str(row.get("cover_url", "")),
                 "content_url": str(row.get("content_url", "")),
                 "source_platform": str(row.get("source_platform", "bilibili")),
+                "published_at": str(row.get("published_at", "") or ""),
+                "published_label": str(row.get("published_label", "") or ""),
                 # body_text / content_type let the desktop delight card derive a
                 # readable title for legacy rows still holding answer_<id> (#79).
                 "content_type": str(row.get("content_type", "") or ""),
@@ -6316,25 +6388,25 @@ def create_app(
         from openbiliclaw.sources.event_format import (
             SOURCE_BILIBILI,
             build_event,
+            format_event_context,
         )
 
         rec_title = str(recommendation.get("title", ""))
-        # Tailor a natural-language context per feedback type — the
-        # "feedback" verb in the generic table doesn't capture the
-        # like/dislike/comment distinction the LLM cares about.
-        feedback_label = {
-            "like": "点赞了",
-            "dislike": "踩了",
-            "comment": "评论了",
-            "dismiss": "忽略了",
-        }.get(feedback_type, "反馈了")
-        feedback_context = f"在 B 站{feedback_label}《{rec_title}》"
+        source_platform = (
+            str(recommendation.get("source_platform") or SOURCE_BILIBILI).strip().lower()
+            or SOURCE_BILIBILI
+        )
+        feedback_context = format_event_context(
+            event_type=feedback_type,
+            source_platform=source_platform,
+            title=rec_title,
+        )
         if note:
             feedback_context = f"{feedback_context},备注:{note}"
         await ctx.memory_manager.propagate_event(
             build_event(
                 event_type="feedback",
-                source_platform=SOURCE_BILIBILI,
+                source_platform=source_platform,
                 title=rec_title,
                 context=feedback_context,
                 metadata={
@@ -6651,6 +6723,7 @@ def create_app(
 
         from openbiliclaw.discovery.candidate_pool import discovered_content_to_candidate_write
         from openbiliclaw.discovery.engine import DiscoveredContent
+        from openbiliclaw.published_time import normalize_published_time
 
         enqueue = getattr(database, "enqueue_discovery_candidates", None)
         if not callable(enqueue):
@@ -6674,6 +6747,10 @@ def create_app(
                 [str(item).strip() for item in tags_raw if str(item).strip()]
                 if isinstance(tags_raw, list)
                 else []
+            )
+            published = normalize_published_time(
+                video.get("published_at") or video.get("pubdate"),
+                label=video.get("published_label"),
             )
             item = DiscoveredContent(
                 bvid=bvid,
@@ -6703,6 +6780,8 @@ def create_app(
                 author_name=up_name,
                 score_threshold=0.60,
                 source_keyword_id=source_keyword_id,
+                published_at=published.published_at,
+                published_label=published.published_label,
             )
             writes.append(
                 discovered_content_to_candidate_write(
@@ -7032,6 +7111,7 @@ def create_app(
 
         from openbiliclaw.discovery.candidate_pool import discovered_content_to_candidate_write
         from openbiliclaw.discovery.engine import DiscoveredContent
+        from openbiliclaw.published_time import normalize_published_time
 
         enqueue = getattr(database, "enqueue_discovery_candidates", None)
         if not callable(enqueue):
@@ -7062,6 +7142,10 @@ def create_app(
             author = str(note.get("author", "") or "").strip()
             cover_url = str(note.get("cover_url", "") or "").strip()
             best_url = _pick_best_xhs_url(database, note_id, url)
+            published = normalize_published_time(
+                note.get("published_at") or note.get("pubdate"),
+                label=note.get("published_label"),
+            )
 
             item = DiscoveredContent(
                 bvid=note_id,
@@ -7087,6 +7171,8 @@ def create_app(
                 source_platform="xiaohongshu",
                 author_name=author,
                 source_keyword_id=source_keyword_id,
+                published_at=published.published_at,
+                published_label=published.published_label,
             )
             writes.append(
                 discovered_content_to_candidate_write(
@@ -7402,7 +7488,7 @@ def create_app(
 
         if status in {"partial", "ok"} or (status == "empty" and task_type == "bootstrap_profile"):
             is_final = status == "ok" or (status == "empty" and task_type == "bootstrap_profile")
-            added_notes = _xhs_task_queue.merge_result(
+            added_notes, enriched_notes = _xhs_task_queue.merge_result_with_enrichment(
                 task_id,
                 urls=urls,
                 notes=notes if notes else None,
@@ -7445,7 +7531,8 @@ def create_app(
             if valid_urls and not _init_busy:
                 ctx.database.save_xhs_observed_urls(valid_urls, "task")
                 _backfill_xhs_tokens(ctx.database, valid_urls)
-            if added_notes and not _init_busy:
+            candidate_notes = [*added_notes, *enriched_notes]
+            if candidate_notes and not _init_busy:
                 # P1.8: a planner-driven xhs *search* task carries its
                 # ``source_keyword_id`` on the payload → thread it onto the
                 # ingested candidates so admission backfills the keyword's yield.
@@ -7457,7 +7544,7 @@ def create_app(
                 )
                 enqueued = _cache_xhs_notes(
                     ctx.database,
-                    added_notes,
+                    candidate_notes,
                     "task",
                     self_info_now,
                     source_keyword_id=task_source_keyword_id,
@@ -7716,7 +7803,7 @@ def create_app(
             except Exception:  # pragma: no cover - defensive
                 xhs_stored_logged_in, xhs_login_at = False, ""
         xhs_login_fresh = False
-        if xhs_stored_logged_in and xhs_login_at:
+        if xhs_login_at:
             try:
                 from datetime import UTC, datetime, timedelta
 
@@ -7730,13 +7817,25 @@ def create_app(
                 )
             except Exception:  # pragma: no cover - defensive
                 xhs_login_fresh = False
-        if xhs_stored_logged_in and xhs_login_fresh:
+        if not xhs_login_at:
+            xiaohongshu = SourceStatusItem(
+                enabled=xhs_enabled,
+                state="unverified",
+                detail="尚未收到小红书浏览器登录态；插件连接后会在本地同步。",
+            )
+        elif xhs_stored_logged_in and xhs_login_fresh:
             token_hint = f"内容令牌 {xhs_tokens} 条。" if xhs_tokens else ""
             xiaohongshu = SourceStatusItem(
                 enabled=xhs_enabled,
                 state="ready",
                 detail=f"已登录小红书。{token_hint}",
                 logged_in=True,
+            )
+        elif xhs_stored_logged_in:
+            xiaohongshu = SourceStatusItem(
+                enabled=xhs_enabled,
+                state="stale",
+                detail="小红书登录态已过期，请连接插件刷新本地状态。",
             )
         else:
             xiaohongshu = SourceStatusItem(
@@ -7759,7 +7858,10 @@ def create_app(
             dy_cookie = ""
         if dy_cookie.strip():
             douyin = SourceStatusItem(
-                enabled=dy_enabled, state="ready", detail="Cookie 就绪。", logged_in=True
+                enabled=dy_enabled,
+                state="unverified",
+                detail="Cookie 已同步，需在实际任务中验证。",
+                logged_in=False,
             )
         else:
             douyin = SourceStatusItem(
@@ -7827,7 +7929,7 @@ def create_app(
             except Exception:  # pragma: no cover - defensive
                 zhihu_stored_logged_in, zhihu_login_at = False, ""
         zhihu_login_fresh = False
-        if zhihu_stored_logged_in and zhihu_login_at:
+        if zhihu_login_at:
             try:
                 from datetime import UTC, datetime, timedelta
 
@@ -7841,13 +7943,28 @@ def create_app(
                 ) <= timedelta(hours=_zhihu_login_fresh_hours)
             except Exception:  # pragma: no cover - defensive
                 zhihu_login_fresh = False
-        if zhihu_stored_logged_in and zhihu_login_fresh:
-            zhihu = SourceStatusItem(
-                enabled=zh_enabled,
-                state="ready",
-                detail="已登录知乎。",
-                logged_in=True,
-            )
+        if zhihu_login_at:
+            if zhihu_stored_logged_in and zhihu_login_fresh:
+                zhihu = SourceStatusItem(
+                    enabled=zh_enabled,
+                    state="ready",
+                    detail="已登录知乎。",
+                    logged_in=True,
+                )
+            elif zhihu_stored_logged_in:
+                zhihu = SourceStatusItem(
+                    enabled=zh_enabled,
+                    state="stale",
+                    detail="知乎登录态已过期，请连接插件刷新本地状态。",
+                    logged_in=False,
+                )
+            else:
+                zhihu = SourceStatusItem(
+                    enabled=zh_enabled,
+                    state="missing",
+                    detail="浏览器最近同步的状态为未登录知乎。",
+                    logged_in=False,
+                )
         elif hasattr(ctx.database, "conn"):
             try:
                 row = ctx.database.conn.execute(
@@ -7991,11 +8108,11 @@ def create_app(
                                     ),
                                     logged_in=False,
                                 )
-        else:
+        elif rd_backend == "rdt":
             try:
-                from openbiliclaw.sources.reddit_tasks import probe_reddit_command_backend
+                from openbiliclaw.sources.reddit_tasks import local_reddit_credential_status
 
-                rd_status = probe_reddit_command_backend(rd_backend)
+                rd_status = local_reddit_credential_status()
                 reddit = SourceStatusItem(
                     enabled=rd_enabled,
                     state=rd_status.state,
@@ -8009,6 +8126,15 @@ def create_app(
                     detail="Reddit 命令后端状态不可用，请检查 opencli / rdt 安装。",
                     logged_in=False,
                 )
+        else:
+            reddit = SourceStatusItem(
+                enabled=rd_enabled,
+                state="unverified",
+                detail=(
+                    f"Reddit {rd_backend} 后端已配置；状态页不执行命令探测，请通过显式任务验证。"
+                ),
+                logged_in=False,
+            )
 
         return SourcesStatusResponse(
             bilibili=bilibili,
@@ -8101,7 +8227,7 @@ def create_app(
             xiaohongshu=item(
                 "xsec_token",
                 xhs_token,
-                "小红书不保存整站 Cookie；这里展示最近同步内容 URL 中的 xsec_token。",
+                "小红书不保存整站 Cookie；xsec_token 只是内容访问令牌，不代表账号登录。",
             ),
             douyin=item("Cookie", dy_cookie, "抖音当前 resolved Cookie。"),
             youtube=SourceCredentialItem(
@@ -9029,6 +9155,9 @@ def create_app(
                 browser_executable=cfg.bilibili.browser_executable,
                 browser_headed=cfg.bilibili.browser_headed,
             ),
+            network=NetworkConfigOut(
+                proxy=_mask_proxy_userinfo(cfg.network.proxy) if mask_keys else cfg.network.proxy,
+            ),
             sources=SourcesConfigOut(
                 browser=SourcesBrowserConfigOut(
                     cdp_url=cfg.sources.browser_cdp_url,
@@ -9468,15 +9597,97 @@ def create_app(
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
 
+    async def _probe_network_proxy(proxy_raw: str) -> ConfigServiceProbeResponse:
+        """Probe the submitted overseas-outbound proxy without saving config.
+
+        Fetches a tiny always-204 endpoint through the candidate proxy with an
+        explicit ``trust_env=False`` (so the probe reflects THIS proxy, not the
+        process env). Classifies failures so the UI can tell "proxy unreachable"
+        from "upstream rejected" from "timeout" (pitfall rule 7 / invariant 4).
+        """
+        import httpx
+
+        from openbiliclaw.config import normalize_outbound_proxy
+
+        # Reject a malformed value with 400 before spending a network round-trip.
+        proxy = normalize_outbound_proxy(proxy_raw)
+        if not proxy:
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind="network_proxy",
+                error="empty",
+                message="未填写代理地址。",
+            )
+        started = time.perf_counter()
+        try:
+            async with httpx.AsyncClient(
+                proxy=proxy, trust_env=False, timeout=5.0
+            ) as client:
+                resp = await client.get("https://www.gstatic.com/generate_204")
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            if resp.status_code in (200, 204):
+                return ConfigServiceProbeResponse(
+                    ok=True,
+                    kind="network_proxy",
+                    message="代理连通正常。",
+                    latency_ms=latency_ms,
+                )
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind="network_proxy",
+                error="unexpected_status",
+                message=f"探测返回 HTTP {resp.status_code}。",
+                latency_ms=latency_ms,
+            )
+        except httpx.ProxyError:
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind="network_proxy",
+                error="proxy_rejected",
+                message="代理拒绝了连接，请检查代理认证 / 协议是否正确。",
+            )
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind="network_proxy",
+                error="proxy_unreachable",
+                message="无法连接到代理，请检查地址 / 端口是否正确且代理在运行。",
+            )
+        except (httpx.TimeoutException, TimeoutError):
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind="network_proxy",
+                error="timeout",
+                message="经代理访问超时（5 秒），请检查代理线路。",
+            )
+        except Exception as exc:  # noqa: BLE001 — surface a safe, classified failure
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind="network_proxy",
+                error="failed",
+                message=f"代理探测失败:{type(exc).__name__}。",
+            )
+
     @app.post("/api/config/probe-service", response_model=ConfigServiceProbeResponse)
     async def probe_config_service(payload: ConfigServiceProbeIn) -> ConfigServiceProbeResponse:
-        """Probe submitted LLM / embedding settings without saving config.toml."""
+        """Probe submitted LLM / embedding / proxy settings without saving config.toml."""
         from copy import deepcopy
 
-        from openbiliclaw.config import load_config
+        from openbiliclaw.config import load_config, normalize_outbound_proxy
+
+        update = payload.config if isinstance(payload.config, dict) else {}
+        if payload.kind == "network_proxy":
+            network_data = update.get("network")
+            proxy_raw = ""
+            if isinstance(network_data, dict):
+                proxy_raw = str(network_data.get("proxy", ""))
+            try:
+                normalize_outbound_proxy(proxy_raw)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await _probe_network_proxy(proxy_raw)
 
         cfg = deepcopy(load_config())
-        update = payload.config if isinstance(payload.config, dict) else {}
         llm_data = update.get("llm")
         if isinstance(llm_data, dict):
             _apply_llm_update(cfg, llm_data)
@@ -9514,6 +9725,7 @@ def create_app(
             _normalize_probability,
             _normalize_scheduler_int,
             load_config,
+            normalize_outbound_proxy,
             save_config,
         )
 
@@ -9999,6 +10211,19 @@ def create_app(
                 if key in ldata:
                     setattr(cfg.logging, key, int(ldata[key]))
 
+        # Apply network (overseas outbound proxy) updates
+        if "network" in update:
+            ndata = update["network"]
+            if isinstance(ndata, dict) and "proxy" in ndata:
+                raw_proxy = str(ndata["proxy"])
+                # A masked GET echo (socks5://***@host) must never overwrite the
+                # stored credentialed URL; an empty value legitimately clears it.
+                if not _is_masked_proxy_echo(raw_proxy):
+                    try:
+                        cfg.network.proxy = normalize_outbound_proxy(raw_proxy)
+                    except ValueError as exc:
+                        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
         for field in reset_fields:
             target = _RESETTABLE_CONFIG_FIELDS[field]
             section = getattr(cfg, target[0])
@@ -10051,6 +10276,13 @@ def create_app(
 
             saved_path = save_config(cfg)
             logger.info("Configuration saved to %s", saved_path)
+
+            # Refresh the process-level outbound-proxy mirror BEFORE any runtime
+            # rebuild so the rebuilt LLM registry constructs its clients with the
+            # new proxy. CN-direct clients never read this value.
+            from openbiliclaw.network import set_outbound_proxy
+
+            set_outbound_proxy(cfg.network.proxy)
 
             if bool(getattr(ctx, "degraded", False)):
                 return ConfigUpdateResponse(

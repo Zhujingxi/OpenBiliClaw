@@ -15,6 +15,7 @@ const UP_SELECTOR = ".bili-video-card__info--author, .up-name, [title='up主']";
 const STATS_SELECTOR = ".bili-video-card__stats--item, .so-icon.watch-num, .play-text";
 const DESC_SELECTOR = ".bili-video-card__info--desc, .des, .description";
 const DURATION_SELECTOR = ".bili-video-card__stats__duration, .duration, .so-imgTag_rb";
+const PUBLISHED_SELECTOR = ".bili-video-card__info--date, .so-icon.time, .pubdate";
 
 export interface BiliSearchVideo {
   bvid?: string;
@@ -26,6 +27,8 @@ export interface BiliSearchVideo {
   view_count?: number;
   like_count?: number;
   description?: string;
+  published_at?: string | number;
+  published_label?: string;
 }
 
 export interface BiliTaskExecuteMessage {
@@ -97,12 +100,18 @@ function normalizeUrl(url: string): string {
 
 function imageUrl(img: ElementLike | null): string {
   if (!img) return "";
-  return normalizeUrl(
-    attrFrom(img, "src") ||
-      attrFrom(img, "data-src") ||
-      attrFrom(img, "data-lazy-src") ||
-      attrFrom(img, "data-original"),
+  // 懒加载占位常是 data: URI —— 存进后端会当成永久封面，宁可留空
+  // 让真实封面在后续摄入时补上（后端空值不覆盖已有封面）。
+  const candidates = [
+    attrFrom(img, "src"),
+    attrFrom(img, "data-src"),
+    attrFrom(img, "data-lazy-src"),
+    attrFrom(img, "data-original"),
+  ];
+  const real = candidates.find(
+    (value) => value.trim() && !/^(data|about|blob):/i.test(value.trim()),
   );
+  return normalizeUrl(real || "");
 }
 
 export function extractBvid(href: string): string {
@@ -169,6 +178,7 @@ export function extractBiliSearchVideos(
       .find((text) => normalizeCountText(text) > 0) ?? "";
     const durationText = textFrom(first(card, DURATION_SELECTOR));
     const duration = parseDurationSeconds(durationText);
+    const publishedLabel = textFrom(first(card, PUBLISHED_SELECTOR));
 
     const video: BiliSearchVideo = {
       ...(bvid ? { bvid } : {}),
@@ -179,6 +189,7 @@ export function extractBiliSearchVideos(
       ...(duration > 0 ? { duration } : {}),
       ...(normalizeCountText(statsText) > 0 ? { view_count: normalizeCountText(statsText) } : {}),
       ...(textFrom(first(card, DESC_SELECTOR)) ? { description: textFrom(first(card, DESC_SELECTOR)) } : {}),
+      ...(publishedLabel ? { published_label: publishedLabel } : {}),
     };
     videos.push(video);
   }

@@ -162,7 +162,10 @@ async def refresh_codex_token(
         "client_id": _CODEX_CLIENT_ID,
     }
     if client is None:
-        async with httpx.AsyncClient() as http_client:
+        # Codex OAuth (openai.com) is an overseas endpoint → honor [network].proxy.
+        from openbiliclaw.network import outbound_httpx_kwargs
+
+        async with httpx.AsyncClient(**outbound_httpx_kwargs()) as http_client:
             response = await http_client.post(_TOKEN_ENDPOINT, data=data, timeout=30.0)
             refreshed = _credentials_from_refresh_response(response, credentials)
     else:

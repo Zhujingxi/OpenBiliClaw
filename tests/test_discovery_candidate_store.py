@@ -403,9 +403,7 @@ def test_reset_stale_evaluations_zero_minutes_releases_fresh_and_null_claims(
     _enqueue_one(db, "BVNULL")
     rows = db.claim_discovery_candidates_for_eval(limit=2)
     assert len(rows) == 2
-    db.conn.execute(
-        "UPDATE discovery_candidates SET claimed_at = NULL WHERE content_id = 'BVNULL'"
-    )
+    db.conn.execute("UPDATE discovery_candidates SET claimed_at = NULL WHERE content_id = 'BVNULL'")
     db.conn.commit()
 
     released = db.reset_stale_discovery_candidate_evaluations(max_age_minutes=0)

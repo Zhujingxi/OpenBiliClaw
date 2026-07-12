@@ -136,6 +136,8 @@ class RecommendationOut(BaseModel):
     content_id: str = ""
     content_url: str = ""
     source_platform: str = ""
+    published_at: str = ""
+    published_label: str = ""
     # Text-first sources (X tweet/thread): the popup renders a no-cover
     # text card from body_text/title when content_type is tweet/thread or
     # cover_url is empty.
@@ -164,6 +166,12 @@ class RecommendationReshuffleResponse(BaseModel):
     """Immediate recommendation reshuffle result."""
 
     items: list[RecommendationOut]
+
+
+class RecommendationReshuffleIn(BaseModel):
+    """Optional visible-card exclusions for a reshuffle request."""
+
+    excluded_bvids: list[str] = Field(default_factory=list)
 
 
 class RecommendationAppendIn(BaseModel):
@@ -274,6 +282,8 @@ class PendingDelightOut(BaseModel):
     cover_url: str = ""
     content_url: str = ""
     source_platform: str = ""
+    published_at: str = ""
+    published_label: str = ""
     # Engagement stats (from content_cache), so the delight card can show the
     # same ▶ / 👍 / 💬 metadata row as the recommendation grid. 0 = unknown /
     # not fetched (platforms that don't populate a metric render nothing).
@@ -479,15 +489,17 @@ class SourceStatusItem(BaseModel):
     - ``ok``         — credential present AND live-validated (X only, from the
       health store).
     - ``ready``      — credential present and structurally valid, but not
-      live-validated (B站 cookie with login fields, 抖音 cookie present, 小红书
-      browser login state recently synced).
+      live-validated (B站 cookie with login fields, or a fresh browser login
+      state recently synced).
     - ``partial``    — credential present but structurally incomplete, likely
       broken (B站 cookie missing some of the core login fields).
     - ``stale``      — credential synced before but not recently, likely
       expired.
     - ``missing``    — source enabled but no usable credential.
-    - ``unverified`` — plugin-backed source is enabled but local task history
-      does not prove a recent successful or failed login-state run yet.
+    - ``unverified`` — a credential or source is configured, but local state
+      does not prove that it currently works.
+    - ``login_required`` / ``error`` — a local command credential is missing,
+      or its saved credential file is invalid.
     - ``expired`` / ``rate_limited`` / ``blocked`` — X live-health states.
     - ``no_auth``    — source needs no login (YouTube, public).
 
@@ -1088,6 +1100,12 @@ class BilibiliConfigOut(BaseModel):
     browser_headed: bool = False
 
 
+class NetworkConfigOut(BaseModel):
+    """Overseas-outbound proxy. Any URL userinfo is masked in responses."""
+
+    proxy: str = ""
+
+
 class SourcesBrowserConfigOut(BaseModel):
     cdp_url: str = ""
     headed: bool = False
@@ -1326,6 +1344,7 @@ class ConfigResponse(BaseModel):
     degraded_reason: str = ""
     llm: LLMConfigOut = Field(default_factory=LLMConfigOut)
     bilibili: BilibiliConfigOut = Field(default_factory=BilibiliConfigOut)
+    network: NetworkConfigOut = Field(default_factory=NetworkConfigOut)
     sources: SourcesConfigOut = Field(default_factory=SourcesConfigOut)
     scheduler: SchedulerConfigOut = Field(default_factory=SchedulerConfigOut)
     discovery: DiscoveryConfigOut = Field(default_factory=DiscoveryConfigOut)
@@ -1344,6 +1363,7 @@ class ConfigUpdateIn(BaseModel):
     suppress_background_llm_work: bool | None = None
     llm: dict[str, object] | None = None
     bilibili: dict[str, object] | None = None
+    network: dict[str, object] | None = None
     sources: dict[str, object] | None = None
     scheduler: dict[str, object] | None = None
     discovery: dict[str, object] | None = None
@@ -1358,7 +1378,7 @@ class ConfigServiceProbeIn(BaseModel):
     provider, no fallback chain) instead of the default provider.
     """
 
-    kind: Literal["llm", "embedding", "llm_fallback"]
+    kind: Literal["llm", "embedding", "llm_fallback", "network_proxy"]
     config: dict[str, object] = Field(default_factory=dict)
 
 
@@ -1366,7 +1386,7 @@ class ConfigServiceProbeResponse(BaseModel):
     """Result of a user-triggered provider connectivity probe."""
 
     ok: bool
-    kind: Literal["llm", "embedding", "llm_fallback"]
+    kind: Literal["llm", "embedding", "llm_fallback", "network_proxy"]
     provider: str = ""
     model: str = ""
     message: str = ""

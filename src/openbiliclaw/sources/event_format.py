@@ -230,6 +230,7 @@ _EVENT_TYPE_LABELS: dict[str, str] = {
     "like": "点赞了",
     "follow": "关注了",
     "dislike": "标记不喜欢",
+    "dismiss": "忽略了",
     "click": "点开了",
     "dialogue": "聊到",
     "feedback": "反馈过",

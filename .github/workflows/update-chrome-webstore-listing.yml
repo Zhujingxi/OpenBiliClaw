@@ -1,0 +1,61 @@
+name: Update Chrome Web Store Listing
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Read-only API capability probe, or guarded metadata apply"
+        required: true
+        default: "probe"
+        type: choice
+        options:
+          - probe
+          - apply
+      replace_pending:
+        description: "Allow apply to cancel an active review before changing metadata"
+        required: true
+        default: false
+        type: boolean
+      publish:
+        description: "Re-submit after an exact metadata read-back (requires replace_pending)"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    name: Probe or update Chrome Web Store listing metadata
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Probe or update listing metadata
+        env:
+          CHROME_WEBSTORE_CLIENT_ID: ${{ secrets.CHROME_WEBSTORE_CLIENT_ID }}
+          CHROME_WEBSTORE_CLIENT_SECRET: ${{ secrets.CHROME_WEBSTORE_CLIENT_SECRET }}
+          CHROME_WEBSTORE_REFRESH_TOKEN: ${{ secrets.CHROME_WEBSTORE_REFRESH_TOKEN }}
+          CHROME_WEBSTORE_PUBLISHER_ID: ${{ secrets.CHROME_WEBSTORE_PUBLISHER_ID }}
+          CHROME_WEBSTORE_EXTENSION_ID: ${{ secrets.CHROME_WEBSTORE_EXTENSION_ID }}
+          MODE: ${{ inputs.mode }}
+          REPLACE_PENDING: ${{ inputs.replace_pending }}
+          PUBLISH: ${{ inputs.publish }}
+        shell: bash
+        run: |
+          args=(--listing docs/chrome-webstore-listing.md --mode "$MODE")
+          if [ "$REPLACE_PENDING" = "true" ]; then
+            args+=(--replace-pending)
+          fi
+          if [ "$PUBLISH" = "true" ]; then
+            args+=(--publish)
+          fi
+          node extension/scripts/chrome-webstore-metadata.mjs "${args[@]}"

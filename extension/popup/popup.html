@@ -742,6 +742,15 @@
       letter-spacing: 0.02em;
     }
 
+    .delight-banner-platform {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--text-muted);
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: rgba(0, 0, 0, 0.05);
+    }
+
     .delight-banner-counter {
       font-size: 10px;
       font-weight: 600;
@@ -833,6 +842,15 @@
       padding: 2px 6px;
       border-radius: 999px;
       background: rgba(168, 85, 247, 0.12);
+      align-self: flex-start;
+    }
+    .message-delight-platform {
+      font-size: 10px;
+      font-weight: 600;
+      color: #6b7280;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: rgba(107, 114, 128, 0.12);
       align-self: flex-start;
     }
     .message-delight-title {
@@ -1705,6 +1723,11 @@
       color: var(--text-muted);
     }
 
+    .recommendation-published-time {
+      margin-left: 6px;
+      color: var(--text-muted);
+    }
+
     .feedback-status {
       margin-top: 10px;
       font-size: 11px;
@@ -2180,6 +2203,7 @@
     }
     .speculative-item .spec-actions {
       display: flex;
+      flex-wrap: wrap;
       gap: 6px;
       margin-top: 4px;
     }
@@ -2260,6 +2284,7 @@
 
     .probe-actions {
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
     }
 
@@ -2274,6 +2299,11 @@
       transition: all 0.15s ease;
     }
 
+    .probe-btn:focus-visible {
+      outline: none;
+      box-shadow: var(--focus-ring);
+    }
+
     .probe-btn.is-confirm {
       background: rgba(63, 185, 80, 0.15);
       color: #1a7f37;
@@ -2281,6 +2311,15 @@
     }
     .probe-btn.is-confirm:hover {
       background: rgba(63, 185, 80, 0.25);
+    }
+
+    .probe-btn.is-neutral {
+      background: var(--warning-soft);
+      color: #9a6420;
+      border-color: rgba(235, 190, 140, 0.45);
+    }
+    .probe-btn.is-neutral:hover {
+      background: rgba(255, 189, 110, 0.3);
     }
 
     .probe-btn.is-reject {
@@ -3993,6 +4032,7 @@
 
     .message-actions {
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
     }
 
@@ -5573,6 +5613,15 @@
         <div class="settings-field">
           <label for="cfgStorageDbPath">SQLite 数据库路径</label>
           <input id="cfgStorageDbPath" type="text" placeholder="data/openbiliclaw.db">
+        </div>
+        <div class="settings-field">
+          <label for="cfgNetworkProxy">海外出口代理</label>
+          <input id="cfgNetworkProxy" type="text" placeholder="socks5://127.0.0.1:1080">
+        </div>
+        <p class="settings-hint" id="cfgNetworkProxyHint">仅作用于海外 AI 服务 / YouTube / 更新检查；B 站等国内请求始终直连。支持 http/https/socks5/socks5h，留空表示不使用。</p>
+        <div class="settings-probe-row">
+          <button id="cfgProbeNetworkProxy" class="settings-secondary-btn" type="button">测试代理</button>
+          <span id="cfgProbeNetworkProxyStatus" class="settings-probe-status" aria-live="polite"></span>
         </div>
       </div>
       </div>

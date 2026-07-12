@@ -1528,9 +1528,7 @@ def test_user_defer_speculation_third_defer_exhausts_to_cooldown(tmp_path: Path)
         tmp_path,
         SpeculativeState(
             active=[
-                SpeculativeInterest(
-                    domain="桌游", category="娱乐", status="active", defer_count=2
-                )
+                SpeculativeInterest(domain="桌游", category="娱乐", status="active", defer_count=2)
             ]
         ),
     )

@@ -722,7 +722,13 @@ class AutoUpdateService:
         channel: str,
         verify_tls: bool,
     ) -> _BackendTagSelection:
-        async with httpx.AsyncClient(timeout=30, verify=verify_tls) as client:
+        # GitHub is overseas for many users → honor [network].proxy alongside
+        # the TLS-verify toggle. Empty proxy leaves construction unchanged.
+        from openbiliclaw.network import outbound_httpx_kwargs
+
+        async with httpx.AsyncClient(
+            timeout=30, verify=verify_tls, **outbound_httpx_kwargs()
+        ) as client:
             tag_names: list[str] = []
             for page in range(1, _MAX_TAG_PAGES + 1):
                 try:

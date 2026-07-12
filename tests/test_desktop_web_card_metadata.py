@@ -77,14 +77,14 @@ def test_delight_card_renders_the_same_engagement_stats_as_the_grid() -> None:
 
     # The delight card fills #delightStats from recommendationStats and hides it
     # when there are no counts (reusing the grid's .video-stats treatment).
-    assert 'const delightStats = recommendationStats(state.delight);' in APP_JS
+    assert "const delightStats = recommendationStats(state.delight);" in APP_JS
     assert "delightStatsEl.textContent = delightStats;" in APP_JS
     assert "delightStatsEl.hidden = !delightStats;" in APP_JS
 
     # comment_count (💬) is in the shared stats renderer so both cards show it.
     stats = _function_body("recommendationStats")
     assert "if (item.comment_count > 0)" in stats
-    assert '💬 ' in stats
+    assert "💬 " in stats
 
     # The DOM has the stats element on the delight card.
     index_html = Path("src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")

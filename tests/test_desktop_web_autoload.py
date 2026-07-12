@@ -40,7 +40,7 @@ def test_autoload_observer_is_wired_to_load_more_sentinel() -> None:
     js = APP_JS.read_text(encoding="utf-8")
     sync_observer = _function_body(js, "syncAutoLoadObserver")
 
-    assert "const AUTO_LOAD_ROOT_MARGIN_PX = 300;" in js
+    assert "const AUTO_LOAD_ROOT_MARGIN_PX = 50;" in js
     assert "autoLoadObserver.disconnect();" in sync_observer
     assert '$("#loadMoreSentinel")' in sync_observer
     assert "rootMargin: `${AUTO_LOAD_ROOT_MARGIN_PX}px`" in sync_observer

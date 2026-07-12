@@ -167,6 +167,46 @@ def test_feedback_like_topic_bonus() -> None:
     assert adj > 0
 
 
+def test_feedback_dislike_matches_key_when_group_is_present() -> None:
+    feedback = FeedbackSignals(disliked_topic_keys=frozenset({"动漫解说"}))
+    item = DiscoveredContent(
+        bvid="BV_KEY",
+        topic_key="动漫解说",
+        topic_group="动漫",
+    )
+    assert PoolCurator._feedback_adjustment(item, feedback) == -0.10
+
+
+def test_feedback_dislike_matches_group_when_key_differs() -> None:
+    feedback = FeedbackSignals(disliked_topic_keys=frozenset({"动漫"}))
+    item = DiscoveredContent(
+        bvid="BV_GROUP",
+        topic_key="动画资讯",
+        topic_group="动漫",
+    )
+    assert PoolCurator._feedback_adjustment(item, feedback) == -0.10
+
+
+def test_feedback_topic_double_match_applies_once() -> None:
+    feedback = FeedbackSignals(disliked_topic_keys=frozenset({"动漫解说", "动漫"}))
+    item = DiscoveredContent(
+        bvid="BV_BOTH",
+        topic_key="动漫解说",
+        topic_group="动漫",
+    )
+    assert PoolCurator._feedback_adjustment(item, feedback) == -0.10
+
+
+def test_feedback_like_matches_either_topic_axis_once() -> None:
+    feedback = FeedbackSignals(liked_topic_keys=frozenset({"建筑", "建筑史"}))
+    item = DiscoveredContent(
+        bvid="BV_LIKE",
+        topic_key="建筑史",
+        topic_group="建筑",
+    )
+    assert PoolCurator._feedback_adjustment(item, feedback) == 0.05
+
+
 def test_feedback_neutral_when_no_signals() -> None:
     feedback = FeedbackSignals()
     item = DiscoveredContent(bvid="BV1", topic_key="ai", up_mid=1)
@@ -294,6 +334,112 @@ def test_score_candidates_penalises_fatigued_topic() -> None:
     assert scores["BV1"] > scores["BV2"]
 
 
+async def test_async_feedback_embedding_checks_key_and_group_once() -> None:
+    class FakeEmbeddingService:
+        similarity_threshold = 0.99
+
+        async def embed(self, text: str) -> list[float]:
+            vectors = {
+                "动漫解说": [1.0, 0.0, 0.0],
+                "动漫": [0.0, 1.0, 0.0],
+                "科技": [0.0, 0.0, 1.0],
+            }
+            return vectors.get(text, [0.0, 0.0, 0.0])
+
+    db, _ = _make_db()
+    curator = PoolCurator(db)
+    now = _now()
+    matching = DiscoveredContent(
+        bvid="BV_MATCH",
+        relevance_score=0.8,
+        topic_key="动漫解说",
+        topic_group="科技",
+        discovered_at=now.isoformat(),
+    )
+    neutral = DiscoveredContent(
+        bvid="BV_NEUTRAL",
+        relevance_score=0.8,
+        topic_key="科技",
+        topic_group="科技",
+        discovered_at=now.isoformat(),
+    )
+    context = ScoringContext(
+        feedback=FeedbackSignals(disliked_topic_keys=frozenset({"动漫解说"})),
+        now=now,
+    )
+
+    scores = await curator.score_candidates_async(
+        [matching, neutral],
+        context,
+        embedding_service=FakeEmbeddingService(),
+    )
+
+    assert scores["BV_MATCH"] == scores["BV_NEUTRAL"] - 0.10
+
+
+async def _assert_async_exact_feedback_survives_partial_embeddings(
+    *,
+    polarity: str,
+    expected_adjustment: float,
+) -> None:
+    class SelectiveEmbeddingService:
+        similarity_threshold = 0.99
+
+        def __init__(self, unavailable: str) -> None:
+            self.unavailable = unavailable
+            self.exact_calls = 0
+
+        async def embed(self, text: str) -> list[float]:
+            if text == "exact":
+                self.exact_calls += 1
+                if self.unavailable == "feedback":
+                    return [] if self.exact_calls == 1 else [1.0, 0.0]
+                return [1.0, 0.0] if self.exact_calls == 1 else []
+            return [0.0, 1.0]
+
+    feedback_kwargs = {f"{polarity}_topic_keys": frozenset({"exact"})}
+    feedback = FeedbackSignals(**feedback_kwargs)
+    now = _now()
+    matching = DiscoveredContent(
+        bvid="BV_MATCH",
+        relevance_score=0.8,
+        topic_key="exact",
+        topic_group="available",
+        discovered_at=now.isoformat(),
+    )
+    neutral = DiscoveredContent(
+        bvid="BV_NEUTRAL",
+        relevance_score=0.8,
+        topic_key="neutral",
+        topic_group="available",
+        discovered_at=now.isoformat(),
+    )
+
+    for unavailable in ("feedback", "candidate"):
+        db, _ = _make_db()
+        scores = await PoolCurator(db).score_candidates_async(
+            [matching, neutral],
+            ScoringContext(feedback=feedback, now=now),
+            embedding_service=SelectiveEmbeddingService(unavailable),
+        )
+
+        assert scores["BV_MATCH"] == scores["BV_NEUTRAL"] + expected_adjustment
+
+
+async def test_async_disliked_exact_fallback_survives_partial_embeddings() -> None:
+    await _assert_async_exact_feedback_survives_partial_embeddings(
+        polarity="disliked",
+        expected_adjustment=-0.10,
+    )
+
+
+async def test_async_liked_exact_fallback_survives_partial_embeddings() -> None:
+    await _assert_async_exact_feedback_survives_partial_embeddings(
+        polarity="liked",
+        expected_adjustment=0.05,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Build context from DB
 # ---------------------------------------------------------------------------
@@ -385,13 +531,22 @@ def test_pool_curator_marks_over_budget_amplification_key() -> None:
 
 def test_build_context_reads_feedback_signals() -> None:
     db, _ = _make_db()
-    db.cache_content("BV1", title="A", up_name="UP", up_mid=42, source="search", topic_key="game")
+    db.cache_content(
+        "BV1",
+        title="A",
+        up_name="UP",
+        up_mid=42,
+        source="search",
+        topic_key="game",
+        topic_group="游戏",
+    )
     rec_id = db.insert_recommendation("BV1", confidence=0.9)
     db.update_recommendation_feedback(rec_id, feedback_type="dislike")
     curator = PoolCurator(db)
     ctx = curator.build_context()
     assert 42 in ctx.feedback.disliked_up_mids
     assert "game" in ctx.feedback.disliked_topic_keys
+    assert "游戏" in ctx.feedback.disliked_topic_keys
 
 
 # ---------------------------------------------------------------------------

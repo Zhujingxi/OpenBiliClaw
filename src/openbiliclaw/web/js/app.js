@@ -7,7 +7,11 @@ import { fetchHealth, checkHealth, fetchAuthStatus } from "./api.js";
 import { createStreamClient } from "./stream.js";
 import { state, patchState, subscribe } from "./state.js";
 import { renderLoginView } from "./views/login.js";
-import { initRecommendView, onStreamEvent as recStreamEvent } from "./views/recommend.js";
+import {
+  initRecommendView,
+  onStreamConnect as recStreamConnect,
+  onStreamEvent as recStreamEvent,
+} from "./views/recommend.js";
 import { initProfileView, onStreamEvent as profileStreamEvent } from "./views/profile.js";
 import { initChatView, onStreamEvent as chatStreamEvent, toggleMessages, loadNotifications } from "./views/chat.js";
 import { initWatchLaterView, initFavoritesView } from "./views/saved.js";
@@ -152,6 +156,7 @@ function readHash() {
 const stream = createStreamClient({
   onConnect() {
     patchState({ online: true });
+    recStreamConnect();
   },
   onDisconnect() {
     patchState({ online: false });

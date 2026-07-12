@@ -37,6 +37,8 @@ export interface ZhihuBootstrapItem {
   search_keyword?: string;
   source_strategy?: string;
   source_keyword_id?: number;
+  published_at?: string | number;
+  published_label?: string;
 }
 
 export interface ZhihuExecuteMessage {
@@ -357,6 +359,8 @@ export function normalizeZhihuReadHistory(raw: unknown): ZhihuBootstrapItem | nu
   if (summary) item.summary = summary;
   const readTime = str(extra.read_time);
   if (readTime) item.interaction_time = readTime;
+  const publishedAt = num(content.created_time ?? content.created);
+  if (publishedAt !== undefined) item.published_at = publishedAt;
   return item;
 }
 
@@ -402,6 +406,8 @@ export function normalizeZhihuActivity(raw: unknown): ZhihuBootstrapItem | null 
   if (voteup !== undefined) item.voteup = voteup;
   const activityId = str(activity.id);
   if (activityId) item.interaction_time = activityId;
+  const publishedAt = num(target.created_time ?? target.created);
+  if (publishedAt !== undefined) item.published_at = publishedAt;
   return item;
 }
 
@@ -446,6 +452,8 @@ export function normalizeZhihuCollectionItem(
   if (summary) item.summary = summary;
   const voteup = num(content.voteup_count);
   if (voteup !== undefined) item.voteup = voteup;
+  const publishedAt = num(content.created_time ?? content.created);
+  if (publishedAt !== undefined) item.published_at = publishedAt;
   return item;
 }
 
@@ -524,6 +532,8 @@ function normalizeZhihuDiscoveryObject(
   if (commentCount === undefined && answerCount !== undefined) item.comment_count = answerCount;
   const followerCount = num(object.follower_count ?? row.follower_count);
   if (favoriteCount === undefined && followerCount !== undefined) item.favorite_count = followerCount;
+  const publishedAt = num(object.created_time ?? object.created);
+  if (publishedAt !== undefined) item.published_at = publishedAt;
   return item;
 }
 

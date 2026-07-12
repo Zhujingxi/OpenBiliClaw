@@ -6,6 +6,8 @@ import asyncio
 import json
 import logging
 import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -240,6 +242,102 @@ def test_select_diversified_batch_keeps_one_accessible_entry_when_available() ->
         }
         for item in batch
     )
+
+
+@pytest.mark.asyncio
+async def test_select_diversified_batch_async_matches_sync_output() -> None:
+    candidates = [
+        DiscoveredContent(
+            bvid=f"BV{i}",
+            title=f"candidate-{i}",
+            topic_group=f"topic-{i % 3}",
+            style_key="tutorial" if i % 2 else "deep_dive",
+            relevance_score=1.0 - i / 20,
+        )
+        for i in range(8)
+    ]
+    embeddings = {
+        item.bvid: [float(index % 3 == axis) for axis in range(3)]
+        for index, item in enumerate(candidates)
+    }
+
+    expected = RecommendationEngine._select_diversified_batch(
+        candidates,
+        limit=5,
+        embeddings=embeddings,
+    )
+    actual = await RecommendationEngine._select_diversified_batch_async(
+        candidates,
+        limit=5,
+        embeddings=embeddings,
+    )
+
+    assert [item.bvid for item in actual] == [item.bvid for item in expected]
+
+
+@pytest.mark.asyncio
+async def test_select_diversified_batch_async_keeps_event_loop_responsive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    main_thread = threading.get_ident()
+    worker_threads: list[int] = []
+    heartbeat_ran = asyncio.Event()
+
+    def blocking_selector(
+        cls: type[RecommendationEngine],
+        candidates: list[DiscoveredContent],
+        **kwargs: object,
+    ) -> list[DiscoveredContent]:
+        del cls, kwargs
+        worker_threads.append(threading.get_ident())
+        time.sleep(0.08)
+        return candidates[:1]
+
+    monkeypatch.setattr(
+        RecommendationEngine,
+        "_select_diversified_batch",
+        classmethod(blocking_selector),
+    )
+
+    async def heartbeat() -> None:
+        await asyncio.sleep(0.01)
+        heartbeat_ran.set()
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+    result = await RecommendationEngine._select_diversified_batch_async(
+        [DiscoveredContent(bvid="BV1", title="one")],
+        limit=1,
+    )
+    await heartbeat_task
+
+    assert heartbeat_ran.is_set()
+    assert [item.bvid for item in result] == ["BV1"]
+    assert worker_threads and worker_threads[0] != main_thread
+
+
+@pytest.mark.asyncio
+async def test_supergroup_canonical_map_async_matches_sync_output() -> None:
+    embeddings = {
+        "动漫": [1.0, 0.0],
+        "动漫文化": [0.99, 0.01],
+        "科技": [0.0, 1.0],
+    }
+    kwargs = {
+        "strict": 0.90,
+        "loose": 0.80,
+        "prefix_len": 2,
+    }
+
+    expected = RecommendationEngine._build_supergroup_canonical_map(
+        embeddings,
+        **kwargs,
+    )
+    actual = await RecommendationEngine._build_supergroup_canonical_map_async(
+        embeddings,
+        **kwargs,
+    )
+
+    assert actual == expected == {"动漫文化": "动漫"}
 
 
 def test_select_diversified_batch_caps_newly_confirmed_amplification_direction() -> None:
@@ -3478,3 +3576,133 @@ def test_list_servable_pool_platforms_returns_distinct_tokens() -> None:
         )
 
         assert db.list_servable_pool_platforms() == ["bilibili", "zhihu"]
+
+
+@pytest.mark.asyncio
+async def test_reshuffle_exclusions_refill_beyond_the_old_candidate_window() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        for index in range(60):
+            _seed_visible(
+                db,
+                f"BV{index:04d}",
+                title=f"候选 {index}",
+                up_name=f"UP {index}",
+                source="search",
+                relevance_score=1.0 - index / 1000,
+                relevance_reason=f"候选 {index} 的理由。",
+                pool_expression=f"候选 {index} 的预生成文案。",
+                pool_topic_label=f"主题 {index}",
+                topic_group=f"主题组 {index}",
+            )
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+        excluded = frozenset(f"BV{index:04d}" for index in range(40))
+
+        recommendations = await engine.serve(
+            _build_profile(),
+            limit=10,
+            excluded_bvids=excluded,
+            expression_mode="precomputed",
+        )
+
+        assert len(recommendations) == 10
+        assert not ({item.content.bvid for item in recommendations} & excluded)
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_serve_final_exclusion_blocks_platform_floor_reintroduction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+        allowed = DiscoveredContent(
+            bvid="BV1ALLOWED",
+            title="允许候选",
+            up_name="UP A",
+            source_strategy="search",
+            relevance_score=0.8,
+            relevance_reason="允许候选理由。",
+            pool_expression="允许候选文案。",
+            pool_topic_label="允许主题",
+        )
+        blocked = DiscoveredContent(
+            bvid="BV1BLOCKED",
+            title="应排除候选",
+            up_name="UP B",
+            source_strategy="search",
+            relevance_score=0.9,
+            relevance_reason="应排除候选理由。",
+            pool_expression="应排除候选文案。",
+            pool_topic_label="排除主题",
+        )
+        monkeypatch.setattr(
+            engine,
+            "_pool_readiness_counts",
+            lambda: {"available": 2, "raw": 2, "pending": 0},
+        )
+        monkeypatch.setattr(engine, "_load_pool_candidates", lambda *, limit: [allowed])
+        monkeypatch.setattr(
+            engine,
+            "_apply_platform_floor",
+            lambda candidates: [blocked, *candidates],
+        )
+
+        recommendations = await engine.serve(
+            _build_profile(),
+            limit=1,
+            excluded_bvids=frozenset({"BV1BLOCKED"}),
+            expression_mode="precomputed",
+        )
+
+        assert [item.content.bvid for item in recommendations] == ["BV1ALLOWED"]
+        db.close()
+
+
+def test_rows_to_discovered_round_trips_all_engagement_stats() -> None:
+    """池子整理(classify_pool_backlog)经 row → dataclass → cache_content 重写行;
+    mapper 漏读任何互动字段都会把该字段清零(与封面被空值抹掉同族缺陷)。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+        stats = {
+            "view_count": 14000,
+            "like_count": 673,
+            "favorite_count": 1283,
+            "collect_count": 1283,
+            "comment_count": 65,
+            "share_count": 7,
+            "danmaku_count": 21,
+            "reply_count": 3,
+            "retweet_count": 2,
+            "bookmark_count": 9,
+        }
+        db.cache_content(
+            "BV1stats",
+            title="互动数据齐全的视频",
+            author_name="Rayman小何",
+            cover_url="//i2.hdslb.com/bfs/archive/x.jpg",
+            published_at="2026-07-08T06:30:00Z",
+            published_label="3 天前",
+            source="search",
+            relevance_score=0.9,
+            **stats,
+        )
+        row = dict(
+            db.conn.execute("SELECT * FROM content_cache WHERE bvid = ?", ("BV1stats",)).fetchone()
+        )
+
+        (item,) = engine._rows_to_discovered([row])
+        kwargs = item.to_cache_kwargs()
+
+        for field_name, expected in stats.items():
+            assert kwargs[field_name] == expected, field_name
+        assert kwargs["author_name"] == "Rayman小何"
+        assert kwargs["published_at"] == "2026-07-08T06:30:00Z"
+        assert kwargs["published_label"] == "3 天前"
+        db.close()

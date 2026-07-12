@@ -202,6 +202,7 @@ def test_keyword_inspiration_preview_threads_persist_axes(
     monkeypatch.setattr(cli_module, "_build_registry", lambda: object(), raising=False)
     monkeypatch.setattr(cli_module, "_build_usage_recorder", lambda: None, raising=False)
     monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine(), raising=False)
+    monkeypatch.setattr(cli_module, "_build_bilibili_client", lambda: object(), raising=False)
     monkeypatch.setattr(
         "openbiliclaw.llm.service.LLMService",
         FakeLLMService,
@@ -299,6 +300,7 @@ def test_keyword_inspiration_preview_one_shot_overrides_apply_on_derived_params(
     monkeypatch.setattr(cli_module, "_build_registry", lambda: object(), raising=False)
     monkeypatch.setattr(cli_module, "_build_usage_recorder", lambda: None, raising=False)
     monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine(), raising=False)
+    monkeypatch.setattr(cli_module, "_build_bilibili_client", lambda: object(), raising=False)
     monkeypatch.setattr("openbiliclaw.llm.service.LLMService", FakeLLMService, raising=False)
     monkeypatch.setattr(
         "openbiliclaw.llm.service.module_overrides_from_config",
@@ -2363,11 +2365,30 @@ def test_recommend_displays_results_and_marks_them_presented(
                         bvid="BV1REC",
                         title="讲透城市与建筑的空间叙事",
                         up_name="城市观察局",
+                        published_at="2020-07-08T06:30:00Z",
+                        published_label="3 days ago",
                     ),
                     expression="这条会对上你最近那种想把结构想透的劲头。",
                     topic_label="你最近那股想把结构想透的劲头",
                     confidence=0.88,
-                )
+                ),
+                Recommendation(
+                    recommendation_id=8,
+                    content=DiscoveredContent(
+                        bvid="BV1LABEL",
+                        title="只有来源相对时间的推荐",
+                        up_name="时间观察局",
+                        published_label="3 days ago",
+                    ),
+                ),
+                Recommendation(
+                    recommendation_id=9,
+                    content=DiscoveredContent(
+                        bvid="BV1EMPTY",
+                        title="没有可靠时间的推荐",
+                        up_name="空值观察局",
+                    ),
+                ),
             ]
 
         def mark_presented(self, recommendation_ids: list[int]) -> None:
@@ -2394,7 +2415,10 @@ def test_recommend_displays_results_and_marks_them_presented(
     assert "这条会对上你最近那种想把结构想透的劲头。" in result.stdout
     assert "话题标签" in result.stdout
     assert "BV1REC" in result.stdout
-    assert fake_engine.marked_ids == [7]
+    assert "2020-07-08" in result.stdout
+    assert "3 days ago" in result.stdout
+    assert result.stdout.count("发布时间") == 2
+    assert fake_engine.marked_ids == [7, 8, 9]
 
 
 def test_feedback_command_updates_recommendation_and_records_event(
@@ -4643,7 +4667,7 @@ def test_save_embedding_config_writes_to_toml(
     reloaded, _ = load_config_with_diagnostics()
     assert reloaded.llm.embedding.provider == "ollama"
     assert reloaded.llm.embedding.model == "bge-m3"
-    assert reloaded.llm.embedding.base_url == "http://localhost:11434/v1"
+    assert reloaded.llm.embedding.base_url == "http://127.0.0.1:11434/v1"
 
 
 def test_save_embedding_config_custom_openai_compat(
