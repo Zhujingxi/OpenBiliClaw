@@ -21,7 +21,7 @@
 
 | 任务 | 状态 | 说明 |
 |------|------|------|
-| OpenClaw bootstrap | ✅ | `build_openclaw_adapter_services()` 在 coordinator attach 后、adapter services 暴露前同步调用 controller 的幂等 `run_startup_maintenance()`，确保任何 Soul/recommendation LLM operation 之前先恢复历史库存；direct controller 继续复用共享 database、scheduler gate、`PresenceTracker` 和 config-backed LLM overrides。 |
+| OpenClaw bootstrap | ✅ | `build_openclaw_adapter_services()` 在 coordinator attach 后、adapter services 暴露前同步调用 controller 的幂等 `run_startup_maintenance()`；只有非 rollback 的真实维护结果才完成该标记，snapshot/DB fallback 或 rollback 会保持可重试。direct controller 继续复用共享 database、scheduler gate、`PresenceTracker` 和 config-backed LLM overrides。 |
 | OpenClaw adapter operations | ✅ | 已提供 `sync_account / get_profile / recommend / submit_feedback / get_runtime_status` |
 | OpenClaw skill descriptors | ✅ | 已提供协议中立的 skill descriptor 列表与 async handler |
 | OpenClaw CLI bridge | ✅ | 已提供 `python -m openbiliclaw.integrations.openclaw.cli`，输出稳定 JSON |

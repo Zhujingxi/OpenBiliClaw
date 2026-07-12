@@ -89,7 +89,7 @@ controller.candidate_eval_coordinator.notify("candidate_enqueued:bilibili")
 - `_pool_count_payload()`：统一生成 runtime status / runtime stream 的池子字段，包含 pending eval 与 evaluated pending 拆分。
 - `_enforce_pool_cap()`：把 target、跨表 raw ceiling、available/raw source quotas、topic/explore cap、stale age 与 XHS 本人昵称一次传给 storage 原子维护入口；成功返回 `result.at_target`，post-snapshot rollback 时记录 ERROR 并按事务前 availability 决策。若 BEGIN / snapshot 尚未取得就失败，storage 抛出专用异常，runtime 重新调用 canonical `count_pool_candidates()` 决策，绝不信任默认零值。每个有结果的维护轮只输出一条包含 `PoolMaintenanceResult` 全字段的汇总日志。
 
-`run_startup_maintenance()` 把生命周期固定为“原子维护/历史恢复 → 暴露服务或启动后台工作”，并用 controller 内部完成标记避免同一 host lifecycle 重复维护。API daemon / 热重载由 `run_forever()` 先调用该钩子，再执行 delight、candidate 与 background loops；OpenClaw 不运行 `run_forever()`，因此 direct bootstrap 在 coordinator attach 后、返回 adapter services 前同步调用同一钩子。维护异常继续按既有韧性边界吞掉且不标记完成，后续 host 启动仍可重试。
+`run_startup_maintenance()` 把生命周期固定为“原子维护/历史恢复 → 暴露服务或启动后台工作”，并用 controller 内部完成标记避免同一 host lifecycle 重复维护。API daemon / 热重载由 `run_forever()` 先调用该钩子，再执行 delight、candidate 与 background loops；OpenClaw 不运行 `run_forever()`，因此 direct bootstrap 在 coordinator attach 后、返回 adapter services 前同步调用同一钩子。`_enforce_pool_cap()` 每次先清空 success signal，只有拿到 `rolled_back=False` 的 `PoolMaintenanceResult` 才置为成功；snapshot/DB 异常即使被 fallback bool 吞掉、或事务返回 rollback，都不会完成 startup 标记，后续 host 调用仍会重试。
 
 `_run_refresh_plan()` 在 durable admission 与文案完成后只调用这一个入口；不再组合 `trim_topic_group_overflow()`、`trim_explore_cluster_overflow()`、`evict_stale_pool_items()`、source trim 或 raw trim，因此不会留下“前半段已提交、后半段才发现库存归零”的中间状态。旧数据库 trim 方法仍保留给兼容测试和手动工具。
 

@@ -396,6 +396,7 @@ class ContinuousRefreshController:
     _init_grace_consumed: bool = False
     _last_llm_gate_allowed: bool = field(default=True, init=False)
     _startup_maintenance_completed: bool = field(default=False, init=False)
+    _last_pool_maintenance_succeeded: bool = field(default=False, init=False)
 
     _signal_event_types = [
         "view",
@@ -708,6 +709,7 @@ class ContinuousRefreshController:
         ``pool_target_count`` is a frontend-visible availability floor, not the
         raw material cap. Raw rows may exceed it until ``_raw_material_ceiling``.
         """
+        self._last_pool_maintenance_succeeded = False
         raw_ceiling = self._raw_material_ceiling()
         try:
             result = self.database.maintain_pool_inventory(
@@ -760,6 +762,7 @@ class ContinuousRefreshController:
         )
         if result.rolled_back:
             return result.available_before >= self.pool_target_count
+        self._last_pool_maintenance_succeeded = True
         return result.at_target
 
     def run_startup_maintenance(self) -> None:
@@ -769,6 +772,8 @@ class ContinuousRefreshController:
         try:
             self._enforce_pool_cap()
         except Exception:
+            return
+        if not self._last_pool_maintenance_succeeded:
             return
         self._startup_maintenance_completed = True
 

@@ -5,6 +5,7 @@ import json
 import logging
 import sqlite3
 from contextlib import suppress
+from dataclasses import replace
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -3849,61 +3850,73 @@ async def test_run_forever_startup_order_repairs_before_llm_and_background_tasks
 
 
 async def test_run_forever_does_not_repeat_host_startup_maintenance() -> None:
+    database = _FakeDatabase(events=[])
     controller = ContinuousRefreshController(
         memory_manager=_FakeMemoryManager(),
-        database=_FakeDatabase(events=[]),
+        database=database,
         soul_engine=_FakeSoulEngine(),
         discovery_engine=_FakeDiscoveryEngine(),
         recommendation_engine=_FakeRecommendationEngine(),
         check_interval_seconds=3600,
     )
-    maintenance_calls = 0
     prepare_started = asyncio.Event()
-
-    def _maintenance() -> bool:
-        nonlocal maintenance_calls
-        maintenance_calls += 1
-        return False
 
     async def _prepare() -> int:
         prepare_started.set()
         return 0
 
-    controller._enforce_pool_cap = _maintenance  # type: ignore[method-assign]
     controller.prepare_delight_candidates = _prepare  # type: ignore[method-assign]
     controller.run_startup_maintenance()
 
     task = asyncio.create_task(controller.run_forever())
     try:
         await asyncio.wait_for(prepare_started.wait(), timeout=0.5)
-        assert maintenance_calls == 1
+        assert len(database.maintenance_calls) == 1
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
 
 
-def test_startup_maintenance_failure_remains_retryable() -> None:
+def test_startup_maintenance_snapshot_failure_remains_retryable() -> None:
+    class _SnapshotFailureDatabase(_FakeDatabase):
+        def maintain_pool_inventory(self, **kwargs: object) -> PoolMaintenanceResult:
+            self.maintenance_calls.append(dict(kwargs))
+            raise RuntimeError("snapshot unavailable")
+
+    database = _SnapshotFailureDatabase(events=[])
     controller = ContinuousRefreshController(
         memory_manager=_FakeMemoryManager(),
-        database=_FakeDatabase(events=[]),
+        database=database,
         soul_engine=_FakeSoulEngine(),
         discovery_engine=_FakeDiscoveryEngine(),
         recommendation_engine=_FakeRecommendationEngine(),
     )
-    maintenance_calls = 0
+    controller.run_startup_maintenance()
+    controller.run_startup_maintenance()
 
-    def _broken_maintenance() -> bool:
-        nonlocal maintenance_calls
-        maintenance_calls += 1
-        raise RuntimeError("maintenance unavailable")
+    assert len(database.maintenance_calls) == 2
 
-    controller._enforce_pool_cap = _broken_maintenance  # type: ignore[method-assign]
+
+def test_startup_maintenance_rolled_back_result_remains_retryable() -> None:
+    class _RolledBackDatabase(_FakeDatabase):
+        def maintain_pool_inventory(self, **kwargs: object) -> PoolMaintenanceResult:
+            result = super().maintain_pool_inventory(**kwargs)  # type: ignore[arg-type]
+            return replace(result, rolled_back=True, reason="forced rollback")
+
+    database = _RolledBackDatabase(events=[])
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+    )
 
     controller.run_startup_maintenance()
     controller.run_startup_maintenance()
 
-    assert maintenance_calls == 2
+    assert len(database.maintenance_calls) == 2
 
 
 async def test_hot_reload_new_controller_repairs_before_new_background_tasks() -> None:
