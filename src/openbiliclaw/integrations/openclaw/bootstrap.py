@@ -286,23 +286,41 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         return await runtime_controller.refresh_if_needed()
 
     async def _precompute_committed_candidates() -> None:
+        expression_coordinator.notify("candidate_commit")
+
+    from openbiliclaw.runtime.expression_copy import ExpressionCopyCoordinator
+
+    async def _drain_expression_copy(limit: int) -> int:
         get_profile = getattr(soul_engine, "get_profile", None)
         if not callable(get_profile):
-            return
+            return 0
         profile = await get_profile()
         if profile is None:
-            return
+            return 0
         before = int(_candidate_eval_snapshot().available)
-        precompute = getattr(runtime_controller, "_safe_precompute_pool_copy", None)
-        if callable(precompute):
-            await precompute(profile=profile)
+        completed = await recommendation_engine.drain_pending_expression_copy(
+            profile=profile, limit=limit
+        )
         publish = getattr(
-            runtime_controller,
-            "_publish_precompute_replenishment_if_needed",
-            None,
+            runtime_controller, "_publish_precompute_replenishment_if_needed", None
         )
         if callable(publish):
             await publish(before_pool_count=before)
+        return int(completed)
+
+    expression_coordinator = ExpressionCopyCoordinator(
+        pending_count_provider=lambda: int(
+            _candidate_eval_snapshot().admitted_pending_copy
+        ),
+        drain_callback=_drain_expression_copy,
+        safety_wake_seconds=float(
+            getattr(config.scheduler, "refresh_check_interval_seconds", 60)
+        ),
+    )
+    runtime_controller.expression_copy_coordinator = expression_coordinator
+    set_copy_callback = getattr(recommendation_engine, "set_copy_pending_callback", None)
+    if callable(set_copy_callback):
+        set_copy_callback(expression_coordinator.notify)
 
     candidate_eval_coordinator = CandidateEvalCoordinator(
         pipeline=candidate_pipeline,
@@ -315,6 +333,9 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         batch_size=30,
         supply_callback=_request_candidate_supply,
         post_commit_callback=_precompute_committed_candidates,
+        on_admitted=lambda count: expression_coordinator.notify(
+            f"candidate_admitted:{count}"
+        ),
         work_allowed=lambda: bool(
             getattr(runtime_controller, "_is_initialized", lambda: True)()
             and getattr(runtime_controller, "_llm_work_allowed", lambda: True)()

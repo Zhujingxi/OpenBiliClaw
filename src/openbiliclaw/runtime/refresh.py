@@ -258,6 +258,12 @@ class SupportsRecommendationEngine(Protocol):
         limit: int,
     ) -> int: ...
 
+    async def precompute_delight_scores(
+        self, *, profile: Any, limit: int
+    ) -> int: ...
+
+    async def classify_pool_backlog(self, *, profile: Any, limit: int) -> int: ...
+
     async def prewarm_supergroup_embeddings(self) -> int: ...
 
     async def prewarm_pool_mmr_embeddings(self, *, limit: int = 200) -> int: ...
@@ -282,6 +288,7 @@ class ContinuousRefreshController:
     event_hub: Any | None = None
     discovery_candidate_pipeline: Any | None = None
     candidate_eval_coordinator: Any | None = None
+    expression_copy_coordinator: Any | None = None
     llm_concurrency_gate: Any | None = None
     bilibili_producer: Any | None = None
     xhs_producer: Any | None = None
@@ -544,6 +551,10 @@ class ContinuousRefreshController:
         if callable(status_payload):
             with suppress(Exception):
                 payload.update(status_payload())
+        expression_status = getattr(self.expression_copy_coordinator, "status_payload", None)
+        if callable(expression_status):
+            with suppress(Exception):
+                payload.update(expression_status())
         gate_status_payload = getattr(self.llm_concurrency_gate, "status_payload", None)
         if callable(gate_status_payload):
             with suppress(Exception):
@@ -974,9 +985,11 @@ class ContinuousRefreshController:
         if not self._is_initialized():
             return 0
         profile = await self.soul_engine.get_profile()
-        return await self.recommendation_engine.precompute_pool_copy(
-            profile=profile,
-            limit=0,
+        delight = getattr(self.recommendation_engine, "precompute_delight_scores", None)
+        if callable(delight):
+            return int(await delight(profile=profile, limit=30))
+        return int(
+            await self.recommendation_engine.precompute_pool_copy(profile=profile, limit=0)
         )
 
     @staticmethod
@@ -1104,9 +1117,14 @@ class ContinuousRefreshController:
             if self.candidate_eval_coordinator is not None
             else self._loop_candidate_eval()
         )
+        expression_copy_loop = (
+            self.expression_copy_coordinator.run_forever()
+            if self.expression_copy_coordinator is not None
+            else self._loop_pool_precompute()
+        )
         tasks = [
             asyncio.create_task(self._loop_refresh()),
-            asyncio.create_task(self._loop_pool_precompute()),
+            asyncio.create_task(expression_copy_loop, name="expression_copy"),
             asyncio.create_task(candidate_eval_loop, name="candidate_eval"),
             asyncio.create_task(self._loop_soul_pipeline()),
             asyncio.create_task(self._loop_bilibili_producer()),
@@ -1124,6 +1142,12 @@ class ContinuousRefreshController:
         try:
             await asyncio.gather(*tasks)
         finally:
+            candidate_stop = getattr(self.candidate_eval_coordinator, "stop", None)
+            if callable(candidate_stop):
+                await candidate_stop()
+            expression_stop = getattr(self.expression_copy_coordinator, "stop", None)
+            if callable(expression_stop):
+                await expression_stop()
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -1220,13 +1244,19 @@ class ContinuousRefreshController:
         except Exception:
             before_pool_count = -1
         try:
-            await engine.precompute_pool_copy(
-                profile=profile,
-                limit=_MAX_DISCOVERY_BACKFILL_PER_REFRESH,
-            )
+            if self.expression_copy_coordinator is None:
+                await engine.precompute_pool_copy(
+                    profile=profile, limit=_MAX_DISCOVERY_BACKFILL_PER_REFRESH
+                )
+            else:
+                await engine.classify_pool_backlog(
+                    profile=profile, limit=_MAX_DISCOVERY_BACKFILL_PER_REFRESH
+                )
         except Exception:
-            logger.exception("Periodic precompute drain failed")
+            logger.exception("Periodic classify drain failed")
             return
+        if self.expression_copy_coordinator is not None:
+            self.expression_copy_coordinator.notify("safety_wake")
         if before_pool_count >= 0:
             await self._publish_precompute_replenishment_if_needed(
                 before_pool_count=before_pool_count,
@@ -1878,10 +1908,13 @@ class ContinuousRefreshController:
             failed = int(drain_result.get("failed", 0) or 0)
             waiting = int(drain_result.get("waiting", 0) or 0)
         if cached > 0 and precompute:
-            await self._safe_precompute_pool_copy(profile=profile)
-            await self._publish_precompute_replenishment_if_needed(
-                before_pool_count=before_pool_count,
-            )
+            if self.expression_copy_coordinator is not None:
+                self.expression_copy_coordinator.notify(f"candidate_admitted:{cached}")
+            else:
+                await self._safe_precompute_pool_copy(profile=profile)
+                await self._publish_precompute_replenishment_if_needed(
+                    before_pool_count=before_pool_count
+                )
         if evaluated or cached or rejected or failed:
             logger.info(
                 "candidate eval drain done: caller=%s evaluated=%s cached=%s rejected=%s failed=%s",
@@ -1959,15 +1992,6 @@ class ContinuousRefreshController:
         pipeline_discovered_count = 0
         flattened_strategies: list[str] = []
         replenished_topics: list[str] = []
-        # v0.3.47+: per-strategy expression precompute tasks. Each strategy's
-        # `discover()` blocks on a slow LLM eval batch (8-16 minutes
-        # observed in production). Without this, popup copy precompute was
-        # gated until ALL strategies finished — i.e. ~30 min of latency
-        # for fresh items. Now: as soon as a strategy yields content we
-        # kick a precompute task; ``self._precompute_lock`` inside
-        # ``RecommendationEngine`` serialises them so two tasks don't
-        # double-spend LLM tokens on the same un-precomputed candidates.
-        precompute_tasks: list[asyncio.Task[Any]] = []
 
         await self._publish_event(
             {
@@ -2155,15 +2179,10 @@ class ContinuousRefreshController:
 
             if admitted_count > 0:
                 replenished_topics.extend(self._extract_topics(topic_items))
-                # Fire expression precompute now (in parallel with the next
-                # strategy's discovery LLM call). The lock inside the engine
-                # queues this if a previous task is still running.
-                precompute_tasks.append(
-                    self._track_task(
-                        "precompute_pool_copy",
-                        self._safe_precompute_pool_copy(profile=profile),
+                if self.expression_copy_coordinator is not None:
+                    self.expression_copy_coordinator.notify(
+                        f"refresh_admitted:{admitted_count}"
                     )
-                )
 
         if flattened_strategies:
             # Snapshot delight count BEFORE precompute so we can detect
@@ -2171,15 +2190,8 @@ class ContinuousRefreshController:
             # to the popup (no per-item chrome notification — popup
             # re-fetches /api/delight/pending-batch when this fires).
             delight_count_before = self._safe_count_delight_candidates()
-            # v0.3.47+: drain the per-strategy precompute tasks fired
-            # eagerly above. They have already been running in parallel
-            # with discovery's later strategies, so this awaits whatever
-            # is still pending instead of starting from scratch. If the
-            # discovery loop produced nothing precompute-eligible (e.g.
-            # all rejected at eval), fall back to one synchronous call so
-            # any earlier-cycle backlog still gets cleared.
-            if precompute_tasks:
-                await asyncio.gather(*precompute_tasks, return_exceptions=True)
+            if self.expression_copy_coordinator is not None:
+                self.expression_copy_coordinator.notify("refresh_complete")
             else:
                 await self._safe_precompute_pool_copy(profile=profile)
             # Pre-warm supergroup-merge embeddings so the popup's "换一批"

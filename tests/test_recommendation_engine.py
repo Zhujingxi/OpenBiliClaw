@@ -2781,6 +2781,73 @@ async def test_drain_expression_copy_default_batch_size_is_30() -> None:
 
 
 @pytest.mark.asyncio
+async def test_public_expression_drain_caps_sixty_then_processes_tail() -> None:
+    class _RecordingLLM:
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+            self.active = 0
+            self.max_active = 0
+
+        async def complete_structured_task(self, **kwargs: object) -> LLMResponse:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                batch = _content_batch_from_prompt(str(kwargs["user_input"]))
+                self.batch_sizes.append(len(batch))
+                await asyncio.sleep(0)
+                return LLMResponse(
+                    content=json.dumps(
+                        [
+                            {
+                                "bvid": item["bvid"],
+                                "expression": f"{item['bvid']} 的推荐文案。",
+                                "topic_label": "持续补货",
+                            }
+                            for item in batch
+                        ],
+                        ensure_ascii=False,
+                    ),
+                    provider="test",
+                    model="dummy",
+                    usage={},
+                )
+            finally:
+                self.active -= 1
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(
+            db,
+            [
+                DiscoveredContent(
+                    bvid=f"BV_EXPR_PUBLIC_{index:02d}",
+                    title=f"持续补货 {index}",
+                    up_name="效率实验室",
+                    style_key="deep_dive",
+                    topic_group="效率工具",
+                    relevance_score=0.88,
+                )
+                for index in range(75)
+            ],
+            precomputed=False,
+        )
+        llm = _RecordingLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+
+        assert await engine.drain_pending_expression_copy(
+            profile=_build_profile(), limit=75
+        ) == 60
+        assert sorted(llm.batch_sizes) == [30, 30]
+        assert llm.max_active == 2
+        llm.batch_sizes.clear()
+        assert await engine.drain_pending_expression_copy(
+            profile=_build_profile(), limit=60
+        ) == 15
+        assert llm.batch_sizes == [15]
+
+
+@pytest.mark.asyncio
 async def test_drain_expression_copy_splits_failed_batch_before_single_fallback() -> None:
     class _SplitRetryExpressionLLM:
         def __init__(self) -> None:

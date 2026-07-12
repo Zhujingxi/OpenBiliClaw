@@ -2,6 +2,8 @@
 
 > 从用户画像出发，在 B 站、小红书、抖音、YouTube、X、知乎、Reddit 和通用 Web 等来源主动寻找潜在会喜欢的内容。
 
+候选 admission 成功后只同步调用轻量 expression `notify()`，不会 inline 或 await 文案 provider；generation-owned coordinator 按 durable `admitted_pending_copy` 连续补齐文案，因此评估 worker 可立即继续补位。
+
 ## 概述
 
 `discovery/` 包负责把用户的 Soul 画像转换成“可被搜索、可被评估、可被推荐”的候选内容集合。

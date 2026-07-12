@@ -1,5 +1,7 @@
 # Runtime Module
 
+每个 runtime generation 只拥有一个 expression copy coordinator：8 条立即、尾批固定 3 秒、单轮最多 60，零进展退避 15 秒，60 秒仅作 safety wake。停止 generation 会取消 collector、gate waiter 与运行中的 provider callback；状态接口暴露 pending/state/deadline/last completed/error。参数来自 2026-07-12 生产日志校准。
+
 > API runtime 启动时创建一套共享 LLM gate 并注入主服务、Soul 与 refresh；在任何 provider 工作可启动前用 canonical database available 初始化 `healthy/refill/empty`，后续 controller readiness、原子维护、推荐池状态与候选 snapshot 持续同步。runtime status 暴露 total/background 以及 refill/maintenance active、waiting 和 inventory state。
 
 gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一对象上调整 total/background，因此旧 HTTP/对话学习调用与新服务仍竞争同一个真实总上限。

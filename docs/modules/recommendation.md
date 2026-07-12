@@ -2,6 +2,8 @@
 
 > 从 discovery 缓存中挑出最值得推的内容，并逐步生成像朋友一样的推荐表达。
 
+runtime 使用公开 `drain_pending_expression_copy(profile, limit<=60)` 作为 copy-only 入口：pending 达 8 条立即执行，1–7 条从首次通知起固定等待最多 3 秒；provider 每批最多 30 条、fan-out 2。分类完成只通过 `set_copy_pending_callback()` 通知，不 inline 等待 copy。参数来自 2026-07-12 生产日志校准。
+
 ## 概述
 
 `recommendation/` 包负责把已经发现并评分过的内容，转成真正准备展示给用户的推荐结果。

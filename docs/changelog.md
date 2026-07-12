@@ -6,6 +6,7 @@
 
 ## v0.3.164：WebUI 可配置的海外出口代理（issue #89，2026-07-12）
 
+- **推荐文案改为 8/3/30×2 持续微批**：每个 API / OpenClaw runtime generation 只拥有一个 expression copy coordinator；待文案达到 8 条立即执行，1–7 条固定从首次通知起最多等 3 秒，通知不延长窗口。单轮最多 drain 60 条、provider 请求每批最多 30 条且最多并发 2；零进展退避 15 秒，60 秒仅作 safety wake。候选 admission 与分类只发非阻塞通知，热重载会停止旧 generation 后再启动新 owner。参数来自 2026-07-12 生产日志校准。
 - **候选评估改用 durable projected inventory**：调度只统计 canonical available、已 admission 待文案与已评估待 admission，普通 raw pending/evaluating 不再虚报库存。3×30 worker 乱序完成时，串行 commit 先保存全部 token-owned 评分，再按 copy-aware headroom 入池；超额达标结果留在 `evaluated`，worker 完成直接补位，60 秒仅作 safety wake。API 与 OpenClaw 使用同一精确 snapshot mapping 和 available gate 值。
 - **后台补货获得两槽新准入保证**：共享 total=4/background=3 gate 新增 cancellation-safe refill admission，优先级为文案 > 候选评估 > 缺货供给 > maintenance；低库存且 refill 排队时 maintenance 新准入最多一个、refill 可借满三槽，库存为零时 park 新 maintenance。规则只影响新 admission，不取消已进入 provider 的 Soul/维护请求；无 refill 可运行时 maintenance 继续借用全部空槽。
 - **补货优先级只跟随 durable canonical 库存**：API、OpenClaw 在任何 provider 工作前用数据库可换数初始化 gate，controller readiness、原子维护、推荐消费/文案完成和 candidate snapshot 持续同步 `healthy/refill/empty`。runtime status 新增 refill/maintenance active、waiting、priority-active 与 inventory state，便于定位库存不足时的真实占槽。

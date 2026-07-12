@@ -190,6 +190,7 @@ class RecommendationEngine:
         self._embedding_service = embedding_service
         self._xhs_self_info_provider = xhs_self_info_provider
         self._pool_inventory_commit_callback = pool_inventory_commit_callback
+        self._copy_pending_callback: Callable[[str], None] | None = None
         self._expression_batch_concurrency = max(1, min(16, int(expression_batch_concurrency)))
         # v0.3.63+: optional registry for detached fire-and-forget tasks
         # (classify_pool_backlog_detached, precompute_delight_scores_detached).
@@ -979,6 +980,27 @@ class RecommendationEngine:
                 completed += int(r or 0)
         return completed
 
+    async def drain_pending_expression_copy(
+        self,
+        *,
+        profile: SoulProfile,
+        limit: int = 60,
+    ) -> int:
+        """Drain only durable classified rows awaiting expression copy."""
+
+        return await self._drain_expression_copy(
+            profile=profile,
+            limit=max(0, min(60, int(limit))),
+            batch_size=_DEFAULT_EXPRESSION_BATCH_SIZE,
+        )
+
+    def set_copy_pending_callback(
+        self, callback: Callable[[str], None] | None
+    ) -> None:
+        """Register the runtime generation's non-blocking copy notifier."""
+
+        self._copy_pending_callback = callback
+
     # ── Source-agnostic content classification ───────────────────────
     #
     # Content from any source (bilibili, xiaohongshu, web, …) must carry
@@ -1043,10 +1065,15 @@ class RecommendationEngine:
             logger.exception("classify_pool_backlog (detached) failed")
             return 0
         if classified > 0:
-            try:
-                await self._drain_expression_copy(profile=profile, limit=max(limit, classified))
-            except Exception:
-                logger.exception("post-classify expression drain failed")
+            if self._copy_pending_callback is not None:
+                try:
+                    self._copy_pending_callback(f"classified:{classified}")
+                except Exception:
+                    logger.warning("post-classify expression notification failed", exc_info=True)
+            else:
+                await self.drain_pending_expression_copy(
+                    profile=profile, limit=max(limit, classified)
+                )
         return classified
 
     async def _safe_precompute_delight_scores(

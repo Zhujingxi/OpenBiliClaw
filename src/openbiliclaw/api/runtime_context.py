@@ -958,14 +958,38 @@ class RuntimeContext:
             return await new_runtime_controller.refresh_if_needed()
 
         async def _precompute_committed_candidates() -> None:
+            expression_coordinator.notify("candidate_commit")
+
+        from openbiliclaw.runtime.expression_copy import ExpressionCopyCoordinator
+
+        async def _drain_expression_copy(limit: int) -> int:
             profile = await new_soul_engine.get_profile()
             if profile is None:
-                return
+                return 0
             before = int(_candidate_eval_snapshot().available)
-            await new_runtime_controller._safe_precompute_pool_copy(profile=profile)  # noqa: SLF001
+            completed = await new_recommendation_engine.drain_pending_expression_copy(
+                profile=cast("Any", profile), limit=limit
+            )
             await new_runtime_controller._publish_precompute_replenishment_if_needed(  # noqa: SLF001
                 before_pool_count=before
             )
+            return int(completed)
+
+        expression_coordinator = ExpressionCopyCoordinator(
+            pending_count_provider=lambda: int(
+                _candidate_eval_snapshot().admitted_pending_copy
+            ),
+            drain_callback=_drain_expression_copy,
+            safety_wake_seconds=float(
+                getattr(new_config.scheduler, "refresh_check_interval_seconds", 60)
+            ),
+        )
+        new_runtime_controller.expression_copy_coordinator = expression_coordinator
+        set_copy_callback = getattr(
+            new_recommendation_engine, "set_copy_pending_callback", None
+        )
+        if callable(set_copy_callback):
+            set_copy_callback(expression_coordinator.notify)
 
         candidate_eval_workers = effective_candidate_eval_workers(
             int(getattr(discovery_cfg, "candidate_eval_concurrency", 3)),
@@ -979,6 +1003,9 @@ class RuntimeContext:
             batch_size=30,
             supply_callback=_request_candidate_supply,
             post_commit_callback=_precompute_committed_candidates,
+            on_admitted=lambda count: expression_coordinator.notify(
+                f"candidate_admitted:{count}"
+            ),
             work_allowed=lambda: (
                 new_runtime_controller._is_initialized()  # noqa: SLF001
                 and new_runtime_controller._llm_work_allowed()  # noqa: SLF001
@@ -1178,13 +1205,32 @@ class RuntimeContext:
                 # freshly-built engine so pool-fill resumes immediately.
                 # precompute_pool_copy spawns classify + delight detached
                 # internally, so one call restarts the whole trio.
-                precompute = getattr(self.recommendation_engine, "precompute_pool_copy", None)
-                if callable(precompute):
+                classify = getattr(self.recommendation_engine, "classify_pool_backlog", None)
+                delight = getattr(self.recommendation_engine, "precompute_delight_scores", None)
+                if callable(classify):
                     self.task_registry.track(
-                        "post_reload_precompute_pool_copy",
-                        self._safe_post_reload_precompute(precompute, profile),
+                        "post_reload_classify_pool_backlog",
+                        classify(profile=profile, limit=60),
                     )
-                    logger.debug("post-reload classify/copy drain scheduled as background task")
+                if callable(delight):
+                    self.task_registry.track(
+                        "post_reload_precompute_delight_scores",
+                        delight(profile=profile, limit=30),
+                    )
+                coordinator = getattr(
+                    self.runtime_controller, "expression_copy_coordinator", None
+                )
+                if coordinator is not None:
+                    coordinator.notify("hot_reload")
+                else:
+                    precompute = getattr(
+                        self.recommendation_engine, "precompute_pool_copy", None
+                    )
+                    if callable(precompute):
+                        self.task_registry.track(
+                            "post_reload_precompute_pool_copy",
+                            self._safe_post_reload_precompute(precompute, profile),
+                        )
             except Exception:
                 pass  # Profile not initialized yet — skip silently
 

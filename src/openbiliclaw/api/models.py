@@ -192,6 +192,11 @@ class RuntimeStatusResponse(BaseModel):
     candidate_eval_last_batch_seconds: float = 0.0
     candidate_eval_last_cached: int = 0
     candidate_eval_last_rejected: int = 0
+    expression_pending_count: int = 0
+    expression_batch_state: str = "idle"
+    expression_batch_deadline: float = 0.0
+    expression_last_completed: int = 0
+    expression_last_error: str = ""
     llm_total_concurrency: int = 0
     llm_background_concurrency: int = 0
     llm_total_active: int = 0

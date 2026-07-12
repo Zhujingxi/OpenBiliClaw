@@ -581,6 +581,7 @@ interactive ──────────────────────�
 background ─ background admission (default 3) ──────┘
              ├─ refill: expression > evaluation > supply
              │  └─ while queued: guarantee 2, may borrow all 3
+             │     expression owner: 8 immediate / 3s fixed tail / 60 drain / 30×2 provider
              └─ maintenance: at most 1 while refill waits;
                 parked when canonical available = 0
 ```

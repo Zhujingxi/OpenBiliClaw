@@ -1,5 +1,7 @@
 # 集成适配层
 
+API 与 OpenClaw composition root 都为每个 runtime generation 构造且只构造一个 `ExpressionCopyCoordinator`，同一对象连接候选 admission、推荐分类 callback 与 controller 生命周期。热重载先停止旧 generation，再替换 coordinator / gate 身份；旧 callback 不能唤醒新 owner。
+
 > OpenClaw bootstrap 每个 runtime 只拥有一个 LLM gate，主服务、Soul 与 refresh 按对象身份共享；gate 在任何 provider 调用前从 canonical database available 初始化，candidate snapshot 与 controller readiness 持续同步 refill admission；发现评估并发不再硬编码。
 
 > 面向外部系统的薄适配层，负责把 OpenBiliClaw 现有学习与推荐能力整理成稳定的 integration 接口。
