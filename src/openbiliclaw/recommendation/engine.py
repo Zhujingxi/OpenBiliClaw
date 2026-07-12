@@ -18,9 +18,9 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from openbiliclaw.discovery.style_keys import VALID_STYLE_KEYS, normalize_style_key
+from openbiliclaw.llm.base import classify_llm_failure_kind
 from openbiliclaw.llm.json_utils import extract_llm_json_list, extract_llm_json_object
 from openbiliclaw.llm.prompt_cache import PromptLayerRenderCache, profile_prompt_layers
-from openbiliclaw.llm.service import is_llm_rate_limit_error
 from openbiliclaw.llm.task_options import without_core_memory_kwargs
 from openbiliclaw.soul.tone import ToneProfile, build_tone_profile
 
@@ -37,6 +37,23 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 _DEFAULT_EXPRESSION_BATCH_SIZE = 30
 _DEFAULT_EXPRESSION_BATCH_CONCURRENCY = 2
+
+
+@dataclass
+class ExpressionBatchMalformed(Exception):  # noqa: N818 - specified domain interface
+    """A successful provider response omitted or malformed batch members."""
+
+    missing_items: tuple[DiscoveredContent, ...]
+    completed: int = 0
+
+
+@dataclass
+class ExpressionCopyTransientError(Exception):
+    """A retryable provider failure; coordinators decide when to retry."""
+
+    kind: str
+    completed: int = 0
+    retry_after: float = 0.0
 
 
 def _interests_by_weight(profile: SoulProfile) -> list[InterestTag]:
@@ -98,6 +115,7 @@ def _batch_results_by_content_key(
         valid_keys.update(_content_result_keys(content))
 
     matched: dict[str, dict[str, Any]] = {}
+    duplicated_keys: set[str] = set()
     saw_identifier = False
     for item in payload:
         raw_key = str(item.get("bvid") or item.get("content_id") or "").strip()
@@ -105,6 +123,12 @@ def _batch_results_by_content_key(
             continue
         saw_identifier = True
         if raw_key not in valid_keys:
+            continue
+        if raw_key in duplicated_keys:
+            continue
+        if raw_key in matched:
+            matched.pop(raw_key, None)
+            duplicated_keys.add(raw_key)
             continue
         matched[raw_key] = item
 
@@ -994,9 +1018,7 @@ class RecommendationEngine:
             batch_size=_DEFAULT_EXPRESSION_BATCH_SIZE,
         )
 
-    def set_copy_pending_callback(
-        self, callback: Callable[[str], None] | None
-    ) -> None:
+    def set_copy_pending_callback(self, callback: Callable[[str], None] | None) -> None:
         """Register the runtime generation's non-blocking copy notifier."""
 
         self._copy_pending_callback = callback
@@ -1458,8 +1480,8 @@ class RecommendationEngine:
             source_platform=batch[0].source_platform if batch else "bilibili",
         )
 
+        complete_structured = self._llm.complete_structured_task
         try:
-            complete_structured = self._llm.complete_structured_task
             response = await complete_structured(
                 system_instruction=messages[0]["content"],
                 user_input=messages[1]["content"],
@@ -1472,34 +1494,20 @@ class RecommendationEngine:
                 caller="recommendation.write_expression",
                 **without_core_memory_kwargs(complete_structured),
             )
-            payload = extract_llm_json_list(
-                str(response.content),
-                wrapper_keys=("results", "items", "expressions", "data"),
-                allow_singleton=True,
-                item_predicate=lambda item: "expression" in item or "topic_label" in item,
-            )
-            if payload is None:
-                raise ValueError("Expected expression JSON array or compatible wrapper.")
         except Exception as exc:
-            if is_llm_rate_limit_error(exc):
-                logger.warning(
-                    "Batch expression generation skipped single-item fallback for %d items "
-                    "because the LLM provider is rate-limited or cooling down: %s",
-                    len(batch),
-                    exc,
-                )
-                return 0
-            if not fallback_to_single:
-                logger.warning(
-                    "Batch expression generation failed for %d items; will split retry",
-                    len(batch),
-                )
-                raise
-            logger.warning(
-                "Batch expression generation failed for %d items, falling back to single",
-                len(batch),
-            )
-            return await self._precompute_single_fallback(batch, profile)
+            kind = classify_llm_failure_kind(exc)
+            if kind in {"rate_limited", "timeout", "connection", "server_error"}:
+                raise ExpressionCopyTransientError(kind=kind) from exc
+            raise
+
+        payload = extract_llm_json_list(
+            str(response.content),
+            wrapper_keys=("results", "items", "expressions", "data"),
+            allow_singleton=True,
+            item_predicate=lambda item: "expression" in item or "topic_label" in item,
+        )
+        if payload is None:
+            raise ExpressionBatchMalformed(tuple(batch))
 
         payload_by_id = _batch_results_by_content_key(payload, batch)
         if payload_by_id is None and len(batch) > 1:
@@ -1514,22 +1522,7 @@ class RecommendationEngine:
             # instead — each single call carries exactly one content item and
             # cannot be misaligned. (A 1-item batch has no ordering ambiguity,
             # so positional matching below stays safe for it.)
-            if not fallback_to_single:
-                logger.warning(
-                    "Batch expression response carried no bvid/content_id for %d "
-                    "items; positional matching is unreliable, will split retry",
-                    len(batch),
-                )
-                raise ValueError(
-                    f"Batch expression response carried no bvid/content_id for {len(batch)} items"
-                )
-            logger.warning(
-                "Batch expression response carried no bvid/content_id for %d "
-                "items; positional matching is unreliable, falling back to "
-                "single generation",
-                len(batch),
-            )
-            return await self._precompute_single_fallback(batch, profile)
+            raise ExpressionBatchMalformed(tuple(batch))
 
         # Gather candidates first (keyed match, or positional for a lone item
         # where order is unambiguous) so we can reject a degenerate batch that
@@ -1565,15 +1558,6 @@ class RecommendationEngine:
             expression for expression, bvids in bvids_by_expression.items() if len(bvids) > 1
         }
         if duplicated:
-            if not fallback_to_single and len(batch) > 1:
-                logger.warning(
-                    "Batch expression produced %d expression(s) shared across "
-                    "distinct videos (model likely repeating itself); will split retry",
-                    len(duplicated),
-                )
-                raise ValueError(
-                    f"Batch expression produced duplicate expressions for {len(batch)} items"
-                )
             logger.warning(
                 "Batch expression produced %d expression(s) shared across "
                 "distinct videos (model likely repeating itself); dropping them",
@@ -1592,12 +1576,20 @@ class RecommendationEngine:
             item.pool_expression = expression
             item.pool_topic_label = topic_label
             completed += 1
+        completed_keys = {
+            item.bvid for item, expression, _ in gathered if expression not in duplicated
+        }
+        missing_items = tuple(item for item in batch if item.bvid not in completed_keys)
+        if missing_items:
+            raise ExpressionBatchMalformed(missing_items, completed)
         return completed
 
     async def _precompute_batch_with_split_retry(
         self,
         batch: list[DiscoveredContent],
         profile: SoulProfile,
+        max_split_depth: int = 3,
+        max_extra_requests: int = 6,
     ) -> int:
         """Try a batch, split failed large batches, then fall back to singles.
 
@@ -1605,23 +1597,31 @@ class RecommendationEngine:
         create nested tasks, so ``expression_batch_concurrency`` remains the
         single concurrency control point.
         """
-        if len(batch) <= 1:
-            return await self._precompute_batch(batch, profile, fallback_to_single=True)
-        try:
-            return await self._precompute_batch(batch, profile, fallback_to_single=False)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            midpoint = max(1, len(batch) // 2)
-            logger.warning(
-                "Expression batch split retry: size=%d -> %d/%d",
-                len(batch),
-                midpoint,
-                len(batch) - midpoint,
-            )
-            left = await self._precompute_batch_with_split_retry(batch[:midpoint], profile)
-            right = await self._precompute_batch_with_split_retry(batch[midpoint:], profile)
-            return left + right
+        budget = {"remaining": max(0, int(max_extra_requests))}
+
+        async def run(items: list[DiscoveredContent], depth: int) -> int:
+            try:
+                return await self._precompute_batch(items, profile, fallback_to_single=False)
+            except ExpressionBatchMalformed as exc:
+                completed = exc.completed
+                missing = list(exc.missing_items)
+                if len(missing) <= 1 or depth >= max_split_depth or budget["remaining"] <= 0:
+                    return completed
+                subsets: tuple[list[DiscoveredContent], ...]
+                if completed > 0:
+                    subsets = (missing,)
+                else:
+                    midpoint = max(1, len(missing) // 2)
+                    subsets = (missing[:midpoint], missing[midpoint:])
+                total = completed
+                for subset in subsets:
+                    if not subset or budget["remaining"] <= 0:
+                        break
+                    budget["remaining"] -= 1
+                    total += await run(subset, depth + 1)
+                return total
+
+        return await run(batch, 0)
 
     async def _precompute_single_fallback(
         self,

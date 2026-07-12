@@ -2413,6 +2413,42 @@ async def test_evaluate_batch_matches_results_by_bvid_when_response_reorders() -
 
 
 @pytest.mark.asyncio
+async def test_evaluate_batch_retries_only_missing_keyed_members() -> None:
+    class _PartialLLM:
+        def __init__(self) -> None:
+            self.request_ids: list[tuple[str, ...]] = []
+
+        async def complete_structured_task(self, *, user_input: str, **kwargs: object) -> object:
+            raw = user_input.split("<content_batch>", 1)[1].split("</content_batch>", 1)[0]
+            items = json.loads(raw.strip())
+            ids = tuple(str(item["bvid"]) for item in items)
+            self.request_ids.append(ids)
+            returned = ids[:2] if len(self.request_ids) == 1 else ids
+            return _SlowResponse(
+                json.dumps(
+                    [
+                        {
+                            "bvid": content_id,
+                            "score": 0.8,
+                            "reason": f"ok {content_id}",
+                            "style_key": "deep_dive",
+                        }
+                        for content_id in returned
+                    ]
+                )
+            )
+
+    llm = _PartialLLM()
+    engine = ContentDiscoveryEngine(llm_service=llm)
+    batch = [
+        DiscoveredContent(bvid=key, title=key, source_strategy="trending")
+        for key in ("A", "B", "C", "D")
+    ]
+    assert await engine._evaluate_batch(batch, _build_profile()) == [0.8] * 4
+    assert llm.request_ids == [("A", "B", "C", "D"), ("C", "D")]
+
+
+@pytest.mark.asyncio
 async def test_evaluate_batch_accepts_newline_delimited_json_objects() -> None:
     """Some providers return one scored JSON object per line instead of an array."""
 

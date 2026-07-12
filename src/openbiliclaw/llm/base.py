@@ -86,6 +86,23 @@ _LLM_QUOTA_MARKERS = (
 )
 
 _LLM_TIMEOUT_MARKERS = ("timeout", "timed out", "deadline exceeded")
+_LLM_CONNECTION_MARKERS = (
+    "connection reset",
+    "connection refused",
+    "network is unreachable",
+    "name resolution",
+    "temporary failure in name resolution",
+)
+_LLM_SERVER_ERROR_MARKERS = (
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "status 500",
+    "status 502",
+    "status 503",
+    "status 504",
+)
 _LLM_INVALID_RESPONSE_MARKERS = (
     "empty response",
     "empty completion",
@@ -107,7 +124,7 @@ def classify_llm_failure_kind(exc: BaseException) -> str | None:
     seen: set[int] = set()
     current: BaseException | None = exc
     rate_limited = no_provider = auth_failed = False
-    timed_out = invalid_response = False
+    timed_out = invalid_response = connection = server_error = False
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         message = str(current).lower()
@@ -125,6 +142,12 @@ def classify_llm_failure_kind(exc: BaseException) -> str | None:
             marker in message for marker in _LLM_TIMEOUT_MARKERS
         ):
             timed_out = True
+        if isinstance(current, (ConnectionError, OSError)) or any(
+            marker in message for marker in _LLM_CONNECTION_MARKERS
+        ):
+            connection = True
+        if any(marker in message for marker in _LLM_SERVER_ERROR_MARKERS):
+            server_error = True
         if isinstance(current, LLMResponseError) or any(
             marker in message for marker in _LLM_INVALID_RESPONSE_MARKERS
         ):
@@ -138,6 +161,10 @@ def classify_llm_failure_kind(exc: BaseException) -> str | None:
         return "auth_failed"
     if timed_out:
         return "timeout"
+    if connection:
+        return "connection"
+    if server_error:
+        return "server_error"
     if invalid_response:
         return "invalid_response"
     return None

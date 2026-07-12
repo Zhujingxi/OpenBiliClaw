@@ -507,3 +507,4 @@ report: PoolHealthReport = curator.check_pool_health()
 19. **legacy 分类也要消费负反馈样本**：正常来源候选会先进入 `discovery_candidates` 统一评估；如果旧行、人工导入或异常恢复让内容已经在 `content_cache` 里但缺 `style_key/topic_group/relevance_score`，这条补评估路径也必须和 discovery batch evaluator 一样读取 `negative_examples`
 20. **分类先于推荐文案**：`precompute_pool_copy` 只处理 `style_key/topic_group` 已补齐的候选。未分类内容应先走 `classify_pool_backlog`，否则文案、topic label 与后续多样性/负反馈口径可能不一致。
 21. **新确认兴趣只应被轻推，不应刷屏**：探针确认是用户给出的方向许可，不是 24h 内把同一方向塞满推荐流的理由；滚动预算与同批硬上限必须同时存在，前者降低排序冲动，后者防止最终回填阶段破坏体验。
+22. **文案 malformed 只追缺项且严格有界**：成功响应中的唯一 keyed 文案立即落库，缺失/重复成员共用 depth=3、最多六次额外 provider 请求的预算；永久 malformed singleton 保持 copy-pending，不再递归调用单条表达。provider transient 原样交给 coordinator，按 15/30/60/120/300 秒退避。

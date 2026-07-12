@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _RATE_LIMIT_BACKOFF_SECONDS = (15.0, 30.0, 60.0, 120.0, 300.0)
-_TRANSIENT_BACKOFF_SECONDS = (5.0, 15.0, 30.0, 60.0)
+_TRANSIENT_BACKOFF_SECONDS = (15.0, 30.0, 60.0, 120.0, 300.0)
 _NO_PROGRESS_BACKOFF_SECONDS = (60.0, 120.0, 300.0)
 
 
@@ -305,6 +305,9 @@ class CandidateEvalCoordinator:
             return
         if kind in {"no_provider", "auth_failed"}:
             self._paused = True
+            return
+        if kind not in {"timeout", "connection", "server_error"}:
+            logger.warning("candidate evaluation worker failed: %s", exc)
             return
         delay = _TRANSIENT_BACKOFF_SECONDS[
             min(self._transient_streak, len(_TRANSIENT_BACKOFF_SECONDS) - 1)

@@ -7,6 +7,10 @@ import inspect
 import time
 from typing import Any
 
+from openbiliclaw.llm.base import classify_llm_failure_kind
+
+_TRANSIENT_BACKOFF_SECONDS = (15.0, 30.0, 60.0, 120.0, 300.0)
+
 
 class ExpressionCopyCoordinator:
     """Drain durable expression-copy work at an 8-item/3-second cadence."""
@@ -29,9 +33,7 @@ class ExpressionCopyCoordinator:
         self.min_items = max(1, int(min_items))
         self.max_wait_seconds = max(0.0, float(max_wait_seconds))
         self.drain_limit = max(1, min(60, int(drain_limit)))
-        self.zero_progress_backoff_seconds = max(
-            0.0, float(zero_progress_backoff_seconds)
-        )
+        self.zero_progress_backoff_seconds = max(0.0, float(zero_progress_backoff_seconds))
         self.safety_wake_seconds = max(0.01, float(safety_wake_seconds))
         self.time_fn = time_fn
         self.wait_fn = wait_fn
@@ -48,12 +50,20 @@ class ExpressionCopyCoordinator:
         self._copy_task: asyncio.Task[int] | None = None
         self._running = False
         self._stopping = False
+        self._transient_streak = 0
+        self._paused = False
 
     def notify(self, reason: str) -> None:
         """Accelerate a durable recheck without running copy inline."""
 
         if self._stopping:
             return
+        if self._paused and (
+            str(reason).startswith("config_")
+            or str(reason).startswith("manual_")
+            or reason == "startup"
+        ):
+            self._paused = False
         self._generation += 1
         self.last_wake_reason = str(reason)
         if self._first_pending_at is None:
@@ -124,6 +134,9 @@ class ExpressionCopyCoordinator:
             self._first_pending_at = None
             self._deadline = 0.0
             self.state = "idle"
+        elif self._paused:
+            self._deadline = now + self.safety_wake_seconds
+            self.state = "paused"
         elif self._retry_not_before > now:
             self._deadline = self._retry_not_before
             self.state = "backoff"
@@ -147,6 +160,7 @@ class ExpressionCopyCoordinator:
         self._copy_task = None
         if task is None:
             return
+        failure_kind: str | None = None
         try:
             completed = task.result()
         except asyncio.CancelledError:
@@ -154,13 +168,32 @@ class ExpressionCopyCoordinator:
         except Exception as exc:
             self.last_error = str(exc)
             completed = 0
+            kind = getattr(exc, "kind", None) or classify_llm_failure_kind(exc)
+            failure_kind = kind
+            now = float(self.time_fn())
+            if kind in {"no_provider", "auth_failed"}:
+                self._paused = True
+            elif kind in {"rate_limited", "timeout", "connection", "server_error"}:
+                delay = _TRANSIENT_BACKOFF_SECONDS[
+                    min(self._transient_streak, len(_TRANSIENT_BACKOFF_SECONDS) - 1)
+                ]
+                self._transient_streak += 1
+                retry_after = max(0.0, float(getattr(exc, "retry_after", 0.0) or 0.0))
+                self._retry_not_before = now + max(delay, retry_after)
         else:
             self.last_error = ""
+            self._transient_streak = 0
         self.last_completed = completed
         now = float(self.time_fn())
         pending = self._pending_count()
         if completed <= 0 and pending > 0:
-            self._retry_not_before = now + self.zero_progress_backoff_seconds
+            if failure_kind not in {
+                "rate_limited",
+                "timeout",
+                "connection",
+                "server_error",
+            }:
+                self._retry_not_before = now + self.zero_progress_backoff_seconds
             self._first_pending_at = None
         else:
             self._retry_not_before = 0.0

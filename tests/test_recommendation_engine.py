@@ -17,6 +17,8 @@ from openbiliclaw.discovery.engine import DiscoveredContent
 from openbiliclaw.llm.base import LLMResponse
 from openbiliclaw.llm.service import LLMProviderExecutionError
 from openbiliclaw.recommendation.engine import (
+    ExpressionBatchMalformed,
+    ExpressionCopyTransientError,
     RecommendationEngine,
     _recommendation_profile_summary,
 )
@@ -2835,15 +2837,11 @@ async def test_public_expression_drain_caps_sixty_then_processes_tail() -> None:
         llm = _RecordingLLM()
         engine = RecommendationEngine(llm=llm, database=db)
 
-        assert await engine.drain_pending_expression_copy(
-            profile=_build_profile(), limit=75
-        ) == 60
+        assert await engine.drain_pending_expression_copy(profile=_build_profile(), limit=75) == 60
         assert sorted(llm.batch_sizes) == [30, 30]
         assert llm.max_active == 2
         llm.batch_sizes.clear()
-        assert await engine.drain_pending_expression_copy(
-            profile=_build_profile(), limit=60
-        ) == 15
+        assert await engine.drain_pending_expression_copy(profile=_build_profile(), limit=60) == 15
         assert llm.batch_sizes == [15]
 
 
@@ -2924,6 +2922,50 @@ async def test_drain_expression_copy_splits_failed_batch_before_single_fallback(
 
 
 @pytest.mark.asyncio
+async def test_expression_malformed_retry_is_bounded_to_seven_batch_calls() -> None:
+    class _MalformedLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured_task(self, **kwargs: object) -> LLMResponse:
+            self.calls += 1
+            return LLMResponse(content="not json", provider="test", model="dummy", usage={})
+
+    items = [DiscoveredContent(bvid=f"BV_BOUND_{i}", title=str(i)) for i in range(8)]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, items, precomputed=False)
+        llm = _MalformedLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+        assert await engine._precompute_batch_with_split_retry(items, _build_profile()) == 0
+    assert llm.calls == 7
+
+
+@pytest.mark.asyncio
+async def test_expression_malformed_singleton_stays_pending_without_single_fallback() -> None:
+    class _MalformedLLM:
+        def __init__(self) -> None:
+            self.callers: list[str] = []
+
+        async def complete_structured_task(self, **kwargs: object) -> LLMResponse:
+            self.callers.append(str(kwargs.get("caller", "")))
+            return LLMResponse(content="not json", provider="test", model="dummy", usage={})
+
+    item = DiscoveredContent(bvid="BV_SINGLE_PENDING", title="pending")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, [item], precomputed=False)
+        llm = _MalformedLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+        assert await engine._precompute_batch_with_split_retry([item], _build_profile()) == 0
+        row = next(row for row in db.get_cached_content(limit=10) if row["bvid"] == item.bvid)
+    assert llm.callers == ["recommendation.write_expression"]
+    assert row["pool_expression"] == ""
+
+
+@pytest.mark.asyncio
 async def test_precompute_batch_skips_single_fallback_during_provider_cooldown() -> None:
     class _CooldownExpressionLLM:
         def __init__(self) -> None:
@@ -2958,9 +3000,10 @@ async def test_precompute_batch_skips_single_fallback_during_provider_cooldown()
         _seed_pool(db, items, precomputed=False)
         engine = RecommendationEngine(llm=llm, database=db)
 
-        completed = await engine._precompute_batch(items, _build_profile())
+        with pytest.raises(ExpressionCopyTransientError) as exc_info:
+            await engine._precompute_batch_with_split_retry(items, _build_profile())
 
-    assert completed == 0
+    assert exc_info.value.kind == "rate_limited"
     assert llm.calls == 1
 
 
@@ -3010,17 +3053,19 @@ async def test_precompute_batch_matches_expressions_by_bvid_when_response_reorde
         _seed_pool(db, items, precomputed=False)
         engine = RecommendationEngine(llm=_ReorderedExpressionLLM(), database=db)
 
-        completed = await engine._precompute_batch(items, _build_profile())
+        with pytest.raises(ExpressionBatchMalformed) as exc_info:
+            await engine._precompute_batch(items, _build_profile())
 
         rows = {row["bvid"]: dict(row) for row in db.get_cached_content(limit=10)}
-        assert completed == 2
+        assert exc_info.value.completed == 2
+        assert [item.bvid for item in exc_info.value.missing_items] == ["BV_EXPR_A"]
         assert rows["BV_EXPR_A"]["pool_expression"] == ""
         assert rows["BV_EXPR_B"]["pool_expression"] == "B 视频自己的推荐文案。"
         assert rows["BV_EXPR_C"]["pool_expression"] == "C 视频自己的推荐文案。"
 
 
 @pytest.mark.asyncio
-async def test_precompute_batch_falls_back_to_single_when_multi_item_response_lacks_ids(
+async def test_precompute_batch_keeps_no_id_multi_item_response_pending(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Multi-item batch with no bvid/content_id must not be matched positionally.
@@ -3076,20 +3121,15 @@ async def test_precompute_batch_falls_back_to_single_when_multi_item_response_la
         engine = RecommendationEngine(llm=llm, database=db)
 
         caplog.set_level(logging.WARNING)
-        completed = await engine._precompute_batch(items, _build_profile())
+        with pytest.raises(ExpressionBatchMalformed):
+            await engine._precompute_batch(items, _build_profile())
 
         # One batch attempt, then one single regeneration per item.
-        assert llm.callers == [
-            "recommendation.write_expression",
-            "recommendation.expression",
-            "recommendation.expression",
-        ]
-        assert completed == 2
-        assert "positional matching is unreliable" in caplog.text
+        assert llm.callers == ["recommendation.write_expression"]
         rows = {row["bvid"]: dict(row) for row in db.get_cached_content(limit=10)}
         # Each row got copy via the keyed single path — never positional batch.
-        assert rows["BV_NOID_A"]["pool_expression"].startswith("单条重写")
-        assert rows["BV_NOID_B"]["pool_expression"].startswith("单条重写")
+        assert rows["BV_NOID_A"]["pool_expression"] == ""
+        assert rows["BV_NOID_B"]["pool_expression"] == ""
 
 
 @pytest.mark.asyncio
@@ -3143,11 +3183,12 @@ async def test_precompute_batch_drops_expression_shared_across_distinct_videos(
         engine = RecommendationEngine(llm=_DuplicateExpressionLLM(), database=db)
 
         caplog.set_level(logging.WARNING)
-        completed = await engine._precompute_batch(items, _build_profile())
+        with pytest.raises(ExpressionBatchMalformed) as exc_info:
+            await engine._precompute_batch(items, _build_profile())
 
         rows = {row["bvid"]: dict(row) for row in db.get_cached_content(limit=10)}
         # Only the unique copy survives; the shared sentence is dropped for both.
-        assert completed == 1
+        assert exc_info.value.completed == 1
         assert rows["BV_DUP_A"]["pool_expression"] == ""
         assert rows["BV_DUP_B"]["pool_expression"] == ""
         assert rows["BV_DUP_C"]["pool_expression"] == "C 独有的文案。"

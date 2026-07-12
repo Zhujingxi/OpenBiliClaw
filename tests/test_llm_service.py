@@ -172,7 +172,10 @@ def test_classify_llm_unavailability_rate_limit_wins_over_no_provider() -> None:
     ("error", "expected"),
     [
         (LLMProviderError("HTTP 401 unauthorized: invalid api key"), "auth_failed"),
+        (ConnectionError("connection reset by peer"), "connection"),
+        (OSError("network is unreachable"), "connection"),
         (LLMTimeoutError("request timed out"), "timeout"),
+        (LLMProviderExecutionError("upstream returned HTTP 503"), "server_error"),
         (LLMResponseError("empty completion"), "invalid_response"),
         (ValueError("unrelated local failure"), None),
     ],
@@ -189,6 +192,15 @@ def test_classify_llm_failure_kind_walks_wrapped_chain() -> None:
             raise LLMFallbackError("all providers failed") from inner
     except LLMFallbackError as wrapped:
         assert classify_llm_failure_kind(wrapped) == "timeout"
+
+
+def test_classify_llm_failure_kind_preserves_auth_precedence_over_wrapper_text() -> None:
+    try:
+        raise LLMProviderError("HTTP 401 unauthorized: invalid api key")
+    except LLMProviderError as inner:
+        wrapped = LLMProviderExecutionError("connection reset while reporting failure")
+        wrapped.__cause__ = inner
+    assert classify_llm_failure_kind(wrapped) == "auth_failed"
 
 
 def test_describe_llm_failure_content_moderation_500() -> None:

@@ -27,7 +27,6 @@ from openbiliclaw.llm.prompt_cache import (
     profile_prompt_layers,
     stable_json_digest,
 )
-from openbiliclaw.llm.service import is_llm_rate_limit_error
 from openbiliclaw.llm.task_options import without_core_memory_kwargs
 from openbiliclaw.sources.platforms import normalize_source_platform
 
@@ -1638,14 +1637,14 @@ class ContentDiscoveryEngine:
             f"profile:{profile_digest}:neg:{negative_digest}"
         )
 
-    async def _evaluate_batch(
+    async def _evaluate_batch_once(
         self,
         batch: list[DiscoveredContent],
         profile: SoulProfile,
         *,
         source_context: str = "",
         negative_examples: object = _NEGATIVE_EXAMPLES_UNSET,
-    ) -> list[float]:
+    ) -> list[float | None]:
         """Send one LLM call for a batch of items."""
         from openbiliclaw.discovery.candidate_pool import resolve_content_type
         from openbiliclaw.llm.prompts import build_batch_content_evaluation_prompt
@@ -1763,40 +1762,26 @@ class ContentDiscoveryEngine:
                     # 16384 max_tokens is plenty for the 1500-3000 token
                     # output a 30-item JSON array now needs.
                     "max_tokens": 16384,
-                    "reasoning_effort": "",
                     "caller": "discovery.evaluate_batch",
                 }
+                from openbiliclaw.llm.task_options import call_accepts_keyword
+
                 complete_structured = self._llm_service.complete_structured_task
+                if call_accepts_keyword(complete_structured, "reasoning_effort"):
+                    kwargs["reasoning_effort"] = ""
                 kwargs.update(without_core_memory_kwargs(complete_structured))
                 llm_call = complete_structured(**kwargs)
             if self._concurrency is not None:
                 response = await self._concurrency.run_llm(llm_call)
             else:
                 response = await llm_call
-            raw = str(getattr(response, "content", "")).strip()
-            payload = _parse_batch_evaluation_payload(raw)
-            if payload is None:
-                raise ValueError("Expected scored JSON array from batch evaluation")
-        except Exception as exc:
-            if is_llm_rate_limit_error(exc):
-                logger.warning(
-                    "Batch evaluation is rate-limited for %d items; "
-                    "propagating transient failure so callers can retry later: %s",
-                    len(batch),
-                    exc,
-                )
-                raise
-            logger.warning(
-                "Batch evaluation failed for %d items (%s: %s), falling back to single eval",
-                len(batch),
-                type(exc).__name__,
-                exc,
-            )
-            # Fallback: evaluate individually
-            return [
-                await self.evaluate_content(c, profile, source_context=source_context)
-                for c in batch
-            ]
+        except Exception:
+            raise
+
+        raw = str(getattr(response, "content", "")).strip()
+        payload = _parse_batch_evaluation_payload(raw)
+        if payload is None:
+            return [None] * len(batch)
 
         payload_by_id = _batch_results_by_content_key(payload, batch)
         if payload_by_id is None and len(payload) != len(batch):
@@ -1806,12 +1791,9 @@ class ContentDiscoveryEngine:
                 len(payload),
                 len(batch),
             )
-            return [
-                await self.evaluate_content(c, profile, source_context=source_context)
-                for c in batch
-            ]
+            return [None] * len(batch)
 
-        results: list[float] = []
+        results: list[float | None] = []
         for i, content in enumerate(batch):
             if payload_by_id is None:
                 raw_item = payload[i] if i < len(payload) else None
@@ -1825,10 +1807,10 @@ class ContentDiscoveryEngine:
                     None,
                 )
             if raw_item is None:
-                results.append(0.0)
+                results.append(None)
                 continue
             if not isinstance(raw_item, dict):
-                results.append(0.0)
+                results.append(None)
                 continue
             item_result: dict[str, Any] = raw_item
             score = self._clamp_score(item_result.get("score", 0.0))
@@ -1872,7 +1854,8 @@ class ContentDiscoveryEngine:
         if cap > 0 and batch:
             buckets: dict[str, list[int]] = {}
             for i, content in enumerate(batch):
-                if i >= len(results) or results[i] <= 0:
+                capped_score = results[i] if i < len(results) else None
+                if capped_score is None or capped_score <= 0:
                     continue
                 key = (content.franchise_key or "").strip().lower()
                 if not key:
@@ -1883,7 +1866,7 @@ class ContentDiscoveryEngine:
                 if len(indices) <= cap:
                     continue
                 # Keep top ``cap`` by score, drop the rest.
-                indices.sort(key=lambda idx: results[idx], reverse=True)
+                indices.sort(key=lambda idx: results[idx] or 0.0, reverse=True)
                 for idx in indices[cap:]:
                     results[idx] = 0.0
                     batch[idx].relevance_score = 0.0
@@ -1908,7 +1891,8 @@ class ContentDiscoveryEngine:
         if style_cap > 0 and batch:
             style_buckets: dict[str, list[int]] = {}
             for i, content in enumerate(batch):
-                if i >= len(results) or results[i] <= 0:
+                capped_score = results[i] if i < len(results) else None
+                if capped_score is None or capped_score <= 0:
                     continue
                 style_key = normalize_style_key(content.style_key)
                 if not style_key:
@@ -1918,7 +1902,7 @@ class ContentDiscoveryEngine:
             for _style_key, indices in style_buckets.items():
                 if len(indices) <= style_cap:
                     continue
-                indices.sort(key=lambda idx: results[idx], reverse=True)
+                indices.sort(key=lambda idx: results[idx] or 0.0, reverse=True)
                 for idx in indices[style_cap:]:
                     results[idx] = 0.0
                     batch[idx].relevance_score = 0.0
@@ -1934,6 +1918,57 @@ class ContentDiscoveryEngine:
                 )
 
         return results
+
+    async def _evaluate_batch(
+        self,
+        batch: list[DiscoveredContent],
+        profile: SoulProfile,
+        *,
+        source_context: str = "",
+        negative_examples: object = _NEGATIVE_EXAMPLES_UNSET,
+        max_split_depth: int = 3,
+        max_extra_requests: int = 6,
+    ) -> list[float]:
+        """Retry only missing members from successful malformed responses."""
+        results: list[float | None] = [None] * len(batch)
+        budget = {"remaining": max(0, int(max_extra_requests))}
+
+        async def run(indices: list[int], depth: int) -> None:
+            subset = [batch[index] for index in indices]
+            subset_results = await self._evaluate_batch_once(
+                subset,
+                profile,
+                source_context=source_context,
+                negative_examples=negative_examples,
+            )
+            missing: list[int] = []
+            for index, score in zip(indices, subset_results, strict=True):
+                results[index] = score
+                if score is None:
+                    missing.append(index)
+            if len(missing) <= 1 or depth >= max_split_depth or budget["remaining"] <= 0:
+                return
+            children: tuple[list[int], ...]
+            if len(missing) < len(indices):
+                children = (missing,)
+            else:
+                midpoint = max(1, len(missing) // 2)
+                children = (missing[:midpoint], missing[midpoint:])
+            for child in children:
+                if not child or budget["remaining"] <= 0:
+                    break
+                budget["remaining"] -= 1
+                await run(child, depth + 1)
+
+        await run(list(range(len(batch))), 0)
+        final: list[float] = []
+        for content, score in zip(batch, results, strict=True):
+            if score is None:
+                content.relevance_reason = "evaluation_response_missing"
+                final.append(0.0)
+            else:
+                final.append(score)
+        return final
 
     @staticmethod
     def _clamp_score(raw_value: object) -> float:

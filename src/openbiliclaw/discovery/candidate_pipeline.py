@@ -708,7 +708,11 @@ class DiscoveryCandidatePipeline:
         claim_token: str | None = None,
     ) -> set[int]:
         evaluations: list[dict[str, Any]] = []
+        unresolved_ids: list[int] = []
         for row, item, score in zip(rows, items, scores, strict=True):
+            if item.relevance_reason == "evaluation_response_missing":
+                unresolved_ids.append(int(row["id"]))
+                continue
             final_score = float(item.relevance_score or score or 0.0)
             status = "evaluated"
             eval_error = ""
@@ -739,7 +743,20 @@ class DiscoveryCandidatePipeline:
             None,
         )
         if claim_token is not None and callable(persist_claimed):
-            return set(persist_claimed(evaluations, claim_token=claim_token))
+            updated_ids = set(persist_claimed(evaluations, claim_token=claim_token))
+            reset_claimed = getattr(
+                self.database, "reset_claimed_discovery_candidates_to_pending", None
+            )
+            if unresolved_ids and callable(reset_claimed):
+                reset_claimed(
+                    unresolved_ids,
+                    claim_token=claim_token,
+                    reason="evaluation_response_missing",
+                    max_attempts=self.max_eval_attempts,
+                    max_batch_attempts=self.max_batch_eval_attempts,
+                    increment_attempts=False,
+                )
+            return updated_ids
         updated = int(self.database.update_discovery_candidate_evaluations(evaluations) or 0)
         if updated == len(evaluations):
             return {int(evaluation["candidate_id"]) for evaluation in evaluations}
