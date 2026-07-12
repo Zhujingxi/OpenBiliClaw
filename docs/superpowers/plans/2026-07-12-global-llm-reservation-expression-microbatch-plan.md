@@ -1,5 +1,10 @@
 # Global LLM Reservation and Expression Microbatch Implementation Plan
 
+> **Superseded:** Do not execute this plan. Use
+> `2026-07-12-inventory-safe-continuous-refill-plan.md`, which adds the confirmed
+> inventory invariant, Zhihu normalization, refill-reserved admission and bounded
+> transient-failure behavior while preserving the same total-4/background-3 goal.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make `llm.concurrency=4` a true runtime-wide limit, reserve one slot from all background LLM work, run three candidate evaluators continuously, and start expression generation at 8 pending items or after a 3-second tail-batch deadline.
