@@ -460,11 +460,11 @@ function renderDelightTray() {
       </div>
     </div>`;
 
-  if (uiState.handled) {
+  if (uiState.show_status) {
     tray.innerHTML += `<div class="delight-result-state" data-tone="${esc(uiState.response_tone)}">${esc(uiState.response_message)}</div>`;
-  } else {
+  }
+  if (uiState.show_actions) {
     // Action buttons
-    const isChatState = d.state === "chatted" || d.state === "chatting";
     const actions = document.createElement("div");
     actions.className = "delight-actions";
     const btns = [
@@ -478,6 +478,7 @@ function renderDelightTray() {
     for (const b of btns) {
       const btn = document.createElement("button");
       btn.className = `btn ${b.action === "view" ? "btn-brand" : "btn-outline"}`;
+      btn.dataset.delightAction = b.action;
       // 稍后再看 = 时钟 / 收藏 = 星星，紧凑 SVG 图标按钮，状态走 aria-pressed。
       if (b.action === "watch-later" || b.action === "favorite") {
         btn.classList.add("delight-save-toggle");
@@ -547,11 +548,12 @@ function renderDelightTray() {
         }).catch(() => {});
       } else {
         btn.addEventListener("click", () => handleDelightAction(d, b.action));
-        if (isChatState && (b.action === "like" || b.action === "reject")) {
-          btn.disabled = true;
+        if (b.action === "like") {
+          btn.setAttribute("aria-pressed", uiState.like_pressed ? "true" : "false");
+          btn.disabled = uiState.like_disabled;
         }
       }
-            actions.appendChild(btn);
+      actions.appendChild(btn);
     }
     tray.appendChild(actions);
   }
@@ -878,7 +880,13 @@ async function handleDelightAction(d, action) {
   if (apiResponse) {
     try {
       await respondToDelight(d.bvid, apiResponse, d.title);
-    } catch { /* best-effort */ }
+    } catch {
+      if (action === "like") {
+        rerenderDelightOnly();
+        return;
+      }
+      /* Other legacy actions remain best-effort. */
+    }
   }
   if (permanent) {
     markDelightSent(d.bvid).catch(() => {});

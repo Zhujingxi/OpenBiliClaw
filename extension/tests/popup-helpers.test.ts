@@ -597,34 +597,144 @@ test("mergeDelightCandidate keeps handled local state for the same bvid and igno
     bvid: "BV1SNOOZED",
     title: "先别出现",
   }, ["BV1SNOOZED"]);
+  const refreshedLiked = mergeDelightCandidate(
+    normalizeDelightCandidate({ bvid: "BV1LIKED", state: "pending" }),
+    { bvid: "BV1LIKED", state: "liked", response_message: "好，这类多来点。" },
+  );
 
   assert.equal(merged.title, "新标题");
   assert.equal(merged.delight_reason, "新理由");
   assert.equal(merged.state, "viewed");
   assert.equal(merged.response_message, "已打开，阿B 会把这次点击当成强信号。");
   assert.equal(ignored, current);
+  assert.equal(refreshedLiked?.state, "liked");
+  assert.equal(refreshedLiked?.response_message, "好，这类多来点。");
 });
 
-test("getDelightUiState keeps handled delight visible with stable copy and highlight state", () => {
-  const uiState = getDelightUiState(
-    normalizeDelightCandidate({
-      bvid: "BV1DELIGHT",
-      title: "这条你会意外喜欢",
-      delight_reason: "它不完全像你最近常看的，但入口很准。",
-      delight_score: 0.88,
-      state: "viewed",
-    }),
+test("getDelightUiState projects status and actions independently for every state", () => {
+  const pending = getDelightUiState({
+    bvid: "BV1DELIGHT",
+    delight_score: 0.88,
+  });
+  assert.deepEqual(pending, {
+    visible: true,
+    highlighted: false,
+    handled: false,
+    show_status: false,
+    show_actions: true,
+    like_pressed: false,
+    like_disabled: false,
+    score_label: "大概率会戳中你",
+    response_tone: "info",
+    response_message: "",
+  });
+
+  const liked = getDelightUiState({
+    bvid: "BV1DELIGHT",
+    delight_score: 0.88,
+    state: "liked",
+  });
+  assert.deepEqual(liked, {
+    visible: true,
+    highlighted: false,
+    handled: false,
+    show_status: true,
+    show_actions: true,
+    like_pressed: true,
+    like_disabled: true,
+    score_label: "大概率会戳中你",
+    response_tone: "success",
+    response_message: "好，这类多来点。",
+  });
+
+  const viewed = getDelightUiState(
+    { bvid: "BV1DELIGHT", delight_score: 0.88, state: "viewed" },
     { highlightBvid: "BV1DELIGHT" },
   );
-
-  assert.deepEqual(uiState, {
+  assert.deepEqual(viewed, {
     visible: true,
     highlighted: true,
     handled: true,
+    show_status: true,
+    show_actions: false,
+    like_pressed: false,
+    like_disabled: true,
     score_label: "大概率会戳中你",
     response_tone: "success",
     response_message: "已打开，阿B 会把这次点击当成强信号。",
   });
+
+  const rejected = getDelightUiState({
+    bvid: "BV1DELIGHT",
+    delight_score: 0.88,
+    state: "rejected",
+  });
+  assert.deepEqual(rejected, {
+    visible: true,
+    highlighted: false,
+    handled: true,
+    show_status: true,
+    show_actions: false,
+    like_pressed: false,
+    like_disabled: true,
+    score_label: "大概率会戳中你",
+    response_tone: "info",
+    response_message: "记下了，这类惊喜先少来点。",
+  });
+
+  const chatted = getDelightUiState({
+    bvid: "BV1DELIGHT",
+    delight_score: 0.88,
+    state: "chatted",
+  });
+  assert.deepEqual(chatted, {
+    visible: true,
+    highlighted: false,
+    handled: false,
+    show_status: true,
+    show_actions: true,
+    like_pressed: false,
+    like_disabled: false,
+    score_label: "大概率会戳中你",
+    response_tone: "info",
+    response_message: "这句已经记下，后面会更会试探。",
+  });
+
+  const chatting = getDelightUiState({
+    bvid: "BV1DELIGHT",
+    delight_score: 0.88,
+    state: "chatting",
+  });
+  assert.equal(chatting.handled, false);
+  assert.equal(chatting.show_status, false);
+  assert.equal(chatting.show_actions, true);
+  assert.equal(chatting.like_pressed, false);
+  assert.equal(chatting.like_disabled, false);
+
+  assert.deepEqual(getDelightUiState({}), {
+    visible: false,
+    highlighted: false,
+    handled: false,
+    show_status: false,
+    show_actions: false,
+    like_pressed: false,
+    like_disabled: false,
+    score_label: "",
+    response_tone: "info",
+    response_message: "",
+  });
+});
+
+test("popup delight renderer synchronizes liked ARIA and duplicate-action state", () => {
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  assert.match(popupJs, /if \(uiState\.show_status\)/);
+  assert.match(popupJs, /if \(uiState\.show_actions\)/);
+  assert.match(
+    popupJs,
+    /likeButton\.setAttribute\("aria-pressed", uiState\.like_pressed \? "true" : "false"\)/,
+  );
+  assert.match(popupJs, /likeButton\.disabled = uiState\.like_disabled/);
 });
 
 test("getPopupState distinguishes offline uninitialized refreshing empty and ready states", () => {

@@ -44,6 +44,19 @@ class MobileWebStub:
             "avoidance.probe": threading.Event(),
         }
         self.response_status = {"interest.probe": 200, "avoidance.probe": 200}
+        self.delight = {
+            "bvid": "BV1DELIGHTLIKED",
+            "content_url": "https://www.bilibili.com/video/BV1DELIGHTLIKED",
+            "source_platform": "bilibili",
+            "title": "会让你意外喜欢的一条",
+            "delight_reason": "它和你最近的兴趣有一条不明显的连接。",
+            "delight_score": 0.9,
+            "state": "pending",
+            "response_message": "",
+        }
+        self.delight_response_status = 200
+        self.delight_posts: list[dict[str, Any]] = []
+        self.delight_post_received = threading.Event()
         self.lock = threading.Lock()
 
     def release(self, probe_type: str, *, status: int) -> None:
@@ -96,6 +109,21 @@ def mobile_web_server() -> tuple[str, MobileWebStub]:
                 return _json_response(self, {"enabled": False, "authenticated": True})
             if path == "/api/health":
                 return _json_response(self, {"ok": True})
+            if path == "/api/recommendations":
+                return _json_response(self, {"items": []})
+            if path == "/api/runtime-status":
+                return _json_response(
+                    self,
+                    {
+                        "initialized": True,
+                        "pool_available_count": 0,
+                        "pool_size": 0,
+                        "pool_refresh_state": "idle",
+                        "unread_count": 2,
+                    },
+                )
+            if path == "/api/activity-feed":
+                return _json_response(self, {"items": [], "has_more": False})
             if path == "/api/notifications/pending":
                 return _json_response(self, {"items": []})
             if path == "/api/interest-probes/pending":
@@ -109,7 +137,9 @@ def mobile_web_server() -> tuple[str, MobileWebStub]:
                     {"items": [state.notifications[1]]},
                 )
             if path == "/api/delight/pending-batch":
-                return _json_response(self, {"items": []})
+                with state.lock:
+                    delight = dict(state.delight)
+                return _json_response(self, {"items": [delight]})
             if path == "/api/chat/turns":
                 return _json_response(self, {"items": []})
             return _json_response(self, {}, 404)
@@ -117,8 +147,20 @@ def mobile_web_server() -> tuple[str, MobileWebStub]:
         def do_POST(self) -> None:  # noqa: N802
             path = self.path.split("?", 1)[0]
             length = int(self.headers.get("Content-Length", "0"))
-            if length:
-                self.rfile.read(length)
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                payload = json.loads(raw.decode("utf-8") or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            if path == "/api/delight/respond":
+                with state.lock:
+                    state.delight_posts.append(payload)
+                    status = state.delight_response_status
+                    if status < 400 and payload.get("response") == "like":
+                        state.delight["state"] = "liked"
+                        state.delight["response_message"] = "好，这类多来点。"
+                state.delight_post_received.set()
+                return _json_response(self, {"ok": status < 400}, status)
             probe_type = {
                 "/api/interest-probes/respond": "interest.probe",
                 "/api/avoidance-probes/respond": "avoidance.probe",
@@ -174,9 +216,18 @@ def chromium_page() -> Page:
               static OPEN = 1;
               constructor() {
                 this.readyState = FakeWebSocket.OPEN;
+                window.__fakeSockets = window.__fakeSockets || [];
+                window.__fakeSockets.push(this);
                 setTimeout(() => this.onopen?.({ type: "open" }), 0);
               }
               close() { this.readyState = 3; }
+            };
+            window.__emitRuntimeEvent = (payload) => {
+              for (const socket of window.__fakeSockets || []) {
+                if (socket.readyState === window.WebSocket.OPEN) {
+                  socket.onmessage?.({ data: JSON.stringify(payload) });
+                }
+              }
             };
             """
         )
@@ -203,6 +254,16 @@ def _assert_all_probe_actions_disabled(card: Any, disabled: bool) -> None:
             expect(buttons.nth(index)).to_be_disabled()
         else:
             expect(buttons.nth(index)).to_be_enabled()
+
+
+def _assert_liked_delight(page: Page) -> None:
+    like = page.locator('.delight-actions [data-delight-action="like"]')
+    expect(page.locator(".delight-result-state")).to_contain_text("好，这类多来点。")
+    expect(page.locator(".delight-actions")).to_be_visible()
+    expect(like).to_have_attribute("aria-pressed", "true")
+    expect(like).to_be_disabled()
+    for action in ("view", "watch-later", "favorite", "reject", "chat"):
+        expect(page.locator(f'[data-delight-action="{action}"]')).to_be_enabled()
 
 
 @pytest.mark.parametrize(
@@ -272,3 +333,63 @@ def test_mobile_probe_failure_restores_rebuilt_card_for_retry(
     _assert_all_probe_actions_disabled(rebuilt, False)
     assert stub.post_counts[probe_type] == 1
     assert page_errors == []
+
+
+def test_mobile_liked_delight_converges_after_click_reload_and_stream(
+    mobile_web_server: tuple[str, MobileWebStub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = mobile_web_server
+    chromium_page.goto(f"{base_url}/m/#/recommend")
+    like = chromium_page.locator('.delight-actions [data-delight-action="like"]')
+    expect(like).to_have_attribute("aria-pressed", "false")
+    expect(like).to_be_enabled()
+
+    like.click()
+    assert stub.delight_post_received.wait(timeout=2)
+    assert stub.delight_posts == [
+        {
+            "bvid": "BV1DELIGHTLIKED",
+            "response": "like",
+            "title": "会让你意外喜欢的一条",
+            "message": "",
+        }
+    ]
+    _assert_liked_delight(chromium_page)
+
+    chromium_page.reload()
+    _assert_liked_delight(chromium_page)
+
+    with stub.lock:
+        stub.delight["state"] = "pending"
+        stub.delight["response_message"] = ""
+    chromium_page.reload()
+    like = chromium_page.locator('.delight-actions [data-delight-action="like"]')
+    expect(like).to_have_attribute("aria-pressed", "false")
+    expect(like).to_be_enabled()
+    expect(chromium_page.locator(".delight-result-state")).to_have_count(0)
+    chromium_page.wait_for_function("() => (window.__fakeSockets || []).length > 0")
+    chromium_page.evaluate(
+        """() => window.__emitRuntimeEvent({
+          type: "delight.liked",
+          data: { bvid: "BV1DELIGHTLIKED", message: "好，这类多来点。" },
+        })"""
+    )
+    _assert_liked_delight(chromium_page)
+
+
+def test_mobile_failed_like_restores_unselected_actions(
+    mobile_web_server: tuple[str, MobileWebStub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = mobile_web_server
+    stub.delight_response_status = 500
+    chromium_page.goto(f"{base_url}/m/#/recommend")
+    like = chromium_page.locator('.delight-actions [data-delight-action="like"]')
+
+    like.click()
+    assert stub.delight_post_received.wait(timeout=2)
+    expect(like).to_have_attribute("aria-pressed", "false")
+    expect(like).to_be_enabled()
+    expect(chromium_page.locator(".delight-result-state")).to_have_count(0)
+    expect(chromium_page.locator(".delight-actions")).to_be_visible()

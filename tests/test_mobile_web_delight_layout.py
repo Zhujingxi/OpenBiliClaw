@@ -53,11 +53,27 @@ def test_mobile_delight_inline_chat_uses_shared_session_helper() -> None:
     assert 'fetchChatTurns({ session: "mobile"' not in js
 
 
-def test_mobile_delight_actions_stay_hidden_for_permanent_handled_states() -> None:
-    """Viewed/liked/rejected delights should not keep generic action buttons visible."""
+def test_mobile_delight_status_and_actions_render_independently() -> None:
+    """Liked delights retain actions while terminal negative/view states can hide them."""
 
     js = RECOMMEND_JS.read_text()
+    css = APP_CSS.read_text()
 
     assert 'class="delight-result-state"' in js
-    assert "always rendered" not in js
-    assert "} else {\n    // Action buttons" in js
+    assert "if (uiState.show_status)" in js
+    assert "if (uiState.show_actions)" in js
+    assert "btn.dataset.delightAction = b.action" in js
+    assert 'btn.setAttribute("aria-pressed", uiState.like_pressed ? "true" : "false")' in js
+    assert "btn.disabled = uiState.like_disabled" in js
+    assert "isChatState &&" not in js
+
+    root_block = _css_block(css, ":root")
+    liked_block = _css_block(
+        css,
+        '.delight-actions [data-delight-action="like"][aria-pressed="true"]',
+    )
+    assert "--accent: var(--brand)" in root_block
+    assert "--accent-strong: var(--brand-strong)" in root_block
+    assert "border-color: var(--accent)" in liked_block
+    assert "background: color-mix" in liked_block
+    assert "color: var(--accent-strong)" in liked_block

@@ -86,6 +86,8 @@ class Issue98Stub:
         self.probe_posts: list[dict[str, Any]] = []
         self.probe_received = threading.Event()
         self.probe_status = 200
+        self.delight_response_status = 200
+        self.delight_response_received = threading.Event()
 
 
 def _json_response(
@@ -279,6 +281,13 @@ def issue_98_server() -> tuple[str, Issue98Stub]:
                     },
                     state.probe_status,
                 )
+            if path == "/api/delight/respond":
+                state.delight_response_received.set()
+                return _json_response(
+                    self,
+                    {"ok": state.delight_response_status < 400},
+                    state.delight_response_status,
+                )
             return _json_response(self, {"ok": True})
 
         def _serve_file(self, path: Path, content_type: str | None = None) -> None:
@@ -410,6 +419,45 @@ def _delight_geometry(page: Page) -> dict[str, Any]:
 def _assert_delight_fits_available_width(geometry: dict[str, Any]) -> None:
     assert geometry["delightRight"] <= geometry["layoutRight"] + 1
     assert geometry["docScroll"] <= geometry["docClient"] + 1
+
+
+def test_liked_delight_keeps_nonduplicate_desktop_actions_available(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = issue_98_server
+    stub.delights = [
+        {
+            **stub.delights[0],
+            "state": "liked",
+            "response_message": "好，这类多来点。",
+        }
+    ]
+
+    chromium_page.goto(f"{base_url}/web/")
+    expect(chromium_page.locator("#delightCount")).to_have_text("1/1")
+    expect(chromium_page.locator("#delightStatus")).to_contain_text("好，这类多来点。")
+    like = chromium_page.locator('[data-delight="like"]')
+    expect(like).to_have_attribute("aria-pressed", "true")
+    expect(like).to_be_disabled()
+    for action in ("view", "dislike", "dismiss", "watch-later", "favorite", "chat"):
+        expect(chromium_page.locator(f'[data-delight="{action}"]')).to_be_enabled()
+
+
+def test_failed_desktop_delight_like_restores_unselected_action(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = issue_98_server
+    stub.delight_response_status = 500
+    chromium_page.goto(f"{base_url}/web/")
+    like = chromium_page.locator('[data-delight="like"]')
+
+    like.click()
+    assert stub.delight_response_received.wait(timeout=2)
+    expect(like).to_have_attribute("aria-pressed", "false")
+    expect(like).to_be_enabled()
+    expect(chromium_page.locator("#delightStatus")).to_have_text("")
 
 
 def test_side_drawer_aria_and_flex_allocation_stay_synchronized(

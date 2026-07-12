@@ -4500,7 +4500,7 @@
       const feedbackToast = response === "like" ? "惊喜推荐已喜欢" : response === "dislike" ? "这类惊喜先少来点" : "已忽略这条惊喜推荐";
       const toastImmediately = response === "like" || response === "dislike";
       if (toastImmediately) showToast(feedbackToast);
-      await requestJson(ENDPOINTS.delightRespond, {
+      const feedbackResult = await requestJson(ENDPOINTS.delightRespond, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -4510,8 +4510,17 @@
           message: ""
         })
       });
+      if (response === "like" && feedbackResult == null) {
+        showToast("这次喜欢还没记上，可以再试一次");
+        setActiveDelight(state.delightIndex);
+        return;
+      }
       if (response === "like") {
-        updateDelightState(delight.bvid, { response_message: "好，这类多来点。" });
+        updateDelightState(delight.bvid, {
+          state: "liked",
+          response_message: "好，这类多来点。",
+        });
+        setActiveDelight(state.delightIndex);
       }
       if (response === "dislike" || response === "dismiss") {
         state.delights = state.delights.filter((item) => item.bvid !== delight.bvid);
@@ -5706,6 +5715,9 @@
         applyContent();
       }
       if ($("#delightCount")) $("#delightCount").textContent = `${state.delightIndex + 1}/${state.delights.length}`;
+      controls.forEach((btn) => {
+          btn.disabled = false;
+      });
       // Sync ☆ / ♥ pressed state for the current delight.
       const delightBvid = state.delight.bvid;
       if (delightBvid && _delightStatusCache.has(delightBvid)) {
@@ -5716,9 +5728,12 @@
         const favBtn = document.querySelector('[data-delight="favorite"]');
         if (favBtn) favBtn.setAttribute("aria-pressed", "false");
       }
-      controls.forEach((btn) => {
-          btn.disabled = false;
-      });
+      const likeBtn = document.querySelector('[data-delight="like"]');
+      const liked = state.delight?.state === "liked";
+      if (likeBtn) {
+        likeBtn.setAttribute("aria-pressed", liked ? "true" : "false");
+        likeBtn.disabled = liked;
+      }
       scheduleActivityRailHeightSync();
     }
 
@@ -5974,6 +5989,21 @@
           : `发现后端新版本 ${newVersion}`);
       }
       if (event.type === "delight.refreshed") scheduleDelightQueueRefresh();
+      if (event.type === "delight.liked") {
+        const data = event.data || event;
+        const bvid = String(data.bvid || data.domain || event.bvid || event.domain || "");
+        const index = state.delights.findIndex((item) => String(item.bvid || "") === bvid);
+        if (index >= 0) {
+          state.delights[index] = {
+            ...state.delights[index],
+            state: "liked",
+            response_message: String(data.message || event.message || "好，这类多来点。"),
+          };
+          if (state.delight && String(state.delight.bvid || "") === bvid) {
+            setActiveDelight(index);
+          }
+        }
+      }
       if (event.type === "notification.pending" && event.bvid) mergeMessages([{ ...event, type: "notification" }]);
       if (event.type === "interest.probe" && event.domain) mergeMessages([{ type: "interest.probe", domain: event.domain, reason: event.reason || event.message || "后端希望确认这个兴趣方向。", specifics: event.specifics || event.examples || [], probe_mode: event.probe_mode || "", challenge: Boolean(event.challenge) }]);
       if (event.type === "avoidance.probe" && event.domain) mergeMessages([{ type: "avoidance.probe", domain: event.domain, reason: event.reason || event.message || "后端希望确认这个避雷方向。", specifics: event.specifics || event.examples || [], probe_mode: event.probe_mode || "", challenge: Boolean(event.challenge) }]);

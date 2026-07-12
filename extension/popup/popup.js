@@ -1619,6 +1619,20 @@ function connectRuntimeStream() {
       ) {
         setHint(String(event.message || ""), "success");
       }
+      if (event.type === "delight.liked") {
+        const data = event.data || event;
+        const bvid = String(data.bvid || data.domain || event.bvid || event.domain || "");
+        const index = state.activeDelights.findIndex((item) => item?.bvid === bvid);
+        if (index >= 0) {
+          state.activeDelights[index] = {
+            ...state.activeDelights[index],
+            state: "liked",
+            response_message: String(data.message || event.message || "好，这类多来点。"),
+          };
+          syncDelightHead();
+          renderDelightSlot();
+        }
+      }
       // Live guided-init progress (gui-init F1): drive the recommend-tab
       // progress bar from the run's stage events.
       if (event.type === "init_progress" || event.type === "init_failed") {
@@ -4614,8 +4628,6 @@ function renderDelightSlot() {
   }
 
   const delight = head;
-  const isHandled = uiState.handled;
-  const isChatting = delight.state === "chatting";
   const isExpanded = Boolean(delight.expanded);
 
   // Banner with thumbnail. Collapsed = ~64px row showing thumbnail +
@@ -4748,7 +4760,7 @@ function renderDelightSlot() {
       body.append(reason);
     }
 
-    if (uiState.response_message) {
+    if (uiState.show_status) {
       const response = document.createElement("p");
       response.className = "delight-banner-response";
       response.dataset.tone = uiState.response_tone;
@@ -4817,6 +4829,9 @@ function renderDelightSlot() {
           await respondToDelight(delight.bvid, "like", delight.title);
         } catch (err) {
           console.error("Delight like failed:", err);
+          setHint("这次喜欢还没记上，可以再试一次。", "error");
+          renderDelightSlot();
+          return;
         }
         setHint("好，这类多来点。", "success");
         updateDelightHead({
@@ -4828,6 +4843,8 @@ function renderDelightSlot() {
         renderDelightSlot();
       },
     );
+    likeButton.setAttribute("aria-pressed", uiState.like_pressed ? "true" : "false");
+    likeButton.disabled = uiState.like_disabled;
 
     const rejectButton = createActionButton(
       "不感兴趣",
@@ -4886,11 +4903,6 @@ function renderDelightSlot() {
       return btn;
     })();
 
-    if (isHandled || isChatting) {
-      rejectButton.disabled = true;
-      likeButton.disabled = true;
-    }
-
     actions.append(
       openButton,
       likeButton,
@@ -4899,7 +4911,9 @@ function renderDelightSlot() {
       rejectButton,
       chatButton,
     );
-    body.append(actions);
+    if (uiState.show_actions) {
+      body.append(actions);
+    }
 
     if (delight.composer_open) {
       const composer = document.createElement("div");

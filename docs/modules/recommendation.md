@@ -41,7 +41,7 @@
 | M127b 避雷探针用户确认 | ✅ | WebSocket 推送 `avoidance.probe` → popup / Web / OpenClaw 卡片（确认避雷 / 搁置避雷 / 不是雷点 / 多聊聊）→ `POST /api/avoidance-probes/respond`；确认后写入 `disliked_topics` 并清理候选池，未确认时不参与过滤 |
 | M128 CLI delight + probe | ✅ | `openbiliclaw delight` 手动查看惊喜推荐候选；`openbiliclaw probe` 手动列出猜测方向并交互确认/拒绝 |
 | M129 惊喜候选自动预热与回填 | ✅ | delight 运行时统一使用动态阈值：默认底线 `0.75`，保守用户底线 `0.80`，正式候选池至少有 150 条已打 `delight_score` 且分布足够分散（总体标准差 ≥ `0.08`）时，才按 delight 分数池内 Top 10% 边界抬高阈值；`precompute_delight_scores()` 直接复用 Evo 写入的 `relevance_score` 生成 `delight_score`，并优先复用面向用户的 `pool_expression` 作为 `delight_reason`（缺失时 fallback 到 `relevance_reason/topic`），不再额外调用单独的 Delight LLM 评分或文案任务；后台启动会自动补齐高分但缺 `reason/hook` 的候选，`suppressed` 高分库存也允许作为惊喜推荐入口 |
-| 惊喜推荐反馈保留 | ✅ | `POST /api/delight/respond` 中 `like / chat` 记录正向学习信号并保留候选；`view` 当场保留卡片但标记已读（对齐推荐池 `shown` 语义，下次重灌不再出现）；`dislike / dismiss` 消费候选并驱动三端立即移除。`pending-batch` 重灌以 `include_liked=True` 保留已喜欢候选并下发 `state="liked"`，喜欢过的卡片在 popup 重开后不再静默消失 |
+| 惊喜推荐反馈保留 | ✅ | `POST /api/delight/respond` 中 `like / chat` 记录正向学习信号并保留候选；`view` 当场保留卡片但标记已读（对齐推荐池 `shown` 语义，下次重灌不再出现）；`dislike / dismiss` 消费候选并驱动三端立即移除。`pending-batch` 重灌以 `include_liked=True` 保留已喜欢候选并下发 `state="liked"`；移动 Web、桌面 Web 与插件统一保留结果提示和完整动作组，只把 like 标为 `aria-pressed="true"` 并禁用重复提交，其它动作继续可用 |
 | 惊喜推送不打断输入（v0.3.157+） | ✅ | 桌面 Web：用户在惊喜卡聊天框互动中（composer 展开 / 输入框有焦点 / 有未发送草稿）时，`delight.candidate` 后台推送只静默入队并更新计数、不切当前卡（此前会 `setActiveDelight` 收起输入框，随后的发送还会把反馈串到换上来的新卡上）；`delight.refreshed` 队列刷新同样只同步数据，当前卡即使已被后端消费也保留引用，发送始终落在用户正对着的卡上；空闲时保持自动切到最新候选的原行为。无惊喜候选时 `renderDelightCover(null)` 只清空旧封面和背景后返回，不读取空候选或打断首页 hydration；有效但无封面的候选仍显示来源平台徽章。移动 Web：输入框聚焦时跳过推送触发的 DOM 重建（textarea 失焦 = 手机键盘收起），草稿本就实时存 state |
 | issue #79 桌面惊喜文字卡收尾 | ✅ | 桌面 Web 惊喜卡保留 `body_text` 并显示最多 5 行正文预览，仅在实际溢出时提供可访问的展开/收起；无封面或封面加载失败时，左侧媒体区以正文和来源徽章渲染毛玻璃文字卡。候选切换与空队列重置折叠态，不改变标题兜底、互动指标、聊天输入保护和反馈语义。 |
 | v0.3.0 在线 supergroup 合并 | ✅ | `_merge_topic_supergroups` serve 时基于 embedding 把 `动漫杂谈/补番/解说` 等近义 topic 合并为同一聚类，让多样化器把它们当作一个桶 |
@@ -321,6 +321,18 @@ Content-Type: application/json
 `POST /api/delight/respond` 支持 `view / like / dislike / chat / dismiss`。`like / chat` 只记录喜欢或对话学习信号，候选保留在队列里；`view`（看看/点开浏览）保留当场卡片的「已打开」展示，但会把候选标记为已读（`delight_notified=1`，不重置 4 小时主动推送冷却）——语义对齐推荐池的 `pool_status='shown'`：浏览过的惊喜在下次队列重灌时不再出现；`dislike / dismiss` 才会立即驱动三端移除该候选。
 
 正向保留跨重灌生效：`GET /api/delight/pending-batch` 以 `include_liked=True` 调用 `get_delight_candidates`，已点喜欢（`feedback_type='like'`）的候选在 popup 重开 / `delight.refreshed` 重灌后仍保留队列位置，并以 `state="liked"` 下发供三端恢复「已喜欢」展示；`view` / `dismiss` / `dislike`（置 `delight_notified=1`）会让候选退出重灌队列。WS 主动推送（`get_pending_delight`）、候选计数与 CLI 仍排除已喜欢项，避免把喜欢过的内容当新惊喜重复推送。
+
+图形端把结果提示、动作组和 like 的可访问状态分开投影；`handled` 只保留为 `viewed / rejected` 的兼容终态标记，不再用来隐藏 liked 的动作组：
+
+| `state` | `show_status` | `show_actions` | `like_pressed` | `like_disabled` |
+| --- | --- | --- | --- | --- |
+| `pending` | 有响应文案时显示 | 是 | 否 | 否 |
+| `liked` | 是 | 是 | 是 | 是 |
+| `viewed` | 是 | 否 | 否 | 是 |
+| `rejected` | 是 | 否 | 否 | 是 |
+| `chatted / chatting` | 有响应文案时显示 | 是 | 否 | 否 |
+
+因此本地 like 成功、`pending-batch` 重灌返回 `state="liked"`，以及 `delight.liked` 实时事件都会收敛到同一 UI：状态文案保留，like 仅阻止重复提交，「看看 / 稍后再看 / 收藏 / 不感兴趣 / 聊一聊」仍可继续操作；like POST 失败则恢复未选中状态供重试。
 
 惊喜与普通推荐互斥：被惊喜通道认领的内容（已作为惊喜送达过，或当前满足惊喜队列条件——delight 分数达动态阈值且 reason/hook 非空）会被 `get_pool_candidates` / `count_pool_candidates` 的 servable 闸门排除，普通推荐 serve 与「还有 N 条」计数都不会再出同一条内容。
 
