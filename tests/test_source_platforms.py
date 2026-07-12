@@ -71,6 +71,10 @@ def test_every_zhihu_strategy_resolves_without_platform(strategy: str) -> None:
     assert source_family(strategy) == "zhihu"
 
 
+def test_zhihu_strategy_overrides_bilibili_cache_default() -> None:
+    assert source_family("zhihu-hot", "bilibili") == "zhihu"
+
+
 def test_url_inference_does_not_match_registered_host_in_path() -> None:
     url = "https://example.com/https://www.zhihu.com/question/1"
     assert infer_source_platform_from_url(url) == ""

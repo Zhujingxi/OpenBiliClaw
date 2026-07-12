@@ -591,6 +591,8 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
 │   LLM adapters · Source adapters (SourceAdapter) │
+│ Source-family registry: alias · strategy · URL host │
+│             → pool accounting · viewed identity    │
 │ Pool → token claim → 3×LLM workers → serial admit → UI │
 │   Unified admission · SQLite (events · pool · recs)│
 └────────────────────────────────────────────────┘

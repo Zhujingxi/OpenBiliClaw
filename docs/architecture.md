@@ -7,7 +7,7 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 1. **用户交互层** — Chrome 浏览器插件（B 站 + 小红书 + 抖音 + YouTube + X (Twitter) + 知乎通过统一 `PlatformAdapter` 做页面行为采集，Reddit 通过 rdt-cli 做默认 discovery、插件保留 bootstrap 初始化信号和命令后端 fallback 登录态任务源，click 在 capture 阶段记录、scroll 覆盖内部 feed 容器 · 视频停留满意度信号 · 推荐展示与真实可换库存状态 · 文字卡（推文 / thread / 知乎回答 / Reddit 帖子）· 正向兴趣 / 避雷探针确认 · durable 对话交互 · 后台 LLM 暂停开关 · 开机自启动开关 · 配置离线缓存 / 降级修复 UI · bili/xhs/dy/yt/zhihu/reddit 任务调度 / 初始化画像导入 / 多路 discovery · B 站 / 抖音 / X Cookie 自动同步 · 本机扩展驱动 E2E 捕捉自检）+ 移动 Web（`/m`）+ 桌面 Web（`/web`）。所有 `/api/*` 前置一道**可选密码门禁**（HTTP 中间件，见下方「API Auth Gateway」）：本机 / 扩展默认免登录，局域网 / 远程设备需密码。
 2. **外部集成层** — OpenClaw adapter / skill wrappers / 本地 API / Codex CLI 凭据导入等对外接入边界
 3. **Agent 核心层** — 自研编排器 + Soul Engine + Discovery Engine + Recommendation Engine + Skill System
-4. **多源适配层（v0.3.0+）** — `SourceAdapter` 协议下的 B 站 / 小红书 / 抖音 / YouTube / X (Twitter) / 知乎 / Reddit / 通用 Web 源
+4. **多源适配层（v0.3.0+）** — `SourceAdapter` 协议下的 B 站 / 小红书 / 抖音 / YouTube / X (Twitter) / 知乎 / Reddit / 通用 Web 源；`sources.platforms` 注册表统一七个平台族的别名、strategy 与 URL host 身份
 5. **多层网状记忆存储** — Core / Episodic / Semantic / Working Memory（SQLite + 向量索引 + JSON）
 
 详见 [项目 Spec](spec.md) 中的架构图。模块级可视化图放在 `docs/diagrams/`：
@@ -61,6 +61,7 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 
 ### Sources (`sources/`) — 多源适配层 (v0.3.0+)
 - `SourceAdapter` Protocol：每个内容源实现统一接口
+- `platforms.py` — Bilibili / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit 七个平台族的唯一可枚举注册表；Storage pool accounting、view-event identity、API URL host 推断、Discovery 已看过滤和 runtime 平台常量都委托该表，避免跨模块别名漂移
 - `bilibili_adapter` — B 站 API 直连（WBI 签名、v_voucher 自动恢复）；`bili_tasks` + `/api/sources/bili/*` 提供搜索冷却时的扩展 DOM 搜索兜底，回传结果进入 `discovery_candidates`
 - `xiaohongshu_adapter` — 小红书扩展代理（被动收集 + 关键词搜索 + 创作者订阅 + `bootstrap_profile` 初始化画像任务，零后端爬取；task-result 进入 memory 前按已见 note key 跨任务去重）
 - `dy_tasks` — 抖音扩展任务队列（`bootstrap_profile` 初始化画像任务；发布 / 收藏 / 点赞 / 关注信号由扩展以用户浏览器登录态抓取；任务 poll 时标记 `in_progress`，CLI 可复用近期 bootstrap；`search` / `hot` / `feed` discovery 任务统一从 `https://www.douyin.com/` 首页开始，由 content script 模拟真实 DOM 操作触发搜索、热榜或推荐流加载，再被动收集页面自身发出的响应和已渲染 DOM；hot board 的 `group_id` 会作为 `seed_aweme_id` 透传，DOM / 被动监听不足时用已登录页面 related API bridge 拉取热点相关候选；三者分别回传 `dy_search` / `dy_hot` / `dy_feed`，并作为 `dy-plugin-search` / `dy-plugin-hot-related` / `dy-plugin-feed` discovery 来源）
@@ -178,7 +179,7 @@ X 是第六个内容源，分两条独立通路：
 - v0.3.1 `get_pool_candidates` 用 `ROW_NUMBER() OVER (PARTITION BY topic_group)` 把每个 topic_group 在候选窗口里限到 ≤3 条，保证长尾 group 真正进得到候选窗口
 - `discovery_candidates` 持久化所有来源 raw candidates 的 lifecycle：`pending_eval`、`evaluating`、`evaluated`、`cached`、`rejected_low_score`、`rejected_duplicate`、`rejected_cache_admission`、`rejected_recently_viewed`、`rejected_franchise_quota`、`failed_eval`。
 - `discovery_inspiration_probe_cache` / `discovery_inspiration_expansion_cache` 持久化 query inspiration 搜索探针、横向扩展、curator 判断和 yield 反馈；`discovery_interest_selection_ledger` 记录二级兴趣抽中事件，让兴趣被抽到后立即进入冷却而不必等待 keyword yield；`discovery_keywords` 可携带 aspect / inspiration / expansion / angle 元数据，但不改变原有 in-flight 去重键。`KeywordPlanner` 的 inspiration-only 分支会从 selection ledger / keyword / raw candidate / admitted pool 构建二级兴趣 coverage snapshot，经过 brainstorm → provider-chain grounding → curator → deterministic quota / explore validation → bounded repair 后写入各平台关键词池；`keyword-inspiration-dry-run` 复用同一路径但跳过关键词写库，并使用独立 preview selection scope 做真实请求诊断。
-- `count_pool_available_candidates_by_source()` 与 `count_pool_candidates()` 保持前端可见口径一致；`count_pool_raw_material_by_source()` 统计 fresh / 非 dislike / 未推荐 / 未看过的 `content_cache` raw material，并合并 `discovery_candidates` 中待评估 / 已评估未缓存的 raw material，供 runtime raw ceiling headroom 和 trim 使用。
+- `count_pool_available_candidates_by_source()` 与 `count_pool_candidates()` 保持前端可见口径一致；`count_pool_raw_material_by_source()` 统计 fresh / 非 dislike / 未推荐 / 未看过的 `content_cache` raw material，并合并 `discovery_candidates` 中待评估 / 已评估未缓存的 raw material，供 runtime raw ceiling headroom 和 trim 使用。两类来源统计及已看身份都通过 `sources.platforms` 归一，`zhihu-*` 等 strategy 可覆盖旧缓存的 Bilibili 默认平台。
 - `chat_turns` 持久化 side panel durable chat turn，字段包含 `turn_id/session/scope/subject/message/status/reply/error/created_at/updated_at`；`scope` 支持 `chat`、`delight`、`probe` 和 `avoidance_probe`
 - `auth_state(key, value)` 单行表持久化局域网密码门禁的撤销纪元 `auth_epoch` 与稳定密码指纹 `password_fingerprint`（非会话表，仅全局计数 + 指纹）；跨进程事务原子自增，验签实时读
 

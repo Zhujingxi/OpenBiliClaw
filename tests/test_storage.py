@@ -1258,6 +1258,24 @@ class TestDatabase:
             assert db.count_pool_raw_material_by_source() == {"zhihu": 3}
             db.close()
 
+    def test_zhihu_pool_accounting_overrides_bilibili_cache_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            _seed_visible(
+                db,
+                "zhihu:answer:cache-default",
+                title="知乎缓存默认平台回归",
+                source="zhihu-hot",
+                source_platform="bilibili",
+                content_id="answer:cache-default",
+                content_url="https://www.zhihu.com/question/1/answer/cache-default",
+            )
+
+            assert db.count_pool_available_candidates_by_source() == {"zhihu": 1}
+            assert db.count_pool_raw_material_by_source() == {"zhihu": 1}
+            db.close()
+
     def test_trim_pool_share_quotas_protect_xhs_source_family(self) -> None:
         """Xiaohongshu rows are protected by the xiaohongshu quota.
 
