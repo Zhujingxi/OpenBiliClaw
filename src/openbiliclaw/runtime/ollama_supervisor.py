@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
     from openbiliclaw.config import Config
 
-_DEFAULT_OLLAMA_ENDPOINT = "http://localhost:11434"
+_DEFAULT_OLLAMA_ENDPOINT = "http://127.0.0.1:11434"
 _DEFAULT_OLLAMA_KEEP_ALIVE = "24h"
 
 console = Console()

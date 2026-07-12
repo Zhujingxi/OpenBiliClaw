@@ -6672,6 +6672,7 @@ function bindSettings() {
     if (lang) lang.value = cfg.language || "zh";
     setVal("cfgDataDir", cfg.data_dir);
     setVal("cfgStorageDbPath", cfg.storage?.db_path);
+    setVal("cfgNetworkProxy", cfg.network?.proxy || "");
 
     // Scheduler
     const schedEnabled = document.getElementById("cfgSchedulerEnabled");
@@ -6936,6 +6937,9 @@ function bindSettings() {
       storage: {
         db_path: getVal("cfgStorageDbPath"),
       },
+      network: {
+        proxy: getVal("cfgNetworkProxy"),
+      },
       logging: {
         level: getVal("cfgLogLevel"),
         file_level: getVal("cfgLogFileLevel"),
@@ -7041,6 +7045,32 @@ function bindSettings() {
   if (probeEmbeddingBtn instanceof HTMLButtonElement) {
     probeEmbeddingBtn.addEventListener("click", () => {
       void runEmbeddingConfigProbe(probeEmbeddingBtn, probeEmbeddingStatus);
+    });
+  }
+
+  async function runNetworkProxyConfigProbe(button, statusEl) {
+    if (!button) return;
+    button.disabled = true;
+    renderProbePending(statusEl, "代理");
+    try {
+      const proxy = getVal("cfgNetworkProxy");
+      const result = await probeConfigService("network_proxy", { network: { proxy } });
+      renderProbeResult(statusEl, result);
+    } catch (err) {
+      renderProbeResult(statusEl, {
+        ok: false,
+        error: err?.message || "代理探测失败",
+      });
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  const probeNetworkProxyBtn = document.getElementById("cfgProbeNetworkProxy");
+  const probeNetworkProxyStatus = document.getElementById("cfgProbeNetworkProxyStatus");
+  if (probeNetworkProxyBtn instanceof HTMLButtonElement) {
+    probeNetworkProxyBtn.addEventListener("click", () => {
+      void runNetworkProxyConfigProbe(probeNetworkProxyBtn, probeNetworkProxyStatus);
     });
   }
 

@@ -71,6 +71,22 @@ _YTDLP_FLAT_OPTIONS: dict[str, Any] = {
 }
 
 
+def _ytdlp_options(**extra: Any) -> dict[str, Any]:
+    """Base flat yt-dlp options plus the overseas outbound proxy when set.
+
+    YouTube is an overseas source, so it honors ``[network].proxy``. yt-dlp's
+    native ``proxy`` option routes its HTTP through it; omitting the key keeps
+    yt-dlp's default (env-inheriting) behavior — zero drift when unset.
+    """
+    from openbiliclaw.network import outbound_proxy_url
+
+    options: dict[str, Any] = {**_YTDLP_FLAT_OPTIONS, **extra}
+    proxy = outbound_proxy_url()
+    if proxy:
+        options["proxy"] = proxy
+    return options
+
+
 @dataclass(frozen=True)
 class InnerTubeConfig:
     api_key: str = _INNERTUBE_KEY
@@ -109,7 +125,7 @@ def _ytdlp_search(query: str, limit: int) -> list[dict[str, Any]]:
     try:
         from yt_dlp import YoutubeDL  # type: ignore[import-untyped]
 
-        with YoutubeDL(_YTDLP_FLAT_OPTIONS) as ydl:
+        with YoutubeDL(_ytdlp_options()) as ydl:
             info = ydl.extract_info(f"ytsearch{max(1, limit)}:{query}", download=False)
         return _ytdlp_entries(info, limit)
     except Exception as exc:
@@ -165,7 +181,7 @@ def _ytdlp_channel(channel_ref: str, limit: int) -> list[dict[str, Any]]:
     try:
         from yt_dlp import YoutubeDL
 
-        with YoutubeDL({**_YTDLP_FLAT_OPTIONS, "playlistend": limit}) as ydl:
+        with YoutubeDL(_ytdlp_options(playlistend=limit)) as ydl:
             info = ydl.extract_info(url, download=False)
         return _ytdlp_entries(info, limit)
     except Exception as exc:

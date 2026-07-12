@@ -379,6 +379,27 @@ class BilibiliConfig:
 
 
 @dataclass
+class NetworkConfig:
+    """Outbound proxy for OVERSEAS clients only.
+
+    Applies to the LLM SDKs (OpenAI/Claude/Gemini/DeepSeek/OpenRouter/
+    openai_compatible chat+embedding), YouTube (yt-dlp), the GitHub updater,
+    and Codex OAuth token refresh. CN-direct clients (bilibili / douyin /
+    ollama / CN-CDN image cache) never consume it — that isolation is pinned
+    by tests/test_network_proxy_isolation.py. This is deliberately distinct
+    from ``[bilibili].proxy`` (which routes B站 requests and is rarely set).
+
+    Empty (default) means "no explicit proxy": overseas SDK clients keep their
+    current behavior of inheriting HTTP(S)_PROXY env, so Docker proxy discovery
+    is unaffected. Accepted schemes: http / https / socks5 / socks5h.
+
+    See docs/plans/2026-07-11-network-proxy-config-spec.md.
+    """
+
+    proxy: str = ""
+
+
+@dataclass
 class SchedulerConfig:
     """Scheduler configuration."""
 
@@ -777,6 +798,9 @@ class Config:
     api: ApiConfig = field(default_factory=ApiConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     bilibili: BilibiliConfig = field(default_factory=BilibiliConfig)
+    # Overseas-outbound proxy (LLM SDKs / YouTube / updater). CN-direct clients
+    # never use it — see NetworkConfig docstring.
+    network: NetworkConfig = field(default_factory=NetworkConfig)
     sources: SourcesConfig = field(default_factory=SourcesConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     # Top-level `[discovery]` carries the unified keyword planner / backpressure
@@ -923,6 +947,55 @@ def _warn_suspicious_budgets(sources: SourcesConfig) -> None:
                 key,
                 value,
             )
+
+
+# Whitelist for [network].proxy. httpx[socks] (pyproject) covers socks5/socks5h;
+# http/https cover CONNECT proxies. Anything else (ftp, socks4, bare host) is a
+# user error we reject at save time rather than silently ignore (pitfall rule 7).
+_OUTBOUND_PROXY_SCHEMES = frozenset({"http", "https", "socks5", "socks5h"})
+
+
+def normalize_outbound_proxy(value: str) -> str:
+    """Normalize an overseas-outbound proxy URL, or raise ``ValueError``.
+
+    Returns ``""`` for empty/whitespace input (proxy disabled). Otherwise
+    strips surrounding whitespace, lowercases the scheme, and validates that
+    the scheme is whitelisted and a host is present. The raise message is a
+    user-facing Chinese reason surfaced directly in the settings UI.
+    """
+    text = value.strip()
+    if not text:
+        return ""
+    parsed = urlparse(text)
+    scheme = parsed.scheme.lower()
+    if scheme not in _OUTBOUND_PROXY_SCHEMES:
+        raise ValueError(
+            f"代理协议不支持:{parsed.scheme or '(缺少协议)'};"
+            "仅支持 http / https / socks5 / socks5h"
+        )
+    if not parsed.hostname:
+        raise ValueError("代理地址缺少主机名,请填写形如 socks5://127.0.0.1:1080 的地址")
+    # Preserve userinfo/host/port/path verbatim; only the scheme is lowercased.
+    return f"{scheme}{text[len(parsed.scheme):]}"
+
+
+def _build_network_config(raw: dict[str, Any]) -> NetworkConfig:
+    """Assemble ``NetworkConfig`` from the raw ``[network]`` table.
+
+    Invalid on-disk values are logged at WARNING and dropped to the empty
+    default rather than crashing load (pitfall rule 4 clamp-to-default); the
+    save-time API guard is what rejects invalid *writes* with a 400.
+    """
+    network_raw = raw.get("network", {})
+    if not isinstance(network_raw, dict):
+        network_raw = {}
+    proxy_raw = str(network_raw.get("proxy", "") or "")
+    try:
+        proxy = normalize_outbound_proxy(proxy_raw)
+    except ValueError as exc:
+        logger.warning("config: [network].proxy 非法已忽略(%s):%s", proxy_raw, exc)
+        proxy = ""
+    return NetworkConfig(proxy=proxy)
 
 
 def _build_config(raw: dict[str, Any]) -> Config:
@@ -1109,6 +1182,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
         ),
         llm=llm,
         bilibili=bilibili,
+        network=_build_network_config(raw),
         sources=sources,
         scheduler=SchedulerConfig(
             **{
@@ -2414,6 +2488,13 @@ def _render_config_toml(
             "[bilibili.browser]",
             f"executable = {_toml_string(config.bilibili.browser_executable)}",
             f"headed = {_toml_bool(config.bilibili.browser_headed)}",
+            "",
+            "[network]",
+            "# Outbound proxy for OVERSEAS clients only: LLM SDKs, YouTube,",
+            "# the GitHub updater, Codex OAuth. B站/抖音/Ollama 等国内直连请求",
+            "# 始终直连,不受此项影响。留空 = 不设代理(沿用进程 env 现状)。",
+            "# 支持 http:// | https:// | socks5:// | socks5h://",
+            f"proxy = {_toml_string(config.network.proxy)}",
             "",
             "[sources.browser]",
             f"cdp_url = {_toml_string(config.sources.browser_cdp_url)}",

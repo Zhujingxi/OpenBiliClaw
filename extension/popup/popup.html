@@ -5599,6 +5599,15 @@
           <label for="cfgStorageDbPath">SQLite 数据库路径</label>
           <input id="cfgStorageDbPath" type="text" placeholder="data/openbiliclaw.db">
         </div>
+        <div class="settings-field">
+          <label for="cfgNetworkProxy">海外出口代理</label>
+          <input id="cfgNetworkProxy" type="text" placeholder="socks5://127.0.0.1:1080">
+        </div>
+        <p class="settings-hint" id="cfgNetworkProxyHint">仅作用于海外 AI 服务 / YouTube / 更新检查；B 站等国内请求始终直连。支持 http/https/socks5/socks5h，留空表示不使用。</p>
+        <div class="settings-probe-row">
+          <button id="cfgProbeNetworkProxy" class="settings-secondary-btn" type="button">测试代理</button>
+          <span id="cfgProbeNetworkProxyStatus" class="settings-probe-status" aria-live="polite"></span>
+        </div>
       </div>
       </div>
 

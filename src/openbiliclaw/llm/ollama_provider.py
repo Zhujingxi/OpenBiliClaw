@@ -38,7 +38,7 @@ class OllamaProvider(OpenAIProvider):
         self,
         api_key: str = "ollama",
         model: str = "llama3",
-        base_url: str = "http://localhost:11434/v1",
+        base_url: str = "http://127.0.0.1:11434/v1",
         timeout: float = 300.0,
         num_ctx: int = 0,
     ) -> None:

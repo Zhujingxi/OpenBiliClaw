@@ -5109,6 +5109,7 @@
       setSelect("language", config.language || "zh");
       setInput("dataDir", config.data_dir);
       setInput("storageDbPath", config.storage?.db_path);
+      setInput("networkProxy", config.network?.proxy || "");
 
       const llm = config.llm || {};
       const provider = llm.default_provider || llm.provider;
@@ -6082,6 +6083,7 @@
           multimodal_image_timeout_seconds: getIntInput("multimodalImageTimeout", 6)
         },
         storage: { db_path: getInput("storageDbPath") },
+        network: { proxy: getInput("networkProxy") },
         logging: {
           level: getInput("logLevel") || "INFO",
           file_level: getInput("logFileLevel") || "DEBUG",
@@ -6434,6 +6436,24 @@
       }
     }
 
+    async function runNetworkProxyConfigProbe() {
+      const button = $("#probeNetworkProxy");
+      const statusEl = $("#probeNetworkProxyStatus");
+      if (button) button.disabled = true;
+      renderProbePending(statusEl, "代理");
+      try {
+        const result = await probeConfigService("network_proxy", { network: { proxy: getInput("networkProxy") } });
+        renderProbeResult(statusEl, result);
+      } catch (error) {
+        renderProbeResult(statusEl, {
+          ok: false,
+          error: configErrorMessage(error?.details) || error?.message || "代理探测失败"
+        });
+      } finally {
+        if (button) button.disabled = false;
+      }
+    }
+
     document.addEventListener("click", (event) => {
       const closeId = event.target?.dataset?.close;
       if (closeId) closePanel(closeId);
@@ -6651,6 +6671,7 @@
     safeBind("#probeLlm", "click", () => { void runLlmConfigProbe(); });
     safeBind("#probeLlmFallback", "click", () => { void runLlmFallbackConfigProbe(); });
     safeBind("#probeEmbedding", "click", () => { void runEmbeddingConfigProbe(); });
+    safeBind("#probeNetworkProxy", "click", () => { void runNetworkProxyConfigProbe(); });
     lanAuthControl = initLanAuthControl();
     bootAutostartControl = initBootAutostartControl();
     Object.values(SOURCE_ENABLE_SELECT_IDS).forEach((id) => {

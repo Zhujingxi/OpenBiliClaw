@@ -420,3 +420,69 @@ def test_get_config_exposes_douyin_and_x_cookies_like_bilibili(monkeypatch, tmp_
     assert revealed["bilibili"]["cookie"] == (
         "SESSDATA=real-sess; bili_jct=real-csrf; DedeUserID=42"
     )
+
+
+# ── [network].proxy API exposure ────────────────────────────────────────────
+
+
+def _proxy_config(proxy: str) -> Config:
+    cfg = _base_config()
+    cfg.network.proxy = proxy
+    return cfg
+
+
+def test_get_config_exposes_network_proxy(monkeypatch, tmp_path) -> None:
+    client, _cfg, _path = _make_client(
+        monkeypatch, tmp_path, _proxy_config("socks5://127.0.0.1:1080")
+    )
+    body = client.get("/api/config").json()
+    assert body["network"]["proxy"] == "socks5://127.0.0.1:1080"
+
+
+def test_get_config_masks_proxy_userinfo(monkeypatch, tmp_path) -> None:
+    client, _cfg, _path = _make_client(
+        monkeypatch, tmp_path, _proxy_config("socks5://user:secret@127.0.0.1:1080")
+    )
+    body = client.get("/api/config").json()
+    assert "secret" not in body["network"]["proxy"]
+    assert body["network"]["proxy"] == "socks5://***@127.0.0.1:1080"
+
+
+def test_put_config_writes_valid_network_proxy(monkeypatch, tmp_path) -> None:
+    from openbiliclaw import network
+
+    network.reset_outbound_proxy_for_tests()
+    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
+
+    response = client.put("/api/config", json={"network": {"proxy": "socks5://127.0.0.1:1080"}})
+
+    assert response.status_code == 200
+    assert load_config_from_path(config_path).network.proxy == "socks5://127.0.0.1:1080"
+    # Hot path updated the process-level source of truth.
+    assert network.outbound_proxy_url() == "socks5://127.0.0.1:1080"
+    network.reset_outbound_proxy_for_tests()
+
+
+def test_put_config_rejects_invalid_network_proxy(monkeypatch, tmp_path) -> None:
+    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
+    before = config_path.read_text(encoding="utf-8")
+
+    response = client.put("/api/config", json={"network": {"proxy": "ftp://127.0.0.1:1"}})
+
+    assert response.status_code == 400
+    # config.toml is untouched on rejection.
+    assert config_path.read_text(encoding="utf-8") == before
+
+
+def test_put_config_ignores_masked_proxy_echo(monkeypatch, tmp_path) -> None:
+    client, _cfg, config_path = _make_client(
+        monkeypatch, tmp_path, _proxy_config("socks5://user:secret@127.0.0.1:1080")
+    )
+
+    response = client.put("/api/config", json={"network": {"proxy": "socks5://***@127.0.0.1:1080"}})
+
+    assert response.status_code == 200
+    assert (
+        load_config_from_path(config_path).network.proxy
+        == "socks5://user:secret@127.0.0.1:1080"
+    )

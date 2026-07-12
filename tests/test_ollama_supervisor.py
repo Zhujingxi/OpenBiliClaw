@@ -194,7 +194,7 @@ def test_start_serve_records_managed_handle(monkeypatch: pytest.MonkeyPatch) -> 
     assert sup._managed_daemon.proc is not None
     assert sup._managed_daemon.proc.pid == 999
     # (a) default start records the default endpoint spec.
-    assert sup._managed_daemon.base_url == "http://localhost:11434"
+    assert sup._managed_daemon.base_url == "http://127.0.0.1:11434"
 
 
 def test_start_serve_reports_starting_and_ready_phases(monkeypatch: pytest.MonkeyPatch) -> None:

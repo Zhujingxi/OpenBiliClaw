@@ -1370,3 +1370,122 @@ async def test_openai_provider_default_flavor_still_uses_chat_completions(
     response = await provider.complete([{"role": "user", "content": "hi"}])
 
     assert response.content == "chat-path"
+
+
+# ── [network].proxy → overseas SDK client wiring ────────────────────────────
+# Providers must route through the proxy when one is set, and stay byte-equivalent
+# to the pre-feature construction when it is empty (zero-drift invariant).
+
+
+def test_openai_provider_injects_proxy_into_http_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.llm import openai_provider as mod
+
+    sdk_kwargs: dict[str, object] = {}
+    httpx_kwargs: dict[str, object] = {}
+    sentinel = object()
+
+    monkeypatch.setattr(mod, "AsyncOpenAI", lambda **kw: sdk_kwargs.update(kw))
+
+    def _fake_client(**kw: object) -> object:
+        httpx_kwargs.update(kw)
+        return sentinel
+
+    monkeypatch.setattr(mod.httpx, "AsyncClient", _fake_client)
+
+    provider = OpenAIProvider(api_key="k", proxy="socks5://127.0.0.1:1080")
+
+    assert provider._proxy == "socks5://127.0.0.1:1080"
+    assert httpx_kwargs.get("proxy") == "socks5://127.0.0.1:1080"
+    assert sdk_kwargs.get("http_client") is sentinel
+
+
+def test_openai_provider_empty_proxy_is_zero_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.llm import openai_provider as mod
+
+    sdk_kwargs: dict[str, object] = {}
+    httpx_called = False
+
+    monkeypatch.setattr(mod, "AsyncOpenAI", lambda **kw: sdk_kwargs.update(kw))
+
+    def _fake_client(**kw: object) -> object:
+        nonlocal httpx_called
+        httpx_called = True
+        return object()
+
+    monkeypatch.setattr(mod.httpx, "AsyncClient", _fake_client)
+
+    OpenAIProvider(api_key="k", proxy="")
+
+    assert httpx_called is False
+    assert "http_client" not in sdk_kwargs
+
+
+def test_claude_provider_injects_proxy_into_http_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.llm import claude_provider as mod
+
+    sdk_kwargs: dict[str, object] = {}
+    httpx_kwargs: dict[str, object] = {}
+    sentinel = object()
+
+    monkeypatch.setattr(mod, "AsyncAnthropic", lambda **kw: sdk_kwargs.update(kw))
+    monkeypatch.setattr(mod.httpx, "AsyncClient", lambda **kw: httpx_kwargs.update(kw) or sentinel)
+
+    provider = ClaudeProvider(api_key="k", proxy="http://127.0.0.1:7890")
+
+    assert provider._proxy == "http://127.0.0.1:7890"
+    assert httpx_kwargs.get("proxy") == "http://127.0.0.1:7890"
+    assert sdk_kwargs.get("http_client") is sentinel
+
+
+def test_claude_provider_empty_proxy_is_zero_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.llm import claude_provider as mod
+
+    sdk_kwargs: dict[str, object] = {}
+    monkeypatch.setattr(mod, "AsyncAnthropic", lambda **kw: sdk_kwargs.update(kw))
+
+    ClaudeProvider(api_key="k", proxy="")
+
+    assert "http_client" not in sdk_kwargs
+
+
+@pytest.mark.skipif(not gemini_sdk_available(), reason="google-genai not installed")
+def test_gemini_provider_injects_proxy_into_http_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.llm import gemini_provider as mod
+
+    sdk_kwargs: dict[str, object] = {}
+    monkeypatch.setattr(mod.genai, "Client", lambda **kw: sdk_kwargs.update(kw))
+
+    provider = GeminiProvider(api_key="k", proxy="socks5://127.0.0.1:1080")
+
+    http_options = sdk_kwargs.get("http_options")
+    assert isinstance(http_options, dict)
+    assert http_options.get("client_args") == {"proxy": "socks5://127.0.0.1:1080"}
+    assert http_options.get("async_client_args") == {"proxy": "socks5://127.0.0.1:1080"}
+    assert provider._proxy == "socks5://127.0.0.1:1080"
+
+
+@pytest.mark.skipif(not gemini_sdk_available(), reason="google-genai not installed")
+def test_gemini_provider_empty_proxy_is_zero_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.llm import gemini_provider as mod
+
+    sdk_kwargs: dict[str, object] = {}
+    monkeypatch.setattr(mod.genai, "Client", lambda **kw: sdk_kwargs.update(kw))
+
+    GeminiProvider(api_key="k", proxy="")
+
+    http_options = sdk_kwargs.get("http_options")
+    assert isinstance(http_options, dict)
+    assert "client_args" not in http_options
+    assert "async_client_args" not in http_options

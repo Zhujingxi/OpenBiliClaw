@@ -595,6 +595,13 @@
           <p class="settings-note-inline" id="authHint">本机与浏览器插件免登录；开启后局域网 / 远程设备访问需要密码。</p>
           <label class="settings-field"><span>开机自启动</span><input id="autostartEnabled" type="checkbox"></label>
           <p class="settings-note-inline" id="autostartHint">开启后下次登录系统会自动拉起后端（不影响当前进程）。</p>
+          <p class="settings-section-title">网络</p>
+          <label class="settings-field full"><span>海外出口代理</span><input id="networkProxy" placeholder="socks5://127.0.0.1:1080"></label>
+          <div class="settings-probe-row">
+            <button class="pill-btn" id="probeNetworkProxy" type="button">测试代理</button>
+            <span class="settings-probe-status" id="probeNetworkProxyStatus" aria-live="polite"></span>
+          </div>
+          <p class="settings-note-inline" id="networkProxyHint">仅作用于海外 AI 服务 / YouTube / 更新检查；B 站等国内请求始终直连。支持 http/https/socks5/socks5h，留空表示不使用。</p>
         </div>
 
         <div class="settings-panel" data-settings-panel="frontend" hidden>

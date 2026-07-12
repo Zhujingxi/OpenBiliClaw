@@ -42,6 +42,26 @@ def test_desktop_web_settings_exposes_and_wires_llm_fallback_probe() -> None:
     assert 'safeBind("#probeLlmFallback"' in js
 
 
+def test_desktop_web_settings_exposes_and_wires_network_proxy() -> None:
+    """The general tab must expose the [network].proxy field with a
+    connectivity probe, and the copy must state CN requests stay direct
+    (invariant: overseas-only proxy, never a global proxy)."""
+    html = (ROOT / "src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")
+    js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    assert 'id="networkProxy"' in html
+    assert 'id="probeNetworkProxy"' in html
+    assert 'id="probeNetworkProxyStatus"' in html
+    assert "海外" in html
+    assert "国内请求始终直连" in html
+
+    assert 'setInput("networkProxy", config.network?.proxy || "")' in js
+    assert "network: { proxy: getInput(\"networkProxy\") }" in js
+    assert "function runNetworkProxyConfigProbe()" in js
+    assert 'probeConfigService("network_proxy",' in js
+    assert 'safeBind("#probeNetworkProxy"' in js
+
+
 def test_desktop_web_settings_always_sends_deepseek_reasoning_effort() -> None:
     js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
 

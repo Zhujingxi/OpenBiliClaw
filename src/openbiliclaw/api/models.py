@@ -1088,6 +1088,12 @@ class BilibiliConfigOut(BaseModel):
     browser_headed: bool = False
 
 
+class NetworkConfigOut(BaseModel):
+    """Overseas-outbound proxy. Any URL userinfo is masked in responses."""
+
+    proxy: str = ""
+
+
 class SourcesBrowserConfigOut(BaseModel):
     cdp_url: str = ""
     headed: bool = False
@@ -1327,6 +1333,7 @@ class ConfigResponse(BaseModel):
     degraded_reason: str = ""
     llm: LLMConfigOut = Field(default_factory=LLMConfigOut)
     bilibili: BilibiliConfigOut = Field(default_factory=BilibiliConfigOut)
+    network: NetworkConfigOut = Field(default_factory=NetworkConfigOut)
     sources: SourcesConfigOut = Field(default_factory=SourcesConfigOut)
     scheduler: SchedulerConfigOut = Field(default_factory=SchedulerConfigOut)
     discovery: DiscoveryConfigOut = Field(default_factory=DiscoveryConfigOut)
@@ -1345,6 +1352,7 @@ class ConfigUpdateIn(BaseModel):
     suppress_background_llm_work: bool | None = None
     llm: dict[str, object] | None = None
     bilibili: dict[str, object] | None = None
+    network: dict[str, object] | None = None
     sources: dict[str, object] | None = None
     scheduler: dict[str, object] | None = None
     discovery: dict[str, object] | None = None
@@ -1359,7 +1367,7 @@ class ConfigServiceProbeIn(BaseModel):
     provider, no fallback chain) instead of the default provider.
     """
 
-    kind: Literal["llm", "embedding", "llm_fallback"]
+    kind: Literal["llm", "embedding", "llm_fallback", "network_proxy"]
     config: dict[str, object] = Field(default_factory=dict)
 
 
@@ -1367,7 +1375,7 @@ class ConfigServiceProbeResponse(BaseModel):
     """Result of a user-triggered provider connectivity probe."""
 
     ok: bool
-    kind: Literal["llm", "embedding", "llm_fallback"]
+    kind: Literal["llm", "embedding", "llm_fallback", "network_proxy"]
     provider: str = ""
     model: str = ""
     message: str = ""
