@@ -157,6 +157,40 @@ def test_save_defaults_to_local_pending(
     assert adapter.calls == []
 
 
+@pytest.mark.parametrize("content_kind", ["question", "answer", "article"])
+def test_save_accepts_real_zhihu_typed_content_ids(
+    saved_sync_client: tuple[TestClient, Database, _FakeBilibiliAdapter],
+    content_kind: str,
+) -> None:
+    client, database, adapter = saved_sync_client
+    content_id = f"{content_kind}:2053077287700883000"
+    item_key = f"zhihu:{content_id}"
+
+    response = client.post(
+        "/api/saved/favorite",
+        json=_saved_item(
+            content_id,
+            source_platform="zhihu",
+            content_url=f"https://www.zhihu.com/{content_kind}/2053077287700883000",
+            content_type=content_kind,
+            cover_url="",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["item_key"] == item_key
+    assert response.json()["sync_status"] == "pending"
+    assert database.get_saved_membership("favorite", item_key) is not None
+    assert (
+        client.get(
+            "/api/saved/favorite/status",
+            params={"item_key": item_key},
+        ).json()["saved"]
+        is True
+    )
+    assert adapter.calls == []
+
+
 def test_auto_sync_returns_pending_task_without_waiting_for_platform_io(
     saved_sync_client: tuple[TestClient, Database, _FakeBilibiliAdapter],
 ) -> None:
@@ -676,6 +710,16 @@ def test_saved_list_status_and_local_only_remove_round_trip(
             "post",
             "/api/saved/favorite/remove",
             {"json": {"item_key": "bilibili:extra:colon"}},
+        ),
+        (
+            "post",
+            "/api/saved/favorite/remove",
+            {"json": {"item_key": "zhihu:question:"}},
+        ),
+        (
+            "post",
+            "/api/saved/favorite/remove",
+            {"json": {"item_key": "zhihu:unknown:123"}},
         ),
         (
             "post",

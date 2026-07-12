@@ -34,6 +34,7 @@ NativeSaveStatusOut = Literal[
 NativeSaveActionOut = Literal["favorite", "watch_later"]
 _SAVED_PLATFORM_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 _URL_FALLBACK_ID_RE = re.compile(r"[0-9a-f]{24}")
+_ZHIHU_TYPED_CONTENT_ID_RE = re.compile(r"(?:question|answer|article):[0-9]+")
 
 
 def _has_unicode_control(value: str) -> bool:
@@ -1065,6 +1066,11 @@ def validate_saved_item_key(value: str) -> str:
     parts = item_key.split(":")
     platform = parts[0]
     stable_key = len(parts) == 2 and bool(parts[1])
+    zhihu_typed_key = (
+        len(parts) == 3
+        and platform == "zhihu"
+        and _ZHIHU_TYPED_CONTENT_ID_RE.fullmatch(":".join(parts[1:])) is not None
+    )
     url_fallback_key = (
         len(parts) == 3
         and parts[1] == "url"
@@ -1072,7 +1078,7 @@ def validate_saved_item_key(value: str) -> str:
     )
     if (
         not platform
-        or not (stable_key or url_fallback_key)
+        or not (stable_key or zhihu_typed_key or url_fallback_key)
         or canonical_source_platform(platform) != platform
         or _SAVED_PLATFORM_RE.fullmatch(platform) is None
     ):
@@ -1148,8 +1154,17 @@ class SavedItemIn(BaseModel):
 
     @field_validator("content_id")
     @classmethod
-    def _validate_content_id(cls, value: str) -> str:
-        if ":" in value or _has_identity_whitespace(value) or _has_unicode_control(value):
+    def _validate_content_id(cls, value: str, info: ValidationInfo) -> str:
+        platform = str(info.data.get("source_platform", ""))
+        typed_zhihu_id = (
+            platform == "zhihu"
+            and _ZHIHU_TYPED_CONTENT_ID_RE.fullmatch(value) is not None
+        )
+        if (
+            (":" in value and not typed_zhihu_id)
+            or _has_identity_whitespace(value)
+            or _has_unicode_control(value)
+        ):
             raise ValueError("content_id must be one non-blank stable identity segment")
         return value
 

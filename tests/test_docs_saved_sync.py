@@ -37,6 +37,8 @@ def test_saved_sync_docs_name_default_and_routes() -> None:
     assert "仅本地保存" in saved_sync_doc
     assert "saved_memberships(item_key)" in storage_doc
     assert "canonical `saved_memberships` 保护" in changelog
+    assert "question/answer/article" in saved_sync_doc
+    assert "知乎真实保存" in changelog
     assert "trap - EXIT INT TERM" in e2e_doc
     assert "(.items | length) > 0" in e2e_doc
     assert "非浏览器 Bearer" in e2e_doc
