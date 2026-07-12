@@ -332,7 +332,7 @@ def test_recommendation_feedback_failure_rolls_back_current_card(
     expect(like).to_be_enabled(timeout=3000)
     expect(like).not_to_have_class("is-active")
     expect(first.locator(".status-line")).to_have_text("")
-    expect(chromium_page.locator("#toast")).to_contain_text("已恢复")
+    expect(chromium_page.locator("#toastContainer .toast-item").first).to_contain_text("已恢复")
 
 
 def test_recommendations_and_runtime_recover_without_leaving_init_gate(
@@ -419,4 +419,4 @@ def test_interest_and_avoidance_probe_actions_are_immediate_and_undoable(
     interest_row.locator('[data-spec-response="reject"]').click()
     assert stub.probe_received.wait(timeout=2)
     expect(interest_row.locator('[data-spec-response="reject"]')).to_be_visible()
-    expect(chromium_page.locator("#toast")).to_contain_text("已恢复")
+    expect(chromium_page.locator("#toastContainer .toast-item").first).to_contain_text("已恢复")
