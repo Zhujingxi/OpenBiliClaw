@@ -2,6 +2,16 @@ import re
 from pathlib import Path
 
 
+def _function_body(app_js: str, name: str) -> str:
+    match = re.search(
+        rf"(?:async )?function {re.escape(name)}\([^)]*\) \{{(?P<body>.*?)\n    \}}",
+        app_js,
+        flags=re.S,
+    )
+    assert match is not None, f"desktop {name} function not found"
+    return match.group("body")
+
+
 def test_desktop_web_starts_with_empty_recommendation_list() -> None:
     """Desktop web must not show built-in demo cards as real recommendations."""
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
@@ -27,11 +37,31 @@ def test_desktop_backend_hydration_clears_empty_recommendations() -> None:
     )
     assert hydrate is not None, "desktop hydrateFromBackend not found"
     body = hydrate.group("body")
-    assert "settleResource(readRecommendationSnapshot())" in body
-    assert (
-        "applyDesktopRecommendationSnapshot(recommendationResult.value, { replace: true });" in body
-    )
+    assert "const recommendationsPromise = readRecommendationSnapshot();" in body
+    assert "function applyInitialRecommendations(items)" in body
+    assert "applyDesktopRecommendationSnapshot(items, { replace: true });" in body
     assert 'desktopRecommendationLoadState = "empty-success"' in app_js
+
+
+def test_desktop_hydration_does_not_gate_cards_on_secondary_resources() -> None:
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+    body = _function_body(app_js, "hydrateFromBackend")
+
+    assert "Promise.all([" not in body
+    assert "recommendationsPromise.then" in body
+    assert "runtimePromise.then" in body
+    assert "Promise.allSettled(secondaryPromises)" in body
+    assert "ENDPOINTS.ping" in body
+
+
+def test_desktop_auth_probe_times_out_without_assuming_authentication() -> None:
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+    body = _function_body(app_js, "fetchAuthStatus")
+
+    assert "new AbortController()" in body
+    assert "controller.abort()" in body
+    assert "5000" in body
+    assert "authenticated: true" not in body
 
 
 def test_desktop_pool_status_shows_available_count() -> None:
@@ -144,16 +174,16 @@ def test_desktop_renders_x_recommendations_as_text_cards() -> None:
     )
     assert render_videos is not None, "desktop renderVideos not found"
     render_body = render_videos.group("body")
-    assert "recommendationMediaHtml(item)" in render_body
+    assert "recommendationMediaHtml(item, index)" in render_body
 
     media_html = re.search(
-        r"function recommendationMediaHtml\(item\) \{(?P<body>.*?)\n    \}",
+        r"function recommendationMediaHtml\(item, index = 0\) \{(?P<body>.*?)\n    \}",
         app_js,
         flags=re.S,
     )
     assert media_html is not None, "desktop recommendationMediaHtml not found"
     assert "cover-text" in media_html.group("body")
-    assert "coverImg(item)" in media_html.group("body")
+    assert "coverImg(item, { eager })" in media_html.group("body")
 
     cover_class = re.search(
         r"function recommendationCoverClass\(item\) \{(?P<body>.*?)\n    \}",

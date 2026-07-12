@@ -1,6 +1,7 @@
 (() => {
     const DEFAULT_API_BASE = "http://127.0.0.1:8420/api";
     const ENDPOINTS = {
+      ping: "/ping",
       health: "/health",
       qrInfo: "/qr-info",
       initStatus: "/init-status",
@@ -204,20 +205,13 @@
       }, 1000);
     }
 
-    function settleResource(promise) {
-      return promise.then(
-        (value) => ({ ok: true, value }),
-        (error) => ({ ok: false, error })
-      );
-    }
-
     async function readRecommendationSnapshot() {
       const payload = await requestJsonStrict(ENDPOINTS.recommendations, { timeoutMs: 15000 });
       return Array.isArray(payload) ? payload : asArray(payload?.items);
     }
 
     async function readRuntimeStatusSnapshot() {
-      const payload = await requestJsonStrict(ENDPOINTS.runtimeStatus, { timeoutMs: 15000 });
+      const payload = await requestJsonStrict(ENDPOINTS.runtimeStatus, { timeoutMs: 15000, cache: "no-store" });
       return payload?.status || payload;
     }
 
@@ -511,6 +505,7 @@
     // 当前批次、也到不了「已看完」的干净状态。收到 50px：哨兵几乎贴到视口底部才触发，
     // 最后一行基本看全后再加载下一批。（2026-07-12，用户反馈强迫症体验）
     const AUTO_LOAD_ROOT_MARGIN_PX = 50;
+    const DESKTOP_EAGER_COVER_COUNT = 4;
     state.autoLoadOnScroll = storageGet(AUTO_LOAD_ON_SCROLL_KEY) !== "0";
     const THEME_STORAGE_KEY = "obc.theme";
     const THEME_OPTIONS = ["auto", "light", "dark"];
@@ -744,16 +739,26 @@
     }
 
     async function fetchAuthStatus() {
+      const base = getApiBase() || DEFAULT_API_BASE;
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 5000);
       try {
-        const base = getApiBase() || DEFAULT_API_BASE;
         const res = await fetch(`${base}/auth/status`, {
           credentials: "same-origin",
           headers: withBearer(),
+          signal: controller.signal,
         });
-        if (!res.ok) return { enabled: false, authenticated: true };
-        return await res.json();
-      } catch {
-        return { enabled: false, authenticated: true };
+        if (!res.ok) throw new Error(`/auth/status 请求失败：HTTP ${res.status}`);
+        const status = await res.json();
+        if (!status || typeof status !== "object" || Array.isArray(status)) {
+          throw new Error("/auth/status 返回了无效数据。");
+        }
+        return status;
+      } catch (error) {
+        if (error?.name === "AbortError") throw new Error("/auth/status 请求超时，请稍后重试。");
+        throw error;
+      } finally {
+        window.clearTimeout(timeoutId);
       }
     }
 
@@ -2295,13 +2300,10 @@
       return isCrossOriginBase() ? ' crossorigin="anonymous"' : "";
     }
 
-    function coverImg(item) {
+    function coverImg(item, { eager = true } = {}) {
       const url = imageProxyUrl(item.cover_url);
       if (!url) return "";
-      // loading="eager" (not lazy): cover starts fetching the moment the card is
-      // in the DOM, so a card scrolled into view never shows the gradient
-      // placeholder while a native lazy <img> defers its fetch ("白一下再出来").
-      return `<img src="${escapeHtml(url)}"${imgCrossOriginAttr()} alt="${escapeHtml(item.title)} 的封面" loading="eager" fetchpriority="auto" decoding="async" referrerpolicy="no-referrer">`;
+      return `<img src="${escapeHtml(url)}"${imgCrossOriginAttr()} alt="${escapeHtml(item.title)} 的封面" loading="${eager ? "eager" : "lazy"}" fetchpriority="${eager ? "high" : "low"}" decoding="async" referrerpolicy="no-referrer">`;
     }
 
     // Warm the browser cache for a batch of cover images before their cards are
@@ -2364,15 +2366,16 @@
       return recommendationTextCardBackdrop(item) ? " is-text-card has-backdrop" : " is-text-card";
     }
 
-    function recommendationMediaHtml(item) {
+    function recommendationMediaHtml(item, index = 0) {
+      const eager = index < DESKTOP_EAGER_COVER_COUNT;
       if (recommendationIsTextCard(item)) {
         const backdrop = recommendationTextCardBackdrop(item);
         const backdropHtml = backdrop
-          ? `<img class="cover-backdrop" src="${escapeHtml(backdrop)}"${imgCrossOriginAttr()} alt="" aria-hidden="true" loading="eager" decoding="async" referrerpolicy="no-referrer">`
+          ? `<img class="cover-backdrop" src="${escapeHtml(backdrop)}"${imgCrossOriginAttr()} alt="" aria-hidden="true" loading="${eager ? "eager" : "lazy"}" fetchpriority="${eager ? "high" : "low"}" decoding="async" referrerpolicy="no-referrer">`
           : "";
         return `${backdropHtml}<p class="cover-text">${escapeHtml(recommendationTextCardText(item))}</p>`;
       }
-      return coverImg(item);
+      return coverImg(item, { eager });
     }
 
     function recommendationMeta(item) {
@@ -2463,7 +2466,7 @@
         $("#retryEmptyRecommendations")?.addEventListener("click", restartDesktopFailedRecoveries);
         return;
       }
-      grid.replaceChildren(...items.map((item) => {
+      grid.replaceChildren(...items.map((item, index) => {
         const card = document.createElement("article");
         const url = contentUrl(item);
         const durationBadge = item.content_type === "video" && item.duration > 0
@@ -2475,12 +2478,12 @@
         card.innerHTML = `
           ${url
             ? `<a class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" aria-label="打开 ${escapeHtml(item.title)}">
-            ${recommendationMediaHtml(item)}
+            ${recommendationMediaHtml(item, index)}
             <span class="platform">${escapeHtml(platformName(item.platform))}</span>
             ${durationBadge}
           </a>`
             : `<button class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" type="button" aria-label="打开 ${escapeHtml(item.title)}">
-            ${recommendationMediaHtml(item)}
+            ${recommendationMediaHtml(item, index)}
             <span class="platform">${escapeHtml(platformName(item.platform))}</span>
             ${durationBadge}
           </button>`}
@@ -5985,7 +5988,11 @@
           // First successful (re)connect with no backend data yet → hydrate.
           // Scoped to the never-hydrated case so transient reconnects don't
           // wipe locally appended recommendation cards (see fix 79042ce).
-          if (!state.initStatus && !state.runtimeStatus) scheduleBackendHydration();
+          if (!state.initStatus && !state.runtimeStatus) {
+            void ensureAuthenticated()
+              .then(scheduleBackendHydration)
+              .catch(() => {});
+          }
         });
         socket.addEventListener("message", (event) => {
           try { handleRuntimeEvent(JSON.parse(event.data)); } catch {}
@@ -6014,95 +6021,182 @@
 
     async function hydrateFromBackend() {
       const firstRuntimeGeneration = desktopRuntimeGeneration;
-      const [health, recommendationResult, runtimeResult, activity, profile, delights, notification, chatTurns, delightChatTurns, config, initStatus] = await Promise.all([
-        requestJson(ENDPOINTS.health),
-        settleResource(readRecommendationSnapshot()),
-        settleResource(readRuntimeStatusSnapshot()),
-        requestJson(`${ENDPOINTS.activityFeed}?limit=5`),
-        requestJson(ENDPOINTS.profile),
-        requestJson(ENDPOINTS.delightBatch),
-        requestJson(ENDPOINTS.notificationPending),
-        requestJson(`${ENDPOINTS.chatTurns}?session=webui&scope=chat&limit=20`),
-        requestJson(`${ENDPOINTS.chatTurns}?session=webui&scope=delight&limit=80`),
-        requestJson(ENDPOINTS.config),
-        requestJson(ENDPOINTS.initStatus)
-      ]);
-      if (health) $("#statusLabel").textContent = "已连接本地后端";
-      if (initStatus) state.initStatus = initStatus;
-      if (recommendationResult.ok) {
-        applyDesktopRecommendationSnapshot(recommendationResult.value, { replace: true });
-      } else if (state.videos.length > 0) {
-        clearDesktopRecommendationRecovery("ready");
-      } else {
+      let runtimeReconciliationGeneration = null;
+
+      function applyInitialRecommendations(items) {
+        applyDesktopRecommendationSnapshot(items, { replace: true });
+        renderFilters();
+        renderVideos();
+      }
+
+      function markDesktopRecommendationFailedAndRecover() {
+        if (state.videos.length > 0) {
+          clearDesktopRecommendationRecovery("ready");
+          return;
+        }
         desktopRecommendationLoadState = "failed";
         scheduleDesktopRecommendationRecovery();
+        renderVideos();
       }
-      if (activity) {
-        state.activity = activity;
-        state.activityItems = asArray(activity.items);
-        state.activityCursor = activity.next_cursor || activity.next || "";
-        state.activityHasMore = Boolean(activity.has_more && state.activityCursor);
+
+      function readRuntimeSnapshot() {
+        return readRuntimeStatusSnapshot();
       }
-      const profilePayload = profile?.profile || profile;
-      if (profilePayload && profilePayload.initialized !== false) {
-        state.profile = profilePayload;
-        hydrateInboxFromSpeculations(profilePayload.speculative_interests);
-        hydrateInboxFromSpeculations(profilePayload.speculative_avoidances, "avoidance.probe");
-      }
-      const chatItems = Array.isArray(chatTurns) ? chatTurns : asArray(chatTurns?.items);
-      if (chatItems.length) {
-        state.chat = chatItems.flatMap((turn) => [
-          { role: "user", text: turn.message || turn.user_message || "" },
-          { role: "agent", text: turn.reply || turn.assistant_message || turn.status || "等待后端回复中。" }
-        ]).filter((item) => item.text);
-      }
-      // Re-read after recommendations: GET /api/recommendations may consume the
-      // pool, so the later snapshot is preferred. Keep the settled first read
-      // as fallback and never turn a late timeout into a fake zero inventory.
-      let effectiveRuntime = runtimeResult.ok && firstRuntimeGeneration === desktopRuntimeGeneration
-        ? runtimeResult.value
-        : null;
-      let effectiveRuntimeGeneration = effectiveRuntime ? firstRuntimeGeneration : null;
-      const secondRuntimeGeneration = desktopRuntimeGeneration;
-      try {
-        const latestRuntime = await readRuntimeStatusSnapshot();
-        if (secondRuntimeGeneration === desktopRuntimeGeneration) {
-          effectiveRuntime = latestRuntime;
-          effectiveRuntimeGeneration = secondRuntimeGeneration;
+
+      function applyInitialRuntimeSnapshot(snapshot) {
+        if (firstRuntimeGeneration !== desktopRuntimeGeneration) return;
+        try {
+          const applied = applyDesktopRuntimeSnapshot(snapshot, firstRuntimeGeneration);
+          if (applied && runtimeReconciliationGeneration === firstRuntimeGeneration) {
+            runtimeReconciliationGeneration = desktopRuntimeGeneration;
+          }
+          if (applied && grid.querySelector(".init-onboarding")) renderVideos();
+        } catch {
+          markDesktopRuntimeFailedAndRecover();
         }
-      } catch {
-        // Keep the first settled snapshot, or a runtime-stream recovery that
-        // may have completed while this slower HTTP read was in flight.
       }
-      if (effectiveRuntime && effectiveRuntimeGeneration !== null) {
-        applyDesktopRuntimeSnapshot(effectiveRuntime, effectiveRuntimeGeneration);
-      } else if (secondRuntimeGeneration === desktopRuntimeGeneration) {
+
+      function markDesktopRuntimeFailedAndRecover() {
+        if (firstRuntimeGeneration !== desktopRuntimeGeneration) return;
         desktopRuntimeLoadState = "failed";
         scheduleDesktopRuntimeRecovery();
         renderDesktopRuntimeFailure();
       }
-      applyDelights(delights);
-      const delightChatItems = Array.isArray(delightChatTurns) ? delightChatTurns : asArray(delightChatTurns?.items);
-      for (const turn of delightChatItems.filter(Boolean)) applyTurnToDelight({ ...turn, scope: turn.scope || "delight" });
-      if (notification?.item) mergeMessages([{ ...notification.item, type: "notification" }]);
-      applyConfig(config?.config || config);
-      renderAll();
-      // Re-attach the init poll if a run is live at load time. Hydrate only
-      // fetches init-status ONCE; without this a page opened/refreshed mid-init
-      // freezes on that single frame whenever SSE is unavailable (proxy strips
-      // it / stream dropped). Critically, the touch() heartbeat deliberately
-      // publishes NO SSE event (coordinator invariant 5), so a hung backend
-      // emits no init_progress at all — only the poll observes last_activity,
-      // so only the poll can drive the stall detector. Mirrors the setup
-      // wizard's boot guard. First-pool waiting also needs the poll to notice
-      // the pool filling.
-      if (initStatus?.running
-        || embeddingPullProgressView(initStatus).active
-        || initWaitingForFirstPool(initStatus)) {
-        scheduleInitStatusRefresh(INIT_STATUS_POLL_MS);
+
+      function applyHealthSnapshot(snapshot) {
+        if (snapshot) $("#statusLabel").textContent = "已连接本地后端";
       }
-      // 预取 LAN IP，供二维码面板使用
+
+      function applyInitStatusSnapshot(snapshot) {
+        if (!snapshot) return;
+        state.initStatus = snapshot;
+        renderVideos();
+        // Re-attach the init poll if a run is live at load time. Hydrate only
+        // fetches init-status once, while the poll observes quiet heartbeats and
+        // first-pool readiness when runtime events are unavailable.
+        if (snapshot.running
+          || embeddingPullProgressView(snapshot).active
+          || initWaitingForFirstPool(snapshot)) {
+          scheduleInitStatusRefresh(INIT_STATUS_POLL_MS);
+        }
+      }
+
+      function applyActivitySnapshot(snapshot) {
+        if (!snapshot) return;
+        state.activity = snapshot;
+        state.activityItems = asArray(snapshot.items);
+        state.activityCursor = snapshot.next_cursor || snapshot.next || "";
+        state.activityHasMore = Boolean(snapshot.has_more && state.activityCursor);
+        renderRail();
+        renderActivityHistory();
+      }
+
+      function applyProfileSnapshot(snapshot) {
+        const profile = snapshot?.profile || snapshot;
+        if (!profile || profile.initialized === false) return;
+        state.profile = profile;
+        hydrateInboxFromSpeculations(profile.speculative_interests);
+        hydrateInboxFromSpeculations(profile.speculative_avoidances, "avoidance.probe");
+        renderRail();
+        renderProfileDetails();
+        renderMessages();
+      }
+
+      function applyDelightSnapshot(snapshot) {
+        applyDelights(snapshot);
+      }
+
+      function applyNotificationSnapshot(snapshot) {
+        if (snapshot?.item) mergeMessages([{ ...snapshot.item, type: "notification" }]);
+      }
+
+      function applyChatSnapshot(snapshot) {
+        const chatItems = Array.isArray(snapshot) ? snapshot : asArray(snapshot?.items);
+        if (!chatItems.length) return;
+        state.chat = chatItems.flatMap((turn) => {
+          const failed = String(turn.status || "").toLowerCase() === "failed";
+          const agentText = failed
+            ? turn.error || "这句还没发出去，稍后再试。"
+            : turn.reply || turn.assistant_message || "等待后端回复中。";
+          return [
+            { role: "user", text: turn.message || turn.user_message || "" },
+            { role: "agent", text: agentText }
+          ];
+        }).filter((item) => item.text);
+        renderChat();
+      }
+
+      function applyDelightChatSnapshot(snapshot) {
+        const items = Array.isArray(snapshot) ? snapshot : asArray(snapshot?.items);
+        for (const turn of items.filter(Boolean)) {
+          applyTurnToDelight({ ...turn, scope: turn.scope || "delight" });
+        }
+      }
+
+      function applyConfigSnapshot(snapshot) {
+        applyConfig(snapshot?.config || snapshot);
+        renderFilters();
+        syncSourceMetric();
+      }
+
+      async function reconcileRuntimeAfterRecommendations() {
+        const secondRuntimeGeneration = desktopRuntimeGeneration;
+        runtimeReconciliationGeneration = secondRuntimeGeneration;
+        try {
+          const applied = applyDesktopRuntimeSnapshot(
+            await readRuntimeSnapshot(),
+            runtimeReconciliationGeneration
+          );
+          if (applied && grid.querySelector(".init-onboarding")) renderVideos();
+        } catch {
+          // Keep the first successful runtime snapshot (or a newer stream
+          // update). If both boot reads failed, its resource-level recovery is
+          // already scheduled by markDesktopRuntimeFailedAndRecover().
+          if (runtimeReconciliationGeneration !== desktopRuntimeGeneration) return;
+          if (desktopRuntimeLoadState === "failed") {
+            scheduleDesktopRuntimeRecovery();
+            renderDesktopRuntimeFailure();
+          }
+        }
+      }
+
+      const recommendationsPromise = readRecommendationSnapshot();
+      const runtimePromise = readRuntimeSnapshot();
+
+      const recommendationApplicationPromise = recommendationsPromise.then(
+        (items) => applyInitialRecommendations(items),
+        () => markDesktopRecommendationFailedAndRecover(),
+      );
+      const runtimeApplicationPromise = runtimePromise.then(
+        (snapshot) => applyInitialRuntimeSnapshot(snapshot),
+        () => markDesktopRuntimeFailedAndRecover(),
+      );
+      const runtimeReconciliationPromise = recommendationApplicationPromise.then(
+        () => reconcileRuntimeAfterRecommendations(),
+        () => reconcileRuntimeAfterRecommendations(),
+      );
+
+      const secondaryPromises = [
+        requestJson(ENDPOINTS.ping).then(applyHealthSnapshot),
+        requestJson(ENDPOINTS.health),
+        requestJson(ENDPOINTS.initStatus).then(applyInitStatusSnapshot),
+        requestJson(`${ENDPOINTS.activityFeed}?limit=5`).then(applyActivitySnapshot),
+        requestJson(ENDPOINTS.profile).then(applyProfileSnapshot),
+        requestJson(ENDPOINTS.delightBatch).then(applyDelightSnapshot),
+        requestJson(ENDPOINTS.notificationPending).then(applyNotificationSnapshot),
+        requestJson(`${ENDPOINTS.chatTurns}?session=webui&scope=chat&limit=20`).then(applyChatSnapshot),
+        requestJson(`${ENDPOINTS.chatTurns}?session=webui&scope=delight&limit=80`).then(applyDelightChatSnapshot),
+        requestJson(ENDPOINTS.config).then(applyConfigSnapshot),
+      ];
+
+      // 预取 LAN IP，供二维码面板使用；它不参与任一首屏资源的应用顺序。
       requestJson(ENDPOINTS.qrInfo).then((info) => { if (info?.lan_ip) _cachedLanIp = info.lan_ip; }).catch(() => {});
+      await Promise.allSettled(secondaryPromises);
+      await Promise.allSettled([
+        recommendationApplicationPromise,
+        runtimeApplicationPromise,
+        runtimeReconciliationPromise,
+      ]);
     }
 
     function renderAll() {
@@ -6997,5 +7091,6 @@
         $("#statusLabel").textContent = "后端数据加载失败";
         $("#runtimeSummary").textContent = error?.message || "页面已保留离线数据，可打开设置检查 FastAPI 地址。";
         showToast("后端数据加载失败，页面已保留离线数据");
+        connectRuntimeStream();
       });
     })();

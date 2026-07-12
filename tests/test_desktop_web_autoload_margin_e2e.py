@@ -80,6 +80,8 @@ def margin_server() -> tuple[str, MarginStub]:
             if path.startswith("/web/assets/"):
                 rel = path.removeprefix("/web/assets/")
                 return self._serve_file(ROOT / "src/openbiliclaw/web/desktop/assets" / rel)
+            if path == "/api/ping":
+                return _json_response(self, {"ok": True})
             if path == "/api/health":
                 return _json_response(self, {"ok": True, "embedding_ready": True})
             if path == "/api/auth/status":

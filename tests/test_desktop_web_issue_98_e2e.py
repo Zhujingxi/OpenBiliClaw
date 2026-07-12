@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import mimetypes
 import threading
@@ -19,9 +20,17 @@ sync_playwright = playwright_api.sync_playwright
 pytestmark = pytest.mark.integration
 
 ROOT = Path(__file__).resolve().parents[1]
+ONE_PIXEL_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42Y"
+    "AAAAASUVORK5CYII="
+)
 
 
-def _recommendations() -> list[dict[str, Any]]:
+def _recommendations(
+    count: int = 3,
+    *,
+    image_backed: bool = False,
+) -> list[dict[str, Any]]:
     return [
         {
             "id": index,
@@ -33,13 +42,25 @@ def _recommendations() -> list[dict[str, Any]]:
             "up_name": f"UP {index}",
             "topic_label": "交互测试",
             "expression": f"第 {index} 张卡片的推荐理由。",
+            "cover_url": (
+                f"https://synthetic.invalid/covers/issue-98-{index}.png"
+                if image_backed
+                else ""
+            ),
         }
-        for index in range(1, 4)
+        for index in range(1, count + 1)
     ]
 
 
 class Issue98Stub:
     def __init__(self) -> None:
+        self.health_delay_seconds = 0.0
+        self.recommendation_reads = 0
+        self.runtime_reads = 0
+        self.runtime_first_delay_seconds = 0.0
+        self.runtime_reread_received = threading.Event()
+        self.recommendations = _recommendations()
+        self.image_proxy_reads = 0
         self.feedback_posts: list[dict[str, Any]] = []
         self.feedback_received = threading.Event()
         self.feedback_delay_seconds = 0.0
@@ -63,6 +84,19 @@ def _json_response(
         handler.wfile.write(body)
 
 
+def _binary_response(
+    handler: BaseHTTPRequestHandler,
+    payload: bytes,
+    content_type: str,
+) -> None:
+    handler.send_response(200)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Content-Length", str(len(payload)))
+    handler.end_headers()
+    with suppress(BrokenPipeError):
+        handler.wfile.write(payload)
+
+
 @pytest.fixture()
 def issue_98_server() -> tuple[str, Issue98Stub]:
     state = Issue98Stub()
@@ -81,18 +115,30 @@ def issue_98_server() -> tuple[str, Issue98Stub]:
             if path.startswith("/web/assets/"):
                 rel = path.removeprefix("/web/assets/")
                 return self._serve_file(ROOT / "src/openbiliclaw/web/desktop/assets" / rel)
+            if path == "/api/ping":
+                return _json_response(self, {"ok": True})
             if path == "/api/health":
+                if state.health_delay_seconds:
+                    time.sleep(state.health_delay_seconds)
                 return _json_response(self, {"ok": True, "embedding_ready": True})
             if path == "/api/auth/status":
                 return _json_response(self, {"enabled": False, "authenticated": True})
             if path == "/api/recommendations":
-                return _json_response(self, {"items": _recommendations()})
+                state.recommendation_reads += 1
+                return _json_response(self, {"items": state.recommendations})
             if path == "/api/runtime-status":
+                state.runtime_reads += 1
+                runtime_read = state.runtime_reads
+                if runtime_read >= 2:
+                    state.runtime_reread_received.set()
+                if runtime_read == 1 and state.runtime_first_delay_seconds:
+                    time.sleep(state.runtime_first_delay_seconds)
+                available = 30 if runtime_read == 1 else 27
                 return _json_response(
                     self,
                     {
                         "initialized": True,
-                        "pool_available_count": 30,
+                        "pool_available_count": available,
                         "pool_size": 30,
                         "pool_refresh_state": "idle",
                         "pool_source_shares": {"bilibili": 1.0},
@@ -100,6 +146,9 @@ def issue_98_server() -> tuple[str, Issue98Stub]:
                         "unread_count": 0,
                     },
                 )
+            if path == "/api/image-proxy":
+                state.image_proxy_reads += 1
+                return _binary_response(self, ONE_PIXEL_PNG, "image/png")
             if path == "/api/init-status":
                 return _json_response(
                     self,
@@ -365,6 +414,69 @@ def test_recommendations_and_runtime_recover_without_leaving_init_gate(
     expect(chromium_page.locator("#poolAvailable")).to_contain_text("30")
     assert request_counts["recommendations"] >= 2
     assert request_counts["runtime"] >= 3
+
+
+def test_fast_recommendations_render_before_slow_health_and_runtime_reconciles(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = issue_98_server
+    stub.health_delay_seconds = 4.0
+    chromium_page.goto(f"{base_url}/web/", wait_until="domcontentloaded")
+
+    expect(chromium_page.locator("#videoGrid .video-card")).to_have_count(3, timeout=1500)
+    expect(chromium_page.locator("#poolAvailable")).to_contain_text("27", timeout=3000)
+    assert stub.recommendation_reads == 1
+    assert stub.runtime_reads >= 2
+
+
+def test_runtime_reread_does_not_wait_for_slow_initial_runtime(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = issue_98_server
+    stub.runtime_first_delay_seconds = 4.0
+    chromium_page.goto(f"{base_url}/web/", wait_until="domcontentloaded")
+
+    assert stub.runtime_reread_received.wait(timeout=1.5), (
+        f"runtime reread did not start: recommendations={stub.recommendation_reads}, "
+        f"runtime={stub.runtime_reads}"
+    )
+    expect(chromium_page.locator("#videoGrid .video-card")).to_have_count(3, timeout=500)
+    expect(chromium_page.locator("#poolAvailable")).to_contain_text("27", timeout=3000)
+    assert stub.runtime_reads >= 2
+
+
+def test_recommendation_cover_requests_are_bounded_before_scroll(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = issue_98_server
+    stub.recommendations = _recommendations(80, image_backed=True)
+    unexpected_upstream_requests: list[str] = []
+
+    def block_synthetic_upstream(route: Any) -> None:
+        unexpected_upstream_requests.append(route.request.url)
+        route.abort()
+
+    chromium_page.route("https://synthetic.invalid/**", block_synthetic_upstream)
+    chromium_page.goto(f"{base_url}/web/", wait_until="domcontentloaded")
+
+    cards = chromium_page.locator("#videoGrid .video-card")
+    expect(cards).to_have_count(80)
+    for index in range(4):
+        expect(cards.nth(index).locator("img")).to_have_attribute("loading", "eager")
+        expect(cards.nth(index).locator("img")).to_have_attribute("fetchpriority", "high")
+    for index in range(4, 80):
+        expect(cards.nth(index).locator("img")).to_have_attribute("loading", "lazy")
+        expect(cards.nth(index).locator("img")).to_have_attribute("fetchpriority", "low")
+    for index in range(80):
+        src = cards.nth(index).locator("img").evaluate("image => image.src")
+        assert src.startswith(f"{base_url}/api/image-proxy?")
+
+    chromium_page.wait_for_timeout(400)
+    assert unexpected_upstream_requests == []
+    assert 4 <= stub.image_proxy_reads < 80
 
 
 def test_interest_and_avoidance_probe_actions_are_immediate_and_undoable(
