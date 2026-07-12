@@ -506,7 +506,11 @@
     state.dismissOnReshuffle = storageGet(DISMISS_ON_RESHUFFLE_KEY) === "1";
     const AUTO_LOAD_ON_SCROLL_KEY = "openbiliclaw.webui.autoLoadOnScroll";
     const AUTO_LOAD_COOLDOWN_MS = 8000;
-    const AUTO_LOAD_ROOT_MARGIN_PX = 300;
+    // 校准：一行卡片(16:9 封面 + 文案)高约 250–350px，若预载边距接近一行高度，
+    // 自动加载会在最后一行(最多 4 张)还没滚进视口时就追加新卡片，用户永远看不全
+    // 当前批次、也到不了「已看完」的干净状态。收到 50px：哨兵几乎贴到视口底部才触发，
+    // 最后一行基本看全后再加载下一批。（2026-07-12，用户反馈强迫症体验）
+    const AUTO_LOAD_ROOT_MARGIN_PX = 50;
     state.autoLoadOnScroll = storageGet(AUTO_LOAD_ON_SCROLL_KEY) !== "0";
     const THEME_STORAGE_KEY = "obc.theme";
     const THEME_OPTIONS = ["auto", "light", "dark"];
