@@ -3795,6 +3795,119 @@ async def test_run_forever_drives_pipeline_tick_and_refresh() -> None:
     )
 
 
+async def test_run_forever_startup_order_repairs_before_llm_and_background_tasks() -> None:
+    calls: list[str] = []
+    candidate_started = asyncio.Event()
+    expression_started = asyncio.Event()
+
+    class _OrderedDatabase(_FakeDatabase):
+        def maintain_pool_inventory(self, **kwargs: object) -> PoolMaintenanceResult:
+            calls.append("maintenance")
+            return super().maintain_pool_inventory(**kwargs)  # type: ignore[arg-type]
+
+    class _OrderedCoordinator:
+        async def run_forever(self) -> None:
+            calls.append("candidate")
+            candidate_started.set()
+            await asyncio.Event().wait()
+
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_OrderedDatabase(events=[]),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        candidate_eval_coordinator=_OrderedCoordinator(),
+        check_interval_seconds=3600,
+    )
+
+    async def _prepare() -> int:
+        calls.append("prepare_delight")
+        return 0
+
+    async def _expression_loop() -> None:
+        calls.append("expression")
+        expression_started.set()
+        await asyncio.Event().wait()
+
+    controller.prepare_delight_candidates = _prepare  # type: ignore[method-assign]
+    controller._loop_pool_precompute = _expression_loop  # type: ignore[method-assign]
+    task = asyncio.create_task(controller.run_forever())
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(candidate_started.wait(), expression_started.wait()),
+            timeout=0.5,
+        )
+        assert calls[0] == "maintenance"
+        assert calls.index("maintenance") < calls.index("prepare_delight")
+        assert calls.index("maintenance") < calls.index("candidate")
+        assert calls.index("maintenance") < calls.index("expression")
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+async def test_hot_reload_new_controller_repairs_before_new_background_tasks() -> None:
+    async def _run_controller_once(label: str) -> list[str]:
+        calls: list[str] = []
+        candidate_started = asyncio.Event()
+        expression_started = asyncio.Event()
+
+        class _ReloadDatabase(_FakeDatabase):
+            def maintain_pool_inventory(self, **kwargs: object) -> PoolMaintenanceResult:
+                calls.append(f"{label}:maintenance")
+                return super().maintain_pool_inventory(**kwargs)  # type: ignore[arg-type]
+
+        class _ReloadCoordinator:
+            async def run_forever(self) -> None:
+                calls.append(f"{label}:candidate")
+                candidate_started.set()
+                await asyncio.Event().wait()
+
+        controller = ContinuousRefreshController(
+            memory_manager=_FakeMemoryManager(),
+            database=_ReloadDatabase(events=[]),
+            soul_engine=_FakeSoulEngine(),
+            discovery_engine=_FakeDiscoveryEngine(),
+            recommendation_engine=_FakeRecommendationEngine(),
+            candidate_eval_coordinator=_ReloadCoordinator(),
+            check_interval_seconds=3600,
+        )
+
+        async def _prepare() -> int:
+            calls.append(f"{label}:prepare_delight")
+            return 0
+
+        async def _expression_loop() -> None:
+            calls.append(f"{label}:expression")
+            expression_started.set()
+            await asyncio.Event().wait()
+
+        controller.prepare_delight_candidates = _prepare  # type: ignore[method-assign]
+        controller._loop_pool_precompute = _expression_loop  # type: ignore[method-assign]
+        task = asyncio.create_task(controller.run_forever())
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(candidate_started.wait(), expression_started.wait()),
+                timeout=0.5,
+            )
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        return calls
+
+    old_calls = await _run_controller_once("old")
+    new_calls = await _run_controller_once("new")
+
+    assert old_calls[0] == "old:maintenance"
+    assert new_calls[0] == "new:maintenance"
+    assert new_calls.index("new:maintenance") < new_calls.index("new:prepare_delight")
+    assert new_calls.index("new:maintenance") < new_calls.index("new:candidate")
+    assert new_calls.index("new:maintenance") < new_calls.index("new:expression")
+
+
 async def test_run_forever_starts_one_candidate_eval_coordinator() -> None:
     class _Coordinator:
         def __init__(self) -> None:

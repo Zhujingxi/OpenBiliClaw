@@ -184,6 +184,7 @@ class SupportsEventDatabase(Protocol):
         max_per_explore_cluster: int = 3,
         stale_max_age_days: int = 14,
         xhs_self_nickname: str = "",
+        recover_suppressed: bool = True,
     ) -> PoolMaintenanceResult: ...
     def iter_cover_lifecycle(self) -> list[tuple[str, str, bool]]: ...
     def iter_servable_cover_urls(
@@ -1046,6 +1047,8 @@ class ContinuousRefreshController:
             ├─ _loop_image_cache_cleanup() 6h  prune consumed+unsaved covers
             └─ _loop_cover_prefetch()    60s   cache fresh-token covers (XHS)
         """
+        with suppress(Exception):
+            self._enforce_pool_cap()
         if self._llm_work_allowed():
             with suppress(Exception):
                 await self.prepare_delight_candidates()

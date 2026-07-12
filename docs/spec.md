@@ -282,6 +282,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │     PoolCurator + 双轴 fatigue + per-group 窗口 + 新兴趣放大保护 │ │
 │  │     request_replenishment + 定时/手动补货 + B/XHS/DY/YT/X/Zhihu/Reddit=5/1/1/1/1/1/1 │ │
 │  │ CandidateEvalCoordinator: raw -> token claim -> 3 LLM workers -> serial commit -> serve │ │
+│  │ Startup/reload: recover eligible suppressed -> atomic maintenance -> LLM/background loops │ │
 │  │     内容元数据：时长/互动/发布时间 -> candidates -> content_cache -> API -> 四端 │ │
 │  │     Query inspiration cache: search preview -> inspiration/expansion -> keyword provenance │ │
 │  │     InspirationKeywordPipeline: axis library learning loop (yield backfill/lifecycle) + breadth config │ │

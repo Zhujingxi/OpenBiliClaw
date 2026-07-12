@@ -2874,7 +2874,13 @@ class Database:
         )
         return self._balance_pool_rows(rows, limit=limit)
 
-    def _pool_servable_where_clause(self, xhs_self_nickname: str) -> tuple[str, tuple[Any, ...]]:
+    def _pool_servable_where_clause_on(
+        self,
+        conn: sqlite3.Connection,
+        xhs_self_nickname: str,
+        *,
+        pool_status: str = "fresh",
+    ) -> tuple[str, tuple[Any, ...]]:
         """Shared WHERE fragment + params defining a ``serve()``-loadable row.
 
         Central definition of "servable right now", mirroring the gate baked
@@ -2888,12 +2894,12 @@ class Database:
         admission_sql, admission_params = self._pool_admission_sql()
         guard_sql = _xhs_self_author_guard_sql()
         guard_params = _xhs_self_author_guard_params(xhs_self_nickname)
-        delight_threshold = self.dynamic_delight_threshold(
-            default_threshold=_DELIGHT_CLAIM_MIN_SCORE
+        delight_threshold = self._dynamic_delight_threshold_on(
+            conn, default_threshold=_DELIGHT_CLAIM_MIN_SCORE
         )
         delight_guard_sql = _delight_claim_guard_sql()
         clause = f"""
-            COALESCE(pool_status, 'fresh') = 'fresh'
+            COALESCE(pool_status, 'fresh') = ?
               AND COALESCE(feedback_type, '') != 'dislike'
               AND {admission_sql}
               AND COALESCE(pool_expression, '') != ''
@@ -2912,7 +2918,10 @@ class Database:
                 WHERE r.bvid = content_cache.bvid
               )
         """
-        return clause, (*admission_params, *guard_params, delight_threshold)
+        return clause, (pool_status, *admission_params, *guard_params, delight_threshold)
+
+    def _pool_servable_where_clause(self, xhs_self_nickname: str) -> tuple[str, tuple[Any, ...]]:
+        return self._pool_servable_where_clause_on(self.conn, xhs_self_nickname)
 
     def get_pool_candidates_for_platform(
         self,
@@ -4009,6 +4018,98 @@ class Database:
                 f"before={available_before} after={available_after} target={target}"
             )
 
+    def _recover_suppressed_pool_inventory_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        deficit: int,
+        source_share_quotas: Mapping[str, int],
+        xhs_self_nickname: str,
+    ) -> list[str]:
+        """Restore eligible paid-for rows until canonical availability fills its gap."""
+        clean_deficit = max(0, int(deficit))
+        if clean_deficit <= 0:
+            return []
+
+        available_rows = self._load_available_pool_candidate_rows_on(
+            conn,
+            xhs_self_nickname=xhs_self_nickname,
+        )
+        desired_available = len(available_rows) + clean_deficit
+        current_family_count: dict[str, int] = defaultdict(int)
+        for row in available_rows:
+            current_family_count[
+                _pool_source_family(row.get("source"), row.get("source_platform"))
+            ] += 1
+
+        where_clause, where_params = self._pool_servable_where_clause_on(
+            conn,
+            xhs_self_nickname,
+            pool_status="suppressed",
+        )
+        candidate_rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT *
+                FROM content_cache
+                WHERE {where_clause}
+                  AND recommended_at IS NULL
+                """,
+                where_params,
+            ).fetchall()
+        ]
+        viewed_content_keys = self._recent_viewed_content_keys_on(conn)
+        eligible_rows = [
+            row
+            for row in candidate_rows
+            if str(row.get("bvid", "")).strip()
+            and not self._is_viewed_row(row, viewed_content_keys)
+            and _is_linkable_pool_source(
+                row.get("source"),
+                row.get("source_platform"),
+                row.get("content_url"),
+            )
+        ]
+        ranked_rows = sorted(
+            eligible_rows,
+            key=lambda row: (
+                0
+                if current_family_count[
+                    _pool_source_family(row.get("source"), row.get("source_platform"))
+                ]
+                < source_share_quotas.get(
+                    _pool_source_family(row.get("source"), row.get("source_platform")),
+                    0,
+                )
+                else 1,
+                -float(row.get("relevance_score", 0.0) or 0.0),
+                -self._sort_timestamp_score(str(row.get("last_scored_at", "") or "")),
+                str(row.get("bvid", "")),
+            ),
+        )
+
+        restored_ids: list[str] = []
+        for row in ranked_rows:
+            bvid = str(row["bvid"])
+            cursor = conn.execute(
+                """
+                UPDATE content_cache
+                SET pool_status = 'fresh'
+                WHERE bvid = ? AND pool_status = 'suppressed'
+                """,
+                (bvid,),
+            )
+            if cursor.rowcount:
+                restored_ids.append(bvid)
+            available_rows = self._load_available_pool_candidate_rows_on(
+                conn,
+                xhs_self_nickname=xhs_self_nickname,
+            )
+            if len(available_rows) >= desired_available:
+                break
+        return restored_ids
+
     def maintain_pool_inventory(
         self,
         *,
@@ -4020,6 +4121,7 @@ class Database:
         max_per_explore_cluster: int = 3,
         stale_max_age_days: int = 14,
         xhs_self_nickname: str = "",
+        recover_suppressed: bool = True,
     ) -> PoolMaintenanceResult:
         """Maintain pool diversity and raw capacity in one short transaction."""
         clean_target = max(0, int(target))
@@ -4045,10 +4147,28 @@ class Database:
             )
             available_before = len(before_rows)
             snapshot_acquired = True
+            raw_before = self._count_pool_raw_material_on(conn)
             protected_ids = {
                 str(row["bvid"]) for row in before_rows[: min(len(before_rows), clean_target)]
             }
-            raw_before = self._count_pool_raw_material_on(conn)
+            recovered_ids: list[str] = []
+            if recover_suppressed:
+                recovered_ids = self._recover_suppressed_pool_inventory_on(
+                    conn,
+                    deficit=max(0, clean_target - available_before),
+                    source_share_quotas=clean_source_quotas,
+                    xhs_self_nickname=xhs_self_nickname,
+                )
+                recovered_available_rows = self._load_available_pool_candidate_rows_on(
+                    conn,
+                    xhs_self_nickname=xhs_self_nickname,
+                )
+                recovered_set = set(recovered_ids)
+                protected_ids.update(
+                    str(row["bvid"])
+                    for row in recovered_available_rows
+                    if str(row["bvid"]) in recovered_set
+                )
             initial_raw_rows = {
                 str(row["bvid"]): row for row in self._load_pool_raw_material_rows_on(conn)
             }
@@ -4137,12 +4257,26 @@ class Database:
                         _pool_source_family(row["source_strategy"], row["source_platform"])
                     ] += 1
 
+            recovered_suppressed = 0
+            if recovered_ids:
+                placeholders = ", ".join("?" for _ in recovered_ids)
+                recovered_suppressed = int(
+                    conn.execute(
+                        f"""
+                        SELECT COUNT(*)
+                        FROM content_cache
+                        WHERE bvid IN ({placeholders}) AND pool_status = 'fresh'
+                        """,
+                        recovered_ids,
+                    ).fetchone()[0]
+                )
+
             result = PoolMaintenanceResult(
                 available_before=available_before,
                 available_after=len(after_rows),
                 target=clean_target,
                 protected_available=len(protected_ids),
-                recovered_suppressed=0,
+                recovered_suppressed=recovered_suppressed,
                 trimmed_stale=len(stale_ids),
                 trimmed_explore_cluster=len(explore_ids),
                 trimmed_ready_reserve=trimmed_ready_reserve,

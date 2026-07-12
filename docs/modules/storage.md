@@ -17,7 +17,7 @@
 | SQLite schema 初始化 | ✅ | `Database.initialize()` 自动创建核心表和索引，支持旧库增量补列 / 补索引。 |
 | 推荐池 readiness 计数 | ✅ | `count_pool_readiness()` 返回 `available/raw/pending/pending_eval/evaluated_pending`，供 runtime status 和补货判断使用。 |
 | 来源 raw material 统计 | ✅ | `count_pool_raw_material_by_source()` 合并 `content_cache` raw rows 和 `discovery_candidates` 待评估候选，供 raw ceiling headroom 使用。 |
-| 原子库存维护 | ✅ | `maintain_pool_inventory()` 在短连接 `BEGIN IMMEDIATE` 中统一 stale / explore / topic / source / raw 维护，保护 canonical available 底线并在不变量失败时整体回滚。 |
+| 原子库存维护与历史恢复 | ✅ | `maintain_pool_inventory()` 在短连接 `BEGIN IMMEDIATE` 中先恢复仍合格的历史 `suppressed` 结果，再统一 stale / explore / topic / source / raw 维护；保护 canonical available 底线并在不变量失败时整体回滚。 |
 | 七平台来源族归一化 | ✅ | `sources.platforms` 以可枚举规则统一 Bilibili、小红书、抖音、YouTube、X、知乎、Reddit 的别名、策略前缀和 URL host；pool accounting、已看身份与 URL 推断共用同一口径。 |
 | discovery 待评估池 | ✅ | `discovery_candidates` 支持 mixed-source enqueue / claim / evaluation / admission，并持久化 `claim_token`、`score_threshold`、`eval_attempts` 与 batch 级 `batch_eval_attempts`；stale-sensitive 完成和释放都匹配 `id + status + claim_token`。 |
 | discovery 历史候选查询 | ✅ | `get_existing_discovery_candidate_keys()` 与 `get_existing_content_cache_ids()` 支持 pipeline 在 enqueue 前过滤历史候选和已缓存内容，避免重复 raw 占住 Evo 前供给窗口。 |
@@ -264,10 +264,13 @@ result = db.maintain_pool_inventory(
     raw_ceiling=1200,
     source_share_quotas={"bilibili": 480, "zhihu": 120},
     raw_source_share_quotas={"bilibili": 960, "zhihu": 240},
+    recover_suppressed=True,
 )
 ```
 
 `PoolMaintenanceResult` 是 immutable 观测快照，记录维护前后 available/raw、保护量、各层 trim、来源拆分、延期 quota、不收敛 raw excess 与 rollback 原因。事务先通过连接感知的 `_load_available_pool_candidate_rows_on()` 读取唯一 canonical servability SQL，按现有 serve 排序保护 `min(available_before, target)`；topic/source/stale/explore 配额不能牺牲保护行，超额记入 deferred 字段。
+
+当 canonical available 低于 target 且 `recover_suppressed=True`（默认）时，同一事务会在 victim planning 前复用已经付费完成评分和文案的历史行。候选必须仍为 `pool_status='suppressed'`、`recommended_at IS NULL`、未出现在 `recommendations`、未近期看过、非 dislike / shown / `purged_by_dislike`、达到统一 admission floor，且 expression / topic label / style / topic group 完整、链接可打开、不是 XHS 本人内容，也未被当前 delight guard 认领。恢复排序先看当前 source family 缺口，再按 relevance、`last_scored_at` 和 BVID；source quota 只影响顺序，不阻止其它来源填满全局缺口。每恢复一行就重新读取 canonical available，到 target 立即停止；新恢复且 canonical 可用的 ID 在后续 trim 中受保护。重复维护是 no-op，`recovered_suppressed` 只统计整笔维护结束后仍为 fresh 的净恢复数。
 
 若 `BEGIN IMMEDIATE` 或 canonical snapshot 读取在 `available_before` 建立前失败，`maintain_pool_inventory()` 抛出 `PoolMaintenanceSnapshotUnavailableError`，不会返回伪造的零库存结果。只有 snapshot 已取得后的 victim/invariant 失败才返回 `rolled_back=True`，其中 `available_before` 保留真实事务前值。
 

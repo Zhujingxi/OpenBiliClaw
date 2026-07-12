@@ -24,6 +24,8 @@ def _seed_ready(
     source: str = "search",
     source_platform: str = "bilibili",
     content_url: str | None = None,
+    relevance_score: float = 0.9,
+    author_name: str = "",
 ) -> None:
     db.cache_content(
         bvid,
@@ -31,12 +33,21 @@ def _seed_ready(
         source=source,
         source_platform=source_platform,
         content_url=content_url or f"https://www.bilibili.com/video/{bvid}",
-        relevance_score=0.9,
+        relevance_score=relevance_score,
         pool_expression="测试推荐文案",
         pool_topic_label="测试主题",
         style_key="tutorial",
         topic_group=topic_group,
+        author_name=author_name,
     )
+
+
+def _suppress(db: Database, bvid: str) -> None:
+    db.conn.execute(
+        "UPDATE content_cache SET pool_status='suppressed' WHERE bvid=?",
+        (bvid,),
+    )
+    db.conn.commit()
 
 
 def _seed_unready(
@@ -277,6 +288,8 @@ def test_invariant_failure_rolls_back_every_victim_update(
         _seed_ready(db, f"BV_READY_{index}", topic_group=f"ready-{index}")
     for index in range(2):
         _seed_unready(db, f"BV_RAW_{index}", topic_group=f"raw-{index}")
+    _seed_ready(db, "BV_RECOVER_ROLLBACK", topic_group="recover-rollback")
+    _suppress(db, "BV_RECOVER_ROLLBACK")
     candidate_ids = _enqueue_candidates(db, 3, prefix="rollback")
     claimed = db.claim_discovery_candidates_for_eval(limit=1, claim_token="rollback-owner")
     assert len(claimed) == 1
@@ -294,7 +307,7 @@ def test_invariant_failure_rolls_back_every_victim_update(
     monkeypatch.setattr(db, "_validate_pool_maintenance_invariant", _force_failure)
 
     result = db.maintain_pool_inventory(
-        target=4,
+        target=5,
         raw_ceiling=4,
         source_share_quotas={"bilibili": 4},
         raw_source_share_quotas={"bilibili": 4},
@@ -337,3 +350,203 @@ def test_begin_immediate_failure_does_not_fabricate_zero_inventory(
     assert db.count_pool_candidates() == 1
     assert failing_connection.rolled_back is True
     assert failing_connection.closed is True
+
+
+def test_recover_suppressed_exclusion_matrix_and_idempotency(tmp_path: Path) -> None:
+    db = _database(tmp_path)
+    eligible_rows = (
+        ("BV_ELIGIBLE", "search", "bilibili", "https://www.bilibili.com/video/BV_ELIGIBLE", 0.99),
+        ("ZH_ELIGIBLE", "zhihu-hot", "zhihu", "https://www.zhihu.com/question/1/answer/2", 0.98),
+        (
+            "XHS_ELIGIBLE",
+            "xhs-search",
+            "xiaohongshu",
+            "https://www.xiaohongshu.com/explore/XHS_ELIGIBLE?xsec_token=ok",
+            0.97,
+        ),
+    )
+    for bvid, source, platform, url, score in eligible_rows:
+        _seed_ready(
+            db,
+            bvid,
+            topic_group=bvid,
+            source=source,
+            source_platform=platform,
+            content_url=url,
+            relevance_score=score,
+        )
+        _suppress(db, bvid)
+
+    excluded = {
+        "BV_RECOMMENDED": {},
+        "BV_VIEWED": {},
+        "BV_DISLIKED": {"feedback_type": "dislike"},
+        "BV_PURGED": {"pool_status": "purged_by_dislike"},
+        "BV_SHOWN": {"pool_status": "shown"},
+        "BV_RECOMMENDED_AT": {"recommended_at": "2026-07-12 09:00:00"},
+        "BV_MISSING_EXPRESSION": {"pool_expression": ""},
+        "BV_MISSING_TOPIC": {"pool_topic_label": ""},
+        "BV_MISSING_STYLE": {"style_key": ""},
+        "BV_MISSING_GROUP": {"topic_group": ""},
+        "BV_LOW_SCORE": {"relevance_score": 0.1},
+        "BV_DELIGHT_CLAIM": {
+            "delight_score": 0.99,
+            "delight_reason": "surprising",
+            "delight_hook": "open me",
+        },
+    }
+    for bvid, updates in excluded.items():
+        _seed_ready(db, bvid, topic_group=bvid, relevance_score=0.96)
+        _suppress(db, bvid)
+        if updates:
+            assignments = ", ".join(f"{column}=?" for column in updates)
+            db.conn.execute(
+                f"UPDATE content_cache SET {assignments} WHERE bvid=?",
+                (*updates.values(), bvid),
+            )
+    _seed_ready(
+        db,
+        "XHS_SELF",
+        topic_group="XHS_SELF",
+        source="xhs-search",
+        source_platform="xiaohongshu",
+        content_url="https://www.xiaohongshu.com/explore/XHS_SELF?xsec_token=ok",
+        relevance_score=0.96,
+        author_name="myself",
+    )
+    _suppress(db, "XHS_SELF")
+    _seed_ready(
+        db,
+        "XHS_UNLINKABLE",
+        topic_group="XHS_UNLINKABLE",
+        source="xhs-search",
+        source_platform="xiaohongshu",
+        content_url="https://www.xiaohongshu.com/explore/XHS_UNLINKABLE",
+        relevance_score=0.96,
+    )
+    _suppress(db, "XHS_UNLINKABLE")
+    db.conn.commit()
+    db.insert_recommendation("BV_RECOMMENDED", confidence=0.96)
+    db.insert_event(
+        "view",
+        url="https://www.bilibili.com/video/BV_VIEWED",
+        metadata={"bvid": "BV_VIEWED", "source_platform": "bilibili"},
+    )
+
+    result = db.maintain_pool_inventory(
+        target=2,
+        raw_ceiling=100,
+        source_share_quotas={"bilibili": 2, "zhihu": 1, "xiaohongshu": 1},
+        xhs_self_nickname="myself",
+    )
+
+    statuses = {
+        str(row["bvid"]): str(row["pool_status"])
+        for row in db.conn.execute("SELECT bvid, pool_status FROM content_cache").fetchall()
+    }
+    assert result.recovered_suppressed == 2
+    assert statuses["BV_ELIGIBLE"] == "fresh"
+    assert statuses["ZH_ELIGIBLE"] == "fresh"
+    assert statuses["XHS_ELIGIBLE"] == "suppressed"
+    assert all(statuses[bvid] != "fresh" for bvid in excluded)
+    assert statuses["XHS_SELF"] == "suppressed"
+    assert statuses["XHS_UNLINKABLE"] == "suppressed"
+
+    snapshot = dict(statuses)
+    repeated = db.maintain_pool_inventory(
+        target=2,
+        raw_ceiling=100,
+        source_share_quotas={"bilibili": 2, "zhihu": 1, "xiaohongshu": 1},
+        xhs_self_nickname="myself",
+    )
+    repeated_statuses = {
+        str(row["bvid"]): str(row["pool_status"])
+        for row in db.conn.execute("SELECT bvid, pool_status FROM content_cache").fetchall()
+    }
+    assert repeated.recovered_suppressed == 0
+    assert repeated.available_before == repeated.available_after == 2
+    assert repeated_statuses == snapshot
+
+    xhs_recovery = db.maintain_pool_inventory(
+        target=3,
+        raw_ceiling=100,
+        source_share_quotas={"bilibili": 2, "zhihu": 1, "xiaohongshu": 1},
+        xhs_self_nickname="myself",
+    )
+    assert xhs_recovery.recovered_suppressed == 1
+    assert (
+        db.conn.execute(
+            "SELECT pool_status FROM content_cache WHERE bvid='XHS_ELIGIBLE'"
+        ).fetchone()[0]
+        == "fresh"
+    )
+
+
+def test_recover_suppressed_prioritizes_source_deficit(tmp_path: Path) -> None:
+    db = _database(tmp_path)
+    _seed_ready(db, "BV_FRESH", topic_group="fresh", relevance_score=0.99)
+    for bvid, platform, source, score in (
+        ("ZH_DEFICIT", "zhihu", "zhihu-hot", 0.80),
+        ("BV_HIGH_1", "bilibili", "search", 0.98),
+        ("BV_HIGH_2", "bilibili", "search", 0.97),
+    ):
+        url = (
+            f"https://www.zhihu.com/question/1/answer/{bvid}"
+            if platform == "zhihu"
+            else f"https://www.bilibili.com/video/{bvid}"
+        )
+        _seed_ready(
+            db,
+            bvid,
+            topic_group=bvid,
+            source=source,
+            source_platform=platform,
+            content_url=url,
+            relevance_score=score,
+        )
+        _suppress(db, bvid)
+
+    result = db.maintain_pool_inventory(
+        target=2,
+        raw_ceiling=20,
+        source_share_quotas={"bilibili": 1, "zhihu": 1},
+    )
+
+    assert result.recovered_suppressed == 1
+    assert (
+        db.conn.execute("SELECT pool_status FROM content_cache WHERE bvid='ZH_DEFICIT'").fetchone()[
+            0
+        ]
+        == "fresh"
+    )
+    assert (
+        db.conn.execute(
+            "SELECT COUNT(*) FROM content_cache WHERE bvid LIKE 'BV_HIGH_%' AND pool_status='fresh'"
+        ).fetchone()[0]
+        == 0
+    )
+
+
+def test_recover_suppressed_allows_over_quota_source_to_fill_global_gap(
+    tmp_path: Path,
+) -> None:
+    db = _database(tmp_path)
+    _seed_ready(db, "BV_FRESH", topic_group="fresh", relevance_score=0.99)
+    for bvid, score in (("BV_HIGH_1", 0.98), ("BV_HIGH_2", 0.97)):
+        _seed_ready(db, bvid, topic_group=bvid, relevance_score=score)
+        _suppress(db, bvid)
+
+    result = db.maintain_pool_inventory(
+        target=2,
+        raw_ceiling=20,
+        source_share_quotas={"bilibili": 1, "zhihu": 1},
+    )
+
+    assert result.recovered_suppressed == 1
+    assert result.available_after == 2
+    assert (
+        db.conn.execute("SELECT pool_status FROM content_cache WHERE bvid='BV_HIGH_1'").fetchone()[
+            0
+        ]
+        == "fresh"
+    )
