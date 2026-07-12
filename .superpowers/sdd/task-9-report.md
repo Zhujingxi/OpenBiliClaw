@@ -65,9 +65,20 @@ Second run after adding phase-only markers and explicit timeouts:
   `soul`, `discovery`, `recommendation`, and `evaluation` module providers and
   clears their old per-module model overrides, so an `evaluation=ollama`
   setting cannot silently win over the requested compatible provider. A guard
-  test proves `discovery.evaluate_batch` resolves the explicit provider. The
-  full live test was deliberately not rerun after this routing correction,
-  pending review of the selection semantics.
+  test proves `discovery.evaluate_batch` resolves the explicit provider.
+
+### Post-routing-review rerun
+
+- After the focused routing review passed, the exact full command was rerun at
+  harness head `467320d8` with the same explicit config/provider controls.
+- Result: `1 failed in 49.17s`. Phases reached `ranking fetched=8` and then
+  `evaluation_done evaluated=8 passing_scores=0 parser_unresolved=0
+  admitted=0 rejected=8`.
+- The strict admission assertion stopped the run before copy, maintenance, and
+  interactive-reservation phases. This independently confirms that the routing
+  correction did not mask a parser failure: all eight real candidates were
+  evaluated but rated below the unchanged admission threshold. No threshold,
+  profile, source data, or provider setting was changed after this result.
 
 ## Guard and focused checks
 
