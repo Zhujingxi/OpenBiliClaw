@@ -4148,26 +4148,31 @@ class Database:
                 row.get("content_url"),
             )
         ]
-        ranked_rows = sorted(
-            eligible_rows,
-            key=lambda row: (
-                0
-                if current_family_count[
-                    _pool_source_family(row.get("source"), row.get("source_platform"))
-                ]
-                < source_share_quotas.get(
-                    _pool_source_family(row.get("source"), row.get("source_platform")),
-                    0,
-                )
-                else 1,
-                -float(row.get("relevance_score", 0.0) or 0.0),
-                -self._sort_timestamp_score(str(row.get("last_scored_at", "") or "")),
-                str(row.get("bvid", "")),
-            ),
-        )
-
         restored_ids: list[str] = []
-        for row in ranked_rows:
+        remaining_rows = list(eligible_rows)
+        while remaining_rows:
+            row = min(
+                remaining_rows,
+                key=lambda candidate: (
+                    0
+                    if current_family_count[
+                        _pool_source_family(
+                            candidate.get("source"), candidate.get("source_platform")
+                        )
+                    ]
+                    < source_share_quotas.get(
+                        _pool_source_family(
+                            candidate.get("source"), candidate.get("source_platform")
+                        ),
+                        0,
+                    )
+                    else 1,
+                    -float(candidate.get("relevance_score", 0.0) or 0.0),
+                    -self._sort_timestamp_score(str(candidate.get("last_scored_at", "") or "")),
+                    str(candidate.get("bvid", "")),
+                ),
+            )
+            remaining_rows.remove(row)
             bvid = str(row["bvid"])
             cursor = conn.execute(
                 """
@@ -4183,6 +4188,13 @@ class Database:
                 conn,
                 xhs_self_nickname=xhs_self_nickname,
             )
+            current_family_count = defaultdict(int)
+            for available_row in available_rows:
+                current_family_count[
+                    _pool_source_family(
+                        available_row.get("source"), available_row.get("source_platform")
+                    )
+                ] += 1
             if len(available_rows) >= desired_available:
                 break
         return restored_ids

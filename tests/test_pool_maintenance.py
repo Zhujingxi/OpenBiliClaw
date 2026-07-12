@@ -527,6 +527,61 @@ def test_recover_suppressed_prioritizes_source_deficit(tmp_path: Path) -> None:
     )
 
 
+def test_recover_suppressed_rebalances_source_deficit_after_each_restore(
+    tmp_path: Path,
+) -> None:
+    db = _database(tmp_path)
+    for bvid, source, platform, score, url in (
+        (
+            "BV_RECOVER_99",
+            "search",
+            "bilibili",
+            0.99,
+            "https://www.bilibili.com/video/BV_RECOVER_99",
+        ),
+        (
+            "BV_RECOVER_98",
+            "search",
+            "bilibili",
+            0.98,
+            "https://www.bilibili.com/video/BV_RECOVER_98",
+        ),
+        (
+            "ZH_RECOVER_70",
+            "zhihu-hot",
+            "zhihu",
+            0.70,
+            "https://www.zhihu.com/question/1/answer/70",
+        ),
+    ):
+        _seed_ready(
+            db,
+            bvid,
+            topic_group=bvid,
+            source=source,
+            source_platform=platform,
+            content_url=url,
+            relevance_score=score,
+        )
+        _suppress(db, bvid)
+
+    result = db.maintain_pool_inventory(
+        target=2,
+        raw_ceiling=20,
+        source_share_quotas={"bilibili": 1, "zhihu": 1},
+    )
+
+    statuses = {
+        str(row["bvid"]): str(row["pool_status"])
+        for row in db.conn.execute("SELECT bvid, pool_status FROM content_cache").fetchall()
+    }
+    assert result.recovered_suppressed == 2
+    assert result.available_after == 2
+    assert statuses["BV_RECOVER_99"] == "fresh"
+    assert statuses["BV_RECOVER_98"] == "suppressed"
+    assert statuses["ZH_RECOVER_70"] == "fresh"
+
+
 def test_recover_suppressed_allows_over_quota_source_to_fill_global_gap(
     tmp_path: Path,
 ) -> None:
