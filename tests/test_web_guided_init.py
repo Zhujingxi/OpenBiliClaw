@@ -133,14 +133,35 @@ def test_init_onboarding_gate_trusts_init_status_when_runtime_status_is_unavaila
 
 
 def test_hydrate_runtime_status_fallback_is_not_dead_catch() -> None:
-    """Strict runtime reads keep the first settled snapshot as fallback."""
+    """Progressive runtime reads apply and recover independently."""
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+    assert "async function hydrateFromBackend()" in app_js
+    hydrate = app_js.split("async function hydrateFromBackend()", 1)[1]
+    hydrate = hydrate.split("\n    function renderAll()", 1)[0]
 
-    assert "settleResource(readRuntimeStatusSnapshot())" in app_js
-    assert "const firstRuntimeGeneration = desktopRuntimeGeneration;" in app_js
-    assert "const secondRuntimeGeneration = desktopRuntimeGeneration;" in app_js
-    assert "const latestRuntime = await readRuntimeStatusSnapshot();" in app_js
-    assert "applyDesktopRuntimeSnapshot(effectiveRuntime, effectiveRuntimeGeneration);" in app_js
+    # The first runtime read has its own immediate application/recovery branch.
+    assert "const firstRuntimeGeneration = desktopRuntimeGeneration;" in hydrate
+    assert "const runtimePromise = readRuntimeSnapshot();" in hydrate
+    assert "const runtimeApplicationPromise = runtimePromise.then(" in hydrate
+    assert "(snapshot) => applyInitialRuntimeSnapshot(snapshot)" in hydrate
+    assert "() => markDesktopRuntimeFailedAndRecover()" in hydrate
+    assert "if (firstRuntimeGeneration !== desktopRuntimeGeneration) return;" in hydrate
+    assert "applyDesktopRuntimeSnapshot(snapshot, firstRuntimeGeneration)" in hydrate
+
+    # Recommendation settlement starts a separate freshness reread, guarded
+    # against newer runtime-stream generations.
+    assert (
+        "const runtimeReconciliationPromise = recommendationApplicationPromise.then(" in hydrate
+    )
+    assert "() => reconcileRuntimeAfterRecommendations()" in hydrate
+    assert "const secondRuntimeGeneration = desktopRuntimeGeneration;" in hydrate
+    assert "await readRuntimeSnapshot()" in hydrate
+    assert "if (runtimeReconciliationGeneration !== desktopRuntimeGeneration) return;" in hydrate
+
+    # Initial rejection enters the existing bounded runtime recovery owner.
+    assert 'desktopRuntimeLoadState = "failed";' in hydrate
+    assert "scheduleDesktopRuntimeRecovery();" in hydrate
+    assert "renderDesktopRuntimeFailure();" in hydrate
 
 
 def test_bili_checklist_label_reflects_probe_result_and_surfaces_detail() -> None:
@@ -171,10 +192,19 @@ def test_runtime_stream_open_rehydrates_when_backend_data_never_loaded() -> None
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
 
     open_handler = app_js.split('socket.addEventListener("open"', 1)[1]
-    open_handler = open_handler.split("});", 1)[0]
-    assert (
-        "if (!state.initStatus && !state.runtimeStatus) scheduleBackendHydration();" in open_handler
-    )
+    open_handler = open_handler.split('socket.addEventListener("message"', 1)[0]
+    guard = "if (!state.initStatus && !state.runtimeStatus) {"
+    authenticate = "void ensureAuthenticated()"
+    schedule = ".then(scheduleBackendHydration)"
+    safe_rejection = ".catch(() => {})"
+
+    assert guard in open_handler
+    assert authenticate in open_handler
+    assert schedule in open_handler
+    assert safe_rejection in open_handler
+    assert open_handler.index(guard) < open_handler.index(authenticate)
+    assert open_handler.index(authenticate) < open_handler.index(schedule)
+    assert open_handler.index(schedule) < open_handler.index(safe_rejection)
 
 
 def test_setup_wizard_guard_resumes_running_and_initialized_states_on_load() -> None:
