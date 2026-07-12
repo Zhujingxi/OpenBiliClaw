@@ -137,6 +137,19 @@ def test_remote_saved_sync_mutations_require_authentication(tmp_path, monkeypatc
         assert response.json() == {"error": "auth_required"}
 
 
+def test_remote_source_result_and_kick_routes_require_authentication(
+    tmp_path, monkeypatch
+) -> None:
+    app, _ = _build_app(tmp_path, monkeypatch)
+    remote = _remote(app)
+
+    for slug in ("xhs", "dy", "yt", "x", "zhihu", "reddit"):
+        for suffix in ("task-result", "kick"):
+            response = remote.post(f"/api/sources/{slug}/{suffix}", json={})
+            assert response.status_code == 401, (slug, suffix)
+            assert response.json() == {"error": "auth_required"}
+
+
 def test_loopback_bypasses_gate(tmp_path, monkeypatch) -> None:
     app, _ = _build_app(tmp_path, monkeypatch)
     r = _loopback(app).get("/api/favorites/BV1AUTH")
@@ -299,7 +312,7 @@ def test_cookie_unsafe_method_requires_csrf(tmp_path, monkeypatch) -> None:
 
 
 def test_mutating_get_task_claim_requires_csrf(tmp_path, monkeypatch) -> None:
-    # /api/sources/{xhs,dy,yt}/next-task are GETs that claim+lock a task, so they
+    # /api/sources/*/next-task are GETs that claim+lock a task, so they
     # must be CSRF-protected for cookie auth (review r2#2). The middleware rejects
     # before the handler runs, so this is deterministic regardless of source state.
     app, _ = _build_app(tmp_path, monkeypatch)
@@ -309,6 +322,9 @@ def test_mutating_get_task_claim_requires_csrf(tmp_path, monkeypatch) -> None:
         "/api/sources/xhs/next-task",
         "/api/sources/dy/next-task",
         "/api/sources/yt/next-task",
+        "/api/sources/x/next-task",
+        "/api/sources/zhihu/next-task",
+        "/api/sources/reddit/next-task",
         "/api/recommendations",  # serve() bootstrap-writes rows
         "/api/chat/turns/abc123",  # GET resumes a pending turn
     ):

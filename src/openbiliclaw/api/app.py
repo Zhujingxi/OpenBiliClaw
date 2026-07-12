@@ -69,6 +69,7 @@ from openbiliclaw.api.models import (
     ExtensionE2ERunIn,
     ExtensionE2ERunOut,
     ExtensionE2ERunStatus,
+    ExtensionNativeSaveResultIn,
     FavoriteAddIn,
     FavoriteItem,
     FavoriteListResponse,
@@ -163,6 +164,9 @@ from openbiliclaw.runtime.image_cache import (
 from openbiliclaw.runtime.keyword_fetch import (
     mark_keyword_terminal_from_xhs_task,
     source_keyword_id_from_xhs_task,
+)
+from openbiliclaw.saved_sync.extension_broker import (
+    ExtensionNativeSaveResultIn as BrokerExtensionNativeSaveResultIn,
 )
 from openbiliclaw.saved_sync.identity import make_item_key
 from openbiliclaw.saved_sync.models import (
@@ -7640,6 +7644,68 @@ def create_app(
                 await publish({"type": "bili_task_available", "source": "task_kick"})
         return {"ok": True}
 
+    def _claim_extension_native_task(slug: str) -> dict[str, Any] | None:
+        broker = getattr(ctx, "extension_native_save_broker", None)
+        if broker is None:
+            return None
+        job = broker.claim_next(slug)
+        if job is None:
+            return None
+        return {
+            "id": job.job_id,
+            "type": "native_save",
+            "item_key": job.item_key,
+            "platform": job.platform,
+            "platform_slug": job.platform_slug,
+            "content_id": job.content_id,
+            "content_url": job.content_url,
+            "content_type": job.content_type,
+            "requested_action": job.requested_action,
+            "resolved_action": job.resolved_action,
+            "target_label": job.target_label,
+        }
+
+    def _is_extension_native_job(task_id: str) -> bool:
+        broker = getattr(ctx, "extension_native_save_broker", None)
+        return bool(broker is not None and broker.owns(task_id))
+
+    def _submit_extension_native_result(payload: dict[str, Any]) -> dict[str, Any]:
+        from pydantic import ValidationError
+
+        try:
+            result = ExtensionNativeSaveResultIn.model_validate(payload)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail="invalid native-save result") from exc
+        broker = getattr(ctx, "extension_native_save_broker", None)
+        accepted = bool(
+            broker is not None
+            and broker.submit_result(
+                BrokerExtensionNativeSaveResultIn(
+                    task_id=result.task_id,
+                    item_key=result.item_key,
+                    status=result.status,
+                    error_code=result.error_code,
+                    error_message=result.error_message,
+                )
+            )
+        )
+        if not accepted:
+            raise HTTPException(status_code=409, detail="native_save_result_conflict")
+        return {"ok": True}
+
+    def _require_legacy_task(queue: Any, task_id: str) -> dict[str, Any]:
+        task = queue.get(task_id) if queue is not None else None
+        if task is None:
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        return cast("dict[str, Any]", task)
+
+    async def _kick_source_task(slug: str) -> dict[str, Any]:
+        publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
+        if callable(publish):
+            with suppress(Exception):
+                await publish({"type": f"{slug}_task_available", "source": "task_kick"})
+        return {"ok": True}
+
     # ── XHS task queue endpoints (extension dispatcher) ──────────────
 
     from openbiliclaw.sources.xhs_tasks import (
@@ -7661,6 +7727,10 @@ def create_app(
     def xhs_next_task(response: Any = None) -> Any:
         """Claim and return the oldest runnable xhs task, or 204 if none."""
         from starlette.responses import Response
+
+        native_task = _claim_extension_native_task("xhs")
+        if native_task is not None:
+            return native_task
 
         # 204 No Content responses MUST NOT carry a body (RFC 7230).
         # JSONResponse(204, None) serialises None to "null" (4 bytes),
@@ -7702,15 +7772,19 @@ def create_app(
 
             raise HTTPException(status_code=422, detail="task_id is required")
 
-        if _xhs_task_queue is None:
-            return {"ok": True}
+        task_id = str(task_id).strip()
+        if _is_extension_native_job(task_id):
+            return _submit_extension_native_result(payload)
 
-        task = _xhs_task_queue.get(task_id)
+        legacy_queue = _xhs_task_queue
+        if legacy_queue is None:
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        task = _require_legacy_task(legacy_queue, task_id)
         task_type = str(task.get("type", "")).strip() if task else ""
 
         if status in {"partial", "ok"} or (status == "empty" and task_type == "bootstrap_profile"):
             is_final = status == "ok" or (status == "empty" and task_type == "bootstrap_profile")
-            added_notes = _xhs_task_queue.merge_result(
+            added_notes = legacy_queue.merge_result(
                 task_id,
                 urls=urls,
                 notes=notes if notes else None,
@@ -7812,7 +7886,7 @@ def create_app(
                         propagated,
                     )
         else:
-            _xhs_task_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
+            legacy_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
             # Unified keyword planner lifecycle (P1.7): the async search failed →
             # mark its ``source_keyword_id`` word ``failed`` (retry via attempts).
             if task is not None:
@@ -8455,6 +8529,10 @@ def create_app(
         """Return the oldest pending dy task, or 204 if none."""
         from starlette.responses import Response
 
+        native_task = _claim_extension_native_task("dy")
+        if native_task is not None:
+            return native_task
+
         if _dy_task_queue is None:
             return Response(status_code=204)
         task = _dy_task_queue.next_pending(only_ids=_init_owned_ids_filter())
@@ -8504,15 +8582,19 @@ def create_app(
 
             raise HTTPException(status_code=422, detail="task_id is required")
 
-        if _dy_task_queue is None:
-            return {"ok": True}
+        task_id = str(task_id).strip()
+        if _is_extension_native_job(task_id):
+            return _submit_extension_native_result(payload)
 
-        task = _dy_task_queue.get(task_id)
+        legacy_queue = _dy_task_queue
+        if legacy_queue is None:
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        task = _require_legacy_task(legacy_queue, task_id)
         task_type = str(task.get("type", "")).strip() if task else ""
 
         if status in {"partial", "ok"} or (status == "empty" and task_type == "bootstrap_profile"):
             is_final = status == "ok" or (status == "empty" and task_type == "bootstrap_profile")
-            added_videos = _dy_task_queue.merge_result(
+            added_videos = legacy_queue.merge_result(
                 task_id,
                 videos=videos if videos else None,
                 scope_counts=scope_counts,
@@ -8544,7 +8626,7 @@ def create_app(
                     await _ingest_profile_update_events(profile_events)
                 _mark_source_bootstrap_keys("dy", propagated_keys)
         else:
-            _dy_task_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
+            legacy_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
 
         return {"ok": True}
 
@@ -8577,21 +8659,36 @@ def create_app(
         """Broadcast `xhs_task_available` so any subscribed extension
         service-worker triggers an immediate poll. Idempotent and best
         effort — failures here never affect task state."""
-        publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
-        if callable(publish):
-            with suppress(Exception):
-                await publish({"type": "xhs_task_available", "source": "task_kick"})
-        return {"ok": True}
+        return await _kick_source_task("xhs")
 
     @app.post("/api/sources/dy/kick")
     async def dy_task_kick() -> dict[str, Any]:
         """Broadcast `dy_task_available` over runtime-stream. See
         xhs_task_kick docstring for rationale."""
-        publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
-        if callable(publish):
-            with suppress(Exception):
-                await publish({"type": "dy_task_available", "source": "task_kick"})
-        return {"ok": True}
+        return await _kick_source_task("dy")
+
+    @app.get("/api/sources/x/next-task")
+    def x_next_task(response: Any = None) -> Any:
+        """Return the oldest pending X native-save task, or 204 if none."""
+        from starlette.responses import Response
+
+        native_task = _claim_extension_native_task("x")
+        return native_task if native_task is not None else Response(status_code=204)
+
+    @app.post("/api/sources/x/task-result")
+    async def x_task_result(payload: dict[str, Any]) -> dict[str, Any]:
+        """Accept an X native-save callback from the extension dispatcher."""
+        task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        if not _is_extension_native_job(task_id):
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        return _submit_extension_native_result(payload)
+
+    @app.post("/api/sources/x/kick")
+    async def x_task_kick() -> dict[str, Any]:
+        """Broadcast `x_task_available` over runtime-stream."""
+        return await _kick_source_task("x")
 
     # ── YouTube bootstrap endpoints ────────────────────────────────
     from openbiliclaw.sources.reddit_tasks import RedditTaskQueue
@@ -8617,6 +8714,10 @@ def create_app(
     def reddit_next_task(response: Any = None) -> Any:
         """Return the oldest pending Reddit task, or 204 if none."""
         from starlette.responses import Response
+
+        native_task = _claim_extension_native_task("reddit")
+        if native_task is not None:
+            return native_task
 
         if _reddit_task_queue is None:
             return Response(status_code=204)
@@ -8651,11 +8752,16 @@ def create_app(
 
             raise HTTPException(status_code=422, detail="task_id is required")
 
-        if _reddit_task_queue is None:
-            return {"ok": True}
+        if _is_extension_native_job(task_id):
+            return _submit_extension_native_result(payload)
+
+        legacy_queue = _reddit_task_queue
+        if legacy_queue is None:
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        _require_legacy_task(legacy_queue, task_id)
 
         if status in {"partial", "ok", "empty"}:
-            _reddit_task_queue.merge_result(
+            legacy_queue.merge_result(
                 task_id,
                 items=items if items else None,
                 scope_counts=scope_counts,
@@ -8663,7 +8769,7 @@ def create_app(
                 complete=status in {"ok", "empty"},
             )
         else:
-            _reddit_task_queue.fail(
+            legacy_queue.fail(
                 task_id,
                 error=str(payload.get("error", "") or ""),
                 debug=debug,
@@ -8674,16 +8780,16 @@ def create_app(
     @app.post("/api/sources/reddit/kick")
     async def reddit_task_kick() -> dict[str, Any]:
         """Broadcast `reddit_task_available` over runtime-stream."""
-        publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
-        if callable(publish):
-            with suppress(Exception):
-                await publish({"type": "reddit_task_available", "source": "task_kick"})
-        return {"ok": True}
+        return await _kick_source_task("reddit")
 
     @app.get("/api/sources/zhihu/next-task")
     def zhihu_next_task(response: Any = None) -> Any:
         """Return the oldest pending Zhihu task, or 204 if none."""
         from starlette.responses import Response
+
+        native_task = _claim_extension_native_task("zhihu")
+        if native_task is not None:
+            return native_task
 
         if _zhihu_task_queue is None:
             return Response(status_code=204)
@@ -8724,10 +8830,13 @@ def create_app(
 
             raise HTTPException(status_code=422, detail="task_id is required")
 
-        if _zhihu_task_queue is None:
-            return {"ok": True}
+        if _is_extension_native_job(task_id):
+            return _submit_extension_native_result(payload)
 
-        task = _zhihu_task_queue.get(task_id)
+        legacy_queue = _zhihu_task_queue
+        if legacy_queue is None:
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        task = _require_legacy_task(legacy_queue, task_id)
         task_type = str(task.get("type", "")).strip() if task else ""
         task_payload: dict[str, Any] = {}
         if task and task.get("payload_json"):
@@ -8739,7 +8848,7 @@ def create_app(
 
         if status in {"partial", "ok"} or status == "empty":
             is_final = status in {"ok", "empty"}
-            added_items = _zhihu_task_queue.merge_result(
+            added_items = legacy_queue.merge_result(
                 task_id,
                 items=items if items else None,
                 scope_counts=scope_counts,
@@ -8772,18 +8881,14 @@ def create_app(
                     await _ingest_profile_update_events(profile_events)
                 _mark_source_bootstrap_keys("zhihu", propagated_keys)
         else:
-            _zhihu_task_queue.fail(task_id, error=str(payload.get("error", "") or ""), debug=debug)
+            legacy_queue.fail(task_id, error=str(payload.get("error", "") or ""), debug=debug)
 
         return {"ok": True}
 
     @app.post("/api/sources/zhihu/kick")
     async def zhihu_task_kick() -> dict[str, Any]:
         """Broadcast `zhihu_task_available` over runtime-stream."""
-        publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
-        if callable(publish):
-            with suppress(Exception):
-                await publish({"type": "zhihu_task_available", "source": "task_kick"})
-        return {"ok": True}
+        return await _kick_source_task("zhihu")
 
     _yt_task_queue: YtTaskQueue | None = None
     if hasattr(ctx.database, "conn"):
@@ -8793,6 +8898,10 @@ def create_app(
     def yt_next_task(response: Any = None) -> Any:
         """Return the oldest pending YouTube task, or 204 if none."""
         from starlette.responses import Response
+
+        native_task = _claim_extension_native_task("yt")
+        if native_task is not None:
+            return native_task
 
         if _yt_task_queue is None:
             return Response(status_code=204)
@@ -8827,15 +8936,19 @@ def create_app(
 
             raise HTTPException(status_code=422, detail="task_id is required")
 
-        if _yt_task_queue is None:
-            return {"ok": True}
+        task_id = str(task_id).strip()
+        if _is_extension_native_job(task_id):
+            return _submit_extension_native_result(payload)
 
-        task = _yt_task_queue.get(task_id)
+        legacy_queue = _yt_task_queue
+        if legacy_queue is None:
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        task = _require_legacy_task(legacy_queue, task_id)
         task_type = str(task.get("type", "")).strip() if task else ""
 
         if status in {"partial", "ok"} or (status == "empty" and task_type == "bootstrap_profile"):
             is_final = status == "ok" or (status == "empty" and task_type == "bootstrap_profile")
-            added_items = _yt_task_queue.merge_result(
+            added_items = legacy_queue.merge_result(
                 task_id,
                 items=items if items else None,
                 scope_counts=scope_counts,
@@ -8867,18 +8980,14 @@ def create_app(
                     await _ingest_profile_update_events(profile_events)
                 _mark_source_bootstrap_keys("yt", propagated_keys)
         else:
-            _yt_task_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
+            legacy_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
 
         return {"ok": True}
 
     @app.post("/api/sources/yt/kick")
     async def yt_task_kick() -> dict[str, Any]:
         """Broadcast `yt_task_available` over runtime-stream."""
-        publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
-        if callable(publish):
-            with suppress(Exception):
-                await publish({"type": "yt_task_available", "source": "task_kick"})
-        return {"ok": True}
+        return await _kick_source_task("yt")
 
     @app.post("/api/extension/e2e/run", response_model=ExtensionE2ERunOut)
     async def extension_e2e_run(

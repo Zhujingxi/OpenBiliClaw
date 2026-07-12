@@ -1201,6 +1201,25 @@ class SavedSyncRequest(BaseModel):
         return list(dict.fromkeys(validate_saved_item_key(value) for value in values))
 
 
+class ExtensionNativeSaveResultIn(BaseModel):
+    """Strict extension callback for one durable native-save job."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: Annotated[StrictStr, Field(min_length=1, max_length=64)]
+    item_key: Annotated[StrictStr, Field(min_length=1, max_length=768)]
+    status: Literal[
+        "synced",
+        "already_synced",
+        "login_required",
+        "rate_limited",
+        "unsupported",
+        "failed",
+    ]
+    error_code: Annotated[StrictStr, Field(max_length=128)] = ""
+    error_message: Annotated[StrictStr, Field(max_length=512)] = ""
+
+
 class SavedItemStateResponse(BaseModel):
     """Local membership plus its latest native-sync state."""
 

@@ -8,6 +8,7 @@
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
+| 扩展原生保存 broker 稳定注入点 | ✅（API 基础） | `RuntimeContext.extension_native_save_broker` 是热重载不替换的 test-injectable 稳定字段；FastAPI 通过该字段领取和回写六平台 job。生产 adapter 创建与 broker 注册仍属后续 wiring，不在本阶段伪装为已启用。 |
 | 统一补货请求入口 | ✅ | `ContinuousRefreshController.request_replenishment(reason, force=False)` 收束补货触发：普通事件和反馈只排队 reason；初始化完成、用户手动刷新或推荐刷新后低库存用 `force=True` 进入手动补货。 |
 | 后台刷新控制 | ✅ | `ContinuousRefreshController` 按 scheduler 配置补充候选池，并通过 source policy 计算各平台有效配比；后台定时 refresh 使用约 90% 的可换池低水位，库存只是略低于 `pool_target_count` 时不跑 discovery。注入 `DiscoveryCandidatePipeline` 后，B 站主补货会在现有 `_refresh_lock` 内按 `pending_eval + evaluating` 水位循环生产 raw candidates，直到待评估供给接近目标 batch 或达到预算；小缺口阶段先给 `search + related_chain` 配额，延后 `trending/explore`。统一关键词 planner 开启但 B 站关键词 store 暂空时，本轮只剔除 `search` 子策略，保留其它 B 站策略，避免回落到旧 `discovery.search.queries` LLM 生成。v0.3.149+ 当 `explore_refresh_hours` 到期或距到期不足一个 refresh tick，且 B 站平台族仍有补货空间时，controller 会允许 `KeywordPlanner` 在同一轮 merged keyword LLM 调用里请求 `explore_domains`，成功写入 B 站 `keyword_kind="explore"` query cache 后同步推进 `last_explore_refresh_at`；后续 `ExploreStrategy` 从该 explore 池 claim query。 |
 | 低可用池补货防死锁 | ✅ | `_source_requested_count()` 仍用 raw headroom 限制正常补货规模，但当 `pool_available_count < pool_target_count` 且 raw ceiling 已满时，不再把 source deficit 直接压成 0；低于 target 时 `_enforce_pool_cap()` 会跳过 source overflow trim，只用 raw ceiling 总量 trim 收敛素材，避免大量不可换 raw material 或 over-quota source suppression 让 Search / producer 永久停摆。 |

@@ -252,6 +252,9 @@ class RuntimeContext:
     database: Any = None
     memory_manager: Any = None
     event_hub: Any = None
+    # Stable, test-injectable execution bridge. Production adapter registration
+    # is intentionally owned by the native-save runtime wiring layer.
+    extension_native_save_broker: Any = None
     presence: PresenceTracker = field(default_factory=PresenceTracker)
     # v0.3.63+: tracks every detached ``asyncio.create_task`` spawned by
     # the runtime (refresh manual / per-strategy precompute, recommendation

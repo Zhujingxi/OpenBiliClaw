@@ -157,6 +157,22 @@ def test_duplicate_or_late_completion_is_rejected(database: Database) -> None:
     assert row["status"] == "synced"
 
 
+def test_broker_ownership_includes_terminal_jobs_and_rejects_invalid_ids(
+    database: Database,
+) -> None:
+    broker = ExtensionNativeSaveBroker(database, wake_platform=AsyncMock())
+    job = make_claimed_job(database)
+    job_id = str(job["job_id"])
+
+    assert broker.owns(job_id)
+    assert broker.submit_result(
+        ExtensionNativeSaveResultIn(job_id, "twitter:123", "synced")
+    )
+    assert broker.owns(job_id)
+    assert not broker.owns(str(uuid4()))
+    assert not broker.owns("not-a-uuid")
+
+
 @pytest.mark.parametrize(
     ("status", "code", "message"),
     [

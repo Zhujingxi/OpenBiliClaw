@@ -303,7 +303,8 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ /api/saved/* -> membership 先提交 -> native_save_tasks/items 快照 -> router │
 │  │ -> BilibiliNativeSaveAdapter（收藏夹/稍后再看）-> durable task-item poll │
-│  │ ExtensionNativeSaveBroker -> extension_native_save_jobs（sanitized foundation；尚未 runtime wiring）│
+│  │ ExtensionNativeSaveBroker -> extension_native_save_jobs -> native_save multiplex │
+│  │ -> /api/sources/{xhs,dy,yt,x,zhihu,reddit}（生产 adapter/executor 待接）│
 │  │ -> 插件/桌面/移动 saved UI；CLI config-show（自动同步默认关闭）    │
 │  │ 其它平台：local-only；账号写入 adapter 与授权 E2E 属后续独立计划   │
 │  └──────────────────────────────────────────────────────┘   │
