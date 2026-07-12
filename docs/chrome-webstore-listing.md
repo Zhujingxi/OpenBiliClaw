@@ -73,30 +73,29 @@ https://github.com/whiteguo233/OpenBiliClaw/blob/main/README_EN.md
 
 以下文件均为 1280×800，使用固定脱敏数据和当前真实 UI 生成。Developer Dashboard 中删除旧图后，按下面顺序上传：
 
-1. `01-local-seven-platforms.png` — 本地私有的七平台内容 Agent
-2. `02-three-surfaces.png` — 插件、PC、手机三端体验
-3. `03-cross-platform-recommendations.png` — 跨平台推荐与反馈闭环
-4. `04-trainable-profile.png` — 可查看、可纠正的私有画像
-5. `05-truthful-login-local-data.png` — 诚实接入状态与本地数据
+1. `01-seven-platform-recommendations.png` — 七平台推荐主视觉，推荐卡和惊喜位都有本地脱敏头图
+2. `02-three-surfaces.png` — PC、插件、手机三端推荐体验
+3. `03-truthful-status-local-data.png` — 诚实接入状态与本地数据
 
 仓库路径：`docs/images/chrome-web-store/`。
 
 需要重做截图时：
 
 ```bash
+.venv/bin/python scripts/build_chrome_webstore_demo_covers.py
 cd extension && npm run build && cd ..
 PYTHONPATH=src .venv/bin/python scripts/capture_chrome_webstore_ui.py \
   --output-dir docs/images/chrome-web-store/source
 .venv/bin/python scripts/build_chrome_webstore_assets.py
 ```
 
-捕获脚本只连接临时 `127.0.0.1` 脱敏演示服务，并拦截所有非本机请求；不得用真实 `config.toml`、数据库、Cookie、账号名或画像文本生成商店素材。
+`build_chrome_webstore_demo_covers.py` 会确定性生成 8 张 640×360 本地插画封面，分别供七条推荐和一个惊喜推荐使用；它们不是任何平台或创作者的真实媒体。捕获脚本只连接临时 `127.0.0.1` 脱敏演示服务，封面也经真实 UI 的本机 `/api/image-proxy` 链路加载，并拦截所有非本机请求；不得用真实 `config.toml`、数据库、Cookie、账号名或画像文本生成商店素材。
 
 ## Metadata API bridge
 
 `.github/workflows/update-chrome-webstore-listing.yml` 是独立的手动文案维护入口，默认 `mode=probe`，只交换短期 OAuth access token 并读取 v1.1 draft；它只输出字段名、文案长度和 SHA-256，不输出 token、secret 或 draft 原文。只有 probe 同时发现 `summary` / `description` 和足够的 listing identity 字段后，`mode=apply` 才可能继续；若当前 submission 正在审核，还必须显式启用 `replace_pending`，写入后必须精确回读一致，最后才允许 `publish`。
 
-Chrome Web Store API v1.1 已弃用，官方只支持到 2026-10-15；而且其公开 `Item` resource 没有承诺商店文案字段，因此 probe 返回“不支持 writable listing metadata”是安全的预期停止结果，不得为绕过它而猜测 Dashboard 私有接口。该 bridge 不构建或上传 ZIP、不移动 release tag，也不上传截图；五张 PNG 仍需在 Developer Dashboard 手动替换。
+Chrome Web Store API v1.1 已弃用，官方只支持到 2026-10-15；而且其公开 `Item` resource 没有承诺商店文案字段，因此 probe 返回“不支持 writable listing metadata”是安全的预期停止结果，不得为绕过它而猜测 Dashboard 私有接口。该 bridge 不构建或上传 ZIP、不移动 release tag，也不上传截图；三张 PNG 仍需在 Developer Dashboard 手动替换。
 
 本地只读探测命令（凭据必须来自环境变量）：
 
@@ -110,7 +109,7 @@ npm run webstore:metadata -- \
 ## 提交前检查
 
 - `Short description` 与 `Detailed description` 已粘贴，七个平台名称完整。
-- 5 张截图已按上面的文件名顺序上传，尺寸均为 1280×800。
+- 3 张截图已按上面的文件名顺序上传，尺寸均为 1280×800。
 - `Website URL` 使用项目主页：`https://whiteguo233.github.io/OpenBiliClaw/`。
 - `Support URL` 使用 GitHub Issues：`https://github.com/whiteguo233/OpenBiliClaw/issues`。
 - `Privacy policy URL` 使用 `docs/privacy.md` 的 GitHub 链接。
