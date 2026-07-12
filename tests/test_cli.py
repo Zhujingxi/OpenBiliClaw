@@ -1375,12 +1375,14 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
             usage_recorder: object | None = None,
             module_overrides: object | None = None,
             concurrency: int = 1,
+            concurrency_gate: object | None = None,
         ) -> None:
             self.registry = registry
             self.memory = memory
             self.usage_recorder = usage_recorder
             self.module_overrides = module_overrides
             self.concurrency = concurrency
+            self.concurrency_gate = concurrency_gate
 
     class FakeRecommendationEngine:
         def __init__(
@@ -1450,6 +1452,9 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
     assert recorder is not None
     assert recorder is discovery_engine.llm_service.usage_recorder
     assert recorder._sink is created_databases[0]
+    assert (
+        recommendation_engine.llm.concurrency_gate is discovery_engine.llm_service.concurrency_gate
+    )
 
 
 def test_start_accepts_explicit_host_and_port(

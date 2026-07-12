@@ -5116,7 +5116,7 @@
       setSelect("llmProvider", provider);
       const fallbackProvider = llm.fallback_provider || "";
       setSelect("llmFallbackProvider", fallbackProvider);
-      setInput("llmConcurrency", llm.concurrency ?? 3);
+      setInput("llmConcurrency", llm.concurrency ?? 4);
       setInput("llmTimeout", llm.timeout);
       setSelect("llmAuthMode", llm.openai?.auth_mode || "api_key");
       if (provider) {
@@ -5928,7 +5928,7 @@
         default_provider: provider,
         // 非空 fallback_provider 即启用 fallback；旧的 fallback_enabled 布尔字段已移除。
         fallback_provider: fallbackProvider,
-        concurrency: getIntInput("llmConcurrency", 3),
+        concurrency: getIntInput("llmConcurrency", 4),
         timeout: getIntInput("llmTimeout", 60),
         [provider]: { ...(state.config?.llm?.[provider] || {}), ...llmProviderConfig },
         embedding: { ...(state.config?.llm?.embedding || {}), ...embedding },

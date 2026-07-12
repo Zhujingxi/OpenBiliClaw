@@ -1,5 +1,7 @@
 # 配置参考
 
+> `[llm].concurrency` 缺省/非法值为 4；显式正数（含旧值 3）原样保留。后台容量为 `max(1, total-1)`；`candidate_eval_concurrency` 仍默认 3。
+
 > `config.toml` 所有配置段落详解。
 
 ## 快速开始

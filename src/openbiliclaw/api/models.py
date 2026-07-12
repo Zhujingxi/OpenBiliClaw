@@ -192,6 +192,12 @@ class RuntimeStatusResponse(BaseModel):
     candidate_eval_last_batch_seconds: float = 0.0
     candidate_eval_last_cached: int = 0
     candidate_eval_last_rejected: int = 0
+    llm_total_concurrency: int = 0
+    llm_background_concurrency: int = 0
+    llm_total_active: int = 0
+    llm_total_waiting: int = 0
+    llm_background_active: int = 0
+    llm_background_waiting: int = 0
     last_discovered_count: int = 0
     last_replenished_count: int = 0
     recent_pool_topics: list[str] = Field(default_factory=list)
@@ -1060,7 +1066,7 @@ class ModuleLLMConfigOut(BaseModel):
 
 class LLMConfigOut(BaseModel):
     default_provider: str = "deepseek"
-    concurrency: int = 3
+    concurrency: int = 4
     timeout: int = 300
     # Non-empty fallback_provider = chat fallback on (the legacy
     # fallback_enabled bool was never consulted and is no longer echoed;

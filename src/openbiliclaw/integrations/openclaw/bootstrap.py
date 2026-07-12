@@ -19,6 +19,7 @@ from openbiliclaw.discovery.strategies.strategies import (
     TrendingStrategy,
 )
 from openbiliclaw.llm import build_llm_registry
+from openbiliclaw.llm.concurrency import LLMConcurrencyGate, background_llm_concurrency
 from openbiliclaw.llm.service import LLMService, module_overrides_from_config
 from openbiliclaw.llm.usage_recorder import UsageRecorder
 from openbiliclaw.memory.manager import MemoryManager
@@ -67,8 +68,7 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
     memory_manager = MemoryManager(config.data_path, database=database)
     memory_manager.initialize()
 
-    llm_cfg = getattr(config, "llm", None)
-    llm_concurrency = int(getattr(llm_cfg, "concurrency", 3))
+    llm_gate = LLMConcurrencyGate(llm_concurrency)
 
     usage_recorder = UsageRecorder(sink=database)
 
@@ -78,6 +78,7 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         usage_recorder=usage_recorder,
         module_overrides=module_overrides,
         llm_concurrency=llm_concurrency,
+        llm_concurrency_gate=llm_gate,
         speculation_interval_minutes=config.scheduler.speculation_interval_minutes,
         speculation_ttl_days=config.scheduler.speculation_ttl_days,
         speculation_cooldown_days=config.scheduler.speculation_cooldown_days,
@@ -123,6 +124,7 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         usage_recorder=usage_recorder,
         module_overrides=module_overrides,
         concurrency=llm_concurrency,
+        concurrency_gate=llm_gate,
     )
     from openbiliclaw.llm.registry import build_embedding_service
     from openbiliclaw.recommendation.curator import PoolCurator
@@ -148,7 +150,7 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
 
     concurrency = DiscoveryConcurrencyController(
         bilibili_request_concurrency=4,
-        llm_evaluation_concurrency=4,
+        llm_evaluation_concurrency=background_llm_concurrency(llm_concurrency),
         search_budget_total=30,
     )
 
@@ -248,6 +250,7 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         youtube_producer=youtube_producer,
         scheduler_config=config.scheduler,
         presence=presence,
+        llm_concurrency_gate=llm_gate,
     )
 
     def _candidate_eval_snapshot() -> CandidateEvalSnapshot:

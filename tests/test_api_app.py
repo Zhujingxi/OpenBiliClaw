@@ -953,12 +953,14 @@ class TestBackendAPI:
                 usage_recorder: object | None = None,
                 module_overrides: object | None = None,
                 concurrency: int = 1,
+                concurrency_gate: object | None = None,
             ) -> None:
                 self.registry = registry
                 self.memory = memory
                 self.usage_recorder = usage_recorder
                 self.module_overrides = module_overrides
                 self.concurrency = concurrency
+                self.concurrency_gate = concurrency_gate
 
         class FakeBilibiliClient:
             def __init__(self, *, cookie: str, proxy: str | None = None) -> None:
@@ -1112,12 +1114,14 @@ class TestBackendAPI:
                 usage_recorder: object | None = None,
                 module_overrides: object | None = None,
                 concurrency: int = 1,
+                concurrency_gate: object | None = None,
             ) -> None:
                 self.registry = registry
                 self.memory = memory
                 self.usage_recorder = usage_recorder
                 self.module_overrides = module_overrides
                 self.concurrency = concurrency
+                self.concurrency_gate = concurrency_gate
 
         class FakeBilibiliClient:
             def __init__(self, *, cookie: str, proxy: str | None = None) -> None:
@@ -1299,6 +1303,13 @@ class TestBackendAPI:
 
         assert captured["bilibili_request_concurrency"] == 2
         assert captured["llm_evaluation_concurrency"] == 2
+        assert (
+            app.state.runtime_context.llm_service.concurrency_gate
+            is (captured["soul_engine_kwargs"]["llm_concurrency_gate"])
+        )
+        assert captured["runtime_controller_kwargs"]["llm_concurrency_gate"] is (
+            app.state.runtime_context.llm_service.concurrency_gate
+        )
         assert captured["engine_concurrency"] is captured["controller"]
         assert all(item is captured["controller"] for item in captured["strategy_concurrency"])
         assert captured["runtime_controller_kwargs"]["scheduler_config"] is fake_config.scheduler
@@ -3864,6 +3875,12 @@ class TestBackendAPI:
             "candidate_eval_last_batch_seconds": 0.0,
             "candidate_eval_last_cached": 0,
             "candidate_eval_last_rejected": 0,
+            "llm_total_concurrency": 0,
+            "llm_background_concurrency": 0,
+            "llm_total_active": 0,
+            "llm_total_waiting": 0,
+            "llm_background_active": 0,
+            "llm_background_waiting": 0,
             "last_discovered_count": 14,
             "last_replenished_count": 6,
             "recent_pool_topics": ["国际时事", "宏观经济", "纪录片"],
@@ -9482,7 +9499,7 @@ class TestEmbeddingAndCompatProviderE2E:
         data = response.json()
 
         assert data["data_dir"] == "runtime-data"
-        assert data["llm"]["concurrency"] == 3
+        assert data["llm"]["concurrency"] == 4
         assert data["llm"]["deepseek"]["reasoning_effort"] == "high"
         assert data["llm"]["openrouter"]["http_referer"] == "https://example.com"
         assert data["llm"]["openrouter"]["x_title"] == "Example App"

@@ -282,6 +282,7 @@ class ContinuousRefreshController:
     event_hub: Any | None = None
     discovery_candidate_pipeline: Any | None = None
     candidate_eval_coordinator: Any | None = None
+    llm_concurrency_gate: Any | None = None
     bilibili_producer: Any | None = None
     xhs_producer: Any | None = None
     douyin_producer: Any | None = None
@@ -530,6 +531,10 @@ class ContinuousRefreshController:
         if callable(status_payload):
             with suppress(Exception):
                 payload.update(status_payload())
+        gate_status_payload = getattr(self.llm_concurrency_gate, "status_payload", None)
+        if callable(gate_status_payload):
+            with suppress(Exception):
+                payload.update(gate_status_payload())
         return payload
 
     async def refresh_if_needed(self) -> dict[str, object]:

@@ -86,7 +86,7 @@ class TestConfigDefaults:
         assert config.api.host == "0.0.0.0"
         assert config.api.port == 8420
         assert config.llm.default_provider == "deepseek"
-        assert config.llm.concurrency == 3
+        assert config.llm.concurrency == 4
         assert config.bilibili.auth_method == "cookie"
         assert config.bilibili.proxy == ""  # direct connection by default
         assert config.scheduler.enabled is True
@@ -98,6 +98,14 @@ class TestConfigDefaults:
         assert config.api.auth.extension_access_enabled is False
         assert config.api.auth.extension_access_keys == []
         assert config.api.auth.extension_token_ttl_hours == 24
+
+    def test_explicit_old_concurrency_is_preserved_and_derives_background(self) -> None:
+        from openbiliclaw.llm.concurrency import background_llm_concurrency
+
+        config = Config(llm=LLMConfig(concurrency=3))
+
+        assert config.llm.concurrency == 3
+        assert background_llm_concurrency(config.llm.concurrency) == 2
 
     def test_config_defaults_pool_target_count_to_300(self) -> None:
         config = Config()

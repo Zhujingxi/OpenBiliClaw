@@ -1,5 +1,7 @@
 # 浏览器插件模块
 
+> popup 的 LLM 总并发 placeholder/读取/保存 fallback 同步为 4；候选评估并发仍为 3，后台容量由后端派生。
+
 ## 模块范围
 
 `extension/` 是浏览器插件子项目（Chrome / Edge / Brave 主构建，Firefox 独立构建），负责：

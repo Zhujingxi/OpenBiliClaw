@@ -575,6 +575,12 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 
 ## 🏛️ Architecture Overview
 
+```text
+interactive ─────────────────────────┐
+                                    ├─ runtime total gate (default 4) ─ provider
+background ─ background gate (3) ───┘
+```
+
 ```
 ┌────────────────────────────────────────────────┐
 │       Browser Extension (Chrome / Firefox)      │

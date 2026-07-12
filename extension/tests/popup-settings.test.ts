@@ -396,6 +396,8 @@ test("settings page round-trips multimodal discovery evaluation controls", () =>
     popupJs,
     /candidate_eval_concurrency: getInt\("cfgCandidateEvalConcurrency", 3\)/,
   );
+  assert.match(popupJs, /setVal\("cfgLlmConcurrency", cfg\.llm\?\.concurrency \?\? 4\)/);
+  assert.match(popupJs, /concurrency: getInt\("cfgLlmConcurrency", 4\)/);
   assert.match(popupJs, /multimodal_batch_size: getInt\("cfgMultimodalBatchSize", 8\)/);
   assert.match(popupJs, /multimodal_image_max_px: getInt\("cfgMultimodalImageMaxPx", 384\)/);
   assert.match(popupJs, /multimodal_image_quality: getInt\("cfgMultimodalImageQuality", 72\)/);

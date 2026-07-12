@@ -712,12 +712,14 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
             usage_recorder: object | None = None,
             module_overrides=None,
             concurrency: int = 3,
+            concurrency_gate: object | None = None,
         ) -> None:
             self.registry = registry
             self.memory = memory
             self.usage_recorder = usage_recorder
             self.module_overrides = module_overrides
             self.concurrency = concurrency
+            self.concurrency_gate = concurrency_gate
 
     class FakeRecommendationEngine:
         def __init__(
@@ -878,10 +880,16 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     assert services.soul_engine.kwargs["speculation_max_primary_interests"] == 17
     assert services.soul_engine.kwargs["speculation_max_secondary_interests"] == 66
     assert services.soul_engine.kwargs["speculator_idle_interval_minutes"] == 11
-    assert services.soul_engine.kwargs["llm_concurrency"] == 3
+    assert services.soul_engine.kwargs["llm_concurrency"] == 4
     assert services.llm_service.module_overrides["discovery"].provider == "deepseek"
     assert services.llm_service.module_overrides["evaluation"].model == "gpt-4o-mini"
-    assert services.llm_service.concurrency == 3
+    assert services.llm_service.concurrency == 4
+    assert (
+        services.llm_service.concurrency_gate is services.soul_engine.kwargs["llm_concurrency_gate"]
+    )
+    assert services.runtime_controller.kwargs["llm_concurrency_gate"] is (
+        services.llm_service.concurrency_gate
+    )
     assert registered_strategies == [
         "FakeStrategy",
         "FakeStrategy",

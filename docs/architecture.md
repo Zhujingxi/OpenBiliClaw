@@ -4,6 +4,12 @@
 
 OpenBiliClaw 采用分层架构设计，从上到下依次为：
 
+```text
+interactive ─────────────────────────┐
+                                    ├─ runtime total gate (default 4) ─ provider
+background ─ background gate (3) ───┘
+```
+
 1. **用户交互层** — Chrome 浏览器插件（B 站 + 小红书 + 抖音 + YouTube + X (Twitter) + 知乎通过统一 `PlatformAdapter` 做页面行为采集，Reddit 通过 rdt-cli 做默认 discovery、插件保留 bootstrap 初始化信号和命令后端 fallback 登录态任务源，click 在 capture 阶段记录、scroll 覆盖内部 feed 容器 · 视频停留满意度信号 · 推荐展示与真实可换库存状态 · 文字卡（推文 / thread / 知乎回答 / Reddit 帖子）· 正向兴趣 / 避雷探针确认 · durable 对话交互 · 后台 LLM 暂停开关 · 开机自启动开关 · 配置离线缓存 / 降级修复 UI · bili/xhs/dy/yt/zhihu/reddit 任务调度 / 初始化画像导入 / 多路 discovery · B 站 / 抖音 / X Cookie 自动同步 · 本机扩展驱动 E2E 捕捉自检）+ 移动 Web（`/m`）+ 桌面 Web（`/web`）。所有 `/api/*` 前置一道**可选密码门禁**（HTTP 中间件，见下方「API Auth Gateway」）：本机 / 扩展默认免登录，局域网 / 远程设备需密码。
 2. **外部集成层** — OpenClaw adapter / skill wrappers / 本地 API / Codex CLI 凭据导入等对外接入边界
 3. **Agent 核心层** — 自研编排器 + Soul Engine + Discovery Engine + Recommendation Engine + Skill System

@@ -6,6 +6,7 @@
 
 ## v0.3.164：WebUI 可配置的海外出口代理（issue #89，2026-07-12）
 
+- **LLM 并发成为 runtime 真正总上限**：API、OpenClaw 与单次 CLI composition 各自只创建一个共享 gate，主服务、Soul、对话与发现链按对象身份复用；默认总并发 4、后台派生为 3。所有 provider 路径都受 total gate 约束，旧 bypass 只能跳过后台 admission；状态接口新增总/后台 active 与 waiting。显式正数配置保持不变，候选评估配置仍默认 3。
 - **升级后先恢复历史合格库存再调用 LLM**：每个 controller 的幂等 startup-maintenance hook 都先在原子 pool maintenance 事务中检查历史 `suppressed` 行；API 启动/热重载由 `run_forever()` 调用，OpenClaw direct bootstrap 则在 adapter service 暴露前同步调用，随后进入 loop 也不会重复维护。只有 `rolled_back=False` 的真实维护结果才完成启动标记；snapshot/DB fallback 或 rollback 保持可重试。仅恢复未推荐、未看过、非 dislike/shown/purged、仍达 admission 与完整 readiness guards 的结果。
 - **推荐库存维护改为原子且保护可用底线**：runtime 的 topic/source/stale/explore/raw 维护收敛为一次短连接 `BEGIN IMMEDIATE`；canonical available 按 serve SQL/排序保护，维护后必须满足 `available_after >= min(available_before, target)`，否则整笔回滚。raw ceiling 统一覆盖 `content_cache` 与 active `discovery_candidates`，未领取候选进入可审计的 `trimmed_capacity` 而不是删除，`evaluating` / token-owned 行永不裁剪；source/topic 配额在库存不足时允许延期并输出统一观测汇总。若 BEGIN / canonical snapshot 取得前锁失败，storage 抛出专用异常，runtime 重新读取 canonical available 决策，不再把未初始化计数误报为零库存。
 - **知乎来源配额归类修复**：新增七平台唯一可枚举来源族规则表，pool available/raw accounting、discovery 已看过滤、已看事件身份和 URL host 推断统一复用同一别名 / strategy 前缀口径；`zhihu-search/hot/feed/creator/related` 即使旧数据缺少 `source_platform` 也会计入 `zhihu`，不再以五个碎片来源绕过知乎配额。

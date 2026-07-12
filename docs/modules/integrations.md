@@ -1,5 +1,7 @@
 # 集成适配层
 
+> OpenClaw bootstrap 每个 runtime 只拥有一个 LLM gate，主服务、Soul 与 refresh 按对象身份共享；发现评估并发不再硬编码。
+
 > 面向外部系统的薄适配层，负责把 OpenBiliClaw 现有学习与推荐能力整理成稳定的 integration 接口。
 
 ## 概述

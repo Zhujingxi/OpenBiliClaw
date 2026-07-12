@@ -1,5 +1,7 @@
 # 灵魂引擎
 
+> `SoulEngine` 接受 runtime-owned gate，内部服务与主服务共享同一对象；`SocraticDialogue` 优先复用 Soul 服务。Prompt、token 与成本语义未变。
+
 > 用户深度理解核心 — 从行为数据到人格画像的推理引擎。
 
 ## 概述

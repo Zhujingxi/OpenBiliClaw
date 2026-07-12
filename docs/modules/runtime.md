@@ -1,5 +1,7 @@
 # Runtime Module
 
+> API runtime/热重载各创建一套共享 LLM gate 并注入主服务、Soul 与 refresh；runtime status 暴露 total/background capacity、active、waiting，发现评估 fan-out 派生自总并发。
+
 ## 概述
 
 `src/openbiliclaw/runtime/` 负责后端 daemon 的长期运行能力：后台刷新、账号同步、反馈批学习调度、运行时事件流、浏览器插件 presence gate、自动更新和任务生命周期管理。FastAPI 启动后会通过 `RuntimeContext` 持有这些 runtime 服务，配置热重载时重建可替换组件。

@@ -478,6 +478,19 @@ def _build_registry() -> Any:
     return build_llm_registry(load_config())
 
 
+def _build_llm_concurrency_gate() -> Any:
+    """Return the single LLM gate owned by this CLI process composition."""
+    from openbiliclaw.config import load_config
+    from openbiliclaw.llm.concurrency import LLMConcurrencyGate
+
+    cached = _RUNTIME_COMPONENTS.get("llm_concurrency_gate")
+    if cached is not None:
+        return cached
+    gate = LLMConcurrencyGate(load_config().llm.concurrency)
+    _RUNTIME_COMPONENTS["llm_concurrency_gate"] = gate
+    return gate
+
+
 def _build_auth_manager() -> Any:
     """Build the configured Bilibili auth manager."""
     from openbiliclaw.bilibili.auth import AuthManager
@@ -551,6 +564,7 @@ def _build_soul_engine() -> Any:
         satisfaction_filter_enabled=cfg.soul.preference.satisfaction_filter_enabled,
         module_overrides=module_overrides_from_config(cfg),
         llm_concurrency=cfg.llm.concurrency,
+        llm_concurrency_gate=_build_llm_concurrency_gate(),
         speculation_interval_minutes=cfg.scheduler.speculation_interval_minutes,
         speculation_ttl_days=cfg.scheduler.speculation_ttl_days,
         speculation_cooldown_days=cfg.scheduler.speculation_cooldown_days,
@@ -598,6 +612,7 @@ def _build_recommendation_engine() -> Any:
         usage_recorder=_build_usage_recorder(),
         module_overrides=module_overrides_from_config(cfg),
         concurrency=cfg.llm.concurrency,
+        concurrency_gate=_build_llm_concurrency_gate(),
     )
     from openbiliclaw.llm.registry import build_embedding_service
 
@@ -692,6 +707,7 @@ def _build_discovery_engine() -> Any:
         SearchStrategy,
         TrendingStrategy,
     )
+    from openbiliclaw.llm.concurrency import background_llm_concurrency
     from openbiliclaw.llm.service import LLMService, module_overrides_from_config
 
     memory = _build_memory_manager()
@@ -707,12 +723,11 @@ def _build_discovery_engine() -> Any:
         usage_recorder=_build_usage_recorder(),
         module_overrides=module_overrides_from_config(cfg),
         concurrency=cfg.llm.concurrency,
+        concurrency_gate=_build_llm_concurrency_gate(),
     )
     concurrency = DiscoveryConcurrencyController(
         bilibili_request_concurrency=2,
-        # Inherit dataclass default (currently 32) — sized so an init
-        # discover's ~32 batches all fan out in a single wave instead
-        # of queueing behind a tight cap. See engine.py for rationale.
+        llm_evaluation_concurrency=background_llm_concurrency(cfg.llm.concurrency),
     )
 
     # Build embedding service from config (optional)
@@ -7054,6 +7069,7 @@ def profile_consolidate(
             usage_recorder=_build_usage_recorder(),
             module_overrides=module_overrides_from_config(cfg),
             concurrency=cfg.llm.concurrency,
+            concurrency_gate=_build_llm_concurrency_gate(),
         )
     except Exception as exc:
         console.print(f"[yellow]  LLM 不可用（{exc}）— 只做规则合并与聚类预览。[/yellow]")
@@ -8865,6 +8881,8 @@ def keyword_inspiration_dry_run(
         memory=memory,
         usage_recorder=_build_usage_recorder(),
         module_overrides=module_overrides_from_config(config),
+        concurrency=config.llm.concurrency,
+        concurrency_gate=_build_llm_concurrency_gate(),
     )
     soul_engine = _build_soul_engine()
     try:
@@ -9002,6 +9020,7 @@ def _run_xhs_discovery(*, force: bool) -> None:
         usage_recorder=_build_usage_recorder(),
         module_overrides=module_overrides_from_config(config),
         concurrency=config.llm.concurrency,
+        concurrency_gate=_build_llm_concurrency_gate(),
     )
 
     xhs_cfg = getattr(config.sources, "xiaohongshu", None)

@@ -51,7 +51,8 @@ extension_token_ttl_hours = 24
 default_provider = "deepseek"
 # Shared max concurrency for LLM requests. Higher values replenish faster but
 # may hit provider/local-proxy rate limits sooner.
-concurrency = 3
+# 总并发 4；后台派生为 3
+concurrency = 4
 # Global request timeout for all LLM providers (seconds).
 # Applies to OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter /
 # openai_compatible. Allowed range: 10..600. Default 300s.

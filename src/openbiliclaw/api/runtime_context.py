@@ -370,6 +370,7 @@ class RuntimeContext:
             TrendingStrategy,
         )
         from openbiliclaw.llm import build_llm_registry
+        from openbiliclaw.llm.concurrency import LLMConcurrencyGate, background_llm_concurrency
         from openbiliclaw.llm.registry import build_embedding_service
         from openbiliclaw.llm.service import LLMService, module_overrides_from_config
         from openbiliclaw.llm.usage_recorder import UsageRecorder
@@ -385,12 +386,14 @@ class RuntimeContext:
         new_usage_recorder = UsageRecorder(sink=self.database)
         new_module_overrides = module_overrides_from_config(new_config)
         llm_concurrency = _llm_concurrency_from_config(new_config)
+        new_llm_gate = LLMConcurrencyGate(llm_concurrency)
         new_llm_service = LLMService(
             registry=new_registry,
             memory=self.memory_manager,
             usage_recorder=new_usage_recorder,
             module_overrides=new_module_overrides,
             concurrency=llm_concurrency,
+            concurrency_gate=new_llm_gate,
         )
 
         # 2. Bilibili client
@@ -426,6 +429,7 @@ class RuntimeContext:
             satisfaction_filter_enabled=satisfaction_filter_enabled,
             module_overrides=new_module_overrides,
             llm_concurrency=llm_concurrency,
+            llm_concurrency_gate=new_llm_gate,
             speculation_interval_minutes=int(
                 getattr(new_config.scheduler, "speculation_interval_minutes", 10)
             ),
@@ -530,7 +534,7 @@ class RuntimeContext:
         # 7. Discovery engine + strategies
         concurrency = DiscoveryConcurrencyController(
             bilibili_request_concurrency=2,
-            llm_evaluation_concurrency=2,
+            llm_evaluation_concurrency=background_llm_concurrency(llm_concurrency),
         )
         new_discovery_engine = ContentDiscoveryEngine(
             llm_service=new_llm_service,
@@ -846,6 +850,7 @@ class RuntimeContext:
             # init's own run_init_backfill bypasses _llm_work_allowed.
             init_active_check=lambda: self.init_coordinator.init_active(),
             task_registry=self.task_registry,
+            llm_concurrency_gate=new_llm_gate,
         )
 
         from openbiliclaw.runtime.candidate_eval import (
