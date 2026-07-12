@@ -1,6 +1,6 @@
 # Task 9 end-to-end verification report
 
-Status: **BLOCKED — required live verification timed out**
+Status: **BLOCKED — the strict live-admission gate rejected all eight real candidates**
 
 ## Deterministic evidence
 
@@ -37,6 +37,31 @@ Second run after adding phase-only markers and explicit timeouts:
 - Evaluation/admission/copy/maintenance/interactive counters were therefore not
   fabricated and the live acceptance gate remains failed.
 
+### SenseTime-compatible provider rerun
+
+- Exact command used the explicit opt-in controls:
+  `OPENBILICLAW_REFILL_E2E=1`,
+  `OPENBILICLAW_REFILL_CONFIG=/Users/white/workspace/OpenBiliClaw/config.toml`,
+  and `OPENBILICLAW_REFILL_PROVIDER=openai_compatible`. The test loads that
+  path only when explicitly supplied and clones the provider default in memory;
+  it never writes config or logs credentials.
+- A 30-second normal-registry completion probe succeeded in **5.6 seconds**.
+- The full temporary-DB/read-only-ranking run reached `fetched=8`, then failed
+  its intentional admission assertion in **33.57 seconds**: `evaluated=8`,
+  `passing_scores=0`, `admitted=0`, `rejected=8`. It correctly did not proceed
+  to copy, maintenance, or interactive-reservation phases.
+- A follow-up aggregate-only diagnostic confirmed one JSON-mode `system/user`
+  evaluator request via `openai_compatible` / `deepseek-v4-flash`: the response
+  parsed as a valid object containing eight scored entries, all eight identifiers
+  matched, all eight candidates resolved (zero parser-unresolved), every score
+  fell below `0.60`, and all eight durable statuses were
+  `rejected_low_score`.
+- This is an admission/data failure under the unchanged strict acceptance rule,
+  not a provider routing, response-shape, parser, authentication, or timeout
+  failure. No threshold, profile, source data, or provider configuration was
+  changed to manufacture a pass; no raw response, prompt, content body, Cookie,
+  or key was printed.
+
 ## Guard and focused checks
 
 - Live integration remains opt-in and is skipped when its explicit flag is
@@ -46,8 +71,9 @@ Second run after adding phase-only markers and explicit timeouts:
 
 ## Remaining gates
 
-The mandatory live provider verification remains failed for the external
-provider-runtime reason above. All deterministic gates were subsequently run:
+The mandatory live provider verification remains failed because this real
+candidate batch did not satisfy strict admission. All deterministic gates were
+subsequently run:
 
 - Full Python suite: `4255 passed, 36 skipped` in 337.67 seconds. The 2288
   warnings are existing FastAPI/websocket deprecation warnings.

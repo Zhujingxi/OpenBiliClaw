@@ -4,9 +4,11 @@ from pathlib import Path
 
 import pytest
 
+from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
 from openbiliclaw.llm.base import LLMResponse, LLMTimeoutError
 from openbiliclaw.llm.concurrency import LLMConcurrencyGate
 
+from . import test_refill_real_provider_integration as live_refill
 from .test_refill_real_provider_integration import _LiveMetrics, _MonitoredRegistry
 
 
@@ -40,6 +42,13 @@ def test_live_summary_reports_measured_retry_attempts() -> None:
     source = Path("tests/test_refill_real_provider_integration.py").read_text(encoding="utf-8")
     assert "transient_retry_count={metrics.transient_retry_count}" in source
     assert "metrics.transient_retry_count <= metrics.provider_round_count" in source
+
+
+def test_live_rejection_failure_reports_sanitized_score_and_admission_counts() -> None:
+    source = Path("tests/test_refill_real_provider_integration.py").read_text(encoding="utf-8")
+    assert "passing_scores=" in source
+    assert "rejected={result['rejected']}" in source
+    assert "parser_unresolved=" in source
 
 
 @pytest.mark.asyncio
@@ -108,3 +117,84 @@ async def test_retry_observer_does_not_count_unrelated_same_caller_request() -> 
 
     assert metrics.provider_round_count == 2
     assert metrics.transient_retry_count == 0
+
+
+def test_live_refill_uses_explicit_config_and_provider_without_mutating_loaded_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = Config(
+        llm=LLMConfig(
+            default_provider="ollama",
+            ollama=LLMProviderConfig(model="unit-test-model"),
+            openai_compatible=LLMProviderConfig(
+                api_key="test-compatible-key",
+                base_url="https://compatible.example/v1",
+                model="test-compatible-model",
+            ),
+        )
+    )
+    paths: list[object] = []
+
+    def _load(path: object = None) -> Config:
+        paths.append(path)
+        return loaded
+
+    monkeypatch.setattr(live_refill, "load_config", _load)
+    monkeypatch.setenv("OPENBILICLAW_REFILL_CONFIG", "/tmp/live-refill.toml")
+    monkeypatch.setenv("OPENBILICLAW_REFILL_PROVIDER", " OPENAI_COMPATIBLE ")
+
+    config, registry = live_refill._load_live_config_and_registry()
+
+    assert paths == ["/tmp/live-refill.toml"]
+    assert loaded.llm.default_provider == "ollama"
+    assert config.llm.default_provider == "openai_compatible"
+    assert registry.default_provider == "openai_compatible"
+
+
+def test_live_refill_fails_when_explicit_provider_is_not_registered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = Config(
+        llm=LLMConfig(
+            default_provider="ollama",
+            ollama=LLMProviderConfig(model="unit-test-model"),
+        )
+    )
+    monkeypatch.delenv("OPENBILICLAW_REFILL_CONFIG", raising=False)
+    monkeypatch.setattr(live_refill, "load_config", lambda: loaded)
+    monkeypatch.setenv("OPENBILICLAW_REFILL_PROVIDER", "openai_compatible")
+
+    with pytest.raises(RuntimeError, match="Requested live refill provider is unavailable"):
+        live_refill._load_live_config_and_registry()
+
+
+def test_live_refill_without_controls_keeps_zero_argument_config_loading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = Config(
+        llm=LLMConfig(
+            default_provider="ollama",
+            ollama=LLMProviderConfig(model="unit-test-model"),
+        )
+    )
+    calls: list[tuple[object, ...]] = []
+
+    def _load(*args: object) -> Config:
+        calls.append(args)
+        return loaded
+
+    monkeypatch.delenv("OPENBILICLAW_REFILL_CONFIG", raising=False)
+    monkeypatch.delenv("OPENBILICLAW_REFILL_PROVIDER", raising=False)
+    monkeypatch.setattr(live_refill, "load_config", _load)
+
+    config, registry = live_refill._load_live_config_and_registry()
+
+    assert calls == [()]
+    assert config is loaded
+    assert registry.default_provider == "ollama"
+
+
+def test_live_refill_integration_remains_explicitly_opt_in() -> None:
+    marks = [mark for mark in live_refill.pytestmark if mark.name == "skipif"]
+    assert len(marks) == 1
+    assert marks[0].kwargs["reason"] == "set OPENBILICLAW_REFILL_E2E=1 for live refill E2E"

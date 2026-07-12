@@ -5,7 +5,7 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -26,11 +26,39 @@ from openbiliclaw.storage.database import Database
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from openbiliclaw.config import Config
+    from openbiliclaw.llm.base import LLMRegistry
+
 _LIVE = os.getenv("OPENBILICLAW_REFILL_E2E", "") == "1"
+_LIVE_CONFIG_ENV = "OPENBILICLAW_REFILL_CONFIG"
+_LIVE_PROVIDER_ENV = "OPENBILICLAW_REFILL_PROVIDER"
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not _LIVE, reason="set OPENBILICLAW_REFILL_E2E=1 for live refill E2E"),
 ]
+
+
+def _load_live_config_and_registry() -> tuple[Config, LLMRegistry]:
+    """Load an opt-in live-test config without changing persisted settings.
+
+    The optional environment controls exist only for this explicitly enabled
+    integration test. They let an operator choose a known-good configured
+    provider while keeping normal config loading and all on-disk settings
+    untouched.
+    """
+
+    config_path = os.getenv(_LIVE_CONFIG_ENV, "").strip()
+    config = load_config(config_path) if config_path else load_config()
+    requested_provider = os.getenv(_LIVE_PROVIDER_ENV, "").strip().lower()
+    if requested_provider:
+        config = replace(
+            config,
+            llm=replace(config.llm, default_provider=requested_provider),
+        )
+    registry = build_llm_registry(config)
+    if requested_provider and registry.default_provider != requested_provider:
+        raise RuntimeError("Requested live refill provider is unavailable.")
+    return config, registry
 
 
 def _profile() -> SoulProfile:
@@ -228,8 +256,7 @@ class _BarrierRegistry:
 @pytest.mark.asyncio
 async def test_real_provider_refill_and_interactive_fourth_slot(tmp_path: Path) -> None:
     print("live_refill_phase=config", flush=True)
-    config = load_config()
-    registry = build_llm_registry(config)
+    config, registry = _load_live_config_and_registry()
     db = Database(tmp_path / "live-refill.db")
     db.initialize()
     memory = MemoryManager(tmp_path / "memory", database=db)
@@ -281,14 +308,27 @@ async def test_real_provider_refill_and_interactive_fourth_slot(tmp_path: Path) 
     print("live_refill_phase=evaluation_start", flush=True)
     async with asyncio.timeout(180):
         outcome = await pipeline.evaluate_claim(claim, profile)
+    passing_scores = sum(
+        score >= pipeline._threshold_for(row)
+        for row, score in zip(claim.rows, outcome.scores, strict=True)
+    )
+    parser_unresolved = sum(
+        item.relevance_reason == "evaluation_response_missing" for item in claim.items
+    )
     result = await pipeline.complete_claim(outcome, admission_limit=8)
     print(
         f"live_refill_phase=evaluation_done evaluated={result['evaluated']} "
-        f"admitted={result['cached']}",
+        f"passing_scores={passing_scores} parser_unresolved={parser_unresolved} "
+        f"admitted={result['cached']} "
+        f"rejected={result['rejected']}",
         flush=True,
     )
     assert result["evaluated"] > 0
-    assert result["cached"] > 0, f"live evaluated={result['evaluated']} admitted=0"
+    assert result["cached"] > 0, (
+        f"live evaluated={result['evaluated']} passing_scores={passing_scores} "
+        f"parser_unresolved={parser_unresolved} "
+        f"admitted=0 rejected={result['rejected']}"
+    )
     recommendation = RecommendationEngine(llm=service, database=db, expression_batch_concurrency=2)
     print("live_refill_phase=copy_start", flush=True)
     async with asyncio.timeout(180):
