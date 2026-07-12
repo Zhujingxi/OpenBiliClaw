@@ -1048,12 +1048,83 @@
       return details.message || details.detail?.message || details.detail?.error || details.error || "";
     }
 
-    function showToast(message) {
-      const toast = $("#toast");
-      toast.textContent = message;
-      toast.classList.add("is-open");
-      window.setTimeout(() => toast.classList.remove("is-open"), 2600);
-    }
+    const toastManager = {
+      items: [], gap: 8, container: null,
+      init() {
+        this.container = document.getElementById("toastContainer");
+        if (!this.container) {
+          this.container = document.createElement("div");
+          this.container.className = "toast-container";
+          document.body.appendChild(this.container);
+        }
+      },
+      showToast(msg, { duration = 2600 } = {}) {
+        const el = document.createElement("div");
+        el.className = "toast-item entering";
+        el.textContent = msg;
+        el.addEventListener("click", (e) => this.dismiss(el));
+        el.addEventListener("mouseenter", () => { const i = this.items.find(it => it.el === el); if (i) this._pause(i); });
+        el.addEventListener("mouseleave", () => { const i = this.items.find(it => it.el === el); if (i) this._resume(i); });
+        this.container.appendChild(el);
+        const item = { el, timer: null, remaining: duration, started: Date.now(), paused: false, exiting: false };
+        this.items.push(item);
+        this._reposition();
+        void el.offsetHeight;
+        el.classList.remove("entering");
+        return item;
+      },
+      _reposition() {
+        let bottom = 0;
+        for (const item of this.items) {
+          if (item.exiting) continue;
+          const first = bottom === 0;
+          item.el.style.bottom = bottom + "px";
+          if (first && !item.reachedBottom) {
+            item.reachedBottom = true;
+            const elapsed = Date.now() - item.started;
+            const actual = Math.max(0, item.remaining - elapsed);
+            if (actual < 2000) item.remaining = actual + 2000;
+            if (!item.paused) this._startTimer(item);
+          }
+          bottom += item.el.offsetHeight + this.gap;
+        }
+      },
+      dismiss(el) {
+        const item = this.items.find((i) => i.el === el);
+        if (!item || item.exiting) return;
+        item.exiting = true;
+        this._clearTimer(item);
+        el.classList.add("exiting");
+        el.addEventListener("transitionend", () => {
+          const idx = this.items.indexOf(item);
+          if (idx >= 0) this.items.splice(idx, 1);
+          el.remove();
+          this._reposition();
+        }, { once: true });
+      },
+      _startTimer(item) {
+        this._clearTimer(item);
+        item.started = Date.now();
+        item.timer = setTimeout(() => this.dismiss(item.el), item.remaining);
+      },
+      _clearTimer(item) {
+        if (item.timer) { clearTimeout(item.timer); item.timer = null; }
+      },
+      _pause(item) {
+        if (item.paused || item.exiting || !item.reachedBottom) return;
+        this._clearTimer(item);
+        item.remaining -= Date.now() - item.started;
+        item.paused = true;
+      },
+      _resume(item) {
+        if (!item.paused || item.exiting || !item.reachedBottom) return;
+        item.paused = false;
+        item.started = Date.now();
+        item.timer = setTimeout(() => this.dismiss(item.el), Math.max(item.remaining, 2000));
+      }
+    };
+    function showToast(message) { toastManager.showToast(message); }
+    window.showToast = showToast;// 用于终端测试ToastNotice
 
     const pendingActions = window.OpenBiliClawPendingActions.createPendingActionCoordinator({
       windowMs: Number(window.__OBC_TEST_UNDO_WINDOW_MS || 10000),
@@ -6768,6 +6839,7 @@
     restoreFrontendSettings();
     setSideDrawerOpen(!isMobileViewport() && storageGet(SIDE_DRAWER_OPEN_KEY) !== "0", { persist: false });
     startChatPlaceholderRotation();
+    toastManager.init();
     try {
       renderAll();
     } catch (error) {
