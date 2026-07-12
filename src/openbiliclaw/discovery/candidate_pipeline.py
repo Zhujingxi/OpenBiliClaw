@@ -9,6 +9,7 @@ import logging
 import secrets
 import time
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from openbiliclaw.discovery.admission import effective_admission_threshold
@@ -72,6 +73,54 @@ class CandidateEvalOutcome:
     claim: CandidateEvalClaim
     scores: tuple[float, ...]
     elapsed_seconds: float
+
+
+class PostAdmissionCopyState(StrEnum):
+    """Terminal ownership state for copy work following a candidate admission."""
+
+    NOT_OWNED = "not_owned"
+    CALLBACK_COMPLETED = "callback_completed"
+    CALLBACK_FAILED = "callback_failed"
+
+
+@dataclass(frozen=True)
+class PostAdmissionCopyReceipt:
+    """Describe whether an admission callback already owned the copy stage.
+
+    The result travels with one ``drain_pending`` return value so callers can
+    distinguish "there was no admission callback" from "the callback already
+    ran (including a durable, retryable failure)".  That is important for
+    one-shot runtimes: their refresh-plan cleanup must only act as a fallback,
+    never re-invoke the owner for the same admission.
+    """
+
+    state: PostAdmissionCopyState = PostAdmissionCopyState.NOT_OWNED
+    completed: int = 0
+
+    @property
+    def owns_copy_stage(self) -> bool:
+        """Whether a post-admission callback took ownership this drain."""
+
+        return self.state is not PostAdmissionCopyState.NOT_OWNED
+
+
+class CandidateDrainResult(dict[str, int]):
+    """Mapping-compatible drain metrics with an explicit copy ownership receipt.
+
+    Existing consumers treat drain output as a ``dict[str, int]``.  Keeping
+    that mapping shape preserves their metric contract (and legacy equality
+    checks) while exposing the non-metric ownership result as a dedicated
+    attribute instead of smuggling it into the public count payload.
+    """
+
+    def __init__(
+        self,
+        values: dict[str, int],
+        *,
+        post_admission_copy: PostAdmissionCopyReceipt,
+    ) -> None:
+        super().__init__(values)
+        self.post_admission_copy = post_admission_copy
 
 
 @dataclass
@@ -367,21 +416,29 @@ class DiscoveryCandidatePipeline:
         *,
         profile: Any,
         batch_size: int = _DEFAULT_EVAL_BATCH_SIZE,
-    ) -> dict[str, int]:
+    ) -> CandidateDrainResult:
         """Evaluate one pending batch and admit accepted items into content_cache."""
 
         if self._drain_lock.locked():
             self.last_admitted_items = []
-            return {"evaluated": 0, "cached": 0, "rejected": 0}
+            return CandidateDrainResult(
+                {"evaluated": 0, "cached": 0, "rejected": 0},
+                post_admission_copy=PostAdmissionCopyReceipt(),
+            )
         async with self._drain_lock:
             result = await self._drain_pending_locked(profile=profile, batch_size=batch_size)
-        await self._notify_candidates_admitted(
+        post_admission_copy = await self._notify_candidates_admitted(
             profile=profile,
             admitted=int(result.get("cached", 0) or 0),
         )
-        return result
+        return CandidateDrainResult(result, post_admission_copy=post_admission_copy)
 
-    async def _notify_candidates_admitted(self, *, profile: Any, admitted: int) -> None:
+    async def _notify_candidates_admitted(
+        self,
+        *,
+        profile: Any,
+        admitted: int,
+    ) -> PostAdmissionCopyReceipt:
         """Run the optional post-admission owner after its DB commit.
 
         Candidate evaluation owns only raw evaluation and cache admission.  A
@@ -392,15 +449,29 @@ class DiscoveryCandidatePipeline:
 
         callback = self.on_candidates_admitted
         if admitted <= 0 or callback is None:
-            return
+            return PostAdmissionCopyReceipt()
         try:
             result = callback(profile, admitted)
             if inspect.isawaitable(result):
-                await result
+                result = await result
+            try:
+                completed = max(0, int(result or 0))
+            except (TypeError, ValueError):
+                completed = 0
+            return PostAdmissionCopyReceipt(
+                state=PostAdmissionCopyState.CALLBACK_COMPLETED,
+                completed=completed,
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("post-admission candidate callback failed")
+            # The durable pending-copy rows remain retryable on a later
+            # operation. The callback still owns this admission, so callers
+            # must not immediately invoke it a second time as a cleanup pass.
+            return PostAdmissionCopyReceipt(
+                state=PostAdmissionCopyState.CALLBACK_FAILED,
+            )
 
     def claim_batch(self, *, limit: int) -> CandidateEvalClaim | None:
         """Claim one token-owned batch without performing LLM work."""

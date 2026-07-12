@@ -2,7 +2,7 @@
 
 > 从用户画像出发，在 B 站、小红书、抖音、YouTube、X、知乎、Reddit 和通用 Web 等来源主动寻找潜在会喜欢的内容。
 
-API daemon 的候选 admission 成功后只同步调用轻量 expression `notify()`，不会 inline 或 await 文案 provider；generation-owned coordinator 按 durable `admitted_pending_copy` 连续补齐文案，因此评估 worker 可立即继续补位。OpenClaw direct one-shot 没有 daemon owner：它在 admission commit 后 await 最多 60 条 durable expression copy，确保返回时 canonical pool 已可 serve，不留下 copy/provider task。
+API daemon 的候选 admission 成功后只同步调用轻量 expression `notify()`，不会 inline 或 await 文案 provider；generation-owned coordinator 按 durable `admitted_pending_copy` 连续补齐文案，因此评估 worker 可立即继续补位。OpenClaw direct one-shot 没有 daemon owner：它在 admission commit 后 await 最多 60 条 durable expression copy，确保返回时 canonical pool 已可 serve，不留下 copy/provider task。`drain_pending()` 会随原有 metrics 返回结构化 post-admission copy receipt；refresh 仅在本轮没有 callback owner 时执行 copy 兜底，避免同一 durable admission 被 controller 收尾再次调用。
 
 ## 概述
 

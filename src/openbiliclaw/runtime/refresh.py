@@ -1071,6 +1071,19 @@ class ContinuousRefreshController:
             logger.exception("one-shot expression-copy drain failed")
             return 0
 
+    @staticmethod
+    def _post_admission_copy_stage_is_owned(drain_result: object) -> bool:
+        """Return whether a pipeline drain already ran its copy-stage owner.
+
+        ``DiscoveryCandidatePipeline`` returns a mapping-compatible result with
+        a structured post-admission receipt. Older test doubles and compatible
+        third-party pipelines return a plain mapping, which deliberately means
+        no owner was reported and therefore preserves the controller fallback.
+        """
+
+        receipt = getattr(drain_result, "post_admission_copy", None)
+        return bool(getattr(receipt, "owns_copy_stage", False))
+
     async def _safe_prewarm_pool_mmr_embeddings(self) -> int:
         """Warm MMR embeddings without blocking refresh completion."""
         try:
@@ -1923,11 +1936,13 @@ class ContinuousRefreshController:
             rejected = int(drain_result.get("rejected", 0) or 0)
             failed = int(drain_result.get("failed", 0) or 0)
             waiting = int(drain_result.get("waiting", 0) or 0)
+            post_admission_copy_owned = self._post_admission_copy_stage_is_owned(drain_result)
         if cached > 0 and precompute:
             if self.expression_copy_coordinator is not None:
                 self.expression_copy_coordinator.notify(f"candidate_admitted:{cached}")
             elif self.one_shot_expression_copy_callback is not None:
-                await self._safe_one_shot_expression_copy(profile=profile)
+                if not post_admission_copy_owned:
+                    await self._safe_one_shot_expression_copy(profile=profile)
             else:
                 await self._safe_precompute_pool_copy(profile=profile)
                 await self._publish_precompute_replenishment_if_needed(
@@ -2010,6 +2025,7 @@ class ContinuousRefreshController:
         pipeline_discovered_count = 0
         flattened_strategies: list[str] = []
         replenished_topics: list[str] = []
+        post_admission_copy_owned = False
 
         await self._publish_event(
             {
@@ -2167,6 +2183,10 @@ class ContinuousRefreshController:
                             batch_size=effective_limit,
                             precompute=False,
                         )
+                    post_admission_copy_owned = (
+                        post_admission_copy_owned
+                        or self._post_admission_copy_stage_is_owned(drain_result)
+                    )
                     discovered_count = int(produced_count or 0)
                     admitted_count = int(drain_result.get("cached", 0) or 0)
                     if admitted_count > 0:
@@ -2221,7 +2241,8 @@ class ContinuousRefreshController:
             if self.expression_copy_coordinator is not None:
                 self.expression_copy_coordinator.notify("refresh_complete")
             elif self.one_shot_expression_copy_callback is not None:
-                await self._safe_one_shot_expression_copy(profile=profile)
+                if not post_admission_copy_owned:
+                    await self._safe_one_shot_expression_copy(profile=profile)
             else:
                 await self._safe_precompute_pool_copy(profile=profile)
             # Pre-warm supergroup-merge embeddings so the popup's "换一批"

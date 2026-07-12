@@ -1155,6 +1155,178 @@ async def test_openclaw_one_shot_producer_admits_inline_with_ninety_claim_cap(
 
 
 @pytest.mark.asyncio
+async def test_openclaw_controller_refresh_owns_post_admission_copy_once(
+    tmp_path: Path,
+) -> None:
+    """A one-shot controller must not re-run copy already owned by admission."""
+
+    from openbiliclaw.recommendation.engine import RecommendationEngine
+    from openbiliclaw.runtime.refresh import ContinuousRefreshController
+
+    profile = SoulProfile(
+        core_traits=["好奇"],
+        preferences=PreferenceLayer(
+            interests=[InterestTag(name="并发控制", category="技术", weight=0.95)]
+        ),
+    )
+
+    class Memory:
+        def __init__(self) -> None:
+            self.runtime_state: dict[str, object] = {}
+
+        def get_layer(self, _name: str) -> SimpleNamespace:
+            return SimpleNamespace(data={"ready": True})
+
+        def load_discovery_runtime_state(self) -> dict[str, object]:
+            return dict(self.runtime_state)
+
+        def save_discovery_runtime_state(self, state: dict[str, object]) -> None:
+            self.runtime_state = dict(state)
+
+        def update_discovery_runtime_state(self, mutator) -> dict[str, object]:
+            state = dict(self.runtime_state)
+            result = mutator(state)
+            self.runtime_state = dict(state if result is None else result)
+            return dict(self.runtime_state)
+
+    class Soul:
+        async def get_profile(self) -> SoulProfile:
+            return profile
+
+        def get_effective_disliked_topics(self) -> list[str]:
+            return []
+
+    class EvaluationEngine:
+        _EVALUATE_BATCH_HARD_CAP = 90
+
+        def __init__(self, database: Database) -> None:
+            self.database = database
+
+        async def produce_candidates(
+            self,
+            _profile: SoulProfile,
+            *,
+            strategies: list[str],
+            limit: int,
+            **_kwargs: object,
+        ) -> list[DiscoveredContent]:
+            return [
+                DiscoveredContent(
+                    bvid=f"BV-openclaw-controller-{index}",
+                    content_id=f"openclaw-controller-{index}",
+                    content_url=(
+                        "https://www.bilibili.com/video/"
+                        f"BV-openclaw-controller-{index}"
+                    ),
+                    title=f"一次性补货链路 {index}",
+                    source_platform="bilibili",
+                    source_strategy=strategies[0] if strategies else "search",
+                    author_name="系统实验室",
+                )
+                for index in range(limit)
+            ]
+
+        async def evaluate_content_batch(
+            self,
+            contents: list[DiscoveredContent],
+            _profile: SoulProfile,
+            **_kwargs: object,
+        ) -> list[float]:
+            for item in contents:
+                item.relevance_score = 0.91
+                item.relevance_reason = "OpenClaw controller fit"
+                item.topic_group = f"并发补货-{item.content_id}"
+                item.style_key = "deep_dive"
+            return [0.91] * len(contents)
+
+        def cache_evaluated_results(self, items: list[DiscoveredContent]) -> int:
+            for item in items:
+                self.database.cache_content(
+                    item.bvid,
+                    title=item.title,
+                    up_name=item.author_name or item.up_name,
+                    source=item.source_strategy,
+                    source_platform=item.source_platform,
+                    content_id=item.content_id or item.bvid,
+                    content_url=item.content_url,
+                    relevance_score=item.relevance_score,
+                    relevance_reason=item.relevance_reason,
+                    topic_group=item.topic_group,
+                    style_key=item.style_key,
+                )
+            return len(items)
+
+    class ExpressionLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured_task(
+            self, *, caller: str, **_kwargs: object
+        ) -> SimpleNamespace:
+            assert caller == "recommendation.write_expression"
+            self.calls += 1
+            return SimpleNamespace(
+                content=json.dumps(
+                    [
+                        {
+                            "content_id": f"openclaw-controller-{index}",
+                            "expression": f"第 {index} 条把补货并发讲得很清楚。",
+                            "topic_label": "把补货跑稳",
+                        }
+                        for index in range(5)
+                    ],
+                    ensure_ascii=False,
+                )
+            )
+
+    database = Database(tmp_path / "openclaw-controller-copy-once.db")
+    database.initialize()
+    evaluation_engine = EvaluationEngine(database)
+    candidate_pipeline = DiscoveryCandidatePipeline(
+        database=database,
+        discovery_engine=evaluation_engine,  # type: ignore[arg-type]
+        pool_target_count=5,
+        min_eval_batch_size=1,
+    )
+    expression_llm = ExpressionLLM()
+    recommendation_engine = RecommendationEngine(llm=expression_llm, database=database)
+    copy_callback_calls = 0
+
+    async def drain_one_shot_copy(callback_profile: SoulProfile) -> int:
+        nonlocal copy_callback_calls
+        copy_callback_calls += 1
+        return await recommendation_engine.drain_pending_expression_copy(
+            profile=callback_profile,
+            limit=60,
+        )
+
+    candidate_pipeline.on_candidates_admitted = (
+        lambda callback_profile, _admitted: drain_one_shot_copy(callback_profile)
+    )
+    controller = ContinuousRefreshController(
+        memory_manager=Memory(),
+        database=database,
+        soul_engine=Soul(),
+        discovery_engine=evaluation_engine,  # type: ignore[arg-type]
+        recommendation_engine=recommendation_engine,
+        discovery_candidate_pipeline=candidate_pipeline,
+        one_shot_expression_copy_callback=drain_one_shot_copy,
+        pool_target_count=5,
+        pool_source_shares={"bilibili": 1},
+        discovery_limit=5,
+    )
+
+    result = await controller.force_refresh()
+
+    assert result["refreshed"] is True
+    assert copy_callback_calls == 1
+    assert expression_llm.calls == 1
+    assert database.count_pool_candidates() == 5
+    assert database.get_pool_candidates_needing_copy(limit=10) == []
+    database.close()
+
+
+@pytest.mark.asyncio
 async def test_openclaw_bootstrap_one_shot_producer_copies_and_serves_fresh_pool(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
