@@ -280,7 +280,7 @@ class TestXhsTaskApi:
                 "urls": ["https://www.xiaohongshu.com/explore/x"],
             },
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 409
 
     def test_creator_crud(self, api_client: TestClient) -> None:
         # Add
