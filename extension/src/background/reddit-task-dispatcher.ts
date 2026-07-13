@@ -9,7 +9,7 @@ import { apiUrl } from "../shared/backend-endpoint.ts";
 import { authenticatedFetch } from "../shared/auth.ts";
 import { ASSET_PREFIX } from "../shared/asset-prefix.ts";
 import { isNativeSaveTask, type NativeSaveResult, type NativeSaveTask } from "../shared/native-save.ts";
-import { runNativeSaveTask } from "./native-save-task-runner.ts";
+import { ensureNativeSaveTaskRecovery, runNativeSaveTask } from "./native-save-task-runner.ts";
 
 const DEFAULT_POLL_INTERVAL_MS = 60_000;
 const POLL_ALARM_NAME = "openbiliclaw-reddit-task-poll";
@@ -299,6 +299,7 @@ export async function handleRedditTaskResult(result: RedditTaskResult): Promise<
 }
 
 async function pollNextTask(): Promise<void> {
+  await ensureNativeSaveTaskRecovery();
   if (taskInFlight) return;
   const task = await fetchNextTask();
   if (!task) return;
@@ -310,12 +311,10 @@ export function startRedditTaskPolling(): void {
   chrome.alarms.create(POLL_ALARM_NAME, { periodInMinutes: DEFAULT_POLL_INTERVAL_MS / 60_000 });
 }
 
-export function handleRedditTaskAlarm(alarmName: string): void {
-  if (alarmName === POLL_ALARM_NAME) {
-    void pollNextTask();
-  }
+export function handleRedditTaskAlarm(alarmName: string): Promise<void> {
+  return alarmName === POLL_ALARM_NAME ? pollNextTask() : Promise.resolve();
 }
 
-export function pollRedditTaskNow(): void {
-  void pollNextTask();
+export function pollRedditTaskNow(): Promise<void> {
+  return pollNextTask();
 }

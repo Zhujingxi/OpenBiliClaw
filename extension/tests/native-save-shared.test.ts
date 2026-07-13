@@ -230,5 +230,21 @@ test("native save docs identify Reddit and X wiring without overstating account 
     assert.match(text, /Reddit\/X executor 已接入/);
     assert.match(text, /尚未真实账号验证/);
     assert.match(text, /小红书、抖音、YouTube、知乎.*待接/);
+    assert.match(text, /共享 MV3 recovery barrier/);
+    assert.match(text, /2xx 未确认|2xx-unconfirmed/);
+    assert.match(text, /(?:结构化.*rate|rate.*结构化|structured.*rate)/i);
   }
+  const spec = readFileSync(resolve("../docs/spec.md"), "utf8");
+  assert.match(spec, /shared MV3 recovery barrier/);
+});
+
+test("README prose matches the fixture-tested Reddit and X executor architecture", () => {
+  const readme = readFileSync(resolve("../README.md"), "utf8");
+  const readmeEn = readFileSync(resolve("../README_EN.md"), "utf8");
+  assert.match(readme, /Reddit\/X 原生保存 executor 已接入.*fixture.*未真实账号验证/);
+  assert.match(readme, /小红书、抖音、YouTube、知乎.*仍待接/);
+  assert.doesNotMatch(readme, /扩展只负责同步 x\.com cookie \+ 捕获互动/);
+  assert.match(readmeEn, /Reddit\/X native-save executors are wired.*fixture-tested.*not real-account verified/i);
+  assert.match(readmeEn, /Xiaohongshu, Douyin, YouTube, and Zhihu.*remain deferred/i);
+  assert.doesNotMatch(readmeEn, /extension only syncs the x\.com cookie and captures engagement/i);
 });

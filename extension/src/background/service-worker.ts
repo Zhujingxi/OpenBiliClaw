@@ -55,7 +55,7 @@ import {
   handleXTaskAlarm,
   pollXTaskNow,
 } from "./x-task-dispatcher.ts";
-import { recoverRecordedNativeSaveTaskTab } from "./native-save-task-runner.ts";
+import { ensureNativeSaveTaskRecovery } from "./native-save-task-runner.ts";
 import {
   startBiliTaskPolling,
   handleBiliTaskAlarm,
@@ -263,11 +263,11 @@ async function handleRuntimeEvent(event: Record<string, unknown>): Promise<void>
     return;
   }
   if (eventType === "reddit_task_available") {
-    pollRedditTaskNow();
+    await pollRedditTaskNow();
     return;
   }
   if (eventType === "x_task_available") {
-    pollXTaskNow();
+    await pollXTaskNow();
     return;
   }
   if (eventType === "bili_task_available") {
@@ -525,7 +525,7 @@ async function startServiceWorkerAfterRecovery(): Promise<void> {
   // MV3 workers can stop between tab creation and cleanup. Session storage records
   // only the runner-owned numeric tab ID, so recovery must finish before polling
   // can create a new task tab and never scans or closes arbitrary Reddit/X tabs.
-  await recoverRecordedNativeSaveTaskTab();
+  await ensureNativeSaveTaskRecovery();
   await ensureSession();
   await connectRuntimeStream();
   startPlatformTaskPolling();
@@ -701,8 +701,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   handleDyTaskAlarm(alarm.name);
   handleYtTaskAlarm(alarm.name);
   handleZhihuTaskAlarm(alarm.name);
-  handleRedditTaskAlarm(alarm.name);
-  handleXTaskAlarm(alarm.name);
+  void handleRedditTaskAlarm(alarm.name);
+  void handleXTaskAlarm(alarm.name);
   handleBiliTaskAlarm(alarm.name);
   if (handleCookieSyncAlarm(alarm.name)) {
     return;

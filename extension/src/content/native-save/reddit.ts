@@ -16,28 +16,39 @@ export interface RedditNativeSaveEnvironment {
 const CONFIRM_ATTEMPTS = 20;
 const CONFIRM_INTERVAL_MS = 100;
 
-function supportedIdentity(task: NativeSaveTask, currentUrl: string): boolean {
+type RedditIdentityCorrelation = "url" | "dom_required";
+
+function supportedIdentity(task: NativeSaveTask, currentUrl: string): RedditIdentityCorrelation | null {
   const match = /^(t[13])_([a-z0-9]+)$/i.exec(task.content_id);
-  if (!match) return false;
-  if (match[1] === "t3" && task.content_type !== "post") return false;
-  if (match[1] === "t1" && task.content_type !== "comment") return false;
+  if (!match) return null;
+  if (match[1] === "t3" && task.content_type !== "post") return null;
+  if (match[1] === "t1" && task.content_type !== "comment") return null;
   try {
-    const hasIdentity = (value: string): boolean => {
+    const route = (value: string): { exact: boolean; postId: string | null } => {
       const url = new URL(value);
       const segments = url.pathname.toLowerCase().split("/").filter(Boolean);
       const id = match[2].toLowerCase();
       if (match[1] === "t3" && (url.hostname === "redd.it" || url.hostname.endsWith(".redd.it"))) {
-        return segments.length === 1 && segments[0] === id;
+        return { exact: segments.length === 1 && segments[0] === id, postId: id };
       }
       const commentsIndex = segments.indexOf("comments");
-      if (commentsIndex < 0 || segments[commentsIndex + 1] === undefined) return false;
-      return match[1] === "t3"
-        ? segments[commentsIndex + 1] === id
-        : segments.slice(commentsIndex + 2).includes(id);
+      const postId = segments[commentsIndex + 1] ?? null;
+      if (commentsIndex < 0 || !postId) return { exact: false, postId: null };
+      return {
+        exact: match[1] === "t3"
+          ? postId === id
+          : segments[commentsIndex + 3] === id,
+        postId,
+      };
     };
-    return hasIdentity(task.content_url) && hasIdentity(currentUrl);
+    const taskRoute = route(task.content_url);
+    if (!taskRoute.exact) return null;
+    const currentRoute = route(currentUrl);
+    if (currentRoute.exact) return "url";
+    if (match[1] === "t1" && currentRoute.postId === taskRoute.postId) return "dom_required";
+    return null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -54,24 +65,35 @@ export async function saveReddit(
   env: RedditNativeSaveEnvironment = browserRedditEnvironment(),
 ): Promise<unknown> {
   if (!env.isLoggedIn()) return { status: "login_required" };
-  if (!supportedIdentity(task, env.currentUrl)) {
+  const identityCorrelation = supportedIdentity(task, env.currentUrl);
+  if (!identityCorrelation) {
     return { status: "unsupported", error_code: "unsupported_content_type" };
   }
   if (env.findControl(task.content_id, "Unsave")) return { status: "already_synced" };
+  let saveControl = env.findControl(task.content_id, "Save");
+  if (identityCorrelation === "dom_required" && !saveControl) {
+    return { status: "failed", error_code: "native_save_failed" };
+  }
 
   const token = env.requestToken();
   if (token) {
+    let response: { ok: boolean; status: number };
     try {
       const body = new URLSearchParams({ id: task.content_id, uh: token, api_type: "json" });
-      const response = await env.postSave(body);
-      if (response.status === 429) return { status: "rate_limited" };
-      if (response.ok && await confirmSaved(task, env)) return { status: "synced" };
+      response = await env.postSave(body);
     } catch {
-      // A request rejected before confirmation may still use the visible control.
+      return { status: "failed", error_code: "native_save_failed" };
     }
+    if (response.status === 429) return { status: "rate_limited" };
+    if (response.ok) {
+      return await confirmSaved(task, env)
+        ? { status: "synced" }
+        : { status: "failed", error_code: "native_save_failed" };
+    }
+    if (response.status !== 403) return { status: "failed", error_code: "native_save_failed" };
   }
 
-  const saveControl = env.findControl(task.content_id, "Save");
+  saveControl ??= env.findControl(task.content_id, "Save");
   if (!saveControl) return { status: "failed", error_code: "native_save_failed" };
   try {
     saveControl.click();

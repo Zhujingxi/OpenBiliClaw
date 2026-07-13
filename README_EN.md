@@ -390,7 +390,7 @@ OpenBiliClaw does not store your platform passwords or bypass login. It reuses t
 | **Zhihu** | Log in normally at https://www.zhihu.com in the same browser | `init --yes-zhihu`, `fetch-zhihu`, `discover --source zhihu`, and `discover-zhihu*` return nothing |
 | **Reddit** | Log in normally at https://www.reddit.com in the same browser; the extension syncs `reddit_session` for backend-installed rdt-cli, and `rdt login` is only a fallback when the extension is unavailable | `fetch-reddit --mode bootstrap` returns no init signals; without a synced rdt credential, the rdt path falls back to extension tasks |
 
-Xiaohongshu, Douyin, YouTube, and Zhihu use Chrome extension tasks; Reddit defaults to backend-installed rdt-cli for steady-state discovery and keeps the extension for init signals; X uses server-side cookie replay (the extension only syncs the x.com cookie and captures engagement). None of them need an extra CDP debugging Chrome. `[sources.browser].cdp_url` remains available only for generic Web / custom webpage fetching.
+Xiaohongshu, Douyin, YouTube, and Zhihu use Chrome extension tasks; Reddit defaults to backend-installed rdt-cli for steady-state discovery and keeps the extension for init signals; X discovery uses server-side cookie replay. None of these read paths needs an extra CDP debugging Chrome. Reddit/X native-save executors are wired and fixture-tested but not real-account verified; Xiaohongshu, Douyin, YouTube, and Zhihu native-save executors remain deferred. `[sources.browser].cdp_url` remains available only for generic Web / custom webpage fetching.
 
 </details>
 
@@ -593,7 +593,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 ├─────────┴──────────┴───────────┴───────────────┤
 │ LLM / source adapters · /api/saved/* · router · Bilibili native save │
 │ Canonical ID · Local-first sync · Task poll · SQLite (events · pool · recs · saved/tasks)│
-│ Six adapters → broker → source tasks → Reddit/X executors (not real-account verified; XHS/DY/YT/Zhihu pending)│
+│ Six adapters → broker → shared MV3 recovery barrier → Reddit/X executors (fixture-only; four pending)│
 └────────────────────────────────────────────────┘
 ```
 
@@ -611,9 +611,9 @@ Remote extension access uses explicit, default-off device authentication: `ext-k
 | **Xiaohongshu** | passive collection · search · creator subscriptions · init import | Extension reads your logged-in pages; zero backend crawling |
 | **Douyin** | init import · search · hot · feed | Extension background tab with real DOM interactions; never steals focus |
 | **YouTube** | init import · Takeout offline import · search / trending / channel | Extension reads profile signals; steady-state refill is backend-direct |
-| **X (Twitter)** | init import · search · For-You · followed authors | Server-side read-only cookie replay; the extension only syncs cookies |
+| **X (Twitter)** | init import · search · For-You · followed authors | Server-side read-only cookie replay for discovery; native bookmark executor wired but not real-account verified |
 | **Zhihu** | init import · search · hot · feed · creator · related | Extension reads logged-in tabs; renders as text cards |
-| **Reddit** | init import · search · hot · subreddit · related | Backend rdt-cli by default; the extension syncs your session automatically |
+| **Reddit** | init import · search · hot · subreddit · related | Backend rdt-cli for discovery by default; Saved executor wired but not real-account verified |
 | **Generic Web** | browser + LLM extraction | Adapts to any webpage |
 
 What happens after discovery:

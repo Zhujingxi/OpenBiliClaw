@@ -17,6 +17,9 @@ export interface ChromeMockState {
   fetchCalls: Array<{ body?: unknown; method?: string; url: string }>;
   queryResult: ChromeMockTab[];
   sessionStorage: Record<string, unknown>;
+  sessionGetImpl: (key: string) => Promise<Record<string, unknown>>;
+  sessionSetImpl: (items: Record<string, unknown>) => Promise<void>;
+  sessionRemoveImpl: (key: string) => Promise<void>;
   tabById: Map<number, ChromeMockTab>;
   nextCreatedTabStatus: string;
   createImpl: (opts: { active?: boolean; url: string }) => Promise<ChromeMockTab>;
@@ -56,6 +59,11 @@ export function installChromeMock(): ChromeMockState {
     fetchCalls: [],
     queryResult: [],
     sessionStorage: {},
+    sessionGetImpl: async (key) => Object.hasOwn(state.sessionStorage, key)
+      ? { [key]: state.sessionStorage[key] }
+      : {},
+    sessionSetImpl: async (items) => { Object.assign(state.sessionStorage, items); },
+    sessionRemoveImpl: async (key) => { delete state.sessionStorage[key]; },
     tabById: new Map(),
     nextCreatedTabStatus: "complete",
     createImpl: async (opts) => {
@@ -131,15 +139,13 @@ export function installChromeMock(): ChromeMockState {
       },
       session: {
         async get(key: string) {
-          return Object.hasOwn(state.sessionStorage, key)
-            ? { [key]: state.sessionStorage[key] }
-            : {};
+          return state.sessionGetImpl(key);
         },
         async set(items: Record<string, unknown>) {
-          Object.assign(state.sessionStorage, items);
+          await state.sessionSetImpl(items);
         },
         async remove(key: string) {
-          delete state.sessionStorage[key];
+          await state.sessionRemoveImpl(key);
         },
       },
       onChanged: {

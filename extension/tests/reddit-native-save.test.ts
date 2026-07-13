@@ -29,8 +29,9 @@ function fixture(options: {
   responseStatus?: number;
   confirmAfterRequest?: boolean;
   confirmAfterClick?: boolean;
+  rejectRequest?: boolean;
 } = {}): RedditNativeSaveEnvironment & { clicks: number; saveRequests: URLSearchParams[] } {
-  let state = options.initialState ?? "Save";
+  let state = options.initialState === undefined ? "Save" : options.initialState;
   const env = {
     clicks: 0,
     saveRequests: [] as URLSearchParams[],
@@ -39,6 +40,7 @@ function fixture(options: {
     requestToken: () => options.token ?? null,
     async postSave(body: URLSearchParams) {
       env.saveRequests.push(body);
+      if (options.rejectRequest) throw new Error("network outcome unknown");
       if (options.confirmAfterRequest) state = "Unsave";
       return { status: options.responseStatus ?? 200, ok: (options.responseStatus ?? 200) < 400 };
     },
@@ -121,6 +123,62 @@ test("Reddit native save falls back to the exact visible Save control", async ()
     assert.deepEqual(await saveReddit(task, env), { status: "synced" });
     assert.equal(env.clicks, 1);
   }
+});
+
+test("Reddit native save never clicks after a 2xx response without confirmation", async () => {
+  const env = fixture({ token: "page-modhash", responseStatus: 200, confirmAfterClick: true });
+  assert.deepEqual(await saveReddit(task, env), {
+    status: "failed",
+    error_code: "native_save_failed",
+  });
+  assert.equal(env.saveRequests.length, 1);
+  assert.equal(env.clicks, 0);
+});
+
+test("Reddit native save never clicks after a network-uncertain request", async () => {
+  const env = fixture({ token: "page-modhash", rejectRequest: true, confirmAfterClick: true });
+  assert.deepEqual(await saveReddit(task, env), {
+    status: "failed",
+    error_code: "native_save_failed",
+  });
+  assert.equal(env.saveRequests.length, 1);
+  assert.equal(env.clicks, 0);
+});
+
+test("Reddit native save requires the comment ID at the canonical URL position", async () => {
+  for (const contentUrl of [
+    "https://www.reddit.com/r/test/comments/abc123/def456/other/",
+    "https://www.reddit.com/r/test/comments/abc123/title/other/def456/",
+  ]) {
+    const env = fixture({ token: "page-modhash", confirmAfterRequest: true });
+    env.currentUrl = contentUrl;
+    const commentTask = { ...task, content_id: "t1_def456", item_key: "reddit:t1_def456", content_type: "comment", content_url: contentUrl };
+    assert.deepEqual(await saveReddit(commentTask, env), {
+      status: "unsupported",
+      error_code: "unsupported_content_type",
+    });
+    assert.equal(env.saveRequests.length, 0);
+  }
+});
+
+test("Reddit native save requires target DOM correlation on a non-permalink comment page", async () => {
+  const commentTask = {
+    ...task,
+    content_id: "t1_def456",
+    item_key: "reddit:t1_def456",
+    content_type: "comment",
+    content_url: "https://www.reddit.com/r/test/comments/abc123/title/def456/",
+  };
+  const missing = fixture({ token: "page-modhash", initialState: null, confirmAfterRequest: true });
+  assert.deepEqual(await saveReddit(commentTask, missing), {
+    status: "failed",
+    error_code: "native_save_failed",
+  });
+  assert.equal(missing.saveRequests.length, 0);
+
+  const correlated = fixture({ token: "page-modhash", confirmAfterRequest: true });
+  assert.deepEqual(await saveReddit(commentTask, correlated), { status: "synced" });
+  assert.equal(correlated.saveRequests.length, 1);
 });
 
 test("Reddit native save fails safely without post-action confirmation", async () => {

@@ -35,7 +35,7 @@ test("service worker starts platform task polling during hot reload bootstrap", 
   const initializeStart = source.indexOf("async function startServiceWorkerAfterRecovery");
   const initializeEnd = source.indexOf("chrome.runtime.onInstalled", initializeStart);
   const initializeBlock = source.slice(initializeStart, initializeEnd);
-  assert.ok(initializeBlock.indexOf("await recoverRecordedNativeSaveTaskTab()") < initializeBlock.indexOf("startPlatformTaskPolling()"));
+  assert.ok(initializeBlock.indexOf("await ensureNativeSaveTaskRecovery()") < initializeBlock.indexOf("startPlatformTaskPolling()"));
   assert.match(initializeBlock, /startCookieSync\(\);/);
 });
 
@@ -64,15 +64,15 @@ test("background runtime stream passes an explicit short session", () => {
 test("service worker wires X polling, alarm, and immediate task wake", () => {
   const source = readFileSync(resolve("src", "background", "service-worker.ts"), "utf8");
   assert.match(source, /startXTaskPolling/);
-  assert.match(source, /handleXTaskAlarm\(alarm\.name\)/);
+  assert.match(source, /void handleXTaskAlarm\(alarm\.name\)/);
   assert.match(source, /eventType === "x_task_available"/);
-  assert.match(source, /pollXTaskNow\(\)/);
+  assert.match(source, /await pollXTaskNow\(\)/);
 });
 
 test("service worker recovers only the recorded native runner orphan on evaluation and lifecycle", () => {
   const source = readFileSync(resolve("src", "background", "service-worker.ts"), "utf8");
-  assert.match(source, /recoverRecordedNativeSaveTaskTab/);
-  assert.match(source, /await recoverRecordedNativeSaveTaskTab\(\);/);
+  assert.match(source, /ensureNativeSaveTaskRecovery/);
+  assert.match(source, /await ensureNativeSaveTaskRecovery\(\);/);
   const installed = source.slice(source.indexOf("chrome.runtime.onInstalled"), source.indexOf("chrome.runtime.onStartup"));
   const startup = source.slice(source.indexOf("chrome.runtime.onStartup"), source.indexOf("chrome.action.onClicked"));
   assert.match(installed, /startServiceWorkerAfterRecovery/);

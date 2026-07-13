@@ -1,7 +1,7 @@
 import { apiUrl } from "../shared/backend-endpoint.ts";
 import { authenticatedFetch } from "../shared/auth.ts";
 import { isNativeSaveTask, type NativeSaveResult, type NativeSaveTask } from "../shared/native-save.ts";
-import { runNativeSaveTask } from "./native-save-task-runner.ts";
+import { ensureNativeSaveTaskRecovery, runNativeSaveTask } from "./native-save-task-runner.ts";
 
 const DEFAULT_POLL_INTERVAL_MS = 60_000;
 const POLL_ALARM_NAME = "openbiliclaw-x-task-poll";
@@ -39,6 +39,7 @@ export async function executeXTask(task: NativeSaveTask): Promise<void> {
 }
 
 async function pollNextTask(): Promise<void> {
+  await ensureNativeSaveTaskRecovery();
   if (pollInFlight) return;
   pollInFlight = true;
   try {
@@ -54,10 +55,10 @@ export function startXTaskPolling(): void {
   chrome.alarms.create(POLL_ALARM_NAME, { periodInMinutes: DEFAULT_POLL_INTERVAL_MS / 60_000 });
 }
 
-export function handleXTaskAlarm(alarmName: string): void {
-  if (alarmName === POLL_ALARM_NAME) void pollNextTask();
+export function handleXTaskAlarm(alarmName: string): Promise<void> {
+  return alarmName === POLL_ALARM_NAME ? pollNextTask() : Promise.resolve();
 }
 
-export function pollXTaskNow(): void {
-  void pollNextTask();
+export function pollXTaskNow(): Promise<void> {
+  return pollNextTask();
 }

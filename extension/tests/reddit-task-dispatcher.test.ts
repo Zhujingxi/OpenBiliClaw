@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 import {
   computeRedditTaskTimeoutMs,
@@ -180,4 +182,11 @@ test("executeTask retries Reddit sendMessage until the content script listener i
   } finally {
     chromeMock.restore();
   }
+});
+
+test("reddit polling awaits the shared native-save recovery barrier", () => {
+  const source = readFileSync(resolve("src/background/reddit-task-dispatcher.ts"), "utf8");
+  const pollStart = source.indexOf("async function pollNextTask");
+  const pollEnd = source.indexOf("export function startRedditTaskPolling", pollStart);
+  assert.match(source.slice(pollStart, pollEnd), /await ensureNativeSaveTaskRecovery\(\)/);
 });

@@ -6,8 +6,10 @@ import {
   releaseDispatcherMutex,
 } from "../src/background/dispatcher-mutex.ts";
 import {
+  ensureNativeSaveTaskRecovery,
   handleNativeSaveContentResult,
   recoverRecordedNativeSaveTaskTab,
+  resetNativeSaveTaskRecoveryForTest,
   runNativeSaveTask,
 } from "../src/background/native-save-task-runner.ts";
 import type { NativeSaveResult, NativeSaveTask } from "../src/shared/native-save.ts";
@@ -162,6 +164,72 @@ test("native save restart recovery closes only the recorded orphan and clears th
     assert.equal(state.tabById.has(88), true);
     assert.deepEqual(state.sessionStorage, {});
   } finally {
+    state.restore();
+  }
+});
+
+test("native save recovery shares one idempotent promise across concurrent startup calls", async () => {
+  const state = installChromeMock();
+  let resolveGet!: (value: Record<string, unknown>) => void;
+  let getCalls = 0;
+  state.sessionGetImpl = async () => {
+    getCalls += 1;
+    if (getCalls > 1) return { openbiliclaw_native_save_task_tab_id: 77 };
+    return new Promise((resolve) => { resolveGet = resolve; });
+  };
+  resetNativeSaveTaskRecoveryForTest();
+  try {
+    const startup = ensureNativeSaveTaskRecovery();
+    const installed = ensureNativeSaveTaskRecovery();
+    assert.equal(startup, installed);
+    assert.equal(getCalls, 1);
+    resolveGet({ openbiliclaw_native_save_task_tab_id: 77 });
+    await Promise.all([startup, installed]);
+    assert.deepEqual(state.removedTabs, [77]);
+  } finally {
+    resetNativeSaveTaskRecoveryForTest();
+    state.restore();
+  }
+});
+
+test("native save runner continues when storage.session is absent", async () => {
+  const state = installChromeMock();
+  const posted: NativeSaveResult[] = [];
+  delete (chrome.storage as { session?: chrome.storage.StorageArea }).session;
+  resetNativeSaveTaskRecoveryForTest();
+  try {
+    const running = runNativeSaveTask(task, "reddit", async (result) => { posted.push(result); }, { timeoutMs: 50 });
+    await tick();
+    state.emitRuntimeMessage(
+      { type: "NATIVE_SAVE_RESULT", platform: "reddit", task_id: task.id, item_key: task.item_key, status: "synced" },
+      { url: task.content_url, tab: { id: 42, url: task.content_url } },
+    );
+    await running;
+    assert.equal(posted[0]?.status, "synced");
+  } finally {
+    resetNativeSaveTaskRecoveryForTest();
+    state.restore();
+  }
+});
+
+test("native save runner continues when storage.session throws", async () => {
+  const state = installChromeMock();
+  const posted: NativeSaveResult[] = [];
+  state.sessionGetImpl = async () => { throw new Error("session get unavailable"); };
+  state.sessionSetImpl = async () => { throw new Error("session set unavailable"); };
+  state.sessionRemoveImpl = async () => { throw new Error("session remove unavailable"); };
+  resetNativeSaveTaskRecoveryForTest();
+  try {
+    const running = runNativeSaveTask(task, "reddit", async (result) => { posted.push(result); }, { timeoutMs: 50 });
+    await tick();
+    state.emitRuntimeMessage(
+      { type: "NATIVE_SAVE_RESULT", platform: "reddit", task_id: task.id, item_key: task.item_key, status: "synced" },
+      { url: task.content_url, tab: { id: 42, url: task.content_url } },
+    );
+    await running;
+    assert.equal(posted[0]?.status, "synced");
+  } finally {
+    resetNativeSaveTaskRecoveryForTest();
     state.restore();
   }
 });

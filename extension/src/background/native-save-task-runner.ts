@@ -32,6 +32,7 @@ interface ActiveTask {
 class NativeSaveDeadlineError extends Error {}
 
 let activeTask: ActiveTask | null = null;
+let nativeSaveRecoveryPromise: Promise<void> | null = null;
 
 function timeoutOutcome(): SanitizedNativeSaveOutcome {
   return sanitizeNativeSaveResult({ status: "failed", error_code: "native_save_timeout" });
@@ -150,15 +151,29 @@ async function removeTabBestEffort(tabId: number): Promise<void> {
   }
 }
 
+function sessionStorageArea(): chrome.storage.StorageArea | null {
+  try {
+    return typeof chrome === "undefined" ? null : chrome.storage?.session ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function recordNativeSaveTaskTab(tabId: number): Promise<void> {
-  await chrome.storage.session.set({ [NATIVE_SAVE_TAB_SESSION_KEY]: tabId });
+  try {
+    await sessionStorageArea()?.set({ [NATIVE_SAVE_TAB_SESSION_KEY]: tabId });
+  } catch {
+    // Session persistence is an optional recovery enhancement, not an execution prerequisite.
+  }
 }
 
 async function clearRecordedNativeSaveTaskTab(tabId: number): Promise<void> {
+  const storage = sessionStorageArea();
+  if (!storage) return;
   try {
-    const stored = await chrome.storage.session.get(NATIVE_SAVE_TAB_SESSION_KEY);
+    const stored = await storage.get(NATIVE_SAVE_TAB_SESSION_KEY);
     if (stored[NATIVE_SAVE_TAB_SESSION_KEY] === tabId) {
-      await chrome.storage.session.remove(NATIVE_SAVE_TAB_SESSION_KEY);
+      await storage.remove(NATIVE_SAVE_TAB_SESSION_KEY);
     }
   } catch {
     // A closed tab is safe even if best-effort session cleanup fails.
@@ -167,16 +182,18 @@ async function clearRecordedNativeSaveTaskTab(tabId: number): Promise<void> {
 
 /** Close only the runner-owned tab recorded before a previous MV3 worker stopped. */
 export async function recoverRecordedNativeSaveTaskTab(): Promise<void> {
+  const storage = sessionStorageArea();
+  if (!storage) return;
   let tabId: unknown;
   try {
-    const stored = await chrome.storage.session.get(NATIVE_SAVE_TAB_SESSION_KEY);
+    const stored = await storage.get(NATIVE_SAVE_TAB_SESSION_KEY);
     tabId = stored[NATIVE_SAVE_TAB_SESSION_KEY];
   } catch {
     return;
   }
   if (typeof tabId !== "number" || !Number.isInteger(tabId) || tabId < 0) {
     try {
-      await chrome.storage.session.remove(NATIVE_SAVE_TAB_SESSION_KEY);
+      await storage.remove(NATIVE_SAVE_TAB_SESSION_KEY);
     } catch {
       // Invalid runner metadata is safe to discard best-effort.
     }
@@ -184,6 +201,16 @@ export async function recoverRecordedNativeSaveTaskTab(): Promise<void> {
   }
   await removeTabBestEffort(tabId);
   await clearRecordedNativeSaveTaskTab(tabId);
+}
+
+/** One MV3-lifetime barrier shared by startup, alarms, wakes, and direct execution. */
+export function ensureNativeSaveTaskRecovery(): Promise<void> {
+  nativeSaveRecoveryPromise ??= recoverRecordedNativeSaveTaskTab();
+  return nativeSaveRecoveryPromise;
+}
+
+export function resetNativeSaveTaskRecoveryForTest(): void {
+  nativeSaveRecoveryPromise = null;
 }
 
 async function createTabBeforeDeadline(
@@ -292,11 +319,12 @@ export async function runNativeSaveTask(
   postResult: (result: NativeSaveResult) => Promise<void>,
   options: NativeSaveRunnerOptions = {},
 ): Promise<void> {
-  const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  const deadline = Date.now() + timeoutMs;
   if (!isNativeSaveTask(task) || task.platform_slug !== platformSlug) {
     throw new Error("native-save task does not match the platform slug");
   }
+  await ensureNativeSaveTaskRecovery();
+  const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const deadline = Date.now() + timeoutMs;
 
   const owner = `native-save:${platformSlug}`;
   const readinessController = new AbortController();

@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import test from "node:test";
 
-import { saveX, type XNativeSaveEnvironment, type XSaveControl } from "../src/content/native-save/x.ts";
+import {
+  hasExplicitXRateLimitText,
+  saveX,
+  type XNativeSaveEnvironment,
+  type XSaveControl,
+} from "../src/content/native-save/x.ts";
 import type { NativeSaveTask } from "../src/shared/native-save.ts";
 
 const task: NativeSaveTask = {
@@ -83,4 +90,13 @@ test("watch-later fallback uses the same X Bookmark mutation once", async () => 
   const env = fixture({ confirmAfterClick: true });
   assert.deepEqual(await saveX({ ...task, requested_action: "watch_later" }, env), { status: "synced" });
   assert.equal(env.clicks, 1);
+});
+
+test("X rate detection ignores tweet prose and recognizes structured localized risk alerts", () => {
+  assert.equal(hasExplicitXRateLimitText([]), false);
+  assert.equal(hasExplicitXRateLimitText([{ textContent: "This tweet says: try again later" }]), true);
+  assert.equal(hasExplicitXRateLimitText([{ textContent: "请求过于频繁，请稍后再试" }]), true);
+  const source = readFileSync(resolve("src/content/native-save/x.ts"), "utf8");
+  assert.doesNotMatch(source, /document\.body\?\.innerText|document\.body\.innerText/);
+  assert.match(source, /data-testid=['"]toast|role=['"]alert/);
 });
