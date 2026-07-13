@@ -28,6 +28,15 @@ type ZhihuCreationFailureCode =
   | "native_confirmation_not_observed";
 
 const EXACT_COLLECTION_TITLE = "OpenBiliClaw";
+const CREATE_COLLECTION_LABELS = new Set(["新建收藏夹", "创建收藏夹", "新建收藏", "新建"]);
+const CONFIRM_COLLECTION_LABELS = new Set([
+  "创建",
+  "确认",
+  "完成",
+  "确定",
+  "确认创建",
+  "创建收藏夹",
+]);
 const TYPED_ID = /^(question|answer|article):([0-9]+)$/;
 const CONFIRM_ATTEMPTS = 20;
 const CONFIRM_INTERVAL_MS = 100;
@@ -442,7 +451,7 @@ export function createZhihuBrowserEnvironment(
         "button, [role='button']",
       )).filter((element) => isEffectivelyVisible(element, root) && closestDialog(element) === dialog &&
         (closestIdentity(element) === null || closestIdentity(element) === currentIdentity) &&
-        ["新建收藏夹", "创建收藏夹", "新建"].includes(visibleText(element)));
+        CREATE_COLLECTION_LABELS.has(visibleText(element)));
       if (createControls.length !== 1) return failCreation("native_control_not_found");
       const dialogsBeforeCreate = new Set(visibleDialogs());
       createControls[0].click();
@@ -483,7 +492,7 @@ export function createZhihuBrowserEnvironment(
         "button, [role='button']",
       )).filter((element) => isEffectivelyVisible(element, root) && closestDialog(element) === formDialog &&
         (closestIdentity(element) === null || closestIdentity(element) === currentIdentity) &&
-        ["创建", "确认", "完成"].includes(visibleText(element)));
+        CONFIRM_COLLECTION_LABELS.has(visibleText(element)));
       if (confirms.length !== 1) return failCreation("native_control_not_found");
       confirms[0].click();
 

@@ -536,7 +536,10 @@ test("Zhihu browser creation waits for async form and deterministic confirmation
       click: () => { dialogOpen = true; },
     });
     const newButton = domElement({ text: "新建收藏夹", click: () => { newClicked = true; } });
-    const confirmButton = domElement({ text: "创建", click: () => { confirmClicks += 1; } });
+    const confirmButton = domElement({
+      text: detachedForm ? "确认创建" : "创建",
+      click: () => { confirmClicks += 1; },
+    });
     const input = domElement() as HTMLInputElement & { _value?: string };
     dialog = domElement({
       attrs: { role: "dialog" },
