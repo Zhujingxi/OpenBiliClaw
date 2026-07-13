@@ -132,7 +132,7 @@ test("Reddit browser state endpoint accepts only the exact saved fullname", asyn
   try {
     for (const [reportedName, expected] of [
       [task.content_id, { status: "already_synced" }],
-      ["t3_different", { status: "failed", error_code: "native_save_failed" }],
+      ["t3_different", { status: "failed", error_code: "native_request_rejected" }],
     ] as const) {
       globalThis.fetch = (async (input: string | URL | Request) => {
         const url = new URL(String(input));
@@ -218,6 +218,24 @@ test("Reddit native save maps rate limits and unsupported identities exactly", a
       error_code: "unsupported_content_type",
     });
     assert.equal(env.saveRequests.length, 0);
+  }
+});
+
+test("Reddit native save reports readiness, request, and control stages", async () => {
+  const cases: Array<[RedditNativeSaveEnvironment, string]> = [
+    [fixture({ token: null, initialState: null }), "native_content_not_ready"],
+    [fixture({ token: "page-modhash", responseStatus: 500 }), "native_request_rejected"],
+    [
+      fixture({ token: "page-modhash", responseStatus: 403, initialState: null }),
+      "native_control_not_found",
+    ],
+  ];
+
+  for (const [env, errorCode] of cases) {
+    assert.deepEqual(await saveReddit(task, env), {
+      status: "failed",
+      error_code: errorCode,
+    });
   }
 });
 
@@ -316,7 +334,7 @@ test("Reddit browser save fails closed when shadow DOM exposes multiple Save con
   try {
     assert.deepEqual(await saveReddit(task), {
       status: "failed",
-      error_code: "native_save_failed",
+      error_code: "native_content_not_ready",
     });
     assert.equal(clicks, 0);
   } finally {
@@ -377,7 +395,7 @@ test("Reddit browser save ignores a lone Save owned by a nested identity", async
   try {
     assert.deepEqual(await saveReddit(task), {
       status: "failed",
-      error_code: "native_save_failed",
+      error_code: "native_content_not_ready",
     });
     assert.equal(clicks, 0);
   } finally {
@@ -436,7 +454,7 @@ test("Reddit native save requires target DOM correlation on a non-permalink comm
   const missing = fixture({ token: "page-modhash", initialState: null, confirmAfterRequest: true });
   assert.deepEqual(await saveReddit(commentTask, missing), {
     status: "failed",
-    error_code: "native_save_failed",
+    error_code: "native_control_not_found",
   });
   assert.equal(missing.saveRequests.length, 0);
 

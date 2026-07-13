@@ -231,7 +231,7 @@ export async function saveZhihu(
     if (!(await env.createCollection(EXACT_COLLECTION_TITLE))) {
       return hasNewRateLimit(rateBefore, env.rateLimitFingerprint())
         ? { status: "rate_limited" }
-        : { status: "failed", error_code: "native_save_failed" };
+        : { status: "failed", error_code: "native_request_rejected" };
     }
     created = true;
     await env.closeCollectionDialog();
@@ -251,7 +251,7 @@ export async function saveZhihu(
   try {
     row.click();
   } catch {
-    return { status: "failed", error_code: "native_save_failed" };
+    return { status: "failed", error_code: "native_request_rejected" };
   }
   if (await confirmChecked(env)) return { status: "synced" };
   return hasNewRateLimit(rateBefore, env.rateLimitFingerprint())

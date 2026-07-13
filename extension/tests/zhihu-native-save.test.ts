@@ -158,6 +158,10 @@ test("Zhihu native save reports the exact control, dialog, target, and confirmat
       "native_target_not_found",
     ],
     [fixture(task, { confirmAfterClick: false }), "native_confirmation_not_observed"],
+    [
+      fixture(task, { initialRows: [{ title: "Other" }], createSucceeds: false }),
+      "native_request_rejected",
+    ],
   ];
 
   for (const [env, errorCode] of cases) {
@@ -263,7 +267,7 @@ test("Zhihu native save polls the reopened dialog until the created exact row ma
 test("Zhihu native save never falls back after create failure or re-query mismatch", async () => {
   const task = taskFor("answer", "2002");
   for (const [env, errorCode] of [
-    [fixture(task, { initialRows: [{ title: "Other" }], createSucceeds: false }), "native_save_failed"],
+    [fixture(task, { initialRows: [{ title: "Other" }], createSucceeds: false }), "native_request_rejected"],
     [fixture(task, { initialRows: [{ title: "Other" }], createdTitle: "openbiliclaw" }), "native_target_not_found"],
   ] as const) {
     assert.deepEqual(await saveZhihu(task, env), {

@@ -76,18 +76,19 @@ export async function saveReddit(
   if (!identityCorrelation) {
     return { status: "unsupported", error_code: "unsupported_content_type" };
   }
-  await waitForNativeSaveReadiness(
+  const contentReady = await waitForNativeSaveReadiness(
     () => env.isLoggedIn() && Boolean(
       env.requestToken() || env.findControl(task.content_id, "Save") ||
       env.findControl(task.content_id, "Unsave"),
     ),
     env.sleep,
   );
+  if (!contentReady) return { status: "failed", error_code: "native_content_not_ready" };
   if (!env.isLoggedIn()) return { status: "login_required" };
   if (env.findControl(task.content_id, "Unsave")) return { status: "already_synced" };
   let saveControl = env.findControl(task.content_id, "Save");
   if (identityCorrelation === "dom_required" && !saveControl) {
-    return { status: "failed", error_code: "native_save_failed" };
+    return { status: "failed", error_code: "native_control_not_found" };
   }
 
   const token = env.requestToken();
@@ -110,15 +111,15 @@ export async function saveReddit(
         ? { status: "synced" }
         : { status: "failed", error_code: "native_confirmation_not_observed" };
     }
-    if (response.status !== 403) return { status: "failed", error_code: "native_save_failed" };
+    if (response.status !== 403) return { status: "failed", error_code: "native_request_rejected" };
   }
 
   saveControl ??= env.findControl(task.content_id, "Save");
-  if (!saveControl) return { status: "failed", error_code: "native_save_failed" };
+  if (!saveControl) return { status: "failed", error_code: "native_control_not_found" };
   try {
     saveControl.click();
   } catch {
-    return { status: "failed", error_code: "native_save_failed" };
+    return { status: "failed", error_code: "native_request_rejected" };
   }
   return await confirmSaved(task, env)
     ? { status: "synced" }
