@@ -1,4 +1,4 @@
-(() => {
+﻿(() => {
     const DEFAULT_API_BASE = "http://127.0.0.1:8420/api";
     const ENDPOINTS = {
       ping: "/ping",
@@ -505,7 +505,6 @@
     // 当前批次、也到不了「已看完」的干净状态。收到 50px：哨兵几乎贴到视口底部才触发，
     // 最后一行基本看全后再加载下一批。（2026-07-12，用户反馈强迫症体验）
     const AUTO_LOAD_ROOT_MARGIN_PX = 50;
-    const DESKTOP_EAGER_COVER_COUNT = 4;
     state.autoLoadOnScroll = storageGet(AUTO_LOAD_ON_SCROLL_KEY) !== "0";
     const THEME_STORAGE_KEY = "obc.theme";
     const THEME_HUE_STORAGE_KEY = "obc.themeHue";
@@ -662,6 +661,7 @@
       setInput("delightQueueLimit", String(limit));
       applyThemeMode(state.themeMode);
       applyThemeHue(state.themeHue);
+      renderThemeHueControls();
       renderReshuffleToggle();
       renderAutoLoadOnScrollToggle();
       syncAutoLoadObserver();
@@ -672,10 +672,12 @@
       setInput("delightQueueLimit", String(limit));
       storageSet(DELIGHT_QUEUE_LIMIT_KEY, String(limit));
       storageSet(THEME_STORAGE_KEY, state.themeMode);
+      storageSet(THEME_HUE_STORAGE_KEY, String(state.themeHue));
       storageSet(DISMISS_ON_RESHUFFLE_KEY, state.dismissOnReshuffle ? "1" : "0");
       storageSet(AUTO_LOAD_ON_SCROLL_KEY, state.autoLoadOnScroll ? "1" : "0");
       applyThemeMode(state.themeMode);
       applyThemeHue(state.themeHue);
+      renderThemeHueControls();
       renderReshuffleToggle();
       renderAutoLoadOnScrollToggle();
       syncAutoLoadObserver();
@@ -1885,7 +1887,7 @@
         const url = contentUrl(item);
         const coverContent = `
             ${coverImg(item)}
-            <span class="platform">${escapeHtml(platformName(item.source_platform || item.platform))}</span>
+            <span class="platform" data-platform="${escapeHtml(item.source_platform || item.platform || "bilibili")}">${escapeHtml(platformName(item.source_platform || item.platform))}</span>
           `;
         card.innerHTML = `
           ${url
@@ -2111,12 +2113,7 @@
       renderThemeControls();
     }
 
-    function setThemeMode(mode, { persist = true, toast = false } = {}) {
-      applyThemeMode(mode);
-      if (persist) storageSet(THEME_STORAGE_KEY, state.themeMode);
-      if (toast) showToast(`主题已切换为${THEME_LABELS[state.themeMode]}`);
-    }
-    function applyThemeHue(hue = state.themeHue) {
+    function applyThemeHue(hue = state.themeHue) {
       state.themeHue = hue;
       document.documentElement.style.setProperty("--hue-primary", hue);
     }
@@ -2131,18 +2128,10 @@
       }
     }
 
-    function renderThemeHueControls() {
-      const hue = state.themeHue || 20;
-      document.querySelectorAll("[data-hue]").forEach((button) => {
-        const isActive = parseInt(button.dataset.hue, 10) === hue;
-        button.classList.toggle("is-active", isActive);
-        button.setAttribute("aria-checked", isActive ? "true" : "false");
-        button.tabIndex = isActive ? 0 : -1;
-      });
-      const slider = $("#hueSlider");
-      if (slider) slider.value = hue;
-      const hueInput = $("#hueValueInput");
-      if (hueInput) hueInput.value = hue;
+    function setThemeMode(mode, { persist = true, toast = false } = {}) {
+      applyThemeMode(mode);
+      if (persist) storageSet(THEME_STORAGE_KEY, state.themeMode);
+      if (toast) showToast(`主题已切换为${THEME_LABELS[state.themeMode]}`);
     }
 
     function cycleThemeMode() {
@@ -2166,6 +2155,20 @@
         button.setAttribute("aria-checked", isActive ? "true" : "false");
         button.tabIndex = isActive ? 0 : -1;
       });
+    }
+
+    function renderThemeHueControls() {
+      const hue = state.themeHue || 20;
+      document.querySelectorAll("[data-hue]").forEach((button) => {
+        const isActive = parseInt(button.dataset.hue, 10) === hue;
+        button.classList.toggle("is-active", isActive);
+        button.setAttribute("aria-checked", isActive ? "true" : "false");
+        button.tabIndex = isActive ? 0 : -1;
+      });
+      const slider = $("#hueSlider");
+      if (slider) slider.value = hue;
+      const hueInput = $("#hueValueInput");
+      if (hueInput) hueInput.value = hue;
     }
 
     function setDismissOnReshuffle(enabled, { persist = true, toast = false } = {}) {
@@ -2511,12 +2514,12 @@
           ${url
             ? `<a class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" aria-label="打开 ${escapeHtml(item.title)}">
             ${recommendationMediaHtml(item, index)}
-            <span class="platform">${escapeHtml(platformName(item.platform))}</span>
+            <span class="platform" data-platform="${escapeHtml(item.platform || "bilibili")}">${escapeHtml(platformName(item.platform))}</span>
             ${durationBadge}
           </a>`
             : `<button class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" type="button" aria-label="打开 ${escapeHtml(item.title)}">
             ${recommendationMediaHtml(item, index)}
-            <span class="platform">${escapeHtml(platformName(item.platform))}</span>
+            <span class="platform" data-platform="${escapeHtml(item.platform || "bilibili")}">${escapeHtml(platformName(item.platform))}</span>
             ${durationBadge}
           </button>`}
           <div>
@@ -5542,7 +5545,7 @@
       text.textContent = bodyText;
       const badge = document.createElement("span");
       badge.className = "platform";
-      badge.textContent = platformName(delight.source_platform);
+      badge.textContent = platformName(delight.source_platform);      badge.dataset.platform = String(delight.source_platform || "bilibili").toLowerCase();
       thumb.append(text, badge);
     }
 
@@ -5558,7 +5561,7 @@
       if (!delight) return;
       const badge = document.createElement("span");
       badge.className = "platform";
-      badge.textContent = platformName(delight.source_platform);
+      badge.textContent = platformName(delight.source_platform);      badge.dataset.platform = String(delight.source_platform || "bilibili").toLowerCase();
       thumb.append(badge);
     }
 
@@ -5581,7 +5584,7 @@
       // 平台徽章不依赖封面 —— 图片正常加载时也始终标明内容来源。
       const badge = document.createElement("span");
       badge.className = "platform";
-      badge.textContent = platformName(delight.source_platform);
+      badge.textContent = platformName(delight.source_platform);      badge.dataset.platform = String(delight.source_platform || "bilibili").toLowerCase();
       const image = document.createElement("img");
       if (isCrossOriginBase()) image.crossOrigin = "anonymous";
       image.alt = "";
