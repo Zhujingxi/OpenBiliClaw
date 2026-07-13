@@ -244,3 +244,58 @@ Chrome/Edge production build passed. Focused popup API / device-auth / saved-syn
 JavaScript file passed `node --check`; the Python contract file remained Ruff-clean; and
 `git diff --check` was clean. No Task 9 real integration E2E, signed-in browser automation, or
 account mutation was run.
+
+# Six-Platform Task 8 Report: Zhihu Exact OpenBiliClaw Collection
+
+## Scope And Safety Boundary
+
+Implemented the sixth extension native-save executor for Zhihu. The implementation and all evidence
+in this report are fixture-only. No signed-in browser was controlled, no real Zhihu request or click
+was made, and no account content was mutated.
+
+## RED To GREEN Evidence
+
+- Initial RED: `ERR_MODULE_NOT_FOUND` for `src/content/native-save/zhihu.ts`; dispatcher rejected the
+  valid native union with `false !== true`.
+- Expanded state-machine RED: reordered stale rate events were incorrectly classified as a new rate
+  event; answer pages with the same answer ID under a mismatched question route were accepted.
+- Expanded DOM RED: the minimal environment lacked full ancestor visibility and exact closest-
+  identity control/dialog/row binding.
+- Dispatcher behavior RED: the module lacked an executable native dependency seam and authenticated
+  exact-result transport export.
+- GREEN: 22 focused tests now cover typed identities, mismatch fences, both intents, exact Unicode
+  title, duplicate ambiguity, create/close/reopen/re-query, created-unchecked selection, no fallback,
+  checked idempotency, directional rate evidence, hidden/related/nested/reused DOM, asynchronous
+  creation proof, and exact authenticated dispatcher closure.
+
+## Independent Review Repair
+
+The first independent read-only review found three Important issues. Regression tests first proved
+that an untagged dialog nested under another item's identity could escape the target fence, that
+trimming a row title accepted whitespace variants, and that creation returned success before an
+asynchronous form or deterministic confirmation proof existed.
+
+The repaired browser environment applies the closest-identity fence to dialogs, rows, create/close
+controls, inputs, and confirmation controls. Collection names compare raw `textContent` with exact
+case-sensitive Unicode equality. Creation clicks the create and confirm controls at most once,
+waits for the asynchronous form, then requires a unique exact row or a deterministic form
+transition; uncertainty fails closed. The outer executor still closes, reopens, and polls for the
+unique exact row before any selection mutation. The same reviewer completed a second read-only pass
+with no Critical, Important, or Minor findings.
+
+## Verification
+
+```text
+focused Zhihu native-save + dispatcher: 22 passed
+extension npm test: 832 passed, 0 failed
+npm run typecheck: passed
+npm run build: passed (Chrome/Edge chrome120 artifact)
+TARGET=edge npm run build: passed (explicit Edge invocation; same shared artifact target)
+git diff --check: passed
+```
+
+## Documentation
+
+Updated changelog, extension/saved-sync/runtime module docs, architecture, spec diagram,
+platform-source integration guide, and README CN/EN. All now state 6/6 executor wiring,
+fixture-only verification, and no real-account verification.

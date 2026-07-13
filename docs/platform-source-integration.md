@@ -274,6 +274,8 @@ CLI：
 - `extension/tests/<slug>-task-executor.test.ts`
 - popup/settings/init 相关测试
 
+原生保存 executor 还必须覆盖 strict task/page/item/type 关联、full ancestor visibility、closest identity fence、hidden/related dialog、同名 ambiguity、checked idempotency，以及 directional action-local risk。需要命名容器的平台必须在创建后 close/reopen/re-query；创建失败或重查不一致不得 fallback 到其它容器。fixture 接线完成不等于真实账号验证，文档和 PR 必须分别报告两种状态。
+
 完成前至少跑：
 
 ```bash

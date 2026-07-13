@@ -307,8 +307,9 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │ -> /api/sources/{xhs,dy,yt,x,zhihu,reddit}；unsupported_adapter_missing 可重试 │
 │  │ -> 插件/桌面/移动 saved UI；CLI config-show（自动同步默认关闭）    │
 │  │ NATIVE_SAVE_EXECUTE/RESULT：global mutex + absolute deadline + bounded replay │
-│  │ final/source URL 与 tab/task/item 严格关联；Reddit/X/YT/XHS/DY executor 已接 │
-│  │ （仅 fixture、尚未真实账号验证）；shared MV3 recovery barrier；知乎待接 │
+│  │ final/source URL 与 tab/task/item 严格关联；Reddit/X/YT/XHS/DY/Zhihu 6/6 已接 │
+│  │ （仅 fixture、均未真实账号验证）；shared MV3 recovery barrier          │
+│  │ Zhihu typed ID -> exact identity control/dialog -> OpenBiliClaw checked proof │
 │  │ YT favorite 精确 OpenBiliClaw + create 后 close/reopen；Watch Later 只认 WL │
 │  │ unsupported_content_type 保持 local-only                         │
 │  └──────────────────────────────────────────────────────┘   │

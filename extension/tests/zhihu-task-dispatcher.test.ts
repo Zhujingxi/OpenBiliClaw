@@ -3,11 +3,14 @@ import assert from "node:assert/strict";
 
 import {
   computeZhihuTaskTimeoutMs,
+  dispatchZhihuNativeSaveTask,
   executeTask,
   handleZhihuTaskResult,
   isValidZhihuTask,
+  postZhihuNativeSaveResult,
   type ZhihuTask,
 } from "../src/background/zhihu-task-dispatcher.ts";
+import type { NativeSaveResult, NativeSaveTask } from "../src/shared/native-save.ts";
 import { installChromeMock } from "./helpers/chrome-mock.ts";
 
 test("isValidZhihuTask accepts discovery task types", () => {
@@ -37,6 +40,67 @@ test("isValidZhihuTask rejects malformed discovery tasks", () => {
   assert.equal(isValidZhihuTask({ id: "hot", type: "hot", max_items: 0 }), false);
   assert.equal(isValidZhihuTask({ id: "creator", type: "creator", creator_urls: [] }), false);
   assert.equal(isValidZhihuTask({ id: "related", type: "related", related_urls: [] }), false);
+});
+
+test("isValidZhihuTask accepts only the Zhihu native-save union branch", () => {
+  const task: NativeSaveTask = {
+    id: "123e4567-e89b-42d3-a456-426614174008",
+    type: "native_save",
+    platform: "zhihu",
+    platform_slug: "zhihu",
+    item_key: "zhihu:answer:2002",
+    content_id: "answer:2002",
+    content_url: "https://www.zhihu.com/question/101/answer/2002",
+    content_type: "answer",
+    requested_action: "favorite",
+    resolved_action: "favorite",
+    target_label: "OpenBiliClaw",
+  };
+  assert.equal(isValidZhihuTask(task), true);
+  assert.equal(isValidZhihuTask({ ...task, platform_slug: "x" }), false);
+});
+
+test("Zhihu native dispatcher runs shared runner with exact slug and authenticated result closure", async () => {
+  const task: NativeSaveTask = {
+    id: "123e4567-e89b-42d3-a456-426614174008",
+    type: "native_save",
+    platform: "zhihu",
+    platform_slug: "zhihu",
+    item_key: "zhihu:article:3003",
+    content_id: "article:3003",
+    content_url: "https://zhuanlan.zhihu.com/p/3003",
+    content_type: "article",
+    requested_action: "watch_later",
+    resolved_action: "favorite",
+    target_label: "OpenBiliClaw",
+  };
+  const posted: NativeSaveResult[] = [];
+  let slug = "";
+  await dispatchZhihuNativeSaveTask(task, {
+    async run(received, platformSlug, postResult) {
+      assert.equal(received, task);
+      slug = platformSlug;
+      await postResult({
+        task_id: task.id,
+        item_key: task.item_key,
+        status: "synced",
+        error_code: "",
+        error_message: "",
+      });
+    },
+    async postResult(result) { posted.push(result); },
+  });
+  assert.equal(slug, "zhihu");
+  assert.equal(posted.length, 1);
+
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  await postZhihuNativeSaveResult(posted[0], {
+    resolveUrl: async (path) => `http://127.0.0.1:8420/api${path}`,
+    async fetch(url, init) { calls.push({ url, init }); return {}; },
+  });
+  assert.equal(calls[0].url, "http://127.0.0.1:8420/api/sources/zhihu/task-result");
+  assert.equal(calls[0].init.method, "POST");
+  assert.deepEqual(JSON.parse(String(calls[0].init.body)), posted[0]);
 });
 
 test("computeZhihuTaskTimeoutMs scales discovery task breadth", () => {
