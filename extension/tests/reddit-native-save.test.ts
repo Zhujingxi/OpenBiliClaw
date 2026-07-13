@@ -202,6 +202,15 @@ test("Reddit native save detects login and existing Saved state before mutation"
   const saved = fixture({ initialState: "Unsave", token: "must-not-be-used" });
   assert.deepEqual(await saveReddit(task, saved), { status: "already_synced" });
   assert.equal(saved.saveRequests.length, 0);
+
+  const apiSaved = fixture({
+    initialState: null,
+    token: null,
+    savedStates: ["saved"],
+  });
+  assert.deepEqual(await saveReddit(task, apiSaved), { status: "already_synced" });
+  assert.equal(apiSaved.saveRequests.length, 0);
+  assert.equal(apiSaved.clicks, 0);
 });
 
 test("Reddit native save maps rate limits and unsupported identities exactly", async () => {

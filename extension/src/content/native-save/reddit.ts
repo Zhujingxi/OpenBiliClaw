@@ -19,6 +19,7 @@ export interface RedditNativeSaveEnvironment {
 
 const CONFIRM_ATTEMPTS = 20;
 const CONFIRM_INTERVAL_MS = 100;
+const STATE_REQUEST_TIMEOUT_MS = 1_500;
 
 type RedditIdentityCorrelation = "url" | "dom_required";
 
@@ -76,23 +77,35 @@ export async function saveReddit(
   if (!identityCorrelation) {
     return { status: "unsupported", error_code: "unsupported_content_type" };
   }
+  const observedSavedState: { value: RedditSavedState } = { value: "unknown" };
+  let stateCheckAttempted = false;
   const contentReady = await waitForNativeSaveReadiness(
-    () => env.isLoggedIn() && Boolean(
-      env.requestToken() || env.findControl(task.content_id, "Save") ||
-      env.findControl(task.content_id, "Unsave"),
-    ),
+    async () => {
+      if (!env.isLoggedIn()) return false;
+      if (env.requestToken() || env.findControl(task.content_id, "Save") ||
+        env.findControl(task.content_id, "Unsave")) {
+        return true;
+      }
+      if (!stateCheckAttempted) {
+        stateCheckAttempted = true;
+        observedSavedState.value = await env.fetchSavedState(task.content_id);
+      }
+      return observedSavedState.value !== "unknown";
+    },
     env.sleep,
   );
   if (!contentReady) return { status: "failed", error_code: "native_content_not_ready" };
   if (!env.isLoggedIn()) return { status: "login_required" };
   if (env.findControl(task.content_id, "Unsave")) return { status: "already_synced" };
+  if (observedSavedState.value === "saved") return { status: "already_synced" };
   let saveControl = env.findControl(task.content_id, "Save");
   if (identityCorrelation === "dom_required" && !saveControl) {
     return { status: "failed", error_code: "native_control_not_found" };
   }
 
   const token = env.requestToken();
-  if (token && await env.fetchSavedState(task.content_id) === "saved") {
+  if (token && observedSavedState.value !== "unsaved" &&
+    await env.fetchSavedState(task.content_id) === "saved") {
     return { status: "already_synced" };
   }
   if (token) {
@@ -246,7 +259,10 @@ function browserRedditEnvironment(): RedditNativeSaveEnvironment {
         const url = new URL("/api/info.json", location.origin);
         url.searchParams.set("id", fullname);
         url.searchParams.set("raw_json", "1");
-        const response = await fetch(url, { credentials: "include" });
+        const response = await fetch(url, {
+          credentials: "include",
+          signal: AbortSignal.timeout(STATE_REQUEST_TIMEOUT_MS),
+        });
         if (!response.ok) return "unknown";
         const payload = await response.json() as {
           data?: { children?: Array<{ data?: { name?: unknown; saved?: unknown } }> };
