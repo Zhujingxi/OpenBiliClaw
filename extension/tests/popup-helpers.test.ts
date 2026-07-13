@@ -1807,13 +1807,26 @@ test("popup inline failed turns render errors without completing or removing pro
 
   const probe = functionSlice("sendInlineChat", "dismissMessage");
   assert.ok(probe.indexOf('nextTurn.status === "failed"') < probe.indexOf('nextTurn.status === "completed"'));
+  assert.match(probe, /input\.closest\("\.message-chat-area"\)/);
+  assert.match(probe, /input\.disabled = true/);
   const failureBranch = probe.slice(
     probe.indexOf("const showFailure"),
     probe.indexOf("const showReply"),
   );
   assert.match(failureBranch, /nextTurn\.error/);
   assert.match(failureBranch, /forgetHandledProbe/);
+  assert.match(failureBranch, /input\.disabled = false/);
+  assert.match(failureBranch, /sendBtn\.disabled = false/);
+  assert.match(failureBranch, /input\.focus\(\)/);
+  assert.doesNotMatch(failureBranch, /chatArea\.remove|input\.remove|sendBtn\.remove/);
   assert.doesNotMatch(failureBranch, /removeMessageFromState|itemEl\.remove/);
+  const beforeCompleted = probe.slice(0, probe.indexOf("const showReply"));
+  assert.doesNotMatch(beforeCompleted, /chatArea\.remove/);
+  const completedBranch = probe.slice(
+    probe.indexOf("const showReply"),
+    probe.indexOf("const settleTurn"),
+  );
+  assert.match(completedBranch, /chatArea\.remove\(\)/);
 });
 
 test("getHintBannerState normalizes supported tones", () => {

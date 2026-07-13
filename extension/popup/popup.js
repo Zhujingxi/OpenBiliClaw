@@ -2907,8 +2907,12 @@ function createChatThinkingPlaceholder(label) {
 async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.probe") {
   const message = input.value.trim();
   if (!message) return;
+  const chatArea = input.closest(".message-chat-area");
+  if (!chatArea || !input.isConnected || !sendBtn.isConnected) return;
   const isAvoidance = isAvoidanceProbeType(type);
 
+  chatArea.querySelector(".message-chat-reply.is-error")?.remove();
+  input.disabled = true;
   sendBtn.disabled = true;
   const turnId = createClientTurnId(isAvoidance ? "avoidance_probe" : "probe");
   rememberHandledProbe(domain, type);
@@ -2932,22 +2936,22 @@ async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.p
 
     // Completed turns remove the card after showing the reply. Failed turns
     // restore the handled/retry state and keep the card visible.
-    const chatArea = itemEl.querySelector(".message-chat-area");
-    if (chatArea) chatArea.remove();
-
     const showFailure = (nextTurn) => {
       forgetHandledProbe(domain, type);
       thinking.remove();
+      input.disabled = false;
       sendBtn.disabled = false;
       const errorEl = document.createElement("div");
-      errorEl.className = "message-chat-reply";
+      errorEl.className = "message-chat-reply is-error";
       errorEl.textContent = nextTurn.error || "刚刚没发出去，换个说法再试试。";
-      itemEl.append(errorEl);
+      chatArea.append(errorEl);
       applyTurnToMessage(nextTurn);
+      input.focus();
     };
 
     const showReply = (nextTurn) => {
       thinking.remove();
+      chatArea.remove();
       const replyEl = document.createElement("div");
       replyEl.className = "message-chat-reply";
       replyEl.textContent =
@@ -2985,12 +2989,14 @@ async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.p
     console.error("Inline chat failed:", err);
     forgetHandledProbe(domain, type);
     thinking.remove();
+    input.disabled = false;
     sendBtn.disabled = false;
     // Show error hint inline
     const errEl = document.createElement("div");
-    errEl.className = "message-chat-reply";
+    errEl.className = "message-chat-reply is-error";
     errEl.textContent = "\u540E\u53F0\u6B63\u5FD9\uFF0C\u7B49\u4E00\u4E0B\u518D\u804A\u3002";
-    itemEl.append(errEl);
+    chatArea.append(errEl);
+    input.focus();
     setTimeout(() => errEl.remove(), 3000);
   }
 }
