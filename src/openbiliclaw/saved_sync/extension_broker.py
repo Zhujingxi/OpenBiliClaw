@@ -121,8 +121,9 @@ class ExtensionNativeSaveBroker:
             )
             row = await self._wait_for_terminal(job_id, dispatch_deadline_at)
         except asyncio.CancelledError:
-            self._database.cancel_unclaimed_extension_native_save_job(job_id)
-            raise
+            if self._database.cancel_unclaimed_extension_native_save_job(job_id):
+                raise
+            row = await self._wait_for_terminal(job_id, dispatch_deadline_at)
         return self._native_result_from_row(row)
 
     def claim_next(self, platform_slug: str) -> ExtensionNativeSaveJob | None:

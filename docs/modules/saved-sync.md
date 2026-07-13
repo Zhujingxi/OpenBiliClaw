@@ -20,8 +20,8 @@
 | 安全失败归一化 | ✅ | 未注册路由写为 `unsupported/unsupported_adapter_missing`，仅该组合可在 adapter 到位后重新快照；executor 返回的 `unsupported_content_type` 等真实内容限制保持 local-only 终态。malformed target / result 写固定 `failed/invalid_adapter_result`；adapter 异常写 `failed/adapter_exception`。 |
 | B 站原生 adapter | ✅ | favorite 精确复用或创建 `OpenBiliClaw` 收藏夹；watch-later 写 B 站稍后再看。任意 endpoint 的 `-101` → `login_required`；只有最终 favorite resource-deal POST 的 `11201` 会由 client 标记为 dedicated duplicate，且 adapter 仍要求 resolved action 为 favorite 才映射 `already_synced`；folder/resolver 的同码与非 favorite route 的该异常均为 `failed`；watch-later 的 `90003` 固定为 `failed/bilibili_video_unavailable`。 |
 | 平台中立 HTTP API | ✅ | `/api/saved/{list_kind}` 提供 save/list/remove/status/sync，`/api/saved-sync/tasks/{task_id}` 返回 durable 逐项结果；`list_kind`、canonical key、选择和 UUID 均 fail closed。普通稳定键严格为 `<canonical-platform>:<nonblank-stable-id>`；知乎真实内容 ID 额外只放行 `zhihu:question/answer/article:<numeric-id>` 三种 typed identity，未知类型、空段和其它平台的额外冒号仍拒绝。URL fallback 严格为 `<platform>:url:<24位小写十六进制>`，URL 只接受无凭据、无空白/控制字符且 host/port 有效的 HTTP(S)。缺失 membership 只返回安全的 `failed/not_saved_locally`。 |
-| 三个图形化保存界面 + CLI 配置可见 | ✅ | 插件 side panel、移动 Web、桌面 Web 的推荐卡只对本地保存做 optimistic update；状态与并发 fence 按 `list_kind:item_key` 隔离，迟到 status 水合不能覆盖新 mutation。插件 / 移动 saved 与 config 请求、桌面 saved 请求均有有界 timeout；插件的单个 deadline 覆盖初次设备会话交换、401 强制换票与受保护请求，认证 fetch 接收同一 AbortSignal。超时 mutation 释放 busy，poll 超时保留 recoverable task。保存页对 adapter 支持的状态提供不受自动开关影响的手动同步，显示真实 target、逐项状态、可恢复失败重试、批量确认和仅终态的分平台结果；`unsupported` 统一显示「仅本地保存 / 暂不支持平台同步」，不显示单项同步且不计入批量数量，避免对 Phase 1 尚无 adapter 的平台反复提交。列表成功加载后从持久化 `sync_task_id` 去重恢复任务，task→item ownership 把关联项显示为同步中并排除重复提交；页面重新可见时恢复查询，销毁时清理 tracker。刷新失败保留最后成功快照并显示重试。desktop 共享 normalizer 与后端一致把 `x` canonicalize 为 `twitter`；移动设置成功加载时 retry 控件保持隐藏。批量同步与重试加载先捕获列表级焦点并在重渲染后优先还原同一动作；卡片动作消失时再依次回退到相邻卡片、列表动作和页面标题。Task/result 文本先清洗再用 textContent/转义渲染；本地删除只调用 `/remove`。CLI 仅由 `config-show` 展示自动同步开关，不提供保存 / 同步动作。 |
-| Runtime wiring | ✅ | `RuntimeContext` 一次创建稳定 broker，并在 local/degraded 与每次 config rebuild 注册六平台 adapter；热重载替换 router/service 与 Bilibili client，但保留同一 broker。`BilibiliNativeSaveAdapter` 仍是唯一 direct adapter。broker best-effort 发布 `<slug>_task_available`；无 event hub 的测试/降级构造仍可用。 |
+| 三个图形化保存界面 + CLI 配置可见 | ✅ | 插件 side panel、移动 Web、桌面 Web 的推荐卡只对本地保存做 optimistic update；状态与并发 fence 按 `list_kind:item_key` 隔离，迟到 status 水合不能覆盖新 mutation。插件 / 移动 saved 与 config 请求、桌面 saved 请求均有有界 timeout；插件的单个 deadline 覆盖初次设备会话交换、401 强制换票与受保护请求，认证 fetch 接收同一 AbortSignal。超时 mutation 释放 busy，poll 超时保留 recoverable task。保存页对 adapter 支持的状态提供不受自动开关影响的手动同步，显示真实 target、逐项状态、可恢复失败重试、批量确认和仅终态的分平台结果；`unsupported` 统一显示「仅本地保存 / 暂不支持平台同步」，不显示单项同步且不计入批量数量，避免对真实内容能力限制反复提交。列表成功加载后从持久化 `sync_task_id` 去重恢复任务，task→item ownership 把关联项显示为同步中并排除重复提交；页面重新可见时恢复查询，销毁时清理 tracker。刷新失败保留最后成功快照并显示重试。desktop 共享 normalizer 与后端一致把 `x` canonicalize 为 `twitter`；移动设置成功加载时 retry 控件保持隐藏。批量同步与重试加载先捕获列表级焦点并在重渲染后优先还原同一动作；卡片动作消失时再依次回退到相邻卡片、列表动作和页面标题。Task/result 文本先清洗再用 textContent/转义渲染；本地删除只调用 `/remove`。CLI 仅由 `config-show` 展示自动同步开关，不提供保存 / 同步动作。 |
+| Runtime wiring | ✅ | `RuntimeContext` 一次创建稳定 broker，并在 local/degraded 与每次 config rebuild 注册六平台 adapter；热重载替换 router/service 与 Bilibili client，但保留同一 broker。`BilibiliNativeSaveAdapter` 仍是唯一 direct adapter。broker best-effort 发布 `<slug>_task_available`；无 event hub 的测试/降级构造仍可用。六平台 pending job 随调用方取消安全变为 `cancelled`；已 claim 的 `in_progress` job 则继续等 durable 终态，由原 service watchdog 跨 rebuild 持有 native state heartbeat，不重放平台 mutation。 |
 
 ## 公开 API
 
@@ -141,8 +141,9 @@ SavedItemInput
 验证边界同样分层：自动化和默认 smoke 只使用 mock adapter 或本地 membership，不发送任何
 Bilibili favorite / watch-later 请求。真实 `favorite` 与 `watch_later` 都会改变账号状态，必须
 为具体 BV ID 取得用户当次授权或使用指定测试账号后才能运行；验证记录只保留 task ID、
-状态、计数和脱敏错误码。YouTube、小红书、抖音、X、知乎与 Reddit 的账号写入 adapter
-仍是后续独立计划，Phase 1 不能宣称这些平台已经原生同步。
+状态、计数和脱敏错误码。YouTube、小红书、抖音、X、知乎与 Reddit 的 production adapter
+与 runtime broker registration 已完成；Tasks 4–8 继续负责扩展 executor、经验证的真实账号写入与
+逐平台授权 E2E。在这些 executor 完成前，不能宣称六平台账号写入已经闭环。
 
 2026-07-13 已在当次明确授权下完成 B 站真实账号授权 E2E：手动收藏、手动稍后再看和
 开启配置后的自动收藏均返回 `synced`；删除三条本地 membership 后，两条平台收藏与一条

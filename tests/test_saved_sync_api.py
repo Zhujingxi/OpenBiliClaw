@@ -893,6 +893,85 @@ async def test_runtime_rebuild_cancels_inflight_saved_sync_before_swap(
     assert old_service.get_sync_task(created.task_id).items[0].error_code == "interrupted"
 
 
+async def test_runtime_rebuild_hands_claimed_extension_job_to_detached_watchdog(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.api.runtime_context import RuntimeContext
+    from openbiliclaw.config import Config
+    from openbiliclaw.saved_sync.adapters.extension import (
+        build_extension_native_save_adapters,
+    )
+    from openbiliclaw.saved_sync.extension_broker import (
+        ExtensionNativeSaveBroker,
+        ExtensionNativeSaveResultIn,
+    )
+
+    database = Database(tmp_path / "runtime-claimed-extension.db")
+    database.initialize()
+    context = RuntimeContext(database=database)
+    broker = ExtensionNativeSaveBroker(
+        database,
+        wake_platform=AsyncMock(),
+        dispatch_deadline_seconds=1.0,
+        execution_deadline_seconds=1.0,
+        poll_interval_seconds=0.001,
+    )
+    context.extension_native_save_broker = broker
+    old_service = SavedSyncService(
+        database,
+        NativeSaveRouter(build_extension_native_save_adapters(broker)),
+        task_starter=lambda name, coro: context.task_registry.track(name, coro),
+        claim_heartbeat_interval_seconds=0.005,
+    )
+    context.saved_sync_service = old_service
+    item = SavedItemInput("reddit", "t3_rebuild", "https://www.reddit.com/comments/rebuild/")
+    old_service.save_local("favorite", item)
+    created = old_service.create_sync_task("favorite", [item.item_key], "manual_single")
+
+    claimed = None
+    for _ in range(100):
+        claimed = broker.claim_next("reddit")
+        if claimed is not None:
+            break
+        await asyncio.sleep(0.001)
+    assert claimed is not None
+
+    replacement: SavedSyncService | None = None
+
+    def fake_rebuild(self: RuntimeContext, config: Config) -> None:
+        nonlocal replacement
+        del config
+        assert self.extension_native_save_broker is broker
+        replacement = SavedSyncService(
+            database,
+            NativeSaveRouter(build_extension_native_save_adapters(broker)),
+        )
+        self.saved_sync_service = replacement
+
+    monkeypatch.setattr(RuntimeContext, "_rebuild_components", fake_rebuild)
+
+    await context.rebuild_from_config(Config())
+
+    assert context.saved_sync_service is replacement
+    assert len(old_service._detached_attempts) == 1
+    assert broker.submit_result(
+        "reddit",
+        ExtensionNativeSaveResultIn(claimed.job_id, item.item_key, "already_synced"),
+    )
+    for _ in range(100):
+        persisted = old_service.get_sync_task(created.task_id)
+        if persisted.items[0].status == "already_synced":
+            break
+        await asyncio.sleep(0.001)
+    assert persisted.items[0].status == "already_synced"
+    assert persisted.items[0].error_code == ""
+    assert (
+        database.conn.execute("SELECT COUNT(*) FROM extension_native_save_jobs").fetchone()[0] == 1
+    )
+    assert broker.claim_next("reddit") is None
+
+
 def test_runtime_construction_failure_keeps_existing_saved_sync_and_bilibili_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

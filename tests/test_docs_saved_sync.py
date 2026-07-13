@@ -78,3 +78,9 @@ def test_saved_sync_docs_register_extension_adapters_without_claiming_executor()
         assert "unsupported_adapter_missing" in text
     assert "六平台扩展保存 adapter" in architecture
     assert "扩展 executor 尚未实现" in architecture
+    assert "Tasks 4–8" in architecture
+    assert "Tasks 4–8" in module
+    assert "Phase 1 只注册 Bilibili 账号写入 adapter" not in architecture
+    assert "其它来源当前保持 local-only" not in architecture
+    assert "账号写入 adapter\n仍是后续独立计划" not in module
+    assert "Phase 1 尚无 adapter 的平台" not in module

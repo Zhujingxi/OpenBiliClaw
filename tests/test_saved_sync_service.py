@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 
+from openbiliclaw.saved_sync.adapters.extension import build_extension_native_save_adapters
+from openbiliclaw.saved_sync.extension_broker import (
+    ExtensionNativeSaveBroker,
+    ExtensionNativeSaveResultIn,
+)
 from openbiliclaw.saved_sync.models import (
     NativeSaveAction,
     NativeSaveCapability,
@@ -814,6 +820,93 @@ async def test_partial_batch_cancellation_releases_later_pending_ownership(
     assert pending_state["sync_task_id"] == ""
     retry = service.create_sync_task("favorite", [pending_key], "manual_single")
     assert [result.item_key for result in retry.items] == [pending_key]
+
+
+async def test_pending_extension_job_cancellation_does_not_detach(
+    db: Database,
+) -> None:
+    broker = ExtensionNativeSaveBroker(
+        db,
+        wake_platform=AsyncMock(),
+        dispatch_deadline_seconds=1.0,
+        execution_deadline_seconds=1.0,
+        poll_interval_seconds=0.001,
+    )
+    service = SavedSyncService(
+        db,
+        NativeSaveRouter(build_extension_native_save_adapters(broker)),
+    )
+    item = SavedItemInput("reddit", "t3_pending", "https://www.reddit.com/comments/pending/")
+    service.save_local("favorite", item)
+    task = service.create_sync_task("favorite", [item.item_key], "manual_single")
+    runner = asyncio.create_task(service.run_sync_task(task.task_id))
+
+    for _ in range(100):
+        job_row = db.conn.execute(
+            "SELECT * FROM extension_native_save_jobs WHERE item_key = ?",
+            (item.item_key,),
+        ).fetchone()
+        if job_row is not None:
+            break
+        await asyncio.sleep(0.001)
+    assert job_row is not None and job_row["status"] == "pending"
+
+    runner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await runner
+
+    durable_job = db.get_extension_native_save_job(str(job_row["job_id"]))
+    assert durable_job is not None and durable_job["status"] == "cancelled"
+    assert service._detached_attempts == set()
+    assert db.conn.execute("SELECT COUNT(*) FROM extension_native_save_jobs").fetchone()[0] == 1
+
+
+async def test_claimed_extension_job_survives_short_service_adapter_timeout(
+    db: Database,
+) -> None:
+    broker = ExtensionNativeSaveBroker(
+        db,
+        wake_platform=AsyncMock(),
+        dispatch_deadline_seconds=1.0,
+        execution_deadline_seconds=1.0,
+        poll_interval_seconds=0.001,
+    )
+    service = SavedSyncService(
+        db,
+        NativeSaveRouter(build_extension_native_save_adapters(broker)),
+        claim_heartbeat_interval_seconds=0.005,
+        adapter_timeout_seconds=0.02,
+    )
+    item = SavedItemInput("reddit", "t3_timeout", "https://www.reddit.com/comments/timeout/")
+    service.save_local("favorite", item)
+    task = service.create_sync_task("favorite", [item.item_key], "manual_single")
+    runner = asyncio.create_task(service.run_sync_task(task.task_id))
+
+    claimed = None
+    for _ in range(100):
+        claimed = broker.claim_next("reddit")
+        if claimed is not None:
+            break
+        await asyncio.sleep(0.001)
+    assert claimed is not None
+
+    initial = await asyncio.wait_for(runner, timeout=0.5)
+    assert initial.items[0].status == "syncing"
+    assert len(service._detached_attempts) == 1
+    assert broker.submit_result(
+        "reddit",
+        ExtensionNativeSaveResultIn(claimed.job_id, item.item_key, "synced"),
+    )
+
+    for _ in range(100):
+        persisted = service.get_sync_task(task.task_id)
+        if persisted.items[0].status == "synced":
+            break
+        await asyncio.sleep(0.001)
+    assert persisted.items[0].status == "synced"
+    assert persisted.items[0].error_code == ""
+    assert db.conn.execute("SELECT COUNT(*) FROM extension_native_save_jobs").fetchone()[0] == 1
+    assert broker.claim_next("reddit") is None
 
 
 async def test_live_aged_claim_heartbeat_prevents_cross_service_reexecution(

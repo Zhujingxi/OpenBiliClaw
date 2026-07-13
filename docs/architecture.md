@@ -38,8 +38,8 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 - 同平台逐项串行、不同平台组可并行；路由缺失写 `unsupported/unsupported_adapter_missing` 并可在 adapter 到位后重试，平台返回的 `unsupported_content_type` 仍是 local-only 终态；adapter 异常写安全的 `failed`，均不回滚本地保存
 - `BilibiliNativeSaveAdapter` 是首个生产 adapter：favorite 精确复用/创建 `OpenBiliClaw`（仅同一个 client 实例/title 在锁内重查并单飞，不覆盖跨 client/process），watch-later 写 B 站稍后再看；BV → aid 先走 application-aware GET 并要求非 bool 正整数，`BilibiliAPIClient` 在任何请求前校验 `SESSDATA + bili_jct`；GET/POST HTTP 412/429 共用脱敏映射，favorite duplicate 由 resource-deal 专项异常标记而非 adapter action 猜测
 - `/api/saved/{list_kind}` 提供严格 canonical save/list/remove/status/sync，`/api/saved-sync/tasks/{uuid}` 从 task ledger 轮询逐项结果；零项已知任务返回 200、未知 UUID 返回 404，缺失 membership 固定返回 `failed/not_saved_locally`，旧 B 站端点只做 local-only 兼容
-- `RuntimeContext` 在 B 站 client 热重载时先取消 registry inflight，再原子重建 router/service；registry 只拥有顶层 sync runner，service-owned heartbeat/save/watchdog 自行保留到 I/O 结束；插件 side panel、桌面 Web、移动 Web 和 CLI 配置输出已经接入同一默认关闭配置与状态契约
-- Phase 1 只注册 Bilibili 账号写入 adapter；其它来源当前保持 local-only，平台同步 adapter、登录态任务与授权 E2E 分别留给后续独立计划
+- `RuntimeContext` 在 B 站 client 热重载时先取消 registry inflight，再原子重建 router/service；registry 只拥有顶层 sync runner。六平台 broker job 若仍为 pending，取消会安全写成 `cancelled`；若扩展已 claim 为 `in_progress`，broker 会继续等待 durable 终态并把所有权交给 service-owned watchdog，使 240 秒 service deadline、360 秒扩展执行 lease 和热重载都不会把同一次平台写入误记为 `interrupted` 或触发重放。插件 side panel、桌面 Web、移动 Web 和 CLI 配置输出已经接入同一默认关闭配置与状态契约
+- 六平台 production adapter 与 runtime broker registration 已完成；Tasks 4–8 继续负责扩展 executor、真实登录态平台写入和逐平台授权 E2E。在这些 executor 完成前，不能宣称六平台账号写入闭环
 
 ### User Soul Engine (`soul/`)
 - 行为数据分析和画像构建
