@@ -229,6 +229,51 @@ test("native save content runtime shares one in-flight outcome across duplicate 
   }
 });
 
+test("native save content runtime routes persisted confirmation to a read-only verifier", async () => {
+  const originalChrome = (globalThis as { chrome?: unknown }).chrome;
+  const originalLocation = (globalThis as { location?: unknown }).location;
+  const listeners: Array<(message: unknown) => Promise<boolean>> = [];
+  const emitted: unknown[] = [];
+  (globalThis as { location?: unknown }).location = {
+    hostname: "www.reddit.com",
+    href: validTask.content_url,
+  };
+  (globalThis as { chrome?: unknown }).chrome = {
+    runtime: {
+      onMessage: { addListener: (listener: (message: unknown) => Promise<boolean>) => listeners.push(listener) },
+      sendMessage: async (message: unknown) => emitted.push(message),
+    },
+  };
+  try {
+    const { installNativeSaveExecutor } = await import(
+      `../src/content/native-save/runtime.ts?verify=${Date.now()}`
+    );
+    let mutations = 0;
+    let verifications = 0;
+    installNativeSaveExecutor(
+      "reddit",
+      async () => { mutations += 1; return { status: "synced" }; },
+      async () => { verifications += 1; return { status: "already_synced" }; },
+    );
+    assert.equal(await listeners[0]({
+      type: "NATIVE_SAVE_EXECUTE",
+      task: validTask,
+      verification_only: true,
+    }), true);
+    assert.equal(mutations, 0);
+    assert.equal(verifications, 1);
+    assert.equal((emitted[0] as { status?: unknown }).status, "already_synced");
+    assert.equal(await listeners[0]({
+      type: "NATIVE_SAVE_EXECUTE",
+      task: validTask,
+      verification_only: "yes",
+    }), false);
+  } finally {
+    (globalThis as { chrome?: unknown }).chrome = originalChrome;
+    (globalThis as { location?: unknown }).location = originalLocation;
+  }
+});
+
 test("native save content runtime evicts the oldest completed outcome after 256 task IDs", async () => {
   const originalChrome = (globalThis as { chrome?: unknown }).chrome;
   const originalLocation = (globalThis as { location?: unknown }).location;

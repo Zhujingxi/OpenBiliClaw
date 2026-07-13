@@ -25,8 +25,9 @@ const recentOutcomes = new Map<string, CachedOutcome>();
 function cachedOutcome(
   task: NativeSaveTask,
   executor: NativeSaveExecutor,
+  cacheKey: string = task.id,
 ): Promise<SanitizedNativeSaveOutcome> | null {
-  const existing = recentOutcomes.get(task.id);
+  const existing = recentOutcomes.get(cacheKey);
   if (existing) {
     if (existing.platform !== task.platform || existing.itemKey !== task.item_key) return null;
     return existing.outcome;
@@ -48,7 +49,7 @@ function cachedOutcome(
     platform: task.platform,
     settled: false,
   };
-  recentOutcomes.set(task.id, cached);
+  recentOutcomes.set(cacheKey, cached);
   void outcome.then(() => { cached.settled = true; });
   return outcome;
 }
@@ -57,19 +58,29 @@ function cachedOutcome(
 export function installNativeSaveExecutor(
   platform: NativeSavePlatform,
   executor: NativeSaveExecutor,
+  verifier?: NativeSaveExecutor,
 ): void {
   if (installedPlatforms.has(platform)) return;
   installedPlatforms.add(platform);
 
   chrome.runtime.onMessage.addListener(async (message: unknown) => {
     if (typeof message !== "object" || message === null) return false;
-    const envelope = message as { type?: unknown; task?: unknown };
+    const envelope = message as { type?: unknown; task?: unknown; verification_only?: unknown };
     if (envelope.type !== "NATIVE_SAVE_EXECUTE" || !isNativeSaveTask(envelope.task)) return false;
+    if (envelope.verification_only !== undefined && typeof envelope.verification_only !== "boolean") {
+      return false;
+    }
     const task = envelope.task;
     if (task.platform !== platform || !isAllowedNativeSavePageUrl(platform, location.href)) {
       return false;
     }
-    const outcomePromise = cachedOutcome(task, executor);
+    const verificationOnly = envelope.verification_only === true;
+    if (verificationOnly && !verifier) return false;
+    const outcomePromise = cachedOutcome(
+      task,
+      verificationOnly ? verifier! : executor,
+      verificationOnly ? `${task.id}:verify` : task.id,
+    );
     if (!outcomePromise) return false;
     const outcome = await outcomePromise;
     await chrome.runtime.sendMessage({

@@ -271,6 +271,9 @@ async function createTabBeforeDeadline(
 }
 
 function taskNavigationUrl(task: NativeSaveTask): string {
+  if (task.platform === "douyin") {
+    return `https://www.douyin.com/jingxuan?modal_id=${encodeURIComponent(task.content_id)}`;
+  }
   if (task.platform !== "reddit") return task.content_url;
   try {
     const url = new URL(task.content_url);
@@ -356,12 +359,14 @@ async function sendExecuteWhenReady(
   deadline: number,
   retryMs: number,
   signal: AbortSignal,
+  verificationOnly: boolean = false,
 ): Promise<void> {
   while (!signal.aborted && Date.now() < deadline) {
     try {
       const response = await chrome.tabs.sendMessage(tabId, {
         type: "NATIVE_SAVE_EXECUTE",
         task,
+        ...(verificationOnly ? { verification_only: true } : {}),
       });
       if (response !== undefined) return;
     } catch {
@@ -377,6 +382,7 @@ async function executeBeforeDeadline(
   deadline: number,
   retryMs: number,
   readinessController: AbortController,
+  verificationOnly: boolean = false,
 ): Promise<SanitizedNativeSaveOutcome> {
   const timeoutMs = remainingMs(deadline);
   if (timeoutMs <= 0) return timeoutOutcome();
@@ -400,7 +406,14 @@ async function executeBeforeDeadline(
       timeoutMs,
     );
   });
-  void sendExecuteWhenReady(tabId, task, deadline, retryMs, readinessController.signal);
+  void sendExecuteWhenReady(
+    tabId,
+    task,
+    deadline,
+    retryMs,
+    readinessController.signal,
+    verificationOnly,
+  );
   try {
     return sanitizeNativeSaveResult(await terminal);
   } finally {
@@ -463,6 +476,30 @@ export async function runNativeSaveTask(
           Math.max(1, options.readinessRetryMs ?? DEFAULT_READINESS_RETRY_MS),
           readinessController,
         );
+        if (
+          task.platform === "douyin" &&
+          outcome.status === "failed" &&
+          outcome.error_code === "native_confirmation_not_observed" &&
+          remainingMs(deadline) > 0
+        ) {
+          const verificationUrl = taskNavigationUrl(task);
+          await beforeDeadline(chrome.tabs.update(tabId, {
+            active: true,
+            url: verificationUrl,
+          }), deadline);
+          const verificationTab = await waitForTabLoad(tabId, deadline);
+          if (!isAllowedNativeSavePageUrl(task.platform, verificationTab.url)) {
+            throw new Error("native-save verification tab left its allow-listed platform");
+          }
+          outcome = await executeBeforeDeadline(
+            task,
+            tabId,
+            deadline,
+            Math.max(1, options.readinessRetryMs ?? DEFAULT_READINESS_RETRY_MS),
+            readinessController,
+            true,
+          );
+        }
       } catch (error) {
         outcome = error instanceof NativeSaveDeadlineError || Date.now() >= deadline
           ? timeoutOutcome()

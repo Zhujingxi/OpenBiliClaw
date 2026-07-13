@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   createDouyinBrowserEnvironment,
   saveDouyin,
+  verifyDouyin,
   type DouyinFavoriteRequestResult,
   type DouyinNativeSaveEnvironment,
   type DouyinSaveControl,
@@ -67,6 +68,7 @@ function fixture(options: {
       if (options.confirmAfterRequest) selected = true;
       return options.requestResult ?? null;
     },
+    waitForAccountState: async () => {},
     findFavoriteControls: () => Array.from({
       length: env.sleeps >= (options.controlsAfterSleeps ?? 0) ? (options.controls ?? 1) : 0,
     }, () => control),
@@ -98,6 +100,19 @@ test("Douyin native save accepts only exact correlated aweme/video identities", 
     status: "unsupported",
     error_code: "unsupported_content_type",
   });
+  assert.deepEqual(await saveDouyin(task, fixture({
+    currentUrl: `https://www.douyin.com/jingxuan?modal_id=${CONTENT_ID}`,
+  })), { status: "synced" });
+  for (const currentUrl of [
+    "https://www.douyin.com/jingxuan",
+    `https://www.douyin.com/jingxuan?modal_id=${CONTENT_ID}&from=feed`,
+    "https://www.douyin.com/jingxuan?modal_id=other",
+  ]) {
+    assert.deepEqual(await saveDouyin(task, fixture({ currentUrl })), {
+      status: "unsupported",
+      error_code: "unsupported_content_type",
+    });
+  }
 });
 
 test("Douyin native save waits for the correlated favorite control before mutation", async () => {
@@ -187,6 +202,19 @@ test("Douyin native save never retries after accepted-but-unconfirmed request", 
   assert.equal(env.clicks, 0);
 });
 
+test("Douyin persisted verification is read-only for selected and unselected states", async () => {
+  const selectedEnv = fixture({ initialSelected: true });
+  assert.deepEqual(await verifyDouyin(task, selectedEnv), { status: "already_synced" });
+  assert.equal(selectedEnv.clicks + selectedEnv.requests, 0);
+
+  const unselectedEnv = fixture({ initialSelected: false });
+  assert.deepEqual(await verifyDouyin(task, unselectedEnv), {
+    status: "failed",
+    error_code: "native_confirmation_not_observed",
+  });
+  assert.equal(unselectedEnv.clicks + unselectedEnv.requests, 0);
+});
+
 test("Douyin native save never treats favorite count change alone as confirmation", async () => {
   const env = fixture({ confirmAfterClick: false });
   assert.deepEqual(await saveDouyin(task, env), {
@@ -246,6 +274,10 @@ function domElement(attributes: Record<string, string> = {}): FakeElement {
           selector.includes("data-video-id") && current.attributes.has("data-video-id") ||
           selector.includes("data-content-id") && current.attributes.has("data-content-id")
         ) return current;
+        if (
+          selector.includes("feed-active-video") &&
+          current.attributes.get("data-e2e") === "feed-active-video"
+        ) return current;
         current = current.parentElement;
       }
       return null;
@@ -256,6 +288,8 @@ function domElement(attributes: Record<string, string> = {}): FakeElement {
 
 function browserDocument(controls: FakeElement[], options: {
   routeOnly?: boolean;
+  routeOnlyWithUnrelatedIdentity?: boolean;
+  modernActive?: boolean;
   login?: boolean;
   hiddenLogin?: boolean;
   unavailable?: boolean;
@@ -270,14 +304,20 @@ function browserDocument(controls: FakeElement[], options: {
   if (options.hiddenLogin) login.style.visibility = "hidden";
   const unavailable = domElement();
   if (options.hiddenUnavailable) unavailable.hidden = true;
-  const target = domElement(options.routeOnly ? {} : { "data-aweme-id": CONTENT_ID });
+  const target = domElement(options.modernActive
+    ? { "data-e2e": "feed-active-video", class: `video_${CONTENT_ID} sliderVideo` }
+    : options.routeOnly || options.routeOnlyWithUnrelatedIdentity
+      ? {}
+      : { "data-aweme-id": CONTENT_ID });
   const nestedUnrelatedContainer = domElement({ "data-aweme-id": "nested-unrelated-video" });
   nestedUnrelatedContainer.parentElement = target;
   for (const control of options.nestedUnrelatedControls ?? []) {
     control.parentElement ??= nestedUnrelatedContainer;
   }
   target.querySelectorAll = (selector) => {
-    if (selector.includes("video-favorite")) return [...controls, ...(options.nestedUnrelatedControls ?? [])];
+    if (selector.includes("video-favorite") || selector.includes("video-player-collect")) {
+      return [...controls, ...(options.nestedUnrelatedControls ?? [])];
+    }
     if (selector.includes("data-e2e='toast'")) {
       const targetRisk = options.targetRiskElements?.() ?? [];
       for (const element of targetRisk) element.parentElement ??= target;
@@ -306,9 +346,13 @@ function browserDocument(controls: FakeElement[], options: {
     },
     querySelectorAll(selector: string) {
       if (selector.includes("data-aweme-id")) {
+        if (options.routeOnlyWithUnrelatedIdentity) return [unrelatedContainer];
         return options.routeOnly ? [] : [target, unrelatedContainer];
       }
-      if (selector.includes("video-favorite")) return [...controls, ...(options.unrelatedControls ?? [])];
+      if (selector.includes("feed-active-video")) return options.modernActive ? [target] : [];
+      if (selector.includes("video-favorite") || selector.includes("video-player-collect")) {
+        return [...controls, ...(options.unrelatedControls ?? [])];
+      }
       if (selector.includes("login-modal")) return options.login || options.hiddenLogin ? [login] : [];
       if (selector.includes("not-found")) return options.unavailable || options.hiddenUnavailable ? [unavailable] : [];
       if (selector.includes("data-e2e='toast'")) {
@@ -343,6 +387,46 @@ test("Douyin browser environment uses one exact route-scoped favorite control wi
     error_code: "native_control_not_found",
   });
   assert.equal(ambiguousControls.reduce((sum, control) => sum + control.clicks, 0), 0);
+});
+
+test("Douyin browser environment ignores unrelated recommendation identities on an exact video route", async () => {
+  const exact = domElement({ "data-e2e": "video-favorite" });
+  const unrelated = domElement({ "data-e2e": "video-favorite" });
+  const env = createDouyinBrowserEnvironment(
+    browserDocument([exact], {
+      routeOnlyWithUnrelatedIdentity: true,
+      unrelatedControls: [unrelated],
+    }),
+    task.content_url,
+  );
+  env.sleep = async () => {};
+  assert.deepEqual(await saveDouyin(task, env), { status: "synced" });
+  assert.equal(exact.clicks, 1);
+  assert.equal(unrelated.clicks, 0);
+});
+
+test("Douyin browser environment scopes the current player collect control by exact active-video class", async () => {
+  const exact = domElement({ "data-e2e": "video-player-collect" });
+  const env = createDouyinBrowserEnvironment(
+    browserDocument([exact], { modernActive: true }),
+    `https://www.douyin.com/jingxuan?modal_id=${CONTENT_ID}`,
+  );
+  env.sleep = async () => {};
+  assert.deepEqual(await saveDouyin(task, env), { status: "synced" });
+  assert.equal(exact.clicks, 1);
+});
+
+test("Douyin browser environment recognizes the hydrated collect icon modifier as already selected", async () => {
+  const exact = domElement({ "data-e2e": "video-player-collect" });
+  const icon = domElement({ class: "semi-icon semi-icon-default base-style selected-style" });
+  exact.querySelectorAll = (selector) => selector.includes("span[role='img']") ? [icon] : [];
+  const env = createDouyinBrowserEnvironment(
+    browserDocument([exact], { modernActive: true }),
+    `https://www.douyin.com/jingxuan?modal_id=${CONTENT_ID}`,
+  );
+  env.sleep = async () => {};
+  assert.deepEqual(await saveDouyin(task, env), { status: "already_synced" });
+  assert.equal(exact.clicks, 0);
 });
 
 test("Douyin browser environment ignores hidden controls and fails closed on ambiguity", async () => {

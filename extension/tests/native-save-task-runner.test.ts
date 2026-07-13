@@ -44,6 +44,18 @@ const tokenizedXhsTask: NativeSaveTask = {
   target_label: "小红书收藏",
 };
 
+const douyinTask: NativeSaveTask = {
+  ...task,
+  id: "123e4567-e89b-12d3-a456-426614174002",
+  platform: "douyin",
+  platform_slug: "dy",
+  item_key: "douyin:7300000000000000000",
+  content_id: "7300000000000000000",
+  content_url: "https://www.douyin.com/video/7300000000000000000",
+  content_type: "video",
+  target_label: "抖音收藏",
+};
+
 function tick(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -85,6 +97,78 @@ test("native save runner opens the exact tokenized Xiaohongshu public-note URL",
       { tab: { id: 42, url: tokenizedXhsTask.content_url } },
     );
     await running;
+  } finally {
+    state.restore();
+  }
+});
+
+test("native save runner opens Douyin's exact modal route instead of the anti-bot video shell", async () => {
+  const state = installChromeMock();
+  state.sendMessageImpl = async () => ({ ready: true });
+  try {
+    const running = runNativeSaveTask(douyinTask, "dy", async () => {}, { timeoutMs: 100 });
+    await tick();
+    const executionUrl = "https://www.douyin.com/jingxuan?modal_id=7300000000000000000";
+    assert.deepEqual(state.createdTabs, [{ active: true, url: executionUrl }]);
+    state.emitRuntimeMessage(
+      {
+        type: "NATIVE_SAVE_RESULT",
+        platform: "douyin",
+        task_id: douyinTask.id,
+        item_key: douyinTask.item_key,
+        status: "synced",
+      },
+      { tab: { id: 42, url: executionUrl } },
+    );
+    await running;
+  } finally {
+    state.restore();
+  }
+});
+
+test("native save runner reloads Douyin once for read-only persisted confirmation", async () => {
+  const state = installChromeMock();
+  const posted: NativeSaveResult[] = [];
+  state.sendMessageImpl = async () => ({ ready: true });
+  try {
+    const running = runNativeSaveTask(
+      douyinTask,
+      "dy",
+      async (result) => { posted.push(result); },
+      { timeoutMs: 100 },
+    );
+    await tick();
+    const executionUrl = "https://www.douyin.com/jingxuan?modal_id=7300000000000000000";
+    state.emitRuntimeMessage(
+      {
+        type: "NATIVE_SAVE_RESULT",
+        platform: "douyin",
+        task_id: douyinTask.id,
+        item_key: douyinTask.item_key,
+        status: "failed",
+        error_code: "native_confirmation_not_observed",
+      },
+      { tab: { id: 42, url: executionUrl } },
+    );
+    await tick();
+    assert.deepEqual(state.updatedTabs, [{ tabId: 42, active: true, url: executionUrl }]);
+    assert.equal(
+      (state.sentMessages.at(-1)?.message as { verification_only?: unknown }).verification_only,
+      true,
+    );
+    state.emitRuntimeMessage(
+      {
+        type: "NATIVE_SAVE_RESULT",
+        platform: "douyin",
+        task_id: douyinTask.id,
+        item_key: douyinTask.item_key,
+        status: "already_synced",
+      },
+      { tab: { id: 42, url: executionUrl } },
+    );
+    await running;
+    assert.equal(posted[0]?.status, "already_synced");
+    assert.deepEqual(state.removedTabs, [42]);
   } finally {
     state.restore();
   }

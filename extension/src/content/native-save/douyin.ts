@@ -16,12 +16,18 @@ export interface DouyinNativeSaveEnvironment {
   rateLimitFingerprint(): string;
   requestFavorite(): Promise<DouyinFavoriteRequestResult>;
   findFavoriteControls(contentId: string): DouyinSaveControl[];
+  waitForAccountState(): Promise<void>;
   sleep(ms: number): Promise<void>;
 }
 
-const CONFIRM_ATTEMPTS = 20;
+// Real modal E2E (2026-07-14) kept the collection Lottie mounted beyond 10s;
+// allow 20s for the hydrated selected modifier, without issuing another click.
+const CONFIRM_ATTEMPTS = 200;
 const CONFIRM_INTERVAL_MS = 100;
+const STATE_SETTLE_MS = 15_000;
 const DOUYIN_CONTENT_IDENTITY_SELECTOR = "[data-aweme-id], [data-video-id], [data-content-id]";
+const DOUYIN_CONTROL_OWNER_SELECTOR =
+  `${DOUYIN_CONTENT_IDENTITY_SELECTOR}, [data-e2e='feed-active-video'], [data-e2e='feed-video']`;
 
 function hasNewRateLimit(before: string, after: string): boolean {
   const baseline = new Set(before.split("\n").filter(Boolean));
@@ -33,7 +39,17 @@ function routeId(value: string): string | null {
     const url = new URL(value);
     if (url.protocol !== "https:" || url.username || url.password || url.port || url.hash) return null;
     if (url.hostname !== "douyin.com" && !url.hostname.endsWith(".douyin.com")) return null;
-    return /^\/video\/([A-Za-z0-9_-]+)\/?$/.exec(url.pathname)?.[1] ?? null;
+    const videoId = /^\/video\/([A-Za-z0-9_-]+)\/?$/.exec(url.pathname)?.[1];
+    if (videoId) return url.search === "" ? videoId : null;
+    if (!/^\/jingxuan\/?$/.test(url.pathname)) return null;
+    const modalIds = url.searchParams.getAll("modal_id");
+    let hasOnlyModalId = true;
+    url.searchParams.forEach((_item, key) => {
+      if (key !== "modal_id") hasOnlyModalId = false;
+    });
+    return hasOnlyModalId && modalIds.length === 1 && /^[A-Za-z0-9_-]+$/.test(modalIds[0])
+      ? modalIds[0]
+      : null;
   } catch {
     return null;
   }
@@ -75,6 +91,13 @@ export async function saveDouyin(
   if (!contentReady) return { status: "failed", error_code: "native_content_not_ready" };
   if (!env.isLoggedIn()) return { status: "login_required" };
   if (env.isUnavailable()) return { status: "unsupported", error_code: "unsupported_content_type" };
+  // The modal renders before Douyin hydrates the account-specific collection state.
+  // Waiting for the same 15-second SDK/account window used by the page tap prevents
+  // a previously-collected white placeholder from being clicked and toggled off.
+  await env.waitForAccountState();
+  if (!env.isLoggedIn()) return { status: "login_required" };
+  if (env.isUnavailable()) return { status: "unsupported", error_code: "unsupported_content_type" };
+  if (!env.isContentReady()) return { status: "failed", error_code: "native_content_not_ready" };
   const initial = env.findFavoriteControls(task.content_id);
   if (initial.length !== 1) return { status: "failed", error_code: "native_control_not_found" };
   if (initial[0].isSelected()) return { status: "already_synced" };
@@ -108,6 +131,32 @@ export async function saveDouyin(
     : { status: "failed", error_code: "native_confirmation_not_observed" };
 }
 
+export async function verifyDouyin(
+  task: NativeSaveTask,
+  env: DouyinNativeSaveEnvironment = createDouyinBrowserEnvironment(),
+): Promise<unknown> {
+  if (!isSupported(task, env.currentUrl) || env.isUnavailable()) {
+    return { status: "unsupported", error_code: "unsupported_content_type" };
+  }
+  if (!hasTargetContract(task)) return { status: "failed", error_code: "native_save_failed" };
+  const contentReady = await waitForNativeSaveReadiness(
+    () => !env.isLoggedIn() || env.isUnavailable() || env.isContentReady(),
+    env.sleep,
+  );
+  if (!contentReady) return { status: "failed", error_code: "native_content_not_ready" };
+  if (!env.isLoggedIn()) return { status: "login_required" };
+  if (env.isUnavailable()) return { status: "unsupported", error_code: "unsupported_content_type" };
+  await env.waitForAccountState();
+  if (!env.isLoggedIn()) return { status: "login_required" };
+  if (env.isUnavailable()) return { status: "unsupported", error_code: "unsupported_content_type" };
+  if (!env.isContentReady()) return { status: "failed", error_code: "native_content_not_ready" };
+  const controls = env.findFavoriteControls(task.content_id);
+  if (controls.length !== 1) return { status: "failed", error_code: "native_control_not_found" };
+  return controls[0].isSelected()
+    ? { status: "already_synced" }
+    : { status: "failed", error_code: "native_confirmation_not_observed" };
+}
+
 function isEffectivelyVisible(element: HTMLElement, root: Document): boolean {
   const view = root.defaultView ?? element.ownerDocument?.defaultView;
   let current: HTMLElement | null = element;
@@ -127,14 +176,24 @@ function isEffectivelyVisible(element: HTMLElement, root: Document): boolean {
 }
 
 function selected(element: HTMLElement): boolean {
-  return element.getAttribute("aria-pressed") === "true" ||
+  const explicit = element.getAttribute("aria-pressed") === "true" ||
     element.getAttribute("aria-checked") === "true" ||
     element.getAttribute("data-e2e-state") === "active" ||
     /(?:已收藏|取消收藏)/.test(element.getAttribute("aria-label") ?? element.title ?? element.textContent ?? "");
+  if (explicit) return true;
+  if (element.getAttribute("data-e2e") !== "video-player-collect") return false;
+  const icon = element.querySelectorAll<HTMLElement>("span[role='img']")[0];
+  if (!icon) return false;
+  const modifiers = (icon.getAttribute("class") ?? "")
+    .split(/\s+/)
+    .filter((token) => token && token !== "semi-icon" && token !== "semi-icon-default");
+  return modifiers.length >= 2;
 }
 
 function isExactFavoriteControl(element: HTMLElement): boolean {
-  if (element.getAttribute("data-e2e") === "video-favorite") return true;
+  if (["video-favorite", "video-player-collect"].includes(element.getAttribute("data-e2e") ?? "")) {
+    return true;
+  }
   const label = (
     element.getAttribute("aria-label") ?? element.title ?? element.textContent ?? ""
   ).trim();
@@ -142,6 +201,14 @@ function isExactFavoriteControl(element: HTMLElement): boolean {
 }
 
 function douyinContentContainer(root: Document, contentId: string): HTMLElement | null {
+  const activeCandidates = Array.from(root.querySelectorAll<HTMLElement>(
+    "[data-e2e='feed-active-video']",
+  )).filter((element) => {
+    const classTokens = (element.getAttribute("class") ?? "").split(/\s+/);
+    return classTokens.includes(`video_${contentId}`) && isEffectivelyVisible(element, root);
+  });
+  if (activeCandidates.length === 1) return activeCandidates[0];
+  if (activeCandidates.length > 1) return null;
   const candidates = Array.from(root.querySelectorAll<HTMLElement>(
     DOUYIN_CONTENT_IDENTITY_SELECTOR,
   )).filter((element) => {
@@ -159,12 +226,12 @@ function routeScopedFavoriteControls(
   contentId: string,
 ): HTMLElement[] {
   if (routeId(currentUrl) !== contentId) return [];
-  const visibleIdentityNodes = Array.from(root.querySelectorAll<HTMLElement>(
-    DOUYIN_CONTENT_IDENTITY_SELECTOR,
-  )).filter((element) => isEffectivelyVisible(element, root));
-  if (visibleIdentityNodes.length !== 0) return [];
   return Array.from(root.querySelectorAll<HTMLElement>("[data-e2e='video-favorite']"))
-    .filter((element) => isEffectivelyVisible(element, root) && isExactFavoriteControl(element));
+    .filter((element) => {
+      if (!isEffectivelyVisible(element, root) || !isExactFavoriteControl(element)) return false;
+      const owner = element.closest<HTMLElement>(DOUYIN_CONTROL_OWNER_SELECTOR);
+      return owner === null;
+    });
 }
 
 export function createDouyinBrowserEnvironment(
@@ -201,7 +268,7 @@ export function createDouyinBrowserEnvironment(
       if (!container) return "";
       return Array.from(container.querySelectorAll<HTMLElement>("[role='alert'], [data-e2e='toast'], .toast"))
         .filter((element) =>
-          element.closest(DOUYIN_CONTENT_IDENTITY_SELECTOR) === container &&
+          element.closest(DOUYIN_CONTROL_OWNER_SELECTOR) === container &&
           isEffectivelyVisible(element, root)
         )
         .map((element) => {
@@ -228,9 +295,9 @@ export function createDouyinBrowserEnvironment(
       const container = douyinContentContainer(root, contentId);
       const elements = container
         ? Array.from(container.querySelectorAll<HTMLElement>(
-          "button[aria-label*='收藏'], [role='button'][aria-label*='收藏'], [data-e2e='video-favorite']",
+          "button[aria-label*='收藏'], [role='button'][aria-label*='收藏'], [data-e2e='video-favorite'], [data-e2e='video-player-collect']",
         )).filter((element) =>
-          element.closest(DOUYIN_CONTENT_IDENTITY_SELECTOR) === container &&
+          element.closest(DOUYIN_CONTROL_OWNER_SELECTOR) === container &&
           isEffectivelyVisible(element, root) && isExactFavoriteControl(element)
         )
         : routeScopedFavoriteControls(root, currentUrl, contentId);
@@ -238,6 +305,11 @@ export function createDouyinBrowserEnvironment(
         isSelected: () => selected(element),
         click: () => element.click(),
       }));
+    },
+    waitForAccountState() {
+      const view = root.defaultView;
+      if (!view || typeof view.setTimeout !== "function") return Promise.resolve();
+      return new Promise((resolve) => view.setTimeout(resolve, STATE_SETTLE_MS));
     },
     sleep(ms) {
       return new Promise((resolve) => setTimeout(resolve, ms));
