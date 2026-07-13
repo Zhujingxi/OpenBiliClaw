@@ -566,7 +566,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 - ⚡ **Instant Reshuffle** — ~0.6s per reshuffle; rapid clicks stay snappy
 - 💬 **Warm Recommendations** — friend-like explanations of why you'd enjoy something, not "because you watched similar videos"
 - 🔄 **Continuous Learning** — Socratic dialogue + behavioral analysis + instant feedback; it understands you better over time
-- ⭐ **Local-First Favorites / Watch Later** — cards save to local SQLite first; with explicit consent, Bilibili can sync to the `OpenBiliClaw` favorites folder or Watch Later, while other native-write adapters remain follow-on work
+- ⭐ **Local-First Favorites / Watch Later** — cards save to local SQLite first; with explicit consent, Bilibili can sync to native targets; Reddit/X executors are wired and fixture-tested but not real-account verified; YouTube / Xiaohongshu / Douyin / Zhihu executors remain deferred
 - 🧩 **Browser Extension** — Chrome / Edge / Brave / Arc / Firefox; side-panel recommendations + cross-site behavior collection, install and go
 - 🚀 **Guided Init in the UI** — the packaged `/setup/` wizard, Desktop Web, and the extension can all initialize with one click; no terminal required
 - 🔬 **Self-Optimizing Eval Loops** — five modules each carry an LLM-as-judge loop that improves prompt quality over rounds

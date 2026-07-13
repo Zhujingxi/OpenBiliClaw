@@ -69,11 +69,11 @@ export async function saveX(
     : { status: "failed", error_code: "native_save_failed" };
 }
 
-function tweetArticle(tweetId: string): HTMLElement | null {
-  const links = Array.from(document.querySelectorAll<HTMLAnchorElement>(`a[href*="/status/${tweetId}"]`));
+function tweetArticle(tweetId: string, root: ParentNode = document): HTMLElement | null {
+  const links = Array.from(root.querySelectorAll<HTMLAnchorElement>(`a[href*="/status/${tweetId}"]`));
   const exactLink = links.find((link) => {
     try {
-      const path = new URL(link.href, location.href).pathname;
+      const path = new URL(link.href, "https://x.com/").pathname;
       return path === `/i/status/${tweetId}` || new RegExp(`^/[^/]+/status/${tweetId}/?$`).test(path);
     } catch {
       return false;
@@ -82,31 +82,64 @@ function tweetArticle(tweetId: string): HTMLElement | null {
   return exactLink?.closest<HTMLElement>("article") ?? null;
 }
 
-function browserXEnvironment(): XNativeSaveEnvironment {
+function platformToastState(root: ParentNode): ReadonlyMap<object, string> {
+  return new Map(Array.from(root.querySelectorAll<HTMLElement>("[data-testid='toast']"))
+    .map((element) => [element, element.textContent?.trim() ?? ""]));
+}
+
+function hasNewExplicitRateLimitToast(
+  before: ReadonlyMap<object, string>,
+  after: ReadonlyMap<object, string>,
+): boolean {
+  for (const [element, text] of after) {
+    if (before.get(element) !== text && EXPLICIT_RATE_LIMIT_PATTERN.test(text)) return true;
+  }
+  return false;
+}
+
+export function createXBrowserEnvironment(
+  root: Document = document,
+  currentUrl: string = location.href,
+): XNativeSaveEnvironment {
+  let toastBaseline: ReadonlyMap<object, string> | null = null;
+  let actionRateLimited = false;
+  let currentPath = "";
+  try {
+    currentPath = new URL(currentUrl).pathname;
+  } catch {
+    // supportedTweet will reject the malformed URL before mutation.
+  }
   return {
-    currentUrl: location.href,
+    currentUrl,
     isLoggedIn() {
-      if (/^\/i\/flow\/login/.test(location.pathname)) return false;
-      if (document.querySelector("a[href='/login'], [data-testid='loginButton']")) return false;
-      return Boolean(document.querySelector("[data-testid='SideNav_AccountSwitcher_Button'], a[href='/home']"));
+      if (/^\/i\/flow\/login/.test(currentPath)) return false;
+      if (root.querySelector("a[href='/login'], [data-testid='loginButton']")) return false;
+      return Boolean(root.querySelector("[data-testid='SideNav_AccountSwitcher_Button'], a[href='/home']"));
     },
     isRateLimited(tweetId) {
-      const article = tweetArticle(tweetId);
+      const article = tweetArticle(tweetId, root);
       const adjacent = article
         ? Array.from(article.querySelectorAll<HTMLElement>(
           "[role='alert'], [role='status'], [data-testid='error-detail']",
         ))
         : [];
-      const platformAlerts = Array.from(document.querySelectorAll<HTMLElement>(
-        "[data-testid='toast'], [role='alert'][data-testid], [data-testid='error-detail']",
-      ));
-      return hasExplicitXRateLimitText([...adjacent, ...platformAlerts]);
+      const currentToasts = platformToastState(root);
+      if (toastBaseline === null) {
+        toastBaseline = currentToasts;
+      } else if (hasNewExplicitRateLimitToast(toastBaseline, currentToasts)) {
+        actionRateLimited = true;
+      }
+      return hasExplicitXRateLimitText(adjacent) || actionRateLimited;
     },
     findTweetControl(tweetId, testId) {
-      return tweetArticle(tweetId)?.querySelector<HTMLElement>(`[data-testid="${testId}"]`) ?? null;
+      return tweetArticle(tweetId, root)?.querySelector<HTMLElement>(`[data-testid="${testId}"]`) ?? null;
     },
     sleep(ms) {
       return new Promise((resolve) => setTimeout(resolve, ms));
     },
   };
+}
+
+function browserXEnvironment(): XNativeSaveEnvironment {
+  return createXBrowserEnvironment();
 }

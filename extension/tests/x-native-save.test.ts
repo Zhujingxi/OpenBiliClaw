@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import test from "node:test";
 
 import {
+  createXBrowserEnvironment,
   hasExplicitXRateLimitText,
   saveX,
   type XNativeSaveEnvironment,
@@ -99,4 +100,77 @@ test("X rate detection ignores tweet prose and recognizes structured localized r
   const source = readFileSync(resolve("src/content/native-save/x.ts"), "utf8");
   assert.doesNotMatch(source, /document\.body\?\.innerText|document\.body\.innerText/);
   assert.match(source, /data-testid=['"]toast|role=['"]alert/);
+});
+
+function browserDomFixture(options: {
+  staleToast?: boolean;
+  unrelatedStructuredError?: boolean;
+  newRateToastAfterClick?: boolean;
+} = {}): { document: Document; clicks: () => number } {
+  let bookmarked = false;
+  let clickCount = 0;
+  const staleToast = { textContent: "请求过于频繁，请稍后再试" };
+  const unrelatedError = { textContent: "Rate limit exceeded" };
+  const newToast = { textContent: "操作频繁，请稍后再试" };
+  const toasts: Array<{ textContent: string | null }> = options.staleToast ? [staleToast] : [];
+  const bookmark = {
+    click() {
+      clickCount += 1;
+      if (options.newRateToastAfterClick) toasts.push(newToast);
+      else bookmarked = true;
+    },
+  };
+  const article = {
+    querySelector(selector: string) {
+      if (selector === '[data-testid="bookmark"]') return bookmarked ? null : bookmark;
+      if (selector === '[data-testid="removeBookmark"]') return bookmarked ? bookmark : null;
+      return null;
+    },
+    querySelectorAll(selector: string) {
+      return selector.includes("[role='alert']") ? [] : [];
+    },
+  };
+  const statusLink = {
+    href: task.content_url,
+    closest(selector: string) {
+      return selector === "article" ? article : null;
+    },
+  };
+  const loggedIn = {};
+  const document = {
+    querySelector(selector: string) {
+      if (selector.includes("SideNav_AccountSwitcher_Button")) return loggedIn;
+      return null;
+    },
+    querySelectorAll(selector: string) {
+      if (selector.startsWith('a[href*="/status/')) return [statusLink];
+      if (selector === "[data-testid='toast']") return toasts;
+      if (selector.includes("[role='alert'][data-testid]") || selector.includes("error-detail")) {
+        return [
+          ...toasts,
+          ...(options.unrelatedStructuredError ? [unrelatedError] : []),
+        ];
+      }
+      return [];
+    },
+  } as unknown as Document;
+  return { document, clicks: () => clickCount };
+}
+
+test("X browser save ignores unrelated structured errors and stale global rate toasts", async () => {
+  const dom = browserDomFixture({ staleToast: true, unrelatedStructuredError: true });
+  const env = createXBrowserEnvironment(dom.document, task.content_url);
+  env.sleep = async () => {};
+
+  assert.deepEqual(await saveX(task, env), { status: "synced" });
+  assert.equal(dom.clicks(), 1);
+});
+
+test("X browser save accepts a newly appeared platform rate toast after the target action", async () => {
+  const dom = browserDomFixture({ newRateToastAfterClick: true });
+  const env = createXBrowserEnvironment(dom.document, task.content_url);
+  env.sleep = async () => {};
+
+  assert.deepEqual(await saveX(task, env), { status: "rate_limited" });
+  assert.equal(dom.clicks(), 1);
 });

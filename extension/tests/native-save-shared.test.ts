@@ -247,4 +247,11 @@ test("README prose matches the fixture-tested Reddit and X executor architecture
   assert.match(readmeEn, /Reddit\/X native-save executors are wired.*fixture-tested.*not real-account verified/i);
   assert.match(readmeEn, /Xiaohongshu, Douyin, YouTube, and Zhihu.*remain deferred/i);
   assert.doesNotMatch(readmeEn, /extension only syncs the x\.com cookie and captures engagement/i);
+
+  const coreFeatures = readme.match(/## ✨ 核心特性([\s\S]*?)\n## /)?.[1] ?? "";
+  const keyFeatures = readmeEn.match(/## ✨ Key Features([\s\S]*?)\n## /)?.[1] ?? "";
+  assert.match(coreFeatures, /Reddit\/X.*executor 已接入.*fixture.*未真实账号验证/);
+  assert.match(coreFeatures, /YouTube.*小红书.*抖音.*知乎.*executor 仍待接/);
+  assert.match(keyFeatures, /Reddit\/X.*executors are wired.*fixture-tested.*not real-account verified/i);
+  assert.match(keyFeatures, /YouTube.*Xiaohongshu.*Douyin.*Zhihu.*executors remain deferred/i);
 });
