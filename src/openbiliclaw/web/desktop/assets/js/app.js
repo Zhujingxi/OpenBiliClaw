@@ -505,6 +505,7 @@
     // 当前批次、也到不了「已看完」的干净状态。收到 50px：哨兵几乎贴到视口底部才触发，
     // 最后一行基本看全后再加载下一批。（2026-07-12，用户反馈强迫症体验）
     const AUTO_LOAD_ROOT_MARGIN_PX = 50;
+    const DESKTOP_EAGER_COVER_COUNT = 4;
     state.autoLoadOnScroll = storageGet(AUTO_LOAD_ON_SCROLL_KEY) !== "0";
     const THEME_STORAGE_KEY = "obc.theme";
     const THEME_HUE_STORAGE_KEY = "obc.themeHue";
