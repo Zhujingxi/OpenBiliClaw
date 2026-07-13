@@ -618,6 +618,27 @@
               <button type="button" data-theme-choice="dark">深色</button>
             </div>
           </div>
+          <div class="settings-theme-field settings-hue-field">
+            <span>主题色相</span>
+            <div class="hue-swatches" id="themeHueSetting" role="radiogroup" aria-label="主题色相">
+              <button type="button" data-hue="0"   class="hue-swatch" style="--swatch:oklch(65% 0.16 0)"   title="烈焰红">烈焰红</button>
+              <button type="button" data-hue="30"  class="hue-swatch" style="--swatch:oklch(65% 0.16 30)"  title="珊瑚橙">珊瑚橙</button>
+              <button type="button" data-hue="60"  class="hue-swatch" style="--swatch:oklch(65% 0.16 60)"  title="柠檬黄">柠檬黄</button>
+              <button type="button" data-hue="90"  class="hue-swatch" style="--swatch:oklch(65% 0.16 90)"  title="嫩草绿">嫩草绿</button>
+              <button type="button" data-hue="120" class="hue-swatch" style="--swatch:oklch(65% 0.16 120)" title="薄荷绿">薄荷绿</button>
+              <button type="button" data-hue="150" class="hue-swatch" style="--swatch:oklch(65% 0.16 150)" title="自然绿">自然绿</button>
+              <button type="button" data-hue="180" class="hue-swatch" style="--swatch:oklch(65% 0.16 180)" title="青瓷色">青瓷色</button>
+              <button type="button" data-hue="210" class="hue-swatch" style="--swatch:oklch(65% 0.16 210)" title="极客蓝">极客蓝</button>
+              <button type="button" data-hue="240" class="hue-swatch" style="--swatch:oklch(65% 0.16 240)" title="星空蓝">星空蓝</button>
+              <button type="button" data-hue="270" class="hue-swatch" style="--swatch:oklch(65% 0.16 270)" title="暗夜紫">暗夜紫</button>
+              <button type="button" data-hue="300" class="hue-swatch" style="--swatch:oklch(65% 0.16 300)" title="梦幻紫">梦幻紫</button>
+              <button type="button" data-hue="330" class="hue-swatch" style="--swatch:oklch(65% 0.16 330)" title="元气粉">元气粉</button>
+            </div>
+            <div class="hue-slider-wrap">
+              <input type="range" class="hue-slider" id="hueSlider" min="0" max="360" step="1" value="20" aria-label="色相滑块">
+              <input type="number" class="hue-value" id="hueValueInput" min="0" max="360" value="20" aria-label="色相数值">
+            </div>
+          </div>
           <label class="settings-field full settings-switch-field" title="开启：换一批前先将当前显示的推荐标记为忽略；关闭：只重排当前推荐池，不反馈当前内容。">
             <span>换一批时忽略当前</span>
             <span class="settings-switch-copy">开启：换一批前先将当前显示的推荐标记为忽略；关闭：只重排当前推荐池，不反馈当前内容。</span>

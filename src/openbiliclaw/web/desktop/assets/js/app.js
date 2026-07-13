@@ -508,10 +508,12 @@
     const DESKTOP_EAGER_COVER_COUNT = 4;
     state.autoLoadOnScroll = storageGet(AUTO_LOAD_ON_SCROLL_KEY) !== "0";
     const THEME_STORAGE_KEY = "obc.theme";
+    const THEME_HUE_STORAGE_KEY = "obc.themeHue";
     const THEME_OPTIONS = ["auto", "light", "dark"];
     const THEME_LABELS = { auto: "跟随系统", light: "浅色", dark: "深色" };
     const THEME_GLYPHS = { auto: "◐", light: "☼", dark: "☾" };
     state.themeMode = THEME_OPTIONS.includes(storageGet(THEME_STORAGE_KEY)) ? storageGet(THEME_STORAGE_KEY) : "auto";
+    state.themeHue = parseInt(storageGet(THEME_HUE_STORAGE_KEY), 10) || 20;
     const SIDE_DRAWER_OPEN_KEY = "openbiliclaw.sideDrawerOpen";
     const DELIGHT_QUEUE_LIMIT_KEY = "openbiliclaw.webui.delightQueueLimit";
     const STAR_REPO_URL = "https://github.com/whiteguo233/OpenBiliClaw";
@@ -659,6 +661,7 @@
       const limit = configuredLimit || storageGet(DELIGHT_QUEUE_LIMIT_KEY) || "20";
       setInput("delightQueueLimit", String(limit));
       applyThemeMode(state.themeMode);
+      applyThemeHue(state.themeHue);
       renderReshuffleToggle();
       renderAutoLoadOnScrollToggle();
       syncAutoLoadObserver();
@@ -672,6 +675,7 @@
       storageSet(DISMISS_ON_RESHUFFLE_KEY, state.dismissOnReshuffle ? "1" : "0");
       storageSet(AUTO_LOAD_ON_SCROLL_KEY, state.autoLoadOnScroll ? "1" : "0");
       applyThemeMode(state.themeMode);
+      applyThemeHue(state.themeHue);
       renderReshuffleToggle();
       renderAutoLoadOnScrollToggle();
       syncAutoLoadObserver();
@@ -2111,6 +2115,34 @@
       applyThemeMode(mode);
       if (persist) storageSet(THEME_STORAGE_KEY, state.themeMode);
       if (toast) showToast(`主题已切换为${THEME_LABELS[state.themeMode]}`);
+    }
+    function applyThemeHue(hue = state.themeHue) {
+      state.themeHue = hue;
+      document.documentElement.style.setProperty("--hue-primary", hue);
+    }
+
+    function setThemeHue(hue, { persist = true, toast = false, render = true } = {}) {
+      applyThemeHue(hue);
+      if (render) renderThemeHueControls();
+      if (persist) storageSet(THEME_HUE_STORAGE_KEY, String(state.themeHue));
+      if (toast) {
+        const names = { 20: "暖陶土", 210: "极客蓝", 340: "元气粉", 150: "自然绿", 280: "暗夜紫", 45: "活力橙" };
+        showToast(`主题色相已切换为${names[state.themeHue] || state.themeHue}`);
+      }
+    }
+
+    function renderThemeHueControls() {
+      const hue = state.themeHue || 20;
+      document.querySelectorAll("[data-hue]").forEach((button) => {
+        const isActive = parseInt(button.dataset.hue, 10) === hue;
+        button.classList.toggle("is-active", isActive);
+        button.setAttribute("aria-checked", isActive ? "true" : "false");
+        button.tabIndex = isActive ? 0 : -1;
+      });
+      const slider = $("#hueSlider");
+      if (slider) slider.value = hue;
+      const hueInput = $("#hueValueInput");
+      if (hueInput) hueInput.value = hue;
     }
 
     function cycleThemeMode() {
@@ -6967,6 +6999,17 @@
     safeBind("#themeToggleBtn", "click", cycleThemeMode);
     document.querySelectorAll("[data-theme-choice]").forEach((button) => {
       button.addEventListener("click", () => setThemeMode(button.dataset.themeChoice, { toast: true }));
+    });
+    document.querySelectorAll("[data-hue]").forEach((button) => {
+      button.addEventListener("click", () => setThemeHue(parseInt(button.dataset.hue, 10), { toast: true }));
+    });
+    safeBind("#hueSlider", "input", (event) => {
+      const val = parseInt(event.target.value, 10);
+      setThemeHue(val);
+    });
+    safeBind("#hueValueInput", "change", (event) => {
+      const val = Math.min(360, Math.max(0, parseInt(event.target.value, 10) || 0));
+      setThemeHue(val);
     });
     ["#dismissOnReshuffleToggle", "#dismissOnReshuffleSetting"].forEach((selector) => {
       safeBind(selector, "change", (event) => {
