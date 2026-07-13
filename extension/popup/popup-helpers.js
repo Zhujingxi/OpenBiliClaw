@@ -217,11 +217,18 @@ export function shouldAutoLoadRecommendations({
   );
 }
 
-export function getConnectionBadgeState(online) {
-  if (online) {
+export function getConnectionBadgeState(status) {
+  if (status === "online") {
     return {
       tone: "online",
       label: "已连接",
+    };
+  }
+
+  if (status === "reconnecting") {
+    return {
+      tone: "reconnecting",
+      label: "重连中",
     };
   }
 

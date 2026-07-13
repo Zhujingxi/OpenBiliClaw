@@ -9,6 +9,7 @@
 后端源码走 `backend-v0.3.165`，浏览器插件走 `extension-v0.3.165`，桌面安装包走 `desktop-v0.3.165`。
 
 - **Firefox 正式 XPI 恢复发布**：Firefox manifest 的稳定 Gecko ID 改为 `openbiliclaw-firefox@whiteguo233.github.io`，避开旧 ID 已被其他 AMO 作者占用导致的 403；扩展测试锁定该 ID，发布链路通过当前 AMO 账号做 unlisted 签名并要求产出 `openbiliclaw-extension-v0.3.165-firefox.xpi`，签名失败会直接阻止 release。
+- **扩展连接徽标不再反复横跳**：popup 将 `/api/ping` 可达性与 runtime WebSocket 状态拆成「已连接 / 重连中 / 未连接」三态；断流后先复检 HTTP，后端仍通时保持功能可用并显示「重连中」，只有探活失败才进入离线轮询。revision guard 会丢弃连接恢复后才返回的旧失败结果，主动切换后端地址关闭旧流也不再误报断线。
 
 ## v0.3.164 / extension v0.3.164 / desktop v0.3.164：持续补货、Web 可靠交互与安全对话（2026-07-13）
 
