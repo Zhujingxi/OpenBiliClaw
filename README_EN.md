@@ -189,12 +189,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.163 (2026-07-11)**
+📌 Latest: **v0.3.164 (2026-07-13)**
 
-- **Truthful login status** — PC and Web settings now use only local credentials and extension heartbeats, distinguishing signed-in, unverified, and content-token states without probing platforms.
-- **Automatic Web inventory recovery** — bounded retries recover transient recommendation or runtime-status timeouts without replacing cards already being viewed or appended.
-- **Cold embedding loads are no longer outages** — local Ollama model warm-up timeouts are separated from real failures while guided init still requires a valid embedding.
-- **More accurate preference feedback** — interest and avoidance feedback now applies across fine and broad topics, preserves the real source platform, and uses consistent actions on all three surfaces.
+- **Faster, more reliable recommendation refill** — durable evaluation and copy micro-batches now follow inventory-aware priority controls, preventing long empty-pool stalls after content is consumed.
+- **More responsive Web interactions** — progressive first paint, smooth drawers, container-responsive Delight layouts, and tuned autoload thresholds are covered by real-browser regressions so slow secondary reads do not block primary content.
+- **Consistent Delight and probe state** — drag, card switching, in-flight submission, failure retry, and motion feedback remain coherent across rerenders and client entry points, reducing accidental gestures and duplicate submissions.
+- **Safe, recoverable dialogue failures** — model failures roll back temporary history, persist a safe typed error without learning, and use the same failure semantics across CLI, Web, and OpenClaw.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
