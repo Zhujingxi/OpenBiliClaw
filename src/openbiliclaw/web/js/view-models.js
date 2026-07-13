@@ -482,6 +482,8 @@ export function getDelightUiState(delight, { highlightBvid = "" } = {}) {
   if (!normalized.bvid) {
     return {
       visible: false, highlighted: false, handled: false,
+      show_status: false, show_actions: false,
+      like_pressed: false, like_disabled: false,
       score_label: "", response_tone: "info", response_message: "",
     };
   }
@@ -491,40 +493,50 @@ export function getDelightUiState(delight, { highlightBvid = "" } = {}) {
     score >= 0.65 ? "这条可能会拐到你" :
     "有点出其不意";
   const highlight = normalizeText(highlightBvid) === normalized.bvid;
+  const base = {
+    visible: true,
+    highlighted: highlight,
+    handled: false,
+    show_status: Boolean(normalized.response_message),
+    show_actions: true,
+    like_pressed: false,
+    like_disabled: false,
+    score_label: scoreLabel,
+    response_tone: "info",
+    response_message: normalized.response_message,
+  };
 
   if (normalized.state === "viewed") {
     return {
-      visible: true, highlighted: highlight, handled: true,
-      score_label: scoreLabel, response_tone: "success",
+      ...base, handled: true, show_status: true, show_actions: false,
+      like_disabled: true, response_tone: "success",
       response_message: normalized.response_message || "已打开，阿B 会把这次点击当成强信号。",
     };
   }
   if (normalized.state === "liked") {
     return {
-      visible: true, highlighted: highlight, handled: true,
-      score_label: scoreLabel, response_tone: "success",
+      ...base, show_status: true, show_actions: true,
+      like_pressed: true, like_disabled: true, response_tone: "success",
       response_message: normalized.response_message || "好，这类多来点。",
     };
   }
   if (normalized.state === "rejected") {
     return {
-      visible: true, highlighted: highlight, handled: true,
-      score_label: scoreLabel, response_tone: "info",
+      ...base, handled: true, show_status: true, show_actions: false,
+      like_disabled: true,
       response_message: normalized.response_message || "记下了，这类惊喜先少来点。",
     };
   }
   if (normalized.state === "chatted" || normalized.state === "chatting") {
+    const responseMessage = normalized.response_message
+      || (normalized.state === "chatted" ? "这句已经记下，后面会更会试探。" : "");
     return {
-      visible: true, highlighted: highlight, handled: false,
-      score_label: scoreLabel, response_tone: "info",
-      response_message: normalized.response_message || "这句已经记下，后面会更会试探。",
+      ...base,
+      show_status: Boolean(responseMessage),
+      response_message: responseMessage,
     };
   }
-  return {
-    visible: true, highlighted: highlight, handled: false,
-    score_label: scoreLabel, response_tone: "info",
-    response_message: normalized.response_message,
-  };
+  return base;
 }
 
 /**

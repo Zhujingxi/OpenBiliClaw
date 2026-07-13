@@ -198,7 +198,7 @@ def describe_llm_failure(exc: BaseException) -> str | None:
     (switch models), so it wins over the coarser transient buckets.
     """
     # Lazily imported to avoid a circular import (service imports this module).
-    from openbiliclaw.llm.service import LLMProviderExecutionError
+    from openbiliclaw.llm.service import LLMProviderExecutionError, LLMResponseContentError
 
     seen: set[int] = set()
     current: BaseException | None = exc
@@ -215,13 +215,13 @@ def describe_llm_failure(exc: BaseException) -> str | None:
             marker in message for marker in _LLM_QUOTA_MARKERS
         ):
             rate_limited = True
-        if isinstance(current, LLMTimeoutError) or "timed out" in message:
+        if isinstance(current, LLMTimeoutError | TimeoutError) or "timed out" in message:
             timed_out = True
         if isinstance(current, LLMFallbackError | LLMProviderExecutionError) and (
             "no provider was available" in message
         ):
             no_provider = True
-        if isinstance(current, LLMResponseError):
+        if isinstance(current, LLMResponseError | LLMResponseContentError):
             empty_response = True
         current = current.__cause__ or current.__context__
 
@@ -249,6 +249,13 @@ def describe_llm_failure(exc: BaseException) -> str | None:
     if empty_response:
         return "AI 服务返回了空响应或无法解析的内容；请更换模型或稍后重试。"
     return None
+
+
+def safe_llm_failure_message(exc: BaseException) -> str:
+    """Return actionable LLM failure copy without exposing upstream detail."""
+    return describe_llm_failure(exc) or (
+        "AI 服务暂时不可用；请稍后重试，或检查设置中的模型与网络。"
+    )
 
 
 @dataclass

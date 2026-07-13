@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import mimetypes
 import threading
@@ -19,9 +20,16 @@ sync_playwright = playwright_api.sync_playwright
 pytestmark = pytest.mark.integration
 
 ROOT = Path(__file__).resolve().parents[1]
+ONE_PIXEL_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
-def _recommendations() -> list[dict[str, Any]]:
+def _recommendations(
+    count: int = 3,
+    *,
+    image_backed: bool = False,
+) -> list[dict[str, Any]]:
     return [
         {
             "id": index,
@@ -33,13 +41,44 @@ def _recommendations() -> list[dict[str, Any]]:
             "up_name": f"UP {index}",
             "topic_label": "交互测试",
             "expression": f"第 {index} 张卡片的推荐理由。",
+            "cover_url": (
+                f"https://synthetic.invalid/covers/issue-98-{index}.png" if image_backed else ""
+            ),
         }
-        for index in range(1, 4)
+        for index in range(1, count + 1)
+    ]
+
+
+def _delights() -> list[dict[str, Any]]:
+    return [
+        {
+            "bvid": f"BV1DELIGHT{index}",
+            "content_id": f"BV1DELIGHT{index}",
+            "content_url": f"https://www.bilibili.com/video/BV1DELIGHT{index}",
+            "source_platform": "bilibili",
+            "title": f"惊喜卡片 {index}",
+            "delight_reason": f"第 {index} 张惊喜卡片的推荐理由。",
+            "delight_score": 0.9,
+            "state": "pending",
+        }
+        for index in range(1, 3)
     ]
 
 
 class Issue98Stub:
     def __init__(self) -> None:
+        self.health_delay_seconds = 0.0
+        self.recommendation_delay_seconds = 0.0
+        self.recommendation_reads = 0
+        self.runtime_reads = 0
+        self.runtime_first_delay_seconds = 0.0
+        self.runtime_reread_status = 200
+        self.runtime_reread_received = threading.Event()
+        self.recommendations = _recommendations()
+        self.delights = _delights()
+        self.image_proxy_reads = 0
+        self.append_posts: list[dict[str, Any]] = []
+        self.append_received = threading.Event()
         self.feedback_posts: list[dict[str, Any]] = []
         self.feedback_received = threading.Event()
         self.feedback_delay_seconds = 0.0
@@ -47,6 +86,8 @@ class Issue98Stub:
         self.probe_posts: list[dict[str, Any]] = []
         self.probe_received = threading.Event()
         self.probe_status = 200
+        self.delight_response_status = 200
+        self.delight_response_received = threading.Event()
 
 
 def _json_response(
@@ -61,6 +102,19 @@ def _json_response(
     handler.end_headers()
     with suppress(BrokenPipeError):
         handler.wfile.write(body)
+
+
+def _binary_response(
+    handler: BaseHTTPRequestHandler,
+    payload: bytes,
+    content_type: str,
+) -> None:
+    handler.send_response(200)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Content-Length", str(len(payload)))
+    handler.end_headers()
+    with suppress(BrokenPipeError):
+        handler.wfile.write(payload)
 
 
 @pytest.fixture()
@@ -81,18 +135,38 @@ def issue_98_server() -> tuple[str, Issue98Stub]:
             if path.startswith("/web/assets/"):
                 rel = path.removeprefix("/web/assets/")
                 return self._serve_file(ROOT / "src/openbiliclaw/web/desktop/assets" / rel)
+            if path == "/api/ping":
+                return _json_response(self, {"ok": True})
             if path == "/api/health":
+                if state.health_delay_seconds:
+                    time.sleep(state.health_delay_seconds)
                 return _json_response(self, {"ok": True, "embedding_ready": True})
             if path == "/api/auth/status":
                 return _json_response(self, {"enabled": False, "authenticated": True})
             if path == "/api/recommendations":
-                return _json_response(self, {"items": _recommendations()})
+                state.recommendation_reads += 1
+                if state.recommendation_delay_seconds:
+                    time.sleep(state.recommendation_delay_seconds)
+                return _json_response(self, {"items": state.recommendations})
             if path == "/api/runtime-status":
+                state.runtime_reads += 1
+                runtime_read = state.runtime_reads
+                if runtime_read >= 2:
+                    state.runtime_reread_received.set()
+                if runtime_read == 1 and state.runtime_first_delay_seconds:
+                    time.sleep(state.runtime_first_delay_seconds)
+                if runtime_read >= 2 and state.runtime_reread_status >= 400:
+                    return _json_response(
+                        self,
+                        {"error": "runtime reread failed"},
+                        state.runtime_reread_status,
+                    )
+                available = 30 if runtime_read == 1 else 27
                 return _json_response(
                     self,
                     {
                         "initialized": True,
-                        "pool_available_count": 30,
+                        "pool_available_count": available,
                         "pool_size": 30,
                         "pool_refresh_state": "idle",
                         "pool_source_shares": {"bilibili": 1.0},
@@ -100,6 +174,9 @@ def issue_98_server() -> tuple[str, Issue98Stub]:
                         "unread_count": 0,
                     },
                 )
+            if path == "/api/image-proxy":
+                state.image_proxy_reads += 1
+                return _binary_response(self, ONE_PIXEL_PNG, "image/png")
             if path == "/api/init-status":
                 return _json_response(
                     self,
@@ -159,7 +236,9 @@ def issue_98_server() -> tuple[str, Issue98Stub]:
                     self,
                     {"items": [], "has_more": False, "next_cursor": ""},
                 )
-            if path in {"/api/delight/pending-batch", "/api/notifications/pending"}:
+            if path == "/api/delight/pending-batch":
+                return _json_response(self, {"items": state.delights})
+            if path == "/api/notifications/pending":
                 return _json_response(self, {"items": []})
             if path == "/api/chat/turns":
                 return _json_response(self, {"items": []})
@@ -175,6 +254,10 @@ def issue_98_server() -> tuple[str, Issue98Stub]:
                 payload = json.loads(raw.decode("utf-8") or "{}")
             except json.JSONDecodeError:
                 payload = {}
+            if path == "/api/recommendations/append":
+                state.append_posts.append(payload)
+                state.append_received.set()
+                return _json_response(self, {"items": []})
             if path == "/api/feedback":
                 state.feedback_posts.append(payload)
                 state.feedback_received.set()
@@ -197,6 +280,13 @@ def issue_98_server() -> tuple[str, Issue98Stub]:
                         ),
                     },
                     state.probe_status,
+                )
+            if path == "/api/delight/respond":
+                state.delight_response_received.set()
+                return _json_response(
+                    self,
+                    {"ok": state.delight_response_status < 400},
+                    state.delight_response_status,
                 )
             return _json_response(self, {"ok": True})
 
@@ -274,6 +364,179 @@ def _card_position(card: Any) -> tuple[float, float]:
 def _assert_position_stable(actual: tuple[float, float], expected: tuple[float, float]) -> None:
     assert actual[0] == pytest.approx(expected[0], abs=2.0)
     assert actual[1] == pytest.approx(expected[1], abs=2.0)
+
+
+def _rect(locator: Any) -> dict[str, float]:
+    return locator.evaluate(
+        """el => { const r = el.getBoundingClientRect();
+        return {left: r.left, right: r.right, top: r.top, width: r.width}; }"""
+    )
+
+
+def _start_horizontal_drag(page: Page, locator: Any, delta_x: int) -> None:
+    box = locator.bounding_box()
+    assert box is not None
+    x = box["x"] + box["width"] / 2
+    y = box["y"] + box["height"] / 2
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x + delta_x, y)
+
+
+def _drag_horizontally(page: Page, locator: Any, delta_x: int) -> None:
+    _start_horizontal_drag(page, locator, delta_x)
+    page.mouse.up()
+
+
+def _load_desktop_with_closed_drawer(
+    page: Page,
+    base_url: str,
+    *,
+    width: int,
+) -> None:
+    page.set_viewport_size({"width": width, "height": 900})
+    page.add_init_script("window.localStorage.setItem('openbiliclaw.sideDrawerOpen', '0')")
+    page.goto(f"{base_url}/web/")
+    expect(page.locator("#delightCount")).to_have_text("1/2")
+
+
+def _delight_geometry(page: Page) -> dict[str, Any]:
+    return page.evaluate(
+        """() => {
+          const layout = document.querySelector('.layout').getBoundingClientRect();
+          const delight = document.querySelector('#delightBanner').getBoundingClientRect();
+          return {
+            layoutRight: layout.right,
+            delightRight: delight.right,
+            docClient: document.documentElement.clientWidth,
+            docScroll: document.documentElement.scrollWidth,
+            columns: getComputedStyle(document.querySelector('#delightBanner')).gridTemplateColumns,
+          };
+        }"""
+    )
+
+
+def _assert_delight_fits_available_width(geometry: dict[str, Any]) -> None:
+    assert geometry["delightRight"] <= geometry["layoutRight"] + 1
+    assert geometry["docScroll"] <= geometry["docClient"] + 1
+
+
+def test_liked_delight_keeps_nonduplicate_desktop_actions_available(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = issue_98_server
+    stub.delights = [
+        {
+            **stub.delights[0],
+            "state": "liked",
+            "response_message": "好，这类多来点。",
+        }
+    ]
+
+    chromium_page.goto(f"{base_url}/web/")
+    expect(chromium_page.locator("#delightCount")).to_have_text("1/1")
+    expect(chromium_page.locator("#delightStatus")).to_contain_text("好，这类多来点。")
+    like = chromium_page.locator('[data-delight="like"]')
+    expect(like).to_have_attribute("aria-pressed", "true")
+    expect(like).to_be_disabled()
+    for action in ("view", "dislike", "dismiss", "watch-later", "favorite", "chat"):
+        expect(chromium_page.locator(f'[data-delight="{action}"]')).to_be_enabled()
+
+
+def test_failed_desktop_delight_like_restores_unselected_action(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = issue_98_server
+    stub.delight_response_status = 500
+    chromium_page.goto(f"{base_url}/web/")
+    like = chromium_page.locator('[data-delight="like"]')
+
+    like.click()
+    assert stub.delight_response_received.wait(timeout=2)
+    expect(like).to_have_attribute("aria-pressed", "false")
+    expect(like).to_be_enabled()
+    expect(chromium_page.locator("#delightStatus")).to_have_text("")
+
+
+def test_side_drawer_aria_and_flex_allocation_stay_synchronized(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, _ = issue_98_server
+    _load_desktop_with_closed_drawer(chromium_page, base_url, width=860)
+
+    button = chromium_page.locator("#sideDrawerBtn")
+    drawer = chromium_page.locator("#sideDrawer")
+    layout = chromium_page.locator(".layout")
+    expect(button).to_have_attribute("aria-expanded", "false")
+    expect(drawer).to_have_attribute("aria-hidden", "true")
+    closed_width = _rect(layout)["width"]
+    button.click()
+    expect(button).to_have_attribute("aria-expanded", "true")
+    expect(drawer).to_have_attribute("aria-hidden", "false")
+    chromium_page.wait_for_timeout(400)
+    assert _rect(layout)["width"] < closed_width
+
+
+@pytest.mark.parametrize("delta_x", [9, 10, 49, 50])
+def test_delight_drag_and_switch_thresholds_in_chromium(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+    delta_x: int,
+) -> None:
+    base_url, _ = issue_98_server
+    _load_desktop_with_closed_drawer(chromium_page, base_url, width=1440)
+    banner = chromium_page.locator("#delightBanner")
+    count = chromium_page.locator("#delightCount")
+
+    if delta_x in {9, 10}:
+        _start_horizontal_drag(chromium_page, banner, -delta_x)
+        classes = (banner.get_attribute("class") or "").split()
+        if delta_x == 9:
+            assert "is-dragging" not in classes
+        else:
+            assert "is-dragging" in classes
+        chromium_page.mouse.up()
+    else:
+        _drag_horizontally(chromium_page, banner, -delta_x)
+
+    if delta_x < 50:
+        expect(count).to_have_text("1/2")
+    else:
+        expect(count).to_have_text("2/2")
+
+
+def test_delight_uses_available_layout_width_without_horizontal_overflow(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, _ = issue_98_server
+    _load_desktop_with_closed_drawer(chromium_page, base_url, width=860)
+
+    closed_geometry = _delight_geometry(chromium_page)
+    _assert_delight_fits_available_width(closed_geometry)
+
+    chromium_page.locator("#sideDrawerBtn").click()
+    chromium_page.wait_for_timeout(400)
+    open_geometry = _delight_geometry(chromium_page)
+    _assert_delight_fits_available_width(open_geometry)
+    assert len(str(open_geometry["columns"]).split()) == 1
+
+
+def test_delight_keeps_two_columns_when_wide_and_drawer_is_closed(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, _ = issue_98_server
+    _load_desktop_with_closed_drawer(chromium_page, base_url, width=1440)
+
+    geometry = _delight_geometry(chromium_page)
+    _assert_delight_fits_available_width(geometry)
+    tracks = str(geometry["columns"]).split()
+    assert len(tracks) == 2
+    assert all(track.endswith("px") for track in tracks)
 
 
 def test_recommendation_feedback_is_immediate_stable_and_undoable(
@@ -367,6 +630,96 @@ def test_recommendations_and_runtime_recover_without_leaving_init_gate(
     assert request_counts["runtime"] >= 3
 
 
+def test_fast_recommendations_render_before_slow_health_and_runtime_reconciles(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = issue_98_server
+    stub.health_delay_seconds = 4.0
+    chromium_page.goto(f"{base_url}/web/", wait_until="domcontentloaded")
+
+    expect(chromium_page.locator("#videoGrid .video-card")).to_have_count(3, timeout=1500)
+    expect(chromium_page.locator("#poolAvailable")).to_contain_text("27", timeout=3000)
+    assert stub.recommendation_reads == 1
+    assert stub.runtime_reads >= 2
+
+
+def test_runtime_reread_does_not_wait_for_slow_initial_runtime(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = issue_98_server
+    stub.runtime_first_delay_seconds = 4.0
+    chromium_page.goto(f"{base_url}/web/", wait_until="domcontentloaded")
+
+    assert stub.runtime_reread_received.wait(timeout=1.5), (
+        f"runtime reread did not start: recommendations={stub.recommendation_reads}, "
+        f"runtime={stub.runtime_reads}"
+    )
+    expect(chromium_page.locator("#videoGrid .video-card")).to_have_count(3, timeout=500)
+    expect(chromium_page.locator("#poolAvailable")).to_contain_text("27", timeout=3000)
+    assert stub.runtime_reads >= 2
+
+
+def test_delayed_recommendations_schedule_autoload_after_failed_runtime_reread(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = issue_98_server
+    stub.recommendation_delay_seconds = 0.8
+    stub.runtime_reread_status = 500
+    chromium_page.set_viewport_size({"width": 1440, "height": 2200})
+    chromium_page.goto(f"{base_url}/web/", wait_until="domcontentloaded")
+
+    cards = chromium_page.locator("#videoGrid .video-card")
+    expect(cards).to_have_count(3, timeout=3000)
+    assert stub.runtime_reread_received.wait(timeout=1.5)
+    assert chromium_page.evaluate(
+        """() => {
+          const sentinel = document.getElementById('loadMoreSentinel');
+          const rect = sentinel.getBoundingClientRect();
+          return rect.top <= window.innerHeight + 50 && rect.bottom >= -50;
+        }"""
+    )
+
+    assert stub.append_received.wait(timeout=1.5), (
+        "recommendation render did not re-check auto-load geometry"
+    )
+    assert stub.append_posts == [{"excluded_bvids": ["BV1ISSUE981", "BV1ISSUE982", "BV1ISSUE983"]}]
+
+
+def test_recommendation_cover_requests_are_bounded_before_scroll(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = issue_98_server
+    stub.recommendations = _recommendations(80, image_backed=True)
+    unexpected_upstream_requests: list[str] = []
+
+    def block_synthetic_upstream(route: Any) -> None:
+        unexpected_upstream_requests.append(route.request.url)
+        route.abort()
+
+    chromium_page.route("https://synthetic.invalid/**", block_synthetic_upstream)
+    chromium_page.goto(f"{base_url}/web/", wait_until="domcontentloaded")
+
+    cards = chromium_page.locator("#videoGrid .video-card")
+    expect(cards).to_have_count(80)
+    for index in range(4):
+        expect(cards.nth(index).locator("img")).to_have_attribute("loading", "eager")
+        expect(cards.nth(index).locator("img")).to_have_attribute("fetchpriority", "high")
+    for index in range(4, 80):
+        expect(cards.nth(index).locator("img")).to_have_attribute("loading", "lazy")
+        expect(cards.nth(index).locator("img")).to_have_attribute("fetchpriority", "low")
+    for index in range(80):
+        src = cards.nth(index).locator("img").evaluate("image => image.src")
+        assert src.startswith(f"{base_url}/api/image-proxy?")
+
+    chromium_page.wait_for_timeout(400)
+    assert unexpected_upstream_requests == []
+    assert 4 <= stub.image_proxy_reads < 80
+
+
 def test_interest_and_avoidance_probe_actions_are_immediate_and_undoable(
     issue_98_server: tuple[str, Issue98Stub],
     chromium_page: Page,
@@ -411,7 +764,7 @@ def test_interest_and_avoidance_probe_actions_are_immediate_and_undoable(
             "message": "",
         }
     ]
-    expect(avoidance).to_contain_text("作为避雷方向")
+    expect(avoidance).to_contain_text("已确认避雷「标题党」")
 
     stub.probe_status = 500
     stub.probe_received.clear()
@@ -420,3 +773,19 @@ def test_interest_and_avoidance_probe_actions_are_immediate_and_undoable(
     assert stub.probe_received.wait(timeout=2)
     expect(interest_row.locator('[data-spec-response="reject"]')).to_be_visible()
     expect(chromium_page.locator("#toastContainer .toast-item").first).to_contain_text("已恢复")
+
+
+def test_committed_probe_toast_names_its_domain(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = issue_98_server
+    chromium_page.goto(f"{base_url}/web/")
+
+    chromium_page.locator("#messagesBtn").click()
+    interest = chromium_page.locator("#messagesDrawer .message-item.is-interest-probe")
+    expect(interest).to_have_count(1)
+    interest.locator('[data-probe="confirm"]').click()
+
+    assert stub.probe_received.wait(timeout=3)
+    expect(chromium_page.locator("#toastContainer .toast-item").first).to_contain_text("系统设计")

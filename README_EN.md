@@ -608,6 +608,11 @@ background ─ background admission (default 3) ──────┘
 │ API/OpenClaw startup hook → recover/maintain → expose LLM │
 │   Unified admission · SQLite (events · pool · recs)│
 └────────────────────────────────────────────────┘
+
+Web / CLI / OpenClaw → SocraticDialogue → success: user+agent history → background learning
+                                      └failure/timeout: rollback provisional history → safe error / failed turn
+
+Desktop startup: recommendation hydration │ runtime hydration │ secondary health/profile/activity/config hydration (independent)
 ```
 
 Remote extension access uses explicit, default-off device authentication: `ext-key generate` → digest-only backend config → `/api/auth/extension-token` short session. HTTP uses a Bearer header; only WebSocket and image proxy URLs carry the short session query.

@@ -1619,6 +1619,20 @@ function connectRuntimeStream() {
       ) {
         setHint(String(event.message || ""), "success");
       }
+      if (event.type === "delight.liked") {
+        const data = event.data || event;
+        const bvid = String(data.bvid || data.domain || event.bvid || event.domain || "");
+        const index = state.activeDelights.findIndex((item) => item?.bvid === bvid);
+        if (index >= 0) {
+          state.activeDelights[index] = {
+            ...state.activeDelights[index],
+            state: "liked",
+            response_message: String(data.message || event.message || "好，这类多来点。"),
+          };
+          syncDelightHead();
+          renderDelightSlot();
+        }
+      }
       // Live guided-init progress (gui-init F1): drive the recommend-tab
       // progress bar from the run's stage events.
       if (event.type === "init_progress" || event.type === "init_failed") {
@@ -2759,6 +2773,17 @@ function expandDelightChat(itemEl, delight) {
       });
       const ca = itemEl.querySelector(".message-chat-area");
       if (ca) ca.remove();
+      const showFailure = (nextTurn) => {
+        thinking.remove();
+        const errorEl = document.createElement("div");
+        errorEl.className = "message-chat-reply";
+        errorEl.textContent = nextTurn.error || "刚刚没发出去，换个说法再试试。";
+        itemEl.append(errorEl);
+        sendBtn.disabled = false;
+        if (actions) actions.hidden = false;
+        applyTurnToMessage(nextTurn);
+        applyTurnToDelight(nextTurn);
+      };
       const showReply = (nextTurn) => {
         thinking.remove();
         const replyEl = document.createElement("div");
@@ -2769,14 +2794,21 @@ function expandDelightChat(itemEl, delight) {
         applyTurnToMessage(nextTurn);
         applyTurnToDelight(nextTurn);
       };
+      const settleTurn = (nextTurn) => {
+        if (nextTurn.status === "failed") {
+          showFailure(nextTurn);
+          return;
+        }
+        if (nextTurn.status === "completed") showReply(nextTurn);
+      };
       if (turn.status === "completed" || turn.status === "failed") {
-        showReply(turn);
+        settleTurn(turn);
       } else {
         applyTurnToMessage(turn);
         pollChatTurnUntilSettled(turn.turn_id, {
           onUpdate(nextTurn) {
             if (nextTurn.status === "completed" || nextTurn.status === "failed") {
-              showReply(nextTurn);
+              settleTurn(nextTurn);
             }
           },
         });
@@ -2875,8 +2907,12 @@ function createChatThinkingPlaceholder(label) {
 async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.probe") {
   const message = input.value.trim();
   if (!message) return;
+  const chatArea = input.closest(".message-chat-area");
+  if (!chatArea || !input.isConnected || !sendBtn.isConnected) return;
   const isAvoidance = isAvoidanceProbeType(type);
 
+  chatArea.querySelector(".message-chat-reply.is-error")?.remove();
+  input.disabled = true;
   sendBtn.disabled = true;
   const turnId = createClientTurnId(isAvoidance ? "avoidance_probe" : "probe");
   rememberHandledProbe(domain, type);
@@ -2898,12 +2934,24 @@ async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.p
       message,
     });
 
-    // Remove chat area, show result, then remove card after delay
-    const chatArea = itemEl.querySelector(".message-chat-area");
-    if (chatArea) chatArea.remove();
+    // Completed turns remove the card after showing the reply. Failed turns
+    // restore the handled/retry state and keep the card visible.
+    const showFailure = (nextTurn) => {
+      forgetHandledProbe(domain, type);
+      thinking.remove();
+      input.disabled = false;
+      sendBtn.disabled = false;
+      const errorEl = document.createElement("div");
+      errorEl.className = "message-chat-reply is-error";
+      errorEl.textContent = nextTurn.error || "刚刚没发出去，换个说法再试试。";
+      chatArea.append(errorEl);
+      applyTurnToMessage(nextTurn);
+      input.focus();
+    };
 
     const showReply = (nextTurn) => {
       thinking.remove();
+      chatArea.remove();
       const replyEl = document.createElement("div");
       replyEl.className = "message-chat-reply";
       replyEl.textContent =
@@ -2917,14 +2965,22 @@ async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.p
       }, 4000);
     };
 
+    const settleTurn = (nextTurn) => {
+      if (nextTurn.status === "failed") {
+        showFailure(nextTurn);
+        return;
+      }
+      if (nextTurn.status === "completed") showReply(nextTurn);
+    };
+
     if (turn.status === "completed" || turn.status === "failed") {
-      showReply(turn);
+      settleTurn(turn);
     } else {
       applyTurnToMessage(turn);
       pollChatTurnUntilSettled(turn.turn_id, {
         onUpdate(nextTurn) {
           if (nextTurn.status === "completed" || nextTurn.status === "failed") {
-            showReply(nextTurn);
+            settleTurn(nextTurn);
           }
         },
       });
@@ -2933,12 +2989,14 @@ async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.p
     console.error("Inline chat failed:", err);
     forgetHandledProbe(domain, type);
     thinking.remove();
+    input.disabled = false;
     sendBtn.disabled = false;
     // Show error hint inline
     const errEl = document.createElement("div");
-    errEl.className = "message-chat-reply";
+    errEl.className = "message-chat-reply is-error";
     errEl.textContent = "\u540E\u53F0\u6B63\u5FD9\uFF0C\u7B49\u4E00\u4E0B\u518D\u804A\u3002";
-    itemEl.append(errEl);
+    chatArea.append(errEl);
+    input.focus();
     setTimeout(() => errEl.remove(), 3000);
   }
 }
@@ -4297,7 +4355,7 @@ function renderChatTurn(turn) {
     return;
   }
   if (status === "failed") {
-    const message = turn.reply || "刚刚没发出去，换个说法再试试。";
+    const message = turn.error || "刚刚没发出去，换个说法再试试。";
     if (assistantPart instanceof HTMLElement) {
       replaceChatThinkingPlaceholder(assistantPart, message);
     } else {
@@ -4614,8 +4672,6 @@ function renderDelightSlot() {
   }
 
   const delight = head;
-  const isHandled = uiState.handled;
-  const isChatting = delight.state === "chatting";
   const isExpanded = Boolean(delight.expanded);
 
   // Banner with thumbnail. Collapsed = ~64px row showing thumbnail +
@@ -4748,7 +4804,7 @@ function renderDelightSlot() {
       body.append(reason);
     }
 
-    if (uiState.response_message) {
+    if (uiState.show_status) {
       const response = document.createElement("p");
       response.className = "delight-banner-response";
       response.dataset.tone = uiState.response_tone;
@@ -4817,6 +4873,9 @@ function renderDelightSlot() {
           await respondToDelight(delight.bvid, "like", delight.title);
         } catch (err) {
           console.error("Delight like failed:", err);
+          setHint("这次喜欢还没记上，可以再试一次。", "error");
+          renderDelightSlot();
+          return;
         }
         setHint("好，这类多来点。", "success");
         updateDelightHead({
@@ -4828,6 +4887,8 @@ function renderDelightSlot() {
         renderDelightSlot();
       },
     );
+    likeButton.setAttribute("aria-pressed", uiState.like_pressed ? "true" : "false");
+    likeButton.disabled = uiState.like_disabled;
 
     const rejectButton = createActionButton(
       "不感兴趣",
@@ -4886,11 +4947,6 @@ function renderDelightSlot() {
       return btn;
     })();
 
-    if (isHandled || isChatting) {
-      rejectButton.disabled = true;
-      likeButton.disabled = true;
-    }
-
     actions.append(
       openButton,
       likeButton,
@@ -4899,7 +4955,9 @@ function renderDelightSlot() {
       rejectButton,
       chatButton,
     );
-    body.append(actions);
+    if (uiState.show_actions) {
+      body.append(actions);
+    }
 
     if (delight.composer_open) {
       const composer = document.createElement("div");

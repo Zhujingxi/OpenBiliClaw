@@ -359,7 +359,7 @@
     .pill-btn.primary { border-color: var(--accent); background: var(--accent); color: var(--accent-on); }
     .pill-btn.dark { background: var(--fg); color: var(--surface); border-color: var(--fg); }
     .badge-dot { display: inline-flex; width: 9px; height: 9px; border-radius: var(--radius-pill); background: var(--success); margin-right: var(--space-2); }
-    .layout { flex: 1; min-width: 0; padding: var(--space-6) var(--page-gutter) var(--section-y-tablet); }
+    .layout { flex: 1; min-width: 0; padding: var(--space-6) var(--page-gutter) var(--section-y-tablet); container-type: inline-size; container-name: desktop-main; }
     body.chat-page-open { overflow-y: hidden; }
     body.chat-page-open .layout { height: calc(100vh - var(--topbar-height)); padding-block: var(--space-6); overflow: hidden; }
     .main-col { min-width: 0; }
@@ -932,6 +932,46 @@
     .mobile-summary-card .profile-chip-row:empty { display: none; }
     .mobile-summary-card .profile-chip-row .chip { max-width: 100%; white-space: normal; overflow-wrap: anywhere; padding: 3px 7px; font-size: 13px; color: var(--fg-2); background: var(--surface); border-color: var(--border-soft); }
     .mobile-summary-card .activity-list { margin-top: 0; }
+
+    /* Delight follows the flex-allocated main width while viewport queries keep
+       navigation ownership. Geometry calibration: 700px fits both card columns,
+       620px fits the action row, and 430px triggers the narrow composition. */
+    @container desktop-main (max-width: 700px) {
+      .delight { grid-template-columns: 1fr; }
+      .delight-body { align-items: start; }
+      .delight-actions { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
+      .delight-main-actions { flex-basis: 212px; grid-template-columns: 116px 88px; }
+      .delight-feedback-actions { width: 128px; }
+    }
+    @container desktop-main (max-width: 620px) {
+      .delight-actions { flex-wrap: wrap; justify-content: stretch; }
+      .delight-main-actions { flex: 1 1 212px; grid-template-columns: minmax(116px, 1fr) 88px; }
+      .delight-feedback-actions { flex: 0 0 128px; margin-left: auto; }
+    }
+    @container desktop-main (max-width: 430px) {
+      .delight { padding: 20px; border-radius: 22px; }
+      .delight-meta { align-items: center; flex-direction: row; }
+      .delight-queue-tools { justify-content: end; margin-left: auto; }
+      .delight-actions { flex-direction: row; flex-wrap: nowrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
+      .delight-actions.is-composing { gap: 0; }
+      .delight-main-actions { order: 2; flex: 1 1 auto; grid-template-columns: minmax(72px, .82fr) minmax(76px, .88fr); gap: 6px; transition: none; }
+      .delight-feedback-actions.card-feedback-icons { order: 1; flex: 0 0 auto; width: auto; max-width: none; height: 40px; min-height: 40px; margin-left: 0; align-self: center; justify-content: center; padding: 3px 8px; transition: none; }
+      .delight-actions .delight-main-actions .small-btn,
+      .delight-actions .delight-main-actions [data-delight="view"],
+      .delight-actions .delight-main-actions .comment-field,
+      .delight-actions .delight-main-actions .chat-action,
+      .delight-actions .delight-feedback-actions.card-feedback-icons { transition: none; }
+      .delight-main-actions .small-btn { width: 100%; padding-inline: 10px; }
+      .delight-main-actions [data-delight="view"] { padding-inline: 10px; }
+      .delight-actions.is-composing .delight-feedback-actions.card-feedback-icons { display: none; }
+      .delight-main-actions.is-composing { flex: 1 1 auto; grid-template-columns: minmax(0, 1fr) 38px 38px; align-items: center; min-height: 38px; }
+      .delight-main-actions.is-composing .comment-field { grid-column: 1; grid-row: 1; align-self: center; }
+      .delight-main-actions.is-composing .comment-field input { height: 38px; }
+      .delight-main-actions.is-composing .composer-cancel { display: inline-flex; grid-column: 2; grid-row: 1; width: 38px; min-width: 38px; padding: 0; align-self: center; background: var(--surface); border-color: var(--border-soft); color: var(--fg-2); font-size: 22px; line-height: 1; }
+      .delight-main-actions.is-composing .chat-action { grid-column: 3; grid-row: 1; width: 38px; min-width: 38px; align-self: center; }
+      .delight-main-actions.is-composing .small-btn { width: auto; min-height: 38px; }
+      .delight-feedback-actions .feedback-icon-btn { flex: 0 0 26px; width: 26px; height: 26px; min-height: 26px; }
+    }
 
     @media (max-width: 1180px) {
       .topbar { grid-template-columns: minmax(180px, auto) minmax(220px, 1fr) auto; }

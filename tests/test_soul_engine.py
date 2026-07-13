@@ -192,9 +192,9 @@ async def test_init_cognition_context_is_ephemeral_and_feeds_profile_build(
         events: list[dict[str, object]],
         existing_preference: dict[str, object],
         event_chunk_size: int = 0,
-        **_: object,
+        progress_callback: object | None = None,
     ) -> dict[str, object]:
-        del events, existing_preference, event_chunk_size
+        del events, existing_preference, event_chunk_size, progress_callback
         return {
             "interests": [{"name": "AI 工具链", "category": "科技", "weight": 0.81}],
             "style": {},

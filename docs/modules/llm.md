@@ -25,6 +25,7 @@
 | 2.3 Prompt 管理与 Service | ✅ | Prompt 构建器 + LLMService 门面 |
 | v0.3.164+ OpenAI-compatible JSON-object 合约 | ✅ | `LLMService.complete_structured_task()` 与 `complete_multimodal_structured_task()` 共享最小兼容层：已有大写 `JSON` 仅归一为小写 `json`；完全没有该 token 时只追加 `json`。这满足部分 OpenAI-compatible 端点对 `response_format=json_object` 的字面消息约束，不改变业务规则、画像、阈值、user 内容或 core-memory 排序；非结构化 `complete_with_core_memory()` 完全不改写 prompt。 |
 | v0.3.162+ LLM 失败可操作说明 | ✅ | `llm.base.describe_llm_failure()` 沿异常 cause/context 链翻译上层错误；新增 authentication / unauthorized / invalid API key / 401 鉴权桶，并将 insufficient quota / quota / exhausted / 429 归入「额度用尽或被限流」桶，API 与 CLI 继续消费同一函数，不新增 init reason code |
+| v0.3.164 LLM 失败安全边界 | ✅ | `describe_llm_failure()` 识别 moderation、鉴权、额度/限流、provider/service 超时与空响应；`safe_llm_failure_message()` 为 API / CLI / OpenClaw 的公共边界提供固定安全兜底，未知异常不回传上游文本 |
 | v0.3.160+ Discovery 统一评估契约 | ✅ | 单条与 batch 内容评估 prompt 仅允许 `explore` 保留主题距离例外；`search` / `trending` / `hot` / `feed` / `related_chain` / `channel` / `creator` 及所有平台不得获得基础分、自动加分、较低门槛或事后画像关联，明显不匹配内容允许低于 admission 门槛 |
 | 4.5 核心记忆加载 | ✅ | 统一 core memory 注入入口，覆盖 Soul 全链路 |
 | v0.3.149+ 关键词合并 prompt 探索 block | ✅ | `build_merged_keywords_prompt()` 支持可选 `explore_domains_block`，只在 runtime 判断 B 站 explore refresh 到期 / 即将到期且有补货空间时追加；system prompt 明确这些 query 是探索性 B 站搜索方向，不应把常规兴趣关键词换皮成 explore。`parse_merged_keywords_with_presence_and_explore_domains()` 在保留平台关键词 decline / omission 语义的同时清洗 `explore_domains` |
@@ -334,7 +335,10 @@ LLMServiceError           # Service 层基类
 └── LLMProviderExecutionError  # Provider 调用失败
 ```
 
-`openbiliclaw.llm.base.describe_llm_failure(exc)` 返回面向用户的中文错因，未识别时返回 `None`。v0.3.162+ 的特异性顺序为 moderation → auth → quota/rate-limit → timeout / provider / empty response，避免 401 或配额耗尽被降级成泛化不可用。
+`openbiliclaw.llm.base.describe_llm_failure(exc)` 返回面向用户的中文错因，未识别时返回 `None`。特异性顺序为 moderation → auth → quota/rate-limit → timeout / provider / empty response，避免 401 或配额耗尽被降级成泛化不可用。
+
+- `describe_llm_failure(exc) -> str | None`：识别 moderation、鉴权、额度/限流、超时、provider 全部不可用、provider/service 空响应。
+- `safe_llm_failure_message(exc) -> str`：公共边界使用；未知异常退化为固定安全提示，不回传上游异常文本。
 
 ## 配置项
 

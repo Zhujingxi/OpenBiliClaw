@@ -63,6 +63,7 @@ class SocraticDialogue:
         self._llm_service = llm_service
         self._session = session
         self._history: list[DialogueTurn] = []
+        self._respond_lock = asyncio.Lock()
         self._tools = tools or []
         self._tool_dispatcher = tool_dispatcher
         self._module_overrides = dict(module_overrides) if module_overrides is not None else None
@@ -83,43 +84,44 @@ class SocraticDialogue:
         Returns:
             Agent's response.
         """
-        from openbiliclaw.llm.service import LLMServiceError
+        async with self._respond_lock:
+            history_length = len(self._history)
+            self._history.append(DialogueTurn(role="user", content=user_message))
 
-        self._history.append(DialogueTurn(role="user", content=user_message))
+            try:
+                service = self._llm_service or self._build_service()
 
-        try:
-            service = self._llm_service or self._build_service()
-
-            # If tools are configured, try tool-calling path first
-            if self._tools and self._tool_dispatcher:
-                reply = await self._respond_with_tools(service, user_message)
-            else:
-                response = await service.complete_socratic_dialogue(
-                    user_message=user_message,
-                    history=self._history_to_messages(),
-                    caller="soul.dialogue",
-                )
-                reply = response.content
-        except (LLMServiceError, RuntimeError):
-            logger.exception("Failed to generate Socratic dialogue response.")
-            reply = "我刚刚思路断了一下，你可以换个说法再告诉我一次吗？"
-
-        self._history.append(DialogueTurn(role="agent", content=reply))
-        learn_fn = getattr(self._soul_engine, "learn_from_dialogue", None)
-        if callable(learn_fn):
-
-            async def _background_learn() -> None:
-                try:
-                    await learn_fn(
+                # If tools are configured, try tool-calling path first
+                if self._tools and self._tool_dispatcher:
+                    reply = await self._respond_with_tools(service, user_message)
+                else:
+                    response = await service.complete_socratic_dialogue(
                         user_message=user_message,
-                        assistant_reply=reply,
-                        session=self._session,
+                        history=self._history_to_messages(),
+                        caller="soul.dialogue",
                     )
-                except Exception:
-                    logger.exception("Failed to learn from dialogue turn.")
+                    reply = response.content
+            except BaseException:
+                del self._history[history_length:]
+                logger.exception("Failed to generate Socratic dialogue response.")
+                raise
 
-            asyncio.create_task(_background_learn())
-        return reply
+            self._history.append(DialogueTurn(role="agent", content=reply))
+            learn_fn = getattr(self._soul_engine, "learn_from_dialogue", None)
+            if callable(learn_fn):
+
+                async def _background_learn() -> None:
+                    try:
+                        await learn_fn(
+                            user_message=user_message,
+                            assistant_reply=reply,
+                            session=self._session,
+                        )
+                    except Exception:
+                        logger.exception("Failed to learn from dialogue turn.")
+
+                asyncio.create_task(_background_learn())
+            return reply
 
     async def _respond_with_tools(self, service: Any, user_message: str) -> str:
         """Attempt a tool-calling response, falling back to normal dialogue.

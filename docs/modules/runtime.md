@@ -34,18 +34,22 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 | Reddit 后台 discovery producer | ✅ | `RedditDiscoveryProducer.produce_if_due()` 在 Reddit 平台族低于 quota 且 `[sources.reddit].enabled=true` 时，默认通过随 OpenBiliClaw 安装的 `rdt-cli` 登录态命令后端触发 `search` / `hot` / `subreddit` / `related` 四个分支；已连接插件会同步 `reddit_session` 到 rdt-cli credential store，命令后端不可用或未登录时 fallback 到已安装浏览器插件的真实 `reddit.com` 登录态任务。四个分支各自有独立 daily budget，默认每类 300。producer 只 enqueue raw candidates 到 `discovery_candidates`，不写 `content_cache`、不同步跑 LLM 评估，正式 admission 由共享 evaluator 异步完成。 |
 | X 源健康状态机 | ✅ | `storage/x_health.py` 的 `XSourceHealthStore` 持久化 `ok` / `missing_cookie` / `expired_cookie`(401) / `blocked`(403) / `rate_limited`(429) 五态；按 code 分别退避，429 带 `cooldown_until` 自愈，401/403/missing 须等用户重新登录 x.com 才恢复；连续 For-You 失败触发 `feed_allowed()=false` 自动暂停。状态经 `GET /api/sources/x/status` 暴露到插件设置页。 |
 | 运行时频率配置 | ✅ | `refresh_check_interval_seconds`、行为触发阈值、trending / explore 间隔、单轮发现上限、惊喜队列加载数量、主动推送间隔和 speculator idle tick 都从 `[scheduler]` 读取，配置热重载后重建 runtime 生效。 |
+| Durable 对话失败原子性 | ✅ | `/api/chat/turns` 在对话缺失、超时、provider/service 失败或空回复时持久化 `status="failed", reply="", error=<安全分类文案>`；真实回复生成后会先持久化 `completed + reply`，再 best-effort 运行情绪/投机/认知/事件副作用，副作用失败不得把已完成 turn 改为 failed；completed 持久化本身失败时也只记录并保留非 failed 状态供恢复。相同已终结 `turn_id` 保持幂等。 |
 | 推荐反馈批学习调度 | ✅ | `FeedbackBatchScheduler` 挂在 FastAPI `app.state`，`/api/feedback` 每次只标记 dirty 并触发 5 秒 debounce；burst 内多条推荐反馈 coalesce 成一次 `SoulEngine.process_feedback_batch_if_needed()`，处理期间又有新反馈时会在本轮结束后再补跑一轮，避免每条反馈都启动画像重分析。 |
 | 浏览器 presence gate | ✅ | `background_llm_work_allowed()` 结合 `scheduler.enabled` 与 `pause_on_extension_disconnect` 控制 daemon-owned 后台 LLM / embedding 工作。 |
 | Runtime event stream | ✅ | `/api/runtime-stream` 向扩展推送状态、Cookie sync 请求、配置重载、候选池快照和 presence 事件；background 连接时会请求小红书 / 知乎立即回传一次本地 Cookie 存在性的布尔心跳，不打开或请求平台页面。`RuntimeEventHub.publish()` 会返回是否至少有一个订阅者接收，供一次性事件判断是否真正投递。 |
 | WebSocket 运行时依赖 | ✅ | 默认安装显式携带 `websockets>=13`，PyInstaller spec 显式收集 `uvicorn.protocols.websockets.websockets_impl` 与 `websockets`，避免源码 / Docker / 桌面包只安装裸 `uvicorn` 时 `/api/runtime-stream` 缺协议实现。 |
 | Activity feed 状态摘要 | ✅ | `/api/activity-feed` 聚合认知更新、反馈、推荐池补货和 live summary；未初始化且还没有推荐 / 可换池 / 补货产物时，普通 `/api/events` 不会新写入 pending signals，旧的 `pending_signal_events` 也不会抢占初始化提示。初始化后 pending 文案统一为“已记下 N 个新动作，下一轮补货会拿来参考”，表示 discovery refresh 水位，不表示画像待处理队列。 |
 | 桌面 Web 推荐卡链接与元信息 | ✅ | `/web` 推荐卡、稍后再看 / 收藏卡、消息抽屉内容和惊喜推荐封面都改为真实 `<a href target="_blank" rel="noopener noreferrer">`；点击上报同时绑定 `click` 与中键 `auxclick`，但不阻止浏览器原生中键 / Ctrl 或 Cmd 点击 / 右键菜单行为。`RecommendationOut` 增量暴露 `duration`、`view_count`、`like_count`、`danmaku_count`、`up_mid`，桌面卡片展示视频时长徽标和播放 / 点赞 / 弹幕统计；字段为 0 或缺失时整段隐藏，不在 X / 小红书 / YouTube 等无数据卡片上显示空元信息。B 站且 `up_mid>0` 时 UP 主名跳到 `space.bilibili.com`，其它平台保持纯文本。 |
+| 桌面 Web 首屏渐进水合 | ✅ | 首屏以 `/api/ping` 判断连接，推荐与 runtime 状态各自返回即各自渲染；health / init / profile / activity / config 等次级读取不会挡住推荐卡。推荐消费后仍独立复读 runtime 库存，失败沿用 1/2/4/8 秒的资源级恢复。 |
+| 桌面 Web 封面请求优先级 | ✅ | 桌面推荐仅前 4 张封面使用 `eager/high`，后续封面使用 `lazy/low`；Delight 保持 `eager/high`。 |
 | 桌面 Web 动效与布局稳定 | ✅ | 根滚动启用 `scrollbar-gutter: stable`，避免内容变长时顶栏横向抖动；消息 / 活动 / 手机二维码抽屉关闭进入 `.is-closing` 退出动画，快速开关会取消未完成 close；六个主分区切换使用短 `page-enter` 淡入。新增动效统一受 `prefers-reduced-motion: reduce` 保护。 |
 | 桌面 Web 暗色模式 | ✅ | `/web` 支持 `auto` / `light` / `dark` 三态主题，顶栏按钮和设置页分段控件共享 `obc.theme` 本地键；`auto` 不写 `data-theme`，交给 `prefers-color-scheme`，手动浅色 / 深色写入 `:root[data-theme=...]`。暗色实现只覆盖 CSS token（暖暗背景、前景、边框、语义色、overlay、shadow），不为单个组件分叉硬编码颜色；`<meta name="color-scheme" content="light dark">` 让原生控件和滚动条跟随主题。 |
 | 推荐/惊喜发布时间出口 | ✅ | `RecommendationOut`、`PendingDelightOut`、推荐列表/换批、pending delight 单条/批量、手动 delight 与 proactive runtime 事件均增量返回 `published_at` / `published_label`（默认空字符串）。API 不把发现时间或推荐生成时间改写为发布时间；桌面 Web 与移动 Web 精确时间优先、相对标签兜底、缺失隐藏，精确时间按本地时区显示并提供完整时间 tooltip。 |
 | 桌面 Web 滚动自动加载 | ✅ | 首页推荐列表底部 sentinel 通过 `IntersectionObserver` 触发 `/api/recommendations/append`，默认开启并保留手动“继续追加”按钮。自动触发必须满足单飞、距上次自动加载至少 8 秒、首页可见、列表非空、加载按钮可见且 `state.runtimeStatus.pool_available_count > 0`；候选池见底时自动续页暂停但手动按钮仍可用。设置页开关写入 `openbiliclaw.webui.autoLoadOnScroll`，关闭后 observer 断开。 |
 | 桌面 Web 画像编辑即时反馈 | ✅ | 画像编辑的 chip 删除和添加按钮在请求 `/api/profile/edit` 前立即禁用并标记 `.is-pending`，让慢后端下也有置灰反馈；`state.profileEditState` 仍只接受服务端响应，成功 / 失败都通过重新渲染清除 pending 或恢复 chip，避免为低频编辑面引入复杂乐观回滚。 |
 | 桌面 Web 可撤销即时反馈 | ✅ | 普通推荐卡和正向/避雷探针的非聊天动作先更新本地 UI，再由共享 pending-action coordinator 保留 10 秒提交屏障；点击撤销会取消定时器且不发 API 写请求，提交失败恢复原状态，`pagehide` 会以 keepalive 立即结清未提交动作。探针聊天和推荐评论需要服务端回复或文本语义，保持直接提交，不伪装成可撤销动作。 |
+| 桌面 Web 探针反馈文案 | ✅ | 消息抽屉与画像页的正向/避雷探针共用一个 domain-aware feedback helper；inline 结果与 toast 使用同一条文本，明确显示经折叠空白且最长 24 字符的探针主题（超长以省略号收束），并通过 `textContent` / `showToast(text)` 写入，避免把主题插入 HTML。 |
 | 三端 probe 反馈语义 | ✅ | 桌面、移动和插件的兴趣/避雷 probe 统一使用 confirm/defer/reject/chat 语义，所有操作均有可见文字；推荐区不新增画像或对话纠偏引导入口。 |
 | 桌面 Web 前端偏好键 | ✅ | `/web` 的纯前端偏好继续走 `storageGet` / `storageSet`，不写 `config.toml`：`obc.theme` 保存主题三态，`openbiliclaw.webui.autoLoadOnScroll` 保存滚动自动加载开关；设置页保存状态行会同时回显主题、换一批忽略当前和滚动自动加载状态。 |
 | 扩展捕捉 E2E 控制事件 | ✅ | local-only `/api/extension/e2e/run` 会通过 runtime stream 投递 `extension_e2e_run`，要求已安装扩展在真实平台页执行白名单 DOM 操作；`/api/extension/e2e/result` 回收插件执行结果，后端再按运行窗口匹配 `/api/events` 中自然捕捉到的事件。 |
@@ -65,6 +69,11 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 | 桌面包 SOCKS 代理兼容 | ✅ | 默认运行依赖使用 `httpx[socks]`，PyInstaller spec 显式收集 `socksio`；用户系统配置 `ALL_PROXY` / `HTTPS_PROXY=socks5://...` 时，冻结桌面包创建 OpenAI / 兼容 LLM 客户端不会因缺少可选 SOCKS 运行时依赖而在启动阶段崩溃。 |
 | 运行时图像处理依赖 | ✅ | 默认安装显式携带 `Pillow>=10.0`，因为 `discovery.multimodal` 的封面压缩路径直接 import `PIL`；不再依赖 B 站 SDK 或打包 extra 的传递依赖碰巧提供 Pillow。 |
 | 运行日志降噪 | ✅ | 全局 logging 初始化会把 `httpx` / `httpcore` / `openai` / `openai._base_client` logger 提升到 WARNING，避免文件日志在 DEBUG 模式下被连接细节和完整 LLM 请求体刷屏；业务模块仍按 `logging.file_level` 输出。 |
+
+- 桌面侧栏是 flex 行内项：按钮的 `aria-expanded` 与侧栏的 `aria-hidden` 同步，内容宽度随
+  312px 侧栏平滑让渡。Delight 以主内容实际 inline-size 响应，而非只看 viewport。
+- Delight 拖拽 10px 才进入拖动态，50px 才切换卡片；滚动自动加载仍使用 50px
+  root margin。前者避免点击抖动，后两者分别控制明确切换与接近视口时加载。
 
 ## 公开 API
 

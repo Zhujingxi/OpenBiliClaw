@@ -597,34 +597,174 @@ test("mergeDelightCandidate keeps handled local state for the same bvid and igno
     bvid: "BV1SNOOZED",
     title: "先别出现",
   }, ["BV1SNOOZED"]);
+  const refreshedLiked = mergeDelightCandidate(
+    normalizeDelightCandidate({ bvid: "BV1LIKED", state: "pending" }),
+    { bvid: "BV1LIKED", state: "liked", response_message: "好，这类多来点。" },
+  );
+  const sameStateLiked = mergeDelightCandidate(
+    normalizeDelightCandidate({
+      bvid: "BV1LIKEDLOCAL",
+      state: "liked",
+      response_message: "本地已喜欢文案",
+    }),
+    { bvid: "BV1LIKEDLOCAL", state: "liked" },
+  );
 
   assert.equal(merged.title, "新标题");
   assert.equal(merged.delight_reason, "新理由");
   assert.equal(merged.state, "viewed");
   assert.equal(merged.response_message, "已打开，阿B 会把这次点击当成强信号。");
   assert.equal(ignored, current);
+  assert.equal(refreshedLiked?.state, "liked");
+  assert.equal(refreshedLiked?.response_message, "好，这类多来点。");
+  assert.equal(sameStateLiked?.response_message, "本地已喜欢文案");
 });
 
-test("getDelightUiState keeps handled delight visible with stable copy and highlight state", () => {
-  const uiState = getDelightUiState(
-    normalizeDelightCandidate({
-      bvid: "BV1DELIGHT",
-      title: "这条你会意外喜欢",
-      delight_reason: "它不完全像你最近常看的，但入口很准。",
-      delight_score: 0.88,
-      state: "viewed",
-    }),
+test("authoritative liked state does not inherit response copy from a different state", () => {
+  const currentViewed = normalizeDelightCandidate({
+    bvid: "BV1STATECHANGE",
+    state: "viewed",
+    response_message: "已打开，阿B 会把这次点击当成强信号。",
+  });
+  const merged = mergeDelightCandidate(currentViewed, {
+    bvid: "BV1STATECHANGE",
+    state: "liked",
+  });
+  const uiState = getDelightUiState(merged);
+
+  assert.equal(merged?.state, "liked");
+  assert.equal(merged?.response_message, "");
+  assert.equal(uiState.response_message, "好，这类多来点。");
+  assert.equal(uiState.show_status, true);
+  assert.equal(uiState.show_actions, true);
+  assert.equal(uiState.like_pressed, true);
+  assert.equal(uiState.like_disabled, true);
+});
+
+test("getDelightUiState projects status and actions independently for every state", () => {
+  const pending = getDelightUiState({
+    bvid: "BV1DELIGHT",
+    delight_score: 0.88,
+  });
+  assert.deepEqual(pending, {
+    visible: true,
+    highlighted: false,
+    handled: false,
+    show_status: false,
+    show_actions: true,
+    like_pressed: false,
+    like_disabled: false,
+    score_label: "大概率会戳中你",
+    response_tone: "info",
+    response_message: "",
+  });
+
+  const liked = getDelightUiState({
+    bvid: "BV1DELIGHT",
+    delight_score: 0.88,
+    state: "liked",
+  });
+  assert.deepEqual(liked, {
+    visible: true,
+    highlighted: false,
+    handled: false,
+    show_status: true,
+    show_actions: true,
+    like_pressed: true,
+    like_disabled: true,
+    score_label: "大概率会戳中你",
+    response_tone: "success",
+    response_message: "好，这类多来点。",
+  });
+
+  const viewed = getDelightUiState(
+    { bvid: "BV1DELIGHT", delight_score: 0.88, state: "viewed" },
     { highlightBvid: "BV1DELIGHT" },
   );
-
-  assert.deepEqual(uiState, {
+  assert.deepEqual(viewed, {
     visible: true,
     highlighted: true,
     handled: true,
+    show_status: true,
+    show_actions: false,
+    like_pressed: false,
+    like_disabled: true,
     score_label: "大概率会戳中你",
     response_tone: "success",
     response_message: "已打开，阿B 会把这次点击当成强信号。",
   });
+
+  const rejected = getDelightUiState({
+    bvid: "BV1DELIGHT",
+    delight_score: 0.88,
+    state: "rejected",
+  });
+  assert.deepEqual(rejected, {
+    visible: true,
+    highlighted: false,
+    handled: true,
+    show_status: true,
+    show_actions: false,
+    like_pressed: false,
+    like_disabled: true,
+    score_label: "大概率会戳中你",
+    response_tone: "info",
+    response_message: "记下了，这类惊喜先少来点。",
+  });
+
+  const chatted = getDelightUiState({
+    bvid: "BV1DELIGHT",
+    delight_score: 0.88,
+    state: "chatted",
+  });
+  assert.deepEqual(chatted, {
+    visible: true,
+    highlighted: false,
+    handled: false,
+    show_status: true,
+    show_actions: true,
+    like_pressed: false,
+    like_disabled: false,
+    score_label: "大概率会戳中你",
+    response_tone: "info",
+    response_message: "这句已经记下，后面会更会试探。",
+  });
+
+  const chatting = getDelightUiState({
+    bvid: "BV1DELIGHT",
+    delight_score: 0.88,
+    state: "chatting",
+  });
+  assert.equal(chatting.handled, false);
+  assert.equal(chatting.show_status, false);
+  assert.equal(chatting.show_actions, true);
+  assert.equal(chatting.like_pressed, false);
+  assert.equal(chatting.like_disabled, false);
+
+  assert.deepEqual(getDelightUiState({}), {
+    visible: false,
+    highlighted: false,
+    handled: false,
+    show_status: false,
+    show_actions: false,
+    like_pressed: false,
+    like_disabled: false,
+    score_label: "",
+    response_tone: "info",
+    response_message: "",
+  });
+});
+
+test("popup delight renderer synchronizes liked ARIA and duplicate-action state", () => {
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  assert.match(popupJs, /if \(uiState\.show_status\)/);
+  assert.match(popupJs, /if \(uiState\.show_actions\)/);
+  assert.match(
+    popupJs,
+    /likeButton\.setAttribute\("aria-pressed", uiState\.like_pressed \? "true" : "false"\)/,
+  );
+  assert.match(popupJs, /likeButton\.disabled = uiState\.like_disabled/);
 });
 
 test("getPopupState distinguishes offline uninitialized refreshing empty and ready states", () => {
@@ -1639,6 +1779,54 @@ test("getConnectionBadgeState returns compact status copy for popup header", () 
     tone: "offline",
     label: "未连接",
   });
+});
+
+test("popup failed chat turn renders durable error", () => {
+  const popupSource = readFileSync(resolve(import.meta.dirname, "../popup/popup.js"), "utf8");
+
+  assert.match(popupSource, /status === "failed"/);
+  assert.match(popupSource, /const message = turn\.error \|\| "刚刚没发出去，换个说法再试试。"/);
+});
+
+test("popup inline failed turns render errors without completing or removing probes", () => {
+  const popupSource = readFileSync(resolve(import.meta.dirname, "../popup/popup.js"), "utf8");
+  const functionSlice = (name: string, nextName: string) => {
+    const start = popupSource.indexOf(`function ${name}`);
+    const end = popupSource.indexOf(`function ${nextName}`, start + 1);
+    assert.ok(start >= 0 && end > start, `${name} source body not found`);
+    return popupSource.slice(start, end);
+  };
+
+  const delight = functionSlice("expandDelightChat", "dismissMessageByBvid");
+  assert.ok(delight.indexOf('nextTurn.status === "failed"') < delight.indexOf('nextTurn.status === "completed"'));
+  const delightFailure = delight.slice(
+    delight.indexOf("const showFailure"),
+    delight.indexOf("const showReply"),
+  );
+  assert.match(delightFailure, /nextTurn\.error/);
+
+  const probe = functionSlice("sendInlineChat", "dismissMessage");
+  assert.ok(probe.indexOf('nextTurn.status === "failed"') < probe.indexOf('nextTurn.status === "completed"'));
+  assert.match(probe, /input\.closest\("\.message-chat-area"\)/);
+  assert.match(probe, /input\.disabled = true/);
+  const failureBranch = probe.slice(
+    probe.indexOf("const showFailure"),
+    probe.indexOf("const showReply"),
+  );
+  assert.match(failureBranch, /nextTurn\.error/);
+  assert.match(failureBranch, /forgetHandledProbe/);
+  assert.match(failureBranch, /input\.disabled = false/);
+  assert.match(failureBranch, /sendBtn\.disabled = false/);
+  assert.match(failureBranch, /input\.focus\(\)/);
+  assert.doesNotMatch(failureBranch, /chatArea\.remove|input\.remove|sendBtn\.remove/);
+  assert.doesNotMatch(failureBranch, /removeMessageFromState|itemEl\.remove/);
+  const beforeCompleted = probe.slice(0, probe.indexOf("const showReply"));
+  assert.doesNotMatch(beforeCompleted, /chatArea\.remove/);
+  const completedBranch = probe.slice(
+    probe.indexOf("const showReply"),
+    probe.indexOf("const settleTurn"),
+  );
+  assert.match(completedBranch, /chatArea\.remove\(\)/);
 });
 
 test("getHintBannerState normalizes supported tones", () => {

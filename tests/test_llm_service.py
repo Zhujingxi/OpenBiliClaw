@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+import openbiliclaw.llm.base as llm_base
 from openbiliclaw.llm.base import (
     LLMFallbackError,
     LLMProviderError,
@@ -104,6 +105,12 @@ class FakeMemoryManager:
 
     def render_core_memory_prompt(self) -> str:
         return self.core_prompt
+
+
+def _safe_llm_failure_message(exc: BaseException) -> str:
+    helper = getattr(llm_base, "safe_llm_failure_message", None)
+    assert helper is not None, "safe_llm_failure_message() is not implemented"
+    return str(helper(exc))
 
 
 def test_is_llm_rate_limit_error_detects_wrapped_provider_backoff() -> None:
@@ -282,7 +289,45 @@ def test_describe_llm_failure_http_429() -> None:
 
 def test_describe_llm_failure_timeout_and_empty_response() -> None:
     assert "超时" in (describe_llm_failure(LLMTimeoutError("request timed out")) or "")
+    assert "超时" in (describe_llm_failure(TimeoutError("socket stalled")) or "")
     assert "空响应" in (describe_llm_failure(LLMResponseError("empty completion")) or "")
+    assert "空响应" in (
+        describe_llm_failure(LLMResponseContentError("LLM returned an empty response")) or ""
+    )
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected_fragment"),
+    [
+        (LLMProviderError("上游内容审查拒绝了请求"), "内容合规"),
+        (LLMProviderError("HTTP 401 unauthorized: invalid api key"), "鉴权失败"),
+        (LLMRateLimitError("HTTP 429 insufficient_quota"), "额度用尽或被限流"),
+        (LLMTimeoutError("provider request timed out"), "响应超时"),
+        (TimeoutError("socket stalled"), "响应超时"),
+        (LLMFallbackError("No provider was available"), "没有可用的 AI 服务"),
+        (LLMResponseError("empty completion"), "空响应"),
+        (LLMResponseContentError("LLM returned an empty response"), "空响应"),
+        (
+            RuntimeError("secret-upstream-detail"),
+            "AI 服务暂时不可用；请稍后重试，或检查设置中的模型与网络。",
+        ),
+    ],
+)
+def test_safe_llm_failure_message_classifies_without_leaking_unknown_detail(
+    exc: BaseException,
+    expected_fragment: str,
+) -> None:
+    message = _safe_llm_failure_message(exc)
+
+    assert expected_fragment in message
+    assert "secret-upstream-detail" not in message
+
+
+def test_safe_llm_failure_message_never_returns_raw_unknown_detail() -> None:
+    message = _safe_llm_failure_message(RuntimeError("secret-upstream-detail"))
+
+    assert message == "AI 服务暂时不可用；请稍后重试，或检查设置中的模型与网络。"
+    assert "secret-upstream-detail" not in message
 
 
 def test_describe_llm_failure_returns_none_for_unrelated_error() -> None:

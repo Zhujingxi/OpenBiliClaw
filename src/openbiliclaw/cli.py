@@ -21,6 +21,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from openbiliclaw.llm.base import safe_llm_failure_message
 from openbiliclaw.published_time import format_published_time
 from openbiliclaw.runtime.ollama_supervisor import (
     _is_default_ollama_endpoint,
@@ -9783,7 +9784,11 @@ def chat() -> None:
                 console.print("阿花：对话结束。")
                 return
 
-            reply = asyncio.run(dialogue.respond(user_message))
+            try:
+                reply = asyncio.run(dialogue.respond(user_message))
+            except Exception as exc:
+                console.print(f"阿花：{safe_llm_failure_message(exc)}")
+                continue
             console.print(f"阿花：{reply}")
     except KeyboardInterrupt:
         console.print("阿花：对话结束。")

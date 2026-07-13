@@ -217,6 +217,8 @@ background ─ background admission (default 3) ──────┘
                 parked when canonical available = 0
 ```
 
+下图的对话/反馈入口共享同一失败原子链路：`Web / CLI / OpenClaw → SocraticDialogue`。成功才写入 user+agent 历史并后台学习；失败/超时回滚临时用户历史，再由边界返回安全错因或持久化 `failed / reply=""`。桌面 Web 的推荐、runtime 与次级 hydration 是独立分支。
+
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │                  用户交互层 (浏览器插件)                        │

@@ -24,6 +24,7 @@ import { setUnreadCount, navigateToTab } from "../app.js";
 import {
   forgetHandledProbe,
   mergeProbeNotifications,
+  probeNotificationKey,
   rememberHandledProbe,
   removeProbeFromNotifications,
   shouldDisplayProbeFromWebSocket,
@@ -57,10 +58,16 @@ let userScrolledUp = false;
 let overlayOpen = false;
 let notifications = [];
 let delightMsgs = [];
+const pendingProbeActions = new Map();
+
+function pendingProbeAction(type, domain) {
+  return pendingProbeActions.get(probeNotificationKey(type, domain)) || null;
+}
 
 function setProbeCardBusy(card, busy) {
   if (!card) return;
   card.classList.toggle("is-processing", busy);
+  card.setAttribute("aria-busy", busy ? "true" : "false");
   for (const actionBtn of card.querySelectorAll("[data-probe]")) {
     actionBtn.disabled = busy;
   }
@@ -336,11 +343,16 @@ function renderOverlay() {
 
   // Probe notifications
   for (const n of notifications) {
+    const domain = n.domain || n.title || "";
     const isAvoidance = (n.type || "") === "avoidance.probe";
     const isChallenge = !isAvoidance && isChallengeProbe(n);
     const actions = isAvoidance ? getAvoidanceProbeMessageActions() : getProbeMessageActions();
+    const pending = pendingProbeAction(n.type, domain);
     const card = document.createElement("div");
     card.className = `message-card ${isAvoidance ? "is-avoidance-probe" : isChallenge ? "is-challenge-probe" : "is-interest-probe"}`;
+    card.dataset.probeDomain = domain;
+    card.setAttribute("aria-busy", pending ? "true" : "false");
+    card.classList.toggle("is-processing", Boolean(pending));
     const prompt = isAvoidance
       ? "想少看这类，就确认这是雷点；如果阿B猜错了，点不是。"
       : isChallenge
@@ -349,13 +361,16 @@ function renderOverlay() {
     card.innerHTML = `
       <div class="message-card-type"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>${isAvoidance ? "避雷确认" : isChallenge ? "挑战探针" : "兴趣探测"}</div>
       <div class="message-card-prompt">${esc(prompt)}</div>
-      <div class="message-card-title">${esc(n.domain || n.title || "")}</div>
+      <div class="message-card-title">${esc(domain)}</div>
       <div class="message-card-body">${esc(n.description || n.reason || n.message || "")}</div>
       <div class="message-card-actions">
         ${actions.map((item) => `
           <button type="button" class="message-action-btn ${item.primary ? "primary" : "secondary"}" data-probe="${esc(item.action)}" data-probe-kind="${isAvoidance ? "avoidance" : "interest"}" data-domain="${esc(n.domain || "")}">${esc(item.label)}</button>
         `).join("")}
       </div>`;
+    for (const button of card.querySelectorAll("button")) {
+      button.disabled = Boolean(pending);
+    }
     panel.appendChild(card);
   }
 
@@ -394,24 +409,24 @@ function renderOverlay() {
         });
         return;
       }
+      const key = probeNotificationKey(probeType, domain);
+      if (!key || pendingProbeActions.has(key)) return;
+      pendingProbeActions.set(key, { response: action });
       setProbeCardBusy(card, true);
-      rememberHandledProbe(domain, probeType);
+      renderOverlay();
       try {
-        const resp = isAvoidance
-          ? await respondToAvoidanceProbe(domain, action)
-          : await respondToProbe(domain, action);
-        if (resp && resp.ok === false) {
-          notifications = removeProbeFromNotifications(notifications, domain, probeType);
-          updateBadgeCount();
-          renderOverlay();
-          return;
-        }
+        await (isAvoidance
+          ? respondToAvoidanceProbe(domain, action)
+          : respondToProbe(domain, action));
+        pendingProbeActions.delete(key);
+        rememberHandledProbe(domain, probeType);
         notifications = removeProbeFromNotifications(notifications, domain, probeType);
         updateBadgeCount();
         renderOverlay();
       } catch {
-        forgetHandledProbe(domain, probeType);
+        pendingProbeActions.delete(key);
         setProbeCardBusy(card, false);
+        renderOverlay();
       }
     });
   }
@@ -676,6 +691,8 @@ function expandInlineChatOnCard(card, { scope, subjectId, subjectTitle, placehol
         message,
       });
 
+      // Only a completed turn consumes a probe notification. Failed turns
+      // keep the composer/card available so the user can retry.
       const showReply = (t) => {
         thinking.remove();
         input.remove();
@@ -694,15 +711,32 @@ function expandInlineChatOnCard(card, { scope, subjectId, subjectTitle, placehol
         }, 3500);
       };
 
+      const settleTurn = (t) => {
+        if (t.status === "failed") {
+          thinking.remove();
+          sendBtn.disabled = false;
+          input.disabled = false;
+          if (isProbeScope) {
+            forgetHandledProbe(subjectId, probeType);
+          }
+          const errEl = document.createElement("div");
+          errEl.className = "inline-chat-error";
+          errEl.textContent = t.error || "刚刚没发出去，换个说法再试试。";
+          chatArea.appendChild(errEl);
+          return;
+        }
+        if (t.status === "completed") showReply(t);
+      };
+
       if (turn.status === "completed" || turn.status === "failed") {
-        showReply(turn);
+        settleTurn(turn);
       } else {
         // Poll until settled
         const poll = async () => {
           try {
             const t = await fetchChatTurn(turnId);
             if (t.status === "completed" || t.status === "failed") {
-              showReply(t);
+              settleTurn(t);
             } else {
               setTimeout(poll, 1500);
             }

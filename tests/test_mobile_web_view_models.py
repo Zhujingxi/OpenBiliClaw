@@ -719,28 +719,96 @@ class TestMobileWebViewModels:
             import { getDelightUiState } from "./src/openbiliclaw/web/js/view-models.js";
 
             const pending = getDelightUiState({ bvid: "BV1", title: "t", delight_score: 0.9 });
-            assert.equal(pending.visible, true);
-            assert.equal(pending.handled, false);
-            assert.equal(pending.score_label, "大概率会戳中你");
+            assert.deepEqual(pending, {
+              visible: true,
+              highlighted: false,
+              handled: false,
+              show_status: false,
+              show_actions: true,
+              like_pressed: false,
+              like_disabled: false,
+              score_label: "大概率会戳中你",
+              response_tone: "info",
+              response_message: "",
+            });
 
             const viewed = getDelightUiState({ bvid: "BV1", state: "viewed", delight_score: 0.7 });
-            assert.equal(viewed.handled, true);
-            assert.equal(viewed.response_tone, "success");
+            assert.deepEqual(viewed, {
+              visible: true,
+              highlighted: false,
+              handled: true,
+              show_status: true,
+              show_actions: false,
+              like_pressed: false,
+              like_disabled: true,
+              score_label: "这条可能会拐到你",
+              response_tone: "success",
+              response_message: "已打开，阿B 会把这次点击当成强信号。",
+            });
 
             const liked = getDelightUiState({ bvid: "BV1", state: "liked", delight_score: 0.7 });
-            assert.equal(liked.handled, true);
-            assert.equal(liked.response_tone, "success");
+            assert.deepEqual(liked, {
+              visible: true,
+              highlighted: false,
+              handled: false,
+              show_status: true,
+              show_actions: true,
+              like_pressed: true,
+              like_disabled: true,
+              score_label: "这条可能会拐到你",
+              response_tone: "success",
+              response_message: "好，这类多来点。",
+            });
+
+            const rejected = getDelightUiState({
+              bvid: "BV1",
+              state: "rejected",
+              delight_score: 0.7,
+            });
+            assert.deepEqual(rejected, {
+              visible: true,
+              highlighted: false,
+              handled: true,
+              show_status: true,
+              show_actions: false,
+              like_pressed: false,
+              like_disabled: true,
+              score_label: "这条可能会拐到你",
+              response_tone: "info",
+              response_message: "记下了，这类惊喜先少来点。",
+            });
 
             const chatted = getDelightUiState({
                 bvid: "BV1",
                 state: "chatted",
                 delight_score: 0.7,
             });
-            assert.equal(chatted.handled, false);
-            assert.equal(chatted.response_tone, "info");
+            assert.deepEqual(chatted, {
+              visible: true,
+              highlighted: false,
+              handled: false,
+              show_status: true,
+              show_actions: true,
+              like_pressed: false,
+              like_disabled: false,
+              score_label: "这条可能会拐到你",
+              response_tone: "info",
+              response_message: "这句已经记下，后面会更会试探。",
+            });
 
             const empty = getDelightUiState({});
-            assert.equal(empty.visible, false);
+            assert.deepEqual(empty, {
+              visible: false,
+              highlighted: false,
+              handled: false,
+              show_status: false,
+              show_actions: false,
+              like_pressed: false,
+              like_disabled: false,
+              score_label: "",
+              response_tone: "info",
+              response_message: "",
+            });
         """)
         )
 

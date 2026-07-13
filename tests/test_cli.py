@@ -2258,6 +2258,40 @@ def test_chat_runs_single_turn_and_prints_reply(
     assert "我听见你在说：我最近总在刷讲结构的视频。" in result.stdout
 
 
+def test_chat_reports_safe_turn_failure_and_keeps_loop_usable(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    from openbiliclaw.llm.service import LLMResponseContentError
+
+    class FakeSoulEngine:
+        async def get_profile(self) -> SoulProfile:
+            return SoulProfile(personality_portrait="稳定用户画像" * 30)
+
+    class FakeDialogue:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def respond(self, user_message: str) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                raise LLMResponseContentError("sk-live-secret")
+            return f"第二轮成功：{user_message}"
+
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine(), raising=False)
+    monkeypatch.setattr(
+        cli_module, "_build_dialogue", lambda soul_engine: FakeDialogue(), raising=False
+    )
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["chat"], input="第一轮\n第二轮\nexit\n")
+
+    assert result.exit_code == 0
+    assert "空响应" in result.stdout
+    assert "sk-live-secret" not in result.stdout
+    assert "第二轮成功：第二轮" in result.stdout
+
+
 def test_chat_exits_cleanly_on_exit_command(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner
 ) -> None:
@@ -2974,7 +3008,10 @@ def test_init_runs_history_preference_profile_and_discovery(
             self.built_history: list[list[dict[str, object]]] = []
 
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0, **_: object
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -3119,7 +3156,10 @@ def test_init_caps_bilibili_history_and_favorites_at_500_and_following_at_100(
             self.built_history: list[list[dict[str, object]]] = []
 
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0, **_: object
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -3228,7 +3268,10 @@ def test_init_accepts_custom_bilibili_history_favorites_and_following_limits(
             self.analyzed_events: list[list[dict[str, object]]] = []
 
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0, **_: object
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -3964,7 +4007,10 @@ def test_init_youtube_env_skip_overrides_yes_flag(
 
     class FakeSoulEngine:
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0, **_: object
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             return None
 
@@ -4166,7 +4212,10 @@ def test_init_no_xhs_flag_skips_enqueue(
             self.analyzed_events: list[list[dict[str, object]]] = []
 
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0, **_: object
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -4273,7 +4322,10 @@ def test_init_backfills_pool_in_stages_until_target_is_reached(
 
     class FakeSoulEngine:
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0, **_: object
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             return None
 
@@ -4421,7 +4473,10 @@ def test_init_skips_backfill_when_pool_target_is_already_reached(
 
     class FakeSoulEngine:
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0, **_: object
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             return None
 
@@ -4529,7 +4584,10 @@ def test_init_reports_partial_success_when_discovery_fails(
 
     class FakeSoulEngine:
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0, **_: object
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             return None
 

@@ -123,9 +123,13 @@ def test_desktop_reattaches_init_poll_when_a_run_is_live_at_load() -> None:
     last_activity in that case.
     """
     app_js = _app_js()
-    # The hydrate path must kick the scheduled poll when a run is live.
-    assert "scheduleInitStatusRefresh(INIT_STATUS_POLL_MS)" in app_js
-    assert "initStatus?.running" in app_js
-    # And it must also cover the embedding-pull and first-pool-wait cases.
-    assert "embeddingPullProgressView(initStatus).active" in app_js
-    assert "initWaitingForFirstPool(initStatus)" in app_js
+    assert "function applyInitStatusSnapshot(snapshot)" in app_js
+    apply_snapshot = app_js.split("function applyInitStatusSnapshot(snapshot)", 1)[1]
+    apply_snapshot = apply_snapshot.split("\n      }", 1)[0]
+
+    # The init-status resource owner must attach the poll for every live state.
+    assert "state.initStatus = snapshot;" in apply_snapshot
+    assert "snapshot.running" in apply_snapshot
+    assert "embeddingPullProgressView(snapshot).active" in apply_snapshot
+    assert "initWaitingForFirstPool(snapshot)" in apply_snapshot
+    assert "scheduleInitStatusRefresh(INIT_STATUS_POLL_MS)" in apply_snapshot

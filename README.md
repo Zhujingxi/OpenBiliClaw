@@ -611,6 +611,11 @@ background ─ background admission (default 3) ──────┘
 │ API/OpenClaw 启动钩子 → 历史恢复/原子维护 → 再暴露 LLM │
 │   统一准入防线 · SQLite（事件 · 候选池 · 推荐 · 对话） │
 └────────────────────────────────────────────────┘
+
+Web / CLI / OpenClaw → SocraticDialogue → 成功：user+agent 历史 → 后台学习
+                                      └失败/超时：回滚临时历史 → 安全错因 / failed turn
+
+桌面首屏：推荐 hydration │ runtime hydration │ health/profile/activity/config 次级 hydration（三分支独立）
 ```
 
 远程扩展连接采用显式、默认关闭的设备认证：`ext-key generate` → 配置仅存摘要 → `/api/auth/extension-token` 换短会话；HTTP 使用 Bearer Header，WebSocket / 图片代理仅携带短会话 query。

@@ -16,6 +16,8 @@
   --brand: #fb7299;
   --brand-strong: #f65788;
   --brand-soft: rgba(251, 114, 153, 0.12);
+  --accent: var(--brand);
+  --accent-strong: var(--brand-strong);
   --sky: #5aa9ff;
   --sky-soft: rgba(90, 169, 255, 0.14);
   --lime-soft: rgba(96, 204, 154, 0.16);
@@ -1844,6 +1846,12 @@ body {
 .delight-actions .btn.delight-save-toggle.watch-later-btn[aria-pressed="true"] { color: var(--brand, #c8553d); border-color: var(--brand, #c8553d); }
 .delight-actions .btn.delight-save-toggle.favorite-btn[aria-pressed="true"] { color: #e8a33d; border-color: #e8a33d; }
 .delight-actions .btn.delight-save-toggle.favorite-btn[aria-pressed="true"] svg { fill: currentColor; }
+
+.delight-actions [data-delight-action="like"][aria-pressed="true"] {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent), var(--surface) 84%);
+  color: var(--accent-strong);
+}
 
 .delight-result-state {
   font-size: 12px;

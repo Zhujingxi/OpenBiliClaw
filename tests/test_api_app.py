@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 from openbiliclaw import __version__
 from openbiliclaw.api.app import create_app
+from openbiliclaw.llm.service import LLMResponseContentError
 
 
 def test_source_platform_helpers_delegate_to_canonical_registry() -> None:
@@ -7215,6 +7216,30 @@ class TestBackendAPI:
         assert response.status_code == 200
         assert response.json() == {"reply": "你更在意的是它背后的逻辑，还是事件本身的冲突感？"}
 
+    def test_chat_endpoint_returns_classified_safe_failure_without_changing_shape(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.llm.service import LLMResponseContentError
+
+        class FakeDialogue:
+            async def respond(self, _user_message: str) -> str:
+                raise LLMResponseContentError("LLM returned an empty response")
+
+        app = create_app(
+            memory_manager=object(),
+            database=object(),
+            soul_engine=object(),
+            dialogue=FakeDialogue(),
+        )
+        client = TestClient(app)
+
+        response = client.post("/api/chat", json={"message": "继续聊"})
+
+        assert response.status_code == 200
+        assert set(response.json()) == {"reply"}
+        assert "空响应" in response.json()["reply"]
+        assert "LLM returned an empty response" not in response.json()["reply"]
+
     def test_chat_endpoint_rejects_empty_message(self) -> None:
         from fastapi.testclient import TestClient
 
@@ -8144,6 +8169,238 @@ class TestBackendAPI:
         assert restored["items"][0]["status"] == "completed"
         assert restored["items"][0]["reply"] == "你更在意的是它背后的逻辑。"
 
+    @pytest.mark.parametrize(
+        ("failure", "expected_fragment"),
+        [
+            (RuntimeError("sk-live-secret"), "AI 服务暂时不可用"),
+            (TimeoutError("socket stalled"), "响应超时"),
+            pytest.param(
+                LLMResponseContentError("LLM returned an empty response"),
+                "空响应",
+                id="empty-response",
+            ),
+        ],
+    )
+    def test_failed_chat_turn_is_safe_terminal_and_same_id_is_idempotent(
+        self,
+        tmp_path: Path,
+        failure: Exception,
+        expected_fragment: str,
+    ) -> None:
+        import time
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        class FakeDialogue:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def respond(self, _user_message: str) -> str:
+                self.calls += 1
+                raise failure
+
+        db = Database(tmp_path / "openbiliclaw.db")
+        db.initialize()
+        dialogue = FakeDialogue()
+        app = create_app(
+            memory_manager=object(),
+            database=db,
+            soul_engine=object(),
+            dialogue=dialogue,
+        )
+        payload = {
+            "turn_id": "turn-failed-1",
+            "session": "popup",
+            "scope": "chat",
+            "message": "这轮应该失败",
+        }
+
+        with TestClient(app) as client:
+            assert client.post("/api/chat/turns", json=payload).status_code == 200
+            turn: dict[str, object] = {}
+            for _ in range(30):
+                time.sleep(0.02)
+                turn = client.get("/api/chat/turns/turn-failed-1").json()
+                if turn["status"] != "pending":
+                    break
+
+            assert turn["status"] == "failed"
+            assert turn["reply"] == ""
+            assert expected_fragment in str(turn["error"])
+            assert "sk-live-secret" not in str(turn["error"])
+
+            retry = client.post("/api/chat/turns", json=payload)
+            assert retry.status_code == 200
+            assert retry.json() == turn
+            time.sleep(0.05)
+            assert dialogue.calls == 1
+
+    def test_empty_chat_turn_reply_is_failed_instead_of_completed(self, tmp_path: Path) -> None:
+        import time
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        class FakeDialogue:
+            async def respond(self, _user_message: str) -> str:
+                return "   "
+
+        db = Database(tmp_path / "openbiliclaw.db")
+        db.initialize()
+        app = create_app(
+            memory_manager=object(),
+            database=db,
+            soul_engine=object(),
+            dialogue=FakeDialogue(),
+        )
+
+        with TestClient(app) as client:
+            client.post(
+                "/api/chat/turns",
+                json={
+                    "turn_id": "turn-empty-1",
+                    "session": "popup",
+                    "scope": "chat",
+                    "message": "不要完成空回复",
+                },
+            )
+            turn: dict[str, object] = {}
+            for _ in range(30):
+                time.sleep(0.02)
+                turn = client.get("/api/chat/turns/turn-empty-1").json()
+                if turn["status"] != "pending":
+                    break
+
+        assert turn["status"] == "failed"
+        assert turn["reply"] == ""
+        assert "空响应" in str(turn["error"])
+
+    def test_durable_reply_completes_before_best_effort_context_side_effects(
+        self, tmp_path: Path
+    ) -> None:
+        import time
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        order: list[str] = []
+
+        class OrderedDatabase(Database):
+            def complete_chat_turn(self, turn_id: str, *, reply: str) -> None:
+                order.append("complete")
+                super().complete_chat_turn(turn_id, reply=reply)
+
+        class FakeDialogue:
+            async def respond(self, _message: str) -> str:
+                order.append("dialogue")
+                return "这是真实回复"
+
+        class FakeMemory:
+            def __init__(self) -> None:
+                self.updates: list[dict[str, object]] = []
+
+            def load_cognition_updates(self) -> list[dict[str, object]]:
+                return list(self.updates)
+
+            def save_cognition_updates(self, updates: list[dict[str, object]]) -> None:
+                order.append("cognition")
+                self.updates = list(updates)
+
+        class FailingEventHub:
+            async def publish(self, _event: dict[str, object]) -> None:
+                order.append("publish")
+                raise RuntimeError("publish unavailable")
+
+        db = OrderedDatabase(tmp_path / "openbiliclaw.db")
+        db.initialize()
+        app = create_app(
+            memory_manager=FakeMemory(),
+            database=db,
+            soul_engine=object(),
+            dialogue=FakeDialogue(),
+            runtime_controller=SimpleNamespace(event_hub=FailingEventHub()),
+        )
+
+        with TestClient(app) as client:
+            client.post(
+                "/api/chat/turns",
+                json={
+                    "turn_id": "turn-side-effect-failure",
+                    "session": "popup",
+                    "scope": "delight",
+                    "subject_id": "BV1SAFE",
+                    "subject_title": "惊喜",
+                    "message": "聊聊",
+                },
+            )
+            turn: dict[str, object] = {}
+            for _ in range(30):
+                time.sleep(0.02)
+                turn = client.get("/api/chat/turns/turn-side-effect-failure").json()
+                if turn["status"] != "pending":
+                    break
+
+        assert turn["status"] == "completed"
+        assert turn["reply"] == "这是真实回复"
+        assert turn["error"] == ""
+        assert order == ["dialogue", "complete", "cognition", "publish"]
+
+    def test_completion_persistence_failure_does_not_mark_genuine_reply_failed(
+        self, tmp_path: Path
+    ) -> None:
+        import threading
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        completion_attempted = threading.Event()
+        failed_calls: list[tuple[str, str, str]] = []
+
+        class FailingCompletionDatabase(Database):
+            def complete_chat_turn(self, turn_id: str, *, reply: str) -> None:
+                completion_attempted.set()
+                raise RuntimeError("completion persistence unavailable")
+
+            def fail_chat_turn(self, turn_id: str, *, error: str, reply: str = "") -> None:
+                failed_calls.append((turn_id, error, reply))
+                super().fail_chat_turn(turn_id, error=error, reply=reply)
+
+        class FakeDialogue:
+            async def respond(self, _message: str) -> str:
+                return "已经完成的真实回复"
+
+        db = FailingCompletionDatabase(tmp_path / "openbiliclaw.db")
+        db.initialize()
+        app = create_app(
+            memory_manager=object(),
+            database=db,
+            soul_engine=object(),
+            dialogue=FakeDialogue(),
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/chat/turns",
+                json={
+                    "turn_id": "turn-completion-write-failure",
+                    "session": "popup",
+                    "scope": "chat",
+                    "message": "这轮模型成功",
+                },
+            )
+            assert response.status_code == 200
+            assert completion_attempted.wait(timeout=1)
+
+        row = db.get_chat_turn("turn-completion-write-failure")
+        assert row is not None
+        assert row["status"] == "pending"
+        assert failed_calls == []
+
     def test_chat_turn_endpoint_records_delight_scope_context(self, tmp_path: Path) -> None:
         import asyncio
         import time
@@ -8905,6 +9162,92 @@ class TestBackendAPI:
         assert response.status_code == 200
         assert response.json()["action"] == "chat"
         assert database.notified == []
+
+    @pytest.mark.parametrize(
+        ("endpoint", "payload", "identity_key", "identity_value"),
+        [
+            (
+                "/api/delight/respond",
+                {"bvid": "BV1FAIL", "title": "惊喜", "response": "chat", "message": "聊聊"},
+                "bvid",
+                "BV1FAIL",
+            ),
+            (
+                "/api/interest-probes/respond",
+                {"domain": "建筑美学", "response": "chat", "message": "聊聊"},
+                "domain",
+                "建筑美学",
+            ),
+            (
+                "/api/avoidance-probes/respond",
+                {"domain": "浅层热点复读", "response": "chat", "message": "聊聊"},
+                "domain",
+                "浅层热点复读",
+            ),
+        ],
+    )
+    def test_contextual_chat_failure_is_safe_and_has_no_success_side_effects(
+        self,
+        endpoint: str,
+        payload: dict[str, str],
+        identity_key: str,
+        identity_value: str,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.llm.service import LLMResponseContentError
+
+        class FakeDialogue:
+            async def respond(self, _message: str) -> str:
+                raise LLMResponseContentError("LLM returned an empty response")
+
+        class FakeMemory:
+            def __init__(self) -> None:
+                self.updates: list[dict[str, object]] = []
+
+            def load_cognition_updates(self) -> list[dict[str, object]]:
+                return list(self.updates)
+
+            def save_cognition_updates(self, updates: list[dict[str, object]]) -> None:
+                self.updates = list(updates)
+
+        class FakeEventHub:
+            def __init__(self) -> None:
+                self.events: list[dict[str, object]] = []
+
+            async def publish(self, event: dict[str, object]) -> None:
+                self.events.append(event)
+
+        memory = FakeMemory()
+        event_hub = FakeEventHub()
+        speculator = object()
+        app = create_app(
+            memory_manager=memory,
+            database=object(),
+            soul_engine=SimpleNamespace(
+                _speculator=speculator,
+                _avoidance_speculator=speculator,
+            ),
+            dialogue=FakeDialogue(),
+            runtime_controller=SimpleNamespace(event_hub=event_hub),
+        )
+        client = TestClient(app)
+
+        response = client.post(endpoint, json=payload)
+
+        assert response.status_code == 200
+        body = response.json()
+        assert set(body) == {"ok", "action", identity_key, "reply"}
+        assert body == {
+            "ok": False,
+            "action": "chat",
+            identity_key: identity_value,
+            "reply": body["reply"],
+        }
+        assert "空响应" in body["reply"]
+        assert "LLM returned an empty response" not in body["reply"]
+        assert memory.updates == []
+        assert event_hub.events == []
 
     def test_delight_dislike_marks_candidate_consumed(self) -> None:
         from fastapi.testclient import TestClient
