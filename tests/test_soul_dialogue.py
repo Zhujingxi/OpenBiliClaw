@@ -147,6 +147,151 @@ async def test_cancelled_dialogue_rolls_back_history_and_never_learns() -> None:
     soul_engine.learn_from_dialogue.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_concurrent_typed_failure_does_not_remove_successful_turn() -> None:
+    success_started = asyncio.Event()
+    release_success = asyncio.Event()
+    failure_started = asyncio.Event()
+    release_failure = asyncio.Event()
+    failure = LLMResponseContentError("LLM returned an empty response")
+
+    class OverlappingService:
+        async def complete_socratic_dialogue(
+            self,
+            *,
+            user_message: str,
+            history: list[dict[str, str]],
+            caller: str = "",
+        ) -> LLMResponse:
+            if user_message == "成功消息":
+                success_started.set()
+                await release_success.wait()
+                return LLMResponse(content="成功回复")
+            failure_started.set()
+            await release_failure.wait()
+            raise failure
+
+    dialogue = SocraticDialogue(
+        llm=None,
+        soul_engine=FakeSoulEngine(),
+        llm_service=OverlappingService(),
+    )
+    success_task = asyncio.create_task(dialogue.respond("成功消息"))
+    await success_started.wait()
+    failure_task = asyncio.create_task(dialogue.respond("失败消息"))
+    await asyncio.sleep(0)
+    assert not failure_task.done()
+
+    release_success.set()
+    assert await success_task == "成功回复"
+    await failure_started.wait()
+    release_failure.set()
+    with pytest.raises(LLMResponseContentError) as raised:
+        await failure_task
+
+    assert raised.value is failure
+    assert [(turn.role, turn.content) for turn in dialogue.history] == [
+        ("user", "成功消息"),
+        ("agent", "成功回复"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cancellation_does_not_orphan_successful_tool_turn() -> None:
+    cancelled_started = asyncio.Event()
+    release_cancelled = asyncio.Event()
+    success_started = asyncio.Event()
+    release_success = asyncio.Event()
+
+    class OverlappingToolService:
+        async def complete_with_tools(self, **kwargs: object) -> LLMResponse:
+            user_message = str(kwargs["user_input"])
+            if user_message == "取消消息":
+                cancelled_started.set()
+                await release_cancelled.wait()
+                return LLMResponse(content="不应返回")
+            success_started.set()
+            await release_success.wait()
+            return LLMResponse(content="工具路径成功回复")
+
+    soul_engine = SimpleNamespace(learn_from_dialogue=AsyncMock())
+    dialogue = SocraticDialogue(
+        llm=None,
+        soul_engine=soul_engine,
+        llm_service=OverlappingToolService(),
+        tools=[{"name": "noop"}],
+        tool_dispatcher=object(),
+    )
+    cancelled_task = asyncio.create_task(dialogue.respond("取消消息"))
+    await cancelled_started.wait()
+    success_task = asyncio.create_task(dialogue.respond("成功消息"))
+    await asyncio.sleep(0)
+    assert not success_task.done()
+
+    cancelled_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_task
+    await success_started.wait()
+    release_success.set()
+    assert await success_task == "工具路径成功回复"
+    await asyncio.sleep(0)
+
+    assert [(turn.role, turn.content) for turn in dialogue.history] == [
+        ("user", "成功消息"),
+        ("agent", "工具路径成功回复"),
+    ]
+    soul_engine.learn_from_dialogue.assert_awaited_once_with(
+        user_message="成功消息",
+        assistant_reply="工具路径成功回复",
+        session="cli",
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancellation_while_waiting_does_not_start_or_mutate_turn() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingService:
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+
+        async def complete_socratic_dialogue(
+            self,
+            *,
+            user_message: str,
+            history: list[dict[str, str]],
+            caller: str = "",
+        ) -> LLMResponse:
+            self.messages.append(user_message)
+            started.set()
+            await release.wait()
+            return LLMResponse(content="成功回复")
+
+    service = BlockingService()
+    dialogue = SocraticDialogue(
+        llm=None,
+        soul_engine=FakeSoulEngine(),
+        llm_service=service,
+    )
+    success_task = asyncio.create_task(dialogue.respond("成功消息"))
+    await started.wait()
+    waiting_task = asyncio.create_task(dialogue.respond("等待时取消"))
+    await asyncio.sleep(0)
+
+    waiting_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting_task
+    release.set()
+    assert await success_task == "成功回复"
+
+    assert service.messages == ["成功消息"]
+    assert [(turn.role, turn.content) for turn in dialogue.history] == [
+        ("user", "成功消息"),
+        ("agent", "成功回复"),
+    ]
+
+
 def test_dialogue_clear_history_resets_turns() -> None:
     dialogue = SocraticDialogue(
         llm=None,

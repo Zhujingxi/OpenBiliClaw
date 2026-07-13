@@ -33,7 +33,7 @@
 | Init chunk cognition context | ✅ | 初始化偏好分片可顺带输出 `awareness_candidates` / `insight_candidates`；`PreferenceAnalyzer` 去重合并为私有 `_init_cognition_context`，`SoulEngine` 只在紧接着的 `build_initial_profile()` 中作为 prompt 上下文消费，不写入长期 `preference.json`、`awareness.json` 或 `insight.json` |
 | filter_events_by_satisfaction | ✅ | `soul/event_filters.py` 中的纯函数，按 `inferred_satisfaction` 过滤事件，`"unknown"` 同时匹配缺失 / `None`，使 pre-migration 老行可被显式 opt-in 保留 |
 | recent_negative_exemplars | ✅ | `soul/negative_exemplars.py` 中的纯函数，从事件层拉最近 negative 标题做 recency 加权（半衰期默认 14d）+ 前缀去重 + 80 字截断，最多返回 16 条 `{title, reason, age_days}`。下游消费者是 `discovery/engine.ContentDiscoveryEngine._evaluate_batch` 和 `recommendation/engine.RecommendationEngine._classify_batch`，二者都会把列表作为 `negative_examples` 透传给 batch evaluator prompt——这是 [inferred_satisfaction 信号](#) 的第二个消费方（第一个是上面的 `filter_events_by_satisfaction`） |
-| SocraticDialogue.respond() | ✅ | 通过 LLMService 调用 LLM，自动注入画像；用户 turn 在真实回复完成前仅为临时历史，异常/取消会回滚，且不触发学习 |
+| SocraticDialogue.respond() | ✅ | 通过 LLMService 调用 LLM，自动注入画像；同一 dialogue 实例逐轮串行执行普通与工具调用，用户 turn 在真实回复完成前仅为临时历史，异常/取消只回滚本轮且不触发学习 |
 | ProfileBuilder | ✅ | 结构化 prompt + JSON 校验 + `OnionProfile` 构建；`build_soul_profile_prompt()` 的 system prompt 保持静态，user prompt 按 `<tone_profile>` → `<preference_summary>` → `<recent_awareness>` → `<active_insights>` → `<history_summary>` 排列并使用确定性 JSON，让超大的历史摘要位于 provider cache 前缀末端 |
 | SoulEngine.build_initial_profile() | ✅ | 从 history + preference 生成并持久化 `soul.json` |
 | SoulEngine.get_profile() | ✅ | 从 soul 层读取画像并叠加用户覆盖层返回**有效画像**，未初始化时抛明确异常 |
@@ -802,7 +802,7 @@ print(dialogue.history)  # [DialogueTurn(role="user", ...), DialogueTurn(role="a
 dialogue.clear_history()
 ```
 
-`respond()` 只在得到非空的真实回复后才追加 agent turn，并将完整的 user+agent 对交给 `learn_from_dialogue()`。LLM 异常、超时或任务取消会删除本轮临时 user turn 并原样重抛，失败内容不进入历史或长期学习。
+`respond()` 只在得到非空的真实回复后才追加 agent turn，并将完整的 user+agent 对交给 `learn_from_dialogue()`。每个 `SocraticDialogue` 实例用独立异步锁串行执行完整 turn 事务，普通回复与工具调用共享同一顺序；等待锁时取消不会改动历史，持锁期间的 LLM 异常、超时或取消只删除本轮临时 user turn 并原样重抛，失败内容不进入历史或长期学习。
 
 ### PreferenceAnalyzer
 
@@ -1081,7 +1081,7 @@ tone = build_tone_profile(
 
 1. **偏好提取用 json_mode**：确保 LLM 返回结构化 JSON，便于程序处理
 2. **标量分类不用 json_mode**：兴趣探针聊天情绪只需要 `strong_positive / weak_positive / neutral / negative` 单词，走普通文本调用；只有真正返回 JSON 的任务才启用 structured task
-3. **对话错误透明传播**：`SocraticDialogue` 回滚本轮临时历史并重抛类型异常；API / CLI / OpenClaw 公共边界再转换为安全中文错因
+3. **对话事务按实例串行**：`SocraticDialogue` 用实例级异步锁覆盖 user turn 暂存、普通/工具 LLM 调用、agent turn 提交或回滚以及学习任务调度；异常与取消只回滚自己的临时 turn 并透明重抛，API / CLI / OpenClaw 公共边界再转换为安全中文错因
 4. **`_build_service()` 回退**：未注入 LLMService 时从 SoulEngine 自动构建
 5. **历史格式转换**：`agent` → `assistant` 角色映射，适配 OpenAI 消息格式
 6. **画像生成独立为 `ProfileBuilder`**：避免把 prompt/JSON 校验逻辑塞进 `SoulEngine`
