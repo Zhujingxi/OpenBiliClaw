@@ -308,13 +308,20 @@ async def test_new_refill_precedes_queued_maintenance_on_next_release() -> None:
     await _wait_until(lambda: gate.status_payload()["llm_maintenance_waiting"] == 1)
     gate.update_inventory(available=1, target=20)
     refill_entered = asyncio.Event()
+    refill_release = asyncio.Event()
     refill = asyncio.create_task(
-        _enter_and_hold(gate, "recommendation.write_expression", refill_entered)
+        _enter_and_hold(
+            gate,
+            "recommendation.write_expression",
+            refill_entered,
+            refill_release,
+        )
     )
     await _wait_until(lambda: gate.status_payload()["llm_refill_waiting"] == 1)
     releases[0].set()
     await asyncio.wait_for(refill_entered.wait(), timeout=1)
     assert not maintenance_entered.is_set()
+    refill_release.set()
     for event in releases[1:]:
         event.set()
     await asyncio.gather(*holders, queued_maintenance, refill)

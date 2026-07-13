@@ -6,7 +6,7 @@
 
 ## v0.3.164：WebUI 可配置的海外出口代理（issue #89，2026-07-12）
 
-- **Linux CI 并发回归去抖**：refill 优先级测试先确认新 refill waiter 已实际入队再释放 background 槽，避免把事件循环调度先后误判为门控失效；50 轮持续补货 E2E 继续由每轮 2 秒功能超时守卫，移除会受共享 runner 负载影响的额外 1 秒墙钟断言。
+- **Linux CI 并发回归去抖**：refill 优先级测试先确认新 refill waiter 已实际入队，并持有其槽位到优先顺序断言完成，避免把 refill 正常退出后的 maintenance 准入误判为门控失效；50 轮持续补货 E2E 继续由每轮 2 秒功能超时守卫，移除会受共享 runner 负载影响的额外 1 秒墙钟断言。
 - **OpenAI-compatible 结构化 JSON 合约兼容**：`LLMService` 的普通 / 多模态 structured 路径会把已有大写 `JSON` 归一为小写 `json`，若完全缺失则只追加最小 `json` 标记，满足部分兼容端点在 `response_format=json_object` 下的字面消息检查；非结构化调用、业务提示、画像、准入阈值、user 内容和 core-memory 排序均不变。
 - **候选批量评估不再虚占 16384 输出 token 配额**：文本与多模态 evaluator 的单次 `max_tokens` 统一收敛为 4096，仍覆盖生产观测中 30 条 JSON 评分约 1500–3000 tokens 的输出，同时避免 OpenAI-compatible 服务按声明上限预留额度并对 8 条真实评估直接返回 `insufficient_quota`。真实商汤回归覆盖空池补货、全部消费后再次评估 / 入池 / 文案回填，以及后台 3 槽占用时交互第 4 槽仍可进入。
 - **结构化批处理失败不再放大成请求风暴**：推荐文案与候选评估把 provider 异常和成功响应的 payload 缺项分开处理；429、timeout、connection、5xx 每轮只调用一次 provider，鉴权/缺 provider 暂停等待配置唤醒。malformed 成功响应先持久化有效 keyed sibling，仅对缺失成员做 depth=3、最多六次额外请求的有界重试；仍缺失的文案保持 pending，评估候选按 claim token 无 attempt 增量地回到 `pending_eval`。协调器 transient 退避统一为 15/30/60/120/300 秒并尊重更长 `Retry-After`。
