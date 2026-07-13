@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from openbiliclaw.llm.base import LLMResponse
-from openbiliclaw.llm.service import LLMServiceError, ModuleOverride
+from openbiliclaw.llm.service import LLMResponseContentError, ModuleOverride
 from openbiliclaw.soul.dialogue import DialogueTurn, SocraticDialogue
 
 
@@ -93,24 +94,57 @@ async def test_dialogue_respond_passes_prior_history_to_service() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dialogue_respond_returns_graceful_fallback_on_service_error() -> None:
-    service = FakeService(error=LLMServiceError("provider down"))
-    soul_engine = FakeSoulEngine()
+async def test_failed_dialogue_rolls_back_history_and_never_learns() -> None:
+    service = FakeService(error=LLMResponseContentError("LLM returned an empty response"))
+    soul_engine = SimpleNamespace(learn_from_dialogue=AsyncMock())
     dialogue = SocraticDialogue(
         llm=None,
         soul_engine=soul_engine,
         llm_service=service,
+        session="popup",
     )
 
-    reply = await dialogue.respond("我有点说不清自己最近为什么总在刷同一类视频。")
-    await asyncio.sleep(0)  # let background learn task run
+    with pytest.raises(LLMResponseContentError):
+        await dialogue.respond("这是不能被学进去的内容")
 
-    assert "换个说法" in reply
-    assert len(dialogue.history) == 2
-    assert dialogue.history[1].content == reply
-    assert soul_engine.learn_calls == [
-        "cli:我有点说不清自己最近为什么总在刷同一类视频。->我刚刚思路断了一下，你可以换个说法再告诉我一次吗？"
-    ]
+    assert dialogue.history == []
+    soul_engine.learn_from_dialogue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_dialogue_rolls_back_history_and_never_learns() -> None:
+    started = asyncio.Event()
+    blocked = asyncio.Event()
+
+    class BlockingService:
+        async def complete_socratic_dialogue(
+            self,
+            *,
+            user_message: str,
+            history: list[dict[str, str]],
+            caller: str = "",
+        ) -> LLMResponse:
+            started.set()
+            await blocked.wait()
+            return LLMResponse(content="不应返回")
+
+    soul_engine = SimpleNamespace(learn_from_dialogue=AsyncMock())
+    dialogue = SocraticDialogue(
+        llm=None,
+        soul_engine=soul_engine,
+        llm_service=BlockingService(),
+        session="popup",
+    )
+
+    task = asyncio.create_task(dialogue.respond("取消也不能留下历史"))
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert dialogue.history == []
+    soul_engine.learn_from_dialogue.assert_not_awaited()
 
 
 def test_dialogue_clear_history_resets_turns() -> None:

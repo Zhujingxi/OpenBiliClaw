@@ -4311,7 +4311,7 @@ function renderChatTurn(turn) {
     return;
   }
   if (status === "failed") {
-    const message = turn.reply || "刚刚没发出去，换个说法再试试。";
+    const message = turn.error || "刚刚没发出去，换个说法再试试。";
     if (assistantPart instanceof HTMLElement) {
       replaceChatThinkingPlaceholder(assistantPart, message);
     } else {

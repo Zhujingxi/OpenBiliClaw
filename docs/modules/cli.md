@@ -1025,7 +1025,7 @@ openbiliclaw init
 
 ### `openbiliclaw chat`
 
-进入持续对话模式，复用 `SocraticDialogue` 的多轮历史。输入 `exit`、`quit` 或空行可结束。聊天内容会先记录为 `dialogue` 事件，并以受控方式积累到长期理解候选中，不会因为一句话立刻改写画像。
+进入持续对话模式，复用 `SocraticDialogue` 的多轮历史。输入 `exit`、`quit` 或空行可结束。聊天内容仅在得到真实回复后以受控方式积累到长期理解候选中，不会因为一句话立刻改写画像。单轮 LLM 失败会打印安全、可操作的错因（不显示上游异常原文），REPL 继续接受下一轮输入。
 
 ```bash
 $ openbiliclaw chat

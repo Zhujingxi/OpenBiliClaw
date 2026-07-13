@@ -2223,6 +2223,40 @@ def test_chat_runs_single_turn_and_prints_reply(
     assert "我听见你在说：我最近总在刷讲结构的视频。" in result.stdout
 
 
+def test_chat_reports_safe_turn_failure_and_keeps_loop_usable(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    from openbiliclaw.llm.service import LLMResponseContentError
+
+    class FakeSoulEngine:
+        async def get_profile(self) -> SoulProfile:
+            return SoulProfile(personality_portrait="稳定用户画像" * 30)
+
+    class FakeDialogue:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def respond(self, user_message: str) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                raise LLMResponseContentError("sk-live-secret")
+            return f"第二轮成功：{user_message}"
+
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine(), raising=False)
+    monkeypatch.setattr(
+        cli_module, "_build_dialogue", lambda soul_engine: FakeDialogue(), raising=False
+    )
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["chat"], input="第一轮\n第二轮\nexit\n")
+
+    assert result.exit_code == 0
+    assert "空响应" in result.stdout
+    assert "sk-live-secret" not in result.stdout
+    assert "第二轮成功：第二轮" in result.stdout
+
+
 def test_chat_exits_cleanly_on_exit_command(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner
 ) -> None:

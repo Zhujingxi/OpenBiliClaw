@@ -22,7 +22,7 @@
 | 任务 | 状态 | 说明 |
 |------|------|------|
 | OpenClaw bootstrap | ✅ | 新增 `build_openclaw_adapter_services()`，复用现有 API bootstrap 的依赖装配顺序；B 站四个 discovery strategy 共用 adapter database，保证内部 evaluator 能读取近期 negative exemplars；direct controller 会接入同一份 scheduler pause gate、独立 `PresenceTracker` 和 config-backed LLM module overrides；精简/旧配置缺少 `[llm].concurrency` 时回落到默认并发 3 |
-| OpenClaw adapter operations | ✅ | 已提供 `sync_account / get_profile / recommend / submit_feedback / get_runtime_status` |
+| OpenClaw adapter operations | ✅ | 已提供 `sync_account / get_profile / recommend / submit_feedback / get_runtime_status / chat`；chat 失败转为携带安全 LLM 分类文案的 `AdapterOperationError`，不暴露原始上游细节 |
 | OpenClaw skill descriptors | ✅ | 已提供协议中立的 skill descriptor 列表与 async handler |
 | OpenClaw CLI bridge | ✅ | 已提供 `python -m openbiliclaw.integrations.openclaw.cli`，输出稳定 JSON |
 | OpenClaw 主动探针闭环 | ✅ | OpenClaw 可拉取/响应 `interest.probe` 与 `avoidance.probe`；`listen` 默认转发 `delight.candidate`、`interest.probe` 和 `avoidance.probe` |
@@ -62,6 +62,7 @@ skills = build_openclaw_skills(adapter)
 - `recommend(limit=5, refresh_if_needed=True)`
 - `submit_feedback(request)`
 - `get_runtime_status()`
+- `chat(request)`：成功返回 `ChatResponse`；失败抛出包含 `safe_llm_failure_message()` 分类文案的 `AdapterOperationError`，同时用 `raise ... from exc` 保留内部 cause 供日志/调试，不序列化该 cause
 - `get_next_probe()`
 - `get_next_avoidance_probe()`
 - `respond_avoidance_probe(request)`

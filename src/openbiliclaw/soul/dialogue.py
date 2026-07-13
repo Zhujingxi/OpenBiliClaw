@@ -83,8 +83,7 @@ class SocraticDialogue:
         Returns:
             Agent's response.
         """
-        from openbiliclaw.llm.service import LLMServiceError
-
+        history_length = len(self._history)
         self._history.append(DialogueTurn(role="user", content=user_message))
 
         try:
@@ -100,9 +99,10 @@ class SocraticDialogue:
                     caller="soul.dialogue",
                 )
                 reply = response.content
-        except (LLMServiceError, RuntimeError):
+        except BaseException:
+            del self._history[history_length:]
             logger.exception("Failed to generate Socratic dialogue response.")
-            reply = "我刚刚思路断了一下，你可以换个说法再告诉我一次吗？"
+            raise
 
         self._history.append(DialogueTurn(role="agent", content=reply))
         learn_fn = getattr(self._soul_engine, "learn_from_dialogue", None)

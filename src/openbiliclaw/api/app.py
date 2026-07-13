@@ -135,6 +135,7 @@ from openbiliclaw.api.models import (
     ZhihuLoginStateResponse,
     ZhihuSourceConfigOut,
 )
+from openbiliclaw.llm.base import safe_llm_failure_message
 from openbiliclaw.runtime import embedding_progress
 from openbiliclaw.runtime.feedback_scheduler import FeedbackBatchScheduler
 from openbiliclaw.runtime.image_cache import (
@@ -4967,31 +4968,28 @@ def create_app(
             raw_message = f"聊聊你为什么觉得「{title or bvid}」我会喜欢"
         contextual_message = f"[关于惊喜推荐「{title or bvid}」的反馈] {raw_message}"
         if ctx.dialogue is None:
+            exc = RuntimeError("Dialogue service is not configured.")
             return JSONResponse(
-                content={"ok": False, "action": "chat", "bvid": bvid, "reply": "对话引擎暂不可用。"}
+                content={
+                    "ok": False,
+                    "action": "chat",
+                    "bvid": bvid,
+                    "reply": safe_llm_failure_message(exc),
+                }
             )
         concurrency = getattr(ctx.discovery_engine, "_concurrency", None)
         if concurrency is not None:
             concurrency.chat_active = True
         try:
             reply = await asyncio.wait_for(ctx.dialogue.respond(contextual_message), timeout=30)
-        except TimeoutError:
-            return JSONResponse(
-                content={
-                    "ok": False,
-                    "action": "chat",
-                    "bvid": bvid,
-                    "reply": "后台正忙，等一下再聊。",
-                }
-            )
-        except Exception:
+        except Exception as exc:
             logger.exception("Dialogue failed for delight chat: %s", bvid)
             return JSONResponse(
                 content={
                     "ok": False,
                     "action": "chat",
                     "bvid": bvid,
-                    "reply": "聊天出了点问题，稍后再试。",
+                    "reply": safe_llm_failure_message(exc),
                 }
             )
         finally:
@@ -5036,11 +5034,9 @@ def create_app(
             # truncated essentially every reply. Extension's AbortController
             # is sized to be generous enough to cover this end-to-end.
             reply = await asyncio.wait_for(ctx.dialogue.respond(message), timeout=120)
-        except TimeoutError:
-            reply = "后台正忙，等一下再聊。"
-        except Exception:
+        except Exception as exc:
             logger.exception("Chat dialogue failed")
-            reply = "聊天出了点问题，稍后再试。"
+            reply = safe_llm_failure_message(exc)
         finally:
             if concurrency is not None:
                 concurrency.chat_active = False
@@ -5492,7 +5488,7 @@ def create_app(
 
     async def _generate_durable_chat_reply(turn: ChatTurnOut) -> str:
         if ctx.dialogue is None:
-            return "对话引擎暂不可用。"
+            raise RuntimeError("Dialogue service is not configured.")
 
         concurrency = getattr(ctx.discovery_engine, "_concurrency", None)
         if concurrency is not None:
@@ -5504,14 +5500,14 @@ def create_app(
                     timeout=120,
                 )
                 reply = str(reply)
-        except TimeoutError:
-            return "后台正忙，等一下再聊。"
-        except Exception:
-            logger.exception("Durable chat turn failed: %s", turn.turn_id)
-            return "聊天出了点问题，稍后再试。"
         finally:
             if concurrency is not None:
                 concurrency.chat_active = False
+
+        if not reply.strip():
+            from openbiliclaw.llm.service import LLMResponseContentError
+
+            raise LLMResponseContentError("LLM returned an empty response")
 
         if turn.scope == "delight":
             label = turn.subject_title or turn.subject_id
@@ -5683,7 +5679,11 @@ def create_app(
             _complete_chat_turn_row(turn_id, reply=reply)
         except Exception as exc:
             logger.exception("Failed to complete durable chat turn %s", turn_id)
-            _fail_chat_turn_row(turn_id, error=str(exc), reply="聊天出了点问题，稍后再试。")
+            _fail_chat_turn_row(
+                turn_id,
+                error=safe_llm_failure_message(exc),
+                reply="",
+            )
         finally:
             running_chat_turn_tasks.discard(turn_id)
 
@@ -5978,7 +5978,13 @@ def create_app(
         # understand this is feedback on a specific speculated interest
         contextual_message = f"[关于猜测兴趣「{domain}」的反馈] {raw_message}"
         if ctx.dialogue is None:
-            return {"ok": False, "action": "chat", "domain": domain, "reply": "对话引擎暂不可用。"}
+            exc = RuntimeError("Dialogue service is not configured.")
+            return {
+                "ok": False,
+                "action": "chat",
+                "domain": domain,
+                "reply": safe_llm_failure_message(exc),
+            }
         # Pause discovery LLM calls while user is chatting
         concurrency = getattr(ctx.discovery_engine, "_concurrency", None)
         if concurrency is not None:
@@ -5990,20 +5996,13 @@ def create_app(
             )
             # Judge sentiment while discovery is still paused
             sentiment, classifier = await _classify_probe_sentiment(raw_message, reply, domain)
-        except TimeoutError:
-            return {
-                "ok": False,
-                "action": "chat",
-                "domain": domain,
-                "reply": "后台正忙，等一下再聊。",
-            }
-        except Exception:
+        except Exception as exc:
             logger.exception("Dialogue failed for probe chat: %s", domain)
             return {
                 "ok": False,
                 "action": "chat",
                 "domain": domain,
-                "reply": "聊天出了点问题，稍后再试。",
+                "reply": safe_llm_failure_message(exc),
             }
         finally:
             if concurrency is not None:
@@ -6269,7 +6268,13 @@ def create_app(
             raw_message = f"我想聊聊你猜我可能想避开的「{domain}」这个方向"
         contextual_message = f"[关于避雷方向「{domain}」的反馈] {raw_message}"
         if ctx.dialogue is None:
-            return {"ok": False, "action": "chat", "domain": domain, "reply": "对话引擎暂不可用。"}
+            exc = RuntimeError("Dialogue service is not configured.")
+            return {
+                "ok": False,
+                "action": "chat",
+                "domain": domain,
+                "reply": safe_llm_failure_message(exc),
+            }
 
         concurrency = getattr(ctx.discovery_engine, "_concurrency", None)
         if concurrency is not None:
@@ -6284,20 +6289,13 @@ def create_app(
                 reply,
                 domain,
             )
-        except TimeoutError:
-            return {
-                "ok": False,
-                "action": "chat",
-                "domain": domain,
-                "reply": "后台正忙，等一下再聊。",
-            }
-        except Exception:
+        except Exception as exc:
             logger.exception("Dialogue failed for avoidance probe chat: %s", domain)
             return {
                 "ok": False,
                 "action": "chat",
                 "domain": domain,
-                "reply": "聊天出了点问题，稍后再试。",
+                "reply": safe_llm_failure_message(exc),
             }
         finally:
             if concurrency is not None:

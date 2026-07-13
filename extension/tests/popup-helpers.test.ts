@@ -1781,6 +1781,13 @@ test("getConnectionBadgeState returns compact status copy for popup header", () 
   });
 });
 
+test("popup failed chat turn renders durable error", () => {
+  const popupSource = readFileSync(resolve(import.meta.dirname, "../popup/popup.js"), "utf8");
+
+  assert.match(popupSource, /status === "failed"/);
+  assert.match(popupSource, /const message = turn\.error \|\| "刚刚没发出去，换个说法再试试。"/);
+});
+
 test("getHintBannerState normalizes supported tones", () => {
   assert.deepEqual(getHintBannerState("success"), {
     tone: "success",

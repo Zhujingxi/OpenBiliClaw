@@ -54,6 +54,13 @@ def test_desktop_hydration_does_not_gate_cards_on_secondary_resources() -> None:
     assert "ENDPOINTS.ping" in body
 
 
+def test_desktop_failed_chat_turn_renders_durable_error() -> None:
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    assert 'status === "failed"' in app_js
+    assert 'turn.error || "这句还没发出去，稍后再试。"' in app_js
+
+
 def test_desktop_auth_probe_times_out_without_assuming_authentication() -> None:
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
     body = _function_body(app_js, "fetchAuthStatus")

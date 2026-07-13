@@ -53,6 +53,13 @@ def test_mobile_delight_inline_chat_uses_shared_session_helper() -> None:
     assert 'fetchChatTurns({ session: "mobile"' not in js
 
 
+def test_mobile_failed_chat_turn_renders_durable_error() -> None:
+    chat_js = (ROOT / "src/openbiliclaw/web/js/views/chat.js").read_text()
+
+    assert 'turn.status === "error" || turn.status === "failed"' in chat_js
+    assert 'errBubble.textContent = turn.error || "\\u56DE\\u590D\\u5931\\u8D25"' in chat_js
+
+
 def test_mobile_delight_status_and_actions_render_independently() -> None:
     """Liked delights retain actions while terminal negative/view states can hide them."""
 

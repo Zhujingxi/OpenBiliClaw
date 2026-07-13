@@ -44,6 +44,20 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 - `AvoidanceSpeculator` — 不喜欢领域探针；未确认前只展示给用户确认，不进入推荐过滤，确认后通过共享 dislike writeback 写入 `disliked_topics` 并清理候选池
 - 苏格拉底式用户对话
 
+对话链路的失败边界是端到端一致的：
+
+```text
+Web / CLI / OpenClaw
+        │ dialogue request
+        ▼
+SocraticDialogue ── success ──> user+agent history ──> background learning
+        │
+        └─ failure/timeout ──> rollback provisional history
+                              └─> boundary-safe error / failed durable turn
+```
+
+Web durable turn 只在成功回复后记录认知并发布成功事件；失败行的 `reply` 为空、`error` 为安全分类文案。桌面 Web 首屏的推荐读取、runtime 读取与 health/profile/activity/config 等次级 hydration 保持三个独立分支，任一慢请求不阻塞其余分支渲染。
+
 ### Memory System (`memory/`)
 - 五层网状记忆管理
 - 跨层关联和双向修正

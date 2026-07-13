@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
+from openbiliclaw.llm.base import safe_llm_failure_message
 from openbiliclaw.soul.avoidance_speculator import choose_next_avoidance_candidate
 from openbiliclaw.soul.dislike_writeback import apply_new_dislikes, topics_for_confirmed_avoidance
 from openbiliclaw.soul.speculator import (
@@ -300,7 +301,8 @@ class OpenClawAdapter:
             )
             reply = await dialogue.respond(request.message)
         except Exception as exc:  # pragma: no cover - defensive adapter boundary
-            raise AdapterOperationError("Failed to run Socratic dialogue turn.") from exc
+            message = safe_llm_failure_message(exc)
+            raise AdapterOperationError(f"Failed to run Socratic dialogue turn: {message}") from exc
         return ChatResponse(reply=str(reply), session=request.session)
 
     async def get_next_probe(self) -> InterestProbeResponse:
