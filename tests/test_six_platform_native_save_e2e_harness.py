@@ -311,6 +311,37 @@ def test_backend_native_save_e2e_models_fail_closed_for_mixed_or_unsafe_payloads
         )
 
 
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "native_content_not_ready",
+        "native_control_not_found",
+        "native_dialog_not_opened",
+        "native_target_not_found",
+        "native_request_rejected",
+        "native_confirmation_not_observed",
+    ],
+)
+def test_backend_native_save_e2e_models_accept_safe_stage_codes(error_code: str) -> None:
+    from openbiliclaw.api.models import ExtensionE2EResultIn
+
+    result = ExtensionE2EResultIn(
+        run_id="e2e-test",
+        token="callback-token",
+        native_save_result={
+            "platform": "reddit",
+            "action": "favorite",
+            "content_id": "t3_public1",
+            "expected_target": "Reddit Saved",
+            "task_status": "failed",
+            "error_code": error_code,
+        },
+    )
+
+    assert result.native_save_result is not None
+    assert result.native_save_result.error_code == error_code
+
+
 def test_backend_native_save_e2e_run_publishes_only_dedicated_authorization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

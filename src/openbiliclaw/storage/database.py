@@ -101,6 +101,14 @@ _EXTENSION_NATIVE_SAVE_RESULT_MESSAGES = {
     ),
     ("failed", "native_save_failed"): "Platform native save failed",
     ("failed", "native_save_timeout"): "Platform native-save task timed out",
+    ("failed", "native_content_not_ready"): "Platform content did not become ready",
+    ("failed", "native_control_not_found"): "Platform save control was not found",
+    ("failed", "native_dialog_not_opened"): "Platform save dialog did not open",
+    ("failed", "native_target_not_found"): "Platform save target was not found uniquely",
+    ("failed", "native_request_rejected"): "Platform native-save request was rejected",
+    ("failed", "native_confirmation_not_observed"): (
+        "Platform native-save confirmation was not observed"
+    ),
 }
 _BVID_PATTERN = re.compile(r"(BV[0-9A-Za-z]+)")
 _LOCAL_EVIDENCE_CJK_RE = re.compile(r"[\u4e00-\u9fff]")

@@ -301,6 +301,38 @@ def test_result_persists_only_backend_owned_safe_message(
     assert "<html>" not in str(row)
 
 
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "native_content_not_ready",
+        "native_control_not_found",
+        "native_dialog_not_opened",
+        "native_target_not_found",
+        "native_request_rejected",
+        "native_confirmation_not_observed",
+    ],
+)
+def test_result_accepts_backend_owned_native_save_stage_codes(
+    database: Database,
+    error_code: str,
+) -> None:
+    job = make_claimed_job(database)
+
+    assert database.complete_extension_native_save_job(
+        str(job["job_id"]),
+        "x",
+        "twitter:123",
+        "failed",
+        error_code,
+        "extension detail must not persist",
+    )
+    row = database.get_extension_native_save_job(str(job["job_id"]))
+    assert row is not None
+    assert row["last_error_code"] == error_code
+    assert row["last_error_message"]
+    assert "extension detail" not in str(row)
+
+
 def test_result_rejects_unknown_code_and_unicode_control(database: Database) -> None:
     unknown_code_job = make_claimed_job(database)
     with pytest.raises(ValueError):
