@@ -9332,11 +9332,14 @@ def create_app(
         in chrome://extensions.
 
         Best-effort — silent when no event-hub is wired."""
+        delivered = False
         publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
         if callable(publish):
             with suppress(Exception):
-                await publish({"type": "extension_reload", "source": "dev"})
-        return {"ok": True}
+                delivered = bool(
+                    await publish({"type": "extension_reload", "source": "dev"})
+                )
+        return {"ok": True, "delivered": delivered}
 
     def _autostart_status_out(
         request: Request,

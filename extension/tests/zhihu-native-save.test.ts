@@ -151,12 +151,6 @@ test("Zhihu native save reports the exact control, dialog, target, and confirmat
   const cases: Array<[ZhihuNativeSaveEnvironment, string]> = [
     [fixture(task, { dialogReadyAfterSleeps: 100 }), "native_control_not_found"],
     [fixture(task, { dialogAvailable: false }), "native_dialog_not_opened"],
-    [
-      fixture(task, {
-        initialRows: [{ title: "OpenBiliClaw" }, { title: "OpenBiliClaw", checked: true }],
-      }),
-      "native_target_not_found",
-    ],
     [fixture(task, { confirmAfterClick: false }), "native_confirmation_not_observed"],
     [
       fixture(task, { initialRows: [{ title: "Other" }], createSucceeds: false }),
@@ -230,31 +224,28 @@ test("Zhihu favorite and watch_later both resolve only to exact OpenBiliClaw fav
   }
 });
 
-test("Zhihu native save uses exact case-sensitive Unicode title and fails ambiguous duplicates", async () => {
+test("Zhihu native save uses exact case-sensitive Unicode title and resolves exact duplicates deterministically", async () => {
   const task = taskFor("question", "1001");
   const caseEnv = fixture(task, { initialRows: [{ title: "openbiliclaw" }] });
   assert.deepEqual(await saveZhihu(task, caseEnv), { status: "synced" });
-  assert.deepEqual(caseEnv.actions, ["open", "create:OpenBiliClaw", "close", "open", "select:OpenBiliClaw"]);
+  assert.deepEqual(caseEnv.actions, ["open", "create:OpenBiliClaw", "select:OpenBiliClaw"]);
 
   const duplicateEnv = fixture(task, {
-    initialRows: [{ title: "OpenBiliClaw" }, { title: "OpenBiliClaw", checked: true }],
+    initialRows: [{ title: "OpenBiliClaw" }, { title: "OpenBiliClaw" }],
   });
-  assert.deepEqual(await saveZhihu(task, duplicateEnv), {
-    status: "failed",
-    error_code: "native_target_not_found",
-  });
-  assert.equal(duplicateEnv.mutations, 0);
+  assert.deepEqual(await saveZhihu(task, duplicateEnv), { status: "synced" });
+  assert.equal(duplicateEnv.mutations, 1);
 });
 
-test("Zhihu native save creates exactly once then closes, reopens, re-queries, and selects unchecked row", async () => {
+test("Zhihu native save creates exactly once, reuses the refreshed dialog, and selects unchecked row", async () => {
   const task = taskFor("article", "3003");
   const env = fixture(task, { initialRows: [], createdChecked: false });
   assert.deepEqual(await saveZhihu(task, env), { status: "synced" });
-  assert.deepEqual(env.actions, ["open", "create:OpenBiliClaw", "close", "open", "select:OpenBiliClaw"]);
+  assert.deepEqual(env.actions, ["open", "create:OpenBiliClaw", "select:OpenBiliClaw"]);
   assert.equal(env.mutations, 2);
 });
 
-test("Zhihu native save polls the reopened dialog until the created exact row materializes", async () => {
+test("Zhihu native save polls the refreshed dialog until the created exact row materializes", async () => {
   const task = taskFor("article", "3003");
   const env = fixture(task, {
     initialRows: [],
@@ -475,6 +466,83 @@ test("Zhihu browser environment binds control, dialog, and row to the exact clos
   assert.equal(spacedClicks, 0);
 });
 
+test("Zhihu browser environment accepts one exact semantic collection row", async () => {
+  const task = taskFor("answer", "2002");
+  let dialogOpen = false;
+  const container = domElement({ attrs: { "data-answer-id": "2002" } });
+  const openButton = domElement({
+    attrs: { "aria-label": "收藏" },
+    parent: container,
+    click: () => { dialogOpen = true; },
+  });
+  (container as unknown as { querySelectorAll(selector: string): unknown[] }).querySelectorAll =
+    (selector: string) => selector.includes("button") ? [openButton] : [];
+  const semanticRow = domElement({ text: "OpenBiliClaw" });
+  const dialog = domElement({
+    attrs: { role: "dialog" },
+    query: (selector) => selector === "div, span" ? [semanticRow] : [],
+  });
+  (semanticRow as unknown as { parentElement: HTMLElement }).parentElement = dialog;
+  const root = {
+    defaultView: null,
+    querySelectorAll(selector: string) {
+      if (selector.includes("data-zop") || selector.includes("data-answer-id")) return [container];
+      if (selector.includes("[role='dialog']")) return dialogOpen ? [dialog] : [];
+      return [];
+    },
+  } as unknown as Document;
+  const env = createZhihuBrowserEnvironment(root, task.content_url);
+  assert.equal(await env.openCollectionDialog(), true);
+  assert.equal(env.findNamedCollections("OpenBiliClaw").length, 1);
+});
+
+test("Zhihu browser environment recognizes current Favlists row markup", async () => {
+  const task = taskFor("answer", "2002");
+  let dialogOpen = false;
+  const container = domElement({ attrs: { "data-answer-id": "2002" } });
+  const openButton = domElement({
+    attrs: { "aria-label": "收藏" },
+    parent: container,
+    click: () => { dialogOpen = true; },
+  });
+  (container as unknown as { querySelectorAll(selector: string): unknown[] }).querySelectorAll =
+    (selector: string) => selector.includes("button") ? [openButton] : [];
+  const title = domElement({ text: "OpenBiliClaw" });
+  let actionText = "收藏";
+  const action = domElement({ click: () => { actionText = "已收藏"; } });
+  (action as unknown as { textContent: string }).textContent = actionText;
+  (action as unknown as { getAttribute(name: string): string | null }).getAttribute =
+    (name) => name === "aria-label" ? actionText : null;
+  const row = domElement({
+    attrs: { class: "Favlists-item" },
+    text: "OpenBiliClaw0 条内容收藏",
+    query: (selector) => selector.includes("Favlists-itemName")
+      ? [title]
+      : selector.includes("Favlists-updateButton") ? [action] : [],
+  });
+  const dialog = domElement({
+    attrs: { role: "dialog" },
+    query: (selector) => selector.includes(".Favlists-item") ? [row] : [],
+  });
+  (title as unknown as { parentElement: HTMLElement }).parentElement = row;
+  (row as unknown as { parentElement: HTMLElement }).parentElement = dialog;
+  const root = {
+    defaultView: null,
+    querySelectorAll(selector: string) {
+      if (selector.includes("data-zop") || selector.includes("data-answer-id")) return [container];
+      if (selector.includes("[role='dialog']")) return dialogOpen ? [dialog] : [];
+      return [];
+    },
+  } as unknown as Document;
+  const env = createZhihuBrowserEnvironment(root, task.content_url);
+  assert.equal(await env.openCollectionDialog(), true);
+  const rows = env.findNamedCollections("OpenBiliClaw");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].isChecked(), false);
+  rows[0].click();
+  assert.equal(rows[0].isChecked(), true);
+});
+
 test("Zhihu browser rate evidence ignores stale, unrelated, and nested recommendation alerts but detects reused action alert", () => {
   const task = taskFor("question", "1001");
   let targetContainer: HTMLElement;
@@ -526,21 +594,33 @@ test("Zhihu browser creation waits for async form and deterministic confirmation
     proofAppears: boolean,
     detachedForm = false,
     confirmAvailable = true,
+    markerOnlyCreate = false,
+    nestedCreateControl = false,
+    semanticOnlyCreate = false,
+    ariaOnlyCreate = false,
+    createReadyAfterQueries = 0,
   ) => {
     const task = taskFor("question", "1001");
     let dialogOpen = false;
     let newClicked = false;
     let confirmClicks = 0;
     let inputQueries = 0;
+    let createQueries = 0;
     let container: HTMLElement;
     let dialog: HTMLElement;
     let formDialog: HTMLElement;
+    let nestedDialog: HTMLElement;
     const openButton = domElement({
       attrs: { "aria-label": "收藏" },
       click: () => { dialogOpen = true; },
     });
     const newButton = domElement({
-      text: detachedForm ? "+ 新建收藏夹" : "新建收藏夹",
+      attrs: markerOnlyCreate
+        ? { "data-testid": "create-collection" }
+        : ariaOnlyCreate ? { "aria-label": "创建新收藏夹" } : undefined,
+      text: markerOnlyCreate || ariaOnlyCreate
+        ? ""
+        : detachedForm ? "+ 新建收藏夹" : "新建收藏夹",
       click: () => { newClicked = true; },
     });
     const confirmButton = domElement({
@@ -551,7 +631,16 @@ test("Zhihu browser creation waits for async form and deterministic confirmation
     dialog = domElement({
       attrs: { role: "dialog" },
       query(selector) {
+        if (selector.includes("[aria-label]") && ariaOnlyCreate) return [newButton];
+        if (selector === "div, span") return semanticOnlyCreate && !ariaOnlyCreate ? [newButton] : [];
         if (selector.includes("button")) {
+          if (!newClicked) {
+            createQueries += 1;
+            if (createQueries <= createReadyAfterQueries) return [];
+          }
+          if (semanticOnlyCreate || ariaOnlyCreate) {
+            return newClicked && confirmAvailable ? [confirmButton] : [];
+          }
           return newClicked && !detachedForm && confirmAvailable
             ? [newButton, confirmButton]
             : [newButton];
@@ -566,6 +655,7 @@ test("Zhihu browser creation waits for async form and deterministic confirmation
         return [];
       },
     });
+    nestedDialog = domElement({ attrs: { role: "dialog" }, parent: dialog });
     formDialog = domElement({
       attrs: { role: "dialog" },
       query(selector) {
@@ -587,7 +677,9 @@ test("Zhihu browser creation waits for async form and deterministic confirmation
     for (const element of [openButton]) {
       (element as unknown as { parentElement: HTMLElement }).parentElement = container;
     }
-    (newButton as unknown as { parentElement: HTMLElement }).parentElement = dialog;
+    (newButton as unknown as { parentElement: HTMLElement }).parentElement = nestedCreateControl
+      ? nestedDialog
+      : dialog;
     for (const element of [confirmButton, input]) {
       (element as unknown as { parentElement: HTMLElement }).parentElement = detachedForm
         ? formDialog
@@ -622,6 +714,33 @@ test("Zhihu browser creation waits for async form and deterministic confirmation
     assert.equal(await detached.env.createCollection("OpenBiliClaw"), true);
     assert.equal(detached.confirmClicks(), 1);
     assert.equal(detached.input._value, "OpenBiliClaw");
+
+    const markerOnly = makeEnvironment(true, false, true, true);
+    assert.equal(await markerOnly.env.openCollectionDialog(), true);
+    assert.equal(await markerOnly.env.createCollection("OpenBiliClaw"), true);
+    assert.equal(markerOnly.confirmClicks(), 1);
+
+    const nestedControl = makeEnvironment(true, false, true, false, true);
+    assert.equal(await nestedControl.env.openCollectionDialog(), true);
+    assert.equal(await nestedControl.env.createCollection("OpenBiliClaw"), true);
+    assert.equal(nestedControl.confirmClicks(), 1);
+
+    const semanticControl = makeEnvironment(true, false, true, false, false, true);
+    assert.equal(await semanticControl.env.openCollectionDialog(), true);
+    assert.equal(await semanticControl.env.createCollection("OpenBiliClaw"), true);
+    assert.equal(semanticControl.confirmClicks(), 1);
+
+    const ariaControl = makeEnvironment(true, false, true, false, false, false, true);
+    assert.equal(await ariaControl.env.openCollectionDialog(), true);
+    assert.equal(await ariaControl.env.createCollection("OpenBiliClaw"), true);
+    assert.equal(ariaControl.confirmClicks(), 1);
+
+    const delayedCreateControl = makeEnvironment(
+      true, false, true, false, false, false, false, 2,
+    );
+    assert.equal(await delayedCreateControl.env.openCollectionDialog(), true);
+    assert.equal(await delayedCreateControl.env.createCollection("OpenBiliClaw"), true);
+    assert.equal(delayedCreateControl.confirmClicks(), 1);
 
     const noConfirm = makeEnvironment(true, true, false);
     assert.equal(await noConfirm.env.openCollectionDialog(), true);

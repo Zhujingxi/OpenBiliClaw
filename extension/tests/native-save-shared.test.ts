@@ -307,7 +307,7 @@ test("native save content runtime evicts the oldest completed outcome after 256 
   }
 });
 
-test("native save docs identify all six executors and only X as real-account verified", () => {
+test("native save docs identify all six executors as real-account verified", () => {
   const runtime = readFileSync(resolve("../docs/modules/runtime.md"), "utf8");
   const changelog = readFileSync(resolve("../docs/changelog.md"), "utf8");
   const architecture = readFileSync(resolve("../docs/architecture.md"), "utf8");
@@ -316,8 +316,7 @@ test("native save docs identify all six executors and only X as real-account ver
   for (const text of [runtime, changelog, architecture]) {
     assert.match(text, /NATIVE_SAVE_EXECUTE/);
     assert.match(text, /6\/6.*executor|executor.*6\/6/);
-    assert.match(text, /X\/Twitter.*(?:synced|真实.*成功)/i);
-    assert.match(text, /(?:其余|另外)?五(?:项|个平台).*?(?:待|尚未).*?(?:授权|真实)/i);
+    assert.match(text, /2026-07-14.*(?:六个平台|七平台).*synced\/already_synced/i);
     assert.match(text, /共享 MV3 recovery barrier/);
     assert.match(text, /知乎.*(?:typed|question|answer|article)/i);
     assert.match(text, /OpenBiliClaw/);
@@ -329,25 +328,24 @@ test("native save docs identify all six executors and only X as real-account ver
   assert.match(runtime, /createXiaohongshuBrowserEnvironment/);
   assert.match(runtime, /createDouyinBrowserEnvironment/);
   assert.match(runtime, /6\/6 executor 已接/);
-  assert.match(extensionModule, /6\/6 executor 已接/);
+  assert.match(extensionModule, /6\/6 executor.*(?:已接入|真实账号验证)/);
   assert.match(extensionModule, /Reddit \/ X \/ YouTube \/ 小红书 \/ 抖音 \/ 知乎六个 executor 均已接入并完成 fixture/);
   assert.doesNotMatch(extensionModule, /其它平台账号写入 adapter 仍属后续计划/);
-  assert.match(savedSyncModule, /6\/6.*executor 已接/);
-  assert.match(savedSyncModule, /X\/Twitter.*synced/i);
-  assert.match(savedSyncModule, /五(?:项|个平台).*?(?:待|尚未).*?(?:授权|真实)/i);
+  assert.match(savedSyncModule, /6\/6 executor.*(?:已接入|真实账号验证)/);
+  assert.match(savedSyncModule, /2026-07-14.*favorite.*watch-later.*synced\/already_synced/i);
   assert.doesNotMatch(savedSyncModule, /扩展 executor 尚未实现/);
 });
 
-test("README prose reports X success and five pending real-account validations", () => {
+test("README prose reports all six extension platforms as real-account verified", () => {
   const readme = readFileSync(resolve("../README.md"), "utf8");
   const readmeEn = readFileSync(resolve("../README_EN.md"), "utf8");
-  assert.match(readme, /Reddit\/X、YouTube、小红书、抖音与知乎原生保存 executor 已 6\/6 接入.*fixture.*X\/Twitter.*synced.*其余五个平台.*待新授权验证/);
+  assert.match(readme, /Reddit\/X、YouTube、小红书、抖音与知乎原生保存 executor 已 6\/6 接入.*fixture.*2026-07-14.*六平台.*synced\/already_synced/);
   assert.doesNotMatch(readme, /扩展只负责同步 x\.com cookie \+ 捕获互动/);
-  assert.match(readmeEn, /Reddit\/X, YouTube, Xiaohongshu, Douyin, and Zhihu native-save executors are wired 6\/6.*fixture-tested.*X\/Twitter.*synced.*other five platforms.*fresh authorization/i);
+  assert.match(readmeEn, /Reddit\/X, YouTube, Xiaohongshu, Douyin, and Zhihu native-save executors are wired 6\/6.*fixture-tested.*2026-07-14.*every platform.*synced\/already_synced/i);
   assert.doesNotMatch(readmeEn, /extension only syncs the x\.com cookie and captures engagement/i);
 
   const coreFeatures = readme.match(/## ✨ 核心特性([\s\S]*?)\n## /)?.[1] ?? "";
   const keyFeatures = readmeEn.match(/## ✨ Key Features([\s\S]*?)\n## /)?.[1] ?? "";
-  assert.match(coreFeatures, /Reddit\/X、YouTube、小红书、抖音与知乎.*executor 已 6\/6 接入.*fixture.*X\/Twitter.*synced.*其余五个平台.*待新授权验证/);
-  assert.match(keyFeatures, /Reddit\/X, YouTube, Xiaohongshu, Douyin, and Zhihu.*executors are wired 6\/6.*fixture-tested.*X\/Twitter.*synced.*other five platforms.*fresh authorization/i);
+  assert.match(coreFeatures, /2026-07-14.*七平台.*synced\/already_synced/);
+  assert.match(keyFeatures, /2026-07-14.*seven platforms.*synced\/already_synced/i);
 });

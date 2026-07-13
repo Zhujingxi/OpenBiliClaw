@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   dispatcherMutexHolder,
   releaseDispatcherMutex,
+  tryAcquireDispatcherMutex,
 } from "../src/background/dispatcher-mutex.ts";
 import {
   ensureNativeSaveTaskRecovery,
@@ -81,11 +82,19 @@ test("native save runner opens an active allow-listed URL and posts one correlat
 
 test("native save runner opens the exact tokenized Xiaohongshu public-note URL", async () => {
   const state = installChromeMock();
+  const posted: NativeSaveResult[] = [];
+  state.nextCreatedTabStatus = "loading";
   state.sendMessageImpl = async () => ({ ready: true });
   try {
-    const running = runNativeSaveTask(tokenizedXhsTask, "xhs", async () => {}, { timeoutMs: 100 });
+    const running = runNativeSaveTask(
+      tokenizedXhsTask,
+      "xhs",
+      async (result) => { posted.push(result); },
+      { timeoutMs: 100 },
+    );
     await tick();
     assert.deepEqual(state.createdTabs, [{ active: true, url: tokenizedXhsTask.content_url }]);
+    assert.equal(state.sentMessages.length, 1);
     state.emitRuntimeMessage(
       {
         type: "NATIVE_SAVE_RESULT",
@@ -97,6 +106,7 @@ test("native save runner opens the exact tokenized Xiaohongshu public-note URL",
       { tab: { id: 42, url: tokenizedXhsTask.content_url } },
     );
     await running;
+    assert.equal(posted[0]?.status, "synced");
   } finally {
     state.restore();
   }
@@ -174,8 +184,59 @@ test("native save runner reloads Douyin once for read-only persisted confirmatio
   }
 });
 
+test("native save runner reloads Xiaohongshu once for read-only persisted confirmation", async () => {
+  const state = installChromeMock();
+  const posted: NativeSaveResult[] = [];
+  state.sendMessageImpl = async () => ({ ready: true });
+  try {
+    const running = runNativeSaveTask(
+      tokenizedXhsTask,
+      "xhs",
+      async (result) => { posted.push(result); },
+      { timeoutMs: 100 },
+    );
+    await tick();
+    state.emitRuntimeMessage(
+      {
+        type: "NATIVE_SAVE_RESULT",
+        platform: "xiaohongshu",
+        task_id: tokenizedXhsTask.id,
+        item_key: tokenizedXhsTask.item_key,
+        status: "failed",
+        error_code: "native_confirmation_not_observed",
+      },
+      { tab: { id: 42, url: tokenizedXhsTask.content_url } },
+    );
+    await tick();
+    assert.deepEqual(state.updatedTabs, [{
+      tabId: 42,
+      active: true,
+      url: tokenizedXhsTask.content_url,
+    }]);
+    assert.equal(
+      (state.sentMessages.at(-1)?.message as { verification_only?: unknown }).verification_only,
+      true,
+    );
+    state.emitRuntimeMessage(
+      {
+        type: "NATIVE_SAVE_RESULT",
+        platform: "xiaohongshu",
+        task_id: tokenizedXhsTask.id,
+        item_key: tokenizedXhsTask.item_key,
+        status: "already_synced",
+      },
+      { tab: { id: 42, url: tokenizedXhsTask.content_url } },
+    );
+    await running;
+    assert.equal(posted[0]?.status, "already_synced");
+  } finally {
+    state.restore();
+  }
+});
+
 test("native save runner reuses one exact Xiaohongshu note tab without closing it", async () => {
   const state = installChromeMock();
+  const posted: NativeSaveResult[] = [];
   const exactUrl = "https://www.xiaohongshu.com/explore/note-123";
   state.queryResult = [
     { id: 70, status: "complete", url: exactUrl },
@@ -184,13 +245,18 @@ test("native save runner reuses one exact Xiaohongshu note tab without closing i
   state.tabById.set(70, state.queryResult[0]);
   state.tabById.set(71, state.queryResult[1]);
   state.sendMessageImpl = async () => ({ ready: true });
+  assert.equal(tryAcquireDispatcherMutex("legacy-discovery"), true);
   try {
-    const running = runNativeSaveTask(tokenizedXhsTask, "xhs", async () => {}, {
-      timeoutMs: 100,
-    });
+    const running = runNativeSaveTask(
+      tokenizedXhsTask,
+      "xhs",
+      async (result) => { posted.push(result); },
+      { timeoutMs: 100 },
+    );
     await tick();
     assert.deepEqual(state.createdTabs, []);
     assert.deepEqual(state.updatedTabs, [{ tabId: 70, active: true }]);
+    assert.equal(state.sentMessages.length, 1);
     assert.deepEqual(state.sessionStorage, {});
     state.emitRuntimeMessage(
       {
@@ -203,8 +269,47 @@ test("native save runner reuses one exact Xiaohongshu note tab without closing i
       { tab: { id: 70, url: exactUrl } },
     );
     await running;
+    assert.equal(posted[0]?.status, "already_synced");
     assert.deepEqual(state.removedTabs, []);
   } finally {
+    releaseDispatcherMutex("legacy-discovery");
+    state.restore();
+  }
+});
+
+test("native save runner opens Xiaohongshu immediately while legacy discovery holds the mutex", async () => {
+  const state = installChromeMock();
+  const posted: NativeSaveResult[] = [];
+  state.sendMessageImpl = async () => ({ ready: true });
+  assert.equal(tryAcquireDispatcherMutex("legacy-discovery"), true);
+  try {
+    const running = runNativeSaveTask(
+      tokenizedXhsTask,
+      "xhs",
+      async (result) => { posted.push(result); },
+      { timeoutMs: 100, mutexRetryMs: 1 },
+    );
+    await tick();
+    await tick();
+    assert.deepEqual(state.createdTabs, [{
+      active: true,
+      url: tokenizedXhsTask.content_url,
+    }]);
+    state.emitRuntimeMessage(
+      {
+        type: "NATIVE_SAVE_RESULT",
+        platform: "xiaohongshu",
+        task_id: tokenizedXhsTask.id,
+        item_key: tokenizedXhsTask.item_key,
+        status: "already_synced",
+      },
+      { tab: { id: 42, url: tokenizedXhsTask.content_url } },
+    );
+    await running;
+    assert.equal(posted[0]?.status, "already_synced");
+    assert.equal(dispatcherMutexHolder(), "legacy-discovery");
+  } finally {
+    releaseDispatcherMutex("legacy-discovery");
     state.restore();
   }
 });

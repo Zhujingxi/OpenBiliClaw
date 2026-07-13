@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   createXiaohongshuBrowserEnvironment,
   saveXiaohongshu,
+  verifyXiaohongshu,
   type XiaohongshuFavoriteRequestResult,
   type XiaohongshuNativeSaveEnvironment,
   type XiaohongshuSaveControl,
@@ -164,6 +165,19 @@ test("XHS native save returns already_synced without a second mutation", async (
   assert.equal(env.clicks + env.requests, 0);
 });
 
+test("XHS read-only verifier reports persisted selection without mutating", async () => {
+  const selected = fixture({ initialSelected: true, requestResult: "success" });
+  assert.deepEqual(await verifyXiaohongshu(task, selected), { status: "already_synced" });
+  assert.equal(selected.clicks + selected.requests, 0);
+
+  const unselected = fixture({ requestResult: "success" });
+  assert.deepEqual(await verifyXiaohongshu(task, unselected), {
+    status: "failed",
+    error_code: "native_confirmation_not_observed",
+  });
+  assert.equal(unselected.clicks + unselected.requests, 0);
+});
+
 test("XHS native save handles stable request success, rejection fallback, 429, and uncertainty", async () => {
   const confirmed = fixture({ requestResult: "success", confirmAfterRequest: true });
   assert.deepEqual(await saveXiaohongshu(task, confirmed), { status: "synced" });
@@ -196,7 +210,7 @@ test("XHS native save never falls back after accepted-but-unconfirmed request", 
   const env = fixture({ requestResult: "success", confirmAfterClick: true });
   assert.deepEqual(await saveXiaohongshu(task, env), {
     status: "failed",
-    error_code: "native_save_failed",
+    error_code: "native_confirmation_not_observed",
   });
   assert.equal(env.requests, 1);
   assert.equal(env.clicks, 0);
@@ -206,7 +220,7 @@ test("XHS native save requires selected state and does not accept count-only cha
   const env = fixture({ confirmAfterClick: false });
   assert.deepEqual(await saveXiaohongshu(task, env), {
     status: "failed",
-    error_code: "native_save_failed",
+    error_code: "native_confirmation_not_observed",
   });
   assert.equal(env.clicks, 1);
 });
@@ -222,7 +236,7 @@ test("XHS native save ignores stale rate UI but correlates a new post-action ris
   ]) {
     assert.deepEqual(await saveXiaohongshu(task, env), {
       status: "failed",
-      error_code: "native_save_failed",
+      error_code: "native_confirmation_not_observed",
     });
   }
 });
@@ -359,6 +373,37 @@ test("XHS browser environment excludes hidden controls and fails closed on ambig
   });
 });
 
+test("XHS browser environment supports the current noteContainer collect-wrapper markup", async () => {
+  const container = domElement({ id: "noteContainer", class: "note-container" });
+  const control = domElement({
+    id: "note-page-collect-board-guide",
+    class: "collect-wrapper",
+  });
+  const use = domElement({ href: "#collect" });
+  control.parentElement = container;
+  use.parentElement = control;
+  control.querySelectorAll = (selector) => selector.includes("use") ? [use] : [];
+  control.click = function click() {
+    this.clicks += 1;
+    use.attributes.set("href", "#collected");
+  };
+  container.querySelectorAll = (selector) =>
+    selector.includes("note-page-collect-board-guide") ? [control] : [];
+  const root = {
+    defaultView: { getComputedStyle: (element: FakeElement) => element.style },
+    querySelectorAll(selector: string) {
+      if (selector.includes("data-note-id")) return [];
+      if (selector.includes("#noteContainer.note-container")) return [container];
+      if (selector.includes("login-container") || selector.includes("not-found")) return [];
+      return [];
+    },
+  } as unknown as Document;
+  const env = createXiaohongshuBrowserEnvironment(root, task.content_url);
+  env.sleep = async () => {};
+  assert.deepEqual(await saveXiaohongshu(task, env), { status: "synced" });
+  assert.equal(control.clicks, 1);
+});
+
 test("XHS browser environment scopes mutation to the exact note and rejects hidden ancestors", async () => {
   const exact = domElement({ "aria-label": "收藏" });
   const hiddenAncestor = domElement();
@@ -381,6 +426,7 @@ test("XHS browser environment scopes mutation to the exact note and rejects hidd
     browserDocument([], { unrelatedControls: [soleUnrelated] }),
     task.content_url,
   );
+  failClosed.sleep = async () => {};
   assert.deepEqual(await saveXiaohongshu(task, failClosed), {
     status: "failed",
     error_code: "native_control_not_found",
@@ -392,6 +438,7 @@ test("XHS browser environment scopes mutation to the exact note and rejects hidd
     browserDocument([], { nestedUnrelatedControls: [nestedUnrelated] }),
     task.content_url,
   );
+  nestedFailClosed.sleep = async () => {};
   assert.deepEqual(await saveXiaohongshu(task, nestedFailClosed), {
     status: "failed",
     error_code: "native_control_not_found",
@@ -447,7 +494,7 @@ test("XHS browser environment fingerprints only new target-local risk events", a
   unrelatedEnv.sleep = async () => {};
   assert.deepEqual(await saveXiaohongshu(task, unrelatedEnv), {
     status: "failed",
-    error_code: "native_save_failed",
+    error_code: "native_confirmation_not_observed",
   });
 
   let nestedAppeared = false;
@@ -461,7 +508,7 @@ test("XHS browser environment fingerprints only new target-local risk events", a
   nestedEnv.sleep = async () => {};
   assert.deepEqual(await saveXiaohongshu(task, nestedEnv), {
     status: "failed",
-    error_code: "native_save_failed",
+    error_code: "native_confirmation_not_observed",
   });
 
   let replaced = false;

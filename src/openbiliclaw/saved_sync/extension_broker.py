@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
@@ -54,6 +55,10 @@ _DEFAULT_DISPATCH_DEADLINE_SECONDS = 65.0
 # uses the same upper bound so its lease never undercuts an extension-owned timeout.
 _DEFAULT_EXECUTION_DEADLINE_SECONDS = 360.0
 _DEFAULT_POLL_INTERVAL_SECONDS = 0.1
+
+
+def _is_transient_sqlite_lock(exc: BaseException) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower()
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,27 +180,53 @@ class ExtensionNativeSaveBroker:
         self, job_id: str, dispatch_deadline_at: float
     ) -> dict[str, object]:
         while True:
-            row = self._database.get_extension_native_save_job(job_id)
+            try:
+                row = await asyncio.to_thread(
+                    self._database.get_extension_native_save_job,
+                    job_id,
+                )
+            except Exception as exc:
+                if _is_transient_sqlite_lock(exc):
+                    await asyncio.sleep(self._poll_interval_seconds)
+                    continue
+                raise
             if row is None:
                 raise RuntimeError("extension native-save job disappeared")
             status = str(row["status"])
             if status in _TERMINAL_JOB_STATUSES:
                 return row
             if status == "pending":
-                if (
-                    time.monotonic() >= dispatch_deadline_at
-                    and self._database.mark_unclaimed_extension_native_save_job_extension_required(
-                        job_id
+                try:
+                    timed_out = time.monotonic() >= dispatch_deadline_at
+                    marked = timed_out and await asyncio.to_thread(
+                        self._database.mark_unclaimed_extension_native_save_job_extension_required,
+                        job_id,
                     )
-                ):
-                    terminal = self._database.get_extension_native_save_job(job_id)
+                    terminal = await asyncio.to_thread(
+                        self._database.get_extension_native_save_job,
+                        job_id,
+                    ) if marked else None
+                except Exception as exc:
+                    if _is_transient_sqlite_lock(exc):
+                        await asyncio.sleep(self._poll_interval_seconds)
+                        continue
+                    raise
+                if marked:
                     if terminal is None:
                         raise RuntimeError("extension native-save job disappeared")
                     return terminal
             elif status == "in_progress":
-                self._database.expire_stale_extension_native_save_jobs(
-                    str(row["platform_slug"]), self._execution_deadline_seconds
-                )
+                try:
+                    await asyncio.to_thread(
+                        self._database.expire_stale_extension_native_save_jobs,
+                        str(row["platform_slug"]),
+                        self._execution_deadline_seconds,
+                    )
+                except Exception as exc:
+                    if _is_transient_sqlite_lock(exc):
+                        await asyncio.sleep(self._poll_interval_seconds)
+                        continue
+                    raise
             else:
                 raise RuntimeError("invalid extension native-save job status")
             await asyncio.sleep(self._poll_interval_seconds)

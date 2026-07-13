@@ -27,6 +27,19 @@ const CONFIRM_ATTEMPTS = 20;
 const CONFIRM_INTERVAL_MS = 100;
 const XHS_CONTENT_IDENTITY_SELECTOR = "[data-note-id], [data-item-id], [data-content-id]";
 
+function xiaohongshuRouteId(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password || url.port || url.hash) return null;
+    if (url.hostname !== "xiaohongshu.com" && !url.hostname.endsWith(".xiaohongshu.com")) {
+      return null;
+    }
+    return /^\/(?:explore|discovery\/item)\/([A-Za-z0-9_-]+)\/?$/.exec(url.pathname)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function hasNewRateLimit(before: string, after: string): boolean {
   const baseline = new Set(before.split("\n").filter(Boolean));
   return after.split("\n").filter(Boolean).some((entry) => !baseline.has(entry));
@@ -52,17 +65,8 @@ function isSupported(task: NativeSaveTask, currentUrl: string): boolean {
   ) return false;
   if (!["note", "video"].includes(task.content_type)) return false;
   if (!/^[A-Za-z0-9_-]+$/.test(task.content_id)) return false;
-  const routeId = (value: string): string | null => {
-    try {
-      const url = new URL(value);
-      if (url.protocol !== "https:" || url.username || url.password || url.port || url.hash) return null;
-      if (url.hostname !== "xiaohongshu.com" && !url.hostname.endsWith(".xiaohongshu.com")) return null;
-      return /^\/(?:explore|discovery\/item)\/([A-Za-z0-9_-]+)\/?$/.exec(url.pathname)?.[1] ?? null;
-    } catch {
-      return null;
-    }
-  };
-  return routeId(task.content_url) === task.content_id && routeId(currentUrl) === task.content_id;
+  return xiaohongshuRouteId(task.content_url) === task.content_id &&
+    xiaohongshuRouteId(currentUrl) === task.content_id;
 }
 
 function hasTargetContract(task: NativeSaveTask): boolean {
@@ -79,10 +83,16 @@ export async function saveXiaohongshu(
   }
   if (!hasTargetContract(task)) return { status: "failed", error_code: "native_save_failed" };
   const contentReady = await waitForNativeSaveReadiness(
-    () => !env.isLoggedIn() || env.isUnavailable() || env.isContentReady(),
+    () => !env.isLoggedIn() || env.isUnavailable() || (
+      env.isContentReady() && env.findFavoriteControls(task.content_id).length > 0
+    ),
     env.sleep,
   );
-  if (!contentReady) return { status: "failed", error_code: "native_content_not_ready" };
+  if (!contentReady) {
+    return env.isContentReady()
+      ? { status: "failed", error_code: "native_control_not_found" }
+      : { status: "failed", error_code: "native_content_not_ready" };
+  }
   if (!env.isLoggedIn()) return { status: "login_required" };
   if (env.isUnavailable()) return { status: "unsupported", error_code: "unsupported_content_type" };
   const initial = env.findFavoriteControls(task.content_id);
@@ -101,7 +111,7 @@ export async function saveXiaohongshu(
     if (await confirmSelected(task, env)) return { status: "synced" };
     return hasNewRateLimit(rateLimitBefore, env.rateLimitFingerprint())
       ? { status: "rate_limited" }
-      : { status: "failed", error_code: "native_save_failed" };
+      : { status: "failed", error_code: "native_confirmation_not_observed" };
   }
 
   const controls = env.findFavoriteControls(task.content_id);
@@ -115,7 +125,36 @@ export async function saveXiaohongshu(
   if (await confirmSelected(task, env)) return { status: "synced" };
   return hasNewRateLimit(rateLimitBefore, env.rateLimitFingerprint())
     ? { status: "rate_limited" }
-    : { status: "failed", error_code: "native_save_failed" };
+    : { status: "failed", error_code: "native_confirmation_not_observed" };
+}
+
+/** Verify persisted favorite state after a reload without ever clicking the control. */
+export async function verifyXiaohongshu(
+  task: NativeSaveTask,
+  env: XiaohongshuNativeSaveEnvironment = createXiaohongshuBrowserEnvironment(),
+): Promise<unknown> {
+  if (!isSupported(task, env.currentUrl) || env.isUnavailable()) {
+    return { status: "unsupported", error_code: "unsupported_content_type" };
+  }
+  if (!hasTargetContract(task)) return { status: "failed", error_code: "native_save_failed" };
+  const contentReady = await waitForNativeSaveReadiness(
+    () => !env.isLoggedIn() || env.isUnavailable() || (
+      env.isContentReady() && env.findFavoriteControls(task.content_id).length > 0
+    ),
+    env.sleep,
+  );
+  if (!contentReady) {
+    return env.isContentReady()
+      ? { status: "failed", error_code: "native_control_not_found" }
+      : { status: "failed", error_code: "native_content_not_ready" };
+  }
+  if (!env.isLoggedIn()) return { status: "login_required" };
+  if (env.isUnavailable()) return { status: "unsupported", error_code: "unsupported_content_type" };
+  const controls = env.findFavoriteControls(task.content_id);
+  if (controls.length !== 1) return { status: "failed", error_code: "native_control_not_found" };
+  return controls[0].isSelected()
+    ? { status: "already_synced" }
+    : { status: "failed", error_code: "native_confirmation_not_observed" };
 }
 
 function isEffectivelyVisible(element: HTMLElement, root: Document): boolean {
@@ -137,14 +176,24 @@ function isEffectivelyVisible(element: HTMLElement, root: Document): boolean {
 }
 
 function selected(element: HTMLElement): boolean {
-  return element.getAttribute("aria-pressed") === "true" ||
+  if (element.getAttribute("aria-pressed") === "true" ||
     element.getAttribute("aria-checked") === "true" ||
     element.getAttribute("data-selected") === "true" ||
-    /(?:已收藏|取消收藏)/.test(element.getAttribute("aria-label") ?? element.title ?? element.textContent ?? "");
+    /(?:已收藏|取消收藏)/.test(
+      element.getAttribute("aria-label") ?? element.title ?? element.textContent ?? "",
+    )) return true;
+  const use = element.querySelectorAll<HTMLElement>("use")[0];
+  const icon = use?.getAttribute("href") ?? use?.getAttribute("xlink:href") ?? "";
+  return /(?:#|\/)(?:collected|collect(?:select|selected|active))$/i.test(icon) ||
+    /(?:select|selected|active).*collect/i.test(icon);
 }
 
 function isExactFavoriteControl(element: HTMLElement): boolean {
   if (element.getAttribute("data-testid") === "collect-button") return true;
+  if (
+    element.getAttribute("id") === "note-page-collect-board-guide" &&
+    /(?:^|\s)collect-wrapper(?:\s|$)/.test(element.getAttribute("class") ?? "")
+  ) return true;
   const label = (
     element.getAttribute("aria-label") ?? element.title ?? element.textContent ?? ""
   ).trim();
@@ -154,6 +203,7 @@ function isExactFavoriteControl(element: HTMLElement): boolean {
 function xiaohongshuContentContainer(
   root: Document,
   contentId: string,
+  currentUrl: string,
 ): HTMLElement | null {
   const candidates = Array.from(root.querySelectorAll<HTMLElement>(
     XHS_CONTENT_IDENTITY_SELECTOR,
@@ -163,7 +213,28 @@ function xiaohongshuContentContainer(
       .filter((value): value is string => value !== null);
     return ids.includes(contentId) && isEffectivelyVisible(element, root);
   });
-  return candidates.length === 1 ? candidates[0] : null;
+  if (candidates.length > 0) return candidates.length === 1 ? candidates[0] : null;
+  if (xiaohongshuRouteId(currentUrl) !== contentId) return null;
+  const current = Array.from(root.querySelectorAll<HTMLElement>(
+    "#noteContainer.note-container",
+  )).filter((element) => isEffectivelyVisible(element, root));
+  return current.length === 1 ? current[0] : null;
+}
+
+function isWithinContainer(element: HTMLElement, container: HTMLElement): boolean {
+  let current: HTMLElement | null = element;
+  while (current) {
+    if (current === container) return true;
+    current = current.parentElement;
+  }
+  return false;
+}
+
+function isBoundToContainer(element: HTMLElement, container: HTMLElement): boolean {
+  const closestIdentity = element.closest<HTMLElement>(XHS_CONTENT_IDENTITY_SELECTOR);
+  return closestIdentity !== null
+    ? closestIdentity === container
+    : isWithinContainer(element, container);
 }
 
 export function createXiaohongshuBrowserEnvironment(
@@ -188,17 +259,18 @@ export function createXiaohongshuBrowserEnvironment(
     },
     isContentReady() {
       const contentId = /^\/(?:explore|discovery\/item)\/([^/]+)/.exec(new URL(currentUrl).pathname)?.[1];
-      return contentId !== undefined && xiaohongshuContentContainer(root, contentId) !== null;
+      return contentId !== undefined &&
+        xiaohongshuContentContainer(root, contentId, currentUrl) !== null;
     },
     rateLimitFingerprint() {
       const contentId = /^\/(?:explore|discovery\/item)\/([^/]+)/
         .exec(new URL(currentUrl).pathname)?.[1];
       if (!contentId) return "";
-      const container = xiaohongshuContentContainer(root, contentId);
+      const container = xiaohongshuContentContainer(root, contentId, currentUrl);
       if (!container) return "";
       return Array.from(container.querySelectorAll<HTMLElement>("[role='alert'], .reds-toast, .toast"))
         .filter((element) =>
-          element.closest(XHS_CONTENT_IDENTITY_SELECTOR) === container &&
+          isBoundToContainer(element, container) &&
           isEffectivelyVisible(element, root)
         )
         .map((element) => {
@@ -223,12 +295,12 @@ export function createXiaohongshuBrowserEnvironment(
     findFavoriteControls(contentId) {
       const pageId = /^\/(?:explore|discovery\/item)\/([^/]+)/.exec(new URL(currentUrl).pathname)?.[1];
       if (pageId !== contentId) return [];
-      const container = xiaohongshuContentContainer(root, contentId);
+      const container = xiaohongshuContentContainer(root, contentId, currentUrl);
       if (!container) return [];
       return Array.from(container.querySelectorAll<HTMLElement>(
-        "button[aria-label*='收藏'], [role='button'][aria-label*='收藏'], [data-testid='collect-button']",
+        "button[aria-label*='收藏'], [role='button'][aria-label*='收藏'], [data-testid='collect-button'], #note-page-collect-board-guide.collect-wrapper",
       )).filter((element) =>
-        element.closest(XHS_CONTENT_IDENTITY_SELECTOR) === container &&
+        isBoundToContainer(element, container) &&
         isEffectivelyVisible(element, root) && isExactFavoriteControl(element)
       ).map((element) => ({
         isSelected: () => selected(element),

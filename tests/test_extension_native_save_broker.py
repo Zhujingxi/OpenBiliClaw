@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from threading import Barrier
@@ -557,6 +558,103 @@ async def test_submit_result_translates_terminal_durable_row(database: Database)
     assert result.status == "already_synced"
     assert result.resolved_action == "favorite"
     assert result.resolved_target == "Reddit Saved"
+
+
+@pytest.mark.asyncio
+async def test_terminal_poll_retries_transient_sqlite_lock(
+    database: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker: ExtensionNativeSaveBroker
+
+    async def wake(platform_slug: str) -> None:
+        job = broker.claim_next(platform_slug)
+        assert job is not None
+        assert broker.submit_result(
+            platform_slug,
+            ExtensionNativeSaveResultIn(job.job_id, job.item_key, "already_synced"),
+        )
+
+    broker = ExtensionNativeSaveBroker(
+        database,
+        wake_platform=wake,
+        dispatch_deadline_seconds=0.2,
+        poll_interval_seconds=0.001,
+    )
+    get_job = database.get_extension_native_save_job
+    calls = 0
+
+    def transient_get(job_id: str) -> dict[str, object] | None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return get_job(job_id)
+
+    monkeypatch.setattr(database, "get_extension_native_save_job", transient_get)
+
+    result = await broker.save(
+        SavedItemInput(
+            "reddit",
+            "t3_locked",
+            "https://www.reddit.com/r/test/comments/locked/demo/",
+            "post",
+        ),
+        NativeSaveRoute("favorite", "favorite", "Reddit Saved"),
+    )
+
+    assert calls >= 2
+    assert result.status == "already_synced"
+
+
+@pytest.mark.asyncio
+async def test_in_progress_expiry_check_retries_transient_sqlite_lock(
+    database: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker: ExtensionNativeSaveBroker
+    claimed: ExtensionNativeSaveJob | None = None
+
+    async def wake(platform_slug: str) -> None:
+        nonlocal claimed
+        claimed = broker.claim_next(platform_slug)
+        assert claimed is not None
+
+    broker = ExtensionNativeSaveBroker(
+        database,
+        wake_platform=wake,
+        dispatch_deadline_seconds=0.2,
+        poll_interval_seconds=0.001,
+    )
+    expire = database.expire_stale_extension_native_save_jobs
+    calls = 0
+
+    def transient_expire(platform_slug: str, lease_seconds: float) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise sqlite3.OperationalError("database is locked")
+        assert claimed is not None
+        assert broker.submit_result(
+            platform_slug,
+            ExtensionNativeSaveResultIn(claimed.job_id, claimed.item_key, "already_synced"),
+        )
+        return expire(platform_slug, lease_seconds)
+
+    monkeypatch.setattr(database, "expire_stale_extension_native_save_jobs", transient_expire)
+
+    result = await broker.save(
+        SavedItemInput(
+            "reddit",
+            "t3_expiry_locked",
+            "https://www.reddit.com/r/test/comments/expiry_locked/demo/",
+            "post",
+        ),
+        NativeSaveRoute("favorite", "favorite", "Reddit Saved"),
+    )
+
+    assert calls >= 2
+    assert result.status == "already_synced"
 
 
 @pytest.mark.asyncio

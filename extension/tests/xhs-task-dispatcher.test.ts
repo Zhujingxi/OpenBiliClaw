@@ -15,6 +15,7 @@ import {
   executeTask,
   handleTaskResult,
   isValidTask,
+  pollXhsTaskOnce,
   postXhsNativeSaveResult,
   type XhsTask,
 } from "../src/background/xhs-task-dispatcher.ts";
@@ -290,6 +291,17 @@ async function flush(): Promise<void> {
   await new Promise((r) => setTimeout(r, 0));
   await new Promise((r) => setTimeout(r, 0));
 }
+
+test("concurrent XHS poll triggers share one task claim", async () => {
+  const state = installChromeMock();
+
+  await Promise.all([pollXhsTaskOnce(), pollXhsTaskOnce()]);
+
+  assert.equal(
+    state.fetchCalls.filter((call) => call.url.endsWith("/sources/xhs/next-task")).length,
+    1,
+  );
+});
 
 test("executeTask sends XHS_TASK_EXECUTE once the tab finishes loading", async () => {
   const state = installChromeMock();

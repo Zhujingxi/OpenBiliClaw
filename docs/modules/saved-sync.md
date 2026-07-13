@@ -14,8 +14,8 @@
 | Capability router | ✅ | `NativeSaveRouter` 按 canonical 平台注册 adapter；`favorite` 只路由到 native favorite，`watch_later` 优先 native watch-later，不支持时仅在 favorite 可用时回退。adapter 的 `target_label()` 运行时返回必须是去空白后 1–256 字符且无控制字符的字符串，否则逐项安全失败且不会写 route / 调用平台。 |
 | Local-first 保存 | ✅ | `SavedSyncService.save_local()` 先提交 membership；自动同步关闭时只落 `pending` native state，不调用 adapter。 |
 | 持久化同步任务 | ✅ | 自动 / 手动触发统一经 `create_sync_task()` 生成一个非空 UUID，并在单个 `BEGIN IMMEDIATE` 事务中写入 `native_save_tasks` / `native_save_task_items` 快照，同时 claim eligible 项。缺失、已完成和已有 owner 的选择也会得到稳定的 terminal 快照；空的 all-eligible 请求仍持久化零项 task。执行前另以唯一 `task_runner_id` 原子领取 batch runner。 |
-| 六平台扩展保存 adapter 与 durable broker | ✅（6/6 executor 已接） | YouTube / 小红书 / 抖音 / X / 知乎 / Reddit 的 production adapter 已注册并委托稳定 `ExtensionNativeSaveBroker`，job 写入独立 `extension_native_save_jobs` ledger；`owns(task_id)` 继续提供 global native ownership。首轮真实 favorite 仅 X/Twitter 得到 `synced`；其余五项暴露的 SPA readiness、XHS 导航参数、Douyin route-only 控件与 Reddit shadow DOM 缺口均已补 fixture 回归，但尚未获新授权重跑，不能宣称真实成功。知乎精确使用 `OpenBiliClaw` 收藏夹，两个 requested intent 都按 backend contract resolved 为 favorite。 |
-| 批量逐项执行 | ✅ | `run_sync_task()` 只读取该 task ID 仍存在的 membership，按平台分组、平台内串行执行，并以 `execution_id` 原子 claim / 完成每一项；同一任务的并发 runner 不会重复调用 adapter，平台组之间仍可并行。执行中每 30 秒 owner-fenced heartbeat；240 秒是调用方响应 deadline，不假定能强制终止不遵守 cancellation 的底层 I/O。 |
+| 六平台扩展保存 adapter 与 durable broker | ✅（6/6 executor + 真实账号验证） | YouTube / 小红书 / 抖音 / X / 知乎 / Reddit 的 production adapter 已注册并委托稳定 `ExtensionNativeSaveBroker`，job 写入独立 `extension_native_save_jobs` ledger；`owns(task_id)` 继续提供 global native ownership。2026-07-14 已在当前登录账号强制绕过旧终态缓存验证 favorite 与 watch-later：YouTube 使用 exact `OpenBiliClaw` / `YouTube Watch Later`，其余五个平台的 watch-later 按能力矩阵回退 favorite，全部得到 `synced/already_synced`。YouTube 同名重复列表按 checked proof、再按稳定 DOM 顺序安全复用，不删除列表；知乎精确使用 `OpenBiliClaw` 收藏夹。 |
+| 批量逐项执行 | ✅ | `run_sync_task()` 只读取该 task ID 仍存在的 membership，按平台分组、平台内串行执行，并以 `execution_id` 原子 claim / 完成每一项；同一任务的并发 runner 不会重复调用 adapter，平台组之间仍可并行。执行中每 30 秒 owner-fenced heartbeat；heartbeat、broker poll 与 terminal persistence 均在线程中的独立短连接上执行，SQLite lock 有界退避重试，durable terminal row 在 heartbeat completion race 中优先。240 秒是调用方响应 deadline，不假定能强制终止不遵守 cancellation 的底层 I/O。 |
 | 可恢复任务查询 | ✅ | `get_sync_task()` 从独立 task/item ledger 重建结果，不依赖当前 membership 或可变的 `native_save_states.task_id`。删除本地 membership、service/API 重建后仍可按 UUID 查询同一批逐项快照；未知 UUID 在 HTTP 层返回 404。 |
 | 安全失败归一化 | ✅ | 未注册路由写为 `unsupported/unsupported_adapter_missing`，仅该组合可在 adapter 到位后重新快照；executor 返回的 `unsupported_content_type` 等真实内容限制保持 local-only 终态。malformed target / result 写固定 `failed/invalid_adapter_result`；adapter 异常写 `failed/adapter_exception`。 |
 | B 站原生 adapter | ✅ | favorite 精确复用或创建 `OpenBiliClaw` 收藏夹；watch-later 写 B 站稍后再看。任意 endpoint 的 `-101` → `login_required`；只有最终 favorite resource-deal POST 的 `11201` 会由 client 标记为 dedicated duplicate，且 adapter 仍要求 resolved action 为 favorite 才映射 `already_synced`；folder/resolver 的同码与非 favorite route 的该异常均为 `failed`；watch-later 的 `90003` 固定为 `failed/bilibili_video_unavailable`。 |
@@ -100,7 +100,7 @@ if job is not None:
 - `ExtensionNativeSaveResultIn` 只接受计划明确的 status/code 组合。扩展传入的 message 永不原样持久化；SQLite 只写后端自有固定文案，并拒绝 Unicode category-C 字符。
 - `save()` 的一个 dispatch deadline 同时覆盖 best-effort wake 与 pending poll；wake 挂起或抛错不会越过 deadline。claim 后改用 execution lease，超时结果不会重新进入 pending。
 - `/api/sources/{xhs,dy,yt,x,zhihu,reddit}` 共用 `next-task`、`task-result` 与 `kick`；领取 broker job 时返回 `type: native_save` 和脱敏 canonical 字段。结果在 broker/DAO 层严格关联 `platform_slug + task_id + item_key`，跨 source、冲突或晚回调返回 409，格式错误返回 422。
-- Native job 优先于同源 discovery/bootstrap queue；路由先查 global ownership，任何 native UUID 都不进入任一 legacy namespace，再查 exact slug 决定提交或 409。全局未归属 ID 只有在当前 legacy queue 实际拥有该 ID 时才进入旧 handler。X 目前只有 native queue 形态。production adapter/broker 与六个平台 executor 已全部接入；2026-07-13 的首轮真实 favorite 只有 X/Twitter 为 `synced`，另外五个平台修复后的成功状态仍待 fresh exact authorization；未经用户对命名测试内容明确授权，不执行或重试真实账号写入。
+- Native job 优先于同源 discovery/bootstrap queue；路由先查 global ownership，任何 native UUID 都不进入任一 legacy namespace，再查 exact slug 决定提交或 409。全局未归属 ID 只有在当前 legacy queue 实际拥有该 ID 时才进入旧 handler。X 目前只有 native queue 形态。XHS alarm 与 runtime-stream wake 共用 single-flight poll，手动 native-save 在无精确复用页时可越过后台 discovery tab mutex 打开 exact tokenized note route；executor 的 identity/control fence 仍保证只操作目标内容。production adapter/broker 与六个平台 executor 已全部接入，并于 2026-07-14 完成 favorite + watch-later/fallback 真实账号验证；未经用户对命名测试内容明确授权，不执行或重试新的真实账号写入。
 
 ### B 站 adapter
 
@@ -179,8 +179,10 @@ SavedItemInput
 平台 favorite / watch-later 请求。Bilibili 的既有 runbook 要求为具体 BV ID 取得用户当次授权；
 六平台 runbook 则逐项要求 exact platform/action/public content ID/expected target，并只记录
 六字段安全结果。YouTube、小红书、抖音、X、知乎与 Reddit 的 production adapter、runtime
-broker registration 及六个平台 executor wiring 已完成；当前仅 fixture 验证，真实账号写入与
-逐平台授权 E2E 仍未执行，因此不能宣称六平台账号写入已经真实闭环。
+broker registration 及六个平台 executor wiring 已完成；fixture 自动化与 2026-07-14 当前登录
+账号的逐平台授权 E2E 均已完成，favorite 和 watch-later/fallback 终态全部为
+`synced/already_synced`。该结果只覆盖 runbook 中精确命名的公开测试内容，不授权自动重试或
+删除平台账号中的保存记录。
 
 2026-07-13 已在当次明确授权下完成 B 站真实账号授权 E2E：手动收藏、手动稍后再看和
 开启配置后的自动收藏均返回 `synced`；删除三条本地 membership 后，两条平台收藏与一条

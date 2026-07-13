@@ -211,24 +211,30 @@ automatically retried; any retry needs a new explicit authorization.
 
 ## Evidence state
 
-Task 10 verified the authorization and result-schema harness with fixtures. On 2026-07-13, one
-freshly authorized favorite item per platform was then executed through the production durable
-path. These are the only safe result fields retained:
+Task 10 verified the authorization and result-schema harness with fixtures. The 2026-07-13 first
+favorite pass exposed real SPA gaps. After those fixes, a newly authorized 2026-07-14 run cleared
+the selected items' old local terminal states and forced every case through the production durable
+broker and the currently logged-in platform account. These are the only safe result fields retained:
 
 | Platform | Action | Public content ID | Expected target | Terminal status | Safe code |
 | --- | --- | --- | --- | --- | --- |
-| YouTube | favorite | `SdQRhJl7Bvo` | `OpenBiliClaw` | `failed` | `native_save_failed` |
-| Xiaohongshu | favorite | `6a2a18bb0000000006031a3c` | `小红书收藏` | `unsupported` | `unsupported_content_type` |
-| Douyin | favorite | `7636735113514011939` | `抖音收藏` | `failed` | `native_save_failed` |
-| X/Twitter | favorite | `2063895528816181253` | `X Bookmarks` | `synced` | — |
-| Zhihu | favorite | `answer:2053546899609740246` | `OpenBiliClaw` | `failed` | `native_save_failed` |
-| Reddit | favorite | `t3_x2eklf` | `Reddit Saved` | `failed` | `native_save_failed` |
+| YouTube | favorite | `SdQRhJl7Bvo` | `OpenBiliClaw` | `already_synced` | — |
+| YouTube | watch_later | `cvh0xXmu0bs` | `YouTube Watch Later` | `already_synced` | — |
+| Xiaohongshu | favorite | `6a531204000000001003eae2` | `小红书收藏` | `already_synced` | — |
+| Xiaohongshu | watch_later | `6a531204000000001003eae2` | `小红书收藏` | `already_synced` | — |
+| Douyin | favorite | `7636735113514011939` | `抖音收藏` | `already_synced` | — |
+| Douyin | watch_later | `7640353849837123526` | `抖音收藏` | `already_synced` | — |
+| X/Twitter | favorite | `2063895528816181253` | `X Bookmarks` | `already_synced` | — |
+| X/Twitter | watch_later | `2063895528816181253` | `X Bookmarks` | `already_synced` | — |
+| Zhihu | favorite | `answer:2053546899609740246` | `OpenBiliClaw` | `already_synced` | — |
+| Zhihu | watch_later | `answer:2053546899609740246` | `OpenBiliClaw` | `already_synced` | — |
+| Reddit | favorite | `t3_x2eklf` | `Reddit Saved` | `already_synced` | — |
+| Reddit | watch_later | `t3_x2eklf` | `Reddit Saved` | `already_synced` | — |
 
-Only X/Twitter is proven successful by this run. Reddit returned a successful save HTTP response
-but the old light-DOM confirmation could not observe `Unsave`, so the account state is uncertain
-and the item must not be retried without a new authorization. The run exposed and fixture-tested
-four corrections: YouTube/Zhihu readiness no longer replays dialog-opening clicks; Reddit confirms
-inside open shadow roots; Douyin permits only a unique route-scoped `video-favorite` fallback; and
-Xiaohongshu preserves only its required public-note navigation query. None of those corrections is
-itself real-account proof. Manual watch-later, automatic sync, duplicate, cleanup confirmation, and
-all five corrected favorite paths remain pending fresh exact authorization.
+The same session separately forced Bilibili `BV1xx411c7mD` through its direct adapter: favorite
+finished `synced` at `B站 OpenBiliClaw 收藏夹`, and watch-later finished `synced` at `B站稍后再看`.
+Before the batch, `GET /api/config` reported `saved_sync.auto_sync_enabled=false`; four newly added
+watch-later memberships returned `pending` with an empty `sync_task_id`, proving that local card
+saves did not mutate accounts. Every platform write above was started manually from the saved-list
+sync route. YouTube's account contained multiple exact `OpenBiliClaw` playlists; the executor did
+not delete them, preferred an already checked exact row, and otherwise uses stable DOM order.

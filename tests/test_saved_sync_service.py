@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
 
+import openbiliclaw.saved_sync.service as saved_sync_service_module
 from openbiliclaw.saved_sync.adapters.extension import build_extension_native_save_adapters
 from openbiliclaw.saved_sync.extension_broker import (
     ExtensionNativeSaveBroker,
@@ -735,6 +737,116 @@ async def test_task_heartbeat_failure_cancels_work_and_releases_pending(
     assert second_state is not None and second_state["sync_task_id"] == ""
     retry = service.create_sync_task("favorite", [second.item_key], "manual_single")
     assert [result.item_key for result in retry.items] == [second.item_key]
+
+
+async def test_transient_sqlite_lock_retries_heartbeats_and_terminal_persistence(
+    db: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = asyncio.Event()
+    adapter = FakeAdapter(NativeSaveCapability("bilibili", True, True, True), gate=gate)
+    service = SavedSyncService(
+        db,
+        NativeSaveRouter([adapter]),
+        claim_heartbeat_interval_seconds=0.005,
+        task_heartbeat_interval_seconds=0.005,
+    )
+    item = SavedItemInput("bilibili", "BV1HEARTBEATLOCKRETRY")
+    service.save_local("favorite", item)
+    task = service.create_sync_task("favorite", [item.item_key], "manual_single")
+    original_item_heartbeat = db.heartbeat_native_save_claim
+    original_task_heartbeat = db.heartbeat_native_sync_task
+    original_complete = db.complete_native_save_claim
+    item_calls = 0
+    task_calls = 0
+    complete_calls = 0
+
+    def item_heartbeat(*args: object, **kwargs: object) -> bool:
+        nonlocal item_calls
+        item_calls += 1
+        if item_calls == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original_item_heartbeat(*args, **kwargs)  # type: ignore[arg-type]
+
+    def task_heartbeat(*args: object, **kwargs: object) -> int:
+        nonlocal task_calls
+        task_calls += 1
+        if task_calls == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original_task_heartbeat(*args, **kwargs)  # type: ignore[arg-type]
+
+    def complete(*args: object, **kwargs: object) -> bool:
+        nonlocal complete_calls
+        complete_calls += 1
+        if complete_calls == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original_complete(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(db, "heartbeat_native_save_claim", item_heartbeat)
+    monkeypatch.setattr(db, "heartbeat_native_sync_task", task_heartbeat)
+    monkeypatch.setattr(db, "complete_native_save_claim", complete)
+    runner = asyncio.create_task(service.run_sync_task(task.task_id))
+    for _ in range(100):
+        if item_calls >= 2 and task_calls >= 2:
+            break
+        await asyncio.sleep(0.005)
+    gate.set()
+
+    result = await runner
+
+    assert item_calls >= 2
+    assert task_calls >= 2
+    assert complete_calls >= 2
+    assert result.items[0].status == "synced"
+
+
+async def test_terminal_item_wins_task_heartbeat_completion_race(
+    db: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = SavedSyncService(db, NativeSaveRouter())
+    item = SavedItemInput("bilibili", "BV1HEARTBEATTERMINALRACE")
+    service.save_local("favorite", item)
+    task = service.create_sync_task("favorite", [item.item_key], "manual_single")
+    terminal = asyncio.Event()
+
+    async def terminal_but_not_returned(
+        rows: list[dict[str, Any]],
+        runner_id: str,
+    ) -> None:
+        row = rows[0]
+        execution_id = "terminal-race-owner"
+        assert db.claim_native_save_item(
+            "favorite",
+            item.item_key,
+            str(row["task_id"]),
+            runner_id,
+            execution_id,
+        )
+        assert db.complete_native_save_claim(
+            "favorite",
+            item.item_key,
+            str(row["task_id"]),
+            execution_id,
+            requested_action="favorite",
+            resolved_action="favorite",
+            resolved_target="B站 OpenBiliClaw 收藏夹",
+            status="synced",
+        )
+        terminal.set()
+        await asyncio.Event().wait()
+
+    async def lose_after_terminal(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        await terminal.wait()
+        raise saved_sync_service_module._NativeSaveTaskRunnerOwnershipLostError
+
+    monkeypatch.setattr(service, "_run_platform_group", terminal_but_not_returned)
+    monkeypatch.setattr(service, "_heartbeat_sync_task", lose_after_terminal)
+
+    result = await service.run_sync_task(task.task_id)
+
+    assert result.items[0].status == "synced"
 
 
 async def test_item_heartbeat_exception_detaches_with_retrying_lease_and_late_result(

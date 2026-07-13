@@ -9203,16 +9203,24 @@ class Database:
         """Refresh the task lease protecting all remaining batch rows."""
         normalized_task_id = self._native_task_id(task_id)
         normalized_runner_id = self._native_runner_id(runner_id)
-        cursor = self._execute_write(
-            """
-            UPDATE native_save_states
-            SET task_heartbeat_at = CURRENT_TIMESTAMP
-            WHERE task_id = ? AND task_runner_id = ? AND task_started_at IS NOT NULL
-              AND status IN ('pending', 'syncing')
-            """,
-            (normalized_task_id, normalized_runner_id),
-        )
-        return int(cursor.rowcount or 0)
+        conn = self.open_connection()
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET task_heartbeat_at = CURRENT_TIMESTAMP
+                WHERE task_id = ? AND task_runner_id = ? AND task_started_at IS NOT NULL
+                  AND status IN ('pending', 'syncing')
+                """,
+                (normalized_task_id, normalized_runner_id),
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def release_pending_native_sync_task(self, task_id: str, runner_id: str) -> int:
         """Release unclaimed pending rows when a runner exits normally or by cancellation."""
@@ -9381,16 +9389,29 @@ class Database:
         normalized_kind = self._saved_list_kind(list_kind)
         normalized_task_id = self._native_task_id(task_id)
         normalized_execution_id = self._native_execution_id(execution_id)
-        cursor = self._execute_write(
-            """
-            UPDATE native_save_states
-            SET last_attempt_at = CURRENT_TIMESTAMP
-            WHERE list_kind = ? AND item_key = ? AND task_id = ?
-              AND status = 'syncing' AND execution_id = ?
-            """,
-            (normalized_kind, item_key.strip(), normalized_task_id, normalized_execution_id),
-        )
-        return int(cursor.rowcount or 0) > 0
+        conn = self.open_connection()
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET last_attempt_at = CURRENT_TIMESTAMP
+                WHERE list_kind = ? AND item_key = ? AND task_id = ?
+                  AND status = 'syncing' AND execution_id = ?
+                """,
+                (
+                    normalized_kind,
+                    item_key.strip(),
+                    normalized_task_id,
+                    normalized_execution_id,
+                ),
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0) > 0
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def complete_native_save_claim(
         self,

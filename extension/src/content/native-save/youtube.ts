@@ -160,12 +160,21 @@ function hasNewRateLimit(env: YouTubeNativeSaveEnvironment, before: string): boo
   return after !== "" && after !== before;
 }
 
-function uniqueNamedPlaylist(
+function preferredNamedPlaylist(
   env: YouTubeNativeSaveEnvironment,
   title: string,
-): YouTubePlaylistRow | null | "ambiguous" {
+): YouTubePlaylistRow | null {
   const matches = env.findNamedPlaylists(title);
-  if (matches.length > 1) return "ambiguous";
+  // Duplicate exact-title playlists can exist after interrupted historical
+  // creation attempts. They are equivalent OpenBiliClaw targets: prefer any
+  // checked row (strongest idempotency proof), otherwise use stable DOM order.
+  for (const match of matches) {
+    try {
+      if (match.isChecked()) return match;
+    } catch {
+      // A stale row must not prevent trying the next exact-title candidate.
+    }
+  }
   return matches[0] ?? null;
 }
 
@@ -242,8 +251,7 @@ async function performSaveYouTube(task: NativeSaveTask, env: YouTubeNativeSaveEn
     return { status: "unsupported", error_code: "unsupported_content_type" };
   }
   let created = false;
-  let row = uniqueNamedPlaylist(env, EXACT_PLAYLIST_TITLE);
-  if (row === "ambiguous") return { status: "failed", error_code: "native_target_not_found" };
+  let row = preferredNamedPlaylist(env, EXACT_PLAYLIST_TITLE);
   if (!row) {
     try {
       if (!(await env.createPlaylist(EXACT_PLAYLIST_TITLE))) {
@@ -265,11 +273,11 @@ async function performSaveYouTube(task: NativeSaveTask, env: YouTubeNativeSaveEn
         : { status: "failed", error_code: "native_dialog_not_opened" };
     }
     for (let attempt = 0; attempt < DIALOG_ATTEMPTS; attempt += 1) {
-      row = uniqueNamedPlaylist(env, EXACT_PLAYLIST_TITLE);
+      row = preferredNamedPlaylist(env, EXACT_PLAYLIST_TITLE);
       if (row) break;
       if (attempt + 1 < DIALOG_ATTEMPTS) await env.sleep(DIALOG_INTERVAL_MS);
     }
-    if (!row || row === "ambiguous") {
+    if (!row) {
       return hasNewRateLimit(env, rateLimitBefore)
         ? { status: "rate_limited" }
         : { status: "failed", error_code: "native_target_not_found" };
@@ -284,10 +292,7 @@ async function performSaveYouTube(task: NativeSaveTask, env: YouTubeNativeSaveEn
   if (
     await confirmed(
       row,
-      () => {
-        const current = uniqueNamedPlaylist(env, EXACT_PLAYLIST_TITLE);
-        return current === "ambiguous" ? null : current;
-      },
+      () => preferredNamedPlaylist(env, EXACT_PLAYLIST_TITLE),
       env,
       rateLimitBefore,
     )

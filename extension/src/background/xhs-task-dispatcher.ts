@@ -94,6 +94,7 @@ export interface XhsTaskResult {
 }
 
 let taskInFlight = false;
+let pollInFlight: Promise<void> | null = null;
 let taskTabId: number | null = null;
 let ownsTaskTab = false;
 let taskTimeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -563,12 +564,20 @@ export async function handleTaskResult(result: XhsTaskResult): Promise<void> {
   cleanupTask();
 }
 
-async function pollOnce(): Promise<void> {
-  await ensureNativeSaveTaskRecovery();
-  if (taskInFlight) return;
-  const task = await fetchNextTask();
-  if (!task) return;
-  await executeTask(task);
+export function pollXhsTaskOnce(): Promise<void> {
+  if (pollInFlight) return pollInFlight;
+  const running = (async () => {
+    await ensureNativeSaveTaskRecovery();
+    if (taskInFlight) return;
+    const task = await fetchNextTask();
+    if (!task) return;
+    await executeTask(task);
+  })();
+  pollInFlight = running;
+  void running.finally(() => {
+    if (pollInFlight === running) pollInFlight = null;
+  });
+  return running;
 }
 
 // ---------------------------------------------------------------------------
@@ -583,7 +592,7 @@ export function startXhsTaskPolling(intervalMs: number = DEFAULT_POLL_INTERVAL_M
 
 export function handleXhsTaskAlarm(alarmName: string): void {
   if (alarmName !== POLL_ALARM_NAME) return;
-  void pollOnce();
+  void pollXhsTaskOnce();
 }
 
 /**
@@ -594,5 +603,5 @@ export function handleXhsTaskAlarm(alarmName: string): void {
  * if a task is already in flight.
  */
 export function pollXhsTaskNow(): void {
-  void pollOnce();
+  void pollXhsTaskOnce();
 }

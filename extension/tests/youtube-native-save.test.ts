@@ -169,10 +169,6 @@ test("YouTube native save reports the exact failed execution stage", async () =>
   const cases: Array<[YouTubeNativeSaveEnvironment, string]> = [
     [fixture({ saveControlReadyAfterSleeps: 100 }), "native_control_not_found"],
     [fixture({ dialogAvailable: false }), "native_dialog_not_opened"],
-    [
-      fixture({ initialNamedRows: [{ title: "OpenBiliClaw" }, { title: "OpenBiliClaw" }] }),
-      "native_target_not_found",
-    ],
     [fixture({ confirmAfterClick: false }), "native_confirmation_not_observed"],
     [
       fixture({
@@ -190,6 +186,23 @@ test("YouTube native save reports the exact failed execution stage", async () =>
       error_code: errorCode,
     });
   }
+});
+
+test("YouTube native save deterministically reuses duplicate exact playlists", async () => {
+  const unchecked = fixture({
+    initialNamedRows: [{ title: "OpenBiliClaw" }, { title: "OpenBiliClaw" }],
+  });
+  assert.deepEqual(await saveYouTube(task, unchecked), { status: "synced" });
+  assert.equal(unchecked.mutations, 1);
+
+  const alreadyChecked = fixture({
+    initialNamedRows: [
+      { title: "OpenBiliClaw" },
+      { title: "OpenBiliClaw", checked: true },
+    ],
+  });
+  assert.deepEqual(await saveYouTube(task, alreadyChecked), { status: "already_synced" });
+  assert.equal(alreadyChecked.mutations, 0);
 });
 
 test("YouTube native save correlates youtu.be tasks with safe canonical redirects", async () => {
@@ -360,7 +373,6 @@ test("YouTube native save maps logged out, unavailable, rate limited, and ambigu
     [fixture({ unavailable: true }), { status: "unsupported", error_code: "unsupported_content_type" }],
     [fixture({ rateLimitedAfterMutation: true, confirmAfterClick: false }), { status: "rate_limited" }],
     [fixture({ dialogAvailable: false }), { status: "failed", error_code: "native_dialog_not_opened" }],
-    [fixture({ initialNamedRows: [{ title: "OpenBiliClaw" }, { title: "OpenBiliClaw" }] }), { status: "failed", error_code: "native_target_not_found" }],
     [fixture({ confirmAfterClick: false }), { status: "failed", error_code: "native_confirmation_not_observed" }],
   ];
   for (const [env, expected] of cases) assert.deepEqual(await saveYouTube(task, env), expected);

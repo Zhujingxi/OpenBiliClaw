@@ -194,7 +194,7 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 - **Instant, undoable feedback** — Desktop recommendation cards and interest/avoidance probes respond immediately with a real 10-second undo window; reshuffle displays the new batch before recording old-card dismissals in the background.
 - **Keyword generation mode in settings** — choose Classic, Hybrid, or Inspiration directly from the config UI to enable search-backed keyword inspiration.
 - **Keyword inspiration axis library** — keyword generation now reuses secondary interests, real search evidence, platform supply advantages, and historical yield for more specific platform-native queries.
-- **Local-first favorites and watch later** — every surface saves locally first, then syncs manually or through an explicitly enabled default-off setting; Bilibili is the first live write adapter.
+- **Local-first favorites and watch later** — every surface saves locally first, then syncs manually or through an explicitly enabled default-off setting; the 2026-07-14 real-account regression completed both actions across all seven platforms as `synced/already_synced`.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -390,7 +390,7 @@ OpenBiliClaw does not store your platform passwords or bypass login. It reuses t
 | **Zhihu** | Log in normally at https://www.zhihu.com in the same browser | `init --yes-zhihu`, `fetch-zhihu`, `discover --source zhihu`, and `discover-zhihu*` return nothing |
 | **Reddit** | Log in normally at https://www.reddit.com in the same browser; the extension syncs `reddit_session` for backend-installed rdt-cli, and `rdt login` is only a fallback when the extension is unavailable | `fetch-reddit --mode bootstrap` returns no init signals; without a synced rdt credential, the rdt path falls back to extension tasks |
 
-Xiaohongshu, Douyin, YouTube, and Zhihu use Chrome extension tasks; Reddit defaults to backend-installed rdt-cli for steady-state discovery and keeps the extension for init signals; X discovery uses server-side cookie replay. None of these read paths needs an extra CDP debugging Chrome. Reddit/X, YouTube, Xiaohongshu, Douyin, and Zhihu native-save executors are wired 6/6 and fixture-tested; X/Twitter's first real favorite finished `synced`, while the other five platforms require fresh authorization after their fixes. `[sources.browser].cdp_url` remains available only for generic Web / custom webpage fetching.
+Xiaohongshu, Douyin, YouTube, and Zhihu use Chrome extension tasks; Reddit defaults to backend-installed rdt-cli for steady-state discovery and keeps the extension for init signals; X discovery uses server-side cookie replay. None of these read paths needs an extra CDP debugging Chrome. Reddit/X, YouTube, Xiaohongshu, Douyin, and Zhihu native-save executors are wired 6/6 and fixture-tested; in the 2026-07-14 real-account regression, every platform's favorite and watch-later/favorite-fallback path finished `synced/already_synced`. `[sources.browser].cdp_url` remains available only for generic Web / custom webpage fetching.
 
 </details>
 
@@ -566,7 +566,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 - ⚡ **Instant Reshuffle** — ~0.6s per reshuffle; rapid clicks stay snappy
 - 💬 **Warm Recommendations** — friend-like explanations of why you'd enjoy something, not "because you watched similar videos"
 - 🔄 **Continuous Learning** — Socratic dialogue + behavioral analysis + instant feedback; it understands you better over time
-- ⭐ **Local-First Favorites / Watch Later** — cards save to local SQLite first; with explicit consent, Bilibili can sync to native targets; Reddit/X, YouTube, Xiaohongshu, Douyin, and Zhihu executors are wired 6/6 and fixture-tested; X/Twitter's first real favorite finished `synced`, while the other five platforms require fresh authorization after their fixes
+- ⭐ **Local-First Favorites / Watch Later** — cards save to local SQLite first and auto-sync stays off by default; the 2026-07-14 real-account regression completed both actions across all seven platforms as `synced/already_synced`
 - 🧩 **Browser Extension** — Chrome / Edge / Brave / Arc / Firefox; side-panel recommendations + cross-site behavior collection, install and go
 - 🚀 **Guided Init in the UI** — the packaged `/setup/` wizard, Desktop Web, and the extension can all initialize with one click; no terminal required
 - 🔬 **Self-Optimizing Eval Loops** — five modules each carry an LLM-as-judge loop that improves prompt quality over rounds
@@ -599,7 +599,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 │ trusted-local E2E exact auth → one saved-sync item → six-field callback │
 │ unsupported_adapter_missing retryable · unsupported_content_type local-only │
 │ Canonical ID · Local-first sync · Task poll · SQLite (events · pool · recs · saved/tasks)│
-│ Six adapters → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executors (6/6 fixture-only)│
+│ Six adapters → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executors (6/6 fixture + real-account)│
 └────────────────────────────────────────────────┘
 ```
 

@@ -443,6 +443,39 @@ def test_execution_heartbeat_is_fenced_by_owner_token(db: Database) -> None:
     )
 
 
+def test_native_heartbeats_do_not_share_the_process_connection(
+    db: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = SavedItemInput("bilibili", "BV1HEARTBEATCONNECTION")
+    db.upsert_saved_membership("favorite", item)
+    assert db.claim_native_sync_task("favorite", [item.item_key], "heartbeat-connection-task") == [
+        item.item_key
+    ]
+    assert db.claim_native_sync_task_runner("heartbeat-connection-task", "heartbeat-runner")
+    assert db.claim_native_save_item(
+        "favorite",
+        item.item_key,
+        "heartbeat-connection-task",
+        "heartbeat-runner",
+        "heartbeat-owner",
+    )
+
+    def reject_process_connection(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("native heartbeat used the process-wide SQLite connection")
+
+    monkeypatch.setattr(db, "_execute_write", reject_process_connection)
+
+    assert db.heartbeat_native_sync_task("heartbeat-connection-task", "heartbeat-runner") == 1
+    assert db.heartbeat_native_save_claim(
+        "favorite",
+        item.item_key,
+        "heartbeat-connection-task",
+        "heartbeat-owner",
+    )
+
+
 @pytest.mark.parametrize(
     ("list_kind", "add_method_name"),
     [("watch_later", "add_to_watch_later"), ("favorite", "add_to_favorites")],

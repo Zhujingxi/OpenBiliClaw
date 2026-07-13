@@ -144,6 +144,25 @@ async function waitForTabLoad(tabId: number, deadline: number): Promise<chrome.t
   }
 }
 
+async function waitForExecutableTab(
+  task: NativeSaveTask,
+  tabId: number,
+  deadline: number,
+): Promise<chrome.tabs.Tab> {
+  // Xiaohongshu keeps document-level requests open for minutes. Its content
+  // executor already has bounded SPA-readiness polling, so waiting for Chrome's
+  // coarse `complete` state only delays an otherwise ready, correlated control.
+  return task.platform === "xiaohongshu"
+    ? await beforeDeadline(chrome.tabs.get(tabId), deadline)
+    : await waitForTabLoad(tabId, deadline);
+}
+
+function observedTabUrl(task: NativeSaveTask, tab: chrome.tabs.Tab): string | undefined {
+  return tab.pendingUrl ?? tab.url ?? (
+    task.platform === "xiaohongshu" ? taskNavigationUrl(task) : undefined
+  );
+}
+
 async function removeTabBestEffort(tabId: number): Promise<void> {
   try {
     await chrome.tabs.remove(tabId);
@@ -440,33 +459,43 @@ export async function runNativeSaveTask(
   let runtimeListenerRegistrationAttempted = false;
   let tabId: number | null = null;
   let ownsTab = false;
+  let reusableTab: chrome.tabs.Tab | null = null;
   let outcome = failedOutcome();
   const listener = (message: unknown, sender: chrome.runtime.MessageSender): void => {
     handleNativeSaveContentResult(message, sender);
   };
 
   try {
-    mutexAcquired = await acquireMutexBefore(
-      owner,
-      deadline,
-      Math.max(1, options.mutexRetryMs ?? DEFAULT_MUTEX_RETRY_MS),
-    );
-    if (!mutexAcquired) {
+    reusableTab = await reuseExactXiaohongshuTab(task, deadline);
+    // A user-triggered XHS save is fully correlated to the exact note route and
+    // control. Let it open that route even while background discovery owns the
+    // shared tab mutex; otherwise a long bootstrap can strand an already
+    // claimed native-save job for minutes. Other platforms keep the mutex
+    // because their page executors do not have the same exact-route boundary.
+    if (reusableTab === null && task.platform !== "xiaohongshu") {
+      mutexAcquired = await acquireMutexBefore(
+        owner,
+        deadline,
+        Math.max(1, options.mutexRetryMs ?? DEFAULT_MUTEX_RETRY_MS),
+      );
+    }
+    if (reusableTab === null && task.platform !== "xiaohongshu" && !mutexAcquired) {
       outcome = timeoutOutcome();
     } else {
       try {
-        const reusableTab = await reuseExactXiaohongshuTab(task, deadline);
         const tab = reusableTab ?? await createTabBeforeDeadline(taskNavigationUrl(task), deadline);
         ownsTab = reusableTab === null;
         if (tab.id === undefined) throw new Error("native-save task tab has no ID");
         tabId = tab.id;
         if (ownsTab) await recordNativeSaveTaskTab(tabId);
-        const loadedTab = await waitForTabLoad(tabId, deadline);
-        if (!isAllowedNativeSavePageUrl(task.platform, loadedTab.url)) {
+        const loadedTab = await waitForExecutableTab(task, tabId, deadline);
+        if (!isAllowedNativeSavePageUrl(task.platform, observedTabUrl(task, loadedTab))) {
           throw new Error("native-save task tab left its allow-listed platform");
         }
-        releaseDispatcherMutex(owner);
-        mutexAcquired = false;
+        if (mutexAcquired) {
+          releaseDispatcherMutex(owner);
+          mutexAcquired = false;
+        }
         runtimeListenerRegistrationAttempted = true;
         chrome.runtime.onMessage.addListener(listener);
         outcome = await executeBeforeDeadline(
@@ -477,7 +506,7 @@ export async function runNativeSaveTask(
           readinessController,
         );
         if (
-          task.platform === "douyin" &&
+          (task.platform === "douyin" || task.platform === "xiaohongshu") &&
           outcome.status === "failed" &&
           outcome.error_code === "native_confirmation_not_observed" &&
           remainingMs(deadline) > 0
@@ -487,8 +516,11 @@ export async function runNativeSaveTask(
             active: true,
             url: verificationUrl,
           }), deadline);
-          const verificationTab = await waitForTabLoad(tabId, deadline);
-          if (!isAllowedNativeSavePageUrl(task.platform, verificationTab.url)) {
+          const verificationTab = await waitForExecutableTab(task, tabId, deadline);
+          if (!isAllowedNativeSavePageUrl(
+            task.platform,
+            observedTabUrl(task, verificationTab),
+          )) {
             throw new Error("native-save verification tab left its allow-listed platform");
           }
           outcome = await executeBeforeDeadline(

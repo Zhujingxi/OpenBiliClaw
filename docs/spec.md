@@ -309,12 +309,12 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │ trusted-local extension E2E exact auth -> single saved sync item -> six-field safe callback        │
 │  │ -> /api/sources/{xhs,dy,yt,x,zhihu,reddit}；unsupported_adapter_missing 可重试 │
 │  │ -> 插件/桌面/移动 saved UI；CLI config-show（自动同步默认关闭）    │
-│  │ NATIVE_SAVE_EXECUTE/RESULT：tab-launch mutex + per-task deadline + bounded replay │
+│  │ NATIVE_SAVE_EXECUTE/RESULT：tab-launch mutex（XHS exact manual 可越过）+ per-task deadline + bounded replay │
 │  │ shared MV3 recovery barrier 在领取任务前清理全部 runner-owned orphan tabs       │
 │  │ final/source URL 与 tab/task/item 严格关联；Reddit/X/YT/XHS/DY/Zhihu 6/6 已接 │
-│  │ （fixture 全覆盖；X/Twitter 首轮 synced，其余五个平台待新授权验证）│
+│  │ （fixture 全覆盖；2026-07-14 六平台 favorite + watch-later/fallback 真实终态均成功）│
 │  │ Zhihu typed ID -> exact identity control/dialog -> OpenBiliClaw checked proof │
-│  │ YT favorite 精确 OpenBiliClaw + create 后 close/reopen；Watch Later 只认 WL │
+│  │ YT favorite 精确 OpenBiliClaw；重复 exact 行优先 checked/稳定复用；Watch Later 只认 WL │
 │  │ unsupported_content_type 保持 local-only                         │
 │  │ UI: pending + 空 task_id 可手动同步；非空 task_id / syncing 禁重复 │
 │  └──────────────────────────────────────────────────────┘   │

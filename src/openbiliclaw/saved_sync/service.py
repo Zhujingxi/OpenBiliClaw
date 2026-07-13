@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import sqlite3
 import uuid
 from collections import defaultdict
 from collections.abc import Callable, Coroutine, Sequence
@@ -29,6 +31,12 @@ TaskStarter = Callable[[str, Coroutine[Any, Any, Any]], asyncio.Task[Any]]
 
 _ACTIVE_STATUSES = frozenset({"pending"})
 _MAX_ADAPTER_TIMEOUT_SECONDS = 240.0
+
+logger = logging.getLogger(__name__)
+
+
+def _is_transient_sqlite_lock(exc: BaseException) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower()
 
 
 @dataclass(slots=True)
@@ -220,11 +228,22 @@ class SavedSyncService:
                         try:
                             await task_heartbeat
                         except _NativeSaveTaskRunnerOwnershipLostError:
+                            current = self.get_sync_task(task_id)
+                            if all(
+                                item.status not in {"pending", "syncing"}
+                                for item in current.items
+                            ):
+                                work.cancel()
+                                await asyncio.gather(work, return_exceptions=True)
+                                return current
                             if work in done:
                                 await work
                                 return self.get_sync_task(task_id)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.warning(
+                                "Native save task heartbeat failed (%s)",
+                                type(exc).__name__,
+                            )
                         work.cancel()
                         await asyncio.gather(work, return_exceptions=True)
                         raise RuntimeError("Native save task heartbeat failed") from None
@@ -289,7 +308,7 @@ class SavedSyncService:
         try:
             adapter, route = self._router.route(item.platform, requested_action)
         except InvalidNativeSaveAdapterResultError:
-            self._persist_result(
+            await self._persist_result(
                 list_kind,
                 NativeSaveResult(
                     item_key=item.item_key,
@@ -305,7 +324,7 @@ class SavedSyncService:
             )
             return
         except UnsupportedNativeSaveError:
-            self._persist_result(
+            await self._persist_result(
                 list_kind,
                 NativeSaveResult(
                     item_key=item.item_key,
@@ -321,7 +340,7 @@ class SavedSyncService:
             )
             return
         except Exception:
-            self._persist_result(
+            await self._persist_result(
                 list_kind,
                 NativeSaveResult(
                     item_key=item.item_key,
@@ -369,7 +388,7 @@ class SavedSyncService:
         except _NativeSaveItemHeartbeatError:
             raise
         except asyncio.CancelledError:
-            self._persist_result(
+            await self._persist_result(
                 list_kind,
                 NativeSaveResult(
                     item_key=item.item_key,
@@ -397,7 +416,7 @@ class SavedSyncService:
                 error_code="adapter_exception",
                 error_message="Native save failed",
             )
-        self._persist_result(
+        await self._persist_result(
             list_kind,
             result,
             task_id=task_id,
@@ -454,7 +473,7 @@ class SavedSyncService:
                             resolved_action=resolved_action,
                             resolved_target=resolved_target,
                         )
-                self._persist_result(
+                await self._persist_result(
                     list_kind,
                     final_result,
                     task_id=task_id,
@@ -519,7 +538,7 @@ class SavedSyncService:
                             resolved_action=resolved_action,
                             resolved_target=resolved_target,
                         )
-                self._persist_result(
+                await self._persist_result(
                     list_kind,
                     final_result,
                     task_id=task_id,
@@ -606,7 +625,7 @@ class SavedSyncService:
         finally:
             retrying_heartbeat.cancel()
             await asyncio.gather(retrying_heartbeat, save_task, return_exceptions=True)
-        self._persist_result(
+        await self._persist_result(
             list_kind,
             final_result,
             task_id=task_id,
@@ -678,12 +697,19 @@ class SavedSyncService:
     ) -> None:
         while True:
             await asyncio.sleep(self._claim_heartbeat_interval_seconds)
-            if not self._database.heartbeat_native_save_claim(
-                list_kind,
-                item_key,
-                task_id,
-                execution_id,
-            ):
+            try:
+                alive = await asyncio.to_thread(
+                    self._database.heartbeat_native_save_claim,
+                    list_kind,
+                    item_key,
+                    task_id,
+                    execution_id,
+                )
+            except Exception as exc:
+                if _is_transient_sqlite_lock(exc):
+                    continue
+                raise
+            if not alive:
                 return
 
     async def _heartbeat_claim_with_retry(
@@ -697,7 +723,8 @@ class SavedSyncService:
         while True:
             await asyncio.sleep(delay)
             try:
-                alive = self._database.heartbeat_native_save_claim(
+                alive = await asyncio.to_thread(
+                    self._database.heartbeat_native_save_claim,
                     list_kind,
                     item_key,
                     task_id,
@@ -713,10 +740,20 @@ class SavedSyncService:
     async def _heartbeat_sync_task(self, task_id: str, runner_id: str) -> None:
         while True:
             await asyncio.sleep(self._task_heartbeat_interval_seconds)
-            if self._database.heartbeat_native_sync_task(task_id, runner_id) == 0:
+            try:
+                alive = await asyncio.to_thread(
+                    self._database.heartbeat_native_sync_task,
+                    task_id,
+                    runner_id,
+                )
+            except Exception as exc:
+                if _is_transient_sqlite_lock(exc):
+                    continue
+                raise
+            if alive == 0:
                 raise _NativeSaveTaskRunnerOwnershipLostError
 
-    def _persist_result(
+    async def _persist_result(
         self,
         list_kind: SavedListKind,
         result: NativeSaveResult,
@@ -725,18 +762,28 @@ class SavedSyncService:
         execution_id: str,
         requested_action: NativeSaveAction,
     ) -> None:
-        self._database.complete_native_save_claim(
-            list_kind,
-            result.item_key,
-            task_id,
-            execution_id,
-            requested_action=requested_action,
-            resolved_action=result.resolved_action,
-            resolved_target=result.resolved_target,
-            status=result.status,
-            last_error_code=result.error_code,
-            last_error_message=result.error_message,
-        )
+        delay = 0.05
+        while True:
+            try:
+                await asyncio.to_thread(
+                    self._database.complete_native_save_claim,
+                    list_kind,
+                    result.item_key,
+                    task_id,
+                    execution_id,
+                    requested_action=requested_action,
+                    resolved_action=result.resolved_action,
+                    resolved_target=result.resolved_target,
+                    status=result.status,
+                    last_error_code=result.error_code,
+                    last_error_message=result.error_message,
+                )
+                return
+            except Exception as exc:
+                if not _is_transient_sqlite_lock(exc):
+                    raise
+                await asyncio.sleep(delay)
+                delay = min(delay * 2.0, 1.0)
 
     @staticmethod
     def _item_from_row(row: dict[str, Any]) -> SavedItemInput:
