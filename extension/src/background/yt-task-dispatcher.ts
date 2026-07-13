@@ -16,10 +16,12 @@
  * URL so chrome.tabs.update is safe and clean.
  */
 
-import type { YtBootstrapItem, YtScope, YtScopeResult } from "../content/yt/task-executor.js";
-import { YT_SCOPE_URLS } from "../content/yt/task-executor.js";
+import type { YtBootstrapItem, YtScope, YtScopeResult } from "../content/yt/task-executor.ts";
+import { YT_SCOPE_URLS } from "../content/yt/task-executor.ts";
 import { apiUrl } from "../shared/backend-endpoint.ts";
 import { authenticatedFetch } from "../shared/auth.ts";
+import { isNativeSaveTask, type NativeSaveResult, type NativeSaveTask } from "../shared/native-save.ts";
+import { ensureNativeSaveTaskRecovery, runNativeSaveTask } from "./native-save-task-runner.ts";
 
 // Cross-source mutex — same field as xhs/dy dispatchers so all three
 // cooperate on a single long-running task slot.
@@ -70,13 +72,15 @@ const DEFAULT_SCOPES: readonly YtScope[] = [
 // Task types
 // ---------------------------------------------------------------------------
 
-export interface YtTask {
+export interface YtBootstrapTask {
   id: string;
   type: "bootstrap_profile";
   scopes?: YtScope[];
   max_items_per_scope?: number;
   max_scroll_rounds?: number;
 }
+
+export type YtTask = YtBootstrapTask | NativeSaveTask;
 
 interface YtTaskPayload {
   task_id: string;
@@ -92,6 +96,9 @@ interface YtTaskPayload {
 // ---------------------------------------------------------------------------
 
 export function isValidYtTask(task: unknown): task is YtTask {
+  if (isNativeSaveTask(task)) {
+    return task.platform === "youtube" && task.platform_slug === "yt";
+  }
   if (typeof task !== "object" || task === null) return false;
   const t = task as Record<string, unknown>;
   if (typeof t.id !== "string" || !t.id) return false;
@@ -105,7 +112,7 @@ export function isValidYtTask(task: unknown): task is YtTask {
   return true;
 }
 
-export function computeYtTaskTimeoutMs(task: YtTask): number {
+export function computeYtTaskTimeoutMs(task: YtBootstrapTask): number {
   const scopeCount =
     Array.isArray(task.scopes) && task.scopes.length > 0 ? task.scopes.length : DEFAULT_SCOPES.length;
   const rounds =
@@ -123,7 +130,7 @@ export function computeYtTaskTimeoutMs(task: YtTask): number {
 let taskInFlight = false;
 let taskTabId: number | null = null;
 let taskTimeoutId: ReturnType<typeof setTimeout> | null = null;
-let currentTask: YtTask | null = null;
+let currentTask: YtBootstrapTask | null = null;
 
 interface TaskProgress {
   task_id: string;
@@ -164,6 +171,18 @@ async function postTaskResult(result: YtTaskPayload): Promise<void> {
   }
 }
 
+async function postNativeSaveResult(result: NativeSaveResult): Promise<void> {
+  try {
+    await authenticatedFetch(await apiUrl("/sources/yt/task-result"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(result),
+    });
+  } catch {
+    // Backend transient unavailability should not crash the service worker.
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Tab lifecycle
 // ---------------------------------------------------------------------------
@@ -187,7 +206,7 @@ function cleanupTask(): void {
   releaseDispatcherMutex("yt");
 }
 
-function armTaskTimeout(task: YtTask): void {
+function armTaskTimeout(task: YtBootstrapTask): void {
   const ms = computeYtTaskTimeoutMs(task);
   taskTimeoutId = setTimeout(async () => {
     await postTaskResult({ task_id: task.id, status: "failed", error: "task_timeout" });
@@ -284,6 +303,16 @@ function navigateToCurrentScope(): void {
 // ---------------------------------------------------------------------------
 
 export async function executeTask(task: YtTask): Promise<void> {
+  if (task.type === "native_save") {
+    if (taskInFlight) return;
+    taskInFlight = true;
+    try {
+      await runNativeSaveTask(task, "yt", postNativeSaveResult);
+    } finally {
+      taskInFlight = false;
+    }
+    return;
+  }
   if (taskInFlight) return;
   if (!tryAcquireDispatcherMutex("yt")) return;
 
@@ -369,6 +398,7 @@ export async function handleYtScopeResult(result: YtScopeResult): Promise<void> 
 // ---------------------------------------------------------------------------
 
 async function pollNextTask(): Promise<void> {
+  await ensureNativeSaveTaskRecovery();
   if (taskInFlight) return;
   const task = await fetchNextTask();
   if (!task) return;

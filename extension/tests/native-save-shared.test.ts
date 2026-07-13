@@ -221,37 +221,41 @@ test("native save content runtime evicts the oldest completed outcome after 256 
   }
 });
 
-test("native save docs identify Reddit and X wiring without overstating account verification", () => {
+test("native save docs identify Reddit, X, and YouTube wiring without overstating account verification", () => {
   const runtime = readFileSync(resolve("../docs/modules/runtime.md"), "utf8");
   const changelog = readFileSync(resolve("../docs/changelog.md"), "utf8");
   const architecture = readFileSync(resolve("../docs/architecture.md"), "utf8");
   for (const text of [runtime, changelog, architecture]) {
     assert.match(text, /NATIVE_SAVE_EXECUTE/);
-    assert.match(text, /Reddit\/X executor 已接入/);
+    assert.match(text, /Reddit\/X 与 YouTube executor 已接入/);
     assert.match(text, /尚未真实账号验证/);
-    assert.match(text, /小红书、抖音、YouTube、知乎.*待接/);
+    assert.match(text, /小红书、抖音、知乎.*待接/);
     assert.match(text, /共享 MV3 recovery barrier/);
     assert.match(text, /2xx 未确认|2xx-unconfirmed/);
     assert.match(text, /(?:结构化.*rate|rate.*结构化|structured.*rate)/i);
+    assert.match(text, /OpenBiliClaw.*close\/reopen|close\/reopen.*OpenBiliClaw/i);
+    assert.match(text, /Watch Later.*WL/);
   }
   const spec = readFileSync(resolve("../docs/spec.md"), "utf8");
   assert.match(spec, /shared MV3 recovery barrier/);
+  assert.match(runtime, /createYouTubeBrowserEnvironment/);
+  assert.match(runtime, /3\/6 executor 已接/);
 });
 
-test("README prose matches the fixture-tested Reddit and X executor architecture", () => {
+test("README prose matches the fixture-tested Reddit, X, and YouTube executor architecture", () => {
   const readme = readFileSync(resolve("../README.md"), "utf8");
   const readmeEn = readFileSync(resolve("../README_EN.md"), "utf8");
-  assert.match(readme, /Reddit\/X 原生保存 executor 已接入.*fixture.*未真实账号验证/);
-  assert.match(readme, /小红书、抖音、YouTube、知乎.*仍待接/);
+  assert.match(readme, /Reddit\/X 与 YouTube 原生保存 executor 已接入.*fixture.*未真实账号验证/);
+  assert.match(readme, /小红书、抖音、知乎.*仍待接/);
   assert.doesNotMatch(readme, /扩展只负责同步 x\.com cookie \+ 捕获互动/);
-  assert.match(readmeEn, /Reddit\/X native-save executors are wired.*fixture-tested.*not real-account verified/i);
-  assert.match(readmeEn, /Xiaohongshu, Douyin, YouTube, and Zhihu.*remain deferred/i);
+  assert.match(readmeEn, /Reddit\/X and YouTube native-save executors are wired.*fixture-tested.*not real-account verified/i);
+  assert.match(readmeEn, /Xiaohongshu, Douyin, and Zhihu.*remain deferred/i);
   assert.doesNotMatch(readmeEn, /extension only syncs the x\.com cookie and captures engagement/i);
 
   const coreFeatures = readme.match(/## ✨ 核心特性([\s\S]*?)\n## /)?.[1] ?? "";
   const keyFeatures = readmeEn.match(/## ✨ Key Features([\s\S]*?)\n## /)?.[1] ?? "";
-  assert.match(coreFeatures, /Reddit\/X.*executor 已接入.*fixture.*未真实账号验证/);
-  assert.match(coreFeatures, /YouTube.*小红书.*抖音.*知乎.*executor 仍待接/);
-  assert.match(keyFeatures, /Reddit\/X.*executors are wired.*fixture-tested.*not real-account verified/i);
-  assert.match(keyFeatures, /YouTube.*Xiaohongshu.*Douyin.*Zhihu.*executors remain deferred/i);
+  assert.match(coreFeatures, /Reddit\/X 与 YouTube.*executor 已接入.*fixture.*未真实账号验证/);
+  assert.match(coreFeatures, /小红书.*抖音.*知乎.*executor 仍待接/);
+  assert.match(keyFeatures, /Reddit\/X and YouTube.*executors are wired.*fixture-tested.*not real-account verified/i);
+  assert.match(keyFeatures, /Xiaohongshu.*Douyin.*Zhihu.*executors remain deferred/i);
 });

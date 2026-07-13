@@ -1,0 +1,545 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  createYouTubeBrowserEnvironment,
+  saveYouTube,
+  type YouTubeNativeSaveEnvironment,
+  type YouTubePlaylistRow,
+} from "../src/content/native-save/youtube.ts";
+import type { NativeSaveTask } from "../src/shared/native-save.ts";
+
+const VIDEO_ID = "dQw4w9WgXcQ";
+const task: NativeSaveTask = {
+  id: "123e4567-e89b-42d3-a456-426614174006",
+  type: "native_save",
+  platform: "youtube",
+  platform_slug: "yt",
+  item_key: `youtube:${VIDEO_ID}`,
+  content_id: VIDEO_ID,
+  content_url: `https://www.youtube.com/watch?v=${VIDEO_ID}`,
+  content_type: "video",
+  requested_action: "favorite",
+  resolved_action: "favorite",
+  target_label: "OpenBiliClaw",
+};
+
+interface FixtureOptions {
+  currentUrl?: string;
+  loggedIn?: boolean;
+  unavailable?: boolean;
+  rateLimited?: boolean;
+  rateLimitedAfterMutation?: boolean;
+  initialNamedRows?: Array<{ title: string; checked?: boolean }>;
+  watchLaterChecked?: boolean;
+  createSucceeds?: boolean;
+  createdTitle?: string;
+  confirmAfterClick?: boolean;
+  dialogAvailable?: boolean;
+}
+
+function fixture(options: FixtureOptions = {}): YouTubeNativeSaveEnvironment & {
+  actions: string[];
+  namedLookups: number;
+  mutations: number;
+} {
+  let open = false;
+  let rows = (options.initialNamedRows ?? [{ title: "OpenBiliClaw" }]).map((row) => ({ ...row }));
+  let watchLaterChecked = options.watchLaterChecked ?? false;
+  let rateLimited = options.rateLimited ?? false;
+  const env = {
+    actions: [] as string[],
+    namedLookups: 0,
+    mutations: 0,
+    currentUrl: options.currentUrl ?? task.content_url,
+    isLoggedIn: () => options.loggedIn ?? true,
+    isUnavailable: () => options.unavailable ?? false,
+    rateLimitFingerprint: () => rateLimited ? "limited" : "",
+    async openSaveDialog() {
+      env.actions.push("open-save-dialog");
+      open = options.dialogAvailable ?? true;
+      return open;
+    },
+    async closeSaveDialog() {
+      env.actions.push("close-save-dialog");
+      open = false;
+    },
+    findNamedPlaylists(title: string): YouTubePlaylistRow[] {
+      env.namedLookups += 1;
+      if (!open) return [];
+      return rows.filter((candidate) => candidate.title === title).map((row) => ({
+        isChecked: () => row.checked ?? false,
+        click() {
+          env.actions.push(`select:${row.title}`);
+          env.mutations += 1;
+          if (options.rateLimitedAfterMutation) rateLimited = true;
+          if (options.confirmAfterClick ?? true) row.checked = true;
+        },
+      }));
+    },
+    findWatchLater(): YouTubePlaylistRow | null {
+      if (!open) return null;
+      return {
+        isChecked: () => watchLaterChecked,
+        click() {
+          env.actions.push("select:watch-later");
+          env.mutations += 1;
+          if (options.rateLimitedAfterMutation) rateLimited = true;
+          if (options.confirmAfterClick ?? true) watchLaterChecked = true;
+        },
+      };
+    },
+    async createPlaylist(title: string) {
+      env.actions.push(`create:${title}`);
+      env.mutations += 1;
+      if (options.rateLimitedAfterMutation) rateLimited = true;
+      if (!(options.createSucceeds ?? true)) return false;
+      rows.push({ title: options.createdTitle ?? title, checked: false });
+      return true;
+    },
+    sleep: async () => {},
+  } satisfies YouTubeNativeSaveEnvironment & {
+    actions: string[];
+    namedLookups: number;
+    mutations: number;
+  };
+  return env;
+}
+
+test("YouTube native save accepts only canonical watch and shorts video URLs", async () => {
+  for (const contentUrl of [
+    `https://www.youtube.com/watch?v=${VIDEO_ID}`,
+    `https://www.youtube.com/shorts/${VIDEO_ID}`,
+  ]) {
+    const env = fixture({ currentUrl: contentUrl });
+    assert.deepEqual(await saveYouTube({ ...task, content_url: contentUrl }, env), { status: "synced" });
+    assert.equal(env.mutations, 1);
+  }
+
+  for (const contentUrl of [
+    `https://www.youtube.com/embed/${VIDEO_ID}`,
+    `https://www.youtube.com/watch?v=${VIDEO_ID}&list=PL123`,
+    `https://www.youtube.com/shorts/${VIDEO_ID}/extra`,
+    `https://www.youtube.com/watch?v=other123456`,
+  ]) {
+    const env = fixture({ currentUrl: contentUrl });
+    assert.deepEqual(await saveYouTube({ ...task, content_url: contentUrl }, env), {
+      status: "unsupported",
+      error_code: "unsupported_content_type",
+    });
+    assert.equal(env.mutations, 0);
+  }
+});
+
+test("YouTube native save correlates youtu.be tasks with safe canonical redirects", async () => {
+  for (const currentUrl of [
+    `https://www.youtube.com/watch?v=${VIDEO_ID}`,
+    `https://www.youtube.com/watch?v=${VIDEO_ID}&feature=share&si=redirect-token`,
+    `https://www.youtube.com/shorts/${VIDEO_ID}?feature=share`,
+  ]) {
+    const env = fixture({ currentUrl });
+    assert.deepEqual(await saveYouTube({ ...task, content_url: `https://youtu.be/${VIDEO_ID}` }, env), {
+      status: "synced",
+    });
+  }
+  for (const currentUrl of [
+    `https://www.youtube.com/watch?v=${VIDEO_ID}&v=${VIDEO_ID}`,
+    `https://www.youtube.com/watch?v=${VIDEO_ID}&v=other123456`,
+    `https://www.youtube.com/watch?v=${VIDEO_ID}&secret=value`,
+    `https://user:pass@www.youtube.com/watch?v=${VIDEO_ID}`,
+    `https://www.youtube.com/watch?v=${VIDEO_ID}#fragment`,
+  ]) {
+    const env = fixture({ currentUrl });
+    assert.deepEqual(await saveYouTube({ ...task, content_url: `https://youtu.be/${VIDEO_ID}` }, env), {
+      status: "unsupported",
+      error_code: "unsupported_content_type",
+    });
+    assert.equal(env.mutations, 0);
+  }
+});
+
+test("YouTube native save creates exact OpenBiliClaw then closes, reopens, and re-queries", async () => {
+  const env = fixture({ initialNamedRows: [] });
+  assert.deepEqual(await saveYouTube(task, env), { status: "synced" });
+  assert.deepEqual(env.actions, [
+    "open-save-dialog",
+    "create:OpenBiliClaw",
+    "close-save-dialog",
+    "open-save-dialog",
+    "select:OpenBiliClaw",
+  ]);
+  assert.equal(env.namedLookups, 2);
+});
+
+test("YouTube native save uses exact Unicode case-sensitive playlist title", async () => {
+  const env = fixture({ initialNamedRows: [{ title: "openbiliclaw" }] });
+  assert.deepEqual(await saveYouTube(task, env), { status: "synced" });
+  assert.ok(env.actions.includes("create:OpenBiliClaw"));
+  assert.ok(env.actions.includes("select:OpenBiliClaw"));
+  assert.ok(!env.actions.includes("select:openbiliclaw"));
+});
+
+test("YouTube native save never falls back after create failure or re-query mismatch", async () => {
+  for (const env of [
+    fixture({ initialNamedRows: [{ title: "Other" }], createSucceeds: false }),
+    fixture({ initialNamedRows: [{ title: "Other" }], createdTitle: "openbiliclaw" }),
+  ]) {
+    assert.deepEqual(await saveYouTube(task, env), {
+      status: "failed",
+      error_code: "native_save_failed",
+    });
+    assert.ok(!env.actions.includes("select:Other"));
+    assert.ok(!env.actions.includes("select:openbiliclaw"));
+  }
+});
+
+test("YouTube native save maps a new create-time rate toast before missing-row failure", async () => {
+  const env = fixture({
+    initialNamedRows: [],
+    createdTitle: "creation-rejected",
+    rateLimitedAfterMutation: true,
+  });
+  assert.deepEqual(await saveYouTube(task, env), { status: "rate_limited" });
+  assert.ok(!env.actions.some((action) => action.startsWith("select:")));
+});
+
+test("YouTube native save never mutates for action or exact-target contract mismatch", async () => {
+  for (const mismatchedTask of [
+    { ...task, target_label: "openbiliclaw" },
+    { ...task, requested_action: "watch_later" as const },
+    {
+      ...task,
+      requested_action: "watch_later" as const,
+      resolved_action: "watch_later" as const,
+      target_label: "OpenBiliClaw",
+    },
+  ]) {
+    const env = fixture();
+    assert.deepEqual(await saveYouTube(mismatchedTask, env), {
+      status: "failed",
+      error_code: "native_save_failed",
+    });
+    assert.equal(env.mutations, 0);
+  }
+});
+
+test("YouTube native save returns already_synced without mutation for existing membership", async () => {
+  const env = fixture({ initialNamedRows: [{ title: "OpenBiliClaw", checked: true }] });
+  assert.deepEqual(await saveYouTube(task, env), { status: "already_synced" });
+  assert.equal(env.mutations, 0);
+});
+
+test("YouTube native save watch later only uses the platform Watch Later row", async () => {
+  for (const checked of [false, true]) {
+    const env = fixture({ watchLaterChecked: checked, initialNamedRows: [] });
+    const result = await saveYouTube({
+      ...task,
+      requested_action: "watch_later",
+      resolved_action: "watch_later",
+      target_label: "YouTube Watch Later",
+    }, env);
+    assert.deepEqual(result, { status: checked ? "already_synced" : "synced" });
+    assert.equal(env.namedLookups, 0);
+    assert.equal(env.actions.some((action) => action.startsWith("create:")), false);
+  }
+});
+
+test("YouTube native save maps logged out, unavailable, rate limited, and ambiguous DOM safely", async () => {
+  const cases: Array<[YouTubeNativeSaveEnvironment, unknown]> = [
+    [fixture({ loggedIn: false }), { status: "login_required" }],
+    [fixture({ unavailable: true }), { status: "unsupported", error_code: "unsupported_content_type" }],
+    [fixture({ rateLimitedAfterMutation: true, confirmAfterClick: false }), { status: "rate_limited" }],
+    [fixture({ dialogAvailable: false }), { status: "failed", error_code: "native_save_failed" }],
+    [fixture({ initialNamedRows: [{ title: "OpenBiliClaw" }, { title: "OpenBiliClaw" }] }), { status: "failed", error_code: "native_save_failed" }],
+    [fixture({ confirmAfterClick: false }), { status: "failed", error_code: "native_save_failed" }],
+  ];
+  for (const [env, expected] of cases) assert.deepEqual(await saveYouTube(task, env), expected);
+});
+
+test("YouTube native save prefers checked membership proof over a stale rate toast", async () => {
+  const env = fixture({
+    initialNamedRows: [{ title: "OpenBiliClaw", checked: true }],
+    rateLimited: true,
+  });
+  assert.deepEqual(await saveYouTube(task, env), { status: "already_synced" });
+  assert.equal(env.mutations, 0);
+});
+
+test("YouTube native save ignores a stale global rate toast when no checked proof appears", async () => {
+  const env = fixture({ rateLimited: true, confirmAfterClick: false });
+  assert.deepEqual(await saveYouTube(task, env), {
+    status: "failed",
+    error_code: "native_save_failed",
+  });
+  assert.equal(env.mutations, 1);
+});
+
+test("YouTube browser environment requires signed-in avatar/menu evidence", () => {
+  const documentFixture = (state: "signed-in" | "signed-out" | "ambiguous") => ({
+    querySelector(selector: string) {
+      if (selector.includes("ServiceLogin") && state === "signed-out") return {};
+      if (selector.includes("avatar-btn") && state === "signed-in") return {};
+      return null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+  }) as unknown as Document;
+  assert.equal(createYouTubeBrowserEnvironment(documentFixture("signed-in"), task.content_url).isLoggedIn(), true);
+  assert.equal(createYouTubeBrowserEnvironment(documentFixture("signed-out"), task.content_url).isLoggedIn(), false);
+  assert.equal(createYouTubeBrowserEnvironment(documentFixture("ambiguous"), task.content_url).isLoggedIn(), false);
+});
+
+test("YouTube browser environment identifies only renderer playlist id WL as Watch Later", () => {
+  const watchLaterRow = {
+    data: { playlistId: "WL" },
+    getAttribute: () => null,
+    querySelector(selector: string) {
+      if (selector.includes("checkbox")) {
+        return { getAttribute: (name: string) => name === "aria-checked" ? "true" : null, hasAttribute: () => false };
+      }
+      return null;
+    },
+  };
+  const namedRow = { ...watchLaterRow, data: { playlistId: "PL-user" } };
+  const dialog = {
+    hasAttribute: () => false,
+    querySelectorAll(selector: string) {
+      if (selector === "ytd-playlist-add-to-option-renderer") return [namedRow, watchLaterRow];
+      return [];
+    },
+  };
+  const documentFixture = {
+    querySelectorAll(selector: string) {
+      if (selector.includes("ytd-add-to-playlist-renderer")) return [dialog];
+      return [];
+    },
+  } as unknown as Document;
+  const row = createYouTubeBrowserEnvironment(documentFixture, task.content_url).findWatchLater();
+  assert.ok(row);
+  assert.equal(row.isChecked(), true);
+});
+
+test("YouTube browser environment rejects WL-prefix hrefs and accepts exact parsed list WL", () => {
+  const makeRow = (href: string) => ({
+    data: {},
+    getAttribute: () => null,
+    querySelector(selector: string) {
+      if (selector.includes("a[href*='list=WL']")) return { href };
+      if (selector.includes("checkbox")) return { getAttribute: () => "false", hasAttribute: () => false };
+      return null;
+    },
+    querySelectorAll(selector: string) {
+      return selector === "a[href]" ? [{ href }] : [];
+    },
+  });
+  const rows = [makeRow("https://www.youtube.com/playlist?list=WL123")];
+  const dialog = {
+    hasAttribute: () => false,
+    parentElement: null,
+    querySelectorAll(selector: string) {
+      return selector === "ytd-playlist-add-to-option-renderer" ? rows : [];
+    },
+  };
+  const documentFixture = {
+    defaultView: null,
+    querySelectorAll(selector: string) {
+      return selector.includes("ytd-add-to-playlist-renderer") ? [dialog] : [];
+    },
+  } as unknown as Document;
+  const env = createYouTubeBrowserEnvironment(documentFixture, task.content_url);
+  assert.equal(env.findWatchLater(), null);
+  rows[0] = makeRow("https://www.youtube.com/playlist?list=WL");
+  assert.ok(env.findWatchLater());
+});
+
+test("YouTube browser environment ignores renderers hidden by an ancestor", () => {
+  const hiddenAncestor = {
+    hidden: true,
+    hasAttribute(name: string) { return name === "hidden"; },
+    getAttribute: () => null,
+    parentElement: null,
+  };
+  const staleDialog = {
+    hasAttribute: () => false,
+    getAttribute: () => null,
+    parentElement: hiddenAncestor,
+    querySelectorAll(selector: string) {
+      if (selector === "ytd-playlist-add-to-option-renderer") {
+        return [{
+          data: { playlistId: "WL" },
+          getAttribute: () => null,
+          parentElement: staleDialog,
+          querySelector(query: string) {
+            if (query.startsWith("#label")) return { textContent: "OpenBiliClaw" };
+            if (query.includes("checkbox")) return { getAttribute: () => "true", hasAttribute: () => true };
+            return null;
+          },
+          querySelectorAll: () => [],
+        }];
+      }
+      return [];
+    },
+  };
+  const documentFixture = {
+    defaultView: null,
+    querySelectorAll(selector: string) {
+      return selector.includes("ytd-add-to-playlist-renderer") ? [staleDialog] : [];
+    },
+  } as unknown as Document;
+  const env = createYouTubeBrowserEnvironment(documentFixture, task.content_url);
+  assert.deepEqual(env.findNamedPlaylists("OpenBiliClaw"), []);
+  assert.equal(env.findWatchLater(), null);
+});
+
+test("YouTube browser environment excludes hidden playlist rows from proof and mutation", () => {
+  let clicks = 0;
+  const hiddenNamedRow = {
+    hidden: true,
+    data: { playlistId: "PL-hidden" },
+    hasAttribute(name: string) { return name === "hidden"; },
+    getAttribute: () => null,
+    parentElement: null,
+    querySelector(selector: string) {
+      if (selector.startsWith("#label")) return { textContent: "OpenBiliClaw" };
+      if (selector.includes("checkbox")) {
+        return {
+          click() { clicks += 1; },
+          getAttribute: (name: string) => name === "aria-checked" ? "true" : null,
+          hasAttribute: () => true,
+        };
+      }
+      return null;
+    },
+    querySelectorAll: () => [],
+  };
+  const hiddenWatchLaterRow = {
+    ...hiddenNamedRow,
+    data: { playlistId: "WL" },
+    querySelector(selector: string) {
+      if (selector.startsWith("#label")) return { textContent: "Watch later" };
+      return hiddenNamedRow.querySelector(selector);
+    },
+  };
+  const dialog = {
+    hasAttribute: () => false,
+    getAttribute: () => null,
+    parentElement: null,
+    querySelectorAll(selector: string) {
+      return selector === "ytd-playlist-add-to-option-renderer"
+        ? [hiddenNamedRow, hiddenWatchLaterRow]
+        : [];
+    },
+  };
+  hiddenNamedRow.parentElement = dialog;
+  hiddenWatchLaterRow.parentElement = dialog;
+  const documentFixture = {
+    defaultView: null,
+    querySelectorAll(selector: string) {
+      return selector.includes("ytd-add-to-playlist-renderer") ? [dialog] : [];
+    },
+  } as unknown as Document;
+  const env = createYouTubeBrowserEnvironment(documentFixture, task.content_url);
+  const named = env.findNamedPlaylists("OpenBiliClaw");
+  const watchLater = env.findWatchLater();
+  assert.deepEqual(named, []);
+  assert.equal(watchLater, null);
+  named[0]?.click();
+  watchLater?.click();
+  assert.equal(clicks, 0);
+});
+
+test("YouTube rate fingerprint ignores unrelated alert mutation beside a stale rate toast", () => {
+  let observerCallback: MutationCallback | null = null;
+  const originalMutationObserver = globalThis.MutationObserver;
+  class FakeMutationObserver {
+    constructor(callback: MutationCallback) { observerCallback = callback; }
+    observe() {}
+    disconnect() {}
+    takeRecords(): MutationRecord[] { return []; }
+  }
+  (globalThis as { MutationObserver?: typeof MutationObserver }).MutationObserver = FakeMutationObserver as unknown as typeof MutationObserver;
+  const staleRateToast = {
+    textContent: "Quota exceeded, try again later",
+    hasAttribute: () => false,
+    getAttribute: () => null,
+    parentElement: null,
+    closest: () => staleRateToast,
+  };
+  const unrelatedAlert = {
+    textContent: "Playlist saved",
+    hasAttribute: () => false,
+    getAttribute: () => null,
+    parentElement: null,
+    closest: () => unrelatedAlert,
+  };
+  const unrelatedChild = {
+    nodeType: 1,
+    closest: () => null,
+    querySelectorAll: () => [],
+  };
+  const broadCommonAncestor = {
+    nodeType: 1,
+    closest: () => null,
+    querySelectorAll: () => [staleRateToast, unrelatedAlert],
+  };
+  const documentFixture = {
+    defaultView: null,
+    querySelectorAll(selector: string) {
+      return selector.includes("tp-yt-paper-toast") ? [staleRateToast, unrelatedAlert] : [];
+    },
+  } as unknown as Document;
+  try {
+    const env = createYouTubeBrowserEnvironment(documentFixture, task.content_url);
+    const before = env.rateLimitFingerprint();
+    observerCallback?.([{ target: unrelatedAlert, type: "attributes", attributeName: "aria-hidden" } as unknown as MutationRecord], {} as MutationObserver);
+    assert.equal(env.rateLimitFingerprint(), before);
+    observerCallback?.([{
+      target: broadCommonAncestor,
+      type: "childList",
+      addedNodes: [unrelatedChild],
+    } as unknown as MutationRecord], {} as MutationObserver);
+    assert.equal(env.rateLimitFingerprint(), before);
+    env.dispose?.();
+  } finally {
+    (globalThis as { MutationObserver?: typeof MutationObserver }).MutationObserver = originalMutationObserver;
+  }
+});
+
+test("YouTube rate fingerprint advances when a reused toast node is shown again", () => {
+  let visible = false;
+  let observerCallback: MutationCallback | null = null;
+  const originalMutationObserver = globalThis.MutationObserver;
+  class FakeMutationObserver {
+    constructor(callback: MutationCallback) { observerCallback = callback; }
+    observe() {}
+    disconnect() {}
+    takeRecords(): MutationRecord[] { return []; }
+  }
+  (globalThis as { MutationObserver?: typeof MutationObserver }).MutationObserver = FakeMutationObserver as unknown as typeof MutationObserver;
+  const toast = {
+    textContent: "Quota exceeded, try again later",
+    hasAttribute(name: string) { return name === "hidden" && !visible; },
+    getAttribute(name: string) { return name === "aria-hidden" ? (visible ? "false" : "true") : null; },
+    parentElement: null,
+    closest: () => toast,
+  };
+  const documentFixture = {
+    defaultView: null,
+    querySelectorAll(selector: string) {
+      return selector.includes("tp-yt-paper-toast") ? [toast] : [];
+    },
+  } as unknown as Document;
+  try {
+    const env = createYouTubeBrowserEnvironment(documentFixture, task.content_url);
+    const before = env.rateLimitFingerprint();
+    visible = true;
+    observerCallback?.([{ target: toast } as unknown as MutationRecord], {} as MutationObserver);
+    const after = env.rateLimitFingerprint();
+    assert.equal(before, "");
+    assert.notEqual(after, before);
+    env.dispose?.();
+  } finally {
+    (globalThis as { MutationObserver?: typeof MutationObserver }).MutationObserver = originalMutationObserver;
+  }
+});
