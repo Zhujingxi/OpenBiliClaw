@@ -12,6 +12,7 @@ export interface ChromeMockState {
   createdTabs: Array<{ active?: boolean; url: string }>;
   updatedTabs: Array<{ active?: boolean; tabId: number; url?: string }>;
   sentMessages: Array<{ message: unknown; tabId: number }>;
+  removedTabs: number[];
   executedScripts: Array<{ files?: string[]; tabId?: number; world?: string }>;
   fetchCalls: Array<{ body?: unknown; method?: string; url: string }>;
   queryResult: ChromeMockTab[];
@@ -21,6 +22,7 @@ export interface ChromeMockState {
   sendMessageImpl: (tabId: number, message: unknown) => Promise<unknown>;
   fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   emitTabUpdated: (tabId: number, changeInfo: { status?: string }) => void;
+  emitRuntimeMessage: (message: unknown, sender?: { tab?: ChromeMockTab }) => void;
   restore: () => void;
 }
 
@@ -32,6 +34,7 @@ export function installChromeMock(): ChromeMockState {
     createdTabs: [],
     updatedTabs: [],
     sentMessages: [],
+    removedTabs: [],
     executedScripts: [],
     fetchCalls: [],
     queryResult: [],
@@ -53,11 +56,17 @@ export function installChromeMock(): ChromeMockState {
         listener(tabId, changeInfo);
       }
     },
+    emitRuntimeMessage(message, sender = {}) {
+      for (const listener of [...runtimeListeners]) {
+        listener(message, sender);
+      }
+    },
     restore() {
       (globalThis as { chrome?: unknown }).chrome = originalChrome;
       globalThis.fetch = originalFetch;
     },
   };
+  const runtimeListeners: Array<(message: unknown, sender: { tab?: ChromeMockTab }) => void> = [];
 
   let nextTabId = 42;
 
@@ -102,6 +111,10 @@ export function installChromeMock(): ChromeMockState {
         state.sentMessages.push({ tabId, message });
         return state.sendMessageImpl(tabId, message);
       },
+      async remove(tabId: number) {
+        state.removedTabs.push(tabId);
+        state.tabById.delete(tabId);
+      },
       onUpdated: {
         addListener(listener: TabUpdatedListener) {
           listeners.push(listener);
@@ -112,6 +125,20 @@ export function installChromeMock(): ChromeMockState {
             listeners.splice(index, 1);
           }
         },
+      },
+    },
+    runtime: {
+      onMessage: {
+        addListener(listener: (message: unknown, sender: { tab?: ChromeMockTab }) => void) {
+          runtimeListeners.push(listener);
+        },
+        removeListener(listener: (message: unknown, sender: { tab?: ChromeMockTab }) => void) {
+          const index = runtimeListeners.indexOf(listener);
+          if (index >= 0) runtimeListeners.splice(index, 1);
+        },
+      },
+      async sendMessage(message: unknown) {
+        for (const listener of [...runtimeListeners]) listener(message, {});
       },
     },
     scripting: {

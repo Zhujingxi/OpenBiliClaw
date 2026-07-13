@@ -306,7 +306,8 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │ 六平台 adapter -> ExtensionNativeSaveBroker -> extension_native_save_jobs -> native_save multiplex │
 │  │ -> /api/sources/{xhs,dy,yt,x,zhihu,reddit}；unsupported_adapter_missing 可重试 │
 │  │ -> 插件/桌面/移动 saved UI；CLI config-show（自动同步默认关闭）    │
-│  │ 扩展 executor 尚未实现；unsupported_content_type 保持 local-only  │
+│  │ NATIVE_SAVE_EXECUTE/RESULT 共享 runner 已有；尚未接入平台 executor │
+│  │ 或 service-worker/source dispatcher；unsupported_content_type 保持 local-only │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │              Skill System (可扩展技能)                 │   │
