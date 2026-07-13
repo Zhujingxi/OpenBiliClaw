@@ -71,6 +71,8 @@ auto_sync_enabled = false
 
 插件 side panel 设置、桌面 Web 和移动 Web 都从 `GET /api/config` 回读该值，并以 `PUT /api/config` 的 `{saved_sync: {auto_sync_enabled}}` 严格保存。卡片保存始终先写本地；平台失败不回滚本地成功。列表页移除只删除 OpenBiliClaw membership，不反向删除平台收藏、书签、Saved、播放列表或稍后观看记录。
 
+推荐卡保存不会在前端按平台决定是否同步：只有后端读到 `auto_sync_enabled = true` 才创建 native task。关闭时响应中的 `pending` 不带 task ID，三个图形化保存页仍保留手动同步；带 task ID 的 `pending` / `syncing` 才表示已有任务并禁用重复提交。
+
 旧 `config.toml` 缺少该段时，加载、`GET /api/config` 与 `openbiliclaw config-show` 都按
 `false` 解析；保存其它配置字段不会意外把它改成 `true`。首次在任一图形界面从关闭切到
 开启，必须先确认外部账号写入警告。列表页的手动单项 / 批量同步是独立的显式授权入口，

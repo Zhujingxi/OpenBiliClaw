@@ -7,6 +7,24 @@ function keyFor(listKind, itemKey) {
   return `${String(listKind || "").trim()}:${String(itemKey || "").trim()}`;
 }
 
+export function createSavedSubmissionFence() {
+  const keys = new Set();
+  const normalize = (value) => String(value || "").trim();
+  return {
+    has(itemKey) { return keys.has(normalize(itemKey)); },
+    claim(itemKeys) {
+      const candidates = [...new Set((Array.isArray(itemKeys) ? itemKeys : []).map(normalize))]
+        .filter(Boolean);
+      if (!candidates.length || candidates.some((key) => keys.has(key))) return false;
+      for (const key of candidates) keys.add(key);
+      return true;
+    },
+    release(itemKeys) {
+      for (const itemKey of Array.isArray(itemKeys) ? itemKeys : []) keys.delete(normalize(itemKey));
+    },
+  };
+}
+
 export function isSavedTaskTerminal(task) {
   const rows = Array.isArray(task?.items) ? task.items : [];
   return rows.every((item) => TERMINAL.has(item?.status));

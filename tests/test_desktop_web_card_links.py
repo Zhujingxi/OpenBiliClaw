@@ -3,6 +3,7 @@ from pathlib import Path
 
 APP_JS = Path("src/openbiliclaw/web/desktop/assets/js/app.js")
 APP_CSS = Path("src/openbiliclaw/web/desktop/assets/css/app.css")
+SAVED_SYNC_CORE = Path("src/openbiliclaw/web/desktop/assets/js/saved-sync-core.js")
 
 
 def test_main_recommendation_card_cover_is_a_real_link_when_url_exists() -> None:
@@ -97,10 +98,11 @@ def test_cover_css_resets_anchor_defaults() -> None:
 def test_saved_pages_render_manual_sync_without_platform_routing() -> None:
     app_js = APP_JS.read_text(encoding="utf-8")
     app_css = APP_CSS.read_text(encoding="utf-8")
+    core = SAVED_SYNC_CORE.read_text(encoding="utf-8")
 
     assert "function runDesktopSavedSync" in app_js
     assert "function summarizeDesktopSavedTask" in app_js
-    assert "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。" in app_js
+    assert "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。" in core
     assert "removeDesktopSavedItem(listKind, item.item_key)" in app_js
     assert "switch (item.source_platform" not in app_js
     assert ".saved-sync-chip" in app_css
@@ -109,10 +111,11 @@ def test_saved_pages_render_manual_sync_without_platform_routing() -> None:
 
 def test_unsupported_saved_items_are_truthful_local_only_and_not_sync_eligible() -> None:
     app_js = APP_JS.read_text(encoding="utf-8")
+    core = SAVED_SYNC_CORE.read_text(encoding="utf-8")
 
     assert 'unsupported: ["仅本地保存", "neutral", false]' in app_js
-    assert 'item.sync_status === "unsupported" ? "暂不支持平台同步"' in app_js
+    assert 'errorCode === "unsupported_content_type"' in core
+    assert 'errorCode === "unsupported_adapter_missing"' in core
     assert (
-        "window.OpenBiliClawSavedSync.isSavedSyncEligibleStatus(item.sync_status)"
-        "\n        && !desktopSavedTaskRuntimes"
+        "window.OpenBiliClawSavedSync.isSavedSyncEligibleStatus(\n        item.sync_status,"
     ) in app_js

@@ -312,6 +312,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │ Zhihu typed ID -> exact identity control/dialog -> OpenBiliClaw checked proof │
 │  │ YT favorite 精确 OpenBiliClaw + create 后 close/reopen；Watch Later 只认 WL │
 │  │ unsupported_content_type 保持 local-only                         │
+│  │ UI: pending + 空 task_id 可手动同步；非空 task_id / syncing 禁重复 │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │              Skill System (可扩展技能)                 │   │

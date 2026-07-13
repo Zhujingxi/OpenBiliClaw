@@ -66,7 +66,7 @@ def test_saved_sync_docs_name_default_and_routes() -> None:
         assert "extension_native_save_jobs" in diagram_doc
 
 
-def test_saved_sync_docs_register_extension_adapters_without_claiming_executor() -> None:
+def test_saved_sync_docs_register_extension_adapters_and_completed_executors() -> None:
     architecture = Path("docs/architecture.md").read_text(encoding="utf-8")
     spec = Path("docs/spec.md").read_text(encoding="utf-8")
     module = Path("docs/modules/saved-sync.md").read_text(encoding="utf-8")
@@ -78,13 +78,36 @@ def test_saved_sync_docs_register_extension_adapters_without_claiming_executor()
     for text in (architecture, spec, module, changelog, readme, readme_en):
         assert "unsupported_adapter_missing" in text
     assert "六平台扩展保存 adapter" in architecture
-    assert "扩展 executor 尚未实现" in architecture
-    assert "Tasks 4–8" in architecture
-    assert "Tasks 4–8" in module
-    assert "Tasks 4–8" in storage
+    assert "extension executor 已 6/6 接线" in architecture
+    assert "扩展 executor 尚未实现" not in architecture
+    assert "Tasks 4–8" not in architecture
+    assert "Tasks 4–8" not in module
+    assert "Tasks 4–8" not in storage
     assert "runtime broker" in storage
     assert "Phase 1 只注册 Bilibili 账号写入 adapter" not in architecture
     assert "其它来源当前保持 local-only" not in architecture
     assert "账号写入 adapter\n仍是后续独立计划" not in module
     assert "Phase 1 尚无 adapter 的平台" not in module
     assert "直到各平台后续计划实现对应 adapter" not in storage
+
+
+def test_saved_sync_docs_explain_truthful_graphical_state_interpretation() -> None:
+    saved_sync = Path("docs/modules/saved-sync.md").read_text(encoding="utf-8")
+    extension = Path("docs/modules/extension.md").read_text(encoding="utf-8")
+    recommendation = Path("docs/modules/recommendation.md").read_text(encoding="utf-8")
+    config = Path("docs/modules/config.md").read_text(encoding="utf-8")
+    architecture = Path("docs/architecture.md").read_text(encoding="utf-8")
+    spec = Path("docs/spec.md").read_text(encoding="utf-8")
+    changelog = Path("docs/changelog.md").read_text(encoding="utf-8")
+    readme = Path("README.md").read_text(encoding="utf-8")
+    readme_en = Path("README_EN.md").read_text(encoding="utf-8")
+
+    for text in (saved_sync, extension, architecture, spec, readme, readme_en):
+        assert "unsupported_content_type" in text
+        assert "unsupported_adapter_missing" in text
+    assert "`pending + 空 sync_task_id`" in saved_sync
+    assert "`pending + 非空 sync_task_id`" in saved_sync
+    assert "后端状态驱动" in extension
+    assert "auto_sync_enabled" in recommendation
+    assert "auto_sync_enabled = false" in config
+    assert "后端状态驱动" in changelog

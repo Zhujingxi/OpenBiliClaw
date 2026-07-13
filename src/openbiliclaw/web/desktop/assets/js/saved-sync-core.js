@@ -19,6 +19,23 @@
     return String(value || "").trim();
   }
 
+  function createSavedSubmissionFence() {
+    const keys = new Set();
+    return {
+      has(itemKey) { return keys.has(text(itemKey)); },
+      claim(itemKeys) {
+        const candidates = [...new Set((Array.isArray(itemKeys) ? itemKeys : []).map(text))]
+          .filter(Boolean);
+        if (!candidates.length || candidates.some((key) => keys.has(key))) return false;
+        for (const key of candidates) keys.add(key);
+        return true;
+      },
+      release(itemKeys) {
+        for (const itemKey of Array.isArray(itemKeys) ? itemKeys : []) keys.delete(text(itemKey));
+      },
+    };
+  }
+
   function inferPlatform(item) {
     const explicit = text(item?.source_platform || item?.platform).toLowerCase();
     if (explicit) return PLATFORM_ALIASES[explicit] || explicit;
@@ -112,8 +129,73 @@
     return rows.every((item) => TERMINAL_STATUSES.has(item?.status));
   }
 
-  function isSavedSyncEligibleStatus(status) {
-    return !["synced", "already_synced", "syncing", "unsupported"].includes(status);
+  function getSavedSyncPresentation(item = {}) {
+    const rawStatus = text(item.sync_status);
+    const status = rawStatus || "not_started";
+    const errorCode = text(item.error_code);
+    const resolvedTarget = text(item.resolved_target);
+    const errorMessage = text(item.error_message);
+    const base = {
+      not_started: ["待同步", "neutral", false],
+      pending: ["待同步", "info", false],
+      syncing: ["同步中", "info", false],
+      synced: ["已同步", "success", false],
+      already_synced: ["已同步", "success", false],
+      login_required: ["需要登录", "warning", true],
+      unsupported: ["仅本地保存", "neutral", false],
+      rate_limited: ["同步失败", "error", true],
+      extension_required: ["需要连接插件", "warning", true],
+      failed: ["同步失败", "error", true],
+    }[status] || ["同步失败", "error", true];
+    let [label, tone, retryable] = base;
+    const busy = status === "syncing" || (status === "pending" && Boolean(text(item.sync_task_id)));
+    const localOnly = status === "unsupported" && errorCode === "unsupported_content_type";
+    if (status === "unsupported" && errorCode === "unsupported_adapter_missing") {
+      label = "待升级重试";
+      tone = "warning";
+      retryable = true;
+    } else if (status === "unsupported" && !localOnly) {
+      label = "同步暂不可用";
+      tone = "warning";
+      retryable = true;
+    }
+    const actionable = !busy && !["synced", "already_synced"].includes(status) && !localOnly;
+    let detail;
+    if (localOnly) detail = "此内容类型暂不支持平台同步，仅保存在本地。";
+    else if (status === "unsupported" && errorCode === "unsupported_adapter_missing") {
+      detail = "同步能力可能正在滚动升级，请更新后端与插件后重试。";
+    } else if (status === "unsupported") detail = errorMessage || "当前同步能力暂不可用，请更新后重试。";
+    else if (["synced", "already_synced"].includes(status)) detail = resolvedTarget || "平台已确认同步完成。";
+    else if (busy) detail = resolvedTarget || "平台同步任务已提交，请稍候。";
+    else if (status === "pending") detail = resolvedTarget || "已保存在本地，可手动同步到平台。";
+    else {
+      const fallback = {
+        login_required: "请登录对应平台后重试。",
+        rate_limited: "平台请求过于频繁，请稍后重试。",
+        extension_required: "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。",
+        failed: "平台同步失败，请重试；若持续失败请检查连接或登录状态。",
+      }[status];
+      detail = errorMessage || resolvedTarget || fallback || "平台目标将在同步时确认";
+    }
+    return {
+      status, label, tone, retryable, actionable, busy, localOnly, detail,
+      actionLabel: busy ? "同步中…" : (retryable ? "重试同步" : "同步"),
+    };
+  }
+
+  function isSavedSyncEligibleStatus(status, errorCode = "", syncTaskId = "") {
+    return getSavedSyncPresentation({
+      sync_status: status,
+      error_code: errorCode,
+      sync_task_id: syncTaskId,
+    }).actionable;
+  }
+
+  function updateSavedBatchButtonState(button, pendingCount) {
+    const disabled = pendingCount <= 0;
+    button.disabled = disabled;
+    button.setAttribute("aria-disabled", String(disabled));
+    button.removeAttribute("aria-busy");
   }
 
   function createRetainedSavedListState() {
@@ -440,14 +522,17 @@
   const api = {
     captureSavedFocus,
     createDurableTaskTracker,
+    createSavedSubmissionFence,
     createSavedTaskCoordinator,
     createRetainedSavedListState,
     createSavedMutationRegistry,
     createStrictSavedApi,
+    getSavedSyncPresentation,
     isSavedSyncEligibleStatus,
     normalizeSavedItem,
     restoreSavedFocus,
     taskIsTerminal,
+    updateSavedBatchButtonState,
   };
   global.OpenBiliClawSavedSync = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;

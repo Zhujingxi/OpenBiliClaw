@@ -90,8 +90,8 @@ removed = db.remove_saved_membership("favorite", item.item_key)
 - 平台 adapter、platform-neutral HTTP API，以及插件 side panel / 桌面 Web / 移动 Web
   保存与同步 UI 已接入同一 normalized store。Bilibili 保持 direct adapter，六平台已注册 extension-backed adapter；
   stable runtime broker wiring 也已完成。其它来源的本地 membership 仍可正常保存、列出和删除，
-  手动同步会进入 durable extension job ledger。Tasks 4–8 继续负责 extension executors 和经验证的
-  真实账号写入；这些任务完成前不能宣称六平台账号写入已经闭环。
+  手动同步会进入 durable extension job ledger。六平台 extension executors 已 6/6 接线并通过 fixture
+  验证；尚未执行的真实账号写入验证继续按显式授权边界单独记录，不能由 fixture 结果替代。
 
 `native_save_states` 完整字段如下：
 

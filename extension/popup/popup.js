@@ -70,6 +70,7 @@ import {
   createSavedToggleRegistry,
   captureSavedFocus,
   createRetainedSavedListState,
+  createSavedSubmissionFence,
   createSavedTaskCoordinator,
   createSavedSyncTaskTracker,
   getSavedSyncPresentation,
@@ -79,6 +80,7 @@ import {
   restoreSavedFocus,
   sanitizeSavedSyncTask,
   summarizeSavedSyncResults,
+  updateSavedBatchButtonState,
 } from "./popup-saved-sync.js";
 import {
   installEmbeddingBannerAutoRefresh,
@@ -634,6 +636,7 @@ function createSavedTaskRuntime() {
   const tracker = createSavedSyncTaskTracker({ poll: (taskId) => pollSavedSyncTask(taskId) });
   return {
     tracker,
+    submissions: createSavedSubmissionFence(),
     coordinator: createSavedTaskCoordinator({
       tracker,
       fetchTask: (taskId) => pollSavedSyncTask(taskId),
@@ -654,24 +657,26 @@ window.addEventListener("pagehide", () => {
 }, { once: true });
 
 function syncEligible(item, listKind = "") {
-  const coordinator = savedTaskRuntimes[listKind]?.coordinator;
-  return isSavedSyncEligibleStatus(item?.sync_status)
-    && !coordinator?.owns(item?.item_key);
+  const runtime = savedTaskRuntimes[listKind];
+  return isSavedSyncEligibleStatus(item?.sync_status, item?.error_code, item?.sync_task_id)
+    && !runtime?.submissions.has(item?.item_key)
+    && !runtime?.coordinator.owns(item?.item_key);
 }
 
 function savedSyncDetail(item) {
-  if (item?.sync_status === "unsupported") {
-    return "暂不支持平台同步";
-  }
-  if (item?.sync_status === "extension_required") {
-    return "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。";
-  }
-  return item?.error_message || item?.resolved_target || "平台目标将在同步时确认";
+  return getSavedSyncPresentation(
+    item?.sync_status,
+    item?.error_code,
+    item?.resolved_target,
+    item?.error_message,
+    item?.sync_task_id,
+  ).detail;
 }
 
 async function runSavedSync(listKind, items, button, status, reload, confirmBatch = false) {
   if (button?.disabled) return;
-  const coordinator = savedTaskRuntimes[listKind].coordinator;
+  const runtime = savedTaskRuntimes[listKind];
+  const coordinator = runtime.coordinator;
   const selected = (Array.isArray(items) ? items : []).filter((item) => syncEligible(item, listKind));
   if (!selected.length) return;
   const platforms = Array.from(new Set(selected.map((item) => (
@@ -680,24 +685,30 @@ async function runSavedSync(listKind, items, button, status, reload, confirmBatc
   if (confirmBatch && !window.confirm(
     `将同步 ${selected.length} 项到 ${platforms.join("、")}，继续吗？`,
   )) return;
+  const selectedKeys = selected.map((item) => item.item_key);
+  if (!runtime.submissions.claim(selectedKeys)) return;
 
+  let submitted = false;
   if (button) {
     const focusRoot = button.closest?.(".view") || button.parentElement;
     savedPendingFocus[listKind] = captureSavedFocus(focusRoot, button)
       || { kind: "list", action: "sync-all" };
     button.disabled = true;
+    button.setAttribute("aria-disabled", "true");
+    button.setAttribute("aria-busy", "true");
     button.textContent = "同步中…";
   }
   if (status) {
     status.removeAttribute("role");
+    status.setAttribute("aria-busy", "true");
     status.textContent = `正在同步 ${selected.length} 项…`;
   }
   try {
     const task = sanitizeSavedSyncTask(
-      await syncSavedItems(listKind, selected.map((item) => item.item_key)),
+      await syncSavedItems(listKind, selectedKeys),
     );
     if (!task.task_id) throw new Error("同步任务缺少 task_id，请重试。");
-    coordinator.track(task, selected.map((item) => item.item_key), {
+    coordinator.track(task, selectedKeys, {
       onProgress: () => {
         if (status) status.textContent = `正在同步 ${selected.length} 项…`;
       },
@@ -708,10 +719,12 @@ async function runSavedSync(listKind, items, button, status, reload, confirmBatc
         if (status) status.textContent = "仍在后台同步；连接恢复后会继续查询。";
       },
       onTerminal: (terminalTask) => {
+        if (status) status.removeAttribute("aria-busy");
         if (status) status.textContent = summarizeSavedSyncResults(terminalTask.items) || "同步已完成";
         void reload();
       },
     });
+    submitted = true;
     if (status) status.textContent = `同步任务已提交 · ${selected.length} 项`;
   } catch (error) {
     if (status) {
@@ -719,7 +732,13 @@ async function runSavedSync(listKind, items, button, status, reload, confirmBatc
       status.textContent = error?.message || "同步失败，请稍后重试。";
     }
   } finally {
-    if (button) button.disabled = false;
+    runtime.submissions.release(selectedKeys);
+    if (!submitted && button) {
+      button.disabled = false;
+      button.setAttribute("aria-disabled", "false");
+      button.removeAttribute("aria-busy");
+    }
+    if (!submitted && status) status.removeAttribute("aria-busy");
     await reload();
   }
 }
@@ -786,7 +805,7 @@ async function loadSavedList(listKind, { list, empty, syncAll, status, toggles }
   const pendingCount = items.filter((item) => syncEligible(item, listKind)).length;
   if (syncAll instanceof HTMLButtonElement) {
     syncAll.textContent = `同步未同步内容（${pendingCount}）`;
-    syncAll.disabled = pendingCount === 0;
+    updateSavedBatchButtonState(syncAll, pendingCount);
     syncAll.onclick = () => runSavedSync(
       listKind, items, syncAll, status,
       () => loadSavedList(listKind, { list, empty, syncAll, status, toggles }),
@@ -840,7 +859,8 @@ function bindSavedCardRemove(card, remove, { listKind, itemKey, requestRemove, t
 }
 
 function buildSavedCard(listKind, item, { list, empty, toggles }) {
-  if (savedTaskRuntimes[listKind].coordinator.owns(item.item_key)) {
+  if (savedTaskRuntimes[listKind].submissions.has(item.item_key)
+    || savedTaskRuntimes[listKind].coordinator.owns(item.item_key)) {
     item = { ...item, sync_status: "syncing" };
   }
   const card = document.createElement("article");
@@ -862,7 +882,13 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
   up.textContent = item.author_name || item.up_name || "";
   const syncLine = document.createElement("span");
   syncLine.className = "saved-sync-line";
-  const presentation = getSavedSyncPresentation(item.sync_status);
+  const presentation = getSavedSyncPresentation(
+    item.sync_status,
+    item.error_code,
+    item.resolved_target,
+    item.error_message,
+    item.sync_task_id,
+  );
   const chip = document.createElement("span");
   chip.className = "saved-sync-chip";
   chip.dataset.tone = presentation.tone;
@@ -897,19 +923,24 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
 
   const actions = document.createElement("span");
   actions.className = "saved-card-actions";
-  if (syncEligible(item, listKind)) {
+  if (presentation.actionable || presentation.busy) {
     const sync = document.createElement("button");
     sync.type = "button";
     sync.className = "saved-card-sync";
     sync.dataset.savedAction = "sync";
-    sync.textContent = presentation.retryable ? "重试同步" : "同步";
-    sync.addEventListener("click", () => runSavedSync(
-      listKind,
-      [item],
-      sync,
-      listKind === "watch_later" ? elements.watchLaterSyncStatus : elements.favoritesSyncStatus,
-      listKind === "watch_later" ? loadWatchLater : loadFavorites,
-    ));
+    sync.textContent = presentation.actionLabel;
+    sync.disabled = presentation.busy;
+    sync.setAttribute("aria-disabled", String(presentation.busy));
+    sync.setAttribute("aria-label", presentation.busy ? `${presentation.label}，请稍候` : presentation.actionLabel);
+    if (presentation.actionable) {
+      sync.addEventListener("click", () => runSavedSync(
+        listKind,
+        [item],
+        sync,
+        listKind === "watch_later" ? elements.watchLaterSyncStatus : elements.favoritesSyncStatus,
+        listKind === "watch_later" ? loadWatchLater : loadFavorites,
+      ));
+    }
     actions.append(sync);
   }
   actions.append(remove);

@@ -70,7 +70,8 @@ const SAVED_SYNC_STATUSES = new Set([
 ]);
 
 const SYNC_PRESENTATIONS = {
-  pending: { label: "待同步", tone: "neutral", retryable: false },
+  not_started: { label: "待同步", tone: "neutral", retryable: false },
+  pending: { label: "待同步", tone: "info", retryable: false },
   syncing: { label: "同步中", tone: "info", retryable: false },
   synced: { label: "已同步", tone: "success", retryable: false },
   already_synced: { label: "已同步", tone: "success", retryable: false },
@@ -79,6 +80,13 @@ const SYNC_PRESENTATIONS = {
   rate_limited: { label: "同步失败", tone: "error", retryable: true },
   extension_required: { label: "需要连接插件", tone: "warning", retryable: true },
   failed: { label: "同步失败", tone: "error", retryable: true },
+};
+
+const RETRY_DETAILS = {
+  login_required: "请登录对应平台后重试。",
+  rate_limited: "平台请求过于频繁，请稍后重试。",
+  extension_required: "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。",
+  failed: "平台同步失败，请重试；若持续失败请检查连接或登录状态。",
 };
 
 const PLATFORM_LABELS = {
@@ -95,12 +103,82 @@ function safeSyncText(value, maxLength = 240) {
   return String(value || "").replace(/[\p{C}\p{Zl}\p{Zp}]/gu, "").trim().slice(0, maxLength);
 }
 
-export function getSavedSyncPresentation(status) {
-  return { ...(SYNC_PRESENTATIONS[status] || SYNC_PRESENTATIONS.failed) };
+export function createSavedSubmissionFence() {
+  const keys = new Set();
+  const normalize = (value) => safeSyncText(value, 2048);
+  return {
+    has(itemKey) { return keys.has(normalize(itemKey)); },
+    claim(itemKeys) {
+      const candidates = [...new Set((Array.isArray(itemKeys) ? itemKeys : []).map(normalize))]
+        .filter(Boolean);
+      if (!candidates.length || candidates.some((key) => keys.has(key))) return false;
+      for (const key of candidates) keys.add(key);
+      return true;
+    },
+    release(itemKeys) {
+      for (const itemKey of Array.isArray(itemKeys) ? itemKeys : []) keys.delete(normalize(itemKey));
+    },
+  };
 }
 
-export function isSavedSyncEligibleStatus(status) {
-  return !["synced", "already_synced", "syncing", "unsupported"].includes(status);
+export function getSavedSyncPresentation(
+  status,
+  errorCode = "",
+  resolvedTarget = "",
+  errorMessage = "",
+  syncTaskId = "",
+) {
+  const normalizedStatus = SAVED_SYNC_STATUSES.has(status) ? status : (status ? "failed" : "not_started");
+  const code = safeSyncText(errorCode, 96);
+  const target = safeSyncText(resolvedTarget);
+  const message = safeSyncText(errorMessage);
+  const presentation = { ...(SYNC_PRESENTATIONS[normalizedStatus] || SYNC_PRESENTATIONS.failed) };
+  presentation.busy = normalizedStatus === "syncing"
+    || (normalizedStatus === "pending" && Boolean(safeSyncText(syncTaskId, 64)));
+  presentation.localOnly = normalizedStatus === "unsupported" && code === "unsupported_content_type";
+  if (normalizedStatus === "unsupported" && code === "unsupported_adapter_missing") {
+    presentation.label = "待升级重试";
+    presentation.tone = "warning";
+    presentation.retryable = true;
+  } else if (normalizedStatus === "unsupported" && !presentation.localOnly) {
+    presentation.label = "同步暂不可用";
+    presentation.tone = "warning";
+    presentation.retryable = true;
+  }
+  presentation.actionable = !presentation.busy
+    && !["synced", "already_synced"].includes(normalizedStatus)
+    && !presentation.localOnly;
+  presentation.actionLabel = presentation.busy
+    ? "同步中…"
+    : (presentation.retryable ? "重试同步" : "同步");
+  if (presentation.localOnly) {
+    presentation.detail = "此内容类型暂不支持平台同步，仅保存在本地。";
+  } else if (normalizedStatus === "unsupported" && code === "unsupported_adapter_missing") {
+    presentation.detail = "同步能力可能正在滚动升级，请更新后端与插件后重试。";
+  } else if (normalizedStatus === "unsupported") {
+    presentation.detail = message || "当前同步能力暂不可用，请更新后重试。";
+  } else if (["synced", "already_synced"].includes(normalizedStatus)) {
+    presentation.detail = target || "平台已确认同步完成。";
+  } else if (presentation.busy) {
+    presentation.detail = target || "平台同步任务已提交，请稍候。";
+  } else if (normalizedStatus === "pending") {
+    presentation.detail = target || "已保存在本地，可手动同步到平台。";
+  } else {
+    presentation.detail = message || target || RETRY_DETAILS[normalizedStatus]
+      || "平台目标将在同步时确认";
+  }
+  return presentation;
+}
+
+export function isSavedSyncEligibleStatus(status, errorCode = "", syncTaskId = "") {
+  return getSavedSyncPresentation(status, errorCode, "", "", syncTaskId).actionable;
+}
+
+export function updateSavedBatchButtonState(button, pendingCount) {
+  const disabled = pendingCount <= 0;
+  button.disabled = disabled;
+  button.setAttribute("aria-disabled", String(disabled));
+  button.removeAttribute("aria-busy");
 }
 
 export function sanitizeSavedSyncTask(payload) {

@@ -35,6 +35,10 @@ def test_mobile_web_saved_sync_api_and_view_contract() -> None:
     assert "保存时自动同步到对应平台" in app
     assert WARNING in app
     assert "switch (item.source_platform" not in saved
+    assert "unsupported_content_type" in saved
+    assert "unsupported_adapter_missing" in saved
+    assert "aria-disabled" in saved
+    assert 'statusKey === "pending"' in saved and 'statusKey === "syncing"' in saved
 
 
 def test_desktop_web_saved_sync_controls_and_consent_contract() -> None:
@@ -57,11 +61,16 @@ def test_desktop_web_saved_sync_controls_and_consent_contract() -> None:
     assert all(label in js for label in ("待同步", "同步中", "已同步", "需要登录", "同步失败"))
     assert "extension_required" in js
     assert "switch (item.source_platform" not in js
+    assert "unsupported_content_type" in core
+    assert "unsupported_adapter_missing" in core
+    assert "aria-disabled" in js
+    assert "error_code" in core
 
 
 def test_extension_side_panel_and_config_contract() -> None:
     html = _read("extension/popup/popup.html")
     js = _read("extension/popup/popup.js")
+    runtime = _read("extension/popup/popup-saved-sync.js")
 
     assert 'id="cfgSavedAutoSync"' in html
     assert "保存时自动同步到对应平台" in html
@@ -72,6 +81,30 @@ def test_extension_side_panel_and_config_contract() -> None:
     assert "本地保存" in js and "同步中" in js and "失败" in js
     assert 'role = "alert"' in js or 'role="alert"' in html
     assert "switch (item.source_platform" not in js
+    assert "unsupported_content_type" in runtime
+    assert "unsupported_adapter_missing" in runtime
+    assert "aria-disabled" in js
+
+
+def test_all_graphical_saved_surfaces_keep_manual_controls_and_default_auto_sync_off() -> None:
+    config_example = _read("config.example.toml")
+    popup_html = _read("extension/popup/popup.html")
+    desktop_html = _read("src/openbiliclaw/web/desktop/index.html")
+    mobile_saved = _read("src/openbiliclaw/web/js/views/saved.js")
+
+    assert "[saved_sync]" in config_example
+    assert "auto_sync_enabled = false" in config_example
+    for markup in (popup_html, desktop_html):
+        assert 'id="watchLaterSyncAll"' in markup
+        assert 'id="favoritesSyncAll"' in markup
+    assert "同步未同步内容" in mobile_saved
+
+    for source in (
+        _read("extension/popup/popup.js"),
+        _read("src/openbiliclaw/web/desktop/assets/js/app.js"),
+        _read("src/openbiliclaw/web/js/app.js"),
+    ):
+        assert "auto_sync_enabled === true" in source
 
 
 def test_saved_sync_css_preserves_focus_motion_and_mobile_touch_safety() -> None:
@@ -84,6 +117,7 @@ def test_saved_sync_css_preserves_focus_motion_and_mobile_touch_safety() -> None
         assert ":focus-visible" in css
         assert "prefers-reduced-motion" in css
         assert "44px" in css
+        assert ".saved-card-sync:disabled" in css or ".small-btn:disabled" in css
 
 
 def test_saved_sync_review_repairs_are_wired_to_all_surfaces() -> None:

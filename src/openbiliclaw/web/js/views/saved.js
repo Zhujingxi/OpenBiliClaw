@@ -12,12 +12,14 @@ import {
   captureSavedFocus,
   createDurableTaskTracker,
   createRetainedSavedListState,
+  createSavedSubmissionFence,
   createSavedTaskCoordinator,
   restoreSavedFocus,
 } from "../saved-sync-runtime.js";
 
 const PAGE_SIZE = 50;
 const PRESENTATION = {
+  not_started: ["待同步", "neutral", false],
   pending: ["待同步", "neutral", false],
   syncing: ["同步中", "info", false],
   synced: ["已同步", "success", false],
@@ -56,22 +58,67 @@ export function normalizeSavedListItem(item = {}) {
     title: safeText(item.title || contentId),
     author_name: safeText(item.author_name || item.up_name),
     cover_url: safeText(item.cover_url, 2048),
-    sync_status: PRESENTATION[item.sync_status] ? item.sync_status : "failed",
+    sync_status: PRESENTATION[item.sync_status] ? item.sync_status : (item.sync_status ? "failed" : ""),
     resolved_target: safeText(item.resolved_target),
+    error_code: safeText(item.error_code, 96),
     error_message: safeText(item.error_message),
   };
 }
 
 export function getSavedSyncViewModel(item) {
   const normalized = normalizeSavedListItem(item);
-  const [label, tone, retryable] = PRESENTATION[normalized.sync_status];
-  let detail = normalized.error_message || normalized.resolved_target || "平台目标将在同步时确认";
-  if (normalized.sync_status === "extension_required") {
-    detail = "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。";
-  } else if (normalized.sync_status === "unsupported") {
-    detail = "暂不支持平台同步";
+  const statusKey = normalized.sync_status || "not_started";
+  let [label, tone, retryable] = PRESENTATION[statusKey] || PRESENTATION.failed;
+  const busy = statusKey === "syncing"
+    || (statusKey === "pending" && Boolean(safeText(normalized.sync_task_id, 64)));
+  const localOnly = statusKey === "unsupported"
+    && normalized.error_code === "unsupported_content_type";
+  if (statusKey === "unsupported" && normalized.error_code === "unsupported_adapter_missing") {
+    label = "待升级重试";
+    tone = "warning";
+    retryable = true;
+  } else if (statusKey === "unsupported" && !localOnly) {
+    label = "同步暂不可用";
+    tone = "warning";
+    retryable = true;
   }
-  return { ...normalized, label, tone, retryable, detail };
+  const actionable = !busy
+    && !["synced", "already_synced"].includes(statusKey)
+    && !localOnly;
+  let detail;
+  if (localOnly) {
+    detail = "此内容类型暂不支持平台同步，仅保存在本地。";
+  } else if (statusKey === "unsupported" && normalized.error_code === "unsupported_adapter_missing") {
+    detail = "同步能力可能正在滚动升级，请更新后端与插件后重试。";
+  } else if (statusKey === "unsupported") {
+    detail = normalized.error_message || "当前同步能力暂不可用，请更新后重试。";
+  } else if (["synced", "already_synced"].includes(statusKey)) {
+    detail = normalized.resolved_target || "平台已确认同步完成。";
+  } else if (busy) {
+    detail = normalized.resolved_target || "平台同步任务已提交，请稍候。";
+  } else if (statusKey === "pending") {
+    detail = normalized.resolved_target || "已保存在本地，可手动同步到平台。";
+  } else {
+    const fallback = {
+      login_required: "请登录对应平台后重试。",
+      rate_limited: "平台请求过于频繁，请稍后重试。",
+      extension_required: "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。",
+      failed: "平台同步失败，请重试；若持续失败请检查连接或登录状态。",
+    }[statusKey];
+    detail = normalized.error_message || normalized.resolved_target || fallback
+      || "平台目标将在同步时确认";
+  }
+  return {
+    ...normalized,
+    label,
+    tone,
+    retryable,
+    detail,
+    actionable,
+    busy,
+    localOnly,
+    actionLabel: busy ? "同步中…" : (retryable ? "重试同步" : "同步"),
+  };
 }
 
 function summarize(items) {
@@ -88,12 +135,16 @@ function summarize(items) {
   )).join(" · ");
 }
 
-export function isSavedSyncEligibleStatus(status) {
-  return !["synced", "already_synced", "syncing", "unsupported"].includes(status);
+export function isSavedSyncEligibleStatus(status, errorCode = "", syncTaskId = "") {
+  return getSavedSyncViewModel({
+    sync_status: status,
+    error_code: errorCode,
+    sync_task_id: syncTaskId,
+  }).actionable;
 }
 
 function eligible(item) {
-  return isSavedSyncEligibleStatus(item.sync_status);
+  return getSavedSyncViewModel(item).actionable;
 }
 
 function createSavedView(cfg) {
@@ -102,7 +153,7 @@ function createSavedView(cfg) {
   let total = 0;
   let loading = false;
   let loaded = false;
-  let syncingKeys = new Set();
+  const syncingKeys = createSavedSubmissionFence();
   let message = "";
   let messageIsError = false;
   let pendingFocus = null;
@@ -173,7 +224,7 @@ function createSavedView(cfg) {
 
   async function runSync(selected, activeButton, confirmBatch = false) {
     selected = selected.filter((item) => (
-      eligible(item) && !taskCoordinator.owns(item.item_key)
+      eligible(item) && !syncingKeys.has(item.item_key) && !taskCoordinator.owns(item.item_key)
     ));
     if (!selected.length || activeButton.disabled) return;
     const platforms = Array.from(new Set(selected.map((item) => (
@@ -182,16 +233,20 @@ function createSavedView(cfg) {
     if (confirmBatch && !window.confirm(
       `将同步 ${selected.length} 项到 ${platforms.join("、")}，继续吗？`,
     )) return;
-    for (const item of selected) syncingKeys.add(item.item_key);
+    const selectedKeys = selected.map((item) => item.item_key);
+    if (!syncingKeys.claim(selectedKeys)) return;
     activeButton.disabled = true;
+    activeButton.setAttribute("aria-disabled", "true");
+    activeButton.setAttribute("aria-busy", "true");
     activeButton.textContent = "同步中…";
     message = `正在同步 ${selected.length} 项…`;
     messageIsError = false;
+    let submitted = false;
     try {
-      const task = await syncSavedItems(cfg.listKind, selected.map((item) => item.item_key));
+      const task = await syncSavedItems(cfg.listKind, selectedKeys);
       const taskId = safeText(task?.task_id, 64);
       if (!taskId) throw new Error("同步任务缺少 task_id，请重试。");
-      taskCoordinator.track(task, selected.map((item) => item.item_key), {
+      taskCoordinator.track(task, selectedKeys, {
         onProgress: () => {
           message = `正在同步 ${selected.length} 项…`;
           messageIsError = false;
@@ -208,20 +263,25 @@ function createSavedView(cfg) {
           renderList();
         },
         onTerminal: (terminalTask) => {
-          for (const item of selected) syncingKeys.delete(item.item_key);
           message = summarize(terminalTask.items) || "同步已完成";
           messageIsError = false;
           void load();
         },
       });
+      submitted = true;
       message = `同步任务已提交 · ${selected.length} 项`;
       await load();
     } catch (error) {
-      for (const item of selected) syncingKeys.delete(item.item_key);
       message = error?.message || "同步失败，请稍后重试。";
       messageIsError = true;
     } finally {
-      activeButton.disabled = false;
+      syncingKeys.release(selectedKeys);
+      if (!submitted) {
+        activeButton.disabled = false;
+        activeButton.setAttribute("aria-disabled", "false");
+        activeButton.removeAttribute("aria-busy");
+        renderList();
+      }
     }
   }
 
@@ -246,7 +306,6 @@ function createSavedView(cfg) {
       const coverHtml = cover
         ? `<img class="saved-card-cover" src="${esc(cover.src)}" alt="" loading="lazy">`
         : `<div class="saved-card-cover saved-card-cover-empty" aria-hidden="true">${cfg.icon}</div>`;
-      const syncLabel = it.retryable ? "重试同步" : "同步";
       return `<article class="saved-card" data-item-key="${esc(it.item_key)}">
         <button class="saved-card-open" data-saved-action="open" type="button" ${url ? `data-url="${esc(url)}"` : "disabled"} aria-label="打开 ${esc(it.title || it.content_id)}">${coverHtml}</button>
         <div class="saved-card-body">
@@ -255,7 +314,7 @@ function createSavedView(cfg) {
           <div class="saved-sync-line"><span class="saved-sync-chip" data-tone="${esc(it.tone)}">${esc(it.label)}</span><span>${esc(it.detail)}</span></div>
         </div>
         <div class="saved-card-actions">
-          ${eligible(it) && !syncingKeys.has(it.item_key) && !taskCoordinator.owns(it.item_key) ? `<button class="saved-card-sync" data-saved-action="sync" type="button">${syncLabel}</button>` : ""}
+          ${it.actionable || it.busy ? `<button class="saved-card-sync" data-saved-action="sync" type="button" aria-disabled="${it.busy}" aria-label="${esc(it.busy ? `${it.label}，请稍候` : it.actionLabel)}" ${it.busy ? "disabled" : ""}>${esc(it.actionLabel)}</button>` : ""}
           <button class="saved-card-remove" data-saved-action="remove" type="button" aria-label="从本地移除" title="只从 OpenBiliClaw 本地移除">×</button>
         </div>
       </article>`;

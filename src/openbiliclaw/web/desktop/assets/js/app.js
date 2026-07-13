@@ -1442,8 +1442,9 @@
         title: safeSavedText(item.title || canonical.content_id),
         author_name: safeSavedText(item.author_name || item.up_name),
         cover_url: safeSavedText(item.cover_url, 2048),
-        sync_status: SAVED_SYNC_PRESENTATION[item.sync_status] ? item.sync_status : "failed",
+        sync_status: SAVED_SYNC_PRESENTATION[item.sync_status] ? item.sync_status : (item.sync_status ? "failed" : ""),
         resolved_target: safeSavedText(item.resolved_target),
+        error_code: safeSavedText(item.error_code, 96),
         error_message: safeSavedText(item.error_message)
       };
     }
@@ -1454,7 +1455,10 @@
       watch_later: window.OpenBiliClawSavedSync.createRetainedSavedListState(),
       favorite: window.OpenBiliClawSavedSync.createRetainedSavedListState()
     };
-    const desktopSyncingKeys = { watch_later: new Set(), favorite: new Set() };
+    const desktopSyncingKeys = {
+      watch_later: window.OpenBiliClawSavedSync.createSavedSubmissionFence(),
+      favorite: window.OpenBiliClawSavedSync.createSavedSubmissionFence()
+    };
     const desktopSavedPendingFocus = { watch_later: null, favorite: null };
     function createDesktopSavedTaskRuntime() {
       const tracker = window.OpenBiliClawSavedSync.createDurableTaskTracker({
@@ -1511,7 +1515,11 @@
     }
 
     function savedSyncEligible(item, listKind = "") {
-      return window.OpenBiliClawSavedSync.isSavedSyncEligibleStatus(item.sync_status)
+      return window.OpenBiliClawSavedSync.isSavedSyncEligibleStatus(
+        item.sync_status,
+        item.error_code,
+        item.sync_task_id
+      )
         && !desktopSavedTaskRuntimes[listKind]?.coordinator.owns(item.item_key);
     }
 
@@ -1551,6 +1559,7 @@
           || desktopSavedTaskRuntimes[listKind].coordinator.owns(item.item_key)) {
           item.sync_status = "syncing";
         }
+        const syncPresentation = window.OpenBiliClawSavedSync.getSavedSyncPresentation(item);
         const card = document.createElement("article");
         card.className = "video-card saved-card";
         card.dataset.itemKey = item.item_key;
@@ -1566,10 +1575,10 @@
           <div>
             <p class="video-title">${escapeHtml(item.title || item.content_id)}</p>
             <p class="video-meta">${escapeHtml(item.author_name || "")}</p>
-            <p class="saved-sync-line"><span class="saved-sync-chip" data-tone="${escapeHtml(SAVED_SYNC_PRESENTATION[item.sync_status][1])}">${escapeHtml(SAVED_SYNC_PRESENTATION[item.sync_status][0])}</span><span>${escapeHtml(item.sync_status === "unsupported" ? "暂不支持平台同步" : item.sync_status === "extension_required" ? "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。" : item.error_message || item.resolved_target || "平台目标将在同步时确认")}</span></p>
+            <p class="saved-sync-line"><span class="saved-sync-chip" data-tone="${escapeHtml(syncPresentation.tone)}">${escapeHtml(syncPresentation.label)}</span><span>${escapeHtml(syncPresentation.detail)}</span></p>
           </div>
           <div class="card-actions saved-card-actions">
-            ${savedSyncEligible(item, listKind) && !desktopSyncingKeys[listKind].has(item.item_key) ? `<button class="small-btn saved-sync-one" data-saved-action="sync" type="button">${SAVED_SYNC_PRESENTATION[item.sync_status][2] ? "重试同步" : "同步"}</button>` : ""}
+            ${syncPresentation.actionable || syncPresentation.busy ? `<button class="small-btn saved-sync-one" data-saved-action="sync" type="button" aria-disabled="${syncPresentation.busy}" aria-label="${escapeHtml(syncPresentation.busy ? `${syncPresentation.label}，请稍候` : syncPresentation.actionLabel)}" ${syncPresentation.busy ? "disabled" : ""}>${escapeHtml(syncPresentation.actionLabel)}</button>` : ""}
             <button class="small-btn saved-remove" data-saved-action="remove" type="button" title="只从 OpenBiliClaw 本地移除">移除</button>
           </div>`;
         const cover = card.querySelector(".cover");
@@ -1605,39 +1614,51 @@
 
     async function runDesktopSavedSync(listKind, selected, activeButton, reload, confirmBatch = false) {
       const coordinator = desktopSavedTaskRuntimes[listKind].coordinator;
-      const eligible = selected.filter((item) => savedSyncEligible(item, listKind));
+      const eligible = selected.filter((item) => savedSyncEligible(item, listKind)
+        && !desktopSyncingKeys[listKind].has(item.item_key));
       if (!eligible.length || activeButton?.disabled) return;
       const platforms = Array.from(new Set(eligible.map((item) => platformName(item.source_platform))));
       if (confirmBatch && !window.confirm(`将同步 ${eligible.length} 项到 ${platforms.join("、")}，继续吗？`)) return;
+      const eligibleKeys = eligible.map((item) => item.item_key);
+      if (!desktopSyncingKeys[listKind].claim(eligibleKeys)) return;
       const status = document.getElementById(listKind === "watch_later" ? "watchLaterSyncStatus" : "favoritesSyncStatus");
+      let submitted = false;
       if (activeButton) {
         const focusRoot = activeButton.closest(".saved-page") || activeButton.parentElement;
         desktopSavedPendingFocus[listKind] = window.OpenBiliClawSavedSync.captureSavedFocus(focusRoot, activeButton)
           || { kind: "list", action: "sync-all" };
         activeButton.disabled = true;
+        activeButton.setAttribute("aria-disabled", "true");
+        activeButton.setAttribute("aria-busy", "true");
         activeButton.textContent = "同步中…";
       }
       if (status) { status.removeAttribute("role"); status.textContent = `正在同步 ${eligible.length} 项…`; }
-      for (const item of eligible) desktopSyncingKeys[listKind].add(item.item_key);
       try {
-        const task = await syncDesktopSaved(listKind, eligible.map((item) => item.item_key));
+        const task = await syncDesktopSaved(listKind, eligibleKeys);
         const taskId = safeSavedText(task?.task_id, 64);
         if (!taskId) throw new Error("同步任务缺少 task_id，请重试。");
-        coordinator.track(task, eligible.map((item) => item.item_key), {
+        coordinator.track(task, eligibleKeys, {
           onProgress: () => { if (status) status.textContent = `正在同步 ${eligible.length} 项…`; },
           onBackground: () => { if (status) status.textContent = "仍在后台同步；可切换页面，返回后会继续更新。"; },
           onPollError: () => { if (status) status.textContent = "仍在后台同步；连接恢复后会继续查询。"; },
           onTerminal: (terminalTask) => {
-            for (const item of eligible) desktopSyncingKeys[listKind].delete(item.item_key);
             if (status) status.textContent = summarizeDesktopSavedTask(terminalTask.items) || "同步已完成";
             void reload();
           }
         });
+        submitted = true;
         if (status) status.textContent = `同步任务已提交 · ${eligible.length} 项`;
       } catch (error) {
-        for (const item of eligible) desktopSyncingKeys[listKind].delete(item.item_key);
         if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "同步失败，请重试。"; }
-      } finally { if (activeButton) activeButton.disabled = false; await reload(); }
+      } finally {
+        desktopSyncingKeys[listKind].release(eligibleKeys);
+        if (!submitted && activeButton) {
+          activeButton.disabled = false;
+          activeButton.setAttribute("aria-disabled", "false");
+          activeButton.removeAttribute("aria-busy");
+        }
+        await reload();
+      }
     }
 
     function bindDesktopSavedBatch(listKind, items, reload) {
@@ -1647,7 +1668,7 @@
       const count = items.filter((item) => savedSyncEligible(item, listKind)
         && !desktopSyncingKeys[listKind].has(item.item_key)).length;
       button.textContent = `同步未同步内容（${count}）`;
-      button.disabled = count === 0;
+      window.OpenBiliClawSavedSync.updateSavedBatchButtonState(button, count);
       button.onclick = () => runDesktopSavedSync(listKind, items, button, reload, true);
     }
 

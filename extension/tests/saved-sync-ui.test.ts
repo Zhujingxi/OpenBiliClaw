@@ -118,16 +118,31 @@ test("saved sync view model sanitizes task snapshots and groups platform results
     label: "需要登录",
     tone: "warning",
     retryable: true,
+    busy: false,
+    localOnly: false,
+    actionable: true,
+    actionLabel: "重试同步",
+    detail: "请登录对应平台后重试。",
   });
   assert.deepEqual(getSavedSyncPresentation("already_synced"), {
     label: "已同步",
     tone: "success",
     retryable: false,
+    busy: false,
+    localOnly: false,
+    actionable: false,
+    actionLabel: "同步",
+    detail: "平台已确认同步完成。",
   });
-  assert.deepEqual(getSavedSyncPresentation("unsupported"), {
+  assert.deepEqual(getSavedSyncPresentation("unsupported", "unsupported_content_type"), {
     label: "仅本地保存",
     tone: "neutral",
     retryable: false,
+    busy: false,
+    localOnly: true,
+    actionable: false,
+    actionLabel: "同步",
+    detail: "此内容类型暂不支持平台同步，仅保存在本地。",
   });
   assert.equal(summarizeSavedSyncResults(task.items), "B站 1/1 · YouTube 0/1");
 });

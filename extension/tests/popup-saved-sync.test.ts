@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createSavedToggleRegistry } from "../popup/popup-saved-sync.js";
+import {
+  createSavedToggleRegistry,
+  isSavedSyncEligibleStatus,
+} from "../popup/popup-saved-sync.js";
 
 function fakeButton() {
   const attrs = new Map<string, string>();
@@ -17,6 +20,28 @@ function fakeButton() {
     },
   };
 }
+
+test("popup saved sync eligibility follows backend state and error code", () => {
+  assert.equal(isSavedSyncEligibleStatus("pending", "", "task-1"), false);
+  assert.equal(isSavedSyncEligibleStatus("pending", "", ""), true);
+  assert.equal(isSavedSyncEligibleStatus("syncing"), false);
+  assert.equal(
+    isSavedSyncEligibleStatus("unsupported", "unsupported_content_type"),
+    false,
+  );
+  assert.equal(
+    isSavedSyncEligibleStatus("unsupported", "unsupported_adapter_missing"),
+    true,
+  );
+
+  for (const platform of ["youtube", "twitter", "xiaohongshu", "douyin", "zhihu", "reddit"]) {
+    assert.equal(
+      isSavedSyncEligibleStatus(undefined, "", ""),
+      true,
+      `${platform} must retain a manual sync path when the backend has no terminal state`,
+    );
+  }
+});
 
 test("popup saved toggle registry syncs every visible button for the same bvid", async () => {
   const first = fakeButton();

@@ -661,7 +661,7 @@ test("all three saved runtimes recover and deduplicate persisted nonterminal tas
   }
 });
 
-test("unsupported saved sync is local-only and excluded from retry across all surfaces", async () => {
+test("saved sync eligibility distinguishes content limits from rolling upgrades across all surfaces", async () => {
   const oldLocation = (globalThis as any).location;
   (globalThis as any).location = { protocol: "http:", host: "127.0.0.1:8420" };
   const popup = await import("../popup/popup-saved-sync.js");
@@ -672,23 +672,108 @@ test("unsupported saved sync is local-only and excluded from retry across all su
 
   for (const runtime of [popup, mobile, desktop]) {
     assert.equal(typeof runtime.isSavedSyncEligibleStatus, "function");
-    assert.equal(runtime.isSavedSyncEligibleStatus("unsupported"), false);
-    assert.equal(runtime.isSavedSyncEligibleStatus("pending"), true);
+    assert.equal(runtime.isSavedSyncEligibleStatus("unsupported", "unsupported_content_type"), false);
+    assert.equal(runtime.isSavedSyncEligibleStatus("unsupported", "unsupported_adapter_missing"), true);
+    assert.equal(runtime.isSavedSyncEligibleStatus("pending", "", "task-1"), false);
+    assert.equal(runtime.isSavedSyncEligibleStatus("pending", "", ""), true);
+    assert.equal(runtime.isSavedSyncEligibleStatus("syncing"), false);
+    assert.equal(runtime.isSavedSyncEligibleStatus(undefined), true);
     for (const retryable of ["login_required", "failed", "rate_limited"]) {
       assert.equal(runtime.isSavedSyncEligibleStatus(retryable), true);
     }
   }
 
   const { readFile } = await import("node:fs/promises");
-  const [popupRuntime, popupView, mobileView, desktopView] = await Promise.all([
+  const [popupRuntime, popupView, mobileView, desktopRuntime, desktopView] = await Promise.all([
     readFile(new URL("../popup/popup-saved-sync.js", import.meta.url), "utf8"),
     readFile(new URL("../popup/popup.js", import.meta.url), "utf8"),
     readFile(new URL("../../src/openbiliclaw/web/js/views/saved.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/openbiliclaw/web/desktop/assets/js/saved-sync-core.js", import.meta.url), "utf8"),
     readFile(new URL("../../src/openbiliclaw/web/desktop/assets/js/app.js", import.meta.url), "utf8"),
   ]);
-  for (const source of [`${popupRuntime}\n${popupView}`, mobileView, desktopView]) {
+  for (const source of [popupRuntime, mobileView, desktopRuntime]) {
     assert.match(source, /仅本地保存/);
-    assert.match(source, /暂不支持平台同步/);
+    assert.match(source, /unsupported_content_type/);
+    assert.match(source, /unsupported_adapter_missing/);
+    assert.match(source, /滚动升级/);
+  }
+  for (const source of [popupView, mobileView, desktopView]) assert.match(source, /aria-disabled/);
+});
+
+test("popup desktop and mobile expose the same truthful saved-state matrix", async () => {
+  const oldLocation = (globalThis as any).location;
+  (globalThis as any).location = { protocol: "http:", host: "127.0.0.1:8420" };
+  const popup = await import("../popup/popup-saved-sync.js");
+  const mobile = await import("../../src/openbiliclaw/web/js/views/saved.js");
+  (globalThis as any).location = oldLocation;
+  await import("../../src/openbiliclaw/web/desktop/assets/js/saved-sync-core.js");
+  const desktop = (globalThis as any).OpenBiliClawSavedSync;
+  const viewModels = [
+    (item: any) => popup.getSavedSyncPresentation(
+      item.sync_status,
+      item.error_code,
+      item.resolved_target,
+      item.error_message,
+      item.sync_task_id,
+    ),
+    (item: any) => mobile.getSavedSyncViewModel({
+      item_key: "youtube:1", source_platform: "youtube", content_id: "1", ...item,
+    }),
+    (item: any) => desktop.getSavedSyncPresentation(item),
+  ];
+
+  for (const model of viewModels) {
+    for (const sync_status of ["pending", "syncing"]) {
+      const busy = model({
+        sync_status,
+        sync_task_id: sync_status === "pending" ? "task-1" : "",
+      });
+      assert.equal(busy.busy, true);
+      assert.equal(busy.actionable, false);
+      assert.match(busy.detail, /请稍候/);
+    }
+
+    const localPending = model({ sync_status: "pending", sync_task_id: "" });
+    assert.equal(localPending.busy, false);
+    assert.equal(localPending.actionable, true);
+    assert.match(localPending.detail, /手动同步/);
+
+    const extension = model({ sync_status: "extension_required" });
+    assert.equal(extension.actionable, true);
+    assert.equal(extension.actionLabel, "重试同步");
+    assert.match(extension.detail, /连接已安装 OpenBiliClaw 插件/);
+
+    const contentLimit = model({
+      sync_status: "unsupported", error_code: "unsupported_content_type",
+    });
+    assert.equal(contentLimit.localOnly, true);
+    assert.equal(contentLimit.actionable, false);
+
+    const rollingUpgrade = model({
+      sync_status: "unsupported", error_code: "unsupported_adapter_missing",
+    });
+    assert.equal(rollingUpgrade.localOnly, false);
+    assert.equal(rollingUpgrade.actionable, true);
+    assert.match(rollingUpgrade.detail, /更新|升级/);
+
+    for (const sync_status of ["login_required", "rate_limited", "failed"]) {
+      const retry = model({ sync_status });
+      assert.equal(retry.actionable, true);
+      assert.equal(retry.actionLabel, "重试同步");
+      assert.match(retry.detail, /重试|稍后/);
+    }
+
+    const success = model({ sync_status: "synced", resolved_target: "YouTube Watch Later" });
+    assert.equal(success.actionable, false);
+    assert.equal(success.detail, "YouTube Watch Later");
+  }
+
+  for (const platform of ["youtube", "twitter", "xiaohongshu", "douyin", "zhihu", "reddit"]) {
+    const ready = mobile.getSavedSyncViewModel({
+      item_key: `${platform}:1`, source_platform: platform, content_id: "1",
+    });
+    assert.equal(ready.label, "待同步", platform);
+    assert.equal(ready.actionable, true, platform);
   }
 });
 
@@ -785,6 +870,119 @@ test("retry and batch handlers capture list focus before work on all three surfa
   assert.match(popup, /async function runSavedSync[\s\S]*?captureSavedFocus\(focusRoot, button\)[\s\S]*?button\.disabled = true/);
   assert.match(mobile, /saved-sync-all[\s\S]*?addEventListener\("click", \(event\) => \{[\s\S]*?captureSavedFocus\(\$root, event\.currentTarget\)[\s\S]*?runSync/);
   assert.match(desktop, /async function runDesktopSavedSync[\s\S]*?captureSavedFocus\(focusRoot, activeButton\)[\s\S]*?activeButton\.disabled = true/);
+});
+
+test("static batch buttons clear stale busy ARIA after success failure or abort reload", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const popupRuntime = await import("../popup/popup-saved-sync.js");
+  const desktopRuntime = (globalThis as any).OpenBiliClawSavedSync;
+  const popup = await readFile(new URL("../popup/popup.js", import.meta.url), "utf8");
+  const desktop = await readFile(
+    new URL("../../src/openbiliclaw/web/desktop/assets/js/app.js", import.meta.url),
+    "utf8",
+  );
+  assert.match(popup, /updateSavedBatchButtonState\(syncAll, pendingCount\)/);
+  assert.match(desktop, /updateSavedBatchButtonState\(button, count\)/);
+
+  for (const update of [
+    popupRuntime.updateSavedBatchButtonState,
+    desktopRuntime.updateSavedBatchButtonState,
+  ]) {
+    for (const outcome of ["success", "failure", "abort"]) {
+      const attrs = new Map([
+        ["aria-busy", "true"],
+        ["aria-disabled", "true"],
+      ]);
+      const button = {
+        disabled: true,
+        setAttribute(name: string, value: string) { attrs.set(name, value); },
+        removeAttribute(name: string) { attrs.delete(name); },
+      };
+      update(button, 2);
+      assert.equal(button.disabled, false, outcome);
+      assert.equal(attrs.get("aria-disabled"), "false", outcome);
+      assert.equal(attrs.has("aria-busy"), false, outcome);
+    }
+
+    const attrs = new Map([["aria-busy", "true"]]);
+    const button = {
+      disabled: false,
+      setAttribute(name: string, value: string) { attrs.set(name, value); },
+      removeAttribute(name: string) { attrs.delete(name); },
+    };
+    update(button, 0);
+    assert.equal(button.disabled, true);
+    assert.equal(attrs.get("aria-disabled"), "true");
+    assert.equal(attrs.has("aria-busy"), false);
+  }
+
+  assert.equal(popupRuntime.getSavedSyncPresentation("pending", "", "", "", "task-1").busy, true);
+  assert.equal(desktopRuntime.getSavedSyncPresentation({
+    sync_status: "pending",
+    sync_task_id: "task-1",
+  }).busy, true);
+});
+
+test("single-item submission fences exclude batch and refresh overlap on all surfaces", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const popupRuntime = await import("../popup/popup-saved-sync.js");
+  const mobileRuntime = await import("../../src/openbiliclaw/web/js/saved-sync-runtime.js");
+  const desktopRuntime = (globalThis as any).OpenBiliClawSavedSync;
+
+  for (const createFence of [
+    popupRuntime.createSavedSubmissionFence,
+    mobileRuntime.createSavedSubmissionFence,
+    desktopRuntime.createSavedSubmissionFence,
+  ]) {
+    assert.equal(typeof createFence, "function");
+    const fence = createFence();
+    assert.equal(fence.claim(["youtube:one"]), true);
+    const rows = ["youtube:one", "reddit:two"];
+    assert.deepEqual(rows.filter((key) => !fence.has(key)), ["reddit:two"]);
+    assert.deepEqual(rows.filter((key) => !fence.has(key)), ["reddit:two"]);
+    assert.equal(fence.claim(["youtube:one"]), false);
+    fence.release(["youtube:one"]);
+    assert.equal(fence.has("youtube:one"), false);
+  }
+
+  const popup = await readFile(new URL("../popup/popup.js", import.meta.url), "utf8");
+  const mobile = await readFile(
+    new URL("../../src/openbiliclaw/web/js/views/saved.js", import.meta.url),
+    "utf8",
+  );
+  const desktop = await readFile(
+    new URL("../../src/openbiliclaw/web/desktop/assets/js/app.js", import.meta.url),
+    "utf8",
+  );
+  assert.match(popup, /syncEligible[\s\S]*?submissions\.has[\s\S]*?submissions\.claim/);
+  assert.match(mobile, /selected = selected\.filter[\s\S]*?!syncingKeys\.has[\s\S]*?syncingKeys\.claim/);
+  assert.match(desktop, /const eligible = selected\.filter[\s\S]*?!desktopSyncingKeys\[listKind\]\.has[\s\S]*?desktopSyncingKeys\[listKind\]\.claim/);
+});
+
+test("pre-task reload stays busy and mobile failure rerenders retryable live status", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const popup = await readFile(new URL("../popup/popup.js", import.meta.url), "utf8");
+  const mobile = await readFile(
+    new URL("../../src/openbiliclaw/web/js/views/saved.js", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    popup,
+    /function buildSavedCard[\s\S]*?submissions\.has\(item\.item_key\)[\s\S]*?sync_status: "syncing"/,
+  );
+  const runSyncStart = mobile.indexOf("  async function runSync(");
+  const runSyncEnd = mobile.indexOf("\n  function renderList()", runSyncStart);
+  assert.notEqual(runSyncStart, -1);
+  assert.notEqual(runSyncEnd, -1);
+  const runSync = mobile.slice(runSyncStart, runSyncEnd);
+  assert.match(
+    runSync,
+    /catch \(error\) \{[\s\S]*?messageIsError = true;[\s\S]*?finally \{[\s\S]*?syncingKeys\.release\(selectedKeys\);[\s\S]*?if \(!submitted\) \{[\s\S]*?renderList\(\)/,
+  );
+  assert.match(
+    mobile,
+    /saved-sync-message" aria-live="polite" \$\{messageIsError \? 'role="alert"'/,
+  );
 });
 
 test("Task 8 save and sync controls reserve coarse-pointer size without label shift", async () => {
