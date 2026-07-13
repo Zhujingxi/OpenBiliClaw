@@ -311,6 +311,7 @@ async def test_new_refill_precedes_queued_maintenance_on_next_release() -> None:
     refill = asyncio.create_task(
         _enter_and_hold(gate, "recommendation.write_expression", refill_entered)
     )
+    await _wait_until(lambda: gate.status_payload()["llm_refill_waiting"] == 1)
     releases[0].set()
     await asyncio.wait_for(refill_entered.wait(), timeout=1)
     assert not maintenance_entered.is_set()
