@@ -29,6 +29,8 @@ const task: NativeSaveTask = {
   target_label: "Reddit Saved",
 };
 
+const redditExecutionUrl = "https://old.reddit.com/r/test/comments/abc/demo/";
+
 const tokenizedXhsTask: NativeSaveTask = {
   ...task,
   id: "123e4567-e89b-12d3-a456-426614174001",
@@ -53,7 +55,7 @@ test("native save runner opens an active allow-listed URL and posts one correlat
   try {
     const running = runNativeSaveTask(task, "reddit", async (result) => { posted.push(result); }, { timeoutMs: 100 });
     await tick();
-    assert.deepEqual(state.createdTabs, [{ active: true, url: task.content_url }]);
+    assert.deepEqual(state.createdTabs, [{ active: true, url: redditExecutionUrl }]);
     state.emitRuntimeMessage({ type: "NATIVE_SAVE_RESULT", platform: "reddit", task_id: task.id, item_key: task.item_key, status: "synced" }, { tab: { id: 42, url: task.content_url } });
     state.emitRuntimeMessage({ type: "NATIVE_SAVE_RESULT", platform: "reddit", task_id: task.id, item_key: task.item_key, status: "synced" }, { tab: { id: 42, url: task.content_url } });
     await running;
@@ -143,7 +145,7 @@ test("native save runner executes two platforms concurrently with independent co
     await tick();
     await tick();
     assert.deepEqual(state.createdTabs, [
-      { active: true, url: task.content_url },
+      { active: true, url: redditExecutionUrl },
       { active: true, url: tokenizedXhsTask.content_url },
     ]);
     assert.deepEqual(state.sessionStorage, {

@@ -270,6 +270,20 @@ async function createTabBeforeDeadline(
   }
 }
 
+function taskNavigationUrl(task: NativeSaveTask): string {
+  if (task.platform !== "reddit") return task.content_url;
+  try {
+    const url = new URL(task.content_url);
+    if (url.hostname === "reddit.com" || url.hostname.endsWith(".reddit.com")) {
+      url.hostname = "old.reddit.com";
+      return url.toString();
+    }
+  } catch {
+    // The shared task validator already rejects malformed URLs; fail closed to the original.
+  }
+  return task.content_url;
+}
+
 function xiaohongshuRouteId(value: string | undefined): string | null {
   if (!value) return null;
   try {
@@ -429,7 +443,7 @@ export async function runNativeSaveTask(
     } else {
       try {
         const reusableTab = await reuseExactXiaohongshuTab(task, deadline);
-        const tab = reusableTab ?? await createTabBeforeDeadline(task.content_url, deadline);
+        const tab = reusableTab ?? await createTabBeforeDeadline(taskNavigationUrl(task), deadline);
         ownsTab = reusableTab === null;
         if (tab.id === undefined) throw new Error("native-save task tab has no ID");
         tabId = tab.id;

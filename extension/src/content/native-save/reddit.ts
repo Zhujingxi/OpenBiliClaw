@@ -209,7 +209,9 @@ function exactControl(root: ParentNode, label: "Save" | "Unsave"): HTMLElement |
   const matches = candidates.filter((element) => {
     const text = element.textContent?.trim() ?? "";
     const aria = element.getAttribute("aria-label")?.trim() ?? "";
-    return (text === label || aria === label) && belongsToExactIdentityRoot(element, root);
+    const expected = label.toLowerCase();
+    return (text.toLowerCase() === expected || aria.toLowerCase() === expected) &&
+      belongsToExactIdentityRoot(element, root);
   });
   return matches.length === 1 ? matches[0] : null;
 }

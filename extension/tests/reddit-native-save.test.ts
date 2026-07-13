@@ -259,12 +259,12 @@ test("Reddit native save falls back to the exact visible Save control", async ()
 });
 
 test("Reddit browser save finds the exact control inside open shadow roots", async () => {
-  let state: "Save" | "Unsave" = "Save";
+  let state: "save" | "unsave" = "save";
   let clicks = 0;
   const control = {
     get textContent() { return state; },
     getAttribute() { return null; },
-    click() { clicks += 1; state = "Unsave"; },
+    click() { clicks += 1; state = "unsave"; },
   };
   const shadowRoot = {
     querySelectorAll(selector: string) {
