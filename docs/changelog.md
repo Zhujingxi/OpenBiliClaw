@@ -4,6 +4,12 @@
 
 ---
 
+## v0.3.165 / extension v0.3.165 / desktop v0.3.165：Firefox 签名安装修复（2026-07-14）
+
+后端源码走 `backend-v0.3.165`，浏览器插件走 `extension-v0.3.165`，桌面安装包走 `desktop-v0.3.165`。
+
+- **Firefox 正式 XPI 恢复发布**：Firefox manifest 的稳定 Gecko ID 改为 `openbiliclaw-firefox@whiteguo233.github.io`，避开旧 ID 已被其他 AMO 作者占用导致的 403；扩展测试锁定该 ID，发布链路通过当前 AMO 账号做 unlisted 签名并要求产出 `openbiliclaw-extension-v0.3.165-firefox.xpi`，签名失败会直接阻止 release。
+
 ## v0.3.164 / extension v0.3.164 / desktop v0.3.164：持续补货、Web 可靠交互与安全对话（2026-07-13）
 
 后端源码走 `backend-v0.3.164`，浏览器插件走 `extension-v0.3.164`，桌面安装包走 `desktop-v0.3.164`。

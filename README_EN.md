@@ -189,12 +189,9 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.164 (2026-07-13)**
+📌 Latest: **v0.3.165 (2026-07-14)**
 
-- **Faster, more reliable recommendation refill** — durable evaluation and copy micro-batches now follow inventory-aware priority controls, preventing long empty-pool stalls after content is consumed.
-- **More responsive Web interactions** — progressive first paint, smooth drawers, container-responsive Delight layouts, and tuned autoload thresholds are covered by real-browser regressions so slow secondary reads do not block primary content.
-- **Consistent Delight and probe state** — drag, card switching, in-flight submission, failure retry, and motion feedback remain coherent across rerenders and client entry points, reducing accidental gestures and duplicate submissions.
-- **Safe, recoverable dialogue failures** — model failures roll back temporary history, persist a safe typed error without learning, and use the same failure semantics across CLI, Web, and OpenClaw.
+- **Firefox now has a directly installable XPI** — the Firefox extension moved to a project-owned AMO identity and resumes Mozilla-signed releases for regular Firefox Release and Beta.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
