@@ -7509,6 +7509,129 @@ class TestBackendAPI:
         assert turn["reply"] == ""
         assert "空响应" in str(turn["error"])
 
+    def test_durable_reply_completes_before_best_effort_context_side_effects(
+        self, tmp_path: Path
+    ) -> None:
+        import time
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        order: list[str] = []
+
+        class OrderedDatabase(Database):
+            def complete_chat_turn(self, turn_id: str, *, reply: str) -> None:
+                order.append("complete")
+                super().complete_chat_turn(turn_id, reply=reply)
+
+        class FakeDialogue:
+            async def respond(self, _message: str) -> str:
+                order.append("dialogue")
+                return "这是真实回复"
+
+        class FakeMemory:
+            def __init__(self) -> None:
+                self.updates: list[dict[str, object]] = []
+
+            def load_cognition_updates(self) -> list[dict[str, object]]:
+                return list(self.updates)
+
+            def save_cognition_updates(self, updates: list[dict[str, object]]) -> None:
+                order.append("cognition")
+                self.updates = list(updates)
+
+        class FailingEventHub:
+            async def publish(self, _event: dict[str, object]) -> None:
+                order.append("publish")
+                raise RuntimeError("publish unavailable")
+
+        db = OrderedDatabase(tmp_path / "openbiliclaw.db")
+        db.initialize()
+        app = create_app(
+            memory_manager=FakeMemory(),
+            database=db,
+            soul_engine=object(),
+            dialogue=FakeDialogue(),
+            runtime_controller=SimpleNamespace(event_hub=FailingEventHub()),
+        )
+
+        with TestClient(app) as client:
+            client.post(
+                "/api/chat/turns",
+                json={
+                    "turn_id": "turn-side-effect-failure",
+                    "session": "popup",
+                    "scope": "delight",
+                    "subject_id": "BV1SAFE",
+                    "subject_title": "惊喜",
+                    "message": "聊聊",
+                },
+            )
+            turn: dict[str, object] = {}
+            for _ in range(30):
+                time.sleep(0.02)
+                turn = client.get("/api/chat/turns/turn-side-effect-failure").json()
+                if turn["status"] != "pending":
+                    break
+
+        assert turn["status"] == "completed"
+        assert turn["reply"] == "这是真实回复"
+        assert turn["error"] == ""
+        assert order == ["dialogue", "complete", "cognition", "publish"]
+
+    def test_completion_persistence_failure_does_not_mark_genuine_reply_failed(
+        self, tmp_path: Path
+    ) -> None:
+        import threading
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        completion_attempted = threading.Event()
+        failed_calls: list[tuple[str, str, str]] = []
+
+        class FailingCompletionDatabase(Database):
+            def complete_chat_turn(self, turn_id: str, *, reply: str) -> None:
+                completion_attempted.set()
+                raise RuntimeError("completion persistence unavailable")
+
+            def fail_chat_turn(self, turn_id: str, *, error: str, reply: str = "") -> None:
+                failed_calls.append((turn_id, error, reply))
+                super().fail_chat_turn(turn_id, error=error, reply=reply)
+
+        class FakeDialogue:
+            async def respond(self, _message: str) -> str:
+                return "已经完成的真实回复"
+
+        db = FailingCompletionDatabase(tmp_path / "openbiliclaw.db")
+        db.initialize()
+        app = create_app(
+            memory_manager=object(),
+            database=db,
+            soul_engine=object(),
+            dialogue=FakeDialogue(),
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/chat/turns",
+                json={
+                    "turn_id": "turn-completion-write-failure",
+                    "session": "popup",
+                    "scope": "chat",
+                    "message": "这轮模型成功",
+                },
+            )
+            assert response.status_code == 200
+            assert completion_attempted.wait(timeout=1)
+
+        row = db.get_chat_turn("turn-completion-write-failure")
+        assert row is not None
+        assert row["status"] == "pending"
+        assert failed_calls == []
+
     def test_chat_turn_endpoint_records_delight_scope_context(self, tmp_path: Path) -> None:
         import asyncio
         import time

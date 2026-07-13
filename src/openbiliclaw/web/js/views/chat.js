@@ -691,6 +691,8 @@ function expandInlineChatOnCard(card, { scope, subjectId, subjectTitle, placehol
         message,
       });
 
+      // Only a completed turn consumes a probe notification. Failed turns
+      // keep the composer/card available so the user can retry.
       const showReply = (t) => {
         thinking.remove();
         input.remove();
@@ -709,15 +711,32 @@ function expandInlineChatOnCard(card, { scope, subjectId, subjectTitle, placehol
         }, 3500);
       };
 
+      const settleTurn = (t) => {
+        if (t.status === "failed") {
+          thinking.remove();
+          sendBtn.disabled = false;
+          input.disabled = false;
+          if (isProbeScope) {
+            forgetHandledProbe(subjectId, probeType);
+          }
+          const errEl = document.createElement("div");
+          errEl.className = "inline-chat-error";
+          errEl.textContent = t.error || "刚刚没发出去，换个说法再试试。";
+          chatArea.appendChild(errEl);
+          return;
+        }
+        if (t.status === "completed") showReply(t);
+      };
+
       if (turn.status === "completed" || turn.status === "failed") {
-        showReply(turn);
+        settleTurn(turn);
       } else {
         // Poll until settled
         const poll = async () => {
           try {
             const t = await fetchChatTurn(turnId);
             if (t.status === "completed" || t.status === "failed") {
-              showReply(t);
+              settleTurn(t);
             } else {
               setTimeout(poll, 1500);
             }

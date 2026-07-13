@@ -3920,12 +3920,12 @@
       };
       try {
         const latest = await requestJson(`${ENDPOINTS.chatTurns}/${encodeURIComponent(turnId)}`);
-        if (latest?.status === "completed" || latest?.reply) {
-          showReply(latest.reply || "后端已完成这轮聊天。");
-          return;
-        }
         if (latest?.status === "failed" || Date.now() - startedAt > 180000) {
           showReply(latest?.error || "聊天处理超时，稍后可以在历史里继续查看。", "error");
+          return;
+        }
+        if (latest?.status === "completed" || latest?.reply) {
+          showReply(latest.reply || "后端已完成这轮聊天。");
           return;
         }
       } catch {
@@ -4619,13 +4619,13 @@
       const startedAt = Date.now();
       const poll = async () => {
         const latest = await requestJson(`${ENDPOINTS.chatTurns}/${encodeURIComponent(turn.turn_id)}`);
-        if (latest?.status === "completed" || latest?.reply) {
-          state.chat[state.chat.length - 1] = { role: "agent", text: latest.reply || "后端已完成这轮聊天。" };
+        if (latest?.status === "failed" || Date.now() - startedAt > 180000) {
+          state.chat[state.chat.length - 1] = { role: "agent", text: latest?.error || "聊天处理超时，稍后可以在历史里继续查看。" };
           renderChat();
           return;
         }
-        if (latest?.status === "failed" || Date.now() - startedAt > 180000) {
-          state.chat[state.chat.length - 1] = { role: "agent", text: latest?.error || "聊天处理超时，稍后可以在历史里继续查看。" };
+        if (latest?.status === "completed" || latest?.reply) {
+          state.chat[state.chat.length - 1] = { role: "agent", text: latest.reply || "后端已完成这轮聊天。" };
           renderChat();
           return;
         }

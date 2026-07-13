@@ -5509,6 +5509,9 @@ def create_app(
 
             raise LLMResponseContentError("LLM returned an empty response")
 
+        return reply
+
+    async def _apply_durable_chat_success_side_effects(turn: ChatTurnOut, reply: str) -> None:
         if turn.scope == "delight":
             label = turn.subject_title or turn.subject_id
             _record_probe_cognition(
@@ -5662,8 +5665,6 @@ def create_app(
             )
             await _publish_probe_event("avoidance.chat", summary, domain)
 
-        return reply
-
     async def _complete_durable_chat_turn(turn_id: str) -> None:
         if turn_id in running_chat_turn_tasks:
             return
@@ -5675,15 +5676,27 @@ def create_app(
             turn = _normalize_chat_turn(row)
             if turn.status != "pending":
                 return
-            reply = await _generate_durable_chat_reply(turn)
-            _complete_chat_turn_row(turn_id, reply=reply)
-        except Exception as exc:
-            logger.exception("Failed to complete durable chat turn %s", turn_id)
-            _fail_chat_turn_row(
-                turn_id,
-                error=safe_llm_failure_message(exc),
-                reply="",
-            )
+            try:
+                reply = await _generate_durable_chat_reply(turn)
+            except Exception as exc:
+                logger.exception("Failed to generate durable chat turn %s", turn_id)
+                _fail_chat_turn_row(
+                    turn_id,
+                    error=safe_llm_failure_message(exc),
+                    reply="",
+                )
+                return
+
+            try:
+                _complete_chat_turn_row(turn_id, reply=reply)
+            except Exception:
+                logger.exception("Failed to persist completed durable chat turn %s", turn_id)
+                return
+
+            try:
+                await _apply_durable_chat_success_side_effects(turn, reply)
+            except Exception:
+                logger.exception("Failed to apply durable chat side effects for %s", turn_id)
         finally:
             running_chat_turn_tasks.discard(turn_id)
 

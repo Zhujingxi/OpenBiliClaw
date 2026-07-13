@@ -2773,6 +2773,17 @@ function expandDelightChat(itemEl, delight) {
       });
       const ca = itemEl.querySelector(".message-chat-area");
       if (ca) ca.remove();
+      const showFailure = (nextTurn) => {
+        thinking.remove();
+        const errorEl = document.createElement("div");
+        errorEl.className = "message-chat-reply";
+        errorEl.textContent = nextTurn.error || "刚刚没发出去，换个说法再试试。";
+        itemEl.append(errorEl);
+        sendBtn.disabled = false;
+        if (actions) actions.hidden = false;
+        applyTurnToMessage(nextTurn);
+        applyTurnToDelight(nextTurn);
+      };
       const showReply = (nextTurn) => {
         thinking.remove();
         const replyEl = document.createElement("div");
@@ -2783,14 +2794,21 @@ function expandDelightChat(itemEl, delight) {
         applyTurnToMessage(nextTurn);
         applyTurnToDelight(nextTurn);
       };
+      const settleTurn = (nextTurn) => {
+        if (nextTurn.status === "failed") {
+          showFailure(nextTurn);
+          return;
+        }
+        if (nextTurn.status === "completed") showReply(nextTurn);
+      };
       if (turn.status === "completed" || turn.status === "failed") {
-        showReply(turn);
+        settleTurn(turn);
       } else {
         applyTurnToMessage(turn);
         pollChatTurnUntilSettled(turn.turn_id, {
           onUpdate(nextTurn) {
             if (nextTurn.status === "completed" || nextTurn.status === "failed") {
-              showReply(nextTurn);
+              settleTurn(nextTurn);
             }
           },
         });
@@ -2912,9 +2930,21 @@ async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.p
       message,
     });
 
-    // Remove chat area, show result, then remove card after delay
+    // Completed turns remove the card after showing the reply. Failed turns
+    // restore the handled/retry state and keep the card visible.
     const chatArea = itemEl.querySelector(".message-chat-area");
     if (chatArea) chatArea.remove();
+
+    const showFailure = (nextTurn) => {
+      forgetHandledProbe(domain, type);
+      thinking.remove();
+      sendBtn.disabled = false;
+      const errorEl = document.createElement("div");
+      errorEl.className = "message-chat-reply";
+      errorEl.textContent = nextTurn.error || "刚刚没发出去，换个说法再试试。";
+      itemEl.append(errorEl);
+      applyTurnToMessage(nextTurn);
+    };
 
     const showReply = (nextTurn) => {
       thinking.remove();
@@ -2931,14 +2961,22 @@ async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.p
       }, 4000);
     };
 
+    const settleTurn = (nextTurn) => {
+      if (nextTurn.status === "failed") {
+        showFailure(nextTurn);
+        return;
+      }
+      if (nextTurn.status === "completed") showReply(nextTurn);
+    };
+
     if (turn.status === "completed" || turn.status === "failed") {
-      showReply(turn);
+      settleTurn(turn);
     } else {
       applyTurnToMessage(turn);
       pollChatTurnUntilSettled(turn.turn_id, {
         onUpdate(nextTurn) {
           if (nextTurn.status === "completed" || nextTurn.status === "failed") {
-            showReply(nextTurn);
+            settleTurn(nextTurn);
           }
         },
       });

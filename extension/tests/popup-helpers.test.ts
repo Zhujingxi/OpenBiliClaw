@@ -1788,6 +1788,34 @@ test("popup failed chat turn renders durable error", () => {
   assert.match(popupSource, /const message = turn\.error \|\| "刚刚没发出去，换个说法再试试。"/);
 });
 
+test("popup inline failed turns render errors without completing or removing probes", () => {
+  const popupSource = readFileSync(resolve(import.meta.dirname, "../popup/popup.js"), "utf8");
+  const functionSlice = (name: string, nextName: string) => {
+    const start = popupSource.indexOf(`function ${name}`);
+    const end = popupSource.indexOf(`function ${nextName}`, start + 1);
+    assert.ok(start >= 0 && end > start, `${name} source body not found`);
+    return popupSource.slice(start, end);
+  };
+
+  const delight = functionSlice("expandDelightChat", "dismissMessageByBvid");
+  assert.ok(delight.indexOf('nextTurn.status === "failed"') < delight.indexOf('nextTurn.status === "completed"'));
+  const delightFailure = delight.slice(
+    delight.indexOf("const showFailure"),
+    delight.indexOf("const showReply"),
+  );
+  assert.match(delightFailure, /nextTurn\.error/);
+
+  const probe = functionSlice("sendInlineChat", "dismissMessage");
+  assert.ok(probe.indexOf('nextTurn.status === "failed"') < probe.indexOf('nextTurn.status === "completed"'));
+  const failureBranch = probe.slice(
+    probe.indexOf("const showFailure"),
+    probe.indexOf("const showReply"),
+  );
+  assert.match(failureBranch, /nextTurn\.error/);
+  assert.match(failureBranch, /forgetHandledProbe/);
+  assert.doesNotMatch(failureBranch, /removeMessageFromState|itemEl\.remove/);
+});
+
 test("getHintBannerState normalizes supported tones", () => {
   assert.deepEqual(getHintBannerState("success"), {
     tone: "success",

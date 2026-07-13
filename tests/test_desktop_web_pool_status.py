@@ -61,6 +61,23 @@ def test_desktop_failed_chat_turn_renders_durable_error() -> None:
     assert 'turn.error || "这句还没发出去，稍后再试。"' in app_js
 
 
+def test_desktop_inline_poll_checks_failed_before_stale_reply() -> None:
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    probe_start = app_js.index("async function pollInlineMessageChatTurn")
+    probe_end = app_js.index("function openInlineMessageProbeChat", probe_start)
+    chat_start = app_js.index("async function sendChat")
+    chat_end = app_js.index("async function refreshRecommendations", chat_start)
+    probe_body = app_js[probe_start:probe_end]
+    chat_body = app_js[chat_start:chat_end]
+    for body in (probe_body, chat_body):
+        failed_index = body.index('status === "failed"')
+        completed_index = body.index('status === "completed"')
+        reply_index = body.index(".reply")
+        assert failed_index < completed_index
+        assert failed_index < reply_index
+
+
 def test_desktop_auth_probe_times_out_without_assuming_authentication() -> None:
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
     body = _function_body(app_js, "fetchAuthStatus")

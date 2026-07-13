@@ -60,6 +60,20 @@ def test_mobile_failed_chat_turn_renders_durable_error() -> None:
     assert 'errBubble.textContent = turn.error || "\\u56DE\\u590D\\u5931\\u8D25"' in chat_js
 
 
+def test_mobile_inline_probe_failure_keeps_notification_and_renders_error() -> None:
+    chat_js = (ROOT / "src/openbiliclaw/web/js/views/chat.js").read_text()
+    start = chat_js.index("function expandInlineChatOnCard")
+    body = chat_js[start:]
+
+    failed_index = body.index('t.status === "failed"')
+    completed_index = body.index('t.status === "completed"')
+    assert failed_index < completed_index
+    failed_branch = body[failed_index:completed_index]
+    assert "t.error" in failed_branch
+    assert "forgetHandledProbe" in failed_branch
+    assert "removeProbeFromNotifications" not in failed_branch
+
+
 def test_mobile_delight_status_and_actions_render_independently() -> None:
     """Liked delights retain actions while terminal negative/view states can hide them."""
 
