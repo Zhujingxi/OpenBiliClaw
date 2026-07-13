@@ -128,6 +128,28 @@ test("native save result sanitizer emits only backend allow-listed status and co
     error_code: "native_save_failed",
     error_message: "Platform native save failed",
   });
+
+  for (const code of [
+    "native_content_not_ready",
+    "native_control_not_found",
+    "native_dialog_not_opened",
+    "native_target_not_found",
+    "native_request_rejected",
+    "native_confirmation_not_observed",
+  ] as const) {
+    const result = sanitizeNativeSaveResult({
+      status: "failed",
+      error_code: code,
+      error_message: "cookie=must-not-cross",
+    });
+    assert.equal(result.status, "failed");
+    assert.equal(result.error_code, code);
+    assert.doesNotMatch(result.error_message, /cookie|must-not-cross/);
+  }
+  assert.equal(
+    sanitizeNativeSaveResult({ status: "failed", error_code: "selector=.secret" }).error_code,
+    "native_save_failed",
+  );
 });
 
 test("native save content runtime allows the matching hostname and executes once per task ID", async () => {

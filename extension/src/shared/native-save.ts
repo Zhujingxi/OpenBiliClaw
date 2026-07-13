@@ -7,6 +7,15 @@ export type NativeSaveStatus =
   | "failed";
 
 export type NativeSaveAction = "favorite" | "watch_later";
+export type NativeSaveFailureCode =
+  | "native_save_failed"
+  | "native_save_timeout"
+  | "native_content_not_ready"
+  | "native_control_not_found"
+  | "native_dialog_not_opened"
+  | "native_target_not_found"
+  | "native_request_rejected"
+  | "native_confirmation_not_observed";
 export type NativeSavePlatform =
   | "youtube"
   | "xiaohongshu"
@@ -193,6 +202,36 @@ const SAFE_RESULTS: Readonly<Record<string, SanitizedNativeSaveOutcome>> = {
     error_code: "native_save_timeout",
     error_message: "Platform native-save task timed out",
   },
+  "failed:native_content_not_ready": {
+    status: "failed",
+    error_code: "native_content_not_ready",
+    error_message: "Platform native-save content was not ready",
+  },
+  "failed:native_control_not_found": {
+    status: "failed",
+    error_code: "native_control_not_found",
+    error_message: "Platform native-save control was not found",
+  },
+  "failed:native_dialog_not_opened": {
+    status: "failed",
+    error_code: "native_dialog_not_opened",
+    error_message: "Platform native-save dialog did not open",
+  },
+  "failed:native_target_not_found": {
+    status: "failed",
+    error_code: "native_target_not_found",
+    error_message: "Platform native-save target was not found",
+  },
+  "failed:native_request_rejected": {
+    status: "failed",
+    error_code: "native_request_rejected",
+    error_message: "Platform native-save request was rejected",
+  },
+  "failed:native_confirmation_not_observed": {
+    status: "failed",
+    error_code: "native_confirmation_not_observed",
+    error_message: "Platform native-save confirmation was not observed",
+  },
 };
 
 /** Collapse executor-controlled output to the backend's fixed status/code/message allow-list. */
@@ -201,8 +240,10 @@ export function sanitizeNativeSaveResult(value: unknown): SanitizedNativeSaveOut
     const record = value as Record<string, unknown>;
     const status = typeof record.status === "string" ? record.status : "";
     const code = typeof record.error_code === "string" ? record.error_code : "";
-    if (status === "failed" && code === "native_save_timeout") {
-      return { ...SAFE_RESULTS["failed:native_save_timeout"] };
+    if (status === "failed") {
+      const failedKey = `failed:${code}`;
+      const safeFailure = SAFE_RESULTS[failedKey];
+      if (safeFailure) return { ...safeFailure };
     }
     const safeKeyByStatus: Readonly<Record<string, string>> = {
       synced: "synced:",
