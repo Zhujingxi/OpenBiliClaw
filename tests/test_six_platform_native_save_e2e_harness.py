@@ -470,6 +470,13 @@ def test_backend_native_save_e2e_rejects_unverified_saved_identity_before_publis
             "https://xiaohongshu.com/discovery/item/64a1b2c3d4e5f6789012abcd/",
         ),
         (
+            "xiaohongshu",
+            "note",
+            "64a1b2c3d4e5f6789012abcd",
+            "https://www.xiaohongshu.com/explore/64a1b2c3d4e5f6789012abcd"
+            "?xsec_token=public-note-token&xsec_source=pc_feed",
+        ),
+        (
             "douyin",
             "aweme",
             "7234567890123456789",
@@ -533,6 +540,23 @@ def test_native_save_e2e_preflight_accepts_executor_equivalent_canonical_urls(
             "xiaohongshu",
             "note",
             "https://www.xiaohongshu.com/explore/64a1b2c3d4e5f6789012abcd?token=secret",
+        ),
+        (
+            "xiaohongshu",
+            "note",
+            "https://www.xiaohongshu.com/explore/64a1b2c3d4e5f6789012abcd?xsec_token=",
+        ),
+        (
+            "xiaohongshu",
+            "note",
+            "https://www.xiaohongshu.com/explore/64a1b2c3d4e5f6789012abcd"
+            "?xsec_token=public-note-token&xsec_token=duplicate",
+        ),
+        (
+            "xiaohongshu",
+            "note",
+            "https://www.xiaohongshu.com/explore/64a1b2c3d4e5f6789012abcd"
+            "?xsec_token=public-note-token&xsec_source=",
         ),
         ("douyin", "video", "https://www.douyin.com/video/7234567890123456789/extra"),
         ("douyin", "video", "https://www.iesdouyin.com/video/7234567890123456789"),

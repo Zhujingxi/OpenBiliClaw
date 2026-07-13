@@ -1,4 +1,5 @@
 import type { NativeSaveTask } from "../../shared/native-save.ts";
+import { waitForNativeSaveReadiness } from "./readiness.ts";
 
 export interface YouTubePlaylistRow {
   isChecked(): boolean;
@@ -9,6 +10,7 @@ export interface YouTubeNativeSaveEnvironment {
   currentUrl: string;
   isLoggedIn(): boolean;
   isUnavailable(): boolean;
+  hasSaveControl(): boolean;
   rateLimitFingerprint(): string;
   openSaveDialog(): Promise<boolean>;
   closeSaveDialog(): Promise<void>;
@@ -159,13 +161,24 @@ async function openDialog(env: YouTubeNativeSaveEnvironment): Promise<boolean> {
 }
 
 async function performSaveYouTube(task: NativeSaveTask, env: YouTubeNativeSaveEnvironment): Promise<unknown> {
-  if (!env.isLoggedIn()) return { status: "login_required" };
   if (!isSupportedTask(task, env.currentUrl) || env.isUnavailable()) {
     return { status: "unsupported", error_code: "unsupported_content_type" };
   }
   if (!hasExactActionTarget(task)) {
     return { status: "failed", error_code: "native_save_failed" };
   }
+  await waitForNativeSaveReadiness(
+    () => env.isLoggedIn() || env.isUnavailable(),
+    env.sleep,
+  );
+  if (!env.isLoggedIn()) return { status: "login_required" };
+  if (env.isUnavailable()) return { status: "unsupported", error_code: "unsupported_content_type" };
+  await waitForNativeSaveReadiness(
+    () => env.hasSaveControl() || env.isUnavailable(),
+    env.sleep,
+  );
+  if (env.isUnavailable()) return { status: "unsupported", error_code: "unsupported_content_type" };
+  if (!env.hasSaveControl()) return { status: "failed", error_code: "native_save_failed" };
   const rateLimitBefore = env.rateLimitFingerprint();
   if (!(await openDialog(env))) {
     return hasNewRateLimit(env, rateLimitBefore)
@@ -457,6 +470,10 @@ export function createYouTubeBrowserEnvironment(
         "ytd-player-error-message-renderer, #error-screen, yt-playability-error-supported-renderers",
       );
       return Array.from(elements).some((element) => UNAVAILABLE_PATTERN.test(element.textContent?.trim() ?? ""));
+    },
+    hasSaveControl() {
+      const stableRoot = root.querySelector<HTMLElement>("ytd-watch-metadata ytd-menu-renderer, #menu ytd-menu-renderer") ?? root;
+      return exactLabeledElement(stableRoot, SAVE_LABELS, root) !== null;
     },
     rateLimitFingerprint() {
       const elements = root.querySelectorAll<HTMLElement>(

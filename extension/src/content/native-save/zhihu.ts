@@ -1,4 +1,5 @@
 import type { NativeSaveTask } from "../../shared/native-save.ts";
+import { waitForNativeSaveReadiness } from "./readiness.ts";
 
 export interface ZhihuCollectionRow {
   isChecked(): boolean;
@@ -9,6 +10,7 @@ export interface ZhihuNativeSaveEnvironment {
   currentUrl: string;
   hasVisibleLoginOverlay(): boolean;
   isUnavailable(): boolean;
+  hasCollectionControl(): boolean;
   rateLimitFingerprint(): string;
   openCollectionDialog(): Promise<boolean>;
   closeCollectionDialog(): Promise<void>;
@@ -198,13 +200,26 @@ export async function saveZhihu(
   task: NativeSaveTask,
   env: ZhihuNativeSaveEnvironment = createZhihuBrowserEnvironment(),
 ): Promise<unknown> {
-  if (env.hasVisibleLoginOverlay()) return { status: "login_required" };
   if (!isSupported(task, env.currentUrl) || env.isUnavailable()) {
     return { status: "unsupported", error_code: "unsupported_content_type" };
   }
   if (!hasTargetContract(task)) return { status: "failed", error_code: "native_save_failed" };
   const rateBefore = env.rateLimitFingerprint();
-  if (!(await env.openCollectionDialog())) {
+  await waitForNativeSaveReadiness(
+    () => env.hasVisibleLoginOverlay() || env.isUnavailable() || env.hasCollectionControl(),
+    env.sleep,
+  );
+  if (env.hasVisibleLoginOverlay()) return { status: "login_required" };
+  if (env.isUnavailable()) {
+    return { status: "unsupported", error_code: "unsupported_content_type" };
+  }
+  if (!env.hasCollectionControl()) {
+    return hasNewRateLimit(rateBefore, env.rateLimitFingerprint())
+      ? { status: "rate_limited" }
+      : { status: "failed", error_code: "native_save_failed" };
+  }
+  const dialogOpened = await env.openCollectionDialog();
+  if (!dialogOpened) {
     return hasNewRateLimit(rateBefore, env.rateLimitFingerprint())
       ? { status: "rate_limited" }
       : { status: "failed", error_code: "native_save_failed" };
@@ -307,6 +322,16 @@ export function createZhihuBrowserEnvironment(
     (checkbox ?? row).click();
   };
 
+  const collectionControls = (): HTMLElement[] => {
+    const container = targetContainer();
+    if (!container || !currentIdentity) return [];
+    return Array.from(container.querySelectorAll<HTMLElement>(
+      "button, [role='button']",
+    )).filter((element) => isEffectivelyVisible(element, root) &&
+      closestIdentity(element) === currentIdentity &&
+      ["收藏", "已收藏", "取消收藏"].includes(visibleText(element)));
+  };
+
   return {
     currentUrl,
     hasVisibleLoginOverlay() {
@@ -321,6 +346,9 @@ export function createZhihuBrowserEnvironment(
         /(?:不存在|已删除|内容不可用|页面不存在|not found|deleted|unavailable)/i.test(
           element.textContent ?? "",
         ));
+    },
+    hasCollectionControl() {
+      return collectionControls().length === 1;
     },
     rateLimitFingerprint() {
       const container = activeContainer ?? targetContainer();
@@ -349,11 +377,7 @@ export function createZhihuBrowserEnvironment(
     async openCollectionDialog() {
       const container = targetContainer();
       if (!container || !currentIdentity) return false;
-      const controls = Array.from(container.querySelectorAll<HTMLElement>(
-        "button, [role='button']",
-      )).filter((element) => isEffectivelyVisible(element, root) &&
-        closestIdentity(element) === currentIdentity &&
-        ["收藏", "已收藏", "取消收藏"].includes(visibleText(element)));
+      const controls = collectionControls();
       if (controls.length !== 1) return false;
       const before = new Set(visibleDialogs());
       activeContainer = container;

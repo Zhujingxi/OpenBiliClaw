@@ -31,16 +31,20 @@ function fixture(options: {
   rateLimited?: boolean;
   initialState?: "bookmark" | "removeBookmark" | null;
   confirmAfterClick?: boolean;
+  readyAfterSleeps?: number;
 } = {}): XNativeSaveEnvironment & { clicks: number; requestedIds: string[] } {
   let state = options.initialState ?? "bookmark";
+  let sleeps = 0;
+  const ready = () => sleeps >= (options.readyAfterSleeps ?? 0);
   const env = {
     clicks: 0,
     requestedIds: [] as string[],
     currentUrl: task.content_url,
-    isLoggedIn: () => options.loggedIn ?? true,
+    isLoggedIn: () => ready() && (options.loggedIn ?? true),
     isRateLimited: () => options.rateLimited ?? false,
     findTweetControl(tweetId: string, testId: "bookmark" | "removeBookmark"): XSaveControl | null {
       env.requestedIds.push(tweetId);
+      if (!ready()) return null;
       if (state !== testId) return null;
       return {
         click() {
@@ -49,7 +53,7 @@ function fixture(options: {
         },
       };
     },
-    sleep: async () => {},
+    sleep: async () => { sleeps += 1; },
   } satisfies XNativeSaveEnvironment & { clicks: number; requestedIds: string[] };
   return env;
 }
@@ -59,6 +63,12 @@ test("X native save clicks the exact tweet bookmark and confirms removeBookmark"
   assert.deepEqual(await saveX(task, env), { status: "synced" });
   assert.equal(env.clicks, 1);
   assert.ok(env.requestedIds.every((id) => id === task.content_id));
+});
+
+test("X native save waits for the logged-in correlated tweet control", async () => {
+  const env = fixture({ readyAfterSleeps: 2, confirmAfterClick: true });
+  assert.deepEqual(await saveX(task, env), { status: "synced" });
+  assert.equal(env.clicks, 1);
 });
 
 test("X native save returns already_synced for removeBookmark without mutation", async () => {

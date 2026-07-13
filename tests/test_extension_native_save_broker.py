@@ -106,7 +106,7 @@ def test_broker_persists_only_safe_job_fields(database: Database) -> None:
     assert "title" not in row
 
 
-def test_persisted_url_strips_fragment_and_non_identity_query_fields(database: Database) -> None:
+def test_persisted_url_keeps_only_platform_navigation_query_fields(database: Database) -> None:
     broker = ExtensionNativeSaveBroker(database, wake_platform=AsyncMock())
 
     youtube_id = broker.enqueue(
@@ -121,7 +121,8 @@ def test_persisted_url_strips_fragment_and_non_identity_query_fields(database: D
         SavedItemInput(
             "xiaohongshu",
             "note-123",
-            "https://www.xiaohongshu.com/explore/note-123?xsec_token=secret&xsec_source=pc_feed",
+            "https://www.xiaohongshu.com/explore/note-123?xsec_token=public-note-token"
+            "&xsec_source=pc_feed&utm_source=ignored#comments",
         ),
         NativeSaveRoute("favorite", "favorite", "Xiaohongshu Favorites"),
     )
@@ -131,7 +132,64 @@ def test_persisted_url_strips_fragment_and_non_identity_query_fields(database: D
     assert youtube_row is not None
     assert youtube_row["content_url"] == "https://www.youtube.com/watch?v=video-123"
     assert xhs_row is not None
-    assert xhs_row["content_url"] == "https://www.xiaohongshu.com/explore/note-123"
+    assert xhs_row["content_url"] == (
+        "https://www.xiaohongshu.com/explore/note-123?"
+        "xsec_token=public-note-token&xsec_source=pc_feed"
+    )
+
+
+def test_persisted_url_normalizes_default_port_and_trailing_dot(database: Database) -> None:
+    row = database.create_or_reuse_extension_native_save_job(
+        make_job(content_url="https://www.reddit.com.:443/r/test/comments/abc/demo/")
+    )
+
+    assert row["content_url"] == "https://www.reddit.com/r/test/comments/abc/demo/"
+
+
+@pytest.mark.parametrize(
+    ("platform", "platform_slug", "item_key", "content_id", "content_url"),
+    [
+        (
+            "xiaohongshu",
+            "xhs",
+            "xiaohongshu:note-123",
+            "note-123",
+            "https://www.xiaohongshu.com/explore/note-123?xsec_source=pc_feed",
+        ),
+        (
+            "youtube",
+            "yt",
+            "youtube:video-123",
+            "video-123",
+            "https://www.youtube.com/watch?v=",
+        ),
+        (
+            "youtube",
+            "yt",
+            "youtube:video-123",
+            "video-123",
+            "https://www.youtube.com/watch?v=video-123&v=duplicate",
+        ),
+    ],
+)
+def test_persisted_url_rejects_incomplete_or_duplicate_identity_query(
+    database: Database,
+    platform: str,
+    platform_slug: str,
+    item_key: str,
+    content_id: str,
+    content_url: str,
+) -> None:
+    with pytest.raises(ValueError, match="navigation query"):
+        database.create_or_reuse_extension_native_save_job(
+            make_job(
+                platform=platform,
+                platform_slug=platform_slug,
+                item_key=item_key,
+                content_id=content_id,
+                content_url=content_url,
+            )
+        )
 
 
 def test_callback_requires_job_and_item_correlation(database: Database) -> None:
@@ -393,6 +451,20 @@ def test_active_job_is_atomically_reused_across_database_connections(tmp_path: P
     ).fetchone()
     assert count is not None
     assert count["count"] == 1
+
+
+def test_active_job_is_atomically_reused_on_one_database_instance(database: Database) -> None:
+    barrier = Barrier(2)
+
+    def create(job: ExtensionNativeSaveJob) -> str:
+        barrier.wait()
+        return str(database.create_or_reuse_extension_native_save_job(job)["job_id"])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(create, make_job()), pool.submit(create, make_job())]
+        job_ids = {future.result() for future in futures}
+
+    assert len(job_ids) == 1
 
 
 def test_active_job_uniqueness_includes_requested_action(database: Database) -> None:

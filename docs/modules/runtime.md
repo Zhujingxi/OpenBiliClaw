@@ -8,8 +8,8 @@
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
-| 扩展原生保存共享 runtime | ✅（6/6 executor 已接） | 扩展已定义与后端一致的 `native_save` task/result allow-list、canonical HTTPS URL 规则、`NATIVE_SAVE_EXECUTE` / `NATIVE_SAVE_RESULT` 消息契约和 active-tab runner。runner 与 legacy dispatcher 共用 `globalThis` mutex，在单一绝对 deadline 内等锁/加载/执行，严格校验 final tab 与 sender URL、tab/ID/item/platform；content 用 256 项 bounded outcome-promise cache 保证近期重复消息只复用并重放同一结果。六个平台 source dispatcher 都在 legacy 解析前接入 native union，并让 startup/install/alarm/wake/direct execution 等待同一个共享 MV3 recovery barrier。知乎 executor 额外严格关联 numeric typed identity、task/current URL、item/type 和 exact target；收藏 control、新打开 dialog、row 都绑定唯一目标与最近 identity fence，full ancestor visibility 排除隐藏/嵌套/关联 UI；缺少 `OpenBiliClaw` 时 create 后 close/reopen/re-query，checked proof 优先，directional action-local risk 忽略 stale/unrelated/nested/reorder。六者均只通过 fixture 测试、尚未真实账号验证。 |
-| 扩展原生保存 broker 与 adapter 注册 | ✅（6/6 executor 已接） | `RuntimeContext.extension_native_save_broker` 是热重载不替换的 test-injectable 稳定实例；local/degraded construction 与 config rebuild 都注册六平台 adapter，service/router 会替换而 broker 不变。wake best-effort 发布 `<slug>_task_available`。六个平台 executor 均已接入但尚未真实账号验证。 |
+| 扩展原生保存共享 runtime | ✅（6/6 executor 已接） | 扩展已定义与后端一致的 `native_save` task/result allow-list、canonical HTTPS URL 规则、`NATIVE_SAVE_EXECUTE` / `NATIVE_SAVE_RESULT` 消息契约和 active-tab runner。runner 与 legacy dispatcher 共用 `globalThis` mutex 保护 tab 创建/加载，加载完成即释放；执行中的任务按 task/tab 独立分桶，不同平台可以并发，仍各自在单一绝对 deadline 内严格校验 final tab 与 sender URL、tab/ID/item/platform。`chrome.storage.session` 可同时记录多个 runner-owned tab，MV3 recovery 只关闭这些 ID；content 用 256 项 bounded outcome-promise cache 保证近期重复消息只复用并重放同一结果。六个平台 source dispatcher 都在 legacy 解析前接入 native union，并让 startup/install/alarm/wake/direct execution 等待同一个共享 MV3 recovery barrier。知乎 executor 额外严格关联 numeric typed identity、task/current URL、item/type 和 exact target；收藏 control、新打开 dialog、row 都绑定唯一目标与最近 identity fence，full ancestor visibility 排除隐藏/嵌套/关联 UI；缺少 `OpenBiliClaw` 时 create 后 close/reopen/re-query，checked proof 优先，directional action-local risk 忽略 stale/unrelated/nested/reorder。首轮真实 favorite 只有 X/Twitter 得到 `synced`，其余五个平台的修复后终态待新授权验证。 |
+| 扩展原生保存 broker 与 adapter 注册 | ✅（6/6 executor 已接） | `RuntimeContext.extension_native_save_broker` 是热重载不替换的 test-injectable 稳定实例；local/degraded construction 与 config rebuild 都注册六平台 adapter，service/router 会替换而 broker 不变。wake best-effort 发布 `<slug>_task_available`。六个平台 executor 均已接入；X/Twitter 已有首轮真实 `synced` 证据，其余五个平台待新授权验证。 |
 | 统一补货请求入口 | ✅ | `ContinuousRefreshController.request_replenishment(reason, force=False)` 收束补货触发：普通事件和反馈只排队 reason；初始化完成、用户手动刷新或推荐刷新后低库存用 `force=True` 进入手动补货。 |
 | 后台刷新控制 | ✅ | `ContinuousRefreshController` 按 scheduler 配置补充候选池，并通过 source policy 计算各平台有效配比；后台定时 refresh 使用约 90% 的可换池低水位，库存只是略低于 `pool_target_count` 时不跑 discovery。注入 `DiscoveryCandidatePipeline` 后，B 站主补货会在现有 `_refresh_lock` 内按 `pending_eval + evaluating` 水位循环生产 raw candidates，直到待评估供给接近目标 batch 或达到预算；小缺口阶段先给 `search + related_chain` 配额，延后 `trending/explore`。统一关键词 planner 开启但 B 站关键词 store 暂空时，本轮只剔除 `search` 子策略，保留其它 B 站策略，避免回落到旧 `discovery.search.queries` LLM 生成。v0.3.149+ 当 `explore_refresh_hours` 到期或距到期不足一个 refresh tick，且 B 站平台族仍有补货空间时，controller 会允许 `KeywordPlanner` 在同一轮 merged keyword LLM 调用里请求 `explore_domains`，成功写入 B 站 `keyword_kind="explore"` query cache 后同步推进 `last_explore_refresh_at`；后续 `ExploreStrategy` 从该 explore 池 claim query。 |
 | 低可用池补货防死锁 | ✅ | `_source_requested_count()` 仍用 raw headroom 限制正常补货规模，但当 `pool_available_count < pool_target_count` 且 raw ceiling 已满时，不再把 source deficit 直接压成 0；低于 target 时 `_enforce_pool_cap()` 会跳过 source overflow trim，只用 raw ceiling 总量 trim 收敛素材，避免大量不可换 raw material 或 over-quota source suppression 让 Search / producer 永久停摆。 |
@@ -57,7 +57,7 @@
 
 ## 公开 API
 
-扩展共享原生保存基础（6/6 executor 已接：Reddit/X、YouTube、小红书、抖音与知乎仅 fixture 验证、尚未真实账号验证）：
+扩展共享原生保存基础（6/6 executor 已接并完成 fixture：X/Twitter 首轮真实 favorite 为 `synced`，其余五个平台待新授权验证）：
 
 ```typescript
 isNativeSaveTask(payload)
@@ -70,7 +70,7 @@ createXiaohongshuBrowserEnvironment(root?, currentUrl?)
 createDouyinBrowserEnvironment(root?, currentUrl?)
 ```
 
-runner 只通过调用方注入的已认证 closure 回传结果；它自身不创建后端 fetch。busy mutex、tab create/load 与 executor 共用一个 deadline；timeout 固定回传 `failed/native_save_timeout`，迟到的 tab-create success 也会被回收。所有 listener/tab/mutex cleanup 独立 guarded。content 的 once fence 仅保证当前 256 项 recent outcome window（含 in-flight）内不重复执行，不是永久 task ledger。
+runner 只通过调用方注入的已认证 closure 回传结果；它自身不创建后端 fetch。busy mutex 只覆盖 tab create/load，加载完成立即释放；每个 executor 仍从调用起使用自己的 absolute deadline，timeout 固定回传 `failed/native_save_timeout`，迟到的 tab-create success 也会被回收。所有 listener/tab/mutex cleanup 独立 guarded。content 的 once fence 仅保证当前 256 项 recent outcome window（含 in-flight）内不重复执行，不是永久 task ledger。
 
 ```python
 from openbiliclaw.runtime.updater import AutoUpdateService

@@ -48,16 +48,22 @@ interface FixtureOptions {
   confirmAfterClick?: boolean;
   rateFingerprints?: string[];
   createdVisibleAfterLookups?: number;
+  dialogReadyAfterSleeps?: number;
 }
 
 function fixture(
   task: NativeSaveTask,
   options: FixtureOptions = {},
-): ZhihuNativeSaveEnvironment & { actions: string[]; mutations: number } {
+): ZhihuNativeSaveEnvironment & {
+  actions: string[];
+  hasCollectionControl(): boolean;
+  mutations: number;
+} {
   let open = false;
   let postCreateLookups = 0;
   let created = false;
   let rateIndex = 0;
+  let sleeps = 0;
   const rows = (options.initialRows ?? [{ title: "OpenBiliClaw" }]).map((row) => ({ ...row }));
   const env = {
     actions: [] as string[],
@@ -65,6 +71,7 @@ function fixture(
     mutations: 0,
     hasVisibleLoginOverlay: () => options.loginOverlay ?? false,
     isUnavailable: () => options.unavailable ?? false,
+    hasCollectionControl: () => sleeps >= (options.dialogReadyAfterSleeps ?? 0),
     rateLimitFingerprint() {
       const values = options.rateFingerprints ?? [""];
       const value = values[Math.min(rateIndex, values.length - 1)] ?? "";
@@ -73,7 +80,7 @@ function fixture(
     },
     async openCollectionDialog() {
       env.actions.push("open");
-      open = options.dialogAvailable ?? true;
+      open = sleeps >= (options.dialogReadyAfterSleeps ?? 0) && (options.dialogAvailable ?? true);
       return open;
     },
     async closeCollectionDialog() {
@@ -110,8 +117,11 @@ function fixture(
       }
       return true;
     },
-    sleep: async () => {},
-  } satisfies ZhihuNativeSaveEnvironment & { mutations: number };
+    sleep: async () => { sleeps += 1; },
+  } satisfies ZhihuNativeSaveEnvironment & {
+    hasCollectionControl(): boolean;
+    mutations: number;
+  };
   return env;
 }
 
@@ -126,6 +136,14 @@ test("Zhihu native save accepts exact typed question, answer, and article identi
     assert.deepEqual(await saveZhihu(task, env), { status: "synced" });
     assert.equal(env.mutations, 1);
   }
+});
+
+test("Zhihu native save waits for the collection trigger before mutation", async () => {
+  const task = taskFor("answer", "2002");
+  const env = fixture(task, { dialogReadyAfterSleeps: 2 });
+  assert.deepEqual(await saveZhihu(task, env), { status: "synced" });
+  assert.equal(env.mutations, 1);
+  assert.equal(env.actions.filter((action) => action === "open").length, 1);
 });
 
 test("Zhihu native save rejects task, page, item, and content-type mismatches before mutation", async () => {

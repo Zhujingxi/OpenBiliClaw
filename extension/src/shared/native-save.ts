@@ -111,12 +111,31 @@ function isAllowedContentUrl(platform: NativeSavePlatform, value: unknown): valu
   if (!isAllowedNativeSavePageUrl(platform, value)) return false;
   const url = new URL(value);
   if (url.hash !== "") return false;
-  if (platform !== "youtube") return url.search === "";
-  let valid = true;
-  url.searchParams.forEach((item, key) => {
-    if (key !== "v" || item.length === 0) valid = false;
-  });
-  return valid;
+  if (url.search === "") return true;
+  if (platform === "youtube") {
+    const videos = url.searchParams.getAll("v");
+    let hasOnlyVideoKeys = true;
+    url.searchParams.forEach((_item, key) => {
+      if (key !== "v") hasOnlyVideoKeys = false;
+    });
+    return hasOnlyVideoKeys
+      && videos.length === 1
+      && videos[0].length > 0;
+  }
+  if (platform === "xiaohongshu") {
+    const tokens = url.searchParams.getAll("xsec_token");
+    const sources = url.searchParams.getAll("xsec_source");
+    let hasOnlyNavigationKeys = true;
+    url.searchParams.forEach((_item, key) => {
+      if (key !== "xsec_token" && key !== "xsec_source") hasOnlyNavigationKeys = false;
+    });
+    return hasOnlyNavigationKeys
+      && tokens.length === 1
+      && tokens[0].length > 0
+      && sources.length <= 1
+      && (sources.length === 0 || sources[0].length > 0);
+  }
+  return false;
 }
 
 export function isNativeSaveTask(value: unknown): value is NativeSaveTask {

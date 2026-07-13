@@ -1,4 +1,5 @@
 import type { NativeSaveTask } from "../../shared/native-save.ts";
+import { waitForNativeSaveReadiness } from "./readiness.ts";
 
 export interface RedditSaveControl {
   click(): void;
@@ -64,11 +65,21 @@ export async function saveReddit(
   task: NativeSaveTask,
   env: RedditNativeSaveEnvironment = browserRedditEnvironment(),
 ): Promise<unknown> {
-  if (!env.isLoggedIn()) return { status: "login_required" };
+  if (!env.isLoggedIn() && /^\/login(?:\/|$)/.test(new URL(env.currentUrl).pathname)) {
+    return { status: "login_required" };
+  }
   const identityCorrelation = supportedIdentity(task, env.currentUrl);
   if (!identityCorrelation) {
     return { status: "unsupported", error_code: "unsupported_content_type" };
   }
+  await waitForNativeSaveReadiness(
+    () => env.isLoggedIn() && Boolean(
+      env.requestToken() || env.findControl(task.content_id, "Save") ||
+      env.findControl(task.content_id, "Unsave"),
+    ),
+    env.sleep,
+  );
+  if (!env.isLoggedIn()) return { status: "login_required" };
   if (env.findControl(task.content_id, "Unsave")) return { status: "already_synced" };
   let saveControl = env.findControl(task.content_id, "Save");
   if (identityCorrelation === "dom_required" && !saveControl) {
@@ -105,13 +116,79 @@ export async function saveReddit(
     : { status: "failed", error_code: "native_save_failed" };
 }
 
+function queryAllOpenShadowRoots(root: ParentNode, selector: string): HTMLElement[] {
+  const candidates = Array.from(root.querySelectorAll<HTMLElement>(selector));
+  const shadowRoots = new Set<ShadowRoot>();
+  const ownShadowRoot = (root as Element & { shadowRoot?: ShadowRoot | null }).shadowRoot;
+  if (ownShadowRoot) shadowRoots.add(ownShadowRoot);
+  for (const element of Array.from(root.querySelectorAll<HTMLElement>("*"))) {
+    if (element.shadowRoot) shadowRoots.add(element.shadowRoot);
+  }
+  for (const shadowRoot of shadowRoots) {
+    candidates.push(...queryAllOpenShadowRoots(shadowRoot, selector));
+  }
+  return candidates;
+}
+
+function isRedditIdentityNode(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const node = value as {
+    tagName?: unknown;
+    matches?: (selector: string) => boolean;
+    getAttribute?: (name: string) => string | null;
+  };
+  try {
+    if (node.matches?.("[data-fullname], [thingid], shreddit-post, shreddit-comment")) return true;
+  } catch {
+    // Fall through to attribute/tag checks for minimal DOM implementations.
+  }
+  const tagName = typeof node.tagName === "string" ? node.tagName.toLowerCase() : "";
+  return tagName === "shreddit-post"
+    || tagName === "shreddit-comment"
+    || node.getAttribute?.("data-fullname") !== null && node.getAttribute?.("data-fullname") !== undefined
+    || node.getAttribute?.("thingid") !== null && node.getAttribute?.("thingid") !== undefined;
+}
+
+function composedParent(value: unknown): unknown {
+  if (typeof value !== "object" || value === null) return null;
+  const node = value as {
+    parentNode?: unknown;
+    host?: unknown;
+    getRootNode?: () => unknown;
+  };
+  if (node.parentNode) return node.parentNode;
+  if (node.host) return node.host;
+  try {
+    const tree = node.getRootNode?.() as { host?: unknown } | undefined;
+    if (tree && tree !== value && tree.host) return tree.host;
+  } catch {
+    // Missing composed-tree metadata fails closed below when ancestry was observable.
+  }
+  return null;
+}
+
+function belongsToExactIdentityRoot(element: HTMLElement, root: ParentNode): boolean {
+  let current: unknown = element;
+  let observedAncestry = false;
+  for (let depth = 0; depth < 128 && current; depth += 1) {
+    if (current === root) return true;
+    if (current !== element && isRedditIdentityNode(current)) return false;
+    const parent = composedParent(current);
+    if (!parent) return !observedAncestry;
+    observedAncestry = true;
+    current = parent;
+  }
+  return false;
+}
+
 function exactControl(root: ParentNode, label: "Save" | "Unsave"): HTMLElement | null {
-  const candidates = Array.from(root.querySelectorAll<HTMLElement>("button, a, [role='button']"));
-  return candidates.find((element) => {
+  const candidates = queryAllOpenShadowRoots(root, "button, a, [role='button']");
+  const matches = candidates.filter((element) => {
     const text = element.textContent?.trim() ?? "";
     const aria = element.getAttribute("aria-label")?.trim() ?? "";
-    return text === label || aria === label;
-  }) ?? null;
+    return (text === label || aria === label) && belongsToExactIdentityRoot(element, root);
+  });
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function targetRoot(fullname: string): ParentNode | null {

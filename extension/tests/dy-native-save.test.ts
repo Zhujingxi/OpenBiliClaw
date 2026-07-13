@@ -31,13 +31,14 @@ function fixture(options: {
   unavailable?: boolean;
   initialSelected?: boolean;
   controls?: number;
+  controlsAfterSleeps?: number;
   requestResult?: DouyinFavoriteRequestResult;
   rejectRequest?: boolean;
   confirmAfterRequest?: boolean;
   confirmAfterClick?: boolean;
   rateBefore?: string;
   rateAfterMutation?: string;
-} = {}): DouyinNativeSaveEnvironment & { clicks: number; requests: number } {
+} = {}): DouyinNativeSaveEnvironment & { clicks: number; requests: number; sleeps: number } {
   let selected = options.initialSelected ?? false;
   let mutated = false;
   const control: DouyinSaveControl = {
@@ -51,9 +52,11 @@ function fixture(options: {
   const env = {
     clicks: 0,
     requests: 0,
+    sleeps: 0,
     currentUrl: options.currentUrl ?? task.content_url,
     isLoggedIn: () => options.loggedIn ?? true,
     isUnavailable: () => options.unavailable ?? false,
+    isContentReady: () => env.sleeps >= (options.controlsAfterSleeps ?? 0),
     rateLimitFingerprint: () => mutated ? (options.rateAfterMutation ?? options.rateBefore ?? "") : (options.rateBefore ?? ""),
     async requestFavorite() {
       env.requests += 1;
@@ -62,9 +65,11 @@ function fixture(options: {
       if (options.confirmAfterRequest) selected = true;
       return options.requestResult ?? null;
     },
-    findFavoriteControls: () => Array.from({ length: options.controls ?? 1 }, () => control),
-    sleep: async () => {},
-  } satisfies DouyinNativeSaveEnvironment & { clicks: number; requests: number };
+    findFavoriteControls: () => Array.from({
+      length: env.sleeps >= (options.controlsAfterSleeps ?? 0) ? (options.controls ?? 1) : 0,
+    }, () => control),
+    sleep: async () => { env.sleeps += 1; },
+  } satisfies DouyinNativeSaveEnvironment & { clicks: number; requests: number; sleeps: number };
   return env;
 }
 
@@ -91,6 +96,13 @@ test("Douyin native save accepts only exact correlated aweme/video identities", 
     status: "unsupported",
     error_code: "unsupported_content_type",
   });
+});
+
+test("Douyin native save waits for the correlated favorite control before mutation", async () => {
+  const env = fixture({ controlsAfterSleeps: 2 });
+  assert.deepEqual(await saveDouyin(task, env), { status: "synced" });
+  assert.ok(env.sleeps >= 2);
+  assert.equal(env.clicks, 1);
 });
 
 test("Douyin native save checks login and deleted content before mutation", async () => {
@@ -228,6 +240,7 @@ function domElement(attributes: Record<string, string> = {}): FakeElement {
 }
 
 function browserDocument(controls: FakeElement[], options: {
+  routeOnly?: boolean;
   login?: boolean;
   hiddenLogin?: boolean;
   unavailable?: boolean;
@@ -242,7 +255,7 @@ function browserDocument(controls: FakeElement[], options: {
   if (options.hiddenLogin) login.style.visibility = "hidden";
   const unavailable = domElement();
   if (options.hiddenUnavailable) unavailable.hidden = true;
-  const target = domElement({ "data-aweme-id": CONTENT_ID });
+  const target = domElement(options.routeOnly ? {} : { "data-aweme-id": CONTENT_ID });
   const nestedUnrelatedContainer = domElement({ "data-aweme-id": "nested-unrelated-video" });
   nestedUnrelatedContainer.parentElement = target;
   for (const control of options.nestedUnrelatedControls ?? []) {
@@ -277,7 +290,9 @@ function browserDocument(controls: FakeElement[], options: {
       return null;
     },
     querySelectorAll(selector: string) {
-      if (selector.includes("data-aweme-id")) return [target, unrelatedContainer];
+      if (selector.includes("data-aweme-id")) {
+        return options.routeOnly ? [] : [target, unrelatedContainer];
+      }
       if (selector.includes("video-favorite")) return [...controls, ...(options.unrelatedControls ?? [])];
       if (selector.includes("login-modal")) return options.login || options.hiddenLogin ? [login] : [];
       if (selector.includes("not-found")) return options.unavailable || options.hiddenUnavailable ? [unavailable] : [];
@@ -288,6 +303,32 @@ function browserDocument(controls: FakeElement[], options: {
     },
   } as unknown as Document;
 }
+
+test("Douyin browser environment uses one exact route-scoped favorite control without identity attributes", async () => {
+  const exact = domElement({ "data-e2e": "video-favorite" });
+  const env = createDouyinBrowserEnvironment(
+    browserDocument([exact], { routeOnly: true }),
+    task.content_url,
+  );
+  env.sleep = async () => {};
+  assert.deepEqual(await saveDouyin(task, env), { status: "synced" });
+  assert.equal(exact.clicks, 1);
+
+  const ambiguousControls = [
+    domElement({ "data-e2e": "video-favorite" }),
+    domElement({ "data-e2e": "video-favorite" }),
+  ];
+  const ambiguous = createDouyinBrowserEnvironment(
+    browserDocument(ambiguousControls, { routeOnly: true }),
+    task.content_url,
+  );
+  ambiguous.sleep = async () => {};
+  assert.deepEqual(await saveDouyin(task, ambiguous), {
+    status: "failed",
+    error_code: "native_save_failed",
+  });
+  assert.equal(ambiguousControls.reduce((sum, control) => sum + control.clicks, 0), 0);
+});
 
 test("Douyin browser environment ignores hidden controls and fails closed on ambiguity", async () => {
   const hidden = domElement({ "aria-label": "收藏" });

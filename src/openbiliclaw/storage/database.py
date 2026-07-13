@@ -82,7 +82,10 @@ _EXTENSION_NATIVE_SAVE_HOSTS = {
     "zhihu": ("zhihu.com",),
     "reddit": ("reddit.com", "redd.it"),
 }
-_EXTENSION_NATIVE_SAVE_IDENTITY_QUERY_FIELDS = {"youtube": frozenset({"v"})}
+_EXTENSION_NATIVE_SAVE_IDENTITY_QUERY_FIELDS = {
+    "youtube": frozenset({"v"}),
+    "xiaohongshu": frozenset({"xsec_token", "xsec_source"}),
+}
 _EXTENSION_NATIVE_SAVE_ACTIONS = frozenset({"favorite", "watch_later"})
 _EXTENSION_NATIVE_SAVE_RESULT_STATUSES = frozenset(
     {"synced", "already_synced", "login_required", "rate_limited", "unsupported", "failed"}
@@ -894,10 +897,25 @@ def _canonical_extension_native_save_url(platform: str, value: object) -> str:
     ):
         raise ValueError("content_url must use an allow-listed platform HTTPS host")
     retained_fields = _EXTENSION_NATIVE_SAVE_IDENTITY_QUERY_FIELDS.get(platform, frozenset())
-    query = urlencode(
-        [(key, item) for key, item in parse_qsl(parts.query) if key in retained_fields]
-    )
-    return urlunsplit(("https", parts.netloc.lower(), parts.path or "/", query, ""))
+    retained_query = [
+        (key, item)
+        for key, item in parse_qsl(parts.query, keep_blank_values=True)
+        if key in retained_fields
+    ]
+    if platform == "youtube" and retained_query:
+        videos = [item for key, item in retained_query if key == "v"]
+        if len(videos) != 1 or not videos[0]:
+            raise ValueError("content_url has an invalid YouTube navigation query")
+    if platform == "xiaohongshu" and retained_query:
+        seen_fields: set[str] = set()
+        for key, item in retained_query:
+            if key in seen_fields or not item:
+                raise ValueError("content_url has an invalid Xiaohongshu navigation query")
+            seen_fields.add(key)
+        if "xsec_token" not in seen_fields:
+            raise ValueError("content_url has an invalid Xiaohongshu navigation query")
+    query = urlencode(retained_query)
+    return urlunsplit(("https", hostname, parts.path or "/", query, ""))
 
 
 def _validated_extension_native_save_job(
@@ -7858,9 +7876,10 @@ class Database:
     ) -> dict[str, Any]:
         """Atomically persist or reuse one active extension native-save job."""
         payload = _validated_extension_native_save_job(job)
-        self.conn.execute("BEGIN IMMEDIATE")
+        conn = self.open_connection()
         try:
-            active = self.conn.execute(
+            conn.execute("BEGIN IMMEDIATE")
+            active = conn.execute(
                 """
                 SELECT * FROM extension_native_save_jobs
                 WHERE platform = ? AND item_key = ? AND requested_action = ?
@@ -7873,7 +7892,7 @@ class Database:
                 ),
             ).fetchone()
             if active is None:
-                self.conn.execute(
+                conn.execute(
                     """
                     INSERT INTO extension_native_save_jobs (
                         job_id, platform, platform_slug, item_key, content_id,
@@ -7894,14 +7913,16 @@ class Database:
                         payload["target_label"],
                     ),
                 )
-                active = self.conn.execute(
+                active = conn.execute(
                     "SELECT * FROM extension_native_save_jobs WHERE job_id = ?",
                     (payload["job_id"],),
                 ).fetchone()
-            self.conn.commit()
+            conn.commit()
         except Exception:
-            self.conn.rollback()
+            conn.rollback()
             raise
+        finally:
+            conn.close()
         if active is None:
             raise RuntimeError("extension native-save job insert did not persist")
         return dict(active)
@@ -7912,10 +7933,11 @@ class Database:
         """Claim the oldest pending platform job after expiring uncertain stale claims."""
         slug = self._validated_extension_native_save_slug(platform_slug)
         lease = self._validated_extension_native_save_lease(lease_seconds)
-        self.conn.execute("BEGIN IMMEDIATE")
+        conn = self.open_connection()
         try:
-            self._expire_stale_extension_native_save_jobs_in_transaction(slug, lease)
-            pending = self.conn.execute(
+            conn.execute("BEGIN IMMEDIATE")
+            self._expire_stale_extension_native_save_jobs_in_transaction(conn, slug, lease)
+            pending = conn.execute(
                 """
                 SELECT job_id FROM extension_native_save_jobs
                 WHERE platform_slug = ? AND status = 'pending'
@@ -7927,7 +7949,7 @@ class Database:
             claimed = None
             if pending is not None:
                 job_id = str(pending["job_id"])
-                cursor = self.conn.execute(
+                cursor = conn.execute(
                     """
                     UPDATE extension_native_save_jobs
                     SET status = 'in_progress',
@@ -7938,14 +7960,16 @@ class Database:
                     (job_id,),
                 )
                 if cursor.rowcount == 1:
-                    claimed = self.conn.execute(
+                    claimed = conn.execute(
                         "SELECT * FROM extension_native_save_jobs WHERE job_id = ?",
                         (job_id,),
                     ).fetchone()
-            self.conn.commit()
+            conn.commit()
         except Exception:
-            self.conn.rollback()
+            conn.rollback()
             raise
+        finally:
+            conn.close()
         return dict(claimed) if claimed is not None else None
 
     def complete_extension_native_save_job(
@@ -7964,77 +7988,100 @@ class Database:
         safe_status, safe_code, safe_message = _validated_extension_native_save_result(
             status, error_code, error_message
         )
-        cursor = self.conn.execute(
-            """
-            UPDATE extension_native_save_jobs
-            SET status = ?, last_error_code = ?, last_error_message = ?,
-                completed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
-                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
-            WHERE job_id = ? AND platform_slug = ? AND item_key = ?
-              AND status = 'in_progress'
-            """,
-            (safe_status, safe_code, safe_message, safe_job_id, safe_slug, safe_item_key),
-        )
-        self.conn.commit()
-        return cursor.rowcount == 1
+        conn = self.open_connection()
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE extension_native_save_jobs
+                SET status = ?, last_error_code = ?, last_error_message = ?,
+                    completed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
+                    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                WHERE job_id = ? AND platform_slug = ? AND item_key = ?
+                  AND status = 'in_progress'
+                """,
+                (safe_status, safe_code, safe_message, safe_job_id, safe_slug, safe_item_key),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+        finally:
+            conn.close()
 
     def cancel_unclaimed_extension_native_save_job(self, job_id: str) -> bool:
         """Cancel a pending job without touching a possibly state-changing claimed job."""
         safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
-        cursor = self.conn.execute(
-            """
-            UPDATE extension_native_save_jobs
-            SET status = 'cancelled',
-                completed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
-                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
-            WHERE job_id = ? AND status = 'pending'
-            """,
-            (safe_job_id,),
-        )
-        self.conn.commit()
-        return cursor.rowcount == 1
+        conn = self.open_connection()
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE extension_native_save_jobs
+                SET status = 'cancelled',
+                    completed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
+                    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                WHERE job_id = ? AND status = 'pending'
+                """,
+                (safe_job_id,),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+        finally:
+            conn.close()
 
     def mark_unclaimed_extension_native_save_job_extension_required(self, job_id: str) -> bool:
         """Durably mark a still-pending job when no extension claims it in time."""
         safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
-        cursor = self.conn.execute(
-            """
-            UPDATE extension_native_save_jobs
-            SET status = 'extension_required',
-                last_error_code = 'extension_unavailable',
-                last_error_message = 'OpenBiliClaw extension is unavailable',
-                completed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
-                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
-            WHERE job_id = ? AND status = 'pending'
-            """,
-            (safe_job_id,),
-        )
-        self.conn.commit()
-        return cursor.rowcount == 1
+        conn = self.open_connection()
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE extension_native_save_jobs
+                SET status = 'extension_required',
+                    last_error_code = 'extension_unavailable',
+                    last_error_message = 'OpenBiliClaw extension is unavailable',
+                    completed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
+                    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                WHERE job_id = ? AND status = 'pending'
+                """,
+                (safe_job_id,),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+        finally:
+            conn.close()
 
     def get_extension_native_save_job(self, job_id: str) -> dict[str, Any] | None:
         """Return a copied durable extension job row by canonical UUID."""
         safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
-        row = self.conn.execute(
-            "SELECT * FROM extension_native_save_jobs WHERE job_id = ?", (safe_job_id,)
-        ).fetchone()
-        return dict(row) if row is not None else None
+        conn = self.open_connection()
+        try:
+            row = conn.execute(
+                "SELECT * FROM extension_native_save_jobs WHERE job_id = ?", (safe_job_id,)
+            ).fetchone()
+            return dict(row) if row is not None else None
+        finally:
+            conn.close()
 
     def owns_extension_native_save_job(self, job_id: str, platform_slug: str | None = None) -> bool:
         """Return global job ownership, optionally restricted to one exact slug."""
         safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
+        conn = self.open_connection()
         if platform_slug is None:
-            row = self.conn.execute(
-                "SELECT 1 FROM extension_native_save_jobs WHERE job_id = ?",
-                (safe_job_id,),
+            try:
+                row = conn.execute(
+                    "SELECT 1 FROM extension_native_save_jobs WHERE job_id = ?",
+                    (safe_job_id,),
+                ).fetchone()
+                return row is not None
+            finally:
+                conn.close()
+        try:
+            safe_slug = self._validated_extension_native_save_slug(platform_slug)
+            row = conn.execute(
+                "SELECT 1 FROM extension_native_save_jobs WHERE job_id = ? AND platform_slug = ?",
+                (safe_job_id, safe_slug),
             ).fetchone()
             return row is not None
-        safe_slug = self._validated_extension_native_save_slug(platform_slug)
-        row = self.conn.execute(
-            "SELECT 1 FROM extension_native_save_jobs WHERE job_id = ? AND platform_slug = ?",
-            (safe_job_id, safe_slug),
-        ).fetchone()
-        return row is not None
+        finally:
+            conn.close()
 
     def expire_stale_extension_native_save_jobs(
         self, platform_slug: str, lease_seconds: float
@@ -8042,19 +8089,22 @@ class Database:
         """Fail stale claimed writes without returning them to the pending queue."""
         slug = self._validated_extension_native_save_slug(platform_slug)
         lease = self._validated_extension_native_save_lease(lease_seconds)
-        self.conn.execute("BEGIN IMMEDIATE")
+        conn = self.open_connection()
         try:
-            count = self._expire_stale_extension_native_save_jobs_in_transaction(slug, lease)
-            self.conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            count = self._expire_stale_extension_native_save_jobs_in_transaction(conn, slug, lease)
+            conn.commit()
         except Exception:
-            self.conn.rollback()
+            conn.rollback()
             raise
+        finally:
+            conn.close()
         return count
 
     def _expire_stale_extension_native_save_jobs_in_transaction(
-        self, platform_slug: str, lease_seconds: float
+        self, conn: sqlite3.Connection, platform_slug: str, lease_seconds: float
     ) -> int:
-        cursor = self.conn.execute(
+        cursor = conn.execute(
             """
             UPDATE extension_native_save_jobs
             SET status = 'failed',

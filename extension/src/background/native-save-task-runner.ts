@@ -31,8 +31,9 @@ interface ActiveTask {
 
 class NativeSaveDeadlineError extends Error {}
 
-let activeTask: ActiveTask | null = null;
+const activeTasks = new Map<string, ActiveTask>();
 let nativeSaveRecoveryPromise: Promise<void> | null = null;
+let sessionRecordMutation: Promise<void> = Promise.resolve();
 
 function timeoutOutcome(): SanitizedNativeSaveOutcome {
   return sanitizeNativeSaveResult({ status: "failed", error_code: "native_save_timeout" });
@@ -159,39 +160,70 @@ function sessionStorageArea(): chrome.storage.StorageArea | null {
   }
 }
 
+function serializedSessionMutation(mutation: () => Promise<void>): Promise<void> {
+  const current = sessionRecordMutation.then(mutation, mutation);
+  sessionRecordMutation = current.catch(() => {});
+  return current;
+}
+
 async function recordNativeSaveTaskTab(tabId: number): Promise<void> {
-  try {
-    await sessionStorageArea()?.set({ [NATIVE_SAVE_TAB_SESSION_KEY]: tabId });
-  } catch {
-    // Session persistence is an optional recovery enhancement, not an execution prerequisite.
-  }
+  await serializedSessionMutation(async () => {
+    const storage = sessionStorageArea();
+    if (!storage) return;
+    try {
+      const stored = await storage.get(NATIVE_SAVE_TAB_SESSION_KEY);
+      const value = stored[NATIVE_SAVE_TAB_SESSION_KEY];
+      const tabIds = typeof value === "number"
+        ? [value]
+        : Array.isArray(value)
+          ? value.filter((item): item is number => typeof item === "number")
+          : [];
+      if (!tabIds.includes(tabId)) tabIds.push(tabId);
+      await storage.set({
+        [NATIVE_SAVE_TAB_SESSION_KEY]: tabIds.length === 1 ? tabIds[0] : tabIds,
+      });
+    } catch {
+      // Session persistence is an optional recovery enhancement, not an execution prerequisite.
+    }
+  });
 }
 
 async function clearRecordedNativeSaveTaskTab(tabId: number): Promise<void> {
-  const storage = sessionStorageArea();
-  if (!storage) return;
-  try {
-    const stored = await storage.get(NATIVE_SAVE_TAB_SESSION_KEY);
-    if (stored[NATIVE_SAVE_TAB_SESSION_KEY] === tabId) {
-      await storage.remove(NATIVE_SAVE_TAB_SESSION_KEY);
+  await serializedSessionMutation(async () => {
+    const storage = sessionStorageArea();
+    if (!storage) return;
+    try {
+      const stored = await storage.get(NATIVE_SAVE_TAB_SESSION_KEY);
+      const value = stored[NATIVE_SAVE_TAB_SESSION_KEY];
+      const tabIds = (typeof value === "number" ? [value] : Array.isArray(value) ? value : [])
+        .filter((item): item is number => typeof item === "number" && item !== tabId);
+      if (tabIds.length === 0) {
+        await storage.remove(NATIVE_SAVE_TAB_SESSION_KEY);
+      } else {
+        await storage.set({
+          [NATIVE_SAVE_TAB_SESSION_KEY]: tabIds.length === 1 ? tabIds[0] : tabIds,
+        });
+      }
+    } catch {
+      // A closed tab is safe even if best-effort session cleanup fails.
     }
-  } catch {
-    // A closed tab is safe even if best-effort session cleanup fails.
-  }
+  });
 }
 
 /** Close only the runner-owned tab recorded before a previous MV3 worker stopped. */
 export async function recoverRecordedNativeSaveTaskTab(): Promise<void> {
   const storage = sessionStorageArea();
   if (!storage) return;
-  let tabId: unknown;
+  let value: unknown;
   try {
     const stored = await storage.get(NATIVE_SAVE_TAB_SESSION_KEY);
-    tabId = stored[NATIVE_SAVE_TAB_SESSION_KEY];
+    value = stored[NATIVE_SAVE_TAB_SESSION_KEY];
   } catch {
     return;
   }
-  if (typeof tabId !== "number" || !Number.isInteger(tabId) || tabId < 0) {
+  const tabIds = (typeof value === "number" ? [value] : Array.isArray(value) ? value : [])
+    .filter((item): item is number => typeof item === "number" && Number.isInteger(item) && item >= 0);
+  if (tabIds.length === 0) {
     try {
       await storage.remove(NATIVE_SAVE_TAB_SESSION_KEY);
     } catch {
@@ -199,8 +231,12 @@ export async function recoverRecordedNativeSaveTaskTab(): Promise<void> {
     }
     return;
   }
-  await removeTabBestEffort(tabId);
-  await clearRecordedNativeSaveTaskTab(tabId);
+  for (const tabId of new Set(tabIds)) await removeTabBestEffort(tabId);
+  try {
+    await storage.remove(NATIVE_SAVE_TAB_SESSION_KEY);
+  } catch {
+    // Orphan tabs are already closed; record cleanup remains best-effort.
+  }
 }
 
 /** One MV3-lifetime barrier shared by startup, alarms, wakes, and direct execution. */
@@ -211,6 +247,7 @@ export function ensureNativeSaveTaskRecovery(): Promise<void> {
 
 export function resetNativeSaveTaskRecoveryForTest(): void {
   nativeSaveRecoveryPromise = null;
+  sessionRecordMutation = Promise.resolve();
 }
 
 async function createTabBeforeDeadline(
@@ -237,9 +274,10 @@ function contentResultForActiveTask(
   message: unknown,
   sender?: chrome.runtime.MessageSender,
 ): boolean {
-  const active = activeTask;
-  if (!active || active.settled || typeof message !== "object" || message === null) return false;
+  if (typeof message !== "object" || message === null) return false;
   const result = message as Record<string, unknown>;
+  const active = typeof result.task_id === "string" ? activeTasks.get(result.task_id) : undefined;
+  if (!active || active.settled) return false;
   const senderUrl = typeof sender?.url === "string" ? sender.url : sender?.tab?.url;
   if (
     result.type !== "NATIVE_SAVE_RESULT" ||
@@ -295,11 +333,19 @@ async function executeBeforeDeadline(
   if (timeoutMs <= 0) return timeoutOutcome();
   let timer: ReturnType<typeof setTimeout>;
   const terminal = new Promise<unknown>((resolve) => {
+    const active: ActiveTask = {
+      task,
+      tabId,
+      platform: task.platform,
+      complete: resolve,
+      settled: false,
+    };
     const complete = (outcome: unknown): void => {
-      if (activeTask) activeTask.settled = true;
+      active.settled = true;
       resolve(outcome);
     };
-    activeTask = { task, tabId, platform: task.platform, complete, settled: false };
+    active.complete = complete;
+    activeTasks.set(task.id, active);
     timer = setTimeout(
       () => complete({ status: "failed", error_code: "native_save_timeout" }),
       timeoutMs,
@@ -354,6 +400,8 @@ export async function runNativeSaveTask(
         if (!isAllowedNativeSavePageUrl(task.platform, loadedTab.url)) {
           throw new Error("native-save task tab left its allow-listed platform");
         }
+        releaseDispatcherMutex(owner);
+        mutexAcquired = false;
         runtimeListenerRegistrationAttempted = true;
         chrome.runtime.onMessage.addListener(listener);
         outcome = await executeBeforeDeadline(
@@ -376,9 +424,10 @@ export async function runNativeSaveTask(
     } catch {
       // Continue independent cleanup.
     }
-    if (activeTask?.task.id === task.id) {
-      activeTask.settled = true;
-      activeTask = null;
+    const active = activeTasks.get(task.id);
+    if (active) {
+      active.settled = true;
+      activeTasks.delete(task.id);
     }
     if (runtimeListenerRegistrationAttempted) {
       for (let attempt = 0; attempt < 2; attempt += 1) {

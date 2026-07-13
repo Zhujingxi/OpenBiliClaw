@@ -30,14 +30,17 @@ function fixture(options: {
   confirmAfterRequest?: boolean;
   confirmAfterClick?: boolean;
   rejectRequest?: boolean;
+  readyAfterSleeps?: number;
 } = {}): RedditNativeSaveEnvironment & { clicks: number; saveRequests: URLSearchParams[] } {
   let state = options.initialState === undefined ? "Save" : options.initialState;
+  let sleeps = 0;
+  const ready = () => sleeps >= (options.readyAfterSleeps ?? 0);
   const env = {
     clicks: 0,
     saveRequests: [] as URLSearchParams[],
     currentUrl: task.content_url,
-    isLoggedIn: () => options.loggedIn ?? true,
-    requestToken: () => options.token ?? null,
+    isLoggedIn: () => ready() && (options.loggedIn ?? true),
+    requestToken: () => ready() ? (options.token ?? null) : null,
     async postSave(body: URLSearchParams) {
       env.saveRequests.push(body);
       if (options.rejectRequest) throw new Error("network outcome unknown");
@@ -45,6 +48,7 @@ function fixture(options: {
       return { status: options.responseStatus ?? 200, ok: (options.responseStatus ?? 200) < 400 };
     },
     findControl(_fullname: string, label: "Save" | "Unsave"): RedditSaveControl | null {
+      if (!ready()) return null;
       if (state !== label) return null;
       return {
         click() {
@@ -53,7 +57,7 @@ function fixture(options: {
         },
       };
     },
-    sleep: async () => {},
+    sleep: async () => { sleeps += 1; },
   } satisfies RedditNativeSaveEnvironment & { clicks: number; saveRequests: URLSearchParams[] };
   return env;
 }
@@ -77,6 +81,12 @@ test("Reddit native save accepts post and comment fullnames and confirms request
     assert.equal(env.saveRequests[0]?.get("uh"), "page-modhash");
     assert.equal(env.clicks, 0);
   }
+});
+
+test("Reddit native save waits for the logged-in correlated post controls", async () => {
+  const env = fixture({ readyAfterSleeps: 2, token: null, confirmAfterClick: true });
+  assert.deepEqual(await saveReddit(task, env), { status: "synced" });
+  assert.equal(env.clicks, 1);
 });
 
 test("Reddit native save accepts a redd.it task after Reddit redirects to the canonical post", async () => {
@@ -122,6 +132,164 @@ test("Reddit native save falls back to the exact visible Save control", async ()
   ]) {
     assert.deepEqual(await saveReddit(task, env), { status: "synced" });
     assert.equal(env.clicks, 1);
+  }
+});
+
+test("Reddit browser save finds the exact control inside open shadow roots", async () => {
+  let state: "Save" | "Unsave" = "Save";
+  let clicks = 0;
+  const control = {
+    get textContent() { return state; },
+    getAttribute() { return null; },
+    click() { clicks += 1; state = "Unsave"; },
+  };
+  const shadowRoot = {
+    querySelectorAll(selector: string) {
+      return selector === "button, a, [role='button']" ? [control] : [];
+    },
+  };
+  const post = {
+    shadowRoot,
+    querySelectorAll() { return []; },
+  };
+  const documentFixture = {
+    querySelector(selector: string) {
+      if (selector === "shreddit-post[id=\"abc123\"]") return post;
+      if (selector.includes("user-menu")) return {};
+      return null;
+    },
+  };
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+  const originalLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+  const originalSetTimeout = globalThis.setTimeout;
+  Object.defineProperty(globalThis, "document", { configurable: true, value: documentFixture });
+  Object.defineProperty(globalThis, "location", {
+    configurable: true,
+    value: {
+      href: task.content_url,
+      origin: "https://www.reddit.com",
+      pathname: "/r/test/comments/abc123/title/",
+    },
+  });
+  globalThis.setTimeout = ((callback: (...args: unknown[]) => void) => {
+    callback();
+    return 0 as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+  try {
+    assert.deepEqual(await saveReddit(task), { status: "synced" });
+    assert.equal(clicks, 1);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    if (originalDocument) Object.defineProperty(globalThis, "document", originalDocument);
+    else delete (globalThis as { document?: unknown }).document;
+    if (originalLocation) Object.defineProperty(globalThis, "location", originalLocation);
+    else delete (globalThis as { location?: unknown }).location;
+  }
+});
+
+test("Reddit browser save fails closed when shadow DOM exposes multiple Save controls", async () => {
+  let clicks = 0;
+  const controls = [
+    { textContent: "Save", getAttribute() { return null; }, click() { clicks += 1; } },
+    { textContent: "Save", getAttribute() { return null; }, click() { clicks += 1; } },
+  ];
+  const shadowRoot = {
+    querySelectorAll(selector: string) {
+      return selector === "button, a, [role='button']" ? controls : [];
+    },
+  };
+  const post = { shadowRoot, querySelectorAll() { return []; } };
+  const documentFixture = {
+    querySelector(selector: string) {
+      if (selector === "shreddit-post[id=\"abc123\"]") return post;
+      if (selector.includes("user-menu")) return {};
+      return null;
+    },
+  };
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+  const originalLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+  Object.defineProperty(globalThis, "document", { configurable: true, value: documentFixture });
+  Object.defineProperty(globalThis, "location", {
+    configurable: true,
+    value: {
+      href: task.content_url,
+      origin: "https://www.reddit.com",
+      pathname: "/r/test/comments/abc123/title/",
+    },
+  });
+  try {
+    assert.deepEqual(await saveReddit(task), {
+      status: "failed",
+      error_code: "native_save_failed",
+    });
+    assert.equal(clicks, 0);
+  } finally {
+    if (originalDocument) Object.defineProperty(globalThis, "document", originalDocument);
+    else delete (globalThis as { document?: unknown }).document;
+    if (originalLocation) Object.defineProperty(globalThis, "location", originalLocation);
+    else delete (globalThis as { location?: unknown }).location;
+  }
+});
+
+test("Reddit browser save ignores a lone Save owned by a nested identity", async () => {
+  let clicks = 0;
+  const post: { querySelectorAll: (selector: string) => unknown[] } = {
+    querySelectorAll() { return []; },
+  };
+  const nestedComment = {
+    tagName: "SHREDDIT-COMMENT",
+    parentNode: post,
+    shadowRoot: null as unknown,
+  };
+  const shadowRoot = {
+    host: nestedComment,
+    querySelectorAll(selector: string) {
+      return selector === "button, a, [role='button']" ? [control] : [];
+    },
+  };
+  const control = {
+    textContent: "Save",
+    parentNode: shadowRoot,
+    getAttribute() { return null; },
+    click() { clicks += 1; },
+  };
+  nestedComment.shadowRoot = shadowRoot;
+  post.querySelectorAll = (selector: string) => selector === "*" ? [nestedComment] : [];
+  const documentFixture = {
+    querySelector(selector: string) {
+      if (selector === "shreddit-post[id=\"abc123\"]") return post;
+      if (selector.includes("user-menu")) return {};
+      return null;
+    },
+  };
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+  const originalLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+  const originalSetTimeout = globalThis.setTimeout;
+  Object.defineProperty(globalThis, "document", { configurable: true, value: documentFixture });
+  Object.defineProperty(globalThis, "location", {
+    configurable: true,
+    value: {
+      href: task.content_url,
+      origin: "https://www.reddit.com",
+      pathname: "/r/test/comments/abc123/title/",
+    },
+  });
+  globalThis.setTimeout = ((callback: (...args: unknown[]) => void) => {
+    callback();
+    return 0 as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+  try {
+    assert.deepEqual(await saveReddit(task), {
+      status: "failed",
+      error_code: "native_save_failed",
+    });
+    assert.equal(clicks, 0);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    if (originalDocument) Object.defineProperty(globalThis, "document", originalDocument);
+    else delete (globalThis as { document?: unknown }).document;
+    if (originalLocation) Object.defineProperty(globalThis, "location", originalLocation);
+    else delete (globalThis as { location?: unknown }).location;
   }
 });
 

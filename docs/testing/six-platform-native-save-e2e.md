@@ -7,10 +7,13 @@
 ## Scope and login boundary
 
 YouTube, Xiaohongshu, Douyin, X/Twitter, Zhihu, and Reddit execute native saves inside the
-installed OpenBiliClaw extension using that browser's existing platform login. The backend and
-the E2E record never receive account IDs, cookies, tokens, HTML, response bodies, or URLs with
-secrets. A temporary automation browser, CDP session, copied cookie, or backend credential is not
-a substitute for the installed extension's real login state.
+installed OpenBiliClaw extension using that browser's existing platform login. The authorization
+and result records never receive account IDs, cookies, tokens, session credentials, HTML, response bodies,
+or full URLs. Xiaohongshu is the narrow navigation exception: an already-stored public-note URL
+may carry only `xsec_token` and `xsec_source` into the exact extension job because a bare note URL
+is not openable; neither value enters the authorization or result record. A temporary automation
+browser, CDP session, copied cookie, or backend credential is not a substitute for the installed
+extension's real login state.
 
 Automatic sync remains default-off: `[saved_sync].auto_sync_enabled = false`. A local save is
 always committed first. A manual favorite or manual watch-later sync is a separate, explicit
@@ -105,7 +108,9 @@ membership and verifies its platform, content ID, executor-supported content typ
 content URL identity, resolved action, and target through the production router. A missing row,
 profile/account URL, or mismatch returns a fixed 422 without publishing or creating a task.
 Canonical URL preflight mirrors the production executor: HTTPS only, no credentials, explicit
-port, fragment, or non-YouTube query; exact executor host set; and exact route cardinality. In
+port or fragment; exact executor host set; and exact route cardinality. Queries are rejected except
+for YouTube's identity `v` and Xiaohongshu's single nonempty `xsec_token` plus optional single
+nonempty `xsec_source`; every other key and duplicate is rejected. In
 particular YouTube accepts only `/watch?v=<id>`, `/shorts/<id>`, or the one-segment `youtu.be`
 form; Xiaohongshu and Douyin reject trailing route segments; X accepts only
 `/i/status/<id>` or `/<user>/status/<id>`; Zhihu binds the typed content kind to its exact route;
@@ -206,6 +211,24 @@ automatically retried; any retry needs a new explicit authorization.
 
 ## Evidence state
 
-Task 10 verified the authorization and result-schema harness with fixtures only. No six-platform
-real-account write was performed, and this document intentionally contains no real-account result
-rows. Authorized real verification belongs to the separate Task 11 gate.
+Task 10 verified the authorization and result-schema harness with fixtures. On 2026-07-13, one
+freshly authorized favorite item per platform was then executed through the production durable
+path. These are the only safe result fields retained:
+
+| Platform | Action | Public content ID | Expected target | Terminal status | Safe code |
+| --- | --- | --- | --- | --- | --- |
+| YouTube | favorite | `SdQRhJl7Bvo` | `OpenBiliClaw` | `failed` | `native_save_failed` |
+| Xiaohongshu | favorite | `6a2a18bb0000000006031a3c` | `小红书收藏` | `unsupported` | `unsupported_content_type` |
+| Douyin | favorite | `7636735113514011939` | `抖音收藏` | `failed` | `native_save_failed` |
+| X/Twitter | favorite | `2063895528816181253` | `X Bookmarks` | `synced` | — |
+| Zhihu | favorite | `answer:2053546899609740246` | `OpenBiliClaw` | `failed` | `native_save_failed` |
+| Reddit | favorite | `t3_x2eklf` | `Reddit Saved` | `failed` | `native_save_failed` |
+
+Only X/Twitter is proven successful by this run. Reddit returned a successful save HTTP response
+but the old light-DOM confirmation could not observe `Unsave`, so the account state is uncertain
+and the item must not be retried without a new authorization. The run exposed and fixture-tested
+four corrections: YouTube/Zhihu readiness no longer replays dialog-opening clicks; Reddit confirms
+inside open shadow roots; Douyin permits only a unique route-scoped `video-favorite` fallback; and
+Xiaohongshu preserves only its required public-note navigation query. None of those corrections is
+itself real-account proof. Manual watch-later, automatic sync, duplicate, cleanup confirmation, and
+all five corrected favorite paths remain pending fresh exact authorization.

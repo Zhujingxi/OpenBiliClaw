@@ -1,4 +1,5 @@
 import type { NativeSaveTask } from "../../shared/native-save.ts";
+import { waitForNativeSaveReadiness } from "./readiness.ts";
 
 export interface DouyinSaveControl {
   isSelected(): boolean;
@@ -11,6 +12,7 @@ export interface DouyinNativeSaveEnvironment {
   currentUrl: string;
   isLoggedIn(): boolean;
   isUnavailable(): boolean;
+  isContentReady(): boolean;
   rateLimitFingerprint(): string;
   requestFavorite(): Promise<DouyinFavoriteRequestResult>;
   findFavoriteControls(contentId: string): DouyinSaveControl[];
@@ -62,11 +64,16 @@ export async function saveDouyin(
   task: NativeSaveTask,
   env: DouyinNativeSaveEnvironment = createDouyinBrowserEnvironment(),
 ): Promise<unknown> {
-  if (!env.isLoggedIn()) return { status: "login_required" };
   if (!isSupported(task, env.currentUrl) || env.isUnavailable()) {
     return { status: "unsupported", error_code: "unsupported_content_type" };
   }
   if (!hasTargetContract(task)) return { status: "failed", error_code: "native_save_failed" };
+  await waitForNativeSaveReadiness(
+    () => !env.isLoggedIn() || env.isUnavailable() || env.isContentReady(),
+    env.sleep,
+  );
+  if (!env.isLoggedIn()) return { status: "login_required" };
+  if (env.isUnavailable()) return { status: "unsupported", error_code: "unsupported_content_type" };
   const initial = env.findFavoriteControls(task.content_id);
   if (initial.length !== 1) return { status: "failed", error_code: "native_save_failed" };
   if (initial[0].isSelected()) return { status: "already_synced" };
@@ -145,6 +152,20 @@ function douyinContentContainer(root: Document, contentId: string): HTMLElement 
   return candidates.length === 1 ? candidates[0] : null;
 }
 
+function routeScopedFavoriteControls(
+  root: Document,
+  currentUrl: string,
+  contentId: string,
+): HTMLElement[] {
+  if (routeId(currentUrl) !== contentId) return [];
+  const visibleIdentityNodes = Array.from(root.querySelectorAll<HTMLElement>(
+    DOUYIN_CONTENT_IDENTITY_SELECTOR,
+  )).filter((element) => isEffectivelyVisible(element, root));
+  if (visibleIdentityNodes.length !== 0) return [];
+  return Array.from(root.querySelectorAll<HTMLElement>("[data-e2e='video-favorite']"))
+    .filter((element) => isEffectivelyVisible(element, root) && isExactFavoriteControl(element));
+}
+
 export function createDouyinBrowserEnvironment(
   root: Document = document,
   currentUrl: string = location.href,
@@ -164,6 +185,13 @@ export function createDouyinBrowserEnvironment(
         ".not-found, .error-page, [data-e2e='video-unavailable']",
       );
       return Array.from(errors).some((element) => isEffectivelyVisible(element, root));
+    },
+    isContentReady() {
+      const contentId = routeId(currentUrl);
+      return contentId !== null && (
+        douyinContentContainer(root, contentId) !== null ||
+        routeScopedFavoriteControls(root, currentUrl, contentId).length > 0
+      );
     },
     rateLimitFingerprint() {
       const contentId = routeId(currentUrl);
@@ -197,13 +225,15 @@ export function createDouyinBrowserEnvironment(
     findFavoriteControls(contentId) {
       if (routeId(currentUrl) !== contentId) return [];
       const container = douyinContentContainer(root, contentId);
-      if (!container) return [];
-      return Array.from(container.querySelectorAll<HTMLElement>(
-        "button[aria-label*='收藏'], [role='button'][aria-label*='收藏'], [data-e2e='video-favorite']",
-      )).filter((element) =>
-        element.closest(DOUYIN_CONTENT_IDENTITY_SELECTOR) === container &&
-        isEffectivelyVisible(element, root) && isExactFavoriteControl(element)
-      ).map((element) => ({
+      const elements = container
+        ? Array.from(container.querySelectorAll<HTMLElement>(
+          "button[aria-label*='收藏'], [role='button'][aria-label*='收藏'], [data-e2e='video-favorite']",
+        )).filter((element) =>
+          element.closest(DOUYIN_CONTENT_IDENTITY_SELECTOR) === container &&
+          isEffectivelyVisible(element, root) && isExactFavoriteControl(element)
+        )
+        : routeScopedFavoriteControls(root, currentUrl, contentId);
+      return elements.map((element) => ({
         isSelected: () => selected(element),
         click: () => element.click(),
       }));

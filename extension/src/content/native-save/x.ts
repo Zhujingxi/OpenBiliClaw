@@ -1,4 +1,5 @@
 import type { NativeSaveTask } from "../../shared/native-save.ts";
+import { waitForNativeSaveReadiness } from "./readiness.ts";
 
 export interface XSaveControl {
   click(): void;
@@ -50,10 +51,21 @@ export async function saveX(
   task: NativeSaveTask,
   env: XNativeSaveEnvironment = browserXEnvironment(),
 ): Promise<unknown> {
-  if (!env.isLoggedIn()) return { status: "login_required" };
+  if (!env.isLoggedIn() && /^\/i\/flow\/login(?:\/|$)/.test(new URL(env.currentUrl).pathname)) {
+    return { status: "login_required" };
+  }
   if (!supportedTweet(task, env.currentUrl)) {
     return { status: "unsupported", error_code: "unsupported_content_type" };
   }
+  await waitForNativeSaveReadiness(
+    () => env.isLoggedIn() && Boolean(
+      env.findTweetControl(task.content_id, "bookmark") ||
+      env.findTweetControl(task.content_id, "removeBookmark") ||
+      env.isRateLimited(task.content_id),
+    ),
+    env.sleep,
+  );
+  if (!env.isLoggedIn()) return { status: "login_required" };
   if (env.findTweetControl(task.content_id, "removeBookmark")) return { status: "already_synced" };
   if (env.isRateLimited(task.content_id)) return { status: "rate_limited" };
   const control = env.findTweetControl(task.content_id, "bookmark");

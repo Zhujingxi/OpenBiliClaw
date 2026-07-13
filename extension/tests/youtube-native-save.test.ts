@@ -36,10 +36,13 @@ interface FixtureOptions {
   createdTitle?: string;
   confirmAfterClick?: boolean;
   dialogAvailable?: boolean;
+  readyAfterSleeps?: number;
+  saveControlReadyAfterSleeps?: number;
 }
 
 function fixture(options: FixtureOptions = {}): YouTubeNativeSaveEnvironment & {
   actions: string[];
+  hasSaveControl(): boolean;
   namedLookups: number;
   mutations: number;
 } {
@@ -47,17 +50,21 @@ function fixture(options: FixtureOptions = {}): YouTubeNativeSaveEnvironment & {
   let rows = (options.initialNamedRows ?? [{ title: "OpenBiliClaw" }]).map((row) => ({ ...row }));
   let watchLaterChecked = options.watchLaterChecked ?? false;
   let rateLimited = options.rateLimited ?? false;
+  let sleeps = 0;
+  const ready = () => sleeps >= (options.readyAfterSleeps ?? 0);
+  const saveControlReady = () => sleeps >= (options.saveControlReadyAfterSleeps ?? 0);
   const env = {
     actions: [] as string[],
     namedLookups: 0,
     mutations: 0,
     currentUrl: options.currentUrl ?? task.content_url,
-    isLoggedIn: () => options.loggedIn ?? true,
+    isLoggedIn: () => ready() && (options.loggedIn ?? true),
     isUnavailable: () => options.unavailable ?? false,
+    hasSaveControl: () => saveControlReady(),
     rateLimitFingerprint: () => rateLimited ? "limited" : "",
     async openSaveDialog() {
       env.actions.push("open-save-dialog");
-      open = options.dialogAvailable ?? true;
+      open = saveControlReady() && (options.dialogAvailable ?? true);
       return open;
     },
     async closeSaveDialog() {
@@ -97,9 +104,10 @@ function fixture(options: FixtureOptions = {}): YouTubeNativeSaveEnvironment & {
       rows.push({ title: options.createdTitle ?? title, checked: false });
       return true;
     },
-    sleep: async () => {},
+    sleep: async () => { sleeps += 1; },
   } satisfies YouTubeNativeSaveEnvironment & {
     actions: string[];
+    hasSaveControl(): boolean;
     namedLookups: number;
     mutations: number;
   };
@@ -129,6 +137,18 @@ test("YouTube native save accepts only canonical watch and shorts video URLs", a
     });
     assert.equal(env.mutations, 0);
   }
+});
+
+test("YouTube native save waits for the authenticated watch page before mutation", async () => {
+  const env = fixture({ readyAfterSleeps: 2 });
+  assert.deepEqual(await saveYouTube(task, env), { status: "synced" });
+  assert.equal(env.mutations, 1);
+});
+
+test("YouTube native save waits for the Save control and opens its dialog only once", async () => {
+  const env = fixture({ saveControlReadyAfterSleeps: 2 });
+  assert.deepEqual(await saveYouTube(task, env), { status: "synced" });
+  assert.equal(env.actions.filter((action) => action === "open-save-dialog").length, 1);
 });
 
 test("YouTube native save correlates youtu.be tasks with safe canonical redirects", async () => {

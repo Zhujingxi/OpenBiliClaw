@@ -125,9 +125,7 @@ def test_next_task_serves_exact_native_job_shape(
         "platform": item.platform,
         "platform_slug": slug,
         "content_id": item.content_id,
-        "content_url": (
-            "https://www.xiaohongshu.com/explore/note-123" if slug == "xhs" else item.content_url
-        ),
+        "content_url": item.content_url,
         "content_type": item.content_type,
         "requested_action": route.requested_action,
         "resolved_action": route.resolved_action,

@@ -29,6 +29,19 @@ const task: NativeSaveTask = {
   target_label: "Reddit Saved",
 };
 
+const tokenizedXhsTask: NativeSaveTask = {
+  ...task,
+  id: "123e4567-e89b-12d3-a456-426614174001",
+  platform: "xiaohongshu",
+  platform_slug: "xhs",
+  item_key: "xiaohongshu:note-123",
+  content_id: "note-123",
+  content_url:
+    "https://www.xiaohongshu.com/explore/note-123?xsec_token=public-note-token&xsec_source=pc_feed",
+  content_type: "note",
+  target_label: "小红书收藏",
+};
+
 function tick(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -47,6 +60,83 @@ test("native save runner opens an active allow-listed URL and posts one correlat
     assert.deepEqual(posted, [{ task_id: task.id, item_key: task.item_key, status: "synced", error_code: "", error_message: "" }]);
     assert.deepEqual(state.removedTabs, [42]);
     assert.equal(dispatcherMutexHolder(), null);
+  } finally {
+    state.restore();
+  }
+});
+
+test("native save runner opens the exact tokenized Xiaohongshu public-note URL", async () => {
+  const state = installChromeMock();
+  state.sendMessageImpl = async () => ({ ready: true });
+  try {
+    const running = runNativeSaveTask(tokenizedXhsTask, "xhs", async () => {}, { timeoutMs: 100 });
+    await tick();
+    assert.deepEqual(state.createdTabs, [{ active: true, url: tokenizedXhsTask.content_url }]);
+    state.emitRuntimeMessage(
+      {
+        type: "NATIVE_SAVE_RESULT",
+        platform: "xiaohongshu",
+        task_id: tokenizedXhsTask.id,
+        item_key: tokenizedXhsTask.item_key,
+        status: "synced",
+      },
+      { tab: { id: 42, url: tokenizedXhsTask.content_url } },
+    );
+    await running;
+  } finally {
+    state.restore();
+  }
+});
+
+test("native save runner executes two platforms concurrently with independent correlation", async () => {
+  const state = installChromeMock();
+  const posted: NativeSaveResult[] = [];
+  state.sendMessageImpl = async () => ({ ready: true });
+  try {
+    const redditRun = runNativeSaveTask(
+      task,
+      "reddit",
+      async (result) => { posted.push(result); },
+      { timeoutMs: 100, mutexRetryMs: 1 },
+    );
+    const xhsRun = runNativeSaveTask(
+      tokenizedXhsTask,
+      "xhs",
+      async (result) => { posted.push(result); },
+      { timeoutMs: 100, mutexRetryMs: 1 },
+    );
+    await tick();
+    await tick();
+    assert.deepEqual(state.createdTabs, [
+      { active: true, url: task.content_url },
+      { active: true, url: tokenizedXhsTask.content_url },
+    ]);
+    assert.deepEqual(state.sessionStorage, {
+      openbiliclaw_native_save_task_tab_id: [42, 43],
+    });
+    state.emitRuntimeMessage(
+      {
+        type: "NATIVE_SAVE_RESULT",
+        platform: "reddit",
+        task_id: task.id,
+        item_key: task.item_key,
+        status: "synced",
+      },
+      { tab: { id: 42, url: task.content_url } },
+    );
+    state.emitRuntimeMessage(
+      {
+        type: "NATIVE_SAVE_RESULT",
+        platform: "xiaohongshu",
+        task_id: tokenizedXhsTask.id,
+        item_key: tokenizedXhsTask.item_key,
+        status: "already_synced",
+      },
+      { tab: { id: 43, url: tokenizedXhsTask.content_url } },
+    );
+    await Promise.all([redditRun, xhsRun]);
+    assert.equal(posted.length, 2);
+    assert.deepEqual(state.removedTabs.sort((a, b) => a - b), [42, 43]);
   } finally {
     state.restore();
   }
@@ -153,14 +243,15 @@ test("native save runner records only its tab identity and clears it on normal c
   }
 });
 
-test("native save restart recovery closes only the recorded orphan and clears the record", async () => {
+test("native save restart recovery closes all and only recorded orphans", async () => {
   const state = installChromeMock();
-  state.sessionStorage.openbiliclaw_native_save_task_tab_id = 77;
+  state.sessionStorage.openbiliclaw_native_save_task_tab_id = [77, 78];
   state.tabById.set(77, { id: 77, url: "https://x.com/i/status/123", status: "complete" });
+  state.tabById.set(78, { id: 78, url: "https://www.youtube.com/watch?v=abc", status: "complete" });
   state.tabById.set(88, { id: 88, url: "https://www.reddit.com/r/test/", status: "complete" });
   try {
     await recoverRecordedNativeSaveTaskTab();
-    assert.deepEqual(state.removedTabs, [77]);
+    assert.deepEqual(state.removedTabs, [77, 78]);
     assert.equal(state.tabById.has(88), true);
     assert.deepEqual(state.sessionStorage, {});
   } finally {

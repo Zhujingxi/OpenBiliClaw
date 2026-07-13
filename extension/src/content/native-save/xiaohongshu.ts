@@ -1,4 +1,5 @@
 import type { NativeSaveTask } from "../../shared/native-save.ts";
+import { waitForNativeSaveReadiness } from "./readiness.ts";
 
 export interface XiaohongshuSaveControl {
   isSelected(): boolean;
@@ -15,6 +16,7 @@ export interface XiaohongshuNativeSaveEnvironment {
   currentUrl: string;
   isLoggedIn(): boolean;
   isUnavailable(): boolean;
+  isContentReady(): boolean;
   rateLimitFingerprint(): string;
   requestFavorite(): Promise<XiaohongshuFavoriteRequestResult>;
   findFavoriteControls(contentId: string): XiaohongshuSaveControl[];
@@ -72,11 +74,16 @@ export async function saveXiaohongshu(
   task: NativeSaveTask,
   env: XiaohongshuNativeSaveEnvironment = createXiaohongshuBrowserEnvironment(),
 ): Promise<unknown> {
-  if (!env.isLoggedIn()) return { status: "login_required" };
   if (!isSupported(task, env.currentUrl) || env.isUnavailable()) {
     return { status: "unsupported", error_code: "unsupported_content_type" };
   }
   if (!hasTargetContract(task)) return { status: "failed", error_code: "native_save_failed" };
+  await waitForNativeSaveReadiness(
+    () => !env.isLoggedIn() || env.isUnavailable() || env.isContentReady(),
+    env.sleep,
+  );
+  if (!env.isLoggedIn()) return { status: "login_required" };
+  if (env.isUnavailable()) return { status: "unsupported", error_code: "unsupported_content_type" };
   const initial = env.findFavoriteControls(task.content_id);
   if (initial.length !== 1) return { status: "failed", error_code: "native_save_failed" };
   if (initial[0].isSelected()) return { status: "already_synced" };
@@ -177,6 +184,10 @@ export function createXiaohongshuBrowserEnvironment(
         ".not-found, .error-page, [data-testid='not-found']",
       );
       return Array.from(errors).some((element) => isEffectivelyVisible(element, root));
+    },
+    isContentReady() {
+      const contentId = /^\/(?:explore|discovery\/item)\/([^/]+)/.exec(new URL(currentUrl).pathname)?.[1];
+      return contentId !== undefined && xiaohongshuContentContainer(root, contentId) !== null;
     },
     rateLimitFingerprint() {
       const contentId = /^\/(?:explore|discovery\/item)\/([^/]+)/

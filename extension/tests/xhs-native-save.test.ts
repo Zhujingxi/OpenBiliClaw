@@ -31,13 +31,14 @@ function fixture(options: {
   unavailable?: boolean;
   initialSelected?: boolean;
   controls?: number;
+  controlsAfterSleeps?: number;
   requestResult?: XiaohongshuFavoriteRequestResult;
   rejectRequest?: boolean;
   confirmAfterRequest?: boolean;
   confirmAfterClick?: boolean;
   rateBefore?: string;
   rateAfterMutation?: string;
-} = {}): XiaohongshuNativeSaveEnvironment & { clicks: number; requests: number } {
+} = {}): XiaohongshuNativeSaveEnvironment & { clicks: number; requests: number; sleeps: number } {
   let selected = options.initialSelected ?? false;
   let mutated = false;
   const control: XiaohongshuSaveControl = {
@@ -51,9 +52,11 @@ function fixture(options: {
   const env = {
     clicks: 0,
     requests: 0,
+    sleeps: 0,
     currentUrl: options.currentUrl ?? task.content_url,
     isLoggedIn: () => options.loggedIn ?? true,
     isUnavailable: () => options.unavailable ?? false,
+    isContentReady: () => env.sleeps >= (options.controlsAfterSleeps ?? 0),
     rateLimitFingerprint: () => mutated ? (options.rateAfterMutation ?? options.rateBefore ?? "") : (options.rateBefore ?? ""),
     async requestFavorite() {
       env.requests += 1;
@@ -62,9 +65,11 @@ function fixture(options: {
       if (options.confirmAfterRequest) selected = true;
       return options.requestResult ?? null;
     },
-    findFavoriteControls: () => Array.from({ length: options.controls ?? 1 }, () => control),
-    sleep: async () => {},
-  } satisfies XiaohongshuNativeSaveEnvironment & { clicks: number; requests: number };
+    findFavoriteControls: () => Array.from({
+      length: env.sleeps >= (options.controlsAfterSleeps ?? 0) ? (options.controls ?? 1) : 0,
+    }, () => control),
+    sleep: async () => { env.sleeps += 1; },
+  } satisfies XiaohongshuNativeSaveEnvironment & { clicks: number; requests: number; sleeps: number };
   return env;
 }
 
@@ -95,6 +100,13 @@ test("XHS native save accepts only canonical correlated note/video identities", 
     status: "unsupported",
     error_code: "unsupported_content_type",
   });
+});
+
+test("XHS native save waits for the correlated favorite control before mutation", async () => {
+  const env = fixture({ controlsAfterSleeps: 2 });
+  assert.deepEqual(await saveXiaohongshu(task, env), { status: "synced" });
+  assert.ok(env.sleeps >= 2);
+  assert.equal(env.clicks, 1);
 });
 
 test("XHS native save checks login and deleted content before mutation", async () => {

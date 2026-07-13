@@ -390,7 +390,7 @@ OpenBiliClaw does not store your platform passwords or bypass login. It reuses t
 | **Zhihu** | Log in normally at https://www.zhihu.com in the same browser | `init --yes-zhihu`, `fetch-zhihu`, `discover --source zhihu`, and `discover-zhihu*` return nothing |
 | **Reddit** | Log in normally at https://www.reddit.com in the same browser; the extension syncs `reddit_session` for backend-installed rdt-cli, and `rdt login` is only a fallback when the extension is unavailable | `fetch-reddit --mode bootstrap` returns no init signals; without a synced rdt credential, the rdt path falls back to extension tasks |
 
-Xiaohongshu, Douyin, YouTube, and Zhihu use Chrome extension tasks; Reddit defaults to backend-installed rdt-cli for steady-state discovery and keeps the extension for init signals; X discovery uses server-side cookie replay. None of these read paths needs an extra CDP debugging Chrome. Reddit/X, YouTube, Xiaohongshu, Douyin, and Zhihu native-save executors are wired 6/6 and fixture-tested, but none is real-account verified. `[sources.browser].cdp_url` remains available only for generic Web / custom webpage fetching.
+Xiaohongshu, Douyin, YouTube, and Zhihu use Chrome extension tasks; Reddit defaults to backend-installed rdt-cli for steady-state discovery and keeps the extension for init signals; X discovery uses server-side cookie replay. None of these read paths needs an extra CDP debugging Chrome. Reddit/X, YouTube, Xiaohongshu, Douyin, and Zhihu native-save executors are wired 6/6 and fixture-tested; X/Twitter's first real favorite finished `synced`, while the other five platforms require fresh authorization after their fixes. `[sources.browser].cdp_url` remains available only for generic Web / custom webpage fetching.
 
 </details>
 
@@ -566,7 +566,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 - ⚡ **Instant Reshuffle** — ~0.6s per reshuffle; rapid clicks stay snappy
 - 💬 **Warm Recommendations** — friend-like explanations of why you'd enjoy something, not "because you watched similar videos"
 - 🔄 **Continuous Learning** — Socratic dialogue + behavioral analysis + instant feedback; it understands you better over time
-- ⭐ **Local-First Favorites / Watch Later** — cards save to local SQLite first; with explicit consent, Bilibili can sync to native targets; Reddit/X, YouTube, Xiaohongshu, Douyin, and Zhihu executors are wired 6/6 and fixture-tested, but none is real-account verified
+- ⭐ **Local-First Favorites / Watch Later** — cards save to local SQLite first; with explicit consent, Bilibili can sync to native targets; Reddit/X, YouTube, Xiaohongshu, Douyin, and Zhihu executors are wired 6/6 and fixture-tested; X/Twitter's first real favorite finished `synced`, while the other five platforms require fresh authorization after their fixes
 - 🧩 **Browser Extension** — Chrome / Edge / Brave / Arc / Firefox; side-panel recommendations + cross-site behavior collection, install and go
 - 🚀 **Guided Init in the UI** — the packaged `/setup/` wizard, Desktop Web, and the extension can all initialize with one click; no terminal required
 - 🔬 **Self-Optimizing Eval Loops** — five modules each carry an LLM-as-judge loop that improves prompt quality over rounds
@@ -617,9 +617,9 @@ Remote extension access uses explicit, default-off device authentication: `ext-k
 | **Xiaohongshu** | passive collection · search · creator subscriptions · init import | Extension reads your logged-in pages; zero backend crawling |
 | **Douyin** | init import · search · hot · feed | Extension background tab with real DOM interactions; never steals focus |
 | **YouTube** | init import · Takeout offline import · search / trending / channel | Extension reads profile signals; steady-state refill is backend-direct |
-| **X (Twitter)** | init import · search · For-You · followed authors | Server-side read-only cookie replay for discovery; native bookmark executor wired but not real-account verified |
+| **X (Twitter)** | init import · search · For-You · followed authors | Server-side read-only cookie replay for discovery; native bookmark executor's first real favorite finished `synced` |
 | **Zhihu** | init import · search · hot · feed · creator · related | Extension reads logged-in tabs; renders as text cards |
-| **Reddit** | init import · search · hot · subreddit · related | Backend rdt-cli for discovery by default; Saved executor wired but not real-account verified |
+| **Reddit** | init import · search · hot · subreddit · related | Backend rdt-cli for discovery by default; Saved executor is fixture-tested, but the first real write remains uncertain after a 2xx response lacked old-DOM confirmation |
 | **Generic Web** | browser + LLM extraction | Adapts to any webpage |
 
 What happens after discovery:

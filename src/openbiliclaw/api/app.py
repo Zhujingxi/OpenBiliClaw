@@ -18,7 +18,7 @@ import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qsl, quote, urlparse
 from uuid import UUID
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -354,11 +354,22 @@ def _native_save_e2e_content_id_from_url(
             return ""
         match = re.fullmatch(r"/shorts/([A-Za-z0-9_-]{11})/?", parsed.path)
         return match.group(1) if match else ""
-    if parsed.query:
+    if parsed.query and platform != "xiaohongshu":
         return ""
     if platform == "xiaohongshu":
         if not host_is_or_subdomain("xiaohongshu.com"):
             return ""
+        if parsed.query:
+            try:
+                query = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+            except ValueError:
+                return ""
+            if (
+                any(key not in {"xsec_token", "xsec_source"} or not item for key, item in query)
+                or len({key for key, _item in query}) != len(query)
+                or "xsec_token" not in {key for key, _item in query}
+            ):
+                return ""
         match = re.fullmatch(
             r"/(?:explore|discovery/item)/([A-Za-z0-9_-]+)/?",
             parsed.path,

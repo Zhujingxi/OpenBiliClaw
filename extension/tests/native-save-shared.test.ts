@@ -69,6 +69,25 @@ test("native save accepts only the exact platform, slug, and HTTPS host contract
     content_id: "video-123",
     content_url: "https://www.youtube.com/watch?v=video-123",
   }), true);
+  const xhsTask = {
+    ...validTask,
+    platform: "xiaohongshu",
+    platform_slug: "xhs",
+    item_key: "xiaohongshu:note-123",
+    content_id: "note-123",
+  } as const;
+  assert.equal(isNativeSaveTask({
+    ...xhsTask,
+    content_url: "https://www.xiaohongshu.com/explore/note-123?xsec_token=public-note-token&xsec_source=pc_feed",
+  }), true);
+  for (const content_url of [
+    "https://www.xiaohongshu.com/explore/note-123?token=secret",
+    "https://www.xiaohongshu.com/explore/note-123?xsec_token=",
+    "https://www.xiaohongshu.com/explore/note-123?xsec_token=one&xsec_token=two",
+    "https://www.xiaohongshu.com/explore/note-123?xsec_token=public-note-token&xsec_source=",
+  ]) {
+    assert.equal(isNativeSaveTask({ ...xhsTask, content_url }), false);
+  }
 });
 
 test("native save rejects malformed, overlong, and inconsistent task fields", () => {
@@ -221,7 +240,7 @@ test("native save content runtime evicts the oldest completed outcome after 256 
   }
 });
 
-test("native save docs identify all six wired executors without overstating account verification", () => {
+test("native save docs identify all six executors and only X as real-account verified", () => {
   const runtime = readFileSync(resolve("../docs/modules/runtime.md"), "utf8");
   const changelog = readFileSync(resolve("../docs/changelog.md"), "utf8");
   const architecture = readFileSync(resolve("../docs/architecture.md"), "utf8");
@@ -230,7 +249,8 @@ test("native save docs identify all six wired executors without overstating acco
   for (const text of [runtime, changelog, architecture]) {
     assert.match(text, /NATIVE_SAVE_EXECUTE/);
     assert.match(text, /6\/6.*executor|executor.*6\/6/);
-    assert.match(text, /尚未真实账号验证/);
+    assert.match(text, /X\/Twitter.*(?:synced|真实.*成功)/i);
+    assert.match(text, /(?:其余|另外)?五(?:项|个平台).*?(?:待|尚未).*?(?:授权|真实)/i);
     assert.match(text, /共享 MV3 recovery barrier/);
     assert.match(text, /知乎.*(?:typed|question|answer|article)/i);
     assert.match(text, /OpenBiliClaw/);
@@ -246,20 +266,21 @@ test("native save docs identify all six wired executors without overstating acco
   assert.match(extensionModule, /Reddit \/ X \/ YouTube \/ 小红书 \/ 抖音 \/ 知乎六个 executor 均已接入并完成 fixture/);
   assert.doesNotMatch(extensionModule, /其它平台账号写入 adapter 仍属后续计划/);
   assert.match(savedSyncModule, /6\/6.*executor 已接/);
-  assert.match(savedSyncModule, /尚未真实账号验证/);
+  assert.match(savedSyncModule, /X\/Twitter.*synced/i);
+  assert.match(savedSyncModule, /五(?:项|个平台).*?(?:待|尚未).*?(?:授权|真实)/i);
   assert.doesNotMatch(savedSyncModule, /扩展 executor 尚未实现/);
 });
 
-test("README prose matches the six fixture-tested executor architecture", () => {
+test("README prose reports X success and five pending real-account validations", () => {
   const readme = readFileSync(resolve("../README.md"), "utf8");
   const readmeEn = readFileSync(resolve("../README_EN.md"), "utf8");
-  assert.match(readme, /Reddit\/X、YouTube、小红书、抖音与知乎原生保存 executor 已 6\/6 接入.*fixture.*未真实账号验证/);
+  assert.match(readme, /Reddit\/X、YouTube、小红书、抖音与知乎原生保存 executor 已 6\/6 接入.*fixture.*X\/Twitter.*synced.*其余五个平台.*待新授权验证/);
   assert.doesNotMatch(readme, /扩展只负责同步 x\.com cookie \+ 捕获互动/);
-  assert.match(readmeEn, /Reddit\/X, YouTube, Xiaohongshu, Douyin, and Zhihu native-save executors are wired 6\/6.*fixture-tested.*none is real-account verified/i);
+  assert.match(readmeEn, /Reddit\/X, YouTube, Xiaohongshu, Douyin, and Zhihu native-save executors are wired 6\/6.*fixture-tested.*X\/Twitter.*synced.*other five platforms.*fresh authorization/i);
   assert.doesNotMatch(readmeEn, /extension only syncs the x\.com cookie and captures engagement/i);
 
   const coreFeatures = readme.match(/## ✨ 核心特性([\s\S]*?)\n## /)?.[1] ?? "";
   const keyFeatures = readmeEn.match(/## ✨ Key Features([\s\S]*?)\n## /)?.[1] ?? "";
-  assert.match(coreFeatures, /Reddit\/X、YouTube、小红书、抖音与知乎.*executor 已 6\/6 接入.*fixture.*未真实账号验证/);
-  assert.match(keyFeatures, /Reddit\/X, YouTube, Xiaohongshu, Douyin, and Zhihu.*executors are wired 6\/6.*fixture-tested.*none is real-account verified/i);
+  assert.match(coreFeatures, /Reddit\/X、YouTube、小红书、抖音与知乎.*executor 已 6\/6 接入.*fixture.*X\/Twitter.*synced.*其余五个平台.*待新授权验证/);
+  assert.match(keyFeatures, /Reddit\/X, YouTube, Xiaohongshu, Douyin, and Zhihu.*executors are wired 6\/6.*fixture-tested.*X\/Twitter.*synced.*other five platforms.*fresh authorization/i);
 });
