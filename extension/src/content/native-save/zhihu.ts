@@ -28,7 +28,16 @@ type ZhihuCreationFailureCode =
   | "native_confirmation_not_observed";
 
 const EXACT_COLLECTION_TITLE = "OpenBiliClaw";
-const CREATE_COLLECTION_LABELS = new Set(["新建收藏夹", "创建收藏夹", "新建收藏", "新建"]);
+const CREATE_COLLECTION_LABELS = new Set([
+  "新建收藏夹",
+  "创建收藏夹",
+  "添加收藏夹",
+  "新增收藏夹",
+  "新建收藏",
+  "新建",
+  "Create collection",
+  "New collection",
+]);
 const CONFIRM_COLLECTION_LABELS = new Set([
   "创建",
   "确认",
@@ -168,6 +177,10 @@ function visibleText(element: HTMLElement): string {
     element.getAttribute?.("aria-label") || element.getAttribute?.("title") ||
     element.textContent || ""
   ).trim();
+}
+
+function actionLabel(element: HTMLElement): string {
+  return visibleText(element).replace(/^[+＋]\s*/, "");
 }
 
 function isSupported(task: NativeSaveTask, currentUrl: string): boolean {
@@ -451,7 +464,7 @@ export function createZhihuBrowserEnvironment(
         "button, [role='button']",
       )).filter((element) => isEffectivelyVisible(element, root) && closestDialog(element) === dialog &&
         (closestIdentity(element) === null || closestIdentity(element) === currentIdentity) &&
-        CREATE_COLLECTION_LABELS.has(visibleText(element)));
+        CREATE_COLLECTION_LABELS.has(actionLabel(element)));
       if (createControls.length !== 1) return failCreation("native_control_not_found");
       const dialogsBeforeCreate = new Set(visibleDialogs());
       createControls[0].click();
@@ -492,7 +505,7 @@ export function createZhihuBrowserEnvironment(
         "button, [role='button']",
       )).filter((element) => isEffectivelyVisible(element, root) && closestDialog(element) === formDialog &&
         (closestIdentity(element) === null || closestIdentity(element) === currentIdentity) &&
-        CONFIRM_COLLECTION_LABELS.has(visibleText(element)));
+        CONFIRM_COLLECTION_LABELS.has(actionLabel(element)));
       if (confirms.length !== 1) return failCreation("native_request_rejected");
       confirms[0].click();
 

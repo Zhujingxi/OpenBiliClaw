@@ -539,7 +539,10 @@ test("Zhihu browser creation waits for async form and deterministic confirmation
       attrs: { "aria-label": "收藏" },
       click: () => { dialogOpen = true; },
     });
-    const newButton = domElement({ text: "新建收藏夹", click: () => { newClicked = true; } });
+    const newButton = domElement({
+      text: detachedForm ? "+ 新建收藏夹" : "新建收藏夹",
+      click: () => { newClicked = true; },
+    });
     const confirmButton = domElement({
       text: detachedForm ? "确认创建" : "创建",
       click: () => { confirmClicks += 1; },
