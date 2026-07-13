@@ -12,13 +12,27 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from http.cookies import CookieError, SimpleCookie
 from typing import Any, ClassVar, cast
 from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+def _cookie_value(raw_cookie: str, name: str) -> str:
+    """Extract one exact name from a browser-style Cookie request header.
+
+    Chrome may include non-RFC segments that make ``SimpleCookie`` stop parsing
+    the remainder of an otherwise valid request header. Ignoring malformed or
+    unrelated segments matches browser request semantics without accepting
+    partial cookie-name matches.
+    """
+    for segment in raw_cookie.split(";"):
+        key, separator, value = segment.strip().partition("=")
+        if separator and key == name:
+            return value.strip()
+    return ""
 
 
 class BilibiliAPIError(RuntimeError):
@@ -393,19 +407,14 @@ class BilibiliAPIClient:
 
     def _csrf_token(self) -> str:
         """Return the CSRF token after validating the authenticated Cookie."""
-        cookies = SimpleCookie()
-        try:
-            cookies.load(self._cookie)
-        except CookieError:
-            cookies = SimpleCookie()
-        session = cookies.get("SESSDATA")
-        csrf = cookies.get("bili_jct")
-        if session is None or not session.value or csrf is None or not csrf.value:
+        session = _cookie_value(self._cookie, "SESSDATA")
+        csrf = _cookie_value(self._cookie, "bili_jct")
+        if not session or not csrf:
             raise BilibiliAuthExpiredError(
                 "Bilibili login required for native save",
                 code=-101,
             )
-        return csrf.value
+        return csrf
 
     async def _post_json(self, path: str, *, data: dict[str, Any]) -> dict[str, Any]:
         """Perform an authenticated form POST and return its decoded data object."""

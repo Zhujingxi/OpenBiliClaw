@@ -849,3 +849,18 @@ def test_client_honors_explicit_proxy_opt_in(monkeypatch: pytest.MonkeyPatch) ->
     assert captured["proxy"] == "http://10.0.0.1:8080"
     assert captured["trust_env"] is False
     assert client._proxy == "http://10.0.0.1:8080"
+
+
+def test_csrf_token_tolerates_non_rfc_chrome_cookie_segment() -> None:
+    client = BilibiliAPIClient(
+        cookie="bad segment; CURRENT_FNVAL=4048; SESSDATA=session; bili_jct=csrf-token"
+    )
+
+    assert client._csrf_token() == "csrf-token"
+
+
+def test_csrf_token_requires_exact_cookie_names() -> None:
+    client = BilibiliAPIClient(cookie="MY_SESSDATA=x; old_bili_jct=y")
+
+    with pytest.raises(BilibiliAuthExpiredError):
+        client._csrf_token()
