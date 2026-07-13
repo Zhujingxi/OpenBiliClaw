@@ -216,17 +216,17 @@ export async function saveZhihu(
   if (!env.hasCollectionControl()) {
     return hasNewRateLimit(rateBefore, env.rateLimitFingerprint())
       ? { status: "rate_limited" }
-      : { status: "failed", error_code: "native_save_failed" };
+      : { status: "failed", error_code: "native_control_not_found" };
   }
   const dialogOpened = await env.openCollectionDialog();
   if (!dialogOpened) {
     return hasNewRateLimit(rateBefore, env.rateLimitFingerprint())
       ? { status: "rate_limited" }
-      : { status: "failed", error_code: "native_save_failed" };
+      : { status: "failed", error_code: "native_dialog_not_opened" };
   }
   let created = false;
   let rows = env.findNamedCollections(EXACT_COLLECTION_TITLE);
-  if (rows.length > 1) return { status: "failed", error_code: "native_save_failed" };
+  if (rows.length > 1) return { status: "failed", error_code: "native_target_not_found" };
   if (rows.length === 0) {
     if (!(await env.createCollection(EXACT_COLLECTION_TITLE))) {
       return hasNewRateLimit(rateBefore, env.rateLimitFingerprint())
@@ -236,13 +236,13 @@ export async function saveZhihu(
     created = true;
     await env.closeCollectionDialog();
     if (!(await env.openCollectionDialog())) {
-      return { status: "failed", error_code: "native_save_failed" };
+      return { status: "failed", error_code: "native_dialog_not_opened" };
     }
     const createdRow = await waitForExactCollection(env);
     if (!createdRow || createdRow === "ambiguous") {
       return hasNewRateLimit(rateBefore, env.rateLimitFingerprint())
         ? { status: "rate_limited" }
-        : { status: "failed", error_code: "native_save_failed" };
+        : { status: "failed", error_code: "native_target_not_found" };
     }
     rows = [createdRow];
   }
@@ -256,7 +256,7 @@ export async function saveZhihu(
   if (await confirmChecked(env)) return { status: "synced" };
   return hasNewRateLimit(rateBefore, env.rateLimitFingerprint())
     ? { status: "rate_limited" }
-    : { status: "failed", error_code: "native_save_failed" };
+    : { status: "failed", error_code: "native_confirmation_not_observed" };
 }
 
 export function createZhihuBrowserEnvironment(

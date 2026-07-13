@@ -32,6 +32,7 @@ function fixture(options: {
   initialSelected?: boolean;
   controls?: number;
   controlsAfterSleeps?: number;
+  contentReady?: boolean;
   requestResult?: DouyinFavoriteRequestResult;
   rejectRequest?: boolean;
   confirmAfterRequest?: boolean;
@@ -56,7 +57,8 @@ function fixture(options: {
     currentUrl: options.currentUrl ?? task.content_url,
     isLoggedIn: () => options.loggedIn ?? true,
     isUnavailable: () => options.unavailable ?? false,
-    isContentReady: () => env.sleeps >= (options.controlsAfterSleeps ?? 0),
+    isContentReady: () => options.contentReady ??
+      env.sleeps >= (options.controlsAfterSleeps ?? 0),
     rateLimitFingerprint: () => mutated ? (options.rateAfterMutation ?? options.rateBefore ?? "") : (options.rateBefore ?? ""),
     async requestFavorite() {
       env.requests += 1;
@@ -103,6 +105,19 @@ test("Douyin native save waits for the correlated favorite control before mutati
   assert.deepEqual(await saveDouyin(task, env), { status: "synced" });
   assert.ok(env.sleeps >= 2);
   assert.equal(env.clicks, 1);
+});
+
+test("Douyin native save reports readiness, control, and confirmation stages", async () => {
+  for (const [env, errorCode] of [
+    [fixture({ contentReady: false }), "native_content_not_ready"],
+    [fixture({ contentReady: true, controls: 0 }), "native_control_not_found"],
+    [fixture({ requestResult: "success", confirmAfterRequest: false }), "native_confirmation_not_observed"],
+  ] as const) {
+    assert.deepEqual(await saveDouyin(task, env), {
+      status: "failed",
+      error_code: errorCode,
+    });
+  }
 });
 
 test("Douyin native save checks login and deleted content before mutation", async () => {
@@ -166,7 +181,7 @@ test("Douyin native save never retries after accepted-but-unconfirmed request", 
   const env = fixture({ requestResult: "success", confirmAfterClick: true });
   assert.deepEqual(await saveDouyin(task, env), {
     status: "failed",
-    error_code: "native_save_failed",
+    error_code: "native_confirmation_not_observed",
   });
   assert.equal(env.requests, 1);
   assert.equal(env.clicks, 0);
@@ -176,7 +191,7 @@ test("Douyin native save never treats favorite count change alone as confirmatio
   const env = fixture({ confirmAfterClick: false });
   assert.deepEqual(await saveDouyin(task, env), {
     status: "failed",
-    error_code: "native_save_failed",
+    error_code: "native_confirmation_not_observed",
   });
   assert.equal(env.clicks, 1);
 });
@@ -190,7 +205,7 @@ test("Douyin native save ignores stale risk UI but maps a new correlated alert",
   ]) {
     assert.deepEqual(await saveDouyin(task, env), {
       status: "failed",
-      error_code: "native_save_failed",
+      error_code: "native_confirmation_not_observed",
     });
   }
 });
@@ -325,7 +340,7 @@ test("Douyin browser environment uses one exact route-scoped favorite control wi
   ambiguous.sleep = async () => {};
   assert.deepEqual(await saveDouyin(task, ambiguous), {
     status: "failed",
-    error_code: "native_save_failed",
+    error_code: "native_control_not_found",
   });
   assert.equal(ambiguousControls.reduce((sum, control) => sum + control.clicks, 0), 0);
 });
@@ -348,7 +363,7 @@ test("Douyin browser environment ignores hidden controls and fails closed on amb
   );
   assert.deepEqual(await saveDouyin(task, ambiguous), {
     status: "failed",
-    error_code: "native_save_failed",
+    error_code: "native_control_not_found",
   });
 });
 
@@ -376,7 +391,7 @@ test("Douyin browser environment scopes mutation to the exact aweme and rejects 
   );
   assert.deepEqual(await saveDouyin(task, failClosed), {
     status: "failed",
-    error_code: "native_save_failed",
+    error_code: "native_control_not_found",
   });
   assert.equal(soleUnrelated.clicks, 0);
 
@@ -387,7 +402,7 @@ test("Douyin browser environment scopes mutation to the exact aweme and rejects 
   );
   assert.deepEqual(await saveDouyin(task, nestedFailClosed), {
     status: "failed",
-    error_code: "native_save_failed",
+    error_code: "native_control_not_found",
   });
   assert.equal(nestedUnrelated.clicks, 0);
 });
@@ -431,7 +446,7 @@ test("Douyin browser environment fingerprints only new target-local risk events"
   unrelatedEnv.sleep = async () => {};
   assert.deepEqual(await saveDouyin(task, unrelatedEnv), {
     status: "failed",
-    error_code: "native_save_failed",
+    error_code: "native_confirmation_not_observed",
   });
 
   let nestedAppeared = false;
@@ -445,7 +460,7 @@ test("Douyin browser environment fingerprints only new target-local risk events"
   nestedEnv.sleep = async () => {};
   assert.deepEqual(await saveDouyin(task, nestedEnv), {
     status: "failed",
-    error_code: "native_save_failed",
+    error_code: "native_confirmation_not_observed",
   });
 
   let replaced = false;

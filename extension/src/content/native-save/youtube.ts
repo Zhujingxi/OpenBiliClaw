@@ -178,12 +178,12 @@ async function performSaveYouTube(task: NativeSaveTask, env: YouTubeNativeSaveEn
     env.sleep,
   );
   if (env.isUnavailable()) return { status: "unsupported", error_code: "unsupported_content_type" };
-  if (!env.hasSaveControl()) return { status: "failed", error_code: "native_save_failed" };
+  if (!env.hasSaveControl()) return { status: "failed", error_code: "native_control_not_found" };
   const rateLimitBefore = env.rateLimitFingerprint();
   if (!(await openDialog(env))) {
     return hasNewRateLimit(env, rateLimitBefore)
       ? { status: "rate_limited" }
-      : { status: "failed", error_code: "native_save_failed" };
+      : { status: "failed", error_code: "native_dialog_not_opened" };
   }
 
   if (task.resolved_action === "watch_later") {
@@ -206,7 +206,7 @@ async function performSaveYouTube(task: NativeSaveTask, env: YouTubeNativeSaveEn
   }
   let created = false;
   let row = uniqueNamedPlaylist(env, EXACT_PLAYLIST_TITLE);
-  if (row === "ambiguous") return { status: "failed", error_code: "native_save_failed" };
+  if (row === "ambiguous") return { status: "failed", error_code: "native_target_not_found" };
   if (!row) {
     try {
       if (!(await env.createPlaylist(EXACT_PLAYLIST_TITLE))) {
@@ -252,7 +252,7 @@ async function performSaveYouTube(task: NativeSaveTask, env: YouTubeNativeSaveEn
   }
   return hasNewRateLimit(env, rateLimitBefore)
     ? { status: "rate_limited" }
-    : { status: "failed", error_code: "native_save_failed" };
+    : { status: "failed", error_code: "native_confirmation_not_observed" };
 }
 
 export async function saveYouTube(

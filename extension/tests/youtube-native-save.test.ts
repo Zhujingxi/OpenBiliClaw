@@ -151,6 +151,25 @@ test("YouTube native save waits for the Save control and opens its dialog only o
   assert.equal(env.actions.filter((action) => action === "open-save-dialog").length, 1);
 });
 
+test("YouTube native save reports the exact failed execution stage", async () => {
+  const cases: Array<[YouTubeNativeSaveEnvironment, string]> = [
+    [fixture({ saveControlReadyAfterSleeps: 100 }), "native_control_not_found"],
+    [fixture({ dialogAvailable: false }), "native_dialog_not_opened"],
+    [
+      fixture({ initialNamedRows: [{ title: "OpenBiliClaw" }, { title: "OpenBiliClaw" }] }),
+      "native_target_not_found",
+    ],
+    [fixture({ confirmAfterClick: false }), "native_confirmation_not_observed"],
+  ];
+
+  for (const [env, errorCode] of cases) {
+    assert.deepEqual(await saveYouTube(task, env), {
+      status: "failed",
+      error_code: errorCode,
+    });
+  }
+});
+
 test("YouTube native save correlates youtu.be tasks with safe canonical redirects", async () => {
   for (const currentUrl of [
     `https://www.youtube.com/watch?v=${VIDEO_ID}`,
@@ -269,9 +288,9 @@ test("YouTube native save maps logged out, unavailable, rate limited, and ambigu
     [fixture({ loggedIn: false }), { status: "login_required" }],
     [fixture({ unavailable: true }), { status: "unsupported", error_code: "unsupported_content_type" }],
     [fixture({ rateLimitedAfterMutation: true, confirmAfterClick: false }), { status: "rate_limited" }],
-    [fixture({ dialogAvailable: false }), { status: "failed", error_code: "native_save_failed" }],
-    [fixture({ initialNamedRows: [{ title: "OpenBiliClaw" }, { title: "OpenBiliClaw" }] }), { status: "failed", error_code: "native_save_failed" }],
-    [fixture({ confirmAfterClick: false }), { status: "failed", error_code: "native_save_failed" }],
+    [fixture({ dialogAvailable: false }), { status: "failed", error_code: "native_dialog_not_opened" }],
+    [fixture({ initialNamedRows: [{ title: "OpenBiliClaw" }, { title: "OpenBiliClaw" }] }), { status: "failed", error_code: "native_target_not_found" }],
+    [fixture({ confirmAfterClick: false }), { status: "failed", error_code: "native_confirmation_not_observed" }],
   ];
   for (const [env, expected] of cases) assert.deepEqual(await saveYouTube(task, env), expected);
 });
@@ -289,7 +308,7 @@ test("YouTube native save ignores a stale global rate toast when no checked proo
   const env = fixture({ rateLimited: true, confirmAfterClick: false });
   assert.deepEqual(await saveYouTube(task, env), {
     status: "failed",
-    error_code: "native_save_failed",
+    error_code: "native_confirmation_not_observed",
   });
   assert.equal(env.mutations, 1);
 });

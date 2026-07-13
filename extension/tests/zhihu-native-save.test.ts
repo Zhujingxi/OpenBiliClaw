@@ -146,6 +146,28 @@ test("Zhihu native save waits for the collection trigger before mutation", async
   assert.equal(env.actions.filter((action) => action === "open").length, 1);
 });
 
+test("Zhihu native save reports the exact control, dialog, target, and confirmation stage", async () => {
+  const task = taskFor("answer", "2002");
+  const cases: Array<[ZhihuNativeSaveEnvironment, string]> = [
+    [fixture(task, { dialogReadyAfterSleeps: 100 }), "native_control_not_found"],
+    [fixture(task, { dialogAvailable: false }), "native_dialog_not_opened"],
+    [
+      fixture(task, {
+        initialRows: [{ title: "OpenBiliClaw" }, { title: "OpenBiliClaw", checked: true }],
+      }),
+      "native_target_not_found",
+    ],
+    [fixture(task, { confirmAfterClick: false }), "native_confirmation_not_observed"],
+  ];
+
+  for (const [env, errorCode] of cases) {
+    assert.deepEqual(await saveZhihu(task, env), {
+      status: "failed",
+      error_code: errorCode,
+    });
+  }
+});
+
 test("Zhihu native save rejects task, page, item, and content-type mismatches before mutation", async () => {
   const task = taskFor("answer", "2002");
   const cases: Array<[NativeSaveTask, string | undefined]> = [
@@ -215,7 +237,7 @@ test("Zhihu native save uses exact case-sensitive Unicode title and fails ambigu
   });
   assert.deepEqual(await saveZhihu(task, duplicateEnv), {
     status: "failed",
-    error_code: "native_save_failed",
+    error_code: "native_target_not_found",
   });
   assert.equal(duplicateEnv.mutations, 0);
 });
@@ -240,13 +262,13 @@ test("Zhihu native save polls the reopened dialog until the created exact row ma
 
 test("Zhihu native save never falls back after create failure or re-query mismatch", async () => {
   const task = taskFor("answer", "2002");
-  for (const env of [
-    fixture(task, { initialRows: [{ title: "Other" }], createSucceeds: false }),
-    fixture(task, { initialRows: [{ title: "Other" }], createdTitle: "openbiliclaw" }),
-  ]) {
+  for (const [env, errorCode] of [
+    [fixture(task, { initialRows: [{ title: "Other" }], createSucceeds: false }), "native_save_failed"],
+    [fixture(task, { initialRows: [{ title: "Other" }], createdTitle: "openbiliclaw" }), "native_target_not_found"],
+  ] as const) {
     assert.deepEqual(await saveZhihu(task, env), {
       status: "failed",
-      error_code: "native_save_failed",
+      error_code: errorCode,
     });
     assert.equal(env.actions.some((action) => action === "select:Other"), false);
     assert.equal(env.actions.some((action) => action === "select:openbiliclaw"), false);
@@ -280,7 +302,7 @@ test("Zhihu native save detects only directional new action-local rate evidence"
     const stale = fixture(task, { confirmAfterClick: false, rateFingerprints });
     assert.deepEqual(await saveZhihu(task, stale), {
       status: "failed",
-      error_code: "native_save_failed",
+      error_code: "native_confirmation_not_observed",
     });
   }
 });
