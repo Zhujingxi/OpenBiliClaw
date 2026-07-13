@@ -426,32 +426,44 @@ export function createZhihuBrowserEnvironment(
         (closestIdentity(element) === null || closestIdentity(element) === currentIdentity) &&
         ["新建收藏夹", "创建收藏夹", "新建"].includes(visibleText(element)));
       if (createControls.length !== 1) return false;
+      const dialogsBeforeCreate = new Set(visibleDialogs());
       createControls[0].click();
 
       let input: HTMLInputElement | null = null;
+      let formDialog: HTMLElement | null = null;
       for (let attempt = 0; attempt < DIALOG_ATTEMPTS; attempt += 1) {
-        const inputs = Array.from(dialog.querySelectorAll<HTMLInputElement>(
-          "input[name='title'], input[placeholder*='收藏夹'], input[placeholder*='名称']",
-        )).filter((candidate) => isEffectivelyVisible(candidate, root) &&
-          (closestIdentity(candidate) === null || closestIdentity(candidate) === currentIdentity));
-        if (inputs.length > 1) return false;
-        if (inputs.length === 1) {
-          input = inputs[0];
+        const scopes = [
+          dialog,
+          ...visibleDialogs().filter((candidate) =>
+            !dialogsBeforeCreate.has(candidate) && dialogMatchesIdentity(candidate)),
+        ];
+        const matches = scopes.flatMap((scope) =>
+          Array.from(scope.querySelectorAll<HTMLInputElement>(
+            "input[name='title'], input[placeholder*='收藏夹'], input[placeholder*='名称']",
+          )).filter((candidate) => isEffectivelyVisible(candidate, root) &&
+            closestDialog(candidate) === scope &&
+            (closestIdentity(candidate) === null || closestIdentity(candidate) === currentIdentity))
+            .map((candidate) => ({ input: candidate, scope })),
+        );
+        if (matches.length > 1) return false;
+        if (matches.length === 1) {
+          input = matches[0].input;
+          formDialog = matches[0].scope;
           break;
         }
         if (attempt + 1 < DIALOG_ATTEMPTS) {
           await new Promise((resolve) => setTimeout(resolve, DIALOG_INTERVAL_MS));
         }
       }
-      if (!input) return false;
+      if (!input || !formDialog) return false;
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
       if (setter) setter.call(input, title);
       else input.value = title;
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
-      const confirms = Array.from(dialog.querySelectorAll<HTMLElement>(
+      const confirms = Array.from(formDialog.querySelectorAll<HTMLElement>(
         "button, [role='button']",
-      )).filter((element) => isEffectivelyVisible(element, root) && closestDialog(element) === dialog &&
+      )).filter((element) => isEffectivelyVisible(element, root) && closestDialog(element) === formDialog &&
         (closestIdentity(element) === null || closestIdentity(element) === currentIdentity) &&
         ["创建", "确认", "完成"].includes(visibleText(element)));
       if (confirms.length !== 1) return false;
@@ -461,9 +473,10 @@ export function createZhihuBrowserEnvironment(
         const exactRows = findCollectionRows(title);
         if (exactRows.length > 1) return false;
         if (exactRows.length === 1) return true;
-        const remainingInputs = Array.from(dialog.querySelectorAll<HTMLInputElement>(
+        const remainingInputs = Array.from(formDialog.querySelectorAll<HTMLInputElement>(
           "input[name='title'], input[placeholder*='收藏夹'], input[placeholder*='名称']",
         )).filter((candidate) => isEffectivelyVisible(candidate, root) &&
+          closestDialog(candidate) === formDialog &&
           (closestIdentity(candidate) === null || closestIdentity(candidate) === currentIdentity));
         if (remainingInputs.length === 0) return true;
         if (remainingInputs.length > 1) return false;

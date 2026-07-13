@@ -522,7 +522,7 @@ test("Zhihu browser creation waits for async form and deterministic confirmation
   }
   (globalThis as { HTMLInputElement?: unknown }).HTMLInputElement = FakeInputElement;
 
-  const makeEnvironment = (proofAppears: boolean) => {
+  const makeEnvironment = (proofAppears: boolean, detachedForm = false) => {
     const task = taskFor("question", "1001");
     let dialogOpen = false;
     let newClicked = false;
@@ -530,6 +530,7 @@ test("Zhihu browser creation waits for async form and deterministic confirmation
     let inputQueries = 0;
     let container: HTMLElement;
     let dialog: HTMLElement;
+    let formDialog: HTMLElement;
     const openButton = domElement({
       attrs: { "aria-label": "收藏" },
       click: () => { dialogOpen = true; },
@@ -540,10 +541,27 @@ test("Zhihu browser creation waits for async form and deterministic confirmation
     dialog = domElement({
       attrs: { role: "dialog" },
       query(selector) {
-        if (selector.includes("button")) return newClicked ? [newButton, confirmButton] : [newButton];
+        if (selector.includes("button")) {
+          return newClicked && !detachedForm ? [newButton, confirmButton] : [newButton];
+        }
         if (selector.includes("input")) {
+          if (detachedForm) return [];
           inputQueries += 1;
           if (!newClicked || inputQueries === 1) return [];
+          if (confirmClicks > 0 && proofAppears) return [];
+          return [input];
+        }
+        return [];
+      },
+    });
+    formDialog = domElement({
+      attrs: { role: "dialog" },
+      query(selector) {
+        if (!newClicked || !detachedForm) return [];
+        if (selector.includes("button")) return [confirmButton];
+        if (selector.includes("input")) {
+          inputQueries += 1;
+          if (inputQueries === 1) return [];
           if (confirmClicks > 0 && proofAppears) return [];
           return [input];
         }
@@ -557,14 +575,19 @@ test("Zhihu browser creation waits for async form and deterministic confirmation
     for (const element of [openButton]) {
       (element as unknown as { parentElement: HTMLElement }).parentElement = container;
     }
-    for (const element of [newButton, confirmButton, input]) {
-      (element as unknown as { parentElement: HTMLElement }).parentElement = dialog;
+    (newButton as unknown as { parentElement: HTMLElement }).parentElement = dialog;
+    for (const element of [confirmButton, input]) {
+      (element as unknown as { parentElement: HTMLElement }).parentElement = detachedForm
+        ? formDialog
+        : dialog;
     }
     const root = {
       defaultView: null,
       querySelectorAll(selector: string) {
         if (selector.includes("data-zop") || selector.includes("data-question-id")) return [container];
-        if (selector.includes("[role='dialog']")) return dialogOpen ? [dialog] : [];
+        if (selector.includes("[role='dialog']")) {
+          return dialogOpen ? [dialog, ...(newClicked && detachedForm ? [formDialog] : [])] : [];
+        }
         return [];
       },
     } as unknown as Document;
@@ -581,6 +604,12 @@ test("Zhihu browser creation waits for async form and deterministic confirmation
     assert.equal(await confirmed.env.createCollection("OpenBiliClaw"), true);
     assert.equal(confirmed.confirmClicks(), 1);
     assert.equal(confirmed.input._value, "OpenBiliClaw");
+
+    const detached = makeEnvironment(true, true);
+    assert.equal(await detached.env.openCollectionDialog(), true);
+    assert.equal(await detached.env.createCollection("OpenBiliClaw"), true);
+    assert.equal(detached.confirmClicks(), 1);
+    assert.equal(detached.input._value, "OpenBiliClaw");
 
     const uncertain = makeEnvironment(false);
     assert.equal(await uncertain.env.openCollectionDialog(), true);
