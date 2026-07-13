@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -214,6 +214,9 @@ class SocraticDialogue:
         """Create the shared LLM service when one is not injected."""
         from openbiliclaw.llm.service import LLMService
 
+        shared_service = getattr(self._soul_engine, "_llm_service", None)
+        if shared_service is not None:
+            return cast("LLMService", shared_service)
         memory = getattr(self._soul_engine, "_memory", None)
         if self._llm is None or memory is None:
             raise RuntimeError("Dialogue service is not configured.")
@@ -224,5 +227,6 @@ class SocraticDialogue:
             registry=self._llm,
             memory=memory,
             module_overrides=module_overrides or {},
-            concurrency=int(getattr(self._soul_engine, "_llm_concurrency", 3)),
+            concurrency=int(getattr(self._soul_engine, "_llm_concurrency", 4)),
+            concurrency_gate=getattr(self._soul_engine, "_llm_concurrency_gate", None),
         )

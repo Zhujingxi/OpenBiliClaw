@@ -279,7 +279,7 @@
             <label class="settings-field"><span>默认 LLM Provider</span><select id="llmProvider" translate="no"><option value="openai">openai</option><option value="claude">claude</option><option value="gemini">gemini</option><option value="deepseek">deepseek</option><option value="openrouter">openrouter</option><option value="ollama">ollama</option><option value="openai_compatible">openai_compatible</option></select></label>
             <label class="settings-field"><span>OpenAI 认证方式</span><select id="llmAuthMode"><option value="api_key">API Key</option><option value="codex_oauth">Codex OAuth</option></select></label>
             <label class="settings-field"><span>默认模型</span><input id="llmModel" value="gpt-5-nano"></label>
-            <label class="settings-field"><span>LLM 并发数</span><input id="llmConcurrency" inputmode="numeric" placeholder="3"></label>
+            <label class="settings-field"><span>LLM 并发数</span><input id="llmConcurrency" inputmode="numeric" placeholder="4"></label>
             <label class="settings-field"><span>LLM 超时（秒）</span><input id="llmTimeout" inputmode="numeric" placeholder="60"></label>
             <label class="settings-field"><span>当前 Provider API Key</span><input id="llmApiKey" autocomplete="off" placeholder="只保存当前选中的 Provider"></label>
             <label class="settings-field"><span>当前 Provider Base URL</span><input id="llmBaseUrl" placeholder="OpenAI-compatible / Claude 第三方网关 / DeepSeek / Ollama 等"></label>
@@ -551,6 +551,7 @@
           <p class="settings-note-inline">经典：仅用合并关键词生成器；混合：在经典基础上再叠加 search-backed 灵感轴链路（最丰富，但同时跑两套，混合最贵）；灵感：完全用灵感轴链路替代经典。</p>
           <p class="settings-section-title">评估输入</p>
           <div class="inline-row">
+            <label class="settings-field"><span>候选评估并发</span><input id="candidateEvalConcurrency" inputmode="numeric" placeholder="3" min="1" max="3"></label>
             <label class="settings-field"><span>封面图评估</span><select id="multimodalEvaluationEnabled"><option value="off">关闭</option><option value="on">开启</option></select></label>
             <label class="settings-field"><span>图文批量大小</span><input id="multimodalBatchSize" inputmode="numeric" placeholder="8" min="1" max="12"></label>
             <label class="settings-field"><span>封面最大边</span><input id="multimodalImageMaxPx" inputmode="numeric" placeholder="384" min="128" max="768"></label>

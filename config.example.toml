@@ -51,7 +51,8 @@ extension_token_ttl_hours = 24
 default_provider = "deepseek"
 # Shared max concurrency for LLM requests. Higher values replenish faster but
 # may hit provider/local-proxy rate limits sooner.
-concurrency = 3
+# 总并发 4；后台派生为 3
+concurrency = 4
 # Global request timeout for all LLM providers (seconds).
 # Applies to OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter /
 # openai_compatible. Allowed range: 10..600. Default 300s.
@@ -508,6 +509,10 @@ inspiration_replace_merged_keywords = false
 # max_expansions_per_seed / max_keywords_per_platform）已移除，写了也会被忽略
 # 并在启动提示中给出迁移说明。
 inspiration_breadth = "high"
+# 候选评估期望并发，合法范围 1..3；每个 worker 最多 30 条，因此最多 90 条
+# raw 候选在途。运行时会为聊天等交互保留一个全局 LLM 槽位，因此有效并发为
+# min(本值, max(1, llm.concurrency - 1))。
+candidate_eval_concurrency = 3
 # 可选封面图评估。默认关闭；开启后 discovery evaluator 会在模型支持图像输入时
 # 把已压缩的候选封面一并送入评估器，模型不支持时自动退回纯文本评估。
 multimodal_evaluation_enabled = false

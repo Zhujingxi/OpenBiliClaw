@@ -14,12 +14,15 @@ from typing import Any
 import pytest
 
 from openbiliclaw.discovery.engine import DiscoveredContent
-from openbiliclaw.llm.base import LLMResponse
+from openbiliclaw.llm.base import LLMFallbackError, LLMProviderError, LLMRateLimitError, LLMResponse
 from openbiliclaw.llm.service import LLMProviderExecutionError
 from openbiliclaw.recommendation.engine import (
+    ExpressionBatchMalformed,
+    ExpressionCopyTransientError,
     RecommendationEngine,
     _recommendation_profile_summary,
 )
+from openbiliclaw.runtime.expression_copy import ExpressionCopyCoordinator
 from openbiliclaw.soul.profile import InterestTag, PreferenceLayer, SoulProfile
 from openbiliclaw.storage.database import Database
 
@@ -2781,6 +2784,69 @@ async def test_drain_expression_copy_default_batch_size_is_30() -> None:
 
 
 @pytest.mark.asyncio
+async def test_public_expression_drain_caps_sixty_then_processes_tail() -> None:
+    class _RecordingLLM:
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+            self.active = 0
+            self.max_active = 0
+
+        async def complete_structured_task(self, **kwargs: object) -> LLMResponse:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                batch = _content_batch_from_prompt(str(kwargs["user_input"]))
+                self.batch_sizes.append(len(batch))
+                await asyncio.sleep(0)
+                return LLMResponse(
+                    content=json.dumps(
+                        [
+                            {
+                                "bvid": item["bvid"],
+                                "expression": f"{item['bvid']} 的推荐文案。",
+                                "topic_label": "持续补货",
+                            }
+                            for item in batch
+                        ],
+                        ensure_ascii=False,
+                    ),
+                    provider="test",
+                    model="dummy",
+                    usage={},
+                )
+            finally:
+                self.active -= 1
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(
+            db,
+            [
+                DiscoveredContent(
+                    bvid=f"BV_EXPR_PUBLIC_{index:02d}",
+                    title=f"持续补货 {index}",
+                    up_name="效率实验室",
+                    style_key="deep_dive",
+                    topic_group="效率工具",
+                    relevance_score=0.88,
+                )
+                for index in range(75)
+            ],
+            precomputed=False,
+        )
+        llm = _RecordingLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+
+        assert await engine.drain_pending_expression_copy(profile=_build_profile(), limit=75) == 60
+        assert sorted(llm.batch_sizes) == [30, 30]
+        assert llm.max_active == 2
+        llm.batch_sizes.clear()
+        assert await engine.drain_pending_expression_copy(profile=_build_profile(), limit=60) == 15
+        assert llm.batch_sizes == [15]
+
+
+@pytest.mark.asyncio
 async def test_drain_expression_copy_splits_failed_batch_before_single_fallback() -> None:
     class _SplitRetryExpressionLLM:
         def __init__(self) -> None:
@@ -2857,6 +2923,315 @@ async def test_drain_expression_copy_splits_failed_batch_before_single_fallback(
 
 
 @pytest.mark.asyncio
+async def test_expression_malformed_retry_is_bounded_to_seven_batch_calls() -> None:
+    class _MalformedLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured_task(self, **kwargs: object) -> LLMResponse:
+            self.calls += 1
+            return LLMResponse(content="not json", provider="test", model="dummy", usage={})
+
+    items = [DiscoveredContent(bvid=f"BV_BOUND_{i}", title=str(i)) for i in range(8)]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, items, precomputed=False)
+        llm = _MalformedLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+        assert await engine._precompute_batch_with_split_retry(items, _build_profile()) == 0
+    assert llm.calls == 7
+
+
+@pytest.mark.asyncio
+async def test_expression_malformed_singleton_stays_pending_without_single_fallback() -> None:
+    class _MalformedLLM:
+        def __init__(self) -> None:
+            self.callers: list[str] = []
+
+        async def complete_structured_task(self, **kwargs: object) -> LLMResponse:
+            self.callers.append(str(kwargs.get("caller", "")))
+            return LLMResponse(content="not json", provider="test", model="dummy", usage={})
+
+    item = DiscoveredContent(bvid="BV_SINGLE_PENDING", title="pending")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, [item], precomputed=False)
+        llm = _MalformedLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+        assert await engine._precompute_batch_with_split_retry([item], _build_profile()) == 0
+        row = next(row for row in db.get_cached_content(limit=10) if row["bvid"] == item.bvid)
+    assert llm.callers == ["recommendation.write_expression"]
+    assert row["pool_expression"] == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "kind"),
+    [
+        (LLMRateLimitError("429 too many requests"), "rate_limited"),
+        (TimeoutError("request timed out"), "timeout"),
+        (ConnectionError("connection reset"), "connection"),
+        (LLMProviderExecutionError("upstream HTTP 503"), "server_error"),
+    ],
+)
+async def test_public_expression_drain_propagates_transient_after_sibling_progress(
+    error: BaseException, kind: str
+) -> None:
+    error.retry_after = 45  # type: ignore[attr-defined]
+
+    class _OneFailedBatchLLM:
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        async def complete_structured_task(
+            self, *, user_input: str, **kwargs: object
+        ) -> LLMResponse:
+            batch = _content_batch_from_prompt(user_input)
+            self.batch_sizes.append(len(batch))
+            if len(batch) > 1:
+                raise error
+            item = batch[0]
+            return LLMResponse(
+                content=json.dumps(
+                    [{"bvid": item["bvid"], "expression": "sibling", "topic_label": "ok"}]
+                ),
+                provider="test",
+                model="dummy",
+                usage={},
+            )
+
+    items = [
+        DiscoveredContent(
+            bvid=f"BV_PUBLIC_TRANSIENT_{i:02d}",
+            title=str(i),
+            style_key="deep_dive",
+            topic_group="test",
+            relevance_score=0.8,
+        )
+        for i in range(31)
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, items, precomputed=False)
+        llm = _OneFailedBatchLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+        with pytest.raises(ExpressionCopyTransientError) as exc_info:
+            await engine.drain_pending_expression_copy(profile=_build_profile(), limit=31)
+    assert sorted(llm.batch_sizes) == [1, 30]
+    assert exc_info.value.kind == kind
+    assert exc_info.value.completed == 1
+    assert exc_info.value.retry_after == 45.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        LLMProviderError("HTTP 401 unauthorized: invalid api key"),
+        LLMFallbackError("No provider was available to process the request."),
+    ],
+)
+async def test_public_expression_drain_propagates_auth_and_no_provider(
+    error: BaseException,
+) -> None:
+    class _UnavailableLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured_task(self, **kwargs: object) -> LLMResponse:
+            self.calls += 1
+            raise error
+
+    items = [
+        DiscoveredContent(
+            bvid=f"BV_PUBLIC_AUTH_{i}",
+            title=str(i),
+            style_key="deep_dive",
+            topic_group="test",
+            relevance_score=0.8,
+        )
+        for i in range(2)
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, items, precomputed=False)
+        llm = _UnavailableLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+        with pytest.raises(type(error)):
+            await engine.drain_pending_expression_copy(profile=_build_profile(), limit=2)
+    assert llm.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_public_expression_drain_carries_partial_progress_into_missing_retry_transient() -> (
+    None
+):
+    class _PartialThenTransientLLM:
+        def __init__(self) -> None:
+            self.request_ids: list[tuple[str, ...]] = []
+
+        async def complete_structured_task(
+            self, *, user_input: str, **kwargs: object
+        ) -> LLMResponse:
+            batch = _content_batch_from_prompt(user_input)
+            ids = tuple(str(item["bvid"]) for item in batch)
+            self.request_ids.append(ids)
+            if len(self.request_ids) == 1:
+                return LLMResponse(
+                    content=json.dumps(
+                        [
+                            {"bvid": key, "expression": f"copy-{key}", "topic_label": "ok"}
+                            for key in ids[:2]
+                        ]
+                    ),
+                    provider="test",
+                    model="dummy",
+                    usage={},
+                )
+            error = TimeoutError("missing subset timed out")
+            error.retry_after = 45  # type: ignore[attr-defined]
+            raise error
+
+    items = [
+        DiscoveredContent(
+            bvid=key,
+            title=key,
+            style_key="deep_dive",
+            topic_group="test",
+            relevance_score=0.8,
+        )
+        for key in ("A", "B", "C", "D")
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, items, precomputed=False)
+        llm = _PartialThenTransientLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+        with pytest.raises(ExpressionCopyTransientError) as exc_info:
+            await engine.drain_pending_expression_copy(profile=_build_profile(), limit=4)
+        rows = {row["bvid"]: dict(row) for row in db.get_cached_content(limit=10)}
+    assert llm.request_ids == [("A", "B", "C", "D"), ("C", "D")]
+    assert exc_info.value.completed == 2
+    assert exc_info.value.retry_after == 45.0
+    assert rows["A"]["pool_expression"] == "copy-A"
+    assert rows["B"]["pool_expression"] == "copy-B"
+    assert rows["C"]["pool_expression"] == ""
+    assert rows["D"]["pool_expression"] == ""
+
+
+@pytest.mark.asyncio
+async def test_expression_partial_progress_is_attached_to_downstream_auth_failure() -> None:
+    class _PartialThenAuthLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured_task(
+            self, *, user_input: str, **kwargs: object
+        ) -> LLMResponse:
+            self.calls += 1
+            ids = tuple(str(item["bvid"]) for item in _content_batch_from_prompt(user_input))
+            if self.calls == 1:
+                return LLMResponse(
+                    content=json.dumps(
+                        [
+                            {"bvid": key, "expression": f"copy-{key}", "topic_label": "ok"}
+                            for key in ids[:2]
+                        ]
+                    ),
+                    provider="test",
+                    model="dummy",
+                    usage={},
+                )
+            raise LLMProviderError("HTTP 401 unauthorized: invalid api key")
+
+    items = [
+        DiscoveredContent(
+            bvid=key,
+            title=key,
+            style_key="deep_dive",
+            topic_group="test",
+            relevance_score=0.8,
+        )
+        for key in ("A", "B", "C", "D")
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, items, precomputed=False)
+        engine = RecommendationEngine(llm=_PartialThenAuthLLM(), database=db)
+        with pytest.raises(LLMProviderError) as exc_info:
+            await engine.drain_pending_expression_copy(profile=_build_profile(), limit=4)
+    assert getattr(exc_info.value, "completed", 0) == 2
+
+
+@pytest.mark.asyncio
+async def test_expression_coordinator_reports_same_branch_partial_progress() -> None:
+    class _PartialThenTimeoutLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured_task(
+            self, *, user_input: str, **kwargs: object
+        ) -> LLMResponse:
+            self.calls += 1
+            ids = tuple(str(item["bvid"]) for item in _content_batch_from_prompt(user_input))
+            if self.calls == 1:
+                return LLMResponse(
+                    content=json.dumps(
+                        [
+                            {"bvid": key, "expression": f"copy-{key}", "topic_label": "ok"}
+                            for key in ids[:2]
+                        ]
+                    ),
+                    provider="test",
+                    model="dummy",
+                    usage={},
+                )
+            raise TimeoutError("missing subset timed out")
+
+    items = [
+        DiscoveredContent(
+            bvid=key,
+            title=key,
+            style_key="deep_dive",
+            topic_group="test",
+            relevance_score=0.8,
+        )
+        for key in ("A", "B", "C", "D")
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, items, precomputed=False)
+        engine = RecommendationEngine(llm=_PartialThenTimeoutLLM(), database=db)
+        coordinator = ExpressionCopyCoordinator(
+            pending_count_provider=lambda: 4,
+            drain_callback=lambda limit: engine.drain_pending_expression_copy(
+                profile=_build_profile(), limit=limit
+            ),
+            min_items=1,
+            safety_wake_seconds=0.01,
+        )
+        task = asyncio.create_task(coordinator.run_forever())
+        async with asyncio.timeout(2):
+            while coordinator.status_payload()["expression_batch_state"] != "backoff":
+                await asyncio.sleep(0)
+        rows = {row["bvid"]: dict(row) for row in db.get_cached_content(limit=10)}
+        assert coordinator.status_payload()["expression_last_completed"] == 2
+        assert rows["A"]["pool_expression"] == "copy-A"
+        assert rows["B"]["pool_expression"] == "copy-B"
+        assert rows["C"]["pool_expression"] == ""
+        assert rows["D"]["pool_expression"] == ""
+        await coordinator.stop()
+        await task
+
+
+@pytest.mark.asyncio
 async def test_precompute_batch_skips_single_fallback_during_provider_cooldown() -> None:
     class _CooldownExpressionLLM:
         def __init__(self) -> None:
@@ -2891,9 +3266,10 @@ async def test_precompute_batch_skips_single_fallback_during_provider_cooldown()
         _seed_pool(db, items, precomputed=False)
         engine = RecommendationEngine(llm=llm, database=db)
 
-        completed = await engine._precompute_batch(items, _build_profile())
+        with pytest.raises(ExpressionCopyTransientError) as exc_info:
+            await engine._precompute_batch_with_split_retry(items, _build_profile())
 
-    assert completed == 0
+    assert exc_info.value.kind == "rate_limited"
     assert llm.calls == 1
 
 
@@ -2943,17 +3319,19 @@ async def test_precompute_batch_matches_expressions_by_bvid_when_response_reorde
         _seed_pool(db, items, precomputed=False)
         engine = RecommendationEngine(llm=_ReorderedExpressionLLM(), database=db)
 
-        completed = await engine._precompute_batch(items, _build_profile())
+        with pytest.raises(ExpressionBatchMalformed) as exc_info:
+            await engine._precompute_batch(items, _build_profile())
 
         rows = {row["bvid"]: dict(row) for row in db.get_cached_content(limit=10)}
-        assert completed == 2
+        assert exc_info.value.completed == 2
+        assert [item.bvid for item in exc_info.value.missing_items] == ["BV_EXPR_A"]
         assert rows["BV_EXPR_A"]["pool_expression"] == ""
         assert rows["BV_EXPR_B"]["pool_expression"] == "B 视频自己的推荐文案。"
         assert rows["BV_EXPR_C"]["pool_expression"] == "C 视频自己的推荐文案。"
 
 
 @pytest.mark.asyncio
-async def test_precompute_batch_falls_back_to_single_when_multi_item_response_lacks_ids(
+async def test_precompute_batch_keeps_no_id_multi_item_response_pending(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Multi-item batch with no bvid/content_id must not be matched positionally.
@@ -3009,20 +3387,15 @@ async def test_precompute_batch_falls_back_to_single_when_multi_item_response_la
         engine = RecommendationEngine(llm=llm, database=db)
 
         caplog.set_level(logging.WARNING)
-        completed = await engine._precompute_batch(items, _build_profile())
+        with pytest.raises(ExpressionBatchMalformed):
+            await engine._precompute_batch(items, _build_profile())
 
         # One batch attempt, then one single regeneration per item.
-        assert llm.callers == [
-            "recommendation.write_expression",
-            "recommendation.expression",
-            "recommendation.expression",
-        ]
-        assert completed == 2
-        assert "positional matching is unreliable" in caplog.text
+        assert llm.callers == ["recommendation.write_expression"]
         rows = {row["bvid"]: dict(row) for row in db.get_cached_content(limit=10)}
         # Each row got copy via the keyed single path — never positional batch.
-        assert rows["BV_NOID_A"]["pool_expression"].startswith("单条重写")
-        assert rows["BV_NOID_B"]["pool_expression"].startswith("单条重写")
+        assert rows["BV_NOID_A"]["pool_expression"] == ""
+        assert rows["BV_NOID_B"]["pool_expression"] == ""
 
 
 @pytest.mark.asyncio
@@ -3076,11 +3449,12 @@ async def test_precompute_batch_drops_expression_shared_across_distinct_videos(
         engine = RecommendationEngine(llm=_DuplicateExpressionLLM(), database=db)
 
         caplog.set_level(logging.WARNING)
-        completed = await engine._precompute_batch(items, _build_profile())
+        with pytest.raises(ExpressionBatchMalformed) as exc_info:
+            await engine._precompute_batch(items, _build_profile())
 
         rows = {row["bvid"]: dict(row) for row in db.get_cached_content(limit=10)}
         # Only the unique copy survives; the shared sentence is dropped for both.
-        assert completed == 1
+        assert exc_info.value.completed == 1
         assert rows["BV_DUP_A"]["pool_expression"] == ""
         assert rows["BV_DUP_B"]["pool_expression"] == ""
         assert rows["BV_DUP_C"]["pool_expression"] == "C 独有的文案。"
@@ -3608,6 +3982,119 @@ async def test_reshuffle_exclusions_refill_beyond_the_old_candidate_window() -> 
 
         assert len(recommendations) == 10
         assert not ({item.content.bvid for item in recommendations} & excluded)
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_serve_notifies_inventory_only_after_detached_shown_commit() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(db, "BV1COMMIT", title="durable", relevance_score=0.95)
+        committed = asyncio.Event()
+        observed_counts: list[int] = []
+
+        async def on_commit() -> None:
+            observed_counts.append(db.count_pool_candidates())
+            committed.set()
+
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            pool_inventory_commit_callback=on_commit,
+        )
+
+        recommendations = await engine.serve(_build_profile(), limit=1)
+        assert len(recommendations) == 1
+        await asyncio.wait_for(committed.wait(), timeout=1)
+        assert observed_counts == [0]
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_serve_does_not_notify_inventory_when_detached_shown_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(db, "BV1FAIL", title="failure", relevance_score=0.95)
+        callback_calls = 0
+
+        def on_commit() -> None:
+            nonlocal callback_calls
+            callback_calls += 1
+
+        def fail_mark(_bvids: list[str]) -> None:
+            raise RuntimeError("write failed")
+
+        monkeypatch.setattr(db, "mark_pool_items_shown", fail_mark)
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            pool_inventory_commit_callback=on_commit,
+        )
+
+        await engine.serve(_build_profile(), limit=1)
+        await asyncio.sleep(0)
+        assert callback_calls == 0
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_serve_sync_fallback_notifies_after_shown_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(db, "BV1SYNC", title="sync", relevance_score=0.95)
+        observed_counts: list[int] = []
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            pool_inventory_commit_callback=lambda: observed_counts.append(
+                db.count_pool_candidates()
+            ),
+        )
+        monkeypatch.setattr(
+            asyncio,
+            "get_running_loop",
+            lambda: (_ for _ in ()).throw(RuntimeError),
+        )
+
+        recommendations = await engine.serve(_build_profile(), limit=1)
+        assert len(recommendations) == 1
+        assert observed_counts == [0]
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_serve_sync_fallback_does_not_fail_when_commit_callback_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(db, "BV1CALLBACK", title="callback", relevance_score=0.95)
+
+        def fail_callback() -> None:
+            raise RuntimeError("callback failed")
+
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            pool_inventory_commit_callback=fail_callback,
+        )
+        monkeypatch.setattr(
+            asyncio,
+            "get_running_loop",
+            lambda: (_ for _ in ()).throw(RuntimeError),
+        )
+
+        recommendations = await engine.serve(_build_profile(), limit=1)
+        assert len(recommendations) == 1
+        assert db.count_pool_candidates() == 0
         db.close()
 
 

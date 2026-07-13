@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from openbiliclaw.discovery.douyin import DouyinDiscoveryOptions, DouyinDiscoveryResult
 from openbiliclaw.discovery.engine import DiscoveredContent
@@ -11,6 +11,9 @@ from openbiliclaw.runtime.douyin_producer import (
     douyin_runtime_hot_budget,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 
 class _FakeSoulEngine:
     async def get_profile(self) -> dict[str, object]:
@@ -18,8 +21,14 @@ class _FakeSoulEngine:
 
 
 class _FakeCandidatePipeline:
-    def __init__(self, *, pool_full: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        pool_full: bool = False,
+        on_candidates_enqueued: Callable[[int], None] | None = None,
+    ) -> None:
         self._pool_full = pool_full
+        self.on_candidates_enqueued = on_candidates_enqueued
         self.enqueued: list[tuple[list[object], str]] = []
         self.drains: list[int] = []
 
@@ -28,7 +37,10 @@ class _FakeCandidatePipeline:
 
     def enqueue_candidates(self, items: list[object], *, source_context: str = "") -> int:
         self.enqueued.append((list(items), source_context))
-        return len(items)
+        inserted = len(items)
+        if inserted > 0 and self.on_candidates_enqueued is not None:
+            self.on_candidates_enqueued(inserted)
+        return inserted
 
     async def drain_pending(self, *, profile: object, batch_size: int = 30) -> dict[str, int]:
         self.drains.append(batch_size)
@@ -103,6 +115,39 @@ async def test_douyin_producer_enqueues_raw_candidates_when_pipeline_is_availabl
     assert result["discovered"] == 2
     assert result["enqueued"] == 2
     assert result["cached"] == 2
+
+
+async def test_douyin_producer_defers_to_coordinator_owned_candidate_evaluation() -> None:
+    notifications: list[int] = []
+    pipeline = _FakeCandidatePipeline(
+        on_candidates_enqueued=notifications.append,
+    )
+    raw_items = [SimpleNamespace(id="a"), SimpleNamespace(id="b")]
+
+    async def discover(profile: Any, options: DouyinDiscoveryOptions) -> DouyinDiscoveryResult:
+        return DouyinDiscoveryResult(
+            items=raw_items,
+            cached=False,
+            source_counts={"dy-plugin-search": 2},
+        )
+
+    producer = DouyinDiscoveryProducer(
+        soul_engine=_FakeSoulEngine(),
+        discover=discover,
+        enabled=True,
+        min_interval_minutes=0,
+        sources=("search", "hot"),
+        candidate_pipeline=pipeline,
+        candidate_evaluation_owned_by_coordinator=True,
+    )
+
+    result = await producer.produce_if_due(limit=12)
+
+    assert pipeline.enqueued == [(raw_items, "douyin")]
+    assert notifications == [2]
+    assert pipeline.drains == []
+    assert result["enqueued"] == 2
+    assert "cached" not in result
 
 
 async def test_douyin_producer_stamps_strategy_score_threshold_before_enqueue() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from openbiliclaw.discovery.candidate_pipeline import DiscoveryCandidatePipeline
+from openbiliclaw.discovery.douyin import DouyinDiscoveryOptions, DouyinDiscoveryResult
 from openbiliclaw.discovery.engine import DiscoveredContent
 from openbiliclaw.integrations.openclaw.bootstrap import (
     OpenClawAdapterServices,
@@ -35,7 +38,9 @@ from openbiliclaw.integrations.openclaw.schemas import (
     SyncAccountResponse,
 )
 from openbiliclaw.recommendation.engine import Recommendation
+from openbiliclaw.runtime.douyin_producer import DouyinDiscoveryProducer
 from openbiliclaw.soul.profile import InterestTag, PreferenceLayer, SoulProfile
+from openbiliclaw.storage.database import Database
 
 
 def test_profile_response_serializes_only_public_fields() -> None:
@@ -109,6 +114,12 @@ def test_runtime_status_response_serializes_public_runtime_fields() -> None:
         "unread_count": 2,
         "pool_available_count": 18,
         "pool_target_count": 30,
+        "llm_refill_active": 0,
+        "llm_refill_waiting": 0,
+        "llm_maintenance_active": 0,
+        "llm_maintenance_waiting": 0,
+        "llm_refill_priority_active": False,
+        "inventory_priority_state": "healthy",
         "last_discovered_count": 7,
         "last_refresh_at": "2026-03-15T12:00:00+08:00",
         "last_account_sync_at": "2026-03-15T12:05:00+08:00",
@@ -520,6 +531,67 @@ async def test_get_profile_returns_trimmed_profile_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_openclaw_recommend_updates_gate_after_durable_pool_commit(tmp_path: Path) -> None:
+    from openbiliclaw.llm.concurrency import InventoryPriorityState, LLMConcurrencyGate
+    from openbiliclaw.recommendation.engine import RecommendationEngine
+    from openbiliclaw.storage.database import Database
+
+    database = Database(tmp_path / "openclaw-recommend.db")
+    database.initialize()
+    database.cache_content(
+        "BV1OPENCLAW",
+        title="OpenClaw durable recommendation",
+        up_name="UP",
+        source="search",
+        relevance_score=0.95,
+        pool_expression="durable expression",
+        pool_topic_label="durable topic",
+        style_key="tutorial",
+        topic_group="durable",
+    )
+    gate = LLMConcurrencyGate(4)
+    gate.update_inventory(available=1, target=1)
+
+    class PrecomputedRecommendationEngine(RecommendationEngine):
+        async def generate_recommendations(
+            self,
+            discovered: list[DiscoveredContent] | None,
+            profile: SoulProfile,
+            limit: int = 10,
+        ) -> list[Recommendation]:
+            return await self.serve(profile, limit=limit, expression_mode="precomputed")
+
+    class Controller:
+        pool_target_count = 1
+
+        def _pool_readiness_counts(self) -> dict[str, int]:
+            available = database.count_pool_candidates()
+            gate.update_inventory(available=available, target=self.pool_target_count)
+            return {"available": available}
+
+    controller = Controller()
+    engine = PrecomputedRecommendationEngine(llm=object(), database=database)  # type: ignore[arg-type]
+    engine.set_pool_inventory_commit_callback(controller._pool_readiness_counts)
+    services = SimpleNamespace(
+        soul_engine=_FakeSoulEngine(),
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        runtime_controller=controller,
+        account_sync_service=_FakeAccountSyncService(),
+        recommendation_engine=engine,
+        llm_service=_FakeLLMService(),
+    )
+
+    result = await OpenClawAdapter(services=services).recommend(limit=1)
+    assert len(result.items) == 1
+    async with asyncio.timeout(1):
+        while gate.inventory_priority_state is not InventoryPriorityState.EMPTY:
+            await asyncio.sleep(0)
+    assert database.count_pool_candidates() == 0
+    database.close()
+
+
+@pytest.mark.asyncio
 async def test_get_runtime_status_merges_refresh_and_account_sync_status() -> None:
     adapter, *_ = _build_adapter()
 
@@ -675,15 +747,23 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     registered_strategies: list[str] = []
     created_strategy_kwargs: list[dict[str, object]] = []
     producer_kwargs: list[dict[str, object]] = []
+    startup_events: list[str] = []
 
     class FakeDatabase:
         def __init__(self, path: str) -> None:
             self.path = path
             self.initialized = 0
+            self.pool_count = 30
             created_databases.append(self)
 
         def initialize(self) -> None:
             self.initialized += 1
+
+        def count_pool_candidates(self, *, xhs_self_nickname: str = "") -> int:
+            return self.pool_count
+
+        def count_discovery_candidates_by_status(self) -> dict[str, int]:
+            return {"pending_eval": 500, "evaluating": 60, "evaluated": 3}
 
     class FakeMemoryManager:
         def __init__(self, data_path: str, database=None) -> None:
@@ -711,12 +791,14 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
             usage_recorder: object | None = None,
             module_overrides=None,
             concurrency: int = 3,
+            concurrency_gate: object | None = None,
         ) -> None:
             self.registry = registry
             self.memory = memory
             self.usage_recorder = usage_recorder
             self.module_overrides = module_overrides
             self.concurrency = concurrency
+            self.concurrency_gate = concurrency_gate
 
     class FakeRecommendationEngine:
         def __init__(
@@ -729,6 +811,10 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
         ) -> None:
             self.llm = llm
             self.database = database
+            self.pool_inventory_commit_callback = None
+
+        def set_pool_inventory_commit_callback(self, callback) -> None:
+            self.pool_inventory_commit_callback = callback
 
     class FakeBilibiliClient:
         def __init__(self, *, cookie: str, proxy: str | None = None) -> None:
@@ -746,6 +832,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
         ) -> None:
             self.llm_service = llm_service
             self.database = database
+            self.concurrency = concurrency
 
         def register_strategy(self, strategy: object) -> None:
             registered_strategies.append(str(getattr(strategy, "name", "")))
@@ -761,17 +848,30 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
         def __init__(self, **kwargs) -> None:
             self.kwargs = kwargs
 
+        def run_startup_maintenance(self) -> None:
+            startup_events.append("maintenance")
+
+        def _pool_readiness_counts(self) -> dict[str, int]:
+            available = created_databases[0].pool_count
+            self.kwargs["llm_concurrency_gate"].update_inventory(
+                available=available,
+                target=self.kwargs["pool_target_count"],
+            )
+            return {"available": available, "admitted_pending_copy": 4}
+
     class FakeCandidatePipeline:
         def __init__(self, **kwargs) -> None:
             self.kwargs = kwargs
 
     class FakeAccountSyncService:
         def __init__(self, **kwargs) -> None:
+            startup_events.append("account_sync")
             self.kwargs = kwargs
 
     fake_config = SimpleNamespace(
         data_path=Path("/tmp/openclaw-data"),
         llm=SimpleNamespace(
+            concurrency=3,
             soul=SimpleNamespace(provider="claude", model="claude-sonnet"),
             discovery=SimpleNamespace(provider="deepseek", model="deepseek-chat"),
             recommendation=SimpleNamespace(provider="", model=""),
@@ -850,6 +950,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     services = build_openclaw_adapter_services()
 
     assert isinstance(services, OpenClawAdapterServices)
+    assert startup_events == ["maintenance", "account_sync"]
     assert len(created_databases) == 1
     assert created_databases[0].initialized == 1
     assert len(created_memories) == 1
@@ -876,6 +977,23 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     assert services.llm_service.module_overrides["discovery"].provider == "deepseek"
     assert services.llm_service.module_overrides["evaluation"].model == "gpt-4o-mini"
     assert services.llm_service.concurrency == 3
+    assert services.discovery_engine.concurrency.llm_evaluation_concurrency == 2
+    assert (
+        services.llm_service.concurrency_gate is services.soul_engine.kwargs["llm_concurrency_gate"]
+    )
+    assert services.runtime_controller.kwargs["llm_concurrency_gate"] is (
+        services.llm_service.concurrency_gate
+    )
+    assert services.llm_service.concurrency_gate.status_payload()["inventory_priority_state"] == (
+        "healthy"
+    )
+    assert services.recommendation_engine.pool_inventory_commit_callback is not None
+    created_databases[0].pool_count = 0
+    services.recommendation_engine.pool_inventory_commit_callback()
+    assert (
+        services.llm_service.concurrency_gate.status_payload()["inventory_priority_state"]
+        == "empty"
+    )
     assert registered_strategies == [
         "FakeStrategy",
         "FakeStrategy",
@@ -895,15 +1013,618 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     assert pipeline.kwargs["database"] is created_databases[0]
     assert pipeline.kwargs["discovery_engine"] is services.discovery_engine
     assert pipeline.kwargs["admission_min_score"] == 0.60
+    # OpenClaw has no daemon to consume a large raw backlog after returning.
+    # Its direct refresh starts with one fixed small evaluation claim, while
+    # the API runtime retains its oversampled continuous-refill settings.
+    assert pipeline.kwargs["candidate_fetch_oversample"] == 1
+    assert pipeline.kwargs["eval_batch_concurrency"] == 1
+    assert pipeline.kwargs["min_eval_batch_size"] == 4
+    assert services.runtime_controller.kwargs["one_shot_inline_eval_limit"] == 4
     assert len(producer_kwargs) == 2
     assert all(kwargs["candidate_pipeline"] is pipeline for kwargs in producer_kwargs)
     assert services.runtime_controller.kwargs["youtube_producer"].kind == "youtube"
+    # The adapter is a one-shot composition: it never starts daemon owners.
+    # Producer evaluation stays bounded inline and admission hands copy to the
+    # awaited one-shot owner rather than an idle coordinator.
+    assert getattr(services.runtime_controller, "candidate_eval_coordinator", None) is None
+    assert getattr(services.runtime_controller, "expression_copy_coordinator", None) is None
+    assert (
+        getattr(
+            services.runtime_controller.kwargs["douyin_producer"],
+            "candidate_evaluation_owned_by_coordinator",
+            False,
+        )
+        is False
+    )
+    assert (
+        getattr(
+            services.runtime_controller.kwargs["youtube_producer"],
+            "candidate_evaluation_owned_by_coordinator",
+            False,
+        )
+        is False
+    )
+    assert getattr(pipeline, "on_candidates_enqueued", None) is None
+    assert callable(getattr(pipeline, "on_candidates_admitted", None))
     assert services.runtime_controller.kwargs["check_interval_seconds"] == 77
     assert services.runtime_controller.kwargs["signal_event_threshold"] == 9
     assert services.runtime_controller.kwargs["trending_refresh_hours"] == 5
     assert services.runtime_controller.kwargs["explore_refresh_hours"] == 18
     assert services.runtime_controller.kwargs["discovery_limit"] == 17
     assert services.runtime_controller.kwargs["proactive_push_interval_seconds"] == 155
+    created_databases[0].pool_count = 7
+    services.runtime_controller._pool_readiness_counts()
+    assert services.llm_service.concurrency_gate.status_payload()["inventory_priority_state"] == (
+        "refill"
+    )
+
+
+@pytest.mark.asyncio
+async def test_openclaw_one_shot_producer_admits_inline_with_ninety_claim_cap(
+    tmp_path: Path,
+) -> None:
+    """The non-daemon OpenClaw composition must not strand producer output."""
+
+    class _Soul:
+        async def get_profile(self) -> object:
+            return object()
+
+    class _InlineEvaluationEngine:
+        _EVALUATE_BATCH_HARD_CAP = 90
+
+        def __init__(self, database: Database) -> None:
+            self.database = database
+            self.max_evaluated_batch = 0
+
+        async def evaluate_content_batch(
+            self,
+            contents: list[DiscoveredContent],
+            _profile: object,
+            **_kwargs: object,
+        ) -> list[float]:
+            self.max_evaluated_batch = max(self.max_evaluated_batch, len(contents))
+            for item in contents:
+                item.relevance_score = 0.91
+                item.relevance_reason = "one-shot fit"
+                item.topic_group = "OpenClaw direct"
+                item.style_key = "deep_dive"
+            return [0.91] * len(contents)
+
+        def cache_evaluated_results(self, items: list[DiscoveredContent]) -> int:
+            for item in items:
+                content_id = item.content_id or item.bvid
+                self.database.cache_content(
+                    content_id,
+                    title=item.title,
+                    up_name=item.author_name or item.up_name,
+                    source=item.source_strategy,
+                    source_platform=item.source_platform,
+                    content_id=content_id,
+                    content_url=item.content_url,
+                    relevance_score=item.relevance_score,
+                    relevance_reason=item.relevance_reason,
+                    topic_group=item.topic_group,
+                    style_key=item.style_key,
+                )
+            return len(items)
+
+    database = Database(tmp_path / "openclaw-one-shot.db")
+    database.initialize()
+    evaluation_engine = _InlineEvaluationEngine(database)
+    pipeline = DiscoveryCandidatePipeline(
+        database=database,
+        discovery_engine=evaluation_engine,  # type: ignore[arg-type]
+        pool_target_count=180,
+    )
+    raw_items = [
+        DiscoveredContent(
+            bvid=f"dy-openclaw-{index}",
+            content_id=f"dy-openclaw-{index}",
+            content_url=f"https://www.douyin.com/video/dy-openclaw-{index}",
+            title=f"OpenClaw direct {index}",
+            source_platform="douyin",
+            source_strategy="search",
+            author_name="creator",
+        )
+        for index in range(120)
+    ]
+
+    async def discover(
+        _profile: object,
+        _options: DouyinDiscoveryOptions,
+    ) -> DouyinDiscoveryResult:
+        return DouyinDiscoveryResult(
+            items=raw_items,
+            cached=False,
+            source_counts={"search": len(raw_items)},
+        )
+
+    # This is the producer state OpenClaw bootstrap intentionally leaves in
+    # place: no coordinator task exists, so the bounded inline path owns work.
+    producer = DouyinDiscoveryProducer(
+        soul_engine=_Soul(),
+        discover=discover,
+        enabled=True,
+        min_interval_minutes=0,
+        sources=("search",),
+        candidate_pipeline=pipeline,
+    )
+
+    result = await producer.produce_if_due(limit=120)
+
+    statuses = database.count_discovery_candidates_by_status()
+    assert producer.candidate_evaluation_owned_by_coordinator is False
+    assert result["enqueued"] == 120
+    assert result["cached"] == 90
+    assert statuses["cached"] == 90
+    assert statuses["pending_eval"] == 30
+    assert evaluation_engine.max_evaluated_batch == 90
+
+
+@pytest.mark.asyncio
+async def test_openclaw_controller_refresh_owns_post_admission_copy_once(
+    tmp_path: Path,
+) -> None:
+    """A one-shot controller must not re-run copy already owned by admission."""
+
+    from openbiliclaw.recommendation.engine import RecommendationEngine
+    from openbiliclaw.runtime.refresh import ContinuousRefreshController
+
+    profile = SoulProfile(
+        core_traits=["好奇"],
+        preferences=PreferenceLayer(
+            interests=[InterestTag(name="并发控制", category="技术", weight=0.95)]
+        ),
+    )
+
+    class Memory:
+        def __init__(self) -> None:
+            self.runtime_state: dict[str, object] = {}
+
+        def get_layer(self, _name: str) -> SimpleNamespace:
+            return SimpleNamespace(data={"ready": True})
+
+        def load_discovery_runtime_state(self) -> dict[str, object]:
+            return dict(self.runtime_state)
+
+        def save_discovery_runtime_state(self, state: dict[str, object]) -> None:
+            self.runtime_state = dict(state)
+
+        def update_discovery_runtime_state(self, mutator) -> dict[str, object]:
+            state = dict(self.runtime_state)
+            result = mutator(state)
+            self.runtime_state = dict(state if result is None else result)
+            return dict(self.runtime_state)
+
+    class Soul:
+        async def get_profile(self) -> SoulProfile:
+            return profile
+
+        def get_effective_disliked_topics(self) -> list[str]:
+            return []
+
+    class EvaluationEngine:
+        _EVALUATE_BATCH_HARD_CAP = 90
+
+        def __init__(self, database: Database) -> None:
+            self.database = database
+
+        async def produce_candidates(
+            self,
+            _profile: SoulProfile,
+            *,
+            strategies: list[str],
+            limit: int,
+            **_kwargs: object,
+        ) -> list[DiscoveredContent]:
+            return [
+                DiscoveredContent(
+                    bvid=f"BV-openclaw-controller-{index}",
+                    content_id=f"openclaw-controller-{index}",
+                    content_url=(f"https://www.bilibili.com/video/BV-openclaw-controller-{index}"),
+                    title=f"一次性补货链路 {index}",
+                    source_platform="bilibili",
+                    source_strategy=strategies[0] if strategies else "search",
+                    author_name="系统实验室",
+                )
+                for index in range(limit)
+            ]
+
+        async def evaluate_content_batch(
+            self,
+            contents: list[DiscoveredContent],
+            _profile: SoulProfile,
+            **_kwargs: object,
+        ) -> list[float]:
+            for item in contents:
+                item.relevance_score = 0.91
+                item.relevance_reason = "OpenClaw controller fit"
+                item.topic_group = f"并发补货-{item.content_id}"
+                item.style_key = "deep_dive"
+            return [0.91] * len(contents)
+
+        def cache_evaluated_results(self, items: list[DiscoveredContent]) -> int:
+            for item in items:
+                self.database.cache_content(
+                    item.bvid,
+                    title=item.title,
+                    up_name=item.author_name or item.up_name,
+                    source=item.source_strategy,
+                    source_platform=item.source_platform,
+                    content_id=item.content_id or item.bvid,
+                    content_url=item.content_url,
+                    relevance_score=item.relevance_score,
+                    relevance_reason=item.relevance_reason,
+                    topic_group=item.topic_group,
+                    style_key=item.style_key,
+                )
+            return len(items)
+
+    class ExpressionLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured_task(
+            self, *, caller: str, **_kwargs: object
+        ) -> SimpleNamespace:
+            assert caller == "recommendation.write_expression"
+            self.calls += 1
+            return SimpleNamespace(
+                content=json.dumps(
+                    [
+                        {
+                            "content_id": f"openclaw-controller-{index}",
+                            "expression": f"第 {index} 条把补货并发讲得很清楚。",
+                            "topic_label": "把补货跑稳",
+                        }
+                        for index in range(5)
+                    ],
+                    ensure_ascii=False,
+                )
+            )
+
+    database = Database(tmp_path / "openclaw-controller-copy-once.db")
+    database.initialize()
+    evaluation_engine = EvaluationEngine(database)
+    candidate_pipeline = DiscoveryCandidatePipeline(
+        database=database,
+        discovery_engine=evaluation_engine,  # type: ignore[arg-type]
+        pool_target_count=5,
+        min_eval_batch_size=1,
+    )
+    expression_llm = ExpressionLLM()
+    recommendation_engine = RecommendationEngine(llm=expression_llm, database=database)
+    copy_callback_calls = 0
+
+    async def drain_one_shot_copy(callback_profile: SoulProfile) -> int:
+        nonlocal copy_callback_calls
+        copy_callback_calls += 1
+        return await recommendation_engine.drain_pending_expression_copy(
+            profile=callback_profile,
+            limit=60,
+        )
+
+    candidate_pipeline.on_candidates_admitted = lambda callback_profile, _admitted: (
+        drain_one_shot_copy(callback_profile)
+    )
+    controller = ContinuousRefreshController(
+        memory_manager=Memory(),
+        database=database,
+        soul_engine=Soul(),
+        discovery_engine=evaluation_engine,  # type: ignore[arg-type]
+        recommendation_engine=recommendation_engine,
+        discovery_candidate_pipeline=candidate_pipeline,
+        one_shot_expression_copy_callback=drain_one_shot_copy,
+        pool_target_count=5,
+        pool_source_shares={"bilibili": 1},
+        discovery_limit=5,
+    )
+
+    result = await controller.force_refresh()
+
+    assert result["refreshed"] is True
+    assert copy_callback_calls == 1
+    assert expression_llm.calls == 1
+    assert database.count_pool_candidates() == 5
+    assert database.get_pool_candidates_needing_copy(limit=10) == []
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_openclaw_bootstrap_one_shot_keeps_partial_copy_durable_without_split_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-daemon OpenClaw refill must finish the durable copy stage inline."""
+
+    import openbiliclaw.integrations.openclaw.bootstrap as bootstrap_module
+    import openbiliclaw.llm.registry as registry_module
+    import openbiliclaw.runtime.douyin_producer as douyin_producer_module
+
+    profile = SoulProfile(
+        core_traits=["好奇"],
+        preferences=PreferenceLayer(
+            interests=[InterestTag(name="系统设计", category="技术", weight=0.95)]
+        ),
+    )
+
+    class BootstrapMemory:
+        def __init__(self, _data_path: Path, database: Database | None = None) -> None:
+            self.database = database
+            self.runtime_state: dict[str, object] = {}
+
+        def initialize(self) -> None:
+            pass
+
+        def load_discovery_runtime_state(self) -> dict[str, object]:
+            return dict(self.runtime_state)
+
+        def save_discovery_runtime_state(self, state: dict[str, object]) -> None:
+            self.runtime_state = dict(state)
+
+        def update_discovery_runtime_state(self, mutator) -> dict[str, object]:
+            state = dict(self.runtime_state)
+            result = mutator(state)
+            self.runtime_state = dict(state if result is None else result)
+            return dict(self.runtime_state)
+
+        def get_layer(self, name: str) -> SimpleNamespace:
+            assert name == "soul"
+            return SimpleNamespace(data={"ready": True})
+
+    class BootstrapSoul:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def get_profile(self) -> SoulProfile:
+            return profile
+
+    class BootstrapLLM:
+        expression_calls = 0
+        expression_batch_sizes: list[int] = []
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def complete_structured_task(
+            self,
+            *,
+            caller: str,
+            user_input: str,
+            **_kwargs: object,
+        ) -> SimpleNamespace:
+            assert caller == "recommendation.write_expression"
+            payload = user_input.split("<content_batch>", 1)[1].split("</content_batch>", 1)[0]
+            batch = json.loads(payload)
+            type(self).expression_calls += 1
+            type(self).expression_batch_sizes.append(len(batch))
+            return SimpleNamespace(
+                content=json.dumps(
+                    [
+                        {
+                            "content_id": str(item["content_id"]),
+                            "expression": (
+                                f"{item['content_id']} 把并发补货讲得很具体，"
+                                "正好接住你想把系统跑稳的劲头。"
+                            ),
+                            "topic_label": "把补货链路跑稳",
+                        }
+                        # Deliberately return a valid subset.  The one-shot
+                        # bridge must make this completed subset servable,
+                        # rather than spend its interaction budget recursively
+                        # split-retrying the remaining durable rows.
+                        for item in batch[:2]
+                    ],
+                    ensure_ascii=False,
+                )
+            )
+
+    class BootstrapDiscovery:
+        _EVALUATE_BATCH_HARD_CAP = 90
+
+        def __init__(self, *, database: Database, **_kwargs: object) -> None:
+            self.database = database
+
+        def register_strategy(self, _strategy: object) -> None:
+            pass
+
+        async def evaluate_content_batch(
+            self,
+            contents: list[DiscoveredContent],
+            _profile: SoulProfile,
+            **_kwargs: object,
+        ) -> list[float]:
+            for item in contents:
+                item.relevance_score = 0.91
+                item.relevance_reason = "OpenClaw one-shot fit"
+                item.topic_group = f"系统设计-{item.content_id}"
+                item.style_key = "deep_dive"
+            return [0.91] * len(contents)
+
+        def cache_evaluated_results(self, items: list[DiscoveredContent]) -> int:
+            for item in items:
+                content_id = item.content_id or item.bvid
+                self.database.cache_content(
+                    item.bvid,
+                    title=item.title,
+                    up_name=item.author_name or item.up_name,
+                    source=item.source_strategy,
+                    source_platform=item.source_platform,
+                    content_id=content_id,
+                    content_url=item.content_url,
+                    relevance_score=item.relevance_score,
+                    relevance_reason=item.relevance_reason,
+                    topic_group=item.topic_group,
+                    style_key=item.style_key,
+                )
+            return len(items)
+
+    class BootstrapStrategy:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+    class BootstrapBilibiliClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+    class BootstrapAccountSync:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+    async def discover(
+        _profile: SoulProfile,
+        _options: DouyinDiscoveryOptions,
+    ) -> DouyinDiscoveryResult:
+        return DouyinDiscoveryResult(
+            items=[
+                DiscoveredContent(
+                    bvid=f"dy-openclaw-copy-{index}",
+                    content_id=f"dy-openclaw-copy-{index}",
+                    content_url=f"https://www.douyin.com/video/dy-openclaw-copy-{index}",
+                    title=f"连续补货的并发控制 {index}",
+                    source_platform="douyin",
+                    source_strategy="search",
+                    author_name="系统实验室",
+                )
+                for index in range(4)
+            ],
+            cached=False,
+            source_counts={"search": 8},
+        )
+
+    def build_douyin(**kwargs: object) -> DouyinDiscoveryProducer:
+        return DouyinDiscoveryProducer(
+            soul_engine=kwargs["soul_engine"],
+            discover=discover,
+            enabled=True,
+            min_interval_minutes=0,
+            sources=("search",),
+            candidate_pipeline=kwargs["candidate_pipeline"],
+        )
+
+    scheduler = SimpleNamespace(
+        enabled=True,
+        pause_on_extension_disconnect=False,
+        pool_target_count=4,
+        pool_source_shares={"douyin": 4},
+        account_sync_interval_hours=6,
+        refresh_check_interval_seconds=60,
+        signal_event_threshold=6,
+        trending_refresh_hours=3,
+        explore_refresh_hours=12,
+        discovery_limit=30,
+        proactive_push_interval_seconds=120,
+        speculation_interval_minutes=15,
+        speculation_ttl_days=7,
+        speculation_cooldown_days=7,
+        speculation_confirmation_threshold=3,
+        speculation_max_active=5,
+        speculation_max_primary_interests=12,
+        speculation_max_secondary_interests=48,
+        speculator_idle_interval_minutes=10,
+    )
+    config = SimpleNamespace(
+        data_path=tmp_path,
+        llm=SimpleNamespace(concurrency=3),
+        bilibili=SimpleNamespace(cookie="", proxy=""),
+        discovery=SimpleNamespace(admission_min_score=0.60),
+        scheduler=scheduler,
+    )
+
+    monkeypatch.setattr(bootstrap_module, "load_config", lambda: config)
+    monkeypatch.setattr(bootstrap_module, "build_llm_registry", lambda _config: object())
+    monkeypatch.setattr(bootstrap_module, "module_overrides_from_config", lambda _config: {})
+    monkeypatch.setattr(bootstrap_module, "_llm_concurrency_from_config", lambda _config: 3)
+    monkeypatch.setattr(bootstrap_module, "resolve_runtime_cookie", lambda **_kwargs: "")
+    monkeypatch.setattr(bootstrap_module, "MemoryManager", BootstrapMemory)
+    monkeypatch.setattr(bootstrap_module, "SoulEngine", BootstrapSoul)
+    monkeypatch.setattr(bootstrap_module, "LLMService", BootstrapLLM)
+    monkeypatch.setattr(bootstrap_module, "BilibiliAPIClient", BootstrapBilibiliClient)
+    monkeypatch.setattr(bootstrap_module, "ContentDiscoveryEngine", BootstrapDiscovery)
+    monkeypatch.setattr(bootstrap_module, "SearchStrategy", BootstrapStrategy)
+    monkeypatch.setattr(bootstrap_module, "TrendingStrategy", BootstrapStrategy)
+    monkeypatch.setattr(bootstrap_module, "RelatedChainStrategy", BootstrapStrategy)
+    monkeypatch.setattr(bootstrap_module, "ExploreStrategy", BootstrapStrategy)
+    monkeypatch.setattr(bootstrap_module, "AccountSyncService", BootstrapAccountSync)
+    monkeypatch.setattr(
+        bootstrap_module, "effective_pool_source_shares", lambda _config: {"douyin": 4}
+    )
+    monkeypatch.setattr(
+        bootstrap_module, "build_youtube_discovery_producer", lambda **_kwargs: None
+    )
+    embedding_builder_calls = 0
+
+    def disabled_embedding_builder(*_args: object) -> None:
+        nonlocal embedding_builder_calls
+        embedding_builder_calls += 1
+        return None
+
+    # ``build_openclaw_adapter_services`` imports this symbol inside its
+    # factory, so patching the registry module verifies the same local-import
+    # seam that the real opt-in harness uses to prohibit embedding providers.
+    monkeypatch.setattr(registry_module, "build_embedding_service", disabled_embedding_builder)
+    monkeypatch.setattr(douyin_producer_module, "build_douyin_discovery_producer", build_douyin)
+
+    services = bootstrap_module.build_openclaw_adapter_services()
+    assert embedding_builder_calls == 1
+    producer = services.runtime_controller.douyin_producer
+
+    copy_drain_calls: list[tuple[int, int]] = []
+    original_drain = services.recommendation_engine.drain_pending_expression_copy
+
+    async def monitored_drain(*args: object, **kwargs: object) -> int:
+        copy_drain_calls.append(
+            (
+                int(kwargs.get("limit", 60) or 0),
+                int(kwargs.get("max_extra_requests", 6) or 0),
+            )
+        )
+        return await original_drain(*args, **kwargs)
+
+    services.recommendation_engine.drain_pending_expression_copy = monitored_drain
+
+    # The post-admission hook must delegate to the controller callback, rather
+    # than capture a parallel copy closure.  This gives the structured receipt
+    # a single observable owner and lets the live OpenClaw E2E monitor the
+    # exact callback that would otherwise be used as the controller fallback.
+    callback_calls = 0
+    original_copy_callback = services.runtime_controller.one_shot_expression_copy_callback
+    assert callable(original_copy_callback)
+
+    async def counting_copy_callback(callback_profile: SoulProfile) -> int:
+        nonlocal callback_calls
+        callback_calls += 1
+        return int(await original_copy_callback(callback_profile))
+
+    services.runtime_controller.one_shot_expression_copy_callback = counting_copy_callback
+
+    assert services.runtime_controller.expression_copy_coordinator is None
+    assert producer is not None
+    produced = await producer.produce_if_due(limit=4)
+
+    assert produced["enqueued"] == 4
+    assert produced["cached"] == 4
+    assert services.runtime_controller._pool_readiness_counts()["available"] == 2  # noqa: SLF001
+    assert len(services.database.get_pool_candidates_needing_copy(limit=10)) == 2
+    assert callback_calls == 1
+    assert BootstrapLLM.expression_calls == 1
+    assert BootstrapLLM.expression_batch_sizes == [4]
+    assert copy_drain_calls == [(4, 0)]
+
+    adapter = OpenClawAdapter(services=services)
+    response = await adapter.recommend(limit=1, refresh_if_needed=True)
+
+    assert len(response.items) == 1
+    assert response.items[0].bvid.startswith("dy-openclaw-copy-")
+    assert response.items[0].reason
+    assert BootstrapLLM.expression_calls == 1
+    await asyncio.sleep(0)
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task()
+        and task.get_name() in {"expression_copy", "classify_pool_backlog_detached"}
+    ]
 
 
 def test_build_openclaw_adapter_returns_ready_adapter(monkeypatch) -> None:

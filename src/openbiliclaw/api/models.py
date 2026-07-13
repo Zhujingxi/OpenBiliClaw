@@ -204,6 +204,32 @@ class RuntimeStatusResponse(BaseModel):
     pool_pending_eval_count: int = 0
     pool_evaluated_pending_count: int = 0
     pool_target_count: int = 0
+    candidate_eval_state: str = "idle"
+    candidate_eval_workers: int = 0
+    candidate_eval_in_flight: int = 0
+    candidate_eval_pending: int = 0
+    candidate_eval_backoff_until: float = 0.0
+    candidate_eval_last_error: str = ""
+    candidate_eval_last_batch_seconds: float = 0.0
+    candidate_eval_last_cached: int = 0
+    candidate_eval_last_rejected: int = 0
+    expression_pending_count: int = 0
+    expression_batch_state: str = "idle"
+    expression_batch_deadline: float = 0.0
+    expression_last_completed: int = 0
+    expression_last_error: str = ""
+    llm_total_concurrency: int = 0
+    llm_background_concurrency: int = 0
+    llm_total_active: int = 0
+    llm_total_waiting: int = 0
+    llm_background_active: int = 0
+    llm_background_waiting: int = 0
+    llm_refill_active: int = 0
+    llm_refill_waiting: int = 0
+    llm_maintenance_active: int = 0
+    llm_maintenance_waiting: int = 0
+    llm_refill_priority_active: bool = False
+    inventory_priority_state: str = "healthy"
     last_discovered_count: int = 0
     last_replenished_count: int = 0
     recent_pool_topics: list[str] = Field(default_factory=list)
@@ -1072,7 +1098,7 @@ class ModuleLLMConfigOut(BaseModel):
 
 class LLMConfigOut(BaseModel):
     default_provider: str = "deepseek"
-    concurrency: int = 3
+    concurrency: int = 4
     timeout: int = 300
     # Non-empty fallback_provider = chat fallback on (the legacy
     # fallback_enabled bool was never consulted and is no longer echoed;
@@ -1246,6 +1272,7 @@ class DiscoveryConfigOut(BaseModel):
     planner_poll_seconds: int = 120
     plan_ttl_hours: int = 12
     admission_min_score: float = 0.60
+    candidate_eval_concurrency: int = Field(default=3, ge=1, le=3)
     multimodal_evaluation_enabled: bool = False
     multimodal_batch_size: int = 8
     multimodal_image_max_px: int = 384

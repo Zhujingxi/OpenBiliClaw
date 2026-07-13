@@ -23,6 +23,7 @@ required.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -260,6 +261,14 @@ class RuntimeContext:
     # are constructed so old detached work doesn't compete with the freshly
     # built runtime for SQLite writes / LLM tokens.
     task_registry: BackgroundTaskRegistry = field(default_factory=BackgroundTaskRegistry)
+    llm_concurrency_gate: Any = None
+    pool_inventory_commit_callback: Any = field(init=False, repr=False, compare=False)
+    _pool_inventory_commit_subscribers: list[Any] = field(
+        default_factory=list,
+        init=False,
+        repr=False,
+        compare=False,
+    )
     # Lazily-built guided-init coordinator (gui-init spec §5). Not a constructor
     # arg; created on first access bound to THIS ctx so it always reads the
     # current database / runtime_controller even after a hot-reload swaps them
@@ -282,6 +291,65 @@ class RuntimeContext:
     runtime_controller: Any = None
     account_sync_service: Any = None
     auto_update_service: Any = None
+
+    def __post_init__(self) -> None:
+        """Cache one callback object that remains valid across hot reloads."""
+        self.pool_inventory_commit_callback = self._handle_pool_inventory_commit
+
+    def add_pool_inventory_commit_subscriber(self, callback: Any) -> None:
+        """Register a stable post-commit observer once for this context."""
+        if callback not in self._pool_inventory_commit_subscribers:
+            self._pool_inventory_commit_subscribers.append(callback)
+
+    async def _handle_pool_inventory_commit(self) -> None:
+        """Refresh current inventory, then notify stable observers."""
+        controller = self.runtime_controller
+        readiness = getattr(controller, "_pool_readiness_counts", None)
+        if callable(readiness):
+            try:
+                result = readiness()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.exception("post-commit inventory synchronization failed")
+        else:
+            self._sync_inventory_without_controller()
+
+        for callback in tuple(self._pool_inventory_commit_subscribers):
+            try:
+                result = callback()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.exception("post-commit inventory subscriber failed")
+
+    def _sync_inventory_without_controller(self) -> None:
+        count_pool = getattr(self.database, "count_pool_candidates", None)
+        update = getattr(self.llm_concurrency_gate, "update_inventory", None)
+        if not callable(count_pool) or not callable(update):
+            return
+        try:
+            nickname = ""
+            load_state = getattr(self.memory_manager, "load_discovery_runtime_state", None)
+            if callable(load_state):
+                state = load_state()
+                info = state.get("xhs_self_info", {}) if isinstance(state, dict) else {}
+                if isinstance(info, dict):
+                    nickname = str(info.get("nickname", "") or "").strip()
+            try:
+                available = int(count_pool(xhs_self_nickname=nickname))
+            except TypeError:
+                available = int(count_pool())
+            controller_target = getattr(self.runtime_controller, "pool_target_count", None)
+            scheduler = getattr(getattr(self, "config", None), "scheduler", None)
+            target = (
+                controller_target
+                if controller_target is not None
+                else getattr(scheduler, "pool_target_count", 0)
+            )
+            update(available=max(0, available), target=max(0, int(target)))
+        except Exception:
+            logger.exception("post-commit inventory fallback synchronization failed")
 
     @property
     def init_coordinator(self) -> Any:
@@ -370,6 +438,7 @@ class RuntimeContext:
             TrendingStrategy,
         )
         from openbiliclaw.llm import build_llm_registry
+        from openbiliclaw.llm.concurrency import LLMConcurrencyGate, background_llm_concurrency
         from openbiliclaw.llm.registry import build_embedding_service
         from openbiliclaw.llm.service import LLMService, module_overrides_from_config
         from openbiliclaw.llm.usage_recorder import UsageRecorder
@@ -385,12 +454,25 @@ class RuntimeContext:
         new_usage_recorder = UsageRecorder(sink=self.database)
         new_module_overrides = module_overrides_from_config(new_config)
         llm_concurrency = _llm_concurrency_from_config(new_config)
+        new_llm_gate = self.llm_concurrency_gate or LLMConcurrencyGate(llm_concurrency)
+        new_inventory_available: int | None = None
+        count_pool = getattr(self.database, "count_pool_candidates", None)
+        if callable(count_pool):
+            try:
+                state = self.memory_manager.load_discovery_runtime_state()
+                info = state.get("xhs_self_info", {}) if isinstance(state, dict) else {}
+                nickname = str(info.get("nickname", "")) if isinstance(info, dict) else ""
+                available = int(count_pool(xhs_self_nickname=nickname))
+            except (AttributeError, TypeError):
+                available = int(count_pool())
+            new_inventory_available = max(0, available)
         new_llm_service = LLMService(
             registry=new_registry,
             memory=self.memory_manager,
             usage_recorder=new_usage_recorder,
             module_overrides=new_module_overrides,
             concurrency=llm_concurrency,
+            concurrency_gate=new_llm_gate,
         )
 
         # 2. Bilibili client
@@ -426,6 +508,7 @@ class RuntimeContext:
             satisfaction_filter_enabled=satisfaction_filter_enabled,
             module_overrides=new_module_overrides,
             llm_concurrency=llm_concurrency,
+            llm_concurrency_gate=new_llm_gate,
             speculation_interval_minutes=int(
                 getattr(new_config.scheduler, "speculation_interval_minutes", 10)
             ),
@@ -530,7 +613,7 @@ class RuntimeContext:
         # 7. Discovery engine + strategies
         concurrency = DiscoveryConcurrencyController(
             bilibili_request_concurrency=2,
-            llm_evaluation_concurrency=2,
+            llm_evaluation_concurrency=background_llm_concurrency(llm_concurrency),
         )
         new_discovery_engine = ContentDiscoveryEngine(
             llm_service=new_llm_service,
@@ -740,6 +823,7 @@ class RuntimeContext:
                 database=self.database,
                 soul_engine=new_soul_engine,
                 llm_service=new_llm_service,
+                candidate_pipeline=new_candidate_pipeline,
                 keyword_fetch=new_keyword_fetch,
             )
             from openbiliclaw.runtime.zhihu_producer import build_zhihu_discovery_producer
@@ -846,7 +930,103 @@ class RuntimeContext:
             # init's own run_init_backfill bypasses _llm_work_allowed.
             init_active_check=lambda: self.init_coordinator.init_active(),
             task_registry=self.task_registry,
+            llm_concurrency_gate=new_llm_gate,
         )
+
+        from openbiliclaw.runtime.candidate_eval import (
+            CandidateEvalCoordinator,
+            CandidateEvalSnapshot,
+            effective_candidate_eval_workers,
+        )
+
+        def _candidate_eval_snapshot() -> CandidateEvalSnapshot:
+            readiness = new_runtime_controller._pool_readiness_counts()  # noqa: SLF001
+            new_runtime_controller._update_llm_inventory_state(  # noqa: SLF001
+                int(readiness.get("available", 0))
+            )
+            status_counts = self.database.count_discovery_candidates_by_status()
+            return CandidateEvalSnapshot(
+                available=int(readiness.get("available", 0)),
+                target=int(new_config.scheduler.pool_target_count),
+                pending_eval=int(status_counts.get("pending_eval", 0)),
+                evaluating=int(status_counts.get("evaluating", 0)),
+                evaluated_pending_admission=int(status_counts.get("evaluated", 0)),
+                admitted_pending_copy=int(readiness.get("admitted_pending_copy", 0)),
+            )
+
+        async def _request_candidate_supply(reason: str) -> dict[str, object]:
+            await new_runtime_controller.request_replenishment(reason=reason)
+            return await new_runtime_controller.refresh_if_needed()
+
+        async def _precompute_committed_candidates() -> None:
+            expression_coordinator.notify("candidate_commit")
+
+        from openbiliclaw.runtime.expression_copy import ExpressionCopyCoordinator
+
+        async def _drain_expression_copy(limit: int) -> int:
+            profile = await new_soul_engine.get_profile()
+            if profile is None:
+                return 0
+            before = int(_candidate_eval_snapshot().available)
+            completed = await new_recommendation_engine.drain_pending_expression_copy(
+                profile=cast("Any", profile), limit=limit
+            )
+            await new_runtime_controller._publish_precompute_replenishment_if_needed(  # noqa: SLF001
+                before_pool_count=before
+            )
+            return int(completed)
+
+        expression_coordinator = ExpressionCopyCoordinator(
+            pending_count_provider=lambda: int(_candidate_eval_snapshot().admitted_pending_copy),
+            drain_callback=_drain_expression_copy,
+            safety_wake_seconds=float(
+                getattr(new_config.scheduler, "refresh_check_interval_seconds", 60)
+            ),
+        )
+        new_runtime_controller.expression_copy_coordinator = expression_coordinator
+        set_copy_callback = getattr(new_recommendation_engine, "set_copy_pending_callback", None)
+        if callable(set_copy_callback):
+            set_copy_callback(expression_coordinator.notify)
+
+        candidate_eval_workers = effective_candidate_eval_workers(
+            int(getattr(discovery_cfg, "candidate_eval_concurrency", 3)),
+            llm_concurrency,
+        )
+        new_candidate_eval_coordinator = CandidateEvalCoordinator(
+            pipeline=new_candidate_pipeline,
+            snapshot_provider=_candidate_eval_snapshot,
+            profile_provider=cast("Any", getattr(new_soul_engine, "get_profile", lambda: None)),
+            worker_count=candidate_eval_workers,
+            batch_size=30,
+            supply_callback=_request_candidate_supply,
+            post_commit_callback=_precompute_committed_candidates,
+            on_admitted=lambda count: expression_coordinator.notify(f"candidate_admitted:{count}"),
+            work_allowed=lambda: (
+                new_runtime_controller._is_initialized()  # noqa: SLF001
+                and new_runtime_controller._llm_work_allowed()  # noqa: SLF001
+            ),
+            safety_wake_seconds=float(
+                getattr(new_config.scheduler, "refresh_check_interval_seconds", 60)
+            ),
+        )
+        new_runtime_controller.candidate_eval_coordinator = new_candidate_eval_coordinator
+        new_candidate_pipeline.on_candidates_enqueued = lambda _count: (
+            new_candidate_eval_coordinator.notify("candidate_enqueued:pipeline")
+        )
+        for producer in (
+            new_douyin_producer,
+            new_youtube_producer,
+            new_zhihu_producer,
+        ):
+            if producer is not None:
+                producer.candidate_evaluation_owned_by_coordinator = True
+        set_pool_commit_callback = getattr(
+            new_recommendation_engine,
+            "set_pool_inventory_commit_callback",
+            None,
+        )
+        if callable(set_pool_commit_callback):
+            set_pool_commit_callback(self.pool_inventory_commit_callback)
 
         # 9. Account sync
         new_account_sync = AccountSyncService(
@@ -895,6 +1075,8 @@ class RuntimeContext:
 
         # ── Atomic swap ─────────────────────────────────────────────
         # All construction succeeded → assign attributes.
+        new_llm_gate.reconfigure(llm_concurrency)
+        self.llm_concurrency_gate = new_llm_gate
         self.config = new_config
         self.llm_registry = new_registry
         self.llm_service = new_llm_service
@@ -906,6 +1088,11 @@ class RuntimeContext:
         self.runtime_controller = new_runtime_controller
         self.account_sync_service = new_account_sync
         self.auto_update_service = new_auto_update
+        if new_inventory_available is not None:
+            new_llm_gate.update_inventory(
+                available=new_inventory_available,
+                target=int(new_config.scheduler.pool_target_count),
+            )
         # Drop the cached init prerequisite probes (chat/bilibili) — config or
         # cookie just changed, so the next /api/init pre-flight must re-probe
         # against the new provider/cookie instead of a stale TTL value (gui-init
@@ -1020,13 +1207,28 @@ class RuntimeContext:
                 # freshly-built engine so pool-fill resumes immediately.
                 # precompute_pool_copy spawns classify + delight detached
                 # internally, so one call restarts the whole trio.
-                precompute = getattr(self.recommendation_engine, "precompute_pool_copy", None)
-                if callable(precompute):
+                classify = getattr(self.recommendation_engine, "classify_pool_backlog", None)
+                delight = getattr(self.recommendation_engine, "precompute_delight_scores", None)
+                if callable(classify):
                     self.task_registry.track(
-                        "post_reload_precompute_pool_copy",
-                        self._safe_post_reload_precompute(precompute, profile),
+                        "post_reload_classify_pool_backlog",
+                        classify(profile=profile, limit=60),
                     )
-                    logger.debug("post-reload classify/copy drain scheduled as background task")
+                if callable(delight):
+                    self.task_registry.track(
+                        "post_reload_precompute_delight_scores",
+                        delight(profile=profile, limit=30),
+                    )
+                coordinator = getattr(self.runtime_controller, "expression_copy_coordinator", None)
+                if coordinator is not None:
+                    coordinator.notify("hot_reload")
+                else:
+                    precompute = getattr(self.recommendation_engine, "precompute_pool_copy", None)
+                    if callable(precompute):
+                        self.task_registry.track(
+                            "post_reload_precompute_pool_copy",
+                            self._safe_post_reload_precompute(precompute, profile),
+                        )
             except Exception:
                 pass  # Profile not initialized yet — skip silently
 

@@ -3,22 +3,30 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 from contextlib import suppress
+from dataclasses import replace
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from openbiliclaw.discovery.candidate_pipeline import DiscoveryCandidatePipeline
+from openbiliclaw.discovery.candidate_pipeline import (
+    CandidateEvalClaim,
+    CandidateEvalOutcome,
+    DiscoveryCandidatePipeline,
+)
 from openbiliclaw.discovery.candidate_pool import DiscoveryCandidateWrite
 from openbiliclaw.discovery.engine import ContentDiscoveryEngine
 from openbiliclaw.llm.base import LLMRateLimitError
+from openbiliclaw.llm.concurrency import InventoryPriorityState, LLMConcurrencyGate
 from openbiliclaw.recommendation.delight import DEFAULT_DELIGHT_THRESHOLD
+from openbiliclaw.runtime.candidate_eval import CandidateEvalCoordinator, CandidateEvalSnapshot
 from openbiliclaw.runtime.events import RuntimeEventHub
 from openbiliclaw.runtime.presence import PresenceTracker
 from openbiliclaw.runtime.refresh import ContinuousRefreshController
-from openbiliclaw.storage.database import Database
+from openbiliclaw.storage.database import Database, PoolMaintenanceResult
 
 from .test_search_strategy import _build_profile
 
@@ -130,6 +138,8 @@ class _FakeDatabase:
         self.trim_overflow_source_share_quotas: dict[str, int] | None = None
         self.reactivate_source_share_quotas: dict[str, int] | None = None
         self.reactivate_raw_source_share_quotas: dict[str, int] | None = None
+        self.maintenance_calls: list[dict[str, object]] = []
+        self.legacy_maintenance_calls = 0
         self.distribution_counts: dict[str, dict[str, int]] = {
             "topic_group": {"科技": 3},
             "style_key": {"deep_dive": 2},
@@ -196,9 +206,11 @@ class _FakeDatabase:
         return {axis: dict(counts) for axis, counts in self.distribution_counts.items()}
 
     def trim_explore_cluster_overflow(self, *, max_per_cluster: int = 3) -> int:
+        self.legacy_maintenance_calls += 1
         return 0
 
     def trim_topic_group_overflow(self, *, max_per_group: int) -> int:
+        self.legacy_maintenance_calls += 1
         return 0
 
     def reactivate_under_quota_pool_sources(
@@ -208,6 +220,7 @@ class _FakeDatabase:
         source_share_quotas: dict[str, int],
         raw_source_share_quotas: dict[str, int] | None = None,
     ) -> int:
+        self.legacy_maintenance_calls += 1
         self.reactivate_source_share_quotas = dict(source_share_quotas)
         self.reactivate_raw_source_share_quotas = (
             dict(raw_source_share_quotas) if raw_source_share_quotas is not None else None
@@ -225,6 +238,7 @@ class _FakeDatabase:
         target: int,
         source_share_quotas: dict[str, int] | None = None,
     ) -> int:
+        self.legacy_maintenance_calls += 1
         self.trim_target = target
         self.trim_source_share_quotas = (
             dict(source_share_quotas) if source_share_quotas is not None else None
@@ -240,11 +254,64 @@ class _FakeDatabase:
         return trimmed
 
     def trim_pool_source_overflow(self, *, source_share_quotas: dict[str, int]) -> int:
+        self.legacy_maintenance_calls += 1
         self.trim_overflow_source_share_quotas = dict(source_share_quotas)
         return 0
 
     def evict_stale_pool_items(self, *, max_age_days: int = 14) -> int:
+        self.legacy_maintenance_calls += 1
         return 0
+
+    def maintain_pool_inventory(
+        self,
+        *,
+        target: int,
+        raw_ceiling: int,
+        source_share_quotas: dict[str, int],
+        raw_source_share_quotas: dict[str, int] | None = None,
+        max_per_topic_group: int = 3,
+        max_per_explore_cluster: int = 3,
+        stale_max_age_days: int = 14,
+        xhs_self_nickname: str = "",
+    ) -> PoolMaintenanceResult:
+        self.maintenance_calls.append(
+            {
+                "target": target,
+                "raw_ceiling": raw_ceiling,
+                "source_share_quotas": dict(source_share_quotas),
+                "raw_source_share_quotas": dict(raw_source_share_quotas or {}),
+                "max_per_topic_group": max_per_topic_group,
+                "max_per_explore_cluster": max_per_explore_cluster,
+                "stale_max_age_days": stale_max_age_days,
+                "xhs_self_nickname": xhs_self_nickname,
+            }
+        )
+        raw_before = self.pool_count if self.pool_raw_count is None else self.pool_raw_count
+        raw_after = min(raw_before, raw_ceiling)
+        if self.pool_raw_count is not None:
+            self.pool_raw_count = raw_after
+        return PoolMaintenanceResult(
+            available_before=self.pool_count,
+            available_after=self.pool_count,
+            target=target,
+            protected_available=min(self.pool_count, target),
+            recovered_suppressed=0,
+            trimmed_stale=0,
+            trimmed_explore_cluster=0,
+            trimmed_ready_reserve=0,
+            trimmed_evaluated=0,
+            trimmed_raw=max(0, raw_before - raw_after),
+            trimmed_by_source={},
+            deferred_topic_trim=0,
+            deferred_source_trim=0,
+            deferred_stale_trim=0,
+            deferred_explore_cluster_trim=0,
+            raw_before=raw_before,
+            raw_after=raw_after,
+            raw_ceiling=raw_ceiling,
+            untrimmed_raw_excess=0,
+            rolled_back=False,
+        )
 
     def get_delight_candidate(
         self,
@@ -1004,6 +1071,7 @@ def test_get_pending_delight_skips_effective_disliked_candidate() -> None:
 
 
 def test_runtime_status_reports_pool_readiness_counts() -> None:
+    gate = LLMConcurrencyGate(4)
     controller = ContinuousRefreshController(
         memory_manager=_FakeMemoryManager(),
         database=_FakeDatabase(
@@ -1016,6 +1084,8 @@ def test_runtime_status_reports_pool_readiness_counts() -> None:
         soul_engine=_FakeSoulEngine(),
         discovery_engine=_FakeDiscoveryEngine(),
         recommendation_engine=_FakeRecommendationEngine(),
+        llm_concurrency_gate=gate,
+        pool_target_count=30,
     )
 
     status = controller.get_runtime_status()
@@ -1025,6 +1095,67 @@ def test_runtime_status_reports_pool_readiness_counts() -> None:
     assert status["pool_pending_count"] == 142
     assert status["pool_pending_eval_count"] == 4
     assert status["pool_evaluated_pending_count"] == 2
+    assert gate.inventory_priority_state is InventoryPriorityState.EMPTY
+    assert status["inventory_priority_state"] == "empty"
+
+
+def test_pool_readiness_snapshot_updates_refill_state_from_canonical_available() -> None:
+    database = _FakeDatabase([], pool_count=7)
+    gate = LLMConcurrencyGate(4)
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        llm_concurrency_gate=gate,
+        pool_target_count=30,
+    )
+
+    assert controller._pool_readiness_counts()["available"] == 7
+    assert gate.inventory_priority_state is InventoryPriorityState.REFILL
+    database.pool_count = 30
+    assert controller._pool_readiness_counts()["available"] == 30
+    assert gate.inventory_priority_state is InventoryPriorityState.HEALTHY
+
+
+def test_pool_readiness_preserves_database_admitted_pending_copy(tmp_path: Path) -> None:
+    database = Database(tmp_path / "readiness.db")
+    database.initialize()
+    database.cache_content(
+        "BVPENDINGCOPY",
+        title="classified admitted row",
+        source="search",
+        relevance_score=0.9,
+        style_key="tutorial",
+        topic_group="testing",
+    )
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        pool_target_count=10,
+    )
+
+    assert database.count_pool_readiness()["admitted_pending_copy"] == 1
+    assert controller._pool_readiness_counts()["admitted_pending_copy"] == 1
+    database.close()
+
+
+def test_pool_readiness_fallback_sets_admitted_pending_copy_to_zero() -> None:
+    database = _FakeDatabase([], pool_count=3)
+    database.count_pool_readiness = lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("boom"))  # type: ignore[method-assign]
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+    )
+
+    assert controller._pool_readiness_counts()["admitted_pending_copy"] == 0
 
 
 async def test_refresh_controller_prepares_delight_candidates_without_refresh() -> None:
@@ -1360,6 +1491,64 @@ async def test_refresh_plan_uses_candidate_pipeline_when_available() -> None:
     assert memory.state["recent_pool_topics"][:1] == ["pipeline-topic"]
 
 
+async def test_one_shot_inline_eval_cap_bounds_default_pool_supply_and_drain() -> None:
+    """A one-shot bridge serves one bounded batch, not the daemon's 30-row wave."""
+
+    pipeline = _FakeCandidatePipeline()
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase([{"id": 1, "event_type": "view"}], pool_count=0),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        discovery_candidate_pipeline=pipeline,
+        one_shot_inline_eval_limit=4,
+        pool_target_count=300,
+        discovery_limit=30,
+    )
+
+    result = await controller.force_refresh()
+
+    assert result["refreshed"] is True
+    assert pipeline.enqueued
+    assert pipeline.drains == [4]
+    assert all(limit <= 4 for _strategies, limit in pipeline.enqueued)
+
+
+async def test_managed_candidate_coordinator_keeps_daemon_sized_supply_wave() -> None:
+    """The one-shot cap must not shrink the API runtime's coordinator-owned wave."""
+
+    class Coordinator:
+        def __init__(self) -> None:
+            self.notifications: list[str] = []
+
+        def notify(self, reason: str) -> None:
+            self.notifications.append(reason)
+
+    pipeline = _FakeCandidatePipeline()
+    coordinator = Coordinator()
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase([{"id": 1, "event_type": "view"}], pool_count=0),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        discovery_candidate_pipeline=pipeline,
+        candidate_eval_coordinator=coordinator,
+        one_shot_inline_eval_limit=4,
+        pool_target_count=300,
+        discovery_limit=30,
+    )
+
+    result = await controller.force_refresh()
+
+    assert result["refreshed"] is True
+    assert pipeline.enqueued
+    assert all(limit == 30 for _strategies, limit in pipeline.enqueued)
+    assert pipeline.drains == []
+    assert coordinator.notifications
+
+
 async def test_refresh_pipeline_drain_uses_shared_candidate_lock() -> None:
     pipeline = _FakeCandidatePipeline()
     controller = ContinuousRefreshController(
@@ -1382,6 +1571,175 @@ async def test_refresh_pipeline_drain_uses_shared_candidate_lock() -> None:
 
     assert pipeline.enqueued == [(["search"], 7)]
     assert pipeline.drains == []
+
+
+async def test_managed_refresh_leaves_all_durable_eval_claims_to_coordinator(
+    tmp_path: Path,
+) -> None:
+    """A live coordinator is the sole owner of refresh-created raw claims.
+
+    The producer intentionally overfills the raw queue.  The coordinator can
+    claim only three 30-item batches; the old inline refresh drain would claim
+    a second 90-item batch, making the durable ``evaluating`` count reach 180.
+    """
+
+    class _BlockingManagedPipeline:
+        def __init__(self, database: Database) -> None:
+            self.database = database
+            self.on_candidates_enqueued: Any | None = None
+            self.inline_drain_calls = 0
+            self.claim_sequence = 0
+            self.release = asyncio.Event()
+
+        async def ensure_pending_supply(self, **_kwargs: object) -> dict[str, int]:
+            writes = [
+                DiscoveryCandidateWrite(
+                    candidate_key=f"bilibili:managed-{index}",
+                    source_platform="bilibili",
+                    source_strategy="search",
+                    content_id=f"managed-{index}",
+                    title=f"Managed candidate {index}",
+                )
+                for index in range(180)
+            ]
+            inserted = self.database.enqueue_discovery_candidates(writes)
+            if inserted > 0 and callable(self.on_candidates_enqueued):
+                self.on_candidates_enqueued(inserted)
+            return {
+                "inserted": inserted,
+                "pending_eval": inserted,
+                "evaluating": 0,
+                "attempts": 1,
+            }
+
+        async def drain_pending(self, **_kwargs: object) -> dict[str, int]:
+            self.inline_drain_calls += 1
+            # This is the old competing owner: it creates a second durable
+            # claim while the coordinator's three workers are still blocked.
+            self.database.claim_discovery_candidates_for_eval(
+                limit=90,
+                claim_token="legacy-inline-drain",
+            )
+            await self.release.wait()
+            return {"evaluated": 0, "cached": 0, "rejected": 0}
+
+        def claim_batch(self, *, limit: int) -> CandidateEvalClaim | None:
+            self.claim_sequence += 1
+            token = f"coordinator-{self.claim_sequence}-{id(self)}-{limit}"
+            rows = self.database.claim_discovery_candidates_for_eval(
+                limit=limit,
+                claim_token=token,
+            )
+            if not rows:
+                return None
+            return CandidateEvalClaim(token=token, rows=tuple(rows), items=())
+
+        async def evaluate_claim(
+            self,
+            claim: CandidateEvalClaim,
+            _profile: object,
+        ) -> CandidateEvalOutcome:
+            await self.release.wait()
+            return CandidateEvalOutcome(claim=claim, scores=(), elapsed_seconds=0.0)
+
+        async def complete_claim(
+            self,
+            _outcome: CandidateEvalOutcome,
+            *,
+            admission_limit: int | None = None,
+        ) -> dict[str, int]:
+            del admission_limit
+            return {"evaluated": 0, "cached": 0, "rejected": 0}
+
+        def release_claim(
+            self,
+            claim: CandidateEvalClaim,
+            *,
+            reason: str,
+            increment_attempts: bool = False,
+        ) -> int:
+            del reason, increment_attempts
+            return self.database.reset_claimed_discovery_candidates_to_pending(
+                [int(row["id"]) for row in claim.rows],
+                claim_token=claim.token,
+                reason="test cleanup",
+                max_attempts=5,
+                max_batch_attempts=50,
+            )
+
+        def admit_evaluated(self, *, limit: int) -> dict[str, int]:
+            del limit
+            return {"cached": 0, "rejected": 0}
+
+    database = Database(tmp_path / "managed-refresh.db")
+    database.initialize()
+    pipeline = _BlockingManagedPipeline(database)
+
+    def snapshot() -> CandidateEvalSnapshot:
+        statuses = database.count_discovery_candidates_by_status()
+        return CandidateEvalSnapshot(
+            available=0,
+            target=500,
+            pending_eval=int(statuses.get("pending_eval", 0)),
+            evaluating=int(statuses.get("evaluating", 0)),
+            evaluated_pending_admission=int(statuses.get("evaluated", 0)),
+            admitted_pending_copy=0,
+        )
+
+    coordinator = CandidateEvalCoordinator(
+        pipeline=pipeline,
+        snapshot_provider=snapshot,
+        profile_provider=lambda: object(),
+        worker_count=3,
+        batch_size=30,
+        safety_wake_seconds=60,
+    )
+    enqueue_notifications: list[int] = []
+
+    def notify_enqueued(count: int) -> None:
+        enqueue_notifications.append(count)
+        coordinator.notify("candidate_enqueued:pipeline")
+
+    pipeline.on_candidates_enqueued = notify_enqueued
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        soul_engine=_ProfileSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        discovery_candidate_pipeline=pipeline,
+        pool_target_count=500,
+        discovery_limit=90,
+        pool_source_shares={"bilibili": 1},
+        candidate_eval_coordinator=coordinator,
+    )
+
+    coordinator_task = asyncio.create_task(coordinator.run_forever())
+    refresh_task = asyncio.create_task(
+        controller._run_refresh_plan(
+            state=_FakeMemoryManager().load_discovery_runtime_state(),
+            profile=await _ProfileSoulEngine().get_profile(),
+            plan=[(["search"], 180)],
+            reason="managed-refresh",
+        )
+    )
+    try:
+        async with asyncio.timeout(2):
+            while int(database.count_discovery_candidates_by_status().get("evaluating", 0)) < 90:
+                await asyncio.sleep(0)
+        # Give a competing inline drain one scheduling turn.  On the old path
+        # it grows durable evaluating rows to 180 and keeps refresh blocked.
+        await asyncio.sleep(0.02)
+        assert enqueue_notifications == [180]
+        assert pipeline.inline_drain_calls == 0
+        assert int(database.count_discovery_candidates_by_status().get("evaluating", 0)) <= 90
+        assert refresh_task.done()
+    finally:
+        pipeline.release.set()
+        if not refresh_task.done():
+            await asyncio.wait_for(refresh_task, timeout=2)
+        await coordinator.stop()
+        await asyncio.wait_for(coordinator_task, timeout=2)
 
 
 async def test_candidate_eval_drain_runs_when_refresh_plan_empty() -> None:
@@ -2641,7 +2999,7 @@ async def test_refresh_skips_discovery_when_available_pool_is_at_target_floor() 
 
     assert result["reason"] == "pool_at_cap"
     assert database.pool_count == 50
-    assert database.trim_target == 150
+    assert database.maintenance_calls[0]["raw_ceiling"] == 150
 
 
 def test_source_target_counts_use_platform_default_shares() -> None:
@@ -3432,12 +3790,79 @@ def test_pool_cap_total_trim_receives_raw_ceiling_source_quotas() -> None:
     )
 
     assert controller._enforce_pool_cap() is True
-    assert database.trim_target == 1200
-    assert database.trim_source_share_quotas is not None
-    assert database.trim_source_share_quotas["bilibili"] == 960
-    assert database.trim_source_share_quotas["xiaohongshu"] == 120
-    assert database.trim_source_share_quotas["douyin"] == 120
+    call = database.maintenance_calls[0]
+    assert call["raw_ceiling"] == 1200
+    assert call["raw_source_share_quotas"] == {
+        "bilibili": 960,
+        "xiaohongshu": 120,
+        "douyin": 120,
+    }
     assert database.pool_raw_count == 1200
+
+
+def test_pool_cap_uses_one_atomic_maintenance_entry_point() -> None:
+    database = _FakeDatabase([], pool_count=20, pool_raw_count=70)
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        pool_target_count=30,
+    )
+
+    assert controller._enforce_pool_cap() is False
+    assert database.legacy_maintenance_calls == 0
+    assert database.maintenance_calls == [
+        {
+            "target": 30,
+            "raw_ceiling": 150,
+            "source_share_quotas": {"bilibili": 30},
+            "raw_source_share_quotas": {"bilibili": 150},
+            "max_per_topic_group": 3,
+            "max_per_explore_cluster": 3,
+            "stale_max_age_days": 14,
+            "xhs_self_nickname": "",
+        }
+    ]
+
+
+def test_pool_cap_uses_canonical_fallback_when_begin_immediate_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BeginFailure:
+        def execute(self, sql: str) -> None:
+            assert sql == "BEGIN IMMEDIATE"
+            raise sqlite3.OperationalError("database is locked")
+
+        def rollback(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    database = Database(tmp_path / "begin-failure.db")
+    database.initialize()
+    _seed_visible_pool_row(
+        database,
+        "BV_LOCKED_READY",
+        topic_group="ready",
+        relevance_score=0.9,
+    )
+    assert database.count_pool_candidates() == 1
+    monkeypatch.setattr(database, "open_connection", BeginFailure)
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        pool_target_count=1,
+    )
+
+    assert controller._enforce_pool_cap() is True
+    assert database.count_pool_candidates() == 1
 
 
 def test_pool_cap_skips_platform_overflow_when_ready_pool_below_target() -> None:
@@ -3456,7 +3881,7 @@ def test_pool_cap_skips_platform_overflow_when_ready_pool_below_target() -> None
     assert database.trim_overflow_source_share_quotas is None
 
 
-def test_pool_cap_reactivates_under_quota_sources_before_trim() -> None:
+def test_pool_cap_does_not_compose_legacy_reactivation_before_maintenance() -> None:
     database = _FakeDatabase([], pool_count=600, reactivate_pool_count=20)
     controller = ContinuousRefreshController(
         memory_manager=_FakeMemoryManager(),
@@ -3469,17 +3894,14 @@ def test_pool_cap_reactivates_under_quota_sources_before_trim() -> None:
     )
 
     assert controller._enforce_pool_cap() is True
-    assert database.reactivate_source_share_quotas is not None
-    assert database.reactivate_source_share_quotas["bilibili"] == 480
-    assert database.reactivate_source_share_quotas["xiaohongshu"] == 60
-    assert database.reactivate_source_share_quotas["douyin"] == 60
-    assert database.reactivate_raw_source_share_quotas is not None
-    assert database.reactivate_raw_source_share_quotas["bilibili"] == 960
-    assert database.reactivate_raw_source_share_quotas["xiaohongshu"] == 120
-    assert database.reactivate_raw_source_share_quotas["douyin"] == 120
-    assert database.trim_source_share_quotas is not None
-    assert database.trim_source_share_quotas["bilibili"] == 960
-    assert database.pool_count == 620
+    assert database.legacy_maintenance_calls == 0
+    assert database.reactivate_source_share_quotas is None
+    assert database.maintenance_calls[0]["source_share_quotas"] == {
+        "bilibili": 480,
+        "xiaohongshu": 60,
+        "douyin": 60,
+    }
+    assert database.pool_count == 600
 
 
 async def test_run_refresh_plan_enforces_raw_ceiling_when_discovery_overshoots() -> None:
@@ -3669,6 +4091,231 @@ async def test_run_forever_drives_pipeline_tick_and_refresh() -> None:
     assert spy.tick_calls >= 1, (
         f"Expected pipeline.tick() to be called at least once. Got: {spy.tick_calls}"
     )
+
+
+async def test_run_forever_startup_order_repairs_before_llm_and_background_tasks() -> None:
+    calls: list[str] = []
+    candidate_started = asyncio.Event()
+    expression_started = asyncio.Event()
+
+    class _OrderedDatabase(_FakeDatabase):
+        def maintain_pool_inventory(self, **kwargs: object) -> PoolMaintenanceResult:
+            calls.append("maintenance")
+            return super().maintain_pool_inventory(**kwargs)  # type: ignore[arg-type]
+
+    class _OrderedCoordinator:
+        async def run_forever(self) -> None:
+            calls.append("candidate")
+            candidate_started.set()
+            await asyncio.Event().wait()
+
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_OrderedDatabase(events=[]),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        candidate_eval_coordinator=_OrderedCoordinator(),
+        check_interval_seconds=3600,
+    )
+
+    async def _prepare() -> int:
+        calls.append("prepare_delight")
+        return 0
+
+    async def _expression_loop() -> None:
+        calls.append("expression")
+        expression_started.set()
+        await asyncio.Event().wait()
+
+    controller.prepare_delight_candidates = _prepare  # type: ignore[method-assign]
+    controller._loop_pool_precompute = _expression_loop  # type: ignore[method-assign]
+    task = asyncio.create_task(controller.run_forever())
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(candidate_started.wait(), expression_started.wait()),
+            timeout=0.5,
+        )
+        assert calls[0] == "maintenance"
+        assert calls.index("maintenance") < calls.index("prepare_delight")
+        assert calls.index("maintenance") < calls.index("candidate")
+        assert calls.index("maintenance") < calls.index("expression")
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+async def test_run_forever_does_not_repeat_host_startup_maintenance() -> None:
+    database = _FakeDatabase(events=[])
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        check_interval_seconds=3600,
+    )
+    prepare_started = asyncio.Event()
+
+    async def _prepare() -> int:
+        prepare_started.set()
+        return 0
+
+    controller.prepare_delight_candidates = _prepare  # type: ignore[method-assign]
+    controller.run_startup_maintenance()
+
+    task = asyncio.create_task(controller.run_forever())
+    try:
+        await asyncio.wait_for(prepare_started.wait(), timeout=0.5)
+        assert len(database.maintenance_calls) == 1
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+def test_startup_maintenance_snapshot_failure_remains_retryable() -> None:
+    class _SnapshotFailureDatabase(_FakeDatabase):
+        def maintain_pool_inventory(self, **kwargs: object) -> PoolMaintenanceResult:
+            self.maintenance_calls.append(dict(kwargs))
+            raise RuntimeError("snapshot unavailable")
+
+    database = _SnapshotFailureDatabase(events=[])
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+    )
+    controller.run_startup_maintenance()
+    controller.run_startup_maintenance()
+
+    assert len(database.maintenance_calls) == 2
+
+
+def test_startup_maintenance_rolled_back_result_remains_retryable() -> None:
+    class _RolledBackDatabase(_FakeDatabase):
+        def maintain_pool_inventory(self, **kwargs: object) -> PoolMaintenanceResult:
+            result = super().maintain_pool_inventory(**kwargs)  # type: ignore[arg-type]
+            return replace(result, rolled_back=True, reason="forced rollback")
+
+    database = _RolledBackDatabase(events=[])
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+    )
+
+    controller.run_startup_maintenance()
+    controller.run_startup_maintenance()
+
+    assert len(database.maintenance_calls) == 2
+
+
+async def test_hot_reload_new_controller_repairs_before_new_background_tasks() -> None:
+    async def _run_controller_once(label: str) -> list[str]:
+        calls: list[str] = []
+        candidate_started = asyncio.Event()
+        expression_started = asyncio.Event()
+
+        class _ReloadDatabase(_FakeDatabase):
+            def maintain_pool_inventory(self, **kwargs: object) -> PoolMaintenanceResult:
+                calls.append(f"{label}:maintenance")
+                return super().maintain_pool_inventory(**kwargs)  # type: ignore[arg-type]
+
+        class _ReloadCoordinator:
+            async def run_forever(self) -> None:
+                calls.append(f"{label}:candidate")
+                candidate_started.set()
+                await asyncio.Event().wait()
+
+        controller = ContinuousRefreshController(
+            memory_manager=_FakeMemoryManager(),
+            database=_ReloadDatabase(events=[]),
+            soul_engine=_FakeSoulEngine(),
+            discovery_engine=_FakeDiscoveryEngine(),
+            recommendation_engine=_FakeRecommendationEngine(),
+            candidate_eval_coordinator=_ReloadCoordinator(),
+            check_interval_seconds=3600,
+        )
+
+        async def _prepare() -> int:
+            calls.append(f"{label}:prepare_delight")
+            return 0
+
+        async def _expression_loop() -> None:
+            calls.append(f"{label}:expression")
+            expression_started.set()
+            await asyncio.Event().wait()
+
+        controller.prepare_delight_candidates = _prepare  # type: ignore[method-assign]
+        controller._loop_pool_precompute = _expression_loop  # type: ignore[method-assign]
+        task = asyncio.create_task(controller.run_forever())
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(candidate_started.wait(), expression_started.wait()),
+                timeout=0.5,
+            )
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        return calls
+
+    old_calls = await _run_controller_once("old")
+    new_calls = await _run_controller_once("new")
+
+    assert old_calls[0] == "old:maintenance"
+    assert new_calls[0] == "new:maintenance"
+    assert new_calls.index("new:maintenance") < new_calls.index("new:prepare_delight")
+    assert new_calls.index("new:maintenance") < new_calls.index("new:candidate")
+    assert new_calls.index("new:maintenance") < new_calls.index("new:expression")
+
+
+async def test_run_forever_starts_one_candidate_eval_coordinator() -> None:
+    class _Coordinator:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.stopped = asyncio.Event()
+            self.run_calls = 0
+
+        async def run_forever(self) -> None:
+            self.run_calls += 1
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.stopped.set()
+
+        def status_payload(self) -> dict[str, object]:
+            return {
+                "candidate_eval_state": "running",
+                "candidate_eval_workers": 3,
+            }
+
+    coordinator = _Coordinator()
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase(events=[]),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        candidate_eval_coordinator=coordinator,
+        check_interval_seconds=3600,
+    )
+    task = asyncio.create_task(controller.run_forever())
+    await asyncio.wait_for(coordinator.started.wait(), timeout=0.5)
+
+    assert coordinator.run_calls == 1
+    assert controller.get_runtime_status()["candidate_eval_state"] == "running"
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(coordinator.stopped.wait(), timeout=0.5)
 
 
 async def test_run_forever_continues_when_pipeline_tick_raises() -> None:

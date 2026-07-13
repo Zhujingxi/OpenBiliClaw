@@ -1,5 +1,9 @@
 # LLM 多模型支持
 
+> 运行时并发由单一 `LLMConcurrencyGate` 管理：所有 provider 请求受总 gate（默认 4）约束，后台还受 `max(1, total-1)`（默认 3）约束。后台 admission 依据 canonical durable inventory 把工作分为 `refill.expression > refill.evaluation > refill.supply > maintenance`；有 refill waiter 时保证下一批新准入至少两个 refill 槽并可借满三个，库存为零时 park 新 maintenance。对话与 `api.sentiment` 是交互流量；未知 caller 只告警一次并按 maintenance 处理。旧 `bypass_semaphore=True` 只绕过后台 gate，`PrioritySemaphore` 仍从 `llm.service` 兼容导出。
+
+热重载不会替换 gate 对象，而是原地 `reconfigure()`：升容立即按优先级唤醒等待者；降容不撤销已进入 provider 的工作，并在 active 降到新容量以下前停止新准入。配置探测也使用 `api.config_probe` 后台分类经过同一 gate。
+
 > 统一的多 LLM Provider 接口，支持 OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter / OpenAI-compatible，带显式备选 Provider、retry 和健康检查。
 
 ## 概述
@@ -19,6 +23,7 @@
 | 2.1 Provider 实现 | ✅ | OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter / OpenAI-compatible，带 retry + 超时 |
 | 2.2 Provider Registry | ✅ | 自动注册 + 可配置 fallback + health check |
 | 2.3 Prompt 管理与 Service | ✅ | Prompt 构建器 + LLMService 门面 |
+| v0.3.164+ OpenAI-compatible JSON-object 合约 | ✅ | `LLMService.complete_structured_task()` 与 `complete_multimodal_structured_task()` 共享最小兼容层：已有大写 `JSON` 仅归一为小写 `json`；完全没有该 token 时只追加 `json`。这满足部分 OpenAI-compatible 端点对 `response_format=json_object` 的字面消息约束，不改变业务规则、画像、阈值、user 内容或 core-memory 排序；非结构化 `complete_with_core_memory()` 完全不改写 prompt。 |
 | v0.3.162+ LLM 失败可操作说明 | ✅ | `llm.base.describe_llm_failure()` 沿异常 cause/context 链翻译上层错误；新增 authentication / unauthorized / invalid API key / 401 鉴权桶，并将 insufficient quota / quota / exhausted / 429 归入「额度用尽或被限流」桶，API 与 CLI 继续消费同一函数，不新增 init reason code |
 | v0.3.160+ Discovery 统一评估契约 | ✅ | 单条与 batch 内容评估 prompt 仅允许 `explore` 保留主题距离例外；`search` / `trending` / `hot` / `feed` / `related_chain` / `channel` / `creator` 及所有平台不得获得基础分、自动加分、较低门槛或事后画像关联，明显不匹配内容允许低于 admission 门槛 |
 | 4.5 核心记忆加载 | ✅ | 统一 core memory 注入入口，覆盖 Soul 全链路 |
@@ -281,22 +286,19 @@ stats = cache.stats()
 
 `profile_prompt_layers()` 只负责确定层次和顺序：core / life / interests / style / recent，未知扩展字段进入末尾 `profile_extra`。`PromptLayerRenderCache` 不缓存业务画像本身，只缓存当前层 digest 对应的 JSON prompt block。调用方仍每次从最新 profile 构造 layer payload；digest 不变时复用完全相同的字符串，digest 变化时只替换该层。
 
-#### 全局优先级队列(v0.3.63+)
+#### Runtime 全局补货优先 admission
 
-`LLMService` 内部用 `PrioritySemaphore`(capacity=1, heapq + monotonic
-counter) 串行化所有 `await registry.complete(...)` 调用,按 `caller`
-tag 解析优先级,longest-prefix 命中:
+`LLMConcurrencyGate.update_inventory(available=..., target=...)` 只消费 canonical durable snapshot，产生 `healthy / refill / empty` 三态。后台先取得 cancellation-safe `RefillAdmissionSemaphore`，再取得 total priority permit；退出时逆序释放，因此后台 holder 不会在等待 total 时占住交互保留槽。
 
-| caller 前缀 | priority | 说明 |
+| 流量类 | total priority | 说明 |
 |---|---|---|
-| `recommendation.write_expression` | 1 | popup 可见的池子表达式回填 |
-| `discovery.evaluate_batch` | 1 | 当前 discovery 批次评估 |
-| `soul.*` / `xhs.*` | 2 | 灵魂分析 / 小红书分类 |
-| 其他 / 空 | 3 | 默认 |
+| interactive | 0 | `soul.dialogue*`、`api.sentiment`，仅经过 total gate |
+| refill.expression | 1 | 推荐文案回填，补货最高优先 |
+| refill.evaluation | 2 | 候选 batch / single 评估 |
+| refill.supply | 3 | 仅在 durable inventory 低于目标时动态升级的关键词/原料生成 |
+| maintenance | 4 | Soul、评测、purge 与健康库存下的 discovery；未知 caller 也落此类 |
 
-数字越小越先服务。无竞争时 free passthrough 不增加开销。维护者新增
-caller tag 时无需在意优先级——默认 priority=3 不会插队挤掉已知的
-priority≤2 任务。
+当 refill waiter 存在时，新 maintenance 最多一个；没有 runnable refill 时 maintenance 可借用所有空闲后台槽，保持 work-conserving。`empty` 只 park 新 maintenance，绝不会取消或抢占已经进入 provider 的 maintenance。状态输出同时包含 refill/maintenance active、waiting、priority-active 与 inventory state。
 
 #### 分模块路由(v0.3.75+)
 
@@ -441,3 +443,4 @@ force-quit 残留场景；收养只做记录、绝不发信号，但让 watchdog
 11. **结构化输出只在 helper 处放宽**：业务模块不再各自手写 JSON 截取逻辑；容错集中在 `json_utils.py`，模块侧用 predicate 收紧语义，避免一个 provider 的异常 shape 修复污染其他任务。
 12. **分模块 override 不隐式改意图**：`[llm.<module>]` 命中时必须精确调用用户指定的 chat provider；只有 provider 拼错或不是 chat-capable 时才降级到默认链并 INFO 一次。模型覆盖通过 per-call `model=` 完成，避免污染 provider 实例状态或影响其他模块。
 13. **Codex OAuth 只做认证层**：`auth_mode="codex_oauth"` 不注册新 provider，而是给现有 `OpenAIProvider` 注入动态 token provider。该模式只允许 OpenAI 官方 `base_url`，防止 ChatGPT OAuth token 泄露给 OpenAI-compatible 代理。
+14. **失败分类先于批响应解析**：共享 classifier 保持 rate-limit / no-provider / auth / invalid-response 的特定语义优先级，并额外识别连接失败与 HTTP 500/502/503/504；调用方只把 provider transient 交给协调器退避，不把 JSON shape 错误误判成网络失败。

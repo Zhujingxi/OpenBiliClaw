@@ -82,6 +82,7 @@ class _DynamicBatchLLMService:
 
     def __init__(self) -> None:
         self.user_inputs: list[str] = []
+        self.max_tokens: list[int] = []
 
     async def complete_structured_task(
         self,
@@ -95,6 +96,7 @@ class _DynamicBatchLLMService:
         reasoning_effort: str | None = None,
     ) -> object:
         self.user_inputs.append(user_input)
+        self.max_tokens.append(max_tokens)
         batch_json = user_input.split("<content_batch>", 1)[1].split("</content_batch>", 1)[0]
         items = json.loads(batch_json.strip())
         payload = [
@@ -594,6 +596,19 @@ async def test_evaluate_content_batch_skips_recently_viewed_non_bilibili_before_
     assert "已经看过的 YouTube" not in user_input
 
 
+def test_candidate_view_keys_normalize_zhihu_alias() -> None:
+    keys = ContentDiscoveryEngine._candidate_view_keys(
+        DiscoveredContent(
+            content_id="answer:42",
+            source_platform="zh",
+            title="知乎回答",
+            source_strategy="zhihu-hot",
+        )
+    )
+
+    assert "zhihu:answer:42" in keys
+
+
 @pytest.mark.asyncio
 async def test_evaluate_content_batch_omits_duplicate_text_description() -> None:
     llm_service = _DynamicBatchLLMService()
@@ -670,6 +685,29 @@ async def test_multimodal_evaluation_uses_configured_smaller_batch_size() -> Non
     assert len(llm_service.user_inputs) == 3
     assert [prompt.count('"content_id"') for prompt in llm_service.user_inputs] == [2, 2, 1]
     assert engine.multimodal_unavailable_reason == ""
+
+
+@pytest.mark.asyncio
+async def test_text_batch_evaluation_bounds_declared_output_tokens() -> None:
+    llm_service = _DynamicBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm_service)
+
+    scores = await engine.evaluate_content_batch(
+        [
+            DiscoveredContent(
+                content_id=f"text-{idx}",
+                title=f"text item {idx}",
+                source_platform="bilibili",
+                source_strategy="trending",
+            )
+            for idx in range(8)
+        ],
+        _build_profile(),
+        batch_size=8,
+    )
+
+    assert scores == [0.8] * 8
+    assert llm_service.max_tokens == [4096]
 
 
 @pytest.mark.asyncio
@@ -750,6 +788,7 @@ async def test_multimodal_evaluation_sends_prepared_cover_images(monkeypatch) ->
         ]
     ]
     assert '"cover_image_ref": "cover:cover-0"' in llm_service.user_inputs[0]
+    assert llm_service.max_tokens == [4096]
 
 
 async def test_multimodal_evaluation_e2e_binds_cached_cover_to_content_id(
@@ -2397,6 +2436,71 @@ async def test_evaluate_batch_matches_results_by_bvid_when_response_reorders() -
     assert batch[1].topic_group == "B 类"
     assert batch[2].relevance_reason == "C 自己的理由"
     assert batch[2].topic_group == "C 类"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_retries_only_missing_keyed_members() -> None:
+    class _PartialLLM:
+        def __init__(self) -> None:
+            self.request_ids: list[tuple[str, ...]] = []
+
+        async def complete_structured_task(self, *, user_input: str, **kwargs: object) -> object:
+            raw = user_input.split("<content_batch>", 1)[1].split("</content_batch>", 1)[0]
+            items = json.loads(raw.strip())
+            ids = tuple(str(item["bvid"]) for item in items)
+            self.request_ids.append(ids)
+            returned = ids[:2] if len(self.request_ids) == 1 else ids
+            return _SlowResponse(
+                json.dumps(
+                    [
+                        {
+                            "bvid": content_id,
+                            "score": 0.8,
+                            "reason": f"ok {content_id}",
+                            "style_key": "deep_dive",
+                        }
+                        for content_id in returned
+                    ]
+                )
+            )
+
+    llm = _PartialLLM()
+    engine = ContentDiscoveryEngine(llm_service=llm)
+    batch = [
+        DiscoveredContent(bvid=key, title=key, source_strategy="trending")
+        for key in ("A", "B", "C", "D")
+    ]
+    assert await engine._evaluate_batch(batch, _build_profile()) == [0.8] * 4
+    assert llm.request_ids == [("A", "B", "C", "D"), ("C", "D")]
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_retries_duplicate_key_without_overwriting_valid_sibling() -> None:
+    class _DuplicateKeyLLM:
+        def __init__(self) -> None:
+            self.request_ids: list[tuple[str, ...]] = []
+
+        async def complete_structured_task(self, *, user_input: str, **kwargs: object) -> object:
+            raw = user_input.split("<content_batch>", 1)[1].split("</content_batch>", 1)[0]
+            ids = tuple(str(item["bvid"]) for item in json.loads(raw.strip()))
+            self.request_ids.append(ids)
+            if len(self.request_ids) == 1:
+                payload = [
+                    {"bvid": "A", "score": 0.1, "reason": "bad first"},
+                    {"bvid": "A", "score": 0.2, "reason": "bad last"},
+                    {"bvid": "B", "score": 0.8, "reason": "B once"},
+                ]
+            else:
+                payload = [{"bvid": "A", "score": 0.7, "reason": "A retry"}]
+            return _SlowResponse(json.dumps(payload))
+
+    llm = _DuplicateKeyLLM()
+    engine = ContentDiscoveryEngine(llm_service=llm)
+    batch = [DiscoveredContent(bvid=key, title=key) for key in ("A", "B")]
+    assert await engine._evaluate_batch(batch, _build_profile()) == [0.7, 0.8]
+    assert llm.request_ids == [("A", "B"), ("A",)]
+    assert batch[0].relevance_reason == "A retry"
+    assert batch[1].relevance_reason == "B once"
 
 
 @pytest.mark.asyncio

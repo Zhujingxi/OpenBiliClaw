@@ -86,7 +86,7 @@ class TestConfigDefaults:
         assert config.api.host == "0.0.0.0"
         assert config.api.port == 8420
         assert config.llm.default_provider == "deepseek"
-        assert config.llm.concurrency == 3
+        assert config.llm.concurrency == 4
         assert config.bilibili.auth_method == "cookie"
         assert config.bilibili.proxy == ""  # direct connection by default
         assert config.scheduler.enabled is True
@@ -98,6 +98,14 @@ class TestConfigDefaults:
         assert config.api.auth.extension_access_enabled is False
         assert config.api.auth.extension_access_keys == []
         assert config.api.auth.extension_token_ttl_hours == 24
+
+    def test_explicit_old_concurrency_is_preserved_and_derives_background(self) -> None:
+        from openbiliclaw.llm.concurrency import background_llm_concurrency
+
+        config = Config(llm=LLMConfig(concurrency=3))
+
+        assert config.llm.concurrency == 3
+        assert background_llm_concurrency(config.llm.concurrency) == 2
 
     def test_config_defaults_pool_target_count_to_300(self) -> None:
         config = Config()
@@ -2094,6 +2102,7 @@ class TestDiscoveryConfig:
         )
         assert config.discovery.inspiration_breadth == "high"
         assert config.discovery.multimodal_evaluation_enabled is False
+        assert config.discovery.candidate_eval_concurrency == 3
         assert config.discovery.multimodal_batch_size == 8
         assert config.discovery.multimodal_image_max_px == 384
         assert config.discovery.multimodal_image_quality == 72
@@ -2154,6 +2163,7 @@ inspiration_replace_merged_keywords = true
 inspiration_search_backends = ["platform_sources", "exa", "you"]
 inspiration_breadth = "high"
 multimodal_evaluation_enabled = true
+candidate_eval_concurrency = 3
 multimodal_batch_size = 4
 multimodal_image_max_px = 512
 multimodal_image_quality = 80
@@ -2180,6 +2190,7 @@ multimodal_image_timeout_seconds = 10
         assert config.discovery.inspiration_search_backends == ("platform_sources", "exa", "you")
         assert config.discovery.inspiration_breadth == "high"
         assert config.discovery.multimodal_evaluation_enabled is True
+        assert config.discovery.candidate_eval_concurrency == 3
         assert config.discovery.multimodal_batch_size == 4
         assert config.discovery.multimodal_image_max_px == 512
         assert config.discovery.multimodal_image_quality == 80
@@ -2201,6 +2212,31 @@ multimodal_image_timeout_seconds = 10
         )
 
     @pytest.mark.parametrize(
+        ("configured", "expected"),
+        [
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            # Scheduler integer settings fall back to their default when a
+            # persisted value exceeds the documented ceiling; they do not
+            # silently retain an unsafe value.
+            (8, 3),
+        ],
+    )
+    def test_discovery_candidate_eval_concurrency_is_limited_to_three(
+        self, tmp_path: Path, configured: int, expected: int
+    ) -> None:
+        toml_path = tmp_path / "c.toml"
+        toml_path.write_text(
+            f"[discovery]\ncandidate_eval_concurrency = {configured}\n",
+            encoding="utf-8",
+        )
+
+        config = load_config(toml_path)
+
+        assert config.discovery.candidate_eval_concurrency == expected
+
+    @pytest.mark.parametrize(
         ("field", "literal", "expected"),
         [
             ("kw_cache_high", "0", 30),
@@ -2213,6 +2249,8 @@ multimodal_image_timeout_seconds = 10
             ("claim_lease_minutes", "0", 10),
             ("planner_poll_seconds", '"nope"', 120),
             ("plan_ttl_hours", "0", 12),
+            ("candidate_eval_concurrency", "0", 3),
+            ("candidate_eval_concurrency", "4", 3),
             ("multimodal_batch_size", "0", 8),
             ("multimodal_batch_size", "13", 8),
             ("multimodal_image_max_px", "127", 384),

@@ -184,6 +184,8 @@ OpenClaw 当前应直接发现仓库里的 workspace skill：
 uv run python -m openbiliclaw.integrations.openclaw.cli <command> [flags]
 ```
 
+每次 CLI bridge 构造 direct adapter 时，会在任何画像、对话或推荐 LLM operation 可调用前，先同步执行一次零 LLM 的候选池历史恢复与原子维护；同一 controller 后续若进入后台 runtime，不会重复执行该启动维护。
+
 已支持的命令：
 
 - `sync-account`

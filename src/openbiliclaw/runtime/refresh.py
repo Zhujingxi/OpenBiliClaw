@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from openbiliclaw.runtime.task_registry import BackgroundTaskRegistry
+    from openbiliclaw.storage.database import PoolMaintenanceResult
 
 logger = logging.getLogger(__name__)
 
@@ -172,23 +173,19 @@ class SupportsEventDatabase(Protocol):
     def count_pool_raw_material_candidates(self) -> int: ...
     def count_pool_raw_material_by_source(self) -> dict[str, int]: ...
     def get_pool_distribution_counts(self) -> dict[str, dict[str, int]]: ...
-    def trim_explore_cluster_overflow(self, *, max_per_cluster: int = 3) -> int: ...
-    def trim_topic_group_overflow(self, *, max_per_group: int) -> int: ...
-    def trim_pool_to_target_count(
+    def maintain_pool_inventory(
         self,
         *,
         target: int,
-        source_share_quotas: dict[str, int] | None = None,
-    ) -> int: ...
-    def trim_pool_source_overflow(self, *, source_share_quotas: dict[str, int]) -> int: ...
-    def reactivate_under_quota_pool_sources(
-        self,
-        *,
-        target: int,
+        raw_ceiling: int,
         source_share_quotas: dict[str, int],
         raw_source_share_quotas: dict[str, int] | None = None,
-    ) -> int: ...
-    def evict_stale_pool_items(self, *, max_age_days: int = 14) -> int: ...
+        max_per_topic_group: int = 3,
+        max_per_explore_cluster: int = 3,
+        stale_max_age_days: int = 14,
+        xhs_self_nickname: str = "",
+        recover_suppressed: bool = True,
+    ) -> PoolMaintenanceResult: ...
     def iter_cover_lifecycle(self) -> list[tuple[str, str, bool]]: ...
     def iter_servable_cover_urls(
         self, *, recent_hours: int = 12, limit: int = 300
@@ -261,6 +258,10 @@ class SupportsRecommendationEngine(Protocol):
         limit: int,
     ) -> int: ...
 
+    async def precompute_delight_scores(self, *, profile: Any, limit: int) -> int: ...
+
+    async def classify_pool_backlog(self, *, profile: Any, limit: int) -> int: ...
+
     async def prewarm_supergroup_embeddings(self) -> int: ...
 
     async def prewarm_pool_mmr_embeddings(self, *, limit: int = 200) -> int: ...
@@ -284,6 +285,19 @@ class ContinuousRefreshController:
     recommendation_engine: SupportsRecommendationEngine
     event_hub: Any | None = None
     discovery_candidate_pipeline: Any | None = None
+    candidate_eval_coordinator: Any | None = None
+    expression_copy_coordinator: Any | None = None
+    # OpenClaw's bridge is intentionally one-shot: it has no daemon loop to
+    # own ExpressionCopyCoordinator.  When supplied, this callback finishes
+    # the durable copy stage synchronously after inline admission instead of
+    # scheduling the daemon-oriented precompute path.
+    one_shot_expression_copy_callback: Callable[[Any], Any] | None = None
+    # Non-daemon bridges can cap their first source/evaluation wave so an
+    # interactive request produces a serviceable batch before its own timeout.
+    # ``0`` preserves the existing uncapped inline behavior; API runtime
+    # controllers leave this at zero and use CandidateEvalCoordinator instead.
+    one_shot_inline_eval_limit: int = 0
+    llm_concurrency_gate: Any | None = None
     bilibili_producer: Any | None = None
     xhs_producer: Any | None = None
     douyin_producer: Any | None = None
@@ -397,6 +411,8 @@ class ContinuousRefreshController:
     # exhausted retries on the first half-hour.
     _init_grace_consumed: bool = False
     _last_llm_gate_allowed: bool = field(default=True, init=False)
+    _startup_maintenance_completed: bool = field(default=False, init=False)
+    _last_pool_maintenance_succeeded: bool = field(default=False, init=False)
 
     _signal_event_types = [
         "view",
@@ -445,22 +461,33 @@ class ContinuousRefreshController:
         try:
             readiness = self.database.count_pool_readiness(xhs_self_nickname=nickname)
             available = int(readiness.get("available", 0))
-            return {
+            counts = {
                 "available": max(0, available),
                 "raw": max(0, int(readiness.get("raw", available))),
                 "pending": max(0, int(readiness.get("pending", 0))),
+                "admitted_pending_copy": max(0, int(readiness.get("admitted_pending_copy", 0))),
                 "pending_eval": max(0, int(readiness.get("pending_eval", 0))),
                 "evaluated_pending": max(0, int(readiness.get("evaluated_pending", 0))),
             }
         except Exception:
             available = int(self.database.count_pool_candidates(xhs_self_nickname=nickname))
-            return {
+            counts = {
                 "available": max(0, available),
                 "raw": max(0, available),
                 "pending": 0,
+                "admitted_pending_copy": 0,
                 "pending_eval": 0,
                 "evaluated_pending": 0,
             }
+        self._update_llm_inventory_state(counts["available"])
+        return counts
+
+    def _update_llm_inventory_state(self, available: int) -> None:
+        """Synchronize refill admission from canonical durable availability."""
+        gate = self.llm_concurrency_gate
+        update = getattr(gate, "update_inventory", None)
+        if callable(update):
+            update(available=max(0, int(available)), target=self.pool_target_count)
 
     @staticmethod
     def _pool_count_payload(counts: dict[str, int]) -> dict[str, int]:
@@ -509,7 +536,7 @@ class ContinuousRefreshController:
                 min_delight_score=self._dynamic_delight_threshold(),
             )
         pool_counts = self._pool_readiness_counts()
-        return {
+        payload: dict[str, object] = {
             "initialized": self._is_initialized(),
             "recommendation_count": self.database.count_recommendations(),
             "pending_signal_events": self._pending_signal_events_count(state),
@@ -526,6 +553,19 @@ class ContinuousRefreshController:
             "pending_delight_count": pending_delight_count,
             "last_delight_notification_at": str(state.get("last_delight_notification_at", "")),
         }
+        status_payload = getattr(self.candidate_eval_coordinator, "status_payload", None)
+        if callable(status_payload):
+            with suppress(Exception):
+                payload.update(status_payload())
+        expression_status = getattr(self.expression_copy_coordinator, "status_payload", None)
+        if callable(expression_status):
+            with suppress(Exception):
+                payload.update(expression_status())
+        gate_status_payload = getattr(self.llm_concurrency_gate, "status_payload", None)
+        if callable(gate_status_payload):
+            with suppress(Exception):
+                payload.update(gate_status_payload())
+        return payload
 
     async def refresh_if_needed(self) -> dict[str, object]:
         """Refresh discovery candidates when thresholds are met.
@@ -704,109 +744,76 @@ class ContinuousRefreshController:
         ``pool_target_count`` is a frontend-visible availability floor, not the
         raw material cap. Raw rows may exceed it until ``_raw_material_ceiling``.
         """
-        source_targets = self._source_target_counts()
-        raw_source_targets = self._raw_source_target_counts()
-
-        # Cross-source topic_group quota runs every tick, not just inside
-        # _run_refresh_plan: when pool sits at cap, refresh exits before
-        # discover, so the in-plan trim would never fire and pre-existing
-        # topic concentration would persist indefinitely. This call is a
-        # cheap SQL group-by + UPDATE, safe to run unconditionally.
-        try:
-            self.database.trim_topic_group_overflow(
-                max_per_group=max(3, self.pool_target_count // 10),
-            )
-        except Exception:
-            logger.exception("trim_topic_group_overflow failed")
-
-        reactivate_fn = getattr(self.database, "reactivate_under_quota_pool_sources", None)
-        if callable(reactivate_fn):
-            try:
-                reactivated = reactivate_fn(
-                    target=self.pool_target_count,
-                    source_share_quotas=source_targets,
-                    raw_source_share_quotas=raw_source_targets,
-                )
-                if reactivated > 0:
-                    # Demote to DEBUG when the count is identical to the
-                    # previous tick — pool sitting in steady-state with
-                    # the same N items reactivating each minute is noise,
-                    # not signal. INFO fires only when N changes (real
-                    # state transition: pool drained to refill, or new
-                    # source surge).
-                    last_reactivated = self._last_pool_maintenance_fingerprint[1]
-                    log_fn = logger.info if reactivated != last_reactivated else logger.debug
-                    log_fn(
-                        "enforce_pool_cap: reactivated=%s under-quota source items",
-                        reactivated,
-                    )
-                    self._last_pool_maintenance_fingerprint = (
-                        self._last_pool_maintenance_fingerprint[0],
-                        reactivated,
-                        self._last_pool_maintenance_fingerprint[2],
-                    )
-                    self.database.trim_topic_group_overflow(
-                        max_per_group=max(3, self.pool_target_count // 10),
-                    )
-            except Exception:
-                logger.exception("reactivate_under_quota_pool_sources failed")
-
-        pool_available = self.database.count_pool_candidates(
-            xhs_self_nickname=self._xhs_self_nickname()
-        )
-
-        trim_source_overflow_fn = getattr(self.database, "trim_pool_source_overflow", None)
-        if callable(trim_source_overflow_fn) and pool_available >= self.pool_target_count:
-            try:
-                source_overflow_suppressed = trim_source_overflow_fn(
-                    source_share_quotas=raw_source_targets,
-                )
-                if source_overflow_suppressed > 0:
-                    logger.info(
-                        "enforce_pool_cap: suppressed=%s over-quota source items",
-                        source_overflow_suppressed,
-                    )
-                    self.database.trim_topic_group_overflow(
-                        max_per_group=max(3, self.pool_target_count // 10),
-                    )
-            except Exception:
-                logger.exception("trim_pool_source_overflow failed")
-        elif callable(trim_source_overflow_fn):
-            logger.debug(
-                "enforce_pool_cap: skipped source overflow trim below target "
-                "pool_available=%s target=%s",
-                pool_available,
-                self.pool_target_count,
-            )
+        self._last_pool_maintenance_succeeded = False
         raw_ceiling = self._raw_material_ceiling()
-        trimmed = 0
         try:
-            trimmed = self.database.trim_pool_to_target_count(
-                target=raw_ceiling,
-                source_share_quotas=raw_source_targets,
+            result = self.database.maintain_pool_inventory(
+                target=self.pool_target_count,
+                raw_ceiling=raw_ceiling,
+                source_share_quotas=self._source_target_counts(),
+                raw_source_share_quotas=self._raw_source_target_counts(),
+                max_per_topic_group=max(3, self.pool_target_count // 10),
+                max_per_explore_cluster=3,
+                stale_max_age_days=14,
+                xhs_self_nickname=self._xhs_self_nickname(),
             )
         except Exception:
-            logger.exception("trim_pool_to_target_count failed")
-        if trimmed > 0:
+            logger.exception("atomic pool maintenance failed")
             pool_available = self.database.count_pool_candidates(
                 xhs_self_nickname=self._xhs_self_nickname()
             )
-            logger.info(
-                "enforce_pool_cap: raw_trimmed=%s, pool_available=%s, target=%s, raw_ceiling=%s",
-                trimmed,
-                pool_available,
-                self.pool_target_count,
-                raw_ceiling,
-            )
-        else:
-            logger.debug(
-                "enforce_pool_cap: no raw trim needed, "
-                "pool_available=%s, target=%s, raw_ceiling=%s",
-                pool_available,
-                self.pool_target_count,
-                raw_ceiling,
-            )
-        return pool_available >= self.pool_target_count
+            self._update_llm_inventory_state(pool_available)
+            return pool_available >= self.pool_target_count
+
+        log_fn = logger.error if result.rolled_back else logger.info
+        log_fn(
+            "pool_maintenance available_before=%s available_after=%s target=%s "
+            "protected_available=%s recovered_suppressed=%s trimmed_stale=%s "
+            "trimmed_explore_cluster=%s trimmed_ready_reserve=%s trimmed_evaluated=%s "
+            "trimmed_raw=%s trimmed_by_source=%s deferred_topic_trim=%s "
+            "deferred_source_trim=%s deferred_stale_trim=%s "
+            "deferred_explore_cluster_trim=%s raw_before=%s raw_after=%s "
+            "raw_ceiling=%s untrimmed_raw_excess=%s rolled_back=%s reason=%s",
+            result.available_before,
+            result.available_after,
+            result.target,
+            result.protected_available,
+            result.recovered_suppressed,
+            result.trimmed_stale,
+            result.trimmed_explore_cluster,
+            result.trimmed_ready_reserve,
+            result.trimmed_evaluated,
+            result.trimmed_raw,
+            result.trimmed_by_source,
+            result.deferred_topic_trim,
+            result.deferred_source_trim,
+            result.deferred_stale_trim,
+            result.deferred_explore_cluster_trim,
+            result.raw_before,
+            result.raw_after,
+            result.raw_ceiling,
+            result.untrimmed_raw_excess,
+            result.rolled_back,
+            result.reason,
+        )
+        if result.rolled_back:
+            self._update_llm_inventory_state(result.available_before)
+            return result.available_before >= self.pool_target_count
+        self._last_pool_maintenance_succeeded = True
+        self._update_llm_inventory_state(result.available_after)
+        return result.at_target
+
+    def run_startup_maintenance(self) -> None:
+        """Run the host's pre-service pool repair at most once per controller."""
+        if self._startup_maintenance_completed:
+            return
+        try:
+            self._enforce_pool_cap()
+        except Exception:
+            return
+        if not self._last_pool_maintenance_succeeded:
+            return
+        self._startup_maintenance_completed = True
 
     async def trigger_manual_refresh(self, *, reason: str = "manual") -> dict[str, object]:
         """Schedule one background manual refresh without blocking the caller."""
@@ -984,10 +991,10 @@ class ContinuousRefreshController:
         if not self._is_initialized():
             return 0
         profile = await self.soul_engine.get_profile()
-        return await self.recommendation_engine.precompute_pool_copy(
-            profile=profile,
-            limit=0,
-        )
+        delight = getattr(self.recommendation_engine, "precompute_delight_scores", None)
+        if callable(delight):
+            return int(await delight(profile=profile, limit=30))
+        return int(await self.recommendation_engine.precompute_pool_copy(profile=profile, limit=0))
 
     @staticmethod
     def _normalize_replenishment_reason(reason: str) -> str:
@@ -1052,6 +1059,36 @@ class ContinuousRefreshController:
             logger.exception("precompute_pool_copy task failed")
             return 0
 
+    async def _safe_one_shot_expression_copy(self, *, profile: Any) -> int:
+        """Finish a non-daemon copy drain without creating background work."""
+
+        callback = self.one_shot_expression_copy_callback
+        if callback is None:
+            return 0
+        try:
+            result = callback(profile)
+            if inspect.isawaitable(result):
+                result = await result
+            return max(0, int(result or 0))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("one-shot expression-copy drain failed")
+            return 0
+
+    @staticmethod
+    def _post_admission_copy_stage_is_owned(drain_result: object) -> bool:
+        """Return whether a pipeline drain already ran its copy-stage owner.
+
+        ``DiscoveryCandidatePipeline`` returns a mapping-compatible result with
+        a structured post-admission receipt. Older test doubles and compatible
+        third-party pipelines return a plain mapping, which deliberately means
+        no owner was reported and therefore preserves the controller fallback.
+        """
+
+        receipt = getattr(drain_result, "post_admission_copy", None)
+        return bool(getattr(receipt, "owns_copy_stage", False))
+
     async def _safe_prewarm_pool_mmr_embeddings(self) -> int:
         """Warm MMR embeddings without blocking refresh completion."""
         try:
@@ -1080,7 +1117,7 @@ class ContinuousRefreshController:
 
             ┌─ _loop_refresh()           60s   LLM-heavy, may take minutes
             ├─ _loop_pool_precompute()   60s   v0.3.60+ — drain pool_expression
-            ├─ _loop_candidate_eval()    60s   drain pending raw candidates
+            ├─ candidate_eval             event continuous candidate evaluator
             ├─ _loop_soul_pipeline()     60s   profile updates, speculator
             ├─ _loop_bilibili_producer() 60s   Bili extension search fallback under cooldown
             ├─ _loop_xhs_producer()      60s   xhs keyword generation
@@ -1094,6 +1131,7 @@ class ContinuousRefreshController:
             ├─ _loop_image_cache_cleanup() 6h  prune consumed+unsaved covers
             └─ _loop_cover_prefetch()    60s   cache fresh-token covers (XHS)
         """
+        self.run_startup_maintenance()
         if self._llm_work_allowed():
             with suppress(Exception):
                 await self.prepare_delight_candidates()
@@ -1108,10 +1146,20 @@ class ContinuousRefreshController:
             if callable(bind_soul):
                 with suppress(Exception):
                     bind_soul(self.soul_engine)
+        candidate_eval_loop = (
+            self.candidate_eval_coordinator.run_forever()
+            if self.candidate_eval_coordinator is not None
+            else self._loop_candidate_eval()
+        )
+        expression_copy_loop = (
+            self.expression_copy_coordinator.run_forever()
+            if self.expression_copy_coordinator is not None
+            else self._loop_pool_precompute()
+        )
         tasks = [
             asyncio.create_task(self._loop_refresh()),
-            asyncio.create_task(self._loop_pool_precompute()),
-            asyncio.create_task(self._loop_candidate_eval()),
+            asyncio.create_task(expression_copy_loop, name="expression_copy"),
+            asyncio.create_task(candidate_eval_loop, name="candidate_eval"),
             asyncio.create_task(self._loop_soul_pipeline()),
             asyncio.create_task(self._loop_bilibili_producer()),
             asyncio.create_task(self._loop_xhs_producer()),
@@ -1128,6 +1176,12 @@ class ContinuousRefreshController:
         try:
             await asyncio.gather(*tasks)
         finally:
+            candidate_stop = getattr(self.candidate_eval_coordinator, "stop", None)
+            if callable(candidate_stop):
+                await candidate_stop()
+            expression_stop = getattr(self.expression_copy_coordinator, "stop", None)
+            if callable(expression_stop):
+                await expression_stop()
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -1220,16 +1274,23 @@ class ContinuousRefreshController:
             before_pool_count = int(
                 self.database.count_pool_candidates(xhs_self_nickname=self._xhs_self_nickname())
             )
+            self._update_llm_inventory_state(before_pool_count)
         except Exception:
             before_pool_count = -1
         try:
-            await engine.precompute_pool_copy(
-                profile=profile,
-                limit=_MAX_DISCOVERY_BACKFILL_PER_REFRESH,
-            )
+            if self.expression_copy_coordinator is None:
+                await engine.precompute_pool_copy(
+                    profile=profile, limit=_MAX_DISCOVERY_BACKFILL_PER_REFRESH
+                )
+            else:
+                await engine.classify_pool_backlog(
+                    profile=profile, limit=_MAX_DISCOVERY_BACKFILL_PER_REFRESH
+                )
         except Exception:
-            logger.exception("Periodic precompute drain failed")
+            logger.exception("Periodic classify drain failed")
             return
+        if self.expression_copy_coordinator is not None:
+            self.expression_copy_coordinator.notify("safety_wake")
         if before_pool_count >= 0:
             await self._publish_precompute_replenishment_if_needed(
                 before_pool_count=before_pool_count,
@@ -1696,6 +1757,7 @@ class ContinuousRefreshController:
         pool_available = self.database.count_pool_candidates(
             xhs_self_nickname=self._xhs_self_nickname()
         )
+        self._update_llm_inventory_state(pool_available)
         pool_below_target = pool_available < self.pool_target_count
 
         if pool_below_target:
@@ -1811,6 +1873,10 @@ class ContinuousRefreshController:
     ) -> dict[str, int]:
         """Drain one pending discovery-candidate batch through the shared evaluator."""
 
+        notify = getattr(self.candidate_eval_coordinator, "notify", None)
+        if callable(notify):
+            notify(reason)
+            return {"evaluated": 0, "cached": 0, "rejected": 0}
         return await self._drain_discovery_candidates_and_precompute(
             reason=reason,
             batch_size=batch_size,
@@ -1842,6 +1908,7 @@ class ContinuousRefreshController:
             except TypeError:
                 pool_available = self.database.count_pool_candidates()
             before_pool_count = int(pool_available)
+            self._update_llm_inventory_state(before_pool_count)
             if int(pool_available) >= self.pool_target_count:
                 logger.debug(
                     "candidate eval drain skipped: reason=pool_at_cap "
@@ -1874,11 +1941,18 @@ class ContinuousRefreshController:
             rejected = int(drain_result.get("rejected", 0) or 0)
             failed = int(drain_result.get("failed", 0) or 0)
             waiting = int(drain_result.get("waiting", 0) or 0)
+            post_admission_copy_owned = self._post_admission_copy_stage_is_owned(drain_result)
         if cached > 0 and precompute:
-            await self._safe_precompute_pool_copy(profile=profile)
-            await self._publish_precompute_replenishment_if_needed(
-                before_pool_count=before_pool_count,
-            )
+            if self.expression_copy_coordinator is not None:
+                self.expression_copy_coordinator.notify(f"candidate_admitted:{cached}")
+            elif self.one_shot_expression_copy_callback is not None:
+                if not post_admission_copy_owned:
+                    await self._safe_one_shot_expression_copy(profile=profile)
+            else:
+                await self._safe_precompute_pool_copy(profile=profile)
+                await self._publish_precompute_replenishment_if_needed(
+                    before_pool_count=before_pool_count
+                )
         if evaluated or cached or rejected or failed:
             logger.info(
                 "candidate eval drain done: caller=%s evaluated=%s cached=%s rejected=%s failed=%s",
@@ -1956,15 +2030,7 @@ class ContinuousRefreshController:
         pipeline_discovered_count = 0
         flattened_strategies: list[str] = []
         replenished_topics: list[str] = []
-        # v0.3.47+: per-strategy expression precompute tasks. Each strategy's
-        # `discover()` blocks on a slow LLM eval batch (8-16 minutes
-        # observed in production). Without this, popup copy precompute was
-        # gated until ALL strategies finished — i.e. ~30 min of latency
-        # for fresh items. Now: as soon as a strategy yields content we
-        # kick a precompute task; ``self._precompute_lock`` inside
-        # ``RecommendationEngine`` serialises them so two tasks don't
-        # double-spend LLM tokens on the same un-precomputed candidates.
-        precompute_tasks: list[asyncio.Task[Any]] = []
+        post_admission_copy_owned = False
 
         await self._publish_event(
             {
@@ -1986,6 +2052,7 @@ class ContinuousRefreshController:
                 current_pool_count=current_pool_count,
                 pool_below_target=initial_pool_below_target,
             )
+            effective_limit = self._bounded_one_shot_inline_eval_limit(effective_limit)
             strategy_limits = self._requested_strategy_limits(
                 strategies=strategies,
                 requested_limit=requested_limit,
@@ -2104,11 +2171,27 @@ class ContinuousRefreshController:
                         )
                     else:
                         produced_count = await pipeline.produce_and_enqueue(**produce_kwargs)
-                    drain_result = await self._drain_discovery_candidates_and_precompute(
-                        reason="refresh",
-                        profile=profile,
-                        batch_size=effective_limit,
-                        precompute=False,
+                    coordinator_notify = getattr(self.candidate_eval_coordinator, "notify", None)
+                    if callable(coordinator_notify):
+                        # API runtime wires ``pipeline.on_candidates_enqueued`` to
+                        # this coordinator.  That callback is the one immediate
+                        # wake for every successful enqueue; doing an inline
+                        # drain here would create a second durable claim owner
+                        # and could take the 3×30 cap to 180 rows.
+                        drain_result = {"evaluated": 0, "cached": 0, "rejected": 0}
+                    else:
+                        # One-shot / legacy compositions deliberately have no
+                        # live coordinator, so preserve their bounded inline
+                        # drain semantics.
+                        drain_result = await self._drain_discovery_candidates_and_precompute(
+                            reason="refresh",
+                            profile=profile,
+                            batch_size=effective_limit,
+                            precompute=False,
+                        )
+                    post_admission_copy_owned = (
+                        post_admission_copy_owned
+                        or self._post_admission_copy_stage_is_owned(drain_result)
                     )
                     discovered_count = int(produced_count or 0)
                     admitted_count = int(drain_result.get("cached", 0) or 0)
@@ -2152,58 +2235,36 @@ class ContinuousRefreshController:
 
             if admitted_count > 0:
                 replenished_topics.extend(self._extract_topics(topic_items))
-                # Fire expression precompute now (in parallel with the next
-                # strategy's discovery LLM call). The lock inside the engine
-                # queues this if a previous task is still running.
-                precompute_tasks.append(
-                    self._track_task(
-                        "precompute_pool_copy",
-                        self._safe_precompute_pool_copy(profile=profile),
-                    )
-                )
+                if self.expression_copy_coordinator is not None:
+                    self.expression_copy_coordinator.notify(f"refresh_admitted:{admitted_count}")
 
         if flattened_strategies:
-            self.database.trim_explore_cluster_overflow(max_per_cluster=3)
-            # Cap each topic_group at ~10% of pool target so a single hot
-            # topic (e.g. 人工智能 from related_chain) can't accumulate
-            # hundreds of fresh candidates across rounds and starve other
-            # sources/topics. Floor at 3 to keep small pools usable.
-            self.database.trim_topic_group_overflow(
-                max_per_group=max(3, self.pool_target_count // 10),
-            )
-            self.database.evict_stale_pool_items(max_age_days=14)
             # Snapshot delight count BEFORE precompute so we can detect
             # net new above-threshold delights and push a refresh event
             # to the popup (no per-item chrome notification — popup
             # re-fetches /api/delight/pending-batch when this fires).
             delight_count_before = self._safe_count_delight_candidates()
-            # v0.3.47+: drain the per-strategy precompute tasks fired
-            # eagerly above. They have already been running in parallel
-            # with discovery's later strategies, so this awaits whatever
-            # is still pending instead of starting from scratch. If the
-            # discovery loop produced nothing precompute-eligible (e.g.
-            # all rejected at eval), fall back to one synchronous call so
-            # any earlier-cycle backlog still gets cleared.
-            if precompute_tasks:
-                await asyncio.gather(*precompute_tasks, return_exceptions=True)
+            if self.expression_copy_coordinator is not None:
+                self.expression_copy_coordinator.notify("refresh_complete")
+            elif self.one_shot_expression_copy_callback is not None:
+                if not post_admission_copy_owned:
+                    await self._safe_one_shot_expression_copy(profile=profile)
             else:
                 await self._safe_precompute_pool_copy(profile=profile)
             # Pre-warm supergroup-merge embeddings so the popup's "换一批"
-            # hot path always hits the L1/L2 cache. New labels added by
-            # this refresh round get warmed before the user clicks.
-            # Warm embedding-derived caches in the background. They are
-            # latency optimizations for later serve() calls, not
-            # requirements for this refresh result to become visible.
-            # Keeping them off the refresh lock prevents slow local
-            # embedding backends from leaving the popup stuck at "正在补货".
-            self._track_task(
-                "prewarm_supergroup_embeddings",
-                self._safe_prewarm_supergroup_embeddings(),
-            )
-            self._track_task(
-                "prewarm_pool_mmr_embeddings",
-                self._safe_prewarm_pool_mmr_embeddings(),
-            )
+            # hot path always hits the L1/L2 cache. These are daemon latency
+            # optimizations, not part of a one-shot adapter's completed
+            # operation; OpenClaw deliberately leaves no provider-backed
+            # background task behind after returning.
+            if self.one_shot_expression_copy_callback is None:
+                self._track_task(
+                    "prewarm_supergroup_embeddings",
+                    self._safe_prewarm_supergroup_embeddings(),
+                )
+                self._track_task(
+                    "prewarm_pool_mmr_embeddings",
+                    self._safe_prewarm_pool_mmr_embeddings(),
+                )
             delight_count_after = self._safe_count_delight_candidates()
             net_new_delights = max(0, delight_count_after - delight_count_before)
             if net_new_delights > 0:
@@ -2223,19 +2284,10 @@ class ContinuousRefreshController:
             await self._publish_delight_if_available()
             await self._publish_probe_if_available()
 
-            # v0.3.66+: enforce the absolute pool cap at the end of every
-            # refresh plan. The earlier trim_topic_group_overflow /
-            # trim_explore_cluster_overflow / evict_stale calls only bound
-            # per-axis concentration (topic, cluster, age) — none of them
-            # cap the total count. Long-running discovery cycles (10-30
-            # min for the LLM eval batch) also block the periodic
-            # _enforce_pool_cap tick in run_forever, so the popup
-            # routinely saw pool_available_count drift well past
-            # pool_target_count (e.g. 668 with target=600 in production).
-            # _enforce_pool_cap also runs reactivate_under_quota and
-            # source-share-aware trim, so this is the right place to land
-            # the freshly-discovered items into their final shape before
-            # the popup re-fetches.
+            # Land all newly durable admissions through the one atomic
+            # topic/source/stale/raw maintenance boundary before the popup
+            # re-fetches. No separately committed destructive pass belongs
+            # in this refresh plan.
             try:
                 self._enforce_pool_cap()
             except Exception:
@@ -2309,13 +2361,20 @@ class ContinuousRefreshController:
         if current == self._last_published_pool_count:
             return
         self._last_published_pool_count = current
-        await self._publish_event(
-            {
-                "type": "pool_status",
-                **self._pool_count_payload(pool_counts),
-                "pool_target_count": int(self.pool_target_count),
-            }
-        )
+        payload: dict[str, object] = {
+            "type": "pool_status",
+            **self._pool_count_payload(pool_counts),
+            "pool_target_count": int(self.pool_target_count),
+        }
+        status_payload = getattr(self.candidate_eval_coordinator, "status_payload", None)
+        if callable(status_payload):
+            with suppress(Exception):
+                payload.update(status_payload())
+        await self._publish_event(payload)
+        if current < int(self.pool_target_count):
+            notify = getattr(self.candidate_eval_coordinator, "notify", None)
+            if callable(notify):
+                notify("inventory_consumed")
 
     def _safe_count_delight_candidates(self) -> int:
         """Best-effort count of pending delight candidates (returns 0 on any
@@ -2774,6 +2833,7 @@ class ContinuousRefreshController:
             )
         except TypeError:
             current_global_available = self.database.count_pool_candidates()
+        self._update_llm_inventory_state(current_global_available)
         global_available_deficit = max(0, self.pool_target_count - int(current_global_available))
         raw_target = int(raw_target_counts.get(source_family, 0))
         current_raw = self._platform_source_count(source_raw_counts, source_family)
@@ -2950,6 +3010,26 @@ class ContinuousRefreshController:
         except (TypeError, ValueError):
             configured = 1
         return min(_MAX_DISCOVERY_BACKFILL_PER_REFRESH, max(1, configured))
+
+    def _bounded_one_shot_inline_eval_limit(self, requested_limit: int) -> int:
+        """Cap a non-daemon refresh's first supply/evaluation wave when configured.
+
+        The API runtime has a live ``CandidateEvalCoordinator`` which can keep
+        draining the raw queue after the HTTP response returns.  OpenClaw's
+        short-lived adapter has no such owner, so its bootstrap opts into a
+        small first wave that can reach durable copy within the adapter timeout.
+        """
+
+        requested = max(1, int(requested_limit))
+        if self.candidate_eval_coordinator is not None:
+            return requested
+        try:
+            configured = int(self.one_shot_inline_eval_limit)
+        except (TypeError, ValueError):
+            configured = 0
+        if configured <= 0:
+            return requested
+        return min(requested, configured)
 
     def _candidate_eval_drain_batch_size(self, batch_size: int | None) -> int:
         default = min(

@@ -2,6 +2,8 @@
 
 > 从 discovery 缓存中挑出最值得推的内容，并逐步生成像朋友一样的推荐表达。
 
+runtime 使用公开 `drain_pending_expression_copy(profile, limit<=60, max_extra_requests=6)` 作为 copy-only 入口：pending 达 8 条立即执行，1–7 条从首次通知起固定等待最多 3 秒；provider 每批最多 30 条、fan-out 2，malformed/partial batch 默认最多额外拆分请求 6 次。分类完成只通过 `set_copy_pending_callback()` 通知，不 inline 等待 copy。OpenClaw direct one-shot 是受限例外，调用 `limit=4, max_extra_requests=0`，持久化首 batch 的有效 subset 并将剩余行留作下一请求。参数来自 2026-07-12 生产日志校准。
+
 ## 概述
 
 `recommendation/` 包负责把已经发现并评分过的内容，转成真正准备展示给用户的推荐结果。
@@ -57,6 +59,7 @@
 | v0.3.66 pool gate on classification | ✅ | `get_pool_candidates` / `count_pool_candidates` 现在同样要求 `style_key` 与 `topic_group` 非空；`get_pool_candidates_needing_copy` 也只挑已分类但缺文案的候选，避免未分类跨源内容先生成 copy 后绕过 serve 分类口径 |
 | v0.3.91 servable pool count | ✅ | `count_pool_candidates()` 在读取前刷新 SQLite/WAL snapshot，并默认应用与 `get_pool_candidates()` 相同的 `max_per_topic_group=3` 候选窗口；新增 `count_pool_readiness()` 拆分 `available/raw/pending`；`serve()` 零候选 warning 会输出 `raw/servable/pending`，用于定位“池子有素材但暂不可换”的真实原因。 |
 | v0.3.102 空池热路径短路 | ✅ | `/api/recommendations/reshuffle` 与 `/api/recommendations/append` 在 `pool_available_count=0` 时立即返回空数组，不再读取画像或调用推荐引擎，并只按 30 秒 debounce 触发一次自动补货；`RecommendationEngine.serve()` 在可用池为 0、或候选被 `excluded_bvids` / 最近已看过滤到 0 后直接返回，跳过 curator、MMR embedding 和推荐历史写入。 |
+| durable shown commit callback | ✅ | `serve()` 保持 `mark_pool_items_shown()` detached 以保护推荐响应时延；只有 shown write 成功后才调用 `set_pool_inventory_commit_callback()` 注入的 sync/async hook。API/OpenClaw 用它重读 canonical available 并更新 refill gate；写失败不触发 callback，callback 自身失败只记录日志、不取消推荐响应。 |
 | v0.3.x PC Web 空推荐展示 | ✅ | 桌面 Web `/web` 不再携带内置演示推荐作为初始 `state.videos`；后端 `/api/recommendations` 返回空数组时必须覆盖并清空当前卡片，和插件 side panel 的空列表语义保持一致。 |
 | v0.3.x available-target pool refill | ✅ | `count_pool_available_candidates_by_source()` 按 `count_pool_candidates()` 同口径统计各平台族的真实可换数量；`count_pool_raw_material_by_source()` 统计 fresh / 非 dislike / 未推荐 / 未看过的 raw material（含 `discovery_candidates` 待评估素材）用于 raw ceiling。补池不再因为 raw/linkable B 站库存达到 300 而停在前端 246 可换，raw trim 也不会在可换未达标时把库存压回 `pool_target_count`。 |
 | v0.3.x 统一 discovery 待评估池 | ✅ | 正常来源 ingest 不再直接写 `content_cache` 等推荐层分类；B 站 / XHS / 抖音 / YouTube / X / 知乎 / Reddit raw candidates 先进入 `discovery_candidates`，由 discovery pipeline 统一 batch 评估并 admission 到 `content_cache`。`classify_pool_backlog()` 只作为 legacy / recovery 路径处理已在 `content_cache` 中但缺分类的旧行。 |
@@ -147,7 +150,7 @@ items = await engine.reshuffle_recommendations(
 - 若引擎内部发现可用池为 0，或候选被最近已看过滤到 0，会直接返回空数组，跳过 curator scoring、MMR embedding 和推荐历史写入
 - 候选读取必须满足统一 admission 分数门：`content_cache.relevance_score >= [discovery].admission_min_score`。API 读取历史推荐时也会过滤 `recommendations.confidence` 低于同一阈值的旧行
 - 如果某条候选暂时还没预生成好推荐文案，这两个字段会保持为空，交给前端直接隐藏
-- 命中候选后会立即写入 `recommendations` 表，并把对应池子项标记为 `shown`
+- 命中候选后会立即写入 `recommendations` 表；对应池子项在 detached durable write 中标记为 `shown`，commit callback 随后同步 canonical inventory
 - API 层在 `reshuffle` 返回后会重新读取 runtime pool 字段并发布 `refresh.pool_updated`，让其它已打开客户端同步扣减后的 `pool_available_count`，但前端不得因此替换当前推荐列表
 - runtime 会把 discovery pool 持续补到 `pool_target_count` 个“真实可换”候选，默认目标现在是 `300`（允许配置到 `600`）；达到目标后停止 discover，等可换数掉回目标以下再补货。raw 素材库存不是 `pool_target_count` 的硬上限：当 topic window、预生成、分类或 XHS token 让 raw 与 available 之间存在折损时，raw 可增长到 `max(pool_target_count * 2, pool_target_count + 120)`，再由 raw ceiling trim 控制成本。补货和 trim 会按 `[scheduler.pool_source_shares]` 做平台级配比，默认保存 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit = 5 / 1 / 1 / 1 / 1 / 1 / 1，但小红书、抖音、YouTube、X、知乎、Reddit 默认关闭，运行时有效配比默认只有 B 站；显式启用某个平台后才会按保存 share 获得配额。少量补货时 discovery 会收缩 LLM 评估窗口，只评估可被当前平台可换缺口和 raw headroom 吸收的过采样候选
 - runtime 补货在调用 discovery 前会构建候选池分布 snapshot，把当前来源缺口和饱和方向作为可选上下文传给兼容的 discovery strategy
@@ -174,7 +177,7 @@ items = await engine.append_recommendations(
 - 仍然走 discovery pool 快路径，不等待新一轮 discover 完成
 - 从 pool row 还原 `DiscoveredContent` 时会保留 `content_type/body_text/content_id/content_url/source_platform`；X tweet / thread 在 append 续页里也必须继续按文字卡渲染
 - 同样复用 `topic_key + style_key + source` 的多样性选择逻辑，并只读取 pool 内已预生成好的推荐文案
-- 追加命中的内容也会立即写入 `recommendations` 表，并把对应池子项标记为 `shown`
+- 追加命中的内容也会立即写入 `recommendations` 表；池子项的 `shown` 标记与 inventory callback 异步提交
 - API 层在 `append` 返回后会发布最新 `refresh.pool_updated` 池子快照，便于其它 surface 更新“还剩几条可换”；正在浏览的列表保持原样，只有用户继续滚动或主动换一批才消费更多候选
 
 ### RecommendationEngine.precompute_pool_copy
@@ -504,3 +507,4 @@ report: PoolHealthReport = curator.check_pool_health()
 19. **legacy 分类也要消费负反馈样本**：正常来源候选会先进入 `discovery_candidates` 统一评估；如果旧行、人工导入或异常恢复让内容已经在 `content_cache` 里但缺 `style_key/topic_group/relevance_score`，这条补评估路径也必须和 discovery batch evaluator 一样读取 `negative_examples`
 20. **分类先于推荐文案**：`precompute_pool_copy` 只处理 `style_key/topic_group` 已补齐的候选。未分类内容应先走 `classify_pool_backlog`，否则文案、topic label 与后续多样性/负反馈口径可能不一致。
 21. **新确认兴趣只应被轻推，不应刷屏**：探针确认是用户给出的方向许可，不是 24h 内把同一方向塞满推荐流的理由；滚动预算与同批硬上限必须同时存在，前者降低排序冲动，后者防止最终回填阶段破坏体验。
+22. **文案 malformed 只追缺项且严格有界**：默认 API/daemon 路径中，成功响应的唯一 keyed 文案立即落库，缺失/重复成员共用 depth=3、最多六次额外 provider 请求的预算；永久 malformed singleton 保持 copy-pending，不再递归调用单条表达。OpenClaw one-shot 显式将该预算设为零，保留有效 subset 并把缺项留给下一请求。provider transient 原样交给 coordinator，按 15/30/60/120/300 秒退避。

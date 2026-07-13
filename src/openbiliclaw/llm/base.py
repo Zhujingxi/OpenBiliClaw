@@ -6,6 +6,7 @@ dynamically selecting and switching between providers.
 
 from __future__ import annotations
 
+import errno
 import logging
 import time
 from abc import ABC, abstractmethod
@@ -56,28 +57,8 @@ def classify_llm_unavailability(exc: BaseException) -> str | None:
     limit" fallback wraps a rate-limit cause and should read as backoff, not a
     missing provider.
     """
-    # Lazily imported to avoid a circular import (service imports this module).
-    from openbiliclaw.llm.service import LLMProviderExecutionError
-
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    rate_limited = False
-    no_provider = False
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        message = str(current).lower()
-        if isinstance(current, LLMRateLimitError) or "rate limit" in message:
-            rate_limited = True
-        if isinstance(current, LLMFallbackError | LLMProviderExecutionError) and (
-            "no provider was available" in message
-        ):
-            no_provider = True
-        current = current.__cause__ or current.__context__
-    if rate_limited:
-        return "rate_limited"
-    if no_provider:
-        return "no_provider"
-    return None
+    kind = classify_llm_failure_kind(exc)
+    return kind if kind in {"rate_limited", "no_provider"} else None
 
 
 # Substrings that mark an upstream content-moderation / compliance refusal.
@@ -104,6 +85,102 @@ _LLM_QUOTA_MARKERS = (
     "exhausted",
     "429",
 )
+
+_LLM_TIMEOUT_MARKERS = ("timeout", "timed out", "deadline exceeded")
+_LLM_CONNECTION_MARKERS = (
+    "connection reset",
+    "connection refused",
+    "network is unreachable",
+    "name resolution",
+    "temporary failure in name resolution",
+)
+_LLM_SERVER_ERROR_MARKERS = (
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "status 500",
+    "status 502",
+    "status 503",
+    "status 504",
+)
+_LLM_INVALID_RESPONSE_MARKERS = (
+    "empty response",
+    "empty completion",
+    "invalid response",
+    "expected scored json",
+)
+
+
+def classify_llm_failure_kind(exc: BaseException) -> str | None:
+    """Return a machine-readable LLM failure kind from an exception chain.
+
+    The chain walk is cycle-safe. Specific provider throttling and missing
+    provider states win over coarser timeout/response classifications.
+    """
+
+    # Lazily imported to avoid a circular import (service imports this module).
+    from openbiliclaw.llm.service import LLMProviderExecutionError
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    rate_limited = no_provider = auth_failed = False
+    timed_out = invalid_response = connection = server_error = False
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = str(current).lower()
+        if isinstance(current, LLMRateLimitError) or any(
+            marker in message for marker in _LLM_QUOTA_MARKERS
+        ):
+            rate_limited = True
+        if isinstance(current, LLMFallbackError | LLMProviderExecutionError) and (
+            "no provider was available" in message
+        ):
+            no_provider = True
+        if any(marker in message for marker in _LLM_AUTH_MARKERS):
+            auth_failed = True
+        if isinstance(current, (LLMTimeoutError, TimeoutError)) or any(
+            marker in message for marker in _LLM_TIMEOUT_MARKERS
+        ):
+            timed_out = True
+        network_errno = isinstance(current, OSError) and current.errno in {
+            errno.ECONNABORTED,
+            errno.ECONNREFUSED,
+            errno.ECONNRESET,
+            errno.ENETDOWN,
+            errno.ENETUNREACH,
+            errno.EHOSTDOWN,
+            errno.EHOSTUNREACH,
+            errno.ETIMEDOUT,
+        }
+        if (
+            isinstance(current, ConnectionError)
+            or network_errno
+            or any(marker in message for marker in _LLM_CONNECTION_MARKERS)
+        ):
+            connection = True
+        if any(marker in message for marker in _LLM_SERVER_ERROR_MARKERS):
+            server_error = True
+        if isinstance(current, LLMResponseError) or any(
+            marker in message for marker in _LLM_INVALID_RESPONSE_MARKERS
+        ):
+            invalid_response = True
+        current = current.__cause__ or current.__context__
+    if rate_limited:
+        return "rate_limited"
+    if no_provider:
+        return "no_provider"
+    if auth_failed:
+        return "auth_failed"
+    if timed_out:
+        return "timeout"
+    if connection:
+        return "connection"
+    if server_error:
+        return "server_error"
+    if invalid_response:
+        return "invalid_response"
+    return None
 
 
 def describe_llm_failure(exc: BaseException) -> str | None:

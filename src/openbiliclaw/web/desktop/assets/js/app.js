@@ -5294,6 +5294,7 @@
 
       const discovery = config.discovery || {};
       setSelect("keywordGenerationMode", discovery.keyword_generation_mode || "legacy");
+      setInput("candidateEvalConcurrency", discovery.candidate_eval_concurrency);
       setSelect("multimodalEvaluationEnabled", discovery.multimodal_evaluation_enabled ? "on" : "off");
       setInput("multimodalBatchSize", discovery.multimodal_batch_size);
       setInput("multimodalImageMaxPx", discovery.multimodal_image_max_px);
@@ -5314,7 +5315,7 @@
       setSelect("llmProvider", provider);
       const fallbackProvider = llm.fallback_provider || "";
       setSelect("llmFallbackProvider", fallbackProvider);
-      setInput("llmConcurrency", llm.concurrency ?? 3);
+      setInput("llmConcurrency", llm.concurrency ?? 4);
       setInput("llmTimeout", llm.timeout);
       setSelect("llmAuthMode", llm.openai?.auth_mode || "api_key");
       if (provider) {
@@ -6152,7 +6153,7 @@
         default_provider: provider,
         // 非空 fallback_provider 即启用 fallback；旧的 fallback_enabled 布尔字段已移除。
         fallback_provider: fallbackProvider,
-        concurrency: getIntInput("llmConcurrency", 3),
+        concurrency: getIntInput("llmConcurrency", 4),
         timeout: getIntInput("llmTimeout", 60),
         [provider]: { ...(state.config?.llm?.[provider] || {}), ...llmProviderConfig },
         embedding: { ...(state.config?.llm?.embedding || {}), ...embedding },
@@ -6299,6 +6300,7 @@
         discovery: {
           ...(state.config?.discovery || {}),
           keyword_generation_mode: $("#keywordGenerationMode").value,
+          candidate_eval_concurrency: getIntInput("candidateEvalConcurrency", 3),
           multimodal_evaluation_enabled: $("#multimodalEvaluationEnabled").value === "on",
           multimodal_batch_size: getIntInput("multimodalBatchSize", 8),
           multimodal_image_max_px: getIntInput("multimodalImageMaxPx", 384),

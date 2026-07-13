@@ -6,8 +6,10 @@ import asyncio
 import inspect
 import json
 import logging
+import secrets
 import time
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from openbiliclaw.discovery.admission import effective_admission_threshold
@@ -55,6 +57,72 @@ def _default_score_thresholds() -> dict[str, float]:
     }
 
 
+@dataclass(frozen=True)
+class CandidateEvalClaim:
+    """One token-owned batch claimed for LLM evaluation."""
+
+    token: str
+    rows: tuple[dict[str, Any], ...]
+    items: tuple[DiscoveredContent, ...]
+
+
+@dataclass(frozen=True)
+class CandidateEvalOutcome:
+    """LLM-only output awaiting serialized persistence and admission."""
+
+    claim: CandidateEvalClaim
+    scores: tuple[float, ...]
+    elapsed_seconds: float
+
+
+class PostAdmissionCopyState(StrEnum):
+    """Terminal ownership state for copy work following a candidate admission."""
+
+    NOT_OWNED = "not_owned"
+    CALLBACK_COMPLETED = "callback_completed"
+    CALLBACK_FAILED = "callback_failed"
+
+
+@dataclass(frozen=True)
+class PostAdmissionCopyReceipt:
+    """Describe whether an admission callback already owned the copy stage.
+
+    The result travels with one ``drain_pending`` return value so callers can
+    distinguish "there was no admission callback" from "the callback already
+    ran (including a durable, retryable failure)".  That is important for
+    one-shot runtimes: their refresh-plan cleanup must only act as a fallback,
+    never re-invoke the owner for the same admission.
+    """
+
+    state: PostAdmissionCopyState = PostAdmissionCopyState.NOT_OWNED
+    completed: int = 0
+
+    @property
+    def owns_copy_stage(self) -> bool:
+        """Whether a post-admission callback took ownership this drain."""
+
+        return self.state is not PostAdmissionCopyState.NOT_OWNED
+
+
+class CandidateDrainResult(dict[str, int]):
+    """Mapping-compatible drain metrics with an explicit copy ownership receipt.
+
+    Existing consumers treat drain output as a ``dict[str, int]``.  Keeping
+    that mapping shape preserves their metric contract (and legacy equality
+    checks) while exposing the non-metric ownership result as a dedicated
+    attribute instead of smuggling it into the public count payload.
+    """
+
+    def __init__(
+        self,
+        values: dict[str, int],
+        *,
+        post_admission_copy: PostAdmissionCopyReceipt,
+    ) -> None:
+        super().__init__(values)
+        self.post_admission_copy = post_admission_copy
+
+
 @dataclass
 class DiscoveryCandidatePipeline:
     """Drain pending raw candidates through one mixed-source evaluator."""
@@ -74,6 +142,11 @@ class DiscoveryCandidatePipeline:
     max_supply_fill_attempts: int = 3
     max_supply_fill_seconds: float = 240.0
     eval_batch_concurrency: int = 2
+    on_candidates_enqueued: Callable[[int], None] | None = None
+    # Non-daemon callers may own the final, durable expression-copy stage
+    # inline.  The API runtime leaves this unset because its coordinator owns
+    # that stage after claim completion.
+    on_candidates_admitted: Callable[[Any, int], Any] | None = None
     time_fn: Callable[[], float] = field(default=time.monotonic, repr=False)
     _drain_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock,
@@ -150,11 +223,15 @@ class DiscoveryCandidatePipeline:
         enqueue = self.database.enqueue_discovery_candidates
         cap = self._max_pending_per_source()
         if cap is None:
-            return int(enqueue(writes))
-        try:
-            return int(enqueue(writes, max_pending_per_source=cap))
-        except TypeError:
-            return int(enqueue(writes))
+            inserted = int(enqueue(writes))
+        else:
+            try:
+                inserted = int(enqueue(writes, max_pending_per_source=cap))
+            except TypeError:
+                inserted = int(enqueue(writes))
+        if inserted > 0 and self.on_candidates_enqueued is not None:
+            self.on_candidates_enqueued(inserted)
+        return inserted
 
     async def ensure_pending_supply(
         self,
@@ -339,14 +416,191 @@ class DiscoveryCandidatePipeline:
         *,
         profile: Any,
         batch_size: int = _DEFAULT_EVAL_BATCH_SIZE,
-    ) -> dict[str, int]:
+    ) -> CandidateDrainResult:
         """Evaluate one pending batch and admit accepted items into content_cache."""
 
         if self._drain_lock.locked():
             self.last_admitted_items = []
-            return {"evaluated": 0, "cached": 0, "rejected": 0}
+            return CandidateDrainResult(
+                {"evaluated": 0, "cached": 0, "rejected": 0},
+                post_admission_copy=PostAdmissionCopyReceipt(),
+            )
         async with self._drain_lock:
-            return await self._drain_pending_locked(profile=profile, batch_size=batch_size)
+            result = await self._drain_pending_locked(profile=profile, batch_size=batch_size)
+        post_admission_copy = await self._notify_candidates_admitted(
+            profile=profile,
+            admitted=int(result.get("cached", 0) or 0),
+        )
+        return CandidateDrainResult(result, post_admission_copy=post_admission_copy)
+
+    async def _notify_candidates_admitted(
+        self,
+        *,
+        profile: Any,
+        admitted: int,
+    ) -> PostAdmissionCopyReceipt:
+        """Run the optional post-admission owner after its DB commit.
+
+        Candidate evaluation owns only raw evaluation and cache admission.  A
+        non-daemon composition can supply the final copy owner here, after the
+        candidate transaction is durable; failures remain retryable because
+        un-copied rows stay in the durable pending-copy set.
+        """
+
+        callback = self.on_candidates_admitted
+        if admitted <= 0 or callback is None:
+            return PostAdmissionCopyReceipt()
+        try:
+            result = callback(profile, admitted)
+            if inspect.isawaitable(result):
+                result = await result
+            try:
+                completed = max(0, int(result or 0))
+            except (TypeError, ValueError):
+                completed = 0
+            return PostAdmissionCopyReceipt(
+                state=PostAdmissionCopyState.CALLBACK_COMPLETED,
+                completed=completed,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("post-admission candidate callback failed")
+            # The durable pending-copy rows remain retryable on a later
+            # operation. The callback still owns this admission, so callers
+            # must not immediately invoke it a second time as a cleanup pass.
+            return PostAdmissionCopyReceipt(
+                state=PostAdmissionCopyState.CALLBACK_FAILED,
+            )
+
+    def claim_batch(self, *, limit: int) -> CandidateEvalClaim | None:
+        """Claim one token-owned batch without performing LLM work."""
+
+        claim_limit = max(0, int(limit))
+        if claim_limit <= 0:
+            return None
+        token = secrets.token_hex(16)
+        claim_fn = self.database.claim_discovery_candidates_for_eval
+        try:
+            rows = list(claim_fn(limit=claim_limit, claim_token=token))
+        except TypeError:
+            rows = list(claim_fn(limit=claim_limit))
+        if not rows:
+            return None
+        stored_tokens = {str(row.get("claim_token") or "") for row in rows}
+        stored_tokens.discard("")
+        if len(stored_tokens) == 1:
+            token = stored_tokens.pop()
+        items = tuple(row_to_discovered_content(row) for row in rows)
+        return CandidateEvalClaim(token=token, rows=tuple(rows), items=items)
+
+    async def evaluate_claim(self, claim: CandidateEvalClaim, profile: Any) -> CandidateEvalOutcome:
+        """Run only the LLM evaluation stage; this method performs no writes."""
+
+        started = self.time_fn()
+        scores = await self.discovery_engine.evaluate_content_batch(
+            list(claim.items),
+            profile,
+            source_context="mixed",
+            batch_size=len(claim.items),
+        )
+        if len(scores) != len(claim.items):
+            raise ValueError(
+                f"evaluation returned {len(scores)} scores for {len(claim.items)} candidates"
+            )
+        return CandidateEvalOutcome(
+            claim=claim,
+            scores=tuple(float(score) for score in scores),
+            elapsed_seconds=max(0.0, self.time_fn() - started),
+        )
+
+    async def complete_claim(
+        self,
+        outcome: CandidateEvalOutcome,
+        *,
+        admission_limit: int | None = None,
+    ) -> dict[str, int]:
+        """Persist and admit one completed claim while honoring token ownership."""
+
+        claim = outcome.claim
+        rows = list(claim.rows)
+        items = list(claim.items)
+        scores = list(outcome.scores)
+        await self._normalize_evaluated_items(items)
+        recently_viewed = self._recent_viewed_content_keys()
+        updated_ids = self._persist_evaluations(
+            rows,
+            items,
+            scores,
+            recently_viewed=recently_viewed,
+            claim_token=claim.token,
+        )
+
+        accepted: list[tuple[dict[str, Any], DiscoveredContent]] = []
+        rejected = 0
+        for row, item, score in zip(rows, items, scores, strict=True):
+            candidate_id = int(row["id"])
+            if candidate_id not in updated_ids:
+                continue
+            final_score = float(item.relevance_score or score or 0.0)
+            if self._is_recently_viewed(item, recently_viewed):
+                rejected += 1
+                continue
+            if final_score < self._threshold_for(row):
+                rejected += 1
+                continue
+            accepted.append((row, item))
+
+        admitted_items: list[DiscoveredContent] = []
+        cached, admission_rejected = self._admit_until_full(
+            accepted,
+            recently_viewed=recently_viewed,
+            admitted_items=admitted_items,
+            limit=admission_limit,
+        )
+        self.last_admitted_items = list(admitted_items)
+        return {
+            "evaluated": len(updated_ids),
+            "cached": cached,
+            "rejected": rejected + admission_rejected,
+            "stale": len(rows) - len(updated_ids),
+        }
+
+    def release_claim(
+        self,
+        claim: CandidateEvalClaim,
+        *,
+        reason: str,
+        increment_attempts: bool = False,
+    ) -> int:
+        """Release only rows still owned by this claim token."""
+
+        ids = [int(row["id"]) for row in claim.rows if int(row.get("id") or 0) > 0]
+        if not ids:
+            return 0
+        reset_claimed = getattr(
+            self.database,
+            "reset_claimed_discovery_candidates_to_pending",
+            None,
+        )
+        if callable(reset_claimed):
+            return int(
+                reset_claimed(
+                    ids,
+                    claim_token=claim.token,
+                    reason=reason,
+                    max_attempts=self.max_eval_attempts,
+                    max_batch_attempts=self.max_batch_eval_attempts,
+                    increment_attempts=increment_attempts,
+                )
+                or 0
+            )
+        self._release_eval_claims(
+            list(claim.rows),
+            reason=reason,
+            increment_attempts=increment_attempts,
+        )
+        return len(ids)
 
     async def _drain_pending_locked(
         self,
@@ -398,23 +652,18 @@ class DiscoveryCandidatePipeline:
                 "waiting": waiting_pending,
             }
 
-        rows = self.database.claim_discovery_candidates_for_eval(limit=claim_limit)
-        if not rows:
+        claim = self.claim_batch(limit=claim_limit)
+        if claim is None:
             self._first_pending_eval_seen_at = None
             self.last_admitted_items = list(admitted_items)
             return {"evaluated": 0, "cached": retry_cached, "rejected": retry_rejected}
 
-        items = [row_to_discovered_content(row) for row in rows]
         try:
-            scores = await self.discovery_engine.evaluate_content_batch(
-                items,
-                profile,
-                source_context="mixed",
-                batch_size=batch_size,
-            )
+            outcome = await self.evaluate_claim(claim, profile)
+            result = await self.complete_claim(outcome)
         except asyncio.CancelledError:
             logger.info("discovery candidate batch evaluation cancelled; releasing claims")
-            self._release_eval_claims(rows, reason="evaluation cancelled", increment_attempts=False)
+            self.release_claim(claim, reason="evaluation cancelled", increment_attempts=False)
             self.last_admitted_items = list(admitted_items)
             raise
         except Exception as exc:
@@ -429,75 +678,25 @@ class DiscoveryCandidatePipeline:
                     "discovery candidate batch evaluation deferred (%s) for %d "
                     "candidate(s); releasing claims to retry on the next tick: %s",
                     kind,
-                    len(rows),
+                    len(claim.rows),
                     exc,
                 )
             else:
                 logger.exception("discovery candidate batch evaluation failed")
-            self._release_eval_claims(rows, reason=str(exc), increment_attempts=False)
+            self.release_claim(claim, reason=str(exc), increment_attempts=False)
             self.last_admitted_items = list(admitted_items)
             return {
                 "evaluated": 0,
                 "cached": retry_cached,
                 "rejected": retry_rejected,
-                "failed": len(rows),
+                "failed": len(claim.rows),
             }
-
-        if len(scores) != len(items):
-            reason = f"evaluation returned {len(scores)} scores for {len(items)} candidates"
-            logger.warning("discovery candidate batch evaluation incomplete: %s", reason)
-            self._release_eval_claims(rows, reason=reason, increment_attempts=False)
-            self.last_admitted_items = list(admitted_items)
-            return {
-                "evaluated": 0,
-                "cached": retry_cached,
-                "rejected": retry_rejected,
-                "failed": len(rows),
-            }
-
-        try:
-            await self._normalize_evaluated_items(items)
-            accepted: list[tuple[dict[str, Any], DiscoveredContent]] = []
-            rejected = 0
-            for row, item, score in zip(rows, items, scores, strict=True):
-                final_score = float(item.relevance_score or score or 0.0)
-                if self._is_recently_viewed(item, recently_viewed):
-                    rejected += 1
-                    continue
-                if final_score < self._threshold_for(row):
-                    rejected += 1
-                    continue
-                accepted.append((row, item))
-            self._persist_evaluations(rows, items, scores, recently_viewed=recently_viewed)
-        except asyncio.CancelledError:
-            logger.info("discovery candidate post-evaluation cancelled; releasing claims")
-            self._release_eval_claims(
-                rows,
-                reason="post-evaluation cancelled",
-                increment_attempts=False,
-            )
-            self.last_admitted_items = list(admitted_items)
-            raise
-        except Exception as exc:
-            logger.exception("discovery candidate post-evaluation processing failed")
-            self._release_eval_claims(rows, reason=str(exc), increment_attempts=False)
-            self.last_admitted_items = list(admitted_items)
-            return {
-                "evaluated": 0,
-                "cached": retry_cached,
-                "rejected": retry_rejected,
-                "failed": len(rows),
-            }
-        cached, admission_rejected = self._admit_until_full(
-            accepted,
-            recently_viewed=recently_viewed,
-            admitted_items=admitted_items,
-        )
-        self.last_admitted_items = list(admitted_items)
+        completed_items = list(self.last_admitted_items)
+        self.last_admitted_items = [*admitted_items, *completed_items]
         return {
-            "evaluated": len(rows),
-            "cached": retry_cached + cached,
-            "rejected": retry_rejected + rejected + admission_rejected,
+            "evaluated": result["evaluated"],
+            "cached": retry_cached + result["cached"],
+            "rejected": retry_rejected + result["rejected"],
         }
 
     def _effective_eval_batch_concurrency(self) -> int:
@@ -518,6 +717,18 @@ class DiscoveryCandidatePipeline:
         """Return whether the visible recommendation pool is at target."""
 
         return self._pool_full()
+
+    def admit_evaluated(self, *, limit: int) -> dict[str, int]:
+        """Admit previously evaluated rows before spending another LLM call."""
+
+        admitted_items: list[DiscoveredContent] = []
+        cached, rejected = self._admit_evaluated_candidates(
+            limit=max(0, int(limit)),
+            recently_viewed=self._recent_viewed_content_keys(),
+            admitted_items=admitted_items,
+        )
+        self.last_admitted_items = admitted_items
+        return {"cached": cached, "rejected": rejected}
 
     def _admit_evaluated_candidates(
         self,
@@ -541,6 +752,7 @@ class DiscoveryCandidatePipeline:
             accepted,
             recently_viewed=recently_viewed,
             admitted_items=admitted_items,
+            limit=limit,
         )
 
     def _release_eval_claims(
@@ -594,9 +806,14 @@ class DiscoveryCandidatePipeline:
         scores: list[float],
         *,
         recently_viewed: set[str],
-    ) -> None:
+        claim_token: str | None = None,
+    ) -> set[int]:
         evaluations: list[dict[str, Any]] = []
+        unresolved_ids: list[int] = []
         for row, item, score in zip(rows, items, scores, strict=True):
+            if item.relevance_reason == "evaluation_response_missing":
+                unresolved_ids.append(int(row["id"]))
+                continue
             final_score = float(item.relevance_score or score or 0.0)
             status = "evaluated"
             eval_error = ""
@@ -621,7 +838,30 @@ class DiscoveryCandidatePipeline:
                     "eval_error": eval_error,
                 }
             )
-        self.database.update_discovery_candidate_evaluations(evaluations)
+        persist_claimed = getattr(
+            self.database,
+            "persist_claimed_discovery_candidate_evaluations",
+            None,
+        )
+        if claim_token is not None and callable(persist_claimed):
+            updated_ids = set(persist_claimed(evaluations, claim_token=claim_token))
+            reset_claimed = getattr(
+                self.database, "reset_claimed_discovery_candidates_to_pending", None
+            )
+            if unresolved_ids and callable(reset_claimed):
+                reset_claimed(
+                    unresolved_ids,
+                    claim_token=claim_token,
+                    reason="evaluation_response_missing",
+                    max_attempts=self.max_eval_attempts,
+                    max_batch_attempts=self.max_batch_eval_attempts,
+                    increment_attempts=False,
+                )
+            return updated_ids
+        updated = int(self.database.update_discovery_candidate_evaluations(evaluations) or 0)
+        if updated == len(evaluations):
+            return {int(evaluation["candidate_id"]) for evaluation in evaluations}
+        return set()
 
     def _admit_until_full(
         self,
@@ -629,11 +869,13 @@ class DiscoveryCandidatePipeline:
         *,
         recently_viewed: set[str],
         admitted_items: list[DiscoveredContent],
+        limit: int | None = None,
     ) -> tuple[int, int]:
         cached = 0
         rejected = 0
+        cache_limit = None if limit is None else max(0, int(limit))
         for row, item in accepted:
-            if self._pool_full():
+            if (cache_limit is not None and cached >= cache_limit) or self._pool_full():
                 break
             if self._is_recently_viewed(item, recently_viewed):
                 self.database.reject_discovery_candidate(

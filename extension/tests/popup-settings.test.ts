@@ -356,6 +356,7 @@ test("settings page round-trips multimodal discovery evaluation controls", () =>
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
 
   for (const id of [
+    "cfgCandidateEvalConcurrency",
     "cfgMultimodalEvaluationEnabled",
     "cfgMultimodalBatchSize",
     "cfgMultimodalImageMaxPx",
@@ -366,6 +367,15 @@ test("settings page round-trips multimodal discovery evaluation controls", () =>
     assert.match(popupJs, new RegExp(`"${id}"`), `${id} should be wired in popup.js`);
   }
 
+  assert.match(
+    popupHtml,
+    /id="cfgCandidateEvalConcurrency" type="number" min="1" max="3" step="1" placeholder="3"/,
+  );
+
+  assert.match(
+    popupJs,
+    /setVal\("cfgCandidateEvalConcurrency", cfg\.discovery\?\.candidate_eval_concurrency\)/,
+  );
   assert.match(
     popupJs,
     /multimodalEvaluation\.checked = cfg\.discovery\?\.multimodal_evaluation_enabled === true/,
@@ -387,6 +397,12 @@ test("settings page round-trips multimodal discovery evaluation controls", () =>
     /setVal\("cfgMultimodalImageTimeout", cfg\.discovery\?\.multimodal_image_timeout_seconds\)/,
   );
   assert.match(popupJs, /multimodal_evaluation_enabled: checked\("cfgMultimodalEvaluationEnabled"\)/);
+  assert.match(
+    popupJs,
+    /candidate_eval_concurrency: getInt\("cfgCandidateEvalConcurrency", 3\)/,
+  );
+  assert.match(popupJs, /setVal\("cfgLlmConcurrency", cfg\.llm\?\.concurrency \?\? 4\)/);
+  assert.match(popupJs, /concurrency: getInt\("cfgLlmConcurrency", 4\)/);
   assert.match(popupJs, /multimodal_batch_size: getInt\("cfgMultimodalBatchSize", 8\)/);
   assert.match(popupJs, /multimodal_image_max_px: getInt\("cfgMultimodalImageMaxPx", 384\)/);
   assert.match(popupJs, /multimodal_image_quality: getInt\("cfgMultimodalImageQuality", 72\)/);

@@ -130,6 +130,15 @@ def test_dialogue_clear_history_resets_turns() -> None:
     assert dialogue.history == []
 
 
+def test_dialogue_reuses_soul_engine_service_identity() -> None:
+    shared_service = FakeService(response="共享")
+    soul_engine = FakeSoulEngine()
+    soul_engine._llm_service = shared_service  # type: ignore[attr-defined]
+    dialogue = SocraticDialogue(llm=object(), soul_engine=soul_engine)
+
+    assert dialogue._build_service() is shared_service
+
+
 def test_dialogue_fallback_service_inherits_soul_engine_module_overrides() -> None:
     overrides = {"soul": ModuleOverride(provider="claude", model="claude-sonnet")}
     registry = SimpleNamespace(default_provider="openai")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import time
 from datetime import UTC, datetime, timedelta
@@ -19,6 +20,25 @@ from openbiliclaw import __version__
 from openbiliclaw.api.app import create_app
 
 
+def test_source_platform_helpers_delegate_to_canonical_registry() -> None:
+    from openbiliclaw.api.app import _infer_source_platform_from_url, _normalize_source_platform
+
+    assert _normalize_source_platform("zh") == "zhihu"
+    assert _normalize_source_platform("") == "bilibili"
+    assert _infer_source_platform_from_url("https://www.zhihu.com/question/1/answer/2") == "zhihu"
+    assert _infer_source_platform_from_url("https://example.com/zhihu.com/question/1") == ""
+
+
+def test_discovery_config_response_caps_candidate_eval_concurrency_at_three() -> None:
+    from pydantic import ValidationError
+
+    from openbiliclaw.api.models import DiscoveryConfigOut
+
+    assert DiscoveryConfigOut(candidate_eval_concurrency=3).candidate_eval_concurrency == 3
+    with pytest.raises(ValidationError):
+        DiscoveryConfigOut(candidate_eval_concurrency=4)
+
+
 def assert_publication(payload: dict[str, object]) -> None:
     assert payload["published_at"] == "2026-07-08T06:30:00Z"
     assert payload["published_label"] == "3 days ago"
@@ -32,6 +52,643 @@ def _wait_for_presence_count(ctx: object, expected: int) -> None:
             return
         time.sleep(0.01)
     assert ctx.presence.snapshot()["active_count"] == expected
+
+
+def _injected_soul_engine(gate: object) -> object:
+    from openbiliclaw.soul.engine import SoulEngine
+
+    class Registry:
+        default_provider = "fake"
+
+        def is_chat_capable(self, name: str) -> bool:
+            return name == "fake"
+
+        async def complete(self, *args: object, **kwargs: object) -> object:
+            raise AssertionError("provider call was not expected")
+
+        async def complete_provider(self, *args: object, **kwargs: object) -> object:
+            raise AssertionError("provider call was not expected")
+
+    memory = SimpleNamespace(_data_dir=None)
+    return SoulEngine(
+        llm=Registry(),  # type: ignore[arg-type]
+        memory=memory,  # type: ignore[arg-type]
+        llm_concurrency_gate=gate,
+    )
+
+
+def test_injected_runtime_adopts_shared_soul_controller_gate(monkeypatch, tmp_path) -> None:
+    from fastapi.testclient import TestClient
+
+    from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+    from openbiliclaw.llm.base import LLMResponse
+    from openbiliclaw.llm.concurrency import LLMConcurrencyGate
+
+    gate = LLMConcurrencyGate(2)
+    soul = _injected_soul_engine(gate)
+    controller = SimpleNamespace(llm_concurrency_gate=gate, event_hub=None)
+    config = Config(
+        data_dir=str(tmp_path),
+        llm=LLMConfig(
+            default_provider="deepseek",
+            deepseek=LLMProviderConfig(api_key="test", model="test-model"),
+        ),
+    )
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
+
+    class ProbeRegistry:
+        default_provider = "deepseek"
+
+        def is_chat_capable(self, name: str) -> bool:
+            return name == "deepseek"
+
+        async def complete_provider(self, *args: object, **kwargs: object) -> LLMResponse:
+            assert gate.status_payload()["llm_total_active"] == 1
+            assert gate.status_payload()["llm_background_active"] == 1
+            return LLMResponse(content="OK", provider="deepseek")
+
+    monkeypatch.setattr(
+        "openbiliclaw.llm.registry.build_llm_registry", lambda _config: ProbeRegistry()
+    )
+    app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=soul,
+        runtime_controller=controller,
+    )
+    ctx = app.state.runtime_context
+
+    assert ctx.llm_concurrency_gate is gate
+    assert soul._llm_service.concurrency_gate is gate  # type: ignore[attr-defined]
+    assert ctx.dialogue._build_service() is soul._llm_service  # type: ignore[attr-defined]
+    response = TestClient(app).post(
+        "/api/config/probe-service",
+        json={"kind": "llm", "config": {}},
+    )
+    assert response.json()["ok"] is True
+
+
+def test_injected_runtime_adopts_one_sided_gate_and_rejects_conflict(monkeypatch, tmp_path) -> None:
+    from openbiliclaw.config import Config
+    from openbiliclaw.llm.concurrency import LLMConcurrencyGate
+
+    config = Config(data_dir=str(tmp_path))
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
+    soul_gate = LLMConcurrencyGate(2)
+    soul = _injected_soul_engine(soul_gate)
+    controller = SimpleNamespace(llm_concurrency_gate=None, event_hub=None)
+
+    soul_app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=soul,
+        runtime_controller=controller,
+    )
+    assert soul_app.state.runtime_context.llm_concurrency_gate is soul_gate
+    assert controller.llm_concurrency_gate is soul_gate
+    assert soul_gate.status_payload()["llm_total_concurrency"] == 2
+
+    controller_gate = LLMConcurrencyGate(3)
+    gate_less_soul = SimpleNamespace(
+        _llm_concurrency_gate=None,
+        _llm_service=SimpleNamespace(concurrency_gate=None),
+    )
+    controller = SimpleNamespace(llm_concurrency_gate=controller_gate, event_hub=None)
+    controller_app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=gate_less_soul,
+        runtime_controller=controller,
+    )
+    assert controller_app.state.runtime_context.llm_concurrency_gate is controller_gate
+    assert gate_less_soul._llm_concurrency_gate is controller_gate
+    assert gate_less_soul._llm_service.concurrency_gate is controller_gate
+
+    with pytest.raises(ValueError, match="different LLM concurrency gates"):
+        create_app(
+            memory_manager=SimpleNamespace(),
+            database=SimpleNamespace(),
+            soul_engine=_injected_soul_engine(LLMConcurrencyGate(2)),
+            runtime_controller=SimpleNamespace(
+                llm_concurrency_gate=LLMConcurrencyGate(2), event_hub=None
+            ),
+        )
+
+
+def test_injected_compatibility_doubles_receive_fresh_shared_gate(monkeypatch, tmp_path) -> None:
+    from openbiliclaw.config import Config, LLMConfig
+
+    config = Config(data_dir=str(tmp_path), llm=LLMConfig(concurrency=3))
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
+    soul = SimpleNamespace()
+    controller = SimpleNamespace(event_hub=None)
+
+    app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=soul,
+        runtime_controller=controller,
+    )
+    gate = app.state.runtime_context.llm_concurrency_gate
+
+    assert gate.status_payload()["llm_total_concurrency"] == 3
+    assert controller.llm_concurrency_gate is gate
+    assert soul._llm_concurrency_gate is gate
+
+
+def test_injected_runtime_initializes_inventory_from_database_and_controller_target(
+    monkeypatch, tmp_path
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from openbiliclaw.config import Config
+    from openbiliclaw.llm.concurrency import InventoryPriorityState, LLMConcurrencyGate
+
+    config = Config(data_dir=str(tmp_path))
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
+
+    class EmptyDatabase:
+        def count_pool_candidates(self, *, xhs_self_nickname: str = "") -> int:
+            return 0
+
+    gate = LLMConcurrencyGate(4)
+    controller = SimpleNamespace(
+        llm_concurrency_gate=gate,
+        pool_target_count=30,
+        event_hub=None,
+    )
+    app = create_app(
+        memory_manager=SimpleNamespace(load_discovery_runtime_state=lambda: {}),
+        database=EmptyDatabase(),
+        soul_engine=_injected_soul_engine(gate),
+        runtime_controller=controller,
+        recommendation_engine=SimpleNamespace(),
+    )
+
+    assert gate.inventory_priority_state is InventoryPriorityState.EMPTY
+    response = TestClient(app).post("/api/recommendations/append", json={"excluded_bvids": []})
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
+    assert gate.inventory_priority_state is InventoryPriorityState.EMPTY
+
+
+def test_injected_inventory_sync_keeps_compatibility_double_without_target_healthy(
+    monkeypatch, tmp_path
+) -> None:
+    from openbiliclaw.config import Config
+    from openbiliclaw.llm.concurrency import InventoryPriorityState
+
+    config = Config(data_dir=str(tmp_path))
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
+    app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=SimpleNamespace(),
+        runtime_controller=SimpleNamespace(event_hub=None),
+    )
+
+    assert (
+        app.state.runtime_context.llm_concurrency_gate.inventory_priority_state
+        is InventoryPriorityState.HEALTHY
+    )
+
+
+def test_failed_late_hot_reload_does_not_mutate_stable_gate_inventory(
+    monkeypatch, tmp_path
+) -> None:
+    from openbiliclaw.api.runtime_context import build_runtime_context
+    from openbiliclaw.config import Config
+    from openbiliclaw.llm.concurrency import InventoryPriorityState
+
+    current = Config(data_dir=str(tmp_path / "data"))
+    current.llm.default_provider = "ollama"
+    current.llm.ollama.model = "llama3"
+    current.scheduler.pool_target_count = 10
+    ctx = build_runtime_context(current)
+    gate = ctx.llm_concurrency_gate
+    gate.update_inventory(available=10, target=10)
+    update_calls: list[tuple[int, int]] = []
+    real_update = gate.update_inventory
+
+    def record_update(*, available: int, target: int) -> None:
+        update_calls.append((available, target))
+        real_update(available=available, target=target)
+
+    monkeypatch.setattr(gate, "update_inventory", record_update)
+
+    class LateFailure:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            raise RuntimeError("late dialogue construction failed")
+
+    monkeypatch.setattr("openbiliclaw.soul.dialogue.SocraticDialogue", LateFailure)
+    proposed = Config(data_dir=str(tmp_path / "data"))
+    proposed.llm.default_provider = "ollama"
+    proposed.llm.ollama.model = "llama3"
+    proposed.scheduler.pool_target_count = 30
+
+    with pytest.raises(RuntimeError, match="late dialogue"):
+        ctx._rebuild_components(proposed)
+
+    assert update_calls == []
+    assert gate.inventory_priority_state is InventoryPriorityState.HEALTHY
+    assert ctx.config is current
+
+
+def test_successful_hot_reload_commits_new_inventory_target(monkeypatch, tmp_path) -> None:
+    from openbiliclaw.api.runtime_context import build_runtime_context
+    from openbiliclaw.config import Config
+    from openbiliclaw.llm.concurrency import InventoryPriorityState
+
+    current = Config(data_dir=str(tmp_path / "data"))
+    current.llm.default_provider = "ollama"
+    current.llm.ollama.model = "llama3"
+    current.scheduler.pool_target_count = 10
+    ctx = build_runtime_context(current)
+    gate = ctx.llm_concurrency_gate
+    monkeypatch.setattr(ctx.database, "count_pool_candidates", lambda **_kwargs: 10)
+    update_calls: list[tuple[int, int]] = []
+    real_update = gate.update_inventory
+
+    def record_update(*, available: int, target: int) -> None:
+        update_calls.append((available, target))
+        real_update(available=available, target=target)
+
+    monkeypatch.setattr(gate, "update_inventory", record_update)
+    proposed = Config(data_dir=str(tmp_path / "data"))
+    proposed.llm.default_provider = "ollama"
+    proposed.llm.ollama.model = "llama3"
+    proposed.scheduler.pool_target_count = 30
+
+    ctx._rebuild_components(proposed)
+
+    assert update_calls[-1] == (10, 30)
+    assert gate.inventory_priority_state is InventoryPriorityState.REFILL
+    assert ctx.config is proposed
+
+
+def test_api_candidate_snapshot_uses_exact_durable_readiness_and_available_gate(
+    monkeypatch, tmp_path
+) -> None:
+    from openbiliclaw.api.runtime_context import build_runtime_context
+    from openbiliclaw.config import Config
+    from openbiliclaw.llm.concurrency import InventoryPriorityState
+
+    config = Config(data_dir=str(tmp_path / "data"))
+    config.llm.default_provider = "ollama"
+    config.llm.ollama.model = "llama3"
+    config.scheduler.pool_target_count = 10
+    ctx = build_runtime_context(config)
+    ctx._rebuild_components(config)
+    for index in range(4):
+        ctx.database.cache_content(
+            f"BVPENDINGCOPY{index}",
+            title=f"classified admitted row {index}",
+            source="search",
+            relevance_score=0.9,
+            style_key="tutorial",
+            topic_group="testing",
+        )
+    monkeypatch.setattr(
+        ctx.database,
+        "count_discovery_candidates_by_status",
+        lambda: {"pending_eval": 500, "evaluating": 60, "evaluated": 3},
+    )
+
+    snapshot = ctx.runtime_controller.candidate_eval_coordinator._snapshot()
+
+    assert snapshot.available == 0
+    assert snapshot.pending_eval == 500
+    assert snapshot.evaluating == 60
+    assert snapshot.evaluated_pending_admission == 3
+    assert snapshot.admitted_pending_copy == 4
+    assert ctx.llm_concurrency_gate.inventory_priority_state is InventoryPriorityState.EMPTY
+
+
+@pytest.mark.asyncio
+async def test_old_engine_commit_callback_uses_current_controller_after_two_reloads(
+    tmp_path,
+) -> None:
+    from openbiliclaw.api.runtime_context import build_runtime_context
+    from openbiliclaw.config import Config
+    from openbiliclaw.llm.concurrency import InventoryPriorityState
+
+    config = Config(data_dir=str(tmp_path / "data"))
+    config.llm.default_provider = "ollama"
+    config.llm.ollama.model = "llama3"
+    config.scheduler.pool_target_count = 30
+    ctx = build_runtime_context(config)
+    for index in range(15):
+        ctx.database.cache_content(
+            f"BVHOT{index:02d}",
+            title=f"hot {index}",
+            source="search",
+            relevance_score=0.9,
+            pool_expression=f"expression {index}",
+            pool_topic_label=f"topic {index}",
+            style_key="tutorial",
+            topic_group=f"group {index}",
+        )
+
+    first = Config(data_dir=str(tmp_path / "data"))
+    first.llm.default_provider = "ollama"
+    first.llm.ollama.model = "llama3"
+    first.scheduler.pool_target_count = 30
+    ctx._rebuild_components(first)
+    old_engine = ctx.recommendation_engine
+    old_callback = old_engine._pool_inventory_commit_callback
+    assert old_callback is ctx.pool_inventory_commit_callback
+    assert ctx.llm_concurrency_gate.inventory_priority_state is InventoryPriorityState.REFILL
+
+    second = Config(data_dir=str(tmp_path / "data"))
+    second.llm.default_provider = "ollama"
+    second.llm.ollama.model = "llama3"
+    second.scheduler.pool_target_count = 10
+    ctx._rebuild_components(second)
+    assert ctx.recommendation_engine._pool_inventory_commit_callback is old_callback
+    assert ctx.llm_concurrency_gate.inventory_priority_state is InventoryPriorityState.HEALTHY
+
+    result = old_callback()
+    if asyncio.iscoroutine(result):
+        await result
+    assert ctx.llm_concurrency_gate.inventory_priority_state is InventoryPriorityState.HEALTHY
+
+
+@pytest.mark.asyncio
+async def test_api_pool_commit_publication_survives_multiple_reloads(monkeypatch, tmp_path) -> None:
+    from openbiliclaw.api.runtime_context import build_runtime_context
+    from openbiliclaw.config import Config
+
+    class EventHub:
+        def __init__(self) -> None:
+            self.events: list[dict[str, object]] = []
+
+        async def publish(self, event: dict[str, object]) -> bool:
+            self.events.append(dict(event))
+            return True
+
+    config = Config(data_dir=str(tmp_path / "data"))
+    config.llm.default_provider = "ollama"
+    config.llm.ollama.model = "llama3"
+    config.scheduler.pool_target_count = 30
+    hub = EventHub()
+    built = build_runtime_context(config, event_hub=hub)
+    for index in range(4):
+        built.database.cache_content(
+            f"BVEVENT{index}",
+            title=f"event {index}",
+            source="search",
+            relevance_score=0.9,
+            pool_expression=f"expression {index}",
+            pool_topic_label=f"topic {index}",
+            style_key="tutorial",
+            topic_group=f"event-group {index}",
+        )
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
+    app = create_app(
+        memory_manager=built.memory_manager,
+        database=built.database,
+        soul_engine=built.soul_engine,
+        dialogue=built.dialogue,
+        runtime_controller=built.runtime_controller,
+        recommendation_engine=built.recommendation_engine,
+        runtime_event_hub=hub,
+        account_sync_service=built.account_sync_service,
+        auto_update_service=built.auto_update_service,
+    )
+    ctx = app.state.runtime_context
+
+    first = Config(data_dir=str(tmp_path / "data"))
+    first.llm.default_provider = "ollama"
+    first.llm.ollama.model = "llama3"
+    first.scheduler.pool_target_count = 30
+    ctx._rebuild_components(first)
+    first_reloaded_engine = ctx.recommendation_engine
+    first_callback = first_reloaded_engine._pool_inventory_commit_callback
+
+    second = Config(data_dir=str(tmp_path / "data"))
+    second.llm.default_provider = "ollama"
+    second.llm.ollama.model = "llama3"
+    second.scheduler.pool_target_count = 10
+    ctx._rebuild_components(second)
+    current_callback = ctx.recommendation_engine._pool_inventory_commit_callback
+    assert current_callback is first_callback
+
+    await current_callback()
+    assert hub.events[-1]["type"] == "refresh.pool_updated"
+    assert hub.events[-1]["pool_available_count"] == 4
+
+    await first_callback()
+    assert hub.events[-1]["pool_available_count"] == 4
+    assert hub.events[-1]["pool_target_count"] == 10
+
+
+def test_injected_runtime_adopts_real_dialogue_gate_and_injects_gate_less_service(
+    monkeypatch, tmp_path
+) -> None:
+    from openbiliclaw.config import Config
+    from openbiliclaw.llm.concurrency import LLMConcurrencyGate
+    from openbiliclaw.llm.service import LLMService
+    from openbiliclaw.soul.dialogue import SocraticDialogue
+
+    config = Config(data_dir=str(tmp_path))
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
+    dialogue_gate = LLMConcurrencyGate(2)
+    soul = _injected_soul_engine(dialogue_gate)
+    dialogue_service = LLMService(
+        registry=soul._llm,  # type: ignore[attr-defined]
+        memory=soul._memory,  # type: ignore[attr-defined]
+        concurrency_gate=dialogue_gate,
+    )
+    dialogue = SocraticDialogue(
+        llm=None,
+        soul_engine=soul,  # type: ignore[arg-type]
+        llm_service=dialogue_service,
+    )
+    controller = SimpleNamespace(llm_concurrency_gate=dialogue_gate, event_hub=None)
+
+    app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=soul,
+        dialogue=dialogue,
+        runtime_controller=controller,
+    )
+
+    assert app.state.runtime_context.llm_concurrency_gate is dialogue_gate
+    assert dialogue._llm_service is dialogue_service
+    assert dialogue._llm_service.concurrency_gate is dialogue_gate
+    assert dialogue._build_service().concurrency_gate is dialogue_gate
+
+    controller_gate = LLMConcurrencyGate(3)
+    gate_less_soul = SimpleNamespace(
+        _llm_concurrency_gate=None,
+        _llm_service=SimpleNamespace(concurrency_gate=None),
+    )
+    gate_less_dialogue_service = SimpleNamespace(concurrency_gate=None)
+    gate_less_dialogue = SocraticDialogue(
+        llm=None,
+        soul_engine=gate_less_soul,
+        llm_service=gate_less_dialogue_service,  # type: ignore[arg-type]
+    )
+    gate_less_app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=gate_less_soul,
+        dialogue=gate_less_dialogue,
+        runtime_controller=SimpleNamespace(llm_concurrency_gate=controller_gate, event_hub=None),
+    )
+    assert gate_less_app.state.runtime_context.llm_concurrency_gate is controller_gate
+    assert gate_less_dialogue._build_service().concurrency_gate is controller_gate
+
+
+def test_injected_runtime_adopts_dialogue_only_gate_and_rejects_dialogue_conflict(
+    monkeypatch, tmp_path
+) -> None:
+    from openbiliclaw.config import Config
+    from openbiliclaw.llm.concurrency import LLMConcurrencyGate
+    from openbiliclaw.soul.dialogue import SocraticDialogue
+
+    config = Config(data_dir=str(tmp_path))
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
+    dialogue_gate = LLMConcurrencyGate(2)
+    soul = SimpleNamespace(
+        _llm_concurrency_gate=None,
+        _llm_service=SimpleNamespace(concurrency_gate=None),
+    )
+    dialogue_service = SimpleNamespace(concurrency_gate=dialogue_gate)
+    dialogue = SocraticDialogue(
+        llm=None,
+        soul_engine=soul,
+        llm_service=dialogue_service,  # type: ignore[arg-type]
+    )
+    controller = SimpleNamespace(llm_concurrency_gate=None, event_hub=None)
+
+    app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=soul,
+        dialogue=dialogue,
+        runtime_controller=controller,
+    )
+    assert app.state.runtime_context.llm_concurrency_gate is dialogue_gate
+    assert soul._llm_service.concurrency_gate is dialogue_gate
+    assert controller.llm_concurrency_gate is dialogue_gate
+
+    with pytest.raises(ValueError, match="different LLM concurrency gates"):
+        create_app(
+            memory_manager=SimpleNamespace(),
+            database=SimpleNamespace(),
+            soul_engine=_injected_soul_engine(LLMConcurrencyGate(2)),
+            dialogue=SocraticDialogue(
+                llm=None,
+                soul_engine=SimpleNamespace(),  # type: ignore[arg-type]
+                llm_service=SimpleNamespace(  # type: ignore[arg-type]
+                    concurrency_gate=LLMConcurrencyGate(2)
+                ),
+            ),
+            runtime_controller=SimpleNamespace(event_hub=None),
+        )
+
+
+def test_injected_compatibility_dialogue_double_without_gate_is_supported(
+    monkeypatch, tmp_path
+) -> None:
+    from openbiliclaw.config import Config
+
+    config = Config(data_dir=str(tmp_path))
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
+    dialogue = SimpleNamespace()
+
+    app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=SimpleNamespace(),
+        dialogue=dialogue,
+        runtime_controller=SimpleNamespace(event_hub=None),
+    )
+
+    assert app.state.runtime_context.dialogue is dialogue
+
+
+def test_injected_controller_nested_discovery_gate_is_validated_and_injected(
+    monkeypatch, tmp_path
+) -> None:
+    from openbiliclaw.config import Config
+    from openbiliclaw.llm.concurrency import LLMConcurrencyGate
+
+    config = Config(data_dir=str(tmp_path))
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
+    adopted_gate = LLMConcurrencyGate(2)
+
+    gate_less_service = SimpleNamespace(concurrency_gate=None)
+    gate_less_controller = SimpleNamespace(
+        event_hub=None,
+        llm_concurrency_gate=adopted_gate,
+        discovery_engine=SimpleNamespace(_llm_service=gate_less_service),
+    )
+    gate_less_app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=SimpleNamespace(),
+        runtime_controller=gate_less_controller,
+    )
+    assert gate_less_app.state.runtime_context.llm_concurrency_gate is adopted_gate
+    assert gate_less_service.concurrency_gate is adopted_gate
+
+    common_service = SimpleNamespace(concurrency_gate=adopted_gate)
+    common_controller = SimpleNamespace(
+        event_hub=None,
+        llm_concurrency_gate=adopted_gate,
+        discovery_engine=SimpleNamespace(_llm_service=common_service),
+    )
+    common_app = create_app(
+        memory_manager=SimpleNamespace(),
+        database=SimpleNamespace(),
+        soul_engine=SimpleNamespace(),
+        runtime_controller=common_controller,
+    )
+    assert common_app.state.runtime_context.llm_concurrency_gate is adopted_gate
+    assert common_service.concurrency_gate is adopted_gate
+
+    conflicting_gate = LLMConcurrencyGate(2)
+    conflicting_service = SimpleNamespace(concurrency_gate=conflicting_gate)
+    with pytest.raises(ValueError, match="different LLM concurrency gates"):
+        create_app(
+            memory_manager=SimpleNamespace(),
+            database=SimpleNamespace(),
+            soul_engine=SimpleNamespace(),
+            runtime_controller=SimpleNamespace(
+                event_hub=None,
+                llm_concurrency_gate=adopted_gate,
+                discovery_engine=SimpleNamespace(_llm_service=conflicting_service),
+            ),
+        )
+    assert conflicting_service.concurrency_gate is conflicting_gate
+
+
+@pytest.mark.parametrize(
+    ("qualified_name", "runtime_attribute"),
+    [
+        ("openbiliclaw.soul.engine.SoulEngine", "_llm_service"),
+        ("openbiliclaw.soul.dialogue.SocraticDialogue", "_llm_service"),
+        ("openbiliclaw.recommendation.engine.RecommendationEngine", "_llm"),
+        ("openbiliclaw.discovery.engine.ContentDiscoveryEngine", "_llm_service"),
+        ("openbiliclaw.runtime.account_sync.AccountSyncService", "soul_engine"),
+    ],
+)
+def test_injected_llm_owner_attribute_audit(qualified_name: str, runtime_attribute: str) -> None:
+    module_name, class_name = qualified_name.rsplit(".", 1)
+    module = __import__(module_name, fromlist=[class_name])
+    owner_type = getattr(module, class_name)
+    source = inspect.getsource(owner_type)
+
+    assert f"self.{runtime_attribute}" in source or runtime_attribute in getattr(
+        owner_type, "__annotations__", {}
+    ), f"{qualified_name} no longer stores its injected LLM owner at {runtime_attribute}"
+
+    app_source = inspect.getsource(create_app)
+    if class_name == "ContentDiscoveryEngine":
+        assert f'getattr(controller_discovery, "{runtime_attribute}", None)' in app_source
 
 
 def _store_xhs_login_state(db: object, *, logged_in: bool, when_iso: str) -> None:
@@ -944,12 +1601,14 @@ class TestBackendAPI:
                 usage_recorder: object | None = None,
                 module_overrides: object | None = None,
                 concurrency: int = 1,
+                concurrency_gate: object | None = None,
             ) -> None:
                 self.registry = registry
                 self.memory = memory
                 self.usage_recorder = usage_recorder
                 self.module_overrides = module_overrides
                 self.concurrency = concurrency
+                self.concurrency_gate = concurrency_gate
 
         class FakeBilibiliClient:
             def __init__(self, *, cookie: str, proxy: str | None = None) -> None:
@@ -1015,6 +1674,68 @@ class TestBackendAPI:
 
         assert isinstance(ctx.runtime_controller.reddit_producer, RedditDiscoveryProducer)
         assert ctx.runtime_controller.pool_source_shares["reddit"] == 2
+
+    def test_runtime_context_delegates_runtime_producer_evaluation_to_shared_coordinator(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        import openbiliclaw.api.runtime_context as runtime_context_module
+        import openbiliclaw.runtime.douyin_producer as douyin_producer_module
+        import openbiliclaw.runtime.x_producer as x_producer_module
+        import openbiliclaw.runtime.zhihu_producer as zhihu_producer_module
+        from openbiliclaw.config import Config
+
+        config = Config(data_dir=str(tmp_path / "data"))
+        config.llm.default_provider = "ollama"
+        config.llm.ollama.model = "llama3"
+        config.sources.douyin.enabled = True
+        config.sources.youtube.enabled = True
+        config.sources.zhihu.enabled = True
+        producers: dict[str, SimpleNamespace] = {}
+        x_kwargs: list[dict[str, object]] = []
+
+        def build_producer(kind: str) -> SimpleNamespace:
+            producer = SimpleNamespace(kind=kind)
+            producers[kind] = producer
+            return producer
+
+        monkeypatch.setattr(
+            douyin_producer_module,
+            "build_douyin_discovery_producer",
+            lambda **_kwargs: build_producer("douyin"),
+        )
+        monkeypatch.setattr(
+            runtime_context_module,
+            "build_youtube_discovery_producer",
+            lambda **_kwargs: build_producer("youtube"),
+        )
+        monkeypatch.setattr(
+            zhihu_producer_module,
+            "build_zhihu_discovery_producer",
+            lambda **_kwargs: build_producer("zhihu"),
+        )
+        monkeypatch.setattr(
+            x_producer_module,
+            "build_x_discovery_producer",
+            lambda **kwargs: x_kwargs.append(kwargs) or build_producer("twitter"),
+        )
+
+        ctx = runtime_context_module.build_runtime_context(config)
+
+        assert set(producers) == {"douyin", "youtube", "zhihu", "twitter"}
+        assert all(
+            producer.candidate_evaluation_owned_by_coordinator is True
+            for kind, producer in producers.items()
+            if kind != "twitter"
+        )
+        notifications: list[str] = []
+        ctx.runtime_controller.candidate_eval_coordinator.notify = notifications.append
+        pipeline = ctx.runtime_controller.discovery_candidate_pipeline
+        assert callable(pipeline.on_candidates_enqueued)
+        pipeline.on_candidates_enqueued(1)
+        assert notifications == ["candidate_enqueued:pipeline"]
+        assert x_kwargs[0]["candidate_pipeline"] is pipeline
 
     def test_create_app_bootstrap_wires_discovery_concurrency_controller(
         self,
@@ -1103,12 +1824,14 @@ class TestBackendAPI:
                 usage_recorder: object | None = None,
                 module_overrides: object | None = None,
                 concurrency: int = 1,
+                concurrency_gate: object | None = None,
             ) -> None:
                 self.registry = registry
                 self.memory = memory
                 self.usage_recorder = usage_recorder
                 self.module_overrides = module_overrides
                 self.concurrency = concurrency
+                self.concurrency_gate = concurrency_gate
 
         class FakeBilibiliClient:
             def __init__(self, *, cookie: str, proxy: str | None = None) -> None:
@@ -1290,6 +2013,13 @@ class TestBackendAPI:
 
         assert captured["bilibili_request_concurrency"] == 2
         assert captured["llm_evaluation_concurrency"] == 2
+        assert (
+            app.state.runtime_context.llm_service.concurrency_gate
+            is (captured["soul_engine_kwargs"]["llm_concurrency_gate"])
+        )
+        assert captured["runtime_controller_kwargs"]["llm_concurrency_gate"] is (
+            app.state.runtime_context.llm_service.concurrency_gate
+        )
         assert captured["engine_concurrency"] is captured["controller"]
         assert all(item is captured["controller"] for item in captured["strategy_concurrency"])
         assert captured["runtime_controller_kwargs"]["scheduler_config"] is fake_config.scheduler
@@ -1316,6 +2046,19 @@ class TestBackendAPI:
         assert captured["soul_engine_kwargs"]["speculation_max_secondary_interests"] == 66
         assert captured["soul_engine_kwargs"]["speculator_idle_interval_minutes"] == 11
         assert callable(captured["account_sync_kwargs"]["llm_work_allowed"])
+
+        runtime_context = app.state.runtime_context
+        old_service = runtime_context.llm_service
+        shared_gate = old_service.concurrency_gate
+        fake_config.llm.concurrency = 2
+
+        runtime_context._rebuild_components(fake_config)
+
+        assert runtime_context.llm_service is not old_service
+        assert old_service.concurrency_gate is shared_gate
+        assert runtime_context.llm_service.concurrency_gate is shared_gate
+        assert captured["soul_engine_kwargs"]["llm_concurrency_gate"] is shared_gate
+        assert shared_gate.status_payload()["llm_total_concurrency"] == 2
 
     def test_cap_by_franchise_keeps_at_most_n_per_franchise(self) -> None:
         """Regression for the 'one popup full of 原神' bug. The API
@@ -3846,6 +4589,32 @@ class TestBackendAPI:
             "pool_pending_eval_count": 0,
             "pool_evaluated_pending_count": 0,
             "pool_target_count": 30,
+            "candidate_eval_state": "idle",
+            "candidate_eval_workers": 0,
+            "candidate_eval_in_flight": 0,
+            "candidate_eval_pending": 0,
+            "candidate_eval_backoff_until": 0.0,
+            "candidate_eval_last_error": "",
+            "candidate_eval_last_batch_seconds": 0.0,
+            "candidate_eval_last_cached": 0,
+            "candidate_eval_last_rejected": 0,
+            "expression_pending_count": 0,
+            "expression_batch_state": "idle",
+            "expression_batch_deadline": 0.0,
+            "expression_last_completed": 0,
+            "expression_last_error": "",
+            "llm_total_concurrency": 0,
+            "llm_background_concurrency": 0,
+            "llm_total_active": 0,
+            "llm_total_waiting": 0,
+            "llm_background_active": 0,
+            "llm_background_waiting": 0,
+            "llm_refill_active": 0,
+            "llm_refill_waiting": 0,
+            "llm_maintenance_active": 0,
+            "llm_maintenance_waiting": 0,
+            "llm_refill_priority_active": False,
+            "inventory_priority_state": "healthy",
             "last_discovered_count": 14,
             "last_replenished_count": 6,
             "recent_pool_topics": ["国际时事", "宏观经济", "纪录片"],
@@ -9444,6 +10213,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "git@github.com:example/OpenBiliClaw.git",
         ]
         cfg.discovery.multimodal_evaluation_enabled = True
+        cfg.discovery.candidate_eval_concurrency = 3
         cfg.discovery.multimodal_batch_size = 4
         cfg.discovery.multimodal_image_max_px = 512
         cfg.discovery.multimodal_image_quality = 80
@@ -9463,7 +10233,7 @@ class TestEmbeddingAndCompatProviderE2E:
         data = response.json()
 
         assert data["data_dir"] == "runtime-data"
-        assert data["llm"]["concurrency"] == 3
+        assert data["llm"]["concurrency"] == 4
         assert data["llm"]["deepseek"]["reasoning_effort"] == "high"
         assert data["llm"]["openrouter"]["http_referer"] == "https://example.com"
         assert data["llm"]["openrouter"]["x_title"] == "Example App"
@@ -9521,6 +10291,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "git@github.com:example/OpenBiliClaw.git",
         ]
         assert data["discovery"]["multimodal_evaluation_enabled"] is True
+        assert data["discovery"]["candidate_eval_concurrency"] == 3
         assert data["discovery"]["multimodal_batch_size"] == 4
         assert data["discovery"]["multimodal_image_max_px"] == 512
         assert data["discovery"]["multimodal_image_quality"] == 80
@@ -9585,7 +10356,9 @@ class TestEmbeddingAndCompatProviderE2E:
         assert "reddit_session" in detail["message"]
         assert not credential_file.exists()
 
-    def test_put_config_updates_multimodal_discovery_settings(self, monkeypatch, tmp_path) -> None:
+    def test_put_config_caps_candidate_eval_concurrency_at_three(
+        self, monkeypatch, tmp_path
+    ) -> None:
         from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
 
         cfg = Config(llm=LLMConfig(openai=LLMProviderConfig(api_key="sk-openai")))
@@ -9595,6 +10368,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "/api/config",
             json={
                 "discovery": {
+                    "candidate_eval_concurrency": 8,
                     "multimodal_evaluation_enabled": "true",
                     "multimodal_batch_size": 4,
                     "multimodal_image_max_px": 512,
@@ -9605,12 +10379,14 @@ class TestEmbeddingAndCompatProviderE2E:
         )
 
         assert response.status_code == 200
+        assert cfg.discovery.candidate_eval_concurrency == 3
         assert cfg.discovery.multimodal_evaluation_enabled is True
         assert cfg.discovery.multimodal_batch_size == 4
         assert cfg.discovery.multimodal_image_max_px == 512
         assert cfg.discovery.multimodal_image_quality == 80
         assert cfg.discovery.multimodal_image_timeout_seconds == 10
         discovery = response.json()["config"]["discovery"]
+        assert discovery["candidate_eval_concurrency"] == 3
         assert discovery["multimodal_evaluation_enabled"] is True
         assert discovery["multimodal_batch_size"] == 4
         assert discovery["multimodal_image_max_px"] == 512
@@ -12590,8 +13366,10 @@ class TestLlmFallbackConfigValidationAndProbe:
 
     def test_probe_llm_fallback_probes_exact_fallback_provider(self, monkeypatch, tmp_path) -> None:
         from openbiliclaw.llm.base import LLMResponse
+        from openbiliclaw.llm.concurrency import LLMTrafficClass
 
         calls: list[tuple[str, object]] = []
+        runtime_gate = None
 
         class FakeRegistry:
             available_providers = ["openai", "deepseek"]
@@ -12601,6 +13379,10 @@ class TestLlmFallbackConfigValidationAndProbe:
                 return name in ("openai", "deepseek")
 
             async def complete_provider(self, provider_name, messages, **kwargs):  # noqa: ARG002
+                assert runtime_gate is not None
+                status = runtime_gate.status_payload()
+                assert status["llm_total_active"] == 1
+                assert status["llm_background_active"] == 1
                 calls.append((provider_name, kwargs.get("model")))
                 return LLMResponse(
                     content="OK",
@@ -12614,6 +13396,7 @@ class TestLlmFallbackConfigValidationAndProbe:
         )
         cfg = self._base_config()
         client, config_path = self._client(monkeypatch, tmp_path, cfg)
+        runtime_gate = client.app.state.runtime_context.llm_concurrency_gate
         before = config_path.read_bytes()
 
         response = client.post(
@@ -12626,11 +13409,13 @@ class TestLlmFallbackConfigValidationAndProbe:
 
         assert response.status_code == 200
         body = response.json()
-        assert body["ok"] is True
+        assert body["ok"] is True, body
         assert body["kind"] == "llm_fallback"
         assert body["provider"] == "deepseek"
         # Exact single-provider probe — never the fallback chain.
         assert [provider for provider, _model in calls] == ["deepseek"]
+        assert runtime_gate.classify("api.config_probe") is LLMTrafficClass.MAINTENANCE
+        assert runtime_gate.status_payload()["llm_total_active"] == 0
         assert config_path.read_bytes() == before
 
     def test_probe_llm_fallback_refuses_cleanly_when_unconfigured(

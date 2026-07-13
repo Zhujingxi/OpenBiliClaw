@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -19,6 +20,7 @@ from openbiliclaw.discovery.strategies.strategies import (
     TrendingStrategy,
 )
 from openbiliclaw.llm import build_llm_registry
+from openbiliclaw.llm.concurrency import LLMConcurrencyGate, background_llm_concurrency
 from openbiliclaw.llm.service import LLMService, module_overrides_from_config
 from openbiliclaw.llm.usage_recorder import UsageRecorder
 from openbiliclaw.memory.manager import MemoryManager
@@ -62,8 +64,20 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
     memory_manager = MemoryManager(config.data_path, database=database)
     memory_manager.initialize()
 
-    llm_cfg = getattr(config, "llm", None)
-    llm_concurrency = int(getattr(llm_cfg, "concurrency", 3))
+    llm_gate = LLMConcurrencyGate(llm_concurrency)
+    count_pool = getattr(database, "count_pool_candidates", None)
+    if callable(count_pool):
+        try:
+            state = memory_manager.load_discovery_runtime_state()
+            info = state.get("xhs_self_info", {}) if isinstance(state, dict) else {}
+            nickname = str(info.get("nickname", "")) if isinstance(info, dict) else ""
+            available = int(count_pool(xhs_self_nickname=nickname))
+        except (AttributeError, TypeError):
+            available = int(count_pool())
+        llm_gate.update_inventory(
+            available=max(0, available),
+            target=int(config.scheduler.pool_target_count),
+        )
 
     usage_recorder = UsageRecorder(sink=database)
 
@@ -73,6 +87,7 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         usage_recorder=usage_recorder,
         module_overrides=module_overrides,
         llm_concurrency=llm_concurrency,
+        llm_concurrency_gate=llm_gate,
         speculation_interval_minutes=config.scheduler.speculation_interval_minutes,
         speculation_ttl_days=config.scheduler.speculation_ttl_days,
         speculation_cooldown_days=config.scheduler.speculation_cooldown_days,
@@ -118,6 +133,7 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         usage_recorder=usage_recorder,
         module_overrides=module_overrides,
         concurrency=llm_concurrency,
+        concurrency_gate=llm_gate,
     )
     from openbiliclaw.llm.registry import build_embedding_service
     from openbiliclaw.recommendation.curator import PoolCurator
@@ -143,7 +159,7 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
 
     concurrency = DiscoveryConcurrencyController(
         bilibili_request_concurrency=4,
-        llm_evaluation_concurrency=4,
+        llm_evaluation_concurrency=background_llm_concurrency(llm_concurrency),
         search_budget_total=30,
     )
 
@@ -197,9 +213,17 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         discovery_engine=discovery_engine,
         pool_target_count=config.scheduler.pool_target_count,
         admission_min_score=admission_min_score,
-        min_eval_batch_size=8,
+        min_eval_batch_size=4,
         max_eval_wait_seconds=120,
-        candidate_fetch_oversample=4,
+        # OpenClaw invokes a one-shot refresh rather than owning the API
+        # runtime's continuous evaluator. Start with a small fixed first
+        # claim so evaluation plus durable copy can complete inside the
+        # adapter's bounded interaction window; a later OpenClaw request can
+        # refill the next batch. The API runtime deliberately keeps its 4x
+        # oversample and default two-way evaluator fan-out for sustained
+        # supply.
+        candidate_fetch_oversample=1,
+        eval_batch_concurrency=1,
     )
 
     from openbiliclaw.runtime.douyin_producer import build_douyin_discovery_producer
@@ -222,6 +246,53 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         concurrency=concurrency,
         candidate_pipeline=candidate_pipeline,
     )
+    runtime_controller: ContinuousRefreshController
+
+    async def _drain_one_shot_expression_copy(profile: Any) -> int:
+        """Complete OpenClaw's terminal copy stage before returning control.
+
+        OpenClaw only invokes short-lived operations and never starts
+        ``ContinuousRefreshController.run_forever()``.  It must therefore
+        await the durable expression-copy work itself rather than notify a
+        daemon coordinator that will never run.
+        """
+
+        if profile is None:
+            return 0
+        before = int(runtime_controller._pool_readiness_counts().get("available", 0))  # noqa: SLF001
+        # This bridge has one bounded interactive request rather than a daemon
+        # retry loop.  Keep its copy work inside the same four-item first-wave
+        # budget and persist any valid partial response immediately; remaining
+        # rows stay durable for the next OpenClaw request instead of consuming
+        # the interaction window on recursive split retries.
+        copy_limit = max(1, min(4, int(runtime_controller.one_shot_inline_eval_limit or 4)))
+        completed = await recommendation_engine.drain_pending_expression_copy(
+            profile=profile,
+            limit=copy_limit,
+            max_extra_requests=0,
+        )
+        await runtime_controller._publish_precompute_replenishment_if_needed(  # noqa: SLF001
+            before_pool_count=before,
+        )
+        return int(completed)
+
+    async def _copy_after_inline_admission(profile: Any, _admitted: int) -> int:
+        """Delegate admission copy to the controller's one-shot owner.
+
+        The pipeline receipt records this callback as the durable copy owner.
+        Resolving the callback through the controller keeps that owner identical
+        to the controller fallback, so a one-shot caller has one observable
+        path rather than two captured closures that could drift apart.
+        """
+
+        callback = runtime_controller.one_shot_expression_copy_callback
+        if callback is None:
+            return 0
+        result = callback(profile)
+        if inspect.isawaitable(result):
+            result = await result
+        return max(0, int(result or 0))
+
     runtime_controller = ContinuousRefreshController(
         memory_manager=memory_manager,
         database=database,
@@ -243,7 +314,23 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         youtube_producer=youtube_producer,
         scheduler_config=config.scheduler,
         presence=presence,
+        llm_concurrency_gate=llm_gate,
+        one_shot_expression_copy_callback=_drain_one_shot_expression_copy,
+        one_shot_inline_eval_limit=4,
     )
+    # The OpenClaw adapter has no daemon lifecycle.  Keep the evaluator's
+    # bounded inline drain, then finish copy through the awaited callback
+    # above; unlike a notify-only coordinator this leaves no dormant owner or
+    # background copy task behind.
+    candidate_pipeline.on_candidates_admitted = _copy_after_inline_admission
+    set_pool_commit_callback = getattr(
+        recommendation_engine,
+        "set_pool_inventory_commit_callback",
+        None,
+    )
+    if callable(set_pool_commit_callback):
+        set_pool_commit_callback(runtime_controller._pool_readiness_counts)  # noqa: SLF001
+    runtime_controller.run_startup_maintenance()
     account_sync_service = AccountSyncService(
         memory_manager=memory_manager,
         bilibili_client=bilibili_client,

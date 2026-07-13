@@ -17,7 +17,7 @@ import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
-from urllib.parse import quote, urlparse, urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -156,6 +156,12 @@ from openbiliclaw.runtime.keyword_fetch import (
 from openbiliclaw.soul.dislike_writeback import (
     apply_new_dislikes,
     topics_for_confirmed_avoidance,
+)
+from openbiliclaw.sources.platforms import (
+    infer_source_platform_from_url as _registry_infer_source_platform_from_url,
+)
+from openbiliclaw.sources.platforms import (
+    normalize_source_platform,
 )
 
 if TYPE_CHECKING:
@@ -546,42 +552,11 @@ def _init_crash_detail(exc: BaseException) -> str:
 
 
 def _normalize_source_platform(source: object) -> str:
-    source_key = str(source or "").strip().lower()
-    if source_key in {"x", "twitter"}:
-        return "twitter"
-    if source_key in {"xhs", "rednote"}:
-        return "xiaohongshu"
-    if source_key in {"yt", "youtube"}:
-        return "youtube"
-    if source_key in {"douyin", "tiktok"}:
-        return "douyin"
-    if source_key in {"zhihu", "知乎"}:
-        return "zhihu"
-    if source_key in {"reddit", "rd"}:
-        return "reddit"
-    if source_key in {"bilibili", "bili", ""}:
-        return "bilibili"
-    return source_key
+    return normalize_source_platform(source, default="bilibili")
 
 
 def _infer_source_platform_from_url(url: object) -> str:
-    text = str(url or "").strip().lower()
-    if "youtube.com" in text or "youtu.be" in text:
-        return "youtube"
-    host = (urlparse(text if "://" in text else f"https://{text}").hostname or "").lower()
-    if host in {"x.com", "twitter.com"} or host.endswith(".x.com") or host.endswith(".twitter.com"):
-        return "twitter"
-    if "xiaohongshu.com" in text or "xhslink.com" in text:
-        return "xiaohongshu"
-    if "douyin.com" in text:
-        return "douyin"
-    if "zhihu.com" in text:
-        return "zhihu"
-    if "reddit.com" in text or "redd.it" in text:
-        return "reddit"
-    if "bilibili.com" in text or "b23.tv" in text:
-        return "bilibili"
-    return ""
+    return _registry_infer_source_platform_from_url(url)
 
 
 def _extension_e2e_actions_for_request(
@@ -1123,6 +1098,8 @@ def create_app(
     if soul_engine is not None:
         # Injection path: caller provides swappable components.
         # Auto-create stable components (database, memory_manager) if missing.
+        from openbiliclaw.config import llm_concurrency_from_config
+        from openbiliclaw.llm.concurrency import LLMConcurrencyGate
         from openbiliclaw.runtime.events import RuntimeEventHub as _RuntimeEventHub
 
         _db = database
@@ -1140,6 +1117,100 @@ def create_app(
             _mm = MemoryManager(config.data_path, database=_db if _created_db else None)
             _mm.initialize()
 
+        soul_service = getattr(soul_engine, "_llm_service", None)
+        soul_declared_gate = getattr(soul_engine, "_llm_concurrency_gate", None)
+        soul_service_gate = getattr(soul_service, "concurrency_gate", None)
+        dialogue_service = getattr(dialogue, "_llm_service", None)
+        dialogue_declared_gate = getattr(dialogue, "_llm_concurrency_gate", None) or getattr(
+            dialogue, "llm_concurrency_gate", None
+        )
+        dialogue_service_gate = getattr(dialogue_service, "concurrency_gate", None)
+        controller_gate = getattr(runtime_controller, "llm_concurrency_gate", None)
+        recommendation_llm = getattr(recommendation_engine, "_llm", None)
+        recommendation_gate = getattr(recommendation_llm, "concurrency_gate", None)
+        account_soul = getattr(account_sync_service, "soul_engine", None)
+        account_soul_service = getattr(account_soul, "_llm_service", None)
+        controller_soul = getattr(runtime_controller, "soul_engine", None)
+        controller_soul_service = getattr(controller_soul, "_llm_service", None)
+        controller_recommendation = getattr(runtime_controller, "recommendation_engine", None)
+        controller_recommendation_llm = getattr(controller_recommendation, "_llm", None)
+        controller_discovery = getattr(runtime_controller, "discovery_engine", None)
+        controller_discovery_llm = getattr(controller_discovery, "_llm_service", None)
+        gate_sources = [
+            ("SoulEngine", soul_declared_gate),
+            ("SoulEngine service", soul_service_gate),
+            ("dialogue", dialogue_declared_gate),
+            ("dialogue service", dialogue_service_gate),
+            ("runtime controller", controller_gate),
+            ("recommendation service", recommendation_gate),
+            ("account-sync SoulEngine", getattr(account_soul, "_llm_concurrency_gate", None)),
+            (
+                "account-sync SoulEngine service",
+                getattr(account_soul_service, "concurrency_gate", None),
+            ),
+            (
+                "runtime-controller SoulEngine",
+                getattr(controller_soul, "_llm_concurrency_gate", None),
+            ),
+            (
+                "runtime-controller SoulEngine service",
+                getattr(controller_soul_service, "concurrency_gate", None),
+            ),
+            (
+                "runtime-controller recommendation service",
+                getattr(controller_recommendation_llm, "concurrency_gate", None),
+            ),
+            (
+                "runtime-controller discovery service",
+                getattr(controller_discovery_llm, "concurrency_gate", None),
+            ),
+        ]
+        provided_gates = [(label, gate) for label, gate in gate_sources if gate is not None]
+        injected_gate = provided_gates[0][1] if provided_gates else None
+        conflicting_labels = [label for label, gate in provided_gates if gate is not injected_gate]
+        if conflicting_labels:
+            sources = ", ".join([provided_gates[0][0], *conflicting_labels])
+            raise ValueError(
+                f"Injected LLM-bearing components use different LLM concurrency gates: {sources}."
+            )
+        if injected_gate is None:
+            injected_gate = LLMConcurrencyGate(llm_concurrency_from_config(config))
+
+        with suppress(Exception):
+            soul_engine._llm_concurrency_gate = injected_gate
+        if soul_service is not None:
+            with suppress(Exception):
+                soul_service.concurrency_gate = injected_gate
+        if dialogue is not None:
+            with suppress(Exception):
+                dialogue._llm_concurrency_gate = injected_gate
+        if dialogue_service is not None:
+            with suppress(Exception):
+                dialogue_service.concurrency_gate = injected_gate
+        if runtime_controller is not None:
+            with suppress(Exception):
+                runtime_controller.llm_concurrency_gate = injected_gate
+        if recommendation_llm is not None:
+            with suppress(Exception):
+                recommendation_llm.concurrency_gate = injected_gate
+        for nested_soul, nested_service in (
+            (account_soul, account_soul_service),
+            (controller_soul, controller_soul_service),
+        ):
+            if nested_soul is not None:
+                with suppress(Exception):
+                    nested_soul._llm_concurrency_gate = injected_gate
+            if nested_service is not None:
+                with suppress(Exception):
+                    nested_service.concurrency_gate = injected_gate
+        for nested_service in (
+            controller_recommendation_llm,
+            controller_discovery_llm,
+        ):
+            if nested_service is not None:
+                with suppress(Exception):
+                    nested_service.concurrency_gate = injected_gate
+
         ctx = RuntimeContext(
             database=_db,
             memory_manager=_mm,
@@ -1155,6 +1226,7 @@ def create_app(
             recommendation_engine=recommendation_engine,
             account_sync_service=account_sync_service,
             auto_update_service=auto_update_service,
+            llm_concurrency_gate=injected_gate,
         )
         if ctx.dialogue is None:
             from openbiliclaw.soul.dialogue import SocraticDialogue
@@ -1189,6 +1261,56 @@ def create_app(
                 ctx.degraded_reason,
                 "; ".join(str(getattr(issue, "message", issue)) for issue in ctx.degraded_issues),
             )
+    if ctx.llm_concurrency_gate is None:
+        from openbiliclaw.config import llm_concurrency_from_config
+        from openbiliclaw.llm.concurrency import LLMConcurrencyGate
+
+        ctx.llm_concurrency_gate = LLMConcurrencyGate(llm_concurrency_from_config(config))
+
+    def _inventory_target() -> int:
+        controller_target = getattr(ctx.runtime_controller, "pool_target_count", None)
+        if controller_target is not None:
+            with suppress(TypeError, ValueError):
+                return max(0, int(controller_target))
+        runtime_scheduler = getattr(getattr(ctx, "config", None), "scheduler", None)
+        configured_target = getattr(runtime_scheduler, "pool_target_count", None)
+        if configured_target is None:
+            configured_target = getattr(
+                getattr(config, "scheduler", None),
+                "pool_target_count",
+                0,
+            )
+        with suppress(TypeError, ValueError):
+            return max(0, int(cast("Any", configured_target)))
+        return 0
+
+    def _canonical_pool_available() -> int | None:
+        nickname = ""
+        load_state = getattr(ctx.memory_manager, "load_discovery_runtime_state", None)
+        if callable(load_state):
+            with suppress(Exception):
+                state = load_state()
+                info = state.get("xhs_self_info", {}) if isinstance(state, dict) else {}
+                if isinstance(info, dict):
+                    nickname = str(info.get("nickname", "") or "").strip()
+        readiness = getattr(ctx.database, "count_pool_readiness", None)
+        if callable(readiness):
+            with suppress(Exception):
+                counts = readiness(xhs_self_nickname=nickname)
+                if isinstance(counts, dict):
+                    return max(0, int(counts.get("available", 0)))
+        count_pool = getattr(ctx.database, "count_pool_candidates", None)
+        if callable(count_pool):
+            with suppress(TypeError):
+                return max(0, int(count_pool(xhs_self_nickname=nickname)))
+            with suppress(Exception):
+                return max(0, int(count_pool()))
+        return None
+
+    initial_available = _canonical_pool_available()
+    update_inventory = getattr(ctx.llm_concurrency_gate, "update_inventory", None)
+    if initial_available is not None and callable(update_inventory):
+        update_inventory(available=initial_available, target=_inventory_target())
     app.state.runtime_context = ctx
     auto_replenishment_task: asyncio.Task[None] | None = None
     auto_replenishment_started_at = 0.0
@@ -4272,37 +4394,56 @@ def create_app(
         except Exception:
             logger.exception("Background pool classification failed")
 
-    async def _drain_discovery_candidates_once() -> None:
-        """Best-effort drain for newly enqueued source candidates."""
+    def _notify_discovery_candidates_enqueued(source: str) -> None:
+        """Wake continuous evaluation after the enqueue transaction commits."""
 
-        drain = getattr(ctx.runtime_controller, "drain_discovery_candidates_once", None)
-        if not callable(drain):
+        coordinator = getattr(ctx.runtime_controller, "candidate_eval_coordinator", None)
+        notify = getattr(coordinator, "notify", None)
+        if callable(notify):
+            notify(f"candidate_enqueued:{source}")
             return
-        try:
-            await drain(batch_size=30)
-        except Exception:
-            logger.exception("Background discovery candidate drain failed")
+
+        async def _drain_discovery_candidates_once() -> None:
+            drain = getattr(ctx.runtime_controller, "drain_discovery_candidates_once", None)
+            if not callable(drain):
+                return
+            try:
+                await drain(batch_size=30)
+            except Exception:
+                logger.exception("Background discovery candidate drain failed")
+
+        asyncio.create_task(_drain_discovery_candidates_once())
 
     def _pool_available_count() -> int | None:
         """Return the best available servable-pool count for hot-path guards."""
+
+        def _sync_inventory(available: int) -> int:
+            update = getattr(ctx.llm_concurrency_gate, "update_inventory", None)
+            if callable(update):
+                update(
+                    available=available,
+                    target=_inventory_target(),
+                )
+            return available
+
         get_runtime_status = getattr(ctx.runtime_controller, "get_runtime_status", None)
         if callable(get_runtime_status):
             with suppress(Exception):
                 status = get_runtime_status()
                 if isinstance(status, dict) and "pool_available_count" in status:
-                    return max(0, int(status.get("pool_available_count") or 0))
+                    return _sync_inventory(max(0, int(status.get("pool_available_count") or 0)))
 
         readiness = getattr(ctx.database, "count_pool_readiness", None)
         if callable(readiness):
             with suppress(Exception):
                 counts = readiness()
                 if isinstance(counts, dict) and "available" in counts:
-                    return max(0, int(counts.get("available") or 0))
+                    return _sync_inventory(max(0, int(counts.get("available") or 0)))
 
         count_pool = getattr(ctx.database, "count_pool_candidates", None)
         if callable(count_pool):
             with suppress(Exception):
-                return max(0, int(count_pool()))
+                return _sync_inventory(max(0, int(count_pool())))
         return None
 
     def _runtime_pool_status_payload() -> dict[str, object]:
@@ -4380,6 +4521,17 @@ def create_app(
             result = publish(event)
             if asyncio.iscoroutine(result):
                 await result
+
+    add_pool_commit_subscriber = getattr(ctx, "add_pool_inventory_commit_subscriber", None)
+    if callable(add_pool_commit_subscriber):
+        add_pool_commit_subscriber(_publish_pool_status_snapshot)
+    set_pool_commit_callback = getattr(
+        ctx.recommendation_engine,
+        "set_pool_inventory_commit_callback",
+        None,
+    )
+    if callable(set_pool_commit_callback):
+        set_pool_commit_callback(ctx.pool_inventory_commit_callback)
 
     async def _run_auto_replenishment(trigger: Callable[[], Any]) -> None:
         try:
@@ -7258,7 +7410,7 @@ def create_app(
                 self_info=self_info_for_filter or None,
             )
             if enqueued:
-                asyncio.create_task(_drain_discovery_candidates_once())
+                _notify_discovery_candidates_enqueued("xiaohongshu")
 
         return {
             "ok": True,
@@ -7402,7 +7554,7 @@ def create_app(
                     source_keyword_id=source_keyword_id,
                 )
                 if enqueued:
-                    asyncio.create_task(_drain_discovery_candidates_once())
+                    _notify_discovery_candidates_enqueued("bilibili")
             return {"ok": True, "enqueued": enqueued}
 
         _bili_task_queue.fail(task_id, error=str(payload.get("error", "") or ""), debug=debug)
@@ -7550,7 +7702,7 @@ def create_app(
                     source_keyword_id=task_source_keyword_id,
                 )
                 if enqueued:
-                    asyncio.create_task(_drain_discovery_candidates_once())
+                    _notify_discovery_candidates_enqueued("xiaohongshu")
             if task_type == "bootstrap_profile" and added_notes and not _skip_profile:
                 fresh_notes, note_keys_by_index = _filter_new_source_bootstrap_items(
                     "xhs",
@@ -9112,7 +9264,7 @@ def create_app(
             degraded_reason=degraded_reason,
             llm=LLMConfigOut(
                 default_provider=cfg.llm.default_provider,
-                concurrency=int(getattr(cfg.llm, "concurrency", 3)),
+                concurrency=int(getattr(cfg.llm, "concurrency", 4)),
                 timeout=int(getattr(cfg.llm, "timeout", 300)),
                 fallback_provider=cfg.llm.fallback_provider,
                 openai=_provider_out(cfg.llm.openai),
@@ -9282,6 +9434,7 @@ def create_app(
                 planner_poll_seconds=cfg.discovery.planner_poll_seconds,
                 plan_ttl_hours=cfg.discovery.plan_ttl_hours,
                 admission_min_score=cfg.discovery.admission_min_score,
+                candidate_eval_concurrency=cfg.discovery.candidate_eval_concurrency,
                 multimodal_evaluation_enabled=cfg.discovery.multimodal_evaluation_enabled,
                 multimodal_batch_size=cfg.discovery.multimodal_batch_size,
                 multimodal_image_max_px=cfg.discovery.multimodal_image_max_px,
@@ -9508,18 +9661,23 @@ def create_app(
                     latency_ms=int((time.perf_counter() - started) * 1000),
                 )
             timeout_s = min(max(float(getattr(cfg.llm, "timeout", 300) or 300), 10.0), 30.0)
+
+            async def _complete_probe() -> Any:
+                async with ctx.llm_concurrency_gate.slot(caller="api.config_probe"):
+                    return await registry.complete_provider(
+                        provider,
+                        [
+                            {"role": "system", "content": "Reply with only OK."},
+                            {"role": "user", "content": "OpenBiliClaw connectivity probe."},
+                        ],
+                        temperature=0,
+                        max_tokens=LLM_CONNECTIVITY_PROBE_MAX_TOKENS,
+                        reasoning_effort="",
+                        model=model or None,
+                    )
+
             response = await asyncio.wait_for(
-                registry.complete_provider(
-                    provider,
-                    [
-                        {"role": "system", "content": "Reply with only OK."},
-                        {"role": "user", "content": "OpenBiliClaw connectivity probe."},
-                    ],
-                    temperature=0,
-                    max_tokens=LLM_CONNECTIVITY_PROBE_MAX_TOKENS,
-                    reasoning_effort="",
-                    model=model or None,
-                ),
+                _complete_probe(),
                 timeout=timeout_s,
             )
             ok = bool(str(getattr(response, "content", "") or "").strip())
@@ -9705,6 +9863,7 @@ def create_app(
         """
         from openbiliclaw.config import (
             _DEFAULT_ADMISSION_MIN_SCORE,
+            _DEFAULT_CANDIDATE_EVAL_CONCURRENCY,
             _DEFAULT_DELIGHT_QUEUE_LIMIT,
             _DEFAULT_DISCOVERY_LIMIT,
             _DEFAULT_EXPLORE_REFRESH_HOURS,
@@ -10125,6 +10284,11 @@ def create_app(
             ddata = update["discovery"]
             if isinstance(ddata, dict):
                 discovery_int_limits = {
+                    "candidate_eval_concurrency": (
+                        _DEFAULT_CANDIDATE_EVAL_CONCURRENCY,
+                        1,
+                        3,
+                    ),
                     "multimodal_batch_size": (
                         _DEFAULT_MULTIMODAL_BATCH_SIZE,
                         1,

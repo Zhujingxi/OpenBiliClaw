@@ -575,6 +575,17 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 
 ## 🏛️ Architecture Overview
 
+```text
+interactive ─────────────────────────────────────────┐
+                                                    ├─ runtime total gate (default 4) ─ provider
+background ─ background admission (default 3) ──────┘
+             ├─ refill: expression > evaluation > supply
+             │  └─ while queued: guarantee 2, may borrow all 3
+             │     expression owner: 8 immediate / 3s fixed tail / 60 drain / 30×2 provider
+             └─ maintenance: at most 1 while refill waits;
+                parked when canonical available = 0
+```
+
 ```
 ┌────────────────────────────────────────────────┐
 │       Browser Extension (Chrome / Firefox)      │
@@ -591,7 +602,10 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
 │   LLM adapters · Source adapters (SourceAdapter) │
-│ Duration/engagement/published → pool → cache → API/UI │
+│ Source-family registry: alias · strategy · URL host │
+│             → pool accounting · viewed identity    │
+│ API projected stock → 3×30 workers → serial admit; OpenClaw first batch≤4 → copy≤4/no split retry → UI │
+│ API/OpenClaw startup hook → recover/maintain → expose LLM │
 │   Unified admission · SQLite (events · pool · recs)│
 └────────────────────────────────────────────────┘
 ```
@@ -618,7 +632,7 @@ Remote extension access uses explicit, default-off device authentication: `ext-k
 What happens after discovery:
 
 - **Safe fetching** — the backend never logs in for you and never crawls content you can't see; every platform reuses the sessions already in your browser, and first-run profile signals are pulled only after you click "Start initialization".
-- **Unified evaluation** — raw candidates from all sources land in one shared eval pool, scored in batches against your Soul profile, content text, and recent negative feedback; the "will you like it?" judgment never lives inside platform-specific logic.
+- **Continuous unified evaluation** — raw candidates share one eval pool with 3×30 immediate-refill workers; scheduling counts only available, copy-pending, and evaluated durable stock, while serial admission is capped by current headroom.
 - **Diversity selection** — platform quotas → topic dedup → style balancing → cross-platform interleaving → count caps; only Bilibili is enabled out of the box, other platforms are switched on in settings.
 
 > Per-platform task pipelines, pool accounting, and fallback strategies are documented in the [Discovery Engine docs](docs/modules/discovery.md).

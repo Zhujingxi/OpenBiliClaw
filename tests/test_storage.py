@@ -36,6 +36,121 @@ class TestDatabase:
             assert db.conn is not None
             db.close()
 
+    def test_claim_token_prevents_stale_evaluation_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            db.enqueue_discovery_candidates(
+                [
+                    DiscoveryCandidateWrite(
+                        candidate_key=f"bilibili:BV{i}",
+                        source_platform="bilibili",
+                        source_strategy="search",
+                        content_id=f"BV{i}",
+                        title=f"Candidate {i}",
+                    )
+                    for i in range(2)
+                ]
+            )
+
+            original = db.claim_discovery_candidates_for_eval(limit=2, claim_token="claim-a")
+            assert {row["claim_token"] for row in original} == {"claim-a"}
+            ids = [int(row["id"]) for row in original]
+            assert (
+                db.reset_claimed_discovery_candidates_to_pending(
+                    ids,
+                    claim_token="claim-a",
+                    reason="reload",
+                    max_attempts=5,
+                    max_batch_attempts=50,
+                    increment_attempts=False,
+                )
+                == 2
+            )
+
+            replacement = db.claim_discovery_candidates_for_eval(limit=2, claim_token="claim-b")
+            updated = db.persist_claimed_discovery_candidate_evaluations(
+                [
+                    {
+                        "candidate_id": row["id"],
+                        "status": "evaluated",
+                        "relevance_score": 0.9,
+                    }
+                    for row in original
+                ],
+                claim_token="claim-a",
+            )
+
+            assert updated == set()
+            assert {row["claim_token"] for row in replacement} == {"claim-b"}
+            assert (
+                db.reset_claimed_discovery_candidates_to_pending(
+                    ids,
+                    claim_token="claim-a",
+                    reason="stale release",
+                    max_attempts=5,
+                    max_batch_attempts=50,
+                    increment_attempts=False,
+                )
+                == 0
+            )
+
+            db.close()
+
+    def test_tokenized_completion_and_stale_reset_clear_claim_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            db.enqueue_discovery_candidates(
+                [
+                    DiscoveryCandidateWrite(
+                        candidate_key="bilibili:BVTOKEN",
+                        source_platform="bilibili",
+                        source_strategy="search",
+                        content_id="BVTOKEN",
+                        title="Token",
+                    )
+                ]
+            )
+            row = db.claim_discovery_candidates_for_eval(limit=1, claim_token="claim-a")[0]
+            updated = db.persist_claimed_discovery_candidate_evaluations(
+                [
+                    {
+                        "candidate_id": row["id"],
+                        "status": "evaluated",
+                        "relevance_score": 0.9,
+                    }
+                ],
+                claim_token="claim-a",
+            )
+            stored = db.conn.execute(
+                "SELECT status, claim_token, claimed_at FROM discovery_candidates"
+            ).fetchone()
+
+            assert updated == {int(row["id"])}
+            assert dict(stored) == {
+                "status": "evaluated",
+                "claim_token": None,
+                "claimed_at": None,
+            }
+
+            db.conn.execute(
+                "UPDATE discovery_candidates SET status='evaluating', "
+                "claim_token='orphan', claimed_at=NULL"
+            )
+            db.conn.commit()
+            assert db.reset_stale_discovery_candidate_evaluations(max_age_minutes=30) == 1
+            reset = db.conn.execute(
+                "SELECT status, claim_token, claimed_at FROM discovery_candidates"
+            ).fetchone()
+            assert dict(reset) == {
+                "status": "pending_eval",
+                "claim_token": None,
+                "claimed_at": None,
+            }
+
+            db.close()
+
     def test_initialize_creates_recommendation_read_indexes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(Path(tmpdir) / "test.db")
@@ -1121,6 +1236,44 @@ class TestDatabase:
             counts = db.count_pool_candidates_by_source()
 
             assert counts == {"bilibili": 4}
+            db.close()
+
+    def test_zhihu_pool_accounting_collapses_blank_platform_strategies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            for index, source in enumerate(("zhihu-creator", "zhihu-hot", "zhihu-feed")):
+                _seed_visible(
+                    db,
+                    f"zhihu:answer:{index}",
+                    title=f"知乎回答 {index}",
+                    source=source,
+                    source_platform="",
+                    content_id=f"answer:{index}",
+                    content_url=f"https://www.zhihu.com/question/1/answer/{index}",
+                )
+
+            assert db.count_pool_available_candidates_by_source() == {"zhihu": 3}
+            assert db.count_pool_raw_material_by_source() == {"zhihu": 3}
+            db.close()
+
+    def test_zhihu_pool_accounting_overrides_bilibili_cache_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            _seed_visible(
+                db,
+                "zhihu:answer:cache-default",
+                title="知乎缓存默认平台回归",
+                source="zhihu-hot",
+                source_platform="bilibili",
+                content_id="answer:cache-default",
+                content_url="https://www.zhihu.com/question/1/answer/cache-default",
+            )
+
+            assert db.count_pool_available_candidates_by_source() == {"zhihu": 1}
+            assert db.count_pool_raw_material_by_source() == {"zhihu": 1}
             db.close()
 
     def test_trim_pool_share_quotas_protect_xhs_source_family(self) -> None:
@@ -2236,10 +2389,124 @@ class TestDatabase:
                 "available": 1,
                 "raw": 3,
                 "pending": 1,
+                "admitted_pending_copy": 1,
                 "pending_eval": 0,
                 "evaluated_pending": 0,
             }
 
+            db.close()
+
+    def test_count_pool_readiness_reports_only_canonical_admitted_pending_copy(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            _seed_visible(db, "BVREADY", source="search")
+            db.cache_content(
+                "BVCOPY",
+                title="classified and admitted",
+                source="search",
+                relevance_score=0.9,
+                style_key="tutorial",
+                topic_group="testing",
+            )
+            db.cache_content(
+                "BVUNCLASSIFIED",
+                title="not copy ready",
+                source="search",
+                relevance_score=0.9,
+                topic_group="testing",
+            )
+            for bvid in ("BVRECOMMENDED", "BVVIEWED", "BVDELIGHT"):
+                db.cache_content(
+                    bvid,
+                    title=bvid,
+                    source="search",
+                    relevance_score=0.9,
+                    style_key="tutorial",
+                    topic_group="testing",
+                )
+            db.insert_recommendation(
+                "BVRECOMMENDED",
+                confidence=0.9,
+                expression="already recommended",
+                topic="testing",
+            )
+            db.insert_event(
+                "view",
+                title="BVVIEWED",
+                url="https://www.bilibili.com/video/BVVIEWED",
+                metadata={"bvid": "BVVIEWED"},
+            )
+            db.conn.execute(
+                """
+                UPDATE content_cache
+                SET delight_score=0.9, delight_reason='surprise', delight_hook='hook'
+                WHERE bvid='BVDELIGHT'
+                """
+            )
+            xhs_url = "https://www.xiaohongshu.com/explore/note"
+            for bvid, up_name, content_url in (
+                ("XHSBARE", "Friend", xhs_url),
+                ("XHSSELF", "Me", f"{xhs_url}?xsec_token=token"),
+            ):
+                db.cache_content(
+                    bvid,
+                    title=bvid,
+                    up_name=up_name,
+                    source="xhs-extension-task",
+                    source_platform="xiaohongshu",
+                    content_url=content_url,
+                    relevance_score=0.9,
+                    style_key="tutorial",
+                    topic_group="testing",
+                )
+            db.enqueue_discovery_candidates(
+                [
+                    DiscoveryCandidateWrite(
+                        candidate_key=f"bilibili:{bvid}",
+                        source_platform="bilibili",
+                        source_strategy="search",
+                        content_id=bvid,
+                        title=bvid,
+                    )
+                    for bvid in ("BVEVALUATED", "BVPENDING", "BVEVALUATING")
+                ]
+            )
+            evaluated = db.claim_discovery_candidates_for_eval(
+                limit=1, claim_token="evaluated-token"
+            )
+            assert db.persist_claimed_discovery_candidate_evaluations(
+                [
+                    {
+                        "candidate_id": int(evaluated[0]["id"]),
+                        "status": "evaluated",
+                        "relevance_score": 0.9,
+                        "relevance_reason": "fit",
+                        "topic_key": "testing",
+                        "topic_group": "testing",
+                        "style_key": "tutorial",
+                        "franchise_key": "",
+                        "pool_expression": "",
+                        "pool_topic_label": "",
+                        "eval_error": "",
+                    }
+                ],
+                claim_token="evaluated-token",
+            )
+            db.claim_discovery_candidates_for_eval(limit=1, claim_token="evaluating-token")
+
+            readiness = db.count_pool_readiness(xhs_self_nickname="Me")
+
+            assert readiness["available"] == 1
+            assert readiness["admitted_pending_copy"] == 1
+            assert readiness["evaluated_pending"] == 1
+            assert readiness["pending_eval"] == 2
+            assert [
+                row["bvid"]
+                for row in db.get_pool_candidates_needing_copy(limit=20, xhs_self_nickname="Me")
+            ] == ["BVCOPY"]
             db.close()
 
     def test_count_pool_readiness_includes_pending_discovery_candidates(self) -> None:
@@ -2348,6 +2615,12 @@ class TestDatabase:
                 url="https://www.bilibili.com/video/BV1SEEN",
                 metadata={"source_platform": "bilibili", "bvid": "BV1SEEN"},
             )
+            db.insert_event(
+                "view",
+                title="知乎回答",
+                url="https://www.zhihu.com/question/1/answer/42",
+                metadata={"source_platform": "zh", "content_id": "answer:42"},
+            )
 
             keys = db.get_recent_viewed_content_keys()
 
@@ -2357,6 +2630,7 @@ class TestDatabase:
             assert "reddit:t3_abc123" in keys
             assert "bilibili:BV1SEEN" in keys
             assert "BV1SEEN" in keys
+            assert "zhihu:answer:42" in keys
 
             db.close()
 

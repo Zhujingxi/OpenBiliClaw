@@ -6606,7 +6606,7 @@ function bindSettings() {
     // LLM
     providerSelect.value = cfg.llm?.default_provider || "openai";
     showProviderFields(providerSelect.value);
-    setVal("cfgLlmConcurrency", cfg.llm?.concurrency ?? 3);
+    setVal("cfgLlmConcurrency", cfg.llm?.concurrency ?? 4);
     setVal("cfgLlmTimeout", cfg.llm?.timeout ?? 300);
     setVal("cfgLlmFallbackProvider", cfg.llm?.fallback_provider);
     syncLlmFallbackSameState();
@@ -6745,6 +6745,7 @@ function bindSettings() {
     setVal("cfgExploreRefreshHours", cfg.scheduler?.explore_refresh_hours);
     setVal("cfgDiscoveryLimit", cfg.scheduler?.discovery_limit);
     setVal("cfgKeywordGenerationMode", cfg.discovery?.keyword_generation_mode || "legacy");
+    setVal("cfgCandidateEvalConcurrency", cfg.discovery?.candidate_eval_concurrency);
     const multimodalEvaluation = document.getElementById("cfgMultimodalEvaluationEnabled");
     if (multimodalEvaluation) {
       multimodalEvaluation.checked = cfg.discovery?.multimodal_evaluation_enabled === true;
@@ -6798,7 +6799,7 @@ function bindSettings() {
       data_dir: getVal("cfgDataDir"),
       llm: {
         default_provider: providerSelect.value,
-        concurrency: getInt("cfgLlmConcurrency", 3),
+        concurrency: getInt("cfgLlmConcurrency", 4),
         timeout: getInt("cfgLlmTimeout", 300),
         // 非空 fallback_provider 即启用 fallback；旧的 fallback_enabled 布尔字段已移除
         // （老后端会忽略未知字段，新后端不再回显它）。
@@ -6947,6 +6948,7 @@ function bindSettings() {
       discovery: {
         ...(state.runtimeConfig?.discovery || {}),
         keyword_generation_mode: getVal("cfgKeywordGenerationMode"),
+        candidate_eval_concurrency: getInt("cfgCandidateEvalConcurrency", 3),
         multimodal_evaluation_enabled: checked("cfgMultimodalEvaluationEnabled"),
         multimodal_batch_size: getInt("cfgMultimodalBatchSize", 8),
         multimodal_image_max_px: getInt("cfgMultimodalImageMaxPx", 384),

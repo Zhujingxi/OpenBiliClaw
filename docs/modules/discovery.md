@@ -2,6 +2,8 @@
 
 > 从用户画像出发，在 B 站、小红书、抖音、YouTube、X、知乎、Reddit 和通用 Web 等来源主动寻找潜在会喜欢的内容。
 
+API daemon 的候选 admission 成功后只同步调用轻量 expression `notify()`，不会 inline 或 await 文案 provider；generation-owned coordinator 按 durable `admitted_pending_copy` 连续补齐文案，因此评估 worker 可立即继续补位。OpenClaw direct one-shot 没有 daemon owner：它在 admission commit 后 await `expression-copy(limit=4, max_extra_requests=0)`，首 batch 的有效 subset 立即进入 canonical pool，剩余 pending-copy 留给下一次 operation；若首 batch 全部无效，本次可服务池仍可能为空，但不会留下 copy/provider task。`drain_pending()` 会随原有 metrics 返回结构化 post-admission copy receipt；refresh 仅在本轮没有 callback owner 时执行 copy 兜底，避免同一 durable admission 被 controller 收尾再次调用。
+
 ## 概述
 
 `discovery/` 包负责把用户的 Soul 画像转换成“可被搜索、可被评估、可被推荐”的候选内容集合。
@@ -19,6 +21,7 @@
 当前模块包含：
 
 - **ContentDiscoveryEngine** — 发现策略编排器，负责注册、运行、去重、批量评估和缓存收口；也提供只拉原始候选的 `produce_candidates()`
+- **批量评估输出预算** — 文本与多模态 evaluator 每个 provider 请求最多声明 4096 个输出 tokens；该值覆盖 30 条结构化评分的生产观测范围，同时避免兼容服务按过大的声明上限预占额度并误触发 `insufficient_quota`
 - **DiscoveryCandidatePipeline** — 统一候选待评估池的生产 / 入队 / 混源 batch 评估 / 入推荐池 admission 编排器
 - **admission.effective_admission_threshold()** — 评估、缓存收口和数据库展示出口共享的纯准入策略；精确 `explore=0.58` 是唯一低于全局门槛的例外
 - **DiscoveryCandidateWrite / discovery_candidates** — 原始候选的持久化队列结构，所有来源先落到 `pending_eval`，再由统一 evaluator claim
@@ -36,6 +39,7 @@
 - **多平台丰富度修复（Phase 2.1，三管齐下）** — 真机发现平台越多，单次调用的 48 槽越摊薄，`core_concept` 会退化成"话题名 + 平台后缀"（`新游推荐 盘点`）而非具体锚点（`士官长 登陆PS5`）。三处协同补救：**(F1，产出侧)** `_INSPIRATION_AXIS_KEYWORD_SYSTEM_PROMPT` 新增一条静态规则，要求 `core_concept` 锚定 `fresh_evidence` 里的具体实体 / 事件 / 作品 / 人物 / 机制、禁止复述 interest 或 axis_label，无锚点时才可退回话题级（仍 100% 静态、过 byte-identical cache）；**(F1.5，择优侧，主)** `materialize_platform_keywords` 的 `_choose_materialize_candidate` 排序键加 `is_specific` 信号——`(需要新轴, is_specific, style_score, -index)`，具体候选同槽位内压过泛化候选，两者同类时才退回 style_score 排序。`is_specific(core_concept, interest, axis_label)` 是**纯确定性剥离残留判定**：把归一化 `core_concept` 里的 interest span、axis_label span、泛化 / 风格 marker（复用 `_PLATFORM_STYLE_MARKERS` + 若干话题填充词）**按最长优先做子串移除**（非空格 token——中文常无空格，`新游推荐盘点` 也要判为复述），去残留空白 / 标点后剩非空即 `True`；确定性补位候选天然 `is_specific=False`。`restatement_rate(keywords)` 是配套观测指标。**(F2，token 侧)** 单次调用 `max_tokens` 随槽位放大：`slots = len(selected_interests) * len(target_platforms)`，`max_tokens = min(16384, 8192 + max(0, slots-12) * 256)`（阈值 12 = 3 平台 × 4 兴趣舒适点；6 平台 24 槽→11264，8×6 48 槽→ceil 16384），并把请求值写进 `llm_telemetry.max_tokens_requested`；provider 因 max_tokens 报错时**降回 8192 floor 有界重试一次**（仅 max_tokens 相关错误、仅当请求高于 floor 才触发，非 Phase-1 禁的 salvage-repair），仍失败才走确定性 fallback——"一轮 ≤1 次成功生成调用"不变式保持。**观测**：`RealizedKeyword.metadata` 现在额外带 `core_concept` / `decoration`（确定性补位带模板 core + 空 decoration），preview 报告显式回写 `report["metadata_by_platform"]`；这两键只观测、不改最终 keyword 文本与入池。
 - **跨域 explore 通道走轴库富链路（Phase 2.3，默认开 coexist）** — B 站 explore 词从旧的把 merged `explore_domains` 拍平（`_explore_domain_queries`）升级为走同一条轴库富链路（`_run_explore_inspiration_stage`），与 regular 通道并存、互不影响。**种子 = merged call 现成的 `explore_domains`（跨域话题，非 like 二级兴趣、非历史旧域）**：把每个 domain 当作 `seed_interest` 喂进 E0 参数化后的 `_run_inspiration_axis_pipeline`，不新增独立跨域发现 LLM 调用。`_INSPIRATION_AXIS_KEYWORD_SYSTEM_PROMPT` 增一条**静态** explore 规则：带 `explore_request` 时 `core_concept` 锚定"未覆盖但相关"的跨域具体实体、避开 `explore_request.avoid_covered`（仍过 byte-identical cache）；F1/F1.5/F2/F3 全继承（具体性 prompt、`is_specific` 择优、动态 max_tokens、core/decoration 观测），explore 词同样具体、跨轴、可核 `restatement_rate`。**舒适区扩张闭环（复用 Phase 2 回填、零新逻辑）**：新生成的轴打 `source='explore'`（`new_axis_source` 参数，`axis_id` 由 interest+label 稳定派生），Phase 2 `backfill_inspiration_axis_yield()` 按 `axis_id` 归因（source 无关，cohort 过滤不排除 `keyword_kind='explore'` 行），高产 explore 轴 yield 上升；下一轮用 `list_inspiration_axes_by_source('explore', min_yield=…)` 把它们作为**匹配当前域的 `existing_axes`** 喂回（只丰富当前域、绝不当种子——否则 `source_interest` 会漂成旧域）。**AC2 机制保证（R3 钳制）**：装配前丢弃 `interest`（归一化匹配）不在当前 domains 种子集里的候选，保证每个 explore 词 `source_interest ∈ 当前域`。**默认开 + 降级不裸奔**：`inspiration_search_enabled=true` 且 explore 到期 → 走富链路（`mark_explore_planned` 照常）；富生成 degraded（`report["explore_degraded"]=true` / 空 ledger / 抛错）→ **降级回旧 `_explore_domain_queries` 拍平**（merged domains 是现成真数据，explore 池仍补货、非空），`planner.last_explore_inspiration_degraded=true`。**无双重 explore**：走新链路就不走旧拍平（除降级）。**预算诚实**：explore 到期的 coexist 轮比不到期轮**只多一次** explore 富生成 LLM 调用，regular 合并通道调用数不变。inspiration 关闭时该通道逐字回退旧拍平行为；`replace` 模式的 explore 路径不变（Non-Goal）。
 - **SourcePolicy** — 统一读取 `sources.<platform>.enabled` 与 `[scheduler.pool_source_shares]`，生成有效平台配比；关闭的平台保留配置但不占 runtime quota
+- **sources.platforms** — 七个平台族的唯一可枚举注册表；discovery 已看过滤、pool 配额统计、已看事件身份和 URL host 推断统一复用别名 / strategy 前缀规则，所有 `zhihu-*` 候选即使缺少 `source_platform` 也归入 `zhihu`
 - **SourceAdapter 协议** — 多源适配层（`sources/`），在上述 4 个 B 站策略之外挂载非 B 站内容源（小红书、抖音初始化画像信号与 DOM-first search / hot / feed discovery、YouTube 初始化画像信号、知乎初始化画像信号与 search / hot / feed / creator / related discovery、Reddit 初始化画像信号与 search / hot / subreddit / related discovery、V2EX 等）
 
 ## 多源适配层
@@ -112,10 +116,10 @@
 
    这一步的作用，是把不同来源的原始线索先汇入同一个 `pending_eval` 队列；从这里往后，来源差异只作为 prompt 上下文和配额统计信号存在，不再决定一套单独评估流程。
 
-4. **混源 batch 评估**
-   `DiscoveryCandidatePipeline.drain_pending()` 会从 `discovery_candidates` claim 一批 `pending_eval` 行，并按来源 round-robin 混合取样，避免单个平台把整批 evaluator 占满。runtime 有两类入口会触发它：refresh plan 发现新 raw 后即时 drain，以及独立 `_loop_candidate_eval()` 周期性 drain 已存在的 pending raw；两者共用 controller drain lock 和 pipeline lock，所以不会并发评估同一批行。文本 eval batch 默认 45，单次 drain 默认最多 claim 两个 LLM batch（90 条，仍受 evaluator hard cap 约束）；`evaluate_content_batch()` 内部也默认只开 2 个 batch worker，外层 `DiscoveryConcurrencyController.run_llm()` 继续作为全局 LLM 并发总闸。多模态封面评估仍使用独立的小 batch。这里就是 agent 判断“结合画像看用户喜不喜欢”的环节：pipeline 把候选转回 `DiscoveredContent`，调用 `ContentDiscoveryEngine.evaluate_content_batch()`，把画像摘要、候选字段、`source_platform`、`source_strategy`、`source_context`、`content_url`、`author_name` 和近期负样本一起交给 LLM 评分。
+4. **混源连续评估**
+   `DiscoveryCandidatePipeline` 提供 `claim_batch → evaluate_claim → complete_claim / release_claim` 四阶段 API。`CandidateEvalCoordinator` 是 API runtime 唯一 claim owner，默认 3 个、每个最多 30 条 worker；worker 只跑 LLM，落库与 admission 串行，任一完成即补位，全局最多 90 条在途。调度库存严格使用 `available + admitted_pending_copy + evaluated_pending_admission`，普通 `pending_eval/evaluating` raw 不计入；每个完成 batch 先把所有 token-owned 评分持久化，再按当时 `target - available - admitted_pending_copy` headroom 入池，超过 headroom 的合格行保留为 durable `evaluated`。API 成功 admission 同步发出轻量 `on_admitted(count)` 通知，不等待文案工作。OpenClaw direct one-shot 则把同一 pipeline 的首轮 source / inline evaluation / copy 都限制为 ≤4，使用 post-admission callback 在 DB commit 后 await `expression-copy(limit=4, max_extra_requests=0)`；首 batch 的有效 subset 可服务，未复制行保留 pending-copy 以供下一次 operation 重试，且 callback 失败不会回滚已经 durable 的 admission。每批唯一 `claim_token` 防止旧 worker 覆盖新 claim；worker completion 直接驱动补位，60 秒只作 API 遗漏通知的 safety wake。平台请求间隔、raw ceiling、来源配比和 admission 阈值均未改变。
 
-   进入批量 LLM 评估前，`evaluate_content_batch()` 会读取 `Database.get_recent_viewed_content_keys()`，用 `source_platform:content_id` 判断最近看过的 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit 候选；命中项直接记为 0 分并从 prompt 中剔除，避免为已看内容消耗 discovery token。老 BVID 也保留 raw key 兼容旧数据。
+   进入批量 LLM 评估前，`evaluate_content_batch()` 会读取 `Database.get_recent_viewed_content_keys()`，并通过 `sources.platforms.normalize_source_platform()` 生成统一的 `source_platform:content_id`，判断最近看过的 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit 候选；命中项直接记为 0 分并从 prompt 中剔除，避免为已看内容消耗 discovery token。老 BVID 也保留 raw key 兼容旧数据。
 
    evaluator 的候选输入不再只依赖标题：各来源会尽量映射 `view_count`、`like_count`、`favorite_count` / `collect_count`、`comment_count` / `reply_count`、`share_count`、`danmaku_count`、`retweet_count`、`bookmark_count`、`tags`、`body_text` 等字段。对知乎 / X 这类 text-first 来源，如果 `description` 与 `body_text` 是同一段文本或只是正文前缀，prompt 里会省略重复的 `description`，保留 `body_text` 作为内容正文，避免同一长文本在 evaluator 输入里发送两遍。prompt 明确把互动指标当辅助信号，不能用高热度替代内容与画像的真实匹配，也不能因为低热度惩罚小众但高度匹配的内容。除 `explore` 外，`search` / `trending` / `hot` / `feed` / `related_chain` / `channel` / `creator` 等发现路径和平台都只提供上下文，不能设置基础分、自动加分、降低门槛或替明显不匹配的候选事后编造画像关联；单条 fallback evaluator 与混源 batch evaluator 使用同一规则。`explore` 仍可容纳主题陌生的候选，但也必须有具体可信的吸引点，不能仅凭抽象心理需求获得高分。
 
@@ -136,7 +140,7 @@
 
    候选队列表本身按来源保留上限，默认上限为 `max(pool_target_count*2, pool_target_count+120, 600)`；入队时会把 `evaluating` 行纳入 cap 计数，但删除时保护 in-flight 行，并优先清理 terminal rows。这样正式池长期满时仍不继续消耗 discovery / LLM，同时不会让外部 observed / producer 队列无限增长，即使 `pool_target_count <= 0` 也保留 600 条的兜底上限。
 
-   `evaluating` claim 的崩溃回收（v0.3.155+）：评估器活在进程内，重启后残留的 `evaluating` 行必然是孤儿——它们计入补货 target（表现为 `target_reached`）却永远不会被 drain（只 claim `pending_eval`）、也不被 cap 清理（保护 in-flight），会让池子永久饿死。三层回收：`Database.initialize()` 打开库时回收 ≥30 分钟的旧 claim（既有行为）；进程内**首个** `DiscoveryCandidatePipeline` 构造时全量回收所有 `evaluating`（含 `claimed_at` 为 NULL 的行；config reload 重建不重扫，避免误伤上一实例在飞的 batch）；每次 `drain_pending` tick 先回收超过 30 分钟的 stale claim（治评估任务中途死亡）。
+   `evaluating` claim 的崩溃回收：`Database.initialize()` 回收旧租约，进程首个 pipeline 回收重启孤儿；正常热重载则由父 `refresh_loop` 等待 coordinator 取消 worker 并按 token 归还未完成行，再构造新 runtime。stale sweep 同时清空 `claim_token`，终态提交也清空 token / claimed_at。
 
    引擎缓存收口仍会按跨源内容身份去重：B 站内容使用 `bvid`，YouTube / 小红书 / 抖音等多源内容使用 `source_platform + content_id`，缺失时再退到 URL / 标题。这样同一个视频被多个策略同时找到时，会保留可入池的一条版本，同时不会把多个非 B 站候选因为空 `bvid` 误合并。
 
@@ -1309,3 +1313,4 @@ for each epoch:
 23. **PromptOptimizer 参数化复用**：不为 discovery 写新的 optimizer，而是让 `PromptOptimizer` 接受不同的参数注册表和白名单，soul 和 discovery 共享 apply/commit/rollback 机制
 24. **长期避雷项必须进入发现前置上下文**：近期 negative exemplars 只能覆盖短期样本，`disliked_topics` 才代表稳定画像里的长期避让；因此 discovery 的共享 `profile_summary` 必须显式携带它，供 query 生成和内容评估共同消费
 25. **画像摘要要保留决策上下文而不是只传兴趣标签**：Search / Trending / Explore 都在问“什么内容适合这个人”，只传兴趣名会让模型退化成关键词扩写；因此 `build_profile_summary()` 同步携带认知风格、价值观、当前阶段、MBTI、近期觉察、当前洞察、来源分布和兴趣来源时间，但仍按前若干项裁剪，避免无界 prompt 膨胀
+26. **评估批次保留成功 sibling**：keyed partial payload 先写入有效评分，只对缺失 ID 使用共享 depth=3 / 六次额外请求预算；预算耗尽仍未解析的候选标记 `evaluation_response_missing`，不以零分拒绝，而是在 claim token 仍匹配时无 attempt 增量回到 `pending_eval`。

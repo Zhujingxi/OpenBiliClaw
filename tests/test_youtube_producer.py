@@ -14,6 +14,7 @@ from openbiliclaw.runtime.youtube_producer import (
 from openbiliclaw.storage.database import Database
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -84,8 +85,14 @@ class _SometimesFailingDiscover:
 
 
 class _FakeCandidatePipeline:
-    def __init__(self, *, pool_full: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        pool_full: bool = False,
+        on_candidates_enqueued: Callable[[int], None] | None = None,
+    ) -> None:
         self._pool_full = pool_full
+        self.on_candidates_enqueued = on_candidates_enqueued
         self.enqueued: list[tuple[list[object], str]] = []
         self.drains: list[int] = []
 
@@ -94,7 +101,10 @@ class _FakeCandidatePipeline:
 
     def enqueue_candidates(self, items: list[object], *, source_context: str = "") -> int:
         self.enqueued.append((list(items), source_context))
-        return len(items)
+        inserted = len(items)
+        if inserted > 0 and self.on_candidates_enqueued is not None:
+            self.on_candidates_enqueued(inserted)
+        return inserted
 
     async def drain_pending(self, *, profile: object, batch_size: int = 30) -> dict[str, int]:
         self.drains.append(batch_size)
@@ -157,6 +167,35 @@ async def test_youtube_producer_enqueues_raw_candidates_when_pipeline_is_availab
     assert result["discovered"] == 2
     assert result["enqueued"] == 2
     assert result["cached"] == 2
+
+
+async def test_youtube_producer_defers_to_coordinator_owned_candidate_evaluation(
+    db: Database,
+) -> None:
+    discover = _Discover([])
+    notifications: list[int] = []
+    pipeline = _FakeCandidatePipeline(
+        on_candidates_enqueued=notifications.append,
+    )
+    producer = YoutubeDiscoveryProducer(
+        database=db,
+        soul_engine=_Soul(),
+        discover=discover,
+        enabled=True,
+        min_interval_minutes=0,
+        daily_search_budget=2,
+        strategies=("yt_search",),
+        candidate_pipeline=pipeline,
+        candidate_evaluation_owned_by_coordinator=True,
+    )
+
+    result = await producer.produce_if_due(limit=4)
+
+    assert len(pipeline.enqueued) == 1
+    assert notifications == [2]
+    assert pipeline.drains == []
+    assert result["enqueued"] == 2
+    assert "cached" not in result
 
 
 async def test_youtube_producer_stamps_strategy_score_threshold_before_enqueue(
