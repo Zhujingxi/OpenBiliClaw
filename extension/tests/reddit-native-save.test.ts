@@ -31,13 +31,21 @@ function fixture(options: {
   confirmAfterClick?: boolean;
   rejectRequest?: boolean;
   readyAfterSleeps?: number;
-} = {}): RedditNativeSaveEnvironment & { clicks: number; saveRequests: URLSearchParams[] } {
+  savedStates?: Array<"saved" | "unsaved" | "unknown">;
+} = {}): RedditNativeSaveEnvironment & {
+  clicks: number;
+  saveRequests: URLSearchParams[];
+  savedStateRequests: number;
+  fetchSavedState(fullname: string): Promise<"saved" | "unsaved" | "unknown">;
+} {
   let state = options.initialState === undefined ? "Save" : options.initialState;
   let sleeps = 0;
+  let savedStateIndex = 0;
   const ready = () => sleeps >= (options.readyAfterSleeps ?? 0);
   const env = {
     clicks: 0,
     saveRequests: [] as URLSearchParams[],
+    savedStateRequests: 0,
     currentUrl: task.content_url,
     isLoggedIn: () => ready() && (options.loggedIn ?? true),
     requestToken: () => ready() ? (options.token ?? null) : null,
@@ -46,6 +54,13 @@ function fixture(options: {
       if (options.rejectRequest) throw new Error("network outcome unknown");
       if (options.confirmAfterRequest) state = "Unsave";
       return { status: options.responseStatus ?? 200, ok: (options.responseStatus ?? 200) < 400 };
+    },
+    async fetchSavedState(_fullname: string) {
+      env.savedStateRequests += 1;
+      const values = options.savedStates ?? ["unknown"];
+      const value = values[Math.min(savedStateIndex, values.length - 1)] ?? "unknown";
+      savedStateIndex += 1;
+      return value;
     },
     findControl(_fullname: string, label: "Save" | "Unsave"): RedditSaveControl | null {
       if (!ready()) return null;
@@ -58,9 +73,90 @@ function fixture(options: {
       };
     },
     sleep: async () => { sleeps += 1; },
-  } satisfies RedditNativeSaveEnvironment & { clicks: number; saveRequests: URLSearchParams[] };
+  } satisfies RedditNativeSaveEnvironment & {
+    clicks: number;
+    saveRequests: URLSearchParams[];
+    savedStateRequests: number;
+    fetchSavedState(fullname: string): Promise<"saved" | "unsaved" | "unknown">;
+  };
   return env;
 }
+
+test("Reddit native save confirms an accepted request through exact saved item state", async () => {
+  const env = fixture({
+    token: "page-modhash",
+    responseStatus: 200,
+    savedStates: ["unsaved", "saved"],
+  });
+
+  assert.deepEqual(await saveReddit(task, env), { status: "synced" });
+  assert.equal(env.saveRequests.length, 1);
+  assert.equal(env.savedStateRequests, 2);
+});
+
+test("Reddit native save reports missing postcondition after an accepted request", async () => {
+  const env = fixture({
+    token: "page-modhash",
+    responseStatus: 200,
+    savedStates: ["unknown"],
+  });
+
+  assert.deepEqual(await saveReddit(task, env), {
+    status: "failed",
+    error_code: "native_confirmation_not_observed",
+  });
+  assert.equal(env.saveRequests.length, 1);
+  assert.ok(env.savedStateRequests > 0);
+});
+
+test("Reddit browser state endpoint accepts only the exact saved fullname", async () => {
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+  const originalLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+  const originalFetch = globalThis.fetch;
+  const documentFixture = {
+    querySelector(selector: string) {
+      if (selector === "input[name='uh']") return { value: "page-modhash" };
+      if (selector.includes("user-menu")) return {};
+      return null;
+    },
+  };
+  Object.defineProperty(globalThis, "document", { configurable: true, value: documentFixture });
+  Object.defineProperty(globalThis, "location", {
+    configurable: true,
+    value: {
+      href: task.content_url,
+      origin: "https://www.reddit.com",
+      pathname: "/r/test/comments/abc123/title/",
+    },
+  });
+  try {
+    for (const [reportedName, expected] of [
+      [task.content_id, { status: "already_synced" }],
+      ["t3_different", { status: "failed", error_code: "native_save_failed" }],
+    ] as const) {
+      globalThis.fetch = (async (input: string | URL | Request) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/api/info.json") {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              data: { children: [{ data: { name: reportedName, saved: true } }] },
+            }),
+          } as Response;
+        }
+        return { ok: false, status: 500 } as Response;
+      }) as typeof fetch;
+      assert.deepEqual(await saveReddit(task), expected);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalDocument) Object.defineProperty(globalThis, "document", originalDocument);
+    else delete (globalThis as { document?: unknown }).document;
+    if (originalLocation) Object.defineProperty(globalThis, "location", originalLocation);
+    else delete (globalThis as { location?: unknown }).location;
+  }
+});
 
 test("Reddit native save accepts post and comment fullnames and confirms request saves", async () => {
   for (const candidate of [
@@ -297,7 +393,7 @@ test("Reddit native save never clicks after a 2xx response without confirmation"
   const env = fixture({ token: "page-modhash", responseStatus: 200, confirmAfterClick: true });
   assert.deepEqual(await saveReddit(task, env), {
     status: "failed",
-    error_code: "native_save_failed",
+    error_code: "native_confirmation_not_observed",
   });
   assert.equal(env.saveRequests.length, 1);
   assert.equal(env.clicks, 0);
@@ -307,7 +403,7 @@ test("Reddit native save never clicks after a network-uncertain request", async 
   const env = fixture({ token: "page-modhash", rejectRequest: true, confirmAfterClick: true });
   assert.deepEqual(await saveReddit(task, env), {
     status: "failed",
-    error_code: "native_save_failed",
+    error_code: "native_confirmation_not_observed",
   });
   assert.equal(env.saveRequests.length, 1);
   assert.equal(env.clicks, 0);
@@ -353,7 +449,7 @@ test("Reddit native save fails safely without post-action confirmation", async (
   const env = fixture({ token: null, confirmAfterClick: false });
   assert.deepEqual(await saveReddit(task, env), {
     status: "failed",
-    error_code: "native_save_failed",
+    error_code: "native_confirmation_not_observed",
   });
   assert.equal(env.clicks, 1);
 });

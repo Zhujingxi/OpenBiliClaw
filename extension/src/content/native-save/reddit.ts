@@ -5,11 +5,14 @@ export interface RedditSaveControl {
   click(): void;
 }
 
+type RedditSavedState = "saved" | "unsaved" | "unknown";
+
 export interface RedditNativeSaveEnvironment {
   currentUrl: string;
   isLoggedIn(): boolean;
   requestToken(): string | null;
   postSave(body: URLSearchParams): Promise<{ ok: boolean; status: number }>;
+  fetchSavedState(fullname: string): Promise<RedditSavedState>;
   findControl(fullname: string, label: "Save" | "Unsave"): RedditSaveControl | null;
   sleep(ms: number): Promise<void>;
 }
@@ -56,6 +59,7 @@ function supportedIdentity(task: NativeSaveTask, currentUrl: string): RedditIden
 async function confirmSaved(task: NativeSaveTask, env: RedditNativeSaveEnvironment): Promise<boolean> {
   for (let attempt = 0; attempt < CONFIRM_ATTEMPTS; attempt += 1) {
     if (env.findControl(task.content_id, "Unsave")) return true;
+    if (await env.fetchSavedState(task.content_id) === "saved") return true;
     if (attempt + 1 < CONFIRM_ATTEMPTS) await env.sleep(CONFIRM_INTERVAL_MS);
   }
   return false;
@@ -87,19 +91,24 @@ export async function saveReddit(
   }
 
   const token = env.requestToken();
+  if (token && await env.fetchSavedState(task.content_id) === "saved") {
+    return { status: "already_synced" };
+  }
   if (token) {
     let response: { ok: boolean; status: number };
     try {
       const body = new URLSearchParams({ id: task.content_id, uh: token, api_type: "json" });
       response = await env.postSave(body);
     } catch {
-      return { status: "failed", error_code: "native_save_failed" };
+      return await confirmSaved(task, env)
+        ? { status: "synced" }
+        : { status: "failed", error_code: "native_confirmation_not_observed" };
     }
     if (response.status === 429) return { status: "rate_limited" };
     if (response.ok) {
       return await confirmSaved(task, env)
         ? { status: "synced" }
-        : { status: "failed", error_code: "native_save_failed" };
+        : { status: "failed", error_code: "native_confirmation_not_observed" };
     }
     if (response.status !== 403) return { status: "failed", error_code: "native_save_failed" };
   }
@@ -113,7 +122,7 @@ export async function saveReddit(
   }
   return await confirmSaved(task, env)
     ? { status: "synced" }
-    : { status: "failed", error_code: "native_save_failed" };
+    : { status: "failed", error_code: "native_confirmation_not_observed" };
 }
 
 function queryAllOpenShadowRoots(root: ParentNode, selector: string): HTMLElement[] {
@@ -230,6 +239,25 @@ function browserRedditEnvironment(): RedditNativeSaveEnvironment {
         body,
       });
       return { ok: response.ok, status: response.status };
+    },
+    async fetchSavedState(fullname) {
+      try {
+        const url = new URL("/api/info.json", location.origin);
+        url.searchParams.set("id", fullname);
+        url.searchParams.set("raw_json", "1");
+        const response = await fetch(url, { credentials: "include" });
+        if (!response.ok) return "unknown";
+        const payload = await response.json() as {
+          data?: { children?: Array<{ data?: { name?: unknown; saved?: unknown } }> };
+        };
+        const children = payload.data?.children;
+        if (!Array.isArray(children) || children.length !== 1) return "unknown";
+        const item = children[0]?.data;
+        if (item?.name !== fullname || typeof item.saved !== "boolean") return "unknown";
+        return item.saved ? "saved" : "unsaved";
+      } catch {
+        return "unknown";
+      }
     },
     findControl(fullname, label) {
       const root = targetRoot(fullname);
