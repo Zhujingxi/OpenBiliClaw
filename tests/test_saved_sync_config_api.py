@@ -13,6 +13,7 @@ from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig, load_confi
 if TYPE_CHECKING:
     from pathlib import Path
 
+
 def _make_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> TestClient:
     config = Config(
         llm=LLMConfig(
@@ -33,9 +34,7 @@ def test_config_api_exposes_and_updates_saved_sync(
 ) -> None:
     client = _make_client(monkeypatch, tmp_path)
 
-    assert client.get("/api/config").json()["saved_sync"] == {
-        "auto_sync_enabled": False
-    }
+    assert client.get("/api/config").json()["saved_sync"] == {"auto_sync_enabled": False}
 
     response = client.put(
         "/api/config",
@@ -43,9 +42,7 @@ def test_config_api_exposes_and_updates_saved_sync(
     )
 
     assert response.status_code == 200
-    assert client.get("/api/config").json()["saved_sync"] == {
-        "auto_sync_enabled": True
-    }
+    assert client.get("/api/config").json()["saved_sync"] == {"auto_sync_enabled": True}
     assert load_config(tmp_path / "config.toml").saved_sync.auto_sync_enabled is True
 
 

@@ -137,9 +137,7 @@ def test_remote_saved_sync_mutations_require_authentication(tmp_path, monkeypatc
         assert response.json() == {"error": "auth_required"}
 
 
-def test_remote_source_result_and_kick_routes_require_authentication(
-    tmp_path, monkeypatch
-) -> None:
+def test_remote_source_result_and_kick_routes_require_authentication(tmp_path, monkeypatch) -> None:
     app, _ = _build_app(tmp_path, monkeypatch)
     remote = _remote(app)
 

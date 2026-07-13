@@ -300,9 +300,7 @@ def test_job_validation_strips_nonidentity_query_and_fragment(database: Database
     row = database.create_or_reuse_extension_native_save_job(
         replace(
             make_job(),
-            content_url=(
-                "https://www.reddit.com/r/test/comments/abc/demo/?token=secret#fragment"
-            ),
+            content_url=("https://www.reddit.com/r/test/comments/abc/demo/?token=secret#fragment"),
         )
     )
 

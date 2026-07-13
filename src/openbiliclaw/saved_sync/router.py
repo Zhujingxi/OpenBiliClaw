@@ -82,9 +82,7 @@ class NativeSaveRouter:
                     f"unsupported watch-later action: {normalized_platform}"
                 )
         else:  # pragma: no cover - protected by the NativeSaveAction type
-            raise UnsupportedNativeSaveError(
-                f"unsupported native save action: {requested_action}"
-            )
+            raise UnsupportedNativeSaveError(f"unsupported native save action: {requested_action}")
 
         target = adapter.target_label(resolved_action)
         try:
@@ -93,9 +91,7 @@ class NativeSaveRouter:
                 isinstance(normalized_target, str)
                 and bool(normalized_target)
                 and len(normalized_target) <= _MAX_TARGET_LABEL_LENGTH
-                and not any(
-                    ord(character) < 32 or ord(character) == 127 for character in target
-                )
+                and not any(ord(character) < 32 or ord(character) == 127 for character in target)
             )
         except Exception:
             valid_target = False

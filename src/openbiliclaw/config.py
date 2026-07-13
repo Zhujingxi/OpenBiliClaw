@@ -1223,9 +1223,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
             manage_ollama=_coerce_bool(autostart_raw.get("manage_ollama"), default=True),
         ),
         saved_sync=SavedSyncConfig(
-            auto_sync_enabled=_coerce_bool(
-                saved_sync_raw.get("auto_sync_enabled"), default=False
-            ),
+            auto_sync_enabled=_coerce_bool(saved_sync_raw.get("auto_sync_enabled"), default=False),
         ),
         storage=StorageConfig(**store_raw),
         logging=LoggingConfig(**logging_raw),
