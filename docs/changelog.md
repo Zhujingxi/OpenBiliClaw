@@ -4,7 +4,9 @@
 
 ---
 
-## v0.3.164：WebUI 可配置的海外出口代理（issue #89，2026-07-12）
+## v0.3.164 / extension v0.3.164 / desktop v0.3.164：持续补货、Web 可靠交互与安全对话（2026-07-13）
+
+后端源码走 `backend-v0.3.164`，浏览器插件走 `extension-v0.3.164`，桌面安装包走 `desktop-v0.3.164`。
 
 - **Linux CI 并发回归去抖**：refill 优先级测试先确认新 refill waiter 已实际入队，并持有其槽位到优先顺序断言完成，避免把 refill 正常退出后的 maintenance 准入误判为门控失效；50 轮持续补货 E2E 继续由每轮 2 秒功能超时守卫，移除会受共享 runner 负载影响的额外 1 秒墙钟断言。
 - **OpenAI-compatible 结构化 JSON 合约兼容**：`LLMService` 的普通 / 多模态 structured 路径会把已有大写 `JSON` 归一为小写 `json`，若完全缺失则只追加最小 `json` 标记，满足部分兼容端点在 `response_format=json_object` 下的字面消息检查；非结构化调用、业务提示、画像、准入阈值、user 内容和 core-memory 排序均不变。
