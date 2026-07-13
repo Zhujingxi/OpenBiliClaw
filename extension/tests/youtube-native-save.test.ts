@@ -32,8 +32,11 @@ interface FixtureOptions {
   rateLimitedAfterMutation?: boolean;
   initialNamedRows?: Array<{ title: string; checked?: boolean }>;
   watchLaterChecked?: boolean;
+  confirmWatchLaterAfterReopen?: boolean;
   createSucceeds?: boolean;
+  creationFailureCode?: "native_control_not_found" | "native_dialog_not_opened" | "native_target_not_found" | "native_request_rejected";
   createdTitle?: string;
+  createdRowAfterLookups?: number;
   confirmAfterClick?: boolean;
   dialogAvailable?: boolean;
   readyAfterSleeps?: number;
@@ -48,7 +51,9 @@ function fixture(options: FixtureOptions = {}): YouTubeNativeSaveEnvironment & {
 } {
   let open = false;
   let rows = (options.initialNamedRows ?? [{ title: "OpenBiliClaw" }]).map((row) => ({ ...row }));
+  let pendingCreatedRow: { title: string; checked: boolean } | null = null;
   let watchLaterChecked = options.watchLaterChecked ?? false;
+  let watchLaterClicked = false;
   let rateLimited = options.rateLimited ?? false;
   let sleeps = 0;
   const ready = () => sleeps >= (options.readyAfterSleeps ?? 0);
@@ -64,6 +69,7 @@ function fixture(options: FixtureOptions = {}): YouTubeNativeSaveEnvironment & {
     rateLimitFingerprint: () => rateLimited ? "limited" : "",
     async openSaveDialog() {
       env.actions.push("open-save-dialog");
+      if (options.confirmWatchLaterAfterReopen && watchLaterClicked) watchLaterChecked = true;
       open = saveControlReady() && (options.dialogAvailable ?? true);
       return open;
     },
@@ -73,6 +79,10 @@ function fixture(options: FixtureOptions = {}): YouTubeNativeSaveEnvironment & {
     },
     findNamedPlaylists(title: string): YouTubePlaylistRow[] {
       env.namedLookups += 1;
+      if (pendingCreatedRow && env.namedLookups >= (options.createdRowAfterLookups ?? 0)) {
+        rows.push(pendingCreatedRow);
+        pendingCreatedRow = null;
+      }
       if (!open) return [];
       return rows.filter((candidate) => candidate.title === title).map((row) => ({
         isChecked: () => row.checked ?? false,
@@ -91,6 +101,7 @@ function fixture(options: FixtureOptions = {}): YouTubeNativeSaveEnvironment & {
         click() {
           env.actions.push("select:watch-later");
           env.mutations += 1;
+          watchLaterClicked = true;
           if (options.rateLimitedAfterMutation) rateLimited = true;
           if (options.confirmAfterClick ?? true) watchLaterChecked = true;
         },
@@ -101,9 +112,12 @@ function fixture(options: FixtureOptions = {}): YouTubeNativeSaveEnvironment & {
       env.mutations += 1;
       if (options.rateLimitedAfterMutation) rateLimited = true;
       if (!(options.createSucceeds ?? true)) return false;
-      rows.push({ title: options.createdTitle ?? title, checked: false });
+      const createdRow = { title: options.createdTitle ?? title, checked: false };
+      if (options.createdRowAfterLookups === undefined) rows.push(createdRow);
+      else pendingCreatedRow = createdRow;
       return true;
     },
+    creationFailureCode: () => options.creationFailureCode ?? "native_request_rejected",
     sleep: async () => { sleeps += 1; },
   } satisfies YouTubeNativeSaveEnvironment & {
     actions: string[];
@@ -160,7 +174,14 @@ test("YouTube native save reports the exact failed execution stage", async () =>
       "native_target_not_found",
     ],
     [fixture({ confirmAfterClick: false }), "native_confirmation_not_observed"],
-    [fixture({ initialNamedRows: [], createSucceeds: false }), "native_request_rejected"],
+    [
+      fixture({
+        initialNamedRows: [],
+        createSucceeds: false,
+        creationFailureCode: "native_control_not_found",
+      }),
+      "native_control_not_found",
+    ],
   ];
 
   for (const [env, errorCode] of cases) {
@@ -209,6 +230,12 @@ test("YouTube native save creates exact OpenBiliClaw then closes, reopens, and r
     "select:OpenBiliClaw",
   ]);
   assert.equal(env.namedLookups, 2);
+});
+
+test("YouTube native save polls the reopened dialog until the created playlist materializes", async () => {
+  const env = fixture({ initialNamedRows: [], createdRowAfterLookups: 4 });
+  assert.deepEqual(await saveYouTube(task, env), { status: "synced" });
+  assert.equal(env.namedLookups, 4);
 });
 
 test("YouTube native save uses exact Unicode case-sensitive playlist title", async () => {
@@ -288,6 +315,43 @@ test("YouTube native save watch later only uses the platform Watch Later row", a
     assert.equal(env.namedLookups, 0);
     assert.equal(env.actions.some((action) => action.startsWith("create:")), false);
   }
+});
+
+test("YouTube native save preserves the browser environment target failure stage", async () => {
+  const env = {
+    ...fixture({ initialNamedRows: [] }),
+    findWatchLater: () => null,
+    targetFailureCode: () => "native_control_not_found" as const,
+  };
+  assert.deepEqual(await saveYouTube({
+    ...task,
+    requested_action: "watch_later",
+    resolved_action: "watch_later",
+    target_label: "YouTube Watch Later",
+  }, env), {
+    status: "failed",
+    error_code: "native_control_not_found",
+  });
+});
+
+test("YouTube watch later reopens the dialog to confirm server membership", async () => {
+  const env = fixture({
+    initialNamedRows: [],
+    confirmAfterClick: false,
+    confirmWatchLaterAfterReopen: true,
+  });
+  assert.deepEqual(await saveYouTube({
+    ...task,
+    requested_action: "watch_later",
+    resolved_action: "watch_later",
+    target_label: "YouTube Watch Later",
+  }, env), { status: "synced" });
+  assert.deepEqual(env.actions, [
+    "open-save-dialog",
+    "select:watch-later",
+    "close-save-dialog",
+    "open-save-dialog",
+  ]);
 });
 
 test("YouTube native save maps logged out, unavailable, rate limited, and ambiguous DOM safely", async () => {
@@ -375,25 +439,29 @@ test("YouTube browser environment correlates a newly visible dialog view model",
 
 test("YouTube browser environment creates a playlist through a detached dialog form", async () => {
   const originalInput = (globalThis as { HTMLInputElement?: unknown }).HTMLInputElement;
+  const originalTextArea = (globalThis as { HTMLTextAreaElement?: unknown }).HTMLTextAreaElement;
   const originalInputEvent = (globalThis as { InputEvent?: unknown }).InputEvent;
-  class FakeInput {
+  class FakeTextArea {
     hidden = false;
     style = {};
+    tagName = "TEXTAREA";
     parentElement: unknown = null;
     private _value = "";
+    onDispatch = () => {};
     set value(value: string) { this._value = value; }
     get value() { return this._value; }
     getAttribute() { return null; }
     hasAttribute() { return false; }
-    dispatchEvent() { return true; }
+    dispatchEvent() { this.onDispatch(); return true; }
   }
-  (globalThis as { HTMLInputElement?: unknown }).HTMLInputElement = FakeInput;
+  (globalThis as { HTMLTextAreaElement?: unknown }).HTMLTextAreaElement = FakeTextArea;
   (globalThis as { InputEvent?: unknown }).InputEvent = class {
     constructor(..._args: unknown[]) {}
   };
   let saveVisible = false;
   let formVisible = false;
   let createClicks = 0;
+  let createEnabled = false;
   const saveButton = {
     hidden: false, style: {}, parentElement: null,
     getAttribute: (name: string) => name === "aria-label" ? "Save" : null,
@@ -410,11 +478,16 @@ test("YouTube browser environment creates a playlist through a detached dialog f
   const createButton = {
     hidden: false, style: {}, parentElement: null,
     textContent: "Create playlist",
-    getAttribute: () => null,
+    getAttribute: (name: string) => name === "aria-disabled" && !createEnabled ? "true" : null,
     hasAttribute: () => false,
-    click: () => { createClicks += 1; formVisible = false; },
+    click: () => {
+      if (!createEnabled) return;
+      createClicks += 1;
+      formVisible = false;
+    },
   };
-  const input = new FakeInput();
+  const input = new FakeTextArea();
+  input.onDispatch = () => queueMicrotask(() => { createEnabled = true; });
   const saveDialog = {
     hidden: false, style: {}, parentElement: null,
     getAttribute: () => null,
@@ -427,22 +500,35 @@ test("YouTube browser environment creates a playlist through a detached dialog f
     hidden: false, style: {}, parentElement: null,
     getAttribute: () => null,
     hasAttribute: () => false,
-    querySelector: (selector: string) => selector.includes("input") ? input : null,
-    querySelectorAll: (selector: string) => selector.includes("button")
-      ? [createButton]
-      : selector.includes("input") ? [input] : [],
+    querySelector: (selector: string) => selector.includes("textarea") ? input : null,
+    querySelectorAll: (selector: string) => selector.includes("textarea") ? [input] : [],
     contains: () => false,
   };
+  const formShell = {
+    hidden: false, style: {}, parentElement: null,
+    getAttribute: (name: string) => name === "role" ? "dialog" : null,
+    hasAttribute: () => false,
+    querySelector: () => null,
+    querySelectorAll: (selector: string) => selector.includes("button") ? [createButton] : [],
+    contains: (candidate: unknown) => candidate === formDialog || candidate === input,
+  };
   newButton.parentElement = saveDialog;
-  createButton.parentElement = formDialog;
+  formDialog.parentElement = formShell;
+  createButton.parentElement = formShell;
   input.parentElement = formDialog;
   const menu = { querySelectorAll: () => [saveButton] };
   const documentFixture = {
     defaultView: null,
     querySelector: (selector: string) => selector.includes("ytd-watch-metadata") ? menu : null,
-    querySelectorAll: (selector: string) => selector.includes("yt-dialog-view-model")
-      ? [...(saveVisible ? [saveDialog] : []), ...(formVisible ? [formDialog] : [])]
-      : [],
+    querySelectorAll(selector: string) {
+      const dialogs = [];
+      if (selector.includes("ytd-add-to-playlist-renderer") && saveVisible) dialogs.push(saveDialog);
+      if (selector.includes("yt-dialog-view-model") && formVisible) dialogs.push(formShell);
+      if (selector.includes("yt-create-playlist-dialog-form-view-model") && formVisible) {
+        dialogs.push(formDialog);
+      }
+      return dialogs;
+    },
   } as unknown as Document;
   try {
     const env = createYouTubeBrowserEnvironment(documentFixture, task.content_url);
@@ -452,6 +538,7 @@ test("YouTube browser environment creates a playlist through a detached dialog f
     assert.equal(createClicks, 1);
   } finally {
     (globalThis as { HTMLInputElement?: unknown }).HTMLInputElement = originalInput;
+    (globalThis as { HTMLTextAreaElement?: unknown }).HTMLTextAreaElement = originalTextArea;
     (globalThis as { InputEvent?: unknown }).InputEvent = originalInputEvent;
   }
 });
@@ -484,6 +571,134 @@ test("YouTube browser environment identifies only renderer playlist id WL as Wat
   const row = createYouTubeBrowserEnvironment(documentFixture, task.content_url).findWatchLater();
   assert.ok(row);
   assert.equal(row.isChecked(), true);
+});
+
+test("YouTube browser environment reads the exact title from renderer data before empty DOM text", () => {
+  const row = {
+    data: { playlistId: "PL-openbiliclaw", title: "OpenBiliClaw" },
+    hidden: false,
+    style: {},
+    parentElement: null,
+    getAttribute: () => null,
+    hasAttribute: () => false,
+    querySelector(selector: string) {
+      if (selector.startsWith("#label")) return { textContent: "" };
+      if (selector.includes("checkbox")) {
+        return { getAttribute: () => "false", hasAttribute: () => false };
+      }
+      return null;
+    },
+    querySelectorAll: () => [],
+  };
+  const dialog = {
+    hidden: false,
+    style: {},
+    parentElement: null,
+    hasAttribute: () => false,
+    getAttribute: () => null,
+    querySelectorAll(selector: string) {
+      return selector === "ytd-playlist-add-to-option-renderer" ? [row] : [];
+    },
+    contains(candidate: unknown) {
+      return candidate === row || candidate === createRenderer || candidate === nestedSheet;
+    },
+  };
+  const createRenderer = {
+    hidden: false,
+    style: {},
+    parentElement: dialog,
+    hasAttribute: () => false,
+    getAttribute: () => null,
+    querySelectorAll: () => [],
+    contains: () => false,
+  };
+  const nestedSheet = {
+    hidden: false,
+    style: {},
+    parentElement: dialog,
+    hasAttribute: () => false,
+    getAttribute: () => null,
+    querySelectorAll: () => [],
+    contains: () => false,
+  };
+  row.parentElement = dialog;
+  const documentFixture = {
+    defaultView: null,
+    querySelectorAll(selector: string) {
+      const roots = [];
+      if (selector.includes("ytd-add-to-playlist-renderer")) roots.push(dialog);
+      if (selector.includes("ytd-add-to-playlist-create-renderer")) roots.push(createRenderer);
+      if (selector.includes("yt-sheet-view-model")) roots.push(nestedSheet);
+      return roots;
+    },
+  } as unknown as Document;
+  assert.equal(
+    createYouTubeBrowserEnvironment(documentFixture, task.content_url)
+      .findNamedPlaylists("OpenBiliClaw").length,
+    1,
+  );
+});
+
+test("YouTube browser environment reads exact modern toggleable playlist rows", () => {
+  const modernRow = (playlistId: string, title: string, initiallyToggled: boolean) => {
+    let toggled = initiallyToggled;
+    const innerRow = {
+      getAttribute: (name: string) => name === "aria-pressed" ? (toggled ? "true" : "false") : null,
+      click: () => { toggled = true; },
+    };
+    return {
+    data: {
+      defaultListItem: {
+        listItemViewModel: {
+          rendererContext: {
+            commandContext: {
+              onTap: { innertubeCommand: { playlistEditEndpoint: { playlistId } } },
+            },
+          },
+        },
+      },
+    },
+    hidden: false,
+    style: {},
+    parentElement: null,
+    hasAttribute: () => false,
+    getAttribute: () => null,
+    querySelector(selector: string) {
+      if (selector.includes("ytListItemViewModelTitle")) return { textContent: title };
+      if (selector.includes("yt-list-item-view-model[aria-pressed]")) return innerRow;
+      if (selector === "yt-list-item-view-model") return innerRow;
+      return null;
+    },
+    querySelectorAll: () => [],
+    click() {},
+    };
+  };
+  const favoriteRow = modernRow("PL-openbiliclaw", "OpenBiliClaw", false);
+  const watchLaterRow = modernRow("PL-modern-without-wl-id", "Watch later", false);
+  const dialog = {
+    hidden: false,
+    style: {},
+    parentElement: null,
+    hasAttribute: () => false,
+    getAttribute: () => null,
+    querySelectorAll(selector: string) {
+      return selector === "toggleable-list-item-view-model" ? [favoriteRow, watchLaterRow] : [];
+    },
+  };
+  favoriteRow.parentElement = dialog;
+  watchLaterRow.parentElement = dialog;
+  const documentFixture = {
+    defaultView: null,
+    querySelectorAll(selector: string) {
+      return selector.includes("ytd-add-to-playlist-renderer") ? [dialog] : [];
+    },
+  } as unknown as Document;
+  const env = createYouTubeBrowserEnvironment(documentFixture, task.content_url);
+  assert.equal(env.findNamedPlaylists("OpenBiliClaw").length, 1);
+  const watchLater = env.findWatchLater();
+  assert.equal(watchLater?.isChecked(), false);
+  watchLater?.click();
+  assert.equal(watchLater?.isChecked(), true);
 });
 
 test("YouTube browser environment rejects WL-prefix hrefs and accepts exact parsed list WL", () => {

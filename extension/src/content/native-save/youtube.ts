@@ -16,13 +16,28 @@ export interface YouTubeNativeSaveEnvironment {
   closeSaveDialog(): Promise<void>;
   findNamedPlaylists(title: string): YouTubePlaylistRow[];
   findWatchLater(): YouTubePlaylistRow | null;
+  targetFailureCode?(): YouTubeTargetFailureCode;
   createPlaylist(title: string): Promise<boolean>;
+  creationFailureCode?(): YouTubeCreationFailureCode;
   sleep(ms: number): Promise<void>;
   dispose?(): void;
 }
 
+type YouTubeCreationFailureCode =
+  | "native_control_not_found"
+  | "native_dialog_not_opened"
+  | "native_target_not_found"
+  | "native_request_rejected"
+  | "native_confirmation_not_observed";
+
+type YouTubeTargetFailureCode =
+  | "native_control_not_found"
+  | "native_dialog_not_opened"
+  | "native_target_not_found";
+
 const EXACT_PLAYLIST_TITLE = "OpenBiliClaw";
 const WATCH_LATER_TARGET = "YouTube Watch Later";
+const WATCH_LATER_LABELS = new Set(["Watch later", "稍后观看", "稍後觀看", "後で見る"]);
 const VIDEO_ID_PATTERN = /^[A-Za-z0-9_-]{11}$/;
 const CONFIRM_ATTEMPTS = 20;
 const CONFIRM_INTERVAL_MS = 100;
@@ -57,6 +72,8 @@ const CURRENT_URL_QUERY_KEYS = new Set(["v", "feature", "si"]);
 const YOUTUBE_HOSTS = new Set(["youtube.com", "www.youtube.com"]);
 const RATE_LIMIT_SELECTOR = "tp-yt-paper-toast #text, yt-notification-action-renderer, [role='alert']";
 const RATE_LIMIT_CONTAINER_SELECTOR = "tp-yt-paper-toast, yt-notification-action-renderer, [role='alert']";
+const SAVE_DIALOG_SELECTOR = "ytd-add-to-playlist-renderer";
+const CREATE_FORM_SELECTOR = "yt-create-playlist-dialog-form-view-model";
 
 function secureUrl(value: string): URL | null {
   try {
@@ -188,7 +205,12 @@ async function performSaveYouTube(task: NativeSaveTask, env: YouTubeNativeSaveEn
 
   if (task.resolved_action === "watch_later") {
     const row = env.findWatchLater();
-    if (!row) return { status: "failed", error_code: "native_target_not_found" };
+    if (!row) {
+      return {
+        status: "failed",
+        error_code: env.targetFailureCode?.() ?? "native_target_not_found",
+      };
+    }
     if (row.isChecked()) return { status: "already_synced" };
     try {
       row.click();
@@ -196,6 +218,21 @@ async function performSaveYouTube(task: NativeSaveTask, env: YouTubeNativeSaveEn
       return { status: "failed", error_code: "native_request_rejected" };
     }
     if (await confirmed(row, () => env.findWatchLater(), env, rateLimitBefore)) return { status: "synced" };
+    if (hasNewRateLimit(env, rateLimitBefore)) return { status: "rate_limited" };
+    try {
+      await env.closeSaveDialog();
+    } catch {
+      return { status: "failed", error_code: "native_request_rejected" };
+    }
+    if (!(await openDialog(env))) {
+      return hasNewRateLimit(env, rateLimitBefore)
+        ? { status: "rate_limited" }
+        : { status: "failed", error_code: "native_dialog_not_opened" };
+    }
+    const refreshed = env.findWatchLater();
+    if (refreshed && await confirmed(refreshed, () => env.findWatchLater(), env, rateLimitBefore)) {
+      return { status: "synced" };
+    }
     return hasNewRateLimit(env, rateLimitBefore)
       ? { status: "rate_limited" }
       : { status: "failed", error_code: "native_confirmation_not_observed" };
@@ -212,7 +249,10 @@ async function performSaveYouTube(task: NativeSaveTask, env: YouTubeNativeSaveEn
       if (!(await env.createPlaylist(EXACT_PLAYLIST_TITLE))) {
         return hasNewRateLimit(env, rateLimitBefore)
           ? { status: "rate_limited" }
-          : { status: "failed", error_code: "native_request_rejected" };
+          : {
+              status: "failed",
+              error_code: env.creationFailureCode?.() ?? "native_request_rejected",
+            };
       }
       created = true;
       await env.closeSaveDialog();
@@ -224,7 +264,11 @@ async function performSaveYouTube(task: NativeSaveTask, env: YouTubeNativeSaveEn
         ? { status: "rate_limited" }
         : { status: "failed", error_code: "native_dialog_not_opened" };
     }
-    row = uniqueNamedPlaylist(env, EXACT_PLAYLIST_TITLE);
+    for (let attempt = 0; attempt < DIALOG_ATTEMPTS; attempt += 1) {
+      row = uniqueNamedPlaylist(env, EXACT_PLAYLIST_TITLE);
+      if (row) break;
+      if (attempt + 1 < DIALOG_ATTEMPTS) await env.sleep(DIALOG_INTERVAL_MS);
+    }
     if (!row || row === "ambiguous") {
       return hasNewRateLimit(env, rateLimitBefore)
         ? { status: "rate_limited" }
@@ -316,20 +360,61 @@ function exactLabeledElement(
   return matches.length === 1 ? matches[0] : null;
 }
 
+function exactLabeledElementInContainingDialogs(
+  scope: HTMLElement,
+  labels: ReadonlySet<string>,
+  root: Document,
+): HTMLElement | null {
+  const enclosing = Array.from(root.querySelectorAll<HTMLElement>([
+    "tp-yt-paper-dialog",
+    "[role='dialog']",
+    "yt-dialog-view-model",
+    "yt-sheet-view-model",
+  ].join(", "))).filter((candidate) =>
+    candidate !== scope && candidate.contains?.(scope) && isEffectivelyVisible(candidate, root));
+  const matches = new Set<HTMLElement>();
+  for (const candidate of [scope, ...enclosing]) {
+    for (const element of Array.from(candidate.querySelectorAll<HTMLElement>(
+      "button, [role='button'], tp-yt-paper-button",
+    ))) {
+      if (isEffectivelyVisible(element, root) && labels.has(visibleText(element))) {
+        matches.add(element);
+      }
+    }
+  }
+  return matches.size === 1 ? Array.from(matches)[0] : null;
+}
+
+function isEnabledAction(element: HTMLElement): boolean {
+  return (
+    element.getAttribute("aria-disabled") !== "true" &&
+    !element.hasAttribute("disabled") &&
+    (element as HTMLElement & { disabled?: boolean }).disabled !== true
+  );
+}
+
 function visibleDialogRoots(root: Document): HTMLElement[] {
+  const saveDialogs = Array.from(root.querySelectorAll<HTMLElement>(SAVE_DIALOG_SELECTOR))
+    .filter((element) => isEffectivelyVisible(element, root));
+  if (saveDialogs.length > 0) return saveDialogs;
   const candidates = Array.from(root.querySelectorAll<HTMLElement>(
     [
-      "ytd-add-to-playlist-renderer",
       "tp-yt-paper-dialog",
       "[role='dialog']",
       "yt-dialog-view-model",
       "yt-sheet-view-model",
+      CREATE_FORM_SELECTOR,
       "ytd-popup-container tp-yt-iron-dropdown",
     ].join(", "),
   ));
   const visible = candidates.filter((element) => isEffectivelyVisible(element, root));
   return visible.filter((candidate) => !visible.some((other) =>
     other !== candidate && candidate.contains?.(other)));
+}
+
+function visibleCreateForms(root: Document): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(CREATE_FORM_SELECTOR))
+    .filter((element) => isEffectivelyVisible(element, root));
 }
 
 function dialogRoot(root: Document, activeDialog: HTMLElement | null = null): HTMLElement | null {
@@ -339,29 +424,74 @@ function dialogRoot(root: Document, activeDialog: HTMLElement | null = null): HT
 }
 
 function playlistRows(root: ParentNode, documentRoot: Document): HTMLElement[] {
-  return Array.from(root.querySelectorAll<HTMLElement>("ytd-playlist-add-to-option-renderer"))
+  const legacy = Array.from(root.querySelectorAll<HTMLElement>("ytd-playlist-add-to-option-renderer"))
+    .filter((row) => isEffectivelyVisible(row, documentRoot));
+  if (legacy.length > 0) return legacy;
+  return Array.from(root.querySelectorAll<HTMLElement>("toggleable-list-item-view-model"))
     .filter((row) => isEffectivelyVisible(row, documentRoot));
 }
 
+type ModernPlaylistListItem = {
+  title?: { content?: unknown };
+  rendererContext?: {
+    commandContext?: {
+      onTap?: {
+        innertubeCommand?: {
+          playlistEditEndpoint?: { playlistId?: unknown };
+        };
+      };
+    };
+  };
+};
+
+function modernListItems(row: HTMLElement): ModernPlaylistListItem[] {
+  const data = (row as HTMLElement & {
+    data?: {
+      defaultListItem?: { listItemViewModel?: ModernPlaylistListItem };
+      toggledListItem?: { listItemViewModel?: ModernPlaylistListItem };
+    };
+  }).data;
+  return [
+    data?.defaultListItem?.listItemViewModel,
+    data?.toggledListItem?.listItemViewModel,
+  ].filter((item): item is ModernPlaylistListItem => item !== undefined);
+}
+
 function playlistTitle(row: HTMLElement): string {
-  const label = row.querySelector<HTMLElement>("#label, yt-formatted-string#label, .label");
+  const rendererTitle = (row as HTMLElement & { data?: { title?: unknown } }).data?.title;
+  if (typeof rendererTitle === "string") return rendererTitle.trim();
+  for (const item of modernListItems(row)) {
+    if (typeof item.title?.content === "string") return item.title.content.trim();
+  }
+  const label = row.querySelector<HTMLElement>(
+    ".ytListItemViewModelTitle, #label, yt-formatted-string#label, .label",
+  );
   return label?.textContent?.trim() ?? "";
 }
 
 function checked(row: HTMLElement): boolean {
   const checkbox = row.querySelector<HTMLElement>(
-    "tp-yt-paper-checkbox, [role='checkbox'], #checkbox",
+    "tp-yt-paper-checkbox, [role='checkbox'], input[type='checkbox'], #checkbox",
   );
-  if (!checkbox) return false;
-  return (
-    checkbox.getAttribute("aria-checked") === "true" ||
-    checkbox.hasAttribute("checked") ||
-    (checkbox as HTMLElement & { checked?: boolean }).checked === true
-  );
+  if (checkbox) {
+    return (
+      checkbox.getAttribute("aria-checked") === "true" ||
+      checkbox.hasAttribute("checked") ||
+      (checkbox as HTMLElement & { checked?: boolean }).checked === true
+    );
+  }
+  const pressed = row.querySelector<HTMLElement>("yt-list-item-view-model[aria-pressed]");
+  if (pressed) return pressed.getAttribute("aria-pressed") === "true";
+  const data = (row as HTMLElement & {
+    data?: { initialState?: { isToggled?: unknown }; initialIsToggled?: unknown };
+  }).data;
+  return data?.initialState?.isToggled === true || data?.initialIsToggled === true;
 }
 
 function clickableRow(row: HTMLElement): HTMLElement {
-  return row.querySelector<HTMLElement>("tp-yt-paper-checkbox, [role='checkbox'], #checkbox") ?? row;
+  return row.querySelector<HTMLElement>(
+    "tp-yt-paper-checkbox, [role='checkbox'], input[type='checkbox'], #checkbox",
+  ) ?? row.querySelector<HTMLElement>("yt-list-item-view-model") ?? row;
 }
 
 function toPlaylistRow(row: HTMLElement): YouTubePlaylistRow {
@@ -382,6 +512,12 @@ function isWatchLaterRow(row: HTMLElement): boolean {
   ) {
     return true;
   }
+  if (modernListItems(row).some((item) =>
+    item.rendererContext?.commandContext?.onTap?.innertubeCommand
+      ?.playlistEditEndpoint?.playlistId === "WL")) {
+    return true;
+  }
+  if (WATCH_LATER_LABELS.has(playlistTitle(row))) return true;
   const anchors = (row as HTMLElement & {
     querySelectorAll?: (selector: string) => NodeListOf<HTMLAnchorElement> | HTMLAnchorElement[];
   }).querySelectorAll?.("a[href]") ?? [];
@@ -400,8 +536,13 @@ function isWatchLaterRow(row: HTMLElement): boolean {
   });
 }
 
-function setInputValue(input: HTMLInputElement, value: string): void {
-  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+type PlaylistTitleField = HTMLInputElement | HTMLTextAreaElement;
+
+function setInputValue(input: PlaylistTitleField, value: string): void {
+  const prototype = input.tagName === "TEXTAREA"
+    ? HTMLTextAreaElement.prototype
+    : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
   setter?.call(input, value);
   input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
   input.dispatchEvent(new Event("change", { bubbles: true }));
@@ -416,6 +557,8 @@ export function createYouTubeBrowserEnvironment(
   const rateEventSnapshots = new WeakMap<Element, { text: string; visible: boolean }>();
   let nextRateElementId = 1;
   let activeDialog: HTMLElement | null = null;
+  let lastCreationFailure: YouTubeCreationFailureCode = "native_request_rejected";
+  let lastTargetFailure: YouTubeTargetFailureCode = "native_target_not_found";
   const rateEventRoot = (element: Element): Element => element.closest(RATE_LIMIT_CONTAINER_SELECTOR) ?? element;
   const rateEventSnapshot = (element: Element): { text: string; visible: boolean } => ({
     text: element.textContent?.trim() ?? "",
@@ -546,29 +689,55 @@ export function createYouTubeBrowserEnvironment(
     },
     findWatchLater() {
       const dialog = dialogRoot(root, activeDialog);
-      if (!dialog) return null;
-      const rows = playlistRows(dialog, root).filter(isWatchLaterRow);
+      if (!dialog) {
+        lastTargetFailure = "native_dialog_not_opened";
+        return null;
+      }
+      const scopedRows = playlistRows(dialog, root);
+      if (scopedRows.length === 0) {
+        lastTargetFailure = playlistRows(root, root).length > 0
+          ? "native_dialog_not_opened"
+          : "native_control_not_found";
+        return null;
+      }
+      const rows = scopedRows.filter(isWatchLaterRow);
+      lastTargetFailure = scopedRows.some((row) => playlistTitle(row) !== "")
+        ? "native_target_not_found"
+        : "native_dialog_not_opened";
       return rows.length === 1 ? toPlaylistRow(rows[0]) : null;
+    },
+    targetFailureCode() {
+      return lastTargetFailure;
     },
     async createPlaylist(title) {
       const dialog = dialogRoot(root, activeDialog);
-      if (!dialog) return false;
+      if (!dialog) {
+        lastCreationFailure = "native_dialog_not_opened";
+        return false;
+      }
       const newPlaylist = dialog.querySelector<HTMLElement>("#new-playlist-button")
         ?? exactLabeledElement(dialog, NEW_PLAYLIST_LABELS, root);
-      if (!newPlaylist) return false;
+      if (!newPlaylist) {
+        lastCreationFailure = "native_control_not_found";
+        return false;
+      }
       const dialogsBeforeCreate = new Set(visibleDialogRoots(root));
       newPlaylist.click();
       for (let attempt = 0; attempt < DIALOG_ATTEMPTS; attempt += 1) {
-        const scopes = [
-          dialog,
+        const scopes = Array.from(new Set([
+          ...visibleCreateForms(root),
           ...visibleDialogRoots(root).filter((candidate) => !dialogsBeforeCreate.has(candidate)),
-        ];
-        const matches = scopes.flatMap((scope) =>
-          Array.from(scope.querySelectorAll<HTMLInputElement>([
+          dialog,
+        ]));
+        const matches: Array<{ input: PlaylistTitleField; scope: HTMLElement }> = [];
+        for (const scope of scopes) {
+          for (const input of Array.from(scope.querySelectorAll<PlaylistTitleField>([
             "input#input",
             "tp-yt-paper-input input",
             "yt-text-input-form-field-renderer input",
             "yt-text-input-form-field input",
+            "text-field-view-model textarea",
+            "yt-create-playlist-dialog-form-view-model textarea",
             "input[aria-label*='name' i]",
             "input[placeholder*='playlist' i]",
             "input[aria-label*='playlist' i]",
@@ -576,23 +745,52 @@ export function createYouTubeBrowserEnvironment(
             "input[aria-label*='播放列表']",
             "input[placeholder*='名称']",
             "input[aria-label*='名称']",
-          ].join(", "))).filter((input) => isEffectivelyVisible(input, root))
-            .map((input) => ({ input, scope })),
-        );
-        if (matches.length > 1) return false;
+          ].join(", "))).filter((candidate) => isEffectivelyVisible(candidate, root))) {
+            if (!matches.some((match) => match.input === input)) matches.push({ input, scope });
+          }
+        }
+        if (matches.length > 1) {
+          lastCreationFailure = "native_target_not_found";
+          return false;
+        }
         if (matches.length === 1) {
           const { input, scope } = matches[0];
           activeDialog = scope;
           setInputValue(input, title);
-          const create = exactLabeledElement(scope, CREATE_LABELS, root);
-          if (!create) return false;
+          let create: HTMLElement | null = null;
+          let sawCreateControl = false;
+          for (let controlAttempt = 0; controlAttempt < DIALOG_ATTEMPTS; controlAttempt += 1) {
+            const candidate = exactLabeledElementInContainingDialogs(scope, CREATE_LABELS, root);
+            if (candidate) {
+              sawCreateControl = true;
+              if (isEnabledAction(candidate)) {
+                create = candidate;
+                break;
+              }
+            }
+            if (controlAttempt + 1 < DIALOG_ATTEMPTS) await this.sleep(DIALOG_INTERVAL_MS);
+          }
+          if (!create) {
+            lastCreationFailure = sawCreateControl
+              ? "native_confirmation_not_observed"
+              : "native_control_not_found";
+            return false;
+          }
           create.click();
-          await this.sleep(DIALOG_INTERVAL_MS);
-          return true;
+          for (let confirmationAttempt = 0; confirmationAttempt < DIALOG_ATTEMPTS; confirmationAttempt += 1) {
+            if (!visibleDialogRoots(root).includes(scope)) return true;
+            if (confirmationAttempt + 1 < DIALOG_ATTEMPTS) await this.sleep(DIALOG_INTERVAL_MS);
+          }
+          lastCreationFailure = "native_confirmation_not_observed";
+          return false;
         }
         if (attempt + 1 < DIALOG_ATTEMPTS) await this.sleep(DIALOG_INTERVAL_MS);
       }
+      lastCreationFailure = "native_dialog_not_opened";
       return false;
+    },
+    creationFailureCode() {
+      return lastCreationFailure;
     },
     sleep(ms) {
       return new Promise((resolve) => setTimeout(resolve, ms));
