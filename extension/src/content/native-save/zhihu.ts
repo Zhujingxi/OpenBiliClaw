@@ -16,8 +16,16 @@ export interface ZhihuNativeSaveEnvironment {
   closeCollectionDialog(): Promise<void>;
   findNamedCollections(title: string): ZhihuCollectionRow[];
   createCollection(title: string): Promise<boolean>;
+  creationFailureCode?(): ZhihuCreationFailureCode;
   sleep(ms: number): Promise<void>;
 }
+
+type ZhihuCreationFailureCode =
+  | "native_control_not_found"
+  | "native_dialog_not_opened"
+  | "native_target_not_found"
+  | "native_request_rejected"
+  | "native_confirmation_not_observed";
 
 const EXACT_COLLECTION_TITLE = "OpenBiliClaw";
 const TYPED_ID = /^(question|answer|article):([0-9]+)$/;
@@ -231,7 +239,10 @@ export async function saveZhihu(
     if (!(await env.createCollection(EXACT_COLLECTION_TITLE))) {
       return hasNewRateLimit(rateBefore, env.rateLimitFingerprint())
         ? { status: "rate_limited" }
-        : { status: "failed", error_code: "native_request_rejected" };
+        : {
+            status: "failed",
+            error_code: env.creationFailureCode?.() ?? "native_request_rejected",
+          };
     }
     created = true;
     await env.closeCollectionDialog();
@@ -268,6 +279,12 @@ export function createZhihuBrowserEnvironment(
   let nextRateElementId = 1;
   let activeContainer: HTMLElement | null = null;
   let activeDialog: HTMLElement | null = null;
+  let lastCreationFailure: ZhihuCreationFailureCode = "native_request_rejected";
+
+  const failCreation = (code: ZhihuCreationFailureCode): false => {
+    lastCreationFailure = code;
+    return false;
+  };
 
   const targetContainer = (): HTMLElement | null => {
     if (!currentIdentity) return null;
@@ -419,13 +436,14 @@ export function createZhihuBrowserEnvironment(
     },
     async createCollection(title) {
       const dialog = activeDialog;
-      if (!dialog) return false;
+      if (!dialog) return failCreation("native_dialog_not_opened");
+      lastCreationFailure = "native_request_rejected";
       const createControls = Array.from(dialog.querySelectorAll<HTMLElement>(
         "button, [role='button']",
       )).filter((element) => isEffectivelyVisible(element, root) && closestDialog(element) === dialog &&
         (closestIdentity(element) === null || closestIdentity(element) === currentIdentity) &&
         ["新建收藏夹", "创建收藏夹", "新建"].includes(visibleText(element)));
-      if (createControls.length !== 1) return false;
+      if (createControls.length !== 1) return failCreation("native_control_not_found");
       const dialogsBeforeCreate = new Set(visibleDialogs());
       createControls[0].click();
 
@@ -445,7 +463,7 @@ export function createZhihuBrowserEnvironment(
             (closestIdentity(candidate) === null || closestIdentity(candidate) === currentIdentity))
             .map((candidate) => ({ input: candidate, scope })),
         );
-        if (matches.length > 1) return false;
+        if (matches.length > 1) return failCreation("native_target_not_found");
         if (matches.length === 1) {
           input = matches[0].input;
           formDialog = matches[0].scope;
@@ -455,7 +473,7 @@ export function createZhihuBrowserEnvironment(
           await new Promise((resolve) => setTimeout(resolve, DIALOG_INTERVAL_MS));
         }
       }
-      if (!input || !formDialog) return false;
+      if (!input || !formDialog) return failCreation("native_dialog_not_opened");
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
       if (setter) setter.call(input, title);
       else input.value = title;
@@ -466,12 +484,12 @@ export function createZhihuBrowserEnvironment(
       )).filter((element) => isEffectivelyVisible(element, root) && closestDialog(element) === formDialog &&
         (closestIdentity(element) === null || closestIdentity(element) === currentIdentity) &&
         ["创建", "确认", "完成"].includes(visibleText(element)));
-      if (confirms.length !== 1) return false;
+      if (confirms.length !== 1) return failCreation("native_control_not_found");
       confirms[0].click();
 
       for (let attempt = 0; attempt < DIALOG_ATTEMPTS; attempt += 1) {
         const exactRows = findCollectionRows(title);
-        if (exactRows.length > 1) return false;
+        if (exactRows.length > 1) return failCreation("native_target_not_found");
         if (exactRows.length === 1) return true;
         const remainingInputs = Array.from(formDialog.querySelectorAll<HTMLInputElement>(
           "input[name='title'], input[placeholder*='收藏夹'], input[placeholder*='名称']",
@@ -479,12 +497,15 @@ export function createZhihuBrowserEnvironment(
           closestDialog(candidate) === formDialog &&
           (closestIdentity(candidate) === null || closestIdentity(candidate) === currentIdentity));
         if (remainingInputs.length === 0) return true;
-        if (remainingInputs.length > 1) return false;
+        if (remainingInputs.length > 1) return failCreation("native_target_not_found");
         if (attempt + 1 < DIALOG_ATTEMPTS) {
           await new Promise((resolve) => setTimeout(resolve, DIALOG_INTERVAL_MS));
         }
       }
-      return false;
+      return failCreation("native_confirmation_not_observed");
+    },
+    creationFailureCode() {
+      return lastCreationFailure;
     },
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   };

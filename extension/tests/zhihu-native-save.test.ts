@@ -614,6 +614,7 @@ test("Zhihu browser creation waits for async form and deterministic confirmation
     const uncertain = makeEnvironment(false);
     assert.equal(await uncertain.env.openCollectionDialog(), true);
     assert.equal(await uncertain.env.createCollection("OpenBiliClaw"), false);
+    assert.equal(uncertain.env.creationFailureCode?.(), "native_confirmation_not_observed");
     assert.equal(uncertain.confirmClicks(), 1);
   } finally {
     (globalThis as { HTMLInputElement?: unknown }).HTMLInputElement = originalInput;
