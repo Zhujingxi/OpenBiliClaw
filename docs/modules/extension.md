@@ -90,7 +90,7 @@ extension/
 │   ├── popup.html
 │   ├── popup.js
 │   ├── popup-autostart-control.js
-│   ├── popup-connection-poller.js # popup 离线期间轻量 /api/ping 重探测
+│   ├── popup-connection-poller.js # popup HTTP / runtime-stream 三态协调与离线 /api/ping 重探测
 │   ├── popup-saved-sync.js
 │   └── popup-helpers.js    # popup 纯函数：runtime 状态归一化、探针 key / stale 过滤等
 ├── src/
@@ -371,7 +371,7 @@ CLI 入口：
 
 `popup/` 目录当前承载 side panel 页面，已具备：
 
-- 后端连接状态检查：首屏用 `/api/ping` 做轻量活性判断，`runtime-stream` 连接 / 断开负责实时翻转在线状态；当首屏或地址切换后处于离线状态时，`popup-connection-poller.js` 会每 1 秒重探测 `/api/ping`，runtime-stream 也以固定 1 秒间隔重连，一旦后端恢复就停止轮询、更新徽标并调度推荐刷新
+- 后端连接状态检查：离线判定以 `/api/ping` 为准，顶部徽标区分绿色「已连接」、琥珀色「重连中」和红色「未连接」。`runtime-stream` 断开时先进入「重连中」并立即复检 `/api/ping`：HTTP 仍通则保留 API 可用状态并等待 WebSocket 自行重连，只有 ping 返回失败或抛错才进入「未连接」并启动 `popup-connection-poller.js` 每 1 秒重探测；HTTP 恢复后先回到「重连中」，流重新打开后才显示「已连接」。协调器使用 revision guard 忽略连接恢复后才返回的旧失败探活，主动切换后端地址关闭旧流也不会触发故障断线提示
 - 设置页的协议（HTTP / HTTPS）、后端地址（默认 `127.0.0.1`）和端口（默认 `8420`）由 `popup-backend-config.js` 一起写入 `chrome.storage.local`。局域网 / 远程地址保存前通过 `optional_host_permissions` 请求精确 origin；公网主机名和公网 IP 不允许 HTTP。popup、service worker、任务派发、cookie 同步和调试中继都在调用时解析当前 endpoint；变更后清除旧短会话并重连。远程认证使用 `obc_extension_device_key` 换取结构化 `obc_auth_session`，普通 HTTP 发 Bearer Header，只有 runtime WebSocket 和图片代理 URL 携带短会话 query
 - 顶部手机图标会打开移动端二维码面板，二维码完全在 popup 本地生成，指向当前插件后端地址的 `/m/`；打开后的 `/m/` 页面已带 PWA manifest 与 iOS Web Clip 元数据，可从手机浏览器保存到主屏幕；当前不提供离线缓存，仍需手机能访问运行中的本地后端。当前 host 仍是 `127.0.0.1` / `localhost` 时，插件会先通过轻量 `/api/qr-info` 读取后端探测到的局域网 IP 并替换二维码 host；端点失败或没有有效 LAN IP 才保留 loopback URL 与警告。在 460px 以下侧边栏宽度，顶部 Web / 二维码 / 消息 / 设置按钮会换到品牌区下一行靠右排列，避免和标题 / 状态徽标重叠
 - 设置页调度区的「停止后台 LLM 请求」写入 `scheduler.enabled=false`；开启后会暂停 daemon-owned 定时发现、候选池预计算和画像更新里的 LLM / embedding 调用，推荐列表不会自动补充新内容，候选池为空时可能暂时没有推荐。「关闭浏览器后停止后台」写入 `scheduler.pause_on_extension_disconnect=true`，断开宽限秒数写入 `scheduler.extension_disconnect_grace_seconds`；所有扩展窗口断开并超过宽限期后，后台 LLM / embedding 工作暂停，重新打开浏览器后恢复。手动刷新和显式 CLI / API 操作仍按用户动作执行
@@ -476,7 +476,7 @@ npm run build
 - popup 设置页字段与 `/api/config` schema 的基础对齐
 - popup API durable chat turn：`startChatTurn()`、`fetchChatTurn()`、`fetchChatTurns()` 会分别调用 `/api/chat/turns`、`/api/chat/turns/{turn_id}` 和列表接口
 - `renderDurableChatTurn(turn)`：`completed` 渲染 `turn.reply`，`failed` 渲染安全 `turn.error`，字段缺失时才使用本地固定兜底文案
-- popup 离线连接恢复：`popup-connection-poller.js` 覆盖 `/api/ping` 失败后持续重探测、恢复后停止轮询并触发在线回调
+- popup 连接状态稳定性：`popup-connection-poller.js` 覆盖 HTTP / runtime-stream 三态投影、失败探活才离线、旧探活 revision guard、`/api/ping` 失败后持续重探测与恢复回调；`popup-stream.js` 另覆盖主动关闭不会误触发断线通知
 - popup 聊天布局：历史 hydrate 与切回聊天 tab 都会触发滚到底部，避免 hidden view 恢复后停在旧消息
 - `dist/` 运行时脚本可被 Chrome 直接加载
 

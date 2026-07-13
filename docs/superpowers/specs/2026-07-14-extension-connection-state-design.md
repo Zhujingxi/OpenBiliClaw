@@ -51,7 +51,7 @@ popup 当前把两个不同信号写进同一个布尔状态：HTTP `/api/ping` 
 
 - `/api/ping` 返回 false 或抛错均归为 `offline`。
 - WebSocket 在探活完成前重连时，`markStreamConnected()` 递增 revision，旧探活结果被忽略。
-- 地址切换时旧 socket 的关闭回调可以触发复核，但复核读取当前 endpoint；新连接或显式 HTTP 结果会以更新 revision 胜出。
+- 地址切换时主动关闭旧 socket 不触发故障断线回调；其他异步探活仍由更新 revision 防止覆盖新连接。
 - HTTP 可达但 WebSocket 长期被代理阻断时保持“重连中”，不伪报后端离线。
 
 ## 测试
@@ -63,5 +63,6 @@ Node 单测覆盖：
 3. WebSocket 断开、HTTP 失败或抛错时进入 `offline`。
 4. 断开探活未完成时重新连接，迟到失败结果不覆盖 `online`。
 5. HTTP 从离线恢复后进入 `reconnecting`，既有离线轮询停止。
+6. 主动关闭旧 WebSocket 不触发断线通知，首次 stream 打开不重复刷新、后续重连仍刷新。
 
 最后运行扩展定向测试、完整 `npm test`、`npm run typecheck` 和 Chrome / Firefox build，确保共享 popup 资源在两种产物中一致。

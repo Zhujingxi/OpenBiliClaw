@@ -39,7 +39,10 @@ import {
   validateCommentInput,
 } from "./popup-helpers.js";
 import { createRuntimeStreamClient } from "./popup-stream.js";
-import { createOfflineBackendPoller } from "./popup-connection-poller.js";
+import {
+  createBackendConnectionCoordinator,
+  createOfflineBackendPoller,
+} from "./popup-connection-poller.js";
 import {
   buildInitChecklist,
   describeInitFailure,
@@ -316,13 +319,26 @@ let recommendationAutoLoadUserArmed = false;
 let recommendationAutoLoadTouchY = null;
 let recommendationAutoLoadIntentInitialized = false;
 let runtimeStreamClient = null;
-const offlineBackendPoller = createOfflineBackendPoller({
+let offlineBackendPoller = null;
+const backendConnectionCoordinator = createBackendConnectionCoordinator({
+  checkBackendStatus,
+  onStatusChange(status) {
+    state.online = status !== "offline";
+    setStatus(status);
+    if (status === "offline") {
+      offlineBackendPoller?.start();
+      return;
+    }
+    offlineBackendPoller?.stop();
+  },
+});
+offlineBackendPoller = createOfflineBackendPoller({
   isOnline: () => state.online,
   checkBackendStatus,
   onOnline: async () => {
-    if (!state.online) {
-      state.online = true;
-      setStatus(true);
+    const wasOnline = state.online;
+    backendConnectionCoordinator.markHttpReachable();
+    if (!wasOnline) {
       setHint("后端连上了，正在刷新。", "success");
     }
     scheduleRecommendationsRefresh({ delayMs: 0 });
@@ -412,7 +428,7 @@ function setHint(message, tone = "info") {
   renderActivityCard();
 }
 
-function setStatus(online) {
+function setStatus(status) {
   if (
     !(elements.statusBadge instanceof HTMLElement) ||
     !(elements.statusDot instanceof HTMLElement) ||
@@ -420,9 +436,10 @@ function setStatus(online) {
   ) {
     return;
   }
-  const badgeState = getConnectionBadgeState(online);
+  const badgeState = getConnectionBadgeState(status);
   elements.statusBadge.dataset.tone = badgeState.tone;
   elements.statusDot.classList.toggle("offline", badgeState.tone === "offline");
+  elements.statusDot.classList.toggle("reconnecting", badgeState.tone === "reconnecting");
   elements.statusLabel.textContent = badgeState.label;
 }
 
@@ -1656,21 +1673,24 @@ function connectRuntimeStream() {
     },
     onConnect() {
       const wasOnline = state.online;
-      offlineBackendPoller.stop();
-      if (!wasOnline) {
-        state.online = true;
-        setStatus(true);
-        setHint("后端连上了，正在刷新。", "success");
+      const { reconnected } = backendConnectionCoordinator.markStreamConnected();
+      if (!wasOnline || reconnected) {
+        setHint(
+          reconnected && wasOnline ? "实时连接已恢复，正在刷新。" : "后端连上了，正在刷新。",
+          "success",
+        );
         scheduleRecommendationsRefresh({ delayMs: 0 });
       }
     },
     onDisconnect() {
-      if (state.online) {
-        state.online = false;
-        setStatus(false);
+      void backendConnectionCoordinator.markStreamDisconnected().then((result) => {
+        if (!result.applied) return;
+        if (result.reachable) {
+          setHint("实时连接正在恢复，后端功能仍可用。");
+          return;
+        }
         setHint("后端连接断了，等重连上会自动恢复。", "error");
-      }
-      offlineBackendPoller.start();
+      });
     },
   });
   client.connect();
@@ -5773,11 +5793,13 @@ async function refreshProfileSummaryAfterInteraction({
 
 async function initializeRecommendations() {
   const online = await checkBackendStatus();
-  state.online = online;
-  setStatus(online);
+  if (online) {
+    backendConnectionCoordinator.markHttpReachable();
+  } else {
+    backendConnectionCoordinator.markOffline();
+  }
 
   if (!online) {
-    offlineBackendPoller.start();
     state.runtimeStatus = null;
     state.runtimeConfig = null;
     state.recommendations = [];
@@ -5790,7 +5812,6 @@ async function initializeRecommendations() {
     renderProfileSummary(normalizeProfileSummary({ initialized: false }));
     return;
   }
-  offlineBackendPoller.stop();
 
   const [runtimeResult, recommendationResult, delightResult, configResult] =
     await Promise.allSettled([
@@ -7377,16 +7398,15 @@ function bindSettings() {
         // Rebind the runtime stream against the new origin and refresh
         // the online indicator. If the backend isn't yet running on the
         // new port these will retry on the fixed liveness cadence and the popup
-        // status will flip to offline — exactly the signal the user
-        // needs to remember to start the daemon with --port.
+        // status will stay reconnecting or flip to offline — exactly the signal
+        // the user needs to remember to start the daemon with --port.
         await clearPopupSession();
         connectRuntimeStream();
-        state.online = await checkBackendStatus();
-        setStatus(state.online);
-        if (state.online) {
-          offlineBackendPoller.stop();
+        const online = await checkBackendStatus();
+        if (online) {
+          backendConnectionCoordinator.markHttpReachable();
         } else {
-          offlineBackendPoller.start();
+          backendConnectionCoordinator.markOffline();
         }
       }
     } catch (err) {

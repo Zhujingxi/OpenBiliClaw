@@ -40,6 +40,12 @@ class FakeWebSocket {
   close() {}
 }
 
+class ClosingFakeWebSocket extends FakeWebSocket {
+  override close() {
+    this.onclose?.();
+  }
+}
+
 test("runtime stream client dispatches parsed events", async () => {
   const received: Array<Record<string, unknown>> = [];
 
@@ -111,6 +117,23 @@ test("runtime stream client calls onDisconnect when socket closes after being co
   assert.equal(disconnected, true);
 
   client.disconnect();
+});
+
+test("runtime stream client does not report an intentional shutdown as a disconnect", () => {
+  let disconnectCount = 0;
+  const client = createRuntimeStreamClient({
+    backendUrl: "http://127.0.0.1:8420/api",
+    WebSocketImpl: ClosingFakeWebSocket as never,
+    onDisconnect() {
+      disconnectCount += 1;
+    },
+  });
+
+  client.connect();
+  FakeWebSocket.latest?.onopen?.();
+  client.disconnect();
+
+  assert.equal(disconnectCount, 0);
 });
 
 test("runtime stream client resolves backend URL dynamically when no explicit backendUrl is given", async () => {

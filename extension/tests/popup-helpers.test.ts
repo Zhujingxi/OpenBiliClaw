@@ -1770,12 +1770,17 @@ test("getTabButtonState highlights current tab", () => {
 });
 
 test("getConnectionBadgeState returns compact status copy for popup header", () => {
-  assert.deepEqual(getConnectionBadgeState(true), {
+  assert.deepEqual(getConnectionBadgeState("online"), {
     tone: "online",
     label: "已连接",
   });
 
-  assert.deepEqual(getConnectionBadgeState(false), {
+  assert.deepEqual(getConnectionBadgeState("reconnecting"), {
+    tone: "reconnecting",
+    label: "重连中",
+  });
+
+  assert.deepEqual(getConnectionBadgeState("offline"), {
     tone: "offline",
     label: "未连接",
   });
