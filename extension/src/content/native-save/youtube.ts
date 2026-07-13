@@ -556,14 +556,35 @@ export function createYouTubeBrowserEnvironment(
       const newPlaylist = dialog.querySelector<HTMLElement>("#new-playlist-button")
         ?? exactLabeledElement(dialog, NEW_PLAYLIST_LABELS, root);
       if (!newPlaylist) return false;
+      const dialogsBeforeCreate = new Set(visibleDialogRoots(root));
       newPlaylist.click();
       for (let attempt = 0; attempt < DIALOG_ATTEMPTS; attempt += 1) {
-        const input = dialog.querySelector<HTMLInputElement>(
-          "input#input, tp-yt-paper-input input, input[aria-label*='name' i]",
+        const scopes = [
+          dialog,
+          ...visibleDialogRoots(root).filter((candidate) => !dialogsBeforeCreate.has(candidate)),
+        ];
+        const matches = scopes.flatMap((scope) =>
+          Array.from(scope.querySelectorAll<HTMLInputElement>([
+            "input#input",
+            "tp-yt-paper-input input",
+            "yt-text-input-form-field-renderer input",
+            "yt-text-input-form-field input",
+            "input[aria-label*='name' i]",
+            "input[placeholder*='playlist' i]",
+            "input[aria-label*='playlist' i]",
+            "input[placeholder*='播放列表']",
+            "input[aria-label*='播放列表']",
+            "input[placeholder*='名称']",
+            "input[aria-label*='名称']",
+          ].join(", "))).filter((input) => isEffectivelyVisible(input, root))
+            .map((input) => ({ input, scope })),
         );
-        if (input) {
+        if (matches.length > 1) return false;
+        if (matches.length === 1) {
+          const { input, scope } = matches[0];
+          activeDialog = scope;
           setInputValue(input, title);
-          const create = exactLabeledElement(dialog, CREATE_LABELS, root);
+          const create = exactLabeledElement(scope, CREATE_LABELS, root);
           if (!create) return false;
           create.click();
           await this.sleep(DIALOG_INTERVAL_MS);

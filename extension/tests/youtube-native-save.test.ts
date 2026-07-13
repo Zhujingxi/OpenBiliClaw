@@ -373,6 +373,89 @@ test("YouTube browser environment correlates a newly visible dialog view model",
   assert.equal(await env.openSaveDialog(), true);
 });
 
+test("YouTube browser environment creates a playlist through a detached dialog form", async () => {
+  const originalInput = (globalThis as { HTMLInputElement?: unknown }).HTMLInputElement;
+  const originalInputEvent = (globalThis as { InputEvent?: unknown }).InputEvent;
+  class FakeInput {
+    hidden = false;
+    style = {};
+    parentElement: unknown = null;
+    private _value = "";
+    set value(value: string) { this._value = value; }
+    get value() { return this._value; }
+    getAttribute() { return null; }
+    hasAttribute() { return false; }
+    dispatchEvent() { return true; }
+  }
+  (globalThis as { HTMLInputElement?: unknown }).HTMLInputElement = FakeInput;
+  (globalThis as { InputEvent?: unknown }).InputEvent = class {
+    constructor(..._args: unknown[]) {}
+  };
+  let saveVisible = false;
+  let formVisible = false;
+  let createClicks = 0;
+  const saveButton = {
+    hidden: false, style: {}, parentElement: null,
+    getAttribute: (name: string) => name === "aria-label" ? "Save" : null,
+    hasAttribute: () => false,
+    click: () => { saveVisible = true; },
+  };
+  const newButton = {
+    hidden: false, style: {}, parentElement: null,
+    textContent: "New playlist",
+    getAttribute: () => null,
+    hasAttribute: () => false,
+    click: () => { formVisible = true; },
+  };
+  const createButton = {
+    hidden: false, style: {}, parentElement: null,
+    textContent: "Create playlist",
+    getAttribute: () => null,
+    hasAttribute: () => false,
+    click: () => { createClicks += 1; formVisible = false; },
+  };
+  const input = new FakeInput();
+  const saveDialog = {
+    hidden: false, style: {}, parentElement: null,
+    getAttribute: () => null,
+    hasAttribute: () => false,
+    querySelector: () => null,
+    querySelectorAll: (selector: string) => selector.includes("button") ? [newButton] : [],
+    contains: () => false,
+  };
+  const formDialog = {
+    hidden: false, style: {}, parentElement: null,
+    getAttribute: () => null,
+    hasAttribute: () => false,
+    querySelector: (selector: string) => selector.includes("input") ? input : null,
+    querySelectorAll: (selector: string) => selector.includes("button")
+      ? [createButton]
+      : selector.includes("input") ? [input] : [],
+    contains: () => false,
+  };
+  newButton.parentElement = saveDialog;
+  createButton.parentElement = formDialog;
+  input.parentElement = formDialog;
+  const menu = { querySelectorAll: () => [saveButton] };
+  const documentFixture = {
+    defaultView: null,
+    querySelector: (selector: string) => selector.includes("ytd-watch-metadata") ? menu : null,
+    querySelectorAll: (selector: string) => selector.includes("yt-dialog-view-model")
+      ? [...(saveVisible ? [saveDialog] : []), ...(formVisible ? [formDialog] : [])]
+      : [],
+  } as unknown as Document;
+  try {
+    const env = createYouTubeBrowserEnvironment(documentFixture, task.content_url);
+    assert.equal(await env.openSaveDialog(), true);
+    assert.equal(await env.createPlaylist("OpenBiliClaw"), true);
+    assert.equal(input.value, "OpenBiliClaw");
+    assert.equal(createClicks, 1);
+  } finally {
+    (globalThis as { HTMLInputElement?: unknown }).HTMLInputElement = originalInput;
+    (globalThis as { InputEvent?: unknown }).InputEvent = originalInputEvent;
+  }
+});
+
 test("YouTube browser environment identifies only renderer playlist id WL as Watch Later", () => {
   const watchLaterRow = {
     data: { playlistId: "WL" },
