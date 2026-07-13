@@ -783,13 +783,9 @@ def test_committed_probe_toast_names_its_domain(
     chromium_page.goto(f"{base_url}/web/")
 
     chromium_page.locator("#messagesBtn").click()
-    interest = chromium_page.locator(
-        "#messagesDrawer .message-item.is-interest-probe"
-    )
+    interest = chromium_page.locator("#messagesDrawer .message-item.is-interest-probe")
     expect(interest).to_have_count(1)
     interest.locator('[data-probe="confirm"]').click()
 
     assert stub.probe_received.wait(timeout=3)
-    expect(chromium_page.locator("#toastContainer .toast-item").first).to_contain_text(
-        "系统设计"
-    )
+    expect(chromium_page.locator("#toastContainer .toast-item").first).to_contain_text("系统设计")

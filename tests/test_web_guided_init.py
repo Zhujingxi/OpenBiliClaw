@@ -150,9 +150,7 @@ def test_hydrate_runtime_status_fallback_is_not_dead_catch() -> None:
 
     # Recommendation settlement starts a separate freshness reread, guarded
     # against newer runtime-stream generations.
-    assert (
-        "const runtimeReconciliationPromise = recommendationApplicationPromise.then(" in hydrate
-    )
+    assert "const runtimeReconciliationPromise = recommendationApplicationPromise.then(" in hydrate
     assert "() => reconcileRuntimeAfterRecommendations()" in hydrate
     assert "const secondRuntimeGeneration = desktopRuntimeGeneration;" in hydrate
     assert "await readRuntimeSnapshot()" in hydrate

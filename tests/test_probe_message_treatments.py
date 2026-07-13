@@ -78,10 +78,7 @@ def test_desktop_probe_chat_expands_inline_in_message_card() -> None:
 def test_desktop_probe_feedback_copy_is_domain_aware_and_bounded() -> None:
     app_js = APP_JS.read_text(encoding="utf-8")
 
-    assert (
-        "function probeFeedbackMessage(type, response, domain, apiResponse = null)"
-        in app_js
-    )
+    assert "function probeFeedbackMessage(type, response, domain, apiResponse = null)" in app_js
     assert "probeFeedbackMessage(type, response, domain, apiResponse)" in app_js
     assert ".slice(0," in _function_body(app_js, "probeFeedbackMessage")
     assert "function messageProbeResult(" not in app_js
