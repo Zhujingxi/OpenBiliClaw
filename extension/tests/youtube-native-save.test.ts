@@ -329,7 +329,7 @@ test("YouTube browser environment requires signed-in avatar/menu evidence", () =
   assert.equal(createYouTubeBrowserEnvironment(documentFixture("ambiguous"), task.content_url).isLoggedIn(), false);
 });
 
-test("YouTube browser environment correlates a newly visible generic save dialog", async () => {
+test("YouTube browser environment correlates a newly visible dialog view model", async () => {
   let dialogVisible = false;
   const button = {
     hidden: false,
@@ -358,7 +358,7 @@ test("YouTube browser environment correlates a newly visible generic save dialog
       return selector.includes("ytd-watch-metadata") ? menu : null;
     },
     querySelectorAll(selector: string) {
-      return selector.includes("role='dialog'") && dialogVisible ? [dialog] : [];
+      return selector.includes("yt-dialog-view-model") && dialogVisible ? [dialog] : [];
     },
   } as unknown as Document;
   const env = createYouTubeBrowserEnvironment(documentFixture, task.content_url);

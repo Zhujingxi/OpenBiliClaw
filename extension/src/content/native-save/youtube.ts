@@ -318,7 +318,14 @@ function exactLabeledElement(
 
 function visibleDialogRoots(root: Document): HTMLElement[] {
   const candidates = Array.from(root.querySelectorAll<HTMLElement>(
-    "ytd-add-to-playlist-renderer, tp-yt-paper-dialog, [role='dialog']",
+    [
+      "ytd-add-to-playlist-renderer",
+      "tp-yt-paper-dialog",
+      "[role='dialog']",
+      "yt-dialog-view-model",
+      "yt-sheet-view-model",
+      "ytd-popup-container tp-yt-iron-dropdown",
+    ].join(", "),
   ));
   const visible = candidates.filter((element) => isEffectivelyVisible(element, root));
   return visible.filter((candidate) => !visible.some((other) =>
