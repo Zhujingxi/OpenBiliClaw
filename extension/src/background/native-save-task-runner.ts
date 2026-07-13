@@ -270,6 +270,41 @@ async function createTabBeforeDeadline(
   }
 }
 
+function xiaohongshuRouteId(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password || url.port) return null;
+    if (url.hostname !== "xiaohongshu.com" && !url.hostname.endsWith(".xiaohongshu.com")) {
+      return null;
+    }
+    return /^\/(?:explore|discovery\/item)\/([A-Za-z0-9_-]+)\/?$/
+      .exec(url.pathname)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function reuseExactXiaohongshuTab(
+  task: NativeSaveTask,
+  deadline: number,
+): Promise<chrome.tabs.Tab | null> {
+  if (task.platform !== "xiaohongshu") return null;
+  try {
+    const tabs = await beforeDeadline(chrome.tabs.query({
+      url: ["https://xiaohongshu.com/*", "https://*.xiaohongshu.com/*"],
+    }), deadline);
+    const matches = tabs.filter((tab) =>
+      tab.id !== undefined && xiaohongshuRouteId(tab.url) === task.content_id
+    );
+    const match = matches[0];
+    if (matches.length !== 1 || match?.id === undefined) return null;
+    return await beforeDeadline(chrome.tabs.update(match.id, { active: true }), deadline) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function contentResultForActiveTask(
   message: unknown,
   sender?: chrome.runtime.MessageSender,
@@ -377,6 +412,7 @@ export async function runNativeSaveTask(
   let mutexAcquired = false;
   let runtimeListenerRegistrationAttempted = false;
   let tabId: number | null = null;
+  let ownsTab = false;
   let outcome = failedOutcome();
   const listener = (message: unknown, sender: chrome.runtime.MessageSender): void => {
     handleNativeSaveContentResult(message, sender);
@@ -392,10 +428,12 @@ export async function runNativeSaveTask(
       outcome = timeoutOutcome();
     } else {
       try {
-        const tab = await createTabBeforeDeadline(task.content_url, deadline);
+        const reusableTab = await reuseExactXiaohongshuTab(task, deadline);
+        const tab = reusableTab ?? await createTabBeforeDeadline(task.content_url, deadline);
+        ownsTab = reusableTab === null;
         if (tab.id === undefined) throw new Error("native-save task tab has no ID");
         tabId = tab.id;
-        await recordNativeSaveTaskTab(tabId);
+        if (ownsTab) await recordNativeSaveTaskTab(tabId);
         const loadedTab = await waitForTabLoad(tabId, deadline);
         if (!isAllowedNativeSavePageUrl(task.platform, loadedTab.url)) {
           throw new Error("native-save task tab left its allow-listed platform");
@@ -439,7 +477,7 @@ export async function runNativeSaveTask(
         }
       }
     }
-    if (tabId !== null) {
+    if (tabId !== null && ownsTab) {
       await removeTabBestEffort(tabId);
       await clearRecordedNativeSaveTaskTab(tabId);
     }

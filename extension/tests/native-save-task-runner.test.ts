@@ -88,6 +88,41 @@ test("native save runner opens the exact tokenized Xiaohongshu public-note URL",
   }
 });
 
+test("native save runner reuses one exact Xiaohongshu note tab without closing it", async () => {
+  const state = installChromeMock();
+  const exactUrl = "https://www.xiaohongshu.com/explore/note-123";
+  state.queryResult = [
+    { id: 70, status: "complete", url: exactUrl },
+    { id: 71, status: "complete", url: "https://www.xiaohongshu.com/explore" },
+  ];
+  state.tabById.set(70, state.queryResult[0]);
+  state.tabById.set(71, state.queryResult[1]);
+  state.sendMessageImpl = async () => ({ ready: true });
+  try {
+    const running = runNativeSaveTask(tokenizedXhsTask, "xhs", async () => {}, {
+      timeoutMs: 100,
+    });
+    await tick();
+    assert.deepEqual(state.createdTabs, []);
+    assert.deepEqual(state.updatedTabs, [{ tabId: 70, active: true }]);
+    assert.deepEqual(state.sessionStorage, {});
+    state.emitRuntimeMessage(
+      {
+        type: "NATIVE_SAVE_RESULT",
+        platform: "xiaohongshu",
+        task_id: tokenizedXhsTask.id,
+        item_key: tokenizedXhsTask.item_key,
+        status: "already_synced",
+      },
+      { tab: { id: 70, url: exactUrl } },
+    );
+    await running;
+    assert.deepEqual(state.removedTabs, []);
+  } finally {
+    state.restore();
+  }
+});
+
 test("native save runner executes two platforms concurrently with independent correlation", async () => {
   const state = installChromeMock();
   const posted: NativeSaveResult[] = [];

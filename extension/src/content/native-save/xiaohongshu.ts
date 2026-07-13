@@ -78,14 +78,15 @@ export async function saveXiaohongshu(
     return { status: "unsupported", error_code: "unsupported_content_type" };
   }
   if (!hasTargetContract(task)) return { status: "failed", error_code: "native_save_failed" };
-  await waitForNativeSaveReadiness(
+  const contentReady = await waitForNativeSaveReadiness(
     () => !env.isLoggedIn() || env.isUnavailable() || env.isContentReady(),
     env.sleep,
   );
+  if (!contentReady) return { status: "failed", error_code: "native_content_not_ready" };
   if (!env.isLoggedIn()) return { status: "login_required" };
   if (env.isUnavailable()) return { status: "unsupported", error_code: "unsupported_content_type" };
   const initial = env.findFavoriteControls(task.content_id);
-  if (initial.length !== 1) return { status: "failed", error_code: "native_save_failed" };
+  if (initial.length !== 1) return { status: "failed", error_code: "native_control_not_found" };
   if (initial[0].isSelected()) return { status: "already_synced" };
   const rateLimitBefore = env.rateLimitFingerprint();
 

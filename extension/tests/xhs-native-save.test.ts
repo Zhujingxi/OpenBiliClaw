@@ -32,6 +32,7 @@ function fixture(options: {
   initialSelected?: boolean;
   controls?: number;
   controlsAfterSleeps?: number;
+  contentReady?: boolean;
   requestResult?: XiaohongshuFavoriteRequestResult;
   rejectRequest?: boolean;
   confirmAfterRequest?: boolean;
@@ -56,7 +57,8 @@ function fixture(options: {
     currentUrl: options.currentUrl ?? task.content_url,
     isLoggedIn: () => options.loggedIn ?? true,
     isUnavailable: () => options.unavailable ?? false,
-    isContentReady: () => env.sleeps >= (options.controlsAfterSleeps ?? 0),
+    isContentReady: () => options.contentReady ??
+      env.sleeps >= (options.controlsAfterSleeps ?? 0),
     rateLimitFingerprint: () => mutated ? (options.rateAfterMutation ?? options.rateBefore ?? "") : (options.rateBefore ?? ""),
     async requestFavorite() {
       env.requests += 1;
@@ -107,6 +109,22 @@ test("XHS native save waits for the correlated favorite control before mutation"
   assert.deepEqual(await saveXiaohongshu(task, env), { status: "synced" });
   assert.ok(env.sleeps >= 2);
   assert.equal(env.clicks, 1);
+});
+
+test("XHS native save distinguishes content readiness from a missing exact control", async () => {
+  const notReady = fixture({ contentReady: false });
+  assert.deepEqual(await saveXiaohongshu(task, notReady), {
+    status: "failed",
+    error_code: "native_content_not_ready",
+  });
+  assert.equal(notReady.clicks + notReady.requests, 0);
+
+  const missingControl = fixture({ contentReady: true, controls: 0 });
+  assert.deepEqual(await saveXiaohongshu(task, missingControl), {
+    status: "failed",
+    error_code: "native_control_not_found",
+  });
+  assert.equal(missingControl.clicks + missingControl.requests, 0);
 });
 
 test("XHS native save checks login and deleted content before mutation", async () => {
@@ -337,7 +355,7 @@ test("XHS browser environment excludes hidden controls and fails closed on ambig
   );
   assert.deepEqual(await saveXiaohongshu(task, ambiguous), {
     status: "failed",
-    error_code: "native_save_failed",
+    error_code: "native_control_not_found",
   });
 });
 
@@ -365,7 +383,7 @@ test("XHS browser environment scopes mutation to the exact note and rejects hidd
   );
   assert.deepEqual(await saveXiaohongshu(task, failClosed), {
     status: "failed",
-    error_code: "native_save_failed",
+    error_code: "native_control_not_found",
   });
   assert.equal(soleUnrelated.clicks, 0);
 
@@ -376,7 +394,7 @@ test("XHS browser environment scopes mutation to the exact note and rejects hidd
   );
   assert.deepEqual(await saveXiaohongshu(task, nestedFailClosed), {
     status: "failed",
-    error_code: "native_save_failed",
+    error_code: "native_control_not_found",
   });
   assert.equal(nestedUnrelated.clicks, 0);
 });
