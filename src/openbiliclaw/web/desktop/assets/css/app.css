@@ -197,7 +197,7 @@
     }
     :root[data-theme="dark"] .search button { background: var(--accent-subtle); color: var(--fg); }
     :root[data-theme="dark"] .search button:hover { background: var(--accent); color: var(--accent-on); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }
-    :root[data-theme="dark"] .top-mobile-btn { background: var(--accent-subtle); border-color: var(--accent-subtle); color: var(--fg); }
+    :root[data-theme="dark"] .top-mobile-btn { background: var(--fg); border-color: var(--fg); color: var(--accent-on); }
     :root[data-theme="dark"] .top-mobile-btn:hover { background: var(--accent); color: var(--accent-on); border-color: var(--accent); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }
     :root[data-theme="dark"] .top-mobile-btn:active { background: var(--accent-strong); color: var(--accent-on); border-color: var(--accent-strong); transform: scale(0.97); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }
     :root[data-theme="dark"] .pill-btn.dark { background: var(--accent-subtle); border-color: var(--accent-subtle); color: var(--fg); }
@@ -205,7 +205,7 @@
     :root[data-theme="dark"] .pill-btn.dark:active { background: var(--accent); border-color: var(--accent); color: var(--accent-on); transform: scale(0.97); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }
     :root[data-theme="dark"] .gh-star-left { background: var(--accent-subtle); color: var(--fg); }
 
-    /* keep both blocks in sync */
+    /* keep both blocks in sync -- no build step to dedupe */
     @media (prefers-color-scheme: dark) {
       :root:not([data-theme="light"]) {
         --light-base: 72%;
@@ -249,7 +249,7 @@
       }
       :root:not([data-theme="light"]) .search button { background: var(--accent-subtle); color: var(--fg); }
       :root:not([data-theme="light"]) .search button:hover { background: var(--accent); color: var(--accent-on); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }
-      :root:not([data-theme="light"]) .top-mobile-btn { background: var(--accent-subtle); border-color: var(--accent-subtle); color: var(--fg); }
+      :root:not([data-theme="light"]) .top-mobile-btn { background: var(--fg); border-color: var(--fg); color: var(--accent-on); }
       :root:not([data-theme="light"]) .top-mobile-btn:hover { background: var(--accent); color: var(--accent-on); border-color: var(--accent); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }
       :root:not([data-theme="light"]) .top-mobile-btn:active { background: var(--accent-strong); color: var(--accent-on); border-color: var(--accent-strong); transform: scale(0.97); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }
       :root:not([data-theme="light"]) .pill-btn.dark { background: var(--accent-subtle); border-color: var(--accent-subtle); color: var(--fg); }
@@ -362,7 +362,7 @@
        buttons) — prominent without diluting terracotta, which stays reserved
        for the dialog's single CTA. */
     .mobile-entry-wrap { position: relative; flex-shrink: 0; }
-    .top-mobile-btn { position: relative; flex-shrink: 0; display: inline-flex; align-items: center; gap: 7px; min-height: 38px; padding: 0 var(--space-4); border: 1px solid var(--accent-subtle); border-radius: var(--radius-pill); background: var(--accent-subtle); color: var(--accent); box-shadow: var(--elev-ring); font-size: 13px; font-weight: 750; cursor: pointer; transition: background var(--motion-fast) ease, border-color var(--motion-fast) ease, box-shadow var(--motion-fast) var(--ease-standard), transform var(--motion-fast) var(--ease-standard); }
+    .top-mobile-btn { position: relative; flex-shrink: 0; display: inline-flex; align-items: center; gap: 7px; min-height: 38px; padding: 0 var(--space-4); border: 1px solid var(--fg); border-radius: var(--radius-pill); background: var(--fg); color: var(--accent-on); box-shadow: var(--elev-ring); font-size: 13px; font-weight: 750; cursor: pointer; transition: background var(--motion-fast) ease, border-color var(--motion-fast) ease, box-shadow var(--motion-fast) var(--ease-standard), transform var(--motion-fast) var(--ease-standard); }
     .top-mobile-btn:hover { background: var(--accent); color: var(--accent-on); border-color: var(--accent); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }
     .top-mobile-btn:active { background: var(--accent-strong); color: var(--accent-on); border-color: var(--accent-strong); transform: scale(0.97); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }
     .top-mobile-btn svg { width: 15px; height: 15px; }
@@ -831,8 +831,8 @@
       to { opacity: 1; }
     }
     @keyframes drawer-mobile-panel-out {
-      from { opacity: 1; }
-      to { opacity: 0; }
+      from { opacity: 1; transform: translateX(0); }
+      to { opacity: 0; transform: translateX(16px); }
     }
     .message-chat-view { display: grid; grid-template-rows: auto auto auto auto minmax(160px, 1fr) auto; gap: var(--space-3); min-height: calc(100vh - 48px); }
     .message-chat-view[hidden] { display: none; }
