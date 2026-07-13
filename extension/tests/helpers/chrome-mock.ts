@@ -24,6 +24,8 @@ export interface ChromeMockState {
   removeImpl: (tabId: number) => Promise<void>;
   runtimeAddListenerImpl: (listener: (message: unknown, sender: { tab?: ChromeMockTab; url?: string }) => void) => void;
   runtimeRemoveListenerImpl: (listener: (message: unknown, sender: { tab?: ChromeMockTab; url?: string }) => void) => void;
+  tabUpdatedAddListenerImpl: (listener: TabUpdatedListener) => void;
+  tabUpdatedRemoveListenerImpl: (listener: TabUpdatedListener) => void;
   fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   emitTabUpdated: (tabId: number, changeInfo: { status?: string; url?: string }) => void;
   emitRuntimeMessage: (message: unknown, sender?: { tab?: ChromeMockTab; url?: string }) => void;
@@ -35,6 +37,14 @@ export interface ChromeMockState {
 export function installChromeMock(): ChromeMockState {
   const originalChrome = (globalThis as { chrome?: unknown }).chrome;
   const originalFetch = globalThis.fetch;
+  const mutexGlobals = globalThis as typeof globalThis & {
+    __OBC_DISPATCHER_MUTEX_HOLDER__?: string;
+    __OBC_DISPATCHER_MUTEX_HELD_SINCE__?: number;
+  };
+  const hadMutexHolder = Object.hasOwn(mutexGlobals, "__OBC_DISPATCHER_MUTEX_HOLDER__");
+  const hadMutexHeldSince = Object.hasOwn(mutexGlobals, "__OBC_DISPATCHER_MUTEX_HELD_SINCE__");
+  const originalMutexHolder = mutexGlobals.__OBC_DISPATCHER_MUTEX_HOLDER__;
+  const originalMutexHeldSince = mutexGlobals.__OBC_DISPATCHER_MUTEX_HELD_SINCE__;
   const listeners: TabUpdatedListener[] = [];
   const state: ChromeMockState = {
     createdTabs: [],
@@ -64,6 +74,11 @@ export function installChromeMock(): ChromeMockState {
       const index = runtimeListeners.indexOf(listener);
       if (index >= 0) runtimeListeners.splice(index, 1);
     },
+    tabUpdatedAddListenerImpl: (listener) => listeners.push(listener),
+    tabUpdatedRemoveListenerImpl: (listener) => {
+      const index = listeners.indexOf(listener);
+      if (index >= 0) listeners.splice(index, 1);
+    },
     fetchImpl: async (input, init) => {
       state.fetchCalls.push({
         url: String(input),
@@ -89,6 +104,13 @@ export function installChromeMock(): ChromeMockState {
     restore() {
       (globalThis as { chrome?: unknown }).chrome = originalChrome;
       globalThis.fetch = originalFetch;
+      if (hadMutexHolder) mutexGlobals.__OBC_DISPATCHER_MUTEX_HOLDER__ = originalMutexHolder;
+      else delete mutexGlobals.__OBC_DISPATCHER_MUTEX_HOLDER__;
+      if (hadMutexHeldSince) {
+        mutexGlobals.__OBC_DISPATCHER_MUTEX_HELD_SINCE__ = originalMutexHeldSince;
+      } else {
+        delete mutexGlobals.__OBC_DISPATCHER_MUTEX_HELD_SINCE__;
+      }
     },
   };
   const runtimeListeners: Array<(
@@ -141,13 +163,10 @@ export function installChromeMock(): ChromeMockState {
       },
       onUpdated: {
         addListener(listener: TabUpdatedListener) {
-          listeners.push(listener);
+          state.tabUpdatedAddListenerImpl(listener);
         },
         removeListener(listener: TabUpdatedListener) {
-          const index = listeners.indexOf(listener);
-          if (index >= 0) {
-            listeners.splice(index, 1);
-          }
+          state.tabUpdatedRemoveListenerImpl(listener);
         },
       },
     },

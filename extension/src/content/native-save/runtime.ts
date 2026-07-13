@@ -12,6 +12,7 @@ export type NativeSaveExecutor = (
 ) => Promise<unknown> | unknown;
 
 const installedPlatforms = new Set<NativeSavePlatform>();
+// Recent, not permanent: completed outcomes leave this 256-entry window by FIFO eviction.
 const MAX_RECENT_TASKS = 256;
 interface CachedOutcome {
   itemKey: string;

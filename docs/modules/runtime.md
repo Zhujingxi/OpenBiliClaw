@@ -66,7 +66,7 @@ runNativeSaveTask(task, platformSlug, authenticatedPostResult)
 installNativeSaveExecutor(platform, executor)
 ```
 
-runner 只通过调用方注入的已认证 closure 回传结果；它自身不创建后端 fetch。busy mutex、tab load 与 executor 共用一个 deadline；timeout 固定回传 `failed/native_save_timeout`，不会重放 mutation。所有 listener/tab/mutex cleanup 独立 guarded。
+runner 只通过调用方注入的已认证 closure 回传结果；它自身不创建后端 fetch。busy mutex、tab create/load 与 executor 共用一个 deadline；timeout 固定回传 `failed/native_save_timeout`，迟到的 tab-create success 也会被回收。所有 listener/tab/mutex cleanup 独立 guarded。content 的 once fence 仅保证当前 256 项 recent outcome window（含 in-flight）内不重复执行，不是永久 task ledger。
 
 ```python
 from openbiliclaw.runtime.updater import AutoUpdateService

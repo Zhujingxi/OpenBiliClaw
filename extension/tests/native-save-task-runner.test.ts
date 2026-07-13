@@ -132,6 +132,74 @@ test("native save runner posts a safe failure when tab creation throws", async (
   }
 });
 
+test("native save runner closes a tab whose creation resolves after the deadline", async () => {
+  const state = installChromeMock();
+  const posted: NativeSaveResult[] = [];
+  let resolveCreate!: (tab: { id: number; status: string; url: string }) => void;
+  state.createImpl = async (opts) => {
+    state.createdTabs.push(opts);
+    return new Promise((resolve) => { resolveCreate = resolve; });
+  };
+  try {
+    await runNativeSaveTask(task, "reddit", async (result) => { posted.push(result); }, {
+      timeoutMs: 5,
+    });
+    assert.equal(posted[0]?.error_code, "native_save_timeout");
+    assert.deepEqual(state.removedTabs, []);
+    resolveCreate({ id: 77, status: "complete", url: task.content_url });
+    await tick();
+    await tick();
+    assert.deepEqual(state.removedTabs, [77]);
+    assert.equal(dispatcherMutexHolder(), null);
+  } finally {
+    state.restore();
+  }
+});
+
+test("native save runner fences tab-update listener add and remove failures", async () => {
+  const addState = installChromeMock();
+  const addNormally = addState.tabUpdatedAddListenerImpl;
+  addState.nextCreatedTabStatus = "loading";
+  addState.tabUpdatedAddListenerImpl = (listener) => {
+    addNormally(listener);
+    throw new Error("tab update add failed");
+  };
+  try {
+    await runNativeSaveTask(task, "reddit", async () => {}, { timeoutMs: 20 });
+    assert.equal(addState.tabUpdatedListenerCount(), 0);
+    assert.deepEqual(addState.removedTabs, [42]);
+    assert.equal(dispatcherMutexHolder(), null);
+  } finally {
+    addState.restore();
+  }
+
+  const removeState = installChromeMock();
+  const removeNormally = removeState.tabUpdatedRemoveListenerImpl;
+  let removeAttempts = 0;
+  removeState.nextCreatedTabStatus = "loading";
+  removeState.tabUpdatedRemoveListenerImpl = (listener) => {
+    removeAttempts += 1;
+    if (removeAttempts === 1) throw new Error("tab update remove failed");
+    removeNormally(listener);
+  };
+  try {
+    const running = runNativeSaveTask(task, "reddit", async () => {}, { timeoutMs: 50 });
+    await tick();
+    removeState.emitTabUpdated(42, { status: "complete" });
+    await tick();
+    removeState.emitRuntimeMessage(
+      { type: "NATIVE_SAVE_RESULT", platform: "reddit", task_id: task.id, item_key: task.item_key, status: "synced" },
+      { url: task.content_url, tab: { id: 42, url: task.content_url } },
+    );
+    await running;
+    assert.equal(removeState.tabUpdatedListenerCount(), 0);
+    assert.deepEqual(removeState.removedTabs, [42]);
+    assert.equal(dispatcherMutexHolder(), null);
+  } finally {
+    removeState.restore();
+  }
+});
+
 test("native save runner contains listener registration and removal failures", async () => {
   const addState = installChromeMock();
   const addPosted: NativeSaveResult[] = [];

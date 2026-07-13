@@ -99,8 +99,10 @@ async function waitForTabLoad(tabId: number, deadline: number): Promise<chrome.t
     revision += 1;
     wake?.();
   };
-  chrome.tabs.onUpdated.addListener(listener);
+  let registrationAttempted = false;
   try {
+    registrationAttempted = true;
+    chrome.tabs.onUpdated.addListener(listener);
     while (Date.now() < deadline) {
       const observedRevision = revision;
       const tab = await beforeDeadline(chrome.tabs.get(tabId), deadline);
@@ -126,11 +128,44 @@ async function waitForTabLoad(tabId: number, deadline: number): Promise<chrome.t
     }
     throw new NativeSaveDeadlineError("native-save tab load timed out");
   } finally {
-    try {
-      chrome.tabs.onUpdated.removeListener(listener);
-    } catch {
-      // Cleanup failures must not skip the runner's remaining teardown.
+    if (registrationAttempted) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          chrome.tabs.onUpdated.removeListener(listener);
+          break;
+        } catch {
+          // Retry one transient failure, then let the runner continue teardown.
+        }
+      }
     }
+  }
+}
+
+async function removeTabBestEffort(tabId: number): Promise<void> {
+  try {
+    await chrome.tabs.remove(tabId);
+  } catch {
+    // The user may have closed the tab, or Chrome cleanup may fail.
+  }
+}
+
+async function createTabBeforeDeadline(
+  url: string,
+  deadline: number,
+): Promise<chrome.tabs.Tab> {
+  const creation = chrome.tabs.create({ active: true, url });
+  try {
+    return await beforeDeadline(creation, deadline);
+  } catch (error) {
+    if (error instanceof NativeSaveDeadlineError) {
+      void creation.then(
+        async (lateTab) => {
+          if (lateTab.id !== undefined) await removeTabBestEffort(lateTab.id);
+        },
+        () => {},
+      );
+    }
+    throw error;
   }
 }
 
@@ -246,10 +281,7 @@ export async function runNativeSaveTask(
       outcome = timeoutOutcome();
     } else {
       try {
-        const tab = await beforeDeadline(
-          chrome.tabs.create({ active: true, url: task.content_url }),
-          deadline,
-        );
+        const tab = await createTabBeforeDeadline(task.content_url, deadline);
         if (tab.id === undefined) throw new Error("native-save task tab has no ID");
         tabId = tab.id;
         const loadedTab = await waitForTabLoad(tabId, deadline);
@@ -293,11 +325,7 @@ export async function runNativeSaveTask(
       }
     }
     if (tabId !== null) {
-      try {
-        await chrome.tabs.remove(tabId);
-      } catch {
-        // The user may have closed the tab, or Chrome cleanup may fail.
-      }
+      await removeTabBestEffort(tabId);
     }
     if (mutexAcquired) {
       try {

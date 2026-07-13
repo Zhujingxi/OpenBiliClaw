@@ -17,8 +17,9 @@
  *
  * Lives in its own module so both background dispatchers can share
  * one global variable inside the same service-worker process. No
- * persistence — the mutex resets when the service worker restarts,
- * which is correct: a SW restart kills any in-flight tabs anyway.
+ * persistence — the mutex resets when the service worker restarts. MV3 task
+ * tabs can outlive that restart, so later service-worker wiring must reconcile
+ * orphan task tabs before claiming fresh work.
  */
 
 interface DispatcherMutexGlobals {
