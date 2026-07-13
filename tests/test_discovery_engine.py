@@ -82,6 +82,7 @@ class _DynamicBatchLLMService:
 
     def __init__(self) -> None:
         self.user_inputs: list[str] = []
+        self.max_tokens: list[int] = []
 
     async def complete_structured_task(
         self,
@@ -95,6 +96,7 @@ class _DynamicBatchLLMService:
         reasoning_effort: str | None = None,
     ) -> object:
         self.user_inputs.append(user_input)
+        self.max_tokens.append(max_tokens)
         batch_json = user_input.split("<content_batch>", 1)[1].split("</content_batch>", 1)[0]
         items = json.loads(batch_json.strip())
         payload = [
@@ -686,6 +688,29 @@ async def test_multimodal_evaluation_uses_configured_smaller_batch_size() -> Non
 
 
 @pytest.mark.asyncio
+async def test_text_batch_evaluation_bounds_declared_output_tokens() -> None:
+    llm_service = _DynamicBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm_service)
+
+    scores = await engine.evaluate_content_batch(
+        [
+            DiscoveredContent(
+                content_id=f"text-{idx}",
+                title=f"text item {idx}",
+                source_platform="bilibili",
+                source_strategy="trending",
+            )
+            for idx in range(8)
+        ],
+        _build_profile(),
+        batch_size=8,
+    )
+
+    assert scores == [0.8] * 8
+    assert llm_service.max_tokens == [4096]
+
+
+@pytest.mark.asyncio
 async def test_multimodal_evaluation_falls_back_to_text_batch_when_vision_unavailable() -> None:
     llm_service = _DynamicBatchLLMService()
     engine = ContentDiscoveryEngine(
@@ -763,6 +788,7 @@ async def test_multimodal_evaluation_sends_prepared_cover_images(monkeypatch) ->
         ]
     ]
     assert '"cover_image_ref": "cover:cover-0"' in llm_service.user_inputs[0]
+    assert llm_service.max_tokens == [4096]
 
 
 async def test_multimodal_evaluation_e2e_binds_cached_cover_to_content_id(

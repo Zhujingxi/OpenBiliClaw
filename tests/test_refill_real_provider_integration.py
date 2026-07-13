@@ -476,6 +476,58 @@ async def test_real_provider_refill_and_interactive_fourth_slot(tmp_path: Path) 
         flush=True,
     )
 
+    consumed_rows = db.get_pool_candidates(limit=100)
+    consumed_bvids = [str(row.get("bvid", "")) for row in consumed_rows]
+    db.mark_pool_items_shown(consumed_bvids)
+    assert db.count_pool_candidates() == 0
+    replacement_items = [
+        DiscoveredContent(
+            bvid=f"BV1LIVE{index:04d}",
+            content_id=f"BV1LIVE{index:04d}",
+            source_platform="bilibili",
+            source_strategy="search",
+            title=title,
+            up_name="OpenBiliClaw live refill test",
+            description=description,
+        )
+        for index, (title, description) in enumerate(
+            [
+                ("Python asyncio 生产级并发控制实战", "讲解信号量、任务取消和背压设计。"),
+                ("LLM Agent 调度器从零实现", "实现请求队列、并发池和可恢复任务状态。"),
+                ("SQLite 事务与并发写入故障排查", "分析锁竞争、原子提交和崩溃恢复。"),
+                ("分布式系统限流与令牌桶工程实践", "比较 RPM、TPM 和自适应退避策略。"),
+            ],
+            start=1,
+        )
+    ]
+    assert pipeline.enqueue_candidates(replacement_items) == len(replacement_items)
+    replacement_claim = pipeline.claim_batch(limit=len(replacement_items))
+    assert replacement_claim is not None
+    async with asyncio.timeout(180):
+        replacement_outcome = await pipeline.evaluate_claim(replacement_claim, profile)
+    replacement_result = await pipeline.complete_claim(
+        replacement_outcome,
+        admission_limit=len(replacement_items),
+    )
+    assert replacement_result["cached"] > 0
+    async with asyncio.timeout(180):
+        replacement_copied = await recommendation._drain_expression_copy(
+            profile=profile,
+            limit=len(replacement_items),
+            batch_size=30,
+        )
+    available_after_refill = db.count_pool_candidates()
+    print(
+        "live_refill_consumed_cycle_summary "
+        f"consumed={len(consumed_bvids)} available_after_consume=0 "
+        f"evaluated={replacement_result['evaluated']} "
+        f"admitted={replacement_result['cached']} copied={replacement_copied} "
+        f"available_after_refill={available_after_refill}",
+        flush=True,
+    )
+    assert replacement_copied > 0
+    assert available_after_refill > 0
+
     barrier = _BarrierRegistry(monitored_registry, metrics)
     background = LLMService(
         registry=barrier,

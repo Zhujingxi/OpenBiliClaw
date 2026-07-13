@@ -1752,7 +1752,7 @@ class ContentDiscoveryEngine:
                     "system_instruction": messages[0]["content"],
                     "user_input": messages[1]["content"],
                     "image_inputs": image_inputs,
-                    "max_tokens": 16384,
+                    "max_tokens": 4096,
                     "reasoning_effort": "",
                     "caller": "discovery.evaluate_batch",
                 }
@@ -1766,9 +1766,10 @@ class ContentDiscoveryEngine:
                     # task is structured scoring (return JSON array), not
                     # reasoning — production logs showed 8-16 min/batch
                     # with reasoning enabled, dropping to ~30s without.
-                    # 16384 max_tokens is plenty for the 1500-3000 token
-                    # output a 30-item JSON array now needs.
-                    "max_tokens": 16384,
+                    # 4096 max_tokens covers the observed 1500-3000 token
+                    # output of a 30-item JSON array without making providers
+                    # reserve an unnecessarily large per-request quota.
+                    "max_tokens": 4096,
                     "caller": "discovery.evaluate_batch",
                 }
                 from openbiliclaw.llm.task_options import call_accepts_keyword
