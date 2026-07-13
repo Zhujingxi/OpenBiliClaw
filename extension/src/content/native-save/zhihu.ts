@@ -493,7 +493,7 @@ export function createZhihuBrowserEnvironment(
       )).filter((element) => isEffectivelyVisible(element, root) && closestDialog(element) === formDialog &&
         (closestIdentity(element) === null || closestIdentity(element) === currentIdentity) &&
         CONFIRM_COLLECTION_LABELS.has(visibleText(element)));
-      if (confirms.length !== 1) return failCreation("native_control_not_found");
+      if (confirms.length !== 1) return failCreation("native_request_rejected");
       confirms[0].click();
 
       for (let attempt = 0; attempt < DIALOG_ATTEMPTS; attempt += 1) {

@@ -522,7 +522,11 @@ test("Zhihu browser creation waits for async form and deterministic confirmation
   }
   (globalThis as { HTMLInputElement?: unknown }).HTMLInputElement = FakeInputElement;
 
-  const makeEnvironment = (proofAppears: boolean, detachedForm = false) => {
+  const makeEnvironment = (
+    proofAppears: boolean,
+    detachedForm = false,
+    confirmAvailable = true,
+  ) => {
     const task = taskFor("question", "1001");
     let dialogOpen = false;
     let newClicked = false;
@@ -545,7 +549,9 @@ test("Zhihu browser creation waits for async form and deterministic confirmation
       attrs: { role: "dialog" },
       query(selector) {
         if (selector.includes("button")) {
-          return newClicked && !detachedForm ? [newButton, confirmButton] : [newButton];
+          return newClicked && !detachedForm && confirmAvailable
+            ? [newButton, confirmButton]
+            : [newButton];
         }
         if (selector.includes("input")) {
           if (detachedForm) return [];
@@ -561,7 +567,7 @@ test("Zhihu browser creation waits for async form and deterministic confirmation
       attrs: { role: "dialog" },
       query(selector) {
         if (!newClicked || !detachedForm) return [];
-        if (selector.includes("button")) return [confirmButton];
+        if (selector.includes("button")) return confirmAvailable ? [confirmButton] : [];
         if (selector.includes("input")) {
           inputQueries += 1;
           if (inputQueries === 1) return [];
@@ -613,6 +619,11 @@ test("Zhihu browser creation waits for async form and deterministic confirmation
     assert.equal(await detached.env.createCollection("OpenBiliClaw"), true);
     assert.equal(detached.confirmClicks(), 1);
     assert.equal(detached.input._value, "OpenBiliClaw");
+
+    const noConfirm = makeEnvironment(true, true, false);
+    assert.equal(await noConfirm.env.openCollectionDialog(), true);
+    assert.equal(await noConfirm.env.createCollection("OpenBiliClaw"), false);
+    assert.equal(noConfirm.env.creationFailureCode?.(), "native_request_rejected");
 
     const uncertain = makeEnvironment(false);
     assert.equal(await uncertain.env.openCollectionDialog(), true);
