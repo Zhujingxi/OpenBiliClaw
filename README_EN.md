@@ -593,6 +593,10 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 ├─────────┴──────────┴───────────┴───────────────┤
 │ LLM / source adapters · /api/saved/* · router · Bilibili native save │
 │ Six adapters → ExtensionNativeSaveBroker → extension_native_save_jobs │
+│ six-platform source task multiplex: xhs / dy / yt / x / zhihu / reddit │
+│ extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension │
+│ exact OpenBiliClaw / YouTube Watch Later targets → safe task-result    │
+│ trusted-local E2E exact auth → one saved-sync item → six-field callback │
 │ unsupported_adapter_missing retryable · unsupported_content_type local-only │
 │ Canonical ID · Local-first sync · Task poll · SQLite (events · pool · recs · saved/tasks)│
 │ Six adapters → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executors (6/6 fixture-only)│

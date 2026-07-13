@@ -160,6 +160,31 @@ def test_local_save_without_auto_sync_never_invokes_adapter(db: Database) -> Non
     assert adapter.calls == []
 
 
+def test_validate_native_save_selection_reads_existing_membership_without_mutation(
+    db: Database,
+) -> None:
+    adapter = FakeAdapter(NativeSaveCapability("reddit", True, False, False))
+    service = SavedSyncService(db, NativeSaveRouter([adapter]))
+    item = SavedItemInput(
+        "reddit",
+        "t3_public1",
+        "https://www.reddit.com/r/test/comments/public1/title/",
+        "post",
+    )
+    service.save_local("watch_later", item, auto_sync=False)
+
+    selected, route = service.validate_native_save_selection(
+        "watch_later",
+        "reddit:t3_public1",
+    )
+
+    assert selected == item
+    assert route == NativeSaveRoute("watch_later", "favorite", "Reddit Saved")
+    assert adapter.calls == []
+    with pytest.raises(ValueError, match="does not exist"):
+        service.validate_native_save_selection("favorite", "reddit:t3_public1")
+
+
 async def test_auto_sync_returns_after_local_commit_and_runs_in_background(db: Database) -> None:
     gate = asyncio.Event()
     adapter = FakeAdapter(NativeSaveCapability("bilibili", True, True, True), gate=gate)

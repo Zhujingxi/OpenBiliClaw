@@ -304,6 +304,9 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │ /api/saved/* -> membership 先提交 -> native_save_tasks/items 快照 -> router │
 │  │ -> BilibiliNativeSaveAdapter（收藏夹/稍后再看）-> durable task-item poll │
 │  │ 六平台 adapter -> ExtensionNativeSaveBroker -> extension_native_save_jobs -> native_save multiplex │
+│  │ extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension                │
+│  │ exact OpenBiliClaw / YouTube Watch Later targets -> authenticated safe task-result                 │
+│  │ trusted-local extension E2E exact auth -> single saved sync item -> six-field safe callback        │
 │  │ -> /api/sources/{xhs,dy,yt,x,zhihu,reddit}；unsupported_adapter_missing 可重试 │
 │  │ -> 插件/桌面/移动 saved UI；CLI config-show（自动同步默认关闭）    │
 │  │ NATIVE_SAVE_EXECUTE/RESULT：global mutex + absolute deadline + bounded replay │

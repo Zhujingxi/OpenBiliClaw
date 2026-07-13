@@ -111,3 +111,85 @@ def test_saved_sync_docs_explain_truthful_graphical_state_interpretation() -> No
     assert "auto_sync_enabled" in recommendation
     assert "auto_sync_enabled = false" in config
     assert "后端状态驱动" in changelog
+
+
+def test_six_platform_native_save_docs_define_safe_e2e_contract() -> None:
+    saved_sync = Path("docs/modules/saved-sync.md").read_text(encoding="utf-8")
+    extension = Path("docs/modules/extension.md").read_text(encoding="utf-8")
+    config = Path("docs/modules/config.md").read_text(encoding="utf-8")
+    integration = Path("docs/platform-source-integration.md").read_text(encoding="utf-8")
+    architecture = Path("docs/architecture.md").read_text(encoding="utf-8")
+    spec = Path("docs/spec.md").read_text(encoding="utf-8")
+    readme = Path("README.md").read_text(encoding="utf-8")
+    readme_en = Path("README_EN.md").read_text(encoding="utf-8")
+    changelog = Path("docs/changelog.md").read_text(encoding="utf-8")
+    docs_index = Path("docs/index.md").read_text(encoding="utf-8")
+    runbook = Path("docs/testing/six-platform-native-save-e2e.md").read_text(encoding="utf-8")
+    runbook_flat = " ".join(runbook.split())
+
+    mapping_rows = (
+        "| YouTube | `OpenBiliClaw` | `YouTube Watch Later` |",
+        "| Xiaohongshu | `小红书收藏` | `小红书收藏` |",
+        "| Douyin | `抖音收藏` | `抖音收藏` |",
+        "| X/Twitter | `X Bookmarks` | `X Bookmarks` |",
+        "| Zhihu | `OpenBiliClaw` | `OpenBiliClaw` |",
+        "| Reddit | `Reddit Saved` | `Reddit Saved` |",
+    )
+    for row in mapping_rows:
+        assert row in runbook
+    for token in (
+        "allow_state_changing=true",
+        "public content_id",
+        "expected_target",
+        "auto_sync_enabled = false",
+        "manual favorite",
+        "manual watch-later",
+        "explicit auto-sync consent",
+        "already_synced",
+        "local cleanup",
+        "platform saves remain",
+        "account IDs",
+        "cookies",
+        "tokens",
+        "HTML",
+        "response bodies",
+        "URLs with secrets",
+    ):
+        assert token in runbook_flat
+    for field in (
+        '"platform"',
+        '"action"',
+        '"content_id"',
+        '"expected_target"',
+        '"task_status"',
+        '"error_code"',
+    ):
+        assert field in runbook
+
+    assert "six-platform-native-save-e2e.md" in docs_index
+    assert "auto_sync_enabled = false" in config
+    assert "精确命名授权" in saved_sync
+    assert "登录态只存在于已安装扩展" in extension
+    assert "native-save 精确授权记录" in integration
+    assert "本地删除不反向删除平台保存" in saved_sync
+    assert "六平台原生保存安全 E2E" in changelog
+
+    broker_flow = (
+        "extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension"
+    )
+    for diagram in (architecture, spec, readme, readme_en):
+        assert broker_flow in diagram
+        assert "OpenBiliClaw" in diagram
+        assert "YouTube Watch Later" in diagram
+
+    for text in (saved_sync, extension, runbook):
+        for status in (
+            "synced",
+            "already_synced",
+            "login_required",
+            "rate_limited",
+            "unsupported_content_type",
+            "extension_required",
+            "failed",
+        ):
+            assert status in text

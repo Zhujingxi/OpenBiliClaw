@@ -23,6 +23,40 @@
 | 三个图形化保存界面 + CLI 配置可见 | ✅ | 插件 side panel、移动 Web、桌面 Web 的推荐卡只对本地保存做 optimistic update；状态与并发 fence 按 `list_kind:item_key` 隔离，迟到 status 水合不能覆盖新 mutation。三个保存页均由后端 `sync_status / sync_task_id / resolved_target / error_code` 驱动，不复制平台路由矩阵：`pending + 空 sync_task_id` 表示自动同步关闭后的本地待同步，保留手动按钮；`pending + 非空 sync_task_id` 与 `syncing` 显示可访问的同步中状态并禁用重复提交。只有 `unsupported_content_type` 显示「仅本地保存」且无同步按钮；历史 `unsupported_adapter_missing` 作为滚动升级兼容状态保留重试；`extension_required` 给出连接登录态插件指引，登录、限流和失败状态给出可操作重试文案，成功态原样显示后端 `resolved_target`。插件 / 移动 saved 与 config 请求、桌面 saved 请求均有有界 timeout；插件的单个 deadline 覆盖初次设备会话交换、401 强制换票与受保护请求。列表成功加载后从持久化 `sync_task_id` 去重恢复任务，task→item ownership 排除重复提交；页面重新可见时恢复查询，销毁时清理 tracker。刷新失败保留最后成功快照并显示重试。批量同步与重试加载先捕获列表级焦点并在重渲染后优先还原同一动作；Task/result 文本先清洗再用 textContent/转义渲染；本地删除只调用 `/remove`。CLI 仅由 `config-show` 展示自动同步开关，不提供保存 / 同步动作。 |
 | Runtime wiring | ✅ | `RuntimeContext` 一次创建稳定 broker，并在 local/degraded 与每次 config rebuild 注册六平台 adapter；热重载替换 router/service 与 Bilibili client，但保留同一 broker。`BilibiliNativeSaveAdapter` 仍是唯一 direct adapter。broker best-effort 发布 `<slug>_task_available`；无 event hub 的测试/降级构造仍可用。六平台 pending job 随调用方取消安全变为 `cancelled`；已 claim 的 `in_progress` job 则继续等 durable 终态，由原 service watchdog 跨 rebuild 持有 native state heartbeat，不重放平台 mutation。 |
 
+### 六平台目标与授权 E2E
+
+| 平台 | favorite | watch-later |
+| --- | --- | --- |
+| YouTube | exact `OpenBiliClaw` playlist | `YouTube Watch Later` |
+| 小红书 | `小红书收藏` | `小红书收藏` fallback |
+| 抖音 | `抖音收藏` | `抖音收藏` fallback |
+| X/Twitter | `X Bookmarks` | `X Bookmarks` fallback |
+| 知乎 | exact `OpenBiliClaw` collection | 同 collection fallback |
+| Reddit | `Reddit Saved` | `Reddit Saved` fallback |
+
+自动同步保持 `auto_sync_enabled = false`；手动 `/sync` 是独立的当次账号写入触发。
+真实写入必须使用[六平台授权 E2E runbook](../testing/six-platform-native-save-e2e.md)，为
+exact platform / action / public `content_id` / `expected_target` 取得当前**精确命名授权**，
+并同时显式设置 `allow_state_changing=true`。授权 envelope 只接受五个固定字段，结果只记录
+`platform/action/content_id/expected_target/task_status/error_code`；账号 ID、Cookie、token、
+HTML、响应正文和含秘密 URL 均 fail closed。删除本地 membership 只调用 `/remove`，即
+**本地删除不反向删除平台保存**。
+
+trusted-local `POST /api/extension/e2e/run` 的 dedicated native-save 模式只接受一个 exact
+`native_save_authorization`，且与 generic `actions` 互斥。后端把 envelope 经 runtime stream
+交给已安装扩展之前，先读取 exact list membership，并用其 platform/content ID/content type/
+canonical HTTPS content URL 以及 production router 重建身份与目标；缺失或 account/profile URL
+固定 422 且不 publish。canonical URL 校验与六平台 production executor 等价：拒绝凭据、显式
+端口、fragment、多余 query/path segment/host，并校验 watch-later fallback 的 exact
+`resolved_action=favorite`。扩展只用已验证 envelope 构造单一 canonical `item_key`，调用对应
+`/api/saved/{favorite|watch_later}/sync` 并轮询同一个 durable task。创建与轮询结果都必须
+恰好包含该 item，resolved action/target 也必须匹配，随后才通过 dedicated callback 返回
+六字段安全结果。初始真实 `pending` snapshot 允许 route 尚未填充的空 target，并继续轮询；
+只有 terminal success 才要求 exact target。总 run deadline 为执行保留 1 秒 callback margin；
+endpoint 解析、设备会话/401 换票、HTTP 和按剩余时间截断的 poll sleep 都计入各自 deadline；
+超时或相关性不确定时只记录 `pending`/`syncing`，不谎报 failed 或暗示可安全重试。通用
+`OBC_E2E_EXECUTE` 永不执行 native-save mutation。
+
 ## 公开 API
 
 ### Adapter protocol 与路由
@@ -128,8 +162,10 @@ SavedItemInput
   -> Database.claim_native_save_item(execution_id)      # atomic item ownership
   -> NativeSaveRouter.route()
   -> Database.update_native_save_claim_route()           # owner fence
-  -> BilibiliNativeSaveAdapter.save()                     # first production adapter
-  -> BilibiliAPIClient authenticated POST + owner heartbeat/deadline
+  -> BilibiliNativeSaveAdapter.save()                     # direct Bilibili branch
+     OR ExtensionNativeSaveBroker                         # six extension platforms
+  -> extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension
+  -> authenticated task-result + owner heartbeat/deadline
   -> Database.complete_native_save_claim(item result)   # state + task snapshot, one transaction
   -> SavedSyncService.get_sync_task()
   -> GET /api/saved-sync/tasks/{task_id} # truthful per-item polling
@@ -139,13 +175,13 @@ SavedItemInput
 删除本地 membership 仍只由 storage/API 层负责，不会反向删除平台账号内容。B 站 adapter 不读取配置、HTTP request 或全局 runtime，也不自行重试；平台中立 service 继续拥有任务、route 与持久化状态，API route 只在保存请求当下读取当前热重载配置。
 
 验证边界同样分层：自动化和默认 smoke 只使用 mock adapter 或本地 membership，不发送任何
-Bilibili favorite / watch-later 请求。真实 `favorite` 与 `watch_later` 都会改变账号状态，必须
-为具体 BV ID 取得用户当次授权或使用指定测试账号后才能运行；验证记录只保留 task ID、
-状态、计数和脱敏错误码。YouTube、小红书、抖音、X、知乎与 Reddit 的 production adapter
-与 runtime broker registration 及六个平台 executor wiring 已完成；当前仅 fixture 验证，真实账号写入与
+平台 favorite / watch-later 请求。Bilibili 的既有 runbook 要求为具体 BV ID 取得用户当次授权；
+六平台 runbook 则逐项要求 exact platform/action/public content ID/expected target，并只记录
+六字段安全结果。YouTube、小红书、抖音、X、知乎与 Reddit 的 production adapter、runtime
+broker registration 及六个平台 executor wiring 已完成；当前仅 fixture 验证，真实账号写入与
 逐平台授权 E2E 仍未执行，因此不能宣称六平台账号写入已经真实闭环。
 
 2026-07-13 已在当次明确授权下完成 B 站真实账号授权 E2E：手动收藏、手动稍后再看和
 开启配置后的自动收藏均返回 `synced`；删除三条本地 membership 后，两条平台收藏与一条
-平台稍后再看仍可读，自动同步配置也恢复为测试前的关闭值。该结果只证明 Bilibili Phase 1
+平台稍后再看仍可读，自动同步配置也恢复为测试前的关闭值。该结果只证明 Bilibili direct
 adapter 的授权链路，不扩大其它平台边界。

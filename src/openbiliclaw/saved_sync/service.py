@@ -22,6 +22,7 @@ from .router import InvalidNativeSaveAdapterResultError, UnsupportedNativeSaveEr
 if TYPE_CHECKING:
     from openbiliclaw.storage.database import Database
 
+    from .models import NativeSaveRoute
     from .router import NativeSaveRouter
 
 TaskStarter = Callable[[str, Coroutine[Any, Any, Any]], asyncio.Task[Any]]
@@ -171,6 +172,22 @@ class SavedSyncService:
                 self._database.discard_native_sync_task(task_id)
                 raise
         return result
+
+    def validate_native_save_selection(
+        self,
+        list_kind: SavedListKind,
+        item_key: str,
+    ) -> tuple[SavedItemInput, NativeSaveRoute]:
+        """Resolve one existing membership without creating or claiming a task."""
+        normalized_key = item_key.strip()
+        row = self._database.get_saved_membership(list_kind, normalized_key)
+        if row is None:
+            raise ValueError("saved membership does not exist")
+        item = self._item_from_row(row)
+        if item.item_key != normalized_key:
+            raise ValueError("saved membership identity is not canonical")
+        _adapter, route = self._router.route(item.platform, list_kind)
+        return item, route
 
     async def run_sync_task(self, task_id: str) -> SavedSyncBatchResult:
         """Execute persisted task rows sequentially within each platform group."""

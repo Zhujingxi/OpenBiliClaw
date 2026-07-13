@@ -5,7 +5,7 @@ from __future__ import annotations
 import ipaddress
 import re
 import unicodedata
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -16,6 +16,7 @@ from pydantic import (
     StrictStr,
     ValidationInfo,
     field_validator,
+    model_validator,
 )
 
 from openbiliclaw.saved_sync.identity import canonical_source_platform, make_item_key
@@ -818,14 +819,86 @@ ExtensionE2EAction = Literal[
 ExtensionE2EActionList = Annotated[list[ExtensionE2EAction], Field(min_length=1)]
 ExtensionE2EActionStatus = Literal["ok", "skipped", "failed"]
 ExtensionE2ERunStatus = Literal["ok", "partial", "failed", "timeout"]
+ExtensionNativeSaveE2EPlatform = Literal[
+    "youtube",
+    "xiaohongshu",
+    "douyin",
+    "twitter",
+    "zhihu",
+    "reddit",
+]
+_EXTENSION_NATIVE_SAVE_E2E_TARGETS: dict[str, dict[NativeSaveActionOut, str]] = {
+    "youtube": {"favorite": "OpenBiliClaw", "watch_later": "YouTube Watch Later"},
+    "xiaohongshu": {"favorite": "小红书收藏", "watch_later": "小红书收藏"},
+    "douyin": {"favorite": "抖音收藏", "watch_later": "抖音收藏"},
+    "twitter": {"favorite": "X Bookmarks", "watch_later": "X Bookmarks"},
+    "zhihu": {"favorite": "OpenBiliClaw", "watch_later": "OpenBiliClaw"},
+    "reddit": {"favorite": "Reddit Saved", "watch_later": "Reddit Saved"},
+}
+_EXTENSION_NATIVE_SAVE_E2E_CONTENT_IDS: dict[str, re.Pattern[str]] = {
+    "youtube": re.compile(r"[A-Za-z0-9_-]{11}"),
+    "xiaohongshu": re.compile(r"[0-9a-f]{24}"),
+    "douyin": re.compile(r"[0-9]{5,30}"),
+    "twitter": re.compile(r"[0-9]{5,30}"),
+    "zhihu": re.compile(r"(?:question|answer|article):[0-9]+"),
+    "reddit": re.compile(r"t[13]_[a-z0-9]+"),
+}
+_EXTENSION_NATIVE_SAVE_E2E_ERROR_CODES: dict[NativeSaveStatusOut, frozenset[str]] = {
+    "pending": frozenset({""}),
+    "syncing": frozenset({""}),
+    "synced": frozenset({""}),
+    "already_synced": frozenset({""}),
+    "login_required": frozenset({""}),
+    "rate_limited": frozenset({""}),
+    "unsupported": frozenset({"unsupported_content_type"}),
+    "extension_required": frozenset({"extension_unavailable"}),
+    "failed": frozenset(
+        {
+            "adapter_exception",
+            "adapter_timeout",
+            "extension_task_timeout",
+            "interrupted",
+            "invalid_adapter_result",
+            "item_heartbeat_failed",
+            "native_save_failed",
+            "native_save_timeout",
+            "not_saved_locally",
+            "sync_already_in_progress",
+        }
+    ),
+}
 
 
 def _default_extension_e2e_platforms() -> list[ExtensionE2EPlatform]:
     return ["douyin", "xiaohongshu", "twitter", "reddit"]
 
 
+class ExtensionNativeSaveE2EAuthorizationIn(BaseModel):
+    """Exact, non-secret authorization for one named native-save mutation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    allow_state_changing: StrictBool
+    platform: ExtensionNativeSaveE2EPlatform
+    action: NativeSaveActionOut
+    content_id: Annotated[StrictStr, Field(min_length=1, max_length=64)]
+    expected_target: Annotated[StrictStr, Field(min_length=1, max_length=64)]
+
+    @model_validator(mode="after")
+    def _validate_exact_mapping(self) -> Self:
+        if self.allow_state_changing is not True:
+            raise ValueError("allow_state_changing must be true")
+        if _EXTENSION_NATIVE_SAVE_E2E_CONTENT_IDS[self.platform].fullmatch(self.content_id) is None:
+            raise ValueError("content_id is not an allowed public content identity")
+        if self.expected_target != _EXTENSION_NATIVE_SAVE_E2E_TARGETS[self.platform][self.action]:
+            raise ValueError("expected_target does not match platform action")
+        return self
+
+
 class ExtensionE2ERunIn(BaseModel):
     """Request to run a local browser-extension E2E simulation."""
+
+    model_config = ConfigDict(extra="forbid")
 
     platforms: list[ExtensionE2EPlatform] = Field(
         default_factory=_default_extension_e2e_platforms,
@@ -834,6 +907,17 @@ class ExtensionE2ERunIn(BaseModel):
     actions: dict[ExtensionE2EPlatform, ExtensionE2EActionList] = Field(default_factory=dict)
     allow_state_changing: bool = False
     timeout_seconds: int = Field(default=45, ge=5, le=180)
+    native_save_authorization: ExtensionNativeSaveE2EAuthorizationIn | None = None
+
+    @model_validator(mode="after")
+    def _validate_native_save_mode(self) -> Self:
+        if self.native_save_authorization is None:
+            return self
+        if self.allow_state_changing is not True:
+            raise ValueError("allow_state_changing must be true for native save")
+        if self.actions:
+            raise ValueError("native-save E2E cannot include generic actions")
+        return self
 
 
 class ExtensionE2EActionResultIn(BaseModel):
@@ -852,13 +936,49 @@ class ExtensionE2EPlatformResultIn(BaseModel):
     detail: str = ""
 
 
+class ExtensionNativeSaveE2EResultIn(BaseModel):
+    """Only fields allowed in a native-save E2E result record."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    platform: ExtensionNativeSaveE2EPlatform
+    action: NativeSaveActionOut
+    content_id: Annotated[StrictStr, Field(min_length=1, max_length=64)]
+    expected_target: Annotated[StrictStr, Field(min_length=1, max_length=64)]
+    task_status: NativeSaveStatusOut
+    error_code: Annotated[StrictStr, Field(max_length=64)] = ""
+
+    @model_validator(mode="after")
+    def _validate_safe_pair(self) -> Self:
+        authorization = ExtensionNativeSaveE2EAuthorizationIn(
+            allow_state_changing=True,
+            platform=self.platform,
+            action=self.action,
+            content_id=self.content_id,
+            expected_target=self.expected_target,
+        )
+        del authorization
+        if self.error_code not in _EXTENSION_NATIVE_SAVE_E2E_ERROR_CODES[self.task_status]:
+            raise ValueError("task_status and error_code combination is not allowed")
+        return self
+
+
 class ExtensionE2EResultIn(BaseModel):
     """Signed extension callback payload for a local E2E run."""
+
+    model_config = ConfigDict(extra="forbid")
 
     run_id: str
     token: str
     platforms: list[ExtensionE2EPlatformResultIn] = Field(default_factory=list)
     error: str = ""
+    native_save_result: ExtensionNativeSaveE2EResultIn | None = None
+
+    @model_validator(mode="after")
+    def _validate_result_mode(self) -> Self:
+        if self.native_save_result is not None and (self.platforms or self.error):
+            raise ValueError("native-save result cannot include generic result fields")
+        return self
 
 
 class ExtensionE2EEventMatchOut(BaseModel):
@@ -897,6 +1017,7 @@ class ExtensionE2ERunOut(BaseModel):
     platforms: list[ExtensionE2EPlatformReportOut] = Field(default_factory=list)
     error: str = ""
     timeout_seconds: int
+    native_save_result: ExtensionNativeSaveE2EResultIn | None = None
 
 
 class FeedbackIn(BaseModel):
@@ -1157,8 +1278,7 @@ class SavedItemIn(BaseModel):
     def _validate_content_id(cls, value: str, info: ValidationInfo) -> str:
         platform = str(info.data.get("source_platform", ""))
         typed_zhihu_id = (
-            platform == "zhihu"
-            and _ZHIHU_TYPED_CONTENT_ID_RE.fullmatch(value) is not None
+            platform == "zhihu" and _ZHIHU_TYPED_CONTENT_ID_RE.fullmatch(value) is not None
         )
         if (
             (":" in value and not typed_zhihu_id)

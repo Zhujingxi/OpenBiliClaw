@@ -69,6 +69,7 @@ from openbiliclaw.api.models import (
     ExtensionE2ERunIn,
     ExtensionE2ERunOut,
     ExtensionE2ERunStatus,
+    ExtensionNativeSaveE2EAuthorizationIn,
     ExtensionNativeSaveResultIn,
     FavoriteAddIn,
     FavoriteItem,
@@ -295,6 +296,147 @@ _E2E_ACTION_EVENT_TYPES: dict[ExtensionE2EAction, frozenset[str]] = {
     "repost": frozenset({"share", "repost"}),
     "bookmark": frozenset({"bookmark", "favorite"}),
 }
+_NATIVE_SAVE_E2E_CONTENT_TYPES: dict[str, frozenset[str]] = {
+    "youtube": frozenset({"video"}),
+    "xiaohongshu": frozenset({"note", "video"}),
+    "douyin": frozenset({"aweme", "video"}),
+    "twitter": frozenset({"tweet", "status"}),
+    "zhihu": frozenset({"question", "answer", "article"}),
+    "reddit": frozenset({"post", "comment"}),
+}
+
+
+def _native_save_e2e_content_id_from_url(
+    platform: str,
+    content_type: str,
+    value: str,
+) -> str:
+    """Return the exact identity accepted by the production content executor."""
+    if (
+        not value
+        or value != value.strip()
+        or len(value) > 2048
+        or any(unicodedata.category(char).startswith("C") for char in value)
+    ):
+        return ""
+    try:
+        parsed = urlparse(value)
+        hostname = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme.lower() != "https"
+        or not hostname
+        or hostname.endswith(".")
+        or port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        return ""
+
+    def host_is_or_subdomain(*hosts: str) -> bool:
+        return any(hostname == host or hostname.endswith(f".{host}") for host in hosts)
+
+    if platform == "youtube":
+        if hostname == "youtu.be":
+            if parsed.query:
+                return ""
+            match = re.fullmatch(r"/([A-Za-z0-9_-]{11})/?", parsed.path)
+            return match.group(1) if match else ""
+        if hostname not in {"youtube.com", "www.youtube.com"}:
+            return ""
+        if parsed.path == "/watch":
+            match = re.fullmatch(r"v=([A-Za-z0-9_-]{11})", parsed.query)
+            return match.group(1) if match else ""
+        if parsed.query:
+            return ""
+        match = re.fullmatch(r"/shorts/([A-Za-z0-9_-]{11})/?", parsed.path)
+        return match.group(1) if match else ""
+    if parsed.query:
+        return ""
+    if platform == "xiaohongshu":
+        if not host_is_or_subdomain("xiaohongshu.com"):
+            return ""
+        match = re.fullmatch(
+            r"/(?:explore|discovery/item)/([A-Za-z0-9_-]+)/?",
+            parsed.path,
+        )
+        return match.group(1) if match else ""
+    if platform == "douyin":
+        if not host_is_or_subdomain("douyin.com"):
+            return ""
+        match = re.fullmatch(r"/video/([A-Za-z0-9_-]+)/?", parsed.path)
+        return match.group(1) if match else ""
+    if platform == "twitter":
+        if not host_is_or_subdomain("x.com", "twitter.com"):
+            return ""
+        match = re.fullmatch(r"/(?:i|[^/]+)/status/([0-9]+)/?", parsed.path)
+        return match.group(1) if match else ""
+    elif platform == "zhihu":
+        if hostname not in {"zhihu.com", "www.zhihu.com", "zhuanlan.zhihu.com"}:
+            return ""
+        if content_type == "article":
+            match = re.fullmatch(r"/p/([0-9]+)/?", parsed.path)
+            return f"article:{match.group(1)}" if match else ""
+        if hostname not in {"zhihu.com", "www.zhihu.com"}:
+            return ""
+        if content_type == "question":
+            match = re.fullmatch(r"/question/([0-9]+)/?", parsed.path)
+            return f"question:{match.group(1)}" if match else ""
+        if content_type == "answer":
+            match = re.fullmatch(r"/question/[0-9]+/answer/([0-9]+)/?", parsed.path)
+            return f"answer:{match.group(1)}" if match else ""
+    elif platform == "reddit":
+        if not host_is_or_subdomain("reddit.com", "redd.it"):
+            return ""
+        parts = [part.lower() for part in parsed.path.split("/") if part]
+        if content_type == "post" and host_is_or_subdomain("redd.it"):
+            if len(parts) == 1 and re.fullmatch(r"[a-z0-9]+", parts[0]):
+                return f"t3_{parts[0]}"
+            return ""
+        try:
+            index = parts.index("comments")
+        except ValueError:
+            return ""
+        if content_type == "post" and len(parts) > index + 1:
+            post_id = parts[index + 1]
+            return f"t3_{post_id}" if re.fullmatch(r"[a-z0-9]+", post_id) else ""
+        if content_type == "comment" and len(parts) > index + 3:
+            comment_id = parts[index + 3]
+            return f"t1_{comment_id}" if re.fullmatch(r"[a-z0-9]+", comment_id) else ""
+    return ""
+
+
+def _native_save_e2e_membership_matches(
+    authorization: ExtensionNativeSaveE2EAuthorizationIn,
+    item: SavedItemInput,
+    route: object,
+) -> bool:
+    content_type = item.content_type.strip()
+    if (
+        item.platform != authorization.platform
+        or item.content_id != authorization.content_id
+        or content_type not in _NATIVE_SAVE_E2E_CONTENT_TYPES[authorization.platform]
+        or _native_save_e2e_content_id_from_url(
+            authorization.platform,
+            content_type,
+            item.content_url,
+        )
+        != authorization.content_id
+    ):
+        return False
+    return (
+        getattr(route, "requested_action", None) == authorization.action
+        and getattr(route, "resolved_action", None)
+        == (
+            authorization.action
+            if authorization.platform == "youtube" or authorization.action == "favorite"
+            else "favorite"
+        )
+        and getattr(route, "resolved_target", None) == authorization.expected_target
+    )
 
 
 @dataclass
@@ -305,6 +447,7 @@ class _ExtensionE2ERunState:
     after_event_id: int
     expected_actions: dict[ExtensionE2EPlatform, list[ExtensionE2EAction]]
     event: asyncio.Event
+    native_save_authorization: ExtensionNativeSaveE2EAuthorizationIn | None = None
     extension_result: ExtensionE2EResultIn | None = None
     error: str = ""
 
@@ -758,6 +901,31 @@ def _build_extension_e2e_report(
     timeout_seconds: int,
 ) -> ExtensionE2ERunOut:
     result = state.extension_result
+    if state.native_save_authorization is not None:
+        native_result = result.native_save_result if result is not None else None
+        error = state.error
+        if timed_out:
+            native_run_status: ExtensionE2ERunStatus = "timeout"
+            error = error or "extension e2e result timed out"
+        elif native_result is None:
+            native_run_status = "failed"
+            error = error or "native save result missing"
+        elif native_result.task_status in {"synced", "already_synced"}:
+            native_run_status = "ok"
+        elif native_result.task_status in {"pending", "syncing"}:
+            native_run_status = "timeout"
+            error = "native save task did not reach a terminal state"
+        else:
+            native_run_status = "failed"
+            error = native_result.error_code or native_result.task_status
+        return ExtensionE2ERunOut(
+            run_id=state.run_id,
+            status=native_run_status,
+            error=error,
+            timeout_seconds=timeout_seconds,
+            native_save_result=native_result,
+        )
+
     action_results: dict[
         tuple[ExtensionE2EPlatform, ExtensionE2EAction], tuple[ExtensionE2EActionStatus, str]
     ] = {}
@@ -8997,7 +9165,36 @@ def create_app(
         if registry:
             raise HTTPException(status_code=409, detail="e2e_run_in_progress")
 
-        expected_actions = _extension_e2e_actions_for_request(payload)
+        native_save_authorization = payload.native_save_authorization
+        expected_actions = (
+            {}
+            if native_save_authorization is not None
+            else _extension_e2e_actions_for_request(payload)
+        )
+        if native_save_authorization is not None:
+            item_key = make_item_key(
+                native_save_authorization.platform,
+                native_save_authorization.content_id,
+            )
+            try:
+                item, route = _saved_service().validate_native_save_selection(
+                    native_save_authorization.action,
+                    item_key,
+                )
+            except (AttributeError, ValueError):
+                raise HTTPException(
+                    status_code=422,
+                    detail="native_save_authorization_not_saved_content",
+                ) from None
+            if not _native_save_e2e_membership_matches(
+                native_save_authorization,
+                item,
+                route,
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="native_save_authorization_not_saved_content",
+                )
         if not payload.allow_state_changing:
             blocked_actions = sorted(
                 {
@@ -9026,6 +9223,7 @@ def create_app(
             after_event_id=after_event_id,
             expected_actions=expected_actions,
             event=asyncio.Event(),
+            native_save_authorization=native_save_authorization,
         )
         registry[run_id] = state
         timed_out = False
@@ -9035,21 +9233,32 @@ def create_app(
             if not callable(publish):
                 state.error = "extension_runtime_unavailable"
             else:
-                delivered = await publish(
-                    {
-                        "type": "extension_e2e_run",
-                        "source": "api",
-                        "run_id": run_id,
-                        "token": token,
-                        "platforms": list(expected_actions.keys()),
-                        "actions": {
-                            platform: list(actions)
-                            for platform, actions in expected_actions.items()
-                        },
-                        "allow_state_changing": payload.allow_state_changing,
-                        "timeout_seconds": payload.timeout_seconds,
-                    }
-                )
+                runtime_event: dict[str, object] = {
+                    "type": "extension_e2e_run",
+                    "source": "api",
+                    "run_id": run_id,
+                    "token": token,
+                    "platforms": list(expected_actions.keys()),
+                    "actions": {
+                        platform: list(actions) for platform, actions in expected_actions.items()
+                    },
+                    "allow_state_changing": payload.allow_state_changing,
+                    "timeout_seconds": payload.timeout_seconds,
+                }
+                if native_save_authorization is not None:
+                    native_save_callback_deadline_ms = (
+                        int(time.time() * 1000) + payload.timeout_seconds * 1000
+                    )
+                    runtime_event["native_save_authorization"] = (
+                        native_save_authorization.model_dump()
+                    )
+                    runtime_event["native_save_execution_deadline_ms"] = (
+                        native_save_callback_deadline_ms - 1000
+                    )
+                    runtime_event["native_save_callback_deadline_ms"] = (
+                        native_save_callback_deadline_ms
+                    )
+                delivered = await publish(runtime_event)
                 if delivered is False:
                     state.error = "extension_runtime_unavailable"
 
@@ -9084,6 +9293,21 @@ def create_app(
             raise HTTPException(status_code=404, detail="unknown run_id")
         if not secrets.compare_digest(state.token, payload.token):
             raise HTTPException(status_code=403, detail="bad token")
+
+        authorization = getattr(state, "native_save_authorization", None)
+        if authorization is not None:
+            result = payload.native_save_result
+            if result is None:
+                raise HTTPException(status_code=409, detail="native_save_result_required")
+            if (
+                result.platform != authorization.platform
+                or result.action != authorization.action
+                or result.content_id != authorization.content_id
+                or result.expected_target != authorization.expected_target
+            ):
+                raise HTTPException(status_code=409, detail="native_save_result_mismatch")
+        elif payload.native_save_result is not None:
+            raise HTTPException(status_code=409, detail="unexpected_native_save_result")
 
         state.extension_result = payload
         state.event.set()
