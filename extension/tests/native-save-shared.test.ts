@@ -50,6 +50,25 @@ test("native save accepts only the exact platform, slug, and HTTPS host contract
   assert.equal(isNativeSaveTask({ ...validTask, content_url: "http://reddit.com/post" }), false);
   assert.equal(isNativeSaveTask({ ...validTask, content_url: "https://reddit.com.evil.test/post" }), false);
   assert.equal(isNativeSaveTask({ ...validTask, content_url: "https://user:secret@reddit.com/post" }), false);
+  assert.equal(isNativeSaveTask({ ...validTask, content_url: "https://reddit.com:8443/post" }), false);
+  assert.equal(isNativeSaveTask({ ...validTask, content_url: "https://reddit.com/post#secret" }), false);
+  assert.equal(isNativeSaveTask({ ...validTask, content_url: "https://reddit.com/post?token=secret" }), false);
+  assert.equal(isNativeSaveTask({
+    ...validTask,
+    platform: "youtube",
+    platform_slug: "yt",
+    item_key: "youtube:video-123",
+    content_id: "video-123",
+    content_url: "https://www.youtube.com/watch?v=video-123&token=secret",
+  }), false);
+  assert.equal(isNativeSaveTask({
+    ...validTask,
+    platform: "youtube",
+    platform_slug: "yt",
+    item_key: "youtube:video-123",
+    content_id: "video-123",
+    content_url: "https://www.youtube.com/watch?v=video-123",
+  }), true);
 });
 
 test("native save rejects malformed, overlong, and inconsistent task fields", () => {
@@ -97,7 +116,10 @@ test("native save content runtime allows the matching hostname and executes once
   const originalLocation = (globalThis as { location?: unknown }).location;
   const listeners: Array<(message: unknown) => unknown> = [];
   const emitted: unknown[] = [];
-  (globalThis as { location?: unknown }).location = { hostname: "www.reddit.com" };
+  (globalThis as { location?: unknown }).location = {
+    hostname: "www.reddit.com",
+    href: validTask.content_url,
+  };
   (globalThis as { chrome?: unknown }).chrome = {
     runtime: {
       onMessage: { addListener: (listener: (message: unknown) => unknown) => listeners.push(listener) },
@@ -115,7 +137,7 @@ test("native save content runtime allows the matching hostname and executes once
     assert.equal(await listeners[0](execute), true);
     assert.equal(await listeners[0](execute), true);
     assert.equal(executions, 1);
-    assert.deepEqual(emitted, [{
+    const expected = {
       type: "NATIVE_SAVE_RESULT",
       platform: "reddit",
       task_id: TASK_ID,
@@ -123,7 +145,76 @@ test("native save content runtime allows the matching hostname and executes once
       status: "synced",
       error_code: "",
       error_message: "",
-    }]);
+    };
+    assert.deepEqual(emitted, [expected, expected]);
+  } finally {
+    (globalThis as { chrome?: unknown }).chrome = originalChrome;
+    (globalThis as { location?: unknown }).location = originalLocation;
+  }
+});
+
+test("native save content runtime shares one in-flight outcome across duplicate executes", async () => {
+  const originalChrome = (globalThis as { chrome?: unknown }).chrome;
+  const originalLocation = (globalThis as { location?: unknown }).location;
+  const listeners: Array<(message: unknown) => Promise<boolean>> = [];
+  const emitted: unknown[] = [];
+  (globalThis as { location?: unknown }).location = { hostname: "www.reddit.com", href: validTask.content_url };
+  (globalThis as { chrome?: unknown }).chrome = {
+    runtime: {
+      onMessage: { addListener: (listener: (message: unknown) => Promise<boolean>) => listeners.push(listener) },
+      sendMessage: async (message: unknown) => emitted.push(message),
+    },
+  };
+  try {
+    const { installNativeSaveExecutor } = await import(`../src/content/native-save/runtime.ts?inflight=${Date.now()}`);
+    let executions = 0;
+    let resolveExecutor!: (value: unknown) => void;
+    const executorResult = new Promise((resolve) => { resolveExecutor = resolve; });
+    installNativeSaveExecutor("reddit", async () => {
+      executions += 1;
+      return executorResult;
+    });
+    const execute = { type: "NATIVE_SAVE_EXECUTE", task: validTask };
+    const first = listeners[0](execute);
+    const duplicate = listeners[0](execute);
+    resolveExecutor({ status: "synced" });
+    assert.deepEqual(await Promise.all([first, duplicate]), [true, true]);
+    assert.equal(executions, 1);
+    assert.equal(emitted.length, 2);
+    assert.deepEqual(emitted[0], emitted[1]);
+  } finally {
+    (globalThis as { chrome?: unknown }).chrome = originalChrome;
+    (globalThis as { location?: unknown }).location = originalLocation;
+  }
+});
+
+test("native save content runtime evicts the oldest completed outcome after 256 task IDs", async () => {
+  const originalChrome = (globalThis as { chrome?: unknown }).chrome;
+  const originalLocation = (globalThis as { location?: unknown }).location;
+  const listeners: Array<(message: unknown) => Promise<boolean>> = [];
+  (globalThis as { location?: unknown }).location = { hostname: "www.reddit.com", href: validTask.content_url };
+  (globalThis as { chrome?: unknown }).chrome = {
+    runtime: {
+      onMessage: { addListener: (listener: (message: unknown) => Promise<boolean>) => listeners.push(listener) },
+      sendMessage: async () => {},
+    },
+  };
+  try {
+    const { installNativeSaveExecutor } = await import(`../src/content/native-save/runtime.ts?eviction=${Date.now()}`);
+    let executions = 0;
+    installNativeSaveExecutor("reddit", async () => {
+      executions += 1;
+      return { status: "synced" };
+    });
+    const taskAt = (index: number): NativeSaveTask => ({
+      ...validTask,
+      id: `123e4567-e89b-42d3-a456-${index.toString(16).padStart(12, "0")}`,
+    });
+    for (let index = 0; index < 257; index += 1) {
+      await listeners[0]({ type: "NATIVE_SAVE_EXECUTE", task: taskAt(index) });
+    }
+    await listeners[0]({ type: "NATIVE_SAVE_EXECUTE", task: taskAt(0) });
+    assert.equal(executions, 258);
   } finally {
     (globalThis as { chrome?: unknown }).chrome = originalChrome;
     (globalThis as { location?: unknown }).location = originalLocation;

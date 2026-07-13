@@ -1,5 +1,5 @@
 export interface TabUpdatedListener {
-  (tabId: number, changeInfo: { status?: string }): void;
+  (tabId: number, changeInfo: { status?: string; url?: string }): void;
 }
 
 export interface ChromeMockTab {
@@ -18,11 +18,17 @@ export interface ChromeMockState {
   queryResult: ChromeMockTab[];
   tabById: Map<number, ChromeMockTab>;
   nextCreatedTabStatus: string;
+  createImpl: (opts: { active?: boolean; url: string }) => Promise<ChromeMockTab>;
   getImpl: (tabId: number) => Promise<ChromeMockTab>;
   sendMessageImpl: (tabId: number, message: unknown) => Promise<unknown>;
+  removeImpl: (tabId: number) => Promise<void>;
+  runtimeAddListenerImpl: (listener: (message: unknown, sender: { tab?: ChromeMockTab; url?: string }) => void) => void;
+  runtimeRemoveListenerImpl: (listener: (message: unknown, sender: { tab?: ChromeMockTab; url?: string }) => void) => void;
   fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
-  emitTabUpdated: (tabId: number, changeInfo: { status?: string }) => void;
-  emitRuntimeMessage: (message: unknown, sender?: { tab?: ChromeMockTab }) => void;
+  emitTabUpdated: (tabId: number, changeInfo: { status?: string; url?: string }) => void;
+  emitRuntimeMessage: (message: unknown, sender?: { tab?: ChromeMockTab; url?: string }) => void;
+  tabUpdatedListenerCount: () => number;
+  runtimeListenerCount: () => number;
   restore: () => void;
 }
 
@@ -40,9 +46,24 @@ export function installChromeMock(): ChromeMockState {
     queryResult: [],
     tabById: new Map(),
     nextCreatedTabStatus: "complete",
+    createImpl: async (opts) => {
+      state.createdTabs.push(opts);
+      const tab = { id: nextTabId++, status: state.nextCreatedTabStatus, url: opts.url };
+      state.tabById.set(tab.id, tab);
+      return tab;
+    },
     getImpl: async (tabId) =>
       state.tabById.get(tabId) ?? { id: tabId, status: "complete" },
     sendMessageImpl: async () => ({ status: "ok", actions: [] }),
+    removeImpl: async (tabId) => {
+      state.removedTabs.push(tabId);
+      state.tabById.delete(tabId);
+    },
+    runtimeAddListenerImpl: (listener) => runtimeListeners.push(listener),
+    runtimeRemoveListenerImpl: (listener) => {
+      const index = runtimeListeners.indexOf(listener);
+      if (index >= 0) runtimeListeners.splice(index, 1);
+    },
     fetchImpl: async (input, init) => {
       state.fetchCalls.push({
         url: String(input),
@@ -52,6 +73,8 @@ export function installChromeMock(): ChromeMockState {
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     },
     emitTabUpdated(tabId, changeInfo) {
+      const current = state.tabById.get(tabId) ?? { id: tabId };
+      state.tabById.set(tabId, { ...current, ...changeInfo });
       for (const listener of [...listeners]) {
         listener(tabId, changeInfo);
       }
@@ -61,12 +84,17 @@ export function installChromeMock(): ChromeMockState {
         listener(message, sender);
       }
     },
+    tabUpdatedListenerCount: () => listeners.length,
+    runtimeListenerCount: () => runtimeListeners.length,
     restore() {
       (globalThis as { chrome?: unknown }).chrome = originalChrome;
       globalThis.fetch = originalFetch;
     },
   };
-  const runtimeListeners: Array<(message: unknown, sender: { tab?: ChromeMockTab }) => void> = [];
+  const runtimeListeners: Array<(
+    message: unknown,
+    sender: { tab?: ChromeMockTab; url?: string },
+  ) => void> = [];
 
   let nextTabId = 42;
 
@@ -85,10 +113,7 @@ export function installChromeMock(): ChromeMockState {
     },
     tabs: {
       async create(opts: { active?: boolean; url: string }) {
-        state.createdTabs.push(opts);
-        const tab = { id: nextTabId++, status: state.nextCreatedTabStatus, url: opts.url };
-        state.tabById.set(tab.id, tab);
-        return tab;
+        return state.createImpl(opts);
       },
       async query() {
         return state.queryResult;
@@ -112,8 +137,7 @@ export function installChromeMock(): ChromeMockState {
         return state.sendMessageImpl(tabId, message);
       },
       async remove(tabId: number) {
-        state.removedTabs.push(tabId);
-        state.tabById.delete(tabId);
+        return state.removeImpl(tabId);
       },
       onUpdated: {
         addListener(listener: TabUpdatedListener) {
@@ -129,12 +153,11 @@ export function installChromeMock(): ChromeMockState {
     },
     runtime: {
       onMessage: {
-        addListener(listener: (message: unknown, sender: { tab?: ChromeMockTab }) => void) {
-          runtimeListeners.push(listener);
+        addListener(listener: (message: unknown, sender: { tab?: ChromeMockTab; url?: string }) => void) {
+          state.runtimeAddListenerImpl(listener);
         },
-        removeListener(listener: (message: unknown, sender: { tab?: ChromeMockTab }) => void) {
-          const index = runtimeListeners.indexOf(listener);
-          if (index >= 0) runtimeListeners.splice(index, 1);
+        removeListener(listener: (message: unknown, sender: { tab?: ChromeMockTab; url?: string }) => void) {
+          state.runtimeRemoveListenerImpl(listener);
         },
       },
       async sendMessage(message: unknown) {

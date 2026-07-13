@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { dispatcherMutexHolder } from "../src/background/dispatcher-mutex.ts";
+import {
+  dispatcherMutexHolder,
+  releaseDispatcherMutex,
+} from "../src/background/dispatcher-mutex.ts";
 import {
   handleNativeSaveContentResult,
   runNativeSaveTask,
@@ -79,6 +82,8 @@ test("native save runner ignores mismatched tab, platform, task ID, and item key
     state.emitRuntimeMessage({ ...base, platform: "twitter" }, { tab: { id: 42, url: task.content_url } });
     state.emitRuntimeMessage({ ...base, task_id: "wrong" }, { tab: { id: 42, url: task.content_url } });
     state.emitRuntimeMessage({ ...base, item_key: "reddit:t3_wrong" }, { tab: { id: 42, url: task.content_url } });
+    state.emitRuntimeMessage(base, { tab: { id: 42, url: "https://evil.example/redirect" } });
+    state.emitRuntimeMessage(base, { url: "https://evil.example/frame", tab: { id: 42, url: task.content_url } });
     assert.equal(handleNativeSaveContentResult(base), false);
     assert.equal(posted.length, 0);
     assert.equal(
@@ -94,26 +99,235 @@ test("native save runner ignores mismatched tab, platform, task ID, and item key
 test("native save timeout posts the fixed safe failure and releases all resources", async () => {
   const state = installChromeMock();
   const posted: NativeSaveResult[] = [];
+  state.sendMessageImpl = async () => { throw new Error("no receiver"); };
   try {
     await runNativeSaveTask(task, "reddit", async (result) => { posted.push(result); }, { timeoutMs: 5, readinessRetryMs: 1 });
     assert.deepEqual(posted, [{ task_id: task.id, item_key: task.item_key, status: "failed", error_code: "native_save_timeout", error_message: "Platform native-save task timed out" }]);
     assert.deepEqual(state.removedTabs, [42]);
     assert.equal(dispatcherMutexHolder(), null);
-    assert.equal(state.sentMessages.length, 1);
+    assert.ok(state.sentMessages.length >= 1);
+    assert.equal(state.runtimeListenerCount(), 0);
+    assert.equal(state.tabUpdatedListenerCount(), 0);
+    assert.equal(handleNativeSaveContentResult(
+      { type: "NATIVE_SAVE_RESULT", platform: "reddit", task_id: task.id, item_key: task.item_key, status: "synced" },
+      { url: task.content_url, tab: { id: 42, url: task.content_url } } as chrome.runtime.MessageSender,
+    ), false);
+    assert.equal(posted.length, 1);
   } finally {
     state.restore();
   }
 });
 
-test("native save runner declines mismatched slug or a busy shared mutex", async () => {
+test("native save runner posts a safe failure when tab creation throws", async () => {
   const state = installChromeMock();
+  const posted: NativeSaveResult[] = [];
+  state.createImpl = async () => { throw new Error("create failed"); };
+  try {
+    await runNativeSaveTask(task, "reddit", async (result) => { posted.push(result); }, { timeoutMs: 20 });
+    assert.equal(posted[0]?.error_code, "native_save_failed");
+    assert.equal(state.runtimeListenerCount(), 0);
+    assert.equal(dispatcherMutexHolder(), null);
+  } finally {
+    state.restore();
+  }
+});
+
+test("native save runner contains listener registration and removal failures", async () => {
+  const addState = installChromeMock();
+  const addPosted: NativeSaveResult[] = [];
+  const addNormally = addState.runtimeAddListenerImpl;
+  addState.runtimeAddListenerImpl = (listener) => {
+    addNormally(listener);
+    throw new Error("add listener failed");
+  };
+  try {
+    await runNativeSaveTask(task, "reddit", async (result) => { addPosted.push(result); }, { timeoutMs: 20 });
+    assert.equal(addPosted[0]?.error_code, "native_save_failed");
+    assert.deepEqual(addState.removedTabs, [42]);
+    assert.equal(addState.runtimeListenerCount(), 0);
+    assert.equal(dispatcherMutexHolder(), null);
+  } finally {
+    releaseNativeMutexForTest();
+    addState.restore();
+  }
+
+  const removeState = installChromeMock();
+  const removePosted: NativeSaveResult[] = [];
+  const removeNormally = removeState.runtimeRemoveListenerImpl;
+  let removeAttempts = 0;
+  removeState.runtimeRemoveListenerImpl = (listener) => {
+    removeAttempts += 1;
+    if (removeAttempts === 1) throw new Error("remove listener failed");
+    removeNormally(listener);
+  };
+  try {
+    const running = runNativeSaveTask(task, "reddit", async (result) => { removePosted.push(result); }, { timeoutMs: 50 });
+    await tick();
+    removeState.emitRuntimeMessage(
+      { type: "NATIVE_SAVE_RESULT", platform: "reddit", task_id: task.id, item_key: task.item_key, status: "synced" },
+      { url: task.content_url, tab: { id: 42, url: task.content_url } },
+    );
+    await running;
+    assert.equal(removePosted.length, 1);
+    assert.deepEqual(removeState.removedTabs, [42]);
+    assert.equal(removeState.runtimeListenerCount(), 0);
+    assert.equal(dispatcherMutexHolder(), null);
+  } finally {
+    releaseNativeMutexForTest();
+    removeState.restore();
+  }
+});
+
+test("native save runner posts and cleans a safe failure when tab inspection throws", async () => {
+  const state = installChromeMock();
+  const posted: NativeSaveResult[] = [];
+  state.getImpl = async () => { throw new Error("get failed"); };
+  try {
+    await runNativeSaveTask(task, "reddit", async (result) => { posted.push(result); }, { timeoutMs: 20 });
+    assert.equal(posted[0]?.error_code, "native_save_failed");
+    assert.deepEqual(state.removedTabs, [42]);
+    assert.equal(state.tabUpdatedListenerCount(), 0);
+    assert.equal(state.runtimeListenerCount(), 0);
+    assert.equal(dispatcherMutexHolder(), null);
+  } finally {
+    state.restore();
+  }
+});
+
+test("native save runner cleans independently when result posting or tab removal fails", async () => {
+  const state = installChromeMock();
+  state.removeImpl = async () => { throw new Error("remove tab failed"); };
+  try {
+    const running = runNativeSaveTask(task, "reddit", async () => { throw new Error("post failed"); }, { timeoutMs: 50 });
+    await tick();
+    state.emitRuntimeMessage(
+      { type: "NATIVE_SAVE_RESULT", platform: "reddit", task_id: task.id, item_key: task.item_key, status: "synced" },
+      { url: task.content_url, tab: { id: 42, url: task.content_url } },
+    );
+    await assert.rejects(running, /post failed/);
+    assert.equal(state.runtimeListenerCount(), 0);
+    assert.equal(state.tabUpdatedListenerCount(), 0);
+    assert.equal(dispatcherMutexHolder(), null);
+  } finally {
+    releaseNativeMutexForTest();
+    state.restore();
+  }
+});
+
+function releaseNativeMutexForTest(): void {
+  const globals = globalThis as typeof globalThis & {
+    __OBC_DISPATCHER_MUTEX_HOLDER__?: string;
+    __OBC_DISPATCHER_MUTEX_HELD_SINCE__?: number;
+  };
+  globals.__OBC_DISPATCHER_MUTEX_HOLDER__ = undefined;
+  globals.__OBC_DISPATCHER_MUTEX_HELD_SINCE__ = undefined;
+  releaseDispatcherMutex("native-save:reddit");
+}
+
+test("native save runner rejects a mismatched slug and times out once behind the legacy mutex", async () => {
+  const state = installChromeMock();
+  const posted: NativeSaveResult[] = [];
+  const globals = globalThis as typeof globalThis & {
+    __OBC_DISPATCHER_MUTEX_HOLDER__?: string;
+    __OBC_DISPATCHER_MUTEX_HELD_SINCE__?: number;
+  };
   try {
     await assert.rejects(runNativeSaveTask(task, "x", async () => {}), /platform slug/);
-    const { tryAcquireDispatcherMutex, releaseDispatcherMutex } = await import("../src/background/dispatcher-mutex.ts");
-    assert.equal(tryAcquireDispatcherMutex("other"), true);
-    await runNativeSaveTask(task, "reddit", async () => {});
+    globals.__OBC_DISPATCHER_MUTEX_HOLDER__ = "legacy-xhs";
+    globals.__OBC_DISPATCHER_MUTEX_HELD_SINCE__ = Date.now();
+    await runNativeSaveTask(task, "reddit", async (result) => { posted.push(result); }, {
+      timeoutMs: 5,
+      mutexRetryMs: 1,
+    });
     assert.deepEqual(state.createdTabs, []);
-    releaseDispatcherMutex("other");
+    assert.equal(globals.__OBC_DISPATCHER_MUTEX_HOLDER__, "legacy-xhs");
+    assert.deepEqual(posted, [{
+      task_id: task.id,
+      item_key: task.item_key,
+      status: "failed",
+      error_code: "native_save_timeout",
+      error_message: "Platform native-save task timed out",
+    }]);
+  } finally {
+    globals.__OBC_DISPATCHER_MUTEX_HOLDER__ = undefined;
+    globals.__OBC_DISPATCHER_MUTEX_HELD_SINCE__ = undefined;
+    state.restore();
+  }
+});
+
+test("native save runner waits for the legacy mutex within the same deadline", async () => {
+  const state = installChromeMock();
+  const globals = globalThis as typeof globalThis & {
+    __OBC_DISPATCHER_MUTEX_HOLDER__?: string;
+    __OBC_DISPATCHER_MUTEX_HELD_SINCE__?: number;
+  };
+  globals.__OBC_DISPATCHER_MUTEX_HOLDER__ = "legacy-yt";
+  globals.__OBC_DISPATCHER_MUTEX_HELD_SINCE__ = Date.now();
+  try {
+    const running = runNativeSaveTask(task, "reddit", async () => {}, {
+      timeoutMs: 100,
+      mutexRetryMs: 1,
+    });
+    await tick();
+    assert.deepEqual(state.createdTabs, []);
+    globals.__OBC_DISPATCHER_MUTEX_HOLDER__ = undefined;
+    globals.__OBC_DISPATCHER_MUTEX_HELD_SINCE__ = undefined;
+    await tick();
+    await tick();
+    state.emitRuntimeMessage(
+      { type: "NATIVE_SAVE_RESULT", platform: "reddit", task_id: task.id, item_key: task.item_key, status: "synced" },
+      { url: task.content_url, tab: { id: 42, url: task.content_url } },
+    );
+    await running;
+    assert.equal(dispatcherMutexHolder(), null);
+    assert.equal(state.createdTabs.length, 1);
+  } finally {
+    globals.__OBC_DISPATCHER_MUTEX_HOLDER__ = undefined;
+    globals.__OBC_DISPATCHER_MUTEX_HELD_SINCE__ = undefined;
+    state.restore();
+  }
+});
+
+test("native save runner rejects a redirected final tab before execution", async () => {
+  const state = installChromeMock();
+  const posted: NativeSaveResult[] = [];
+  state.getImpl = async (tabId) => ({ id: tabId, status: "complete", url: "https://evil.example/" });
+  try {
+    await runNativeSaveTask(task, "reddit", async (result) => { posted.push(result); }, { timeoutMs: 20 });
+    assert.deepEqual(state.sentMessages, []);
+    assert.equal(posted[0]?.status, "failed");
+    assert.equal(posted[0]?.error_code, "native_save_failed");
+  } finally {
+    state.restore();
+  }
+});
+
+test("native save runner closes the tab-load get/listener race", async () => {
+  const state = installChromeMock();
+  state.nextCreatedTabStatus = "loading";
+  let gets = 0;
+  state.getImpl = async (tabId) => {
+    gets += 1;
+    if (gets === 1) {
+      state.emitTabUpdated(tabId, { status: "complete" });
+      return { id: tabId, status: "loading", url: task.content_url };
+    }
+    return { id: tabId, status: "complete", url: task.content_url };
+  };
+  try {
+    const running = runNativeSaveTask(task, "reddit", async () => {}, { timeoutMs: 100 });
+    await tick();
+    await tick();
+    const sentBeforeRecovery = state.sentMessages.length;
+    state.emitTabUpdated(42, { status: "complete" });
+    await tick();
+    state.emitRuntimeMessage(
+      { type: "NATIVE_SAVE_RESULT", platform: "reddit", task_id: task.id, item_key: task.item_key, status: "synced" },
+      { url: task.content_url, tab: { id: 42, url: task.content_url } },
+    );
+    await running;
+    assert.equal(sentBeforeRecovery, 1);
+    assert.equal(state.tabUpdatedListenerCount(), 0);
   } finally {
     state.restore();
   }

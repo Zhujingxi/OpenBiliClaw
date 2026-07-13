@@ -8,7 +8,7 @@
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
-| 扩展原生保存共享 runtime | ✅（平台 executor 待接） | 扩展已定义与后端一致的 `native_save` task/result allow-list、`NATIVE_SAVE_EXECUTE` / `NATIVE_SAVE_RESULT` 消息契约、共享 dispatcher mutex runner、严格 tab/ID/item/platform correlation、固定安全结果清洗和 content 一次执行 fence。当前尚未接入平台 executor，也未接入 service-worker/source dispatcher，因此不代表六平台账号 mutation 已闭环。 |
+| 扩展原生保存共享 runtime | ✅（平台 executor 待接） | 扩展已定义与后端一致的 `native_save` task/result allow-list、canonical HTTPS URL 规则、`NATIVE_SAVE_EXECUTE` / `NATIVE_SAVE_RESULT` 消息契约和 active-tab runner。runner 与 legacy dispatcher 共用 `globalThis` mutex，在单一绝对 deadline 内等锁/加载/执行，严格校验 final tab 与 sender URL、tab/ID/item/platform；content 用 256 项 bounded outcome-promise cache 保证近期重复消息只复用并重放同一结果。当前尚未接入平台 executor，也未接入 service-worker/source dispatcher，因此不代表六平台账号 mutation 已闭环。 |
 | 扩展原生保存 broker 与 adapter 注册 | ✅（executor 待接） | `RuntimeContext.extension_native_save_broker` 是热重载不替换的 test-injectable 稳定实例；local/degraded construction 与 config rebuild 都注册六平台 adapter，service/router 会替换而 broker 不变。wake best-effort 发布 `<slug>_task_available`。扩展 executor 尚未实现。 |
 | 统一补货请求入口 | ✅ | `ContinuousRefreshController.request_replenishment(reason, force=False)` 收束补货触发：普通事件和反馈只排队 reason；初始化完成、用户手动刷新或推荐刷新后低库存用 `force=True` 进入手动补货。 |
 | 后台刷新控制 | ✅ | `ContinuousRefreshController` 按 scheduler 配置补充候选池，并通过 source policy 计算各平台有效配比；后台定时 refresh 使用约 90% 的可换池低水位，库存只是略低于 `pool_target_count` 时不跑 discovery。注入 `DiscoveryCandidatePipeline` 后，B 站主补货会在现有 `_refresh_lock` 内按 `pending_eval + evaluating` 水位循环生产 raw candidates，直到待评估供给接近目标 batch 或达到预算；小缺口阶段先给 `search + related_chain` 配额，延后 `trending/explore`。统一关键词 planner 开启但 B 站关键词 store 暂空时，本轮只剔除 `search` 子策略，保留其它 B 站策略，避免回落到旧 `discovery.search.queries` LLM 生成。v0.3.149+ 当 `explore_refresh_hours` 到期或距到期不足一个 refresh tick，且 B 站平台族仍有补货空间时，controller 会允许 `KeywordPlanner` 在同一轮 merged keyword LLM 调用里请求 `explore_domains`，成功写入 B 站 `keyword_kind="explore"` query cache 后同步推进 `last_explore_refresh_at`；后续 `ExploreStrategy` 从该 explore 池 claim query。 |
@@ -66,7 +66,7 @@ runNativeSaveTask(task, platformSlug, authenticatedPostResult)
 installNativeSaveExecutor(platform, executor)
 ```
 
-runner 只通过调用方注入的已认证 closure 回传结果；它自身不创建后端 fetch。timeout 固定回传 `failed/native_save_timeout`，不会重放 mutation。
+runner 只通过调用方注入的已认证 closure 回传结果；它自身不创建后端 fetch。busy mutex、tab load 与 executor 共用一个 deadline；timeout 固定回传 `failed/native_save_timeout`，不会重放 mutation。所有 listener/tab/mutex cleanup 独立 guarded。
 
 ```python
 from openbiliclaw.runtime.updater import AutoUpdateService

@@ -877,12 +877,17 @@ def _validated_extension_native_save_text(
 
 def _canonical_extension_native_save_url(platform: str, value: object) -> str:
     raw_url = _validated_extension_native_save_text(value, "content_url", max_length=2048)
-    parts = urlsplit(raw_url)
+    try:
+        parts = urlsplit(raw_url)
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError("content_url must use an allow-listed platform HTTPS host") from exc
     hostname = (parts.hostname or "").lower().rstrip(".")
     allowed_hosts = _EXTENSION_NATIVE_SAVE_HOSTS[platform]
     if (
         parts.scheme.lower() != "https"
         or not hostname
+        or port not in {None, 443}
         or parts.username is not None
         or parts.password is not None
         or not any(hostname == host or hostname.endswith(f".{host}") for host in allowed_hosts)

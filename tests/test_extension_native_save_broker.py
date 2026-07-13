@@ -286,6 +286,48 @@ def test_job_validation_rejects_mismatched_platform_host_and_control_chars(
         database.create_or_reuse_extension_native_save_job(replace(make_job(), platform_slug="x"))
 
 
+def test_job_validation_rejects_nondefault_extension_url_port(database: Database) -> None:
+    with pytest.raises(ValueError):
+        database.create_or_reuse_extension_native_save_job(
+            replace(
+                make_job(),
+                content_url="https://www.reddit.com:8443/r/test/comments/abc/demo/",
+            )
+        )
+
+
+def test_job_validation_strips_nonidentity_query_and_fragment(database: Database) -> None:
+    row = database.create_or_reuse_extension_native_save_job(
+        replace(
+            make_job(),
+            content_url=(
+                "https://www.reddit.com/r/test/comments/abc/demo/?token=secret#fragment"
+            ),
+        )
+    )
+
+    assert row["content_url"] == "https://www.reddit.com/r/test/comments/abc/demo/"
+
+
+def test_job_validation_retains_only_youtube_identity_query(database: Database) -> None:
+    job = ExtensionNativeSaveJob(
+        job_id=str(uuid4()),
+        platform="youtube",
+        platform_slug="yt",
+        item_key="youtube:video-123",
+        content_id="video-123",
+        content_url="https://www.youtube.com/watch?v=video-123&token=secret#fragment",
+        content_type="video",
+        requested_action="watch_later",
+        resolved_action="watch_later",
+        target_label="YouTube Watch Later",
+    )
+
+    row = database.create_or_reuse_extension_native_save_job(job)
+
+    assert row["content_url"] == "https://www.youtube.com/watch?v=video-123"
+
+
 @pytest.mark.parametrize(
     "job",
     [

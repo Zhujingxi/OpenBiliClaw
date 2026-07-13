@@ -1,20 +1,23 @@
 import {
+  isAllowedNativeSavePageUrl,
   isNativeSaveTask,
   sanitizeNativeSaveResult,
   type NativeSavePlatform,
   type NativeSaveResult,
   type NativeSaveSlug,
   type NativeSaveTask,
+  type SanitizedNativeSaveOutcome,
 } from "../shared/native-save.ts";
 import { releaseDispatcherMutex, tryAcquireDispatcherMutex } from "./dispatcher-mutex.ts";
 
 const DEFAULT_TIMEOUT_MS = 240_000;
 const DEFAULT_READINESS_RETRY_MS = 250;
-const LOAD_FALLBACK_MS = 10_000;
+const DEFAULT_MUTEX_RETRY_MS = 50;
 
 export interface NativeSaveRunnerOptions {
   timeoutMs?: number;
   readinessRetryMs?: number;
+  mutexRetryMs?: number;
 }
 
 interface ActiveTask {
@@ -25,43 +28,110 @@ interface ActiveTask {
   settled: boolean;
 }
 
+class NativeSaveDeadlineError extends Error {}
+
 let activeTask: ActiveTask | null = null;
 
-function delay(ms: number, signal: AbortSignal): Promise<void> {
+function timeoutOutcome(): SanitizedNativeSaveOutcome {
+  return sanitizeNativeSaveResult({ status: "failed", error_code: "native_save_timeout" });
+}
+
+function failedOutcome(): SanitizedNativeSaveOutcome {
+  return sanitizeNativeSaveResult({ status: "failed", error_code: "native_save_failed" });
+}
+
+function remainingMs(deadline: number): number {
+  return Math.max(0, deadline - Date.now());
+}
+
+async function beforeDeadline<T>(promise: Promise<T>, deadline: number): Promise<T> {
+  const timeoutMs = remainingMs(deadline);
+  if (timeoutMs <= 0) throw new NativeSaveDeadlineError("native-save task timed out");
+  let timer: ReturnType<typeof setTimeout>;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new NativeSaveDeadlineError("native-save task timed out")),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer!);
+  }
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
-    if (signal.aborted) {
+    if (signal?.aborted) {
       resolve();
       return;
     }
     const timer = setTimeout(finish, ms);
     function finish(): void {
       clearTimeout(timer);
-      signal.removeEventListener("abort", finish);
+      signal?.removeEventListener("abort", finish);
       resolve();
     }
-    signal.addEventListener("abort", finish, { once: true });
+    signal?.addEventListener("abort", finish, { once: true });
   });
 }
 
-async function waitForTabLoad(tabId: number): Promise<void> {
-  const current = await chrome.tabs.get(tabId).catch(() => null);
-  if (current?.status === "complete") return;
-  await new Promise<void>((resolve) => {
-    let done = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const finish = (): void => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
+async function acquireMutexBefore(
+  owner: string,
+  deadline: number,
+  retryMs: number,
+): Promise<boolean> {
+  while (Date.now() < deadline) {
+    if (tryAcquireDispatcherMutex(owner)) return true;
+    await delay(Math.min(retryMs, remainingMs(deadline)));
+  }
+  return false;
+}
+
+async function waitForTabLoad(tabId: number, deadline: number): Promise<chrome.tabs.Tab> {
+  let revision = 0;
+  let wake: (() => void) | null = null;
+  const listener = (updatedId: number): void => {
+    if (updatedId !== tabId) return;
+    revision += 1;
+    wake?.();
+  };
+  chrome.tabs.onUpdated.addListener(listener);
+  try {
+    while (Date.now() < deadline) {
+      const observedRevision = revision;
+      const tab = await beforeDeadline(chrome.tabs.get(tabId), deadline);
+      if (tab.status === "complete") return tab;
+      if (revision !== observedRevision) continue;
+      await new Promise<void>((resolve, reject) => {
+        const timeoutMs = remainingMs(deadline);
+        if (timeoutMs <= 0) {
+          reject(new NativeSaveDeadlineError("native-save tab load timed out"));
+          return;
+        }
+        const timer = setTimeout(() => {
+          wake = null;
+          reject(new NativeSaveDeadlineError("native-save tab load timed out"));
+        }, timeoutMs);
+        wake = () => {
+          clearTimeout(timer);
+          wake = null;
+          resolve();
+        };
+        if (revision !== observedRevision) wake();
+      });
+    }
+    throw new NativeSaveDeadlineError("native-save tab load timed out");
+  } finally {
+    try {
       chrome.tabs.onUpdated.removeListener(listener);
-      resolve();
-    };
-    const listener = (updatedId: number, info: { status?: string }): void => {
-      if (updatedId === tabId && info.status === "complete") finish();
-    };
-    chrome.tabs.onUpdated.addListener(listener);
-    timer = setTimeout(finish, LOAD_FALLBACK_MS);
-  });
+    } catch {
+      // Cleanup failures must not skip the runner's remaining teardown.
+    }
+  }
 }
 
 function contentResultForActiveTask(
@@ -71,12 +141,14 @@ function contentResultForActiveTask(
   const active = activeTask;
   if (!active || active.settled || typeof message !== "object" || message === null) return false;
   const result = message as Record<string, unknown>;
+  const senderUrl = typeof sender?.url === "string" ? sender.url : sender?.tab?.url;
   if (
     result.type !== "NATIVE_SAVE_RESULT" ||
     result.platform !== active.platform ||
     result.task_id !== active.task.id ||
     result.item_key !== active.task.item_key ||
-    sender?.tab?.id !== active.tabId
+    sender?.tab?.id !== active.tabId ||
+    !isAllowedNativeSavePageUrl(active.platform, senderUrl)
   ) {
     return false;
   }
@@ -85,7 +157,6 @@ function contentResultForActiveTask(
   return true;
 }
 
-/** Accept a result only when a runner-owned sender is supplied by chrome.runtime. */
 export function handleNativeSaveContentResult(
   message: unknown,
   sender?: chrome.runtime.MessageSender,
@@ -106,13 +177,40 @@ async function sendExecuteWhenReady(
         type: "NATIVE_SAVE_EXECUTE",
         task,
       });
-      if (response !== undefined) {
-        return;
-      }
+      if (response !== undefined) return;
     } catch {
-      // MV3 can wake the tab before its content listener is registered.
+      // MV3 can expose the loaded tab before its content listener is registered.
     }
-    await delay(retryMs, signal);
+    await delay(Math.min(retryMs, remainingMs(deadline)), signal);
+  }
+}
+
+async function executeBeforeDeadline(
+  task: NativeSaveTask,
+  tabId: number,
+  deadline: number,
+  retryMs: number,
+  readinessController: AbortController,
+): Promise<SanitizedNativeSaveOutcome> {
+  const timeoutMs = remainingMs(deadline);
+  if (timeoutMs <= 0) return timeoutOutcome();
+  let timer: ReturnType<typeof setTimeout>;
+  const terminal = new Promise<unknown>((resolve) => {
+    const complete = (outcome: unknown): void => {
+      if (activeTask) activeTask.settled = true;
+      resolve(outcome);
+    };
+    activeTask = { task, tabId, platform: task.platform, complete, settled: false };
+    timer = setTimeout(
+      () => complete({ status: "failed", error_code: "native_save_timeout" }),
+      timeoutMs,
+    );
+  });
+  void sendExecuteWhenReady(tabId, task, deadline, retryMs, readinessController.signal);
+  try {
+    return sanitizeNativeSaveResult(await terminal);
+  } finally {
+    clearTimeout(timer!);
   }
 }
 
@@ -122,57 +220,91 @@ export async function runNativeSaveTask(
   postResult: (result: NativeSaveResult) => Promise<void>,
   options: NativeSaveRunnerOptions = {},
 ): Promise<void> {
+  const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const deadline = Date.now() + timeoutMs;
   if (!isNativeSaveTask(task) || task.platform_slug !== platformSlug) {
     throw new Error("native-save task does not match the platform slug");
   }
-  const owner = `native-save:${platformSlug}`;
-  if (!tryAcquireDispatcherMutex(owner)) return;
 
-  let tabId: number | null = null;
-  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const owner = `native-save:${platformSlug}`;
   const readinessController = new AbortController();
+  let mutexAcquired = false;
+  let runtimeListenerRegistrationAttempted = false;
+  let tabId: number | null = null;
+  let outcome = failedOutcome();
   const listener = (message: unknown, sender: chrome.runtime.MessageSender): void => {
     handleNativeSaveContentResult(message, sender);
   };
-  chrome.runtime.onMessage.addListener(listener);
 
   try {
-    const tab = await chrome.tabs.create({ active: true, url: task.content_url });
-    if (tab.id === undefined) throw new Error("native-save task tab has no ID");
-    tabId = tab.id;
-    await waitForTabLoad(tabId);
-
-    const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-    const deadline = Date.now() + timeoutMs;
-    const terminal = new Promise<unknown>((resolve) => {
-      activeTask = { task, tabId: tabId as number, platform: task.platform, complete: resolve, settled: false };
-      timeoutId = setTimeout(
-        () => resolve({ status: "failed", error_code: "native_save_timeout" }),
-        timeoutMs,
-      );
-    });
-    void sendExecuteWhenReady(
-      tabId,
-      task,
+    mutexAcquired = await acquireMutexBefore(
+      owner,
       deadline,
-      Math.max(1, options.readinessRetryMs ?? DEFAULT_READINESS_RETRY_MS),
-      readinessController.signal,
+      Math.max(1, options.mutexRetryMs ?? DEFAULT_MUTEX_RETRY_MS),
     );
-    const outcome = sanitizeNativeSaveResult(await terminal);
-    if (activeTask) activeTask.settled = true;
+    if (!mutexAcquired) {
+      outcome = timeoutOutcome();
+    } else {
+      try {
+        const tab = await beforeDeadline(
+          chrome.tabs.create({ active: true, url: task.content_url }),
+          deadline,
+        );
+        if (tab.id === undefined) throw new Error("native-save task tab has no ID");
+        tabId = tab.id;
+        const loadedTab = await waitForTabLoad(tabId, deadline);
+        if (!isAllowedNativeSavePageUrl(task.platform, loadedTab.url)) {
+          throw new Error("native-save task tab left its allow-listed platform");
+        }
+        runtimeListenerRegistrationAttempted = true;
+        chrome.runtime.onMessage.addListener(listener);
+        outcome = await executeBeforeDeadline(
+          task,
+          tabId,
+          deadline,
+          Math.max(1, options.readinessRetryMs ?? DEFAULT_READINESS_RETRY_MS),
+          readinessController,
+        );
+      } catch (error) {
+        outcome = error instanceof NativeSaveDeadlineError || Date.now() >= deadline
+          ? timeoutOutcome()
+          : failedOutcome();
+      }
+    }
     await postResult({ task_id: task.id, item_key: task.item_key, ...outcome });
   } finally {
-    readinessController.abort();
-    if (timeoutId !== null) clearTimeout(timeoutId);
-    activeTask = null;
-    chrome.runtime.onMessage.removeListener(listener);
+    try {
+      readinessController.abort();
+    } catch {
+      // Continue independent cleanup.
+    }
+    if (activeTask?.task.id === task.id) {
+      activeTask.settled = true;
+      activeTask = null;
+    }
+    if (runtimeListenerRegistrationAttempted) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          chrome.runtime.onMessage.removeListener(listener);
+          break;
+        } catch {
+          // Retry one transient Chrome failure, then continue independent cleanup.
+        }
+      }
+    }
     if (tabId !== null) {
       try {
         await chrome.tabs.remove(tabId);
       } catch {
-        // The user may have closed the task tab first.
+        // The user may have closed the tab, or Chrome cleanup may fail.
       }
     }
-    releaseDispatcherMutex(owner);
+    if (mutexAcquired) {
+      try {
+        releaseDispatcherMutex(owner);
+      } catch {
+        // Do not let mutex cleanup mask the authenticated callback result.
+      }
+    }
   }
 }

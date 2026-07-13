@@ -88,7 +88,10 @@ export function isAllowedNativeSaveHostname(platform: NativeSavePlatform, hostna
   );
 }
 
-function isAllowedContentUrl(platform: NativeSavePlatform, value: unknown): value is string {
+export function isAllowedNativeSavePageUrl(
+  platform: NativeSavePlatform,
+  value: unknown,
+): value is string {
   if (!isSafeText(value, 2048)) return false;
   try {
     const url = new URL(value);
@@ -96,11 +99,24 @@ function isAllowedContentUrl(platform: NativeSavePlatform, value: unknown): valu
       url.protocol === "https:" &&
       url.username === "" &&
       url.password === "" &&
+      url.port === "" &&
       isAllowedNativeSaveHostname(platform, url.hostname)
     );
   } catch {
     return false;
   }
+}
+
+function isAllowedContentUrl(platform: NativeSavePlatform, value: unknown): value is string {
+  if (!isAllowedNativeSavePageUrl(platform, value)) return false;
+  const url = new URL(value);
+  if (url.hash !== "") return false;
+  if (platform !== "youtube") return url.search === "";
+  let valid = true;
+  url.searchParams.forEach((item, key) => {
+    if (key !== "v" || item.length === 0) valid = false;
+  });
+  return valid;
 }
 
 export function isNativeSaveTask(value: unknown): value is NativeSaveTask {
