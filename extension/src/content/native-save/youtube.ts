@@ -316,11 +316,18 @@ function exactLabeledElement(
   return matches.length === 1 ? matches[0] : null;
 }
 
-function dialogRoot(root: Document): HTMLElement | null {
+function visibleDialogRoots(root: Document): HTMLElement[] {
   const candidates = Array.from(root.querySelectorAll<HTMLElement>(
-    "ytd-add-to-playlist-renderer, tp-yt-paper-dialog ytd-add-to-playlist-renderer",
+    "ytd-add-to-playlist-renderer, tp-yt-paper-dialog, [role='dialog']",
   ));
   const visible = candidates.filter((element) => isEffectivelyVisible(element, root));
+  return visible.filter((candidate) => !visible.some((other) =>
+    other !== candidate && candidate.contains?.(other)));
+}
+
+function dialogRoot(root: Document, activeDialog: HTMLElement | null = null): HTMLElement | null {
+  if (activeDialog && isEffectivelyVisible(activeDialog, root)) return activeDialog;
+  const visible = visibleDialogRoots(root);
   return visible.length === 1 ? visible[0] : null;
 }
 
@@ -401,6 +408,7 @@ export function createYouTubeBrowserEnvironment(
   const rateMutationGenerations = new WeakMap<Element, number>();
   const rateEventSnapshots = new WeakMap<Element, { text: string; visible: boolean }>();
   let nextRateElementId = 1;
+  let activeDialog: HTMLElement | null = null;
   const rateEventRoot = (element: Element): Element => element.closest(RATE_LIMIT_CONTAINER_SELECTOR) ?? element;
   const rateEventSnapshot = (element: Element): { text: string; visible: boolean } => ({
     text: element.textContent?.trim() ?? "",
@@ -500,34 +508,43 @@ export function createYouTubeBrowserEnvironment(
       const stableRoot = root.querySelector<HTMLElement>("ytd-watch-metadata ytd-menu-renderer, #menu ytd-menu-renderer") ?? root;
       const button = exactLabeledElement(stableRoot, SAVE_LABELS, root);
       if (!button) return false;
+      const before = new Set(visibleDialogRoots(root));
       button.click();
       for (let attempt = 0; attempt < DIALOG_ATTEMPTS; attempt += 1) {
-        if (dialogRoot(root)) return true;
+        const visible = visibleDialogRoots(root);
+        const fresh = visible.filter((dialog) => !before.has(dialog));
+        const candidates = fresh.length > 0 ? fresh : visible;
+        if (candidates.length === 1) {
+          activeDialog = candidates[0];
+          return true;
+        }
+        if (candidates.length > 1) return false;
         if (attempt + 1 < DIALOG_ATTEMPTS) await this.sleep(DIALOG_INTERVAL_MS);
       }
       return false;
     },
     async closeSaveDialog() {
-      const dialog = dialogRoot(root);
+      const dialog = dialogRoot(root, activeDialog);
       if (!dialog) return;
       const close = dialog.querySelector<HTMLElement>("#close-button, yt-icon-button#close-button")
         ?? exactLabeledElement(dialog, CLOSE_LABELS, root);
       close?.click();
       await this.sleep(DIALOG_INTERVAL_MS);
+      activeDialog = null;
     },
     findNamedPlaylists(title) {
-      const dialog = dialogRoot(root);
+      const dialog = dialogRoot(root, activeDialog);
       if (!dialog) return [];
       return playlistRows(dialog, root).filter((row) => playlistTitle(row) === title).map(toPlaylistRow);
     },
     findWatchLater() {
-      const dialog = dialogRoot(root);
+      const dialog = dialogRoot(root, activeDialog);
       if (!dialog) return null;
       const rows = playlistRows(dialog, root).filter(isWatchLaterRow);
       return rows.length === 1 ? toPlaylistRow(rows[0]) : null;
     },
     async createPlaylist(title) {
-      const dialog = dialogRoot(root);
+      const dialog = dialogRoot(root, activeDialog);
       if (!dialog) return false;
       const newPlaylist = dialog.querySelector<HTMLElement>("#new-playlist-button")
         ?? exactLabeledElement(dialog, NEW_PLAYLIST_LABELS, root);

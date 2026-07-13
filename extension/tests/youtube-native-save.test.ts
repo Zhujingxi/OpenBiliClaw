@@ -329,6 +329,43 @@ test("YouTube browser environment requires signed-in avatar/menu evidence", () =
   assert.equal(createYouTubeBrowserEnvironment(documentFixture("ambiguous"), task.content_url).isLoggedIn(), false);
 });
 
+test("YouTube browser environment correlates a newly visible generic save dialog", async () => {
+  let dialogVisible = false;
+  const button = {
+    hidden: false,
+    style: {},
+    parentElement: null,
+    getAttribute(name: string) { return name === "aria-label" ? "Save" : null; },
+    hasAttribute() { return false; },
+    click() { dialogVisible = true; },
+  };
+  const menu = {
+    querySelectorAll(selector: string) {
+      return selector.includes("button") ? [button] : [];
+    },
+  };
+  const dialog = {
+    hidden: false,
+    style: {},
+    parentElement: null,
+    getAttribute(name: string) { return name === "role" ? "dialog" : null; },
+    hasAttribute() { return false; },
+    querySelectorAll() { return []; },
+  };
+  const documentFixture = {
+    defaultView: null,
+    querySelector(selector: string) {
+      return selector.includes("ytd-watch-metadata") ? menu : null;
+    },
+    querySelectorAll(selector: string) {
+      return selector.includes("role='dialog'") && dialogVisible ? [dialog] : [];
+    },
+  } as unknown as Document;
+  const env = createYouTubeBrowserEnvironment(documentFixture, task.content_url);
+
+  assert.equal(await env.openSaveDialog(), true);
+});
+
 test("YouTube browser environment identifies only renderer playlist id WL as Watch Later", () => {
   const watchLaterRow = {
     data: { playlistId: "WL" },
