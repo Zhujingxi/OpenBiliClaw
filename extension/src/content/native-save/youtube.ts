@@ -188,17 +188,17 @@ async function performSaveYouTube(task: NativeSaveTask, env: YouTubeNativeSaveEn
 
   if (task.resolved_action === "watch_later") {
     const row = env.findWatchLater();
-    if (!row) return { status: "failed", error_code: "native_save_failed" };
+    if (!row) return { status: "failed", error_code: "native_target_not_found" };
     if (row.isChecked()) return { status: "already_synced" };
     try {
       row.click();
     } catch {
-      return { status: "failed", error_code: "native_save_failed" };
+      return { status: "failed", error_code: "native_request_rejected" };
     }
     if (await confirmed(row, () => env.findWatchLater(), env, rateLimitBefore)) return { status: "synced" };
     return hasNewRateLimit(env, rateLimitBefore)
       ? { status: "rate_limited" }
-      : { status: "failed", error_code: "native_save_failed" };
+      : { status: "failed", error_code: "native_confirmation_not_observed" };
   }
 
   if (task.resolved_action !== "favorite") {
@@ -212,30 +212,30 @@ async function performSaveYouTube(task: NativeSaveTask, env: YouTubeNativeSaveEn
       if (!(await env.createPlaylist(EXACT_PLAYLIST_TITLE))) {
         return hasNewRateLimit(env, rateLimitBefore)
           ? { status: "rate_limited" }
-          : { status: "failed", error_code: "native_save_failed" };
+          : { status: "failed", error_code: "native_request_rejected" };
       }
       created = true;
       await env.closeSaveDialog();
     } catch {
-      return { status: "failed", error_code: "native_save_failed" };
+      return { status: "failed", error_code: "native_request_rejected" };
     }
     if (!(await openDialog(env))) {
       return hasNewRateLimit(env, rateLimitBefore)
         ? { status: "rate_limited" }
-        : { status: "failed", error_code: "native_save_failed" };
+        : { status: "failed", error_code: "native_dialog_not_opened" };
     }
     row = uniqueNamedPlaylist(env, EXACT_PLAYLIST_TITLE);
     if (!row || row === "ambiguous") {
       return hasNewRateLimit(env, rateLimitBefore)
         ? { status: "rate_limited" }
-        : { status: "failed", error_code: "native_save_failed" };
+        : { status: "failed", error_code: "native_target_not_found" };
     }
   }
   if (row.isChecked()) return { status: created ? "synced" : "already_synced" };
   try {
     row.click();
   } catch {
-    return { status: "failed", error_code: "native_save_failed" };
+    return { status: "failed", error_code: "native_request_rejected" };
   }
   if (
     await confirmed(

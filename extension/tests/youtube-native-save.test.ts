@@ -160,6 +160,7 @@ test("YouTube native save reports the exact failed execution stage", async () =>
       "native_target_not_found",
     ],
     [fixture({ confirmAfterClick: false }), "native_confirmation_not_observed"],
+    [fixture({ initialNamedRows: [], createSucceeds: false }), "native_request_rejected"],
   ];
 
   for (const [env, errorCode] of cases) {
@@ -219,13 +220,19 @@ test("YouTube native save uses exact Unicode case-sensitive playlist title", asy
 });
 
 test("YouTube native save never falls back after create failure or re-query mismatch", async () => {
-  for (const env of [
-    fixture({ initialNamedRows: [{ title: "Other" }], createSucceeds: false }),
-    fixture({ initialNamedRows: [{ title: "Other" }], createdTitle: "openbiliclaw" }),
-  ]) {
+  for (const [env, errorCode] of [
+    [
+      fixture({ initialNamedRows: [{ title: "Other" }], createSucceeds: false }),
+      "native_request_rejected",
+    ],
+    [
+      fixture({ initialNamedRows: [{ title: "Other" }], createdTitle: "openbiliclaw" }),
+      "native_target_not_found",
+    ],
+  ] as const) {
     assert.deepEqual(await saveYouTube(task, env), {
       status: "failed",
-      error_code: "native_save_failed",
+      error_code: errorCode,
     });
     assert.ok(!env.actions.includes("select:Other"));
     assert.ok(!env.actions.includes("select:openbiliclaw"));
